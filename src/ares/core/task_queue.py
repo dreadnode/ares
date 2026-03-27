@@ -32,6 +32,14 @@ from ares.core.redis_client import (
 )
 from ares.core.tracing import IP_PATTERN, is_likely_fqdn, producer_span
 
+# Optional: trace context propagation for cross-process tracing
+try:
+    from opentelemetry.propagate import inject as otel_inject
+
+    _OTEL_PROPAGATE_AVAILABLE = True
+except ImportError:
+    _OTEL_PROPAGATE_AVAILABLE = False
+
 
 class TaskMessage(BaseModel):
     """Task message structure for Redis queues."""
@@ -280,12 +288,21 @@ class RedisTaskQueue(BaseTaskQueue):
         # Target service name for Tempo service graph
         target_service = f"ares-{target_role.replace('_', '-')}-agent"
 
+        # Inject trace context into payload for cross-process trace propagation
+        # This allows workers to link their spans back to the orchestrator's span
+        payload_with_trace = dict(payload)  # Don't mutate original
+        if _OTEL_PROPAGATE_AVAILABLE:
+            trace_ctx: dict[str, str] = {}
+            otel_inject(trace_ctx)
+            if trace_ctx:
+                payload_with_trace["_trace_context"] = trace_ctx
+
         task = TaskMessage(
             task_id=task_id,
             task_type=task_type,
             source_agent=source_agent,
             target_agent=target_role,
-            payload=payload,
+            payload=payload_with_trace,
             priority=priority,
             callback_queue=self._result_queue_key(task_id),
         )

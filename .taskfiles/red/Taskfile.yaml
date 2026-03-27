@@ -688,7 +688,7 @@ tasks:
           $HOSTNAME_ARG $SPN_ARG $ACCOUNT_ARG $DOMAIN_ARG --details '{{.DETAILS}}'
 
   multi:inject-hash:
-    desc: "Inject a hash into operation shared state (usage: task red:multi:inject-hash OPERATION_ID=op-xxx USERNAME=krbtgt DOMAIN=contoso.local HASH=aad3b435b51404eeaad3b435b51404ee:... [HASH_TYPE=NTLM])"
+    desc: "Inject a hash into operation shared state (usage: task red:multi:inject-hash OPERATION_ID=op-xxx USERNAME=krbtgt DOMAIN=contoso.local HASH=aad3b435b51404eeaad3b435b51404ee:... [HASH_TYPE=NTLM] [AES_KEY=...])"
     silent: true
     vars:
       OPERATION_ID: '{{.OPERATION_ID | default ""}}'
@@ -696,6 +696,7 @@ tasks:
       HASH: '{{.HASH | default ""}}'
       DOMAIN: '{{.DOMAIN | default ""}}'
       HASH_TYPE: '{{.HASH_TYPE | default "NTLM"}}'
+      AES_KEY: '{{.AES_KEY | default ""}}'
       SOURCE: '{{.SOURCE | default "manual-inject"}}'
     preconditions:
       - sh: test -n "{{.OPERATION_ID}}"
@@ -710,9 +711,13 @@ tasks:
         if [ -n "{{.DOMAIN}}" ]; then
           DOMAIN_ARG="--domain {{.DOMAIN}}"
         fi
+        AES_ARG=""
+        if [ -n "{{.AES_KEY}}" ]; then
+          AES_ARG="--aes-key {{.AES_KEY}}"
+        fi
         kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-orchestrator -- \
           python -m ares.cli_ops inject-hash "{{.OPERATION_ID}}" "{{.USERNAME}}" "{{.HASH}}" \
-          $DOMAIN_ARG --hash-type "{{.HASH_TYPE}}" --source "{{.SOURCE}}"
+          $DOMAIN_ARG $AES_ARG --hash-type "{{.HASH_TYPE}}" --source "{{.SOURCE}}"
 
   multi:inject-host:
     desc: "Inject a host into operation shared state (usage: task red:multi:inject-host OPERATION_ID=op-xxx IP=192.168.58.20 HOSTNAME=dc01.fabrikam.local)"

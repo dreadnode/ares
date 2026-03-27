@@ -429,6 +429,12 @@ class PersistenceMixin:
             for domain, dc_ip in list(self.shared_state.domain_controllers.items()):
                 await backend.set_dc(domain, dc_ip)
 
+            # Persist all discovered domains (additive - uses SADD)
+            # This ensures domains discovered via threaded result consumer are persisted
+            # since background tasks from add_domain may fail due to event loop mismatch
+            for domain in list(self.shared_state.all_domains):
+                await backend.add_domain(domain)
+
             # ADDITIVE pattern: only upgrade False→True, never downgrade
             # Don't write False (it's the default and can't downgrade from True)
             if self.shared_state.has_domain_admin:
@@ -445,6 +451,9 @@ class PersistenceMixin:
             # Persist domain_admin_domains (additive - uses SADD)
             for da_domain in self.shared_state.domain_admin_domains:
                 await backend.add_domain_admin_domain(da_domain)
+            # Persist cached domain SIDs for golden ticket and cross-domain follow-on work
+            for domain, sid in self.shared_state.domain_sids.items():
+                await backend.set_domain_sid(domain, sid)
             # Persist completed_at timestamp (set in-memory when DA achieved via add_hash)
             if self.shared_state.completed_at:
                 await backend.set_meta("completed_at", self.shared_state.completed_at.isoformat())

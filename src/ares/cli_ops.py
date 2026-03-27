@@ -802,8 +802,31 @@ def _print_loot(state, *, json_output: bool = False) -> None:
 
     # Human-readable output
     print(f"Operation: {state.operation_id}")
+
+    # Get compromised domains (DA achieved)
+    da_domains = getattr(state, "domain_admin_domains", [])
+
+    # Determine if multi-forest compromise (DA on 2+ distinct forest roots)
+    da_forest_roots = set()
+    for da_domain in da_domains:
+        parts = da_domain.split(".")
+        # Forest root is the rightmost 2 parts (e.g., essos.local from north.essos.local)
+        if len(parts) >= 2:
+            forest_root = ".".join(parts[-2:]) if len(parts) == 2 else ".".join(parts[1:])
+            # For child domains, find the actual forest root
+            while len(forest_root.split(".")) > 2:
+                forest_root = ".".join(forest_root.split(".")[1:])
+            da_forest_roots.add(forest_root.lower())
+
+    is_multi_forest = len(da_forest_roots) >= 2
+
+    if is_multi_forest:
+        print("*** MULTI-FOREST COMPROMISE ***")
+        print(f"  Forests compromised: {', '.join(sorted(da_forest_roots))}")
     if state.has_domain_admin:
         print("*** DOMAIN ADMIN ACHIEVED ***")
+        if da_domains:
+            print(f"  Compromised domains: {', '.join(sorted(da_domains))}")
         if state.domain_admin_path:
             print(f"  Path: {state.domain_admin_path}")
     if state.has_golden_ticket:
@@ -1187,6 +1210,7 @@ async def _load_state_from_redis(client: Any, operation_id: str) -> Any:
     dc_map = await backend.get_all_dcs()
     netbios_map = await backend.get_all_netbios_mappings()
     domain_sids = await backend.get_domain_sids()
+    domain_admin_domains = await backend.get_domain_admin_domains()
 
     timeline_events_raw = await backend.get_timeline_events()
     timeline_events = []
@@ -1224,6 +1248,7 @@ async def _load_state_from_redis(client: Any, operation_id: str) -> Any:
         "domain_controllers": dc_map,
         "netbios_to_fqdn": netbios_map,
         "domain_sids": domain_sids,
+        "domain_admin_domains": domain_admin_domains,
         "operation_timeline": timeline_events,
     }
     if started_at is not None:
@@ -1783,8 +1808,28 @@ async def runtime(
         print(f"Credentials: {creds}  Hashes: {hashes}  Hosts: {hosts}")
         print(f"Vulns: {vulns} discovered, {exploited} exploited")
 
+        # Get compromised domains (DA achieved)
+        da_domains = getattr(state, "domain_admin_domains", [])
+
+        # Determine if multi-forest compromise (DA on 2+ distinct forest roots)
+        da_forest_roots = set()
+        for da_domain in da_domains:
+            parts = da_domain.split(".")
+            if len(parts) >= 2:
+                forest_root = ".".join(parts[-2:]) if len(parts) == 2 else ".".join(parts[1:])
+                while len(forest_root.split(".")) > 2:
+                    forest_root = ".".join(forest_root.split(".")[1:])
+                da_forest_roots.add(forest_root.lower())
+
+        is_multi_forest = len(da_forest_roots) >= 2
+
+        if is_multi_forest:
+            print("\n*** MULTI-FOREST COMPROMISE ***")
+            print(f"  Forests: {', '.join(sorted(da_forest_roots))}")
         if state.has_domain_admin:
             print("\n*** DOMAIN ADMIN ACHIEVED ***")
+            if da_domains:
+                print(f"  Domains: {', '.join(sorted(da_domains))}")
         if state.has_golden_ticket:
             print("*** GOLDEN TICKET OBTAINED ***")
 
@@ -2251,6 +2296,9 @@ async def inject_hash(
     hash_type: Annotated[
         str, cyclopts.Parameter(help="Hash type (NTLM, Kerberos, AS-REP)")
     ] = "NTLM",
+    aes_key: Annotated[
+        str, cyclopts.Parameter(help="AES256 key (64 hex chars) for Windows 2016+")
+    ] = "",
     source: Annotated[str, cyclopts.Parameter(help="Source of the hash")] = "manual-inject",
     redis_url: Annotated[str, cyclopts.Parameter(help="Redis URL (default: from config)")] = "",
 ) -> None:
@@ -2289,6 +2337,7 @@ async def inject_hash(
             domain=domain,
             hash_value=hash_value,
             hash_type=hash_type,
+            aes_key=aes_key,  # Empty string is fine, model has default
         )
 
         backend = RedisStateBackend(client, operation_id)
@@ -2298,6 +2347,7 @@ async def inject_hash(
             await backend.add_hash(hash_obj)
 
         # If krbtgt hash, always set DA status (even if hash already existed)
+        is_da_hash = username.lower() in ("krbtgt", "administrator") and hash_type.upper() == "NTLM"
         if username.lower() == "krbtgt":
             state.has_domain_admin = True
             if domain and domain.lower() not in [d.lower() for d in state.domain_admin_domains]:
@@ -2308,6 +2358,65 @@ async def inject_hash(
                 domain=domain.lower() if domain else None,
             )
             logger.info("Set has_domain_admin=True (krbtgt hash injected)")
+
+        # Dispatch trust key extraction for multi-forest mode
+        # This triggers extraction of trust account hashes (e.g., ESSOS$) for inter-forest attacks
+        if is_da_hash and state.has_domain_admin:
+            from ares.core.config import get_multi_forest_mode
+
+            if get_multi_forest_mode():
+                undominated = state.get_undominated_forests()
+                if undominated:
+                    import json
+                    import uuid
+
+                    from ares.core.task_queue import RedisTaskQueue
+
+                    tq = RedisTaskQueue(resolved_redis_url)
+                    await tq.connect()
+
+                    da_domain_lower = domain.lower() if domain else ""
+
+                    # Get DC for the DA domain
+                    dc_ip = state.domain_controllers.get(da_domain_lower)
+                    if dc_ip:
+                        for target_forest in undominated:
+                            # Build task payload matching publishing.py format
+                            task_payload = {
+                                "vuln_type": "trust_key_extraction",
+                                "target": dc_ip,
+                                "domain": da_domain_lower,
+                                "username": "Administrator",
+                                "password": hash_value,
+                                "dc_ip": dc_ip,
+                                "trusted_domain": target_forest,
+                                "use_hash": True,
+                                "auth_domain": da_domain_lower,
+                            }
+
+                            task_id = f"trust_extraction_{uuid.uuid4().hex[:12]}"
+                            task_data = {
+                                "task_id": task_id,
+                                "task_type": "exploit",
+                                "target_agent": "privesc",
+                                "payload": task_payload,
+                                "source_agent": "manual_inject",
+                                "priority": 1,
+                            }
+
+                            # Submit directly to privesc queue with RPUSH for high priority
+                            task_json = json.dumps(task_data)
+                            await tq.redis.rpush("ares:tasks:privesc", task_json)
+                            logger.info(
+                                f"🌲 Dispatched trust key extraction: {da_domain_lower} → {target_forest} "
+                                f"(DC: {dc_ip})"
+                            )
+                    else:
+                        logger.warning(
+                            f"🌲 Trust key extraction skipped: no DC IP known for {da_domain_lower}"
+                        )
+
+                    await tq.disconnect()
 
         await client.aclose()
 

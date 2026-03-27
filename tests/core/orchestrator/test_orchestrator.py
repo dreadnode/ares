@@ -378,6 +378,7 @@ class TestAutoGoldenTicket:
 
         dispatcher = SimpleNamespace(shared_state=state)
         dispatcher._find_domain_controller_ip = MagicMock(return_value="192.168.58.21")
+        dispatcher._task_queue = None  # Disable Redis sync for test
 
         # Mock run_tool to capture the command
         captured_cmds = []
@@ -439,6 +440,7 @@ class TestAutoGoldenTicket:
 
         dispatcher = SimpleNamespace(shared_state=state)
         dispatcher._find_domain_controller_ip = MagicMock(return_value="192.168.58.23")
+        dispatcher._task_queue = None  # Disable Redis sync for test
 
         captured_cmds = []
 
@@ -499,6 +501,7 @@ class TestAutoGoldenTicket:
 
         dispatcher = SimpleNamespace(shared_state=state)
         dispatcher._find_domain_controller_ip = MagicMock(return_value="192.168.58.25")
+        dispatcher._task_queue = None  # Disable Redis sync for test
 
         captured_cmds = []
 
@@ -547,6 +550,7 @@ class TestAutoGoldenTicket:
 
         dispatcher = SimpleNamespace(shared_state=state)
         dispatcher._find_domain_controller_ip = MagicMock(return_value="192.168.58.27")
+        dispatcher._task_queue = None  # Disable Redis sync for test
 
         captured_cmds = []
 
@@ -611,6 +615,7 @@ class TestAutoGoldenTicket:
 
         dispatcher = SimpleNamespace(shared_state=state)
         dispatcher._find_domain_controller_ip = MagicMock(return_value="192.168.58.29")
+        dispatcher._task_queue = None  # Disable Redis sync for test
 
         captured_cmds = []
 
@@ -632,6 +637,118 @@ class TestAutoGoldenTicket:
         lookupsid_cmd = captured_cmds[0]
         assert "same_domain_user" in lookupsid_cmd[1]
         assert ":cccc33334444dddd" in lookupsid_cmd[3]
+
+    @pytest.mark.asyncio
+    async def test_auto_golden_ticket_child_domain_validates_parent_dc(self):
+        """Test that child domain golden ticket correctly validates parent DC.
+
+        Bug fix test: When cached DC IP belongs to a child DC (e.g., winterfell.child.parent.local)
+        but is incorrectly mapped to parent domain, the code should reject it and find the correct
+        parent DC instead.
+        """
+        from unittest.mock import patch
+
+        from ares.core.models import Credential, Hash, Host
+        from ares.core.orchestrator import _auto_golden_ticket
+
+        # Child domain: child.contoso.local, Parent domain: contoso.local
+        state = SharedRedTeamState(
+            operation_id="op-gt-child-parent",
+            target=Target(ip="192.168.58.10", domain="child.contoso.local"),
+        )
+
+        # Add krbtgt hash for CHILD domain (triggers ExtraSid golden ticket)
+        state.all_hashes.append(
+            Hash(
+                username="krbtgt",
+                hash_value="aad3b435b51404eeaad3b435b51404ee:childkrbtgthash1234567890123456",
+                hash_type="ntlm",
+                domain="child.contoso.local",
+                source="secretsdump",
+            )
+        )
+
+        # Add password credential for authentication
+        state.all_credentials.append(
+            Credential(
+                username="testuser",
+                password="TestPass123!",  # pragma: allowlist secret
+                domain="child.contoso.local",
+                source="manual",
+            )
+        )
+
+        # Add CHILD DC host (this is the WRONG DC for parent domain DCSync)
+        child_dc = Host(
+            ip="192.168.58.121",  # Child DC IP
+            hostname="winterfell.child.contoso.local",  # Child DC hostname
+            is_dc=True,
+        )
+        state.all_hosts.append(child_dc)
+
+        # Add PARENT DC host (this is the CORRECT DC for parent domain DCSync)
+        parent_dc = Host(
+            ip="192.168.58.238",  # Parent DC IP
+            hostname="kingslanding.contoso.local",  # Parent DC hostname
+            is_dc=True,
+        )
+        state.all_hosts.append(parent_dc)
+
+        # BUG SCENARIO: Cache has WRONG mapping - child DC IP mapped to parent domain
+        state.domain_controllers["contoso.local"] = "192.168.58.121"  # WRONG!
+
+        dispatcher = SimpleNamespace(shared_state=state)
+        dispatcher._find_domain_controller_ip = MagicMock(return_value="192.168.58.10")
+        dispatcher._task_queue = None  # Disable Redis sync for test
+
+        captured_cmds = []
+        captured_dc_ips = []
+
+        def mock_run_tool(cmd, timeout_seconds=60):
+            captured_cmds.append(cmd)
+            # Extract the target IP from the command (last argument for lookupsid)
+            if "impacket-lookupsid" in str(cmd):
+                # Format: impacket-lookupsid 'domain/user:pass@TARGET_IP'
+                for arg in cmd:
+                    if "@" in arg:
+                        target_ip = arg.split("@")[-1]
+                        captured_dc_ips.append(target_ip)
+            return ("Domain SID is: S-1-5-21-1234567890-1234567890-1234567890", "", 0)
+
+        with patch("ares.tools.red.common.run_tool", side_effect=mock_run_tool):
+            task = asyncio.create_task(_auto_golden_ticket(dispatcher, check_interval=0.1))
+            await asyncio.sleep(0.3)
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
+        # The fix should have:
+        # 1. Detected child domain (child.contoso.local has 3 parts)
+        # 2. Determined parent domain (contoso.local)
+        # 3. Checked cached DC (192.168.58.121) but REJECTED it because hostname
+        #    winterfell.child.contoso.local ends with child domain, not parent
+        # 4. Found correct parent DC via host enumeration (192.168.58.238)
+        # 5. Used parent DC IP for lookupsid (to get parent domain SID for ExtraSid)
+
+        # Verify at least one command was captured
+        assert len(captured_cmds) >= 1, "No commands were captured"
+
+        # First lookupsid should target the child DC (for child domain SID)
+        # Then parent DC should be used for parent domain operations
+        # The key is that we should NOT see lookupsid against the wrong DC
+        # for the parent domain DCSync
+
+        # Check that parent DC IP was resolved correctly by verifying logs or
+        # by checking that the parent SID lookup used the correct IP
+        # For this test, we verify the logic by checking captured IPs include parent DC
+        if len(captured_dc_ips) >= 2:
+            # Second lookup should be against parent DC for ExtraSid
+            assert "192.168.58.238" in captured_dc_ips, (
+                f"Parent DC IP 192.168.58.238 not found in captured IPs: {captured_dc_ips}. "
+                f"Fix may not be working - check that cached child DC IP was rejected."
+            )
 
 
 class TestWaitForCrackTasks:

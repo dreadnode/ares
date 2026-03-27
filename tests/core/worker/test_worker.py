@@ -1575,6 +1575,77 @@ class TestRedisWorkerAgentUsageExtraction:
         assert result["output_tokens"] == 0
         assert result["total_tokens"] == 0
 
+
+class TestRedisWorkerStateRefresh:
+    """Tests for Redis-backed worker state refresh/merge behavior."""
+
+    @pytest.fixture
+    def worker(self):
+        """Create a RedisWorkerAgent with mocked dependencies."""
+        from unittest.mock import MagicMock
+
+        from ares.core.models import AgentRole, SharedRedTeamState, Target
+        from ares.core.worker._worker import RedisWorkerAgent
+
+        mock_queue = MagicMock()
+        shared_state = SharedRedTeamState(
+            operation_id="op-usage-test",
+            target=Target(ip="192.168.58.10", domain="contoso.local"),
+        )
+
+        return RedisWorkerAgent(
+            role=AgentRole.RECON,
+            task_queue=mock_queue,
+            agent=MagicMock(),
+            agent_name="test-recon",
+            shared_state=shared_state,
+        )
+
+    def test_merge_shared_state_preserves_branch_redis_fields(self):
+        """Worker refresh should merge the Redis-backed DA domain/SID fields used on this branch."""
+        from unittest.mock import MagicMock
+
+        from ares.core.models import AgentRole, SharedRedTeamState
+        from ares.core.worker._worker import RedisWorkerAgent
+
+        worker = RedisWorkerAgent(
+            role=AgentRole.RECON,
+            task_queue=MagicMock(),
+            agent=MagicMock(),
+            agent_name="test-recon",
+            shared_state=SharedRedTeamState(operation_id="op-current"),
+        )
+
+        worker.shared_state.domain_admin_domains = ["contoso.local"]
+        worker.shared_state.domain_sids = {"contoso.local": "S-1-5-21-1-2-3"}
+        worker.shared_state.netbios_to_fqdn = {"CONTOSO": "contoso.local"}
+        worker.shared_state.da_hash_id = "hash-old"
+
+        fresh = SharedRedTeamState(operation_id="op-fresh")
+        fresh.domain_admin_domains = ["contoso.local", "fabrikam.local"]
+        fresh.domain_sids = {
+            "contoso.local": "S-1-5-21-1-2-3",
+            "fabrikam.local": "S-1-5-21-4-5-6",
+        }
+        fresh.netbios_to_fqdn = {
+            "CONTOSO": "contoso.local",
+            "FABRIKAM": "fabrikam.local",
+        }
+        fresh.da_hash_id = "hash-new"
+
+        worker._merge_shared_state(fresh)
+
+        assert worker.shared_state.domain_admin_domains == ["contoso.local", "fabrikam.local"]
+        assert worker.shared_state.domain_sids == {
+            "contoso.local": "S-1-5-21-1-2-3",
+            "fabrikam.local": "S-1-5-21-4-5-6",
+        }
+        assert worker.shared_state.netbios_to_fqdn == {
+            "CONTOSO": "contoso.local",
+            "FABRIKAM": "fabrikam.local",
+        }
+        assert worker.shared_state.da_hash_id == "hash-new"
+
     def test_extract_usage_uses_defaults_for_missing_token_fields(self, worker):
         """Test that _extract_usage uses 0 as default for missing token fields."""
         mock_usage = MagicMock(spec=[])  # No token attributes

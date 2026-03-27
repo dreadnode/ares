@@ -1,8 +1,9 @@
 """Patches for rigging to handle common LLM quirks.
 
 This module monkey-patches rigging's Tool.handle_tool_call to normalize
-parameter names to lowercase, fixing issues where LLMs send capitalized
-parameter names (e.g., 'Username' instead of 'username').
+parameter names to snake_case, fixing issues where LLMs send capitalized
+or space-separated parameter names (e.g., 'Username' or 'Dc Ip' instead
+of 'username' or 'dc_ip').
 
 Apply early in initialization by importing this module:
     from ares.core import rigging_patches
@@ -22,21 +23,23 @@ _patched = False
 
 
 def _normalize_tool_call_kwargs(arguments_json: str) -> str:
-    """Normalize tool call argument keys to lowercase.
+    """Normalize tool call argument keys to snake_case.
 
-    LLMs sometimes return capitalized parameter names (Username vs username).
-    This function normalizes all keys to lowercase to match Python conventions.
+    LLMs sometimes return capitalized or space-separated parameter names
+    (e.g., 'Username' or 'Dc Ip' instead of 'username' or 'dc_ip').
+    This function normalizes all keys to snake_case to match Python conventions.
 
     Args:
         arguments_json: JSON string of tool call arguments
 
     Returns:
-        JSON string with lowercase keys
+        JSON string with snake_case keys
     """
     try:
         kwargs = json.loads(arguments_json)
         if isinstance(kwargs, dict):
-            normalized = {k.lower(): v for k, v in kwargs.items()}
+            # Lowercase and replace spaces with underscores
+            normalized = {k.lower().replace(" ", "_"): v for k, v in kwargs.items()}
             return json.dumps(normalized)
     except (json.JSONDecodeError, TypeError):
         pass
@@ -46,8 +49,8 @@ def _normalize_tool_call_kwargs(arguments_json: str) -> str:
 def apply() -> None:
     """Apply rigging patches for LLM quirk handling.
 
-    This patches Tool.handle_tool_call to normalize kwargs keys to lowercase
-    before validation, preventing ValidationErrors from case mismatches.
+    This patches Tool.handle_tool_call to normalize kwargs keys to snake_case
+    before validation, preventing ValidationErrors from case/spacing mismatches.
     """
     global _patched
     if _patched:

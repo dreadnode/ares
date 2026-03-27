@@ -2035,6 +2035,7 @@ def _serialize_hash(hash_obj: Hash) -> str:
             "discovered_at": hash_obj.discovered_at.isoformat() if hash_obj.discovered_at else None,
             "parent_id": hash_obj.parent_id,
             "attack_step": hash_obj.attack_step,
+            "aes_key": hash_obj.aes_key,  # AES256 key for golden ticket generation
         },
         separators=(",", ":"),
     )
@@ -2062,6 +2063,7 @@ def _deserialize_hash(data: str | bytes) -> Hash:
         discovered_at=discovered_at,
         parent_id=d.get("parent_id"),
         attack_step=d.get("attack_step") or 0,
+        aes_key=d.get("aes_key") or "",  # AES256 key for golden ticket generation
     )
 
 

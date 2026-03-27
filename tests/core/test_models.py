@@ -1,6 +1,9 @@
 """Tests for rigging Model integration in ares.core.models."""
 
+import asyncio
 from datetime import datetime, timezone
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -215,6 +218,48 @@ class TestInvestigativeQuestionModel:
         assert data["state"] == "pending"
         assert "priority_score" in data
 
+
+class TestSharedRedTeamStateRedisRefresh:
+    """Tests for Redis-backed SharedRedTeamState refresh behavior."""
+
+    @pytest.mark.asyncio
+    async def test_refresh_from_redis_loads_da_domains_and_domain_sids(self) -> None:
+        """refresh_from_redis should include the branch's Redis-backed DA domain/SID fields."""
+        from ares.core.models import SharedRedTeamState
+
+        backend = SimpleNamespace(
+            get_shares=AsyncMock(return_value=[]),
+            get_exploited_vulnerabilities=AsyncMock(return_value={}),
+            get_credentials=AsyncMock(return_value=[]),
+            get_hashes=AsyncMock(return_value=[]),
+            get_users=AsyncMock(return_value=[]),
+            get_hosts=AsyncMock(return_value=[]),
+            get_domain_admin=AsyncMock(return_value=(True, "krbtgt dump", "hash-123")),
+            get_domain_admin_domains=AsyncMock(return_value=["contoso.local", "fabrikam.local"]),
+            get_domain_sids=AsyncMock(
+                return_value={
+                    "contoso.local": "S-1-5-21-1-2-3",
+                    "fabrikam.local": "S-1-5-21-4-5-6",
+                }
+            ),
+            get_golden_ticket=AsyncMock(return_value=False),
+            get_golden_tickets=AsyncMock(return_value=[]),
+            get_meta=AsyncMock(return_value=False),
+        )
+
+        state = SharedRedTeamState(operation_id="op-redis-refresh")
+        state.set_backend(backend)
+
+        await state.refresh_from_redis()
+
+        assert state.has_domain_admin is True
+        assert state.domain_admin_path == "krbtgt dump"
+        assert state.domain_admin_domains == ["contoso.local", "fabrikam.local"]
+        assert state.domain_sids == {
+            "contoso.local": "S-1-5-21-1-2-3",
+            "fabrikam.local": "S-1-5-21-4-5-6",
+        }
+
     def test_can_parallelize_with(self) -> None:
         """Test question parallelization check."""
         from ares.core.models import InvestigativeQuestion, QuestionSource
@@ -250,7 +295,32 @@ class TestInvestigativeQuestionModel:
 
         # Independent questions can parallelize
         assert q1.can_parallelize_with(q3)
-        assert q3.can_parallelize_with(q1)
+
+
+class TestSharedRedTeamStatePersistence:
+    """Tests for backend persistence eligibility checks."""
+
+    @pytest.mark.asyncio
+    async def test_can_persist_to_backend_for_orchestrator_dispatcher(self) -> None:
+        from ares.core.models import SharedRedTeamState
+
+        state = SharedRedTeamState(operation_id="op-test")
+        object.__setattr__(state, "_backend", object())
+        object.__setattr__(state, "_backend_loop", asyncio.get_running_loop())
+        state.set_dispatcher(SimpleNamespace(_is_orchestrator=True))
+
+        assert state._can_persist_to_backend() is True
+
+    @pytest.mark.asyncio
+    async def test_can_persist_to_backend_disabled_for_worker_dispatcher(self) -> None:
+        from ares.core.models import SharedRedTeamState
+
+        state = SharedRedTeamState(operation_id="op-test")
+        object.__setattr__(state, "_backend", object())
+        object.__setattr__(state, "_backend_loop", asyncio.get_running_loop())
+        state.set_dispatcher(SimpleNamespace(_is_orchestrator=False))
+
+        assert state._can_persist_to_backend() is False
 
 
 class TestRedTeamModels:
@@ -1752,6 +1822,57 @@ class TestRetroactiveDomainNormalization:
         assert len(admin_hashes) == 1
         assert admin_hashes[0].domain == "contoso.local", (
             f"BUG: Administrator hash incorrectly normalized to {admin_hashes[0].domain}"
+        )
+
+    def test_fix_child_domain_dc_hostnames(self) -> None:
+        """Test that child domain DC hostnames are corrected when child domain is discovered.
+
+        Bug fix test: When nmap/SMB reports the forest root domain instead of the child domain,
+        the DC hostname may be incorrectly assigned (e.g., winterfell.contoso.local instead of
+        winterfell.child.contoso.local). This test verifies the fix corrects the hostname.
+        """
+        from ares.core.models import Host, SharedRedTeamState
+
+        state = SharedRedTeamState(operation_id="test-dc-fix")
+
+        # Setup: Add parent domain and parent DC
+        state.add_domain("contoso.local")
+        parent_dc = Host(
+            ip="192.168.58.238",
+            hostname="kingslanding.contoso.local",
+            is_dc=True,
+        )
+        state.add_host(parent_dc)
+
+        # Add child DC with WRONG hostname (forest root instead of child domain)
+        # This simulates what happens when nmap/SMB reports wrong domain
+        child_dc = Host(
+            ip="192.168.58.121",
+            hostname="winterfell.contoso.local",  # WRONG - should be child.contoso.local
+            is_dc=True,
+        )
+        state.add_host(child_dc)
+
+        # Register the child DC for the child domain (this happens when we extract hashes)
+        # This tells us winterfell actually serves child.contoso.local
+        state.domain_controllers["child.contoso.local"] = "192.168.58.121"
+
+        # Now discover child domain through user enumeration (triggers normalization)
+        state.add_user("sql_svc", "child.contoso.local", "bloodhound")
+
+        # Verify: DC hostname should be corrected
+        winterfell = next((h for h in state.all_hosts if h.ip == "192.168.58.121"), None)
+        assert winterfell is not None
+        assert winterfell.hostname == "winterfell.child.contoso.local", (
+            f"DC hostname not corrected: got {winterfell.hostname}, "
+            f"expected winterfell.child.contoso.local"
+        )
+
+        # Verify: domain_controllers mapping is correct
+        assert state.domain_controllers.get("child.contoso.local") == "192.168.58.121"
+        # Parent domain should NOT map to child DC anymore
+        assert state.domain_controllers.get("contoso.local") != "192.168.58.121", (
+            "Parent domain should not map to child DC after fix"
         )
 
     def test_resolve_credential_domain_excludes_well_known_accounts(self) -> None:

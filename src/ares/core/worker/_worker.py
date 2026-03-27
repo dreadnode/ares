@@ -23,7 +23,15 @@ from typing import TYPE_CHECKING, Any, ClassVar
 
 from loguru import logger
 from opentelemetry import trace
-from opentelemetry.trace import SpanKind
+from opentelemetry.trace import Link, SpanKind, use_span
+
+# Optional: trace context extraction for cross-process tracing
+try:
+    from opentelemetry.propagate import extract as otel_extract
+
+    _OTEL_PROPAGATE_AVAILABLE = True
+except ImportError:
+    _OTEL_PROPAGATE_AVAILABLE = False
 
 from ares.core.config import (
     get_agent_task_timeout,
@@ -584,10 +592,38 @@ class RedisWorkerAgent:
                 "worker.agent": self.agent_name,
             }
         )
+
+        # Extract trace context from payload and create link to parent span
+        # This enables cross-process trace correlation in Tempo
+        links: list[Link] = []
+        if _OTEL_PROPAGATE_AVAILABLE:
+            trace_ctx = payload_snapshot.get("_trace_context")
+            if trace_ctx and isinstance(trace_ctx, dict):
+                parent_ctx = otel_extract(trace_ctx)
+                parent_span = trace.get_current_span(parent_ctx)
+                parent_span_ctx = parent_span.get_span_context()
+                if parent_span_ctx.is_valid:
+                    links.append(Link(parent_span_ctx))
+
         _task_span = _tracer.start_span(
-            "process_task", kind=SpanKind.CONSUMER, attributes=span_attrs
+            "process_task", kind=SpanKind.CONSUMER, attributes=span_attrs, links=links
         )
 
+        # Use use_span() to set _task_span as the current context so that
+        # child operations (trace_tool_call, trace_discovery, trace_decision)
+        # can add events to this span instead of creating orphan spans.
+        # end_on_exit=False because we manually end the span in the finally block.
+        with use_span(_task_span, end_on_exit=False):
+            await self._process_task_inner(task, _task_span, payload_snapshot, started_at)
+
+    async def _process_task_inner(
+        self,
+        task: TaskMessage,
+        _task_span,
+        payload_snapshot: dict,
+        started_at: str,
+    ) -> None:
+        """Inner implementation of task processing, runs inside use_span context."""
         try:
             await self.task_queue.set_task_status(
                 task_id=task.task_id,
@@ -1015,8 +1051,11 @@ class RedisWorkerAgent:
                 fresh.da_hash_id,
             ) = await backend.get_domain_admin()
             fresh.has_golden_ticket = await backend.get_golden_ticket()
+            fresh.domain_admin_domains.extend(await backend.get_domain_admin_domains())
+            fresh.domain_sids.update(await backend.get_domain_sids())
             # Load DC map for child domain resolution
             fresh.domain_controllers.update(await backend.get_all_dcs())
+            fresh.netbios_to_fqdn.update(await backend.get_all_netbios_mappings())
 
             # Reconstruct Target from meta for environment tracking
             target_ip = await backend.get_meta("target_ip", default="")
@@ -1085,7 +1124,11 @@ class RedisWorkerAgent:
             "completed",
             "has_domain_admin",
             "has_golden_ticket",
+            "da_hash_id",
             "domain_admin_path",
+            "domain_admin_domains",
+            "domain_sids",
+            "netbios_to_fqdn",
             "registered_agents",
             "operation_timeline",
             "identified_techniques",
@@ -1901,8 +1944,11 @@ class RedisWorkerAgent:
                 fresh.da_hash_id,
             ) = await backend.get_domain_admin()
             fresh.has_golden_ticket = await backend.get_golden_ticket()
+            fresh.domain_admin_domains.extend(await backend.get_domain_admin_domains())
+            fresh.domain_sids.update(await backend.get_domain_sids())
             # Load DC map for child domain resolution
             fresh.domain_controllers.update(await backend.get_all_dcs())
+            fresh.netbios_to_fqdn.update(await backend.get_all_netbios_mappings())
 
             # Reconstruct Target from meta for environment tracking
             target_ip = await backend.get_meta("target_ip", default="")

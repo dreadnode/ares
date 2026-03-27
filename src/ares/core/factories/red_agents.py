@@ -683,13 +683,14 @@ def create_role_hooks(
                     logger.info(
                         f"📊 [{log_name}] Context: {tokens:,} / {max_tokens:,} tokens ({pct:.0f}%)"
                     )
-                # Early warning at 40% - guide LLM to use summary tools
+                # Early warning at 60% - guide LLM to use summary tools
                 # Only apply to orchestrator to avoid disrupting worker task flows
-                elif pct >= 40 and role == AgentRole.ORCHESTRATOR:
+                # NOTE: Set high enough to avoid triggering RetryWithFeedback loop
+                elif pct >= 60 and role == AgentRole.ORCHESTRATOR:
                     logger.info(f"📊 [{log_name}] Context at {pct:.0f}% - suggesting summary tools")
                     return RetryWithFeedback(
                         feedback=(
-                            "⚠️ Context usage approaching 50%. To conserve context space:\n"
+                            "⚠️ Context usage approaching 70%. To conserve context space:\n"
                             "• Use get_hash_summary() / get_credential_summary() for status checks\n"
                             "• Use get_exploitation_status(include_details=False) for counts only\n"
                             "• Use pagination (limit=30, offset=N) when you need full details\n"

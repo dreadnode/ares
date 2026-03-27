@@ -744,6 +744,45 @@ class LateralMovementTools(Toolset):
                 self.state.hashes.append(hash_obj)
                 extracted += 1
 
+        # Second pass: Extract AES256 keys and attach to existing hashes
+        # AES keys are required for golden ticket generation on Windows 2016+
+        # which rejects RC4/NTLM-based tickets with KDC_ERR_TGT_REVOKED
+        # Pattern matches: [DOMAIN\]username:aes256-cts-hmac-sha1-96:hexkey
+        # \w+\$? allows trust accounts like ESSOS$ and machine accounts
+        aes_pattern = re.compile(
+            r"^(?:([^\\:\s]+)\\)?(\w+\$?):aes256-cts-hmac-sha1-96:([a-fA-F0-9]{64})$"
+        )
+        aes_keys_found: dict[tuple[str, str], str] = {}  # (domain, username) -> aes_key
+        for line in output.splitlines():
+            stripped = line.strip()
+            match = aes_pattern.match(stripped)
+            if match:
+                aes_domain = match.group(1) or domain
+                aes_username = match.group(2)
+                aes_key = match.group(3)
+                aes_keys_found[(aes_domain.lower(), aes_username.lower())] = aes_key
+
+        if aes_keys_found and isinstance(self.state, SharedRedTeamState):
+            aes_attached = 0
+            for (aes_domain, aes_username), aes_key in aes_keys_found.items():
+                # Create a hash object with just the AES key - add_hash will merge it
+                aes_hash = Hash(
+                    username=aes_username,
+                    hash_value="",  # Will be ignored during merge
+                    hash_type="NTLM",
+                    domain=aes_domain,
+                    aes_key=aes_key,
+                    source=source,
+                )
+                # add_hash merges aes_key into existing hash with same username/domain
+                if self.state.add_hash(aes_hash, "secretsdump"):
+                    aes_attached += 1
+            if aes_attached:
+                logger.warning(
+                    f"[+] Auto-extracted {len(aes_keys_found)} AES256 keys from secretsdump "
+                    f"(attached to {aes_attached} hashes for golden ticket support)"
+                )
+
         if extracted:
             # Log with context about the attack path
             if ctx.impersonated_user:

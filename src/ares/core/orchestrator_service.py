@@ -416,6 +416,15 @@ class OrchestratorService:
 
         while self.running:
             try:
+                # Check if Redis client is available before attempting to poll
+                # If client is dead, _pop_operation_request returns None immediately
+                # which would skip the BLPOP wait and spin the loop
+                if not self.task_queue or not self.task_queue._client:
+                    logger.warning("Redis client unavailable, attempting reconnection")
+                    await self._force_reconnect()
+                    await asyncio.sleep(5)
+                    continue
+
                 # Block for up to 5 seconds waiting for an operation request
                 # Using BLPOP for blocking pop from list
                 result = await asyncio.wait_for(self._pop_operation_request(), timeout=5.0)
@@ -447,6 +456,14 @@ class OrchestratorService:
                         await self._force_reconnect()
                         last_successful_poll = time.monotonic()
                 continue
+            except asyncio.CancelledError:
+                # Task was cancelled - check if we should stop or continue
+                if not self.running:
+                    logger.info("Service loop cancelled during shutdown")
+                    break
+                # If still supposed to be running, log and continue
+                logger.warning("Service loop task cancelled but service still running, continuing")
+                continue
             except Exception as e:
                 logger.error(f"Error in service loop: {e}")
                 # On Redis errors, invalidate Sentinel client and reconnect
@@ -454,7 +471,14 @@ class OrchestratorService:
                     logger.warning("Redis connection error, forcing reconnection")
                     await self._force_reconnect()
                     last_successful_poll = time.monotonic()
-                await asyncio.sleep(5)  # Back off on error
+                try:
+                    await asyncio.sleep(5)  # Back off on error
+                except asyncio.CancelledError:
+                    if not self.running:
+                        break
+                continue
+
+        logger.info(f"Service loop exited (running={self.running})")
 
     async def _force_reconnect(self) -> None:
         """Force reconnection to Redis by invalidating cached clients."""
@@ -727,14 +751,18 @@ class OrchestratorService:
                     f"Operation {request.operation_id} exceeded service timeout "
                     f"({operation_timeout}s)"
                 )
-                await self._publish_operation_status(
-                    request.operation_id,
-                    "failed",
-                    {
-                        "failed_at": datetime.now(timezone.utc).isoformat(),
-                        "error": f"Operation exceeded service timeout ({operation_timeout}s)",
-                    },
-                )
+                try:
+                    await self._publish_operation_status(
+                        request.operation_id,
+                        "failed",
+                        {
+                            "failed_at": datetime.now(timezone.utc).isoformat(),
+                            "error": f"Operation exceeded service timeout ({operation_timeout}s)",
+                        },
+                    )
+                except Exception as publish_error:
+                    logger.error(f"Failed to publish timeout status: {publish_error}")
+                logger.info("Service timeout handled, returning to service loop")
                 return  # Continue to next operation
 
             # Publish operation status: completed
@@ -764,19 +792,29 @@ class OrchestratorService:
                 f"(started {start_str}, ended {end_str}, duration {duration_str})"
             )
 
+        except asyncio.CancelledError:
+            logger.warning("Operation processing was cancelled")
+            # Re-raise to let the service loop handle cancellation
+            raise
         except Exception as e:
             logger.error(f"Error processing operation: {e}")
 
             # Publish operation status: failed
             if "request" in locals():
-                await self._publish_operation_status(
-                    request.operation_id,
-                    "failed",
-                    {
-                        "failed_at": datetime.now(timezone.utc).isoformat(),
-                        "error": str(e),
-                    },
-                )
+                try:
+                    await self._publish_operation_status(
+                        request.operation_id,
+                        "failed",
+                        {
+                            "failed_at": datetime.now(timezone.utc).isoformat(),
+                            "error": str(e),
+                        },
+                    )
+                except Exception as publish_error:
+                    logger.error(f"Failed to publish error status: {publish_error}")
+
+        # Log that we're returning to service loop (helps debug loop exit issues)
+        logger.debug("Operation processing complete, returning to service loop")
 
     async def _publish_operation_status(
         self,

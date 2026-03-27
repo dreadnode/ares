@@ -588,6 +588,7 @@ class Hash(Model):
     discovered_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     parent_id: str | None = None  # ID of credential/hash that enabled this discovery
     attack_step: int = 0  # Position in attack chain
+    aes_key: str = ""  # AES256 key from secretsdump (for golden ticket generation)
 
 
 class Share(Model):
@@ -915,6 +916,7 @@ class SharedRedTeamState:
 
         Returns False if:
         - No backend is set
+        - State is attached to a worker dispatcher (workers report via task results)
         - No event loop is running
         - Current loop differs from backend loop (threaded consumer case)
 
@@ -926,6 +928,10 @@ class SharedRedTeamState:
         via pub/sub, so it's not lost.
         """
         if not self._backend:
+            return False
+
+        dispatcher = getattr(self, "_dispatcher", None)
+        if dispatcher is not None and not getattr(dispatcher, "_is_orchestrator", False):
             return False
 
         import asyncio
@@ -1254,6 +1260,15 @@ class SharedRedTeamState:
                 self.has_domain_admin = True
                 if da_path:
                     self.domain_admin_path = da_path
+
+            redis_da_domains = await self._backend.get_domain_admin_domains()
+            existing_da_domains = {d.lower() for d in self.domain_admin_domains}
+            for da_domain in redis_da_domains:
+                if da_domain.lower() not in existing_da_domains:
+                    self.domain_admin_domains.append(da_domain.lower())
+
+            redis_domain_sids = await self._backend.get_domain_sids()
+            self.domain_sids.update(redis_domain_sids)
 
             has_gt = await self._backend.get_golden_ticket()
             if has_gt:
@@ -2576,6 +2591,76 @@ class SharedRedTeamState:
             # Deduplicate after normalization
             self.all_credentials = self._dedupe_credentials(self.all_credentials)
 
+        # Fix DC hostnames that are incorrectly assigned to parent domain
+        # This happens when nmap/SMB reports the forest root domain instead of the child domain
+        self._fix_child_domain_dc_hostnames(child_fqdn, parent_domain)
+
+    def _fix_child_domain_dc_hostnames(self, child_fqdn: str, parent_domain: str) -> None:
+        """Fix DC hostnames that are incorrectly assigned to parent domain.
+
+        When nmap/SMB scans a child domain DC, they may report the forest root domain
+        instead of the child domain. For example:
+        - winterfell.sevenkingdoms.local (wrong - forest root)
+        - winterfell.north.sevenkingdoms.local (correct - child domain)
+
+        This method:
+        1. Checks if domain_controllers has an entry for the child domain
+        2. Finds the DC host with that IP
+        3. If hostname ends with parent domain, corrects it to child domain
+        4. Updates the domain_controllers mapping accordingly
+        """
+        # Check if we have a DC registered for the child domain
+        child_dc_ip = self.domain_controllers.get(child_fqdn.lower())
+        if not child_dc_ip:
+            # No DC known for child domain yet - nothing to fix
+            return
+
+        # Find the host with this DC's IP
+        dc_host = None
+        for host in self.all_hosts:
+            if host.ip == child_dc_ip:
+                dc_host = host
+                break
+
+        if not dc_host or not dc_host.hostname:
+            return
+
+        hostname_lower = dc_host.hostname.lower()
+
+        # Check if hostname incorrectly ends with parent domain
+        # e.g., "winterfell.sevenkingdoms.local" should be "winterfell.north.sevenkingdoms.local"
+        if hostname_lower.endswith(f".{parent_domain}") and not hostname_lower.endswith(
+            f".{child_fqdn}"
+        ):
+            # Extract the hostname prefix (e.g., "winterfell")
+            prefix = hostname_lower[: -(len(parent_domain) + 1)]  # Remove ".parent.domain"
+
+            # Construct correct hostname
+            correct_hostname = f"{prefix}.{child_fqdn}"
+
+            old_hostname = dc_host.hostname
+            dc_host.hostname = correct_hostname
+            logger.warning(
+                f"🔧 Fixed child domain DC hostname: {old_hostname} -> {correct_hostname} "
+                f"(DC serves {child_fqdn}, not {parent_domain})"
+            )
+
+            # Update domain_controllers mapping: remove incorrect parent domain entry
+            if (
+                parent_domain in self.domain_controllers
+                and self.domain_controllers[parent_domain] == child_dc_ip
+            ):
+                del self.domain_controllers[parent_domain]
+                logger.info(f"Removed incorrect DC mapping: {parent_domain} -> {child_dc_ip}")
+
+            # Persist updated host to Redis backend
+            if self._can_persist_to_backend():
+                import asyncio
+
+                loop = asyncio.get_running_loop()
+                task = loop.create_task(self._backend.update_host(dc_host.ip, dc_host))
+                self._track_background_task(task, f"fix_dc_hostname({dc_host.ip})")
+
     def add_hash(self, hash_obj: Hash, source_agent: str) -> bool:
         """Add hash if not duplicate. Returns True if added."""
         hash_type = (hash_obj.hash_type or "").strip().lower()
@@ -2611,6 +2696,7 @@ class SharedRedTeamState:
 
         for existing in self.all_hashes:
             if existing.hash_value == hash_value:
+                updated = False
                 # If incoming hash has cracked_password and existing doesn't, merge it
                 if hash_obj.cracked_password and not existing.cracked_password:
                     existing.cracked_password = hash_obj.cracked_password
@@ -2618,6 +2704,7 @@ class SharedRedTeamState:
                         f"Hash updated with cracked password: {domain}\\{username} ({hash_type}) "
                         f"from {source_agent}"
                     )
+                    updated = True
                     # Credential creation is the caller's responsibility (publish_hash → publish_credential).
                     # Signal credential access so dispatcher loops wake up.
                     if self._dispatcher:
@@ -2625,15 +2712,44 @@ class SharedRedTeamState:
                             self._dispatcher.signal_credential_access()
                         elif hasattr(self._dispatcher, "_credential_access_requested"):
                             self._dispatcher._credential_access_requested.set()  # Thread-safe
+
+                # If incoming hash has aes_key and existing doesn't, merge it
+                # AES keys are critical for golden ticket generation on Windows 2016+
+                if hash_obj.aes_key and not existing.aes_key:
+                    existing.aes_key = hash_obj.aes_key
+                    logger.info(
+                        f"Hash updated with AES key: {domain}\\{username} ({hash_type}) "
+                        f"from {source_agent}"
+                    )
+                    updated = True
+
+                if updated:
                     # Request checkpoint (threading.Event, safe from any thread)
                     if self._dispatcher and hasattr(self._dispatcher, "_checkpoint_requested"):
                         self._dispatcher._checkpoint_requested.set()
                     return True  # Return True since we updated it
-                logger.info(
+                logger.debug(
                     f"Hash rejected: duplicate hash for {domain}\\{username} ({hash_type}) from {source_agent} - "
                     f"matches existing {existing.domain}\\{existing.username} ({existing.hash_type})"
                 )
                 return False
+
+            # For NTLM hashes, also match by username+domain to allow AES key merging
+            # This handles the case where AES keys are extracted separately from NTLM hashes
+            if hash_type == "ntlm" and (existing.hash_type or "").strip().lower() == "ntlm":
+                existing_user = (existing.username or "").strip().lower()
+                existing_domain = (existing.domain or "").strip().lower()
+                if existing_user == username and existing_domain == domain:
+                    # Merge AES key if we have one and existing doesn't
+                    if hash_obj.aes_key and not existing.aes_key:
+                        existing.aes_key = hash_obj.aes_key
+                        logger.info(f"AES key merged for {domain}\\{username} from {source_agent}")
+                        if self._dispatcher and hasattr(self._dispatcher, "_checkpoint_requested"):
+                            self._dispatcher._checkpoint_requested.set()
+                        return True
+                    # Existing hash found but no update needed
+                    if not hash_value:  # This was an AES-only hash
+                        return False
             # For AS-REP, dedupe by user since each request generates different hash but same password
             existing_value = existing.hash_value or ""
             existing_is_asrep = (existing.hash_type or "").strip().lower() in {
@@ -2762,7 +2878,10 @@ class SharedRedTeamState:
             if hash_type == "ntlm" and username == "krbtgt":
                 task2 = loop.create_task(
                     self._backend.set_domain_admin(
-                        achieved=True, path=self.domain_admin_path, da_hash_id=self.da_hash_id
+                        achieved=True,
+                        path=self.domain_admin_path,
+                        da_hash_id=self.da_hash_id,
+                        domain=domain,
                     )
                 )
                 self._track_background_task(task2, "set_domain_admin")

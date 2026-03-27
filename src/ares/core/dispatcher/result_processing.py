@@ -51,8 +51,9 @@ class ResultProcessingMixin:
         """
         if not target_ip:
             fallback = self.shared_state.target.domain if self.shared_state.target else ""
-            logger.warning(
-                f"_resolve_domain_from_target_host: NO TARGET provided, fallback={fallback}"
+            logger.debug(
+                f"_resolve_domain_from_target_host: no target_ip (task has no specific target), "
+                f"using operation domain={fallback}"
             )
             return fallback
 
@@ -351,6 +352,9 @@ class ResultProcessingMixin:
             output = result.strip()
 
         if output:
+            # Debug: Log if output contains AES keys
+            if "aes256" in output.lower():
+                logger.info(f"🔑 Output contains AES256 keys ({len(output)} chars)")
             await self._process_output_text(
                 output,
                 source_agent,
@@ -980,6 +984,12 @@ class ResultProcessingMixin:
             if domain_lower not in self.state.domain_sids:
                 self.state.domain_sids[domain_lower] = extracted_sid
                 logger.info(f"🔑 Cached domain SID for {domain}: {extracted_sid}")
+                backend = getattr(self.state, "_backend", None)
+                if backend is not None:
+                    try:
+                        await backend.set_domain_sid(domain_lower, extracted_sid)
+                    except Exception as e:
+                        logger.debug(f"Failed to persist domain SID for {domain}: {e}")
 
         # Extract and auto-queue delegation vulnerabilities from findDelegation output
         # Always extract as a backup - dedup handled in _auto_queue_delegation_vulnerabilities
@@ -1558,7 +1568,12 @@ class ResultProcessingMixin:
         return None
 
     def _extract_hashes_from_output(self: RedTeamDispatcher, output: str) -> list[Hash]:
-        """Extract Kerberos hashes (TGS, AS-REP, NTLM) from tool output."""
+        """Extract Kerberos hashes (TGS, AS-REP, NTLM) from tool output.
+
+        Also extracts AES256 keys from secretsdump output and attaches them
+        to corresponding NTLM hashes. AES keys are required for golden ticket
+        generation on modern Windows (2016+) where RC4 golden tickets fail.
+        """
         if not output:
             return []
         hashes: list[Hash] = []
@@ -1580,6 +1595,36 @@ class ResultProcessingMixin:
             h = self._try_extract_ntlm_hash(stripped, seen)
             if h:
                 hashes.append(h)
+
+        # Second pass: extract AES256 keys and attach to corresponding hashes
+        # secretsdump output format: username:aes256-cts-hmac-sha1-96:hexkey
+        # or domain.fqdn\username:aes256-cts-hmac-sha1-96:hexkey
+        # or DOMAIN\username:aes256-cts-hmac-sha1-96:hexkey
+        # \w+\$? allows trust accounts like ESSOS$ and machine accounts
+        aes_pattern = re.compile(
+            r"^(?:[\w.]+\\)?(\w+\$?):aes256-cts-hmac-sha1-96:([a-fA-F0-9]{64})$"
+        )
+        aes_count = 0
+        for line in output.splitlines():
+            stripped = line.strip()
+            match = aes_pattern.match(stripped)
+            if match:
+                username_lower = match.group(1).lower()
+                aes_key = match.group(2)
+                aes_count += 1
+                # Attach to matching hash (same username, NTLM type)
+                for h in hashes:
+                    if (
+                        h.username.lower() == username_lower
+                        and h.hash_type.upper() == "NTLM"
+                        and not h.aes_key
+                    ):
+                        h.aes_key = aes_key
+                        logger.debug(f"Attached AES key to {h.username}: {aes_key[:20]}...")
+                        break
+
+        if aes_count > 0:
+            logger.info(f"Extracted {aes_count} AES256 keys from output")
 
         return hashes
 

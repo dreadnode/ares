@@ -209,8 +209,46 @@ class AnnouncementMixin:
         extraction_dc_ip = dc_ip
 
         if is_child_domain and parent_domain:
-            # Get parent DC IP
-            parent_dc_ip = self.shared_state.domain_controllers.get(parent_domain.lower())
+            # Get parent DC IP - MUST validate it's actually a parent DC
+            # The cache may have incorrect mappings (e.g., child DC IP for parent domain)
+            parent_dc_ip = None
+            cached_dc_ip = self.shared_state.domain_controllers.get(parent_domain.lower())
+
+            if cached_dc_ip:
+                # Validate the cached IP is actually a parent DC, not a child DC
+                for host in self.shared_state.all_hosts:
+                    if (
+                        host.ip == cached_dc_ip
+                        and host.is_dc
+                        and host.hostname
+                        and host.hostname.lower().endswith(f".{parent_domain.lower()}")
+                        and not host.hostname.lower().endswith(f".{da_domain_lower}")
+                    ):
+                        parent_dc_ip = cached_dc_ip
+                        break
+
+                if not parent_dc_ip:
+                    logger.warning(
+                        f"MULTI_FOREST_MODE: Cached DC {cached_dc_ip} for {parent_domain} "
+                        f"is not a valid parent DC, searching for correct DC"
+                    )
+
+            if not parent_dc_ip:
+                # Try to find parent DC from hosts by hostname
+                for host in self.shared_state.all_hosts:
+                    if (
+                        host.is_dc
+                        and host.hostname
+                        and host.hostname.lower().endswith(f".{parent_domain.lower()}")
+                        and not host.hostname.lower().endswith(f".{da_domain_lower}")
+                    ):
+                        parent_dc_ip = host.ip
+                        logger.info(
+                            f"MULTI_FOREST_MODE: Found parent DC via hostname: "
+                            f"{host.hostname} -> {parent_dc_ip}"
+                        )
+                        break
+
             if parent_dc_ip:
                 extraction_dc_ip = parent_dc_ip
             else:
