@@ -695,6 +695,11 @@ class RedisWorkerAgent:
             result = None
             last_rate_limit_error: str | Exception | None = None
             agent_timeout = get_agent_task_timeout()
+            # MSSQL exploitation chains need more time (6+ tool calls across linked servers)
+            vuln_type = (task.payload.get("vuln_type") or "") if task.payload else ""
+            if vuln_type.startswith("mssql_"):
+                agent_timeout = max(agent_timeout, 480)  # 8 minutes for MSSQL
+                logger.debug(f"Extended timeout to {agent_timeout}s for MSSQL task {task.task_id}")
             rate_limit_delays = get_rate_limit_backoff_delays()
             rate_limit_max_retries = get_rate_limit_max_retries()
             try:

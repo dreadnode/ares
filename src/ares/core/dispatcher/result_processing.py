@@ -407,6 +407,21 @@ class ResultProcessingMixin:
                 f"(chained secretsdump succeeded{da_note})"
             )
 
+        # Clear trust extraction dedup on failure so it can be retried
+        # (e.g., missing SIDs, auth failure, timeout — may succeed on next attempt)
+        if not success and task_info.task_type == "exploit":
+            vuln_type = task_params.get("vuln_type", "")
+            if vuln_type == "trust_key_extraction":
+                extraction_domain = (task_params.get("domain") or "").lower()
+                trusted_domain = (task_params.get("trusted_domain") or "").lower()
+                if extraction_domain and trusted_domain:
+                    dedup_key = f"{extraction_domain}:{trusted_domain}"
+                    self.shared_state.processed_trust_extractions.discard(dedup_key)
+                    logger.info(
+                        f"🌲 Cleared trust extraction dedup for retry: {dedup_key} "
+                        f"(task {task_id} failed)"
+                    )
+
         # Resolve any waiting futures
         self._resolve_task_future(task_id, success, result, error)
 
@@ -543,11 +558,26 @@ class ResultProcessingMixin:
                             f"Error publishing cracked credential {hash_obj.domain}\\{hash_obj.username}: {e}"
                         )
 
-        # NOTE: discovered_shares from JSON is NOT processed here.
-        # LLM agents parse netexec output non-deterministically, often returning
-        # invalid permissions (e.g., "Basic", "Remote" from comment text).
-        # Instead, shares are extracted deterministically from raw output via
-        # _extract_shares_from_output() in _process_output_text().
+        # Process discovered shares from worker state serialization.
+        # Workers extract shares deterministically from raw netexec output via
+        # _parse_netexec_shares() in the enumerate_shares tool, so these are reliable.
+        # Workers can't auto-persist to Redis (is_orchestrator=False), so we must
+        # process them here to get shares into the orchestrator's state and Redis.
+        discovered_shares = result.get("discovered_shares")
+        if isinstance(discovered_shares, list) and discovered_shares:
+            logger.info(
+                f"Processing {len(discovered_shares)} discovered shares from {target_label}"
+            )
+            for s in discovered_shares:
+                if not isinstance(s, dict):
+                    continue
+                share = Share(
+                    host=s.get("host", ""),
+                    name=s.get("name", ""),
+                    permissions=s.get("permissions", ""),
+                    comment=s.get("comment", ""),
+                )
+                await self.publish_share(share, source_agent, task_queue=task_queue)
 
         # Get fallback domain for users by resolving from target host's FQDN
         # This correctly handles child domain DCs (e.g., dc02 serves child.contoso.local)
@@ -878,9 +908,10 @@ class ResultProcessingMixin:
                 # which calls publish_credential() with the cracked credential. This ensures
                 # immediate dispatch logic (delegation checks, secretsdump) is triggered.
 
-        # NOTE: share/shares from JSON is NOT processed here.
-        # LLM agents parse netexec output non-deterministically. Shares are
-        # extracted deterministically from raw output via _extract_shares_from_output().
+        # NOTE: share/shares from LLM-structured JSON is not processed here.
+        # LLM-extracted shares are unreliable. Worker-serialized discovered_shares
+        # are handled in _process_discovered_data() and raw output extraction
+        # happens in _process_output_text() via _extract_shares_from_output().
 
     def _extract_output_from_result(self: RedTeamDispatcher, result: dict[str, Any]) -> str:
         """Extract combined output text from result dict."""

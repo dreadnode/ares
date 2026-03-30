@@ -523,11 +523,15 @@ class NetworkEnumerationTools(Toolset):
                 nonlocal current_hostname
                 if not current_ip:
                     return
-                # Build FQDN from hostname and domain if available
+                # NOTE: Do NOT join short hostname with nmap's (Domain:...) to build FQDN.
+                # nmap's LDAP probe reports the forest root domain (e.g., "sevenkingdoms.local")
+                # even for child domain DCs (e.g., winterfell belongs to "north.sevenkingdoms.local").
+                # Joining produces wrong FQDNs like "winterfell.sevenkingdoms.local".
+                # The correct FQDN will be discovered by netexec SMB which reports the actual domain,
+                # and merged via add_host()'s hostname upgrade logic.
                 hostname_to_use = current_hostname
-                if current_hostname and current_domain and "." not in current_hostname:
-                    hostname_to_use = f"{current_hostname.lower()}.{current_domain.lower()}"
-                    # Track the domain from LDAP for fixing other hosts
+                if current_domain:
+                    # Track the domain from LDAP for reference (but don't use it for FQDN construction)
                     discovered_domains.add(current_domain.lower())
 
                 # Try to fix truncated domain with currently known domains

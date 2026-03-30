@@ -1105,16 +1105,19 @@ def create_role_hooks(
                         # child domain DCs (e.g., dc02 serves child.contoso.local,
                         # not the operation's target domain contoso.local).
                         hash_domain = h.domain or ""
+                        discovery_data = {
+                            "username": h.username,
+                            "hash_value": h.hash_value,
+                            "hash_type": h.hash_type,
+                            "domain": hash_domain,
+                            "target": tool_target,  # Include target for tracing
+                        }
+                        if h.aes_key:
+                            discovery_data["aes_key"] = h.aes_key
                         await task_queue.publish_discovery(
                             operation_id=operation_id,
                             discovery_type="hash",
-                            data={
-                                "username": h.username,
-                                "hash_value": h.hash_value,
-                                "hash_type": h.hash_type,
-                                "domain": hash_domain,
-                                "target": tool_target,  # Include target for tracing
-                            },
+                            data=discovery_data,
                             source_agent=log_name,
                             task_id=current_task_id,
                         )

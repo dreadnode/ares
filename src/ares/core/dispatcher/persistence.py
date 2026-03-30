@@ -79,6 +79,30 @@ class PersistenceMixin:
         pipe.expire(key, ttl)
         await pipe.execute()
 
+    async def _persist_users(
+        self: RedTeamDispatcher,
+        key: str,
+        users: list[Any],
+        serializer: Callable[[Any], str],
+        ttl: int,
+    ) -> None:
+        """Persist users to Redis HASH using HSET (additive, no delete).
+
+        Uses dedup key {domain}:{username} to prevent duplicates.
+        HSET is idempotent so no DELETE needed.
+        """
+        if not users:
+            return
+
+        pipe = self.redis_client.pipeline()
+        for user in users:
+            domain = (user.domain or "").strip().lower()
+            username = (user.username or "").strip().lower()
+            dedup_key = f"{domain}:{username}"
+            pipe.hset(key, dedup_key, serializer(user))
+        pipe.expire(key, ttl)
+        await pipe.execute()
+
     async def _persist_hashes(
         self: RedTeamDispatcher,
         key: str,
@@ -370,6 +394,7 @@ class PersistenceMixin:
                 _serialize_hash,
                 _serialize_host,
                 _serialize_share,
+                _serialize_user,
                 _serialize_vulnerability,
             )
 
@@ -378,6 +403,11 @@ class PersistenceMixin:
             # Persist hosts (clear-and-rewrite - hosts only added by orchestrator)
             await self._persist_collection(
                 f"ares:op:{op_id}:hosts", self.shared_state.all_hosts, _serialize_host, ttl
+            )
+
+            # Persist users using HASH (additive, no delete - preserves worker data)
+            await self._persist_users(
+                f"ares:op:{op_id}:users", self.shared_state.all_users, _serialize_user, ttl
             )
 
             # Persist shares using HASH (additive, no delete - preserves worker data)
@@ -464,6 +494,7 @@ class PersistenceMixin:
 
             logger.debug(
                 f"Checkpoint complete: {len(self.shared_state.all_hosts)} hosts, "
+                f"{len(self.shared_state.all_users)} users, "
                 f"{len(self.shared_state.all_shares)} shares, "
                 f"{len(self.shared_state.all_credentials)} creds, "
                 f"{len(self.shared_state.all_hashes)} hashes, "

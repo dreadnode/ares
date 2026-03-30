@@ -750,6 +750,426 @@ class TestAutoGoldenTicket:
                 f"Fix may not be working - check that cached child DC IP was rejected."
             )
 
+    @pytest.mark.asyncio
+    async def test_auto_golden_ticket_child_domain_uses_trust_key_referral(self):
+        """Test that child→parent escalation uses referral routing, not direct DCSync.
+
+        The ExtraSid golden ticket can't DCSync the parent domain directly because
+        Impacket's cross-realm referral following is broken in all versions
+        (fortra/impacket#315). The fix monkey-patches sendReceive() to route
+        referral TGS requests to the correct parent DC. Step 1 extracts the trust
+        key from the child domain, Step 2 re-forges the golden ticket and uses
+        referral routing to DCSync the parent.
+
+        Expected command sequence:
+        1. lookupsid (child domain SID)
+        2. lookupsid (parent domain SID for ExtraSid)
+        3. ticketer (golden ticket with ExtraSid) + secretsdump (child for trust key)
+        4. ticketer (golden ticket again) + python3 -c (referral-routed parent DCSync)
+        """
+        from unittest.mock import patch
+
+        from ares.core.models import Credential, Hash, Host
+        from ares.core.orchestrator import _auto_golden_ticket
+
+        state = SharedRedTeamState(
+            operation_id="op-gt-trust-key",
+            target=Target(ip="192.168.58.10", domain="child.contoso.local"),
+        )
+
+        # krbtgt hash for child domain (triggers ExtraSid golden ticket path)
+        state.all_hashes.append(
+            Hash(
+                username="krbtgt",
+                hash_value="aad3b435b51404eeaad3b435b51404ee:childkrbtgthash1234567890123456",
+                hash_type="ntlm",
+                domain="child.contoso.local",
+                source="secretsdump",
+            )
+        )
+
+        state.all_credentials.append(
+            Credential(
+                username="testuser",
+                password="TestPass123!",  # pragma: allowlist secret
+                domain="child.contoso.local",
+                source="manual",
+            )
+        )
+
+        # Child DC
+        state.all_hosts.append(
+            Host(
+                ip="192.168.58.121",
+                hostname="winterfell.child.contoso.local",
+                is_dc=True,
+            )
+        )
+        # Parent DC
+        state.all_hosts.append(
+            Host(
+                ip="192.168.58.238",
+                hostname="kingslanding.contoso.local",
+                is_dc=True,
+            )
+        )
+
+        state.domain_controllers["child.contoso.local"] = "192.168.58.121"
+        state.domain_controllers["contoso.local"] = "192.168.58.238"
+
+        dispatcher = SimpleNamespace(shared_state=state)
+        dispatcher._find_domain_controller_ip = MagicMock(return_value="192.168.58.121")
+        dispatcher._task_queue = None
+        dispatcher.announce_golden_ticket = AsyncMock()
+        dispatcher._auto_dispatch_trust_key_extraction = AsyncMock()
+
+        captured_cmds = []
+
+        def mock_run_tool(cmd, timeout_seconds=60):
+            cmd_str = str(cmd)
+            captured_cmds.append(cmd)
+
+            # 1. lookupsid calls → return domain SIDs
+            if "impacket-lookupsid" in cmd_str:
+                # Route by target DC IP
+                if "192.168.58.238" in cmd_str:
+                    return (
+                        "Domain SID is: S-1-5-21-9999999999-9999999999-9999999999",
+                        "",
+                        0,
+                    )
+                return (
+                    "Domain SID is: S-1-5-21-1111111111-1111111111-1111111111",
+                    "",
+                    0,
+                )
+
+            # 2. Step 1: Combined ticketer + child DCSync for trust key (has CONTOSO$)
+            if "impacket-ticketer" in cmd_str and "CONTOSO$" in cmd_str:
+                return (
+                    "Saving ticket in Administrator.ccache\n"
+                    "[*] Dumping Domain Credentials (domain\\uid:rid:lmhash:nthash)\n"
+                    "CONTOSO$:1234:aad3b435b51404eeaad3b435b51404ee"  # pragma: allowlist secret
+                    ":abcdef1234567890abcdef1234567890:::\n"
+                    "[*] Kerberos keys grabbed\n"
+                    "CONTOSO$:aes256-cts-hmac-sha1-96"
+                    ":aaff00112233445566778899aabbccddeeff00112233445566778899aabbccddee\n",
+                    "",
+                    0,
+                )
+
+            # 3. Step 2: Combined ticketer + parent DCSync via referral routing
+            if "impacket-ticketer" in cmd_str and "secretsdump" in cmd_str:
+                return (
+                    "Saving ticket in Administrator.ccache\n"
+                    "[*] Dumping Domain Credentials\n"
+                    "contoso.local\\Administrator:500"  # pragma: allowlist secret
+                    ":aad3b435b51404eeaad3b435b51404ee"
+                    ":aabb00112233445566778899aabbccdd:::\n",
+                    "",
+                    0,
+                )
+
+            # 4. Standalone ticketer (golden ticket) → success
+            if "impacket-ticketer" in cmd_str:
+                return ("Saving ticket in Administrator.ccache", "", 0)
+
+            return ("", "", 1)
+
+        with patch("ares.tools.red.common.run_tool", side_effect=mock_run_tool):
+            task = asyncio.create_task(_auto_golden_ticket(dispatcher, check_interval=0.1))
+            await asyncio.sleep(0.5)
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
+        # Verify the trust key referral sequence occurred
+        cmd_strs = [str(c) for c in captured_cmds]
+
+        # Should have DCSync'd child for trust account (CONTOSO$)
+        trust_extract_cmds = [c for c in cmd_strs if "secretsdump" in c and "CONTOSO$" in c]
+        assert len(trust_extract_cmds) >= 1, (
+            f"Expected trust key extraction DCSync for CONTOSO$. Commands: {cmd_strs}"
+        )
+
+        # The trust extraction should target the CHILD DC
+        trust_cmd = trust_extract_cmds[0]
+        assert "192.168.58.121" in trust_cmd, (
+            f"Trust key extraction should target child DC (192.168.58.121), got: {trust_cmd}"
+        )
+        # Identity should use child domain
+        assert "child.contoso.local/Administrator" in trust_cmd, (
+            f"Trust key extraction identity should use child domain. Got: {trust_cmd}"
+        )
+
+        # Step 2 should reuse golden ticket (NOT forge inter-realm TGT)
+        # and use referral routing with child DC for Kerberos
+        step2_cmds = [
+            c
+            for c in cmd_strs
+            if "impacket-ticketer" in c and "secretsdump" in c and "CONTOSO$" not in c
+        ]
+        assert len(step2_cmds) >= 1, (
+            f"Expected Step 2 golden ticket + referral DCSync command. Commands: {cmd_strs}"
+        )
+
+        # Step 2 should use child DC for -dc-ip (Kerberos referral routing)
+        step2_cmd = step2_cmds[0]
+        assert "192.168.58.121" in step2_cmd, (
+            f"Step 2 should reference child DC (192.168.58.121) for "
+            f"Kerberos referral routing. Got: {step2_cmd}"
+        )
+        # Step 2 should use child domain identity (golden ticket is for child realm)
+        assert "CHILD.CONTOSO.LOCAL" in step2_cmd, (
+            f"Step 2 identity should use child domain (golden ticket realm). Got: {step2_cmd}"
+        )
+        # Step 2 should target parent DC FQDN
+        assert "kingslanding.contoso.local" in step2_cmd, (
+            f"Step 2 should target parent DC FQDN. Got: {step2_cmd}"
+        )
+        # Step 2 should NOT use inter-realm TGT approach
+        assert "krbtgt/contoso.local" not in step2_cmd, (
+            f"Step 2 should NOT forge inter-realm TGT. Got: {step2_cmd}"
+        )
+
+        # Verify parent hash was stored (add_hash lowercases username/domain)
+        parent_hashes = [
+            h
+            for h in state.all_hashes
+            if h.username.lower() == "administrator"
+            and (h.domain or "").lower() == "contoso.local"
+            and h.hash_type
+            and h.hash_type.lower() == "ntlm"
+            and h.source
+            and "parent_dcsync" in h.source
+        ]
+        assert len(parent_hashes) >= 1, (
+            f"Parent Administrator hash not stored in state. "
+            f"Hashes: {[(h.username, h.domain, h.source) for h in state.all_hashes]}"
+        )
+        expected = "aabb00112233445566778899aabbccdd"  # pragma: allowlist secret
+        assert parent_hashes[0].hash_value == expected
+
+        # Verify parent domain marked as DA
+        assert "contoso.local" in [d.lower() for d in state.domain_admin_domains], (
+            "Parent domain not marked as domain admin"
+        )
+
+        # Verify trust extraction was dispatched for foreign forests
+        dispatcher._auto_dispatch_trust_key_extraction.assert_called()
+
+    @pytest.mark.asyncio
+    async def test_auto_golden_ticket_trust_key_uses_aes_when_available(self):
+        """Test that trust key AES256 is extracted and stored from child DCSync."""
+        from unittest.mock import patch
+
+        from ares.core.models import Credential, Hash, Host
+        from ares.core.orchestrator import _auto_golden_ticket
+
+        state = SharedRedTeamState(
+            operation_id="op-gt-trust-aes",
+            target=Target(ip="192.168.58.10", domain="child.contoso.local"),
+        )
+
+        state.all_hashes.append(
+            Hash(
+                username="krbtgt",
+                hash_value="aad3b435b51404eeaad3b435b51404ee:childkrbtgthash1234567890123456",
+                hash_type="ntlm",
+                domain="child.contoso.local",
+                source="secretsdump",
+            )
+        )
+        state.all_credentials.append(
+            Credential(
+                username="testuser",
+                password="TestPass123!",  # pragma: allowlist secret
+                domain="child.contoso.local",
+                source="manual",
+            )
+        )
+
+        state.all_hosts.append(
+            Host(ip="192.168.58.121", hostname="dc01.child.contoso.local", is_dc=True)
+        )
+        state.all_hosts.append(Host(ip="192.168.58.238", hostname="dc01.contoso.local", is_dc=True))
+        state.domain_controllers["child.contoso.local"] = "192.168.58.121"
+        state.domain_controllers["contoso.local"] = "192.168.58.238"
+
+        dispatcher = SimpleNamespace(shared_state=state)
+        dispatcher._find_domain_controller_ip = MagicMock(return_value="192.168.58.121")
+        dispatcher._task_queue = None
+        dispatcher.announce_golden_ticket = AsyncMock()
+        dispatcher._auto_dispatch_trust_key_extraction = AsyncMock()
+
+        captured_cmds = []
+        aes_key_value = "aaff00112233445566778899aabbccddeeff00112233445566778899aabbccddee"  # pragma: allowlist secret
+
+        def mock_run_tool(cmd, timeout_seconds=60):
+            cmd_str = str(cmd)
+            captured_cmds.append(cmd)
+
+            if "impacket-lookupsid" in cmd_str:
+                if "192.168.58.238" in cmd_str:
+                    return (
+                        "Domain SID is: S-1-5-21-9999999999-9999999999-9999999999",
+                        "",
+                        0,
+                    )
+                return (
+                    "Domain SID is: S-1-5-21-1111111111-1111111111-1111111111",
+                    "",
+                    0,
+                )
+            # Step 1: Combined ticketer + child DCSync for trust key (has CONTOSO$)
+            if "impacket-ticketer" in cmd_str and "CONTOSO$" in cmd_str:
+                return (
+                    "Saving ticket in Administrator.ccache\n"
+                    "CONTOSO$:1234:aad3b435b51404eeaad3b435b51404ee"  # pragma: allowlist secret
+                    ":abcdef1234567890abcdef1234567890:::\n"
+                    "CONTOSO$:aes256-cts-hmac-sha1-96"
+                    f":{aes_key_value}\n",
+                    "",
+                    0,
+                )
+            # Step 2: Combined ticketer + parent DCSync via referral routing
+            if "impacket-ticketer" in cmd_str and "secretsdump" in cmd_str:
+                return (
+                    "Saving ticket in Administrator.ccache\n"
+                    "Administrator:500:aad3b435b51404eeaad3b435b51404ee"  # pragma: allowlist secret
+                    ":aabb00112233445566778899aabbccdd:::\n",
+                    "",
+                    0,
+                )
+            if "impacket-ticketer" in cmd_str:
+                return ("Saving ticket in Administrator.ccache", "", 0)
+            return ("", "", 1)
+
+        with patch("ares.tools.red.common.run_tool", side_effect=mock_run_tool):
+            task = asyncio.create_task(_auto_golden_ticket(dispatcher, check_interval=0.1))
+            await asyncio.sleep(0.5)
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
+        # Verify trust key AES was extracted and stored
+        trust_hashes = [
+            h
+            for h in state.all_hashes
+            if h.username.upper() == "CONTOSO$" and h.hash_type and h.hash_type.lower() == "ntlm"
+        ]
+        assert len(trust_hashes) >= 1, (
+            f"Expected CONTOSO$ trust hash in state. "
+            f"Hashes: {[(h.username, h.domain, h.source) for h in state.all_hashes]}"
+        )
+        trust_hash = trust_hashes[0]
+        assert trust_hash.aes_key == aes_key_value, (
+            f"Trust key AES256 should be stored. Got: {trust_hash.aes_key}"
+        )
+
+        # Step 2 should reuse the golden ticket (NOT forge inter-realm TGT)
+        step2_cmds = [
+            str(c)
+            for c in captured_cmds
+            if "impacket-ticketer" in str(c)
+            and "secretsdump" in str(c)
+            and "CONTOSO$" not in str(c)
+        ]
+        assert len(step2_cmds) >= 1, (
+            f"Expected Step 2 golden ticket + referral DCSync. "
+            f"Got: {[str(c) for c in captured_cmds]}"
+        )
+        # Should NOT have -spn krbtgt/contoso.local (no inter-realm TGT)
+        assert "krbtgt/contoso.local" not in step2_cmds[0], (
+            f"Step 2 should NOT forge inter-realm TGT. Got: {step2_cmds[0]}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_auto_golden_ticket_trust_key_extraction_failure_handled(self):
+        """Test graceful handling when trust key extraction fails."""
+        from unittest.mock import patch
+
+        from ares.core.models import Credential, Hash, Host
+        from ares.core.orchestrator import _auto_golden_ticket
+
+        state = SharedRedTeamState(
+            operation_id="op-gt-trust-fail",
+            target=Target(ip="192.168.58.10", domain="child.contoso.local"),
+        )
+
+        state.all_hashes.append(
+            Hash(
+                username="krbtgt",
+                hash_value="aad3b435b51404eeaad3b435b51404ee:childkrbtgthash1234567890123456",
+                hash_type="ntlm",
+                domain="child.contoso.local",
+                source="secretsdump",
+            )
+        )
+        state.all_credentials.append(
+            Credential(
+                username="testuser",
+                password="TestPass123!",  # pragma: allowlist secret
+                domain="child.contoso.local",
+                source="manual",
+            )
+        )
+
+        state.all_hosts.append(
+            Host(ip="192.168.58.121", hostname="dc01.child.contoso.local", is_dc=True)
+        )
+        state.all_hosts.append(Host(ip="192.168.58.238", hostname="dc01.contoso.local", is_dc=True))
+        state.domain_controllers["child.contoso.local"] = "192.168.58.121"
+        state.domain_controllers["contoso.local"] = "192.168.58.238"
+
+        dispatcher = SimpleNamespace(shared_state=state)
+        dispatcher._find_domain_controller_ip = MagicMock(return_value="192.168.58.121")
+        dispatcher._task_queue = None
+        dispatcher.announce_golden_ticket = AsyncMock()
+
+        def mock_run_tool(cmd, timeout_seconds=60):
+            cmd_str = str(cmd)
+            if "impacket-lookupsid" in cmd_str:
+                return (
+                    "Domain SID is: S-1-5-21-1111111111-1111111111-1111111111",
+                    "",
+                    0,
+                )
+            if "impacket-ticketer" in cmd_str:
+                return ("Saving ticket in Administrator.ccache", "", 0)
+            # Trust key extraction FAILS (access denied, no output)
+            if "secretsdump" in cmd_str and "CONTOSO$" in cmd_str:
+                return ("[-] ERROR: Could not connect", "Access denied", 1)
+            return ("", "", 1)
+
+        with patch("ares.tools.red.common.run_tool", side_effect=mock_run_tool):
+            task = asyncio.create_task(_auto_golden_ticket(dispatcher, check_interval=0.1))
+            await asyncio.sleep(0.5)
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
+        # Should NOT crash — golden ticket was still created for the child domain
+        assert dispatcher.announce_golden_ticket.called, (
+            "Golden ticket should still be announced even if trust key extraction fails"
+        )
+
+        # No parent domain hash should be in state
+        parent_hashes = [
+            h
+            for h in state.all_hashes
+            if h.username == "Administrator" and h.domain == "contoso.local"
+        ]
+        assert len(parent_hashes) == 0, (
+            "No parent Administrator hash should exist when trust key extraction fails"
+        )
+
 
 class TestWaitForCrackTasks:
     """Tests for crack task grace period."""

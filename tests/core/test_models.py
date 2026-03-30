@@ -1462,7 +1462,7 @@ class TestSiblingDomainHandling:
         from ares.core.models import SharedRedTeamState, Target
 
         state = SharedRedTeamState(operation_id="test-op")
-        # Target is fabrikam.local but user is actually in child.contoso.local
+        # Target is fabrikam.local, user is actually in child.fabrikam.local (child of target)
         state.target = Target(ip="192.168.58.1", domain="fabrikam.local")
 
         # First discovery with target fallback
@@ -1470,11 +1470,29 @@ class TestSiblingDomainHandling:
         assert result1 is True
         assert state.all_users[0].domain == "fabrikam.local"
 
-        # Second discovery with correct specific domain
-        result2 = state.add_user("svc_backup", "child.contoso.local")
+        # Second discovery with correct child domain
+        result2 = state.add_user("svc_backup", "child.fabrikam.local")
         assert result2 is True  # Should update, not add duplicate
         assert len(state.all_users) == 1
-        assert state.all_users[0].domain == "child.contoso.local"
+        assert state.all_users[0].domain == "child.fabrikam.local"
+
+    def test_user_rejected_when_foreign_domain_after_target(self) -> None:
+        """Test that foreign forest domain is rejected when user already in target domain."""
+        from ares.core.models import SharedRedTeamState, Target
+
+        state = SharedRedTeamState(operation_id="test-op")
+        state.target = Target(ip="192.168.58.1", domain="fabrikam.local")
+
+        # First discovery in target domain
+        result1 = state.add_user("svc_backup", "fabrikam.local")
+        assert result1 is True
+        assert state.all_users[0].domain == "fabrikam.local"
+
+        # Second discovery in foreign forest should be rejected (not child/parent of target)
+        result2 = state.add_user("svc_backup", "child.contoso.local")
+        assert result2 is False
+        assert len(state.all_users) == 1
+        assert state.all_users[0].domain == "fabrikam.local"
 
     def test_user_rejected_when_target_fallback_after_specific(self) -> None:
         """Test that target fallback domain is rejected when user already has specific domain."""
@@ -1483,16 +1501,16 @@ class TestSiblingDomainHandling:
         state = SharedRedTeamState(operation_id="test-op")
         state.target = Target(ip="192.168.58.1", domain="fabrikam.local")
 
-        # First discovery with specific domain
-        result1 = state.add_user("svc_backup", "child.contoso.local")
+        # First discovery with specific child domain
+        result1 = state.add_user("svc_backup", "child.fabrikam.local")
         assert result1 is True
-        assert state.all_users[0].domain == "child.contoso.local"
+        assert state.all_users[0].domain == "child.fabrikam.local"
 
-        # Second discovery with target fallback should be rejected
+        # Second discovery with target fallback should be rejected (less specific)
         result2 = state.add_user("svc_backup", "fabrikam.local")
         assert result2 is False
         assert len(state.all_users) == 1
-        assert state.all_users[0].domain == "child.contoso.local"
+        assert state.all_users[0].domain == "child.fabrikam.local"
 
     def test_sibling_domain_conflict_keeps_first(self) -> None:
         """Test that when two non-target sibling domains conflict, first one is kept."""
@@ -1824,12 +1842,16 @@ class TestRetroactiveDomainNormalization:
             f"BUG: Administrator hash incorrectly normalized to {admin_hashes[0].domain}"
         )
 
-    def test_fix_child_domain_dc_hostnames(self) -> None:
-        """Test that child domain DC hostnames are corrected when child domain is discovered.
+    def test_child_domain_dc_hostname_upgraded_via_add_host(self) -> None:
+        """Test that child domain DC hostnames are corrected via add_host merge logic.
 
-        Bug fix test: When nmap/SMB reports the forest root domain instead of the child domain,
-        the DC hostname may be incorrectly assigned (e.g., winterfell.contoso.local instead of
-        winterfell.child.contoso.local). This test verifies the fix corrects the hostname.
+        When nmap initially reports a short hostname (e.g., "winterfell") and netexec
+        later discovers the correct FQDN (e.g., "winterfell.child.contoso.local"),
+        the hostname is upgraded via add_host()'s new_is_more_specific check.
+
+        Note: _fix_child_domain_dc_hostnames() is disabled because it incorrectly
+        renamed parent DCs. The fix is now at the nmap parsing level (short hostname
+        only, no Domain: field join) + netexec FQDN upgrade.
         """
         from ares.core.models import Host, SharedRedTeamState
 
@@ -1844,36 +1866,32 @@ class TestRetroactiveDomainNormalization:
         )
         state.add_host(parent_dc)
 
-        # Add child DC with WRONG hostname (forest root instead of child domain)
-        # This simulates what happens when nmap/SMB reports wrong domain
+        # Add child DC with short hostname (nmap no longer builds wrong FQDNs)
         child_dc = Host(
             ip="192.168.58.121",
-            hostname="winterfell.contoso.local",  # WRONG - should be child.contoso.local
+            hostname="winterfell",  # Short name from nmap
             is_dc=True,
         )
         state.add_host(child_dc)
 
-        # Register the child DC for the child domain (this happens when we extract hashes)
-        # This tells us winterfell actually serves child.contoso.local
-        state.domain_controllers["child.contoso.local"] = "192.168.58.121"
+        # Later, netexec discovers correct FQDN and add_host upgrades it
+        updated_dc = Host(
+            ip="192.168.58.121",
+            hostname="winterfell.child.contoso.local",
+            is_dc=True,
+        )
+        state.add_host(updated_dc)
 
-        # Now discover child domain through user enumeration (triggers normalization)
-        state.add_user("sql_svc", "child.contoso.local", "bloodhound")
-
-        # Verify: DC hostname should be corrected
+        # Verify: DC hostname was upgraded to correct FQDN
         winterfell = next((h for h in state.all_hosts if h.ip == "192.168.58.121"), None)
         assert winterfell is not None
         assert winterfell.hostname == "winterfell.child.contoso.local", (
-            f"DC hostname not corrected: got {winterfell.hostname}, "
+            f"DC hostname not upgraded: got {winterfell.hostname}, "
             f"expected winterfell.child.contoso.local"
         )
 
-        # Verify: domain_controllers mapping is correct
+        # Verify: domain_controllers mapping is correct for child domain
         assert state.domain_controllers.get("child.contoso.local") == "192.168.58.121"
-        # Parent domain should NOT map to child DC anymore
-        assert state.domain_controllers.get("contoso.local") != "192.168.58.121", (
-            "Parent domain should not map to child DC after fix"
-        )
 
     def test_resolve_credential_domain_excludes_well_known_accounts(self) -> None:
         """Test that _resolve_credential_domain_from_users does NOT correct well-known accounts.

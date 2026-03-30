@@ -250,6 +250,9 @@ class PublishingMixin:
         added = self.shared_state.add_hash(hash_obj, source_agent)
 
         if added:
+            # Also register the hash owner as a known user
+            # (add_user filters machine accounts ending in $)
+            self._add_user(hash_obj.username, hash_obj.domain or "", source_agent)
             # Signal credential access - use thread-safe event from non-main thread
             is_main_thread = threading.current_thread() is threading.main_thread()
             if is_main_thread:
@@ -1356,8 +1359,38 @@ class PublishingMixin:
         # Get DC IP for the domain where we have DA
         da_domain_lower = da_domain.lower()
         dc_ip = self.shared_state.domain_controllers.get(da_domain_lower)
+
+        # Validate DC actually belongs to this domain (not a stale mapping from
+        # incomplete hostname resolution)
+        if dc_ip:
+            for h in self.shared_state.all_hosts:
+                if h.ip == dc_ip and h.hostname:
+                    h_domain = ".".join(h.hostname.lower().split(".")[1:])
+                    if h_domain != da_domain_lower:
+                        logger.warning(
+                            f"MULTI_FOREST_MODE: DC {dc_ip} hostname {h.hostname} "
+                            f"belongs to {h_domain}, not {da_domain_lower} — searching for correct DC"
+                        )
+                        dc_ip = None
+                        for h2 in self.shared_state.all_hosts:
+                            if (
+                                h2.is_dc
+                                and h2.hostname
+                                and ".".join(h2.hostname.lower().split(".")[1:]) == da_domain_lower
+                            ):
+                                dc_ip = h2.ip
+                                self.shared_state.domain_controllers[da_domain_lower] = dc_ip
+                                logger.info(
+                                    f"MULTI_FOREST_MODE: Found correct DC for {da_domain_lower}: "
+                                    f"{h2.hostname} -> {dc_ip}"
+                                )
+                                break
+                    break
+
         if not dc_ip:
             logger.warning(f"Cannot dispatch trust key extraction: no DC IP for {da_domain}")
+            # Clear dedup flag so this can be retried when DC IP becomes available
+            self._trust_extraction_dispatched.discard(da_domain_lower)
             return
 
         # Find DA credential (Administrator NTLM hash preferred)
@@ -1393,6 +1426,8 @@ class PublishingMixin:
             logger.warning(
                 f"Cannot dispatch trust key extraction: no DA credentials for {da_domain}"
             )
+            # Clear dedup flag so this can be retried when credentials appear
+            self._trust_extraction_dispatched.discard(da_domain_lower)
             return
 
         # Dispatch trust key extraction for each undominated forest
@@ -1435,7 +1470,7 @@ class PublishingMixin:
                     )
 
             if not parent_dc_ip:
-                # Try to find parent DC from hosts by hostname
+                # Try to find parent DC from hosts by hostname (strict: is_dc)
                 for host in self.shared_state.all_hosts:
                     if (
                         host.is_dc
@@ -1450,39 +1485,38 @@ class PublishingMixin:
                         )
                         break
 
-            # DNS fallback if parent DC still not found
+            if not parent_dc_ip:
+                # Relaxed: any host with parent domain hostname and DC ports
+                dc_ports = {"389", "88", "53"}
+                for host in self.shared_state.all_hosts:
+                    if (
+                        host.hostname
+                        and host.hostname.lower().endswith(f".{parent_domain.lower()}")
+                        and not host.hostname.lower().endswith(f".{da_domain_lower}")
+                    ):
+                        host_ports = {str(p.port) for p in (host.ports or [])}
+                        if host_ports & dc_ports:
+                            parent_dc_ip = host.ip
+                            logger.info(
+                                f"MULTI_FOREST_MODE: Found parent DC via hostname+ports: "
+                                f"{host.hostname} -> {parent_dc_ip}"
+                            )
+                            break
+
+            # DNS fallback - use Python socket instead of dig
             if not parent_dc_ip:
                 logger.info(
                     f"MULTI_FOREST_MODE: Parent DC not in state, trying DNS for {parent_domain}"
                 )
                 try:
-                    import subprocess
+                    import socket
 
-                    # Query SRV record for parent DC
-                    dns_cmd = ["dig", "+short", f"_ldap._tcp.dc._msdcs.{parent_domain}", "SRV"]
-                    result = subprocess.run(  # noqa: ASYNC221
-                        dns_cmd, capture_output=True, text=True, timeout=10, check=False
+                    parent_dc_ip = socket.gethostbyname(parent_domain)
+                    logger.info(
+                        f"MULTI_FOREST_MODE: Resolved parent DC via DNS: "
+                        f"{parent_domain} -> {parent_dc_ip}"
                     )
-                    if result.returncode == 0 and result.stdout.strip():
-                        for line in result.stdout.strip().split("\n"):
-                            parts = line.split()
-                            if len(parts) >= 4:
-                                dc_hostname = parts[3].rstrip(".")
-                                a_cmd = ["dig", "+short", dc_hostname, "A"]
-                                a_result = subprocess.run(  # noqa: ASYNC221
-                                    a_cmd, capture_output=True, text=True, timeout=10, check=False
-                                )
-                                if a_result.returncode == 0 and a_result.stdout.strip():
-                                    parent_dc_ip = a_result.stdout.strip().split("\n")[0]
-                                    logger.info(
-                                        f"MULTI_FOREST_MODE: Resolved parent DC via DNS: "
-                                        f"{dc_hostname} -> {parent_dc_ip}"
-                                    )
-                                    # Cache for future use
-                                    self.shared_state.domain_controllers[parent_domain] = (
-                                        parent_dc_ip
-                                    )
-                                    break
+                    self.shared_state.domain_controllers[parent_domain] = parent_dc_ip
                 except Exception as dns_err:
                     logger.warning(f"MULTI_FOREST_MODE: DNS resolution failed: {dns_err}")
 
@@ -1542,12 +1576,17 @@ class PublishingMixin:
             # Build task payload (must match exploit prompt format)
             # Use extraction_domain/extraction_dc_ip which may be parent (forest root) if
             # we have Enterprise Admin via ExtraSid
+            # If hash is in LM:NT format, extract just the NT hash to avoid
+            # the LLM agent prepending ":" and creating ":LM:NT" (3 values)
+            hash_for_payload = da_hash
+            if hash_for_payload and ":" in hash_for_payload:
+                hash_for_payload = hash_for_payload.split(":")[-1]
             task_payload = {
                 "vuln_type": "trust_key_extraction",
                 "target": extraction_dc_ip,
                 "domain": extraction_domain,
                 "username": da_username,
-                "password": da_hash or da_password,
+                "password": hash_for_payload or da_password,
                 "dc_ip": extraction_dc_ip,
                 "trusted_domain": target_forest,
                 "use_hash": bool(da_hash),

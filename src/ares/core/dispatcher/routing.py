@@ -24,6 +24,18 @@ if TYPE_CHECKING:
 class RoutingMixin:
     """Task routing methods for dispatching work to specialized agents."""
 
+    def _should_skip_for_da(self: RedTeamDispatcher) -> bool:
+        """Check if task dispatch should be skipped because DA is achieved.
+
+        Returns False (don't skip) when multi-forest mode is active and
+        undominated forests remain — tasks must continue for cross-forest ops.
+        """
+        if not self.shared_state.has_domain_admin:
+            return False
+        from ares.core.config import get_multi_forest_mode
+
+        return not (get_multi_forest_mode() and not self.shared_state.all_forests_dominated())
+
     def _normalize_domain(self: RedTeamDispatcher, domain: str) -> str:
         """Normalize domain to FQDN format.
 
@@ -709,7 +721,8 @@ class RoutingMixin:
             Task ID for tracking.
         """
         # Skip new crack tasks if DA already achieved (allow in-progress to complete)
-        if self.shared_state.has_domain_admin:
+        # Multi-forest mode: continue cracking for cross-forest credential discovery
+        if self._should_skip_for_da():
             logger.debug(f"Skipping crack request for {username} - DA already achieved")
             return ""
         # Normalize domain to FQDN format
@@ -806,7 +819,8 @@ class RoutingMixin:
             Task ID for tracking.
         """
         # Skip lateral movement if DA already achieved
-        if self.shared_state.has_domain_admin:
+        # Multi-forest mode: continue lateral movement for cross-forest pivoting
+        if self._should_skip_for_da():
             logger.debug(f"Skipping lateral movement to {target_host} - DA already achieved")
             return ""
 
@@ -943,7 +957,8 @@ class RoutingMixin:
             Task ID for tracking.
         """
         # Skip ACL analysis if DA already achieved
-        if self.shared_state.has_domain_admin:
+        # Multi-forest mode: continue ACL analysis for cross-forest paths
+        if self._should_skip_for_da():
             logger.debug(f"Skipping ACL analysis for {target_user} - DA already achieved")
             return ""
 
@@ -1062,7 +1077,8 @@ class RoutingMixin:
             Task ID for tracking.
         """
         # Skip new recon tasks if DA already achieved
-        if self.shared_state.has_domain_admin:
+        # Multi-forest mode: continue recon for foreign domain host discovery
+        if self._should_skip_for_da():
             logger.debug(f"Skipping recon request ({reason}) - DA already achieved")
             return ""
 
@@ -1209,7 +1225,8 @@ class RoutingMixin:
             Task ID for tracking.
         """
         # Skip new credential access tasks if DA already achieved
-        if self.shared_state.has_domain_admin:
+        # Multi-forest mode: continue credential access for cross-forest discovery
+        if self._should_skip_for_da():
             logger.debug(f"Skipping credential access request ({reason}) - DA already achieved")
             return ""
 
@@ -1351,7 +1368,7 @@ class RoutingMixin:
         task_queue: Any = None,
     ) -> str:
         """Request PrivEscAgent to exploit vulnerability."""
-        if self.shared_state.has_domain_admin:
+        if self._should_skip_for_da():
             logger.debug(f"Skipping exploit {vuln_type} on {target} - DA already achieved")
             return ""
 
@@ -1431,7 +1448,8 @@ class RoutingMixin:
             Task ID for tracking.
         """
         # Skip new privesc enumeration tasks if DA already achieved
-        if self.shared_state.has_domain_admin:
+        # Multi-forest mode: continue enumeration for cross-forest attack paths
+        if self._should_skip_for_da():
             logger.debug(f"Skipping privesc enumeration ({techniques}) - DA already achieved")
             return ""
 
@@ -1555,7 +1573,8 @@ class RoutingMixin:
             Task ID for tracking.
         """
         # Skip new coercion tasks if DA already achieved
-        if self.shared_state.has_domain_admin:
+        # Multi-forest mode: continue coercion for cross-forest relay attacks
+        if self._should_skip_for_da():
             logger.debug(f"Skipping coercion request ({techniques}) - DA already achieved")
             return ""
 

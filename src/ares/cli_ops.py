@@ -747,10 +747,24 @@ def _print_loot(state, *, json_output: bool = False) -> None:
     real_weaknesses = _filter_real_weaknesses(list(state.all_weaknesses))
 
     if json_output:
+        da_domains = getattr(state, "domain_admin_domains", [])
+        # Calculate multi-forest status
+        da_forest_roots = set()
+        for da_domain in da_domains:
+            parts = da_domain.split(".")
+            if len(parts) >= 2:
+                forest_root = ".".join(parts[-2:]) if len(parts) == 2 else ".".join(parts[1:])
+                while len(forest_root.split(".")) > 2:
+                    forest_root = ".".join(forest_root.split(".")[1:])
+                da_forest_roots.add(forest_root.lower())
+
         output = {
             "operation_id": state.operation_id,
             "has_domain_admin": state.has_domain_admin,
             "domain_admin_path": state.domain_admin_path,
+            "domain_admin_domains": da_domains,
+            "is_multi_forest_compromise": len(da_forest_roots) >= 2,
+            "compromised_forests": sorted(da_forest_roots),
             "has_golden_ticket": state.has_golden_ticket,
             "domains": list(getattr(state, "all_domains", [])),
             "hosts": [
@@ -1250,6 +1264,7 @@ async def _load_state_from_redis(client: Any, operation_id: str) -> Any:
         "domain_sids": domain_sids,
         "domain_admin_domains": domain_admin_domains,
         "operation_timeline": timeline_events,
+        "golden_tickets": await backend.get_golden_tickets(),
     }
     if started_at is not None:
         kwargs["started_at"] = started_at
@@ -1802,10 +1817,11 @@ async def runtime(
         creds = len(state.all_credentials)
         hashes = len(state.all_hashes)
         hosts = len(state.all_hosts)
+        shares = len(state.all_shares)
         vulns = len(state.discovered_vulnerabilities)
         exploited = len(state.exploited_vulnerabilities)
 
-        print(f"Credentials: {creds}  Hashes: {hashes}  Hosts: {hosts}")
+        print(f"Credentials: {creds}  Hashes: {hashes}  Hosts: {hosts}  Shares: {shares}")
         print(f"Vulns: {vulns} discovered, {exploited} exploited")
 
         # Get compromised domains (DA achieved)
@@ -1825,13 +1841,23 @@ async def runtime(
 
         if is_multi_forest:
             print("\n*** MULTI-FOREST COMPROMISE ***")
-            print(f"  Forests: {', '.join(sorted(da_forest_roots))}")
+            print(f"  Forests compromised: {', '.join(sorted(da_forest_roots))}")
         if state.has_domain_admin:
             print("\n*** DOMAIN ADMIN ACHIEVED ***")
             if da_domains:
-                print(f"  Domains: {', '.join(sorted(da_domains))}")
+                print(f"  Compromised domains: {', '.join(sorted(da_domains))}")
+            if state.domain_admin_path:
+                print(f"  Path: {state.domain_admin_path}")
         if state.has_golden_ticket:
             print("*** GOLDEN TICKET OBTAINED ***")
+            for gt in state.golden_tickets:
+                gt_domain = gt.get("domain", "unknown")
+                gt_status = gt.get("status", "unknown")
+                gt_path = gt.get("ticket_path", "")
+                detail = f"  {gt_domain} ({gt_status})"
+                if gt_path:
+                    detail += f" - {gt_path}"
+                print(detail)
 
     except Exception as e:
         logger.error(f"Failed to get runtime: {e}")
@@ -2381,13 +2407,18 @@ async def inject_hash(
                     dc_ip = state.domain_controllers.get(da_domain_lower)
                     if dc_ip:
                         for target_forest in undominated:
+                            # Extract NT hash only from LM:NT format
+                            # Prevents LLM agent from prepending ":" → ":LM:NT" (3 values)
+                            nt_hash_for_payload = hash_value
+                            if nt_hash_for_payload and ":" in nt_hash_for_payload:
+                                nt_hash_for_payload = nt_hash_for_payload.split(":")[-1]
                             # Build task payload matching publishing.py format
                             task_payload = {
                                 "vuln_type": "trust_key_extraction",
                                 "target": dc_ip,
                                 "domain": da_domain_lower,
                                 "username": "Administrator",
-                                "password": hash_value,
+                                "password": nt_hash_for_payload,
                                 "dc_ip": dc_ip,
                                 "trusted_domain": target_forest,
                                 "use_hash": True,
@@ -2484,14 +2515,13 @@ async def inject_host(
             backend = RedisStateBackend(client, operation_id)
             await backend.add_host(host)
 
-            # Extract domain from hostname and add to validated domains
+            # Extract domain from hostname and add to all_domains
             parts = hostname.split(".", 1)
             if len(parts) > 1:
                 domain = parts[1]
                 if domain not in state.all_domains:
                     state.all_domains.append(domain)
-                state._validated_domains.add(domain)
-                logger.info(f"Domain '{domain}' now validated (host discovered)")
+                    logger.info(f"Domain '{domain}' added to all_domains (host discovered)")
 
             await client.aclose()
 

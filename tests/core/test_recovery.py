@@ -65,6 +65,11 @@ def mock_backend():
     backend.get_all_dcs = AsyncMock(return_value={})
     backend.get_all_netbios_mappings = AsyncMock(return_value={})
     backend.get_all_artifacts = AsyncMock(return_value={})
+    backend.get_domain_sids = AsyncMock(return_value={})
+    backend.get_domain_admin_domains = AsyncMock(return_value=[])
+    backend.get_timeline_events = AsyncMock(return_value=[])
+    backend.get_techniques = AsyncMock(return_value=set())
+    backend.get_golden_tickets = AsyncMock(return_value=[])
     return backend
 
 

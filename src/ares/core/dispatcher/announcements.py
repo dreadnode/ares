@@ -140,8 +140,40 @@ class AnnouncementMixin:
 
         # Get DC IP for the domain where we have DA
         dc_ip = self.shared_state.domain_controllers.get(da_domain_lower)
+
+        # Validate DC actually belongs to this domain (not a stale mapping from
+        # incomplete hostname resolution — e.g., NMAP gives winterfell.sevenkingdoms.local
+        # before LDAP corrects it to winterfell.north.sevenkingdoms.local)
+        if dc_ip:
+            for h in self.shared_state.all_hosts:
+                if h.ip == dc_ip and h.hostname:
+                    h_domain = ".".join(h.hostname.lower().split(".")[1:])
+                    if h_domain != da_domain_lower:
+                        logger.warning(
+                            f"MULTI_FOREST_MODE: DC {dc_ip} hostname {h.hostname} "
+                            f"belongs to {h_domain}, not {da_domain_lower} — searching for correct DC"
+                        )
+                        dc_ip = None
+                        # Try to find correct DC by hostname
+                        for h2 in self.shared_state.all_hosts:
+                            if (
+                                h2.is_dc
+                                and h2.hostname
+                                and ".".join(h2.hostname.lower().split(".")[1:]) == da_domain_lower
+                            ):
+                                dc_ip = h2.ip
+                                self.shared_state.domain_controllers[da_domain_lower] = dc_ip
+                                logger.info(
+                                    f"MULTI_FOREST_MODE: Found correct DC for {da_domain_lower}: "
+                                    f"{h2.hostname} -> {dc_ip}"
+                                )
+                                break
+                    break
+
         if not dc_ip:
             logger.warning(f"Cannot dispatch trust key extraction: no DC IP for {da_domain}")
+            # Clear dedup flag so this can be retried when DC IP becomes available
+            self._trust_extraction_dispatched.discard(da_domain_lower)
             return
 
         # Determine if this is a child domain
@@ -201,6 +233,8 @@ class AnnouncementMixin:
                 logger.warning(
                     f"Cannot dispatch trust key extraction: no DA credentials for {da_domain}"
                 )
+                # Clear dedup flag so this can be retried when credentials appear
+                self._trust_extraction_dispatched.discard(da_domain_lower)
             return
 
         # Determine the extraction domain and DC IP
@@ -297,11 +331,16 @@ class AnnouncementMixin:
 
             # Build task payload
             # extract_trust_key uses secretsdump -just-dc-user FORESTNETBIOS$
+            # If hash is in LM:NT format, extract just the NT hash to avoid
+            # the LLM agent prepending ":" and creating ":LM:NT" (3 values)
+            hash_for_payload = da_hash
+            if hash_for_payload and ":" in hash_for_payload:
+                hash_for_payload = hash_for_payload.split(":")[-1]
             task_payload = {
                 "tool": "extract_trust_key",
                 "domain": extraction_domain,
                 "username": "Administrator" if da_hash else da_username,
-                "password": da_hash or da_password,
+                "password": hash_for_payload or da_password,
                 "dc_ip": extraction_dc_ip,
                 "trusted_domain": target_forest,
                 "use_hash": bool(da_hash),
@@ -313,14 +352,20 @@ class AnnouncementMixin:
             )
 
             # Dispatch to privesc worker (has KerberosTools with extract_trust_key)
+            # Submit DIRECTLY to bypass throttling — this is the most critical
+            # task in the multi-forest chain and must not be deferred/dropped
             if self._task_queue:
                 try:
-                    await self._throttled_submit_task(
+                    task_id = await self._task_queue.submit_task(
                         task_type="exploit",
                         target_role="privesc",
                         payload=task_payload,
                         source_agent="auto_trust_extraction",
                         priority=1,  # High priority - critical for multi-forest
+                    )
+                    logger.info(
+                        f"🌲 Trust extraction task {task_id} submitted "
+                        f"to ares:tasks:privesc (direct, bypassed throttle)"
                     )
                 except Exception as e:
                     logger.error(f"Failed to dispatch trust key extraction: {e}")

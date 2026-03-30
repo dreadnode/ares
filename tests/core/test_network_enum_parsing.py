@@ -451,15 +451,24 @@ Nmap done: 1 IP address (1 host up)"""
 
         hosts = result.get("discovered_hosts", [])
         assert len(hosts) == 1
-        # Hostname should be FQDN: dc01.contoso.local
-        assert hosts[0]["hostname"] == "dc01.contoso.local"
+        # Hostname is short name from Service Info (nmap's Domain: field is NOT used
+        # for FQDN construction because it reports forest root, not actual domain
+        # for child domain DCs). The correct FQDN is built later by netexec SMB.
+        assert hosts[0]["hostname"] == "DC01"
 
 
 class TestNmapParsingFQDNBuilding:
-    """Test FQDN construction from hostname + domain."""
+    """Test FQDN construction from hostname + domain.
 
-    def test_builds_fqdn_from_hostname_and_domain(self, monkeypatch):
-        """Should build 'hostname.domain' when both are available."""
+    NOTE: nmap's (Domain:...) from LDAP reports the forest root domain, not the
+    actual domain a DC belongs to. For child domain DCs this produces wrong FQDNs
+    (e.g., winterfell.sevenkingdoms.local instead of winterfell.north.sevenkingdoms.local).
+    Therefore we do NOT join hostname + domain from nmap. The correct FQDN is provided
+    by netexec SMB and merged via add_host() hostname upgrade logic.
+    """
+
+    def test_keeps_short_hostname_from_nmap(self, monkeypatch):
+        """Should keep short hostname from nmap (FQDN built later by netexec)."""
         tool = NetworkEnumerationTools()
         state = SharedRedTeamState(operation_id="op-nmap-fqdn")
         state.target = Target(ip="192.168.58.10", domain="contoso.local")
@@ -487,7 +496,8 @@ Nmap done: 1 IP address (1 host up)"""
 
         hosts = result.get("discovered_hosts", [])
         assert len(hosts) == 1
-        assert hosts[0]["hostname"] == "dc01.contoso.local"
+        # Short hostname only - nmap's Domain: field is not used for FQDN construction
+        assert hosts[0]["hostname"] == "DC01"
 
     def test_does_not_double_domain_if_hostname_already_fqdn(self, monkeypatch):
         """Should not append domain if hostname already contains a dot."""
@@ -709,9 +719,9 @@ Nmap done: 3 IP addresses (3 hosts up)"""
         # Find each host by IP
         hosts_by_ip = {h["ip"]: h for h in hosts}
 
-        # DC01: should be marked as DC with FQDN
+        # DC01: should be marked as DC (short hostname - FQDN built later by netexec)
         dc = hosts_by_ip["192.168.58.10"]
-        assert dc["hostname"] == "dc01.contoso.local"
+        assert dc["hostname"] == "DC01"
         assert dc["os"] == "Windows"
         assert "AD DC" in dc["roles"]
 
@@ -893,12 +903,13 @@ Nmap done: 1 IP address (1 host up)"""
 
         hosts = result.get("discovered_hosts", [])
         assert len(hosts) == 1
-        assert hosts[0]["hostname"] == "dc02.fabrikam.local"
+        # Short hostname only - FQDN built later by netexec
+        assert hosts[0]["hostname"] == "DC02"
         assert hosts[0]["os"] == "Windows"
         assert "AD DC" in hosts[0]["roles"]
 
     def test_handles_child_domain(self, monkeypatch):
-        """Should correctly parse child domain (child.contoso.local)."""
+        """Should keep short hostname for child domain DC (FQDN built later by netexec)."""
         tool = NetworkEnumerationTools()
         state = SharedRedTeamState(operation_id="op-nmap-child")
         state.target = Target(ip="192.168.58.110", domain="child.contoso.local")
@@ -926,5 +937,6 @@ Nmap done: 1 IP address (1 host up)"""
 
         hosts = result.get("discovered_hosts", [])
         assert len(hosts) == 1
-        assert hosts[0]["hostname"] == "childdc.child.contoso.local"
+        # Short hostname - nmap's Domain: field not used for FQDN
+        assert hosts[0]["hostname"] == "CHILDDC"
         assert "AD DC" in hosts[0]["roles"]

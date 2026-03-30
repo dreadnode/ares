@@ -55,7 +55,7 @@ class ThrottlingMixin:
     # - unconstrained_delegation: TGT capture → DCSync → DA
     # - esc1, esc4, esc8: ADCS attacks → domain user cert → DA
     # - krbtgt_hash: already have DA material
-    # NOT included: mssql_impersonation, mssql_linked_server (lower value, takes long to exploit)
+    # MSSQL: Only critical in multi-forest mode (may be the ONLY path to foreign forest)
     CRITICAL_PATH_VULN_TYPES = frozenset(
         {
             "constrained_delegation",
@@ -69,6 +69,10 @@ class ThrottlingMixin:
             "adcs_esc8",
         }
     )
+
+    # MSSQL exploit subtypes - elevated to critical path in multi-forest mode only
+    # (cross-forest Kerberos is broken in impacket, MSSQL linked servers may be the only pivot)
+    MSSQL_VULN_TYPES = frozenset({"mssql_impersonation", "mssql_linked_server", "mssql_linked"})
 
     # ESC8-related techniques that should bypass hard cap when dispatched as coercion tasks
     # ESC8 is a critical path to DA via ADCS web enrollment relay
@@ -180,6 +184,22 @@ class ThrottlingMixin:
                 task_type in self.CRITICAL_PATH_TASK_TYPES
                 and vuln_type in self.CRITICAL_PATH_VULN_TYPES
             )
+
+            # In multi-forest mode, MSSQL exploits become critical path
+            # (cross-forest Kerberos broken in impacket - MSSQL may be only pivot)
+            if (
+                not is_critical_exploit
+                and task_type in self.CRITICAL_PATH_TASK_TYPES
+                and vuln_type in self.MSSQL_VULN_TYPES
+            ):
+                from ares.core.config import get_multi_forest_mode
+
+                if (
+                    get_multi_forest_mode()
+                    and self._shared_state
+                    and not self._shared_state.all_forests_dominated()
+                ):
+                    is_critical_exploit = True
 
             # Also check for delegation enumeration - these discover constrained delegation
             # which is a critical path to DA. Without this, find_delegation tasks get deferred
@@ -527,6 +547,20 @@ class ThrottlingMixin:
             task_type in self.CRITICAL_PATH_TASK_TYPES
             and vuln_type in self.CRITICAL_PATH_VULN_TYPES
         )
+        # In multi-forest mode, MSSQL exploits become critical path
+        if (
+            not is_critical_exploit
+            and task_type in self.CRITICAL_PATH_TASK_TYPES
+            and vuln_type in self.MSSQL_VULN_TYPES
+        ):
+            from ares.core.config import get_multi_forest_mode
+
+            if (
+                get_multi_forest_mode()
+                and self._shared_state
+                and not self._shared_state.all_forests_dominated()
+            ):
+                is_critical_exploit = True
         is_esc8_coercion = task_type == "coercion" and any(
             t.lower() in self.ESC8_COERCION_TECHNIQUES for t in techniques
         )

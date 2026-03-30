@@ -2197,6 +2197,20 @@ class SharedRedTeamState:
     ) -> bool:
         """Handle sibling domain case for user deduplication."""
         if existing_domain == target_domain and normalized_domain != target_domain:
+            # Only correct from target domain to a related domain (child/parent
+            # within the same forest). Do NOT correct to a foreign forest domain,
+            # which happens when cross-domain group membership is enumerated
+            # (e.g., cersei.lannister in sevenkingdoms.local discovered via
+            # BloodHound of essos.local through AcrossTheNarrowSea group).
+            is_child_of_target = normalized_domain.endswith(f".{target_domain}")
+            is_parent_of_target = target_domain.endswith(f".{normalized_domain}")
+            if not is_child_of_target and not is_parent_of_target:
+                logger.debug(
+                    f"User rejected: {normalized} in {existing_domain} (target), "
+                    f"ignoring foreign domain discovery {normalized_domain}"
+                )
+                return False
+
             user_in_new_domain = any(
                 u.username == normalized and (u.domain or "").lower() == normalized_domain
                 for u in self.all_users
@@ -2608,7 +2622,16 @@ class SharedRedTeamState:
         2. Finds the DC host with that IP
         3. If hostname ends with parent domain, corrects it to child domain
         4. Updates the domain_controllers mapping accordingly
+
+        NOTE: DISABLED - This was incorrectly "fixing" parent DC hostnames, causing
+        the golden ticket DCSync to use the wrong DC. The domain_controllers mapping
+        can be incorrect when a child domain is first discovered.
         """
+        # DISABLED: This heuristic causes issues when domain_controllers has wrong mappings
+        # The parent DC (kingslanding.sevenkingdoms.local) was being renamed to
+        # kingslanding.north.sevenkingdoms.local, breaking parent domain access.
+        return
+
         # Check if we have a DC registered for the child domain
         child_dc_ip = self.domain_controllers.get(child_fqdn.lower())
         if not child_dc_ip:
@@ -3049,6 +3072,13 @@ class SharedRedTeamState:
                         or (existing_is_short and new_is_fqdn)
                         or new_is_more_specific
                     ):
+                        # Track old domain for stale DC mapping cleanup
+                        _old_dc_domain = None
+                        if existing.hostname and "." in existing.hostname:
+                            _old_parts = existing.hostname.lower().split(".")
+                            if len(_old_parts) > 1:
+                                _old_dc_domain = ".".join(_old_parts[1:])
+
                         existing.hostname = new_hostname
                         data_changed = True
                         # Extract domain from new FQDN hostname
@@ -3057,6 +3087,36 @@ class SharedRedTeamState:
                             if len(parts) > 1:
                                 domain = ".".join(parts[1:])
                                 self.add_domain(domain)
+
+                                # Clean up stale DC mapping if domain changed
+                                # e.g., winterfell.sevenkingdoms.local -> winterfell.north.sevenkingdoms.local
+                                # removes incorrect sevenkingdoms.local -> 10.1.2.121
+                                if (
+                                    _old_dc_domain
+                                    and _old_dc_domain != domain
+                                    and existing.is_dc
+                                    and self.domain_controllers.get(_old_dc_domain) == existing.ip
+                                ):
+                                    del self.domain_controllers[_old_dc_domain]
+                                    logger.info(
+                                        f"Removed stale DC mapping: {_old_dc_domain} -> "
+                                        f"{existing.ip} (hostname updated to {new_hostname})"
+                                    )
+                                    # Try to find the correct DC for the old domain
+                                    for h in self.all_hosts:
+                                        if (
+                                            h.ip != existing.ip
+                                            and h.is_dc
+                                            and h.hostname
+                                            and ".".join(h.hostname.lower().split(".")[1:])
+                                            == _old_dc_domain
+                                        ):
+                                            self.domain_controllers[_old_dc_domain] = h.ip
+                                            logger.info(
+                                                f"Re-registered DC: {_old_dc_domain} -> "
+                                                f"{h.ip} ({h.hostname})"
+                                            )
+                                            break
                 if host.os and (not existing.os or existing.os.lower() == "unknown"):
                     existing.os = host.os
                     data_changed = True
@@ -3089,6 +3149,24 @@ class SharedRedTeamState:
                         if domain not in self.domain_controllers:
                             self.domain_controllers[domain] = existing.ip
                             logger.info(f"DC registered (merge): {domain} -> {existing.ip}")
+                        elif self.domain_controllers[domain] != existing.ip:
+                            # Another DC already registered for this domain —
+                            # check if the existing mapping's hostname actually
+                            # belongs to a CHILD domain (stale mapping from
+                            # incomplete hostname). If so, replace it.
+                            existing_dc_ip = self.domain_controllers[domain]
+                            for h in self.all_hosts:
+                                if h.ip == existing_dc_ip and h.hostname:
+                                    h_domain = ".".join(h.hostname.lower().split(".")[1:])
+                                    if h_domain != domain:
+                                        logger.info(
+                                            f"Replacing stale DC mapping: "
+                                            f"{domain} -> {existing_dc_ip} "
+                                            f"(actually {h_domain}) with "
+                                            f"{existing.ip} ({existing.hostname})"
+                                        )
+                                        self.domain_controllers[domain] = existing.ip
+                                    break
                 logger.debug(
                     f"Host merged: {host.ip} (existing, updated details, is_dc={existing.is_dc}, "
                     f"data_changed={data_changed})"

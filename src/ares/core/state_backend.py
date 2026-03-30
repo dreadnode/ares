@@ -394,6 +394,18 @@ class RedisStateBackend(BaseRedisBackend):
             # HSETNX returns 1 if field was set (new), 0 if already existed
             added = await self._redis.hsetnx(key, dedup_field, data)
             if not added:
+                # If incoming hash has AES key, try to merge it into existing hash
+                # This is critical for golden ticket generation on Windows 2016+
+                if hash_obj.aes_key:
+                    existing_data = await self._redis.hget(key, dedup_field)
+                    if existing_data:
+                        existing = _deserialize_hash(existing_data)
+                        if not existing.aes_key:
+                            # Merge AES key and update
+                            existing.aes_key = hash_obj.aes_key
+                            await self._redis.hset(key, dedup_field, _serialize_hash(existing))
+                            logger.info(f"Hash updated with AES key in Redis: {domain}\\{username}")
+                            return True
                 logger.debug(f"Hash rejected (duplicate): {dedup_field}")
                 return False
             await self._set_ttl(key)
@@ -590,18 +602,29 @@ class RedisStateBackend(BaseRedisBackend):
     # =========================================================================
 
     async def add_user(self, user: User) -> bool:
-        """Add a user to Redis LIST.
+        """Add a user to Redis HASH (additive, no delete).
+
+        Uses {domain}:{username} as the dedup key for O(1) lookup.
 
         Args:
             user: User to add
 
         Returns:
-            True if added successfully
+            True if added (new), False if duplicate
         """
         key = self._key(self.KEY_USERS)
         try:
+            domain = (user.domain or "").strip().lower()
+            username = (user.username or "").strip().lower()
+            dedup_key = f"{domain}:{username}"
             data = _serialize_user(user)
-            await self._redis.rpush(key, data)
+            added = await self._redis.hsetnx(key, dedup_key, data)
+            if not added:
+                # Update existing entry if new data has more info (e.g., is_admin upgrade)
+                if user.is_admin:
+                    await self._redis.hset(key, dedup_key, data)
+                    return True
+                return False
             await self._set_ttl(key)
             return True
         except Exception as e:
@@ -609,15 +632,15 @@ class RedisStateBackend(BaseRedisBackend):
             return False
 
     async def get_users(self) -> list[User]:
-        """Get all users from Redis LIST.
+        """Get all users from Redis HASH.
 
         Returns:
             List of User objects
         """
         key = self._key(self.KEY_USERS)
         try:
-            items = await self._redis.lrange(key, 0, -1)
-            return [_deserialize_user(item) for item in items]
+            items = await self._redis.hgetall(key)
+            return [_deserialize_user(v) for v in items.values()]
         except Exception as e:
             logger.warning(f"Failed to get users from Redis: {e}")
             return []
