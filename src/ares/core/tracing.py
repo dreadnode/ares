@@ -42,7 +42,7 @@ from opentelemetry.trace import Span, SpanKind
 IP_PATTERN = re.compile(r"^\d{1,3}(?:\.\d{1,3}){3}$")
 
 # Common domain TLDs for FQDN detection (not usernames!)
-# This prevents treating "sansa.stark" as an FQDN
+# This prevents treating "jane.doe" as an FQDN
 FQDN_SUFFIXES = (
     ".local",
     ".internal",
@@ -61,7 +61,7 @@ def is_likely_fqdn(value: str) -> bool:
     """Check if value looks like an FQDN vs a username.
 
     FQDNs have domain suffixes (.local, .com, etc.) or 3+ segments.
-    Usernames like 'sansa.stark' have 2 segments and no TLD.
+    Usernames like 'jane.doe' have 2 segments and no TLD.
 
     Args:
         value: The string to check.
@@ -72,7 +72,7 @@ def is_likely_fqdn(value: str) -> bool:
     Examples:
         >>> is_likely_fqdn("dc01.contoso.local")
         True
-        >>> is_likely_fqdn("sansa.stark")
+        >>> is_likely_fqdn("jane.doe")
         False
         >>> is_likely_fqdn("dc01.child.parent")
         True
@@ -238,6 +238,8 @@ TOOL_TO_TECHNIQUE: dict[str, str] = {
     "get_domain_info": "T1087.002",
     "enumerate_users": "T1087.002",  # Domain Account Discovery
     "enum_domain_trusts": "T1482",  # Domain Trust Discovery
+    "enumerate_domain_trusts": "T1482",  # Domain Trust Discovery
+    "enumerate_foreign_security_principals": "T1482",  # Domain Trust Discovery
     "enumerate_forest": "T1482",
     "enum_constrained_delegation": "T1087.002",
     "enum_unconstrained_delegation": "T1087.002",
@@ -357,6 +359,7 @@ TOOL_TO_CATEGORY: dict[str, str] = {
     "enumerate_users": "NetworkEnumerationTools",
     "enum_domain_trusts": "TrustEnumerationTools",
     "enumerate_domain_trusts": "TrustEnumerationTools",
+    "enumerate_foreign_security_principals": "TrustEnumerationTools",
     "enumerate_forest": "NetworkEnumerationTools",
     "enum_constrained_delegation": "NetworkEnumerationTools",
     "enum_unconstrained_delegation": "NetworkEnumerationTools",

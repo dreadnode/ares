@@ -325,8 +325,10 @@ class MonitoringMixin:
 
             # MSSQL exploitation chains take longer (6+ tool calls, linked server ops)
             vuln_type = (task_info.params.get("vuln_type") or "") if task_info.params else ""
-            if vuln_type.startswith("mssql_"):
-                task_timeout = max(task_timeout, 480)  # Floor at 8 minutes for MSSQL
+            if vuln_type == "mssql_cross_forest_pivot":
+                task_timeout = max(task_timeout, 720)  # 12 min for cross-forest (multi-hop)
+            elif vuln_type.startswith("mssql_"):
+                task_timeout = max(task_timeout, 480)  # 8 min for standard MSSQL
 
             if age_seconds > task_timeout:
                 stale_task_ids.append(task_id)
@@ -419,7 +421,9 @@ class MonitoringMixin:
 
             # MSSQL exploitation chains take longer (6+ tool calls, linked server ops)
             vuln_type = (task_info.params.get("vuln_type") or "") if task_info.params else ""
-            if vuln_type.startswith("mssql_"):
+            if vuln_type == "mssql_cross_forest_pivot":
+                task_timeout = max(task_timeout, 720)
+            elif vuln_type.startswith("mssql_"):
                 task_timeout = max(task_timeout, 480)
 
             if age_seconds > task_timeout:
@@ -757,8 +761,8 @@ class MonitoringMixin:
                         target_ip = target_ips[0]
             logger.info(f"_process_realtime_hash_discovery: target_from_task_params={target_ip}")
 
-        # Resolve NetBIOS domain names (e.g., "NORTH") to FQDN (e.g., "north.sevenkingdoms.local")
-        # This handles domain-prefixed secretsdump output like "NORTH\krbtgt:..."
+        # Resolve NetBIOS domain names (e.g., "CHILD") to FQDN (e.g., "child.contoso.local")
+        # This handles domain-prefixed secretsdump output like "CHILD\krbtgt:..."
         if domain and "." not in domain and self._shared_state:
             resolved = self._shared_state._resolve_netbios_to_fqdn(domain)
             if resolved != domain:
@@ -850,6 +854,7 @@ class MonitoringMixin:
             "adcs_esc4",
             "adcs_esc8",
             "mssql_impersonation",
+            "mssql_cross_forest_pivot",
         }
 
         # Auto-dispatch exploit for high-value vulnerabilities

@@ -50,6 +50,7 @@ CAPABILITY_REGISTRY: dict[str, list[str]] = {
         "check_sidhistory",
         "enumerate_domain_netbios_mappings",
         "enumerate_domain_trusts",
+        "enumerate_foreign_security_principals",
     ],
     "enum4linux": ["enumerate_users"],
     "enum4linux-ng": ["enumerate_users"],

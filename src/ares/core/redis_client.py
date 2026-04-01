@@ -334,7 +334,7 @@ async def timed_redis_write(
 ):
     """Execute a Redis write operation with a timeout.
 
-    Wraps Redis write operations (set, hset, lpush, etc.) with asyncio.wait_for()
+    Wraps Redis write operations (set, hset, xadd, lpush, etc.) with asyncio.wait_for()
     to prevent indefinite blocking when Redis is unavailable.
 
     Args:
@@ -388,7 +388,7 @@ async def create_redis_client(
             The client won't auto-failover but avoids SentinelConnectionPool's
             internal async state sharing issues.
         socket_timeout: Socket timeout in seconds. Use None to disable (for blocking
-            operations like BRPOP). Use ... (default) to use env var setting.
+            operations like XREADGROUP/BRPOP). Use ... (default) to use env var setting.
 
     Returns:
         Async Redis client connected to master

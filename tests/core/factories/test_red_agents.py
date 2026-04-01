@@ -953,7 +953,7 @@ class TestTargetExtractionLogic:
 
     The hook must correctly distinguish between:
     - FQDNs (e.g., 'dc01.contoso.local') -> target_fqdn
-    - Usernames with dots (e.g., 'sansa.stark') -> target_user
+    - Usernames with dots (e.g., 'jane.doe') -> target_user
     - IPs (e.g., '192.168.58.10') -> target_ip
     - Plain hostnames (e.g., 'dc01') -> target_hostname
     """
@@ -1015,9 +1015,9 @@ class TestTargetExtractionLogic:
 
     @pytest.mark.asyncio
     async def test_username_with_dot_not_treated_as_fqdn(self, monkeypatch):
-        """Test that usernames like 'sansa.stark' are NOT treated as FQDNs.
+        """Test that usernames like 'jane.doe' are NOT treated as FQDNs.
 
-        This is the critical bug fix: before, 'sansa.stark' was incorrectly
+        This is the critical bug fix: before, 'jane.doe' was incorrectly
         identified as an FQDN because it contains a dot.
         """
         from unittest.mock import patch
@@ -1032,7 +1032,7 @@ class TestTargetExtractionLogic:
         # This happens with privesc tools targeting user accounts
         event = self._make_tool_end_event(
             "targeted_kerberoast",
-            {"target": "sansa.stark", "domain": "contoso.local"},
+            {"target": "jane.doe", "domain": "contoso.local"},
         )
 
         captured_calls = []
@@ -1052,13 +1052,13 @@ class TestTargetExtractionLogic:
         assert len(captured_calls) > 0, "trace_tool_call should be called"
         call = captured_calls[0]
 
-        # sansa.stark should NOT be treated as FQDN
+        # jane.doe should NOT be treated as FQDN
         assert call.get("target_fqdn") is None, (
-            f"Username 'sansa.stark' should NOT be target_fqdn, got: {call.get('target_fqdn')}"
+            f"Username 'jane.doe' should NOT be target_fqdn, got: {call.get('target_fqdn')}"
         )
         # It should be captured as target_user instead
-        assert call.get("target_user") == "sansa.stark", (
-            f"Username 'sansa.stark' should be target_user, got: {call.get('target_user')}"
+        assert call.get("target_user") == "jane.doe", (
+            f"Username 'jane.doe' should be target_user, got: {call.get('target_user')}"
         )
 
     @pytest.mark.asyncio

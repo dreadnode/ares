@@ -829,6 +829,8 @@ tasks:
           echo "Using Redis master at $REDIS_HOST (via Sentinel)"
           REDIS_HOST_ARG=(-h "$REDIS_HOST" -p 6379)
         else
+          # Specify container explicitly to suppress "Defaulted container" warnings
+          CONTAINER_ARG=(-c redis)
           echo "WARNING: No Sentinel found, using Redis pod directly (may hit replica)"
         fi
 
@@ -846,17 +848,16 @@ tasks:
         fi
         redis_cmd del "$TEST_KEY" >/dev/null 2>&1 || true
 
-        for pattern in "ares:operation:*:state" "ares:operation:*:checkpoint_time" "ares:operations:*:status" "ares:lock:*" "ares:tasks:*" "ares:results:*"; do
-          keys=$(redis_cmd --scan --pattern "$pattern")
+        for pattern in "ares:operation:*:state" "ares:operation:*:checkpoint_time" "ares:operations:*:status" "ares:lock:*" "ares:tasks:*" "ares:stream:tasks:*" "ares:results:*"; do
+          keys=$(redis_cmd --scan --pattern "$pattern" 2>/dev/null)
           count=0
           if [ -n "$keys" ]; then
-            for key in $keys; do
-              if ! redis_cmd del "$key" >/dev/null; then
-                echo "ERROR: Failed to delete key: $key"
-                exit 1
-              fi
-              count=$((count + 1))
-            done
+            # Batch delete in a single redis-cli call to avoid per-key kubectl exec overhead
+            count=$(echo "$keys" | wc -w | tr -d ' ')
+            if ! echo "$keys" | xargs redis_cmd del >/dev/null 2>&1; then
+              echo "ERROR: Failed to delete keys matching $pattern"
+              exit 1
+            fi
           fi
           echo "Cleared $pattern ($count keys)"
         done

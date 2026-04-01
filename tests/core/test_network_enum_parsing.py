@@ -462,7 +462,7 @@ class TestNmapParsingFQDNBuilding:
 
     NOTE: nmap's (Domain:...) from LDAP reports the forest root domain, not the
     actual domain a DC belongs to. For child domain DCs this produces wrong FQDNs
-    (e.g., winterfell.sevenkingdoms.local instead of winterfell.north.sevenkingdoms.local).
+    (e.g., ws01.contoso.local instead of ws01.corp.contoso.local).
     Therefore we do NOT join hostname + domain from nmap. The correct FQDN is provided
     by netexec SMB and merged via add_host() hostname upgrade logic.
     """

@@ -6,7 +6,8 @@ and BlueTaskQueue (blue team), including:
 - Ping/reconnect for stale connection detection
 - Shared constants for TTLs and key prefixes
 
-The task queues use Redis Lists for FIFO task distribution and Results tracking.
+The red team task queue uses Redis Streams with consumer groups for reliable
+task distribution (XADD/XREADGROUP/XACK). Result queues remain List-based.
 """
 
 from __future__ import annotations
@@ -79,9 +80,9 @@ class BaseTaskQueue(abc.ABC):
         uses direct connection to avoid SentinelConnectionPool's cross-loop
         Future issues.
 
-        Uses socket_timeout=None to allow blocking operations (BRPOP) to wait
-        for extended periods without hitting socket timeout. Timeout control
-        is handled at the application level via asyncio.wait_for.
+        Uses socket_timeout=None to allow blocking operations (XREADGROUP, BRPOP)
+        to wait for extended periods without hitting socket timeout. Timeout
+        control is handled at the application level via asyncio.wait_for.
         """
         if self._connected:
             return

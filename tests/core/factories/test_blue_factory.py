@@ -1262,13 +1262,13 @@ class TestExtractUsersFromResults:
 
         result_data = {
             "results": [
-                {"TargetUserName": "jon.snow"},
-                {"TargetUserName": "samwell.tarly"},
+                {"TargetUserName": "john.doe"},
+                {"TargetUserName": "bob.smith"},
             ]
         }
         users = _extract_users_from_results(result_data)
-        assert "jon.snow" in users
-        assert "samwell.tarly" in users
+        assert "john.doe" in users
+        assert "bob.smith" in users
 
     def test_extracts_subject_user_name(self):
         """Test extraction of SubjectUserName field."""
@@ -1334,11 +1334,11 @@ class TestExtractUsersFromResults:
 
         result_data = {
             "results": [
-                {"TargetUserName": "Jon.Snow"},
+                {"TargetUserName": "John.Doe"},
             ]
         }
         users = _extract_users_from_results(result_data)
-        assert "jon.snow" in users
+        assert "john.doe" in users
 
     def test_empty_results(self):
         """Test handling of empty results."""
@@ -1360,7 +1360,7 @@ class TestQueueUserInvestigation:
 
         result_data = {
             "results": [
-                {"TargetUserName": "jon.snow"},
+                {"TargetUserName": "john.doe"},
             ]
         }
         _queue_user_investigation(investigation_state, result_data)
@@ -1372,23 +1372,23 @@ class TestQueueUserInvestigation:
             if q.get("type") == "user_investigation"
         ]
         assert len(user_queries) == 1
-        assert user_queries[0]["user"] == "jon.snow"
+        assert user_queries[0]["user"] == "john.doe"
 
     def test_skips_already_investigated_users(self, investigation_state: InvestigationState):
         """Test that already investigated users are skipped."""
         from ares.core.factories.blue_factory import _queue_user_investigation
 
-        investigation_state.queried_users.add("jon.snow")
+        investigation_state.queried_users.add("john.doe")
         result_data = {
             "results": [
-                {"TargetUserName": "jon.snow"},
+                {"TargetUserName": "john.doe"},
             ]
         }
         _queue_user_investigation(investigation_state, result_data)
 
         # Should not have a queued pivot query since user is already investigated
         user_queries = [
-            q for q in investigation_state.queued_pivot_queries if q.get("user") == "jon.snow"
+            q for q in investigation_state.queued_pivot_queries if q.get("user") == "john.doe"
         ]
         assert len(user_queries) == 0
 
@@ -1398,14 +1398,14 @@ class TestQueueUserInvestigation:
 
         result_data = {
             "results": [
-                {"TargetUserName": "jon.snow"},
+                {"TargetUserName": "john.doe"},
             ]
         }
         _queue_user_investigation(investigation_state, result_data)
         _queue_user_investigation(investigation_state, result_data)
 
         user_queries = [
-            q for q in investigation_state.queued_pivot_queries if q.get("user") == "jon.snow"
+            q for q in investigation_state.queued_pivot_queries if q.get("user") == "john.doe"
         ]
         assert len(user_queries) == 1
 
@@ -1448,7 +1448,7 @@ class TestCheckCriticalUsers:
 
         result_data = {
             "results": [
-                {"TargetUserName": "jon.snow"},
+                {"TargetUserName": "john.doe"},
             ]
         }
         _check_critical_users(investigation_state, result_data)

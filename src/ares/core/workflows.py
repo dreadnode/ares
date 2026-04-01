@@ -343,8 +343,15 @@ async def exploitation_workflow(
         async with exploit_semaphore:
             # Check for DA before starting (may have been achieved by parallel exploit)
             if dispatcher.shared_state.has_domain_admin:
-                logger.debug(f"Skipping {vuln_id} - Domain Admin already achieved")
-                return
+                from ares.core.config import get_multi_forest_mode
+
+                if get_multi_forest_mode() and not dispatcher.shared_state.all_forests_dominated():
+                    # Multi-forest: continue exploiting to reach undominated forests
+                    pass
+                else:
+                    logger.debug(f"Skipping {vuln_id} - Domain Admin already achieved")
+                    in_flight_vulns.discard(vuln_id)
+                    return
 
             logger.info(f"Processing vulnerability: {vuln_type} on {vuln['target']}")
 
@@ -630,11 +637,17 @@ async def _wait_with_da_check(
     Returns:
         Task result dict, or abandoned result if DA achieved during wait
     """
+    from ares.core.config import get_multi_forest_mode
+
     start = asyncio.get_event_loop().time()
     while (asyncio.get_event_loop().time() - start) < timeout:
         if dispatcher.shared_state.has_domain_admin:
-            logger.info(f"DA achieved - abandoning wait for task {task_id}")
-            return {"success": False, "error": "Cancelled: DA achieved", "abandoned": True}
+            # In multi-forest mode, only abandon if ALL forests are dominated
+            if get_multi_forest_mode() and not dispatcher.shared_state.all_forests_dominated():
+                pass  # Keep waiting — exploits may target undominated forests
+            else:
+                logger.info(f"DA achieved - abandoning wait for task {task_id}")
+                return {"success": False, "error": "Cancelled: DA achieved", "abandoned": True}
 
         try:
             return await dispatcher.wait_for_task(task_id, timeout=check_interval)

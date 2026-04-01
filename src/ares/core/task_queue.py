@@ -1,6 +1,7 @@
 """Redis-based task queue for multi-agent communication.
 
-Replaces in-memory asyncio.Queue with Redis Lists for cross-pod messaging.
+Uses Redis Streams with consumer groups for reliable cross-pod task distribution.
+Result queues and discovery queues remain List-based (point-to-point, one-shot).
 """
 
 from __future__ import annotations
@@ -52,6 +53,9 @@ class TaskMessage(BaseModel):
     priority: int = 5  # 1=urgent, 5=normal, 10=low
     created_at: datetime | None = None
     callback_queue: str | None = None  # Where to send results
+    # Stream metadata (populated by poll_task, not serialized to Redis)
+    stream_entry_id: str | None = None  # Redis Stream entry ID for XACK
+    _stream_urgent: bool = False  # Whether consumed from the urgent stream
 
     def __init__(self, **data):
         if data.get("created_at") is None:
@@ -78,13 +82,18 @@ class TaskResult(BaseModel):
 
 class RedisTaskQueue(BaseTaskQueue):
     """
-    Redis-based task queue for inter-pod communication.
+    Redis-based task queue for inter-pod communication using Streams.
 
     Queue naming convention:
-        - ares:tasks:{role}        - Task queue per role (List)
-        - ares:results:{task_id}   - Result queue per task (List, TTL)
-        - ares:tasks:priority:{role} - Priority sorted set (for future use)
-        - ares:heartbeat:{agent}   - Agent heartbeat (String, TTL)
+        - ares:stream:tasks:{role}:urgent  - Urgent task stream (priority <= 2, retries)
+        - ares:stream:tasks:{role}:normal  - Normal task stream (priority > 2)
+        - ares:cg:tasks:{role}             - Consumer group per role
+        - ares:results:{task_id}           - Result queue per task (List, TTL)
+        - ares:heartbeat:{agent}           - Agent heartbeat (String, TTL)
+
+    Workers use consumer groups (XREADGROUP) to consume tasks. After processing,
+    tasks are acknowledged (XACK). Unacknowledged tasks from crashed consumers
+    can be reclaimed via XAUTOCLAIM.
 
     Usage (Orchestrator):
         queue = RedisTaskQueue(redis_url)
@@ -103,20 +112,25 @@ class RedisTaskQueue(BaseTaskQueue):
         await queue.connect()
 
         while True:
-            task = await queue.poll_task(role="cracker", timeout=5)
+            task = await queue.poll_task(role="cracker", timeout=5, consumer_name="worker-0")
             if task:
                 result = await process_task(task)
                 await queue.send_result(task.task_id, result)
+                await queue.ack_task("cracker", task.stream_entry_id, task._stream_urgent)
     """
 
     # Queue key prefixes
     TASK_QUEUE_PREFIX = "ares:tasks"
+    TASK_STREAM_PREFIX = "ares:stream:tasks"
+    TASK_GROUP_PREFIX = "ares:cg:tasks"
     RESULT_QUEUE_PREFIX = "ares:results"
     HEARTBEAT_PREFIX = "ares:heartbeat"
     TASK_STATUS_PREFIX = "ares:task_status"
     TASK_STATUS_TTL = 60 * 60 * 24  # 24 hours
     LOCK_PREFIX = "ares:lock"
     STATE_UPDATE_CHANNEL_PREFIX = "ares:state:updates"
+    # Stream trimming: approximate max entries per stream to bound memory
+    STREAM_MAXLEN = 10000
 
     def __init__(self, redis_url: str | None = None, use_circuit_breaker: bool = True):
         super().__init__(redis_url)
@@ -132,9 +146,9 @@ class RedisTaskQueue(BaseTaskQueue):
         uses direct connection to avoid SentinelConnectionPool's cross-loop
         Future issues.
 
-        Uses socket_timeout=None to allow blocking operations (BRPOP) to wait
-        for extended periods without hitting socket timeout. Timeout control
-        is handled at the application level via asyncio.wait_for.
+        Uses socket_timeout=None to allow blocking operations (XREADGROUP, BRPOP)
+        to wait for extended periods without hitting socket timeout. Timeout
+        control is handled at the application level via asyncio.wait_for.
 
         Circuit breaker: If the circuit is open, fails fast without attempting
         connection. This prevents thundering herd when Redis is unavailable.
@@ -237,8 +251,107 @@ class RedisTaskQueue(BaseTaskQueue):
             raise
 
     def _task_queue_key(self, role: str) -> str:
-        """Get task queue key for a role."""
+        """Get legacy task queue key for a role (List-based, kept for reference)."""
         return f"{self.TASK_QUEUE_PREFIX}:{role}"
+
+    def _task_stream_key(self, role: str, urgent: bool = False) -> str:
+        """Get task stream key for a role.
+
+        Uses two streams per role for priority support:
+        - urgent stream: priority <= 2 tasks and retries (processed first)
+        - normal stream: priority > 2 tasks (FIFO)
+        """
+        suffix = ":urgent" if urgent else ":normal"
+        return f"{self.TASK_STREAM_PREFIX}:{role}{suffix}"
+
+    def _task_group_name(self, role: str) -> str:
+        """Get consumer group name for a role."""
+        return f"{self.TASK_GROUP_PREFIX}:{role}"
+
+    async def _ensure_consumer_group(self, stream_key: str, group_name: str) -> None:
+        """Create consumer group if it doesn't exist.
+
+        Uses MKSTREAM to auto-create the stream if needed.
+        Silently handles BUSYGROUP error (group already exists).
+        """
+        try:
+            await self.redis.xgroup_create(stream_key, group_name, id="0", mkstream=True)
+        except Exception as e:
+            # BUSYGROUP means group already exists - that's fine
+            if "BUSYGROUP" not in str(e):
+                raise
+
+    async def ack_task(self, role: str, stream_entry_id: str, urgent: bool = False) -> None:
+        """Acknowledge a task after processing.
+
+        This removes the message from the consumer's Pending Entries List (PEL).
+        Unacknowledged messages can be reclaimed by other consumers via XAUTOCLAIM.
+
+        Args:
+            role: Worker role
+            stream_entry_id: The stream entry ID returned by poll_task
+            urgent: Whether the task was from the urgent stream
+        """
+        stream_key = self._task_stream_key(role, urgent=urgent)
+        group_name = self._task_group_name(role)
+        try:
+            await self.redis.xack(stream_key, group_name, stream_entry_id)
+        except Exception as e:
+            # Log but don't raise - ack failure shouldn't crash the worker.
+            # The message stays in PEL and can be reclaimed later.
+            logger.warning(f"Failed to XACK {stream_entry_id} on {stream_key}: {e}")
+
+    async def reclaim_pending_tasks(
+        self,
+        role: str,
+        consumer_name: str,
+        min_idle_ms: int = 60_000,
+        count: int = 10,
+    ) -> list[TaskMessage]:
+        """Reclaim tasks from dead consumers using XAUTOCLAIM.
+
+        Called on startup or periodically to pick up unacknowledged messages
+        from consumers that crashed.
+
+        Args:
+            role: Worker role
+            consumer_name: This consumer's name (claims will be reassigned here)
+            min_idle_ms: Only reclaim messages idle longer than this (ms)
+            count: Max messages to reclaim per call
+
+        Returns:
+            List of reclaimed TaskMessages
+        """
+        reclaimed: list[TaskMessage] = []
+        for urgent in (True, False):
+            stream_key = self._task_stream_key(role, urgent=urgent)
+            group_name = self._task_group_name(role)
+            try:
+                await self._ensure_consumer_group(stream_key, group_name)
+                # XAUTOCLAIM returns (new_start_id, claimed_entries, deleted_ids)
+                _, entries, _ = await self.redis.xautoclaim(
+                    stream_key,
+                    group_name,
+                    consumer_name,
+                    min_idle_time=min_idle_ms,
+                    start_id="0-0",
+                    count=count,
+                )
+                for entry_id, fields in entries:
+                    try:
+                        task = TaskMessage.model_validate_json(fields["data"])
+                        task.stream_entry_id = entry_id
+                        task._stream_urgent = urgent
+                        reclaimed.append(task)
+                    except Exception as e:
+                        logger.warning(f"Failed to parse reclaimed entry {entry_id}: {e}")
+                        # ACK unparsable entries to prevent infinite reclaim loop
+                        await self.redis.xack(stream_key, group_name, entry_id)
+            except Exception as e:
+                logger.warning(f"XAUTOCLAIM failed on {stream_key}: {e}")
+        if reclaimed:
+            logger.info(f"Reclaimed {len(reclaimed)} pending tasks for {role}/{consumer_name}")
+        return reclaimed
 
     def _result_queue_key(self, task_id: str) -> str:
         """Get result queue key for a task."""
@@ -347,7 +460,7 @@ class RedisTaskQueue(BaseTaskQueue):
                     if not target_fqdn:
                         target_fqdn = val
                 elif "." in val:
-                    # Has dot but not FQDN -> likely username (e.g., "sansa.stark")
+                    # Has dot but not FQDN -> likely username (e.g., "jane.doe")
                     target_user = val
                 # Plain hostname without dots - NOT an FQDN, use target_hostname
                 elif val and not target_hostname:
@@ -377,25 +490,29 @@ class RedisTaskQueue(BaseTaskQueue):
             },
         ):
             try:
-                # Priority-based insertion:
-                # - priority <= 2 (urgent): RPUSH to front of queue (processed first)
-                # - priority > 2 (normal): LPUSH to back of queue (FIFO order)
-                # Workers use BRPOP from right, so RPUSH items are processed immediately.
+                # Priority-based insertion using two streams:
+                # - priority <= 2 (urgent): written to the urgent stream (processed first)
+                # - priority > 2 (normal): written to the normal stream (FIFO)
+                # Workers check the urgent stream before the normal stream.
                 task_json = task.model_dump_json()
-                if priority <= 2:
-                    await timed_redis_write(
-                        self.redis.rpush(queue_key, task_json),
-                        operation_name=f"submit_task_{task_id}",
-                    )
+                is_urgent = priority <= 2
+                stream_key = self._task_stream_key(target_role, urgent=is_urgent)
+                await self._ensure_consumer_group(stream_key, self._task_group_name(target_role))
+                await timed_redis_write(
+                    self.redis.xadd(
+                        stream_key,
+                        {"data": task_json},
+                        maxlen=self.STREAM_MAXLEN,
+                        approximate=True,
+                    ),
+                    operation_name=f"submit_task_{task_id}",
+                )
+                if is_urgent:
                     logger.info(
-                        f"Task {task_id} URGENT (priority={priority}) submitted to front of {queue_key}"
+                        f"Task {task_id} URGENT (priority={priority}) submitted to {stream_key}"
                     )
                 else:
-                    await timed_redis_write(
-                        self.redis.lpush(queue_key, task_json),
-                        operation_name=f"submit_task_{task_id}",
-                    )
-                    logger.info(f"Task {task_id} submitted to {queue_key}")
+                    logger.info(f"Task {task_id} submitted to {stream_key}")
                 return task_id
 
             except asyncio.TimeoutError:
@@ -564,17 +681,23 @@ class RedisTaskQueue(BaseTaskQueue):
         role: str,
         timeout: float = 5.0,
         max_retries: int = 5,
+        consumer_name: str = "default",
     ) -> TaskMessage | None:
         """
-        Poll for next task (blocking).
+        Poll for next task using Redis Streams consumer groups.
+
+        Checks the urgent stream first (non-blocking), then blocks on the
+        normal stream. This ensures urgent/retry tasks are always processed
+        before normal priority tasks.
 
         Includes automatic retry with exponential backoff on stale connection
         detection to avoid missed poll cycles when Sentinel pods restart.
 
         Args:
             role: Worker role to poll for
-            timeout: How long to block waiting
+            timeout: How long to block waiting (seconds)
             max_retries: Max retries on stale connection (default: 5, giving 6 total attempts)
+            consumer_name: Unique consumer name (typically agent_name or pod_name)
 
         Returns:
             TaskMessage or None if timeout
@@ -582,7 +705,9 @@ class RedisTaskQueue(BaseTaskQueue):
         Raises:
             Exception: Re-raises connection errors after marking connection as failed
         """
-        queue_key = self._task_queue_key(role)
+        urgent_stream = self._task_stream_key(role, urgent=True)
+        normal_stream = self._task_stream_key(role, urgent=False)
+        group_name = self._task_group_name(role)
         last_error: Exception | None = None
         base_delay = get_redis_retry_base_delay()
         max_delay = get_redis_retry_max_delay()
@@ -592,33 +717,62 @@ class RedisTaskQueue(BaseTaskQueue):
                 await self.connect()
 
             try:
-                # BRPOP from right for FIFO order
+                # Ensure consumer groups exist for both streams
+                await self._ensure_consumer_group(urgent_stream, group_name)
+                await self._ensure_consumer_group(normal_stream, group_name)
+
+                # 1. Check urgent stream first (non-blocking)
+                urgent_result = await self.redis.xreadgroup(
+                    group_name,
+                    consumer_name,
+                    {urgent_stream: ">"},
+                    count=1,
+                    block=None,  # Non-blocking
+                )
+                if urgent_result:
+                    # urgent_result: [(stream_key, [(entry_id, fields)])]
+                    entry_id, fields = urgent_result[0][1][0]
+                    task = TaskMessage.model_validate_json(fields["data"])
+                    task.stream_entry_id = entry_id
+                    task._stream_urgent = True
+                    return task
+
+                # 2. Block on normal stream
                 # Wrap in asyncio.wait_for to catch hung connections.
-                # The Redis timeout parameter only works if the request reaches the server.
                 # On a stale/dead TCP connection, the await hangs forever without this.
-                result = await asyncio.wait_for(
-                    self.redis.brpop(queue_key, timeout=int(timeout)),
+                timeout_ms = int(timeout * 1000)
+                normal_result = await asyncio.wait_for(
+                    self.redis.xreadgroup(
+                        group_name,
+                        consumer_name,
+                        {normal_stream: ">"},
+                        count=1,
+                        block=timeout_ms,
+                    ),
                     timeout=timeout + 2.0,  # Extra margin for network latency
                 )
 
-                if result is None:
+                if not normal_result:
                     return None
 
-                _, data = result
-                return TaskMessage.model_validate_json(data)
+                entry_id, fields = normal_result[0][1][0]
+                task = TaskMessage.model_validate_json(fields["data"])
+                task.stream_entry_id = entry_id
+                task._stream_urgent = False
+                return task
 
             except asyncio.TimeoutError:
-                # asyncio.wait_for timed out but Redis BRPOP didn't return
+                # asyncio.wait_for timed out but XREADGROUP didn't return
                 # This indicates a stale connection (e.g., Sentinel pod restarted)
                 logger.warning(
-                    f"BRPOP hung for {timeout + 2.0}s on queue {queue_key} - "
+                    f"XREADGROUP hung for {timeout + 2.0}s on {normal_stream} - "
                     f"stale connection detected (attempt {attempt + 1}/{max_retries + 1})"
                 )
                 invalidate_sentinel_client()
                 self._handle_connection_error(
-                    TimeoutError("BRPOP hung - possible stale Sentinel connection")
+                    TimeoutError("XREADGROUP hung - possible stale Sentinel connection")
                 )
-                last_error = TimeoutError("BRPOP hung after retries")
+                last_error = TimeoutError("XREADGROUP hung after retries")
 
             except Exception as e:
                 if is_connection_error(e):
@@ -821,12 +975,15 @@ class RedisTaskQueue(BaseTaskQueue):
     # === Queue Stats ===
 
     async def get_queue_length(self, role: str) -> int:
-        """Get number of pending tasks for a role."""
+        """Get number of pending tasks for a role (sum of urgent + normal streams)."""
         if not self._connected:
             await self.connect()
 
-        queue_key = self._task_queue_key(role)
-        return await self.redis.llen(queue_key)
+        urgent_key = self._task_stream_key(role, urgent=True)
+        normal_key = self._task_stream_key(role, urgent=False)
+        urgent_len = await self.redis.xlen(urgent_key)
+        normal_len = await self.redis.xlen(normal_key)
+        return urgent_len + normal_len
 
     async def get_all_queue_stats(self) -> dict[str, int]:
         """Get queue lengths for all roles."""
@@ -986,14 +1143,19 @@ class RedisTaskQueue(BaseTaskQueue):
             callback_queue=self._result_queue_key(task_id),
         )
 
-        queue_key = self._task_queue_key(target_role)
+        # Retries always go to the urgent stream for priority processing
+        stream_key = self._task_stream_key(target_role, urgent=True)
 
         try:
-            # RPUSH to front of queue (workers use BRPOP from right)
-            # This prioritizes retried tasks over new ones
-            await self.redis.rpush(queue_key, task.model_dump_json())
+            await self._ensure_consumer_group(stream_key, self._task_group_name(target_role))
+            await self.redis.xadd(
+                stream_key,
+                {"data": task.model_dump_json()},
+                maxlen=self.STREAM_MAXLEN,
+                approximate=True,
+            )
 
-            logger.info(f"Task {task_id} requeued to {queue_key} (retry {retry_count})")
+            logger.info(f"Task {task_id} requeued to {stream_key} (retry {retry_count})")
             return task_id
 
         except Exception as e:

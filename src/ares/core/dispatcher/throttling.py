@@ -124,8 +124,11 @@ class ThrottlingMixin:
         if not effective_queue or not effective_queue._client:
             return 0
         try:
-            queue_key = f"ares:tasks:{role}"
-            return await effective_queue._client.llen(queue_key)
+            urgent_key = f"ares:stream:tasks:{role}:urgent"
+            normal_key = f"ares:stream:tasks:{role}:normal"
+            urgent_len = await effective_queue._client.xlen(urgent_key)
+            normal_len = await effective_queue._client.xlen(normal_key)
+            return urgent_len + normal_len
         except Exception as e:
             logger.debug(f"Failed to get queue length for {role}: {e}")
             return 0

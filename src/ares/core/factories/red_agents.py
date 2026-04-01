@@ -400,7 +400,7 @@ def create_role_hooks(
 
         # Extract target info from tool arguments for span metrics
         # Separate IP, FQDN, and hostname for OTel semantic convention compliance
-        # Uses is_likely_fqdn() to distinguish FQDNs from usernames (e.g., "sansa.stark")
+        # Uses is_likely_fqdn() to distinguish FQDNs from usernames (e.g., "jane.doe")
         target_ip = None
         target_fqdn = None
         target_hostname = None

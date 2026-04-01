@@ -24,7 +24,7 @@ its own Kubernetes pod with role-specific tools installed.
 │  - Operation completion decision                                        │
 │  - Does NOT execute exploitation tools directly                         │
 └──────────────────────────────┬─────────────────────────────────────────┘
-                               │ Redis pub/sub + task queues
+                               │ Redis Streams + pub/sub
        ┌───────────────────────┼─────────────┬─────────────┬─────────────┬─────────────┐
        ▼             ▼         ▼             ▼             ▼             ▼             ▼
 ┌───────────┐ ┌───────────┐ ┌───────────┐ ┌───────────┐ ┌───────────┐ ┌───────────┐ ┌───────────┐

@@ -774,6 +774,15 @@ class PublishingMixin:
             # Skip credentials without passwords - MSSQL needs actual passwords
             if not cred.password:
                 continue
+            password_lower = cred.password.strip().lower()
+            if any(
+                marker in password_lower
+                for marker in ("separator unmatched", ".ccache", "saving ticket in")
+            ):
+                logger.debug(
+                    f"Skipping invalid SQL credential artifact: {cred.domain}\\{cred.username}"
+                )
+                continue
 
             key = f"{cred.domain}\\{cred.username}"
             if key in seen:
@@ -888,12 +897,22 @@ class PublishingMixin:
             )
         return added
 
-    async def scan_hosts_for_mssql(self: RedTeamDispatcher) -> int:
+    async def scan_hosts_for_mssql(
+        self: RedTeamDispatcher,
+        force_requeue: bool = False,
+    ) -> int:
         """
         Scan all known hosts for MSSQL services and queue vulnerabilities.
 
         This method should be called periodically by the orchestrator to catch
         MSSQL hosts discovered by worker agents that didn't go through publish_host.
+
+        When force_requeue=True, replaces existing MSSQL vulns if new credentials
+        are available (e.g., after DA is achieved and more creds are discovered).
+
+        Args:
+            force_requeue: If True, re-queue MSSQL vulns when credential count
+                has increased since original queue time.
 
         Returns:
             Number of new MSSQL vulnerabilities queued.
@@ -912,17 +931,7 @@ class PublishingMixin:
             if not has_mssql:
                 continue
 
-            # Check if we already have an MSSQL vuln queued for this host
-            # Snapshot to avoid "dict changed size during iteration" from threaded consumer
-            already_queued = any(
-                vuln.target == host.ip and vuln.vuln_type.startswith("mssql_")
-                for vuln in list(self.shared_state.discovered_vulnerabilities.values())
-            )
-
-            if already_queued:
-                continue
-
-            # Find SQL credentials
+            # Find SQL credentials (current state — may have grown since last queue)
             sql_creds = self._find_sql_credentials()
 
             # Only queue if we have valid credentials
@@ -933,20 +942,117 @@ class PublishingMixin:
                 )
                 continue
 
+            # Check if we already have MSSQL vulns queued for this host
+            # Snapshot to avoid "dict changed size during iteration" from threaded consumer
+            existing_mssql_vulns = [
+                (vid, vuln)
+                for vid, vuln in list(self.shared_state.discovered_vulnerabilities.items())
+                if vuln.target == host.ip and vuln.vuln_type.startswith("mssql_")
+            ]
+
+            if existing_mssql_vulns and not force_requeue:
+                continue
+
+            # When force_requeue, check if credential count has grown
+            if existing_mssql_vulns and force_requeue:
+                # Check credential count in any existing vuln
+                old_cred_count = 0
+                for _, vuln in existing_mssql_vulns:
+                    old_creds = vuln.details.get("available_credentials", [])
+                    old_cred_count = max(old_cred_count, len(old_creds))
+
+                if len(sql_creds) <= old_cred_count:
+                    # No new credentials — skip re-queue
+                    continue
+
+                # Remove old vulns so we can re-queue with fresh creds
+                # Only remove vulns that haven't been picked up by an agent yet
+                for vid, _vuln in existing_mssql_vulns:
+                    if vid not in self.shared_state.exploited_vulnerabilities:
+                        del self.shared_state.discovered_vulnerabilities[vid]
+                        logger.info(
+                            f"Removed stale MSSQL vuln {vid} for {host.ip} "
+                            f"(had {old_cred_count} creds, now have {len(sql_creds)})"
+                        )
+
+            host_domain = ""
+            if host.hostname and "." in host.hostname:
+                host_domain = host.hostname.lower().split(".", 1)[-1]
+
             # Queue MSSQL vulnerabilities (both linked server and impersonation)
-            details: dict[str, Any] = {
+            # Add cross-forest context when undominated forests remain
+            from ares.core.config import get_multi_forest_mode
+
+            cross_forest_note = ""
+            undominated: list[str] = []
+            if get_multi_forest_mode() and self.shared_state.has_domain_admin:
+                undominated = self.shared_state.get_undominated_forests()
+                if undominated:
+                    cross_forest_note = (
+                        f" CRITICAL: Undominated forests remain: {', '.join(undominated)}. "
+                        f"Enumerate linked servers and follow cross-forest links. "
+                        f"Use OPENQUERY/xp_cmdshell via linked server to pivot into foreign forest. "
+                        f"Extract any credentials from the foreign forest — even a single "
+                        f"foreign-domain credential enables full forest compromise via secretsdump."
+                    )
+
+            da_domains = {d.lower() for d in self.shared_state.domain_admin_domains}
+            is_cross_forest_host = bool(
+                undominated
+                and host_domain
+                and (host_domain in da_domains or host_domain in undominated)
+            )
+
+            if is_cross_forest_host:
+                pivot_domains = ", ".join(undominated)
+                pivot_key = (
+                    f"scan_mssql_cross_forest:{host.ip}:{host_domain}:{','.join(sorted(undominated))}:"
+                    f"{len(sql_creds)}"
+                )
+                if self.shared_state.is_processed("processed_cross_forest_pivots", pivot_key):
+                    continue
+                self.shared_state.mark_processed("processed_cross_forest_pivots", pivot_key)
+
+                details = {
+                    "hostname": host.hostname,
+                    "services": host.services,
+                    "available_credentials": sql_creds,
+                    "note": (
+                        f"CRITICAL CROSS-FOREST PIVOT. This MSSQL server sits on the designed path "
+                        f"between dominated domains and undominated forests ({pivot_domains}). "
+                        f"Prioritize mssql_enum_impersonation, mssql_enum_linked_servers, "
+                        f"mssql_linked_enable_xpcmdshell, and mssql_linked_xpcmdshell. "
+                        f"Do not stop at SQL auth; use linked servers to reach the foreign host and "
+                        f"dump host-local secrets for the next pivot."
+                    ),
+                }
+
+                await self.queue_vulnerability(
+                    vuln_type="mssql_cross_forest_pivot",
+                    target=host.ip,
+                    details=details,
+                    discovered_by="mssql_scanner",
+                )
+                queued += 1
+                logger.info(
+                    f"Periodic scan: queued MSSQL cross-forest pivot for "
+                    f"{host.ip} ({host.hostname}) with {len(sql_creds)} SQL credentials"
+                )
+                continue
+
+            vuln_details: dict[str, Any] = {
                 "hostname": host.hostname,
                 "services": host.services,
                 "available_credentials": sql_creds,
                 "note": f"Auto-detected MSSQL service with {len(sql_creds)} potential SQL credential(s). "
-                "Check for linked servers and impersonation.",
+                f"Check for linked servers and impersonation.{cross_forest_note}",
             }
 
             # Queue mssql_linked_server vulnerability
             await self.queue_vulnerability(
                 vuln_type="mssql_linked_server",
                 target=host.ip,
-                details=details,
+                details=vuln_details,
                 discovered_by="mssql_scanner",
             )
 
@@ -957,7 +1063,7 @@ class PublishingMixin:
                 "services": host.services,
                 "available_credentials": sql_creds,
                 "note": f"Auto-detected MSSQL service with {len(sql_creds)} potential SQL credential(s). "
-                "Check for impersonation rights (EXECUTE AS) to sa, dbo, or other privileged logins.",
+                f"Check for impersonation rights (EXECUTE AS) to sa, dbo, or other privileged logins.{cross_forest_note}",
             }
             await self.queue_vulnerability(
                 vuln_type="mssql_impersonation",
@@ -1435,7 +1541,7 @@ class PublishingMixin:
         import uuid
 
         # Check if we should extract from parent domain (forest root) instead of child
-        # Trust accounts like ESSOS$ exist at the forest level, so we need forest root DA
+        # Trust accounts like FABRIKAM$ exist at the forest level, so we need forest root DA
         extraction_domain = da_domain_lower
         extraction_dc_ip = dc_ip
 
@@ -1581,6 +1687,11 @@ class PublishingMixin:
             hash_for_payload = da_hash
             if hash_for_payload and ":" in hash_for_payload:
                 hash_for_payload = hash_for_payload.split(":")[-1]
+            # Include target domain SID if cached (critical for inter-realm ticket)
+            # Without this, the agent must call get_sid which fails cross-forest
+            # because source domain credentials don't authenticate to target DC
+            target_sid = self.shared_state.domain_sids.get(target_forest_lower, "")
+
             task_payload = {
                 "vuln_type": "trust_key_extraction",
                 "target": extraction_dc_ip,
@@ -1592,6 +1703,10 @@ class PublishingMixin:
                 "use_hash": bool(da_hash),
                 # Original DA domain for credential context (cross-domain auth via trust)
                 "auth_domain": da_domain,
+                # Target domain SID if known (avoids cross-forest get_sid failure)
+                "target_sid": target_sid,
+                # Source domain SID if known
+                "source_sid": self.shared_state.domain_sids.get(extraction_domain.lower(), ""),
             }
 
             task_id = f"trust_extraction_{uuid.uuid4().hex[:12]}"
@@ -1610,18 +1725,27 @@ class PublishingMixin:
             )
 
             try:
-                # Submit directly to privesc queue (where KerberosTools lives)
-                # Use RPUSH for priority <= 2 (urgent) tasks - workers BRPOP from right,
-                # so RPUSH items are processed immediately (front of queue)
+                # Submit directly to privesc urgent stream (where KerberosTools lives)
                 task_json = json.dumps(task_data)
                 logger.debug(f"🌲 Trust extraction task payload: {task_json[:200]}...")
-                result = await task_queue.redis.rpush(
-                    "ares:tasks:privesc",
-                    task_json,
+                stream_key = "ares:stream:tasks:privesc:urgent"
+                group_name = "ares:cg:tasks:privesc"
+                try:
+                    await task_queue.redis.xgroup_create(
+                        stream_key, group_name, id="0", mkstream=True
+                    )
+                except Exception as xg_err:
+                    if "BUSYGROUP" not in str(xg_err):
+                        raise
+                result = await task_queue.redis.xadd(
+                    stream_key,
+                    {"data": task_json},
+                    maxlen=10000,
+                    approximate=True,
                 )
                 logger.warning(
-                    f"🌲 Trust key extraction task {task_id} submitted to privesc queue "
-                    f"(rpush result: {result})"
+                    f"🌲 Trust key extraction task {task_id} submitted to privesc stream "
+                    f"(xadd result: {result})"
                 )
             except Exception as e:
                 logger.error(f"🌲 Failed to dispatch trust key extraction: {e}", exc_info=True)

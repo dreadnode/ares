@@ -102,8 +102,8 @@ class ResultProcessingMixin:
         """Resolve the correct domain for extracted data, preferring target host FQDN over NetBIOS.
 
         When tools run against a DC, the target host's domain (from its FQDN) is
-        authoritative. LLM often extracts NetBIOS names like "NORTH" from output like
-        "NORTH\\krbtgt:hash" or "NORTH\\jon.snow", but we should use the target DC's domain.
+        authoritative. LLM often extracts NetBIOS names like "CHILD" from output like
+        "CHILD\\krbtgt:hash" or "CHILD\\testuser", but we should use the target DC's domain.
 
         Resolution logic:
         1. If extracted domain is empty → use target_domain
@@ -1631,7 +1631,7 @@ class ResultProcessingMixin:
         # secretsdump output format: username:aes256-cts-hmac-sha1-96:hexkey
         # or domain.fqdn\username:aes256-cts-hmac-sha1-96:hexkey
         # or DOMAIN\username:aes256-cts-hmac-sha1-96:hexkey
-        # \w+\$? allows trust accounts like ESSOS$ and machine accounts
+        # \w+\$? allows trust accounts like FABRIKAM$ and machine accounts
         aes_pattern = re.compile(
             r"^(?:[\w.]+\\)?(\w+\$?):aes256-cts-hmac-sha1-96:([a-fA-F0-9]{64})$"
         )

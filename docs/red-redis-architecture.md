@@ -48,14 +48,16 @@ sequenceDiagram
     O->>R: SET ares:op:active {op_id}
     O->>R: initialize ares:op:{op_id}:* state
 
-    O->>R: LPUSH / RPUSH ares:tasks:{role}
+    O->>R: XADD ares:stream:tasks:{role}:{urgent|normal}
 
     W->>R: GET ares:op:active
     W->>R: GET ares:op:{op_id}:model
     W->>R: GET ares:op:{op_id}:model_overrides
     W->>R: GET ares:op:{op_id}:worker_credentials
-    W->>R: BRPOP ares:tasks:{role}
+    W->>R: XREADGROUP ares:stream:tasks:{role}:urgent (non-blocking)
+    W->>R: XREADGROUP ares:stream:tasks:{role}:normal (blocking)
     W->>W: execute task locally
+    W->>R: XACK (acknowledge processed task)
     W->>R: LPUSH ares:results:{task_id}
     W->>R: SET ares:heartbeat:{agent_name}
     W->>R: SET ares:task_status:{task_id}
@@ -86,7 +88,8 @@ sequenceDiagram
 | `ares:op:{op_id}:worker_credentials` | String | Orchestrator service | Workers | API credentials for worker LLM calls |
 | `ares:lock:{op_id}` | String | Orchestrator runtime | Workers, recovery | Operation exclusivity / liveness |
 | `ares:op:active` | String | Orchestrator runtime | Workers | Active operation discovery pointer |
-| `ares:tasks:{role}` | List | Orchestrator runtime / dispatcher | Workers | Per-role task queue |
+| `ares:stream:tasks:{role}:urgent` | Stream | Orchestrator / dispatcher | Workers (consumer group) | Urgent/retry task stream (priority ≤ 2) |
+| `ares:stream:tasks:{role}:normal` | Stream | Orchestrator / dispatcher | Workers (consumer group) | Normal task stream (priority > 2, FIFO) |
 | `ares:results:{task_id}` | List | Workers | Dispatcher result consumer | Task result mailbox |
 | `ares:heartbeat:{agent_name}` | String | Workers | Dispatcher | Worker liveness and current task |
 | `ares:task_status:{task_id}` | String | Workers | CLI / operators | Task debugging and runtime status |
@@ -169,8 +172,11 @@ Common keys:
 
 On `main`, the practical contract is:
 
-- Redis task queues move work between orchestrator and workers
-- Redis result queues return task completion back to the dispatcher
+- Redis Streams (with consumer groups) move tasks between orchestrator and
+  workers. Two streams per role: `urgent` (priority ≤ 2, retries) and `normal`.
+  Workers XACK after processing; unacknowledged tasks can be reclaimed via
+  XAUTOCLAIM.
+- Redis result queues (Lists) return task completion back to the dispatcher
 - Redis canonical state under `ares:op:{op_id}:*` is the durable source of
   truth for recovery and worker refresh
 

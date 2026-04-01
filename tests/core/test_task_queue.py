@@ -196,6 +196,13 @@ def mock_redis_client():
     client.brpop = AsyncMock(return_value=None)
     client.rpop = AsyncMock(return_value=None)
     client.llen = AsyncMock(return_value=0)
+    # Stream operations
+    client.xadd = AsyncMock(return_value="1-0")
+    client.xreadgroup = AsyncMock(return_value=None)
+    client.xack = AsyncMock(return_value=1)
+    client.xlen = AsyncMock(return_value=0)
+    client.xgroup_create = AsyncMock(return_value=True)
+    client.xautoclaim = AsyncMock(return_value=("0-0", [], []))
     client.set = AsyncMock(return_value=True)
     client.get = AsyncMock(return_value=None)
     client.expire = AsyncMock(return_value=True)
@@ -305,41 +312,37 @@ class TestRedisTaskQueueConnectionErrorHandling:
         self, task_queue, mock_redis_client
     ):
         """Test poll_task retries on connection errors and returns None after exhausting retries."""
-        mock_redis_client.brpop.side_effect = Exception("Connection closed unexpectedly")
+        mock_redis_client.xreadgroup.side_effect = Exception("Connection closed unexpectedly")
 
         # With retry logic, poll_task returns None after exhausting retries
         result = await task_queue.poll_task(role="cracker", timeout=1.0, max_retries=2)
 
         assert result is None
-        # brpop should be called max_retries + 1 times
-        assert mock_redis_client.brpop.call_count == 3
 
     @pytest.mark.asyncio
     async def test_poll_task_connection_timeout_retries(self, task_queue, mock_redis_client):
         """Test poll_task retries on timeout errors."""
-        mock_redis_client.brpop.side_effect = Exception("Connection timeout")
+        mock_redis_client.xreadgroup.side_effect = Exception("Connection timeout")
 
         result = await task_queue.poll_task(role="cracker", timeout=1.0, max_retries=1)
 
         assert result is None
-        assert mock_redis_client.brpop.call_count == 2
 
     @pytest.mark.asyncio
     async def test_poll_task_broken_pipe_retries(self, task_queue, mock_redis_client):
         """Test poll_task retries on broken pipe errors."""
-        mock_redis_client.brpop.side_effect = Exception("Broken pipe")
+        mock_redis_client.xreadgroup.side_effect = Exception("Broken pipe")
 
         result = await task_queue.poll_task(role="cracker", timeout=1.0, max_retries=1)
 
         assert result is None
-        assert mock_redis_client.brpop.call_count == 2
 
     @pytest.mark.asyncio
     async def test_poll_task_non_connection_error_preserves_state(
         self, task_queue, mock_redis_client
     ):
         """Test poll_task preserves state for non-connection errors."""
-        mock_redis_client.brpop.side_effect = ValueError("Invalid data format")
+        mock_redis_client.xreadgroup.side_effect = ValueError("Invalid data format")
 
         with pytest.raises(ValueError, match="Invalid data format"):
             await task_queue.poll_task(role="cracker", timeout=1.0)
@@ -399,25 +402,29 @@ class TestRedisTaskQueueConnectionErrorHandling:
     async def test_poll_task_asyncio_timeout_handles_stale_connection(
         self, task_queue, mock_redis_client
     ):
-        """Test poll_task handles asyncio.TimeoutError from hung BRPOP.
+        """Test poll_task handles asyncio.TimeoutError from hung XREADGROUP.
 
-        This tests the fix for stale Sentinel connections where BRPOP hangs
+        This tests the fix for stale Sentinel connections where XREADGROUP hangs
         forever on a dead TCP socket. The asyncio.wait_for wrapper should
         detect this and reset connection state.
         """
         import asyncio
 
-        # Simulate a hung BRPOP that never returns (stale connection)
-        async def hung_brpop(*args, **kwargs):
-            await asyncio.sleep(100)  # Would block forever without wait_for
+        call_count = 0
 
-        mock_redis_client.brpop = hung_brpop
+        # Simulate: urgent stream returns nothing (non-blocking), normal stream hangs
+        async def hung_xreadgroup(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if kwargs.get("block") is None:
+                # Non-blocking urgent check - return nothing
+                return
+            # Blocking normal check - simulate hung connection
+            await asyncio.sleep(100)
+
+        mock_redis_client.xreadgroup = hung_xreadgroup
 
         with patch("ares.core.task_queue.invalidate_sentinel_client") as mock_invalidate:
-            # poll_task with timeout=0.1 should trigger asyncio.TimeoutError
-            # after 0.1 + 2.0 = 2.1 seconds, but we mock so it's faster
-            # Actually the wait_for will use timeout + 2.0, so we use a tiny timeout
-            # Using max_retries=0 to test single attempt behavior
             result = await task_queue.poll_task(role="cracker", timeout=0.1, max_retries=0)
 
             # Should return None (not raise) to allow retry
@@ -507,11 +514,17 @@ class TestRedisTaskQueueConnectionErrorHandling:
 class TestRedisTaskQueueKeyGeneration:
     """Tests for queue key generation methods."""
 
-    def test_task_queue_key(self):
-        """Test task queue key generation."""
+    def test_task_stream_key(self):
+        """Test task stream key generation."""
         queue = RedisTaskQueue()
-        assert queue._task_queue_key("cracker") == "ares:tasks:cracker"
-        assert queue._task_queue_key("lateral") == "ares:tasks:lateral"
+        assert queue._task_stream_key("cracker", urgent=False) == "ares:stream:tasks:cracker:normal"
+        assert queue._task_stream_key("cracker", urgent=True) == "ares:stream:tasks:cracker:urgent"
+        assert queue._task_stream_key("lateral") == "ares:stream:tasks:lateral:normal"
+
+    def test_task_group_name(self):
+        """Test consumer group name generation."""
+        queue = RedisTaskQueue()
+        assert queue._task_group_name("cracker") == "ares:cg:tasks:cracker"
 
     def test_result_queue_key(self):
         """Test result queue key generation."""
@@ -537,11 +550,11 @@ class TestRedisTaskQueueSubmit:
         )
 
         assert task_id.startswith("crack_")
-        mock_redis_client.lpush.assert_called_once()
+        mock_redis_client.xadd.assert_called_once()
 
-        # Verify the pushed data
-        call_args = mock_redis_client.lpush.call_args
-        assert call_args[0][0] == "ares:tasks:cracker"
+        # Verify the stream key (normal priority -> normal stream)
+        call_args = mock_redis_client.xadd.call_args
+        assert call_args[0][0] == "ares:stream:tasks:cracker:normal"
 
     @pytest.mark.asyncio
     async def test_submit_task_with_custom_id(self, task_queue, mock_redis_client):
@@ -565,10 +578,10 @@ class TestRedisTaskQueueSubmit:
             priority=1,
         )
 
-        # Verify priority is in the pushed data
-        # High priority (<=2) uses rpush to front of queue
-        call_args = mock_redis_client.rpush.call_args
-        pushed_json = call_args[0][1]
+        # High priority (<=2) goes to the urgent stream
+        call_args = mock_redis_client.xadd.call_args
+        assert call_args[0][0] == "ares:stream:tasks:cracker:urgent"
+        pushed_json = call_args[0][1]["data"]
         pushed_data = json.loads(pushed_json)
         assert pushed_data["priority"] == 1
 
@@ -579,16 +592,16 @@ class TestRedisTaskQueuePoll:
     @pytest.mark.asyncio
     async def test_poll_task_empty(self, task_queue, mock_redis_client):
         """Test polling when queue is empty returns None."""
-        mock_redis_client.brpop.return_value = None
+        # Urgent stream returns nothing (non-blocking), normal stream returns nothing (blocking)
+        mock_redis_client.xreadgroup.return_value = None
 
         task = await task_queue.poll_task(role="cracker", timeout=1.0)
 
         assert task is None
-        mock_redis_client.brpop.assert_called_once_with("ares:tasks:cracker", timeout=1)
 
     @pytest.mark.asyncio
-    async def test_poll_task_success(self, task_queue, mock_redis_client):
-        """Test polling a task successfully."""
+    async def test_poll_task_success_normal(self, task_queue, mock_redis_client):
+        """Test polling a task from the normal stream."""
         task_message = TaskMessage(
             task_id="crack_abc",
             task_type="crack",
@@ -597,16 +610,52 @@ class TestRedisTaskQueuePoll:
             payload={"hash_value": "test123"},
         )
 
-        mock_redis_client.brpop.return_value = (
-            "ares:tasks:cracker",
-            task_message.model_dump_json(),
-        )
+        # First call (urgent, non-blocking) returns nothing
+        # Second call (normal, blocking) returns a task
+        mock_redis_client.xreadgroup.side_effect = [
+            None,  # urgent stream empty
+            [
+                (
+                    "ares:stream:tasks:cracker:normal",
+                    [("1-0", {"data": task_message.model_dump_json()})],
+                )
+            ],
+        ]
 
         task = await task_queue.poll_task(role="cracker", timeout=5.0)
 
         assert task is not None
         assert task.task_id == "crack_abc"
         assert task.payload["hash_value"] == "test123"
+        assert task.stream_entry_id == "1-0"
+        assert task._stream_urgent is False
+
+    @pytest.mark.asyncio
+    async def test_poll_task_success_urgent(self, task_queue, mock_redis_client):
+        """Test polling a task from the urgent stream (takes priority)."""
+        task_message = TaskMessage(
+            task_id="crack_urgent",
+            task_type="crack",
+            source_agent="orchestrator",
+            target_agent="cracker",
+            payload={"hash_value": "krbtgt"},
+            priority=1,
+        )
+
+        # First call (urgent, non-blocking) returns a task
+        mock_redis_client.xreadgroup.return_value = [
+            (
+                "ares:stream:tasks:cracker:urgent",
+                [("2-0", {"data": task_message.model_dump_json()})],
+            )
+        ]
+
+        task = await task_queue.poll_task(role="cracker", timeout=5.0)
+
+        assert task is not None
+        assert task.task_id == "crack_urgent"
+        assert task.stream_entry_id == "2-0"
+        assert task._stream_urgent is True
 
 
 class TestRedisTaskQueueResults:
@@ -794,11 +843,11 @@ class TestRedisTaskQueueRequeue:
         )
 
         assert task_id == "original_task_123"
-        mock_redis_client.rpush.assert_called_once()
+        mock_redis_client.xadd.assert_called_once()
 
-        # Verify the pushed data
-        call_args = mock_redis_client.rpush.call_args
-        assert call_args[0][0] == "ares:tasks:cracker"
+        # Verify the stream key (retries always go to urgent stream)
+        call_args = mock_redis_client.xadd.call_args
+        assert call_args[0][0] == "ares:stream:tasks:cracker:urgent"
 
     @pytest.mark.asyncio
     async def test_requeue_task_preserves_task_id(self, task_queue, mock_redis_client):
@@ -816,8 +865,8 @@ class TestRedisTaskQueueRequeue:
         assert returned_id == original_id
 
         # Verify the task message contains the original ID
-        call_args = mock_redis_client.rpush.call_args
-        pushed_json = call_args[0][1]
+        call_args = mock_redis_client.xadd.call_args
+        pushed_json = call_args[0][1]["data"]
         pushed_data = json.loads(pushed_json)
         assert pushed_data["task_id"] == original_id
 
@@ -832,8 +881,8 @@ class TestRedisTaskQueueRequeue:
             retry_count=3,
         )
 
-        call_args = mock_redis_client.rpush.call_args
-        pushed_json = call_args[0][1]
+        call_args = mock_redis_client.xadd.call_args
+        pushed_json = call_args[0][1]["data"]
         pushed_data = json.loads(pushed_json)
 
         assert pushed_data["payload"]["_retry_count"] == 3
@@ -851,15 +900,15 @@ class TestRedisTaskQueueRequeue:
             retry_count=1,
         )
 
-        call_args = mock_redis_client.rpush.call_args
-        pushed_json = call_args[0][1]
+        call_args = mock_redis_client.xadd.call_args
+        pushed_json = call_args[0][1]["data"]
         pushed_data = json.loads(pushed_json)
 
         assert pushed_data["priority"] == 1  # High priority for retries
 
     @pytest.mark.asyncio
-    async def test_requeue_task_uses_rpush_for_priority(self, task_queue, mock_redis_client):
-        """Test that requeue uses RPUSH to prioritize retried tasks."""
+    async def test_requeue_task_uses_urgent_stream(self, task_queue, mock_redis_client):
+        """Test that requeue uses the urgent stream to prioritize retried tasks."""
         await task_queue.requeue_task(
             task_type="crack",
             target_role="cracker",
@@ -868,14 +917,15 @@ class TestRedisTaskQueueRequeue:
             retry_count=1,
         )
 
-        # Should use rpush (not lpush) to put at front of queue
-        mock_redis_client.rpush.assert_called_once()
-        mock_redis_client.lpush.assert_not_called()
+        # Should use xadd to the urgent stream
+        mock_redis_client.xadd.assert_called_once()
+        call_args = mock_redis_client.xadd.call_args
+        assert call_args[0][0] == "ares:stream:tasks:cracker:urgent"
 
     @pytest.mark.asyncio
     async def test_requeue_task_connection_error_resets_state(self, task_queue, mock_redis_client):
         """Test requeue handles connection errors and resets state."""
-        mock_redis_client.rpush.side_effect = Exception("Connection closed")
+        mock_redis_client.xadd.side_effect = Exception("Connection closed")
 
         with pytest.raises(Exception, match="Connection closed"):
             await task_queue.requeue_task(
@@ -894,7 +944,7 @@ class TestRedisTaskQueueRequeue:
         self, task_queue, mock_redis_client
     ):
         """Test requeue preserves state for non-connection errors."""
-        mock_redis_client.rpush.side_effect = TypeError("Serialization error")
+        mock_redis_client.xadd.side_effect = TypeError("Serialization error")
 
         with pytest.raises(TypeError, match="Serialization error"):
             await task_queue.requeue_task(
@@ -916,17 +966,17 @@ class TestRedisTaskQueueStats:
     @pytest.mark.asyncio
     async def test_get_queue_length_empty(self, task_queue, mock_redis_client):
         """Test getting queue length when empty."""
-        mock_redis_client.llen.return_value = 0
+        mock_redis_client.xlen.return_value = 0
 
         length = await task_queue.get_queue_length("cracker")
 
         assert length == 0
-        mock_redis_client.llen.assert_called_once_with("ares:tasks:cracker")
 
     @pytest.mark.asyncio
     async def test_get_queue_length_with_tasks(self, task_queue, mock_redis_client):
-        """Test getting queue length with pending tasks."""
-        mock_redis_client.llen.return_value = 5
+        """Test getting queue length with pending tasks (sum of urgent + normal)."""
+        # xlen called twice: once for urgent, once for normal
+        mock_redis_client.xlen.side_effect = [2, 3]
 
         length = await task_queue.get_queue_length("cracker")
 
@@ -935,16 +985,16 @@ class TestRedisTaskQueueStats:
     @pytest.mark.asyncio
     async def test_get_all_queue_stats(self, task_queue, mock_redis_client):
         """Test getting all queue statistics."""
-        # Return different lengths for different roles
-        mock_redis_client.llen.side_effect = [3, 0, 1, 0, 2, 0, 0]
+        # Return pairs (urgent, normal) for each role: cracker, lateral, acl, privesc, coercion, recon, credential_access
+        mock_redis_client.xlen.side_effect = [1, 2, 0, 0, 0, 1, 0, 0, 1, 1, 0, 0, 0, 0]
 
         stats = await task_queue.get_all_queue_stats()
 
-        assert stats["cracker"] == 3
+        assert stats["cracker"] == 3  # 1 + 2
         assert stats["lateral"] == 0
-        assert stats["acl"] == 1
+        assert stats["acl"] == 1  # 0 + 1
         assert stats["privesc"] == 0
-        assert stats["coercion"] == 2
+        assert stats["coercion"] == 2  # 1 + 1
         assert stats["recon"] == 0
         assert stats["credential_access"] == 0
 
@@ -960,17 +1010,19 @@ class TestEndToEndFlow:
     @pytest.mark.asyncio
     async def test_submit_poll_complete_flow(self, mock_redis_client):
         """Test complete flow: submit -> poll -> send result -> get result."""
-        # Track pushed messages
-        pushed_tasks = []
+        # Track submitted tasks and results
+        submitted_tasks = []
         pushed_results = []
 
+        async def track_xadd(key, fields, **kwargs):
+            submitted_tasks.append((key, fields))
+            return "1-0"
+
         async def track_lpush(key, value):
-            if "tasks" in key:
-                pushed_tasks.append((key, value))
-            else:
-                pushed_results.append((key, value))
+            pushed_results.append((key, value))
             return 1
 
+        mock_redis_client.xadd = AsyncMock(side_effect=track_xadd)
         mock_redis_client.lpush = AsyncMock(side_effect=track_lpush)
 
         # Create two queue instances (simulating orchestrator and worker)
@@ -993,16 +1045,22 @@ class TestEndToEndFlow:
         )
 
         assert task_id.startswith("crack_")
-        assert len(pushed_tasks) == 1
+        assert len(submitted_tasks) == 1
 
-        # Simulate worker polling (return the pushed task)
-        pushed_task_json = pushed_tasks[0][1]
-        mock_redis_client.brpop.return_value = ("ares:tasks:cracker", pushed_task_json)
+        # Simulate worker polling (return the submitted task from normal stream)
+        submitted_task_json = submitted_tasks[0][1]["data"]
+        mock_redis_client.xreadgroup = AsyncMock(
+            side_effect=[
+                None,  # urgent stream empty
+                [("ares:stream:tasks:cracker:normal", [("1-0", {"data": submitted_task_json})])],
+            ]
+        )
 
         task = await worker_queue.poll_task(role="cracker")
 
         assert task is not None
         assert task.task_id == task_id
+        assert task.stream_entry_id == "1-0"
 
         # Worker sends result
         await worker_queue.send_result(
@@ -1013,6 +1071,10 @@ class TestEndToEndFlow:
         )
 
         assert len(pushed_results) == 1
+
+        # Worker acks the task
+        await worker_queue.ack_task("cracker", task.stream_entry_id, task._stream_urgent)
+        mock_redis_client.xack.assert_called_once()
 
         # Orchestrator gets result
         pushed_result_json = pushed_results[0][1]
@@ -1035,7 +1097,10 @@ class TestEndToEndFlow:
         """Test multiple workers polling from same queue."""
         task_counter = [0]
 
-        async def mock_brpop(key, timeout):
+        async def mock_xreadgroup(group, consumer, streams, count=None, block=None):
+            if block is None:
+                # Non-blocking urgent check
+                return None
             task_counter[0] += 1
             if task_counter[0] <= 3:
                 task = TaskMessage(
@@ -1045,10 +1110,11 @@ class TestEndToEndFlow:
                     target_agent="cracker",
                     payload={},
                 )
-                return (key, task.model_dump_json())
+                stream_key = next(iter(streams.keys()))
+                return [(stream_key, [(f"{task_counter[0]}-0", {"data": task.model_dump_json()})])]
             return None
 
-        mock_redis_client.brpop = AsyncMock(side_effect=mock_brpop)
+        mock_redis_client.xreadgroup = AsyncMock(side_effect=mock_xreadgroup)
 
         worker1 = RedisTaskQueue("redis://localhost:6379")
         worker1._client = mock_redis_client
@@ -1059,9 +1125,9 @@ class TestEndToEndFlow:
         worker2._connected = True
 
         # Both workers poll
-        task1 = await worker1.poll_task(role="cracker")
-        task2 = await worker2.poll_task(role="cracker")
-        task3 = await worker1.poll_task(role="cracker")
+        task1 = await worker1.poll_task(role="cracker", consumer_name="worker-1")
+        task2 = await worker2.poll_task(role="cracker", consumer_name="worker-2")
+        task3 = await worker1.poll_task(role="cracker", consumer_name="worker-1")
 
         # Each got a different task
         assert task1.task_id == "task_1"
@@ -1569,7 +1635,7 @@ class TestSpanTargetExtraction:
         payload = {
             "domain": "contoso.local",
             "dc_ip": "192.168.58.10",  # DC for authentication
-            "target_ips": ["MEEREEN"],  # Actual target (NetBIOS hostname)
+            "target_ips": ["WEB01"],  # Actual target (NetBIOS hostname)
             "username": "testuser",
             "techniques": ["ldap_enum"],
         }
@@ -1592,11 +1658,11 @@ class TestSpanTargetExtraction:
             )
 
         # dc_ip (192.168.58.10) should NOT be used as target_ip
-        # target_hostname should be "MEEREEN" (NetBIOS name from target_ips)
-        # target_fqdn should be None since MEEREEN is not an FQDN
+        # target_hostname should be "WEB01" (NetBIOS name from target_ips)
+        # target_fqdn should be None since WEB01 is not an FQDN
         assert captured_kwargs.get("target_ip") is None
         assert captured_kwargs.get("target_fqdn") is None
-        assert captured_kwargs.get("target_hostname") == "MEEREEN"
+        assert captured_kwargs.get("target_hostname") == "WEB01"
 
     @pytest.mark.asyncio
     async def test_target_ips_list_ip_used_as_target_ip(self, task_queue, mock_redis_client):

@@ -642,7 +642,7 @@ class TestAutoGoldenTicket:
     async def test_auto_golden_ticket_child_domain_validates_parent_dc(self):
         """Test that child domain golden ticket correctly validates parent DC.
 
-        Bug fix test: When cached DC IP belongs to a child DC (e.g., winterfell.child.parent.local)
+        Bug fix test: When cached DC IP belongs to a child DC (e.g., ws01.child.parent.local)
         but is incorrectly mapped to parent domain, the code should reject it and find the correct
         parent DC instead.
         """
@@ -681,7 +681,7 @@ class TestAutoGoldenTicket:
         # Add CHILD DC host (this is the WRONG DC for parent domain DCSync)
         child_dc = Host(
             ip="192.168.58.121",  # Child DC IP
-            hostname="winterfell.child.contoso.local",  # Child DC hostname
+            hostname="ws01.child.contoso.local",  # Child DC hostname
             is_dc=True,
         )
         state.all_hosts.append(child_dc)
@@ -689,7 +689,7 @@ class TestAutoGoldenTicket:
         # Add PARENT DC host (this is the CORRECT DC for parent domain DCSync)
         parent_dc = Host(
             ip="192.168.58.238",  # Parent DC IP
-            hostname="kingslanding.contoso.local",  # Parent DC hostname
+            hostname="dc01.contoso.local",  # Parent DC hostname
             is_dc=True,
         )
         state.all_hosts.append(parent_dc)
@@ -700,6 +700,8 @@ class TestAutoGoldenTicket:
         dispatcher = SimpleNamespace(shared_state=state)
         dispatcher._find_domain_controller_ip = MagicMock(return_value="192.168.58.10")
         dispatcher._task_queue = None  # Disable Redis sync for test
+        dispatcher.announce_golden_ticket = AsyncMock()
+        dispatcher._auto_dispatch_trust_key_extraction = AsyncMock()
 
         captured_cmds = []
         captured_dc_ips = []
@@ -728,7 +730,7 @@ class TestAutoGoldenTicket:
         # 1. Detected child domain (child.contoso.local has 3 parts)
         # 2. Determined parent domain (contoso.local)
         # 3. Checked cached DC (192.168.58.121) but REJECTED it because hostname
-        #    winterfell.child.contoso.local ends with child domain, not parent
+        #    ws01.child.contoso.local ends with child domain, not parent
         # 4. Found correct parent DC via host enumeration (192.168.58.238)
         # 5. Used parent DC IP for lookupsid (to get parent domain SID for ExtraSid)
 
@@ -801,7 +803,7 @@ class TestAutoGoldenTicket:
         state.all_hosts.append(
             Host(
                 ip="192.168.58.121",
-                hostname="winterfell.child.contoso.local",
+                hostname="ws01.child.contoso.local",
                 is_dc=True,
             )
         )
@@ -809,7 +811,7 @@ class TestAutoGoldenTicket:
         state.all_hosts.append(
             Host(
                 ip="192.168.58.238",
-                hostname="kingslanding.contoso.local",
+                hostname="dc01.contoso.local",
                 is_dc=True,
             )
         )
@@ -844,8 +846,9 @@ class TestAutoGoldenTicket:
                     0,
                 )
 
-            # 2. Step 1: Combined ticketer + child DCSync for trust key (has CONTOSO$)
-            if "impacket-ticketer" in cmd_str and "CONTOSO$" in cmd_str:
+            # 2. Step 1: Combined ticketer + child DCSync for trust key
+            # Has CANDIDATE_DC markers for DC resolution (Step 2 uses python3 -c instead)
+            if "impacket-ticketer" in cmd_str and "CANDIDATE_DC" in cmd_str:
                 return (
                     "Saving ticket in Administrator.ccache\n"
                     "[*] Dumping Domain Credentials (domain\\uid:rid:lmhash:nthash)\n"
@@ -858,7 +861,7 @@ class TestAutoGoldenTicket:
                     0,
                 )
 
-            # 3. Step 2: Combined ticketer + parent DCSync via referral routing
+            # 3. Step 2: Combined ticketer + parent DCSync via referral routing (python3 -c)
             if "impacket-ticketer" in cmd_str and "secretsdump" in cmd_str:
                 return (
                     "Saving ticket in Administrator.ccache\n"
@@ -905,12 +908,10 @@ class TestAutoGoldenTicket:
         )
 
         # Step 2 should reuse golden ticket (NOT forge inter-realm TGT)
-        # and use referral routing with child DC for Kerberos
-        step2_cmds = [
-            c
-            for c in cmd_strs
-            if "impacket-ticketer" in c and "secretsdump" in c and "CONTOSO$" not in c
-        ]
+        # and use referral routing with child DC for Kerberos.
+        # Step 1 uses bash + impacket-secretsdump -just-dc-user 'CONTOSO$'
+        # Step 2 uses python3 -c with runpy for referral routing
+        step2_cmds = [c for c in cmd_strs if "impacket-ticketer" in c and "python3 -c" in c]
         assert len(step2_cmds) >= 1, (
             f"Expected Step 2 golden ticket + referral DCSync command. Commands: {cmd_strs}"
         )
@@ -926,7 +927,7 @@ class TestAutoGoldenTicket:
             f"Step 2 identity should use child domain (golden ticket realm). Got: {step2_cmd}"
         )
         # Step 2 should target parent DC FQDN
-        assert "kingslanding.contoso.local" in step2_cmd, (
+        assert "dc01.contoso.local" in step2_cmd, (
             f"Step 2 should target parent DC FQDN. Got: {step2_cmd}"
         )
         # Step 2 should NOT use inter-realm TGT approach
@@ -1023,8 +1024,9 @@ class TestAutoGoldenTicket:
                     "",
                     0,
                 )
-            # Step 1: Combined ticketer + child DCSync for trust key (has CONTOSO$)
-            if "impacket-ticketer" in cmd_str and "CONTOSO$" in cmd_str:
+            # Step 1: Combined ticketer + child DCSync for trust key
+            # Has CANDIDATE_DC markers for DC resolution (Step 2 uses python3 -c instead)
+            if "impacket-ticketer" in cmd_str and "CANDIDATE_DC" in cmd_str:
                 return (
                     "Saving ticket in Administrator.ccache\n"
                     "CONTOSO$:1234:aad3b435b51404eeaad3b435b51404ee"  # pragma: allowlist secret
@@ -1034,7 +1036,7 @@ class TestAutoGoldenTicket:
                     "",
                     0,
                 )
-            # Step 2: Combined ticketer + parent DCSync via referral routing
+            # Step 2: Combined ticketer + parent DCSync via referral routing (python3 -c)
             if "impacket-ticketer" in cmd_str and "secretsdump" in cmd_str:
                 return (
                     "Saving ticket in Administrator.ccache\n"
@@ -1072,12 +1074,12 @@ class TestAutoGoldenTicket:
         )
 
         # Step 2 should reuse the golden ticket (NOT forge inter-realm TGT)
+        # Step 1 uses bash + impacket-secretsdump -just-dc-user 'CONTOSO$'
+        # Step 2 uses python3 -c with runpy for referral routing
         step2_cmds = [
             str(c)
             for c in captured_cmds
-            if "impacket-ticketer" in str(c)
-            and "secretsdump" in str(c)
-            and "CONTOSO$" not in str(c)
+            if "impacket-ticketer" in str(c) and "python3 -c" in str(c)
         ]
         assert len(step2_cmds) >= 1, (
             f"Expected Step 2 golden ticket + referral DCSync. "
@@ -1547,7 +1549,7 @@ class TestDirectNmapNetBIOSEnrichment:
                 )
             # Phase 3: nbstat - returns FQDN
             return (
-                "Nmap scan report for castelblack.north.contoso.local (192.168.58.10)\n"
+                "Nmap scan report for sql02.north.contoso.local (192.168.58.10)\n"
                 "PORT    STATE  SERVICE\n"
                 "137/udp open   netbios-ns\n",
                 "",
@@ -1566,7 +1568,7 @@ class TestDirectNmapNetBIOSEnrichment:
 
         assert len(hosts) == 1
         assert hosts[0].ip == "192.168.58.10"
-        assert hosts[0].hostname == "castelblack.north.contoso.local"
+        assert hosts[0].hostname == "sql02.north.contoso.local"
 
     @pytest.mark.asyncio
     async def test_netbios_enrichment_parses_netbios_name(self, monkeypatch):
@@ -1765,3 +1767,254 @@ class TestDirectNmapNetBIOSEnrichment:
         assert len(hosts) == 1
         assert hosts[0].ip == "192.168.58.14"
         assert hosts[0].hostname == ""
+
+
+class TestShouldStopBackgroundTask:
+    """Tests for _should_stop_background_task helper."""
+
+    def test_stops_when_completed(self):
+        """Should always stop when operation is completed."""
+        from ares.core.orchestrator import _should_stop_background_task
+
+        state = SharedRedTeamState(
+            operation_id="op-test-stop-1",
+            target=Target(ip="192.168.58.10", domain="contoso.local"),
+        )
+        state.completed = True
+        assert _should_stop_background_task(state) is True
+
+    def test_continues_when_no_da(self):
+        """Should continue running when DA not yet achieved."""
+        from ares.core.orchestrator import _should_stop_background_task
+
+        state = SharedRedTeamState(
+            operation_id="op-test-stop-2",
+            target=Target(ip="192.168.58.10", domain="contoso.local"),
+        )
+        state.has_domain_admin = False
+        assert _should_stop_background_task(state) is False
+
+    def test_stops_on_da_single_domain(self, monkeypatch):
+        """Should stop on DA in single-domain (non-multi-forest) mode."""
+        from ares.core.orchestrator import _should_stop_background_task
+
+        monkeypatch.setattr(
+            "ares.core.orchestrator._orchestrator.get_multi_forest_mode",
+            lambda: False,
+        )
+
+        state = SharedRedTeamState(
+            operation_id="op-test-stop-3",
+            target=Target(ip="192.168.58.10", domain="contoso.local"),
+        )
+        state.has_domain_admin = True
+        assert _should_stop_background_task(state) is True
+
+    def test_continues_on_da_multi_forest_undominated(self, monkeypatch):
+        """Should continue when DA achieved but foreign forests remain undominated."""
+        from ares.core.models import Host
+        from ares.core.orchestrator import _should_stop_background_task
+
+        monkeypatch.setattr(
+            "ares.core.orchestrator._orchestrator.get_multi_forest_mode",
+            lambda: True,
+        )
+
+        state = SharedRedTeamState(
+            operation_id="op-test-stop-4",
+            target=Target(ip="192.168.58.10", domain="contoso.local"),
+        )
+        state.has_domain_admin = True
+        state.domain_admin_domains = ["contoso.local"]
+        # Add a foreign domain host to make it discoverable
+        state.add_host(
+            Host(
+                ip="192.168.58.20",
+                hostname="dc01.fabrikam.local",
+                services=["88/tcp kerberos-sec"],
+                is_dc=True,
+            )
+        )
+        # fabrikam.local is foreign and undominated
+        assert state.all_forests_dominated() is False
+        assert _should_stop_background_task(state) is False
+
+    def test_stops_on_da_multi_forest_all_dominated(self, monkeypatch):
+        """Should stop when all forests dominated in multi-forest mode."""
+        from ares.core.models import Host
+        from ares.core.orchestrator import _should_stop_background_task
+
+        monkeypatch.setattr(
+            "ares.core.orchestrator._orchestrator.get_multi_forest_mode",
+            lambda: True,
+        )
+
+        state = SharedRedTeamState(
+            operation_id="op-test-stop-5",
+            target=Target(ip="192.168.58.10", domain="contoso.local"),
+        )
+        state.has_domain_admin = True
+        state.domain_admin_domains = ["contoso.local", "fabrikam.local"]
+        state.add_host(
+            Host(
+                ip="192.168.58.20",
+                hostname="dc01.fabrikam.local",
+                services=["88/tcp kerberos-sec"],
+                is_dc=True,
+            )
+        )
+        # Both forests dominated
+        assert state.all_forests_dominated() is True
+        assert _should_stop_background_task(state) is True
+
+
+class TestAutoMssqlDetectionMultiForest:
+    """Test that MSSQL detection continues in multi-forest mode after DA."""
+
+    @pytest.mark.asyncio
+    async def test_mssql_detection_continues_after_da_in_multi_forest(self, monkeypatch):
+        """MSSQL detection should NOT stop after DA when undominated forests remain."""
+        from ares.core.models import Host
+        from ares.core.orchestrator import _auto_mssql_detection
+
+        monkeypatch.setattr(
+            "ares.core.orchestrator._orchestrator.get_multi_forest_mode",
+            lambda: True,
+        )
+
+        state = SharedRedTeamState(
+            operation_id="op-test-mssql-mf",
+            target=Target(ip="192.168.58.10", domain="contoso.local"),
+        )
+        state.has_domain_admin = True
+        state.domain_admin_domains = ["contoso.local"]
+        # Add foreign domain host so forests are not all dominated
+        state.add_host(
+            Host(
+                ip="192.168.58.20",
+                hostname="dc01.fabrikam.local",
+                services=["88/tcp kerberos-sec"],
+                is_dc=True,
+            )
+        )
+        # Add an MSSQL host
+        state.add_host(
+            Host(
+                ip="192.168.58.17",
+                hostname="sql01.contoso.local",
+                services=["1433/tcp ms-sql-s"],
+            )
+        )
+
+        scan_called = False
+
+        async def mock_scan():
+            nonlocal scan_called
+            scan_called = True
+            # Complete the operation to stop the loop
+            state.domain_admin_domains.append("fabrikam.local")
+            return 1
+
+        dispatcher = SimpleNamespace(shared_state=state)
+        dispatcher.scan_hosts_for_mssql = mock_scan
+
+        await _auto_mssql_detection(dispatcher, check_interval=0.05)
+
+        assert scan_called, "MSSQL scan should have been called despite DA on first domain"
+
+
+class TestAutoCrossForestPivot:
+    """Tests for _auto_cross_forest_pivot background task."""
+
+    @pytest.mark.asyncio
+    async def test_cross_forest_pivot_stops_when_not_multi_forest(self, monkeypatch):
+        """Should exit when not in multi-forest mode."""
+        from ares.core.orchestrator import _auto_cross_forest_pivot
+
+        monkeypatch.setattr(
+            "ares.core.orchestrator._orchestrator.get_multi_forest_mode",
+            lambda: False,
+        )
+
+        state = SharedRedTeamState(
+            operation_id="op-test-cfp-1",
+            target=Target(ip="192.168.58.10", domain="contoso.local"),
+        )
+        state.completed = True  # Will stop on first iteration
+
+        dispatcher = SimpleNamespace(shared_state=state)
+        dispatcher._task_queue = None
+
+        await _auto_cross_forest_pivot(dispatcher, check_interval=0.05)
+
+    @pytest.mark.asyncio
+    async def test_cross_forest_pivot_dispatches_fsp_and_mssql(self, monkeypatch):
+        """Should dispatch FSP enumeration and MSSQL re-scan for undominated forests."""
+        from ares.core.models import Credential, Host
+        from ares.core.orchestrator import _auto_cross_forest_pivot
+
+        monkeypatch.setattr(
+            "ares.core.orchestrator._orchestrator.get_multi_forest_mode",
+            lambda: True,
+        )
+
+        state = SharedRedTeamState(
+            operation_id="op-test-cfp-2",
+            target=Target(ip="192.168.58.10", domain="contoso.local"),
+        )
+        state.has_domain_admin = True
+        state.domain_admin_domains = ["contoso.local"]
+        state.domain_controllers["fabrikam.local"] = "192.168.58.20"
+        state.add_host(
+            Host(
+                ip="192.168.58.20",
+                hostname="dc01.fabrikam.local",
+                services=["88/tcp kerberos-sec"],
+                is_dc=True,
+            )
+        )
+        # Add a DA credential for contoso.local
+        state.all_credentials.append(
+            Credential(
+                username="Administrator",
+                password="P@ssw0rd!",  # pragma: allowlist secret
+                domain="contoso.local",
+                source="test",
+                is_admin=True,
+            )  # pragma: allowlist secret
+        )
+
+        dispatched_tasks: list[dict] = []
+        mssql_scanned = False
+
+        async def mock_submit(task_type, target_role, payload, source_agent, priority):
+            dispatched_tasks.append(
+                {
+                    "tool": payload.get("tool"),
+                    "domain": payload.get("domain") or payload.get("target_domain", ""),
+                }
+            )
+            # After first dispatch, mark all forests dominated to stop loop
+            state.domain_admin_domains.append("fabrikam.local")
+
+        async def mock_mssql_scan(force_requeue=False):
+            nonlocal mssql_scanned
+            mssql_scanned = True
+            return 0
+
+        dispatcher = SimpleNamespace(shared_state=state)
+        dispatcher._task_queue = None
+        dispatcher._throttled_submit_task = mock_submit
+        dispatcher.scan_hosts_for_mssql = mock_mssql_scan
+
+        await _auto_cross_forest_pivot(dispatcher, check_interval=0.05)
+
+        # Should have dispatched FSP enumeration
+        fsp_dispatches = [
+            t for t in dispatched_tasks if t["tool"] == "enumerate_foreign_security_principals"
+        ]
+        assert len(fsp_dispatches) >= 1, f"Expected FSP dispatch, got: {dispatched_tasks}"
+        assert fsp_dispatches[0]["domain"] == "fabrikam.local"
+
+        # Should have done MSSQL re-scan
+        assert mssql_scanned

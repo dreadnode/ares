@@ -449,7 +449,7 @@ class TestClassifyIOC:
         assert _classify_ioc("d:\\data") is None
         # But valid domain users should still work
         assert _classify_ioc("contoso\\admin") == "user"
-        assert _classify_ioc("north\\robb.stark") == "user"
+        assert _classify_ioc("contoso\\jane.doe") == "user"
 
 
 class TestAdjustConfidenceForValidation:

@@ -93,6 +93,30 @@ WELL_KNOWN_ACCOUNTS: frozenset[str] = frozenset(
     }
 )
 
+_SUSPICIOUS_VALUE_PATTERNS: tuple[str, ...] = (
+    "separator unmatched",
+    "saving ticket in",
+    "command timed out",
+    "no such file or directory",
+    "maximum steps reached",
+    "attributeerror",
+    "traceback",
+)
+
+
+def _looks_like_invalid_secret(value: str) -> bool:
+    """Return True when a candidate password/hash is clearly tool noise."""
+    normalized = (value or "").strip()
+    if not normalized:
+        return True
+
+    lowered = normalized.lower()
+    if any(pattern in lowered for pattern in _SUSPICIOUS_VALUE_PATTERNS):
+        return True
+
+    # Kerberos ticket file paths should never be stored as credentials or hashes.
+    return lowered.endswith(".ccache") or ".ccache" in lowered
+
 
 def _get_uuid() -> str:
     """Get a UUID, deterministic if replay context is active."""
@@ -708,6 +732,8 @@ _PROCESSED_SET_MAP: dict[str, str] = {
     "dispatched_acl_steps": "acl_steps",
     "scanned_targets": "scanned_targets",
     "processed_trust_extractions": "trust_extractions",
+    "processed_fsp_enumerations": "fsp_enumerations",
+    "processed_cross_forest_pivots": "cross_forest_pivots",
 }
 
 
@@ -832,6 +858,15 @@ class SharedRedTeamState:
     processed_trust_extractions: set[str] = field(
         default_factory=set
     )  # "source_domain:target_forest" - trust key extraction dispatched
+    processed_foreign_dcsync: set[str] = field(
+        default_factory=set
+    )  # "domain:dc_ip:username" - foreign domain DCSync dispatched
+    processed_fsp_enumerations: set[str] = field(
+        default_factory=set
+    )  # "target_domain:dc_ip:username" - FSP enumeration dispatched
+    processed_cross_forest_pivots: set[str] = field(
+        default_factory=set
+    )  # "attack_type:target:cred" - cross-forest pivot dispatched
 
     # Golden ticket capability tracking
     # Key: "domain:username" (lowercase), Value: list of capability info dicts
@@ -947,6 +982,59 @@ class SharedRedTeamState:
 
         # Only persist if we're in the same loop where backend was created
         return current_loop is self._backend_loop
+
+    async def sync_hosts_and_domains_from_redis(self) -> int:
+        """Sync hosts, domains, and DA status from Redis into in-memory state.
+
+        Used by background tasks to pick up externally injected data
+        (e.g., from CLI inject-host/inject-hash) that bypasses the in-memory state.
+
+        Returns:
+            Number of new items synced.
+        """
+        if not self._backend:
+            return 0
+
+        synced = 0
+        try:
+            # Sync has_domain_admin flag
+            da_achieved, da_path, _ = await self._backend.get_domain_admin()
+            if da_achieved and not self.has_domain_admin:
+                self.has_domain_admin = True
+                if da_path:
+                    self.domain_admin_path = da_path
+                synced += 1
+
+            # Sync domain_admin_domains
+            da_domains = await self._backend.get_domain_admin_domains()
+            existing_da = {d.lower() for d in self.domain_admin_domains}
+            for d in da_domains:
+                if d.lower() not in existing_da:
+                    self.domain_admin_domains.append(d.lower())
+                    existing_da.add(d.lower())
+                    synced += 1
+
+            # Sync hosts
+            redis_hosts = await self._backend.get_hosts()
+            existing_ips = {h.ip for h in self.all_hosts}
+            for host in redis_hosts:
+                if host.ip not in existing_ips:
+                    self.all_hosts.append(host)
+                    existing_ips.add(host.ip)
+                    synced += 1
+
+            # Sync domains
+            redis_domains = await self._backend.get_domains()
+            existing_domains = {d.lower() for d in self.all_domains}
+            for domain in redis_domains:
+                if domain.lower() not in existing_domains:
+                    self.all_domains.append(domain)
+                    existing_domains.add(domain.lower())
+                    synced += 1
+        except Exception as e:
+            logger.warning(f"Failed to sync from Redis: {e}")
+
+        return synced
 
     def _track_background_task(self, task, description: str = "") -> None:
         """Track a background Redis persist task with proper error handling.
@@ -1103,6 +1191,16 @@ class SharedRedTeamState:
                 continue
             # A domain is foreign if it's not in the same namespace as target
             foreign.add(domain_lower)
+
+        # Also add validated domains directly (from hosts/users) even if not
+        # yet in all_domains — host injection and enumeration can discover
+        # foreign domains before agents add them to all_domains
+        for vd in validated_domains:
+            if vd == target_domain:
+                continue
+            if vd.endswith("." + target_domain):
+                continue
+            foreign.add(vd)
 
         logger.info(f"_get_foreign_domains result: {foreign}")
         return foreign
@@ -2060,6 +2158,11 @@ class SharedRedTeamState:
                 f"Credential rejected: empty password for '{username}' from {source_agent}"
             )
             return False
+        if _looks_like_invalid_secret(password):
+            logger.debug(
+                f"Credential rejected: invalid password artifact for '{username}' from {source_agent}"
+            )
+            return False
         # Guard against file-path artifacts (e.g., /tmp/users.txt) leaking in.
         if "/" in username or "\\" in username or username.endswith(".txt"):
             logger.debug(f"Credential rejected: path artifact '{username}' from {source_agent}")
@@ -2200,8 +2303,8 @@ class SharedRedTeamState:
             # Only correct from target domain to a related domain (child/parent
             # within the same forest). Do NOT correct to a foreign forest domain,
             # which happens when cross-domain group membership is enumerated
-            # (e.g., cersei.lannister in sevenkingdoms.local discovered via
-            # BloodHound of essos.local through AcrossTheNarrowSea group).
+            # (e.g., user in contoso.local discovered via
+            # BloodHound of fabrikam.local through cross-forest group membership).
             is_child_of_target = normalized_domain.endswith(f".{target_domain}")
             is_parent_of_target = target_domain.endswith(f".{normalized_domain}")
             if not is_child_of_target and not is_parent_of_target:
@@ -2614,8 +2717,8 @@ class SharedRedTeamState:
 
         When nmap/SMB scans a child domain DC, they may report the forest root domain
         instead of the child domain. For example:
-        - winterfell.sevenkingdoms.local (wrong - forest root)
-        - winterfell.north.sevenkingdoms.local (correct - child domain)
+        - ws01.contoso.local (wrong - forest root)
+        - ws01.child.contoso.local (correct - child domain)
 
         This method:
         1. Checks if domain_controllers has an entry for the child domain
@@ -2628,8 +2731,8 @@ class SharedRedTeamState:
         can be incorrect when a child domain is first discovered.
         """
         # DISABLED: This heuristic causes issues when domain_controllers has wrong mappings
-        # The parent DC (kingslanding.sevenkingdoms.local) was being renamed to
-        # kingslanding.north.sevenkingdoms.local, breaking parent domain access.
+        # The parent DC (dc01.contoso.local) was being renamed to
+        # dc01.child.contoso.local, breaking parent domain access.
         return
 
         # Check if we have a DC registered for the child domain
@@ -2651,11 +2754,11 @@ class SharedRedTeamState:
         hostname_lower = dc_host.hostname.lower()
 
         # Check if hostname incorrectly ends with parent domain
-        # e.g., "winterfell.sevenkingdoms.local" should be "winterfell.north.sevenkingdoms.local"
+        # e.g., "ws01.contoso.local" should be "ws01.child.contoso.local"
         if hostname_lower.endswith(f".{parent_domain}") and not hostname_lower.endswith(
             f".{child_fqdn}"
         ):
-            # Extract the hostname prefix (e.g., "winterfell")
+            # Extract the hostname prefix (e.g., "ws01")
             prefix = hostname_lower[: -(len(parent_domain) + 1)]  # Remove ".parent.domain"
 
             # Construct correct hostname
@@ -2698,6 +2801,11 @@ class SharedRedTeamState:
         domain = self._validate_hash_domain(username, domain, source_agent)
 
         hash_value = hash_obj.hash_value or ""
+        if _looks_like_invalid_secret(hash_value):
+            logger.debug(
+                f"Hash rejected: invalid hash artifact for {domain}\\{username} from {source_agent}"
+            )
+            return False
 
         # Detect hash type from value if type is unknown/missing
         # AS-REP hashes start with $krb5asrep$
@@ -3089,8 +3197,8 @@ class SharedRedTeamState:
                                 self.add_domain(domain)
 
                                 # Clean up stale DC mapping if domain changed
-                                # e.g., winterfell.sevenkingdoms.local -> winterfell.north.sevenkingdoms.local
-                                # removes incorrect sevenkingdoms.local -> 10.1.2.121
+                                # e.g., ws01.contoso.local -> ws01.child.contoso.local
+                                # removes incorrect contoso.local -> 192.168.58.121
                                 if (
                                     _old_dc_domain
                                     and _old_dc_domain != domain
@@ -3292,7 +3400,7 @@ class SharedRedTeamState:
         if ips:
             return ips
 
-        # User accounts with dots/underscores (svc_backup, admin.user, jon.snow)
+        # User accounts with dots/underscores (svc_backup, admin.user, john.doe)
         user_accounts = [
             m.group(1)
             for m in re.finditer(r"\b([a-z]+[._][a-z]+)\b", block_lower)

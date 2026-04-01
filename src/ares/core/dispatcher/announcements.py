@@ -142,8 +142,8 @@ class AnnouncementMixin:
         dc_ip = self.shared_state.domain_controllers.get(da_domain_lower)
 
         # Validate DC actually belongs to this domain (not a stale mapping from
-        # incomplete hostname resolution — e.g., NMAP gives winterfell.sevenkingdoms.local
-        # before LDAP corrects it to winterfell.north.sevenkingdoms.local)
+        # incomplete hostname resolution — e.g., NMAP gives ws01.contoso.local
+        # before LDAP corrects it to ws01.child.contoso.local)
         if dc_ip:
             for h in self.shared_state.all_hosts:
                 if h.ip == dc_ip and h.hostname:
@@ -336,6 +336,10 @@ class AnnouncementMixin:
             hash_for_payload = da_hash
             if hash_for_payload and ":" in hash_for_payload:
                 hash_for_payload = hash_for_payload.split(":")[-1]
+            # Include target domain SID if cached (critical for inter-realm ticket)
+            # Without this, the agent must call get_sid which fails cross-forest
+            target_sid = self.shared_state.domain_sids.get(target_forest.lower(), "")
+            source_sid = self.shared_state.domain_sids.get((extraction_domain or "").lower(), "")
             task_payload = {
                 "tool": "extract_trust_key",
                 "domain": extraction_domain,
@@ -344,6 +348,8 @@ class AnnouncementMixin:
                 "dc_ip": extraction_dc_ip,
                 "trusted_domain": target_forest,
                 "use_hash": bool(da_hash),
+                "target_sid": target_sid,
+                "source_sid": source_sid,
             }
 
             logger.warning(

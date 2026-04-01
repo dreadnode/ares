@@ -373,9 +373,9 @@ class TestIsLikelyFqdn:
         assert is_likely_fqdn("db.corp") is True
 
     def test_username_with_dot_returns_false(self):
-        """Usernames like 'sansa.stark' should return False."""
-        assert is_likely_fqdn("sansa.stark") is False
-        assert is_likely_fqdn("jon.snow") is False
+        """Usernames like 'jane.doe' should return False."""
+        assert is_likely_fqdn("jane.doe") is False
+        assert is_likely_fqdn("john.doe") is False
         assert is_likely_fqdn("john.doe") is False
 
     def test_three_segment_fqdn(self):
@@ -895,7 +895,7 @@ class TestTraceToolCall:
                 "secretsdump",
                 target_fqdn="dc01.contoso.local",
                 target_domain="contoso.local",  # Parent domain (target)
-                target_user="samwell.tarly",
+                target_user="bob.smith",
                 credential_domain="child.contoso.local",  # Child domain (credential)
             )
 
@@ -904,7 +904,7 @@ class TestTraceToolCall:
         assert call_kwargs["attributes"]["attack_target_domain"] == "contoso.local"
         # Credential domain is where the user actually belongs
         assert call_kwargs["attributes"]["credential.domain"] == "child.contoso.local"
-        assert call_kwargs["attributes"]["user.name"] == "samwell.tarly"
+        assert call_kwargs["attributes"]["user.name"] == "bob.smith"
 
     def test_trace_tool_call_credential_domain_not_set_when_none(self):
         """trace_tool_call should not include credential.domain when not provided."""

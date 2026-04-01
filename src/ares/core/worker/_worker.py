@@ -456,14 +456,25 @@ class RedisWorkerAgent:
                     if await self._check_for_pointer_switch():
                         return
 
-                # Poll Redis queue (blocks up to 5 seconds)
+                # Poll Redis stream (blocks up to 5 seconds)
                 task = await self.task_queue.poll_task(
                     role=self.role.value,
                     timeout=5.0,
+                    consumer_name=self.agent_name,
                 )
 
                 if task:
-                    await self._process_task(task)
+                    try:
+                        await self._process_task(task)
+                    finally:
+                        # Acknowledge the task in the stream after processing
+                        # (whether success or failure - result is sent separately)
+                        if task.stream_entry_id:
+                            await self.task_queue.ack_task(
+                                self.role.value,
+                                task.stream_entry_id,
+                                urgent=task._stream_urgent,
+                            )
 
                 # Reset retry delay on successful poll
                 retry_delay = 1.0
@@ -547,7 +558,7 @@ class RedisWorkerAgent:
                 elif "." in val and is_likely_fqdn(val):
                     target_fqdn = val
                 elif "." in val:
-                    # Has dot but not FQDN -> likely username (e.g., "sansa.stark")
+                    # Has dot but not FQDN -> likely username (e.g., "jane.doe")
                     target_user = val
                 elif val:
                     # Plain hostname without dots - NOT an FQDN

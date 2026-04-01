@@ -1845,8 +1845,8 @@ class TestRetroactiveDomainNormalization:
     def test_child_domain_dc_hostname_upgraded_via_add_host(self) -> None:
         """Test that child domain DC hostnames are corrected via add_host merge logic.
 
-        When nmap initially reports a short hostname (e.g., "winterfell") and netexec
-        later discovers the correct FQDN (e.g., "winterfell.child.contoso.local"),
+        When nmap initially reports a short hostname (e.g., "ws01") and netexec
+        later discovers the correct FQDN (e.g., "ws01.child.contoso.local"),
         the hostname is upgraded via add_host()'s new_is_more_specific check.
 
         Note: _fix_child_domain_dc_hostnames() is disabled because it incorrectly
@@ -1861,7 +1861,7 @@ class TestRetroactiveDomainNormalization:
         state.add_domain("contoso.local")
         parent_dc = Host(
             ip="192.168.58.238",
-            hostname="kingslanding.contoso.local",
+            hostname="dc01.contoso.local",
             is_dc=True,
         )
         state.add_host(parent_dc)
@@ -1869,7 +1869,7 @@ class TestRetroactiveDomainNormalization:
         # Add child DC with short hostname (nmap no longer builds wrong FQDNs)
         child_dc = Host(
             ip="192.168.58.121",
-            hostname="winterfell",  # Short name from nmap
+            hostname="ws01",  # Short name from nmap
             is_dc=True,
         )
         state.add_host(child_dc)
@@ -1877,17 +1877,17 @@ class TestRetroactiveDomainNormalization:
         # Later, netexec discovers correct FQDN and add_host upgrades it
         updated_dc = Host(
             ip="192.168.58.121",
-            hostname="winterfell.child.contoso.local",
+            hostname="ws01.child.contoso.local",
             is_dc=True,
         )
         state.add_host(updated_dc)
 
         # Verify: DC hostname was upgraded to correct FQDN
-        winterfell = next((h for h in state.all_hosts if h.ip == "192.168.58.121"), None)
-        assert winterfell is not None
-        assert winterfell.hostname == "winterfell.child.contoso.local", (
-            f"DC hostname not upgraded: got {winterfell.hostname}, "
-            f"expected winterfell.child.contoso.local"
+        child_host = next((h for h in state.all_hosts if h.ip == "192.168.58.121"), None)
+        assert child_host is not None
+        assert child_host.hostname == "ws01.child.contoso.local", (
+            f"DC hostname not upgraded: got {child_host.hostname}, "
+            f"expected ws01.child.contoso.local"
         )
 
         # Verify: domain_controllers mapping is correct for child domain
@@ -2837,3 +2837,40 @@ class TestAddHostMerge:
         assert len(state.all_hosts) == 1
         # Original hostname preserved since short names differ
         assert state.all_hosts[0].hostname == "dc01.contoso.local"
+
+
+class TestCredentialArtifactFiltering:
+    """Regression tests for malformed credential/hash artifacts."""
+
+    def test_add_credential_rejects_tool_artifact_password(self) -> None:
+        """Tool error strings should not be stored as passwords."""
+        from ares.core.models import Credential, SharedRedTeamState
+
+        state = SharedRedTeamState(operation_id="test-op")
+        cred = Credential(
+            username="administrator",
+            password="Separator unmatched",  # pragma: allowlist secret
+            domain="fabrikam.local",
+        )
+
+        added = state.add_credential(cred, "credential_access")
+
+        assert added is False
+        assert state.all_credentials == []
+
+    def test_add_hash_rejects_ccache_filename_artifact(self) -> None:
+        """Kerberos ticket filenames should not be stored as hash values."""
+        from ares.core.models import Hash, SharedRedTeamState
+
+        state = SharedRedTeamState(operation_id="test-op")
+        hash_obj = Hash(
+            username="administrator",
+            hash_value="Administrator.ccache",
+            hash_type="Unknown",
+            domain="fabrikam.local",
+        )
+
+        added = state.add_hash(hash_obj, "kerberos")
+
+        assert added is False
+        assert state.all_hashes == []

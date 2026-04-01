@@ -144,6 +144,7 @@ class CredentialHarvestingTools(Toolset):
                     hash_value=hash_value,
                     hash_type="NTLM",
                     domain=hash_domain,
+                    source=f"secretsdump:{target}",
                 )
                 if hasattr(self.state, "add_hash"):
                     self.state.add_hash(hash_obj, "secretsdump")

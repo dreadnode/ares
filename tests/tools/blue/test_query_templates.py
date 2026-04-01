@@ -1409,7 +1409,7 @@ class TestS4UDelegationDetection:
     """Tests for detect_s4u_delegation method.
 
     This detection catches the attack from op-20260214-141846:
-    - jon.snow used constrained delegation via S4U2Proxy
+    - john.doe used constrained delegation via S4U2Proxy
     - Impersonated Administrator to CIFS/dc02
     - Led to secretsdump and krbtgt extraction
     """
@@ -1512,7 +1512,7 @@ class TestLSASecretsAccessDetection:
     - DefaultPassword, DPAPI, NLKM patterns
 
     From op-20260214-141846:
-    - LSA secret 'DefaultPassword' contained robb.stark credentials
+    - LSA secret 'DefaultPassword' contained jane.doe credentials
     """
 
     @pytest.fixture

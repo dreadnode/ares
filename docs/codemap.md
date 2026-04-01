@@ -50,7 +50,7 @@ The central framework for both blue and red team operations.
 | `replay/` | Deterministic replay for debugging and testing |
 | `factories/` | Agent and worker factory implementations |
 | `models.py` | Data models (Credential, Host, Evidence, Target, etc.) |
-| `task_queue.py` | Redis-based task queue for multi-agent coordination |
+| `task_queue.py` | Redis Streams-based task queue with consumer groups for multi-agent coordination |
 | `persistence.py` | State persistence and serialization |
 | `recovery.py` | Operation checkpoint and recovery management |
 | `state_backend.py` | Redis state backend for persistent storage |
@@ -349,7 +349,7 @@ Each agent defines: model selection, max_steps, pod_selector, capabilities.
 
 ```text
 Orchestrator Pod (ares-orchestrator)
-    ↓ Redis task queues + pub/sub
+    ↓ Redis Streams (task queues) + pub/sub
 Worker Pods:
     ├── RECON (ares-recon-agent)
     ├── CREDENTIAL_ACCESS (ares-credential-access-agent)

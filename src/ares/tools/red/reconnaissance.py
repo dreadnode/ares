@@ -510,7 +510,7 @@ class NetworkEnumerationTools(Toolset):
                 # e.g., "child.local" might be truncated "child.contoso.local"
                 domain_parts = domain_suffix.split(".")
                 if domain_parts:
-                    first_label = domain_parts[0]  # e.g., "north"
+                    first_label = domain_parts[0]  # e.g., "child"
                     for known in known_domains:
                         if known.startswith(first_label + ".") and known != domain_suffix:
                             corrected = f"{short_name}.{known}"
@@ -524,9 +524,9 @@ class NetworkEnumerationTools(Toolset):
                 if not current_ip:
                     return
                 # NOTE: Do NOT join short hostname with nmap's (Domain:...) to build FQDN.
-                # nmap's LDAP probe reports the forest root domain (e.g., "sevenkingdoms.local")
-                # even for child domain DCs (e.g., winterfell belongs to "north.sevenkingdoms.local").
-                # Joining produces wrong FQDNs like "winterfell.sevenkingdoms.local".
+                # nmap's LDAP probe reports the forest root domain (e.g., "contoso.local")
+                # even for child domain DCs (e.g., ws01 belongs to "child.contoso.local").
+                # Joining produces wrong FQDNs like "ws01.contoso.local".
                 # The correct FQDN will be discovered by netexec SMB which reports the actual domain,
                 # and merged via add_host()'s hostname upgrade logic.
                 hostname_to_use = current_hostname
@@ -2455,7 +2455,7 @@ class TrustEnumerationTools(Toolset):
             Structured output with discovered trust relationships
 
         Example:
-            >>> enumerate_domain_trusts("north.sevenkingdoms.local", "admin", "pass", "192.168.58.10")
+            >>> enumerate_domain_trusts("child.contoso.local", "admin", "pass", "192.168.58.10")
         """
         import subprocess
 
@@ -2593,3 +2593,288 @@ class TrustEnumerationTools(Toolset):
         except Exception as e:
             logger.error(f"Trust enumeration failed: {e}")
             return f"Trust enumeration failed: {e}"
+
+    @dn.tool_method
+    def enumerate_foreign_security_principals(
+        self,
+        target_domain: str,
+        username: str,
+        password: str,
+        dc_ip: str,
+        source_domain: str = "",
+    ) -> str:
+        """
+        Enumerate Foreign Security Principals (FSPs) in a domain via LDAP.
+
+        FSPs represent users/groups from OTHER domains that have been granted
+        permissions in this domain. This is critical for cross-forest attacks:
+
+        - Foreign users in local groups may have GenericWrite → RBCD attack
+        - Foreign users in LAPS reader groups → read local admin passwords
+        - Foreign groups with ACL rights → privilege escalation across forests
+
+        Args:
+            target_domain: Domain to enumerate FSPs in (e.g., 'fabrikam.local')
+            username: Username for LDAP authentication
+            password: Password for authentication
+            dc_ip: Domain controller IP address
+            source_domain: Optional source domain for SID resolution
+
+        Returns:
+            Structured output mapping foreign principals to local group memberships
+
+        Example:
+            >>> enumerate_foreign_security_principals("fabrikam.local", "admin", "pass", "192.168.58.20", "contoso.local")
+        """
+        import subprocess
+
+        # Step 1: Query ForeignSecurityPrincipals container for all FSP objects
+        base_dn = ",".join(f"DC={p}" for p in target_domain.split("."))
+        fsp_base = f"CN=ForeignSecurityPrincipals,{base_dn}"
+
+        cmd = [
+            "ldapsearch",
+            "-x",
+            "-H",
+            f"ldap://{dc_ip}",
+            "-D",
+            f"{username}@{target_domain}" if "@" not in username else username,
+            "-w",
+            password,
+            "-b",
+            fsp_base,
+            "(objectClass=foreignSecurityPrincipal)",
+            "cn",
+            "objectSid",
+            "distinguishedName",
+        ]
+
+        try:
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=60,
+                check=False,
+            )
+            output = result.stdout + "\n" + (result.stderr or "")
+
+            # Parse FSP entries — extract SIDs from CN values
+            fsp_sids: list[str] = []
+            for raw_line in output.split("\n"):
+                line = raw_line.strip()
+                if line.startswith(("cn: ", "CN: ")):
+                    sid = line.split(": ", 1)[1].strip()
+                    # FSP CN is the SID string (e.g., S-1-5-21-xxx-yyy-zzz-1234)
+                    if sid.startswith("S-1-5-21-"):
+                        fsp_sids.append(sid)
+
+            if not fsp_sids:
+                return (
+                    f"No Foreign Security Principals found in {target_domain}.\n"
+                    f"This domain may not have cross-forest group memberships configured."
+                )
+
+            # Step 2: For each FSP SID, find which groups it belongs to
+            fsp_groups: dict[str, list[str]] = {}  # SID → list of group names
+
+            for sid in fsp_sids:
+                fsp_dn = f"CN={sid},{fsp_base}"
+                group_cmd = [
+                    "ldapsearch",
+                    "-x",
+                    "-H",
+                    f"ldap://{dc_ip}",
+                    "-D",
+                    f"{username}@{target_domain}" if "@" not in username else username,
+                    "-w",
+                    password,
+                    "-b",
+                    base_dn,
+                    f"(&(objectClass=group)(member={fsp_dn}))",
+                    "cn",
+                    "sAMAccountName",
+                    "description",
+                ]
+
+                try:
+                    grp_result = subprocess.run(
+                        group_cmd,
+                        capture_output=True,
+                        text=True,
+                        timeout=30,
+                        check=False,
+                    )
+                    grp_output = grp_result.stdout or ""
+                    groups: list[str] = []
+                    for raw_grp_line in grp_output.split("\n"):
+                        grp_line = raw_grp_line.strip()
+                        if grp_line.lower().startswith(
+                            "samaccountname: "
+                        ) or grp_line.lower().startswith("cn: "):
+                            grp_name = grp_line.split(": ", 1)[1].strip()
+                            if grp_name and grp_name != fsp_base:
+                                groups.append(grp_name)
+                    if groups:
+                        # Deduplicate while preserving order
+                        seen: set[str] = set()
+                        unique_groups: list[str] = []
+                        for g in groups:
+                            if g.lower() not in seen:
+                                seen.add(g.lower())
+                                unique_groups.append(g)
+                        fsp_groups[sid] = unique_groups
+                except subprocess.TimeoutExpired:
+                    logger.warning(f"Group membership query timed out for SID {sid}")
+                except Exception as grp_err:
+                    logger.warning(f"Group membership query failed for SID {sid}: {grp_err}")
+
+            # Step 3: Try to resolve SIDs to usernames via source domain
+            sid_to_name: dict[str, str] = {}
+            if source_domain and self.state:
+                # Check domain_controllers for source domain DC
+                source_dc = self.state.domain_controllers.get(source_domain.lower())
+                if source_dc:
+                    # Find a credential for the source domain
+                    source_cred = None
+                    for cred in self.state.all_credentials:
+                        if (
+                            cred.domain
+                            and cred.domain.lower() == source_domain.lower()
+                            and cred.password
+                        ):
+                            source_cred = cred
+                            break
+
+                    if source_cred:
+                        for sid in fsp_sids:
+                            # Use ldapsearch to resolve SID in source domain
+                            # Convert SID string to binary for LDAP search
+                            resolve_cmd = [
+                                "ldapsearch",
+                                "-x",
+                                "-H",
+                                f"ldap://{source_dc}",
+                                "-D",
+                                f"{source_cred.username}@{source_cred.domain}",
+                                "-w",
+                                source_cred.password,
+                                "-b",
+                                ",".join(f"DC={p}" for p in source_domain.split(".")),
+                                f"(objectSid={sid})",
+                                "sAMAccountName",
+                                "objectClass",
+                            ]
+                            try:
+                                res = subprocess.run(
+                                    resolve_cmd,
+                                    capture_output=True,
+                                    text=True,
+                                    timeout=15,
+                                    check=False,
+                                )
+                                for raw_rline in (res.stdout or "").split("\n"):
+                                    rline = raw_rline.strip()
+                                    if rline.lower().startswith("samaccountname: "):
+                                        name = rline.split(": ", 1)[1].strip()
+                                        sid_to_name[sid] = name
+                                        break
+                            except Exception:
+                                pass
+
+            # Build output
+            output_parts = [f"🔍 FOREIGN SECURITY PRINCIPALS: {target_domain}"]
+            output_parts.append(f"DC: {dc_ip}")
+            output_parts.append(f"FSPs found: {len(fsp_sids)}")
+            output_parts.append(f"FSPs with group memberships: {len(fsp_groups)}\n")
+
+            attack_paths: list[dict[str, Any]] = []
+
+            for sid in fsp_sids:
+                name = sid_to_name.get(sid, "")
+                display = f"{name}@{source_domain}" if name else sid
+                groups = fsp_groups.get(sid, [])
+
+                output_parts.append(f"  📌 {display}")
+                output_parts.append(f"     SID: {sid}")
+                if groups:
+                    output_parts.append(f"     Groups: {', '.join(groups)}")
+                    for g in groups:
+                        attack_paths.append(
+                            {
+                                "sid": sid,
+                                "username": name,
+                                "source_domain": source_domain,
+                                "target_domain": target_domain,
+                                "group": g,
+                            }
+                        )
+                else:
+                    output_parts.append(
+                        "     Groups: (none found — may have direct ACL permissions)"
+                    )
+                output_parts.append("")
+
+            if attack_paths:
+                output_parts.append("\n🎯 ATTACK IMPLICATIONS:")
+                output_parts.append(
+                    "Foreign principals in local groups may have exploitable permissions:"
+                )
+                for ap in attack_paths:
+                    g = ap["group"]
+                    display = (
+                        f"{ap['username']}@{ap['source_domain']}" if ap["username"] else ap["sid"]
+                    )
+                    output_parts.append(f"  → {display} is member of '{g}' in {target_domain}")
+                    output_parts.append(
+                        f"    Check: Does '{g}' have GenericWrite/GenericAll on computers? → RBCD attack"
+                    )
+                    output_parts.append(
+                        f"    Check: Is '{g}' a LAPS reader? → laps_dump for local admin passwords"
+                    )
+                    output_parts.append(
+                        f"    Check: Does '{g}' have WriteMember on privileged groups? → add to Domain Admins"
+                    )
+
+                output_parts.append("\n⚡ NEXT STEPS:")
+                output_parts.append(
+                    "  1. If you control the foreign user, authenticate to this domain AS that user"
+                )
+                output_parts.append(
+                    "  2. Run BloodHound or manual ACL checks to see what the group can do"
+                )
+                output_parts.append(
+                    "  3. GenericWrite on computer$ → rbcd_write + s4u_attack → local admin"
+                )
+                output_parts.append("  4. LAPS reader → laps_dump → local admin password")
+
+            # JSON structured output
+            output_parts.append("\n\n📊 STRUCTURED DATA (JSON):")
+            output_parts.append(
+                json.dumps(
+                    {
+                        "target_domain": target_domain,
+                        "source_domain": source_domain,
+                        "fsp_count": len(fsp_sids),
+                        "fsp_with_groups": len(fsp_groups),
+                        "principals": [
+                            {
+                                "sid": sid,
+                                "username": sid_to_name.get(sid, ""),
+                                "groups": fsp_groups.get(sid, []),
+                            }
+                            for sid in fsp_sids
+                        ],
+                        "attack_paths": attack_paths,
+                    },
+                    indent=2,
+                )
+            )
+
+            return "\n".join(output_parts)
+
+        except subprocess.TimeoutExpired:
+            return f"FSP enumeration timed out for {target_domain}"
+        except Exception as e:
+            logger.error(f"FSP enumeration failed: {e}")
+            return f"FSP enumeration failed: {e}"

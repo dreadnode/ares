@@ -824,7 +824,7 @@ def _print_loot(state, *, json_output: bool = False) -> None:
     da_forest_roots = set()
     for da_domain in da_domains:
         parts = da_domain.split(".")
-        # Forest root is the rightmost 2 parts (e.g., essos.local from north.essos.local)
+        # Forest root is the rightmost 2 parts (e.g., contoso.local from corp.contoso.local)
         if len(parts) >= 2:
             forest_root = ".".join(parts[-2:]) if len(parts) == 2 else ".".join(parts[1:])
             # For child domains, find the actual forest root
@@ -2337,7 +2337,7 @@ async def inject_hash(
         # Inject krbtgt to simulate DA
         ares-ops inject-hash op-xxx krbtgt \\
             "aad3b435b51404eeaad3b435b51404ee:313b6f423a71d74c0a1b8a2f43b22d4c" \\
-            --domain sevenkingdoms.local
+            --domain contoso.local
 
         # Inject Administrator NTLM hash
         ares-ops inject-hash op-xxx Administrator \\
@@ -2386,7 +2386,7 @@ async def inject_hash(
             logger.info("Set has_domain_admin=True (krbtgt hash injected)")
 
         # Dispatch trust key extraction for multi-forest mode
-        # This triggers extraction of trust account hashes (e.g., ESSOS$) for inter-forest attacks
+        # This triggers extraction of trust account hashes (e.g., FABRIKAM$) for inter-forest attacks
         if is_da_hash and state.has_domain_admin:
             from ares.core.config import get_multi_forest_mode
 
@@ -2435,9 +2435,23 @@ async def inject_hash(
                                 "priority": 1,
                             }
 
-                            # Submit directly to privesc queue with RPUSH for high priority
+                            # Submit directly to privesc urgent stream
                             task_json = json.dumps(task_data)
-                            await tq.redis.rpush("ares:tasks:privesc", task_json)
+                            stream_key = "ares:stream:tasks:privesc:urgent"
+                            group_name = "ares:cg:tasks:privesc"
+                            try:
+                                await tq.redis.xgroup_create(
+                                    stream_key, group_name, id="0", mkstream=True
+                                )
+                            except Exception as xg_err:
+                                if "BUSYGROUP" not in str(xg_err):
+                                    raise
+                            await tq.redis.xadd(
+                                stream_key,
+                                {"data": task_json},
+                                maxlen=10000,
+                                approximate=True,
+                            )
                             logger.info(
                                 f"🌲 Dispatched trust key extraction: {da_domain_lower} → {target_forest} "
                                 f"(DC: {dc_ip})"
@@ -2486,11 +2500,11 @@ async def inject_host(
     appear as "discovered" (validated by having a host in that domain).
 
     Examples:
-        # Inject DC from foreign forest (makes essos.local a discovered domain)
-        ares-ops inject-host op-xxx 192.168.58.20 dc01.essos.local
+        # Inject DC from foreign forest (makes fabrikam.local a discovered domain)
+        ares-ops inject-host op-xxx 192.168.58.20 dc01.fabrikam.local
 
         # Inject child domain DC
-        ares-ops inject-host op-xxx 192.168.58.30 dc01.north.sevenkingdoms.local
+        ares-ops inject-host op-xxx 192.168.58.30 dc01.child.contoso.local
     """
     from ares.core.models import Host
     from ares.core.state_backend import RedisStateBackend
@@ -2515,13 +2529,13 @@ async def inject_host(
             backend = RedisStateBackend(client, operation_id)
             await backend.add_host(host)
 
-            # Extract domain from hostname and add to all_domains
+            # Extract domain from hostname and persist to Redis domains set
             parts = hostname.split(".", 1)
             if len(parts) > 1:
                 domain = parts[1]
-                if domain not in state.all_domains:
-                    state.all_domains.append(domain)
-                    logger.info(f"Domain '{domain}' added to all_domains (host discovered)")
+                was_new = await backend.add_domain(domain)
+                if was_new:
+                    logger.info(f"Domain '{domain}' added to Redis domains set (host discovered)")
 
             await client.aclose()
 
@@ -2560,12 +2574,12 @@ async def inject_domain_sid(
     logic when it cannot obtain the SID via lookupsid or LDAP.
 
     Examples:
-        # Inject domain SID for north.sevenkingdoms.local
-        ares-ops inject-domain-sid op-xxx north.sevenkingdoms.local \\
+        # Inject domain SID for child.contoso.local
+        ares-ops inject-domain-sid op-xxx child.contoso.local \\
             "S-1-5-21-3870412345-54678901-1234567890"
 
-        # Inject parent domain SID for sevenkingdoms.local
-        ares-ops inject-domain-sid op-xxx sevenkingdoms.local \\
+        # Inject parent domain SID for contoso.local
+        ares-ops inject-domain-sid op-xxx contoso.local \\
             "S-1-5-21-1234567890-9876543210-5555555555"
     """
     from ares.core.state_backend import RedisStateBackend

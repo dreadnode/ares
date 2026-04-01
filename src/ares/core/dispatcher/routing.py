@@ -676,6 +676,15 @@ class RoutingMixin:
                 f"- **Discovery Method:** MSSQL enum_impersonate\n"
                 f"- **Impact:** Full SQL Server control, xp_cmdshell for OS command execution."
             ),
+            "mssql_cross_forest_pivot": (
+                f"### MSSQL Cross-Forest Pivot — Linked Server on {hostname}\n"
+                f"**Vulnerability:** MSSQL linked servers enable cross-forest pivoting "
+                f"via OPENQUERY/xp_cmdshell on the remote server.\n"
+                f"- **Affected Resource:** {hostname} ({target})\n"
+                f"- **Discovery Method:** MSSQL linked server enumeration + cross-forest analysis\n"
+                f"- **Impact:** RCE on foreign forest host via linked server chain, "
+                f"credential extraction, and full forest compromise."
+            ),
             "esc8": (
                 f"### ADCS ESC8 — Web Enrollment Relay on {hostname}\n"
                 f"**Vulnerability:** ADCS web enrollment endpoint is vulnerable to "

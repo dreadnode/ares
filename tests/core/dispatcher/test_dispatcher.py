@@ -2127,3 +2127,67 @@ class TestDomainAdminTraceDiscovery:
         assert len(da_calls) == 2, f"Expected 2 domain_admin traces, got {len(da_calls)}"
         traced_domains = {c["target_domain"] for c in da_calls}
         assert traced_domains == {"contoso.local", "child.contoso.local"}
+
+    @pytest.mark.asyncio
+    async def test_scan_hosts_for_mssql_queues_cross_forest_pivot(self):
+        """Multi-forest MSSQL hosts should queue explicit cross-forest pivot vulns."""
+        dispatcher = RedTeamDispatcher()
+        dispatcher._shared_state = SharedRedTeamState(operation_id="op-test-mssql-cross-forest")
+        dispatcher._shared_state.has_domain_admin = True
+        dispatcher._shared_state.domain_admin_domains = ["child.contoso.local"]
+        dispatcher._shared_state.all_domains = [
+            "contoso.local",
+            "child.contoso.local",
+            "fabrikam.local",
+        ]
+        dispatcher._shared_state.all_hosts.extend(
+            [
+                Host(
+                    ip="10.1.2.17",
+                    hostname="sql-child.child.contoso.local",
+                    services=["mssql/1433"],
+                ),
+                Host(
+                    ip="10.1.2.210",
+                    hostname="sql-root.fabrikam.local",
+                    services=["mssql/1433"],
+                ),
+            ]
+        )
+        dispatcher._shared_state.all_credentials.append(
+            Credential(
+                username="sql.admin",
+                password="SqlPass123!",  # pragma: allowlist secret
+                domain="child.contoso.local",
+            )
+        )
+        dispatcher.queue_vulnerability = AsyncMock()
+
+        queued = await dispatcher.scan_hosts_for_mssql()
+
+        assert queued == 2
+        assert dispatcher.queue_vulnerability.await_count == 2
+        for call in dispatcher.queue_vulnerability.call_args_list:
+            assert call.kwargs["vuln_type"] == "mssql_cross_forest_pivot"
+
+    @pytest.mark.asyncio
+    async def test_scan_hosts_for_mssql_skips_invalid_sql_password_artifact(self):
+        """Malformed credential artifacts should not be reused for MSSQL auth."""
+        dispatcher = RedTeamDispatcher()
+        dispatcher._shared_state = SharedRedTeamState(operation_id="op-test-mssql-invalid-cred")
+        dispatcher._shared_state.all_hosts.append(
+            Host(ip="192.168.58.20", hostname="sql01", services=["tcp/1433"])
+        )
+        dispatcher._shared_state.all_credentials.append(
+            Credential(
+                username="administrator",
+                password="Separator unmatched",  # pragma: allowlist secret
+                domain="fabrikam.local",
+            )
+        )
+        dispatcher.queue_vulnerability = AsyncMock()
+
+        queued = await dispatcher.scan_hosts_for_mssql()
+
+        assert queued == 0
+        dispatcher.queue_vulnerability.assert_not_awaited()

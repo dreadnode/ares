@@ -64,6 +64,13 @@ def mock_redis():
     redis.brpop = AsyncMock(return_value=None)
     redis.rpop = AsyncMock(return_value=None)
     redis.llen = AsyncMock(return_value=0)
+    # Stream operations
+    redis.xadd = AsyncMock(return_value="1-0")
+    redis.xreadgroup = AsyncMock(return_value=None)
+    redis.xack = AsyncMock(return_value=1)
+    redis.xlen = AsyncMock(return_value=0)
+    redis.xgroup_create = AsyncMock(return_value=True)
+    redis.xautoclaim = AsyncMock(return_value=("0-0", [], []))
     redis.aclose = AsyncMock()
 
     # ZSET operations for vulnerability queue
@@ -386,11 +393,11 @@ class TestDispatcher:
         assert task_id != ""
         assert task_id in dispatcher.shared_state.pending_tasks
 
-        # With Redis enabled, task goes to Redis queue, not in-memory queue
-        # Verify Redis lpush was called with task for cracker queue
-        mock_redis.lpush.assert_called()
-        call_args = mock_redis.lpush.call_args
-        assert "ares:tasks:cracker" in call_args[0][0]
+        # With Redis enabled, task goes to Redis stream, not in-memory queue
+        # Verify Redis xadd was called with task for cracker stream
+        mock_redis.xadd.assert_called()
+        call_args = mock_redis.xadd.call_args
+        assert "ares:stream:tasks:cracker:" in call_args[0][0]
 
     @pytest.mark.asyncio
     async def test_task_completion(self, dispatcher):

