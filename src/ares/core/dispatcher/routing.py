@@ -729,11 +729,10 @@ class RoutingMixin:
         Returns:
             Task ID for tracking.
         """
-        # Skip new crack tasks if DA already achieved (allow in-progress to complete)
-        # Multi-forest mode: continue cracking for cross-forest credential discovery
-        if self._should_skip_for_da():
-            logger.debug(f"Skipping crack request for {username} - DA already achieved")
-            return ""
+        # NOTE: crack tasks are NEVER gated by DA status.
+        # They don't consume LLM tokens and cracking foreign domain hashes
+        # (e.g., missandei@essos.local AS-REP) is critical for multi-forest pivots.
+        # The _auto_crack_dispatch comment at line ~2810 confirms this intent.
         # Normalize domain to FQDN format
         domain = self._normalize_domain(domain)
         # Use provided task_queue or fall back to instance queue

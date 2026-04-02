@@ -711,7 +711,34 @@ class ResultProcessingMixin:
             # For ADCS vulnerabilities, ensure we have credential context for exploitation
             # (worker may have run certipy_find with creds that orchestrator doesn't know about)
             if vuln_type.startswith("adcs_"):
-                # If no credentials in details, try to find valid creds for the domain
+                # ESC4: need the credential of the user with GenericAll on the template
+                # (e.g., khal.drogo), not just any domain user
+                enrollee = (
+                    (
+                        details.get("enrollee_user")
+                        or details.get("principal")
+                        or details.get("write_owner")
+                        or ""
+                    )
+                    .lower()
+                    .strip()
+                )
+
+                if enrollee and (not details.get("username") or not details.get("password")):
+                    # Try to find the specific principal's credential
+                    for cred in self.shared_state.all_credentials:
+                        if cred.username.lower() == enrollee and cred.password:
+                            details["username"] = cred.username
+                            details["password"] = cred.password
+                            details["domain"] = cred.domain
+                            details["enrollee_user"] = cred.username
+                            logger.info(
+                                f"ADCS {vuln_type}: using principal credential "
+                                f"{cred.username}@{cred.domain} for template exploitation"
+                            )
+                            break
+
+                # If no principal-specific creds, fall back to any valid creds for the domain
                 if not details.get("username") or not details.get("password"):
                     domain_hint = details.get("domain") or ""
                     for cred in self.shared_state.all_credentials:

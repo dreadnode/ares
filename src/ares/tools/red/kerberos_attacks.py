@@ -1221,6 +1221,141 @@ class CertipyTools(Toolset):
         elif block not in self.state.weaknesses:
             self.state.weaknesses.append(block)
 
+    def _queue_esc4_vulnerability(
+        self,
+        certipy_output: str,
+        domain: str,
+        dc_ip: str,
+        username: str,
+        password: str | None,
+    ) -> None:
+        """Auto-queue ESC4 vulnerability when detected by certipy_find."""
+        if not self.state or not isinstance(self.state, SharedRedTeamState):
+            return
+
+        # Extract template name from certipy output
+        template_match = re.search(r"Template Name\s*:\s*(\S+)", certipy_output, re.IGNORECASE)
+        template_name = template_match.group(1).strip() if template_match else ""
+
+        # Extract CA name
+        ca_match = re.search(r"CA Name\s*:\s*([^\n\r]+)", certipy_output, re.IGNORECASE)
+        ca_name = ca_match.group(1).strip() if ca_match else ""
+
+        # Extract principal with dangerous permissions (GenericAll, WriteDacl, WriteOwner)
+        # Certipy outputs: "ESSOS.LOCAL\\khal.drogo : GenericAll"
+        enrollee_user = ""
+        perm_pattern = re.compile(
+            r"(\S+\\(\S+))\s*:\s*(?:GenericAll|WriteDacl|WriteOwner|GenericWrite)",
+            re.IGNORECASE,
+        )
+        for m in perm_pattern.finditer(certipy_output):
+            candidate = m.group(2).strip().lower()
+            # Skip machine accounts and built-in groups
+            if candidate.endswith("$") or candidate in (
+                "domain admins",
+                "enterprise admins",
+                "administrators",
+                "cert publishers",
+                "enterprise key admins",
+            ):
+                continue
+            enrollee_user = candidate
+            break
+
+        if not template_name:
+            logger.warning("ESC4 detected but couldn't extract template name from certipy output")
+            return
+
+        target = dc_ip
+        vuln_id = f"adcs_esc4_{domain}_{template_name}_{uuid.uuid4().hex[:8]}"
+
+        details: dict[str, str | list[str] | None] = {
+            "template": template_name,
+            "ca_name": ca_name,
+            "domain": domain,
+            "dc_ip": dc_ip,
+            "username": username,
+            "password": password,
+            "enrollee_user": enrollee_user,
+            "principal": enrollee_user,
+            "attack_steps": [
+                f"1. certipy_template_esc4 to modify template '{template_name}' "
+                f"(user with GenericAll: {enrollee_user or 'unknown'})",
+                "2. certipy_request with -upn administrator@domain",
+                "3. certipy_auth to get Administrator NTLM hash",
+                "4. DCSync with Administrator hash",
+            ],
+        }
+
+        vuln = VulnerabilityInfo(
+            vuln_id=vuln_id,
+            vuln_type="adcs_esc4",
+            target=target,
+            discovered_by="certipy_find",
+            details=details,
+            priority=2,
+        )
+
+        added = self.state.add_vulnerability(vuln)
+        if added:
+            logger.warning(
+                f"[!] ESC4 vulnerability queued: {vuln_id} "
+                f"(template: {template_name}, principal: {enrollee_user or 'unknown'}, "
+                f"CA: {ca_name or 'unknown'})"
+            )
+
+    def _queue_esc1_vulnerability(
+        self,
+        certipy_output: str,
+        domain: str,
+        dc_ip: str,
+        username: str,
+        password: str | None,
+    ) -> None:
+        """Auto-queue ESC1 vulnerability when detected by certipy_find."""
+        if not self.state or not isinstance(self.state, SharedRedTeamState):
+            return
+
+        # Extract template name
+        template_match = re.search(r"Template Name\s*:\s*(\S+)", certipy_output, re.IGNORECASE)
+        template_name = template_match.group(1).strip() if template_match else ""
+
+        # Extract CA name
+        ca_match = re.search(r"CA Name\s*:\s*([^\n\r]+)", certipy_output, re.IGNORECASE)
+        ca_name = ca_match.group(1).strip() if ca_match else ""
+
+        if not template_name:
+            logger.warning("ESC1 detected but couldn't extract template name from certipy output")
+            return
+
+        target = dc_ip
+        vuln_id = f"adcs_esc1_{domain}_{template_name}_{uuid.uuid4().hex[:8]}"
+
+        details: dict[str, str | list[str] | None] = {
+            "template": template_name,
+            "ca_name": ca_name,
+            "domain": domain,
+            "dc_ip": dc_ip,
+            "username": username,
+            "password": password,
+        }
+
+        vuln = VulnerabilityInfo(
+            vuln_id=vuln_id,
+            vuln_type="adcs_esc1",
+            target=target,
+            discovered_by="certipy_find",
+            details=details,
+            priority=2,
+        )
+
+        added = self.state.add_vulnerability(vuln)
+        if added:
+            logger.warning(
+                f"[!] ESC1 vulnerability queued: {vuln_id} "
+                f"(template: {template_name}, CA: {ca_name or 'unknown'})"
+            )
+
     def _queue_esc8_vulnerability(
         self,
         certipy_output: str,
@@ -1450,6 +1585,14 @@ class CertipyTools(Toolset):
                 # Auto-queue ESC8 vulnerability for exploitation
                 # This ensures the orchestrator knows to dispatch coercion tasks
                 self._queue_esc8_vulnerability(result, domain, dc_ip, username, resolved_password)
+
+            # Auto-queue ESC1/ESC4 vulnerabilities for exploitation
+            # Without this, the LLM agent must manually call queue_vulnerability_for_exploitation
+            # which is unreliable for the organic chain (e.g., missandei→khal.drogo→ESC4→DA)
+            if "esc4" in result.lower():
+                self._queue_esc4_vulnerability(result, domain, dc_ip, username, resolved_password)
+            elif "esc1" in result.lower():
+                self._queue_esc1_vulnerability(result, domain, dc_ip, username, resolved_password)
 
             return result
 

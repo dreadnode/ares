@@ -690,13 +690,16 @@ async def _exploit_vulnerability(
     async def dispatch_krbtgt() -> str:
         return await _dispatch_krbtgt(dispatcher, vuln, target, details)
 
+    # NOTE: vuln_type is normalized to lowercase by queue_vulnerability(),
+    # so all comparisons must use lowercase.
+    vt_lower = vuln_type.lower()
     routes = [
-        (lambda: vuln_type.startswith("ADCS_"), dispatch_exploit),
-        (lambda: vuln_type == "acl_abuse", dispatch_acl),
-        (lambda: "delegation" in vuln_type.lower(), dispatch_exploit),
-        (lambda: vuln_type == "krbtgt_hash", dispatch_krbtgt),
-        (lambda: vuln_type == "dcsync", dispatch_exploit),
-        (lambda: vuln_type.startswith("mssql_"), dispatch_exploit),
+        (lambda: vt_lower.startswith("adcs_"), dispatch_exploit),
+        (lambda: vt_lower == "acl_abuse", dispatch_acl),
+        (lambda: "delegation" in vt_lower, dispatch_exploit),
+        (lambda: vt_lower == "krbtgt_hash", dispatch_krbtgt),
+        (lambda: vt_lower == "dcsync", dispatch_exploit),
+        (lambda: vt_lower.startswith("mssql_"), dispatch_exploit),
         (lambda: True, dispatch_exploit),
     ]
 

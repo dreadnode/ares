@@ -1688,12 +1688,23 @@ async def _auto_adcs_enumeration(
                 continue
 
             # Build current domain set (computed from state each iteration)
+            # Include ALL known domains, not just credential domains — cross-trust
+            # creds can authenticate to foreign domain CAs for certipy find.
             _iter_domains: set[str] = set()
             if state.target and state.target.domain:
                 _iter_domains.add(state.target.domain)
             for cred in state.all_credentials:
                 if cred.domain:
                     _iter_domains.add(cred.domain)
+            # Include trusted domains and host domains for foreign ADCS discovery
+            for td in state.trusted_domains:
+                if td:
+                    _iter_domains.add(td.lower())
+            for host in state.all_hosts:
+                if host.hostname and "." in host.hostname:
+                    parts = host.hostname.lower().split(".", 1)
+                    if len(parts) > 1 and not parts[1].endswith(".internal"):
+                        _iter_domains.add(parts[1])
 
             current_time = asyncio.get_event_loop().time()
 
@@ -2016,9 +2027,29 @@ async def _auto_bloodhound(
 
             # Try to run BloodHound for each domain
             for domain in _iter_domains:
+                domain_lower = domain.lower()
                 # Skip domains we've already successfully enumerated (persisted in state)
-                if domain.lower() in state.processed_bloodhound_domains:
-                    continue
+                # EXCEPTION: re-run with native creds if first run used cross-trust creds.
+                # Cross-trust BloodHound may miss user-to-user ACLs (e.g., missandei→khal.drogo)
+                # that are only visible to same-domain authenticated users.
+                if domain_lower in state.processed_bloodhound_domains:
+                    # Check if we now have a NATIVE credential we haven't tried yet
+                    native_creds = [
+                        c
+                        for c in state.all_credentials
+                        if c.password and (c.domain or "").lower() == domain_lower
+                    ]
+                    has_untried_native = any(
+                        (domain_lower, c.username.lower(), domain_lower) not in bloodhound_attempts
+                        for c in native_creds
+                    )
+                    if not has_untried_native:
+                        continue
+                    # We have a native cred we haven't tried — re-enumerate for better ACL data
+                    logger.info(
+                        f"🩸 Auto-BloodHound: Re-enumerating {domain} with native credential "
+                        f"(previous run used cross-trust creds, may have missed ACLs)"
+                    )
 
                 # Find a credential for this domain
                 # First try same-domain creds, then cross-domain creds (trusts allow this)
@@ -2861,12 +2892,18 @@ async def _auto_crack_dispatch(
                     priority=crack_priority,
                 )
 
-                # Always mark as processed to prevent retry storm when throttled
-                # The deferred queue handles actual retries for deferred tasks
-                state.processed_crack_requests.add(crack_key)
+                # Only mark as processed when actually dispatched (non-empty task_id).
+                # If the throttler rejected it (empty string), we must retry next cycle
+                # so foreign domain hashes (e.g., missandei@essos.local) aren't permanently lost.
                 if crack_task_id:
+                    state.processed_crack_requests.add(crack_key)
                     logger.info(
                         f"Auto-crack dispatched: {hash_obj.domain}\\{hash_obj.username} ({hash_obj.hash_type}) -> {crack_task_id}"
+                    )
+                else:
+                    logger.warning(
+                        f"Auto-crack rejected for {hash_obj.domain}\\{hash_obj.username} "
+                        f"({hash_obj.hash_type}) - will retry next cycle"
                     )
 
         except asyncio.CancelledError:
