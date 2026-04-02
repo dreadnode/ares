@@ -23,7 +23,6 @@ from ares.core.config import get_namespace, get_redis_url
 from ares.core.litellm_env import configure_litellm_env
 from ares.core.redis_client import (
     get_retry_delay,
-    invalidate_sentinel_client,
     is_connection_error,
 )
 from ares.core.task_queue import RedisTaskQueue
@@ -356,7 +355,7 @@ class BlueOrchestratorService:
                     else:
                         logger.warning(
                             f"No successful Redis poll for {elapsed:.1f}s and ping failed, "
-                            f"forcing reconnection (possible Sentinel pod restart)"
+                            f"forcing reconnection (possible pod restart)"
                         )
                         await self._force_reconnect()
                         last_successful_poll = time.monotonic()
@@ -370,9 +369,7 @@ class BlueOrchestratorService:
                 await asyncio.sleep(5)
 
     async def _force_reconnect(self) -> None:
-        """Force reconnection to Redis by invalidating cached clients."""
-        invalidate_sentinel_client()
-
+        """Force reconnection to Redis."""
         if self.task_queue:
             try:
                 await self.task_queue.disconnect()
@@ -671,7 +668,6 @@ class BlueOrchestratorService:
                             f"(attempt {attempt + 1}/{max_retries}): {e}. "
                             f"Retrying in {delay:.1f}s..."
                         )
-                        invalidate_sentinel_client()
                         await asyncio.sleep(delay)
                     else:
                         raise

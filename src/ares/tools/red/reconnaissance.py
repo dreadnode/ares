@@ -951,8 +951,6 @@ class NetworkEnumerationTools(Toolset):
         try:
             if not domain or not dns_ip:
                 return "[!] Domain and dns_ip are required for SRV lookup."
-            if self.state and hasattr(self.state, "add_domain"):
-                self.state.add_domain(domain)
             query = f"_ldap._tcp.dc._msdcs.{domain}"
             cmd = ["nslookup", "-type=srv", query, dns_ip]
             stdout, stderr, _ = run_tool(cmd, timeout_seconds=120)
@@ -1081,8 +1079,11 @@ class NetworkEnumerationTools(Toolset):
                 domain_hint = self.state.target.domain or ""
 
             effective_domain = domain_hint
-            if effective_domain and self.state and hasattr(self.state, "add_domain"):
-                self.state.add_domain(effective_domain)
+            # Only register domain from tool output, not LLM parameters — LLMs hallucinate
+            # domain names (e.g., 'sevenkingdomain.local' instead of 'sevenkingdoms.local').
+            # Domains from tool output are authoritative; LLM params are not.
+            if domain_from_output and self.state and hasattr(self.state, "add_domain"):
+                self.state.add_domain(domain_from_output)
 
             # Populate hosts and users in state BEFORE Kerberos call so it has users to validate
             found_users = False

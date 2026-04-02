@@ -30,7 +30,6 @@ from ares.core.config import (
 )
 from ares.core.redis_client import (
     get_retry_delay,
-    invalidate_sentinel_client,
     is_connection_error,
     timed_redis_write,
 )
@@ -125,14 +124,8 @@ class BlueTaskQueue(BaseTaskQueue):
         self.use_global_queue = use_global_queue
 
     def _handle_connection_error(self, error: Exception) -> None:
-        """Handle Redis connection errors by resetting connection state.
-
-        Overrides base class to also invalidate Sentinel client for fresh DNS resolution.
-        """
-        # Call base class to reset state
+        """Handle Redis connection errors by resetting connection state."""
         super()._handle_connection_error(error)
-        # Also invalidate Sentinel for fresh DNS resolution
-        invalidate_sentinel_client()
 
     def _task_queue_key(self, investigation_id: str, role: str) -> str:
         """Get task queue key for a role within an investigation (legacy mode)."""
@@ -414,7 +407,7 @@ class BlueTaskQueue(BaseTaskQueue):
         """Wait for a task result.
 
         Includes automatic retry with exponential backoff on connection errors.
-        This is critical for handling Sentinel failover where IPs may be stale.
+        This is critical for handling connection issues where connections may be stale.
 
         Args:
             task_id: Task ID to wait for.
@@ -527,7 +520,7 @@ class BlueTaskQueue(BaseTaskQueue):
                     f"stale connection detected (attempt {attempt + 1}/{max_retries + 1})"
                 )
                 self._handle_connection_error(
-                    TimeoutError("BRPOP hung - possible stale Sentinel connection")
+                    TimeoutError("BRPOP hung - possible stale connection")
                 )
                 last_error = TimeoutError("BRPOP hung after retries")
                 continue
@@ -589,7 +582,7 @@ class BlueTaskQueue(BaseTaskQueue):
                     f"stale connection detected (attempt {attempt + 1}/{max_retries + 1})"
                 )
                 self._handle_connection_error(
-                    TimeoutError("BRPOP hung - possible stale Sentinel connection")
+                    TimeoutError("BRPOP hung - possible stale connection")
                 )
                 last_error = TimeoutError("BRPOP hung after retries")
                 continue

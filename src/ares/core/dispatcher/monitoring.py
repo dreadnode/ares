@@ -214,7 +214,6 @@ class MonitoringMixin:
                         "broken pipe",
                         "reset",
                         "refused",
-                        "sentinel",
                     ]
                 )
 
@@ -870,7 +869,7 @@ class MonitoringMixin:
         """Ping dispatcher's Redis client and reconnect if stale.
 
         The dispatcher has its own _redis_client separate from _task_queue.
-        Both need health checking to detect stale Sentinel connections after
+        Both need health checking to detect stale connections after
         pod restarts.
 
         Args:
@@ -889,10 +888,7 @@ class MonitoringMixin:
             logger.warning(
                 f"Dispatcher Redis ping failed ({type(e).__name__}: {e}), forcing reconnection"
             )
-            # Invalidate Sentinel client to force fresh DNS resolution
-            from ares.core.redis_client import create_redis_client, invalidate_sentinel_client
-
-            invalidate_sentinel_client()
+            from ares.core.redis_client import create_redis_client
 
             # Close stale client
             try:
@@ -901,7 +897,7 @@ class MonitoringMixin:
                 pass
             self._redis_client = None
 
-            # Reconnect with fresh Sentinel IPs
+            # Reconnect
             try:
                 self._redis_client = await create_redis_client(self._redis_url)
                 await self._redis_client.ping()
@@ -954,8 +950,8 @@ class MonitoringMixin:
 
                 now = time.monotonic()
 
-                # Check Redis connection health to detect stale Sentinel connections
-                # This catches issues when Sentinel pods restart with new IPs
+                # Check Redis connection health to detect stale connections
+                # This catches issues when pods restart with new IPs
                 # Both _task_queue and _redis_client need health checks - they are separate clients
                 if now - last_connection_check >= connection_check_interval:
                     # Check task queue Redis client
@@ -1269,7 +1265,7 @@ class MonitoringMixin:
         task_queue: RedisTaskQueue | None = None
 
         try:
-            # Connect to Redis with retries (Sentinel may not be ready immediately)
+            # Connect to Redis with retries (Redis may not be ready immediately)
             if redis_url:
                 max_connect_retries = 10
                 for attempt in range(max_connect_retries):
@@ -1352,27 +1348,11 @@ class MonitoringMixin:
 
     def _handle_consumer_error(self: RedTeamDispatcher, e: Exception, failures: int) -> bool:
         """Handle errors in the threaded result consumer. Returns True if should stop."""
-        from ares.core.redis_client import invalidate_sentinel_client
+        from ares.core.redis_client import is_connection_error as _is_conn_err
 
-        error_str = str(e).lower()
-        connection_keywords = [
-            "connection",
-            "closed",
-            "timeout",
-            "broken pipe",
-            "reset",
-            "refused",
-            "sentinel",
-            # DNS resolution failures
-            "name or service not known",
-            "getaddrinfo",
-            "temporary failure in name resolution",
-        ]
-        is_connection_error = any(kw in error_str for kw in connection_keywords)
+        conn_error = _is_conn_err(e)
 
-        if is_connection_error:
-            # Invalidate Sentinel client to force fresh DNS resolution on reconnect
-            invalidate_sentinel_client()
+        if conn_error:
             max_failures = get_max_redis_consecutive_failures()
             delay = min(
                 get_redis_retry_base_delay() * (2 ** min(failures - 1, 4)),

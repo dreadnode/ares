@@ -926,74 +926,84 @@ tasks:
         TOTAL_MISSING=0
         FAILED_PODS=""
 
+        # Build list of all pods and their containers for parallel checking
+        ALL_PODS=""
+        for ORCH_POD in $ORCH_PODS; do
+          ALL_PODS="$ALL_PODS $ORCH_POD:{{.ORCH_CONTAINER}}"
+        done
+        if [ -n "$WORKER_PODS" ]; then
+          for WORKER_POD in $WORKER_PODS; do
+            wc="{{.WORKER_CONTAINER}}"
+            if [ -z "$wc" ]; then
+              wc=$(kubectl get pod -n {{.K8S_NAMESPACE}} "$WORKER_POD" \
+                -o jsonpath="{.spec.containers[0].name}" 2>/dev/null)
+            fi
+            ALL_PODS="$ALL_PODS $WORKER_POD:$wc"
+          done
+        fi
+
+        # Create temp dir for parallel results
+        RESULTS_DIR=$(mktemp -d)
+        trap "rm -rf $RESULTS_DIR" EXIT
+
+        # Launch all hash checks in parallel (all files x all pods)
+        for f in $FILES_TO_CHECK; do
+          if [ ! -f "$f" ]; then
+            continue
+          fi
+          relative_path="${f#src/ares/}"
+          local_hash=$(shasum -a 256 "$f" 2>/dev/null | awk '{print $1}')
+          echo "$local_hash" > "$RESULTS_DIR/local_$(echo "$relative_path" | tr '/' '_')"
+
+          for pod_entry in $ALL_PODS; do
+            pod_name=$(echo "$pod_entry" | cut -d: -f1)
+            container=$(echo "$pod_entry" | cut -d: -f2)
+            result_file="$RESULTS_DIR/$(echo "${relative_path}_${pod_name}" | tr '/' '_')"
+            (
+              rh=$(kubectl exec -n {{.K8S_NAMESPACE}} -c "$container" "$pod_name" -- \
+                sha256sum "{{.PVC_PATH}}/src/ares/$relative_path" 2>/dev/null | awk '{print $1}')
+              echo "${rh:-MISSING}" > "$result_file"
+            ) &
+          done
+        done
+
+        # Wait for all parallel checks to complete
+        wait
+
+        # Collect results
         for f in $FILES_TO_CHECK; do
           if [ ! -f "$f" ]; then
             continue
           fi
 
           relative_path="${f#src/ares/}"
-          local_hash=$(shasum -a 256 "$f" 2>/dev/null | awk '{print $1}')
+          local_hash=$(cat "$RESULTS_DIR/local_$(echo "$relative_path" | tr '/' '_')")
 
           TOTAL_CHECKED=$((TOTAL_CHECKED + 1))
           FILE_OK=true
           POD_RESULTS=""
 
-          # Check orchestrator pods
-          for ORCH_POD in $ORCH_PODS; do
-            remote_hash=$(kubectl exec -n {{.K8S_NAMESPACE}} -c {{.ORCH_CONTAINER}} "$ORCH_POD" -- \
-              sha256sum "{{.PVC_PATH}}/src/ares/$relative_path" 2>/dev/null | awk '{print $1}')
+          for pod_entry in $ALL_PODS; do
+            pod_name=$(echo "$pod_entry" | cut -d: -f1)
+            result_file="$RESULTS_DIR/$(echo "${relative_path}_${pod_name}" | tr '/' '_')"
+            remote_hash=$(cat "$result_file" 2>/dev/null)
 
-            if [ -z "$remote_hash" ]; then
-              POD_RESULTS="$POD_RESULTS $ORCH_POD:MISSING"
+            if [ -z "$remote_hash" ] || [ "$remote_hash" = "MISSING" ]; then
+              POD_RESULTS="$POD_RESULTS $pod_name:MISSING"
               FILE_OK=false
-              if ! echo "$FAILED_PODS" | grep -q "$ORCH_POD"; then
-                FAILED_PODS="$FAILED_PODS $ORCH_POD"
+              if ! echo "$FAILED_PODS" | grep -q "$pod_name"; then
+                FAILED_PODS="$FAILED_PODS $pod_name"
               fi
             elif [ "$remote_hash" != "$local_hash" ]; then
-              POD_RESULTS="$POD_RESULTS $ORCH_POD:DIFFERS"
+              POD_RESULTS="$POD_RESULTS $pod_name:DIFFERS"
               FILE_OK=false
-              if ! echo "$FAILED_PODS" | grep -q "$ORCH_POD"; then
-                FAILED_PODS="$FAILED_PODS $ORCH_POD"
+              if ! echo "$FAILED_PODS" | grep -q "$pod_name"; then
+                FAILED_PODS="$FAILED_PODS $pod_name"
               fi
             else
-              POD_RESULTS="$POD_RESULTS $ORCH_POD:OK"
+              POD_RESULTS="$POD_RESULTS $pod_name:OK"
             fi
           done
-
-          # Check worker pods
-          if [ -n "$WORKER_PODS" ]; then
-            for WORKER_POD in $WORKER_PODS; do
-              worker_container="{{.WORKER_CONTAINER}}"
-              if [ -z "$worker_container" ]; then
-                worker_container=$(kubectl get pod -n {{.K8S_NAMESPACE}} "$WORKER_POD" \
-                  -o jsonpath="{.spec.containers[0].name}" 2>/dev/null)
-              fi
-              if [ -n "$worker_container" ]; then
-                container_flag="-c $worker_container"
-              else
-                container_flag=""
-              fi
-
-              remote_hash=$(kubectl exec -n {{.K8S_NAMESPACE}} $container_flag "$WORKER_POD" -- \
-                sha256sum "{{.PVC_PATH}}/src/ares/$relative_path" 2>/dev/null | awk '{print $1}')
-
-              if [ -z "$remote_hash" ]; then
-                POD_RESULTS="$POD_RESULTS $WORKER_POD:MISSING"
-                FILE_OK=false
-                if ! echo "$FAILED_PODS" | grep -q "$WORKER_POD"; then
-                  FAILED_PODS="$FAILED_PODS $WORKER_POD"
-                fi
-              elif [ "$remote_hash" != "$local_hash" ]; then
-                POD_RESULTS="$POD_RESULTS $WORKER_POD:DIFFERS"
-                FILE_OK=false
-                if ! echo "$FAILED_PODS" | grep -q "$WORKER_POD"; then
-                  FAILED_PODS="$FAILED_PODS $WORKER_POD"
-                fi
-              else
-                POD_RESULTS="$POD_RESULTS $WORKER_POD:OK"
-              fi
-            done
-          fi
 
           # Report results for this file
           if [ "$FILE_OK" = "true" ]; then

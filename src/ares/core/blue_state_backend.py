@@ -35,7 +35,7 @@ Redis key structure:
 
 Resilience:
     All write operations use tenacity retry with exponential backoff + circuit breaker
-    to handle transient Redis connection issues (e.g., Sentinel failover, pod restarts).
+    to handle transient Redis connection issues (e.g., pod restarts).
     Pattern matches redis-py's ExponentialBackoff(cap=10, base=1).
 """
 

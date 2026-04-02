@@ -1678,7 +1678,7 @@ class SharedRedTeamState:
         """
         import base64
 
-        # Limit artifact size to 10MB (Redis Sentinel provides robust storage)
+        # Limit artifact size to 10MB
         max_size = 10 * 1024 * 1024
         if isinstance(content, str):
             content_bytes = content.encode("utf-8", errors="replace")
@@ -4151,8 +4151,8 @@ class SharedRedTeamState:
     def cleanup_invalid_domains(self) -> int:
         """Remove domains that don't match any known valid pattern.
 
-        Cleans up typo domains like 'sevenkingdomain.local' that were added
-        due to LLM hallucination. A domain is considered invalid if:
+        Cleans up typo domains added due to LLM hallucination.
+        A domain is considered invalid if:
         - No users exist in that domain
         - No hosts have that domain in their FQDN
         - It's not the target domain

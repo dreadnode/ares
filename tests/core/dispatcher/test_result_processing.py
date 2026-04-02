@@ -383,6 +383,163 @@ SMB         192.168.58.20   445    WS01      public                          Bas
         assert public.comment == "Basic share"
 
 
+class TestHashSourceFromTaskResult:
+    """Tests for hash source fallback in _process_success_result_data.
+
+    When crack workers return results via result["hash"] or result["hashes"],
+    the Hash object should use source from hash data if present, otherwise
+    fall back to source_agent (e.g., "ares-cracker").
+    """
+
+    @pytest.mark.asyncio
+    async def test_hash_source_falls_back_to_source_agent(self):
+        """Hash without source in data should use source_agent as fallback."""
+        from unittest.mock import AsyncMock, MagicMock
+
+        from ares.core.dispatcher._dispatcher import RedTeamDispatcher
+        from ares.core.models import SharedRedTeamState, Target
+
+        dispatcher = RedTeamDispatcher()
+        dispatcher._shared_state = SharedRedTeamState(operation_id="test-hash-source")
+        dispatcher._shared_state.target = Target(ip="192.168.58.10", domain="contoso.local")
+        dispatcher._credential_access_event = MagicMock()
+        dispatcher._checkpoint = AsyncMock()
+        dispatcher._checkpoint_requested = MagicMock()
+        dispatcher._immediate_crack_dispatch = AsyncMock()
+
+        published_hashes = []
+
+        async def capture_publish(hash_obj, source_agent, **kwargs):
+            published_hashes.append(hash_obj)
+
+        dispatcher.publish_hash = capture_publish
+
+        # Simulate crack result: hash dict without "source" key (like worker sends)
+        result = {
+            "hash": {
+                "username": "jon.snow",
+                "hash_value": "$krb5tgs$23$*jon.snow$CONTOSO.LOCAL$...",
+                "hash_type": "Kerberoast",
+                "domain": "contoso.local",
+                "cracked_password": "iknownothing",  # pragma: allowlist secret
+            },
+            "success": True,
+        }
+
+        await dispatcher._process_success_result_data(
+            result,
+            task_id="crack_test_001",
+            source_agent="ares-cracker",
+            parent_credential_id=None,
+            parent_attack_step=0,
+        )
+
+        assert len(published_hashes) == 1
+        assert published_hashes[0].source == "ares-cracker"
+
+    @pytest.mark.asyncio
+    async def test_hash_source_uses_explicit_source_from_data(self):
+        """Hash with explicit source in data should use that source."""
+        from unittest.mock import AsyncMock, MagicMock
+
+        from ares.core.dispatcher._dispatcher import RedTeamDispatcher
+        from ares.core.models import SharedRedTeamState, Target
+
+        dispatcher = RedTeamDispatcher()
+        dispatcher._shared_state = SharedRedTeamState(operation_id="test-hash-source-explicit")
+        dispatcher._shared_state.target = Target(ip="192.168.58.10", domain="contoso.local")
+        dispatcher._credential_access_event = MagicMock()
+        dispatcher._checkpoint = AsyncMock()
+        dispatcher._checkpoint_requested = MagicMock()
+        dispatcher._immediate_crack_dispatch = AsyncMock()
+
+        published_hashes = []
+
+        async def capture_publish(hash_obj, source_agent, **kwargs):
+            published_hashes.append(hash_obj)
+
+        dispatcher.publish_hash = capture_publish
+
+        result = {
+            "hash": {
+                "username": "svc_sql",
+                "hash_value": "aad3b435:31d6cfe0d16ae931b73c59d7e0c089c0",
+                "hash_type": "NTLM",
+                "domain": "contoso.local",
+                "cracked_password": "",
+                "source": "secretsdump@192.168.58.10",
+            },
+            "success": True,
+        }
+
+        await dispatcher._process_success_result_data(
+            result,
+            task_id="privesc_test_001",
+            source_agent="ares-privesc",
+            parent_credential_id=None,
+            parent_attack_step=0,
+        )
+
+        assert len(published_hashes) == 1
+        assert published_hashes[0].source == "secretsdump@192.168.58.10"
+
+    @pytest.mark.asyncio
+    async def test_hashes_plural_source_falls_back_to_source_agent(self):
+        """Hashes (plural) without source should use source_agent as fallback."""
+        from unittest.mock import AsyncMock, MagicMock
+
+        from ares.core.dispatcher._dispatcher import RedTeamDispatcher
+        from ares.core.models import SharedRedTeamState, Target
+
+        dispatcher = RedTeamDispatcher()
+        dispatcher._shared_state = SharedRedTeamState(operation_id="test-hashes-source")
+        dispatcher._shared_state.target = Target(ip="192.168.58.10", domain="contoso.local")
+        dispatcher._credential_access_event = MagicMock()
+        dispatcher._checkpoint = AsyncMock()
+        dispatcher._checkpoint_requested = MagicMock()
+        dispatcher._immediate_crack_dispatch = AsyncMock()
+
+        published_hashes = []
+
+        async def capture_publish(hash_obj, source_agent, **kwargs):
+            published_hashes.append(hash_obj)
+
+        dispatcher.publish_hash = capture_publish
+
+        result = {
+            "hashes": [
+                {
+                    "username": "administrator",
+                    "hash_value": "aad3b435:2e993405ab82e4454afc9c9bb0939a25",
+                    "hash_type": "NTLM",
+                    "domain": "contoso.local",
+                },
+                {
+                    "username": "krbtgt",
+                    "hash_value": "aad3b435:faaa7e195adfc629437d6e9135712b5d",
+                    "hash_type": "NTLM",
+                    "domain": "contoso.local",
+                    "source": "ntds-dump",
+                },
+            ],
+            "success": True,
+        }
+
+        await dispatcher._process_success_result_data(
+            result,
+            task_id="privesc_test_001",
+            source_agent="ares-privesc",
+            parent_credential_id=None,
+            parent_attack_step=0,
+        )
+
+        assert len(published_hashes) == 2
+        # First hash has no source in data -> falls back to source_agent
+        assert published_hashes[0].source == "ares-privesc"
+        # Second hash has explicit source in data -> uses it
+        assert published_hashes[1].source == "ntds-dump"
+
+
 class TestCrackedHashImmediateDispatch:
     """Tests for immediate dispatch when hash is cracked.
 

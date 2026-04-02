@@ -27,7 +27,6 @@ from ares.core.config import (
 )
 from ares.core.redis_client import (
     get_retry_delay,
-    invalidate_sentinel_client,
     is_connection_error,
     timed_redis_write,
 )
@@ -143,8 +142,7 @@ class RedisTaskQueue(BaseTaskQueue):
         """Connect to Redis with circuit breaker protection.
 
         When called from a non-main thread (e.g., threaded result consumer),
-        uses direct connection to avoid SentinelConnectionPool's cross-loop
-        Future issues.
+        uses direct connection to avoid cross-loop Future issues.
 
         Uses socket_timeout=None to allow blocking operations (XREADGROUP, BRPOP)
         to wait for extended periods without hitting socket timeout. Timeout
@@ -664,8 +662,6 @@ class RedisTaskQueue(BaseTaskQueue):
             # Handle connection errors to force reconnection on next call
             if is_connection_error(e):
                 self._handle_connection_error(e)
-                # Force fresh DNS resolution on reconnect (handles Sentinel pod restarts)
-                invalidate_sentinel_client()
             # On pipeline failure, return empty results (caller will retry)
             # Note: Circuit breaker already logged this if it's a connection error
             if not self._circuit or not is_connection_error(e):
@@ -691,7 +687,7 @@ class RedisTaskQueue(BaseTaskQueue):
         before normal priority tasks.
 
         Includes automatic retry with exponential backoff on stale connection
-        detection to avoid missed poll cycles when Sentinel pods restart.
+        detection to avoid missed poll cycles after pod restarts.
 
         Args:
             role: Worker role to poll for
@@ -763,14 +759,13 @@ class RedisTaskQueue(BaseTaskQueue):
 
             except asyncio.TimeoutError:
                 # asyncio.wait_for timed out but XREADGROUP didn't return
-                # This indicates a stale connection (e.g., Sentinel pod restarted)
+                # This indicates a stale connection (e.g., pod restarted)
                 logger.warning(
                     f"XREADGROUP hung for {timeout + 2.0}s on {normal_stream} - "
                     f"stale connection detected (attempt {attempt + 1}/{max_retries + 1})"
                 )
-                invalidate_sentinel_client()
                 self._handle_connection_error(
-                    TimeoutError("XREADGROUP hung - possible stale Sentinel connection")
+                    TimeoutError("XREADGROUP hung - possible stale connection")
                 )
                 last_error = TimeoutError("XREADGROUP hung after retries")
 

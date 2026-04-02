@@ -27,7 +27,7 @@ Redis key structure:
 
 Resilience:
     All write operations use tenacity retry with exponential backoff + circuit breaker
-    to handle transient Redis connection issues (e.g., Sentinel failover, pod restarts).
+    to handle transient Redis connection issues (e.g., pod restarts).
     Pattern matches redis-py's ExponentialBackoff(cap=10, base=1).
 """
 
@@ -156,7 +156,7 @@ class RedisStateBackend(BaseRedisBackend):
         This ensures the same credential isn't stored twice.
 
         Uses circuit breaker + exponential backoff retry for resilience against
-        transient Redis connection issues (Sentinel failover, pod restarts).
+        transient Redis connection issues (e.g., pod restarts).
 
         Args:
             cred: Credential to add
@@ -2011,18 +2011,18 @@ class RedisStateBackend(BaseRedisBackend):
 
 def _serialize_credential(cred: Credential) -> str:
     """Serialize a Credential to JSON string."""
-    return json.dumps(
-        {
-            "id": cred.id,
-            "username": cred.username,
-            "password": cred.password,
-            "domain": cred.domain,
-            "source": cred.source,
-            "parent_id": cred.parent_id,
-            "attack_step": cred.attack_step,
-        },
-        separators=(",", ":"),
-    )
+    data: dict[str, Any] = {
+        "id": cred.id,
+        "username": cred.username,
+        "password": cred.password,
+        "domain": cred.domain,
+        "source": cred.source,
+        "parent_id": cred.parent_id,
+        "attack_step": cred.attack_step,
+    }
+    if cred.is_admin:
+        data["is_admin"] = True
+    return json.dumps(data, separators=(",", ":"))
 
 
 def _deserialize_credential(data: str | bytes) -> Credential:
@@ -2041,6 +2041,7 @@ def _deserialize_credential(data: str | bytes) -> Credential:
         source=d.get("source") or "",
         parent_id=d.get("parent_id"),
         attack_step=d.get("attack_step") or 0,
+        is_admin=d.get("is_admin") or False,
     )
 
 

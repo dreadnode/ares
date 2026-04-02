@@ -270,8 +270,8 @@ class CredentialDiscoveryTools(Toolset):
             return "[!] LDAP search requires a valid password. Cannot search without credentials."
         if resolved_password.strip().lower() in self._PLACEHOLDER_PASSWORDS:
             return "[!] Refusing to use placeholder password; provide a real credential."
-        if self.state and hasattr(self.state, "add_domain"):
-            self.state.add_domain(domain)
+        # Don't register domain from LLM parameters — domains are registered
+        # from authoritative sources (host FQDNs, user enumeration, tool output).
 
         base_dn = ",".join([f"DC={part}" for part in domain.split(".")])
 

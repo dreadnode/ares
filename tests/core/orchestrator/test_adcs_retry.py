@@ -272,6 +272,120 @@ class TestAutoAdcsEnumerationRetry:
         assert "testuser" in usernames_used or "admin" in usernames_used
 
 
+class TestAutoAdcsForeignDomainReprobe:
+    """Tests for foreign domain ADCS re-probing with new credentials.
+
+    When a new credential appears for a foreign domain (e.g., khal.drogo@essos.local
+    after missandei@essos.local), _auto_adcs_enumeration should re-probe the foreign
+    DC since different users may have different ACL visibility on cert templates (ESC4).
+    """
+
+    @pytest.fixture
+    def multi_forest_state(self) -> SharedRedTeamState:
+        """Create a multi-forest state with foreign domain."""
+        state = SharedRedTeamState(operation_id="test-multiforest-adcs")
+        state.target = Target(ip="192.168.58.10", domain="contoso.local")
+
+        # Foreign domain credential (first user)
+        state.all_credentials.append(
+            Credential(
+                username="missandei",
+                password="fr3edom",  # pragma: allowlist secret
+                domain="fabrikam.local",
+                source="cracked:ares-cracker",
+            )
+        )
+
+        # Foreign DC known
+        state.domain_controllers["fabrikam.local"] = "192.168.58.20"
+
+        return state
+
+    @pytest.fixture
+    def multi_forest_dispatcher(self, multi_forest_state):
+        """Create a mock dispatcher for multi-forest ADCS tests."""
+        dispatcher = MagicMock()
+        dispatcher.shared_state = multi_forest_state
+        dispatcher.find_adcs_servers = MagicMock(return_value=[])  # No CertEnroll shares
+        dispatcher.request_adcs_enumeration = AsyncMock(return_value="adcs_probe_001")
+        return dispatcher
+
+    @pytest.mark.asyncio
+    async def test_reprobes_foreign_domain_with_new_credential(self, multi_forest_dispatcher):
+        """Foreign domain should be re-probed when new credential appears."""
+        from ares.core.orchestrator import _auto_adcs_enumeration
+
+        iteration_count = [0]
+        state = multi_forest_dispatcher.shared_state
+
+        async def mock_sleep(delay):
+            iteration_count[0] += 1
+            # After first probe, add a new credential for the foreign domain
+            if iteration_count[0] == 2:
+                state.all_credentials.append(
+                    Credential(
+                        username="khal.drogo",
+                        password="horse",  # pragma: allowlist secret
+                        domain="fabrikam.local",
+                        source="cracked:ares-cracker",
+                    )
+                )
+            if iteration_count[0] >= 4:
+                state.completed = True
+
+        with (
+            patch("asyncio.sleep", side_effect=mock_sleep),
+            patch("asyncio.get_event_loop") as mock_loop,
+            patch(
+                "ares.core.orchestrator._orchestrator.get_multi_forest_mode",
+                return_value=True,
+            ),
+        ):
+            mock_loop.return_value.time = lambda: 1000.0
+
+            await _auto_adcs_enumeration(multi_forest_dispatcher, check_interval=0.1)
+
+        # Should have probed at least twice: once with missandei, once with khal.drogo
+        assert multi_forest_dispatcher.request_adcs_enumeration.call_count >= 2
+        calls = multi_forest_dispatcher.request_adcs_enumeration.call_args_list
+        usernames_probed = [
+            c.kwargs.get("username", c[1].get("username", "")) if c.kwargs else "" for c in calls
+        ]
+        # Handle positional args too
+        if not any(usernames_probed):
+            usernames_probed = [c[1]["username"] for c in calls]
+        assert "missandei" in usernames_probed
+        assert "khal.drogo" in usernames_probed
+
+    @pytest.mark.asyncio
+    async def test_does_not_reprobe_same_credential(self, multi_forest_dispatcher):
+        """Same (domain, username) pair should not be probed twice."""
+        from ares.core.orchestrator import _auto_adcs_enumeration
+
+        iteration_count = [0]
+
+        async def mock_sleep(delay):
+            iteration_count[0] += 1
+            if iteration_count[0] >= 4:
+                multi_forest_dispatcher.shared_state.completed = True
+
+        with (
+            patch("asyncio.sleep", side_effect=mock_sleep),
+            patch("asyncio.get_event_loop") as mock_loop,
+            patch(
+                "ares.core.orchestrator._orchestrator.get_multi_forest_mode",
+                return_value=True,
+            ),
+        ):
+            mock_loop.return_value.time = lambda: 1000.0
+
+            await _auto_adcs_enumeration(multi_forest_dispatcher, check_interval=0.1)
+
+        # missandei should only be probed once (dedup by domain+username)
+        calls = multi_forest_dispatcher.request_adcs_enumeration.call_args_list
+        assert len(calls) == 1  # Only one unique (domain, username) pair
+
+
 class TestAdcsServerDetection:
     """Tests for ADCS server detection via CertEnroll share."""
 

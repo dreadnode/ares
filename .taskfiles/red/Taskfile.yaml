@@ -125,24 +125,13 @@ tasks:
           set -euo pipefail
           echo "Setting active operation pointer in Redis..."
           REDIS_PASS=$(kubectl get secret redis-secret -n {{.K8S_NAMESPACE}} -o jsonpath='{.data.password}' 2>/dev/null | base64 -d || echo "")
-
-          # Find the Redis master pod (replicas are read-only)
-          REDIS_MASTER=""
-          for pod in $(kubectl get pods -n {{.K8S_NAMESPACE}} -l app=redis -o name 2>/dev/null); do
-            ROLE=$(kubectl exec -n {{.K8S_NAMESPACE}} $pod -c redis -- env REDISCLI_AUTH="$REDIS_PASS" redis-cli info replication 2>/dev/null | grep "^role:" | cut -d: -f2 | tr -d '\r')
-            if [ "$ROLE" = "master" ]; then
-              REDIS_MASTER=$pod
-              break
-            fi
-          done
-
-          if [ -z "$REDIS_MASTER" ]; then
-            echo "No Redis master found in namespace {{.K8S_NAMESPACE}}"
+          REDIS_POD=$(kubectl get pods -n {{.K8S_NAMESPACE}} -l app=redis -o name 2>/dev/null | head -1)
+          if [ -z "$REDIS_POD" ]; then
+            echo "No Redis pod found in namespace {{.K8S_NAMESPACE}}"
             exit 1
           fi
-          echo "Found Redis master: $REDIS_MASTER"
 
-          kubectl exec -n {{.K8S_NAMESPACE}} $REDIS_MASTER -c redis -- env REDISCLI_AUTH="$REDIS_PASS" \
+          kubectl exec -n {{.K8S_NAMESPACE}} $REDIS_POD -c redis -- env REDISCLI_AUTH="$REDIS_PASS" \
             redis-cli set ares:operation:active "{{.OPERATION_ID_COMPUTED}}" >/dev/null
           echo "Set ares:operation:active -> {{.OPERATION_ID_COMPUTED}}"
         silent: false
@@ -800,8 +789,7 @@ tasks:
         kubectl rollout status -n {{.K8S_NAMESPACE}} deploy/$ORCH_DEPLOY || true
 
         REDIS_POD=$(kubectl get pods -n {{.K8S_NAMESPACE}} -l app=redis -o name 2>/dev/null | head -1)
-        SENTINEL_POD=$(kubectl get pods -n {{.K8S_NAMESPACE}} -l app=redis-sentinel -o name 2>/dev/null | head -1)
-        if [ -z "$REDIS_POD" ] && [ -z "$SENTINEL_POD" ]; then
+        if [ -z "$REDIS_POD" ]; then
           echo "No Redis pod found in namespace {{.K8S_NAMESPACE}}"
           exit 1
         fi
@@ -811,28 +799,9 @@ tasks:
         if [ -n "$REDIS_PASS" ]; then
           REDIS_ENV=(env REDISCLI_AUTH="$REDIS_PASS")
         fi
-        # Always use Sentinel pod as client (it can reach master)
-        REDIS_CLIENT_POD="${SENTINEL_POD:-$REDIS_POD}"
-        REDIS_HOST=""
+        REDIS_CLIENT_POD="$REDIS_POD"
         REDIS_HOST_ARG=()
-        CONTAINER_ARG=()
-
-        if [ -n "$SENTINEL_POD" ]; then
-          CONTAINER_ARG=(-c sentinel)
-          # Get master IP from Sentinel (returns IP on first line, port on second)
-          REDIS_HOST=$(kubectl exec -n {{.K8S_NAMESPACE}} "$SENTINEL_POD" "${CONTAINER_ARG[@]}" -- "${REDIS_ENV[@]}" redis-cli -p 26379 sentinel get-master-addr-by-name aresmaster 2>/dev/null | head -1 || true)
-          if [ -z "$REDIS_HOST" ]; then
-            echo "ERROR: Sentinel did not return master IP. Cannot proceed with clear."
-            echo "Check Sentinel health: kubectl exec -n {{.K8S_NAMESPACE}} $SENTINEL_POD -c sentinel -- redis-cli -p 26379 info sentinel"
-            exit 1
-          fi
-          echo "Using Redis master at $REDIS_HOST (via Sentinel)"
-          REDIS_HOST_ARG=(-h "$REDIS_HOST" -p 6379)
-        else
-          # Specify container explicitly to suppress "Defaulted container" warnings
-          CONTAINER_ARG=(-c redis)
-          echo "WARNING: No Sentinel found, using Redis pod directly (may hit replica)"
-        fi
+        CONTAINER_ARG=(-c redis)
 
         # Helper function to run redis-cli commands
         redis_cmd() {
@@ -842,22 +811,19 @@ tasks:
         # Verify we can write to Redis before proceeding
         TEST_KEY="ares:clear:test:$$"
         if ! redis_cmd set "$TEST_KEY" "test" EX 5 >/dev/null 2>&1; then
-          echo "ERROR: Cannot write to Redis. Are we connected to a read-only replica?"
-          echo "Master host: ${REDIS_HOST:-direct}"
+          echo "ERROR: Cannot write to Redis."
           exit 1
         fi
         redis_cmd del "$TEST_KEY" >/dev/null 2>&1 || true
 
         for pattern in "ares:operation:*:state" "ares:operation:*:checkpoint_time" "ares:operations:*:status" "ares:lock:*" "ares:tasks:*" "ares:stream:tasks:*" "ares:results:*"; do
-          keys=$(redis_cmd --scan --pattern "$pattern" 2>/dev/null)
+          keys=$(redis_cmd --scan --pattern "$pattern" 2>/dev/null | grep -v '^$' || true)
           count=0
           if [ -n "$keys" ]; then
-            # Batch delete in a single redis-cli call to avoid per-key kubectl exec overhead
-            count=$(echo "$keys" | wc -w | tr -d ' ')
-            if ! echo "$keys" | xargs redis_cmd del >/dev/null 2>&1; then
-              echo "ERROR: Failed to delete keys matching $pattern"
-              exit 1
-            fi
+            # Batch delete: pass keys as args to a single DEL command
+            count=$(echo "$keys" | wc -l | tr -d ' ')
+            # shellcheck disable=SC2086
+            redis_cmd del $keys >/dev/null 2>&1 || true
           fi
           echo "Cleared $pattern ($count keys)"
         done

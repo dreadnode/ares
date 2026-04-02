@@ -377,6 +377,65 @@ class ACLChainTracker:
             return ACLAction.RBCD
         return ACLAction.SHADOW_CREDENTIALS
 
+    def create_single_step_chain(
+        self,
+        principal: str,
+        target: str,
+        right: str,
+        domain: str,
+        target_type: str = "user",
+        discovered_by: str = "vulnerability",
+    ) -> ACLChain | None:
+        """Create a single-step ACL chain from a discovered vulnerability.
+
+        Used to convert acl_abuse vulnerabilities into executable chains
+        so the chain executor can handle exploitation directly.
+
+        Args:
+            principal: User who has the ACL right (source)
+            target: Target of the ACL right
+            right: ACL right (e.g. GenericAll, GenericWrite)
+            domain: Domain for the chain
+            target_type: Type of target (user, group, computer)
+            discovered_by: Source that discovered this vulnerability
+        """
+        # Deduplicate - don't create chain if one already targets this principal->target
+        for chain in self.chains.values():
+            for step in chain.steps:
+                if (
+                    step.source.lower() == principal.lower()
+                    and step.target.lower() == target.lower()
+                    and not step.completed
+                ):
+                    return None
+
+        chain_id = f"acl-vuln-{uuid.uuid4().hex[:8]}"
+        action = self._right_to_action(right, target)
+
+        step = ACLChainStep(
+            step_id="step-1",
+            source=principal,
+            target=target,
+            right=right,
+            action=action,
+            target_type=target_type,
+        )
+
+        chain = ACLChain(
+            chain_id=chain_id,
+            steps=[step],
+            goal=target,
+            domain=domain,
+            discovered_by=discovered_by,
+        )
+
+        self.add_chain(chain)
+        logger.info(
+            f"🔗 Created single-step ACL chain: {principal} -[{right}]-> {target} "
+            f"(action={action.value}, domain={domain})"
+        )
+        return chain
+
     def get_chain(self, chain_id: str) -> ACLChain | None:
         """Get a chain by ID."""
         return self.chains.get(chain_id)
@@ -533,9 +592,9 @@ def extract_acl_chains_from_bloodhound(
         self._acl_chain_tracker.set_state(self.shared_state)
 
     chains: list[ACLChain] = []
-    domain = ""
+    default_domain = ""
     if self.shared_state.target and self.shared_state.target.domain:
-        domain = self.shared_state.target.domain
+        default_domain = self.shared_state.target.domain
 
     # Look for shortest path sections in output
     path_indicators = [
@@ -558,8 +617,11 @@ def extract_acl_chains_from_bloodhound(
         if not line:
             if current_path:
                 path_text = " ".join(current_path)
+                # Extract domain from @DOMAIN suffixes in path for foreign domain support
+                domain_match = re.search(r"@([\w.-]+\.[\w]+)", path_text, re.IGNORECASE)
+                path_domain = domain_match.group(1) if domain_match else default_domain
                 chain = self._acl_chain_tracker.create_chain_from_bloodhound_path(
-                    path_text, domain, source_agent
+                    path_text, path_domain, source_agent
                 )
                 if chain:
                     chains.append(chain)
@@ -570,8 +632,10 @@ def extract_acl_chains_from_bloodhound(
     # Handle last path
     if current_path:
         path_text = " ".join(current_path)
+        domain_match = re.search(r"@([\w.-]+\.[\w]+)", path_text, re.IGNORECASE)
+        path_domain = domain_match.group(1) if domain_match else default_domain
         chain = self._acl_chain_tracker.create_chain_from_bloodhound_path(
-            path_text, domain, source_agent
+            path_text, path_domain, source_agent
         )
         if chain:
             chains.append(chain)

@@ -407,6 +407,46 @@ class ResultProcessingMixin:
                 f"(chained secretsdump succeeded{da_note})"
             )
 
+        # Mark ACL chain step as completed when acl_chain_step task finishes
+        if task_info.task_type == "acl_chain_step":
+            chain_id = task_params.get("chain_id", "")
+            step_id = task_params.get("step_id", "")
+            if chain_id and step_id and hasattr(self, "_acl_chain_tracker"):
+                if success:
+                    new_cred = None
+                    if isinstance(result, dict):
+                        # Extract credential from step result (published by worker)
+                        for cred in result.get("new_credentials", []):
+                            new_cred = {
+                                "username": cred.get("username", ""),
+                                "password": cred.get("password", ""),
+                                "domain": cred.get("domain", ""),
+                            }
+                            break
+                        # Fall back to hash if no cleartext credential
+                        if not new_cred:
+                            for h in result.get("new_hashes", []):
+                                new_cred = {
+                                    "username": h.get("username", ""),
+                                    "hash": h.get("hash", ""),
+                                    "domain": task_params.get("domain", ""),
+                                }
+                                break
+                    self._acl_chain_tracker.mark_step_completed(
+                        chain_id, step_id, str(result)[:500], new_cred
+                    )
+                    logger.info(
+                        f"🔗 ACL chain step completed: {chain_id}:{step_id} "
+                        f"(new_cred={'yes' if new_cred else 'no'})"
+                    )
+                else:
+                    logger.warning(
+                        f"🔗 ACL chain step failed: {chain_id}:{step_id} - {error or 'unknown'}"
+                    )
+                    # Remove from dispatched set so it can be retried
+                    step_key = f"{chain_id}:{step_id}"
+                    self.shared_state.dispatched_acl_steps.discard(step_key)
+
         # Clear trust extraction dedup on failure so it can be retried
         # (e.g., missing SIDs, auth failure, timeout — may succeed on next attempt)
         if not success and task_info.task_type == "exploit":
@@ -878,6 +918,7 @@ class ResultProcessingMixin:
                 hash_type=hash_data.get("hash_type", "NTLM"),
                 domain=hash_domain,
                 cracked_password=hash_data.get("cracked_password", ""),
+                source=hash_data.get("source", "") or source_agent,
                 parent_id=parent_credential_id,
                 attack_step=discovery_step,
             )
@@ -900,6 +941,7 @@ class ResultProcessingMixin:
                     hash_type=h.get("hash_type", "NTLM"),
                     domain=hash_domain,
                     cracked_password=h.get("cracked_password", ""),
+                    source=h.get("source", "") or source_agent,
                     parent_id=parent_credential_id,
                     attack_step=discovery_step,
                 )
@@ -1069,6 +1111,8 @@ class ResultProcessingMixin:
         Parses BloodHound shortest path output to identify multi-hop
         ACL abuse chains to Domain Admin.
         """
+        import re
+
         from ares.core.dispatcher.acl_chains import ACLChainTracker
 
         # Only process if output looks like BloodHound path data
@@ -1083,9 +1127,9 @@ class ResultProcessingMixin:
             self._acl_chain_tracker.set_state(self.shared_state)
 
         tracker: ACLChainTracker = self._acl_chain_tracker
-        domain = ""
+        default_domain = ""
         if self.shared_state.target and self.shared_state.target.domain:
-            domain = self.shared_state.target.domain
+            default_domain = self.shared_state.target.domain
 
         # Split output into potential paths
         lines = output.split("\n")
@@ -1097,8 +1141,12 @@ class ResultProcessingMixin:
             if not line:
                 if current_path:
                     path_text = " ".join(current_path)
+                    # Extract domain from @DOMAIN suffixes in path (e.g. USER@essos.local)
+                    # This ensures foreign domain chains get the correct domain
+                    domain_match = re.search(r"@([\w.-]+\.[\w]+)", path_text, re.IGNORECASE)
+                    path_domain = domain_match.group(1) if domain_match else default_domain
                     chain = tracker.create_chain_from_bloodhound_path(
-                        path_text, domain, source_agent
+                        path_text, path_domain, source_agent
                     )
                     if chain:
                         chains_found += 1
@@ -1109,7 +1157,9 @@ class ResultProcessingMixin:
         # Handle last path
         if current_path:
             path_text = " ".join(current_path)
-            chain = tracker.create_chain_from_bloodhound_path(path_text, domain, source_agent)
+            domain_match = re.search(r"@([\w.-]+\.[\w]+)", path_text, re.IGNORECASE)
+            path_domain = domain_match.group(1) if domain_match else default_domain
+            chain = tracker.create_chain_from_bloodhound_path(path_text, path_domain, source_agent)
             if chain:
                 chains_found += 1
 

