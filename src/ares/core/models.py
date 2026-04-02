@@ -101,6 +101,7 @@ _SUSPICIOUS_VALUE_PATTERNS: tuple[str, ...] = (
     "maximum steps reached",
     "attributeerror",
     "traceback",
+    "golden_ticket",
 )
 
 
@@ -584,6 +585,11 @@ class Credential(Model):
     is_admin: bool = False
     parent_id: str | None = None  # ID of credential/hash that enabled this discovery
     attack_step: int = 0  # Position in attack chain
+
+    @property
+    def has_usable_password(self) -> bool:
+        """Check if credential has a real, usable password (not a placeholder)."""
+        return bool(self.password) and not _looks_like_invalid_secret(self.password)
 
 
 class Hash(Model):

@@ -36,7 +36,7 @@ from typing import Any
 import dreadnode as dn
 from loguru import logger
 from opentelemetry import trace
-from opentelemetry.trace import Span, SpanKind
+from opentelemetry.trace import SpanKind
 
 # IP address pattern for validation
 IP_PATTERN = re.compile(r"^\d{1,3}(?:\.\d{1,3}){3}$")
@@ -511,23 +511,6 @@ def infer_target_type(hostname: str | None, dc_ips: set[str] | None = None) -> s
 # =============================================================================
 
 
-def _get_current_span_for_events() -> Span | None:
-    """Get current span if it is recording, else None for fallback.
-
-    This helper enables the event-based tracing pattern: when there's an active
-    span (e.g., the worker's process_task span), we add events to it instead of
-    creating orphan child spans. If no active span exists, callers can fall back
-    to creating standalone spans for backward compatibility.
-
-    Returns:
-        The current span if it exists and is recording, otherwise None.
-    """
-    span = trace.get_current_span()
-    if span and span.is_recording():
-        return span
-    return None
-
-
 def get_tool_mitre_info(tool_name: str) -> tuple[str | None, str | None]:
     """Get MITRE technique ID and tactic for a tool.
 
@@ -805,11 +788,11 @@ def trace_tool_call(
     operation_id: str | None = None,
     credential_domain: str | None = None,
 ) -> None:
-    """Record a tool call as an event on the current span, or standalone span as fallback.
+    """Record a tool call as a child span with attack-specific attributes.
 
-    Prefers adding an event to the current active span (e.g., worker's process_task
-    span) to avoid creating orphan spans that appear disconnected in Tempo.
-    Falls back to creating a standalone span if no active span exists.
+    Creates a point-in-time child span under the current trace context so that
+    attributes (destination.address, mitre.*, etc.) are queryable via TraceQL
+    and extractable by Tempo's span metrics generator.
 
     Args:
         role: Agent role executing the tool.
@@ -848,13 +831,10 @@ def trace_tool_call(
         attrs["attack_operation_id"] = operation_id
 
     try:
-        # Prefer adding event to current span to avoid orphan spans
-        current_span = _get_current_span_for_events()
-        if current_span:
-            current_span.add_event(f"tool.{tool_name}", attributes=attrs)
-            return
-
-        # Fallback: standalone span (backward compat when no active span)
+        # Always create a child span so attributes are queryable via TraceQL
+        # (span events are not searchable in Tempo 2.x TraceQL queries).
+        # When there's an active span context, dn.span creates a proper child
+        # span — not an orphan.
         with dn.span(f"tool.{tool_name}", attributes=attrs):
             pass  # Point-in-time span
     except Exception as e:
@@ -874,13 +854,9 @@ def trace_discovery(
     weakness_type: str | None = None,
     additional_attrs: dict[str, Any] | None = None,
 ) -> None:
-    """Record a discovery as an event on the current span, or standalone span as fallback.
+    """Record a discovery as a child span with attack-specific attributes.
 
-    Prefers adding an event to the current active span (e.g., worker's process_task
-    span) to avoid creating orphan spans that appear disconnected in Tempo.
-    Falls back to creating a standalone span if no active span exists.
-
-    Creates events/spans for state-changing discoveries like credentials,
+    Creates child spans for state-changing discoveries like credentials,
     hashes, weaknesses, and vulnerabilities. These are separate from
     tool calls because the discovery info is extracted from tool OUTPUT,
     not arguments.
@@ -945,13 +921,6 @@ def trace_discovery(
         attrs.update(additional_attrs)
 
     try:
-        # Prefer adding event to current span to avoid orphan spans
-        current_span = _get_current_span_for_events()
-        if current_span:
-            current_span.add_event(f"discovery.{discovery_type}", attributes=attrs)
-            return
-
-        # Fallback: standalone span (backward compat when no active span)
         with dn.span(f"discovery.{discovery_type}", attributes=attrs):
             pass  # Point-in-time span
     except Exception as e:
@@ -968,11 +937,7 @@ def trace_decision(
     operation_id: str | None = None,
     task_id: str | None = None,
 ) -> None:
-    """Record an agent tool selection decision as an event on the current span, or standalone span as fallback.
-
-    Prefers adding an event to the current active span (e.g., worker's process_task
-    span) to avoid creating orphan spans that appear disconnected in Tempo.
-    Falls back to creating a standalone span if no active span exists.
+    """Record an agent tool selection decision as a child span.
 
     Captures why an agent chose specific tools, including
     the reasoning and alternatives considered. This enables post-hoc analysis
@@ -1021,13 +986,6 @@ def trace_decision(
         attrs["attack_tool_category"] = category
 
     try:
-        # Prefer adding event to current span to avoid orphan spans
-        current_span = _get_current_span_for_events()
-        if current_span:
-            current_span.add_event(f"decision.{role}", attributes=attrs)
-            return
-
-        # Fallback: standalone span (backward compat when no active span)
         with dn.span(f"decision.{role}", attributes=attrs):
             pass  # Point-in-time span
     except Exception as e:

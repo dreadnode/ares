@@ -2224,6 +2224,13 @@ class BloodHoundTools(Toolset):
                 logger.warning(f"Skipping BloodHound for {domain}: {reason}")
                 return f"Skipping BloodHound for {domain} - {reason}. Use credentials valid for this domain."
 
+        # Sanitize username: bloodhound-python expects a bare username without domain prefix
+        # The LLM agent may pass DOMAIN\user or user@domain format
+        if "\\" in username:
+            username = username.split("\\", 1)[1]
+        elif "@" in username:
+            username = username.split("@", 1)[0]
+
         cmd = [
             "bloodhound-python",
             "-d",

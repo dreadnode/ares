@@ -1176,69 +1176,15 @@ class TestTraceDecision:
         assert attrs["attack_tool_category"] == "LateralMovementTools"
 
 
-class TestGetCurrentSpanForEvents:
-    """Tests for _get_current_span_for_events helper."""
+class TestSpanBasedTracing:
+    """Tests that trace functions always create child spans (not events).
 
-    def test_returns_none_when_no_active_span(self):
-        """Should return None when no span is active."""
-        from ares.core.tracing import _get_current_span_for_events
+    Span attributes must be queryable via TraceQL and extractable by Tempo's
+    span metrics generator, which doesn't support event attributes.
+    """
 
-        # By default, there's no active span in test context
-        result = _get_current_span_for_events()
-        # The default INVALID_SPAN is not recording
-        assert result is None
-
-    def test_returns_span_when_recording(self):
-        """Should return span when an active recording span exists."""
-        from unittest.mock import MagicMock, patch
-
-        from ares.core.tracing import _get_current_span_for_events
-
-        mock_span = MagicMock()
-        mock_span.is_recording.return_value = True
-
-        with patch("opentelemetry.trace.get_current_span", return_value=mock_span):
-            result = _get_current_span_for_events()
-            assert result is mock_span
-
-    def test_returns_none_when_span_not_recording(self):
-        """Should return None when span exists but is not recording."""
-        from unittest.mock import MagicMock, patch
-
-        from ares.core.tracing import _get_current_span_for_events
-
-        mock_span = MagicMock()
-        mock_span.is_recording.return_value = False
-
-        with patch("opentelemetry.trace.get_current_span", return_value=mock_span):
-            result = _get_current_span_for_events()
-            assert result is None
-
-
-class TestEventBasedTracing:
-    """Tests for event-based tracing (adding events to current span instead of orphan spans)."""
-
-    def test_trace_tool_call_adds_event_to_current_span(self):
-        """trace_tool_call should add event when active span exists."""
-        from unittest.mock import MagicMock, patch
-
-        from ares.core.tracing import trace_tool_call
-
-        mock_span = MagicMock()
-        mock_span.is_recording.return_value = True
-
-        with patch("opentelemetry.trace.get_current_span", return_value=mock_span):
-            trace_tool_call("recon", "red", "nmap_scan", is_error=False)
-
-        # Should add event to current span
-        mock_span.add_event.assert_called_once()
-        event_name = mock_span.add_event.call_args[0][0]
-        event_attrs = mock_span.add_event.call_args[1]["attributes"]
-        assert event_name == "tool.nmap_scan"
-        assert event_attrs["tool.status"] == "success"
-
-    def test_trace_tool_call_falls_back_to_span_when_no_context(self):
-        """trace_tool_call should create standalone span when no active span."""
+    def test_trace_tool_call_creates_span(self):
+        """trace_tool_call should always create a child span."""
         from unittest.mock import MagicMock, patch
 
         from ares.core.tracing import trace_tool_call
@@ -1247,30 +1193,25 @@ class TestEventBasedTracing:
         mock_span.__enter__ = MagicMock(return_value=mock_span)
         mock_span.__exit__ = MagicMock(return_value=False)
 
-        # Return non-recording span (simulates no active context)
-        mock_invalid_span = MagicMock()
-        mock_invalid_span.is_recording.return_value = False
+        with patch("dreadnode.span", return_value=mock_span) as mock_dn_span:
+            trace_tool_call("recon", "red", "nmap_scan", is_error=False)
 
-        with (
-            patch("opentelemetry.trace.get_current_span", return_value=mock_invalid_span),
-            patch("dreadnode.span", return_value=mock_span) as mock_dn_span,
-        ):
-            trace_tool_call("recon", "red", "nmap_scan")
-
-        # Should fall back to creating standalone span
         mock_dn_span.assert_called_once()
         assert "tool.nmap_scan" in mock_dn_span.call_args[0][0]
+        span_attrs = mock_dn_span.call_args[1]["attributes"]
+        assert span_attrs["tool.status"] == "success"
 
-    def test_trace_discovery_adds_event_to_current_span(self):
-        """trace_discovery should add event when active span exists."""
+    def test_trace_discovery_creates_span(self):
+        """trace_discovery should always create a child span."""
         from unittest.mock import MagicMock, patch
 
         from ares.core.tracing import trace_discovery
 
         mock_span = MagicMock()
-        mock_span.is_recording.return_value = True
+        mock_span.__enter__ = MagicMock(return_value=mock_span)
+        mock_span.__exit__ = MagicMock(return_value=False)
 
-        with patch("opentelemetry.trace.get_current_span", return_value=mock_span):
+        with patch("dreadnode.span", return_value=mock_span) as mock_dn_span:
             trace_discovery(
                 discovery_type="credential",
                 source_agent="credential_access",
@@ -1278,51 +1219,23 @@ class TestEventBasedTracing:
                 target_domain="contoso.local",
             )
 
-        # Should add event to current span
-        mock_span.add_event.assert_called_once()
-        event_name = mock_span.add_event.call_args[0][0]
-        event_attrs = mock_span.add_event.call_args[1]["attributes"]
-        assert event_name == "discovery.credential"
-        assert event_attrs["user.name"] == "admin"
-        assert event_attrs["attack_target_domain"] == "contoso.local"
-
-    def test_trace_discovery_falls_back_to_span_when_no_context(self):
-        """trace_discovery should create standalone span when no active span."""
-        from unittest.mock import MagicMock, patch
-
-        from ares.core.tracing import trace_discovery
-
-        mock_span = MagicMock()
-        mock_span.__enter__ = MagicMock(return_value=mock_span)
-        mock_span.__exit__ = MagicMock(return_value=False)
-
-        mock_invalid_span = MagicMock()
-        mock_invalid_span.is_recording.return_value = False
-
-        with (
-            patch("opentelemetry.trace.get_current_span", return_value=mock_invalid_span),
-            patch("dreadnode.span", return_value=mock_span) as mock_dn_span,
-        ):
-            trace_discovery(
-                discovery_type="hash",
-                source_agent="credential_access",
-                target_user="krbtgt",
-            )
-
-        # Should fall back to creating standalone span
         mock_dn_span.assert_called_once()
-        assert "discovery.hash" in mock_dn_span.call_args[0][0]
+        assert "discovery.credential" in mock_dn_span.call_args[0][0]
+        span_attrs = mock_dn_span.call_args[1]["attributes"]
+        assert span_attrs["user.name"] == "admin"
+        assert span_attrs["attack_target_domain"] == "contoso.local"
 
-    def test_trace_decision_adds_event_to_current_span(self):
-        """trace_decision should add event when active span exists."""
+    def test_trace_decision_creates_span(self):
+        """trace_decision should always create a child span."""
         from unittest.mock import MagicMock, patch
 
         from ares.core.tracing import trace_decision
 
         mock_span = MagicMock()
-        mock_span.is_recording.return_value = True
+        mock_span.__enter__ = MagicMock(return_value=mock_span)
+        mock_span.__exit__ = MagicMock(return_value=False)
 
-        with patch("opentelemetry.trace.get_current_span", return_value=mock_span):
+        with patch("dreadnode.span", return_value=mock_span) as mock_dn_span:
             trace_decision(
                 role="credential_access",
                 team="red",
@@ -1331,52 +1244,22 @@ class TestEventBasedTracing:
                 reasoning_summary="Using secretsdump for DCSync",
             )
 
-        # Should add event to current span
-        mock_span.add_event.assert_called_once()
-        event_name = mock_span.add_event.call_args[0][0]
-        event_attrs = mock_span.add_event.call_args[1]["attributes"]
-        assert event_name == "decision.credential_access"
-        assert event_attrs["decision.tool_chosen"] == "secretsdump"
-
-    def test_trace_decision_falls_back_to_span_when_no_context(self):
-        """trace_decision should create standalone span when no active span."""
-        from unittest.mock import MagicMock, patch
-
-        from ares.core.tracing import trace_decision
-
-        mock_span = MagicMock()
-        mock_span.__enter__ = MagicMock(return_value=mock_span)
-        mock_span.__exit__ = MagicMock(return_value=False)
-
-        mock_invalid_span = MagicMock()
-        mock_invalid_span.is_recording.return_value = False
-
-        with (
-            patch("opentelemetry.trace.get_current_span", return_value=mock_invalid_span),
-            patch("dreadnode.span", return_value=mock_span) as mock_dn_span,
-        ):
-            trace_decision(
-                role="recon",
-                team="red",
-                tools_considered=["nmap_scan"],
-                tool_chosen="nmap_scan",
-                reasoning_summary="Scanning network",
-            )
-
-        # Should fall back to creating standalone span
         mock_dn_span.assert_called_once()
-        assert "decision.recon" in mock_dn_span.call_args[0][0]
+        assert "decision.credential_access" in mock_dn_span.call_args[0][0]
+        span_attrs = mock_dn_span.call_args[1]["attributes"]
+        assert span_attrs["decision.tool_chosen"] == "secretsdump"
 
-    def test_event_includes_error_attributes(self):
-        """trace_tool_call event should include error attributes when is_error=True."""
+    def test_trace_tool_call_includes_error_attributes(self):
+        """trace_tool_call span should include error attributes when is_error=True."""
         from unittest.mock import MagicMock, patch
 
         from ares.core.tracing import trace_tool_call
 
         mock_span = MagicMock()
-        mock_span.is_recording.return_value = True
+        mock_span.__enter__ = MagicMock(return_value=mock_span)
+        mock_span.__exit__ = MagicMock(return_value=False)
 
-        with patch("opentelemetry.trace.get_current_span", return_value=mock_span):
+        with patch("dreadnode.span", return_value=mock_span) as mock_dn_span:
             trace_tool_call(
                 "lateral",
                 "red",
@@ -1385,20 +1268,21 @@ class TestEventBasedTracing:
                 error_message="Access denied",
             )
 
-        event_attrs = mock_span.add_event.call_args[1]["attributes"]
-        assert event_attrs["tool.status"] == "error"
-        assert event_attrs["error.message"] == "Access denied"
+        span_attrs = mock_dn_span.call_args[1]["attributes"]
+        assert span_attrs["tool.status"] == "error"
+        assert span_attrs["error.message"] == "Access denied"
 
-    def test_event_includes_operation_id(self):
-        """trace_tool_call event should include operation_id when provided."""
+    def test_trace_tool_call_includes_operation_id(self):
+        """trace_tool_call span should include operation_id when provided."""
         from unittest.mock import MagicMock, patch
 
         from ares.core.tracing import trace_tool_call
 
         mock_span = MagicMock()
-        mock_span.is_recording.return_value = True
+        mock_span.__enter__ = MagicMock(return_value=mock_span)
+        mock_span.__exit__ = MagicMock(return_value=False)
 
-        with patch("opentelemetry.trace.get_current_span", return_value=mock_span):
+        with patch("dreadnode.span", return_value=mock_span) as mock_dn_span:
             trace_tool_call(
                 "credential_access",
                 "red",
@@ -1406,5 +1290,5 @@ class TestEventBasedTracing:
                 operation_id="op-test-123",
             )
 
-        event_attrs = mock_span.add_event.call_args[1]["attributes"]
-        assert event_attrs["attack_operation_id"] == "op-test-123"
+        span_attrs = mock_dn_span.call_args[1]["attributes"]
+        assert span_attrs["attack_operation_id"] == "op-test-123"

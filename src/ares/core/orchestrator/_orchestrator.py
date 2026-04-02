@@ -129,6 +129,7 @@ def _is_valid_secret_candidate(value: str | None) -> bool:
         "command timed out",
         "traceback",
         ".ccache",
+        "golden_ticket",
     )
     return not any(marker in normalized for marker in invalid_markers)
 
@@ -1732,10 +1733,21 @@ async def _auto_adcs_enumeration(
                     failed_servers.add(server_ip)
                     continue
 
-                for cred in state.all_credentials:
-                    if not cred.password:
-                        continue
+                # Determine server's domain from hostname for credential matching
+                server_domain = ""
+                if server_hostname and "." in server_hostname:
+                    server_domain = server_hostname.lower().split(".", 1)[1]
 
+                # Sort credentials: same-domain first, admin first, filter placeholders
+                sorted_creds = sorted(
+                    [c for c in state.all_credentials if c.has_usable_password],
+                    key=lambda c: (
+                        0 if server_domain and (c.domain or "").lower() == server_domain else 1,
+                        0 if c.is_admin else 1,
+                    ),
+                )
+
+                for cred in sorted_creds:
                     cred_key = (server_ip, cred.username, cred.domain or "")
 
                     # Check if we've already attempted with this credential
@@ -1832,7 +1844,7 @@ async def _auto_adcs_enumeration(
                     # Find credentials for this domain (prefer same-domain, then admin)
                     # Try each credential we haven't probed with yet
                     for cred in sorted(
-                        [c for c in state.all_credentials if c.password],
+                        [c for c in state.all_credentials if c.has_usable_password],
                         key=lambda c: (
                             0 if (c.domain or "").lower() == domain_lower else 1,
                             0 if c.is_admin else 1,
@@ -1919,8 +1931,8 @@ async def _auto_share_spider(
             # For each readable share, try to spider with available credentials
             for share in readable_shares:
                 for cred in state.all_credentials:
-                    if not cred.password:
-                        continue  # Need password for SMB auth
+                    if not cred.has_usable_password:
+                        continue  # Need real password for SMB auth
 
                     # Create unique key for this spider attempt (persisted in state)
                     spider_key = (
@@ -2025,8 +2037,40 @@ async def _auto_bloodhound(
 
             current_time = asyncio.get_event_loop().time()
 
+            # Prioritize undominated foreign forests over domains we already own.
+            # Without this, BloodHound wastes cycles re-enumerating sevenkingdoms.local
+            # while essos.local (the actual target) waits in the queue.
+            da_domains = {d.lower() for d in state.domain_admin_domains}
+            target_domain = (
+                state.target.domain.lower() if state.target and state.target.domain else ""
+            )
+
+            def _bh_domain_priority(
+                d: str,
+                _da_domains: set[str] = da_domains,
+                _target_domain: str = target_domain,
+            ) -> int:
+                dl = d.lower()
+                # Undominated foreign forests first (highest priority)
+                if (
+                    dl not in _da_domains
+                    and dl != _target_domain
+                    and not dl.endswith("." + _target_domain)
+                ):
+                    return 0
+                # Target domain (initial attack surface)
+                if dl == _target_domain:
+                    return 1
+                # Child domains of target
+                if dl.endswith("." + _target_domain):
+                    return 2
+                # Already dominated domains last
+                return 3
+
+            sorted_domains = sorted(_iter_domains, key=_bh_domain_priority)
+
             # Try to run BloodHound for each domain
-            for domain in _iter_domains:
+            for domain in sorted_domains:
                 domain_lower = domain.lower()
                 # Skip domains we've already successfully enumerated (persisted in state)
                 # EXCEPTION: re-run with native creds if first run used cross-trust creds.
@@ -2037,7 +2081,7 @@ async def _auto_bloodhound(
                     native_creds = [
                         c
                         for c in state.all_credentials
-                        if c.password and (c.domain or "").lower() == domain_lower
+                        if c.has_usable_password and (c.domain or "").lower() == domain_lower
                     ]
                     has_untried_native = any(
                         (domain_lower, c.username.lower(), domain_lower) not in bloodhound_attempts
@@ -2051,10 +2095,22 @@ async def _auto_bloodhound(
                         f"(previous run used cross-trust creds, may have missed ACLs)"
                     )
 
+                # Skip if ANY BloodHound task is already running for this domain
+                # (prevents dispatching with a different credential while one is in-flight)
+                domain_has_running_task = False
+                for key, (tid, _ac, _at) in bloodhound_attempts.items():
+                    if key[0] == domain_lower and tid in state.pending_tasks:
+                        task_info = state.pending_tasks[tid]
+                        if task_info.status != TaskStatus.COMPLETED:
+                            domain_has_running_task = True
+                            break
+                if domain_has_running_task:
+                    continue
+
                 # Find a credential for this domain
                 # First try same-domain creds, then cross-domain creds (trusts allow this)
                 sorted_creds = sorted(
-                    [c for c in state.all_credentials if c.password],
+                    [c for c in state.all_credentials if c.has_usable_password],
                     key=lambda c: (
                         0 if (c.domain or "").lower() == domain.lower() else 1,
                         0 if c.is_admin else 1,
@@ -2072,8 +2128,8 @@ async def _auto_bloodhound(
                         task_id, attempt_count, last_attempt = bloodhound_attempts[cred_key]
 
                         # Check if the task completed successfully
-                        task_info = state.pending_tasks.get(task_id)
-                        if task_info and task_info.status == TaskStatus.COMPLETED:
+                        bh_task = state.pending_tasks.get(task_id)
+                        if bh_task and bh_task.status == TaskStatus.COMPLETED:
                             state.processed_bloodhound_domains.add(domain.lower())
                             logger.info(f"BloodHound collection succeeded for {domain}")
                             break
@@ -2093,8 +2149,9 @@ async def _auto_bloodhound(
                                 f"(attempt {attempt_count + 1}/{max_retries})"
                             )
                         else:
-                            # Task still in progress
-                            continue
+                            # Task still in progress — skip this DOMAIN entirely
+                            # (don't try other creds while one is already running)
+                            break
                     else:
                         attempt_count = 0
 
@@ -2482,7 +2539,7 @@ async def _auto_credential_access(
                         (
                             c
                             for c in state.all_credentials
-                            if c.password and (c.domain or "").lower() != fd.lower()
+                            if c.has_usable_password and (c.domain or "").lower() != fd.lower()
                         ),
                         None,
                     )
@@ -2666,8 +2723,8 @@ async def _auto_credential_access(
                 # These are high-value low-hanging fruit that take ~2-5 seconds each
                 # Running them separately ensures they complete quickly without getting
                 # blocked by slow recon (smb_sweep) or credential dumping (secretsdump)
-                # NOTE: These techniques require password auth (not hash), skip if no password
-                if cred.password:
+                # NOTE: These techniques require password auth (not hash), skip if no usable password
+                if cred.has_usable_password:
                     dc_targets = dc_hosts_in_domain or domain_hosts[:1]
                     await dispatcher.request_credential_access(
                         source_agent="orchestrator",
@@ -3164,9 +3221,9 @@ async def _auto_delegation_enumeration(
                 logger.debug("Auto-delegation: waiting for credentials")
                 continue
 
-            # Find new credentials with passwords
+            # Find new credentials with usable passwords (not placeholders)
             for cred in state.all_credentials:
-                if not cred.password:
+                if not cred.has_usable_password:
                     continue
 
                 cred_key = f"{(cred.domain or '').lower()}:{cred.username.lower()}"
@@ -6127,13 +6184,17 @@ async def _auto_cross_forest_pivot(
                     # Find best credential for secretsdump (prefer creds from this domain)
                     sd_cred = None
                     for cred in state.all_credentials:
-                        if cred.password and cred.domain and cred.domain.lower() == fd_lower:
+                        if (
+                            cred.has_usable_password
+                            and cred.domain
+                            and cred.domain.lower() == fd_lower
+                        ):
                             sd_cred = cred
                             break
-                    # Fall back to any credential with a password
+                    # Fall back to any credential with a usable password
                     if not sd_cred:
                         for cred in state.all_credentials:
-                            if cred.password:
+                            if cred.has_usable_password:
                                 sd_cred = cred
                                 break
                     if not sd_cred:
