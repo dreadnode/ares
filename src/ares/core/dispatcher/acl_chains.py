@@ -58,6 +58,7 @@ class ACLAction(Enum):
     WRITE_DACL = "write_dacl"
     TAKE_OWNERSHIP = "take_ownership"
     RBCD = "rbcd"
+    MODIFY_CERTTEMPLATE = "modify_certtemplate"
 
 
 @dataclass
@@ -69,7 +70,7 @@ class ACLChainStep:
     target: str  # Target of the action (what we're attacking)
     right: str  # ACL right being abused
     action: ACLAction  # Action to take
-    target_type: str = "user"  # user, group, computer
+    target_type: str = "user"  # user, group, computer, certtemplate
     completed: bool = False
     result: str = ""
     completed_at: datetime | None = None
@@ -337,10 +338,19 @@ class ACLChainTracker:
         self.add_chain(chain)
         return chain
 
-    def _right_to_action(self, right: str, target: str) -> ACLAction:
+    def _right_to_action(self, right: str, target: str, target_type: str = "") -> ACLAction:
         """Determine the best action for a given ACL right."""
         right_lower = right.lower().replace("-", "").replace("_", "")
         target_lower = target.lower()
+
+        # Certificate template targets — modify template for ESC4 exploitation
+        if target_type == "certtemplate" and (
+            "genericall" in right_lower
+            or "genericwrite" in right_lower
+            or "writedacl" in right_lower
+            or "writeowner" in right_lower
+        ):
+            return ACLAction.MODIFY_CERTTEMPLATE
 
         # Group targets - add member
         is_group_target = target_lower in ("domain admins", "enterprise admins", "administrators")
@@ -410,7 +420,7 @@ class ACLChainTracker:
                     return None
 
         chain_id = f"acl-vuln-{uuid.uuid4().hex[:8]}"
-        action = self._right_to_action(right, target)
+        action = self._right_to_action(right, target, target_type)
 
         step = ACLChainStep(
             step_id="step-1",

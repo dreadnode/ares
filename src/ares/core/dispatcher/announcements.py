@@ -172,8 +172,8 @@ class AnnouncementMixin:
 
         if not dc_ip:
             logger.warning(f"Cannot dispatch trust key extraction: no DC IP for {da_domain}")
-            # Clear dedup flag so this can be retried when DC IP becomes available
-            self._trust_extraction_dispatched.discard(da_domain_lower)
+            # Do NOT clear dedup flag — periodic retry loop will handle re-attempts.
+            # Clearing allows duplicate dispatch from publishing.py path.
             return
 
         # Determine if this is a child domain
@@ -227,14 +227,12 @@ class AnnouncementMixin:
                     f"for {parent_domain}. Waiting for golden ticket flow to DCSync parent. "
                     f"Trust extraction deferred."
                 )
-                # Clear dedup flag so this can be retried
-                self._trust_extraction_dispatched.discard(da_domain_lower)
             else:
                 logger.warning(
                     f"Cannot dispatch trust key extraction: no DA credentials for {da_domain}"
                 )
-                # Clear dedup flag so this can be retried when credentials appear
-                self._trust_extraction_dispatched.discard(da_domain_lower)
+            # Do NOT clear dedup flag — periodic retry loop will handle re-attempts.
+            # Clearing allows duplicate dispatch from publishing.py path.
             return
 
         # Determine the extraction domain and DC IP

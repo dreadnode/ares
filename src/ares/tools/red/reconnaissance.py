@@ -2059,10 +2059,13 @@ class BloodHoundTools(Toolset):
             except Exception as e:
                 logger.debug(f"Failed to parse BloodHound JSON {fpath}: {e}")
 
-        # Extract abusable ACEs from users, groups, and computers
+        # Extract abusable ACEs from users, groups, computers, and certificate templates
+        # Certificate templates ("certtemplates") are critical for ADCS ESC4 — we need to
+        # know which principals have GenericAll/WriteDacl on templates to build attack chains
+        acl_target_types = {"users", "groups", "computers", "certtemplates"}
         acl_edges: list[dict[str, str]] = []
         for file_type, entries in all_data:
-            if file_type not in ("users", "groups", "computers"):
+            if file_type not in acl_target_types:
                 continue
             for entry in entries:
                 target_name = entry.get("Properties", {}).get("name", "")
@@ -2086,12 +2089,14 @@ class BloodHoundTools(Toolset):
                     # Skip unresolved SIDs that look like builtin groups
                     if principal == sid and ("S-1-5-32-" in sid or sid.startswith("S-1-5-9")):
                         continue
+                    # Map type: users→user, groups→group, certtemplates→certtemplate
+                    target_type = file_type.rstrip("s")
                     acl_edges.append(
                         {
                             "principal": principal,
                             "target": target_name,
                             "right": right,
-                            "target_type": file_type.rstrip("s"),  # users→user, groups→group
+                            "target_type": target_type,
                         }
                     )
 

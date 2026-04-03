@@ -199,6 +199,58 @@ class TestParseBloodhoundJsonAcls:
             assert result[0]["target"] == "DOMAIN ADMINS@CONTOSO.LOCAL"
             assert result[0]["target_type"] == "group"
 
+    def test_extracts_certtemplate_acls(self):
+        """Certificate template ACLs must be extracted for ESC4 attack chains."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            khal_sid = "S-1-5-21-1606295247-3362563358-1415986617-1123"
+            template_oid = "f610dd23-0ae5-4c31-8303-6789abcd1234"
+
+            # khal.drogo has GenericAll on the ESC4 certificate template
+            certtemplates = {
+                "meta": {"type": "certtemplates"},
+                "data": [
+                    {
+                        "ObjectIdentifier": template_oid,
+                        "Properties": {"name": "ESC4-TEMPLATE@ESSOS.LOCAL"},
+                        "Aces": [self._make_ace(khal_sid, "GenericAll")],
+                    },
+                ],
+            }
+            # Separate users file so the SID resolves
+            users = self._make_users_json(
+                [self._make_user_entry("KHAL.DROGO@ESSOS.LOCAL", khal_sid)]
+            )
+            tmpl_path = self._write_json(tmpdir, "certtemplates.json", certtemplates)
+            users_path = self._write_json(tmpdir, "users.json", users)
+
+            result = BloodHoundTools._parse_bloodhound_json_acls([users_path, tmpl_path])
+
+            assert len(result) == 1
+            edge = result[0]
+            assert edge["principal"] == "KHAL.DROGO@ESSOS.LOCAL"
+            assert edge["target"] == "ESC4-TEMPLATE@ESSOS.LOCAL"
+            assert edge["right"] == "GenericAll"
+            assert edge["target_type"] == "certtemplate"
+
+    def test_skips_non_target_file_types(self):
+        """Non-target file types (domains, ous, gpos) should still be skipped."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            user_sid = "S-1-5-21-111-222-333-1001"
+            domain_data = {
+                "meta": {"type": "domains"},
+                "data": [
+                    {
+                        "ObjectIdentifier": "S-1-5-21-111-222-333",
+                        "Properties": {"name": "CONTOSO.LOCAL"},
+                        "Aces": [self._make_ace(user_sid, "GenericAll")],
+                    },
+                ],
+            }
+            path = self._write_json(tmpdir, "domains.json", domain_data)
+
+            result = BloodHoundTools._parse_bloodhound_json_acls([path])
+            assert result == []
+
     def test_unresolved_sid_kept_if_not_builtin(self):
         """Unresolved SIDs that aren't builtin should still appear."""
         with tempfile.TemporaryDirectory() as tmpdir:

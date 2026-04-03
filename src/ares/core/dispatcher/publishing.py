@@ -449,6 +449,15 @@ class PublishingMixin:
         is_main_thread: bool,
     ) -> None:
         """Dispatch crack task immediately when a new hash is published."""
+        # Skip machine/trust accounts — their passwords are 120+ random chars,
+        # the NT hash IS the trust key and is used directly with -nthash
+        if hash_obj.username.endswith("$"):
+            logger.debug(
+                f"Skipping crack dispatch for machine account: "
+                f"{hash_obj.domain}\\{hash_obj.username}"
+            )
+            return
+
         # Build crack key for deduplication (same as _auto_crack_dispatch)
         crack_key = (
             f"{(hash_obj.domain or '').lower()}:"
@@ -1539,8 +1548,8 @@ class PublishingMixin:
 
         if not dc_ip:
             logger.warning(f"Cannot dispatch trust key extraction: no DC IP for {da_domain}")
-            # Clear dedup flag so this can be retried when DC IP becomes available
-            self._trust_extraction_dispatched.discard(da_domain_lower)
+            # Do NOT clear dedup flag — periodic retry loop will handle re-attempts.
+            # Clearing allows duplicate dispatch from announcements.py path.
             return
 
         # Find DA credential (Administrator NTLM hash preferred)
@@ -1576,8 +1585,8 @@ class PublishingMixin:
             logger.warning(
                 f"Cannot dispatch trust key extraction: no DA credentials for {da_domain}"
             )
-            # Clear dedup flag so this can be retried when credentials appear
-            self._trust_extraction_dispatched.discard(da_domain_lower)
+            # Do NOT clear dedup flag — periodic retry loop will handle re-attempts.
+            # Clearing allows duplicate dispatch from announcements.py path.
             return
 
         # Dispatch trust key extraction for each undominated forest
@@ -1703,8 +1712,8 @@ class PublishingMixin:
                         f"Administrator hash found for {parent_domain}. Waiting for golden ticket "
                         f"flow to DCSync parent domain. Trust extraction deferred."
                     )
-                    # Clear the dedup flag so this can be retried when parent hash appears
-                    self._trust_extraction_dispatched.discard(da_domain_lower)
+                    # Do NOT clear dedup flag — periodic retry loop will handle re-attempts.
+                    # Clearing allows duplicate dispatch from announcements.py path.
                     return
             else:
                 logger.warning(
