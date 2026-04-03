@@ -454,9 +454,16 @@ class DeferredQueueMixin:
                 await asyncio.sleep(get_deferred_queue_check_interval())
 
                 # HALT: If DA achieved, drain deferred queues and stop processing
+                # In multi-forest mode, continue processing until ALL forests dominated
                 if self._shared_state and self._shared_state.has_domain_admin:
-                    await self._drain_queues_on_da()
-                    continue
+                    from ares.core.config import get_multi_forest_mode
+
+                    if get_multi_forest_mode() and not self._shared_state.all_forests_dominated():
+                        # Multi-forest: keep processing deferred tasks for undominated forests
+                        pass
+                    else:
+                        await self._drain_queues_on_da()
+                        continue
 
                 llm_count = await self._get_llm_task_count()
                 max_tasks = get_max_concurrent_tasks()

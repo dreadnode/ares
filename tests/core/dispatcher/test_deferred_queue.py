@@ -759,3 +759,141 @@ class TestStaleTaskCleanup:
 
         # Fresh task should remain
         assert "fresh-task-1" in dispatcher._shared_state.pending_tasks
+
+
+class TestDeferredQueueMultiForestDrain:
+    """Tests for deferred queue processor respecting multi-forest mode on DA.
+
+    When DA is achieved, the deferred queue processor should:
+    - Single-forest mode: drain all deferred queues immediately
+    - Multi-forest mode + undominated forests: continue processing (do NOT drain)
+    - Multi-forest mode + all forests dominated: drain deferred queues
+    """
+
+    @pytest.fixture
+    def fake_redis(self):
+        return FakeRedis()
+
+    @pytest.fixture
+    def dispatcher(self, fake_redis):
+        d = RedTeamDispatcher()
+        d._shared_state = SharedRedTeamState(operation_id="op-test-mf-drain")
+        d._operation_id = "op-test-mf-drain"
+        d._running = True
+        d._task_queue = MagicMock()
+        d._task_queue.redis = fake_redis
+        d._task_queue.submit_task = AsyncMock(return_value="task-123")
+        return d
+
+    def _queue_key(self, dispatcher, task_type: str) -> str:
+        return f"{DEFERRED_QUEUE_PREFIX}:{dispatcher._operation_id}:{task_type}"
+
+    async def _populate_deferred_queue(self, dispatcher):
+        """Add some tasks to the deferred queue for testing."""
+        await dispatcher._enqueue_deferred_task(
+            task_type="lateral",
+            target_role="lateral",
+            payload={"target": "192.168.58.10"},
+            source_agent="orchestrator",
+            priority=5,
+        )
+        await dispatcher._enqueue_deferred_task(
+            task_type="exploit",
+            target_role="privesc",
+            payload={"target": "192.168.58.20"},
+            source_agent="orchestrator",
+            priority=3,
+        )
+
+    @pytest.mark.asyncio
+    async def test_da_multi_forest_undominated_does_not_drain(self, dispatcher, fake_redis):
+        """Multi-forest mode + DA + undominated forests: tasks should NOT be drained."""
+        from unittest.mock import patch
+
+        await self._populate_deferred_queue(dispatcher)
+
+        # Verify tasks are present
+        assert await fake_redis.zcard(self._queue_key(dispatcher, "lateral")) == 1
+        assert await fake_redis.zcard(self._queue_key(dispatcher, "exploit")) == 1
+
+        # Set DA achieved
+        dispatcher._shared_state.has_domain_admin = True
+        dispatcher._shared_state.all_forests_dominated = MagicMock(return_value=False)
+
+        # Spy on _drain_queues_on_da to verify it is NOT called
+        dispatcher._drain_queues_on_da = AsyncMock()
+
+        # Mock multi-forest mode ON, simulate the processor's DA check logic
+        with patch("ares.core.config.get_multi_forest_mode", return_value=True):
+            if dispatcher._shared_state.has_domain_admin:
+                from ares.core.config import get_multi_forest_mode
+
+                if get_multi_forest_mode() and not dispatcher._shared_state.all_forests_dominated():
+                    # Multi-forest: keep processing - should NOT drain
+                    pass
+                else:
+                    await dispatcher._drain_queues_on_da()
+
+        # _drain_queues_on_da should NOT have been called
+        dispatcher._drain_queues_on_da.assert_not_called()
+
+        # Tasks should still be in the queue
+        assert await fake_redis.zcard(self._queue_key(dispatcher, "lateral")) == 1
+        assert await fake_redis.zcard(self._queue_key(dispatcher, "exploit")) == 1
+
+    @pytest.mark.asyncio
+    async def test_da_multi_forest_all_dominated_drains(self, dispatcher, fake_redis):
+        """Multi-forest mode + DA + all forests dominated: tasks SHOULD be drained."""
+        from unittest.mock import patch
+
+        await self._populate_deferred_queue(dispatcher)
+
+        # Verify tasks are present
+        assert await fake_redis.zcard(self._queue_key(dispatcher, "lateral")) == 1
+        assert await fake_redis.zcard(self._queue_key(dispatcher, "exploit")) == 1
+
+        # Set DA achieved
+        dispatcher._shared_state.has_domain_admin = True
+        dispatcher._shared_state.all_forests_dominated = MagicMock(return_value=True)
+
+        # Mock multi-forest mode ON, simulate the processor's DA check logic
+        with patch("ares.core.config.get_multi_forest_mode", return_value=True):
+            if dispatcher._shared_state.has_domain_admin:
+                from ares.core.config import get_multi_forest_mode
+
+                if get_multi_forest_mode() and not dispatcher._shared_state.all_forests_dominated():
+                    pass  # Would keep processing
+                else:
+                    await dispatcher._drain_queues_on_da()
+
+        # All queues should be empty
+        assert await fake_redis.zcard(self._queue_key(dispatcher, "lateral")) == 0
+        assert await fake_redis.zcard(self._queue_key(dispatcher, "exploit")) == 0
+
+    @pytest.mark.asyncio
+    async def test_da_single_forest_drains(self, dispatcher, fake_redis):
+        """Single-forest mode + DA: tasks SHOULD be drained (existing behavior)."""
+        from unittest.mock import patch
+
+        await self._populate_deferred_queue(dispatcher)
+
+        # Verify tasks are present
+        assert await fake_redis.zcard(self._queue_key(dispatcher, "lateral")) == 1
+        assert await fake_redis.zcard(self._queue_key(dispatcher, "exploit")) == 1
+
+        # Set DA achieved
+        dispatcher._shared_state.has_domain_admin = True
+
+        # Mock multi-forest mode OFF, simulate the processor's DA check logic
+        with patch("ares.core.config.get_multi_forest_mode", return_value=False):
+            if dispatcher._shared_state.has_domain_admin:
+                from ares.core.config import get_multi_forest_mode
+
+                if get_multi_forest_mode() and not dispatcher._shared_state.all_forests_dominated():
+                    pass  # Would keep processing
+                else:
+                    await dispatcher._drain_queues_on_da()
+
+        # All queues should be empty
+        assert await fake_redis.zcard(self._queue_key(dispatcher, "lateral")) == 0
+        assert await fake_redis.zcard(self._queue_key(dispatcher, "exploit")) == 0

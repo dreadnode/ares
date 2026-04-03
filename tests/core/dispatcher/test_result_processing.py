@@ -714,6 +714,12 @@ class TestMarkVulnerabilityExploitedDirectPersist:
             in dispatcher.shared_state.exploited_vulnerabilities
         )
 
+        # Verify STRING key was also written (for get_exploitation_status consistency)
+        mock_redis.set.assert_called_once()
+        call_args = mock_redis.set.call_args
+        assert "exploited:constrained_delegation_192.168.58.10" in call_args[0][0]
+        mock_redis.expire.assert_called_once()
+
     @pytest.mark.asyncio
     async def test_threaded_consumer_fallback_on_redis_failure(self):
         """When direct Redis persist fails, should fallback to checkpoint request."""
@@ -777,9 +783,9 @@ class TestMarkVulnerabilityExploitedDirectPersist:
         dispatcher._checkpoint_requested.set.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_failed_exploit_requests_checkpoint_only(self):
-        """Failed exploitation should only request checkpoint, not direct persist."""
-        from unittest.mock import MagicMock, patch
+    async def test_failed_exploit_persists_string_key(self):
+        """Failed exploitation should persist STRING key for get_exploitation_status()."""
+        from unittest.mock import AsyncMock, MagicMock, patch
 
         from ares.core.dispatcher._dispatcher import RedTeamDispatcher
         from ares.core.models import SharedRedTeamState
@@ -788,8 +794,9 @@ class TestMarkVulnerabilityExploitedDirectPersist:
         dispatcher._shared_state = SharedRedTeamState(operation_id="op-test-failed")
         dispatcher._checkpoint_requested = MagicMock()
 
+        mock_redis = AsyncMock()
         mock_task_queue = MagicMock()
-        mock_task_queue.redis = MagicMock()
+        mock_task_queue.redis = mock_redis
 
         with patch("ares.core.dispatcher.vulnerability.threading.current_thread") as mock_current:
             mock_current.return_value = MagicMock(name="ResultConsumerThread")
@@ -801,9 +808,12 @@ class TestMarkVulnerabilityExploitedDirectPersist:
                 task_queue=mock_task_queue,
             )
 
-        # Should request checkpoint (failed exploits don't need immediate persist)
-        dispatcher._checkpoint_requested.set.assert_called_once()
-        # Should NOT have added to exploited set
+        # Should persist the STRING key (for get_exploitation_status)
+        mock_redis.set.assert_called_once()
+        call_args = mock_redis.set.call_args
+        assert "exploited:esc8_192.168.58.40" in call_args[0][0]
+        mock_redis.expire.assert_called_once()
+        # Should NOT have added to exploited set (success=False)
         assert "esc8_192.168.58.40" not in dispatcher.shared_state.exploited_vulnerabilities
 
     @pytest.mark.asyncio
@@ -1155,6 +1165,160 @@ class TestParentVulnIdTracking:
 
         # mark_vulnerability_exploited should NOT be called for failed task
         dispatcher.mark_vulnerability_exploited.assert_not_called()
+
+
+class TestThreadedConsumerStringKeyDetails:
+    """Tests for the per-vuln STRING key written by the threaded consumer path.
+
+    When mark_vulnerability_exploited is called from a non-main thread,
+    it writes a STRING key `ares:op:{op_id}:exploited:{vuln_id}` containing
+    JSON with success, result, and exploited_at. Both success and failure
+    cases are persisted, and the key has an 86400-second TTL.
+    """
+
+    @pytest.mark.asyncio
+    async def test_string_key_contains_correct_json_structure(self):
+        """STRING key should contain success, result, and exploited_at fields."""
+        import json
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        from ares.core.dispatcher._dispatcher import RedTeamDispatcher
+        from ares.core.models import SharedRedTeamState
+
+        dispatcher = RedTeamDispatcher()
+        dispatcher._shared_state = SharedRedTeamState(operation_id="op-test-string-json")
+        dispatcher._checkpoint_requested = MagicMock()
+
+        mock_redis = AsyncMock()
+        mock_task_queue = MagicMock()
+        mock_task_queue.redis = mock_redis
+
+        mock_backend = AsyncMock()
+        mock_backend.mark_exploited = AsyncMock(return_value=True)
+
+        result_data = {"output": "S4U2self ticket forged", "target": "dc01.contoso.local"}
+
+        with patch("ares.core.dispatcher.vulnerability.threading.current_thread") as mock_current:
+            mock_current.return_value = MagicMock(name="ResultConsumerThread")
+
+            with patch("ares.core.state_backend.RedisStateBackend") as mock_backend_class:
+                mock_backend_class.return_value = mock_backend
+
+                await dispatcher.mark_vulnerability_exploited(
+                    vuln_id="constrained_delegation_dc01.contoso.local_abc12345",
+                    success=True,
+                    result=result_data,
+                    task_queue=mock_task_queue,
+                )
+
+        # Verify STRING key was written with correct structure
+        mock_redis.set.assert_called_once()
+        call_args = mock_redis.set.call_args[0]
+        key = call_args[0]
+        raw_json = call_args[1]
+
+        assert (
+            key
+            == "ares:op:op-test-string-json:exploited:constrained_delegation_dc01.contoso.local_abc12345"
+        )
+
+        data = json.loads(raw_json)
+        assert data["success"] is True
+        assert data["result"] == result_data
+        assert "exploited_at" in data
+        # exploited_at should be an ISO timestamp
+        from datetime import datetime
+
+        datetime.fromisoformat(data["exploited_at"])  # Should not raise
+
+    @pytest.mark.asyncio
+    async def test_failed_exploitation_writes_string_key_with_success_false(self):
+        """Failed exploitation from threaded consumer should write STRING key with success=False."""
+        import json
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        from ares.core.dispatcher._dispatcher import RedTeamDispatcher
+        from ares.core.models import SharedRedTeamState
+
+        dispatcher = RedTeamDispatcher()
+        dispatcher._shared_state = SharedRedTeamState(operation_id="op-test-fail-string")
+        dispatcher._checkpoint_requested = MagicMock()
+
+        mock_redis = AsyncMock()
+        mock_task_queue = MagicMock()
+        mock_task_queue.redis = mock_redis
+
+        error_result = {"error": "KDC_ERR_TGT_REVOKED", "target": "dc01.fabrikam.local"}
+
+        with patch("ares.core.dispatcher.vulnerability.threading.current_thread") as mock_current:
+            mock_current.return_value = MagicMock(name="ResultConsumerThread")
+
+            await dispatcher.mark_vulnerability_exploited(
+                vuln_id="esc4_dc01.fabrikam.local_def67890",
+                success=False,
+                result=error_result,
+                task_queue=mock_task_queue,
+            )
+
+        # STRING key should be written even for failures
+        mock_redis.set.assert_called_once()
+        call_args = mock_redis.set.call_args[0]
+        key = call_args[0]
+        raw_json = call_args[1]
+
+        assert "exploited:esc4_dc01.fabrikam.local_def67890" in key
+
+        data = json.loads(raw_json)
+        assert data["success"] is False
+        assert data["result"] == error_result
+        assert "exploited_at" in data
+
+        # Should NOT have been added to exploited set (success=False)
+        assert (
+            "esc4_dc01.fabrikam.local_def67890"
+            not in dispatcher.shared_state.exploited_vulnerabilities
+        )
+
+        # backend.mark_exploited should NOT have been called (success=False skips SET key)
+        # The STRING key is written regardless, but the SET membership is success-only
+
+    @pytest.mark.asyncio
+    async def test_string_key_has_86400_ttl(self):
+        """STRING key should have 86400 second (24 hour) TTL."""
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        from ares.core.dispatcher._dispatcher import RedTeamDispatcher
+        from ares.core.models import SharedRedTeamState
+
+        dispatcher = RedTeamDispatcher()
+        dispatcher._shared_state = SharedRedTeamState(operation_id="op-test-ttl")
+        dispatcher._checkpoint_requested = MagicMock()
+
+        mock_redis = AsyncMock()
+        mock_task_queue = MagicMock()
+        mock_task_queue.redis = mock_redis
+
+        mock_backend = AsyncMock()
+        mock_backend.mark_exploited = AsyncMock(return_value=True)
+
+        with patch("ares.core.dispatcher.vulnerability.threading.current_thread") as mock_current:
+            mock_current.return_value = MagicMock(name="ResultConsumerThread")
+
+            with patch("ares.core.state_backend.RedisStateBackend") as mock_backend_class:
+                mock_backend_class.return_value = mock_backend
+
+                await dispatcher.mark_vulnerability_exploited(
+                    vuln_id="smb_signing_192.168.58.30_aaa11111",
+                    success=True,
+                    result={"output": "Relay succeeded"},
+                    task_queue=mock_task_queue,
+                )
+
+        # Verify expire was called with 86400 seconds
+        mock_redis.expire.assert_called_once()
+        expire_args = mock_redis.expire.call_args[0]
+        assert expire_args[0] == "ares:op:op-test-ttl:exploited:smb_signing_192.168.58.30_aaa11111"
+        assert expire_args[1] == 86400
 
 
 if __name__ == "__main__":
