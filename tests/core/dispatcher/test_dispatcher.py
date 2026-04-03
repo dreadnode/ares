@@ -344,11 +344,11 @@ class TestMssqlScanning:
 
         assert len(creds) == 1
 
-    def test_find_sql_credentials_limits_to_five(self):
-        """Test that at most 5 credentials are returned."""
+    def test_find_sql_credentials_limits_to_eight(self):
+        """Test that at most 8 credentials are returned."""
         dispatcher = RedTeamDispatcher()
         dispatcher._shared_state = SharedRedTeamState(operation_id="op-test-mssql-10")
-        for i in range(10):
+        for i in range(15):
             dispatcher._shared_state.all_credentials.append(
                 Credential(
                     username=f"user{i}",
@@ -360,7 +360,7 @@ class TestMssqlScanning:
 
         creds = dispatcher._find_sql_credentials()
 
-        assert len(creds) == 5
+        assert len(creds) == 8
 
 
 class TestFindDomainControllerIp:
@@ -579,11 +579,12 @@ class TestFindDomainControllerIp:
         child_dc = dispatcher._find_domain_controller_ip("child.contoso.local")
         assert child_dc == "192.168.58.20", f"Expected dc02 (192.168.58.20), got {child_dc}"
 
-    def test_uses_target_when_domain_matches(self):
-        """When target.domain matches requested domain, use target.ip.
+    def test_target_without_dc_evidence_not_used(self):
+        """target.ip must NOT be returned as DC without DC evidence.
 
-        This handles the case where the operation was started with --domain flag,
-        meaning the user explicitly told us the target IP is the DC for that domain.
+        target.ip is just the first scan IP, not necessarily a DC.
+        Returning it blindly poisons all downstream tasks with a wrong DC
+        (e.g., fabrikam.local member server returned for contoso.local).
         """
         dispatcher = RedTeamDispatcher()
         dispatcher._shared_state = SharedRedTeamState(operation_id="op-test-dc-target")
@@ -593,12 +594,62 @@ class TestFindDomainControllerIp:
             ip="192.168.58.10",
             domain="contoso.local",
         )
-        # No hosts in all_hosts yet (recon hasn't run)
+        # No hosts in all_hosts yet (recon hasn't run) — no DC evidence
+        dc_ip = dispatcher._find_domain_controller_ip("contoso.local")
+
+        # Should NOT return target.ip — no host entry with DC services/role
+        assert dc_ip == ""
+
+    def test_target_with_dc_evidence_used(self):
+        """target.ip IS returned when host has confirmed DC services."""
+        dispatcher = RedTeamDispatcher()
+        dispatcher._shared_state = SharedRedTeamState(operation_id="op-test-dc-target-2")
+
+        dispatcher._shared_state.target = Target(
+            ip="192.168.58.10",
+            domain="contoso.local",
+        )
+        # Host discovered with DC services
+        dispatcher._shared_state.all_hosts.append(
+            Host(
+                ip="192.168.58.10",
+                hostname="dc01.contoso.local",
+                services=["88/tcp kerberos-sec", "389/tcp ldap"],
+            )
+        )
 
         dc_ip = dispatcher._find_domain_controller_ip("contoso.local")
 
-        # Should return target.ip since target.domain matches
         assert dc_ip == "192.168.58.10"
+
+    def test_target_with_wrong_domain_not_used(self):
+        """target.ip from different domain must not be returned.
+
+        Reproduces bug where target.ip (first scan IP, a fabrikam.local member)
+        was returned as DC for contoso.local because target.domain matched.
+        """
+        dispatcher = RedTeamDispatcher()
+        dispatcher._shared_state = SharedRedTeamState(operation_id="op-test-dc-cross-domain")
+
+        # Target IP is first scan IP — happens to be from fabrikam.local
+        dispatcher._shared_state.target = Target(
+            ip="192.168.58.210",
+            domain="contoso.local",
+        )
+        # Host is actually in fabrikam.local with DC-like services
+        dispatcher._shared_state.all_hosts.append(
+            Host(
+                ip="192.168.58.210",
+                hostname="sql01.fabrikam.local",
+                services=["88/tcp kerberos-sec", "389/tcp ldap", "1433/tcp ms-sql-s"],
+            )
+        )
+
+        dc_ip = dispatcher._find_domain_controller_ip("contoso.local")
+
+        # Must NOT return sql01 — its hostname belongs to fabrikam.local
+        assert dc_ip != "192.168.58.210"
+        assert dc_ip == ""
 
     def test_ignores_target_when_domain_mismatch(self):
         """When target.domain doesn't match, don't use target.ip blindly."""
@@ -2191,3 +2242,55 @@ class TestDomainAdminTraceDiscovery:
 
         assert queued == 0
         dispatcher.queue_vulnerability.assert_not_awaited()
+
+
+class TestBloodhoundAclArrowParsing:
+    """Tests that arrow-format ACL edges from BloodHound JSON are parsed correctly."""
+
+    def test_arrow_format_genericall_regex_matches(self):
+        """Arrow format 'PRINCIPAL -[GenericAll]-> TARGET' should match ACL regex."""
+        import re
+
+        output = (
+            "=== ACL ABUSE PATHS (from BloodHound JSON) ===\n"
+            "MISSANDEI@ESSOS.LOCAL -[GenericAll]-> KHAL.DROGO@ESSOS.LOCAL (user)\n"
+            "KHAL.DROGO@ESSOS.LOCAL -[GenericAll]-> VISERYS.TARGARYEN@ESSOS.LOCAL (user)\n"
+        )
+
+        pattern = r"(\S+)\s+-\[(?:genericall|genericwrite|writedacl|writeowner|forcechangepassword|allextendedrights)\]->\s*(\S+)"
+
+        matches = []
+        for match in re.finditer(pattern, output, re.IGNORECASE):
+            matches.append((match.group(1), match.group(2)))
+
+        assert len(matches) == 2
+        assert ("MISSANDEI@ESSOS.LOCAL", "KHAL.DROGO@ESSOS.LOCAL") in matches
+        assert ("KHAL.DROGO@ESSOS.LOCAL", "VISERYS.TARGARYEN@ESSOS.LOCAL") in matches
+
+    def test_arrow_format_forcechangepassword_regex(self):
+        """ForceChangePassword in arrow format should be parsed."""
+        import re
+
+        pattern = r"(\S+)\s+-\[(?:genericall|genericwrite|writedacl|writeowner|forcechangepassword|allextendedrights)\]->\s*(\S+)"
+        output = "USER1@CONTOSO.LOCAL -[ForceChangePassword]-> USER2@CONTOSO.LOCAL (user)\n"
+
+        matches = list(re.finditer(pattern, output, re.IGNORECASE))
+        assert len(matches) == 1
+        assert matches[0].group(1) == "USER1@CONTOSO.LOCAL"
+        assert matches[0].group(2) == "USER2@CONTOSO.LOCAL"
+
+    def test_acl_chain_tracker_parses_arrow_format(self):
+        """ACLChainTracker should create chains from arrow-format edges."""
+        from ares.core.dispatcher.acl_chains import ACLChainTracker
+
+        tracker = ACLChainTracker()
+        path = "MISSANDEI@ESSOS.LOCAL -[GenericAll]-> KHAL.DROGO@ESSOS.LOCAL"
+        chain = tracker.create_chain_from_bloodhound_path(path, "essos.local", "bloodhound")
+
+        assert chain is not None
+        assert len(chain.steps) == 1
+        step = chain.steps[0]
+        assert "missandei" in step.source.lower()
+        assert "khal.drogo" in step.target.lower()
+        right_val = step.right.value if hasattr(step.right, "value") else step.right
+        assert right_val == "GenericAll"

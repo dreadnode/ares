@@ -2247,6 +2247,8 @@ class ResultProcessingMixin:
         # Parse ACL abuse patterns (GenericAll, GenericWrite on users/computers)
         acl_patterns = [
             r"(\S+)\s+(?:has\s+)?(?:genericall|genericwrite|writedacl|writeowner)\s+(?:on|to)\s+(?:user|computer)?\s*(\S+)",
+            # BloodHound arrow format: PRINCIPAL -[GenericAll]-> TARGET (type)
+            r"(\S+)\s+-\[(?:genericall|genericwrite|writedacl|writeowner|forcechangepassword|allextendedrights)\]->\s*(\S+)",
         ]
 
         for pattern in acl_patterns:

@@ -806,8 +806,8 @@ def _generate_exploit_prompt(
         state_context = format_state_context(state, "exploit", current_target=target)
         return adcs_prompt + state_context
 
-    # Special handling for MSSQL vulnerabilities
-    if vuln_type.startswith("mssql_"):
+    # Special handling for MSSQL vulnerabilities (case-insensitive check)
+    if vuln_type.lower().startswith("mssql_"):
         return _generate_mssql_exploit_prompt(task, payload, state, base_prompt, target)
 
     # Special handling for constrained delegation (S4U attack)
@@ -1038,6 +1038,14 @@ def _generate_mssql_exploit_prompt(
     if available_creds:
         creds_section = "\n**AVAILABLE SQL CREDENTIALS (use these!):**\n"
         for cred in available_creds:
+            # Handle case where cred was JSON-serialized to string during Redis round-trip
+            if isinstance(cred, str):
+                import json as _json
+
+                try:
+                    cred = _json.loads(cred)  # noqa: PLW2901
+                except (ValueError, TypeError):
+                    continue
             is_sql = cred.get("is_sql_account", "False") == "True"
             marker = " [SQL SERVICE ACCOUNT]" if is_sql else ""
             creds_section += (

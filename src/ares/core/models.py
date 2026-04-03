@@ -1195,6 +1195,9 @@ class SharedRedTeamState:
                     f"not corroborated by hosts/users/trusts"
                 )
                 continue
+            # Skip non-FQDN names (no dot = NetBIOS name, not a domain)
+            if "." not in domain_lower:
+                continue
             # A domain is foreign if it's not in the same namespace as target
             foreign.add(domain_lower)
 
@@ -1205,6 +1208,11 @@ class SharedRedTeamState:
             if vd == target_domain:
                 continue
             if vd.endswith("." + target_domain):
+                continue
+            # Skip non-FQDN names (e.g., NetBIOS names like "winterfell" or "NORTH")
+            # that look like hostnames rather than domain names. A real domain FQDN
+            # always contains at least one dot (e.g., "essos.local").
+            if "." not in vd:
                 continue
             foreign.add(vd)
 

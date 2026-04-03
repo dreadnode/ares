@@ -223,24 +223,21 @@ After achieving DA on any domain, the following happens automatically:
 - Trust key extraction is dispatched for each undominated foreign forest
 - Uses secretsdump to extract FORESTNAME$ trust account hash
 
-If automatic extraction fails or you need manual control:
+**⚠️ CRITICAL: Inter-realm ticket → DCSync is BROKEN on modern patched DCs (SPN validation blocks DRSUAPI).
+Do NOT dispatch trust key → inter-realm ticket → secretsdump tasks. They will ALWAYS fail.**
 
-1. **Extract trust keys manually** (if auto-dispatch didn't work):
-   - `dispatch_privesc_exploit(task_type="exploit", tool="extract_trust_key", domain="contoso.local", dc_ip="DC_IP", trusted_domain="fabrikam.local", username="Administrator", password="HASH_OR_PASSWORD")`  {# pragma: allowlist secret #}
+If automatic trust key extraction is dispatched, it provides authenticated access but NOT DCSync capability.
 
-2. **Alternative pivot methods** (if trust key extraction fails):
-   - **MSSQL Linked Servers**: Check for SQL servers in the foreign forest, pivot via linked server queries
-   - **Shared credentials**: Try ALL discovered credentials against foreign forest DCs
-   - **Pass-the-Hash**: If you have Administrator hash from source domain, try it against foreign forest (password reuse)
+**Viable cross-forest pivot methods:**
 
-3. **After getting trust key**, use it to forge inter-realm ticket:
-   - The PRIVESC worker will automatically attempt this when trust key is extracted
+1. **MSSQL Linked Servers**: Check for SQL servers in the foreign forest, pivot via linked server queries
+2. **ACL Abuse**: Run BloodHound against foreign domain with any available creds → find ACL chains (GenericAll, WriteDACL)
+3. **ADCS ESC1/ESC4**: Certificate template abuse via certipy against foreign domain CA
+4. **Shared credentials**: Try ALL discovered credentials against foreign forest DCs via secretsdump
+5. **Local admin on foreign hosts**: secretsdump workstations → harvest cached domain creds
+6. **Kerberoast cross-forest**: Request TGS for SPNs in foreign domain, crack service account passwords
 
-4. **Repeat credential expansion** in the new forest:
-   - `dispatch_credential_access(task_type="secretsdump", targets="FOREIGN_FOREST_DC_IP", domain="fabrikam.local", username="Administrator", password="INTER_REALM_TICKET")`  {# pragma: allowlist secret #}
-   - Look for krbtgt hash to confirm full forest compromise
-
-5. **Check progress** with `get_exploitation_status()` to see undominated forests
+**Check progress** with `get_exploitation_status()` to see undominated forests
 
 {% endif -%}
 ### When to call announce_domain_admin():

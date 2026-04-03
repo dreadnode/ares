@@ -1005,9 +1005,11 @@ class RedisWorkerAgent:
             raise  # Re-raise to stop worker
         except Exception as e:
             # Non-fatal task errors - log with stack trace and continue
+            import traceback as _tb
+
             logger.error(
-                f"[{self.agent_name}] Task {task.task_id} failed: {type(e).__name__}: {e}",
-                exc_info=True,
+                f"[{self.agent_name}] Task {task.task_id} failed: {type(e).__name__}: {e}\n"
+                f"{''.join(_tb.format_exception(type(e), e, e.__traceback__))}",
             )
             # Preserve any discoveries made before the exception
             exception_result = self._serialize_state_discoveries()

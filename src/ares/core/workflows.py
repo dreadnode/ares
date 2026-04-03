@@ -309,6 +309,7 @@ async def exploitation_workflow(
     start_time = asyncio.get_event_loop().time()
     exploited_count = 0
     credentials_gained = 0
+    da_grace_start: float | None = None  # Grace period for multi-forest domain discovery
 
     # Failure tracking is now persisted to Redis via dispatcher methods:
     # - dispatcher.increment_vuln_type_failure(vuln_type) - increment on failure
@@ -400,6 +401,13 @@ async def exploitation_workflow(
                 )
                 # Fall through to mark as failed
 
+            # Deferred tasks are queued but not yet executed — don't mark as exploited.
+            # The actual result will come back via the threaded result consumer.
+            if result.get("deferred"):
+                logger.info(f"Exploit for {vuln_id} ({vuln_type}) deferred — not marking exploited")
+                in_flight_vulns.discard(vuln_id)
+                return
+
             # Mark as attempted (only for actual execution attempts)
             await dispatcher.mark_vulnerability_exploited(
                 vuln_id,
@@ -451,8 +459,27 @@ async def exploitation_workflow(
                 )
                 # Don't break - fall through to vuln dispatch logic below
                 # This allows the workflow to continue exploiting to reach other forests
+            elif get_multi_forest_mode():
+                # Multi-forest mode but all_forests_dominated() returned True.
+                # This can be a race condition: DA achieved before foreign domains
+                # were discovered. Keep the workflow alive for a grace period to allow
+                # foreign domain discovery (via MSSQL pivots, trust enumeration, etc.)
+                if da_grace_start is None:
+                    da_grace_start = asyncio.get_event_loop().time()
+                    logger.info(
+                        "Multi-forest mode: all forests appear dominated, "
+                        "starting 300s grace period for foreign domain discovery"
+                    )
+                grace_elapsed = asyncio.get_event_loop().time() - da_grace_start
+                if grace_elapsed < 300:
+                    await asyncio.sleep(5.0)
+                    continue
+                logger.success(
+                    "Domain Admin achieved! Multi-forest grace period expired, "
+                    "no new foreign domains discovered. Halting exploitation workflow."
+                )
             else:
-                # Single-forest mode OR all forests dominated - we're done
+                # Single-forest mode - we're done
                 logger.success("Domain Admin achieved! Halting exploitation workflow.")
 
                 # Cancel all active exploitation tasks immediately

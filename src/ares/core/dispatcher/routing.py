@@ -111,11 +111,16 @@ class RoutingMixin:
 
         Detection priority:
         0. Cached domain_controllers dict (fastest, populated by add_host)
-        1. Hosts with explicit DC roles (AD DC, DC, Domain Controller) matching domain
-        2. Hosts with "dc" in hostname matching domain (strong indicator)
+        0.5. Target host — only if host has confirmed DC services/role for this domain
+        1. Hosts with explicit DC roles matching domain
+        2. Hosts with "dc" in hostname matching domain
         3. Hosts with DC-like services (Kerberos 88, LDAP 389) matching domain
-        4. Fallback: any host with DC role/services (cross-domain, logged as warning)
-        5. DNS SRV lookup (last resort, requires network access)
+        3.5. Child domain: find DC in same forest (not parent DC)
+        4. DNS SRV lookup
+        4.5. LDAP rootDSE query against DC candidates
+
+        Returns empty string if no DC found — never returns a DC from
+        a different domain (that silently poisons all downstream tasks).
         """
         domain_lower = domain.lower() if domain else ""
 
@@ -171,24 +176,23 @@ class RoutingMixin:
             # Fallback: hostname IS the domain (rare edge case)
             return hostname_lower == domain_lower_check
 
-        # Check target first (if it belongs to this domain)
+        # Check target first — but ONLY if host evidence confirms it's a DC for this domain.
+        # target.ip is just the first scan IP, NOT necessarily a DC.
+        # Without DC evidence (services/role), returning target.ip can poison every task
+        # with a wrong DC (e.g., returning a fabrikam.local member server for contoso.local).
         if self.shared_state.target and self.shared_state.target.ip:
             target_ip = self.shared_state.target.ip
             target_hostname = (self.shared_state.target.hostname or "").lower()
-            target_domain = (self.shared_state.target.domain or "").lower()
 
-            # If target.domain was explicitly set and matches, use target.ip
-            # This is set when user starts operation with --domain, meaning target IS the DC
-            if target_domain and target_domain == domain_lower:
-                return target_ip
-
-            if target_hostname and _hostname_matches_domain(target_hostname, domain_lower):
-                return target_ip
+            # Only use target if we have a host entry with DC evidence
             for host in self.shared_state.all_hosts:
                 if host.ip == target_ip:
-                    hostname = (host.hostname or "").lower()
-                    if _hostname_matches_domain(hostname, domain_lower) and _has_dc_services(host):
+                    hostname = (host.hostname or target_hostname or "").lower()
+                    if _hostname_matches_domain(hostname, domain_lower) and (
+                        _has_dc_services(host) or _has_dc_role(host)
+                    ):
                         return host.ip
+                    break
 
         # Priority 1: Search hosts with explicit DC roles that belong to this domain
         for host in self.shared_state.all_hosts:
@@ -270,23 +274,15 @@ class RoutingMixin:
                     logger.info(f"DC IP found via LDAP: {dc_candidate.ip} serves {dc_domain}")
                     return dc_candidate.ip
 
-        # Priority 5: Fallback - hosts with DC roles (any domain) - log warning
-        for host in self.shared_state.all_hosts:
-            if _has_dc_role(host):
-                logger.warning(
-                    f"DC IP fallback (no domain match): {host.ip} ({host.hostname}) for domain {domain}"
-                )
-                return host.ip
-
-        # Priority 6: Any host with DC-like services (risky, may be wrong) - log warning
-        for host in self.shared_state.all_hosts:
-            if _has_dc_services(host):
-                logger.warning(
-                    f"DC IP last resort (services only): {host.ip} ({host.hostname}) for domain {domain}"
-                )
-                return host.ip
-
-        logger.warning(f"No DC IP found for domain {domain}")
+        # DO NOT fall back to any DC from any domain — returning a DC from a different
+        # domain silently poisons every task (recon, credential_access, exploit) with
+        # queries hitting the wrong domain controller. Better to return empty and fail
+        # loudly so the caller can handle it.
+        logger.warning(
+            f"No DC IP found for domain {domain} — "
+            f"checked cache, host roles/hostnames/services, child-domain forest, DNS SRV, and LDAP. "
+            f"Known DCs: {self.shared_state.domain_controllers}"
+        )
         return ""
 
     def _dns_lookup_dc(self: RedTeamDispatcher, domain: str) -> str:
@@ -731,7 +727,7 @@ class RoutingMixin:
         """
         # NOTE: crack tasks are NEVER gated by DA status.
         # They don't consume LLM tokens and cracking foreign domain hashes
-        # (e.g., missandei@essos.local AS-REP) is critical for multi-forest pivots.
+        # (e.g., user@fabrikam.local AS-REP) is critical for multi-forest pivots.
         # The _auto_crack_dispatch comment at line ~2810 confirms this intent.
         # Normalize domain to FQDN format
         domain = self._normalize_domain(domain)

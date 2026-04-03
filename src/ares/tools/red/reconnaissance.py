@@ -2005,6 +2005,100 @@ class BloodHoundTools(Toolset):
             f"credentials are for different domain ({cred_domain}), not valid for {target_domain}",
         )
 
+    @staticmethod
+    def _parse_bloodhound_json_acls(json_files: list[str]) -> list[dict[str, str]]:
+        """Parse BloodHound JSON files to extract abusable ACL relationships.
+
+        BloodHound-python writes JSON files (*_users.json, *_groups.json, etc.)
+        containing ACE data with SID-based principals. This method:
+        1. Builds a SID→name map from all JSON files
+        2. Extracts non-inherited ACEs with abuse rights (GenericAll, etc.)
+        3. Filters out well-known admin groups (Domain Admins, etc.)
+        4. Returns list of {principal, target, right} dicts
+
+        Returns:
+            List of dicts with keys: principal, target, right, target_type
+        """
+        from pathlib import Path as _Path
+
+        abuse_rights = {
+            "GenericAll",
+            "GenericWrite",
+            "WriteDacl",
+            "WriteOwner",
+            "ForceChangePassword",
+            "AllExtendedRights",
+        }
+        # Well-known admin SID suffixes to skip (DA, EA, BA, AO, SO)
+        admin_sid_suffixes = {"-512", "-519"}
+        admin_builtin_sids = {
+            "S-1-5-32-544",  # BUILTIN\Administrators
+            "S-1-5-32-548",  # BUILTIN\Account Operators
+            "S-1-5-32-549",  # BUILTIN\Server Operators
+            "S-1-5-18",  # SYSTEM
+        }
+
+        # Build SID → name map from all JSON files
+        sid_map: dict[str, str] = {}
+        all_data: list[tuple[str, list]] = []  # (type, entries)
+
+        for fpath in json_files:
+            if not _Path(fpath).is_file():
+                continue
+            try:
+                with open(fpath) as f:
+                    data = json.load(f)
+                file_type = data.get("meta", {}).get("type", "")
+                entries = data.get("data", [])
+                all_data.append((file_type, entries))
+                for entry in entries:
+                    obj_id = entry.get("ObjectIdentifier", "")
+                    name = entry.get("Properties", {}).get("name", "")
+                    if obj_id and name:
+                        sid_map[obj_id] = name
+            except Exception as e:
+                logger.debug(f"Failed to parse BloodHound JSON {fpath}: {e}")
+
+        # Extract abusable ACEs from users, groups, and computers
+        acl_edges: list[dict[str, str]] = []
+        for file_type, entries in all_data:
+            if file_type not in ("users", "groups", "computers"):
+                continue
+            for entry in entries:
+                target_name = entry.get("Properties", {}).get("name", "")
+                if not target_name:
+                    continue
+                for ace in entry.get("Aces", []):
+                    right = ace.get("RightName", "")
+                    if right not in abuse_rights:
+                        continue
+                    if ace.get("IsInherited", True):
+                        continue
+                    sid = ace.get("PrincipalSID", "")
+                    # Skip well-known admin SIDs
+                    if any(sid.endswith(s) for s in admin_sid_suffixes):
+                        continue
+                    if sid in admin_builtin_sids or any(
+                        sid.startswith(p) for p in admin_builtin_sids
+                    ):
+                        continue
+                    principal = sid_map.get(sid, sid)
+                    # Skip unresolved SIDs that look like builtin groups
+                    if principal == sid and ("S-1-5-32-" in sid or sid.startswith("S-1-5-9")):
+                        continue
+                    acl_edges.append(
+                        {
+                            "principal": principal,
+                            "target": target_name,
+                            "right": right,
+                            "target_type": file_type.rstrip("s"),  # users→user, groups→group
+                        }
+                    )
+
+        if acl_edges:
+            logger.info(f"[+] Extracted {len(acl_edges)} abusable ACL edges from BloodHound JSON")
+        return acl_edges
+
     def _parse_bloodhound_output(self, raw_output: str) -> dict[str, Any]:
         """Parse BloodHound collection output for actionable attack paths.
 
@@ -2340,6 +2434,37 @@ class BloodHoundTools(Toolset):
             stdout, stderr, _ = run_tool(cmd, timeout_seconds=600, target_role=None)
 
             raw_output = stdout + "\n" + (stderr or "")
+
+            # Parse BloodHound JSON files for ACL data that isn't in stdout
+            # bloodhound-python writes JSON to CWD (/tmp on worker pods)
+            import time
+            from pathlib import Path
+
+            tmp_dir = Path("/tmp")  # noqa: S108  # nosec B108
+            suffixes = [
+                "_users.json",
+                "_groups.json",
+                "_computers.json",
+                "_domains.json",
+                "_containers.json",
+                "_gpos.json",
+                "_ous.json",
+            ]
+            json_files = [str(p) for suffix in suffixes for p in tmp_dir.glob(f"*{suffix}")]
+            # Filter to recent files (created in last 10 min) to avoid stale data
+            cutoff = time.time() - 600
+            recent_json = [f for f in json_files if Path(f).stat().st_mtime > cutoff]
+
+            acl_edges = self._parse_bloodhound_json_acls(recent_json)
+            if acl_edges:
+                # Append ACL edges to raw output in BloodHound arrow format
+                # so result_processing._extract_acl_chains_from_output() can parse them
+                raw_output += "\n\n=== ACL ABUSE PATHS (from BloodHound JSON) ===\n"
+                for edge in acl_edges:
+                    raw_output += (
+                        f"{edge['principal']} -[{edge['right']}]-> "
+                        f"{edge['target']} ({edge['target_type']})\n"
+                    )
 
             # Parse output for actionable intelligence
             parsed = self._parse_bloodhound_output(raw_output)

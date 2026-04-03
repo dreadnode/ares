@@ -63,7 +63,7 @@ from ares.tools.red import (
 if TYPE_CHECKING:
     from ares.core.k8s_executor import KubernetesPodExecutor
 
-from dreadnode.agent.reactions import Finish, Reaction
+from dreadnode.agent.reactions import Finish, Reaction, RetryWithFeedback
 
 
 def fix_tool_output_encoding(content: str) -> str:
@@ -666,7 +666,6 @@ def create_role_hooks(
 
     async def context_aware_summarize(event: StepStart | GenerationEnd) -> Reaction | None:
         """Wrap summarize_when_long with logging and early warning for observability."""
-        from dreadnode.agent.reactions import RetryWithFeedback
 
         # Log token count on each step start
         if isinstance(event, StepStart):
@@ -726,11 +725,13 @@ def create_role_hooks(
             )
 
             if tool_name == "domain_admin_checker" and "success" in result:
-                return (
-                    "🎉 DOMAIN ADMIN CONFIRMED!\n"
-                    "→ Broadcast this achievement to all agents\n"
-                    "→ Run secretsdump on all targets\n"
-                    "→ Generate golden ticket if possible"
+                return RetryWithFeedback(
+                    feedback=(
+                        "🎉 DOMAIN ADMIN CONFIRMED!\n"
+                        "→ Broadcast this achievement to all agents\n"
+                        "→ Run secretsdump on all targets\n"
+                        "→ Generate golden ticket if possible"
+                    )
                 )
             return None
 
@@ -809,10 +810,12 @@ def create_role_hooks(
             )
 
             if tool_name in ["hashcat_crack", "john_crack"] and "cracked" in result.lower():
-                return (
-                    "🔓 PASSWORD CRACKED!\n"
-                    "→ Use report_cracked_credential to broadcast to all agents\n"
-                    "→ Include username, password, and original hash"
+                return RetryWithFeedback(
+                    feedback=(
+                        "🔓 PASSWORD CRACKED!\n"
+                        "→ Use report_cracked_credential to broadcast to all agents\n"
+                        "→ Include username, password, and original hash"
+                    )
                 )
             return None
 
@@ -854,10 +857,12 @@ def create_role_hooks(
                 or ".pfx" in result_lower
                 or ("hash" in result_lower and ":" in result)
             ):
-                return (
-                    "✅ ADCS EXPLOITATION SUCCESSFUL!\n"
-                    "→ Report the obtained credential/certificate\n"
-                    "→ Use certipy_auth to get NTLM hash if needed"
+                return RetryWithFeedback(
+                    feedback=(
+                        "✅ ADCS EXPLOITATION SUCCESSFUL!\n"
+                        "→ Report the obtained credential/certificate\n"
+                        "→ Use certipy_auth to get NTLM hash if needed"
+                    )
                 )
 
             # Track ADCS failures - detect unreachable CA/web enrollment
@@ -902,11 +907,13 @@ def create_role_hooks(
                 failures = _privesc_failures["adcs_failures"]
                 if failures >= 2:
                     targets = ", ".join(_privesc_failures["failed_targets"]) or "CA"
-                    return (
-                        f"⚠️ ADCS FUTILITY: {failures} failures on {targets}\n"
-                        "→ CA web enrollment appears unreachable\n"
-                        "→ STOP retrying ADCS attacks - call task_complete with failure\n"
-                        "→ Try OTHER attack paths (delegation, GPO abuse) if available"
+                    return RetryWithFeedback(
+                        feedback=(
+                            f"⚠️ ADCS FUTILITY: {failures} failures on {targets}\n"
+                            "→ CA web enrollment appears unreachable\n"
+                            "→ STOP retrying ADCS attacks - call task_complete with failure\n"
+                            "→ Try OTHER attack paths (delegation, GPO abuse) if available"
+                        )
                     )
 
             # Track delegation failures
@@ -916,10 +923,12 @@ def create_role_hooks(
             ):
                 _privesc_failures["delegation_failures"] += 1
                 if _privesc_failures["delegation_failures"] >= 3:
-                    return (
-                        f"⚠️ DELEGATION FUTILITY: {_privesc_failures['delegation_failures']} failures\n"
-                        "→ STOP retrying delegation attacks\n"
-                        "→ Try OTHER attack paths or call task_complete"
+                    return RetryWithFeedback(
+                        feedback=(
+                            f"⚠️ DELEGATION FUTILITY: {_privesc_failures['delegation_failures']} failures\n"
+                            "→ STOP retrying delegation attacks\n"
+                            "→ Try OTHER attack paths or call task_complete"
+                        )
                     )
 
             return None
@@ -965,9 +974,11 @@ def create_role_hooks(
 
                     if _coercion_failures["count"] >= 3:
                         targets = ", ".join(_coercion_failures["targets"])
-                        return (
-                            f"COERCION FUTILITY: {_coercion_failures['count']} failures on targets: {targets}\n"
-                            "→ If all targets exhausted, call task_complete now."
+                        return RetryWithFeedback(
+                            feedback=(
+                                f"COERCION FUTILITY: {_coercion_failures['count']} failures on targets: {targets}\n"
+                                "→ If all targets exhausted, call task_complete now."
+                            )
                         )
             return None
 
@@ -1210,7 +1221,16 @@ def create_role_hooks(
                 # Get tool call args for credential context
                 args: dict[str, str] = {}
                 if hasattr(event, "tool_call") and event.tool_call:
-                    args = getattr(event.tool_call, "arguments", {}) or {}
+                    raw_args = getattr(event.tool_call, "arguments", {}) or {}
+                    if isinstance(raw_args, str):
+                        try:
+                            import json
+
+                            args = json.loads(raw_args)
+                        except (json.JSONDecodeError, TypeError):
+                            args = {}
+                    else:
+                        args = raw_args
 
                 for esc in esc_matches:
                     esc_type = esc.upper()
@@ -1275,7 +1295,16 @@ def create_role_hooks(
                 ):
                     target = ""
                     if hasattr(event, "tool_call") and event.tool_call:
-                        args = getattr(event.tool_call, "arguments", {}) or {}
+                        raw_args = getattr(event.tool_call, "arguments", {}) or {}
+                        if isinstance(raw_args, str):
+                            try:
+                                import json
+
+                                args = json.loads(raw_args)
+                            except (json.JSONDecodeError, TypeError):
+                                args = {}
+                        else:
+                            args = raw_args
                         target = args.get("target", "") or args.get("host", "")
                     if not target:
                         logger.debug("Skipping MSSQL impersonation vuln: no target available")

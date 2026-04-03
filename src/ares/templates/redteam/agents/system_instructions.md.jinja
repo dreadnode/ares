@@ -158,11 +158,16 @@ IF BloodHound or delegation tools find opportunities:
 
 **Trust Escalation (Cross-Forest):**
 - Forest trusts have SID filtering enabled - ExtraSids attack is BLOCKED
-- Must use alternative techniques:
-  1. **Trust Key Attack**: extract_trust_key → create_inter_realm_ticket with target forest SID
-  2. **MSSQL Linked Servers**: Pivot via SQL Server links across forest boundary
-  3. **Shared Credentials**: Same service accounts/passwords across forests
-  4. **Kerberoast Cross-Forest**: Request TGS for SPNs in trusted forest
+- **⚠️ KNOWN LIMITATION: Inter-realm DCSync via trust keys is BROKEN on modern patched DCs.**
+  SPN target name validation blocks DRSUAPI replication requests. Trust keys give authenticated
+  access to the foreign forest but CANNOT be used for secretsdump/DCSync. Do NOT waste cycles
+  attempting `create_inter_realm_ticket` → secretsdump against foreign DCs — it will always fail.
+- Must use alternative techniques (trust key DCSync is NOT viable):
+  1. **MSSQL Linked Servers**: Pivot via SQL Server links across forest boundary
+  2. **Shared Credentials**: Same service accounts/passwords across forests
+  3. **Kerberoast Cross-Forest**: Request TGS for SPNs in trusted forest
+  4. **ACL Abuse**: GenericAll/WriteDACL on foreign domain objects (via BloodHound)
+  5. **ADCS ESC1/ESC4**: Certificate template abuse for foreign domain DA
 
 **MSSQL Pivoting:**
 - mssql_enum_linked_servers → find linked servers

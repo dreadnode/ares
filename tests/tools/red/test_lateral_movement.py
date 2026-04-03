@@ -793,5 +793,101 @@ is_srvrolemember
             assert "1" in impersonate_result or "is_srvrolemember" in impersonate_result.lower()
 
 
+class TestMSSQLConnectArgs:
+    """Tests for _mssql_connect_args helper and port parameter."""
+
+    def test_default_port_omits_flag(self):
+        """Default port (1433) should not add -port flag."""
+        args = MSSQLTools._mssql_connect_args(
+            "192.168.58.22",
+            "user",
+            "pass",  # pragma: allowlist secret
+            "contoso.local",
+            windows_auth=True,
+            port=None,
+        )
+        assert "-port" not in args
+        assert "contoso.local/user:pass@192.168.58.22" in args
+        assert "-windows-auth" in args
+
+    def test_explicit_1433_omits_flag(self):
+        args = MSSQLTools._mssql_connect_args(
+            "192.168.58.22",
+            "user",
+            "pass",  # pragma: allowlist secret
+            "contoso.local",
+            windows_auth=True,
+            port=1433,
+        )
+        assert "-port" not in args
+
+    def test_nonstandard_port_adds_flag(self):
+        """Named instances on non-standard ports should add -port flag."""
+        args = MSSQLTools._mssql_connect_args(
+            "192.168.58.22",
+            "user",
+            "pass",  # pragma: allowlist secret
+            "contoso.local",
+            windows_auth=True,
+            port=49201,
+        )
+        assert "-port 49201" in args
+
+    def test_no_domain_no_windows_auth(self):
+        args = MSSQLTools._mssql_connect_args(
+            "192.168.58.22",
+            "sa",
+            "pass",  # pragma: allowlist secret
+            None,
+            windows_auth=False,
+            port=1434,
+        )
+        assert "sa:pass@192.168.58.22" in args
+        assert "-windows-auth" not in args
+        assert "-port 1434" in args
+
+    def test_port_passed_to_tool(self):
+        """Verify port parameter is passed through to mssqlclient.py."""
+        tools = MSSQLTools()
+        with patch("ares.tools.red.lateral_movement.run_tool") as mock_run:
+            mock_run.return_value = ("OK", "", 0)
+            tools.mssql_enum_linked_servers(
+                target="192.168.58.22",
+                username="user",
+                password="pass",  # pragma: allowlist secret
+                domain="contoso.local",
+                port=49201,
+            )
+            cmd = mock_run.call_args[0][0]
+            # cmd is ["bash", "-c", "cat <<'MSSQL_EOF' | mssqlclient.py ... -port 49201\n..."]
+            assert "-port 49201" in cmd[2]
+
+    def test_pipe_cmd_includes_exit(self):
+        """Verify _mssql_pipe_cmd appends exit to prevent mssqlclient.py hang."""
+        cmd = MSSQLTools._mssql_pipe_cmd(
+            "SELECT 1",
+            "mssqlclient.py user:pass@192.168.58.22",  # pragma: allowlist secret
+        )
+        assert "exit" in cmd
+        assert "MSSQL_EOF" in cmd
+        assert "SELECT 1" in cmd
+
+    def test_tool_uses_heredoc_with_exit(self):
+        """Verify tools use heredoc piping so mssqlclient.py exits cleanly."""
+        tools = MSSQLTools()
+        with patch("ares.tools.red.lateral_movement.run_tool") as mock_run:
+            mock_run.return_value = ("OK", "", 0)
+            tools.mssql_enum_impersonation(
+                target="192.168.58.22",
+                username="user",
+                password="pass",  # pragma: allowlist secret
+                domain="contoso.local",
+            )
+            cmd = mock_run.call_args[0][0]
+            shell_cmd = cmd[2]
+            assert "exit" in shell_cmd
+            assert "MSSQL_EOF" in shell_cmd
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
