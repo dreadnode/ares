@@ -1,0 +1,47 @@
+Begin red team operation for {{ target_domain }}.
+
+Target IPs: {{ target_ips | join(", ") }}
+Initial credential: {{ cred_info }}
+
+Your objectives:
+1. Run nmap_scan on all targets to discover services (ONCE - do NOT re-scan targets that have already been scanned)
+2. **Run smb_sweep on all targets** - This captures Windows OS versions, FQDNs, and domain membership (CRITICAL for host identification)
+3. **MULTI-DOMAIN SETUP (run early with first credential!):**
+   - enumerate_domain_netbios_mappings: Query AD for NetBIOS->FQDN domain mappings
+   - This ensures credentials from child domains resolve correctly (e.g., CORP -> corp.contoso.local)
+4. LOW-HANGING FRUIT (do these early!):
+   - ldap_search_descriptions: Find passwords stored in user description fields
+   - password_spray with common passwords (Password1, Welcome1, Summer2024, Company123, Qwerty123, Passw0rd!, LetMeIn1)
+   - username_as_password: Test if users have username as password (e.g., user1:user1)
+5. Enumerate users and shares with netexec/enum4linux-ng/rpcclient/smbclient
+6. If no creds, run Kerberos user recon with kerberos_user_enum_noauth
+7. Run certipy_find to discover ADCS vulnerabilities
+8. Run run_bloodhound for ACL analysis and attack path discovery
+9. **CRITICAL CREDENTIAL EXPANSION (run IMMEDIATELY after finding ANY credentials):**
+   - Use secretsdump on ALL domain controllers to dump hashes
+   - Use kerberoast to find service accounts with weak passwords
+   - Use asrep_roast to find accounts without Kerberos pre-auth
+   - Check secretsdump output for krbtgt or Administrator hashes
+   - If krbtgt hash found → Generate golden ticket → Announce Domain Admin
+   - If Administrator hash found → Test DA access → Announce Domain Admin
+10. Coordinate with specialized agents to exploit discovered vulnerabilities
+11. Use trigger_credential_expansion after getting new credentials
+12. Continue until Domain Admin access achieved
+
+Priority vulnerabilities to look for:
+- Passwords in LDAP description fields (QUICK WIN - check first!)
+- Username=password combinations (QUICK WIN)
+- Weak/common passwords via spraying (QUICK WIN)
+- **krbtgt hash via secretsdump (HIGHEST PRIORITY - instant DA)**
+- **Administrator hash via secretsdump (VERY HIGH PRIORITY)**
+- ADCS ESC1-ESC8
+- Kerberoastable accounts
+- AS-REP roastable accounts
+- Unconstrained/Constrained delegation
+- ACL abuse paths (GenericAll, WriteDACL, etc.)
+- MSSQL linked servers
+
+CRITICAL WORKFLOW AFTER FINDING CREDENTIALS:
+1. Run secretsdump against all DCs immediately
+2. Run kerberoast and asrep_roast with the credentials
+3. Look for krbtgt or Administrator in secretsdump output

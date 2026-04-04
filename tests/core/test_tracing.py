@@ -231,23 +231,6 @@ class TestToolMitreInfo:
         assert technique_id == "T1046"
         assert tactic == "discovery"
 
-    def test_reporting_tools(self):
-        """Reporting/documentation tools should have technique IDs."""
-        # record_credential - Account Discovery
-        technique_id, tactic = get_tool_mitre_info("record_credential")
-        assert technique_id == "T1087.002"
-        assert tactic == "discovery"
-
-        # record_weakness - Software Discovery
-        technique_id, tactic = get_tool_mitre_info("record_weakness")
-        assert technique_id == "T1518.001"
-        assert tactic == "discovery"
-
-        # record_timeline_event - Account Discovery
-        technique_id, tactic = get_tool_mitre_info("record_timeline_event")
-        assert technique_id == "T1087"
-        assert tactic == "discovery"
-
     def test_unknown_tool_returns_none(self):
         """Unknown tools should return None."""
         technique_id, tactic = get_tool_mitre_info("unknown_tool")
@@ -280,12 +263,6 @@ class TestToolCategory:
     def test_bloodhound_category(self):
         """BloodHound tools should return BloodHoundTools."""
         assert get_tool_category("run_bloodhound") == "BloodHoundTools"
-
-    def test_reporting_category(self):
-        """Reporting tools should return ReportingTools."""
-        assert get_tool_category("record_credential") == "ReportingTools"
-        assert get_tool_category("record_weakness") == "ReportingTools"
-        assert get_tool_category("record_timeline_event") == "ReportingTools"
 
     def test_coercion_category(self):
         """Coercion tools should return CoercionTools."""

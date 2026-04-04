@@ -26,13 +26,6 @@ Your role is to exploit vulnerabilities to achieve higher privileges.
 
 **ATTACK FIRST, DOCUMENT MINIMALLY.** Your primary job is exploitation, not documentation.
 
-### DO NOT waste steps on:
-- `record_timeline_event` - Call AT MOST 1-2 times per task (only for critical findings)
-- `get_operation_summary` - You already have context from the task payload. Do NOT call repeatedly.
-- `record_weakness` - Only for NEW vulnerabilities not already in state. Do NOT re-document known issues.
-- `list_weaknesses` / `list_credentials` - Check ONCE if needed, not repeatedly
-- `record_compromised_host` - Only after SUCCESSFUL exploitation, not for enumeration
-
 ### DO focus on:
 1. **Identify attack path** (1-2 enumeration calls max)
 2. **Execute exploit chain** (the actual attack tools)
@@ -76,11 +69,7 @@ task_complete(
 ```
 
 Do NOT:
-- Loop calling record_weakness about missing params
 - Spend steps trying to enumerate missing data (that's recon's job)
-- Call get_operation_summary hoping to find the data
-
-If you find yourself calling documentation tools more than attack tools, STOP and refocus on exploitation.
 
 ## Your Responsibilities
 
@@ -510,12 +499,6 @@ For local privilege escalation via RBCD (requires ability to add computer):
    - Call `task_complete` with discovered credentials/hashes
    - Or `request_assistance` if blocked by technical issue
 
-**Anti-patterns to AVOID:**
-- Calling `record_timeline_event` after every tool
-- Checking `get_operation_summary` repeatedly
-- Re-documenting vulnerabilities already in your task payload
-- Calling `list_weaknesses` or `list_credentials` multiple times
-
 ## Tools Available
 
 ### Tool Inventory
@@ -603,6 +586,5 @@ request_assistance(
 ```
 
 **DO NOT:**
-- Call record_timeline_event before task_complete
 - Call get_operation_summary to "verify" your results
 - Re-document the vulnerability you just exploited

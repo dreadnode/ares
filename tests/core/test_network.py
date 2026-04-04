@@ -751,22 +751,6 @@ class TestRedTeamReportingTools:
         tools.set_state(red_team_state)
         assert tools.state == red_team_state
 
-    def test_record_weakness_basic(self, red_team_state: SharedRedTeamState):
-        """Test record_weakness records a finding."""
-        from ares.tools.red import RedTeamReportingTools
-
-        tools = RedTeamReportingTools()
-        tools.set_state(red_team_state)
-
-        result = tools.record_weakness(
-            title="Weak Password Policy",
-            vulnerability="Password length requirement is only 7 characters",
-            affected_resource="Domain-wide",
-        )
-
-        assert "[+] Recorded weakness: Weak Password Policy" in result
-        assert len(red_team_state.weaknesses) == 1
-
 
 class TestCoercionTools:
     """Tests for CoercionTools class."""

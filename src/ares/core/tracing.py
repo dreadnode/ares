@@ -310,10 +310,6 @@ TOOL_TO_TECHNIQUE: dict[str, str] = {
     "forge_golden_ticket": "T1558.001",  # Golden Ticket (alias)  # nosec B105
     "forge_silver_ticket": "T1558.002",  # Silver Ticket
     "create_machine_account": "T1136.002",
-    # Reporting / Documentation tools
-    "record_credential": "T1087.002",  # Account Discovery (documenting discovered credentials)
-    "record_weakness": "T1518.001",  # Software Discovery: Security Software
-    "record_timeline_event": "T1087",  # Account Discovery (general)
 }
 
 # Map tool categories to tactics for fallback
@@ -433,10 +429,6 @@ TOOL_TO_CATEGORY: dict[str, str] = {
     "forge_golden_ticket": "GoldenTicketTools",  # nosec B105
     "forge_silver_ticket": "GoldenTicketTools",
     "create_machine_account": "GoldenTicketTools",
-    # ReportingTools - Documentation and findings recording
-    "record_credential": "ReportingTools",
-    "record_weakness": "ReportingTools",
-    "record_timeline_event": "ReportingTools",
 }
 
 # =============================================================================

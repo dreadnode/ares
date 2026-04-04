@@ -447,6 +447,22 @@ class ResultProcessingMixin:
                     step_key = f"{chain_id}:{step_id}"
                     self.shared_state.dispatched_acl_steps.discard(step_key)
 
+        # On successful trust key extraction, register the trusted domain so
+        # _get_foreign_domains / all_forests_dominated can use it for pivoting.
+        # The extract_trust_key tool returns secretsdump output (no structured
+        # "trusted_domains" JSON), so the result_processing text parsers never
+        # pick it up — we must do it explicitly from the task params.
+        if success and task_info.task_type == "exploit":
+            vuln_type = task_params.get("vuln_type", "")
+            if vuln_type == "trust_key_extraction":
+                trusted_domain = (task_params.get("trusted_domain") or "").lower()
+                if trusted_domain and trusted_domain not in self.shared_state.trusted_domains:
+                    self.shared_state.trusted_domains.append(trusted_domain)
+                    logger.info(
+                        f"🌲 Trusted domain registered from successful extraction: "
+                        f"{trusted_domain} (task {task_id})"
+                    )
+
         # Clear trust extraction dedup on failure so it can be retried
         # (e.g., missing SIDs, auth failure, timeout — may succeed on next attempt)
         if not success and task_info.task_type == "exploit":
@@ -644,6 +660,14 @@ class ResultProcessingMixin:
                         logger.info(
                             f"Trusted domain discovered: {domain_lower} from {target_label}"
                         )
+
+        # Also extract trusted domains from raw output text embedded in result
+        # The LLM often doesn't propagate trusted_domains from tool output into
+        # its structured result, so we parse stdout/output fields directly
+        if not trusted_domains:
+            raw_output = self._extract_output_from_result(result)
+            if raw_output:
+                self._extract_trusted_domains_from_output(raw_output)
 
         # Process discovered vulnerabilities (delegation, ADCS, etc.)
         discovered_vulns = result.get("discovered_vulnerabilities")
@@ -1090,6 +1114,10 @@ class ResultProcessingMixin:
                         await backend.set_domain_sid(domain_lower, extracted_sid)
                     except Exception as e:
                         logger.debug(f"Failed to persist domain SID for {domain}: {e}")
+
+        # Extract trusted_domains from embedded JSON in tool output
+        # (e.g., enumerate_domain_trusts embeds STRUCTURED DATA JSON in its text output)
+        self._extract_trusted_domains_from_output(output)
 
         # Extract and auto-queue delegation vulnerabilities from findDelegation output
         # Always extract as a backup - dedup handled in _auto_queue_delegation_vulnerabilities
@@ -1760,6 +1788,47 @@ class ResultProcessingMixin:
         if match:
             return match.group(1)
         return None
+
+    def _extract_trusted_domains_from_output(self: RedTeamDispatcher, output: str) -> None:
+        """Extract trusted domains from tool output text.
+
+        The enumerate_domain_trusts tool embeds JSON with a "trusted_domains"
+        key. The LLM may not propagate this into its structured result, so we
+        parse it directly from the raw text. Also handles trust info in
+        non-JSON formats (e.g., "→ essos.local (ESSOS) Direction: Bidirectional").
+        """
+        if not output or ("trust" not in output.lower()):
+            return
+
+        # Strategy 1: Find "trusted_domains": [...] array directly in text
+        # This handles both compact and multi-line JSON
+        for match in re.finditer(r'"trusted_domains"\s*:\s*\[([^\]]*)\]', output, re.DOTALL):
+            array_content = match.group(1)
+            # Extract quoted strings from the array
+            for domain_match in re.finditer(r'"([^"]+)"', array_content):
+                domain_lower = domain_match.group(1).strip().lower()
+                if (
+                    domain_lower
+                    and "." in domain_lower
+                    and domain_lower not in self.shared_state.trusted_domains
+                ):
+                    self.shared_state.trusted_domains.append(domain_lower)
+                    logger.info(f"Trusted domain discovered from output: {domain_lower}")
+
+        # Strategy 2: Parse "→ domain.tld (NETBIOS) Direction: Bidirectional/Outbound"
+        # from enumerate_domain_trusts formatted output
+        for match in re.finditer(
+            r"→\s+([\w.]+)\s+\([^)]*\)\s*\n\s*Direction:\s*(Bidirectional|Outbound|Inbound)",
+            output,
+        ):
+            domain_lower = match.group(1).strip().lower()
+            if (
+                domain_lower
+                and "." in domain_lower
+                and domain_lower not in self.shared_state.trusted_domains
+            ):
+                self.shared_state.trusted_domains.append(domain_lower)
+                logger.info(f"Trusted domain discovered from output (arrow format): {domain_lower}")
 
     def _extract_gmsa_from_output(self: RedTeamDispatcher, output: str) -> list[dict[str, str]]:
         """

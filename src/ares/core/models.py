@@ -1211,7 +1211,7 @@ class SharedRedTeamState:
                 continue
             # Skip non-FQDN names (e.g., NetBIOS names like "winterfell" or "NORTH")
             # that look like hostnames rather than domain names. A real domain FQDN
-            # always contains at least one dot (e.g., "essos.local").
+            # always contains at least one dot (e.g., "contoso.local").
             if "." not in vd:
                 continue
             foreign.add(vd)
@@ -2166,6 +2166,19 @@ class SharedRedTeamState:
         if not username or username.lower() in {"(none)", "none", "null", "(null)"}:
             logger.debug(f"Credential rejected: invalid username '{username}' from {source_agent}")
             return False
+        # Reject LSA secret key names misinterpreted as usernames
+        lsa_secret_names = {
+            "defaultpassword",
+            "cachedlogonscount",
+            "nl$km",
+            "dpapi_system",
+            "_sc_",
+            "aspnet_wp_password",
+            "$machine.acc",
+        }
+        if username.lower() in lsa_secret_names:
+            logger.debug(f"Credential rejected: LSA secret name '{username}' from {source_agent}")
+            return False
         # Reject credentials without passwords (use add_hash for hashes)
         if not password:
             logger.debug(
@@ -2202,6 +2215,53 @@ class SharedRedTeamState:
                     f"Credential rejected: duplicate {domain}\\{username} from {source_agent}"
                 )
                 return False
+
+            # Reject conflicting passwords for the same user+domain.
+            # Keep the first password stored (typically from a deterministic
+            # source like hash cracking or secretsdump) and reject later
+            # arrivals with a different password.
+            # Exception: well-known accounts (krbtgt, Administrator) may legitimately
+            # differ across domains, so we skip them.
+            if (
+                existing.username.strip().lower() == username.lower()
+                and existing.domain.strip().lower() == domain
+                and existing.password.strip().lower() != password.lower()
+                and username.lower() not in WELL_KNOWN_ACCOUNTS
+            ):
+                # The incoming credential has a verified source (cracked/realtime) —
+                # trust it over the existing LLM-reported one and REPLACE.
+                new_source = (credential.source or "").lower()
+                existing_source_lower = (existing.source or "").lower()
+                new_is_verified = any(
+                    tag in new_source for tag in ("cracked:", "realtime:", "user_description")
+                )
+                existing_is_verified = any(
+                    tag in existing_source_lower
+                    for tag in ("cracked:", "realtime:", "user_description")
+                )
+                if new_is_verified and not existing_is_verified:
+                    # Replace unverified credential with verified one
+                    logger.warning(
+                        f"Credential REPLACED: {domain}\\{username} — "
+                        f"verified source '{credential.source}' replaces "
+                        f"unverified '{existing.source}' "
+                        f"(old password: {existing.password[:3]}***, "
+                        f"new password: {password[:3]}***)"
+                    )
+                    existing.password = password
+                    existing.source = credential.source
+                    existing.is_admin = credential.is_admin or existing.is_admin
+                    if credential.parent_id:
+                        existing.parent_id = credential.parent_id
+                        existing.attack_step = credential.attack_step
+                    return False  # Not "added" as new, but updated in place
+                # Either both verified (keep first) or new is unverified — reject
+                logger.warning(
+                    f"Credential rejected: conflicting password for {domain}\\{username} "
+                    f"from {source_agent} — already have password from '{existing.source}'"
+                )
+                return False
+
             # Check for cross-domain duplicates: same username + password but different domain
             # Only reject if user is KNOWN to exist in only ONE domain (hallucination)
             # If user exists in multiple domains, it's legitimate password reuse
@@ -2393,6 +2453,23 @@ class SharedRedTeamState:
                 f"User rejected: machine account '{normalized}' for domain {normalized_domain}"
             )
             return False
+        # Filter out LSA secret key names that secretsdump outputs as DOMAIN\keyname
+        # These are registry value names, not actual usernames
+        lsa_secret_names = {
+            "defaultpassword",
+            "cachedlogonscount",
+            "nl$km",
+            "dpapi_system",
+            "_sc_",
+            "aspnet_wp_password",
+            "$machine.acc",
+        }
+        if normalized.lower() in lsa_secret_names:
+            logger.debug(
+                f"User rejected: LSA secret name '{normalized}' for domain {normalized_domain}"
+            )
+            return False
+
         # Filter out tool output artifacts that look like usernames but are actually
         # status messages or descriptions (e.g., "gpp_passwords_found" from netexec)
         artifact_patterns = (
