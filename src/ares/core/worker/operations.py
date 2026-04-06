@@ -329,7 +329,7 @@ async def is_operation_completed(redis_url: str, operation_id: str) -> bool:
         operation_id: Operation ID to check
 
     Returns:
-        True if operation status is "completed" or "failed", False otherwise
+        True if operation status is "completed", "failed", or "killed", False otherwise
     """
     client = await create_redis_client(redis_url, decode_responses=True)
     try:
@@ -339,7 +339,7 @@ async def is_operation_completed(redis_url: str, operation_id: str) -> bool:
             return False
         data = json.loads(str(status_data))
         status = data.get("status", "")
-        return status in ("completed", "failed")
+        return status in ("completed", "failed", "killed")
     except Exception as e:
         logger.debug(f"Failed to check operation status for {operation_id}: {e}")
         return False

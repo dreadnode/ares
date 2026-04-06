@@ -24,6 +24,14 @@ if TYPE_CHECKING:
 class RoutingMixin:
     """Task routing methods for dispatching work to specialized agents."""
 
+    def _is_multi_forest_continuation_active(self: RedTeamDispatcher) -> bool:
+        """Return True when DA was achieved but foreign forests still remain."""
+        if not self.shared_state.has_domain_admin:
+            return False
+        from ares.core.config import get_multi_forest_mode
+
+        return get_multi_forest_mode() and not self.shared_state.all_forests_dominated()
+
     def _should_skip_for_da(self: RedTeamDispatcher) -> bool:
         """Check if task dispatch should be skipped because DA is achieved.
 
@@ -35,6 +43,133 @@ class RoutingMixin:
         from ares.core.config import get_multi_forest_mode
 
         return not (get_multi_forest_mode() and not self.shared_state.all_forests_dominated())
+
+    def _is_dominated_domain(self: RedTeamDispatcher, domain: str) -> bool:
+        """Return True when the domain is already covered by achieved DA."""
+        normalized = self._normalize_domain(domain)
+        if not normalized:
+            return False
+
+        da_domains = {d.lower() for d in self.shared_state.domain_admin_domains}
+        return normalized in da_domains or any(normalized.endswith("." + d) for d in da_domains)
+
+    def _infer_domain_from_target(self: RedTeamDispatcher, target: str) -> str:
+        """Infer a domain from a target IP/hostname/FQDN when explicit domain is absent."""
+        if not target:
+            return ""
+
+        if hasattr(self, "_resolve_domain_from_target_host"):
+            try:
+                resolved = self._resolve_domain_from_target_host(target)
+            except Exception:
+                resolved = ""
+            if resolved:
+                return self._normalize_domain(resolved)
+
+        target_lower = target.strip().lower()
+        for host in self.shared_state.all_hosts:
+            hostname = (host.hostname or "").strip().lower()
+            if (
+                host.ip == target
+                or hostname == target_lower
+                or (hostname and hostname.startswith(target_lower + "."))
+            ) and "." in hostname:
+                return self._normalize_domain(hostname.split(".", 1)[1])
+
+        if "." in target_lower and not re.fullmatch(r"\d{1,3}(?:\.\d{1,3}){3}", target_lower):
+            parts = target_lower.split(".", 1)
+            if len(parts) > 1:
+                return self._normalize_domain(parts[1])
+
+        return ""
+
+    def _get_task_target_domain(
+        self: RedTeamDispatcher,
+        *,
+        domain: str = "",
+        target_host: str = "",
+        target_ips: list[str] | None = None,
+        payload: dict[str, Any] | None = None,
+    ) -> str:
+        """Resolve the effective target domain for a dispatch request."""
+        if domain:
+            return self._normalize_domain(domain)
+
+        payload = payload or {}
+        payload_domain = payload.get("domain")
+        if isinstance(payload_domain, str) and payload_domain:
+            return self._normalize_domain(payload_domain)
+
+        candidates: list[str] = []
+        for field in ("target_host", "target_ip", "target"):
+            value = payload.get(field, "")
+            if isinstance(value, str) and value:
+                candidates.append(value)
+        for item in payload.get("target_ips", []) or []:
+            if isinstance(item, str) and item:
+                candidates.append(item)
+        if target_host:
+            candidates.append(target_host)
+        for item in target_ips or []:
+            if item:
+                candidates.append(item)
+
+        for candidate in candidates:
+            resolved = self._infer_domain_from_target(candidate)
+            if resolved:
+                return resolved
+
+        return ""
+
+    def _is_cross_forest_critical_task(
+        self: RedTeamDispatcher,
+        task_type: str,
+        payload: dict[str, Any] | None = None,
+    ) -> bool:
+        """Allow only the specific dominated-domain tasks needed for foreign pivots."""
+        payload = payload or {}
+        vuln_type = str(payload.get("vuln_type") or "").lower()
+        tool = str(payload.get("tool") or "").lower()
+        return task_type == "exploit" and (
+            vuln_type in {"mssql_cross_forest_pivot", "trust_key_extraction"}
+            or tool == "extract_trust_key"
+        )
+
+    def _should_skip_dominated_domain_task(
+        self: RedTeamDispatcher,
+        task_type: str,
+        payload: dict[str, Any] | None = None,
+        *,
+        domain: str = "",
+        target_host: str = "",
+        target_ips: list[str] | None = None,
+    ) -> bool:
+        """Suppress redundant owned-domain work while multi-forest pivoting continues."""
+        if not self._is_multi_forest_continuation_active():
+            return False
+
+        payload = payload or {}
+        task_domain = self._get_task_target_domain(
+            domain=domain,
+            target_host=target_host,
+            target_ips=target_ips,
+            payload=payload,
+        )
+        if not task_domain or not self._is_dominated_domain(task_domain):
+            return False
+
+        if self._is_cross_forest_critical_task(task_type, payload):
+            return False
+
+        task_desc = task_type
+        vuln_type = str(payload.get("vuln_type") or "").lower()
+        if vuln_type:
+            task_desc = f"{task_type}/{vuln_type}"
+        logger.info(
+            f"Skipping {task_desc} for dominated domain {task_domain} "
+            "(multi-forest mode: preserving capacity for undominated forests)"
+        )
+        return True
 
     def _normalize_domain(self: RedTeamDispatcher, domain: str) -> str:
         """Normalize domain to FQDN format.
@@ -907,6 +1042,14 @@ class RoutingMixin:
             )
             return ""
 
+        if self._should_skip_dominated_domain_task(
+            "lateral",
+            {"domain": resolved_domain, "target_host": target_host},
+            domain=resolved_domain,
+            target_host=target_host,
+        ):
+            return ""
+
         if self._task_queue:
             task_id = await self._throttled_submit_task(
                 task_type="lateral",
@@ -1086,6 +1229,9 @@ class RoutingMixin:
             logger.debug(f"Skipping recon request ({reason}) - DA already achieved")
             return ""
 
+        # Normalize domain to FQDN format
+        domain = self._normalize_domain(domain)
+
         # Skip nmap if all targets have already been scanned
         if reason == "network_scan" and techniques and "nmap_scan" in techniques:
             scan_targets = set(target_ips or [])
@@ -1093,6 +1239,20 @@ class RoutingMixin:
             if scan_targets and scan_targets == already_scanned:
                 logger.info(f"Skipping nmap - all {len(scan_targets)} targets already scanned")
                 return ""
+
+        payload_preview = {
+            "domain": domain,
+            "target_ips": target_ips or [],
+            "reason": reason,
+            "techniques": techniques or [],
+        }
+        if self._should_skip_dominated_domain_task(
+            "recon",
+            payload_preview,
+            domain=domain,
+            target_ips=target_ips,
+        ):
+            return ""
 
         # PREREQUISITE: Non-nmap recon tasks require targets to be scanned first
         # This ensures nmap runs before SMB enumeration, user enumeration, etc.
@@ -1121,9 +1281,6 @@ class RoutingMixin:
                 )
                 # DON'T return - continue to dispatch the enumeration task with lower priority
                 # It will be queued behind nmap and run after nmap completes
-
-        # Normalize domain to FQDN format
-        domain = self._normalize_domain(domain)
 
         self._ensure_credential_in_state(
             username=username,
@@ -1268,6 +1425,22 @@ class RoutingMixin:
         if extra_params:
             payload.update(extra_params)
 
+        if self._should_skip_dominated_domain_task(
+            "credential_access",
+            payload,
+            domain=domain,
+            target_ips=target_ips,
+        ):
+            return ""
+
+        # --- Dispatch-level dedup for secretsdump and share spider ---
+        techniques_set = set(techniques or [])
+        skipped = self._dedup_credential_access_dispatch(
+            techniques_set, target_ips or [], reason or ""
+        )
+        if skipped:
+            return ""
+
         # Use provided task_queue (from threaded consumer) or fall back to self._task_queue
         effective_task_queue = task_queue if task_queue is not None else self._task_queue
         if effective_task_queue:
@@ -1314,6 +1487,72 @@ class RoutingMixin:
         # No Redis task queue - cannot dispatch
         logger.warning("No task queue available, cannot route credential access request")
         return ""
+
+    def _dedup_credential_access_dispatch(
+        self: RedTeamDispatcher,
+        techniques: set[str],
+        target_ips: list[str],
+        reason: str,
+    ) -> bool:
+        """Check dispatch-level dedup for secretsdump and share spider tasks.
+
+        Prevents duplicate dispatch of expensive credential access operations:
+        - secretsdump: Dedup per target IP (no point re-dumping an already-dumped host)
+        - smbclient_spider: Dedup by sorted target IP set (identical spider batches)
+
+        Returns True if the task should be skipped (duplicate), False otherwise.
+        """
+        # Lazy-init dedup sets (same pattern as _mssql_enum_dispatched)
+        if not hasattr(self, "_dispatched_secretsdump_targets"):
+            self._dispatched_secretsdump_targets: set[str] = set()
+        if not hasattr(self, "_dispatched_spider_keys"):
+            self._dispatched_spider_keys: set[str] = set()
+
+        # --- Secretsdump dedup: skip targets already dumped or in-flight ---
+        if "secretsdump" in techniques and target_ips:
+            new_targets = []
+            for ip in target_ips:
+                if ip in self._dispatched_secretsdump_targets:
+                    logger.debug(f"Secretsdump dedup: skipping {ip} (already dispatched/completed)")
+                else:
+                    new_targets.append(ip)
+
+            if not new_targets:
+                logger.info(
+                    f"Secretsdump dedup: all targets already dispatched, "
+                    f"skipping ({', '.join(target_ips)})"
+                )
+                return True
+
+            # Mark all targets as dispatched (in-flight)
+            for ip in new_targets:
+                self._dispatched_secretsdump_targets.add(ip)
+
+            # If some targets were filtered, the caller still uses the original
+            # target_ips list; we allow the dispatch with the full set since
+            # at least one target is new.
+
+        # --- Share spider dedup: skip identical target IP batches ---
+        if "smbclient_spider" in techniques and target_ips:
+            spider_key = "spider:" + ",".join(sorted(target_ips))
+            if spider_key in self._dispatched_spider_keys:
+                logger.info(
+                    f"Share spider dedup: identical target set already dispatched "
+                    f"({spider_key}), skipping"
+                )
+                return True
+            self._dispatched_spider_keys.add(spider_key)
+
+        return False
+
+    def mark_secretsdump_failed(self: RedTeamDispatcher, target_ip: str) -> None:
+        """Remove a target from secretsdump dedup set so it can be retried.
+
+        Called when a secretsdump task fails, allowing re-dispatch to the same target.
+        """
+        if hasattr(self, "_dispatched_secretsdump_targets"):
+            self._dispatched_secretsdump_targets.discard(target_ip)
+            logger.debug(f"Secretsdump dedup: cleared {target_ip} for retry after failure")
 
     def _enrich_delegation_payload(
         self: RedTeamDispatcher, payload: dict[str, Any], vuln_type: str
@@ -1385,6 +1624,9 @@ class RoutingMixin:
         # Enrich with credentials and resolve DC IP
         self._enrich_delegation_payload(payload, vuln_type)
         self._resolve_dc_ip_for_payload(payload, vuln_type)
+
+        if self._should_skip_dominated_domain_task("exploit", payload):
+            return ""
 
         # Track attack chain
         username = payload.get("username") or payload.get("account_name", "")
@@ -1508,6 +1750,13 @@ class RoutingMixin:
             "parent_credential_id": parent_id,
             "parent_attack_step": parent_step,
         }
+
+        if self._should_skip_dominated_domain_task(
+            "privesc_enumeration",
+            payload,
+            domain=domain,
+        ):
+            return ""
 
         # Use provided task_queue (from threaded consumer) or fall back to self._task_queue
         effective_task_queue = task_queue if task_queue is not None else self._task_queue

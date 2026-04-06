@@ -25,6 +25,71 @@ from ares.tools.red.common import (
     write_users_file_remote,
 )
 
+# Markers for noise lines produced by missing tools on worker pods.
+_NOISE_MARKERS = ("command not found", "No such file or directory")
+
+
+def _filter_enum_output_noise(
+    output: str,
+    outputs: list[tuple[str, str]],
+) -> str:
+    """Filter useless error lines from enumerate_users output to save LLM tokens.
+
+    Worker pods may not have netexec/nmap installed, producing hundreds of
+    tokens of "command not found" noise.  This strips those lines and, if
+    ALL sub-commands failed, replaces the output with a concise summary.
+
+    Args:
+        output: The concatenated section output string (returned to LLM).
+        outputs: The raw (label, content) pairs from _run_user_enum_commands.
+
+    Returns:
+        Cleaned output string.
+    """
+    if not output:
+        return output
+
+    # Identify which tools produced only noise vs useful output.
+    noise_tools: list[str] = []
+    clean_tools: list[str] = []
+    for label, content in outputs:
+        if not content or not content.strip():
+            continue
+        lines = content.strip().splitlines()
+        useful_lines = [ln for ln in lines if not any(marker in ln for marker in _NOISE_MARKERS)]
+        if useful_lines:
+            clean_tools.append(label)
+        else:
+            noise_tools.append(label)
+
+    # If every tool with output was pure noise, return concise failure.
+    if noise_tools and not clean_tools:
+        tool_names = sorted({label.split()[0] for label in noise_tools})
+        return (
+            "[!] User enumeration failed - tools not available "
+            f"({', '.join(tool_names)} not installed). "
+            "Try rpcclient or LDAP enumeration instead."
+        )
+
+    # Otherwise strip noise lines from the combined output.
+    filtered_lines = [
+        ln for ln in output.splitlines() if not any(marker in ln for marker in _NOISE_MARKERS)
+    ]
+    filtered = "\n".join(filtered_lines).strip()
+
+    # Collapse empty section headers left behind after stripping.
+    filtered = re.sub(r"={5,} [^=]+ ={5,}\s*(?=={5,}|\Z)", "", filtered).strip()
+
+    if noise_tools and clean_tools:
+        tool_names = sorted({label.split()[0] for label in noise_tools})
+        successful_names = sorted({label.split()[0] for label in clean_tools})
+        filtered += (
+            f"\n[*] Note: some enumeration tools unavailable ({', '.join(tool_names)}). "
+            f"Results from: {', '.join(successful_names)}"
+        )
+
+    return filtered
+
 
 class NetworkEnumerationTools(Toolset):
     """Tools for network scanning and recon."""
@@ -1131,6 +1196,9 @@ class NetworkEnumerationTools(Toolset):
                 if kerb_output:
                     output = (output + "\n\n" + kerb_output).strip()
 
+            # Filter noise (e.g. "command not found") before returning to LLM.
+            output = _filter_enum_output_noise(output, outputs)
+
             if output and (_has_user_entries(output) or found_users or found_passwords):
                 return output
 
@@ -1163,6 +1231,32 @@ class NetworkEnumerationTools(Toolset):
         Example:
             >>> enumerate_shares("192.168.58.100", "DOMAIN", "user", "pass")
         """
+
+        # Dedup: shares don't change between calls with same or lower auth level
+        # Auth hierarchy: authenticated > guest > null
+        _auth_levels = {"null": 0, "guest": 1, "authenticated": 2}
+        if username and password:
+            auth_level = "authenticated"
+        elif username and username.lower() == "guest":
+            auth_level = "guest"
+        else:
+            auth_level = "null"
+        auth_rank = _auth_levels[auth_level]
+        share_key = f"enumerate_shares:{target.lower()}:{auth_level}"
+        if self.state and hasattr(self.state, "processed_spidered_shares"):
+            # Check if already enumerated at same or higher auth level
+            for level_name, level_rank in _auth_levels.items():
+                if level_rank >= auth_rank:
+                    existing_key = f"enumerate_shares:{target.lower()}:{level_name}"
+                    if existing_key in self.state.processed_spidered_shares:
+                        cached = getattr(self.state, "dedup_cache", {}).get(existing_key)
+                        if cached:
+                            return f"[*] Already enumerated shares on {target} with {level_name} session (cached result):\n{cached}"
+                        return (
+                            f"[*] Already enumerated shares on {target} with {level_name} session - "
+                            "results won't change. Use smbclient_spider to search specific shares for credentials."
+                        )
+            # Add after we successfully enumerate (even if 0 shares found, the enum completed)
 
         def _parse_netexec_hosts(output: str) -> list[Host]:
             hosts: list[Host] = []
@@ -1337,6 +1431,12 @@ class NetworkEnumerationTools(Toolset):
                 logger.info(
                     f"[enumerate_shares] Added {shares_added} new shares to state for {target}"
                 )
+
+            # Mark as processed and cache result after successful enumeration
+            if self.state and hasattr(self.state, "processed_spidered_shares"):
+                self.state.processed_spidered_shares.add(share_key)
+                if hasattr(self.state, "dedup_cache"):
+                    self.state.dedup_cache[share_key] = all_output
 
             return all_output
 
@@ -2309,10 +2409,19 @@ class BloodHoundTools(Toolset):
             >>> run_bloodhound("contoso.local", "dave.lee", "ExamplePass123!", "192.168.58.10")
         """
         # DEDUP CHECK: Skip if already ran BloodHound for this domain (prevents duplicate work)
-        if self.state:
-            domain_key = domain.lower()
-            if domain_key in getattr(self.state, "processed_bloodhound_domains", set()):
-                return f"BloodHound already completed for {domain} - skipping to save time"
+        bh_key = f"bloodhound:{domain.lower()}"
+        if (
+            self.state
+            and hasattr(self.state, "processed_spidered_shares")
+            and bh_key in self.state.processed_spidered_shares
+        ):
+            cached = getattr(self.state, "dedup_cache", {}).get(bh_key)
+            if cached:
+                return (
+                    f"[*] Already collected BloodHound data for {domain} (cached result):\n{cached}"
+                )
+            return f"[*] Already collected BloodHound data for {domain} - ACL/path data won't change. Analyze existing results instead of re-running."
+        # Add to set after successful collection
 
         # CREDENTIAL DOMAIN CHECK: Verify credentials can authenticate to target domain
         # Child domain creds cannot auth to parent domain LDAP, cross-forest won't work either
@@ -2549,7 +2658,14 @@ class BloodHoundTools(Toolset):
             output_parts.append("\n\n📄 RAW OUTPUT:")
             output_parts.append(raw_output)
 
-            return "\n".join(output_parts)
+            # Mark as processed and cache result after successful collection
+            result = "\n".join(output_parts)
+            if self.state and hasattr(self.state, "processed_spidered_shares"):
+                self.state.processed_spidered_shares.add(bh_key)
+                if hasattr(self.state, "dedup_cache"):
+                    self.state.dedup_cache[bh_key] = result
+
+            return result
 
         except Exception as e:
             logger.error(f"BloodHound failed: {e}")

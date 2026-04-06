@@ -330,7 +330,8 @@ Certificate Authorities
                 feedback_messages.append(result)
 
         # certipy_find should NOT trigger "EXPLOITATION SUCCESSFUL"
-        for msg in feedback_messages:
+        for result in feedback_messages:
+            msg = result.feedback if hasattr(result, "feedback") else str(result)
             assert "EXPLOITATION SUCCESSFUL" not in msg, (
                 f"certipy_find should NOT trigger exploitation success hook. Got: {msg}"
             )
@@ -359,7 +360,10 @@ Certificate Authorities
                 feedback_messages.append(result)
 
         # certipy_auth with hash output SHOULD trigger success
-        success_found = any("EXPLOITATION SUCCESSFUL" in msg for msg in feedback_messages)
+        success_found = any(
+            "EXPLOITATION SUCCESSFUL" in (r.feedback if hasattr(r, "feedback") else str(r))
+            for r in feedback_messages
+        )
         assert success_found, "certipy_auth with hash output should trigger exploitation success"
 
     @pytest.mark.asyncio
@@ -383,7 +387,10 @@ Certificate Authorities
             if result:
                 feedback_messages.append(result)
 
-        success_found = any("EXPLOITATION SUCCESSFUL" in msg for msg in feedback_messages)
+        success_found = any(
+            "EXPLOITATION SUCCESSFUL" in (r.feedback if hasattr(r, "feedback") else str(r))
+            for r in feedback_messages
+        )
         assert success_found, "certipy_req with .pfx output should trigger exploitation success"
 
 

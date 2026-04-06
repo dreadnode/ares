@@ -387,6 +387,14 @@ class DeferredQueueMixin:
         if not self._task_queue:
             return False
 
+        role_health = self.get_role_health(task.target_role)
+        if role_health.get("is_registered") and role_health.get("online_count", 0) == 0:
+            logger.warning(
+                f"Deferred task {task.task_type} -> {task.target_role} still waiting: "
+                "target role offline"
+            )
+            return False
+
         try:
             task_id = await self._task_queue.submit_task(
                 task_type=task.task_type,
@@ -477,6 +485,8 @@ class DeferredQueueMixin:
                         f"(at {llm_count}/{max_tasks} capacity)"
                     )
                     for task in critical_tasks:
+                        if self._should_skip_dominated_domain_task(task.task_type, task.payload):
+                            continue
                         await self._submit_deferred_task(task, is_critical=True)
 
                 # At soft cap but below hard cap: still process deferred tasks for starved roles
@@ -496,6 +506,8 @@ class DeferredQueueMixin:
                     tasks_to_process = await self._get_deferred_for_starved_roles()
 
                 for task in tasks_to_process:
+                    if self._should_skip_dominated_domain_task(task.task_type, task.payload):
+                        continue
                     success = await self._submit_deferred_task(task)
                     if not success:
                         # Re-queue on failure

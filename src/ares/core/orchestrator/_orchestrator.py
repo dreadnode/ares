@@ -54,6 +54,7 @@ from ares.core.models import (
 from ares.core.persistent_store import PersistentStore, get_persistent_store_config
 from ares.core.recovery import OperationRecoveryManager, RecoveryError
 from ares.core.task_queue import RedisTaskQueue
+from ares.core.token_usage import estimate_usage_cost, get_usage_models
 from ares.core.workflows import exploitation_workflow
 from ares.reports.redteam import RedTeamReportGenerator
 from ares.tools.red.orchestrator import OrchestratorTools
@@ -634,6 +635,42 @@ def _log_orchestrator_result(result: rg.RunResult, model: str) -> None:
     log_fn(log_msg)
 
 
+def _extract_result_usage(result: Any) -> dict[str, int] | None:
+    """Extract token usage from an agent run result."""
+    usage = getattr(result, "usage", None)
+    if usage is None:
+        return None
+    try:
+        return {
+            "input_tokens": int(getattr(usage, "input_tokens", 0)),
+            "output_tokens": int(getattr(usage, "output_tokens", 0)),
+            "total_tokens": int(getattr(usage, "total_tokens", 0)),
+        }
+    except Exception:
+        return None
+
+
+async def _record_orchestrator_usage(
+    task_queue: RedisTaskQueue,
+    operation_id: str,
+    result: Any,
+    *,
+    fallback_model: str,
+) -> None:
+    """Accumulate orchestrator token usage into operation-level counters."""
+    usage = _extract_result_usage(result)
+    if not usage or not usage["total_tokens"]:
+        return
+
+    model_name = getattr(getattr(result, "agent", None), "model", "") or fallback_model
+    await task_queue.increment_token_usage(
+        operation_id=operation_id,
+        input_tokens=usage["input_tokens"],
+        output_tokens=usage["output_tokens"],
+        model=str(model_name),
+    )
+
+
 def _create_completion_tools(
     shared_state: SharedRedTeamState,
     dispatcher: RedTeamDispatcher,
@@ -880,14 +917,23 @@ async def run_multi_agent_operation(
     # Register all agents with dispatcher
     await _register_agents(dispatcher, agents)
 
-    # Wait for required workers before starting
-    await _ensure_required_workers(dispatcher, ["recon"], timeout=120.0)
+    # Wait for the core worker set before starting. If privesc/credential access
+    # are offline, exploit tasks can be queued into unpolled Redis streams and
+    # the operation burns budget without forward progress.
+    await _ensure_required_workers(
+        dispatcher,
+        ["recon", "credential_access", "cracker", "privesc", "lateral"],
+        timeout=120.0,
+    )
 
     # Run NMAP to discover hosts before background tasks start
     state = dispatcher.shared_state
     if target_ips:
         namespace = get_namespace()
         await _run_direct_nmap(state, target_ips, namespace)
+
+    # Kill event — set by _check_kill_signal when CLI sends kill signal
+    kill_event = asyncio.Event()
 
     # Start background tasks
     # - Credential access (AS-REP, password spray, etc.) handled by _auto_credential_access
@@ -896,6 +942,9 @@ async def run_multi_agent_operation(
         asyncio.create_task(_monitor_agent_health(dispatcher), name="health_monitor"),
         asyncio.create_task(exploitation_workflow(dispatcher), name="exploitation_workflow"),
         asyncio.create_task(_extend_operation_lock(task_queue, operation_id), name="lock_extender"),
+        asyncio.create_task(
+            _check_kill_signal(task_queue, operation_id, kill_event), name="kill_signal_checker"
+        ),
         asyncio.create_task(
             _auto_credential_expansion(dispatcher), name="auto_credential_expansion"
         ),
@@ -994,9 +1043,32 @@ async def run_multi_agent_operation(
 
             # Run the orchestrator agent with crash and rate limit recovery
             while orchestrator_crash_count < max_orchestrator_crashes:
+                if kill_event.is_set():
+                    raise OperationKilledError(f"Operation {operation_id} killed via CLI")
                 try:
                     logger.info(f"🤖 Connecting to {model}...")
-                    result = await orchestrator_agent.run(initial_prompt)
+
+                    # Race the agent against the kill signal
+                    agent_task = asyncio.create_task(orchestrator_agent.run(initial_prompt))
+                    kill_wait = asyncio.create_task(kill_event.wait())
+                    _done, pending = await asyncio.wait(
+                        {agent_task, kill_wait}, return_when=asyncio.FIRST_COMPLETED
+                    )
+                    for p in pending:
+                        p.cancel()
+                        try:
+                            await p
+                        except (asyncio.CancelledError, Exception):
+                            pass
+                    if kill_event.is_set():
+                        raise OperationKilledError(f"Operation {operation_id} killed via CLI")
+                    result = agent_task.result()
+                    await _record_orchestrator_usage(
+                        task_queue,
+                        operation_id,
+                        result,
+                        fallback_model=model,
+                    )
                     _log_orchestrator_result(result, model)
 
                     # Check if result indicates a fatal error (e.g., auth failure)
@@ -1022,6 +1094,8 @@ async def run_multi_agent_operation(
                         raise RuntimeError(f"Orchestrator returned error: {error_msg}")
 
                     break  # Success - exit the retry loop
+                except OperationKilledError:
+                    raise  # Propagate kill signal immediately
                 except Exception as e:
                     error_str = str(e)
 
@@ -1279,6 +1353,15 @@ async def run_multi_agent_operation(
             "report_markdown": report_markdown,
         }
 
+    except OperationKilledError:
+        logger.warning(f"🛑 Operation {operation_id} was killed — cleaning up")
+        return {
+            "operation_id": operation_id,
+            "success": False,
+            "killed": True,
+            "domain_admin_achieved": dispatcher.shared_state.has_domain_admin,
+        }
+
     except Exception as e:
         logger.error(f"Operation failed: {e}")
         raise
@@ -1514,6 +1597,39 @@ async def _monitor_agent_health(
             await asyncio.sleep(check_interval)
 
 
+class OperationKilledError(Exception):
+    """Raised when an operation is killed via CLI."""
+
+
+async def _check_kill_signal(
+    task_queue: RedisTaskQueue,
+    operation_id: str,
+    kill_event: asyncio.Event,
+    interval: float = 5.0,
+) -> None:
+    """Poll Redis for kill signal and set the kill event when detected.
+
+    The CLI `delete` command sets the operation status to "killed" before
+    removing other keys. This task detects that signal and sets the event
+    so the main orchestrator loop can break out gracefully.
+    """
+    import json
+
+    while True:
+        await asyncio.sleep(interval)
+        try:
+            status_key = f"ares:op:{operation_id}:status"
+            raw = await task_queue.redis.get(status_key)
+            if raw:
+                data = json.loads(raw)
+                if data.get("status") == "killed":
+                    logger.warning(f"🛑 Kill signal detected for {operation_id} — shutting down")
+                    kill_event.set()
+                    return
+        except Exception:
+            pass  # Transient Redis errors — retry next interval
+
+
 async def _extend_operation_lock(
     task_queue: RedisTaskQueue,
     operation_id: str,
@@ -1552,18 +1668,15 @@ async def _periodic_token_usage_summary(
             in_tok = usage["input_tokens"]
             out_tok = usage["output_tokens"]
             total = in_tok + out_tok
-            model = usage.get("model", "")
+            models = get_usage_models(usage)
+            total_cost, breakdown, _unpriced_models = estimate_usage_cost(usage)
             cost_str = ""
-            if model:
-                try:
-                    import litellm
-
-                    in_cost, out_cost = litellm.cost_per_token(
-                        model, prompt_tokens=in_tok, completion_tokens=out_tok
-                    )
-                    cost_str = f" | ${in_cost + out_cost:.4f}"
-                except Exception:
-                    pass
+            if total_cost is not None:
+                blended_suffix = " blended" if len(breakdown) > 1 else ""
+                cost_str = f" | ${total_cost:.4f}{blended_suffix}"
+            elif models:
+                model_label = "models" if len(models) > 1 else "model"
+                cost_str = f" | cost unavailable for {len(models)} {model_label}"
             logger.opt(colors=True).info(
                 f"<magenta>💰 [token-usage] {total:,} tokens "
                 f"(in: {in_tok:,}  out: {out_tok:,}){cost_str}</magenta>"
@@ -2990,6 +3103,11 @@ async def _auto_crack_dispatch(
             for hash_obj in state.all_hashes:
                 # Skip already cracked
                 if hash_obj.cracked_password:
+                    continue
+
+                # Skip machine/trust/persistence accounts — their passwords are
+                # 120+ random chars and computationally infeasible to crack
+                if hash_obj.username.endswith("$"):
                     continue
 
                 # Build crack key for deduplication
@@ -6172,9 +6290,10 @@ async def _auto_foreign_dcsync(
                         f"Falling back to FSP/MSSQL/ACL paths."
                     )
                 else:
+                    # Log enough to see the secretsdump error (ticketer alone is ~400 chars)
                     logger.warning(
                         f"🌲 Auto-foreign-dcsync: inter-realm DCSync failed for "
-                        f"{foreign_domain}, output: {ir_output[:500]!r}"
+                        f"{foreign_domain}, output: {ir_output[-1000:]!r}"
                     )
 
         except asyncio.CancelledError:

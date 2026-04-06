@@ -192,6 +192,39 @@ class ThrottlingMixin:
                 and vuln_type in self.CRITICAL_PATH_VULN_TYPES
             )
 
+            # Demote exploits targeting already-dominated domains — they're redundant
+            # and waste bypass slots that cross-forest pivots need
+            if is_critical_exploit and self._shared_state:
+                target_domain = (payload.get("domain") or "").lower() if payload else ""
+                if not target_domain:
+                    # Try to infer from target_ip
+                    target_ips = payload.get("target_ips", []) if payload else []
+                    tip = (
+                        target_ips[0]
+                        if target_ips
+                        else ((payload.get("target_ip") or "") if payload else "")
+                    )
+                    if tip:
+                        for h in self._shared_state.all_hosts:
+                            if h.ip == tip and h.hostname and "." in h.hostname:
+                                target_domain = ".".join(h.hostname.lower().split(".")[1:])
+                                break
+                da_domains = {d.lower() for d in self._shared_state.domain_admin_domains}
+                if target_domain and target_domain in da_domains:
+                    # Check parent domains too (north.sevenkingdoms.local → sevenkingdoms.local)
+                    is_dominated = True
+                elif target_domain:
+                    # Check if target is a child of a dominated domain
+                    is_dominated = any(target_domain.endswith("." + d) for d in da_domains)
+                else:
+                    is_dominated = False
+                if is_dominated and vuln_type != "mssql_cross_forest_pivot":
+                    logger.debug(
+                        f"Throttle: demoting {vuln_type} on {target_domain} "
+                        f"(DA already achieved — saving bypass slots for undominated forests)"
+                    )
+                    is_critical_exploit = False
+
             # In multi-forest mode, MSSQL exploits become critical path
             # (cross-forest Kerberos broken in impacket - MSSQL may be only pivot)
             if (
@@ -223,7 +256,13 @@ class ThrottlingMixin:
                 t.lower() in self.ESC8_COERCION_TECHNIQUES for t in techniques
             )
 
-            multi_forest_mssql_critical = (
+            # mssql_cross_forest_pivot is the highest priority — it may be the ONLY
+            # path to the foreign forest. Always bypass, even above MAX_BYPASS_TASKS.
+            is_cross_forest_pivot = (
+                task_type in self.CRITICAL_PATH_TASK_TYPES
+                and vuln_type == "mssql_cross_forest_pivot"
+            )
+            multi_forest_mssql_critical = is_cross_forest_pivot or (
                 task_type in self.CRITICAL_PATH_TASK_TYPES
                 and vuln_type in self.MSSQL_VULN_TYPES
                 and vuln_type not in self.CRITICAL_PATH_VULN_TYPES
@@ -623,6 +662,25 @@ class ThrottlingMixin:
         if not effective_task_queue:
             logger.warning("No task queue available for throttled submit")
             return ""
+
+        # Don't bury tasks in a role stream with no active consumer. If the target
+        # role is registered but currently offline, keep the task in the deferred
+        # queue so it remains visible and can be submitted when the worker returns.
+        role_health = self.get_role_health(target_role)
+        if role_health.get("is_registered") and role_health.get("online_count", 0) == 0:
+            logger.warning(
+                f"Target role {target_role} is offline "
+                f"(stale agents: {role_health.get('stale_agents', [])}) - "
+                f"deferring {task_type} task until a worker is online"
+            )
+            queued = await self._enqueue_deferred_task(
+                task_type=task_type,
+                target_role=target_role,
+                payload=payload,
+                source_agent=source_agent,
+                priority=priority,
+            )
+            return "deferred" if queued else ""
 
         start_wait = asyncio.get_event_loop().time()
         total_waited = 0.0

@@ -10,7 +10,7 @@ Priority scheme rationale:
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -941,6 +941,35 @@ class TestThrottleBypass:
         )
 
         assert should_drop is False
+
+    @pytest.mark.asyncio
+    async def test_throttled_submit_task_defers_when_target_role_offline(self):
+        """Tasks for an offline role should stay in the deferred queue, not the Redis stream."""
+        dispatcher = RedTeamDispatcher()
+        dispatcher._shared_state = SharedRedTeamState(operation_id="op-test-offline-role")
+        dispatcher._task_queue = AsyncMock()
+        dispatcher._enqueue_deferred_task = AsyncMock(return_value=True)
+        dispatcher.get_role_health = MagicMock(
+            return_value={
+                "role": "privesc",
+                "is_registered": True,
+                "online_count": 0,
+                "total_count": 1,
+                "stale_agents": ["ares-privesc"],
+            }
+        )
+
+        result = await dispatcher._throttled_submit_task(
+            task_type="exploit",
+            target_role="privesc",
+            payload={"vuln_type": "mssql_cross_forest_pivot"},
+            source_agent="test",
+            priority=2,
+        )
+
+        assert result == "deferred"
+        dispatcher._enqueue_deferred_task.assert_awaited_once()
+        dispatcher._task_queue.submit_task.assert_not_awaited()
 
     def test_non_delegation_privesc_enum_does_not_bypass(self):
         """privesc_enumeration without delegation technique should NOT bypass."""

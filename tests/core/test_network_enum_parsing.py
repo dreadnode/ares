@@ -278,6 +278,121 @@ def test_add_user_validates_against_motd_garbage():
     assert users == {"administrator", "john.doe", "svc-sql"}
 
 
+class TestFilterEnumOutputNoise:
+    """Tests for _filter_enum_output_noise that strips command-not-found noise."""
+
+    def test_all_tools_failed_returns_concise_message(self):
+        """When every sub-command produces only noise, return a short failure summary."""
+        from ares.tools.red.reconnaissance import _filter_enum_output_noise
+
+        outputs = [
+            ("netexec smb --users", "bash: line 1: netexec: command not found\n"),
+            ("nmap port 445", "bash: line 1: nmap: command not found\n"),
+            ("nmap smb-enum-users", "bash: line 1: nmap: command not found\n"),
+            ("netexec smb --rid-brute", "bash: line 1: netexec: command not found\n"),
+        ]
+        combined = "\n\n".join(f"===== {label} =====\n{content}" for label, content in outputs)
+
+        result = _filter_enum_output_noise(combined, outputs)
+
+        assert "command not found" not in result
+        assert "tools not available" in result
+        assert "netexec" in result
+        assert "nmap" in result
+
+    def test_partial_success_strips_noise_keeps_results(self):
+        """When some tools succeed, strip noise but keep good output."""
+        from ares.tools.red.reconnaissance import _filter_enum_output_noise
+
+        good_output = "user:[administrator] rid:[0x1f4]\nuser:[svc-sql] rid:[0x450]"
+        outputs = [
+            ("netexec smb --users", "bash: line 1: netexec: command not found\n"),
+            ("rpcclient null session enumdomusers", good_output),
+            ("nmap port 445", "bash: line 1: nmap: command not found\n"),
+        ]
+        combined = "\n\n".join(f"===== {label} =====\n{content}" for label, content in outputs)
+
+        result = _filter_enum_output_noise(combined, outputs)
+
+        # Noise lines stripped
+        assert "command not found" not in result
+        # Good output preserved
+        assert "administrator" in result
+        assert "svc-sql" in result
+        # Note about unavailable tools appended
+        assert "some enumeration tools unavailable" in result
+        assert "rpcclient" in result  # listed as successful
+
+    def test_no_noise_passes_through_unchanged(self):
+        """When there is no noise, output passes through without modification."""
+        from ares.tools.red.reconnaissance import _filter_enum_output_noise
+
+        good_output = (
+            "SMB 192.168.58.10 445 DC01 [*] Windows Server 2019\n"
+            "SMB 192.168.58.10 445 DC01 admin 2026-01-01"
+        )
+        outputs = [("netexec smb --users", good_output)]
+        combined = f"===== netexec smb --users =====\n{good_output}"
+
+        result = _filter_enum_output_noise(combined, outputs)
+
+        assert result == combined
+        assert "unavailable" not in result
+
+    def test_empty_output_returns_empty(self):
+        """Empty output should pass through."""
+        from ares.tools.red.reconnaissance import _filter_enum_output_noise
+
+        result = _filter_enum_output_noise("", [])
+        assert result == ""
+
+    def test_no_such_file_filtered(self):
+        """'No such file or directory' lines should also be filtered."""
+        from ares.tools.red.reconnaissance import _filter_enum_output_noise
+
+        outputs = [
+            ("netexec smb --users", "bash: netexec: No such file or directory\n"),
+        ]
+        combined = "===== netexec smb --users =====\nbash: netexec: No such file or directory"
+
+        result = _filter_enum_output_noise(combined, outputs)
+
+        assert "No such file or directory" not in result
+        assert "tools not available" in result
+
+    def test_enumerate_users_filters_noise_end_to_end(self, monkeypatch):
+        """End-to-end: enumerate_users should not return command-not-found noise."""
+        from ares.tools.red.reconnaissance import NetworkEnumerationTools
+
+        tool = NetworkEnumerationTools()
+        state = SharedRedTeamState(operation_id="op-test-noise-filter")
+        state.target = Target(ip="192.168.58.10", domain="contoso.local")
+        tool.set_state(state)
+
+        outputs = [
+            ("netexec smb --users", "bash: line 1: netexec: command not found\n"),
+            (
+                "rpcclient null session enumdomusers",
+                "user:[administrator] rid:[0x1f4]\nuser:[svc-web] rid:[0x452]",
+            ),
+            ("nmap port 445", "bash: line 1: nmap: command not found\n"),
+            ("nmap smb-enum-users", "bash: line 1: nmap: command not found\n"),
+            ("netexec smb --rid-brute", "bash: line 1: netexec: command not found\n"),
+        ]
+
+        monkeypatch.setattr(tool, "_run_user_enum_commands", lambda *_a, **_kw: outputs)
+
+        result = tool.enumerate_users(
+            target="192.168.58.10",
+            username="svc",
+            password="notreal",  # pragma: allowlist secret
+            domain="contoso.local",
+        )
+
+        assert "command not found" not in result
+        assert "administrator" in result
+
+
 class TestNmapParsingHostnameExtraction:
     """Test hostname extraction from nmap Service Info line."""
 

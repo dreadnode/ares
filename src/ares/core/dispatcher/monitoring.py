@@ -344,11 +344,19 @@ class MonitoringMixin:
         self._log_slow_pickup_warning(slow_pickup_tasks)
 
         if stale_task_ids:
+            pending_key = f"ares:op:{self._shared_state.operation_id}:pending_tasks"
             for task_id in stale_task_ids:
                 stale_task: TaskInfo | None = self._shared_state.pending_tasks.get(task_id)
                 if stale_task is not None:
                     del self._shared_state.pending_tasks[task_id]
                     MonitoringMixin._warned_tasks.discard(task_id)  # Clean up warning tracking
+                if self._redis_client is not None:
+                    try:
+                        await self._redis_client.hdel(pending_key, task_id)
+                    except Exception as e:
+                        logger.warning(
+                            f"Failed to remove stale task {task_id} from Redis pending_tasks: {e}"
+                        )
 
                 if stale_task is not None:
                     activity_time = (

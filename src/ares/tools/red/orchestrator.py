@@ -7,6 +7,7 @@ and dispatch tasks to specialized worker agents.
 from __future__ import annotations
 
 import ipaddress
+import time
 from typing import TYPE_CHECKING, Any
 
 import dreadnode as dn
@@ -64,6 +65,33 @@ class OrchestratorTools(Toolset):
     _exploitation_status_last_check: float = 0.0
     _exploitation_status_cache: str = ""
     _STATUS_CACHE_TTL: float = 30.0  # 30 second cache
+
+    # Cooldown tracking for read-only state query tools (per-instance)
+    _last_call_times: dict[str, float] | None = None
+
+    def _check_cooldown(self, tool_name: str, cooldown_seconds: float = 30.0) -> str | None:
+        """Check if a tool was called too recently and return a cooldown message if so.
+
+        Returns a short message if the tool was called within cooldown_seconds,
+        or None if enough time has passed (allowing the call to proceed).
+        """
+        if self._last_call_times is None:
+            self._last_call_times = {}
+
+        now = time.time()
+        last_call = self._last_call_times.get(tool_name, 0.0)
+        elapsed = now - last_call
+
+        if elapsed < cooldown_seconds:
+            ago = int(elapsed)
+            return (
+                f"[*] {tool_name} was called {ago}s ago — state unchanged. "
+                "Focus on executing your current task with the information you already have. "
+                "Do NOT call this tool again until you've made progress."
+            )
+
+        self._last_call_times[tool_name] = now
+        return None
 
     def set_dispatcher(self, dispatcher: RedTeamDispatcher) -> None:
         """Set the dispatcher for inter-agent communication."""
@@ -945,6 +973,9 @@ class OrchestratorTools(Toolset):
         Returns:
             Formatted list of pending tasks
         """
+        cooldown_msg = self._check_cooldown("get_pending_tasks")
+        if cooldown_msg:
+            return cooldown_msg
         import time
 
         now = time.time()
@@ -1078,6 +1109,9 @@ class OrchestratorTools(Toolset):
         Returns:
             Formatted list of discovered credentials
         """
+        cooldown_msg = self._check_cooldown("get_all_credentials")
+        if cooldown_msg:
+            return cooldown_msg
         creds = list(self.shared_state.all_credentials)
         total = len(creds)
 
@@ -1118,6 +1152,9 @@ class OrchestratorTools(Toolset):
         Returns:
             Brief credential summary with counts
         """
+        cooldown_msg = self._check_cooldown("get_credential_summary")
+        if cooldown_msg:
+            return cooldown_msg
         creds = self.shared_state.all_credentials
 
         if not creds:
@@ -1158,6 +1195,9 @@ class OrchestratorTools(Toolset):
         Returns:
             Formatted list of discovered hashes with full hash values
         """
+        cooldown_msg = self._check_cooldown("get_all_hashes")
+        if cooldown_msg:
+            return cooldown_msg
         hashes = list(self.shared_state.all_hashes)
         total = len(hashes)
 
@@ -1208,6 +1248,9 @@ class OrchestratorTools(Toolset):
         Returns:
             Brief hash summary with counts by type
         """
+        cooldown_msg = self._check_cooldown("get_hash_summary")
+        if cooldown_msg:
+            return cooldown_msg
         hashes = self.shared_state.all_hashes
 
         if not hashes:
@@ -1292,6 +1335,9 @@ class OrchestratorTools(Toolset):
         Returns:
             Formatted vulnerability status
         """
+        cooldown_msg = self._check_cooldown("get_exploitation_status")
+        if cooldown_msg:
+            return cooldown_msg
         import time
 
         now = time.time()
@@ -1399,6 +1445,9 @@ class OrchestratorTools(Toolset):
         Returns:
             Formatted operation summary
         """
+        cooldown_msg = self._check_cooldown("get_operation_summary")
+        if cooldown_msg:
+            return cooldown_msg
         state = self.shared_state
         summary = state.to_summary()
         status = await self.dispatcher.get_exploitation_status()

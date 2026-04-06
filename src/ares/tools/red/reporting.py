@@ -4,6 +4,8 @@ This module provides toolsets for recording findings during
 red team operations.
 """
 
+import time
+
 import dreadnode as dn
 from dreadnode.agent.tools.base import Toolset
 
@@ -18,6 +20,33 @@ class RedTeamReportingTools(Toolset):
     """
 
     state: SharedRedTeamState | None = None
+
+    # Cooldown tracking for read-only state query tools (per-instance)
+    _last_call_times: dict[str, float] | None = None
+
+    def _check_cooldown(self, tool_name: str, cooldown_seconds: float = 30.0) -> str | None:
+        """Check if a tool was called too recently and return a cooldown message if so.
+
+        Returns a short message if the tool was called within cooldown_seconds,
+        or None if enough time has passed (allowing the call to proceed).
+        """
+        if self._last_call_times is None:
+            self._last_call_times = {}
+
+        now = time.time()
+        last_call = self._last_call_times.get(tool_name, 0.0)
+        elapsed = now - last_call
+
+        if elapsed < cooldown_seconds:
+            ago = int(elapsed)
+            return (
+                f"[*] {tool_name} was called {ago}s ago — state unchanged. "
+                "Focus on executing your current task with the information you already have. "
+                "Do NOT call this tool again until you've made progress."
+            )
+
+        self._last_call_times[tool_name] = now
+        return None
 
     def set_state(self, state: SharedRedTeamState) -> None:
         """Set the operation state for this toolset."""
@@ -37,6 +66,9 @@ class RedTeamReportingTools(Toolset):
         Example:
             >>> get_operation_summary()
         """
+        cooldown_msg = self._check_cooldown("get_operation_summary")
+        if cooldown_msg:
+            return cooldown_msg
         if not self.state:
             return "[!] No operation state available"
 
@@ -85,6 +117,9 @@ class RedTeamReportingTools(Toolset):
         Example:
             >>> list_credentials()
         """
+        cooldown_msg = self._check_cooldown("list_credentials")
+        if cooldown_msg:
+            return cooldown_msg
         if not self.state:
             return "[!] No operation state available"
 
@@ -121,6 +156,9 @@ class RedTeamReportingTools(Toolset):
         Example:
             >>> list_weaknesses()
         """
+        cooldown_msg = self._check_cooldown("list_weaknesses")
+        if cooldown_msg:
+            return cooldown_msg
         if not self.state:
             return "[!] No operation state available"
 

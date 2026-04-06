@@ -269,6 +269,77 @@ class TestGetNextVulnerabilityMultiForest:
             )
 
 
+class TestDominatedDomainSuppression:
+    """Tests for suppressing redundant owned-domain work after DA."""
+
+    @pytest.fixture
+    def dispatcher(self):
+        d = RedTeamDispatcher()
+        d._shared_state = SharedRedTeamState(
+            operation_id="test-op-dominated",
+            target=Target(ip="192.168.58.10", domain="sevenkingdoms.local"),
+        )
+        d._shared_state.has_domain_admin = True
+        d._shared_state.domain_admin_domains = ["sevenkingdoms.local"]
+        d._shared_state.all_domains = ["sevenkingdoms.local", "essos.local"]
+        d._shared_state._validated_domains = {"sevenkingdoms.local", "essos.local"}
+        d._shared_state.all_hosts.extend(
+            [
+                Host(ip="192.168.58.10", hostname="dc01.sevenkingdoms.local", is_dc=True),
+                Host(ip="192.168.58.20", hostname="sql01.north.sevenkingdoms.local"),
+                Host(ip="192.168.58.30", hostname="dc01.essos.local", is_dc=True),
+            ]
+        )
+        d._task_queue = MagicMock()
+        d._task_queue.submit_task = AsyncMock(return_value="task-123")
+        d._throttled_submit_task = AsyncMock(return_value="task-123")
+        return d
+
+    @pytest.mark.asyncio
+    async def test_skips_credential_access_for_dominated_domain(self, dispatcher):
+        with patch("ares.core.config.get_multi_forest_mode", return_value=True):
+            result = await dispatcher.request_credential_access(
+                source_agent="orchestrator",
+                domain="north.sevenkingdoms.local",
+                target_ips=["192.168.58.20"],
+                username="administrator",
+                password="Winter2025!",  # pragma: allowlist secret
+                reason="new_credential_dc",
+                techniques=["secretsdump"],
+            )
+
+        assert result == ""
+        dispatcher._throttled_submit_task.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_skips_generic_exploit_for_dominated_domain(self, dispatcher):
+        with patch("ares.core.config.get_multi_forest_mode", return_value=True):
+            result = await dispatcher.request_exploit(
+                vuln_type="unconstrained_delegation",
+                vuln_id="vuln-1",
+                target="192.168.58.20",
+                source_agent="orchestrator",
+                params={"domain": "north.sevenkingdoms.local"},
+            )
+
+        assert result == ""
+        dispatcher._throttled_submit_task.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_allows_cross_forest_pivot_on_dominated_domain(self, dispatcher):
+        with patch("ares.core.config.get_multi_forest_mode", return_value=True):
+            result = await dispatcher.request_exploit(
+                vuln_type="mssql_cross_forest_pivot",
+                vuln_id="vuln-pivot",
+                target="192.168.58.20",
+                source_agent="orchestrator",
+                params={"domain": "north.sevenkingdoms.local"},
+            )
+
+        assert result == "task-123"
+        dispatcher._throttled_submit_task.assert_awaited_once()
+
+
 class TestWorkflowMultiForestFallthrough:
     """Tests for exploitation workflow multi-forest fallthrough.
 

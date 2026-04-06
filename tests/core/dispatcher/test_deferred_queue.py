@@ -760,6 +760,33 @@ class TestStaleTaskCleanup:
         # Fresh task should remain
         assert "fresh-task-1" in dispatcher._shared_state.pending_tasks
 
+    @pytest.mark.asyncio
+    async def test_cleanup_removes_stale_tasks_from_redis_pending_hash(self, dispatcher):
+        """Stale cleanup should delete ghost tasks from Redis pending_tasks too."""
+        from datetime import datetime, timedelta, timezone
+
+        from ares.core.config import get_stale_task_timeout
+        from ares.core.models import TaskInfo, TaskStatus
+
+        old_time = datetime.now(timezone.utc) - timedelta(seconds=get_stale_task_timeout() * 3 + 60)
+        stale_task = TaskInfo(
+            task_id="stale-task-redis",
+            task_type="recon",
+            assigned_agent="recon",
+            status=TaskStatus.PENDING,
+        )
+        stale_task.created_at = old_time
+        stale_task.last_activity_at = old_time
+        dispatcher._shared_state.pending_tasks["stale-task-redis"] = stale_task
+        dispatcher._redis_client = AsyncMock()
+
+        await dispatcher._cleanup_stale_tasks()
+
+        dispatcher._redis_client.hdel.assert_awaited_once_with(
+            "ares:op:op-test-stale:pending_tasks",
+            "stale-task-redis",
+        )
+
 
 class TestDeferredQueueMultiForestDrain:
     """Tests for deferred queue processor respecting multi-forest mode on DA.

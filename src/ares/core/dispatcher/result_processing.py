@@ -478,6 +478,14 @@ class ResultProcessingMixin:
                         f"(task {task_id} failed)"
                     )
 
+        # Clear secretsdump dispatch dedup on failure so targets can be retried
+        if not success and task_info.task_type == "credential_access":
+            techniques = task_params.get("techniques", [])
+            if "secretsdump" in techniques:
+                failed_targets = task_params.get("target_ips", [])
+                for ip in failed_targets if isinstance(failed_targets, list) else []:
+                    self.mark_secretsdump_failed(ip)
+
         # Resolve any waiting futures
         self._resolve_task_future(task_id, success, result, error)
 

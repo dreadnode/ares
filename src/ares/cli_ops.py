@@ -37,6 +37,7 @@ from ares.core.orchestrator_client import (  # noqa: E402
     wait_for_operation_completion,
 )
 from ares.core.redis_client import create_verified_redis_client  # noqa: E402
+from ares.core.token_usage import estimate_usage_cost, get_usage_models  # noqa: E402
 
 
 def _get_vuln_priorities() -> dict[str, int]:
@@ -1865,25 +1866,31 @@ async def runtime(
         tq = RedisTaskQueue(redis_url=resolved_redis_url)
         await tq.connect()
         usage = await tq.get_token_usage(operation_id)
-        await tq.close()
+        await tq.disconnect()
         if usage and (usage["input_tokens"] or usage["output_tokens"]):
             in_tok = usage["input_tokens"]
             out_tok = usage["output_tokens"]
             total_tok = in_tok + out_tok
-            model = usage.get("model", "")
+            models = get_usage_models(usage)
             print(f"\nTokens: {total_tok:,} (in: {in_tok:,}  out: {out_tok:,})")
-            if model:
-                try:
-                    import litellm
-
-                    in_cost, out_cost = litellm.cost_per_token(
-                        model, prompt_tokens=in_tok, completion_tokens=out_tok
-                    )
-                    total_cost = in_cost + out_cost
-                    print(f"Model:  {model}")
-                    print(f"Cost:   ${total_cost:.4f}")
-                except Exception:
-                    print(f"Model:  {model} (cost lookup failed)")
+            if models:
+                model_names = ", ".join(sorted(models))
+                label = "Models" if len(models) > 1 else "Model"
+                print(f"{label}:  {model_names}")
+                total_cost, breakdown, unpriced_models = estimate_usage_cost(usage)
+                if total_cost is not None:
+                    cost_suffix = " (blended)" if len(breakdown) > 1 else ""
+                    print(f"Cost:   ${total_cost:.4f}{cost_suffix}")
+                elif usage.get("model"):
+                    print("Cost:   unavailable")
+                if len(breakdown) > 1:
+                    for item in breakdown:
+                        print(
+                            f"  - {item['model']}: {item['total_tokens']:,} tokens "
+                            f"(${item['cost']:.4f})"
+                        )
+                if unpriced_models:
+                    print(f"Unpriced models: {', '.join(unpriced_models)}")
 
     except Exception as e:
         logger.error(f"Failed to get runtime: {e}")
@@ -2043,16 +2050,29 @@ async def delete(
                 await client.aclose()
                 return
 
+        # Set kill signal BEFORE deleting keys so orchestrator and workers see it
+        status_key = f"ares:op:{operation_id}:status"
+        import json as json_module
+
+        kill_status = json_module.dumps(
+            {
+                "status": "killed",
+                "summary": "Operation killed via CLI",
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            }
+        )
+        await client.setex(status_key, 300, kill_status)  # 5-min TTL for detection
+        logger.info(f"Kill signal set for {operation_id}")
+
         keys_to_delete: list[str] = []
         native_keys = await client.keys(f"ares:op:{operation_id}:*")
-        keys_to_delete.extend(native_keys)
+        # Exclude the status key — workers/orchestrator need it to detect the kill
+        keys_to_delete.extend(k for k in native_keys if k != status_key)
 
         keys_to_delete.append(f"ares:lock:{operation_id}")
         active_op = await client.get("ares:op:active")
         if active_op == operation_id:
             keys_to_delete.append("ares:op:active")
-
-        import json as json_module
 
         task_keys = await client.keys("ares:task_status:*")
         for key in task_keys:

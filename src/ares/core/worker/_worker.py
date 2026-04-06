@@ -841,9 +841,20 @@ class RedisWorkerAgent:
                 self._total_input_tokens += in_tok
                 self._total_output_tokens += out_tok
                 total = self._total_input_tokens + self._total_output_tokens
+                cost_str = ""
+                if model_name:
+                    try:
+                        import litellm
+
+                        in_cost, out_cost = litellm.cost_per_token(
+                            model_name, prompt_tokens=in_tok, completion_tokens=out_tok
+                        )
+                        cost_str = f" | ${in_cost + out_cost:.4f}"
+                    except Exception:
+                        pass
                 logger.opt(colors=True).info(
                     f"<cyan>💰 [{self.agent_name}] tokens: "
-                    f"{in_tok + out_tok:,} this task | "
+                    f"{in_tok + out_tok:,} this task{cost_str} | "
                     f"{total:,} cumulative (in: {self._total_input_tokens:,} "
                     f"out: {self._total_output_tokens:,})</cyan>"
                 )

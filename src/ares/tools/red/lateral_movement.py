@@ -1209,7 +1209,17 @@ class MSSQLTools(Toolset):
         try:
             logger.info(f"[*] Executing command on MSSQL: {command}")
             stdout, stderr, _ = run_tool(["bash", "-c", cmd_string], timeout_seconds=120)
-            return stdout + "\n" + (stderr or "")
+            result = (stdout or "").strip() + "\n" + (stderr or "").strip()
+            result = result.strip()
+            if not result or result == "NULL":
+                return (
+                    "[!] xp_cmdshell returned empty output. This usually means xp_cmdshell "
+                    "is disabled or you lack sysadmin privileges. Try: "
+                    "(1) mssql_impersonate to escalate to sa, then "
+                    "(2) mssql_enable_xp_cmdshell, then retry. "
+                    "Do NOT retry the same command with different syntax - the issue is permissions, not syntax."
+                )
+            return result
 
         except Exception as e:
             return f"MSSQL command execution failed: {e}"

@@ -65,6 +65,19 @@ class GoldenTicketTools(Toolset):
             >>> get_sid("child.contoso.local", "user", "pass", "192.168.58.100")
             >>> get_sid("contoso.local", "user", "pass", "192.168.58.101")
         """
+        # Dedup: SID is a domain property, doesn't change with different credentials
+        sid_key = f"get_sid:{domain.lower()}"
+        if (
+            self.state
+            and hasattr(self.state, "processed_spidered_shares")
+            and sid_key in self.state.processed_spidered_shares
+        ):
+            cached = getattr(self.state, "dedup_cache", {}).get(sid_key)
+            if cached:
+                return f"[*] Already looked up SID for {domain} (cached result):\n{cached}"
+            return f"[*] Already looked up SID for {domain} - SID is a domain property and won't change with different credentials."
+        # Don't add to set yet - only add after successful lookup
+
         # Detect if password is actually an NTLM hash
         import re
 
@@ -96,7 +109,13 @@ class GoldenTicketTools(Toolset):
         try:
             stdout, stderr, _ = run_tool(cmd, timeout_seconds=120)
             logger.info(f"[*] SID lookup completed for {domain}")
-            return stdout or stderr
+            result = stdout or stderr
+            # Mark as processed and cache result after successful lookup
+            if self.state and hasattr(self.state, "processed_spidered_shares"):
+                self.state.processed_spidered_shares.add(sid_key)
+                if hasattr(self.state, "dedup_cache"):
+                    self.state.dedup_cache[sid_key] = result
+            return result
         except Exception as e:
             return f"Error: {e!s}"
 
@@ -1510,6 +1529,18 @@ class CertipyTools(Toolset):
         resolved_password = self._resolve_password(username, domain, password)
         if resolved_password and resolved_password.strip().lower() in self._PLACEHOLDER_PASSWORDS:
             return "[!] Refusing to use placeholder password; provide a real credential."
+
+        # Dedup: certipy_find results are per-domain, not per-credential.
+        # Running it again with different creds against the same domain returns identical results.
+        find_key = f"certipy_find:{domain.lower()}"
+        if self.state and hasattr(self.state, "processed_spidered_shares"):
+            if find_key in self.state.processed_spidered_shares:
+                return (
+                    f"[*] Already enumerated ADCS on {domain} - results won't change with different credentials. "
+                    "If you found vulnerable templates, use certipy_request to exploit them. "
+                    "Do NOT call certipy_find again."
+                )
+            self.state.processed_spidered_shares.add(find_key)
 
         realm = domain.upper()
         krb5_conf = f"/tmp/ares-krb5-{uuid.uuid4().hex}.conf"  # nosec B108  # noqa: S108

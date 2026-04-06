@@ -7,6 +7,7 @@ Result queues and discovery queues remain List-based (point-to-point, one-shot).
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import uuid
 from datetime import datetime, timezone
@@ -130,6 +131,7 @@ class RedisTaskQueue(BaseTaskQueue):
     STATE_UPDATE_CHANNEL_PREFIX = "ares:state:updates"
     # Stream trimming: approximate max entries per stream to bound memory
     STREAM_MAXLEN = 10000
+    TOKEN_USAGE_MODEL_PREFIX = "model"  # noqa: S105  # nosec B105  # not a password
 
     def __init__(self, redis_url: str | None = None, use_circuit_breaker: bool = True):
         super().__init__(redis_url)
@@ -938,6 +940,12 @@ class RedisTaskQueue(BaseTaskQueue):
             pipe.hincrby(key, "output_tokens", output_tokens)
             if model:
                 pipe.hset(key, "model", model)
+                pipe.hincrby(
+                    key, self._token_usage_model_field(model, "input_tokens"), input_tokens
+                )
+                pipe.hincrby(
+                    key, self._token_usage_model_field(model, "output_tokens"), output_tokens
+                )
             await pipe.execute()
         except Exception as e:
             # Best-effort — don't fail the task over accounting
@@ -958,16 +966,53 @@ class RedisTaskQueue(BaseTaskQueue):
             def _val(v: Any) -> str:
                 return v.decode() if isinstance(v, bytes) else str(v)
 
+            models: dict[str, dict[str, int]] = {}
+            for raw_field, raw_value in data.items():
+                field = _val(raw_field)
+                parsed = self._parse_token_usage_model_field(field)
+                if not parsed:
+                    continue
+                model_name, token_type = parsed
+                model_usage = models.setdefault(model_name, {"input_tokens": 0, "output_tokens": 0})
+                model_usage[token_type] = int(_val(raw_value))
+
             return {
                 "input_tokens": int(_val(data.get(b"input_tokens", data.get("input_tokens", 0)))),
                 "output_tokens": int(
                     _val(data.get(b"output_tokens", data.get("output_tokens", 0)))
                 ),
                 "model": _val(data.get(b"model", data.get("model", ""))),
+                "models": models,
             }
         except Exception as e:
             logger.debug(f"Failed to read token usage: {e}")
             return None
+
+    @classmethod
+    def _token_usage_model_field(cls, model: str, token_type: str) -> str:
+        encoded = base64.urlsafe_b64encode(model.encode("utf-8")).decode("ascii")
+        return f"{cls.TOKEN_USAGE_MODEL_PREFIX}:{encoded}:{token_type}"
+
+    @classmethod
+    def _parse_token_usage_model_field(cls, field: str) -> tuple[str, str] | None:
+        prefix = f"{cls.TOKEN_USAGE_MODEL_PREFIX}:"
+        if not field.startswith(prefix):
+            return None
+
+        parts = field.split(":", 2)
+        if len(parts) != 3:
+            return None
+
+        _, encoded_model, token_type = parts
+        if token_type not in {"input_tokens", "output_tokens"}:
+            return None
+
+        try:
+            model = base64.urlsafe_b64decode(encoded_model.encode("ascii")).decode("utf-8")
+        except Exception:
+            return None
+
+        return model, token_type
 
     async def get_heartbeat(self, agent_name: str) -> dict[str, Any] | None:
         """

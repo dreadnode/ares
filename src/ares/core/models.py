@@ -874,6 +874,10 @@ class SharedRedTeamState:
         default_factory=set
     )  # "attack_type:target:cred" - cross-forest pivot dispatched
 
+    # Tool result dedup cache — stores output of idempotent tools keyed by dedup key
+    # Keys: "get_sid:{domain}", "enumerate_shares:{target}:{auth_level}", "bloodhound:{domain}"
+    dedup_cache: dict[str, str] = field(default_factory=dict)
+
     # Golden ticket capability tracking
     # Key: "domain:username" (lowercase), Value: list of capability info dicts
     # Each dict: {domain, reason, dc_host, dc_ip}
@@ -2193,11 +2197,11 @@ class SharedRedTeamState:
         if "/" in username or "\\" in username or username.endswith(".txt"):
             logger.debug(f"Credential rejected: path artifact '{username}' from {source_agent}")
             return False
-        # Filter out attack tool artifacts (e.g., EVIL625686$ created by impacket addcomputer.py for RBCD)
+        # Filter out attack tool artifacts (e.g., EVILE62EE3$ created by impacket addcomputer.py for RBCD)
         username_upper = username.upper()
         if username_upper.startswith("EVIL") and username_upper.endswith("$"):
             middle = username_upper[4:-1]  # Extract part between EVIL and $
-            if middle.isdigit():
+            if all(c in "0123456789ABCDEF" for c in middle):
                 logger.debug(
                     f"Credential rejected: attack tool artifact '{username}' from {source_agent}"
                 )
