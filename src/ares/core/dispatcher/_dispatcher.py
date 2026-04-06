@@ -134,6 +134,10 @@ class RedTeamDispatcher(
         # Threaded result consumer (initialized in MonitoringMixin methods)
         self._result_consumer_thread: threading.Thread | None = None
         self._result_consumer_stop_event: threading.Event | None = None
+        # Task IDs recently removed by stale cleanup — consumer checks these for
+        # late-arriving results to prevent orphaned results when workers finish
+        # after the stale timeout.
+        self._recently_cleaned_task_ids: dict[str, float] = {}  # task_id -> cleanup_time
         # Asyncio task for maintenance (stale cleanup, reconciliation)
         self._maintenance_task: asyncio.Task | None = None
 

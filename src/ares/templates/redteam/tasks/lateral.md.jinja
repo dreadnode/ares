@@ -1,0 +1,7 @@
+Perform lateral movement to {{ target_host }}:
+Username: {{ domain }}\{{ username }}
+Credential ({{ cred_type }}): {{ cred_value }}
+Method: {{ method or 'auto-select' }}
+Task ID: {{ task_id }}
+
+Use the exact credential value above; do not substitute placeholders. Try psexec, then wmiexec or evil-winrm if needed. If access succeeds, run secretsdump to harvest credentials. Call report_lateral_success(task_id, target, method, new_credentials, new_hashes) with any credentials/hashes found as JSON. If access fails, call report_lateral_failed(task_id, target, reason).

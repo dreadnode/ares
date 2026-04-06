@@ -915,6 +915,60 @@ class RedisTaskQueue(BaseTaskQueue):
                 self._handle_connection_error(e)
             raise
 
+    async def increment_token_usage(
+        self,
+        operation_id: str,
+        input_tokens: int,
+        output_tokens: int,
+        model: str = "",
+    ) -> None:
+        """Atomically increment token usage counters for an operation.
+
+        Uses Redis HINCRBY for lock-free, crash-safe accumulation across workers.
+        The model field is stored as-is (last writer wins — all workers in an op
+        typically use the same model).
+        """
+        if not self._connected:
+            await self.connect()
+
+        key = f"ares:op:{operation_id}:token_usage"
+        try:
+            pipe = self.redis.pipeline()
+            pipe.hincrby(key, "input_tokens", input_tokens)
+            pipe.hincrby(key, "output_tokens", output_tokens)
+            if model:
+                pipe.hset(key, "model", model)
+            await pipe.execute()
+        except Exception as e:
+            # Best-effort — don't fail the task over accounting
+            logger.debug(f"Failed to increment token usage: {e}")
+
+    async def get_token_usage(self, operation_id: str) -> dict[str, Any] | None:
+        """Read aggregated token usage for an operation."""
+        if not self._connected:
+            await self.connect()
+
+        key = f"ares:op:{operation_id}:token_usage"
+        try:
+            data = await self.redis.hgetall(key)
+            if not data:
+                return None
+
+            # Redis returns bytes or strings depending on decode_responses
+            def _val(v: Any) -> str:
+                return v.decode() if isinstance(v, bytes) else str(v)
+
+            return {
+                "input_tokens": int(_val(data.get(b"input_tokens", data.get("input_tokens", 0)))),
+                "output_tokens": int(
+                    _val(data.get(b"output_tokens", data.get("output_tokens", 0)))
+                ),
+                "model": _val(data.get(b"model", data.get("model", ""))),
+            }
+        except Exception as e:
+            logger.debug(f"Failed to read token usage: {e}")
+            return None
+
     async def get_heartbeat(self, agent_name: str) -> dict[str, Any] | None:
         """
         Get agent heartbeat data.

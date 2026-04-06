@@ -1265,6 +1265,73 @@ class TestGeneratePromptFromTaskTechniqueEnforcement:
         assert "1. find_delegation" in prompt
         assert "2. find_trusts" in prompt or "find_trusts(...)" in prompt
 
+    def test_generate_prompt_handles_cross_forest_trust_key_without_resolved_sids(self):
+        """Test trust-key prompts include SID resolution when no SIDs are pre-resolved."""
+        from ares.core.models import SharedRedTeamState, Target
+        from ares.core.task_queue import TaskMessage
+        from ares.core.worker import generate_prompt_from_task
+
+        state = SharedRedTeamState(
+            operation_id="op-trust-key",
+            target=Target(ip="192.168.58.10", domain="contoso.local"),
+        )
+
+        task = TaskMessage(
+            task_id="task-trust-key-001",
+            task_type="exploit",
+            source_agent="orchestrator",
+            target_agent="privesc",
+            payload={
+                "tool": "extract_trust_key",
+                "target": "192.168.58.240",
+                "domain": "contoso.local",
+                "trusted_domain": "fabrikam.local",
+                "dc_ip": "192.168.58.240",
+                "username": "Administrator",
+                "password": "31d6cfe0d16ae931b73c59d7e0c089c0",  # pragma: allowlist secret
+                "use_hash": True,
+            },
+        )
+
+        prompt = generate_prompt_from_task(task, state)
+
+        assert "CROSS-FOREST TRUST KEY EXTRACTION" in prompt
+        assert "SID RESOLUTION" in prompt
+        assert "source_sid: get_sid(domain='contoso.local'" in prompt
+        assert "target_sid: get_sid(domain='fabrikam.local'" in prompt
+        assert "IMPORTANT: get_sid supports pass-the-hash" in prompt
+
+    def test_generate_prompt_handles_adcs_esc_payload_with_template_field(self):
+        """Test ADCS ESC prompt generation accepts payload['template'] without crashing."""
+        from ares.core.models import SharedRedTeamState, Target
+        from ares.core.task_queue import TaskMessage
+        from ares.core.worker import generate_prompt_from_task
+
+        state = SharedRedTeamState(
+            operation_id="op-adcs-esc",
+            target=Target(ip="192.168.58.10", domain="contoso.local"),
+        )
+
+        task = TaskMessage(
+            task_id="task-adcs-esc8-001",
+            task_type="exploit",
+            source_agent="orchestrator",
+            target_agent="privesc",
+            payload={
+                "vuln_type": "adcs_esc8",
+                "target": "dc01.contoso.local",
+                "ca_server": "ca01.contoso.local",
+                "template": "DomainController",
+                "domain": "contoso.local",
+            },
+        )
+
+        prompt = generate_prompt_from_task(task, state)
+
+        assert "ADCS ADCS_ESC8 EXPLOITATION" in prompt
+        assert "CA Server: ca01.contoso.local" in prompt
+        assert "Template: DomainController" in prompt
+
 
 class TestUpdateEtcHosts:
     """Tests for _update_etc_hosts function."""

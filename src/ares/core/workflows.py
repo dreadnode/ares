@@ -440,6 +440,8 @@ async def exploitation_workflow(
                 logger.info("Exploitation yielded credentials, triggering expansion loop")
                 await credential_expansion_loop(dispatcher, max_iterations=5)
 
+    _last_logged_undominated: set[str] = set()
+
     while True:
         elapsed = asyncio.get_event_loop().time() - start_time
         if elapsed > max_runtime:
@@ -453,10 +455,13 @@ async def exploitation_workflow(
             # Multi-forest mode: continue exploitation until ALL forests are dominated
             if get_multi_forest_mode() and not state.all_forests_dominated():
                 undominated = state.get_undominated_forests()
-                logger.info(
-                    f"DA achieved but multi-forest mode active - "
-                    f"{len(undominated)} forest(s) remain: {', '.join(undominated)}"
-                )
+                undominated_set = set(undominated)
+                if undominated_set != _last_logged_undominated:
+                    logger.info(
+                        f"DA achieved but multi-forest mode active - "
+                        f"{len(undominated)} forest(s) remain: {', '.join(undominated)}"
+                    )
+                    _last_logged_undominated = undominated_set
                 # Don't break - fall through to vuln dispatch logic below
                 # This allows the workflow to continue exploiting to reach other forests
             elif get_multi_forest_mode():
@@ -687,6 +692,22 @@ async def _wait_with_da_check(
     return {"success": False, "error": "Task timed out", "retryable": True}
 
 
+def _get_exploit_wait_timeout(vuln_type: str) -> float:
+    """Return workflow wait timeout for an exploit task.
+
+    The workflow-level wait must not be shorter than the realistic execution
+    time of the underlying exploit path, or the orchestrator will mark slow
+    but still-running tasks as timed out and keep retrying them.
+    """
+    vuln_type_lower = (vuln_type or "").lower()
+
+    if vuln_type_lower == "mssql_cross_forest_pivot":
+        return 900.0
+    if vuln_type_lower.startswith("mssql_"):
+        return 600.0
+    return 180.0
+
+
 async def _exploit_vulnerability(
     dispatcher: RedTeamDispatcher,
     vuln: dict[str, Any],
@@ -746,10 +767,15 @@ async def _exploit_vulnerability(
         logger.info(f"Exploit task for {vuln_type} deferred to background queue")
         return {"success": True, "deferred": True}
 
-    # Wait for task completion with periodic DA checks
-    # Uses chunked waits to detect DA achievement and abandon stale tasks early
-    # Timeout reduced from 1200s (20min) to 180s (3min) to prevent workflow blocking
-    return await _wait_with_da_check(dispatcher, task_id, timeout=180.0, check_interval=10.0)
+    # Wait for task completion with periodic DA checks.
+    # Use per-vulnerability budgets so slow MSSQL exploit chains are not
+    # declared timed out while they are still legitimately running.
+    return await _wait_with_da_check(
+        dispatcher,
+        task_id,
+        timeout=_get_exploit_wait_timeout(vuln_type),
+        check_interval=10.0,
+    )
 
 
 __all__ = [

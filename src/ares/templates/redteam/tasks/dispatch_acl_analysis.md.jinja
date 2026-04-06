@@ -1,0 +1,7 @@
+Analyze ACLs and find attack paths:
+Target User: {{ target_user }}
+Domain: {{ domain }}
+Find Path To: {{ find_path_to }}
+Task ID: {{ task_id }}
+
+Use provided ACL/BloodHound context if available. If pathing data is missing, request BloodHound analysis from recon/orchestrator. Execute any viable ACL abuse attacks. Report the result using task_complete.

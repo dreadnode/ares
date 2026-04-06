@@ -322,12 +322,13 @@ class MonitoringMixin:
             else:
                 task_timeout = effective_timeout
 
-            # MSSQL exploitation chains take longer (6+ tool calls, linked server ops)
+            # Exploit tasks are LLM-driven: queue wait (4+ min) + execution (4-5 min)
+            # Don't stale-clean them prematurely or results get orphaned
             vuln_type = (task_info.params.get("vuln_type") or "") if task_info.params else ""
             if vuln_type == "mssql_cross_forest_pivot":
-                task_timeout = max(task_timeout, 720)  # 12 min for cross-forest (multi-hop)
-            elif vuln_type.startswith("mssql_"):
-                task_timeout = max(task_timeout, 480)  # 8 min for standard MSSQL
+                task_timeout = max(task_timeout, 900)  # 15 min for cross-forest (multi-hop)
+            elif task_info.task_type == "exploit":
+                task_timeout = max(task_timeout, 600)  # 10 min for all exploits (queue + LLM)
 
             if age_seconds > task_timeout:
                 stale_task_ids.append(task_id)
@@ -418,12 +419,12 @@ class MonitoringMixin:
             else:
                 task_timeout = stale_timeout
 
-            # MSSQL exploitation chains take longer (6+ tool calls, linked server ops)
+            # Exploit tasks are LLM-driven: queue wait (4+ min) + execution (4-5 min)
             vuln_type = (task_info.params.get("vuln_type") or "") if task_info.params else ""
             if vuln_type == "mssql_cross_forest_pivot":
-                task_timeout = max(task_timeout, 720)
-            elif vuln_type.startswith("mssql_"):
-                task_timeout = max(task_timeout, 480)
+                task_timeout = max(task_timeout, 900)
+            elif task_info.task_type == "exploit":
+                task_timeout = max(task_timeout, 600)
 
             if age_seconds > task_timeout:
                 stale_task_ids.append(task_id)

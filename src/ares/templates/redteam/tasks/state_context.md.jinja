@@ -1,0 +1,44 @@
+{% if state %}
+
+
+## STATE
+{% if state.all_domains %}
+
+Domains: {{ state.all_domains[:5] | join(', ') }}
+{% endif %}
+{% if state.all_credentials %}
+
+### Credentials ({{ state.all_credentials | length }})
+{% for cred in state.all_credentials[:8] %}
+  {{ cred.domain }}\{{ cred.username }}:{{ cred.password }}{{ " [ADMIN]" if cred.is_admin else "" }}
+{% endfor %}
+{% endif %}
+{% if cracked_hashes %}
+
+### Cracked ({{ cracked_hashes | length }})
+{% for h in cracked_hashes[:5] %}
+  {{ h.domain }}\{{ h.username }}:{{ h.cracked_password }}
+{% endfor %}
+{% endif %}
+{% if dc_hosts %}
+
+### DCs ({{ dc_hosts | length }})
+{% for h in dc_hosts[:3] %}
+  {{ h.ip }} ({{ h.hostname or '?' }})
+{% endfor %}
+{% endif %}
+{% if other_hosts and other_hosts | length <= 5 %}
+
+### Other hosts ({{ other_hosts | length }})
+{% for h in other_hosts %}
+  {{ h.ip }} ({{ h.hostname or '?' }})
+{% endfor %}
+{% endif %}
+{% if unexploited_vulns %}
+
+### Pending vulns ({{ unexploited_vulns | length }})
+{% for vuln in unexploited_vulns[:3] %}
+  {{ vuln.vuln_type }} on {{ vuln.target }}
+{% endfor %}
+{% endif %}
+{% endif %}

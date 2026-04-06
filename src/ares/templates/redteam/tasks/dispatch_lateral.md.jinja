@@ -1,0 +1,7 @@
+Perform lateral movement to {{ target_host }}:
+Username: {{ domain }}\{{ username }}
+Credential ({{ cred_type }}): {{ cred_value }}
+Method: {{ method or 'auto-select' }}
+Task ID: {{ task_id }}
+
+Use the exact credential value above; do not substitute placeholders. Try to establish access using psexec, evil-winrm, or wmi. If successful, run secretsdump to harvest credentials. Report the result using task_complete.

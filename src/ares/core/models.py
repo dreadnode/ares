@@ -1087,14 +1087,14 @@ class SharedRedTeamState:
         # Get all foreign domains (from explicit trusts AND from host discovery)
         foreign_domains = self._get_foreign_domains()
 
-        logger.info(
+        logger.debug(
             f"all_forests_dominated check: foreign_domains={foreign_domains}, "
             f"da_domains={self.domain_admin_domains}"
         )
 
         if not foreign_domains:
             # No foreign domains discovered yet - only have initial domain
-            logger.info("all_forests_dominated: True (no foreign domains)")
+            logger.debug("all_forests_dominated: True (no foreign domains)")
             return True
 
         da_domains_lower = {d.lower() for d in self.domain_admin_domains}
@@ -1103,10 +1103,10 @@ class SharedRedTeamState:
             foreign_lower = foreign.lower()
             # Check if we have DA on this foreign domain
             if foreign_lower not in da_domains_lower:
-                logger.info(f"all_forests_dominated: False (undominated: {foreign})")
+                logger.debug(f"all_forests_dominated: False (undominated: {foreign})")
                 return False
 
-        logger.info("all_forests_dominated: True (all foreign domains dominated)")
+        logger.debug("all_forests_dominated: True (all foreign domains dominated)")
         return True
 
     def get_undominated_forests(self) -> list[str]:
@@ -1166,8 +1166,7 @@ class SharedRedTeamState:
         for td in self.trusted_domains:
             validated_domains.add(td.lower())
 
-        # Log inputs for debugging
-        logger.info(
+        logger.debug(
             f"_get_foreign_domains called: target={target_domain}, "
             f"all_domains={self.all_domains}, trusted_domains={self.trusted_domains}, "
             f"validated_domains={validated_domains}"
@@ -1216,7 +1215,7 @@ class SharedRedTeamState:
                 continue
             foreign.add(vd)
 
-        logger.info(f"_get_foreign_domains result: {foreign}")
+        logger.debug(f"_get_foreign_domains result: {foreign}")
         return foreign
 
     # =========================================================================

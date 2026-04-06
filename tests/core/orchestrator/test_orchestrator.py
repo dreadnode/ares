@@ -962,6 +962,131 @@ class TestAutoGoldenTicket:
         dispatcher._auto_dispatch_trust_key_extraction.assert_called()
 
     @pytest.mark.asyncio
+    async def test_auto_golden_ticket_retries_failed_no_sid_with_cached_sid(self):
+        """Manual SID injection should unblock a prior failed_no_sid golden ticket."""
+        from unittest.mock import patch
+
+        from ares.core.models import Hash
+        from ares.core.orchestrator import _auto_golden_ticket
+
+        state = SharedRedTeamState(
+            operation_id="op-gt-cached-sid-retry",
+            target=Target(ip="192.168.58.30", domain="contoso.local"),
+        )
+        state.all_hashes.append(
+            Hash(
+                username="krbtgt",
+                hash_value="aad3b435b51404eeaad3b435b51404ee:31d6cfe0d16ae931b73c59d7e0c089c0",
+                hash_type="ntlm",
+                domain="contoso.local",
+                source="secretsdump",
+            )
+        )
+        state.domain_sids["contoso.local"] = "S-1-5-21-1234567890-1234567890-1234567890"
+        state.golden_tickets.append(
+            {
+                "domain": "contoso.local",
+                "status": "failed_no_sid",
+                "created_at": "2026-04-06T00:00:00+00:00",
+            }
+        )
+
+        dispatcher = SimpleNamespace(shared_state=state)
+        dispatcher._find_domain_controller_ip = MagicMock(return_value="192.168.58.31")
+        dispatcher._task_queue = None
+        dispatcher.announce_golden_ticket = AsyncMock()
+        dispatcher._auto_dispatch_trust_key_extraction = AsyncMock()
+
+        captured_cmds = []
+
+        def mock_run_tool(cmd, timeout_seconds=60):
+            captured_cmds.append(cmd)
+            if "impacket-ticketer" in str(cmd):
+                return ("Saving ticket in Administrator.ccache", "", 0)
+            return ("", "", 0)
+
+        with patch("ares.tools.red.common.run_tool", side_effect=mock_run_tool):
+            task = asyncio.create_task(_auto_golden_ticket(dispatcher, check_interval=0.1))
+            await asyncio.sleep(0.2)
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
+        assert captured_cmds, "Expected golden ticket generation to run"
+        assert all("impacket-lookupsid" not in str(cmd) for cmd in captured_cmds)
+        assert any(ticket.get("status") == "success" for ticket in state.golden_tickets)
+
+    @pytest.mark.asyncio
+    async def test_auto_golden_ticket_uses_ldap_after_lookupsid_timeout(self, monkeypatch):
+        """Repeated lookupsid timeouts should fall through to LDAP SID lookup."""
+        from unittest.mock import patch
+
+        from ares.core.models import Credential, Hash
+        from ares.core.orchestrator import _auto_golden_ticket
+        from ares.core.orchestrator._orchestrator import TransientToolError
+
+        state = SharedRedTeamState(
+            operation_id="op-gt-ldap-timeout",
+            target=Target(ip="192.168.58.32", domain="contoso.local"),
+        )
+        state.all_hashes.append(
+            Hash(
+                username="krbtgt",
+                hash_value="aad3b435b51404eeaad3b435b51404ee:31d6cfe0d16ae931b73c59d7e0c089c0",
+                hash_type="ntlm",
+                domain="contoso.local",
+                source="secretsdump",
+            )
+        )
+        state.all_credentials.append(
+            Credential(
+                username="testuser",
+                password="TestPass123!",  # pragma: allowlist secret
+                domain="contoso.local",
+                source="manual",
+            )
+        )
+
+        dispatcher = SimpleNamespace(shared_state=state)
+        dispatcher._find_domain_controller_ip = MagicMock(return_value="192.168.58.33")
+        dispatcher._task_queue = None
+        dispatcher.announce_golden_ticket = AsyncMock()
+        dispatcher._auto_dispatch_trust_key_extraction = AsyncMock()
+
+        ldap_lookup = AsyncMock(return_value="S-1-5-21-2222222222-2222222222-2222222222")
+        monkeypatch.setattr(
+            "ares.core.orchestrator._orchestrator._run_lookupsid_with_retry",
+            AsyncMock(side_effect=TransientToolError("timed out")),
+        )
+        monkeypatch.setattr(
+            "ares.core.orchestrator._orchestrator._get_domain_sid_via_ldap",
+            ldap_lookup,
+        )
+
+        with patch(
+            "ares.tools.red.common.run_tool",
+            return_value=("Saving ticket in Administrator.ccache", "", 0),
+        ):
+            task = asyncio.create_task(_auto_golden_ticket(dispatcher, check_interval=0.1))
+            await asyncio.sleep(0.2)
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
+        ldap_lookup.assert_awaited_once_with(
+            "192.168.58.33",
+            "contoso.local",
+            state.all_credentials[0],
+            None,
+        )
+        assert state.domain_sids["contoso.local"] == "S-1-5-21-2222222222-2222222222-2222222222"
+        assert any(ticket.get("status") == "success" for ticket in state.golden_tickets)
+
+    @pytest.mark.asyncio
     async def test_auto_golden_ticket_trust_key_uses_aes_when_available(self):
         """Test that trust key AES256 is extracted and stored from child DCSync."""
         from unittest.mock import patch
@@ -1513,6 +1638,55 @@ class TestHashCrackingPriority:
         call_kwargs = dispatcher.request_crack.call_args.kwargs
         assert call_kwargs["priority"] == 5
 
+    @pytest.mark.asyncio
+    async def test_auto_credential_access_applies_foreign_idle_backoff(self, monkeypatch):
+        """Foreign-domain idle polling should sleep before rechecking state."""
+        from ares.core.models import Credential, Host
+        from ares.core.orchestrator._orchestrator import _auto_credential_access, _make_cred_key
+
+        state = SharedRedTeamState(
+            operation_id="op-test-foreign-backoff",
+            target=Target(ip="192.168.58.40", domain="north.sevenkingdoms.local"),
+        )
+        state.all_hosts.append(
+            Host(ip="192.168.58.40", hostname="dc01.north.sevenkingdoms.local", is_dc=True)
+        )
+        state.trusted_domains.append("essos.local")
+        state.all_credentials.append(
+            Credential(
+                username="arya",
+                password="Needle123!",  # pragma: allowlist secret
+                domain="north.sevenkingdoms.local",
+                source="manual",
+            )
+        )
+        state.processed_cred_expansion.add(
+            _make_cred_key("arya", "north.sevenkingdoms.local", "Needle123!")
+        )
+        state.processed_asrep_domains.add("essos.local")
+
+        dispatcher = SimpleNamespace(
+            shared_state=state,
+            wait_for_credential_access_signal=AsyncMock(),
+        )
+
+        sleep_calls: list[float] = []
+
+        async def fake_sleep(delay: float) -> None:
+            sleep_calls.append(delay)
+            raise asyncio.CancelledError
+
+        monkeypatch.setattr(
+            "ares.core.orchestrator._orchestrator.get_multi_forest_mode", lambda: True
+        )
+        monkeypatch.setattr("ares.core.orchestrator._orchestrator.asyncio.sleep", fake_sleep)
+
+        await _auto_credential_access(dispatcher, check_interval=0.5)
+
+        assert sleep_calls
+        assert sleep_calls[0] == pytest.approx(0.25)
+        dispatcher.wait_for_credential_access_signal.assert_not_awaited()
+
 
 class TestDirectNmapNetBIOSEnrichment:
     """Tests for NetBIOS hostname enrichment in direct nmap scan."""
@@ -2018,3 +2192,82 @@ class TestAutoCrossForestPivot:
 
         # Should have done MSSQL re-scan
         assert mssql_scanned
+
+    @pytest.mark.asyncio
+    async def test_cross_forest_pivot_submits_follow_on_secretsdump_with_parent_vuln(
+        self, monkeypatch
+    ):
+        """Successful foreign MSSQL exploits should trigger direct secretsdump with parent vuln."""
+        from ares.core.models import Credential, Host, VulnerabilityInfo
+        from ares.core.orchestrator import _auto_cross_forest_pivot
+
+        monkeypatch.setattr(
+            "ares.core.orchestrator._orchestrator.get_multi_forest_mode",
+            lambda: True,
+        )
+
+        state = SharedRedTeamState(
+            operation_id="op-test-cfp-follow-on",
+            target=Target(ip="192.168.58.10", domain="contoso.local"),
+        )
+        state.has_domain_admin = True
+        state.domain_admin_domains = ["contoso.local"]
+        state.domain_controllers["fabrikam.local"] = "192.168.58.20"
+        state.add_host(
+            Host(
+                ip="192.168.58.30",
+                hostname="sql01.fabrikam.local",
+                services=["1433/tcp mssql"],
+            )
+        )
+        state.all_credentials.append(
+            Credential(
+                username="Administrator",
+                password="P@ssw0rd!",  # pragma: allowlist secret
+                domain="contoso.local",
+                source="test",
+                is_admin=True,
+            )
+        )
+        vuln = VulnerabilityInfo(
+            vuln_id="mssql_impersonation_192.168.58.30",
+            vuln_type="mssql_impersonation",
+            target="192.168.58.30",
+            details={"hostname": "sql01.fabrikam.local"},
+            discovered_by="test",
+        )
+        state.discovered_vulnerabilities[vuln.vuln_id] = vuln
+        state.exploited_vulnerabilities.add(vuln.vuln_id)
+
+        submitted_payloads: list[dict] = []
+
+        async def mock_submit_task(*, task_type, target_role, payload, source_agent, priority):
+            submitted_payloads.append(
+                {
+                    "task_type": task_type,
+                    "target_role": target_role,
+                    "payload": payload,
+                    "source_agent": source_agent,
+                    "priority": priority,
+                }
+            )
+            state.domain_admin_domains.append("fabrikam.local")
+            state.completed = True
+            return "task-secretsdump-1"
+
+        dispatcher = SimpleNamespace(shared_state=state)
+        dispatcher._task_queue = SimpleNamespace(
+            submit_task=AsyncMock(side_effect=mock_submit_task)
+        )
+        dispatcher._throttled_submit_task = AsyncMock()
+        dispatcher.scan_hosts_for_mssql = AsyncMock(return_value=0)
+        dispatcher._find_credential_id = MagicMock(return_value=("cred-1", 2))
+        dispatcher._find_sql_credentials = MagicMock(return_value=[])
+
+        await _auto_cross_forest_pivot(dispatcher, check_interval=0.05)
+
+        assert submitted_payloads, "Expected a direct follow-on task submission"
+        secretsdump = submitted_payloads[0]["payload"]
+        assert submitted_payloads[0]["task_type"] == "credential_access"
+        assert secretsdump["reason"] == "mssql_exploit_secretsdump"
+        assert secretsdump["parent_vuln_id"] == vuln.vuln_id

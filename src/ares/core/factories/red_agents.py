@@ -755,7 +755,7 @@ def create_role_hooks(
                 # Multi-forest mode: don't stop if other forests remain undominated
                 if get_multi_forest_mode() and not shared_state.all_forests_dominated():
                     undominated = shared_state.get_undominated_forests()
-                    logger.info(
+                    logger.debug(
                         f"🌲 DA achieved but multi-forest mode active - "
                         f"{len(undominated)} forest(s) remain: {', '.join(undominated)}"
                     )

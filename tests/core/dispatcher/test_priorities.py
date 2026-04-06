@@ -10,6 +10,8 @@ Priority scheme rationale:
 
 from __future__ import annotations
 
+from unittest.mock import AsyncMock
+
 import pytest
 
 from ares.core.dispatcher import RedTeamDispatcher
@@ -903,6 +905,42 @@ class TestThrottleBypass:
         dispatcher = RedTeamDispatcher()
 
         assert "mssql_impersonation" not in dispatcher.CRITICAL_PATH_VULN_TYPES
+
+    @pytest.mark.asyncio
+    async def test_multi_forest_mssql_impersonation_bypasses_hard_cap_cap(self, monkeypatch):
+        """Multi-forest MSSQL critical path should bypass the normal hard-cap bypass ceiling."""
+        dispatcher = RedTeamDispatcher()
+        dispatcher._shared_state = SharedRedTeamState(operation_id="op-test-mssql-hard-cap")
+        dispatcher._shared_state.domain_admin_domains = ["child.contoso.local"]
+        dispatcher._shared_state.all_domains = [
+            "contoso.local",
+            "child.contoso.local",
+            "fabrikam.local",
+        ]
+        dispatcher._shared_state.all_forests_dominated = lambda: False
+
+        monkeypatch.setattr(
+            "ares.core.config.get_multi_forest_mode",
+            lambda: True,
+            raising=False,
+        )
+        monkeypatch.setattr(
+            "ares.core.dispatcher.throttling.get_max_concurrent_tasks",
+            lambda: 8,
+            raising=False,
+        )
+
+        dispatcher._get_pending_count_by_role = AsyncMock(return_value=0)
+        dispatcher._get_llm_task_count = AsyncMock(return_value=20)
+
+        should_drop = await dispatcher._check_llm_throttle_drop(
+            task_type="exploit",
+            target_role="privesc",
+            reason="max concurrent tasks",
+            payload={"vuln_type": "mssql_impersonation"},
+        )
+
+        assert should_drop is False
 
     def test_non_delegation_privesc_enum_does_not_bypass(self):
         """privesc_enumeration without delegation technique should NOT bypass."""

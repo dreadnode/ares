@@ -1,0 +1,28 @@
+Run privilege escalation enumeration:
+Domain: {{ domain }}
+DC IP: {{ dc_ip or 'N/A' }}
+{% if dc_warning %}⚠️ {{ dc_warning }}
+{% endif %}
+Username: {{ username }}
+Password: {{ password }}
+Task ID: {{ task_id }}
+
+**EXECUTE THESE ENUMERATION TECHNIQUES:**
+{% for instruction in technique_instructions %}
+{{ instruction }}
+{% endfor %}
+
+**WORKFLOW:**
+1. Execute each enumeration technique
+2. If CONSTRAINED DELEGATION is found for the current user ({{ username }}):
+   a. Run s4u_attack to get Administrator ticket for the target SPN
+   b. If ticket obtained, IMMEDIATELY use it:
+      - Set KRB5CCNAME to the .ccache file path
+      - Run secretsdump with -k -no-pass against the target DC to dump hashes
+      - Example: secretsdump -k -no-pass -dc-ip {{ dc_ip }} {{ domain }}/Administrator@dc01.{{ domain }}
+   c. Report the Administrator hash if obtained - THIS IS DOMAIN ADMIN!
+3. If UNCONSTRAINED DELEGATION is found, report it for coercion attack
+4. Mark task complete with findings
+
+**CRITICAL:** When you get an S4U ticket, you MUST use it immediately with secretsdump!
+The ticket is your key to Domain Admin - don't stop after getting it.

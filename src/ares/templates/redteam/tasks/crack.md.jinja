@@ -1,0 +1,7 @@
+Crack this hash for user {{ username }}@{{ domain }}:
+Hash: {{ hash_value }}
+Type: {{ hash_type }}
+Wordlist: {{ wordlist }}
+Task ID: {{ task_id }}
+
+Use hashcat or john to crack. When cracked, call report_cracked_credential(task_id, username, password, hash, domain). If cracking fails, call report_crack_failed(task_id, hash, reason).

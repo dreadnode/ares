@@ -55,7 +55,8 @@ class ThrottlingMixin:
     # - unconstrained_delegation: TGT capture → DCSync → DA
     # - esc1, esc4, esc8: ADCS attacks → domain user cert → DA
     # - krbtgt_hash: already have DA material
-    # MSSQL: Only critical in multi-forest mode (may be the ONLY path to foreign forest)
+    # - mssql_cross_forest_pivot: linked server RCE into foreign forest (may be ONLY path)
+    # MSSQL (other): Only critical in multi-forest mode (may be the ONLY path to foreign forest)
     CRITICAL_PATH_VULN_TYPES = frozenset(
         {
             "constrained_delegation",
@@ -67,12 +68,15 @@ class ThrottlingMixin:
             "adcs_esc1",
             "adcs_esc4",
             "adcs_esc8",
+            "mssql_cross_forest_pivot",
         }
     )
 
     # MSSQL exploit subtypes - elevated to critical path in multi-forest mode only
     # (cross-forest Kerberos is broken in impacket, MSSQL linked servers may be the only pivot)
-    MSSQL_VULN_TYPES = frozenset({"mssql_impersonation", "mssql_linked_server", "mssql_linked"})
+    MSSQL_VULN_TYPES = frozenset(
+        {"mssql_impersonation", "mssql_linked_server", "mssql_linked", "mssql_cross_forest_pivot"}
+    )
 
     # ESC8-related techniques that should bypass hard cap when dispatched as coercion tasks
     # ESC8 is a critical path to DA via ADCS web enrollment relay
@@ -219,10 +223,17 @@ class ThrottlingMixin:
                 t.lower() in self.ESC8_COERCION_TECHNIQUES for t in techniques
             )
 
+            multi_forest_mssql_critical = (
+                task_type in self.CRITICAL_PATH_TASK_TYPES
+                and vuln_type in self.MSSQL_VULN_TYPES
+                and vuln_type not in self.CRITICAL_PATH_VULN_TYPES
+                and is_critical_exploit
+            )
+
             if is_critical_exploit or is_delegation_enum or is_esc8_coercion:
                 # Count how many tasks are already bypassing hard cap
                 bypass_count = llm_count - hard_cap
-                if bypass_count >= self.MAX_BYPASS_TASKS:
+                if bypass_count >= self.MAX_BYPASS_TASKS and not multi_forest_mssql_critical:
                     # Already have MAX_BYPASS_TASKS above hard cap - defer this one too
                     if is_critical_exploit:
                         bypass_reason = f"{task_type}/{vuln_type}"
@@ -242,6 +253,12 @@ class ThrottlingMixin:
                     bypass_reason = f"{task_type}/esc8_relay"
                 else:
                     bypass_reason = f"{task_type}/find_delegation"
+                if multi_forest_mssql_critical and bypass_count >= self.MAX_BYPASS_TASKS:
+                    logger.warning(
+                        f"Throttle HARD CAP: {llm_count} running (limit: {max_tasks}, hard cap: {hard_cap}) - "
+                        f"ALLOWING {bypass_reason} (multi-forest MSSQL critical path bypassed cap)"
+                    )
+                    return False
                 logger.info(
                     f"Throttle HARD CAP: {llm_count} running (limit: {max_tasks}, hard cap: {hard_cap}) - "
                     f"ALLOWING {bypass_reason} (high-value DA path, bypass {bypass_count + 1}/{self.MAX_BYPASS_TASKS})"

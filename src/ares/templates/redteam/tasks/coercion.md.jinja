@@ -1,0 +1,25 @@
+Start network coercion:
+**NETWORK INTERFACE: `{{ interface }}`** (auto-detected for this environment)
+Techniques: {{ techniques | join(', ') }}
+Duration: {{ duration }}s
+Task ID: {{ task_id }}
+
+{% if attack_type == "esc8" %}
+**ESC8 RELAY** - ADCS: {{ adcs_server }}, Coerce DC: {{ coerce_hostname or coerce_target }}
+
+{% elif attack_type == "ldaps_relay" %}
+**LDAPS RELAY** - Coerce DC: {{ coerce_hostname or coerce_target }}
+
+{% endif %}
+**CRITICAL: When calling start_responder or start_mitm6, pass `interface="{{ interface }}"` exactly.**
+Do NOT guess interface names (e.g., eth0) - always use the auto-detected value above.
+
+**STEP BUDGET: ~30 steps max. Work efficiently!**
+
+**HARD LIMITS:**
+- Each coercion technique: max 2 attempts per target
+- 'connection refused'/'timed out'/'RPC unavailable' → SKIP target
+- Track attempts - never repeat same target+technique
+
+**CALL task_complete WHEN:**
+- All targets attempted | Relay succeeded | Duration exceeded

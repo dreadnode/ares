@@ -1,0 +1,18 @@
+**RECONNAISSANCE TASK**
+
+Target IPs: {{ targets_str }}
+Domain: {{ domain or 'N/A' }}
+DC IP: {{ dc_ip or 'N/A' }}
+{% if cred_line %}{{ cred_line }}
+{% endif %}
+Reason: {{ reason or 'general recon' }}
+Task ID: {{ task_id }}
+
+**EXECUTE THESE TECHNIQUES:**
+{{ techniques_section }}
+
+**IMPORTANT:**
+- Parse and record ALL discovered information (hosts, services, users, shares)
+- The system will automatically extract discovered data from tool outputs
+- Report any vulnerabilities or interesting findings
+- Mark task complete when reconnaissance is finished

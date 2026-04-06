@@ -1,0 +1,7 @@
+Start network coercion:
+Interface: {{ interface }}
+Techniques: {{ techniques | join(', ') }}
+Duration: {{ duration }}s
+Task ID: {{ task_id }}
+
+Start responder/mitm6 and capture any hashes. Report captured credentials using task_complete.

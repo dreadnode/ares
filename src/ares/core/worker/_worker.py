@@ -172,7 +172,12 @@ def _is_rate_limit_error(exc: Exception) -> bool:
 
 
 def _extract_structured_payload(result_text: str) -> dict[str, Any] | None:
-    """Extract structured JSON payload from agent output if present."""
+    """Extract structured JSON payload from agent output if present.
+
+    NOTE: credential/hash fields from LLM-generated JSON are intentionally
+    ignored. Only tool code (via SharedRedTeamState) can add credentials and
+    hashes to state. This prevents LLM hallucination from polluting state.
+    """
     match = re.search(r"```json\\s*(\\{.*?\\})\\s*```", result_text, re.DOTALL)
     if not match:
         return None
@@ -182,7 +187,12 @@ def _extract_structured_payload(result_text: str) -> dict[str, Any] | None:
         return None
     if not isinstance(payload, dict):
         return None
-    return payload
+    # Strip credential/hash fields — LLM must not inject these into state.
+    # Only tool-populated SharedRedTeamState (via discovered_credentials/
+    # discovered_hashes from _serialize_state_discoveries) is authoritative.
+    for key in ("credential", "credentials", "hash", "hashes"):
+        payload.pop(key, None)
+    return payload or None
 
 
 def _extract_asrep_hashes(result_text: str) -> list[dict[str, str]]:
@@ -248,6 +258,8 @@ class RedisWorkerAgent:
         self._running = False
         self._current_task: str | None = None
         self._tasks_completed = 0
+        self._total_input_tokens = 0
+        self._total_output_tokens = 0
         self._pointer_switched = False
         self._run_agent_in_thread = self.role == AgentRole.ACL
         self._state_refresh_client = None
@@ -811,12 +823,30 @@ class RedisWorkerAgent:
             # Extract token usage for metrics and tracing
             usage_metrics = self._extract_usage(result)
             if usage_metrics:
+                in_tok = usage_metrics["input_tokens"]
+                out_tok = usage_metrics["output_tokens"]
                 # Add to span for Tempo/OTel (follows OpenTelemetry GenAI semantic conventions)
-                _task_span.set_attribute("gen_ai.usage.input_tokens", usage_metrics["input_tokens"])
-                _task_span.set_attribute(
-                    "gen_ai.usage.output_tokens", usage_metrics["output_tokens"]
-                )
+                _task_span.set_attribute("gen_ai.usage.input_tokens", in_tok)
+                _task_span.set_attribute("gen_ai.usage.output_tokens", out_tok)
                 _task_span.set_attribute("gen_ai.usage.total_tokens", usage_metrics["total_tokens"])
+                # Accumulate to Redis counters for operation-level cost tracking
+                model_name = getattr(getattr(result, "agent", None), "model", "") or ""
+                await self.task_queue.increment_token_usage(
+                    operation_id=self.operation_id or "",
+                    input_tokens=in_tok,
+                    output_tokens=out_tok,
+                    model=model_name,
+                )
+                # Local running totals for periodic summary
+                self._total_input_tokens += in_tok
+                self._total_output_tokens += out_tok
+                total = self._total_input_tokens + self._total_output_tokens
+                logger.opt(colors=True).info(
+                    f"<cyan>💰 [{self.agent_name}] tokens: "
+                    f"{in_tok + out_tok:,} this task | "
+                    f"{total:,} cumulative (in: {self._total_input_tokens:,} "
+                    f"out: {self._total_output_tokens:,})</cyan>"
+                )
 
             result_payload: dict[str, Any] = {"output": result_text, "task_type": task.task_type}
             # Include usage in result payload for downstream aggregation

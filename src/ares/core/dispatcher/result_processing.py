@@ -59,7 +59,7 @@ class ResultProcessingMixin:
 
         # Look up host by IP or hostname
         target_lower = target_ip.lower()
-        logger.info(
+        logger.debug(
             f"_resolve_domain_from_target_host: target={target_ip}, "
             f"hosts=[{', '.join(f'{h.ip}:{h.hostname}' for h in self.shared_state.all_hosts[:5])}...]"
         )

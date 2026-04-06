@@ -1859,6 +1859,32 @@ async def runtime(
                     detail += f" - {gt_path}"
                 print(detail)
 
+        # Token usage & estimated cost (from Redis counters set by workers)
+        from ares.core.task_queue import RedisTaskQueue
+
+        tq = RedisTaskQueue(redis_url=resolved_redis_url)
+        await tq.connect()
+        usage = await tq.get_token_usage(operation_id)
+        await tq.close()
+        if usage and (usage["input_tokens"] or usage["output_tokens"]):
+            in_tok = usage["input_tokens"]
+            out_tok = usage["output_tokens"]
+            total_tok = in_tok + out_tok
+            model = usage.get("model", "")
+            print(f"\nTokens: {total_tok:,} (in: {in_tok:,}  out: {out_tok:,})")
+            if model:
+                try:
+                    import litellm
+
+                    in_cost, out_cost = litellm.cost_per_token(
+                        model, prompt_tokens=in_tok, completion_tokens=out_tok
+                    )
+                    total_cost = in_cost + out_cost
+                    print(f"Model:  {model}")
+                    print(f"Cost:   ${total_cost:.4f}")
+                except Exception:
+                    print(f"Model:  {model} (cost lookup failed)")
+
     except Exception as e:
         logger.error(f"Failed to get runtime: {e}")
         sys.exit(1)
