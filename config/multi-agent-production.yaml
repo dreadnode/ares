@@ -27,6 +27,9 @@ operation:
   max_steps: 500
   # Maximum runtime for multi-forest mode (default 3600s is too short for cross-forest pivots)
   max_runtime: 7200.0
+  # Workflow wait budgets before MSSQL exploits are marked retryable
+  mssql_workflow_timeout: 360.0
+  mssql_cross_forest_workflow_timeout: 480.0
 
 # Agent configurations
 agents:
