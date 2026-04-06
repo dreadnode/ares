@@ -178,6 +178,10 @@ class OperationConfig:
     # Worker agent settings
     # Timeout for agent tasks (prevents infinite retry loops)
     agent_task_timeout: int = 300  # 5 minutes
+    # Workflow wait budget for MSSQL exploitation before marking retryable
+    mssql_workflow_timeout: float = 360.0
+    # Workflow wait budget for cross-forest MSSQL pivots before marking retryable
+    mssql_cross_forest_workflow_timeout: float = 480.0
 
     # Context offloading settings
     # Tool outputs larger than this (chars) are offloaded to Redis
@@ -413,6 +417,10 @@ def _build_config(data: dict[str, Any]) -> OperationConfig:
         critical_priority_threshold=operation.get("critical_priority_threshold", 3),
         # Worker settings from operation section
         agent_task_timeout=operation.get("agent_task_timeout", 300),
+        mssql_workflow_timeout=operation.get("mssql_workflow_timeout", 360.0),
+        mssql_cross_forest_workflow_timeout=operation.get(
+            "mssql_cross_forest_workflow_timeout", 480.0
+        ),
         # Phase detection thresholds
         lateral_movement_admin_creds_threshold=phase_detection.get(
             "lateral_movement_admin_creds", 3
@@ -600,6 +608,16 @@ def _apply_env_overrides(config: OperationConfig) -> OperationConfig:
     if agent_timeout := os.environ.get("ARES_AGENT_TASK_TIMEOUT"):
         try:
             config.agent_task_timeout = int(agent_timeout)
+        except ValueError:
+            pass
+    if mssql_workflow_timeout := os.environ.get("ARES_MSSQL_WORKFLOW_TIMEOUT"):
+        try:
+            config.mssql_workflow_timeout = float(mssql_workflow_timeout)
+        except ValueError:
+            pass
+    if mssql_cross_forest_timeout := os.environ.get("ARES_MSSQL_CROSS_FOREST_WORKFLOW_TIMEOUT"):
+        try:
+            config.mssql_cross_forest_workflow_timeout = float(mssql_cross_forest_timeout)
         except ValueError:
             pass
 
@@ -963,6 +981,16 @@ def get_agent_task_timeout() -> int:
     return load_config().agent_task_timeout
 
 
+def get_mssql_workflow_timeout() -> float:
+    """Get workflow wait timeout (seconds) for MSSQL exploitation."""
+    return load_config().mssql_workflow_timeout
+
+
+def get_mssql_cross_forest_workflow_timeout() -> float:
+    """Get workflow wait timeout (seconds) for cross-forest MSSQL pivots."""
+    return load_config().mssql_cross_forest_workflow_timeout
+
+
 def get_offload_threshold() -> int:
     """Get character threshold for offloading tool outputs to Redis."""
     return load_config().offload_threshold
@@ -1179,6 +1207,8 @@ __all__ = [
     "get_max_vulnerability_failures",
     "get_min_messages_to_keep",
     "get_min_slots_per_role",
+    "get_mssql_cross_forest_workflow_timeout",
+    "get_mssql_workflow_timeout",
     "get_multi_forest_mode",
     "get_namespace",
     "get_offload_threshold",

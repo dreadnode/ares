@@ -17,6 +17,7 @@ class TestExploitWorkflowTimeouts:
 
         dispatcher = SimpleNamespace()
         wait_mock = AsyncMock(return_value={"success": True})
+        monkeypatch.setattr("ares.core.config.get_mssql_workflow_timeout", lambda: 360.0)
 
         monkeypatch.setattr(
             "ares.core.workflows._dispatch_exploit",
@@ -40,7 +41,7 @@ class TestExploitWorkflowTimeouts:
         wait_mock.assert_awaited_once_with(
             dispatcher,
             "task-mssql-1",
-            timeout=600.0,
+            timeout=360.0,
             check_interval=10.0,
         )
 
@@ -50,6 +51,10 @@ class TestExploitWorkflowTimeouts:
 
         dispatcher = SimpleNamespace()
         wait_mock = AsyncMock(return_value={"success": True})
+        monkeypatch.setattr(
+            "ares.core.config.get_mssql_cross_forest_workflow_timeout",
+            lambda: 480.0,
+        )
 
         monkeypatch.setattr(
             "ares.core.workflows._dispatch_exploit",
@@ -72,7 +77,7 @@ class TestExploitWorkflowTimeouts:
         wait_mock.assert_awaited_once_with(
             dispatcher,
             "task-mssql-xf-1",
-            timeout=900.0,
+            timeout=480.0,
             check_interval=10.0,
         )
 

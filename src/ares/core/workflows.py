@@ -699,12 +699,17 @@ def _get_exploit_wait_timeout(vuln_type: str) -> float:
     time of the underlying exploit path, or the orchestrator will mark slow
     but still-running tasks as timed out and keep retrying them.
     """
+    from ares.core.config import (
+        get_mssql_cross_forest_workflow_timeout,
+        get_mssql_workflow_timeout,
+    )
+
     vuln_type_lower = (vuln_type or "").lower()
 
     if vuln_type_lower == "mssql_cross_forest_pivot":
-        return 900.0
+        return get_mssql_cross_forest_workflow_timeout()
     if vuln_type_lower.startswith("mssql_"):
-        return 600.0
+        return get_mssql_workflow_timeout()
     return 180.0
 
 
