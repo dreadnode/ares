@@ -86,9 +86,18 @@ pub struct StateInner {
     // MSSQL enum tracking (persisted to Redis SET)
     pub mssql_enum_dispatched: HashSet<String>,
 
+    // ACL chain data (from BloodHound, stored in Redis LIST)
+    pub acl_chains: Vec<serde_json::Value>,
+
+    // ACL step dedup (tracks which chain steps have been dispatched)
+    pub dispatched_acl_steps: HashSet<String>,
+
     // Pending/completed tasks (in-memory only)
     pub pending_tasks: HashMap<String, TaskInfo>,
     pub completed_tasks: HashMap<String, ares_core::models::TaskResult>,
+
+    // Completion flag (set externally to signal operation should wrap up)
+    pub completed: bool,
 }
 
 impl StateInner {
@@ -119,8 +128,11 @@ impl StateInner {
             domain_admin_path: None,
             dedup,
             mssql_enum_dispatched: HashSet::new(),
+            acl_chains: Vec::new(),
+            dispatched_acl_steps: HashSet::new(),
             pending_tasks: HashMap::new(),
             completed_tasks: HashMap::new(),
+            completed: false,
         }
     }
 
@@ -248,6 +260,33 @@ impl SharedState {
         let domain_sids: HashMap<String, String> =
             conn.hgetall(&domain_sids_key).await.unwrap_or_default();
 
+        // Load ACL chains
+        let acl_chains_key = format!(
+            "{}:{}:{}",
+            state::KEY_PREFIX,
+            operation_id,
+            state::KEY_ACL_CHAINS
+        );
+        let acl_chains_raw: Vec<String> = conn
+            .lrange(&acl_chains_key, 0, -1)
+            .await
+            .unwrap_or_default();
+        let acl_chains: Vec<serde_json::Value> = acl_chains_raw
+            .iter()
+            .filter_map(|s| serde_json::from_str(s).ok())
+            .collect();
+
+        // Load dispatched ACL steps from dedup set
+        let acl_dedup_key = format!(
+            "{}:{}:{}:{}",
+            state::KEY_PREFIX,
+            operation_id,
+            state::KEY_DEDUP_PREFIX,
+            DEDUP_ACL_STEPS
+        );
+        let dispatched_acl_steps: HashSet<String> =
+            conn.smembers(&acl_dedup_key).await.unwrap_or_default();
+
         // Apply to state
         let mut state = self.inner.write().await;
         state.target = loaded.target;
@@ -269,6 +308,8 @@ impl SharedState {
         state.domain_admin_path = loaded.domain_admin_path;
         state.dedup = dedup_sets;
         state.mssql_enum_dispatched = mssql_dispatched;
+        state.acl_chains = acl_chains;
+        state.dispatched_acl_steps = dispatched_acl_steps;
 
         let cred_count = state.credentials.len();
         let hash_count = state.hashes.len();
@@ -517,6 +558,22 @@ impl SharedState {
         let domain_sids: HashMap<String, String> =
             conn.hgetall(&domain_sids_key).await.unwrap_or_default();
 
+        // Refresh ACL chains
+        let acl_chains_key = format!(
+            "{}:{}:{}",
+            state::KEY_PREFIX,
+            operation_id,
+            state::KEY_ACL_CHAINS
+        );
+        let acl_chains_raw: Vec<String> = conn
+            .lrange(&acl_chains_key, 0, -1)
+            .await
+            .unwrap_or_default();
+        let acl_chains: Vec<serde_json::Value> = acl_chains_raw
+            .iter()
+            .filter_map(|s| serde_json::from_str(s).ok())
+            .collect();
+
         let mut state = self.inner.write().await;
         state.credentials = credentials;
         state.hashes = hashes;
@@ -528,6 +585,7 @@ impl SharedState {
         state.domain_admin_path = meta.domain_admin_path;
         state.domain_controllers = dc_map;
         state.domain_sids = domain_sids;
+        state.acl_chains = acl_chains;
 
         Ok(())
     }

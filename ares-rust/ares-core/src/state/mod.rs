@@ -454,6 +454,50 @@ impl RedisStateReader {
         let _: () = conn.expire(&key, 86400).await?;
         Ok(())
     }
+
+    /// Load timeline events from `ares:op:{id}:timeline` LIST.
+    ///
+    /// Each entry is a JSON object with at least `timestamp`, `description`,
+    /// and optionally `mitre_techniques`.
+    pub async fn get_timeline(
+        &self,
+        conn: &mut impl AsyncCommands,
+    ) -> Result<Vec<serde_json::Value>, redis::RedisError> {
+        let key = self.key(KEY_TIMELINE);
+        let items: Vec<String> = conn.lrange(&key, 0, -1).await?;
+        let mut events = Vec::new();
+        for item in items {
+            if let Ok(val) = serde_json::from_str::<serde_json::Value>(&item) {
+                events.push(val);
+            }
+        }
+        Ok(events)
+    }
+
+    /// Load MITRE ATT&CK technique IDs from `ares:op:{id}:techniques` SET.
+    pub async fn get_techniques(
+        &self,
+        conn: &mut impl AsyncCommands,
+    ) -> Result<Vec<String>, redis::RedisError> {
+        let key = self.key(KEY_TECHNIQUES);
+        let items: Vec<String> = conn.smembers(&key).await?;
+        Ok(items)
+    }
+
+    /// Get a cached report from `ares:op:{id}:report` STRING.
+    pub async fn get_report(
+        &self,
+        conn: &mut impl AsyncCommands,
+    ) -> Result<Option<String>, redis::RedisError> {
+        let key = format!("{}:report", self.key_prefix());
+        let report: Option<String> = conn.get(&key).await?;
+        Ok(report)
+    }
+
+    /// Returns the key prefix for this operation: `ares:op:{op_id}`
+    fn key_prefix(&self) -> String {
+        format!("{KEY_PREFIX}:{}", self.operation_id)
+    }
 }
 
 /// Build credential dedup key matching Python format:

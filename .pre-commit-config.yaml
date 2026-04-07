@@ -31,7 +31,7 @@ repos:
     rev: v2.4.2
     hooks:
       - id: codespell
-        entry: codespell -q 3 -f --skip=".git,.github,README.md,target,Cargo.lock" --ignore-words-list="astroid,braket,unstall,infinit,sems"
+        entry: codespell -q 3 -f --skip=".git,.github,README.md,target,Cargo.lock" --ignore-words-list="astroid,braket,unstall,infinit,sems,te"
 
   - repo: https://github.com/RodrigoGonzalez/check-mkdocs
     rev: v1.2.0

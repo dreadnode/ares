@@ -15,12 +15,17 @@ uuid = { workspace = true }
 thiserror = { workspace = true }
 anyhow = { workspace = true }
 serde_yaml = { workspace = true }
+regex = { workspace = true }
+once_cell = { workspace = true }
 md-5 = "0.10"
 base64 = "0.22"
 pyo3 = { workspace = true, optional = true }
 
 [dev-dependencies]
 tempfile = "3"
+
+[lib]
+crate-type = ["lib", "cdylib"]
 
 [features]
 default = []

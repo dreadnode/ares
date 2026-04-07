@@ -18,6 +18,7 @@
 //!   7. Enter the main orchestration loop
 
 mod automation;
+mod completion;
 mod config;
 mod cost_summary;
 mod deferred;
@@ -25,6 +26,7 @@ mod dispatcher;
 mod exploitation;
 mod monitoring;
 mod python_bridge;
+mod recovery;
 mod result_processing;
 mod results;
 mod routing;
@@ -178,6 +180,43 @@ async fn main() -> Result<()> {
     // --- Automation tasks ---
     let auto_handles = spawn_automation_tasks(dispatcher.clone(), shutdown_rx.clone());
 
+    // --- Recovery check ---
+    {
+        let recovery_mgr = recovery::OperationRecoveryManager::new(config.redis_url.clone());
+        match recovery_mgr.recover(&config.operation_id).await {
+            Ok(recovered) => {
+                if !recovered.requeued_task_ids.is_empty() || !recovered.failed_task_ids.is_empty()
+                {
+                    info!(
+                        requeued = recovered.requeued_task_ids.len(),
+                        failed = recovered.failed_task_ids.len(),
+                        "Recovery: re-enqueued interrupted tasks"
+                    );
+                }
+            }
+            Err(e) => {
+                // Recovery failure is non-fatal — we already loaded state above
+                warn!(err = %e, "Recovery check failed (non-fatal, continuing)");
+            }
+        }
+    }
+
+    // --- Completion monitor ---
+    let completion_disp = dispatcher.clone();
+    let completion_state = shared_state.clone();
+    let completion_shutdown = shutdown_rx.clone();
+    let completion_handle = tokio::spawn(async move {
+        completion::wait_for_completion(
+            &completion_state,
+            &completion_disp,
+            completion_shutdown,
+            std::time::Duration::from_secs(7200),
+            std::time::Duration::from_secs(10),
+        )
+        .await;
+        info!("Completion monitor finished — operation complete");
+    });
+
     info!(
         operation_id = %config.operation_id,
         automation_tasks = auto_handles.len(),
@@ -219,6 +258,7 @@ async fn main() -> Result<()> {
                 exploit_handle,
                 disc_handle,
                 refresh_handle,
+                completion_handle,
             );
             for h in auto_handles {
                 let _ = h.await;
@@ -263,6 +303,7 @@ fn spawn_automation_tasks(
     spawn_auto!(auto_credential_access);
     spawn_auto!(auto_credential_expansion);
     spawn_auto!(auto_golden_ticket);
+    spawn_auto!(auto_acl_chain_follow);
 
     info!(count = handles.len(), "Automation tasks spawned");
     handles

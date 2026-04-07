@@ -4,7 +4,8 @@ build-backend = "maturin"
 
 [project]
 name = "ares-core"
-requires-python = ">=3.11"
+requires-python = ">=3.10"
 
 [tool.maturin]
 features = ["python"]
+module-name = "ares_core"
