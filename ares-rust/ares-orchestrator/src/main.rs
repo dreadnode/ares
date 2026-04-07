@@ -1,7 +1,6 @@
-// Orchestrator is scaffolded; most public APIs are not yet wired up.
-#![allow(dead_code)]
-
 //! Ares Orchestrator — Rust-native orchestration loop.
+
+#![allow(dead_code)]
 //!
 //! Entry point for the `ares-orchestrator` binary. Rust owns the tokio event
 //! loop and all Redis IO; Python (via PyO3) is called only for LLM agent
@@ -12,16 +11,24 @@
 //!   2. Connect to Redis
 //!   3. Acquire the operation lock
 //!   4. Initialize the Python bridge (if enabled)
-//!   5. Spawn background tasks: heartbeat monitor, result consumer, deferred processor
-//!   6. Enter the main orchestration loop
+//!   5. Load shared state from Redis
+//!   6. Spawn background tasks: heartbeat monitor, result consumer, deferred
+//!      processor, cost summary, automation tasks, exploitation workflow,
+//!      discovery poller, state refresh
+//!   7. Enter the main orchestration loop
 
+mod automation;
 mod config;
 mod cost_summary;
 mod deferred;
+mod dispatcher;
+mod exploitation;
 mod monitoring;
 mod python_bridge;
+mod result_processing;
 mod results;
 mod routing;
+mod state;
 mod task_queue;
 mod throttling;
 
@@ -35,9 +42,11 @@ use tracing::{info, warn};
 use crate::config::OrchestratorConfig;
 use crate::cost_summary::spawn_cost_summary;
 use crate::deferred::DeferredQueue;
+use crate::dispatcher::Dispatcher;
 use crate::monitoring::{spawn_heartbeat_monitor, AgentRegistry};
-use crate::results::{spawn_result_consumer, CompletedTask};
-use crate::routing::{ActiveTaskTracker, TaskRouter};
+use crate::results::spawn_result_consumer;
+use crate::routing::ActiveTaskTracker;
+use crate::state::SharedState;
 use crate::task_queue::TaskQueue;
 use crate::throttling::Throttler;
 
@@ -76,7 +85,6 @@ async fn main() -> Result<()> {
         .try_acquire_lock(&config.operation_id, config.lock_ttl)
         .await?;
     if !acquired {
-        // Another orchestrator already holds the lock
         anyhow::bail!(
             "Operation {} is locked by another orchestrator",
             config.operation_id
@@ -91,16 +99,33 @@ async fn main() -> Result<()> {
     info!("Python bridge ready");
 
     // --- Shared state ---
+    let shared_state = SharedState::new(config.operation_id.clone());
+    shared_state
+        .load_from_redis(&queue)
+        .await
+        .context("Failed to load state from Redis")?;
+
     let tracker = ActiveTaskTracker::new();
     let registry = AgentRegistry::new();
     let throttler = Arc::new(Throttler::new(config.clone(), tracker.clone()));
-    let _router = TaskRouter::new(queue.clone(), tracker.clone(), config.clone());
     let deferred = Arc::new(DeferredQueue::new(queue.clone(), config.clone()));
+
+    // --- Central dispatcher ---
+    let dispatcher = Arc::new(Dispatcher::new(
+        queue.clone(),
+        tracker.clone(),
+        throttler.clone(),
+        deferred.clone(),
+        shared_state.clone(),
+        config.clone(),
+    ));
 
     // --- Shutdown signal ---
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
     // --- Spawn background tasks ---
+
+    // Core infrastructure
     let hb_handle = spawn_heartbeat_monitor(
         queue.clone(),
         registry.clone(),
@@ -127,24 +152,48 @@ async fn main() -> Result<()> {
 
     let cost_handle = spawn_cost_summary(queue.clone(), config.clone(), shutdown_rx.clone());
 
+    // Exploitation workflow
+    let exploit_disp = dispatcher.clone();
+    let exploit_shutdown = shutdown_rx.clone();
+    let exploit_handle = tokio::spawn(async move {
+        exploitation::exploitation_workflow(exploit_disp, exploit_shutdown).await
+    });
+
+    // Discovery poller
+    let disc_disp = dispatcher.clone();
+    let disc_shutdown = shutdown_rx.clone();
+    let disc_handle =
+        tokio::spawn(
+            async move { result_processing::discovery_poller(disc_disp, disc_shutdown).await },
+        );
+
+    // State refresh
+    let refresh_disp = dispatcher.clone();
+    let refresh_shutdown = shutdown_rx.clone();
+    let refresh_handle =
+        tokio::spawn(
+            async move { automation::state_refresh(refresh_disp, refresh_shutdown).await },
+        );
+
+    // --- Automation tasks ---
+    let auto_handles = spawn_automation_tasks(dispatcher.clone(), shutdown_rx.clone());
+
     info!(
         operation_id = %config.operation_id,
-        "Orchestration loop started — waiting for tasks and results"
+        automation_tasks = auto_handles.len(),
+        "Orchestration loop started — all background tasks running"
     );
 
     // --- Main loop ---
-    // In the full implementation this loop will:
-    //   1. Receive completed results via result_rx
-    //   2. Process results (extract credentials, hosts, vulns)
-    //   3. Generate follow-up tasks by calling the Python agent bridge
-    //   4. Submit new tasks through the router with throttling
-    //
-    // For now it handles results and graceful shutdown.
     loop {
         tokio::select! {
             // Process completed task results
             Some(completed) = result_rx.recv() => {
-                handle_completed_task(&completed, &throttler).await;
+                result_processing::process_completed_task(
+                    &completed,
+                    &dispatcher,
+                    &throttler,
+                ).await;
             }
 
             // Graceful shutdown on SIGTERM / SIGINT
@@ -159,11 +208,21 @@ async fn main() -> Result<()> {
     info!("Shutting down background tasks...");
     let _ = shutdown_tx.send(true);
 
-    // Wait for background tasks (with timeout)
     let shutdown_timeout = std::time::Duration::from_secs(10);
     tokio::select! {
         _ = async {
-            let _ = tokio::join!(hb_handle, result_handle, deferred_handle, cost_handle);
+            let _ = tokio::join!(
+                hb_handle,
+                result_handle,
+                deferred_handle,
+                cost_handle,
+                exploit_handle,
+                disc_handle,
+                refresh_handle,
+            );
+            for h in auto_handles {
+                let _ = h.await;
+            }
         } => {
             info!("All background tasks stopped");
         }
@@ -176,31 +235,35 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-/// Process a completed task result.
-async fn handle_completed_task(completed: &CompletedTask, throttler: &Throttler) {
-    let task_id = &completed.task_id;
-    let result = &completed.result;
+/// Spawn all automation background tasks. Returns their JoinHandles.
+fn spawn_automation_tasks(
+    dispatcher: Arc<Dispatcher>,
+    shutdown_rx: watch::Receiver<bool>,
+) -> Vec<tokio::task::JoinHandle<()>> {
+    let mut handles = Vec::new();
 
-    if result.success {
-        info!(
-            task_id = %task_id,
-            agent = result.agent_name.as_deref().unwrap_or("unknown"),
-            "Task completed successfully"
-        );
-        throttler.clear_rate_limit_error().await;
-    } else {
-        let err_msg = result.error.as_deref().unwrap_or("unknown error");
-        warn!(task_id = %task_id, err = err_msg, "Task failed");
-
-        // Check for rate-limit errors in the failure message
-        if err_msg.to_lowercase().contains("rate limit") || err_msg.to_lowercase().contains("429") {
-            throttler.record_rate_limit_error().await;
-        }
+    macro_rules! spawn_auto {
+        ($name:ident) => {{
+            let d = dispatcher.clone();
+            let s = shutdown_rx.clone();
+            handles.push(tokio::spawn(async move {
+                automation::$name(d, s).await;
+            }));
+        }};
     }
 
-    // TODO: In the full implementation, this will:
-    // 1. Parse the result payload for discovered credentials, hosts, vulns
-    // 2. Update shared state in Redis
-    // 3. Generate follow-up tasks based on new intelligence
-    // 4. Call Python bridge for LLM-driven task generation
+    spawn_auto!(auto_crack_dispatch);
+    spawn_auto!(auto_mssql_detection);
+    spawn_auto!(auto_adcs_enumeration);
+    spawn_auto!(auto_share_spider);
+    spawn_auto!(auto_bloodhound);
+    spawn_auto!(auto_delegation_enumeration);
+    spawn_auto!(auto_coercion);
+    spawn_auto!(auto_local_admin_secretsdump);
+    spawn_auto!(auto_credential_access);
+    spawn_auto!(auto_credential_expansion);
+    spawn_auto!(auto_golden_ticket);
+
+    info!(count = handles.len(), "Automation tasks spawned");
+    handles
 }
