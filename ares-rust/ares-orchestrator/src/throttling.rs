@@ -1,0 +1,270 @@
+//! Rate limiting and concurrency control.
+//!
+//! Mirrors the Python `ares.core.dispatcher.throttling.ThrottlingMixin`.
+//!
+//! Three layers of throttling:
+//! 1. **Per-role semaphores** — limits how many tasks one role can have in-flight.
+//! 2. **Global LLM concurrency** — soft cap + 1.5x hard cap before deferring.
+//! 3. **Dispatch delay** — minimum interval between consecutive submissions.
+
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::time::Instant;
+
+use tokio::sync::Semaphore;
+use tracing::{debug, info, warn};
+
+use crate::config::OrchestratorConfig;
+use crate::routing::ActiveTaskTracker;
+
+// ---------------------------------------------------------------------------
+// Critical-path classification (matches Python ThrottlingMixin constants)
+// ---------------------------------------------------------------------------
+
+/// Task types that bypass hard-cap throttling (DA-critical path).
+const CRITICAL_PATH_TASK_TYPES: &[&str] = &["exploit"];
+
+/// High-value exploit subtypes that bypass hard cap.
+const CRITICAL_PATH_VULN_TYPES: &[&str] = &[
+    "constrained_delegation",
+    "unconstrained_delegation",
+    "esc1",
+    "esc4",
+    "esc8",
+    "krbtgt_hash",
+    "adcs_esc1",
+    "adcs_esc4",
+    "adcs_esc8",
+];
+
+/// Maximum tasks allowed to bypass the hard cap simultaneously.
+const MAX_BYPASS_TASKS: usize = 3;
+
+// ---------------------------------------------------------------------------
+// ThrottleDecision
+// ---------------------------------------------------------------------------
+
+/// What the throttler decided about a candidate task.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ThrottleDecision {
+    /// Submit immediately.
+    Allow,
+    /// Defer to the deferred queue.
+    Defer,
+    /// Wait for `duration` then re-check.
+    Wait(std::time::Duration),
+}
+
+// ---------------------------------------------------------------------------
+// Throttler
+// ---------------------------------------------------------------------------
+
+/// Concurrency controller that mirrors the Python throttling logic.
+pub struct Throttler {
+    config: Arc<OrchestratorConfig>,
+    tracker: ActiveTaskTracker,
+    /// Per-role semaphores (lazily populated).
+    role_semaphores: tokio::sync::Mutex<HashMap<String, Arc<Semaphore>>>,
+    /// Timestamp of the last successful dispatch.
+    last_dispatch: tokio::sync::Mutex<Instant>,
+    /// Accumulated rate-limit errors (from worker feedback).
+    rate_limit_errors: tokio::sync::Mutex<u32>,
+    /// Global backoff deadline (if any).
+    backoff_until: tokio::sync::Mutex<Option<Instant>>,
+}
+
+impl Throttler {
+    pub fn new(config: Arc<OrchestratorConfig>, tracker: ActiveTaskTracker) -> Self {
+        Self {
+            config,
+            tracker,
+            role_semaphores: tokio::sync::Mutex::new(HashMap::new()),
+            last_dispatch: tokio::sync::Mutex::new(Instant::now()),
+            rate_limit_errors: tokio::sync::Mutex::new(0),
+            backoff_until: tokio::sync::Mutex::new(None),
+        }
+    }
+
+    /// Evaluate whether `task_type` targeting `role` should be allowed now.
+    pub async fn check(
+        &self,
+        task_type: &str,
+        target_role: &str,
+        payload: Option<&serde_json::Value>,
+    ) -> ThrottleDecision {
+        // Non-LLM tasks (crack, command) always pass.
+        if crate::routing::is_non_llm_task(task_type) {
+            return ThrottleDecision::Allow;
+        }
+
+        // Global backoff check
+        {
+            let backoff = self.backoff_until.lock().await;
+            if let Some(deadline) = *backoff {
+                if Instant::now() < deadline {
+                    let remaining = deadline - Instant::now();
+                    return ThrottleDecision::Wait(remaining);
+                }
+            }
+        }
+
+        let llm_count = self.tracker.llm_task_count().await;
+        let max_tasks = self.config.max_concurrent_tasks;
+        let hard_cap = self.config.hard_cap();
+
+        // --- HARD CAP (1.5x) ---
+        if llm_count >= hard_cap {
+            if self.is_critical_path(task_type, payload) {
+                let bypass_count = llm_count.saturating_sub(hard_cap);
+                if bypass_count >= MAX_BYPASS_TASKS {
+                    warn!(
+                        llm_count,
+                        hard_cap,
+                        bypass_count,
+                        task_type,
+                        "Hard cap: too many bypass tasks, deferring"
+                    );
+                    return ThrottleDecision::Defer;
+                }
+                info!(
+                    llm_count,
+                    hard_cap,
+                    bypass = bypass_count + 1,
+                    task_type,
+                    "Hard cap: allowing critical-path task"
+                );
+                return ThrottleDecision::Allow;
+            }
+
+            debug!(llm_count, hard_cap, task_type, "Hard cap: deferring task");
+            return ThrottleDecision::Defer;
+        }
+
+        // --- SOFT CAP ---
+        if llm_count >= max_tasks {
+            let role_count = self.tracker.count_for_role(target_role).await;
+            let min_per_role = 1_usize; // matches get_min_slots_per_role default
+            if role_count < min_per_role {
+                info!(
+                    llm_count,
+                    max_tasks,
+                    role = target_role,
+                    role_count,
+                    "Soft cap: allowing — role below minimum"
+                );
+                return ThrottleDecision::Allow;
+            }
+            debug!(llm_count, max_tasks, task_type, "Soft cap: deferring task");
+            return ThrottleDecision::Defer;
+        }
+
+        // --- Dispatch delay ---
+        {
+            let last = self.last_dispatch.lock().await;
+            let elapsed = last.elapsed();
+            if elapsed < self.config.dispatch_delay {
+                let wait = self.config.dispatch_delay - elapsed;
+                return ThrottleDecision::Wait(wait);
+            }
+        }
+
+        ThrottleDecision::Allow
+    }
+
+    /// Record that a dispatch happened (updates the last-dispatch timestamp).
+    pub async fn record_dispatch(&self) {
+        let mut last = self.last_dispatch.lock().await;
+        *last = Instant::now();
+    }
+
+    /// Record a rate-limit error from a worker. If enough accumulate, trigger
+    /// a global backoff.
+    pub async fn record_rate_limit_error(&self) {
+        let mut errors = self.rate_limit_errors.lock().await;
+        *errors += 1;
+        let threshold = 3_u32; // matches Python get_rate_limit_threshold default
+        if *errors >= threshold {
+            let backoff_secs = 30_u64; // matches Python get_rate_limit_backoff default
+            let mut bo = self.backoff_until.lock().await;
+            *bo = Some(Instant::now() + std::time::Duration::from_secs(backoff_secs));
+            warn!(
+                errors = *errors,
+                backoff_secs, "Rate limit threshold reached — applying global backoff"
+            );
+            *errors = 0;
+        }
+    }
+
+    /// Clear one rate-limit error (call on successful task completion).
+    pub async fn clear_rate_limit_error(&self) {
+        let mut errors = self.rate_limit_errors.lock().await;
+        *errors = errors.saturating_sub(1);
+    }
+
+    /// Acquire a per-role semaphore permit. Returns a guard that releases on drop.
+    pub async fn acquire_role_permit(
+        &self,
+        role: &str,
+    ) -> Option<tokio::sync::OwnedSemaphorePermit> {
+        let sem = {
+            let mut sems = self.role_semaphores.lock().await;
+            sems.entry(role.to_string())
+                .or_insert_with(|| Arc::new(Semaphore::new(self.config.max_tasks_per_role)))
+                .clone()
+        };
+        sem.try_acquire_owned().ok()
+    }
+
+    // --- internal ---
+
+    fn is_critical_path(&self, task_type: &str, payload: Option<&serde_json::Value>) -> bool {
+        // Check exploit + vuln_type
+        if CRITICAL_PATH_TASK_TYPES.contains(&task_type) {
+            if let Some(p) = payload {
+                let vt = p
+                    .get("vuln_type")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_lowercase();
+                if CRITICAL_PATH_VULN_TYPES.contains(&vt.as_str()) {
+                    return true;
+                }
+            }
+        }
+
+        // Check delegation enumeration
+        if task_type == "privesc_enumeration" {
+            if let Some(techniques) = payload
+                .and_then(|p| p.get("techniques"))
+                .and_then(|v| v.as_array())
+            {
+                if techniques.iter().any(|t| {
+                    t.as_str()
+                        .map(|s| s.to_lowercase().contains("delegation"))
+                        .unwrap_or(false)
+                }) {
+                    return true;
+                }
+            }
+        }
+
+        // Check ESC8 coercion
+        if task_type == "coercion" {
+            if let Some(techniques) = payload
+                .and_then(|p| p.get("techniques"))
+                .and_then(|v| v.as_array())
+            {
+                let esc8_techniques = ["ntlmrelayx_to_adcs", "petitpotam"];
+                if techniques.iter().any(|t| {
+                    t.as_str()
+                        .map(|s| esc8_techniques.contains(&s.to_lowercase().as_str()))
+                        .unwrap_or(false)
+                }) {
+                    return true;
+                }
+            }
+        }
+
+        false
+    }
+}

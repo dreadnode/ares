@@ -1,0 +1,27 @@
+[package]
+name = "ares-worker"
+version = "0.1.0"
+edition = "2021"
+description = "Worker binary for Ares red team multi-agent system"
+
+[[bin]]
+name = "ares-worker"
+path = "src/main.rs"
+
+[dependencies]
+ares-core = { path = "../ares-core" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+redis = { workspace = true }
+chrono = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+uuid = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+pyo3 = { workspace = true, optional = true }
+
+[features]
+default = []
+python = ["pyo3"]

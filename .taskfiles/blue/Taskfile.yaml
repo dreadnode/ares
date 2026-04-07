@@ -17,14 +17,8 @@ vars:
   OPENAI_API_KEY:
     sh: grep -E '^OPENAI_API_KEY=' .env 2>/dev/null | cut -d= -f2- | tr -d '"' || op item get "Dreadnode Openai" --fields dreadnode-ares-api-key --reveal 2>/dev/null || echo ""
 
-  # Model selection (MODEL_ALL takes precedence over MODEL)
-  MODEL_ARG:
-    sh: |
-      if [ -n "{{.MODEL_ALL}}" ]; then
-        echo "{{.MODEL_ALL}}"
-      else
-        echo "{{.MODEL}}"
-      fi
+  # Model selection (MODEL is a simple override, config file is source of truth)
+  MODEL_ARG: '{{.MODEL}}'
 
 tasks:
   # ===========================================================================
@@ -387,7 +381,7 @@ tasks:
         if [ "{{.JSON}}" = "true" ]; then
           JSON_FLAG="--json-output"
         fi
-        uv run python -m ares.cli_ops export-detection $OP_ID_ARG $LATEST_FLAG $JSON_FLAG --output-dir "{{.OUTPUT_DIR}}"
+        {{.ARES_CLI}} ops export-detection $OP_ID_ARG $LATEST_FLAG $JSON_FLAG --output-dir "{{.OUTPUT_DIR}}"
 
   reports:consolidate:
     desc: Generate a consolidated report from all investigation reports in a directory
@@ -561,13 +555,7 @@ tasks:
       ALERT: '{{.ALERT | default ""}}'
       INVESTIGATION_ID: '{{.INVESTIGATION_ID | default ""}}'
       MULTI_AGENT: '{{.MULTI_AGENT | default "false"}}'
-      MODEL_ARG:
-        sh: |
-          if [ -n "{{.MODEL_ALL}}" ]; then
-            echo "{{.MODEL_ALL}}"
-          else
-            echo "{{.MODEL}}"
-          fi
+      MODEL_ARG: '{{.MODEL}}'
     preconditions:
       - sh: test -n "{{.ALERT}}"
         msg: "ALERT variable is required. Usage: task blue:multi ALERT=alert.json"
@@ -615,13 +603,7 @@ tasks:
       ALERT: '{{.ALERT | default ""}}'
       INVESTIGATION_ID: '{{.INVESTIGATION_ID | default ""}}'
       MULTI_AGENT: '{{.MULTI_AGENT | default "false"}}'
-      MODEL_ARG:
-        sh: |
-          if [ -n "{{.MODEL_ALL}}" ]; then
-            echo "{{.MODEL_ALL}}"
-          else
-            echo "{{.MODEL}}"
-          fi
+      MODEL_ARG: '{{.MODEL}}'
       REDIS_URL:
         sh: |
           REDIS_PASS=$(kubectl get secret redis-secret -n {{.K8S_NAMESPACE}} -o jsonpath='{.data.password}' 2>/dev/null | base64 -d || echo "")
@@ -682,13 +664,7 @@ tasks:
     vars:
       OPERATION_ID: '{{.OPERATION_ID | default ""}}'
       LATEST: '{{.LATEST | default ""}}'
-      MODEL_ARG:
-        sh: |
-          if [ -n "{{.MODEL_ALL}}" ]; then
-            echo "{{.MODEL_ALL}}"
-          else
-            echo "{{.MODEL}}"
-          fi
+      MODEL_ARG: '{{.MODEL}}'
     preconditions:
       - sh: test -n "{{.OPERATION_ID}}" || test "{{.LATEST}}" = "true"
         msg: "Either OPERATION_ID or LATEST=true is required. Usage: task blue:multi:remote OPERATION_ID=op-xxx  OR  task blue:multi:remote LATEST=true"

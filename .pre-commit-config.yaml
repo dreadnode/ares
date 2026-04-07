@@ -31,7 +31,7 @@ repos:
     rev: v2.4.2
     hooks:
       - id: codespell
-        entry: codespell -q 3 -f --skip=".git,.github,README.md" --ignore-words-list="astroid,braket,unstall,infinit"
+        entry: codespell -q 3 -f --skip=".git,.github,README.md,target,Cargo.lock" --ignore-words-list="astroid,braket,unstall,infinit,sems"
 
   - repo: https://github.com/RodrigoGonzalez/check-mkdocs
     rev: v1.2.0
@@ -98,6 +98,37 @@ repos:
           - "types-PyYAML"
           - "types-requests"
           - "types-setuptools"
+
+  # Rust checks
+  - repo: local
+    hooks:
+      - id: cargo-fmt
+        name: Rust format check
+        entry: cargo fmt --manifest-path ares-rust/Cargo.toml --all -- --check
+        language: system
+        files: '\.rs$'
+        pass_filenames: false
+
+      - id: cargo-clippy
+        name: Rust clippy lint
+        entry: cargo clippy --manifest-path ares-rust/Cargo.toml --all-targets -- -D warnings
+        language: system
+        files: '\.rs$'
+        pass_filenames: false
+
+      - id: cargo-check
+        name: Rust compile check
+        entry: cargo check --manifest-path ares-rust/Cargo.toml --all-targets
+        language: system
+        files: '\.rs$'
+        pass_filenames: false
+
+      - id: cargo-test
+        name: Rust tests
+        entry: cargo test --manifest-path ares-rust/Cargo.toml
+        language: system
+        files: '\.rs$'
+        pass_filenames: false
 
   - repo: local
     hooks:

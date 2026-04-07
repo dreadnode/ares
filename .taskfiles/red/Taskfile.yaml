@@ -32,22 +32,6 @@ tasks:
         sh: test -f .env && echo "" || op item get "Ares Grafana MCP" --fields grafana-token --reveal 2>/dev/null || echo ""
       OPENAI_API_KEY:
         sh: test -f .env && echo "" || op item get "Dreadnode Openai" --fields dreadnode-ares-api-key --reveal 2>/dev/null || echo ""
-      ARES_MODEL:
-        sh: |
-          if [ -n "{{.MODEL_ALL}}" ]; then
-            echo "{{.MODEL_ALL}}"
-          else
-            echo "{{.MODEL}}"
-          fi
-      MODEL_ARG:
-        sh: |
-          if [ -n "{{.MODEL_ORCHESTRATOR}}" ]; then
-            echo "{{.MODEL_ORCHESTRATOR}}"
-          elif [ -n "{{.MODEL_ALL}}" ]; then
-            echo "{{.MODEL_ALL}}"
-          else
-            echo "{{.MODEL}}"
-          fi
       RESOLVED_TARGETS:
         sh: |
           TARGET="{{.TARGET}}"
@@ -156,6 +140,12 @@ tasks:
             RESUME_FLAG="--resume"
           fi
 
+          # MODEL override: if MODEL is set, pass as ARES_MODEL_OVERRIDE for quick testing
+          MODEL_OVERRIDE_ENV=""
+          if [ -n "{{.MODEL}}" ]; then
+            MODEL_OVERRIDE_ENV="ARES_MODEL_OVERRIDE={{.MODEL}}"
+          fi
+
           kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-orchestrator -- \
             env OPENAI_API_KEY="{{.OPENAI_API_KEY}}" \
             ANTHROPIC_API_KEY="{{.ANTHROPIC_API_KEY}}" \
@@ -165,21 +155,13 @@ tasks:
             DREADNODE_WORKSPACE="{{.DREADNODE_WORKSPACE}}" \
             DREADNODE_PROJECT="{{.DREADNODE_PROJECT}}" \
             GRAFANA_SERVICE_ACCOUNT_TOKEN="{{.GRAFANA_SERVICE_ACCOUNT_TOKEN}}" \
-            ARES_MODEL="{{.ARES_MODEL}}" \
-            ARES_ORCHESTRATOR_MODEL="{{.MODEL_ORCHESTRATOR}}" \
-            ARES_WORKER_MODEL="{{.MODEL_WORKER}}" \
-            ARES_AGENT_RECON_MODEL="{{.MODEL_RECON}}" \
-            ARES_AGENT_CREDENTIAL_ACCESS_MODEL="{{.MODEL_CREDENTIAL_ACCESS}}" \
-            ARES_AGENT_CRACKER_MODEL="{{.MODEL_CRACKER}}" \
-            ARES_AGENT_ACL_MODEL="{{.MODEL_ACL}}" \
-            ARES_AGENT_PRIVESC_MODEL="{{.MODEL_PRIVESC}}" \
-            ARES_AGENT_LATERAL_MODEL="{{.MODEL_LATERAL}}" \
-            ARES_AGENT_COERCION_MODEL="{{.MODEL_COERCION}}" \
+            ARES_CONFIG="/etc/ares/config.yaml" \
+            $MODEL_OVERRIDE_ENV \
             GRAFANA_URL="{{.GRAFANA_URL}}" \
             python -m ares.cli_ops submit "{{.TARGET}}" "{{.DOMAIN}}" \
             $IPS_ARGS \
             --operation-id "{{.OPERATION_ID_COMPUTED}}" \
-            --model "{{.MODEL_ARG}}" \
+            --model "{{.MODEL}}" \
             --max-steps {{.MAX_STEPS_RED}} \
             --redis-url "{{.REDIS_URL}}" \
             --env "{{.TARGET_ENV}}" \
@@ -283,7 +265,7 @@ tasks:
           fi
 
           # Fetch report
-          if python -m ares.cli_ops report "{{.OPERATION_ID_COMPUTED}}" --output-dir ./reports 2>&1; then
+          if {{.ARES_CLI}} ops report "{{.OPERATION_ID_COMPUTED}}" --output-dir ./reports 2>&1; then
             echo ""
             echo "✓ Report saved: ./reports/{{.OPERATION_ID_COMPUTED}}_report.md"
           else
@@ -526,7 +508,7 @@ tasks:
         fi
 
         # Run watch locally - fetches reports from Redis to local ./reports
-        python -m ares.cli_ops watch --poll-interval {{.POLL_INTERVAL}} --output-dir "{{.OUTPUT_DIR}}" $ONCE_FLAG
+        {{.ARES_CLI}} ops watch --poll-interval {{.POLL_INTERVAL}} --output-dir "{{.OUTPUT_DIR}}" $ONCE_FLAG
 
   multi:list:
     desc: "List multi-agent operations and their state"
@@ -693,22 +675,6 @@ tasks:
       RESUME: '{{.RESUME | default "false"}}'
       TARGET_ENV: '{{.TARGET_ENV | default "staging"}}'
       # Computed vars (no 1Password - uses .env)
-      ARES_MODEL:
-        sh: |
-          if [ -n "{{.MODEL_ALL}}" ]; then
-            echo "{{.MODEL_ALL}}"
-          else
-            echo "{{.MODEL}}"
-          fi
-      MODEL_ARG:
-        sh: |
-          if [ -n "{{.MODEL_ORCHESTRATOR}}" ]; then
-            echo "{{.MODEL_ORCHESTRATOR}}"
-          elif [ -n "{{.MODEL_ALL}}" ]; then
-            echo "{{.MODEL_ALL}}"
-          else
-            echo "{{.MODEL}}"
-          fi
       RESOLVED_TARGETS:
         sh: |
           TARGET="{{.TARGET}}"
@@ -831,6 +797,12 @@ tasks:
             RESUME_FLAG="--resume"
           fi
 
+          # MODEL override: if MODEL is set, pass as ARES_MODEL_OVERRIDE for quick testing
+          MODEL_OVERRIDE_ENV=""
+          if [ -n "{{.MODEL}}" ]; then
+            MODEL_OVERRIDE_ENV="ARES_MODEL_OVERRIDE={{.MODEL}}"
+          fi
+
           kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-orchestrator -- \
             env OPENAI_API_KEY="${OPENAI_API_KEY:-}" \
             ANTHROPIC_API_KEY="${ANTHROPIC_API_KEY:-}" \
@@ -840,16 +812,8 @@ tasks:
             DREADNODE_WORKSPACE="{{.DREADNODE_WORKSPACE}}" \
             DREADNODE_PROJECT="{{.DREADNODE_PROJECT}}" \
             GRAFANA_SERVICE_ACCOUNT_TOKEN="${GRAFANA_SERVICE_ACCOUNT_TOKEN:-}" \
-            ARES_MODEL="{{.ARES_MODEL}}" \
-            ARES_ORCHESTRATOR_MODEL="{{.MODEL_ORCHESTRATOR}}" \
-            ARES_WORKER_MODEL="{{.MODEL_WORKER}}" \
-            ARES_AGENT_RECON_MODEL="{{.MODEL_RECON}}" \
-            ARES_AGENT_CREDENTIAL_ACCESS_MODEL="{{.MODEL_CREDENTIAL_ACCESS}}" \
-            ARES_AGENT_CRACKER_MODEL="{{.MODEL_CRACKER}}" \
-            ARES_AGENT_ACL_MODEL="{{.MODEL_ACL}}" \
-            ARES_AGENT_PRIVESC_MODEL="{{.MODEL_PRIVESC}}" \
-            ARES_AGENT_LATERAL_MODEL="{{.MODEL_LATERAL}}" \
-            ARES_AGENT_COERCION_MODEL="{{.MODEL_COERCION}}" \
+            ARES_CONFIG="/etc/ares/config.yaml" \
+            $MODEL_OVERRIDE_ENV \
             GRAFANA_URL="{{.GRAFANA_URL}}" \
             ARES_MAX_CONCURRENT_TASKS=1 \
             ARES_TASK_DISPATCH_DELAY=3.0 \
@@ -858,7 +822,7 @@ tasks:
             python -m ares.cli_ops submit "{{.TARGET}}" "{{.DOMAIN}}" \
             $IPS_ARGS \
             --operation-id "{{.OPERATION_ID_COMPUTED}}" \
-            --model "{{.MODEL_ARG}}" \
+            --model "{{.MODEL}}" \
             --max-steps {{.MAX_STEPS_RED}} \
             --redis-url "{{.REDIS_URL}}" \
             --env "{{.TARGET_ENV}}" \
@@ -962,7 +926,7 @@ tasks:
           fi
 
           # Fetch report
-          if python -m ares.cli_ops report "{{.OPERATION_ID_COMPUTED}}" --output-dir ./reports 2>&1; then
+          if {{.ARES_CLI}} ops report "{{.OPERATION_ID_COMPUTED}}" --output-dir ./reports 2>&1; then
             echo ""
             echo "✓ Report saved: ./reports/{{.OPERATION_ID_COMPUTED}}_report.md"
           else
@@ -1020,6 +984,66 @@ tasks:
           DOMAIN: "{{.DOMAIN}}"
           TARGET: "{{.TARGETS}}"
           RESUME: "true"
+
+  # ===========================================================================
+  # Local Rust CLI convenience tasks (require ARES_REDIS_URL)
+  # ===========================================================================
+
+  multi:loot:local:
+    desc: "Dump loot using local Rust CLI (requires ARES_REDIS_URL)"
+    silent: true
+    vars:
+      OPERATION_ID: '{{.OPERATION_ID | default ""}}'
+      LATEST: '{{.LATEST | default "false"}}'
+      JSON: '{{.JSON | default "false"}}'
+      WATCH: '{{.WATCH | default "0"}}'
+      DIFF: '{{.DIFF | default "false"}}'
+    cmds:
+      - |
+        {{.ARES_CLI}} ops loot \
+          {{if ne .OPERATION_ID ""}}{{.OPERATION_ID}}{{end}} \
+          {{if eq .LATEST "true"}}--latest{{end}} \
+          {{if eq .JSON "true"}}--json{{end}} \
+          {{if ne .WATCH "0"}}--watch {{.WATCH}}{{end}} \
+          {{if eq .DIFF "true"}}--diff{{end}}
+
+  multi:status:local:
+    desc: "Check operation status using local Rust CLI"
+    silent: true
+    vars:
+      OPERATION_ID: '{{.OPERATION_ID | default ""}}'
+      LATEST: '{{.LATEST | default "false"}}'
+    cmds:
+      - |
+        {{.ARES_CLI}} ops status \
+          {{if ne .OPERATION_ID ""}}{{.OPERATION_ID}}{{end}} \
+          {{if eq .LATEST "true"}}--latest{{end}}
+
+  multi:list:local:
+    desc: "List operations using local Rust CLI"
+    silent: true
+    vars:
+      LATEST: '{{.LATEST | default "false"}}'
+    cmds:
+      - '{{.ARES_CLI}} ops list {{if eq .LATEST "true"}}--latest{{end}}'
+
+  multi:runtime:local:
+    desc: "Show operation runtime using local Rust CLI"
+    silent: true
+    vars:
+      OPERATION_ID: '{{.OPERATION_ID | default ""}}'
+      LATEST: '{{.LATEST | default "false"}}'
+    cmds:
+      - |
+        {{.ARES_CLI}} ops runtime \
+          {{if ne .OPERATION_ID ""}}{{.OPERATION_ID}}{{end}} \
+          {{if eq .LATEST "true"}}--latest{{end}}
+
+  multi:queue:local:
+    desc: "Show queue state using local Rust CLI"
+    silent: true
+    cmds:
+      - '{{.ARES_CLI}} ops queue'
 
   multi:redis:clear:
     desc: "Clear multi-agent Redis operation cache (DANGEROUS: drops ops/locks/status)"

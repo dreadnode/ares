@@ -17,17 +17,9 @@ includes:
     taskfile: .taskfiles/red/Taskfile.yaml
     optional: true
     vars:
-      MODEL_ALL: '{{.MODEL_ALL}}'
+      ARES_CLI: '{{.ARES_CLI}}'
       MODEL: '{{.MODEL}}'
-      MODEL_ORCHESTRATOR: '{{.MODEL_ORCHESTRATOR}}'
-      MODEL_WORKER: '{{.MODEL_WORKER}}'
-      MODEL_RECON: '{{.MODEL_RECON}}'
-      MODEL_CREDENTIAL_ACCESS: '{{.MODEL_CREDENTIAL_ACCESS}}'
-      MODEL_CRACKER: '{{.MODEL_CRACKER}}'
-      MODEL_ACL: '{{.MODEL_ACL}}'
-      MODEL_PRIVESC: '{{.MODEL_PRIVESC}}'
-      MODEL_LATERAL: '{{.MODEL_LATERAL}}'
-      MODEL_COERCION: '{{.MODEL_COERCION}}'
+      ARES_CONFIG: '{{.ARES_CONFIG}}'
       MAX_STEPS_RED: '{{.MAX_STEPS_RED}}'
       LOG_DIR: '{{.LOG_DIR}}'
       REPORT_DIR: '{{.REPORT_DIR}}'
@@ -45,8 +37,9 @@ includes:
     taskfile: .taskfiles/blue/Taskfile.yaml
     optional: true
     vars:
-      MODEL_ALL: '{{.MODEL_ALL}}'
+      ARES_CLI: '{{.ARES_CLI}}'
       MODEL: '{{.MODEL}}'
+      ARES_CONFIG: '{{.ARES_CONFIG}}'
       MAX_STEPS_BLUE: '{{.MAX_STEPS_BLUE}}'
       MAX_STEPS_BLUE_ONCE: '{{.MAX_STEPS_BLUE_ONCE}}'
       POLL_INTERVAL: '{{.POLL_INTERVAL}}'
@@ -75,16 +68,10 @@ vars:
   DREADNODE_ORGANIZATION: '{{.DREADNODE_ORGANIZATION | default "ares"}}'
   DREADNODE_WORKSPACE: '{{.DREADNODE_WORKSPACE | default "ares-protocol"}}'
   DREADNODE_PROJECT: '{{.DREADNODE_PROJECT | default "ares-soc"}}'
-  MODEL_ORCHESTRATOR: '{{.MODEL_ORCHESTRATOR | default ""}}'
-  MODEL_WORKER: '{{.MODEL_WORKER | default ""}}'
-  MODEL_ALL: '{{.MODEL_ALL | default "gpt-5.2"}}'
-  MODEL_RECON: '{{.MODEL_RECON | default ""}}'
-  MODEL_CREDENTIAL_ACCESS: '{{.MODEL_CREDENTIAL_ACCESS | default ""}}'
-  MODEL_CRACKER: '{{.MODEL_CRACKER | default ""}}'
-  MODEL_ACL: '{{.MODEL_ACL | default ""}}'
-  MODEL_PRIVESC: '{{.MODEL_PRIVESC | default ""}}'
-  MODEL_LATERAL: '{{.MODEL_LATERAL | default ""}}'
-  MODEL_COERCION: '{{.MODEL_COERCION | default ""}}'
+  # Config file (single source of truth for model assignments)
+  ARES_CONFIG: '{{.ARES_CONFIG | default "./config/multi-agent-production.yaml"}}'
+  # Rust CLI binary
+  ARES_CLI: '{{.ARES_CLI | default "./ares-rust/target/release/ares-cli"}}'
   # Infrastructure
   K8S_NAMESPACE: '{{.K8S_NAMESPACE | default "attack-simulation"}}'
   TARGET_PROFILE: '{{.TARGET_PROFILE | default "lab"}}'
@@ -177,6 +164,44 @@ tasks:
         find . -type f -name "*.pyd" -delete
         rm -rf .coverage htmlcov/ .pytest_cache/ .mypy_cache/ build/ dist/ ./*.egg-info/
 
+  # Rust CLI tasks
+  rust:build:
+    desc: Build the Rust CLI binary (debug)
+    silent: true
+    cmds:
+      - cd ares-rust && cargo build
+      - echo "Debug binary built at ares-rust/target/debug/ares-cli"
+
+  rust:release:
+    desc: Build the Rust CLI binary (release)
+    silent: true
+    cmds:
+      - cd ares-rust && cargo build --release
+      - echo "Release binary built at ares-rust/target/release/ares-cli"
+
+  rust:test:
+    desc: Run Rust tests
+    silent: true
+    cmds:
+      - cd ares-rust && cargo test
+
+  rust:check:
+    desc: Check Rust code compiles without building
+    silent: true
+    cmds:
+      - cd ares-rust && cargo check
+
+  rust:clean:
+    desc: Clean Rust build artifacts
+    silent: true
+    cmds:
+      - cd ares-rust && cargo clean
+
+  rust:deploy:
+    desc: "Cross-compile and deploy Rust binaries to K8s pods"
+    cmds:
+      - task: remote:rust:deploy:quick
+
   # Poetry and API tasks
   poetry:
     desc: Run poetry in the API directory
@@ -237,11 +262,8 @@ tasks:
         echo "Configuration:"
         echo "  Platform: {{.DREADNODE_SERVER_URL}}"
         echo "  Project: {{.DREADNODE_PROJECT}}"
-        if [ -n "{{.MODEL_ALL}}" ]; then
-          echo "  Model: {{.MODEL_ALL}}"
-        else
-          echo "  Model: {{.MODEL}}"
-        fi
+        echo "  Model (override): {{.MODEL}}"
+        echo "  Config: {{.ARES_CONFIG}}"
         echo "  Grafana: {{.GRAFANA_URL}}"
         echo "  Loki: {{.LOKI_URL}}"
         echo "  Prometheus: {{.PROMETHEUS_URL}}"
@@ -320,6 +342,28 @@ tasks:
     silent: true
     cmds:
       - uv run python -c "import ares; print('Ares version:', ares.__version__)"
+
+  # ===========================================================================
+  # Config Management Tasks
+  # ===========================================================================
+
+  config:models:
+    desc: "Show model assignments from config"
+    silent: true
+    cmds:
+      - '{{.ARES_CLI}} config show --models'
+
+  config:set-model:
+    desc: "Set model for a role (usage: task config:set-model -- orchestrator gpt-5.2)"
+    silent: true
+    cmds:
+      - '{{.ARES_CLI}} config set-model {{.CLI_ARGS}}'
+
+  config:set-model-all:
+    desc: "Set all roles to the same model (usage: task config:set-model-all -- gpt-5.2)"
+    silent: true
+    cmds:
+      - '{{.ARES_CLI}} config set-model --all {{.CLI_ARGS}}'
 
   # ===========================================================================
   # Ares Red Team Agent Tasks
