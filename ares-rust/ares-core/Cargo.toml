@@ -30,3 +30,7 @@ crate-type = ["lib", "cdylib"]
 [features]
 default = []
 python = ["pyo3"]
+# Only enable extension-module when building the cdylib Python extension (.so).
+# Do NOT enable this for binaries that embed Python (orchestrator, worker) —
+# extension-module disables linking against libpython, which breaks Rust→Python calls.
+extension-module = ["pyo3/extension-module"]

@@ -238,6 +238,24 @@ enum OpsCommands {
         operation_id: String,
     },
 
+    /// Export detection playbook from operation state
+    ExportDetection {
+        /// Operation ID
+        operation_id: Option<String>,
+        /// Use the latest operation
+        #[arg(long)]
+        latest: bool,
+        /// Output directory for playbook files
+        #[arg(long, default_value = "./reports")]
+        output_dir: String,
+        /// Output JSON to stdout instead of files
+        #[arg(long)]
+        json: bool,
+        /// Skip markdown playbook generation
+        #[arg(long)]
+        no_markdown: bool,
+    },
+
     /// Clean up old operation checkpoints
     Cleanup {
         /// Max age in hours
@@ -678,6 +696,23 @@ async fn run_ops(cmd: OpsCommands, redis_url: Option<String>) -> Result<()> {
             regenerate,
             output_dir,
         } => ops_report(redis_url, operation_id, latest, regenerate, output_dir).await,
+        OpsCommands::ExportDetection {
+            operation_id,
+            latest,
+            output_dir,
+            json,
+            no_markdown,
+        } => {
+            ops_export_detection(
+                redis_url,
+                operation_id,
+                latest,
+                output_dir,
+                json,
+                !no_markdown,
+            )
+            .await
+        }
         OpsCommands::Cleanup { max_age_hours } => ops_cleanup(redis_url, max_age_hours).await,
     }
 }
@@ -2324,6 +2359,1258 @@ fn save_report(output_dir: &str, op_id: &str, report: &str) -> Result<String> {
     let path = format!("{output_dir}/{op_id}_report.md");
     std::fs::write(&path, report).with_context(|| format!("Failed to write report to {path}"))?;
     Ok(path)
+}
+
+// ============================================================================
+// ops export-detection
+// ============================================================================
+
+async fn ops_export_detection(
+    redis_url: Option<String>,
+    operation_id: Option<String>,
+    latest: bool,
+    output_dir: String,
+    json_output: bool,
+    markdown: bool,
+) -> Result<()> {
+    let mut conn = connect_redis(redis_url).await?;
+    let op_id = resolve_operation_id(&mut conn, operation_id, latest).await?;
+
+    let reader = RedisStateReader::new(op_id.clone());
+
+    let state = reader
+        .load_state(&mut conn)
+        .await?
+        .with_context(|| format!("No state found for operation: {op_id}"))?;
+
+    let techniques = reader.get_techniques(&mut conn).await.unwrap_or_default();
+
+    let playbook = generate_detection_playbook(&state, &techniques);
+
+    if json_output {
+        let json = serde_json::to_string_pretty(&playbook)?;
+        println!("{json}");
+    } else {
+        std::fs::create_dir_all(&output_dir)
+            .with_context(|| format!("Failed to create output directory: {output_dir}"))?;
+
+        // Save JSON
+        let json_path = format!("{output_dir}/{op_id}_detection_playbook.json");
+        let json = serde_json::to_string_pretty(&playbook)?;
+        std::fs::write(&json_path, &json)
+            .with_context(|| format!("Failed to write JSON playbook to {json_path}"))?;
+        println!("Detection playbook (JSON) saved to {json_path}");
+
+        // Save Markdown
+        if markdown {
+            let md_path = format!("{output_dir}/{op_id}_detection_playbook.md");
+            let md = generate_detection_markdown(&playbook);
+            std::fs::write(&md_path, &md)
+                .with_context(|| format!("Failed to write markdown playbook to {md_path}"))?;
+            println!("Detection playbook (Markdown) saved to {md_path}");
+        }
+
+        // Console summary
+        println!();
+        println!("Detection Playbook Summary");
+        println!("  Operation:    {}", playbook.operation_id);
+        println!("  Techniques:   {}", playbook.summary.techniques_used.len());
+        println!("  Credentials:  {}", playbook.summary.total_credentials);
+        println!("  Hosts:        {}", playbook.summary.total_hosts);
+        println!(
+            "  Domain Admin: {}",
+            if playbook.summary.achieved_domain_admin {
+                "YES"
+            } else {
+                "No"
+            }
+        );
+        println!("  Priority Queries: {}", playbook.priority_queries.len());
+        println!("  Detection Targets: {}", playbook.detection_targets.len());
+        println!();
+
+        // Show top 5 priority queries
+        if !playbook.priority_queries.is_empty() {
+            println!("Top Priority Queries:");
+            for (i, q) in playbook.priority_queries.iter().take(5).enumerate() {
+                println!(
+                    "  {}. [{}] {}: {}",
+                    i + 1,
+                    q.priority.to_uppercase(),
+                    q.technique_id,
+                    q.description
+                );
+            }
+        }
+    }
+
+    Ok(())
+}
+
+// ---- Detection playbook data structures (JSON-serializable) ----
+
+#[derive(serde::Serialize)]
+struct DetectionPlaybook {
+    operation_id: String,
+    generated_at: String,
+    attack_window: AttackWindow,
+    summary: PlaybookSummary,
+    executive_summary: String,
+    technique_detections: HashMap<String, TechniqueDetection>,
+    detection_targets: Vec<DetectionTarget>,
+    priority_queries: Vec<PlaybookQuery>,
+}
+
+#[derive(serde::Serialize)]
+struct AttackWindow {
+    start: String,
+    end: String,
+    duration_minutes: i64,
+}
+
+#[derive(serde::Serialize)]
+struct PlaybookSummary {
+    techniques_used: Vec<String>,
+    technique_count: usize,
+    total_credentials: usize,
+    total_hosts: usize,
+    achieved_domain_admin: bool,
+    domain_admin_path: Option<String>,
+}
+
+#[derive(serde::Serialize)]
+struct PlaybookQuery {
+    technique_id: String,
+    technique_name: String,
+    description: String,
+    logql: String,
+    label_selector: String,
+    expected_evidence: Vec<String>,
+    time_window: TimeWindow,
+    priority: String,
+    windows_event_ids: Vec<String>,
+}
+
+#[derive(serde::Serialize)]
+struct TimeWindow {
+    start: Option<String>,
+    end: Option<String>,
+}
+
+#[derive(serde::Serialize)]
+struct DetectionTarget {
+    ioc_type: String,
+    value: String,
+    pyramid_level: u8,
+    pyramid_level_name: String,
+    context: String,
+    detection_queries: Vec<String>,
+    log_sources: Vec<String>,
+    mitre_techniques: Vec<String>,
+}
+
+#[derive(serde::Serialize)]
+struct TechniqueDetection {
+    technique_id: String,
+    technique_name: String,
+    description: String,
+    occurred_at: Vec<String>,
+    targets: Vec<String>,
+    credentials_used: Vec<String>,
+    detection_queries: Vec<PlaybookQuery>,
+    windows_event_ids: Vec<String>,
+    log_sources: Vec<String>,
+    detection_guidance: String,
+}
+
+// ---- Detection playbook generation ----
+
+fn pyramid_level_name(level: u8) -> &'static str {
+    match level {
+        1 => "Hash Values (L1)",
+        2 => "IP Addresses (L2)",
+        3 => "Domain Names (L3)",
+        4 => "Network/Host Artifacts (L4)",
+        5 => "Tools (L5)",
+        6 => "TTPs (L6)",
+        _ => "Unknown",
+    }
+}
+
+fn get_technique_name(id: &str) -> &'static str {
+    match id {
+        "T1046" => "Network Service Discovery",
+        "T1003" => "OS Credential Dumping",
+        "T1003.001" => "LSASS Memory",
+        "T1003.006" => "DCSync",
+        "T1078" => "Valid Accounts",
+        "T1078.002" => "Domain Accounts",
+        "T1110" => "Brute Force",
+        "T1558" => "Steal or Forge Kerberos Tickets",
+        "T1558.001" => "Golden Ticket",
+        "T1558.003" => "Kerberoasting",
+        "T1558.004" => "AS-REP Roasting",
+        "T1021" => "Remote Services",
+        "T1021.002" => "SMB/Windows Admin Shares",
+        "T1649" => "ADCS Certificate Theft",
+        "T1550" => "Use Alternate Authentication Material",
+        "T1550.002" => "Pass the Hash",
+        "T1484" => "Domain Policy Modification",
+        "T1087" => "Account Discovery",
+        _ => "",
+    }
+}
+
+fn make_time_window(start: &DateTime<Utc>, end: &DateTime<Utc>) -> TimeWindow {
+    TimeWindow {
+        start: Some(start.to_rfc3339()),
+        end: Some(end.to_rfc3339()),
+    }
+}
+
+fn generate_detection_playbook(
+    state: &SharedRedTeamState,
+    techniques: &[String],
+) -> DetectionPlaybook {
+    let now = Utc::now();
+    let attack_start = state.started_at;
+    let attack_end = state.completed_at.unwrap_or(now);
+    let duration_minutes = (attack_end - attack_start).num_minutes();
+
+    // Build detection targets from hosts
+    let mut detection_targets = Vec::new();
+    for host in &state.all_hosts {
+        detection_targets.push(DetectionTarget {
+            ioc_type: "ip".into(),
+            value: host.ip.clone(),
+            pyramid_level: 2,
+            pyramid_level_name: pyramid_level_name(2).into(),
+            context: format!(
+                "Discovered host: {}",
+                if host.hostname.is_empty() {
+                    "unknown"
+                } else {
+                    &host.hostname
+                }
+            ),
+            detection_queries: vec![
+                format!(r#"{{job="windows-security"}} |= "{}""#, host.ip),
+                format!(r#"{{job="firewall"}} |= "{}""#, host.ip),
+            ],
+            log_sources: vec![
+                "windows-security".into(),
+                "firewall".into(),
+                "netflow".into(),
+            ],
+            mitre_techniques: vec!["T1046".into()],
+        });
+        if !host.hostname.is_empty() {
+            detection_targets.push(DetectionTarget {
+                ioc_type: "hostname".into(),
+                value: host.hostname.clone(),
+                pyramid_level: 3,
+                pyramid_level_name: pyramid_level_name(3).into(),
+                context: format!("Host: {}", host.ip),
+                detection_queries: vec![format!(
+                    r#"{{job="windows-security"}} |~ "(?i){}""#,
+                    host.hostname
+                )],
+                log_sources: vec!["windows-security".into(), "dns".into()],
+                mitre_techniques: vec!["T1046".into()],
+            });
+        }
+    }
+
+    // Build detection targets from credentials
+    for cred in &state.all_credentials {
+        let account_name = if cred.domain.is_empty() {
+            cred.username.clone()
+        } else {
+            format!(r"{}\{}", cred.domain, cred.username)
+        };
+        detection_targets.push(DetectionTarget {
+            ioc_type: "user".into(),
+            value: account_name,
+            pyramid_level: 4,
+            pyramid_level_name: pyramid_level_name(4).into(),
+            context: format!(
+                "Compromised credential (source: {})",
+                if cred.source.is_empty() {
+                    "unknown"
+                } else {
+                    &cred.source
+                }
+            ),
+            detection_queries: vec![
+                format!(
+                    r#"{{job="windows-security"}} |~ "(?i)(4624|4625|4648)" |~ "(?i){}""#,
+                    cred.username
+                ),
+                format!(
+                    r#"{{job="windows-security"}} |~ "(?i)LogonType.*(3|10)" |~ "(?i){}""#,
+                    cred.username
+                ),
+            ],
+            log_sources: vec!["windows-security".into()],
+            mitre_techniques: vec!["T1078".into(), "T1003".into()],
+        });
+    }
+
+    // Build detection targets from hashes
+    for hash_obj in &state.all_hashes {
+        let hash_preview = if hash_obj.hash_value.len() > 16 {
+            format!("{}...", &hash_obj.hash_value[..16])
+        } else {
+            hash_obj.hash_value.clone()
+        };
+        detection_targets.push(DetectionTarget {
+            ioc_type: "hash".into(),
+            value: format!("{}:{}", hash_obj.username, hash_preview),
+            pyramid_level: 1,
+            pyramid_level_name: pyramid_level_name(1).into(),
+            context: format!(
+                "Dumped from {}",
+                if hash_obj.source.is_empty() {
+                    "unknown"
+                } else {
+                    &hash_obj.source
+                }
+            ),
+            detection_queries: vec![format!(
+                r#"{{job="windows-security"}} |= "4624" |~ "(?i){}" |~ "NTLM""#,
+                hash_obj.username
+            )],
+            log_sources: vec!["windows-security".into()],
+            mitre_techniques: vec!["T1003".into()],
+        });
+    }
+
+    // Build technique detections
+    let technique_detections =
+        build_technique_detections(state, techniques, &attack_start, &attack_end);
+
+    // Build priority queries
+    let priority_queries = build_priority_queries(state, techniques, &attack_start, &attack_end);
+
+    // Executive summary
+    let mut summary_parts = Vec::new();
+    summary_parts.push(format!(
+        "Red team operation {} ran from {} to {} UTC.",
+        state.operation_id,
+        attack_start.format("%Y-%m-%d %H:%M"),
+        attack_end.format("%Y-%m-%d %H:%M")
+    ));
+    if state.has_domain_admin {
+        summary_parts.push(
+            "**CRITICAL:** Domain Admin was achieved. \
+             Focus detection efforts on the attack path and lateral movement."
+                .into(),
+        );
+    }
+    summary_parts.push(format!(
+        "The attack used {} MITRE ATT&CK techniques, compromised {} credentials, \
+         and discovered {} hosts.",
+        techniques.len(),
+        state.all_credentials.len(),
+        state.all_hosts.len()
+    ));
+    if !state.exploited_vulnerabilities.is_empty() {
+        summary_parts.push(format!(
+            "Exploited {} vulnerabilities. \
+             Review technique detections below for specific guidance.",
+            state.exploited_vulnerabilities.len()
+        ));
+    }
+
+    DetectionPlaybook {
+        operation_id: state.operation_id.clone(),
+        generated_at: now.to_rfc3339(),
+        attack_window: AttackWindow {
+            start: attack_start.to_rfc3339(),
+            end: attack_end.to_rfc3339(),
+            duration_minutes,
+        },
+        summary: PlaybookSummary {
+            techniques_used: techniques.to_vec(),
+            technique_count: techniques.len(),
+            total_credentials: state.all_credentials.len(),
+            total_hosts: state.all_hosts.len(),
+            achieved_domain_admin: state.has_domain_admin,
+            domain_admin_path: state.domain_admin_path.clone(),
+        },
+        executive_summary: summary_parts.join(" "),
+        technique_detections,
+        detection_targets,
+        priority_queries,
+    }
+}
+
+fn build_technique_detections(
+    state: &SharedRedTeamState,
+    techniques: &[String],
+    attack_start: &DateTime<Utc>,
+    attack_end: &DateTime<Utc>,
+) -> HashMap<String, TechniqueDetection> {
+    let mut detections = HashMap::new();
+
+    for technique_id in techniques {
+        let detection = match technique_id.as_str() {
+            "T1046" => build_t1046(state, attack_start, attack_end),
+            "T1003" => build_t1003(state, attack_start, attack_end),
+            "T1003.001" => build_t1003_001(attack_start, attack_end),
+            "T1003.006" => build_t1003_006(attack_start, attack_end),
+            "T1078" => build_t1078(state, attack_start, attack_end),
+            "T1078.002" => build_t1078_002(attack_start, attack_end),
+            "T1110" => build_t1110(attack_start, attack_end),
+            "T1558" => build_t1558(attack_start, attack_end),
+            "T1558.001" => build_t1558_001(attack_start, attack_end),
+            "T1558.003" => build_t1558_003(attack_start, attack_end),
+            "T1021" => build_t1021(state, attack_start, attack_end),
+            "T1021.002" => build_t1021_002(state, attack_start, attack_end),
+            "T1649" => build_t1649(attack_start, attack_end),
+            "T1550" => build_t1550(attack_start, attack_end),
+            "T1550.002" => build_t1550_002(attack_start, attack_end),
+            other => {
+                // Try parent technique for sub-techniques
+                let parent = other.split('.').next().unwrap_or(other);
+                match parent {
+                    "T1046" => build_t1046(state, attack_start, attack_end),
+                    "T1003" => build_t1003(state, attack_start, attack_end),
+                    "T1078" => build_t1078(state, attack_start, attack_end),
+                    "T1558" => build_t1558(attack_start, attack_end),
+                    "T1021" => build_t1021(state, attack_start, attack_end),
+                    "T1550" => build_t1550(attack_start, attack_end),
+                    _ => {
+                        let name = get_technique_name(other);
+                        let display_name = if name.is_empty() {
+                            other.to_string()
+                        } else {
+                            name.to_string()
+                        };
+                        TechniqueDetection {
+                            technique_id: other.to_string(),
+                            technique_name: display_name,
+                            description: format!("Technique {other} was used during the attack."),
+                            occurred_at: vec![],
+                            targets: vec![],
+                            credentials_used: vec![],
+                            detection_queries: vec![],
+                            windows_event_ids: vec![],
+                            log_sources: vec![],
+                            detection_guidance: format!(
+                                "Review MITRE ATT&CK documentation for {other} detection guidance."
+                            ),
+                        }
+                    }
+                }
+            }
+        };
+        detections.insert(technique_id.clone(), detection);
+    }
+    detections
+}
+
+// ---- Individual technique detection builders ----
+
+fn build_t1046(
+    state: &SharedRedTeamState,
+    start: &DateTime<Utc>,
+    end: &DateTime<Utc>,
+) -> TechniqueDetection {
+    let targets: Vec<String> = state.all_hosts.iter().map(|h| h.ip.clone()).collect();
+    TechniqueDetection {
+        technique_id: "T1046".into(),
+        technique_name: "Network Service Discovery".into(),
+        description: "Attacker performed network scanning to discover hosts and services.".into(),
+        occurred_at: vec![],
+        targets,
+        credentials_used: vec![],
+        detection_queries: vec![PlaybookQuery {
+            technique_id: "T1046".into(),
+            technique_name: "Network Scan Detection".into(),
+            description: "Detect port scanning activity".into(),
+            logql:
+                r#"{job="firewall"} |~ "(?i)(scan|probe)" or {job="windows-security"} |= "5156""#
+                    .into(),
+            label_selector: r#"{job="windows-security"}"#.into(),
+            expected_evidence: vec![],
+            time_window: make_time_window(start, end),
+            priority: "medium".into(),
+            windows_event_ids: vec!["5156".into(), "5157".into()],
+        }],
+        windows_event_ids: vec!["5156".into(), "5157".into()],
+        log_sources: vec![
+            "firewall".into(),
+            "windows-security".into(),
+            "netflow".into(),
+        ],
+        detection_guidance: "Look for rapid connection attempts to multiple ports. \
+            Monitor Windows Filtering Platform events (5156/5157) for connection patterns."
+            .into(),
+    }
+}
+
+fn build_t1003(
+    state: &SharedRedTeamState,
+    start: &DateTime<Utc>,
+    end: &DateTime<Utc>,
+) -> TechniqueDetection {
+    let credentials_used: Vec<String> = state
+        .all_credentials
+        .iter()
+        .take(5)
+        .map(|c| {
+            if c.domain.is_empty() {
+                c.username.clone()
+            } else {
+                format!(r"{}\{}", c.domain, c.username)
+            }
+        })
+        .collect();
+    TechniqueDetection {
+        technique_id: "T1003".into(),
+        technique_name: "OS Credential Dumping".into(),
+        description: "Attacker dumped credentials from the operating system.".into(),
+        occurred_at: vec![],
+        targets: vec![],
+        credentials_used,
+        detection_queries: vec![PlaybookQuery {
+            technique_id: "T1003".into(),
+            technique_name: "Credential Dump Detection".into(),
+            description: "Detect LSASS access or credential dumping tools".into(),
+            logql: r#"{job="windows-security"} |~ "(?i)(lsass|mimikatz|procdump|secretsdump)""#
+                .into(),
+            label_selector: r#"{job="windows-security"}"#.into(),
+            expected_evidence: vec![],
+            time_window: make_time_window(start, end),
+            priority: "critical".into(),
+            windows_event_ids: vec!["4624".into(), "4648".into(), "4672".into(), "1".into()],
+        }],
+        windows_event_ids: vec!["4624".into(), "4648".into(), "4672".into(), "10".into()],
+        log_sources: vec!["windows-security".into(), "sysmon".into()],
+        detection_guidance: "Monitor Sysmon Event ID 10 (ProcessAccess) for LSASS access. \
+            Alert on known credential dumping tools in command lines."
+            .into(),
+    }
+}
+
+fn build_t1003_001(start: &DateTime<Utc>, end: &DateTime<Utc>) -> TechniqueDetection {
+    TechniqueDetection {
+        technique_id: "T1003.001".into(),
+        technique_name: "LSASS Memory".into(),
+        description: "Attacker accessed LSASS process memory to extract credentials.".into(),
+        occurred_at: vec![],
+        targets: vec![],
+        credentials_used: vec![],
+        detection_queries: vec![PlaybookQuery {
+            technique_id: "T1003.001".into(),
+            technique_name: "LSASS Access Detection".into(),
+            description: "Detect processes accessing LSASS memory".into(),
+            logql: r#"{job="sysmon"} |= "10" |~ "(?i)lsass.exe" |~ "GrantedAccess""#.into(),
+            label_selector: r#"{job="sysmon"}"#.into(),
+            expected_evidence: vec![],
+            time_window: make_time_window(start, end),
+            priority: "critical".into(),
+            windows_event_ids: vec!["10".into()],
+        }],
+        windows_event_ids: vec!["10".into()],
+        log_sources: vec!["sysmon".into()],
+        detection_guidance:
+            "Sysmon Event ID 10 with TargetImage containing lsass.exe is highly suspicious. \
+             Legitimate access typically comes from specific system processes only."
+                .into(),
+    }
+}
+
+fn build_t1003_006(start: &DateTime<Utc>, end: &DateTime<Utc>) -> TechniqueDetection {
+    TechniqueDetection {
+        technique_id: "T1003.006".into(),
+        technique_name: "DCSync".into(),
+        description: "Attacker used DCSync to replicate domain credentials.".into(),
+        occurred_at: vec![],
+        targets: vec![],
+        credentials_used: vec![],
+        detection_queries: vec![PlaybookQuery {
+            technique_id: "T1003.006".into(),
+            technique_name: "DCSync Detection".into(),
+            description: "Detect directory replication requests from non-DC".into(),
+            logql: r#"{job="windows-security"} |= "4662" |~ "(?i)(1131f6aa|1131f6ad|89e95b76)""#
+                .into(),
+            label_selector: r#"{job="windows-security"}"#.into(),
+            expected_evidence: vec!["Replicating Directory Changes requests".into()],
+            time_window: make_time_window(start, end),
+            priority: "critical".into(),
+            windows_event_ids: vec!["4662".into()],
+        }],
+        windows_event_ids: vec!["4662".into()],
+        log_sources: vec!["windows-security".into()],
+        detection_guidance: "Monitor Event ID 4662 for DS-Replication-Get-Changes requests. \
+             GUIDs: 1131f6aa (Get-Changes), 1131f6ad (Get-Changes-All). \
+             Alert when source is not a domain controller."
+            .into(),
+    }
+}
+
+fn build_t1078(
+    state: &SharedRedTeamState,
+    start: &DateTime<Utc>,
+    end: &DateTime<Utc>,
+) -> TechniqueDetection {
+    let credentials: Vec<String> = state
+        .all_credentials
+        .iter()
+        .take(10)
+        .map(|c| {
+            if c.domain.is_empty() {
+                c.username.clone()
+            } else {
+                format!(r"{}\{}", c.domain, c.username)
+            }
+        })
+        .collect();
+    TechniqueDetection {
+        technique_id: "T1078".into(),
+        technique_name: "Valid Accounts".into(),
+        description: "Attacker used valid credentials for access.".into(),
+        occurred_at: vec![],
+        targets: vec![],
+        credentials_used: credentials,
+        detection_queries: vec![PlaybookQuery {
+            technique_id: "T1078".into(),
+            technique_name: "Account Usage Detection".into(),
+            description: "Detect authentication from compromised accounts".into(),
+            logql: r#"{job="windows-security"} |~ "(4624|4625)" |~ "LogonType.*(3|10)""#.into(),
+            label_selector: r#"{job="windows-security"}"#.into(),
+            expected_evidence: vec![],
+            time_window: make_time_window(start, end),
+            priority: "high".into(),
+            windows_event_ids: vec!["4624".into(), "4625".into()],
+        }],
+        windows_event_ids: vec!["4624".into(), "4625".into(), "4648".into()],
+        log_sources: vec!["windows-security".into()],
+        detection_guidance:
+            "Monitor authentication events for unusual source IPs, times, or logon types. \
+             Implement impossible travel detection for user accounts."
+                .into(),
+    }
+}
+
+fn build_t1078_002(start: &DateTime<Utc>, end: &DateTime<Utc>) -> TechniqueDetection {
+    TechniqueDetection {
+        technique_id: "T1078.002".into(),
+        technique_name: "Domain Accounts".into(),
+        description: "Attacker used domain account credentials.".into(),
+        occurred_at: vec![],
+        targets: vec![],
+        credentials_used: vec![],
+        detection_queries: vec![PlaybookQuery {
+            technique_id: "T1078.002".into(),
+            technique_name: "Domain Account Abuse".into(),
+            description: "Detect domain admin or privileged account usage".into(),
+            logql: r#"{job="windows-security"} |= "4672" |~ "(?i)admin""#.into(),
+            label_selector: r#"{job="windows-security"}"#.into(),
+            expected_evidence: vec![],
+            time_window: make_time_window(start, end),
+            priority: "critical".into(),
+            windows_event_ids: vec!["4672".into(), "4624".into()],
+        }],
+        windows_event_ids: vec!["4672".into(), "4624".into(), "4648".into()],
+        log_sources: vec!["windows-security".into()],
+        detection_guidance: "Monitor Event ID 4672 (special privileges assigned). \
+             Alert on Domain Admin logons from unusual sources."
+            .into(),
+    }
+}
+
+fn build_t1110(start: &DateTime<Utc>, end: &DateTime<Utc>) -> TechniqueDetection {
+    TechniqueDetection {
+        technique_id: "T1110".into(),
+        technique_name: "Brute Force".into(),
+        description: "Attacker attempted credential guessing attacks.".into(),
+        occurred_at: vec![],
+        targets: vec![],
+        credentials_used: vec![],
+        detection_queries: vec![PlaybookQuery {
+            technique_id: "T1110".into(),
+            technique_name: "Brute Force Detection".into(),
+            description: "Detect multiple failed authentication attempts".into(),
+            logql: r#"{job="windows-security"} |= "4625""#.into(),
+            label_selector: r#"{job="windows-security"}"#.into(),
+            expected_evidence: vec!["Multiple failed logon attempts".into()],
+            time_window: make_time_window(start, end),
+            priority: "high".into(),
+            windows_event_ids: vec!["4625".into()],
+        }],
+        windows_event_ids: vec!["4625".into(), "4771".into()],
+        log_sources: vec!["windows-security".into()],
+        detection_guidance: "Count Event ID 4625 per source IP and username. \
+             Alert on >5 failures in 5 minutes from same source."
+            .into(),
+    }
+}
+
+fn build_t1558(start: &DateTime<Utc>, end: &DateTime<Utc>) -> TechniqueDetection {
+    TechniqueDetection {
+        technique_id: "T1558".into(),
+        technique_name: "Steal or Forge Kerberos Tickets".into(),
+        description: "Attacker manipulated Kerberos tickets for access.".into(),
+        occurred_at: vec![],
+        targets: vec![],
+        credentials_used: vec![],
+        detection_queries: vec![PlaybookQuery {
+            technique_id: "T1558".into(),
+            technique_name: "Kerberos Attack Detection".into(),
+            description: "Detect suspicious Kerberos ticket requests".into(),
+            logql: r#"{job="windows-security"} |~ "(4768|4769)" |~ "(?i)(RC4|0x17)""#.into(),
+            label_selector: r#"{job="windows-security"}"#.into(),
+            expected_evidence: vec![],
+            time_window: make_time_window(start, end),
+            priority: "critical".into(),
+            windows_event_ids: vec!["4768".into(), "4769".into()],
+        }],
+        windows_event_ids: vec!["4768".into(), "4769".into(), "4770".into()],
+        log_sources: vec!["windows-security".into()],
+        detection_guidance: "Monitor for TGS requests with RC4 encryption (Kerberoasting). \
+             Alert on TGT requests without pre-authentication (AS-REP Roasting)."
+            .into(),
+    }
+}
+
+fn build_t1558_001(start: &DateTime<Utc>, end: &DateTime<Utc>) -> TechniqueDetection {
+    TechniqueDetection {
+        technique_id: "T1558.001".into(),
+        technique_name: "Golden Ticket".into(),
+        description: "Attacker forged a Kerberos TGT using the krbtgt hash.".into(),
+        occurred_at: vec![],
+        targets: vec![],
+        credentials_used: vec![],
+        detection_queries: vec![PlaybookQuery {
+            technique_id: "T1558.001".into(),
+            technique_name: "Golden Ticket Detection".into(),
+            description: "Detect forged TGT usage patterns".into(),
+            logql: r#"{job="windows-security"} |= "4769" |~ "(?i)krbtgt""#.into(),
+            label_selector: r#"{job="windows-security"}"#.into(),
+            expected_evidence: vec![
+                "TGS requests for krbtgt".into(),
+                "Unusual ticket lifetimes".into(),
+            ],
+            time_window: make_time_window(start, end),
+            priority: "critical".into(),
+            windows_event_ids: vec!["4769".into()],
+        }],
+        windows_event_ids: vec!["4768".into(), "4769".into()],
+        log_sources: vec!["windows-security".into()],
+        detection_guidance: "Golden Tickets have unusual properties: long lifetimes, \
+             non-standard encryption, requests from unusual clients. \
+             Compare TGT properties against normal baselines."
+            .into(),
+    }
+}
+
+fn build_t1558_003(start: &DateTime<Utc>, end: &DateTime<Utc>) -> TechniqueDetection {
+    TechniqueDetection {
+        technique_id: "T1558.003".into(),
+        technique_name: "Kerberoasting".into(),
+        description: "Attacker requested service tickets for offline cracking.".into(),
+        occurred_at: vec![],
+        targets: vec![],
+        credentials_used: vec![],
+        detection_queries: vec![PlaybookQuery {
+            technique_id: "T1558.003".into(),
+            technique_name: "Kerberoasting Detection".into(),
+            description: "Detect TGS requests with RC4 encryption".into(),
+            logql: r#"{job="windows-security"} |= "4769" |~ "(?i)(0x17|RC4)""#.into(),
+            label_selector: r#"{job="windows-security"}"#.into(),
+            expected_evidence: vec!["TGS requests with RC4-HMAC encryption".into()],
+            time_window: make_time_window(start, end),
+            priority: "high".into(),
+            windows_event_ids: vec!["4769".into()],
+        }],
+        windows_event_ids: vec!["4769".into()],
+        log_sources: vec!["windows-security".into()],
+        detection_guidance: "Monitor Event ID 4769 for encryption type 0x17 (RC4-HMAC). \
+             Modern environments should use AES. Alert on RC4 TGS requests."
+            .into(),
+    }
+}
+
+fn build_t1021(
+    state: &SharedRedTeamState,
+    start: &DateTime<Utc>,
+    end: &DateTime<Utc>,
+) -> TechniqueDetection {
+    let targets: Vec<String> = state.all_hosts.iter().map(|h| h.ip.clone()).collect();
+    TechniqueDetection {
+        technique_id: "T1021".into(),
+        technique_name: "Remote Services".into(),
+        description: "Attacker used remote services for lateral movement.".into(),
+        occurred_at: vec![],
+        targets,
+        credentials_used: vec![],
+        detection_queries: vec![PlaybookQuery {
+            technique_id: "T1021".into(),
+            technique_name: "Remote Service Usage".into(),
+            description: "Detect lateral movement via remote services".into(),
+            logql: r#"{job="windows-security"} |= "4624" |~ "LogonType.*(3|10)""#.into(),
+            label_selector: r#"{job="windows-security"}"#.into(),
+            expected_evidence: vec![],
+            time_window: make_time_window(start, end),
+            priority: "high".into(),
+            windows_event_ids: vec!["4624".into()],
+        }],
+        windows_event_ids: vec!["4624".into(), "4648".into()],
+        log_sources: vec!["windows-security".into()],
+        detection_guidance: "Monitor Type 3 (network) and Type 10 (remote interactive) logons. \
+             Correlate with process execution for lateral movement detection."
+            .into(),
+    }
+}
+
+fn build_t1021_002(
+    state: &SharedRedTeamState,
+    start: &DateTime<Utc>,
+    end: &DateTime<Utc>,
+) -> TechniqueDetection {
+    let targets: Vec<String> = state.all_hosts.iter().map(|h| h.ip.clone()).collect();
+    let shares: Vec<String> = state
+        .all_shares
+        .iter()
+        .take(5)
+        .map(|s| format!("{}:{}", s.host, s.name))
+        .collect();
+    TechniqueDetection {
+        technique_id: "T1021.002".into(),
+        technique_name: "SMB/Windows Admin Shares".into(),
+        description: "Attacker accessed admin shares for lateral movement.".into(),
+        occurred_at: vec![],
+        targets,
+        credentials_used: vec![],
+        detection_queries: vec![PlaybookQuery {
+            technique_id: "T1021.002".into(),
+            technique_name: "Admin Share Access".into(),
+            description: r#"Detect access to C$, ADMIN$, IPC$ shares"#.into(),
+            logql: r#"{job="windows-security"} |= "5140" |~ "(?i)(C\$|ADMIN\$|IPC\$)""#.into(),
+            label_selector: r#"{job="windows-security"}"#.into(),
+            expected_evidence: shares
+                .iter()
+                .map(|s| format!("Share access: {s}"))
+                .collect(),
+            time_window: make_time_window(start, end),
+            priority: "high".into(),
+            windows_event_ids: vec!["5140".into(), "5145".into()],
+        }],
+        windows_event_ids: vec!["5140".into(), "5145".into()],
+        log_sources: vec!["windows-security".into()],
+        detection_guidance: "Monitor Event ID 5140/5145 for admin share access. \
+             Alert on C$, ADMIN$, or IPC$ access from non-admin workstations."
+            .into(),
+    }
+}
+
+fn build_t1649(start: &DateTime<Utc>, end: &DateTime<Utc>) -> TechniqueDetection {
+    TechniqueDetection {
+        technique_id: "T1649".into(),
+        technique_name: "Steal or Forge Authentication Certificates".into(),
+        description: "Attacker exploited AD Certificate Services.".into(),
+        occurred_at: vec![],
+        targets: vec![],
+        credentials_used: vec![],
+        detection_queries: vec![PlaybookQuery {
+            technique_id: "T1649".into(),
+            technique_name: "ADCS Attack Detection".into(),
+            description: "Detect suspicious certificate requests".into(),
+            logql: r#"{job="windows-security"} |~ "(4886|4887)" |~ "(?i)certificate""#.into(),
+            label_selector: r#"{job="windows-security"}"#.into(),
+            expected_evidence: vec![],
+            time_window: make_time_window(start, end),
+            priority: "critical".into(),
+            windows_event_ids: vec!["4886".into(), "4887".into()],
+        }],
+        windows_event_ids: vec!["4886".into(), "4887".into(), "4768".into()],
+        log_sources: vec!["windows-security".into(), "ad-cs".into()],
+        detection_guidance: "Monitor certificate enrollment events (4886/4887). \
+             Alert on certificate requests with unusual templates or SANs. \
+             Watch for ESC1-ESC8 vulnerability patterns."
+            .into(),
+    }
+}
+
+fn build_t1550(start: &DateTime<Utc>, end: &DateTime<Utc>) -> TechniqueDetection {
+    TechniqueDetection {
+        technique_id: "T1550".into(),
+        technique_name: "Use Alternate Authentication Material".into(),
+        description: "Attacker used stolen authentication material (hashes, tickets).".into(),
+        occurred_at: vec![],
+        targets: vec![],
+        credentials_used: vec![],
+        detection_queries: vec![PlaybookQuery {
+            technique_id: "T1550".into(),
+            technique_name: "Auth Material Abuse".into(),
+            description: "Detect pass-the-hash or ticket reuse".into(),
+            logql: r#"{job="windows-security"} |= "4624" |~ "NTLM" |~ "LogonType.*3""#.into(),
+            label_selector: r#"{job="windows-security"}"#.into(),
+            expected_evidence: vec![],
+            time_window: make_time_window(start, end),
+            priority: "critical".into(),
+            windows_event_ids: vec!["4624".into()],
+        }],
+        windows_event_ids: vec!["4624".into(), "4648".into()],
+        log_sources: vec!["windows-security".into()],
+        detection_guidance: "Monitor for NTLM authentication anomalies. \
+             Pass-the-hash often shows as Type 3 logon with NTLM package."
+            .into(),
+    }
+}
+
+fn build_t1550_002(start: &DateTime<Utc>, end: &DateTime<Utc>) -> TechniqueDetection {
+    TechniqueDetection {
+        technique_id: "T1550.002".into(),
+        technique_name: "Pass the Hash".into(),
+        description: "Attacker used NTLM hashes for authentication.".into(),
+        occurred_at: vec![],
+        targets: vec![],
+        credentials_used: vec![],
+        detection_queries: vec![PlaybookQuery {
+            technique_id: "T1550.002".into(),
+            technique_name: "Pass-the-Hash Detection".into(),
+            description: "Detect NTLM Type 3 logons indicating PtH".into(),
+            logql: r#"{job="windows-security"} |= "4624" |~ "NTLM" |~ "LogonType.*3""#.into(),
+            label_selector: r#"{job="windows-security"}"#.into(),
+            expected_evidence: vec!["Network logon with NTLM authentication".into()],
+            time_window: make_time_window(start, end),
+            priority: "critical".into(),
+            windows_event_ids: vec!["4624".into()],
+        }],
+        windows_event_ids: vec!["4624".into()],
+        log_sources: vec!["windows-security".into()],
+        detection_guidance: "Pass-the-Hash shows as Event 4624 with LogonType 3 and NTLM package. \
+             Correlate with process creation to detect lateral movement chains."
+            .into(),
+    }
+}
+
+// ---- Priority query builder ----
+
+fn build_priority_queries(
+    state: &SharedRedTeamState,
+    techniques: &[String],
+    attack_start: &DateTime<Utc>,
+    attack_end: &DateTime<Utc>,
+) -> Vec<PlaybookQuery> {
+    let mut queries = Vec::new();
+
+    // 1. Domain Admin detection (highest priority if achieved)
+    if state.has_domain_admin {
+        queries.push(PlaybookQuery {
+            technique_id: "T1078.002".into(),
+            technique_name: "Domain Admin Access".into(),
+            description: "Detect Domain Admin logon events".into(),
+            logql: r#"{job="windows-security"} |= "4672" |~ "(?i)(Domain Admins|Administrator)""#
+                .into(),
+            label_selector: r#"{job="windows-security"}"#.into(),
+            expected_evidence: vec!["Special privileges assigned to new logon".into()],
+            time_window: make_time_window(attack_start, attack_end),
+            priority: "critical".into(),
+            windows_event_ids: vec!["4672".into(), "4624".into()],
+        });
+    }
+
+    // 2. Credential dumping detection
+    if !state.all_hashes.is_empty() {
+        let usernames: Vec<&str> = state
+            .all_hashes
+            .iter()
+            .take(5)
+            .map(|h| h.username.as_str())
+            .collect();
+        let username_pattern = usernames.join("|");
+        queries.push(PlaybookQuery {
+            technique_id: "T1003".into(),
+            technique_name: "Credential Dumping".into(),
+            description: format!(
+                "Detect credential access for dumped accounts: {}",
+                usernames.join(", ")
+            ),
+            logql: format!(
+                r#"{{job="windows-security"}} |~ "(?i)(4624|4648)" |~ "(?i)({username_pattern})""#
+            ),
+            label_selector: r#"{job="windows-security"}"#.into(),
+            expected_evidence: usernames
+                .iter()
+                .map(|u| format!("Logon events for {u}"))
+                .collect(),
+            time_window: make_time_window(attack_start, attack_end),
+            priority: "critical".into(),
+            windows_event_ids: vec!["4624".into(), "4648".into(), "4672".into()],
+        });
+    }
+
+    // 3. Lateral movement detection
+    if state.all_hosts.len() > 1 {
+        let host_ips: Vec<&str> = state
+            .all_hosts
+            .iter()
+            .take(5)
+            .map(|h| h.ip.as_str())
+            .collect();
+        let ip_pattern = host_ips.join("|");
+        queries.push(PlaybookQuery {
+            technique_id: "T1021.002".into(),
+            technique_name: "Lateral Movement via SMB".into(),
+            description: "Detect lateral movement to discovered hosts".into(),
+            logql: format!(
+                r#"{{job="windows-security"}} |= "4624" |~ "LogonType.*(3|10)" |~ "({ip_pattern})""#
+            ),
+            label_selector: r#"{job="windows-security"}"#.into(),
+            expected_evidence: vec!["Network logon (Type 3) events".into()],
+            time_window: make_time_window(attack_start, attack_end),
+            priority: "high".into(),
+            windows_event_ids: vec!["4624".into(), "4648".into()],
+        });
+    }
+
+    // 4. Kerberos attack detection
+    if techniques.iter().any(|t| t.starts_with("T1558")) {
+        queries.push(PlaybookQuery {
+            technique_id: "T1558".into(),
+            technique_name: "Kerberos Ticket Attacks".into(),
+            description: "Detect Kerberoasting, AS-REP Roasting, or Golden Ticket".into(),
+            logql: r#"{job="windows-security"} |~ "(4768|4769)" |~ "(?i)(RC4|0x17|0x18)""#.into(),
+            label_selector: r#"{job="windows-security"}"#.into(),
+            expected_evidence: vec![
+                "TGS requests with RC4 encryption (Kerberoasting indicator)".into()
+            ],
+            time_window: make_time_window(attack_start, attack_end),
+            priority: "high".into(),
+            windows_event_ids: vec!["4768".into(), "4769".into()],
+        });
+    }
+
+    // 5. Network discovery detection
+    queries.push(PlaybookQuery {
+        technique_id: "T1046".into(),
+        technique_name: "Network Service Discovery".into(),
+        description: "Detect network scanning activity".into(),
+        logql:
+            r#"{job="firewall"} |~ "(?i)(scan|nmap|masscan)" or {job="windows-security"} |= "5156""#
+                .into(),
+        label_selector: r#"{job="windows-security"}"#.into(),
+        expected_evidence: vec![
+            "Firewall connection events".into(),
+            "Port scan patterns".into(),
+        ],
+        time_window: make_time_window(attack_start, attack_end),
+        priority: "medium".into(),
+        windows_event_ids: vec!["5156".into()],
+    });
+
+    // 6. Compromised account activity (top 3)
+    for cred in state.all_credentials.iter().take(3) {
+        let account = if cred.domain.is_empty() {
+            cred.username.clone()
+        } else {
+            format!(r"{}\{}", cred.domain, cred.username)
+        };
+        queries.push(PlaybookQuery {
+            technique_id: "T1078".into(),
+            technique_name: "Valid Account Usage".into(),
+            description: format!("Detect activity from compromised account: {account}"),
+            logql: format!(
+                r#"{{job="windows-security"}} |~ "(?i)(4624|4625|4648|4672)" |~ "(?i){}""#,
+                cred.username
+            ),
+            label_selector: r#"{job="windows-security"}"#.into(),
+            expected_evidence: vec![format!("Authentication events for {account}")],
+            time_window: make_time_window(attack_start, attack_end),
+            priority: "high".into(),
+            windows_event_ids: vec!["4624".into(), "4625".into(), "4648".into(), "4672".into()],
+        });
+    }
+
+    // Sort by priority
+    let priority_order = |p: &str| -> u8 {
+        match p {
+            "critical" => 0,
+            "high" => 1,
+            "medium" => 2,
+            "low" => 3,
+            _ => 4,
+        }
+    };
+    queries.sort_by_key(|q| priority_order(&q.priority));
+
+    queries
+}
+
+// ---- Markdown generation ----
+
+fn generate_detection_markdown(playbook: &DetectionPlaybook) -> String {
+    let mut md = String::with_capacity(8192);
+
+    md.push_str("# Detection Playbook\n\n");
+    md.push_str(&format!("**Operation ID:** `{}`\n", playbook.operation_id));
+    md.push_str(&format!("**Generated:** {}\n", playbook.generated_at));
+    md.push_str(&format!(
+        "**Attack Window:** {} to {}\n\n",
+        playbook.attack_window.start, playbook.attack_window.end
+    ));
+    md.push_str("---\n\n");
+
+    // Executive Summary
+    md.push_str("## Executive Summary\n\n");
+    md.push_str(&playbook.executive_summary);
+    md.push_str("\n\n---\n\n");
+
+    // Attack Statistics
+    md.push_str("## Attack Statistics\n\n");
+    md.push_str(&format!(
+        "- **Techniques Used:** {}\n",
+        playbook.summary.technique_count
+    ));
+    md.push_str(&format!(
+        "- **Credentials Harvested:** {}\n",
+        playbook.summary.total_credentials
+    ));
+    md.push_str(&format!(
+        "- **Hosts Discovered:** {}\n",
+        playbook.summary.total_hosts
+    ));
+    md.push_str(&format!(
+        "- **Domain Admin Achieved:** {}\n",
+        if playbook.summary.achieved_domain_admin {
+            "Yes"
+        } else {
+            "No"
+        }
+    ));
+    if let Some(path) = &playbook.summary.domain_admin_path {
+        md.push_str(&format!("- **DA Path:** {path}\n"));
+    }
+    md.push_str("\n---\n\n");
+
+    // Priority Detection Queries
+    md.push_str("## Priority Detection Queries\n\n");
+    if !playbook.priority_queries.is_empty() {
+        md.push_str(
+            "Run these queries first - they target the most critical attack techniques.\n\n",
+        );
+        for (i, query) in playbook.priority_queries.iter().take(10).enumerate() {
+            md.push_str(&format!(
+                "### {}. {}: {}\n\n",
+                i + 1,
+                query.technique_id,
+                query.technique_name
+            ));
+            md.push_str(&format!(
+                "**Priority:** {}\n",
+                query.priority.to_uppercase()
+            ));
+            md.push_str(&format!("**Description:** {}\n\n", query.description));
+            md.push_str("```logql\n");
+            md.push_str(&query.logql);
+            md.push_str("\n```\n\n");
+            if !query.windows_event_ids.is_empty() {
+                md.push_str(&format!(
+                    "**Event IDs:** {}\n",
+                    query.windows_event_ids.join(", ")
+                ));
+            }
+            if !query.expected_evidence.is_empty() {
+                md.push_str(&format!(
+                    "**Expected Evidence:** {}\n",
+                    query.expected_evidence.join(", ")
+                ));
+            }
+            md.push('\n');
+        }
+    }
+    md.push_str("---\n\n");
+
+    // Detection Targets (IOCs)
+    md.push_str("## Detection Targets (IOCs)\n\n");
+    if !playbook.detection_targets.is_empty() {
+        md.push_str("| Type | Value | Pyramid Level | Detection |\n");
+        md.push_str("|------|-------|---------------|----------|\n");
+
+        let mut sorted_targets: Vec<&DetectionTarget> = playbook.detection_targets.iter().collect();
+        sorted_targets.sort_by(|a, b| b.pyramid_level.cmp(&a.pyramid_level));
+
+        for target in sorted_targets.iter().take(20) {
+            let value_display = truncate_str(&target.value, 40);
+            let detection_preview = target
+                .detection_queries
+                .first()
+                .map(|q| truncate_str(q, 30))
+                .unwrap_or_else(|| "N/A".into());
+            md.push_str(&format!(
+                "| {} | `{}` | {} | {} |\n",
+                target.ioc_type, value_display, target.pyramid_level_name, detection_preview
+            ));
+        }
+    }
+    md.push_str("\n---\n\n");
+
+    // Technique-Specific Detections
+    md.push_str("## Technique-Specific Detections\n\n");
+    let mut sorted_techniques: Vec<(&String, &TechniqueDetection)> =
+        playbook.technique_detections.iter().collect();
+    sorted_techniques.sort_by(|(a, _), (b, _)| a.cmp(b));
+
+    for (tech_id, detection) in sorted_techniques {
+        md.push_str(&format!(
+            "### {}: {}\n\n",
+            tech_id, detection.technique_name
+        ));
+        md.push_str(if detection.description.is_empty() {
+            "No description available."
+        } else {
+            &detection.description
+        });
+        md.push_str("\n\n");
+
+        if !detection.targets.is_empty() {
+            let targets: Vec<&str> = detection
+                .targets
+                .iter()
+                .take(5)
+                .map(|s| s.as_str())
+                .collect();
+            md.push_str(&format!("**Targets:** {}\n", targets.join(", ")));
+        }
+        if !detection.credentials_used.is_empty() {
+            let creds: Vec<&str> = detection
+                .credentials_used
+                .iter()
+                .take(5)
+                .map(|s| s.as_str())
+                .collect();
+            md.push_str(&format!("**Credentials Used:** {}\n", creds.join(", ")));
+        }
+        if !detection.windows_event_ids.is_empty() {
+            md.push_str(&format!(
+                "**Event IDs to Monitor:** {}\n",
+                detection.windows_event_ids.join(", ")
+            ));
+        }
+        if !detection.detection_guidance.is_empty() {
+            md.push_str(&format!(
+                "\n**Detection Guidance:** {}\n",
+                detection.detection_guidance
+            ));
+        }
+        if !detection.detection_queries.is_empty() {
+            md.push_str("\n**Queries:**\n\n");
+            for query in detection.detection_queries.iter().take(3) {
+                md.push_str("```logql\n");
+                md.push_str(&query.logql);
+                md.push_str("\n```\n\n");
+            }
+        }
+        md.push('\n');
+    }
+
+    md.push_str("---\n\n*Generated by Ares Detection Playbook Export*\n");
+    md
 }
 
 // ============================================================================
@@ -4099,11 +5386,13 @@ fn parse_datetime(s: &str) -> Result<DateTime<Utc>> {
         .map_err(|e| anyhow::anyhow!("Failed to parse datetime '{s}': {e}"))
 }
 
-fn truncate_str(s: &str, max_len: usize) -> String {
-    if s.len() > max_len {
-        format!("{}...", &s[..max_len.saturating_sub(3)])
-    } else {
+fn truncate_str(s: &str, max_chars: usize) -> String {
+    let char_count = s.chars().count();
+    if char_count <= max_chars {
         s.to_string()
+    } else {
+        let truncated: String = s.chars().take(max_chars).collect();
+        format!("{truncated}...")
     }
 }
 

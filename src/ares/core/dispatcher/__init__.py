@@ -28,9 +28,14 @@ from ares.core.dispatcher._dispatcher import RedTeamDispatcher
 
 # Re-export extraction utilities
 from ares.core.dispatcher.extraction import (
+    extract_delegation_entries,
+    extract_domain_sid,
     extract_host_from_spn,
     extract_hosts_from_output,
+    extract_kerberos_hashes,
+    extract_ntlm_hashes,
     extract_plaintext_passwords_from_output,
+    extract_secretsdump_hashes,
     extract_shares_from_output,
     extract_ticket_path_from_output,
     extract_users_from_output,
@@ -40,9 +45,14 @@ __all__ = [
     # Main dispatcher class
     "RedTeamDispatcher",
     # Extraction utilities
+    "extract_delegation_entries",
+    "extract_domain_sid",
     "extract_host_from_spn",
     "extract_hosts_from_output",
+    "extract_kerberos_hashes",
+    "extract_ntlm_hashes",
     "extract_plaintext_passwords_from_output",
+    "extract_secretsdump_hashes",
     "extract_shares_from_output",
     "extract_ticket_path_from_output",
     "extract_users_from_output",

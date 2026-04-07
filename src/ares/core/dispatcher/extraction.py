@@ -5,13 +5,28 @@ from tool command output (netexec, Impacket, etc.). These are used by
 the RedTeamDispatcher to process task results.
 
 All functions are pure (no side effects) and can be tested independently.
+
+When the native ``ares_core`` Rust extension is available (built via maturin),
+host and share parsing is delegated to compiled Rust regex for ~10-50x speedup.
+The Python fallback is kept for environments where the extension is not installed.
 """
 
 from __future__ import annotations
 
 import re
+from typing import Any
 
 from ares.core.models import Host, Share
+
+# ---------------------------------------------------------------------------
+# Try to import the Rust extension for high-performance parsing
+# ---------------------------------------------------------------------------
+try:
+    import ares_core as _rust  # type: ignore[import-untyped]
+
+    _HAS_RUST = True
+except ImportError:
+    _HAS_RUST = False
 
 
 def extract_hosts_from_output(output: str) -> list[Host]:
@@ -29,6 +44,40 @@ def extract_hosts_from_output(output: str) -> list[Host]:
     if not output:
         return []
 
+    if _HAS_RUST:
+        return _rust_extract_hosts(output)
+
+    return _py_extract_hosts(output)
+
+
+def _rust_extract_hosts(output: str) -> list[Host]:
+    """Delegate host extraction to the Rust extension."""
+    hosts: list[Host] = []
+    seen: set[str] = set()
+    for h in _rust.py_extract_hosts(output):
+        ip = h["ip"]
+        if ip in seen:
+            continue
+        seen.add(ip)
+        hostname = h.get("hostname", "")
+        domain = h.get("domain", "")
+        # Construct FQDN if domain is present and hostname isn't already qualified
+        if domain and hostname and not hostname.lower().endswith(domain.lower()):
+            hostname = f"{hostname.lower()}.{domain}"
+        hosts.append(
+            Host(
+                ip=ip,
+                hostname=hostname,
+                os=h.get("os", ""),
+                roles=[],
+                services=[],
+            )
+        )
+    return hosts
+
+
+def _py_extract_hosts(output: str) -> list[Host]:
+    """Python fallback for host extraction."""
     hosts: list[Host] = []
     seen: set[str] = set()
 
@@ -319,6 +368,27 @@ def extract_shares_from_output(output: str, default_host: str = "") -> list[Shar
     if not output:
         return []
 
+    if _HAS_RUST:
+        return _rust_extract_shares(output)
+
+    return _py_extract_shares(output, default_host)
+
+
+def _rust_extract_shares(output: str) -> list[Share]:
+    """Delegate share extraction to the Rust extension."""
+    return [
+        Share(
+            host=s["host"],
+            name=s["name"],
+            permissions=s.get("permissions", ""),
+            comment=s.get("comment", ""),
+        )
+        for s in _rust.py_extract_shares(output)
+    ]
+
+
+def _py_extract_shares(output: str, default_host: str = "") -> list[Share]:
+    """Python fallback for share extraction."""
     shares: list[Share] = []
     seen: set[tuple[str, str]] = set()
     in_table = False
@@ -445,10 +515,219 @@ def extract_host_from_spn(spn: str) -> str | None:
     return target or None
 
 
+# ---------------------------------------------------------------------------
+# Rust-accelerated parsing functions for secretsdump, hashes, delegations
+# ---------------------------------------------------------------------------
+
+
+def extract_secretsdump_hashes(output: str) -> list[dict[str, Any]]:
+    """Extract NTLM hashes from secretsdump output using Rust when available.
+
+    Returns:
+        List of dicts with keys: username, domain, rid, lm_hash, nt_hash,
+        hash_value, is_krbtgt, is_administrator, is_machine_account.
+    """
+    if not output:
+        return []
+    if _HAS_RUST:
+        return list(_rust.py_parse_secretsdump(output))
+    return _py_extract_secretsdump_hashes(output)
+
+
+def _py_extract_secretsdump_hashes(output: str) -> list[dict[str, Any]]:
+    """Python fallback for secretsdump hash extraction."""
+    results: list[dict[str, Any]] = []
+    empty_nt = "31d6cfe0d16ae931b73c59d7e0c089c0"
+    # Pattern: [domain\]user:rid:lm_hash:nt_hash:::
+    pattern = re.compile(
+        r"^(?:([^\\:\s]+)\\)?([^:\\]+):(\d+):([a-fA-F0-9]{32}):([a-fA-F0-9]{32}):::",
+    )
+    for line in output.splitlines():
+        m = pattern.match(line.strip())
+        if not m:
+            continue
+        domain = (m.group(1) or "").lower()
+        username = m.group(2)
+        rid = int(m.group(3))
+        lm_hash = m.group(4).lower()
+        nt_hash = m.group(5).lower()
+        if nt_hash == empty_nt:
+            continue
+        results.append(
+            {
+                "username": username,
+                "domain": domain,
+                "rid": rid,
+                "lm_hash": lm_hash,
+                "nt_hash": nt_hash,
+                "hash_value": f"{lm_hash}:{nt_hash}",
+                "is_krbtgt": rid == 502 or username.lower() == "krbtgt",
+                "is_administrator": rid == 500 or username.lower() == "administrator",
+                "is_machine_account": username.endswith("$"),
+            }
+        )
+    return results
+
+
+def extract_kerberos_hashes(output: str) -> list[dict[str, Any]]:
+    """Extract Kerberos hashes (TGS/AS-REP) from tool output using Rust when available.
+
+    Returns:
+        List of dicts with keys: username, domain, hash_value, hash_type.
+    """
+    if not output:
+        return []
+    if _HAS_RUST:
+        return list(_rust.py_extract_kerberos_hashes(output))
+    return _py_extract_kerberos_hashes(output)
+
+
+def _py_extract_kerberos_hashes(output: str) -> list[dict[str, Any]]:
+    """Python fallback for Kerberos hash extraction."""
+    results: list[dict[str, Any]] = []
+    tgs_re = re.compile(r"(\$krb5tgs\$\d+\$\*?([^$*]+)\$([^$]+)\$[^\s]+)")
+    asrep_re = re.compile(r"(\$krb5asrep\$\d+\$([^@:]+)@([^:]+):[^\s]+)")
+
+    for line in output.splitlines():
+        stripped = line.strip()
+        m = tgs_re.search(stripped)
+        if m:
+            results.append(
+                {
+                    "username": m.group(2),
+                    "domain": m.group(3),
+                    "hash_value": m.group(1),
+                    "hash_type": "TGS",
+                }
+            )
+            continue
+        m = asrep_re.search(stripped)
+        if m:
+            results.append(
+                {
+                    "username": m.group(2),
+                    "domain": m.group(3),
+                    "hash_value": m.group(1),
+                    "hash_type": "AsRep",
+                }
+            )
+    return results
+
+
+def extract_ntlm_hashes(output: str) -> list[dict[str, Any]]:
+    """Extract NTLM hashes from tool output using Rust when available.
+
+    Returns:
+        List of dicts with keys: username, domain, rid, lm_hash, nt_hash,
+        hash_value, is_krbtgt, is_administrator, is_machine_account.
+    """
+    if not output:
+        return []
+    if _HAS_RUST:
+        return list(_rust.py_extract_ntlm_hashes(output))
+    return _py_extract_secretsdump_hashes(output)  # Same format
+
+
+def extract_delegation_entries(output: str) -> list[dict[str, str]]:
+    """Extract delegation entries from findDelegation output using Rust when available.
+
+    Returns:
+        List of dicts with keys: account, account_type, delegation_type, target_spn.
+    """
+    if not output:
+        return []
+    if _HAS_RUST:
+        return list(_rust.py_extract_delegations(output))
+    return _py_extract_delegations(output)
+
+
+def _py_extract_delegations(output: str) -> list[dict[str, str]]:
+    """Python fallback for delegation extraction."""
+    delegations: list[dict[str, str]] = []
+    seen: set[str] = set()
+    in_table = False
+
+    for line in output.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        lower = stripped.lower()
+        if "accountname" in lower and "delegationtype" in lower:
+            in_table = True
+            continue
+        if in_table and set(stripped) <= {"-", " "}:
+            continue
+        if in_table and stripped.startswith(("[", "Impacket")):
+            in_table = False
+            continue
+        if not in_table:
+            continue
+
+        parts = stripped.split()
+        if len(parts) < 3:
+            continue
+
+        account = parts[0]
+        account_type = parts[1]
+        delegation_type = ""
+        target_spn = ""
+
+        if "unconstrained" in lower:
+            delegation_type = "Unconstrained"
+        elif "constrained" in lower:
+            delegation_type = "Constrained"
+        elif "rbcd" in lower:
+            delegation_type = "RBCD"
+        else:
+            continue
+
+        for part in parts:
+            if "/" in part and not part.startswith("[") and part not in ("w/", "w/o"):
+                slash_idx = part.find("/")
+                if slash_idx < len(part) - 1 and part[slash_idx + 1].isalpha():
+                    target_spn = part
+                    break
+        if target_spn == "N/A":
+            target_spn = ""
+
+        key = f"{account.lower()}:{delegation_type.lower()}"
+        if key in seen:
+            continue
+        seen.add(key)
+        delegations.append(
+            {
+                "account": account,
+                "account_type": account_type,
+                "delegation_type": delegation_type,
+                "target_spn": target_spn,
+            }
+        )
+    return delegations
+
+
+def extract_domain_sid(output: str) -> str | None:
+    """Extract the first domain SID from output using Rust when available.
+
+    Returns:
+        Domain SID string (e.g., S-1-5-21-...) or None if not found.
+    """
+    if not output:
+        return None
+    if _HAS_RUST:
+        return _rust.py_extract_domain_sid(output)
+    m = re.search(r"S-1-5-21-\d+-\d+-\d+", output)
+    return m.group(0) if m else None
+
+
 __all__ = [
+    "extract_delegation_entries",
+    "extract_domain_sid",
     "extract_host_from_spn",
     "extract_hosts_from_output",
+    "extract_kerberos_hashes",
+    "extract_ntlm_hashes",
     "extract_plaintext_passwords_from_output",
+    "extract_secretsdump_hashes",
     "extract_shares_from_output",
     "extract_ticket_path_from_output",
     "extract_users_from_output",

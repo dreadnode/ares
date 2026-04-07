@@ -10,7 +10,7 @@ requires-python = ">=3.11"
 authors = [{ name = "Dreadnode", email = "hello@dreadnode.io" }]
 
 [tool.maturin]
-features = ["python"]
+features = ["python", "extension-module"]
 module-name = "ares_core"
 manifest-path = "Cargo.toml"
-strip = true
+strip = false
