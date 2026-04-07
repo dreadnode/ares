@@ -486,6 +486,19 @@ class ResultProcessingMixin:
                 for ip in failed_targets if isinstance(failed_targets, list) else []:
                     self.mark_secretsdump_failed(ip)
 
+        # Clear exploit dispatch dedup on failure so vuln_id can be retried
+        if not success and task_info.task_type == "exploit":
+            failed_vuln_id = task_params.get("vuln_id", "")
+            if failed_vuln_id:
+                self.mark_exploit_failed(failed_vuln_id)
+
+        # Clear privesc enumeration dedup on failure so domain+technique can be retried
+        if not success and task_info.task_type == "privesc_enumeration":
+            domain = (task_params.get("domain") or "").lower()
+            techniques = task_params.get("techniques") or ["find_delegation"]
+            failed_privesc_key = f"privesc:{domain}:{','.join(sorted(techniques))}"
+            self.mark_privesc_failed(failed_privesc_key)
+
         # Resolve any waiting futures
         self._resolve_task_future(task_id, success, result, error)
 
@@ -879,6 +892,12 @@ class ResultProcessingMixin:
         if not exploit_vuln_id:
             logger.warning(
                 f"Cannot dispatch S4U attack for {account}: no matching vulnerability found"
+            )
+            return
+
+        if exploit_vuln_id in self.shared_state.exploited_vulnerabilities:
+            logger.debug(
+                f"Skipping S4U dispatch for {account}: vuln_id={exploit_vuln_id} already exploited"
             )
             return
 
@@ -2168,6 +2187,12 @@ class ResultProcessingMixin:
 
             # Auto-dispatch S4U attack if we have credentials for constrained delegation
             if account_cred and delegation_type == "constrained" and target_spn and queued_vuln_id:
+                if queued_vuln_id in self.shared_state.exploited_vulnerabilities:
+                    logger.debug(
+                        f"Skipping S4U auto-dispatch for {account}: "
+                        f"vuln_id={queued_vuln_id} already exploited"
+                    )
+                    continue
                 dc_ip = self._find_domain_controller_ip(account_cred.domain)
                 # Fallback: extract DC IP from target SPN hostname or vulnerability details
                 if not dc_ip:
@@ -2343,15 +2368,30 @@ class ResultProcessingMixin:
                     continue
                 seen.add(key)
 
+                # Extract domain from @DOMAIN suffix or DOMAIN\ prefix on principal or target
+                acl_domain = ""
+                if "@" in principal:
+                    acl_domain = principal.split("@")[-1].strip("() ")
+                elif "\\" in principal:
+                    acl_domain = principal.split("\\")[0].strip()
+                elif "@" in target:
+                    acl_domain = target.split("@")[-1].strip("() ")
+                elif "\\" in target:
+                    acl_domain = target.split("\\")[0].strip()
+
+                acl_details: dict[str, Any] = {
+                    "target_type": "computer" if is_computer else "user",
+                    "description": f"{principal} has dangerous ACL permissions on {target}",
+                }
+                if acl_domain:
+                    acl_details["domain"] = acl_domain
+
                 vulns.append(
                     {
                         "vuln_type": "acl_abuse",
                         "target": target,
                         "principal": principal,
-                        "details": {
-                            "target_type": "computer" if is_computer else "user",
-                            "description": f"{principal} has dangerous ACL permissions on {target}",
-                        },
+                        "details": acl_details,
                     }
                 )
 
@@ -2390,16 +2430,24 @@ class ResultProcessingMixin:
                     continue
                 seen.add(key)
 
+                ga_domain = ""
+                if "@" in principal:
+                    ga_domain = principal.split("@")[-1].strip("() ")
+                elif "\\" in principal:
+                    ga_domain = principal.split("\\")[0].strip()
+                ga_details: dict[str, Any] = {
+                    "instant_da": True,
+                    "action": "Use bloodyad_add_group_member to add yourself to Domain Admins!",
+                    "description": f"🚨 INSTANT DA PATH: {principal} has write access to Domain Admins group!",
+                }
+                if ga_domain:
+                    ga_details["domain"] = ga_domain
                 vulns.append(
                     {
                         "vuln_type": "genericall_domain_admins",
                         "target": "Domain Admins",
                         "principal": principal,
-                        "details": {
-                            "instant_da": True,
-                            "action": "Use bloodyad_add_group_member to add yourself to Domain Admins!",
-                            "description": f"🚨 INSTANT DA PATH: {principal} has write access to Domain Admins group!",
-                        },
+                        "details": ga_details,
                     }
                 )
                 logger.warning(
@@ -2478,16 +2526,24 @@ class ResultProcessingMixin:
                     continue
                 seen.add(key)
 
+                asd_domain = ""
+                if "@" in principal:
+                    asd_domain = principal.split("@")[-1].strip("() ")
+                elif "\\" in principal:
+                    asd_domain = principal.split("\\")[0].strip()
+                asd_details: dict[str, Any] = {
+                    "persistence": True,
+                    "action": "Use adminsd_holder_add_ace to plant persistent backdoor on all protected groups!",
+                    "description": f"🔒 PERSISTENCE PATH: {principal} can modify AdminSDHolder - permanent DA backdoor!",
+                }
+                if asd_domain:
+                    asd_details["domain"] = asd_domain
                 vulns.append(
                     {
                         "vuln_type": "adminsd_holder_acl",
                         "target": "AdminSDHolder",
                         "principal": principal,
-                        "details": {
-                            "persistence": True,
-                            "action": "Use adminsd_holder_add_ace to plant persistent backdoor on all protected groups!",
-                            "description": f"🔒 PERSISTENCE PATH: {principal} can modify AdminSDHolder - permanent DA backdoor!",
-                        },
+                        "details": asd_details,
                     }
                 )
                 logger.warning(
@@ -2546,7 +2602,8 @@ class ResultProcessingMixin:
             if principal_cred:
                 vuln_details["username"] = principal_cred.username
                 vuln_details["password"] = principal_cred.password
-                vuln_details["domain"] = principal_cred.domain
+                if not vuln_details.get("domain"):
+                    vuln_details["domain"] = principal_cred.domain
 
             await self.queue_vulnerability(
                 vuln_type=vuln_type,

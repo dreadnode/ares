@@ -6,6 +6,7 @@ the appropriate agent roles (crack, lateral, exploit, recon, etc.).
 
 from __future__ import annotations
 
+import asyncio
 import re
 from typing import TYPE_CHECKING, Any
 
@@ -1554,6 +1555,25 @@ class RoutingMixin:
             self._dispatched_secretsdump_targets.discard(target_ip)
             logger.debug(f"Secretsdump dedup: cleared {target_ip} for retry after failure")
 
+    def mark_exploit_failed(self: RedTeamDispatcher, vuln_id: str) -> None:
+        """Remove a vuln_id from exploit dedup set so it can be retried.
+
+        Called when an exploit task fails, allowing re-dispatch for the same vulnerability.
+        """
+        if hasattr(self, "_dispatched_exploit_vuln_ids"):
+            self._dispatched_exploit_vuln_ids.discard(vuln_id)
+            logger.debug(f"Exploit dedup: cleared vuln_id={vuln_id} for retry after failure")
+
+    def mark_privesc_failed(self: RedTeamDispatcher, privesc_key: str) -> None:
+        """Remove a privesc_key from privesc dedup set so it can be retried.
+
+        Called when a privesc_enumeration task fails, allowing re-dispatch for the same
+        domain+technique combination.
+        """
+        if hasattr(self, "_dispatched_privesc_keys"):
+            self._dispatched_privesc_keys.discard(privesc_key)
+            logger.debug(f"Privesc dedup: cleared {privesc_key} for retry after failure")
+
     def _enrich_delegation_payload(
         self: RedTeamDispatcher, payload: dict[str, Any], vuln_type: str
     ) -> None:
@@ -1615,6 +1635,25 @@ class RoutingMixin:
             logger.debug(f"Skipping exploit {vuln_type} on {target} - DA already achieved")
             return ""
 
+        # Exploit dispatch dedup: skip already-exploited or in-flight vuln_ids
+        if not hasattr(self, "_dispatched_exploit_vuln_ids"):
+            self._dispatched_exploit_vuln_ids: set[str] = set()
+
+        if vuln_id:
+            if vuln_id in self.shared_state.exploited_vulnerabilities:
+                logger.debug(
+                    f"Exploit dedup: skipping {vuln_type} vuln_id={vuln_id} (already exploited)"
+                )
+                return ""
+            if vuln_id in self._dispatched_exploit_vuln_ids:
+                logger.debug(
+                    f"Exploit dedup: skipping {vuln_type} vuln_id={vuln_id} (already dispatched/in-flight)"
+                )
+                return ""
+            # Add optimistically BEFORE await to prevent asyncio race
+            # (another coroutine could enter while we await _throttled_submit_task)
+            self._dispatched_exploit_vuln_ids.add(vuln_id)
+
         params = params or {}
         if "domain" in params:
             params["domain"] = self._normalize_domain(params["domain"])
@@ -1626,6 +1665,8 @@ class RoutingMixin:
         self._resolve_dc_ip_for_payload(payload, vuln_type)
 
         if self._should_skip_dominated_domain_task("exploit", payload):
+            if vuln_id:
+                self._dispatched_exploit_vuln_ids.discard(vuln_id)
             return ""
 
         # Track attack chain
@@ -1640,17 +1681,27 @@ class RoutingMixin:
         effective_task_queue = task_queue if task_queue is not None else self._task_queue
         if not effective_task_queue:
             logger.warning("No task queue available, cannot route exploit request")
+            if vuln_id:
+                self._dispatched_exploit_vuln_ids.discard(vuln_id)
             return ""
 
-        task_id = await self._throttled_submit_task(
-            task_type="exploit",
-            target_role="privesc",
-            payload=payload,
-            source_agent=source_agent,
-            priority=1,
-            task_queue=effective_task_queue,
-        )
+        try:
+            task_id = await self._throttled_submit_task(
+                task_type="exploit",
+                target_role="privesc",
+                payload=payload,
+                source_agent=source_agent,
+                priority=1,
+                task_queue=effective_task_queue,
+            )
+        except (asyncio.CancelledError, asyncio.TimeoutError):
+            # Clean up dedup set so the vuln can be retried
+            if vuln_id:
+                self._dispatched_exploit_vuln_ids.discard(vuln_id)
+            raise
         if not task_id:
+            if vuln_id:
+                self._dispatched_exploit_vuln_ids.discard(vuln_id)
             return ""
 
         if task_id in ("deferred", "queued"):
@@ -1702,6 +1753,20 @@ class RoutingMixin:
         # Normalize domain to FQDN format
         domain = self._normalize_domain(domain)
 
+        # Domain+technique dedup: skip if same domain+technique already dispatched
+        # (regardless of which credential triggered it)
+        if not hasattr(self, "_dispatched_privesc_keys"):
+            self._dispatched_privesc_keys: set[str] = set()
+
+        privesc_key = (
+            f"privesc:{domain.lower()}:{','.join(sorted(techniques or ['find_delegation']))}"
+        )
+        if privesc_key in self._dispatched_privesc_keys:
+            logger.info(f"Privesc dedup: {privesc_key} already dispatched, skipping")
+            return ""
+        # Add optimistically BEFORE await to prevent asyncio race
+        self._dispatched_privesc_keys.add(privesc_key)
+
         # Deduplication: check if already processed or pending for this credential
         cred_key = f"{domain.lower()}:{username.lower()}"
         technique_key = f"{cred_key}:{','.join(sorted(techniques or ['find_delegation']))}"
@@ -1709,6 +1774,7 @@ class RoutingMixin:
         # Skip if already successfully processed
         if cred_key in self.shared_state.processed_delegation_creds:
             logger.debug(f"Skipping privesc enumeration for {cred_key} - already processed")
+            self._dispatched_privesc_keys.discard(privesc_key)
             return ""
 
         # Skip if there's already a pending task for same credential + techniques
@@ -1724,6 +1790,7 @@ class RoutingMixin:
                 logger.debug(
                     f"Skipping privesc enumeration for {cred_key} - already pending (task {task.task_id})"
                 )
+                self._dispatched_privesc_keys.discard(privesc_key)
                 return ""
 
         self._ensure_credential_in_state(
@@ -1756,6 +1823,7 @@ class RoutingMixin:
             payload,
             domain=domain,
         ):
+            self._dispatched_privesc_keys.discard(privesc_key)
             return ""
 
         # Use provided task_queue (from threaded consumer) or fall back to self._task_queue
@@ -1772,6 +1840,7 @@ class RoutingMixin:
                 task_queue=effective_task_queue,
             )
             if not task_id:
+                self._dispatched_privesc_keys.discard(privesc_key)
                 return ""
 
             # Task queued for main loop dispatch or deferred - don't create TaskInfo here

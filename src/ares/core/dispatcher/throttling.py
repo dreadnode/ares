@@ -69,6 +69,7 @@ class ThrottlingMixin:
             "adcs_esc4",
             "adcs_esc8",
             "mssql_cross_forest_pivot",
+            "trust_raise_child",
         }
     )
 

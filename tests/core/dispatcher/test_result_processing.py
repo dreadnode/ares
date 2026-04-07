@@ -783,8 +783,8 @@ class TestMarkVulnerabilityExploitedDirectPersist:
         dispatcher._checkpoint_requested.set.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_failed_exploit_persists_string_key(self):
-        """Failed exploitation should persist STRING key for get_exploitation_status()."""
+    async def test_failed_exploit_does_not_persist_string_key(self):
+        """Failed exploitation should NOT persist STRING key to avoid blocking retries."""
         from unittest.mock import AsyncMock, MagicMock, patch
 
         from ares.core.dispatcher._dispatcher import RedTeamDispatcher
@@ -808,11 +808,8 @@ class TestMarkVulnerabilityExploitedDirectPersist:
                 task_queue=mock_task_queue,
             )
 
-        # Should persist the STRING key (for get_exploitation_status)
-        mock_redis.set.assert_called_once()
-        call_args = mock_redis.set.call_args
-        assert "exploited:esc8_192.168.58.40" in call_args[0][0]
-        mock_redis.expire.assert_called_once()
+        # Should NOT persist the STRING key (failed exploits don't block retries)
+        mock_redis.set.assert_not_called()
         # Should NOT have added to exploited set (success=False)
         assert "esc8_192.168.58.40" not in dispatcher.shared_state.exploited_vulnerabilities
 
@@ -1232,9 +1229,8 @@ class TestThreadedConsumerStringKeyDetails:
         datetime.fromisoformat(data["exploited_at"])  # Should not raise
 
     @pytest.mark.asyncio
-    async def test_failed_exploitation_writes_string_key_with_success_false(self):
-        """Failed exploitation from threaded consumer should write STRING key with success=False."""
-        import json
+    async def test_failed_exploitation_does_not_write_string_key(self):
+        """Failed exploitation should NOT write STRING key to avoid blocking retries."""
         from unittest.mock import AsyncMock, MagicMock, patch
 
         from ares.core.dispatcher._dispatcher import RedTeamDispatcher
@@ -1260,27 +1256,14 @@ class TestThreadedConsumerStringKeyDetails:
                 task_queue=mock_task_queue,
             )
 
-        # STRING key should be written even for failures
-        mock_redis.set.assert_called_once()
-        call_args = mock_redis.set.call_args[0]
-        key = call_args[0]
-        raw_json = call_args[1]
-
-        assert "exploited:esc4_dc01.fabrikam.local_def67890" in key
-
-        data = json.loads(raw_json)
-        assert data["success"] is False
-        assert data["result"] == error_result
-        assert "exploited_at" in data
+        # STRING key should NOT be written for failures (allows retries)
+        mock_redis.set.assert_not_called()
 
         # Should NOT have been added to exploited set (success=False)
         assert (
             "esc4_dc01.fabrikam.local_def67890"
             not in dispatcher.shared_state.exploited_vulnerabilities
         )
-
-        # backend.mark_exploited should NOT have been called (success=False skips SET key)
-        # The STRING key is written regardless, but the SET membership is success-only
 
     @pytest.mark.asyncio
     async def test_string_key_has_86400_ttl(self):

@@ -943,7 +943,8 @@ async def run_multi_agent_operation(
         asyncio.create_task(exploitation_workflow(dispatcher), name="exploitation_workflow"),
         asyncio.create_task(_extend_operation_lock(task_queue, operation_id), name="lock_extender"),
         asyncio.create_task(
-            _check_kill_signal(task_queue, operation_id, kill_event), name="kill_signal_checker"
+            _check_kill_signal(task_queue, operation_id, kill_event, state),
+            name="kill_signal_checker",
         ),
         asyncio.create_task(
             _auto_credential_expansion(dispatcher), name="auto_credential_expansion"
@@ -1605,13 +1606,16 @@ async def _check_kill_signal(
     task_queue: RedisTaskQueue,
     operation_id: str,
     kill_event: asyncio.Event,
+    state: SharedRedTeamState,
     interval: float = 5.0,
 ) -> None:
     """Poll Redis for kill signal and set the kill event when detected.
 
     The CLI `delete` command sets the operation status to "killed" before
     removing other keys. This task detects that signal and sets the event
-    so the main orchestrator loop can break out gracefully.
+    so the main orchestrator loop can break out gracefully. Also sets
+    state.killed so background tasks (which check _should_stop_background_task)
+    terminate immediately.
     """
     import json
 
@@ -1624,6 +1628,7 @@ async def _check_kill_signal(
                 data = json.loads(raw)
                 if data.get("status") == "killed":
                     logger.warning(f"🛑 Kill signal detected for {operation_id} — shutting down")
+                    state.killed = True
                     kill_event.set()
                     return
         except Exception:
@@ -1690,8 +1695,9 @@ def _should_stop_background_task(state: SharedRedTeamState) -> bool:
 
     In single-domain mode: stop when DA achieved or completed.
     In multi-forest mode: stop only when ALL forests dominated or completed.
+    Also stops immediately if operation was killed via CLI.
     """
-    if state.completed:
+    if state.killed or state.completed:
         return True
     if not state.has_domain_admin:
         return False
@@ -1703,7 +1709,7 @@ def _should_stop_background_task(state: SharedRedTeamState) -> bool:
 
 async def _auto_credential_expansion(
     dispatcher: RedTeamDispatcher,
-    check_interval: float = 10.0,  # Reduced from 30s for faster lateral testing
+    check_interval: float | None = None,
     min_hosts: int = 1,
 ) -> None:
     """
@@ -1717,7 +1723,11 @@ async def _auto_credential_expansion(
         check_interval: Seconds between credential checks
         min_hosts: Minimum hosts required before triggering expansion
     """
+    from ares.core.config import get_bg_credential_expansion_interval
     from ares.core.workflows import credential_expansion_loop
+
+    if check_interval is None:
+        check_interval = get_bg_credential_expansion_interval()
 
     # NOTE: processed credentials persisted in state.processed_expansion_creds for restart recovery
     expansion_running = False
@@ -1824,8 +1834,8 @@ async def _auto_mssql_detection(
 
 async def _auto_adcs_enumeration(
     dispatcher: RedTeamDispatcher,
-    check_interval: float = 45.0,
-    max_retries: int = 2,
+    check_interval: float | None = None,
+    max_retries: int | None = None,
 ) -> None:
     """
     Background task that automatically runs ADCS enumeration when:
@@ -1840,12 +1850,24 @@ async def _auto_adcs_enumeration(
         check_interval: Seconds between ADCS checks
         max_retries: Maximum retry attempts per server (reduced to avoid blocking privesc queue)
     """
+    from ares.core.config import (
+        get_adcs_max_retries,
+        get_adcs_retry_cooldown,
+        get_adcs_stuck_timeout,
+        get_bg_adcs_enumeration_interval,
+    )
+
+    if check_interval is None:
+        check_interval = get_bg_adcs_enumeration_interval()
+    if max_retries is None:
+        max_retries = get_adcs_max_retries()
+
     # Track (server, user, domain) -> (task_id, attempt_count, last_attempt_time)
     adcs_attempts: dict[tuple[str, str, str], tuple[str, int, float]] = {}
     # NOTE: successful_servers persisted in state.processed_adcs_servers for restart recovery
     failed_servers: set[str] = set()  # Servers that consistently fail - transient
-    retry_cooldown = 60.0  # Wait 1 minute before retrying failed tasks
-    stuck_task_timeout = 480.0  # Consider tasks stuck after 8 minutes
+    retry_cooldown = get_adcs_retry_cooldown()
+    stuck_task_timeout = get_adcs_stuck_timeout()
     # Track foreign domain ADCS probes by (domain, username) - re-probe when new creds appear
     probed_adcs_domain_creds: set[tuple[str, str]] = set()
 
@@ -2060,7 +2082,7 @@ async def _auto_adcs_enumeration(
 
 async def _auto_share_spider(
     dispatcher: RedTeamDispatcher,
-    check_interval: float = 30.0,
+    check_interval: float | None = None,
 ) -> None:
     """
     Background task that automatically spiders discovered shares for credentials.
@@ -2073,6 +2095,11 @@ async def _auto_share_spider(
 
     This catches common scenarios like credentials stored in share files.
     """
+    from ares.core.config import get_bg_share_spider_interval
+
+    if check_interval is None:
+        check_interval = get_bg_share_spider_interval()
+
     # NOTE: spidered shares persisted in state.processed_spidered_shares ("host:share:user:domain")
 
     while True:
@@ -2081,8 +2108,8 @@ async def _auto_share_spider(
 
             # Only stop when operation is explicitly completed, NOT when DA is achieved
             # We still want to spider shares after DA to find additional credentials and loot
-            if state.completed:
-                logger.debug("Operation complete, stopping auto share spider")
+            if state.killed or state.completed:
+                logger.debug("Operation complete/killed, stopping auto share spider")
                 break
 
             # Need credentials to spider shares (authenticated access)
@@ -2152,8 +2179,8 @@ async def _auto_share_spider(
 
 async def _auto_bloodhound(
     dispatcher: RedTeamDispatcher,
-    check_interval: float = 30.0,
-    max_retries: int = 3,
+    check_interval: float | None = None,
+    max_retries: int | None = None,
 ) -> None:
     """
     Background task that automatically runs BloodHound when credentials are discovered.
@@ -2167,10 +2194,21 @@ async def _auto_bloodhound(
         check_interval: Seconds between checks for new credentials
         max_retries: Maximum retry attempts per domain
     """
+    from ares.core.config import (
+        get_bg_bloodhound_interval,
+        get_bloodhound_max_retries,
+        get_bloodhound_retry_cooldown,
+    )
+
+    if check_interval is None:
+        check_interval = get_bg_bloodhound_interval()
+    if max_retries is None:
+        max_retries = get_bloodhound_max_retries()
+
     # Track (domain, username) -> (task_id, attempt_count, last_attempt_time)
     bloodhound_attempts: dict[tuple[str, str, str], tuple[str, int, float]] = {}
     # NOTE: successful domains persisted in state.processed_bloodhound_domains for restart recovery
-    retry_cooldown = 120.0  # Wait 2 minutes before retrying failed tasks
+    retry_cooldown = get_bloodhound_retry_cooldown()
 
     while True:
         try:
@@ -2486,7 +2524,7 @@ def _is_likely_privileged_credential(username: str, source: str | None) -> bool:
 
 async def _auto_credential_access(
     dispatcher: RedTeamDispatcher,
-    check_interval: float = 15.0,  # Reduced from 60s for faster reaction
+    check_interval: float | None = None,
     min_hosts: int = 1,
 ) -> None:
     """
@@ -2498,6 +2536,11 @@ async def _auto_credential_access(
 
     All tracking is persisted to state for recovery after restart.
     """
+    from ares.core.config import get_bg_credential_access_interval
+
+    if check_interval is None:
+        check_interval = get_bg_credential_access_interval()
+
     # NOTE: All tracking now uses state fields instead of local variables
     # This enables recovery after orchestrator restart without duplicate work
     last_user_count: dict[str, int] = {}  # Only this stays local (non-critical)
@@ -3075,7 +3118,7 @@ async def _auto_credential_access(
 
 async def _auto_crack_dispatch(
     dispatcher: RedTeamDispatcher,
-    check_interval: float = 30.0,
+    check_interval: float | None = None,
 ) -> None:
     """
     Dedicated background task for dispatching hash crack requests.
@@ -3085,6 +3128,11 @@ async def _auto_crack_dispatch(
 
     Processes: AS-REP, Kerberoast, and other crackable hash types.
     """
+    from ares.core.config import get_bg_crack_dispatch_interval
+
+    if check_interval is None:
+        check_interval = get_bg_crack_dispatch_interval()
+
     while True:
         try:
             await asyncio.sleep(check_interval)
@@ -3093,8 +3141,8 @@ async def _auto_crack_dispatch(
 
             # NOTE: Don't exit on has_domain_admin - we still want to crack hashes
             # after DA for reporting/persistence. Crack tasks don't use LLM tokens.
-            if state.completed:
-                logger.debug("Operation complete, stopping auto crack dispatch")
+            if state.killed or state.completed:
+                logger.debug("Operation complete/killed, stopping auto crack dispatch")
                 break
 
             if not state.all_hashes:
@@ -3173,7 +3221,7 @@ async def _auto_crack_dispatch(
 
 async def _auto_coercion(
     dispatcher: RedTeamDispatcher,
-    check_interval: float = 60.0,
+    check_interval: float | None = None,
 ) -> None:
     """
     Background task that automatically triggers coercion attacks when conditions are met.
@@ -3189,6 +3237,11 @@ async def _auto_coercion(
         dispatcher: The dispatcher instance
         check_interval: Seconds between coercion checks
     """
+    from ares.core.config import get_bg_coercion_interval
+
+    if check_interval is None:
+        check_interval = get_bg_coercion_interval()
+
     # NOTE: All tracking now uses state fields for restart recovery
     # - state.processed_esc8_servers: ADCS servers we've started ESC8 against
     # - state.processed_state.processed_coerced_dcs: DCs we've attempted to coerce
@@ -3349,7 +3402,7 @@ async def _auto_coercion(
 
 async def _auto_delegation_enumeration(
     dispatcher: RedTeamDispatcher,
-    check_interval: float = 15.0,
+    check_interval: float | None = None,
 ) -> None:
     """
     Background task that automatically runs delegation enumeration for discovered credentials.
@@ -3367,6 +3420,11 @@ async def _auto_delegation_enumeration(
         dispatcher: The dispatcher instance
         check_interval: Seconds between checks for new credentials (default: 15s for faster detection)
     """
+    from ares.core.config import get_bg_delegation_enumeration_interval
+
+    if check_interval is None:
+        check_interval = get_bg_delegation_enumeration_interval()
+
     # NOTE: Processed credentials are persisted in state.processed_delegation_creds
     # Format: "domain:username" - successful delegation enumerations
     # Track dispatched tasks: task_id -> cred_key (transient, for completion tracking)
@@ -3479,7 +3537,7 @@ async def _auto_delegation_enumeration(
 
 async def _auto_local_admin_secretsdump(
     dispatcher: RedTeamDispatcher,
-    check_interval: float = 45.0,
+    check_interval: float | None = None,
 ) -> None:
     """
     Background task that automatically runs secretsdump when local admin access is detected.
@@ -3496,11 +3554,19 @@ async def _auto_local_admin_secretsdump(
         dispatcher: The dispatcher instance
         check_interval: Seconds between checks for admin access opportunities
     """
+    from ares.core.config import (
+        get_bg_local_admin_secretsdump_interval,
+        get_secretsdump_max_retries,
+    )
+
+    if check_interval is None:
+        check_interval = get_bg_local_admin_secretsdump_interval()
+
     # Track (host_ip, username, domain) -> task_id for in-flight deduplication (transient)
     secretsdump_attempts: dict[tuple[str, str, str], str] = {}
     # NOTE: successful hosts are persisted in state.processed_secretsdump for restart recovery
     failed_attempts: dict[tuple[str, str, str], int] = {}  # Track failures for retry limiting
-    max_retries = 2
+    max_retries = get_secretsdump_max_retries()
 
     while True:
         try:
@@ -3844,7 +3910,7 @@ async def _run_lookupsid_with_retry(
 
 async def _auto_golden_ticket(
     dispatcher: RedTeamDispatcher,
-    check_interval: float = 30.0,
+    check_interval: float | None = None,
 ) -> None:
     """
     Background task that automatically generates golden ticket when krbtgt hash is found.
@@ -3862,6 +3928,11 @@ async def _auto_golden_ticket(
         check_interval: Seconds between checks
     """
     import re
+
+    from ares.core.config import get_bg_golden_ticket_interval
+
+    if check_interval is None:
+        check_interval = get_bg_golden_ticket_interval()
 
     first_check = True
     while True:
@@ -3953,6 +4024,10 @@ async def _auto_golden_ticket(
                     domain = (hash_obj.domain or "").lower()
                     if domain and domain not in processed_domains:
                         pending_krbtgt_domains.add(domain)
+
+            if state.killed:
+                logger.debug("Operation killed, stopping auto golden ticket")
+                break
 
             # Only exit if operation is complete AND no unprocessed krbtgt hashes
             if state.completed and not pending_krbtgt_domains:
@@ -5614,7 +5689,7 @@ async def _auto_golden_ticket(
 
 async def _auto_foreign_dcsync(
     dispatcher: RedTeamDispatcher,
-    check_interval: float = 45.0,
+    check_interval: float | None = None,
 ) -> None:
     """
     Background task that auto-dispatches secretsdump against foreign (undominated) domains
@@ -5630,7 +5705,11 @@ async def _auto_foreign_dcsync(
     """
     import re
 
+    from ares.core.config import get_bg_foreign_dcsync_interval
     from ares.core.models import Hash
+
+    if check_interval is None:
+        check_interval = get_bg_foreign_dcsync_interval()
 
     logger.info("🌲 Auto-foreign-dcsync: background task started")
 
@@ -5640,8 +5719,8 @@ async def _auto_foreign_dcsync(
 
             state = dispatcher.shared_state
 
-            if state.completed:
-                logger.info("🌲 Auto-foreign-dcsync: operation complete, stopping")
+            if state.killed or state.completed:
+                logger.info("🌲 Auto-foreign-dcsync: operation complete/killed, stopping")
                 break
 
             # Only relevant in multi-forest mode
@@ -5841,7 +5920,7 @@ async def _auto_foreign_dcsync(
                         logger.warning(
                             f"🌲 Auto-foreign-dcsync: empty output from secretsdump on {dc_ip}"
                         )
-                        state.processed_foreign_dcsync.add(dedup_key)
+                        state.mark_processed("foreign_dcsync", dedup_key)
                         continue
 
                     # Parse Administrator hash
@@ -5897,7 +5976,7 @@ async def _auto_foreign_dcsync(
                         )
 
                     # Always dedup after attempt (success or fail)
-                    state.processed_foreign_dcsync.add(dedup_key)
+                    state.mark_processed("foreign_dcsync", dedup_key)
 
                     if admin_match or krbtgt_match:
                         await dispatcher._checkpoint()
@@ -6043,7 +6122,7 @@ async def _auto_foreign_dcsync(
                         )
 
                     # Always dedup after attempt (success or fail)
-                    state.processed_foreign_dcsync.add(dedup_key)
+                    state.mark_processed("foreign_dcsync", dedup_key)
                     if admin_match or krbtgt_match:
                         await dispatcher._checkpoint()
                         if state.all_forests_dominated():
@@ -6196,7 +6275,7 @@ async def _auto_foreign_dcsync(
                     "  try:\n"
                     "    sys.argv=['secretsdump','-k','-no-pass',"
                     "'-just-dc-user',usr,'-just-dc-ntlm',"
-                    "'-target-ip',TDC,'-dc-ip',SDC,"
+                    "'-target-ip',TDC,'-dc-ip',TDC,"
                     "SD+'/Administrator@'+TF]\n"
                     "    print(f'DCSync {usr} via {TF}')\n"
                     "    runpy.run_path(sd,run_name='__main__')\n"
@@ -6222,7 +6301,7 @@ async def _auto_foreign_dcsync(
                     f"output_len={len(ir_output)}, first_300={ir_output[:300]!r}"
                 )
 
-                state.processed_foreign_dcsync.add(dedup_key_ir)
+                state.mark_processed("foreign_dcsync", dedup_key_ir)
 
                 # Parse results
                 ir_admin = re.search(
@@ -6305,7 +6384,7 @@ async def _auto_foreign_dcsync(
 
 async def _auto_cross_forest_pivot(
     dispatcher: RedTeamDispatcher,
-    check_interval: float = 60.0,
+    check_interval: float | None = None,
 ) -> None:
     """
     Background task that dispatches cross-forest attack paths when trust key DCSync fails.
@@ -6318,6 +6397,11 @@ async def _auto_cross_forest_pivot(
     This provides fallback paths when inter-realm ticket DCSync is blocked by
     SPN target name validation on modern patched DCs.
     """
+    from ares.core.config import get_bg_cross_forest_pivot_interval
+
+    if check_interval is None:
+        check_interval = get_bg_cross_forest_pivot_interval()
+
     logger.info("🌲 Auto-cross-forest-pivot: background task started")
 
     while True:
@@ -6326,8 +6410,8 @@ async def _auto_cross_forest_pivot(
 
             state = dispatcher.shared_state
 
-            if state.completed:
-                logger.info("🌲 Auto-cross-forest-pivot: operation complete, stopping")
+            if state.killed or state.completed:
+                logger.info("🌲 Auto-cross-forest-pivot: operation complete/killed, stopping")
                 break
 
             # Only relevant in multi-forest mode with DA and undominated forests
@@ -6882,7 +6966,7 @@ async def _auto_cross_forest_pivot(
 
 async def _auto_acl_chain_follow(
     dispatcher: RedTeamDispatcher,
-    check_interval: float = 30.0,
+    check_interval: float | None = None,
 ) -> None:
     """
     Automatically follow ACL chains discovered by BloodHound.
@@ -6900,7 +6984,11 @@ async def _auto_acl_chain_follow(
         dispatcher: The dispatcher instance
         check_interval: Seconds between chain progress checks
     """
+    from ares.core.config import get_bg_acl_chain_follow_interval
     from ares.core.dispatcher.acl_chains import ACLAction, ACLChainTracker
+
+    if check_interval is None:
+        check_interval = get_bg_acl_chain_follow_interval()
 
     state = dispatcher.shared_state
 
@@ -6920,6 +7008,10 @@ async def _auto_acl_chain_follow(
 
             # Re-read state each iteration for latest tracking
             state = dispatcher.shared_state
+
+            if state.killed:
+                logger.debug("Operation killed, stopping auto ACL chain follow")
+                break
 
             # Skip if DA achieved AND all forests dominated (or not multi-forest)
             if state.has_domain_admin and (
@@ -6961,6 +7053,12 @@ async def _auto_acl_chain_follow(
                     right = "ForceChangePassword"
 
                 domain = vuln.details.get("domain", "")
+                if not domain and principal:
+                    # Extract domain from principal (USER@DOMAIN or DOMAIN\USER)
+                    if "@" in principal:
+                        domain = principal.split("@")[-1].strip("() ")
+                    elif "\\" in principal:
+                        domain = principal.split("\\")[0].strip()
                 if not domain and state.target:
                     domain = state.target.domain or ""
 
@@ -7118,8 +7216,8 @@ def _get_running_crack_tasks(dispatcher: RedTeamDispatcher) -> list[str]:
 
 async def _wait_for_loot_collection(
     dispatcher: RedTeamDispatcher,
-    grace_period: float = 60.0,
-    check_interval: float = 5.0,
+    grace_period: float | None = None,
+    check_interval: float | None = None,
 ) -> None:
     """
     Wait for loot collection tasks (share spider, etc.) after DA is achieved.
@@ -7132,6 +7230,13 @@ async def _wait_for_loot_collection(
         grace_period: Seconds to wait for loot collection
         check_interval: Seconds between status logs
     """
+    from ares.core.config import get_loot_check_interval, get_loot_collection_grace
+
+    if grace_period is None:
+        grace_period = get_loot_collection_grace()
+    if check_interval is None:
+        check_interval = get_loot_check_interval()
+
     state = dispatcher.shared_state
     initial_creds = len(state.all_credentials)
     initial_hashes = len(state.all_hashes)

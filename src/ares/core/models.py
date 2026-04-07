@@ -740,6 +740,7 @@ _PROCESSED_SET_MAP: dict[str, str] = {
     "processed_trust_extractions": "trust_extractions",
     "processed_fsp_enumerations": "fsp_enumerations",
     "processed_cross_forest_pivots": "cross_forest_pivots",
+    "processed_foreign_dcsync": "foreign_dcsync",
 }
 
 
@@ -810,6 +811,9 @@ class SharedRedTeamState:
     # Task tracking
     pending_tasks: dict[str, TaskInfo] = field(default_factory=dict)
     completed_tasks: dict[str, TaskResult] = field(default_factory=dict)
+
+    # Kill signal — set by _check_kill_signal when CLI sends kill command
+    killed: bool = False
 
     # Success flags
     completed: bool = False
@@ -927,9 +931,26 @@ class SharedRedTeamState:
     # Event loop where backend was created (for cross-loop detection)
     _backend_loop: Any = field(default=None, init=False, repr=False, compare=False)
 
+    # Real-time discovery publisher callback (NOT serialized)
+    # Workers set this to publish discoveries immediately to Redis via task_queue,
+    # instead of batching until task completion.
+    # Signature: fn(discovery_type: str, data: dict) -> None
+    _realtime_publish_fn: Any = field(default=None, init=False, repr=False, compare=False)
+
     def set_dispatcher(self, dispatcher) -> None:
         """Set dispatcher for real-time publishing of discoveries."""
         object.__setattr__(self, "_dispatcher", dispatcher)
+
+    def set_realtime_publish(self, fn) -> None:
+        """Set callback for real-time discovery publishing from workers.
+
+        Workers call this so that add_credential/add_hash immediately
+        publish discoveries to Redis instead of batching until task end.
+
+        Args:
+            fn: Callable(discovery_type: str, data: dict) -> None
+        """
+        object.__setattr__(self, "_realtime_publish_fn", fn)
 
     def set_backend(self, backend) -> None:
         """Set Redis-native state backend for direct persistence.
@@ -2313,6 +2334,22 @@ class SharedRedTeamState:
         self.pending_credential_findings.discard(pending_key)
         logger.info(f"Credential added: {domain}\\{username} (source: {source_agent})")
 
+        # Real-time publish to orchestrator (workers only)
+        if self._realtime_publish_fn:
+            try:
+                self._realtime_publish_fn(
+                    "credential",
+                    {
+                        "username": credential.username,
+                        "password": credential.password,
+                        "domain": credential.domain,
+                        "source": credential.source,
+                        "is_admin": credential.is_admin,
+                    },
+                )
+            except Exception as e:
+                logger.debug(f"Realtime publish failed for credential {domain}\\{username}: {e}")
+
         # Persist to Redis backend if available and in the correct event loop
         if self._can_persist_to_backend():
             import asyncio
@@ -3092,6 +3129,24 @@ class SharedRedTeamState:
                     },
                 )
 
+        # Real-time publish to orchestrator (workers only)
+        if self._realtime_publish_fn:
+            try:
+                self._realtime_publish_fn(
+                    "hash",
+                    {
+                        "username": hash_obj.username,
+                        "hash_value": hash_obj.hash_value,
+                        "hash_type": hash_obj.hash_type,
+                        "domain": hash_obj.domain,
+                        "cracked_password": hash_obj.cracked_password,
+                        "source": hash_obj.source,
+                        "aes_key": getattr(hash_obj, "aes_key", None),
+                    },
+                )
+            except Exception as e:
+                logger.debug(f"Realtime publish failed for hash {domain}\\{username}: {e}")
+
         # Persist to Redis backend if available and in the correct event loop
         if self._can_persist_to_backend():
             import asyncio
@@ -3411,6 +3466,23 @@ class SharedRedTeamState:
                 if host.is_dc and domain not in self.domain_controllers:
                     self.domain_controllers[domain] = host.ip
                     logger.info(f"DC registered: {domain} -> {host.ip} ({host.hostname})")
+
+        # Real-time publish to orchestrator (workers only)
+        if self._realtime_publish_fn:
+            try:
+                self._realtime_publish_fn(
+                    "host",
+                    {
+                        "ip": host.ip,
+                        "hostname": host.hostname,
+                        "os": host.os,
+                        "roles": list(host.roles) if host.roles else [],
+                        "services": list(host.services) if host.services else [],
+                        "is_dc": host.is_dc,
+                    },
+                )
+            except Exception as e:
+                logger.debug(f"Realtime publish failed for host {host.ip}: {e}")
 
         # Persist to Redis backend if available and in the correct event loop
         if self._can_persist_to_backend():

@@ -2064,6 +2064,30 @@ async def delete(
         await client.setex(status_key, 300, kill_status)  # 5-min TTL for detection
         logger.info(f"Kill signal set for {operation_id}")
 
+        # Drain all task streams so workers don't pick up queued tasks
+        worker_roles = [
+            "recon",
+            "credential_access",
+            "cracker",
+            "acl",
+            "privesc",
+            "lateral",
+            "coercion",
+        ]
+        drained_count = 0
+        for role in worker_roles:
+            for suffix in (":urgent", ":normal"):
+                stream_key = f"ares:stream:tasks:{role}{suffix}"
+                try:
+                    # XTRIM to 0 removes all entries from the stream
+                    trimmed = await client.xtrim(stream_key, maxlen=0)
+                    if trimmed:
+                        drained_count += trimmed
+                except Exception:
+                    pass  # Stream may not exist
+        if drained_count:
+            logger.info(f"Drained {drained_count} pending tasks from streams")
+
         keys_to_delete: list[str] = []
         native_keys = await client.keys(f"ares:op:{operation_id}:*")
         # Exclude the status key — workers/orchestrator need it to detect the kill

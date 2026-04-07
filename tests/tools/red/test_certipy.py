@@ -216,7 +216,7 @@ Certificate Authorities
             # Check vulnerability details
             vuln = next(iter(state.discovered_vulnerabilities.values()))
             assert vuln.vuln_type == "ADCS_ESC8"
-            assert "corp-DC01-CA" in str(vuln.details.get("ca_name", ""))
+            assert "corp-DC01-CA" in str(vuln.details.get("template", ""))
             assert vuln.priority == 3  # ESC8 has priority 3
             assert vuln.discovered_by == "certipy_find"
 

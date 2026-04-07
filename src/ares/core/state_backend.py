@@ -880,6 +880,54 @@ class RedisStateBackend(BaseRedisBackend):
             logger.warning(f"Failed to mark vulnerability exploited: {e}")
             return False
 
+    async def unmark_exploited(self, vuln_id: str) -> bool:
+        """Remove a vulnerability from the exploited set.
+
+        Args:
+            vuln_id: Vulnerability ID to unmark
+
+        Returns:
+            True if removed successfully
+        """
+        key = self._key(self.KEY_EXPLOITED)
+
+        async def _do_unmark():
+            await self._redis.srem(key, vuln_id)
+            return True
+
+        try:
+            return await self._with_retry("unmark_exploited", _do_unmark)
+        except CircuitBreakerError:
+            logger.debug(f"Circuit breaker open, skipping unmark_exploited for {vuln_id}")
+            return False
+        except Exception as e:
+            logger.warning(f"Failed to unmark vulnerability exploited: {e}")
+            return False
+
+    async def delete_vulnerability(self, vuln_id: str) -> bool:
+        """Remove a vulnerability from the discovered vulnerabilities hash.
+
+        Args:
+            vuln_id: Vulnerability ID to delete
+
+        Returns:
+            True if deleted successfully
+        """
+        key = self._key(self.KEY_VULNS)
+
+        async def _do_delete():
+            await self._redis.hdel(key, vuln_id)
+            return True
+
+        try:
+            return await self._with_retry("delete_vulnerability", _do_delete)
+        except CircuitBreakerError:
+            logger.debug(f"Circuit breaker open, skipping delete_vulnerability for {vuln_id}")
+            return False
+        except Exception as e:
+            logger.warning(f"Failed to delete vulnerability from Redis: {e}")
+            return False
+
     async def get_exploited_vulnerabilities(self) -> set[str]:
         """Get set of exploited vulnerability IDs.
 

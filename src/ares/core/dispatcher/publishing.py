@@ -990,15 +990,28 @@ class PublishingMixin:
                     # No new credentials — skip re-queue
                     continue
 
-                # Remove old vulns so we can re-queue with fresh creds
-                # Only remove vulns that haven't been picked up by an agent yet
+                # Remove old vulns so we can re-queue with fresh creds.
+                # Clear from both memory AND Redis to survive pod restarts.
+                backend = getattr(self.shared_state, "_backend", None)
                 for vid, _vuln in existing_mssql_vulns:
-                    if vid not in self.shared_state.exploited_vulnerabilities:
+                    try:
                         del self.shared_state.discovered_vulnerabilities[vid]
-                        logger.info(
-                            f"Removed stale MSSQL vuln {vid} for {host.ip} "
-                            f"(had {old_cred_count} creds, now have {len(sql_creds)})"
-                        )
+                    except KeyError:
+                        pass  # Already deleted by another thread
+                    # Also clear from exploited set so the re-queued vuln
+                    # with updated credentials can be attempted fresh
+                    self.shared_state.exploited_vulnerabilities.discard(vid)
+                    # Persist cleanup to Redis
+                    if backend:
+                        try:
+                            await backend.delete_vulnerability(vid)
+                            await backend.unmark_exploited(vid)
+                        except Exception as e:
+                            logger.debug(f"Redis cleanup for {vid}: {e}")
+                    logger.info(
+                        f"Removed stale MSSQL vuln {vid} for {host.ip} "
+                        f"(had {old_cred_count} creds, now have {len(sql_creds)})"
+                    )
 
             # Extract actual MSSQL port from nmap services (may differ from 1433 for named instances)
             mssql_port = 1433

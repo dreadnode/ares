@@ -35,9 +35,11 @@ except ImportError:
 
 from ares.core.config import (
     get_agent_task_timeout,
+    get_mssql_agent_timeout,
     get_rate_limit_backoff_delays,
     get_rate_limit_max_retries,
     get_redis_url,
+    get_task_step_caps,
 )
 from ares.core.dispatcher import RedTeamDispatcher
 from ares.core.exceptions import AuthenticationError, ConfigurationError, CriticalWorkerError
@@ -241,7 +243,7 @@ class RedisWorkerAgent:
         pod_name: str | None = None,
         operation_id: str | None = None,
         redis_url: str | None = None,
-        pointer_check_interval: float = 30.0,
+        pointer_check_interval: float = 5.0,
         max_operation_age: int = 300,
         shared_state: Any | None = None,
     ):
@@ -271,6 +273,47 @@ class RedisWorkerAgent:
         self._state_subscriber_stop_event = threading.Event()
         # Track hosts written to /etc/hosts to avoid duplicates
         self._hosts_written_to_etc: set[str] = set()
+
+    def _setup_realtime_publisher(self) -> None:
+        """Wire up real-time discovery publishing on the worker's shared_state.
+
+        When tools call add_credential/add_hash/add_host, the discovery is
+        immediately published to the orchestrator via Redis instead of being
+        batched until task completion.
+        """
+        if not self.shared_state or not self.operation_id:
+            return
+
+        loop = asyncio.get_running_loop()
+        task_queue = self.task_queue
+        operation_id = self.operation_id
+        agent_name = self.agent_name
+        current_task_id = self._current_task or ""
+
+        def _publish(discovery_type: str, data: dict) -> None:
+            """Thread-safe realtime publish — schedules async call on the event loop."""
+            try:
+                coro = task_queue.publish_discovery(
+                    operation_id=operation_id,
+                    discovery_type=discovery_type,
+                    data=data,
+                    source_agent=agent_name,
+                    task_id=current_task_id,
+                )
+                future = asyncio.run_coroutine_threadsafe(coro, loop)
+                # Fire-and-forget: don't block the tool waiting for publish
+                future.add_done_callback(
+                    lambda f: (
+                        logger.debug(f"Realtime {discovery_type} publish failed: {f.exception()}")
+                        if f.exception()
+                        else None
+                    )
+                )
+            except RuntimeError:
+                # Event loop closed — task is shutting down, skip
+                pass
+
+        self.shared_state.set_realtime_publish(_publish)
 
     def _run_agent_sync(self, prompt: str) -> Any:
         """Run the async agent in a dedicated event loop (thread-safe helper)."""
@@ -666,6 +709,9 @@ class RedisWorkerAgent:
             f"(type={task.task_type}, payload={payload_snapshot})"
         )
 
+        # Wire up real-time discovery publishing for this task
+        self._setup_realtime_publisher()
+
         # Set credential context from task payload for attack chain tracking
         # This allows tools (e.g., secretsdump) to set parent_id on discoveries
         if payload_snapshot:
@@ -686,6 +732,7 @@ class RedisWorkerAgent:
                     f"step={parent_step}, user={source_domain}\\{source_user}, task={task.task_id}"
                 )
 
+        original_max_steps = self.agent.max_steps
         try:
             # State already refreshed above (before span creation)
             # Handle "command" tasks directly via subprocess (no agent needed)
@@ -711,6 +758,19 @@ class RedisWorkerAgent:
                 )
                 return
 
+            # Bail out early if operation was killed while we were building the prompt
+            if (
+                self.redis_url
+                and self.operation_id
+                and await is_operation_completed(self.redis_url, self.operation_id)
+            ):
+                logger.warning(
+                    f"[{self.agent_name}] Operation {self.operation_id} killed before LLM call, "
+                    f"dropping task {task.task_id}"
+                )
+                self._running = False
+                return
+
             # Run agent with rate limit retry and task-level timeout
             # Note: Rate limit errors can appear as:
             # 1. Exceptions raised during _run_agent()
@@ -721,8 +781,20 @@ class RedisWorkerAgent:
             # MSSQL exploitation chains need more time (6+ tool calls across linked servers)
             vuln_type = (task.payload.get("vuln_type") or "") if task.payload else ""
             if vuln_type.startswith("mssql_"):
-                agent_timeout = max(agent_timeout, 480)  # 8 minutes for MSSQL
+                agent_timeout = max(agent_timeout, get_mssql_agent_timeout())
                 logger.debug(f"Extended timeout to {agent_timeout}s for MSSQL task {task.task_id}")
+
+            # Per-task-type step cap: override agent.max_steps for focused tasks
+            # to prevent cost blowout from agents flailing on doomed tasks
+            original_max_steps = self.agent.max_steps
+            task_step_caps = get_task_step_caps()
+            task_step_cap = task_step_caps.get(task.task_type)
+            if task_step_cap and task_step_cap < self.agent.max_steps:
+                self.agent.max_steps = task_step_cap
+                logger.info(
+                    f"[{self.agent_name}] Step cap for {task.task_type}: "
+                    f"{task_step_cap} (role default: {original_max_steps})"
+                )
             rate_limit_delays = get_rate_limit_backoff_delays()
             rate_limit_max_retries = get_rate_limit_max_retries()
             try:
@@ -1078,6 +1150,12 @@ class RedisWorkerAgent:
                 logger.warning(f"[{self.agent_name}] Failed to record task status: {status_error}")
         finally:
             self._current_task = None
+            # Clear realtime publisher to prevent stale task_id references
+            if self.shared_state:
+                self.shared_state.set_realtime_publish(None)
+            # Restore original max_steps after per-task override
+            if self.agent.max_steps != original_max_steps:
+                self.agent.max_steps = original_max_steps
             # Clear credential context to prevent leakage between tasks
             clear_credential_context()
             # End the CONSUMER span for Tempo service graph
@@ -2045,7 +2123,7 @@ class WorkerAgent:
         agent_name: str,
         operation_id: str | None = None,
         redis_url: str | None = None,
-        pointer_check_interval: float = 30.0,
+        pointer_check_interval: float = 5.0,
         max_operation_age: int = 300,
     ):
         self.role = role

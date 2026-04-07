@@ -284,8 +284,8 @@ async def credential_expansion_loop(
 async def exploitation_workflow(
     dispatcher: RedTeamDispatcher,
     check_interval: float = 10.0,
-    max_runtime: float = 7200.0,  # 2 hours default
-    max_concurrent_exploits: int = 3,
+    max_runtime: float = 7200.0,
+    max_concurrent_exploits: int | None = None,
 ) -> dict[str, Any]:
     """
     Main exploitation loop with parallel exploit execution.
@@ -306,6 +306,11 @@ async def exploitation_workflow(
     Returns:
         Summary of exploitation results
     """
+    from ares.core.config import get_max_concurrent_exploits, get_max_retries_per_vuln
+
+    if max_concurrent_exploits is None:
+        max_concurrent_exploits = get_max_concurrent_exploits()
+
     start_time = asyncio.get_event_loop().time()
     exploited_count = 0
     credentials_gained = 0
@@ -319,7 +324,7 @@ async def exploitation_workflow(
     # Track retry counts per vulnerability (prevent infinite retry loops)
     # Note: Per-vuln retries are also tracked in ZSET via failure_count field
     retry_counts: dict[str, int] = {}
-    max_retries_per_vuln = 2  # Allow 2 retries (3 total attempts)
+    max_retries_per_vuln = get_max_retries_per_vuln()
 
     # Semaphore for parallel exploitation
     exploit_semaphore = asyncio.Semaphore(max_concurrent_exploits)
@@ -342,6 +347,11 @@ async def exploitation_workflow(
         vuln_id = vuln["id"]
 
         async with exploit_semaphore:
+            # Bail immediately if killed
+            if dispatcher.shared_state.killed:
+                in_flight_vulns.discard(vuln_id)
+                return
+
             # Check for DA before starting (may have been achieved by parallel exploit)
             if dispatcher.shared_state.has_domain_admin:
                 from ares.core.config import get_multi_forest_mode
@@ -356,10 +366,13 @@ async def exploitation_workflow(
 
             logger.info(f"Processing vulnerability: {vuln_type} on {vuln['target']}")
 
-            # Route to appropriate agent with timeout (reduced from 16min to 5min)
+            # Route to appropriate agent with per-vuln-type timeout.
+            # Must be >= inner wait timeout + dispatch overhead (90s throttle max).
+            exploit_wait = _get_exploit_wait_timeout(vuln_type)
+            outer_timeout = exploit_wait + 120  # dispatch overhead + margin
             exploit_started = asyncio.get_event_loop().time()
             try:
-                async with asyncio.timeout(300):  # 5 min total (was 16 min)
+                async with asyncio.timeout(outer_timeout):
                     result = await _exploit_vulnerability(dispatcher, vuln)
             except asyncio.TimeoutError:
                 logger.error(f"Exploitation of {vuln_id} ({vuln_type}) timed out at dispatch level")
@@ -449,6 +462,9 @@ async def exploitation_workflow(
             break
 
         state = dispatcher.shared_state
+        if state.killed:
+            logger.warning("🛑 Operation killed — stopping exploitation workflow")
+            break
         if state.has_domain_admin:
             from ares.core.config import get_multi_forest_mode, get_stop_on_golden_ticket
 
@@ -469,15 +485,21 @@ async def exploitation_workflow(
                 # This can be a race condition: DA achieved before foreign domains
                 # were discovered. Keep the workflow alive for a grace period to allow
                 # foreign domain discovery (via MSSQL pivots, trust enumeration, etc.)
+                from ares.core.config import (
+                    get_foreign_domain_discovery_check,
+                    get_foreign_domain_discovery_grace,
+                )
+
+                fd_grace = get_foreign_domain_discovery_grace()
                 if da_grace_start is None:
                     da_grace_start = asyncio.get_event_loop().time()
                     logger.info(
                         "Multi-forest mode: all forests appear dominated, "
-                        "starting 300s grace period for foreign domain discovery"
+                        f"starting {fd_grace}s grace period for foreign domain discovery"
                     )
                 grace_elapsed = asyncio.get_event_loop().time() - da_grace_start
-                if grace_elapsed < 300:
-                    await asyncio.sleep(5.0)
+                if grace_elapsed < fd_grace:
+                    await asyncio.sleep(get_foreign_domain_discovery_check())
                     continue
                 logger.success(
                     "Domain Admin achieved! Multi-forest grace period expired, "
@@ -593,6 +615,9 @@ async def _dispatch_exploit(
         return task_id
     except asyncio.TimeoutError:
         logger.error(f"Exploit dispatch timed out for {vuln_id} - possible throttle deadlock")
+        # Clean up dedup set so the vuln can be retried on next cycle
+        if hasattr(dispatcher, "_dispatched_exploit_vuln_ids") and vuln_id:
+            dispatcher._dispatched_exploit_vuln_ids.discard(vuln_id)
         return ""
 
 
@@ -689,6 +714,13 @@ async def _wait_with_da_check(
 
     # Total timeout exceeded - mark as retryable so vuln can be re-processed
     logger.warning(f"Exploitation task {task_id} timed out after {timeout}s - will allow retry")
+
+    # Clean up the leaked pending_tasks entry so it doesn't accumulate
+    # and count against the concurrent task limit forever
+    task_info = dispatcher.shared_state.pending_tasks.pop(task_id, None)
+    if task_info:
+        logger.debug(f"Removed timed-out task {task_id} from pending_tasks")
+
     return {"success": False, "error": "Task timed out", "retryable": True}
 
 
@@ -700,6 +732,7 @@ def _get_exploit_wait_timeout(vuln_type: str) -> float:
     but still-running tasks as timed out and keep retrying them.
     """
     from ares.core.config import (
+        get_default_exploit_wait_timeout,
         get_mssql_cross_forest_workflow_timeout,
         get_mssql_workflow_timeout,
     )
@@ -710,7 +743,7 @@ def _get_exploit_wait_timeout(vuln_type: str) -> float:
         return get_mssql_cross_forest_workflow_timeout()
     if vuln_type_lower.startswith("mssql_"):
         return get_mssql_workflow_timeout()
-    return 180.0
+    return get_default_exploit_wait_timeout()
 
 
 async def _exploit_vulnerability(

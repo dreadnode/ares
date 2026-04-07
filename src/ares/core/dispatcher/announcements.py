@@ -17,6 +17,7 @@ from ares.core.config import (
     get_stop_on_domain_admin,
     get_stop_on_golden_ticket,
 )
+from ares.core.models import TaskInfo
 from ares.core.tracing import trace_discovery
 
 if TYPE_CHECKING:
@@ -367,6 +368,15 @@ class AnnouncementMixin:
                         source_agent="auto_trust_extraction",
                         priority=1,  # High priority - critical for multi-forest
                     )
+                    # Register in pending_tasks so the result consumer can
+                    # correlate the result (prevents ghost task)
+                    task_info = TaskInfo(
+                        task_id=task_id,
+                        task_type="exploit",
+                        assigned_agent="privesc",
+                        params=task_payload,
+                    )
+                    self.shared_state.pending_tasks[task_id] = task_info
                     logger.info(
                         f"🌲 Trust extraction task {task_id} submitted "
                         f"to ares:tasks:privesc (direct, bypassed throttle)"

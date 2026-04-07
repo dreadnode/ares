@@ -1452,8 +1452,8 @@ class CertipyTools(Toolset):
 
         # Build details for exploitation
         details: dict[str, str | list[str] | None] = {
-            "ca_name": ca_name,
-            "ca_host": target,
+            "ca_server": target,
+            "template": ca_name,
             "domain": domain,
             "dc_ip": dc_ip,
             "username": username,

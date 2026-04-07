@@ -640,10 +640,12 @@ def _generate_exploit_prompt(
         base = _render(
             "exploit_adcs_esc.md.jinja",
             vuln_type=vuln_type,
-            ca_server=payload.get("ca_server", target),
-            template=payload.get("template", ""),
+            ca_server=payload.get("ca_server", payload.get("ca_host", target)),
+            template=payload.get("template", payload.get("ca_name", "")),
             domain=payload.get("domain", ""),
             enrollee_user=payload.get("enrollee_user", payload.get("username", "")),
+            username=payload.get("username", ""),
+            password=payload.get("password", ""),
             task_id=task.task_id,
         )
         return base + format_state_context(state, "exploit", current_target=target)

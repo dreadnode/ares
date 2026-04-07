@@ -656,11 +656,32 @@ class MonitoringMixin:
                     )
                 elif discovery_type == "vulnerability":
                     await self._process_realtime_vulnerability_discovery(data, source_agent)
+                elif discovery_type == "host":
+                    await self._process_realtime_host_discovery(data, source_agent)
                 else:
                     logger.debug(f"Unknown discovery type: {discovery_type}")
 
         except Exception as e:
             logger.warning(f"Error polling discoveries: {e}")
+
+    async def _process_realtime_host_discovery(
+        self: RedTeamDispatcher, data: dict, source_agent: str
+    ) -> None:
+        """Process a real-time host discovery from a worker."""
+        from ares.core.models import Host
+
+        host = Host(
+            ip=data.get("ip", ""),
+            hostname=data.get("hostname", ""),
+            os=data.get("os", ""),
+            roles=data.get("roles", []),
+            services=data.get("services", []),
+        )
+        if data.get("is_dc"):
+            host.is_dc = True
+        if not host.ip:
+            return
+        await self.publish_host(host, source_agent)
 
     async def _process_realtime_delegation_discovery(
         self: RedTeamDispatcher, data: dict, source_agent: str, task_queue: Any = None
@@ -809,6 +830,7 @@ class MonitoringMixin:
         self: RedTeamDispatcher, data: dict, source_agent: str, task_queue: Any = None
     ) -> None:
         """Process a real-time vulnerability discovery and queue for exploitation."""
+        from ares.core.dispatcher.vulnerability import normalize_vuln_type
         from ares.core.models import VulnerabilityInfo
 
         vuln_type = data.get("vuln_type", "")
@@ -819,7 +841,7 @@ class MonitoringMixin:
             return
 
         # Generate vuln_id if not provided (must match queue_vulnerability format)
-        normalized_type = vuln_type.lower()
+        normalized_type = normalize_vuln_type(vuln_type)
         if not vuln_id:
             vuln_id = f"{normalized_type}_{target}_{uuid.uuid4().hex[:8]}"
 
@@ -841,7 +863,7 @@ class MonitoringMixin:
 
         vuln = VulnerabilityInfo(
             vuln_id=vuln_id,
-            vuln_type=vuln_type,
+            vuln_type=normalized_type,
             target=target,
             discovered_by=f"realtime:{source_agent}",
             details=details,
@@ -866,11 +888,16 @@ class MonitoringMixin:
         }
 
         # Auto-dispatch exploit for high-value vulnerabilities
-        if vuln_type.lower() in high_value_vulns:
-            await self.request_exploit(
-                vuln_type, vuln_id, target, source_agent, details, task_queue=task_queue
-            )
-            logger.warning(f"🚀 Auto-dispatched exploit for {vuln_type} on {target}")
+        if normalized_type in high_value_vulns:
+            if vuln_id in self.shared_state.exploited_vulnerabilities:
+                logger.debug(
+                    f"Skipping auto-dispatch for {vuln_type} vuln_id={vuln_id} (already exploited)"
+                )
+            else:
+                await self.request_exploit(
+                    normalized_type, vuln_id, target, source_agent, details, task_queue=task_queue
+                )
+                logger.warning(f"🚀 Auto-dispatched exploit for {normalized_type} on {target}")
 
     async def _ping_or_reconnect_dispatcher_redis(
         self: RedTeamDispatcher, timeout: float = 5.0
@@ -1520,6 +1547,8 @@ class MonitoringMixin:
                     await self._process_realtime_vulnerability_discovery(
                         data, source_agent, task_queue=task_queue
                     )
+                elif discovery_type == "host":
+                    await self._process_realtime_host_discovery(data, source_agent)
                 else:
                     logger.debug(f"Unknown discovery type: {discovery_type}")
 

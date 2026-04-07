@@ -145,7 +145,7 @@ agents:
 
   privesc:
     model: "gpt-5.2"
-    max_steps: 100
+    max_steps: 100  # Exploits need room for retries on tool errors (ConnectionRefused, auth failures)
     pod_selector: "ares.dreadnode.io/role=privesc"
     # Provisioned by: ansible/playbooks/ares/privesc.yml → dreadnode.nimbus_range.privesc_tools
     capabilities:
@@ -259,6 +259,8 @@ timeouts:
   lateral_movement: 180  # seconds
   hash_cracking: 600  # seconds - 10 minutes
   exploitation: 900  # seconds - ACL tasks can take 10+ minutes
+  mssql_agent: 480  # seconds - MSSQL exploit chains need more time (6+ tool calls)
+  default_exploit_wait: 180.0  # seconds - workflow wait for non-MSSQL exploits
 
 # Recovery configuration
 recovery:
@@ -267,6 +269,62 @@ recovery:
   retry_delay: 10  # seconds
   checkpoint_on_credential: true
   checkpoint_on_vulnerability: true
+
+# Background task check intervals (seconds)
+# These control how often each auto-dispatcher checks for new work
+background_tasks:
+  credential_expansion: 10.0    # Reduced from 30s for faster lateral testing
+  credential_access: 15.0       # Reduced from 60s for faster reaction
+  crack_dispatch: 30.0
+  share_spider: 30.0
+  bloodhound: 30.0
+  golden_ticket: 30.0
+  acl_chain_follow: 30.0
+  adcs_enumeration: 45.0
+  local_admin_secretsdump: 45.0
+  foreign_dcsync: 45.0
+  coercion: 60.0
+  cross_forest_pivot: 60.0
+  delegation_enumeration: 15.0  # Reduced from 60s for faster detection
+
+# Circuit breaker and failure handling
+circuit_breaker:
+  # Per-tool: stop agent after N consecutive failures on the same tool
+  per_tool_threshold: 3
+  # Global: stop agent after N auth/validation failures across ALL tools
+  global_auth_threshold: 5
+
+# Task retry and cooldown settings
+task_retries:
+  # ADCS enumeration
+  adcs_max_retries: 2
+  adcs_retry_cooldown: 60.0     # seconds before retrying failed ADCS tasks
+  adcs_stuck_timeout: 480.0     # seconds before considering ADCS tasks stuck
+  # BloodHound
+  bloodhound_max_retries: 3
+  bloodhound_retry_cooldown: 120.0  # seconds before retrying failed BH tasks
+  # Secretsdump
+  secretsdump_max_retries: 2
+  # Exploitation workflow
+  max_retries_per_vuln: 2       # Allow 2 retries (3 total attempts)
+  max_concurrent_exploits: 3
+
+# Per-task-type step caps (override role max_steps for focused tasks)
+# Prevents cost blowout from agents flailing on doomed tasks
+task_step_caps:
+  exploit: 60
+  trust_extraction: 40
+  secretsdump: 40
+  coercion: 25
+
+# Completion grace periods (seconds)
+completion:
+  loot_collection_grace: 60.0     # Wait for share spidering after DA
+  loot_check_interval: 5.0
+  golden_ticket_wait: 120.0       # Wait for golden ticket generation
+  golden_ticket_check: 5.0
+  foreign_domain_discovery: 300.0 # Grace period for foreign domain discovery after DA
+  foreign_domain_check: 5.0
 
 # Phase detection thresholds (see PRIORITY.md for rationale)
 # Used to determine operation phase for task prioritization

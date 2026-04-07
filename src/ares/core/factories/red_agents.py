@@ -19,6 +19,8 @@ from loguru import logger
 from ares.core.capability_registry import FilteredToolset, get_enabled_tools
 from ares.core.config import (
     get_agent_config,
+    get_circuit_breaker_global_auth_threshold,
+    get_circuit_breaker_per_tool_threshold,
     get_max_context_tokens,
     get_min_messages_to_keep,
     get_multi_forest_mode,
@@ -63,7 +65,7 @@ from ares.tools.red import (
 if TYPE_CHECKING:
     from ares.core.k8s_executor import KubernetesPodExecutor
 
-from dreadnode.agent.reactions import Finish, Reaction, RetryWithFeedback
+from dreadnode.agent.reactions import Fail, Finish, Reaction, RetryWithFeedback
 
 
 def fix_tool_output_encoding(content: str) -> str:
@@ -318,9 +320,24 @@ def create_role_hooks(
     # Circuit breaker state - track consecutive failures per tool
     # This prevents agents from infinitely retrying the same failing approach
     consecutive_failures: dict[str, int] = {}
-    circuit_breaker_threshold = 3  # Stop after 3 consecutive failures on same tool
+    circuit_breaker_threshold = get_circuit_breaker_per_tool_threshold()
     circuit_breaker_tripped = (
         False  # Flag to prevent redundant Finish reactions from parallel calls
+    )
+
+    # Global auth/validation failure counter - tracks consecutive failures across ALL tools
+    # for patterns that indicate fundamental misconfig (wrong creds, unreachable target, etc.)
+    global_auth_failures: list[int] = [0]  # mutable container for nonlocal access
+    global_auth_failure_threshold = get_circuit_breaker_global_auth_threshold()
+    auth_failure_patterns = (
+        "NTLM needs domain",
+        "Login failed",
+        "STATUS_LOGON_FAILURE",
+        "KDC_ERR_PREAUTH_FAILED",
+        "KDC_ERR_CLIENT_REVOKED",
+        "KDC_ERR_C_PRINCIPAL_UNKNOWN",
+        "SSPI",
+        "Authentication failed",
     )
 
     # Common logging hooks
@@ -342,51 +359,47 @@ def create_role_hooks(
         tool_name = event.tool_call.name
         is_error = False
 
-        if hasattr(event, "error") and event.error:
-            is_error = True
-            logger.warning(f"❌ [{log_name}] {tool_name} failed: {event.error}")
+        content = fix_tool_output_encoding(
+            str(event.message.content) if event.message and event.message.content else ""
+        )
+        if not content:
+            logger.info(f"✅ [{log_name}] {tool_name}: (empty)")
         else:
-            content = fix_tool_output_encoding(
-                str(event.message.content) if event.message and event.message.content else ""
+            # Detect error content returned by rigging's exception catching
+            # (ValidationError, JSONDecodeError are caught and returned as error XML)
+            # Also detect common tool failure patterns
+            # NOTE: Be careful not to match on status reports that mention failures
+            # e.g. get_exploitation_status() returns "Task timed out" for OTHER tasks
+            is_error = (
+                content.startswith('<error type="')
+                or "ValidationError" in content
+                or "[-] ERROR" in content
             )
-            if not content:
-                logger.info(f"✅ [{log_name}] {tool_name}: (empty)")
-            else:
-                # Detect error content returned by rigging's exception catching
-                # (ValidationError, JSONDecodeError are caught and returned as error XML)
-                # Also detect common tool failure patterns
-                # NOTE: Be careful not to match on status reports that mention failures
-                # e.g. get_exploitation_status() returns "Task timed out" for OTHER tasks
-                is_error = (
-                    content.startswith('<error type="')
-                    or "ValidationError" in content
-                    or "[-] ERROR" in content
+            # Only match "Login failed" / "timed out" if they appear at the start
+            # (actual tool errors), not in the middle of status reports
+            if not is_error:
+                first_line = content.split("\n")[0].lower() if content else ""
+                is_error = first_line.startswith(
+                    ("login failed", "error:", "timed out", "task timed out")
                 )
-                # Only match "Login failed" / "timed out" if they appear at the start
-                # (actual tool errors), not in the middle of status reports
-                if not is_error:
-                    first_line = content.split("\n")[0].lower() if content else ""
-                    is_error = first_line.startswith(
-                        ("login failed", "error:", "timed out", "task timed out")
-                    )
-                icon = "❌" if is_error else "✅"
-                log_fn = logger.warning if is_error else logger.info
+            icon = "❌" if is_error else "✅"
+            log_fn = logger.warning if is_error else logger.info
 
-                # Show first 50 lines, max 5000 chars
-                lines = content.split("\n")[:50]
-                result = "\n".join(lines)
-                truncated = len(lines) < len(content.split("\n")) or len(content) > 5000
-                if len(result) > 5000:
-                    result = result[:5000]
-                    truncated = True
-                suffix = " ..." if truncated else ""
-                if "\n" in result:
-                    log_fn(f"{icon} [{log_name}] {tool_name}:\n{result}{suffix}")
-                else:
-                    log_fn(f"{icon} [{log_name}] {tool_name}: {result}{suffix}")
+            # Show first 50 lines, max 5000 chars
+            lines = content.split("\n")[:50]
+            result = "\n".join(lines)
+            truncated = len(lines) < len(content.split("\n")) or len(content) > 5000
+            if len(result) > 5000:
+                result = result[:5000]
+                truncated = True
+            suffix = " ..." if truncated else ""
+            if "\n" in result:
+                log_fn(f"{icon} [{log_name}] {tool_name}:\n{result}{suffix}")
+            else:
+                log_fn(f"{icon} [{log_name}] {tool_name}: {result}{suffix}")
 
         # Create trace span for tool execution with result status
-        error_msg = str(event.error)[:500] if hasattr(event, "error") and event.error else None
+        error_msg = content[:500] if is_error and content else None
 
         # Build DC IPs set from shared_state for proper target type inference
         dc_ips: set[str] = set()
@@ -536,14 +549,41 @@ def create_role_hooks(
         # Use nonlocal to modify the tripped flag
         nonlocal circuit_breaker_tripped
 
-        # If already tripped, return Finish immediately to stop parallel calls
+        # If already tripped, return Fail immediately to stop parallel calls
         if circuit_breaker_tripped:
-            return Finish(reason="Circuit breaker already tripped - stopping agent")
+            return Fail(error="Circuit breaker already tripped - stopping agent")
 
         if is_error:
             consecutive_failures[tool_name] = consecutive_failures.get(tool_name, 0) + 1
             fail_count = consecutive_failures[tool_name]
 
+            # Check if this is an auth/validation failure pattern
+            error_content = content
+
+            is_auth_failure = any(
+                pat.lower() in error_content.lower() for pat in auth_failure_patterns
+            )
+            if is_auth_failure:
+                global_auth_failures[0] += 1
+                auth_count = global_auth_failures[0]
+                if auth_count >= global_auth_failure_threshold:
+                    circuit_breaker_tripped = True
+                    logger.error(
+                        f"🔌 [{log_name}] Auth/validation circuit breaker tripped: "
+                        f"{auth_count} consecutive auth/validation failures across tools - "
+                        f"last failure: {tool_name}"
+                    )
+                    return Fail(
+                        error=f"Circuit breaker: {auth_count} consecutive auth/validation "
+                        f"failures across tools. Last failure: {tool_name}."
+                    )
+                if auth_count >= 3:
+                    logger.warning(
+                        f"⚠️ [{log_name}] Auth/validation failures: {auth_count}/{global_auth_failure_threshold} "
+                        f"(last: {tool_name})"
+                    )
+
+            # Per-tool circuit breaker
             if fail_count >= circuit_breaker_threshold:
                 # Set flag BEFORE returning to prevent race with parallel calls
                 circuit_breaker_tripped = True
@@ -551,9 +591,8 @@ def create_role_hooks(
                     f"🔌 [{log_name}] Circuit breaker tripped: {tool_name} failed "
                     f"{fail_count} times consecutively - stopping agent"
                 )
-                return Finish(
-                    reason=f"Circuit breaker: {tool_name} failed {fail_count} times consecutively. "
-                    "The approach is not working - task will be retried with a different strategy."
+                return Fail(
+                    error=f"Circuit breaker: {tool_name} failed {fail_count} times consecutively."
                 )
             if fail_count >= 2:
                 logger.warning(
@@ -561,8 +600,9 @@ def create_role_hooks(
                     f"(circuit breaker at {circuit_breaker_threshold})"
                 )
         else:
-            # Reset failure counter on success
+            # Reset failure counters on success
             consecutive_failures[tool_name] = 0
+            global_auth_failures[0] = 0
 
         return None
 

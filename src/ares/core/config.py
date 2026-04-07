@@ -228,6 +228,57 @@ class OperationConfig:
     # are mutually exclusive - only one can be True
     multi_forest_mode: bool = False
 
+    # Background task check intervals (seconds)
+    bg_credential_expansion_interval: float = 10.0
+    bg_credential_access_interval: float = 15.0
+    bg_crack_dispatch_interval: float = 30.0
+    bg_share_spider_interval: float = 30.0
+    bg_bloodhound_interval: float = 30.0
+    bg_golden_ticket_interval: float = 30.0
+    bg_acl_chain_follow_interval: float = 30.0
+    bg_adcs_enumeration_interval: float = 45.0
+    bg_local_admin_secretsdump_interval: float = 45.0
+    bg_foreign_dcsync_interval: float = 45.0
+    bg_coercion_interval: float = 60.0
+    bg_cross_forest_pivot_interval: float = 60.0
+    bg_delegation_enumeration_interval: float = 15.0
+
+    # Circuit breaker settings
+    circuit_breaker_per_tool_threshold: int = 3
+    circuit_breaker_global_auth_threshold: int = 5
+
+    # Task retry and cooldown settings
+    adcs_max_retries: int = 2
+    adcs_retry_cooldown: float = 60.0
+    adcs_stuck_timeout: float = 480.0
+    bloodhound_max_retries: int = 3
+    bloodhound_retry_cooldown: float = 120.0
+    secretsdump_max_retries: int = 2
+    max_retries_per_vuln: int = 2
+    max_concurrent_exploits: int = 3
+
+    # Per-task-type step caps (override role max_steps for focused tasks)
+    task_step_caps: dict[str, int] = field(
+        default_factory=lambda: {
+            "exploit": 25,
+            "trust_extraction": 20,
+            "secretsdump": 20,
+            "coercion": 25,
+        }
+    )
+
+    # Timeout overrides
+    mssql_agent_timeout: int = 480
+    default_exploit_wait_timeout: float = 180.0
+
+    # Completion grace periods
+    loot_collection_grace: float = 60.0
+    loot_check_interval: float = 5.0
+    golden_ticket_wait: float = 120.0
+    golden_ticket_check_interval: float = 5.0
+    foreign_domain_discovery_grace: float = 300.0
+    foreign_domain_discovery_check: float = 5.0
+
     # Rate limit retry settings (for worker agents)
     # Delays between retries when rate limited (list of seconds)
     rate_limit_backoff_delays: list[float] = field(
@@ -367,6 +418,10 @@ def _build_config(data: dict[str, Any]) -> OperationConfig:
     grafana = data.get("grafana", {})
     phase_detection = data.get("phase_detection", {})
     context_management = data.get("context_management", {})
+    bg_tasks = data.get("background_tasks", {})
+    cb = data.get("circuit_breaker", {})
+    task_retries = data.get("task_retries", {})
+    completion = data.get("completion", {})
 
     # Build agent configs
     agents: dict[str, AgentConfig] = {}
@@ -462,6 +517,52 @@ def _build_config(data: dict[str, Any]) -> OperationConfig:
             "query_limits_by_stage",
             {"triage": 8, "causation": 14, "lateral": 20, "synthesis": 20},
         ),
+        # Background task check intervals
+        bg_credential_expansion_interval=bg_tasks.get("credential_expansion", 10.0),
+        bg_credential_access_interval=bg_tasks.get("credential_access", 15.0),
+        bg_crack_dispatch_interval=bg_tasks.get("crack_dispatch", 30.0),
+        bg_share_spider_interval=bg_tasks.get("share_spider", 30.0),
+        bg_bloodhound_interval=bg_tasks.get("bloodhound", 30.0),
+        bg_golden_ticket_interval=bg_tasks.get("golden_ticket", 30.0),
+        bg_acl_chain_follow_interval=bg_tasks.get("acl_chain_follow", 30.0),
+        bg_adcs_enumeration_interval=bg_tasks.get("adcs_enumeration", 45.0),
+        bg_local_admin_secretsdump_interval=bg_tasks.get("local_admin_secretsdump", 45.0),
+        bg_foreign_dcsync_interval=bg_tasks.get("foreign_dcsync", 45.0),
+        bg_coercion_interval=bg_tasks.get("coercion", 60.0),
+        bg_cross_forest_pivot_interval=bg_tasks.get("cross_forest_pivot", 60.0),
+        bg_delegation_enumeration_interval=bg_tasks.get("delegation_enumeration", 15.0),
+        # Circuit breaker
+        circuit_breaker_per_tool_threshold=cb.get("per_tool_threshold", 3),
+        circuit_breaker_global_auth_threshold=cb.get("global_auth_threshold", 5),
+        # Task retries
+        adcs_max_retries=task_retries.get("adcs_max_retries", 2),
+        adcs_retry_cooldown=task_retries.get("adcs_retry_cooldown", 60.0),
+        adcs_stuck_timeout=task_retries.get("adcs_stuck_timeout", 480.0),
+        bloodhound_max_retries=task_retries.get("bloodhound_max_retries", 3),
+        bloodhound_retry_cooldown=task_retries.get("bloodhound_retry_cooldown", 120.0),
+        secretsdump_max_retries=task_retries.get("secretsdump_max_retries", 2),
+        max_retries_per_vuln=task_retries.get("max_retries_per_vuln", 2),
+        max_concurrent_exploits=task_retries.get("max_concurrent_exploits", 3),
+        # Per-task-type step caps
+        task_step_caps=data.get(
+            "task_step_caps",
+            {
+                "exploit": 25,
+                "trust_extraction": 20,
+                "secretsdump": 20,
+                "coercion": 25,
+            },
+        ),
+        # Timeout overrides
+        mssql_agent_timeout=timeouts.get("mssql_agent", 480),
+        default_exploit_wait_timeout=timeouts.get("default_exploit_wait", 180.0),
+        # Completion grace periods
+        loot_collection_grace=completion.get("loot_collection_grace", 60.0),
+        loot_check_interval=completion.get("loot_check_interval", 5.0),
+        golden_ticket_wait=completion.get("golden_ticket_wait", 120.0),
+        golden_ticket_check_interval=completion.get("golden_ticket_check", 5.0),
+        foreign_domain_discovery_grace=completion.get("foreign_domain_discovery", 300.0),
+        foreign_domain_discovery_check=completion.get("foreign_domain_check", 5.0),
     )
 
     # Validate mutual exclusion of stop conditions
@@ -1158,6 +1259,184 @@ def get_replay_fallback() -> Literal["error", "live", "skip"]:
     return load_config().replay_fallback
 
 
+# --- Background task interval getters ---
+
+
+def get_bg_credential_expansion_interval() -> float:
+    """Get check interval for auto credential expansion."""
+    return load_config().bg_credential_expansion_interval
+
+
+def get_bg_credential_access_interval() -> float:
+    """Get check interval for auto credential access."""
+    return load_config().bg_credential_access_interval
+
+
+def get_bg_crack_dispatch_interval() -> float:
+    """Get check interval for auto crack dispatch."""
+    return load_config().bg_crack_dispatch_interval
+
+
+def get_bg_share_spider_interval() -> float:
+    """Get check interval for auto share spidering."""
+    return load_config().bg_share_spider_interval
+
+
+def get_bg_bloodhound_interval() -> float:
+    """Get check interval for auto BloodHound."""
+    return load_config().bg_bloodhound_interval
+
+
+def get_bg_golden_ticket_interval() -> float:
+    """Get check interval for auto golden ticket."""
+    return load_config().bg_golden_ticket_interval
+
+
+def get_bg_acl_chain_follow_interval() -> float:
+    """Get check interval for auto ACL chain follow."""
+    return load_config().bg_acl_chain_follow_interval
+
+
+def get_bg_adcs_enumeration_interval() -> float:
+    """Get check interval for auto ADCS enumeration."""
+    return load_config().bg_adcs_enumeration_interval
+
+
+def get_bg_local_admin_secretsdump_interval() -> float:
+    """Get check interval for auto local admin secretsdump."""
+    return load_config().bg_local_admin_secretsdump_interval
+
+
+def get_bg_foreign_dcsync_interval() -> float:
+    """Get check interval for auto foreign DCSync."""
+    return load_config().bg_foreign_dcsync_interval
+
+
+def get_bg_coercion_interval() -> float:
+    """Get check interval for auto coercion."""
+    return load_config().bg_coercion_interval
+
+
+def get_bg_cross_forest_pivot_interval() -> float:
+    """Get check interval for auto cross-forest pivot."""
+    return load_config().bg_cross_forest_pivot_interval
+
+
+def get_bg_delegation_enumeration_interval() -> float:
+    """Get check interval for auto delegation enumeration."""
+    return load_config().bg_delegation_enumeration_interval
+
+
+# --- Circuit breaker getters ---
+
+
+def get_circuit_breaker_per_tool_threshold() -> int:
+    """Get per-tool circuit breaker threshold."""
+    return load_config().circuit_breaker_per_tool_threshold
+
+
+def get_circuit_breaker_global_auth_threshold() -> int:
+    """Get global auth failure circuit breaker threshold."""
+    return load_config().circuit_breaker_global_auth_threshold
+
+
+# --- Task retry getters ---
+
+
+def get_adcs_max_retries() -> int:
+    """Get max retries for ADCS enumeration."""
+    return load_config().adcs_max_retries
+
+
+def get_adcs_retry_cooldown() -> float:
+    """Get retry cooldown for ADCS tasks."""
+    return load_config().adcs_retry_cooldown
+
+
+def get_adcs_stuck_timeout() -> float:
+    """Get stuck timeout for ADCS tasks."""
+    return load_config().adcs_stuck_timeout
+
+
+def get_bloodhound_max_retries() -> int:
+    """Get max retries for BloodHound."""
+    return load_config().bloodhound_max_retries
+
+
+def get_bloodhound_retry_cooldown() -> float:
+    """Get retry cooldown for BloodHound tasks."""
+    return load_config().bloodhound_retry_cooldown
+
+
+def get_secretsdump_max_retries() -> int:
+    """Get max retries for secretsdump."""
+    return load_config().secretsdump_max_retries
+
+
+def get_max_retries_per_vuln() -> int:
+    """Get max retries per vulnerability in exploitation workflow."""
+    return load_config().max_retries_per_vuln
+
+
+def get_max_concurrent_exploits() -> int:
+    """Get max concurrent exploits in exploitation workflow."""
+    return load_config().max_concurrent_exploits
+
+
+# --- Task step cap getters ---
+
+
+def get_task_step_caps() -> dict[str, int]:
+    """Get per-task-type step caps."""
+    return load_config().task_step_caps
+
+
+# --- Timeout getters ---
+
+
+def get_mssql_agent_timeout() -> int:
+    """Get agent timeout for MSSQL tasks."""
+    return load_config().mssql_agent_timeout
+
+
+def get_default_exploit_wait_timeout() -> float:
+    """Get default workflow wait timeout for non-MSSQL exploits."""
+    return load_config().default_exploit_wait_timeout
+
+
+# --- Completion grace period getters ---
+
+
+def get_loot_collection_grace() -> float:
+    """Get grace period for loot collection after DA."""
+    return load_config().loot_collection_grace
+
+
+def get_loot_check_interval() -> float:
+    """Get check interval during loot collection grace period."""
+    return load_config().loot_check_interval
+
+
+def get_golden_ticket_wait() -> float:
+    """Get timeout for waiting on golden ticket generation."""
+    return load_config().golden_ticket_wait
+
+
+def get_golden_ticket_check_interval() -> float:
+    """Get check interval for golden ticket generation."""
+    return load_config().golden_ticket_check_interval
+
+
+def get_foreign_domain_discovery_grace() -> float:
+    """Get grace period for foreign domain discovery after DA."""
+    return load_config().foreign_domain_discovery_grace
+
+
+def get_foreign_domain_discovery_check() -> float:
+    """Get check interval during foreign domain discovery grace."""
+    return load_config().foreign_domain_discovery_check
+
+
 def clear_config_cache() -> None:
     """Clear the cached configuration (useful for testing)."""
     global _cached_config
@@ -1172,23 +1451,51 @@ __all__ = [
     "OperationConfig",
     "clear_config_cache",
     "derive_redis_url",
+    "get_adcs_max_retries",
+    "get_adcs_retry_cooldown",
+    "get_adcs_stuck_timeout",
     "get_agent_config",
     "get_agent_heartbeat_timeout",
     "get_agent_task_timeout",
+    "get_bg_acl_chain_follow_interval",
+    "get_bg_adcs_enumeration_interval",
+    "get_bg_bloodhound_interval",
+    "get_bg_coercion_interval",
+    "get_bg_crack_dispatch_interval",
+    "get_bg_credential_access_interval",
+    "get_bg_credential_expansion_interval",
+    "get_bg_cross_forest_pivot_interval",
+    "get_bg_delegation_enumeration_interval",
+    "get_bg_foreign_dcsync_interval",
+    "get_bg_golden_ticket_interval",
+    "get_bg_local_admin_secretsdump_interval",
+    "get_bg_share_spider_interval",
+    "get_bloodhound_max_retries",
+    "get_bloodhound_retry_cooldown",
     "get_bonus_queries_for_evidence",
     "get_bonus_queries_for_pyramid_l4",
+    "get_circuit_breaker_global_auth_threshold",
+    "get_circuit_breaker_per_tool_threshold",
     "get_context_compaction_interval",
     "get_crack_task_grace_period",
     "get_critical_priority_threshold",
+    "get_default_exploit_wait_timeout",
     "get_default_max_retries",
     "get_default_network_interface",
     "get_deferred_queue_check_interval",
     "get_deferred_task_max_age",
+    "get_foreign_domain_discovery_check",
+    "get_foreign_domain_discovery_grace",
+    "get_golden_ticket_check_interval",
+    "get_golden_ticket_wait",
     "get_lateral_movement_admin_creds_threshold",
     "get_lateral_movement_owned_hosts_threshold",
+    "get_loot_check_interval",
+    "get_loot_collection_grace",
     "get_low_medium_early_exit_min_evidence",
     "get_low_medium_early_exit_min_queries",
     "get_low_medium_early_exit_min_steps",
+    "get_max_concurrent_exploits",
     "get_max_concurrent_tasks",
     "get_max_context_tokens",
     "get_max_deferred_per_type",
@@ -1200,6 +1507,7 @@ __all__ = [
     "get_max_queries_per_investigation",
     "get_max_redis_consecutive_failures",
     "get_max_result_entries",
+    "get_max_retries_per_vuln",
     "get_max_runtime",
     "get_max_stored_results",
     "get_max_timeline_before_compaction",
@@ -1207,6 +1515,7 @@ __all__ = [
     "get_max_vulnerability_failures",
     "get_min_messages_to_keep",
     "get_min_slots_per_role",
+    "get_mssql_agent_timeout",
     "get_mssql_cross_forest_workflow_timeout",
     "get_mssql_workflow_timeout",
     "get_multi_forest_mode",
@@ -1226,10 +1535,12 @@ __all__ = [
     "get_replay_file",
     "get_replay_mode",
     "get_replay_seed",
+    "get_secretsdump_max_retries",
     "get_stale_task_timeout",
     "get_stop_on_domain_admin",
     "get_stop_on_golden_ticket",
     "get_task_dispatch_delay",
+    "get_task_step_caps",
     "get_unvalidated_confidence_penalty",
     "get_vulnerability_priorities",
     "load_config",
