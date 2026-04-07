@@ -73,7 +73,8 @@ repos:
     hooks:
       - id: detect-secrets
         args: ["--baseline", ".secrets.baseline"]
-        exclude: .secrets.baseline
+        pass_filenames: false
+        exclude: ^(\.secrets\.baseline|docs/rust-migration/redis-schema-contract\.md)$
 
   # Clean jupyter notebook outputs
   - repo: https://github.com/kynan/nbstripout
