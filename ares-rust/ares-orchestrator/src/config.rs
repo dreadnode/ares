@@ -106,3 +106,50 @@ fn parse_env<T: std::str::FromStr>(key: &str, default: T) -> T {
         .and_then(|v| v.parse().ok())
         .unwrap_or(default)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Helper to create a config without env vars.
+    pub(crate) fn make_config(max_tasks: usize) -> OrchestratorConfig {
+        OrchestratorConfig {
+            redis_url: "redis://localhost".into(),
+            operation_id: "test-op".into(),
+            max_concurrent_tasks: max_tasks,
+            heartbeat_interval: Duration::from_secs(30),
+            heartbeat_timeout: Duration::from_secs(120),
+            result_poll_interval: Duration::from_millis(500),
+            lock_ttl: Duration::from_secs(300),
+            deferred_poll_interval: Duration::from_secs(10),
+            max_tasks_per_role: 3,
+            dispatch_delay: Duration::from_millis(0),
+            stale_task_timeout: Duration::from_secs(300),
+            deferred_task_max_age: Duration::from_secs(300),
+            max_deferred_per_type: 5,
+            max_deferred_total: 20,
+        }
+    }
+
+    #[test]
+    fn hard_cap_is_1_5x() {
+        assert_eq!(make_config(8).hard_cap(), 12);
+        assert_eq!(make_config(10).hard_cap(), 15);
+        assert_eq!(make_config(1).hard_cap(), 1);
+    }
+
+    #[test]
+    fn from_env_defaults_and_missing_op_id() {
+        // Combined test to avoid env var race conditions between parallel tests.
+        std::env::remove_var("ARES_OPERATION_ID");
+        assert!(OrchestratorConfig::from_env().is_err());
+
+        std::env::set_var("ARES_OPERATION_ID", "test-op-1");
+        let c = OrchestratorConfig::from_env().unwrap();
+        assert_eq!(c.max_concurrent_tasks, 8);
+        assert_eq!(c.heartbeat_interval, Duration::from_secs(30));
+        assert_eq!(c.max_tasks_per_role, 3);
+        assert_eq!(c.dispatch_delay, Duration::from_millis(200));
+        std::env::remove_var("ARES_OPERATION_ID");
+    }
+}

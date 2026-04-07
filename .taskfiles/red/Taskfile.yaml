@@ -536,7 +536,7 @@ tasks:
       - kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-orchestrator -- python -m ares.cli_ops delete "{{.OPERATION_ID}}" --force
 
   multi:kill:
-    desc: "Kill running operations except the latest (usage: task red:multi:kill [OPERATION_ID=op-xxx] [KEEP_LATEST=true])"
+    desc: "Kill running operations and restart workers to stop token burn (usage: task red:multi:kill [OPERATION_ID=op-xxx] [KEEP_LATEST=true])"
     silent: true
     vars:
       OPERATION_ID: '{{.OPERATION_ID | default ""}}'
@@ -544,16 +544,24 @@ tasks:
     cmds:
       - |
         set -euo pipefail
+        KILLED_ANY=false
+
         if [ -n "{{.OPERATION_ID}}" ]; then
           # Kill specific operation
           echo "Killing operation: {{.OPERATION_ID}}"
           kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-orchestrator -- python -m ares.cli_ops delete "{{.OPERATION_ID}}" --force
+          KILLED_ANY=true
         else
           # Get all running operations
           RUNNING_OPS=$(kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-orchestrator -- python -m ares.cli_ops queue 2>/dev/null | grep '\[running\]' | awk '{print $1}' || true)
           if [ -z "$RUNNING_OPS" ]; then
             echo "No running operations found"
-            exit 0
+            if [ "{{.KEEP_LATEST}}" = "false" ]; then
+              echo "KEEP_LATEST=false — restarting workers as safety net"
+              KILLED_ANY=true
+            else
+              exit 0
+            fi
           fi
 
           # Count running ops
@@ -568,16 +576,33 @@ tasks:
             for op in $TO_KILL; do
               echo "Killing: $op"
               kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-orchestrator -- python -m ares.cli_ops delete "$op" --force
+              KILLED_ANY=true
             done
           elif [ "{{.KEEP_LATEST}}" = "false" ]; then
             # Kill all running
             for op in $RUNNING_OPS; do
               echo "Killing: $op"
               kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-orchestrator -- python -m ares.cli_ops delete "$op" --force
+              KILLED_ANY=true
             done
           else
             echo "Only 1 running operation - use KEEP_LATEST=false to kill it"
           fi
+        fi
+
+        # Restart workers to immediately stop in-flight LLM calls burning tokens
+        if [ "$KILLED_ANY" = "true" ]; then
+          echo ""
+          echo "=== Restarting workers to stop in-flight token burn ==="
+          RED_WORKERS=$(kubectl get statefulsets -n {{.K8S_NAMESPACE}} -o name | grep -v -E 'blue|redis' | sed 's|statefulset.apps/||')
+          for sts in $RED_WORKERS; do
+            kubectl rollout restart statefulset "$sts" -n {{.K8S_NAMESPACE}}
+          done
+          echo "Waiting for workers to terminate..."
+          for sts in $RED_WORKERS; do
+            kubectl rollout status statefulset "$sts" -n {{.K8S_NAMESPACE}} --timeout=120s 2>/dev/null || true
+          done
+          echo "All workers restarted. Token burn stopped."
         fi
 
   multi:backfill-domains:

@@ -111,3 +111,40 @@ impl WorkerConfig {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Combined test to avoid env var race conditions between parallel tests.
+    #[test]
+    fn from_env_all_scenarios() {
+        // Missing redis URL fails
+        std::env::remove_var("ARES_REDIS_URL");
+        std::env::set_var("ARES_WORKER_ROLE", "recon");
+        assert!(WorkerConfig::from_env().is_err());
+
+        // Missing role fails
+        std::env::set_var("ARES_REDIS_URL", "redis://localhost");
+        std::env::remove_var("ARES_WORKER_ROLE");
+        assert!(WorkerConfig::from_env().is_err());
+
+        // Defaults applied
+        std::env::set_var("ARES_WORKER_ROLE", "recon");
+        let c = WorkerConfig::from_env().unwrap();
+        assert_eq!(c.task_timeout, Duration::from_secs(600));
+        assert_eq!(c.heartbeat_interval, Duration::from_secs(15));
+        assert_eq!(c.heartbeat_ttl, Duration::from_secs(60));
+        assert_eq!(c.poll_timeout, Duration::from_secs(5));
+        assert!(c.operation_id.is_none());
+
+        // Agent name from role
+        std::env::set_var("ARES_WORKER_ROLE", "credential_access");
+        let c = WorkerConfig::from_env().unwrap();
+        assert_eq!(c.agent_name, "ares-credential-access-agent");
+        assert_eq!(c.worker_role, "credential_access");
+
+        std::env::remove_var("ARES_REDIS_URL");
+        std::env::remove_var("ARES_WORKER_ROLE");
+    }
+}

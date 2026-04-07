@@ -25,7 +25,7 @@ pyo3 = { workspace = true, optional = true }
 tempfile = "3"
 
 [lib]
-crate-type = ["lib"]
+crate-type = ["lib", "cdylib"]
 
 [features]
 default = []

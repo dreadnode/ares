@@ -443,3 +443,78 @@ fn is_shutdown_signalled(_shutdown: &Arc<tokio::sync::Notify>) -> bool {
     // drops the task or aborts it.
     false
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn task_message_roundtrip() {
+        let msg = TaskMessage {
+            task_id: "task-123".into(),
+            task_type: "recon".into(),
+            source_agent: "orchestrator".into(),
+            target_agent: "ares-recon-0".into(),
+            payload: serde_json::json!({"target_ip": "10.0.0.1"}),
+            priority: 3,
+            created_at: Some("2026-04-07T10:00:00Z".into()),
+            callback_queue: None,
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        let msg2: TaskMessage = serde_json::from_str(&json).unwrap();
+        assert_eq!(msg.task_id, msg2.task_id);
+        assert_eq!(msg.task_type, msg2.task_type);
+        assert_eq!(msg.priority, msg2.priority);
+    }
+
+    #[test]
+    fn task_message_default_priority() {
+        let json = r#"{
+            "task_id": "t1",
+            "task_type": "recon",
+            "source_agent": "orch",
+            "target_agent": "recon-0",
+            "payload": {}
+        }"#;
+        let msg: TaskMessage = serde_json::from_str(json).unwrap();
+        assert_eq!(msg.priority, 5); // default
+    }
+
+    #[test]
+    fn task_result_success() {
+        let r = TaskResult::success(
+            "t1",
+            serde_json::json!({"output": "done"}),
+            "pod-0",
+            "ares-recon",
+        );
+        assert!(r.success);
+        assert!(r.error.is_none());
+        assert!(r.result.is_some());
+        assert!(r.completed_at.is_some());
+        assert_eq!(r.worker_pod.as_deref(), Some("pod-0"));
+    }
+
+    #[test]
+    fn task_result_failure() {
+        let r = TaskResult::failure("t1", "timeout".into(), None, "pod-0", "ares-recon");
+        assert!(!r.success);
+        assert_eq!(r.error.as_deref(), Some("timeout"));
+        assert!(r.result.is_none());
+    }
+
+    #[test]
+    fn task_result_skip_serializing_none() {
+        let r = TaskResult::success("t1", serde_json::json!("ok"), "pod", "agent");
+        let json = serde_json::to_string(&r).unwrap();
+        // error field should be absent (skip_serializing_if = "Option::is_none")
+        assert!(!json.contains("\"error\""));
+    }
+
+    #[test]
+    fn redis_key_prefixes() {
+        assert_eq!(TASK_QUEUE_PREFIX, "ares:tasks");
+        assert_eq!(RESULT_QUEUE_PREFIX, "ares:results");
+        assert_eq!(TASK_STATUS_PREFIX, "ares:task_status");
+    }
+}

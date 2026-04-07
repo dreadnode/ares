@@ -268,3 +268,169 @@ impl Throttler {
         false
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::routing::{ActiveTask, ActiveTaskTracker};
+    use serde_json::json;
+
+    fn make_throttler(max_tasks: usize) -> (Throttler, ActiveTaskTracker) {
+        let config = Arc::new(crate::config::OrchestratorConfig {
+            redis_url: "redis://localhost".into(),
+            operation_id: "test-op".into(),
+            max_concurrent_tasks: max_tasks,
+            heartbeat_interval: std::time::Duration::from_secs(30),
+            heartbeat_timeout: std::time::Duration::from_secs(120),
+            result_poll_interval: std::time::Duration::from_millis(500),
+            lock_ttl: std::time::Duration::from_secs(300),
+            deferred_poll_interval: std::time::Duration::from_secs(10),
+            max_tasks_per_role: 3,
+            dispatch_delay: std::time::Duration::from_millis(0),
+            stale_task_timeout: std::time::Duration::from_secs(300),
+            deferred_task_max_age: std::time::Duration::from_secs(300),
+            max_deferred_per_type: 5,
+            max_deferred_total: 20,
+        });
+        let tracker = ActiveTaskTracker::new();
+        (Throttler::new(config, tracker.clone()), tracker)
+    }
+
+    #[tokio::test]
+    async fn non_llm_always_allowed() {
+        let (t, _) = make_throttler(1);
+        assert_eq!(
+            t.check("crack", "cracker", None).await,
+            ThrottleDecision::Allow
+        );
+        assert_eq!(
+            t.check("command", "lateral", None).await,
+            ThrottleDecision::Allow
+        );
+    }
+
+    #[tokio::test]
+    async fn under_soft_cap_allows() {
+        let (t, _) = make_throttler(8);
+        assert_eq!(
+            t.check("recon", "recon", None).await,
+            ThrottleDecision::Allow
+        );
+    }
+
+    #[tokio::test]
+    async fn hard_cap_defers_non_critical() {
+        let (t, tracker) = make_throttler(2); // soft=2, hard=3
+        for i in 0..3 {
+            tracker
+                .add(ActiveTask {
+                    task_id: format!("t{i}"),
+                    task_type: "recon".into(),
+                    role: "recon".into(),
+                    submitted_at: Instant::now(),
+                })
+                .await;
+        }
+        assert_eq!(
+            t.check("recon", "recon", None).await,
+            ThrottleDecision::Defer
+        );
+    }
+
+    #[tokio::test]
+    async fn critical_path_bypasses_hard_cap() {
+        let (t, tracker) = make_throttler(2);
+        for i in 0..3 {
+            tracker
+                .add(ActiveTask {
+                    task_id: format!("t{i}"),
+                    task_type: "recon".into(),
+                    role: "recon".into(),
+                    submitted_at: Instant::now(),
+                })
+                .await;
+        }
+        let payload = json!({"vuln_type": "constrained_delegation"});
+        assert_eq!(
+            t.check("exploit", "privesc", Some(&payload)).await,
+            ThrottleDecision::Allow
+        );
+    }
+
+    #[tokio::test]
+    async fn critical_path_delegation_enum() {
+        let (t, tracker) = make_throttler(2);
+        for i in 0..3 {
+            tracker
+                .add(ActiveTask {
+                    task_id: format!("t{i}"),
+                    task_type: "recon".into(),
+                    role: "recon".into(),
+                    submitted_at: Instant::now(),
+                })
+                .await;
+        }
+        let payload = json!({"techniques": ["find_delegation"]});
+        assert_eq!(
+            t.check("privesc_enumeration", "privesc", Some(&payload))
+                .await,
+            ThrottleDecision::Allow
+        );
+    }
+
+    #[tokio::test]
+    async fn critical_path_esc8_coercion() {
+        let (t, tracker) = make_throttler(2);
+        for i in 0..3 {
+            tracker
+                .add(ActiveTask {
+                    task_id: format!("t{i}"),
+                    task_type: "recon".into(),
+                    role: "recon".into(),
+                    submitted_at: Instant::now(),
+                })
+                .await;
+        }
+        let payload = json!({"techniques": ["petitpotam"]});
+        assert_eq!(
+            t.check("coercion", "coercion", Some(&payload)).await,
+            ThrottleDecision::Allow
+        );
+    }
+
+    #[tokio::test]
+    async fn rate_limit_triggers_backoff() {
+        let (t, _) = make_throttler(8);
+        t.record_rate_limit_error().await;
+        t.record_rate_limit_error().await;
+        t.record_rate_limit_error().await; // threshold=3
+        assert!(matches!(
+            t.check("recon", "recon", None).await,
+            ThrottleDecision::Wait(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn clear_error_prevents_backoff() {
+        let (t, _) = make_throttler(8);
+        t.record_rate_limit_error().await;
+        t.record_rate_limit_error().await;
+        t.clear_rate_limit_error().await; // back to 1
+        t.record_rate_limit_error().await; // now 2
+        assert_eq!(
+            t.check("recon", "recon", None).await,
+            ThrottleDecision::Allow
+        );
+    }
+
+    #[tokio::test]
+    async fn role_semaphore_limits() {
+        let (t, _) = make_throttler(8);
+        let _p1 = t.acquire_role_permit("recon").await;
+        let _p2 = t.acquire_role_permit("recon").await;
+        let _p3 = t.acquire_role_permit("recon").await;
+        assert!(_p1.is_some() && _p2.is_some() && _p3.is_some());
+        assert!(t.acquire_role_permit("recon").await.is_none());
+        assert!(t.acquire_role_permit("lateral").await.is_some());
+    }
+}

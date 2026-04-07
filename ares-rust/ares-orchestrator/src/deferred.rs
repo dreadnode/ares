@@ -317,3 +317,57 @@ pub fn spawn_deferred_processor(
         }
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_task(priority: i32, enqueue_time: f64) -> DeferredTask {
+        DeferredTask {
+            priority,
+            enqueue_time,
+            task_type: "recon".into(),
+            target_role: "recon".into(),
+            payload: serde_json::json!({}),
+            source_agent: "orchestrator".into(),
+        }
+    }
+
+    #[test]
+    fn higher_priority_lower_score() {
+        let high = make_task(1, 1000.0);
+        let low = make_task(5, 1000.0);
+        assert!(high.score() < low.score());
+    }
+
+    #[test]
+    fn same_priority_fifo_ordering() {
+        let earlier = make_task(5, 1000.0);
+        let later = make_task(5, 1010.0);
+        assert!(earlier.score() < later.score());
+    }
+
+    #[test]
+    fn score_deterministic() {
+        let t = make_task(3, 1700000000.0);
+        assert_eq!(t.score(), t.score());
+    }
+
+    #[test]
+    fn priority_dominates_time_within_bucket() {
+        // With small time deltas (< 1s apart), priority bucket dominates
+        let p1_late = make_task(1, 100.010);
+        let p5_early = make_task(5, 100.000);
+        assert!(p1_late.score() < p5_early.score());
+    }
+
+    #[test]
+    fn deferred_task_roundtrip() {
+        let t = make_task(3, 1700000000.0);
+        let json = serde_json::to_string(&t).unwrap();
+        let t2: DeferredTask = serde_json::from_str(&json).unwrap();
+        assert_eq!(t.priority, t2.priority);
+        assert_eq!(t.task_type, t2.task_type);
+        assert!((t.enqueue_time - t2.enqueue_time).abs() < f64::EPSILON);
+    }
+}

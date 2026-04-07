@@ -24,4 +24,4 @@ pyo3 = { workspace = true, optional = true }
 
 [features]
 default = []
-python = ["pyo3"]
+python = ["pyo3", "ares-core/python"]

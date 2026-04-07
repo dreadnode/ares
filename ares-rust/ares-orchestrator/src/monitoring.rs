@@ -240,3 +240,63 @@ async fn cleanup_stale_tasks(
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn register_and_list() {
+        let r = AgentRegistry::new();
+        r.register("ares-recon-0", "recon").await;
+        r.register("ares-lateral-0", "lateral").await;
+        let mut names = r.agent_names().await;
+        names.sort();
+        assert_eq!(names, vec!["ares-lateral-0", "ares-recon-0"]);
+    }
+
+    #[tokio::test]
+    async fn heartbeat_update_prevents_staleness() {
+        let r = AgentRegistry::new();
+        r.register("a1", "recon").await;
+        r.update_heartbeat("a1", "busy", Some("task-42"), Utc::now())
+            .await;
+        assert!(r
+            .stale_agents(std::time::Duration::from_secs(60))
+            .await
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn stale_agent_detected() {
+        let r = AgentRegistry::new();
+        r.register("old", "recon").await;
+        let old_ts = Utc::now() - chrono::Duration::seconds(120);
+        r.update_heartbeat("old", "idle", None, old_ts).await;
+        let stale = r.stale_agents(std::time::Duration::from_secs(60)).await;
+        assert_eq!(stale.len(), 1);
+        assert_eq!(stale[0].name, "old");
+    }
+
+    #[tokio::test]
+    async fn mark_offline_excludes_from_stale() {
+        let r = AgentRegistry::new();
+        r.register("dead", "recon").await;
+        let old_ts = Utc::now() - chrono::Duration::seconds(300);
+        r.update_heartbeat("dead", "idle", None, old_ts).await;
+        r.mark_offline("dead").await;
+        assert!(r
+            .stale_agents(std::time::Duration::from_secs(60))
+            .await
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn re_register_updates_role() {
+        let r = AgentRegistry::new();
+        r.register("a1", "recon").await;
+        r.register("a1", "lateral").await;
+        let agents = r.agents.lock().await;
+        assert_eq!(agents.get("a1").unwrap().role, "lateral");
+    }
+}

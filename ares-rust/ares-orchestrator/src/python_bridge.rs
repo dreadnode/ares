@@ -78,19 +78,23 @@ pub mod real {
             Python::with_gil(|py| {
                 let agents_mod = py
                     .import("ares.agents")
-                    .context("Failed to import ares.agents")?;
+                    .map_err(|e| anyhow::anyhow!("Failed to import ares.agents: {e}"))?;
 
                 let kwargs = PyDict::new(py);
-                kwargs.set_item("role", agent_role)?;
-                kwargs.set_item("prompt", prompt)?;
+                kwargs
+                    .set_item("role", agent_role)
+                    .map_err(|e| anyhow::anyhow!("Failed to set kwargs: {e}"))?;
+                kwargs
+                    .set_item("prompt", prompt)
+                    .map_err(|e| anyhow::anyhow!("Failed to set kwargs: {e}"))?;
 
                 let result = agents_mod
                     .call_method("run_step", (), Some(&kwargs))
-                    .context("Python agent step raised an exception")?;
+                    .map_err(|e| anyhow::anyhow!("Python agent step raised an exception: {e}"))?;
 
                 let response: String = result
                     .extract()
-                    .context("Agent step did not return a string")?;
+                    .map_err(|e| anyhow::anyhow!("Agent step did not return a string: {e}"))?;
 
                 debug!(
                     role = agent_role,

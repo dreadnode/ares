@@ -91,7 +91,8 @@ fn call_python_agent(task_type: &str, params: &Value) -> anyhow::Result<AgentRes
         let generate_fn = prompts_mod.getattr("generate_prompt_from_task_raw")?;
 
         // Build the prompt from task_type + params
-        let params_json = serde_json::to_string(params)?;
+        let params_json = serde_json::to_string(params)
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("JSON error: {e}")))?;
         let prompt: Option<String> = generate_fn.call1((task_type, params_json))?.extract()?;
 
         let prompt = match prompt {
@@ -128,7 +129,7 @@ fn call_python_agent(task_type: &str, params: &Value) -> anyhow::Result<AgentRes
             .flatten();
 
         // Extract usage metrics
-        let usage = extract_usage(py, &result);
+        let usage = extract_usage(&result);
 
         Ok(AgentResult {
             output,
@@ -140,7 +141,9 @@ fn call_python_agent(task_type: &str, params: &Value) -> anyhow::Result<AgentRes
 }
 
 #[cfg(feature = "python")]
-fn extract_usage(py: pyo3::prelude::Python<'_>, result: &pyo3::PyAny) -> Option<TokenUsage> {
+fn extract_usage(result: &pyo3::Bound<'_, pyo3::types::PyAny>) -> Option<TokenUsage> {
+    use pyo3::types::PyAnyMethods;
+
     let usage_obj = result.getattr("usage").ok()?;
     if usage_obj.is_none() {
         return None;
@@ -152,8 +155,8 @@ fn extract_usage(py: pyo3::prelude::Python<'_>, result: &pyo3::PyAny) -> Option<
     let model: Option<String> = result
         .getattr("agent")
         .ok()
-        .and_then(|agent| agent.getattr("model").ok())
-        .and_then(|m| m.extract().ok());
+        .and_then(|agent: pyo3::Bound<'_, pyo3::types::PyAny>| agent.getattr("model").ok())
+        .and_then(|m: pyo3::Bound<'_, pyo3::types::PyAny>| m.extract().ok());
 
     Some(TokenUsage {
         input_tokens,

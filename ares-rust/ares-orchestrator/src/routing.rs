@@ -204,3 +204,143 @@ impl TaskRouter {
         &self.queue
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn non_llm_task_classification() {
+        assert!(is_non_llm_task("crack"));
+        assert!(is_non_llm_task("command"));
+        assert!(!is_non_llm_task("recon"));
+        assert!(!is_non_llm_task("exploit"));
+        assert!(!is_non_llm_task("privesc_enumeration"));
+        assert!(!is_non_llm_task(""));
+    }
+
+    #[tokio::test]
+    async fn tracker_add_remove() {
+        let tracker = ActiveTaskTracker::new();
+        assert_eq!(tracker.total().await, 0);
+
+        tracker
+            .add(ActiveTask {
+                task_id: "t1".into(),
+                task_type: "recon".into(),
+                role: "recon".into(),
+                submitted_at: std::time::Instant::now(),
+            })
+            .await;
+
+        assert_eq!(tracker.total().await, 1);
+        assert_eq!(tracker.count_for_role("recon").await, 1);
+        assert_eq!(tracker.count_for_role("lateral").await, 0);
+
+        let removed = tracker.remove("t1").await;
+        assert!(removed.is_some());
+        assert_eq!(tracker.total().await, 0);
+        assert_eq!(tracker.count_for_role("recon").await, 0);
+    }
+
+    #[tokio::test]
+    async fn tracker_remove_nonexistent() {
+        let tracker = ActiveTaskTracker::new();
+        assert!(tracker.remove("nonexistent").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn llm_count_excludes_non_llm() {
+        let tracker = ActiveTaskTracker::new();
+
+        for (id, task_type, role) in [
+            ("t1", "recon", "recon"),
+            ("t2", "crack", "cracker"),
+            ("t3", "command", "lateral"),
+            ("t4", "exploit", "privesc"),
+        ] {
+            tracker
+                .add(ActiveTask {
+                    task_id: id.into(),
+                    task_type: task_type.into(),
+                    role: role.into(),
+                    submitted_at: std::time::Instant::now(),
+                })
+                .await;
+        }
+
+        assert_eq!(tracker.total().await, 4);
+        assert_eq!(tracker.llm_task_count().await, 2); // recon + exploit
+    }
+
+    #[tokio::test]
+    async fn stale_tasks_detection() {
+        let tracker = ActiveTaskTracker::new();
+
+        tracker
+            .add(ActiveTask {
+                task_id: "old".into(),
+                task_type: "recon".into(),
+                role: "recon".into(),
+                submitted_at: std::time::Instant::now() - std::time::Duration::from_secs(120),
+            })
+            .await;
+
+        tracker
+            .add(ActiveTask {
+                task_id: "new".into(),
+                task_type: "recon".into(),
+                role: "recon".into(),
+                submitted_at: std::time::Instant::now(),
+            })
+            .await;
+
+        let stale = tracker
+            .stale_tasks(std::time::Duration::from_secs(60))
+            .await;
+        assert_eq!(stale.len(), 1);
+        assert_eq!(stale[0].task_id, "old");
+    }
+
+    #[tokio::test]
+    async fn task_ids_collected() {
+        let tracker = ActiveTaskTracker::new();
+        tracker
+            .add(ActiveTask {
+                task_id: "a".into(),
+                task_type: "recon".into(),
+                role: "recon".into(),
+                submitted_at: std::time::Instant::now(),
+            })
+            .await;
+        tracker
+            .add(ActiveTask {
+                task_id: "b".into(),
+                task_type: "exploit".into(),
+                role: "privesc".into(),
+                submitted_at: std::time::Instant::now(),
+            })
+            .await;
+
+        let mut ids = tracker.task_ids().await;
+        ids.sort();
+        assert_eq!(ids, vec!["a", "b"]);
+    }
+
+    #[tokio::test]
+    async fn role_count_saturating_sub() {
+        let tracker = ActiveTaskTracker::new();
+        // Double-remove shouldn't panic or underflow
+        tracker
+            .add(ActiveTask {
+                task_id: "t1".into(),
+                task_type: "recon".into(),
+                role: "recon".into(),
+                submitted_at: std::time::Instant::now(),
+            })
+            .await;
+        tracker.remove("t1").await;
+        tracker.remove("t1").await; // second remove returns None
+        assert_eq!(tracker.count_for_role("recon").await, 0);
+    }
+}

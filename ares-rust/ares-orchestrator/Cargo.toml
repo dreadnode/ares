@@ -25,4 +25,8 @@ tokio = { workspace = true }
 
 [features]
 default = []
-python = ["ares-core/python"]
+python = ["ares-core/python", "pyo3"]
+
+[dependencies.pyo3]
+workspace = true
+optional = true

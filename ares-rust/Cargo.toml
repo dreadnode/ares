@@ -14,7 +14,7 @@ uuid = { version = "1.11", features = ["v4"] }
 thiserror = "1"
 anyhow = "1"
 clap = { version = "4.5.23", features = ["derive", "env"] }
-pyo3 = { version = "0.22", features = ["extension-module"] }
+pyo3 = { version = "0.23", features = ["extension-module"] }
 serde_yaml = "0.9"
 regex = "1"
 once_cell = "1"

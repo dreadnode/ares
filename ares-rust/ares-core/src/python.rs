@@ -6,8 +6,14 @@
 //! backend and task queue as synchronous Python classes.
 
 use pyo3::prelude::*;
+use pyo3::types::PyBool;
 use redis::AsyncCommands;
-use std::cell::RefCell;
+use std::sync::Mutex;
+
+/// Helper: convert a bool to a PyObject (avoids Borrowed move issues with PyO3 0.23).
+fn bool_to_py(py: Python<'_>, val: bool) -> PyObject {
+    PyBool::new(py, val).to_owned().into_any().unbind()
+}
 
 use crate::models::{
     AgentInfo, AgentRole, Credential, Hash, Host, OperationMeta, Share, SharedRedTeamState, Target,
@@ -80,17 +86,38 @@ fn py_parse_secretsdump(output: &str) -> Vec<std::collections::HashMap<String, P
             .into_iter()
             .map(|h| {
                 let mut m = std::collections::HashMap::new();
-                m.insert("username".into(), h.username.to_object(py));
-                m.insert("domain".into(), h.domain.to_object(py));
-                m.insert("rid".into(), h.rid.to_object(py));
-                m.insert("lm_hash".into(), h.lm_hash.to_object(py));
-                m.insert("nt_hash".into(), h.nt_hash.to_object(py));
-                m.insert("hash_value".into(), h.hash_value.to_object(py));
-                m.insert("is_krbtgt".into(), h.is_krbtgt.to_object(py));
-                m.insert("is_administrator".into(), h.is_administrator.to_object(py));
+                m.insert(
+                    "username".into(),
+                    h.username.into_pyobject(py).unwrap().into_any().unbind(),
+                );
+                m.insert(
+                    "domain".into(),
+                    h.domain.into_pyobject(py).unwrap().into_any().unbind(),
+                );
+                m.insert(
+                    "rid".into(),
+                    h.rid.into_pyobject(py).unwrap().into_any().unbind(),
+                );
+                m.insert(
+                    "lm_hash".into(),
+                    h.lm_hash.into_pyobject(py).unwrap().into_any().unbind(),
+                );
+                m.insert(
+                    "nt_hash".into(),
+                    h.nt_hash.into_pyobject(py).unwrap().into_any().unbind(),
+                );
+                m.insert(
+                    "hash_value".into(),
+                    h.hash_value.into_pyobject(py).unwrap().into_any().unbind(),
+                );
+                m.insert("is_krbtgt".into(), bool_to_py(py, h.is_krbtgt));
+                m.insert(
+                    "is_administrator".into(),
+                    bool_to_py(py, h.is_administrator),
+                );
                 m.insert(
                     "is_machine_account".into(),
-                    h.is_machine_account.to_object(py),
+                    bool_to_py(py, h.is_machine_account),
                 );
                 m
             })
@@ -107,14 +134,26 @@ fn py_extract_kerberos_hashes(output: &str) -> Vec<std::collections::HashMap<Str
             .into_iter()
             .map(|h| {
                 let mut m = std::collections::HashMap::new();
-                m.insert("username".into(), h.username.to_object(py));
-                m.insert("domain".into(), h.domain.to_object(py));
-                m.insert("hash_value".into(), h.hash_value.to_object(py));
+                m.insert(
+                    "username".into(),
+                    h.username.into_pyobject(py).unwrap().into_any().unbind(),
+                );
+                m.insert(
+                    "domain".into(),
+                    h.domain.into_pyobject(py).unwrap().into_any().unbind(),
+                );
+                m.insert(
+                    "hash_value".into(),
+                    h.hash_value.into_pyobject(py).unwrap().into_any().unbind(),
+                );
                 let type_str = match h.hash_type {
                     parsing::KerberosHashType::TGS => "TGS",
                     parsing::KerberosHashType::AsRep => "AsRep",
                 };
-                m.insert("hash_type".into(), type_str.to_object(py));
+                m.insert(
+                    "hash_type".into(),
+                    type_str.into_pyobject(py).unwrap().into_any().unbind(),
+                );
                 m
             })
             .collect()
@@ -130,17 +169,38 @@ fn py_extract_ntlm_hashes(output: &str) -> Vec<std::collections::HashMap<String,
             .into_iter()
             .map(|h| {
                 let mut m = std::collections::HashMap::new();
-                m.insert("username".into(), h.username.to_object(py));
-                m.insert("domain".into(), h.domain.to_object(py));
-                m.insert("rid".into(), h.rid.to_object(py));
-                m.insert("lm_hash".into(), h.lm_hash.to_object(py));
-                m.insert("nt_hash".into(), h.nt_hash.to_object(py));
-                m.insert("hash_value".into(), h.hash_value.to_object(py));
-                m.insert("is_krbtgt".into(), h.is_krbtgt.to_object(py));
-                m.insert("is_administrator".into(), h.is_administrator.to_object(py));
+                m.insert(
+                    "username".into(),
+                    h.username.into_pyobject(py).unwrap().into_any().unbind(),
+                );
+                m.insert(
+                    "domain".into(),
+                    h.domain.into_pyobject(py).unwrap().into_any().unbind(),
+                );
+                m.insert(
+                    "rid".into(),
+                    h.rid.into_pyobject(py).unwrap().into_any().unbind(),
+                );
+                m.insert(
+                    "lm_hash".into(),
+                    h.lm_hash.into_pyobject(py).unwrap().into_any().unbind(),
+                );
+                m.insert(
+                    "nt_hash".into(),
+                    h.nt_hash.into_pyobject(py).unwrap().into_any().unbind(),
+                );
+                m.insert(
+                    "hash_value".into(),
+                    h.hash_value.into_pyobject(py).unwrap().into_any().unbind(),
+                );
+                m.insert("is_krbtgt".into(), bool_to_py(py, h.is_krbtgt));
+                m.insert(
+                    "is_administrator".into(),
+                    bool_to_py(py, h.is_administrator),
+                );
                 m.insert(
                     "is_machine_account".into(),
-                    h.is_machine_account.to_object(py),
+                    bool_to_py(py, h.is_machine_account),
                 );
                 m
             })
@@ -157,10 +217,22 @@ fn py_extract_hosts(output: &str) -> Vec<std::collections::HashMap<String, PyObj
             .into_iter()
             .map(|h| {
                 let mut m = std::collections::HashMap::new();
-                m.insert("ip".into(), h.ip.to_object(py));
-                m.insert("hostname".into(), h.hostname.to_object(py));
-                m.insert("os".into(), h.os.to_object(py));
-                m.insert("domain".into(), h.domain.to_object(py));
+                m.insert(
+                    "ip".into(),
+                    h.ip.into_pyobject(py).unwrap().into_any().unbind(),
+                );
+                m.insert(
+                    "hostname".into(),
+                    h.hostname.into_pyobject(py).unwrap().into_any().unbind(),
+                );
+                m.insert(
+                    "os".into(),
+                    h.os.into_pyobject(py).unwrap().into_any().unbind(),
+                );
+                m.insert(
+                    "domain".into(),
+                    h.domain.into_pyobject(py).unwrap().into_any().unbind(),
+                );
                 m
             })
             .collect()
@@ -176,17 +248,30 @@ fn py_extract_delegations(output: &str) -> Vec<std::collections::HashMap<String,
             .into_iter()
             .map(|d| {
                 let mut m = std::collections::HashMap::new();
-                m.insert("account".into(), d.account.to_object(py));
-                m.insert("account_type".into(), d.account_type.to_object(py));
+                m.insert(
+                    "account".into(),
+                    d.account.into_pyobject(py).unwrap().into_any().unbind(),
+                );
+                m.insert(
+                    "account_type".into(),
+                    d.account_type
+                        .into_pyobject(py)
+                        .unwrap()
+                        .into_any()
+                        .unbind(),
+                );
                 let dtype = match d.delegation_type {
                     parsing::DelegationType::Unconstrained => "Unconstrained",
                     parsing::DelegationType::Constrained => "Constrained",
                     parsing::DelegationType::RBCD => "RBCD",
                 };
-                m.insert("delegation_type".into(), dtype.to_object(py));
+                m.insert(
+                    "delegation_type".into(),
+                    dtype.into_pyobject(py).unwrap().into_any().unbind(),
+                );
                 let spn: PyObject = match d.target_spn {
-                    Some(s) => s.to_object(py),
-                    None => py.None(),
+                    Some(s) => s.into_pyobject(py).unwrap().into_any().unbind(),
+                    None => py.None().into_pyobject(py).unwrap().into_any().unbind(),
                 };
                 m.insert("target_spn".into(), spn);
                 m
@@ -210,10 +295,22 @@ fn py_extract_shares(output: &str) -> Vec<std::collections::HashMap<String, PyOb
             .into_iter()
             .map(|s| {
                 let mut m = std::collections::HashMap::new();
-                m.insert("host".into(), s.host.to_object(py));
-                m.insert("name".into(), s.name.to_object(py));
-                m.insert("permissions".into(), s.permissions.to_object(py));
-                m.insert("comment".into(), s.comment.to_object(py));
+                m.insert(
+                    "host".into(),
+                    s.host.into_pyobject(py).unwrap().into_any().unbind(),
+                );
+                m.insert(
+                    "name".into(),
+                    s.name.into_pyobject(py).unwrap().into_any().unbind(),
+                );
+                m.insert(
+                    "permissions".into(),
+                    s.permissions.into_pyobject(py).unwrap().into_any().unbind(),
+                );
+                m.insert(
+                    "comment".into(),
+                    s.comment.into_pyobject(py).unwrap().into_any().unbind(),
+                );
                 m
             })
             .collect()
@@ -234,12 +331,12 @@ fn redis_err(e: redis::RedisError) -> PyErr {
 
 /// Holds a tokio runtime and a lazily-initialized Redis connection.
 ///
-/// Uses `RefCell` for interior mutability so that the runtime and connection
-/// can be borrowed independently, avoiding the double-borrow issue with `&mut self`.
+/// Uses `Mutex` for interior mutability so the type is `Sync` (required by
+/// PyO3 0.23+). The mutex is only held briefly to take/put the connection.
 struct RedisHandle {
     runtime: tokio::runtime::Runtime,
     redis_url: String,
-    connection: RefCell<Option<redis::aio::MultiplexedConnection>>,
+    connection: Mutex<Option<redis::aio::MultiplexedConnection>>,
 }
 
 impl RedisHandle {
@@ -252,7 +349,7 @@ impl RedisHandle {
         Ok(Self {
             runtime,
             redis_url,
-            connection: RefCell::new(None),
+            connection: Mutex::new(None),
         })
     }
 
@@ -266,8 +363,10 @@ impl RedisHandle {
     {
         // Take the connection out (or create one)
         let conn = {
-            let mut borrow = self.connection.borrow_mut();
-            borrow.take()
+            let mut guard = self.connection.lock().map_err(|e| {
+                pyo3::exceptions::PyRuntimeError::new_err(format!("Lock poisoned: {e}"))
+            })?;
+            guard.take()
         };
 
         let conn = match conn {
@@ -286,7 +385,9 @@ impl RedisHandle {
         match result {
             Ok((val, conn)) => {
                 // Put the connection back
-                *self.connection.borrow_mut() = Some(conn);
+                if let Ok(mut guard) = self.connection.lock() {
+                    *guard = Some(conn);
+                }
                 Ok(val)
             }
             Err(e) => {
