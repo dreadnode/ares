@@ -69,10 +69,15 @@ from ares.core.worker.prompts import (
     format_state_context,
     generate_prompt_from_task,
 )
+from ares.core.worker.tool_executor import (
+    ToolExecutor,
+    run_tool_executor,
+)
 
 __all__ = [
     "TASK_PROMPTS",
     "RedisWorkerAgent",
+    "ToolExecutor",
     "WorkerAgent",
     "discover_active_operation",
     "format_state_context",
@@ -85,5 +90,6 @@ __all__ = [
     "get_worker_credentials",
     "logger",
     "resolve_dc_ip_for_domain",
+    "run_tool_executor",
     "run_worker",
 ]

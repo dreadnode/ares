@@ -67,6 +67,7 @@ ares = "ares.__main__:run"
 ares-ops = "ares.cli_ops:main"
 ares-blue-ops = "ares.cli_blue_ops:main"
 ares-history = "ares.cli_history:main"
+ares-tool-executor = "ares.core.worker.tool_executor:main"
 
 [tool.poetry.plugins."pipx.run"]
 ares = 'ares.__main__:run'
