@@ -115,7 +115,15 @@ async fn main() -> Result<()> {
         if !config.target_domain.is_empty() {
             let domain = config.target_domain.to_lowercase();
             if !state.domains.contains(&domain) {
-                state.domains.push(domain);
+                state.domains.push(domain.clone());
+                // Also persist to Redis
+                let domain_key = format!("ares:op:{}:domains", state.operation_id);
+                let mut conn = queue.connection();
+                let _: Result<(), _> =
+                    redis::AsyncCommands::sadd(&mut conn, &domain_key, &domain).await;
+                let _: Result<(), _> =
+                    redis::AsyncCommands::expire(&mut conn, &domain_key, 86400i64).await;
+                info!(domain = %domain, "Seeded target domain");
             }
         }
     }

@@ -91,10 +91,16 @@ pub(crate) async fn dispatch_initial_recon(
         }
     }
 
-    // User enumeration + AS-REP roast against first IP (likely DC)
+    // User enumeration against first IP (likely DC) — try null session for initial bootstrap
     if let Some(first_ip) = config.target_ips.first() {
+        let payload = serde_json::json!({
+            "target_ip": first_ip,
+            "domain": domain,
+            "techniques": ["user_enumeration"],
+            "null_session": true,
+        });
         match dispatcher
-            .request_recon(first_ip, domain, &["user_enumeration"], None)
+            .throttled_submit("recon", "recon", payload, 5)
             .await
         {
             Ok(Some(task_id)) => {

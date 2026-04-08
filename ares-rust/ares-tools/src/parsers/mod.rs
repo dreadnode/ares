@@ -49,11 +49,22 @@ pub fn parse_tool_output(tool_name: &str, output: &str, params: &Value) -> Value
             }
         }
         "enumerate_users" => {
-            // User enumeration doesn't produce hosts/creds directly,
-            // but we extract usernames for downstream spray attacks
-            let users = parse_netexec_users(output);
-            if !users.is_empty() {
-                discoveries["discovered_users"] = Value::Array(users);
+            let mut raw_users = parse_netexec_users(output);
+
+            // Check for embedded credentials (last element with _credentials key)
+            if let Some(last) = raw_users.last() {
+                if last.get("_credentials").is_some() {
+                    if let Some(creds) = last["_credentials"].as_array() {
+                        if !creds.is_empty() {
+                            discoveries["credentials"] = Value::Array(creds.clone());
+                        }
+                    }
+                    raw_users.pop(); // Remove the _credentials marker
+                }
+            }
+
+            if !raw_users.is_empty() {
+                discoveries["discovered_users"] = Value::Array(raw_users);
             }
         }
         "enumerate_shares" => {
@@ -110,6 +121,7 @@ pub fn merge_discoveries(all: &[Value]) -> Value {
     let mut credentials = Vec::new();
     let mut hashes = Vec::new();
     let mut vulnerabilities = Vec::new();
+    let mut discovered_users = Vec::new();
 
     for disc in all {
         if let Some(h) = disc.get("hosts").and_then(|v| v.as_array()) {
@@ -123,6 +135,9 @@ pub fn merge_discoveries(all: &[Value]) -> Value {
         }
         if let Some(v) = disc.get("vulnerabilities").and_then(|v| v.as_array()) {
             vulnerabilities.extend(v.iter().cloned());
+        }
+        if let Some(u) = disc.get("discovered_users").and_then(|v| v.as_array()) {
+            discovered_users.extend(u.iter().cloned());
         }
     }
 
@@ -138,6 +153,9 @@ pub fn merge_discoveries(all: &[Value]) -> Value {
     }
     if !vulnerabilities.is_empty() {
         merged["vulnerabilities"] = Value::Array(vulnerabilities);
+    }
+    if !discovered_users.is_empty() {
+        merged["discovered_users"] = Value::Array(discovered_users);
     }
     merged
 }
@@ -250,5 +268,85 @@ PORT     STATE SERVICE\n\
         assert!(hosts[0]["is_dc"].as_bool().unwrap());
         assert_eq!(hosts[1]["ip"], "10.1.2.211");
         assert!(!hosts[1]["is_dc"].as_bool().unwrap());
+    }
+
+    #[test]
+    fn test_parse_netexec_users_table_format() {
+        let output = r#"SMB         10.1.2.121  445    WINTERFELL       [*] Windows 10 / Server 2019 Build 17763 x64 (name:WINTERFELL) (domain:north.sevenkingdoms.local) (signing:True) (SMBv1:False)
+SMB         10.1.2.121  445    WINTERFELL       [+] north.sevenkingdoms.local\:
+SMB         10.1.2.121  445    WINTERFELL       -Username-                    -Last PW Set-       -BadPW- -Description-
+SMB         10.1.2.121  445    WINTERFELL       arya.stark                    2026-03-25 23:21:09 0       Arya Stark
+SMB         10.1.2.121  445    WINTERFELL       sansa.stark                   2026-03-25 23:21:09 0       Sansa Stark
+SMB         10.1.2.121  445    WINTERFELL       brandon.stark                 2026-03-25 23:21:09 0       Brandon Stark
+SMB         10.1.2.121  445    WINTERFELL       samwell.tarly                 2026-03-25 23:22:25 0       Samwell Tarly (Password : Heartsbane)
+SMB         10.1.2.121  445    WINTERFELL       jon.snow                      2026-03-25 23:22:25 0       Jon Snow
+SMB         10.1.2.121  445    WINTERFELL       Guest                         <never>             0       Built-in account for guest access
+SMB         10.1.2.121  445    WINTERFELL       [*] Enumerated 10 local users: NORTH"#;
+
+        let users = parse_netexec_users(output);
+
+        // Should have 5 user entries + 1 _credentials marker
+        let user_entries: Vec<_> = users
+            .iter()
+            .filter(|u| u.get("username").is_some())
+            .collect();
+        assert!(
+            user_entries.len() >= 5,
+            "Should have at least 5 users, got {}",
+            user_entries.len()
+        );
+
+        // Check domain was extracted from banner
+        assert_eq!(user_entries[0]["domain"], "north.sevenkingdoms.local");
+        assert_eq!(user_entries[0]["username"], "arya.stark");
+
+        // Check password leak extraction
+        let cred_marker = users.iter().find(|u| u.get("_credentials").is_some());
+        assert!(cred_marker.is_some(), "Should have _credentials marker");
+        let creds = cred_marker.unwrap()["_credentials"].as_array().unwrap();
+        assert_eq!(creds.len(), 1);
+        assert_eq!(creds[0]["username"], "samwell.tarly");
+        assert_eq!(creds[0]["password"], "Heartsbane");
+
+        // Guest should be excluded
+        assert!(!user_entries.iter().any(|u| u["username"] == "Guest"));
+    }
+
+    #[test]
+    fn test_parse_netexec_users_rid_brute_format() {
+        let output = r#"SMB  10.1.2.121  445  WINTERFELL  [+] north.sevenkingdoms.local\:
+SMB  10.1.2.121  445  WINTERFELL  NORTH\arya.stark (SidTypeUser)
+SMB  10.1.2.121  445  WINTERFELL  NORTH\sansa.stark (SidTypeUser)"#;
+
+        let users = parse_netexec_users(output);
+        let user_entries: Vec<_> = users
+            .iter()
+            .filter(|u| u.get("username").is_some())
+            .collect();
+        assert_eq!(user_entries.len(), 2);
+        assert_eq!(user_entries[0]["username"], "arya.stark");
+        assert_eq!(user_entries[0]["domain"], "NORTH");
+    }
+
+    #[test]
+    fn test_parse_tool_output_enumerate_users_extracts_creds() {
+        let output = r#"SMB  10.1.2.121  445  WINTERFELL  [*] Windows 10 (name:WINTERFELL) (domain:contoso.local) (signing:True)
+SMB  10.1.2.121  445  WINTERFELL  [+] contoso.local\:
+SMB  10.1.2.121  445  WINTERFELL  -Username-  -Last PW Set-  -BadPW- -Description-
+SMB  10.1.2.121  445  WINTERFELL  alice       2026-03-25 23:21:09 0  Alice (Password : Secret123)
+SMB  10.1.2.121  445  WINTERFELL  bob         2026-03-25 23:21:09 0  Bob"#;
+
+        let params = json!({"target": "10.1.2.121"});
+        let discoveries = parse_tool_output("enumerate_users", output, &params);
+
+        // Should have users
+        let users = discoveries["discovered_users"].as_array().unwrap();
+        assert_eq!(users.len(), 2);
+
+        // Should have extracted credential from description
+        let creds = discoveries["credentials"].as_array().unwrap();
+        assert_eq!(creds.len(), 1);
+        assert_eq!(creds[0]["username"], "alice");
+        assert_eq!(creds[0]["password"], "Secret123");
     }
 }
