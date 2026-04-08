@@ -417,7 +417,7 @@ pub async fn run_agent_loop(
 
         // Dispatch external tools to workers concurrently
         if !external.is_empty() {
-            tool_calls_dispatched += external.len() as u32;
+            tool_calls_dispatched = tool_calls_dispatched.saturating_add(external.len() as u32);
 
             let mut join_set = tokio::task::JoinSet::new();
             for call in &external {
@@ -507,8 +507,11 @@ pub async fn run_agent_loop(
 /// This approximation works well for English text and code with
 /// Anthropic and OpenAI tokenizers.
 fn estimate_tokens(text: &str) -> u32 {
-    // chars/4 is a widely-used approximation; slightly conservative
-    (text.len() as u32).div_ceil(4)
+    // chars/4 is a widely-used approximation; slightly conservative.
+    // Clamp to u32::MAX before casting to avoid silent truncation on
+    // strings larger than ~4 GiB (possible in theory for tool outputs).
+    let len = text.len().min(u32::MAX as usize) as u32;
+    len.div_ceil(4)
 }
 
 /// Estimate total tokens for a message.
@@ -544,7 +547,7 @@ fn estimate_context_tokens(
         total += estimate_message_tokens(msg);
     }
     // Tool definitions contribute to context (~50 tokens per tool avg)
-    total += tools.len() as u32 * 50;
+    total = total.saturating_add(tools.len().min(u32::MAX as usize) as u32 * 50);
     total
 }
 

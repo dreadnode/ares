@@ -214,27 +214,40 @@ pub async fn increment_token_usage(
 ) -> Result<(), redis::RedisError> {
     let key = token_usage_key(operation_id);
 
+    let input_i64 = i64::try_from(input_tokens).map_err(|_| {
+        redis::RedisError::from((
+            redis::ErrorKind::InvalidClientConfig,
+            "input_tokens overflows i64",
+        ))
+    })?;
+    let output_i64 = i64::try_from(output_tokens).map_err(|_| {
+        redis::RedisError::from((
+            redis::ErrorKind::InvalidClientConfig,
+            "output_tokens overflows i64",
+        ))
+    })?;
+
     let mut pipe = redis::pipe();
     pipe.atomic();
     pipe.cmd("HINCRBY")
         .arg(&key)
         .arg("input_tokens")
-        .arg(input_tokens as i64);
+        .arg(input_i64);
     pipe.cmd("HINCRBY")
         .arg(&key)
         .arg("output_tokens")
-        .arg(output_tokens as i64);
+        .arg(output_i64);
 
     if !model.is_empty() {
         pipe.cmd("HSET").arg(&key).arg("model").arg(model);
         pipe.cmd("HINCRBY")
             .arg(&key)
             .arg(model_field(model, "input_tokens"))
-            .arg(input_tokens as i64);
+            .arg(input_i64);
         pipe.cmd("HINCRBY")
             .arg(&key)
             .arg(model_field(model, "output_tokens"))
-            .arg(output_tokens as i64);
+            .arg(output_i64);
     }
 
     pipe.query_async::<()>(conn).await?;
