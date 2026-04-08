@@ -53,6 +53,14 @@ pub async fn process_completed_task(
         if let Err(e) = extract_discoveries(payload, dispatcher).await {
             warn!(task_id = %task_id, err = %e, "Failed to extract discoveries from result");
         }
+        // Also extract from nested "discoveries" key (structured parser output
+        // from the LLM runner is placed under result.discoveries)
+        if let Some(disc) = payload.get("discoveries") {
+            if let Err(e) = extract_discoveries(disc, dispatcher).await {
+                warn!(task_id = %task_id, err = %e, "Failed to extract nested discoveries");
+            }
+            check_domain_admin_indicators(disc, dispatcher).await;
+        }
     }
 
     // Check for domain admin indicators

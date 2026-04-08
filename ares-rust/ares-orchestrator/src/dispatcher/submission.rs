@@ -157,8 +157,18 @@ impl Dispatcher {
 
         self.throttler.record_dispatch().await;
 
-        // Set initial task status
-        let _ = self.queue.set_task_status(&task_id, "in_progress").await;
+        // Set initial task status with full metadata
+        let _ = self
+            .queue
+            .set_task_status_full(
+                &task_id,
+                "in_progress",
+                &self.config.operation_id,
+                target_role,
+                task_type,
+                Some(&payload),
+            )
+            .await;
 
         // Spawn the LLM agent loop as a background task
         let queue = self.queue.clone();

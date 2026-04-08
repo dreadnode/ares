@@ -36,6 +36,9 @@ pub const DEDUP_WRITABLE_SHARES: &str = "writable_shares";
 pub const DEDUP_HASH_LATERAL: &str = "hash_lateral";
 pub const DEDUP_SCANNED_TARGETS: &str = "scanned_targets";
 pub const DEDUP_ACL_STEPS: &str = "acl_steps";
+pub const DEDUP_TRUST_FOLLOW: &str = "trust_follow";
+pub const DEDUP_S4U_EXPLOITS: &str = "s4u_exploits";
+pub const DEDUP_GMSA_ACCOUNTS: &str = "gmsa_accounts";
 
 /// Vuln queue ZSET key suffix.
 pub const KEY_VULN_QUEUE: &str = "vuln_queue";
@@ -60,4 +63,7 @@ const ALL_DEDUP_SETS: &[&str] = &[
     DEDUP_HASH_LATERAL,
     DEDUP_SCANNED_TARGETS,
     DEDUP_ACL_STEPS,
+    DEDUP_TRUST_FOLLOW,
+    DEDUP_S4U_EXPLOITS,
+    DEDUP_GMSA_ACCOUNTS,
 ];

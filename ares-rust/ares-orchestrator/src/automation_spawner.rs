@@ -35,6 +35,10 @@ pub(crate) fn spawn_automation_tasks(
     spawn_auto!(auto_credential_expansion);
     spawn_auto!(auto_golden_ticket);
     spawn_auto!(auto_acl_chain_follow);
+    spawn_auto!(auto_trust_follow);
+    spawn_auto!(auto_s4u_exploitation);
+    spawn_auto!(auto_gmsa_extraction);
+    spawn_auto!(auto_stall_detection);
 
     info!(count = handles.len(), "Automation tasks spawned");
     handles

@@ -20,11 +20,15 @@ mod crack;
 mod credential_access;
 mod credential_expansion;
 mod delegation;
+mod gmsa;
 mod golden_ticket;
 mod mssql;
 mod refresh;
+mod s4u;
 mod secretsdump;
 mod shares;
+mod stall_detection;
+mod trust;
 
 // Re-export all public task functions at the same paths they had before the split.
 pub use acl::auto_acl_chain_follow;
@@ -35,11 +39,15 @@ pub use crack::auto_crack_dispatch;
 pub use credential_access::auto_credential_access;
 pub use credential_expansion::auto_credential_expansion;
 pub use delegation::auto_delegation_enumeration;
+pub use gmsa::auto_gmsa_extraction;
 pub use golden_ticket::auto_golden_ticket;
 pub use mssql::auto_mssql_detection;
 pub use refresh::state_refresh;
+pub use s4u::auto_s4u_exploitation;
 pub use secretsdump::auto_local_admin_secretsdump;
 pub use shares::auto_share_spider;
+pub use stall_detection::auto_stall_detection;
+pub use trust::auto_trust_follow;
 
 // ---------------------------------------------------------------------------
 // Helpers

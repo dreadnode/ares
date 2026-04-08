@@ -362,14 +362,71 @@ impl TaskQueue {
     // === Task status tracking ===============================================
 
     /// Set the status string for a task (with 24h TTL).
+    ///
+    /// If a record already exists for this task, preserves existing fields
+    /// (operation_id, role, task_type, started_at, payload) and updates
+    /// only the status and timestamps.
     pub async fn set_task_status(&self, task_id: &str, status: &str) -> Result<()> {
         let key = Self::task_status_key(task_id);
-        let payload = serde_json::json!({
+        let mut conn = self.conn.clone();
+
+        // Read-modify-write: preserve existing fields
+        let existing: Option<String> = match conn.get::<_, Option<String>>(&key).await {
+            Ok(v) => v,
+            Err(e) => {
+                warn!(task_id = task_id, err = %e, "Failed to read existing task status");
+                None
+            }
+        };
+        let mut payload: serde_json::Value = existing
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_else(|| serde_json::json!({}));
+
+        let now = Utc::now().to_rfc3339();
+        payload["task_id"] = serde_json::json!(task_id);
+        payload["status"] = serde_json::json!(status);
+        payload["updated_at"] = serde_json::json!(now);
+
+        if status == "in_progress" && payload.get("started_at").is_none() {
+            payload["started_at"] = serde_json::json!(now);
+        }
+        if status == "completed" || status == "failed" {
+            payload["ended_at"] = serde_json::json!(now);
+        }
+
+        let json = payload.to_string();
+        conn.set_ex::<_, _, ()>(&key, &json, TASK_STATUS_TTL_SECS)
+            .await?;
+        Ok(())
+    }
+
+    /// Write a full task status record with all metadata.
+    pub async fn set_task_status_full(
+        &self,
+        task_id: &str,
+        status: &str,
+        operation_id: &str,
+        role: &str,
+        task_type: &str,
+        payload: Option<&serde_json::Value>,
+    ) -> Result<()> {
+        let key = Self::task_status_key(task_id);
+        let now = Utc::now().to_rfc3339();
+        let mut record = serde_json::json!({
             "task_id": task_id,
             "status": status,
-            "updated_at": Utc::now().to_rfc3339(),
+            "operation_id": operation_id,
+            "role": role,
+            "task_type": task_type,
+            "updated_at": now,
         });
-        let json = payload.to_string();
+        if status == "in_progress" {
+            record["started_at"] = serde_json::json!(now);
+        }
+        if let Some(p) = payload {
+            record["payload"] = p.clone();
+        }
+        let json = record.to_string();
         let mut conn = self.conn.clone();
         conn.set_ex::<_, _, ()>(&key, &json, TASK_STATUS_TTL_SECS)
             .await?;
@@ -398,15 +455,18 @@ impl TaskQueue {
         let mut conn = self.conn.clone();
         conn.lpush::<_, _, ()>(&key, &json).await?;
         conn.expire::<_, ()>(&key, RESULT_TTL_SECS as i64).await?;
-        self.set_task_status(
-            task_id,
-            if result.success {
-                "completed"
-            } else {
-                "failed"
-            },
-        )
-        .await?;
+        let final_status = if result.success {
+            "completed"
+        } else {
+            "failed"
+        };
+        debug!(
+            task_id = task_id,
+            status = final_status,
+            "Updating task status after send_result"
+        );
+        self.set_task_status(task_id, final_status).await?;
+        debug!(task_id = task_id, "Task status updated to {}", final_status);
         Ok(())
     }
 }
