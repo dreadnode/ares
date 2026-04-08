@@ -92,7 +92,7 @@ impl LlmTaskRunner {
         // 5. Run the agent loop
         let outcome = run_agent_loop(
             self.provider.as_ref(),
-            self.dispatcher.as_ref(),
+            Arc::clone(&self.dispatcher),
             &self.config,
             &system_prompt,
             &task_prompt,

@@ -136,57 +136,45 @@ async fn main() -> Result<()> {
     let throttler = Arc::new(Throttler::new(config.clone(), tracker.clone()));
     let deferred = Arc::new(DeferredQueue::new(queue.clone(), config.clone()));
 
+    // --- LLM provider (required — ARES_LLM_MODEL must be set) ---
+    let model_spec = std::env::var("ARES_LLM_MODEL")
+        .context("ARES_LLM_MODEL is required — set to e.g. 'anthropic/claude-sonnet-4-20250514'")?;
+    let (provider, model_name) = ares_llm::create_provider(&model_spec)
+        .context("Failed to create LLM provider from ARES_LLM_MODEL")?;
+
+    // Choose tool dispatch strategy:
+    // ARES_TOOL_DISPATCH=local → in-process via ares_tools::dispatch()
+    // default → Redis queue for worker consumption (ares:tool_exec:{role})
+    let tool_disp: Arc<dyn ares_llm::ToolDispatcher> =
+        if std::env::var("ARES_TOOL_DISPATCH").as_deref() == Ok("local") {
+            info!("Tool dispatch: local (in-process via ares-tools)");
+            Arc::new(tool_dispatcher::LocalToolDispatcher::new())
+        } else {
+            info!("Tool dispatch: Redis queue (ares:tool_exec:{{role}})");
+            Arc::new(tool_dispatcher::RedisToolDispatcher::new(queue.clone()))
+        };
+
+    let llm_runner = Arc::new(llm_runner::LlmTaskRunner::new(
+        provider,
+        model_name.clone(),
+        tool_disp,
+        shared_state.clone(),
+    ));
+    info!(
+        model = %model_name,
+        "LLM runner initialized — Rust drives all agent loops"
+    );
+
     // --- Central dispatcher ---
-    let mut dispatcher = Dispatcher::new(
+    let dispatcher = Arc::new(Dispatcher::new(
         queue.clone(),
         tracker.clone(),
         throttler.clone(),
         deferred.clone(),
         shared_state.clone(),
         config.clone(),
-    );
-
-    // --- LLM runner (optional — enabled when ARES_LLM_MODEL is set) ---
-    if let Ok(model_spec) = std::env::var("ARES_LLM_MODEL") {
-        match ares_llm::create_provider(&model_spec) {
-            Ok((provider, model_name)) => {
-                // Choose tool dispatch strategy:
-                // ARES_TOOL_DISPATCH=local → in-process via ares_tools::dispatch()
-                // default → Redis queue for worker consumption (ares:tool_exec:{role})
-                let tool_disp: Arc<dyn ares_llm::ToolDispatcher> =
-                    if std::env::var("ARES_TOOL_DISPATCH").as_deref() == Ok("local") {
-                        info!("Tool dispatch: local (in-process via ares-tools)");
-                        Arc::new(tool_dispatcher::LocalToolDispatcher::new())
-                    } else {
-                        info!("Tool dispatch: Redis queue (ares:tool_exec:{{role}})");
-                        Arc::new(tool_dispatcher::RedisToolDispatcher::new(queue.clone()))
-                    };
-
-                let runner = Arc::new(llm_runner::LlmTaskRunner::new(
-                    provider,
-                    model_name.clone(),
-                    tool_disp,
-                    shared_state.clone(),
-                ));
-                dispatcher = dispatcher.with_llm_runner(runner);
-                info!(
-                    model = %model_name,
-                    "LLM runner initialized — Rust will drive agent loops"
-                );
-            }
-            Err(e) => {
-                warn!(
-                    model = %model_spec,
-                    err = %e,
-                    "Failed to create LLM provider — tasks will be pushed to Redis queue for workers"
-                );
-            }
-        }
-    } else {
-        info!("ARES_LLM_MODEL not set — tasks will be pushed to Redis queue for workers");
-    }
-
-    let dispatcher = Arc::new(dispatcher);
+        llm_runner,
+    ));
 
     // --- Shutdown signal ---
     let (shutdown_tx, shutdown_rx) = watch::channel(false);

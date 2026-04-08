@@ -92,57 +92,34 @@ impl Dispatcher {
 
     /// Direct submit (bypasses throttle). Returns task_id.
     ///
-    /// If the LLM runner is available and the task type is supported,
-    /// spawns a tokio task that drives the LLM agent loop. Otherwise,
-    /// pushes to the Redis queue for Python workers.
+    /// Routes the task to the Rust LLM agent loop. If the task type
+    /// has no mapped role, logs a warning and drops the task.
     pub(super) async fn do_submit(
         &self,
         task_type: &str,
         target_role: &str,
         payload: serde_json::Value,
-        priority: i32,
+        _priority: i32,
     ) -> Result<Option<String>> {
-        // Check if the LLM runner can handle this task
-        let llm_role = self
-            .llm_runner
-            .as_ref()
-            .and_then(|_| crate::llm_runner::role_for_task_type(task_type));
+        let role = match crate::llm_runner::role_for_task_type(task_type) {
+            Some(r) => r,
+            None => {
+                warn!(
+                    task_type = task_type,
+                    "No LLM role mapping for task type, dropping"
+                );
+                return Ok(None);
+            }
+        };
 
-        if let (Some(runner), Some(role)) = (&self.llm_runner, llm_role) {
-            return self
-                .submit_to_llm(runner.clone(), task_type, target_role, role, payload)
-                .await;
-        }
-
-        // Fallback: push to Redis for Python workers
-        self.submit_to_queue(task_type, target_role, payload, priority)
-            .await
-    }
-
-    /// Submit a task to the Redis queue for Python workers.
-    async fn submit_to_queue(
-        &self,
-        task_type: &str,
-        target_role: &str,
-        payload: serde_json::Value,
-        priority: i32,
-    ) -> Result<Option<String>> {
-        let task_id = self
-            .queue
-            .submit_task(task_type, target_role, payload, "orchestrator", priority)
-            .await?;
-
-        self.tracker
-            .add(ActiveTask {
-                task_id: task_id.clone(),
-                task_type: task_type.to_string(),
-                role: target_role.to_string(),
-                submitted_at: std::time::Instant::now(),
-            })
-            .await;
-
-        self.throttler.record_dispatch().await;
-        Ok(Some(task_id))
+        self.submit_to_llm(
+            self.llm_runner.clone(),
+            task_type,
+            target_role,
+            role,
+            payload,
+        )
+        .await
     }
 
     /// Submit a task to the Rust LLM agent loop. Spawns a background tokio
@@ -192,69 +169,96 @@ impl Dispatcher {
 
             // Convert outcome to TaskResult and push to result queue
             let result = match outcome {
-                Ok(outcome) => match &outcome.reason {
-                    LoopEndReason::TaskComplete { result, .. } => TaskResult {
-                        task_id: tid.clone(),
-                        success: true,
-                        result: Some(json!({
-                            "summary": result,
-                            "steps": outcome.steps,
-                            "tool_calls": outcome.tool_calls_dispatched,
-                        })),
-                        error: None,
-                        completed_at: Some(Utc::now()),
-                        worker_pod: Some("rust-llm-runner".into()),
-                        agent_name: Some(tt.clone()),
-                    },
-                    LoopEndReason::RequestAssistance { issue, context } => TaskResult {
-                        task_id: tid.clone(),
-                        success: false,
-                        result: None,
-                        error: Some(format!("Assistance needed: {issue} (context: {context})")),
-                        completed_at: Some(Utc::now()),
-                        worker_pod: Some("rust-llm-runner".into()),
-                        agent_name: Some(tt.clone()),
-                    },
-                    LoopEndReason::MaxSteps => TaskResult {
-                        task_id: tid.clone(),
-                        success: false,
-                        result: Some(json!({
-                            "steps": outcome.steps,
-                            "tool_calls": outcome.tool_calls_dispatched,
-                        })),
-                        error: Some("Agent hit max steps limit".into()),
-                        completed_at: Some(Utc::now()),
-                        worker_pod: Some("rust-llm-runner".into()),
-                        agent_name: Some(tt.clone()),
-                    },
-                    LoopEndReason::EndTurn { content } => TaskResult {
-                        task_id: tid.clone(),
-                        success: true,
-                        result: Some(json!({"summary": content})),
-                        error: None,
-                        completed_at: Some(Utc::now()),
-                        worker_pod: Some("rust-llm-runner".into()),
-                        agent_name: Some(tt.clone()),
-                    },
-                    LoopEndReason::MaxTokens => TaskResult {
-                        task_id: tid.clone(),
-                        success: false,
-                        result: None,
-                        error: Some("Agent hit max tokens".into()),
-                        completed_at: Some(Utc::now()),
-                        worker_pod: Some("rust-llm-runner".into()),
-                        agent_name: Some(tt.clone()),
-                    },
-                    LoopEndReason::Error(err) => TaskResult {
-                        task_id: tid.clone(),
-                        success: false,
-                        result: None,
-                        error: Some(err.clone()),
-                        completed_at: Some(Utc::now()),
-                        worker_pod: Some("rust-llm-runner".into()),
-                        agent_name: Some(tt.clone()),
-                    },
-                },
+                Ok(outcome) => {
+                    // Merge all structured discoveries from tool results
+                    let merged_discoveries = if outcome.discoveries.is_empty() {
+                        None
+                    } else {
+                        Some(ares_tools::parsers::merge_discoveries(&outcome.discoveries))
+                    };
+
+                    match &outcome.reason {
+                        LoopEndReason::TaskComplete { result, .. } => {
+                            let mut result_json = json!({
+                                "summary": result,
+                                "steps": outcome.steps,
+                                "tool_calls": outcome.tool_calls_dispatched,
+                            });
+                            if let Some(disc) = merged_discoveries {
+                                result_json["discoveries"] = disc;
+                            }
+                            TaskResult {
+                                task_id: tid.clone(),
+                                success: true,
+                                result: Some(result_json),
+                                error: None,
+                                completed_at: Some(Utc::now()),
+                                worker_pod: Some("rust-llm-runner".into()),
+                                agent_name: Some(tt.clone()),
+                            }
+                        }
+                        LoopEndReason::RequestAssistance { issue, context } => TaskResult {
+                            task_id: tid.clone(),
+                            success: false,
+                            result: None,
+                            error: Some(format!("Assistance needed: {issue} (context: {context})")),
+                            completed_at: Some(Utc::now()),
+                            worker_pod: Some("rust-llm-runner".into()),
+                            agent_name: Some(tt.clone()),
+                        },
+                        LoopEndReason::MaxSteps => {
+                            let mut result_json = json!({
+                                "steps": outcome.steps,
+                                "tool_calls": outcome.tool_calls_dispatched,
+                            });
+                            if let Some(disc) = merged_discoveries {
+                                result_json["discoveries"] = disc;
+                            }
+                            TaskResult {
+                                task_id: tid.clone(),
+                                success: false,
+                                result: Some(result_json),
+                                error: Some("Agent hit max steps limit".into()),
+                                completed_at: Some(Utc::now()),
+                                worker_pod: Some("rust-llm-runner".into()),
+                                agent_name: Some(tt.clone()),
+                            }
+                        }
+                        LoopEndReason::EndTurn { content } => {
+                            let mut result_json = json!({"summary": content});
+                            if let Some(disc) = merged_discoveries {
+                                result_json["discoveries"] = disc;
+                            }
+                            TaskResult {
+                                task_id: tid.clone(),
+                                success: true,
+                                result: Some(result_json),
+                                error: None,
+                                completed_at: Some(Utc::now()),
+                                worker_pod: Some("rust-llm-runner".into()),
+                                agent_name: Some(tt.clone()),
+                            }
+                        }
+                        LoopEndReason::MaxTokens => TaskResult {
+                            task_id: tid.clone(),
+                            success: false,
+                            result: None,
+                            error: Some("Agent hit max tokens".into()),
+                            completed_at: Some(Utc::now()),
+                            worker_pod: Some("rust-llm-runner".into()),
+                            agent_name: Some(tt.clone()),
+                        },
+                        LoopEndReason::Error(err) => TaskResult {
+                            task_id: tid.clone(),
+                            success: false,
+                            result: None,
+                            error: Some(err.clone()),
+                            completed_at: Some(Utc::now()),
+                            worker_pod: Some("rust-llm-runner".into()),
+                            agent_name: Some(tt.clone()),
+                        },
+                    }
+                }
                 Err(e) => TaskResult {
                     task_id: tid.clone(),
                     success: false,

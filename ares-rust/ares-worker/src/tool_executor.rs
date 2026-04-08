@@ -53,6 +53,9 @@ struct ToolExecResponse {
     call_id: String,
     output: String,
     error: Option<String>,
+    /// Structured discoveries parsed from the tool output.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    discoveries: Option<serde_json::Value>,
 }
 
 // ─── Tool executor loop ─────────────────────────────────────────────────────
@@ -196,15 +199,30 @@ async fn execute_and_respond(
 
     let response = match ares_tools::dispatch(&request.tool_name, &request.arguments).await {
         Ok(output) => {
+            let combined = output.combined();
             let error = if output.success {
                 None
             } else {
                 Some(format!("tool exited with code {:?}", output.exit_code))
             };
+
+            // Parse structured discoveries from tool output
+            let discoveries = ares_tools::parsers::parse_tool_output(
+                &request.tool_name,
+                &combined,
+                &request.arguments,
+            );
+            let discoveries = if discoveries.as_object().is_none_or(|o| o.is_empty()) {
+                None
+            } else {
+                Some(discoveries)
+            };
+
             ToolExecResponse {
                 call_id: request.call_id.clone(),
-                output: output.combined(),
+                output: combined,
                 error,
+                discoveries,
             }
         }
         Err(e) => {
@@ -218,6 +236,7 @@ async fn execute_and_respond(
                 call_id: request.call_id.clone(),
                 output: String::new(),
                 error: Some(e.to_string()),
+                discoveries: None,
             }
         }
     };
@@ -294,10 +313,13 @@ mod tests {
             call_id: "nmap_scan_abc123".into(),
             output: "Found 5 hosts".into(),
             error: None,
+            discoveries: None,
         };
         let json = serde_json::to_string(&resp).unwrap();
         assert!(json.contains("nmap_scan_abc123"));
         assert!(json.contains("Found 5 hosts"));
+        // discoveries omitted when None
+        assert!(!json.contains("discoveries"));
     }
 
     #[test]
@@ -306,10 +328,26 @@ mod tests {
             call_id: "x".into(),
             output: String::new(),
             error: Some("Connection refused".into()),
+            discoveries: None,
         };
         let json = serde_json::to_string(&resp).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed["error"], "Connection refused");
+    }
+
+    #[test]
+    fn tool_exec_response_with_discoveries() {
+        let resp = ToolExecResponse {
+            call_id: "nmap_abc".into(),
+            output: "scan output".into(),
+            error: None,
+            discoveries: Some(serde_json::json!({
+                "hosts": [{"ip": "192.168.58.10", "services": ["445/tcp"]}]
+            })),
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        assert!(json.contains("discoveries"));
+        assert!(json.contains("192.168.58.10"));
     }
 
     #[test]

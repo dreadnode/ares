@@ -10,6 +10,8 @@
 //! 4. Feed tool result back to LLM, repeat
 //! 5. Stop when: task_complete called, max steps reached, or end_turn with no tools
 
+use std::sync::Arc;
+
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
@@ -56,6 +58,9 @@ impl Default for AgentLoopConfig {
 pub struct ToolExecResult {
     pub output: String,
     pub error: Option<String>,
+    /// Structured discoveries parsed from the tool output (hosts, creds, hashes, vulns).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub discoveries: Option<serde_json::Value>,
 }
 
 /// Trait for dispatching tool calls to external executors (Python workers).
@@ -145,19 +150,31 @@ fn handle_callback(call: &ToolCall) -> Result<CallbackResult> {
 // Tool dispatch helper
 // ---------------------------------------------------------------------------
 
-/// Dispatch a single external tool call and return the output string.
+/// Result of dispatching a single tool call.
+struct DispatchResult {
+    call_id: String,
+    output: String,
+    discoveries: Option<serde_json::Value>,
+}
+
+/// Dispatch a single external tool call.
 async fn dispatch_one(
-    dispatcher: &dyn ToolDispatcher,
-    role: &str,
-    task_id: &str,
-    call: &ToolCall,
-) -> String {
-    match dispatcher.dispatch_tool(role, task_id, call).await {
+    dispatcher: Arc<dyn ToolDispatcher>,
+    role: String,
+    task_id: String,
+    call: ToolCall,
+) -> DispatchResult {
+    match dispatcher.dispatch_tool(&role, &task_id, &call).await {
         Ok(result) => {
-            if let Some(err) = &result.error {
+            let output = if let Some(err) = &result.error {
                 format!("Error: {err}\n\nPartial output:\n{}", result.output)
             } else {
                 result.output
+            };
+            DispatchResult {
+                call_id: call.id,
+                output,
+                discoveries: result.discoveries,
             }
         }
         Err(e) => {
@@ -166,7 +183,11 @@ async fn dispatch_one(
                 err = %e,
                 "Tool dispatch failed"
             );
-            format!("Tool execution failed: {e}")
+            DispatchResult {
+                call_id: call.id,
+                output: format!("Tool execution failed: {e}"),
+                discoveries: None,
+            }
         }
     }
 }
@@ -186,6 +207,8 @@ pub struct AgentLoopOutcome {
     pub steps: u32,
     /// Number of tool calls dispatched.
     pub tool_calls_dispatched: u32,
+    /// Accumulated structured discoveries from all tool results.
+    pub discoveries: Vec<serde_json::Value>,
 }
 
 /// Why the agent loop stopped.
@@ -219,7 +242,7 @@ pub enum LoopEndReason {
 #[allow(clippy::too_many_arguments)]
 pub async fn run_agent_loop(
     provider: &dyn LlmProvider,
-    dispatcher: &dyn ToolDispatcher,
+    dispatcher: Arc<dyn ToolDispatcher>,
     config: &AgentLoopConfig,
     system_prompt: &str,
     task_prompt: &str,
@@ -232,6 +255,7 @@ pub async fn run_agent_loop(
     let mut total_usage = TokenUsage::default();
     let mut steps: u32 = 0;
     let mut tool_calls_dispatched: u32 = 0;
+    let mut all_discoveries: Vec<serde_json::Value> = Vec::new();
 
     loop {
         if steps >= config.max_steps {
@@ -241,6 +265,7 @@ pub async fn run_agent_loop(
                 total_usage,
                 steps,
                 tool_calls_dispatched,
+                discoveries: all_discoveries,
             };
         }
 
@@ -271,6 +296,7 @@ pub async fn run_agent_loop(
                     total_usage,
                     steps,
                     tool_calls_dispatched,
+                    discoveries: all_discoveries,
                 };
             }
         };
@@ -291,6 +317,7 @@ pub async fn run_agent_loop(
                     total_usage,
                     steps,
                     tool_calls_dispatched,
+                    discoveries: all_discoveries,
                 };
             }
             StopReason::MaxTokens if response.tool_calls.is_empty() => {
@@ -299,6 +326,7 @@ pub async fn run_agent_loop(
                     total_usage,
                     steps,
                     tool_calls_dispatched,
+                    discoveries: all_discoveries,
                 };
             }
             _ => {}
@@ -333,11 +361,40 @@ pub async fn run_agent_loop(
             }
         }
 
-        // Dispatch external tools to workers
-        for call in &external {
-            tool_calls_dispatched += 1;
-            let output = dispatch_one(dispatcher, role, task_id, call).await;
-            messages.push(ChatMessage::tool_result(&call.id, &output));
+        // Dispatch external tools to workers concurrently
+        if !external.is_empty() {
+            tool_calls_dispatched += external.len() as u32;
+
+            let mut join_set = tokio::task::JoinSet::new();
+            for call in &external {
+                let disp = Arc::clone(&dispatcher);
+                let r = role.to_string();
+                let tid = task_id.to_string();
+                let c = (*call).clone();
+                join_set.spawn(dispatch_one(disp, r, tid, c));
+            }
+
+            // Collect results preserving call ordering
+            let mut results: Vec<DispatchResult> = Vec::with_capacity(external.len());
+            while let Some(res) = join_set.join_next().await {
+                match res {
+                    Ok(dr) => results.push(dr),
+                    Err(e) => {
+                        warn!(err = %e, "Tool dispatch task panicked");
+                    }
+                }
+            }
+
+            // Add tool results to messages in the original call order
+            // and accumulate any structured discoveries
+            for call in &external {
+                if let Some(dr) = results.iter().find(|r| r.call_id == call.id) {
+                    messages.push(ChatMessage::tool_result(&call.id, &dr.output));
+                    if let Some(disc) = &dr.discoveries {
+                        all_discoveries.push(disc.clone());
+                    }
+                }
+            }
         }
 
         // Handle callbacks (may short-circuit the loop)
@@ -358,6 +415,7 @@ pub async fn run_agent_loop(
                         total_usage,
                         steps,
                         tool_calls_dispatched,
+                        discoveries: all_discoveries,
                     };
                 }
                 Ok(CallbackResult::RequestAssistance { issue, context }) => {
@@ -367,6 +425,7 @@ pub async fn run_agent_loop(
                         total_usage,
                         steps,
                         tool_calls_dispatched,
+                        discoveries: all_discoveries,
                     };
                 }
                 Ok(CallbackResult::Continue(msg)) => {

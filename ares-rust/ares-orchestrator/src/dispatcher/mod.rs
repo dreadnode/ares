@@ -28,9 +28,8 @@ pub struct Dispatcher {
     pub config: Arc<OrchestratorConfig>,
     /// Notifies auto_credential_access to wake up when new creds arrive.
     pub credential_access_notify: Arc<Notify>,
-    /// Optional LLM runner — when set, tasks are driven by Rust agent loop
-    /// instead of being pushed to Python workers.
-    pub llm_runner: Option<Arc<LlmTaskRunner>>,
+    /// LLM runner — drives tasks through the Rust agent loop.
+    pub llm_runner: Arc<LlmTaskRunner>,
 }
 
 impl Dispatcher {
@@ -41,6 +40,7 @@ impl Dispatcher {
         deferred: Arc<DeferredQueue>,
         state: SharedState,
         config: Arc<OrchestratorConfig>,
+        llm_runner: Arc<LlmTaskRunner>,
     ) -> Self {
         Self {
             queue,
@@ -50,13 +50,7 @@ impl Dispatcher {
             state,
             config,
             credential_access_notify: Arc::new(Notify::new()),
-            llm_runner: None,
+            llm_runner,
         }
-    }
-
-    /// Set the LLM runner for driving tasks in Rust.
-    pub fn with_llm_runner(mut self, runner: Arc<LlmTaskRunner>) -> Self {
-        self.llm_runner = Some(runner);
-        self
     }
 }

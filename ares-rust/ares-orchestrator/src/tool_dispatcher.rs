@@ -52,6 +52,9 @@ pub struct ToolExecResponse {
     pub call_id: String,
     pub output: String,
     pub error: Option<String>,
+    /// Structured discoveries parsed by the worker from tool output.
+    #[serde(default)]
+    pub discoveries: Option<serde_json::Value>,
 }
 
 // ---------------------------------------------------------------------------
@@ -137,6 +140,7 @@ impl ares_llm::ToolDispatcher for RedisToolDispatcher {
                 Ok(ToolExecResult {
                     output: response.output,
                     error: response.error,
+                    discoveries: response.discoveries,
                 })
             }
             None => {
@@ -158,6 +162,7 @@ impl ares_llm::ToolDispatcher for RedisToolDispatcher {
                         "Tool '{}' timed out after {timeout_secs}s",
                         call.name
                     )),
+                    discoveries: None,
                 })
             }
         }
@@ -192,19 +197,32 @@ impl ares_llm::ToolDispatcher for LocalToolDispatcher {
 
         match ares_tools::dispatch(&call.name, &call.arguments).await {
             Ok(output) => {
+                let combined = output.combined();
                 let error = if output.success {
                     None
                 } else {
                     Some(format!("tool exited with code {:?}", output.exit_code))
                 };
+
+                // Parse structured discoveries locally
+                let discoveries =
+                    ares_tools::parsers::parse_tool_output(&call.name, &combined, &call.arguments);
+                let discoveries = if discoveries.as_object().is_none_or(|o| o.is_empty()) {
+                    None
+                } else {
+                    Some(discoveries)
+                };
+
                 Ok(ToolExecResult {
-                    output: output.combined(),
+                    output: combined,
                     error,
+                    discoveries,
                 })
             }
             Err(e) => Ok(ToolExecResult {
                 output: String::new(),
                 error: Some(e.to_string()),
+                discoveries: None,
             }),
         }
     }

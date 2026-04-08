@@ -1,7 +1,7 @@
 //! Integration tests for the agent loop using mock LLM and tool dispatcher.
 
 use std::collections::VecDeque;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
 use serde_json::json;
@@ -79,6 +79,7 @@ impl ToolDispatcher for MockDispatcher {
             Ok(ToolExecResult {
                 output: "default mock output".into(),
                 error: None,
+                discoveries: None,
             })
         })
     }
@@ -180,16 +181,17 @@ async fn test_multi_turn_tool_use_then_task_complete() {
     }]);
 
     let provider = MockProvider::new(vec![turn1, turn2]);
-    let dispatcher = MockDispatcher::new(vec![Ok(ToolExecResult {
+    let dispatcher = Arc::new(MockDispatcher::new(vec![Ok(ToolExecResult {
         output: "Host: 192.168.58.10 (open: 22,80,445)\nHost: 192.168.58.20 (open: 88,389,445)"
             .into(),
         error: None,
-    })]);
+        discoveries: None,
+    })]));
 
     let config = default_config(10);
     let outcome = run_agent_loop(
         &provider,
-        &dispatcher,
+        dispatcher.clone(),
         &config,
         "You are a recon agent.",
         "Scan the 192.168.58.0/24 subnet.",
@@ -240,17 +242,18 @@ async fn test_max_steps_limit() {
             Ok(ToolExecResult {
                 output: "scan complete".into(),
                 error: None,
+                discoveries: None,
             })
         })
         .collect();
 
     let provider = MockProvider::new(responses);
-    let dispatcher = MockDispatcher::new(dispatcher_results);
+    let dispatcher = Arc::new(MockDispatcher::new(dispatcher_results));
 
     let config = default_config(3);
     let outcome = run_agent_loop(
         &provider,
-        &dispatcher,
+        dispatcher,
         &config,
         "You are a recon agent.",
         "Keep scanning.",
@@ -284,12 +287,12 @@ async fn test_end_turn_no_tool_calls() {
     };
 
     let provider = MockProvider::new(vec![response]);
-    let dispatcher = MockDispatcher::new(vec![]);
+    let dispatcher = Arc::new(MockDispatcher::new(vec![]));
 
     let config = default_config(10);
     let outcome = run_agent_loop(
         &provider,
-        &dispatcher,
+        dispatcher.clone(),
         &config,
         "You are a recon agent.",
         "Analyze the network.",
@@ -339,15 +342,16 @@ async fn test_tool_dispatch_error_fed_back() {
     let provider = MockProvider::new(vec![turn1, turn2]);
 
     // Dispatcher returns an error for the tool call
-    let dispatcher = MockDispatcher::new(vec![Ok(ToolExecResult {
+    let dispatcher = Arc::new(MockDispatcher::new(vec![Ok(ToolExecResult {
         output: "partial scan data".into(),
         error: Some("Connection timed out after 30s".into()),
-    })]);
+        discoveries: None,
+    })]));
 
     let config = default_config(10);
     let outcome = run_agent_loop(
         &provider,
-        &dispatcher,
+        dispatcher,
         &config,
         "You are a recon agent.",
         "Scan 192.168.58.10.",
@@ -396,12 +400,14 @@ async fn test_tool_dispatch_hard_error_fed_back() {
     let provider = MockProvider::new(vec![turn1, turn2]);
 
     // Dispatcher returns a hard anyhow error
-    let dispatcher = MockDispatcher::new(vec![Err(anyhow::anyhow!("Redis connection refused"))]);
+    let dispatcher = Arc::new(MockDispatcher::new(vec![Err(anyhow::anyhow!(
+        "Redis connection refused",
+    ))]));
 
     let config = default_config(10);
     let outcome = run_agent_loop(
         &provider,
-        &dispatcher,
+        dispatcher,
         &config,
         "You are a recon agent.",
         "Scan 192.168.58.10.",
@@ -438,12 +444,12 @@ async fn test_request_assistance_callback() {
     }]);
 
     let provider = MockProvider::new(vec![response]);
-    let dispatcher = MockDispatcher::new(vec![]);
+    let dispatcher = Arc::new(MockDispatcher::new(vec![]));
 
     let config = default_config(10);
     let outcome = run_agent_loop(
         &provider,
-        &dispatcher,
+        dispatcher.clone(),
         &config,
         "You are a recon agent.",
         "Scan target.",
@@ -511,15 +517,16 @@ async fn test_token_usage_accumulates() {
     };
 
     let provider = MockProvider::new(vec![turn1, turn2]);
-    let dispatcher = MockDispatcher::new(vec![Ok(ToolExecResult {
+    let dispatcher = Arc::new(MockDispatcher::new(vec![Ok(ToolExecResult {
         output: "scan done".into(),
         error: None,
-    })]);
+        discoveries: None,
+    })]));
 
     let config = default_config(10);
     let outcome = run_agent_loop(
         &provider,
-        &dispatcher,
+        dispatcher,
         &config,
         "System prompt.",
         "Task prompt.",
@@ -543,12 +550,12 @@ async fn test_token_usage_accumulates() {
 async fn test_llm_error_returns_error_outcome() {
     // Provider with no responses queued -- will return an error
     let provider = MockProvider::new(vec![]);
-    let dispatcher = MockDispatcher::new(vec![]);
+    let dispatcher = Arc::new(MockDispatcher::new(vec![]));
 
     let config = default_config(10);
     let outcome = run_agent_loop(
         &provider,
-        &dispatcher,
+        dispatcher,
         &config,
         "System prompt.",
         "Task prompt.",
