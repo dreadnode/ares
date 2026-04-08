@@ -1,0 +1,22 @@
+# Threat Hunt Task
+
+## Task ID: {{ task_id }}
+
+## Hunt Parameters
+- **Technique**: {{ technique_id }}
+- **Detection Method**: {{ detection_method }}
+{% if hostname %}- **Focus Host**: {{ hostname }}{% endif %}
+{% if username %}- **Focus User**: {{ username }}{% endif %}
+{% if context %}- **Context**: {{ context }}{% endif %}
+
+## Investigation State
+{{ state_summary }}
+
+## Instructions
+Conduct focused threat hunting for the specified technique:
+1. Run detection queries specific to {{ technique_id }}
+2. Examine logs on the focus host/user for related activity
+3. Look for evidence chains: what preceded and followed this activity?
+4. Record all evidence with MITRE technique mappings
+5. Build timeline events showing attack progression
+6. Call `hunt_complete` with your findings

@@ -21,6 +21,7 @@ operation:
   # Stop operation when golden ticket is forged (for child→parent forest escalation)
   # When true, operation continues past DA to forge golden ticket with ExtraSid
   stop_on_golden_ticket: true
+  multi_forest_mode: false
 
 # Agent configurations
 agents:

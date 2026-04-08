@@ -18,6 +18,7 @@
 
 mod automation;
 mod automation_spawner;
+mod blue;
 mod bootstrap;
 mod completion;
 mod config;
@@ -277,6 +278,33 @@ async fn main() -> Result<()> {
     // --- Automation tasks ---
     let auto_handles = spawn_automation_tasks(dispatcher.clone(), shutdown_rx.clone());
 
+    // --- Blue team orchestrator (optional — enabled when ARES_BLUE_ENABLED=1) ---
+    let blue_handle = if std::env::var("ARES_BLUE_ENABLED").as_deref() == Ok("1") {
+        // Create a separate LLM provider for the blue team
+        let blue_model_spec =
+            std::env::var("ARES_BLUE_LLM_MODEL").unwrap_or_else(|_| model_spec.clone());
+        let (blue_provider, blue_model) = ares_llm::create_provider(&blue_model_spec)
+            .context("Failed to create blue team LLM provider")?;
+
+        let blue_disp: Arc<dyn ares_llm::ToolDispatcher> =
+            if std::env::var("ARES_TOOL_DISPATCH").as_deref() == Ok("local") {
+                Arc::new(tool_dispatcher::LocalToolDispatcher::new())
+            } else {
+                Arc::new(tool_dispatcher::RedisToolDispatcher::new(queue.clone()))
+            };
+
+        info!(model = %blue_model, "Starting blue team orchestrator");
+        Some(blue::spawn_blue_orchestrator(
+            blue_provider,
+            blue_model,
+            blue_disp,
+            config.redis_url.clone(),
+            shutdown_rx.clone(),
+        ))
+    } else {
+        None
+    };
+
     // --- Recovery check ---
     {
         let recovery_mgr = recovery::OperationRecoveryManager::new(config.redis_url.clone());
@@ -366,6 +394,9 @@ async fn main() -> Result<()> {
                 completion_handle,
             );
             for h in auto_handles {
+                let _ = h.await;
+            }
+            if let Some(h) = blue_handle {
                 let _ = h.await;
             }
         } => {

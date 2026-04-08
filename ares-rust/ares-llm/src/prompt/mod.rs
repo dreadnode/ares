@@ -5,6 +5,7 @@
 //! Variable extraction from JSON payloads happens in Rust; prompt wording
 //! and structure lives in `.tera` template files.
 
+pub mod blue;
 pub mod templates;
 
 mod acl;

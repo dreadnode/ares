@@ -5,6 +5,7 @@
 //! in Rust without dispatching to Python workers.
 
 mod acl;
+pub mod blue;
 mod coercion;
 mod cracker;
 mod credential_access;

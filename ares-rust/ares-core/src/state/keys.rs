@@ -99,3 +99,26 @@ pub const BLUE_KEY_RECOMMENDATIONS: &str = "recommendations";
 pub const BLUE_KEY_TRIAGE_DECISION: &str = "triage:decision";
 /// Redis LIST key suffix for the ordered triage audit trail.
 pub const BLUE_KEY_TRIAGE_RECORDS: &str = "triage:records";
+/// Redis LIST key suffix for executed query records.
+pub const BLUE_KEY_QUERIES: &str = "queries";
+/// Redis LIST key suffix for lateral movement connections.
+pub const BLUE_KEY_LATERAL: &str = "lateral";
+/// Redis LIST key suffix for queued pivot investigation targets.
+pub const BLUE_KEY_PIVOT_QUEUE: &str = "pivot_queue";
+/// Redis LIST key suffix for queued chained detection methods.
+pub const BLUE_KEY_CHAIN_QUEUE: &str = "chain_queue";
+
+/// Redis key prefix for blue team task queues.
+pub const BLUE_TASK_QUEUE_PREFIX: &str = "ares:blue:tasks";
+/// Redis key prefix for blue team task results.
+pub const BLUE_RESULT_QUEUE_PREFIX: &str = "ares:blue:results";
+/// Redis key prefix for blue team agent heartbeats.
+pub const BLUE_HEARTBEAT_PREFIX: &str = "ares:blue:heartbeat";
+/// Redis SET key for active blue team investigations.
+pub const BLUE_ACTIVE_INVESTIGATIONS: &str = "ares:blue:active_investigations";
+/// Redis LIST key for the investigation request queue.
+pub const BLUE_INVESTIGATION_QUEUE: &str = "ares:blue:investigations";
+/// Redis key prefix for blue team operation tracking.
+pub const BLUE_OP_PREFIX: &str = "ares:blue:op";
+/// Redis key prefix for investigation status.
+pub const BLUE_STATUS_PREFIX: &str = "ares:blue:inv";

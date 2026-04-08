@@ -63,6 +63,31 @@ const TASK_ACL_ANALYSIS_TEMPLATE: &str =
 const TASK_COMMAND_TEMPLATE: &str = include_str!("../../templates/redteam/tasks/command.md.tera");
 
 // ---------------------------------------------------------------------------
+// Embedded templates — blue team agent instruction templates
+// ---------------------------------------------------------------------------
+
+const BLUE_TRIAGE_TEMPLATE: &str = include_str!("../../templates/blueteam/agents/triage.md.tera");
+const BLUE_THREAT_HUNTER_TEMPLATE: &str =
+    include_str!("../../templates/blueteam/agents/threat_hunter.md.tera");
+const BLUE_LATERAL_ANALYST_TEMPLATE: &str =
+    include_str!("../../templates/blueteam/agents/lateral_analyst.md.tera");
+const BLUE_ORCHESTRATOR_TEMPLATE: &str =
+    include_str!("../../templates/blueteam/agents/orchestrator.md.tera");
+const BLUE_ESCALATION_TRIAGE_TEMPLATE: &str =
+    include_str!("../../templates/blueteam/agents/escalation_triage.md.tera");
+
+// ---------------------------------------------------------------------------
+// Embedded templates — blue team task templates
+// ---------------------------------------------------------------------------
+
+const BLUE_TASK_TRIAGE_TEMPLATE: &str =
+    include_str!("../../templates/blueteam/tasks/triage_task.md.tera");
+const BLUE_TASK_THREAT_HUNT_TEMPLATE: &str =
+    include_str!("../../templates/blueteam/tasks/threat_hunt_task.md.tera");
+const BLUE_TASK_LATERAL_TEMPLATE: &str =
+    include_str!("../../templates/blueteam/tasks/lateral_task.md.tera");
+
+// ---------------------------------------------------------------------------
 // Template name constants
 // ---------------------------------------------------------------------------
 
@@ -96,6 +121,18 @@ pub const TASK_COERCION: &str = "redteam/tasks/coercion";
 pub const TASK_PRIVESC_ENUMERATION: &str = "redteam/tasks/privesc_enumeration";
 pub const TASK_ACL_ANALYSIS: &str = "redteam/tasks/acl_analysis";
 pub const TASK_COMMAND: &str = "redteam/tasks/command";
+
+// Blue team agent instruction templates
+pub const TEMPLATE_BLUE_TRIAGE: &str = "blueteam/agents/triage";
+pub const TEMPLATE_BLUE_THREAT_HUNTER: &str = "blueteam/agents/threat_hunter";
+pub const TEMPLATE_BLUE_LATERAL_ANALYST: &str = "blueteam/agents/lateral_analyst";
+pub const TEMPLATE_BLUE_ORCHESTRATOR: &str = "blueteam/agents/orchestrator";
+pub const TEMPLATE_BLUE_ESCALATION_TRIAGE: &str = "blueteam/agents/escalation_triage";
+
+// Blue team task templates
+pub const BLUE_TASK_TRIAGE: &str = "blueteam/tasks/triage_task";
+pub const BLUE_TASK_THREAT_HUNT: &str = "blueteam/tasks/threat_hunt_task";
+pub const BLUE_TASK_LATERAL: &str = "blueteam/tasks/lateral_task";
 
 // ---------------------------------------------------------------------------
 // Global Tera instance
@@ -140,6 +177,19 @@ static TEMPLATES: Lazy<Tera> = Lazy::new(|| {
         (TASK_PRIVESC_ENUMERATION, TASK_PRIVESC_ENUMERATION_TEMPLATE),
         (TASK_ACL_ANALYSIS, TASK_ACL_ANALYSIS_TEMPLATE),
         (TASK_COMMAND, TASK_COMMAND_TEMPLATE),
+        // Blue team agent templates
+        (TEMPLATE_BLUE_TRIAGE, BLUE_TRIAGE_TEMPLATE),
+        (TEMPLATE_BLUE_THREAT_HUNTER, BLUE_THREAT_HUNTER_TEMPLATE),
+        (TEMPLATE_BLUE_LATERAL_ANALYST, BLUE_LATERAL_ANALYST_TEMPLATE),
+        (TEMPLATE_BLUE_ORCHESTRATOR, BLUE_ORCHESTRATOR_TEMPLATE),
+        (
+            TEMPLATE_BLUE_ESCALATION_TRIAGE,
+            BLUE_ESCALATION_TRIAGE_TEMPLATE,
+        ),
+        // Blue team task templates
+        (BLUE_TASK_TRIAGE, BLUE_TASK_TRIAGE_TEMPLATE),
+        (BLUE_TASK_THREAT_HUNT, BLUE_TASK_THREAT_HUNT_TEMPLATE),
+        (BLUE_TASK_LATERAL, BLUE_TASK_LATERAL_TEMPLATE),
     ];
 
     for (name, content) in templates {

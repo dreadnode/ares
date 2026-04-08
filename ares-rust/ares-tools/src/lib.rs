@@ -6,6 +6,7 @@
 
 pub mod acl;
 pub mod args;
+pub mod blue;
 pub mod coercion;
 pub mod cracker;
 pub mod credential_access;

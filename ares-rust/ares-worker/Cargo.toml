@@ -10,6 +10,7 @@ path = "src/main.rs"
 
 [dependencies]
 ares-core = { path = "../ares-core", features = ["telemetry"] }
+ares-llm = { path = "../ares-llm" }
 ares-tools = { path = "../ares-tools" }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -21,3 +22,4 @@ tracing-subscriber = { workspace = true }
 uuid = { workspace = true }
 thiserror = { workspace = true }
 anyhow = { workspace = true }
+async-trait = "0.1"

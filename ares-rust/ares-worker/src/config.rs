@@ -19,6 +19,11 @@ pub enum WorkerMode {
     /// results to `ares:tool_results:{call_id}`. Used when the Rust
     /// orchestrator drives the LLM agent loop (ARES_LLM_MODEL).
     ToolExec,
+
+    /// Blue team task execution: consume from `ares:blue:tasks:global:{role}`,
+    /// run the blue team LLM agent loop with HTTP-based tools (Loki,
+    /// Prometheus, detection queries), push results to `ares:blue:results:`.
+    BlueTask,
 }
 
 /// Worker configuration parsed from environment variables.
@@ -91,6 +96,7 @@ impl WorkerConfig {
 
         let mode = match env::var("ARES_WORKER_MODE").as_deref() {
             Ok("tool_exec") => WorkerMode::ToolExec,
+            Ok("blue_task") => WorkerMode::BlueTask,
             _ => WorkerMode::Task,
         };
 
@@ -169,6 +175,11 @@ mod tests {
         std::env::set_var("ARES_WORKER_MODE", "tool_exec");
         let c = WorkerConfig::from_env().unwrap();
         assert_eq!(c.mode, WorkerMode::ToolExec);
+
+        // Worker mode: blue_task
+        std::env::set_var("ARES_WORKER_MODE", "blue_task");
+        let c = WorkerConfig::from_env().unwrap();
+        assert_eq!(c.mode, WorkerMode::BlueTask);
         std::env::remove_var("ARES_WORKER_MODE");
 
         // Agent name from role

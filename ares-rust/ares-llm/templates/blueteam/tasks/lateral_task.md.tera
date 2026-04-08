@@ -1,0 +1,21 @@
+# Lateral Movement Analysis Task
+
+## Task ID: {{ task_id }}
+
+## Analysis Parameters
+{% if focus_host %}- **Focus Host**: {{ focus_host }}{% endif %}
+{% if focus_user %}- **Focus User**: {{ focus_user }}{% endif %}
+{% if context %}- **Context**: {{ context }}{% endif %}
+
+## Investigation State
+{{ state_summary }}
+
+## Instructions
+Analyze lateral movement patterns:
+1. Query authentication logs for the focus host/user
+2. Identify connections to/from other hosts
+3. Look for admin tool usage (PsExec, WMI, WinRM, RDP, SMB)
+4. Track credential usage across systems
+5. Record lateral connections between hosts
+6. Map the complete movement path
+7. Call `lateral_complete` with scope and containment recommendations

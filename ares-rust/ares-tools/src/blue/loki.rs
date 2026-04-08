@@ -1,0 +1,275 @@
+//! Loki log query tools.
+//!
+//! HTTP-based queries against Loki's REST API for LogQL log retrieval.
+
+use anyhow::{Context, Result};
+use serde_json::Value;
+
+use crate::args::{optional_i64, required_str};
+use crate::ToolOutput;
+
+fn loki_url() -> String {
+    std::env::var("LOKI_URL").unwrap_or_else(|_| "http://localhost:3100".to_string())
+}
+
+fn make_output(body: &str) -> ToolOutput {
+    ToolOutput {
+        stdout: body.to_string(),
+        stderr: String::new(),
+        exit_code: Some(0),
+        success: true,
+    }
+}
+
+fn make_error(msg: &str) -> ToolOutput {
+    ToolOutput {
+        stdout: String::new(),
+        stderr: msg.to_string(),
+        exit_code: Some(1),
+        success: false,
+    }
+}
+
+/// Query logs from Loki using LogQL.
+pub async fn query_logs(args: &Value) -> Result<ToolOutput> {
+    let logql = required_str(args, "logql")?;
+    let start_time = required_str(args, "start_time")?;
+    let end_time = required_str(args, "end_time")?;
+    let limit = optional_i64(args, "limit").unwrap_or(100);
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .get(format!("{}/loki/api/v1/query_range", loki_url()))
+        .query(&[
+            ("query", logql),
+            ("start", start_time),
+            ("end", end_time),
+            ("limit", &limit.to_string()),
+        ])
+        .send()
+        .await
+        .context("Failed to query Loki")?;
+
+    let status = resp.status();
+    let body = resp.text().await.context("Failed to read Loki response")?;
+
+    if !status.is_success() {
+        return Ok(make_error(&format!("Loki returned {status}: {body}")));
+    }
+
+    Ok(make_output(&format_loki_response(&body)))
+}
+
+/// Query logs around a specific timestamp.
+pub async fn query_logs_around_timestamp(args: &Value) -> Result<ToolOutput> {
+    let logql = required_str(args, "logql")?;
+    let timestamp = required_str(args, "timestamp")?;
+    let window_minutes = optional_i64(args, "window_minutes").unwrap_or(30);
+    let limit = optional_i64(args, "limit").unwrap_or(100);
+
+    // Parse timestamp and compute window
+    let ts = chrono::DateTime::parse_from_rfc3339(timestamp)
+        .or_else(|_| chrono::DateTime::parse_from_str(timestamp, "%Y-%m-%dT%H:%M:%S%.fZ"))
+        .unwrap_or_else(|_| chrono::Utc::now().into());
+
+    let start = ts - chrono::Duration::minutes(window_minutes);
+    let end = ts + chrono::Duration::minutes(window_minutes);
+
+    let modified_args = serde_json::json!({
+        "logql": logql,
+        "start_time": start.to_rfc3339(),
+        "end_time": end.to_rfc3339(),
+        "limit": limit,
+    });
+
+    query_logs(&modified_args).await
+}
+
+/// Query logs with progressive time window expansion.
+pub async fn query_logs_progressive(args: &Value) -> Result<ToolOutput> {
+    let logql = required_str(args, "logql")?;
+    let reference_timestamp = required_str(args, "reference_timestamp")?;
+    let limit = optional_i64(args, "limit").unwrap_or(100);
+
+    let ts = chrono::DateTime::parse_from_rfc3339(reference_timestamp)
+        .unwrap_or_else(|_| chrono::Utc::now().into());
+
+    // Progressive windows: 30min, 1h, 6h, 24h
+    for window_minutes in [30, 60, 360, 1440] {
+        let start = ts - chrono::Duration::minutes(window_minutes);
+        let end = ts + chrono::Duration::minutes(window_minutes);
+
+        let modified_args = serde_json::json!({
+            "logql": logql,
+            "start_time": start.to_rfc3339(),
+            "end_time": end.to_rfc3339(),
+            "limit": limit,
+        });
+
+        let result = query_logs(&modified_args).await?;
+        if result.success && !result.stdout.is_empty() && result.stdout != "No results found." {
+            return Ok(ToolOutput {
+                stdout: format!(
+                    "[Window: ±{}min from {}]\n{}",
+                    window_minutes, reference_timestamp, result.stdout
+                ),
+                ..result
+            });
+        }
+    }
+
+    Ok(make_output(
+        "No results found across all time windows (30min to 24h).",
+    ))
+}
+
+/// Get label values from Loki.
+pub async fn get_label_values(args: &Value) -> Result<ToolOutput> {
+    let label = required_str(args, "label")?;
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .get(format!("{}/loki/api/v1/label/{}/values", loki_url(), label))
+        .send()
+        .await
+        .context("Failed to query Loki label values")?;
+
+    let status = resp.status();
+    let body = resp.text().await?;
+
+    if !status.is_success() {
+        return Ok(make_error(&format!("Loki returned {status}: {body}")));
+    }
+
+    // Parse and format values
+    if let Ok(json) = serde_json::from_str::<Value>(&body) {
+        if let Some(values) = json.get("data").and_then(|d| d.as_array()) {
+            let formatted: Vec<&str> = values.iter().filter_map(|v| v.as_str()).collect();
+            return Ok(make_output(&format!(
+                "Label '{}' values ({} total):\n{}",
+                label,
+                formatted.len(),
+                formatted.join("\n")
+            )));
+        }
+    }
+
+    Ok(make_output(&body))
+}
+
+/// Execute multiple LogQL queries in parallel.
+pub async fn execute_parallel_queries(args: &Value) -> Result<ToolOutput> {
+    let queries = args
+        .get("queries")
+        .and_then(|v| v.as_array())
+        .context("queries must be an array")?;
+    let start_time = required_str(args, "start_time")?;
+    let end_time = required_str(args, "end_time")?;
+    let limit = optional_i64(args, "limit").unwrap_or(50);
+
+    // Cap at 10 queries
+    let queries: Vec<&Value> = queries.iter().take(10).collect();
+    let mut handles = Vec::with_capacity(queries.len());
+
+    for q in &queries {
+        let logql = q
+            .get("logql")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let desc = q
+            .get("description")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unnamed query")
+            .to_string();
+        let st = start_time.to_string();
+        let et = end_time.to_string();
+
+        handles.push(tokio::spawn(async move {
+            let query_args = serde_json::json!({
+                "logql": logql,
+                "start_time": st,
+                "end_time": et,
+                "limit": limit,
+            });
+            let result = query_logs(&query_args).await;
+            (desc, logql, result)
+        }));
+    }
+
+    let mut output_parts = Vec::new();
+    for handle in handles {
+        match handle.await {
+            Ok((desc, logql, result)) => {
+                let result_text = match result {
+                    Ok(out) => {
+                        if out.success {
+                            out.stdout
+                        } else {
+                            format!("Error: {}", out.stderr)
+                        }
+                    }
+                    Err(e) => format!("Error: {e}"),
+                };
+                output_parts.push(format!("### {desc}\nQuery: `{logql}`\n{result_text}\n",));
+            }
+            Err(e) => {
+                output_parts.push(format!("### Query failed\nError: {e}\n"));
+            }
+        }
+    }
+
+    Ok(make_output(&output_parts.join("\n---\n\n")))
+}
+
+/// Format a Loki JSON response into readable text.
+fn format_loki_response(body: &str) -> String {
+    let json: Value = match serde_json::from_str(body) {
+        Ok(v) => v,
+        Err(_) => return body.to_string(),
+    };
+
+    let result = json.get("data").and_then(|d| d.get("result"));
+    let streams = match result.and_then(|r| r.as_array()) {
+        Some(s) if !s.is_empty() => s,
+        _ => return "No results found.".to_string(),
+    };
+
+    let mut lines = Vec::new();
+    let mut total_entries = 0;
+
+    for stream in streams {
+        let labels = stream
+            .get("stream")
+            .and_then(|s| s.as_object())
+            .map(|obj| {
+                obj.iter()
+                    .map(|(k, v)| format!("{k}={}", v.as_str().unwrap_or("")))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            })
+            .unwrap_or_default();
+
+        if let Some(values) = stream.get("values").and_then(|v| v.as_array()) {
+            for entry in values {
+                if let Some(arr) = entry.as_array() {
+                    if arr.len() >= 2 {
+                        let log_line = arr[1].as_str().unwrap_or("");
+                        lines.push(format!("[{labels}] {log_line}"));
+                        total_entries += 1;
+                    }
+                }
+            }
+        }
+    }
+
+    if lines.is_empty() {
+        "No results found.".to_string()
+    } else {
+        format!(
+            "Found {} log entries:\n\n{}",
+            total_entries,
+            lines.join("\n")
+        )
+    }
+}

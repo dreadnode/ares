@@ -33,6 +33,8 @@
 
 mod blue_operations;
 mod blue_reader;
+pub mod blue_task_queue;
+mod blue_writer;
 mod dedup_keys;
 mod keys;
 mod operations;
@@ -40,6 +42,8 @@ mod reader;
 
 pub use blue_operations::*;
 pub use blue_reader::*;
+pub use blue_task_queue::BlueTaskQueue;
+pub use blue_writer::*;
 pub use dedup_keys::*;
 pub use keys::*;
 pub use operations::*;

@@ -8,6 +8,7 @@
 //! Heartbeat runs on a separate tokio task.
 //! Graceful shutdown: finish current task before exiting on SIGTERM.
 
+mod blue_task_loop;
 mod config;
 mod heartbeat;
 mod hosts;
@@ -31,6 +32,7 @@ async fn main() -> anyhow::Result<()> {
     let mode_str = match config.mode {
         config::WorkerMode::Task => "task",
         config::WorkerMode::ToolExec => "tool_exec",
+        config::WorkerMode::BlueTask => "blue_task",
     };
     info!(
         agent = %config.agent_name,
@@ -91,6 +93,30 @@ async fn main() -> anyhow::Result<()> {
         }
         config::WorkerMode::ToolExec => {
             tool_executor::run_tool_exec_loop(&config, conn, status_tx, shutdown_signal).await
+        }
+        config::WorkerMode::BlueTask => {
+            // Blue team mode requires an LLM provider
+            let model_spec = std::env::var("ARES_LLM_MODEL")
+                .unwrap_or_else(|_| "anthropic/claude-sonnet-4-20250514".to_string());
+            let (provider, model_name) = match ares_llm::create_provider(&model_spec) {
+                Ok(p) => p,
+                Err(e) => {
+                    error!("Failed to create LLM provider for blue worker: {e}");
+                    return Err(e);
+                }
+            };
+            let dispatcher = std::sync::Arc::new(blue_task_loop::BlueLocalToolDispatcher::new());
+            info!(model = %model_name, "Blue team worker using LLM");
+            blue_task_loop::run_blue_task_loop(
+                &config,
+                conn,
+                provider,
+                dispatcher,
+                model_name,
+                status_tx,
+                shutdown_signal,
+            )
+            .await
         }
     };
 

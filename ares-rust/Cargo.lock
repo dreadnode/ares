@@ -194,8 +194,10 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "approx",
+ "chrono",
  "once_cell",
  "regex",
+ "reqwest",
  "rstest",
  "serde",
  "serde_json",
@@ -211,7 +213,9 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "ares-core",
+ "ares-llm",
  "ares-tools",
+ "async-trait",
  "chrono",
  "redis",
  "serde",

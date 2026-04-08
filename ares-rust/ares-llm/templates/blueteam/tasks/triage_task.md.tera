@@ -1,0 +1,20 @@
+# Triage Task
+
+## Alert Details
+{{ alert_summary }}
+
+## Task ID: {{ task_id }}
+
+## Investigation State
+{{ state_summary }}
+
+## Instructions
+Perform initial triage of this alert:
+1. Query logs around the alert timestamp ({{ alert_timestamp }})
+2. Identify the primary indicators: source host, user, target
+3. Check for correlated alerts in a ±30 minute window
+4. Map initial observations to MITRE ATT&CK techniques
+5. Record all discovered evidence
+6. Call `triage_complete` with your assessment
+
+Focus on speed and accuracy. Deep investigation will follow if needed.
