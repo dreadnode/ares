@@ -52,7 +52,7 @@
 - [x] Audit Python CLI vs Rust CLI — identify gaps
 - [x] Fill missing commands: submit, from-operation
 - [x] Update Taskfiles to point at Rust binary
-- [ ] Deprecate Python CLI entry points
+- [x] Deprecate Python CLI entry points
 
 ### P2: Orchestrator PyO3 Bridge (Rust to Python) ✅
 
@@ -92,7 +92,7 @@
 - [x] Port `BlueTeamReportGenerator` logic
 - [x] Wire into ares-cli `ops report` command
 - [x] 9 unit tests
-- [ ] Verify output matches Python reports (visual diff)
+- [x] Verify output matches Python reports (visual diff)
 
 ### P5: Blue Team State Backend ✅
 
@@ -120,13 +120,13 @@
 
 ### Short-term
 
-- [ ] Deprecate Python CLI entry points
+- [x] Deprecate Python CLI entry points
 - [ ] Run PyO3 bridge `#[ignore]` tests in k8s
-- [ ] Visual diff of Rust vs Python report output
-- [ ] End-to-end integration test
+- [x] Visual diff of Rust vs Python report output
+- [x] End-to-end integration test
 
 ### Future
 
-- [ ] Split ares-core into lib + cdylib if needed
-- [ ] Profile and optimize hot parsing paths
-- [ ] Add structured logging to CLI
+- [x] Split ares-core into lib + cdylib (already done)
+- [x] Profile and optimize hot parsing paths
+- [x] Add structured logging to CLI (tracing already wired)

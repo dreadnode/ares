@@ -6,6 +6,7 @@ import re
 import shutil
 import sys
 import uuid
+import warnings
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Annotated, Any
@@ -2648,6 +2649,12 @@ async def watch(
 
 def main() -> None:
     """Run the ares-ops CLI application."""
+    warnings.warn(
+        "The 'ares-ops' Python CLI is deprecated. Use the Rust CLI binary 'ares' instead. "
+        "See NEW-RUST-TODO.md for details.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     try:
         app()
     except Exception as e:

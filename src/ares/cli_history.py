@@ -10,6 +10,7 @@ This module provides commands for:
 import asyncio
 import json
 import sys
+import warnings
 from datetime import datetime, timezone
 from typing import Annotated
 
@@ -576,6 +577,12 @@ async def _apply_retention():
 
 def main():
     """Run the ares-history CLI application."""
+    warnings.warn(
+        "The 'ares-history' Python CLI is deprecated. Use the Rust CLI binary 'ares' instead. "
+        "See NEW-RUST-TODO.md for details.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     app()
 
 

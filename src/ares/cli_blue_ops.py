@@ -4,6 +4,7 @@ import asyncio
 import json
 import os
 import sys
+import warnings
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Annotated, Any
@@ -1379,6 +1380,12 @@ async def triage_status(
 
 def main():
     """Run the ares-blue-ops CLI application."""
+    warnings.warn(
+        "The 'ares-blue-ops' Python CLI is deprecated. Use the Rust CLI binary 'ares' instead. "
+        "See NEW-RUST-TODO.md for details.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     app()
 
 
