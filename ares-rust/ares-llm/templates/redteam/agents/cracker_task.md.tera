@@ -1,0 +1,9 @@
+# Password Cracking Task
+
+Attempt to crack the following hash:
+
+**Hash Value**: `{{ hash_value }}`
+
+**Hash Type**: `{{ hash_type }}`
+
+Follow the cracking workflow and report results immediately.

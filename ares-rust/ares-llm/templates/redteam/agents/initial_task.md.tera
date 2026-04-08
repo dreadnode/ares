@@ -1,0 +1,26 @@
+# Red Team Operation Task
+
+Enumerate and discover users, shares, hashes, and credentials for all targets.
+
+## Targets
+
+```
+{{ target_ip }}
+```
+
+## Top Priorities
+1. Domain admin access
+2. Golden ticket generation
+
+## Critical Actions
+
+- **Admin hash found** → Immediately use domain_admin_checker on all targets → Report findings → Dump secrets
+- **krbtgt hash found** → Immediately use golden_ticket tool → Dump secrets on target domain
+- **Each share should only be pilfered once**
+- **Don't re-enumerate successfully enumerated targets**
+
+## Starting Point
+
+Begin with: **nmap scan of ALL targets above** (pass all IPs space-separated to nmap_scan) to collect ports, services, and FQDNs
+
+Then proceed with systematic enumeration following the priority workflow on ALL discovered hosts.

@@ -1,0 +1,10 @@
+# Share Pilfering Task
+
+Attempt to pilfer the following share:
+
+**Target**: {{ target }}
+**Share Name**: {{ share_name }}
+**Username**: {{ username }}
+**Password**: {{ password }}
+
+Follow the share pilfering workflow and report all credentials found.

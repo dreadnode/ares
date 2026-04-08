@@ -6,28 +6,120 @@
 
 use anyhow::{Context as _, Result};
 use once_cell::sync::Lazy;
+use std::collections::HashMap;
 use tera::{Context, Tera};
 
 // ---------------------------------------------------------------------------
-// Embedded templates
+// Embedded templates — agent instruction templates (system prompts)
 // ---------------------------------------------------------------------------
 
 const RECON_TEMPLATE: &str = include_str!("../../templates/redteam/agents/recon.md.tera");
+const CREDENTIAL_ACCESS_TEMPLATE: &str =
+    include_str!("../../templates/redteam/agents/credential_access.md.tera");
+const CRACKER_TEMPLATE: &str = include_str!("../../templates/redteam/agents/cracker.md.tera");
+const ACL_TEMPLATE: &str = include_str!("../../templates/redteam/agents/acl.md.tera");
+const PRIVESC_TEMPLATE: &str = include_str!("../../templates/redteam/agents/privesc.md.tera");
+const LATERAL_TEMPLATE: &str = include_str!("../../templates/redteam/agents/lateral.md.tera");
+const COERCION_TEMPLATE: &str = include_str!("../../templates/redteam/agents/coercion.md.tera");
+const ORCHESTRATOR_TEMPLATE: &str =
+    include_str!("../../templates/redteam/agents/orchestrator.md.tera");
+const SYSTEM_INSTRUCTIONS_TEMPLATE: &str =
+    include_str!("../../templates/redteam/agents/system_instructions.md.tera");
 
+// ---------------------------------------------------------------------------
+// Embedded templates — task-specific templates (user prompts)
+// ---------------------------------------------------------------------------
+
+const INITIAL_TASK_TEMPLATE: &str =
+    include_str!("../../templates/redteam/agents/initial_task.md.tera");
+const CRACKER_INSTRUCTIONS_TEMPLATE: &str =
+    include_str!("../../templates/redteam/agents/cracker_instructions.md.tera");
+const CRACKER_TASK_TEMPLATE: &str =
+    include_str!("../../templates/redteam/agents/cracker_task.md.tera");
+const GOLDEN_TICKET_INSTRUCTIONS_TEMPLATE: &str =
+    include_str!("../../templates/redteam/agents/golden_ticket_instructions.md.tera");
+const GOLDEN_TICKET_TASK_TEMPLATE: &str =
+    include_str!("../../templates/redteam/agents/golden_ticket_task.md.tera");
+const SHARE_PILFER_INSTRUCTIONS_TEMPLATE: &str =
+    include_str!("../../templates/redteam/agents/share_pilfer_instructions.md.tera");
+const SHARE_PILFER_TASK_TEMPLATE: &str =
+    include_str!("../../templates/redteam/agents/share_pilfer_task.md.tera");
+
+// ---------------------------------------------------------------------------
 // Template name constants
+// ---------------------------------------------------------------------------
+
+// Agent instruction templates (used as system prompts)
 pub const TEMPLATE_RECON: &str = "redteam/agents/recon";
+pub const TEMPLATE_CREDENTIAL_ACCESS: &str = "redteam/agents/credential_access";
+pub const TEMPLATE_CRACKER: &str = "redteam/agents/cracker";
+pub const TEMPLATE_ACL: &str = "redteam/agents/acl";
+pub const TEMPLATE_PRIVESC: &str = "redteam/agents/privesc";
+pub const TEMPLATE_LATERAL: &str = "redteam/agents/lateral";
+pub const TEMPLATE_COERCION: &str = "redteam/agents/coercion";
+pub const TEMPLATE_ORCHESTRATOR: &str = "redteam/agents/orchestrator";
+pub const TEMPLATE_SYSTEM_INSTRUCTIONS: &str = "redteam/agents/system_instructions";
+
+// Task templates (used as user prompts)
+pub const TEMPLATE_INITIAL_TASK: &str = "redteam/agents/initial_task";
+pub const TEMPLATE_CRACKER_INSTRUCTIONS: &str = "redteam/agents/cracker_instructions";
+pub const TEMPLATE_CRACKER_TASK: &str = "redteam/agents/cracker_task";
+pub const TEMPLATE_GOLDEN_TICKET_INSTRUCTIONS: &str = "redteam/agents/golden_ticket_instructions";
+pub const TEMPLATE_GOLDEN_TICKET_TASK: &str = "redteam/agents/golden_ticket_task";
+pub const TEMPLATE_SHARE_PILFER_INSTRUCTIONS: &str = "redteam/agents/share_pilfer_instructions";
+pub const TEMPLATE_SHARE_PILFER_TASK: &str = "redteam/agents/share_pilfer_task";
+
+// ---------------------------------------------------------------------------
+// Global Tera instance
+// ---------------------------------------------------------------------------
 
 /// Global Tera instance with all agent templates registered.
 static TEMPLATES: Lazy<Tera> = Lazy::new(|| {
     let mut tera = Tera::default();
-    tera.add_raw_template(TEMPLATE_RECON, RECON_TEMPLATE)
-        .expect("Failed to register recon template");
-    // Future templates will be added here as they are ported:
-    // tera.add_raw_template(TEMPLATE_CREDENTIAL_ACCESS, CRED_ACCESS_TEMPLATE)...
+
+    // Agent instruction templates
+    let templates: &[(&str, &str)] = &[
+        (TEMPLATE_RECON, RECON_TEMPLATE),
+        (TEMPLATE_CREDENTIAL_ACCESS, CREDENTIAL_ACCESS_TEMPLATE),
+        (TEMPLATE_CRACKER, CRACKER_TEMPLATE),
+        (TEMPLATE_ACL, ACL_TEMPLATE),
+        (TEMPLATE_PRIVESC, PRIVESC_TEMPLATE),
+        (TEMPLATE_LATERAL, LATERAL_TEMPLATE),
+        (TEMPLATE_COERCION, COERCION_TEMPLATE),
+        (TEMPLATE_ORCHESTRATOR, ORCHESTRATOR_TEMPLATE),
+        (TEMPLATE_SYSTEM_INSTRUCTIONS, SYSTEM_INSTRUCTIONS_TEMPLATE),
+        // Task templates
+        (TEMPLATE_INITIAL_TASK, INITIAL_TASK_TEMPLATE),
+        (TEMPLATE_CRACKER_INSTRUCTIONS, CRACKER_INSTRUCTIONS_TEMPLATE),
+        (TEMPLATE_CRACKER_TASK, CRACKER_TASK_TEMPLATE),
+        (
+            TEMPLATE_GOLDEN_TICKET_INSTRUCTIONS,
+            GOLDEN_TICKET_INSTRUCTIONS_TEMPLATE,
+        ),
+        (TEMPLATE_GOLDEN_TICKET_TASK, GOLDEN_TICKET_TASK_TEMPLATE),
+        (
+            TEMPLATE_SHARE_PILFER_INSTRUCTIONS,
+            SHARE_PILFER_INSTRUCTIONS_TEMPLATE,
+        ),
+        (TEMPLATE_SHARE_PILFER_TASK, SHARE_PILFER_TASK_TEMPLATE),
+    ];
+
+    for (name, content) in templates {
+        tera.add_raw_template(name, content)
+            .unwrap_or_else(|e| panic!("Failed to register template '{name}': {e}"));
+    }
+
     tera
 });
 
+// ---------------------------------------------------------------------------
+// Render functions
+// ---------------------------------------------------------------------------
+
 /// Render an agent instruction template with the given context variables.
+///
+/// Used for role-based system prompts (recon, credential_access, cracker, etc.)
+/// that have a `{% for tool in capabilities %}` loop.
 ///
 /// # Arguments
 /// * `template_name` - Template identifier (e.g. `TEMPLATE_RECON`)
@@ -48,6 +140,41 @@ pub fn render_agent_instructions(
     TEMPLATES
         .render(template_name, &ctx)
         .with_context(|| format!("Failed to render template '{template_name}'"))
+}
+
+/// Render the system_instructions template which needs `all_capabilities` as a
+/// map of role → tool list (e.g. `{"recon": ["nmap_scan", ...], "lateral": [...]}`).
+///
+/// If `all_capabilities` is `None`, the template falls back to hardcoded defaults.
+pub fn render_system_instructions(
+    all_capabilities: Option<&HashMap<String, Vec<String>>>,
+) -> Result<String> {
+    let mut ctx = Context::new();
+    if let Some(caps) = all_capabilities {
+        ctx.insert("all_capabilities", caps);
+    }
+
+    TEMPLATES
+        .render(TEMPLATE_SYSTEM_INSTRUCTIONS, &ctx)
+        .with_context(|| "Failed to render system_instructions template".to_string())
+}
+
+/// Render a task-specific template with arbitrary key-value context.
+///
+/// Used for templates like initial_task, cracker_task, golden_ticket_task,
+/// and share_pilfer_task that use custom variables (target_ip, hash_value, etc.).
+pub fn render_task_template(
+    template_name: &str,
+    variables: &HashMap<String, String>,
+) -> Result<String> {
+    let mut ctx = Context::new();
+    for (key, value) in variables {
+        ctx.insert(key.as_str(), value);
+    }
+
+    TEMPLATES
+        .render(template_name, &ctx)
+        .with_context(|| format!("Failed to render task template '{template_name}'"))
 }
 
 // ---------------------------------------------------------------------------
@@ -78,6 +205,166 @@ mod tests {
         let result = render_agent_instructions(TEMPLATE_RECON, &[], false, &[]).unwrap();
         assert!(result.contains("RECON Worker Agent"));
         assert!(result.contains("## Available Tools"));
+    }
+
+    #[test]
+    fn test_render_credential_access_template() {
+        let capabilities = vec!["secretsdump".to_string(), "kerberoast".to_string()];
+        let result =
+            render_agent_instructions(TEMPLATE_CREDENTIAL_ACCESS, &capabilities, false, &[])
+                .unwrap();
+        assert!(result.contains("Credential Access Agent"));
+        assert!(result.contains("- secretsdump"));
+        assert!(result.contains("- kerberoast"));
+    }
+
+    #[test]
+    fn test_render_cracker_template() {
+        let capabilities = vec!["crack_with_hashcat".to_string()];
+        let result =
+            render_agent_instructions(TEMPLATE_CRACKER, &capabilities, false, &[]).unwrap();
+        assert!(result.contains("Hash Cracker Agent"));
+        assert!(result.contains("- crack_with_hashcat"));
+    }
+
+    #[test]
+    fn test_render_acl_template() {
+        let capabilities = vec!["pywhisker".to_string(), "dacl_edit".to_string()];
+        let result = render_agent_instructions(TEMPLATE_ACL, &capabilities, false, &[]).unwrap();
+        assert!(result.contains("ACL Exploitation Agent"));
+        assert!(result.contains("- pywhisker"));
+    }
+
+    #[test]
+    fn test_render_privesc_template() {
+        let capabilities = vec!["certipy_find".to_string(), "s4u_attack".to_string()];
+        let result =
+            render_agent_instructions(TEMPLATE_PRIVESC, &capabilities, false, &[]).unwrap();
+        assert!(result.contains("Privilege Escalation Agent"));
+        assert!(result.contains("- certipy_find"));
+    }
+
+    #[test]
+    fn test_render_lateral_template() {
+        let capabilities = vec!["psexec".to_string(), "evil_winrm".to_string()];
+        let result =
+            render_agent_instructions(TEMPLATE_LATERAL, &capabilities, false, &[]).unwrap();
+        assert!(result.contains("Lateral Movement Agent"));
+        assert!(result.contains("- psexec"));
+    }
+
+    #[test]
+    fn test_render_coercion_template() {
+        let capabilities = vec!["petitpotam".to_string(), "start_responder".to_string()];
+        let result =
+            render_agent_instructions(TEMPLATE_COERCION, &capabilities, false, &[]).unwrap();
+        assert!(result.contains("Coercion Agent"));
+        assert!(result.contains("- petitpotam"));
+    }
+
+    #[test]
+    fn test_render_orchestrator_template() {
+        let capabilities = vec!["dispatch_recon".to_string()];
+        let result =
+            render_agent_instructions(TEMPLATE_ORCHESTRATOR, &capabilities, false, &[]).unwrap();
+        assert!(result.contains("Red Team Orchestrator"));
+    }
+
+    #[test]
+    fn test_render_system_instructions_with_capabilities() {
+        let mut caps: HashMap<String, Vec<String>> = HashMap::new();
+        caps.insert("recon".to_string(), vec!["nmap_scan".to_string()]);
+        caps.insert(
+            "credential_access".to_string(),
+            vec!["secretsdump".to_string()],
+        );
+        caps.insert("cracker".to_string(), vec!["hashcat".to_string()]);
+        caps.insert("coercion".to_string(), vec!["responder".to_string()]);
+        caps.insert("acl".to_string(), vec!["pywhisker".to_string()]);
+        caps.insert("privesc".to_string(), vec!["certipy".to_string()]);
+        caps.insert("lateral".to_string(), vec!["psexec".to_string()]);
+
+        let result = render_system_instructions(Some(&caps)).unwrap();
+        assert!(result.contains("RECON"));
+        assert!(result.contains("nmap_scan"));
+    }
+
+    #[test]
+    fn test_render_system_instructions_without_capabilities() {
+        let result = render_system_instructions(None).unwrap();
+        // Falls back to hardcoded defaults
+        assert!(result.contains("nmap, netexec, rpcclient"));
+    }
+
+    #[test]
+    fn test_render_initial_task() {
+        let mut vars = HashMap::new();
+        vars.insert(
+            "target_ip".to_string(),
+            "192.168.58.10 192.168.58.20".to_string(),
+        );
+        let result = render_task_template(TEMPLATE_INITIAL_TASK, &vars).unwrap();
+        assert!(result.contains("192.168.58.10 192.168.58.20"));
+        assert!(result.contains("nmap scan"));
+    }
+
+    #[test]
+    fn test_render_cracker_task() {
+        let mut vars = HashMap::new();
+        vars.insert(
+            "hash_value".to_string(),
+            "$krb5tgs$23$*svc_sql$".to_string(),
+        );
+        vars.insert("hash_type".to_string(), "Kerberos TGS".to_string());
+        let result = render_task_template(TEMPLATE_CRACKER_TASK, &vars).unwrap();
+        assert!(result.contains("$krb5tgs$23$*svc_sql$"));
+        assert!(result.contains("Kerberos TGS"));
+    }
+
+    #[test]
+    fn test_render_golden_ticket_task() {
+        let mut vars = HashMap::new();
+        vars.insert("krbtgt_hash".to_string(), "aad3b435:5703ad15".to_string());
+        vars.insert("user_name".to_string(), "admin".to_string());
+        vars.insert("password".to_string(), "P@ss".to_string());
+        vars.insert(
+            "compromised_domain".to_string(),
+            "child.contoso.local".to_string(),
+        );
+        vars.insert("target_domain".to_string(), "contoso.local".to_string());
+        vars.insert("compromised_dc_ip".to_string(), "192.168.58.10".to_string());
+        vars.insert("target_dc_ip".to_string(), "192.168.58.20".to_string());
+        let result = render_task_template(TEMPLATE_GOLDEN_TICKET_TASK, &vars).unwrap();
+        assert!(result.contains("aad3b435:5703ad15"));
+        assert!(result.contains("child.contoso.local"));
+        assert!(result.contains("192.168.58.10"));
+        assert!(result.contains("192.168.58.20"));
+    }
+
+    #[test]
+    fn test_render_share_pilfer_task() {
+        let mut vars = HashMap::new();
+        vars.insert("target".to_string(), "192.168.58.10".to_string());
+        vars.insert("share_name".to_string(), "SYSVOL".to_string());
+        vars.insert("username".to_string(), "admin".to_string());
+        vars.insert("password".to_string(), "P@ss".to_string());
+        let result = render_task_template(TEMPLATE_SHARE_PILFER_TASK, &vars).unwrap();
+        assert!(result.contains("SYSVOL"));
+        assert!(result.contains("192.168.58.10"));
+    }
+
+    #[test]
+    fn test_render_static_templates() {
+        // Templates with no variables should render cleanly
+        let empty: HashMap<String, String> = HashMap::new();
+        let result = render_task_template(TEMPLATE_CRACKER_INSTRUCTIONS, &empty).unwrap();
+        assert!(result.contains("Password Cracking Agent"));
+
+        let result = render_task_template(TEMPLATE_GOLDEN_TICKET_INSTRUCTIONS, &empty).unwrap();
+        assert!(result.contains("Golden Ticket Agent"));
+
+        let result = render_task_template(TEMPLATE_SHARE_PILFER_INSTRUCTIONS, &empty).unwrap();
+        assert!(result.contains("Share Pilfering Agent"));
     }
 
     #[test]
