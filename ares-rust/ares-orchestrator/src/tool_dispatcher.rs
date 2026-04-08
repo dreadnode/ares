@@ -197,6 +197,7 @@ impl ares_llm::ToolDispatcher for LocalToolDispatcher {
 
         match ares_tools::dispatch(&call.name, &call.arguments).await {
             Ok(output) => {
+                let raw = output.combined_raw();
                 let combined = output.combined();
                 let error = if output.success {
                     None
@@ -204,9 +205,9 @@ impl ares_llm::ToolDispatcher for LocalToolDispatcher {
                     Some(format!("tool exited with code {:?}", output.exit_code))
                 };
 
-                // Parse structured discoveries locally
+                // Parse structured discoveries from raw (unfiltered) output
                 let discoveries =
-                    ares_tools::parsers::parse_tool_output(&call.name, &combined, &call.arguments);
+                    ares_tools::parsers::parse_tool_output(&call.name, &raw, &call.arguments);
                 let discoveries = if discoveries.as_object().is_none_or(|o| o.is_empty()) {
                     None
                 } else {

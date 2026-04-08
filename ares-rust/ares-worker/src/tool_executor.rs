@@ -188,6 +188,9 @@ async fn execute_and_respond(conn: &mut redis::aio::ConnectionManager, request: 
 
     let response = match ares_tools::dispatch(&request.tool_name, &request.arguments).await {
         Ok(output) => {
+            // Raw output for structured parsers (need unfiltered data)
+            let raw = output.combined_raw();
+            // Filtered output for LLM (strips MOTD, noise, etc.)
             let combined = output.combined();
             let error = if output.success {
                 None
@@ -195,10 +198,10 @@ async fn execute_and_respond(conn: &mut redis::aio::ConnectionManager, request: 
                 Some(format!("tool exited with code {:?}", output.exit_code))
             };
 
-            // Parse structured discoveries from tool output
+            // Parse structured discoveries from raw (unfiltered) tool output
             let discoveries = ares_tools::parsers::parse_tool_output(
                 &request.tool_name,
-                &combined,
+                &raw,
                 &request.arguments,
             );
             let discoveries = if discoveries.as_object().is_none_or(|o| o.is_empty()) {

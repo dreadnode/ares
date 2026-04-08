@@ -12,6 +12,7 @@ mod config;
 mod heartbeat;
 mod hosts;
 mod task_loop;
+mod tool_check;
 mod tool_executor;
 
 use std::sync::Arc;
@@ -60,6 +61,10 @@ async fn main() -> anyhow::Result<()> {
         config.heartbeat_ttl,
         Arc::clone(&shutdown),
     );
+
+    // Check tool availability for this role and publish inventory
+    let inventory = tool_check::check_tools(&config.worker_role).await;
+    tool_check::publish_inventory(&mut conn.clone(), &config.agent_name, &inventory).await;
 
     // Spawn /etc/hosts sync if we have an operation ID
     let _hosts_handle = config.operation_id.as_ref().map(|op_id| {

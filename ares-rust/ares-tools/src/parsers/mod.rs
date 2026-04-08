@@ -5,6 +5,7 @@
 //! the Python workers used.
 
 mod certipy;
+mod credential_tools;
 mod delegation;
 mod nmap;
 mod secrets;
@@ -15,6 +16,9 @@ use serde_json::{json, Value};
 
 // Re-export all public parser functions at module level.
 pub use certipy::parse_certipy_find;
+pub use credential_tools::{
+    parse_adidnsdump, parse_ldap_descriptions, parse_lsassy, parse_ntds_dit, parse_spray_success,
+};
 pub use delegation::{extract_delegation_account, parse_delegation};
 pub use nmap::{flush_nmap_host, parse_nmap_output};
 pub use secrets::{parse_asrep_roast, parse_kerberoast, parse_secretsdump};
@@ -107,6 +111,42 @@ pub fn parse_tool_output(tool_name: &str, output: &str, params: &Value) -> Value
             let vulns = parse_certipy_find(output, params);
             if !vulns.is_empty() {
                 discoveries["vulnerabilities"] = Value::Array(vulns);
+            }
+        }
+        "lsassy" => {
+            let (hashes, creds) = parse_lsassy(output, params);
+            if !hashes.is_empty() {
+                discoveries["hashes"] = Value::Array(hashes);
+            }
+            if !creds.is_empty() {
+                discoveries["credentials"] = Value::Array(creds);
+            }
+        }
+        "ntds_dit_extract" => {
+            let (hashes, creds) = parse_ntds_dit(output, params);
+            if !hashes.is_empty() {
+                discoveries["hashes"] = Value::Array(hashes);
+            }
+            if !creds.is_empty() {
+                discoveries["credentials"] = Value::Array(creds);
+            }
+        }
+        "password_spray" | "username_as_password" => {
+            let creds = parse_spray_success(output, params);
+            if !creds.is_empty() {
+                discoveries["credentials"] = Value::Array(creds);
+            }
+        }
+        "ldap_search_descriptions" => {
+            let creds = parse_ldap_descriptions(output, params);
+            if !creds.is_empty() {
+                discoveries["credentials"] = Value::Array(creds);
+            }
+        }
+        "adidnsdump" => {
+            let hosts = parse_adidnsdump(output);
+            if !hosts.is_empty() {
+                discoveries["hosts"] = Value::Array(hosts);
             }
         }
         _ => {}

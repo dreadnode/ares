@@ -32,8 +32,8 @@ pub async fn run_agent_task(
         // Direct tool dispatch (task_type IS the tool name)
         info!(tool = task_type, "Executing tool natively");
         let output = ares_tools::dispatch(task_type, params).await?;
-        let combined = output.combined();
-        let discoveries = ares_tools::parsers::parse_tool_output(task_type, &combined, params);
+        let raw = output.combined_raw();
+        let discoveries = ares_tools::parsers::parse_tool_output(task_type, &raw, params);
         return Ok(make_result_with_discoveries(output, discoveries));
     }
 
@@ -49,9 +49,9 @@ pub async fn run_agent_task(
                 if !output.success {
                     any_error = true;
                 }
+                let raw = output.combined_raw();
                 let combined = output.combined();
-                let disc =
-                    ares_tools::parsers::parse_tool_output(tool_name, &combined, tool_params);
+                let disc = ares_tools::parsers::parse_tool_output(tool_name, &raw, tool_params);
                 all_discoveries.push(disc);
                 outputs.push(format!("=== {} ===\n{}", tool_name, combined));
             }

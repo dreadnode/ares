@@ -194,6 +194,8 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "approx",
+ "once_cell",
+ "regex",
  "rstest",
  "serde",
  "serde_json",

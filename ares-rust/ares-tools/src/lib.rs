@@ -11,6 +11,7 @@ pub mod cracker;
 pub mod credential_access;
 pub mod credentials;
 pub mod executor;
+pub mod filter;
 pub mod lateral;
 pub mod parsers;
 pub mod privesc;
@@ -30,7 +31,23 @@ pub struct ToolOutput {
 
 impl ToolOutput {
     /// Merge stdout and stderr into a single output string for the LLM.
+    ///
+    /// Applies noise filtering (MOTD banners, box-drawing, "command not found",
+    /// etc.) so the LLM sees clean, actionable output.
     pub fn combined(&self) -> String {
+        let mut out = self.stdout.clone();
+        if !self.stderr.is_empty() {
+            if !out.is_empty() {
+                out.push_str("\n\n--- stderr ---\n");
+            }
+            out.push_str(&self.stderr);
+        }
+        filter::filter_output(&out)
+    }
+
+    /// Merge stdout and stderr without filtering (for structured parsers that
+    /// need the raw bytes).
+    pub fn combined_raw(&self) -> String {
         let mut out = self.stdout.clone();
         if !self.stderr.is_empty() {
             if !out.is_empty() {
