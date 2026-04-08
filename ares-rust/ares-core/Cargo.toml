@@ -20,6 +20,8 @@ once_cell = { workspace = true }
 md-5 = "0.10"
 base64 = "0.22"
 tera = { workspace = true }
+sqlx = { workspace = true }
+sha2 = "0.10"
 
 # OpenTelemetry (behind "telemetry" feature)
 opentelemetry = { workspace = true, optional = true }

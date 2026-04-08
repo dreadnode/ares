@@ -1280,9 +1280,6 @@ tasks:
           fi
       - cmd: echo "=== BUILDING RUST BINARIES ==="
       - task: :remote:rust:build
-      - cmd: echo "=== DEPLOYING RUST BINARIES (team={{.TEAM}}) ==="
-      - task: :remote:rust:deploy
-        vars: { TEAM: "{{.TEAM}}" }
       - cmd: echo "=== SYNCING CONFIG ==="
       - task: multi:sync:config
       - cmd: echo "=== CLEARING REDIS CACHE ==="
@@ -1290,6 +1287,9 @@ tasks:
       - cmd: echo "=== ROLLING OUT (team={{.TEAM}}) ==="
       - task: :remote:rollout
         vars: { NAMESPACE: "{{.K8S_NAMESPACE}}", TEAM: "{{.TEAM}}" }
+      - cmd: echo "=== DEPLOYING RUST BINARIES (team={{.TEAM}}) ==="
+      - task: :remote:rust:deploy
+        vars: { TEAM: "{{.TEAM}}" }
 
   multi:sync:config:
     desc: "Sync config/multi-agent-production.yaml to all pods"

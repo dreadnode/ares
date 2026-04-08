@@ -11,6 +11,7 @@
 pub mod config;
 pub mod models;
 pub mod parsing;
+pub mod persistent_store;
 pub mod reports;
 pub mod state;
 #[cfg(feature = "telemetry")]
