@@ -15,7 +15,6 @@ use std::collections::{HashMap, HashSet};
 ///
 /// Matches Python: `class Target(Model)`
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[cfg_attr(feature = "python", pyo3::pyclass(get_all))]
 pub struct Target {
     pub ip: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -31,7 +30,6 @@ pub struct Target {
 /// Matches Python: `class Host(Model)`
 /// Redis serialization: `{"ip","hostname","os","roles","services","is_dc"}`
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[cfg_attr(feature = "python", pyo3::pyclass(get_all))]
 pub struct Host {
     pub ip: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -79,7 +77,6 @@ impl Host {
 /// Matches Python: `class User(Model)`
 /// Redis serialization: `{"username","domain","source"}`
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[cfg_attr(feature = "python", pyo3::pyclass(get_all))]
 pub struct User {
     pub username: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -97,7 +94,6 @@ pub struct User {
 /// Matches Python: `class Credential(Model)`
 /// Redis serialization: `{"id","username","password","domain","source","parent_id","attack_step"}`
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[cfg_attr(feature = "python", pyo3::pyclass)]
 pub struct Credential {
     #[serde(default = "new_uuid")]
     pub id: String,
@@ -122,7 +118,6 @@ pub struct Credential {
 /// Matches Python: `class Hash(Model)`
 /// Redis serialization: `{"id","username","hash_type","hash_value","domain","source","cracked_password","discovered_at","parent_id","attack_step"}`
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[cfg_attr(feature = "python", pyo3::pyclass)]
 pub struct Hash {
     #[serde(default = "new_uuid")]
     pub id: String,
@@ -156,7 +151,6 @@ fn default_hash_type() -> String {
 /// Matches Python: `class Share(Model)`
 /// Redis serialization: `{"host","name","permissions","comment"}`
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[cfg_attr(feature = "python", pyo3::pyclass(get_all))]
 pub struct Share {
     pub host: String,
     pub name: String,
@@ -175,7 +169,6 @@ pub struct Share {
 /// Matches Python: `class AgentRole(Enum)`
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
-#[cfg_attr(feature = "python", pyo3::pyclass(eq, eq_int))]
 pub enum AgentRole {
     Orchestrator,
     Recon,
@@ -207,7 +200,6 @@ impl std::fmt::Display for AgentRole {
 /// Matches Python: `class TaskStatus(Enum)`
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-#[cfg_attr(feature = "python", pyo3::pyclass(eq, eq_int))]
 pub enum TaskStatus {
     Pending,
     InProgress,
@@ -234,7 +226,6 @@ impl std::fmt::Display for TaskStatus {
 ///
 /// Matches Python: `class TaskInfo` dataclass
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "python", pyo3::pyclass)]
 pub struct TaskInfo {
     pub task_id: String,
     pub task_type: String,
@@ -273,7 +264,6 @@ fn default_max_retries() -> i32 {
 ///
 /// Matches Python: `class TaskResult` dataclass
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "python", pyo3::pyclass)]
 pub struct TaskResult {
     pub task_id: String,
     pub success: bool,
@@ -290,7 +280,6 @@ pub struct TaskResult {
 /// Matches Python: `class VulnerabilityInfo` dataclass
 /// Redis serialization: `{"vuln_id","vuln_type","target","discovered_by","discovered_at","details","recommended_agent","priority"}`
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "python", pyo3::pyclass)]
 pub struct VulnerabilityInfo {
     pub vuln_id: String,
     pub vuln_type: String,
@@ -314,7 +303,6 @@ fn default_priority() -> i32 {
 ///
 /// Matches Python: `class AgentInfo` dataclass
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "python", pyo3::pyclass)]
 pub struct AgentInfo {
     pub name: String,
     pub pod_name: String,
@@ -343,7 +331,6 @@ fn default_agent_status() -> String {
 ///
 /// This is the JSON format used by the task queue, distinct from TaskInfo.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "python", pyo3::pyclass)]
 pub struct TaskStatusRecord {
     pub operation_id: String,
     pub status: String,
@@ -371,7 +358,6 @@ pub struct TaskStatusRecord {
 ///
 /// Fields are stored as individual hash fields, not a single JSON blob.
 #[derive(Debug, Clone, Default)]
-#[cfg_attr(feature = "python", pyo3::pyclass)]
 pub struct OperationMeta {
     pub has_domain_admin: bool,
     pub has_golden_ticket: bool,
@@ -516,7 +502,6 @@ fn parse_meta_string_list(raw: &str) -> Vec<String> {
 /// This matches the Python `SharedRedTeamState` dataclass but only includes
 /// fields needed by the CLI (loot, status, runtime, etc.).
 #[derive(Debug, Clone)]
-#[cfg_attr(feature = "python", pyo3::pyclass)]
 pub struct SharedRedTeamState {
     pub operation_id: String,
     pub target: Option<Target>,
@@ -583,7 +568,6 @@ impl SharedRedTeamState {
 /// Higher levels are harder for adversaries to change.
 /// Matches Python: `class PyramidLevel(IntEnum)`
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
-#[cfg_attr(feature = "python", pyo3::pyclass(eq, eq_int))]
 pub enum PyramidLevel {
     HashValues = 1,
     IpAddresses = 2,
@@ -611,7 +595,6 @@ impl std::fmt::Display for PyramidLevel {
 /// Matches Python: `class InvestigationStage(Enum)`
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-#[cfg_attr(feature = "python", pyo3::pyclass(eq, eq_int))]
 pub enum InvestigationStage {
     Triage,
     Causation,
@@ -635,7 +618,6 @@ impl std::fmt::Display for InvestigationStage {
 /// Matches Python: `class TriageDecision(Enum)`
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-#[cfg_attr(feature = "python", pyo3::pyclass(eq, eq_int))]
 pub enum TriageDecision {
     Pending,
     Confirmed,
@@ -665,7 +647,6 @@ impl std::fmt::Display for TriageDecision {
 /// Matches Python: `class Evidence(Model)`
 /// Redis serialization: stored as JSON in evidence HASH.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "python", pyo3::pyclass(get_all))]
 pub struct Evidence {
     pub id: String,
     /// Evidence type (ip, domain, hash, process, user, file, artifact, tool, technique).
@@ -703,7 +684,6 @@ fn default_confidence() -> f64 {
 /// Matches Python: `class TimelineEvent(Model)`
 /// Redis serialization: stored as JSON in timeline LIST.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "python", pyo3::pyclass(get_all))]
 pub struct TimelineEvent {
     pub id: String,
     pub timestamp: String,
@@ -733,7 +713,6 @@ fn default_timeline_source() -> String {
 /// Matches Python: `class BlueTaskInfo` dataclass
 /// Redis serialization: stored as JSON in tasks:pending / tasks:completed HASH.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "python", pyo3::pyclass(get_all))]
 pub struct BlueTaskInfo {
     pub task_id: String,
     pub task_type: String,
@@ -760,7 +739,6 @@ fn default_blue_task_status() -> String {
 /// Matches Python: `class TriageRecord` dataclass
 /// Redis serialization: stored as JSON in triage:records LIST.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "python", pyo3::pyclass(get_all))]
 pub struct TriageRecord {
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub triage_id: String,
@@ -786,7 +764,6 @@ pub struct TriageRecord {
 /// Matches Python: `class SharedBlueTeamState` dataclass
 /// This provides the CLI with investigation state for display and reporting.
 #[derive(Debug, Clone)]
-#[cfg_attr(feature = "python", pyo3::pyclass)]
 pub struct SharedBlueTeamState {
     pub investigation_id: String,
     pub alert: serde_json::Value,

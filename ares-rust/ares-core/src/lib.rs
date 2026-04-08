@@ -16,6 +16,3 @@ pub mod state;
 #[cfg(feature = "telemetry")]
 pub mod telemetry;
 pub mod token_usage;
-
-#[cfg(feature = "python")]
-mod python;

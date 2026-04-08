@@ -190,6 +190,26 @@ impl SharedState {
         }
     }
 
+    /// Create a cheap snapshot of state for prompt generation.
+    ///
+    /// Clones the relevant fields so the RwLock is released before LLM calls.
+    pub async fn snapshot(&self) -> ares_llm::prompt::StateSnapshot {
+        let s = self.inner.read().await;
+        ares_llm::prompt::StateSnapshot {
+            credentials: s.credentials.clone(),
+            hashes: s.hashes.clone(),
+            hosts: s.hosts.clone(),
+            shares: s.shares.clone(),
+            domains: s.domains.clone(),
+            discovered_vulnerabilities: s.discovered_vulnerabilities.clone(),
+            exploited_vulnerabilities: s.exploited_vulnerabilities.clone(),
+            domain_controllers: s.domain_controllers.clone(),
+            netbios_to_fqdn: s.netbios_to_fqdn.clone(),
+            has_domain_admin: s.has_domain_admin,
+            has_golden_ticket: s.has_golden_ticket,
+        }
+    }
+
     /// Read-only access to the state.
     pub async fn read(&self) -> tokio::sync::RwLockReadGuard<'_, StateInner> {
         self.inner.read().await

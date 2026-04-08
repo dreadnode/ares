@@ -3,19 +3,18 @@
 #![allow(dead_code)]
 //!
 //! Entry point for the `ares-orchestrator` binary. Rust owns the tokio event
-//! loop and all Redis IO; Python (via PyO3) is called only for LLM agent
-//! steps when the `python` feature is enabled.
+//! loop and all Redis IO. When `ARES_LLM_MODEL` is set, tasks are driven by
+//! the Rust LLM agent loop; otherwise they are pushed to Redis for workers.
 //!
 //! Startup sequence:
 //!   1. Load config from env vars
 //!   2. Connect to Redis
 //!   3. Acquire the operation lock
-//!   4. Initialize the Python bridge (if enabled)
-//!   5. Load shared state from Redis
-//!   6. Spawn background tasks: heartbeat monitor, result consumer, deferred
+//!   4. Load shared state from Redis
+//!   5. Spawn background tasks: heartbeat monitor, result consumer, deferred
 //!      processor, cost summary, automation tasks, exploitation workflow,
 //!      discovery poller, state refresh
-//!   7. Enter the main orchestration loop
+//!   6. Enter the main orchestration loop
 
 mod automation;
 mod completion;
@@ -24,8 +23,8 @@ mod cost_summary;
 mod deferred;
 mod dispatcher;
 mod exploitation;
+mod llm_runner;
 mod monitoring;
-mod python_bridge;
 mod recovery;
 mod result_processing;
 mod results;
@@ -33,6 +32,7 @@ mod routing;
 mod state;
 mod task_queue;
 mod throttling;
+mod tool_dispatcher;
 
 use std::sync::Arc;
 
@@ -89,13 +89,6 @@ async fn main() -> Result<()> {
         );
     }
 
-    // --- Python bridge ---
-    let bridge = python_bridge::create_bridge();
-    bridge
-        .initialize()
-        .context("Failed to initialize Python bridge")?;
-    info!("Python bridge ready");
-
     // --- Shared state ---
     let shared_state = SharedState::new(config.operation_id.clone());
     shared_state
@@ -109,14 +102,45 @@ async fn main() -> Result<()> {
     let deferred = Arc::new(DeferredQueue::new(queue.clone(), config.clone()));
 
     // --- Central dispatcher ---
-    let dispatcher = Arc::new(Dispatcher::new(
+    let mut dispatcher = Dispatcher::new(
         queue.clone(),
         tracker.clone(),
         throttler.clone(),
         deferred.clone(),
         shared_state.clone(),
         config.clone(),
-    ));
+    );
+
+    // --- LLM runner (optional — enabled when ARES_LLM_MODEL is set) ---
+    if let Ok(model_spec) = std::env::var("ARES_LLM_MODEL") {
+        match ares_llm::create_provider(&model_spec) {
+            Ok((provider, model_name)) => {
+                let tool_disp = Arc::new(tool_dispatcher::RedisToolDispatcher::new(queue.clone()));
+                let runner = Arc::new(llm_runner::LlmTaskRunner::new(
+                    provider,
+                    model_name.clone(),
+                    tool_disp,
+                    shared_state.clone(),
+                ));
+                dispatcher = dispatcher.with_llm_runner(runner);
+                info!(
+                    model = %model_name,
+                    "LLM runner initialized — Rust will drive agent loops"
+                );
+            }
+            Err(e) => {
+                warn!(
+                    model = %model_spec,
+                    err = %e,
+                    "Failed to create LLM provider — tasks will be pushed to Redis queue for workers"
+                );
+            }
+        }
+    } else {
+        info!("ARES_LLM_MODEL not set — tasks will be pushed to Redis queue for workers");
+    }
+
+    let dispatcher = Arc::new(dispatcher);
 
     // --- Shutdown signal ---
     let (shutdown_tx, shutdown_rx) = watch::channel(false);

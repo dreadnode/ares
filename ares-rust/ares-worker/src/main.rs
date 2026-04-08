@@ -2,16 +2,14 @@
 //!
 //! Owns the task consumption loop:
 //! 1. BLPOP from Redis queue (`ares:tasks:{role}`)
-//! 2. Delegate to Python via PyO3 for the actual LLM agent step
+//! 2. Execute agent tasks (native Rust tool execution)
 //! 3. Push results back (`ares:results:{task_id}`)
 //!
-//! Single-threaded for LLM calls (GIL makes parallelism pointless for Python).
-//! Heartbeat runs on a separate tokio task (no GIL needed).
+//! Heartbeat runs on a separate tokio task.
 //! Graceful shutdown: finish current task before exiting on SIGTERM.
 
 mod config;
 mod heartbeat;
-mod python_bridge;
 mod task_loop;
 
 use std::sync::Arc;

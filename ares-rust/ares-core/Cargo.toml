@@ -20,7 +20,6 @@ once_cell = { workspace = true }
 md-5 = "0.10"
 base64 = "0.22"
 tera = { workspace = true }
-pyo3 = { workspace = true, optional = true }
 
 # OpenTelemetry (behind "telemetry" feature)
 opentelemetry = { workspace = true, optional = true }
@@ -32,12 +31,8 @@ tracing-subscriber = { workspace = true, optional = true }
 [dev-dependencies]
 tempfile = "3"
 
-[lib]
-crate-type = ["lib", "cdylib"]
-
 [features]
 default = []
-python = ["pyo3"]
 telemetry = [
     "opentelemetry",
     "opentelemetry_sdk",
@@ -45,7 +40,3 @@ telemetry = [
     "tracing-opentelemetry",
     "tracing-subscriber",
 ]
-# Only enable extension-module when building the cdylib Python extension (.so).
-# Do NOT enable this for binaries that embed Python (orchestrator, worker) —
-# extension-module disables linking against libpython, which breaks Rust→Python calls.
-extension-module = ["pyo3/extension-module"]

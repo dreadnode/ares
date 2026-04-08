@@ -1,13 +1,11 @@
 //! Core task consumption loop.
 //!
-//! Mirrors the Python `RedisWorkerAgent._worker_loop()` and `_process_task()`:
-//!
 //! ```text
 //! loop {
 //!     1. BRPOP from ares:tasks:{role}
 //!     2. Deserialize TaskMessage
 //!     3. Update task status to "running"
-//!     4. Call into Python for LLM agent step (PyO3)
+//!     4. Execute agent task (native Rust)
 //!     5. Parse result
 //!     6. Serialize TaskResult
 //!     7. LPUSH to ares:results:{task_id}
@@ -29,7 +27,57 @@ use ares_core::token_usage;
 
 use crate::config::WorkerConfig;
 use crate::heartbeat::WorkerStatus;
-use crate::python_bridge;
+
+// ─── Agent result types ──────────────────────────────────────────────────────
+
+/// Result from running an agent task.
+#[derive(Debug, Clone)]
+pub struct AgentResult {
+    /// Raw text output from the agent.
+    pub output: String,
+    /// Whether the agent encountered an error.
+    pub error: Option<String>,
+    /// Token usage metrics from the LLM call.
+    pub usage: Option<TokenUsage>,
+}
+
+/// LLM token usage counters.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct TokenUsage {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub total_tokens: u64,
+    /// Model name (e.g. "openai/gpt-4.1-mini").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+}
+
+/// Execute a tool natively in Rust via ares-tools.
+///
+/// The `task_type` is used as the tool name for dispatch. The `params` JSON
+/// is passed directly as tool arguments.
+async fn run_agent_task(
+    task_type: &str,
+    params: &serde_json::Value,
+    _timeout: Duration,
+) -> anyhow::Result<AgentResult> {
+    info!(tool = task_type, "Executing tool natively");
+
+    let output = ares_tools::dispatch(task_type, params).await?;
+
+    let combined = output.combined();
+    let error = if output.success {
+        None
+    } else {
+        Some(format!("tool exited with code {:?}", output.exit_code))
+    };
+
+    Ok(AgentResult {
+        output: combined,
+        error,
+        usage: None, // No LLM usage for direct tool execution
+    })
+}
 
 // ─── Redis key prefixes (must match Python's RedisTaskQueue) ─────────────────
 
@@ -232,7 +280,7 @@ async fn poll_task(
     }
 }
 
-/// Process a single task: set status, run Python agent, push result.
+/// Process a single task: set status, run agent, push result.
 async fn process_task(
     conn: &mut redis::aio::MultiplexedConnection,
     config: &WorkerConfig,
@@ -267,9 +315,8 @@ async fn process_task(
         warn!(task_id = %task.task_id, "Failed to set task status to running: {e}");
     }
 
-    // 2. Run the Python agent
-    let agent_result =
-        python_bridge::run_agent_task(&task.task_type, &task.payload, config.task_timeout).await;
+    // 2. Run the agent task
+    let agent_result = run_agent_task(&task.task_type, &task.payload, config.task_timeout).await;
 
     // 3. Extract token usage before consuming agent_result (for Redis tracking)
     let usage_for_tracking = agent_result.as_ref().ok().and_then(|ar| ar.usage.clone());
