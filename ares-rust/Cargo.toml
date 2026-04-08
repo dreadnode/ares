@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["ares-core", "ares-cli", "ares-orchestrator", "ares-worker"]
+members = ["ares-core", "ares-cli", "ares-llm", "ares-orchestrator", "ares-worker"]
 
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }
