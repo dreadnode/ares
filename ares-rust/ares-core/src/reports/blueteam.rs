@@ -160,7 +160,11 @@ impl BlueTeamReportGenerator {
                             .iter()
                             .map(|ev| {
                                 let id = ev.get("id").and_then(|v| v.as_str()).unwrap_or("");
-                                let id_short = if id.len() > 12 { &id[..12] } else { id };
+                                let id_short: String = if id.chars().count() > 12 {
+                                    id.chars().take(12).collect()
+                                } else {
+                                    id.to_string()
+                                };
                                 let techniques = ev
                                     .get("techniques")
                                     .and_then(|v| v.as_array())

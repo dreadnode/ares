@@ -28,8 +28,9 @@ pub(crate) fn timeline_event_from_json(event: &serde_json::Value) -> TimelineEve
 
     TimelineEventCtx {
         timestamp: ts,
-        description_short: if desc.len() > 60 {
-            format!("{}...", &desc[..60])
+        description_short: if desc.chars().count() > 60 {
+            let truncated: String = desc.chars().take(60).collect();
+            format!("{truncated}...")
         } else {
             desc.clone()
         },
