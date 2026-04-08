@@ -142,6 +142,36 @@ fn handle_callback(call: &ToolCall) -> Result<CallbackResult> {
 }
 
 // ---------------------------------------------------------------------------
+// Tool dispatch helper
+// ---------------------------------------------------------------------------
+
+/// Dispatch a single external tool call and return the output string.
+async fn dispatch_one(
+    dispatcher: &dyn ToolDispatcher,
+    role: &str,
+    task_id: &str,
+    call: &ToolCall,
+) -> String {
+    match dispatcher.dispatch_tool(role, task_id, call).await {
+        Ok(result) => {
+            if let Some(err) = &result.error {
+                format!("Error: {err}\n\nPartial output:\n{}", result.output)
+            } else {
+                result.output
+            }
+        }
+        Err(e) => {
+            warn!(
+                tool = %call.name,
+                err = %e,
+                "Tool dispatch failed"
+            );
+            format!("Tool execution failed: {e}")
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Agent loop outcome
 // ---------------------------------------------------------------------------
 
@@ -290,71 +320,63 @@ pub async fn run_agent_loop(
             response.tool_calls.clone(),
         ));
 
-        // Process each tool call
+        // Partition into external tools (dispatched to workers) and callbacks
+        // (handled in Rust). External tools are dispatched first so their
+        // results are available before callbacks like task_complete fire.
+        let mut external: Vec<&ToolCall> = Vec::new();
+        let mut callbacks: Vec<&ToolCall> = Vec::new();
         for call in &response.tool_calls {
             if tool_registry::is_callback_tool(&call.name) {
-                // Handle callback in Rust
-                match handle_callback(call) {
-                    Ok(CallbackResult::TaskComplete { task_id, result }) => {
-                        info!(
-                            task_id = %task_id,
-                            steps = steps,
-                            "Task completed"
-                        );
-                        // Add tool result to messages for completeness
-                        messages.push(ChatMessage::tool_result(
-                            &call.id,
-                            "Task marked as complete.",
-                        ));
-                        return AgentLoopOutcome {
-                            reason: LoopEndReason::TaskComplete { task_id, result },
-                            total_usage,
-                            steps,
-                            tool_calls_dispatched,
-                        };
-                    }
-                    Ok(CallbackResult::RequestAssistance { issue, context }) => {
-                        info!(issue = %issue, "Assistance requested");
-                        return AgentLoopOutcome {
-                            reason: LoopEndReason::RequestAssistance { issue, context },
-                            total_usage,
-                            steps,
-                            tool_calls_dispatched,
-                        };
-                    }
-                    Ok(CallbackResult::Continue(msg)) => {
-                        messages.push(ChatMessage::tool_result(&call.id, &msg));
-                    }
-                    Err(e) => {
-                        messages.push(ChatMessage::tool_result(
-                            &call.id,
-                            format!("Callback error: {e}"),
-                        ));
-                    }
-                }
+                callbacks.push(call);
             } else {
-                // Dispatch to external worker
-                tool_calls_dispatched += 1;
-                match dispatcher.dispatch_tool(role, task_id, call).await {
-                    Ok(result) => {
-                        let output = if let Some(err) = &result.error {
-                            format!("Error: {err}\n\nPartial output:\n{}", result.output)
-                        } else {
-                            result.output
-                        };
-                        messages.push(ChatMessage::tool_result(&call.id, &output));
-                    }
-                    Err(e) => {
-                        warn!(
-                            tool = %call.name,
-                            err = %e,
-                            "Tool dispatch failed"
-                        );
-                        messages.push(ChatMessage::tool_result(
-                            &call.id,
-                            format!("Tool execution failed: {e}"),
-                        ));
-                    }
+                external.push(call);
+            }
+        }
+
+        // Dispatch external tools to workers
+        for call in &external {
+            tool_calls_dispatched += 1;
+            let output = dispatch_one(dispatcher, role, task_id, call).await;
+            messages.push(ChatMessage::tool_result(&call.id, &output));
+        }
+
+        // Handle callbacks (may short-circuit the loop)
+        for call in &callbacks {
+            match handle_callback(call) {
+                Ok(CallbackResult::TaskComplete { task_id, result }) => {
+                    info!(
+                        task_id = %task_id,
+                        steps = steps,
+                        "Task completed"
+                    );
+                    messages.push(ChatMessage::tool_result(
+                        &call.id,
+                        "Task marked as complete.",
+                    ));
+                    return AgentLoopOutcome {
+                        reason: LoopEndReason::TaskComplete { task_id, result },
+                        total_usage,
+                        steps,
+                        tool_calls_dispatched,
+                    };
+                }
+                Ok(CallbackResult::RequestAssistance { issue, context }) => {
+                    info!(issue = %issue, "Assistance requested");
+                    return AgentLoopOutcome {
+                        reason: LoopEndReason::RequestAssistance { issue, context },
+                        total_usage,
+                        steps,
+                        tool_calls_dispatched,
+                    };
+                }
+                Ok(CallbackResult::Continue(msg)) => {
+                    messages.push(ChatMessage::tool_result(&call.id, &msg));
+                }
+                Err(e) => {
+                    messages.push(ChatMessage::tool_result(
+                        &call.id,
+                        format!("Callback error: {e}"),
+                    ));
                 }
             }
         }
