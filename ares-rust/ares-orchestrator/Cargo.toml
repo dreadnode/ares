@@ -25,3 +25,4 @@ async-trait = "0.1"
 
 [dev-dependencies]
 tokio = { workspace = true }
+rstest = "0.18"
