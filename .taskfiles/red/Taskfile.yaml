@@ -159,6 +159,7 @@ tasks:
             DREADNODE_PROJECT="{{.DREADNODE_PROJECT}}" \
             GRAFANA_SERVICE_ACCOUNT_TOKEN="{{.GRAFANA_SERVICE_ACCOUNT_TOKEN}}" \
             ARES_CONFIG="/etc/ares/config.yaml" \
+            ARES_MULTI_FOREST_MODE=false \
             $MODEL_OVERRIDE_ENV \
             GRAFANA_URL="{{.GRAFANA_URL}}" \
             python -m ares.cli_ops submit "{{.TARGET}}" "{{.DOMAIN}}" \
@@ -906,6 +907,7 @@ tasks:
             DREADNODE_PROJECT="{{.DREADNODE_PROJECT}}" \
             GRAFANA_SERVICE_ACCOUNT_TOKEN="${GRAFANA_SERVICE_ACCOUNT_TOKEN:-}" \
             ARES_CONFIG="/etc/ares/config.yaml" \
+            ARES_MULTI_FOREST_MODE=false \
             $MODEL_OVERRIDE_ENV \
             GRAFANA_URL="{{.GRAFANA_URL}}" \
             ARES_MAX_CONCURRENT_TASKS=1 \
