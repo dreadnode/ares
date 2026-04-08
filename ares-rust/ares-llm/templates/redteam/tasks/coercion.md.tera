@@ -1,0 +1,21 @@
+## Coercion Task: {{ task_id }}
+
+**Target:** {{ target_ip }}
+**Listener:** {{ listener_ip }}
+
+{% if techniques -%}
+**Techniques:**
+{% for t in techniques -%}
+- {{ t }}
+{% endfor -%}
+{% endif -%}
+
+Attempt to coerce authentication from the target to the listener.
+
+{% if state_context %}
+## Current Operation State
+
+{{ state_context }}
+{% endif -%}
+
+Call `task_complete` when coercion attempt finishes.

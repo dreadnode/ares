@@ -54,14 +54,10 @@ use crate::throttling::Throttler;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // --- Tracing ---
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
-        .with_target(false)
-        .init();
+    // --- Telemetry (console + OTLP when endpoint is configured) ---
+    let _telemetry = ares_core::telemetry::init_telemetry(
+        ares_core::telemetry::TelemetryConfig::new("ares-orchestrator"),
+    );
 
     info!(
         version = env!("CARGO_PKG_VERSION"),

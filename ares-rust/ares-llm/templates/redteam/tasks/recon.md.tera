@@ -1,0 +1,24 @@
+## Recon Task: {{ task_id }}
+
+**Target:** {{ target_ip }}
+{% if domain %}**Domain:** {{ domain }}
+{% endif -%}
+{% if credential_username %}**Credential:** {{ credential_username }}@{{ credential_domain }}
+{% endif -%}
+
+{% if techniques -%}
+**Requested Techniques:**
+{% for t in techniques -%}
+- {{ t }}
+{% endfor -%}
+{% else -%}
+Perform a comprehensive reconnaissance scan of the target.
+{% endif -%}
+
+{% if state_context %}
+## Current Operation State
+
+{{ state_context }}
+{% endif -%}
+
+Call `task_complete` with your findings when done.

@@ -1,0 +1,18 @@
+## ACL Analysis Task: {{ task_id }}
+
+{% if chain_json -%}
+**ACL Chain to Analyze:**
+```json
+{{ chain_json }}
+```
+{% endif -%}
+
+Analyze and execute this ACL abuse chain step by step.
+
+{% if state_context %}
+## Current Operation State
+
+{{ state_context }}
+{% endif -%}
+
+Call `task_complete` when the ACL chain has been exploited or fails.

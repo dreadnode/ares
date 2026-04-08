@@ -618,14 +618,11 @@ enum ConfigCommands {
 
 #[tokio::main]
 async fn main() {
-    // Initialize tracing
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn,ares_cli=info")),
-        )
-        .with_target(false)
-        .init();
+    // Initialize telemetry (console + OTLP when endpoint is configured)
+    let _telemetry = ares_core::telemetry::init_telemetry(
+        ares_core::telemetry::TelemetryConfig::new("ares-cli")
+            .with_default_filter("warn,ares_cli=info"),
+    );
 
     let cli = Cli::parse();
 

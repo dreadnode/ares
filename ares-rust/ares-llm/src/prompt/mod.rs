@@ -1,8 +1,9 @@
 //! Task prompt generation for LLM agent steps.
 //!
 //! Ports the prompt building logic from `src/ares/core/worker/prompts.py`.
-//! Each task type gets a specific prompt that includes relevant state context
-//! (credentials, hosts, vulnerabilities) formatted as markdown for the LLM.
+//! Each task type gets a specific prompt rendered from a Tera template.
+//! Variable extraction from JSON payloads happens in Rust; prompt wording
+//! and structure lives in `.tera` template files.
 
 pub mod templates;
 
@@ -11,6 +12,12 @@ use std::fmt::Write;
 
 use ares_core::models::{Credential, Hash, Host, Share, VulnerabilityInfo};
 use serde_json::Value;
+use tera::Context;
+
+use templates::{
+    render_template_with_context, TASK_ACL_ANALYSIS, TASK_COERCION, TASK_COMMAND, TASK_CRACK,
+    TASK_CREDENTIAL_ACCESS, TASK_EXPLOIT, TASK_LATERAL, TASK_PRIVESC_ENUMERATION, TASK_RECON,
+};
 
 // ---------------------------------------------------------------------------
 // StateSnapshot — cheap, clonable view of operation state
@@ -34,7 +41,7 @@ pub struct StateSnapshot {
 }
 
 // ---------------------------------------------------------------------------
-// State context formatting
+// State context formatting (stays in Rust — data processing with truncation)
 // ---------------------------------------------------------------------------
 
 /// Maximum items to include in state context to avoid overwhelming the LLM.
@@ -47,7 +54,8 @@ const MAX_VULNERABILITIES: usize = 5;
 /// Format operation state as markdown context for the LLM.
 ///
 /// Includes discovered credentials, hashes, hosts, and pending vulnerabilities.
-/// Truncates to avoid exceeding context limits.
+/// Truncates to avoid exceeding context limits. The result is injected into
+/// task templates as `{{ state_context }}`.
 pub fn format_state_context(
     state: &StateSnapshot,
     task_type: &str,
@@ -182,402 +190,296 @@ pub fn format_state_context(
 }
 
 // ---------------------------------------------------------------------------
+// Helper: extract credential fields from payload into context
+// ---------------------------------------------------------------------------
+
+fn insert_credential_context(ctx: &mut Context, payload: &Value) {
+    if let Some(cred) = payload.get("credential") {
+        let user = cred["username"].as_str().unwrap_or("");
+        let cred_domain = cred["domain"].as_str().unwrap_or("");
+        if !user.is_empty() {
+            ctx.insert("credential_username", user);
+            ctx.insert("credential_domain", cred_domain);
+
+            let has_password = cred
+                .get("password")
+                .and_then(|v| v.as_str())
+                .is_some_and(|p| !p.is_empty());
+            ctx.insert(
+                "auth_type",
+                if has_password {
+                    "password"
+                } else {
+                    "hash/ticket"
+                },
+            );
+        }
+    }
+}
+
+fn insert_state_context(
+    ctx: &mut Context,
+    state: Option<&StateSnapshot>,
+    task_type: &str,
+    target: Option<&str>,
+) {
+    if let Some(s) = state {
+        let state_ctx = format_state_context(s, task_type, target);
+        if !state_ctx.is_empty() {
+            ctx.insert("state_context", &state_ctx);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Task prompt generation
 // ---------------------------------------------------------------------------
 
 /// Generate a task prompt from a task type and JSON payload.
 ///
 /// Returns `None` if the task type is not recognized.
+/// Each task type extracts variables from the payload and renders
+/// the corresponding `.tera` template.
 pub fn generate_task_prompt(
     task_type: &str,
     task_id: &str,
     payload: &Value,
     state: Option<&StateSnapshot>,
 ) -> Option<String> {
-    match task_type {
-        "recon" => Some(generate_recon_prompt(task_id, payload, state)),
-        "crack" => Some(generate_crack_prompt(task_id, payload)),
-        "credential_access" => Some(generate_credential_access_prompt(task_id, payload, state)),
-        "lateral_movement" | "lateral" => Some(generate_lateral_prompt(task_id, payload, state)),
-        "exploit" => Some(generate_exploit_prompt(task_id, payload, state)),
-        "coercion" => Some(generate_coercion_prompt(task_id, payload, state)),
-        "privesc_enumeration" => Some(generate_privesc_enumeration_prompt(task_id, payload, state)),
-        "acl_analysis" => Some(generate_acl_analysis_prompt(task_id, payload, state)),
-        "command" => Some(generate_command_prompt(task_id, payload)),
-        _ => None,
-    }
+    let result = match task_type {
+        "recon" => generate_recon_prompt(task_id, payload, state),
+        "crack" => generate_crack_prompt(task_id, payload),
+        "credential_access" => generate_credential_access_prompt(task_id, payload, state),
+        "lateral_movement" | "lateral" => generate_lateral_prompt(task_id, payload, state),
+        "exploit" => generate_exploit_prompt(task_id, payload, state),
+        "coercion" => generate_coercion_prompt(task_id, payload, state),
+        "privesc_enumeration" => generate_privesc_enumeration_prompt(task_id, payload, state),
+        "acl_analysis" => generate_acl_analysis_prompt(task_id, payload, state),
+        "command" => generate_command_prompt(task_id, payload),
+        _ => return None,
+    };
+    Some(result.unwrap_or_else(|e| format!("Error generating prompt: {e}")))
 }
 
-fn generate_recon_prompt(task_id: &str, payload: &Value, state: Option<&StateSnapshot>) -> String {
-    let target_ip = payload["target_ip"].as_str().unwrap_or("unknown");
+fn generate_recon_prompt(
+    task_id: &str,
+    payload: &Value,
+    state: Option<&StateSnapshot>,
+) -> anyhow::Result<String> {
+    let mut ctx = Context::new();
+    ctx.insert("task_id", task_id);
+    ctx.insert(
+        "target_ip",
+        payload["target_ip"].as_str().unwrap_or("unknown"),
+    );
+
     let domain = payload["domain"].as_str().unwrap_or("");
+    if !domain.is_empty() {
+        ctx.insert("domain", domain);
+    }
+
+    insert_credential_context(&mut ctx, payload);
+
     let techniques: Vec<&str> = payload["techniques"]
         .as_array()
         .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect())
         .unwrap_or_default();
-
-    let mut prompt = format!(
-        "## Recon Task: {task_id}\n\n\
-         **Target:** {target_ip}\n"
-    );
-
-    if !domain.is_empty() {
-        writeln!(prompt, "**Domain:** {domain}").unwrap();
-    }
-
-    // Credential for authenticated scans
-    if let Some(cred) = payload.get("credential") {
-        let user = cred["username"].as_str().unwrap_or("");
-        let cred_domain = cred["domain"].as_str().unwrap_or("");
-        if !user.is_empty() {
-            writeln!(prompt, "**Credential:** {user}@{cred_domain}").unwrap();
-        }
-    }
-
     if !techniques.is_empty() {
-        writeln!(prompt, "\n**Requested Techniques:**").unwrap();
-        for t in &techniques {
-            writeln!(prompt, "- {t}").unwrap();
-        }
-    } else {
-        writeln!(
-            prompt,
-            "\nPerform a comprehensive reconnaissance scan of the target."
-        )
-        .unwrap();
+        ctx.insert("techniques", &techniques);
     }
 
-    // Add state context
-    if let Some(s) = state {
-        let ctx = format_state_context(s, "recon", Some(target_ip));
-        if !ctx.is_empty() {
-            writeln!(prompt, "\n## Current Operation State\n\n{ctx}").unwrap();
-        }
-    }
+    insert_state_context(&mut ctx, state, "recon", payload["target_ip"].as_str());
 
-    writeln!(
-        prompt,
-        "\nCall `task_complete` with your findings when done."
-    )
-    .unwrap();
-
-    prompt
+    render_template_with_context(TASK_RECON, &ctx)
 }
 
-fn generate_crack_prompt(task_id: &str, payload: &Value) -> String {
-    let hash_type = payload["hash_type"].as_str().unwrap_or("unknown");
-    let hash_value = payload["hash_value"].as_str().unwrap_or("");
-    let username = payload["username"].as_str().unwrap_or("");
-    let domain = payload["domain"].as_str().unwrap_or("");
-
-    let mut prompt = format!(
-        "## Crack Task: {task_id}\n\n\
-         **Hash Type:** {hash_type}\n\
-         **Hash:** {hash_value}\n"
+fn generate_crack_prompt(task_id: &str, payload: &Value) -> anyhow::Result<String> {
+    let mut ctx = Context::new();
+    ctx.insert("task_id", task_id);
+    ctx.insert(
+        "hash_type",
+        payload["hash_type"].as_str().unwrap_or("unknown"),
     );
+    ctx.insert("hash_value", payload["hash_value"].as_str().unwrap_or(""));
 
+    let username = payload["username"].as_str().unwrap_or("");
     if !username.is_empty() {
-        writeln!(prompt, "**Username:** {username}").unwrap();
+        ctx.insert("username", username);
     }
+
+    let domain = payload["domain"].as_str().unwrap_or("");
     if !domain.is_empty() {
-        writeln!(prompt, "**Domain:** {domain}").unwrap();
+        ctx.insert("domain", domain);
     }
 
-    writeln!(
-        prompt,
-        "\nCrack this hash using hashcat or john. Try rockyou.txt first, then rules."
-    )
-    .unwrap();
-    writeln!(
-        prompt,
-        "Call `task_complete` with the cracked password or report failure."
-    )
-    .unwrap();
-
-    prompt
+    render_template_with_context(TASK_CRACK, &ctx)
 }
 
 fn generate_credential_access_prompt(
     task_id: &str,
     payload: &Value,
     state: Option<&StateSnapshot>,
-) -> String {
-    let technique = payload["technique"].as_str().unwrap_or("secretsdump");
-    let target_ip = payload["target_ip"].as_str().unwrap_or("unknown");
-    let domain = payload["domain"].as_str().unwrap_or("");
-
-    let mut prompt = format!(
-        "## Credential Access Task: {task_id}\n\n\
-         **Technique:** {technique}\n\
-         **Target:** {target_ip}\n"
+) -> anyhow::Result<String> {
+    let mut ctx = Context::new();
+    ctx.insert("task_id", task_id);
+    ctx.insert(
+        "technique",
+        payload["technique"].as_str().unwrap_or("secretsdump"),
+    );
+    ctx.insert(
+        "target_ip",
+        payload["target_ip"].as_str().unwrap_or("unknown"),
     );
 
+    let domain = payload["domain"].as_str().unwrap_or("");
     if !domain.is_empty() {
-        writeln!(prompt, "**Domain:** {domain}").unwrap();
+        ctx.insert("domain", domain);
     }
 
-    if let Some(cred) = payload.get("credential") {
-        let user = cred["username"].as_str().unwrap_or("");
-        let cred_domain = cred["domain"].as_str().unwrap_or("");
-        let has_password = cred
-            .get("password")
-            .and_then(|v| v.as_str())
-            .is_some_and(|p| !p.is_empty());
-        if !user.is_empty() {
-            let auth_type = if has_password {
-                "password"
-            } else {
-                "hash/ticket"
-            };
-            writeln!(prompt, "**Credential:** {user}@{cred_domain} ({auth_type})").unwrap();
-        }
-    }
+    insert_credential_context(&mut ctx, payload);
+    insert_state_context(
+        &mut ctx,
+        state,
+        "credential_access",
+        payload["target_ip"].as_str(),
+    );
 
-    writeln!(
-        prompt,
-        "\nExecute the {technique} attack against the target."
-    )
-    .unwrap();
-
-    if let Some(s) = state {
-        let ctx = format_state_context(s, "credential_access", Some(target_ip));
-        if !ctx.is_empty() {
-            writeln!(prompt, "\n## Current Operation State\n\n{ctx}").unwrap();
-        }
-    }
-
-    writeln!(
-        prompt,
-        "Call `task_complete` with extracted credentials/hashes."
-    )
-    .unwrap();
-
-    prompt
+    render_template_with_context(TASK_CREDENTIAL_ACCESS, &ctx)
 }
 
 fn generate_lateral_prompt(
     task_id: &str,
     payload: &Value,
     state: Option<&StateSnapshot>,
-) -> String {
-    let technique = payload["technique"].as_str().unwrap_or("psexec");
-    let target_ip = payload["target_ip"].as_str().unwrap_or("unknown");
-
-    let mut prompt = format!(
-        "## Lateral Movement Task: {task_id}\n\n\
-         **Technique:** {technique}\n\
-         **Target:** {target_ip}\n"
+) -> anyhow::Result<String> {
+    let mut ctx = Context::new();
+    ctx.insert("task_id", task_id);
+    ctx.insert(
+        "technique",
+        payload["technique"].as_str().unwrap_or("psexec"),
+    );
+    ctx.insert(
+        "target_ip",
+        payload["target_ip"].as_str().unwrap_or("unknown"),
     );
 
-    if let Some(cred) = payload.get("credential") {
-        let user = cred["username"].as_str().unwrap_or("");
-        let cred_domain = cred["domain"].as_str().unwrap_or("");
-        if !user.is_empty() {
-            writeln!(prompt, "**Credential:** {user}@{cred_domain}").unwrap();
-        }
-    }
+    insert_credential_context(&mut ctx, payload);
+    insert_state_context(&mut ctx, state, "lateral", payload["target_ip"].as_str());
 
-    writeln!(prompt, "\nMove laterally to the target using {technique}.").unwrap();
-
-    if let Some(s) = state {
-        let ctx = format_state_context(s, "lateral", Some(target_ip));
-        if !ctx.is_empty() {
-            writeln!(prompt, "\n## Current Operation State\n\n{ctx}").unwrap();
-        }
-    }
-
-    writeln!(
-        prompt,
-        "Call `task_complete` when lateral movement succeeds or fails."
-    )
-    .unwrap();
-
-    prompt
+    render_template_with_context(TASK_LATERAL, &ctx)
 }
 
 fn generate_exploit_prompt(
     task_id: &str,
     payload: &Value,
     state: Option<&StateSnapshot>,
-) -> String {
-    let vuln_type = payload["vuln_type"].as_str().unwrap_or("unknown");
-    let target = payload["target"].as_str().unwrap_or("unknown");
-
-    let mut prompt = format!(
-        "## Exploit Task: {task_id}\n\n\
-         **Vulnerability:** {vuln_type}\n\
-         **Target:** {target}\n"
+) -> anyhow::Result<String> {
+    let mut ctx = Context::new();
+    ctx.insert("task_id", task_id);
+    ctx.insert(
+        "vuln_type",
+        payload["vuln_type"].as_str().unwrap_or("unknown"),
     );
+    ctx.insert("target", payload["target"].as_str().unwrap_or("unknown"));
 
     if let Some(details) = payload.get("details") {
-        if let Some(obj) = details.as_object() {
-            writeln!(prompt, "\n**Details:**").unwrap();
-            for (k, v) in obj {
-                writeln!(prompt, "- {k}: {v}").unwrap();
-            }
+        if details.is_object() {
+            ctx.insert(
+                "details_json",
+                &serde_json::to_string_pretty(details).unwrap_or_default(),
+            );
         }
     }
 
-    writeln!(prompt, "\nExploit this vulnerability on the target.").unwrap();
+    insert_state_context(&mut ctx, state, "exploit", payload["target"].as_str());
 
-    if let Some(s) = state {
-        let ctx = format_state_context(s, "exploit", Some(target));
-        if !ctx.is_empty() {
-            writeln!(prompt, "\n## Current Operation State\n\n{ctx}").unwrap();
-        }
-    }
-
-    writeln!(prompt, "Call `task_complete` with the exploitation result.").unwrap();
-
-    prompt
+    render_template_with_context(TASK_EXPLOIT, &ctx)
 }
 
 fn generate_coercion_prompt(
     task_id: &str,
     payload: &Value,
     state: Option<&StateSnapshot>,
-) -> String {
-    let target_ip = payload["target_ip"].as_str().unwrap_or("unknown");
-    let listener_ip = payload["listener_ip"].as_str().unwrap_or("");
+) -> anyhow::Result<String> {
+    let mut ctx = Context::new();
+    ctx.insert("task_id", task_id);
+    ctx.insert(
+        "target_ip",
+        payload["target_ip"].as_str().unwrap_or("unknown"),
+    );
+    ctx.insert("listener_ip", payload["listener_ip"].as_str().unwrap_or(""));
+
     let techniques: Vec<&str> = payload["techniques"]
         .as_array()
         .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect())
         .unwrap_or_default();
-
-    let mut prompt = format!(
-        "## Coercion Task: {task_id}\n\n\
-         **Target:** {target_ip}\n\
-         **Listener:** {listener_ip}\n"
-    );
-
     if !techniques.is_empty() {
-        writeln!(prompt, "\n**Techniques:**").unwrap();
-        for t in &techniques {
-            writeln!(prompt, "- {t}").unwrap();
-        }
+        ctx.insert("techniques", &techniques);
     }
 
-    writeln!(
-        prompt,
-        "\nAttempt to coerce authentication from the target to the listener."
-    )
-    .unwrap();
+    insert_state_context(&mut ctx, state, "coercion", payload["target_ip"].as_str());
 
-    if let Some(s) = state {
-        let ctx = format_state_context(s, "coercion", Some(target_ip));
-        if !ctx.is_empty() {
-            writeln!(prompt, "\n## Current Operation State\n\n{ctx}").unwrap();
-        }
-    }
-
-    writeln!(
-        prompt,
-        "Call `task_complete` when coercion attempt finishes."
-    )
-    .unwrap();
-
-    prompt
+    render_template_with_context(TASK_COERCION, &ctx)
 }
 
 fn generate_privesc_enumeration_prompt(
     task_id: &str,
     payload: &Value,
     state: Option<&StateSnapshot>,
-) -> String {
-    let technique = payload["technique"].as_str().unwrap_or("enumeration");
-    let target_ip = payload["target_ip"].as_str().unwrap_or("unknown");
-    let domain = payload["domain"].as_str().unwrap_or("");
-
-    let mut prompt = format!(
-        "## Privilege Escalation Enumeration: {task_id}\n\n\
-         **Technique:** {technique}\n\
-         **Target:** {target_ip}\n"
+) -> anyhow::Result<String> {
+    let mut ctx = Context::new();
+    ctx.insert("task_id", task_id);
+    ctx.insert(
+        "technique",
+        payload["technique"].as_str().unwrap_or("enumeration"),
+    );
+    ctx.insert(
+        "target_ip",
+        payload["target_ip"].as_str().unwrap_or("unknown"),
     );
 
+    let domain = payload["domain"].as_str().unwrap_or("");
     if !domain.is_empty() {
-        writeln!(prompt, "**Domain:** {domain}").unwrap();
+        ctx.insert("domain", domain);
     }
 
-    if let Some(cred) = payload.get("credential") {
-        let user = cred["username"].as_str().unwrap_or("");
-        let cred_domain = cred["domain"].as_str().unwrap_or("");
-        if !user.is_empty() {
-            writeln!(prompt, "**Credential:** {user}@{cred_domain}").unwrap();
-        }
-    }
+    insert_credential_context(&mut ctx, payload);
+    insert_state_context(
+        &mut ctx,
+        state,
+        "privesc_enumeration",
+        payload["target_ip"].as_str(),
+    );
 
-    writeln!(
-        prompt,
-        "\nEnumerate privilege escalation opportunities using {technique}."
-    )
-    .unwrap();
-
-    if let Some(s) = state {
-        let ctx = format_state_context(s, "privesc_enumeration", Some(target_ip));
-        if !ctx.is_empty() {
-            writeln!(prompt, "\n## Current Operation State\n\n{ctx}").unwrap();
-        }
-    }
-
-    writeln!(
-        prompt,
-        "Call `task_complete` with discovered escalation paths."
-    )
-    .unwrap();
-
-    prompt
+    render_template_with_context(TASK_PRIVESC_ENUMERATION, &ctx)
 }
 
 fn generate_acl_analysis_prompt(
     task_id: &str,
     payload: &Value,
     state: Option<&StateSnapshot>,
-) -> String {
-    let mut prompt = format!("## ACL Analysis Task: {task_id}\n\n");
+) -> anyhow::Result<String> {
+    let mut ctx = Context::new();
+    ctx.insert("task_id", task_id);
 
     if let Some(chain) = payload.get("chain") {
-        writeln!(prompt, "**ACL Chain to Analyze:**").unwrap();
-        writeln!(prompt, "```json").unwrap();
-        writeln!(
-            prompt,
-            "{}",
-            serde_json::to_string_pretty(chain).unwrap_or_default()
-        )
-        .unwrap();
-        writeln!(prompt, "```").unwrap();
+        ctx.insert(
+            "chain_json",
+            &serde_json::to_string_pretty(chain).unwrap_or_default(),
+        );
     }
 
-    writeln!(
-        prompt,
-        "\nAnalyze and execute this ACL abuse chain step by step."
-    )
-    .unwrap();
+    insert_state_context(&mut ctx, state, "acl_analysis", None);
 
-    if let Some(s) = state {
-        let ctx = format_state_context(s, "acl_analysis", None);
-        if !ctx.is_empty() {
-            writeln!(prompt, "\n## Current Operation State\n\n{ctx}").unwrap();
-        }
-    }
-
-    writeln!(
-        prompt,
-        "Call `task_complete` when the ACL chain has been exploited or fails."
-    )
-    .unwrap();
-
-    prompt
+    render_template_with_context(TASK_ACL_ANALYSIS, &ctx)
 }
 
-fn generate_command_prompt(task_id: &str, payload: &Value) -> String {
-    let command = payload["command"].as_str().unwrap_or("unknown");
+fn generate_command_prompt(task_id: &str, payload: &Value) -> anyhow::Result<String> {
+    let mut ctx = Context::new();
+    ctx.insert("task_id", task_id);
+    ctx.insert("command", payload["command"].as_str().unwrap_or("unknown"));
 
-    format!(
-        "## Command Task: {task_id}\n\n\
-         Execute the following command:\n\n\
-         ```\n{command}\n```\n\n\
-         Call `task_complete` with the command output."
-    )
+    render_template_with_context(TASK_COMMAND, &ctx)
 }
 
 // ---------------------------------------------------------------------------
@@ -627,7 +529,7 @@ mod tests {
         assert!(prompt.contains("Recon Task: task-001"));
         assert!(prompt.contains("192.168.58.0/24"));
         assert!(prompt.contains("contoso.local"));
-        assert!(prompt.contains("nmap_scan"));
+        assert!(prompt.contains("- nmap_scan"));
     }
 
     #[test]
@@ -641,6 +543,7 @@ mod tests {
         let prompt = generate_task_prompt("crack", "task-002", &payload, None).unwrap();
         assert!(prompt.contains("Crack Task: task-002"));
         assert!(prompt.contains("ntlm"));
+        assert!(prompt.contains("admin"));
     }
 
     #[test]
@@ -657,7 +560,8 @@ mod tests {
         });
         let prompt = generate_task_prompt("credential_access", "task-003", &payload, None).unwrap();
         assert!(prompt.contains("secretsdump"));
-        assert!(prompt.contains("admin@contoso.local"));
+        assert!(prompt.contains("admin"));
+        assert!(prompt.contains("contoso.local"));
     }
 
     #[test]
@@ -689,6 +593,50 @@ mod tests {
     }
 
     #[test]
+    fn test_generate_coercion_prompt() {
+        let payload = serde_json::json!({
+            "target_ip": "192.168.58.10",
+            "listener_ip": "192.168.58.100",
+            "techniques": ["petitpotam", "coercer"]
+        });
+        let prompt = generate_task_prompt("coercion", "task-006", &payload, None).unwrap();
+        assert!(prompt.contains("Coercion Task: task-006"));
+        assert!(prompt.contains("192.168.58.10"));
+        assert!(prompt.contains("- petitpotam"));
+    }
+
+    #[test]
+    fn test_generate_privesc_prompt() {
+        let payload = serde_json::json!({
+            "technique": "find_delegation",
+            "target_ip": "192.168.58.10",
+            "domain": "contoso.local"
+        });
+        let prompt =
+            generate_task_prompt("privesc_enumeration", "task-007", &payload, None).unwrap();
+        assert!(prompt.contains("Privilege Escalation"));
+        assert!(prompt.contains("find_delegation"));
+    }
+
+    #[test]
+    fn test_generate_acl_prompt() {
+        let payload = serde_json::json!({
+            "chain": [{"source": "user1", "target": "admin", "right": "GenericAll"}]
+        });
+        let prompt = generate_task_prompt("acl_analysis", "task-008", &payload, None).unwrap();
+        assert!(prompt.contains("ACL Analysis"));
+        assert!(prompt.contains("GenericAll"));
+    }
+
+    #[test]
+    fn test_generate_command_prompt() {
+        let payload = serde_json::json!({"command": "whoami"});
+        let prompt = generate_task_prompt("command", "task-009", &payload, None).unwrap();
+        assert!(prompt.contains("whoami"));
+        assert!(prompt.contains("Command Task: task-009"));
+    }
+
+    #[test]
     fn test_format_state_context_truncation() {
         let mut state = StateSnapshot::default();
         for i in 0..20 {
@@ -715,9 +663,17 @@ mod tests {
     }
 
     #[test]
-    fn test_command_prompt() {
-        let payload = serde_json::json!({"command": "whoami"});
-        let prompt = generate_task_prompt("command", "task-006", &payload, None).unwrap();
-        assert!(prompt.contains("whoami"));
+    fn test_state_context_injected_into_template() {
+        let payload = serde_json::json!({
+            "technique": "secretsdump",
+            "target_ip": "192.168.58.10",
+            "domain": "contoso.local"
+        });
+        let state = sample_state();
+        let prompt =
+            generate_task_prompt("credential_access", "task-010", &payload, Some(&state)).unwrap();
+        // State context includes the domain
+        assert!(prompt.contains("Discovered Domains"));
+        assert!(prompt.contains("contoso.local"));
     }
 }

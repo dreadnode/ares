@@ -20,13 +20,10 @@ use tracing::{error, info};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // Initialize tracing (respects RUST_LOG env var)
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
-        .init();
+    // Initialize telemetry (console + OTLP when endpoint is configured)
+    let _telemetry = ares_core::telemetry::init_telemetry(
+        ares_core::telemetry::TelemetryConfig::new("ares-worker"),
+    );
 
     // Parse config from environment
     let config = config::WorkerConfig::from_env()?;

@@ -13,6 +13,8 @@ pub mod models;
 pub mod parsing;
 pub mod reports;
 pub mod state;
+#[cfg(feature = "telemetry")]
+pub mod telemetry;
 pub mod token_usage;
 
 #[cfg(feature = "python")]
