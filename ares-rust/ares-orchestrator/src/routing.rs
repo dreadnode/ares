@@ -41,6 +41,12 @@ struct TrackerInner {
     role_counts: HashMap<String, usize>,
 }
 
+impl Default for ActiveTaskTracker {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ActiveTaskTracker {
     pub fn new() -> Self {
         Self {

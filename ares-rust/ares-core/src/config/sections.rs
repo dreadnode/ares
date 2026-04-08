@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use super::defaults::*;
 
+/// Operation-level settings: name, namespace, and task dispatch behaviour.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OperationConfig {
     pub name: String,
@@ -24,6 +25,7 @@ pub struct OperationConfig {
     pub stop_on_golden_ticket: bool,
 }
 
+/// Per-agent configuration: model selection, step limits, and tool allowlist.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentConfig {
     pub model: String,
@@ -37,6 +39,7 @@ pub struct AgentConfig {
     pub tools: Vec<String>,
 }
 
+/// Timeout values (in seconds) for various operation phases.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TimeoutConfig {
     #[serde(default)]
@@ -53,6 +56,7 @@ pub struct TimeoutConfig {
     pub exploitation: u64,
 }
 
+/// Task retry and checkpoint recovery settings.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RecoveryConfig {
     #[serde(default = "default_true")]
@@ -67,6 +71,7 @@ pub struct RecoveryConfig {
     pub checkpoint_on_vulnerability: bool,
 }
 
+/// Thresholds that trigger phase transitions (e.g. lateral movement).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PhaseDetectionConfig {
     #[serde(default = "default_lateral_admin_creds")]
@@ -77,6 +82,7 @@ pub struct PhaseDetectionConfig {
     pub min_slots_per_role: u32,
 }
 
+/// LLM context window management settings.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ContextManagementConfig {
     #[serde(default = "default_max_context_tokens")]
@@ -87,6 +93,7 @@ pub struct ContextManagementConfig {
     pub max_output_chars: u32,
 }
 
+/// Structured logging configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LoggingConfig {
     #[serde(default = "default_log_level")]
@@ -101,6 +108,7 @@ pub struct LoggingConfig {
     pub backup_count: u32,
 }
 
+/// Resource limits for concurrent task execution and credential caching.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ResourceConfig {
     #[serde(default = "default_max_concurrent_resources")]
@@ -113,6 +121,7 @@ pub struct ResourceConfig {
     pub credential_cache_ttl: u64,
 }
 
+/// Security hardening settings: TLS verification, audit logging, rate limiting.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SecurityConfig {
     #[serde(default = "default_true")]
@@ -125,6 +134,7 @@ pub struct SecurityConfig {
     pub rate_limiting: RateLimitingConfig,
 }
 
+/// API rate-limiting settings applied to outbound LLM requests.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct RateLimitingConfig {
     #[serde(default = "default_true")]
@@ -133,6 +143,7 @@ pub struct RateLimitingConfig {
     pub max_requests_per_minute: u32,
 }
 
+/// Optional Grafana dashboard integration settings.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GrafanaConfig {
     #[serde(default)]

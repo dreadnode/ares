@@ -341,7 +341,7 @@ impl TaskQueue {
             .arg(ttl.as_secs())
             .query_async(&mut conn)
             .await
-            .unwrap_or(false);
+            .with_context(|| format!("SET NX lock for operation {operation_id}"))?;
         if acquired {
             info!(operation_id, "Operation lock acquired");
         }

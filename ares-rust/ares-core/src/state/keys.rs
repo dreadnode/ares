@@ -10,30 +10,55 @@ pub const LOCK_PREFIX: &str = "ares:lock";
 pub const TASK_STATUS_PREFIX: &str = "ares:task_status";
 
 // Collection key suffixes (appended to `ares:op:{op_id}:`)
+/// Redis SET key suffix for discovered credentials.
 pub const KEY_CREDENTIALS: &str = "credentials";
+/// Redis SET key suffix for discovered password hashes.
 pub const KEY_HASHES: &str = "hashes";
+/// Redis SET key suffix for discovered hosts.
 pub const KEY_HOSTS: &str = "hosts";
+/// Redis SET key suffix for discovered user accounts.
 pub const KEY_USERS: &str = "users";
+/// Redis SET key suffix for discovered SMB shares.
 pub const KEY_SHARES: &str = "shares";
+/// Redis SET key suffix for identified weaknesses.
 pub const KEY_WEAKNESSES: &str = "weaknesses";
+/// Redis SET key suffix for discovered domain names.
 pub const KEY_DOMAINS: &str = "domains";
+/// Redis SET key suffix for discovered vulnerabilities.
 pub const KEY_VULNS: &str = "vulns";
+/// Redis SET key suffix for exploited targets.
 pub const KEY_EXPLOITED: &str = "exploited";
+/// Redis HASH key suffix for operation metadata.
 pub const KEY_META: &str = "meta";
+/// Redis HASH key suffix mapping IP → DC hostname.
 pub const KEY_DC_MAP: &str = "dc_map";
+/// Redis HASH key suffix mapping IP → NetBIOS name.
 pub const KEY_NETBIOS_MAP: &str = "netbios_map";
+/// Redis SET key suffix for collected artifacts.
 pub const KEY_ARTIFACTS: &str = "artifacts";
+/// Redis LIST key suffix for the operation event timeline.
 pub const KEY_TIMELINE: &str = "timeline";
+/// Redis SET key suffix for forged Kerberos golden tickets.
 pub const KEY_GOLDEN_TICKETS: &str = "golden_tickets";
+/// Redis SET key suffix for AdminSDHolder ACL backdoors.
 pub const KEY_ADMINSD_BACKDOORS: &str = "adminsd_backdoors";
+/// Redis SET key suffix for exploitable ACL chains.
 pub const KEY_ACL_CHAINS: &str = "acl_chains";
+/// Redis SET key suffix for discovered gMSA accounts.
 pub const KEY_GMSA_ACCOUNTS: &str = "gmsa_accounts";
+/// Redis key prefix suffix for deduplication bloom-filter sets.
 pub const KEY_DEDUP_PREFIX: &str = "dedup";
+/// Redis SET key suffix for observed MITRE ATT&CK technique IDs.
 pub const KEY_TECHNIQUES: &str = "techniques";
+/// Redis SET key suffix tracking dispatched MSSQL enumeration tasks.
 pub const KEY_MSSQL_ENUM_DISPATCHED: &str = "mssql_enum_dispatched";
+/// Redis HASH key suffix for tasks currently pending execution.
 pub const KEY_PENDING_TASKS: &str = "pending_tasks";
+/// Redis HASH key suffix for tasks that have finished execution.
 pub const KEY_COMPLETED_TASKS: &str = "completed_tasks";
+/// Redis HASH key suffix tracking consecutive failures per vulnerability type.
 pub const KEY_VULN_TYPE_FAILURES: &str = "vuln_type_failures";
+/// Redis HASH key suffix mapping domain name → SID string.
 pub const KEY_DOMAIN_SIDS: &str = "domain_sids";
 
 /// Pub/Sub channel prefix for state update notifications.
@@ -46,17 +71,31 @@ pub const BLUE_KEY_PREFIX: &str = "ares:blue:inv";
 pub const BLUE_LOCK_PREFIX: &str = "ares:blue:lock";
 
 // Blue team collection key suffixes (appended to `ares:blue:inv:{inv_id}:`)
+/// Redis HASH key suffix for collected evidence items.
 pub const BLUE_KEY_EVIDENCE: &str = "evidence";
+/// Redis LIST key suffix for the investigation timeline.
 pub const BLUE_KEY_TIMELINE: &str = "timeline";
+/// Redis SET key suffix for identified MITRE ATT&CK technique IDs.
 pub const BLUE_KEY_TECHNIQUES: &str = "techniques";
+/// Redis SET key suffix for identified MITRE ATT&CK tactic IDs.
 pub const BLUE_KEY_TACTICS: &str = "tactics";
+/// Redis SET key suffix for queried host names/IPs.
 pub const BLUE_KEY_HOSTS: &str = "hosts";
+/// Redis SET key suffix for queried user accounts.
 pub const BLUE_KEY_USERS: &str = "users";
+/// Redis SET key suffix for executed query type identifiers.
 pub const BLUE_KEY_QUERY_TYPES: &str = "query_types";
+/// Redis HASH key suffix for investigation metadata.
 pub const BLUE_KEY_META: &str = "meta";
+/// Redis HASH key suffix for tasks currently pending execution.
 pub const BLUE_KEY_PENDING_TASKS: &str = "tasks:pending";
+/// Redis HASH key suffix for tasks that have finished execution.
 pub const BLUE_KEY_COMPLETED_TASKS: &str = "tasks:completed";
+/// Redis HASH key suffix mapping technique ID → human-readable name.
 pub const BLUE_KEY_TECHNIQUE_NAMES: &str = "technique_names";
+/// Redis LIST key suffix for analyst recommendations.
 pub const BLUE_KEY_RECOMMENDATIONS: &str = "recommendations";
+/// Redis key suffix for the current triage decision JSON blob.
 pub const BLUE_KEY_TRIAGE_DECISION: &str = "triage:decision";
+/// Redis LIST key suffix for the ordered triage audit trail.
 pub const BLUE_KEY_TRIAGE_RECORDS: &str = "triage:records";
