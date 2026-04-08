@@ -5,11 +5,11 @@ pub mod routing;
 pub mod tool_registry;
 
 pub use provider::{
-    create_provider, ChatMessage, ContentPart, LlmProvider, LlmRequest, LlmResponse, Role,
-    StopReason, TokenUsage, ToolCall, ToolDefinition,
+    create_provider, ChatMessage, ContentPart, LlmError, LlmProvider, LlmRequest, LlmResponse,
+    Role, StopReason, TokenUsage, ToolCall, ToolDefinition,
 };
 
 pub use agent_loop::{
-    run_agent_loop, AgentLoopConfig, AgentLoopOutcome, LoopEndReason, ToolDispatcher,
-    ToolExecResult,
+    run_agent_loop, AgentLoopConfig, AgentLoopOutcome, ContextConfig, LoopEndReason, RetryConfig,
+    ToolDispatcher, ToolExecResult,
 };

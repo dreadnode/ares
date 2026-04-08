@@ -3,13 +3,12 @@
 //! Implements the `LlmProvider` trait for the OpenAI Chat Completions API.
 //! See: <https://platform.openai.com/docs/api-reference/chat>
 
-use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use tracing::debug;
 
 use super::{
-    ChatMessage, ContentPart, LlmProvider, LlmRequest, LlmResponse, Role, StopReason, TokenUsage,
-    ToolCall,
+    ChatMessage, ContentPart, LlmError, LlmProvider, LlmRequest, LlmResponse, Role, StopReason,
+    TokenUsage, ToolCall,
 };
 
 const DEFAULT_API_URL: &str = "https://api.openai.com/v1/chat/completions";
@@ -267,7 +266,7 @@ fn parse_stop_reason(reason: Option<&str>) -> StopReason {
 
 #[async_trait::async_trait]
 impl LlmProvider for OpenAiProvider {
-    async fn chat(&self, request: &LlmRequest) -> Result<LlmResponse> {
+    async fn chat(&self, request: &LlmRequest) -> Result<LlmResponse, LlmError> {
         let mut messages: Vec<ApiMessage> = Vec::new();
 
         // System message goes as first message for OpenAI
@@ -310,28 +309,54 @@ impl LlmProvider for OpenAiProvider {
             .json(&api_request)
             .send()
             .await
-            .context("Failed to send request to OpenAI API")?;
+            .map_err(|e| LlmError::Network(e.to_string()))?;
 
         let status = response.status();
+        let retry_after_ms = response
+            .headers()
+            .get("retry-after")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.parse::<f64>().ok())
+            .map(|secs| (secs * 1000.0) as u64);
         let body = response
             .text()
             .await
-            .context("Failed to read OpenAI API response body")?;
+            .map_err(|e| LlmError::Network(e.to_string()))?;
 
         if !status.is_success() {
-            if let Ok(err) = serde_json::from_str::<ApiErrorResponse>(&body) {
-                anyhow::bail!("OpenAI API error ({}): {}", status, err.error.message);
-            }
-            anyhow::bail!("OpenAI API error ({}): {}", status, body);
+            let message = if let Ok(err) = serde_json::from_str::<ApiErrorResponse>(&body) {
+                // Check for context length exceeded
+                if let Some(ref code) = err.error.error_type {
+                    if (code == "context_length_exceeded" || code == "invalid_request_error")
+                        && (err.error.message.contains("context length")
+                            || err.error.message.contains("maximum context"))
+                    {
+                        return Err(LlmError::ContextTooLong(err.error.message));
+                    }
+                }
+                err.error.message
+            } else {
+                body
+            };
+
+            return Err(match status.as_u16() {
+                429 => LlmError::RateLimited { retry_after_ms },
+                401 => LlmError::AuthError(message),
+                _ => LlmError::ApiError {
+                    status: status.as_u16(),
+                    message,
+                },
+            });
         }
 
-        let api_response: ApiResponse =
-            serde_json::from_str(&body).context("Failed to parse OpenAI API response")?;
+        let api_response: ApiResponse = serde_json::from_str(&body).map_err(|e| {
+            LlmError::Other(anyhow::anyhow!("Failed to parse OpenAI response: {e}"))
+        })?;
 
         let choice = api_response
             .choices
             .first()
-            .context("No choices in OpenAI response")?;
+            .ok_or_else(|| LlmError::Other(anyhow::anyhow!("No choices in OpenAI response")))?;
 
         let content = choice.message.content.clone().unwrap_or_default();
 

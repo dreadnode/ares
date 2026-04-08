@@ -4,10 +4,9 @@
 //! This provider reuses the OpenAI serialization format with a custom base URL.
 //! See: <https://github.com/ollama/ollama/blob/main/docs/openai.md>
 
-use anyhow::Result;
 use tracing::debug;
 
-use super::{LlmProvider, LlmRequest, LlmResponse};
+use super::{LlmError, LlmProvider, LlmRequest, LlmResponse};
 
 pub struct OllamaProvider {
     inner: super::openai::OpenAiProvider,
@@ -24,7 +23,7 @@ impl OllamaProvider {
 
 #[async_trait::async_trait]
 impl LlmProvider for OllamaProvider {
-    async fn chat(&self, request: &LlmRequest) -> Result<LlmResponse> {
+    async fn chat(&self, request: &LlmRequest) -> Result<LlmResponse, LlmError> {
         debug!(model = %request.model, "Ollama API request (via OpenAI compat)");
         self.inner.chat(request).await
     }

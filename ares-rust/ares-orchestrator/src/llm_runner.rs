@@ -41,12 +41,16 @@ impl LlmTaskRunner {
         dispatcher: Arc<dyn ToolDispatcher>,
         state: SharedState,
     ) -> Self {
+        let config = AgentLoopConfig {
+            model: model_name.clone(),
+            ..AgentLoopConfig::default()
+        };
         Self {
             provider,
             model_name,
             dispatcher,
             state,
-            config: AgentLoopConfig::default(),
+            config,
         }
     }
 

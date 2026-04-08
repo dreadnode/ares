@@ -7,7 +7,6 @@ pub mod anthropic;
 pub mod ollama;
 pub mod openai;
 
-use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
 // ---------------------------------------------------------------------------
@@ -158,6 +157,61 @@ pub struct TokenUsage {
 }
 
 // ---------------------------------------------------------------------------
+// LLM error types
+// ---------------------------------------------------------------------------
+
+/// Typed error for LLM provider calls, enabling retry classification.
+#[derive(Debug, thiserror::Error)]
+pub enum LlmError {
+    /// Rate limited by the provider — retryable with backoff.
+    #[error("rate limited (retry after {retry_after_ms:?}ms)")]
+    RateLimited { retry_after_ms: Option<u64> },
+
+    /// Authentication failure — not retryable.
+    #[error("authentication failed: {0}")]
+    AuthError(String),
+
+    /// Request too large for context window — not retryable as-is.
+    #[error("context too long: {0}")]
+    ContextTooLong(String),
+
+    /// Network/connection error — retryable.
+    #[error("network error: {0}")]
+    Network(String),
+
+    /// API returned a non-success status — may or may not be retryable.
+    #[error("API error ({status}): {message}")]
+    ApiError { status: u16, message: String },
+
+    /// Catch-all for other errors.
+    #[error("{0}")]
+    Other(#[from] anyhow::Error),
+}
+
+impl LlmError {
+    /// Whether this error is worth retrying with backoff.
+    pub fn is_retryable(&self) -> bool {
+        matches!(
+            self,
+            LlmError::RateLimited { .. }
+                | LlmError::Network(_)
+                | LlmError::ApiError {
+                    status: 500..=599,
+                    ..
+                }
+        )
+    }
+
+    /// Suggested wait time before retrying, if available.
+    pub fn retry_after_ms(&self) -> Option<u64> {
+        match self {
+            LlmError::RateLimited { retry_after_ms } => *retry_after_ms,
+            _ => None,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Request / Response
 // ---------------------------------------------------------------------------
 
@@ -206,7 +260,7 @@ pub struct LlmResponse {
 #[async_trait::async_trait]
 pub trait LlmProvider: Send + Sync {
     /// Send a chat request and get a response.
-    async fn chat(&self, request: &LlmRequest) -> Result<LlmResponse>;
+    async fn chat(&self, request: &LlmRequest) -> Result<LlmResponse, LlmError>;
 
     /// Provider name (e.g. "anthropic", "openai", "ollama").
     fn name(&self) -> &str;
@@ -225,7 +279,7 @@ pub trait LlmProvider: Send + Sync {
 /// - `ollama/` → OllamaProvider (reads `OLLAMA_BASE_URL`, default `http://localhost:11434`)
 ///
 /// If no prefix, defaults to Anthropic.
-pub fn create_provider(model: &str) -> Result<(Box<dyn LlmProvider>, String)> {
+pub fn create_provider(model: &str) -> anyhow::Result<(Box<dyn LlmProvider>, String)> {
     if let Some(model_name) = model.strip_prefix("anthropic/") {
         let api_key = std::env::var("ANTHROPIC_API_KEY")
             .map_err(|_| anyhow::anyhow!("ANTHROPIC_API_KEY not set"))?;

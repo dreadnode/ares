@@ -91,10 +91,11 @@ pub(crate) async fn dispatch_initial_recon(
         }
     }
 
-    // User enumeration against first IP (likely DC) — try null session for initial bootstrap
-    if let Some(first_ip) = config.target_ips.first() {
+    // User enumeration against all target IPs — we don't know which are DCs yet,
+    // and non-DC IPs may silently return no output. Null session for bootstrap.
+    for ip in &config.target_ips {
         let payload = serde_json::json!({
-            "target_ip": first_ip,
+            "target_ip": ip,
             "domain": domain,
             "techniques": ["user_enumeration"],
             "null_session": true,
@@ -104,11 +105,11 @@ pub(crate) async fn dispatch_initial_recon(
             .await
         {
             Ok(Some(task_id)) => {
-                info!(task_id = %task_id, "Dispatched user enumeration");
+                info!(task_id = %task_id, ip = %ip, "Dispatched user enumeration");
                 count += 1;
             }
-            Ok(None) => warn!("User enumeration throttled/deferred"),
-            Err(e) => warn!(err = %e, "Failed to dispatch user enumeration"),
+            Ok(None) => warn!(ip = %ip, "User enumeration throttled/deferred"),
+            Err(e) => warn!(ip = %ip, err = %e, "Failed to dispatch user enumeration"),
         }
     }
 

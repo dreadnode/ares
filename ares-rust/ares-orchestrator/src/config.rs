@@ -57,6 +57,18 @@ pub struct OrchestratorConfig {
 
     /// Target IPs for the operation (comma-separated in env, parsed to vec).
     pub target_ips: Vec<String>,
+
+    /// Initial credential to seed at startup (optional).
+    /// Format: `user:pass@domain` or from JSON payload.
+    pub initial_credential: Option<InitialCredential>,
+}
+
+/// A credential provided at operation launch time.
+#[derive(Debug, Clone)]
+pub struct InitialCredential {
+    pub username: String,
+    pub password: String,
+    pub domain: String,
 }
 
 impl OrchestratorConfig {
@@ -70,7 +82,7 @@ impl OrchestratorConfig {
 
         // ARES_OPERATION_ID may be a plain operation-id string OR a full JSON
         // payload (the queue dispatcher passes the entire operation request JSON).
-        let (operation_id, target_domain, target_ips) = if raw_op.starts_with('{') {
+        let (operation_id, target_domain, target_ips, json_cred) = if raw_op.starts_with('{') {
             let v: serde_json::Value = serde_json::from_str(&raw_op)
                 .map_err(|e| anyhow::anyhow!("Failed to parse ARES_OPERATION_ID JSON: {e}"))?;
             let op_id = v["operation_id"]
@@ -86,7 +98,19 @@ impl OrchestratorConfig {
                         .collect()
                 })
                 .unwrap_or_default();
-            (op_id, domain, ips)
+            // Extract initial credential from JSON payload
+            let cred = match (
+                v["initial_username"].as_str(),
+                v["initial_password"].as_str(),
+            ) {
+                (Some(user), Some(pass)) => Some(InitialCredential {
+                    username: user.to_string(),
+                    password: pass.to_string(),
+                    domain: v["initial_domain"].as_str().unwrap_or(&domain).to_string(),
+                }),
+                _ => None,
+            };
+            (op_id, domain, ips, cred)
         } else {
             // Plain operation ID — read target info from separate env vars
             let domain = env::var("ARES_TARGET_DOMAIN").unwrap_or_default();
@@ -96,8 +120,16 @@ impl OrchestratorConfig {
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty())
                 .collect();
-            (raw_op, domain, ips)
+            (raw_op, domain, ips, None)
         };
+
+        // Initial credential: JSON payload takes precedence, then env var.
+        // Format: user:pass@domain
+        let initial_credential = json_cred.or_else(|| {
+            env::var("ARES_INITIAL_CREDENTIAL")
+                .ok()
+                .and_then(|raw| parse_credential_spec(&raw, &target_domain))
+        });
 
         let max_concurrent_tasks = parse_env("ARES_MAX_CONCURRENT_TASKS", 8);
         let heartbeat_interval_secs = parse_env("ARES_HEARTBEAT_INTERVAL_SECS", 30);
@@ -129,6 +161,7 @@ impl OrchestratorConfig {
             max_deferred_total,
             target_domain,
             target_ips,
+            initial_credential,
         })
     }
 
@@ -136,6 +169,40 @@ impl OrchestratorConfig {
     pub fn hard_cap(&self) -> usize {
         (self.max_concurrent_tasks as f64 * 1.5) as usize
     }
+}
+
+/// Parse a credential spec in `user:pass@domain` format.
+/// If no `@domain` is given, falls back to `default_domain`.
+///
+/// The `@` that separates password from domain must look like a domain
+/// (contains a dot). This avoids misinterpreting `@` characters within
+/// passwords (e.g., `admin:P@ssw0rd` stays intact).
+fn parse_credential_spec(spec: &str, default_domain: &str) -> Option<InitialCredential> {
+    // Find the first colon — everything before it is the username
+    let colon_pos = spec.find(':')?;
+    let username = &spec[..colon_pos];
+    let rest = &spec[colon_pos + 1..]; // password[@domain]
+
+    // Split domain from password: only if the part after the last '@' contains a dot
+    let (password, domain) = if let Some(at_pos) = rest.rfind('@') {
+        let candidate = &rest[at_pos + 1..];
+        if candidate.contains('.') {
+            (&rest[..at_pos], candidate)
+        } else {
+            (rest, default_domain)
+        }
+    } else {
+        (rest, default_domain)
+    };
+
+    if username.is_empty() || password.is_empty() {
+        return None;
+    }
+    Some(InitialCredential {
+        username: username.to_string(),
+        password: password.to_string(),
+        domain: domain.to_string(),
+    })
 }
 
 /// Parse an environment variable into a numeric type, falling back to `default`.
@@ -169,6 +236,7 @@ mod tests {
             max_deferred_total: 20,
             target_domain: String::new(),
             target_ips: Vec::new(),
+            initial_credential: None,
         }
     }
 
@@ -182,6 +250,7 @@ mod tests {
     #[test]
     fn from_env_plain_and_json_and_missing() {
         // Single test to avoid env var race conditions between parallel tests.
+        std::env::remove_var("ARES_INITIAL_CREDENTIAL");
 
         // Missing → error
         std::env::remove_var("ARES_OPERATION_ID");
@@ -194,6 +263,7 @@ mod tests {
         assert_eq!(c.max_concurrent_tasks, 8);
         assert_eq!(c.heartbeat_interval, Duration::from_secs(30));
         assert!(c.target_ips.is_empty());
+        assert!(c.initial_credential.is_none());
 
         // JSON payload → parsed operation_id, target_domain, target_ips
         let payload = r#"{"operation_id":"op-json-test","target_domain":"contoso.local","target_ips":["192.168.58.1","192.168.58.2"],"model":"gpt-4"}"#;
@@ -203,6 +273,62 @@ mod tests {
         assert_eq!(c.target_domain, "contoso.local");
         assert_eq!(c.target_ips, vec!["192.168.58.1", "192.168.58.2"]);
 
+        // JSON payload with initial credential
+        let payload = r#"{"operation_id":"op-cred","target_domain":"contoso.local","target_ips":[],"initial_username":"admin","initial_password":"Pass123"}"#;
+        std::env::set_var("ARES_OPERATION_ID", payload);
+        let c = OrchestratorConfig::from_env().unwrap();
+        let cred = c.initial_credential.unwrap();
+        assert_eq!(cred.username, "admin");
+        assert_eq!(cred.password, "Pass123");
+        assert_eq!(cred.domain, "contoso.local");
+
+        // Env var credential (ARES_INITIAL_CREDENTIAL)
+        std::env::set_var("ARES_OPERATION_ID", "test-op-2");
+        std::env::set_var("ARES_INITIAL_CREDENTIAL", "user1:secret@fabrikam.local");
+        let c = OrchestratorConfig::from_env().unwrap();
+        let cred = c.initial_credential.unwrap();
+        assert_eq!(cred.username, "user1");
+        assert_eq!(cred.password, "secret");
+        assert_eq!(cred.domain, "fabrikam.local");
+
         std::env::remove_var("ARES_OPERATION_ID");
+        std::env::remove_var("ARES_INITIAL_CREDENTIAL");
+    }
+
+    #[test]
+    fn parse_credential_spec_full() {
+        let cred = parse_credential_spec("admin:P@ssw0rd@contoso.local", "").unwrap();
+        assert_eq!(cred.username, "admin");
+        assert_eq!(cred.password, "P@ssw0rd");
+        assert_eq!(cred.domain, "contoso.local");
+    }
+
+    #[test]
+    fn parse_credential_spec_no_domain() {
+        let cred = parse_credential_spec("admin:P@ssw0rd", "fallback.local").unwrap();
+        assert_eq!(cred.username, "admin");
+        assert_eq!(cred.password, "P@ssw0rd");
+        assert_eq!(cred.domain, "fallback.local");
+    }
+
+    #[test]
+    fn parse_credential_spec_at_in_password() {
+        // rfind('@') splits at the last @, so user:p@ss@domain works
+        let cred = parse_credential_spec("admin:p@ss@contoso.local", "").unwrap();
+        assert_eq!(cred.username, "admin");
+        assert_eq!(cred.password, "p@ss");
+        assert_eq!(cred.domain, "contoso.local");
+    }
+
+    #[test]
+    fn parse_credential_spec_invalid() {
+        // No colon
+        assert!(parse_credential_spec("admin", "").is_none());
+        // Empty username
+        assert!(parse_credential_spec(":pass@domain.local", "").is_none());
+        // Empty password
+        assert!(parse_credential_spec("admin:@domain.local", "").is_none());
+        // Empty password without domain
+        assert!(parse_credential_spec("admin:", "").is_none());
     }
 }

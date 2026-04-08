@@ -45,6 +45,7 @@ const RESULT_TTL: i64 = 60 * 60 * 24;
 /// Run the main task consumption loop until shutdown is signalled.
 pub async fn run_task_loop(
     config: &WorkerConfig,
+    conn: redis::aio::ConnectionManager,
     status_tx: tokio::sync::watch::Sender<WorkerStatus>,
     shutdown: Arc<tokio::sync::Notify>,
 ) -> anyhow::Result<()> {
@@ -55,20 +56,23 @@ pub async fn run_task_loop(
         "Starting task loop"
     );
 
-    let mut conn = connect_redis(&config.redis_url).await?;
+    let mut conn = conn;
 
     // Exponential backoff state for connection errors
     let mut retry_delay = Duration::from_secs(1);
     let max_retry_delay = Duration::from_secs(60);
 
     loop {
-        // Check for shutdown
-        if is_shutdown_signalled(&shutdown) {
-            info!("Task loop: shutdown signalled, finishing");
-            break;
-        }
+        // Race BRPOP against shutdown signal
+        let poll_result = tokio::select! {
+            result = poll_task(&mut conn, &queue_key, config.poll_timeout) => result,
+            _ = shutdown.notified() => {
+                info!("Task loop: shutdown signalled, finishing");
+                break;
+            }
+        };
 
-        match poll_task(&mut conn, &queue_key, config.poll_timeout).await {
+        match poll_result {
             Ok(Some(task)) => {
                 // Reset backoff on successful poll
                 retry_delay = Duration::from_secs(1);
@@ -79,6 +83,7 @@ pub async fn run_task_loop(
                     current_task: Some(task.task_id.clone()),
                 });
 
+                // Execute the task — runs to completion even if shutdown arrives mid-task
                 result_handler::process_task(&mut conn, config, &task).await;
 
                 // Update heartbeat status back to idle
@@ -105,6 +110,7 @@ pub async fn run_task_loop(
                 .any(|kw| error_str.contains(kw));
 
                 if is_conn_error {
+                    // ConnectionManager auto-reconnects; just back off before retrying
                     warn!(
                         delay_secs = retry_delay.as_secs(),
                         "Task loop: connection error, retrying: {e}"
@@ -114,20 +120,12 @@ pub async fn run_task_loop(
                         _ = shutdown.notified() => break,
                     }
                     retry_delay = (retry_delay * 2).min(max_retry_delay);
-
-                    // Try to reconnect
-                    match connect_redis(&config.redis_url).await {
-                        Ok(new_conn) => {
-                            conn = new_conn;
-                            debug!("Task loop: reconnected to Redis");
-                        }
-                        Err(re) => {
-                            error!("Task loop: reconnect failed: {re}");
-                        }
-                    }
                 } else {
                     error!("Task loop: non-connection error: {e}");
-                    tokio::time::sleep(Duration::from_secs(5)).await;
+                    tokio::select! {
+                        _ = tokio::time::sleep(Duration::from_secs(5)) => {}
+                        _ = shutdown.notified() => break,
+                    }
                     retry_delay = Duration::from_secs(1);
                 }
             }
@@ -140,7 +138,7 @@ pub async fn run_task_loop(
 /// BRPOP from the task queue with timeout.
 /// Returns `Ok(None)` on timeout (no task available).
 async fn poll_task(
-    conn: &mut redis::aio::MultiplexedConnection,
+    conn: &mut redis::aio::ConnectionManager,
     queue_key: &str,
     timeout: Duration,
 ) -> anyhow::Result<Option<TaskMessage>> {
@@ -159,23 +157,6 @@ async fn poll_task(
         }
         None => Ok(None),
     }
-}
-
-/// Open a Redis connection.
-async fn connect_redis(url: &str) -> anyhow::Result<redis::aio::MultiplexedConnection> {
-    let client = redis::Client::open(url)?;
-    let conn = client.get_multiplexed_async_connection().await?;
-    Ok(conn)
-}
-
-/// Non-blocking check if shutdown has been signalled.
-/// Uses `Notify` — we peek by trying `notified()` with zero timeout.
-fn is_shutdown_signalled(_shutdown: &Arc<tokio::sync::Notify>) -> bool {
-    // Notify doesn't have a try_recv. We rely on the tokio::select! in the
-    // connection-error branch and the BRPOP timeout to periodically give us
-    // a chance to check. For a clean shutdown on SIGTERM, the main function
-    // drops the task or aborts it.
-    false
 }
 
 #[cfg(test)]

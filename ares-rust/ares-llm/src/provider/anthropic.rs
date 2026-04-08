@@ -3,13 +3,12 @@
 //! Implements the `LlmProvider` trait for the Anthropic Messages API.
 //! See: <https://docs.anthropic.com/en/api/messages>
 
-use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use tracing::debug;
 
 use super::{
-    ChatMessage, ContentPart, LlmProvider, LlmRequest, LlmResponse, Role, StopReason, TokenUsage,
-    ToolCall,
+    ChatMessage, ContentPart, LlmError, LlmProvider, LlmRequest, LlmResponse, Role, StopReason,
+    TokenUsage, ToolCall,
 };
 
 const API_URL: &str = "https://api.anthropic.com/v1/messages";
@@ -198,7 +197,7 @@ fn parse_stop_reason(reason: Option<&str>) -> StopReason {
 
 #[async_trait::async_trait]
 impl LlmProvider for AnthropicProvider {
-    async fn chat(&self, request: &LlmRequest) -> Result<LlmResponse> {
+    async fn chat(&self, request: &LlmRequest) -> Result<LlmResponse, LlmError> {
         let messages: Vec<ApiMessage> = request
             .messages
             .iter()
@@ -231,28 +230,40 @@ impl LlmProvider for AnthropicProvider {
             .json(&api_request)
             .send()
             .await
-            .context("Failed to send request to Anthropic API")?;
+            .map_err(|e| LlmError::Network(e.to_string()))?;
 
         let status = response.status();
+        let retry_after_ms = parse_retry_after(response.headers());
         let body = response
             .text()
             .await
-            .context("Failed to read Anthropic API response body")?;
+            .map_err(|e| LlmError::Network(e.to_string()))?;
 
         if !status.is_success() {
-            if let Ok(err) = serde_json::from_str::<ApiError>(&body) {
-                anyhow::bail!(
-                    "Anthropic API error ({}): {} — {}",
-                    status,
-                    err.error.error_type,
-                    err.error.message
-                );
-            }
-            anyhow::bail!("Anthropic API error ({}): {}", status, body);
+            let message = if let Ok(err) = serde_json::from_str::<ApiError>(&body) {
+                let msg = format!("{} — {}", err.error.error_type, err.error.message);
+                // Classify by error type
+                if err.error.error_type == "request_too_large" {
+                    return Err(LlmError::ContextTooLong(msg));
+                }
+                msg
+            } else {
+                body
+            };
+
+            return Err(match status.as_u16() {
+                429 => LlmError::RateLimited { retry_after_ms },
+                401 => LlmError::AuthError(message),
+                _ => LlmError::ApiError {
+                    status: status.as_u16(),
+                    message,
+                },
+            });
         }
 
-        let api_response: ApiResponse =
-            serde_json::from_str(&body).context("Failed to parse Anthropic API response")?;
+        let api_response: ApiResponse = serde_json::from_str(&body).map_err(|e| {
+            LlmError::Other(anyhow::anyhow!("Failed to parse Anthropic response: {e}"))
+        })?;
 
         // Extract text and tool calls from response blocks
         let mut text_parts = Vec::new();
@@ -303,6 +314,15 @@ impl LlmProvider for AnthropicProvider {
     fn name(&self) -> &str {
         "anthropic"
     }
+}
+
+/// Parse the `retry-after` header value to milliseconds.
+fn parse_retry_after(headers: &reqwest::header::HeaderMap) -> Option<u64> {
+    headers
+        .get("retry-after")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.parse::<f64>().ok())
+        .map(|secs| (secs * 1000.0) as u64)
 }
 
 // ---------------------------------------------------------------------------

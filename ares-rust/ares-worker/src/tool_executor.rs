@@ -67,6 +67,7 @@ struct ToolExecResponse {
 /// back to the per-call mailbox `ares:tool_results:{call_id}`.
 pub async fn run_tool_exec_loop(
     config: &WorkerConfig,
+    conn: redis::aio::ConnectionManager,
     status_tx: tokio::sync::watch::Sender<WorkerStatus>,
     shutdown: Arc<tokio::sync::Notify>,
 ) -> anyhow::Result<()> {
@@ -77,7 +78,7 @@ pub async fn run_tool_exec_loop(
         "Starting tool executor loop"
     );
 
-    let mut conn = connect_redis(&config.redis_url).await?;
+    let mut conn = conn;
 
     // Exponential backoff state for connection errors
     let mut retry_delay = Duration::from_secs(1);
@@ -129,6 +130,7 @@ pub async fn run_tool_exec_loop(
                 .any(|kw| error_str.contains(kw));
 
                 if is_conn_error {
+                    // ConnectionManager auto-reconnects; just back off before retrying
                     warn!(
                         delay_secs = retry_delay.as_secs(),
                         "Tool executor: connection error, retrying: {e}"
@@ -138,16 +140,6 @@ pub async fn run_tool_exec_loop(
                         _ = shutdown.notified() => return Ok(()),
                     }
                     retry_delay = (retry_delay * 2).min(max_retry_delay);
-
-                    match connect_redis(&config.redis_url).await {
-                        Ok(new_conn) => {
-                            conn = new_conn;
-                            debug!("Tool executor: reconnected to Redis");
-                        }
-                        Err(re) => {
-                            error!("Tool executor: reconnect failed: {re}");
-                        }
-                    }
                 } else {
                     error!("Tool executor: non-connection error: {e}");
                     tokio::time::sleep(Duration::from_secs(5)).await;
@@ -160,7 +152,7 @@ pub async fn run_tool_exec_loop(
 
 /// BRPOP a single tool execution request from the queue.
 async fn poll_tool_request(
-    conn: &mut redis::aio::MultiplexedConnection,
+    conn: &mut redis::aio::ConnectionManager,
     queue_key: &str,
     timeout: Duration,
 ) -> anyhow::Result<Option<ToolExecRequest>> {
@@ -186,10 +178,7 @@ async fn poll_tool_request(
 }
 
 /// Execute a tool call and push the result to Redis.
-async fn execute_and_respond(
-    conn: &mut redis::aio::MultiplexedConnection,
-    request: &ToolExecRequest,
-) {
+async fn execute_and_respond(conn: &mut redis::aio::ConnectionManager, request: &ToolExecRequest) {
     info!(
         tool = %request.tool_name,
         call_id = %request.call_id,
@@ -271,20 +260,13 @@ async fn execute_and_respond(
 
 /// LPUSH result and set TTL.
 async fn push_result(
-    conn: &mut redis::aio::MultiplexedConnection,
+    conn: &mut redis::aio::ConnectionManager,
     result_key: &str,
     result_json: &str,
 ) -> anyhow::Result<()> {
     conn.lpush::<_, _, ()>(result_key, result_json).await?;
     conn.expire::<_, ()>(result_key, RESULT_TTL).await?;
     Ok(())
-}
-
-/// Open a Redis connection.
-async fn connect_redis(url: &str) -> anyhow::Result<redis::aio::MultiplexedConnection> {
-    let client = redis::Client::open(url)?;
-    let conn = client.get_multiplexed_async_connection().await?;
-    Ok(conn)
 }
 
 // ─── Tests ──────────────────────────────────────────────────────────────────

@@ -7,7 +7,7 @@ use anyhow::Result;
 use serde_json::json;
 
 use ares_llm::{
-    run_agent_loop, AgentLoopConfig, LlmProvider, LlmRequest, LlmResponse, LoopEndReason,
+    run_agent_loop, AgentLoopConfig, LlmError, LlmProvider, LlmRequest, LlmResponse, LoopEndReason,
     StopReason, TokenUsage, ToolCall, ToolDefinition, ToolDispatcher, ToolExecResult,
 };
 
@@ -30,11 +30,11 @@ impl MockProvider {
 
 #[async_trait::async_trait]
 impl LlmProvider for MockProvider {
-    async fn chat(&self, _request: &LlmRequest) -> Result<LlmResponse> {
+    async fn chat(&self, _request: &LlmRequest) -> Result<LlmResponse, LlmError> {
         let mut queue = self.responses.lock().unwrap();
-        queue
-            .pop_front()
-            .ok_or_else(|| anyhow::anyhow!("MockProvider: no more queued responses"))
+        queue.pop_front().ok_or_else(|| {
+            LlmError::Other(anyhow::anyhow!("MockProvider: no more queued responses"))
+        })
     }
 
     fn name(&self) -> &str {
@@ -95,6 +95,16 @@ fn default_config(max_steps: u32) -> AgentLoopConfig {
         max_steps,
         max_tokens: 4096,
         temperature: None,
+        retry: ares_llm::agent_loop::RetryConfig {
+            max_retries: 0, // No retries in tests by default (fast failure)
+            base_delay_ms: 10,
+            max_delay_ms: 100,
+        },
+        context: ares_llm::agent_loop::ContextConfig {
+            max_context_tokens: 0,    // No limit in tests by default
+            max_tool_output_chars: 0, // No truncation in tests
+            min_recent_messages: 10,
+        },
     }
 }
 
@@ -574,4 +584,142 @@ async fn test_llm_error_returns_error_outcome() {
 
     assert_eq!(outcome.steps, 1);
     assert_eq!(outcome.tool_calls_dispatched, 0);
+}
+
+// ---------------------------------------------------------------------------
+// Test 8: Rate limit retry succeeds on second attempt
+// ---------------------------------------------------------------------------
+
+/// Mock provider that fails with RateLimited on the first N calls, then succeeds.
+struct RetryMockProvider {
+    fail_count: std::sync::atomic::AtomicU32,
+    failures_before_success: u32,
+    success_response: Mutex<Option<LlmResponse>>,
+}
+
+impl RetryMockProvider {
+    fn new(failures_before_success: u32, success_response: LlmResponse) -> Self {
+        Self {
+            fail_count: std::sync::atomic::AtomicU32::new(0),
+            failures_before_success,
+            success_response: Mutex::new(Some(success_response)),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl LlmProvider for RetryMockProvider {
+    async fn chat(&self, _request: &LlmRequest) -> Result<LlmResponse, LlmError> {
+        let attempt = self
+            .fail_count
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if attempt < self.failures_before_success {
+            Err(LlmError::RateLimited {
+                retry_after_ms: Some(10),
+            })
+        } else {
+            let resp = self.success_response.lock().unwrap().take().unwrap();
+            Ok(resp)
+        }
+    }
+
+    fn name(&self) -> &str {
+        "retry-mock"
+    }
+}
+
+#[tokio::test]
+async fn test_rate_limit_retry_succeeds() {
+    // First call returns 429, second call returns EndTurn
+    let success = LlmResponse {
+        content: "Recovered after rate limit.".into(),
+        tool_calls: vec![],
+        stop_reason: StopReason::EndTurn,
+        usage: default_usage(),
+    };
+
+    let provider = RetryMockProvider::new(2, success);
+    let dispatcher = Arc::new(MockDispatcher::new(vec![]));
+
+    let mut config = default_config(10);
+    config.retry = ares_llm::agent_loop::RetryConfig {
+        max_retries: 3,
+        base_delay_ms: 10,
+        max_delay_ms: 50,
+    };
+
+    let outcome = run_agent_loop(
+        &provider,
+        dispatcher,
+        &config,
+        "System prompt.",
+        "Task prompt.",
+        "recon",
+        "task-recon-008",
+        &test_tools(),
+    )
+    .await;
+
+    match &outcome.reason {
+        LoopEndReason::EndTurn { content } => {
+            assert!(content.contains("Recovered"));
+        }
+        other => panic!("Expected EndTurn after retry, got: {:?}", other),
+    }
+
+    // Should have taken 1 step (the retry is transparent to the loop)
+    assert_eq!(outcome.steps, 1);
+}
+
+// ---------------------------------------------------------------------------
+// Test 9: Non-retryable error fails immediately
+// ---------------------------------------------------------------------------
+
+/// Mock provider that always returns AuthError.
+struct AuthErrorMockProvider;
+
+#[async_trait::async_trait]
+impl LlmProvider for AuthErrorMockProvider {
+    async fn chat(&self, _request: &LlmRequest) -> Result<LlmResponse, LlmError> {
+        Err(LlmError::AuthError("Invalid API key".into()))
+    }
+
+    fn name(&self) -> &str {
+        "auth-error-mock"
+    }
+}
+
+#[tokio::test]
+async fn test_auth_error_fails_immediately() {
+    let provider = AuthErrorMockProvider;
+    let dispatcher = Arc::new(MockDispatcher::new(vec![]));
+
+    let mut config = default_config(10);
+    config.retry = ares_llm::agent_loop::RetryConfig {
+        max_retries: 5, // Even with retries configured, auth errors should not retry
+        base_delay_ms: 10,
+        max_delay_ms: 50,
+    };
+
+    let outcome = run_agent_loop(
+        &provider,
+        dispatcher,
+        &config,
+        "System prompt.",
+        "Task prompt.",
+        "recon",
+        "task-recon-009",
+        &test_tools(),
+    )
+    .await;
+
+    match &outcome.reason {
+        LoopEndReason::Error(msg) => {
+            assert!(msg.contains("authentication failed"));
+        }
+        other => panic!("Expected Error with auth message, got: {:?}", other),
+    }
+
+    // Should have taken exactly 1 step (no retries for auth errors)
+    assert_eq!(outcome.steps, 1);
 }

@@ -10,6 +10,7 @@
 
 mod config;
 mod heartbeat;
+mod hosts;
 mod task_loop;
 mod tool_executor;
 
@@ -40,22 +41,35 @@ async fn main() -> anyhow::Result<()> {
         "Ares worker starting"
     );
 
+    // Single shared Redis connection — cloned cheaply to all subsystems
+    let redis_client = redis::Client::open(config.redis_url.as_str())?;
+    let conn = redis::aio::ConnectionManager::new(redis_client).await?;
+
     // Shared shutdown signal
     let shutdown = Arc::new(tokio::sync::Notify::new());
-    let shutdown_heartbeat = Arc::clone(&shutdown);
     let shutdown_signal = Arc::clone(&shutdown);
 
     // Spawn background heartbeat
     let (_heartbeat_handle, status_tx) = heartbeat::spawn_heartbeat(
-        config.redis_url.clone(),
+        conn.clone(),
         config.agent_name.clone(),
         config.pod_name.clone(),
         config.worker_role.clone(),
         config.operation_id.clone(),
         config.heartbeat_interval,
         config.heartbeat_ttl,
-        shutdown_heartbeat,
+        Arc::clone(&shutdown),
     );
+
+    // Spawn /etc/hosts sync if we have an operation ID
+    let _hosts_handle = config.operation_id.as_ref().map(|op_id| {
+        hosts::spawn_hosts_sync(
+            conn.clone(),
+            op_id.clone(),
+            config.agent_name.clone(),
+            Arc::clone(&shutdown),
+        )
+    });
 
     // Spawn SIGTERM/SIGINT handler
     let shutdown_for_signal = Arc::clone(&shutdown_signal);
@@ -68,10 +82,10 @@ async fn main() -> anyhow::Result<()> {
     // Run the appropriate loop based on worker mode
     let result = match config.mode {
         config::WorkerMode::Task => {
-            task_loop::run_task_loop(&config, status_tx, shutdown_signal).await
+            task_loop::run_task_loop(&config, conn, status_tx, shutdown_signal).await
         }
         config::WorkerMode::ToolExec => {
-            tool_executor::run_tool_exec_loop(&config, status_tx, shutdown_signal).await
+            tool_executor::run_tool_exec_loop(&config, conn, status_tx, shutdown_signal).await
         }
     };
 

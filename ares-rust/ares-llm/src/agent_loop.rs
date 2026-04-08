@@ -17,7 +17,8 @@ use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
 
 use crate::provider::{
-    ChatMessage, LlmProvider, LlmRequest, Role, StopReason, TokenUsage, ToolCall,
+    ChatMessage, LlmError, LlmProvider, LlmRequest, LlmResponse, Role, StopReason, TokenUsage,
+    ToolCall,
 };
 use crate::tool_registry;
 
@@ -36,6 +37,10 @@ pub struct AgentLoopConfig {
     pub max_tokens: u32,
     /// Optional temperature override.
     pub temperature: Option<f32>,
+    /// Retry configuration for transient LLM errors (rate limits, network).
+    pub retry: RetryConfig,
+    /// Context window management configuration.
+    pub context: ContextConfig,
 }
 
 impl Default for AgentLoopConfig {
@@ -45,6 +50,52 @@ impl Default for AgentLoopConfig {
             max_steps: 75,
             max_tokens: 4096,
             temperature: None,
+            retry: RetryConfig::default(),
+            context: ContextConfig::default(),
+        }
+    }
+}
+
+/// Context window management to prevent unbounded message growth.
+#[derive(Debug, Clone)]
+pub struct ContextConfig {
+    /// Maximum context budget in estimated tokens (0 = no limit).
+    /// When the conversation exceeds this, older messages in the middle are dropped.
+    pub max_context_tokens: u32,
+    /// Maximum chars for a single tool result before truncation.
+    /// Large tool outputs (nmap scans, secretsdump) are truncated to this limit.
+    pub max_tool_output_chars: usize,
+    /// Minimum number of recent messages to always keep (never truncated).
+    pub min_recent_messages: usize,
+}
+
+impl Default for ContextConfig {
+    fn default() -> Self {
+        Self {
+            max_context_tokens: 180_000,   // Conservative for 200k models
+            max_tool_output_chars: 30_000, // ~7,500 tokens per tool output
+            min_recent_messages: 10,
+        }
+    }
+}
+
+/// Retry configuration for LLM calls with exponential backoff + jitter.
+#[derive(Debug, Clone)]
+pub struct RetryConfig {
+    /// Maximum number of retries for retryable errors.
+    pub max_retries: u32,
+    /// Base delay in milliseconds (doubles each retry).
+    pub base_delay_ms: u64,
+    /// Maximum delay cap in milliseconds.
+    pub max_delay_ms: u64,
+}
+
+impl Default for RetryConfig {
+    fn default() -> Self {
+        Self {
+            max_retries: 5,
+            base_delay_ms: 1_000,
+            max_delay_ms: 60_000,
         }
     }
 }
@@ -271,6 +322,9 @@ pub async fn run_agent_loop(
 
         steps += 1;
 
+        // Trim conversation if approaching context limit
+        trim_conversation(&mut messages, system_prompt, tools, &config.context);
+
         // Build LLM request
         let mut request = LlmRequest::new(&config.model);
         request.system = Some(system_prompt.to_string());
@@ -286,11 +340,11 @@ pub async fn run_agent_loop(
             "Agent loop step"
         );
 
-        // Call LLM
-        let response = match provider.chat(&request).await {
+        // Call LLM with retry on transient errors
+        let response = match call_with_retry(provider, &request, &config.retry, task_id).await {
             Ok(r) => r,
             Err(e) => {
-                warn!(err = %e, task_id = task_id, "LLM call failed");
+                warn!(err = %e, task_id = task_id, "LLM call failed after retries");
                 return AgentLoopOutcome {
                     reason: LoopEndReason::Error(e.to_string()),
                     total_usage,
@@ -386,10 +440,13 @@ pub async fn run_agent_loop(
             }
 
             // Add tool results to messages in the original call order
-            // and accumulate any structured discoveries
+            // and accumulate any structured discoveries.
+            // Truncate large outputs to prevent context window exhaustion.
             for call in &external {
                 if let Some(dr) = results.iter().find(|r| r.call_id == call.id) {
-                    messages.push(ChatMessage::tool_result(&call.id, &dr.output));
+                    let output =
+                        truncate_tool_output(&dr.output, config.context.max_tool_output_chars);
+                    messages.push(ChatMessage::tool_result(&call.id, &output));
                     if let Some(disc) = &dr.discoveries {
                         all_discoveries.push(disc.clone());
                     }
@@ -440,6 +497,200 @@ pub async fn run_agent_loop(
             }
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Context window management
+// ---------------------------------------------------------------------------
+
+/// Estimate token count for a string using the chars/4 heuristic.
+/// This approximation works well for English text and code with
+/// Anthropic and OpenAI tokenizers.
+fn estimate_tokens(text: &str) -> u32 {
+    // chars/4 is a widely-used approximation; slightly conservative
+    (text.len() as u32).div_ceil(4)
+}
+
+/// Estimate total tokens for a message.
+fn estimate_message_tokens(msg: &ChatMessage) -> u32 {
+    let mut tokens = 4u32; // Role overhead
+    if let Some(ref content) = msg.content {
+        tokens += estimate_tokens(content);
+    }
+    if let Some(ref parts) = msg.parts {
+        for part in parts {
+            tokens += match part {
+                crate::provider::ContentPart::Text { text } => estimate_tokens(text),
+                crate::provider::ContentPart::ToolResult { content, .. } => {
+                    estimate_tokens(content) + 10
+                }
+                crate::provider::ContentPart::ToolUse { input, .. } => {
+                    estimate_tokens(&input.to_string()) + 10
+                }
+            };
+        }
+    }
+    tokens
+}
+
+/// Estimate total tokens for the full context (system + messages + tools).
+fn estimate_context_tokens(
+    system: &str,
+    messages: &[ChatMessage],
+    tools: &[crate::ToolDefinition],
+) -> u32 {
+    let mut total = estimate_tokens(system);
+    for msg in messages {
+        total += estimate_message_tokens(msg);
+    }
+    // Tool definitions contribute to context (~50 tokens per tool avg)
+    total += tools.len() as u32 * 50;
+    total
+}
+
+/// Truncate a tool output string to fit within the character limit.
+/// Keeps the beginning and end, inserting a truncation notice in the middle.
+fn truncate_tool_output(output: &str, max_chars: usize) -> String {
+    if output.len() <= max_chars || max_chars == 0 {
+        return output.to_string();
+    }
+
+    let keep = max_chars.saturating_sub(80); // Reserve space for notice
+    let head = keep * 2 / 3;
+    let tail = keep - head;
+
+    let head_str = &output[..head.min(output.len())];
+    let tail_start = output.len().saturating_sub(tail);
+    let tail_str = &output[tail_start..];
+
+    let omitted = output.len() - head - tail;
+    format!(
+        "{head_str}\n\n[... {omitted} characters truncated — showing first {head} and last {tail} chars ...]\n\n{tail_str}"
+    )
+}
+
+/// Trim the conversation to fit within the token budget.
+///
+/// Strategy: keep the first message (task prompt) and the last N messages
+/// (most recent context). Drop messages in the middle, replacing them with
+/// a summary marker.
+fn trim_conversation(
+    messages: &mut Vec<ChatMessage>,
+    system: &str,
+    tools: &[crate::ToolDefinition],
+    config: &ContextConfig,
+) {
+    if config.max_context_tokens == 0 {
+        return;
+    }
+
+    let total = estimate_context_tokens(system, messages, tools);
+    if total <= config.max_context_tokens {
+        return;
+    }
+
+    let min_keep = config.min_recent_messages;
+    if messages.len() <= min_keep + 1 {
+        // Not enough messages to trim
+        return;
+    }
+
+    // Keep first message + last min_keep messages, drop the middle
+    let drop_end = messages.len().saturating_sub(min_keep);
+    if drop_end <= 1 {
+        return;
+    }
+
+    let dropped = drop_end - 1;
+    let summary = format!(
+        "[Context trimmed: {dropped} earlier messages removed to stay within token budget. \
+         The conversation continues from the most recent exchanges.]"
+    );
+
+    // Replace middle section with summary
+    messages.splice(
+        1..drop_end,
+        std::iter::once(ChatMessage::text(crate::provider::Role::User, &summary)),
+    );
+
+    debug!(
+        dropped = dropped,
+        remaining = messages.len(),
+        estimated_tokens = estimate_context_tokens(system, messages, tools),
+        "Trimmed conversation context"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Retry logic
+// ---------------------------------------------------------------------------
+
+/// Call the LLM with retry on transient errors (rate limits, network failures).
+///
+/// Uses exponential backoff with jitter. Respects `Retry-After` headers from
+/// rate-limited responses. Non-retryable errors (auth, context too long) fail
+/// immediately.
+async fn call_with_retry(
+    provider: &dyn LlmProvider,
+    request: &LlmRequest,
+    config: &RetryConfig,
+    task_id: &str,
+) -> Result<LlmResponse, LlmError> {
+    let mut last_err: Option<LlmError> = None;
+
+    for attempt in 0..=config.max_retries {
+        match provider.chat(request).await {
+            Ok(response) => return Ok(response),
+            Err(e) => {
+                if !e.is_retryable() || attempt == config.max_retries {
+                    return Err(e);
+                }
+
+                // Calculate delay: use Retry-After if available, otherwise exponential backoff
+                let backoff_ms = config.base_delay_ms.saturating_mul(1u64 << attempt.min(10));
+                let delay_ms = e
+                    .retry_after_ms()
+                    .unwrap_or(backoff_ms)
+                    .min(config.max_delay_ms);
+
+                // Add jitter: ±25% of the delay
+                let jitter = delay_ms / 4;
+                let jittered = if jitter > 0 {
+                    let offset =
+                        (simple_hash(attempt, task_id) % (jitter * 2)) as i64 - jitter as i64;
+                    (delay_ms as i64 + offset).max(100) as u64
+                } else {
+                    delay_ms
+                };
+
+                warn!(
+                    err = %e,
+                    attempt = attempt + 1,
+                    max_retries = config.max_retries,
+                    delay_ms = jittered,
+                    task_id = task_id,
+                    "LLM call failed, retrying"
+                );
+
+                tokio::time::sleep(tokio::time::Duration::from_millis(jittered)).await;
+                last_err = Some(e);
+            }
+        }
+    }
+
+    Err(last_err.unwrap_or_else(|| LlmError::Other(anyhow::anyhow!("retry exhausted"))))
+}
+
+/// Simple deterministic hash for jitter (avoids rand dependency).
+fn simple_hash(attempt: u32, task_id: &str) -> u64 {
+    let mut h: u64 = 0xcbf29ce484222325;
+    for b in task_id.bytes() {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    h ^= attempt as u64;
+    h = h.wrapping_mul(0x100000001b3);
+    h
 }
 
 // ---------------------------------------------------------------------------
@@ -524,5 +775,181 @@ mod tests {
         let config = AgentLoopConfig::default();
         assert_eq!(config.max_steps, 75);
         assert_eq!(config.max_tokens, 4096);
+        assert_eq!(config.retry.max_retries, 5);
+        assert_eq!(config.retry.base_delay_ms, 1_000);
+        assert_eq!(config.retry.max_delay_ms, 60_000);
+    }
+
+    #[test]
+    fn test_retry_config_defaults() {
+        let config = RetryConfig::default();
+        assert_eq!(config.max_retries, 5);
+        assert_eq!(config.base_delay_ms, 1_000);
+        assert_eq!(config.max_delay_ms, 60_000);
+    }
+
+    #[test]
+    fn test_llm_error_retryable() {
+        assert!(LlmError::RateLimited {
+            retry_after_ms: Some(1000)
+        }
+        .is_retryable());
+        assert!(LlmError::Network("timeout".into()).is_retryable());
+        assert!(LlmError::ApiError {
+            status: 500,
+            message: "internal error".into()
+        }
+        .is_retryable());
+        assert!(LlmError::ApiError {
+            status: 502,
+            message: "bad gateway".into()
+        }
+        .is_retryable());
+        assert!(!LlmError::AuthError("bad key".into()).is_retryable());
+        assert!(!LlmError::ContextTooLong("too big".into()).is_retryable());
+        assert!(!LlmError::ApiError {
+            status: 400,
+            message: "bad request".into()
+        }
+        .is_retryable());
+    }
+
+    #[test]
+    fn test_llm_error_retry_after() {
+        assert_eq!(
+            LlmError::RateLimited {
+                retry_after_ms: Some(5000)
+            }
+            .retry_after_ms(),
+            Some(5000)
+        );
+        assert_eq!(
+            LlmError::RateLimited {
+                retry_after_ms: None
+            }
+            .retry_after_ms(),
+            None
+        );
+        assert_eq!(LlmError::Network("err".into()).retry_after_ms(), None);
+    }
+
+    #[test]
+    fn test_simple_hash_deterministic() {
+        let h1 = simple_hash(0, "task-001");
+        let h2 = simple_hash(0, "task-001");
+        assert_eq!(h1, h2);
+
+        let h3 = simple_hash(1, "task-001");
+        assert_ne!(h1, h3);
+
+        let h4 = simple_hash(0, "task-002");
+        assert_ne!(h1, h4);
+    }
+
+    // Context management tests
+
+    #[test]
+    fn test_estimate_tokens() {
+        assert_eq!(estimate_tokens(""), 0); // (0 + 3) / 4 = 0
+        assert_eq!(estimate_tokens("hello"), 2); // (5 + 3) / 4 = 2
+        assert_eq!(estimate_tokens(&"a".repeat(400)), 100); // (400 + 3) / 4 = 100
+    }
+
+    #[test]
+    fn test_truncate_tool_output_short() {
+        let output = "short output";
+        assert_eq!(truncate_tool_output(output, 100), output);
+    }
+
+    #[test]
+    fn test_truncate_tool_output_no_limit() {
+        let output = "a".repeat(100_000);
+        assert_eq!(truncate_tool_output(&output, 0), output);
+    }
+
+    #[test]
+    fn test_truncate_tool_output_long() {
+        let output = "a".repeat(50_000);
+        let truncated = truncate_tool_output(&output, 1000);
+        assert!(truncated.len() < 1200); // Slightly over due to notice
+        assert!(truncated.contains("truncated"));
+        assert!(truncated.starts_with("aaa")); // Head preserved
+        assert!(truncated.ends_with("aaa")); // Tail preserved
+    }
+
+    #[test]
+    fn test_context_config_defaults() {
+        let config = ContextConfig::default();
+        assert_eq!(config.max_context_tokens, 180_000);
+        assert_eq!(config.max_tool_output_chars, 30_000);
+        assert_eq!(config.min_recent_messages, 10);
+    }
+
+    #[test]
+    fn test_trim_conversation_under_limit() {
+        let mut messages = vec![
+            ChatMessage::text(Role::User, "task prompt"),
+            ChatMessage::text(Role::Assistant, "I'll scan."),
+            ChatMessage::tool_result("call_1", "scan result"),
+        ];
+        let config = ContextConfig {
+            max_context_tokens: 1_000_000,
+            max_tool_output_chars: 0,
+            min_recent_messages: 10,
+        };
+        let original_len = messages.len();
+        trim_conversation(&mut messages, "system", &[], &config);
+        assert_eq!(messages.len(), original_len); // No change
+    }
+
+    #[test]
+    fn test_trim_conversation_disabled() {
+        let mut messages = vec![ChatMessage::text(
+            Role::User,
+            "a".repeat(1_000_000).as_str(),
+        )];
+        let config = ContextConfig {
+            max_context_tokens: 0, // Disabled
+            max_tool_output_chars: 0,
+            min_recent_messages: 10,
+        };
+        trim_conversation(&mut messages, "system", &[], &config);
+        assert_eq!(messages.len(), 1);
+    }
+
+    #[test]
+    fn test_trim_conversation_drops_middle() {
+        // Create a conversation that exceeds the limit
+        let mut messages = Vec::new();
+        messages.push(ChatMessage::text(Role::User, "task prompt"));
+        for i in 0..20 {
+            messages.push(ChatMessage::text(
+                Role::Assistant,
+                format!("Step {i}: {}", "x".repeat(500)),
+            ));
+            messages.push(ChatMessage::tool_result(
+                format!("call_{i}"),
+                "y".repeat(500),
+            ));
+        }
+        // 1 + 40 = 41 messages
+
+        let config = ContextConfig {
+            max_context_tokens: 100, // Very low limit to force trimming
+            max_tool_output_chars: 0,
+            min_recent_messages: 4,
+        };
+
+        trim_conversation(&mut messages, "system", &[], &config);
+
+        // Should have: first message + summary + last 4 messages = 6
+        assert_eq!(messages.len(), 6);
+        // First message preserved
+        assert_eq!(messages[0].text_content().unwrap(), "task prompt");
+        // Summary marker inserted
+        assert!(messages[1]
+            .text_content()
+            .unwrap()
+            .contains("Context trimmed"));
     }
 }

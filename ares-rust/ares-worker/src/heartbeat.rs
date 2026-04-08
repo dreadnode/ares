@@ -13,7 +13,7 @@ use chrono::Utc;
 use redis::AsyncCommands;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
-use tracing::{debug, error, warn};
+use tracing::{debug, warn};
 
 /// Heartbeat key prefix — matches `RedisTaskQueue.HEARTBEAT_PREFIX` in Python.
 const HEARTBEAT_PREFIX: &str = "ares:heartbeat";
@@ -47,7 +47,7 @@ pub struct HeartbeatHandle {
 /// the task loop uses to update current status.
 #[allow(clippy::too_many_arguments)]
 pub fn spawn_heartbeat(
-    redis_url: String,
+    conn: redis::aio::ConnectionManager,
     agent_name: String,
     pod_name: String,
     role: String,
@@ -59,7 +59,7 @@ pub fn spawn_heartbeat(
     let (status_tx, status_rx) = watch::channel(WorkerStatus::default());
 
     let handle = tokio::spawn(heartbeat_loop(
-        redis_url,
+        conn,
         agent_name,
         pod_name,
         role,
@@ -75,7 +75,7 @@ pub fn spawn_heartbeat(
 
 #[allow(clippy::too_many_arguments)]
 async fn heartbeat_loop(
-    redis_url: String,
+    mut conn: redis::aio::ConnectionManager,
     agent_name: String,
     pod_name: String,
     role: String,
@@ -88,24 +88,7 @@ async fn heartbeat_loop(
     let heartbeat_key = format!("{HEARTBEAT_PREFIX}:{agent_name}");
     let ttl_secs = ttl.as_secs() as i64;
 
-    // Connect to Redis with retry
-    let mut conn = loop {
-        match connect_redis(&redis_url).await {
-            Ok(c) => break c,
-            Err(e) => {
-                warn!("Heartbeat: failed to connect to Redis, retrying in 5s: {e}");
-                tokio::select! {
-                    _ = tokio::time::sleep(Duration::from_secs(5)) => {}
-                    _ = shutdown.notified() => {
-                        debug!("Heartbeat: shutdown before initial connection");
-                        return;
-                    }
-                }
-            }
-        }
-    };
-
-    debug!("Heartbeat: connected, writing to {heartbeat_key} every {interval:?}");
+    debug!("Heartbeat: writing to {heartbeat_key} every {interval:?}");
 
     let mut ticker = tokio::time::interval(interval);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -145,13 +128,8 @@ async fn heartbeat_loop(
                 debug!("Heartbeat: {agent_name} -> {}", status.status);
             }
             Err(e) => {
-                warn!("Heartbeat: Redis write failed, reconnecting: {e}");
-                match connect_redis(&redis_url).await {
-                    Ok(new_conn) => conn = new_conn,
-                    Err(re) => {
-                        error!("Heartbeat: reconnect failed: {re}");
-                    }
-                }
+                // ConnectionManager auto-reconnects on next use
+                warn!("Heartbeat: Redis write failed: {e}");
             }
         }
     }
@@ -174,10 +152,4 @@ fn build_heartbeat_json(
         "timestamp": Utc::now().to_rfc3339(),
     })
     .to_string()
-}
-
-/// Open a Redis connection from a URL string.
-async fn connect_redis(url: &str) -> Result<redis::aio::MultiplexedConnection, redis::RedisError> {
-    let client = redis::Client::open(url)?;
-    client.get_multiplexed_async_connection().await
 }

@@ -14,7 +14,7 @@ use super::{RESULT_QUEUE_PREFIX, RESULT_TTL, TASK_STATUS_PREFIX, TASK_STATUS_TTL
 
 /// Process a single task: set status, run agent, push result.
 pub async fn process_task(
-    conn: &mut redis::aio::MultiplexedConnection,
+    conn: &mut redis::aio::ConnectionManager,
     config: &WorkerConfig,
     task: &TaskMessage,
 ) {
@@ -179,7 +179,7 @@ pub async fn process_task(
 
 /// Push a result to the result queue and set TTL.
 async fn push_result(
-    conn: &mut redis::aio::MultiplexedConnection,
+    conn: &mut redis::aio::ConnectionManager,
     result_key: &str,
     result_json: &str,
 ) -> anyhow::Result<()> {
@@ -191,7 +191,7 @@ async fn push_result(
 /// Set task status in Redis with TTL.
 /// Matches Python's `set_task_status` — writes JSON to `ares:task_status:{task_id}`.
 async fn set_task_status(
-    conn: &mut redis::aio::MultiplexedConnection,
+    conn: &mut redis::aio::ConnectionManager,
     task_id: &str,
     status: &str,
     extra_fields: &serde_json::Value,

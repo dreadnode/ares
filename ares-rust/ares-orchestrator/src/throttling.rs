@@ -293,6 +293,7 @@ mod tests {
             max_deferred_total: 20,
             target_domain: String::new(),
             target_ips: Vec::new(),
+            initial_credential: None,
         });
         let tracker = ActiveTaskTracker::new();
         (Throttler::new(config, tracker.clone()), tracker)

@@ -71,9 +71,27 @@ async fn main() -> Result<()> {
     // --- Configuration ---
     let config =
         Arc::new(OrchestratorConfig::from_env().context("Failed to load config from environment")?);
+
+    // Load the YAML config (optional — provides agent definitions, vuln priorities, etc.)
+    let ares_config = match ares_core::config::AresConfig::from_env() {
+        Ok(cfg) => {
+            info!(
+                config_name = %cfg.operation.name,
+                agent_roles = cfg.agents.len(),
+                "Loaded YAML config"
+            );
+            Some(Arc::new(cfg))
+        }
+        Err(e) => {
+            info!("No YAML config loaded (using env vars only): {e}");
+            None
+        }
+    };
+
     info!(
         operation_id = %config.operation_id,
         max_concurrent = config.max_concurrent_tasks,
+        has_yaml_config = ares_config.is_some(),
         "Configuration loaded"
     );
 
@@ -128,6 +146,30 @@ async fn main() -> Result<()> {
         }
     }
 
+    // --- Inject initial credential (if provided) ---
+    if let Some(ref cred) = config.initial_credential {
+        let credential = ares_core::models::Credential {
+            id: uuid::Uuid::new_v4().to_string(),
+            username: cred.username.clone(),
+            password: cred.password.clone(),
+            domain: cred.domain.clone(),
+            source: "initial".to_string(),
+            discovered_at: Some(chrono::Utc::now()),
+            is_admin: false,
+            parent_id: None,
+            attack_step: 0,
+        };
+        match shared_state.publish_credential(&queue, credential).await {
+            Ok(true) => info!(
+                username = %cred.username,
+                domain = %cred.domain,
+                "Seeded initial credential"
+            ),
+            Ok(false) => info!("Initial credential already exists (dedup)"),
+            Err(e) => warn!("Failed to seed initial credential: {e}"),
+        }
+    }
+
     // Write operation metadata to Redis so workers can discover us
     bootstrap_meta(&queue, &config).await?;
 
@@ -173,6 +215,7 @@ async fn main() -> Result<()> {
         deferred.clone(),
         shared_state.clone(),
         config.clone(),
+        ares_config.clone(),
         llm_runner,
     ));
 

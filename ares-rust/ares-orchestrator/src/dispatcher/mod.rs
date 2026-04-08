@@ -26,6 +26,9 @@ pub struct Dispatcher {
     pub deferred: Arc<DeferredQueue>,
     pub state: SharedState,
     pub config: Arc<OrchestratorConfig>,
+    /// YAML config (agent roles, vulnerability priorities, context management).
+    /// `None` if no YAML config file was found at startup.
+    pub ares_config: Option<Arc<ares_core::config::AresConfig>>,
     /// Notifies auto_credential_access to wake up when new creds arrive.
     pub credential_access_notify: Arc<Notify>,
     /// LLM runner — drives tasks through the Rust agent loop.
@@ -33,6 +36,7 @@ pub struct Dispatcher {
 }
 
 impl Dispatcher {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         queue: TaskQueue,
         tracker: ActiveTaskTracker,
@@ -40,6 +44,7 @@ impl Dispatcher {
         deferred: Arc<DeferredQueue>,
         state: SharedState,
         config: Arc<OrchestratorConfig>,
+        ares_config: Option<Arc<ares_core::config::AresConfig>>,
         llm_runner: Arc<LlmTaskRunner>,
     ) -> Self {
         Self {
@@ -49,6 +54,7 @@ impl Dispatcher {
             deferred,
             state,
             config,
+            ares_config,
             credential_access_notify: Arc::new(Notify::new()),
             llm_runner,
         }
