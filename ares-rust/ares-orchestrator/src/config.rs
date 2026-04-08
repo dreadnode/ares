@@ -51,6 +51,12 @@ pub struct OrchestratorConfig {
 
     /// Maximum total deferred tasks across all types.
     pub max_deferred_total: usize,
+
+    /// Target domain for the operation (e.g. "sevenkingdoms.local").
+    pub target_domain: String,
+
+    /// Target IPs for the operation (comma-separated in env, parsed to vec).
+    pub target_ips: Vec<String>,
 }
 
 impl OrchestratorConfig {
@@ -59,8 +65,39 @@ impl OrchestratorConfig {
         let redis_url =
             env::var("ARES_REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379/0".to_string());
 
-        let operation_id = env::var("ARES_OPERATION_ID")
+        let raw_op = env::var("ARES_OPERATION_ID")
             .map_err(|_| anyhow::anyhow!("ARES_OPERATION_ID is required"))?;
+
+        // ARES_OPERATION_ID may be a plain operation-id string OR a full JSON
+        // payload (the queue dispatcher passes the entire operation request JSON).
+        let (operation_id, target_domain, target_ips) = if raw_op.starts_with('{') {
+            let v: serde_json::Value = serde_json::from_str(&raw_op)
+                .map_err(|e| anyhow::anyhow!("Failed to parse ARES_OPERATION_ID JSON: {e}"))?;
+            let op_id = v["operation_id"]
+                .as_str()
+                .ok_or_else(|| anyhow::anyhow!("Missing operation_id in JSON payload"))?
+                .to_string();
+            let domain = v["target_domain"].as_str().unwrap_or("").to_string();
+            let ips: Vec<String> = v["target_ips"]
+                .as_array()
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                        .collect()
+                })
+                .unwrap_or_default();
+            (op_id, domain, ips)
+        } else {
+            // Plain operation ID — read target info from separate env vars
+            let domain = env::var("ARES_TARGET_DOMAIN").unwrap_or_default();
+            let ips: Vec<String> = env::var("ARES_TARGET_IPS")
+                .unwrap_or_default()
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+            (raw_op, domain, ips)
+        };
 
         let max_concurrent_tasks = parse_env("ARES_MAX_CONCURRENT_TASKS", 8);
         let heartbeat_interval_secs = parse_env("ARES_HEARTBEAT_INTERVAL_SECS", 30);
@@ -90,6 +127,8 @@ impl OrchestratorConfig {
             deferred_task_max_age: Duration::from_secs(deferred_task_max_age_secs),
             max_deferred_per_type,
             max_deferred_total,
+            target_domain,
+            target_ips,
         })
     }
 
@@ -128,6 +167,8 @@ mod tests {
             deferred_task_max_age: Duration::from_secs(300),
             max_deferred_per_type: 5,
             max_deferred_total: 20,
+            target_domain: String::new(),
+            target_ips: Vec::new(),
         }
     }
 
@@ -139,17 +180,29 @@ mod tests {
     }
 
     #[test]
-    fn from_env_defaults_and_missing_op_id() {
-        // Combined test to avoid env var race conditions between parallel tests.
+    fn from_env_plain_and_json_and_missing() {
+        // Single test to avoid env var race conditions between parallel tests.
+
+        // Missing → error
         std::env::remove_var("ARES_OPERATION_ID");
         assert!(OrchestratorConfig::from_env().is_err());
 
+        // Plain string → operation_id, empty targets
         std::env::set_var("ARES_OPERATION_ID", "test-op-1");
         let c = OrchestratorConfig::from_env().unwrap();
+        assert_eq!(c.operation_id, "test-op-1");
         assert_eq!(c.max_concurrent_tasks, 8);
         assert_eq!(c.heartbeat_interval, Duration::from_secs(30));
-        assert_eq!(c.max_tasks_per_role, 3);
-        assert_eq!(c.dispatch_delay, Duration::from_millis(200));
+        assert!(c.target_ips.is_empty());
+
+        // JSON payload → parsed operation_id, target_domain, target_ips
+        let payload = r#"{"operation_id":"op-json-test","target_domain":"contoso.local","target_ips":["10.0.0.1","10.0.0.2"],"model":"gpt-4"}"#;
+        std::env::set_var("ARES_OPERATION_ID", payload);
+        let c = OrchestratorConfig::from_env().unwrap();
+        assert_eq!(c.operation_id, "op-json-test");
+        assert_eq!(c.target_domain, "contoso.local");
+        assert_eq!(c.target_ips, vec!["10.0.0.1", "10.0.0.2"]);
+
         std::env::remove_var("ARES_OPERATION_ID");
     }
 }

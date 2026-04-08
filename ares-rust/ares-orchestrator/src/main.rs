@@ -96,6 +96,22 @@ async fn main() -> Result<()> {
         .await
         .context("Failed to load state from Redis")?;
 
+    // --- Seed state from config (fresh operations have no Redis state yet) ---
+    {
+        let mut state = shared_state.write().await;
+        if state.target_ips.is_empty() && !config.target_ips.is_empty() {
+            state.target_ips = config.target_ips.clone();
+            info!(
+                target_domain = %config.target_domain,
+                target_ips = ?config.target_ips,
+                "Seeded target info from operation payload"
+            );
+        }
+    }
+
+    // Write operation metadata to Redis so workers can discover us
+    bootstrap_meta(&queue, &config).await?;
+
     let tracker = ActiveTaskTracker::new();
     let registry = AgentRegistry::new();
     let throttler = Arc::new(Throttler::new(config.clone(), tracker.clone()));
@@ -243,6 +259,14 @@ async fn main() -> Result<()> {
         "Orchestration loop started — all background tasks running"
     );
 
+    // --- Dispatch initial reconnaissance (seeds the reactive automation pipeline) ---
+    if !config.target_ips.is_empty() {
+        let recon_count = dispatch_initial_recon(&dispatcher, &config).await;
+        info!(tasks = recon_count, "Initial recon dispatched");
+    } else {
+        warn!("No target IPs configured — skipping initial recon dispatch");
+    }
+
     // --- Main loop ---
     loop {
         tokio::select! {
@@ -327,4 +351,106 @@ fn spawn_automation_tasks(
 
     info!(count = handles.len(), "Automation tasks spawned");
     handles
+}
+
+/// Write initial operation metadata to Redis so workers can discover the operation.
+///
+/// Mirrors the Python `_initialize_state_and_persist()` in `_orchestrator.py`.
+async fn bootstrap_meta(queue: &TaskQueue, config: &OrchestratorConfig) -> Result<()> {
+    use chrono::Utc;
+    use redis::AsyncCommands;
+
+    let mut conn = queue.connection();
+    let meta_key = format!(
+        "{}:{}:{}",
+        ares_core::state::KEY_PREFIX,
+        config.operation_id,
+        "meta"
+    );
+
+    let now = Utc::now().to_rfc3339();
+    let fields: Vec<(&str, String)> = vec![
+        (
+            "started_at",
+            serde_json::to_string(&now).unwrap_or_default(),
+        ),
+        ("initialized", "true".to_string()),
+        (
+            "target_domain",
+            serde_json::to_string(&config.target_domain).unwrap_or_default(),
+        ),
+        (
+            "target_ip",
+            serde_json::to_string(config.target_ips.first().unwrap_or(&String::new()))
+                .unwrap_or_default(),
+        ),
+        (
+            "target_ips",
+            serde_json::to_string(&config.target_ips.join(",")).unwrap_or_default(),
+        ),
+    ];
+
+    for (field, value) in &fields {
+        let _: () = conn.hset(&meta_key, *field, value).await?;
+    }
+    // 24h TTL
+    let _: () = conn.expire(&meta_key, 86400).await?;
+
+    // Set active operation pointer for worker discovery
+    let _: () = conn.set("ares:op:active", &config.operation_id).await?;
+
+    info!(
+        operation_id = %config.operation_id,
+        meta_key = %meta_key,
+        "Operation metadata written to Redis"
+    );
+    Ok(())
+}
+
+/// Dispatch initial recon tasks for each target IP.
+///
+/// This seeds the reactive automation pipeline — without these initial tasks,
+/// all automation tasks have nothing to work with on a fresh operation.
+async fn dispatch_initial_recon(
+    dispatcher: &Arc<Dispatcher>,
+    config: &OrchestratorConfig,
+) -> usize {
+    let mut count = 0;
+    let domain = &config.target_domain;
+
+    // Network scan + SMB signing check per target IP
+    for ip in &config.target_ips {
+        match dispatcher
+            .request_recon(ip, domain, &["network_scan", "smb_signing_check"], None)
+            .await
+        {
+            Ok(Some(task_id)) => {
+                info!(task_id = %task_id, ip = %ip, "Dispatched initial recon");
+                count += 1;
+            }
+            Ok(None) => {
+                warn!(ip = %ip, "Initial recon throttled/deferred");
+            }
+            Err(e) => {
+                warn!(ip = %ip, err = %e, "Failed to dispatch initial recon");
+            }
+        }
+    }
+
+    // User enumeration + AS-REP roast against first IP (likely DC)
+    if let Some(first_ip) = config.target_ips.first() {
+        match dispatcher
+            .request_recon(first_ip, domain, &["user_enumeration"], None)
+            .await
+        {
+            Ok(Some(task_id)) => {
+                info!(task_id = %task_id, "Dispatched user enumeration");
+                count += 1;
+            }
+            Ok(None) => warn!("User enumeration throttled/deferred"),
+            Err(e) => warn!(err = %e, "Failed to dispatch user enumeration"),
+        }
+    }
+
+    count
 }

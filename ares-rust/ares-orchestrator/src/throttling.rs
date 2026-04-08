@@ -291,6 +291,8 @@ mod tests {
             deferred_task_max_age: std::time::Duration::from_secs(300),
             max_deferred_per_type: 5,
             max_deferred_total: 20,
+            target_domain: String::new(),
+            target_ips: Vec::new(),
         });
         let tracker = ActiveTaskTracker::new();
         (Throttler::new(config, tracker.clone()), tracker)
