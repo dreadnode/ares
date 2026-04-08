@@ -298,6 +298,35 @@ impl RedisStateReader {
         Ok(())
     }
 
+    /// Add a user to Redis LIST (with dedup via username+domain).
+    pub async fn add_user(
+        &self,
+        conn: &mut impl AsyncCommands,
+        user: &User,
+    ) -> Result<bool, redis::RedisError> {
+        let key = self.key(KEY_USERS);
+        // Simple dedup: check existing users
+        let existing: Vec<String> = conn.lrange(&key, 0, -1).await?;
+        let dedup_key = format!(
+            "{}@{}",
+            user.username.to_lowercase(),
+            user.domain.to_lowercase()
+        );
+        for item in &existing {
+            if let Ok(u) = serde_json::from_str::<User>(item) {
+                let existing_key =
+                    format!("{}@{}", u.username.to_lowercase(), u.domain.to_lowercase());
+                if existing_key == dedup_key {
+                    return Ok(false);
+                }
+            }
+        }
+        let data = serde_json::to_string(user).unwrap_or_default();
+        let _: () = conn.rpush(&key, &data).await?;
+        let _: () = conn.expire(&key, 86400).await?;
+        Ok(true)
+    }
+
     /// Add a domain to Redis SET.
     pub async fn add_domain(
         &self,

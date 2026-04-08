@@ -81,6 +81,14 @@ pub async fn process_task(
                 if let Some(ref usage) = ar.usage {
                     result_payload["usage"] = serde_json::to_value(usage).unwrap_or_default();
                 }
+                // Include structured discoveries parsed from tool output
+                if let Some(ref disc) = ar.discoveries {
+                    if let Some(obj) = disc.as_object() {
+                        for (k, v) in obj {
+                            result_payload[k] = v.clone();
+                        }
+                    }
+                }
                 (
                     TaskResult::success(
                         &task.task_id,

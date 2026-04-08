@@ -61,28 +61,90 @@ impl SharedState {
         let mut conn = queue.connection();
         reader.add_host(&mut conn, &host).await?;
 
-        // Update DC map if this is a domain controller
-        if (host.is_dc || host.detect_dc()) && !host.hostname.is_empty() {
-            let domain = host
-                .hostname
-                .split('.')
-                .skip(1)
-                .collect::<Vec<_>>()
-                .join(".");
+        // Update DC map and domain list if this is a domain controller
+        if host.is_dc || host.detect_dc() {
+            // Extract domain from hostname, or fall back to target_domain
+            let raw_domain = if !host.hostname.is_empty() {
+                host.hostname
+                    .split('.')
+                    .skip(1)
+                    .collect::<Vec<_>>()
+                    .join(".")
+            } else {
+                String::new()
+            };
+            // If the hostname is an AWS internal name or non-AD FQDN,
+            // use the target_domain from config instead
+            let domain = if raw_domain.is_empty()
+                || raw_domain.contains("compute.internal")
+                || raw_domain.contains("amazonaws.com")
+            {
+                let state = self.inner.read().await;
+                state.domains.first().cloned().unwrap_or_default()
+            } else {
+                raw_domain
+            };
             if !domain.is_empty() {
-                let dc_key = format!(
-                    "{}:{}:{}",
-                    state::KEY_PREFIX,
-                    self.inner.read().await.operation_id,
-                    state::KEY_DC_MAP
-                );
+                let op_id = self.inner.read().await.operation_id.clone();
+                let dc_key = format!("{}:{}:{}", state::KEY_PREFIX, op_id, state::KEY_DC_MAP);
                 let _: () = conn.hset(&dc_key, &domain, &host.ip).await?;
+
+                // Add domain to state and Redis
+                let domain_lower = domain.to_lowercase();
+                let mut state = self.inner.write().await;
+                if !state.domains.contains(&domain_lower) {
+                    state.domains.push(domain_lower.clone());
+                    state
+                        .domain_controllers
+                        .insert(domain_lower.clone(), host.ip.clone());
+                    let domain_key =
+                        format!("{}:{}:{}", state::KEY_PREFIX, op_id, state::KEY_DOMAINS);
+                    let _: () = conn.sadd(&domain_key, &domain_lower).await?;
+                    let _: () = conn.expire(&domain_key, 86400).await?;
+                } else if let std::collections::hash_map::Entry::Vacant(e) =
+                    state.domain_controllers.entry(domain_lower)
+                {
+                    e.insert(host.ip.clone());
+                }
+                state.hosts.push(host);
+                return Ok(true);
             }
         }
 
         let mut state = self.inner.write().await;
         state.hosts.push(host);
         Ok(true)
+    }
+
+    /// Add a user to state and Redis (with dedup).
+    pub async fn publish_user(&self, queue: &TaskQueue, user: User) -> Result<bool> {
+        // Check for duplicate in memory
+        {
+            let state = self.inner.read().await;
+            let dedup = format!(
+                "{}@{}",
+                user.username.to_lowercase(),
+                user.domain.to_lowercase()
+            );
+            if state.users.iter().any(|u| {
+                format!("{}@{}", u.username.to_lowercase(), u.domain.to_lowercase()) == dedup
+            }) {
+                return Ok(false);
+            }
+        }
+
+        let operation_id = {
+            let state = self.inner.read().await;
+            state.operation_id.clone()
+        };
+        let reader = RedisStateReader::new(operation_id);
+        let mut conn = queue.connection();
+        let added = reader.add_user(&mut conn, &user).await?;
+        if added {
+            let mut state = self.inner.write().await;
+            state.users.push(user);
+        }
+        Ok(added)
     }
 
     /// Add a vulnerability to state and Redis.

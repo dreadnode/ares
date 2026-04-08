@@ -14,6 +14,8 @@ pub struct AgentResult {
     pub error: Option<String>,
     /// Token usage metrics from the LLM call.
     pub usage: Option<TokenUsage>,
+    /// Structured discoveries parsed from tool output (hosts, creds, hashes, vulns).
+    pub discoveries: Option<serde_json::Value>,
 }
 
 /// LLM token usage counters.

@@ -16,7 +16,7 @@ use serde_json::Value;
 use tokio::sync::watch;
 use tracing::{debug, info, warn};
 
-use ares_core::models::{Credential, Hash, Host, VulnerabilityInfo};
+use ares_core::models::{Credential, Hash, Host, User, VulnerabilityInfo};
 
 use crate::dispatcher::Dispatcher;
 use crate::results::CompletedTask;
@@ -114,6 +114,19 @@ async fn extract_discoveries(payload: &Value, dispatcher: &Arc<Dispatcher>) -> R
         for host_val in hosts {
             if let Ok(host) = serde_json::from_value::<Host>(host_val.clone()) {
                 let _ = dispatcher.state.publish_host(&dispatcher.queue, host).await;
+            }
+        }
+    }
+
+    // Extract users
+    if let Some(users) = payload.get("discovered_users").and_then(|v| v.as_array()) {
+        for user_val in users {
+            if let Ok(user) = serde_json::from_value::<User>(user_val.clone()) {
+                match dispatcher.state.publish_user(&dispatcher.queue, user).await {
+                    Ok(true) => debug!("Published new user from result"),
+                    Ok(false) => {} // duplicate
+                    Err(e) => warn!(err = %e, "Failed to publish user"),
+                }
             }
         }
     }

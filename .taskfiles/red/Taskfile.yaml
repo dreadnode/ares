@@ -1250,7 +1250,7 @@ tasks:
         kubectl exec -n {{.K8S_NAMESPACE}} $REDIS_POD -- "${REDIS_ENV[@]}" redis-cli --scan --pattern "ares:lock:*" || true
 
   multi:sync:align:
-    desc: "Sync code changes to PVCs, clear Redis cache, and align cluster pods (usage: task red:multi:sync:align [TEAM=red|blue|all])"
+    desc: "Build and deploy Rust binaries, clear Redis cache, and align cluster pods (usage: task red:multi:sync:align [TEAM=red|blue|all])"
     vars:
       TEAM: '{{.TEAM | default "red"}}'
     cmds:
@@ -1276,9 +1276,11 @@ tasks:
             done
             echo "Local CLI sessions stopped"
           fi
-      - cmd: echo "=== SYNCING CODE (team={{.TEAM}}) ==="
-      - task: :remote:sync:full
-        vars: { NAMESPACE: "{{.K8S_NAMESPACE}}", TEAM: "{{.TEAM}}" }
+      - cmd: echo "=== BUILDING RUST BINARIES ==="
+      - task: :remote:rust:build
+      - cmd: echo "=== DEPLOYING RUST BINARIES (team={{.TEAM}}) ==="
+      - task: :remote:rust:deploy
+        vars: { TEAM: "{{.TEAM}}" }
       - cmd: echo "=== SYNCING CONFIG ==="
       - task: multi:sync:config
       - cmd: echo "=== CLEARING REDIS CACHE ==="

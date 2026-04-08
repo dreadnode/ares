@@ -12,6 +12,7 @@ pub mod credential_access;
 pub mod credentials;
 pub mod executor;
 pub mod lateral;
+pub mod parsers;
 pub mod privesc;
 pub mod recon;
 
