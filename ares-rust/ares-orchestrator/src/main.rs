@@ -150,7 +150,18 @@ async fn main() -> Result<()> {
     if let Ok(model_spec) = std::env::var("ARES_LLM_MODEL") {
         match ares_llm::create_provider(&model_spec) {
             Ok((provider, model_name)) => {
-                let tool_disp = Arc::new(tool_dispatcher::RedisToolDispatcher::new(queue.clone()));
+                // Choose tool dispatch strategy:
+                // ARES_TOOL_DISPATCH=local → in-process via ares_tools::dispatch()
+                // default → Redis queue for worker consumption (ares:tool_exec:{role})
+                let tool_disp: Arc<dyn ares_llm::ToolDispatcher> =
+                    if std::env::var("ARES_TOOL_DISPATCH").as_deref() == Ok("local") {
+                        info!("Tool dispatch: local (in-process via ares-tools)");
+                        Arc::new(tool_dispatcher::LocalToolDispatcher::new())
+                    } else {
+                        info!("Tool dispatch: Redis queue (ares:tool_exec:{{role}})");
+                        Arc::new(tool_dispatcher::RedisToolDispatcher::new(queue.clone()))
+                    };
+
                 let runner = Arc::new(llm_runner::LlmTaskRunner::new(
                     provider,
                     model_name.clone(),

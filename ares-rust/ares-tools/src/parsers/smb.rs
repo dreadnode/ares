@@ -41,7 +41,7 @@ pub fn parse_smb_signing(output: &str, params: &Value) -> Vec<Value> {
 pub fn parse_netexec_smb(output: &str) -> Vec<Value> {
     let mut hosts = Vec::new();
 
-    // NetExec SMB output: "SMB  10.1.2.3  445  DC01  [*] Windows Server 2019 ..."
+    // NetExec SMB output: "SMB  192.168.58.10  445  DC01  [*] Windows Server 2019 ..."
     for line in output.lines() {
         if !line.contains("SMB") {
             continue;

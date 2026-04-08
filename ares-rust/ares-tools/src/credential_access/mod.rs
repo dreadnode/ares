@@ -35,13 +35,13 @@ mod tests {
     /// Verify that the base_dn builder handles a deeper domain.
     #[test]
     fn test_base_dn_from_child_domain() {
-        let domain = "north.sevenkingdoms.local";
+        let domain = "north.contoso.local";
         let dn: String = domain
             .split('.')
             .map(|p| format!("DC={p}"))
             .collect::<Vec<_>>()
             .join(",");
-        assert_eq!(dn, "DC=north,DC=sevenkingdoms,DC=local");
+        assert_eq!(dn, "DC=north,DC=contoso,DC=local");
     }
 
     /// Verify password_spray builds args for jitter correctly (presence only).

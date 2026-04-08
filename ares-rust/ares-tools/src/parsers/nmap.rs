@@ -19,7 +19,7 @@ pub fn parse_nmap_output(output: &str, params: &Value) -> Vec<Value> {
     for line in output.lines() {
         let line = line.trim();
 
-        // "Nmap scan report for hostname (10.1.2.3)" or "Nmap scan report for 10.1.2.3"
+        // "Nmap scan report for hostname (192.168.58.10)" or "Nmap scan report for 192.168.58.10"
         if line.starts_with("Nmap scan report for") {
             // Flush previous host (only if we already saw a report header)
             if seen_report && !current_ip.is_empty() {

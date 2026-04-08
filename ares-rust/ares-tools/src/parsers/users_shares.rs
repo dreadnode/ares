@@ -8,18 +8,18 @@ use serde_json::{json, Value};
 /// 1. `DOMAIN\username` lines (e.g. from `--rid-brute`)
 /// 2. Table format from `--users`:
 ///    ```text
-///    SMB  10.1.2.121  445  WINTERFELL  -Username-  -Last PW Set-  -BadPW- -Description-
-///    SMB  10.1.2.121  445  WINTERFELL  arya.stark  2026-03-25 23:21:09  0  Arya Stark
+///    SMB  192.168.58.10  445  DC01  -Username-  -Last PW Set-  -BadPW- -Description-
+///    SMB  192.168.58.10  445  DC01  alice.johnson  2026-03-25 23:21:09  0  Alice Johnson
 ///    ```
 ///
 /// Also extracts embedded passwords from description fields like
-/// `(Password : Heartsbane)`.
+/// `(Password : Summer2026!)`.
 pub fn parse_netexec_users(output: &str) -> Vec<Value> {
     let mut users = Vec::new();
     let mut credentials = Vec::new();
     let mut seen = std::collections::HashSet::new();
 
-    // Extract domain from SMB banner: (domain:north.sevenkingdoms.local)
+    // Extract domain from SMB banner: (domain:contoso.local)
     let mut detected_domain = String::new();
     for line in output.lines() {
         if let Some(start) = line.find("(domain:") {
@@ -72,7 +72,7 @@ pub fn parse_netexec_users(output: &str) -> Vec<Value> {
         }
 
         // Format 2: Table rows after header
-        // SMB  10.1.2.121  445  WINTERFELL  arya.stark  2026-03-25 23:21:09  0  Arya Stark
+        // SMB  192.168.58.10  445  DC01  alice.johnson  2026-03-25 23:21:09  0  Alice Johnson
         if in_table && line.starts_with("SMB") {
             // Skip bracket lines
             if line.contains("[*]") || line.contains("[+]") || line.contains("[-]") {
@@ -154,7 +154,7 @@ pub fn parse_netexec_shares(output: &str) -> Vec<Value> {
     let mut shares = Vec::new();
 
     for line in output.lines() {
-        // Share lines: "SMB  10.1.2.3  445  DC01  SHARENAME  READ,WRITE"
+        // Share lines: "SMB  192.168.58.10  445  DC01  SHARENAME  READ,WRITE"
         if line.contains("READ") || line.contains("WRITE") {
             let parts: Vec<&str> = line.split_whitespace().collect();
             if parts.len() >= 5 {

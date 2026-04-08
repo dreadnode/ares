@@ -177,7 +177,7 @@ mod tests {
     #[test]
     fn test_parse_nmap_with_services() {
         let output = r#"Starting Nmap 7.98 ( https://nmap.org ) at 2026-04-08 11:12 UTC
-Nmap scan report for ip-10-1-2-210.us-west-2.compute.internal (10.1.2.210)
+Nmap scan report for dc01.contoso.local (192.168.58.210)
 Host is up (0.0010s latency).
 Not shown: 994 filtered tcp ports (no-response)
 PORT     STATE SERVICE
@@ -189,12 +189,12 @@ PORT     STATE SERVICE
 
 Nmap done: 1 IP address (1 host up) scanned in 4.32 seconds"#;
 
-        let params = json!({"target": "10.1.2.210"});
+        let params = json!({"target": "192.168.58.210"});
         let hosts = parse_nmap_output(output, &params);
 
         assert_eq!(hosts.len(), 1, "Should produce exactly one host");
         let host = &hosts[0];
-        assert_eq!(host["ip"], "10.1.2.210");
+        assert_eq!(host["ip"], "192.168.58.210");
         let services = host["services"].as_array().unwrap();
         assert!(
             services.len() >= 5,
@@ -211,7 +211,7 @@ Nmap done: 1 IP address (1 host up) scanned in 4.32 seconds"#;
     fn test_parse_nmap_with_stderr_separator() {
         // combined() output includes stderr
         let output = "Starting Nmap 7.98 ( https://nmap.org ) at 2026-04-08 11:12 UTC\n\
-Nmap scan report for dc01.contoso.local (10.1.2.210)\n\
+Nmap scan report for dc01.contoso.local (192.168.58.210)\n\
 PORT    STATE SERVICE\n\
 88/tcp  open  kerberos-sec\n\
 389/tcp open  ldap\n\
@@ -222,12 +222,12 @@ Nmap done: 1 IP address (1 host up) scanned in 2.10 seconds\n\
 --- stderr ---\n\
 Warning: some warning here";
 
-        let params = json!({"target": "10.1.2.210"});
+        let params = json!({"target": "192.168.58.210"});
         let hosts = parse_nmap_output(output, &params);
 
         assert_eq!(hosts.len(), 1);
         let host = &hosts[0];
-        assert_eq!(host["ip"], "10.1.2.210");
+        assert_eq!(host["ip"], "192.168.58.210");
         assert_eq!(host["hostname"], "dc01.contoso.local");
         assert!(
             host["is_dc"].as_bool().unwrap(),
@@ -240,48 +240,48 @@ Warning: some warning here";
     #[test]
     fn test_parse_nmap_fallback_no_output() {
         let output = "";
-        let params = json!({"target": "10.1.2.210"});
+        let params = json!({"target": "192.168.58.210"});
         let hosts = parse_nmap_output(output, &params);
 
         assert_eq!(hosts.len(), 1);
-        assert_eq!(hosts[0]["ip"], "10.1.2.210");
+        assert_eq!(hosts[0]["ip"], "192.168.58.210");
         assert!(hosts[0]["services"].as_array().unwrap().is_empty());
     }
 
     #[test]
     fn test_parse_nmap_multiple_hosts() {
-        let output = "Nmap scan report for dc01.contoso.local (10.1.2.210)\n\
+        let output = "Nmap scan report for dc01.contoso.local (192.168.58.210)\n\
 PORT    STATE SERVICE\n\
 88/tcp  open  kerberos-sec\n\
 445/tcp open  microsoft-ds\n\
 \n\
-Nmap scan report for srv01.contoso.local (10.1.2.211)\n\
+Nmap scan report for srv01.contoso.local (192.168.58.211)\n\
 PORT     STATE SERVICE\n\
 445/tcp  open  microsoft-ds\n\
 1433/tcp open  ms-sql-s";
 
-        let params = json!({"target": "10.1.2.210"});
+        let params = json!({"target": "192.168.58.210"});
         let hosts = parse_nmap_output(output, &params);
 
         assert_eq!(hosts.len(), 2);
-        assert_eq!(hosts[0]["ip"], "10.1.2.210");
+        assert_eq!(hosts[0]["ip"], "192.168.58.210");
         assert!(hosts[0]["is_dc"].as_bool().unwrap());
-        assert_eq!(hosts[1]["ip"], "10.1.2.211");
+        assert_eq!(hosts[1]["ip"], "192.168.58.211");
         assert!(!hosts[1]["is_dc"].as_bool().unwrap());
     }
 
     #[test]
     fn test_parse_netexec_users_table_format() {
-        let output = r#"SMB         10.1.2.121  445    WINTERFELL       [*] Windows 10 / Server 2019 Build 17763 x64 (name:WINTERFELL) (domain:north.sevenkingdoms.local) (signing:True) (SMBv1:False)
-SMB         10.1.2.121  445    WINTERFELL       [+] north.sevenkingdoms.local\:
-SMB         10.1.2.121  445    WINTERFELL       -Username-                    -Last PW Set-       -BadPW- -Description-
-SMB         10.1.2.121  445    WINTERFELL       arya.stark                    2026-03-25 23:21:09 0       Arya Stark
-SMB         10.1.2.121  445    WINTERFELL       sansa.stark                   2026-03-25 23:21:09 0       Sansa Stark
-SMB         10.1.2.121  445    WINTERFELL       brandon.stark                 2026-03-25 23:21:09 0       Brandon Stark
-SMB         10.1.2.121  445    WINTERFELL       samwell.tarly                 2026-03-25 23:22:25 0       Samwell Tarly (Password : Heartsbane)
-SMB         10.1.2.121  445    WINTERFELL       jon.snow                      2026-03-25 23:22:25 0       Jon Snow
-SMB         10.1.2.121  445    WINTERFELL       Guest                         <never>             0       Built-in account for guest access
-SMB         10.1.2.121  445    WINTERFELL       [*] Enumerated 10 local users: NORTH"#;
+        let output = r#"SMB         192.168.58.121  445    DC01       [*] Windows 10 / Server 2019 Build 17763 x64 (name:DC01) (domain:north.contoso.local) (signing:True) (SMBv1:False)
+SMB         192.168.58.121  445    DC01       [+] north.contoso.local\:
+SMB         192.168.58.121  445    DC01       -Username-                    -Last PW Set-       -BadPW- -Description-
+SMB         192.168.58.121  445    DC01       alice.johnson                 2026-03-25 23:21:09 0       Alice Johnson
+SMB         192.168.58.121  445    DC01       bob.smith                     2026-03-25 23:21:09 0       Bob Smith
+SMB         192.168.58.121  445    DC01       carol.williams                2026-03-25 23:21:09 0       Carol Williams
+SMB         192.168.58.121  445    DC01       dave.miller                   2026-03-25 23:22:25 0       Dave Miller (Password : Summer2026!)
+SMB         192.168.58.121  445    DC01       eve.davis                     2026-03-25 23:22:25 0       Eve Davis
+SMB         192.168.58.121  445    DC01       Guest                         <never>             0       Built-in account for guest access
+SMB         192.168.58.121  445    DC01       [*] Enumerated 10 local users: NORTH"#;
 
         let users = parse_netexec_users(output);
 
@@ -297,16 +297,16 @@ SMB         10.1.2.121  445    WINTERFELL       [*] Enumerated 10 local users: N
         );
 
         // Check domain was extracted from banner
-        assert_eq!(user_entries[0]["domain"], "north.sevenkingdoms.local");
-        assert_eq!(user_entries[0]["username"], "arya.stark");
+        assert_eq!(user_entries[0]["domain"], "north.contoso.local");
+        assert_eq!(user_entries[0]["username"], "alice.johnson");
 
         // Check password leak extraction
         let cred_marker = users.iter().find(|u| u.get("_credentials").is_some());
         assert!(cred_marker.is_some(), "Should have _credentials marker");
         let creds = cred_marker.unwrap()["_credentials"].as_array().unwrap();
         assert_eq!(creds.len(), 1);
-        assert_eq!(creds[0]["username"], "samwell.tarly");
-        assert_eq!(creds[0]["password"], "Heartsbane");
+        assert_eq!(creds[0]["username"], "dave.miller");
+        assert_eq!(creds[0]["password"], "Summer2026!");
 
         // Guest should be excluded
         assert!(!user_entries.iter().any(|u| u["username"] == "Guest"));
@@ -314,9 +314,9 @@ SMB         10.1.2.121  445    WINTERFELL       [*] Enumerated 10 local users: N
 
     #[test]
     fn test_parse_netexec_users_rid_brute_format() {
-        let output = r#"SMB  10.1.2.121  445  WINTERFELL  [+] north.sevenkingdoms.local\:
-SMB  10.1.2.121  445  WINTERFELL  NORTH\arya.stark (SidTypeUser)
-SMB  10.1.2.121  445  WINTERFELL  NORTH\sansa.stark (SidTypeUser)"#;
+        let output = r#"SMB  192.168.58.121  445  DC01  [+] north.contoso.local\:
+SMB  192.168.58.121  445  DC01  NORTH\alice.johnson (SidTypeUser)
+SMB  192.168.58.121  445  DC01  NORTH\bob.smith (SidTypeUser)"#;
 
         let users = parse_netexec_users(output);
         let user_entries: Vec<_> = users
@@ -324,19 +324,19 @@ SMB  10.1.2.121  445  WINTERFELL  NORTH\sansa.stark (SidTypeUser)"#;
             .filter(|u| u.get("username").is_some())
             .collect();
         assert_eq!(user_entries.len(), 2);
-        assert_eq!(user_entries[0]["username"], "arya.stark");
+        assert_eq!(user_entries[0]["username"], "alice.johnson");
         assert_eq!(user_entries[0]["domain"], "NORTH");
     }
 
     #[test]
     fn test_parse_tool_output_enumerate_users_extracts_creds() {
-        let output = r#"SMB  10.1.2.121  445  WINTERFELL  [*] Windows 10 (name:WINTERFELL) (domain:contoso.local) (signing:True)
-SMB  10.1.2.121  445  WINTERFELL  [+] contoso.local\:
-SMB  10.1.2.121  445  WINTERFELL  -Username-  -Last PW Set-  -BadPW- -Description-
-SMB  10.1.2.121  445  WINTERFELL  alice       2026-03-25 23:21:09 0  Alice (Password : Secret123)
-SMB  10.1.2.121  445  WINTERFELL  bob         2026-03-25 23:21:09 0  Bob"#;
+        let output = r#"SMB  192.168.58.121  445  DC01  [*] Windows 10 (name:DC01) (domain:contoso.local) (signing:True)
+SMB  192.168.58.121  445  DC01  [+] contoso.local\:
+SMB  192.168.58.121  445  DC01  -Username-  -Last PW Set-  -BadPW- -Description-
+SMB  192.168.58.121  445  DC01  alice       2026-03-25 23:21:09 0  Alice (Password : Welcome1!)
+SMB  192.168.58.121  445  DC01  bob         2026-03-25 23:21:09 0  Bob"#;
 
-        let params = json!({"target": "10.1.2.121"});
+        let params = json!({"target": "192.168.58.121"});
         let discoveries = parse_tool_output("enumerate_users", output, &params);
 
         // Should have users
@@ -347,6 +347,6 @@ SMB  10.1.2.121  445  WINTERFELL  bob         2026-03-25 23:21:09 0  Bob"#;
         let creds = discoveries["credentials"].as_array().unwrap();
         assert_eq!(creds.len(), 1);
         assert_eq!(creds[0]["username"], "alice");
-        assert_eq!(creds[0]["password"], "Secret123");
+        assert_eq!(creds[0]["password"], "Welcome1!");
     }
 }

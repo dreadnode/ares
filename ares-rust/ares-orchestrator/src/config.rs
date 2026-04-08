@@ -52,7 +52,7 @@ pub struct OrchestratorConfig {
     /// Maximum total deferred tasks across all types.
     pub max_deferred_total: usize,
 
-    /// Target domain for the operation (e.g. "sevenkingdoms.local").
+    /// Target domain for the operation (e.g. "contoso.local").
     pub target_domain: String,
 
     /// Target IPs for the operation (comma-separated in env, parsed to vec).
@@ -196,12 +196,12 @@ mod tests {
         assert!(c.target_ips.is_empty());
 
         // JSON payload → parsed operation_id, target_domain, target_ips
-        let payload = r#"{"operation_id":"op-json-test","target_domain":"contoso.local","target_ips":["10.0.0.1","10.0.0.2"],"model":"gpt-4"}"#;
+        let payload = r#"{"operation_id":"op-json-test","target_domain":"contoso.local","target_ips":["192.168.58.1","192.168.58.2"],"model":"gpt-4"}"#;
         std::env::set_var("ARES_OPERATION_ID", payload);
         let c = OrchestratorConfig::from_env().unwrap();
         assert_eq!(c.operation_id, "op-json-test");
         assert_eq!(c.target_domain, "contoso.local");
-        assert_eq!(c.target_ips, vec!["10.0.0.1", "10.0.0.2"]);
+        assert_eq!(c.target_ips, vec!["192.168.58.1", "192.168.58.2"]);
 
         std::env::remove_var("ARES_OPERATION_ID");
     }

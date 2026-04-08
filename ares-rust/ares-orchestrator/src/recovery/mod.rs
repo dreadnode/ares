@@ -76,22 +76,22 @@ mod tests {
     fn test_dedupe_asrep_by_domain_username() {
         let hashes = vec![
             make_hash(
-                "jsnow",
+                "edavis",
                 "contoso.local",
                 "asrep",
-                "$krb5asrep$23$jsnow@CONTOSO.LOCAL$aaaa",
+                "$krb5asrep$23$edavis@CONTOSO.LOCAL$aaaa",
             ),
             make_hash(
-                "jsnow",
+                "edavis",
                 "contoso.local",
                 "asrep",
-                "$krb5asrep$23$jsnow@CONTOSO.LOCAL$bbbb",
+                "$krb5asrep$23$edavis@CONTOSO.LOCAL$bbbb",
             ),
             make_hash(
-                "jsnow",
+                "edavis",
                 "contoso.local",
                 "asrep",
-                "$krb5asrep$23$jsnow@CONTOSO.LOCAL$cccc",
+                "$krb5asrep$23$edavis@CONTOSO.LOCAL$cccc",
             ),
         ];
         let result = dedupe_hashes(hashes);
@@ -110,16 +110,16 @@ mod tests {
     fn test_dedupe_asrep_different_users_kept() {
         let hashes = vec![
             make_hash(
-                "jsnow",
+                "edavis",
                 "contoso.local",
                 "as-rep",
-                "$krb5asrep$23$jsnow@C$aaa",
+                "$krb5asrep$23$edavis@C$aaa",
             ),
             make_hash(
-                "rbaratheon",
+                "fwilson",
                 "contoso.local",
                 "as-rep",
-                "$krb5asrep$23$rbaratheon@C$bbb",
+                "$krb5asrep$23$fwilson@C$bbb",
             ),
         ];
         let result = dedupe_hashes(hashes);
@@ -200,8 +200,18 @@ mod tests {
     fn test_dedupe_mixed_types() {
         let hashes = vec![
             // 2 AS-REP for same user -> 1
-            make_hash("jsnow", "contoso.local", "asrep", "$krb5asrep$23$jsnow@C$a"),
-            make_hash("jsnow", "contoso.local", "asrep", "$krb5asrep$23$jsnow@C$b"),
+            make_hash(
+                "edavis",
+                "contoso.local",
+                "asrep",
+                "$krb5asrep$23$edavis@C$a",
+            ),
+            make_hash(
+                "edavis",
+                "contoso.local",
+                "asrep",
+                "$krb5asrep$23$edavis@C$b",
+            ),
             // 1 NTLM
             make_hash("admin", "contoso.local", "NTLM", "aad3b435:hash1"), // pragma: allowlist secret
             // 1 Kerberoast
@@ -229,8 +239,18 @@ mod tests {
     #[test]
     fn test_dedupe_case_insensitive() {
         let hashes = vec![
-            make_hash("JSnow", "CONTOSO.LOCAL", "asrep", "$krb5asrep$23$JSnow@C$a"),
-            make_hash("jsnow", "contoso.local", "asrep", "$krb5asrep$23$jsnow@C$b"),
+            make_hash(
+                "EDavis",
+                "CONTOSO.LOCAL",
+                "asrep",
+                "$krb5asrep$23$EDavis@C$a",
+            ),
+            make_hash(
+                "edavis",
+                "contoso.local",
+                "asrep",
+                "$krb5asrep$23$edavis@C$b",
+            ),
         ];
         let result = dedupe_hashes(hashes);
         assert_eq!(result.len(), 1, "Case-insensitive dedup for AS-REP");

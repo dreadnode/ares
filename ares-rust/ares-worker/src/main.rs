@@ -11,6 +11,7 @@
 mod config;
 mod heartbeat;
 mod task_loop;
+mod tool_executor;
 
 use std::sync::Arc;
 
@@ -25,9 +26,14 @@ async fn main() -> anyhow::Result<()> {
 
     // Parse config from environment
     let config = config::WorkerConfig::from_env()?;
+    let mode_str = match config.mode {
+        config::WorkerMode::Task => "task",
+        config::WorkerMode::ToolExec => "tool_exec",
+    };
     info!(
         agent = %config.agent_name,
         role = %config.worker_role,
+        mode = mode_str,
         pod = %config.pod_name,
         operation_id = ?config.operation_id,
         task_timeout_secs = config.task_timeout.as_secs(),
@@ -59,8 +65,15 @@ async fn main() -> anyhow::Result<()> {
         shutdown_for_signal.notify_waiters();
     });
 
-    // Run the task loop (blocks until shutdown)
-    let result = task_loop::run_task_loop(&config, status_tx, shutdown_signal).await;
+    // Run the appropriate loop based on worker mode
+    let result = match config.mode {
+        config::WorkerMode::Task => {
+            task_loop::run_task_loop(&config, status_tx, shutdown_signal).await
+        }
+        config::WorkerMode::ToolExec => {
+            tool_executor::run_tool_exec_loop(&config, status_tx, shutdown_signal).await
+        }
+    };
 
     match &result {
         Ok(()) => info!("Ares worker shut down cleanly"),

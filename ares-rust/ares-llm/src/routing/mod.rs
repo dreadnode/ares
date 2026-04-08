@@ -115,7 +115,7 @@ mod tests {
     #[test]
     fn test_has_dc_role() {
         let dc = make_host(
-            "10.0.0.1",
+            "192.168.58.1",
             "dc01.contoso.local",
             vec!["Domain Controller"],
             vec![],
@@ -124,24 +124,29 @@ mod tests {
 
         let dc_flag = Host {
             is_dc: true,
-            ..make_host("10.0.0.2", "srv01.contoso.local", vec![], vec![])
+            ..make_host("192.168.58.2", "srv01.contoso.local", vec![], vec![])
         };
         assert!(dc_discovery::has_dc_role(&dc_flag));
 
-        let non_dc = make_host("10.0.0.3", "web01.contoso.local", vec!["web"], vec![]);
+        let non_dc = make_host("192.168.58.3", "web01.contoso.local", vec!["web"], vec![]);
         assert!(!dc_discovery::has_dc_role(&non_dc));
     }
 
     #[test]
     fn test_has_dc_services() {
-        let with_kerberos = make_host("10.0.0.1", "dc01", vec![], vec!["88/tcp kerberos"]);
+        let with_kerberos = make_host("192.168.58.1", "dc01", vec![], vec!["88/tcp kerberos"]);
         assert!(dc_discovery::has_dc_services(&with_kerberos));
 
-        let with_ldap = make_host("10.0.0.2", "dc02", vec![], vec!["389/tcp ldap"]);
+        let with_ldap = make_host("192.168.58.2", "dc02", vec![], vec!["389/tcp ldap"]);
         assert!(dc_discovery::has_dc_services(&with_ldap));
 
         // 3389 should NOT match (prefix check prevents this)
-        let rdp_only = make_host("10.0.0.3", "srv01", vec![], vec!["3389/tcp ms-wbt-server"]);
+        let rdp_only = make_host(
+            "192.168.58.3",
+            "srv01",
+            vec![],
+            vec!["3389/tcp ms-wbt-server"],
+        );
         assert!(!dc_discovery::has_dc_services(&rdp_only));
     }
 
@@ -263,7 +268,7 @@ mod tests {
     #[test]
     fn test_find_dc_ip_tier5_fallback_role() {
         let hosts = vec![make_host(
-            "10.0.0.1",
+            "192.168.58.1",
             "dc01.other.local",
             vec!["dc"],
             vec![],
@@ -284,7 +289,7 @@ mod tests {
     #[test]
     fn test_find_dc_ip_tier6_last_resort() {
         let hosts = vec![make_host(
-            "10.0.0.1",
+            "192.168.58.1",
             "unknown-host",
             vec![],
             vec!["88/tcp kerberos"],
@@ -353,9 +358,9 @@ mod tests {
 
     #[test]
     fn test_resolve_dc_skips_if_already_set() {
-        let mut payload = serde_json::json!({"domain": "contoso.local", "dc_ip": "10.0.0.1"});
+        let mut payload = serde_json::json!({"domain": "contoso.local", "dc_ip": "192.168.58.1"});
         resolve_dc_for_payload(&mut payload, &[], &HashMap::new(), &HashMap::new(), None);
-        assert_eq!(payload["dc_ip"].as_str(), Some("10.0.0.1")); // unchanged
+        assert_eq!(payload["dc_ip"].as_str(), Some("192.168.58.1")); // unchanged
     }
 
     // --- Utility ---

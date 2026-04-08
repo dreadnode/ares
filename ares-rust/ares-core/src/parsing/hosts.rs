@@ -100,10 +100,10 @@ mod tests {
 
     #[test]
     fn test_extract_hosts_simple() {
-        let output = "SMB  10.0.0.1  445  HOST01  some other data\n";
+        let output = "SMB  192.168.58.1  445  HOST01  some other data\n";
         let hosts = extract_hosts(output);
         assert_eq!(hosts.len(), 1);
-        assert_eq!(hosts[0].ip, "10.0.0.1");
+        assert_eq!(hosts[0].ip, "192.168.58.1");
         assert_eq!(hosts[0].hostname, "HOST01");
     }
 

@@ -190,7 +190,7 @@ mod tests {
             task_type: "recon".into(),
             source_agent: "orchestrator".into(),
             target_agent: "ares-recon-0".into(),
-            payload: serde_json::json!({"target_ip": "10.0.0.1"}),
+            payload: serde_json::json!({"target_ip": "192.168.58.1"}),
             priority: 3,
             created_at: Some("2026-04-07T10:00:00Z".into()),
             callback_queue: None,
