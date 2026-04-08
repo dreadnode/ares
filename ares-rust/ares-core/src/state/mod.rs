@@ -38,8 +38,8 @@ use redis::AsyncCommands;
 use tracing::warn;
 
 use crate::models::{
-    Credential, Hash, Host, OperationMeta, Share, SharedRedTeamState, Target, User,
-    VulnerabilityInfo,
+    BlueTaskInfo, Credential, Evidence, Hash, Host, OperationMeta, Share, SharedBlueTeamState,
+    SharedRedTeamState, Target, TimelineEvent, TriageRecord, User, VulnerabilityInfo,
 };
 
 /// Redis key prefix for all operation state.
@@ -722,6 +722,480 @@ pub async fn delete_operation(
             }
         }
     }
+
+    let mut deleted = 0usize;
+    for key in &keys {
+        let count: usize = conn.del(key).await?;
+        deleted += count;
+    }
+
+    Ok(deleted)
+}
+
+// ============================================================================
+// Blue Team State Reader
+// ============================================================================
+
+/// Redis key prefix for all blue team investigation state.
+pub const BLUE_KEY_PREFIX: &str = "ares:blue:inv";
+
+/// Redis lock key prefix for blue team investigations.
+pub const BLUE_LOCK_PREFIX: &str = "ares:blue:lock";
+
+// Blue team collection key suffixes (appended to `ares:blue:inv:{inv_id}:`)
+pub const BLUE_KEY_EVIDENCE: &str = "evidence";
+pub const BLUE_KEY_TIMELINE: &str = "timeline";
+pub const BLUE_KEY_TECHNIQUES: &str = "techniques";
+pub const BLUE_KEY_TACTICS: &str = "tactics";
+pub const BLUE_KEY_HOSTS: &str = "hosts";
+pub const BLUE_KEY_USERS: &str = "users";
+pub const BLUE_KEY_QUERY_TYPES: &str = "query_types";
+pub const BLUE_KEY_META: &str = "meta";
+pub const BLUE_KEY_PENDING_TASKS: &str = "tasks:pending";
+pub const BLUE_KEY_COMPLETED_TASKS: &str = "tasks:completed";
+pub const BLUE_KEY_TECHNIQUE_NAMES: &str = "technique_names";
+pub const BLUE_KEY_RECOMMENDATIONS: &str = "recommendations";
+pub const BLUE_KEY_TRIAGE_DECISION: &str = "triage:decision";
+pub const BLUE_KEY_TRIAGE_RECORDS: &str = "triage:records";
+
+/// Build a Redis key for a blue team investigation's collection.
+///
+/// # Examples
+/// ```
+/// use ares_core::state::build_blue_key;
+/// assert_eq!(build_blue_key("inv-123", "meta"), "ares:blue:inv:inv-123:meta");
+/// ```
+pub fn build_blue_key(investigation_id: &str, suffix: &str) -> String {
+    format!("{BLUE_KEY_PREFIX}:{investigation_id}:{suffix}")
+}
+
+/// Build a Redis lock key for a blue team investigation.
+pub fn build_blue_lock_key(investigation_id: &str) -> String {
+    format!("{BLUE_LOCK_PREFIX}:{investigation_id}")
+}
+
+/// Read-only Redis state backend for blue team investigations.
+///
+/// This provides methods to read investigation state from Redis, matching
+/// the Python `BlueStateBackend` key patterns exactly.
+pub struct BlueStateReader {
+    investigation_id: String,
+}
+
+impl BlueStateReader {
+    pub fn new(investigation_id: String) -> Self {
+        Self { investigation_id }
+    }
+
+    fn key(&self, suffix: &str) -> String {
+        build_blue_key(&self.investigation_id, suffix)
+    }
+
+    /// Check if the investigation exists in Redis.
+    pub async fn exists(&self, conn: &mut impl AsyncCommands) -> Result<bool, redis::RedisError> {
+        let exists: bool = conn.exists(self.key(BLUE_KEY_META)).await?;
+        Ok(exists)
+    }
+
+    /// Load all evidence from `ares:blue:inv:{id}:evidence` HASH.
+    ///
+    /// Values are JSON-serialized Evidence objects; keys are dedup keys.
+    pub async fn get_evidence(
+        &self,
+        conn: &mut impl AsyncCommands,
+    ) -> Result<Vec<Evidence>, redis::RedisError> {
+        let items: HashMap<String, String> = conn.hgetall(self.key(BLUE_KEY_EVIDENCE)).await?;
+        let mut result = Vec::with_capacity(items.len());
+        for (_dedup_key, json_str) in items {
+            match serde_json::from_str::<Evidence>(&json_str) {
+                Ok(ev) => result.push(ev),
+                Err(e) => warn!("Failed to deserialize evidence: {e}"),
+            }
+        }
+        Ok(result)
+    }
+
+    /// Load timeline events from `ares:blue:inv:{id}:timeline` LIST.
+    pub async fn get_timeline(
+        &self,
+        conn: &mut impl AsyncCommands,
+    ) -> Result<Vec<TimelineEvent>, redis::RedisError> {
+        let items: Vec<String> = conn.lrange(self.key(BLUE_KEY_TIMELINE), 0, -1).await?;
+        let mut result = Vec::with_capacity(items.len());
+        for json_str in items {
+            match serde_json::from_str::<TimelineEvent>(&json_str) {
+                Ok(ev) => result.push(ev),
+                Err(e) => warn!("Failed to deserialize timeline event: {e}"),
+            }
+        }
+        Ok(result)
+    }
+
+    /// Load MITRE ATT&CK technique IDs from `ares:blue:inv:{id}:techniques` SET.
+    pub async fn get_techniques(
+        &self,
+        conn: &mut impl AsyncCommands,
+    ) -> Result<Vec<String>, redis::RedisError> {
+        let items: HashSet<String> = conn.smembers(self.key(BLUE_KEY_TECHNIQUES)).await?;
+        Ok(items.into_iter().collect())
+    }
+
+    /// Load MITRE ATT&CK tactic IDs from `ares:blue:inv:{id}:tactics` SET.
+    pub async fn get_tactics(
+        &self,
+        conn: &mut impl AsyncCommands,
+    ) -> Result<Vec<String>, redis::RedisError> {
+        let items: HashSet<String> = conn.smembers(self.key(BLUE_KEY_TACTICS)).await?;
+        Ok(items.into_iter().collect())
+    }
+
+    /// Load technique name mappings from `ares:blue:inv:{id}:technique_names` HASH.
+    pub async fn get_technique_names(
+        &self,
+        conn: &mut impl AsyncCommands,
+    ) -> Result<HashMap<String, String>, redis::RedisError> {
+        let items: HashMap<String, String> =
+            conn.hgetall(self.key(BLUE_KEY_TECHNIQUE_NAMES)).await?;
+        Ok(items)
+    }
+
+    /// Load queried hosts from `ares:blue:inv:{id}:hosts` SET.
+    pub async fn get_hosts(
+        &self,
+        conn: &mut impl AsyncCommands,
+    ) -> Result<Vec<String>, redis::RedisError> {
+        let items: HashSet<String> = conn.smembers(self.key(BLUE_KEY_HOSTS)).await?;
+        Ok(items.into_iter().collect())
+    }
+
+    /// Load queried users from `ares:blue:inv:{id}:users` SET.
+    pub async fn get_users(
+        &self,
+        conn: &mut impl AsyncCommands,
+    ) -> Result<Vec<String>, redis::RedisError> {
+        let items: HashSet<String> = conn.smembers(self.key(BLUE_KEY_USERS)).await?;
+        Ok(items.into_iter().collect())
+    }
+
+    /// Load executed query types from `ares:blue:inv:{id}:query_types` SET.
+    pub async fn get_query_types(
+        &self,
+        conn: &mut impl AsyncCommands,
+    ) -> Result<Vec<String>, redis::RedisError> {
+        let items: HashSet<String> = conn.smembers(self.key(BLUE_KEY_QUERY_TYPES)).await?;
+        Ok(items.into_iter().collect())
+    }
+
+    /// Load recommendations from `ares:blue:inv:{id}:recommendations` LIST.
+    pub async fn get_recommendations(
+        &self,
+        conn: &mut impl AsyncCommands,
+    ) -> Result<Vec<String>, redis::RedisError> {
+        let items: Vec<String> = conn
+            .lrange(self.key(BLUE_KEY_RECOMMENDATIONS), 0, -1)
+            .await?;
+        Ok(items)
+    }
+
+    /// Load the current triage decision from `ares:blue:inv:{id}:triage:decision` STRING.
+    pub async fn get_triage_decision(
+        &self,
+        conn: &mut impl AsyncCommands,
+    ) -> Result<Option<serde_json::Value>, redis::RedisError> {
+        let raw: Option<String> = conn.get(self.key(BLUE_KEY_TRIAGE_DECISION)).await?;
+        match raw {
+            Some(json_str) => match serde_json::from_str::<serde_json::Value>(&json_str) {
+                Ok(val) => Ok(Some(val)),
+                Err(e) => {
+                    warn!("Failed to deserialize triage decision: {e}");
+                    Ok(None)
+                }
+            },
+            None => Ok(None),
+        }
+    }
+
+    /// Load triage records from `ares:blue:inv:{id}:triage:records` LIST.
+    pub async fn get_triage_records(
+        &self,
+        conn: &mut impl AsyncCommands,
+    ) -> Result<Vec<TriageRecord>, redis::RedisError> {
+        let items: Vec<String> = conn
+            .lrange(self.key(BLUE_KEY_TRIAGE_RECORDS), 0, -1)
+            .await?;
+        let mut result = Vec::with_capacity(items.len());
+        for json_str in items {
+            match serde_json::from_str::<TriageRecord>(&json_str) {
+                Ok(rec) => result.push(rec),
+                Err(e) => warn!("Failed to deserialize triage record: {e}"),
+            }
+        }
+        Ok(result)
+    }
+
+    /// Load pending tasks from `ares:blue:inv:{id}:tasks:pending` HASH.
+    pub async fn get_pending_tasks(
+        &self,
+        conn: &mut impl AsyncCommands,
+    ) -> Result<HashMap<String, BlueTaskInfo>, redis::RedisError> {
+        let items: HashMap<String, String> = conn.hgetall(self.key(BLUE_KEY_PENDING_TASKS)).await?;
+        let mut result = HashMap::with_capacity(items.len());
+        for (task_id, json_str) in items {
+            match serde_json::from_str::<BlueTaskInfo>(&json_str) {
+                Ok(task) => {
+                    result.insert(task_id, task);
+                }
+                Err(e) => warn!("Failed to deserialize pending task {task_id}: {e}"),
+            }
+        }
+        Ok(result)
+    }
+
+    /// Load completed tasks from `ares:blue:inv:{id}:tasks:completed` HASH.
+    pub async fn get_completed_tasks(
+        &self,
+        conn: &mut impl AsyncCommands,
+    ) -> Result<HashMap<String, BlueTaskInfo>, redis::RedisError> {
+        let items: HashMap<String, String> =
+            conn.hgetall(self.key(BLUE_KEY_COMPLETED_TASKS)).await?;
+        let mut result = HashMap::with_capacity(items.len());
+        for (task_id, json_str) in items {
+            match serde_json::from_str::<BlueTaskInfo>(&json_str) {
+                Ok(task) => {
+                    result.insert(task_id, task);
+                }
+                Err(e) => warn!("Failed to deserialize completed task {task_id}: {e}"),
+            }
+        }
+        Ok(result)
+    }
+
+    /// Load meta fields from `ares:blue:inv:{id}:meta` HASH.
+    ///
+    /// Meta fields are stored as JSON-encoded values (via Python's `json.dumps()`).
+    pub async fn get_meta(
+        &self,
+        conn: &mut impl AsyncCommands,
+    ) -> Result<HashMap<String, serde_json::Value>, redis::RedisError> {
+        let raw: HashMap<String, String> = conn.hgetall(self.key(BLUE_KEY_META)).await?;
+        let mut result = HashMap::with_capacity(raw.len());
+        for (field, json_str) in raw {
+            match serde_json::from_str::<serde_json::Value>(&json_str) {
+                Ok(val) => {
+                    result.insert(field, val);
+                }
+                Err(_) => {
+                    // Fall back to treating it as a plain string
+                    result.insert(field, serde_json::Value::String(json_str));
+                }
+            }
+        }
+        Ok(result)
+    }
+
+    /// Check if the investigation has an active lock.
+    pub async fn is_running(
+        &self,
+        conn: &mut impl AsyncCommands,
+    ) -> Result<bool, redis::RedisError> {
+        let exists: bool = conn
+            .exists(build_blue_lock_key(&self.investigation_id))
+            .await?;
+        Ok(exists)
+    }
+
+    /// Load the full SharedBlueTeamState from Redis.
+    ///
+    /// This is the Rust equivalent of `BlueStateBackend.snapshot()`.
+    pub async fn load_state(
+        &self,
+        conn: &mut impl AsyncCommands,
+    ) -> Result<Option<SharedBlueTeamState>, redis::RedisError> {
+        if !self.exists(conn).await? {
+            return Ok(None);
+        }
+
+        let meta = self.get_meta(conn).await?;
+        let evidence = self.get_evidence(conn).await?;
+        let timeline = self.get_timeline(conn).await?;
+        let techniques = self.get_techniques(conn).await?;
+        let tactics = self.get_tactics(conn).await?;
+        let technique_names = self.get_technique_names(conn).await?;
+        let hosts = self.get_hosts(conn).await?;
+        let users = self.get_users(conn).await?;
+        let query_types = self.get_query_types(conn).await?;
+        let recommendations = self.get_recommendations(conn).await?;
+        let triage_decision = self.get_triage_decision(conn).await?;
+        let triage_records = self.get_triage_records(conn).await?;
+        let pending_tasks = self.get_pending_tasks(conn).await?;
+        let completed_tasks = self.get_completed_tasks(conn).await?;
+
+        // Extract scalar meta fields
+        let stage = meta
+            .get("stage")
+            .and_then(|v| v.as_str())
+            .unwrap_or("triage")
+            .to_string();
+        let started_at = meta
+            .get("started_at")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let escalated = meta
+            .get("escalated")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let escalation_reason = meta
+            .get("escalation_reason")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let attack_synopsis = meta
+            .get("attack_synopsis")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let alert = meta
+            .get("alert")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
+
+        let state = SharedBlueTeamState {
+            investigation_id: self.investigation_id.clone(),
+            alert,
+            stage,
+            started_at,
+            evidence,
+            timeline,
+            identified_techniques: techniques,
+            identified_tactics: tactics,
+            technique_names,
+            queried_hosts: hosts,
+            queried_users: users,
+            executed_query_types: query_types,
+            escalated,
+            escalation_reason,
+            attack_synopsis,
+            recommendations,
+            triage_decision,
+            triage_records,
+            pending_tasks,
+            completed_tasks,
+        };
+
+        Ok(Some(state))
+    }
+}
+
+/// List all blue team investigation IDs by scanning `ares:blue:inv:*:meta` keys.
+pub async fn list_investigation_ids(
+    conn: &mut impl AsyncCommands,
+) -> Result<Vec<String>, redis::RedisError> {
+    let keys: Vec<String> = redis::cmd("KEYS")
+        .arg("ares:blue:inv:*:meta")
+        .query_async(conn)
+        .await?;
+
+    let mut inv_ids = Vec::new();
+    for key in keys {
+        // Key format: ares:blue:inv:{id}:meta
+        let parts: Vec<&str> = key.split(':').collect();
+        if parts.len() >= 4 {
+            inv_ids.push(parts[3].to_string());
+        }
+    }
+    inv_ids.sort();
+    Ok(inv_ids)
+}
+
+/// List all running blue team investigation IDs by scanning lock keys.
+pub async fn list_running_investigations(
+    conn: &mut impl AsyncCommands,
+) -> Result<HashSet<String>, redis::RedisError> {
+    let keys: Vec<String> = redis::cmd("KEYS")
+        .arg(format!("{BLUE_LOCK_PREFIX}:*"))
+        .query_async(conn)
+        .await?;
+
+    let mut running = HashSet::new();
+    for key in keys {
+        // Key format: ares:blue:lock:{id}
+        let parts: Vec<&str> = key.splitn(4, ':').collect();
+        if parts.len() >= 4 {
+            running.insert(parts[3].to_string());
+        }
+    }
+    Ok(running)
+}
+
+/// Resolve the latest blue team investigation ID, preferring running investigations.
+pub async fn resolve_latest_investigation(
+    conn: &mut impl AsyncCommands,
+) -> Result<Option<String>, redis::RedisError> {
+    let running_invs = list_running_investigations(conn).await?;
+    let all_inv_ids = list_investigation_ids(conn).await?;
+
+    if all_inv_ids.is_empty() {
+        return Ok(None);
+    }
+
+    // Collect (started_at, inv_id, is_running) tuples
+    let mut invs: Vec<(Option<String>, String, bool)> = Vec::new();
+
+    for inv_id in &all_inv_ids {
+        let meta_key = build_blue_key(inv_id, BLUE_KEY_META);
+        let data: HashMap<String, String> = conn.hgetall(&meta_key).await?;
+        let started_at = data.get("started_at").and_then(|s| {
+            // Try JSON-decoding first (Python stores as json.dumps(value))
+            if let Ok(serde_json::Value::String(inner)) =
+                serde_json::from_str::<serde_json::Value>(s)
+            {
+                Some(inner)
+            } else if !s.is_empty() && s != "null" {
+                Some(s.clone())
+            } else {
+                None
+            }
+        });
+        let is_running = running_invs.contains(inv_id);
+        invs.push((started_at, inv_id.clone(), is_running));
+    }
+
+    // Prefer running investigations
+    let running: Vec<_> = invs
+        .iter()
+        .filter(|(_, _, is_running)| *is_running)
+        .collect();
+    if !running.is_empty() {
+        return Ok(Some(pick_latest_blue(&running)));
+    }
+
+    // Fall back to latest by started_at
+    let all: Vec<_> = invs.iter().collect();
+    Ok(Some(pick_latest_blue(&all)))
+}
+
+fn pick_latest_blue(items: &[&(Option<String>, String, bool)]) -> String {
+    // Prefer items with a timestamp, sort descending
+    let mut with_time: Vec<_> = items.iter().filter(|(t, _, _)| t.is_some()).collect();
+    if !with_time.is_empty() {
+        with_time.sort_by(|a, b| b.0.cmp(&a.0));
+        return with_time[0].1.clone();
+    }
+    // Fallback: sort by inv_id descending
+    let mut by_id: Vec<_> = items.to_vec();
+    by_id.sort_by(|a, b| b.1.cmp(&a.1));
+    by_id[0].1.clone()
+}
+
+/// Delete an investigation and all its associated Redis keys.
+pub async fn delete_investigation(
+    conn: &mut impl AsyncCommands,
+    investigation_id: &str,
+) -> Result<usize, redis::RedisError> {
+    let pattern = format!("{BLUE_KEY_PREFIX}:{investigation_id}:*");
+    let mut keys: Vec<String> = redis::cmd("KEYS").arg(&pattern).query_async(conn).await?;
+
+    // Also delete the lock key
+    keys.push(build_blue_lock_key(investigation_id));
 
     let mut deleted = 0usize;
     for key in &keys {

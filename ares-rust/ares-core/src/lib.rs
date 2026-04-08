@@ -11,6 +11,7 @@
 pub mod config;
 pub mod models;
 pub mod parsing;
+pub mod reports;
 pub mod state;
 pub mod token_usage;
 

@@ -271,6 +271,41 @@ enum OpsCommands {
         #[arg(long)]
         latest: bool,
     },
+
+    /// Submit a new red team operation to the orchestrator service
+    Submit {
+        /// Target name or identifier
+        target: String,
+        /// Target domain (e.g., contoso.local)
+        domain: String,
+        /// Target IP addresses (comma-separated or repeated)
+        #[arg(long, value_delimiter = ',', required = true)]
+        ips: Vec<String>,
+        /// Operation ID (auto-generated if not provided)
+        #[arg(long)]
+        operation_id: Option<String>,
+        /// Initial credential username
+        #[arg(long)]
+        username: Option<String>,
+        /// Initial credential password
+        #[arg(long)]
+        password: Option<String>,
+        /// Initial credential NTLM hash
+        #[arg(long)]
+        ntlm_hash: Option<String>,
+        /// Resume from checkpoint
+        #[arg(long)]
+        resume: bool,
+        /// LLM model to use (defaults to ARES_ORCHESTRATOR_MODEL or ARES_MODEL env)
+        #[arg(long)]
+        model: Option<String>,
+        /// Maximum agent steps
+        #[arg(long, default_value = "200")]
+        max_steps: u32,
+        /// Target environment for tracing (e.g., dev, staging, prod)
+        #[arg(long)]
+        env: Option<String>,
+    },
 }
 
 // ============================================================================
@@ -381,6 +416,55 @@ enum BlueCommands {
         /// Skip confirmation for --all
         #[arg(long)]
         force: bool,
+    },
+
+    /// Submit a new blue team investigation
+    Submit {
+        /// Alert JSON string or path to JSON file
+        alert_json: String,
+        /// Investigation ID (auto-generated if not provided)
+        #[arg(long)]
+        investigation_id: Option<String>,
+        /// LLM model to use (defaults to ARES_ORCHESTRATOR_MODEL or ARES_MODEL env)
+        #[arg(long)]
+        model: Option<String>,
+        /// Maximum agent steps
+        #[arg(long, default_value = "25")]
+        max_steps: u32,
+        /// Force multi-agent mode
+        #[arg(long)]
+        multi_agent: bool,
+        /// Disable auto-routing HIGH/CRITICAL to multi-agent
+        #[arg(long)]
+        no_auto_route: bool,
+        /// Grafana URL
+        #[arg(long, env = "GRAFANA_URL")]
+        grafana_url: Option<String>,
+        /// Grafana API key
+        #[arg(long, env = "GRAFANA_SERVICE_ACCOUNT_TOKEN")]
+        grafana_api_key: Option<String>,
+    },
+
+    /// Submit investigations for alerts from a red team operation
+    #[command(name = "from-operation")]
+    FromOperation {
+        /// Red team operation ID
+        operation_id: Option<String>,
+        /// Use the latest red team operation
+        #[arg(long)]
+        latest: bool,
+        /// LLM model to use
+        #[arg(long)]
+        model: Option<String>,
+        /// Maximum agent steps
+        #[arg(long, default_value = "25")]
+        max_steps: u32,
+        /// Grafana URL
+        #[arg(long, env = "GRAFANA_URL")]
+        grafana_url: Option<String>,
+        /// Grafana API key
+        #[arg(long, env = "GRAFANA_SERVICE_ACCOUNT_TOKEN")]
+        grafana_api_key: Option<String>,
     },
 }
 
@@ -714,6 +798,35 @@ async fn run_ops(cmd: OpsCommands, redis_url: Option<String>) -> Result<()> {
             .await
         }
         OpsCommands::Cleanup { max_age_hours } => ops_cleanup(redis_url, max_age_hours).await,
+        OpsCommands::Submit {
+            target,
+            domain,
+            ips,
+            operation_id,
+            username,
+            password,
+            ntlm_hash,
+            resume,
+            model,
+            max_steps,
+            env,
+        } => {
+            ops_submit(
+                redis_url,
+                target,
+                domain,
+                ips,
+                operation_id,
+                username,
+                password,
+                ntlm_hash,
+                resume,
+                model,
+                max_steps,
+                env,
+            )
+            .await
+        }
     }
 }
 
@@ -1960,7 +2073,7 @@ async fn ops_report(
         }
     }
 
-    // Generate report from state
+    // Generate report from state using tera templates
     let state = reader
         .load_state(&mut conn)
         .await?
@@ -1970,388 +2083,19 @@ async fn ops_report(
     let techniques = reader.get_techniques(&mut conn).await.unwrap_or_default();
     let is_running = reader.is_running(&mut conn).await.unwrap_or(false);
 
-    let report = generate_report(&state, &timeline, &techniques, is_running);
+    let generator = ares_core::reports::RedTeamReportGenerator::new()
+        .context("Failed to initialize report template engine")?;
+    let report = generator
+        .generate_comprehensive(&state, &timeline, &techniques)
+        .or_else(|_| generator.generate_summary(&state, &timeline, &techniques, is_running))
+        .context("Failed to render report template")?;
     let report_path = save_report(&output_dir, &op_id, &report)?;
     println!("Report saved to {report_path}");
 
     Ok(())
 }
 
-fn generate_report(
-    state: &SharedRedTeamState,
-    timeline: &[serde_json::Value],
-    techniques: &[String],
-    is_running: bool,
-) -> String {
-    let unique_creds = dedup_credentials(&state.all_credentials);
-    let unique_hashes = dedup_hashes(&state.all_hashes);
-    let now = Utc::now();
-
-    let (runtime_seconds, status) = if let Some(completed) = state.completed_at {
-        (
-            (completed - state.started_at).num_seconds().max(0) as u64,
-            "Completed",
-        )
-    } else if is_running {
-        (
-            (now - state.started_at).num_seconds().max(0) as u64,
-            "Running",
-        )
-    } else {
-        (
-            (now - state.started_at).num_seconds().max(0) as u64,
-            "Stopped",
-        )
-    };
-
-    let target_display = state
-        .target
-        .as_ref()
-        .map(|t| {
-            if !t.domain.is_empty() {
-                format!("{} ({})", t.ip, t.domain)
-            } else {
-                t.ip.clone()
-            }
-        })
-        .unwrap_or_else(|| {
-            if state.target_ips.is_empty() {
-                "Unknown".to_string()
-            } else {
-                state.target_ips.join(", ")
-            }
-        });
-
-    let dc_count = state
-        .all_hosts
-        .iter()
-        .filter(|h| h.is_dc || h.detect_dc())
-        .count();
-
-    let mut report = String::with_capacity(8192);
-
-    // Header
-    report.push_str("# Red Team Operation Report\n\n");
-    report.push_str(&format!("**Operation ID**: {}\n\n", state.operation_id));
-    report.push_str(&format!("**Target**: {target_display}\n\n"));
-    report.push_str(&format!(
-        "**Started**: {}\n\n",
-        state.started_at.to_rfc3339()
-    ));
-    report.push_str(&format!(
-        "**Completed**: {}\n\n",
-        state
-            .completed_at
-            .map(|t| t.to_rfc3339())
-            .unwrap_or_else(|| status.to_string())
-    ));
-    report.push_str(&format!(
-        "**Duration**: {}\n\n",
-        format_duration(runtime_seconds)
-    ));
-    report.push_str("---\n\n");
-
-    // Executive Summary
-    report.push_str("## Executive Summary\n\n");
-    if state.has_domain_admin {
-        report.push_str("### DOMAIN ADMIN ACHIEVED\n\n");
-        report.push_str(&format!(
-            "**Attack Path**: {}\n\n",
-            state
-                .domain_admin_path
-                .as_deref()
-                .unwrap_or("Path not recorded")
-        ));
-    } else {
-        report.push_str("Domain Admin access was **not achieved** during this operation.\n\n");
-    }
-    if state.has_golden_ticket {
-        report.push_str("### GOLDEN TICKET GENERATED\n\n");
-        report.push_str("Persistent domain access has been established via Golden Ticket.\n\n");
-    }
-    report.push_str("---\n\n");
-
-    // Success Metrics
-    report.push_str("## Success Metrics\n\n");
-    report.push_str("| Metric | Value |\n|--------|-------|\n");
-    report.push_str(&format!(
-        "| Domain Admin Access | {} |\n",
-        if state.has_domain_admin {
-            "ACHIEVED"
-        } else {
-            "Not Achieved"
-        }
-    ));
-    report.push_str(&format!(
-        "| Golden Ticket | {} |\n",
-        if state.has_golden_ticket {
-            "GENERATED"
-        } else {
-            "Not Generated"
-        }
-    ));
-    report.push_str(&format!(
-        "| Domains Discovered | {} |\n",
-        state.all_domains.len()
-    ));
-    report.push_str(&format!(
-        "| Hosts Discovered | {} ({} DCs) |\n",
-        state.all_hosts.len(),
-        dc_count
-    ));
-    report.push_str(&format!(
-        "| Users Discovered | {} |\n",
-        state.all_users.len()
-    ));
-    report.push_str(&format!(
-        "| Credentials Obtained | {} |\n",
-        unique_creds.len()
-    ));
-    report.push_str(&format!(
-        "| NTLM Hashes Captured | {} |\n",
-        unique_hashes.len()
-    ));
-    report.push_str(&format!(
-        "| Vulnerabilities Found | {} |\n",
-        state.discovered_vulnerabilities.len()
-    ));
-    report.push_str(&format!(
-        "| Vulnerabilities Exploited | {} |\n",
-        state.exploited_vulnerabilities.len()
-    ));
-    report.push_str(&format!(
-        "| Network Shares | {} |\n",
-        state.all_shares.len()
-    ));
-    report.push_str("\n---\n\n");
-
-    // Domains
-    report.push_str("## Domains\n\n");
-    if state.all_domains.is_empty() {
-        report.push_str("No domains discovered.\n\n");
-    } else {
-        let mut domains: Vec<_> = state.all_domains.iter().map(|d| d.to_lowercase()).collect();
-        domains.sort();
-        domains.dedup();
-        for d in &domains {
-            report.push_str(&format!("- {d}\n"));
-        }
-        report.push('\n');
-    }
-    report.push_str("---\n\n");
-
-    // Discovered Hosts
-    report.push_str("## Discovered Hosts\n\n");
-    if state.all_hosts.is_empty() {
-        report.push_str("No hosts discovered.\n\n");
-    } else {
-        for host in &state.all_hosts {
-            let label = if !host.hostname.is_empty() {
-                &host.hostname
-            } else {
-                &host.ip
-            };
-            let dc_tag = if host.is_dc || host.detect_dc() {
-                " [DOMAIN CONTROLLER]"
-            } else {
-                ""
-            };
-            report.push_str(&format!("### {label}{dc_tag}\n\n"));
-            report.push_str(&format!("- **IP**: {}\n", host.ip));
-            report.push_str(&format!(
-                "- **OS**: {}\n",
-                if host.os.is_empty() {
-                    "Unknown"
-                } else {
-                    &host.os
-                }
-            ));
-            if !host.services.is_empty() {
-                report.push_str("- **Services**:\n");
-                for svc in &host.services {
-                    report.push_str(&format!("  - {svc}\n"));
-                }
-            }
-            report.push('\n');
-        }
-    }
-    report.push_str("---\n\n");
-
-    // Network Shares
-    report.push_str("## Network Shares\n\n");
-    if state.all_shares.is_empty() {
-        report.push_str("No network shares discovered.\n\n");
-    } else {
-        report.push_str("| Share | Host | Permissions |\n|-------|------|-------------|\n");
-        for share in &state.all_shares {
-            report.push_str(&format!(
-                "| {} | {} | {} |\n",
-                share.name,
-                share.host,
-                if share.permissions.is_empty() {
-                    "-"
-                } else {
-                    &share.permissions
-                }
-            ));
-        }
-        report.push('\n');
-    }
-    report.push_str("---\n\n");
-
-    // Credentials & Hashes
-    report.push_str("## Credentials & Hashes\n\n");
-    report.push_str(&format!(
-        "### Plaintext Credentials ({})\n\n",
-        unique_creds.len()
-    ));
-    if unique_creds.is_empty() {
-        report.push_str("No plaintext credentials captured.\n\n");
-    } else {
-        report.push_str("| Domain | Username | Password | Source | Admin |\n|--------|----------|----------|--------|-------|\n");
-        for cred in &unique_creds {
-            report.push_str(&format!(
-                "| {} | {} | `{}` | {} | {} |\n",
-                cred.domain,
-                cred.username,
-                cred.password,
-                cred.source,
-                if cred.is_admin { "Yes" } else { "No" }
-            ));
-        }
-        report.push('\n');
-    }
-
-    report.push_str(&format!("### NTLM Hashes ({})\n\n", unique_hashes.len()));
-    if unique_hashes.is_empty() {
-        report.push_str("No NTLM hashes captured.\n\n");
-    } else {
-        for hash in &unique_hashes {
-            report.push_str(&format!(
-                "- `{}\\{}:{}:{}`",
-                hash.domain, hash.username, hash.hash_type, hash.hash_value
-            ));
-            if !hash.source.is_empty() {
-                report.push_str(&format!(" ({})", hash.source));
-            }
-            report.push('\n');
-        }
-        report.push('\n');
-    }
-    report.push_str("---\n\n");
-
-    // Timeline
-    report.push_str("## Attack Path & Timeline\n\n");
-    if let Some(path) = &state.domain_admin_path {
-        report.push_str("### Path to Domain Admin\n\n");
-        report.push_str(path);
-        report.push_str("\n\n");
-    }
-    report.push_str("### Key Events\n\n");
-    if timeline.is_empty() {
-        report.push_str("No timeline events recorded.\n\n");
-    } else {
-        report.push_str("| Time (UTC) | Event | MITRE |\n|------------|-------|-------|\n");
-        for event in timeline {
-            let ts = event
-                .get("timestamp")
-                .and_then(|v| v.as_str())
-                .unwrap_or("-");
-            let desc = event
-                .get("description")
-                .and_then(|v| v.as_str())
-                .unwrap_or("-");
-            let mitre = event
-                .get("mitre_techniques")
-                .and_then(|v| v.as_array())
-                .map(|arr| {
-                    arr.iter()
-                        .filter_map(|v| v.as_str())
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                })
-                .unwrap_or_else(|| "-".to_string());
-            report.push_str(&format!("| {ts} | {desc} | {mitre} |\n"));
-        }
-        report.push('\n');
-    }
-    report.push_str("---\n\n");
-
-    // Vulnerabilities
-    report.push_str("## Vulnerabilities & Weaknesses\n\n");
-    report.push_str("### Discovered Vulnerabilities\n\n");
-    if state.discovered_vulnerabilities.is_empty() {
-        report.push_str("No specific vulnerabilities discovered.\n\n");
-    } else {
-        for (vuln_id, vuln) in &state.discovered_vulnerabilities {
-            let exploited = state.exploited_vulnerabilities.contains(vuln_id);
-            report.push_str(&format!("#### {} on {}\n\n", vuln.vuln_type, vuln.target));
-            report.push_str(&format!("- **Priority**: {}\n", vuln.priority));
-            report.push_str(&format!(
-                "- **Status**: {}\n",
-                if exploited {
-                    "EXPLOITED"
-                } else {
-                    "Not Exploited"
-                }
-            ));
-            if !vuln.details.is_empty() {
-                report.push_str(&format!("- **Details**: {:?}\n", vuln.details));
-            }
-            report.push('\n');
-        }
-    }
-
-    report.push_str("### Security Weaknesses\n\n");
-    if state.all_weaknesses.is_empty() {
-        report.push_str("No significant weaknesses recorded.\n\n");
-    } else {
-        for w in &state.all_weaknesses {
-            report.push_str(&format!("- {w}\n"));
-        }
-        report.push('\n');
-    }
-    report.push_str("---\n\n");
-
-    // MITRE ATT&CK
-    report.push_str("## MITRE ATT&CK Mapping\n\n");
-    if techniques.is_empty() {
-        report.push_str("No MITRE techniques mapped.\n\n");
-    } else {
-        let mut sorted_techniques = techniques.to_vec();
-        sorted_techniques.sort();
-        for t in &sorted_techniques {
-            report.push_str(&format!("- {t}\n"));
-        }
-        report.push('\n');
-    }
-    report.push_str("---\n\n");
-
-    // Recommendations
-    report.push_str("## Recommendations\n\n");
-    report.push_str("### Immediate Actions\n\n");
-    report.push_str("1. **Reset all compromised credentials** - All passwords listed above should be changed immediately\n");
-    report.push_str("2. **Revoke any generated tickets** - If golden ticket was created, full krbtgt password reset required (twice)\n");
-    report.push_str(
-        "3. **Investigate lateral movement** - Review access logs on all compromised hosts\n",
-    );
-    report.push_str("4. **Patch identified vulnerabilities** - Address all discovered vulnerabilities by priority\n\n");
-    report.push_str("### Long-term Improvements\n\n");
-    report.push_str("1. Implement credential tiering and reduce credential exposure\n");
-    report.push_str(
-        "2. Enable and monitor for Kerberos anomalies (unconstrained delegation, S4U abuse)\n",
-    );
-    report.push_str("3. Segment network to limit lateral movement paths\n");
-    report.push_str("4. Deploy endpoint detection for common attack tools (Impacket, Mimikatz)\n");
-    report.push_str("5. Regular vulnerability assessments for ADCS, MSSQL, and delegation misconfigurations\n\n");
-    report.push_str("---\n\n");
-    report.push_str(&format!(
-        "*Report generated by Ares Red Team Agent*\n*{}*\n",
-        now.to_rfc3339()
-    ));
-
-    report
-}
+// Old generate_report function removed — replaced by ares_core::reports::RedTeamReportGenerator
 
 fn save_report(output_dir: &str, op_id: &str, report: &str) -> Result<String> {
     std::fs::create_dir_all(output_dir)
@@ -3813,6 +3557,48 @@ async fn run_blue(cmd: BlueCommands, redis_url: Option<String>) -> Result<()> {
             dry_run,
             force,
         } => blue_cleanup(redis_url, max_age_hours, all, dry_run, force).await,
+        BlueCommands::Submit {
+            alert_json,
+            investigation_id,
+            model,
+            max_steps,
+            multi_agent,
+            no_auto_route,
+            grafana_url,
+            grafana_api_key,
+        } => {
+            blue_submit(
+                redis_url,
+                alert_json,
+                investigation_id,
+                model,
+                max_steps,
+                multi_agent,
+                !no_auto_route,
+                grafana_url,
+                grafana_api_key,
+            )
+            .await
+        }
+        BlueCommands::FromOperation {
+            operation_id,
+            latest,
+            model,
+            max_steps,
+            grafana_url,
+            grafana_api_key,
+        } => {
+            blue_from_operation(
+                redis_url,
+                operation_id,
+                latest,
+                model,
+                max_steps,
+                grafana_url,
+                grafana_api_key,
+            )
+            .await
+        }
     }
 }
 
@@ -4873,6 +4659,446 @@ async fn blue_cleanup(
         "Deleted {total_deleted} keys from {} investigation(s)",
         to_delete.len()
     );
+
+    Ok(())
+}
+
+// ============================================================================
+// ops submit
+// ============================================================================
+
+/// Environment variable names to capture and pass to the orchestrator.
+const OPS_ENV_VAR_NAMES: &[&str] = &[
+    "OPENAI_API_KEY",
+    "ANTHROPIC_API_KEY",
+    "DREADNODE_API_KEY",
+    "DREADNODE_API_TOKEN",
+    "DREADNODE_SERVER_URL",
+    "DREADNODE_SERVER",
+    "DREADNODE_ORGANIZATION",
+    "DREADNODE_WORKSPACE",
+    "DREADNODE_PROJECT",
+    "GRAFANA_SERVICE_ACCOUNT_TOKEN",
+    "GRAFANA_URL",
+    "ARES_MODEL",
+    "ARES_ORCHESTRATOR_MODEL",
+    "ARES_WORKER_MODEL",
+    "ARES_AGENT_RECON_MODEL",
+    "ARES_AGENT_CREDENTIAL_ACCESS_MODEL",
+    "ARES_AGENT_CRACKER_MODEL",
+    "ARES_AGENT_ACL_MODEL",
+    "ARES_AGENT_PRIVESC_MODEL",
+    "ARES_AGENT_LATERAL_MODEL",
+    "ARES_AGENT_COERCION_MODEL",
+];
+
+/// Environment variable names for blue team operations.
+const BLUE_ENV_VAR_NAMES: &[&str] = &[
+    "OPENAI_API_KEY",
+    "ANTHROPIC_API_KEY",
+    "GRAFANA_SERVICE_ACCOUNT_TOKEN",
+    "GRAFANA_API_KEY",
+    "GRAFANA_URL",
+    "DREADNODE_API_KEY",
+    "DREADNODE_SERVER_URL",
+    "DREADNODE_ORGANIZATION",
+    "DREADNODE_WORKSPACE",
+    "DREADNODE_PROJECT",
+    "ARES_MODEL",
+    "ARES_ORCHESTRATOR_MODEL",
+];
+
+/// Collect environment variables that are set, returning a map of name->value.
+fn collect_env_vars(names: &[&str]) -> HashMap<String, String> {
+    let mut result = HashMap::new();
+    for name in names {
+        if let Ok(val) = std::env::var(name) {
+            if !val.is_empty() {
+                result.insert(name.to_string(), val);
+            }
+        }
+    }
+    result
+}
+
+/// Resolve the effective model from --model flag or environment variables.
+fn resolve_model(model: &Option<String>) -> Option<String> {
+    model
+        .clone()
+        .or_else(|| std::env::var("ARES_ORCHESTRATOR_MODEL").ok())
+        .or_else(|| std::env::var("ARES_MODEL").ok())
+        .filter(|s| !s.is_empty())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn ops_submit(
+    redis_url: Option<String>,
+    target: String,
+    domain: String,
+    ips: Vec<String>,
+    operation_id: Option<String>,
+    username: Option<String>,
+    password: Option<String>,
+    ntlm_hash: Option<String>,
+    resume: bool,
+    model: Option<String>,
+    max_steps: u32,
+    env: Option<String>,
+) -> Result<()> {
+    if ips.is_empty() {
+        anyhow::bail!("No target IPs specified. Use --ips to provide target IPs.");
+    }
+
+    // Generate operation ID if not provided
+    let op_id = operation_id
+        .unwrap_or_else(|| format!("multiagent-{}", &uuid::Uuid::new_v4().to_string()[..8]));
+
+    // Build initial credential if username provided
+    let initial_cred = username.as_ref().map(|uname| {
+        let mut cred = serde_json::Map::new();
+        cred.insert(
+            "username".to_string(),
+            serde_json::Value::String(uname.clone()),
+        );
+        cred.insert(
+            "domain".to_string(),
+            serde_json::Value::String(domain.clone()),
+        );
+        if let Some(ref pw) = password {
+            cred.insert(
+                "password".to_string(),
+                serde_json::Value::String(pw.clone()),
+            );
+        }
+        if let Some(ref hash) = ntlm_hash {
+            cred.insert(
+                "ntlm_hash".to_string(),
+                serde_json::Value::String(hash.clone()),
+            );
+        }
+        serde_json::Value::Object(cred)
+    });
+
+    info!("Submitting operation: {op_id}");
+    info!("Target: {target} ({domain})");
+    info!("IPs: {}", ips.join(", "));
+
+    // Collect environment variables
+    let env_vars = collect_env_vars(OPS_ENV_VAR_NAMES);
+    if !env_vars.is_empty() {
+        let mut keys: Vec<&str> = env_vars.keys().map(|s| s.as_str()).collect();
+        keys.sort();
+        info!("Submitting with env vars: {}", keys.join(", "));
+    } else {
+        warn!("No env vars found to submit with operation request");
+    }
+
+    // Resolve model
+    let effective_model = resolve_model(&model);
+    if let Some(ref m) = effective_model {
+        if m.starts_with("gpt-") && std::env::var("OPENAI_API_KEY").is_err() {
+            anyhow::bail!(
+                "OPENAI_API_KEY is required for OpenAI models. Set it in the environment \
+                 before submitting the operation."
+            );
+        }
+    }
+    if effective_model.is_none() {
+        anyhow::bail!(
+            "No model specified. Provide --model or set \
+             ARES_ORCHESTRATOR_MODEL/ARES_MODEL in the environment."
+        );
+    }
+
+    let now = Utc::now();
+
+    // Build operation request (matches Python orchestrator_client.py format)
+    let request = serde_json::json!({
+        "operation_id": op_id,
+        "target_domain": domain,
+        "target_ips": ips,
+        "target_environment": env,
+        "initial_credential": initial_cred,
+        "resume_from_checkpoint": resume,
+        "model": effective_model,
+        "max_steps": max_steps,
+        "checkpoint_interval": 60,
+        "report_dir": null,
+        "submitted_at": now.to_rfc3339(),
+    });
+
+    let mut conn = connect_redis(redis_url).await?;
+
+    // Store env_vars separately (matches Python: avoids exposing secrets in main queue)
+    if !env_vars.is_empty() {
+        let env_vars_key = format!("ares:op:{op_id}:env_vars");
+        let env_json = serde_json::to_string(&env_vars)?;
+        let _: () = conn.set(&env_vars_key, &env_json).await?;
+        let _: () = conn.expire(&env_vars_key, 3600).await?; // 1 hour TTL
+    }
+
+    // Push operation request to queue (matches Python: RPUSH to ares:operations)
+    let request_json = serde_json::to_string(&request)?;
+    let _: () = conn.rpush("ares:operations", &request_json).await?;
+
+    info!("Operation submitted: {op_id}");
+    println!("{op_id}");
+
+    Ok(())
+}
+
+// ============================================================================
+// blue submit
+// ============================================================================
+
+#[allow(clippy::too_many_arguments)]
+async fn blue_submit(
+    redis_url: Option<String>,
+    alert_json: String,
+    investigation_id: Option<String>,
+    model: Option<String>,
+    max_steps: u32,
+    multi_agent: bool,
+    auto_route: bool,
+    grafana_url: Option<String>,
+    grafana_api_key: Option<String>,
+) -> Result<()> {
+    // Parse alert JSON: either from file or inline string
+    let alert: serde_json::Value = if std::path::Path::new(&alert_json).is_file() {
+        let content = std::fs::read_to_string(&alert_json)
+            .with_context(|| format!("Failed to read alert file: {alert_json}"))?;
+        serde_json::from_str(&content)
+            .with_context(|| format!("Invalid JSON in file: {alert_json}"))?
+    } else {
+        serde_json::from_str(&alert_json).context("Invalid alert JSON string")?
+    };
+
+    // Resolve model
+    let effective_model = resolve_model(&model);
+    if effective_model.is_none() {
+        anyhow::bail!("No model specified. Use --model or set ARES_ORCHESTRATOR_MODEL/ARES_MODEL");
+    }
+
+    // Generate investigation ID
+    let inv_id = investigation_id
+        .unwrap_or_else(|| format!("inv-{}", &uuid::Uuid::new_v4().to_string()[..8]));
+
+    // Collect env vars
+    let env_vars = collect_env_vars(BLUE_ENV_VAR_NAMES);
+    if !env_vars.is_empty() {
+        let mut keys: Vec<&str> = env_vars.keys().map(|s| s.as_str()).collect();
+        keys.sort();
+        info!(
+            "Submitting investigation with env vars: {}",
+            keys.join(", ")
+        );
+    }
+
+    let now = Utc::now();
+
+    // Build investigation request (matches Python blue_orchestrator_client.py format)
+    let request = serde_json::json!({
+        "investigation_id": inv_id,
+        "alert": alert,
+        "correlation_context": null,
+        "model": effective_model,
+        "max_steps": max_steps,
+        "multi_agent": multi_agent,
+        "auto_route": auto_route,
+        "report_dir": null,
+        "grafana_url": grafana_url,
+        "grafana_api_key": grafana_api_key,
+        "submitted_at": now.to_rfc3339(),
+    });
+
+    let mut conn = connect_redis(redis_url).await?;
+
+    // Store env_vars separately (matches Python pattern)
+    if !env_vars.is_empty() {
+        let env_vars_key = format!("ares:blue:inv:{inv_id}:env_vars");
+        let env_json = serde_json::to_string(&env_vars)?;
+        let _: () = conn.set(&env_vars_key, &env_json).await?;
+        let _: () = conn.expire(&env_vars_key, 3600).await?;
+    }
+
+    // Push investigation request to queue
+    let request_json = serde_json::to_string(&request)?;
+    let _: () = conn
+        .rpush("ares:blue:investigations", &request_json)
+        .await?;
+
+    info!("Investigation submitted: {inv_id}");
+    println!("Investigation submitted: {inv_id}");
+    println!("Status: submitted");
+
+    Ok(())
+}
+
+// ============================================================================
+// blue from-operation
+// ============================================================================
+
+#[allow(clippy::too_many_arguments)]
+async fn blue_from_operation(
+    redis_url: Option<String>,
+    operation_id: Option<String>,
+    latest: bool,
+    model: Option<String>,
+    max_steps: u32,
+    grafana_url: Option<String>,
+    grafana_api_key: Option<String>,
+) -> Result<()> {
+    let mut conn = connect_redis(redis_url.clone()).await?;
+    let op_id = resolve_operation_id(&mut conn, operation_id, latest).await?;
+
+    // Load the red team operation state
+    let reader = RedisStateReader::new(op_id.clone());
+    let state = reader
+        .load_state(&mut conn)
+        .await?
+        .with_context(|| format!("No state found for operation: {op_id}"))?;
+
+    let is_running = reader.is_running(&mut conn).await?;
+
+    // Extract attack window
+    let window_start = state.started_at;
+    let window_end = state.completed_at.unwrap_or_else(Utc::now);
+
+    info!("Operation: {op_id}");
+    info!(
+        "Attack window: {} to {}",
+        window_start.to_rfc3339(),
+        window_end.to_rfc3339()
+    );
+    info!("Running: {is_running}");
+
+    // Resolve model
+    let effective_model = resolve_model(&model);
+    if effective_model.is_none() {
+        anyhow::bail!("No model specified. Use --model or set ARES_ORCHESTRATOR_MODEL/ARES_MODEL");
+    }
+
+    // Resolve Grafana config
+    let grafana_url = grafana_url.or_else(|| std::env::var("GRAFANA_URL").ok());
+    let grafana_api_key =
+        grafana_api_key.or_else(|| std::env::var("GRAFANA_SERVICE_ACCOUNT_TOKEN").ok());
+
+    if grafana_url.is_none() {
+        anyhow::bail!("Grafana URL required. Use --grafana-url or set GRAFANA_URL");
+    }
+    if grafana_api_key.is_none() {
+        anyhow::bail!(
+            "Grafana API key required. Use --grafana-api-key or set GRAFANA_SERVICE_ACCOUNT_TOKEN"
+        );
+    }
+
+    // Collect env vars
+    let env_vars = collect_env_vars(BLUE_ENV_VAR_NAMES);
+
+    // Build operation context that will be attached to each investigation
+    let target_env = state
+        .target
+        .as_ref()
+        .map(|t| t.environment.clone())
+        .unwrap_or_default();
+
+    // Collect attack techniques from state
+    let techniques_key = format!("ares:op:{op_id}:techniques");
+    let techniques: Vec<String> = redis::cmd("SMEMBERS")
+        .arg(&techniques_key)
+        .query_async(&mut conn)
+        .await
+        .unwrap_or_default();
+
+    let operation_context = serde_json::json!({
+        "operation_id": op_id,
+        "attack_window_start": window_start.to_rfc3339(),
+        "attack_window_end": window_end.to_rfc3339(),
+        "techniques_used": &techniques[..std::cmp::min(techniques.len(), 20)],
+        "deployment": target_env,
+    });
+
+    // Build summary of what was found in the operation
+    let cred_count = state.all_credentials.len();
+    let host_count = state.all_hosts.len();
+    let vuln_count = state.discovered_vulnerabilities.len();
+
+    // Collect host IPs and usernames from operation for alert context
+    let target_ips: Vec<String> = state.all_hosts.iter().map(|h| h.ip.clone()).collect();
+    let target_users: Vec<String> = state
+        .all_credentials
+        .iter()
+        .map(|c| c.username.clone())
+        .collect();
+
+    // Generate a synthetic alert from the red team operation data
+    let alert = serde_json::json!({
+        "labels": {
+            "alertname": format!("RedTeamOperation_{}", op_id),
+            "severity": "critical",
+            "source": "ares-red-team",
+            "deployment": target_env,
+        },
+        "annotations": {
+            "summary": format!(
+                "Red team operation {op_id} - {cred_count} credentials, {host_count} hosts, {vuln_count} vulnerabilities",
+            ),
+            "description": format!(
+                "Investigate blue team detection coverage for red team operation {op_id}. \
+                 Attack window: {} to {}. Domain admin: {}.",
+                window_start.to_rfc3339(),
+                window_end.to_rfc3339(),
+                state.has_domain_admin,
+            ),
+        },
+        "operation_context": operation_context,
+        "startsAt": window_start.to_rfc3339(),
+        "endsAt": window_end.to_rfc3339(),
+        "target_ips": &target_ips[..std::cmp::min(target_ips.len(), 50)],
+        "target_users": &target_users[..std::cmp::min(target_users.len(), 50)],
+    });
+
+    // Submit as a single multi-agent investigation
+    let inv_id = format!("inv-{}", &uuid::Uuid::new_v4().to_string()[..8]);
+    let now = Utc::now();
+
+    let request = serde_json::json!({
+        "investigation_id": inv_id,
+        "alert": alert,
+        "correlation_context": null,
+        "model": effective_model,
+        "max_steps": max_steps,
+        "multi_agent": true,
+        "auto_route": false,
+        "report_dir": null,
+        "grafana_url": grafana_url,
+        "grafana_api_key": grafana_api_key,
+        "submitted_at": now.to_rfc3339(),
+    });
+
+    // Store env_vars separately
+    if !env_vars.is_empty() {
+        let env_vars_key = format!("ares:blue:inv:{inv_id}:env_vars");
+        let env_json = serde_json::to_string(&env_vars)?;
+        let _: () = conn.set(&env_vars_key, &env_json).await?;
+        let _: () = conn.expire(&env_vars_key, 3600).await?;
+    }
+
+    // Push to investigation queue
+    let request_json = serde_json::to_string(&request)?;
+    let _: () = conn
+        .rpush("ares:blue:investigations", &request_json)
+        .await?;
+
+    // Track investigation against operation
+    let op_inv_key = format!("ares:blue:op:{op_id}:investigations");
+    let _: () = conn.sadd(&op_inv_key, &inv_id).await?;
+    let _: () = conn.expire(&op_inv_key, 7 * 24 * 3600).await?; // 7 day TTL
+
+    info!("Investigation submitted: {inv_id}");
+    println!("Investigation submitted: {inv_id} (from operation {op_id})");
+    println!("Status: submitted");
+    println!("\nTrack progress with: ares-cli blue operation-status {op_id}");
 
     Ok(())
 }

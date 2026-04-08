@@ -12,6 +12,7 @@ from typing import Any
 
 from sqlalchemy import (
     ARRAY,
+    BigInteger,
     Boolean,
     DateTime,
     Float,
@@ -68,6 +69,12 @@ class OperationRecord(Base):
     host_count: Mapped[int | None] = mapped_column(Integer)
     vulnerability_count: Mapped[int | None] = mapped_column(Integer)
     exploited_vulnerability_count: Mapped[int | None] = mapped_column(Integer)
+
+    # Token usage / cost tracking (populated by offload-cost)
+    total_input_tokens: Mapped[int | None] = mapped_column(BigInteger)
+    total_output_tokens: Mapped[int | None] = mapped_column(BigInteger)
+    total_cost: Mapped[float | None] = mapped_column(Float)
+    model_usage: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
 
     # Relationships
     credentials: Mapped[list[CredentialRecord]] = relationship(

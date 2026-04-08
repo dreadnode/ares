@@ -157,3 +157,190 @@ pub fn create_bridge() -> Box<dyn AgentBridge> {
         Box::new(mock::MockAgentBridge::new())
     }
 }
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── Mock bridge tests (run without Python, default test suite) ────────
+
+    #[test]
+    fn test_create_bridge_succeeds() {
+        // Should succeed without Python — returns the mock bridge.
+        let bridge = create_bridge();
+        // Just verify we got something back (type-erased Box<dyn AgentBridge>).
+        assert!(bridge.initialize().is_ok());
+    }
+
+    #[test]
+    fn test_mock_bridge_initialize() {
+        let bridge = mock::MockAgentBridge::new();
+        let result = bridge.initialize();
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_mock_bridge_call_agent_step_returns_noop() {
+        let bridge = mock::MockAgentBridge::new();
+        let result = bridge.call_agent_step("recon", "test prompt");
+        assert!(result.is_ok());
+        let output = result.unwrap();
+        assert!(
+            output.contains("noop"),
+            "Mock bridge should return a noop action, got: {output}"
+        );
+    }
+
+    #[test]
+    fn test_mock_bridge_includes_role_in_response() {
+        let bridge = mock::MockAgentBridge::new();
+        let output = bridge.call_agent_step("privesc", "escalate").unwrap();
+        assert!(
+            output.contains("privesc"),
+            "Mock response should include the agent role, got: {output}"
+        );
+    }
+
+    #[test]
+    fn test_mock_bridge_returns_valid_json() {
+        let bridge = mock::MockAgentBridge::new();
+        let output = bridge.call_agent_step("recon", "scan 10.0.0.1").unwrap();
+        let parsed: serde_json::Result<serde_json::Value> = serde_json::from_str(&output);
+        assert!(
+            parsed.is_ok(),
+            "Mock bridge should return valid JSON, got: {output}"
+        );
+    }
+
+    #[test]
+    fn test_mock_bridge_different_roles() {
+        let bridge = mock::MockAgentBridge::new();
+        for role in &["recon", "privesc", "credential_access", "lateral_movement"] {
+            let output = bridge.call_agent_step(role, "test").unwrap();
+            assert!(
+                output.contains(role),
+                "Response for role '{role}' should include role name, got: {output}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_mock_bridge_handles_empty_prompt() {
+        let bridge = mock::MockAgentBridge::new();
+        let result = bridge.call_agent_step("recon", "");
+        assert!(result.is_ok(), "Mock bridge should handle empty prompts");
+    }
+
+    #[test]
+    fn test_mock_bridge_handles_large_prompt() {
+        let bridge = mock::MockAgentBridge::new();
+        let large_prompt = "x".repeat(100_000);
+        let result = bridge.call_agent_step("recon", &large_prompt);
+        assert!(result.is_ok(), "Mock bridge should handle large prompts");
+    }
+
+    // ── Trait object tests ───────────────────────────────────────────────
+
+    #[test]
+    fn test_bridge_trait_is_send_sync() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<mock::MockAgentBridge>();
+        // Also verify the trait object is Send + Sync (required for Arc sharing).
+        fn assert_boxed_send_sync<T: Send + Sync + ?Sized>() {}
+        assert_boxed_send_sync::<dyn AgentBridge>();
+    }
+
+    #[test]
+    fn test_bridge_usable_through_trait_object() {
+        // Verify the bridge works when used via Box<dyn AgentBridge>,
+        // which is how main.rs uses it.
+        let bridge: Box<dyn AgentBridge> = create_bridge();
+        bridge.initialize().unwrap();
+        let result = bridge.call_agent_step("recon", "test").unwrap();
+        assert!(!result.is_empty());
+    }
+
+    #[test]
+    fn test_bridge_usable_through_arc() {
+        // The orchestrator may share the bridge across tasks via Arc.
+        let bridge: std::sync::Arc<dyn AgentBridge> = std::sync::Arc::from(create_bridge());
+        let result = bridge.call_agent_step("recon", "test").unwrap();
+        assert!(!result.is_empty());
+    }
+
+    // ── Feature-gated Python integration tests ───────────────────────────
+
+    #[cfg(feature = "python")]
+    mod python_integration {
+        use super::super::*;
+
+        #[test]
+        #[ignore] // requires Python environment with ares package installed
+        fn test_python_bridge_initializes() {
+            let bridge = real::PyAgentBridge::new();
+            let result = bridge.initialize();
+            assert!(
+                result.is_ok(),
+                "Python bridge should initialize: {:?}",
+                result.err()
+            );
+        }
+
+        #[test]
+        #[ignore] // requires Python environment with ares package installed
+        fn test_python_bridge_agent_step() {
+            let bridge = real::PyAgentBridge::new();
+            bridge.initialize().expect("Failed to initialize bridge");
+            let result = bridge.call_agent_step("recon", "Enumerate targets");
+            assert!(
+                result.is_ok(),
+                "Python agent step should succeed: {:?}",
+                result.err()
+            );
+            let output = result.unwrap();
+            assert!(
+                !output.is_empty(),
+                "Agent step should return non-empty output"
+            );
+        }
+
+        #[test]
+        #[ignore] // requires Python environment with ares package installed
+        fn test_python_bridge_multiple_calls() {
+            // Verify the bridge can handle multiple sequential calls
+            // (GIL acquisition/release cycle works correctly).
+            let bridge = real::PyAgentBridge::new();
+            bridge.initialize().expect("Failed to initialize bridge");
+            for i in 0..3 {
+                let result = bridge.call_agent_step("recon", &format!("Step {i}"));
+                assert!(
+                    result.is_ok(),
+                    "Call {i} should succeed: {:?}",
+                    result.err()
+                );
+            }
+        }
+
+        #[test]
+        #[ignore] // requires Python environment with ares package installed
+        fn test_gil_not_held_during_struct_creation() {
+            // Creating multiple bridge instances from different threads should not
+            // deadlock — struct creation must not hold the GIL.
+            let handles: Vec<_> = (0..4)
+                .map(|_| {
+                    std::thread::spawn(|| {
+                        let _bridge = real::PyAgentBridge::new();
+                    })
+                })
+                .collect();
+            for h in handles {
+                h.join()
+                    .expect("Thread should not panic during bridge creation");
+            }
+        }
+    }
+}

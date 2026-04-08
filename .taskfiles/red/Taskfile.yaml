@@ -8,6 +8,8 @@ set: [errexit, pipefail]
 shopt: [globstar]
 
 vars:
+  # Rust CLI binary path (passed from parent Taskfile)
+  ARES_CLI: '{{.ARES_CLI | default "./ares-rust/target/release/ares-cli"}}'
   # Remote paths (local to this taskfile)
   REMOTE_REPORT_DIR: '{{.REMOTE_REPORT_DIR | default "/reports"}}'
 
@@ -146,6 +148,7 @@ tasks:
             MODEL_OVERRIDE_ENV="ARES_MODEL_OVERRIDE={{.MODEL}}"
           fi
 
+          # TODO: Replace with `ares-cli ops submit` once implemented in Rust CLI
           kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-orchestrator -- \
             env OPENAI_API_KEY="{{.OPENAI_API_KEY}}" \
             ANTHROPIC_API_KEY="{{.ANTHROPIC_API_KEY}}" \
@@ -303,7 +306,7 @@ tasks:
         if [ -n "{{.OPERATION_ID}}" ]; then
           OP_ID_ARG="{{.OPERATION_ID}}"
         fi
-        kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-orchestrator -- python -m ares.cli_ops loot $OP_ID_ARG $LATEST_FLAG {{if ne .WATCH "0"}}--watch {{.WATCH}}{{end}} {{if eq .DIFF "true"}}--diff{{end}}
+        kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-orchestrator -- ares-cli ops loot $OP_ID_ARG $LATEST_FLAG {{if ne .WATCH "0"}}--watch {{.WATCH}}{{end}} {{if eq .DIFF "true"}}--diff{{end}}
 
   multi:status:
     desc: "Check multi-agent operation status (usage: task red:multi:status [OPERATION_ID=op-xxx] [LATEST=true])"
@@ -324,7 +327,7 @@ tasks:
         if [ -n "{{.OPERATION_ID}}" ]; then
           OP_ID_ARG="{{.OPERATION_ID}}"
         fi
-        kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-orchestrator -- python -m ares.cli_ops status $OP_ID_ARG $LATEST_FLAG
+        kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-orchestrator -- ares-cli ops status $OP_ID_ARG $LATEST_FLAG
 
   multi:tasks:list:
     desc: "List tasks for an operation (usage: task red:multi:tasks:list [OPERATION_ID=op-xxx] [LATEST=true] [ROLE=lateral] [STATUS=pending|in_progress|running|completed|failed|all])"
@@ -354,7 +357,7 @@ tasks:
         if [ -n "{{.ROLE}}" ]; then
           ROLE_ARG="--role {{.ROLE}}"
         fi
-        kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-orchestrator -- python -m ares.cli_ops tasks $OP_ID_ARG $LATEST_FLAG --task-status {{.STATUS}} $ROLE_ARG
+        kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-orchestrator -- ares-cli ops tasks $OP_ID_ARG $LATEST_FLAG --status {{.STATUS}} $ROLE_ARG
 
   multi:runtime:
     desc: "Show runtime for an operation (usage: task red:multi:runtime [OPERATION_ID=op-xxx] [LATEST=true])"
@@ -375,7 +378,7 @@ tasks:
         if [ -n "{{.OPERATION_ID}}" ]; then
           OP_ID_ARG="{{.OPERATION_ID}}"
         fi
-        kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-orchestrator -- python -m ares.cli_ops runtime $OP_ID_ARG $LATEST_FLAG
+        kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-orchestrator -- ares-cli ops runtime $OP_ID_ARG $LATEST_FLAG
 
   multi:report:
     desc: "Generate markdown report for an operation (usage: task red:multi:report [OPERATION_ID=op-xxx] [LATEST=true] [REGENERATE=true])"
@@ -405,11 +408,11 @@ tasks:
           REGEN_FLAG="--regenerate"
         fi
         # Generate report via CLI (outputs to pod's /tmp, we retrieve from Redis)
-        kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-orchestrator -- python -m ares.cli_ops report $OP_ID_ARG $LATEST_FLAG $REGEN_FLAG --output-dir /tmp/reports
+        kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-orchestrator -- ares-cli ops report $OP_ID_ARG $LATEST_FLAG $REGEN_FLAG --output-dir /tmp/reports
 
         # Get the operation ID if we used --latest
         if [ -n "$LATEST_FLAG" ]; then
-          RESOLVED_OP_ID=$(kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-orchestrator -- python -m ares.cli_ops list --latest 2>/dev/null | tr -d '\n')
+          RESOLVED_OP_ID=$(kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-orchestrator -- ares-cli ops list --latest 2>/dev/null | tr -d '\n')
         else
           RESOLVED_OP_ID="{{.OPERATION_ID}}"
         fi
@@ -514,7 +517,7 @@ tasks:
     desc: "List multi-agent operations and their state"
     silent: true
     cmds:
-      - kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-orchestrator -- python -m ares.cli_ops queue
+      - kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-orchestrator -- ares-cli ops queue
 
   multi:cleanup:
     desc: "Clean up old multi-agent operation checkpoints (usage: task red:multi:cleanup [MAX_AGE_HOURS=24])"
@@ -522,7 +525,7 @@ tasks:
     vars:
       MAX_AGE_HOURS: '{{.MAX_AGE_HOURS | default "24"}}'
     cmds:
-      - kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-orchestrator -- python -m ares.cli_ops cleanup --max-age-hours {{.MAX_AGE_HOURS}}
+      - kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-orchestrator -- ares-cli ops cleanup --max-age-hours {{.MAX_AGE_HOURS}}
 
   multi:delete:
     desc: "Delete a specific operation and all its data (usage: task red:multi:delete OPERATION_ID=op-xxx)"
@@ -533,7 +536,7 @@ tasks:
       - sh: test -n "{{.OPERATION_ID}}"
         msg: "OPERATION_ID variable is required"
     cmds:
-      - kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-orchestrator -- python -m ares.cli_ops delete "{{.OPERATION_ID}}" --force
+      - kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-orchestrator -- ares-cli ops delete "{{.OPERATION_ID}}" --force
 
   multi:kill:
     desc: "Kill running operations and restart workers to stop token burn (usage: task red:multi:kill [OPERATION_ID=op-xxx] [KEEP_LATEST=true])"
@@ -549,11 +552,11 @@ tasks:
         if [ -n "{{.OPERATION_ID}}" ]; then
           # Kill specific operation
           echo "Killing operation: {{.OPERATION_ID}}"
-          kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-orchestrator -- python -m ares.cli_ops delete "{{.OPERATION_ID}}" --force
+          kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-orchestrator -- ares-cli ops delete "{{.OPERATION_ID}}" --force
           KILLED_ANY=true
         else
           # Get all running operations
-          RUNNING_OPS=$(kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-orchestrator -- python -m ares.cli_ops queue 2>/dev/null | grep '\[running\]' | awk '{print $1}' || true)
+          RUNNING_OPS=$(kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-orchestrator -- ares-cli ops queue 2>/dev/null | grep '\[running\]' | awk '{print $1}' || true)
           if [ -z "$RUNNING_OPS" ]; then
             echo "No running operations found"
             if [ "{{.KEEP_LATEST}}" = "false" ]; then
@@ -575,14 +578,14 @@ tasks:
             echo "Keeping latest: $LATEST"
             for op in $TO_KILL; do
               echo "Killing: $op"
-              kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-orchestrator -- python -m ares.cli_ops delete "$op" --force
+              kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-orchestrator -- ares-cli ops delete "$op" --force
               KILLED_ANY=true
             done
           elif [ "{{.KEEP_LATEST}}" = "false" ]; then
             # Kill all running
             for op in $RUNNING_OPS; do
               echo "Killing: $op"
-              kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-orchestrator -- python -m ares.cli_ops delete "$op" --force
+              kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-orchestrator -- ares-cli ops delete "$op" --force
               KILLED_ANY=true
             done
           else
@@ -614,7 +617,7 @@ tasks:
       - sh: test -n "{{.OPERATION_ID}}"
         msg: "OPERATION_ID variable is required"
     cmds:
-      - kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-orchestrator -- python -m ares.cli_ops backfill-domains "{{.OPERATION_ID}}"
+      - kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-orchestrator -- ares-cli ops backfill-domains "{{.OPERATION_ID}}"
 
   multi:inject-credential:
     desc: "Inject a credential into operation shared state (usage: task red:multi:inject-credential OPERATION_ID=op-xxx USERNAME=testuser PASSWORD=secret [DOMAIN=contoso.local])"
@@ -644,8 +647,72 @@ tasks:
           ADMIN_ARG="--is-admin"
         fi
         kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-orchestrator -- \
-          python -m ares.cli_ops inject-credential "{{.OPERATION_ID}}" "{{.USERNAME}}" "{{.PASSWORD}}" \
+          ares-cli ops inject-credential "{{.OPERATION_ID}}" "{{.USERNAME}}" "{{.PASSWORD}}" \
           $DOMAIN_ARG --source "{{.SOURCE}}" $ADMIN_ARG
+
+  multi:inject-hash:
+    desc: "Inject an NTLM hash into operation shared state (usage: task red:multi:inject-hash OPERATION_ID=op-xxx USERNAME=krbtgt HASH=aad3b...:313b... [DOMAIN=contoso.local] [AES_KEY=f8b6...])"
+    silent: true
+    vars:
+      OPERATION_ID: '{{.OPERATION_ID | default ""}}'
+      USERNAME: '{{.USERNAME | default ""}}'
+      HASH: '{{.HASH | default ""}}'
+      DOMAIN: '{{.DOMAIN | default ""}}'
+      AES_KEY: '{{.AES_KEY | default ""}}'
+    preconditions:
+      - sh: test -n "{{.OPERATION_ID}}"
+        msg: "OPERATION_ID variable is required"
+      - sh: test -n "{{.USERNAME}}"
+        msg: "USERNAME variable is required"
+      - sh: test -n "{{.HASH}}"
+        msg: "HASH variable is required"
+    cmds:
+      - |
+        DOMAIN_ARG=""
+        if [ -n "{{.DOMAIN}}" ]; then
+          DOMAIN_ARG="--domain {{.DOMAIN}}"
+        fi
+        AES_ARG=""
+        if [ -n "{{.AES_KEY}}" ]; then
+          AES_ARG="--aes-key {{.AES_KEY}}"
+        fi
+        kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-orchestrator -- \
+          ares-cli ops inject-hash "{{.OPERATION_ID}}" "{{.USERNAME}}" "{{.HASH}}" \
+          $DOMAIN_ARG $AES_ARG
+
+  multi:inject-host:
+    desc: "Inject a host into operation shared state (usage: task red:multi:inject-host OPERATION_ID=op-xxx IP=192.168.58.20 HOSTNAME=dc01.essos.local)"
+    silent: true
+    vars:
+      OPERATION_ID: '{{.OPERATION_ID | default ""}}'
+      IP: '{{.IP | default ""}}'
+      HOSTNAME: '{{.HOSTNAME | default ""}}'
+    preconditions:
+      - sh: test -n "{{.OPERATION_ID}}"
+        msg: "OPERATION_ID variable is required"
+      - sh: test -n "{{.IP}}"
+        msg: "IP variable is required"
+      - sh: test -n "{{.HOSTNAME}}"
+        msg: "HOSTNAME variable is required"
+    cmds:
+      - kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-orchestrator -- ares-cli ops inject-host "{{.OPERATION_ID}}" "{{.IP}}" "{{.HOSTNAME}}"
+
+  multi:inject-domain-sid:
+    desc: "Inject a domain SID into operation shared state (usage: task red:multi:inject-domain-sid OPERATION_ID=op-xxx DOMAIN=north.sevenkingdoms.local SID=S-1-5-21-...)"
+    silent: true
+    vars:
+      OPERATION_ID: '{{.OPERATION_ID | default ""}}'
+      DOMAIN: '{{.DOMAIN | default ""}}'
+      SID: '{{.SID | default ""}}'
+    preconditions:
+      - sh: test -n "{{.OPERATION_ID}}"
+        msg: "OPERATION_ID variable is required"
+      - sh: test -n "{{.DOMAIN}}"
+        msg: "DOMAIN variable is required"
+      - sh: test -n "{{.SID}}"
+        msg: "SID variable is required"
+    cmds:
+      - kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-orchestrator -- ares-cli ops inject-domain-sid "{{.OPERATION_ID}}" "{{.DOMAIN}}" "{{.SID}}"
 
   multi:inject-vulnerability:
     desc: "Inject a vulnerability into operation shared state (usage: task red:multi:inject-vulnerability OPERATION_ID=op-xxx VULN_TYPE=constrained_delegation TARGET_IP=10.1.2.240 ...)"
@@ -685,7 +752,7 @@ tasks:
           DOMAIN_ARG="--domain {{.DOMAIN}}"
         fi
         kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-orchestrator -- \
-          python -m ares.cli_ops inject-vulnerability "{{.OPERATION_ID}}" "{{.VULN_TYPE}}" "{{.TARGET_IP}}" \
+          ares-cli ops inject-vulnerability "{{.OPERATION_ID}}" "{{.VULN_TYPE}}" "{{.TARGET_IP}}" \
           $HOSTNAME_ARG $SPN_ARG $ACCOUNT_ARG $DOMAIN_ARG --details '{{.DETAILS}}'
 
   # ===========================================================================
@@ -828,6 +895,7 @@ tasks:
             MODEL_OVERRIDE_ENV="ARES_MODEL_OVERRIDE={{.MODEL}}"
           fi
 
+          # TODO: Replace with `ares-cli ops submit` once implemented in Rust CLI
           kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-orchestrator -- \
             env OPENAI_API_KEY="${OPENAI_API_KEY:-}" \
             ANTHROPIC_API_KEY="${ANTHROPIC_API_KEY:-}" \

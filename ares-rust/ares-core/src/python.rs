@@ -16,8 +16,10 @@ fn bool_to_py(py: Python<'_>, val: bool) -> PyObject {
 }
 
 use crate::models::{
-    AgentInfo, AgentRole, Credential, Hash, Host, OperationMeta, Share, SharedRedTeamState, Target,
-    TaskInfo, TaskResult, TaskStatus, TaskStatusRecord, User, VulnerabilityInfo,
+    AgentInfo, AgentRole, BlueTaskInfo, Credential, Evidence, Hash, Host, InvestigationStage,
+    OperationMeta, PyramidLevel, Share, SharedBlueTeamState, SharedRedTeamState, Target, TaskInfo,
+    TaskResult, TaskStatus, TaskStatusRecord, TimelineEvent, TriageDecision, TriageRecord, User,
+    VulnerabilityInfo,
 };
 
 // ============================================================================
@@ -716,6 +718,216 @@ impl PyTaskQueue {
 }
 
 // ============================================================================
+// PyBlueStateReader
+// ============================================================================
+
+/// Python-facing Redis state backend for blue team investigations.
+///
+/// Wraps the async `BlueStateReader` methods behind a synchronous interface
+/// by using a per-instance tokio `Runtime`.
+#[pyclass]
+struct PyBlueStateReader {
+    handle: RedisHandle,
+}
+
+#[pymethods]
+impl PyBlueStateReader {
+    #[new]
+    fn new(redis_url: &str) -> PyResult<Self> {
+        Ok(Self {
+            handle: RedisHandle::new(redis_url.to_string())?,
+        })
+    }
+
+    /// Load the full SharedBlueTeamState for an investigation, or None if it doesn't exist.
+    fn load_state(&self, investigation_id: &str) -> PyResult<Option<SharedBlueTeamState>> {
+        let inv_id = investigation_id.to_string();
+        self.handle.run(|mut conn| async move {
+            let reader = crate::state::BlueStateReader::new(inv_id);
+            let result = reader.load_state(&mut conn).await?;
+            Ok((result, conn))
+        })
+    }
+
+    /// Get all evidence for an investigation.
+    fn get_evidence(&self, investigation_id: &str) -> PyResult<Vec<Evidence>> {
+        let inv_id = investigation_id.to_string();
+        self.handle.run(|mut conn| async move {
+            let reader = crate::state::BlueStateReader::new(inv_id);
+            let result = reader.get_evidence(&mut conn).await?;
+            Ok((result, conn))
+        })
+    }
+
+    /// Get timeline events for an investigation.
+    fn get_timeline(&self, investigation_id: &str) -> PyResult<Vec<TimelineEvent>> {
+        let inv_id = investigation_id.to_string();
+        self.handle.run(|mut conn| async move {
+            let reader = crate::state::BlueStateReader::new(inv_id);
+            let result = reader.get_timeline(&mut conn).await?;
+            Ok((result, conn))
+        })
+    }
+
+    /// Get MITRE ATT&CK technique IDs for an investigation.
+    fn get_techniques(&self, investigation_id: &str) -> PyResult<Vec<String>> {
+        let inv_id = investigation_id.to_string();
+        self.handle.run(|mut conn| async move {
+            let reader = crate::state::BlueStateReader::new(inv_id);
+            let result = reader.get_techniques(&mut conn).await?;
+            Ok((result, conn))
+        })
+    }
+
+    /// Get MITRE ATT&CK tactic IDs for an investigation.
+    fn get_tactics(&self, investigation_id: &str) -> PyResult<Vec<String>> {
+        let inv_id = investigation_id.to_string();
+        self.handle.run(|mut conn| async move {
+            let reader = crate::state::BlueStateReader::new(inv_id);
+            let result = reader.get_tactics(&mut conn).await?;
+            Ok((result, conn))
+        })
+    }
+
+    /// Get technique name mappings for an investigation.
+    fn get_technique_names(
+        &self,
+        investigation_id: &str,
+    ) -> PyResult<std::collections::HashMap<String, String>> {
+        let inv_id = investigation_id.to_string();
+        self.handle.run(|mut conn| async move {
+            let reader = crate::state::BlueStateReader::new(inv_id);
+            let result = reader.get_technique_names(&mut conn).await?;
+            Ok((result, conn))
+        })
+    }
+
+    /// Get queried hosts for an investigation.
+    fn get_hosts(&self, investigation_id: &str) -> PyResult<Vec<String>> {
+        let inv_id = investigation_id.to_string();
+        self.handle.run(|mut conn| async move {
+            let reader = crate::state::BlueStateReader::new(inv_id);
+            let result = reader.get_hosts(&mut conn).await?;
+            Ok((result, conn))
+        })
+    }
+
+    /// Get queried users for an investigation.
+    fn get_users(&self, investigation_id: &str) -> PyResult<Vec<String>> {
+        let inv_id = investigation_id.to_string();
+        self.handle.run(|mut conn| async move {
+            let reader = crate::state::BlueStateReader::new(inv_id);
+            let result = reader.get_users(&mut conn).await?;
+            Ok((result, conn))
+        })
+    }
+
+    /// Get executed query types for an investigation.
+    fn get_query_types(&self, investigation_id: &str) -> PyResult<Vec<String>> {
+        let inv_id = investigation_id.to_string();
+        self.handle.run(|mut conn| async move {
+            let reader = crate::state::BlueStateReader::new(inv_id);
+            let result = reader.get_query_types(&mut conn).await?;
+            Ok((result, conn))
+        })
+    }
+
+    /// Get recommendations for an investigation.
+    fn get_recommendations(&self, investigation_id: &str) -> PyResult<Vec<String>> {
+        let inv_id = investigation_id.to_string();
+        self.handle.run(|mut conn| async move {
+            let reader = crate::state::BlueStateReader::new(inv_id);
+            let result = reader.get_recommendations(&mut conn).await?;
+            Ok((result, conn))
+        })
+    }
+
+    /// Get the current triage decision for an investigation.
+    fn get_triage_decision(&self, investigation_id: &str) -> PyResult<Option<String>> {
+        let inv_id = investigation_id.to_string();
+        self.handle.run(|mut conn| async move {
+            let reader = crate::state::BlueStateReader::new(inv_id);
+            let result = reader.get_triage_decision(&mut conn).await?;
+            Ok((
+                result.map(|v| serde_json::to_string(&v).unwrap_or_default()),
+                conn,
+            ))
+        })
+    }
+
+    /// Get triage records for an investigation.
+    fn get_triage_records(&self, investigation_id: &str) -> PyResult<Vec<TriageRecord>> {
+        let inv_id = investigation_id.to_string();
+        self.handle.run(|mut conn| async move {
+            let reader = crate::state::BlueStateReader::new(inv_id);
+            let result = reader.get_triage_records(&mut conn).await?;
+            Ok((result, conn))
+        })
+    }
+
+    /// Get pending tasks for an investigation.
+    fn get_pending_tasks(
+        &self,
+        investigation_id: &str,
+    ) -> PyResult<std::collections::HashMap<String, BlueTaskInfo>> {
+        let inv_id = investigation_id.to_string();
+        self.handle.run(|mut conn| async move {
+            let reader = crate::state::BlueStateReader::new(inv_id);
+            let result = reader.get_pending_tasks(&mut conn).await?;
+            Ok((result, conn))
+        })
+    }
+
+    /// Get completed tasks for an investigation.
+    fn get_completed_tasks(
+        &self,
+        investigation_id: &str,
+    ) -> PyResult<std::collections::HashMap<String, BlueTaskInfo>> {
+        let inv_id = investigation_id.to_string();
+        self.handle.run(|mut conn| async move {
+            let reader = crate::state::BlueStateReader::new(inv_id);
+            let result = reader.get_completed_tasks(&mut conn).await?;
+            Ok((result, conn))
+        })
+    }
+
+    /// List all investigation IDs.
+    fn list_investigations(&self) -> PyResult<Vec<String>> {
+        self.handle.run(|mut conn| async move {
+            let result = crate::state::list_investigation_ids(&mut conn).await?;
+            Ok((result, conn))
+        })
+    }
+
+    /// Resolve the latest investigation ID, preferring running investigations.
+    fn resolve_latest_investigation(&self) -> PyResult<Option<String>> {
+        self.handle.run(|mut conn| async move {
+            let result = crate::state::resolve_latest_investigation(&mut conn).await?;
+            Ok((result, conn))
+        })
+    }
+
+    /// Check if an investigation is currently running (has an active lock).
+    fn is_running(&self, investigation_id: &str) -> PyResult<bool> {
+        let inv_id = investigation_id.to_string();
+        self.handle.run(|mut conn| async move {
+            let reader = crate::state::BlueStateReader::new(inv_id);
+            let result = reader.is_running(&mut conn).await?;
+            Ok((result, conn))
+        })
+    }
+
+    /// Delete an investigation and all associated Redis keys. Returns number of keys deleted.
+    fn delete_investigation(&self, investigation_id: &str) -> PyResult<usize> {
+        let inv_id = investigation_id.to_string();
+        self.handle.run(|mut conn| async move {
+            let result = crate::state::delete_investigation(&mut conn, &inv_id).await?;
+            Ok((result, conn))
+        })
+    }
+}
+
+// ============================================================================
 // Module registration
 // ============================================================================
 
@@ -739,8 +951,19 @@ fn ares_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<OperationMeta>()?;
     m.add_class::<SharedRedTeamState>()?;
 
+    // Blue team model types
+    m.add_class::<PyramidLevel>()?;
+    m.add_class::<InvestigationStage>()?;
+    m.add_class::<TriageDecision>()?;
+    m.add_class::<Evidence>()?;
+    m.add_class::<TimelineEvent>()?;
+    m.add_class::<BlueTaskInfo>()?;
+    m.add_class::<TriageRecord>()?;
+    m.add_class::<SharedBlueTeamState>()?;
+
     // Register backend classes
     m.add_class::<PyRedisStateBackend>()?;
+    m.add_class::<PyBlueStateReader>()?;
     m.add_class::<PyTaskQueue>()?;
 
     // Register helper functions

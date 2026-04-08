@@ -15,6 +15,13 @@ from typing import TYPE_CHECKING, Any
 
 from loguru import logger
 
+from ares.core.dispatcher.extraction import (
+    extract_delegation_entries,
+    extract_hosts_from_output,
+    extract_kerberos_hashes,
+    extract_secretsdump_hashes,
+    extract_shares_from_output,
+)
 from ares.core.models import (
     Credential,
     Hash,
@@ -1057,47 +1064,21 @@ class ResultProcessingMixin:
         """
         if not output:
             return []
-        hosts: list[Host] = []
-        seen: set[str] = set()
+
+        # First pass: extract banner lines via extraction.py (gets Rust acceleration)
+        hosts = extract_hosts_from_output(output)
+        seen: set[str] = {h.ip for h in hosts}
+
+        # Second pass: non-banner SMB lines that extraction.py doesn't handle
         for line in output.splitlines():
             stripped = line.strip()
             if not stripped:
                 continue
 
-            # Try banner line first (has OS info): "SMB IP PORT HOSTNAME [*] OS info..."
-            smb_match = re.search(
-                r"SMB\s+(\d{1,3}(?:\.\d{1,3}){3})\s+\d+\s+([A-Za-z0-9_.-]+)\s+\[\*\]\s+(.+)",
-                stripped,
-            )
-            if smb_match:
-                ip = smb_match.group(1)
-                host_col = smb_match.group(2)
-                details = smb_match.group(3)
-                name_match = re.search(r"\(name:([^)]+)\)", details)
-                domain_match = re.search(r"\(domain:([^)]+)\)", details)
-                domain = domain_match.group(1) if domain_match else ""
-                hostname = name_match.group(1) if name_match else host_col
-                if domain and hostname and not hostname.lower().endswith(domain.lower()):
-                    hostname = f"{hostname.lower()}.{domain}"
-                os_match = re.search(r"^\s*([^(]+?)\s+\(name:", details)
-                os_name = os_match.group(1).strip() if os_match else "Unknown"
-                if ip in seen:
-                    continue
-                seen.add(ip)
-                hosts.append(
-                    Host(
-                        ip=ip,
-                        hostname=hostname,
-                        os=os_name,
-                        roles=[],
-                        services=[],
-                    )
-                )
+            # Skip banner lines (already handled above)
+            if re.search(r"SMB\s+\d{1,3}(?:\.\d{1,3}){3}\s+\d+\s+\S+\s+\[\*\]", stripped):
                 continue
 
-            # Fallback: non-banner SMB lines (share table, user enum, etc.)
-            # Format: "SMB IP PORT HOSTNAME ..." where HOSTNAME is short name (no [*])
-            # This catches hosts from share enumeration output that don't have banner lines
             simple_match = re.match(
                 r"^SMB\s+(\d{1,3}(?:\.\d{1,3}){3})\s+\d+\s+([A-Za-z0-9_-]+)\s+",
                 stripped,
@@ -1105,18 +1086,16 @@ class ResultProcessingMixin:
             if simple_match:
                 ip = simple_match.group(1)
                 hostname_short = simple_match.group(2)
-                # Skip if we already have this IP (banner line takes precedence)
                 if ip in seen:
                     continue
-                # Skip if hostname looks like a table header or separator
                 if hostname_short.lower() in ("share", "name", "permissions", "remark"):
                     continue
                 seen.add(ip)
                 hosts.append(
                     Host(
                         ip=ip,
-                        hostname=hostname_short,  # Short name, will be upgraded later if FQDN found
-                        os="Unknown",  # No OS info in non-banner lines
+                        hostname=hostname_short,
+                        os="Unknown",
                         roles=[],
                         services=[],
                     )
@@ -1371,69 +1350,7 @@ class ResultProcessingMixin:
         self: RedTeamDispatcher, output: str, default_host: str = ""
     ) -> list[Share]:
         """Extract shares from netexec --shares output."""
-        if not output:
-            return []
-        shares: list[Share] = []
-        seen: set[tuple[str, str]] = set()
-        in_table = False
-        current_host = default_host
-
-        for line in output.splitlines():
-            stripped = line.strip()
-            if not stripped:
-                continue
-
-            # Parse host from SMB line prefix: "SMB  192.168.58.1  445  HOSTNAME  ..."
-            if stripped.startswith("SMB"):
-                smb_match = re.match(r"^SMB\s+(\d+\.\d+\.\d+\.\d+)\s+", stripped)
-                if smb_match:
-                    current_host = smb_match.group(1)
-                # Strip SMB prefix to get body
-                body = re.sub(r"^SMB\s+\S+\s+\d+\s+\S+\s+", "", stripped).strip()
-                if not body:
-                    continue
-                lower = body.lower()
-                if lower.startswith("share") and "permission" in lower:
-                    in_table = True
-                    continue
-                if in_table and set(body) <= {"-", " "}:
-                    continue
-                if in_table and (body.startswith("[") or lower.startswith("smb")):
-                    in_table = False
-                    continue
-                if not in_table:
-                    continue
-                parts = body.split(None, 2)
-                if not parts:
-                    continue
-                name = parts[0].strip()
-                if not name or name.lower() == "share":
-                    continue
-                # Validate permissions - netexec only outputs READ, WRITE, or READ,WRITE
-                # If parts[1] isn't a valid permission, it's actually the comment
-                # (happens when share has no permissions, e.g., "ADMIN$  Remote Admin")
-                valid_perms = {"read", "write", "read,write", "write,read"}
-                raw_perm = parts[1].strip().lower() if len(parts) > 1 else ""
-                if raw_perm in valid_perms:
-                    permissions = parts[1].strip().upper()
-                    comment = parts[2].strip() if len(parts) > 2 else ""
-                else:
-                    # No valid permission - parts[1:] is actually the comment
-                    permissions = ""
-                    comment = " ".join(parts[1:]).strip() if len(parts) > 1 else ""
-                key = (current_host.lower(), name.lower())
-                if key in seen:
-                    continue
-                seen.add(key)
-                shares.append(
-                    Share(
-                        host=current_host,
-                        name=name,
-                        permissions=permissions,
-                        comment=comment,
-                    )
-                )
-        return shares
+        return extract_shares_from_output(output, default_host)
 
     def _unwrap_ntlm_lines(self: RedTeamDispatcher, output: str) -> list[str]:
         """Unwrap line-wrapped NTLM hashes from secretsdump output."""
@@ -1453,82 +1370,47 @@ class ResultProcessingMixin:
             i += 1
         return unwrapped
 
-    def _try_extract_tgs_hash(self: RedTeamDispatcher, line: str, seen: set[str]) -> Hash | None:
-        """Try to extract a TGS hash from a line."""
-        match = re.search(r"(\$krb5tgs\$\d+\$\*([^$*]+)\$([^$*]+)\$[^$]+\$[a-fA-F0-9$]+)", line)
-        if match and match.group(1) not in seen:
-            seen.add(match.group(1))
-            return Hash(
-                username=match.group(2),
-                hash_value=match.group(1),
-                hash_type="TGS",
-                domain=match.group(3),
-            )
-        return None
-
-    def _try_extract_asrep_hash(self: RedTeamDispatcher, line: str, seen: set[str]) -> Hash | None:
-        """Try to extract an AS-REP hash from a line."""
-        match = re.search(r"(\$krb5asrep\$\d+\$([^@:]+)@([^:]+):[a-fA-F0-9$]+)", line)
-        if match and match.group(1) not in seen:
-            seen.add(match.group(1))
-            return Hash(
-                username=match.group(2),
-                hash_value=match.group(1),
-                hash_type="AS-REP",
-                domain=match.group(3),
-            )
-        return None
-
-    def _try_extract_ntlm_hash(self: RedTeamDispatcher, line: str, seen: set[str]) -> Hash | None:
-        """Try to extract an NTLM hash from a line (domain-prefixed or plain)."""
-        # Domain-prefixed: domain\user:rid:lmhash:nthash:::
-        match = re.search(
-            r"([^\\:\s]+)\\([^:\\]+):\d+:([a-fA-F0-9]{32}):([a-fA-F0-9]{32}):::", line
-        )
-        if match:
-            hash_value = f"{match.group(3)}:{match.group(4)}"
-            if hash_value not in seen:
-                seen.add(hash_value)
-                return Hash(
-                    username=match.group(2),
-                    hash_value=hash_value,
-                    hash_type="NTLM",
-                    domain=match.group(1),
-                )
-        # Non-domain-prefixed: user:rid:lmhash:nthash:::
-        match = re.match(r"([^:\\$\s]+):(\d+):([a-fA-F0-9]{32}):([a-fA-F0-9]{32}):::", line)
-        if match:
-            hash_value = f"{match.group(3)}:{match.group(4)}"
-            if hash_value not in seen:
-                seen.add(hash_value)
-                return Hash(
-                    username=match.group(1), hash_value=hash_value, hash_type="NTLM", domain=""
-                )
-        return None
-
     def _extract_hashes_from_output(self: RedTeamDispatcher, output: str) -> list[Hash]:
         """Extract Kerberos hashes (TGS, AS-REP, NTLM) from tool output."""
         if not output:
             return []
+
+        # Unwrap line-wrapped NTLM hashes before passing to extraction functions
+        unwrapped_output = "\n".join(self._unwrap_ntlm_lines(output))
+
         hashes: list[Hash] = []
         seen: set[str] = set()
 
-        for line in self._unwrap_ntlm_lines(output):
-            stripped = line.strip()
-            if not stripped:
-                continue
-            # Try each hash type in order
-            h = self._try_extract_tgs_hash(stripped, seen)
-            if h:
-                hashes.append(h)
-                continue
-            h = self._try_extract_asrep_hash(stripped, seen)
-            if h:
-                hashes.append(h)
-                continue
-            h = self._try_extract_ntlm_hash(stripped, seen)
-            if h:
-                hashes.append(h)
+        # Extract Kerberos hashes (TGS / AS-REP)
+        for entry in extract_kerberos_hashes(unwrapped_output):
+            key = entry["hash_value"]
+            if key not in seen:
+                seen.add(key)
+                hash_type = entry["hash_type"]
+                if hash_type == "AsRep":
+                    hash_type = "AS-REP"
+                hashes.append(
+                    Hash(
+                        username=entry["username"],
+                        hash_value=entry["hash_value"],
+                        hash_type=hash_type,
+                        domain=entry.get("domain", ""),
+                    )
+                )
+
+        # Extract NTLM hashes (secretsdump format)
+        for entry in extract_secretsdump_hashes(unwrapped_output):
+            key = entry["hash_value"]
+            if key not in seen:
+                seen.add(key)
+                hashes.append(
+                    Hash(
+                        username=entry["username"],
+                        hash_value=entry["hash_value"],
+                        hash_type="NTLM",
+                        domain=entry.get("domain", ""),
+                    )
+                )
 
         return hashes
 
@@ -1705,85 +1587,7 @@ class ResultProcessingMixin:
 
         Returns list of dicts with keys: account, account_type, delegation_type, target_spn
         """
-        if not output:
-            return []
-
-        delegations: list[dict[str, str]] = []
-        seen: set[str] = set()
-        in_table = False
-
-        for line in output.splitlines():
-            stripped = line.strip()
-            if not stripped:
-                continue
-
-            lower = stripped.lower()
-
-            # Detect table header
-            if "accountname" in lower and "delegationtype" in lower:
-                in_table = True
-                continue
-
-            # Skip separator lines (dashes)
-            if in_table and set(stripped) <= {"-", " "}:
-                continue
-
-            # Stop at non-table content
-            if in_table and stripped.startswith(("[", "Impacket")):
-                in_table = False
-                continue
-
-            if not in_table:
-                continue
-
-            # Parse table row - handle fixed-width columns with multi-word delegation types
-            parts = stripped.split()
-            if len(parts) < 3:
-                continue
-
-            account = parts[0]
-            account_type = parts[1] if len(parts) > 1 else ""
-
-            # Find delegation type - look for Constrained/Unconstrained/RBCD keyword
-            delegation_type = ""
-            target_spn = ""
-            lower_line = stripped.lower()
-
-            if "unconstrained" in lower_line:
-                delegation_type = "unconstrained"
-            elif "constrained" in lower_line:
-                delegation_type = "constrained"
-            elif "rbcd" in lower_line:
-                delegation_type = "rbcd"
-            else:
-                continue  # Not a delegation line
-
-            # Extract target SPN - look for SPN pattern (service/host)
-            for part in parts:
-                if "/" in part and not part.startswith("[") and part not in ("w/", "w/o"):
-                    slash_idx = part.find("/")
-                    if slash_idx < len(part) - 1 and part[slash_idx + 1].isalpha():
-                        target_spn = part
-                        break
-            if target_spn == "N/A":
-                target_spn = ""
-
-            # Deduplicate by account+delegation_type
-            key = f"{account.lower()}:{delegation_type.lower()}"
-            if key in seen:
-                continue
-            seen.add(key)
-
-            delegations.append(
-                {
-                    "account": account,
-                    "account_type": account_type,
-                    "delegation_type": delegation_type,
-                    "target_spn": target_spn,
-                }
-            )
-
-        return delegations
+        return extract_delegation_entries(output)
 
     async def _auto_queue_delegation_vulnerabilities(
         self: RedTeamDispatcher,

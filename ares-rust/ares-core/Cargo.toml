@@ -19,6 +19,7 @@ regex = { workspace = true }
 once_cell = { workspace = true }
 md-5 = "0.10"
 base64 = "0.22"
+tera = { workspace = true }
 pyo3 = { workspace = true, optional = true }
 
 [dev-dependencies]

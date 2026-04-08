@@ -3,6 +3,8 @@
 version: "3"
 
 vars:
+  # Rust CLI binary path (passed from parent Taskfile)
+  ARES_CLI: '{{.ARES_CLI | default "./ares-rust/target/release/ares-cli"}}'
   # AWS defaults for Grafana access
   PROFILE: '{{.PROFILE | default "infrastructure"}}'
   REGION: '{{.REGION | default "us-west-2"}}'
@@ -326,13 +328,13 @@ tasks:
         fi
         JSON_FLAG=""
         if [ "{{.JSON}}" = "true" ]; then
-          JSON_FLAG="--json-output"
+          JSON_FLAG="--json"
         fi
-        kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-orchestrator -- python -m ares.cli_ops export-detection $OP_ID_ARG $LATEST_FLAG $JSON_FLAG --output-dir /tmp/reports
+        kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-orchestrator -- ares-cli ops export-detection $OP_ID_ARG $LATEST_FLAG $JSON_FLAG --output-dir /tmp/reports
 
         # Get the operation ID if we used --latest
         if [ -n "$LATEST_FLAG" ]; then
-          RESOLVED_OP_ID=$(kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-orchestrator -- python -m ares.cli_ops list --latest 2>/dev/null | tr -d '\n')
+          RESOLVED_OP_ID=$(kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-orchestrator -- ares-cli ops list --latest 2>/dev/null | tr -d '\n')
         else
           RESOLVED_OP_ID="{{.OPERATION_ID}}"
         fi
@@ -379,7 +381,7 @@ tasks:
         fi
         JSON_FLAG=""
         if [ "{{.JSON}}" = "true" ]; then
-          JSON_FLAG="--json-output"
+          JSON_FLAG="--json"
         fi
         {{.ARES_CLI}} ops export-detection $OP_ID_ARG $LATEST_FLAG $JSON_FLAG --output-dir "{{.OUTPUT_DIR}}"
 
@@ -578,6 +580,7 @@ tasks:
           MULTI_AGENT_FLAG="--multi-agent"
         fi
 
+        # TODO: Replace with `ares-cli blue submit` once implemented in Rust CLI
         kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-blue-orchestrator -- \
           env OPENAI_API_KEY="{{.OPENAI_API_KEY}}" \
           ANTHROPIC_API_KEY="{{.ANTHROPIC_API_KEY}}" \
@@ -639,6 +642,7 @@ tasks:
           MULTI_AGENT_FLAG="--multi-agent"
         fi
 
+        # TODO: Replace with `ares-cli blue submit` once implemented in Rust CLI
         kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-blue-orchestrator -- \
           env OPENAI_API_KEY="$OPENAI_API_KEY" \
           ANTHROPIC_API_KEY="$ANTHROPIC_API_KEY" \
@@ -682,6 +686,7 @@ tasks:
           OP_ARGS="{{.OPERATION_ID}}"
         fi
 
+        # TODO: Replace with `ares-cli blue from-operation` once implemented in Rust CLI
         kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-blue-orchestrator -- \
           env OPENAI_API_KEY="{{.OPENAI_API_KEY}}" \
           ANTHROPIC_API_KEY="{{.ANTHROPIC_API_KEY}}" \
@@ -718,13 +723,13 @@ tasks:
         if [ -n "{{.INVESTIGATION_ID}}" ]; then
           INV_ID_ARG="{{.INVESTIGATION_ID}}"
         fi
-        kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-blue-orchestrator -- python3 -m ares.cli_blue_ops status $INV_ID_ARG $LATEST_FLAG
+        kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-blue-orchestrator -- ares-cli blue status $INV_ID_ARG $LATEST_FLAG
 
   multi:list:
     desc: "List all investigations"
     silent: true
     cmds:
-      - kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-blue-orchestrator -- python3 -m ares.cli_blue_ops list
+      - kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-blue-orchestrator -- ares-cli blue list
 
   multi:evidence:
     desc: "Show evidence for an investigation (usage: task blue:multi:evidence [INVESTIGATION_ID=inv-xxx] [LATEST=true])"
@@ -748,9 +753,9 @@ tasks:
         fi
         JSON_FLAG=""
         if [ "{{.JSON}}" = "true" ]; then
-          JSON_FLAG="--json-output"
+          JSON_FLAG="--json"
         fi
-        kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-blue-orchestrator -- python3 -m ares.cli_blue_ops evidence $INV_ID_ARG $LATEST_FLAG $JSON_FLAG
+        kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-blue-orchestrator -- ares-cli blue evidence $INV_ID_ARG $LATEST_FLAG $JSON_FLAG
 
   multi:techniques:
     desc: "Show MITRE techniques identified (usage: task blue:multi:techniques [INVESTIGATION_ID=inv-xxx] [LATEST=true])"
@@ -771,7 +776,7 @@ tasks:
         if [ -n "{{.INVESTIGATION_ID}}" ]; then
           INV_ID_ARG="{{.INVESTIGATION_ID}}"
         fi
-        kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-blue-orchestrator -- python3 -m ares.cli_blue_ops techniques $INV_ID_ARG $LATEST_FLAG
+        kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-blue-orchestrator -- ares-cli blue techniques $INV_ID_ARG $LATEST_FLAG
 
   multi:runtime:
     desc: "Show runtime for an investigation (usage: task blue:multi:runtime [INVESTIGATION_ID=inv-xxx] [LATEST=true])"
@@ -792,7 +797,28 @@ tasks:
         if [ -n "{{.INVESTIGATION_ID}}" ]; then
           INV_ID_ARG="{{.INVESTIGATION_ID}}"
         fi
-        kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-blue-orchestrator -- python3 -m ares.cli_blue_ops runtime $INV_ID_ARG $LATEST_FLAG
+        kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-blue-orchestrator -- ares-cli blue runtime $INV_ID_ARG $LATEST_FLAG
+
+  multi:triage-status:
+    desc: "Show triage status for an investigation (usage: task blue:multi:triage-status [INVESTIGATION_ID=inv-xxx] [LATEST=true])"
+    silent: true
+    vars:
+      INVESTIGATION_ID: '{{.INVESTIGATION_ID | default ""}}'
+      LATEST: '{{.LATEST | default ""}}'
+    preconditions:
+      - sh: test -n "{{.INVESTIGATION_ID}}" || test "{{.LATEST}}" = "true"
+        msg: "Either INVESTIGATION_ID or LATEST=true is required"
+    cmds:
+      - |
+        LATEST_FLAG=""
+        if [ "{{.LATEST}}" = "true" ]; then
+          LATEST_FLAG="--latest"
+        fi
+        INV_ID_ARG=""
+        if [ -n "{{.INVESTIGATION_ID}}" ]; then
+          INV_ID_ARG="{{.INVESTIGATION_ID}}"
+        fi
+        kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-blue-orchestrator -- ares-cli blue triage-status $INV_ID_ARG $LATEST_FLAG
 
   multi:operation-status:
     desc: "Show aggregate status for all investigations from a red team operation (usage: task blue:multi:operation-status [OPERATION_ID=op-xxx] [LATEST=true] [WATCH=10])"
@@ -818,7 +844,7 @@ tasks:
         if [ "{{.WATCH}}" != "0" ]; then
           WATCH_ARG="--watch {{.WATCH}}"
         fi
-        kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-blue-orchestrator -- python3 -m ares.cli_blue_ops operation-status $OP_ID_ARG $LATEST_FLAG $WATCH_ARG
+        kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-blue-orchestrator -- ares-cli blue operation-status $OP_ID_ARG $LATEST_FLAG $WATCH_ARG
 
   multi:delete:
     desc: "Delete an investigation and all its data (usage: task blue:multi:delete INVESTIGATION_ID=inv-xxx)"
@@ -829,7 +855,7 @@ tasks:
       - sh: test -n "{{.INVESTIGATION_ID}}"
         msg: "INVESTIGATION_ID variable is required"
     cmds:
-      - kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-blue-orchestrator -- python3 -m ares.cli_blue_ops delete "{{.INVESTIGATION_ID}}" --force
+      - kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-blue-orchestrator -- ares-cli blue delete "{{.INVESTIGATION_ID}}" --force
 
   multi:delete-operation:
     desc: "Delete an operation and all its investigations (usage: task blue:multi:delete-operation OPERATION_ID=op-xxx)"
@@ -840,7 +866,7 @@ tasks:
       - sh: test -n "{{.OPERATION_ID}}"
         msg: "OPERATION_ID variable is required"
     cmds:
-      - kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-blue-orchestrator -- python3 -m ares.cli_blue_ops delete-operation "{{.OPERATION_ID}}" --force
+      - kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-blue-orchestrator -- ares-cli blue delete-operation "{{.OPERATION_ID}}" --force
 
   multi:cleanup:
     desc: "Clean up old investigations (usage: task blue:multi:cleanup [MAX_AGE_HOURS=24] [ALL=true])"
@@ -859,7 +885,7 @@ tasks:
         if [ "{{.DRY_RUN}}" = "true" ]; then
           DRY_RUN_FLAG="--dry-run"
         fi
-        kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-blue-orchestrator -- python3 -m ares.cli_blue_ops cleanup --max-age-hours {{.MAX_AGE_HOURS}} $ALL_FLAG $DRY_RUN_FLAG
+        kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-blue-orchestrator -- ares-cli blue cleanup --max-age-hours {{.MAX_AGE_HOURS}} $ALL_FLAG $DRY_RUN_FLAG
 
   multi:logs:
     desc: "Follow blue team logs (usage: task blue:multi:logs [ALL=true] [ROLE=orchestrator|triage|threat-hunter|lateral-analyst])"

@@ -14,10 +14,15 @@ from ares.core.dispatcher.extraction import (
     _HAS_RUST,
     extract_delegation_entries,
     extract_domain_sid,
+    extract_host_from_spn,
     extract_hosts_from_output,
     extract_kerberos_hashes,
+    extract_ntlm_hashes,
+    extract_plaintext_passwords_from_output,
     extract_secretsdump_hashes,
     extract_shares_from_output,
+    extract_ticket_path_from_output,
+    extract_users_from_output,
 )
 
 # Sample outputs for testing
@@ -64,6 +69,49 @@ DOMAIN_SID_OUTPUT = """\
 [*] Domain SID is: S-1-5-21-1328384573-4090356449-2552632942
 """
 
+NTLM_OUTPUT = """\
+contoso.local\\Administrator:500:aad3b435b51404eeaad3b435b51404ee:64fbae31cc352fc26af97cbdef151e03:::
+svc_sql:1234:aad3b435b51404eeaad3b435b51404ee:e52cac67419a9a224a3b108f3fa6cb6d:::
+"""
+
+USER_ENUM_OUTPUT = """\
+SMB         192.168.58.10   445    DC01             user:[Administrator] rid:[0x1f4]
+SMB         192.168.58.10   445    DC01             user:[Guest] rid:[0x1f5]
+Account: svc_sql
+sAMAccountName: john.doe
+"""
+
+LSA_PASSWORD_OUTPUT = """\
+[*] DefaultPassword
+CONTOSO\\admin.user:SuperSecret123!
+"""
+
+LDAP_PASSWORD_OUTPUT = """\
+dn: CN=svc_backup,OU=Service Accounts,DC=contoso,DC=local
+sAMAccountName: svc_backup
+description: Password: Backup2024!
+"""
+
+TICKET_OUTPUT = """\
+[*] Getting TGT for user
+[*] Saving ticket in administrator@cifs_dc01.contoso.local@CONTOSO.LOCAL.ccache
+"""
+
+KERBEROS_COMBINED_OUTPUT = """\
+$krb5tgs$23$*svc_sql$contoso.local$MSSQLSvc/srv01.contoso.local:1433*$abc123hash...
+$krb5asrep$23$svc_nopreauth@contoso.local:def456hash...
+"""
+
+RBCD_DELEGATION_OUTPUT = """\
+Impacket v0.12.0.dev1 - Copyright Fortra, LLC and its affiliated companies
+
+AccountName   AccountType    DelegationType                    DelegationRightsTo
+-----------   -----------    ----------------                  ------------------
+svc_sql       user           Constrained                       cifs/srv01.contoso.local
+WEB01$        computer       Unconstrained                     N/A
+APP01$        computer       RBCD                              cifs/dc01.contoso.local
+"""
+
 
 class TestExtractHosts:
     def test_basic_extraction(self):
@@ -106,6 +154,18 @@ class TestExtractSecretsdumpHashes:
         assert by_user["administrator"]["is_administrator"] is True
         assert by_user["krbtgt"]["is_krbtgt"] is True
 
+    def test_hash_value_format(self):
+        """Verify hash_value is formatted as 'lm:nt'."""
+        hashes = extract_secretsdump_hashes(SECRETSDUMP_OUTPUT)
+        by_user = {h["username"].lower(): h for h in hashes}
+        admin = by_user["administrator"]
+        assert admin["hash_value"] == f"{admin['lm_hash']}:{admin['nt_hash']}"
+        assert ":" in admin["hash_value"]
+        # Each side of the colon should be a 32-char hex string
+        lm_part, nt_part = admin["hash_value"].split(":")
+        assert len(lm_part) == 32
+        assert len(nt_part) == 32
+
     def test_empty_input(self):
         assert extract_secretsdump_hashes("") == []
 
@@ -122,6 +182,17 @@ class TestExtractKerberosHashes:
         assert len(hashes) >= 1
         assert hashes[0]["hash_type"] == "AsRep"
         assert hashes[0]["username"] == "svc_nopreauth"
+
+    def test_combined_tgs_and_asrep(self):
+        """Verify both TGS and AsRep hashes are extracted from combined output."""
+        hashes = extract_kerberos_hashes(KERBEROS_COMBINED_OUTPUT)
+        assert len(hashes) == 2
+        types = {h["hash_type"] for h in hashes}
+        assert "TGS" in types
+        assert "AsRep" in types
+        usernames = {h["username"] for h in hashes}
+        assert "svc_sql" in usernames
+        assert "svc_nopreauth" in usernames
 
     def test_empty_input(self):
         assert extract_kerberos_hashes("") == []
@@ -145,6 +216,14 @@ class TestExtractDelegationEntries:
         delegations = extract_delegation_entries(DELEGATION_OUTPUT)
         by_account = {d["account"]: d for d in delegations}
         assert "cifs/srv01.contoso.local" in by_account["svc_sql"]["target_spn"]
+
+    def test_rbcd_delegation(self):
+        """Verify RBCD delegation type is correctly parsed."""
+        delegations = extract_delegation_entries(RBCD_DELEGATION_OUTPUT)
+        by_account = {d["account"]: d for d in delegations}
+        assert "APP01$" in by_account
+        assert by_account["APP01$"]["delegation_type"] in ("rbcd", "RBCD")
+        assert "cifs/dc01.contoso.local" in by_account["APP01$"]["target_spn"]
 
     def test_empty_input(self):
         assert extract_delegation_entries("") == []
@@ -178,6 +257,122 @@ class TestExtractDomainSid:
 
     def test_empty_input(self):
         assert extract_domain_sid("") is None
+
+
+class TestExtractNtlmHashes:
+    def test_domain_prefixed_hashes(self):
+        hashes = extract_ntlm_hashes(NTLM_OUTPUT)
+        assert len(hashes) >= 1
+        usernames = {h["username"].lower() for h in hashes}
+        assert "administrator" in usernames
+
+    def test_non_domain_prefixed_hashes(self):
+        hashes = extract_ntlm_hashes(NTLM_OUTPUT)
+        usernames = {h["username"].lower() for h in hashes}
+        assert "svc_sql" in usernames
+
+    def test_hash_fields(self):
+        hashes = extract_ntlm_hashes(NTLM_OUTPUT)
+        by_user = {h["username"].lower(): h for h in hashes}
+        admin = by_user["administrator"]
+        assert admin["lm_hash"] == "aad3b435b51404eeaad3b435b51404ee"
+        assert admin["nt_hash"] == "64fbae31cc352fc26af97cbdef151e03"
+        assert admin["hash_value"] == f"{admin['lm_hash']}:{admin['nt_hash']}"
+        assert admin["is_administrator"] is True
+
+    def test_empty_input(self):
+        assert extract_ntlm_hashes("") == []
+
+
+class TestExtractUsers:
+    def test_user_bracket_pattern(self):
+        users = extract_users_from_output(USER_ENUM_OUTPUT)
+        assert "Administrator" in users
+        assert "Guest" in users
+
+    def test_account_pattern(self):
+        users = extract_users_from_output(USER_ENUM_OUTPUT)
+        assert "svc_sql" in users
+
+    def test_samaccountname_pattern(self):
+        users = extract_users_from_output(USER_ENUM_OUTPUT)
+        assert "john.doe" in users
+
+    def test_smb_output_with_timestamp(self):
+        smb_timestamp_output = """\
+SMB         192.168.58.10   445    DC01             jsmith 2024-01-15 10:30:00
+"""
+        users = extract_users_from_output(smb_timestamp_output)
+        assert "jsmith" in users
+
+    def test_empty_input(self):
+        assert extract_users_from_output("") == []
+        assert extract_users_from_output("no user info here") == []
+
+    def test_no_duplicates(self):
+        dup_output = """\
+user:[Administrator] rid:[0x1f4]
+user:[Administrator] rid:[0x1f4]
+"""
+        users = extract_users_from_output(dup_output)
+        assert users.count("Administrator") == 1
+
+
+class TestExtractPlaintextPasswords:
+    def test_lsa_default_password(self):
+        creds = extract_plaintext_passwords_from_output(LSA_PASSWORD_OUTPUT)
+        assert len(creds) >= 1
+        found = False
+        for username, password, cred_domain in creds:
+            if username == "admin.user" and password == "SuperSecret123!":
+                found = True
+                assert cred_domain.upper() == "CONTOSO"
+                break
+        assert found, f"Expected admin.user credential not found in {creds}"
+
+    def test_ldap_entry_format(self):
+        creds = extract_plaintext_passwords_from_output(LDAP_PASSWORD_OUTPUT)
+        assert len(creds) >= 1
+        found = False
+        for username, password, _domain in creds:
+            if username == "svc_backup" and password == "Backup2024!":
+                found = True
+                break
+        assert found, f"Expected svc_backup credential not found in {creds}"
+
+    def test_empty_input(self):
+        assert extract_plaintext_passwords_from_output("") == []
+
+
+class TestExtractTicketPath:
+    def test_saving_ticket_format(self):
+        path = extract_ticket_path_from_output(TICKET_OUTPUT)
+        assert path == "administrator@cifs_dc01.contoso.local@CONTOSO.LOCAL.ccache"
+
+    def test_no_match(self):
+        assert extract_ticket_path_from_output("no ticket here") == ""
+
+    def test_empty_input(self):
+        assert extract_ticket_path_from_output("") == ""
+
+
+class TestExtractHostFromSpn:
+    def test_cifs_spn(self):
+        host = extract_host_from_spn("cifs/dc01.contoso.local")
+        assert host == "dc01.contoso.local"
+
+    def test_mssql_spn_with_port(self):
+        host = extract_host_from_spn("MSSQLSvc/sql01:1433")
+        assert host == "sql01"
+
+    def test_empty_input(self):
+        assert extract_host_from_spn("") is None
+
+    def test_none_input(self):
+        assert extract_host_from_spn(None) is None
+
+    def test_no_slash(self):
+        assert extract_host_from_spn("noslash") is None
 
 
 class TestRustAvailability:
