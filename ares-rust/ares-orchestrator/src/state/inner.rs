@@ -107,3 +107,145 @@ impl StateInner {
             .insert(key);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::state::*;
+
+    #[test]
+    fn test_state_inner_new_initializes_all_dedup_sets() {
+        let state = StateInner::new("op-test".into());
+        assert_eq!(state.operation_id, "op-test");
+        assert!(!state.has_domain_admin);
+        assert!(!state.has_golden_ticket);
+        assert!(!state.completed);
+
+        // All 19 dedup sets should be initialized
+        for name in ALL_DEDUP_SETS {
+            assert!(state.dedup.contains_key(*name), "Missing dedup set: {name}");
+            assert!(state.dedup[*name].is_empty());
+        }
+        assert_eq!(state.dedup.len(), ALL_DEDUP_SETS.len());
+    }
+
+    #[test]
+    fn test_is_processed_returns_false_for_unknown_set() {
+        let state = StateInner::new("op-1".into());
+        assert!(!state.is_processed("nonexistent_set", "key1"));
+    }
+
+    #[test]
+    fn test_mark_processed_and_is_processed() {
+        let mut state = StateInner::new("op-1".into());
+        assert!(!state.is_processed(DEDUP_CRACK_REQUESTS, "hash1"));
+
+        state.mark_processed(DEDUP_CRACK_REQUESTS, "hash1".into());
+        assert!(state.is_processed(DEDUP_CRACK_REQUESTS, "hash1"));
+        assert!(!state.is_processed(DEDUP_CRACK_REQUESTS, "hash2"));
+    }
+
+    #[test]
+    fn test_mark_processed_creates_new_set_if_needed() {
+        let mut state = StateInner::new("op-1".into());
+        state.mark_processed("custom_set", "key1".into());
+        assert!(state.is_processed("custom_set", "key1"));
+    }
+
+    #[test]
+    fn test_mark_processed_idempotent() {
+        let mut state = StateInner::new("op-1".into());
+        state.mark_processed(DEDUP_SECRETSDUMP, "192.168.58.10".into());
+        state.mark_processed(DEDUP_SECRETSDUMP, "192.168.58.10".into());
+        assert_eq!(state.dedup[DEDUP_SECRETSDUMP].len(), 1);
+    }
+
+    #[test]
+    fn test_dedup_sets_are_independent() {
+        let mut state = StateInner::new("op-1".into());
+        state.mark_processed(DEDUP_CRACK_REQUESTS, "hash1".into());
+        state.mark_processed(DEDUP_SECRETSDUMP, "192.168.58.10".into());
+
+        assert!(state.is_processed(DEDUP_CRACK_REQUESTS, "hash1"));
+        assert!(!state.is_processed(DEDUP_CRACK_REQUESTS, "192.168.58.10"));
+        assert!(state.is_processed(DEDUP_SECRETSDUMP, "192.168.58.10"));
+        assert!(!state.is_processed(DEDUP_SECRETSDUMP, "hash1"));
+    }
+
+    #[test]
+    fn test_exploited_vulnerabilities_tracking() {
+        let mut state = StateInner::new("op-1".into());
+        assert!(state.exploited_vulnerabilities.is_empty());
+
+        state
+            .exploited_vulnerabilities
+            .insert("vuln-001".to_string());
+        assert!(state.exploited_vulnerabilities.contains("vuln-001"));
+        assert!(!state.exploited_vulnerabilities.contains("vuln-002"));
+    }
+
+    #[test]
+    fn test_mssql_enum_dispatched_tracking() {
+        let mut state = StateInner::new("op-1".into());
+        assert!(!state.mssql_enum_dispatched.contains("192.168.58.20"));
+
+        state
+            .mssql_enum_dispatched
+            .insert("192.168.58.20".to_string());
+        assert!(state.mssql_enum_dispatched.contains("192.168.58.20"));
+    }
+
+    #[test]
+    fn test_domain_controller_map() {
+        let mut state = StateInner::new("op-1".into());
+        state
+            .domain_controllers
+            .insert("contoso.local".into(), "192.168.58.10".into());
+        state
+            .domain_controllers
+            .insert("fabrikam.local".into(), "192.168.58.20".into());
+
+        assert_eq!(
+            state.domain_controllers.get("contoso.local"),
+            Some(&"192.168.58.10".to_string())
+        );
+        assert_eq!(
+            state.domain_controllers.get("fabrikam.local"),
+            Some(&"192.168.58.20".to_string())
+        );
+        assert_eq!(state.domain_controllers.get("unknown.local"), None);
+    }
+
+    #[test]
+    fn test_all_known_dedup_set_constants() {
+        // Verify constants are accessible and match expected names
+        let expected = vec![
+            DEDUP_CRACK_REQUESTS,
+            DEDUP_SECRETSDUMP,
+            DEDUP_DELEGATION_CREDS,
+            DEDUP_ADCS_SERVERS,
+            DEDUP_BLOODHOUND_DOMAINS,
+            DEDUP_SPIDERED_SHARES,
+            DEDUP_EXPANSION_CREDS,
+            DEDUP_ASREP_DOMAINS,
+            DEDUP_USERNAME_SPRAY,
+            DEDUP_PASSWORD_SPRAY,
+            DEDUP_ESC8_SERVERS,
+            DEDUP_COERCED_DCS,
+            DEDUP_WRITABLE_SHARES,
+            DEDUP_HASH_LATERAL,
+            DEDUP_SCANNED_TARGETS,
+            DEDUP_ACL_STEPS,
+            DEDUP_TRUST_FOLLOW,
+            DEDUP_S4U_EXPLOITS,
+            DEDUP_GMSA_ACCOUNTS,
+        ];
+        assert_eq!(expected.len(), ALL_DEDUP_SETS.len());
+        for name in expected {
+            assert!(
+                ALL_DEDUP_SETS.contains(&name),
+                "Missing from ALL_DEDUP_SETS: {name}"
+            );
+        }
+    }
+}

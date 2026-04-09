@@ -266,17 +266,103 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_role_for_task_type() {
-        assert_eq!(role_for_task_type("recon"), Some(AgentRole::Recon));
-        assert_eq!(
-            role_for_task_type("credential_access"),
-            Some(AgentRole::CredentialAccess)
-        );
+    fn test_role_for_task_type_recon_variants() {
+        for tt in &[
+            "recon",
+            "nmap",
+            "bloodhound",
+            "delegation_enum",
+            "certipy_find",
+        ] {
+            assert_eq!(
+                role_for_task_type(tt),
+                Some(AgentRole::Recon),
+                "Failed for: {tt}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_role_for_task_type_credential_access_variants() {
+        for tt in &[
+            "credential_access",
+            "secretsdump",
+            "share_spider",
+            "kerberoast",
+            "asrep_roast",
+            "password_spray",
+        ] {
+            assert_eq!(
+                role_for_task_type(tt),
+                Some(AgentRole::CredentialAccess),
+                "Failed for: {tt}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_role_for_task_type_other_roles() {
         assert_eq!(role_for_task_type("crack"), Some(AgentRole::Cracker));
         assert_eq!(role_for_task_type("lateral"), Some(AgentRole::Lateral));
         assert_eq!(role_for_task_type("exploit"), Some(AgentRole::Privesc));
+        assert_eq!(
+            role_for_task_type("privesc_enumeration"),
+            Some(AgentRole::Privesc)
+        );
         assert_eq!(role_for_task_type("coercion"), Some(AgentRole::Coercion));
         assert_eq!(role_for_task_type("acl_analysis"), Some(AgentRole::Acl));
+    }
+
+    #[test]
+    fn test_role_for_task_type_unmapped() {
+        assert_eq!(role_for_task_type("command"), None);
         assert_eq!(role_for_task_type("unknown"), None);
+        assert_eq!(role_for_task_type(""), None);
+    }
+
+    #[test]
+    fn test_build_system_prompt_all_roles() {
+        let snapshot = StateSnapshot::default();
+        for role in &[
+            AgentRole::Recon,
+            AgentRole::CredentialAccess,
+            AgentRole::Cracker,
+            AgentRole::Acl,
+            AgentRole::Privesc,
+            AgentRole::Lateral,
+            AgentRole::Coercion,
+            AgentRole::Orchestrator,
+        ] {
+            let result = build_system_prompt(*role, &snapshot);
+            assert!(result.is_ok(), "Failed for role: {:?}", role);
+            let prompt = result.unwrap();
+            assert!(!prompt.is_empty(), "Empty prompt for role: {:?}", role);
+        }
+    }
+
+    #[test]
+    fn test_build_task_prompt_known_types() {
+        let snapshot = StateSnapshot::default();
+        let payload = serde_json::json!({
+            "target_ip": "192.168.58.10",
+            "domain": "contoso.local",
+            "techniques": ["nmap"]
+        });
+
+        let result = build_task_prompt("recon", "t-1", &payload, &snapshot);
+        assert!(result.is_ok());
+        assert!(!result.unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_build_task_prompt_unknown_type_falls_back() {
+        let snapshot = StateSnapshot::default();
+        let payload = serde_json::json!({"foo": "bar"});
+
+        let result = build_task_prompt("unknown_type", "t-1", &payload, &snapshot);
+        assert!(result.is_ok());
+        let prompt = result.unwrap();
+        assert!(prompt.contains("unknown_type"));
+        assert!(prompt.contains("task_complete"));
     }
 }
