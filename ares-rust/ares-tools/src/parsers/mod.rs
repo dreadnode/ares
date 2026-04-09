@@ -389,4 +389,88 @@ SMB  192.168.58.121  445  DC01  bob         2026-03-25 23:21:09 0  Bob"#;
         assert_eq!(creds[0]["username"], "alice");
         assert_eq!(creds[0]["password"], "Welcome1!");
     }
+
+    // --- looks_like_ip ---
+
+    #[test]
+    fn test_looks_like_ip_valid() {
+        assert!(looks_like_ip("192.168.58.10"));
+        assert!(looks_like_ip("10.0.0.1"));
+        assert!(looks_like_ip("0.0.0.0"));
+        assert!(looks_like_ip("255.255.255.255"));
+    }
+
+    #[test]
+    fn test_looks_like_ip_invalid() {
+        assert!(!looks_like_ip("not-an-ip"));
+        assert!(!looks_like_ip("192.168.58"));
+        assert!(!looks_like_ip("192.168.58.10.5"));
+        assert!(!looks_like_ip("256.0.0.1")); // 256 > u8
+        assert!(!looks_like_ip("dc01.contoso.local"));
+        assert!(!looks_like_ip(""));
+    }
+
+    // --- merge_discoveries ---
+
+    #[test]
+    fn test_merge_discoveries_combines_arrays() {
+        let d1 = json!({
+            "hosts": [{"ip": "192.168.58.10"}],
+            "credentials": [{"username": "admin"}],
+        });
+        let d2 = json!({
+            "hosts": [{"ip": "192.168.58.20"}],
+            "hashes": [{"username": "krbtgt"}],
+        });
+        let merged = merge_discoveries(&[d1, d2]);
+        assert_eq!(merged["hosts"].as_array().unwrap().len(), 2);
+        assert_eq!(merged["credentials"].as_array().unwrap().len(), 1);
+        assert_eq!(merged["hashes"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn test_merge_discoveries_empty_input() {
+        let merged = merge_discoveries(&[]);
+        assert!(merged["hosts"].is_null());
+        assert!(merged["credentials"].is_null());
+    }
+
+    #[test]
+    fn test_merge_discoveries_single_input() {
+        let d = json!({"vulnerabilities": [{"vuln_id": "v1"}]});
+        let merged = merge_discoveries(&[d]);
+        assert_eq!(merged["vulnerabilities"].as_array().unwrap().len(), 1);
+    }
+
+    // --- parse_tool_output routing ---
+
+    #[test]
+    fn test_parse_tool_output_secretsdump() {
+        let output = "Administrator:500:aad3b435b51404eeaad3b435b51404ee:e19ccf75ee54e06b06a5907af13cef42:::";
+        let params = json!({"domain": "contoso.local"});
+        let disc = parse_tool_output("secretsdump", output, &params);
+        assert!(!disc["hashes"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_parse_tool_output_kerberoast() {
+        let output = "$krb5tgs$23$*svc_sql$CONTOSO$contoso.local/svc_sql*$abc";
+        let params = json!({"domain": "contoso.local"});
+        let disc = parse_tool_output("kerberoast", output, &params);
+        assert_eq!(disc["hashes"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn test_parse_tool_output_unknown_tool() {
+        let disc = parse_tool_output("unknown_tool", "output", &json!({}));
+        assert_eq!(disc, json!({}));
+    }
+
+    #[test]
+    fn test_parse_tool_output_find_delegation() {
+        let output = "svc_sql$  Computer  Constrained  CIFS/dc01.contoso.local";
+        let params = json!({"domain": "contoso.local", "target_ip": "192.168.58.10"});
+        let disc = parse_tool_output("find_delegation", output, &params);
+        assert_eq!(disc["vulnerabilities"].as_array().unwrap().len(), 1);
+    }
 }

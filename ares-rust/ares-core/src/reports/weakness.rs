@@ -87,3 +87,93 @@ pub fn deduplicate_weaknesses(weaknesses: &[String]) -> Vec<ParsedWeakness> {
 
     result
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_weakness_block_h3_title() {
+        let block = "### SMB Signing Disabled\n**Vulnerability:** SMB signing not required";
+        let parsed = parse_weakness_block(block);
+        assert_eq!(parsed.title, "SMB Signing Disabled");
+        assert_eq!(parsed.vulnerability, "SMB signing not required");
+    }
+
+    #[test]
+    fn test_parse_weakness_block_bold_title() {
+        let block = "**Kerberoastable Account**\n- **Vulnerability:** Weak service account";
+        let parsed = parse_weakness_block(block);
+        assert_eq!(parsed.title, "Kerberoastable Account");
+        assert_eq!(parsed.vulnerability, "Weak service account");
+    }
+
+    #[test]
+    fn test_parse_weakness_block_all_fields() {
+        let block = "\
+### ADCS ESC1
+- **Vulnerability:** Certificate template misconfiguration
+- **Affected Resource:** contoso-DC01-CA
+- **Discovery Method:** certipy find
+- **Impact:** Domain admin escalation";
+        let parsed = parse_weakness_block(block);
+        assert_eq!(parsed.title, "ADCS ESC1");
+        assert_eq!(
+            parsed.vulnerability,
+            "Certificate template misconfiguration"
+        );
+        assert_eq!(parsed.affected_resource, "contoso-DC01-CA");
+        assert_eq!(parsed.discovery_method, "certipy find");
+        assert_eq!(parsed.impact, "Domain admin escalation");
+    }
+
+    #[test]
+    fn test_parse_weakness_block_empty() {
+        let parsed = parse_weakness_block("");
+        assert_eq!(parsed.title, "");
+        assert_eq!(parsed.vulnerability, "");
+    }
+
+    #[test]
+    fn test_parse_weakness_block_title_field() {
+        let block = "**Title:** Custom Title\n**Vulnerability:** Something";
+        let parsed = parse_weakness_block(block);
+        assert_eq!(parsed.title, "Custom Title");
+    }
+
+    #[test]
+    fn test_deduplicate_weaknesses_removes_dupes() {
+        let weaknesses = vec![
+            "### SMB Signing\n**Vulnerability:** Not required".to_string(),
+            "### SMB Signing\n**Vulnerability:** Not required on host B".to_string(),
+            "### Kerberoast\n**Vulnerability:** Weak SPN".to_string(),
+        ];
+        let deduped = deduplicate_weaknesses(&weaknesses);
+        assert_eq!(deduped.len(), 2);
+    }
+
+    #[test]
+    fn test_deduplicate_weaknesses_case_insensitive() {
+        let weaknesses = vec!["### SMB Signing".to_string(), "### smb signing".to_string()];
+        let deduped = deduplicate_weaknesses(&weaknesses);
+        assert_eq!(deduped.len(), 1);
+    }
+
+    #[test]
+    fn test_deduplicate_weaknesses_empty_titles_kept() {
+        let weaknesses = vec!["just some text".to_string(), "other text".to_string()];
+        let deduped = deduplicate_weaknesses(&weaknesses);
+        // Both have empty titles, empty titles are not deduped against each other
+        assert_eq!(deduped.len(), 2);
+    }
+
+    #[test]
+    fn test_deduplicate_weaknesses_unicode_dashes_normalized() {
+        let weaknesses = vec![
+            "### SMB\u{2014}Signing".to_string(),
+            "### SMB-Signing".to_string(),
+        ];
+        let deduped = deduplicate_weaknesses(&weaknesses);
+        assert_eq!(deduped.len(), 1);
+    }
+}

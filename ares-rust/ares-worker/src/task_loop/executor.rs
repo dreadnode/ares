@@ -233,3 +233,183 @@ fn expand_exploit_task(params: &serde_json::Value) -> Vec<(String, serde_json::V
 
     vec![(tool.to_string(), normalize_params(params))]
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    // --- normalize_params ---
+
+    #[test]
+    fn test_normalize_params_target_ip_to_target() {
+        let params = json!({"target_ip": "192.168.58.10"});
+        let norm = normalize_params(&params);
+        assert_eq!(norm["target"], "192.168.58.10");
+        assert_eq!(norm["targets"], "192.168.58.10");
+        // Original field preserved
+        assert_eq!(norm["target_ip"], "192.168.58.10");
+    }
+
+    #[test]
+    fn test_normalize_params_existing_target_not_overwritten() {
+        let params = json!({"target": "192.168.58.10", "target_ip": "192.168.58.20"});
+        let norm = normalize_params(&params);
+        assert_eq!(norm["target"], "192.168.58.10"); // not overwritten
+    }
+
+    #[test]
+    fn test_normalize_params_credential_flattening() {
+        let params = json!({
+            "target_ip": "192.168.58.10",
+            "credential": {
+                "username": "admin",
+                "password": "P@ss1",
+                "domain": "contoso.local"
+            }
+        });
+        let norm = normalize_params(&params);
+        assert_eq!(norm["username"], "admin");
+        assert_eq!(norm["password"], "P@ss1");
+        assert_eq!(norm["domain"], "contoso.local");
+    }
+
+    #[test]
+    fn test_normalize_params_existing_fields_not_overwritten_by_cred() {
+        let params = json!({
+            "domain": "fabrikam.local",
+            "credential": {
+                "domain": "contoso.local",
+                "username": "admin",
+                "password": "pass"
+            }
+        });
+        let norm = normalize_params(&params);
+        assert_eq!(norm["domain"], "fabrikam.local"); // not overwritten
+    }
+
+    // --- map_technique_to_tool ---
+
+    #[test]
+    fn test_map_technique_to_tool_mapped() {
+        assert_eq!(map_technique_to_tool("network_scan"), "nmap_scan");
+        assert_eq!(map_technique_to_tool("user_enumeration"), "enumerate_users");
+        assert_eq!(
+            map_technique_to_tool("share_enumeration"),
+            "enumerate_shares"
+        );
+        assert_eq!(map_technique_to_tool("smb_enumeration"), "smb_sweep");
+        assert_eq!(
+            map_technique_to_tool("bloodhound_collect"),
+            "run_bloodhound"
+        );
+        assert_eq!(
+            map_technique_to_tool("trust_enumeration"),
+            "enumerate_domain_trusts"
+        );
+        assert_eq!(map_technique_to_tool("share_spider"), "smbclient_spider");
+        assert_eq!(map_technique_to_tool("asrep_roast"), "asrep_roast");
+        assert_eq!(map_technique_to_tool("asrep"), "asrep_roast");
+    }
+
+    #[test]
+    fn test_map_technique_to_tool_passthrough() {
+        assert_eq!(map_technique_to_tool("nmap_scan"), "nmap_scan");
+        assert_eq!(map_technique_to_tool("secretsdump"), "secretsdump");
+        assert_eq!(map_technique_to_tool("kerberoast"), "kerberoast");
+    }
+
+    // --- expand_task ---
+
+    #[test]
+    fn test_expand_task_recon_with_techniques() {
+        let params = json!({"techniques": ["network_scan", "user_enumeration"], "target_ip": "192.168.58.10"});
+        let tools = expand_task("recon", &params);
+        assert_eq!(tools.len(), 2);
+        assert_eq!(tools[0].0, "nmap_scan");
+        assert_eq!(tools[1].0, "enumerate_users");
+        // Params should be normalized
+        assert_eq!(tools[0].1["target"], "192.168.58.10");
+    }
+
+    #[test]
+    fn test_expand_task_credential_access_single_technique() {
+        let params = json!({"technique": "secretsdump", "target_ip": "192.168.58.10"});
+        let tools = expand_task("credential_access", &params);
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0].0, "secretsdump");
+    }
+
+    #[test]
+    fn test_expand_task_concrete_tool_returns_empty() {
+        let params = json!({"target": "192.168.58.10"});
+        let tools = expand_task("nmap_scan", &params);
+        assert!(tools.is_empty());
+    }
+
+    // --- expand_crack_task ---
+
+    #[test]
+    fn test_expand_crack_task_default_hashcat() {
+        let params = json!({"hash_value": "abc123", "hash_type": "ntlm"});
+        let tools = expand_crack_task(&params);
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0].0, "crack_with_hashcat");
+    }
+
+    #[test]
+    fn test_expand_crack_task_john() {
+        let params = json!({"hash_value": "abc123", "use_john": true});
+        let tools = expand_crack_task(&params);
+        assert_eq!(tools[0].0, "crack_with_john");
+    }
+
+    // --- expand_exploit_task ---
+
+    #[test]
+    fn test_expand_exploit_delegation() {
+        let params = json!({"vuln_type": "constrained_delegation", "target_ip": "192.168.58.10"});
+        let tools = expand_exploit_task(&params);
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0].0, "s4u_attack");
+    }
+
+    #[test]
+    fn test_expand_exploit_adcs_variants() {
+        for (vuln_type, expected_tool) in &[
+            ("esc1", "certipy_request"),
+            ("adcs_esc1", "certipy_request"),
+            ("esc4", "certipy_esc4_full_chain"),
+            ("esc8", "ntlmrelayx_to_adcs"),
+        ] {
+            let params = json!({"vuln_type": vuln_type});
+            let tools = expand_exploit_task(&params);
+            assert_eq!(
+                tools[0].0, *expected_tool,
+                "Failed for vuln_type: {vuln_type}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_expand_exploit_other_types() {
+        for (vuln_type, expected) in &[
+            ("krbtgt_hash", "generate_golden_ticket"),
+            ("rbcd", "rbcd_write"),
+            ("nopac", "nopac"),
+            ("zerologon", "zerologon_check"),
+            ("mssql_access", "mssql_enum_impersonation"),
+        ] {
+            let params = json!({"vuln_type": vuln_type});
+            let tools = expand_exploit_task(&params);
+            assert_eq!(tools[0].0, *expected, "Failed for vuln_type: {vuln_type}");
+        }
+    }
+
+    #[test]
+    fn test_expand_exploit_unknown_type_empty() {
+        let params = json!({"vuln_type": "unknown_vuln"});
+        let tools = expand_exploit_task(&params);
+        assert!(tools.is_empty());
+    }
+}

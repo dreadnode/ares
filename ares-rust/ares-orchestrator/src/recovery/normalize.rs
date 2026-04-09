@@ -60,3 +60,112 @@ pub fn normalize_credential_domains(
 pub fn normalize_hash_domains(hashes: &mut [Hash], netbios_map: &HashMap<String, String>) -> usize {
     normalize_domains(hashes, netbios_map, |h| &mut h.domain)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_map() -> HashMap<String, String> {
+        let mut m = HashMap::new();
+        m.insert("CONTOSO".to_string(), "contoso.local".to_string());
+        m.insert("FABRIKAM".to_string(), "fabrikam.local".to_string());
+        m
+    }
+
+    #[test]
+    fn test_resolve_domain_netbios_to_fqdn() {
+        let map = make_map();
+        assert_eq!(
+            resolve_domain("CONTOSO", &map),
+            Some("contoso.local".to_string())
+        );
+    }
+
+    #[test]
+    fn test_resolve_domain_case_insensitive() {
+        let map = make_map();
+        assert_eq!(
+            resolve_domain("contoso", &map),
+            Some("contoso.local".to_string())
+        );
+    }
+
+    #[test]
+    fn test_resolve_domain_already_fqdn() {
+        let map = make_map();
+        assert_eq!(resolve_domain("contoso.local", &map), None);
+    }
+
+    #[test]
+    fn test_resolve_domain_empty() {
+        let map = make_map();
+        assert_eq!(resolve_domain("", &map), None);
+    }
+
+    #[test]
+    fn test_resolve_domain_unknown_netbios() {
+        let map = make_map();
+        assert_eq!(resolve_domain("UNKNOWN", &map), None);
+    }
+
+    #[test]
+    fn test_normalize_credential_domains() {
+        let map = make_map();
+        let mut creds = vec![
+            Credential {
+                id: String::new(),
+                username: "admin".to_string(),
+                password: "P@ss1".to_string(),
+                domain: "CONTOSO".to_string(),
+                source: String::new(),
+                discovered_at: None,
+                is_admin: false,
+                parent_id: None,
+                attack_step: 0,
+            },
+            Credential {
+                id: String::new(),
+                username: "jdoe".to_string(),
+                password: "P@ss2".to_string(),
+                domain: "contoso.local".to_string(),
+                source: String::new(),
+                discovered_at: None,
+                is_admin: false,
+                parent_id: None,
+                attack_step: 0,
+            },
+        ];
+        let fixed = normalize_credential_domains(&mut creds, &map);
+        assert_eq!(fixed, 1);
+        assert_eq!(creds[0].domain, "contoso.local");
+        assert_eq!(creds[1].domain, "contoso.local"); // unchanged
+    }
+
+    #[test]
+    fn test_normalize_hash_domains() {
+        let map = make_map();
+        let mut hashes = vec![Hash {
+            id: String::new(),
+            username: "admin".to_string(),
+            hash_value: "aabbccdd".to_string(),
+            hash_type: "ntlm".to_string(),
+            domain: "FABRIKAM".to_string(),
+            cracked_password: None,
+            source: String::new(),
+            discovered_at: None,
+            parent_id: None,
+            attack_step: 0,
+            aes_key: None,
+        }];
+        let fixed = normalize_hash_domains(&mut hashes, &map);
+        assert_eq!(fixed, 1);
+        assert_eq!(hashes[0].domain, "fabrikam.local");
+    }
+
+    #[test]
+    fn test_normalize_empty_slice() {
+        let map = make_map();
+        let mut creds: Vec<Credential> = vec![];
+        assert_eq!(normalize_credential_domains(&mut creds, &map), 0);
+    }
+}

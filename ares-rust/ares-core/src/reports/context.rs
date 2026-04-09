@@ -203,3 +203,179 @@ pub(crate) fn build_vuln_ctx(
         details: format_vuln_details(&vuln.details),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    #[test]
+    fn test_host_ctx_from_host_with_hostname() {
+        let host = Host {
+            ip: "192.168.58.10".to_string(),
+            hostname: "dc01.contoso.local".to_string(),
+            os: "Windows Server 2019".to_string(),
+            roles: vec!["domain_controller".to_string(), "winrm".to_string()],
+            services: vec!["88/tcp (kerberos)".to_string()],
+            is_dc: true,
+            owned: false,
+        };
+        let ctx = HostCtx::from(&host);
+        assert_eq!(ctx.label, "dc01.contoso.local");
+        assert_eq!(ctx.ip, "192.168.58.10");
+        assert_eq!(ctx.os, "Windows Server 2019");
+        assert!(ctx.roles.contains("domain_controller"));
+        assert!(ctx.is_dc);
+    }
+
+    #[test]
+    fn test_host_ctx_from_host_no_hostname() {
+        let host = Host {
+            ip: "192.168.58.20".to_string(),
+            hostname: String::new(),
+            os: String::new(),
+            roles: vec![],
+            services: vec![],
+            is_dc: false,
+            owned: false,
+        };
+        let ctx = HostCtx::from(&host);
+        assert_eq!(ctx.label, "192.168.58.20");
+        assert_eq!(ctx.os, "");
+        assert_eq!(ctx.roles, "");
+    }
+
+    #[test]
+    fn test_user_ctx_from_user() {
+        let user = User {
+            username: "admin".to_string(),
+            domain: "contoso.local".to_string(),
+            description: "Built-in admin".to_string(),
+            is_admin: true,
+            source: String::new(),
+        };
+        let ctx = UserCtx::from(&user);
+        assert_eq!(ctx.username, "admin");
+        assert_eq!(ctx.domain, "contoso.local");
+        assert_eq!(ctx.admin_display, "Yes");
+    }
+
+    #[test]
+    fn test_user_ctx_non_admin() {
+        let user = User {
+            username: "jdoe".to_string(),
+            domain: "contoso.local".to_string(),
+            description: String::new(),
+            is_admin: false,
+            source: String::new(),
+        };
+        let ctx = UserCtx::from(&user);
+        assert_eq!(ctx.admin_display, "No");
+        assert_eq!(ctx.description, "");
+    }
+
+    #[test]
+    fn test_cred_ctx_empty_domain() {
+        let cred = Credential {
+            id: String::new(),
+            username: "admin".to_string(),
+            password: "P@ss1".to_string(),
+            domain: String::new(),
+            source: "secretsdump".to_string(),
+            discovered_at: None,
+            is_admin: false,
+            parent_id: None,
+            attack_step: 0,
+        };
+        let ctx = CredCtx::from(&cred);
+        assert_eq!(ctx.domain, "Unknown");
+    }
+
+    #[test]
+    fn test_hash_ctx_from_hash() {
+        let hash = Hash {
+            id: String::new(),
+            username: "krbtgt".to_string(),
+            hash_value: "aabbccdd".to_string(),
+            hash_type: "ntlm".to_string(),
+            domain: "contoso.local".to_string(),
+            cracked_password: None,
+            source: "secretsdump".to_string(),
+            discovered_at: None,
+            parent_id: None,
+            attack_step: 0,
+            aes_key: None,
+        };
+        let ctx = HashCtx::from(&hash);
+        assert_eq!(ctx.username, "krbtgt");
+        assert_eq!(ctx.hash_type, "ntlm");
+        assert_eq!(ctx.domain, "contoso.local");
+    }
+
+    #[test]
+    fn test_share_ctx_from_share() {
+        let share = Share {
+            host: "192.168.58.10".to_string(),
+            name: "SYSVOL".to_string(),
+            permissions: "READ".to_string(),
+            comment: "Logon server share".to_string(),
+        };
+        let ctx = ShareCtx::from(&share);
+        assert_eq!(ctx.name, "SYSVOL");
+        assert_eq!(ctx.host, "192.168.58.10");
+        assert_eq!(ctx.permissions, "READ");
+    }
+
+    #[test]
+    fn test_share_ctx_empty_fields() {
+        let share = Share {
+            host: "192.168.58.10".to_string(),
+            name: "C$".to_string(),
+            permissions: String::new(),
+            comment: String::new(),
+        };
+        let ctx = ShareCtx::from(&share);
+        assert_eq!(ctx.permissions, "");
+        assert_eq!(ctx.comment, "");
+    }
+
+    #[test]
+    fn test_build_vuln_ctx_not_exploited() {
+        let vuln = VulnerabilityInfo {
+            vuln_id: "smb_signing_192.168.58.10".to_string(),
+            vuln_type: "smb_signing_disabled".to_string(),
+            target: "192.168.58.10".to_string(),
+            discovered_by: "recon".to_string(),
+            discovered_at: chrono::Utc::now(),
+            details: HashMap::new(),
+            recommended_agent: "exploit".to_string(),
+            priority: 5,
+        };
+        let exploited = HashSet::new();
+        let ctx = build_vuln_ctx("smb_signing_192.168.58.10", &vuln, &exploited);
+        assert!(!ctx.exploited);
+        assert_eq!(ctx.status_display, "Not Exploited");
+        assert_eq!(ctx.exploited_display, "\u{2717}");
+    }
+
+    #[test]
+    fn test_build_vuln_ctx_exploited() {
+        let vuln = VulnerabilityInfo {
+            vuln_id: "esc1_192.168.58.10".to_string(),
+            vuln_type: "adcs_esc1".to_string(),
+            target: "192.168.58.10".to_string(),
+            discovered_by: "recon".to_string(),
+            discovered_at: chrono::Utc::now(),
+            details: HashMap::new(),
+            recommended_agent: "privesc".to_string(),
+            priority: 10,
+        };
+        let mut exploited = HashSet::new();
+        exploited.insert("esc1_192.168.58.10".to_string());
+        let ctx = build_vuln_ctx("esc1_192.168.58.10", &vuln, &exploited);
+        assert!(ctx.exploited);
+        assert_eq!(ctx.status_display, "EXPLOITED");
+        assert_eq!(ctx.exploited_display, "\u{2713}");
+        assert_eq!(ctx.priority, 10);
+    }
+}

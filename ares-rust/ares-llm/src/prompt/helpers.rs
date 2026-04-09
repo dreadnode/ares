@@ -107,3 +107,172 @@ pub(crate) fn cred_display_str(payload: &Value, hash_value: Option<&str>) -> Str
     }
     "N/A".to_string()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    // --- is_pass_the_hash_compatible ---
+
+    #[test]
+    fn test_pth_compat_lm_nt() {
+        assert!(is_pass_the_hash_compatible(Some(
+            "aad3b435b51404eeaad3b435b51404ee:313b6f423a71d74c0a1b8a2f43b22d4c"
+        )));
+    }
+
+    #[test]
+    fn test_pth_compat_nt_only() {
+        assert!(is_pass_the_hash_compatible(Some(
+            "313b6f423a71d74c0a1b8a2f43b22d4c"
+        )));
+    }
+
+    #[test]
+    fn test_pth_compat_none() {
+        assert!(!is_pass_the_hash_compatible(None));
+    }
+
+    #[test]
+    fn test_pth_compat_empty() {
+        assert!(!is_pass_the_hash_compatible(Some("")));
+    }
+
+    #[test]
+    fn test_pth_compat_kerberos_hash() {
+        assert!(!is_pass_the_hash_compatible(Some(
+            "$krb5tgs$23$*svc_sql$contoso.local"
+        )));
+    }
+
+    #[test]
+    fn test_pth_compat_multiple_colons() {
+        assert!(!is_pass_the_hash_compatible(Some("aad3:b435:b514")));
+    }
+
+    #[test]
+    fn test_pth_compat_lm_empty_nt_valid() {
+        // Empty LM part with valid NT
+        assert!(is_pass_the_hash_compatible(Some(
+            ":313b6f423a71d74c0a1b8a2f43b22d4c"
+        )));
+    }
+
+    // --- payload_techniques ---
+
+    #[test]
+    fn test_payload_techniques_present() {
+        let payload = json!({"techniques": ["network_scan", "user_enumeration"]});
+        let techs = payload_techniques(&payload);
+        assert_eq!(techs, vec!["network_scan", "user_enumeration"]);
+    }
+
+    #[test]
+    fn test_payload_techniques_missing() {
+        let payload = json!({"target": "192.168.58.10"});
+        let techs = payload_techniques(&payload);
+        assert!(techs.is_empty());
+    }
+
+    #[test]
+    fn test_payload_techniques_empty_array() {
+        let payload = json!({"techniques": []});
+        let techs = payload_techniques(&payload);
+        assert!(techs.is_empty());
+    }
+
+    // --- cred_param_str ---
+
+    #[test]
+    fn test_cred_param_str_password() {
+        let payload = json!({"password": "P@ss1"});
+        assert_eq!(cred_param_str(&payload, None), "password='P@ss1'");
+    }
+
+    #[test]
+    fn test_cred_param_str_hash() {
+        let payload = json!({});
+        assert_eq!(
+            cred_param_str(&payload, Some("aabbccdd")),
+            "hashes='aabbccdd'"
+        );
+    }
+
+    #[test]
+    fn test_cred_param_str_fallback() {
+        let payload = json!({});
+        assert_eq!(cred_param_str(&payload, None), "password='N/A'");
+    }
+
+    #[test]
+    fn test_cred_param_str_empty_password_uses_hash() {
+        let payload = json!({"password": ""});
+        assert_eq!(cred_param_str(&payload, Some("aabb")), "hashes='aabb'");
+    }
+
+    // --- cred_display_str ---
+
+    #[test]
+    fn test_cred_display_str_password() {
+        let payload = json!({"password": "Secret123"});
+        assert_eq!(cred_display_str(&payload, None), "Secret123");
+    }
+
+    #[test]
+    fn test_cred_display_str_hash() {
+        let payload = json!({});
+        assert_eq!(
+            cred_display_str(&payload, Some("aabbccdd")),
+            "[HASH] aabbccdd"
+        );
+    }
+
+    #[test]
+    fn test_cred_display_str_fallback() {
+        let payload = json!({});
+        assert_eq!(cred_display_str(&payload, None), "N/A");
+    }
+
+    // --- insert_credential_context ---
+
+    #[test]
+    fn test_insert_credential_context_with_password() {
+        let payload = json!({
+            "credential": {
+                "username": "admin",
+                "domain": "contoso.local",
+                "password": "P@ss1"
+            }
+        });
+        let mut ctx = Context::new();
+        insert_credential_context(&mut ctx, &payload);
+        let json = ctx.into_json();
+        assert_eq!(json["credential_username"], "admin");
+        assert_eq!(json["credential_domain"], "contoso.local");
+        assert_eq!(json["auth_type"], "password");
+    }
+
+    #[test]
+    fn test_insert_credential_context_with_hash() {
+        let payload = json!({
+            "credential": {
+                "username": "admin",
+                "domain": "contoso.local"
+            }
+        });
+        let mut ctx = Context::new();
+        insert_credential_context(&mut ctx, &payload);
+        let json = ctx.into_json();
+        assert_eq!(json["auth_type"], "hash/ticket");
+    }
+
+    #[test]
+    fn test_insert_credential_context_no_cred() {
+        let payload = json!({"target": "192.168.58.10"});
+        let mut ctx = Context::new();
+        insert_credential_context(&mut ctx, &payload);
+        let json = ctx.into_json();
+        assert!(json.get("credential_username").is_none());
+    }
+}

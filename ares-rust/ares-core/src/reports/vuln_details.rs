@@ -100,3 +100,93 @@ pub(crate) fn value_to_display(value: &serde_json::Value) -> Option<String> {
         _ => None,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    #[test]
+    fn test_format_vuln_details_empty() {
+        let details = HashMap::new();
+        assert_eq!(format_vuln_details(&details), "-");
+    }
+
+    #[test]
+    fn test_format_vuln_details_ordered_keys() {
+        let mut details = HashMap::new();
+        details.insert("account_name".to_string(), serde_json::json!("svc_sql$"));
+        details.insert("domain".to_string(), serde_json::json!("contoso.local"));
+        let result = format_vuln_details(&details);
+        assert!(result.contains("Account: svc_sql$"));
+        assert!(result.contains("Domain: contoso.local"));
+    }
+
+    #[test]
+    fn test_format_vuln_details_skip_keys() {
+        let mut details = HashMap::new();
+        details.insert("has_credentials".to_string(), serde_json::json!(true));
+        details.insert("services".to_string(), serde_json::json!(["smb"]));
+        details.insert("domain".to_string(), serde_json::json!("contoso.local"));
+        let result = format_vuln_details(&details);
+        assert!(!result.contains("has_credentials"));
+        assert!(!result.contains("services"));
+        assert!(result.contains("Domain: contoso.local"));
+    }
+
+    #[test]
+    fn test_format_vuln_details_custom_keys_title_cased() {
+        let mut details = HashMap::new();
+        details.insert("custom_field".to_string(), serde_json::json!("value"));
+        let result = format_vuln_details(&details);
+        assert!(result.contains("Custom Field: value"));
+    }
+
+    #[test]
+    fn test_format_vuln_details_skips_null_and_empty() {
+        let mut details = HashMap::new();
+        details.insert("domain".to_string(), serde_json::Value::Null);
+        details.insert("account".to_string(), serde_json::json!(""));
+        let result = format_vuln_details(&details);
+        assert_eq!(result, "-");
+    }
+
+    #[test]
+    fn test_format_vuln_details_bool_and_number() {
+        let mut details = HashMap::new();
+        details.insert("some_flag".to_string(), serde_json::json!(true));
+        details.insert("some_count".to_string(), serde_json::json!(42));
+        let result = format_vuln_details(&details);
+        assert!(result.contains("true"));
+        assert!(result.contains("42"));
+    }
+
+    #[test]
+    fn test_format_vuln_details_skips_complex_types() {
+        let mut details = HashMap::new();
+        details.insert("nested".to_string(), serde_json::json!({"a": 1}));
+        details.insert("list".to_string(), serde_json::json!([1, 2, 3]));
+        let result = format_vuln_details(&details);
+        assert_eq!(result, "-");
+    }
+
+    #[test]
+    fn test_value_to_display() {
+        assert_eq!(value_to_display(&serde_json::Value::Null), None);
+        assert_eq!(value_to_display(&serde_json::json!("")), None);
+        assert_eq!(
+            value_to_display(&serde_json::json!("hello")),
+            Some("hello".to_string())
+        );
+        assert_eq!(
+            value_to_display(&serde_json::json!(true)),
+            Some("true".to_string())
+        );
+        assert_eq!(
+            value_to_display(&serde_json::json!(42)),
+            Some("42".to_string())
+        );
+        assert_eq!(value_to_display(&serde_json::json!([1])), None);
+        assert_eq!(value_to_display(&serde_json::json!({"a": 1})), None);
+    }
+}

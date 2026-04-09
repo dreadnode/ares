@@ -128,3 +128,123 @@ pub fn flush_nmap_host(
         "owned": false,
     }));
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn test_parse_nmap_single_host_with_services() {
+        let output = "\
+Nmap scan report for dc01.contoso.local (192.168.58.10)
+Host is up (0.0010s latency).
+PORT     STATE SERVICE
+88/tcp   open  kerberos-sec
+135/tcp  open  msrpc
+389/tcp  open  ldap
+445/tcp  open  microsoft-ds
+5985/tcp open  wsman";
+        let params = json!({"target": "192.168.58.10"});
+        let hosts = parse_nmap_output(output, &params);
+        assert_eq!(hosts.len(), 1);
+        assert_eq!(hosts[0]["ip"], "192.168.58.10");
+        assert_eq!(hosts[0]["hostname"], "dc01.contoso.local");
+        assert!(hosts[0]["is_dc"].as_bool().unwrap());
+        let roles = hosts[0]["roles"].as_array().unwrap();
+        let role_strs: Vec<&str> = roles.iter().filter_map(|v| v.as_str()).collect();
+        assert!(role_strs.contains(&"domain_controller"));
+        assert!(role_strs.contains(&"winrm"));
+    }
+
+    #[test]
+    fn test_parse_nmap_ip_only_no_hostname() {
+        let output = "\
+Nmap scan report for 192.168.58.20
+PORT     STATE SERVICE
+445/tcp  open  microsoft-ds
+1433/tcp open  ms-sql-s";
+        let params = json!({"target": "192.168.58.20"});
+        let hosts = parse_nmap_output(output, &params);
+        assert_eq!(hosts.len(), 1);
+        assert_eq!(hosts[0]["ip"], "192.168.58.20");
+        assert_eq!(hosts[0]["hostname"], "");
+        assert!(!hosts[0]["is_dc"].as_bool().unwrap());
+        let roles = hosts[0]["roles"].as_array().unwrap();
+        let role_strs: Vec<&str> = roles.iter().filter_map(|v| v.as_str()).collect();
+        assert!(role_strs.contains(&"mssql"));
+    }
+
+    #[test]
+    fn test_parse_nmap_multiple_hosts() {
+        let output = "\
+Nmap scan report for dc01.contoso.local (192.168.58.10)
+PORT    STATE SERVICE
+88/tcp  open  kerberos-sec
+389/tcp open  ldap
+
+Nmap scan report for srv01.contoso.local (192.168.58.20)
+PORT     STATE SERVICE
+445/tcp  open  microsoft-ds
+1433/tcp open  ms-sql-s";
+        let params = json!({"target": "192.168.58.0/24"});
+        let hosts = parse_nmap_output(output, &params);
+        assert_eq!(hosts.len(), 2);
+        assert_eq!(hosts[0]["ip"], "192.168.58.10");
+        assert_eq!(hosts[1]["ip"], "192.168.58.20");
+        assert!(hosts[0]["is_dc"].as_bool().unwrap());
+        assert!(!hosts[1]["is_dc"].as_bool().unwrap());
+    }
+
+    #[test]
+    fn test_parse_nmap_os_detection() {
+        let output = "\
+Nmap scan report for 192.168.58.10
+PORT    STATE SERVICE
+445/tcp open  microsoft-ds
+OS details: Microsoft Windows Server 2019";
+        let params = json!({"target": "192.168.58.10"});
+        let hosts = parse_nmap_output(output, &params);
+        assert_eq!(hosts[0]["os"], "Microsoft Windows Server 2019");
+    }
+
+    #[test]
+    fn test_parse_nmap_empty_output_with_target() {
+        let params = json!({"target": "192.168.58.10"});
+        let hosts = parse_nmap_output("Starting Nmap 7.94 ...\nNmap done: 0 hosts up", &params);
+        assert_eq!(hosts.len(), 1);
+        assert_eq!(hosts[0]["ip"], "192.168.58.10");
+        assert_eq!(hosts[0]["hostname"], "");
+    }
+
+    #[test]
+    fn test_parse_nmap_empty_output_no_target() {
+        let hosts = parse_nmap_output("", &json!({}));
+        assert!(hosts.is_empty());
+    }
+
+    #[test]
+    fn test_parse_nmap_dc_hostname_detection() {
+        let output = "Nmap scan report for DC02 (192.168.58.11)\nPORT    STATE SERVICE\n445/tcp open  microsoft-ds";
+        let params = json!({"target": "192.168.58.11"});
+        let hosts = parse_nmap_output(output, &params);
+        assert!(hosts[0]["is_dc"].as_bool().unwrap());
+    }
+
+    #[test]
+    fn test_flush_nmap_host_empty_ip() {
+        let mut hosts = Vec::new();
+        flush_nmap_host("", "host", "Windows", &[], &mut hosts);
+        assert!(hosts.is_empty());
+    }
+
+    #[test]
+    fn test_flush_nmap_host_winrm_role() {
+        let mut hosts = Vec::new();
+        let services = vec!["5985/tcp (wsman)".to_string()];
+        flush_nmap_host("192.168.58.30", "", "", &services, &mut hosts);
+        let roles = hosts[0]["roles"].as_array().unwrap();
+        let role_strs: Vec<&str> = roles.iter().filter_map(|v| v.as_str()).collect();
+        assert!(role_strs.contains(&"winrm"));
+    }
+}

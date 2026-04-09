@@ -110,3 +110,107 @@ pub fn parse_asrep_roast(output: &str, params: &Value) -> Vec<Value> {
 
     hashes
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn test_parse_secretsdump_ntlm_hashes() {
+        let output = "\
+[*] Dumping local SAM hashes (uid:rid:lmhash:nthash)
+Administrator:500:aad3b435b51404eeaad3b435b51404ee:e19ccf75ee54e06b06a5907af13cef42:::
+Guest:501:aad3b435b51404eeaad3b435b51404ee:31d6cfe0d16ae931b73c59d7e0c089c0:::
+svc_sql:1001:aad3b435b51404eeaad3b435b51404ee:abcdef1234567890abcdef1234567890:::
+[*] Cleaning up...";
+        let params = json!({"domain": "contoso.local"});
+        let (hashes, creds) = parse_secretsdump(output, &params);
+
+        // Guest hash (31d6cf...) should be skipped (empty/disabled)
+        assert_eq!(hashes.len(), 2);
+        assert_eq!(hashes[0]["username"], "Administrator");
+        assert_eq!(hashes[0]["domain"], "contoso.local");
+        assert_eq!(hashes[0]["hash_type"], "ntlm");
+        assert!(hashes[0]["hash_value"]
+            .as_str()
+            .unwrap()
+            .contains("e19ccf75"));
+        assert_eq!(hashes[1]["username"], "svc_sql");
+        assert!(creds.is_empty());
+    }
+
+    #[test]
+    fn test_parse_secretsdump_domain_prefix() {
+        let output = "CONTOSO\\Administrator:500:aad3b435b51404eeaad3b435b51404ee:e19ccf75ee54e06b06a5907af13cef42:::";
+        let params = json!({"domain": "contoso.local"});
+        let (hashes, _) = parse_secretsdump(output, &params);
+        assert_eq!(hashes.len(), 1);
+        assert_eq!(hashes[0]["username"], "Administrator");
+        assert_eq!(hashes[0]["domain"], "CONTOSO");
+    }
+
+    #[test]
+    fn test_parse_secretsdump_skips_comments_and_brackets() {
+        let output = "\
+[*] Service RemoteRegistry is in stopped state
+# This is a comment
+[*] SAM hashes extracted";
+        let params = json!({"domain": "contoso.local"});
+        let (hashes, _) = parse_secretsdump(output, &params);
+        assert!(hashes.is_empty());
+    }
+
+    #[test]
+    fn test_parse_secretsdump_empty_output() {
+        let (hashes, creds) = parse_secretsdump("", &json!({}));
+        assert!(hashes.is_empty());
+        assert!(creds.is_empty());
+    }
+
+    #[test]
+    fn test_parse_kerberoast_hashes() {
+        let output = "\
+[*] Getting TGS for SPN accounts
+$krb5tgs$23$*svc_sql$CONTOSO.LOCAL$contoso.local/svc_sql*$abc123def456
+$krb5tgs$23$*svc_http$CONTOSO.LOCAL$contoso.local/svc_http*$789xyz
+[*] Done";
+        let params = json!({"domain": "contoso.local"});
+        let hashes = parse_kerberoast(output, &params);
+        assert_eq!(hashes.len(), 2);
+        assert_eq!(hashes[0]["username"], "svc_sql");
+        assert_eq!(hashes[0]["hash_type"], "kerberoast");
+        assert_eq!(hashes[0]["domain"], "contoso.local");
+        assert!(hashes[0]["hash_value"]
+            .as_str()
+            .unwrap()
+            .starts_with("$krb5tgs$"));
+        assert_eq!(hashes[1]["username"], "svc_http");
+    }
+
+    #[test]
+    fn test_parse_kerberoast_no_hashes() {
+        let hashes = parse_kerberoast("[*] No SPN accounts found", &json!({}));
+        assert!(hashes.is_empty());
+    }
+
+    #[test]
+    fn test_parse_asrep_roast() {
+        let output = "\
+$krb5asrep$23$jdoe@CONTOSO.LOCAL:abc123def456
+$krb5asrep$23$svc_backup@CONTOSO.LOCAL:789xyz";
+        let params = json!({"domain": "contoso.local"});
+        let hashes = parse_asrep_roast(output, &params);
+        assert_eq!(hashes.len(), 2);
+        assert_eq!(hashes[0]["username"], "jdoe");
+        assert_eq!(hashes[0]["hash_type"], "asrep");
+        assert_eq!(hashes[0]["source"], "asrep_roast");
+        assert_eq!(hashes[1]["username"], "svc_backup");
+    }
+
+    #[test]
+    fn test_parse_asrep_roast_empty() {
+        let hashes = parse_asrep_roast("[-] No AS-REP roastable accounts", &json!({}));
+        assert!(hashes.is_empty());
+    }
+}

@@ -176,3 +176,89 @@ pub fn parse_netexec_shares(output: &str) -> Vec<Value> {
 
     shares
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_netexec_users_rid_brute() {
+        let output = "\
+SMB  192.168.58.10  445  DC01  [*] Enumerating users
+CONTOSO\\Administrator  (SidTypeUser)
+CONTOSO\\jdoe  (SidTypeUser)
+CONTOSO\\svc_sql  (SidTypeUser)";
+        let users = parse_netexec_users(output);
+        assert_eq!(users.len(), 3);
+        assert_eq!(users[0]["username"], "Administrator");
+        assert_eq!(users[0]["domain"], "CONTOSO");
+        assert_eq!(users[1]["username"], "jdoe");
+        assert_eq!(users[2]["username"], "svc_sql");
+    }
+
+    #[test]
+    fn test_parse_netexec_users_table_format() {
+        let output = "\
+SMB  192.168.58.10  445  DC01  [*] (domain:contoso.local) Enumerated
+SMB  192.168.58.10  445  DC01  -Username-  -Last PW Set-  -BadPW- -Description-
+SMB  192.168.58.10  445  DC01  alice.j  2026-03-25 23:21:09  0  Alice Johnson
+SMB  192.168.58.10  445  DC01  bob.s    2026-03-20 10:00:00  0  Bob Smith";
+        let users = parse_netexec_users(output);
+        assert_eq!(users.len(), 2);
+        assert_eq!(users[0]["username"], "alice.j");
+        assert_eq!(users[0]["domain"], "contoso.local"); // from domain: banner
+        assert_eq!(users[1]["username"], "bob.s");
+    }
+
+    #[test]
+    fn test_parse_netexec_users_with_password_leak() {
+        let output = "\
+SMB  192.168.58.10  445  DC01  [*] (domain:contoso.local) Enumerated
+SMB  192.168.58.10  445  DC01  -Username-  -Last PW Set-  -BadPW- -Description-
+SMB  192.168.58.10  445  DC01  svc_test  2026-01-01 00:00:00  0  Service (Password : Summer2026!)";
+        let users = parse_netexec_users(output);
+        // Should have user + _credentials marker
+        assert!(users.len() >= 2);
+        let last = users.last().unwrap();
+        let creds = last["_credentials"].as_array().unwrap();
+        assert_eq!(creds.len(), 1);
+        assert_eq!(creds[0]["username"], "svc_test");
+        assert_eq!(creds[0]["password"], "Summer2026!");
+        assert_eq!(creds[0]["source"], "user_description_leak");
+    }
+
+    #[test]
+    fn test_parse_netexec_users_dedup() {
+        let output = "\
+CONTOSO\\jdoe  (SidTypeUser)
+CONTOSO\\jdoe  (SidTypeUser)
+CONTOSO\\JDOE  (SidTypeUser)";
+        let users = parse_netexec_users(output);
+        assert_eq!(users.len(), 1); // all three are the same user
+    }
+
+    #[test]
+    fn test_parse_netexec_users_empty() {
+        let users = parse_netexec_users("[*] No users found");
+        assert!(users.is_empty());
+    }
+
+    #[test]
+    fn test_parse_netexec_shares() {
+        let output = "\
+SMB  192.168.58.10  445  DC01  SYSVOL  READ
+SMB  192.168.58.10  445  DC01  NETLOGON  READ
+SMB  192.168.58.10  445  DC01  IT_Share  READ,WRITE";
+        let shares = parse_netexec_shares(output);
+        assert_eq!(shares.len(), 3);
+        assert_eq!(shares[0]["name"], "SYSVOL");
+        assert_eq!(shares[0]["access"], "READ");
+        assert_eq!(shares[2]["name"], "IT_Share");
+    }
+
+    #[test]
+    fn test_parse_netexec_shares_empty() {
+        let shares = parse_netexec_shares("[*] No shares enumerated");
+        assert!(shares.is_empty());
+    }
+}

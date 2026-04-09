@@ -47,3 +47,119 @@ pub fn extract_host_from_spn(spn: &str) -> Option<String> {
         None
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // --- is_pass_the_hash_compatible ---
+
+    #[test]
+    fn test_pth_compatible_lm_nt_format() {
+        assert!(is_pass_the_hash_compatible(
+            "aad3b435b51404eeaad3b435b51404ee:313b6f423a71d74c0a1b8a2f43b22d4c"
+        ));
+    }
+
+    #[test]
+    fn test_pth_compatible_nt_only() {
+        assert!(is_pass_the_hash_compatible(
+            "313b6f423a71d74c0a1b8a2f43b22d4c"
+        ));
+    }
+
+    #[test]
+    fn test_pth_not_compatible_empty() {
+        assert!(!is_pass_the_hash_compatible(""));
+    }
+
+    #[test]
+    fn test_pth_not_compatible_dollar_sign() {
+        assert!(!is_pass_the_hash_compatible("$krb5tgs$23$svc_sql"));
+    }
+
+    #[test]
+    fn test_pth_not_compatible_short() {
+        assert!(!is_pass_the_hash_compatible("aabbccdd"));
+    }
+
+    #[test]
+    fn test_pth_not_compatible_non_hex() {
+        assert!(!is_pass_the_hash_compatible(
+            "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
+        ));
+    }
+
+    #[test]
+    fn test_pth_compatible_with_whitespace() {
+        assert!(is_pass_the_hash_compatible(
+            "  313b6f423a71d74c0a1b8a2f43b22d4c  "
+        ));
+    }
+
+    // --- extract_ticket_path ---
+
+    #[test]
+    fn test_extract_ticket_path_saving_format() {
+        let output = "[*] Saving ticket in admin.ccache";
+        assert_eq!(
+            extract_ticket_path(output),
+            Some("admin.ccache".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_ticket_path_fallback() {
+        let output = "Ticket written to krbtgt_contoso.ccache";
+        assert_eq!(
+            extract_ticket_path(output),
+            Some("krbtgt_contoso.ccache".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_ticket_path_none() {
+        assert_eq!(extract_ticket_path("No ticket found"), None);
+    }
+
+    #[test]
+    fn test_extract_ticket_path_empty() {
+        assert_eq!(extract_ticket_path(""), None);
+    }
+
+    // --- extract_host_from_spn ---
+
+    #[test]
+    fn test_extract_host_from_spn_mssql() {
+        assert_eq!(
+            extract_host_from_spn("MSSQLSvc/db01.contoso.local"),
+            Some("db01.contoso.local".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_host_from_spn_with_port() {
+        assert_eq!(
+            extract_host_from_spn("MSSQLSvc/db01.contoso.local:1433"),
+            Some("db01.contoso.local".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_host_from_spn_cifs() {
+        assert_eq!(
+            extract_host_from_spn("CIFS/dc01.contoso.local"),
+            Some("dc01.contoso.local".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_host_from_spn_no_slash() {
+        assert_eq!(extract_host_from_spn("krbtgt"), None);
+    }
+
+    #[test]
+    fn test_extract_host_from_spn_no_dots() {
+        assert_eq!(extract_host_from_spn("HTTP/localhost"), None);
+    }
+}
