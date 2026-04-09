@@ -132,3 +132,125 @@ pub fn resolve_dc_for_payload(
         payload["dc_ip"] = serde_json::Value::String(tip.to_string());
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn make_cred(username: &str, domain: &str, password: &str) -> Credential {
+        Credential {
+            id: String::new(),
+            username: username.to_string(),
+            password: password.to_string(),
+            domain: domain.to_string(),
+            source: String::new(),
+            discovered_at: None,
+            is_admin: false,
+            parent_id: None,
+            attack_step: 0,
+        }
+    }
+
+    fn make_host(ip: &str, hostname: &str, is_dc: bool) -> Host {
+        Host {
+            ip: ip.to_string(),
+            hostname: hostname.to_string(),
+            os: String::new(),
+            roles: vec![],
+            services: vec![],
+            is_dc,
+            owned: false,
+        }
+    }
+
+    // --- enrich_delegation_payload ---
+
+    #[test]
+    fn test_enrich_delegation_payload_adds_password() {
+        let creds = vec![make_cred("svc_sql", "contoso.local", "SvcP@ss1")];
+        let mut payload = json!({"account_name": "svc_sql$", "domain": "contoso.local"});
+        enrich_delegation_payload(&mut payload, "constrained_delegation", &creds, &[]);
+        assert_eq!(payload["password"], "SvcP@ss1");
+    }
+
+    #[test]
+    fn test_enrich_delegation_payload_skips_non_delegation() {
+        let creds = vec![make_cred("svc_sql", "contoso.local", "SvcP@ss1")];
+        let mut payload = json!({"account_name": "svc_sql$"});
+        enrich_delegation_payload(&mut payload, "smb_signing", &creds, &[]);
+        assert!(payload.get("password").is_none());
+    }
+
+    #[test]
+    fn test_enrich_delegation_payload_doesnt_overwrite_password() {
+        let creds = vec![make_cred("svc_sql", "contoso.local", "SvcP@ss1")];
+        let mut payload = json!({"account_name": "svc_sql$", "password": "existing"});
+        enrich_delegation_payload(&mut payload, "constrained_delegation", &creds, &[]);
+        assert_eq!(payload["password"], "existing");
+    }
+
+    #[test]
+    fn test_enrich_delegation_payload_resolves_target_ip_from_spn() {
+        let hosts = vec![make_host("192.168.58.10", "dc01.contoso.local", true)];
+        let mut payload = json!({
+            "account_name": "svc_sql$",
+            "target_spn": "CIFS/dc01.contoso.local"
+        });
+        enrich_delegation_payload(&mut payload, "constrained_delegation", &[], &hosts);
+        assert_eq!(payload["target_ip"], "192.168.58.10");
+    }
+
+    #[test]
+    fn test_enrich_delegation_payload_sets_domain_from_cred() {
+        let creds = vec![make_cred("svc_sql", "contoso.local", "SvcP@ss1")];
+        let mut payload = json!({"account_name": "svc_sql$"});
+        enrich_delegation_payload(&mut payload, "unconstrained_delegation", &creds, &[]);
+        assert_eq!(payload["domain"], "contoso.local");
+    }
+
+    // --- resolve_dc_for_payload ---
+
+    #[test]
+    fn test_resolve_dc_skips_if_already_set() {
+        let mut payload = json!({"dc_ip": "192.168.58.10", "domain": "contoso.local"});
+        resolve_dc_for_payload(&mut payload, &[], &HashMap::new(), &HashMap::new(), None);
+        assert_eq!(payload["dc_ip"], "192.168.58.10");
+    }
+
+    #[test]
+    fn test_resolve_dc_no_domain_skips() {
+        let mut payload = json!({"target": "192.168.58.20"});
+        resolve_dc_for_payload(&mut payload, &[], &HashMap::new(), &HashMap::new(), None);
+        assert!(payload.get("dc_ip").is_none());
+    }
+
+    #[test]
+    fn test_resolve_dc_falls_back_to_target_ip() {
+        let mut payload = json!({"domain": "contoso.local", "target_ip": "192.168.58.20"});
+        resolve_dc_for_payload(&mut payload, &[], &HashMap::new(), &HashMap::new(), None);
+        assert_eq!(payload["dc_ip"], "192.168.58.20");
+    }
+
+    #[test]
+    fn test_resolve_dc_falls_back_to_operation_target() {
+        let mut payload = json!({"domain": "contoso.local"});
+        resolve_dc_for_payload(
+            &mut payload,
+            &[],
+            &HashMap::new(),
+            &HashMap::new(),
+            Some("192.168.58.10"),
+        );
+        assert_eq!(payload["dc_ip"], "192.168.58.10");
+    }
+
+    #[test]
+    fn test_resolve_dc_from_dc_map() {
+        let mut dc_map = HashMap::new();
+        dc_map.insert("contoso.local".to_string(), "192.168.58.10".to_string());
+        let mut payload = json!({"domain": "contoso.local"});
+        resolve_dc_for_payload(&mut payload, &[], &dc_map, &HashMap::new(), None);
+        assert_eq!(payload["dc_ip"], "192.168.58.10");
+    }
+}

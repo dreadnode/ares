@@ -148,3 +148,158 @@ pub fn format_state_context(
 
     ctx
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ares_core::models::{Credential, Hash, Host};
+
+    fn make_snapshot() -> StateSnapshot {
+        StateSnapshot::default()
+    }
+
+    #[test]
+    fn test_format_state_context_empty() {
+        let snap = make_snapshot();
+        let ctx = format_state_context(&snap, "recon", None);
+        assert!(ctx.is_empty());
+    }
+
+    #[test]
+    fn test_format_state_context_domains() {
+        let mut snap = make_snapshot();
+        snap.domains = vec!["contoso.local".to_string()];
+        let ctx = format_state_context(&snap, "recon", None);
+        assert!(ctx.contains("### Discovered Domains"));
+        assert!(ctx.contains("contoso.local"));
+    }
+
+    #[test]
+    fn test_format_state_context_credentials_shown_for_lateral() {
+        let mut snap = make_snapshot();
+        snap.credentials = vec![Credential {
+            id: String::new(),
+            username: "admin".to_string(),
+            password: "P@ss1".to_string(),
+            domain: "contoso.local".to_string(),
+            source: String::new(),
+            discovered_at: None,
+            is_admin: true,
+            parent_id: None,
+            attack_step: 0,
+        }];
+        let ctx = format_state_context(&snap, "lateral", None);
+        assert!(ctx.contains("### Discovered Credentials"));
+        assert!(ctx.contains("admin@contoso.local [ADMIN]"));
+    }
+
+    #[test]
+    fn test_format_state_context_credentials_hidden_for_recon() {
+        let mut snap = make_snapshot();
+        snap.credentials = vec![Credential {
+            id: String::new(),
+            username: "admin".to_string(),
+            password: "P@ss1".to_string(),
+            domain: "contoso.local".to_string(),
+            source: String::new(),
+            discovered_at: None,
+            is_admin: false,
+            parent_id: None,
+            attack_step: 0,
+        }];
+        let ctx = format_state_context(&snap, "recon", None);
+        assert!(!ctx.contains("### Discovered Credentials"));
+    }
+
+    #[test]
+    fn test_format_state_context_truncates_credentials() {
+        let mut snap = make_snapshot();
+        snap.credentials = (0..12)
+            .map(|i| Credential {
+                id: String::new(),
+                username: format!("user{i}"),
+                password: "p".to_string(),
+                domain: "contoso.local".to_string(),
+                source: String::new(),
+                discovered_at: None,
+                is_admin: false,
+                parent_id: None,
+                attack_step: 0,
+            })
+            .collect();
+        let ctx = format_state_context(&snap, "lateral", None);
+        assert!(ctx.contains("... and 4 more"));
+    }
+
+    #[test]
+    fn test_format_state_context_hosts_split_dc_and_other() {
+        let mut snap = make_snapshot();
+        snap.hosts = vec![
+            Host {
+                ip: "192.168.58.10".to_string(),
+                hostname: "dc01.contoso.local".to_string(),
+                os: String::new(),
+                roles: vec![],
+                services: vec![],
+                is_dc: true,
+                owned: false,
+            },
+            Host {
+                ip: "192.168.58.20".to_string(),
+                hostname: "srv01.contoso.local".to_string(),
+                os: String::new(),
+                roles: vec!["mssql".to_string()],
+                services: vec![],
+                is_dc: false,
+                owned: false,
+            },
+        ];
+        let ctx = format_state_context(&snap, "recon", None);
+        assert!(ctx.contains("### Domain Controllers"));
+        assert!(ctx.contains("dc01.contoso.local (192.168.58.10)"));
+        assert!(ctx.contains("### Other Hosts"));
+        assert!(ctx.contains("srv01.contoso.local"));
+        assert!(ctx.contains("[mssql]"));
+    }
+
+    #[test]
+    fn test_format_state_context_cracked_hashes() {
+        let mut snap = make_snapshot();
+        snap.hashes = vec![Hash {
+            id: String::new(),
+            username: "svc_sql".to_string(),
+            hash_value: "aabb".to_string(),
+            hash_type: "ntlm".to_string(),
+            domain: "contoso.local".to_string(),
+            cracked_password: Some("CrackedP@ss".to_string()),
+            source: String::new(),
+            discovered_at: None,
+            parent_id: None,
+            attack_step: 0,
+            aes_key: None,
+        }];
+        let ctx = format_state_context(&snap, "recon", None);
+        assert!(ctx.contains("### Cracked Hashes"));
+        assert!(ctx.contains("svc_sql@contoso.local (ntlm)"));
+    }
+
+    #[test]
+    fn test_format_state_context_uncracked_hashes_not_shown() {
+        let mut snap = make_snapshot();
+        snap.hashes = vec![Hash {
+            id: String::new(),
+            username: "svc_sql".to_string(),
+            hash_value: "aabb".to_string(),
+            hash_type: "ntlm".to_string(),
+            domain: "contoso.local".to_string(),
+            cracked_password: None,
+            source: String::new(),
+            discovered_at: None,
+            parent_id: None,
+            attack_step: 0,
+            aes_key: None,
+        }];
+        let ctx = format_state_context(&snap, "recon", None);
+        assert!(!ctx.contains("### Cracked Hashes"));
+    }
+}

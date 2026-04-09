@@ -101,3 +101,80 @@ impl TaskResult {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn test_task_result_success() {
+        let result = TaskResult::success("task-1", json!({"output": "done"}), "pod-1", "recon");
+        assert!(result.success);
+        assert!(result.error.is_none());
+        assert_eq!(result.task_id, "task-1");
+        assert!(result.result.is_some());
+        assert_eq!(result.worker_pod.as_deref(), Some("pod-1"));
+        assert_eq!(result.agent_name.as_deref(), Some("recon"));
+        assert!(result.completed_at.is_some());
+    }
+
+    #[test]
+    fn test_task_result_failure() {
+        let result = TaskResult::failure(
+            "task-2",
+            "timeout".to_string(),
+            Some(json!({"partial": true})),
+            "pod-1",
+            "lateral",
+        );
+        assert!(!result.success);
+        assert_eq!(result.error.as_deref(), Some("timeout"));
+        assert!(result.result.is_some());
+    }
+
+    #[test]
+    fn test_task_result_failure_no_result() {
+        let result = TaskResult::failure("task-3", "crash".to_string(), None, "pod-1", "recon");
+        assert!(!result.success);
+        assert!(result.result.is_none());
+    }
+
+    #[test]
+    fn test_task_message_deserialize() {
+        let json = json!({
+            "task_id": "t-1",
+            "task_type": "recon",
+            "source_agent": "orchestrator",
+            "target_agent": "recon-1",
+            "payload": {"target_ip": "192.168.58.10"},
+            "priority": 3,
+            "created_at": "2026-04-08T12:00:00Z"
+        });
+        let msg: TaskMessage = serde_json::from_value(json).unwrap();
+        assert_eq!(msg.task_id, "t-1");
+        assert_eq!(msg.task_type, "recon");
+        assert_eq!(msg.priority, 3);
+        assert!(msg.callback_queue.is_none());
+    }
+
+    #[test]
+    fn test_task_message_default_priority() {
+        let json = json!({
+            "task_id": "t-1",
+            "task_type": "recon",
+            "source_agent": "orchestrator",
+            "target_agent": "recon-1",
+            "payload": {}
+        });
+        let msg: TaskMessage = serde_json::from_value(json).unwrap();
+        assert_eq!(msg.priority, 5); // default
+    }
+
+    #[test]
+    fn test_task_result_serialization_skips_none() {
+        let result = TaskResult::success("t-1", json!({"ok": true}), "pod-1", "recon");
+        let serialized = serde_json::to_value(&result).unwrap();
+        assert!(serialized.get("error").is_none());
+    }
+}

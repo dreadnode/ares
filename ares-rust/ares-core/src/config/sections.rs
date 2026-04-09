@@ -143,6 +143,94 @@ pub struct RateLimitingConfig {
     pub max_requests_per_minute: u32,
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_recovery_config_defaults() {
+        let cfg: RecoveryConfig = serde_json::from_str("{}").unwrap();
+        assert!(cfg.enabled);
+        assert_eq!(cfg.max_retries, 3);
+        assert_eq!(cfg.retry_delay, 10);
+        assert!(cfg.checkpoint_on_credential);
+        assert!(cfg.checkpoint_on_vulnerability);
+    }
+
+    #[test]
+    fn test_recovery_config_override() {
+        let cfg: RecoveryConfig =
+            serde_json::from_str(r#"{"enabled": false, "max_retries": 5}"#).unwrap();
+        assert!(!cfg.enabled);
+        assert_eq!(cfg.max_retries, 5);
+    }
+
+    #[test]
+    fn test_phase_detection_config_defaults() {
+        let cfg: PhaseDetectionConfig = serde_json::from_str("{}").unwrap();
+        assert_eq!(cfg.lateral_movement_admin_creds, 3);
+        assert_eq!(cfg.lateral_movement_owned_hosts, 5);
+        assert_eq!(cfg.min_slots_per_role, 1);
+    }
+
+    #[test]
+    fn test_context_management_config_defaults() {
+        let cfg: ContextManagementConfig = serde_json::from_str("{}").unwrap();
+        assert_eq!(cfg.max_context_tokens, 50000);
+        assert_eq!(cfg.min_messages_to_keep, 15);
+        assert_eq!(cfg.max_output_chars, 3000);
+    }
+
+    #[test]
+    fn test_logging_config_defaults() {
+        let cfg: LoggingConfig = serde_json::from_str("{}").unwrap();
+        assert_eq!(cfg.level, "INFO");
+        assert_eq!(cfg.max_size_mb, 100);
+        assert_eq!(cfg.backup_count, 5);
+    }
+
+    #[test]
+    fn test_resource_config_defaults() {
+        let cfg: ResourceConfig = serde_json::from_str("{}").unwrap();
+        assert_eq!(cfg.max_concurrent_tasks, 10);
+        assert_eq!(cfg.max_credentials_per_expansion, 100);
+        assert_eq!(cfg.max_hosts_per_scan, 50);
+        assert_eq!(cfg.credential_cache_ttl, 3600);
+    }
+
+    #[test]
+    fn test_security_config_defaults() {
+        let cfg: SecurityConfig = serde_json::from_str("{}").unwrap();
+        assert!(cfg.verify_ssl);
+        assert!(!cfg.encrypted_state);
+        assert!(cfg.audit_logging);
+    }
+
+    #[test]
+    fn test_rate_limiting_config_defaults() {
+        let cfg: RateLimitingConfig = serde_json::from_str("{}").unwrap();
+        assert!(cfg.enabled);
+        assert_eq!(cfg.max_requests_per_minute, 60);
+    }
+
+    #[test]
+    fn test_timeout_config_all_zero_defaults() {
+        let cfg: TimeoutConfig = serde_json::from_str("{}").unwrap();
+        assert_eq!(cfg.agent_heartbeat, 0);
+        assert_eq!(cfg.task_timeout, 0);
+        assert_eq!(cfg.operation_timeout, 0);
+    }
+
+    #[test]
+    fn test_agent_config_defaults() {
+        let cfg: AgentConfig = serde_json::from_str(r#"{"model": "openai/gpt-4.1"}"#).unwrap();
+        assert_eq!(cfg.model, "openai/gpt-4.1");
+        assert_eq!(cfg.max_steps, 100);
+        assert!(cfg.capabilities.is_empty());
+        assert!(cfg.tools.is_empty());
+    }
+}
+
 /// Optional Grafana dashboard integration settings.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GrafanaConfig {

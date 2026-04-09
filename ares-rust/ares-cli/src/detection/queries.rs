@@ -161,3 +161,146 @@ pub(crate) fn build_priority_queries(
 
     queries
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ares_core::models::{Credential, Hash, Host};
+
+    fn make_state() -> SharedRedTeamState {
+        SharedRedTeamState::new("test-op".to_string())
+    }
+
+    #[test]
+    fn test_build_priority_queries_minimal() {
+        let state = make_state();
+        let start = Utc::now() - chrono::Duration::hours(1);
+        let end = Utc::now();
+        let queries = build_priority_queries(&state, &[], &start, &end);
+        // Always includes network discovery query
+        assert!(!queries.is_empty());
+        assert!(queries.iter().any(|q| q.technique_id == "T1046"));
+    }
+
+    #[test]
+    fn test_build_priority_queries_with_domain_admin() {
+        let mut state = make_state();
+        state.has_domain_admin = true;
+        let start = Utc::now() - chrono::Duration::hours(1);
+        let end = Utc::now();
+        let queries = build_priority_queries(&state, &[], &start, &end);
+        assert!(queries.iter().any(|q| q.technique_id == "T1078.002"));
+        // DA query should be critical and first
+        assert_eq!(queries[0].priority, "critical");
+    }
+
+    #[test]
+    fn test_build_priority_queries_with_hashes() {
+        let mut state = make_state();
+        state.all_hashes = vec![Hash {
+            id: String::new(),
+            username: "admin".to_string(),
+            hash_value: "aabb".to_string(),
+            hash_type: "ntlm".to_string(),
+            domain: "contoso.local".to_string(),
+            cracked_password: None,
+            source: String::new(),
+            discovered_at: None,
+            parent_id: None,
+            attack_step: 0,
+            aes_key: None,
+        }];
+        let start = Utc::now() - chrono::Duration::hours(1);
+        let end = Utc::now();
+        let queries = build_priority_queries(&state, &[], &start, &end);
+        assert!(queries.iter().any(|q| q.technique_id == "T1003"));
+    }
+
+    #[test]
+    fn test_build_priority_queries_with_lateral_movement() {
+        let mut state = make_state();
+        state.all_hosts = vec![
+            Host {
+                ip: "192.168.58.10".to_string(),
+                hostname: "dc01.contoso.local".to_string(),
+                os: String::new(),
+                roles: vec![],
+                services: vec![],
+                is_dc: true,
+                owned: false,
+            },
+            Host {
+                ip: "192.168.58.20".to_string(),
+                hostname: "srv01.contoso.local".to_string(),
+                os: String::new(),
+                roles: vec![],
+                services: vec![],
+                is_dc: false,
+                owned: false,
+            },
+        ];
+        let start = Utc::now() - chrono::Duration::hours(1);
+        let end = Utc::now();
+        let queries = build_priority_queries(&state, &[], &start, &end);
+        assert!(queries.iter().any(|q| q.technique_id == "T1021.002"));
+    }
+
+    #[test]
+    fn test_build_priority_queries_kerberos_techniques() {
+        let state = make_state();
+        let start = Utc::now() - chrono::Duration::hours(1);
+        let end = Utc::now();
+        let techniques = vec!["T1558.003".to_string()];
+        let queries = build_priority_queries(&state, &techniques, &start, &end);
+        assert!(queries.iter().any(|q| q.technique_id == "T1558"));
+    }
+
+    #[test]
+    fn test_build_priority_queries_credential_accounts() {
+        let mut state = make_state();
+        state.all_credentials = vec![Credential {
+            id: String::new(),
+            username: "admin".to_string(),
+            password: "P@ss1".to_string(),
+            domain: "contoso.local".to_string(),
+            source: String::new(),
+            discovered_at: None,
+            is_admin: false,
+            parent_id: None,
+            attack_step: 0,
+        }];
+        let start = Utc::now() - chrono::Duration::hours(1);
+        let end = Utc::now();
+        let queries = build_priority_queries(&state, &[], &start, &end);
+        assert!(queries
+            .iter()
+            .any(|q| { q.technique_id == "T1078" && q.description.contains("admin") }));
+    }
+
+    #[test]
+    fn test_build_priority_queries_sorted_by_priority() {
+        let mut state = make_state();
+        state.has_domain_admin = true;
+        state.all_hashes = vec![Hash {
+            id: String::new(),
+            username: "admin".to_string(),
+            hash_value: "aabb".to_string(),
+            hash_type: "ntlm".to_string(),
+            domain: "contoso.local".to_string(),
+            cracked_password: None,
+            source: String::new(),
+            discovered_at: None,
+            parent_id: None,
+            attack_step: 0,
+            aes_key: None,
+        }];
+        let start = Utc::now() - chrono::Duration::hours(1);
+        let end = Utc::now();
+        let queries = build_priority_queries(&state, &[], &start, &end);
+        // First query should be critical
+        assert_eq!(queries[0].priority, "critical");
+        // Last should be medium or lower
+        let last = queries.last().unwrap();
+        assert!(last.priority == "medium" || last.priority == "low");
+    }
+}

@@ -145,6 +145,225 @@ fn parse_meta_string_list(raw: &str) -> Vec<String> {
         .collect()
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ─── parse_meta_bool ─────────────────────────────────────────────────────
+
+    #[test]
+    fn test_parse_meta_bool_true_variants() {
+        assert!(parse_meta_bool("true"));
+        assert!(parse_meta_bool("True"));
+        assert!(parse_meta_bool("1"));
+    }
+
+    #[test]
+    fn test_parse_meta_bool_false_variants() {
+        assert!(!parse_meta_bool("false"));
+        assert!(!parse_meta_bool("False"));
+        assert!(!parse_meta_bool("0"));
+        assert!(!parse_meta_bool(""));
+        assert!(!parse_meta_bool("yes"));
+        assert!(!parse_meta_bool("random"));
+    }
+
+    // ─── parse_meta_string ───────────────────────────────────────────────────
+
+    #[test]
+    fn test_parse_meta_string_json_quoted() {
+        assert_eq!(
+            parse_meta_string(r#""contoso.local""#),
+            Some("contoso.local".to_string())
+        );
+    }
+
+    #[test]
+    fn test_parse_meta_string_raw() {
+        assert_eq!(
+            parse_meta_string("contoso.local"),
+            Some("contoso.local".to_string())
+        );
+    }
+
+    #[test]
+    fn test_parse_meta_string_null() {
+        assert_eq!(parse_meta_string("null"), None);
+    }
+
+    #[test]
+    fn test_parse_meta_string_empty() {
+        assert_eq!(parse_meta_string(""), None);
+    }
+
+    #[test]
+    fn test_parse_meta_string_json_empty() {
+        assert_eq!(parse_meta_string(r#""""#), None);
+    }
+
+    #[test]
+    fn test_parse_meta_string_with_spaces() {
+        assert_eq!(
+            parse_meta_string(r#""admin -> DA via secretsdump""#),
+            Some("admin -> DA via secretsdump".to_string())
+        );
+    }
+
+    // ─── parse_meta_datetime ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_parse_meta_datetime_rfc3339() {
+        assert!(parse_meta_datetime("2025-01-28T12:00:00+00:00").is_some());
+    }
+
+    #[test]
+    fn test_parse_meta_datetime_json_quoted() {
+        assert!(parse_meta_datetime(r#""2025-01-28T12:00:00+00:00""#).is_some());
+    }
+
+    #[test]
+    fn test_parse_meta_datetime_null() {
+        assert!(parse_meta_datetime("null").is_none());
+    }
+
+    #[test]
+    fn test_parse_meta_datetime_empty() {
+        assert!(parse_meta_datetime("").is_none());
+    }
+
+    #[test]
+    fn test_parse_meta_datetime_invalid() {
+        assert!(parse_meta_datetime("not-a-date").is_none());
+    }
+
+    #[test]
+    fn test_parse_meta_datetime_utc_z() {
+        assert!(parse_meta_datetime("2025-01-28T12:00:00Z").is_some());
+    }
+
+    // ─── parse_meta_string_list ──────────────────────────────────────────────
+
+    #[test]
+    fn test_parse_meta_string_list_json_array() {
+        let list = parse_meta_string_list(r#"["192.168.58.10","192.168.58.20"]"#);
+        assert_eq!(list, vec!["192.168.58.10", "192.168.58.20"]);
+    }
+
+    #[test]
+    fn test_parse_meta_string_list_comma_separated() {
+        let list = parse_meta_string_list("192.168.58.10,192.168.58.20");
+        assert_eq!(list, vec!["192.168.58.10", "192.168.58.20"]);
+    }
+
+    #[test]
+    fn test_parse_meta_string_list_json_encoded_comma() {
+        let list = parse_meta_string_list(r#""192.168.58.10,192.168.58.20""#);
+        assert_eq!(list, vec!["192.168.58.10", "192.168.58.20"]);
+    }
+
+    #[test]
+    fn test_parse_meta_string_list_single() {
+        let list = parse_meta_string_list("192.168.58.10");
+        assert_eq!(list, vec!["192.168.58.10"]);
+    }
+
+    #[test]
+    fn test_parse_meta_string_list_empty() {
+        assert!(parse_meta_string_list("").is_empty());
+    }
+
+    #[test]
+    fn test_parse_meta_string_list_with_spaces() {
+        let list = parse_meta_string_list("192.168.58.10, 192.168.58.20 , 192.168.58.30");
+        assert_eq!(
+            list,
+            vec!["192.168.58.10", "192.168.58.20", "192.168.58.30"]
+        );
+    }
+
+    #[test]
+    fn test_parse_meta_string_list_filters_empty() {
+        let list = parse_meta_string_list(r#"["192.168.58.10","","192.168.58.20"]"#);
+        assert_eq!(list, vec!["192.168.58.10", "192.168.58.20"]);
+    }
+
+    // ─── OperationMeta::from_redis_hash ──────────────────────────────────────
+
+    #[test]
+    fn test_operation_meta_empty_hash() {
+        let data = HashMap::new();
+        let meta = OperationMeta::from_redis_hash(&data);
+        assert!(!meta.has_domain_admin);
+        assert!(!meta.has_golden_ticket);
+        assert!(meta.domain_admin_path.is_none());
+        assert!(meta.started_at.is_none());
+        assert!(meta.completed_at.is_none());
+        assert!(meta.target_ip.is_none());
+        assert!(meta.target_domain.is_none());
+        assert!(meta.target_ips.is_empty());
+    }
+
+    #[test]
+    fn test_operation_meta_full() {
+        let mut data = HashMap::new();
+        data.insert("has_domain_admin".to_string(), "true".to_string());
+        data.insert("has_golden_ticket".to_string(), "true".to_string());
+        data.insert(
+            "domain_admin_path".to_string(),
+            r#""secretsdump -> golden ticket""#.to_string(),
+        );
+        data.insert(
+            "started_at".to_string(),
+            r#""2025-01-28T12:00:00+00:00""#.to_string(),
+        );
+        data.insert(
+            "completed_at".to_string(),
+            r#""2025-01-28T13:00:00+00:00""#.to_string(),
+        );
+        data.insert("target_ip".to_string(), r#""192.168.58.10""#.to_string());
+        data.insert(
+            "target_domain".to_string(),
+            r#""contoso.local""#.to_string(),
+        );
+        data.insert(
+            "target_ips".to_string(),
+            r#"["192.168.58.10","192.168.58.20"]"#.to_string(),
+        );
+
+        let meta = OperationMeta::from_redis_hash(&data);
+        assert!(meta.has_domain_admin);
+        assert!(meta.has_golden_ticket);
+        assert_eq!(
+            meta.domain_admin_path.as_deref(),
+            Some("secretsdump -> golden ticket")
+        );
+        assert!(meta.started_at.is_some());
+        assert!(meta.completed_at.is_some());
+        assert_eq!(meta.target_ip.as_deref(), Some("192.168.58.10"));
+        assert_eq!(meta.target_domain.as_deref(), Some("contoso.local"));
+        assert_eq!(meta.target_ips.len(), 2);
+    }
+
+    #[test]
+    fn test_operation_meta_completed_at_bare() {
+        let mut data = HashMap::new();
+        data.insert(
+            "completed_at".to_string(),
+            "2025-01-28T13:30:00Z".to_string(),
+        );
+        let meta = OperationMeta::from_redis_hash(&data);
+        assert!(meta.completed_at.is_some());
+    }
+
+    #[test]
+    fn test_operation_meta_default_derives() {
+        let meta = OperationMeta::default();
+        assert!(!meta.has_domain_admin);
+        assert!(!meta.has_golden_ticket);
+        assert!(meta.target_ips.is_empty());
+    }
+}
+
 /// Read-only view of the shared red team state, loaded from Redis.
 ///
 /// This matches the Python `SharedRedTeamState` dataclass but only includes
