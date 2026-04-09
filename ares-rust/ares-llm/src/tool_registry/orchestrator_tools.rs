@@ -270,6 +270,42 @@ pub(super) fn tool_definitions() -> Vec<ToolDefinition> {
                 "required": ["target_ip", "listener_ip"]
             }),
         },
+        ToolDefinition {
+            name: "dispatch_crack".into(),
+            description: "Dispatch a hash cracking task. The cracker agent will attempt to crack \
+                the hash using hashcat (default) or john."
+                .into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "hash_value": {
+                        "type": "string",
+                        "description": "The hash value to crack"
+                    },
+                    "hash_type": {
+                        "type": "string",
+                        "description": "Hash type (e.g. 'ntlm', 'kerberos_tgs', 'kerberos_as', 'mscache2')"
+                    },
+                    "username": {
+                        "type": "string",
+                        "description": "Username associated with the hash"
+                    },
+                    "domain": {
+                        "type": "string",
+                        "description": "Domain associated with the hash"
+                    },
+                    "use_john": {
+                        "type": "boolean",
+                        "description": "Use john instead of hashcat. Default: false"
+                    },
+                    "priority": {
+                        "type": "integer",
+                        "description": "Task priority (1=highest, 10=lowest). Default: 5"
+                    }
+                },
+                "required": ["hash_value", "hash_type"]
+            }),
+        },
         // ----- Operation lifecycle -----
         ToolDefinition {
             name: "complete_operation".into(),

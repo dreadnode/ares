@@ -4,7 +4,7 @@
 //! The runner builds prompts, calls the LLM, dispatches tool calls to
 //! Python workers via Redis, and handles callbacks in Rust.
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use anyhow::Result;
 use tracing::{debug, info, warn};
@@ -33,7 +33,9 @@ pub struct LlmTaskRunner {
     dispatcher: Arc<dyn ToolDispatcher>,
     state: SharedState,
     config: AgentLoopConfig,
-    callback_handler: Option<Arc<dyn CallbackHandler>>,
+    /// Deferred callback handler — set after construction to break the
+    /// `LlmTaskRunner → Dispatcher → LlmTaskRunner` circular dependency.
+    callback_handler: OnceLock<Arc<dyn CallbackHandler>>,
 }
 
 impl LlmTaskRunner {
@@ -53,7 +55,7 @@ impl LlmTaskRunner {
             dispatcher,
             state,
             config,
-            callback_handler: None,
+            callback_handler: OnceLock::new(),
         }
     }
 
@@ -62,9 +64,13 @@ impl LlmTaskRunner {
         self
     }
 
-    pub fn with_callback_handler(mut self, handler: Arc<dyn CallbackHandler>) -> Self {
-        self.callback_handler = Some(handler);
-        self
+    /// Set the callback handler after construction.
+    ///
+    /// This is safe to call from `&self` (interior mutability via `OnceLock`),
+    /// which lets us break the circular dependency: the handler needs the
+    /// `Dispatcher`, which itself holds an `Arc<LlmTaskRunner>`.
+    pub fn set_callback_handler(&self, handler: Arc<dyn CallbackHandler>) {
+        let _ = self.callback_handler.set(handler);
     }
 
     /// Execute a task through the LLM agent loop.
@@ -111,7 +117,7 @@ impl LlmTaskRunner {
             role_str,
             task_id,
             &tools,
-            self.callback_handler.clone(),
+            self.callback_handler.get().cloned(),
         )
         .await;
 

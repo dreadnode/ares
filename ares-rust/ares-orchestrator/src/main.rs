@@ -235,8 +235,18 @@ async fn main() -> Result<()> {
         shared_state.clone(),
         config.clone(),
         ares_config.clone(),
-        llm_runner,
+        llm_runner.clone(),
     ));
+
+    // --- Wire orchestrator callback handler ---
+    // Deferred initialization: the handler needs the dispatcher, which contains
+    // the llm_runner, creating a circular dependency. OnceLock breaks the cycle.
+    let callback_handler = Arc::new(
+        callback_handler::OrchestratorCallbackHandler::new(shared_state.clone(), queue.clone())
+            .with_dispatcher(dispatcher.clone()),
+    );
+    llm_runner.set_callback_handler(callback_handler);
+    info!("Orchestrator callback handler wired (query + dispatch tools)");
 
     // --- Shutdown signal ---
     let (shutdown_tx, shutdown_rx) = watch::channel(false);

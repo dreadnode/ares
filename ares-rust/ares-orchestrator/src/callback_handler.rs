@@ -307,6 +307,43 @@ impl OrchestratorCallbackHandler {
         )?))
     }
 
+    async fn get_operation_summary(&self) -> Result<CallbackResult> {
+        let state = self.state.read().await;
+
+        let cracked_count = state
+            .hashes
+            .iter()
+            .filter(|h| h.cracked_password.is_some())
+            .count();
+        let admin_count = state.credentials.iter().filter(|c| c.is_admin).count();
+
+        let result = json!({
+            "operation_id": state.operation_id,
+            "target_ips": state.target_ips,
+            "domains": state.domains,
+            "has_domain_admin": state.has_domain_admin,
+            "credentials": {
+                "total": state.credentials.len(),
+                "admin": admin_count,
+            },
+            "hashes": {
+                "total": state.hashes.len(),
+                "cracked": cracked_count,
+                "uncracked": state.hashes.len() - cracked_count,
+            },
+            "hosts": state.hosts.len(),
+            "users": state.users.len(),
+            "discovered_vulnerabilities": state.discovered_vulnerabilities.len(),
+            "exploited_vulnerabilities": state.exploited_vulnerabilities.len(),
+            "pending_tasks": state.pending_tasks.len(),
+            "completed_tasks": state.completed_tasks.len(),
+        });
+
+        Ok(CallbackResult::Continue(serde_json::to_string_pretty(
+            &result,
+        )?))
+    }
+
     // -----------------------------------------------------------------------
     // Dispatch tools — submit sub-tasks via Dispatcher
     // -----------------------------------------------------------------------
@@ -471,6 +508,39 @@ impl OrchestratorCallbackHandler {
             task_id.as_deref().unwrap_or("queued")
         )))
     }
+    async fn dispatch_crack(&self, call: &ToolCall) -> Result<CallbackResult> {
+        let dispatcher = self
+            .dispatcher
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Dispatcher not configured"))?;
+
+        let hash_value = call.arguments["hash_value"].as_str().unwrap_or("");
+        let hash_type = call.arguments["hash_type"].as_str().unwrap_or("ntlm");
+        let username = call.arguments["username"].as_str().unwrap_or("");
+        let domain = call.arguments["domain"].as_str().unwrap_or("");
+
+        let hash = ares_core::models::Hash {
+            id: uuid::Uuid::new_v4().to_string(),
+            username: username.to_string(),
+            hash_value: hash_value.to_string(),
+            hash_type: hash_type.to_string(),
+            domain: domain.to_string(),
+            cracked_password: None,
+            source: String::new(),
+            discovered_at: None,
+            parent_id: None,
+            attack_step: 0,
+            aes_key: None,
+        };
+
+        let task_id = dispatcher.request_crack(&hash).await?;
+
+        info!(hash_type = hash_type, "Dispatched crack task");
+        Ok(CallbackResult::Continue(format!(
+            "Crack task dispatched for {username}@{domain} ({hash_type}): {}",
+            task_id.as_deref().unwrap_or("queued")
+        )))
+    }
 }
 
 #[async_trait::async_trait]
@@ -485,12 +555,14 @@ impl CallbackHandler for OrchestratorCallbackHandler {
             "get_hash_value" => Some(self.get_hash_value(call).await),
             "get_pending_tasks" => Some(self.get_pending_tasks().await),
             "get_agent_status" => Some(self.get_agent_status().await),
+            "get_operation_summary" => Some(self.get_operation_summary().await),
             // Dispatch tools
             "dispatch_recon" => Some(self.dispatch_recon(call).await),
             "dispatch_credential_access" => Some(self.dispatch_credential_access(call).await),
             "dispatch_lateral_movement" => Some(self.dispatch_lateral(call).await),
             "dispatch_privesc_exploit" => Some(self.dispatch_exploit(call).await),
             "dispatch_coercion" => Some(self.dispatch_coercion(call).await),
+            "dispatch_crack" => Some(self.dispatch_crack(call).await),
             // Not ours — let built-in handler take over
             _ => None,
         }
@@ -690,6 +762,53 @@ mod tests {
             id: "c8".into(),
             name: "dispatch_recon".into(),
             arguments: json!({"target_ip": "192.168.58.10"}),
+        };
+        let result = handler.handle_callback(&call).await.unwrap();
+        assert!(result.is_err()); // No dispatcher configured
+    }
+
+    #[tokio::test]
+    async fn test_operation_summary() {
+        let handler = make_handler();
+        {
+            let mut s = handler.state.write().await;
+            s.credentials
+                .push(make_cred("admin", "pass", "contoso.local", true));
+            s.hashes.push(make_hash(
+                "krbtgt",
+                "contoso.local",
+                "NTLM",
+                "aad3b435:313b6f42",
+                None,
+            ));
+            s.has_domain_admin = true;
+        }
+
+        let call = ToolCall {
+            id: "c10".into(),
+            name: "get_operation_summary".into(),
+            arguments: json!({}),
+        };
+        let result = handler.handle_callback(&call).await.unwrap().unwrap();
+        match result {
+            CallbackResult::Continue(msg) => {
+                let parsed: serde_json::Value = serde_json::from_str(&msg).unwrap();
+                assert_eq!(parsed["credentials"]["total"], 1);
+                assert_eq!(parsed["credentials"]["admin"], 1);
+                assert_eq!(parsed["hashes"]["total"], 1);
+                assert_eq!(parsed["has_domain_admin"], true);
+            }
+            other => panic!("Expected Continue, got: {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_dispatch_crack_without_dispatcher() {
+        let handler = make_handler();
+        let call = ToolCall {
+            id: "c11".into(),
+            name: "dispatch_crack".into(),
+            arguments: json!({"hash_value": "aad3b435:beef", "hash_type": "ntlm"}),
         };
         let result = handler.handle_callback(&call).await.unwrap();
         assert!(result.is_err()); // No dispatcher configured

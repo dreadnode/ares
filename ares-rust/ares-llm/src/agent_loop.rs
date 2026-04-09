@@ -262,6 +262,25 @@ fn handle_builtin_callback(call: &ToolCall) -> Result<CallbackResult> {
                 result: summary,
             })
         }
+        // Orchestrator-only tools — these require a custom CallbackHandler
+        // (OrchestratorCallbackHandler) to provide meaningful state. When called
+        // without one (e.g., by a worker), return a generic message.
+        "get_credential_summary"
+        | "get_hash_summary"
+        | "get_all_credentials"
+        | "get_all_hashes"
+        | "get_hash_value"
+        | "get_pending_tasks"
+        | "get_agent_status"
+        | "get_operation_summary"
+        | "dispatch_recon"
+        | "dispatch_credential_access"
+        | "dispatch_lateral_movement"
+        | "dispatch_privesc_exploit"
+        | "dispatch_coercion"
+        | "dispatch_crack" => Ok(CallbackResult::Continue(
+            "This tool requires the orchestrator callback handler.".to_string(),
+        )),
         _ => anyhow::bail!("Unknown callback tool: {}", call.name),
     }
 }

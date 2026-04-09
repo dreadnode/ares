@@ -73,12 +73,14 @@ pub const CALLBACK_TOOLS: &[&str] = &[
     "get_hash_value",
     "get_pending_tasks",
     "get_agent_status",
+    "get_operation_summary",
     // Orchestrator dispatch tools
     "dispatch_recon",
     "dispatch_credential_access",
     "dispatch_lateral_movement",
     "dispatch_privesc_exploit",
     "dispatch_coercion",
+    "dispatch_crack",
 ];
 
 /// Check if a tool name is a callback (handled in Rust, not dispatched).
