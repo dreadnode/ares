@@ -525,6 +525,71 @@ fn test_exploit_adcs_esc8() {
 }
 
 #[test]
+fn test_exploit_trust_key_extraction() {
+    let payload = serde_json::json!({
+        "vuln_type": "trust_key",
+        "target": "192.168.58.10",
+        "domain": "contoso.local",
+        "trusted_domain": "fabrikam.local",
+        "username": "Administrator",
+        "password": "P@ss1",
+        "dc_ip": "192.168.58.10"
+    });
+    let prompt = generate_task_prompt("exploit", "t-30", &payload, None).unwrap();
+    assert!(prompt.contains("TRUST KEY EXTRACTION"));
+    assert!(prompt.contains("extract_trust_key"));
+    assert!(prompt.contains("create_inter_realm_ticket"));
+    assert!(prompt.contains("fabrikam.local"));
+    assert!(prompt.contains("secretsdump_kerberos"));
+}
+
+#[test]
+fn test_exploit_child_to_parent_has_raise_child() {
+    let payload = serde_json::json!({
+        "vuln_type": "child_to_parent",
+        "target": "192.168.58.10",
+        "domain": "child.contoso.local",
+        "trusted_domain": "contoso.local",
+        "username": "Administrator",
+        "password": "P@ss1",
+        "dc_ip": "192.168.58.10"
+    });
+    let prompt = generate_task_prompt("exploit", "t-31", &payload, None).unwrap();
+    assert!(prompt.contains("TRUST KEY EXTRACTION"));
+    assert!(prompt.contains("raise_child"));
+    assert!(prompt.contains("Enterprise Admins"));
+}
+
+#[test]
+fn test_exploit_mssql_lateral_enumeration() {
+    let state = StateSnapshot {
+        credentials: vec![Credential {
+            id: "c1".into(),
+            username: "svc_sql".into(),
+            password: "SqlPass1".into(),
+            domain: "contoso.local".into(),
+            source: String::new(),
+            discovered_at: None,
+            is_admin: false,
+            parent_id: None,
+            attack_step: 0,
+        }],
+        ..Default::default()
+    };
+    let payload = serde_json::json!({
+        "vuln_type": "mssql_access",
+        "target": "192.168.58.30",
+        "domain": "contoso.local"
+    });
+    let prompt = generate_task_prompt("exploit", "t-32", &payload, Some(&state)).unwrap();
+    assert!(prompt.contains("MSSQL LATERAL ENUMERATION"));
+    assert!(prompt.contains("mssql_enum_impersonation"));
+    assert!(prompt.contains("mssql_enum_linked_servers"));
+    assert!(prompt.contains("mssql_ntlm_coerce"));
+    assert!(prompt.contains("svc_sql"));
+}
+
+#[test]
 fn test_exploit_generic_fallback() {
     let payload = serde_json::json!({
         "vuln_type": "unknown_vuln",
