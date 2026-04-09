@@ -268,3 +268,29 @@ struct HashExpansionWork {
     hash: ares_core::models::Hash,
     targets: Vec<String>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_lateral_techniques_order() {
+        // smbexec first (stealthiest), then wmiexec, then psexec
+        assert_eq!(LATERAL_TECHNIQUES[0], "smbexec");
+        assert_eq!(LATERAL_TECHNIQUES[1], "wmiexec");
+        assert_eq!(LATERAL_TECHNIQUES[2], "psexec");
+    }
+
+    #[test]
+    fn test_lateral_techniques_count() {
+        assert_eq!(LATERAL_TECHNIQUES.len(), 3);
+    }
+
+    #[test]
+    fn test_lateral_techniques_contains() {
+        assert!(LATERAL_TECHNIQUES.contains(&"smbexec"));
+        assert!(LATERAL_TECHNIQUES.contains(&"wmiexec"));
+        assert!(LATERAL_TECHNIQUES.contains(&"psexec"));
+        assert!(!LATERAL_TECHNIQUES.contains(&"evil-winrm"));
+    }
+}

@@ -240,3 +240,155 @@ impl SharedBlueTeamState {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    // ─── PyramidLevel ────────────────────────────────────────────────────
+
+    #[test]
+    fn test_pyramid_level_display() {
+        assert_eq!(PyramidLevel::HashValues.to_string(), "hash_values");
+        assert_eq!(PyramidLevel::IpAddresses.to_string(), "ip_addresses");
+        assert_eq!(PyramidLevel::DomainNames.to_string(), "domain_names");
+        assert_eq!(
+            PyramidLevel::NetworkHostArtifacts.to_string(),
+            "network_host_artifacts"
+        );
+        assert_eq!(PyramidLevel::Tools.to_string(), "tools");
+        assert_eq!(PyramidLevel::Ttps.to_string(), "ttps");
+    }
+
+    #[test]
+    fn test_pyramid_level_values() {
+        assert_eq!(PyramidLevel::HashValues as i32, 1);
+        assert_eq!(PyramidLevel::Ttps as i32, 6);
+    }
+
+    // ─── InvestigationStage ──────────────────────────────────────────────
+
+    #[test]
+    fn test_investigation_stage_display() {
+        assert_eq!(InvestigationStage::Triage.to_string(), "triage");
+        assert_eq!(InvestigationStage::Causation.to_string(), "causation");
+        assert_eq!(InvestigationStage::Lateral.to_string(), "lateral");
+        assert_eq!(InvestigationStage::Synthesis.to_string(), "synthesis");
+    }
+
+    #[test]
+    fn test_investigation_stage_serde() {
+        let stage = InvestigationStage::Causation;
+        let json_str = serde_json::to_string(&stage).unwrap();
+        assert_eq!(json_str, r#""causation""#);
+        let back: InvestigationStage = serde_json::from_str(&json_str).unwrap();
+        assert_eq!(back, InvestigationStage::Causation);
+    }
+
+    // ─── TriageDecision ──────────────────────────────────────────────────
+
+    #[test]
+    fn test_triage_decision_display() {
+        assert_eq!(TriageDecision::Pending.to_string(), "pending");
+        assert_eq!(TriageDecision::Confirmed.to_string(), "confirmed");
+        assert_eq!(TriageDecision::Downgraded.to_string(), "downgraded");
+        assert_eq!(TriageDecision::Reinvestigate.to_string(), "reinvestigate");
+        assert_eq!(TriageDecision::Routed.to_string(), "routed");
+    }
+
+    #[test]
+    fn test_triage_decision_serde() {
+        let d = TriageDecision::Confirmed;
+        let json_str = serde_json::to_string(&d).unwrap();
+        assert_eq!(json_str, r#""confirmed""#);
+        let back: TriageDecision = serde_json::from_str(&json_str).unwrap();
+        assert_eq!(back, TriageDecision::Confirmed);
+    }
+
+    // ─── Evidence serde ──────────────────────────────────────────────────
+
+    #[test]
+    fn test_evidence_deserialize_minimal() {
+        let j = json!({
+            "id": "ev-001",
+            "type": "ip",
+            "value": "192.168.58.10",
+            "source": "nmap"
+        });
+        let ev: Evidence = serde_json::from_value(j).unwrap();
+        assert_eq!(ev.id, "ev-001");
+        assert_eq!(ev.evidence_type, "ip");
+        assert_eq!(ev.value, "192.168.58.10");
+        assert_eq!(ev.confidence, 0.5); // default
+        assert!(!ev.validated);
+        assert!(ev.mitre_techniques.is_empty());
+    }
+
+    #[test]
+    fn test_evidence_type_rename() {
+        let j = json!({
+            "id": "ev-002",
+            "type": "technique",
+            "value": "T1046",
+            "source": "detection",
+            "mitre_techniques": ["T1046"],
+            "confidence": 0.9,
+            "validated": true
+        });
+        let ev: Evidence = serde_json::from_value(j).unwrap();
+        assert_eq!(ev.evidence_type, "technique");
+        assert_eq!(ev.confidence, 0.9);
+        assert!(ev.validated);
+        assert_eq!(ev.mitre_techniques, vec!["T1046"]);
+    }
+
+    // ─── BlueTaskInfo serde ──────────────────────────────────────────────
+
+    #[test]
+    fn test_blue_task_info_defaults() {
+        let j = json!({
+            "task_id": "bt-001",
+            "task_type": "query_logs"
+        });
+        let info: BlueTaskInfo = serde_json::from_value(j).unwrap();
+        assert_eq!(info.task_id, "bt-001");
+        assert_eq!(info.status, "pending"); // default
+        assert!(info.completed_at.is_none());
+        assert!(info.result.is_none());
+        assert!(info.error.is_none());
+    }
+
+    // ─── SharedBlueTeamState::new ────────────────────────────────────────
+
+    #[test]
+    fn test_shared_blue_team_state_new() {
+        let state = SharedBlueTeamState::new("inv-001".to_string());
+        assert_eq!(state.investigation_id, "inv-001");
+        assert_eq!(state.stage, "triage");
+        assert!(!state.escalated);
+        assert!(state.evidence.is_empty());
+        assert!(state.timeline.is_empty());
+        assert!(state.recommendations.is_empty());
+        assert!(state.attack_synopsis.is_none());
+        assert!(state.triage_decision.is_none());
+    }
+
+    // ─── TriageRecord serde ──────────────────────────────────────────────
+
+    #[test]
+    fn test_triage_record_deserialize() {
+        let j = json!({
+            "decision": "confirmed",
+            "reasoning": "Multiple IOCs match known attack pattern",
+            "confidence": 0.95,
+            "focus_areas": ["lateral_movement", "credential_access"]
+        });
+        let record: TriageRecord = serde_json::from_value(j).unwrap();
+        assert_eq!(record.decision, "confirmed");
+        assert_eq!(record.confidence, 0.95);
+        assert_eq!(record.focus_areas.len(), 2);
+        assert!(record.routed_to.is_none());
+        assert_eq!(record.reinvestigation_cycle, 0);
+    }
+}

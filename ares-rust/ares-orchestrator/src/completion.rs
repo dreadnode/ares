@@ -248,3 +248,31 @@ pub async fn wait_for_completion(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_gt_done_statuses_contains_success() {
+        assert!(GT_DONE_STATUSES.contains(&"success"));
+    }
+
+    #[test]
+    fn test_gt_done_statuses_contains_failures() {
+        assert!(GT_DONE_STATUSES.contains(&"failed_no_dc"));
+        assert!(GT_DONE_STATUSES.contains(&"failed_no_sid"));
+        assert!(GT_DONE_STATUSES.contains(&"failed_ticketer"));
+    }
+
+    #[test]
+    fn test_gt_done_statuses_does_not_contain_pending() {
+        assert!(!GT_DONE_STATUSES.contains(&"pending"));
+        assert!(!GT_DONE_STATUSES.contains(&"in_progress"));
+    }
+
+    #[test]
+    fn test_gt_done_statuses_count() {
+        assert_eq!(GT_DONE_STATUSES.len(), 4);
+    }
+}
