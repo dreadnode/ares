@@ -43,3 +43,18 @@ pub(crate) async fn ops_queue(redis_url: Option<String>) -> Result<()> {
 
     Ok(())
 }
+
+pub(crate) async fn ops_claim_next(redis_url: Option<String>, timeout: u64) -> Result<()> {
+    let mut conn = connect_redis(redis_url).await?;
+    let result: Option<(String, String)> = redis::cmd("BRPOP")
+        .arg("ares:operations")
+        .arg(timeout as i64)
+        .query_async(&mut conn)
+        .await?;
+
+    if let Some((_queue, payload)) = result {
+        println!("{payload}");
+    }
+
+    Ok(())
+}

@@ -37,7 +37,10 @@ impl OpenAiProvider {
 struct ApiRequest {
     model: String,
     messages: Vec<ApiMessage>,
-    max_tokens: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_tokens: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_completion_tokens: Option<u32>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     tools: Vec<ApiTool>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -260,6 +263,11 @@ fn parse_stop_reason(reason: Option<&str>) -> StopReason {
     }
 }
 
+fn uses_max_completion_tokens(model: &str) -> bool {
+    let model = model.strip_prefix("openai/").unwrap_or(model);
+    model.starts_with("gpt-5")
+}
+
 // ---------------------------------------------------------------------------
 // LlmProvider implementation
 // ---------------------------------------------------------------------------
@@ -286,10 +294,12 @@ impl LlmProvider for OpenAiProvider {
             messages.push(convert_message(msg));
         }
 
+        let use_max_completion_tokens = uses_max_completion_tokens(&request.model);
         let api_request = ApiRequest {
             model: request.model.clone(),
             messages,
-            max_tokens: request.max_tokens,
+            max_tokens: (!use_max_completion_tokens).then_some(request.max_tokens),
+            max_completion_tokens: use_max_completion_tokens.then_some(request.max_tokens),
             tools: convert_tools(&request.tools),
             temperature: request.temperature,
         };
@@ -479,5 +489,12 @@ mod tests {
         let api_tools = convert_tools(&tools);
         assert_eq!(api_tools[0].tool_type, "function");
         assert_eq!(api_tools[0].function.name, "nmap_scan");
+    }
+
+    #[test]
+    fn test_gpt5_uses_max_completion_tokens() {
+        assert!(uses_max_completion_tokens("gpt-5.2"));
+        assert!(uses_max_completion_tokens("openai/gpt-5.2"));
+        assert!(!uses_max_completion_tokens("gpt-4o-mini"));
     }
 }

@@ -102,6 +102,13 @@ pub(crate) enum OpsCommands {
     /// List operations and queue state from Redis
     Queue,
 
+    /// Claim the next queued operation request from Redis
+    ClaimNext {
+        /// BRPOP timeout in seconds
+        #[arg(long, default_value = "30")]
+        timeout: u64,
+    },
+
     /// Generate a report for an operation
     Report {
         /// Operation ID

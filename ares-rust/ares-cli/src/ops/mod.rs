@@ -42,6 +42,7 @@ pub(crate) async fn run_ops(cmd: OpsCommands, redis_url: Option<String>) -> Resu
             role,
         } => tasks::ops_tasks(redis_url, operation_id, latest, status, role).await,
         OpsCommands::Queue => queue::ops_queue(redis_url).await,
+        OpsCommands::ClaimNext { timeout } => queue::ops_claim_next(redis_url, timeout).await,
         OpsCommands::InjectCredential {
             operation_id,
             username,
