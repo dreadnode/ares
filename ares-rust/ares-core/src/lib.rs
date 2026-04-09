@@ -9,6 +9,8 @@
 //! - [`state`] — Redis state backend with key patterns and read/write operations.
 
 pub mod config;
+pub mod correlation;
+pub mod eval;
 pub mod models;
 pub mod parsing;
 pub mod persistent_store;

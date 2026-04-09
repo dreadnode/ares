@@ -1,5 +1,7 @@
 mod backfill;
+mod correlate;
 mod delete;
+mod evaluate;
 mod inject;
 mod list;
 mod loot;
@@ -150,6 +152,18 @@ pub(crate) async fn run_ops(cmd: OpsCommands, redis_url: Option<String>) -> Resu
         OpsCommands::Cleanup { max_age_hours } => {
             delete::ops_cleanup(redis_url, max_age_hours).await
         }
+        OpsCommands::Correlate {
+            reports_dir,
+            time_window,
+            json,
+        } => correlate::ops_correlate(reports_dir, time_window, json),
+        OpsCommands::Evaluate {
+            states_dir,
+            state_file,
+            output_dir,
+            json,
+            save,
+        } => evaluate::ops_evaluate(states_dir, state_file, output_dir, json, save),
         OpsCommands::Submit {
             target,
             domain,

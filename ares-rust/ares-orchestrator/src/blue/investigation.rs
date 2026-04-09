@@ -125,6 +125,7 @@ pub async fn run_investigation(
         role.as_str(),
         &investigation.investigation_id,
         &tools,
+        None, // Blue team doesn't need custom callbacks
     )
     .await;
 

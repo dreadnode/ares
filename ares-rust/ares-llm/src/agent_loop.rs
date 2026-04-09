@@ -147,7 +147,20 @@ pub enum CallbackResult {
     Continue(String),
 }
 
-fn handle_callback(call: &ToolCall) -> Result<CallbackResult> {
+/// Trait for providing custom callback handlers to the agent loop.
+///
+/// The orchestrator implements this to handle state query tools
+/// (get_hash_summary, get_all_credentials, etc.) and dispatch tools
+/// (dispatch_recon, dispatch_lateral, etc.) that need Redis access.
+///
+/// Return `None` if the handler doesn't recognize the tool — the
+/// built-in handler will be tried next.
+#[async_trait::async_trait]
+pub trait CallbackHandler: Send + Sync {
+    async fn handle_callback(&self, call: &ToolCall) -> Option<Result<CallbackResult>>;
+}
+
+fn handle_builtin_callback(call: &ToolCall) -> Result<CallbackResult> {
     match call.name.as_str() {
         "task_complete" => {
             let task_id = call.arguments["task_id"]
@@ -179,6 +192,20 @@ fn handle_callback(call: &ToolCall) -> Result<CallbackResult> {
                 "Credential recorded: {username} with cracked password"
             )))
         }
+        "report_crack_failed" => {
+            let hash_type = call.arguments["hash_type"]
+                .as_str()
+                .unwrap_or("")
+                .to_string();
+            let username = call.arguments["username"]
+                .as_str()
+                .unwrap_or("")
+                .to_string();
+            info!(username = %username, hash_type = %hash_type, "Crack failed reported");
+            Ok(CallbackResult::Continue(format!(
+                "Crack failure recorded for {username} ({hash_type})"
+            )))
+        }
         "report_finding" => {
             let finding_type = call.arguments["finding_type"]
                 .as_str()
@@ -193,8 +220,65 @@ fn handle_callback(call: &ToolCall) -> Result<CallbackResult> {
                 "Finding recorded: {finding_type}"
             )))
         }
+        "report_lateral_success" => {
+            let target = call.arguments["target_ip"]
+                .as_str()
+                .or_else(|| call.arguments["target"].as_str())
+                .unwrap_or("")
+                .to_string();
+            let technique = call.arguments["technique"]
+                .as_str()
+                .unwrap_or("")
+                .to_string();
+            info!(target = %target, technique = %technique, "Lateral movement succeeded");
+            Ok(CallbackResult::Continue(format!(
+                "Lateral movement recorded: {technique} → {target}"
+            )))
+        }
+        "report_lateral_failed" => {
+            let target = call.arguments["target_ip"]
+                .as_str()
+                .or_else(|| call.arguments["target"].as_str())
+                .unwrap_or("")
+                .to_string();
+            let technique = call.arguments["technique"]
+                .as_str()
+                .unwrap_or("")
+                .to_string();
+            let reason = call.arguments["reason"].as_str().unwrap_or("").to_string();
+            info!(target = %target, technique = %technique, "Lateral movement failed: {reason}");
+            Ok(CallbackResult::Continue(format!(
+                "Lateral failure recorded: {technique} → {target}: {reason}"
+            )))
+        }
+        "complete_operation" => {
+            let summary = call.arguments["summary"]
+                .as_str()
+                .unwrap_or("Operation completed")
+                .to_string();
+            info!("Operation marked complete: {summary}");
+            Ok(CallbackResult::TaskComplete {
+                task_id: "operation".to_string(),
+                result: summary,
+            })
+        }
         _ => anyhow::bail!("Unknown callback tool: {}", call.name),
     }
+}
+
+/// Handle a callback tool, trying the custom handler first then built-in.
+async fn handle_callback(
+    call: &ToolCall,
+    custom: Option<&dyn CallbackHandler>,
+) -> Result<CallbackResult> {
+    // Try custom handler first (orchestrator state queries, dispatch tools)
+    if let Some(handler) = custom {
+        if let Some(result) = handler.handle_callback(call).await {
+            return result;
+        }
+    }
+    // Fall back to built-in handlers
+    handle_builtin_callback(call)
 }
 
 // ---------------------------------------------------------------------------
@@ -290,6 +374,9 @@ pub enum LoopEndReason {
 /// 2. Calls the LLM in a loop
 /// 3. Dispatches tool calls to workers or handles callbacks
 /// 4. Returns when the task completes or max steps reached
+///
+/// `callback_handler` — optional custom handler for role-specific callback
+/// tools (e.g. orchestrator state queries). Pass `None` for worker tasks.
 #[allow(clippy::too_many_arguments)]
 pub async fn run_agent_loop(
     provider: &dyn LlmProvider,
@@ -300,6 +387,7 @@ pub async fn run_agent_loop(
     role: &str,
     task_id: &str,
     tools: &[crate::ToolDefinition],
+    callback_handler: Option<Arc<dyn CallbackHandler>>,
 ) -> AgentLoopOutcome {
     let mut messages: Vec<ChatMessage> = vec![ChatMessage::text(Role::User, task_prompt)];
 
@@ -455,8 +543,9 @@ pub async fn run_agent_loop(
         }
 
         // Handle callbacks (may short-circuit the loop)
+        let cb_handler = callback_handler.as_deref();
         for call in &callbacks {
-            match handle_callback(call) {
+            match handle_callback(call, cb_handler).await {
                 Ok(CallbackResult::TaskComplete { task_id, result }) => {
                     info!(
                         task_id = %task_id,
@@ -714,7 +803,7 @@ mod tests {
                 "result": "Found 5 hosts"
             }),
         };
-        let result = handle_callback(&call).unwrap();
+        let result = handle_builtin_callback(&call).unwrap();
         match result {
             CallbackResult::TaskComplete { task_id, result } => {
                 assert_eq!(task_id, "task-001");
@@ -734,7 +823,7 @@ mod tests {
                 "context": "Tried 3 times"
             }),
         };
-        let result = handle_callback(&call).unwrap();
+        let result = handle_builtin_callback(&call).unwrap();
         match result {
             CallbackResult::RequestAssistance { issue, context } => {
                 assert_eq!(issue, "Cannot reach target");
@@ -754,7 +843,7 @@ mod tests {
                 "description": "SMB signing not required on 192.168.58.20"
             }),
         };
-        let result = handle_callback(&call).unwrap();
+        let result = handle_builtin_callback(&call).unwrap();
         match result {
             CallbackResult::Continue(msg) => {
                 assert!(msg.contains("smb_signing_disabled"));
@@ -770,7 +859,7 @@ mod tests {
             name: "unknown_callback".into(),
             arguments: serde_json::json!({}),
         };
-        assert!(handle_callback(&call).is_err());
+        assert!(handle_builtin_callback(&call).is_err());
     }
 
     #[test]

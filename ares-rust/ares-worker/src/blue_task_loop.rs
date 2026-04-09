@@ -220,6 +220,7 @@ async fn execute_blue_task(
         role.as_str(),
         &task.task_id,
         &tools,
+        None, // No custom callback handler for worker tasks
     )
     .await;
 

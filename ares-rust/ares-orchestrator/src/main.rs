@@ -20,6 +20,7 @@ mod automation;
 mod automation_spawner;
 mod blue;
 mod bootstrap;
+pub(crate) mod callback_handler;
 mod completion;
 mod config;
 mod cost_summary;

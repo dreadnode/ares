@@ -13,7 +13,8 @@ use ares_llm::prompt::templates;
 use ares_llm::prompt::StateSnapshot;
 use ares_llm::tool_registry::{self, AgentRole};
 use ares_llm::{
-    run_agent_loop, AgentLoopConfig, AgentLoopOutcome, LlmProvider, LoopEndReason, ToolDispatcher,
+    run_agent_loop, AgentLoopConfig, AgentLoopOutcome, CallbackHandler, LlmProvider, LoopEndReason,
+    ToolDispatcher,
 };
 
 use crate::state::SharedState;
@@ -32,6 +33,7 @@ pub struct LlmTaskRunner {
     dispatcher: Arc<dyn ToolDispatcher>,
     state: SharedState,
     config: AgentLoopConfig,
+    callback_handler: Option<Arc<dyn CallbackHandler>>,
 }
 
 impl LlmTaskRunner {
@@ -51,11 +53,17 @@ impl LlmTaskRunner {
             dispatcher,
             state,
             config,
+            callback_handler: None,
         }
     }
 
     pub fn with_config(mut self, config: AgentLoopConfig) -> Self {
         self.config = config;
+        self
+    }
+
+    pub fn with_callback_handler(mut self, handler: Arc<dyn CallbackHandler>) -> Self {
+        self.callback_handler = Some(handler);
         self
     }
 
@@ -103,6 +111,7 @@ impl LlmTaskRunner {
             role_str,
             task_id,
             &tools,
+            self.callback_handler.clone(),
         )
         .await;
 

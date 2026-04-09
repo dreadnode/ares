@@ -252,6 +252,38 @@ pub(crate) enum OpsCommands {
         latest: bool,
     },
 
+    /// Run red-blue correlation analysis on report files
+    Correlate {
+        /// Directory containing red team and investigation report files
+        #[arg(long, default_value = "./reports")]
+        reports_dir: String,
+        /// Time window in minutes for matching activities to detections
+        #[arg(long, default_value = "30")]
+        time_window: i64,
+        /// Output as JSON instead of markdown
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Evaluate blue team detection against red team operation state
+    Evaluate {
+        /// Directory containing red team state JSON files
+        #[arg(long)]
+        states_dir: Option<String>,
+        /// Single red team state JSON file
+        #[arg(long)]
+        state_file: Option<String>,
+        /// Output directory for evaluation results
+        #[arg(long, default_value = "./eval_results")]
+        output_dir: String,
+        /// Output as JSON instead of summary
+        #[arg(long)]
+        json: bool,
+        /// Save results and gap analysis to output directory
+        #[arg(long)]
+        save: bool,
+    },
+
     /// Submit a new red team operation to the orchestrator service
     Submit {
         /// Target name or identifier

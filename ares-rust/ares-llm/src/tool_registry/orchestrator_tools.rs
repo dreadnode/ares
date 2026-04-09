@@ -129,6 +129,148 @@ pub(super) fn tool_definitions() -> Vec<ToolDefinition> {
                 "required": []
             }),
         },
+        // ----- Dispatch tools (orchestrator submits sub-tasks) -----
+        ToolDefinition {
+            name: "dispatch_recon".into(),
+            description: "Dispatch a reconnaissance task to scan a target. The task will be \
+                assigned to a recon agent and executed asynchronously."
+                .into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "target_ip": {
+                        "type": "string",
+                        "description": "Target IP address to scan"
+                    },
+                    "domain": {
+                        "type": "string",
+                        "description": "Target domain (e.g. 'contoso.local')"
+                    },
+                    "techniques": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Specific recon techniques to use (e.g. ['nmap', 'smb_sweep']). Leave empty for general recon."
+                    }
+                },
+                "required": ["target_ip"]
+            }),
+        },
+        ToolDefinition {
+            name: "dispatch_credential_access".into(),
+            description:
+                "Dispatch a credential access task (secretsdump, kerberoast, ASREP roast, \
+                password spray, etc.) to attack a specific target with given credentials."
+                    .into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "technique": {
+                        "type": "string",
+                        "description": "Attack technique (e.g. 'secretsdump', 'kerberoast', 'asrep_roast', 'password_spray', 'lsassy')"
+                    },
+                    "target_ip": {
+                        "type": "string",
+                        "description": "Target IP address"
+                    },
+                    "domain": {
+                        "type": "string",
+                        "description": "Target domain"
+                    },
+                    "username": {
+                        "type": "string",
+                        "description": "Username for authentication"
+                    },
+                    "password": {
+                        "type": "string",
+                        "description": "Password for authentication"
+                    },
+                    "priority": {
+                        "type": "integer",
+                        "description": "Task priority (1=highest, 10=lowest). Default: 5"
+                    }
+                },
+                "required": ["technique", "target_ip", "domain", "username", "password"]
+            }),
+        },
+        ToolDefinition {
+            name: "dispatch_lateral_movement".into(),
+            description:
+                "Dispatch a lateral movement task to move to a new host using compromised \
+                credentials. Techniques include psexec, wmiexec, smbexec, etc."
+                    .into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "target_ip": {
+                        "type": "string",
+                        "description": "Target host IP to move to"
+                    },
+                    "technique": {
+                        "type": "string",
+                        "description": "Lateral movement technique (e.g. 'psexec', 'wmiexec', 'smbexec', 'atexec')"
+                    },
+                    "username": {
+                        "type": "string",
+                        "description": "Username for authentication"
+                    },
+                    "password": {
+                        "type": "string",
+                        "description": "Password for authentication"
+                    },
+                    "domain": {
+                        "type": "string",
+                        "description": "Domain for the credential"
+                    }
+                },
+                "required": ["target_ip", "technique", "username", "password", "domain"]
+            }),
+        },
+        ToolDefinition {
+            name: "dispatch_privesc_exploit".into(),
+            description: "Dispatch an exploitation task for a discovered vulnerability. Provide \
+                the vulnerability ID from the discovered vulnerabilities list."
+                .into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "vuln_id": {
+                        "type": "string",
+                        "description": "Vulnerability ID to exploit (from discovered vulnerabilities)"
+                    },
+                    "priority": {
+                        "type": "integer",
+                        "description": "Task priority (1=highest, 10=lowest). Default: 3"
+                    }
+                },
+                "required": ["vuln_id"]
+            }),
+        },
+        ToolDefinition {
+            name: "dispatch_coercion".into(),
+            description: "Dispatch a coercion/relay attack against a target. Uses techniques like \
+                PetitPotam, PrinterBug to coerce authentication to a relay listener."
+                .into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "target_ip": {
+                        "type": "string",
+                        "description": "Target to coerce"
+                    },
+                    "listener_ip": {
+                        "type": "string",
+                        "description": "Relay listener IP"
+                    },
+                    "techniques": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Coercion techniques (default: ['petitpotam', 'printerbug'])"
+                    }
+                },
+                "required": ["target_ip", "listener_ip"]
+            }),
+        },
+        // ----- Operation lifecycle -----
         ToolDefinition {
             name: "complete_operation".into(),
             description: "Mark the entire red team operation as complete. This finalizes all \

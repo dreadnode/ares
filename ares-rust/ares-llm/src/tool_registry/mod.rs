@@ -52,7 +52,11 @@ impl AgentRole {
 // ---------------------------------------------------------------------------
 
 /// Names of callback tools that the agent loop handles directly.
+///
+/// Includes orchestrator query and dispatch tools — these are handled by a
+/// custom `CallbackHandler` (if provided) rather than being dispatched to workers.
 pub const CALLBACK_TOOLS: &[&str] = &[
+    // Universal callbacks
     "task_complete",
     "request_assistance",
     "report_cracked_credential",
@@ -61,6 +65,20 @@ pub const CALLBACK_TOOLS: &[&str] = &[
     "report_lateral_success",
     "report_lateral_failed",
     "complete_operation",
+    // Orchestrator query tools (handled by OrchestratorCallbackHandler)
+    "get_credential_summary",
+    "get_hash_summary",
+    "get_all_credentials",
+    "get_all_hashes",
+    "get_hash_value",
+    "get_pending_tasks",
+    "get_agent_status",
+    // Orchestrator dispatch tools
+    "dispatch_recon",
+    "dispatch_credential_access",
+    "dispatch_lateral_movement",
+    "dispatch_privesc_exploit",
+    "dispatch_coercion",
 ];
 
 /// Check if a tool name is a callback (handled in Rust, not dispatched).
