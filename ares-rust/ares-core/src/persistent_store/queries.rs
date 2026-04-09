@@ -12,6 +12,8 @@ use sqlx::PgPool;
 use tracing::info;
 use uuid::Uuid;
 
+use super::config::PersistentStoreConfig;
+
 // ============================================================================
 // Row types (sqlx::FromRow)
 // ============================================================================
@@ -125,7 +127,31 @@ impl HistoricalQueryService {
         Self { pool }
     }
 
+    /// Connect to PostgreSQL using a [`PersistentStoreConfig`].
+    ///
+    /// The config must have `database_url` set (i.e. `is_enabled()` must be true).
+    /// Pool size and timeout are taken from the config rather than hardcoded.
+    pub async fn from_config(config: &PersistentStoreConfig) -> Result<Self> {
+        let database_url = config
+            .database_url
+            .as_deref()
+            .context("database_url is required but not set")?;
+
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .min_connections(config.pool_min_size)
+            .max_connections(config.pool_max_size)
+            .acquire_timeout(config.pool_timeout())
+            .connect(database_url)
+            .await
+            .context("Failed to connect to PostgreSQL")?;
+
+        Ok(Self { pool })
+    }
+
     /// Connect to PostgreSQL.
+    ///
+    /// Uses hardcoded pool defaults. Prefer [`from_config`](Self::from_config)
+    /// for configurable pool settings.
     pub async fn connect(database_url: &str) -> Result<Self> {
         let pool = sqlx::postgres::PgPoolOptions::new()
             .max_connections(3)

@@ -1148,16 +1148,6 @@ tasks:
         set -euo pipefail
         echo "Clearing Redis operation cache in namespace {{.K8S_NAMESPACE}}"
 
-        ORCH_DEPLOY=ares-orchestrator
-        CURRENT_REPLICAS=$(kubectl get deploy -n {{.K8S_NAMESPACE}} $ORCH_DEPLOY -o jsonpath='{.spec.replicas}' 2>/dev/null || echo "1")
-        # Ensure we restore to at least 1 replica (protects against previous failed runs leaving it at 0)
-        if [ "$CURRENT_REPLICAS" -lt 1 ] 2>/dev/null; then
-          CURRENT_REPLICAS=1
-        fi
-        echo "Scaling $ORCH_DEPLOY to 0 replicas (will restore to $CURRENT_REPLICAS)"
-        kubectl scale -n {{.K8S_NAMESPACE}} deploy/$ORCH_DEPLOY --replicas=0
-        kubectl rollout status -n {{.K8S_NAMESPACE}} deploy/$ORCH_DEPLOY || true
-
         REDIS_POD=$(kubectl get pods -n {{.K8S_NAMESPACE}} -l app=redis -o name 2>/dev/null | head -1)
         if [ -z "$REDIS_POD" ]; then
           echo "No Redis pod found in namespace {{.K8S_NAMESPACE}}"
@@ -1199,15 +1189,28 @@ tasks:
           echo "Cleared $pattern ($count keys)"
         done
 
-        redis_cmd del ares:operations >/dev/null 2>&1 || true
-        echo "Cleared ares:operations queue"
+        # Clear additional keys
+        for key in ares:operations ares:operation:active; do
+          redis_cmd del "$key" >/dev/null 2>&1 || true
+          echo "Cleared $key"
+        done
 
-        redis_cmd del ares:operation:active >/dev/null 2>&1 || true
-        echo "Cleared ares:operation:active pointer"
+        # Clear op-specific keys (meta, task queues, etc.)
+        for pattern in "ares:op:*" "ares:tool_exec:*"; do
+          keys=$(redis_cmd --scan --pattern "$pattern")
+          count=0
+          if [ -n "$keys" ]; then
+            for key in $keys; do
+              redis_cmd del "$key" >/dev/null 2>&1 || true
+              count=$((count + 1))
+            done
+          fi
+          if [ $count -gt 0 ]; then
+            echo "Cleared $pattern ($count keys)"
+          fi
+        done
 
-        echo "Scaling $ORCH_DEPLOY back to $CURRENT_REPLICAS replicas"
-        kubectl scale -n {{.K8S_NAMESPACE}} deploy/$ORCH_DEPLOY --replicas="$CURRENT_REPLICAS"
-        kubectl rollout status -n {{.K8S_NAMESPACE}} deploy/$ORCH_DEPLOY || true
+        echo "Redis cleared"
 
   multi:redis:list:
     desc: "List multi-agent Redis operations, statuses, and locks"
@@ -1252,7 +1255,7 @@ tasks:
         kubectl exec -n {{.K8S_NAMESPACE}} $REDIS_POD -- "${REDIS_ENV[@]}" redis-cli --scan --pattern "ares:lock:*" || true
 
   multi:sync:align:
-    desc: "Build and deploy Rust binaries, clear Redis cache, and align cluster pods (usage: task red:multi:sync:align [TEAM=red|blue|all])"
+    desc: "Build, rollout, deploy binaries+config, clear Redis (usage: task red:multi:sync:align [TEAM=red|blue|all])"
     vars:
       TEAM: '{{.TEAM | default "red"}}'
     cmds:
@@ -1264,32 +1267,34 @@ tasks:
             echo "=== STOPPING LOCAL CLI SESSIONS ==="
             echo "Found running red:multi:local processes: $LOCAL_PIDS"
             for pid in $LOCAL_PIDS; do
-              # Kill the process group to ensure child processes are also killed
               pkill -TERM -P "$pid" 2>/dev/null || true
               kill -TERM "$pid" 2>/dev/null || true
             done
             sleep 1
-            # Force kill if still running
             for pid in $LOCAL_PIDS; do
               if kill -0 "$pid" 2>/dev/null; then
-                echo "Force killing $pid"
                 kill -9 "$pid" 2>/dev/null || true
               fi
             done
             echo "Local CLI sessions stopped"
           fi
+      # 1. Build binaries locally
       - cmd: echo "=== BUILDING RUST BINARIES ==="
       - task: :remote:rust:build
-      - cmd: echo "=== SYNCING CONFIG ==="
-      - task: multi:sync:config
+      # 2. Clear Redis (no longer rescales orchestrator)
       - cmd: echo "=== CLEARING REDIS CACHE ==="
       - task: multi:redis:clear
+      # 3. Rollout pods (fresh containers)
       - cmd: echo "=== ROLLING OUT (team={{.TEAM}}) ==="
       - task: :remote:rollout
         vars: { NAMESPACE: "{{.K8S_NAMESPACE}}", TEAM: "{{.TEAM}}" }
+      # 4. Deploy binaries to the NEW pods (after rollout)
       - cmd: echo "=== DEPLOYING RUST BINARIES (team={{.TEAM}}) ==="
       - task: :remote:rust:deploy
         vars: { TEAM: "{{.TEAM}}" }
+      # 5. Sync config to the NEW pods (after rollout)
+      - cmd: echo "=== SYNCING CONFIG ==="
+      - task: multi:sync:config
 
   multi:sync:config:
     desc: "Sync config/multi-agent-production.yaml to all pods"

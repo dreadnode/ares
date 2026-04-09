@@ -4,8 +4,12 @@
 //! HTTP requests to Loki, Prometheus, and Grafana APIs.
 
 pub mod detection;
+pub mod grafana;
+pub mod investigation;
+pub mod learning;
 pub mod loki;
 pub mod prometheus;
+pub mod validation;
 
 use anyhow::Result;
 use serde_json::Value;
@@ -35,6 +39,23 @@ pub async fn dispatch_blue(tool_name: &str, arguments: &Value) -> Result<ToolOut
         "run_parallel_detections" => detection::run_parallel_detections(arguments).await,
         "list_detection_templates" => detection::list_detection_templates(arguments).await,
 
+        // ── Grafana ─────────────────────────────────────────────
+        "get_grafana_alerts" => grafana::get_alerts(arguments).await,
+        "get_grafana_annotations" => grafana::get_annotations(arguments).await,
+        "search_grafana_dashboards" => grafana::search_dashboards(arguments).await,
+        "get_grafana_dashboard" => grafana::get_dashboard(arguments).await,
+
+        // ── MITRE ATT&CK learning ─────────────────────────────────
+        "lookup_technique" => Ok(learning::lookup_technique(arguments)?),
+        "suggest_techniques" => Ok(learning::suggest_techniques(arguments)?),
+
+        // ── Investigation state mutation ─────────────────────────
+        "add_evidence" => investigation::add_evidence(arguments).await,
+        "record_timeline_event" => investigation::record_timeline_event(arguments).await,
+        "add_technique" => investigation::add_technique(arguments).await,
+        "add_lateral_connection" => investigation::add_lateral_connection(arguments).await,
+        "get_investigation_summary" => investigation::get_investigation_summary(arguments).await,
+
         _ => Err(anyhow::anyhow!("unknown blue team tool: {tool_name}")),
     }
 }
@@ -53,5 +74,16 @@ pub fn is_blue_tool(name: &str) -> bool {
             | "run_detection_query"
             | "run_parallel_detections"
             | "list_detection_templates"
+            | "get_grafana_alerts"
+            | "get_grafana_annotations"
+            | "search_grafana_dashboards"
+            | "get_grafana_dashboard"
+            | "lookup_technique"
+            | "suggest_techniques"
+            | "add_evidence"
+            | "record_timeline_event"
+            | "add_technique"
+            | "add_lateral_connection"
+            | "get_investigation_summary"
     )
 }

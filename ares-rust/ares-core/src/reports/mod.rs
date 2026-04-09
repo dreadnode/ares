@@ -280,4 +280,165 @@ mod tests {
         assert!(report.contains("blue-test-001"));
         assert!(report.contains("ESCALATIONS REQUIRED"));
     }
+
+    #[test]
+    fn test_blueteam_investigation_report_renders() {
+        use crate::models::{Evidence, SharedBlueTeamState, TimelineEvent};
+
+        let gen = BlueTeamReportGenerator::new().unwrap();
+        let mut state = SharedBlueTeamState::new("inv-test-001".to_string());
+        state.alert = serde_json::json!({
+            "labels": {
+                "alertname": "HighCPUUsage",
+                "severity": "critical",
+                "instance": "dc01.contoso.local",
+                "job": "node_exporter"
+            }
+        });
+        state.evidence = vec![
+            Evidence {
+                id: "ev-001".to_string(),
+                evidence_type: "ip".to_string(),
+                value: "192.168.58.10".to_string(),
+                source: "network_log".to_string(),
+                timestamp: Some("2026-04-07T10:00:00Z".to_string()),
+                pyramid_level: 2,
+                mitre_techniques: vec!["T1021".to_string()],
+                confidence: 0.85,
+                metadata: HashMap::new(),
+                source_query_id: None,
+                validated: true,
+            },
+            Evidence {
+                id: "ev-002".to_string(),
+                evidence_type: "technique".to_string(),
+                value: "Lateral Movement via SMB".to_string(),
+                source: "siem".to_string(),
+                timestamp: Some("2026-04-07T10:05:00Z".to_string()),
+                pyramid_level: 6,
+                mitre_techniques: vec!["T1021.002".to_string()],
+                confidence: 0.92,
+                metadata: HashMap::new(),
+                source_query_id: None,
+                validated: true,
+            },
+        ];
+        state.timeline = vec![TimelineEvent {
+            id: "tl-001".to_string(),
+            timestamp: "2026-04-07T10:00:00Z".to_string(),
+            description: "SMB connection from workstation to DC".to_string(),
+            evidence_ids: vec!["ev-001".to_string()],
+            mitre_techniques: vec!["T1021.002".to_string()],
+            confidence: 0.9,
+            source: "siem".to_string(),
+            extra_data_json: None,
+        }];
+        state.identified_techniques = vec!["T1021".to_string(), "T1021.002".to_string()];
+        state.identified_tactics = vec!["Lateral Movement".to_string()];
+        state.technique_names = HashMap::from([
+            ("T1021".to_string(), "Remote Services".to_string()),
+            (
+                "T1021.002".to_string(),
+                "SMB/Windows Admin Shares".to_string(),
+            ),
+        ]);
+        state.queried_hosts = vec!["dc01.contoso.local".to_string()];
+        state.queried_users = vec!["admin@contoso.local".to_string()];
+        state.escalated = true;
+        state.escalation_reason = Some("High severity lateral movement detected".to_string());
+        state.attack_synopsis = Some("Lateral movement via SMB to domain controller".to_string());
+        state.recommendations = vec!["Block unauthorized SMB traffic".to_string()];
+
+        let queries = vec![serde_json::json!({
+            "type": "loki",
+            "query": "{job=\"windows_event\"} |= \"SMB\"",
+            "result_count": 15,
+        })];
+
+        let result = gen.generate_investigation(&state, &queries);
+        assert!(result.is_ok(), "Generate failed: {:?}", result.err());
+        let report = result.unwrap();
+        assert!(report.contains("# Investigation Report"), "Missing header");
+        assert!(report.contains("inv-test-001"), "Missing investigation ID");
+        assert!(report.contains("HighCPUUsage"), "Missing alert name");
+        assert!(report.contains("ESCALATED"), "Missing escalation status");
+        assert!(report.contains("T1021"), "Missing MITRE technique");
+        assert!(report.contains("dc01.contoso.local"), "Missing host");
+        assert!(
+            report.contains("Lateral movement via SMB"),
+            "Missing attack synopsis"
+        );
+        assert!(
+            report.contains("Block unauthorized SMB traffic"),
+            "Missing recommendation"
+        );
+        assert!(
+            report.contains("Elevation Score"),
+            "Missing pyramid assessment"
+        );
+    }
+
+    #[test]
+    fn test_blueteam_generate_from_states() {
+        use crate::models::{Evidence, SharedBlueTeamState};
+
+        let gen = BlueTeamReportGenerator::new().unwrap();
+
+        let mut state1 = SharedBlueTeamState::new("inv-001".to_string());
+        state1.started_at = "2026-04-07T10:00:00Z".to_string();
+        state1.alert = serde_json::json!({
+            "labels": { "alertname": "BruteForce", "severity": "high" }
+        });
+        state1.evidence = vec![Evidence {
+            id: "ev-001".to_string(),
+            evidence_type: "ip".to_string(),
+            value: "10.0.0.1".to_string(),
+            source: "firewall".to_string(),
+            timestamp: None,
+            pyramid_level: 2,
+            mitre_techniques: vec!["T1110".to_string()],
+            confidence: 0.8,
+            metadata: HashMap::new(),
+            source_query_id: None,
+            validated: false,
+        }];
+        state1.identified_techniques = vec!["T1110".to_string()];
+        state1.queried_hosts = vec!["server01".to_string()];
+
+        let mut state2 = SharedBlueTeamState::new("inv-002".to_string());
+        state2.started_at = "2026-04-07T10:05:00Z".to_string();
+        state2.alert = serde_json::json!({
+            "labels": { "alertname": "MalwareDetected", "severity": "critical" }
+        });
+        state2.evidence = vec![Evidence {
+            id: "ev-002".to_string(),
+            evidence_type: "hash".to_string(),
+            value: "abc123def456".to_string(),
+            source: "edr".to_string(),
+            timestamp: None,
+            pyramid_level: 1,
+            mitre_techniques: vec!["T1059".to_string()],
+            confidence: 0.95,
+            metadata: HashMap::new(),
+            source_query_id: None,
+            validated: true,
+        }];
+        state2.identified_techniques = vec!["T1059".to_string()];
+        state2.queried_hosts = vec!["workstation01".to_string()];
+        state2.escalated = true;
+
+        let states = vec![state1, state2];
+        let queries_by_inv = HashMap::new();
+
+        let result = gen.generate_from_states("op-test-001", &states, &queries_by_inv);
+        assert!(result.is_ok(), "Generate failed: {:?}", result.err());
+        let report = result.unwrap();
+        assert!(report.contains("# Blue Team Operation Report"));
+        assert!(report.contains("op-test-001"));
+        assert!(report.contains("BruteForce"));
+        assert!(report.contains("MalwareDetected"));
+        assert!(report.contains("ESCALATIONS REQUIRED"));
+        // Should have 2 investigations
+        assert!(report.contains("Investigations | 2"));
+    }
 }

@@ -19,6 +19,8 @@ pub fn generate_blue_task_prompt(
         "triage_alert" | "triage" => generate_triage_prompt(task_id, params, state_summary),
         "threat_hunt" => generate_threat_hunt_prompt(task_id, params, state_summary),
         "lateral_analysis" | "lateral" => generate_lateral_prompt(task_id, params, state_summary),
+        "user_investigation" => generate_user_investigation_prompt(task_id, params, state_summary),
+        "host_investigation" => generate_host_investigation_prompt(task_id, params, state_summary),
         _ => return None,
     };
     Some(result.unwrap_or_else(|e| format!("Error generating blue team prompt: {e}")))
@@ -100,6 +102,51 @@ fn generate_lateral_prompt(
     ctx.insert("context", &context);
 
     templates::render_template_with_context(templates::BLUE_TASK_LATERAL, &ctx)
+}
+
+fn generate_user_investigation_prompt(
+    task_id: &str,
+    params: &serde_json::Value,
+    state_summary: &str,
+) -> Result<String> {
+    let mut ctx = Context::new();
+    ctx.insert("task_id", task_id);
+    ctx.insert("state_summary", state_summary);
+
+    let username = params
+        .get("username")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown");
+    ctx.insert("username", username);
+
+    let domain = params.get("domain").and_then(|v| v.as_str());
+    ctx.insert("domain", &domain);
+
+    let context = params.get("context").and_then(|v| v.as_str());
+    ctx.insert("context", &context);
+
+    templates::render_template_with_context(templates::BLUE_TASK_USER_INVESTIGATION, &ctx)
+}
+
+fn generate_host_investigation_prompt(
+    task_id: &str,
+    params: &serde_json::Value,
+    state_summary: &str,
+) -> Result<String> {
+    let mut ctx = Context::new();
+    ctx.insert("task_id", task_id);
+    ctx.insert("state_summary", state_summary);
+
+    let hostname = params
+        .get("hostname")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown");
+    ctx.insert("hostname", hostname);
+
+    let context = params.get("context").and_then(|v| v.as_str());
+    ctx.insert("context", &context);
+
+    templates::render_template_with_context(templates::BLUE_TASK_HOST_INVESTIGATION, &ctx)
 }
 
 /// Get the template name for a blue team agent role's system prompt.

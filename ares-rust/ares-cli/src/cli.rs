@@ -398,6 +398,25 @@ pub(crate) enum BlueCommands {
         force: bool,
     },
 
+    /// Generate a markdown report for a blue team operation or investigation
+    Report {
+        /// Operation ID (generates multi-investigation report)
+        #[arg(long)]
+        operation_id: Option<String>,
+        /// Investigation ID (generates single investigation report)
+        #[arg(long)]
+        investigation_id: Option<String>,
+        /// Use the latest operation or investigation
+        #[arg(long)]
+        latest: bool,
+        /// Force regeneration (skip cached report)
+        #[arg(long)]
+        regenerate: bool,
+        /// Output directory
+        #[arg(long, default_value = "reports")]
+        output_dir: String,
+    },
+
     /// Submit a new blue team investigation
     Submit {
         /// Alert JSON string or path to JSON file

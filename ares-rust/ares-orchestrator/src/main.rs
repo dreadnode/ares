@@ -179,11 +179,28 @@ async fn main() -> Result<()> {
     let throttler = Arc::new(Throttler::new(config.clone(), tracker.clone()));
     let deferred = Arc::new(DeferredQueue::new(queue.clone(), config.clone()));
 
-    // --- LLM provider (required — ARES_LLM_MODEL must be set) ---
-    let model_spec = std::env::var("ARES_LLM_MODEL")
-        .context("ARES_LLM_MODEL is required — set to e.g. 'anthropic/claude-sonnet-4-20250514'")?;
-    let (provider, model_name) = ares_llm::create_provider(&model_spec)
-        .context("Failed to create LLM provider from ARES_LLM_MODEL")?;
+    // --- LLM provider ---
+    // Priority: ARES_LLM_MODEL env var > config YAML agents.orchestrator.model
+    let model_spec = std::env::var("ARES_LLM_MODEL").ok().or_else(|| {
+        let config_path = std::env::var("ARES_CONFIG")
+            .unwrap_or_else(|_| "/ares/config/multi-agent-production.yaml".to_string());
+        std::fs::read_to_string(&config_path)
+            .ok()
+            .and_then(|content| {
+                let yaml: serde_yaml::Value = serde_yaml::from_str(&content).ok()?;
+                let model = yaml["agents"]["orchestrator"]["model"].as_str()?;
+                // Prefix with "openai/" if no provider prefix present
+                let spec = if model.contains('/') {
+                    model.to_string()
+                } else {
+                    format!("openai/{model}")
+                };
+                info!(config = %config_path, model = %spec, "Model loaded from config YAML");
+                Some(spec)
+            })
+    }).context("No LLM model configured — set ARES_LLM_MODEL or agents.orchestrator.model in config YAML")?;
+    let (provider, model_name) =
+        ares_llm::create_provider(&model_spec).context("Failed to create LLM provider")?;
 
     // Choose tool dispatch strategy:
     // ARES_TOOL_DISPATCH=local → in-process via ares_tools::dispatch()

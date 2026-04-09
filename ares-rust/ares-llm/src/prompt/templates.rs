@@ -86,6 +86,10 @@ const BLUE_TASK_THREAT_HUNT_TEMPLATE: &str =
     include_str!("../../templates/blueteam/tasks/threat_hunt_task.md.tera");
 const BLUE_TASK_LATERAL_TEMPLATE: &str =
     include_str!("../../templates/blueteam/tasks/lateral_task.md.tera");
+const BLUE_TASK_USER_INVESTIGATION_TEMPLATE: &str =
+    include_str!("../../templates/blueteam/tasks/user_investigation_task.md.tera");
+const BLUE_TASK_HOST_INVESTIGATION_TEMPLATE: &str =
+    include_str!("../../templates/blueteam/tasks/host_investigation_task.md.tera");
 
 // ---------------------------------------------------------------------------
 // Template name constants
@@ -133,6 +137,8 @@ pub const TEMPLATE_BLUE_ESCALATION_TRIAGE: &str = "blueteam/agents/escalation_tr
 pub const BLUE_TASK_TRIAGE: &str = "blueteam/tasks/triage_task";
 pub const BLUE_TASK_THREAT_HUNT: &str = "blueteam/tasks/threat_hunt_task";
 pub const BLUE_TASK_LATERAL: &str = "blueteam/tasks/lateral_task";
+pub const BLUE_TASK_USER_INVESTIGATION: &str = "blueteam/tasks/user_investigation_task";
+pub const BLUE_TASK_HOST_INVESTIGATION: &str = "blueteam/tasks/host_investigation_task";
 
 // ---------------------------------------------------------------------------
 // Global Tera instance
@@ -190,6 +196,14 @@ static TEMPLATES: Lazy<Tera> = Lazy::new(|| {
         (BLUE_TASK_TRIAGE, BLUE_TASK_TRIAGE_TEMPLATE),
         (BLUE_TASK_THREAT_HUNT, BLUE_TASK_THREAT_HUNT_TEMPLATE),
         (BLUE_TASK_LATERAL, BLUE_TASK_LATERAL_TEMPLATE),
+        (
+            BLUE_TASK_USER_INVESTIGATION,
+            BLUE_TASK_USER_INVESTIGATION_TEMPLATE,
+        ),
+        (
+            BLUE_TASK_HOST_INVESTIGATION,
+            BLUE_TASK_HOST_INVESTIGATION_TEMPLATE,
+        ),
     ];
 
     for (name, content) in templates {

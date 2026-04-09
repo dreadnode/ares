@@ -120,6 +120,18 @@ impl BlueStateReader {
         Ok(items.into_iter().collect())
     }
 
+    /// Load executed queries from `ares:blue:inv:{id}:queries` LIST.
+    pub async fn get_queries(
+        &self,
+        conn: &mut impl AsyncCommands,
+    ) -> Result<Vec<serde_json::Value>, redis::RedisError> {
+        let items: Vec<String> = conn.lrange(self.key(BLUE_KEY_QUERIES), 0, -1).await?;
+        Ok(items
+            .iter()
+            .filter_map(|s| serde_json::from_str(s).ok())
+            .collect())
+    }
+
     /// Load recommendations from `ares:blue:inv:{id}:recommendations` LIST.
     pub async fn get_recommendations(
         &self,

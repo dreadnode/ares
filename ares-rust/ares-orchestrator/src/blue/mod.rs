@@ -9,6 +9,7 @@
 //! workflows instead of attack chains.
 
 mod callbacks;
+pub mod chaining;
 mod investigation;
 mod runner;
 

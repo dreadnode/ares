@@ -2,6 +2,7 @@ mod delete;
 mod evidence;
 mod list;
 mod operation;
+mod report;
 mod runtime;
 mod status;
 mod submit;
@@ -51,6 +52,23 @@ pub(crate) async fn run_blue(cmd: BlueCommands, redis_url: Option<String>) -> Re
             latest,
             watch,
         } => operation::blue_operation_status(redis_url, operation_id, latest, watch).await,
+        BlueCommands::Report {
+            operation_id,
+            investigation_id,
+            latest,
+            regenerate,
+            output_dir,
+        } => {
+            report::blue_report(
+                redis_url,
+                operation_id,
+                investigation_id,
+                latest,
+                regenerate,
+                output_dir,
+            )
+            .await
+        }
         BlueCommands::Delete {
             investigation_id,
             force,

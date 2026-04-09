@@ -17,9 +17,11 @@
 //! - MITRE ATT&CK coverage analysis
 //! - Retention policy enforcement
 
+mod config;
 mod queries;
 mod store;
 
+pub use config::{PersistentStoreConfig, RetentionConfig};
 pub use queries::{
     CostRow, CredentialRow, HashRow, HistoricalQueryService, MitreCoverage, OperationRow,
     OperationSummary,

@@ -3,18 +3,21 @@
 //! Handles creating investigations, dispatching tasks to workers,
 //! processing results, and driving the investigation to completion.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use chrono::Utc;
 use tracing::{info, warn};
 
-use ares_core::state::blue_task_queue::{BlueTaskMessage, BlueTaskQueue};
+use ares_core::state::blue_task_queue::{BlueTaskMessage, BlueTaskQueue, BlueTaskResult};
 use ares_core::state::BlueStateWriter;
 use ares_llm::tool_registry::blue::BlueAgentRole;
 use ares_llm::{
     run_agent_loop, AgentLoopConfig, AgentLoopOutcome, LlmProvider, LoopEndReason, ToolDispatcher,
 };
+
+use super::chaining;
 
 /// Represents a running investigation.
 pub struct Investigation {
@@ -126,6 +129,48 @@ pub async fn run_investigation(
     .await;
 
     let investigation_outcome = process_outcome(&outcome, &investigation.investigation_id);
+
+    // Auto-chain follow-up tasks based on discoveries from the agent loop.
+    let mut dispatched_chains: HashSet<String> = HashSet::new();
+    let mut chained_task_ids: Vec<String> = Vec::new();
+
+    for discovery in &outcome.discoveries {
+        let synthetic_result = BlueTaskResult {
+            task_id: format!("discovery_{}", investigation.investigation_id),
+            investigation_id: investigation.investigation_id.clone(),
+            success: true,
+            result: Some(discovery.clone()),
+            error: None,
+            completed_at: Utc::now().to_rfc3339(),
+            worker_agent: Some("orchestrator".into()),
+        };
+
+        match chaining::process_task_result(
+            &synthetic_result,
+            _task_queue,
+            &investigation.investigation_id,
+            &mut dispatched_chains,
+        )
+        .await
+        {
+            Ok(new_ids) => chained_task_ids.extend(new_ids),
+            Err(e) => {
+                warn!(
+                    investigation_id = %investigation.investigation_id,
+                    error = %e,
+                    "Failed to process evidence chain"
+                );
+            }
+        }
+    }
+
+    if !chained_task_ids.is_empty() {
+        info!(
+            investigation_id = %investigation.investigation_id,
+            count = chained_task_ids.len(),
+            "Evidence auto-chaining dispatched follow-up tasks"
+        );
+    }
 
     // Update investigation status
     let final_status = match &investigation_outcome {

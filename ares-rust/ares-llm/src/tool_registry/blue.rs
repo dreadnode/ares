@@ -70,6 +70,22 @@ pub fn blue_tools_for_role(role: BlueAgentRole) -> Vec<ToolDefinition> {
         _ => {}
     }
 
+    // Redis-backed investigation state mutation tools
+    match role {
+        BlueAgentRole::Triage
+        | BlueAgentRole::ThreatHunter
+        | BlueAgentRole::LateralAnalyst
+        | BlueAgentRole::Orchestrator
+        | BlueAgentRole::EscalationTriage => {
+            tools.extend(investigation_state_tool_definitions());
+        }
+    }
+
+    // Lateral connection tool only for lateral_analyst
+    if role == BlueAgentRole::LateralAnalyst {
+        tools.push(lateral_connection_tool_definition());
+    }
+
     tools
 }
 
@@ -866,11 +882,300 @@ fn escalation_triage_tool_definitions() -> Vec<ToolDefinition> {
 }
 
 // ---------------------------------------------------------------------------
+// Grafana tools (alerts, annotations, dashboards)
+// ---------------------------------------------------------------------------
+
+fn grafana_tool_definitions() -> Vec<ToolDefinition> {
+    vec![
+        ToolDefinition {
+            name: "get_grafana_alerts".into(),
+            description: "Get alerts from Grafana. Tries multiple API endpoints for compatibility across Grafana versions.".into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "state": {
+                        "type": "string",
+                        "description": "Filter by alert state (e.g., 'firing', 'pending', 'inactive')"
+                    }
+                }
+            }),
+        },
+        ToolDefinition {
+            name: "get_grafana_annotations".into(),
+            description: "Get annotations from Grafana with optional time range and tag filters. Useful for reviewing alert history and investigation markers.".into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "from": {
+                        "type": "string",
+                        "description": "Start time as epoch milliseconds or ISO8601 string"
+                    },
+                    "to": {
+                        "type": "string",
+                        "description": "End time as epoch milliseconds or ISO8601 string"
+                    },
+                    "tags": {
+                        "type": "string",
+                        "description": "Comma-separated tag filter (e.g., 'ares,investigation')"
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum annotations to return (default: 100)"
+                    },
+                    "type": {
+                        "type": "string",
+                        "description": "Annotation type filter (e.g., 'alert')"
+                    }
+                }
+            }),
+        },
+        ToolDefinition {
+            name: "search_grafana_dashboards".into(),
+            description: "Search for dashboards in Grafana by query string or tag.".into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Search query string"
+                    },
+                    "tag": {
+                        "type": "string",
+                        "description": "Filter dashboards by tag"
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum results to return (default: 50)"
+                    }
+                }
+            }),
+        },
+        ToolDefinition {
+            name: "get_grafana_dashboard".into(),
+            description: "Get a specific Grafana dashboard by its UID, including panel details and metadata.".into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "uid": {
+                        "type": "string",
+                        "description": "Dashboard UID"
+                    }
+                },
+                "required": ["uid"]
+            }),
+        },
+    ]
+}
+
+// ---------------------------------------------------------------------------
+// Investigation state mutation tools (Redis-backed, require investigation_id)
+// ---------------------------------------------------------------------------
+
+/// Core investigation state tools available to all worker roles.
+fn investigation_state_tool_definitions() -> Vec<ToolDefinition> {
+    vec![
+        ToolDefinition {
+            name: "add_evidence".into(),
+            description: "Add evidence to the investigation state. Uses Redis HSETNX for deduplication.".into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "investigation_id": {
+                        "type": "string",
+                        "description": "Investigation ID"
+                    },
+                    "evidence_type": {
+                        "type": "string",
+                        "enum": ["ip", "domain", "hash", "process", "user", "file", "artifact", "tool", "technique"],
+                        "description": "Type of evidence"
+                    },
+                    "value": {
+                        "type": "string",
+                        "description": "The evidence value (IP address, hash, username, etc.)"
+                    },
+                    "source": {
+                        "type": "string",
+                        "description": "Where this evidence was found"
+                    },
+                    "confidence": {
+                        "type": "number",
+                        "description": "Confidence level (0.0-1.0, default: 0.5)"
+                    },
+                    "pyramid_level": {
+                        "type": "string",
+                        "enum": ["hash_values", "ip_addresses", "domain_names", "network_host_artifacts", "tools", "ttps"],
+                        "description": "Pyramid of Pain level (default: ip_addresses)"
+                    },
+                    "timestamp": {
+                        "type": "string",
+                        "description": "Evidence timestamp in ISO8601 format (default: now)"
+                    }
+                },
+                "required": ["investigation_id", "evidence_type", "value", "source"]
+            }),
+        },
+        ToolDefinition {
+            name: "record_timeline_event".into(),
+            description: "Add a timeline event to the investigation. Events are appended to a Redis LIST.".into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "investigation_id": {
+                        "type": "string",
+                        "description": "Investigation ID"
+                    },
+                    "description": {
+                        "type": "string",
+                        "description": "Description of the event"
+                    },
+                    "timestamp": {
+                        "type": "string",
+                        "description": "Event timestamp in ISO8601 format"
+                    },
+                    "mitre_techniques": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "MITRE ATT&CK technique IDs associated with this event"
+                    },
+                    "confidence": {
+                        "type": "number",
+                        "description": "Confidence level (0.0-1.0, default: 0.5)"
+                    },
+                    "source": {
+                        "type": "string",
+                        "description": "Source of this event (default: agent)"
+                    },
+                    "evidence_ids": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "IDs of related evidence items"
+                    }
+                },
+                "required": ["investigation_id", "description", "timestamp"]
+            }),
+        },
+        ToolDefinition {
+            name: "add_technique".into(),
+            description: "Record a MITRE ATT&CK technique observed during investigation. Stored in a Redis SET for deduplication.".into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "investigation_id": {
+                        "type": "string",
+                        "description": "Investigation ID"
+                    },
+                    "technique_id": {
+                        "type": "string",
+                        "description": "MITRE ATT&CK technique ID (e.g., T1003.001)"
+                    },
+                    "technique_name": {
+                        "type": "string",
+                        "description": "Human-readable technique name"
+                    }
+                },
+                "required": ["investigation_id", "technique_id"]
+            }),
+        },
+        ToolDefinition {
+            name: "get_investigation_summary".into(),
+            description: "Read the current investigation state from Redis and return a formatted summary including evidence count, timeline, techniques, hosts, and users.".into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "investigation_id": {
+                        "type": "string",
+                        "description": "Investigation ID"
+                    }
+                },
+                "required": ["investigation_id"]
+            }),
+        },
+    ]
+}
+
+/// Lateral movement connection tool (only for lateral_analyst role).
+fn lateral_connection_tool_definition() -> ToolDefinition {
+    ToolDefinition {
+        name: "add_lateral_connection".into(),
+        description: "Record a lateral movement connection between two hosts. Automatically tracks both hosts and the user.".into(),
+        input_schema: json!({
+            "type": "object",
+            "properties": {
+                "investigation_id": {
+                    "type": "string",
+                    "description": "Investigation ID"
+                },
+                "source_host": {
+                    "type": "string",
+                    "description": "Source hostname or IP"
+                },
+                "destination_host": {
+                    "type": "string",
+                    "description": "Destination hostname or IP"
+                },
+                "method": {
+                    "type": "string",
+                    "description": "Lateral movement method (e.g., 'smb', 'wmi', 'rdp', 'winrm', 'psexec')"
+                },
+                "timestamp": {
+                    "type": "string",
+                    "description": "Connection timestamp in ISO8601 format (default: now)"
+                },
+                "user": {
+                    "type": "string",
+                    "description": "User account used for the connection"
+                }
+            },
+            "required": ["investigation_id", "source_host", "destination_host"]
+        }),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// MITRE ATT&CK learning tools (available to all roles)
+// ---------------------------------------------------------------------------
+
+fn learning_tool_definitions() -> Vec<ToolDefinition> {
+    vec![
+        ToolDefinition {
+            name: "lookup_technique".into(),
+            description: "Look up a MITRE ATT&CK technique by ID. Returns the technique name, description, associated tactics, and detection recommendations.".into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "technique_id": {
+                        "type": "string",
+                        "description": "MITRE ATT&CK technique ID (e.g., 'T1003', 'T1059.001', 'T1558.003')"
+                    }
+                },
+                "required": ["technique_id"]
+            }),
+        },
+        ToolDefinition {
+            name: "suggest_techniques".into(),
+            description: "Suggest relevant MITRE ATT&CK techniques based on an evidence type or attack category. Returns technique IDs with descriptions.".into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "evidence_type": {
+                        "type": "string",
+                        "description": "Evidence category (e.g., 'credential_access', 'lateral_movement', 'persistence', 'discovery', 'execution', 'privilege_escalation', 'defense_evasion', 'kerberos', 'brute_force', 'pass_the_hash', 'dcsync', 'golden_ticket')"
+                    }
+                },
+                "required": ["evidence_type"]
+            }),
+        },
+    ]
+}
+
+// ---------------------------------------------------------------------------
 // Role-specific tool sets
 // ---------------------------------------------------------------------------
 
 fn triage_tool_definitions() -> Vec<ToolDefinition> {
     let mut tools = loki_tool_definitions();
+    tools.extend(grafana_tool_definitions());
+    tools.extend(learning_tool_definitions());
     tools.extend(worker_callback_definitions());
     tools
 }
@@ -878,14 +1183,18 @@ fn triage_tool_definitions() -> Vec<ToolDefinition> {
 fn threat_hunter_tool_definitions() -> Vec<ToolDefinition> {
     let mut tools = loki_tool_definitions();
     tools.extend(prometheus_tool_definitions());
+    tools.extend(grafana_tool_definitions());
     tools.extend(detection_query_tool_definitions());
+    tools.extend(learning_tool_definitions());
     tools.extend(worker_callback_definitions());
     tools
 }
 
 fn lateral_analyst_tool_definitions() -> Vec<ToolDefinition> {
     let mut tools = loki_tool_definitions();
+    tools.extend(grafana_tool_definitions());
     tools.extend(detection_query_tool_definitions());
+    tools.extend(learning_tool_definitions());
     tools.extend(worker_callback_definitions());
     tools
 }
