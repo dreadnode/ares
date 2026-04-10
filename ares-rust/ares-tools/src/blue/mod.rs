@@ -39,6 +39,10 @@ pub async fn dispatch_blue(tool_name: &str, arguments: &Value) -> Result<ToolOut
         "run_parallel_detections" => detection::run_parallel_detections(arguments).await,
         "list_detection_templates" => detection::list_detection_templates(arguments).await,
 
+        // ── Investigation helpers ────────────────────────────────
+        "get_host_activity" => detection::get_host_activity(arguments).await,
+        "get_user_activity" => detection::get_user_activity(arguments).await,
+
         // ── Grafana ─────────────────────────────────────────────
         "get_grafana_alerts" => grafana::get_alerts(arguments).await,
         "get_grafana_annotations" => grafana::get_annotations(arguments).await,
@@ -74,6 +78,8 @@ pub fn is_blue_tool(name: &str) -> bool {
             | "run_detection_query"
             | "run_parallel_detections"
             | "list_detection_templates"
+            | "get_host_activity"
+            | "get_user_activity"
             | "get_grafana_alerts"
             | "get_grafana_annotations"
             | "search_grafana_dashboards"
