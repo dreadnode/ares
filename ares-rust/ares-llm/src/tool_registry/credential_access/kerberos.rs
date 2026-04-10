@@ -34,7 +34,7 @@ pub fn definitions() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: "asrep_roast".into(),
-            description: "Find accounts that do not require Kerberos pre-authentication and extract AS-REP hashes for offline cracking. Targets accounts with DONT_REQUIRE_PREAUTH set.".into(),
+            description: "Find accounts that do not require Kerberos pre-authentication and extract AS-REP hashes for offline cracking. Works WITHOUT credentials: uses a built-in wordlist to test usernames. Can also work WITH credentials for LDAP-based enumeration.".into(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -42,25 +42,29 @@ pub fn definitions() -> Vec<ToolDefinition> {
                         "type": "string",
                         "description": "Target Active Directory domain (e.g. contoso.local)"
                     },
-                    "username": {
-                        "type": "string",
-                        "description": "Domain username for authentication"
-                    },
-                    "password": {
-                        "type": "string",
-                        "description": "Password for authentication"
-                    },
                     "dc_ip": {
                         "type": "string",
                         "description": "Domain controller IP address"
+                    },
+                    "username": {
+                        "type": "string",
+                        "description": "Optional: domain username for authenticated LDAP enumeration"
+                    },
+                    "password": {
+                        "type": "string",
+                        "description": "Optional: password for authenticated mode"
+                    },
+                    "users_file": {
+                        "type": "string",
+                        "description": "Optional: path to username wordlist for unauthenticated mode. If omitted, a built-in wordlist is used."
                     }
                 },
-                "required": ["domain", "username", "password", "dc_ip"]
+                "required": ["domain", "dc_ip"]
             }),
         },
         ToolDefinition {
             name: "kerberos_user_enum_noauth".into(),
-            description: "Enumerate valid Kerberos usernames without requiring domain credentials. Sends AS-REQ messages to identify valid accounts by response codes.".into(),
+            description: "Enumerate valid Kerberos usernames without credentials. Sends AS-REQ messages to identify valid accounts by response codes. Uses a built-in wordlist of common AD usernames if no users_file is provided.".into(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -74,7 +78,7 @@ pub fn definitions() -> Vec<ToolDefinition> {
                     },
                     "users_file": {
                         "type": "string",
-                        "description": "Path to file containing usernames to test (one per line)"
+                        "description": "Optional: path to username wordlist. If omitted, a built-in wordlist of common AD and service account names is used."
                     }
                 },
                 "required": ["domain", "dc_ip"]

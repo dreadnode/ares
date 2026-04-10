@@ -307,7 +307,7 @@ tasks:
         if [ -n "{{.OPERATION_ID}}" ]; then
           OP_ID_ARG="{{.OPERATION_ID}}"
         fi
-        kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-orchestrator -- ares-cli ops loot $OP_ID_ARG $LATEST_FLAG {{if ne .WATCH "0"}}--watch {{.WATCH}}{{end}} {{if eq .DIFF "true"}}--diff{{end}}
+        kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-orchestrator -- env RUST_LOG=error ares-cli ops loot $OP_ID_ARG $LATEST_FLAG {{if ne .WATCH "0"}}--watch {{.WATCH}}{{end}} {{if eq .DIFF "true"}}--diff{{end}}
 
   multi:status:
     desc: "Check multi-agent operation status (usage: task red:multi:status [OPERATION_ID=op-xxx] [LATEST=true])"
@@ -328,7 +328,7 @@ tasks:
         if [ -n "{{.OPERATION_ID}}" ]; then
           OP_ID_ARG="{{.OPERATION_ID}}"
         fi
-        kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-orchestrator -- ares-cli ops status $OP_ID_ARG $LATEST_FLAG
+        kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-orchestrator -- env RUST_LOG=error ares-cli ops status $OP_ID_ARG $LATEST_FLAG
 
   multi:tasks:list:
     desc: "List tasks for an operation (usage: task red:multi:tasks:list [OPERATION_ID=op-xxx] [LATEST=true] [ROLE=lateral] [STATUS=pending|in_progress|running|completed|failed|all])"
@@ -358,7 +358,7 @@ tasks:
         if [ -n "{{.ROLE}}" ]; then
           ROLE_ARG="--role {{.ROLE}}"
         fi
-        kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-orchestrator -- ares-cli ops tasks $OP_ID_ARG $LATEST_FLAG --status {{.STATUS}} $ROLE_ARG
+        kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-orchestrator -- env RUST_LOG=error ares-cli ops tasks $OP_ID_ARG $LATEST_FLAG --status {{.STATUS}} $ROLE_ARG
 
   multi:runtime:
     desc: "Show runtime for an operation (usage: task red:multi:runtime [OPERATION_ID=op-xxx] [LATEST=true])"
@@ -371,6 +371,7 @@ tasks:
         msg: "Either OPERATION_ID or LATEST=true is required"
     cmds:
       - |
+        set -euo pipefail
         LATEST_FLAG=""
         if [ "{{.LATEST}}" = "true" ]; then
           LATEST_FLAG="--latest"
@@ -379,7 +380,40 @@ tasks:
         if [ -n "{{.OPERATION_ID}}" ]; then
           OP_ID_ARG="{{.OPERATION_ID}}"
         fi
-        kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-orchestrator -- ares-cli ops runtime $OP_ID_ARG $LATEST_FLAG
+        if kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-orchestrator -- env RUST_LOG=error ares-cli ops runtime $OP_ID_ARG $LATEST_FLAG; then
+          exit 0
+        fi
+
+        if [ "{{.LATEST}}" != "true" ] || [ -n "{{.OPERATION_ID}}" ]; then
+          exit 1
+        fi
+
+        REDIS_PASS=$(kubectl get secret redis-secret -n {{.K8S_NAMESPACE}} -o jsonpath='{.data.password}' 2>/dev/null | base64 -d || echo "")
+        REDIS_ENV=()
+        if [ -n "$REDIS_PASS" ]; then
+          REDIS_ENV=(env REDISCLI_AUTH="$REDIS_PASS")
+        fi
+
+        REDIS_POD=$(kubectl get pods -n {{.K8S_NAMESPACE}} -l app=redis -o name 2>/dev/null | head -1)
+        if [ -z "$REDIS_POD" ]; then
+          echo "No Redis pod found in namespace {{.K8S_NAMESPACE}}"
+          exit 1
+        fi
+
+        LATEST_REQUEST=$(kubectl exec -n {{.K8S_NAMESPACE}} $REDIS_POD -- "${REDIS_ENV[@]}" redis-cli lindex ares:operations -1 2>/dev/null || true)
+        if [ -z "$LATEST_REQUEST" ]; then
+          echo "No started operations found, and the queue is empty."
+          exit 1
+        fi
+
+        QUEUED_OP_ID=$(printf '%s\n' "$LATEST_REQUEST" | sed -n 's/.*"operation_id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
+        if [ -n "$QUEUED_OP_ID" ]; then
+          echo "Latest operation is queued but has not started yet: $QUEUED_OP_ID"
+          echo "Use: task red:multi:status OPERATION_ID=$QUEUED_OP_ID"
+        else
+          echo "Latest operation is queued but has not started yet."
+        fi
+        exit 0
 
   multi:report:
     desc: "Generate markdown report for an operation (usage: task red:multi:report [OPERATION_ID=op-xxx] [LATEST=true] [REGENERATE=true])"
@@ -409,11 +443,11 @@ tasks:
           REGEN_FLAG="--regenerate"
         fi
         # Generate report via CLI (outputs to pod's /tmp, we retrieve from Redis)
-        kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-orchestrator -- ares-cli ops report $OP_ID_ARG $LATEST_FLAG $REGEN_FLAG --output-dir /tmp/reports
+        kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-orchestrator -- env RUST_LOG=error ares-cli ops report $OP_ID_ARG $LATEST_FLAG $REGEN_FLAG --output-dir /tmp/reports
 
         # Get the operation ID if we used --latest
         if [ -n "$LATEST_FLAG" ]; then
-          RESOLVED_OP_ID=$(kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-orchestrator -- ares-cli ops list --latest 2>/dev/null | tr -d '\n')
+          RESOLVED_OP_ID=$(kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-orchestrator -- env RUST_LOG=error ares-cli ops list --latest 2>/dev/null | tr -d '\n')
         else
           RESOLVED_OP_ID="{{.OPERATION_ID}}"
         fi
@@ -518,7 +552,7 @@ tasks:
     desc: "List multi-agent operations and their state"
     silent: true
     cmds:
-      - kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-orchestrator -- ares-cli ops queue
+      - kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-orchestrator -- env RUST_LOG=error ares-cli ops queue
 
   multi:cleanup:
     desc: "Clean up old multi-agent operation checkpoints (usage: task red:multi:cleanup [MAX_AGE_HOURS=24])"
@@ -526,7 +560,7 @@ tasks:
     vars:
       MAX_AGE_HOURS: '{{.MAX_AGE_HOURS | default "24"}}'
     cmds:
-      - kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-orchestrator -- ares-cli ops cleanup --max-age-hours {{.MAX_AGE_HOURS}}
+      - kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-orchestrator -- env RUST_LOG=error ares-cli ops cleanup --max-age-hours {{.MAX_AGE_HOURS}}
 
   multi:delete:
     desc: "Delete a specific operation and all its data (usage: task red:multi:delete OPERATION_ID=op-xxx)"
@@ -537,7 +571,7 @@ tasks:
       - sh: test -n "{{.OPERATION_ID}}"
         msg: "OPERATION_ID variable is required"
     cmds:
-      - kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-orchestrator -- ares-cli ops delete "{{.OPERATION_ID}}" --force
+      - kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-orchestrator -- env RUST_LOG=error ares-cli ops delete "{{.OPERATION_ID}}" --force
 
   multi:kill:
     desc: "Kill running operations and restart workers to stop token burn (usage: task red:multi:kill [OPERATION_ID=op-xxx] [KEEP_LATEST=true])"
@@ -553,11 +587,11 @@ tasks:
         if [ -n "{{.OPERATION_ID}}" ]; then
           # Kill specific operation
           echo "Killing operation: {{.OPERATION_ID}}"
-          kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-orchestrator -- ares-cli ops delete "{{.OPERATION_ID}}" --force
+          kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-orchestrator -- env RUST_LOG=error ares-cli ops delete "{{.OPERATION_ID}}" --force
           KILLED_ANY=true
         else
           # Get all running operations
-          RUNNING_OPS=$(kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-orchestrator -- ares-cli ops queue 2>/dev/null | grep '\[running\]' | awk '{print $1}' || true)
+          RUNNING_OPS=$(kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-orchestrator -- env RUST_LOG=error ares-cli ops queue 2>/dev/null | grep '\[running\]' | awk '{print $1}' || true)
           if [ -z "$RUNNING_OPS" ]; then
             echo "No running operations found"
             if [ "{{.KEEP_LATEST}}" = "false" ]; then
@@ -579,14 +613,14 @@ tasks:
             echo "Keeping latest: $LATEST"
             for op in $TO_KILL; do
               echo "Killing: $op"
-              kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-orchestrator -- ares-cli ops delete "$op" --force
+              kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-orchestrator -- env RUST_LOG=error ares-cli ops delete "$op" --force
               KILLED_ANY=true
             done
           elif [ "{{.KEEP_LATEST}}" = "false" ]; then
             # Kill all running
             for op in $RUNNING_OPS; do
               echo "Killing: $op"
-              kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-orchestrator -- ares-cli ops delete "$op" --force
+              kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-orchestrator -- env RUST_LOG=error ares-cli ops delete "$op" --force
               KILLED_ANY=true
             done
           else
@@ -618,7 +652,7 @@ tasks:
       - sh: test -n "{{.OPERATION_ID}}"
         msg: "OPERATION_ID variable is required"
     cmds:
-      - kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-orchestrator -- ares-cli ops backfill-domains "{{.OPERATION_ID}}"
+      - kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-orchestrator -- env RUST_LOG=error ares-cli ops backfill-domains "{{.OPERATION_ID}}"
 
   multi:inject-credential:
     desc: "Inject a credential into operation shared state (usage: task red:multi:inject-credential OPERATION_ID=op-xxx USERNAME=testuser PASSWORD=secret [DOMAIN=contoso.local])"
@@ -1284,15 +1318,18 @@ tasks:
       # 2. Clear Redis (no longer rescales orchestrator)
       - cmd: echo "=== CLEARING REDIS CACHE ==="
       - task: multi:redis:clear
-      # 3. Rollout pods (fresh containers)
+      # 3. Patch orchestrator wrapper to use ares-cli instead of redis-cli
+      - cmd: echo "=== PATCHING ORCHESTRATOR WRAPPER ==="
+      - task: :remote:orchestrator:patch-wrapper
+      # 4. Rollout pods (fresh containers)
       - cmd: echo "=== ROLLING OUT (team={{.TEAM}}) ==="
       - task: :remote:rollout
         vars: { NAMESPACE: "{{.K8S_NAMESPACE}}", TEAM: "{{.TEAM}}" }
-      # 4. Deploy binaries to the NEW pods (after rollout)
+      # 5. Deploy binaries to the NEW pods (after rollout)
       - cmd: echo "=== DEPLOYING RUST BINARIES (team={{.TEAM}}) ==="
       - task: :remote:rust:deploy
         vars: { TEAM: "{{.TEAM}}" }
-      # 5. Sync config to the NEW pods (after rollout)
+      # 6. Sync config to the NEW pods (after rollout)
       - cmd: echo "=== SYNCING CONFIG ==="
       - task: multi:sync:config
 

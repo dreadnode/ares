@@ -112,47 +112,7 @@ pub fn definitions() -> Vec<ToolDefinition> {
                 "required": ["domain", "username", "password", "dc_ip"]
             }),
         },
-        ToolDefinition {
-            name: "addspn".into(),
-            description: "Add or remove a Service Principal Name (SPN) on a domain account. \
-                Useful for targeted Kerberoasting or setting up delegation attacks."
-                .into(),
-            input_schema: json!({
-                "type": "object",
-                "properties": {
-                    "target_account": {
-                        "type": "string",
-                        "description": "Target account to modify the SPN on"
-                    },
-                    "spn": {
-                        "type": "string",
-                        "description": "SPN value to add or remove (e.g. 'http/web01.contoso.local')"
-                    },
-                    "domain": {
-                        "type": "string",
-                        "description": "Target domain (e.g. contoso.local)"
-                    },
-                    "username": {
-                        "type": "string",
-                        "description": "Username for authentication"
-                    },
-                    "password": {
-                        "type": "string",
-                        "description": "Password for authentication"
-                    },
-                    "dc_ip": {
-                        "type": "string",
-                        "description": "Domain controller IP address"
-                    },
-                    "action": {
-                        "type": "string",
-                        "description": "Action to perform: 'add' or 'remove'. Defaults to add.",
-                        "default": "add"
-                    }
-                },
-                "required": ["target_account", "spn", "domain", "username", "password", "dc_ip"]
-            }),
-        },
+        // NOTE: addspn removed — bloodyAD not in privesc container (ACL role only).
         ToolDefinition {
             name: "rbcd_write".into(),
             description: "Write the msDS-AllowedToActOnBehalfOfOtherIdentity attribute on a \
@@ -190,39 +150,6 @@ pub fn definitions() -> Vec<ToolDefinition> {
                 "required": ["target_computer", "attacker_sid", "domain", "username", "password", "dc_ip"]
             }),
         },
-        ToolDefinition {
-            name: "krbrelayup".into(),
-            description: "Execute KrbRelayUp attack for local privilege escalation on a \
-                domain-joined machine by relaying Kerberos authentication to LDAP and \
-                abusing RBCD or Shadow Credentials."
-                .into(),
-            input_schema: json!({
-                "type": "object",
-                "properties": {
-                    "domain": {
-                        "type": "string",
-                        "description": "Target domain (e.g. contoso.local)"
-                    },
-                    "dc_ip": {
-                        "type": "string",
-                        "description": "Domain controller IP address"
-                    },
-                    "method": {
-                        "type": "string",
-                        "description": "Attack method: 'rbcd' or 'shadowcred'. Defaults to rbcd.",
-                        "default": "rbcd"
-                    },
-                    "create_user": {
-                        "type": "string",
-                        "description": "Username for the new computer account to create"
-                    },
-                    "create_password": {
-                        "type": "string",
-                        "description": "Password for the new computer account"
-                    }
-                },
-                "required": ["domain", "dc_ip"]
-            }),
-        },
+        // NOTE: krbrelayup removed — KrbRelayUp binary not in privesc container.
     ]
 }

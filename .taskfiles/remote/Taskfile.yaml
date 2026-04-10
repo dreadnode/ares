@@ -869,9 +869,24 @@ tasks:
     silent: true
     vars:
       RUST_TARGET: '{{.RUST_TARGET | default "x86_64-unknown-linux-gnu"}}'
+      MAX_OPEN_FILES: '{{.MAX_OPEN_FILES | default "8192"}}'
+      CARGO_BUILD_JOBS: '{{.CARGO_BUILD_JOBS | default "4"}}'
     cmds:
       - |
+        bash <<'EOF'
+        set -euo pipefail
+
         echo -e "{{.INFO}} Cross-compiling for {{.RUST_TARGET}}..."
+
+        BEFORE_ULIMIT=$(ulimit -n)
+        if ulimit -n {{.MAX_OPEN_FILES}} 2>/dev/null; then
+          echo -e "{{.INFO}} maxfiles: $BEFORE_ULIMIT -> $(ulimit -n)"
+        else
+          echo -e "{{.WARN}} Could not raise maxfiles (current: $BEFORE_ULIMIT)"
+        fi
+
+        export CARGO_BUILD_JOBS="{{.CARGO_BUILD_JOBS}}"
+        echo -e "{{.INFO}} cargo build jobs: $CARGO_BUILD_JOBS"
 
         # Cross-compile: prefer cargo-zigbuild (works on Apple Silicon),
         # fall back to cross, then raw cargo
@@ -889,6 +904,21 @@ tasks:
         ls -lh ares-rust/target/{{.RUST_TARGET}}/release/ares-cli \
                ares-rust/target/{{.RUST_TARGET}}/release/ares-orchestrator \
                ares-rust/target/{{.RUST_TARGET}}/release/ares-worker 2>/dev/null || true
+        EOF
+
+  orchestrator:patch-wrapper:
+    desc: "Patch the red orchestrator deployment wrapper to use ares-cli instead of redis-cli"
+    silent: true
+    cmds:
+      - |
+        set -euo pipefail
+
+        echo -e "{{.INFO}} Patching ares-orchestrator deployment wrapper..."
+        kubectl patch deployment ares-orchestrator \
+          -n {{.K8S_NAMESPACE}} \
+          --type='json' \
+          --patch-file .taskfiles/remote/orchestrator-wrapper-patch.json >/dev/null
+        echo -e "{{.SUCCESS}} ares-orchestrator wrapper patched"
 
   rust:deploy:
     desc: "Deploy Rust binaries to K8s pods (usage: task remote:rust:deploy [TEAM=red|blue|all])"

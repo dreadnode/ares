@@ -174,51 +174,6 @@ pub fn definitions() -> Vec<ToolDefinition> {
                 "required": ["domain", "username", "password"]
             }),
         },
-        ToolDefinition {
-            name: "dnstool".into(),
-            description: "Add, modify, or delete DNS records in Active Directory Integrated \
-                DNS. Useful for injecting records to redirect traffic or support relay attacks."
-                .into(),
-            input_schema: json!({
-                "type": "object",
-                "properties": {
-                    "dc_ip": {
-                        "type": "string",
-                        "description": "Domain controller IP address"
-                    },
-                    "domain": {
-                        "type": "string",
-                        "description": "Target domain (e.g. contoso.local)"
-                    },
-                    "username": {
-                        "type": "string",
-                        "description": "Username for authentication"
-                    },
-                    "password": {
-                        "type": "string",
-                        "description": "Password for authentication"
-                    },
-                    "record_name": {
-                        "type": "string",
-                        "description": "DNS record name to create/modify/delete"
-                    },
-                    "record_data": {
-                        "type": "string",
-                        "description": "DNS record data (e.g. IP address for A record)"
-                    },
-                    "record_type": {
-                        "type": "string",
-                        "description": "DNS record type. Defaults to A.",
-                        "default": "A"
-                    },
-                    "action": {
-                        "type": "string",
-                        "description": "Action to perform: 'add', 'modify', or 'delete'. Defaults to add.",
-                        "default": "add"
-                    }
-                },
-                "required": ["dc_ip", "domain", "username", "password", "record_name", "record_data"]
-            }),
-        },
+        // NOTE: dnstool removed — dnstool.py not in privesc container.
     ]
 }

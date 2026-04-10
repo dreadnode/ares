@@ -10,8 +10,8 @@ use tracing::{info, warn};
 
 /// Tools needed by each worker role.
 ///
-/// Shared tools (netexec, impacket-*, ldapsearch) are listed under
-/// every role that uses them.
+/// Only lists tools that are actually installed in each role's container
+/// image. Tools are checked via `which` at startup.
 fn tools_for_role(role: &str) -> &'static [&'static str] {
     match role {
         "recon" => &[
@@ -22,17 +22,14 @@ fn tools_for_role(role: &str) -> &'static [&'static str] {
             "rpcclient",
             "dig",
             "adidnsdump",
-            "xfreerdp",
             "impacket-lookupsid",
         ],
         "credential_access" => &[
-            "netexec",
             "impacket-GetUserSPNs",
             "impacket-GetNPUsers",
             "impacket-secretsdump",
             "impacket-lookupsid",
             "lsassy",
-            "ldapsearch",
         ],
         "cracker" => &["hashcat", "john"],
         "lateral" => &[
@@ -45,23 +42,27 @@ fn tools_for_role(role: &str) -> &'static [&'static str] {
             "evil-winrm",
             "sshpass",
             "xfreerdp",
-            "netexec",
             "pth-winexe",
             "pth-smbclient",
             "pth-rpcclient",
         ],
         "privesc" => &[
             "certipy",
-            "bloodyAD",
             "impacket-findDelegation",
             "impacket-addcomputer",
             "impacket-rbcd",
             "impacket-getST",
             "impacket-ticketer",
             "impacket-secretsdump",
-            "netexec",
+            "impacket-lookupsid",
+            "lsassy",
         ],
-        "acl" => &["bloodyAD", "dacledit.py", "impacket-secretsdump", "netexec"],
+        "acl" => &[
+            "bloodyAD",
+            "dacledit.py",
+            "impacket-secretsdump",
+            "impacket-dacledit",
+        ],
         "coercion" => &["responder", "impacket-ntlmrelayx", "coercer", "mitm6"],
         // ToolExec workers may handle any role's tools
         _ => &[],

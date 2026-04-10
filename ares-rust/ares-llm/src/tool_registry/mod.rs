@@ -65,6 +65,13 @@ pub const CALLBACK_TOOLS: &[&str] = &[
     "report_lateral_success",
     "report_lateral_failed",
     "complete_operation",
+    // Reporting tools (handled in-process, not dispatched to workers)
+    "record_credential",
+    "record_weakness",
+    "record_compromised_host",
+    "record_timeline_event",
+    "list_credentials",
+    "list_weaknesses",
     // Orchestrator query tools (handled by OrchestratorCallbackHandler)
     "get_credential_summary",
     "get_hash_summary",
@@ -246,6 +253,13 @@ mod tests {
         assert!(is_callback_tool("report_cracked_credential"));
         assert!(is_callback_tool("report_lateral_success"));
         assert!(is_callback_tool("complete_operation"));
+        // Reporting tools are callbacks (not dispatched to workers)
+        assert!(is_callback_tool("record_credential"));
+        assert!(is_callback_tool("record_weakness"));
+        assert!(is_callback_tool("record_compromised_host"));
+        assert!(is_callback_tool("record_timeline_event"));
+        assert!(is_callback_tool("list_credentials"));
+        assert!(is_callback_tool("list_weaknesses"));
         assert!(!is_callback_tool("nmap_scan"));
         assert!(!is_callback_tool("secretsdump"));
     }
@@ -386,7 +400,9 @@ mod tests {
         assert!(names.contains(&"secretsdump"));
         assert!(names.contains(&"kerberoast"));
         assert!(names.contains(&"lsassy"));
-        assert!(names.contains(&"password_spray"));
+        assert!(names.contains(&"ntds_dit_extract"));
+        // NOTE: password_spray, domain_admin_checker, etc. removed — require
+        // netexec which is not in the credential_access container image.
     }
 
     #[test]

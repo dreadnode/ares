@@ -156,8 +156,11 @@ pub fn parse_tool_output(tool_name: &str, output: &str, params: &Value) -> Value
 }
 
 /// Merge discoveries from multiple tool outputs.
+///
+/// Deduplicates hosts by IP, keeping the entry with the most services
+/// and preferring entries with `is_dc: true`.
 pub fn merge_discoveries(all: &[Value]) -> Value {
-    let mut hosts = Vec::new();
+    let mut host_map: std::collections::HashMap<String, Value> = std::collections::HashMap::new();
     let mut credentials = Vec::new();
     let mut hashes = Vec::new();
     let mut vulnerabilities = Vec::new();
@@ -165,7 +168,39 @@ pub fn merge_discoveries(all: &[Value]) -> Value {
 
     for disc in all {
         if let Some(h) = disc.get("hosts").and_then(|v| v.as_array()) {
-            hosts.extend(h.iter().cloned());
+            for host in h {
+                let ip = host.get("ip").and_then(|v| v.as_str()).unwrap_or("");
+                if ip.is_empty() {
+                    continue;
+                }
+                match host_map.entry(ip.to_string()) {
+                    std::collections::hash_map::Entry::Vacant(e) => {
+                        e.insert(host.clone());
+                    }
+                    std::collections::hash_map::Entry::Occupied(mut e) => {
+                        let existing = e.get();
+                        let existing_services = existing
+                            .get("services")
+                            .and_then(|v| v.as_array())
+                            .map_or(0, |a| a.len());
+                        let new_services = host
+                            .get("services")
+                            .and_then(|v| v.as_array())
+                            .map_or(0, |a| a.len());
+                        let existing_is_dc = existing
+                            .get("is_dc")
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(false);
+                        let new_is_dc =
+                            host.get("is_dc").and_then(|v| v.as_bool()).unwrap_or(false);
+
+                        // Replace if new entry has DC status or more services
+                        if (new_is_dc && !existing_is_dc) || new_services > existing_services {
+                            e.insert(host.clone());
+                        }
+                    }
+                }
+            }
         }
         if let Some(c) = disc.get("credentials").and_then(|v| v.as_array()) {
             credentials.extend(c.iter().cloned());
@@ -182,7 +217,8 @@ pub fn merge_discoveries(all: &[Value]) -> Value {
     }
 
     let mut merged = json!({});
-    if !hosts.is_empty() {
+    if !host_map.is_empty() {
+        let hosts: Vec<Value> = host_map.into_values().collect();
         merged["hosts"] = Value::Array(hosts);
     }
     if !credentials.is_empty() {
@@ -426,6 +462,26 @@ SMB  192.168.58.121  445  DC01  bob         2026-03-25 23:21:09 0  Bob"#;
         assert_eq!(merged["hosts"].as_array().unwrap().len(), 2);
         assert_eq!(merged["credentials"].as_array().unwrap().len(), 1);
         assert_eq!(merged["hashes"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn test_merge_discoveries_dedup_hosts_by_ip() {
+        let d1 = json!({
+            "hosts": [
+                {"ip": "192.168.58.10", "is_dc": false, "services": ["445/tcp"]},
+            ],
+        });
+        let d2 = json!({
+            "hosts": [
+                {"ip": "192.168.58.10", "is_dc": true, "hostname": "dc01.contoso.local",
+                 "services": ["88/tcp", "389/tcp", "445/tcp"]},
+            ],
+        });
+        let merged = merge_discoveries(&[d1, d2]);
+        let hosts = merged["hosts"].as_array().unwrap();
+        assert_eq!(hosts.len(), 1, "Should dedup by IP");
+        assert!(hosts[0]["is_dc"].as_bool().unwrap(), "Should keep DC entry");
+        assert_eq!(hosts[0]["services"].as_array().unwrap().len(), 3);
     }
 
     #[test]

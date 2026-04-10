@@ -262,6 +262,64 @@ fn handle_builtin_callback(call: &ToolCall) -> Result<CallbackResult> {
                 result: summary,
             })
         }
+        // Reporting tools — handled in-process so they don't get dispatched to workers
+        "record_credential" => {
+            let username = call.arguments["username"]
+                .as_str()
+                .unwrap_or("")
+                .to_string();
+            let domain = call.arguments["domain"].as_str().unwrap_or("").to_string();
+            let source = call.arguments["source"].as_str().unwrap_or("").to_string();
+            info!(username = %username, domain = %domain, source = %source, "Credential recorded via callback");
+            Ok(CallbackResult::Continue(format!(
+                "Credential recorded: {username}@{domain} (source: {source})"
+            )))
+        }
+        "record_weakness" => {
+            let title = call.arguments["title"].as_str().unwrap_or("").to_string();
+            let affected = call.arguments["affected_resource"]
+                .as_str()
+                .unwrap_or("")
+                .to_string();
+            info!(title = %title, affected = %affected, "Weakness recorded via callback");
+            Ok(CallbackResult::Continue(format!(
+                "Weakness recorded: {title} ({affected})"
+            )))
+        }
+        "record_compromised_host" => {
+            let ip = call.arguments["ip"].as_str().unwrap_or("").to_string();
+            let hostname = call.arguments["hostname"]
+                .as_str()
+                .unwrap_or("")
+                .to_string();
+            let access = call.arguments["access_level"]
+                .as_str()
+                .unwrap_or("")
+                .to_string();
+            info!(ip = %ip, hostname = %hostname, access = %access, "Compromised host recorded");
+            Ok(CallbackResult::Continue(format!(
+                "Compromised host recorded: {ip} ({hostname}) — {access}"
+            )))
+        }
+        "record_timeline_event" => {
+            let desc = call.arguments["description"]
+                .as_str()
+                .unwrap_or("")
+                .to_string();
+            info!("Timeline event recorded: {desc}");
+            Ok(CallbackResult::Continue(format!(
+                "Timeline event recorded: {desc}"
+            )))
+        }
+        "list_credentials" => {
+            // Minimal response — real data comes from OrchestratorCallbackHandler
+            Ok(CallbackResult::Continue(
+                "Use get_all_credentials for full credential listing.".to_string(),
+            ))
+        }
+        "list_weaknesses" => Ok(CallbackResult::Continue(
+            "Weaknesses listing is available via the orchestrator.".to_string(),
+        )),
         // Orchestrator-only tools — these require a custom CallbackHandler
         // (OrchestratorCallbackHandler) to provide meaningful state. When called
         // without one (e.g., by a worker), return a generic message.
