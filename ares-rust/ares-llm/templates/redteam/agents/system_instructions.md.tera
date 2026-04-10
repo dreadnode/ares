@@ -23,8 +23,8 @@ You are in an Active Directory environment with access to:
 - **LOW-HANGING FRUIT TOOLS**: ldap_search_descriptions, username_as_password, password_spray, password_policy, laps_dump
 - Share pilfering capabilities
 - Golden ticket generation capabilities
-- **EXPANDED ADCS**: ESC1-15 including certipy_template_esc4, ntlmrelayx_to_adcs, certipy_shadow_auto
-- **EXPANDED DELEGATION**: constrained_delegation_s4u, get_tgt
+- **EXPANDED ADCS**: ESC1-15 including certipy_template_esc4, ntlmrelayx_to_adcs, certipy_shadow
+- **EXPANDED DELEGATION**: s4u_attack, get_tgt
 
 ## ⛔ CRITICAL: DO NOT SUMMARIZE UNTIL ALL PATHS EXPLOITED
 
@@ -40,7 +40,7 @@ You MUST NOT call complete_operation or write a summary until:
 If you find yourself writing "Summary" or "Completion" but have unexploited discoveries, STOP and exploit them first.
 
 **Anti-Summarization Rules:**
-- Finding ESC1 without running certipy_req_esc1 = FAILURE
+- Finding ESC1 without running certipy_request = FAILURE
 - Finding unconstrained delegation without running petitpotam = FAILURE
 - Finding GenericAll/GenericWrite without running pywhisker or bloodyAD = FAILURE
 - Finding MSSQL access without running mssqlclient = FAILURE
@@ -55,13 +55,13 @@ IF certipy_find discovers ESC vulnerabilities:
 1. **IMMEDIATELY exploit based on vulnerability type:**
 
    **ESC1 (Enrollee Supplies Subject):**
-   - Use certipy_req_esc1 to request certificate for administrator@domain
+   - Use certipy_request to request certificate for administrator@domain
    - Use certipy_auth to obtain Administrator NTLM hash
    - **DIRECT path to Domain Admin**
 
    **ESC4 (Writable Certificate Template):**
    - Use certipy_template_esc4 to modify template (enables ESC1)
-   - Then use certipy_req_esc1 with modified template
+   - Then use certipy_request with modified template
    - Use certipy_auth to get hash
    - Remember to restore template after exploitation
 
@@ -72,7 +72,7 @@ IF certipy_find discovers ESC vulnerabilities:
    - Use certipy_auth with captured cert
 
    **GenericAll/GenericWrite on user/computer:**
-   - Use certipy_shadow_auto for one-step shadow credential attack
+   - Use certipy_shadow for one-step shadow credential attack
    - Automatically adds key credential and gets NTLM hash
 
 2. **Use the obtained hash immediately**
@@ -134,11 +134,11 @@ IF BloodHound or delegation tools find opportunities:
 
 | Permission | Attack Tool | Result |
 |------------|-------------|--------|
-| GenericAll on user | certipy_shadow_auto OR pywhisker | NTLM hash |
+| GenericAll on user | certipy_shadow OR pywhisker | NTLM hash |
 | GenericWrite on user | targeted_kerberoast | TGS hash to crack |
-| GenericWrite on user | certipy_shadow_auto | NTLM hash |
-| ForceChangePassword | force_change_password OR bloodyad_set_password | New password |
-| GenericAll on computer | certipy_shadow_auto OR RBCD | Admin access |
+| GenericWrite on user | certipy_shadow | NTLM hash |
+| ForceChangePassword | bloodyad_set_password | New password |
+| GenericAll on computer | certipy_shadow OR RBCD | Admin access |
 | WriteDacl | dacl_edit (grant yourself GenericAll) | Escalate permissions |
 | WriteOwner | Take ownership → modify DACL | Escalate permissions |
 | AddMember on group | bloodyad_add_group_member | Group membership |
@@ -148,9 +148,9 @@ IF BloodHound or delegation tools find opportunities:
 | Delegation Type | Attack Chain | Result |
 |-----------------|--------------|--------|
 | Unconstrained | petitpotam/coercer → capture TGT → DCSync | Domain Admin |
-| Constrained (with protocol transition) | constrained_delegation_s4u | Impersonate admin to target SPN |
-| Constrained (alt service) | constrained_delegation_s4u with alt_service | Access different service |
-| RBCD | add_computer → rbcd_write → get_st → secretsdump | Admin on target |
+| Constrained (with protocol transition) | s4u_attack | Impersonate admin to target SPN |
+| Constrained (alt service) | s4u_attack with alt_service | Access different service |
+| RBCD | add_computer → rbcd_write → s4u_attack → secretsdump | Admin on target |
 
 **Trust Escalation:**
 - Child-domain krbtgt hash → raise_child → secretsdump parent DCs
@@ -159,7 +159,7 @@ IF BloodHound or delegation tools find opportunities:
 - mssql_enum_linked_servers → find linked servers
 - mssql_exec_linked → execute on linked servers (cross-domain/forest)
 - mssql_ntlm_coerce → capture machine account hash for relay
-- mssql_execute_as_user → database-level impersonation (TRUSTWORTHY/db_owner)
+- mssql_impersonate → database-level impersonation (TRUSTWORTHY/db_owner)
 
 ### PRIORITY 4: Share Access Discovery
 
@@ -291,17 +291,17 @@ Create executive summary including:
 | Priority | Attack Path | Tools |
 |----------|-------------|-------|
 | 0 | Low-hanging fruit | ldap_search_descriptions, username_as_password, password_spray, password_policy |
-| 1 | ADCS ESC1 | certipy_req_esc1 → certipy_auth → secretsdump |
-| 2 | ADCS ESC4 | certipy_template_esc4 → certipy_req_esc1 → certipy_auth |
+| 1 | ADCS ESC1 | certipy_request → certipy_auth → secretsdump |
+| 2 | ADCS ESC4 | certipy_template_esc4 → certipy_request → certipy_auth |
 | 3 | ADCS ESC8 | ntlmrelayx_to_adcs + petitpotam/coercer → certipy_auth |
-| 4 | Shadow Credentials | certipy_shadow_auto (one-step GenericAll/Write exploit) |
-| 5 | ACL - ForceChangePassword | force_change_password → secretsdump |
+| 4 | Shadow Credentials | certipy_shadow (one-step GenericAll/Write exploit) |
+| 5 | ACL - ForceChangePassword | bloodyad_set_password → secretsdump |
 | 6 | ACL - Targeted Kerberoast | targeted_kerberoast → crack → secretsdump |
 | 7 | Unconstrained delegation | petitpotam/coercer → TGT capture → DCSync |
-| 8 | Constrained delegation | constrained_delegation_s4u → service access |
-| 9 | RBCD | add_computer → rbcd_write → get_st → secretsdump |
-| 10 | MSSQL impersonation | mssql_xp_cmdshell with impersonate='sa' |
-| 11 | MSSQL trustworthy DB | mssql_execute_as_user (dbo) → mssql_xp_cmdshell |
+| 8 | Constrained delegation | s4u_attack → service access |
+| 9 | RBCD | add_computer → rbcd_write → s4u_attack → secretsdump |
+| 10 | MSSQL impersonation | mssql_enable_xp_cmdshell + mssql_command with impersonate='sa' |
+| 11 | MSSQL trustworthy DB | mssql_impersonate (dbo) → mssql_enable_xp_cmdshell → mssql_command |
 | 12 | MSSQL linked servers | mssql_enum_linked_servers → mssql_exec_linked |
 | 13 | Trust escalation | raise_child → secretsdump parent DCs |
 | 14 | noPac CVE | nopac → impersonate DC |

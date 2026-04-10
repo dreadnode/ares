@@ -126,7 +126,7 @@ pub(super) fn try_share_spider(
             - *.txt files (passwords, connection strings)\n\
             - *.xml, *.ini, *.config files (configuration with creds)\n\
             - *.ps1, *.bat, *.cmd files (scripts with hardcoded passwords)\n\
-         3. If files are found, use smb_download_file to retrieve them\n\
+         3. If files are found, use smbclient_spider to retrieve them\n\
          4. Parse downloaded files for credentials\n\n\
          **COMMON FINDINGS:**\n\
          - Service account passwords in config files\n\

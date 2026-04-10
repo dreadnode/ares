@@ -26,7 +26,7 @@ Your role is to find and exploit ACL-based attack paths to privileged access.
 2. **ACL Exploitation**
    - Shadow Credentials (pywhisker) - BEST option
    - Targeted Kerberoasting (targeted_kerberoast)
-   - Password reset (force_change_password, bloodyad_set_password)
+   - Password reset (bloodyad_set_password)
    - DACL modification (dacl_edit)
    - Group membership (bloodyad_add_group_member)
 
@@ -53,8 +53,6 @@ When you have these permissions on a user/computer:
 
 3. **Password Change**
    ```
-   force_change_password(target="user", new_password="NewPass123!")
-   OR
    bloodyad_set_password(target="user", new_password="NewPass123!")
    → Use new credentials
    ```
@@ -67,7 +65,7 @@ dacl_edit(target="user", right="GenericAll")
 
 ### ForceChangePassword
 ```
-force_change_password(target="user", new_password="NewPass123!")
+bloodyad_set_password(target="user", new_password="NewPass123!")
 → Use new password immediately
 ```
 
@@ -148,8 +146,7 @@ Report to orchestrator for PRIVESC dispatch:
 |------|----------|
 | pywhisker | Shadow credentials attack |
 | targeted_kerberoast | Set SPN and kerberoast |
-| force_change_password | Reset user password |
-| bloodyad_set_password | Alternative password reset |
+| bloodyad_set_password | Reset user password (ForceChangePassword ACL) |
 | dacl_edit | Modify DACL permissions |
 | bloodyad_add_genericall | Grant GenericAll permission |
 | bloodyad_add_group_member | Add to groups |

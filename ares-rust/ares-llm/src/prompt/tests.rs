@@ -296,7 +296,7 @@ fn test_credaccess_share_spider() {
     assert!(prompt.contains("SHARE SPIDER TASK"));
     assert!(prompt.contains("smbclient_spider"));
     assert!(prompt.contains("*.txt"));
-    assert!(prompt.contains("smb_download_file"));
+    assert!(prompt.contains("smbclient_spider"));
 }
 
 #[test]
@@ -503,7 +503,7 @@ fn test_exploit_adcs_esc1() {
     });
     let prompt = generate_task_prompt("exploit", "t-24", &payload, None).unwrap();
     assert!(prompt.contains("ADCS ADCS_ESC1 EXPLOITATION"));
-    assert!(prompt.contains("certipy_req_esc1"));
+    assert!(prompt.contains("certipy_request"));
     assert!(prompt.contains("certipy_auth"));
     assert!(prompt.contains("VulnTemplate"));
     assert!(!prompt.contains("ntlmrelayx"));
@@ -521,7 +521,7 @@ fn test_exploit_adcs_esc8() {
     assert!(prompt.contains("ADCS ADCS_ESC8 EXPLOITATION"));
     assert!(prompt.contains("ntlmrelayx"));
     assert!(prompt.contains("web enrollment"));
-    assert!(!prompt.contains("certipy_req_esc1"));
+    assert!(!prompt.contains("certipy_request"));
 }
 
 #[test]
