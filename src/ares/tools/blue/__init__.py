@@ -12,7 +12,6 @@ __all__ = [
     "LearningTools",
     "LokiTools",
     "PrometheusTools",
-    "QueryTemplateTools",
     "QuestionEngineTools",
     "SharedInvestigationTools",
     "connect_grafana_mcp",
@@ -29,7 +28,6 @@ _LAZY_IMPORTS: dict[str, tuple[str, str]] = {
     "LearningTools": ("ares.tools.blue.learning", "LearningTools"),
     "LokiTools": ("ares.tools.blue.observability", "LokiTools"),
     "PrometheusTools": ("ares.tools.blue.observability", "PrometheusTools"),
-    "QueryTemplateTools": ("ares.tools.blue.query_templates", "QueryTemplateTools"),
     "SharedInvestigationTools": ("ares.tools.blue.shared_wrappers", "SharedInvestigationTools"),
 }
 

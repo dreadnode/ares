@@ -34,7 +34,6 @@ from ares.core.evidence_validation import (
     reset_evidence_validation,
     store_query_result,
 )
-from ares.core.factories.mcp_utils import parse_mcp_text_content
 from ares.core.models import Evidence, InvestigationState, PyramidLevel
 from ares.core.query_resilience import QueryResilientExecutor, get_resilient_executor
 from ares.core.templates import get_template_loader
@@ -44,7 +43,6 @@ from ares.tools.blue import (
     GrafanaTools,
     InvestigationTools,
     LearningTools,
-    QueryTemplateTools,
     QuestionEngineTools,
 )
 from ares.tools.shared import MITRELookupTools
@@ -1742,68 +1740,17 @@ def create_investigation_agent(
     completion_tools = CompletionTools()
     completion_tools.set_state(state)
 
-    loki_url = grafana_url.rstrip("/")
-    # Extract MCP query_loki_logs function if available (fixes auth issues with direct HTTP)
-    mcp_query_fn = None
-    if grafana_mcp_tools:
-        for tool in grafana_mcp_tools:
-            tool_name = getattr(tool, "name", "") or getattr(tool, "__name__", "")
-            if "query_loki_logs" in tool_name:
-                tool_fn = getattr(tool, "fn", None)
-                if tool_fn is None and callable(tool):
-                    tool_fn = tool
-
-                if tool_fn:
-
-                    async def mcp_loki_wrapper(
-                        datasource_uid: str,
-                        logql: str,
-                        start_time: str,
-                        end_time: str,
-                        limit: int,
-                        _fn=tool_fn,
-                    ):
-                        result = await _fn(
-                            datasourceUid=datasource_uid,
-                            logql=logql,
-                            startRfc3339=start_time,
-                            endRfc3339=end_time,
-                            limit=limit,
-                        )
-                        return parse_mcp_text_content(result)
-
-                    mcp_query_fn = mcp_loki_wrapper
-                    logger.info(
-                        "QueryTemplateTools will use MCP query_loki_logs for authenticated queries"
-                    )
-                break
-
-    # Derive label selector from alert context for scoped queries
-    deployment = state.alert.get("labels", {}).get("deployment", "")
-    default_selector = (
-        f'{{deployment="{deployment}"}}' if deployment else '{job="windows-security"}'
-    )
-    query_template_tools = QueryTemplateTools(
-        loki_url=loki_url, default_label_selector=default_selector, mcp_query_fn=mcp_query_fn
-    )
-
     learning_tools = LearningTools()
 
-    # Pass specific QueryTemplateTools methods instead of the whole toolset
-    # to reduce context window usage (~35 tools → 4 tools).
-    # The dispatcher run_detection_query() internally calls any detect_* method,
-    # preserving dn.log_metric() observability on each detection query.
-    # Note: escalate_investigation is now a method on CompletionTools (completion_tools).
+    # Detection query tools (run_detection_query, list_detection_templates,
+    # get_host_activity, get_user_activity) are now handled by the Rust
+    # tool registry and dispatched through ares-tools/src/blue/detection.rs.
     tools: list = [
         grafana_tools,
         investigation_tools,
         question_tools,
         mitre_tools,
         completion_tools,
-        query_template_tools.run_detection_query,
-        query_template_tools.list_query_templates,
-        query_template_tools.get_host_activity,
-        query_template_tools.get_user_activity,
         learning_tools,
     ]
 

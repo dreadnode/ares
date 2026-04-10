@@ -605,7 +605,7 @@ class InvestigationTools(Toolset):  # type: ignore[misc]
 
         See Also:
             track_host_investigation: Call this when you investigate a suggested host.
-            detect_lateral_movement: Use QueryTemplateTools to detect lateral movement.
+            detect_lateral_movement: Use run_detection_query to detect lateral movement.
         """
         if not self.state:
             return {"error": "No investigation state"}

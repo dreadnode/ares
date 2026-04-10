@@ -68,7 +68,7 @@ def create_blue_agent(
         mitre_client: MITRE ATT&CK client.
         mcp_tools: Optional list of MCP tools from Grafana.
         max_steps: Maximum agent steps.
-        grafana_url: Grafana/Loki URL for QueryTemplateTools.
+        grafana_url: Grafana/Loki URL for observability queries.
         alert: Alert dict for deriving label selectors.
 
     Returns:
@@ -154,7 +154,7 @@ def _build_tools_for_role(
     shared_tools.set_shared_state(dispatcher.shared_state)
     shared_tools.set_mitre_client(mitre_client)
 
-    # Extract MCP query function and build QueryTemplateTools config
+    # Extract MCP query function for authenticated Loki queries
     loki_url = grafana_url.rstrip("/") if grafana_url else "http://localhost:3100"
     mcp_query_fn = _extract_mcp_query_fn(mcp_tools)
     deployment = (alert or {}).get("labels", {}).get("deployment", "")
@@ -225,23 +225,15 @@ def _build_hunter_tools(
     mcp_query_fn: Any = None,
     default_selector: str = '{job="windows-security"}',
 ) -> list:
-    """Build tools for threat hunter: detection queries + MCP + MITRE."""
-    from ares.tools.blue import QueryTemplateTools
+    """Build tools for threat hunter: detection queries + MCP + MITRE.
+
+    Detection query tools (run_detection_query, list_detection_templates,
+    get_host_activity, get_user_activity) are now handled by the Rust
+    tool registry and dispatched through ares-tools/src/blue/detection.rs.
+    """
     from ares.tools.shared import MITRELookupTools
 
     tools: list = [shared_tools]
-
-    # Pass specific QueryTemplateTools methods instead of whole toolset
-    # (39 detect_* methods → 4 selective methods = massive context reduction)
-    query_tools = QueryTemplateTools(
-        loki_url=loki_url,
-        default_label_selector=default_selector,
-        mcp_query_fn=mcp_query_fn,
-    )
-    tools.append(query_tools.run_detection_query)
-    tools.append(query_tools.list_query_templates)
-    tools.append(query_tools.get_host_activity)
-    tools.append(query_tools.get_user_activity)
 
     # MITRE lookup tools
     mitre_tools = MITRELookupTools()
@@ -264,20 +256,13 @@ def _build_lateral_tools(
     mcp_query_fn: Any = None,
     default_selector: str = '{job="windows-security"}',
 ) -> list:
-    """Build tools for lateral analyst: host/user activity + MCP."""
-    from ares.tools.blue import QueryTemplateTools
+    """Build tools for lateral analyst: host/user activity + MCP.
 
+    Detection query tools (run_detection_query, get_host_activity,
+    get_user_activity) are now handled by the Rust tool registry
+    and dispatched through ares-tools/src/blue/detection.rs.
+    """
     tools: list = [shared_tools]
-
-    # Pass specific QueryTemplateTools methods for lateral analysis
-    query_tools = QueryTemplateTools(
-        loki_url=loki_url,
-        default_label_selector=default_selector,
-        mcp_query_fn=mcp_query_fn,
-    )
-    tools.append(query_tools.run_detection_query)
-    tools.append(query_tools.get_host_activity)
-    tools.append(query_tools.get_user_activity)
 
     # Add filtered MCP tools
     if mcp_tools:
@@ -290,8 +275,7 @@ def _build_lateral_tools(
 def _extract_mcp_query_fn(mcp_tools: list | None) -> Any:
     """Extract MCP query_loki_logs function from MCP tools.
 
-    Returns a wrapper function compatible with QueryTemplateTools.mcp_query_fn,
-    or None if no query_loki_logs tool found.
+    Returns a wrapper function, or None if no query_loki_logs tool found.
     """
     if not mcp_tools:
         return None
@@ -322,9 +306,7 @@ def _extract_mcp_query_fn(mcp_tools: list | None) -> Any:
                     )
                     return parse_mcp_text_content(result)
 
-                logger.info(
-                    "QueryTemplateTools will use MCP query_loki_logs for authenticated queries"
-                )
+                logger.info("MCP query_loki_logs available for authenticated queries")
                 return mcp_loki_wrapper
     return None
 

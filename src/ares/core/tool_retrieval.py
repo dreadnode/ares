@@ -88,7 +88,7 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
     # Generic Activity
     "get_host_activity": "Get all activity for a specific host machine computer logs",
     "get_user_activity": "Get all activity for a specific user account login authentication",
-    "list_query_templates": "List all available query templates detection methods MITRE",
+    "list_detection_templates": "List all available detection query templates with MITRE mappings",
 }
 
 # Keyword-based fallback mapping for when embeddings aren't available
@@ -198,7 +198,7 @@ ESSENTIAL_TOOLS = [
     "detect_suspicious_execution",  # Catch-all for malicious activity
     "get_host_activity",  # Generic host investigation
     "get_user_activity",  # Generic user investigation
-    "list_query_templates",  # Discovery
+    "list_detection_templates",  # Discovery
 ]
 
 
