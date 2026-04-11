@@ -52,7 +52,7 @@ async def test_runtime_shows_token_usage_and_cost(capsys):
     )
 
     fake_litellm = SimpleNamespace(
-        cost_per_token=lambda model, _prompt_tokens, _completion_tokens: {
+        cost_per_token=lambda model, **_kwargs: {
             "openai/gpt-4.1-mini": (0.01, 0.02),
             "openai/gpt-5-mini": (0.03, 0.07),
         }[model]
