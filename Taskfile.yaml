@@ -33,6 +33,17 @@ includes:
       TARGET_REGION: '{{.TARGET_REGION}}'
       TARGET: '{{.TARGET}}'
       DOMAIN: '{{.DOMAIN}}'
+      EC2_NAME: '{{.EC2_NAME}}'
+      EC2_PROFILE: '{{.EC2_PROFILE}}'
+      EC2_REGION: '{{.EC2_REGION}}'
+  ec2:
+    taskfile: .taskfiles/ec2/Taskfile.yaml
+    optional: true
+    vars:
+      EC2_NAME: '{{.EC2_NAME}}'
+      EC2_PROFILE: '{{.EC2_PROFILE}}'
+      EC2_REGION: '{{.EC2_REGION}}'
+      ARES_CONFIG: '{{.ARES_CONFIG}}'
   blue:
     taskfile: .taskfiles/blue/Taskfile.yaml
     optional: true
@@ -79,6 +90,10 @@ vars:
   # Red team defaults
   TARGET: '{{.TARGET | default "dreadgoad"}}'
   DOMAIN: '{{.DOMAIN | default "sevenkingdoms.local"}}'
+  # EC2 deployment (alternative to K8s)
+  EC2_NAME: '{{.EC2_NAME | default "ares-tools"}}'
+  EC2_PROFILE: '{{.EC2_PROFILE | default "lab"}}'
+  EC2_REGION: '{{.EC2_REGION | default "us-west-1"}}'
 
 tasks:
   default:
