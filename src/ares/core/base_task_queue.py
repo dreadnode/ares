@@ -19,11 +19,7 @@ from typing import TYPE_CHECKING
 from loguru import logger
 
 from ares.core.config import get_agent_heartbeat_timeout, get_redis_url
-from ares.core.redis_client import (
-    create_redis_client,
-    get_redis_sentinel_config,
-    invalidate_sentinel_client,
-)
+from ares.core.redis_client import create_redis_client
 
 if TYPE_CHECKING:
     from redis.asyncio import Redis
@@ -76,8 +72,7 @@ class BaseTaskQueue(abc.ABC):
         """Connect to Redis.
 
         When called from a non-main thread (e.g., threaded result consumer),
-        uses direct connection to avoid SentinelConnectionPool's cross-loop
-        Future issues.
+        uses direct connection to avoid connection pool's cross-loop issues.
 
         Uses socket_timeout=None to allow blocking operations (BRPOP) to wait
         for extended periods without hitting socket timeout. Timeout control
@@ -87,7 +82,7 @@ class BaseTaskQueue(abc.ABC):
             return
 
         # Use direct connection when in a non-main thread to avoid
-        # SentinelConnectionPool's async state being shared across event loops
+        # connection pool's async state being shared across event loops
         is_main_thread = threading.current_thread() is threading.main_thread()
         direct_connection = not is_main_thread
 
@@ -104,14 +99,7 @@ class BaseTaskQueue(abc.ABC):
             )
             await self._client.ping()
             self._connected = True
-
-            if get_redis_sentinel_config():
-                conn_type = "direct" if direct_connection else "via Sentinel"
-                logger.info(
-                    f"{self.__class__.__name__} connected to Redis {conn_type} (socket_timeout=None)"
-                )
-            else:
-                logger.info(f"{self.__class__.__name__} connected to Redis at {self.redis_url}")
+            logger.info(f"{self.__class__.__name__} connected to Redis at {self.redis_url}")
 
         except Exception as e:
             raise RuntimeError(f"Failed to connect to Redis: {e}") from e
@@ -127,8 +115,7 @@ class BaseTaskQueue(abc.ABC):
         """Ping Redis and reconnect if the connection is stale.
 
         This should be called periodically to detect stale connections caused by
-        Sentinel pod restarts. When a Sentinel pod restarts with a new IP, existing
-        connections may hang indefinitely.
+        pod restarts.
 
         Args:
             timeout: Max seconds to wait for ping response
@@ -145,8 +132,6 @@ class BaseTaskQueue(abc.ABC):
             return True
         except Exception as e:
             logger.warning(f"Redis ping failed ({type(e).__name__}: {e}), forcing reconnection")
-            # Invalidate Sentinel client to force fresh DNS resolution
-            invalidate_sentinel_client()
             self._connected = False
             try:
                 if self._client:
@@ -154,7 +139,6 @@ class BaseTaskQueue(abc.ABC):
             except Exception:
                 pass
             self._client = None
-            # Reconnect with fresh Sentinel IPs
             await self.connect()
             logger.info("Reconnected to Redis after ping failure")
             return False

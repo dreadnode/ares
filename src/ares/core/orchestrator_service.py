@@ -22,7 +22,6 @@ from ares.core.litellm_env import configure_litellm_env
 from ares.core.models import Credential
 from ares.core.orchestrator import run_multi_agent_operation
 from ares.core.recovery import OperationRecoveryManager
-from ares.core.redis_client import invalidate_sentinel_client
 from ares.core.task_queue import RedisTaskQueue
 
 
@@ -411,7 +410,7 @@ class OrchestratorService:
 
         last_successful_poll = time.monotonic()
         # If no successful poll for this many seconds, force reconnect
-        # This handles stale Sentinel connections after pod restarts
+        # This handles stale connections after pod restarts
         stale_connection_threshold = 30.0
 
         while self.running:
@@ -428,7 +427,7 @@ class OrchestratorService:
 
             except asyncio.TimeoutError:
                 # asyncio.wait_for timed out - BLPOP didn't return in time
-                # This could mean the connection is stale (Sentinel pod restarted)
+                # This could mean the connection is stale (pod restarted)
                 # or simply that no tasks are in the queue (normal idle state)
                 elapsed = time.monotonic() - last_successful_poll
                 if elapsed > stale_connection_threshold:
@@ -442,14 +441,14 @@ class OrchestratorService:
                     else:
                         logger.warning(
                             f"No successful Redis poll for {elapsed:.1f}s and ping failed, "
-                            f"forcing reconnection (possible Sentinel pod restart)"
+                            f"forcing reconnection (possible pod restart)"
                         )
                         await self._force_reconnect()
                         last_successful_poll = time.monotonic()
                 continue
             except Exception as e:
                 logger.error(f"Error in service loop: {e}")
-                # On Redis errors, invalidate Sentinel client and reconnect
+                # On Redis errors, reconnect
                 if "ConnectionError" in str(type(e).__name__) or "Redis" in str(type(e).__name__):
                     logger.warning("Redis connection error, forcing reconnection")
                     await self._force_reconnect()
@@ -457,10 +456,7 @@ class OrchestratorService:
                 await asyncio.sleep(5)  # Back off on error
 
     async def _force_reconnect(self) -> None:
-        """Force reconnection to Redis by invalidating cached clients."""
-        # Invalidate the thread-local Sentinel client to force fresh DNS resolution
-        invalidate_sentinel_client()
-
+        """Force reconnection to Redis."""
         # Disconnect and reconnect the task queue
         if self.task_queue:
             try:

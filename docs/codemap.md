@@ -70,7 +70,7 @@ The central framework for both blue and red team operations.
 | `orchestrator_client.py` | Client for communicating with orchestrator |
 | `orchestrator_service.py` | Orchestrator service pod implementation |
 | `query_resilience.py` | Query retry logic and resilience patterns |
-| `redis_client.py` | Redis client wrapper with Sentinel support |
+| `redis_client.py` | Redis client wrapper |
 | `remote.py` | Remote execution on Kubernetes pods |
 | `templates.py` | Jinja2 template loading and rendering |
 | `alert_correlation.py` | Alert clustering for blue team investigations |

@@ -802,7 +802,7 @@ class BlueTeamOrchestrator:
         is persisted even if the orchestrator service crashes before it can
         update the status itself.
 
-        Retries with fresh Redis connections on failure to handle stale Sentinel
+        Retries with fresh Redis connections on failure to handle stale
         connections after pod restarts.
 
         Args:
@@ -814,7 +814,7 @@ class BlueTeamOrchestrator:
         import json
         from datetime import datetime, timezone
 
-        from ares.core.redis_client import create_redis_client, invalidate_sentinel_client
+        from ares.core.redis_client import create_redis_client
 
         status_key = f"ares:blue:inv:{investigation_id}:status"
         now = datetime.now(timezone.utc).isoformat()
@@ -860,8 +860,6 @@ class BlueTeamOrchestrator:
                 )
 
                 if attempt < max_retries - 1:
-                    # Invalidate sentinel and get fresh client for retry
-                    invalidate_sentinel_client()
                     await asyncio.sleep(0.5 * (attempt + 1))  # Backoff: 0.5s, 1s
                     try:
                         client = await create_redis_client()

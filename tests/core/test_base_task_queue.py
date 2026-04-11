@@ -197,16 +197,12 @@ class TestPingOrReconnect:
         new_client = AsyncMock()
         new_client.ping = AsyncMock()
 
-        with (
-            patch("ares.core.base_task_queue.invalidate_sentinel_client") as mock_invalidate,
-            patch("ares.core.base_task_queue.create_redis_client") as mock_create,
-        ):
+        with patch("ares.core.base_task_queue.create_redis_client") as mock_create:
             mock_create.return_value = new_client
 
             result = await queue.ping_or_reconnect()
 
         assert result is False  # Returns False when reconnection was needed
-        mock_invalidate.assert_called_once()
         mock_client.aclose.assert_called_once()
 
     @pytest.mark.asyncio

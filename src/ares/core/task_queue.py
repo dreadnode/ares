@@ -26,7 +26,6 @@ from ares.core.config import (
 )
 from ares.core.redis_client import (
     get_retry_delay,
-    invalidate_sentinel_client,
     is_connection_error,
     timed_redis_write,
 )
@@ -121,7 +120,7 @@ class RedisTaskQueue(BaseTaskQueue):
         """Connect to Redis with circuit breaker protection.
 
         When called from a non-main thread (e.g., threaded result consumer),
-        uses direct connection to avoid SentinelConnectionPool's cross-loop
+        uses direct connection to avoid connection pool's cross-loop
         Future issues.
 
         Uses socket_timeout=None to allow blocking operations (BRPOP) to wait
@@ -530,8 +529,6 @@ class RedisTaskQueue(BaseTaskQueue):
             # Handle connection errors to force reconnection on next call
             if is_connection_error(e):
                 self._handle_connection_error(e)
-                # Force fresh DNS resolution on reconnect (handles Sentinel pod restarts)
-                invalidate_sentinel_client()
             # On pipeline failure, return empty results (caller will retry)
             # Note: Circuit breaker already logged this if it's a connection error
             if not self._circuit or not is_connection_error(e):
@@ -552,7 +549,7 @@ class RedisTaskQueue(BaseTaskQueue):
         Poll for next task (blocking).
 
         Includes automatic retry with exponential backoff on stale connection
-        detection to avoid missed poll cycles when Sentinel pods restart.
+        detection to avoid missed poll cycles when pods restart.
 
         Args:
             role: Worker role to poll for
@@ -592,14 +589,13 @@ class RedisTaskQueue(BaseTaskQueue):
 
             except asyncio.TimeoutError:
                 # asyncio.wait_for timed out but Redis BRPOP didn't return
-                # This indicates a stale connection (e.g., Sentinel pod restarted)
+                # This indicates a stale connection (e.g., pod restarted)
                 logger.warning(
                     f"BRPOP hung for {timeout + 2.0}s on queue {queue_key} - "
                     f"stale connection detected (attempt {attempt + 1}/{max_retries + 1})"
                 )
-                invalidate_sentinel_client()
                 self._handle_connection_error(
-                    TimeoutError("BRPOP hung - possible stale Sentinel connection")
+                    TimeoutError("BRPOP hung - possible stale connection")
                 )
                 last_error = TimeoutError("BRPOP hung after retries")
 

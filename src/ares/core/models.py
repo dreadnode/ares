@@ -1479,7 +1479,7 @@ class SharedRedTeamState:
         """
         import base64
 
-        # Limit artifact size to 10MB (Redis Sentinel provides robust storage)
+        # Limit artifact size to 10MB
         max_size = 10 * 1024 * 1024
         if isinstance(content, str):
             content_bytes = content.encode("utf-8", errors="replace")

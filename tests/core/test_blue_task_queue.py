@@ -256,7 +256,6 @@ class TestBlueTaskQueueConnection:
                 "ares.core.base_task_queue.create_redis_client",
                 return_value=new_mock_client,
             ),
-            patch("ares.core.base_task_queue.invalidate_sentinel_client"),
         ):
             result = await queue.ping_or_reconnect()
 
@@ -667,7 +666,6 @@ class TestBlueTaskQueueErrorHandling:
         connected_queue._client.brpop = slow_brpop
 
         with (
-            patch("ares.core.base_task_queue.invalidate_sentinel_client"),
             patch(
                 "ares.core.base_task_queue.create_redis_client",
                 return_value=connected_queue._client,
@@ -816,7 +814,6 @@ class TestBlueTaskQueueRetryLogic:
         queue_with_reconnect._client.brpop = slow_then_normal
 
         with (
-            patch("ares.core.base_task_queue.invalidate_sentinel_client"),
             patch(
                 "ares.core.base_task_queue.create_redis_client",
                 return_value=queue_with_reconnect._client,

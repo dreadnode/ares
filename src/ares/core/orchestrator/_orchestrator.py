@@ -919,7 +919,6 @@ async def run_multi_agent_operation(
                         "broken pipe",
                         "reset",
                         "refused",
-                        "sentinel",
                     ]
                     if any(kw in error_str.lower() for kw in redis_error_keywords):
                         redis_retry_count += 1
