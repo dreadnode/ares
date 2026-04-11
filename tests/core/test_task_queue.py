@@ -939,6 +939,72 @@ class TestRedisTaskQueueStats:
 
 
 # ============================================================================
+# Token Usage Tests
+# ============================================================================
+
+
+class TestTokenUsage:
+    """Tests for per-model token usage accounting."""
+
+    @pytest.mark.asyncio
+    async def test_increment_token_usage_tracks_per_model_breakdown(
+        self, task_queue, mock_redis_client
+    ):
+        """Token accounting should retain aggregate and per-model counters."""
+        pipeline = MagicMock()
+        pipeline.hincrby = MagicMock(return_value=pipeline)
+        pipeline.hset = MagicMock(return_value=pipeline)
+        pipeline.execute = AsyncMock(return_value=[1, 1, 1, 1, 1])
+        mock_redis_client.pipeline = MagicMock(return_value=pipeline)
+
+        await task_queue.increment_token_usage(
+            operation_id="op-contoso-runtime",
+            input_tokens=150,
+            output_tokens=75,
+            model="openai/gpt-4.1-mini",
+        )
+
+        key = "ares:op:op-contoso-runtime:token_usage"
+        pipeline.hincrby.assert_any_call(key, "input_tokens", 150)
+        pipeline.hincrby.assert_any_call(key, "output_tokens", 75)
+        pipeline.hset.assert_called_once_with(key, "model", "openai/gpt-4.1-mini")
+        pipeline.hincrby.assert_any_call(
+            key,
+            RedisTaskQueue._token_usage_model_field("openai/gpt-4.1-mini", "input_tokens"),
+            150,
+        )
+        pipeline.hincrby.assert_any_call(
+            key,
+            RedisTaskQueue._token_usage_model_field("openai/gpt-4.1-mini", "output_tokens"),
+            75,
+        )
+
+    @pytest.mark.asyncio
+    async def test_get_token_usage_returns_per_model_breakdown(self, task_queue, mock_redis_client):
+        """Token usage reads should decode mixed-model counters."""
+        mock_redis_client.hgetall.return_value = {
+            "input_tokens": "300",
+            "output_tokens": "120",
+            "model": "openai/gpt-5-mini",
+            RedisTaskQueue._token_usage_model_field("openai/gpt-4.1-mini", "input_tokens"): "100",
+            RedisTaskQueue._token_usage_model_field("openai/gpt-4.1-mini", "output_tokens"): "20",
+            RedisTaskQueue._token_usage_model_field("openai/gpt-5-mini", "input_tokens"): "200",
+            RedisTaskQueue._token_usage_model_field("openai/gpt-5-mini", "output_tokens"): "100",
+        }
+
+        usage = await task_queue.get_token_usage("op-contoso-runtime")
+
+        assert usage is not None
+        assert usage["input_tokens"] == 300
+        assert usage["output_tokens"] == 120
+        assert usage["model"] == "openai/gpt-5-mini"
+        assert usage["models"] == {
+            "openai/gpt-4.1-mini": {"input_tokens": 100, "output_tokens": 20},
+            "openai/gpt-5-mini": {"input_tokens": 200, "output_tokens": 100},
+        }
+
+
+# ============================================================================
 # End-to-End Flow Tests (Simulated)
 # ============================================================================
 

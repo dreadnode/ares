@@ -53,6 +53,7 @@ from ares.core.models import (
 from ares.core.persistent_store import PersistentStore, get_persistent_store_config
 from ares.core.recovery import OperationRecoveryManager, RecoveryError
 from ares.core.task_queue import RedisTaskQueue
+from ares.core.token_usage import estimate_usage_cost, get_usage_models
 from ares.core.workflows import exploitation_workflow
 from ares.reports.redteam import RedTeamReportGenerator
 from ares.tools.red.orchestrator import OrchestratorTools
@@ -530,6 +531,42 @@ def _is_rate_limit_error(error: Exception | str) -> bool:
     )
 
 
+def _extract_result_usage(result: Any) -> dict[str, int] | None:
+    """Extract token usage from an agent run result."""
+    usage = getattr(result, "usage", None)
+    if usage is None:
+        return None
+    try:
+        return {
+            "input_tokens": int(getattr(usage, "input_tokens", 0)),
+            "output_tokens": int(getattr(usage, "output_tokens", 0)),
+            "total_tokens": int(getattr(usage, "total_tokens", 0)),
+        }
+    except Exception:
+        return None
+
+
+async def _record_orchestrator_usage(
+    task_queue: RedisTaskQueue,
+    operation_id: str,
+    result: Any,
+    *,
+    fallback_model: str,
+) -> None:
+    """Accumulate orchestrator token usage into operation-level counters."""
+    usage = _extract_result_usage(result)
+    if not usage or not usage["total_tokens"]:
+        return
+
+    model_name = getattr(getattr(result, "agent", None), "model", "") or fallback_model
+    await task_queue.increment_token_usage(
+        operation_id=operation_id,
+        input_tokens=usage["input_tokens"],
+        output_tokens=usage["output_tokens"],
+        model=str(model_name),
+    )
+
+
 def _log_orchestrator_result(result: rg.RunResult, model: str) -> None:
     logger.success(
         f"✅ Model connection successful: {model} "
@@ -793,6 +830,9 @@ async def run_multi_agent_operation(
             _auto_local_admin_secretsdump(dispatcher), name="auto_local_admin_secretsdump"
         ),
         asyncio.create_task(_auto_golden_ticket(dispatcher), name="auto_golden_ticket"),
+        asyncio.create_task(
+            _periodic_token_usage_summary(task_queue, operation_id), name="token_usage_summary"
+        ),
     ]
 
     # Build initial prompt for orchestrator
@@ -852,6 +892,12 @@ async def run_multi_agent_operation(
                 try:
                     logger.info(f"🤖 Connecting to {model}...")
                     result = await orchestrator_agent.run(initial_prompt)
+                    await _record_orchestrator_usage(
+                        task_queue,
+                        operation_id,
+                        result,
+                        fallback_model=model,
+                    )
                     _log_orchestrator_result(result, model)
 
                     # Check if result indicates a fatal error (e.g., auth failure)
@@ -4009,6 +4055,38 @@ IMPORTANT - Avoid polling loops:
 
 Let's begin the operation!
 """
+
+
+async def _periodic_token_usage_summary(
+    task_queue: RedisTaskQueue,
+    operation_id: str,
+    interval: float = 120.0,
+) -> None:
+    """Log aggregate token usage and estimated cost every ``interval`` seconds."""
+    while True:
+        await asyncio.sleep(interval)
+        try:
+            usage = await task_queue.get_token_usage(operation_id)
+            if not usage or not (usage["input_tokens"] or usage["output_tokens"]):
+                continue
+            in_tok = usage["input_tokens"]
+            out_tok = usage["output_tokens"]
+            total = in_tok + out_tok
+            models = get_usage_models(usage)
+            total_cost, breakdown, _unpriced_models = estimate_usage_cost(usage)
+            cost_str = ""
+            if total_cost is not None:
+                blended_suffix = " blended" if len(breakdown) > 1 else ""
+                cost_str = f" | ${total_cost:.4f}{blended_suffix}"
+            elif models:
+                model_label = "models" if len(models) > 1 else "model"
+                cost_str = f" | cost unavailable for {len(models)} {model_label}"
+            logger.opt(colors=True).info(
+                f"<magenta>💰 [token-usage] {total:,} tokens "
+                f"(in: {in_tok:,}  out: {out_tok:,}){cost_str}</magenta>"
+            )
+        except Exception as e:
+            logger.debug(f"Token usage summary failed: {e}")
 
 
 __all__ = [

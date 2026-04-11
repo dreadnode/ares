@@ -6,6 +6,7 @@ Replaces in-memory asyncio.Queue with Redis Lists for cross-pod messaging.
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import uuid
 from datetime import datetime, timezone
@@ -108,6 +109,7 @@ class RedisTaskQueue(BaseTaskQueue):
     TASK_STATUS_TTL = 60 * 60 * 24  # 24 hours
     LOCK_PREFIX = "ares:lock"
     STATE_UPDATE_CHANNEL_PREFIX = "ares:state:updates"
+    TOKEN_USAGE_MODEL_PREFIX = "model"  # noqa: S105  # nosec B105  # not a password
 
     def __init__(self, redis_url: str | None = None, use_circuit_breaker: bool = True):
         super().__init__(redis_url)
@@ -1173,6 +1175,101 @@ class RedisTaskQueue(BaseTaskQueue):
                 logger.warning(f"Failed to poll discoveries: {e}")
 
         return discoveries
+
+    async def increment_token_usage(
+        self,
+        operation_id: str,
+        input_tokens: int,
+        output_tokens: int,
+        model: str = "",
+    ) -> None:
+        """Atomically increment token usage counters for an operation.
+
+        Uses Redis HINCRBY for lock-free, crash-safe accumulation across workers.
+        """
+        if not self._connected:
+            await self.connect()
+
+        key = f"ares:op:{operation_id}:token_usage"
+        try:
+            pipe = self.redis.pipeline()
+            pipe.hincrby(key, "input_tokens", input_tokens)
+            pipe.hincrby(key, "output_tokens", output_tokens)
+            if model:
+                pipe.hset(key, "model", model)
+                pipe.hincrby(
+                    key, self._token_usage_model_field(model, "input_tokens"), input_tokens
+                )
+                pipe.hincrby(
+                    key, self._token_usage_model_field(model, "output_tokens"), output_tokens
+                )
+            await pipe.execute()
+        except Exception as e:
+            # Best-effort — don't fail the task over accounting
+            logger.debug(f"Failed to increment token usage: {e}")
+
+    async def get_token_usage(self, operation_id: str) -> dict[str, Any] | None:
+        """Read aggregated token usage for an operation."""
+        if not self._connected:
+            await self.connect()
+
+        key = f"ares:op:{operation_id}:token_usage"
+        try:
+            data = await self.redis.hgetall(key)
+            if not data:
+                return None
+
+            # Redis returns bytes or strings depending on decode_responses
+            def _val(v: Any) -> str:
+                return v.decode() if isinstance(v, bytes) else str(v)
+
+            models: dict[str, dict[str, int]] = {}
+            for raw_field, raw_value in data.items():
+                field = _val(raw_field)
+                parsed = self._parse_token_usage_model_field(field)
+                if not parsed:
+                    continue
+                model_name, token_type = parsed
+                model_usage = models.setdefault(model_name, {"input_tokens": 0, "output_tokens": 0})
+                model_usage[token_type] = int(_val(raw_value))
+
+            return {
+                "input_tokens": int(_val(data.get(b"input_tokens", data.get("input_tokens", 0)))),
+                "output_tokens": int(
+                    _val(data.get(b"output_tokens", data.get("output_tokens", 0)))
+                ),
+                "model": _val(data.get(b"model", data.get("model", ""))),
+                "models": models,
+            }
+        except Exception as e:
+            logger.debug(f"Failed to read token usage: {e}")
+            return None
+
+    @classmethod
+    def _token_usage_model_field(cls, model: str, token_type: str) -> str:
+        encoded = base64.urlsafe_b64encode(model.encode("utf-8")).decode("ascii")
+        return f"{cls.TOKEN_USAGE_MODEL_PREFIX}:{encoded}:{token_type}"
+
+    @classmethod
+    def _parse_token_usage_model_field(cls, field: str) -> tuple[str, str] | None:
+        prefix = f"{cls.TOKEN_USAGE_MODEL_PREFIX}:"
+        if not field.startswith(prefix):
+            return None
+
+        parts = field.split(":", 2)
+        if len(parts) != 3:
+            return None
+
+        _, encoded_model, token_type = parts
+        if token_type not in {"input_tokens", "output_tokens"}:
+            return None
+
+        try:
+            model = base64.urlsafe_b64decode(encoded_model.encode("ascii")).decode("utf-8")
+        except Exception:
+            return None
+
+        return model, token_type
 
     def get_circuit_breaker_status(self) -> dict[str, Any] | None:
         """Get circuit breaker status for monitoring.
