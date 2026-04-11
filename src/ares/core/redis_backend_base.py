@@ -144,7 +144,7 @@ class BaseRedisBackend(abc.ABC):
     async def _with_retry(self, operation_name: str, operation) -> Any:
         """Execute a Redis operation with circuit breaker + tenacity retry.
 
-        Provides resilience for transient Redis connection issues (Sentinel failover,
+        Provides resilience for transient Redis connection issues (
         pod restarts, network blips). Pattern follows:
         - redis-py's ExponentialBackoff(cap=10, base=1)
         - tenacity's AsyncRetrying for async retry logic

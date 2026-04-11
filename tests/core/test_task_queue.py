@@ -401,7 +401,7 @@ class TestRedisTaskQueueConnectionErrorHandling:
     ):
         """Test poll_task handles asyncio.TimeoutError from hung BRPOP.
 
-        This tests the fix for stale Sentinel connections where BRPOP hangs
+        This tests the fix for stale connections where BRPOP hangs
         forever on a dead TCP socket. The asyncio.wait_for wrapper should
         detect this and reset connection state.
         """
@@ -413,22 +413,18 @@ class TestRedisTaskQueueConnectionErrorHandling:
 
         mock_redis_client.brpop = hung_brpop
 
-        with patch("ares.core.task_queue.invalidate_sentinel_client") as mock_invalidate:
-            # poll_task with timeout=0.1 should trigger asyncio.TimeoutError
-            # after 0.1 + 2.0 = 2.1 seconds, but we mock so it's faster
-            # Actually the wait_for will use timeout + 2.0, so we use a tiny timeout
-            # Using max_retries=0 to test single attempt behavior
-            result = await task_queue.poll_task(role="cracker", timeout=0.1, max_retries=0)
+        # poll_task with timeout=0.1 should trigger asyncio.TimeoutError
+        # after 0.1 + 2.0 = 2.1 seconds, but we mock so it's faster
+        # Actually the wait_for will use timeout + 2.0, so we use a tiny timeout
+        # Using max_retries=0 to test single attempt behavior
+        result = await task_queue.poll_task(role="cracker", timeout=0.1, max_retries=0)
 
-            # Should return None (not raise) to allow retry
-            assert result is None
+        # Should return None (not raise) to allow retry
+        assert result is None
 
-            # Connection state should be reset
-            assert task_queue._connected is False
-            assert task_queue._client is None
-
-            # Sentinel client should be invalidated for fresh DNS resolution
-            mock_invalidate.assert_called_once()
+        # Connection state should be reset
+        assert task_queue._connected is False
+        assert task_queue._client is None
 
     @pytest.mark.asyncio
     async def test_check_results_batch_dns_failure_resets_state(
@@ -453,19 +449,15 @@ class TestRedisTaskQueueConnectionErrorHandling:
         )
         mock_redis_client.pipeline = MagicMock(return_value=mock_pipeline)
 
-        with patch("ares.core.task_queue.invalidate_sentinel_client") as mock_invalidate:
-            # check_results_batch should return empty results on failure
-            results = await task_queue.check_results_batch(["task_1", "task_2"])
+        # check_results_batch should return empty results on failure
+        results = await task_queue.check_results_batch(["task_1", "task_2"])
 
-            # Should return dict with None values (not raise)
-            assert results == {"task_1": None, "task_2": None}
+        # Should return dict with None values (not raise)
+        assert results == {"task_1": None, "task_2": None}
 
-            # Connection state should be reset for retry
-            assert task_queue._connected is False
-            assert task_queue._client is None
-
-            # Sentinel client should be invalidated for fresh DNS resolution
-            mock_invalidate.assert_called_once()
+        # Connection state should be reset for retry
+        assert task_queue._connected is False
+        assert task_queue._client is None
 
     @pytest.mark.asyncio
     async def test_check_results_batch_connection_reset_resets_state(
@@ -477,12 +469,10 @@ class TestRedisTaskQueueConnectionErrorHandling:
         mock_pipeline.execute = AsyncMock(side_effect=Exception("Connection reset by peer"))
         mock_redis_client.pipeline = MagicMock(return_value=mock_pipeline)
 
-        with patch("ares.core.task_queue.invalidate_sentinel_client") as mock_invalidate:
-            results = await task_queue.check_results_batch(["task_1"])
+        results = await task_queue.check_results_batch(["task_1"])
 
-            assert results == {"task_1": None}
-            assert task_queue._connected is False
-            mock_invalidate.assert_called_once()
+        assert results == {"task_1": None}
+        assert task_queue._connected is False
 
     @pytest.mark.asyncio
     async def test_check_results_batch_non_connection_error_preserves_state(
@@ -690,17 +680,16 @@ class TestRedisTaskQueueResults:
 
         mock_redis_client.brpop = hung_brpop
 
-        with patch("ares.core.task_queue.invalidate_sentinel_client"):
-            # wait_for_result with timeout=0.1 should trigger asyncio.TimeoutError
-            # after 0.1 + 5.0 = 5.1 seconds, but we mock so it's faster
-            result = await task_queue.wait_for_result("task_stale", timeout=0.1)
+        # wait_for_result with timeout=0.1 should trigger asyncio.TimeoutError
+        # after 0.1 + 5.0 = 5.1 seconds, but we mock so it's faster
+        result = await task_queue.wait_for_result("task_stale", timeout=0.1)
 
-            # Should return None (not raise) to indicate timeout
-            assert result is None
+        # Should return None (not raise) to indicate timeout
+        assert result is None
 
-            # Connection state should be reset
-            assert task_queue._connected is False
-            assert task_queue._client is None
+        # Connection state should be reset
+        assert task_queue._connected is False
+        assert task_queue._client is None
 
     @pytest.mark.asyncio
     async def test_check_result_not_ready(self, task_queue, mock_redis_client):

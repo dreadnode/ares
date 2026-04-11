@@ -96,8 +96,8 @@ class OperationRecoveryManager:
         """
         Handle Redis connection errors by resetting connection state.
 
-        This allows the next operation to attempt reconnection via Sentinel,
-        which will discover the current master (handles pod restarts/failover).
+        This allows the next operation to attempt reconnection
+        (handles pod restarts).
         """
         self._connected = False
         if self._redis_client:

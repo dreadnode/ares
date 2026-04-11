@@ -62,7 +62,6 @@ class TestPingOrReconnectDispatcherRedis:
         new_client.ping = AsyncMock(return_value=True)
 
         with (
-            patch("ares.core.redis_client.invalidate_sentinel_client") as mock_invalidate,
             patch(
                 "ares.core.redis_client.create_redis_client",
                 new=AsyncMock(return_value=new_client),
@@ -71,7 +70,6 @@ class TestPingOrReconnectDispatcherRedis:
             result = await mock_dispatcher._ping_or_reconnect_dispatcher_redis()
 
         assert result is False
-        mock_invalidate.assert_called_once()
         mock_client.aclose.assert_awaited_once()
         assert mock_dispatcher._redis_client is new_client
 
@@ -95,7 +93,6 @@ class TestPingOrReconnectDispatcherRedis:
         new_client.ping = AsyncMock(return_value=True)
 
         with (
-            patch("ares.core.redis_client.invalidate_sentinel_client"),
             patch(
                 "ares.core.redis_client.create_redis_client",
                 new=AsyncMock(return_value=new_client),
@@ -127,7 +124,6 @@ class TestPingOrReconnectDispatcherRedis:
         new_client.ping = AsyncMock(return_value=True)
 
         with (
-            patch("ares.core.redis_client.invalidate_sentinel_client"),
             patch(
                 "ares.core.redis_client.create_redis_client",
                 new=AsyncMock(return_value=new_client),
@@ -146,7 +142,6 @@ class TestPingOrReconnectDispatcherRedis:
         mock_dispatcher._redis_client = mock_client
 
         with (
-            patch("ares.core.redis_client.invalidate_sentinel_client"),
             patch(
                 "ares.core.redis_client.create_redis_client",
                 new=AsyncMock(side_effect=ConnectionError("Failed to reconnect")),
@@ -172,7 +167,6 @@ class TestPingOrReconnectDispatcherRedis:
         new_client.ping = AsyncMock(return_value=True)
 
         with (
-            patch("ares.core.redis_client.invalidate_sentinel_client"),
             patch(
                 "ares.core.redis_client.create_redis_client",
                 new=AsyncMock(return_value=new_client),
@@ -196,7 +190,6 @@ class TestPingOrReconnectDispatcherRedis:
         new_client.ping = AsyncMock(return_value=True)
 
         with (
-            patch("ares.core.redis_client.invalidate_sentinel_client"),
             patch(
                 "ares.core.redis_client.create_redis_client",
                 new=AsyncMock(return_value=new_client),

@@ -1040,8 +1040,7 @@ tasks:
         kubectl rollout status -n {{.K8S_NAMESPACE}} deploy/$ORCH_DEPLOY || true
 
         REDIS_POD=$(kubectl get pods -n {{.K8S_NAMESPACE}} -l app=redis -o name 2>/dev/null | head -1)
-        SENTINEL_POD=$(kubectl get pods -n {{.K8S_NAMESPACE}} -l app=redis-sentinel -o name 2>/dev/null | head -1)
-        if [ -z "$REDIS_POD" ] && [ -z "$SENTINEL_POD" ]; then
+        if [ -z "$REDIS_POD" ]; then
           echo "No Redis pod found in namespace {{.K8S_NAMESPACE}}"
           exit 1
         fi
@@ -1051,30 +1050,10 @@ tasks:
         if [ -n "$REDIS_PASS" ]; then
           REDIS_ENV=(env REDISCLI_AUTH="$REDIS_PASS")
         fi
-        # Always use Sentinel pod as client (it can reach master)
-        REDIS_CLIENT_POD="${SENTINEL_POD:-$REDIS_POD}"
-        REDIS_HOST=""
-        REDIS_HOST_ARG=()
-        CONTAINER_ARG=()
-
-        if [ -n "$SENTINEL_POD" ]; then
-          CONTAINER_ARG=(-c sentinel)
-          # Get master IP from Sentinel (returns IP on first line, port on second)
-          REDIS_HOST=$(kubectl exec -n {{.K8S_NAMESPACE}} "$SENTINEL_POD" "${CONTAINER_ARG[@]}" -- "${REDIS_ENV[@]}" redis-cli -p 26379 sentinel get-master-addr-by-name aresmaster 2>/dev/null | head -1 || true)
-          if [ -z "$REDIS_HOST" ]; then
-            echo "ERROR: Sentinel did not return master IP. Cannot proceed with clear."
-            echo "Check Sentinel health: kubectl exec -n {{.K8S_NAMESPACE}} $SENTINEL_POD -c sentinel -- redis-cli -p 26379 info sentinel"
-            exit 1
-          fi
-          echo "Using Redis master at $REDIS_HOST (via Sentinel)"
-          REDIS_HOST_ARG=(-h "$REDIS_HOST" -p 6379)
-        else
-          echo "WARNING: No Sentinel found, using Redis pod directly (may hit replica)"
-        fi
 
         # Helper function to run redis-cli commands
         redis_cmd() {
-          kubectl exec -n {{.K8S_NAMESPACE}} "$REDIS_CLIENT_POD" "${CONTAINER_ARG[@]}" -- "${REDIS_ENV[@]}" redis-cli "${REDIS_HOST_ARG[@]}" "$@"
+          kubectl exec -n {{.K8S_NAMESPACE}} "$REDIS_POD" -- "${REDIS_ENV[@]}" redis-cli "$@"
         }
 
         # Verify we can write to Redis before proceeding
