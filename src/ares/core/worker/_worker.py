@@ -766,7 +766,9 @@ class RedisWorkerAgent:
                 _task_span.set_attribute("gen_ai.usage.output_tokens", out_tok)
                 _task_span.set_attribute("gen_ai.usage.total_tokens", usage_metrics["total_tokens"])
                 # Accumulate to Redis counters for operation-level cost tracking
-                model_name = getattr(getattr(result, "agent", None), "model", "") or ""
+                agent = getattr(result, "agent", None)
+                model_name = getattr(agent, "model_name", None) or getattr(agent, "model", "") or ""
+                model_name = str(model_name)
                 await self.task_queue.increment_token_usage(
                     operation_id=self.operation_id or "",
                     input_tokens=in_tok,

@@ -558,7 +558,8 @@ async def _record_orchestrator_usage(
     if not usage or not usage["total_tokens"]:
         return
 
-    model_name = getattr(getattr(result, "agent", None), "model", "") or fallback_model
+    agent = getattr(result, "agent", None)
+    model_name = getattr(agent, "model_name", None) or getattr(agent, "model", "") or fallback_model
     await task_queue.increment_token_usage(
         operation_id=operation_id,
         input_tokens=usage["input_tokens"],
