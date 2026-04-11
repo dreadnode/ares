@@ -920,6 +920,170 @@ tasks:
           --patch-file .taskfiles/remote/orchestrator-wrapper-patch.json >/dev/null
         echo -e "{{.SUCCESS}} ares-orchestrator wrapper patched"
 
+  check:
+    desc: "Check if local Rust binaries match remote pods (usage: task remote:check [TEAM=red|blue|all])"
+    silent: true
+    vars:
+      RUST_TARGET: '{{.RUST_TARGET | default "x86_64-unknown-linux-gnu"}}'
+      BIN_DIR: 'ares-rust/target/{{.RUST_TARGET}}/release'
+      REMOTE_BIN_DIR: '/usr/local/bin'
+    cmds:
+      - |
+        echo -e "{{.INFO}} Comparing local Rust binaries to remote pods (team={{.TEAM}})"
+        echo ""
+
+        # Check local binaries exist
+        LOCAL_BINS_FOUND=0
+        for bin in ares-cli ares-orchestrator ares-worker; do
+          if [ -f "{{.BIN_DIR}}/$bin" ]; then
+            LOCAL_BINS_FOUND=$((LOCAL_BINS_FOUND + 1))
+          else
+            echo -e "{{.WARN}} Local binary not found: {{.BIN_DIR}}/$bin"
+          fi
+        done
+
+        if [ $LOCAL_BINS_FOUND -eq 0 ]; then
+          echo -e "{{.ERROR}} No local binaries found. Run: task remote:rust:build"
+          exit 1
+        fi
+
+        # Get pods based on team
+        ORCH_PODS=""
+        WORKER_PODS=""
+
+        if [ "{{.TEAM}}" = "red" ] || [ "{{.TEAM}}" = "all" ]; then
+          RED_ORCH=$(kubectl get pods -n {{.K8S_NAMESPACE}} \
+            -l {{.RED_ORCH_LABEL}} \
+            --field-selector=status.phase=Running \
+            -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
+          if [ -n "$RED_ORCH" ]; then
+            ORCH_PODS="$RED_ORCH"
+          fi
+
+          RED_WORKERS=$(kubectl get pods -n {{.K8S_NAMESPACE}} \
+            -l {{.RED_COMPONENT_LABEL}} \
+            --field-selector=status.phase=Running \
+            -o json | jq -r --arg orch "$RED_ORCH" \
+              '.items[] | select(.metadata.name != $orch) | .metadata.name' \
+              2>/dev/null | tr '\n' ' ')
+          WORKER_PODS="$RED_WORKERS"
+        fi
+
+        if [ "{{.TEAM}}" = "blue" ] || [ "{{.TEAM}}" = "all" ]; then
+          BLUE_ORCH=$(kubectl get pods -n {{.K8S_NAMESPACE}} \
+            -l {{.BLUE_ORCH_LABEL}} \
+            --field-selector=status.phase=Running \
+            -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
+          if [ -n "$BLUE_ORCH" ]; then
+            ORCH_PODS="$ORCH_PODS $BLUE_ORCH"
+          fi
+        fi
+
+        ORCH_PODS=$(echo "$ORCH_PODS" | xargs)
+        WORKER_PODS=$(echo "$WORKER_PODS" | xargs)
+
+        if [ -z "$ORCH_PODS" ] && [ -z "$WORKER_PODS" ]; then
+          echo -e "{{.ERROR}} No running pods found for team={{.TEAM}}"
+          exit 1
+        fi
+
+        ORCH_COUNT=$(echo "$ORCH_PODS" | wc -w | xargs)
+        WORKER_COUNT=0
+        [ -n "$WORKER_PODS" ] && WORKER_COUNT=$(echo "$WORKER_PODS" | wc -w | xargs)
+        echo -e "{{.INFO}} Checking against $ORCH_COUNT orchestrator(s) + $WORKER_COUNT worker(s)"
+        echo ""
+
+        TOTAL_CHECKED=0
+        TOTAL_MATCH=0
+        TOTAL_DIFFER=0
+        TOTAL_MISSING=0
+        FAILED_PODS=""
+
+        check_binary() {
+          local bin_name="$1"
+          local pod="$2"
+          local local_hash="$3"
+
+          remote_hash=$(kubectl exec -n {{.K8S_NAMESPACE}} "$pod" -- \
+            sha256sum "{{.REMOTE_BIN_DIR}}/$bin_name" 2>/dev/null | awk '{print $1}')
+
+          if [ -z "$remote_hash" ]; then
+            echo "MISSING"
+          elif [ "$remote_hash" != "$local_hash" ]; then
+            echo "DIFFERS"
+          else
+            echo "OK"
+          fi
+        }
+
+        # Check orchestrator pods: ares-cli + ares-orchestrator
+        for pod in $ORCH_PODS; do
+          for bin in ares-cli ares-orchestrator; do
+            [ ! -f "{{.BIN_DIR}}/$bin" ] && continue
+            local_hash=$(shasum -a 256 "{{.BIN_DIR}}/$bin" | awk '{print $1}')
+            TOTAL_CHECKED=$((TOTAL_CHECKED + 1))
+
+            result=$(check_binary "$bin" "$pod" "$local_hash")
+            case "$result" in
+              OK)
+                echo -e "{{.SUCCESS}} $bin @ $pod: OK"
+                TOTAL_MATCH=$((TOTAL_MATCH + 1))
+                ;;
+              MISSING)
+                echo -e "{{.WARN}} $bin @ $pod: MISSING"
+                TOTAL_MISSING=$((TOTAL_MISSING + 1))
+                echo "$FAILED_PODS" | grep -q "$pod" || FAILED_PODS="$FAILED_PODS $pod"
+                ;;
+              DIFFERS)
+                echo -e "{{.ERROR}} $bin @ $pod: DIFFERS"
+                TOTAL_DIFFER=$((TOTAL_DIFFER + 1))
+                echo "$FAILED_PODS" | grep -q "$pod" || FAILED_PODS="$FAILED_PODS $pod"
+                ;;
+            esac
+          done
+        done
+
+        # Check worker pods: ares-worker only
+        if [ -n "$WORKER_PODS" ] && [ -f "{{.BIN_DIR}}/ares-worker" ]; then
+          local_hash=$(shasum -a 256 "{{.BIN_DIR}}/ares-worker" | awk '{print $1}')
+          for pod in $WORKER_PODS; do
+            TOTAL_CHECKED=$((TOTAL_CHECKED + 1))
+
+            result=$(check_binary "ares-worker" "$pod" "$local_hash")
+            case "$result" in
+              OK)
+                echo -e "{{.SUCCESS}} ares-worker @ $pod: OK"
+                TOTAL_MATCH=$((TOTAL_MATCH + 1))
+                ;;
+              MISSING)
+                echo -e "{{.WARN}} ares-worker @ $pod: MISSING"
+                TOTAL_MISSING=$((TOTAL_MISSING + 1))
+                echo "$FAILED_PODS" | grep -q "$pod" || FAILED_PODS="$FAILED_PODS $pod"
+                ;;
+              DIFFERS)
+                echo -e "{{.ERROR}} ares-worker @ $pod: DIFFERS"
+                TOTAL_DIFFER=$((TOTAL_DIFFER + 1))
+                echo "$FAILED_PODS" | grep -q "$pod" || FAILED_PODS="$FAILED_PODS $pod"
+                ;;
+            esac
+          done
+        fi
+
+        echo ""
+        echo "========================================"
+        echo -e "{{.INFO}} Summary: $TOTAL_CHECKED checked, $TOTAL_MATCH match, $TOTAL_DIFFER differ, $TOTAL_MISSING missing"
+
+        if [ "$TOTAL_DIFFER" -gt 0 ] || [ "$TOTAL_MISSING" -gt 0 ]; then
+          FAILED_PODS=$(echo "$FAILED_PODS" | xargs)
+          FAILED_COUNT=$(echo "$FAILED_PODS" | wc -w | xargs)
+          echo -e "{{.WARN}} $FAILED_COUNT pod(s) out of sync"
+          echo ""
+          echo -e "{{.WARN}} Run 'task remote:rust:deploy TEAM={{.TEAM}}' to deploy binaries"
+          exit 1
+        else
+          echo -e "{{.SUCCESS}} All binaries match on all pods"
+        fi
+
   rust:deploy:
     desc: "Deploy Rust binaries to K8s pods (usage: task remote:rust:deploy [TEAM=red|blue|all])"
     silent: true

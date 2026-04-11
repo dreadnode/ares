@@ -49,6 +49,7 @@ repos:
       - id: script-must-have-extension
         name: Ensure shell scripts end with .sh
         types: [shell]
+        exclude: '\.tmpl$'
       - id: shellcheck
       - id: shfmt
 

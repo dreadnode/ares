@@ -1,0 +1,674 @@
+---
+# EC2 deployment tasks — run ares directly on EC2 via AWS SSM
+# Alternative to K8s for faster testing iterations.
+#
+# Architecture: single EC2 with Redis + orchestrator + all worker roles.
+# Workers run as systemd template units (ares-worker@{role}).
+# Orchestrator runs per-operation (not a service).
+#
+# Usage:
+#   task ec2:setup EC2_NAME=ares-tools       # One-time: install Redis, create systemd units
+#   task ec2:deploy EC2_NAME=ares-tools      # Build + push Rust binaries via bcp
+#   task ec2:start EC2_NAME=ares-tools       # Start Redis + workers
+#   task ec2:status EC2_NAME=ares-tools      # Show process status
+#   task ec2:redis:forward EC2_NAME=ares-tools  # Port-forward Redis for local CLI
+#   task ec2:logs EC2_NAME=ares-tools ROLE=lateral  # Tail worker logs
+version: "3"
+
+set: [errexit, pipefail]
+
+vars:
+  INFO: '\033[0;34m[INFO]\033[0m'
+  SUCCESS: '\033[0;32m[SUCCESS]\033[0m'
+  ERROR: '\033[0;31m[ERROR]\033[0m'
+  WARN: '\033[1;33m[WARN]\033[0m'
+  # EC2 instance identification (Name tag filter)
+  EC2_NAME: '{{.EC2_NAME | default "ares-tools"}}'
+  EC2_PROFILE: '{{.EC2_PROFILE | default "lab"}}'
+  EC2_REGION: '{{.EC2_REGION | default "us-west-1"}}'
+  # S3 bucket for file staging (auto-detect from bcp config)
+  BCP_BUCKET:
+    sh: |
+      if [ -f ~/.bcp/config.yaml ]; then
+        grep -E '^\s*bucket:' ~/.bcp/config.yaml 2>/dev/null | head -1 | awk '{print $2}' | tr -d '"' | tr -d "'" || true
+      fi
+  # Remote paths on EC2
+  ARES_REMOTE_BIN: '/usr/local/bin'
+  ARES_REMOTE_CONFIG: '/etc/ares/config.yaml'
+  ARES_LOG_DIR: '/var/log/ares'
+  # Build config
+  RUST_TARGET: '{{.RUST_TARGET | default "x86_64-unknown-linux-gnu"}}'
+  BIN_DIR: 'ares-rust/target/{{.RUST_TARGET}}/release'
+  # Worker roles
+  WORKER_ROLES: 'recon credential_access cracker acl privesc lateral coercion'
+  # Worker mode: tool_exec (Rust LLM orchestrator) or task (Python-style)
+  WORKER_MODE: '{{.WORKER_MODE | default "tool_exec"}}'
+
+tasks:
+  # ============================================================================
+  # Instance Resolution
+  # ============================================================================
+  resolve:
+    desc: "Show resolved EC2 instance ID and IP (usage: task ec2:resolve [EC2_NAME=ares-tools])"
+    silent: true
+    cmds:
+      - |
+        INSTANCE_INFO=$(aws ec2 describe-instances \
+          --profile "{{.EC2_PROFILE}}" \
+          --region "{{.EC2_REGION}}" \
+          --filters "Name=instance-state-name,Values=running" \
+                    "Name=tag:Name,Values=*{{.EC2_NAME}}*" \
+          --query "Reservations[*].Instances[*].[InstanceId,PrivateIpAddress,Tags[?Key==\`Name\`].Value|[0]]" \
+          --output text)
+
+        if [ -z "$INSTANCE_INFO" ]; then
+          echo -e "{{.ERROR}} No running instance found matching Name tag: {{.EC2_NAME}}"
+          exit 1
+        fi
+
+        echo -e "{{.SUCCESS}} Resolved EC2 instance:"
+        echo "$INSTANCE_INFO" | while read -r id ip name; do
+          echo "  Instance ID: $id"
+          echo "  Private IP:  $ip"
+          echo "  Name:        $name"
+        done
+
+  # ============================================================================
+  # Binary Deployment
+  # ============================================================================
+  deploy:
+    desc: "Cross-compile Rust binaries and deploy to EC2 via S3 staging (usage: task ec2:deploy [EC2_NAME=ares-tools])"
+    silent: true
+    vars:
+      MAX_OPEN_FILES: '{{.MAX_OPEN_FILES | default "8192"}}'
+      CARGO_BUILD_JOBS: '{{.CARGO_BUILD_JOBS | default "4"}}'
+      S3_DEPLOY_PREFIX: 'ares-deploy'
+    preconditions:
+      - sh: test -n "{{.BCP_BUCKET}}"
+        msg: "BCP_BUCKET not set. Either create ~/.bcp/config.yaml with 'bucket: your-bucket' or pass BCP_BUCKET=your-bucket"
+    cmds:
+      # Cross-compile
+      - |
+        echo -e "{{.INFO}} Cross-compiling for {{.RUST_TARGET}}..."
+
+        BEFORE_ULIMIT=$(ulimit -n 2>/dev/null || echo "unknown")
+        ulimit -n {{.MAX_OPEN_FILES}} 2>/dev/null || true
+        AFTER_ULIMIT=$(ulimit -n 2>/dev/null || echo "unknown")
+        if [ "$BEFORE_ULIMIT" != "$AFTER_ULIMIT" ]; then
+          echo -e "{{.INFO}} maxfiles: $BEFORE_ULIMIT -> $AFTER_ULIMIT"
+        fi
+
+        export CARGO_BUILD_JOBS="{{.CARGO_BUILD_JOBS}}"
+
+        if command -v cargo-zigbuild >/dev/null 2>&1; then
+          cd ares-rust && cargo zigbuild --release --target {{.RUST_TARGET}}
+        elif command -v cross >/dev/null 2>&1; then
+          cd ares-rust && cross build --release --target {{.RUST_TARGET}}
+        else
+          echo -e "{{.WARN}} No cross-compilation tool found, trying cargo with target..."
+          cd ares-rust && cargo build --release --target {{.RUST_TARGET}}
+        fi
+
+        echo -e "{{.SUCCESS}} Binaries built:"
+        ls -lh {{.BIN_DIR}}/ares-cli {{.BIN_DIR}}/ares-orchestrator {{.BIN_DIR}}/ares-worker 2>/dev/null || true
+
+      # Upload to S3 staging
+      - |
+        echo -e "{{.INFO}} Uploading binaries to s3://{{.BCP_BUCKET}}/{{.S3_DEPLOY_PREFIX}}/..."
+
+        for bin in ares-cli ares-orchestrator ares-worker; do
+          aws s3 cp "{{.BIN_DIR}}/$bin" "s3://{{.BCP_BUCKET}}/{{.S3_DEPLOY_PREFIX}}/$bin" \
+            --profile "{{.EC2_PROFILE}}" --region "{{.EC2_REGION}}"
+        done
+
+        echo -e "{{.SUCCESS}} Binaries staged in S3"
+
+      # Pull from S3 on EC2 via SSM + verify
+      - |
+        INSTANCE_ID=$(aws ec2 describe-instances \
+          --profile "{{.EC2_PROFILE}}" \
+          --region "{{.EC2_REGION}}" \
+          --filters "Name=instance-state-name,Values=running" \
+                    "Name=tag:Name,Values=*{{.EC2_NAME}}*" \
+          --query "Reservations[*].Instances[*].InstanceId" \
+          --output text | head -1)
+
+        if [ -z "$INSTANCE_ID" ]; then
+          echo -e "{{.ERROR}} No running instance found matching: {{.EC2_NAME}}"
+          exit 1
+        fi
+
+        echo -e "{{.INFO}} Pulling binaries from S3 to $INSTANCE_ID..."
+
+        PARAMS_FILE=$(mktemp)
+        trap "rm -f $PARAMS_FILE" EXIT
+        jq -n --arg bucket "{{.BCP_BUCKET}}" --arg prefix "{{.S3_DEPLOY_PREFIX}}" \
+          '{"commands": ["set -e; for bin in ares-cli ares-orchestrator ares-worker; do aws s3 cp s3://" + $bucket + "/" + $prefix + "/$bin /usr/local/bin/$bin; chmod +x /usr/local/bin/$bin; done; echo Deployed:; ls -lh /usr/local/bin/ares-*"]}' \
+          > "$PARAMS_FILE"
+
+        CMD_ID=$(aws ssm send-command \
+          --profile "{{.EC2_PROFILE}}" \
+          --region "{{.EC2_REGION}}" \
+          --instance-ids "$INSTANCE_ID" \
+          --document-name "AWS-RunShellScript" \
+          --parameters "file://$PARAMS_FILE" \
+          --query "Command.CommandId" --output text)
+
+        # Poll for completion
+        for i in $(seq 1 60); do
+          STATUS=$(aws ssm get-command-invocation \
+            --profile "{{.EC2_PROFILE}}" \
+            --region "{{.EC2_REGION}}" \
+            --command-id "$CMD_ID" \
+            --instance-id "$INSTANCE_ID" \
+            --query "Status" --output text 2>/dev/null) || true
+          case "$STATUS" in
+            Success|Failed|Cancelled|TimedOut) break ;;
+          esac
+          sleep 1
+        done
+
+        aws ssm get-command-invocation \
+          --profile "{{.EC2_PROFILE}}" \
+          --region "{{.EC2_REGION}}" \
+          --command-id "$CMD_ID" \
+          --instance-id "$INSTANCE_ID" \
+          --query "StandardOutputContent" --output text
+
+        if [ "$STATUS" != "Success" ]; then
+          echo -e "{{.ERROR}} Deploy failed (status: $STATUS)"
+          aws ssm get-command-invocation \
+            --profile "{{.EC2_PROFILE}}" \
+            --region "{{.EC2_REGION}}" \
+            --command-id "$CMD_ID" \
+            --instance-id "$INSTANCE_ID" \
+            --query "StandardErrorContent" --output text
+          exit 1
+        fi
+
+        echo -e "{{.SUCCESS}} Deploy complete"
+
+  deploy:config:
+    desc: "Push config.yaml to EC2 via S3 staging (usage: task ec2:deploy:config [EC2_NAME=ares-tools] [ARES_CONFIG=./config/multi-agent-production.yaml])"
+    silent: true
+    vars:
+      ARES_CONFIG: '{{.ARES_CONFIG | default "./config/multi-agent-production.yaml"}}'
+      S3_DEPLOY_PREFIX: 'ares-deploy'
+    preconditions:
+      - sh: test -f "{{.ARES_CONFIG}}"
+        msg: "Config file not found: {{.ARES_CONFIG}}"
+      - sh: test -n "{{.BCP_BUCKET}}"
+        msg: "BCP_BUCKET not set"
+    cmds:
+      - |
+        INSTANCE_ID=$(aws ec2 describe-instances \
+          --profile "{{.EC2_PROFILE}}" \
+          --region "{{.EC2_REGION}}" \
+          --filters "Name=instance-state-name,Values=running" \
+                    "Name=tag:Name,Values=*{{.EC2_NAME}}*" \
+          --query "Reservations[*].Instances[*].InstanceId" \
+          --output text | head -1)
+
+        if [ -z "$INSTANCE_ID" ]; then
+          echo -e "{{.ERROR}} No running instance found matching: {{.EC2_NAME}}"
+          exit 1
+        fi
+
+        echo -e "{{.INFO}} Uploading config to S3..."
+        aws s3 cp "{{.ARES_CONFIG}}" "s3://{{.BCP_BUCKET}}/{{.S3_DEPLOY_PREFIX}}/config.yaml" \
+          --profile "{{.EC2_PROFILE}}" --region "{{.EC2_REGION}}"
+
+        echo -e "{{.INFO}} Pulling config to $INSTANCE_ID..."
+        PARAMS_FILE=$(mktemp)
+        trap "rm -f $PARAMS_FILE" EXIT
+        jq -n --arg bucket "{{.BCP_BUCKET}}" --arg prefix "{{.S3_DEPLOY_PREFIX}}" \
+          '{"commands": ["mkdir -p /etc/ares && aws s3 cp s3://" + $bucket + "/" + $prefix + "/config.yaml /etc/ares/config.yaml && echo Config deployed: && cat /etc/ares/config.yaml | head -5"]}' \
+          > "$PARAMS_FILE"
+
+        CMD_ID=$(aws ssm send-command \
+          --profile "{{.EC2_PROFILE}}" \
+          --region "{{.EC2_REGION}}" \
+          --instance-ids "$INSTANCE_ID" \
+          --document-name "AWS-RunShellScript" \
+          --parameters "file://$PARAMS_FILE" \
+          --query "Command.CommandId" --output text)
+
+        for i in $(seq 1 30); do
+          STATUS=$(aws ssm get-command-invocation \
+            --profile "{{.EC2_PROFILE}}" \
+            --region "{{.EC2_REGION}}" \
+            --command-id "$CMD_ID" \
+            --instance-id "$INSTANCE_ID" \
+            --query "Status" --output text 2>/dev/null) || true
+          case "$STATUS" in
+            Success|Failed|Cancelled|TimedOut) break ;;
+          esac
+          sleep 1
+        done
+
+        aws ssm get-command-invocation \
+          --profile "{{.EC2_PROFILE}}" \
+          --region "{{.EC2_REGION}}" \
+          --command-id "$CMD_ID" \
+          --instance-id "$INSTANCE_ID" \
+          --query "StandardOutputContent" --output text
+
+        if [ "$STATUS" != "Success" ]; then
+          echo -e "{{.ERROR}} Config deploy failed (status: $STATUS)"
+          aws ssm get-command-invocation \
+            --profile "{{.EC2_PROFILE}}" \
+            --region "{{.EC2_REGION}}" \
+            --command-id "$CMD_ID" \
+            --instance-id "$INSTANCE_ID" \
+            --query "StandardErrorContent" --output text
+          exit 1
+        fi
+
+        echo -e "{{.SUCCESS}} Config deployed to $INSTANCE_ID:{{.ARES_REMOTE_CONFIG}}"
+
+  # ============================================================================
+  # One-Time Setup
+  # ============================================================================
+  setup:
+    desc: "One-time EC2 setup: install Redis, create log dirs, install systemd units (usage: task ec2:setup [EC2_NAME=ares-tools])"
+    silent: true
+    cmds:
+      - |
+        INSTANCE_ID=$(aws ec2 describe-instances \
+          --profile "{{.EC2_PROFILE}}" \
+          --region "{{.EC2_REGION}}" \
+          --filters "Name=instance-state-name,Values=running" \
+                    "Name=tag:Name,Values=*{{.EC2_NAME}}*" \
+          --query "Reservations[*].Instances[*].InstanceId" \
+          --output text | head -1)
+
+        if [ -z "$INSTANCE_ID" ]; then
+          echo -e "{{.ERROR}} No running instance found matching: {{.EC2_NAME}}"
+          exit 1
+        fi
+
+        echo -e "{{.INFO}} Setting up ares on $INSTANCE_ID..."
+
+        # JSON-encode the setup script for SSM
+        PARAMS_FILE=$(mktemp)
+        trap "rm -f $PARAMS_FILE" EXIT
+        jq -Rs '{"commands": [.]}' < .taskfiles/ec2/scripts/setup.sh > "$PARAMS_FILE"
+
+        CMD_ID=$(aws ssm send-command \
+          --profile "{{.EC2_PROFILE}}" \
+          --region "{{.EC2_REGION}}" \
+          --instance-ids "$INSTANCE_ID" \
+          --document-name "AWS-RunShellScript" \
+          --parameters "file://$PARAMS_FILE" \
+          --timeout-seconds 120 \
+          --query "Command.CommandId" --output text)
+
+        echo -e "{{.INFO}} Waiting for setup to complete (command: $CMD_ID)..."
+
+        for i in $(seq 1 120); do
+          STATUS=$(aws ssm get-command-invocation \
+            --profile "{{.EC2_PROFILE}}" \
+            --region "{{.EC2_REGION}}" \
+            --command-id "$CMD_ID" \
+            --instance-id "$INSTANCE_ID" \
+            --query "Status" --output text 2>/dev/null) || true
+          case "$STATUS" in
+            Success|Failed|Cancelled|TimedOut) break ;;
+          esac
+          sleep 1
+        done
+
+        echo ""
+        aws ssm get-command-invocation \
+          --profile "{{.EC2_PROFILE}}" \
+          --region "{{.EC2_REGION}}" \
+          --command-id "$CMD_ID" \
+          --instance-id "$INSTANCE_ID" \
+          --query "StandardOutputContent" --output text
+
+        if [ "$STATUS" != "Success" ]; then
+          echo -e "{{.ERROR}} Setup failed (status: $STATUS)"
+          aws ssm get-command-invocation \
+            --profile "{{.EC2_PROFILE}}" \
+            --region "{{.EC2_REGION}}" \
+            --command-id "$CMD_ID" \
+            --instance-id "$INSTANCE_ID" \
+            --query "StandardErrorContent" --output text
+          exit 1
+        fi
+
+        echo -e "{{.SUCCESS}} EC2 setup complete"
+
+  # ============================================================================
+  # Process Management
+  # ============================================================================
+  start:
+    desc: "Start Redis + all worker roles on EC2 (usage: task ec2:start [EC2_NAME=ares-tools])"
+    silent: true
+    cmds:
+      - |
+        INSTANCE_ID=$(aws ec2 describe-instances \
+          --profile "{{.EC2_PROFILE}}" \
+          --region "{{.EC2_REGION}}" \
+          --filters "Name=instance-state-name,Values=running" \
+                    "Name=tag:Name,Values=*{{.EC2_NAME}}*" \
+          --query "Reservations[*].Instances[*].InstanceId" \
+          --output text | head -1)
+
+        if [ -z "$INSTANCE_ID" ]; then
+          echo -e "{{.ERROR}} No running instance found matching: {{.EC2_NAME}}"
+          exit 1
+        fi
+
+        # Build systemctl start command for all roles
+        WORKER_UNITS=""
+        for role in {{.WORKER_ROLES}}; do
+          WORKER_UNITS="$WORKER_UNITS ares-worker@${role}.service"
+        done
+
+        echo -e "{{.INFO}} Starting ares services on $INSTANCE_ID..."
+
+        PARAMS_FILE=$(mktemp)
+        trap "rm -f $PARAMS_FILE" EXIT
+        START_CMD="systemctl start redis-server 2>/dev/null || systemctl start redis; sleep 1; redis-cli ping; "
+        START_CMD+="systemctl start $WORKER_UNITS; sleep 2; echo Worker status:; "
+        START_CMD+='for role in recon credential_access cracker acl privesc lateral coercion; do '
+        START_CMD+='st=$(systemctl is-active ares-worker@${role} 2>/dev/null || echo dead); '
+        START_CMD+='printf "  %-20s %s\n" $role $st; done'
+        jq -n --arg cmd "$START_CMD" '{"commands": [$cmd]}' > "$PARAMS_FILE"
+
+        CMD_ID=$(aws ssm send-command \
+          --profile "{{.EC2_PROFILE}}" \
+          --region "{{.EC2_REGION}}" \
+          --instance-ids "$INSTANCE_ID" \
+          --document-name "AWS-RunShellScript" \
+          --parameters "file://$PARAMS_FILE" \
+          --query "Command.CommandId" --output text)
+
+        for i in $(seq 1 30); do
+          STATUS=$(aws ssm get-command-invocation \
+            --profile "{{.EC2_PROFILE}}" \
+            --region "{{.EC2_REGION}}" \
+            --command-id "$CMD_ID" \
+            --instance-id "$INSTANCE_ID" \
+            --query "Status" --output text 2>/dev/null) || true
+          case "$STATUS" in
+            Success|Failed|Cancelled|TimedOut) break ;;
+          esac
+          sleep 1
+        done
+
+        aws ssm get-command-invocation \
+          --profile "{{.EC2_PROFILE}}" \
+          --region "{{.EC2_REGION}}" \
+          --command-id "$CMD_ID" \
+          --instance-id "$INSTANCE_ID" \
+          --query "StandardOutputContent" --output text
+
+        if [ "$STATUS" = "Success" ]; then
+          echo -e "{{.SUCCESS}} All services started"
+        else
+          echo -e "{{.ERROR}} Start failed (status: $STATUS)"
+          aws ssm get-command-invocation \
+            --profile "{{.EC2_PROFILE}}" \
+            --region "{{.EC2_REGION}}" \
+            --command-id "$CMD_ID" \
+            --instance-id "$INSTANCE_ID" \
+            --query "StandardErrorContent" --output text
+          exit 1
+        fi
+
+  stop:
+    desc: "Stop all worker roles on EC2 (keeps Redis running) (usage: task ec2:stop [EC2_NAME=ares-tools])"
+    silent: true
+    cmds:
+      - |
+        INSTANCE_ID=$(aws ec2 describe-instances \
+          --profile "{{.EC2_PROFILE}}" \
+          --region "{{.EC2_REGION}}" \
+          --filters "Name=instance-state-name,Values=running" \
+                    "Name=tag:Name,Values=*{{.EC2_NAME}}*" \
+          --query "Reservations[*].Instances[*].InstanceId" \
+          --output text | head -1)
+
+        if [ -z "$INSTANCE_ID" ]; then
+          echo -e "{{.ERROR}} No running instance found matching: {{.EC2_NAME}}"
+          exit 1
+        fi
+
+        WORKER_UNITS=""
+        for role in {{.WORKER_ROLES}}; do
+          WORKER_UNITS="$WORKER_UNITS ares-worker@${role}.service"
+        done
+
+        echo -e "{{.INFO}} Stopping ares services on $INSTANCE_ID..."
+
+        PARAMS_FILE=$(mktemp)
+        trap "rm -f $PARAMS_FILE" EXIT
+        jq -n --arg units "$WORKER_UNITS" '{"commands": ["systemctl stop " + $units + " 2>/dev/null || true; pkill -f ares-orchestrator 2>/dev/null || true; echo Stopped all ares workers and orchestrator"]}' > "$PARAMS_FILE"
+
+        CMD_ID=$(aws ssm send-command \
+          --profile "{{.EC2_PROFILE}}" \
+          --region "{{.EC2_REGION}}" \
+          --instance-ids "$INSTANCE_ID" \
+          --document-name "AWS-RunShellScript" \
+          --parameters "file://$PARAMS_FILE" \
+          --query "Command.CommandId" --output text)
+
+        for i in $(seq 1 15); do
+          STATUS=$(aws ssm get-command-invocation \
+            --profile "{{.EC2_PROFILE}}" \
+            --region "{{.EC2_REGION}}" \
+            --command-id "$CMD_ID" \
+            --instance-id "$INSTANCE_ID" \
+            --query "Status" --output text 2>/dev/null) || true
+          case "$STATUS" in
+            Success|Failed|Cancelled|TimedOut) break ;;
+          esac
+          sleep 1
+        done
+
+        aws ssm get-command-invocation \
+          --profile "{{.EC2_PROFILE}}" \
+          --region "{{.EC2_REGION}}" \
+          --command-id "$CMD_ID" \
+          --instance-id "$INSTANCE_ID" \
+          --query "StandardOutputContent" --output text
+
+        echo -e "{{.SUCCESS}} Services stopped (Redis still running)"
+
+  restart:
+    desc: "Restart all worker roles on EC2 (usage: task ec2:restart [EC2_NAME=ares-tools])"
+    silent: true
+    cmds:
+      - task: stop
+      - task: start
+
+  # ============================================================================
+  # Status & Monitoring
+  # ============================================================================
+  status:
+    desc: "Show ares process status on EC2 (usage: task ec2:status [EC2_NAME=ares-tools])"
+    silent: true
+    cmds:
+      - |
+        INSTANCE_ID=$(aws ec2 describe-instances \
+          --profile "{{.EC2_PROFILE}}" \
+          --region "{{.EC2_REGION}}" \
+          --filters "Name=instance-state-name,Values=running" \
+                    "Name=tag:Name,Values=*{{.EC2_NAME}}*" \
+          --query "Reservations[*].Instances[*].InstanceId" \
+          --output text | head -1)
+
+        if [ -z "$INSTANCE_ID" ]; then
+          echo -e "{{.ERROR}} No running instance found matching: {{.EC2_NAME}}"
+          exit 1
+        fi
+
+        PARAMS_FILE=$(mktemp)
+        trap "rm -f $PARAMS_FILE" EXIT
+        jq -Rs '{"commands": [.]}' < .taskfiles/ec2/scripts/status.sh > "$PARAMS_FILE"
+
+        CMD_ID=$(aws ssm send-command \
+          --profile "{{.EC2_PROFILE}}" \
+          --region "{{.EC2_REGION}}" \
+          --instance-ids "$INSTANCE_ID" \
+          --document-name "AWS-RunShellScript" \
+          --parameters "file://$PARAMS_FILE" \
+          --query "Command.CommandId" --output text)
+
+        for i in $(seq 1 15); do
+          RESULT=$(aws ssm get-command-invocation \
+            --profile "{{.EC2_PROFILE}}" \
+            --region "{{.EC2_REGION}}" \
+            --command-id "$CMD_ID" \
+            --instance-id "$INSTANCE_ID" \
+            --query "Status" --output text 2>/dev/null) || true
+          case "$RESULT" in
+            Success|Failed|Cancelled|TimedOut) break ;;
+          esac
+          sleep 1
+        done
+
+        aws ssm get-command-invocation \
+          --profile "{{.EC2_PROFILE}}" \
+          --region "{{.EC2_REGION}}" \
+          --command-id "$CMD_ID" \
+          --instance-id "$INSTANCE_ID" \
+          --query "StandardOutputContent" --output text
+
+  logs:
+    desc: "Tail ares logs on EC2 via SSM session (usage: task ec2:logs [EC2_NAME=ares-tools] [ROLE=orchestrator] [LINES=50])"
+    silent: true
+    vars:
+      ROLE: '{{.ROLE | default "orchestrator"}}'
+      LINES: '{{.LINES | default "50"}}'
+    cmds:
+      - |
+        INSTANCE_ID=$(aws ec2 describe-instances \
+          --profile "{{.EC2_PROFILE}}" \
+          --region "{{.EC2_REGION}}" \
+          --filters "Name=instance-state-name,Values=running" \
+                    "Name=tag:Name,Values=*{{.EC2_NAME}}*" \
+          --query "Reservations[*].Instances[*].InstanceId" \
+          --output text | head -1)
+
+        if [ -z "$INSTANCE_ID" ]; then
+          echo -e "{{.ERROR}} No running instance found matching: {{.EC2_NAME}}"
+          exit 1
+        fi
+
+        LOG_FILE="{{.ARES_LOG_DIR}}/{{.ROLE}}.log"
+        echo -e "{{.INFO}} Tailing $LOG_FILE on $INSTANCE_ID (Ctrl+C to stop)..."
+
+        aws ssm start-session \
+          --profile "{{.EC2_PROFILE}}" \
+          --region "{{.EC2_REGION}}" \
+          --target "$INSTANCE_ID" \
+          --document-name "AWS-StartInteractiveCommand" \
+          --parameters "command=[\"tail -n {{.LINES}} -f $LOG_FILE\"]"
+
+  # ============================================================================
+  # Redis Port Forward
+  # ============================================================================
+  redis:forward:
+    desc: "SSM port-forward Redis to localhost:16379 for local CLI access (usage: task ec2:redis:forward [EC2_NAME=ares-tools])"
+    silent: true
+    cmds:
+      - |
+        INSTANCE_ID=$(aws ec2 describe-instances \
+          --profile "{{.EC2_PROFILE}}" \
+          --region "{{.EC2_REGION}}" \
+          --filters "Name=instance-state-name,Values=running" \
+                    "Name=tag:Name,Values=*{{.EC2_NAME}}*" \
+          --query "Reservations[*].Instances[*].InstanceId" \
+          --output text | head -1)
+
+        if [ -z "$INSTANCE_ID" ]; then
+          echo -e "{{.ERROR}} No running instance found matching: {{.EC2_NAME}}"
+          exit 1
+        fi
+
+        # Kill any stale port-forward
+        lsof -ti:16379 | xargs kill 2>/dev/null || true
+        sleep 1
+
+        echo -e "{{.INFO}} Port-forwarding Redis: localhost:16379 -> $INSTANCE_ID:6379"
+        echo -e "{{.INFO}} Use: ARES_REDIS_URL=redis://localhost:16379 ares-cli ops loot --latest"
+        echo -e "{{.INFO}} Press Ctrl+C to stop"
+        echo ""
+
+        aws ssm start-session \
+          --profile "{{.EC2_PROFILE}}" \
+          --region "{{.EC2_REGION}}" \
+          --target "$INSTANCE_ID" \
+          --document-name "AWS-StartPortForwardingSession" \
+          --parameters '{"portNumber":["6379"],"localPortNumber":["16379"]}'
+
+  # ============================================================================
+  # Arbitrary Command Execution
+  # ============================================================================
+  exec:
+    desc: "Run a command on EC2 via SSM (usage: task ec2:exec EC2_NAME=ares-tools CMD='redis-cli info')"
+    silent: true
+    vars:
+      CMD: '{{.CMD | default ""}}'
+    preconditions:
+      - sh: test -n "{{.CMD}}"
+        msg: "CMD required. Usage: task ec2:exec CMD='redis-cli info keyspace'"
+    cmds:
+      - |
+        INSTANCE_ID=$(aws ec2 describe-instances \
+          --profile "{{.EC2_PROFILE}}" \
+          --region "{{.EC2_REGION}}" \
+          --filters "Name=instance-state-name,Values=running" \
+                    "Name=tag:Name,Values=*{{.EC2_NAME}}*" \
+          --query "Reservations[*].Instances[*].InstanceId" \
+          --output text | head -1)
+
+        if [ -z "$INSTANCE_ID" ]; then
+          echo -e "{{.ERROR}} No running instance found matching: {{.EC2_NAME}}"
+          exit 1
+        fi
+
+        PARAMS_FILE=$(mktemp)
+        trap "rm -f $PARAMS_FILE" EXIT
+        jq -n --arg cmd "{{.CMD}}" '{"commands": [$cmd]}' > "$PARAMS_FILE"
+
+        CMD_ID=$(aws ssm send-command \
+          --profile "{{.EC2_PROFILE}}" \
+          --region "{{.EC2_REGION}}" \
+          --instance-ids "$INSTANCE_ID" \
+          --document-name "AWS-RunShellScript" \
+          --parameters "file://$PARAMS_FILE" \
+          --query "Command.CommandId" --output text)
+
+        for i in $(seq 1 60); do
+          STATUS=$(aws ssm get-command-invocation \
+            --profile "{{.EC2_PROFILE}}" \
+            --region "{{.EC2_REGION}}" \
+            --command-id "$CMD_ID" \
+            --instance-id "$INSTANCE_ID" \
+            --query "Status" --output text 2>/dev/null) || true
+          case "$STATUS" in
+            Success|Failed|Cancelled|TimedOut) break ;;
+          esac
+          sleep 1
+        done
+
+        aws ssm get-command-invocation \
+          --profile "{{.EC2_PROFILE}}" \
+          --region "{{.EC2_REGION}}" \
+          --command-id "$CMD_ID" \
+          --instance-id "$INSTANCE_ID" \
+          --query "StandardOutputContent" --output text
+
+        if [ "$STATUS" != "Success" ]; then
+          aws ssm get-command-invocation \
+            --profile "{{.EC2_PROFILE}}" \
+            --region "{{.EC2_REGION}}" \
+            --command-id "$CMD_ID" \
+            --instance-id "$INSTANCE_ID" \
+            --query "StandardErrorContent" --output text >&2
+          exit 1
+        fi

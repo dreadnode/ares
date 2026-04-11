@@ -148,7 +148,6 @@ tasks:
             MODEL_OVERRIDE_ENV="ARES_MODEL_OVERRIDE={{.MODEL}}"
           fi
 
-          # TODO: Replace with `ares-cli ops submit` once implemented in Rust CLI
           kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-orchestrator -- \
             env OPENAI_API_KEY="{{.OPENAI_API_KEY}}" \
             ANTHROPIC_API_KEY="{{.ANTHROPIC_API_KEY}}" \
@@ -162,12 +161,12 @@ tasks:
             ARES_MULTI_FOREST_MODE=false \
             $MODEL_OVERRIDE_ENV \
             GRAFANA_URL="{{.GRAFANA_URL}}" \
-            python -m ares.cli_ops submit "{{.TARGET}}" "{{.DOMAIN}}" \
+            ares-cli --redis-url "{{.REDIS_URL}}" ops submit \
+            "{{.TARGET}}" "{{.DOMAIN}}" \
             $IPS_ARGS \
             --operation-id "{{.OPERATION_ID_COMPUTED}}" \
             --model "{{.MODEL}}" \
             --max-steps {{.MAX_STEPS_RED}} \
-            --redis-url "{{.REDIS_URL}}" \
             --env "{{.TARGET_ENV}}" \
             $RESUME_FLAG \
             2>&1 | tee -a "{{.LOGFILE}}"
@@ -1115,6 +1114,218 @@ tasks:
           RESUME: "true"
 
   # ===========================================================================
+  # EC2 (SSM) — run operation on EC2 instead of K8s
+  # ===========================================================================
+
+  ec2:multi:
+    desc: "Run multi-agent red team operation on EC2 via SSM (usage: task red:ec2:multi [TARGET=dreadgoad] [DOMAIN=contoso.local] [EC2_NAME=ares-tools])"
+    silent: true
+    vars:
+      OPERATION_ID: '{{.OPERATION_ID | default ""}}'
+      RESUME: '{{.RESUME | default "false"}}'
+      TARGET_ENV: '{{.TARGET_ENV | default "staging"}}'
+      EC2_NAME: '{{.EC2_NAME | default "ares-tools"}}'
+      EC2_PROFILE: '{{.EC2_PROFILE | default "lab"}}'
+      EC2_REGION: '{{.EC2_REGION | default "us-west-1"}}'
+      RESOLVED_TARGETS:
+        sh: |
+          TARGET="{{.TARGET}}"
+          if echo "$TARGET" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+'; then
+            echo "$TARGET"
+          else
+            aws ec2 describe-instances \
+              --profile "{{.TARGET_PROFILE}}" \
+              --region "{{.TARGET_REGION}}" \
+              --filters "Name=instance-state-name,Values=running" \
+              --query "Reservations[*].Instances[?contains(Tags[?Key==\`Name\`].Value|[0], \`$TARGET\`)].PrivateIpAddress" \
+              --output text | tr '\t\n' ',' | sed 's/,$//'
+          fi
+      OPERATION_ID_COMPUTED:
+        sh: |
+          if [ -n "{{.OPERATION_ID}}" ]; then
+            echo "{{.OPERATION_ID}}"
+          else
+            echo "op-$(date +%Y%m%d-%H%M%S)"
+          fi
+      LOGFILE:
+        sh: echo "{{.LOG_DIR}}/red-ec2-{{.OPERATION_ID_COMPUTED}}-$(date +%Y%m%d-%H%M%S).log"
+    preconditions:
+      - sh: test -n "{{.TARGET}}"
+        msg: "TARGET variable is required. Usage: task red:ec2:multi TARGET=dreadgoad"
+      - sh: test -n "{{.RESOLVED_TARGETS}}"
+        msg: "No running EC2 instances found matching Name tag filter: {{.TARGET}}"
+      - sh: test -f .env
+        msg: ".env file required for API keys"
+    cmds:
+      # Show operation details
+      - cmd: |
+          TARGET="{{.TARGET}}"
+          if echo "$TARGET" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+'; then
+            echo "Using direct IP(s): {{.RESOLVED_TARGETS}}"
+          else
+            echo "Resolved '{{.TARGET}}' via AWS EC2 ({{.TARGET_PROFILE}}/{{.TARGET_REGION}})"
+            TARGET_COUNT=$(echo "{{.RESOLVED_TARGETS}}" | tr ',' '\n' | wc -l | xargs)
+            echo "Found $TARGET_COUNT target(s): {{.RESOLVED_TARGETS}}"
+          fi
+
+          echo ""
+          echo "Operation ID: {{.OPERATION_ID_COMPUTED}}"
+          echo "Target domain: {{.DOMAIN}}"
+          echo "Target IPs: {{.RESOLVED_TARGETS}}"
+          echo "Deploy mode: EC2 (SSM)"
+          echo "EC2 Name tag: {{.EC2_NAME}}"
+          if [ "{{.RESUME}}" = "true" ]; then
+            echo "Resuming from checkpoint"
+          fi
+          echo "Logging to: {{.LOGFILE}}"
+          echo ""
+        silent: false
+
+      # Create log directory
+      - cmd: mkdir -p {{.LOG_DIR}}
+        silent: true
+
+      # Resolve EC2 instance
+      - cmd: |
+          set -euo pipefail
+
+          INSTANCE_ID=$(aws ec2 describe-instances \
+            --profile "{{.EC2_PROFILE}}" \
+            --region "{{.EC2_REGION}}" \
+            --filters "Name=instance-state-name,Values=running" \
+                      "Name=tag:Name,Values=*{{.EC2_NAME}}*" \
+            --query "Reservations[*].Instances[*].InstanceId" \
+            --output text | head -1)
+
+          if [ -z "$INSTANCE_ID" ]; then
+            echo "ERROR: No running instance found matching: {{.EC2_NAME}}"
+            exit 1
+          fi
+          echo "EC2 instance: $INSTANCE_ID"
+
+          # Set active operation pointer in Redis via SSM
+          echo "Setting active operation pointer in Redis..."
+          PARAMS_FILE=$(mktemp)
+          jq -n --arg cmd "redis-cli set ares:operation:active {{.OPERATION_ID_COMPUTED}}" '{"commands": [$cmd]}' > "$PARAMS_FILE"
+          CMD_ID=$(aws ssm send-command \
+            --profile "{{.EC2_PROFILE}}" \
+            --region "{{.EC2_REGION}}" \
+            --instance-ids "$INSTANCE_ID" \
+            --document-name "AWS-RunShellScript" \
+            --parameters "file://$PARAMS_FILE" \
+            --query "Command.CommandId" --output text)
+          rm -f "$PARAMS_FILE"
+
+          for i in $(seq 1 15); do
+            STATUS=$(aws ssm get-command-invocation \
+              --profile "{{.EC2_PROFILE}}" \
+              --region "{{.EC2_REGION}}" \
+              --command-id "$CMD_ID" \
+              --instance-id "$INSTANCE_ID" \
+              --query "Status" --output text 2>/dev/null) || true
+            case "$STATUS" in
+              Success|Failed|Cancelled|TimedOut) break ;;
+            esac
+            sleep 1
+          done
+
+          if [ "$STATUS" != "Success" ]; then
+            echo "ERROR: Failed to set active operation in Redis"
+            exit 1
+          fi
+          echo "Set ares:operation:active -> {{.OPERATION_ID_COMPUTED}}"
+        silent: false
+
+      # Submit operation via SSM: run ares-orchestrator on EC2
+      - cmd: |
+          set -euo pipefail
+          set -a
+          . ./.env
+          set +a
+
+          INSTANCE_ID=$(aws ec2 describe-instances \
+            --profile "{{.EC2_PROFILE}}" \
+            --region "{{.EC2_REGION}}" \
+            --filters "Name=instance-state-name,Values=running" \
+                      "Name=tag:Name,Values=*{{.EC2_NAME}}*" \
+            --query "Reservations[*].Instances[*].InstanceId" \
+            --output text | head -1)
+
+          echo "Submitting operation to EC2 orchestrator..."
+
+          # Build JSON payload for ARES_OPERATION_ID
+          TARGET_IPS_JSON=$(echo "{{.RESOLVED_TARGETS}}" | tr ',' '\n' | sed 's/^/"/;s/$/"/' | paste -sd, | sed 's/^/[/;s/$/]/')
+
+          ORCH_PAYLOAD="{\"operation_id\":\"{{.OPERATION_ID_COMPUTED}}\",\"target_domain\":\"{{.DOMAIN}}\",\"target_ips\":${TARGET_IPS_JSON},\"model\":\"{{.MODEL}}\"}"
+
+          # Build orchestrator launch script from template
+          ORCH_SCRIPT=$(mktemp)
+          ORCH_PARAMS=$(mktemp)
+          sed -e "s|__ARES_PAYLOAD__|${ORCH_PAYLOAD}|" \
+              -e "s|__OPENAI_API_KEY__|${OPENAI_API_KEY:-}|" \
+              -e "s|__ANTHROPIC_API_KEY__|${ANTHROPIC_API_KEY:-}|" \
+              -e "s|__DREADNODE_API_KEY__|${DREADNODE_API_KEY:-}|" \
+              -e "s|__DREADNODE_SERVER_URL__|{{.DREADNODE_SERVER_URL}}|" \
+              -e "s|__DREADNODE_ORGANIZATION__|{{.DREADNODE_ORGANIZATION}}|" \
+              -e "s|__DREADNODE_WORKSPACE__|{{.DREADNODE_WORKSPACE}}|" \
+              -e "s|__DREADNODE_PROJECT__|{{.DREADNODE_PROJECT}}|" \
+              -e "s|__GRAFANA_TOKEN__|${GRAFANA_SERVICE_ACCOUNT_TOKEN:-}|" \
+              -e "s|__GRAFANA_URL__|{{.GRAFANA_URL}}|" \
+              .taskfiles/ec2/scripts/launch-orchestrator.sh.tmpl > "$ORCH_SCRIPT"
+          jq -Rs '{"commands": [.]}' < "$ORCH_SCRIPT" > "$ORCH_PARAMS"
+
+          CMD_ID=$(aws ssm send-command \
+            --profile "{{.EC2_PROFILE}}" \
+            --region "{{.EC2_REGION}}" \
+            --instance-ids "$INSTANCE_ID" \
+            --document-name "AWS-RunShellScript" \
+            --parameters "file://$ORCH_PARAMS" \
+            --query "Command.CommandId" --output text)
+          rm -f "$ORCH_SCRIPT" "$ORCH_PARAMS"
+
+          for i in $(seq 1 15); do
+            STATUS=$(aws ssm get-command-invocation \
+              --profile "{{.EC2_PROFILE}}" \
+              --region "{{.EC2_REGION}}" \
+              --command-id "$CMD_ID" \
+              --instance-id "$INSTANCE_ID" \
+              --query "Status" --output text 2>/dev/null) || true
+            case "$STATUS" in
+              Success|Failed|Cancelled|TimedOut) break ;;
+            esac
+            sleep 1
+          done
+
+          OUTPUT=$(aws ssm get-command-invocation \
+            --profile "{{.EC2_PROFILE}}" \
+            --region "{{.EC2_REGION}}" \
+            --command-id "$CMD_ID" \
+            --instance-id "$INSTANCE_ID" \
+            --query "StandardOutputContent" --output text)
+          echo "$OUTPUT" | tee -a "{{.LOGFILE}}"
+
+          if [ "$STATUS" != "Success" ]; then
+            echo "ERROR: Failed to start orchestrator"
+            aws ssm get-command-invocation \
+              --profile "{{.EC2_PROFILE}}" \
+              --region "{{.EC2_REGION}}" \
+              --command-id "$CMD_ID" \
+              --instance-id "$INSTANCE_ID" \
+              --query "StandardErrorContent" --output text
+            exit 1
+          fi
+
+          echo ""
+          echo "Operation {{.OPERATION_ID_COMPUTED}} submitted on EC2"
+          echo ""
+          echo "Monitor with:"
+          echo "  task ec2:logs EC2_NAME={{.EC2_NAME}} ROLE=orchestrator"
+          echo "  task ec2:redis:forward EC2_NAME={{.EC2_NAME}}  # then:"
+          echo "  ARES_REDIS_URL=redis://localhost:16379 task red:multi:loot:local LATEST=true"
+        silent: false
+        ignore_error: true
+
+  # ===========================================================================
   # Local Rust CLI convenience tasks (require ARES_REDIS_URL)
   # ===========================================================================
 
@@ -1208,18 +1419,10 @@ tasks:
         fi
         redis_cmd del "$TEST_KEY" >/dev/null 2>&1 || true
 
+        # Lua script: SCAN + UNLINK in a single Redis call (avoids per-key kubectl exec)
+        LUA_DEL='local cursor="0" local count=0 repeat local r=redis.call("SCAN",cursor,"MATCH",ARGV[1],"COUNT",200) cursor=r[1] if #r[2]>0 then redis.call("UNLINK",unpack(r[2])) count=count+#r[2] end until cursor=="0" return count'
         for pattern in "ares:operation:*:state" "ares:operation:*:checkpoint_time" "ares:operations:*:status" "ares:lock:*" "ares:tasks:*" "ares:results:*"; do
-          keys=$(redis_cmd --scan --pattern "$pattern")
-          count=0
-          if [ -n "$keys" ]; then
-            for key in $keys; do
-              if ! redis_cmd del "$key" >/dev/null; then
-                echo "ERROR: Failed to delete key: $key"
-                exit 1
-              fi
-              count=$((count + 1))
-            done
-          fi
+          count=$(redis_cmd eval "$LUA_DEL" 0 "$pattern" 2>/dev/null || echo "0")
           echo "Cleared $pattern ($count keys)"
         done
 
@@ -1231,15 +1434,8 @@ tasks:
 
         # Clear op-specific keys (meta, task queues, etc.)
         for pattern in "ares:op:*" "ares:tool_exec:*"; do
-          keys=$(redis_cmd --scan --pattern "$pattern")
-          count=0
-          if [ -n "$keys" ]; then
-            for key in $keys; do
-              redis_cmd del "$key" >/dev/null 2>&1 || true
-              count=$((count + 1))
-            done
-          fi
-          if [ $count -gt 0 ]; then
+          count=$(redis_cmd eval "$LUA_DEL" 0 "$pattern" 2>/dev/null || echo "0")
+          if [ "$count" != "0" ]; then
             echo "Cleared $pattern ($count keys)"
           fi
         done
