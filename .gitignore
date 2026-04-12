@@ -1,12 +1,5 @@
 # Testing code
 notebooks/
-test-alerts/
-
-# Project-specific ignores
-TODO
-.tool-versions
-/reports/
-/logs/
 
 # Custom parquet storage
 *.parquet
@@ -180,4 +173,3 @@ cython_debug/
 
 # Renovate
 cache
-.claude/
