@@ -37,6 +37,7 @@ from ares.core.orchestrator_client import (  # noqa: E402
     wait_for_operation_completion,
 )
 from ares.core.redis_client import create_verified_redis_client  # noqa: E402
+from ares.core.token_usage import estimate_usage_cost, get_usage_models  # noqa: E402
 
 
 def _get_vuln_priorities() -> dict[str, int]:
@@ -1785,6 +1786,36 @@ async def runtime(
             print("\n*** DOMAIN ADMIN ACHIEVED ***")
         if state.has_golden_ticket:
             print("*** GOLDEN TICKET OBTAINED ***")
+
+        # Token usage & estimated cost (from Redis counters set by workers)
+        tq = RedisTaskQueue(redis_url=resolved_redis_url)
+        await tq.connect()
+        usage = await tq.get_token_usage(operation_id)
+        await tq.disconnect()
+        if usage and (usage["input_tokens"] or usage["output_tokens"]):
+            in_tok = usage["input_tokens"]
+            out_tok = usage["output_tokens"]
+            total_tok = in_tok + out_tok
+            models = get_usage_models(usage)
+            print(f"\nTokens: {total_tok:,} (in: {in_tok:,}  out: {out_tok:,})")
+            if models:
+                model_names = ", ".join(sorted(models))
+                label = "Models" if len(models) > 1 else "Model"
+                print(f"{label}:  {model_names}")
+                total_cost, breakdown, unpriced_models = estimate_usage_cost(usage)
+                if total_cost is not None:
+                    cost_suffix = " (blended)" if len(breakdown) > 1 else ""
+                    print(f"Cost:   ${total_cost:.4f}{cost_suffix}")
+                elif usage.get("model"):
+                    print("Cost:   unavailable")
+                if len(breakdown) > 1:
+                    for item in breakdown:
+                        print(
+                            f"  - {item['model']}: {item['total_tokens']:,} tokens "
+                            f"(${item['cost']:.4f})"
+                        )
+                if unpriced_models:
+                    print(f"Unpriced models: {', '.join(unpriced_models)}")
 
     except Exception as e:
         logger.error(f"Failed to get runtime: {e}")

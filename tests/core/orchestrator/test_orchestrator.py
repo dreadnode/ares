@@ -113,6 +113,104 @@ async def test_run_multi_agent_operation_skips_wait_when_completed(monkeypatch):
     wait_mock.assert_not_awaited()
 
 
+@pytest.mark.asyncio
+async def test_run_multi_agent_operation_records_orchestrator_token_usage(monkeypatch):
+    from ares.core.orchestrator import _orchestrator as orch
+
+    shared_state = SimpleNamespace(
+        completed=False,
+        has_domain_admin=False,
+        domain_admin_path=None,
+        has_golden_ticket=False,
+        all_credentials=[],
+        all_hashes=[],
+        all_hosts=[],
+        discovered_vulnerabilities=[],
+        exploited_vulnerabilities=[],
+        completed_tasks=[],
+        pending_tasks={},
+        processed_asrep_domains=set(),
+        golden_tickets=[],
+        refresh_from_redis=AsyncMock(),
+    )
+
+    dispatcher = SimpleNamespace(shared_state=shared_state)
+    dispatcher.request_credential_access = AsyncMock(return_value="task-usage")
+    dispatcher.start = AsyncMock()
+    dispatcher.recover_state = AsyncMock(return_value=None)
+    dispatcher.register = AsyncMock()
+    dispatcher.stop = AsyncMock()
+    dispatcher.get_exploitation_status = AsyncMock(
+        return_value={"pending": [], "total_discovered": 0, "total_succeeded": 0}
+    )
+
+    task_queue = SimpleNamespace()
+    task_queue.connect = AsyncMock()
+    task_queue.acquire_operation_lock = AsyncMock(return_value=True)
+    task_queue.release_operation_lock = AsyncMock()
+    task_queue.disconnect = AsyncMock()
+    task_queue.increment_token_usage = AsyncMock()
+
+    recovery = SimpleNamespace()
+    recovery.start = AsyncMock()
+    recovery.start_periodic_checkpoint = AsyncMock()
+
+    class DummyAgent:
+        async def run(self, _prompt):
+            dispatcher.shared_state.completed = True
+            return SimpleNamespace(
+                stop_reason="completed",
+                messages=[],
+                steps=1,
+                error=None,
+                usage=SimpleNamespace(input_tokens=23, output_tokens=11, total_tokens=34),
+                agent=SimpleNamespace(model="openai/gpt-5-mini"),
+            )
+
+    monkeypatch.setattr(orch, "RedTeamDispatcher", lambda **_kwargs: dispatcher)
+    monkeypatch.setattr(orch, "RedisTaskQueue", lambda *_args, **_kwargs: task_queue)
+    monkeypatch.setattr(orch, "OperationRecoveryManager", lambda **_kwargs: recovery)
+    monkeypatch.setattr(orch, "get_redis_url", lambda: "redis://")
+    monkeypatch.setattr(orch, "get_namespace", lambda: "default")
+    monkeypatch.setattr(orch, "_load_or_initialize_state", AsyncMock())
+    monkeypatch.setattr(orch, "_create_agent_ensemble", AsyncMock(return_value=[]))
+    monkeypatch.setattr(orch, "_register_agents", AsyncMock())
+    monkeypatch.setattr(orch, "_ensure_required_workers", AsyncMock())
+    monkeypatch.setattr(orch, "_prime_operation", AsyncMock())
+    monkeypatch.setattr(orch, "_run_direct_nmap", AsyncMock())
+    monkeypatch.setattr(orch, "_create_orchestrator_agent", AsyncMock(return_value=DummyAgent()))
+    monkeypatch.setattr(orch, "_build_orchestrator_prompt", lambda **_kwargs: "prompt")
+    monkeypatch.setattr(orch, "_log_orchestrator_result", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        orch, "_generate_multi_agent_report", lambda *_args, **_kwargs: (None, None)
+    )
+
+    async def _noop(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(orch, "exploitation_workflow", _noop)
+    monkeypatch.setattr(orch, "_monitor_agent_health", _noop)
+    monkeypatch.setattr(orch, "_extend_operation_lock", _noop)
+    monkeypatch.setattr(orch, "_periodic_token_usage_summary", _noop)
+    monkeypatch.setattr(orch, "_wait_for_completion", AsyncMock())
+    monkeypatch.setattr(orch.dn, "run", lambda **_kwargs: nullcontext())
+    monkeypatch.setattr(orch.dn, "log_params", MagicMock())
+
+    await run_multi_agent_operation(
+        operation_id="op-contoso-orch-usage",
+        target_domain="contoso.local",
+        target_ips=["192.168.58.3"],
+        model="fallback-model",
+    )
+
+    task_queue.increment_token_usage.assert_awaited_once_with(
+        operation_id="op-contoso-orch-usage",
+        input_tokens=23,
+        output_tokens=11,
+        model="openai/gpt-5-mini",
+    )
+
+
 class TestAutoBloodHound:
     """Tests for automatic BloodHound collection."""
 
