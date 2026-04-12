@@ -80,6 +80,10 @@ pub async fn run_tool_exec_loop(
 
     let mut conn = conn;
 
+    // Track tools that failed with "not installed" so we can short-circuit
+    // future calls immediately without attempting to spawn the binary.
+    let mut unavailable_tools: std::collections::HashSet<String> = std::collections::HashSet::new();
+
     // Exponential backoff state for connection errors
     let mut retry_delay = Duration::from_secs(1);
     let max_retry_delay = Duration::from_secs(60);
@@ -104,7 +108,7 @@ pub async fn run_tool_exec_loop(
                     current_task: Some(format!("{}:{}", request.tool_name, request.call_id)),
                 });
 
-                execute_and_respond(&mut conn, &request).await;
+                execute_and_respond(&mut conn, &request, &mut unavailable_tools).await;
 
                 // Back to idle
                 let _ = status_tx.send(WorkerStatus {
@@ -178,7 +182,38 @@ async fn poll_tool_request(
 }
 
 /// Execute a tool call and push the result to Redis.
-async fn execute_and_respond(conn: &mut redis::aio::ConnectionManager, request: &ToolExecRequest) {
+///
+/// If the tool has previously failed with "not installed", short-circuits
+/// immediately without attempting to spawn the binary.
+async fn execute_and_respond(
+    conn: &mut redis::aio::ConnectionManager,
+    request: &ToolExecRequest,
+    unavailable_tools: &mut std::collections::HashSet<String>,
+) {
+    // Short-circuit if this tool is known to be unavailable
+    if unavailable_tools.contains(&request.tool_name) {
+        debug!(
+            tool = %request.tool_name,
+            call_id = %request.call_id,
+            "Skipping unavailable tool (previously failed to spawn)"
+        );
+        let response = ToolExecResponse {
+            call_id: request.call_id.clone(),
+            output: String::new(),
+            error: Some(format!(
+                "Tool '{}' is not installed on this worker. \
+                 Do not call this tool again — it failed to spawn previously.",
+                request.tool_name
+            )),
+            discoveries: None,
+        };
+        let result_key = format!("{TOOL_RESULT_PREFIX}:{}", request.call_id);
+        if let Ok(json) = serde_json::to_string(&response) {
+            let _ = push_result(conn, &result_key, &json).await;
+        }
+        return;
+    }
+
     info!(
         tool = %request.tool_name,
         call_id = %request.call_id,
@@ -218,6 +253,15 @@ async fn execute_and_respond(conn: &mut redis::aio::ConnectionManager, request: 
             }
         }
         Err(e) => {
+            let err_str = e.to_string();
+            // Track tools that fail because the binary is missing
+            if err_str.contains("failed to spawn") || err_str.contains("not installed") {
+                warn!(
+                    tool = %request.tool_name,
+                    "Tool binary not found — marking as unavailable for this session"
+                );
+                unavailable_tools.insert(request.tool_name.clone());
+            }
             warn!(
                 tool = %request.tool_name,
                 call_id = %request.call_id,
@@ -227,7 +271,7 @@ async fn execute_and_respond(conn: &mut redis::aio::ConnectionManager, request: 
             ToolExecResponse {
                 call_id: request.call_id.clone(),
                 output: String::new(),
-                error: Some(e.to_string()),
+                error: Some(err_str),
                 discoveries: None,
             }
         }

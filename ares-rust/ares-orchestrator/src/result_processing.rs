@@ -100,8 +100,9 @@ pub async fn process_completed_task(
         auto_chain_s4u_secretsdump(payload, dispatcher, &completed.task_id).await;
     }
 
-    // Notify credential access to wake up for potential new creds
+    // Notify credential access and delegation enumeration to wake up for potential new creds
     dispatcher.credential_access_notify.notify_one();
+    dispatcher.delegation_notify.notify_one();
 
     // Publish state update to workers
     let _ = dispatcher.notify_state_update().await;
@@ -627,9 +628,17 @@ pub(crate) fn parse_discoveries(payload: &Value) -> ParsedDiscoveries {
         }
     }
 
-    // Vulnerabilities
+    // Vulnerabilities (array)
     if let Some(vulns) = payload.get("vulnerabilities").and_then(|v| v.as_array()) {
         for vuln_val in vulns {
+            if let Ok(vuln) = serde_json::from_value::<VulnerabilityInfo>(vuln_val.clone()) {
+                result.vulnerabilities.push(vuln);
+            }
+        }
+    }
+    // Single vulnerability fallback (agents may report one vuln not wrapped in array)
+    if result.vulnerabilities.is_empty() {
+        if let Some(vuln_val) = payload.get("vulnerability") {
             if let Ok(vuln) = serde_json::from_value::<VulnerabilityInfo>(vuln_val.clone()) {
                 result.vulnerabilities.push(vuln);
             }
@@ -819,8 +828,9 @@ async fn poll_discoveries(dispatcher: &Dispatcher) -> Result<()> {
         }
     }
 
-    // Notify credential access after processing discoveries
+    // Notify credential access and delegation enumeration after processing discoveries
     dispatcher.credential_access_notify.notify_one();
+    dispatcher.delegation_notify.notify_one();
     let _ = dispatcher.notify_state_update().await;
 
     Ok(())

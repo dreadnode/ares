@@ -31,6 +31,8 @@ pub struct Dispatcher {
     pub ares_config: Option<Arc<ares_core::config::AresConfig>>,
     /// Notifies auto_credential_access to wake up when new creds arrive.
     pub credential_access_notify: Arc<Notify>,
+    /// Notifies auto_delegation_enumeration to wake up when new creds arrive.
+    pub delegation_notify: Arc<Notify>,
     /// LLM runner — drives tasks through the Rust agent loop.
     pub llm_runner: Arc<LlmTaskRunner>,
 }
@@ -56,6 +58,7 @@ impl Dispatcher {
             config,
             ares_config,
             credential_access_notify: Arc::new(Notify::new()),
+            delegation_notify: Arc::new(Notify::new()),
             llm_runner,
         }
     }

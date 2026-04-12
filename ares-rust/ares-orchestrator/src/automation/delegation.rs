@@ -15,12 +15,14 @@ pub async fn auto_delegation_enumeration(
     dispatcher: Arc<Dispatcher>,
     mut shutdown: watch::Receiver<bool>,
 ) {
+    let notify = dispatcher.delegation_notify.clone();
     let mut interval = tokio::time::interval(Duration::from_secs(30));
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
     loop {
         tokio::select! {
             _ = interval.tick() => {},
+            _ = notify.notified() => {},
             _ = shutdown.changed() => break,
         }
         if *shutdown.borrow() {

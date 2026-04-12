@@ -478,6 +478,16 @@ pub async fn run_agent_loop(
     let mut tool_calls_dispatched: u32 = 0;
     let mut all_discoveries: Vec<serde_json::Value> = Vec::new();
 
+    // Dynamic tool filtering: track unavailable tools and per-tool call counts
+    // to prevent infinite retry loops on missing binaries and runaway tool calls.
+    let mut active_tools: Vec<crate::ToolDefinition> = tools.to_vec();
+    let mut tool_call_counts: std::collections::HashMap<String, u32> =
+        std::collections::HashMap::new();
+    /// Max times a single tool can be called within one agent loop before
+    /// it is removed from the tool definitions to force the LLM to try
+    /// a different approach.
+    const MAX_TOOL_CALLS_PER_NAME: u32 = 10;
+
     loop {
         if steps >= config.max_steps {
             warn!(task_id = task_id, steps = steps, "Agent loop hit max steps");
@@ -493,13 +503,13 @@ pub async fn run_agent_loop(
         steps += 1;
 
         // Trim conversation if approaching context limit
-        trim_conversation(&mut messages, system_prompt, tools, &config.context);
+        trim_conversation(&mut messages, system_prompt, &active_tools, &config.context);
 
         // Build LLM request
         let mut request = LlmRequest::new(&config.model);
         request.system = Some(system_prompt.to_string());
         request.messages.clone_from(&messages);
-        request.tools = tools.to_vec();
+        request.tools = active_tools.clone();
         request.max_tokens = config.max_tokens;
         request.temperature = config.temperature;
 
@@ -617,14 +627,69 @@ pub async fn run_agent_loop(
             // Add tool results to messages in the original call order
             // and accumulate any structured discoveries.
             // Truncate large outputs to prevent context window exhaustion.
+            let mut tools_to_remove: Vec<String> = Vec::new();
             for call in &external {
+                // Track per-tool call counts for retry limiting
+                let count = tool_call_counts.entry(call.name.clone()).or_insert(0);
+                *count += 1;
+
                 if let Some(dr) = results.iter().find(|r| r.call_id == call.id) {
+                    // Detect "not installed" errors and mark tool for removal
+                    let is_not_installed = dr.output.contains("not installed")
+                        || dr.output.contains("failed to spawn");
+                    if is_not_installed {
+                        warn!(
+                            tool = %call.name,
+                            task_id = task_id,
+                            "Tool binary not installed — removing from available tools"
+                        );
+                        tools_to_remove.push(call.name.clone());
+                    }
+
                     let output =
                         truncate_tool_output(&dr.output, config.context.max_tool_output_chars);
                     messages.push(ChatMessage::tool_result(&call.id, &output));
                     if let Some(disc) = &dr.discoveries {
                         all_discoveries.push(disc.clone());
                     }
+                }
+
+                // Check if tool has exceeded max call count
+                if *tool_call_counts.get(&call.name).unwrap_or(&0) >= MAX_TOOL_CALLS_PER_NAME
+                    && !tools_to_remove.contains(&call.name)
+                {
+                    warn!(
+                        tool = %call.name,
+                        count = *tool_call_counts.get(&call.name).unwrap_or(&0),
+                        task_id = task_id,
+                        "Tool exceeded max call limit — removing from available tools"
+                    );
+                    tools_to_remove.push(call.name.clone());
+                }
+            }
+
+            // Remove exhausted/unavailable tools from active definitions
+            if !tools_to_remove.is_empty() {
+                let before = active_tools.len();
+                active_tools.retain(|t| !tools_to_remove.contains(&t.name));
+                let removed = before - active_tools.len();
+                if removed > 0 {
+                    info!(
+                        removed_count = removed,
+                        remaining = active_tools.len(),
+                        tools = ?tools_to_remove,
+                        "Removed tools from active definitions"
+                    );
+                    // Inject a system-like message so the LLM knows these tools are gone
+                    let removed_list = tools_to_remove.join(", ");
+                    messages.push(ChatMessage::text(
+                        Role::User,
+                        format!(
+                            "[SYSTEM] The following tools have been removed and are no longer \
+                             available: {removed_list}. Do not attempt to call them. \
+                             Use alternative approaches or different tools."
+                        ),
+                    ));
                 }
             }
         }

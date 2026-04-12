@@ -7,6 +7,7 @@
 mod certipy;
 mod credential_tools;
 mod delegation;
+mod mssql;
 mod nmap;
 mod secrets;
 mod smb;
@@ -20,6 +21,7 @@ pub use credential_tools::{
     parse_adidnsdump, parse_ldap_descriptions, parse_lsassy, parse_ntds_dit, parse_spray_success,
 };
 pub use delegation::{extract_delegation_account, parse_delegation};
+pub use mssql::{parse_mssql_impersonation, parse_mssql_linked_servers};
 pub use nmap::{flush_nmap_host, parse_nmap_output};
 pub use secrets::{parse_asrep_roast, parse_kerberoast, parse_secretsdump};
 pub use smb::{parse_netexec_smb, parse_smb_signing};
@@ -185,6 +187,18 @@ pub fn parse_tool_output(tool_name: &str, output: &str, params: &Value) -> Value
             let hosts = parse_adidnsdump(output);
             if !hosts.is_empty() {
                 discoveries["hosts"] = Value::Array(hosts);
+            }
+        }
+        "mssql_enum_impersonation" => {
+            let vulns = parse_mssql_impersonation(output, params);
+            if !vulns.is_empty() {
+                discoveries["vulnerabilities"] = Value::Array(vulns);
+            }
+        }
+        "mssql_enum_linked_servers" => {
+            let vulns = parse_mssql_linked_servers(output, params);
+            if !vulns.is_empty() {
+                discoveries["vulnerabilities"] = Value::Array(vulns);
             }
         }
         _ => {}

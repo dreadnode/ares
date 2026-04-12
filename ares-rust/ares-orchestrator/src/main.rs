@@ -448,6 +448,25 @@ async fn main() -> Result<()> {
         "Orchestration loop started — all background tasks running"
     );
 
+    // --- Pre-flight tool availability check ---
+    // Wait briefly for workers to start and publish their tool inventories,
+    // then warn loudly about any critical missing tools.
+    {
+        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        let missing = preflight_tool_check(&mut queue.connection()).await;
+        if !missing.is_empty() {
+            for (role, tools) in &missing {
+                warn!(
+                    role = %role,
+                    missing = ?tools,
+                    "PREFLIGHT: worker is missing critical tools — operations will be degraded"
+                );
+            }
+        } else {
+            info!("Preflight tool check passed — all critical tools available");
+        }
+    }
+
     // --- Dispatch initial reconnaissance (seeds the reactive automation pipeline) ---
     if !config.target_ips.is_empty() {
         let recon_count = dispatch_initial_recon(&dispatcher, &config).await;
@@ -547,4 +566,72 @@ async fn main() -> Result<()> {
 
     info!("ares-orchestrator stopped");
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Pre-flight tool check
+// ---------------------------------------------------------------------------
+
+/// Critical tools per worker role. If any of these are missing, operations
+/// will be severely degraded.
+const CRITICAL_TOOLS: &[(&str, &[&str])] = &[
+    ("recon", &["nmap", "netexec"]),
+    (
+        "credential_access",
+        &[
+            "impacket-GetUserSPNs",
+            "impacket-GetNPUsers",
+            "impacket-secretsdump",
+        ],
+    ),
+    ("privesc", &["impacket-findDelegation", "impacket-getST"]),
+    (
+        "lateral",
+        &[
+            "impacket-psexec",
+            "impacket-smbexec",
+            "impacket-secretsdump",
+        ],
+    ),
+];
+
+/// Query Redis for each worker's tool inventory and report any missing
+/// critical tools. Returns a list of (role, missing_tools) pairs.
+async fn preflight_tool_check(
+    conn: &mut redis::aio::ConnectionManager,
+) -> Vec<(String, Vec<String>)> {
+    use redis::AsyncCommands;
+
+    let mut problems = Vec::new();
+
+    for &(role, critical) in CRITICAL_TOOLS {
+        let agent_key = format!("ares:tools:ares-{role}-agent");
+        let available: Vec<String> = match conn.get::<_, Option<String>>(&agent_key).await {
+            Ok(Some(json)) => serde_json::from_str(&json).unwrap_or_default(),
+            _ => {
+                // No inventory published yet — worker may not have started
+                warn!(
+                    role = role,
+                    "No tool inventory found — worker may not be running"
+                );
+                problems.push((
+                    role.to_string(),
+                    critical.iter().map(|s| s.to_string()).collect(),
+                ));
+                continue;
+            }
+        };
+
+        let missing: Vec<String> = critical
+            .iter()
+            .filter(|&&tool| !available.iter().any(|a| a == tool))
+            .map(|s| s.to_string())
+            .collect();
+
+        if !missing.is_empty() {
+            problems.push((role.to_string(), missing));
+        }
+    }
+
+    problems
 }

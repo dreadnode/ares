@@ -217,17 +217,84 @@ impl Dispatcher {
     }
 
     /// Submit an exploit task for a vulnerability.
+    ///
+    /// Looks up the best available credential or hash for the vuln's target/domain
+    /// and attaches it to the payload so the agent doesn't have to discover auth independently.
     pub async fn request_exploit(
         &self,
         vuln: &ares_core::models::VulnerabilityInfo,
         priority: i32,
     ) -> Result<Option<String>> {
-        let payload = json!({
+        let mut payload = json!({
             "vuln_id": vuln.vuln_id,
             "vuln_type": vuln.vuln_type,
             "target": vuln.target,
             "details": vuln.details,
         });
+
+        // Look up credentials for this exploit from state
+        {
+            let state = self.state.read().await;
+
+            // Try account_name from vuln details first, then fall back to any cred for the target domain
+            let account_name = vuln
+                .details
+                .get("account_name")
+                .and_then(|v| v.as_str())
+                .or_else(|| vuln.details.get("AccountName").and_then(|v| v.as_str()));
+
+            let domain = vuln
+                .details
+                .get("domain")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+
+            // Try to find a matching credential
+            let cred = if let Some(acct) = account_name {
+                state
+                    .credentials
+                    .iter()
+                    .find(|c| c.username.to_lowercase() == acct.to_lowercase())
+            } else {
+                None
+            }
+            .or_else(|| {
+                // Fall back to any credential for the vuln's domain
+                if !domain.is_empty() {
+                    state
+                        .credentials
+                        .iter()
+                        .find(|c| c.domain.to_lowercase() == domain.to_lowercase())
+                } else {
+                    // Fall back to first available credential
+                    state.credentials.first()
+                }
+            });
+
+            if let Some(cred) = cred {
+                payload["credential"] = json!({
+                    "username": cred.username,
+                    "password": cred.password,
+                    "domain": cred.domain,
+                });
+            }
+
+            // Also attach a hash if available for the account
+            if let Some(acct) = account_name {
+                if let Some(hash) = state
+                    .hashes
+                    .iter()
+                    .find(|h| h.username.to_lowercase() == acct.to_lowercase())
+                {
+                    payload["hash"] = json!(hash.hash_value);
+                    payload["hash_username"] = json!(hash.username);
+                    if let Some(ref aes) = hash.aes_key {
+                        payload["aes_key"] = json!(aes);
+                    }
+                }
+            }
+        }
+
         let role = if vuln.recommended_agent.is_empty() {
             "privesc"
         } else {

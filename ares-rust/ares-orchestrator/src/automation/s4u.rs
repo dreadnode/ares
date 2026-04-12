@@ -20,12 +20,14 @@ pub async fn auto_s4u_exploitation(
     dispatcher: Arc<Dispatcher>,
     mut shutdown: watch::Receiver<bool>,
 ) {
+    let notify = dispatcher.delegation_notify.clone();
     let mut interval = tokio::time::interval(Duration::from_secs(20));
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
     loop {
         tokio::select! {
             _ = interval.tick() => {},
+            _ = notify.notified() => {},
             _ = shutdown.changed() => break,
         }
         if *shutdown.borrow() {
@@ -100,6 +102,12 @@ pub async fn auto_s4u_exploitation(
 
                     // Need at least a credential or hash to perform S4U
                     if credential.is_none() && hash.is_none() {
+                        debug!(
+                            vuln_id = %vuln.vuln_id,
+                            vuln_type = %vuln.vuln_type,
+                            account = ?account_name,
+                            "S4U skipped: no credential or hash for delegating account"
+                        );
                         return None;
                     }
 
