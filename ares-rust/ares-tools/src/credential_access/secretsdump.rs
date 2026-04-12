@@ -16,7 +16,7 @@ pub async fn secretsdump(args: &Value) -> Result<ToolOutput> {
     let hash = optional_str(args, "hash");
     let target = required_str(args, "target")?;
     let dc_ip = optional_str(args, "dc_ip");
-    let use_kerberos = optional_bool(args, "use_kerberos").unwrap_or(false);
+    let use_kerberos = optional_bool(args, "no_pass").unwrap_or(false);
     let ticket_path = optional_str(args, "ticket_path");
     let timeout_minutes = optional_i64(args, "timeout_minutes");
 

@@ -12,7 +12,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use serde_json::json;
-use tracing::info;
+use tracing::{info, warn};
 
 use ares_llm::provider::ToolCall;
 use ares_llm::{CallbackHandler, CallbackResult};
@@ -275,14 +275,34 @@ impl OrchestratorCallbackHandler {
             .task_queue
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("TaskQueue not configured"))?;
-        // Read heartbeats from Redis to get agent status
+        // Read heartbeats from Redis to get agent status (SCAN to avoid blocking)
         let mut conn = task_queue.connection();
         let pattern = "ares:heartbeat:*";
-        let keys: Vec<String> = redis::cmd("KEYS")
-            .arg(pattern)
-            .query_async(&mut conn)
-            .await
-            .unwrap_or_default();
+        let keys = {
+            let mut all_keys = Vec::new();
+            let mut cursor: u64 = 0;
+            loop {
+                let result: Result<(u64, Vec<String>), redis::RedisError> = redis::cmd("SCAN")
+                    .arg(cursor)
+                    .arg("MATCH")
+                    .arg(pattern)
+                    .arg("COUNT")
+                    .arg(100)
+                    .query_async(&mut conn)
+                    .await;
+                match result {
+                    Ok((next_cursor, keys)) => {
+                        all_keys.extend(keys);
+                        cursor = next_cursor;
+                        if cursor == 0 {
+                            break;
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+            all_keys
+        };
 
         let mut agents: Vec<serde_json::Value> = Vec::new();
         for key in &keys {
@@ -508,6 +528,180 @@ impl OrchestratorCallbackHandler {
             task_id.as_deref().unwrap_or("queued")
         )))
     }
+    // -----------------------------------------------------------------------
+    // Recording tools — persist weaknesses & timeline events to state/Redis
+    // -----------------------------------------------------------------------
+
+    async fn record_credential(&self, call: &ToolCall) -> Result<CallbackResult> {
+        let username = call.arguments["username"]
+            .as_str()
+            .unwrap_or("")
+            .to_string();
+        let password = call.arguments["password"]
+            .as_str()
+            .unwrap_or("")
+            .to_string();
+        let domain = call.arguments["domain"].as_str().unwrap_or("").to_string();
+        let source = call.arguments["source"].as_str().unwrap_or("").to_string();
+
+        if username.is_empty() {
+            return Ok(CallbackResult::Continue("Username is required".to_string()));
+        }
+
+        let task_queue = self
+            .task_queue
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("TaskQueue not configured"))?;
+
+        let credential = ares_core::models::Credential {
+            id: uuid::Uuid::new_v4().to_string(),
+            username: username.clone(),
+            password: password.clone(),
+            domain: domain.clone(),
+            source: source.clone(),
+            discovered_at: Some(chrono::Utc::now()),
+            is_admin: false,
+            parent_id: None,
+            attack_step: 0,
+        };
+
+        match self.state.publish_credential(task_queue, credential).await {
+            Ok(true) => {
+                info!(username = %username, domain = %domain, source = %source, "Credential persisted via callback");
+                Ok(CallbackResult::Continue(format!(
+                    "Credential recorded and persisted: {username}@{domain} (source: {source})"
+                )))
+            }
+            Ok(false) => Ok(CallbackResult::Continue(format!(
+                "Credential already known: {username}@{domain}"
+            ))),
+            Err(e) => {
+                warn!(err = %e, "Failed to persist credential");
+                Ok(CallbackResult::Continue(format!(
+                    "Credential recorded (persist failed: {e}): {username}@{domain}"
+                )))
+            }
+        }
+    }
+
+    async fn record_weakness(&self, call: &ToolCall) -> Result<CallbackResult> {
+        let title = call.arguments["title"].as_str().unwrap_or("").to_string();
+        let vulnerability = call.arguments["vulnerability"]
+            .as_str()
+            .unwrap_or("")
+            .to_string();
+        let affected = call.arguments["affected_resource"]
+            .as_str()
+            .unwrap_or("")
+            .to_string();
+        let impact = call.arguments["impact"].as_str().unwrap_or("").to_string();
+        let recommendation = call.arguments["recommendation"]
+            .as_str()
+            .unwrap_or("")
+            .to_string();
+
+        if title.is_empty() {
+            return Ok(CallbackResult::Continue(
+                "Weakness title is required".to_string(),
+            ));
+        }
+
+        let task_queue = self
+            .task_queue
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("TaskQueue not configured"))?;
+
+        // Build weakness block matching Python format for parse_weakness_block_display()
+        let mut block = format!("Title: {title}");
+        if !vulnerability.is_empty() {
+            block.push_str(&format!("\nVulnerability: {vulnerability}"));
+        }
+        if !affected.is_empty() {
+            block.push_str(&format!("\nAffected Resource: {affected}"));
+        }
+        if !impact.is_empty() {
+            block.push_str(&format!("\nImpact: {impact}"));
+        }
+        if !recommendation.is_empty() {
+            block.push_str(&format!("\nRecommendation: {recommendation}"));
+        }
+
+        let dedup_key = title.to_lowercase();
+        match self
+            .state
+            .publish_weakness(task_queue, block, dedup_key)
+            .await
+        {
+            Ok(true) => {
+                info!(title = %title, affected = %affected, "Weakness recorded and persisted");
+                Ok(CallbackResult::Continue(format!(
+                    "Weakness recorded: {title} ({affected})"
+                )))
+            }
+            Ok(false) => Ok(CallbackResult::Continue(format!(
+                "Weakness already recorded: {title}"
+            ))),
+            Err(e) => {
+                warn!(err = %e, "Failed to persist weakness");
+                Ok(CallbackResult::Continue(format!(
+                    "Weakness recorded (persist failed): {title}"
+                )))
+            }
+        }
+    }
+
+    async fn record_timeline_event(&self, call: &ToolCall) -> Result<CallbackResult> {
+        let description = call.arguments["description"]
+            .as_str()
+            .unwrap_or("")
+            .to_string();
+        let source = call.arguments["source"]
+            .as_str()
+            .unwrap_or("agent")
+            .to_string();
+        let mitre_techniques: Vec<String> = call.arguments["mitre_techniques"]
+            .as_array()
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        if description.is_empty() {
+            return Ok(CallbackResult::Continue(
+                "Event description is required".to_string(),
+            ));
+        }
+
+        let task_queue = self
+            .task_queue
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("TaskQueue not configured"))?;
+
+        let event_id = format!("evt-{}", &uuid::Uuid::new_v4().simple().to_string()[..8]);
+        let event = json!({
+            "id": event_id,
+            "timestamp": chrono::Utc::now().to_rfc3339(),
+            "source": source,
+            "description": description,
+            "mitre_techniques": mitre_techniques,
+        });
+
+        if let Err(e) = self
+            .state
+            .persist_timeline_event(task_queue, &event, &mitre_techniques)
+            .await
+        {
+            warn!(err = %e, "Failed to persist timeline event");
+        }
+
+        info!(description = %description, "Timeline event recorded and persisted");
+        Ok(CallbackResult::Continue(format!(
+            "Timeline event recorded: {description}"
+        )))
+    }
+
     async fn dispatch_crack(&self, call: &ToolCall) -> Result<CallbackResult> {
         let dispatcher = self
             .dispatcher
@@ -556,6 +750,10 @@ impl CallbackHandler for OrchestratorCallbackHandler {
             "get_pending_tasks" => Some(self.get_pending_tasks().await),
             "get_agent_status" => Some(self.get_agent_status().await),
             "get_operation_summary" => Some(self.get_operation_summary().await),
+            // Recording tools — persist to state and Redis
+            "record_credential" => Some(self.record_credential(call).await),
+            "record_weakness" => Some(self.record_weakness(call).await),
+            "record_timeline_event" => Some(self.record_timeline_event(call).await),
             // Dispatch tools
             "dispatch_recon" => Some(self.dispatch_recon(call).await),
             "dispatch_credential_access" => Some(self.dispatch_credential_access(call).await),
@@ -565,6 +763,27 @@ impl CallbackHandler for OrchestratorCallbackHandler {
             "dispatch_crack" => Some(self.dispatch_crack(call).await),
             // Not ours — let built-in handler take over
             _ => None,
+        }
+    }
+
+    async fn on_token_usage(&self, usage: &ares_llm::TokenUsage, model: &str) {
+        if usage.input_tokens == 0 && usage.output_tokens == 0 {
+            return;
+        }
+        if let Some(ref queue) = self.task_queue {
+            let op_id = self.state.read().await.operation_id.clone();
+            let mut conn = queue.connection();
+            if let Err(e) = ares_core::token_usage::increment_token_usage(
+                &mut conn,
+                &op_id,
+                usage.input_tokens.into(),
+                usage.output_tokens.into(),
+                model,
+            )
+            .await
+            {
+                warn!(err = %e, "Failed to record incremental token usage");
+            }
         }
     }
 }
@@ -1054,6 +1273,8 @@ mod tests {
             "get_hash_value",
             "get_pending_tasks",
             "get_operation_summary",
+            "record_weakness",
+            "record_timeline_event",
             "dispatch_recon",
             "dispatch_credential_access",
             "dispatch_lateral_movement",

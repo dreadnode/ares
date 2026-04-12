@@ -239,6 +239,9 @@ mod tests {
             DEDUP_TRUST_FOLLOW,
             DEDUP_S4U_EXPLOITS,
             DEDUP_GMSA_ACCOUNTS,
+            DEDUP_LOW_HANGING,
+            DEDUP_CRED_SECRETSDUMP,
+            DEDUP_SHARE_ENUM,
         ];
         assert_eq!(expected.len(), ALL_DEDUP_SETS.len());
         for name in expected {

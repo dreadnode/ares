@@ -57,7 +57,7 @@ pub fn parse_netexec_users(output: &str) -> Vec<Value> {
                         users.push(json!({
                             "username": username,
                             "domain": domain,
-                            "source": "enumerate_users",
+                            "source": "netexec_user_enum",
                         }));
                     }
                 }
@@ -85,8 +85,8 @@ pub fn parse_netexec_users(output: &str) -> Vec<Value> {
             if parts.len() >= 8 {
                 let username = parts[4].to_string();
 
-                // Skip header remnants and special accounts
-                if username.starts_with('-') || username.to_lowercase() == "guest" {
+                // Skip header remnants
+                if username.starts_with('-') {
                     continue;
                 }
 
@@ -108,7 +108,7 @@ pub fn parse_netexec_users(output: &str) -> Vec<Value> {
                     users.push(json!({
                         "username": username,
                         "domain": domain,
-                        "source": "enumerate_users",
+                        "source": "netexec_user_enum",
                     }));
 
                     // Check for embedded passwords in description: (Password : XXX)
@@ -151,26 +151,48 @@ pub fn parse_netexec_users(output: &str) -> Vec<Value> {
 }
 
 pub fn parse_netexec_shares(output: &str) -> Vec<Value> {
+    // Netexec --shares output format (after the header/separator rows):
+    //   SMB  192.168.58.10  445  DC01  SHARENAME  READ,WRITE  Remark text
+    //   [0]  [1]            [2]  [3]   [4]        [5]         [6..]
     let mut shares = Vec::new();
+    let mut seen = std::collections::HashSet::new();
 
     for line in output.lines() {
-        // Share lines: "SMB  192.168.58.10  445  DC01  SHARENAME  READ,WRITE"
-        if line.contains("READ") || line.contains("WRITE") {
-            let parts: Vec<&str> = line.split_whitespace().collect();
-            if parts.len() >= 5 {
-                // Find the share name (usually after the hostname)
-                for (i, part) in parts.iter().enumerate() {
-                    if *part == "READ" || *part == "WRITE" || part.contains("READ") {
-                        if i > 0 {
-                            shares.push(json!({
-                                "name": parts[i - 1],
-                                "access": part,
-                            }));
-                        }
-                        break;
-                    }
-                }
-            }
+        if !(line.contains("READ") || line.contains("WRITE")) {
+            continue;
+        }
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        // Minimum: SMB IP PORT HOST SHARE PERM
+        if parts.len() < 6 {
+            continue;
+        }
+        // Detect SMB-prefixed lines
+        if parts[0] != "SMB" {
+            continue;
+        }
+        let host = parts[1];
+        let share_name = parts[4];
+        let perm = parts[5].to_uppercase();
+        if !(perm.contains("READ") || perm.contains("WRITE")) {
+            continue;
+        }
+        // Skip header/separator rows
+        if share_name.starts_with('-') || share_name.to_lowercase() == "share" {
+            continue;
+        }
+        let comment = if parts.len() > 6 {
+            parts[6..].join(" ")
+        } else {
+            String::new()
+        };
+        let key = format!("{}:{}", host.to_lowercase(), share_name.to_lowercase());
+        if seen.insert(key) {
+            shares.push(json!({
+                "host": host,
+                "name": share_name,
+                "permissions": perm,
+                "comment": comment,
+            }));
         }
     }
 
@@ -246,14 +268,21 @@ CONTOSO\\JDOE  (SidTypeUser)";
     #[test]
     fn test_parse_netexec_shares() {
         let output = "\
-SMB  192.168.58.10  445  DC01  SYSVOL  READ
-SMB  192.168.58.10  445  DC01  NETLOGON  READ
-SMB  192.168.58.10  445  DC01  IT_Share  READ,WRITE";
+SMB  192.168.58.10  445  DC01  Share           Permissions     Remark
+SMB  192.168.58.10  445  DC01  ------          -----------     ------
+SMB  192.168.58.10  445  DC01  ADMIN$                          Remote Admin
+SMB  192.168.58.10  445  DC01  C$                              Default share
+SMB  192.168.58.10  445  DC01  SYSVOL          READ            Logon server share
+SMB  192.168.58.10  445  DC01  NETLOGON        READ            Logon server share
+SMB  192.168.58.10  445  DC01  IT_Share        READ,WRITE";
         let shares = parse_netexec_shares(output);
         assert_eq!(shares.len(), 3);
         assert_eq!(shares[0]["name"], "SYSVOL");
-        assert_eq!(shares[0]["access"], "READ");
+        assert_eq!(shares[0]["host"], "192.168.58.10");
+        assert_eq!(shares[0]["permissions"], "READ");
+        assert_eq!(shares[0]["comment"], "Logon server share");
         assert_eq!(shares[2]["name"], "IT_Share");
+        assert_eq!(shares[2]["permissions"], "READ,WRITE");
     }
 
     #[test]

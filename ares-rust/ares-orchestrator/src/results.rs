@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use anyhow::Result;
 use tokio::sync::{mpsc, watch};
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::config::OrchestratorConfig;
 use crate::routing::ActiveTaskTracker;
@@ -78,28 +78,33 @@ pub fn spawn_result_consumer(
                     let is_conn = is_connection_error(&e);
 
                     if is_conn {
-                        let max_failures = 10_u32;
                         let delay = Duration::from_secs(std::cmp::min(
-                            30,
-                            2_u64.pow(consecutive_failures.min(4)),
+                            60,
+                            2_u64.pow(consecutive_failures.min(5)),
                         ));
-                        warn!(
-                            attempt = consecutive_failures,
-                            max = max_failures,
-                            err = %e,
-                            "Result consumer Redis error, retrying in {:?}",
-                            delay
-                        );
 
-                        if consecutive_failures >= max_failures {
-                            // Fatal — let the orchestrator crash so K8s restarts it
-                            panic!(
-                                "Redis unavailable after {} consecutive failures: {}",
-                                consecutive_failures, e
+                        if consecutive_failures >= 10 {
+                            error!(
+                                attempt = consecutive_failures,
+                                err = %e,
+                                "Result consumer: Redis unavailable for extended period, still retrying"
+                            );
+                        } else {
+                            warn!(
+                                attempt = consecutive_failures,
+                                err = %e,
+                                delay_secs = delay.as_secs(),
+                                "Result consumer: connection error, retrying"
                             );
                         }
 
-                        tokio::time::sleep(delay).await;
+                        tokio::select! {
+                            _ = tokio::time::sleep(delay) => {},
+                            _ = shutdown.changed() => {
+                                info!("Result consumer shutting down (signalled during backoff)");
+                                break;
+                            }
+                        }
                         continue;
                     } else {
                         warn!(err = %e, "Result consumer non-connection error");
@@ -134,7 +139,10 @@ async fn consume_cycle(
         return Ok(0);
     }
 
-    let results = queue.check_results_batch(&task_ids).await?;
+    let results = queue
+        .check_results_batch(&task_ids)
+        .await
+        .inspect_err(|e| warn!(tracked = task_ids.len(), err = %e, "check_results_batch failed"))?;
 
     let mut found = 0_usize;
     for (task_id, maybe_result) in results {

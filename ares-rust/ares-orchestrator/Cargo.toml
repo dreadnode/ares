@@ -23,6 +23,8 @@ tracing-subscriber = { workspace = true }
 anyhow = { workspace = true }
 uuid = { workspace = true }
 async-trait = "0.1"
+regex = { workspace = true }
+once_cell = "1"
 
 [dev-dependencies]
 tokio = { workspace = true }

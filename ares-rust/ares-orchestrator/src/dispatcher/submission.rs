@@ -170,12 +170,34 @@ impl Dispatcher {
             )
             .await;
 
+        // Persist pending task to Redis HASH for recovery
+        let now = Utc::now();
+        let task_info = ares_core::models::TaskInfo {
+            task_id: task_id.clone(),
+            task_type: task_type.to_string(),
+            assigned_agent: target_role.to_string(),
+            status: ares_core::models::TaskStatus::InProgress,
+            created_at: now,
+            started_at: Some(now),
+            completed_at: None,
+            last_activity_at: now,
+            params: Default::default(),
+            result: None,
+            error: None,
+            retry_count: 0,
+            max_retries: 3,
+        };
+        let _ = self.state.track_pending_task(&self.queue, task_info).await;
+
         // Spawn the LLM agent loop as a background task
         let queue = self.queue.clone();
         let tid = task_id.clone();
         let tt = task_type.to_string();
         tokio::spawn(async move {
             let outcome = runner.execute_task(&tt, &tid, role, &payload).await;
+
+            // Token usage is now recorded incrementally per-LLM-call via
+            // CallbackHandler::on_token_usage — no batch recording needed here.
 
             // Convert outcome to TaskResult and push to result queue
             let result = match outcome {

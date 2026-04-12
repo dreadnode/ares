@@ -39,6 +39,9 @@ pub const DEDUP_ACL_STEPS: &str = "acl_steps";
 pub const DEDUP_TRUST_FOLLOW: &str = "trust_follow";
 pub const DEDUP_S4U_EXPLOITS: &str = "s4u_exploits";
 pub const DEDUP_GMSA_ACCOUNTS: &str = "gmsa_accounts";
+pub const DEDUP_LOW_HANGING: &str = "low_hanging";
+pub const DEDUP_CRED_SECRETSDUMP: &str = "cred_secretsdump";
+pub const DEDUP_SHARE_ENUM: &str = "share_enum";
 
 /// Vuln queue ZSET key suffix.
 pub const KEY_VULN_QUEUE: &str = "vuln_queue";
@@ -65,5 +68,8 @@ const ALL_DEDUP_SETS: &[&str] = &[
     DEDUP_ACL_STEPS,
     DEDUP_TRUST_FOLLOW,
     DEDUP_S4U_EXPLOITS,
+    DEDUP_SHARE_ENUM,
     DEDUP_GMSA_ACCOUNTS,
+    DEDUP_LOW_HANGING,
+    DEDUP_CRED_SECRETSDUMP,
 ];

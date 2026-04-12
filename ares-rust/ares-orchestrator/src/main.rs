@@ -29,6 +29,7 @@ mod dispatcher;
 mod exploitation;
 mod llm_runner;
 mod monitoring;
+mod output_extraction;
 mod recovery;
 mod result_processing;
 mod results;
@@ -43,7 +44,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use tokio::signal;
 use tokio::sync::watch;
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 use crate::automation_spawner::spawn_automation_tasks;
 use crate::bootstrap::{bootstrap_meta, dispatch_initial_recon};
@@ -51,7 +52,7 @@ use crate::config::OrchestratorConfig;
 use crate::cost_summary::spawn_cost_summary;
 use crate::deferred::DeferredQueue;
 use crate::dispatcher::Dispatcher;
-use crate::monitoring::{spawn_heartbeat_monitor, AgentRegistry};
+use crate::monitoring::{spawn_heartbeat_monitor, spawn_lock_keeper, AgentRegistry};
 use crate::results::spawn_result_consumer;
 use crate::routing::ActiveTaskTracker;
 use crate::state::SharedState;
@@ -145,6 +146,68 @@ async fn main() -> Result<()> {
                     redis::AsyncCommands::expire(&mut conn, &domain_key, 86400i64).await;
                 info!(domain = %domain, "Seeded target domain");
             }
+
+            // Seed domain_controllers from target IPs so automation tasks
+            // (AS-REP roast, Kerberoast, BloodHound, delegation enum) can fire
+            // immediately without waiting for recon to report back.
+            // Use the first target IP as the DC for the target domain.
+            if state.domain_controllers.is_empty() {
+                if let Some(first_ip) = config.target_ips.first() {
+                    let dc_key = format!(
+                        "{}:{}:{}",
+                        ares_core::state::KEY_PREFIX,
+                        state.operation_id,
+                        ares_core::state::KEY_DC_MAP,
+                    );
+                    let mut conn = queue.connection();
+                    let _: Result<(), _> =
+                        redis::AsyncCommands::hset(&mut conn, &dc_key, &domain, first_ip).await;
+                    state
+                        .domain_controllers
+                        .insert(domain.clone(), first_ip.clone());
+                    info!(
+                        domain = %domain,
+                        dc_ip = %first_ip,
+                        "Seeded domain controller from target IPs (enables immediate automation)"
+                    );
+                }
+            }
+
+            // Seed placeholder hosts for ALL target IPs (matches Python startup).
+            // This ensures all IPs appear in the host list even before recon runs,
+            // and detect_dc() on service results can trigger domain extraction.
+            {
+                let host_key = format!(
+                    "{}:{}:{}",
+                    ares_core::state::KEY_PREFIX,
+                    state.operation_id,
+                    ares_core::state::KEY_HOSTS,
+                );
+                let mut conn = queue.connection();
+                for ip in &config.target_ips {
+                    if !state.hosts.iter().any(|h| h.ip == *ip) {
+                        let placeholder = ares_core::models::Host {
+                            ip: ip.clone(),
+                            hostname: String::new(),
+                            os: String::new(),
+                            roles: vec![],
+                            services: vec![],
+                            is_dc: false,
+                            owned: false,
+                        };
+                        let data = serde_json::to_string(&placeholder).unwrap_or_default();
+                        let _: Result<(), _> =
+                            redis::AsyncCommands::rpush(&mut conn, &host_key, &data).await;
+                        state.hosts.push(placeholder);
+                    }
+                }
+                let _: Result<(), _> =
+                    redis::AsyncCommands::expire(&mut conn, &host_key, 86400i64).await;
+                info!(
+                    count = config.target_ips.len(),
+                    "Seeded placeholder hosts for all target IPs"
+                );
+            }
         }
     }
 
@@ -212,7 +275,10 @@ async fn main() -> Result<()> {
             Arc::new(tool_dispatcher::LocalToolDispatcher::new())
         } else {
             info!("Tool dispatch: Redis queue (ares:tool_exec:{{role}})");
-            Arc::new(tool_dispatcher::RedisToolDispatcher::new(queue.clone()))
+            Arc::new(tool_dispatcher::RedisToolDispatcher::new(
+                queue.clone(),
+                config.operation_id.clone(),
+            ))
         };
 
     let llm_runner = Arc::new(llm_runner::LlmTaskRunner::new(
@@ -253,7 +319,10 @@ async fn main() -> Result<()> {
 
     // --- Spawn background tasks ---
 
-    // Core infrastructure
+    // Core infrastructure — lock keeper runs independently to prevent
+    // lock expiry even if heartbeat sweeps or Redis calls hang.
+    let lock_handle = spawn_lock_keeper(queue.clone(), config.clone(), shutdown_rx.clone());
+
     let hb_handle = spawn_heartbeat_monitor(
         queue.clone(),
         registry.clone(),
@@ -262,7 +331,7 @@ async fn main() -> Result<()> {
         shutdown_rx.clone(),
     );
 
-    let (result_handle, mut result_rx) = spawn_result_consumer(
+    let (_result_handle, mut result_rx) = spawn_result_consumer(
         queue.clone(),
         tracker.clone(),
         config.clone(),
@@ -318,7 +387,10 @@ async fn main() -> Result<()> {
             if std::env::var("ARES_TOOL_DISPATCH").as_deref() == Ok("local") {
                 Arc::new(tool_dispatcher::LocalToolDispatcher::new())
             } else {
-                Arc::new(tool_dispatcher::RedisToolDispatcher::new(queue.clone()))
+                Arc::new(tool_dispatcher::RedisToolDispatcher::new(
+                    queue.clone(),
+                    config.operation_id.clone(),
+                ))
             };
 
         info!(model = %blue_model, "Starting blue team orchestrator");
@@ -388,12 +460,29 @@ async fn main() -> Result<()> {
     loop {
         tokio::select! {
             // Process completed task results
-            Some(completed) = result_rx.recv() => {
-                result_processing::process_completed_task(
-                    &completed,
-                    &dispatcher,
-                    &throttler,
-                ).await;
+            result = result_rx.recv() => {
+                match result {
+                    Some(completed) => {
+                        result_processing::process_completed_task(
+                            &completed,
+                            &dispatcher,
+                            &throttler,
+                        ).await;
+                    }
+                    None => {
+                        // Result consumer died — channel closed.
+                        // Respawn it after a brief delay.
+                        error!("Result consumer channel closed unexpectedly — restarting consumer");
+                        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                        let (_new_handle, new_rx) = spawn_result_consumer(
+                            queue.clone(),
+                            tracker.clone(),
+                            config.clone(),
+                            shutdown_rx.clone(),
+                        );
+                        result_rx = new_rx;
+                    }
+                }
             }
 
             // Graceful shutdown on SIGTERM / SIGINT
@@ -412,8 +501,8 @@ async fn main() -> Result<()> {
     tokio::select! {
         _ = async {
             let _ = tokio::join!(
+                lock_handle,
                 hb_handle,
-                result_handle,
                 deferred_handle,
                 cost_handle,
                 exploit_handle,
@@ -432,6 +521,27 @@ async fn main() -> Result<()> {
         }
         _ = tokio::time::sleep(shutdown_timeout) => {
             warn!("Background task shutdown timed out");
+        }
+    }
+
+    // --- Finalize operation in Redis ---
+    // Write completion metadata, status key, clear lock and active pointer.
+    // Matches Python's operation completion sequence.
+    {
+        let mut conn = queue.connection();
+        let has_da = shared_state.read().await.has_domain_admin;
+        let status = if has_da { "completed" } else { "stopped" };
+        match ares_core::state::finalize_operation(&mut conn, &config.operation_id, status).await {
+            Ok(()) => info!(
+                operation_id = %config.operation_id,
+                status = status,
+                "Operation finalized in Redis"
+            ),
+            Err(e) => warn!(
+                operation_id = %config.operation_id,
+                err = %e,
+                "Failed to finalize operation in Redis"
+            ),
         }
     }
 

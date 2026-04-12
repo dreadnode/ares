@@ -26,7 +26,7 @@ pub(super) fn try_generate(
         (
             "asrep_roast",
             format!(
-                "asrep_roast(target='{dc_ip}', domain='{domain}') \
+                "asrep_roast(dc_ip='{dc_ip}', domain='{domain}') \
                  - find users without Kerberos pre-auth"
             ),
         ),
@@ -47,7 +47,7 @@ pub(super) fn try_generate(
         (
             "kerberos_user_enum_noauth",
             format!(
-                "kerberos_user_enum_noauth(target='{dc_ip}', domain='{domain}') \
+                "kerberos_user_enum_noauth(dc_ip='{dc_ip}', domain='{domain}') \
                  - enumerate valid usernames via Kerberos"
             ),
         ),

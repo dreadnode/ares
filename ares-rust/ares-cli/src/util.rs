@@ -27,6 +27,46 @@ pub(crate) fn parse_datetime(s: &str) -> Result<DateTime<Utc>> {
         .map_err(|e| anyhow::anyhow!("Failed to parse datetime '{s}': {e}"))
 }
 
+/// Format a number with thousand separators (e.g. 1234567 -> "1,234,567").
+pub(crate) fn format_number(n: u64) -> String {
+    let s = n.to_string();
+    let mut result = String::with_capacity(s.len() + s.len() / 3);
+    for (i, c) in s.chars().enumerate() {
+        if i > 0 && (s.len() - i).is_multiple_of(3) {
+            result.push(',');
+        }
+        result.push(c);
+    }
+    result
+}
+
+/// Scan Redis keys matching a pattern using cursor iteration.
+///
+/// Replaces `KEYS` commands which block Redis on large datasets.
+pub(crate) async fn scan_redis_keys(
+    conn: &mut redis::aio::MultiplexedConnection,
+    pattern: &str,
+) -> Result<Vec<String>> {
+    let mut all_keys = Vec::new();
+    let mut cursor: u64 = 0;
+    loop {
+        let (next_cursor, keys): (u64, Vec<String>) = redis::cmd("SCAN")
+            .arg(cursor)
+            .arg("MATCH")
+            .arg(pattern)
+            .arg("COUNT")
+            .arg(100)
+            .query_async(conn)
+            .await?;
+        all_keys.extend(keys);
+        cursor = next_cursor;
+        if cursor == 0 {
+            break;
+        }
+    }
+    Ok(all_keys)
+}
+
 pub(crate) fn truncate_str(s: &str, max_chars: usize) -> String {
     let char_count = s.chars().count();
     if char_count <= max_chars {

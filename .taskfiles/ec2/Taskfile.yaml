@@ -606,6 +606,410 @@ tasks:
           --parameters '{"portNumber":["6379"],"localPortNumber":["16379"]}'
 
   # ============================================================================
+  # CLI Operations (loot, runtime, status, list, queue)
+  # ============================================================================
+  loot:
+    desc: "Dump loot from EC2 via SSM (usage: task ec2:loot [EC2_NAME=ares-tools] [LATEST=true] [OPERATION_ID=op-xxx] [JSON=false] [DIFF=false])"
+    silent: true
+    vars:
+      OPERATION_ID: '{{.OPERATION_ID | default ""}}'
+      LATEST: '{{.LATEST | default "true"}}'
+      JSON: '{{.JSON | default "false"}}'
+      DIFF: '{{.DIFF | default "false"}}'
+    cmds:
+      - |
+        INSTANCE_ID=$(aws ec2 describe-instances \
+          --profile "{{.EC2_PROFILE}}" \
+          --region "{{.EC2_REGION}}" \
+          --filters "Name=instance-state-name,Values=running" \
+                    "Name=tag:Name,Values=*{{.EC2_NAME}}*" \
+          --query "Reservations[*].Instances[*].InstanceId" \
+          --output text | head -1)
+
+        if [ -z "$INSTANCE_ID" ]; then
+          echo -e "{{.ERROR}} No running instance found matching: {{.EC2_NAME}}"
+          exit 1
+        fi
+
+        CLI_CMD="ares-cli ops loot"
+        {{if ne .OPERATION_ID ""}}CLI_CMD="$CLI_CMD {{.OPERATION_ID}}"{{end}}
+        {{if eq .LATEST "true"}}CLI_CMD="$CLI_CMD --latest"{{end}}
+        {{if eq .JSON "true"}}CLI_CMD="$CLI_CMD --json"{{end}}
+        {{if eq .DIFF "true"}}CLI_CMD="$CLI_CMD --diff"{{end}}
+
+        PARAMS_FILE=$(mktemp)
+        trap "rm -f $PARAMS_FILE" EXIT
+        jq -n --arg cmd "$CLI_CMD" '{"commands": [$cmd]}' > "$PARAMS_FILE"
+
+        CMD_ID=$(aws ssm send-command \
+          --profile "{{.EC2_PROFILE}}" \
+          --region "{{.EC2_REGION}}" \
+          --instance-ids "$INSTANCE_ID" \
+          --document-name "AWS-RunShellScript" \
+          --parameters "file://$PARAMS_FILE" \
+          --query "Command.CommandId" --output text)
+
+        for i in $(seq 1 60); do
+          STATUS=$(aws ssm get-command-invocation \
+            --profile "{{.EC2_PROFILE}}" \
+            --region "{{.EC2_REGION}}" \
+            --command-id "$CMD_ID" \
+            --instance-id "$INSTANCE_ID" \
+            --query "Status" --output text 2>/dev/null) || true
+          case "$STATUS" in
+            Success|Failed|Cancelled|TimedOut) break ;;
+          esac
+          sleep 1
+        done
+
+        aws ssm get-command-invocation \
+          --profile "{{.EC2_PROFILE}}" \
+          --region "{{.EC2_REGION}}" \
+          --command-id "$CMD_ID" \
+          --instance-id "$INSTANCE_ID" \
+          --query "StandardOutputContent" --output text
+
+        if [ "$STATUS" != "Success" ]; then
+          aws ssm get-command-invocation \
+            --profile "{{.EC2_PROFILE}}" \
+            --region "{{.EC2_REGION}}" \
+            --command-id "$CMD_ID" \
+            --instance-id "$INSTANCE_ID" \
+            --query "StandardErrorContent" --output text >&2
+          exit 1
+        fi
+
+  runtime:
+    desc: "Show operation runtime from EC2 via SSM (usage: task ec2:runtime [EC2_NAME=ares-tools] [LATEST=true] [OPERATION_ID=op-xxx])"
+    silent: true
+    vars:
+      OPERATION_ID: '{{.OPERATION_ID | default ""}}'
+      LATEST: '{{.LATEST | default "true"}}'
+    cmds:
+      - |
+        INSTANCE_ID=$(aws ec2 describe-instances \
+          --profile "{{.EC2_PROFILE}}" \
+          --region "{{.EC2_REGION}}" \
+          --filters "Name=instance-state-name,Values=running" \
+                    "Name=tag:Name,Values=*{{.EC2_NAME}}*" \
+          --query "Reservations[*].Instances[*].InstanceId" \
+          --output text | head -1)
+
+        if [ -z "$INSTANCE_ID" ]; then
+          echo -e "{{.ERROR}} No running instance found matching: {{.EC2_NAME}}"
+          exit 1
+        fi
+
+        CLI_CMD="ares-cli ops runtime"
+        {{if ne .OPERATION_ID ""}}CLI_CMD="$CLI_CMD {{.OPERATION_ID}}"{{end}}
+        {{if eq .LATEST "true"}}CLI_CMD="$CLI_CMD --latest"{{end}}
+
+        PARAMS_FILE=$(mktemp)
+        trap "rm -f $PARAMS_FILE" EXIT
+        jq -n --arg cmd "$CLI_CMD" '{"commands": [$cmd]}' > "$PARAMS_FILE"
+
+        CMD_ID=$(aws ssm send-command \
+          --profile "{{.EC2_PROFILE}}" \
+          --region "{{.EC2_REGION}}" \
+          --instance-ids "$INSTANCE_ID" \
+          --document-name "AWS-RunShellScript" \
+          --parameters "file://$PARAMS_FILE" \
+          --query "Command.CommandId" --output text)
+
+        for i in $(seq 1 60); do
+          STATUS=$(aws ssm get-command-invocation \
+            --profile "{{.EC2_PROFILE}}" \
+            --region "{{.EC2_REGION}}" \
+            --command-id "$CMD_ID" \
+            --instance-id "$INSTANCE_ID" \
+            --query "Status" --output text 2>/dev/null) || true
+          case "$STATUS" in
+            Success|Failed|Cancelled|TimedOut) break ;;
+          esac
+          sleep 1
+        done
+
+        aws ssm get-command-invocation \
+          --profile "{{.EC2_PROFILE}}" \
+          --region "{{.EC2_REGION}}" \
+          --command-id "$CMD_ID" \
+          --instance-id "$INSTANCE_ID" \
+          --query "StandardOutputContent" --output text
+
+        if [ "$STATUS" != "Success" ]; then
+          aws ssm get-command-invocation \
+            --profile "{{.EC2_PROFILE}}" \
+            --region "{{.EC2_REGION}}" \
+            --command-id "$CMD_ID" \
+            --instance-id "$INSTANCE_ID" \
+            --query "StandardErrorContent" --output text >&2
+          exit 1
+        fi
+
+  # ============================================================================
+  # Operation Launch
+  # ============================================================================
+  launch:
+    desc: "Launch orchestrator on EC2 via Secrets Manager (usage: task ec2:launch EC2_NAME=kali-ares [DOMAIN=...] [TARGETS=...] [CRED_USER=...] [CRED_PASS=...])"
+    silent: true
+    vars:
+      DOMAIN: '{{.DOMAIN | default "sevenkingdoms.local"}}'
+      TARGETS: '{{.TARGETS | default "10.1.2.150,10.1.2.220,10.1.2.58,10.1.2.254,10.1.2.51"}}'
+      CRED_USER: '{{.CRED_USER | default "samwell.tarly"}}'
+      CRED_PASS: '{{.CRED_PASS | default "Heartsbane"}}'
+      CRED_DOMAIN: '{{.CRED_DOMAIN | default "north.sevenkingdoms.local"}}'
+      SECRETS_ID: '{{.SECRETS_ID | default "ares/api-keys"}}'
+      LLM_MODEL: '{{.LLM_MODEL | default "openai/gpt-4.1"}}'
+      FLUSH_REDIS: '{{.FLUSH_REDIS | default "true"}}'
+    cmds:
+      - |
+        INSTANCE_ID=$(aws ec2 describe-instances \
+          --profile "{{.EC2_PROFILE}}" \
+          --region "{{.EC2_REGION}}" \
+          --filters "Name=instance-state-name,Values=running" \
+                    "Name=tag:Name,Values=*{{.EC2_NAME}}*" \
+          --query "Reservations[*].Instances[*].InstanceId" \
+          --output text | head -1)
+
+        if [ -z "$INSTANCE_ID" ]; then
+          echo -e "{{.ERROR}} No running instance found matching: {{.EC2_NAME}}"
+          exit 1
+        fi
+
+        OP_ID="op-$(date -u +%Y%m%d-%H%M%S)"
+        echo -e "{{.INFO}} Operation ID: $OP_ID"
+
+        # Build target IPs JSON array
+        TARGET_ARRAY=$(echo '{{.TARGETS}}' | tr ',' '\n' | jq -R . | jq -sc .)
+
+        PAYLOAD=$(jq -c -n \
+          --arg op_id "$OP_ID" \
+          --arg domain "{{.DOMAIN}}" \
+          --argjson targets "$TARGET_ARRAY" \
+          --arg user "{{.CRED_USER}}" \
+          --arg pass "{{.CRED_PASS}}" \
+          --arg cred_domain "{{.CRED_DOMAIN}}" \
+          '{
+            "operation_id": $op_id,
+            "target_domain": $domain,
+            "target_ips": $targets,
+            "initial_credential": { "username": $user, "password": $pass, "domain": $cred_domain }
+          }')
+
+        # Fetch API keys from Secrets Manager
+        SECRETS=$(aws secretsmanager get-secret-value \
+          --profile "{{.EC2_PROFILE}}" \
+          --region "{{.EC2_REGION}}" \
+          --secret-id "{{.SECRETS_ID}}" \
+          --query SecretString --output text 2>/dev/null) || true
+
+        if [ -z "$SECRETS" ]; then
+          echo -e "{{.ERROR}} Failed to fetch API keys from Secrets Manager ({{.SECRETS_ID}})"
+          echo -e "{{.INFO}} Create with: aws secretsmanager create-secret --name ares/api-keys --secret-string '{\"OPENAI_API_KEY\":\"...\",\"ANTHROPIC_API_KEY\":\"...\"}'"
+          exit 1
+        fi
+
+        OPENAI_KEY=$(echo "$SECRETS" | jq -r .OPENAI_API_KEY)
+        ANTHROPIC_KEY=$(echo "$SECRETS" | jq -r .ANTHROPIC_API_KEY)
+
+        FLUSH_CMD=""
+        if [ "{{.FLUSH_REDIS}}" = "true" ]; then
+          FLUSH_CMD="redis-cli FLUSHDB; echo Redis flushed;"
+        fi
+
+        LAUNCH_SCRIPT="#!/bin/bash
+        set -e
+        ${FLUSH_CMD}
+        pkill -f ares-orchestrator 2>/dev/null || true; sleep 1
+        export OPENAI_API_KEY='${OPENAI_KEY}'
+        export ANTHROPIC_API_KEY='${ANTHROPIC_KEY}'
+        export ARES_REDIS_URL=redis://127.0.0.1:6379
+        export ARES_LLM_MODEL='{{.LLM_MODEL}}'
+        export RUST_LOG=info
+        export ARES_CONFIG={{.ARES_REMOTE_CONFIG}}
+        export ARES_OPERATION_ID='${PAYLOAD}'
+        mkdir -p {{.ARES_LOG_DIR}}
+        nohup /usr/local/bin/ares-orchestrator >{{.ARES_LOG_DIR}}/orchestrator.log 2>&1 &
+        sleep 2
+        if pgrep -f ares-orchestrator >/dev/null; then
+          echo Orchestrator started for ${OP_ID}
+          head -5 {{.ARES_LOG_DIR}}/orchestrator.log
+        else
+          echo FAILED TO START
+          cat {{.ARES_LOG_DIR}}/orchestrator.log | head -20; exit 1
+        fi"
+
+        B64=$(echo "$LAUNCH_SCRIPT" | base64)
+        PARAMS_FILE=$(mktemp)
+        trap "rm -f $PARAMS_FILE" EXIT
+        jq -n --arg b64 "$B64" '{"commands": ["echo " + $b64 + " | base64 -d | /bin/bash"]}' > "$PARAMS_FILE"
+
+        echo -e "{{.INFO}} Launching orchestrator on $INSTANCE_ID..."
+
+        CMD_ID=$(aws ssm send-command \
+          --profile "{{.EC2_PROFILE}}" \
+          --region "{{.EC2_REGION}}" \
+          --instance-ids "$INSTANCE_ID" \
+          --document-name "AWS-RunShellScript" \
+          --parameters "file://$PARAMS_FILE" \
+          --query "Command.CommandId" --output text)
+
+        for i in $(seq 1 30); do
+          STATUS=$(aws ssm get-command-invocation \
+            --profile "{{.EC2_PROFILE}}" \
+            --region "{{.EC2_REGION}}" \
+            --command-id "$CMD_ID" \
+            --instance-id "$INSTANCE_ID" \
+            --query "Status" --output text 2>/dev/null) || true
+          case "$STATUS" in Success|Failed|Cancelled|TimedOut) break ;; esac
+          sleep 1
+        done
+
+        aws ssm get-command-invocation \
+          --profile "{{.EC2_PROFILE}}" \
+          --region "{{.EC2_REGION}}" \
+          --command-id "$CMD_ID" \
+          --instance-id "$INSTANCE_ID" \
+          --query "StandardOutputContent" --output text
+
+        if [ "$STATUS" != "Success" ]; then
+          echo -e "{{.ERROR}} Launch failed"
+          aws ssm get-command-invocation \
+            --profile "{{.EC2_PROFILE}}" \
+            --region "{{.EC2_REGION}}" \
+            --command-id "$CMD_ID" \
+            --instance-id "$INSTANCE_ID" \
+            --query "StandardErrorContent" --output text >&2
+          exit 1
+        fi
+
+        echo -e "{{.SUCCESS}} Operation $OP_ID launched"
+        echo -e "{{.INFO}} Monitor: task ec2:runtime EC2_NAME={{.EC2_NAME}}"
+
+  # ============================================================================
+  # Post-AMI Tool Setup
+  # ============================================================================
+  setup:tools:
+    desc: "Install pentest tools on EC2 via pipx (usage: task ec2:setup:tools EC2_NAME=kali-ares)"
+    silent: true
+    cmds:
+      - |
+        INSTANCE_ID=$(aws ec2 describe-instances \
+          --profile "{{.EC2_PROFILE}}" \
+          --region "{{.EC2_REGION}}" \
+          --filters "Name=instance-state-name,Values=running" \
+                    "Name=tag:Name,Values=*{{.EC2_NAME}}*" \
+          --query "Reservations[*].Instances[*].InstanceId" \
+          --output text | head -1)
+
+        if [ -z "$INSTANCE_ID" ]; then
+          echo -e "{{.ERROR}} No running instance found matching: {{.EC2_NAME}}"
+          exit 1
+        fi
+
+        read -r -d '' SCRIPT << 'TOOLEOF' || true
+        #!/bin/bash
+        set -e
+        export DEBIAN_FRONTEND=noninteractive
+        export PATH="/root/.local/bin:/usr/local/bin:$PATH"
+
+        echo "=== Installing system deps ==="
+        apt-get update -qq
+        apt-get install -y -qq nmap smbclient samba-common-bin ldap-utils dnsutils whois python3-pip python3-venv pipx git jq unzip hashcat
+
+        echo "=== Installing tools via pipx ==="
+        pipx ensurepath
+        pipx install impacket 2>&1 | tail -3
+        pipx install git+https://github.com/Pennyw0rth/NetExec.git 2>&1 | tail -3
+        pipx install bloodhound 2>&1 | tail -3
+        pipx install certipy-ad 2>&1 | tail -3
+
+        echo "=== Creating impacket wrappers ==="
+        for s in secretsdump GetNPUsers GetUserSPNs psexec wmiexec smbexec getTGT getST ticketer lookupsid findDelegation addcomputer rbcd dacledit raiseChild ntlmrelayx mssqlclient; do
+          printf '#!/bin/bash\nexec /root/.local/share/pipx/venvs/impacket/bin/%s.py "$@"\n' "$s" > "/usr/local/bin/impacket-${s}"
+          chmod +x "/usr/local/bin/impacket-${s}"
+        done
+
+        echo "=== Creating symlinks ==="
+        for cmd in netexec nxc bloodhound-python certipy; do
+          SRC="/root/.local/bin/$cmd"
+          [ -f "$SRC" ] && ln -sf "$SRC" "/usr/local/bin/$cmd"
+        done
+
+        echo "=== Installing wordlists ==="
+        mkdir -p /usr/share/wordlists
+        if [ ! -f /usr/share/wordlists/rockyou.txt ]; then
+          curl -sL https://github.com/brannondorsey/naive-hashcat/releases/download/data/rockyou.txt -o /usr/share/wordlists/rockyou.txt
+          echo "rockyou.txt: $(wc -l < /usr/share/wordlists/rockyou.txt) entries"
+        else
+          echo "rockyou.txt already present"
+        fi
+
+        echo "=== Fixing worker PATH ==="
+        if ! grep -q "^Environment=PATH=" /etc/systemd/system/ares-worker@.service 2>/dev/null; then
+          sed -i '/\[Service\]/a Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/root/.local/bin' /etc/systemd/system/ares-worker@.service
+          systemctl daemon-reload
+        fi
+
+        echo "=== Restarting workers ==="
+        for role in recon credential_access cracker acl privesc lateral coercion; do
+          systemctl restart ares-worker@$role 2>/dev/null || true
+        done
+
+        echo "=== Verifying ==="
+        for cmd in nmap netexec impacket-secretsdump impacket-GetNPUsers smbclient rpcclient ldapsearch; do
+          printf "%-30s %s\n" "$cmd:" "$(which $cmd 2>/dev/null || echo NOT_FOUND)"
+        done
+        echo "=== Done ==="
+        TOOLEOF
+
+        B64=$(echo "$SCRIPT" | base64)
+        PARAMS_FILE=$(mktemp)
+        trap "rm -f $PARAMS_FILE" EXIT
+        jq -n --arg b64 "$B64" '{"commands": ["echo " + $b64 + " | base64 -d | /bin/bash"], "executionTimeout": ["600"]}' > "$PARAMS_FILE"
+
+        echo -e "{{.INFO}} Installing pentest tools on $INSTANCE_ID (2-3 minutes)..."
+
+        CMD_ID=$(aws ssm send-command \
+          --profile "{{.EC2_PROFILE}}" \
+          --region "{{.EC2_REGION}}" \
+          --instance-ids "$INSTANCE_ID" \
+          --document-name "AWS-RunShellScript" \
+          --parameters "file://$PARAMS_FILE" \
+          --query "Command.CommandId" --output text)
+
+        for i in $(seq 1 180); do
+          STATUS=$(aws ssm get-command-invocation \
+            --profile "{{.EC2_PROFILE}}" \
+            --region "{{.EC2_REGION}}" \
+            --command-id "$CMD_ID" \
+            --instance-id "$INSTANCE_ID" \
+            --query "Status" --output text 2>/dev/null) || true
+          case "$STATUS" in Success|Failed|Cancelled|TimedOut) break ;; esac
+          sleep 2
+        done
+
+        aws ssm get-command-invocation \
+          --profile "{{.EC2_PROFILE}}" \
+          --region "{{.EC2_REGION}}" \
+          --command-id "$CMD_ID" \
+          --instance-id "$INSTANCE_ID" \
+          --query "StandardOutputContent" --output text
+
+        if [ "$STATUS" = "Success" ]; then
+          echo -e "{{.SUCCESS}} Tools installed on $INSTANCE_ID"
+        else
+          echo -e "{{.ERROR}} Tool installation failed (status: $STATUS)"
+          aws ssm get-command-invocation \
+            --profile "{{.EC2_PROFILE}}" \
+            --region "{{.EC2_REGION}}" \
+            --command-id "$CMD_ID" \
+            --instance-id "$INSTANCE_ID" \
+            --query "StandardErrorContent" --output text >&2
+          exit 1
+        fi
+
+  # ============================================================================
   # Arbitrary Command Execution
   # ============================================================================
   exec:

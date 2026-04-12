@@ -44,7 +44,7 @@ pub(super) fn tool_definitions() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: "enumerate_users".into(),
-            description: "Enumerate domain users via LDAP, RPC, or SMB. Returns usernames, groups, and properties.".into(),
+            description: "Enumerate domain users via netexec SMB (--users with --rid-brute fallback). Returns usernames and domain membership.".into(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -58,10 +58,9 @@ pub(super) fn tool_definitions() -> Vec<ToolDefinition> {
                     },
                     "username": {"type": "string", "description": "Username for authentication"},
                     "password": {"type": "string", "description": "Password for authentication"},
-                    "method": {
-                        "type": "string",
-                        "enum": ["ldap", "rpc", "smb"],
-                        "description": "Enumeration method"
+                    "null_session": {
+                        "type": "boolean",
+                        "description": "Use null session (empty creds) for unauthenticated enumeration"
                     }
                 },
                 "required": ["target", "domain"]
@@ -246,12 +245,12 @@ pub(super) fn tool_definitions() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: "smbclient_kerberos_shares".into(),
-            description: "Enumerate SMB shares using Kerberos authentication.".into(),
+            description: "Enumerate SMB shares using Kerberos ticket authentication. Requires a valid TGT in the ccache (no password needed). Use after obtaining a Kerberos ticket via S4U, golden ticket, or ADCS.".into(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "target": {"type": "string", "description": "Target hostname"},
-                    "target_ip": {"type": "string", "description": "Target IP (if different from hostname)"}
+                    "target": {"type": "string", "description": "Target hostname (must match SPN in ticket)"},
+                    "target_ip": {"type": "string", "description": "Target IP address (if hostname does not resolve via DNS)"}
                 },
                 "required": ["target"]
             }),

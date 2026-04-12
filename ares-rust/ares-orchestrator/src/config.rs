@@ -98,17 +98,38 @@ impl OrchestratorConfig {
                         .collect()
                 })
                 .unwrap_or_default();
-            // Extract initial credential from JSON payload
-            let cred = match (
-                v["initial_username"].as_str(),
-                v["initial_password"].as_str(),
-            ) {
-                (Some(user), Some(pass)) => Some(InitialCredential {
-                    username: user.to_string(),
-                    password: pass.to_string(),
-                    domain: v["initial_domain"].as_str().unwrap_or(&domain).to_string(),
-                }),
-                _ => None,
+            // Extract initial credential from JSON payload.
+            // Python sends a nested object: {"initial_credential": {"username": ..., "password": ..., "domain": ...}}
+            // Also support flat fields for backwards compatibility: {"initial_username": ..., "initial_password": ...}
+            let cred = if let Some(ic) = v.get("initial_credential").and_then(|v| v.as_object()) {
+                match (
+                    ic.get("username").and_then(|v| v.as_str()),
+                    ic.get("password").and_then(|v| v.as_str()),
+                ) {
+                    (Some(user), Some(pass)) => Some(InitialCredential {
+                        username: user.to_string(),
+                        password: pass.to_string(),
+                        domain: ic
+                            .get("domain")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or(&domain)
+                            .to_string(),
+                    }),
+                    _ => None,
+                }
+            } else {
+                // Flat field fallback
+                match (
+                    v["initial_username"].as_str(),
+                    v["initial_password"].as_str(),
+                ) {
+                    (Some(user), Some(pass)) => Some(InitialCredential {
+                        username: user.to_string(),
+                        password: pass.to_string(),
+                        domain: v["initial_domain"].as_str().unwrap_or(&domain).to_string(),
+                    }),
+                    _ => None,
+                }
             };
             (op_id, domain, ips, cred)
         } else {
@@ -139,10 +160,10 @@ impl OrchestratorConfig {
         let deferred_poll_interval_secs = parse_env("ARES_DEFERRED_POLL_INTERVAL_SECS", 10);
         let max_tasks_per_role = parse_env("ARES_MAX_TASKS_PER_ROLE", 3);
         let dispatch_delay_ms = parse_env("ARES_DISPATCH_DELAY_MS", 200);
-        let stale_task_timeout_secs = parse_env("ARES_STALE_TASK_TIMEOUT_SECS", 300);
+        let stale_task_timeout_secs = parse_env("ARES_STALE_TASK_TIMEOUT_SECS", 120);
         let deferred_task_max_age_secs = parse_env("ARES_DEFERRED_TASK_MAX_AGE_SECS", 300);
-        let max_deferred_per_type = parse_env("ARES_MAX_DEFERRED_PER_TYPE", 5);
-        let max_deferred_total = parse_env("ARES_MAX_DEFERRED_TOTAL", 20);
+        let max_deferred_per_type = parse_env("ARES_MAX_DEFERRED_PER_TYPE", 50);
+        let max_deferred_total = parse_env("ARES_MAX_DEFERRED_TOTAL", 200);
 
         Ok(Self {
             redis_url,
@@ -230,10 +251,10 @@ mod tests {
             deferred_poll_interval: Duration::from_secs(10),
             max_tasks_per_role: 3,
             dispatch_delay: Duration::from_millis(0),
-            stale_task_timeout: Duration::from_secs(300),
+            stale_task_timeout: Duration::from_secs(120),
             deferred_task_max_age: Duration::from_secs(300),
-            max_deferred_per_type: 5,
-            max_deferred_total: 20,
+            max_deferred_per_type: 50,
+            max_deferred_total: 200,
             target_domain: String::new(),
             target_ips: Vec::new(),
             initial_credential: None,
@@ -273,13 +294,22 @@ mod tests {
         assert_eq!(c.target_domain, "contoso.local");
         assert_eq!(c.target_ips, vec!["192.168.58.1", "192.168.58.2"]);
 
-        // JSON payload with initial credential
-        let payload = r#"{"operation_id":"op-cred","target_domain":"contoso.local","target_ips":[],"initial_username":"admin","initial_password":"Pass123"}"#;
+        // JSON payload with nested initial_credential (Python format)
+        let payload = r#"{"operation_id":"op-cred","target_domain":"contoso.local","target_ips":[],"initial_credential":{"username":"admin","password":"Pass123","domain":"contoso.local"}}"#;
         std::env::set_var("ARES_OPERATION_ID", payload);
         let c = OrchestratorConfig::from_env().unwrap();
         let cred = c.initial_credential.unwrap();
         assert_eq!(cred.username, "admin");
         assert_eq!(cred.password, "Pass123");
+        assert_eq!(cred.domain, "contoso.local");
+
+        // JSON payload with flat initial credential (backwards compat)
+        let payload = r#"{"operation_id":"op-cred2","target_domain":"contoso.local","target_ips":[],"initial_username":"admin2","initial_password":"Pass456"}"#;
+        std::env::set_var("ARES_OPERATION_ID", payload);
+        let c = OrchestratorConfig::from_env().unwrap();
+        let cred = c.initial_credential.unwrap();
+        assert_eq!(cred.username, "admin2");
+        assert_eq!(cred.password, "Pass456");
         assert_eq!(cred.domain, "contoso.local");
 
         // Env var credential (ARES_INITIAL_CREDENTIAL)

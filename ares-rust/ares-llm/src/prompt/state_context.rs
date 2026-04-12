@@ -89,13 +89,23 @@ pub fn format_state_context(
 
         if !dcs.is_empty() {
             let _ = writeln!(ctx, "### Domain Controllers");
+            // Build reverse lookup: IP → domain from domain_controllers map
+            let ip_to_domain: std::collections::HashMap<&str, &str> = state
+                .domain_controllers
+                .iter()
+                .map(|(domain, ip)| (ip.as_str(), domain.as_str()))
+                .collect();
             for h in dcs.iter().take(MAX_DCS) {
                 let name = if h.hostname.is_empty() {
                     &h.ip
                 } else {
                     &h.hostname
                 };
-                let _ = writeln!(ctx, "- {} ({})", name, h.ip);
+                let domain_info = ip_to_domain
+                    .get(h.ip.as_str())
+                    .map(|d| format!(" [domain: {d}]"))
+                    .unwrap_or_default();
+                let _ = writeln!(ctx, "- {} ({}){}", name, h.ip, domain_info);
             }
             let _ = writeln!(ctx);
         }

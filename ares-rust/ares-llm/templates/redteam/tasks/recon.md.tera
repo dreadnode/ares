@@ -3,7 +3,7 @@
 **Target:** {{ target_ip }}
 {% if domain %}**Domain:** {{ domain }}
 {% endif -%}
-{% if credential_username %}**Credential:** {{ credential_username }}@{{ credential_domain }}
+{% if credential_username %}**Credential:** {{ credential_username }}@{{ credential_domain }}{% if credential_password %} / Password: {{ credential_password }}{% endif %}
 {% endif -%}
 
 {% if techniques -%}
@@ -21,4 +21,41 @@ Perform a comprehensive reconnaissance scan of the target.
 {{ state_context }}
 {% endif -%}
 
-Call `task_complete` with your findings when done.
+## Output Requirements
+
+When calling `task_complete`, you MUST include a structured `discoveries` object with these fields so the orchestrator can process your findings:
+
+```json
+{
+  "summary": "Brief description of findings",
+  "discoveries": {
+    "hosts": [
+      {
+        "ip": "10.1.2.100",
+        "hostname": "dc01.contoso.local",
+        "is_dc": true,
+        "os": "Windows Server 2019",
+        "services": [{"port": 445, "protocol": "tcp", "service": "microsoft-ds"}],
+        "roles": ["AD DC"]
+      }
+    ],
+    "discovered_users": [
+      {"username": "jdoe", "domain": "contoso.local", "is_admin": false}
+    ],
+    "shares": [
+      {"host": "10.1.2.100", "name": "SYSVOL", "permissions": "READ"}
+    ],
+    "vulnerabilities": [
+      {
+        "vuln_type": "mssql_impersonation",
+        "target_ip": "10.1.2.100",
+        "account_name": "svc_sql",
+        "domain": "contoso.local",
+        "details": "description"
+      }
+    ]
+  }
+}
+```
+
+**Critical**: For hosts with Kerberos (88), LDAP (389), or DNS (53) services, set `is_dc: true` and include the full FQDN hostname (e.g. `dc01.contoso.local`). This triggers automated credential attacks.

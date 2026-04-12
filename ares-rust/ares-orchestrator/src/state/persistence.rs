@@ -88,6 +88,39 @@ impl SharedState {
             .filter_map(|s| serde_json::from_str(s).ok())
             .collect();
 
+        // Load pending tasks from Redis HASH
+        let pending_tasks_key = format!(
+            "{}:{}:{}",
+            state::KEY_PREFIX,
+            operation_id,
+            state::KEY_PENDING_TASKS
+        );
+        let raw_pending: std::collections::HashMap<String, String> =
+            conn.hgetall(&pending_tasks_key).await.unwrap_or_default();
+        let mut pending_tasks = std::collections::HashMap::new();
+        for (task_id, json_str) in &raw_pending {
+            if let Ok(task_info) = serde_json::from_str::<ares_core::models::TaskInfo>(json_str) {
+                pending_tasks.insert(task_id.clone(), task_info);
+            }
+        }
+
+        // Load completed tasks from Redis HASH
+        let completed_tasks_key = format!(
+            "{}:{}:{}",
+            state::KEY_PREFIX,
+            operation_id,
+            state::KEY_COMPLETED_TASKS
+        );
+        let raw_completed: std::collections::HashMap<String, String> =
+            conn.hgetall(&completed_tasks_key).await.unwrap_or_default();
+        let mut completed_tasks = std::collections::HashMap::new();
+        for (task_id, json_str) in &raw_completed {
+            if let Ok(task_result) = serde_json::from_str::<ares_core::models::TaskResult>(json_str)
+            {
+                completed_tasks.insert(task_id.clone(), task_result);
+            }
+        }
+
         // Load dispatched ACL steps from dedup set
         let acl_dedup_key = format!(
             "{}:{}:{}:{}",
@@ -122,6 +155,8 @@ impl SharedState {
         state.mssql_enum_dispatched = mssql_dispatched;
         state.acl_chains = acl_chains;
         state.dispatched_acl_steps = dispatched_acl_steps;
+        state.pending_tasks = pending_tasks;
+        state.completed_tasks = completed_tasks;
 
         let cred_count = state.credentials.len();
         let hash_count = state.hashes.len();

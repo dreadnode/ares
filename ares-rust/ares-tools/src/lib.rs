@@ -81,6 +81,7 @@ pub async fn dispatch(tool_name: &str, arguments: &Value) -> Result<ToolOutput> 
         "zerologon_check" => recon::zerologon_check(arguments).await,
         "adidnsdump" => recon::adidnsdump(arguments).await,
         "save_users_to_file" => recon::save_users_to_file(arguments).await,
+        "smbclient_kerberos_shares" => recon::smbclient_kerberos_shares(arguments).await,
 
         // ── Credential Access ───────────────────────────────────────
         "kerberoast" => credential_access::kerberoast(arguments).await,

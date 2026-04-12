@@ -10,7 +10,7 @@
 mod callbacks;
 mod execution;
 mod kerberos;
-mod mssql;
+pub(super) mod mssql;
 mod pth;
 
 use crate::ToolDefinition;

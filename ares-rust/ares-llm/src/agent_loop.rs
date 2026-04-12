@@ -158,6 +158,11 @@ pub enum CallbackResult {
 #[async_trait::async_trait]
 pub trait CallbackHandler: Send + Sync {
     async fn handle_callback(&self, call: &ToolCall) -> Option<Result<CallbackResult>>;
+
+    /// Called after each LLM API response with the incremental token usage.
+    /// Default implementation is a no-op. Override this to record per-call
+    /// token usage (e.g. persist to Redis so CLI shows live cost data).
+    async fn on_token_usage(&self, _usage: &TokenUsage, _model: &str) {}
 }
 
 fn handle_builtin_callback(call: &ToolCall) -> Result<CallbackResult> {
@@ -525,6 +530,11 @@ pub async fn run_agent_loop(
         total_usage.output_tokens += response.usage.output_tokens;
         total_usage.cache_creation_input_tokens += response.usage.cache_creation_input_tokens;
         total_usage.cache_read_input_tokens += response.usage.cache_read_input_tokens;
+
+        // Report incremental token usage to callback handler (persists to Redis)
+        if let Some(ref handler) = callback_handler {
+            handler.on_token_usage(&response.usage, &config.model).await;
+        }
 
         // Handle based on stop reason
         match response.stop_reason {

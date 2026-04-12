@@ -40,6 +40,16 @@ pub fn parse_nmap_output(output: &str, params: &Value) -> Vec<Value> {
             } else {
                 current_ip = rest.to_string();
             }
+
+            // Discard cloud-provider reverse-DNS hostnames — they are
+            // not useful for AD domain resolution and would prevent
+            // FQDN extraction from script output later.
+            if hostname.contains("compute.internal")
+                || hostname.contains("amazonaws.com")
+                || hostname.contains("compute.googleapis.com")
+            {
+                hostname.clear();
+            }
         }
 
         // "445/tcp open  microsoft-ds"
@@ -47,11 +57,10 @@ pub fn parse_nmap_output(output: &str, params: &Value) -> Vec<Value> {
             let parts: Vec<&str> = line.split_whitespace().collect();
             if parts.len() >= 3 {
                 let port_proto = parts[0]; // "445/tcp"
-                let service = if parts.len() >= 4 {
-                    parts[2..].join(" ")
-                } else {
-                    parts[2].to_string()
-                };
+                                           // Only capture the service name (column 3), not version/product info.
+                                           // nmap -sV output: "389/tcp open ldap Microsoft Windows Active Directory LDAP ..."
+                                           // We want just "ldap", not the full version string.
+                let service = parts[2];
                 services.push(format!("{} ({})", port_proto, service));
             }
         }
@@ -62,6 +71,60 @@ pub fn parse_nmap_output(output: &str, params: &Value) -> Vec<Value> {
                 .split_once(':')
                 .map(|(_, v)| v.trim().to_string())
                 .unwrap_or_default();
+        }
+
+        // Extract FQDN from nmap script output when hostname is empty or a
+        // short NetBIOS name (no dots).  Look for common patterns:
+        //   smb-os-discovery:  |   FQDN: kingslanding.sevenkingdoms.local
+        //   rdp-ntlm-info:    |   DNS_Computer_Name: meereen.essos.local
+        //   ldap service:     |   dnsHostName: winterfell.north.sevenkingdoms.local
+        //   ssl-cert:         | ssl-cert: Subject: commonName=kingslanding.sevenkingdoms.local
+        //   ssl-cert SAN:     | Subject Alternative Name: ..., DNS:kingslanding.sevenkingdoms.local
+        if !current_ip.is_empty() && !hostname.contains('.') {
+            let trimmed = line.trim_start_matches('|').trim_start_matches('_').trim();
+
+            // key: value patterns (smb-os-discovery, rdp-ntlm-info, ldap)
+            for prefix in &["FQDN:", "DNS_Computer_Name:", "dnsHostName:"] {
+                if let Some(rest) = trimmed.strip_prefix(prefix) {
+                    let fqdn = rest.trim().to_lowercase();
+                    if fqdn.contains('.') && !fqdn.contains(' ') {
+                        hostname = fqdn;
+                        break;
+                    }
+                }
+            }
+
+            // ssl-cert commonName= pattern
+            if !hostname.contains('.') {
+                if let Some(cn_start) = trimmed.find("commonName=") {
+                    let cn = &trimmed[cn_start + "commonName=".len()..];
+                    let cn = cn
+                        .split([',', '\n', '|'])
+                        .next()
+                        .unwrap_or("")
+                        .trim()
+                        .to_lowercase();
+                    if cn.contains('.') && !cn.contains(' ') {
+                        hostname = cn;
+                    }
+                }
+            }
+
+            // ssl-cert DNS: in Subject Alternative Name
+            if !hostname.contains('.') {
+                if let Some(dns_start) = trimmed.find("DNS:") {
+                    let dns = &trimmed[dns_start + "DNS:".len()..];
+                    let dns = dns
+                        .split([',', '\n', '|', ' '])
+                        .next()
+                        .unwrap_or("")
+                        .trim()
+                        .to_lowercase();
+                    if dns.contains('.') && !dns.contains(' ') {
+                        hostname = dns;
+                    }
+                }
+            }
         }
     }
 
@@ -229,6 +292,125 @@ OS details: Microsoft Windows Server 2019";
         let params = json!({"target": "192.168.58.11"});
         let hosts = parse_nmap_output(output, &params);
         assert!(hosts[0]["is_dc"].as_bool().unwrap());
+    }
+
+    #[test]
+    fn test_parse_nmap_fqdn_from_script_output() {
+        let output = "\
+Nmap scan report for 10.1.2.220
+PORT    STATE SERVICE
+88/tcp  open  kerberos-sec
+389/tcp open  ldap
+445/tcp open  microsoft-ds
+| rdp-ntlm-info:
+|   DNS_Domain_Name: sevenkingdoms.local
+|   DNS_Computer_Name: kingslanding.sevenkingdoms.local
+|   FQDN: kingslanding.sevenkingdoms.local";
+        let params = json!({"target": "10.1.2.220"});
+        let hosts = parse_nmap_output(output, &params);
+        assert_eq!(hosts.len(), 1);
+        assert_eq!(hosts[0]["hostname"], "kingslanding.sevenkingdoms.local");
+        assert!(hosts[0]["is_dc"].as_bool().unwrap());
+    }
+
+    #[test]
+    fn test_parse_nmap_fqdn_does_not_override_existing() {
+        // When nmap header already has the FQDN, script output shouldn't override
+        let output = "\
+Nmap scan report for kingslanding.sevenkingdoms.local (10.1.2.220)
+PORT    STATE SERVICE
+88/tcp  open  kerberos-sec
+|   DNS_Computer_Name: kingslanding.sevenkingdoms.local";
+        let params = json!({"target": "10.1.2.220"});
+        let hosts = parse_nmap_output(output, &params);
+        assert_eq!(hosts[0]["hostname"], "kingslanding.sevenkingdoms.local");
+    }
+
+    #[test]
+    fn test_parse_nmap_fqdn_from_dns_host_name() {
+        let output = "\
+Nmap scan report for 10.1.2.150
+PORT    STATE SERVICE
+88/tcp  open  kerberos-sec
+389/tcp open  ldap
+|   dnsHostName: winterfell.north.sevenkingdoms.local";
+        let params = json!({"target": "10.1.2.150"});
+        let hosts = parse_nmap_output(output, &params);
+        assert_eq!(hosts[0]["hostname"], "winterfell.north.sevenkingdoms.local");
+    }
+
+    #[test]
+    fn test_parse_nmap_aws_internal_hostname_replaced_by_fqdn() {
+        // AWS internal hostnames should be discarded, allowing FQDN extraction
+        let output = "\
+Nmap scan report for ip-10-1-2-220.us-west-2.compute.internal (10.1.2.220)
+PORT    STATE SERVICE
+88/tcp  open  kerberos-sec
+389/tcp open  ldap
+| ssl-cert: Subject: commonName=kingslanding.sevenkingdoms.local
+| Subject Alternative Name: othername: 1.3.6.1.4.1.311.25.1:<unsupported>, DNS:kingslanding.sevenkingdoms.local";
+        let params = json!({"target": "10.1.2.220"});
+        let hosts = parse_nmap_output(output, &params);
+        assert_eq!(hosts.len(), 1);
+        assert_eq!(hosts[0]["ip"], "10.1.2.220");
+        assert_eq!(hosts[0]["hostname"], "kingslanding.sevenkingdoms.local");
+        assert!(hosts[0]["is_dc"].as_bool().unwrap());
+    }
+
+    #[test]
+    fn test_parse_nmap_fqdn_from_ssl_cert_commonname() {
+        let output = "\
+Nmap scan report for 10.1.2.58
+PORT    STATE SERVICE
+389/tcp open  ldap
+| ssl-cert: Subject: commonName=meereen.essos.local
+|_Not valid after:  2027-04-09T06:53:55";
+        let params = json!({"target": "10.1.2.58"});
+        let hosts = parse_nmap_output(output, &params);
+        assert_eq!(hosts[0]["hostname"], "meereen.essos.local");
+    }
+
+    #[test]
+    fn test_parse_nmap_fqdn_from_ssl_cert_san_dns() {
+        let output = "\
+Nmap scan report for 10.1.2.51
+PORT     STATE SERVICE
+3389/tcp open  ms-wbt-server
+| Subject Alternative Name: DNS:castelblack.north.sevenkingdoms.local";
+        let params = json!({"target": "10.1.2.51"});
+        let hosts = parse_nmap_output(output, &params);
+        assert_eq!(
+            hosts[0]["hostname"],
+            "castelblack.north.sevenkingdoms.local"
+        );
+    }
+
+    #[test]
+    fn test_parse_nmap_version_info_stripped_from_services() {
+        // nmap -sV output includes version/product info after the service name.
+        // We should only capture the service name, not the version string.
+        let output = "\
+Nmap scan report for 10.1.2.150
+PORT     STATE SERVICE       VERSION
+88/tcp   open  kerberos-sec  Microsoft Windows Kerberos
+135/tcp  open  msrpc         Microsoft Windows RPC
+139/tcp  open  netbios-ssn   Microsoft Windows netbios-ssn
+389/tcp  open  ldap          Microsoft Windows Active Directory LDAP (Domain: sevenkingdoms.local0., Site: Default-First-Site-Name)
+445/tcp  open  microsoft-ds
+3389/tcp open  ms-wbt-server Microsoft Terminal Services";
+        let params = json!({"target": "10.1.2.150"});
+        let hosts = parse_nmap_output(output, &params);
+        assert_eq!(hosts.len(), 1);
+        let services = hosts[0]["services"].as_array().unwrap();
+        let svc_strs: Vec<&str> = services.iter().filter_map(|v| v.as_str()).collect();
+        // Should have clean service names without version info
+        assert!(svc_strs.contains(&"88/tcp (kerberos-sec)"));
+        assert!(svc_strs.contains(&"135/tcp (msrpc)"));
+        assert!(svc_strs.contains(&"389/tcp (ldap)"));
+        assert!(svc_strs.contains(&"445/tcp (microsoft-ds)"));
+        assert!(svc_strs.contains(&"3389/tcp (ms-wbt-server)"));
+        // Ensure version info is NOT included
+        assert!(!svc_strs.iter().any(|s| s.contains("Microsoft Windows")));
     }
 
     #[test]

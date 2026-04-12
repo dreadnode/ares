@@ -7,14 +7,39 @@ use redis::AsyncCommands;
 use super::keys::*;
 use super::{build_blue_key, build_blue_lock_key};
 
+/// Scan Redis keys matching a pattern using cursor iteration (avoids KEYS).
+async fn scan_keys(
+    conn: &mut impl AsyncCommands,
+    pattern: &str,
+) -> Result<Vec<String>, redis::RedisError> {
+    let mut all_keys = Vec::new();
+    let mut cursor: u64 = 0;
+    loop {
+        let (next_cursor, keys): (u64, Vec<String>) = redis::cmd("SCAN")
+            .arg(cursor)
+            .arg("MATCH")
+            .arg(pattern)
+            .arg("COUNT")
+            .arg(100)
+            .query_async(conn)
+            .await?;
+
+        all_keys.extend(keys);
+        cursor = next_cursor;
+        if cursor == 0 {
+            break;
+        }
+    }
+    Ok(all_keys)
+}
+
 /// List all blue team investigation IDs by scanning `ares:blue:inv:*:meta` keys.
+///
+/// Uses SCAN with cursor iteration to avoid blocking Redis.
 pub async fn list_investigation_ids(
     conn: &mut impl AsyncCommands,
 ) -> Result<Vec<String>, redis::RedisError> {
-    let keys: Vec<String> = redis::cmd("KEYS")
-        .arg("ares:blue:inv:*:meta")
-        .query_async(conn)
-        .await?;
+    let keys = scan_keys(conn, "ares:blue:inv:*:meta").await?;
 
     let mut inv_ids = Vec::new();
     for key in keys {
@@ -29,13 +54,13 @@ pub async fn list_investigation_ids(
 }
 
 /// List all running blue team investigation IDs by scanning lock keys.
+///
+/// Uses SCAN with cursor iteration to avoid blocking Redis.
 pub async fn list_running_investigations(
     conn: &mut impl AsyncCommands,
 ) -> Result<HashSet<String>, redis::RedisError> {
-    let keys: Vec<String> = redis::cmd("KEYS")
-        .arg(format!("{BLUE_LOCK_PREFIX}:*"))
-        .query_async(conn)
-        .await?;
+    let pattern = format!("{BLUE_LOCK_PREFIX}:*");
+    let keys = scan_keys(conn, &pattern).await?;
 
     let mut running = HashSet::new();
     for key in keys {
@@ -109,12 +134,14 @@ pub(crate) fn pick_latest_blue(items: &[&(Option<String>, String, bool)]) -> Str
 }
 
 /// Delete an investigation and all its associated Redis keys.
+///
+/// Uses SCAN with cursor iteration to avoid blocking Redis.
 pub async fn delete_investigation(
     conn: &mut impl AsyncCommands,
     investigation_id: &str,
 ) -> Result<usize, redis::RedisError> {
     let pattern = format!("{BLUE_KEY_PREFIX}:{investigation_id}:*");
-    let mut keys: Vec<String> = redis::cmd("KEYS").arg(&pattern).query_async(conn).await?;
+    let mut keys = scan_keys(conn, &pattern).await?;
 
     // Also delete the lock key
     keys.push(build_blue_lock_key(investigation_id));

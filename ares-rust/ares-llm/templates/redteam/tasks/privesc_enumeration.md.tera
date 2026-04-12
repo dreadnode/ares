@@ -4,7 +4,7 @@
 **Target:** {{ target_ip }}
 {% if domain %}**Domain:** {{ domain }}
 {% endif -%}
-{% if credential_username %}**Credential:** {{ credential_username }}@{{ credential_domain }}
+{% if credential_username %}**Credential:** {{ credential_username }}@{{ credential_domain }}{% if credential_password %} / Password: {{ credential_password }}{% endif %}
 {% endif -%}
 
 Enumerate privilege escalation opportunities using {{ technique }}.

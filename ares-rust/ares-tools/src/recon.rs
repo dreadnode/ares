@@ -31,7 +31,11 @@ fn domain_to_base_dn(domain: &str) -> String {
 // Tools
 // ---------------------------------------------------------------------------
 
-/// Run an nmap TCP connect scan against a target.
+/// Run a multi-phase nmap TCP connect scan against a target.
+///
+/// Phase 1: Fast port discovery (top-100 ports)
+/// Phase 2: Service version detection (-sV) on discovered ports
+/// Phase 3: NetBIOS enrichment for hosts missing hostnames
 ///
 /// Required args: `target`
 /// Optional args: `ports`, `arguments`
@@ -40,25 +44,99 @@ pub async fn nmap_scan(args: &Value) -> Result<ToolOutput> {
     let ports = optional_str(args, "ports");
     let extra = optional_str(args, "arguments");
 
+    // Phase 1: Fast port discovery
     let mut cmd = CommandBuilder::new("nmap")
         .args(["-Pn", "-sT", "-T4", "--open"])
-        .timeout_secs(300);
+        .timeout_secs(120);
 
-    // Append any caller-supplied extra arguments first.
     if let Some(extra_args) = extra {
         for a in extra_args.split_whitespace() {
             cmd = cmd.arg(a);
         }
     }
 
-    // Port specification — default to top-100 if nothing was provided.
     match ports {
         Some(p) => cmd = cmd.flag("-p", p),
         None => cmd = cmd.arg("--top-ports").arg("100"),
     }
 
     cmd = cmd.arg(target);
-    cmd.execute().await
+    let phase1 = cmd.execute().await?;
+
+    // Extract discovered open ports from phase 1
+    let mut discovered_ports: Vec<String> = Vec::new();
+    for line in phase1.stdout.lines() {
+        let line = line.trim();
+        if line.contains("/tcp") && line.contains("open") {
+            if let Some(port) = line.split('/').next() {
+                discovered_ports.push(port.trim().to_string());
+            }
+        }
+    }
+
+    // If no ports found, return phase 1 output as-is
+    if discovered_ports.is_empty() {
+        return Ok(phase1);
+    }
+
+    // Phase 2: Service version detection on discovered ports
+    let port_spec = discovered_ports.join(",");
+    let mut cmd2 = CommandBuilder::new("nmap")
+        .args(["-Pn", "-sT", "-T4", "--open", "-sV"])
+        .flag("-p", &port_spec)
+        .timeout_secs(300);
+
+    if let Some(extra_args) = extra {
+        for a in extra_args.split_whitespace() {
+            cmd2 = cmd2.arg(a);
+        }
+    }
+
+    cmd2 = cmd2.arg(target);
+    let phase2 = cmd2.execute().await?;
+
+    // Phase 3: NetBIOS enrichment for hosts without hostnames
+    // Parse phase 2 output to find IPs without hostnames
+    let mut ips_needing_nbstat: Vec<String> = Vec::new();
+    for line in phase2.stdout.lines() {
+        let line = line.trim();
+        if line.starts_with("Nmap scan report for") {
+            let rest = line.trim_start_matches("Nmap scan report for").trim();
+            // If there's no parenthesized IP, the report is just an IP (no hostname)
+            if !rest.contains('(') && crate::parsers::looks_like_ip_pub(rest) {
+                ips_needing_nbstat.push(rest.to_string());
+            }
+        }
+    }
+
+    if ips_needing_nbstat.is_empty() {
+        return Ok(phase2);
+    }
+
+    // Run NetBIOS scan for hostname resolution
+    let nbstat_targets = ips_needing_nbstat.join(" ");
+    let nbstat_result = CommandBuilder::new("nmap")
+        .args(["-Pn", "-sU", "-p", "137", "--script", "nbstat"])
+        .arg(nbstat_targets)
+        .timeout_secs(60)
+        .execute()
+        .await;
+
+    // Merge phase 2 + NetBIOS output
+    match nbstat_result {
+        Ok(nbstat) if !nbstat.stdout.is_empty() => {
+            let mut combined_stdout = phase2.stdout;
+            combined_stdout.push_str("\n\n--- NetBIOS Enrichment ---\n");
+            combined_stdout.push_str(&nbstat.stdout);
+            Ok(ToolOutput {
+                stdout: combined_stdout,
+                stderr: phase2.stderr,
+                exit_code: phase2.exit_code,
+                success: phase2.success,
+            })
+        }
+        _ => Ok(phase2),
+    }
 }
 
 /// Sweep a subnet/range with netexec SMB to discover live hosts.
@@ -77,31 +155,72 @@ pub async fn smb_sweep(args: &Value) -> Result<ToolOutput> {
 
 /// Enumerate domain users via netexec SMB.
 ///
+/// Runs `--users` first; if no users are found, falls back to `--rid-brute`
+/// (which works better for null sessions and some DC configurations).
+///
 /// Required args: `target`
 /// Optional args: `username`, `password`, `hash`, `domain`, `null_session`
 pub async fn enumerate_users(args: &Value) -> Result<ToolOutput> {
     let target = required_str(args, "target")?;
     let null_session = optional_bool(args, "null_session").unwrap_or(false);
 
-    let mut cmd = CommandBuilder::new("netexec")
+    let build_creds = || -> Vec<String> {
+        if null_session {
+            vec!["-u".into(), "".into(), "-p".into(), "".into()]
+        } else {
+            credentials::netexec_creds(
+                optional_str(args, "username"),
+                optional_str(args, "password"),
+                optional_str(args, "hash"),
+                optional_str(args, "domain"),
+            )
+        }
+    };
+
+    // Phase 1: Try --users
+    let result = CommandBuilder::new("netexec")
         .arg("smb")
         .arg(target)
-        .timeout_secs(120);
+        .args(build_creds())
+        .arg("--users")
+        .timeout_secs(120)
+        .execute()
+        .await?;
 
-    if null_session {
-        cmd = cmd.args(["-u", "", "-p", ""]);
-    } else {
-        let creds = credentials::netexec_creds(
-            optional_str(args, "username"),
-            optional_str(args, "password"),
-            optional_str(args, "hash"),
-            optional_str(args, "domain"),
-        );
-        cmd = cmd.args(creds);
+    // Check if --users returned actual user data (look for -Username- header
+    // followed by data lines, or any DOMAIN\user lines)
+    let has_users = result.stdout.contains("-Username-")
+        && result.stdout.lines().any(|l| {
+            let l = l.trim();
+            l.starts_with("SMB")
+                && !l.contains("[*]")
+                && !l.contains("[+]")
+                && !l.contains("[-]")
+                && !l.contains("-Username-")
+                && l.split_whitespace().count() >= 8
+        });
+
+    if has_users {
+        return Ok(result);
     }
 
-    cmd = cmd.arg("--users");
-    cmd.execute().await
+    // Phase 2: Fallback to --rid-brute
+    let rid_result = CommandBuilder::new("netexec")
+        .arg("smb")
+        .arg(target)
+        .args(build_creds())
+        .arg("--rid-brute")
+        .timeout_secs(120)
+        .execute()
+        .await?;
+
+    // If rid-brute found users, return it; otherwise return the original --users output
+    // so the LLM still sees the banner/error info
+    if rid_result.stdout.contains('\\') && rid_result.stdout.contains("SidType") {
+        Ok(rid_result)
+    } else {
+        Ok(result)
+    }
 }
 
 /// Enumerate SMB shares on a target.
@@ -164,13 +283,13 @@ pub async fn run_bloodhound(args: &Value) -> Result<ToolOutput> {
 
 /// Run an LDAP search query against a target.
 ///
-/// Required args: `target`, `domain`, `username`, `password`
-/// Optional args: `base_dn`, `filter`, `attributes`
+/// Required args: `target`, `domain`
+/// Optional args: `username`, `password`, `base_dn`, `filter`, `attributes`
 pub async fn ldap_search(args: &Value) -> Result<ToolOutput> {
     let target = required_str(args, "target")?;
     let domain = required_str(args, "domain")?;
-    let username = required_str(args, "username")?;
-    let password = required_str(args, "password")?;
+    let username = optional_str(args, "username");
+    let password = optional_str(args, "password");
     let base_dn = optional_str(args, "base_dn");
     let filter = optional_str(args, "filter");
     let attributes = optional_str(args, "attributes");
@@ -180,24 +299,30 @@ pub async fn ldap_search(args: &Value) -> Result<ToolOutput> {
         None => domain_to_base_dn(domain),
     };
 
-    let bind_dn = format!("{username}@{domain}");
     let uri = format!("ldap://{target}");
 
     let mut cmd = CommandBuilder::new("ldapsearch")
         .arg("-x")
-        .flag("-H", uri)
-        .flag("-D", bind_dn)
-        .flag("-w", password)
-        .flag("-b", computed_base_dn)
+        .flag("-H", &uri)
         .timeout_secs(120);
+
+    if let (Some(u), Some(p)) = (username, password) {
+        let bind_dn = format!("{u}@{domain}");
+        cmd = cmd.flag("-D", bind_dn).flag("-w", p);
+    }
+
+    cmd = cmd.flag("-b", computed_base_dn);
 
     if let Some(f) = filter {
         cmd = cmd.arg(f);
     }
 
     if let Some(attrs) = attributes {
-        for attr in attrs.split_whitespace() {
-            cmd = cmd.arg(attr);
+        for attr in attrs.split(|c: char| c == ',' || c.is_whitespace()) {
+            let attr = attr.trim();
+            if !attr.is_empty() {
+                cmd = cmd.arg(attr);
+            }
         }
     }
 
@@ -259,13 +384,13 @@ pub async fn dig_query(args: &Value) -> Result<ToolOutput> {
 
 /// Enumerate Active Directory domain trusts via LDAP.
 ///
-/// Required args: `target`, `domain`, `username`, `password`
-/// Optional args: `base_dn`
+/// Required args: `target`, `domain`
+/// Optional args: `username`, `password`, `base_dn`
 pub async fn enumerate_domain_trusts(args: &Value) -> Result<ToolOutput> {
     let target = required_str(args, "target")?;
     let domain = required_str(args, "domain")?;
-    let username = required_str(args, "username")?;
-    let password = required_str(args, "password")?;
+    let username = optional_str(args, "username");
+    let password = optional_str(args, "password");
     let base_dn = optional_str(args, "base_dn");
 
     let computed_base_dn = match base_dn {
@@ -273,15 +398,19 @@ pub async fn enumerate_domain_trusts(args: &Value) -> Result<ToolOutput> {
         None => domain_to_base_dn(domain),
     };
 
-    let bind_dn = format!("{username}@{domain}");
     let uri = format!("ldap://{target}");
 
-    CommandBuilder::new("ldapsearch")
+    let mut cmd = CommandBuilder::new("ldapsearch")
         .arg("-x")
-        .flag("-H", uri)
-        .flag("-D", bind_dn)
-        .flag("-w", password)
-        .flag("-b", computed_base_dn)
+        .flag("-H", &uri)
+        .timeout_secs(120);
+
+    if let (Some(u), Some(p)) = (username, password) {
+        let bind_dn = format!("{u}@{domain}");
+        cmd = cmd.flag("-D", bind_dn).flag("-w", p);
+    }
+
+    cmd.flag("-b", computed_base_dn)
         .arg("(objectClass=trustedDomain)")
         .args([
             "cn",
@@ -290,7 +419,6 @@ pub async fn enumerate_domain_trusts(args: &Value) -> Result<ToolOutput> {
             "trustAttributes",
             "flatName",
         ])
-        .timeout_secs(120)
         .execute()
         .await
 }
@@ -382,6 +510,29 @@ pub async fn save_users_to_file(args: &Value) -> Result<ToolOutput> {
         .timeout_secs(120)
         .execute()
         .await
+}
+
+/// Enumerate SMB shares using Kerberos ticket authentication (smbclient.py -k).
+///
+/// Requires a valid TGT already in the ccache — no username/password needed.
+/// Useful after obtaining a Kerberos ticket (e.g., via S4U, golden ticket, ADCS).
+///
+/// Required args: `target`
+/// Optional args: `target_ip`
+pub async fn smbclient_kerberos_shares(args: &Value) -> Result<ToolOutput> {
+    let target = required_str(args, "target")?;
+    let target_ip = optional_str(args, "target_ip");
+
+    let mut cmd = CommandBuilder::new("smbclient.py")
+        .args(["-k", "-no-pass"])
+        .timeout_secs(180);
+
+    if let Some(ip) = target_ip {
+        cmd = cmd.flag("-target-ip", ip);
+    }
+
+    // Impacket smbclient.py uses @host to list shares
+    cmd.arg(format!("@{target}")).execute().await
 }
 
 // ---------------------------------------------------------------------------

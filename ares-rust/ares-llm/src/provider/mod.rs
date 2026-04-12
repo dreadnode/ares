@@ -295,6 +295,16 @@ pub fn create_provider(model: &str) -> anyhow::Result<(Box<dyn LlmProvider>, Str
             .unwrap_or_else(|_| "http://localhost:11434".to_string());
         let provider = ollama::OllamaProvider::new(base_url);
         Ok((Box::new(provider), model_name.to_string()))
+    } else if model.starts_with("gpt-")
+        || model.starts_with("o1")
+        || model.starts_with("o3")
+        || model.starts_with("o4")
+    {
+        // Auto-detect OpenAI models without explicit prefix
+        let api_key = std::env::var("OPENAI_API_KEY")
+            .map_err(|_| anyhow::anyhow!("OPENAI_API_KEY not set for model '{model}'"))?;
+        let provider = openai::OpenAiProvider::new(api_key, None);
+        Ok((Box::new(provider), model.to_string()))
     } else {
         // Default to Anthropic if no prefix
         let api_key = std::env::var("ANTHROPIC_API_KEY")

@@ -53,6 +53,21 @@ pub(crate) async fn bootstrap_meta(queue: &TaskQueue, config: &OrchestratorConfi
     // Set active operation pointer for worker discovery
     let _: () = conn.set("ares:op:active", &config.operation_id).await?;
 
+    // Write operation status key (matches Python's status tracking)
+    ares_core::state::set_operation_status(&mut conn, &config.operation_id, "running").await?;
+
+    // Store the LLM model name for worker discovery and recovery
+    let model_key = format!(
+        "{}:{}:{}",
+        ares_core::state::KEY_PREFIX,
+        config.operation_id,
+        ares_core::state::KEY_MODEL,
+    );
+    let model_name = std::env::var("ARES_LLM_MODEL").unwrap_or_default();
+    if !model_name.is_empty() {
+        let _: () = conn.set_ex(&model_key, &model_name, 86400u64).await?;
+    }
+
     info!(
         operation_id = %config.operation_id,
         meta_key = %meta_key,

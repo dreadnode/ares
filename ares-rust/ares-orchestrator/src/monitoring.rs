@@ -103,13 +103,100 @@ impl AgentRegistry {
 }
 
 // ---------------------------------------------------------------------------
+// Lock keeper — independent task that only refreshes the operation lock
+// ---------------------------------------------------------------------------
+
+/// Spawn a dedicated task that extends the operation lock TTL every
+/// `heartbeat_interval`. This is intentionally decoupled from the heartbeat
+/// sweep so that a slow/hanging Redis call in the sweep cannot block lock
+/// refresh and cause the lock to expire.
+///
+/// Creates its own Redis connection to avoid contention with the main
+/// connection pool used for tool dispatch and result polling.
+pub fn spawn_lock_keeper(
+    queue: TaskQueue,
+    config: Arc<OrchestratorConfig>,
+    mut shutdown: watch::Receiver<bool>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        // Create a dedicated Redis connection for the lock keeper so that
+        // EXPIRE commands are not queued behind heavy BRPOP/LPUSH traffic
+        // on the shared connection manager.
+        let dedicated_queue = match TaskQueue::connect(&config.redis_url).await {
+            Ok(q) => {
+                info!("Lock keeper using dedicated Redis connection");
+                q
+            }
+            Err(e) => {
+                warn!(err = %e, "Lock keeper failed to create dedicated connection, falling back to shared");
+                queue.clone()
+            }
+        };
+
+        let mut interval = tokio::time::interval(config.heartbeat_interval);
+
+        loop {
+            tokio::select! {
+                _ = interval.tick() => {},
+                _ = shutdown.changed() => {
+                    debug!("Lock keeper shutting down");
+                    break;
+                }
+            }
+
+            // Wrap in a timeout so a hung Redis connection can't block us
+            // for longer than the lock TTL.
+            let extend_timeout = std::time::Duration::from_secs(10);
+            let result = tokio::time::timeout(
+                extend_timeout,
+                dedicated_queue.extend_lock(&config.operation_id, config.lock_ttl),
+            )
+            .await;
+
+            match result {
+                Ok(Ok(true)) => {} // Lock TTL refreshed
+                Ok(Ok(false)) => {
+                    // Lock key disappeared — re-acquire it
+                    warn!(
+                        operation_id = %config.operation_id,
+                        "Lock key missing, attempting re-acquisition"
+                    );
+                    match dedicated_queue
+                        .try_acquire_lock(&config.operation_id, config.lock_ttl)
+                        .await
+                    {
+                        Ok(true) => info!(
+                            operation_id = %config.operation_id,
+                            "Operation lock re-acquired"
+                        ),
+                        Ok(false) => warn!(
+                            operation_id = %config.operation_id,
+                            "Lock re-acquisition failed — another holder exists"
+                        ),
+                        Err(e) => warn!(err = %e, "Lock re-acquisition error"),
+                    }
+                }
+                Ok(Err(e)) => {
+                    warn!(err = %e, "Failed to extend operation lock");
+                }
+                Err(_) => {
+                    warn!("Lock extend timed out (Redis unresponsive?)");
+                }
+            }
+        }
+    })
+}
+
+// ---------------------------------------------------------------------------
 // Heartbeat monitor task
 // ---------------------------------------------------------------------------
 
 /// Spawn a background task that periodically:
 /// 1. Reads heartbeat keys from Redis for all known agents
 /// 2. Marks stale agents as offline
-/// 3. Extends the operation lock TTL
+/// 3. Cleans up stale tasks
+///
+/// Lock refresh is handled by the separate `spawn_lock_keeper` task.
 ///
 /// Runs until `shutdown` is signalled.
 pub fn spawn_heartbeat_monitor(
@@ -149,16 +236,8 @@ pub fn spawn_heartbeat_monitor(
             }
             consecutive_failures = 0;
 
-            // Extend operation lock
-            if let Err(e) = queue
-                .extend_lock(&config.operation_id, config.lock_ttl)
-                .await
-            {
-                warn!(err = %e, "Failed to extend operation lock");
-            }
-
-            // Clean up stale tasks
-            if let Err(e) = cleanup_stale_tasks(&tracker, &config).await {
+            // Clean up stale tasks (salvage any pending results first)
+            if let Err(e) = cleanup_stale_tasks(&tracker, &queue, &config).await {
                 warn!(err = %e, "Stale task cleanup failed");
             }
         }
@@ -206,8 +285,13 @@ async fn run_heartbeat_sweep(
 }
 
 /// Remove tasks that have been active longer than the configured stale timeout.
+///
+/// Before removing, checks Redis for unclaimed results and logs a warning so
+/// we know the result consumer missed them. (The real-time discovery push in
+/// `RedisToolDispatcher` ensures discoveries still reach state.)
 async fn cleanup_stale_tasks(
     tracker: &ActiveTaskTracker,
+    queue: &TaskQueue,
     config: &OrchestratorConfig,
 ) -> Result<()> {
     let llm_count = tracker.llm_task_count().await;
@@ -222,12 +306,27 @@ async fn cleanup_stale_tasks(
 
     let stale = tracker.stale_tasks(effective_timeout).await;
     for task in &stale {
-        warn!(
-            task_id = %task.task_id,
-            role = %task.role,
-            age_secs = task.submitted_at.elapsed().as_secs(),
-            "Removing stale task"
-        );
+        // Check if there's an unclaimed result sitting in Redis
+        let has_unclaimed = queue
+            .has_pending_result(&task.task_id)
+            .await
+            .unwrap_or(false);
+
+        if has_unclaimed {
+            warn!(
+                task_id = %task.task_id,
+                role = %task.role,
+                age_secs = task.submitted_at.elapsed().as_secs(),
+                "Removing stale task with UNCLAIMED result in Redis (result consumer missed it)"
+            );
+        } else {
+            warn!(
+                task_id = %task.task_id,
+                role = %task.role,
+                age_secs = task.submitted_at.elapsed().as_secs(),
+                "Removing stale task"
+            );
+        }
         tracker.remove(&task.task_id).await;
     }
 

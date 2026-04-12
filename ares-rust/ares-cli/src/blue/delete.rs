@@ -5,7 +5,7 @@ use chrono::Utc;
 use redis::AsyncCommands;
 
 use crate::redis_conn::connect_redis;
-use crate::util::parse_datetime;
+use crate::util::{parse_datetime, scan_redis_keys};
 
 pub(crate) async fn blue_delete(
     redis_url: Option<String>,
@@ -25,10 +25,7 @@ pub(crate) async fn blue_delete(
     }
 
     let pattern = format!("ares:blue:inv:{investigation_id}:*");
-    let keys: Vec<String> = redis::cmd("KEYS")
-        .arg(&pattern)
-        .query_async(&mut conn)
-        .await?;
+    let keys = scan_redis_keys(&mut conn, &pattern).await?;
 
     let mut deleted = 0usize;
     for key in &keys {
@@ -87,10 +84,7 @@ pub(crate) async fn blue_delete_operation(
     let mut total_deleted = 0usize;
     for inv_id in &inv_ids {
         let pattern = format!("ares:blue:inv:{inv_id}:*");
-        let keys: Vec<String> = redis::cmd("KEYS")
-            .arg(&pattern)
-            .query_async(&mut conn)
-            .await?;
+        let keys = scan_redis_keys(&mut conn, &pattern).await?;
         for key in &keys {
             let count: usize = conn.del(key).await?;
             total_deleted += count;
@@ -127,14 +121,8 @@ pub(crate) async fn blue_cleanup(
     let mut conn = connect_redis(redis_url).await?;
 
     if all {
-        let inv_keys: Vec<String> = redis::cmd("KEYS")
-            .arg("ares:blue:inv:*")
-            .query_async(&mut conn)
-            .await?;
-        let op_keys: Vec<String> = redis::cmd("KEYS")
-            .arg("ares:blue:op:*")
-            .query_async(&mut conn)
-            .await?;
+        let inv_keys = scan_redis_keys(&mut conn, "ares:blue:inv:*").await?;
+        let op_keys = scan_redis_keys(&mut conn, "ares:blue:op:*").await?;
         let active_exists: bool = conn.exists("ares:blue:active_investigations").await?;
         let queue_len: i64 = conn.llen("ares:blue:investigations").await?;
 
@@ -183,10 +171,7 @@ pub(crate) async fn blue_cleanup(
     // Selective cleanup: only completed/failed older than max_age_hours
     let cutoff = Utc::now().timestamp() - (max_age_hours as i64 * 3600);
 
-    let status_keys: Vec<String> = redis::cmd("KEYS")
-        .arg("ares:blue:inv:*:status")
-        .query_async(&mut conn)
-        .await?;
+    let status_keys = scan_redis_keys(&mut conn, "ares:blue:inv:*:status").await?;
 
     let mut to_delete: Vec<String> = Vec::new();
 
@@ -243,10 +228,7 @@ pub(crate) async fn blue_cleanup(
     let mut total_deleted = 0usize;
     for inv_id in &to_delete {
         let pattern = format!("ares:blue:inv:{inv_id}:*");
-        let keys: Vec<String> = redis::cmd("KEYS")
-            .arg(&pattern)
-            .query_async(&mut conn)
-            .await?;
+        let keys = scan_redis_keys(&mut conn, &pattern).await?;
         for key in &keys {
             let count: usize = conn.del(key).await?;
             total_deleted += count;

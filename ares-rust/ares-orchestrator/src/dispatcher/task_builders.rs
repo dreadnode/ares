@@ -2,6 +2,9 @@
 
 use anyhow::Result;
 use serde_json::json;
+use tracing::{debug, info};
+
+use crate::state::DEDUP_SCANNED_TARGETS;
 
 use super::Dispatcher;
 
@@ -19,6 +22,11 @@ impl Dispatcher {
     }
 
     /// Submit a recon task.
+    ///
+    /// Guards (mirroring Python's `request_recon` in `routing.py`):
+    /// 1. Skip entirely if domain admin has been achieved
+    /// 2. Skip nmap tasks if all targets are already in `scanned_targets`
+    /// 3. Auto-dispatch nmap prerequisite before enumeration if targets not scanned
     pub async fn request_recon(
         &self,
         target_ip: &str,
@@ -26,6 +34,75 @@ impl Dispatcher {
         techniques: &[&str],
         credential: Option<&ares_core::models::Credential>,
     ) -> Result<Option<String>> {
+        // Guard 1: Skip recon if domain admin already achieved
+        {
+            let state = self.state.read().await;
+            if state.has_domain_admin {
+                debug!(
+                    target_ip = target_ip,
+                    "Skipping recon — domain admin already achieved"
+                );
+                return Ok(None);
+            }
+        }
+
+        let is_nmap = techniques.contains(&"network_scan") || techniques.contains(&"nmap_scan");
+        let is_smb_signing = techniques.contains(&"smb_signing_check");
+        let is_scan_only = (is_nmap || is_smb_signing)
+            && techniques
+                .iter()
+                .all(|t| *t == "network_scan" || *t == "nmap_scan" || *t == "smb_signing_check");
+
+        // Guard 2: Skip nmap/scan tasks if target already scanned
+        if is_scan_only {
+            let state = self.state.read().await;
+            if state.is_processed(DEDUP_SCANNED_TARGETS, target_ip) {
+                debug!(
+                    target_ip = target_ip,
+                    "Skipping scan — target already in scanned_targets"
+                );
+                return Ok(None);
+            }
+        }
+
+        // Guard 3: Auto-dispatch nmap prerequisite before enumeration
+        // If this is NOT a scan task and the target hasn't been scanned yet,
+        // dispatch an nmap scan first at priority 1 (urgent).
+        if !is_scan_only {
+            let needs_scan = {
+                let state = self.state.read().await;
+                !state.is_processed(DEDUP_SCANNED_TARGETS, target_ip)
+            };
+            if needs_scan {
+                info!(
+                    target_ip = target_ip,
+                    "Auto-dispatching nmap prerequisite before enumeration"
+                );
+                let scan_payload = json!({
+                    "target_ip": target_ip,
+                    "domain": domain,
+                    "techniques": ["network_scan", "smb_signing_check"],
+                });
+                // Priority 1 = urgent, scanned before the enumeration task
+                let _ = self
+                    .throttled_submit("recon", "recon", scan_payload, 1)
+                    .await;
+            }
+        }
+
+        // Mark nmap targets as scanned (optimistic, to prevent duplicate dispatches)
+        if is_nmap {
+            {
+                let mut state = self.state.write().await;
+                state.mark_processed(DEDUP_SCANNED_TARGETS, target_ip.to_string());
+            }
+            // Persist to Redis so it survives restarts
+            let _ = self
+                .state
+                .persist_dedup(&self.queue, DEDUP_SCANNED_TARGETS, target_ip)
+                .await;
+        }
+
         let mut payload = json!({
             "target_ip": target_ip,
             "domain": domain,
@@ -38,7 +115,42 @@ impl Dispatcher {
                 "domain": cred.domain,
             });
         }
-        self.throttled_submit("recon", "recon", payload, 5).await
+
+        // Nmap tasks get priority 1, other recon priority 5
+        let priority = if is_nmap { 1 } else { 5 };
+        self.throttled_submit("recon", "recon", payload, priority)
+            .await
+    }
+
+    /// Submit a low-hanging fruit credential discovery task (SYSVOL, GPP, LDAP, LAPS).
+    ///
+    /// Mirrors Python's fast credential discovery dispatch: sends multiple high-success-rate
+    /// techniques in a single task so the LLM agent executes them sequentially.
+    pub async fn request_low_hanging_fruit(
+        &self,
+        target_ip: &str,
+        domain: &str,
+        credential: &ares_core::models::Credential,
+        priority: i32,
+    ) -> Result<Option<String>> {
+        let payload = json!({
+            "techniques": [
+                "sysvol_script_search",
+                "gpp_password_finder",
+                "ldap_search_descriptions",
+                "laps_dump"
+            ],
+            "reason": "low_hanging_fruit",
+            "target_ip": target_ip,
+            "domain": domain,
+            "credential": {
+                "username": credential.username,
+                "password": credential.password,
+                "domain": credential.domain,
+            },
+        });
+        self.throttled_submit("credential_access", "credential_access", payload, priority)
+            .await
     }
 
     /// Submit a credential access task (kerberoast, asrep, secretsdump, etc.).
@@ -164,6 +276,24 @@ impl Dispatcher {
         });
         self.throttled_submit("privesc_enumeration", "recon", payload, 5)
             .await
+    }
+
+    /// Submit a share enumeration task against a host using credentials.
+    pub async fn request_share_enumeration(
+        &self,
+        host_ip: &str,
+        credential: &ares_core::models::Credential,
+    ) -> Result<Option<String>> {
+        let payload = json!({
+            "techniques": ["enumerate_shares"],
+            "target_ip": host_ip,
+            "credential": {
+                "username": credential.username,
+                "password": credential.password,
+                "domain": credential.domain,
+            },
+        });
+        self.throttled_submit("recon", "recon", payload, 5).await
     }
 
     /// Submit a share spider task.

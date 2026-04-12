@@ -90,8 +90,8 @@ pub(crate) async fn ops_submit(
     }
 
     // Generate operation ID if not provided
-    let op_id = operation_id
-        .unwrap_or_else(|| format!("multiagent-{}", &uuid::Uuid::new_v4().to_string()[..8]));
+    let op_id =
+        operation_id.unwrap_or_else(|| format!("op-{}", Utc::now().format("%Y%m%d-%H%M%S")));
 
     // Build initial credential if username provided
     let initial_cred = username.as_ref().map(|uname| {

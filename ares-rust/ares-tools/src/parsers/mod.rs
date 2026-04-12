@@ -74,7 +74,7 @@ pub fn parse_tool_output(tool_name: &str, output: &str, params: &Value) -> Value
         "enumerate_shares" => {
             let shares = parse_netexec_shares(output);
             if !shares.is_empty() {
-                discoveries["discovered_shares"] = Value::Array(shares);
+                discoveries["shares"] = Value::Array(shares);
             }
         }
         "run_bloodhound" => {
@@ -95,10 +95,48 @@ pub fn parse_tool_output(tool_name: &str, output: &str, params: &Value) -> Value
                 discoveries["hashes"] = Value::Array(hashes);
             }
         }
-        "asrep_roast" => {
+        "asrep_roast" | "kerberos_user_enum_noauth" => {
             let hashes = parse_asrep_roast(output, params);
             if !hashes.is_empty() {
                 discoveries["hashes"] = Value::Array(hashes);
+            }
+            // Extract valid usernames from GetNPUsers output lines like:
+            //   [-] User Administrator doesn't have UF_DONT_REQUIRE_PREAUTH set
+            //   [-] invalid principal syntax
+            // The first pattern confirms a valid AD account.
+            let mut valid_users = Vec::new();
+            let domain = params.get("domain").and_then(|v| v.as_str()).unwrap_or("");
+            for line in output.lines() {
+                let line = line.trim();
+                if let Some(rest) = line.strip_prefix("[-] User ") {
+                    // Match all variants that confirm a valid AD principal:
+                    //   [-] User X doesn't have UF_DONT_REQUIRE_PREAUTH set
+                    //   [-] User X does not have UF_DONT_REQUIRE_PREAUTH set
+                    //   [-] User X is disabled / KDC_ERR_CLIENT_REVOKED
+                    let username = rest
+                        .strip_suffix(" doesn't have UF_DONT_REQUIRE_PREAUTH set")
+                        .or_else(|| rest.strip_suffix(" does not have UF_DONT_REQUIRE_PREAUTH set"))
+                        .or_else(|| {
+                            if rest.contains("KDC_ERR_CLIENT_REVOKED") {
+                                rest.split_whitespace().next()
+                            } else {
+                                None
+                            }
+                        });
+                    if let Some(username) = username {
+                        let username = username.trim();
+                        if !username.is_empty() {
+                            valid_users.push(json!({
+                                "username": username,
+                                "domain": domain,
+                                "source": "kerberos_enum",
+                            }));
+                        }
+                    }
+                }
+            }
+            if !valid_users.is_empty() {
+                discoveries["discovered_users"] = Value::Array(valid_users);
             }
         }
         "find_delegation" => {
@@ -165,6 +203,7 @@ pub fn merge_discoveries(all: &[Value]) -> Value {
     let mut hashes = Vec::new();
     let mut vulnerabilities = Vec::new();
     let mut discovered_users = Vec::new();
+    let mut shares = Vec::new();
 
     for disc in all {
         if let Some(h) = disc.get("hosts").and_then(|v| v.as_array()) {
@@ -214,6 +253,9 @@ pub fn merge_discoveries(all: &[Value]) -> Value {
         if let Some(u) = disc.get("discovered_users").and_then(|v| v.as_array()) {
             discovered_users.extend(u.iter().cloned());
         }
+        if let Some(s) = disc.get("shares").and_then(|v| v.as_array()) {
+            shares.extend(s.iter().cloned());
+        }
     }
 
     let mut merged = json!({});
@@ -233,6 +275,9 @@ pub fn merge_discoveries(all: &[Value]) -> Value {
     if !discovered_users.is_empty() {
         merged["discovered_users"] = Value::Array(discovered_users);
     }
+    if !shares.is_empty() {
+        merged["shares"] = Value::Array(shares);
+    }
     merged
 }
 
@@ -241,6 +286,11 @@ pub fn merge_discoveries(all: &[Value]) -> Value {
 // ---------------------------------------------------------------------------
 
 fn looks_like_ip(s: &str) -> bool {
+    looks_like_ip_pub(s)
+}
+
+/// Check if a string looks like an IPv4 address (public for recon module).
+pub fn looks_like_ip_pub(s: &str) -> bool {
     let parts: Vec<&str> = s.split('.').collect();
     parts.len() == 4 && parts.iter().all(|p| p.parse::<u8>().is_ok())
 }
@@ -361,14 +411,14 @@ SMB         192.168.58.121  445    DC01       [*] Enumerated 10 local users: NOR
 
         let users = parse_netexec_users(output);
 
-        // Should have 5 user entries + 1 _credentials marker
+        // Should have 6 user entries + 1 _credentials marker (Guest is included)
         let user_entries: Vec<_> = users
             .iter()
             .filter(|u| u.get("username").is_some())
             .collect();
         assert!(
-            user_entries.len() >= 5,
-            "Should have at least 5 users, got {}",
+            user_entries.len() >= 6,
+            "Should have at least 6 users (including Guest), got {}",
             user_entries.len()
         );
 
@@ -384,8 +434,13 @@ SMB         192.168.58.121  445    DC01       [*] Enumerated 10 local users: NOR
         assert_eq!(creds[0]["username"], "dave.miller");
         assert_eq!(creds[0]["password"], "Summer2026!");
 
-        // Guest should be excluded
-        assert!(!user_entries.iter().any(|u| u["username"] == "Guest"));
+        // Guest should be included (matches Python behavior)
+        assert!(user_entries.iter().any(|u| u["username"] == "Guest"));
+
+        // All users should have netexec_user_enum source
+        assert!(user_entries
+            .iter()
+            .all(|u| u["source"] == "netexec_user_enum"));
     }
 
     #[test]
@@ -528,5 +583,37 @@ SMB  192.168.58.121  445  DC01  bob         2026-03-25 23:21:09 0  Bob"#;
         let params = json!({"domain": "contoso.local", "target_ip": "192.168.58.10"});
         let disc = parse_tool_output("find_delegation", output, &params);
         assert_eq!(disc["vulnerabilities"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn test_kerberos_user_enum_all_variants() {
+        // Test all three output variants from impacket-GetNPUsers
+        let output = r#"Impacket v0.12.0 - Copyright Fortra, LLC and its affiliated companies
+
+[*] Getting TGT for Administrator
+[-] User Administrator doesn't have UF_DONT_REQUIRE_PREAUTH set
+[-] User svc_sql does not have UF_DONT_REQUIRE_PREAUTH set
+[-] User disabled_acct - Loss of credentials through KDC_ERR_CLIENT_REVOKED
+[-] invalid principal syntax
+"#;
+
+        let params = json!({"domain": "contoso.local", "dc_ip": "192.168.58.10"});
+        let disc = parse_tool_output("kerberos_user_enum_noauth", output, &params);
+        let users = disc["discovered_users"].as_array().unwrap();
+        assert_eq!(users.len(), 3, "Should find 3 valid users, got {:?}", users);
+
+        let names: Vec<&str> = users
+            .iter()
+            .map(|u| u["username"].as_str().unwrap())
+            .collect();
+        assert!(names.contains(&"Administrator"));
+        assert!(names.contains(&"svc_sql"));
+        assert!(names.contains(&"disabled_acct"));
+
+        // All should have domain set
+        for u in users {
+            assert_eq!(u["domain"], "contoso.local");
+            assert_eq!(u["source"], "kerberos_enum");
+        }
     }
 }

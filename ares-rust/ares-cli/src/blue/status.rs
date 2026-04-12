@@ -11,10 +11,7 @@ pub(crate) async fn blue_status(
     let mut conn = connect_redis(redis_url).await?;
 
     let inv_id = if latest {
-        let status_keys: Vec<String> = redis::cmd("KEYS")
-            .arg("ares:blue:inv:*:status")
-            .query_async(&mut conn)
-            .await?;
+        let status_keys = crate::util::scan_redis_keys(&mut conn, "ares:blue:inv:*:status").await?;
 
         let mut candidates: Vec<(String, String)> = Vec::new();
         for key in &status_keys {

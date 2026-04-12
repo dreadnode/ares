@@ -62,16 +62,6 @@ Your role is to move through the network and extract credentials from compromise
    smbexec(target="192.168.58.10", username="admin", hash="aad3b435b51404eeaad3b435b51404ee:31d6cfe0d16ae931b73c59d7e0c089c0", domain="contoso.local")
    ```
 
-4. **atexec** - Scheduled task execution (stealthier)
-   ```
-   atexec(target="192.168.58.10", username="admin", hash="aad3b435b51404eeaad3b435b51404ee:31d6cfe0d16ae931b73c59d7e0c089c0", domain="contoso.local", command="whoami")
-   ```
-
-5. **dcomexec** - DCOM-based execution
-   ```
-   dcomexec(target="192.168.58.10", username="admin", hash="aad3b435b51404eeaad3b435b51404ee:31d6cfe0d16ae931b73c59d7e0c089c0", domain="contoso.local")
-   ```
-
 ### Pass-the-Hash
 When you have NTLM hash instead of password, use the format `LM:NT` or just `NT`:
 ```
@@ -180,22 +170,16 @@ If target is a DC, secretsdump automatically performs DCSync. Look for:
 | evil_winrm | Remote execution via WinRM |
 | wmiexec | Remote execution via WMI |
 | smbexec | Remote execution via SMB (service per command) |
-| atexec | Scheduled task execution (stealthier) |
-| dcomexec | DCOM-based execution |
 | get_tgt | Request TGT for pass-the-ticket |
 | psexec_kerberos | PSExec with Kerberos auth |
 | wmiexec_kerberos | WMIExec with Kerberos auth |
+| smbexec_kerberos | SMBExec with Kerberos auth |
 
 ### Harvesting Tools
 | Tool | Use Case |
 |------|----------|
-| secretsdump | Dump SAM/LSA/NTDS |
-| lsassy | Remote LSA dump |
-
-### Share Tools
-| Tool | Use Case |
-|------|----------|
-| smbclient_spider | Spider shares for sensitive files (scripts, configs) |
+| secretsdump | Dump SAM/LSA/NTDS (password/hash auth) |
+| secretsdump_kerberos | Dump SAM/LSA/NTDS (Kerberos ticket auth) |
 
 ## Error Handling
 

@@ -104,7 +104,7 @@ pub async fn auto_gmsa_extraction(
             });
 
             match dispatcher
-                .throttled_submit("credential_access", "privesc", payload, 3)
+                .throttled_submit("credential_access", "credential_access", payload, 3)
                 .await
             {
                 Ok(Some(task_id)) => {

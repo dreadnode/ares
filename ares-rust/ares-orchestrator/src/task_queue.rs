@@ -189,6 +189,14 @@ impl TaskQueue {
         Ok(task_id)
     }
 
+    /// Non-destructive peek: does a result exist for this task?
+    pub async fn has_pending_result(&self, task_id: &str) -> Result<bool> {
+        let key = Self::result_queue_key(task_id);
+        let mut conn = self.conn.clone();
+        let len: i64 = conn.llen(&key).await.unwrap_or(0);
+        Ok(len > 0)
+    }
+
     /// Non-blocking check for a task result (RPOP).
     pub async fn check_result(&self, task_id: &str) -> Result<Option<TaskResult>> {
         let key = Self::result_queue_key(task_id);

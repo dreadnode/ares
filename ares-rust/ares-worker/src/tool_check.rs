@@ -36,6 +36,7 @@ fn tools_for_role(role: &str) -> &'static [&'static str] {
             "impacket-psexec",
             "impacket-wmiexec",
             "impacket-smbexec",
+            "impacket-secretsdump",
             "impacket-mssqlclient",
             "impacket-getTGT",
             "impacket-getST",
@@ -45,6 +46,7 @@ fn tools_for_role(role: &str) -> &'static [&'static str] {
             "pth-winexe",
             "pth-smbclient",
             "pth-rpcclient",
+            "pth-wmis",
         ],
         "privesc" => &[
             "certipy",
@@ -55,6 +57,8 @@ fn tools_for_role(role: &str) -> &'static [&'static str] {
             "impacket-ticketer",
             "impacket-secretsdump",
             "impacket-lookupsid",
+            "impacket-mssqlclient",
+            "raiseChild.py",
             "lsassy",
         ],
         "acl" => &[
@@ -62,8 +66,16 @@ fn tools_for_role(role: &str) -> &'static [&'static str] {
             "dacledit.py",
             "impacket-secretsdump",
             "impacket-dacledit",
+            "pywhisker.py",
+            "targetedKerberoast.py",
         ],
-        "coercion" => &["responder", "impacket-ntlmrelayx", "coercer", "mitm6"],
+        "coercion" => &[
+            "responder",
+            "impacket-ntlmrelayx",
+            "coercer",
+            "mitm6",
+            "dfscoerce",
+        ],
         // ToolExec workers may handle any role's tools
         _ => &[],
     }

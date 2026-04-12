@@ -23,6 +23,7 @@ use defaults::default_max_steps;
 /// Default search paths for the config file, in priority order.
 const DEFAULT_PATHS: &[&str] = &[
     "./config/multi-agent-production.yaml",
+    "/ares/config/multi-agent-production.yaml",
     "/etc/ares/config.yaml",
 ];
 

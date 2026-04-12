@@ -4,7 +4,7 @@
 //! See: <https://platform.openai.com/docs/api-reference/chat>
 
 use serde::{Deserialize, Serialize};
-use tracing::debug;
+use tracing::info;
 
 use super::{
     ChatMessage, ContentPart, LlmError, LlmProvider, LlmRequest, LlmResponse, Role, StopReason,
@@ -24,7 +24,11 @@ impl OpenAiProvider {
         Self {
             api_key,
             base_url: base_url.unwrap_or_else(|| DEFAULT_API_URL.to_string()),
-            client: reqwest::Client::new(),
+            client: reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(300))
+                .connect_timeout(std::time::Duration::from_secs(15))
+                .build()
+                .expect("failed to build reqwest client"),
         }
     }
 }
@@ -304,7 +308,7 @@ impl LlmProvider for OpenAiProvider {
             temperature: request.temperature,
         };
 
-        debug!(
+        info!(
             model = %request.model,
             msg_count = request.messages.len(),
             tool_count = request.tools.len(),
@@ -400,7 +404,7 @@ impl LlmProvider for OpenAiProvider {
 
         let stop_reason = parse_stop_reason(choice.finish_reason.as_deref());
 
-        debug!(
+        info!(
             input_tokens = usage.input_tokens,
             output_tokens = usage.output_tokens,
             tool_calls = tool_calls.len(),

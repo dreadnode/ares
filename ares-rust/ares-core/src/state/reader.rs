@@ -387,6 +387,67 @@ impl RedisStateReader {
         Ok(())
     }
 
+    /// Add a share to `ares:op:{id}:shares` HASH (with dedup by host+name).
+    pub async fn add_share(
+        &self,
+        conn: &mut impl AsyncCommands,
+        share: &Share,
+    ) -> Result<bool, redis::RedisError> {
+        let key = self.key(KEY_SHARES);
+        let dedup_field = format!(
+            "{}:{}",
+            share.host.to_lowercase(),
+            share.name.to_lowercase()
+        );
+        let data = serde_json::to_string(share).unwrap_or_default();
+
+        let added: bool = conn.hset_nx(&key, &dedup_field, &data).await?;
+        if added {
+            let _: () = conn.expire(&key, 86400).await?;
+        }
+        Ok(added)
+    }
+
+    /// Add a weakness block to `ares:op:{id}:weaknesses` HASH (with dedup by title).
+    pub async fn add_weakness(
+        &self,
+        conn: &mut impl AsyncCommands,
+        block: &str,
+        dedup_key: &str,
+    ) -> Result<bool, redis::RedisError> {
+        let key = self.key(KEY_WEAKNESSES);
+        let added: bool = conn.hset_nx(&key, dedup_key, block).await?;
+        if added {
+            let _: () = conn.expire(&key, 86400).await?;
+        }
+        Ok(added)
+    }
+
+    /// Add a timeline event to `ares:op:{id}:timeline` LIST.
+    pub async fn add_timeline_event(
+        &self,
+        conn: &mut impl AsyncCommands,
+        event: &serde_json::Value,
+    ) -> Result<(), redis::RedisError> {
+        let key = self.key(KEY_TIMELINE);
+        let data = serde_json::to_string(event).unwrap_or_default();
+        let _: () = conn.rpush(&key, &data).await?;
+        let _: () = conn.expire(&key, 86400).await?;
+        Ok(())
+    }
+
+    /// Add a MITRE ATT&CK technique to `ares:op:{id}:techniques` SET.
+    pub async fn add_technique(
+        &self,
+        conn: &mut impl AsyncCommands,
+        technique_id: &str,
+    ) -> Result<bool, redis::RedisError> {
+        let key = self.key(KEY_TECHNIQUES);
+        let added: i64 = conn.sadd(&key, technique_id).await?;
+        let _: () = conn.expire(&key, 86400).await?;
+        Ok(added > 0)
+    }
+
     /// Load timeline events from `ares:op:{id}:timeline` LIST.
     ///
     /// Each entry is a JSON object with at least `timestamp`, `description`,
@@ -422,6 +483,46 @@ impl RedisStateReader {
         let key = format!("{}:report", self.key_prefix());
         let report: Option<String> = conn.get(&key).await?;
         Ok(report)
+    }
+
+    /// Increment a vulnerability type failure counter.
+    ///
+    /// Key: `ares:op:{id}:vuln_type_failures` HASH — matches Python's `HINCRBY`
+    /// for tracking per-vulnerability-type failure counts.
+    pub async fn increment_vuln_type_failure(
+        &self,
+        conn: &mut impl AsyncCommands,
+        vuln_type: &str,
+    ) -> Result<i64, redis::RedisError> {
+        let key = self.key(KEY_VULN_TYPE_FAILURES);
+        let count: i64 = conn.hincr(&key, vuln_type, 1i64).await?;
+        let _: () = conn.expire(&key, 86400).await?;
+        Ok(count)
+    }
+
+    /// Get the failure count for a vulnerability type.
+    pub async fn get_vuln_type_failure_count(
+        &self,
+        conn: &mut impl AsyncCommands,
+        vuln_type: &str,
+    ) -> Result<i64, redis::RedisError> {
+        let key = self.key(KEY_VULN_TYPE_FAILURES);
+        let count: Option<String> = conn.hget(&key, vuln_type).await?;
+        Ok(count.and_then(|s| s.parse().ok()).unwrap_or(0))
+    }
+
+    /// Get all vulnerability type failure counts.
+    pub async fn get_all_vuln_type_failures(
+        &self,
+        conn: &mut impl AsyncCommands,
+    ) -> Result<std::collections::HashMap<String, i64>, redis::RedisError> {
+        let key = self.key(KEY_VULN_TYPE_FAILURES);
+        let data: std::collections::HashMap<String, String> = conn.hgetall(&key).await?;
+        let result = data
+            .into_iter()
+            .filter_map(|(k, v)| v.parse::<i64>().ok().map(|c| (k, c)))
+            .collect();
+        Ok(result)
     }
 
     /// Returns the key prefix for this operation: `ares:op:{op_id}`

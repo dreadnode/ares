@@ -16,9 +16,10 @@ use serde_json::Value;
 use tokio::sync::watch;
 use tracing::{debug, info, warn};
 
-use ares_core::models::{Credential, Hash, Host, User, VulnerabilityInfo};
+use ares_core::models::{Credential, Hash, Host, Share, User, VulnerabilityInfo};
 
 use crate::dispatcher::Dispatcher;
+use crate::output_extraction;
 use crate::results::CompletedTask;
 use crate::throttling::Throttler;
 
@@ -30,6 +31,22 @@ pub async fn process_completed_task(
 ) {
     let task_id = &completed.task_id;
     let result = &completed.result;
+
+    // Persist task completion to Redis (pending → completed) for recovery.
+    // Matches Python's write to ares:op:{id}:completed_tasks HASH.
+    {
+        let core_result = ares_core::models::TaskResult {
+            task_id: task_id.clone(),
+            success: result.success,
+            result: result.result.clone(),
+            error: result.error.clone(),
+            completed_at: result.completed_at.unwrap_or_else(chrono::Utc::now),
+        };
+        let _ = dispatcher
+            .state
+            .complete_task(&dispatcher.queue, task_id, core_result)
+            .await;
+    }
 
     if result.success {
         info!(
@@ -68,6 +85,21 @@ pub async fn process_completed_task(
         check_domain_admin_indicators(payload, dispatcher).await;
     }
 
+    // Secondary pass: regex-based extraction from raw text in the result.
+    // This catches discoveries that the per-tool parsers or LLM may have missed.
+    if let Some(ref payload) = result.result {
+        let default_domain = get_default_domain(dispatcher).await;
+        extract_from_raw_text(payload, dispatcher, &default_domain).await;
+    }
+
+    // S4U auto-chain: detect .ccache in output and dispatch secretsdump with ticket.
+    // Mirrors Python's _auto_chain_s4u_lateral_movement — when a task produces a
+    // Kerberos ticket (.ccache), chain a secretsdump using that ticket for
+    // immediate credential extraction.
+    if let Some(ref payload) = result.result {
+        auto_chain_s4u_secretsdump(payload, dispatcher, &completed.task_id).await;
+    }
+
     // Notify credential access to wake up for potential new creds
     dispatcher.credential_access_notify.notify_one();
 
@@ -75,25 +107,281 @@ pub async fn process_completed_task(
     let _ = dispatcher.notify_state_update().await;
 }
 
-/// Extract credentials, hashes, hosts, and vulns from a result payload.
-async fn extract_discoveries(payload: &Value, dispatcher: &Arc<Dispatcher>) -> Result<()> {
-    let parsed = parse_discoveries(payload);
+/// Get the default domain from state (first domain, or empty string).
+async fn get_default_domain(dispatcher: &Arc<Dispatcher>) -> String {
+    let state = dispatcher.state.read().await;
+    state.domains.first().cloned().unwrap_or_default()
+}
 
-    for cred in parsed.credentials {
+/// S4U auto-chain: detect .ccache ticket in task output and dispatch secretsdump.
+///
+/// Mirrors Python's `_auto_chain_s4u_lateral_movement` — when a task produces a
+/// Kerberos ticket file (.ccache), automatically dispatch a secretsdump task using
+/// that ticket. This chains S4U/delegation → secretsdump without waiting for the
+/// next automation cycle.
+async fn auto_chain_s4u_secretsdump(payload: &Value, dispatcher: &Arc<Dispatcher>, task_id: &str) {
+    // Collect all text fields to search for .ccache references
+    let mut text_parts: Vec<&str> = Vec::new();
+    for key in &["summary", "output", "result", "tool_output"] {
+        if let Some(s) = payload.get(*key).and_then(|v| v.as_str()) {
+            text_parts.push(s);
+        }
+    }
+    if let Some(arr) = payload.get("tool_outputs").and_then(|v| v.as_array()) {
+        for item in arr {
+            if let Some(s) = item.as_str() {
+                text_parts.push(s);
+            } else if let Some(s) = item.get("output").and_then(|v| v.as_str()) {
+                text_parts.push(s);
+            }
+        }
+    }
+
+    let combined = text_parts.join("\n");
+    let ticket_path = match ares_llm::routing::extract_ticket_path(&combined) {
+        Some(p) => p,
+        None => return, // No .ccache found
+    };
+
+    info!(
+        task_id = %task_id,
+        ticket_path = %ticket_path,
+        "Detected .ccache ticket — chaining secretsdump"
+    );
+
+    // Try to extract target from the task params (target_spn → host) or ccache filename
+    let target_ip = payload
+        .get("target_spn")
+        .and_then(|v| v.as_str())
+        .and_then(ares_llm::routing::extract_host_from_spn)
+        .or_else(|| {
+            // Try to parse target from ccache filename:
+            // Administrator@cifs_dc01.contoso.local@CONTOSO.LOCAL.ccache
+            let fname = ticket_path.rsplit('/').next().unwrap_or(&ticket_path);
+            if let Some(at_pos) = fname.find('@') {
+                let after = &fname[at_pos + 1..];
+                // Extract hostname: cifs_dc01.contoso.local@REALM.ccache
+                let host_part = after.split('@').next().unwrap_or(after).replace('_', ".");
+                // Remove the service prefix (cifs. → dc01.contoso.local)
+                if let Some(dot_pos) = host_part.find('.') {
+                    let candidate = &host_part[dot_pos + 1..];
+                    if candidate.contains('.') {
+                        return Some(candidate.to_string());
+                    }
+                }
+            }
+            None
+        })
+        .or_else(|| {
+            // Fallback: use target_ip from the task payload
+            payload
+                .get("target_ip")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+        })
+        .or_else(|| {
+            payload
+                .get("target")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+        });
+
+    let target_ip = match target_ip {
+        Some(ip) => ip,
+        None => {
+            warn!(task_id = %task_id, "S4U auto-chain: .ccache found but no target could be determined");
+            return;
+        }
+    };
+
+    // Resolve target IP if it's a hostname
+    let resolved_ip = {
+        let state = dispatcher.state.read().await;
+        // Check if target_ip is actually an IP already
+        if target_ip.parse::<std::net::Ipv4Addr>().is_ok() {
+            target_ip.clone()
+        } else {
+            // It's a hostname — look up in hosts
+            state
+                .hosts
+                .iter()
+                .find(|h| h.hostname.to_lowercase() == target_ip.to_lowercase())
+                .map(|h| h.ip.clone())
+                .unwrap_or(target_ip.clone())
+        }
+    };
+
+    let domain = payload.get("domain").and_then(|v| v.as_str()).unwrap_or("");
+
+    // Dispatch secretsdump with ticket (no password needed)
+    let sd_payload = serde_json::json!({
+        "technique": "secretsdump",
+        "techniques": ["secretsdump"],
+        "target_ip": resolved_ip,
+        "domain": domain,
+        "ticket_path": ticket_path,
+        "no_pass": true,
+    });
+
+    match dispatcher
+        .throttled_submit("credential_access", "credential_access", sd_payload, 2)
+        .await
+    {
+        Ok(Some(new_task_id)) => {
+            info!(
+                parent_task = %task_id,
+                chained_task = %new_task_id,
+                target = %resolved_ip,
+                ticket = %ticket_path,
+                "S4U auto-chain: secretsdump dispatched with ticket"
+            );
+        }
+        Ok(None) => {}
+        Err(e) => warn!(err = %e, "S4U auto-chain: failed to dispatch secretsdump"),
+    }
+}
+
+/// Extract discoveries from raw text fields in the result payload.
+///
+/// Collects text from "summary", "output", "result", and "tool_outputs" fields
+/// and runs regex-based extraction on the combined text. This mirrors Python's
+/// `_process_output_text()` — a safety net that catches discoveries the per-tool
+/// parsers or LLM-reported structured data may have missed.
+async fn extract_from_raw_text(
+    payload: &Value,
+    dispatcher: &Arc<Dispatcher>,
+    default_domain: &str,
+) {
+    // Collect all text fields from the result payload
+    let mut text_parts: Vec<&str> = Vec::new();
+
+    for key in &["summary", "output", "result", "tool_output"] {
+        if let Some(s) = payload.get(*key).and_then(|v| v.as_str()) {
+            text_parts.push(s);
+        }
+    }
+
+    // Also check array-valued tool_outputs
+    if let Some(arr) = payload.get("tool_outputs").and_then(|v| v.as_array()) {
+        for item in arr {
+            if let Some(s) = item.as_str() {
+                text_parts.push(s);
+            } else if let Some(s) = item.get("output").and_then(|v| v.as_str()) {
+                text_parts.push(s);
+            }
+        }
+    }
+
+    if text_parts.is_empty() {
+        return;
+    }
+
+    let combined = text_parts.join("\n");
+    let extracted = output_extraction::extract_from_output_text(&combined, default_domain);
+
+    if extracted.is_empty() {
+        return;
+    }
+
+    let mut new_count = 0usize;
+
+    for cred in extracted.credentials {
         match dispatcher
             .state
             .publish_credential(&dispatcher.queue, cred)
             .await
         {
-            Ok(true) => debug!("Published new credential from result"),
+            Ok(true) => new_count += 1,
+            Ok(false) => {} // duplicate
+            Err(e) => warn!(err = %e, "Failed to publish text-extracted credential"),
+        }
+    }
+
+    for hash in extracted.hashes {
+        match dispatcher.state.publish_hash(&dispatcher.queue, hash).await {
+            Ok(true) => new_count += 1,
+            Ok(false) => {}
+            Err(e) => warn!(err = %e, "Failed to publish text-extracted hash"),
+        }
+    }
+
+    for host in extracted.hosts {
+        let _ = dispatcher.state.publish_host(&dispatcher.queue, host).await;
+    }
+
+    for user in extracted.users {
+        match dispatcher.state.publish_user(&dispatcher.queue, user).await {
+            Ok(true) => new_count += 1,
+            Ok(false) => {}
+            Err(e) => warn!(err = %e, "Failed to publish text-extracted user"),
+        }
+    }
+
+    for share in extracted.shares {
+        match dispatcher
+            .state
+            .publish_share(&dispatcher.queue, share)
+            .await
+        {
+            Ok(true) => new_count += 1,
+            Ok(false) => {}
+            Err(e) => warn!(err = %e, "Failed to publish text-extracted share"),
+        }
+    }
+
+    if new_count > 0 {
+        info!(
+            count = new_count,
+            "Published new discoveries from raw text extraction"
+        );
+    }
+}
+
+/// Extract credentials, hashes, hosts, vulns, and shares from a result payload.
+async fn extract_discoveries(payload: &Value, dispatcher: &Arc<Dispatcher>) -> Result<()> {
+    let parsed = parse_discoveries(payload);
+
+    for cred in parsed.credentials {
+        // Capture fields before move for timeline event
+        let source = cred.source.clone();
+        let username = cred.username.clone();
+        let domain = cred.domain.clone();
+        let is_admin = cred.is_admin;
+        match dispatcher
+            .state
+            .publish_credential(&dispatcher.queue, cred)
+            .await
+        {
+            Ok(true) => {
+                debug!("Published new credential from result");
+                create_credential_timeline_event(dispatcher, &source, &username, &domain, is_admin)
+                    .await;
+            }
             Ok(false) => {} // duplicate
             Err(e) => warn!(err = %e, "Failed to publish credential"),
         }
     }
 
     for hash in parsed.hashes {
+        // Capture fields before move for timeline event
+        let username = hash.username.clone();
+        let domain = hash.domain.clone();
+        let hash_type = hash.hash_type.clone();
+        let hash_value = hash.hash_value.clone();
+        let source = hash.source.clone();
         match dispatcher.state.publish_hash(&dispatcher.queue, hash).await {
-            Ok(true) => debug!("Published new hash from result"),
+            Ok(true) => {
+                debug!("Published new hash from result");
+                create_hash_timeline_event(
+                    dispatcher,
+                    &username,
+                    &domain,
+                    &hash_type,
+                    &hash_value,
+                    &source,
+                )
+                .await;
+            }
             Ok(false) => {}
             Err(e) => warn!(err = %e, "Failed to publish hash"),
         }
@@ -118,7 +406,143 @@ async fn extract_discoveries(payload: &Value, dispatcher: &Arc<Dispatcher>) -> R
             .await;
     }
 
+    for share in parsed.shares {
+        match dispatcher
+            .state
+            .publish_share(&dispatcher.queue, share)
+            .await
+        {
+            Ok(true) => debug!("Published new share from result"),
+            Ok(false) => {}
+            Err(e) => warn!(err = %e, "Failed to publish share"),
+        }
+    }
+
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Timeline event helpers — create events with MITRE technique mapping
+// ---------------------------------------------------------------------------
+
+/// Create a timeline event when a credential is published.
+///
+/// MITRE techniques:
+/// - T1078 (Valid Accounts) for admin creds, T1552 (Unsecured Credentials) otherwise
+/// - T1558.003 (Kerberoasting) if source contains "kerberoast"
+/// - T1558.004 (AS-REP Roasting) if source contains "asrep"/"as-rep"
+/// - T1110 (Brute Force) if source contains "cracked"
+async fn create_credential_timeline_event(
+    dispatcher: &Arc<Dispatcher>,
+    source: &str,
+    username: &str,
+    domain: &str,
+    is_admin: bool,
+) {
+    let mut techniques: Vec<String> = vec![if is_admin {
+        "T1078".to_string()
+    } else {
+        "T1552".to_string()
+    }];
+    let source_lower = source.to_lowercase();
+    if source_lower.contains("kerberoast") {
+        techniques.push("T1558.003".to_string());
+    }
+    if source_lower.contains("asrep") || source_lower.contains("as-rep") {
+        techniques.push("T1558.004".to_string());
+    }
+    if source_lower.contains("cracked") {
+        techniques.push("T1110".to_string());
+    }
+
+    let event_id = format!(
+        "evt-cred-{}",
+        &uuid::Uuid::new_v4().simple().to_string()[..8]
+    );
+    let event = serde_json::json!({
+        "id": event_id,
+        "timestamp": chrono::Utc::now().to_rfc3339(),
+        "source": source,
+        "description": format!("Credential discovered: {domain}\\{username} via {source}"),
+        "mitre_techniques": techniques,
+    });
+
+    let _ = dispatcher
+        .state
+        .persist_timeline_event(&dispatcher.queue, &event, &techniques)
+        .await;
+}
+
+/// Create a timeline event when a hash is published.
+///
+/// MITRE techniques:
+/// - T1003 (OS Credential Dumping) always
+/// - T1558.003 (Kerberoasting) for TGS-REP / kerberoast hashes
+/// - T1558.004 (AS-REP Roasting) for AS-REP hashes
+/// - T1003.006 (DCSync) for NTLM hashes from secretsdump/dcsync
+async fn create_hash_timeline_event(
+    dispatcher: &Arc<Dispatcher>,
+    username: &str,
+    domain: &str,
+    hash_type: &str,
+    hash_value: &str,
+    source: &str,
+) {
+    let mut techniques: Vec<String> = vec!["T1003".to_string()];
+    let hash_value_lower = hash_value.to_lowercase();
+    let hash_type_lower = hash_type.to_lowercase();
+    let source_lower = source.to_lowercase();
+
+    // Kerberoasting: TGS-REP hashes
+    if hash_value_lower.contains("$krb5tgs$")
+        || matches!(
+            hash_type_lower.as_str(),
+            "kerberoast" | "krb5tgs" | "tgs-rep" | "tgs"
+        )
+        || source_lower.contains("kerberoast")
+    {
+        techniques.push("T1558.003".to_string());
+    }
+
+    // AS-REP Roasting
+    if hash_value_lower.contains("$krb5asrep$")
+        || matches!(hash_type_lower.as_str(), "asrep" | "as-rep" | "krb5asrep")
+        || source_lower.contains("asrep")
+        || source_lower.contains("as-rep")
+    {
+        techniques.push("T1558.004".to_string());
+    }
+
+    // DCSync / secretsdump for NTLM hashes
+    if hash_type_lower == "ntlm"
+        && (source_lower.contains("secretsdump") || source_lower.contains("dcsync"))
+    {
+        techniques.push("T1003.006".to_string());
+    }
+
+    let is_critical = matches!(username.to_lowercase().as_str(), "krbtgt" | "administrator");
+    let description = if is_critical {
+        format!("CRITICAL: Hash discovered: {domain}\\{username} ({hash_type})")
+    } else {
+        format!("Hash discovered: {domain}\\{username} ({hash_type})")
+    };
+
+    let event_id = format!(
+        "evt-hash-{}",
+        &uuid::Uuid::new_v4().simple().to_string()[..8]
+    );
+    let event = serde_json::json!({
+        "id": event_id,
+        "timestamp": chrono::Utc::now().to_rfc3339(),
+        "source": source,
+        "description": description,
+        "mitre_techniques": techniques,
+    });
+
+    let _ = dispatcher
+        .state
+        .persist_timeline_event(&dispatcher.queue, &event, &techniques)
+        .await;
 }
 
 // ---------------------------------------------------------------------------
@@ -133,6 +557,7 @@ pub(crate) struct ParsedDiscoveries {
     pub hosts: Vec<Host>,
     pub users: Vec<User>,
     pub vulnerabilities: Vec<VulnerabilityInfo>,
+    pub shares: Vec<Share>,
 }
 
 /// Parse discoveries from a JSON payload into typed structs.
@@ -207,6 +632,15 @@ pub(crate) fn parse_discoveries(payload: &Value) -> ParsedDiscoveries {
         for vuln_val in vulns {
             if let Ok(vuln) = serde_json::from_value::<VulnerabilityInfo>(vuln_val.clone()) {
                 result.vulnerabilities.push(vuln);
+            }
+        }
+    }
+
+    // Shares
+    if let Some(shares) = payload.get("shares").and_then(|v| v.as_array()) {
+        for share_val in shares {
+            if let Ok(share) = serde_json::from_value::<Share>(share_val.clone()) {
+                result.shares.push(share);
             }
         }
     }
@@ -324,14 +758,27 @@ async fn poll_discoveries(dispatcher: &Dispatcher) -> Result<()> {
         };
 
         match disc_type {
-            "credential" => {
-                if let Ok(cred) = serde_json::from_value::<Credential>(data.clone()) {
-                    let _ = dispatcher
+            "credential" => match serde_json::from_value::<Credential>(data.clone()) {
+                Ok(cred) => {
+                    let user_domain = format!("{}@{}", cred.username, cred.domain);
+                    match dispatcher
                         .state
                         .publish_credential(&dispatcher.queue, cred)
-                        .await;
+                        .await
+                    {
+                        Ok(true) => {
+                            info!(credential = %user_domain, "Discovery: credential published")
+                        }
+                        Ok(false) => {
+                            debug!(credential = %user_domain, "Discovery: credential already known")
+                        }
+                        Err(e) => {
+                            warn!(err = %e, credential = %user_domain, "Failed to publish discovered credential")
+                        }
+                    }
                 }
-            }
+                Err(e) => warn!(err = %e, "Failed to deserialize credential discovery"),
+            },
             "hash" => {
                 if let Ok(hash) = serde_json::from_value::<Hash>(data.clone()) {
                     let _ = dispatcher.state.publish_hash(&dispatcher.queue, hash).await;
@@ -345,9 +792,25 @@ async fn poll_discoveries(dispatcher: &Dispatcher) -> Result<()> {
                         .await;
                 }
             }
-            "host" => {
-                if let Ok(host) = serde_json::from_value::<Host>(data.clone()) {
+            "host" => match serde_json::from_value::<Host>(data.clone()) {
+                Ok(host) => {
                     let _ = dispatcher.state.publish_host(&dispatcher.queue, host).await;
+                }
+                Err(e) => {
+                    warn!(err = %e, data = %data, "Failed to deserialize host discovery");
+                }
+            },
+            "share" => {
+                if let Ok(share) = serde_json::from_value::<Share>(data.clone()) {
+                    let _ = dispatcher
+                        .state
+                        .publish_share(&dispatcher.queue, share)
+                        .await;
+                }
+            }
+            "user" => {
+                if let Ok(user) = serde_json::from_value::<User>(data.clone()) {
+                    let _ = dispatcher.state.publish_user(&dispatcher.queue, user).await;
                 }
             }
             other => {
@@ -526,6 +989,30 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_shares() {
+        let payload = json!({
+            "shares": [
+                {
+                    "host": "192.168.58.10",
+                    "name": "SYSVOL",
+                    "permissions": "READ",
+                    "comment": "Logon server share"
+                },
+                {
+                    "host": "192.168.58.10",
+                    "name": "ADMIN$",
+                    "permissions": "READ,WRITE"
+                }
+            ]
+        });
+        let parsed = parse_discoveries(&payload);
+        assert_eq!(parsed.shares.len(), 2);
+        assert_eq!(parsed.shares[0].name, "SYSVOL");
+        assert_eq!(parsed.shares[0].permissions, "READ");
+        assert_eq!(parsed.shares[1].name, "ADMIN$");
+    }
+
+    #[test]
     fn test_parse_empty_payload() {
         let payload = json!({});
         let parsed = parse_discoveries(&payload);
@@ -534,6 +1021,7 @@ mod tests {
         assert!(parsed.hosts.is_empty());
         assert!(parsed.users.is_empty());
         assert!(parsed.vulnerabilities.is_empty());
+        assert!(parsed.shares.is_empty());
     }
 
     #[test]

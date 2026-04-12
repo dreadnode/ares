@@ -61,6 +61,12 @@ pub const KEY_VULN_TYPE_FAILURES: &str = "vuln_type_failures";
 /// Redis HASH key suffix mapping domain name → SID string.
 pub const KEY_DOMAIN_SIDS: &str = "domain_sids";
 
+/// Redis STRING key suffix for operation status JSON.
+pub const KEY_STATUS: &str = "status";
+
+/// Redis STRING key suffix for the LLM model name used by the operation.
+pub const KEY_MODEL: &str = "model";
+
 /// Pub/Sub channel prefix for state update notifications.
 pub const STATE_UPDATE_CHANNEL_PREFIX: &str = "ares:state:updates";
 

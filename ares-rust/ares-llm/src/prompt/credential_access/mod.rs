@@ -48,6 +48,14 @@ pub(crate) fn generate_credential_access_prompt(
     let hash_is_pth = is_pass_the_hash_compatible(hash_value);
 
     let mut techniques = payload_techniques(payload);
+    // Also read singular "technique" from dispatchers that use it
+    if techniques.is_empty() {
+        if let Some(t) = payload.get("technique").and_then(|v| v.as_str()) {
+            if !t.is_empty() {
+                techniques.push(t.to_string());
+            }
+        }
+    }
     if hash_value.is_some() && !hash_is_pth {
         techniques.retain(|t| {
             let lower = t.to_lowercase();
@@ -60,15 +68,23 @@ pub(crate) fn generate_credential_access_prompt(
         .and_then(|v| v.as_array())
         .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect())
         .unwrap_or_default();
-    let dc_ip = payload.get("dc_ip").and_then(|v| v.as_str()).unwrap_or("");
-    let domain = payload.get("domain").and_then(|v| v.as_str()).unwrap_or("");
-    let username = payload
-        .get("username")
+    let dc_ip = payload
+        .get("dc_ip")
+        .or_else(|| payload.get("target_ip"))
         .and_then(|v| v.as_str())
         .unwrap_or("");
-    let password = payload
-        .get("password")
+    let domain = payload.get("domain").and_then(|v| v.as_str()).unwrap_or("");
+    // Read from nested "credential" object first (dispatchers nest it), flat fallback
+    let cred_obj = payload.get("credential");
+    let username = cred_obj
+        .and_then(|c| c.get("username"))
         .and_then(|v| v.as_str())
+        .or_else(|| payload.get("username").and_then(|v| v.as_str()))
+        .unwrap_or("");
+    let password = cred_obj
+        .and_then(|c| c.get("password"))
+        .and_then(|v| v.as_str())
+        .or_else(|| payload.get("password").and_then(|v| v.as_str()))
         .unwrap_or("");
     let reason = payload.get("reason").and_then(|v| v.as_str()).unwrap_or("");
 

@@ -4,7 +4,7 @@ use chrono::Utc;
 use ares_core::state::RedisStateReader;
 
 use crate::redis_conn::{connect_redis, resolve_operation_id};
-use crate::util::format_duration;
+use crate::util::{format_duration, format_number};
 
 pub(crate) async fn ops_runtime(
     redis_url: Option<String>,
@@ -69,7 +69,12 @@ pub(crate) async fn ops_runtime(
             let out_tok = usage.output_tokens;
             let total_tok = in_tok + out_tok;
 
-            println!("\nTokens: {total_tok} (in: {in_tok}  out: {out_tok})");
+            println!(
+                "\nTokens: {} (in: {}  out: {})",
+                format_number(total_tok),
+                format_number(in_tok),
+                format_number(out_tok)
+            );
 
             if !usage.models.is_empty() {
                 let mut model_names: Vec<_> = usage.models.keys().collect();

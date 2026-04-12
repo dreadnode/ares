@@ -38,7 +38,7 @@ pub(crate) async fn blue_submit(
 
     // Generate investigation ID
     let inv_id = investigation_id
-        .unwrap_or_else(|| format!("inv-{}", &uuid::Uuid::new_v4().to_string()[..8]));
+        .unwrap_or_else(|| format!("inv-{}", chrono::Utc::now().format("%Y%m%d-%H%M%S")));
 
     // Collect env vars
     let env_vars = collect_env_vars(BLUE_ENV_VAR_NAMES);
@@ -212,8 +212,8 @@ pub(crate) async fn blue_from_operation(
     });
 
     // Submit as a single multi-agent investigation
-    let inv_id = format!("inv-{}", &uuid::Uuid::new_v4().to_string()[..8]);
     let now = Utc::now();
+    let inv_id = format!("inv-{}", now.format("%Y%m%d-%H%M%S"));
 
     let request = serde_json::json!({
         "investigation_id": inv_id,

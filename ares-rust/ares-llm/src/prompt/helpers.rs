@@ -15,10 +15,11 @@ pub(crate) fn insert_credential_context(ctx: &mut Context, payload: &Value) {
             ctx.insert("credential_username", user);
             ctx.insert("credential_domain", cred_domain);
 
-            let has_password = cred
-                .get("password")
-                .and_then(|v| v.as_str())
-                .is_some_and(|p| !p.is_empty());
+            let password = cred.get("password").and_then(|v| v.as_str()).unwrap_or("");
+            let has_password = !password.is_empty();
+            if has_password {
+                ctx.insert("credential_password", password);
+            }
             ctx.insert(
                 "auth_type",
                 if has_password {
@@ -82,12 +83,26 @@ pub(crate) fn payload_techniques(payload: &Value) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// Extract password from payload — checks nested `credential.password` first,
+/// then flat top-level `password` (matches both dispatcher shapes).
+fn extract_password(payload: &Value) -> Option<&str> {
+    payload
+        .get("credential")
+        .and_then(|c| c.get("password"))
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .or_else(|| {
+            payload
+                .get("password")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+        })
+}
+
 /// Build the credential parameter string for technique call sites.
 pub(crate) fn cred_param_str(payload: &Value, hash_value: Option<&str>) -> String {
-    if let Some(pw) = payload.get("password").and_then(|v| v.as_str()) {
-        if !pw.is_empty() {
-            return format!("password='{pw}'");
-        }
+    if let Some(pw) = extract_password(payload) {
+        return format!("password='{pw}'");
     }
     if let Some(h) = hash_value {
         return format!("hashes='{h}'");
@@ -97,10 +112,8 @@ pub(crate) fn cred_param_str(payload: &Value, hash_value: Option<&str>) -> Strin
 
 /// Build the credential display string.
 pub(crate) fn cred_display_str(payload: &Value, hash_value: Option<&str>) -> String {
-    if let Some(pw) = payload.get("password").and_then(|v| v.as_str()) {
-        if !pw.is_empty() {
-            return pw.to_string();
-        }
+    if let Some(pw) = extract_password(payload) {
+        return pw.to_string();
     }
     if let Some(h) = hash_value {
         return format!("[HASH] {h}");
@@ -191,6 +204,18 @@ mod tests {
     }
 
     #[test]
+    fn test_cred_param_str_nested_password() {
+        let payload = json!({"credential": {"username": "admin", "domain": "contoso.local", "password": "Heartsbane"}});
+        assert_eq!(cred_param_str(&payload, None), "password='Heartsbane'");
+    }
+
+    #[test]
+    fn test_cred_param_str_nested_takes_precedence() {
+        let payload = json!({"password": "flat", "credential": {"password": "nested"}});
+        assert_eq!(cred_param_str(&payload, None), "password='nested'");
+    }
+
+    #[test]
     fn test_cred_param_str_hash() {
         let payload = json!({});
         assert_eq!(
@@ -211,12 +236,24 @@ mod tests {
         assert_eq!(cred_param_str(&payload, Some("aabb")), "hashes='aabb'");
     }
 
+    #[test]
+    fn test_cred_param_str_nested_empty_uses_hash() {
+        let payload = json!({"credential": {"password": ""}});
+        assert_eq!(cred_param_str(&payload, Some("aabb")), "hashes='aabb'");
+    }
+
     // --- cred_display_str ---
 
     #[test]
     fn test_cred_display_str_password() {
         let payload = json!({"password": "Secret123"});
         assert_eq!(cred_display_str(&payload, None), "Secret123");
+    }
+
+    #[test]
+    fn test_cred_display_str_nested_password() {
+        let payload = json!({"credential": {"password": "Heartsbane"}});
+        assert_eq!(cred_display_str(&payload, None), "Heartsbane");
     }
 
     #[test]
@@ -250,6 +287,7 @@ mod tests {
         let json = ctx.into_json();
         assert_eq!(json["credential_username"], "admin");
         assert_eq!(json["credential_domain"], "contoso.local");
+        assert_eq!(json["credential_password"], "P@ss1");
         assert_eq!(json["auth_type"], "password");
     }
 

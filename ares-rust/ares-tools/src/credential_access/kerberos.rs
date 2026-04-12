@@ -49,17 +49,19 @@ pub async fn asrep_roast(args: &Value) -> Result<ToolOutput> {
         let target = format!("{domain}/");
         cmd = cmd.arg(&target).flag("-usersfile", uf).arg("-no-pass");
     } else {
-        // No-auth mode: try common usernames file
+        // No-auth mode: use seclists if available, otherwise built-in AD usernames
         let target = format!("{domain}/");
-        let wordlist = "/usr/share/seclists/Usernames/xato-net-10-million-usernames-dup.txt";
-        if std::path::Path::new(wordlist).exists() {
+        let seclists = "/usr/share/seclists/Usernames/xato-net-10-million-usernames-dup.txt";
+        if std::path::Path::new(seclists).exists() {
             cmd = cmd
                 .arg(&target)
-                .flag("-usersfile", wordlist)
+                .flag("-usersfile", seclists)
                 .arg("-no-pass");
         } else {
-            // Fallback: try anonymous LDAP bind
-            cmd = cmd.arg(&target).arg("-no-pass");
+            // Write built-in AD usernames to a temp file
+            let tmp = format!("/tmp/asrep_users_{}.txt", std::process::id());
+            std::fs::write(&tmp, DEFAULT_AD_USERNAMES)?;
+            cmd = cmd.arg(&target).flag("-usersfile", &tmp).arg("-no-pass");
         }
     }
 
@@ -110,10 +112,13 @@ pub async fn kerberos_user_enum_noauth(args: &Value) -> Result<ToolOutput> {
 
     let target = format!("{domain}/");
 
-    // Use provided wordlist or generate a default one
+    // Use provided wordlist, seclists if available, or built-in defaults
     let tmp_file;
+    let seclists = "/usr/share/seclists/Usernames/xato-net-10-million-usernames-dup.txt";
     let wordlist_path = if let Some(uf) = users_file {
         uf.to_string()
+    } else if std::path::Path::new(seclists).exists() {
+        seclists.to_string()
     } else {
         tmp_file = format!("/tmp/kerberos_users_{}.txt", std::process::id());
         std::fs::write(&tmp_file, DEFAULT_AD_USERNAMES)?;

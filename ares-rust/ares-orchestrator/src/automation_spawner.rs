@@ -26,6 +26,7 @@ pub(crate) fn spawn_automation_tasks(
     spawn_auto!(auto_crack_dispatch);
     spawn_auto!(auto_mssql_detection);
     spawn_auto!(auto_adcs_enumeration);
+    spawn_auto!(auto_share_enumeration);
     spawn_auto!(auto_share_spider);
     spawn_auto!(auto_bloodhound);
     spawn_auto!(auto_delegation_enumeration);

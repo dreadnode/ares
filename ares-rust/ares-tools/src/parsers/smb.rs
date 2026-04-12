@@ -1,8 +1,39 @@
 //! SMB-related output parsers (signing check, NetExec SMB sweep).
 
+use regex::Regex;
 use serde_json::{json, Value};
+use std::sync::LazyLock;
 
 use super::looks_like_ip;
+
+static RE_NAME: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\(name:([^)]+)\)").unwrap());
+static RE_DOMAIN: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\(domain:([^)]+)\)").unwrap());
+
+/// Extract `(name:X)` and `(domain:Y)` from a NetExec banner line and
+/// construct an FQDN: `x.y` (lowercased).  Falls back to the positional
+/// NetBIOS name when the parenthesised fields are absent.
+fn extract_fqdn_from_line(line: &str, positional_name: &str) -> String {
+    let name = RE_NAME
+        .captures(line)
+        .map(|c| c.get(1).unwrap().as_str().to_string())
+        .unwrap_or_else(|| positional_name.to_string());
+
+    let domain = RE_DOMAIN.captures(line).map(|c| {
+        c.get(1)
+            .unwrap()
+            .as_str()
+            .trim_end_matches("0.")
+            .trim_end_matches('.')
+            .to_string()
+    });
+
+    match domain {
+        Some(d) if !d.is_empty() && !name.is_empty() && !name.contains('.') => {
+            format!("{}.{}", name.to_lowercase(), d.to_lowercase())
+        }
+        _ => positional_name.to_string(),
+    }
+}
 
 pub fn parse_smb_signing(output: &str, params: &Value) -> Vec<Value> {
     let target_ip = params
@@ -18,6 +49,13 @@ pub fn parse_smb_signing(output: &str, params: &Value) -> Vec<Value> {
         || output.to_lowercase().contains("not required")
         || output.to_lowercase().contains("message_signing: disabled");
 
+    // Try to extract hostname from the output (NetExec banner lines)
+    let hostname = output
+        .lines()
+        .find(|l| l.contains("SMB"))
+        .map(|l| extract_fqdn_from_line(l, ""))
+        .unwrap_or_default();
+
     if !target_ip.is_empty() {
         let mut services = vec!["445/tcp (microsoft-ds)".to_string()];
         if signing_disabled {
@@ -26,7 +64,7 @@ pub fn parse_smb_signing(output: &str, params: &Value) -> Vec<Value> {
 
         hosts.push(json!({
             "ip": target_ip,
-            "hostname": "",
+            "hostname": hostname,
             "os": "",
             "roles": [],
             "services": services,
@@ -41,7 +79,8 @@ pub fn parse_smb_signing(output: &str, params: &Value) -> Vec<Value> {
 pub fn parse_netexec_smb(output: &str) -> Vec<Value> {
     let mut hosts = Vec::new();
 
-    // NetExec SMB output: "SMB  192.168.58.10  445  DC01  [*] Windows Server 2019 ..."
+    // NetExec SMB output:
+    //   "SMB  10.1.2.254  445  KINGSLANDING  [*] Windows Server 2019 ... (name:KINGSLANDING) (domain:sevenkingdoms.local) (signing:True)"
     for line in output.lines() {
         if !line.contains("SMB") {
             continue;
@@ -50,7 +89,8 @@ pub fn parse_netexec_smb(output: &str) -> Vec<Value> {
         // Look for IP-like token
         for (i, part) in parts.iter().enumerate() {
             if looks_like_ip(part) {
-                let hostname = parts.get(i + 2).copied().unwrap_or("");
+                let netbios_name = parts.get(i + 2).copied().unwrap_or("");
+                let hostname = extract_fqdn_from_line(line, netbios_name);
                 let os = parts[i + 3..]
                     .iter()
                     .skip_while(|p| p.starts_with('['))
@@ -118,21 +158,54 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_netexec_smb() {
+    fn test_parse_netexec_smb_with_fqdn() {
         let output = "\
-SMB  192.168.58.10  445  DC01  [*] Windows Server 2019 Build 17763 x64
-SMB  192.168.58.20  445  SRV01  [*] Windows Server 2016 Build 14393 x64";
+SMB  192.168.58.10  445  DC01  [*] Windows Server 2019 Build 17763 x64 (name:DC01) (domain:contoso.local) (signing:True)
+SMB  192.168.58.20  445  SRV01  [*] Windows Server 2016 Build 14393 x64 (name:SRV01) (domain:contoso.local) (signing:False)";
         let hosts = parse_netexec_smb(output);
         assert_eq!(hosts.len(), 2);
         assert_eq!(hosts[0]["ip"], "192.168.58.10");
-        assert_eq!(hosts[0]["hostname"], "DC01");
+        assert_eq!(hosts[0]["hostname"], "dc01.contoso.local");
         assert_eq!(hosts[1]["ip"], "192.168.58.20");
-        assert_eq!(hosts[1]["hostname"], "SRV01");
+        assert_eq!(hosts[1]["hostname"], "srv01.contoso.local");
+    }
+
+    #[test]
+    fn test_parse_netexec_smb_without_domain() {
+        // Fallback: no (name:...) (domain:...) → bare NetBIOS name
+        let output = "SMB  192.168.58.10  445  DC01  [*] Windows Server 2019 Build 17763 x64";
+        let hosts = parse_netexec_smb(output);
+        assert_eq!(hosts.len(), 1);
+        assert_eq!(hosts[0]["hostname"], "DC01");
     }
 
     #[test]
     fn test_parse_netexec_smb_empty() {
         let hosts = parse_netexec_smb("No SMB hosts found");
         assert!(hosts.is_empty());
+    }
+
+    #[test]
+    fn test_extract_fqdn_from_line() {
+        let line = "SMB  10.1.2.254  445  KINGSLANDING  [*] Windows 10 / Server 2019 Build 17763 x64 (name:KINGSLANDING) (domain:sevenkingdoms.local) (signing:True)";
+        assert_eq!(
+            extract_fqdn_from_line(line, "KINGSLANDING"),
+            "kingslanding.sevenkingdoms.local"
+        );
+    }
+
+    #[test]
+    fn test_extract_fqdn_trailing_zero() {
+        let line = "SMB  10.1.2.58  445  CASTELBLACK  [*] ... (name:CASTELBLACK) (domain:north.sevenkingdoms.local0.) (signing:False)";
+        assert_eq!(
+            extract_fqdn_from_line(line, "CASTELBLACK"),
+            "castelblack.north.sevenkingdoms.local"
+        );
+    }
+
+    #[test]
+    fn test_extract_fqdn_no_domain() {
+        let line = "SMB  10.1.2.254  445  DC01  [*] Windows Server 2019";
+        assert_eq!(extract_fqdn_from_line(line, "DC01"), "DC01");
     }
 }

@@ -131,10 +131,7 @@ pub(crate) async fn run_blue(cmd: BlueCommands, redis_url: Option<String>) -> Re
 pub(super) async fn resolve_latest_investigation(
     conn: &mut redis::aio::MultiplexedConnection,
 ) -> Result<Option<String>> {
-    let status_keys: Vec<String> = redis::cmd("KEYS")
-        .arg("ares:blue:inv:*:status")
-        .query_async(conn)
-        .await?;
+    let status_keys = crate::util::scan_redis_keys(conn, "ares:blue:inv:*:status").await?;
 
     let mut candidates: Vec<InvestigationCandidate> = Vec::new();
 

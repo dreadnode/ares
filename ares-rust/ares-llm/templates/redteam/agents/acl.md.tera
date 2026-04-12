@@ -84,11 +84,11 @@ Take ownership of an object, then grant yourself full control:
 ```
 Note: If you have WriteOwner, use bloodyad_add_genericall to escalate permissions first.
 
-### GPO Abuse (Coordinate with PRIVESC)
+### GPO Abuse (Report to Orchestrator)
 When you have write access to a GPO (via BloodHound):
 ```
-Report to orchestrator for PRIVESC dispatch:
-→ GPO abuse requires SharpGPOAbuse (on PRIVESC agent)
+Report to orchestrator via request_assistance:
+→ GPO abuse requires coordination with orchestrator
 → Can add user to local admins on all GPO-linked computers
 → Can create scheduled task for code execution
 ```
@@ -150,9 +150,8 @@ Report to orchestrator for PRIVESC dispatch:
 | dacl_edit | Modify DACL permissions |
 | bloodyad_add_genericall | Grant GenericAll permission |
 | bloodyad_add_group_member | Add to groups |
-| sharpgpoabuse | GPO abuse (add local admin, scheduled task) |
-| pygpoabuse_immediate_task | Create immediate GPO task |
 | adminsd_holder_add_ace | Add ACE to AdminSDHolder |
+| gmsa_read_password_bloodyad | Read gMSA password (bloodyAD) |
 
 ## Reporting Results
 

@@ -19,6 +19,7 @@ use tracing::{debug, warn};
 
 use ares_llm::{ToolCall, ToolExecResult};
 
+use crate::state::DISCOVERY_KEY_PREFIX;
 use crate::task_queue::TaskQueue;
 
 /// Prefix for tool execution request queues.
@@ -61,23 +62,101 @@ pub struct ToolExecResponse {
 // Dispatcher implementation
 // ---------------------------------------------------------------------------
 
+/// Tools that require netexec/ldapsearch and must be routed to the recon
+/// worker queue regardless of the calling agent's role.
+const RECON_ROUTED_TOOLS: &[&str] = &[
+    "ldap_search_descriptions",
+    "password_spray",
+    "username_as_password",
+    "gpp_password_finder",
+    "sysvol_script_search",
+    "password_policy",
+    "laps_dump",
+    "smbclient_spider",
+    "check_credman_entries",
+    "check_autologon_registry",
+    "domain_admin_checker",
+    "gmsa_dump_passwords",
+];
+
+/// Resolve the actual worker queue for a tool call.
+///
+/// Most tools go to the calling agent's role queue. Netexec-dependent tools
+/// are cross-routed to the `recon` queue where the binary exists.
+fn resolve_queue_role<'a>(role: &'a str, tool_name: &str) -> &'a str {
+    if role != "recon" && RECON_ROUTED_TOOLS.contains(&tool_name) {
+        "recon"
+    } else {
+        role
+    }
+}
+
 /// Dispatches tool calls to workers via Redis queues.
+///
+/// When tool results contain structured discoveries (hosts, credentials, etc.),
+/// they are pushed to the `ares:discoveries:{op_id}` list for real-time
+/// processing by the discovery poller — ensuring discoveries reach state
+/// immediately rather than waiting for the task result consumer.
 pub struct RedisToolDispatcher {
     queue: TaskQueue,
     tool_timeout: Duration,
+    operation_id: String,
 }
 
 impl RedisToolDispatcher {
-    pub fn new(queue: TaskQueue) -> Self {
+    pub fn new(queue: TaskQueue, operation_id: String) -> Self {
         Self {
             queue,
             tool_timeout: Duration::from_secs(DEFAULT_TOOL_TIMEOUT_SECS),
+            operation_id,
         }
     }
 
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
         self.tool_timeout = timeout;
         self
+    }
+
+    /// Push structured discoveries from a tool result to the real-time
+    /// discovery list so the discovery poller publishes them to state.
+    async fn push_realtime_discoveries(&self, discoveries: &serde_json::Value, tool_name: &str) {
+        let discovery_key = format!("{DISCOVERY_KEY_PREFIX}:{}", self.operation_id);
+        let mut conn = self.queue.connection();
+
+        // Push each discovery type as individual entries
+        let type_map: &[(&str, &str)] = &[
+            ("hosts", "host"),
+            ("credentials", "credential"),
+            ("hashes", "hash"),
+            ("vulnerabilities", "vulnerability"),
+            ("shares", "share"),
+            ("discovered_users", "user"),
+        ];
+
+        let mut pushed = 0usize;
+        for &(key, disc_type) in type_map {
+            if let Some(items) = discoveries.get(key).and_then(|v| v.as_array()) {
+                for item in items {
+                    let entry = serde_json::json!({
+                        "type": disc_type,
+                        "data": item,
+                        "source_tool": tool_name,
+                    });
+                    if let Ok(json) = serde_json::to_string(&entry) {
+                        let _: Result<(), _> = conn.lpush(&discovery_key, &json).await;
+                        pushed += 1;
+                    }
+                }
+            }
+        }
+
+        if pushed > 0 {
+            debug!(
+                count = pushed,
+                tool = tool_name,
+                "Pushed real-time discoveries"
+            );
+        }
     }
 }
 
@@ -98,7 +177,8 @@ impl ares_llm::ToolDispatcher for RedisToolDispatcher {
             arguments: call.arguments.clone(),
         };
 
-        let queue_key = format!("{TOOL_EXEC_PREFIX}:{role}");
+        let effective_role = resolve_queue_role(role, &call.name);
+        let queue_key = format!("{TOOL_EXEC_PREFIX}:{effective_role}");
         let result_key = format!("{TOOL_RESULT_PREFIX}:{call_id}");
         let payload =
             serde_json::to_string(&request).context("Failed to serialize tool exec request")?;
@@ -107,6 +187,7 @@ impl ares_llm::ToolDispatcher for RedisToolDispatcher {
             tool = %call.name,
             call_id = %call_id,
             queue = %queue_key,
+            effective_role = %effective_role,
             "Dispatching tool call to worker"
         );
 
@@ -136,6 +217,13 @@ impl ares_llm::ToolDispatcher for RedisToolDispatcher {
                     has_error = response.error.is_some(),
                     "Tool result received"
                 );
+
+                // Push discoveries to the real-time discovery list so
+                // the discovery poller publishes them to state immediately,
+                // independent of the task result consumer.
+                if let Some(ref disc) = response.discoveries {
+                    self.push_realtime_discoveries(disc, &call.name).await;
+                }
 
                 Ok(ToolExecResult {
                     output: response.output,
@@ -261,5 +349,70 @@ mod tests {
         let json = r#"{"call_id":"x","output":"","error":"Connection refused"}"#;
         let resp: ToolExecResponse = serde_json::from_str(json).unwrap();
         assert_eq!(resp.error.as_deref(), Some("Connection refused"));
+    }
+
+    #[test]
+    fn test_cross_role_routing_netexec_tools() {
+        // Netexec tools called from credential_access should route to recon
+        assert_eq!(
+            resolve_queue_role("credential_access", "password_spray"),
+            "recon"
+        );
+        assert_eq!(
+            resolve_queue_role("credential_access", "username_as_password"),
+            "recon"
+        );
+        assert_eq!(
+            resolve_queue_role("credential_access", "ldap_search_descriptions"),
+            "recon"
+        );
+        assert_eq!(
+            resolve_queue_role("credential_access", "gpp_password_finder"),
+            "recon"
+        );
+        assert_eq!(
+            resolve_queue_role("credential_access", "sysvol_script_search"),
+            "recon"
+        );
+        assert_eq!(
+            resolve_queue_role("credential_access", "laps_dump"),
+            "recon"
+        );
+        assert_eq!(
+            resolve_queue_role("credential_access", "smbclient_spider"),
+            "recon"
+        );
+        assert_eq!(
+            resolve_queue_role("credential_access", "password_policy"),
+            "recon"
+        );
+    }
+
+    #[test]
+    fn test_cross_role_routing_native_tools_stay() {
+        // Tools native to credential_access should stay on credential_access
+        assert_eq!(
+            resolve_queue_role("credential_access", "secretsdump"),
+            "credential_access"
+        );
+        assert_eq!(
+            resolve_queue_role("credential_access", "kerberoast"),
+            "credential_access"
+        );
+        assert_eq!(
+            resolve_queue_role("credential_access", "lsassy"),
+            "credential_access"
+        );
+    }
+
+    #[test]
+    fn test_cross_role_routing_recon_stays_recon() {
+        // When recon itself calls these tools, they stay on recon
+        assert_eq!(resolve_queue_role("recon", "password_spray"), "recon");
+        assert_eq!(resolve_queue_role("recon", "nmap_scan"), "recon");
+        assert_eq!(
+            resolve_queue_role("recon", "ldap_search_descriptions"),
+            "recon"
+        );
     }
 }

@@ -343,6 +343,48 @@ pub fn definitions() -> Vec<ToolDefinition> {
             }),
         },
         ToolDefinition {
+            name: "secretsdump".into(),
+            description: "Dump secrets from a target machine including SAM hashes, NTDS.dit \
+                credentials, LSA secrets, and cached domain credentials via DRSUAPI or \
+                registry extraction. Use after gaining admin access to a host."
+                .into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "target": {
+                        "type": "string",
+                        "description": "Target IP address or hostname"
+                    },
+                    "username": {
+                        "type": "string",
+                        "description": "Username for authentication"
+                    },
+                    "password": {
+                        "type": "string",
+                        "description": "Password for authentication"
+                    },
+                    "hash": {
+                        "type": "string",
+                        "description": "NTLM hash for pass-the-hash authentication (LM:NT format)"
+                    },
+                    "domain": {
+                        "type": "string",
+                        "description": "Domain name for authentication"
+                    },
+                    "dc_ip": {
+                        "type": "string",
+                        "description": "Domain controller IP (used for DRSUAPI replication)"
+                    },
+                    "timeout_minutes": {
+                        "type": "integer",
+                        "description": "Overall operation timeout in minutes (default: 3)",
+                        "default": 3
+                    }
+                },
+                "required": ["target", "username"]
+            }),
+        },
+        ToolDefinition {
             name: "secretsdump_kerberos".into(),
             description: "Dump secrets (NTLM hashes, Kerberos keys) from a remote host using \
                 Kerberos ticket authentication. Uses impacket-secretsdump with -k flag."

@@ -135,7 +135,7 @@ pub async fn smbexec(args: &Value) -> Result<ToolOutput> {
     CommandBuilder::new("impacket-smbexec")
         .arg(&auth_str)
         .args(extra_args)
-        .arg(command)
+        .flag("-c", command)
         .timeout_secs(120)
         .execute()
         .await
@@ -163,7 +163,7 @@ pub async fn smbexec_kerberos(args: &Value) -> Result<ToolOutput> {
         .arg(&target_str)
         .flag_opt("-dc-ip", dc_ip)
         .flag_opt("-target-ip", target_ip)
-        .arg(command)
+        .flag("-c", command)
         .env(env_key, env_val)
         .timeout_secs(120)
         .execute()

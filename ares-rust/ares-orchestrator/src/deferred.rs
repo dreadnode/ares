@@ -112,12 +112,8 @@ impl DeferredQueue {
         let pattern = format!("{}:{}:*", DEFERRED_QUEUE_PREFIX, self.config.operation_id);
         let mut conn = self.queue_conn();
 
-        // SCAN for matching keys
-        let keys: Vec<String> = redis::cmd("KEYS")
-            .arg(&pattern)
-            .query_async(&mut conn)
-            .await
-            .unwrap_or_default();
+        // SCAN for matching keys (avoids blocking Redis with KEYS)
+        let keys: Vec<String> = scan_keys_async(&mut conn, &pattern).await;
 
         if keys.is_empty() {
             return Ok(None);
@@ -168,11 +164,7 @@ impl DeferredQueue {
     pub async fn evict_stale(&self) -> Result<usize> {
         let pattern = format!("{}:{}:*", DEFERRED_QUEUE_PREFIX, self.config.operation_id);
         let mut conn = self.queue_conn();
-        let keys: Vec<String> = redis::cmd("KEYS")
-            .arg(&pattern)
-            .query_async(&mut conn)
-            .await
-            .unwrap_or_default();
+        let keys: Vec<String> = scan_keys_async(&mut conn, &pattern).await;
 
         let max_age = self.config.deferred_task_max_age;
         let cutoff = Utc::now().timestamp() as f64 - max_age.as_secs_f64();
@@ -215,6 +207,33 @@ impl DeferredQueue {
         // We access it through an internal method.
         self.queue.connection()
     }
+}
+
+/// Scan Redis keys matching a pattern using cursor iteration (avoids KEYS).
+async fn scan_keys_async(conn: &mut redis::aio::ConnectionManager, pattern: &str) -> Vec<String> {
+    let mut all_keys = Vec::new();
+    let mut cursor: u64 = 0;
+    loop {
+        let result: Result<(u64, Vec<String>), _> = redis::cmd("SCAN")
+            .arg(cursor)
+            .arg("MATCH")
+            .arg(pattern)
+            .arg("COUNT")
+            .arg(100)
+            .query_async(conn)
+            .await;
+        match result {
+            Ok((next_cursor, keys)) => {
+                all_keys.extend(keys);
+                cursor = next_cursor;
+                if cursor == 0 {
+                    break;
+                }
+            }
+            Err(_) => break,
+        }
+    }
+    all_keys
 }
 
 // ---------------------------------------------------------------------------
@@ -304,7 +323,7 @@ pub fn spawn_deferred_processor(
                         }
                     }
                     ThrottleDecision::Defer | ThrottleDecision::Wait(_) => {
-                        // Put it back
+                        // Put it back; stop draining since capacity is full.
                         let _ = deferred.enqueue(&task).await;
                         break;
                     }
