@@ -56,7 +56,14 @@ pub async fn nmap_scan(args: &Value) -> Result<ToolOutput> {
     }
 
     match ports {
-        Some(p) => cmd = cmd.flag("-p", p),
+        Some(p) => {
+            // Cap full-port scans to top 10000 to avoid timeouts
+            let capped = match p.trim() {
+                "-" | "0-65535" | "1-65535" => "1-10000",
+                other => other,
+            };
+            cmd = cmd.flag("-p", capped);
+        }
         None => cmd = cmd.arg("--top-ports").arg("100"),
     }
 
@@ -80,19 +87,13 @@ pub async fn nmap_scan(args: &Value) -> Result<ToolOutput> {
     }
 
     // Phase 2: Service version detection on discovered ports
+    // Only use -sV here; skip extra args (-sC, -O) to avoid slow script/OS scans
     let port_spec = discovered_ports.join(",");
-    let mut cmd2 = CommandBuilder::new("nmap")
-        .args(["-Pn", "-sT", "-T4", "--open", "-sV"])
+    let cmd2 = CommandBuilder::new("nmap")
+        .args(["-Pn", "-sT", "-T4", "--open", "-sV", "--reason"])
         .flag("-p", &port_spec)
-        .timeout_secs(300);
-
-    if let Some(extra_args) = extra {
-        for a in extra_args.split_whitespace() {
-            cmd2 = cmd2.arg(a);
-        }
-    }
-
-    cmd2 = cmd2.arg(target);
+        .timeout_secs(120)
+        .arg(target);
     let phase2 = cmd2.execute().await?;
 
     // Phase 3: NetBIOS enrichment for hosts without hostnames

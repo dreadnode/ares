@@ -18,7 +18,7 @@ pub(super) fn tool_definitions() -> Vec<ToolDefinition> {
                     },
                     "ports": {
                         "type": "string",
-                        "description": "Port specification (e.g. '1-1000', '80,443,445', '-' for all ports)"
+                        "description": "Port specification (e.g. '1-1000', '80,443,445'). Use targeted ranges, not all ports."
                     },
                     "arguments": {
                         "type": "string",

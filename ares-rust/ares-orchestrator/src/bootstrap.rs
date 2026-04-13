@@ -87,10 +87,17 @@ pub(crate) async fn dispatch_initial_recon(
     let mut count = 0;
     let domain = &config.target_domain;
 
-    // Network scan + SMB signing check per target IP
+    // Network scan + SMB sweep + SMB signing check per target IP.
+    // smb_sweep (NetExec) is critical: it discovers hostnames, OS, and DCs
+    // from SMB banners — data that nmap alone may miss.
     for ip in &config.target_ips {
         match dispatcher
-            .request_recon(ip, domain, &["network_scan", "smb_signing_check"], None)
+            .request_recon(
+                ip,
+                domain,
+                &["network_scan", "smb_sweep", "smb_signing_check"],
+                None,
+            )
             .await
         {
             Ok(Some(task_id)) => {

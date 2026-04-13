@@ -128,6 +128,12 @@ pub fn parse_spray_success(output: &str, params: &Value) -> Vec<Value> {
             continue;
         }
 
+        // Skip Guest fallback — SMB accepted the connection but mapped it to the
+        // built-in Guest account.  The supplied password was NOT validated.
+        if line.contains("(Guest)") {
+            continue;
+        }
+
         // Extract the part after [+]
         if let Some(after_plus) = line.split("[+]").nth(1) {
             let after_plus = after_plus.trim();
@@ -147,11 +153,30 @@ pub fn parse_spray_success(output: &str, params: &Value) -> Vec<Value> {
                     }
                 };
 
-                // Skip if it looks like a hash auth, not a password
+                let is_admin = line.contains("Pwn3d!");
+
+                // Handle hash-auth Pwn3d! lines where there's no cleartext password
+                // e.g. "DOMAIN\user (Pwn3d!)" — password field is "(Pwn3d!)" or empty
                 if password.is_empty()
                     || password.starts_with("(Pwn3d!)")
                     || password.starts_with('(')
                 {
+                    // Still record admin status even without a cleartext password
+                    if is_admin {
+                        let domain = if domain_part.is_empty() {
+                            default_domain
+                        } else {
+                            domain_part
+                        };
+                        creds.push(json!({
+                            "id": format!("spray_{}_{}", username, domain),
+                            "username": username,
+                            "password": "",
+                            "domain": domain,
+                            "source": "password_spray",
+                            "is_admin": true,
+                        }));
+                    }
                     continue;
                 }
 
@@ -170,7 +195,7 @@ pub fn parse_spray_success(output: &str, params: &Value) -> Vec<Value> {
                     "password": password,
                     "domain": domain,
                     "source": "password_spray",
-                    "is_admin": line.contains("Pwn3d!"),
+                    "is_admin": is_admin,
                 }));
             }
         }
@@ -196,15 +221,25 @@ static DESC_PASSWORD_RE: Lazy<Regex> =
 
 /// Parse ldap_search_descriptions output for passwords in user descriptions.
 ///
-/// netexec output format:
+/// Handles two formats:
+///
+/// 1. netexec SMB output:
 /// ```text
 /// SMB  192.168.58.121  445  DC01  svc_sql  Password: Summer2026!
+/// ```
+///
+/// 2. ldapsearch LDIF output (attribute order NOT guaranteed by LDAP):
+/// ```text
+/// dn: CN=Samwell Tarly,CN=Users,DC=north,DC=sevenkingdoms,DC=local
+/// sAMAccountName: samwell.tarly
+/// description: Samwell Tarly (Password : Heartsbane)
 /// ```
 pub fn parse_ldap_descriptions(output: &str, params: &Value) -> Vec<Value> {
     let default_domain = params.get("domain").and_then(|v| v.as_str()).unwrap_or("");
 
     let mut creds = Vec::new();
 
+    // --- Strategy 1: netexec SMB format (same-line extraction) ---
     for line in output.lines() {
         let line = line.trim();
         if line.is_empty() {
@@ -212,7 +247,11 @@ pub fn parse_ldap_descriptions(output: &str, params: &Value) -> Vec<Value> {
         }
 
         if let Some(caps) = DESC_PASSWORD_RE.captures(line) {
-            let password = caps[1].to_string();
+            let password = caps[1]
+                .trim_matches('\'')
+                .trim_matches('"')
+                .trim_end_matches(')')
+                .to_string();
 
             // Try to extract username from the line
             // netexec format: "SMB ... DC01  username  Description with Password: xxx"
@@ -221,6 +260,78 @@ pub fn parse_ldap_descriptions(output: &str, params: &Value) -> Vec<Value> {
                 creds.push(json!({
                     "id": format!("ldap_desc_{}_{}", username, default_domain),
                     "username": username,
+                    "password": password,
+                    "domain": default_domain,
+                    "source": "ldap_description",
+                    "is_admin": false,
+                }));
+            }
+        }
+    }
+
+    // --- Strategy 2: LDIF format (two-pass: collect entries, then match) ---
+    // LDAP doesn't guarantee attribute order, so we must collect each entry's
+    // sAMAccountName and description before matching passwords.
+    if creds.is_empty() {
+        let mut current_sam = String::new();
+        let mut current_desc = String::new();
+
+        for line in output.lines() {
+            let line = line.trim();
+
+            // Blank line = end of LDIF entry
+            if line.is_empty() {
+                if !current_sam.is_empty() && !current_desc.is_empty() {
+                    if let Some(caps) = DESC_PASSWORD_RE.captures(&current_desc) {
+                        let password = caps[1]
+                            .trim_matches('\'')
+                            .trim_matches('"')
+                            .trim_end_matches(')')
+                            .to_string();
+                        creds.push(json!({
+                            "id": format!("ldap_desc_{}_{}", current_sam, default_domain),
+                            "username": current_sam.clone(),
+                            "password": password,
+                            "domain": default_domain,
+                            "source": "ldap_description",
+                            "is_admin": false,
+                        }));
+                    }
+                }
+                current_sam.clear();
+                current_desc.clear();
+                continue;
+            }
+
+            // Skip comments and dn lines
+            if line.starts_with('#') || line.starts_with("dn:") {
+                continue;
+            }
+
+            if let Some(val) = line
+                .strip_prefix("sAMAccountName: ")
+                .or_else(|| line.strip_prefix("sAMAccountName:"))
+            {
+                current_sam = val.trim().to_string();
+            } else if let Some(val) = line
+                .strip_prefix("description: ")
+                .or_else(|| line.strip_prefix("description:"))
+            {
+                current_desc = val.trim().to_string();
+            }
+        }
+
+        // Handle last entry (no trailing blank line)
+        if !current_sam.is_empty() && !current_desc.is_empty() {
+            if let Some(caps) = DESC_PASSWORD_RE.captures(&current_desc) {
+                let password = caps[1]
+                    .trim_matches('\'')
+                    .trim_matches('"')
+                    .trim_end_matches(')')
+                    .to_string();
+                creds.push(json!({
+                    "id": format!("ldap_desc_{}_{}", current_sam, default_domain),
+                    "username": current_sam,
                     "password": password,
                     "domain": default_domain,
                     "source": "ldap_description",
@@ -359,7 +470,20 @@ SMB  192.168.58.121  445  DC01  [+] contoso.local\\admin:Admin123 (Pwn3d!)";
     }
 
     #[test]
-    fn ldap_descriptions_extracts_passwords() {
+    fn spray_filters_guest_sessions() {
+        let output = "\
+SMB  10.1.2.150  445  WINTERFELL  [+] north.sevenkingdoms.local\\admin:admin (Guest)
+SMB  10.1.2.150  445  WINTERFELL  [+] north.sevenkingdoms.local\\hodor:hodor (Guest)
+SMB  10.1.2.150  445  WINTERFELL  [+] north.sevenkingdoms.local\\realuser:realpass";
+        let params = json!({"domain": "north.sevenkingdoms.local"});
+        let creds = parse_spray_success(output, &params);
+        assert_eq!(creds.len(), 1, "Guest sessions should be filtered out");
+        assert_eq!(creds[0]["username"], "realuser");
+        assert_eq!(creds[0]["password"], "realpass");
+    }
+
+    #[test]
+    fn ldap_descriptions_extracts_passwords_nxc() {
         let output = "\
 SMB  192.168.58.121  445  DC01  svc_sql  Service account (Password: Summer2026!)
 SMB  192.168.58.121  445  DC01  alice    No password here
@@ -368,9 +492,52 @@ SMB  192.168.58.121  445  DC01  backup   Backup svc pwd=BackupPass1";
         let creds = parse_ldap_descriptions(output, &params);
         assert_eq!(creds.len(), 2);
         assert_eq!(creds[0]["username"], "svc_sql");
-        assert_eq!(creds[0]["password"], "Summer2026!)");
+        assert_eq!(creds[0]["password"], "Summer2026!");
         assert_eq!(creds[1]["username"], "backup");
         assert_eq!(creds[1]["password"], "BackupPass1");
+    }
+
+    /// LDIF format from ldapsearch — attributes can appear in any order.
+    #[test]
+    fn ldap_descriptions_extracts_from_ldif() {
+        let output = "\
+# jon.snow, Users, north.sevenkingdoms.local
+dn: CN=Jon Snow,CN=Users,DC=north,DC=sevenkingdoms,DC=local
+sAMAccountName: jon.snow
+description: Jon Snow
+userPrincipalName: jon.snow@north.sevenkingdoms.local
+
+# samwell.tarly, Users, north.sevenkingdoms.local
+dn: CN=Samwell Tarly,CN=Users,DC=north,DC=sevenkingdoms,DC=local
+sAMAccountName: samwell.tarly
+description: Samwell Tarly (Password : Heartsbane)
+userPrincipalName: samwell.tarly@north.sevenkingdoms.local";
+        let params = json!({"domain": "north.sevenkingdoms.local"});
+        let creds = parse_ldap_descriptions(output, &params);
+        assert_eq!(creds.len(), 1);
+        assert_eq!(creds[0]["username"], "samwell.tarly");
+        assert_eq!(creds[0]["password"], "Heartsbane");
+        assert_eq!(creds[0]["source"], "ldap_description");
+    }
+
+    /// LDIF with description BEFORE sAMAccountName (LDAP doesn't guarantee order).
+    #[test]
+    fn ldap_descriptions_ldif_reverse_attribute_order() {
+        let output = "\
+# jon.snow, Users, north.sevenkingdoms.local
+dn: CN=Jon Snow,CN=Users,DC=north,DC=sevenkingdoms,DC=local
+description: Jon Snow
+sAMAccountName: jon.snow
+
+# samwell.tarly, Users, north.sevenkingdoms.local
+dn: CN=Samwell Tarly,CN=Users,DC=north,DC=sevenkingdoms,DC=local
+description: Samwell Tarly (Password : Heartsbane)
+sAMAccountName: samwell.tarly";
+        let params = json!({"domain": "north.sevenkingdoms.local"});
+        let creds = parse_ldap_descriptions(output, &params);
+        assert_eq!(creds.len(), 1);
+        assert_eq!(creds[0]["username"], "samwell.tarly");
+        assert_eq!(creds[0]["password"], "Heartsbane");
     }
 
     #[test]

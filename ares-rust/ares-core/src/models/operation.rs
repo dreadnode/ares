@@ -3,7 +3,7 @@
 use chrono::{DateTime, Utc};
 use std::collections::{HashMap, HashSet};
 
-use super::core::{Credential, Hash, Host, Share, Target, User};
+use super::core::{Credential, Hash, Host, Share, Target, TrustInfo, User};
 use super::task::VulnerabilityInfo;
 
 /// Operation metadata stored in the `ares:op:{id}:meta` Redis HASH.
@@ -397,6 +397,9 @@ pub struct SharedRedTeamState {
     // Domain controller cache
     pub domain_controllers: HashMap<String, String>,
     pub netbios_to_fqdn: HashMap<String, String>,
+
+    // Trust relationships (domain FQDN → trust metadata)
+    pub trusted_domains: HashMap<String, TrustInfo>,
 }
 
 impl SharedRedTeamState {
@@ -422,6 +425,7 @@ impl SharedRedTeamState {
             domain_admin_path: None,
             domain_controllers: HashMap::new(),
             netbios_to_fqdn: HashMap::new(),
+            trusted_domains: HashMap::new(),
         }
     }
 }

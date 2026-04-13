@@ -17,7 +17,7 @@ use tokio::sync::watch;
 use tracing::{debug, info, warn};
 
 use crate::config::OrchestratorConfig;
-use crate::routing::ActiveTaskTracker;
+use crate::dispatcher::Dispatcher;
 use crate::task_queue::TaskQueue;
 use crate::throttling::{ThrottleDecision, Throttler};
 
@@ -242,10 +242,12 @@ async fn scan_keys_async(conn: &mut redis::aio::ConnectionManager, pattern: &str
 
 /// Spawn a tokio task that periodically drains the deferred queue whenever
 /// the throttler allows new submissions.
+///
+/// Uses `Dispatcher::do_submit()` to route tasks directly to the LLM agent
+/// loop (not Redis task queues, which have no consumer in this process).
 pub fn spawn_deferred_processor(
     deferred: Arc<DeferredQueue>,
-    queue: TaskQueue,
-    tracker: ActiveTaskTracker,
+    dispatcher: Arc<Dispatcher>,
     throttler: Arc<Throttler>,
     config: Arc<OrchestratorConfig>,
     mut shutdown: watch::Receiver<bool>,
@@ -287,31 +289,30 @@ pub fn spawn_deferred_processor(
 
                 match decision {
                     ThrottleDecision::Allow => {
-                        match queue
-                            .submit_task(
+                        // Route directly to the LLM agent loop via Dispatcher.
+                        // do_submit handles tracker.add() and throttler.record_dispatch().
+                        match dispatcher
+                            .do_submit(
                                 &task.task_type,
                                 &task.target_role,
                                 task.payload.clone(),
-                                &task.source_agent,
                                 task.priority,
                             )
                             .await
                         {
-                            Ok(tid) => {
-                                tracker
-                                    .add(crate::routing::ActiveTask {
-                                        task_id: tid.clone(),
-                                        task_type: task.task_type.clone(),
-                                        role: task.target_role.clone(),
-                                        submitted_at: std::time::Instant::now(),
-                                    })
-                                    .await;
-                                throttler.record_dispatch().await;
+                            Ok(Some(tid)) => {
                                 dispatched += 1;
                                 info!(
                                     task_id = %tid,
                                     task_type = %task.task_type,
                                     "Deferred task dispatched"
+                                );
+                            }
+                            Ok(None) => {
+                                // No role mapping — task was dropped
+                                debug!(
+                                    task_type = %task.task_type,
+                                    "Deferred task dropped (no role mapping)"
                                 );
                             }
                             Err(e) => {

@@ -35,8 +35,13 @@ pub(super) fn tool_definitions() -> Vec<ToolDefinition> {
                     },
                     "use_dynamic_wordlist": {
                         "type": "boolean",
-                        "description": "When true, augments the wordlist with previously cracked passwords and domain-specific mutations. Defaults to true.",
+                        "description": "When true, augments the wordlist with username-derived password candidates (e.g. jon.snow -> Jon, Snow, jon1, Snow123). Defaults to true.",
                         "default": true
+                    },
+                    "known_usernames": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "List of known usernames from the target domain, used to generate dynamic password candidates. Pass all discovered usernames for best coverage."
                     }
                 },
                 "required": ["hash_value"]
@@ -71,8 +76,13 @@ pub(super) fn tool_definitions() -> Vec<ToolDefinition> {
                     },
                     "use_dynamic_wordlist": {
                         "type": "boolean",
-                        "description": "When true, augments the wordlist with previously cracked passwords and domain-specific mutations. Defaults to true.",
+                        "description": "When true, augments the wordlist with username-derived password candidates. Defaults to true.",
                         "default": true
+                    },
+                    "known_usernames": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "List of known usernames from the target domain, used to generate dynamic password candidates."
                     }
                 },
                 "required": ["hash_value"]
@@ -83,44 +93,9 @@ pub(super) fn tool_definitions() -> Vec<ToolDefinition> {
 
 pub(super) fn callback_definitions() -> Vec<ToolDefinition> {
     vec![
-        ToolDefinition {
-            name: "report_cracked_credential".into(),
-            description: "Report a successfully cracked password back to the orchestrator. \
-                The credential will be stored and made available to other agents for \
-                lateral movement and privilege escalation."
-                .into(),
-            input_schema: json!({
-                "type": "object",
-                "properties": {
-                    "task_id": {
-                        "type": "string",
-                        "description": "The task ID associated with this cracking job"
-                    },
-                    "username": {
-                        "type": "string",
-                        "description": "The account username the cracked hash belongs to"
-                    },
-                    "password": {
-                        "type": "string",
-                        "description": "The recovered plaintext password"
-                    },
-                    "original_hash": {
-                        "type": "string",
-                        "description": "The original hash value that was cracked"
-                    },
-                    "domain": {
-                        "type": "string",
-                        "description": "The domain the account belongs to (e.g. contoso.local)"
-                    },
-                    "method": {
-                        "type": "string",
-                        "description": "The cracking method used. Defaults to hashcat.",
-                        "default": "hashcat"
-                    }
-                },
-                "required": ["task_id", "username", "password", "original_hash"]
-            }),
-        },
+        // NOTE: report_cracked_credential removed — cracked passwords are extracted
+        // from hashcat/john stdout via output_extraction.rs parsers. LLMs must never
+        // construct credential data directly.
         ToolDefinition {
             name: "report_crack_failed".into(),
             description: "Report that a cracking attempt failed and no password was recovered. \

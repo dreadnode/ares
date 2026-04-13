@@ -5,16 +5,102 @@ use regex::Regex;
 
 use ares_core::models::{Credential, Hash, User};
 
-pub(crate) fn dedup_users(users: &[User]) -> Vec<User> {
+/// Strip trailing DNS root dot from domain strings (e.g. `north.sevenkingdoms.local.` → `north.sevenkingdoms.local`).
+fn strip_trailing_dot(s: &str) -> &str {
+    s.strip_suffix('.').unwrap_or(s)
+}
+
+/// Noise usernames that should be filtered.
+const NOISE_USERNAMES: &[&str] = &[
+    "none",
+    "null",
+    "(none)",
+    "(null)",
+    "anonymous",
+    "unknown",
+    "n/a",
+    "default",
+    "test",
+    "local",
+    "localhost",
+    "domain",
+    "workgroup",
+    // Built-in / service accounts — not useful attack targets
+    "guest",
+    "defaultaccount",
+    "krbtgt",
+    "ssm-user",
+    "ansible",
+];
+
+/// Prefixes for machine-local service accounts that should be filtered.
+/// e.g. SQLServer2005SQLBrowserUser$BRAAVOS
+const NOISE_USERNAME_PREFIXES: &[&str] = &["sqlserver", "mssql", "healthmailbox"];
+
+/// Resolve a NetBIOS domain name to FQDN using the netbios_to_fqdn map.
+fn resolve_netbios_domain(domain: &str, netbios_to_fqdn: &HashMap<String, String>) -> String {
+    let lower = domain.to_lowercase();
+    // Already an FQDN (contains dots)
+    if lower.contains('.') {
+        return strip_trailing_dot(&lower).to_string();
+    }
+    // Try direct lookup — netbios_to_fqdn keys are UPPERCASE (from publish_netbios)
+    let upper = domain.to_uppercase();
+    if let Some(fqdn) = netbios_to_fqdn.get(&upper) {
+        return fqdn.to_lowercase();
+    }
+    // Try matching as prefix of known FQDNs
+    for (nb, fqdn) in netbios_to_fqdn {
+        if nb.to_lowercase() == lower {
+            return fqdn.to_lowercase();
+        }
+    }
+    // Return as-is lowercased
+    lower
+}
+
+/// Sources that produce verified users (KDC-confirmed or enumerated).
+/// `output_extraction` is excluded — its DOMAIN\user regex matches every
+/// wordlist entry in kerbrute/ASREProast output, not just confirmed users.
+const TRUSTED_USER_SOURCES: &[&str] = &["kerberos_enum", "netexec_user_enum"];
+
+pub(crate) fn dedup_users(users: &[User], netbios_to_fqdn: &HashMap<String, String>) -> Vec<User> {
     let mut seen = HashSet::new();
     let mut result = Vec::new();
     for u in users {
-        let key = (
-            u.domain.trim().to_lowercase(),
-            u.username.trim().to_lowercase(),
-        );
+        let raw_domain = strip_trailing_dot(u.domain.trim());
+        let domain = resolve_netbios_domain(raw_domain, netbios_to_fqdn).to_lowercase();
+        let username = u.username.trim().to_lowercase();
+
+        // Only accept users from trusted parser sources
+        if !u.source.is_empty() && !TRUSTED_USER_SOURCES.contains(&u.source.as_str()) {
+            continue;
+        }
+
+        // Filter garbage entries
+        if username.is_empty()
+            || username.len() <= 1
+            || username.contains('/')
+            || username.starts_with('_')  // DNS service prefixes (_udp, _tcp, _msdcs)
+            || username.bytes().any(|b| b < 0x20)  // control characters
+            || !username.bytes().all(|b| b.is_ascii_graphic())  // non-printable
+            || NOISE_USERNAMES.contains(&username.as_str())
+            || NOISE_USERNAME_PREFIXES.iter().any(|p| username.starts_with(p))
+        {
+            continue;
+        }
+        // Filter domains that look like DNS artifacts
+        if domain.starts_with('_') || domain.is_empty() {
+            continue;
+        }
+
+        let key = (domain.clone(), username);
         if seen.insert(key) {
-            result.push(u.clone());
+            let mut cleaned = u.clone();
+            cleaned.domain =
+                resolve_netbios_domain(strip_trailing_dot(cleaned.domain.trim()), netbios_to_fqdn)
+                    .to_lowercase();
+            result.push(cleaned);
         }
     }
     result
@@ -30,6 +116,9 @@ static TRAILING_PAREN_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"\s+\([^)]+\)\s
 /// with embedded `@domain` suffixes, and remove garbage entries.
 pub(crate) fn sanitize_credentials(creds: &mut Vec<Credential>) {
     for cred in creds.iter_mut() {
+        // Strip trailing dots from domains
+        cred.domain = strip_trailing_dot(cred.domain.trim()).to_string();
+
         // Strip "Password: " / "Password:" prefix from password values
         // e.g. "Password: hodor" → "hodor"
         if PASSWORD_PREFIX_RE.is_match(&cred.password) {
@@ -54,7 +143,7 @@ pub(crate) fn sanitize_credentials(creds: &mut Vec<Credential>) {
                 let domain_part = parts[1].split('@').next().unwrap_or(parts[1]).to_string();
                 if domain_part.contains('.') {
                     cred.username = base_username;
-                    cred.domain = domain_part;
+                    cred.domain = strip_trailing_dot(&domain_part).to_string();
                 }
             }
         }
@@ -63,7 +152,27 @@ pub(crate) fn sanitize_credentials(creds: &mut Vec<Credential>) {
     // Remove credentials with empty or noise-only passwords
     creds.retain(|c| {
         let pw = c.password.trim();
-        !pw.is_empty() && pw.to_lowercase() != "password"
+        let username = c.username.trim().to_lowercase();
+        if pw.is_empty() || pw.to_lowercase() == "password" {
+            return false;
+        }
+        // Filter password == username (LLM-hallucinated credential guesses)
+        if pw.to_lowercase() == username {
+            return false;
+        }
+        // Filter "Discovered" as password (not a real credential)
+        if pw.eq_ignore_ascii_case("discovered") {
+            return false;
+        }
+        // Filter usernames containing path separators (file path artifacts)
+        if username.contains('/') || username.contains('\\') {
+            return false;
+        }
+        // Filter EVIL\d+$ impacket RBCD artifacts
+        if username.starts_with("evil") && username.ends_with('$') {
+            return false;
+        }
+        true
     });
 }
 
@@ -81,24 +190,43 @@ pub(crate) fn dedup_credentials(creds: &[Credential]) -> Vec<Credential> {
             c.password.clone(),
         );
         if seen.insert(key) {
-            result.push(c.clone());
+            let mut normalized = c.clone();
+            normalized.domain = c.domain.trim().to_lowercase();
+            normalized.username = c.username.trim().to_lowercase();
+            result.push(normalized);
         }
     }
     result
+}
+
+/// Normalize hash type for display: `ntlm` → `NTLM`, `kerberoast` → `Kerberoast`, `asrep` → `AS-REP`.
+fn normalize_hash_type(hash_type: &str) -> String {
+    match hash_type.trim().to_lowercase().as_str() {
+        "ntlm" => "NTLM".to_string(),
+        "kerberoast" => "Kerberoast".to_string(),
+        "asrep" | "as-rep" | "asreproast" => "AS-REP".to_string(),
+        "aes256" | "aes-256" => "AES256".to_string(),
+        "aes128" | "aes-128" => "AES128".to_string(),
+        other => other.to_string(),
+    }
 }
 
 pub(crate) fn dedup_hashes(hashes: &[Hash]) -> Vec<Hash> {
     let mut seen = HashSet::new();
     let mut result = Vec::new();
     for h in hashes {
+        let domain = strip_trailing_dot(h.domain.trim()).to_lowercase();
         let key = (
-            h.domain.trim().to_lowercase(),
+            domain.clone(),
             h.username.trim().to_lowercase(),
             h.hash_type.trim().to_lowercase(),
             h.hash_value.trim().to_lowercase(),
         );
         if seen.insert(key) {
-            result.push(h.clone());
+            let mut cleaned = h.clone();
+            cleaned.domain = strip_trailing_dot(cleaned.domain.trim()).to_lowercase();
+            cleaned.hash_type = normalize_hash_type(&cleaned.hash_type);
+            result.push(cleaned);
         }
     }
     result
@@ -243,6 +371,14 @@ const WEAKNESS_NOISE_PREFIXES: &[&str] = &[
 static WEAKNESS_FIELD_RE: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"\*\*([^*:]+):\*\*\s*(.*)$").unwrap());
 
+/// Regex for plain-text weakness fields: `Key: value` or `Key : value`
+static WEAKNESS_PLAIN_FIELD_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(
+        r"^(Title|Vulnerability|Affected[_ ]Resource|Impact|Discovery[_ ]Method)\s*:\s*(.+)$",
+    )
+    .unwrap()
+});
+
 /// Parsed weakness fields for display.
 pub(crate) struct ParsedWeaknessDisplay {
     pub title: String,
@@ -268,14 +404,17 @@ pub(crate) fn parse_weakness_block_display(block: &str) -> ParsedWeaknessDisplay
             continue;
         }
 
+        // Markdown format: ### Title
         if let Some(rest) = stripped.strip_prefix("### ") {
             result.title = rest.trim().to_string();
         } else if stripped.starts_with("**")
             && !stripped.contains(":**")
             && stripped.ends_with("**")
         {
+            // Markdown format: **Bold Title**
             result.title = stripped.trim_matches('*').trim().to_string();
         } else if stripped.contains(":**") {
+            // Markdown format: **Field:** value or - **Field:** value
             let clean = stripped.trim_start_matches('-').trim();
             if let Some(caps) = WEAKNESS_FIELD_RE.captures(clean) {
                 let key = caps[1].trim().to_lowercase().replace(' ', "_");
@@ -288,6 +427,17 @@ pub(crate) fn parse_weakness_block_display(block: &str) -> ParsedWeaknessDisplay
                     _ => {}
                 }
             }
+        } else if let Some(caps) = WEAKNESS_PLAIN_FIELD_RE.captures(stripped) {
+            // Plain-text format: Field: value (written by Rust orchestrator LLM)
+            let key = caps[1].to_lowercase().replace(' ', "_");
+            let value = caps[2].trim().to_string();
+            match key.as_str() {
+                "title" => result.title = value,
+                "vulnerability" => result.vulnerability = value,
+                "affected_resource" => result.affected_resource = value,
+                "impact" => result.impact = value,
+                _ => {}
+            }
         }
     }
 
@@ -299,16 +449,17 @@ pub(crate) fn parse_weakness_block_display(block: &str) -> ParsedWeaknessDisplay
 }
 
 /// Filter out agent task suggestions incorrectly recorded as weaknesses.
-/// Returns (raw_block, parsed) tuples for real weaknesses only.
+/// Returns (raw_block, parsed) tuples for real weaknesses only, deduplicated by title.
 pub(crate) fn filter_real_weaknesses(weaknesses: &[String]) -> Vec<(&str, ParsedWeaknessDisplay)> {
     let mut result = Vec::new();
+    let mut seen_titles: HashSet<String> = HashSet::new();
     for w in weaknesses {
         let parsed = parse_weakness_block_display(w);
         let title_lower = parsed.title.trim().to_lowercase();
         let is_noise = WEAKNESS_NOISE_PREFIXES
             .iter()
             .any(|prefix| title_lower.starts_with(prefix));
-        if !is_noise {
+        if !is_noise && seen_titles.insert(title_lower) {
             result.push((w.as_str(), parsed));
         }
     }
@@ -329,15 +480,27 @@ pub(crate) fn normalize_state_domains(
     hosts: &[ares_core::models::Host],
     target_domain: Option<&str>,
 ) {
+    // Normalize all domain strings: strip trailing dots
+    for d in domains.iter_mut() {
+        *d = strip_trailing_dot(d.trim()).to_string();
+    }
+    for cred in credentials.iter_mut() {
+        cred.domain = strip_trailing_dot(cred.domain.trim()).to_string();
+    }
+    for h in hashes.iter_mut() {
+        h.domain = strip_trailing_dot(h.domain.trim()).to_string();
+    }
+
     // Build user domain lookup: username -> set of domains
     let mut user_domains: HashMap<String, HashSet<String>> = HashMap::new();
     for user in users {
         let username_lower = user.username.to_lowercase();
-        if !user.domain.is_empty() {
+        let domain = strip_trailing_dot(user.domain.trim()).to_lowercase();
+        if !domain.is_empty() {
             user_domains
                 .entry(username_lower)
                 .or_default()
-                .insert(user.domain.to_lowercase());
+                .insert(domain);
         }
     }
 
@@ -557,32 +720,35 @@ mod tests {
 
     #[test]
     fn test_dedup_users_basic() {
+        let nb = HashMap::new();
         let users = vec![
             make_user("contoso.local", "admin"),
             make_user("contoso.local", "admin"), // dup
             make_user("contoso.local", "jdoe"),
         ];
-        let deduped = dedup_users(&users);
+        let deduped = dedup_users(&users, &nb);
         assert_eq!(deduped.len(), 2);
     }
 
     #[test]
     fn test_dedup_users_case_insensitive() {
+        let nb = HashMap::new();
         let users = vec![
             make_user("CONTOSO.LOCAL", "Admin"),
             make_user("contoso.local", "admin"),
         ];
-        let deduped = dedup_users(&users);
+        let deduped = dedup_users(&users, &nb);
         assert_eq!(deduped.len(), 1);
     }
 
     #[test]
     fn test_dedup_users_different_domains() {
+        let nb = HashMap::new();
         let users = vec![
             make_user("contoso.local", "admin"),
             make_user("fabrikam.local", "admin"),
         ];
-        let deduped = dedup_users(&users);
+        let deduped = dedup_users(&users, &nb);
         assert_eq!(deduped.len(), 2);
     }
 
@@ -760,6 +926,17 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_weakness_block_display_plain_text() {
+        // Plain-text format written by Rust orchestrator LLM
+        let block = "Title: Password in User Description (samwell.tarly)\nVulnerability: Password found in AD description\nAffected Resource: 10.1.2.150\nImpact: Information disclosure";
+        let parsed = parse_weakness_block_display(block);
+        assert_eq!(parsed.title, "Password in User Description (samwell.tarly)");
+        assert_eq!(parsed.vulnerability, "Password found in AD description");
+        assert_eq!(parsed.affected_resource, "10.1.2.150");
+        assert_eq!(parsed.impact, "Information disclosure");
+    }
+
+    #[test]
     fn test_parse_weakness_block_display_no_title() {
         let parsed = parse_weakness_block_display("just some text without a title marker");
         // Falls back to extract_weakness_title which uses first line
@@ -834,9 +1011,12 @@ mod tests {
             make_cred("contoso.local", "user1", "PASSWORD: MyPass123"),
         ];
         sanitize_credentials(&mut creds);
-        assert_eq!(creds[0].password, "hodor");
-        assert_eq!(creds[1].password, "secret");
-        assert_eq!(creds[2].password, "MyPass123");
+        // "Password: hodor" → "hodor" → filtered (password == username)
+        // "password:secret" → "secret" → kept
+        // "PASSWORD: MyPass123" → "MyPass123" → kept
+        assert_eq!(creds.len(), 2);
+        assert_eq!(creds[0].password, "secret");
+        assert_eq!(creds[1].password, "MyPass123");
     }
 
     #[test]
@@ -860,8 +1040,10 @@ mod tests {
             make_cred("contoso.local", "admin", "P@ss1 (Pwn3d!)"),
         ];
         sanitize_credentials(&mut creds);
-        assert_eq!(creds[0].password, "svc_test");
-        assert_eq!(creds[1].password, "P@ss1");
+        // "svc_test (Guest)" → "svc_test" → filtered (password == username)
+        // "P@ss1 (Pwn3d!)" → "P@ss1" → kept
+        assert_eq!(creds.len(), 1);
+        assert_eq!(creds[0].password, "P@ss1");
     }
 
     #[test]
@@ -912,6 +1094,7 @@ mod tests {
     #[test]
     fn test_sanitize_then_dedup_collapses_variants() {
         // Simulates the real scenario: hodor appears with multiple dirty variants
+        // All variants resolve to password == username, so all get filtered
         let mut creds = vec![
             make_cred("contoso.local", "hodor", "hodor"),
             make_cred("contoso.local", "hodor", "Password: hodor"),
@@ -919,8 +1102,18 @@ mod tests {
         ];
         sanitize_credentials(&mut creds);
         let deduped = dedup_credentials(&creds);
-        // "Password" removed, "Password: hodor" → "hodor" deduped with existing "hodor"
-        assert_eq!(deduped.len(), 1);
-        assert_eq!(deduped[0].password, "hodor");
+        assert_eq!(deduped.len(), 0);
+    }
+
+    #[test]
+    fn test_sanitize_filters_password_equals_username() {
+        let mut creds = vec![
+            make_cred("contoso.local", "admin", "admin"),
+            make_cred("contoso.local", "user1", "DifferentPass"),
+            make_cred("contoso.local", "jdoe", "Discovered"),
+        ];
+        sanitize_credentials(&mut creds);
+        assert_eq!(creds.len(), 1);
+        assert_eq!(creds[0].username, "user1");
     }
 }

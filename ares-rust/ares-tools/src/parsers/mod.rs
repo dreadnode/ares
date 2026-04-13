@@ -5,18 +5,21 @@
 //! the Python workers used.
 
 mod certipy;
+mod cracker;
 mod credential_tools;
 mod delegation;
 mod mssql;
 mod nmap;
 mod secrets;
 mod smb;
+mod trust;
 mod users_shares;
 
 use serde_json::{json, Value};
 
 // Re-export all public parser functions at module level.
 pub use certipy::parse_certipy_find;
+pub use cracker::parse_cracker_output;
 pub use credential_tools::{
     parse_adidnsdump, parse_ldap_descriptions, parse_lsassy, parse_ntds_dit, parse_spray_success,
 };
@@ -25,6 +28,7 @@ pub use mssql::{parse_mssql_impersonation, parse_mssql_linked_servers};
 pub use nmap::{flush_nmap_host, parse_nmap_output};
 pub use secrets::{parse_asrep_roast, parse_kerberoast, parse_secretsdump};
 pub use smb::{parse_netexec_smb, parse_smb_signing};
+pub use trust::parse_domain_trusts;
 pub use users_shares::{parse_netexec_shares, parse_netexec_users};
 
 /// Parse raw tool output and return structured discoveries.
@@ -171,10 +175,25 @@ pub fn parse_tool_output(tool_name: &str, output: &str, params: &Value) -> Value
                 discoveries["credentials"] = Value::Array(creds);
             }
         }
-        "password_spray" | "username_as_password" => {
+        "password_spray" => {
             let creds = parse_spray_success(output, params);
             if !creds.is_empty() {
                 discoveries["credentials"] = Value::Array(creds);
+            }
+        }
+        "username_as_password" => {
+            let creds = parse_spray_success(output, params);
+            // Only keep creds where password == username (matches Python guard)
+            let filtered: Vec<Value> = creds
+                .into_iter()
+                .filter(|c| {
+                    let user = c["username"].as_str().unwrap_or("");
+                    let pass = c["password"].as_str().unwrap_or("");
+                    !pass.is_empty() && pass.eq_ignore_ascii_case(user)
+                })
+                .collect();
+            if !filtered.is_empty() {
+                discoveries["credentials"] = Value::Array(filtered);
             }
         }
         "ldap_search_descriptions" => {
@@ -199,6 +218,22 @@ pub fn parse_tool_output(tool_name: &str, output: &str, params: &Value) -> Value
             let vulns = parse_mssql_linked_servers(output, params);
             if !vulns.is_empty() {
                 discoveries["vulnerabilities"] = Value::Array(vulns);
+            }
+        }
+        "enumerate_domain_trusts" => {
+            let trusts = parse_domain_trusts(output);
+            if !trusts.is_empty() {
+                let trust_values: Vec<Value> = trusts
+                    .iter()
+                    .filter_map(|t| serde_json::to_value(t).ok())
+                    .collect();
+                discoveries["trusted_domains"] = Value::Array(trust_values);
+            }
+        }
+        "crack_with_hashcat" | "crack_with_john" => {
+            let creds = parse_cracker_output(output, params);
+            if !creds.is_empty() {
+                discoveries["credentials"] = Value::Array(creds);
             }
         }
         _ => {}

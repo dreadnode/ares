@@ -170,6 +170,24 @@ SMB signing check shows unsigned hosts:
    - Regularly check get_operation_summary()
    - Don't complete operation with pending vulnerabilities
 
+{% if undominated_forests | length > 0 -%}
+## Multi-Forest Status
+
+**WARNING: The following forest roots have NOT been dominated yet (no krbtgt hash obtained):**
+
+{% for forest in undominated_forests -%}
+- **{{ forest }}** — needs krbtgt extraction
+{% endfor %}
+
+You MUST NOT call `complete_operation()` until ALL forests are dominated or all attack paths are exhausted.
+
+**Actions to dominate remaining forests:**
+1. Enumerate trust relationships: `dispatch_recon(target_ip="<DC_IP>", domain="<DOMAIN>", techniques=["enumerate_domain_trusts"])`
+2. Extract trust keys: `dispatch_privesc_exploit(vuln_id="trust_key_extraction")` with the appropriate DA credential
+3. Use inter-realm tickets to secretsdump the foreign forest's DC
+4. If trust key path fails, look for organic paths: MSSQL links, ACL chains, foreign security principals
+{% endif -%}
+
 ## Stop Conditions
 
 ### When to call complete_operation():

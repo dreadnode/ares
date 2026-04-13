@@ -1,7 +1,7 @@
 //! Completion and golden-ticket wait loops.
 //!
 //! These functions block (async) until the operation reaches a terminal state:
-//! domain admin achieved, golden ticket forged, max runtime exceeded, or
+//! all forests dominated, golden tickets forged, max runtime exceeded, or
 //! explicit shutdown.
 
 use std::collections::HashSet;
@@ -21,6 +21,80 @@ const GT_DONE_STATUSES: &[&str] = &[
     "failed_no_sid",
     "failed_ticketer",
 ];
+
+/// Pure computation: given state fields, return undominated forest root domains.
+///
+/// Used by both the async `undominated_forests()` and `SharedState::snapshot()`.
+pub fn compute_undominated_forests(
+    target_domain: Option<&str>,
+    first_domain: Option<&str>,
+    trusted_domains: &std::collections::HashMap<String, ares_core::models::TrustInfo>,
+    dominated_domains: &HashSet<String>,
+) -> Vec<String> {
+    let mut required_forests: HashSet<String> = HashSet::new();
+
+    if let Some(td) = target_domain {
+        if !td.is_empty() {
+            required_forests.insert(forest_root_of(td));
+        }
+    }
+    if let Some(fd) = first_domain {
+        required_forests.insert(forest_root_of(fd));
+    }
+
+    for trust in trusted_domains.values() {
+        if trust.is_cross_forest() {
+            required_forests.insert(forest_root_of(&trust.domain));
+        }
+    }
+
+    if required_forests.is_empty() {
+        return Vec::new();
+    }
+
+    let dominated_roots: HashSet<String> = dominated_domains
+        .iter()
+        .map(|d| forest_root_of(d))
+        .collect();
+
+    required_forests
+        .difference(&dominated_roots)
+        .cloned()
+        .collect()
+}
+
+/// Check if all trusted forests have been dominated.
+///
+/// Returns a list of forest root domains that still need krbtgt hashes.
+/// An empty list means all forests are dominated.
+///
+/// This mirrors Python's `all_forests_dominated()` which checks that
+/// krbtgt hashes are obtained from every trusted forest, not just the
+/// initial target domain.
+pub async fn undominated_forests(state: &SharedState) -> Vec<String> {
+    let inner = state.read().await;
+    compute_undominated_forests(
+        inner.target.as_ref().map(|t| t.domain.as_str()),
+        inner.domains.first().map(|d| d.as_str()),
+        &inner.trusted_domains,
+        &inner.dominated_domains,
+    )
+}
+
+/// Extract forest root from a domain FQDN.
+///
+/// For `north.contoso.local` → `contoso.local`
+/// For `contoso.local` → `contoso.local`
+fn forest_root_of(domain: &str) -> String {
+    let lower = domain.to_lowercase();
+    let parts: Vec<&str> = lower.split('.').collect();
+    if parts.len() <= 2 {
+        lower
+    } else {
+        // Walk up to find the 2-part root (assumes .local/.com TLD)
+        parts[parts.len() - 2..].join(".")
+    }
+}
 
 /// Wait until all domains with krbtgt hashes have had their golden tickets
 /// processed (or timeout).
@@ -165,12 +239,13 @@ pub async fn wait_for_golden_ticket(
 /// Main operation completion loop.
 ///
 /// Polls every `interval` checking for:
-/// - `has_domain_admin` flag set
+/// - All forests dominated (krbtgt from every trusted forest)
 /// - `completed` flag set (external completion signal)
 /// - Max runtime exceeded
 ///
-/// On any completion condition, waits for golden ticket (with a shorter timeout)
-/// before returning.
+/// When DA is achieved for the initial domain but other forests remain
+/// undominated, the operation continues until all forests are dominated
+/// or max runtime is exceeded.
 pub async fn wait_for_completion(
     state: &SharedState,
     dispatcher: &Arc<Dispatcher>,
@@ -204,7 +279,17 @@ pub async fn wait_for_completion(
         } else if elapsed >= max_runtime {
             Some("max runtime exceeded")
         } else if has_da {
-            Some("domain admin achieved")
+            // DA achieved — but check if all forests are dominated
+            let remaining = undominated_forests(state).await;
+            if remaining.is_empty() {
+                Some("all forests dominated")
+            } else {
+                debug!(
+                    undominated = ?remaining,
+                    "DA achieved but forests remain undominated"
+                );
+                None // Continue — other forests still need krbtgt
+            }
         } else {
             None
         };
@@ -274,5 +359,20 @@ mod tests {
     #[test]
     fn test_gt_done_statuses_count() {
         assert_eq!(GT_DONE_STATUSES.len(), 4);
+    }
+
+    #[test]
+    fn test_forest_root_of_simple() {
+        assert_eq!(forest_root_of("contoso.local"), "contoso.local");
+    }
+
+    #[test]
+    fn test_forest_root_of_child() {
+        assert_eq!(forest_root_of("north.contoso.local"), "contoso.local");
+    }
+
+    #[test]
+    fn test_forest_root_of_deep_child() {
+        assert_eq!(forest_root_of("sub.north.contoso.local"), "contoso.local");
     }
 }

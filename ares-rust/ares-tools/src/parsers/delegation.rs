@@ -15,24 +15,16 @@ pub fn parse_delegation(output: &str, params: &Value) -> Vec<Value> {
     for line in output.lines() {
         let line_lower = line.to_lowercase();
 
-        if line_lower.contains("constrained") && !line.trim().starts_with("AccountName") {
-            let account = extract_delegation_account(line);
-            if !account.is_empty() {
-                vulns.push(json!({
-                    "vuln_id": format!("constrained_delegation_{}", account),
-                    "vuln_type": "constrained_delegation",
-                    "target": target_ip,
-                    "details": {
-                        "account_name": account,
-                        "domain": domain,
-                        "delegation_type": "constrained",
-                    },
-                    "recommended_agent": "privesc",
-                }));
-            }
+        // Skip header line
+        if line.trim().starts_with("AccountName") {
+            continue;
         }
 
-        if line_lower.contains("unconstrained") && !line.trim().starts_with("AccountName") {
+        // impacket-findDelegation output columns:
+        // AccountName  AccountType  DelegationType  DelegationRightsTo
+        let parts: Vec<&str> = line.split_whitespace().collect();
+
+        if line_lower.contains("unconstrained") {
             let account = extract_delegation_account(line);
             if !account.is_empty() {
                 vulns.push(json!({
@@ -44,6 +36,31 @@ pub fn parse_delegation(output: &str, params: &Value) -> Vec<Value> {
                         "domain": domain,
                         "delegation_type": "unconstrained",
                     },
+                    "recommended_agent": "privesc",
+                }));
+            }
+        } else if line_lower.contains("constrained") {
+            let account = extract_delegation_account(line);
+            // Extract delegation target (column 3+, may contain spaces for multiple SPNs)
+            let delegation_target = if parts.len() >= 4 {
+                parts[3..].join(" ")
+            } else {
+                String::new()
+            };
+            if !account.is_empty() {
+                let mut details = json!({
+                    "account_name": account,
+                    "domain": domain,
+                    "delegation_type": "constrained",
+                });
+                if !delegation_target.is_empty() {
+                    details["delegation_target"] = json!(delegation_target);
+                }
+                vulns.push(json!({
+                    "vuln_id": format!("constrained_delegation_{}", account),
+                    "vuln_type": "constrained_delegation",
+                    "target": target_ip,
+                    "details": details,
                     "recommended_agent": "privesc",
                 }));
             }
@@ -90,21 +107,19 @@ svc_sql$                       Computer     Constrained          CIFS/dc01.conto
         assert_eq!(vulns[0]["target"], "192.168.58.10");
         assert_eq!(vulns[0]["details"]["account_name"], "svc_sql$");
         assert_eq!(vulns[0]["details"]["domain"], "contoso.local");
+        assert_eq!(
+            vulns[0]["details"]["delegation_target"],
+            "CIFS/dc01.contoso.local"
+        );
     }
 
     #[test]
     fn test_parse_delegation_unconstrained() {
-        // "Unconstrained" contains "constrained", so the parser produces both types
         let output = "DC01$  Computer  Unconstrained  N/A";
         let params = json!({"domain": "contoso.local", "target": "192.168.58.10"});
         let vulns = parse_delegation(output, &params);
-        assert_eq!(vulns.len(), 2); // both constrained + unconstrained match
-        let types: Vec<&str> = vulns
-            .iter()
-            .map(|v| v["vuln_type"].as_str().unwrap())
-            .collect();
-        assert!(types.contains(&"constrained_delegation"));
-        assert!(types.contains(&"unconstrained_delegation"));
+        assert_eq!(vulns.len(), 1);
+        assert_eq!(vulns[0]["vuln_type"], "unconstrained_delegation");
     }
 
     #[test]
@@ -115,8 +130,9 @@ svc_sql$     Computer     Constrained     CIFS/dc01.contoso.local
 DC01$        Computer     Unconstrained   N/A";
         let params = json!({"domain": "contoso.local", "target_ip": "192.168.58.10"});
         let vulns = parse_delegation(output, &params);
-        // Header "AccountName" skipped; "Constrained" → 1 vuln; "Unconstrained" → 2 vulns (matches both checks)
-        assert_eq!(vulns.len(), 3);
+        assert_eq!(vulns.len(), 2);
+        assert_eq!(vulns[0]["vuln_type"], "constrained_delegation");
+        assert_eq!(vulns[1]["vuln_type"], "unconstrained_delegation");
     }
 
     #[test]

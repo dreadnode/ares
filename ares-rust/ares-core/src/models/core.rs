@@ -199,6 +199,40 @@ mod tests {
     }
 }
 
+/// Trust relationship metadata for an AD domain trust.
+///
+/// Stores structured trust information discovered via `enumerate_domain_trusts`
+/// (LDAP `objectClass=trustedDomain`).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TrustInfo {
+    /// FQDN of the trusted domain (e.g. `fabrikam.local`).
+    pub domain: String,
+    /// NetBIOS / flat name (e.g. `FABRIKAM`).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub flat_name: String,
+    /// Trust direction: `"inbound"`, `"outbound"`, or `"bidirectional"`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub direction: String,
+    /// Trust type: `"parent_child"`, `"forest"`, `"external"`, or `"unknown"`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub trust_type: String,
+    /// Whether SID filtering is active (blocks RID < 1000 across forest trusts).
+    #[serde(default)]
+    pub sid_filtering: bool,
+}
+
+impl TrustInfo {
+    /// Is this a parent-child (intra-forest) trust?
+    pub fn is_parent_child(&self) -> bool {
+        self.trust_type == "parent_child"
+    }
+
+    /// Is this a cross-forest trust?
+    pub fn is_cross_forest(&self) -> bool {
+        self.trust_type == "forest" || self.trust_type == "external"
+    }
+}
+
 /// Discovered SMB share.
 ///
 /// Matches Python: `class Share(Model)`

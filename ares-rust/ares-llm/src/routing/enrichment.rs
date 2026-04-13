@@ -84,13 +84,15 @@ pub fn enrich_delegation_payload(
 /// Resolve dc_ip for an exploit payload if not already set.
 ///
 /// Uses domain from the payload to find a DC via the multi-tier discovery.
+/// Returns the `DcDiscovery` if one was used, so callers can check `should_cache`
+/// before writing to `domain_controllers`.
 pub fn resolve_dc_for_payload(
     payload: &mut serde_json::Value,
     hosts: &[Host],
     domain_controllers: &HashMap<String, String>,
     netbios_to_fqdn: &HashMap<String, String>,
     target_ip: Option<&str>,
-) {
+) -> Option<super::dc_discovery::DcDiscovery> {
     // Skip if dc_ip already set
     if !payload
         .get("dc_ip")
@@ -98,13 +100,13 @@ pub fn resolve_dc_for_payload(
         .unwrap_or("")
         .is_empty()
     {
-        return;
+        return None;
     }
 
     // Need a domain to resolve DC
     let domain = match payload.get("domain").and_then(|v| v.as_str()) {
         Some(d) if !d.is_empty() => d,
-        _ => return,
+        _ => return None,
     };
 
     // Try multi-tier DC discovery
@@ -115,15 +117,15 @@ pub fn resolve_dc_for_payload(
         netbios_to_fqdn,
         target_ip,
     ) {
-        payload["dc_ip"] = serde_json::Value::String(discovery.ip);
-        return;
+        payload["dc_ip"] = serde_json::Value::String(discovery.ip.clone());
+        return Some(discovery);
     }
 
     // Fallback to target_ip from payload
     if let Some(tip) = payload.get("target_ip").and_then(|v| v.as_str()) {
         if !tip.is_empty() {
             payload["dc_ip"] = serde_json::Value::String(tip.to_string());
-            return;
+            return None;
         }
     }
 
@@ -131,6 +133,7 @@ pub fn resolve_dc_for_payload(
     if let Some(tip) = target_ip {
         payload["dc_ip"] = serde_json::Value::String(tip.to_string());
     }
+    None
 }
 
 #[cfg(test)]

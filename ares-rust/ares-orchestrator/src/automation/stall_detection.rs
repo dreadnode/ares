@@ -20,10 +20,10 @@ use crate::dispatcher::Dispatcher;
 use crate::state::*;
 
 /// How long without new discoveries before we consider the op stalled.
-const STALL_THRESHOLD: Duration = Duration::from_secs(300); // 5 minutes
+const STALL_THRESHOLD: Duration = Duration::from_secs(180); // 3 minutes
 
 /// Minimum interval between stall recovery actions.
-const RECOVERY_COOLDOWN: Duration = Duration::from_secs(600); // 10 minutes
+const RECOVERY_COOLDOWN: Duration = Duration::from_secs(120); // 2 minutes
 
 /// Monitors for discovery stalls and triggers fallback actions.
 /// Interval: 60s.
@@ -92,7 +92,7 @@ pub async fn auto_stall_detection(
         }
 
         // Cap recovery attempts (don't spam indefinitely)
-        if recovery_attempts >= 3 {
+        if recovery_attempts >= 10 {
             continue;
         }
 
@@ -115,7 +115,12 @@ pub async fn auto_stall_detection(
                     .domain_controllers
                     .iter()
                     .filter(|(domain, _)| {
-                        let key = format!("stall_spray:{}", domain.to_lowercase());
+                        // Use recovery_attempts in key so each round dispatches fresh sprays
+                        let key = format!(
+                            "stall_spray:{}:{}",
+                            domain.to_lowercase(),
+                            recovery_attempts
+                        );
                         !state.is_processed(DEDUP_PASSWORD_SPRAY, &key)
                     })
                     .map(|(domain, dc_ip)| (domain.clone(), dc_ip.clone()))
@@ -136,7 +141,11 @@ pub async fn auto_stall_detection(
                 {
                     Ok(Some(task_id)) => {
                         info!(task_id = %task_id, domain = %domain, "Stall recovery: password spray dispatched");
-                        let key = format!("stall_spray:{}", domain.to_lowercase());
+                        let key = format!(
+                            "stall_spray:{}:{}",
+                            domain.to_lowercase(),
+                            recovery_attempts
+                        );
                         dispatcher
                             .state
                             .write()
@@ -153,41 +162,50 @@ pub async fn auto_stall_detection(
             }
         }
 
-        // --- Fallback 2: LDAP description search with all creds ---
+        // --- Fallback 2: Low-hanging fruit (SYSVOL, GPP, LDAP descriptions, LAPS) ---
         if has_creds && has_dcs {
-            let ldap_work: Option<(String, String, ares_core::models::Credential)> = {
+            let lhf_work: Vec<(String, String, String, ares_core::models::Credential)> = {
                 let state = dispatcher.state.read().await;
-                state.credentials.first().and_then(|cred| {
-                    let dc_ip = state
-                        .domain_controllers
-                        .get(&cred.domain.to_lowercase())
-                        .cloned()?;
-                    let key = format!("stall_ldap:{}:{}", cred.domain, cred.username);
-                    if state.is_processed(DEDUP_EXPANSION_CREDS, &key) {
-                        return None;
-                    }
-                    Some((key, dc_ip, cred.clone()))
-                })
+                state
+                    .credentials
+                    .iter()
+                    .filter(|c| !c.domain.is_empty() && !c.password.is_empty())
+                    .filter_map(|cred| {
+                        let cred_domain = cred.domain.to_lowercase();
+                        let key = format!(
+                            "stall_lhf:{}:{}:{}",
+                            cred_domain,
+                            cred.username.to_lowercase(),
+                            recovery_attempts
+                        );
+                        if state.is_processed(DEDUP_EXPANSION_CREDS, &key) {
+                            return None;
+                        }
+                        let dc_ip = state
+                            .domain_controllers
+                            .get(&cred_domain)
+                            .cloned()
+                            .or_else(|| {
+                                let suffix = format!(".{cred_domain}");
+                                state
+                                    .domain_controllers
+                                    .iter()
+                                    .find(|(d, _)| d.ends_with(&suffix))
+                                    .map(|(_, ip)| ip.clone())
+                            })?;
+                        Some((key, dc_ip, cred_domain, cred.clone()))
+                    })
+                    .take(2)
+                    .collect()
             };
 
-            if let Some((key, dc_ip, cred)) = ldap_work {
-                let payload = json!({
-                    "technique": "ldap_search_descriptions",
-                    "target_ip": dc_ip,
-                    "domain": cred.domain,
-                    "credential": {
-                        "username": cred.username,
-                        "password": cred.password,
-                        "domain": cred.domain,
-                    },
-                });
-
+            for (key, dc_ip, domain, cred) in lhf_work {
                 match dispatcher
-                    .throttled_submit("credential_access", "credential_access", payload, 6)
+                    .request_low_hanging_fruit(&dc_ip, &domain, &cred, 6)
                     .await
                 {
                     Ok(Some(task_id)) => {
-                        info!(task_id = %task_id, "Stall recovery: LDAP description search dispatched");
+                        info!(task_id = %task_id, domain = %domain, "Stall recovery: low-hanging fruit dispatched");
                         dispatcher
                             .state
                             .write()
@@ -199,7 +217,7 @@ pub async fn auto_stall_detection(
                             .await;
                     }
                     Ok(None) => {}
-                    Err(e) => warn!(err = %e, "Stall recovery: LDAP search failed"),
+                    Err(e) => warn!(err = %e, "Stall recovery: low-hanging fruit failed"),
                 }
             }
         }

@@ -62,7 +62,9 @@ pub async fn process_completed_task(
         if err_msg.to_lowercase().contains("rate limit") || err_msg.to_lowercase().contains("429") {
             throttler.record_rate_limit_error().await;
         }
-        return; // Don't extract discoveries from failed tasks
+        // Don't return early — failed tasks (MaxSteps, Error) may still carry
+        // parser-extracted discoveries from tool calls that ran before failure.
+        // All discoveries now come from regex parsers, not LLM hallucination.
     }
 
     // Extract discoveries from the result payload
@@ -90,6 +92,12 @@ pub async fn process_completed_task(
     if let Some(ref payload) = result.result {
         let default_domain = get_default_domain(dispatcher).await;
         extract_from_raw_text(payload, dispatcher, &default_domain).await;
+    }
+
+    // Domain SID extraction: scan raw text for S-1-5-21-... patterns (from secretsdump).
+    // Caches the SID for golden ticket generation without needing lookupsid.
+    if let Some(ref payload) = result.result {
+        extract_and_cache_domain_sid(payload, dispatcher).await;
     }
 
     // S4U auto-chain: detect .ccache in output and dispatch secretsdump with ticket.
@@ -121,9 +129,9 @@ async fn get_default_domain(dispatcher: &Arc<Dispatcher>) -> String {
 /// that ticket. This chains S4U/delegation → secretsdump without waiting for the
 /// next automation cycle.
 async fn auto_chain_s4u_secretsdump(payload: &Value, dispatcher: &Arc<Dispatcher>, task_id: &str) {
-    // Collect all text fields to search for .ccache references
+    // Collect ONLY raw tool output fields — never LLM-generated summaries.
     let mut text_parts: Vec<&str> = Vec::new();
-    for key in &["summary", "output", "result", "tool_output"] {
+    for key in &["tool_output", "output"] {
         if let Some(s) = payload.get(*key).and_then(|v| v.as_str()) {
             text_parts.push(s);
         }
@@ -244,7 +252,7 @@ async fn auto_chain_s4u_secretsdump(payload: &Value, dispatcher: &Arc<Dispatcher
 
 /// Extract discoveries from raw text fields in the result payload.
 ///
-/// Collects text from "summary", "output", "result", and "tool_outputs" fields
+/// Collects text from raw tool output fields ("tool_output", "output", "tool_outputs")
 /// and runs regex-based extraction on the combined text. This mirrors Python's
 /// `_process_output_text()` — a safety net that catches discoveries the per-tool
 /// parsers or LLM-reported structured data may have missed.
@@ -253,16 +261,16 @@ async fn extract_from_raw_text(
     dispatcher: &Arc<Dispatcher>,
     default_domain: &str,
 ) {
-    // Collect all text fields from the result payload
+    // Only parse tool_outputs — actual tool stdout collected by the agent loop.
+    // The result payload's "summary", "result", and "output" fields are all
+    // LLM-generated prose and MUST NOT be fed into regex extractors (they produce
+    // false positives like "Password : only" from conversational text).
+    //
+    // Structured discoveries from tool-call parsers are already handled by
+    // extract_discoveries() via the "discoveries" key — this pass is a secondary
+    // safety net for raw tool stdout that parsers may have missed.
     let mut text_parts: Vec<&str> = Vec::new();
 
-    for key in &["summary", "output", "result", "tool_output"] {
-        if let Some(s) = payload.get(*key).and_then(|v| v.as_str()) {
-            text_parts.push(s);
-        }
-    }
-
-    // Also check array-valued tool_outputs
     if let Some(arr) = payload.get("tool_outputs").and_then(|v| v.as_array()) {
         for item in arr {
             if let Some(s) = item.as_str() {
@@ -277,8 +285,19 @@ async fn extract_from_raw_text(
         return;
     }
 
-    let combined = text_parts.join("\n");
-    let extracted = output_extraction::extract_from_output_text(&combined, default_domain);
+    // Process each tool output independently to prevent stateful parsers
+    // (e.g. extract_plaintext_passwords's current_user tracker) from leaking
+    // context across unrelated tool calls — a joined string caused false
+    // credential attribution (e.g. jon.snow:Heartsbane from stale context).
+    let mut extracted = output_extraction::TextExtractions::default();
+    for part in &text_parts {
+        let partial = output_extraction::extract_from_output_text(part, default_domain);
+        extracted.credentials.extend(partial.credentials);
+        extracted.hashes.extend(partial.hashes);
+        extracted.hosts.extend(partial.hosts);
+        extracted.users.extend(partial.users);
+        extracted.shares.extend(partial.shares);
+    }
 
     if extracted.is_empty() {
         return;
@@ -287,12 +306,31 @@ async fn extract_from_raw_text(
     let mut new_count = 0usize;
 
     for cred in extracted.credentials {
+        let is_cracked = cred.source.starts_with("cracked:");
+        let cracked_username = cred.username.clone();
+        let cracked_domain = cred.domain.clone();
+        let cracked_password = cred.password.clone();
         match dispatcher
             .state
             .publish_credential(&dispatcher.queue, cred)
             .await
         {
-            Ok(true) => new_count += 1,
+            Ok(true) => {
+                new_count += 1;
+                // When a cracked credential is published, update the corresponding
+                // hash's cracked_password field in state and Redis.
+                if is_cracked {
+                    let _ = dispatcher
+                        .state
+                        .update_hash_cracked_password(
+                            &dispatcher.queue,
+                            &cracked_username,
+                            &cracked_domain,
+                            &cracked_password,
+                        )
+                        .await;
+                }
+            }
             Ok(false) => {} // duplicate
             Err(e) => warn!(err = %e, "Failed to publish text-extracted credential"),
         }
@@ -310,13 +348,11 @@ async fn extract_from_raw_text(
         let _ = dispatcher.state.publish_host(&dispatcher.queue, host).await;
     }
 
-    for user in extracted.users {
-        match dispatcher.state.publish_user(&dispatcher.queue, user).await {
-            Ok(true) => new_count += 1,
-            Ok(false) => {}
-            Err(e) => warn!(err = %e, "Failed to publish text-extracted user"),
-        }
-    }
+    // Users intentionally NOT published from raw text extraction.
+    // The DOMAIN\user regex matches every wordlist entry in kerbrute/ASREProast
+    // output (e.g. "[-] User sql_svc doesn't have UF_DONT_REQUIRE_PREAUTH set").
+    // Only per-tool parsers (kerberos_enum, netexec_user_enum) produce verified
+    // users gated by KDC response patterns.
 
     for share in extracted.shares {
         match dispatcher
@@ -330,11 +366,202 @@ async fn extract_from_raw_text(
         }
     }
 
+    // Pwn3d! detection: scan raw text for admin indicators and upgrade credentials.
+    // netexec output like "[+] DOMAIN\user:password (Pwn3d!)" means the credential
+    // has local admin rights. Mark existing credentials as is_admin and trigger
+    // immediate high-priority secretsdump.
+    // Check each tool output independently (joining is safe here — Pwn3d! is a
+    // standalone marker with no stateful context to leak).
+    for part in &text_parts {
+        if part.contains("Pwn3d!") {
+            detect_and_upgrade_admin_credentials(part, dispatcher).await;
+        }
+    }
+
     if new_count > 0 {
         info!(
             count = new_count,
             "Published new discoveries from raw text extraction"
         );
+    }
+}
+
+/// Detect Pwn3d! in raw output and upgrade matching credentials to is_admin=true.
+/// Triggers immediate high-priority secretsdump against all DCs for admin credentials.
+async fn detect_and_upgrade_admin_credentials(text: &str, dispatcher: &Arc<Dispatcher>) {
+    // Pattern: [+] DOMAIN\user:password (Pwn3d!) or DOMAIN\user (Pwn3d!)
+    for line in text.lines() {
+        if !line.contains("Pwn3d!") || !line.contains("[+]") {
+            continue;
+        }
+
+        // Extract domain\user from the line
+        if let Some(after_plus) = line.split("[+]").nth(1) {
+            let after_plus = after_plus.trim();
+            if let Some(backslash) = after_plus.find('\\') {
+                let domain_part = after_plus[..backslash].trim();
+                let rest = &after_plus[backslash + 1..];
+                let username = if let Some(colon) = rest.find(':') {
+                    &rest[..colon]
+                } else {
+                    rest.split_whitespace().next().unwrap_or("")
+                };
+                let username = username.trim();
+                let domain = domain_part.to_lowercase();
+
+                if username.is_empty() || domain.is_empty() {
+                    continue;
+                }
+
+                info!(
+                    username = %username,
+                    domain = %domain,
+                    "Pwn3d! detected — upgrading credential to admin"
+                );
+
+                // Upgrade the credential in state
+                let upgraded = {
+                    let mut state = dispatcher.state.write().await;
+                    let mut found = false;
+                    for cred in state.credentials.iter_mut() {
+                        if cred.username.to_lowercase() == username.to_lowercase()
+                            && cred.domain.to_lowercase() == domain
+                            && !cred.is_admin
+                        {
+                            cred.is_admin = true;
+                            found = true;
+                        }
+                    }
+                    found
+                };
+
+                if upgraded {
+                    info!(
+                        username = %username,
+                        domain = %domain,
+                        "Credential upgraded to admin — dispatching priority secretsdump"
+                    );
+
+                    // Dispatch immediate secretsdump against all DCs
+                    let work: Vec<(String, ares_core::models::Credential)> = {
+                        let state = dispatcher.state.read().await;
+                        state
+                            .credentials
+                            .iter()
+                            .filter(|c| {
+                                c.username.to_lowercase() == username.to_lowercase()
+                                    && c.domain.to_lowercase() == domain
+                                    && c.is_admin
+                            })
+                            .flat_map(|cred| {
+                                state
+                                    .domain_controllers
+                                    .values()
+                                    .map(|dc_ip| (dc_ip.clone(), cred.clone()))
+                                    .collect::<Vec<_>>()
+                            })
+                            .collect()
+                    };
+
+                    for (dc_ip, cred) in work {
+                        match dispatcher.request_secretsdump(&dc_ip, &cred, 1).await {
+                            Ok(Some(task_id)) => {
+                                info!(
+                                    task_id = %task_id,
+                                    target = %dc_ip,
+                                    username = %username,
+                                    "Admin Pwn3d! secretsdump dispatched (priority 1)"
+                                );
+                            }
+                            Ok(None) => {}
+                            Err(e) => warn!(err = %e, "Failed to dispatch Pwn3d! secretsdump"),
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Extract domain SID from raw text (secretsdump output) and cache it.
+///
+/// Secretsdump prints `[*] Domain SID is: S-1-5-21-...` early in its output.
+/// Caching this allows golden ticket generation without needing lookupsid
+/// (which often fails with STATUS_NETLOGON_NOT_STARTED in lab environments).
+async fn extract_and_cache_domain_sid(payload: &Value, dispatcher: &Arc<Dispatcher>) {
+    // Collect ONLY raw tool output fields — never LLM-generated summaries.
+    let mut text_parts: Vec<&str> = Vec::new();
+    for key in &["tool_output", "output"] {
+        if let Some(s) = payload.get(*key).and_then(|v| v.as_str()) {
+            text_parts.push(s);
+        }
+    }
+    if let Some(arr) = payload.get("tool_outputs").and_then(|v| v.as_array()) {
+        for item in arr {
+            if let Some(s) = item.as_str() {
+                text_parts.push(s);
+            } else if let Some(s) = item.get("output").and_then(|v| v.as_str()) {
+                text_parts.push(s);
+            }
+        }
+    }
+
+    if text_parts.is_empty() {
+        return;
+    }
+
+    let combined = text_parts.join("\n");
+    if let Some(sid) = ares_core::parsing::extract_domain_sid(&combined) {
+        // Determine which domain this SID belongs to.
+        // Use the domain from the payload or fall back to the first known domain.
+        let domain = payload
+            .get("domain")
+            .and_then(|v| v.as_str())
+            .map(|d| d.to_lowercase())
+            .filter(|d| !d.is_empty());
+
+        let domain = match domain {
+            Some(d) => d,
+            None => {
+                let state = dispatcher.state.read().await;
+                match state.domains.first() {
+                    Some(d) => d.to_lowercase(),
+                    None => return,
+                }
+            }
+        };
+
+        // Check if we already have this SID cached
+        let already_cached = {
+            let state = dispatcher.state.read().await;
+            state
+                .domain_sids
+                .get(&domain)
+                .map(|s| s == &sid)
+                .unwrap_or(false)
+        };
+
+        if !already_cached {
+            // Write to Redis
+            let op_id = {
+                let state = dispatcher.state.read().await;
+                state.operation_id.clone()
+            };
+            let reader = ares_core::state::RedisStateReader::new(op_id);
+            let mut conn = dispatcher.queue.connection();
+            if let Err(e) = reader.set_domain_sid(&mut conn, &domain, &sid).await {
+                warn!(err = %e, domain = %domain, "Failed to persist domain SID to Redis");
+            } else {
+                info!(domain = %domain, sid = %sid, "Domain SID cached from secretsdump output");
+                // Update in-memory state
+                dispatcher
+                    .state
+                    .write()
+                    .await
+                    .domain_sids
+                    .insert(domain, sid);
+            }
+        }
     }
 }
 
@@ -347,7 +574,9 @@ async fn extract_discoveries(payload: &Value, dispatcher: &Arc<Dispatcher>) -> R
         let source = cred.source.clone();
         let username = cred.username.clone();
         let domain = cred.domain.clone();
+        let password = cred.password.clone();
         let is_admin = cred.is_admin;
+        let is_cracked = source.starts_with("cracked");
         match dispatcher
             .state
             .publish_credential(&dispatcher.queue, cred)
@@ -357,6 +586,19 @@ async fn extract_discoveries(payload: &Value, dispatcher: &Arc<Dispatcher>) -> R
                 debug!("Published new credential from result");
                 create_credential_timeline_event(dispatcher, &source, &username, &domain, is_admin)
                     .await;
+                // When a cracked credential is published, update the corresponding
+                // hash's cracked_password field in state and Redis.
+                if is_cracked {
+                    let _ = dispatcher
+                        .state
+                        .update_hash_cracked_password(
+                            &dispatcher.queue,
+                            &username,
+                            &domain,
+                            &password,
+                        )
+                        .await;
+                }
             }
             Ok(false) => {} // duplicate
             Err(e) => warn!(err = %e, "Failed to publish credential"),
@@ -416,6 +658,25 @@ async fn extract_discoveries(payload: &Value, dispatcher: &Arc<Dispatcher>) -> R
             Ok(true) => debug!("Published new share from result"),
             Ok(false) => {}
             Err(e) => warn!(err = %e, "Failed to publish share"),
+        }
+    }
+
+    // Extract trusted_domains from parser output
+    if let Some(trusts) = payload.get("trusted_domains").and_then(|v| v.as_array()) {
+        for trust_val in trusts {
+            if let Ok(trust) =
+                serde_json::from_value::<ares_core::models::TrustInfo>(trust_val.clone())
+            {
+                match dispatcher
+                    .state
+                    .publish_trust_info(&dispatcher.queue, trust)
+                    .await
+                {
+                    Ok(true) => info!("Published new trust relationship from result"),
+                    Ok(false) => {}
+                    Err(e) => warn!(err = %e, "Failed to publish trust info"),
+                }
+            }
         }
     }
 
@@ -619,11 +880,20 @@ pub(crate) fn parse_discoveries(payload: &Value) -> ParsedDiscoveries {
         }
     }
 
-    // Users
+    // Users — defense-in-depth: only accept entries with a parser-verified source.
+    // The primary gate is in submission.rs (strips LLM-provided discovered_users
+    // before merge), but this filter catches any remaining path where an LLM
+    // could inject a user with a spoofed source tag.
+    // output_extraction is intentionally excluded — its DOMAIN\user regex
+    // matches every wordlist entry in kerbrute/ASREProast output, not just
+    // KDC-confirmed users.
+    const TRUSTED_USER_SOURCES: &[&str] = &["kerberos_enum", "netexec_user_enum"];
     if let Some(users) = payload.get("discovered_users").and_then(|v| v.as_array()) {
         for user_val in users {
             if let Ok(user) = serde_json::from_value::<User>(user_val.clone()) {
-                result.users.push(user);
+                if TRUSTED_USER_SOURCES.contains(&user.source.as_str()) {
+                    result.users.push(user);
+                }
             }
         }
     }
@@ -819,7 +1089,10 @@ async fn poll_discoveries(dispatcher: &Dispatcher) -> Result<()> {
             }
             "user" => {
                 if let Ok(user) = serde_json::from_value::<User>(data.clone()) {
-                    let _ = dispatcher.state.publish_user(&dispatcher.queue, user).await;
+                    // Only publish users with a parser-verified source
+                    if ["kerberos_enum", "netexec_user_enum"].contains(&user.source.as_str()) {
+                        let _ = dispatcher.state.publish_user(&dispatcher.queue, user).await;
+                    }
                 }
             }
             other => {
@@ -958,21 +1231,42 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_users() {
+    fn test_parse_users_with_trusted_source() {
         let payload = json!({
             "discovered_users": [
                 {
                     "username": "jdoe",
                     "domain": "contoso.local",
-                    "groups": ["Domain Users"],
+                    "source": "kerberos_enum",
                     "is_admin": false,
-                    "is_enabled": true
                 }
             ]
         });
         let parsed = parse_discoveries(&payload);
         assert_eq!(parsed.users.len(), 1);
         assert_eq!(parsed.users[0].username, "jdoe");
+    }
+
+    #[test]
+    fn test_parse_users_rejects_untrusted_source() {
+        // LLM-fabricated users (no source or unknown source) must be rejected
+        let payload = json!({
+            "discovered_users": [
+                {
+                    "username": "fake_admin",
+                    "domain": "contoso.local",
+                    "is_admin": false,
+                },
+                {
+                    "username": "also_fake",
+                    "domain": "contoso.local",
+                    "source": "llm_hallucination",
+                    "is_admin": false,
+                }
+            ]
+        });
+        let parsed = parse_discoveries(&payload);
+        assert_eq!(parsed.users.len(), 0);
     }
 
     #[test]

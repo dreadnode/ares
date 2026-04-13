@@ -532,174 +532,44 @@ impl OrchestratorCallbackHandler {
     // Recording tools — persist weaknesses & timeline events to state/Redis
     // -----------------------------------------------------------------------
 
-    async fn record_credential(&self, call: &ToolCall) -> Result<CallbackResult> {
-        let username = call.arguments["username"]
-            .as_str()
-            .unwrap_or("")
-            .to_string();
-        let password = call.arguments["password"]
-            .as_str()
-            .unwrap_or("")
-            .to_string();
-        let domain = call.arguments["domain"].as_str().unwrap_or("").to_string();
-        let source = call.arguments["source"].as_str().unwrap_or("").to_string();
-
-        if username.is_empty() {
-            return Ok(CallbackResult::Continue("Username is required".to_string()));
-        }
-
-        let task_queue = self
-            .task_queue
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("TaskQueue not configured"))?;
-
-        let credential = ares_core::models::Credential {
-            id: uuid::Uuid::new_v4().to_string(),
-            username: username.clone(),
-            password: password.clone(),
-            domain: domain.clone(),
-            source: source.clone(),
-            discovered_at: Some(chrono::Utc::now()),
-            is_admin: false,
-            parent_id: None,
-            attack_step: 0,
-        };
-
-        match self.state.publish_credential(task_queue, credential).await {
-            Ok(true) => {
-                info!(username = %username, domain = %domain, source = %source, "Credential persisted via callback");
-                Ok(CallbackResult::Continue(format!(
-                    "Credential recorded and persisted: {username}@{domain} (source: {source})"
-                )))
-            }
-            Ok(false) => Ok(CallbackResult::Continue(format!(
-                "Credential already known: {username}@{domain}"
-            ))),
-            Err(e) => {
-                warn!(err = %e, "Failed to persist credential");
-                Ok(CallbackResult::Continue(format!(
-                    "Credential recorded (persist failed: {e}): {username}@{domain}"
-                )))
-            }
-        }
+    /// record_credential is disabled — credentials come only from tool output parsing.
+    /// This handler exists as a safety net in case the LLM somehow invokes it.
+    async fn record_credential(&self, _call: &ToolCall) -> Result<CallbackResult> {
+        warn!("record_credential called but disabled — credentials are auto-extracted from tool output");
+        Ok(CallbackResult::Continue(
+            "This tool is disabled. Credentials are automatically extracted from tool output. \
+             Focus on running tools that produce credential data (secretsdump, lsassy, netexec, etc.) \
+             and the system will parse and store credentials automatically."
+                .to_string(),
+        ))
     }
 
-    async fn record_weakness(&self, call: &ToolCall) -> Result<CallbackResult> {
-        let title = call.arguments["title"].as_str().unwrap_or("").to_string();
-        let vulnerability = call.arguments["vulnerability"]
-            .as_str()
-            .unwrap_or("")
-            .to_string();
-        let affected = call.arguments["affected_resource"]
-            .as_str()
-            .unwrap_or("")
-            .to_string();
-        let impact = call.arguments["impact"].as_str().unwrap_or("").to_string();
-        let recommendation = call.arguments["recommendation"]
-            .as_str()
-            .unwrap_or("")
-            .to_string();
-
-        if title.is_empty() {
-            return Ok(CallbackResult::Continue(
-                "Weakness title is required".to_string(),
-            ));
-        }
-
-        let task_queue = self
-            .task_queue
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("TaskQueue not configured"))?;
-
-        // Build weakness block matching Python format for parse_weakness_block_display()
-        let mut block = format!("Title: {title}");
-        if !vulnerability.is_empty() {
-            block.push_str(&format!("\nVulnerability: {vulnerability}"));
-        }
-        if !affected.is_empty() {
-            block.push_str(&format!("\nAffected Resource: {affected}"));
-        }
-        if !impact.is_empty() {
-            block.push_str(&format!("\nImpact: {impact}"));
-        }
-        if !recommendation.is_empty() {
-            block.push_str(&format!("\nRecommendation: {recommendation}"));
-        }
-
-        let dedup_key = title.to_lowercase();
-        match self
-            .state
-            .publish_weakness(task_queue, block, dedup_key)
-            .await
-        {
-            Ok(true) => {
-                info!(title = %title, affected = %affected, "Weakness recorded and persisted");
-                Ok(CallbackResult::Continue(format!(
-                    "Weakness recorded: {title} ({affected})"
-                )))
-            }
-            Ok(false) => Ok(CallbackResult::Continue(format!(
-                "Weakness already recorded: {title}"
-            ))),
-            Err(e) => {
-                warn!(err = %e, "Failed to persist weakness");
-                Ok(CallbackResult::Continue(format!(
-                    "Weakness recorded (persist failed): {title}"
-                )))
-            }
-        }
+    /// record_weakness is disabled — weaknesses are extracted from parsed tool output
+    /// (nmap scripts, netexec banners, etc.) via output_extraction.rs.
+    /// This handler exists as a safety net in case the LLM somehow invokes it.
+    async fn record_weakness(&self, _call: &ToolCall) -> Result<CallbackResult> {
+        warn!(
+            "record_weakness called but disabled — weaknesses are auto-extracted from tool output"
+        );
+        Ok(CallbackResult::Continue(
+            "This tool is disabled. Weaknesses are automatically extracted from tool output. \
+             Focus on running tools that reveal vulnerabilities (nmap scripts, netexec, \
+             BloodHound queries, etc.) and the system will parse and store findings automatically."
+                .to_string(),
+        ))
     }
 
-    async fn record_timeline_event(&self, call: &ToolCall) -> Result<CallbackResult> {
-        let description = call.arguments["description"]
-            .as_str()
-            .unwrap_or("")
-            .to_string();
-        let source = call.arguments["source"]
-            .as_str()
-            .unwrap_or("agent")
-            .to_string();
-        let mitre_techniques: Vec<String> = call.arguments["mitre_techniques"]
-            .as_array()
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|v| v.as_str().map(String::from))
-                    .collect()
-            })
-            .unwrap_or_default();
-
-        if description.is_empty() {
-            return Ok(CallbackResult::Continue(
-                "Event description is required".to_string(),
-            ));
-        }
-
-        let task_queue = self
-            .task_queue
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("TaskQueue not configured"))?;
-
-        let event_id = format!("evt-{}", &uuid::Uuid::new_v4().simple().to_string()[..8]);
-        let event = json!({
-            "id": event_id,
-            "timestamp": chrono::Utc::now().to_rfc3339(),
-            "source": source,
-            "description": description,
-            "mitre_techniques": mitre_techniques,
-        });
-
-        if let Err(e) = self
-            .state
-            .persist_timeline_event(task_queue, &event, &mitre_techniques)
-            .await
-        {
-            warn!(err = %e, "Failed to persist timeline event");
-        }
-
-        info!(description = %description, "Timeline event recorded and persisted");
-        Ok(CallbackResult::Continue(format!(
-            "Timeline event recorded: {description}"
-        )))
+    /// record_timeline_event is disabled — timeline events are auto-generated from
+    /// state changes (credential/hash/host discoveries) in result_processing.rs.
+    /// This handler exists as a safety net in case the LLM somehow invokes it.
+    async fn record_timeline_event(&self, _call: &ToolCall) -> Result<CallbackResult> {
+        warn!("record_timeline_event called but disabled — timeline events are auto-generated from discoveries");
+        Ok(CallbackResult::Continue(
+            "This tool is disabled. Timeline events are automatically generated when \
+             credentials, hashes, and hosts are discovered from tool output. Focus on \
+             running attack tools and the system will build the timeline automatically."
+                .to_string(),
+        ))
     }
 
     async fn dispatch_crack(&self, call: &ToolCall) -> Result<CallbackResult> {
@@ -735,6 +605,20 @@ impl OrchestratorCallbackHandler {
             task_id.as_deref().unwrap_or("queued")
         )))
     }
+
+    /// report_cracked_credential is disabled — cracked passwords are extracted from
+    /// hashcat/john stdout via output_extraction.rs parsers. LLMs must never construct
+    /// credential data directly.
+    /// This handler exists as a safety net in case the LLM somehow invokes it.
+    async fn report_cracked_credential(&self, _call: &ToolCall) -> Result<CallbackResult> {
+        warn!("report_cracked_credential called but disabled — cracked passwords are auto-extracted from tool output");
+        Ok(CallbackResult::Continue(
+            "This tool is disabled. Cracked passwords are automatically extracted from \
+             hashcat and john output. Run the cracking tools and the system will parse \
+             and store cracked credentials automatically."
+                .to_string(),
+        ))
+    }
 }
 
 #[async_trait::async_trait]
@@ -761,6 +645,8 @@ impl CallbackHandler for OrchestratorCallbackHandler {
             "dispatch_privesc_exploit" => Some(self.dispatch_exploit(call).await),
             "dispatch_coercion" => Some(self.dispatch_coercion(call).await),
             "dispatch_crack" => Some(self.dispatch_crack(call).await),
+            // Cracker result — persist cracked credential and update hash
+            "report_cracked_credential" => Some(self.report_cracked_credential(call).await),
             // Not ours — let built-in handler take over
             _ => None,
         }
@@ -1273,8 +1159,6 @@ mod tests {
             "get_hash_value",
             "get_pending_tasks",
             "get_operation_summary",
-            "record_weakness",
-            "record_timeline_event",
             "dispatch_recon",
             "dispatch_credential_access",
             "dispatch_lateral_movement",

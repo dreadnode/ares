@@ -48,6 +48,12 @@ pub fn extract_from_output_text(output: &str, default_domain: &str) -> TextExtra
     result.credentials = extract_plaintext_passwords(output, default_domain);
     result.shares = extract_shares(output);
     result.hashes = extract_hashes(output, default_domain);
+
+    // Cracked password extraction — parses hashcat/john stdout for cracked hashes.
+    // Returns credentials with source "cracked:hashcat" or "cracked:john".
+    let cracked = extract_cracked_passwords(output, default_domain);
+    result.credentials.extend(cracked);
+
     result
 }
 
@@ -184,6 +190,63 @@ static RE_SMB_TIMESTAMP: Lazy<Regex> = Lazy::new(|| {
     Regex::new(r"SMB\s+\S+\s+\d+\s+\S+\s+([A-Za-z0-9_.\-]+)\s+\d{4}-\d{2}-\d{2}").unwrap()
 });
 
+/// Reject garbage usernames and invalid domains from regex extraction.
+fn is_valid_extracted_user(username: &str, domain: &str) -> bool {
+    // Empty or machine accounts
+    if username.is_empty() || username.ends_with('$') {
+        return false;
+    }
+    // Control characters (e.g. \x05 from DNS encoding)
+    if username.bytes().any(|b| b < 0x20) || domain.bytes().any(|b| b < 0x20) {
+        return false;
+    }
+    // Too short
+    if username.len() <= 1 {
+        return false;
+    }
+    // Noise usernames
+    let lower = username.to_lowercase();
+    const NOISE: &[&str] = &[
+        "anonymous",
+        "none",
+        "null",
+        "unknown",
+        "n/a",
+        "default",
+        "test",
+        "local",
+        "localhost",
+        "domain",
+        "workgroup",
+    ];
+    if NOISE.contains(&lower.as_str()) {
+        return false;
+    }
+    // DNS service prefixes — _udp, _tcp, _msdcs, _sites, _kerberos, etc.
+    if username.starts_with('_') || domain.starts_with('_') {
+        return false;
+    }
+    // Domain must contain a dot (FQDN) or be a plausible NetBIOS name (all-alpha, <= 15 chars).
+    // Reject bare words that are clearly not domains.
+    if !domain.contains('.') {
+        if domain.len() > 15 || domain.is_empty() {
+            return false;
+        }
+        // NetBIOS names are alphanumeric (no dots, no underscores at start)
+        if !domain
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+        {
+            return false;
+        }
+    }
+    // Username must be ASCII printable (AD usernames don't have weird chars)
+    if !username.bytes().all(|b| b.is_ascii_graphic()) {
+        return false;
+    }
+    true
+}
+
 fn extract_users(output: &str, default_domain: &str) -> Vec<User> {
     let mut users = Vec::new();
     let mut seen = std::collections::HashSet::new();
@@ -194,7 +257,12 @@ fn extract_users(output: &str, default_domain: &str) -> Vec<User> {
 
         // Update current domain from (domain:XXX) context
         if let Some(caps) = RE_DOMAIN_CONTEXT.captures(stripped) {
-            current_domain = caps.get(1).unwrap().as_str().to_string();
+            current_domain = caps
+                .get(1)
+                .unwrap()
+                .as_str()
+                .trim_end_matches('.')
+                .to_string();
         }
 
         let mut found = Vec::new();
@@ -237,11 +305,10 @@ fn extract_users(output: &str, default_domain: &str) -> Vec<User> {
             found.push((user.to_string(), current_domain.clone()));
         }
 
-        for (username, domain) in found {
-            if username.is_empty() || username.ends_with('$') {
-                continue;
-            }
-            if username.eq_ignore_ascii_case("anonymous") {
+        for (raw_username, raw_domain) in found {
+            let username = raw_username.trim().trim_end_matches('.').to_string();
+            let domain = raw_domain.trim().trim_end_matches('.').to_string();
+            if !is_valid_extracted_user(&username, &domain) {
                 continue;
             }
             let key = format!("{}@{}", username.to_lowercase(), domain.to_lowercase());
@@ -277,10 +344,73 @@ static RE_SMB_TIMESTAMP_PASSWORD: Lazy<Regex> = Lazy::new(|| {
     .unwrap()
 });
 
+/// General nxc SMB line with a username field followed eventually by "Password":
+/// `SMB  IP  PORT  HOST  username  ... Password : xxx`
+/// Broader than RE_SMB_TIMESTAMP_PASSWORD — doesn't require a timestamp.
+static RE_SMB_LINE_PASSWORD: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"SMB\s+\S+\s+\d+\s+\S+\s+([A-Za-z0-9_.\-]+)\s+.*(?i)Password\s*:\s*").unwrap()
+});
+
+/// Netexec [+] success line: `SMB IP PORT HOST [+] DOMAIN\user:password`
+static RE_NETEXEC_SUCCESS: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"\[\+\]\s+([A-Za-z0-9_.\-]+)\\([A-Za-z0-9_.\-$]+):([^\s(]+)").unwrap()
+});
+
 fn extract_plaintext_passwords(output: &str, default_domain: &str) -> Vec<Credential> {
     let mut credentials = Vec::new();
     let mut seen = std::collections::HashSet::new();
-    let mut current_user = String::new();
+
+    // Failure markers — netexec sometimes prints [+] for lines that are NOT successful
+    // authentication (e.g. STATUS_ACCOUNT_LOCKED_OUT). Filter these out to match Python
+    // behavior in _parse_netexec_credentials.
+    const FAILURE_MARKERS: &[&str] = &[
+        "STATUS_LOGON_FAILURE",
+        "STATUS_PASSWORD_EXPIRED",
+        "STATUS_PASSWORD_MUST_CHANGE",
+        "STATUS_ACCOUNT_LOCKED_OUT",
+        "STATUS_ACCOUNT_DISABLED",
+        "STATUS_ACCOUNT_RESTRICTION",
+        "STATUS_NO_LOGON_SERVERS",
+        "STATUS_ACCESS_DENIED",
+        "STATUS_INVALID_LOGON_HOURS",
+        "STATUS_INVALID_WORKSTATION",
+        "LOGON FAILURE",
+        "LOGON_FAILURE",
+        "ACCESS_DENIED",
+        // Guest fallback — SMB accepted the connection but mapped it to the
+        // built-in Guest account.  The supplied password was NOT validated.
+        "(GUEST)",
+    ];
+
+    // First pass: netexec [+] success lines (e.g. password spray, username_as_password)
+    for line in output.lines() {
+        let stripped = line.trim();
+        if !stripped.contains("[+]") {
+            continue;
+        }
+        // Skip lines containing failure status codes
+        let upper = stripped.to_uppercase();
+        if FAILURE_MARKERS.iter().any(|m| upper.contains(m)) {
+            continue;
+        }
+        if let Some(caps) = RE_NETEXEC_SUCCESS.captures(stripped) {
+            let domain = caps.get(1).unwrap().as_str().to_string();
+            let user = caps.get(2).unwrap().as_str().to_string();
+            let pass = caps
+                .get(3)
+                .unwrap()
+                .as_str()
+                .trim_end_matches("(Pwn3d!)")
+                .trim()
+                .to_string();
+            if is_valid_credential(&user, &pass) {
+                let key = format!("{}\\{}:{}", domain, user, pass);
+                if seen.insert(key) {
+                    credentials.push(make_credential(&user, &pass, &domain, "netexec_auth"));
+                }
+            }
+        }
+    }
     let mut current_domain = default_domain.to_string();
     let mut expecting_default_password = false;
 
@@ -315,19 +445,13 @@ fn extract_plaintext_passwords(output: &str, default_domain: &str) -> Vec<Creden
             }
         }
 
-        // Track current context
+        // Track current domain context (for dedup key and credential domain).
+        // Only domain is tracked — username tracking was removed to prevent
+        // stale-context misattribution (LDAP doesn't guarantee attribute order).
         if let Some(caps) = RE_DOMAIN_BACKSLASH.captures(stripped) {
             current_domain = caps.get(1).unwrap().as_str().to_string();
-            current_user = caps.get(2).unwrap().as_str().to_string();
         } else if let Some(caps) = RE_UPN.captures(stripped) {
-            current_user = caps.get(1).unwrap().as_str().to_string();
             current_domain = caps.get(2).unwrap().as_str().to_string();
-        } else if let Some(caps) = RE_USER_BRACKET.captures(stripped) {
-            current_user = caps.get(1).unwrap().as_str().to_string();
-        } else if let Some(caps) = RE_ACCOUNT.captures(stripped) {
-            current_user = caps.get(1).unwrap().as_str().to_string();
-        } else if let Some(caps) = RE_SAM.captures(stripped) {
-            current_user = caps.get(1).unwrap().as_str().to_string();
         }
 
         // Password extraction (only on lines containing "password")
@@ -341,17 +465,29 @@ fn extract_plaintext_passwords(output: &str, default_domain: &str) -> Vec<Creden
                 .unwrap()
                 .as_str()
                 .trim_end_matches(|c| ".,;:()".contains(c))
+                .trim_matches('\'')
+                .trim_matches('"')
                 .to_string();
 
-            // Try to find username from the same line
+            // Extract username from the SAME line only. Never fall back to
+            // current_user — LDAP doesn't guarantee attribute order, so
+            // description may appear before sAMAccountName within an entry,
+            // causing stale current_user from a previous entry to be
+            // misattributed (e.g. jon.snow:Heartsbane instead of
+            // samwell.tarly:Heartsbane). Per-tool parsers handle structured
+            // extraction; this safety net only catches same-line patterns.
             let username = if let Some(smb_caps) = RE_SMB_TIMESTAMP_PASSWORD.captures(stripped) {
+                smb_caps.get(1).unwrap().as_str().to_string()
+            } else if let Some(smb_caps) = RE_SMB_LINE_PASSWORD.captures(stripped) {
                 smb_caps.get(1).unwrap().as_str().to_string()
             } else if let Some(acct_caps) = RE_ACCOUNT.captures(stripped) {
                 acct_caps.get(1).unwrap().as_str().to_string()
             } else if let Some(bracket_caps) = RE_USER_BRACKET.captures(stripped) {
                 bracket_caps.get(1).unwrap().as_str().to_string()
             } else {
-                current_user.clone()
+                // No same-line username found — skip this password.
+                // The per-tool parser handles structured extraction.
+                continue;
             };
 
             if !username.is_empty() && is_valid_credential(&username, &password) {
@@ -400,8 +536,36 @@ pub(crate) fn is_valid_credential(username: &str, password: &str) -> bool {
     let pw_lower = password.to_lowercase();
     if matches!(
         pw_lower.as_str(),
-        "(null)" | "(null:null)" | "*blank*" | "<blank>" | "n/a" | "[+]" | "password"
+        "(null)"
+            | "(null:null)"
+            | "*blank*"
+            | "<blank>"
+            | "n/a"
+            | "[+]"
+            | "[-]"
+            | "password"
+            | "no"
+            | "yes"
+            | "true"
+            | "false"
+            | "unknown"
+            | "none"
+            | "null"
+            | "fail"
+            | "failed"
+            | "error"
+            | "status"
+            | "success"
+            | "enabled"
+            | "disabled"
+            | "required"
+            | "allowed"
+            | "denied"
     ) {
+        return false;
+    }
+    // Reject passwords that are too short to be real AD credentials
+    if password.len() < 3 {
         return false;
     }
     true
@@ -663,6 +827,116 @@ fn extract_hashes(output: &str, default_domain: &str) -> Vec<Hash> {
 }
 
 // ---------------------------------------------------------------------------
+// Cracked password extraction — hashcat & john stdout
+// ---------------------------------------------------------------------------
+
+/// Hashcat cracked TGS: $krb5tgs$23$*user$DOMAIN$spn*$hash:plaintext
+static RE_CRACKED_TGS: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"\$krb5tgs\$\d+\$\*([^$*]+)\$([^$*]+)\$[^*]+\*\$[a-fA-F0-9$]+:(.+)$").unwrap()
+});
+
+/// Hashcat cracked AS-REP: $krb5asrep$23$user@DOMAIN:hash:plaintext
+static RE_CRACKED_ASREP: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"\$krb5asrep\$\d+\$([^@:]+)@([^:]+):[a-fA-F0-9$]+:(.+)$").unwrap());
+
+/// John --show output: user:plaintext (with optional trailing :::... fields)
+/// Only matches lines that look like john --show format — username followed by
+/// password, then optional RID and empty LM/NT fields.
+static RE_JOHN_SHOW: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"^([^:\s$][^:]*):([^:]+):\d*:(?:[a-fA-F0-9]*:){0,3}:*\s*$").unwrap());
+
+fn extract_cracked_passwords(output: &str, default_domain: &str) -> Vec<Credential> {
+    let mut credentials = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+
+    // Detect john --show context (john outputs "N password hash cracked")
+    let is_john_output =
+        output.contains("password hash cracked") || output.contains("password hashes cracked");
+
+    for line in output.lines() {
+        let stripped = line.trim();
+        if stripped.is_empty() {
+            continue;
+        }
+
+        // Hashcat cracked TGS (Kerberoast)
+        if let Some(caps) = RE_CRACKED_TGS.captures(stripped) {
+            let username = caps.get(1).unwrap().as_str();
+            let domain = caps.get(2).unwrap().as_str();
+            let password = caps.get(3).unwrap().as_str();
+            if is_valid_credential(username, password) {
+                let key = format!(
+                    "cracked:{}@{}",
+                    username.to_lowercase(),
+                    domain.to_lowercase()
+                );
+                if seen.insert(key) {
+                    credentials.push(make_credential(
+                        username,
+                        password,
+                        domain,
+                        "cracked:hashcat",
+                    ));
+                }
+            }
+            continue;
+        }
+
+        // Hashcat cracked AS-REP
+        if let Some(caps) = RE_CRACKED_ASREP.captures(stripped) {
+            let username = caps.get(1).unwrap().as_str();
+            let domain = caps.get(2).unwrap().as_str();
+            let password = caps.get(3).unwrap().as_str();
+            if is_valid_credential(username, password) {
+                let key = format!(
+                    "cracked:{}@{}",
+                    username.to_lowercase(),
+                    domain.to_lowercase()
+                );
+                if seen.insert(key) {
+                    credentials.push(make_credential(
+                        username,
+                        password,
+                        domain,
+                        "cracked:hashcat",
+                    ));
+                }
+            }
+            continue;
+        }
+
+        // John --show output (only if we detected john context)
+        if is_john_output {
+            if let Some(caps) = RE_JOHN_SHOW.captures(stripped) {
+                let username = caps.get(1).unwrap().as_str();
+                let password = caps.get(2).unwrap().as_str();
+                // Skip john summary lines
+                if username.chars().all(|c| c.is_ascii_digit()) {
+                    continue;
+                }
+                if is_valid_credential(username, password) {
+                    let key = format!(
+                        "cracked:{}@{}",
+                        username.to_lowercase(),
+                        default_domain.to_lowercase()
+                    );
+                    if seen.insert(key) {
+                        credentials.push(make_credential(
+                            username,
+                            password,
+                            default_domain,
+                            "cracked:john",
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
+    credentials
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -885,6 +1159,93 @@ CONTOSO\\svc_backup:BackupPass123!";
         assert!(creds.is_empty());
     }
 
+    /// Regression: stale current_user must never be used for password attribution.
+    /// Previously, NORTH\jon.snow on an earlier line would set current_user, and a
+    /// later "Password: Heartsbane" (belonging to samwell.tarly) would be falsely
+    /// attributed to jon.snow.
+    ///
+    /// Fix: password lines without a same-line username are skipped entirely.
+    /// Per-tool parsers handle structured extraction (LDIF, nxc table format).
+    #[test]
+    fn test_stale_context_does_not_leak_across_passwords() {
+        // Simulate secretsdump output followed by LDAP description output
+        let output = "\
+NORTH\\jon.snow:1103:aad3b435b51404eeaad3b435b51404ee:abc123def456abc123def456abc123de:::\n\
+Password: Heartsbane";
+        let creds = extract_plaintext_passwords(output, "sevenkingdoms.local");
+        // The password line has no same-line username, so it must be skipped.
+        // Per-tool parsers handle the structured extraction correctly.
+        assert!(
+            creds.is_empty(),
+            "bare Password: line must not produce credentials"
+        );
+    }
+
+    /// Regression: LDAP attribute order is NOT guaranteed.
+    /// description may appear BEFORE sAMAccountName within an entry.
+    /// extract_plaintext_passwords must never misattribute passwords from
+    /// a previous entry's username context.
+    #[test]
+    fn test_ldif_attribute_order_no_misattribution() {
+        // ldapsearch output where description comes BEFORE sAMAccountName
+        // and jon.snow's entry appears before samwell.tarly's
+        let output = "\
+# jon.snow, Users, north.sevenkingdoms.local\n\
+dn: CN=Jon Snow,CN=Users,DC=north,DC=sevenkingdoms,DC=local\n\
+sAMAccountName: jon.snow\n\
+description: Jon Snow\n\
+userPrincipalName: jon.snow@north.sevenkingdoms.local\n\
+\n\
+# samwell.tarly, Users, north.sevenkingdoms.local\n\
+dn: CN=Samwell Tarly,CN=Users,DC=north,DC=sevenkingdoms,DC=local\n\
+description: Samwell Tarly (Password : Heartsbane)\n\
+sAMAccountName: samwell.tarly\n\
+userPrincipalName: samwell.tarly@north.sevenkingdoms.local";
+
+        let creds = extract_plaintext_passwords(output, "north.sevenkingdoms.local");
+        // The description line has no same-line username — must be skipped.
+        // jon.snow:Heartsbane must NEVER be produced.
+        assert!(
+            creds.is_empty(),
+            "LDIF description without same-line username must not produce credentials, got: {:?}",
+            creds
+        );
+    }
+
+    /// nxc SMB lines without timestamps should still extract via RE_SMB_LINE_PASSWORD.
+    #[test]
+    fn test_smb_line_without_timestamp() {
+        let output =
+            "SMB  192.168.58.10  445  DC01  svc_test  0  Service Account (Password : TestPass!)";
+        let creds = extract_plaintext_passwords(output, "contoso.local");
+        assert_eq!(creds.len(), 1);
+        assert_eq!(creds[0].username, "svc_test");
+        assert_eq!(creds[0].password, "TestPass!");
+    }
+
+    /// Ensure that two separate tool outputs processed independently don't
+    /// cross-contaminate username context.
+    #[test]
+    fn test_separate_outputs_no_cross_contamination() {
+        // Tool output 1: secretsdump mentions jon.snow
+        let output1 = "NORTH\\jon.snow:1103:aad3b435b51404eeaad3b435b51404ee:abc123:::\n";
+        // Tool output 2: LDAP description with password for samwell.tarly
+        let output2 =
+            "SMB  10.1.2.58  445  WINTERFELL  samwell.tarly  2026-04-13 Password: Heartsbane";
+
+        // Process separately (as the fix does)
+        let creds1 = extract_plaintext_passwords(output1, "sevenkingdoms.local");
+        let creds2 = extract_plaintext_passwords(output2, "sevenkingdoms.local");
+
+        // output1 should not produce a plaintext credential (it's a hash line)
+        assert!(creds1.is_empty());
+
+        // output2 should attribute Heartsbane to samwell.tarly, not jon.snow
+        assert_eq!(creds2.len(), 1);
+        assert_eq!(creds2[0].username, "samwell.tarly");
+        assert_eq!(creds2[0].password, "Heartsbane");
+    }
+
     // --- Share extraction ---
 
     #[test]
@@ -929,6 +1290,49 @@ CONTOSO\\krbtgt:502:aad3b435b51404eeaad3b435b51404ee:313b6f423a71d74c0a1b8a2f43b
         assert!(result.is_empty());
     }
 
+    #[test]
+    fn test_extract_netexec_success_credential() {
+        let output = "\
+SMB  10.1.2.150  445  WINTERFELL  [*] Windows 10 / Server 2019 Build 17763 x64 (name:WINTERFELL) (domain:north.sevenkingdoms.local) (signing:True)\n\
+SMB  10.1.2.150  445  WINTERFELL  [-] north.sevenkingdoms.local\\admin:admin STATUS_LOGON_FAILURE\n\
+SMB  10.1.2.150  445  WINTERFELL  [+] north.sevenkingdoms.local\\hodor:hodor";
+
+        let result = extract_from_output_text(output, "north.sevenkingdoms.local");
+        assert_eq!(result.credentials.len(), 1);
+        assert_eq!(result.credentials[0].username, "hodor");
+        assert_eq!(result.credentials[0].password, "hodor");
+        assert_eq!(result.credentials[0].domain, "north.sevenkingdoms.local");
+        assert_eq!(result.credentials[0].source, "netexec_auth");
+    }
+
+    #[test]
+    fn test_extract_netexec_success_with_pwned() {
+        let output =
+            "SMB  10.1.2.150  445  DC01  [+] contoso.local\\Administrator:P@ssw0rd(Pwn3d!)";
+
+        let result = extract_from_output_text(output, "contoso.local");
+        assert_eq!(result.credentials.len(), 1);
+        assert_eq!(result.credentials[0].username, "Administrator");
+        assert_eq!(result.credentials[0].password, "P@ssw0rd");
+    }
+
+    #[test]
+    fn test_extract_netexec_guest_filtered() {
+        let output = "\
+SMB  10.1.2.150  445  WINTERFELL  [+] north.sevenkingdoms.local\\admin:admin (Guest)\n\
+SMB  10.1.2.150  445  WINTERFELL  [+] north.sevenkingdoms.local\\hodor:hodor (Guest)\n\
+SMB  10.1.2.150  445  WINTERFELL  [+] north.sevenkingdoms.local\\realuser:realpass";
+
+        let result = extract_from_output_text(output, "north.sevenkingdoms.local");
+        assert_eq!(
+            result.credentials.len(),
+            1,
+            "Guest lines should be filtered out"
+        );
+        assert_eq!(result.credentials[0].username, "realuser");
+        assert_eq!(result.credentials[0].password, "realpass");
+    }
+
     // --- is_valid_credential tests ---
 
     #[test]
@@ -964,5 +1368,71 @@ CONTOSO\\krbtgt:502:aad3b435b51404eeaad3b435b51404ee:313b6f423a71d74c0a1b8a2f43b
         assert!(is_valid_credential("admin", "P@ss1"));
         assert!(is_valid_credential("hodor", "hodor"));
         assert!(is_valid_credential("svc_test", "svc_test"));
+    }
+
+    // --- Cracked password extraction ---
+
+    #[test]
+    fn test_extract_cracked_tgs_hashcat() {
+        let output =
+            "$krb5tgs$23$*svc_sql$CONTOSO.LOCAL$contoso.local/svc_sql*$abc123def456:Summer2024!";
+        let creds = extract_cracked_passwords(output, "contoso.local");
+        assert_eq!(creds.len(), 1);
+        assert_eq!(creds[0].username, "svc_sql");
+        assert_eq!(creds[0].domain, "CONTOSO.LOCAL");
+        assert_eq!(creds[0].password, "Summer2024!");
+        assert_eq!(creds[0].source, "cracked:hashcat");
+    }
+
+    #[test]
+    fn test_extract_cracked_asrep_hashcat() {
+        let output = "$krb5asrep$23$jdoe@CONTOSO.LOCAL:abc123def456:Winter2024!";
+        let creds = extract_cracked_passwords(output, "contoso.local");
+        assert_eq!(creds.len(), 1);
+        assert_eq!(creds[0].username, "jdoe");
+        assert_eq!(creds[0].domain, "CONTOSO.LOCAL");
+        assert_eq!(creds[0].password, "Winter2024!");
+        assert_eq!(creds[0].source, "cracked:hashcat");
+    }
+
+    #[test]
+    fn test_extract_cracked_john_show() {
+        let output = "svc_sql:Summer2024!::::::::\n1 password hash cracked, 0 left";
+        let creds = extract_cracked_passwords(output, "contoso.local");
+        assert_eq!(creds.len(), 1);
+        assert_eq!(creds[0].username, "svc_sql");
+        assert_eq!(creds[0].password, "Summer2024!");
+        assert_eq!(creds[0].source, "cracked:john");
+    }
+
+    #[test]
+    fn test_extract_cracked_dedup() {
+        let output = "\
+$krb5tgs$23$*svc_sql$CONTOSO.LOCAL$contoso.local/svc_sql*$abc:Summer2024!\n\
+$krb5tgs$23$*svc_sql$CONTOSO.LOCAL$contoso.local/svc_sql*$def:Summer2024!";
+        let creds = extract_cracked_passwords(output, "contoso.local");
+        assert_eq!(creds.len(), 1, "Should dedup same user@domain");
+    }
+
+    #[test]
+    fn test_extract_cracked_no_false_positives_on_uncracked() {
+        // Uncracked TGS hash should NOT produce a cracked credential
+        let output = "$krb5tgs$23$*svc_sql$CONTOSO.LOCAL$contoso.local/svc_sql*$abc123def456";
+        let creds = extract_cracked_passwords(output, "contoso.local");
+        assert!(
+            creds.is_empty(),
+            "Uncracked hash should not produce credential"
+        );
+    }
+
+    #[test]
+    fn test_extract_cracked_john_not_triggered_without_context() {
+        // john --show format should only match if "password hash cracked" context is present
+        let output = "svc_sql:Summer2024!::::::::";
+        let creds = extract_cracked_passwords(output, "contoso.local");
+        assert!(
+            creds.is_empty(),
+            "John format without context should not match"
+        );
     }
 }

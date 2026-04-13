@@ -46,6 +46,8 @@ pub struct StateSnapshot {
     pub netbios_to_fqdn: HashMap<String, String>,
     pub has_domain_admin: bool,
     pub has_golden_ticket: bool,
+    /// Forest root domains that still need krbtgt hashes (computed at snapshot time).
+    pub undominated_forests: Vec<String>,
 }
 
 // ---------------------------------------------------------------------------

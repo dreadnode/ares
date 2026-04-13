@@ -44,7 +44,16 @@ pub async fn auto_crack_dispatch(dispatcher: Arc<Dispatcher>, mut shutdown: watc
                 .collect()
         };
 
-        for (dedup_key, hash) in work {
+        // Serialize crack tasks: hashcat only allows one instance at a time.
+        // Skip this tick if a cracker task is already running.
+        if dispatcher.tracker.count_for_role("cracker").await > 0 {
+            debug!("Crack task already active, skipping dispatch this tick");
+            continue;
+        }
+
+        // Only dispatch one crack task per tick to avoid hashcat PID conflicts.
+        // Remaining hashes will be picked up on subsequent ticks.
+        if let Some((dedup_key, hash)) = work.into_iter().next() {
             match dispatcher.request_crack(&hash).await {
                 Ok(Some(task_id)) => {
                     debug!(task_id = %task_id, hash_type = %hash.hash_type, "Crack task dispatched");

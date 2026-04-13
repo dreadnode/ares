@@ -4,13 +4,18 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::sync::watch;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
+
+use ares_llm::routing::find_domain_credential;
 
 use crate::dispatcher::Dispatcher;
 use crate::state::*;
 
 /// Dispatches BloodHound collection for each discovered domain.
 /// Interval: 30s. Matches Python `_auto_bloodhound`.
+///
+/// Selects the best credential per domain (same-domain preferred, with
+/// trust-scope enforcement) instead of using a single global credential.
 pub async fn auto_bloodhound(dispatcher: Arc<Dispatcher>, mut shutdown: watch::Receiver<bool>) {
     let mut interval = tokio::time::interval(Duration::from_secs(30));
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -26,10 +31,9 @@ pub async fn auto_bloodhound(dispatcher: Arc<Dispatcher>, mut shutdown: watch::R
 
         let work: Vec<(String, String, ares_core::models::Credential)> = {
             let state = dispatcher.state.read().await;
-            let cred = match state.credentials.first() {
-                Some(c) => c.clone(),
-                None => continue,
-            };
+            if state.credentials.is_empty() {
+                continue;
+            }
 
             state
                 .domains
@@ -37,7 +41,20 @@ pub async fn auto_bloodhound(dispatcher: Arc<Dispatcher>, mut shutdown: watch::R
                 .filter(|d| !state.is_processed(DEDUP_BLOODHOUND_DOMAINS, d))
                 .filter_map(|domain| {
                     let dc_ip = state.domain_controllers.get(domain).cloned()?;
-                    Some((domain.clone(), dc_ip, cred.clone()))
+                    // Select best credential for this specific domain
+                    let cred = find_domain_credential(
+                        domain,
+                        &state.credentials,
+                        &state.netbios_to_fqdn,
+                        &state.trusted_domains,
+                    );
+                    match cred {
+                        Some(c) => Some((domain.clone(), dc_ip, c.clone())),
+                        None => {
+                            debug!(domain = %domain, "No valid credential for BloodHound");
+                            None
+                        }
+                    }
                 })
                 .collect()
         };

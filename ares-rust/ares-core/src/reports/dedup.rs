@@ -63,12 +63,22 @@ pub fn dedup_hashes(hashes: &[Hash]) -> Vec<Hash> {
     result
 }
 
+/// Sources that produce verified users (KDC-confirmed or enumerated).
+/// `output_extraction` is excluded — its DOMAIN\user regex matches every
+/// wordlist entry in kerbrute/ASREProast output, not just confirmed users.
+const TRUSTED_USER_SOURCES: &[&str] = &["kerberos_enum", "netexec_user_enum"];
+
 /// Deduplicate users by (domain, username) case-insensitively.
-/// Also normalizes is_admin for known admin usernames.
+/// Filters to trusted parser sources only and normalizes is_admin for known
+/// admin usernames.
 pub fn dedup_users(users: &[User]) -> Vec<User> {
     let mut seen = HashSet::new();
     let mut result = Vec::new();
     for u in users {
+        // Only accept users from trusted parser sources
+        if !u.source.is_empty() && !TRUSTED_USER_SOURCES.contains(&u.source.as_str()) {
+            continue;
+        }
         let key = (u.domain.to_lowercase(), u.username.to_lowercase());
         if seen.insert(key) {
             let mut u = u.clone();

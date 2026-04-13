@@ -137,7 +137,7 @@ impl LlmTaskRunner {
 // ---------------------------------------------------------------------------
 
 /// Build the system prompt for a given agent role.
-fn build_system_prompt(role: AgentRole, _snapshot: &StateSnapshot) -> Result<String> {
+fn build_system_prompt(role: AgentRole, snapshot: &StateSnapshot) -> Result<String> {
     // Get capabilities from the tool definitions for this role
     let tools = tool_registry::tools_for_role(role);
     let capabilities: Vec<String> = tools
@@ -161,8 +161,12 @@ fn build_system_prompt(role: AgentRole, _snapshot: &StateSnapshot) -> Result<Str
     let system_instructions = templates::render_system_instructions(None)?;
 
     // Render agent-specific instructions
-    let agent_instructions =
-        templates::render_agent_instructions(template_name, &capabilities, false, &[])?;
+    let agent_instructions = templates::render_agent_instructions(
+        template_name,
+        &capabilities,
+        false,
+        &snapshot.undominated_forests,
+    )?;
 
     Ok(format!("{system_instructions}\n\n{agent_instructions}"))
 }

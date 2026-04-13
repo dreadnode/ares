@@ -44,6 +44,23 @@ StandardError=append:/var/log/ares/%i.log
 WantedBy=multi-user.target
 UNIT_EOF
 
+echo "=== Installing cracking tools ==="
+if ! command -v hashcat > /dev/null 2>&1 || ! command -v john > /dev/null 2>&1; then
+    if command -v apt-get > /dev/null 2>&1; then
+        apt-get install -y -qq hashcat john
+    fi
+fi
+
+echo "=== Fixing pip/system impacket conflicts ==="
+# Kali's system impacket has patches (regsecrets) that pip versions lack.
+# Remove any pip-installed impacket that shadows the system package.
+if [ -d /usr/local/lib/python3.13/dist-packages/impacket ]; then
+    pip3 uninstall -y impacket --break-system-packages 2> /dev/null || true
+    rm -rf /usr/local/lib/python3.13/dist-packages/impacket \
+           /usr/local/lib/python3.13/dist-packages/impacket-*.dist-info
+    echo "Removed pip impacket shadow — using system package"
+fi
+
 echo "=== Enabling Redis ==="
 systemctl enable redis-server 2> /dev/null || systemctl enable redis 2> /dev/null || true
 systemctl start redis-server 2> /dev/null || systemctl start redis 2> /dev/null || true

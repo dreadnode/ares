@@ -160,7 +160,7 @@ impl OrchestratorConfig {
         let deferred_poll_interval_secs = parse_env("ARES_DEFERRED_POLL_INTERVAL_SECS", 10);
         let max_tasks_per_role = parse_env("ARES_MAX_TASKS_PER_ROLE", 3);
         let dispatch_delay_ms = parse_env("ARES_DISPATCH_DELAY_MS", 200);
-        let stale_task_timeout_secs = parse_env("ARES_STALE_TASK_TIMEOUT_SECS", 120);
+        let stale_task_timeout_secs = parse_env("ARES_STALE_TASK_TIMEOUT_SECS", 900);
         let deferred_task_max_age_secs = parse_env("ARES_DEFERRED_TASK_MAX_AGE_SECS", 300);
         let max_deferred_per_type = parse_env("ARES_MAX_DEFERRED_PER_TYPE", 50);
         let max_deferred_total = parse_env("ARES_MAX_DEFERRED_TOTAL", 200);
@@ -251,7 +251,7 @@ mod tests {
             deferred_poll_interval: Duration::from_secs(10),
             max_tasks_per_role: 3,
             dispatch_delay: Duration::from_millis(0),
-            stale_task_timeout: Duration::from_secs(120),
+            stale_task_timeout: Duration::from_secs(900),
             deferred_task_max_age: Duration::from_secs(300),
             max_deferred_per_type: 50,
             max_deferred_total: 200,

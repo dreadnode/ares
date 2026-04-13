@@ -100,9 +100,7 @@ margaery.tyrell\nloras.tyrell\n\
 oberyn.martell\nellaria.sand\n\
 davos.seaworth\nmelisandre\n\
 samwell\njsnow\nrcon\n\
-sql_admin\ndb_admin\n\
-webadmin\nnetadmin\n\
-helpdesk\nsupport\nservice\n";
+";
 
 /// Enumerate valid usernames via Kerberos pre-auth without credentials.
 pub async fn kerberos_user_enum_noauth(args: &Value) -> Result<ToolOutput> {

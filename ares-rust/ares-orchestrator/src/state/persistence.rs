@@ -72,6 +72,22 @@ impl SharedState {
         let domain_sids: HashMap<String, String> =
             conn.hgetall(&domain_sids_key).await.unwrap_or_default();
 
+        // Load trusted domains
+        let trusted_domains_key = format!(
+            "{}:{}:{}",
+            state::KEY_PREFIX,
+            operation_id,
+            state::KEY_TRUSTED_DOMAINS
+        );
+        let raw_trusts: HashMap<String, String> =
+            conn.hgetall(&trusted_domains_key).await.unwrap_or_default();
+        let mut trusted_domains = HashMap::new();
+        for (domain, json_str) in &raw_trusts {
+            if let Ok(trust) = serde_json::from_str::<ares_core::models::TrustInfo>(json_str) {
+                trusted_domains.insert(domain.clone(), trust);
+            }
+        }
+
         // Load ACL chains
         let acl_chains_key = format!(
             "{}:{}:{}",
@@ -148,6 +164,23 @@ impl SharedState {
         state.domain_controllers = loaded.domain_controllers;
         state.netbios_to_fqdn = loaded.netbios_to_fqdn;
         state.domain_sids = domain_sids;
+        state.trusted_domains = trusted_domains;
+        // Rebuild dominated_domains from krbtgt hashes
+        state.dominated_domains = state
+            .hashes
+            .iter()
+            .filter(|h| {
+                h.username.to_lowercase() == "krbtgt" && h.hash_type.to_lowercase().contains("ntlm")
+            })
+            .map(|h| {
+                if h.domain.is_empty() {
+                    state.domains.first().cloned().unwrap_or_default()
+                } else {
+                    h.domain.to_lowercase()
+                }
+            })
+            .filter(|d| !d.is_empty())
+            .collect();
         state.has_domain_admin = loaded.has_domain_admin;
         state.has_golden_ticket = loaded.has_golden_ticket;
         state.domain_admin_path = loaded.domain_admin_path;
@@ -225,6 +258,22 @@ impl SharedState {
             .filter_map(|s| serde_json::from_str(s).ok())
             .collect();
 
+        // Refresh trusted domains
+        let trusted_domains_key = format!(
+            "{}:{}:{}",
+            state::KEY_PREFIX,
+            operation_id,
+            state::KEY_TRUSTED_DOMAINS
+        );
+        let raw_trusts: HashMap<String, String> =
+            conn.hgetall(&trusted_domains_key).await.unwrap_or_default();
+        let mut trusted_domains = HashMap::new();
+        for (domain, json_str) in &raw_trusts {
+            if let Ok(trust) = serde_json::from_str::<ares_core::models::TrustInfo>(json_str) {
+                trusted_domains.insert(domain.clone(), trust);
+            }
+        }
+
         let mut state = self.inner.write().await;
         state.credentials = credentials;
         state.hashes = hashes;
@@ -236,7 +285,24 @@ impl SharedState {
         state.domain_admin_path = meta.domain_admin_path;
         state.domain_controllers = dc_map;
         state.domain_sids = domain_sids;
+        state.trusted_domains = trusted_domains;
         state.acl_chains = acl_chains;
+        // Rebuild dominated_domains from refreshed hashes
+        state.dominated_domains = state
+            .hashes
+            .iter()
+            .filter(|h| {
+                h.username.to_lowercase() == "krbtgt" && h.hash_type.to_lowercase().contains("ntlm")
+            })
+            .map(|h| {
+                if h.domain.is_empty() {
+                    state.domains.first().cloned().unwrap_or_default()
+                } else {
+                    h.domain.to_lowercase()
+                }
+            })
+            .filter(|d| !d.is_empty())
+            .collect();
 
         Ok(())
     }

@@ -17,8 +17,8 @@ use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
 
 use crate::provider::{
-    ChatMessage, LlmError, LlmProvider, LlmRequest, LlmResponse, Role, StopReason, TokenUsage,
-    ToolCall,
+    ChatMessage, ContentPart, LlmError, LlmProvider, LlmRequest, LlmResponse, Role, StopReason,
+    TokenUsage, ToolCall,
 };
 use crate::tool_registry;
 
@@ -172,7 +172,12 @@ fn handle_builtin_callback(call: &ToolCall) -> Result<CallbackResult> {
                 .as_str()
                 .unwrap_or("unknown")
                 .to_string();
-            let result = call.arguments["result"].as_str().unwrap_or("").to_string();
+            // The LLM may pass result as a string or a JSON object — handle both.
+            let result = match &call.arguments["result"] {
+                serde_json::Value::String(s) => s.clone(),
+                other if !other.is_null() => serde_json::to_string(other).unwrap_or_default(),
+                _ => String::new(),
+            };
             Ok(CallbackResult::TaskComplete { task_id, result })
         }
         "request_assistance" => {
@@ -184,18 +189,14 @@ fn handle_builtin_callback(call: &ToolCall) -> Result<CallbackResult> {
             Ok(CallbackResult::RequestAssistance { issue, context })
         }
         "report_cracked_credential" => {
-            let username = call.arguments["username"]
-                .as_str()
-                .unwrap_or("")
-                .to_string();
-            let _password = call.arguments["password"]
-                .as_str()
-                .unwrap_or("")
-                .to_string();
-            info!(username = %username, "Cracked credential reported");
-            Ok(CallbackResult::Continue(format!(
-                "Credential recorded: {username} with cracked password"
-            )))
+            // This tool was removed. Cracked passwords are auto-extracted from
+            // hashcat/john stdout. Tell the LLM to just call task_complete.
+            warn!("report_cracked_credential called but removed — passwords are auto-extracted from tool output");
+            Ok(CallbackResult::Continue(
+                "This tool no longer exists. Cracked passwords are automatically extracted from \
+                 hashcat/john stdout. Just call task_complete with a summary."
+                    .to_string(),
+            ))
         }
         "report_crack_failed" => {
             let hash_type = call.arguments["hash_type"]
@@ -267,18 +268,15 @@ fn handle_builtin_callback(call: &ToolCall) -> Result<CallbackResult> {
                 result: summary,
             })
         }
-        // Reporting tools — handled in-process so they don't get dispatched to workers
+        // record_credential is deprecated — credentials are extracted automatically
+        // from tool output via regex parsing. This handler exists only as a safety net.
         "record_credential" => {
-            let username = call.arguments["username"]
-                .as_str()
-                .unwrap_or("")
-                .to_string();
-            let domain = call.arguments["domain"].as_str().unwrap_or("").to_string();
-            let source = call.arguments["source"].as_str().unwrap_or("").to_string();
-            info!(username = %username, domain = %domain, source = %source, "Credential recorded via callback");
-            Ok(CallbackResult::Continue(format!(
-                "Credential recorded: {username}@{domain} (source: {source})"
-            )))
+            warn!("record_credential called but tool is disabled — credentials are auto-extracted from tool output");
+            Ok(CallbackResult::Continue(
+                "This tool is disabled. Credentials are automatically extracted from tool output. \
+                 Focus on running tools that produce credential data (secretsdump, lsassy, netexec, etc.) \
+                 and the system will parse and store credentials automatically.".to_string()
+            ))
         }
         "record_weakness" => {
             let title = call.arguments["title"].as_str().unwrap_or("").to_string();
@@ -426,6 +424,8 @@ pub struct AgentLoopOutcome {
     pub tool_calls_dispatched: u32,
     /// Accumulated structured discoveries from all tool results.
     pub discoveries: Vec<serde_json::Value>,
+    /// Raw tool output strings for secondary regex extraction.
+    pub tool_outputs: Vec<String>,
 }
 
 /// Why the agent loop stopped.
@@ -477,6 +477,7 @@ pub async fn run_agent_loop(
     let mut steps: u32 = 0;
     let mut tool_calls_dispatched: u32 = 0;
     let mut all_discoveries: Vec<serde_json::Value> = Vec::new();
+    let mut all_tool_outputs: Vec<String> = Vec::new();
 
     // Dynamic tool filtering: track unavailable tools and per-tool call counts
     // to prevent infinite retry loops on missing binaries and runaway tool calls.
@@ -497,6 +498,7 @@ pub async fn run_agent_loop(
                 steps,
                 tool_calls_dispatched,
                 discoveries: all_discoveries,
+                tool_outputs: all_tool_outputs,
             };
         }
 
@@ -531,6 +533,7 @@ pub async fn run_agent_loop(
                     steps,
                     tool_calls_dispatched,
                     discoveries: all_discoveries,
+                    tool_outputs: all_tool_outputs,
                 };
             }
         };
@@ -557,6 +560,7 @@ pub async fn run_agent_loop(
                     steps,
                     tool_calls_dispatched,
                     discoveries: all_discoveries,
+                    tool_outputs: all_tool_outputs,
                 };
             }
             StopReason::MaxTokens if response.tool_calls.is_empty() => {
@@ -566,6 +570,7 @@ pub async fn run_agent_loop(
                     steps,
                     tool_calls_dispatched,
                     discoveries: all_discoveries,
+                    tool_outputs: all_tool_outputs,
                 };
             }
             _ => {}
@@ -634,24 +639,42 @@ pub async fn run_agent_loop(
                 *count += 1;
 
                 if let Some(dr) = results.iter().find(|r| r.call_id == call.id) {
-                    // Detect "not installed" errors and mark tool for removal
-                    let is_not_installed = dr.output.contains("not installed")
-                        || dr.output.contains("failed to spawn");
-                    if is_not_installed {
+                    // Detect spawn failures (binary not found) and mark tool for removal.
+                    // Only match the executor's own error message pattern — NOT arbitrary
+                    // tool output that happens to contain "not installed" (e.g., a target
+                    // host saying some service is "not installed" in its response).
+                    let is_spawn_failure = dr.output.contains("failed to spawn");
+                    if is_spawn_failure {
                         warn!(
                             tool = %call.name,
                             task_id = task_id,
-                            "Tool binary not installed — removing from available tools"
+                            "Tool binary not found (spawn failed) — removing from available tools"
                         );
                         tools_to_remove.push(call.name.clone());
                     }
 
                     let output =
                         truncate_tool_output(&dr.output, config.context.max_tool_output_chars);
+                    // Collect raw tool output for secondary regex extraction
+                    all_tool_outputs.push(dr.output.clone());
                     messages.push(ChatMessage::tool_result(&call.id, &output));
                     if let Some(disc) = &dr.discoveries {
                         all_discoveries.push(disc.clone());
                     }
+                } else {
+                    // No result for this call — dispatch panicked or errored.
+                    // Must still push a tool result to keep the message sequence valid
+                    // (OpenAI requires every tool_call_id to have a matching result).
+                    warn!(
+                        tool = %call.name,
+                        call_id = %call.id,
+                        task_id = task_id,
+                        "No dispatch result for tool call — inserting error placeholder"
+                    );
+                    messages.push(ChatMessage::tool_result(
+                        &call.id,
+                        "Tool execution failed: no result received (dispatch error)",
+                    ));
                 }
 
                 // Check if tool has exceeded max call count
@@ -714,6 +737,7 @@ pub async fn run_agent_loop(
                         steps,
                         tool_calls_dispatched,
                         discoveries: all_discoveries,
+                        tool_outputs: all_tool_outputs,
                     };
                 }
                 Ok(CallbackResult::RequestAssistance { issue, context }) => {
@@ -724,6 +748,7 @@ pub async fn run_agent_loop(
                         steps,
                         tool_calls_dispatched,
                         discoveries: all_discoveries,
+                        tool_outputs: all_tool_outputs,
                     };
                 }
                 Ok(CallbackResult::Continue(msg)) => {
@@ -794,22 +819,35 @@ fn estimate_context_tokens(
 
 /// Truncate a tool output string to fit within the character limit.
 /// Keeps the beginning and end, inserting a truncation notice in the middle.
+/// Uses char indices (not byte offsets) to avoid slicing mid-UTF-8.
 fn truncate_tool_output(output: &str, max_chars: usize) -> String {
-    if output.len() <= max_chars || max_chars == 0 {
+    let char_count = output.chars().count();
+    if char_count <= max_chars || max_chars == 0 {
         return output.to_string();
     }
 
     let keep = max_chars.saturating_sub(80); // Reserve space for notice
-    let head = keep * 2 / 3;
-    let tail = keep - head;
+    let head_chars = keep * 2 / 3;
+    let tail_chars = keep - head_chars;
 
-    let head_str = &output[..head.min(output.len())];
-    let tail_start = output.len().saturating_sub(tail);
-    let tail_str = &output[tail_start..];
+    // Find byte offset of the head_chars-th character
+    let head_byte = output
+        .char_indices()
+        .nth(head_chars)
+        .map(|(i, _)| i)
+        .unwrap_or(output.len());
+    // Find byte offset of the (char_count - tail_chars)-th character
+    let tail_byte = output
+        .char_indices()
+        .nth(char_count.saturating_sub(tail_chars))
+        .map(|(i, _)| i)
+        .unwrap_or(output.len());
 
-    let omitted = output.len() - head - tail;
+    let head_str = &output[..head_byte];
+    let tail_str = &output[tail_byte..];
+    let omitted = char_count - head_chars - tail_chars;
     format!(
-        "{head_str}\n\n[... {omitted} characters truncated — showing first {head} and last {tail} chars ...]\n\n{tail_str}"
+        "{head_str}\n\n[... {omitted} characters truncated — showing first {head_chars} and last {tail_chars} chars ...]\n\n{tail_str}"
     )
 }
 
@@ -818,6 +856,10 @@ fn truncate_tool_output(output: &str, max_chars: usize) -> String {
 /// Strategy: keep the first message (task prompt) and the last N messages
 /// (most recent context). Drop messages in the middle, replacing them with
 /// a summary marker.
+///
+/// Tool-call groups (an assistant message with tool_calls followed by its
+/// tool-result messages) are treated as atomic units — we never split them,
+/// since OpenAI rejects orphaned tool_call_ids with a 400 "invalid JSON" error.
 fn trim_conversation(
     messages: &mut Vec<ChatMessage>,
     system: &str,
@@ -840,8 +882,33 @@ fn trim_conversation(
     }
 
     // Keep first message + last min_keep messages, drop the middle
-    let drop_end = messages.len().saturating_sub(min_keep);
+    let mut drop_end = messages.len().saturating_sub(min_keep);
     if drop_end <= 1 {
+        return;
+    }
+
+    // Adjust drop_end so we don't sever tool-call / tool-result pairs.
+    // If the first kept message (at drop_end) is a tool-result, walk backward
+    // to include the preceding assistant tool-call message in the kept set.
+    while drop_end > 1 && is_tool_result(&messages[drop_end]) {
+        drop_end -= 1;
+    }
+
+    // If after adjustment there's nothing left to drop, bail out.
+    if drop_end <= 1 {
+        return;
+    }
+
+    // If the last dropped message (at drop_end - 1) is an assistant message
+    // with tool_calls, we must also drop the subsequent tool-result messages,
+    // so advance drop_end past them.
+    if has_tool_calls(&messages[drop_end - 1]) {
+        while drop_end < messages.len() && is_tool_result(&messages[drop_end]) {
+            drop_end += 1;
+        }
+    }
+
+    if drop_end <= 1 || drop_end >= messages.len() {
         return;
     }
 
@@ -863,6 +930,32 @@ fn trim_conversation(
         estimated_tokens = estimate_context_tokens(system, messages, tools),
         "Trimmed conversation context"
     );
+}
+
+/// Check if a message is a tool result (role=Tool or User with ToolResult parts).
+fn is_tool_result(msg: &ChatMessage) -> bool {
+    if msg.role == Role::Tool {
+        return true;
+    }
+    if let Some(ref parts) = msg.parts {
+        return parts
+            .iter()
+            .any(|p| matches!(p, ContentPart::ToolResult { .. }));
+    }
+    false
+}
+
+/// Check if a message is an assistant message with tool_use calls.
+fn has_tool_calls(msg: &ChatMessage) -> bool {
+    if msg.role != Role::Assistant {
+        return false;
+    }
+    if let Some(ref parts) = msg.parts {
+        return parts
+            .iter()
+            .any(|p| matches!(p, ContentPart::ToolUse { .. }));
+    }
+    false
 }
 
 // ---------------------------------------------------------------------------

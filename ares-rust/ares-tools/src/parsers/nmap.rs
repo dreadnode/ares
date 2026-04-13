@@ -134,7 +134,9 @@ pub fn parse_nmap_output(output: &str, params: &Value) -> Vec<Value> {
     }
 
     // If no hosts were found but we have a target_ip, create a minimal host entry
-    if hosts.is_empty() && !target_ip.is_empty() {
+    // Skip CIDR notation (e.g. "10.1.2.0/24") — individual hosts will be discovered
+    // by their own scan results; a subnet target should never become a host entry.
+    if hosts.is_empty() && !target_ip.is_empty() && !target_ip.contains('/') {
         hosts.push(json!({
             "ip": target_ip,
             "hostname": "",

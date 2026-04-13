@@ -162,6 +162,7 @@ mod tests {
             domain_admin_path: None,
             domain_controllers: HashMap::new(),
             netbios_to_fqdn: HashMap::new(),
+            trusted_domains: HashMap::new(),
         };
 
         let result = gen.generate_summary(&state, &[], &[], false);
@@ -230,6 +231,7 @@ mod tests {
             domain_admin_path: Some("secretsdump -> administrator hash -> DA".to_string()),
             domain_controllers: HashMap::new(),
             netbios_to_fqdn: HashMap::new(),
+            trusted_domains: HashMap::new(),
         };
 
         let result = gen.generate_comprehensive(&state, &[], &["T1003.006".to_string()]);

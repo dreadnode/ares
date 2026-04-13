@@ -59,6 +59,26 @@ use crate::state::SharedState;
 use crate::task_queue::TaskQueue;
 use crate::throttling::Throttler;
 
+/// Probe target IPs on port 88 (Kerberos) then 389 (LDAP) to find a real DC.
+/// Returns the first IP that accepts a TCP connection within 500ms.
+async fn probe_dc_port(ips: &[String]) -> Option<String> {
+    for port in [88u16, 389] {
+        for ip in ips {
+            let addr = format!("{ip}:{port}");
+            if let Ok(Ok(_)) = tokio::time::timeout(
+                std::time::Duration::from_millis(500),
+                tokio::net::TcpStream::connect(&addr),
+            )
+            .await
+            {
+                info!(ip = %ip, port = port, "DC probe: port open");
+                return Some(ip.clone());
+            }
+        }
+    }
+    None
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     // --- Telemetry (console + OTLP when endpoint is configured) ---
@@ -150,9 +170,10 @@ async fn main() -> Result<()> {
             // Seed domain_controllers from target IPs so automation tasks
             // (AS-REP roast, Kerberoast, BloodHound, delegation enum) can fire
             // immediately without waiting for recon to report back.
-            // Use the first target IP as the DC for the target domain.
+            // Probe port 88 (Kerberos) to find a real DC, don't blindly use first IP.
             if state.domain_controllers.is_empty() {
-                if let Some(first_ip) = config.target_ips.first() {
+                let dc_ip = probe_dc_port(&config.target_ips).await;
+                if let Some(ref ip) = dc_ip {
                     let dc_key = format!(
                         "{}:{}:{}",
                         ares_core::state::KEY_PREFIX,
@@ -161,15 +182,47 @@ async fn main() -> Result<()> {
                     );
                     let mut conn = queue.connection();
                     let _: Result<(), _> =
-                        redis::AsyncCommands::hset(&mut conn, &dc_key, &domain, first_ip).await;
-                    state
-                        .domain_controllers
-                        .insert(domain.clone(), first_ip.clone());
+                        redis::AsyncCommands::hset(&mut conn, &dc_key, &domain, ip).await;
+                    state.domain_controllers.insert(domain.clone(), ip.clone());
                     info!(
                         domain = %domain,
-                        dc_ip = %first_ip,
-                        "Seeded domain controller from target IPs (enables immediate automation)"
+                        dc_ip = %ip,
+                        "Seeded domain controller from target IPs (port 88 probe)"
                     );
+
+                    // Also register the credential's domain (may differ from target_domain,
+                    // e.g., north.sevenkingdoms.local vs sevenkingdoms.local).
+                    // This ensures automation tasks (spray, kerberoast) can find a DC
+                    // for the credential's domain.
+                    if let Some(ref cred) = config.initial_credential {
+                        let cred_domain = cred.domain.to_lowercase();
+                        if cred_domain != domain && !cred_domain.is_empty() {
+                            let _: Result<(), _> =
+                                redis::AsyncCommands::hset(&mut conn, &dc_key, &cred_domain, ip)
+                                    .await;
+                            state
+                                .domain_controllers
+                                .insert(cred_domain.clone(), ip.clone());
+                            // Also add this domain to the domains set
+                            if !state.domains.contains(&cred_domain) {
+                                state.domains.push(cred_domain.clone());
+                                let domain_key = format!("ares:op:{}:domains", state.operation_id);
+                                let _: Result<(), _> = redis::AsyncCommands::sadd(
+                                    &mut conn,
+                                    &domain_key,
+                                    &cred_domain,
+                                )
+                                .await;
+                            }
+                            info!(
+                                cred_domain = %cred_domain,
+                                dc_ip = %ip,
+                                "Also registered credential domain in DC map"
+                            );
+                        }
+                    }
+                } else {
+                    warn!("No target IP responded on port 88/389 — DC will be discovered by recon");
                 }
             }
 
@@ -266,18 +319,28 @@ async fn main() -> Result<()> {
     let (provider, model_name) =
         ares_llm::create_provider(&model_spec).context("Failed to create LLM provider")?;
 
+    // Credential auth throttle — prevents AD account lockout by rate-limiting
+    // auth-bearing tool calls per credential. Default: max 3 attempts per 60s,
+    // well under the typical AD lockout threshold (5 in 5 min).
+    let auth_throttle = tool_dispatcher::AuthThrottle::new(3, std::time::Duration::from_secs(60));
+
     // Choose tool dispatch strategy:
     // ARES_TOOL_DISPATCH=local → in-process via ares_tools::dispatch()
     // default → Redis queue for worker consumption (ares:tool_exec:{role})
     let tool_disp: Arc<dyn ares_llm::ToolDispatcher> =
         if std::env::var("ARES_TOOL_DISPATCH").as_deref() == Ok("local") {
             info!("Tool dispatch: local (in-process via ares-tools)");
-            Arc::new(tool_dispatcher::LocalToolDispatcher::new())
+            Arc::new(tool_dispatcher::LocalToolDispatcher::new(
+                queue.clone(),
+                config.operation_id.clone(),
+                auth_throttle.clone(),
+            ))
         } else {
             info!("Tool dispatch: Redis queue (ares:tool_exec:{{role}})");
             Arc::new(tool_dispatcher::RedisToolDispatcher::new(
                 queue.clone(),
                 config.operation_id.clone(),
+                auth_throttle.clone(),
             ))
         };
 
@@ -340,8 +403,7 @@ async fn main() -> Result<()> {
 
     let deferred_handle = deferred::spawn_deferred_processor(
         deferred.clone(),
-        queue.clone(),
-        tracker.clone(),
+        dispatcher.clone(),
         throttler.clone(),
         config.clone(),
         shutdown_rx.clone(),
@@ -385,11 +447,16 @@ async fn main() -> Result<()> {
 
         let blue_disp: Arc<dyn ares_llm::ToolDispatcher> =
             if std::env::var("ARES_TOOL_DISPATCH").as_deref() == Ok("local") {
-                Arc::new(tool_dispatcher::LocalToolDispatcher::new())
+                Arc::new(tool_dispatcher::LocalToolDispatcher::new(
+                    queue.clone(),
+                    config.operation_id.clone(),
+                    auth_throttle.clone(),
+                ))
             } else {
                 Arc::new(tool_dispatcher::RedisToolDispatcher::new(
                     queue.clone(),
                     config.operation_id.clone(),
+                    auth_throttle.clone(),
                 ))
             };
 

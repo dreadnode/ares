@@ -30,6 +30,12 @@ pub struct StateInner {
     pub netbios_to_fqdn: HashMap<String, String>,
     pub domain_sids: HashMap<String, String>,
 
+    // Trust relationships (domain FQDN → trust metadata)
+    pub trusted_domains: HashMap<String, TrustInfo>,
+
+    // Per-domain DA tracking: domains where krbtgt NTLM has been obtained
+    pub dominated_domains: HashSet<String>,
+
     // Flags
     pub has_domain_admin: bool,
     pub has_golden_ticket: bool,
@@ -78,6 +84,8 @@ impl StateInner {
             domain_controllers: HashMap::new(),
             netbios_to_fqdn: HashMap::new(),
             domain_sids: HashMap::new(),
+            trusted_domains: HashMap::new(),
+            dominated_domains: HashSet::new(),
             has_domain_admin: false,
             has_golden_ticket: false,
             domain_admin_path: None,

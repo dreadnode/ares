@@ -59,17 +59,17 @@ pub const CALLBACK_TOOLS: &[&str] = &[
     // Universal callbacks
     "task_complete",
     "request_assistance",
-    "report_cracked_credential",
+    // NOTE: report_cracked_credential removed — cracked passwords come from parsed tool output
     "report_crack_failed",
     "report_finding",
     "report_lateral_success",
     "report_lateral_failed",
     "complete_operation",
     // Reporting tools (handled in-process, not dispatched to workers)
-    "record_credential",
-    "record_weakness",
+    // NOTE: record_credential removed — credentials come only from tool output parsing
+    // NOTE: record_weakness removed — weaknesses come only from parsed tool output
+    // NOTE: record_timeline_event removed — timeline events auto-generated from discoveries
     "record_compromised_host",
-    "record_timeline_event",
     "list_credentials",
     "list_weaknesses",
     // Orchestrator query tools (handled by OrchestratorCallbackHandler)
@@ -262,21 +262,20 @@ mod tests {
         assert!(names.contains(&"nmap_scan"));
         assert!(names.contains(&"task_complete"));
         assert!(names.contains(&"request_assistance"));
-        assert!(names.contains(&"record_credential"));
     }
 
     #[test]
     fn test_callback_tool_detection() {
         assert!(is_callback_tool("task_complete"));
         assert!(is_callback_tool("request_assistance"));
-        assert!(is_callback_tool("report_cracked_credential"));
         assert!(is_callback_tool("report_lateral_success"));
         assert!(is_callback_tool("complete_operation"));
         // Reporting tools are callbacks (not dispatched to workers)
-        assert!(is_callback_tool("record_credential"));
-        assert!(is_callback_tool("record_weakness"));
         assert!(is_callback_tool("record_compromised_host"));
-        assert!(is_callback_tool("record_timeline_event"));
+        // Removed: record_weakness, record_timeline_event, report_cracked_credential
+        assert!(!is_callback_tool("record_weakness"));
+        assert!(!is_callback_tool("record_timeline_event"));
+        assert!(!is_callback_tool("report_cracked_credential"));
         assert!(is_callback_tool("list_credentials"));
         assert!(is_callback_tool("list_weaknesses"));
         assert!(!is_callback_tool("nmap_scan"));
@@ -323,7 +322,6 @@ mod tests {
         assert!(!names.contains(&"enumerate_users"));
         // Reporting + callbacks always present
         assert!(names.contains(&"task_complete"));
-        assert!(names.contains(&"record_credential"));
     }
 
     #[test]
@@ -338,7 +336,7 @@ mod tests {
         let tools = tools_for_role(AgentRole::Cracker);
         let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
         assert!(names.contains(&"crack_with_hashcat"));
-        assert!(names.contains(&"report_cracked_credential"));
+        // report_cracked_credential removed — cracked passwords come from parsed tool output
         assert!(names.contains(&"report_crack_failed"));
     }
 
@@ -376,14 +374,21 @@ mod tests {
         ] {
             let tools = tools_for_role(role);
             let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
+            // record_compromised_host is the remaining reporting tool (log-only, no state write)
             assert!(
-                names.contains(&"record_credential"),
-                "Role {:?} missing record_credential",
+                names.contains(&"record_compromised_host"),
+                "Role {:?} missing record_compromised_host",
+                role
+            );
+            // State-writing reporting tools must NOT be present
+            assert!(
+                !names.contains(&"record_weakness"),
+                "Role {:?} has removed tool record_weakness",
                 role
             );
             assert!(
-                names.contains(&"record_weakness"),
-                "Role {:?} missing record_weakness",
+                !names.contains(&"record_timeline_event"),
+                "Role {:?} has removed tool record_timeline_event",
                 role
             );
         }

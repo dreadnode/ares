@@ -1,11 +1,35 @@
 use std::collections::{HashMap, HashSet};
 
+use once_cell::sync::Lazy;
+use regex::Regex;
+
 use ares_core::models::{Host, SharedRedTeamState};
 
 use crate::dedup::{
     dedup_credentials, dedup_hashes, dedup_users, filter_real_weaknesses, normalize_source_label,
     normalize_state_domains, sanitize_credentials,
 };
+
+/// Regex to strip NetExec parenthesized metadata from OS strings.
+/// Matches `(name:...)`, `(domain:...)`, `(signing:...)`, `(SMBv1:...)`, `(Null Auth:...)`.
+static OS_PAREN_METADATA_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"\s*\([^)]*\)").unwrap());
+
+/// Clean OS string by stripping NetExec metadata like `(name:X) (domain:Y) (signing:True)`.
+fn clean_os_string(os: &str) -> String {
+    let cleaned = OS_PAREN_METADATA_RE.replace_all(os, "");
+    cleaned.trim().to_string()
+}
+
+/// Check if a service entry is a real network service (not metadata like `smb_signing_disabled`).
+fn is_real_service(svc: &str) -> bool {
+    // Real services contain port/proto format like "445/tcp"
+    let trimmed = svc.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    // Must contain port/proto pattern
+    trimmed.contains("/tcp") || trimmed.contains("/udp")
+}
 
 pub(crate) fn print_loot(state: &SharedRedTeamState, json_output: bool) {
     // Clone mutable parts for domain normalization
@@ -41,7 +65,7 @@ fn print_loot_json(
     hashes: &[ares_core::models::Hash],
     domains: &[String],
 ) {
-    let unique_users = dedup_users(&state.all_users);
+    let unique_users = dedup_users(&state.all_users, &state.netbios_to_fqdn);
     let unique_creds = dedup_credentials(credentials);
     let unique_hashes = dedup_hashes(hashes);
     let real_weaknesses = filter_real_weaknesses(&state.all_weaknesses);
@@ -105,10 +129,11 @@ fn is_aws_hostname(hostname: &str) -> bool {
 
 /// Resolve a host's display hostname, matching Python's `add_host` logic:
 /// 1. Strip AWS internal hostnames (ip-*.compute.internal).
-/// 2. If hostname is short (no dots), try netbios_to_fqdn to build an FQDN.
-/// 3. Otherwise use the hostname as-is.
+/// 2. Strip trailing DNS root dots.
+/// 3. If hostname is short (no dots), try netbios_to_fqdn to build an FQDN.
+/// 4. Otherwise use the hostname as-is.
 fn resolve_display_hostname(host: &Host, netbios_to_fqdn: &HashMap<String, String>) -> String {
-    let hostname = host.hostname.trim();
+    let hostname = host.hostname.trim().trim_end_matches('.');
 
     // If it's an AWS PTR or empty, blank it out (matches Python's add_host behavior)
     if hostname.is_empty() || is_aws_hostname(hostname) {
@@ -117,19 +142,21 @@ fn resolve_display_hostname(host: &Host, netbios_to_fqdn: &HashMap<String, Strin
 
     // If hostname has no dots (short/NetBIOS name), try to resolve to FQDN
     if !hostname.contains('.') {
-        let lower = hostname.to_lowercase();
-        if let Some(fqdn) = netbios_to_fqdn.get(&lower) {
-            return fqdn.clone();
+        // netbios_to_fqdn keys are UPPERCASE (from publish_netbios)
+        let upper = hostname.to_uppercase();
+        if let Some(fqdn) = netbios_to_fqdn.get(&upper) {
+            return fqdn.to_lowercase();
         }
+        let lower = hostname.to_lowercase();
         // Try as hostname prefix: check if any netbios entry has this as a prefix
         for (nb, fqdn) in netbios_to_fqdn {
             if fqdn.to_lowercase().starts_with(&format!("{lower}.")) || nb.to_lowercase() == lower {
-                return fqdn.clone();
+                return fqdn.to_lowercase();
             }
         }
     }
 
-    hostname.to_string()
+    hostname.to_lowercase()
 }
 
 /// Check if `new_hostname` is a more-specific FQDN than `existing` (matching
@@ -149,6 +176,11 @@ fn is_more_specific_fqdn(existing: &str, new: &str) -> bool {
     new_parts.len() > ex_parts.len()
 }
 
+/// Check if a string looks like a valid IP address (v4).
+fn looks_like_ip(s: &str) -> bool {
+    !s.is_empty() && s.chars().all(|c| c.is_ascii_digit() || c == '.')
+}
+
 /// Deduplicate hosts by IP, merging services, preferring FQDN hostnames over
 /// short names. Cross-references `domain_controllers` (dc_map) to detect DCs
 /// and resolve hostnames. Matches Python's `add_host` merge logic.
@@ -158,11 +190,37 @@ fn dedup_hosts(
     domain_controllers: &HashMap<String, String>,
 ) -> Vec<Host> {
     let mut by_ip: HashMap<String, Host> = HashMap::new();
+    // Track hostname-in-IP entries to merge later
+    let mut hostname_only: Vec<Host> = Vec::new();
 
     for host in hosts {
+        let ip = host.ip.trim();
+
+        // Skip CIDR subnet entries (e.g. "10.1.2.0/24") — not real hosts
+        if ip.contains('/') {
+            continue;
+        }
+
         let resolved = resolve_display_hostname(host, netbios_to_fqdn);
 
-        if let Some(existing) = by_ip.get_mut(&host.ip) {
+        // Detect hostname-in-IP: the IP field contains a hostname (not a valid IP)
+        if !looks_like_ip(ip) && !ip.is_empty() {
+            let mut h = host.clone();
+            // Move the hostname-like value to the hostname field
+            if h.hostname.is_empty() {
+                h.hostname = ip.trim_end_matches('.').to_string();
+            }
+            h.ip = String::new();
+            hostname_only.push(h);
+            continue;
+        }
+
+        if ip.is_empty() {
+            // Skip entries with no IP at all
+            continue;
+        }
+
+        if let Some(existing) = by_ip.get_mut(ip) {
             let existing_is_short = !existing.hostname.contains('.');
             let new_is_fqdn = !resolved.is_empty() && resolved.contains('.');
 
@@ -201,7 +259,36 @@ fn dedup_hosts(
         } else {
             let mut merged = host.clone();
             merged.hostname = resolved;
-            by_ip.insert(host.ip.clone(), merged);
+            by_ip.insert(ip.to_string(), merged);
+        }
+    }
+
+    // Merge hostname-only entries into existing hosts by matching hostname
+    for h in hostname_only {
+        let hostname_lower = h.hostname.to_lowercase();
+        let mut merged = false;
+        for existing in by_ip.values_mut() {
+            if existing.hostname.to_lowercase() == hostname_lower {
+                // Merge services
+                for svc in &h.services {
+                    if !existing.services.contains(svc) {
+                        existing.services.push(svc.clone());
+                    }
+                }
+                if h.is_dc {
+                    existing.is_dc = true;
+                }
+                if existing.os.is_empty() && !h.os.is_empty() {
+                    existing.os = h.os.clone();
+                }
+                merged = true;
+                break;
+            }
+        }
+        // If no match found, skip — don't add entries without a valid IP
+        if !merged && !h.services.is_empty() {
+            // Only add if it has useful data (services)
+            by_ip.insert(format!("_hostname_{}", h.hostname), h);
         }
     }
 
@@ -263,7 +350,7 @@ fn print_loot_human(
     // Domains with hierarchy
     let mut domains: Vec<String> = domains_input
         .iter()
-        .map(|d| d.trim().to_lowercase())
+        .map(|d| d.trim().trim_end_matches('.').to_lowercase())
         .filter(|d| !d.is_empty())
         .collect();
     domains.sort();
@@ -343,32 +430,65 @@ fn print_loot_human(
         } else {
             parts.join(" / ")
         };
-        if !host.os.is_empty() {
-            line = format!("{line} [{}]", host.os);
+        let cleaned_os = clean_os_string(&host.os);
+        if !cleaned_os.is_empty() {
+            line = format!("{line} [{cleaned_os}]");
         }
         if host.is_dc {
             line = format!("{line} [DC]");
         }
         println!("  - {line}");
         // Normalize and deduplicate services for display
-        let mut services: Vec<String> = host
-            .services
-            .iter()
-            .map(|svc| {
-                // Strip parens: "445/tcp (microsoft-ds)" → "445/tcp microsoft-ds"
-                let stripped = svc.replace(" (", " ").replace(')', "");
-                // Strip nmap version/product info: keep only "port/proto service_name"
-                // e.g. "389/tcp ldap Microsoft Windows Active Directory LDAP ..." → "389/tcp ldap"
-                let parts: Vec<&str> = stripped.split_whitespace().collect();
-                if parts.len() >= 2 && parts[0].contains('/') {
-                    format!("{} {}", parts[0], parts[1])
-                } else {
-                    stripped
-                }
-            })
-            .collect();
-        services.sort();
-        services.dedup();
+        // Use a map keyed by port/proto so each port only appears once
+        let mut port_map: HashMap<String, String> = HashMap::new();
+        for svc in &host.services {
+            if !is_real_service(svc) {
+                continue;
+            }
+            // Strip parens: "445/tcp (microsoft-ds)" → "445/tcp microsoft-ds"
+            let stripped = svc.replace(" (", " ").replace(')', "");
+            // Strip nmap version/product info: keep only "port/proto service_name"
+            let parts: Vec<&str> = stripped.split_whitespace().collect();
+            let normalized = if parts.len() >= 2 && parts[0].contains('/') {
+                // Strip trailing '?' from uncertain nmap identifications
+                let svc_name = parts[1].trim_end_matches('?');
+                format!("{} {}", parts[0], svc_name)
+            } else {
+                // Still strip trailing '?' even for non-standard formats
+                stripped.trim_end_matches('?').to_string()
+            };
+            // Extract port/proto key (e.g. "445/tcp")
+            let port_key = normalized
+                .split_whitespace()
+                .next()
+                .unwrap_or("")
+                .to_string();
+            // Keep the longer (more descriptive) service name per port
+            port_map
+                .entry(port_key)
+                .and_modify(|existing| {
+                    if normalized.len() > existing.len() {
+                        *existing = normalized.clone();
+                    }
+                })
+                .or_insert(normalized);
+        }
+        let mut services: Vec<String> = port_map.into_values().collect();
+        services.sort_by(|a, b| {
+            let port_a = a
+                .split('/')
+                .next()
+                .unwrap_or("0")
+                .parse::<u16>()
+                .unwrap_or(0);
+            let port_b = b
+                .split('/')
+                .next()
+                .unwrap_or("0")
+                .parse::<u16>()
+                .unwrap_or(0);
+            port_a.cmp(&port_b)
+        });
         for svc in &services {
             println!("      {svc}");
         }
@@ -376,7 +496,7 @@ fn print_loot_human(
     println!();
 
     // Users grouped by source (with label normalization)
-    let unique_users = dedup_users(&state.all_users);
+    let unique_users = dedup_users(&state.all_users, &state.netbios_to_fqdn);
     println!("Users ({}):", unique_users.len());
     let mut users_by_source: HashMap<String, Vec<_>> = HashMap::new();
     for user in &unique_users {

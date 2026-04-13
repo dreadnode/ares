@@ -117,8 +117,8 @@ impl CommandBuilder {
 
         match join_result {
             Ok(Ok(Ok(output))) => {
-                let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-                let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+                let stdout = sanitize_tool_output(&output.stdout);
+                let stderr = sanitize_tool_output(&output.stderr);
                 let exit_code = output.status.code();
                 let success = output.status.success();
 
@@ -145,6 +145,20 @@ impl CommandBuilder {
             )),
         }
     }
+}
+
+/// Convert raw bytes to a clean UTF-8 string safe for JSON serialization.
+/// Strips null bytes and C0 control characters (except newline, tab, carriage return)
+/// that would cause OpenAI-compatible APIs to reject the payload.
+fn sanitize_tool_output(raw: &[u8]) -> String {
+    String::from_utf8_lossy(raw)
+        .chars()
+        .filter(|c| {
+            // Keep printable chars, newline, tab, carriage return
+            // Strip null bytes and other C0 controls that break JSON parsers
+            *c >= ' ' || *c == '\n' || *c == '\t' || *c == '\r'
+        })
+        .collect()
 }
 
 /// Convenience: run a simple command with default timeout.

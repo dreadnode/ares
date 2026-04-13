@@ -99,13 +99,21 @@ pub fn parse_netexec_smb(output: &str) -> Vec<Value> {
                     .collect::<Vec<_>>()
                     .join(" ");
 
+                // DCs have signing:True and typically run kerberos (88) + ldap (389)
+                let signing_true = line.contains("(signing:True)");
+                let mut services = vec!["445/tcp (microsoft-ds)".to_string()];
+                if signing_true {
+                    services.push("88/tcp (kerberos-sec)".to_string());
+                    services.push("389/tcp (ldap)".to_string());
+                }
+
                 hosts.push(json!({
                     "ip": part,
                     "hostname": hostname,
                     "os": os,
                     "roles": [],
-                    "services": ["445/tcp (microsoft-ds)"],
-                    "is_dc": false,
+                    "services": services,
+                    "is_dc": signing_true,
                     "owned": false,
                 }));
                 break;

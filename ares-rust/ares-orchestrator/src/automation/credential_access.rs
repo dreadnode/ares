@@ -191,7 +191,7 @@ pub async fn auto_credential_access(
             });
 
             match dispatcher
-                .throttled_submit("credential_access", "credential_access", payload, 8)
+                .throttled_submit("credential_access", "credential_access", payload, 4)
                 .await
             {
                 Ok(Some(task_id)) => {
@@ -316,7 +316,7 @@ pub async fn auto_credential_access(
         };
 
         for (dedup_key, target_ip, cred) in sd_work {
-            let priority = if cred.is_admin { 2 } else { 5 };
+            let priority = if cred.is_admin { 2 } else { 7 };
             match dispatcher
                 .request_secretsdump(&target_ip, &cred, priority)
                 .await
@@ -343,12 +343,12 @@ pub async fn auto_credential_access(
             }
         }
 
-        // --- Common password spray: per domain when users exist but no creds yet ---
-        // Mirrors Python's password_spray dispatch — doesn't wait for stall detection.
+        // --- Common password spray: per domain when no admin creds found yet ---
+        // Keep spraying common passwords until we find admin or achieve DA.
         let common_spray_work: Vec<(String, String)> = {
             let state = dispatcher.state.read().await;
-            if state.credentials.len() > 1 || state.has_domain_admin {
-                // Already have creds beyond initial — skip common spray
+            if state.has_domain_admin || state.credentials.iter().any(|c| c.is_admin) {
+                // Already have admin creds or DA — skip common spray
                 Vec::new()
             } else {
                 state
@@ -357,10 +357,6 @@ pub async fn auto_credential_access(
                     .filter(|(domain, _)| {
                         let key = format!("common:{}", domain.to_lowercase());
                         !state.is_processed(DEDUP_PASSWORD_SPRAY, &key)
-                            && state
-                                .users
-                                .iter()
-                                .any(|u| u.domain.to_lowercase() == **domain)
                     })
                     .map(|(domain, dc_ip)| (domain.clone(), dc_ip.clone()))
                     .collect()
@@ -376,24 +372,29 @@ pub async fn auto_credential_access(
                 "use_common_passwords": true,
             });
 
+            // Mark as processed BEFORE submitting to prevent duplicate deferred entries.
+            // The task will be dispatched or deferred regardless.
+            let key = format!("common:{}", domain.to_lowercase());
+            dispatcher
+                .state
+                .write()
+                .await
+                .mark_processed(DEDUP_PASSWORD_SPRAY, key.clone());
+            let _ = dispatcher
+                .state
+                .persist_dedup(&dispatcher.queue, DEDUP_PASSWORD_SPRAY, &key)
+                .await;
+
             match dispatcher
-                .throttled_submit("credential_access", "credential_access", payload, 6)
+                .throttled_submit("credential_access", "credential_access", payload, 3)
                 .await
             {
                 Ok(Some(task_id)) => {
                     info!(task_id = %task_id, domain = %domain, "Common password spray dispatched");
-                    let key = format!("common:{}", domain.to_lowercase());
-                    dispatcher
-                        .state
-                        .write()
-                        .await
-                        .mark_processed(DEDUP_PASSWORD_SPRAY, key.clone());
-                    let _ = dispatcher
-                        .state
-                        .persist_dedup(&dispatcher.queue, DEDUP_PASSWORD_SPRAY, &key)
-                        .await;
                 }
-                Ok(None) => {}
+                Ok(None) => {
+                    debug!(domain = %domain, "Common password spray deferred");
+                }
                 Err(e) => warn!(err = %e, "Failed to dispatch common password spray"),
             }
         }

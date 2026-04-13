@@ -352,6 +352,7 @@ mod tests {
             steps: 10,
             tool_calls_dispatched: 5,
             discoveries: Vec::new(),
+            tool_outputs: Vec::new(),
         };
         match process_outcome(&outcome, "inv1") {
             InvestigationOutcome::Completed { verdict, steps, .. } => {
@@ -373,6 +374,7 @@ mod tests {
             steps: 3,
             tool_calls_dispatched: 1,
             discoveries: Vec::new(),
+            tool_outputs: Vec::new(),
         };
         match process_outcome(&outcome, "inv1") {
             InvestigationOutcome::Escalated { severity, .. } => {

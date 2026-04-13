@@ -24,6 +24,15 @@ impl SharedState {
     /// Clones the relevant fields so the RwLock is released before LLM calls.
     pub async fn snapshot(&self) -> ares_llm::prompt::StateSnapshot {
         let s = self.inner.read().await;
+
+        // Compute undominated forests inline (avoids re-acquiring lock)
+        let undominated = crate::completion::compute_undominated_forests(
+            s.target.as_ref().map(|t| t.domain.as_str()),
+            s.domains.first().map(|d| d.as_str()),
+            &s.trusted_domains,
+            &s.dominated_domains,
+        );
+
         ares_llm::prompt::StateSnapshot {
             credentials: s.credentials.clone(),
             hashes: s.hashes.clone(),
@@ -36,6 +45,7 @@ impl SharedState {
             netbios_to_fqdn: s.netbios_to_fqdn.clone(),
             has_domain_admin: s.has_domain_admin,
             has_golden_ticket: s.has_golden_ticket,
+            undominated_forests: undominated,
         }
     }
 

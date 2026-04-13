@@ -39,7 +39,7 @@ pub fn definitions() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: "password_spray".into(),
-            description: "Spray a single password across all domain users. Tests one password against many accounts. Use password_policy first to check lockout thresholds.".into(),
+            description: "Spray a single password across all domain users. Tests one password against many accounts. Use password_policy first to check lockout thresholds. Uses a built-in username wordlist if no users_file is provided.".into(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -49,7 +49,7 @@ pub fn definitions() -> Vec<ToolDefinition> {
                     },
                     "users_file": {
                         "type": "string",
-                        "description": "Path to file containing usernames (one per line)"
+                        "description": "Optional path to file containing usernames (one per line). If omitted, a built-in common username list is used."
                     },
                     "password": {
                         "type": "string",
@@ -64,7 +64,7 @@ pub fn definitions() -> Vec<ToolDefinition> {
                         "description": "Optional delay between attempts to avoid lockout"
                     }
                 },
-                "required": ["target", "users_file", "password", "domain"]
+                "required": ["target", "password", "domain"]
             }),
         },
         ToolDefinition {

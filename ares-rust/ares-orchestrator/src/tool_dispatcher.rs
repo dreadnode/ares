@@ -10,12 +10,14 @@
 //! Also provides [`LocalToolDispatcher`] for in-process execution without
 //! going through Redis, useful for testing or single-binary deployments.
 
-use std::time::Duration;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use redis::AsyncCommands;
 use serde::{Deserialize, Serialize};
-use tracing::{debug, warn};
+use tokio::sync::Mutex;
+use tracing::{debug, info, warn};
 
 use ares_llm::{ToolCall, ToolExecResult};
 
@@ -31,8 +33,10 @@ const TOOL_RESULT_PREFIX: &str = "ares:tool_results";
 /// TTL for result keys (1 hour).
 const RESULT_TTL_SECS: u64 = 3600;
 
-/// Default timeout waiting for a tool result (5 minutes).
-const DEFAULT_TOOL_TIMEOUT_SECS: u64 = 300;
+/// Default timeout waiting for a tool result (25 minutes).
+/// Must exceed queue wait time + longest tool runtime (hashcat can queue
+/// behind another hashcat, so 2x runtime + buffer).
+const DEFAULT_TOOL_TIMEOUT_SECS: u64 = 1500;
 
 // ---------------------------------------------------------------------------
 // Wire format
@@ -79,6 +83,142 @@ const RECON_ROUTED_TOOLS: &[&str] = &[
     "gmsa_dump_passwords",
 ];
 
+/// Tools that authenticate against AD targets. Tool calls with these names
+/// are subject to per-credential rate limiting to avoid account lockout.
+const AUTH_BEARING_TOOLS: &[&str] = &[
+    // netexec tools (each invocation is a separate SMB/LDAP auth)
+    "ldap_search_descriptions",
+    "password_spray",
+    "username_as_password",
+    "gpp_password_finder",
+    "sysvol_script_search",
+    "password_policy",
+    "laps_dump",
+    "smbclient_spider",
+    "check_credman_entries",
+    "check_autologon_registry",
+    "domain_admin_checker",
+    "gmsa_dump_passwords",
+    // impacket tools
+    "secretsdump",
+    "secretsdump_kerberos",
+    "kerberoast",
+    "asrep_roast",
+    "lsassy",
+    "ntds_dit_extract",
+    // lateral tools (auth per target)
+    "smbexec",
+    "psexec",
+    "wmiexec",
+    "dcomexec",
+    "atexec",
+    "smbclient_kerberos_shares",
+];
+
+// ---------------------------------------------------------------------------
+// Credential auth throttle — prevents AD account lockout
+// ---------------------------------------------------------------------------
+
+/// Per-credential auth attempt tracker.
+///
+/// Tracks timestamps of auth-bearing tool dispatches keyed by `user@domain`.
+/// Before dispatching, callers must call `acquire()` which sleeps if the
+/// credential has been used too many times within the observation window.
+///
+/// Default policy: max 3 auth attempts per credential per 60-second window.
+/// This stays well under the typical AD lockout threshold (5 in 5 min).
+#[derive(Clone)]
+pub struct AuthThrottle {
+    inner: Arc<Mutex<AuthThrottleInner>>,
+}
+
+struct AuthThrottleInner {
+    /// `credential_key` → Vec of timestamps
+    attempts: std::collections::HashMap<String, Vec<Instant>>,
+    /// Max auth attempts per credential within the observation window.
+    max_attempts: usize,
+    /// Observation window for rate limiting.
+    window: Duration,
+}
+
+impl AuthThrottle {
+    pub fn new(max_attempts: usize, window: Duration) -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(AuthThrottleInner {
+                attempts: std::collections::HashMap::new(),
+                max_attempts,
+                window,
+            })),
+        }
+    }
+
+    /// Acquire permission to dispatch an auth-bearing tool call.
+    /// Sleeps if the credential has hit the rate limit within the window.
+    pub async fn acquire(&self, credential_key: &str) {
+        loop {
+            let sleep_dur = {
+                let mut inner = self.inner.lock().await;
+                let now = Instant::now();
+                let max_attempts = inner.max_attempts;
+                let window = inner.window;
+
+                let timestamps = inner
+                    .attempts
+                    .entry(credential_key.to_string())
+                    .or_default();
+
+                // Prune expired entries
+                timestamps.retain(|t| now.duration_since(*t) < window);
+
+                if timestamps.len() < max_attempts {
+                    // Under the limit — record this attempt and proceed
+                    timestamps.push(now);
+                    return;
+                }
+
+                // Over the limit — calculate how long to wait until the oldest
+                // attempt falls outside the window
+                let oldest = timestamps[0];
+                let elapsed = now.duration_since(oldest);
+                if elapsed >= window {
+                    // Edge case: already expired, prune and retry
+                    timestamps.remove(0);
+                    timestamps.push(now);
+                    return;
+                }
+
+                window - elapsed + Duration::from_millis(100)
+            };
+
+            info!(
+                credential = credential_key,
+                wait_secs = sleep_dur.as_secs_f32(),
+                "Auth throttle: delaying tool dispatch to avoid account lockout"
+            );
+            tokio::time::sleep(sleep_dur).await;
+        }
+    }
+}
+
+/// Extract a credential key from tool call arguments for rate limiting.
+/// Returns `Some("user@domain")` if the tool authenticates with credentials.
+fn extract_credential_key(call: &ToolCall) -> Option<String> {
+    if !AUTH_BEARING_TOOLS.contains(&call.name.as_str()) {
+        return None;
+    }
+    let username = call.arguments.get("username").and_then(|v| v.as_str())?;
+    let domain = call
+        .arguments
+        .get("domain")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown");
+    Some(format!(
+        "{}@{}",
+        username.to_lowercase(),
+        domain.to_lowercase()
+    ))
+}
+
 /// Resolve the actual worker queue for a tool call.
 ///
 /// Most tools go to the calling agent's role queue. Netexec-dependent tools
@@ -101,14 +241,16 @@ pub struct RedisToolDispatcher {
     queue: TaskQueue,
     tool_timeout: Duration,
     operation_id: String,
+    auth_throttle: AuthThrottle,
 }
 
 impl RedisToolDispatcher {
-    pub fn new(queue: TaskQueue, operation_id: String) -> Self {
+    pub fn new(queue: TaskQueue, operation_id: String, auth_throttle: AuthThrottle) -> Self {
         Self {
             queue,
             tool_timeout: Duration::from_secs(DEFAULT_TOOL_TIMEOUT_SECS),
             operation_id,
+            auth_throttle,
         }
     }
 
@@ -168,6 +310,11 @@ impl ares_llm::ToolDispatcher for RedisToolDispatcher {
         task_id: &str,
         call: &ToolCall,
     ) -> Result<ToolExecResult> {
+        // Rate-limit auth-bearing tools to prevent AD account lockout
+        if let Some(cred_key) = extract_credential_key(call) {
+            self.auth_throttle.acquire(&cred_key).await;
+        }
+
         let call_id = format!("{}_{}", call.name, uuid::Uuid::new_v4().simple());
 
         let request = ToolExecRequest {
@@ -265,11 +412,59 @@ impl ares_llm::ToolDispatcher for RedisToolDispatcher {
 ///
 /// Useful for testing, single-binary deployments, or when workers are
 /// colocated in the same process as the orchestrator.
-pub struct LocalToolDispatcher;
+pub struct LocalToolDispatcher {
+    queue: TaskQueue,
+    operation_id: String,
+    auth_throttle: AuthThrottle,
+}
 
 impl LocalToolDispatcher {
-    pub fn new() -> Self {
-        Self
+    pub fn new(queue: TaskQueue, operation_id: String, auth_throttle: AuthThrottle) -> Self {
+        Self {
+            queue,
+            operation_id,
+            auth_throttle,
+        }
+    }
+
+    /// Push discoveries to the real-time discovery list (same as RedisToolDispatcher).
+    async fn push_realtime_discoveries(&self, discoveries: &serde_json::Value, tool_name: &str) {
+        let discovery_key = format!("{DISCOVERY_KEY_PREFIX}:{}", self.operation_id);
+        let mut conn = self.queue.connection();
+
+        let type_map: &[(&str, &str)] = &[
+            ("hosts", "host"),
+            ("credentials", "credential"),
+            ("hashes", "hash"),
+            ("vulnerabilities", "vulnerability"),
+            ("shares", "share"),
+            ("discovered_users", "user"),
+        ];
+
+        let mut pushed = 0usize;
+        for &(key, disc_type) in type_map {
+            if let Some(items) = discoveries.get(key).and_then(|v| v.as_array()) {
+                for item in items {
+                    let entry = serde_json::json!({
+                        "type": disc_type,
+                        "data": item,
+                        "source_tool": tool_name,
+                    });
+                    if let Ok(json) = serde_json::to_string(&entry) {
+                        let _: Result<(), _> = conn.lpush(&discovery_key, &json).await;
+                        pushed += 1;
+                    }
+                }
+            }
+        }
+
+        if pushed > 0 {
+            debug!(
+                count = pushed,
+                tool = tool_name,
+                "Pushed real-time discoveries (local)"
+            );
+        }
     }
 }
 
@@ -281,6 +476,11 @@ impl ares_llm::ToolDispatcher for LocalToolDispatcher {
         _task_id: &str,
         call: &ToolCall,
     ) -> Result<ToolExecResult> {
+        // Rate-limit auth-bearing tools to prevent AD account lockout
+        if let Some(cred_key) = extract_credential_key(call) {
+            self.auth_throttle.acquire(&cred_key).await;
+        }
+
         debug!(tool = %call.name, "Executing tool locally");
 
         match ares_tools::dispatch(&call.name, &call.arguments).await {
@@ -301,6 +501,11 @@ impl ares_llm::ToolDispatcher for LocalToolDispatcher {
                 } else {
                     Some(discoveries)
                 };
+
+                // Push discoveries to real-time list immediately (like RedisToolDispatcher)
+                if let Some(ref disc) = discoveries {
+                    self.push_realtime_discoveries(disc, &call.name).await;
+                }
 
                 Ok(ToolExecResult {
                     output: combined,

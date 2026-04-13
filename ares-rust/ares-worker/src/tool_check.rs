@@ -4,163 +4,17 @@
 //! for missing tools and optionally report the inventory to the orchestrator
 //! via Redis.
 //!
-//! Expected tools per role are defined by Ansible provisioning — see
-//! `docs/red.md` § "Installed Tools by Agent Role" for the authoritative
-//! reference. Binary names here match what the Rust tool dispatch
-//! (`ares-tools`) actually invokes via `CommandBuilder::new`.
+//! Tool lists are generated at compile time from `docs/tools.yaml` by
+//! `build.rs`. See that file for the authoritative reference of expected
+//! tools per role.
 
 use std::collections::BTreeMap;
 
 use tracing::{info, warn};
 
-/// All worker roles that have tool requirements.
-#[cfg(test)]
-const WORKER_ROLES: &[&str] = &[
-    "recon",
-    "credential_access",
-    "cracker",
-    "acl",
-    "privesc",
-    "lateral",
-    "coercion",
-];
-
-/// Tools expected on each worker role's container image.
-///
-/// Source of truth: `docs/red.md` § "Installed Tools by Agent Role",
-/// cross-referenced with `ares-tools/src/` `CommandBuilder::new` calls.
-fn tools_for_role(role: &str) -> &'static [&'static str] {
-    match role {
-        // Provisioned by: ansible/playbooks/ares/recon.yml
-        "recon" => &[
-            // Network scanning
-            "nmap",
-            // SMB/AD enumeration
-            "netexec",
-            "enum4linux",
-            "enum4linux-ng",
-            "rpcclient",
-            // LDAP
-            "ldapsearch",
-            // DNS
-            "dig",
-            "nslookup",
-            "whois",
-            "adidnsdump",
-            // AD tools
-            "bloodhound-python",
-            "certipy",
-            // Impacket
-            "impacket-GetNPUsers",
-            "impacket-GetUserSPNs",
-        ],
-        // Provisioned by: ansible/playbooks/ares/credential_access.yml
-        // NOTE: netexec is NOT installed on this agent (only on RECON)
-        "credential_access" => &[
-            // SMB
-            "smbclient",
-            "rpcclient",
-            // Password spraying
-            "sprayhound",
-            // Kerberoasting
-            "targetedKerberoast",
-            // Credential extraction
-            "lsassy",
-            "gMSADumper.py",
-            // Impacket
-            "impacket-GetNPUsers",
-            "impacket-GetUserSPNs",
-            "impacket-secretsdump",
-        ],
-        // Provisioned by: ansible/playbooks/ares/cracker.yml
-        "cracker" => &["hashcat", "john"],
-        // Provisioned by: ansible/playbooks/ares/acl_abuse.yml
-        "acl" => &[
-            // ACL abuse
-            "bloodyAD",
-            "pywhisker",
-            // Kerberoasting
-            "targetedKerberoast",
-            // SMB
-            "rpcclient",
-            // Impacket
-            "impacket-dacledit",
-            // Alternate script names (some installs use .py suffix)
-            "dacledit.py",
-        ],
-        // Provisioned by: ansible/playbooks/ares/privesc.yml
-        "privesc" => &[
-            // ADCS
-            "certipy",
-            // Credential extraction
-            "lsassy",
-            // CVE exploits
-            "noPac.py",
-            "CVE-2021-1675.py",
-            // Kerberos relay toolkit (krbrelayx)
-            "printerbug.py",
-            "addspn.py",
-            "dnstool.py",
-            // Delegation & kerberos
-            "KrbRelayUp",
-            "pygpoabuse",
-            "raiseChild.py",
-            // Impacket
-            "impacket-findDelegation",
-            "impacket-getST",
-            "impacket-getTGT",
-            "impacket-rbcd",
-            "impacket-addcomputer",
-            "impacket-lookupsid",
-            "impacket-mssqlclient",
-            "impacket-ticketer",
-            "impacket-secretsdump",
-            "impacket-psexec",
-        ],
-        // Provisioned by: ansible/playbooks/ares/lateral_movement.yml
-        "lateral" => &[
-            // WinRM
-            "evil-winrm",
-            // RDP
-            "xfreerdp",
-            // SSH
-            "sshpass",
-            // SMB
-            "smbclient",
-            // Pivoting
-            "proxychains4",
-            // Pass-the-Hash
-            "pth-winexe",
-            "pth-smbclient",
-            "pth-rpcclient",
-            "pth-net",
-            "pth-wmic",
-            // Impacket
-            "impacket-psexec",
-            "impacket-wmiexec",
-            "impacket-smbexec",
-            "impacket-secretsdump",
-        ],
-        // Provisioned by: ansible/playbooks/ares/coercion.yml
-        "coercion" => &[
-            // Poisoning
-            "responder",
-            "mitm6",
-            // Coercion
-            "coercer",
-            "petitpotam",
-            "dfscoerce",
-            // Kerberos relay toolkit (krbrelayx)
-            "printerbug.py",
-            "addspn.py",
-            "dnstool.py",
-            // NTLM relay
-            "impacket-ntlmrelayx",
-        ],
-        // ToolExec workers may handle any role's tools
-        _ => &[],
-    }
-}
+// Pull in `WORKER_ROLES`, `tools_for_role()`, and `ALL_BINARIES` generated
+// by build.rs from docs/tools.yaml.
+include!(concat!(env!("OUT_DIR"), "/tool_tables.rs"));
 
 /// Check which tools are available in $PATH for the given role.
 ///
@@ -278,9 +132,8 @@ mod tests {
     // ---------------------------------------------------------------
     // Per-role expected tool assertions.
     //
-    // These mirror the "Installed Tools by Agent Role" tables in
-    // docs/red.md. When Ansible provisioning changes, update both
-    // docs/red.md and these tests.
+    // These validate that docs/tools.yaml contains the expected tools.
+    // When Ansible provisioning changes, update docs/tools.yaml.
     // ---------------------------------------------------------------
 
     #[test]

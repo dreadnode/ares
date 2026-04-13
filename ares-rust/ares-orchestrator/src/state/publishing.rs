@@ -169,6 +169,10 @@ impl SharedState {
     }
 
     /// Add a hash to state and Redis (with dedup).
+    ///
+    /// When a `krbtgt` NTLM hash is stored, `has_domain_admin` is automatically
+    /// set — mirroring Python's `add_hash()` behaviour so that `auto_golden_ticket`
+    /// triggers without requiring the LLM to emit a structured JSON payload.
     pub async fn publish_hash(&self, queue: &TaskQueue, hash: Hash) -> Result<bool> {
         let operation_id = {
             let state = self.inner.read().await;
@@ -178,10 +182,102 @@ impl SharedState {
         let mut conn = queue.connection();
         let added = reader.add_hash(&mut conn, &hash).await?;
         if added {
+            let is_krbtgt = hash.username.to_lowercase() == "krbtgt"
+                && hash.hash_type.to_lowercase().contains("ntlm");
+            let hash_domain = hash.domain.clone();
             let mut state = self.inner.write().await;
             state.hashes.push(hash);
+
+            // Track per-domain domination when krbtgt NTLM hash arrives
+            if is_krbtgt {
+                let krbtgt_domain = if hash_domain.is_empty() {
+                    state.domains.first().cloned().unwrap_or_default()
+                } else {
+                    hash_domain.to_lowercase()
+                };
+                if !krbtgt_domain.is_empty() {
+                    state.dominated_domains.insert(krbtgt_domain.clone());
+                    tracing::info!(domain = %krbtgt_domain, "Domain dominated (krbtgt hash obtained)");
+                }
+
+                // Auto-set domain admin when first krbtgt NTLM hash arrives (matches Python)
+                if !state.has_domain_admin {
+                    drop(state);
+                    let path = Some("secretsdump → krbtgt NTLM hash".to_string());
+                    if let Err(e) = self.set_domain_admin(queue, path).await {
+                        tracing::warn!(err = %e, "Failed to auto-set domain admin from krbtgt hash");
+                    } else {
+                        tracing::info!(
+                            "🎯 Domain Admin auto-set from krbtgt NTLM hash in publish_hash"
+                        );
+                    }
+                }
+            }
         }
         Ok(added)
+    }
+
+    /// Update a hash's `cracked_password` field in memory and Redis.
+    ///
+    /// Finds the first hash matching the given username and domain (case-insensitive)
+    /// that has no cracked password yet, sets it, and persists the change to the Redis
+    /// HASH by scanning fields and updating the matching entry.
+    pub async fn update_hash_cracked_password(
+        &self,
+        queue: &TaskQueue,
+        username: &str,
+        domain: &str,
+        password: &str,
+    ) -> Result<bool> {
+        // Update in-memory state and capture the updated hash for Redis persist
+        let (op_id, hash_type) = {
+            let mut state = self.inner.write().await;
+            let idx = state.hashes.iter().position(|h| {
+                h.username.eq_ignore_ascii_case(username)
+                    && h.domain.eq_ignore_ascii_case(domain)
+                    && h.cracked_password.is_none()
+            });
+            match idx {
+                Some(i) => {
+                    state.hashes[i].cracked_password = Some(password.to_string());
+                    let ht = state.hashes[i].hash_type.clone();
+                    (state.operation_id.clone(), ht)
+                }
+                None => return Ok(false),
+            }
+        };
+
+        // Persist to Redis HASH: scan fields, find the matching entry, update it
+        let hash_key = format!("{}:{}:{}", state::KEY_PREFIX, op_id, state::KEY_HASHES,);
+        let mut conn = queue.connection();
+        let entries: std::collections::HashMap<String, String> =
+            redis::AsyncCommands::hgetall(&mut conn, &hash_key)
+                .await
+                .unwrap_or_default();
+        for (field, value) in &entries {
+            if let Ok(mut h) = serde_json::from_str::<Hash>(value) {
+                if h.username.eq_ignore_ascii_case(username)
+                    && h.domain.eq_ignore_ascii_case(domain)
+                    && h.cracked_password.is_none()
+                {
+                    h.cracked_password = Some(password.to_string());
+                    let updated_json = serde_json::to_string(&h).unwrap_or_default();
+                    let _: Result<(), _> =
+                        redis::AsyncCommands::hset(&mut conn, &hash_key, field, &updated_json)
+                            .await;
+                    break;
+                }
+            }
+        }
+
+        tracing::info!(
+            username = %username,
+            domain = %domain,
+            hash_type = %hash_type,
+            "Hash cracked_password updated in state and Redis"
+        );
+
+        Ok(true)
     }
 
     /// Add a host to state and Redis.
@@ -195,8 +291,9 @@ impl SharedState {
     /// domain suffix is automatically extracted and added to `state.domains`
     /// (matches Python's `add_host()` behavior).
     pub async fn publish_host(&self, queue: &TaskQueue, host: Host) -> Result<bool> {
-        // Strip AWS internal hostnames — they're useless for AD operations
+        // Normalize hostname: strip trailing dots and AWS internal names
         let mut host = host;
+        host.hostname = host.hostname.trim_end_matches('.').to_lowercase();
         if is_aws_hostname(&host.hostname) {
             host.hostname = String::new();
         }
@@ -207,7 +304,8 @@ impl SharedState {
             && host.hostname.contains('.')
             && !is_aws_hostname(&host.hostname)
         {
-            let parts: Vec<&str> = host.hostname.split('.').collect();
+            let hostname_clean = host.hostname.trim_end_matches('.');
+            let parts: Vec<&str> = hostname_clean.split('.').collect();
             if parts.len() >= 3 {
                 let domain = parts[1..].join(".").to_lowercase();
                 // Reject AWS/cloud domains
@@ -239,12 +337,31 @@ impl SharedState {
             }
         }
 
-        // Check for existing host with same IP and merge if the new entry
-        // brings richer data (DC detection, more services, hostname).
+        // Check for existing host with same IP or hostname and merge if the
+        // new entry brings richer data (DC detection, more services, hostname).
         // Returns (needs_dc_registration, was_merged_and_changed).
         let (needs_dc_registration, merged_changed) = {
             let mut state = self.inner.write().await;
-            if let Some(existing) = state.hosts.iter_mut().find(|h| h.ip == host.ip) {
+            // Look up by IP first, then fall back to hostname match
+            let existing_idx = state
+                .hosts
+                .iter()
+                .position(|h| !h.ip.is_empty() && h.ip == host.ip)
+                .or_else(|| {
+                    if !host.hostname.is_empty() {
+                        state.hosts.iter().position(|h| {
+                            !h.hostname.is_empty()
+                                && h.hostname.eq_ignore_ascii_case(&host.hostname)
+                        })
+                    } else {
+                        None
+                    }
+                });
+            if let Some(existing) = existing_idx.map(|i| &mut state.hosts[i]) {
+                // Merge IP if incoming has one and existing doesn't
+                if !host.ip.is_empty() && existing.ip.is_empty() {
+                    existing.ip = host.ip.clone();
+                }
                 let new_is_dc = host.is_dc || host.detect_dc();
                 let was_dc = existing.is_dc;
                 let had_hostname = !existing.hostname.is_empty();
@@ -749,6 +866,27 @@ impl SharedState {
             .netbios_to_fqdn
             .insert(netbios.to_string(), fqdn.to_string());
         Ok(())
+    }
+
+    /// Add a trust relationship to state and Redis.
+    pub async fn publish_trust_info(
+        &self,
+        queue: &TaskQueue,
+        trust: ares_core::models::TrustInfo,
+    ) -> Result<bool> {
+        let operation_id = {
+            let state = self.inner.read().await;
+            state.operation_id.clone()
+        };
+        let reader = RedisStateReader::new(operation_id);
+        let mut conn = queue.connection();
+        let added = reader.add_trusted_domain(&mut conn, &trust).await?;
+        if added {
+            let domain_key = trust.domain.to_lowercase();
+            let mut state = self.inner.write().await;
+            state.trusted_domains.insert(domain_key, trust);
+        }
+        Ok(added)
     }
 
     /// Set has_domain_admin flag and persist to Redis.

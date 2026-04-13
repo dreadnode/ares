@@ -225,6 +225,8 @@ impl RedisStateReader {
             meta.target_ips.clone()
         };
 
+        let trusted_domains = self.get_trusted_domains(conn).await.unwrap_or_default();
+
         let state = SharedRedTeamState {
             operation_id: self.operation_id.clone(),
             target,
@@ -245,6 +247,7 @@ impl RedisStateReader {
             domain_admin_path: meta.domain_admin_path,
             domain_controllers: dc_map,
             netbios_to_fqdn: netbios_map,
+            trusted_domains,
         };
 
         Ok(Some(state))
@@ -523,6 +526,37 @@ impl RedisStateReader {
             .filter_map(|(k, v)| v.parse::<i64>().ok().map(|c| (k, c)))
             .collect();
         Ok(result)
+    }
+
+    /// Load trusted domains from `ares:op:{id}:trusted_domains` HASH.
+    pub async fn get_trusted_domains(
+        &self,
+        conn: &mut impl AsyncCommands,
+    ) -> Result<HashMap<String, crate::models::TrustInfo>, redis::RedisError> {
+        let items: HashMap<String, String> = conn.hgetall(self.key(KEY_TRUSTED_DOMAINS)).await?;
+        let mut result = HashMap::with_capacity(items.len());
+        for (domain, json_str) in items {
+            if let Some(trust) = try_deserialize(&json_str, &format!("trust {domain}")) {
+                result.insert(domain, trust);
+            }
+        }
+        Ok(result)
+    }
+
+    /// Add a trust relationship to `ares:op:{id}:trusted_domains` HASH.
+    pub async fn add_trusted_domain(
+        &self,
+        conn: &mut impl AsyncCommands,
+        trust: &crate::models::TrustInfo,
+    ) -> Result<bool, redis::RedisError> {
+        let key = self.key(KEY_TRUSTED_DOMAINS);
+        let domain_key = trust.domain.to_lowercase();
+        let data = serde_json::to_string(trust).unwrap_or_default();
+        let added: bool = conn.hset_nx(&key, &domain_key, &data).await?;
+        if added {
+            let _: () = conn.expire(&key, 86400).await?;
+        }
+        Ok(added)
     }
 
     /// Returns the key prefix for this operation: `ares:op:{op_id}`

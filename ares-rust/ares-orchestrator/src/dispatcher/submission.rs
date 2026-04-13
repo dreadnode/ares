@@ -2,7 +2,7 @@
 
 use anyhow::Result;
 use chrono::Utc;
-use serde_json::json;
+use serde_json::{json, Value};
 use std::sync::Arc;
 use tracing::{debug, info, warn};
 
@@ -94,7 +94,7 @@ impl Dispatcher {
     ///
     /// Routes the task to the Rust LLM agent loop. If the task type
     /// has no mapped role, logs a warning and drops the task.
-    pub(super) async fn do_submit(
+    pub async fn do_submit(
         &self,
         task_type: &str,
         target_role: &str,
@@ -133,6 +133,28 @@ impl Dispatcher {
         role: ares_llm::tool_registry::AgentRole,
         payload: serde_json::Value,
     ) -> Result<Option<String>> {
+        // Per-credential concurrency gate: if too many tasks are already
+        // in-flight for this credential, defer instead of spawning another.
+        let cred_key = super::credential_key_from_payload(&payload);
+        if let Some(ref key) = cred_key {
+            if !self.credential_inflight.try_acquire(key).await {
+                info!(
+                    credential = key.as_str(),
+                    task_type, "Credential concurrency limit reached, deferring task"
+                );
+                let task = DeferredTask {
+                    priority: 3,
+                    enqueue_time: Utc::now().timestamp() as f64,
+                    task_type: task_type.to_string(),
+                    target_role: target_role.to_string(),
+                    payload,
+                    source_agent: "orchestrator".to_string(),
+                };
+                let _ = self.deferred.enqueue(&task).await;
+                return Ok(None);
+            }
+        }
+
         let task_id = format!(
             "{}_{}",
             task_type,
@@ -193,6 +215,8 @@ impl Dispatcher {
         let queue = self.queue.clone();
         let tid = task_id.clone();
         let tt = task_type.to_string();
+        let cred_inflight = self.credential_inflight.clone();
+        let cred_key_owned = cred_key.clone();
         tokio::spawn(async move {
             let outcome = runner.execute_task(&tt, &tid, role, &payload).await;
 
@@ -209,15 +233,95 @@ impl Dispatcher {
                         Some(ares_tools::parsers::merge_discoveries(&outcome.discoveries))
                     };
 
+                    // Collect raw tool outputs for secondary regex extraction
+                    let tool_outputs_json: Vec<Value> = outcome
+                        .tool_outputs
+                        .iter()
+                        .map(|s| Value::String(s.clone()))
+                        .collect();
+
                     match &outcome.reason {
                         LoopEndReason::TaskComplete { result, .. } => {
-                            let mut result_json = json!({
-                                "summary": result,
-                                "steps": outcome.steps,
-                                "tool_calls": outcome.tool_calls_dispatched,
-                            });
+                            // The result may be a JSON string (serialized object from
+                            // the LLM) or plain text. If it parses as JSON, merge its
+                            // fields into the result payload so extract_discoveries()
+                            // can find any LLM-reported hosts/credentials.
+                            let mut result_json =
+                                if let Ok(parsed) = serde_json::from_str::<Value>(result) {
+                                    if parsed.is_object() {
+                                        let mut obj = parsed;
+                                        obj["steps"] = json!(outcome.steps);
+                                        obj["tool_calls"] = json!(outcome.tool_calls_dispatched);
+                                        obj
+                                    } else {
+                                        json!({
+                                            "summary": result,
+                                            "steps": outcome.steps,
+                                            "tool_calls": outcome.tool_calls_dispatched,
+                                        })
+                                    }
+                                } else {
+                                    json!({
+                                        "summary": result,
+                                        "steps": outcome.steps,
+                                        "tool_calls": outcome.tool_calls_dispatched,
+                                    })
+                                };
+                            // Strip ALL discovery-like keys from the LLM's
+                            // task_complete result. The LLM can hallucinate
+                            // hosts, credentials, hashes, users, vulns, trusts,
+                            // etc. Only parser-extracted discoveries (from tool
+                            // output regex in ares-tools) are authoritative.
+                            //
+                            // Keys stripped at both top-level and inside
+                            // "discoveries":
+                            //   - discovered_users, hosts, credentials,
+                            //     credential, hashes, vulnerabilities,
+                            //     vulnerability, shares, trusted_domains
+                            //   - has_domain_admin (prevents LLM from faking DA)
+                            //   - cracked_password (prevents fake cred injection)
+                            const STRIPPED_DISCOVERY_KEYS: &[&str] = &[
+                                "discovered_users",
+                                "hosts",
+                                "credentials",
+                                "credential",
+                                "hashes",
+                                "vulnerabilities",
+                                "vulnerability",
+                                "shares",
+                                "trusted_domains",
+                                "has_domain_admin",
+                                "cracked_password",
+                            ];
+                            if let Some(obj) = result_json.as_object_mut() {
+                                for key in STRIPPED_DISCOVERY_KEYS {
+                                    obj.remove(*key);
+                                }
+                                if let Some(disc) = obj.get_mut("discoveries") {
+                                    if let Some(d) = disc.as_object_mut() {
+                                        for key in STRIPPED_DISCOVERY_KEYS {
+                                            d.remove(*key);
+                                        }
+                                    }
+                                }
+                            }
+
+                            // Merge parser-extracted discoveries (from tool outputs).
+                            // These are the only trusted source for all
+                            // discovery types.
                             if let Some(disc) = merged_discoveries {
-                                result_json["discoveries"] = disc;
+                                if result_json.get("discoveries").is_some() {
+                                    let llm_disc = result_json["discoveries"].take();
+                                    let combined =
+                                        ares_tools::parsers::merge_discoveries(&[llm_disc, disc]);
+                                    result_json["discoveries"] = combined;
+                                } else {
+                                    result_json["discoveries"] = disc;
+                                }
+                            }
+                            if !tool_outputs_json.is_empty() {
+                                result_json["tool_outputs"] =
+                                    Value::Array(tool_outputs_json.clone());
                             }
                             TaskResult {
                                 task_id: tid.clone(),
@@ -229,15 +333,30 @@ impl Dispatcher {
                                 agent_name: Some(tt.clone()),
                             }
                         }
-                        LoopEndReason::RequestAssistance { issue, context } => TaskResult {
-                            task_id: tid.clone(),
-                            success: false,
-                            result: None,
-                            error: Some(format!("Assistance needed: {issue} (context: {context})")),
-                            completed_at: Some(Utc::now()),
-                            worker_pod: Some("rust-llm-runner".into()),
-                            agent_name: Some(tt.clone()),
-                        },
+                        LoopEndReason::RequestAssistance { issue, context } => {
+                            let mut result_json = json!({
+                                "steps": outcome.steps,
+                                "tool_calls": outcome.tool_calls_dispatched,
+                            });
+                            if let Some(disc) = merged_discoveries {
+                                result_json["discoveries"] = disc;
+                            }
+                            if !tool_outputs_json.is_empty() {
+                                result_json["tool_outputs"] =
+                                    Value::Array(tool_outputs_json.clone());
+                            }
+                            TaskResult {
+                                task_id: tid.clone(),
+                                success: false,
+                                result: Some(result_json),
+                                error: Some(format!(
+                                    "Assistance needed: {issue} (context: {context})"
+                                )),
+                                completed_at: Some(Utc::now()),
+                                worker_pod: Some("rust-llm-runner".into()),
+                                agent_name: Some(tt.clone()),
+                            }
+                        }
                         LoopEndReason::MaxSteps => {
                             let mut result_json = json!({
                                 "steps": outcome.steps,
@@ -245,6 +364,10 @@ impl Dispatcher {
                             });
                             if let Some(disc) = merged_discoveries {
                                 result_json["discoveries"] = disc;
+                            }
+                            if !tool_outputs_json.is_empty() {
+                                result_json["tool_outputs"] =
+                                    Value::Array(tool_outputs_json.clone());
                             }
                             TaskResult {
                                 task_id: tid.clone(),
@@ -261,6 +384,10 @@ impl Dispatcher {
                             if let Some(disc) = merged_discoveries {
                                 result_json["discoveries"] = disc;
                             }
+                            if !tool_outputs_json.is_empty() {
+                                result_json["tool_outputs"] =
+                                    Value::Array(tool_outputs_json.clone());
+                            }
                             TaskResult {
                                 task_id: tid.clone(),
                                 success: true,
@@ -271,15 +398,28 @@ impl Dispatcher {
                                 agent_name: Some(tt.clone()),
                             }
                         }
-                        LoopEndReason::MaxTokens => TaskResult {
-                            task_id: tid.clone(),
-                            success: false,
-                            result: None,
-                            error: Some("Agent hit max tokens".into()),
-                            completed_at: Some(Utc::now()),
-                            worker_pod: Some("rust-llm-runner".into()),
-                            agent_name: Some(tt.clone()),
-                        },
+                        LoopEndReason::MaxTokens => {
+                            let mut result_json = json!({
+                                "steps": outcome.steps,
+                                "tool_calls": outcome.tool_calls_dispatched,
+                            });
+                            if let Some(disc) = merged_discoveries {
+                                result_json["discoveries"] = disc;
+                            }
+                            if !tool_outputs_json.is_empty() {
+                                result_json["tool_outputs"] =
+                                    Value::Array(tool_outputs_json.clone());
+                            }
+                            TaskResult {
+                                task_id: tid.clone(),
+                                success: false,
+                                result: Some(result_json),
+                                error: Some("Agent hit max tokens".into()),
+                                completed_at: Some(Utc::now()),
+                                worker_pod: Some("rust-llm-runner".into()),
+                                agent_name: Some(tt.clone()),
+                            }
+                        }
                         LoopEndReason::Error(err) => TaskResult {
                             task_id: tid.clone(),
                             success: false,
@@ -301,6 +441,11 @@ impl Dispatcher {
                     agent_name: Some(tt.clone()),
                 },
             };
+
+            // Release per-credential concurrency slot
+            if let Some(ref key) = cred_key_owned {
+                cred_inflight.release(key).await;
+            }
 
             // Push result to the normal result queue so the result consumer picks it up
             if let Err(e) = queue.send_result(&tid, &result).await {

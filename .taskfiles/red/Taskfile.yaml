@@ -1124,7 +1124,7 @@ tasks:
       OPERATION_ID: '{{.OPERATION_ID | default ""}}'
       RESUME: '{{.RESUME | default "false"}}'
       TARGET_ENV: '{{.TARGET_ENV | default "staging"}}'
-      EC2_NAME: '{{.EC2_NAME | default "ares-tools"}}'
+      EC2_NAME: '{{.EC2_NAME | default "kali-ares"}}'
       EC2_PROFILE: '{{.EC2_PROFILE | default "lab"}}'
       EC2_REGION: '{{.EC2_REGION | default "us-west-1"}}'
       RESOLVED_TARGETS:
@@ -1271,6 +1271,7 @@ tasks:
               -e "s|__DREADNODE_PROJECT__|{{.DREADNODE_PROJECT}}|" \
               -e "s|__GRAFANA_TOKEN__|${GRAFANA_SERVICE_ACCOUNT_TOKEN:-}|" \
               -e "s|__GRAFANA_URL__|{{.GRAFANA_URL}}|" \
+              -e "s|__ARES_LLM_MODEL__|{{.MODEL}}|" \
               .taskfiles/ec2/scripts/launch-orchestrator.sh.tmpl > "$ORCH_SCRIPT"
           jq -Rs '{"commands": [.]}' < "$ORCH_SCRIPT" > "$ORCH_PARAMS"
 
