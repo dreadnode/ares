@@ -4,15 +4,15 @@
 //! IDs, tactic names, and attack phases — used as span attributes for
 //! observability dashboards.
 
-use once_cell::sync::Lazy;
 use std::collections::HashMap;
+use std::sync::LazyLock;
 
 // =============================================================================
 // Role → Tactic
 // =============================================================================
 
 /// Red team agent role → primary MITRE tactic.
-pub static ROLE_TO_TACTIC: Lazy<HashMap<&str, &str>> = Lazy::new(|| {
+pub static ROLE_TO_TACTIC: LazyLock<HashMap<&str, &str>> = LazyLock::new(|| {
     HashMap::from([
         ("orchestrator", "command-and-control"),
         ("recon", "discovery"),
@@ -26,7 +26,7 @@ pub static ROLE_TO_TACTIC: Lazy<HashMap<&str, &str>> = Lazy::new(|| {
 });
 
 /// Blue team agent role → investigative tactic.
-pub static BLUE_ROLE_TO_TACTIC: Lazy<HashMap<&str, &str>> = Lazy::new(|| {
+pub static BLUE_ROLE_TO_TACTIC: LazyLock<HashMap<&str, &str>> = LazyLock::new(|| {
     HashMap::from([
         ("orchestrator", "collection"),
         ("triage", "discovery"),
@@ -40,7 +40,7 @@ pub static BLUE_ROLE_TO_TACTIC: Lazy<HashMap<&str, &str>> = Lazy::new(|| {
 // =============================================================================
 
 /// Red team agent role → attack phase.
-pub static ROLE_TO_PHASE: Lazy<HashMap<&str, &str>> = Lazy::new(|| {
+pub static ROLE_TO_PHASE: LazyLock<HashMap<&str, &str>> = LazyLock::new(|| {
     HashMap::from([
         ("orchestrator", "coordination"),
         ("recon", "reconnaissance"),
@@ -54,7 +54,7 @@ pub static ROLE_TO_PHASE: Lazy<HashMap<&str, &str>> = Lazy::new(|| {
 });
 
 /// Blue team agent role → investigation phase.
-pub static BLUE_ROLE_TO_PHASE: Lazy<HashMap<&str, &str>> = Lazy::new(|| {
+pub static BLUE_ROLE_TO_PHASE: LazyLock<HashMap<&str, &str>> = LazyLock::new(|| {
     HashMap::from([
         ("orchestrator", "coordination"),
         ("triage", "initial-triage"),
@@ -68,7 +68,7 @@ pub static BLUE_ROLE_TO_PHASE: Lazy<HashMap<&str, &str>> = Lazy::new(|| {
 // =============================================================================
 
 /// Tool name → MITRE ATT&CK technique ID.
-pub static TOOL_TO_TECHNIQUE: Lazy<HashMap<&str, &str>> = Lazy::new(|| {
+pub static TOOL_TO_TECHNIQUE: LazyLock<HashMap<&str, &str>> = LazyLock::new(|| {
     HashMap::from([
         // Reconnaissance / Discovery
         ("nmap_scan", "T1046"),
@@ -166,7 +166,7 @@ pub static TOOL_TO_TECHNIQUE: Lazy<HashMap<&str, &str>> = Lazy::new(|| {
 // =============================================================================
 
 /// Tool name → toolset category (for dashboard grouping).
-pub static TOOL_TO_CATEGORY: Lazy<HashMap<&str, &str>> = Lazy::new(|| {
+pub static TOOL_TO_CATEGORY: LazyLock<HashMap<&str, &str>> = LazyLock::new(|| {
     HashMap::from([
         // NetworkEnumerationTools
         ("nmap_scan", "NetworkEnumerationTools"),
@@ -285,7 +285,7 @@ pub fn get_tool_role(tool_name: &str) -> Option<&'static str> {
 }
 
 /// Tool category → fallback tactic.
-pub static TOOL_CATEGORY_TO_TACTIC: Lazy<HashMap<&str, &str>> = Lazy::new(|| {
+pub static TOOL_CATEGORY_TO_TACTIC: LazyLock<HashMap<&str, &str>> = LazyLock::new(|| {
     HashMap::from([
         ("NetworkEnumerationTools", "discovery"),
         ("BloodHoundTools", "discovery"),

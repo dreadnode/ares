@@ -959,6 +959,114 @@ tasks:
           exit 1
         fi
 
+  report:
+    desc: "Generate and fetch report from EC2 (usage: task ec2:report [EC2_NAME=kali-ares] [LATEST=true] [OPERATION_ID=op-xxx] [REGENERATE=false])"
+    silent: true
+    vars:
+      OPERATION_ID: '{{.OPERATION_ID | default ""}}'
+      LATEST: '{{.LATEST | default "true"}}'
+      REGENERATE: '{{.REGENERATE | default "false"}}'
+      OUTPUT_DIR: '{{.OUTPUT_DIR | default "./reports"}}'
+    cmds:
+      - |
+        INSTANCE_ID=$(aws ec2 describe-instances \
+          --profile "{{.EC2_PROFILE}}" \
+          --region "{{.EC2_REGION}}" \
+          --filters "Name=instance-state-name,Values=running" \
+                    "Name=tag:Name,Values=*{{.EC2_NAME}}*" \
+          --query "Reservations[*].Instances[*].InstanceId" \
+          --output text | head -1)
+
+        if [ -z "$INSTANCE_ID" ]; then
+          echo -e "{{.ERROR}} No running instance found matching: {{.EC2_NAME}}"
+          exit 1
+        fi
+
+        # Step 1: Generate report on EC2 and get the operation ID + report content
+        REPORT_CMD="set -e; RUST_LOG=error ares-cli ops report"
+        {{if ne .OPERATION_ID ""}}REPORT_CMD="$REPORT_CMD {{.OPERATION_ID}}"{{end}}
+        {{if eq .LATEST "true"}}REPORT_CMD="$REPORT_CMD --latest"{{end}}
+        {{if eq .REGENERATE "true"}}REPORT_CMD="$REPORT_CMD --regenerate"{{end}}
+        REPORT_CMD="$REPORT_CMD --output-dir /tmp/reports 2>&1"
+        # After generation, output the report file content with a marker
+        REPORT_CMD="$REPORT_CMD; echo '===REPORT_FILES==='; for f in /tmp/reports/*_report.md; do echo \"FILE:\$(basename \$f)\"; cat \"\$f\"; done"
+
+        PARAMS_FILE=$(mktemp)
+        trap "rm -f $PARAMS_FILE" EXIT
+        jq -n --arg cmd "$REPORT_CMD" '{"commands": [$cmd]}' > "$PARAMS_FILE"
+
+        echo -e "{{.INFO}} Generating report on EC2..."
+
+        CMD_ID=$(aws ssm send-command \
+          --profile "{{.EC2_PROFILE}}" \
+          --region "{{.EC2_REGION}}" \
+          --instance-ids "$INSTANCE_ID" \
+          --document-name "AWS-RunShellScript" \
+          --parameters "file://$PARAMS_FILE" \
+          --timeout-seconds 120 \
+          --query "Command.CommandId" --output text)
+
+        for i in $(seq 1 120); do
+          STATUS=$(aws ssm get-command-invocation \
+            --profile "{{.EC2_PROFILE}}" \
+            --region "{{.EC2_REGION}}" \
+            --command-id "$CMD_ID" \
+            --instance-id "$INSTANCE_ID" \
+            --query "Status" --output text 2>/dev/null) || true
+          case "$STATUS" in
+            Success|Failed|Cancelled|TimedOut) break ;;
+          esac
+          sleep 1
+        done
+
+        OUTPUT=$(aws ssm get-command-invocation \
+          --profile "{{.EC2_PROFILE}}" \
+          --region "{{.EC2_REGION}}" \
+          --command-id "$CMD_ID" \
+          --instance-id "$INSTANCE_ID" \
+          --query "StandardOutputContent" --output text)
+
+        if [ "$STATUS" != "Success" ]; then
+          echo -e "{{.ERROR}} Report generation failed"
+          aws ssm get-command-invocation \
+            --profile "{{.EC2_PROFILE}}" \
+            --region "{{.EC2_REGION}}" \
+            --command-id "$CMD_ID" \
+            --instance-id "$INSTANCE_ID" \
+            --query "StandardErrorContent" --output text >&2
+          exit 1
+        fi
+
+        # Step 2: Extract report content and save locally
+        mkdir -p "{{.OUTPUT_DIR}}"
+
+        # Parse the output — everything after ===REPORT_FILES=== contains FILE:name + content
+        BEFORE_MARKER=$(echo "$OUTPUT" | sed '/===REPORT_FILES===/,$d')
+        AFTER_MARKER=$(echo "$OUTPUT" | sed -n '/===REPORT_FILES===/,$p' | tail -n +2)
+
+        # Show the CLI output (report generation messages)
+        echo "$BEFORE_MARKER"
+
+        # Extract filename and content, save to local files
+        FILENAME=""
+        OUTFILE=""
+        while IFS= read -r line; do
+          if [[ "$line" == FILE:* ]]; then
+            if [ -n "$FILENAME" ] && [ -f "$OUTFILE" ]; then
+              echo -e "{{.SUCCESS}} Report saved: $OUTFILE"
+            fi
+            FILENAME="${line#FILE:}"
+            OUTFILE="{{.OUTPUT_DIR}}/$FILENAME"
+            : > "$OUTFILE"
+          elif [ -n "$OUTFILE" ]; then
+            echo "$line" >> "$OUTFILE"
+          fi
+        done <<< "$AFTER_MARKER"
+
+        if [ -n "$FILENAME" ] && [ -f "$OUTFILE" ]; then
+          echo -e "{{.SUCCESS}} Report saved: $OUTFILE"
+        fi
+
   ops:
     desc: "List all operations on EC2 (usage: task ec2:ops [EC2_NAME=ares-tools] [LATEST=true])"
     silent: true

@@ -1,16 +1,16 @@
 //! Kerberos hash extraction (TGS / AS-REP).
 
-use once_cell::sync::Lazy;
 use regex::Regex;
+use std::sync::LazyLock;
 
 use super::types::{KerberosHash, KerberosHashType};
 
-static KRB_TGS_RE: Lazy<Regex> = Lazy::new(|| {
+static KRB_TGS_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"\$krb5tgs\$\d+\$\*([^$*]+)\$([^$*]+)\$[^$]+\$[a-fA-F0-9$]+")
         .expect("krb5tgs regex")
 });
 
-static KRB_ASREP_RE: Lazy<Regex> = Lazy::new(|| {
+static KRB_ASREP_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"\$krb5asrep\$\d+\$([^@:]+)@([^:]+):[a-fA-F0-9$]+").expect("krb5asrep regex")
 });
 

@@ -1,14 +1,14 @@
 //! Secretsdump output parser.
 
-use once_cell::sync::Lazy;
 use regex::Regex;
+use std::sync::LazyLock;
 
 use super::types::ParsedHash;
 
 /// Empty password NT hash constant.
 const EMPTY_NT_HASH: &str = "31d6cfe0d16ae931b73c59d7e0c089c0";
 
-static SECRETSDUMP_RE: Lazy<Regex> = Lazy::new(|| {
+static SECRETSDUMP_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"^(?:([^\\:\s]+)\\)?([^:]+):(\d+):([a-fA-F0-9]{32}):([a-fA-F0-9]{32}):::$")
         .expect("secretsdump regex")
 });

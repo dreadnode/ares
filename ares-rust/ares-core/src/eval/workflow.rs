@@ -27,8 +27,8 @@ pub struct ModelCost {
 
 /// Estimate cost in USD for token usage.
 pub fn estimate_cost(model: &str, prompt_tokens: u64, completion_tokens: u64) -> f64 {
-    static MODEL_COSTS: once_cell::sync::Lazy<HashMap<&'static str, ModelCost>> =
-        once_cell::sync::Lazy::new(|| {
+    static MODEL_COSTS: std::sync::LazyLock<HashMap<&'static str, ModelCost>> =
+        std::sync::LazyLock::new(|| {
             HashMap::from([
                 (
                     "claude-sonnet-4-20250514",

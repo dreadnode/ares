@@ -11,6 +11,7 @@ use super::types::{InterruptedTask, RetryingTask};
 ///
 /// Provides convenience methods to inspect the recovered state and produce
 /// a human-readable summary for the orchestrator.
+#[allow(dead_code)]
 pub struct OperationResumeHelper<'a> {
     pub state: &'a SharedRedTeamState,
     pub requeued_task_ids: &'a [String],
@@ -19,6 +20,7 @@ pub struct OperationResumeHelper<'a> {
     pub pending_tasks: &'a HashMap<String, TaskInfo>,
 }
 
+#[allow(dead_code)]
 impl<'a> OperationResumeHelper<'a> {
     /// Get tasks that permanently failed (exceeded max retries during recovery).
     pub fn get_interrupted_tasks(&self) -> Vec<InterruptedTask> {

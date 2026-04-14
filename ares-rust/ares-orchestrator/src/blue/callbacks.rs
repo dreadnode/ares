@@ -9,6 +9,7 @@ use ares_llm::ToolCall;
 /// Handle a blue team callback tool call.
 ///
 /// Returns `None` if the tool is not a blue team callback.
+#[allow(dead_code)]
 pub fn handle_blue_callback(call: &ToolCall) -> Option<CallbackResult> {
     match call.name.as_str() {
         // ── Worker completion callbacks ──────────────────────────────

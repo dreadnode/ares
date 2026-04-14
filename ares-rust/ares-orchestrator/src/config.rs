@@ -9,6 +9,7 @@ use std::time::Duration;
 
 /// All tunables for the orchestrator, loaded once at startup.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct OrchestratorConfig {
     /// Redis connection URL (supports `redis://` and `redis+sentinel://`).
     pub redis_url: String,

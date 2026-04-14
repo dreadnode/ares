@@ -9,10 +9,10 @@
 use std::collections::{HashMap, HashSet};
 
 use chrono::{DateTime, Utc};
-use once_cell::sync::Lazy;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::sync::LazyLock;
 use tracing::info;
 
 /// A connection between two hosts.
@@ -152,7 +152,7 @@ impl LateralGraph {
 }
 
 /// MITRE technique mappings for lateral movement connection types.
-static TECHNIQUE_MAPPINGS: Lazy<HashMap<&'static str, &'static str>> = Lazy::new(|| {
+static TECHNIQUE_MAPPINGS: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| {
     HashMap::from([
         ("smb", "T1021.002"),
         ("rdp", "T1021.001"),
@@ -244,11 +244,11 @@ impl LateralPatterns {
     }
 }
 
-static HOSTNAME_RE: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"\b([a-zA-Z][a-zA-Z0-9-]*\.[a-zA-Z0-9.-]+)\b").unwrap());
+static HOSTNAME_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\b([a-zA-Z][a-zA-Z0-9-]*\.[a-zA-Z0-9.-]+)\b").unwrap());
 
-static IP_RE: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$").unwrap());
+static IP_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$").unwrap());
 
 /// Analyzes query results for lateral movement patterns.
 ///

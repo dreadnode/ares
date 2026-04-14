@@ -52,6 +52,7 @@ impl SharedState {
     /// Increment a vulnerability type failure counter in Redis.
     ///
     /// Returns the new failure count. Matches Python's `vuln_type_failures` HINCRBY.
+    #[allow(dead_code)]
     pub async fn increment_vuln_failure(&self, queue: &TaskQueue, vuln_type: &str) -> Result<i64> {
         let operation_id = {
             let state = self.inner.read().await;
@@ -66,6 +67,7 @@ impl SharedState {
     }
 
     /// Check if a vulnerability type has exceeded its max failures.
+    #[allow(dead_code)]
     pub async fn vuln_type_exceeded_failures(
         &self,
         queue: &TaskQueue,

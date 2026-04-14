@@ -1,28 +1,28 @@
 //! Host extraction from netexec/crackmapexec SMB output.
 
-use once_cell::sync::Lazy;
 use regex::Regex;
+use std::sync::LazyLock;
 
 use super::types::ParsedHost;
 
-static SMB_BANNER_RE: Lazy<Regex> = Lazy::new(|| {
+static SMB_BANNER_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"SMB\s+(\d{1,3}(?:\.\d{1,3}){3})\s+\d+\s+([A-Za-z0-9_.\-]+)\s+\[\*\]\s+(.+)")
         .expect("smb banner regex")
 });
 
-static SMB_SIMPLE_RE: Lazy<Regex> = Lazy::new(|| {
+static SMB_SIMPLE_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"^SMB\s+(\d{1,3}(?:\.\d{1,3}){3})\s+\d+\s+([A-Za-z0-9_\-]+)\s+")
         .expect("smb simple regex")
 });
 
-static SMB_NAME_RE: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"\(name:([^)]+)\)").expect("smb name regex"));
+static SMB_NAME_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\(name:([^)]+)\)").expect("smb name regex"));
 
-static SMB_DOMAIN_RE: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"\(domain:([^)]+)\)").expect("smb domain regex"));
+static SMB_DOMAIN_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\(domain:([^)]+)\)").expect("smb domain regex"));
 
-static SMB_OS_RE: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"^\s*([^(]+?)\s+\(name:").expect("smb os regex"));
+static SMB_OS_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^\s*([^(]+?)\s+\(name:").expect("smb os regex"));
 
 /// Extract host information from netexec/crackmapexec SMB output.
 pub fn extract_hosts(output: &str) -> Vec<ParsedHost> {

@@ -260,6 +260,7 @@ impl RedisToolDispatcher {
         }
     }
 
+    #[allow(dead_code)]
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
         self.tool_timeout = timeout;
         self

@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
-use once_cell::sync::Lazy;
 use regex::Regex;
+use std::sync::LazyLock;
 
 use ares_core::models::{Host, SharedRedTeamState, VulnerabilityInfo};
 
@@ -12,7 +12,8 @@ use crate::dedup::{
 
 /// Regex to strip NetExec parenthesized metadata from OS strings.
 /// Matches `(name:...)`, `(domain:...)`, `(signing:...)`, `(SMBv1:...)`, `(Null Auth:...)`.
-static OS_PAREN_METADATA_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"\s*\([^)]*\)").unwrap());
+static OS_PAREN_METADATA_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\s*\([^)]*\)").unwrap());
 
 /// Clean OS string by stripping NetExec metadata like `(name:X) (domain:Y) (signing:True)`.
 fn clean_os_string(os: &str) -> String {

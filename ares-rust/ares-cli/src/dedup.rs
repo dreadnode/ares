@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
-use once_cell::sync::Lazy;
 use regex::Regex;
+use std::sync::LazyLock;
 
 use ares_core::models::{Credential, Hash, User};
 
@@ -107,17 +107,19 @@ pub(crate) fn dedup_users(users: &[User], netbios_to_fqdn: &HashMap<String, Stri
 }
 
 /// Strip ANSI escape sequences from text.
-static RE_ANSI: Lazy<Regex> = Lazy::new(|| Regex::new(r"\x1b\[[0-9;]*m").unwrap());
+static RE_ANSI: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\x1b\[[0-9;]*m").unwrap());
 
 fn strip_ansi(s: &str) -> String {
     RE_ANSI.replace_all(s, "").to_string()
 }
 
 /// Regex matching `Password` (case-insensitive) followed by optional `:` and space.
-static PASSWORD_PREFIX_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?i)^password\s*:\s*").unwrap());
+static PASSWORD_PREFIX_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)^password\s*:\s*").unwrap());
 
 /// Regex matching trailing parenthetical metadata like ` (Guest)`, ` (Pwn3d!)`.
-static TRAILING_PAREN_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"\s+\([^)]+\)\s*$").unwrap());
+static TRAILING_PAREN_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\s+\([^)]+\)\s*$").unwrap());
 
 /// Sanitize credentials in-place: strip noise from passwords, normalize usernames
 /// with embedded `@domain` suffixes, and remove garbage entries.
@@ -251,11 +253,13 @@ pub(crate) fn dedup_hashes(hashes: &[Hash]) -> Vec<Hash> {
 // Source label normalization (matches Python _normalize_source_label)
 // ---------------------------------------------------------------------------
 
-static TASK_INPUT_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"\((\w+)_[a-f0-9]+\)").unwrap());
+static TASK_INPUT_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\((\w+)_[a-f0-9]+\)").unwrap());
 
-static TASK_SUFFIX_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"^(\w+)_[a-f0-9]{8,}$").unwrap());
+static TASK_SUFFIX_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^(\w+)_[a-f0-9]{8,}$").unwrap());
 
-static LABEL_MAP: Lazy<HashMap<&'static str, &'static str>> = Lazy::new(|| {
+static LABEL_MAP: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| {
     let mut m = HashMap::new();
     // Task types
     m.insert("exploit", "Exploitation");

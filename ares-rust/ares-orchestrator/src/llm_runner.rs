@@ -27,6 +27,7 @@ use crate::state::SharedState;
 ///
 /// Owns an LLM provider and tool dispatcher, and builds prompts from
 /// the current operation state.
+#[allow(dead_code)]
 pub struct LlmTaskRunner {
     provider: Box<dyn LlmProvider>,
     model_name: String,
@@ -60,10 +61,12 @@ impl LlmTaskRunner {
     }
 
     /// Return the model name used by this runner (e.g. "gpt-5.2").
+    #[allow(dead_code)]
     pub fn model_name(&self) -> &str {
         &self.model_name
     }
 
+    #[allow(dead_code)]
     pub fn with_config(mut self, config: AgentLoopConfig) -> Self {
         self.config = config;
         self

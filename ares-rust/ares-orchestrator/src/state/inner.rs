@@ -177,6 +177,7 @@ impl StateInner {
     ///
     /// Starting from a credential or hash, follows the `parent_id` links back
     /// to the initial access credential. Returns steps in forward order.
+    #[allow(dead_code)]
     fn build_attack_chain(&self, item_id: &str) -> Vec<AttackChainStep> {
         let mut chain = Vec::new();
         let mut current_id = Some(item_id.to_string());
@@ -224,6 +225,7 @@ impl StateInner {
     }
 
     /// Build the attack chain to domain admin (krbtgt hash).
+    #[allow(dead_code)]
     pub fn build_domain_admin_chain(&self) -> Vec<AttackChainStep> {
         let krbtgt = self.hashes.iter().find(|h| {
             h.username.eq_ignore_ascii_case("krbtgt") && h.hash_type.to_lowercase().contains("ntlm")

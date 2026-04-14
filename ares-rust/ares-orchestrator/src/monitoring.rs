@@ -22,6 +22,7 @@ use crate::task_queue::TaskQueue;
 
 /// Live state for a registered agent.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct AgentState {
     pub name: String,
     pub role: String,
@@ -44,6 +45,7 @@ impl AgentRegistry {
     }
 
     /// Register an agent (or update it if already known).
+    #[allow(dead_code)]
     pub async fn register(&self, name: &str, role: &str) {
         let mut agents = self.agents.lock().await;
         agents
@@ -338,6 +340,74 @@ async fn cleanup_stale_tasks(
     }
 
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Pre-flight tool check
+// ---------------------------------------------------------------------------
+
+/// Critical tools per worker role. If any of these are missing, operations
+/// will be severely degraded.
+pub(crate) const CRITICAL_TOOLS: &[(&str, &[&str])] = &[
+    ("recon", &["nmap", "netexec"]),
+    (
+        "credential_access",
+        &[
+            "impacket-GetUserSPNs",
+            "impacket-GetNPUsers",
+            "impacket-secretsdump",
+        ],
+    ),
+    ("privesc", &["impacket-findDelegation", "impacket-getST"]),
+    (
+        "lateral",
+        &[
+            "impacket-psexec",
+            "impacket-smbexec",
+            "impacket-secretsdump",
+        ],
+    ),
+];
+
+/// Query Redis for each worker's tool inventory and report any missing
+/// critical tools. Returns a list of (role, missing_tools) pairs.
+pub(crate) async fn preflight_tool_check(
+    conn: &mut redis::aio::ConnectionManager,
+) -> Vec<(String, Vec<String>)> {
+    use redis::AsyncCommands;
+
+    let mut problems = Vec::new();
+
+    for &(role, critical) in CRITICAL_TOOLS {
+        let agent_key = format!("ares:tools:ares-{role}-agent");
+        let available: Vec<String> = match conn.get::<_, Option<String>>(&agent_key).await {
+            Ok(Some(json)) => serde_json::from_str(&json).unwrap_or_default(),
+            _ => {
+                // No inventory published yet — worker may not have started
+                warn!(
+                    role = role,
+                    "No tool inventory found — worker may not be running"
+                );
+                problems.push((
+                    role.to_string(),
+                    critical.iter().map(|s| s.to_string()).collect(),
+                ));
+                continue;
+            }
+        };
+
+        let missing: Vec<String> = critical
+            .iter()
+            .filter(|&&tool| !available.iter().any(|a| a == tool))
+            .map(|s| s.to_string())
+            .collect();
+
+        if !missing.is_empty() {
+            problems.push((role.to_string(), missing));
+        }
+    }
+
+    problems
 }
 
 #[cfg(test)]

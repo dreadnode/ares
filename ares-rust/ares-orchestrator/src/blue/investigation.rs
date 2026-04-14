@@ -243,6 +243,7 @@ pub async fn run_investigation(
 
 /// Outcome of a completed investigation.
 #[derive(Debug)]
+#[allow(dead_code)]
 pub enum InvestigationOutcome {
     Completed {
         verdict: String,
@@ -310,6 +311,7 @@ fn extract_verdict(text: &str) -> String {
 /// Dispatch a sub-task to a blue team worker agent.
 ///
 /// Called by the orchestrator's LLM when it uses `dispatch_task` tool.
+#[allow(dead_code)]
 pub async fn dispatch_subtask(
     task_queue: &mut BlueTaskQueue,
     investigation_id: &str,

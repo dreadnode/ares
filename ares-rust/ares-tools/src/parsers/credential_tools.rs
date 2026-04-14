@@ -1,9 +1,9 @@
 //! Parsers for lsassy, password spray, username-as-password, NTDS.DIT,
 //! LDAP description passwords, and adidnsdump.
 
-use once_cell::sync::Lazy;
 use regex::Regex;
 use serde_json::{json, Value};
+use std::sync::LazyLock;
 
 // ── Lsassy ──────────────────────────────────────────────────────────────────
 
@@ -216,8 +216,8 @@ pub fn parse_ntds_dit(output: &str, params: &Value) -> (Vec<Value>, Vec<Value>) 
 
 /// Regex to find passwords embedded in LDAP description fields.
 /// Common patterns: "Password: xxx", "pwd=xxx", "pass: xxx"
-static DESC_PASSWORD_RE: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"(?i)(?:password|pass|pwd)\s*[=:]\s*(\S+)").unwrap());
+static DESC_PASSWORD_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)(?:password|pass|pwd)\s*[=:]\s*(\S+)").unwrap());
 
 /// Parse ldap_search_descriptions output for passwords in user descriptions.
 ///

@@ -18,21 +18,12 @@ struct ToolsFile {
 
 #[derive(Deserialize)]
 struct RoleDef {
-    #[allow(dead_code)]
-    provisioned_by: Option<String>,
-    #[allow(dead_code)]
-    notes: Option<String>,
     tools: Vec<ToolCategory>,
 }
 
 #[derive(Deserialize)]
 struct ToolCategory {
-    #[allow(dead_code)]
-    category: String,
     binaries: Vec<String>,
-    #[allow(dead_code)]
-    #[serde(default)]
-    fn_names: Vec<String>,
 }
 
 fn main() {
@@ -101,32 +92,4 @@ fn main() {
     writeln!(f, "        _ => &[],").unwrap();
     writeln!(f, "    }}").unwrap();
     writeln!(f, "}}").unwrap();
-
-    // Generate a flat list of all known binaries (useful for validation).
-    let mut all_binaries: Vec<&str> = tools_file
-        .roles
-        .values()
-        .flat_map(|def| def.tools.iter())
-        .flat_map(|cat| cat.binaries.iter().map(|s| s.as_str()))
-        .collect();
-    all_binaries.sort();
-    all_binaries.dedup();
-
-    writeln!(f).unwrap();
-    writeln!(
-        f,
-        "/// Every unique binary across all roles, sorted alphabetically."
-    )
-    .unwrap();
-    writeln!(
-        f,
-        "/// Auto-generated from `tools.yaml` — do not edit by hand."
-    )
-    .unwrap();
-    writeln!(f, "#[allow(dead_code)]").unwrap();
-    writeln!(f, "const ALL_BINARIES: &[&str] = &[").unwrap();
-    for bin in &all_binaries {
-        writeln!(f, "    {bin:?},").unwrap();
-    }
-    writeln!(f, "];").unwrap();
 }

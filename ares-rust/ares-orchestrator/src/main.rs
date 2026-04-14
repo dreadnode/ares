@@ -1,6 +1,4 @@
 //! Ares Orchestrator — Rust-native orchestration loop.
-
-#![allow(dead_code)]
 //!
 //! Entry point for the `ares-orchestrator` binary. Rust owns the tokio event
 //! loop and all Redis IO. When `ARES_LLM_MODEL` is set, tasks are driven by
@@ -59,33 +57,15 @@ use crate::state::SharedState;
 use crate::task_queue::TaskQueue;
 use crate::throttling::Throttler;
 
-/// Probe target IPs on port 88 (Kerberos) then 389 (LDAP) to find a real DC.
-/// Returns the first IP that accepts a TCP connection within 500ms.
-async fn probe_dc_port(ips: &[String]) -> Option<String> {
-    for port in [88u16, 389] {
-        for ip in ips {
-            let addr = format!("{ip}:{port}");
-            if let Ok(Ok(_)) = tokio::time::timeout(
-                std::time::Duration::from_millis(500),
-                tokio::net::TcpStream::connect(&addr),
-            )
-            .await
-            {
-                info!(ip = %ip, port = port, "DC probe: port open");
-                return Some(ip.clone());
-            }
-        }
-    }
-    None
-}
-
 #[tokio::main]
 async fn main() -> Result<()> {
-    // --- Telemetry (console + OTLP when endpoint is configured) ---
     let _telemetry = ares_core::telemetry::init_telemetry(
         ares_core::telemetry::TelemetryConfig::new("ares-orchestrator"),
     );
+    run().await
+}
 
+async fn run() -> Result<()> {
     info!(
         version = env!("CARGO_PKG_VERSION"),
         "ares-orchestrator starting"
@@ -172,7 +152,7 @@ async fn main() -> Result<()> {
             // immediately without waiting for recon to report back.
             // Probe port 88 (Kerberos) to find a real DC, don't blindly use first IP.
             if state.domain_controllers.is_empty() {
-                let dc_ip = probe_dc_port(&config.target_ips).await;
+                let dc_ip = bootstrap::probe_dc_port(&config.target_ips).await;
                 if let Some(ref ip) = dc_ip {
                     let dc_key = format!(
                         "{}:{}:{}",
@@ -441,8 +421,10 @@ async fn main() -> Result<()> {
     // --- Blue team orchestrator (optional — enabled when ARES_BLUE_ENABLED=1) ---
     let blue_handle = if std::env::var("ARES_BLUE_ENABLED").as_deref() == Ok("1") {
         // Create a separate LLM provider for the blue team
-        let blue_model_spec =
-            std::env::var("ARES_BLUE_LLM_MODEL").unwrap_or_else(|_| model_spec.clone());
+        let blue_model_spec = std::env::var("ARES_BLUE_LLM_MODEL")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| model_spec.clone());
         let (blue_provider, blue_model) = ares_llm::create_provider(&blue_model_spec)
             .context("Failed to create blue team LLM provider")?;
 
@@ -527,7 +509,7 @@ async fn main() -> Result<()> {
     // then warn loudly about any critical missing tools.
     {
         tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-        let missing = preflight_tool_check(&mut queue.connection()).await;
+        let missing = monitoring::preflight_tool_check(&mut queue.connection()).await;
         if !missing.is_empty() {
             for (role, tools) in &missing {
                 warn!(
@@ -658,72 +640,4 @@ async fn main() -> Result<()> {
 
     info!("ares-orchestrator stopped");
     Ok(())
-}
-
-// ---------------------------------------------------------------------------
-// Pre-flight tool check
-// ---------------------------------------------------------------------------
-
-/// Critical tools per worker role. If any of these are missing, operations
-/// will be severely degraded.
-const CRITICAL_TOOLS: &[(&str, &[&str])] = &[
-    ("recon", &["nmap", "netexec"]),
-    (
-        "credential_access",
-        &[
-            "impacket-GetUserSPNs",
-            "impacket-GetNPUsers",
-            "impacket-secretsdump",
-        ],
-    ),
-    ("privesc", &["impacket-findDelegation", "impacket-getST"]),
-    (
-        "lateral",
-        &[
-            "impacket-psexec",
-            "impacket-smbexec",
-            "impacket-secretsdump",
-        ],
-    ),
-];
-
-/// Query Redis for each worker's tool inventory and report any missing
-/// critical tools. Returns a list of (role, missing_tools) pairs.
-async fn preflight_tool_check(
-    conn: &mut redis::aio::ConnectionManager,
-) -> Vec<(String, Vec<String>)> {
-    use redis::AsyncCommands;
-
-    let mut problems = Vec::new();
-
-    for &(role, critical) in CRITICAL_TOOLS {
-        let agent_key = format!("ares:tools:ares-{role}-agent");
-        let available: Vec<String> = match conn.get::<_, Option<String>>(&agent_key).await {
-            Ok(Some(json)) => serde_json::from_str(&json).unwrap_or_default(),
-            _ => {
-                // No inventory published yet — worker may not have started
-                warn!(
-                    role = role,
-                    "No tool inventory found — worker may not be running"
-                );
-                problems.push((
-                    role.to_string(),
-                    critical.iter().map(|s| s.to_string()).collect(),
-                ));
-                continue;
-            }
-        };
-
-        let missing: Vec<String> = critical
-            .iter()
-            .filter(|&&tool| !available.iter().any(|a| a == tool))
-            .map(|s| s.to_string())
-            .collect();
-
-        if !missing.is_empty() {
-            problems.push((role.to_string(), missing));
-        }
-    }
-
-    problems
 }

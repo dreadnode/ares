@@ -60,6 +60,7 @@ pub enum ThrottleDecision {
 // ---------------------------------------------------------------------------
 
 /// Concurrency controller that mirrors the Python throttling logic.
+#[allow(dead_code)]
 pub struct Throttler {
     config: Arc<OrchestratorConfig>,
     tracker: ActiveTaskTracker,
@@ -202,6 +203,7 @@ impl Throttler {
     }
 
     /// Acquire a per-role semaphore permit. Returns a guard that releases on drop.
+    #[allow(dead_code)]
     pub async fn acquire_role_permit(
         &self,
         role: &str,

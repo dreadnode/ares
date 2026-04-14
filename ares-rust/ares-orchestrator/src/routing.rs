@@ -91,6 +91,7 @@ impl ActiveTaskTracker {
     }
 
     /// Total active tasks across all roles.
+    #[allow(dead_code)]
     pub async fn total(&self) -> usize {
         let inner = self.inner.lock().await;
         inner.tasks.len()
@@ -127,12 +128,14 @@ pub fn is_non_llm_task(task_type: &str) -> bool {
 // ---------------------------------------------------------------------------
 
 /// Routes tasks to agent queues, respecting per-role concurrency limits.
+#[allow(dead_code)]
 pub struct TaskRouter {
     queue: TaskQueue,
     tracker: ActiveTaskTracker,
     config: Arc<OrchestratorConfig>,
 }
 
+#[allow(dead_code)]
 impl TaskRouter {
     pub fn new(
         queue: TaskQueue,

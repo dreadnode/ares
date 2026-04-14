@@ -9,14 +9,14 @@
 //! mechanism (they run at tool-call time). This module runs on the full task
 //! result text as a secondary pass.
 
-use once_cell::sync::Lazy;
 use regex::Regex;
+use std::sync::LazyLock;
 
 use ares_core::models::{Credential, Hash, Host, Share, User};
 
 /// Strip ANSI escape sequences from text (e.g., color codes from tool output).
 pub(crate) fn strip_ansi(s: &str) -> String {
-    static RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"\x1b\[[0-9;]*m").unwrap());
+    static RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\x1b\[[0-9;]*m").unwrap());
     RE.replace_all(s, "").into_owned()
 }
 
@@ -67,18 +67,21 @@ pub fn extract_from_output_text(output: &str, default_domain: &str) -> TextExtra
 // Host extraction — SMB banner lines
 // ---------------------------------------------------------------------------
 
-static RE_SMB_BANNER: Lazy<Regex> = Lazy::new(|| {
+static RE_SMB_BANNER: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"SMB\s+(\d{1,3}(?:\.\d{1,3}){3})\s+\d+\s+([A-Za-z0-9_.\-]+)\s+\[\*\]\s+(.+)")
         .unwrap()
 });
 
-static RE_SMB_BANNER_NAME: Lazy<Regex> = Lazy::new(|| Regex::new(r"\(name:([^)]+)\)").unwrap());
+static RE_SMB_BANNER_NAME: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\(name:([^)]+)\)").unwrap());
 
-static RE_SMB_BANNER_DOMAIN: Lazy<Regex> = Lazy::new(|| Regex::new(r"\(domain:([^)]+)\)").unwrap());
+static RE_SMB_BANNER_DOMAIN: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\(domain:([^)]+)\)").unwrap());
 
-static RE_SMB_BANNER_OS: Lazy<Regex> = Lazy::new(|| Regex::new(r"^\s*([^(]+?)\s+\(name:").unwrap());
+static RE_SMB_BANNER_OS: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^\s*([^(]+?)\s+\(name:").unwrap());
 
-static RE_SMB_SIMPLE: Lazy<Regex> = Lazy::new(|| {
+static RE_SMB_SIMPLE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"^SMB\s+(\d{1,3}(?:\.\d{1,3}){3})\s+\d+\s+([A-Za-z0-9_\-]+)\s+").unwrap()
 });
 
@@ -175,24 +178,26 @@ fn extract_hosts(output: &str) -> Vec<Host> {
 // User extraction
 // ---------------------------------------------------------------------------
 
-static RE_DOMAIN_CONTEXT: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"(?i)\(domain:([^)]+)\)").unwrap());
+static RE_DOMAIN_CONTEXT: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)\(domain:([^)]+)\)").unwrap());
 
-static RE_DOMAIN_BACKSLASH: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"([A-Za-z0-9_.\-]+)\\([A-Za-z0-9_.\-$]+)").unwrap());
+static RE_DOMAIN_BACKSLASH: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"([A-Za-z0-9_.\-]+)\\([A-Za-z0-9_.\-$]+)").unwrap());
 
-static RE_UPN: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"([A-Za-z0-9_.\-]+)@([A-Za-z0-9_.\-]+\.[A-Za-z0-9_.\-]+)").unwrap());
+static RE_UPN: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"([A-Za-z0-9_.\-]+)@([A-Za-z0-9_.\-]+\.[A-Za-z0-9_.\-]+)").unwrap()
+});
 
-static RE_USER_BRACKET: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?i)user:\[([^\]]+)\]").unwrap());
+static RE_USER_BRACKET: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)user:\[([^\]]+)\]").unwrap());
 
-static RE_ACCOUNT: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"Account:\s*([A-Za-z0-9_.\-]+)").unwrap());
+static RE_ACCOUNT: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"Account:\s*([A-Za-z0-9_.\-]+)").unwrap());
 
-static RE_SAM: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"(?i)samaccountname:\s*([A-Za-z0-9_.\-]+)").unwrap());
+static RE_SAM: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)samaccountname:\s*([A-Za-z0-9_.\-]+)").unwrap());
 
-static RE_SMB_TIMESTAMP: Lazy<Regex> = Lazy::new(|| {
+static RE_SMB_TIMESTAMP: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"SMB\s+\S+\s+\d+\s+\S+\s+([A-Za-z0-9_.\-]+)\s+\d{4}-\d{2}-\d{2}").unwrap()
 });
 
@@ -337,13 +342,13 @@ fn extract_users(output: &str, default_domain: &str) -> Vec<User> {
 // Plaintext password extraction
 // ---------------------------------------------------------------------------
 
-static RE_DEFAULT_PASSWORD_CRED: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"^([^\\]+)\\([^:]+):(.+)$").unwrap());
+static RE_DEFAULT_PASSWORD_CRED: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^([^\\]+)\\([^:]+):(.+)$").unwrap());
 
-static RE_PASSWORD_VALUE: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"(?i)Password\s*:\s*([^\s)]+)").unwrap());
+static RE_PASSWORD_VALUE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)Password\s*:\s*([^\s)]+)").unwrap());
 
-static RE_SMB_TIMESTAMP_PASSWORD: Lazy<Regex> = Lazy::new(|| {
+static RE_SMB_TIMESTAMP_PASSWORD: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
         r"SMB\s+\S+\s+\d+\s+\S+\s+([A-Za-z0-9_.\-]+)\s+\d{4}-\d{2}-\d{2}.*(?i)Password\s*:\s*",
     )
@@ -353,12 +358,12 @@ static RE_SMB_TIMESTAMP_PASSWORD: Lazy<Regex> = Lazy::new(|| {
 /// General nxc SMB line with a username field followed eventually by "Password":
 /// `SMB  IP  PORT  HOST  username  ... Password : xxx`
 /// Broader than RE_SMB_TIMESTAMP_PASSWORD — doesn't require a timestamp.
-static RE_SMB_LINE_PASSWORD: Lazy<Regex> = Lazy::new(|| {
+static RE_SMB_LINE_PASSWORD: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"SMB\s+\S+\s+\d+\s+\S+\s+([A-Za-z0-9_.\-]+)\s+.*(?i)Password\s*:\s*").unwrap()
 });
 
 /// Netexec [+] success line: `SMB IP PORT HOST [+] DOMAIN\user:password`
-static RE_NETEXEC_SUCCESS: Lazy<Regex> = Lazy::new(|| {
+static RE_NETEXEC_SUCCESS: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"\[\+\]\s+([A-Za-z0-9_.\-]+)\\([A-Za-z0-9_.\-$]+):([^\s(]+)").unwrap()
 });
 
@@ -604,10 +609,11 @@ fn make_credential(username: &str, password: &str, domain: &str, source: &str) -
 // Share extraction — SMB share table parser
 // ---------------------------------------------------------------------------
 
-static RE_SMB_IP: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"^SMB\s+(\d+\.\d+\.\d+\.\d+)\s+").unwrap());
+static RE_SMB_IP: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^SMB\s+(\d+\.\d+\.\d+\.\d+)\s+").unwrap());
 
-static RE_SMB_PREFIX: Lazy<Regex> = Lazy::new(|| Regex::new(r"^SMB\s+\S+\s+\d+\s+\S+\s+").unwrap());
+static RE_SMB_PREFIX: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^SMB\s+\S+\s+\d+\s+\S+\s+").unwrap());
 
 fn extract_shares(output: &str) -> Vec<Share> {
     let mut shares = Vec::new();
@@ -683,28 +689,29 @@ fn extract_shares(output: &str) -> Vec<Share> {
 // Hash extraction — NTLM, Kerberoast (TGS), AS-REP
 // ---------------------------------------------------------------------------
 
-static RE_TGS_HASH: Lazy<Regex> = Lazy::new(|| {
+static RE_TGS_HASH: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(\$krb5tgs\$\d+\$\*([^$*]+)\$([^$*]+)\$[^$]+\$[a-fA-F0-9$]+)").unwrap()
 });
 
-static RE_ASREP_HASH: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"(\$krb5asrep\$\d+\$([^@:]+)@([^:]+):[a-fA-F0-9$]+)").unwrap());
+static RE_ASREP_HASH: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(\$krb5asrep\$\d+\$([^@:]+)@([^:]+):[a-fA-F0-9$]+)").unwrap());
 
 // domain\user:rid:lmhash:nthash:::
-static RE_NTLM_DOMAIN: Lazy<Regex> = Lazy::new(|| {
+static RE_NTLM_DOMAIN: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"([^\\:\s]+)\\([^:\\]+):\d+:([a-fA-F0-9]{32}):([a-fA-F0-9]{32}):::").unwrap()
 });
 
 // user:rid:lmhash:nthash:::
-static RE_NTLM_PLAIN: Lazy<Regex> = Lazy::new(|| {
+static RE_NTLM_PLAIN: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"^([^:\\$\s]+):(\d+):([a-fA-F0-9]{32}):([a-fA-F0-9]{32}):::").unwrap()
 });
 
 // Partial NTLM line (line-wrapped secretsdump)
-static RE_NTLM_PARTIAL: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"^[^:\s]+:\d+:[a-fA-F0-9]{32}:[a-fA-F0-9]+$").unwrap());
+static RE_NTLM_PARTIAL: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^[^:\s]+:\d+:[a-fA-F0-9]{32}:[a-fA-F0-9]+$").unwrap());
 
-static RE_NTLM_CONTINUATION: Lazy<Regex> = Lazy::new(|| Regex::new(r"^[a-fA-F0-9]+:::$").unwrap());
+static RE_NTLM_CONTINUATION: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^[a-fA-F0-9]+:::$").unwrap());
 
 fn extract_hashes(output: &str, default_domain: &str) -> Vec<Hash> {
     let mut hashes = Vec::new();
@@ -846,28 +853,29 @@ fn extract_hashes(output: &str, default_domain: &str) -> Vec<Hash> {
 // ---------------------------------------------------------------------------
 
 /// Hashcat cracked TGS: $krb5tgs$23$*user$DOMAIN$spn*$hash:plaintext
-static RE_CRACKED_TGS: Lazy<Regex> = Lazy::new(|| {
+static RE_CRACKED_TGS: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"\$krb5tgs\$\d+\$\*([^$*]+)\$([^$*]+)\$[^*]+\*\$[a-fA-F0-9$]+:(.+)$").unwrap()
 });
 
 /// Cracked AS-REP: $krb5asrep$23$user@DOMAIN:hash:plaintext (hashcat)
 /// or $krb5asrep$23$user@DOMAIN:plaintext (john --show, no hex section)
-static RE_CRACKED_ASREP: Lazy<Regex> = Lazy::new(|| {
+static RE_CRACKED_ASREP: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"\$krb5asrep\$\d+\$([^@:]+)@([^:]+):(?:[a-fA-F0-9$]+:)?(.+)$").unwrap()
 });
 
 /// John --show output: user:plaintext (with optional trailing :::... fields)
 /// Only matches lines that look like john --show format — username followed by
 /// password, then optional RID and empty LM/NT fields.
-static RE_JOHN_SHOW: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"^([^:\s$][^:]*):([^:]+):\d*:(?:[a-fA-F0-9]*:){0,3}:*\s*$").unwrap());
+static RE_JOHN_SHOW: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"^([^:\s$][^:]*):([^:]+):\d*:(?:[a-fA-F0-9]*:){0,3}:*\s*$").unwrap()
+});
 
 /// John --show unknown user: ?:plaintext (john can't determine username from TGS hashes)
-static RE_JOHN_UNKNOWN_USER: Lazy<Regex> = Lazy::new(|| Regex::new(r"^\?:(.+)$").unwrap());
+static RE_JOHN_UNKNOWN_USER: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^\?:(.+)$").unwrap());
 
 /// Extract username/domain from a TGS hash in the output text.
-static RE_TGS_HASH_USER: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"\$krb5tgs\$\d+\$\*([^$*]+)\$([^$*]+)").unwrap());
+static RE_TGS_HASH_USER: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\$krb5tgs\$\d+\$\*([^$*]+)\$([^$*]+)").unwrap());
 
 fn extract_cracked_passwords(output: &str, default_domain: &str) -> Vec<Credential> {
     let mut credentials = Vec::new();

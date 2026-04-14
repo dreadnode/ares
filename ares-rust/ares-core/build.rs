@@ -20,10 +20,6 @@ struct ToolsFile {
 
 #[derive(Deserialize)]
 struct RoleDef {
-    #[allow(dead_code)]
-    provisioned_by: Option<String>,
-    #[allow(dead_code)]
-    notes: Option<String>,
     tools: Vec<ToolCategory>,
 }
 

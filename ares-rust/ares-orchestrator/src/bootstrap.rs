@@ -8,6 +8,26 @@ use crate::config::OrchestratorConfig;
 use crate::dispatcher::Dispatcher;
 use crate::task_queue::TaskQueue;
 
+/// Probe target IPs on port 88 (Kerberos) then 389 (LDAP) to find a real DC.
+/// Returns the first IP that accepts a TCP connection within 500ms.
+pub(crate) async fn probe_dc_port(ips: &[String]) -> Option<String> {
+    for port in [88u16, 389] {
+        for ip in ips {
+            let addr = format!("{ip}:{port}");
+            if let Ok(Ok(_)) = tokio::time::timeout(
+                std::time::Duration::from_millis(500),
+                tokio::net::TcpStream::connect(&addr),
+            )
+            .await
+            {
+                info!(ip = %ip, port = port, "DC probe: port open");
+                return Some(ip.clone());
+            }
+        }
+    }
+    None
+}
+
 /// Write initial operation metadata to Redis so workers can discover the operation.
 ///
 /// Mirrors the Python `_initialize_state_and_persist()` in `_orchestrator.py`.

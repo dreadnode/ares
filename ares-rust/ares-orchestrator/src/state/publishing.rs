@@ -4,9 +4,9 @@
 use std::collections::HashMap;
 
 use anyhow::Result;
-use once_cell::sync::Lazy;
 use redis::AsyncCommands;
 use regex::Regex;
+use std::sync::LazyLock;
 
 use ares_core::models::*;
 use ares_core::state::{self, RedisStateReader};
@@ -16,10 +16,12 @@ use crate::output_extraction::{is_valid_credential, strip_ansi};
 use crate::task_queue::TaskQueue;
 
 /// Regex matching `Password` (case-insensitive) followed by optional `:` and space.
-static PASSWORD_PREFIX_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?i)^password\s*:\s*").unwrap());
+static PASSWORD_PREFIX_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)^password\s*:\s*").unwrap());
 
 /// Regex matching trailing parenthetical metadata like ` (Guest)`, ` (Pwn3d!)`.
-static TRAILING_PAREN_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"\s+\([^)]+\)\s*$").unwrap());
+static TRAILING_PAREN_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\s+\([^)]+\)\s*$").unwrap());
 
 /// Sanitize and validate a credential before storage.
 ///
@@ -767,6 +769,7 @@ impl SharedState {
     }
 
     /// Add a MITRE ATT&CK technique to Redis SET.
+    #[allow(dead_code)]
     pub async fn add_technique(&self, queue: &TaskQueue, technique_id: &str) -> Result<bool> {
         let operation_id = {
             let state = self.inner.read().await;

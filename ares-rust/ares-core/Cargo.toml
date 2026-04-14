@@ -16,7 +16,6 @@ thiserror = { workspace = true }
 anyhow = { workspace = true }
 serde_yaml = { workspace = true }
 regex = { workspace = true }
-once_cell = { workspace = true }
 md-5 = "0.10"
 base64 = "0.22"
 tera = { workspace = true }

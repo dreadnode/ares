@@ -6,8 +6,8 @@
 use std::collections::HashMap;
 
 use anyhow::Result;
-use once_cell::sync::Lazy;
 use serde_json::Value;
+use std::sync::LazyLock;
 
 use crate::args::required_str;
 use crate::ToolOutput;
@@ -23,7 +23,7 @@ struct Technique {
     detection: &'static str,
 }
 
-static TECHNIQUES: Lazy<HashMap<&'static str, Technique>> = Lazy::new(|| {
+static TECHNIQUES: LazyLock<HashMap<&'static str, Technique>> = LazyLock::new(|| {
     let mut m = HashMap::new();
 
     m.insert("T1003", Technique {
@@ -306,7 +306,7 @@ static TECHNIQUES: Lazy<HashMap<&'static str, Technique>> = Lazy::new(|| {
 // Evidence type to technique mapping
 // ---------------------------------------------------------------------------
 
-static EVIDENCE_MAP: Lazy<HashMap<&'static str, Vec<&'static str>>> = Lazy::new(|| {
+static EVIDENCE_MAP: LazyLock<HashMap<&'static str, Vec<&'static str>>> = LazyLock::new(|| {
     let mut m = HashMap::new();
 
     m.insert(

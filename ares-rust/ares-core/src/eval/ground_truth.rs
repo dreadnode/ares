@@ -190,8 +190,8 @@ pub fn is_technique_required(technique_id: &str) -> bool {
 
 /// Get MITRE techniques associated with a vulnerability type.
 pub fn get_techniques_for_vuln_type(vuln_type: &str) -> Vec<String> {
-    static VULN_MAP: once_cell::sync::Lazy<HashMap<&'static str, Vec<&'static str>>> =
-        once_cell::sync::Lazy::new(|| {
+    static VULN_MAP: std::sync::LazyLock<HashMap<&'static str, Vec<&'static str>>> =
+        std::sync::LazyLock::new(|| {
             HashMap::from([
                 ("ADCS_ESC1", vec!["T1649"]),
                 ("ADCS_ESC2", vec!["T1649"]),

@@ -5,8 +5,8 @@
 //! tool output. Mirrors the Python orchestrator's `_filter_motd_garbage`
 //! and related helpers.
 
-use once_cell::sync::Lazy;
 use regex::Regex;
+use std::sync::LazyLock;
 
 // ── Box-drawing characters that appear in MOTD banners ──────────────────────
 
@@ -43,12 +43,12 @@ const NOISE_MARKERS: &[&str] = &[
 
 // ── Regex: section header lines ──────────────────────────────────────────────
 
-static SECTION_HEADER_RE: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"^={5,}\s+[^=]+\s+={5,}\s*$").unwrap());
+static SECTION_HEADER_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^={5,}\s+[^=]+\s+={5,}\s*$").unwrap());
 
 // ── Regex: collapse 3+ consecutive blank lines into 2 ───────────────────────
 
-static EXCESS_BLANKS_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"\n{4,}").unwrap());
+static EXCESS_BLANKS_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\n{4,}").unwrap());
 
 /// Returns `true` if the line looks like MOTD / banner garbage.
 fn is_motd_line(line: &str) -> bool {

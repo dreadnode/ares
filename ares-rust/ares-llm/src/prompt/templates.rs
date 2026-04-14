@@ -5,8 +5,8 @@
 //! and multi-forest mode flags.
 
 use anyhow::{Context as _, Result};
-use once_cell::sync::Lazy;
 use std::collections::HashMap;
+use std::sync::LazyLock;
 use tera::{Context, Tera};
 
 // ---------------------------------------------------------------------------
@@ -145,7 +145,7 @@ pub const BLUE_TASK_HOST_INVESTIGATION: &str = "blueteam/tasks/host_investigatio
 // ---------------------------------------------------------------------------
 
 /// Global Tera instance with all agent templates registered.
-static TEMPLATES: Lazy<Tera> = Lazy::new(|| {
+static TEMPLATES: LazyLock<Tera> = LazyLock::new(|| {
     let mut tera = Tera::default();
 
     // Agent instruction templates

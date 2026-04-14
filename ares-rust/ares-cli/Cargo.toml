@@ -23,4 +23,3 @@ anyhow = { workspace = true }
 uuid = { workspace = true }
 sqlx = { workspace = true }
 regex = { workspace = true }
-once_cell = { workspace = true }

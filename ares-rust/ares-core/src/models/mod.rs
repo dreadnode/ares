@@ -9,10 +9,15 @@ mod operation;
 mod task;
 mod util;
 
-pub use blue::*;
-pub use core::*;
-pub use operation::*;
-pub use task::*;
+pub use blue::{
+    BlueTaskInfo, Evidence, InvestigationStage, PyramidLevel, SharedBlueTeamState, TimelineEvent,
+    TriageDecision, TriageRecord,
+};
+pub use core::{Credential, Hash, Host, Share, Target, TrustInfo, User};
+pub use operation::{AttackChainStep, OperationMeta, SharedRedTeamState};
+pub use task::{
+    AgentInfo, AgentRole, TaskInfo, TaskResult, TaskStatus, TaskStatusRecord, VulnerabilityInfo,
+};
 // util functions are pub(crate) and imported directly by sibling modules via super::util::
 
 #[cfg(test)]

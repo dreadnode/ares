@@ -21,6 +21,7 @@ use crate::dispatcher::Dispatcher;
 use crate::state::SharedState;
 
 /// Golden ticket processing statuses that indicate the domain is "done".
+#[allow(dead_code)]
 const GT_DONE_STATUSES: &[&str] = &[
     "success",
     "failed_no_dc",
@@ -106,6 +107,7 @@ fn forest_root_of(domain: &str) -> String {
 /// processed (or timeout).
 ///
 /// Returns `true` if a golden ticket was successfully forged for at least one domain.
+#[allow(dead_code)]
 pub async fn wait_for_golden_ticket(
     state: &SharedState,
     mut shutdown_rx: watch::Receiver<bool>,

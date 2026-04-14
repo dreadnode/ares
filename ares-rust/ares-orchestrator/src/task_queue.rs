@@ -99,6 +99,7 @@ pub struct TaskQueue {
     conn: ConnectionManager,
 }
 
+#[allow(dead_code)]
 impl TaskQueue {
     /// Create a new queue from an existing connection manager.
     pub fn new(conn: ConnectionManager) -> Self {

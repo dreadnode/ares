@@ -1,15 +1,16 @@
 //! Domain SID extraction.
 
-use once_cell::sync::Lazy;
 use regex::Regex;
+use std::sync::LazyLock;
 
-static DOMAIN_SID_RE: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"S-1-5-21-\d+-\d+-\d+").expect("domain sid regex"));
+static DOMAIN_SID_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"S-1-5-21-\d+-\d+-\d+").expect("domain sid regex"));
 
 /// Regex to extract the RID-500 account name from lookupsid output.
 /// Matches lines like: `500: DOMAIN\AccountName (SidTypeUser)`
-static RID500_RE: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"(?m)^500:\s+[^\\]+\\(.+?)\s+\(SidTypeUser\)").expect("rid500 regex"));
+static RID500_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?m)^500:\s+[^\\]+\\(.+?)\s+\(SidTypeUser\)").expect("rid500 regex")
+});
 
 /// Extract the first domain SID (`S-1-5-21-...`) found in the output.
 pub fn extract_domain_sid(output: &str) -> Option<String> {

@@ -2,11 +2,11 @@
 
 use std::collections::HashMap;
 
-use once_cell::sync::Lazy;
+use std::sync::LazyLock;
 
 const MITRE_TECHNIQUES_YAML: &str = include_str!("data/mitre_techniques.yaml");
 
-static MITRE_TECHNIQUES: Lazy<HashMap<String, String>> = Lazy::new(|| {
+static MITRE_TECHNIQUES: LazyLock<HashMap<String, String>> = LazyLock::new(|| {
     serde_yaml::from_str::<HashMap<String, String>>(MITRE_TECHNIQUES_YAML).unwrap_or_default()
 });
 

@@ -1,30 +1,30 @@
 //! NTLM hash extraction from various tool outputs.
 
-use once_cell::sync::Lazy;
 use regex::Regex;
+use std::sync::LazyLock;
 
 use super::types::ParsedHash;
 
 /// Empty password NT hash constant.
 const EMPTY_NT_HASH: &str = "31d6cfe0d16ae931b73c59d7e0c089c0";
 
-static NTLM_DOMAIN_RE: Lazy<Regex> = Lazy::new(|| {
+static NTLM_DOMAIN_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"([^\\:\s]+)\\([^:\\]+):(\d+):([a-fA-F0-9]{32}):([a-fA-F0-9]{32}):::")
         .expect("ntlm domain regex")
 });
 
-static NTLM_PLAIN_RE: Lazy<Regex> = Lazy::new(|| {
+static NTLM_PLAIN_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"([^:\\\s]+):(\d+):([a-fA-F0-9]{32}):([a-fA-F0-9]{32}):::")
         .expect("ntlm plain regex")
 });
 
 // Regex for NT hash that may be split across two lines (first 16 hex chars on
 // one line, remaining 16 on the next).
-static PARTIAL_NT_RE: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"([a-fA-F0-9]{16})\s*$").expect("partial nt regex"));
+static PARTIAL_NT_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"([a-fA-F0-9]{16})\s*$").expect("partial nt regex"));
 
-static CONTINUATION_RE: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"^\s*([a-fA-F0-9]{16})\s*$").expect("continuation regex"));
+static CONTINUATION_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^\s*([a-fA-F0-9]{16})\s*$").expect("continuation regex"));
 
 /// Extract NTLM hashes from various tool outputs.
 ///

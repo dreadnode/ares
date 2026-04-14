@@ -462,6 +462,7 @@ impl Dispatcher {
     }
 
     /// Get estimated concurrent task count available.
+    #[allow(dead_code)]
     pub async fn available_slots(&self) -> usize {
         let llm_count = self.tracker.llm_task_count().await;
         self.config.max_concurrent_tasks.saturating_sub(llm_count)

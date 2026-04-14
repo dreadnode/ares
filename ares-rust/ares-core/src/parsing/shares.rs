@@ -1,14 +1,15 @@
 //! SMB share extraction from netexec/crackmapexec output.
 
-use once_cell::sync::Lazy;
 use regex::Regex;
+use std::sync::LazyLock;
 
 use super::types::ParsedShare;
 
-static SMB_SHARE_PREFIX_RE: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"^SMB\s+(\d+\.\d+\.\d+\.\d+)\s+").expect("smb share prefix regex"));
+static SMB_SHARE_PREFIX_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"^SMB\s+(\d+\.\d+\.\d+\.\d+)\s+").expect("smb share prefix regex")
+});
 
-static SHARE_LINE_RE: Lazy<Regex> = Lazy::new(|| {
+static SHARE_LINE_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"^\s*(\S+)\s+(READ,\s*WRITE|READ|WRITE|NO ACCESS)\s*(.*)?$")
         .expect("share line regex")
 });
