@@ -245,6 +245,54 @@ pub async fn auto_trust_follow(dispatcher: Arc<Dispatcher>, mut shutdown: watch:
         };
 
         for item in work {
+            // Synthesize a forest_trust_escalation vulnerability to track the
+            // cross-forest attack path in discovered vulnerabilities.
+            let vuln_id = format!(
+                "forest_trust_{}_{}",
+                item.hash.domain.to_lowercase(),
+                item.target_domain.to_lowercase()
+            );
+            let trust_target = item
+                .target_dc_ip
+                .clone()
+                .unwrap_or_else(|| item.target_domain.clone());
+            {
+                let mut details = std::collections::HashMap::new();
+                details.insert(
+                    "source_domain".into(),
+                    serde_json::Value::String(item.hash.domain.clone()),
+                );
+                details.insert(
+                    "target_domain".into(),
+                    serde_json::Value::String(item.target_domain.clone()),
+                );
+                details.insert(
+                    "trust_account".into(),
+                    serde_json::Value::String(item.hash.username.clone()),
+                );
+                details.insert(
+                    "note".into(),
+                    serde_json::Value::String(format!(
+                        "Forest trust escalation via {} trust key — inter-realm ticket + secretsdump",
+                        item.hash.username
+                    )),
+                );
+                let vuln = ares_core::models::VulnerabilityInfo {
+                    vuln_id: vuln_id.clone(),
+                    vuln_type: "forest_trust_escalation".to_string(),
+                    target: trust_target,
+                    discovered_by: "trust_automation".to_string(),
+                    discovered_at: chrono::Utc::now(),
+                    details,
+                    recommended_agent: String::new(),
+                    priority: 1,
+                };
+                let _ = dispatcher
+                    .state
+                    .publish_vulnerability(&dispatcher.queue, vuln)
+                    .await;
+            }
+
             // 1. Dispatch inter-realm ticket creation
             let mut ticket_payload = json!({
                 "technique": "create_inter_realm_ticket",
@@ -252,6 +300,7 @@ pub async fn auto_trust_follow(dispatcher: Arc<Dispatcher>, mut shutdown: watch:
                 "target_domain": item.target_domain,
                 "trust_hash": item.hash.hash_value,
                 "trust_account": item.hash.username,
+                "vuln_id": &vuln_id,
             });
             if let Some(ref sid) = item.source_domain_sid {
                 ticket_payload["domain_sid"] = json!(sid);
@@ -271,6 +320,11 @@ pub async fn auto_trust_follow(dispatcher: Arc<Dispatcher>, mut shutdown: watch:
                         target_domain = %item.target_domain,
                         "Inter-realm ticket task dispatched"
                     );
+                    // Mark trust vuln as exploited once the ticket task is dispatched
+                    let _ = dispatcher
+                        .state
+                        .mark_exploited(&dispatcher.queue, &vuln_id)
+                        .await;
                 }
                 Ok(None) => {
                     debug!("Inter-realm ticket deferred by throttler");

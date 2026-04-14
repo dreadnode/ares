@@ -1167,6 +1167,12 @@ async fn check_domain_admin_indicators(payload: &Value, dispatcher: &Arc<Dispatc
         return;
     }
 
+    // Check if DA was already set (publish_hash path may have fired first)
+    let already_da = {
+        let state = dispatcher.state.read().await;
+        state.has_domain_admin
+    };
+
     // Determine the path description
     let path = if payload.get("has_domain_admin").and_then(|v| v.as_bool()) == Some(true) {
         payload
@@ -1180,12 +1186,60 @@ async fn check_domain_admin_indicators(payload: &Value, dispatcher: &Arc<Dispatc
 
     if let Err(e) = dispatcher
         .state
-        .set_domain_admin(&dispatcher.queue, path)
+        .set_domain_admin(&dispatcher.queue, path.clone())
         .await
     {
         warn!(err = %e, "Failed to set domain admin flag");
     } else {
         info!("🎯 Domain Admin achieved!");
+    }
+
+    // If DA wasn't already set via publish_hash (atypical path — explicit
+    // has_domain_admin flag without a krbtgt hash), synthesize a vuln entry
+    // so the loot display is consistent.
+    if !already_da {
+        let (domain, dc_target) = {
+            let state = dispatcher.state.read().await;
+            let domain = state.domains.first().cloned().unwrap_or_default();
+            let dc = state
+                .domain_controllers
+                .get(&domain.to_lowercase())
+                .cloned()
+                .unwrap_or_else(|| domain.clone());
+            (domain, dc)
+        };
+        if !domain.is_empty() {
+            let vuln_id = format!("domain_admin_{}", domain.to_lowercase());
+            let mut details = std::collections::HashMap::new();
+            details.insert("domain".into(), serde_json::Value::String(domain.clone()));
+            if let Some(ref p) = path {
+                details.insert("path".into(), serde_json::Value::String(p.clone()));
+            }
+            details.insert(
+                "note".into(),
+                serde_json::Value::String(
+                    "Domain admin achieved via agent-reported indicator".to_string(),
+                ),
+            );
+            let vuln = ares_core::models::VulnerabilityInfo {
+                vuln_id: vuln_id.clone(),
+                vuln_type: "domain_admin".to_string(),
+                target: dc_target,
+                discovered_by: "result_processing".to_string(),
+                discovered_at: chrono::Utc::now(),
+                details,
+                recommended_agent: String::new(),
+                priority: 1,
+            };
+            let _ = dispatcher
+                .state
+                .publish_vulnerability(&dispatcher.queue, vuln)
+                .await;
+            let _ = dispatcher
+                .state
+                .mark_exploited(&dispatcher.queue, &vuln_id)
+                .await;
+        }
     }
 }
 

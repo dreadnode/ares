@@ -1,6 +1,8 @@
 //! Publishing methods — add credentials, hashes, hosts, and vulnerabilities
 //! to both in-memory state and Redis.
 
+use std::collections::HashMap;
+
 use anyhow::Result;
 use once_cell::sync::Lazy;
 use redis::AsyncCommands;
@@ -205,6 +207,13 @@ impl SharedState {
                     tracing::info!(domain = %krbtgt_domain, "Domain dominated (krbtgt hash obtained)");
                 }
 
+                // Resolve DC target IP for vulnerability entry
+                let dc_target = state
+                    .domain_controllers
+                    .get(&krbtgt_domain)
+                    .cloned()
+                    .unwrap_or_else(|| krbtgt_domain.clone());
+
                 // Auto-set domain admin when first krbtgt NTLM hash arrives (matches Python)
                 if !state.has_domain_admin {
                     drop(state);
@@ -216,7 +225,37 @@ impl SharedState {
                             "🎯 Domain Admin auto-set from krbtgt NTLM hash in publish_hash"
                         );
                     }
+                } else {
+                    drop(state);
                 }
+
+                // Synthesize a dc_secretsdump vulnerability so the discovered
+                // vulnerabilities list reflects the DA achievement path.
+                let vuln_id = format!("dc_secretsdump_{}", krbtgt_domain);
+                let mut details = HashMap::new();
+                details.insert(
+                    "domain".into(),
+                    serde_json::Value::String(krbtgt_domain.clone()),
+                );
+                details.insert(
+                    "note".into(),
+                    serde_json::Value::String(
+                        "Domain controller compromised via secretsdump — krbtgt NTLM hash extracted"
+                            .to_string(),
+                    ),
+                );
+                let vuln = VulnerabilityInfo {
+                    vuln_id: vuln_id.clone(),
+                    vuln_type: "dc_secretsdump".to_string(),
+                    target: dc_target,
+                    discovered_by: "credential_access".to_string(),
+                    discovered_at: chrono::Utc::now(),
+                    details,
+                    recommended_agent: String::new(),
+                    priority: 1,
+                };
+                let _ = self.publish_vulnerability(queue, vuln).await;
+                let _ = self.mark_exploited(queue, &vuln_id).await;
             }
         }
         Ok(added)
@@ -887,9 +926,46 @@ impl SharedState {
             )
             .await?;
 
+        // Resolve DC IP for the vulnerability target
+        let dc_target = {
+            let state = self.inner.read().await;
+            state
+                .domain_controllers
+                .get(&domain.to_lowercase())
+                .cloned()
+                .unwrap_or_else(|| domain.to_string())
+        };
+
         let mut state = self.inner.write().await;
         state.has_golden_ticket = true;
         tracing::info!(domain = %domain, "🏆 Golden ticket flag set");
+        drop(state);
+
+        // Synthesize a golden_ticket vulnerability so loot reflects the achievement
+        let vuln_id = format!("golden_ticket_{}", domain.to_lowercase());
+        let mut details = HashMap::new();
+        details.insert(
+            "domain".into(),
+            serde_json::Value::String(domain.to_string()),
+        );
+        details.insert(
+            "note".into(),
+            serde_json::Value::String(
+                "Golden ticket forged — persistent domain access via krbtgt key".to_string(),
+            ),
+        );
+        let vuln = VulnerabilityInfo {
+            vuln_id: vuln_id.clone(),
+            vuln_type: "golden_ticket".to_string(),
+            target: dc_target,
+            discovered_by: "golden_ticket_automation".to_string(),
+            discovered_at: chrono::Utc::now(),
+            details,
+            recommended_agent: String::new(),
+            priority: 1,
+        };
+        let _ = self.publish_vulnerability(queue, vuln).await;
+        let _ = self.mark_exploited(queue, &vuln_id).await;
         Ok(())
     }
 

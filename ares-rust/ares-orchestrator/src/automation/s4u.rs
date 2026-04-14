@@ -260,6 +260,8 @@ pub async fn auto_s4u_exploitation(
             }
 
             let vuln_id = item.vuln.vuln_id.clone();
+            // Attach vuln_id so result processing can mark_exploited on success
+            payload["vuln_id"] = json!(&vuln_id);
 
             // Priority 10 = highest — S4U must run before other agents use the
             // credential and potentially lock out the account.
