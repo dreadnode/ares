@@ -319,9 +319,15 @@ pub async fn wait_for_completion(
             if stop_on_da {
                 // Config says stop immediately on DA — skip forest check
                 Some("domain admin achieved (stop_on_domain_admin)")
-            } else if has_gt && stop_on_gt {
-                // Golden ticket forged — stop now (matches Python announce_golden_ticket)
-                Some("golden ticket forged (stop_on_golden_ticket)")
+            } else if stop_on_gt {
+                // stop_on_golden_ticket: keep running until GT is forged.
+                // Do NOT fall through to the "all forests dominated" default
+                // path — that would exit without the golden ticket.
+                if has_gt {
+                    Some("golden ticket forged (stop_on_golden_ticket)")
+                } else {
+                    None // Continue — waiting for golden ticket
+                }
             } else {
                 // Default: continue until all forests are dominated
                 let remaining = undominated_forests(state).await;
@@ -348,14 +354,18 @@ pub async fn wait_for_completion(
                 "Completion condition met"
             );
 
-            // If we have DA but not golden ticket, optionally wait for it
-            if has_da && !has_gt && stop_on_gt {
-                info!("Waiting for golden ticket before final completion (stop_on_golden_ticket)");
-                let gt_timeout = Duration::from_secs(60);
-                let gt_interval = Duration::from_secs(5);
-                let _got_gt =
-                    wait_for_golden_ticket(state, shutdown_rx.clone(), gt_timeout, gt_interval)
-                        .await;
+            // Signal the main loop to stop via Redis so it breaks out of its
+            // select! within the next 5-second poll cycle.
+            {
+                let mut conn = dispatcher.queue.connection();
+                if let Err(e) = ares_core::state::request_stop_operation(
+                    &mut conn,
+                    &dispatcher.config.operation_id,
+                )
+                .await
+                {
+                    warn!(err = %e, "Failed to set Redis stop signal from completion monitor");
+                }
             }
 
             // Extend the lock one final time before returning
