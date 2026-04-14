@@ -37,28 +37,28 @@ repos:
     hooks:
       - id: cargo-fmt
         name: Rust format check
-        entry: cargo fmt --manifest-path ares-rust/Cargo.toml --all -- --check
+        entry: cargo fmt --all -- --check
         language: system
         files: '\.rs$'
         pass_filenames: false
 
       - id: cargo-clippy
         name: Rust clippy lint
-        entry: cargo clippy --manifest-path ares-rust/Cargo.toml --all-targets -- -D warnings
+        entry: cargo clippy --all-targets -- -D warnings
         language: system
         files: '\.rs$'
         pass_filenames: false
 
       - id: cargo-check
         name: Rust compile check
-        entry: cargo check --manifest-path ares-rust/Cargo.toml --all-targets
+        entry: cargo check --all-targets
         language: system
         files: '\.rs$'
         pass_filenames: false
 
       - id: cargo-test
         name: Rust tests
-        entry: cargo test --manifest-path ares-rust/Cargo.toml
+        entry: cargo test
         language: system
         files: '\.rs$'
         pass_filenames: false

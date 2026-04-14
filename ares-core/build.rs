@@ -34,7 +34,7 @@ struct ToolCategory {
 fn main() {
     let manifest_dir = env::var("CARGO_MANIFEST_DIR").unwrap();
     let yaml_path = Path::new(&manifest_dir)
-        .parent() // ares-rust/
+        .parent() // workspace root
         .unwrap()
         .join("tools.yaml");
 

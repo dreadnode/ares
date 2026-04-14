@@ -891,19 +891,19 @@ tasks:
         # Cross-compile: prefer cargo-zigbuild (works on Apple Silicon),
         # fall back to cross, then raw cargo
         if command -v cargo-zigbuild >/dev/null 2>&1; then
-          cd ares-rust && cargo zigbuild --release --target {{.RUST_TARGET}}
+          cargo zigbuild --release --target {{.RUST_TARGET}}
         elif command -v cross >/dev/null 2>&1; then
-          cd ares-rust && cross build --release --target {{.RUST_TARGET}}
+          cross build --release --target {{.RUST_TARGET}}
         else
           echo -e "{{.WARN}} No cross-compilation tool found, trying cargo with target..."
           echo -e "{{.INFO}} Install: cargo install cargo-zigbuild"
-          cd ares-rust && cargo build --release --target {{.RUST_TARGET}}
+          cargo build --release --target {{.RUST_TARGET}}
         fi
 
         echo -e "{{.SUCCESS}} Binaries built:"
-        ls -lh ares-rust/target/{{.RUST_TARGET}}/release/ares-cli \
-               ares-rust/target/{{.RUST_TARGET}}/release/ares-orchestrator \
-               ares-rust/target/{{.RUST_TARGET}}/release/ares-worker 2>/dev/null || true
+        ls -lh target/{{.RUST_TARGET}}/release/ares-cli \
+               target/{{.RUST_TARGET}}/release/ares-orchestrator \
+               target/{{.RUST_TARGET}}/release/ares-worker 2>/dev/null || true
         EOF
 
   orchestrator:patch-wrapper:
@@ -925,7 +925,7 @@ tasks:
     silent: true
     vars:
       RUST_TARGET: '{{.RUST_TARGET | default "x86_64-unknown-linux-gnu"}}'
-      BIN_DIR: 'ares-rust/target/{{.RUST_TARGET}}/release'
+      BIN_DIR: 'target/{{.RUST_TARGET}}/release'
       REMOTE_BIN_DIR: '/usr/local/bin'
     cmds:
       - |
@@ -1089,7 +1089,7 @@ tasks:
     silent: true
     vars:
       RUST_TARGET: '{{.RUST_TARGET | default "x86_64-unknown-linux-gnu"}}'
-      BIN_DIR: 'ares-rust/target/{{.RUST_TARGET}}/release'
+      BIN_DIR: 'target/{{.RUST_TARGET}}/release'
       REMOTE_BIN_DIR: '/usr/local/bin'
     preconditions:
       - sh: test -f {{.BIN_DIR}}/ares-cli

@@ -38,7 +38,7 @@ vars:
   ARES_LOG_DIR: '/var/log/ares'
   # Build config
   RUST_TARGET: '{{.RUST_TARGET | default "x86_64-unknown-linux-gnu"}}'
-  BIN_DIR: 'ares-rust/target/{{.RUST_TARGET}}/release'
+  BIN_DIR: 'target/{{.RUST_TARGET}}/release'
   # Build tool: auto (cross on macOS, zigbuild on Linux), cross, zigbuild, cargo, remote
   # remote: builds natively on EC2 (fastest, no cross-compilation)
   BUILD_TOOL: '{{.BUILD_TOOL | default "auto"}}'
@@ -135,7 +135,7 @@ tasks:
           trap "rm -f $SRC_TAR" EXIT
           tar -czf "$SRC_TAR" \
             --exclude='target' --exclude='.git' --exclude='*.o' --exclude='*.d' \
-            -C "$(pwd)" ares-rust/
+            -C "$(pwd)" Cargo.toml Cargo.lock Cross.toml tools.yaml .cargo/ ares-core/ ares-cli/ ares-llm/ ares-orchestrator/ ares-tools/ ares-worker/
 
           # Upload source to S3
           echo -e "{{.INFO}} Uploading source to S3..."
@@ -220,20 +220,18 @@ tasks:
 
         case "$BUILD_TOOL" in
           cross)
-            cd ares-rust
             # Override linker: container has x86_64-linux-gnu-gcc, not x86_64-unknown-linux-gnu-gcc.
             export CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER=x86_64-linux-gnu-gcc
             cross build --release --target {{.RUST_TARGET}} -j "{{.CARGO_BUILD_JOBS}}"
             ;;
           zigbuild)
-            cd ares-rust
             for pkg in ares-cli ares-orchestrator ares-worker; do
               cargo zigbuild --release --target {{.RUST_TARGET}} -j "{{.CARGO_BUILD_JOBS}}" -p $pkg
             done
             ;;
           cargo)
             echo -e "{{.WARN}} Using plain cargo (no cross-compilation toolchain)..."
-            cd ares-rust && cargo build --release --target {{.RUST_TARGET}} -j "{{.CARGO_BUILD_JOBS}}"
+            cargo build --release --target {{.RUST_TARGET}} -j "{{.CARGO_BUILD_JOBS}}"
             ;;
           *)
             echo -e "{{.ERROR}} Unknown BUILD_TOOL: $BUILD_TOOL (valid: auto, cross, zigbuild, cargo, remote)"

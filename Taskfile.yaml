@@ -84,7 +84,7 @@ vars:
   # Config file (single source of truth for model assignments)
   ARES_CONFIG: '{{.ARES_CONFIG | default "./config/ares.yaml"}}'
   # Rust CLI binary
-  ARES_CLI: '{{.ARES_CLI | default "./ares-rust/target/release/ares-cli"}}'
+  ARES_CLI: '{{.ARES_CLI | default "./target/release/ares-cli"}}'
   # Infrastructure
   K8S_NAMESPACE: '{{.K8S_NAMESPACE | default "attack-simulation"}}'
   TARGET_PROFILE: '{{.TARGET_PROFILE | default "lab"}}'
@@ -189,33 +189,33 @@ tasks:
     desc: Build the Rust CLI binary (debug)
     silent: true
     cmds:
-      - cd ares-rust && cargo build
-      - echo "Debug binary built at ares-rust/target/debug/ares-cli"
+      - cargo build
+      - echo "Debug binary built at target/debug/ares-cli"
 
   rust:release:
     desc: Build the Rust CLI binary (release)
     silent: true
     cmds:
-      - cd ares-rust && cargo build --release
-      - echo "Release binary built at ares-rust/target/release/ares-cli"
+      - cargo build --release
+      - echo "Release binary built at target/release/ares-cli"
 
   rust:test:
     desc: Run Rust tests
     silent: true
     cmds:
-      - cd ares-rust && cargo test
+      - cargo test
 
   rust:check:
     desc: Check Rust code compiles without building
     silent: true
     cmds:
-      - cd ares-rust && cargo check
+      - cargo check
 
   rust:clean:
     desc: Clean Rust build artifacts
     silent: true
     cmds:
-      - cd ares-rust && cargo clean
+      - cargo clean
 
   rust:deploy:
     desc: "Cross-compile and deploy Rust binaries to K8s pods"
