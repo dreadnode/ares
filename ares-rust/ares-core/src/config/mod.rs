@@ -54,7 +54,19 @@ impl AresConfig {
             .with_context(|| format!("Failed to read config file: {}", path.display()))?;
         let config: Self = serde_yaml::from_str(&contents)
             .with_context(|| format!("Failed to parse config file: {}", path.display()))?;
+        config.validate()?;
         Ok(config)
+    }
+
+    /// Validate config invariants after loading.
+    fn validate(&self) -> Result<()> {
+        if self.operation.stop_on_domain_admin && self.operation.stop_on_golden_ticket {
+            bail!(
+                "stop_on_domain_admin and stop_on_golden_ticket are mutually exclusive — \
+                 enable one or the other, not both"
+            );
+        }
+        Ok(())
     }
 
     /// Resolve the config file path and load it.
@@ -333,6 +345,46 @@ security: {}
             assert_eq!(cfg.vulnerability_priority("adcs_esc1"), 1);
             assert_eq!(cfg.vulnerability_priority("password_spray"), 50);
         }
+    }
+
+    #[test]
+    fn test_stop_criteria_mutually_exclusive() {
+        let yaml = MINIMAL_YAML.replace(
+            "namespace: \"test-ns\"",
+            "namespace: \"test-ns\"\n  stop_on_domain_admin: true\n  stop_on_golden_ticket: true",
+        );
+        let f = write_temp_yaml(&yaml);
+        let result = AresConfig::load(f.path());
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("mutually exclusive"),
+            "Expected mutual exclusivity error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_stop_on_golden_ticket_alone_valid() {
+        let yaml = MINIMAL_YAML.replace(
+            "namespace: \"test-ns\"",
+            "namespace: \"test-ns\"\n  stop_on_golden_ticket: true",
+        );
+        let f = write_temp_yaml(&yaml);
+        let cfg = AresConfig::load(f.path()).unwrap();
+        assert!(cfg.operation.stop_on_golden_ticket);
+        assert!(!cfg.operation.stop_on_domain_admin);
+    }
+
+    #[test]
+    fn test_stop_on_domain_admin_alone_valid() {
+        let yaml = MINIMAL_YAML.replace(
+            "namespace: \"test-ns\"",
+            "namespace: \"test-ns\"\n  stop_on_domain_admin: true",
+        );
+        let f = write_temp_yaml(&yaml);
+        let cfg = AresConfig::load(f.path()).unwrap();
+        assert!(cfg.operation.stop_on_domain_admin);
+        assert!(!cfg.operation.stop_on_golden_ticket);
     }
 
     #[test]

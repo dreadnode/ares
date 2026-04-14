@@ -23,6 +23,9 @@ use crate::output_extraction;
 use crate::results::CompletedTask;
 use crate::throttling::Throttler;
 
+/// Kerberos/SMB errors that indicate a credential is locked out.
+const LOCKOUT_PATTERNS: &[&str] = &["KDC_ERR_CLIENT_REVOKED", "STATUS_ACCOUNT_LOCKED_OUT"];
+
 /// Process a completed task result: extract discoveries and update state.
 pub async fn process_completed_task(
     completed: &CompletedTask,
@@ -31,6 +34,17 @@ pub async fn process_completed_task(
 ) {
     let task_id = &completed.task_id;
     let result = &completed.result;
+
+    // Grab credential key from pending task BEFORE complete_task removes it.
+    let cred_key = {
+        let state = dispatcher.state.read().await;
+        state
+            .pending_tasks
+            .get(task_id.as_str())
+            .and_then(|t| t.params.get("credential_key"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+    };
 
     // Persist task completion to Redis (pending → completed) for recovery.
     // Matches Python's write to ares:op:{id}:completed_tasks HASH.
@@ -131,6 +145,25 @@ pub async fn process_completed_task(
                 .await
             {
                 warn!(err = %e, vuln_id = %vuln_id, "Failed to mark vulnerability exploited");
+            }
+        }
+    }
+
+    // Credential lockout quarantine: if the task result contains lockout
+    // indicators, quarantine the credential so automation stops scheduling it.
+    if let Some(ref key) = cred_key {
+        if has_lockout_in_result(result) {
+            if let Some((username, domain)) = key.split_once('@') {
+                warn!(
+                    credential = %key,
+                    task_id = %task_id,
+                    "Credential quarantined for 5 min: lockout detected"
+                );
+                dispatcher
+                    .state
+                    .write()
+                    .await
+                    .quarantine_credential(username, domain);
             }
         }
     }
@@ -607,14 +640,41 @@ async fn extract_and_cache_domain_sid(payload: &Value, dispatcher: &Arc<Dispatch
             if let Err(e) = reader.set_domain_sid(&mut conn, &domain, &sid).await {
                 warn!(err = %e, domain = %domain, "Failed to persist domain SID to Redis");
             } else {
-                info!(domain = %domain, sid = %sid, "Domain SID cached from secretsdump output");
+                info!(domain = %domain, sid = %sid, "Domain SID cached from task output");
                 // Update in-memory state
                 dispatcher
                     .state
                     .write()
                     .await
                     .domain_sids
-                    .insert(domain, sid);
+                    .insert(domain.clone(), sid);
+            }
+        }
+
+        // Also extract RID-500 account name from lookupsid output (if present).
+        if let Some(admin_name) = ares_core::parsing::extract_rid500_name(&combined) {
+            let already_known = {
+                let state = dispatcher.state.read().await;
+                state.admin_names.contains_key(&domain)
+            };
+            if !already_known {
+                let op_id = {
+                    let state = dispatcher.state.read().await;
+                    state.operation_id.clone()
+                };
+                let reader = ares_core::state::RedisStateReader::new(op_id);
+                let mut conn = dispatcher.queue.connection();
+                if let Err(e) = reader.set_admin_name(&mut conn, &domain, &admin_name).await {
+                    warn!(err = %e, domain = %domain, "Failed to persist admin name to Redis");
+                } else {
+                    info!(domain = %domain, name = %admin_name, "RID-500 account name cached from task output");
+                    dispatcher
+                        .state
+                        .write()
+                        .await
+                        .admin_names
+                        .insert(domain, admin_name);
+                }
             }
         }
     }
@@ -1377,6 +1437,44 @@ async fn poll_discoveries(dispatcher: &Dispatcher) -> Result<()> {
     let _ = dispatcher.notify_state_update().await;
 
     Ok(())
+}
+
+/// Check if a task result contains lockout error indicators.
+///
+/// Scans the error text, tool_outputs array, and summary/output fields
+/// for patterns indicating the credential was locked out or revoked.
+fn has_lockout_in_result(result: &crate::task_queue::TaskResult) -> bool {
+    // Check error text
+    if let Some(ref err) = result.error {
+        if LOCKOUT_PATTERNS.iter().any(|p| err.contains(p)) {
+            return true;
+        }
+    }
+
+    // Check result payload
+    if let Some(ref payload) = result.result {
+        // Check tool_outputs array (raw tool stdout/stderr)
+        if let Some(outputs) = payload.get("tool_outputs").and_then(|v| v.as_array()) {
+            for output in outputs {
+                if let Some(text) = output.as_str() {
+                    if LOCKOUT_PATTERNS.iter().any(|p| text.contains(p)) {
+                        return true;
+                    }
+                }
+            }
+        }
+
+        // Check summary/output text
+        for key in &["summary", "output", "tool_output"] {
+            if let Some(text) = payload.get(*key).and_then(|v| v.as_str()) {
+                if LOCKOUT_PATTERNS.iter().any(|p| text.contains(p)) {
+                    return true;
+                }
+            }
+        }
+    }
+
+    false
 }
 
 // ---------------------------------------------------------------------------

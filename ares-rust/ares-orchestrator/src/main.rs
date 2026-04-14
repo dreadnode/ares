@@ -503,7 +503,13 @@ async fn main() -> Result<()> {
             &completion_state,
             &completion_disp,
             completion_shutdown,
-            std::time::Duration::from_secs(7200),
+            std::time::Duration::from_secs(
+                ares_config
+                    .as_ref()
+                    .map(|c| c.timeouts.operation_timeout)
+                    .filter(|&t| t > 0)
+                    .unwrap_or(7200),
+            ),
             std::time::Duration::from_secs(10),
         )
         .await;

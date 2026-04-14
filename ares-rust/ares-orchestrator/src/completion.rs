@@ -3,6 +3,12 @@
 //! These functions block (async) until the operation reaches a terminal state:
 //! all forests dominated, golden tickets forged, max runtime exceeded, or
 //! explicit shutdown.
+//!
+//! Two config flags control early-exit behaviour (mutually exclusive):
+//! - `stop_on_domain_admin`: stop as soon as DA is achieved on any domain,
+//!   without waiting for all trusted forests to be dominated.
+//! - `stop_on_golden_ticket`: continue past DA to forge a golden ticket with
+//!   ExtraSid for child→parent escalation, then stop once forged.
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -243,9 +249,15 @@ pub async fn wait_for_golden_ticket(
 /// - `completed` flag set (external completion signal)
 /// - Max runtime exceeded
 ///
-/// When DA is achieved for the initial domain but other forests remain
-/// undominated, the operation continues until all forests are dominated
-/// or max runtime is exceeded.
+/// Behaviour is influenced by two mutually exclusive config flags:
+/// - `stop_on_domain_admin`: stop as soon as DA is achieved on *any* domain,
+///   without waiting for forests or golden tickets.
+/// - `stop_on_golden_ticket`: continue past DA to forge a golden ticket with
+///   ExtraSid, then stop. If the ticket isn't forged within 60 s of DA, stop
+///   anyway.
+///
+/// When neither flag is set (default), the operation continues until all
+/// trusted forests are dominated or max runtime is exceeded.
 pub async fn wait_for_completion(
     state: &SharedState,
     dispatcher: &Arc<Dispatcher>,
@@ -255,8 +267,22 @@ pub async fn wait_for_completion(
 ) {
     let start = tokio::time::Instant::now();
 
+    // Read stop-condition flags from config (default: both false)
+    let (stop_on_da, stop_on_gt) = dispatcher
+        .ares_config
+        .as_ref()
+        .map(|c| {
+            (
+                c.operation.stop_on_domain_admin,
+                c.operation.stop_on_golden_ticket,
+            )
+        })
+        .unwrap_or((false, false));
+
     info!(
         max_runtime_secs = max_runtime.as_secs(),
+        stop_on_domain_admin = stop_on_da,
+        stop_on_golden_ticket = stop_on_gt,
         "Completion monitor started"
     );
 
@@ -270,25 +296,44 @@ pub async fn wait_for_completion(
         let elapsed = start.elapsed();
         let (has_da, has_gt, completed) = {
             let inner = state.read().await;
-            (inner.has_domain_admin, inner.has_golden_ticket, false)
+            (
+                inner.has_domain_admin,
+                inner.has_golden_ticket,
+                inner.completed,
+            )
         };
 
-        // Check completion conditions
+        // Check completion conditions.
+        //
+        // Priority order matches Python's _wait_for_completion():
+        // 1. External completed flag (e.g. CLI stop signal)
+        // 2. Max runtime exceeded
+        // 3. stop_on_domain_admin: stop immediately on DA
+        // 4. stop_on_golden_ticket: stop when DA + golden ticket achieved
+        // 5. Default: stop when all trusted forests are dominated
         let reason = if completed {
             Some("operation marked completed")
         } else if elapsed >= max_runtime {
             Some("max runtime exceeded")
         } else if has_da {
-            // DA achieved — but check if all forests are dominated
-            let remaining = undominated_forests(state).await;
-            if remaining.is_empty() {
-                Some("all forests dominated")
+            if stop_on_da {
+                // Config says stop immediately on DA — skip forest check
+                Some("domain admin achieved (stop_on_domain_admin)")
+            } else if has_gt && stop_on_gt {
+                // Golden ticket forged — stop now (matches Python announce_golden_ticket)
+                Some("golden ticket forged (stop_on_golden_ticket)")
             } else {
-                debug!(
-                    undominated = ?remaining,
-                    "DA achieved but forests remain undominated"
-                );
-                None // Continue — other forests still need krbtgt
+                // Default: continue until all forests are dominated
+                let remaining = undominated_forests(state).await;
+                if remaining.is_empty() {
+                    Some("all forests dominated")
+                } else {
+                    debug!(
+                        undominated = ?remaining,
+                        "DA achieved but forests remain undominated"
+                    );
+                    None // Continue — other forests still need krbtgt
+                }
             }
         } else {
             None
@@ -303,9 +348,9 @@ pub async fn wait_for_completion(
                 "Completion condition met"
             );
 
-            // If we have DA but not golden ticket, wait for it
-            if has_da && !has_gt {
-                info!("Waiting for golden ticket before final completion");
+            // If we have DA but not golden ticket, optionally wait for it
+            if has_da && !has_gt && stop_on_gt {
+                info!("Waiting for golden ticket before final completion (stop_on_golden_ticket)");
                 let gt_timeout = Duration::from_secs(60);
                 let gt_interval = Duration::from_secs(5);
                 let _got_gt =

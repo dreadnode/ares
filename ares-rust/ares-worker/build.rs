@@ -1,4 +1,4 @@
-//! Build script — generates `tools_for_role()` from `docs/tools.yaml`.
+//! Build script — generates `tools_for_role()` from `tools.yaml`.
 //!
 //! The generated file is written to `$OUT_DIR/tool_tables.rs` and
 //! included by `tool_check.rs` via `include!`.
@@ -30,6 +30,9 @@ struct ToolCategory {
     #[allow(dead_code)]
     category: String,
     binaries: Vec<String>,
+    #[allow(dead_code)]
+    #[serde(default)]
+    fn_names: Vec<String>,
 }
 
 fn main() {
@@ -37,9 +40,7 @@ fn main() {
     let yaml_path = Path::new(&manifest_dir)
         .parent() // ares-rust/
         .unwrap()
-        .parent() // repo root
-        .unwrap()
-        .join("docs/tools.yaml");
+        .join("tools.yaml");
 
     println!("cargo::rerun-if-changed={}", yaml_path.display());
 
@@ -74,7 +75,7 @@ fn main() {
     writeln!(f, "///").unwrap();
     writeln!(
         f,
-        "/// Auto-generated from `docs/tools.yaml` — do not edit by hand."
+        "/// Auto-generated from `tools.yaml` — do not edit by hand."
     )
     .unwrap();
     writeln!(
@@ -119,7 +120,7 @@ fn main() {
     .unwrap();
     writeln!(
         f,
-        "/// Auto-generated from `docs/tools.yaml` — do not edit by hand."
+        "/// Auto-generated from `tools.yaml` — do not edit by hand."
     )
     .unwrap();
     writeln!(f, "#[allow(dead_code)]").unwrap();

@@ -43,6 +43,7 @@ pub async fn auto_local_admin_secretsdump(
                 // Skip delegation accounts — secretsdump will always fail
                 // (non-admin) and wastes auth budget reserved for S4U.
                 .filter(|c| c.is_admin || !state.is_delegation_account(&c.username))
+                .filter(|c| !state.is_credential_quarantined(&c.username, &c.domain))
                 .cloned()
                 .collect();
 

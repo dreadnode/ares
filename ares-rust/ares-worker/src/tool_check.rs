@@ -4,7 +4,7 @@
 //! for missing tools and optionally report the inventory to the orchestrator
 //! via Redis.
 //!
-//! Tool lists are generated at compile time from `docs/tools.yaml` by
+//! Tool lists are generated at compile time from `tools.yaml` by
 //! `build.rs`. See that file for the authoritative reference of expected
 //! tools per role.
 
@@ -13,7 +13,7 @@ use std::collections::BTreeMap;
 use tracing::{info, warn};
 
 // Pull in `WORKER_ROLES`, `tools_for_role()`, and `ALL_BINARIES` generated
-// by build.rs from docs/tools.yaml.
+// by build.rs from tools.yaml.
 include!(concat!(env!("OUT_DIR"), "/tool_tables.rs"));
 
 /// Check which tools are available in $PATH for the given role.
@@ -132,8 +132,8 @@ mod tests {
     // ---------------------------------------------------------------
     // Per-role expected tool assertions.
     //
-    // These validate that docs/tools.yaml contains the expected tools.
-    // When Ansible provisioning changes, update docs/tools.yaml.
+    // These validate that tools.yaml contains the expected tools.
+    // When Ansible provisioning changes, update tools.yaml.
     // ---------------------------------------------------------------
 
     #[test]

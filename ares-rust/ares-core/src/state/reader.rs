@@ -381,6 +381,19 @@ impl RedisStateReader {
         Ok(())
     }
 
+    /// Set the RID-500 account name for a domain in the `admin_names` HASH.
+    pub async fn set_admin_name(
+        &self,
+        conn: &mut impl AsyncCommands,
+        domain: &str,
+        name: &str,
+    ) -> Result<(), redis::RedisError> {
+        let key = self.key(KEY_ADMIN_NAMES);
+        let _: () = conn.hset(&key, domain, name).await?;
+        let _: () = conn.expire(&key, 86400).await?;
+        Ok(())
+    }
+
     /// Add a share to `ares:op:{id}:shares` HASH (with dedup by host+name).
     pub async fn add_share(
         &self,

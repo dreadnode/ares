@@ -31,7 +31,10 @@ pub async fn auto_share_spider(dispatcher: Arc<Dispatcher>, mut shutdown: watch:
             let cred = match state
                 .credentials
                 .iter()
-                .find(|c| !state.is_delegation_account(&c.username))
+                .find(|c| {
+                    !state.is_delegation_account(&c.username)
+                        && !state.is_credential_quarantined(&c.username, &c.domain)
+                })
                 .or_else(|| state.credentials.first())
             {
                 Some(c) => c.clone(),

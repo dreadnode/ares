@@ -58,6 +58,8 @@ pub const KEY_COMPLETED_TASKS: &str = "completed_tasks";
 pub const KEY_VULN_TYPE_FAILURES: &str = "vuln_type_failures";
 /// Redis HASH key suffix mapping domain name → SID string.
 pub const KEY_DOMAIN_SIDS: &str = "domain_sids";
+/// Redis HASH key suffix mapping domain FQDN → RID-500 account name.
+pub const KEY_ADMIN_NAMES: &str = "admin_names";
 /// Redis HASH key suffix mapping domain FQDN → TrustInfo JSON.
 pub const KEY_TRUSTED_DOMAINS: &str = "trusted_domains";
 

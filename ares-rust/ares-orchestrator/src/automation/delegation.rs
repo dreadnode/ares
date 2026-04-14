@@ -38,6 +38,7 @@ pub async fn auto_delegation_enumeration(
                 // with other creds, and using a delegation account's cred
                 // burns auth budget reserved for S4U.
                 .filter(|c| !state.is_delegation_account(&c.username))
+                .filter(|c| !state.is_credential_quarantined(&c.username, &c.domain))
                 .filter_map(|cred| {
                     if cred.domain.is_empty() {
                         return None;

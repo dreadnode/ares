@@ -2,9 +2,15 @@
 
 use std::collections::{HashMap, HashSet};
 
+use chrono::{DateTime, Utc};
+
 use ares_core::models::*;
 
 use super::ALL_DEDUP_SETS;
+
+/// Lockout quarantine duration: 5 minutes matches S4U cooldown and typical
+/// AD lockout observation windows. Longer values block the critical path.
+const QUARANTINE_DURATION_SECS: i64 = 300;
 
 #[derive(Debug)]
 pub struct StateInner {
@@ -28,6 +34,8 @@ pub struct StateInner {
     pub domain_controllers: HashMap<String, String>,
     pub netbios_to_fqdn: HashMap<String, String>,
     pub domain_sids: HashMap<String, String>,
+    /// RID-500 account name per domain (may differ from "Administrator" if renamed).
+    pub admin_names: HashMap<String, String>,
 
     // Trust relationships (domain FQDN → trust metadata)
     pub trusted_domains: HashMap<String, TrustInfo>,
@@ -56,6 +64,11 @@ pub struct StateInner {
     pub pending_tasks: HashMap<String, TaskInfo>,
     pub completed_tasks: HashMap<String, ares_core::models::TaskResult>,
 
+    // Credential lockout quarantine: `user@domain` → expiry time.
+    // Credentials that triggered STATUS_ACCOUNT_LOCKED_OUT or
+    // KDC_ERR_CLIENT_REVOKED are quarantined to avoid burning auth budget.
+    pub quarantined_credentials: HashMap<String, DateTime<Utc>>,
+
     // Completion flag (set externally to signal operation should wrap up)
     pub completed: bool,
 }
@@ -82,6 +95,7 @@ impl StateInner {
             domain_controllers: HashMap::new(),
             netbios_to_fqdn: HashMap::new(),
             domain_sids: HashMap::new(),
+            admin_names: HashMap::new(),
             trusted_domains: HashMap::new(),
             dominated_domains: HashSet::new(),
             has_domain_admin: false,
@@ -93,6 +107,7 @@ impl StateInner {
             dispatched_acl_steps: HashSet::new(),
             pending_tasks: HashMap::new(),
             completed_tasks: HashMap::new(),
+            quarantined_credentials: HashMap::new(),
             completed: false,
         }
     }
@@ -115,6 +130,23 @@ impl StateInner {
                 .map(|a| a.to_lowercase() == u)
                 .unwrap_or(false)
         })
+    }
+
+    /// Check if a credential is quarantined due to lockout.
+    /// Expired quarantines are ignored (lazy cleanup).
+    pub fn is_credential_quarantined(&self, username: &str, domain: &str) -> bool {
+        let key = format!("{}@{}", username.to_lowercase(), domain.to_lowercase());
+        self.quarantined_credentials
+            .get(&key)
+            .map(|expiry| Utc::now() < *expiry)
+            .unwrap_or(false)
+    }
+
+    /// Quarantine a credential for `QUARANTINE_DURATION_SECS` after lockout.
+    pub fn quarantine_credential(&mut self, username: &str, domain: &str) {
+        let key = format!("{}@{}", username.to_lowercase(), domain.to_lowercase());
+        let expiry = Utc::now() + chrono::Duration::seconds(QUARANTINE_DURATION_SECS);
+        self.quarantined_credentials.insert(key, expiry);
     }
 
     /// Check if a dedup key exists in the named set.
@@ -372,5 +404,35 @@ mod tests {
         assert!(state.is_delegation_account("jon.snow"));
         assert!(state.is_delegation_account("Jon.Snow")); // case insensitive
         assert!(!state.is_delegation_account("samwell.tarly"));
+    }
+
+    #[test]
+    fn test_credential_quarantine() {
+        let mut state = StateInner::new("op-1".into());
+
+        // Not quarantined initially
+        assert!(!state.is_credential_quarantined("hodor", "north.sevenkingdoms.local"));
+
+        // Quarantine a credential
+        state.quarantine_credential("hodor", "north.sevenkingdoms.local");
+        assert!(state.is_credential_quarantined("hodor", "north.sevenkingdoms.local"));
+        assert!(state.is_credential_quarantined("HODOR", "NORTH.SEVENKINGDOMS.LOCAL")); // case insensitive
+
+        // Different credential not affected
+        assert!(!state.is_credential_quarantined("jon.snow", "north.sevenkingdoms.local"));
+    }
+
+    #[test]
+    fn test_credential_quarantine_expired() {
+        let mut state = StateInner::new("op-1".into());
+
+        // Insert with an already-expired time
+        let key = "hodor@north.sevenkingdoms.local".to_string();
+        state
+            .quarantined_credentials
+            .insert(key, Utc::now() - chrono::Duration::seconds(1));
+
+        // Should not be quarantined (expired)
+        assert!(!state.is_credential_quarantined("hodor", "north.sevenkingdoms.local"));
     }
 }

@@ -33,6 +33,11 @@ pub fn definitions() -> Vec<ToolDefinition> {
                     "extra_sid": {
                         "type": "string",
                         "description": "Extra SID to include for ExtraSid attack on parent domain (e.g. parent SID + '-519' for Enterprise Admins)"
+                    },
+                    "username": {
+                        "type": "string",
+                        "description": "Account name for RID 500 to embed in the ticket. Defaults to 'Administrator'. Use the actual RID-500 name if it has been renamed.",
+                        "default": "Administrator"
                     }
                 },
                 "required": ["krbtgt_hash", "domain_sid", "domain"]

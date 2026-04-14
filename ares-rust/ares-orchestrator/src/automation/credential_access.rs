@@ -88,6 +88,8 @@ pub async fn auto_credential_access(
                 // other creds, and burning auth on delegation accounts risks
                 // lockout before S4U can use them.
                 .filter(|c| !state.is_delegation_account(&c.username))
+                // Skip quarantined credentials — locked out, retry after expiry.
+                .filter(|c| !state.is_credential_quarantined(&c.username, &c.domain))
                 .filter_map(|cred| {
                     let cred_domain = cred.domain.to_lowercase();
                     let dedup = format!("krb:{}:{}", cred_domain, cred.username.to_lowercase());
@@ -158,6 +160,7 @@ pub async fn auto_credential_access(
                 // Skip delegation accounts — their auth budget is reserved for
                 // S4U exploitation. Spraying them causes lockout before S4U fires.
                 .filter(|u| !state.is_delegation_account(&u.username))
+                .filter(|u| !state.is_credential_quarantined(&u.username, &u.domain))
                 .filter_map(|u| {
                     let user_domain = u.domain.to_lowercase();
                     let dedup = format!("{}:{}", user_domain, u.username.to_lowercase());
@@ -234,6 +237,7 @@ pub async fn auto_credential_access(
                 .filter(|c| !c.domain.is_empty() && !c.password.is_empty())
                 // Skip delegation accounts — their auth is reserved for S4U.
                 .filter(|c| c.is_admin || !state.is_delegation_account(&c.username))
+                .filter(|c| !state.is_credential_quarantined(&c.username, &c.domain))
                 .filter_map(|cred| {
                     let cred_domain = cred.domain.to_lowercase();
                     let dedup = format!("{}:{}", cred_domain, cred.username.to_lowercase());
@@ -308,6 +312,7 @@ pub async fn auto_credential_access(
                     // Skip delegation accounts — secretsdump will always fail
                     // (they're not admin) and burns auth budget needed for S4U.
                     .filter(|c| c.is_admin || !state.is_delegation_account(&c.username))
+                    .filter(|c| !state.is_credential_quarantined(&c.username, &c.domain))
                 {
                     let cred_domain = cred.domain.to_lowercase();
                     for host in &state.hosts {

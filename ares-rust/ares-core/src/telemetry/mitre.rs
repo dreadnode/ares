@@ -263,6 +263,27 @@ pub static TOOL_TO_CATEGORY: Lazy<HashMap<&str, &str>> = Lazy::new(|| {
     ])
 });
 
+// =============================================================================
+// Tool metadata from tools.yaml (generated at compile time)
+// =============================================================================
+
+include!(concat!(env!("OUT_DIR"), "/tool_meta.rs"));
+
+/// Look up the tool binary from `tools.yaml`.
+pub fn get_tool_binary(tool_name: &str) -> Option<&'static str> {
+    tool_meta(tool_name).map(|m| m.binary)
+}
+
+/// Look up the human-readable category from `tools.yaml`.
+pub fn get_tool_yaml_category(tool_name: &str) -> Option<&'static str> {
+    tool_meta(tool_name).map(|m| m.category)
+}
+
+/// Look up the provisioning role from `tools.yaml`.
+pub fn get_tool_role(tool_name: &str) -> Option<&'static str> {
+    tool_meta(tool_name).map(|m| m.role)
+}
+
 /// Tool category → fallback tactic.
 pub static TOOL_CATEGORY_TO_TACTIC: Lazy<HashMap<&str, &str>> = Lazy::new(|| {
     HashMap::from([

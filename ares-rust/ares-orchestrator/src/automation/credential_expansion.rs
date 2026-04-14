@@ -48,9 +48,9 @@ pub async fn auto_credential_expansion(
                 .iter()
                 .filter(|c| !c.domain.is_empty() && !c.password.is_empty())
                 // Skip delegation accounts — their auth is reserved for S4U.
-                // Lateral movement and secretsdump with non-admin delegation
-                // creds wastes auth budget and risks lockout before S4U fires.
                 .filter(|c| c.is_admin || !state.is_delegation_account(&c.username))
+                // Skip quarantined credentials — locked out, retry after expiry.
+                .filter(|c| !state.is_credential_quarantined(&c.username, &c.domain))
                 .filter_map(|cred| {
                     let dedup = format!(
                         "{}:{}",

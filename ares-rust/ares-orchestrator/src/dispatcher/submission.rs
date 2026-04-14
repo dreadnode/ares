@@ -1,9 +1,11 @@
 //! Task submission — throttled_submit and do_submit.
 
+use std::collections::HashMap;
+use std::sync::Arc;
+
 use anyhow::Result;
 use chrono::Utc;
 use serde_json::{json, Value};
-use std::sync::Arc;
 use tracing::{debug, info, warn};
 
 use crate::deferred::DeferredTask;
@@ -202,6 +204,10 @@ impl Dispatcher {
 
         // Persist pending task to Redis HASH for recovery
         let now = Utc::now();
+        let mut task_params: HashMap<String, serde_json::Value> = HashMap::new();
+        if let Some(ref key) = cred_key {
+            task_params.insert("credential_key".to_string(), serde_json::json!(key));
+        }
         let task_info = ares_core::models::TaskInfo {
             task_id: task_id.clone(),
             task_type: task_type.to_string(),
@@ -211,7 +217,7 @@ impl Dispatcher {
             started_at: Some(now),
             completed_at: None,
             last_activity_at: now,
-            params: Default::default(),
+            params: task_params,
             result: None,
             error: None,
             retry_count: 0,

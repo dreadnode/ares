@@ -131,6 +131,11 @@ impl AgentSpanBuilder {
             .unwrap_or((None, None));
 
         let tool_category = self.tool_name.as_deref().and_then(mitre::get_tool_category);
+        let tool_binary = self.tool_name.as_deref().and_then(mitre::get_tool_binary);
+        let tool_yaml_category = self
+            .tool_name
+            .as_deref()
+            .and_then(mitre::get_tool_yaml_category);
 
         // Phase and tactic from role.
         let (phase_map, tactic_map) = match self.team {
@@ -183,6 +188,8 @@ impl AgentSpanBuilder {
             "tool.name" = self.tool_name.as_deref().unwrap_or(""),
             attack_tool_name = self.tool_name.as_deref().unwrap_or(""),
             attack_tool_category = tool_category.unwrap_or(""),
+            "tool.binary" = tool_binary.unwrap_or(""),
+            "tool.provisioned_category" = tool_yaml_category.unwrap_or(""),
             "tool.status" = tool_status,
             // Target (OTel semantic conventions)
             "destination.address" = self.target.fqdn.as_deref().unwrap_or(""),

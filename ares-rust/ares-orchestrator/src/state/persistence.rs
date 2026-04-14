@@ -72,6 +72,16 @@ impl SharedState {
         let domain_sids: HashMap<String, String> =
             conn.hgetall(&domain_sids_key).await.unwrap_or_default();
 
+        // Load RID-500 admin account names
+        let admin_names_key = format!(
+            "{}:{}:{}",
+            state::KEY_PREFIX,
+            operation_id,
+            state::KEY_ADMIN_NAMES
+        );
+        let admin_names: HashMap<String, String> =
+            conn.hgetall(&admin_names_key).await.unwrap_or_default();
+
         // Load trusted domains
         let trusted_domains_key = format!(
             "{}:{}:{}",
@@ -163,6 +173,7 @@ impl SharedState {
         state.domain_controllers = loaded.domain_controllers;
         state.netbios_to_fqdn = loaded.netbios_to_fqdn;
         state.domain_sids = domain_sids;
+        state.admin_names = admin_names;
         state.trusted_domains = trusted_domains;
         // Rebuild dominated_domains from krbtgt hashes
         state.dominated_domains = state
@@ -241,6 +252,16 @@ impl SharedState {
         let domain_sids: HashMap<String, String> =
             conn.hgetall(&domain_sids_key).await.unwrap_or_default();
 
+        // Load RID-500 admin account names
+        let admin_names_key = format!(
+            "{}:{}:{}",
+            state::KEY_PREFIX,
+            operation_id,
+            state::KEY_ADMIN_NAMES
+        );
+        let admin_names: HashMap<String, String> =
+            conn.hgetall(&admin_names_key).await.unwrap_or_default();
+
         // Refresh ACL chains
         let acl_chains_key = format!(
             "{}:{}:{}",
@@ -284,6 +305,7 @@ impl SharedState {
         state.domain_admin_path = meta.domain_admin_path;
         state.domain_controllers = dc_map;
         state.domain_sids = domain_sids;
+        state.admin_names = admin_names;
         state.trusted_domains = trusted_domains;
         state.acl_chains = acl_chains;
         // Rebuild dominated_domains from refreshed hashes
