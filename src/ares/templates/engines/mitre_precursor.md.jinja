@@ -1,9 +1,0 @@
-PRECURSOR INVESTIGATION: We detected {{ detected_technique_id }} ({{ detected_technique_name }}). Before this attack, attackers typically perform {{ precursor_technique_id }} ({{ precursor_technique_name }}). {{ rationale }}
-
-INVESTIGATE: Look for {{ precursor_technique_name }} activity in the time window BEFORE the detected technique.
-{% if windows_events %}
-KEY WINDOWS EVENTS: {{ windows_events }}
-{% endif %}
-{% if log_patterns %}
-SUGGESTED LOG PATTERNS: {{ log_patterns }}
-{% endif %}

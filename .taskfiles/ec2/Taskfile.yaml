@@ -39,6 +39,8 @@ vars:
   # Build config
   RUST_TARGET: '{{.RUST_TARGET | default "x86_64-unknown-linux-gnu"}}'
   BIN_DIR: 'ares-rust/target/{{.RUST_TARGET}}/release'
+  # Cross-compilation tool: auto (zigbuild→cross→cargo), cross, zigbuild, cargo
+  BUILD_TOOL: '{{.BUILD_TOOL | default "auto"}}'
   # Worker roles
   WORKER_ROLES: 'recon credential_access cracker acl privesc lateral coercion'
   # Worker mode: tool_exec (Rust LLM orchestrator) or task (Python-style)
@@ -91,23 +93,49 @@ tasks:
       - |
         echo -e "{{.INFO}} Cross-compiling for {{.RUST_TARGET}}..."
 
-        ulimit -n {{.MAX_OPEN_FILES}} 2>/dev/null || ulimit -n 10240 2>/dev/null || ulimit -n 4096 2>/dev/null || true
+        # zig 0.15+ cannot handle RLIM_INFINITY — it needs a concrete fd limit.
+        # Force a numeric value even if the current limit is "unlimited".
+        CURRENT_FD_LIMIT=$(ulimit -n 2>/dev/null || echo "256")
+        if [ "$CURRENT_FD_LIMIT" = "unlimited" ] || [ "$CURRENT_FD_LIMIT" -lt "{{.MAX_OPEN_FILES}}" ] 2>/dev/null; then
+          ulimit -n {{.MAX_OPEN_FILES}} 2>/dev/null || ulimit -n 10240 2>/dev/null || ulimit -n 4096 2>/dev/null || true
+        fi
 
         export CARGO_BUILD_JOBS="{{.CARGO_BUILD_JOBS}}"
 
-        # Build each binary separately to avoid parallel zig linker instances
-        # exhausting macOS file descriptor quota (ProcessFdQuotaExceeded).
-        if command -v cargo-zigbuild >/dev/null 2>&1; then
-          cd ares-rust
-          for pkg in ares-cli ares-orchestrator ares-worker; do
-            cargo zigbuild --release --target {{.RUST_TARGET}} -j "{{.CARGO_BUILD_JOBS}}" -p $pkg
-          done
-        elif command -v cross >/dev/null 2>&1; then
-          cd ares-rust && cross build --release --target {{.RUST_TARGET}} -j "{{.CARGO_BUILD_JOBS}}"
-        else
-          echo -e "{{.WARN}} No cross-compilation tool found, trying cargo with target..."
-          cd ares-rust && cargo build --release --target {{.RUST_TARGET}} -j "{{.CARGO_BUILD_JOBS}}"
+        BUILD_TOOL="{{.BUILD_TOOL}}"
+
+        # Resolve 'auto': prefer zigbuild, fall back to cross, then plain cargo.
+        if [ "$BUILD_TOOL" = "auto" ]; then
+          if command -v cargo-zigbuild >/dev/null 2>&1; then
+            BUILD_TOOL="zigbuild"
+          elif command -v cross >/dev/null 2>&1; then
+            BUILD_TOOL="cross"
+          else
+            BUILD_TOOL="cargo"
+          fi
         fi
+
+        echo -e "{{.INFO}} Using build tool: $BUILD_TOOL"
+
+        case "$BUILD_TOOL" in
+          cross)
+            cd ares-rust && cross build --release --target {{.RUST_TARGET}} -j "{{.CARGO_BUILD_JOBS}}"
+            ;;
+          zigbuild)
+            cd ares-rust
+            for pkg in ares-cli ares-orchestrator ares-worker; do
+              cargo zigbuild --release --target {{.RUST_TARGET}} -j "{{.CARGO_BUILD_JOBS}}" -p $pkg
+            done
+            ;;
+          cargo)
+            echo -e "{{.WARN}} Using plain cargo (no cross-compilation toolchain)..."
+            cd ares-rust && cargo build --release --target {{.RUST_TARGET}} -j "{{.CARGO_BUILD_JOBS}}"
+            ;;
+          *)
+            echo -e "{{.ERROR}} Unknown BUILD_TOOL: $BUILD_TOOL (valid: auto, cross, zigbuild, cargo)"
+            exit 1
+            ;;
+        esac
 
         echo -e "{{.SUCCESS}} Binaries built:"
         ls -lh {{.BIN_DIR}}/ares-cli {{.BIN_DIR}}/ares-orchestrator {{.BIN_DIR}}/ares-worker 2>/dev/null || true

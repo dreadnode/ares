@@ -1,6 +1,0 @@
-User '{{ username }}' marked for investigation. Suggested queries:
-
-Loki:
-- {job="auth"} |= "{{ username }}" | json
-- {job="syslog"} |= "{{ username }}" | json
-- {job="audit"} | json | user="{{ username }}"
