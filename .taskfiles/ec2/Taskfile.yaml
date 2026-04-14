@@ -482,6 +482,78 @@ tasks:
 
         echo -e "{{.SUCCESS}} Services stopped (Redis still running)"
 
+  stop-op:
+    desc: "Stop a specific operation gracefully (usage: task ec2:stop-op [EC2_NAME=ares-tools] [OPERATION_ID=op-xxx] [LATEST=true])"
+    silent: true
+    vars:
+      OPERATION_ID: '{{.OPERATION_ID | default ""}}'
+      LATEST: '{{.LATEST | default "false"}}'
+    cmds:
+      - |
+        INSTANCE_ID=$(aws ec2 describe-instances \
+          --profile "{{.EC2_PROFILE}}" \
+          --region "{{.EC2_REGION}}" \
+          --filters "Name=instance-state-name,Values=running" \
+                    "Name=tag:Name,Values=*{{.EC2_NAME}}*" \
+          --query "Reservations[*].Instances[*].InstanceId" \
+          --output text | head -1)
+
+        if [ -z "$INSTANCE_ID" ]; then
+          echo -e "{{.ERROR}} No running instance found matching: {{.EC2_NAME}}"
+          exit 1
+        fi
+
+        CLI_CMD="ares-cli ops stop"
+        {{if ne .OPERATION_ID ""}}CLI_CMD="$CLI_CMD {{.OPERATION_ID}}"{{end}}
+        {{if eq .LATEST "true"}}CLI_CMD="$CLI_CMD --latest"{{end}}
+
+        if [ -z "{{.OPERATION_ID}}" ] && [ "{{.LATEST}}" != "true" ]; then
+          echo -e "{{.ERROR}} Provide OPERATION_ID=op-xxx or LATEST=true"
+          exit 1
+        fi
+
+        PARAMS_FILE=$(mktemp)
+        trap "rm -f $PARAMS_FILE" EXIT
+        jq -n --arg cmd "$CLI_CMD" '{"commands": [$cmd]}' > "$PARAMS_FILE"
+
+        CMD_ID=$(aws ssm send-command \
+          --profile "{{.EC2_PROFILE}}" \
+          --region "{{.EC2_REGION}}" \
+          --instance-ids "$INSTANCE_ID" \
+          --document-name "AWS-RunShellScript" \
+          --parameters "file://$PARAMS_FILE" \
+          --query "Command.CommandId" --output text)
+
+        for i in $(seq 1 15); do
+          STATUS=$(aws ssm get-command-invocation \
+            --profile "{{.EC2_PROFILE}}" \
+            --region "{{.EC2_REGION}}" \
+            --command-id "$CMD_ID" \
+            --instance-id "$INSTANCE_ID" \
+            --query "Status" --output text 2>/dev/null) || true
+          case "$STATUS" in
+            Success|Failed|Cancelled|TimedOut) break ;;
+          esac
+          sleep 1
+        done
+
+        aws ssm get-command-invocation \
+          --profile "{{.EC2_PROFILE}}" \
+          --region "{{.EC2_REGION}}" \
+          --command-id "$CMD_ID" \
+          --instance-id "$INSTANCE_ID" \
+          --query "StandardOutputContent" --output text
+
+        if [ "$STATUS" != "Success" ]; then
+          aws ssm get-command-invocation \
+            --profile "{{.EC2_PROFILE}}" \
+            --region "{{.EC2_REGION}}" \
+            --command-id "$CMD_ID" \
+            --instance-id "$INSTANCE_ID" \
+            --query "StandardErrorContent" --output text >&2
+          exit 1
+        fi
+
   restart:
     desc: "Restart all worker roles on EC2 (usage: task ec2:restart [EC2_NAME=ares-tools])"
     silent: true

@@ -252,6 +252,29 @@ pub async fn delete_operation(
     Ok(deleted)
 }
 
+/// Request an operation to stop by setting a short-lived signal key.
+///
+/// Key: `ares:op:{id}:stop_requested` with a 120s TTL.
+/// The orchestrator polls this key and initiates graceful shutdown when found.
+pub async fn request_stop_operation(
+    conn: &mut impl AsyncCommands,
+    operation_id: &str,
+) -> Result<(), redis::RedisError> {
+    let key = build_key(operation_id, KEY_STOP_REQUESTED);
+    conn.set_ex::<_, _, ()>(&key, "1", 120).await?;
+    Ok(())
+}
+
+/// Check whether a stop has been requested for this operation.
+pub async fn is_stop_requested(
+    conn: &mut impl AsyncCommands,
+    operation_id: &str,
+) -> Result<bool, redis::RedisError> {
+    let key = build_key(operation_id, KEY_STOP_REQUESTED);
+    let exists: bool = conn.exists(&key).await?;
+    Ok(exists)
+}
+
 /// Scan Redis keys matching a pattern using cursor iteration.
 ///
 /// This is a non-blocking alternative to KEYS that won't stall Redis.

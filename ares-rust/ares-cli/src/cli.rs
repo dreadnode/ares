@@ -210,6 +210,15 @@ pub(crate) enum OpsCommands {
         sid: String,
     },
 
+    /// Stop a running operation (signals graceful shutdown)
+    Stop {
+        /// Operation ID (omit to stop the latest running operation)
+        operation_id: Option<String>,
+        /// Use the latest running operation
+        #[arg(long)]
+        latest: bool,
+    },
+
     /// Delete an operation and all its associated data
     Delete {
         /// Operation ID

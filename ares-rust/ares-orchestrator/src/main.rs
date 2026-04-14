@@ -544,6 +544,9 @@ async fn main() -> Result<()> {
     }
 
     // --- Main loop ---
+    let mut stop_check = tokio::time::interval(std::time::Duration::from_secs(5));
+    stop_check.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
     loop {
         tokio::select! {
             // Process completed task results
@@ -568,6 +571,21 @@ async fn main() -> Result<()> {
                             shutdown_rx.clone(),
                         );
                         result_rx = new_rx;
+                    }
+                }
+            }
+
+            // Poll for remote stop signal from `ares-cli ops stop`
+            _ = stop_check.tick() => {
+                let mut conn = queue.connection();
+                match ares_core::state::is_stop_requested(&mut conn, &config.operation_id).await {
+                    Ok(true) => {
+                        info!("Remote stop requested via Redis — shutting down");
+                        break;
+                    }
+                    Ok(false) => {}
+                    Err(e) => {
+                        warn!(err = %e, "Failed to check stop signal");
                     }
                 }
             }

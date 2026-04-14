@@ -9,6 +9,7 @@ mod queue;
 mod report;
 mod runtime;
 mod status;
+mod stop;
 pub(crate) mod submit;
 mod tasks;
 
@@ -90,6 +91,10 @@ pub(crate) async fn run_ops(cmd: OpsCommands, redis_url: Option<String>) -> Resu
             ip,
             hostname,
         } => inject::ops_inject_host(redis_url, operation_id, ip, hostname).await,
+        OpsCommands::Stop {
+            operation_id,
+            latest,
+        } => stop::ops_stop(redis_url, operation_id, latest).await,
         OpsCommands::Delete {
             operation_id,
             force,
