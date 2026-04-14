@@ -11,67 +11,100 @@ pub fn parse_delegation(output: &str, params: &Value) -> Vec<Value> {
         .unwrap_or("");
 
     let mut vulns = Vec::new();
+    let mut seen = std::collections::HashSet::new();
 
     for line in output.lines() {
-        let line_lower = line.to_lowercase();
+        let trimmed = line.trim();
+        let line_lower = trimmed.to_lowercase();
 
-        // Skip header line
-        if line.trim().starts_with("AccountName") {
+        // Skip header, separator, and noise lines
+        if trimmed.starts_with("AccountName")
+            || trimmed.starts_with("---")
+            || trimmed.starts_with("[")
+            || trimmed.starts_with("Impacket")
+            || trimmed.is_empty()
+        {
             continue;
         }
 
-        // impacket-findDelegation output columns:
-        // AccountName  AccountType  DelegationType  DelegationRightsTo
-        let parts: Vec<&str> = line.split_whitespace().collect();
-
-        if line_lower.contains("unconstrained") {
-            let account = extract_delegation_account(line);
-            if !account.is_empty() {
-                vulns.push(json!({
-                    "vuln_id": format!("unconstrained_delegation_{}", account),
-                    "vuln_type": "unconstrained_delegation",
-                    "target": target_ip,
-                    "details": {
-                        "account_name": account,
-                        "domain": domain,
-                        "delegation_type": "unconstrained",
-                    },
-                    "recommended_agent": "privesc",
-                }));
-            }
-        } else if line_lower.contains("constrained") {
-            let account = extract_delegation_account(line);
-            // Extract delegation target (column 3+, may contain spaces for multiple SPNs)
-            let delegation_target = if parts.len() >= 4 {
-                parts[3..].join(" ")
-            } else {
-                String::new()
-            };
-            if !account.is_empty() {
-                let mut details = json!({
-                    "account_name": account,
-                    "domain": domain,
-                    "delegation_type": "constrained",
-                });
-                if !delegation_target.is_empty() {
-                    details["delegation_target"] = json!(delegation_target);
-                }
-                vulns.push(json!({
-                    "vuln_id": format!("constrained_delegation_{}", account),
-                    "vuln_type": "constrained_delegation",
-                    "target": target_ip,
-                    "details": details,
-                    "recommended_agent": "privesc",
-                }));
-            }
+        let parts: Vec<&str> = trimmed.split_whitespace().collect();
+        if parts.len() < 3 {
+            continue;
         }
+
+        // Determine delegation type from keywords in the line
+        let delegation_type = if line_lower.contains("unconstrained") {
+            "unconstrained"
+        } else if line_lower.contains("constrained") {
+            "constrained"
+        } else {
+            continue;
+        };
+
+        let account = extract_delegation_account(trimmed);
+        if account.is_empty() {
+            continue;
+        }
+
+        // Extract delegation target SPN by scanning for "service/host" pattern.
+        // This handles variable-width DelegationType columns like
+        // "Constrained w/ Protocol Transition" that break simple column indexing.
+        let delegation_target = extract_spn_from_parts(&parts);
+
+        let vuln_type = format!("{}_delegation", delegation_type);
+        let dedup_key = format!("{}:{}", account.to_lowercase(), vuln_type);
+        if !seen.insert(dedup_key) {
+            continue; // skip duplicate account+type
+        }
+
+        let mut details = json!({
+            "account_name": account,
+            "domain": domain,
+            "delegation_type": delegation_type,
+        });
+        if let Some(ref spn) = delegation_target {
+            details["delegation_target"] = json!(spn);
+        }
+
+        vulns.push(json!({
+            "vuln_id": format!("{}_{}", vuln_type, account),
+            "vuln_type": vuln_type,
+            "target": target_ip,
+            "discovered_by": "find_delegation",
+            "details": details,
+            "recommended_agent": "privesc",
+            "priority": if delegation_type == "constrained" { 8 } else { 7 },
+        }));
     }
 
     vulns
 }
 
+/// Extract `service/host` SPN from whitespace-split parts.
+/// Skips tokens like "w/", "w/o", and bracket-prefixed items.
+fn extract_spn_from_parts(parts: &[&str]) -> Option<String> {
+    for part in parts {
+        if !part.contains('/') {
+            continue;
+        }
+        // Skip "w/" and "w/o"
+        if *part == "w/" || *part == "w/o" {
+            continue;
+        }
+        // Skip bracket-prefixed tokens like "[*]"
+        if part.starts_with('[') {
+            continue;
+        }
+        // Must look like service/host (alphabetic after the slash)
+        let slash_idx = part.find('/').unwrap();
+        if slash_idx + 1 < part.len() && part.as_bytes()[slash_idx + 1].is_ascii_alphabetic() {
+            return Some(part.to_string());
+        }
+    }
+    None
+}
+
 pub fn extract_delegation_account(line: &str) -> String {
-    // impacket-findDelegation output format varies, but account is typically first column
     let parts: Vec<&str> = line.split_whitespace().collect();
     if !parts.is_empty() {
         // Account might be "DOMAIN/account$" or just "account$"
@@ -111,6 +144,7 @@ svc_sql$                       Computer     Constrained          CIFS/dc01.conto
             vulns[0]["details"]["delegation_target"],
             "CIFS/dc01.contoso.local"
         );
+        assert_eq!(vulns[0]["discovered_by"], "find_delegation");
     }
 
     #[test]
@@ -120,6 +154,7 @@ svc_sql$                       Computer     Constrained          CIFS/dc01.conto
         let vulns = parse_delegation(output, &params);
         assert_eq!(vulns.len(), 1);
         assert_eq!(vulns[0]["vuln_type"], "unconstrained_delegation");
+        assert_eq!(vulns[0]["discovered_by"], "find_delegation");
     }
 
     #[test]
@@ -160,5 +195,63 @@ DC01$        Computer     Unconstrained   N/A";
     #[test]
     fn test_extract_delegation_account_empty() {
         assert_eq!(extract_delegation_account(""), "");
+    }
+
+    /// Test with real GOAD lab output format including "SPN Exists" column
+    /// and multi-word DelegationType like "Constrained w/ Protocol Transition".
+    #[test]
+    fn test_parse_delegation_goad_format() {
+        let output = "\
+Impacket v0.13.0.dev0+20251022.125034.d843881f - Copyright Fortra, LLC and its affiliated companies
+
+AccountName   AccountType  DelegationType                       DelegationRightsTo                         SPN Exists
+------------  -----------  -----------------------------------  -----------------------------------------  ----------
+sansa.stark   Person       Unconstrained                        N/A                                        No
+jon.snow      Person       Constrained w/ Protocol Transition   CIFS/winterfell                            No
+jon.snow      Person       Constrained w/ Protocol Transition   CIFS/winterfell.north.sevenkingdoms.local  No
+CASTELBLACK$  Computer     Constrained w/o Protocol Transition  HTTP/winterfell                            No
+CASTELBLACK$  Computer     Constrained w/o Protocol Transition  HTTP/winterfell.north.sevenkingdoms.local  Yes
+WINTERFELL$   Computer     Unconstrained                        N/A                                        Yes
+
+";
+        let params = json!({"domain": "north.sevenkingdoms.local", "target_ip": "10.1.2.150"});
+        let vulns = parse_delegation(output, &params);
+
+        // Dedup: sansa.stark unconstrained, jon.snow constrained,
+        // CASTELBLACK$ constrained, WINTERFELL$ unconstrained = 4
+        assert_eq!(vulns.len(), 4, "Expected 4 deduped vulns, got {:?}", vulns);
+
+        // sansa.stark → unconstrained
+        assert_eq!(vulns[0]["vuln_type"], "unconstrained_delegation");
+        assert_eq!(vulns[0]["details"]["account_name"], "sansa.stark");
+
+        // jon.snow → constrained with SPN
+        assert_eq!(vulns[1]["vuln_type"], "constrained_delegation");
+        assert_eq!(vulns[1]["details"]["account_name"], "jon.snow");
+        let spn = vulns[1]["details"]["delegation_target"].as_str().unwrap();
+        assert!(
+            spn.starts_with("CIFS/winterfell"),
+            "Expected CIFS/winterfell SPN, got {}",
+            spn
+        );
+
+        // CASTELBLACK$ → constrained with HTTP SPN
+        assert_eq!(vulns[2]["vuln_type"], "constrained_delegation");
+        assert_eq!(vulns[2]["details"]["account_name"], "CASTELBLACK$");
+        let spn = vulns[2]["details"]["delegation_target"].as_str().unwrap();
+        assert!(
+            spn.starts_with("HTTP/winterfell"),
+            "Expected HTTP/winterfell SPN, got {}",
+            spn
+        );
+
+        // WINTERFELL$ → unconstrained
+        assert_eq!(vulns[3]["vuln_type"], "unconstrained_delegation");
+        assert_eq!(vulns[3]["details"]["account_name"], "WINTERFELL$");
+
+        // All should have discovered_by
+        for v in &vulns {
+            assert_eq!(v["discovered_by"], "find_delegation");
+        }
     }
 }

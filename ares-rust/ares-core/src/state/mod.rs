@@ -9,7 +9,6 @@
 //!     ares:op:{op_id}:hosts             LIST (JSON per entry)
 //!     ares:op:{op_id}:users             LIST (JSON per entry)
 //!     ares:op:{op_id}:shares            HASH (dedup_key -> JSON)
-//!     ares:op:{op_id}:weaknesses        HASH (dedup_key -> block)
 //!     ares:op:{op_id}:domains           SET
 //!     ares:op:{op_id}:vulns             HASH (vuln_id -> JSON)
 //!     ares:op:{op_id}:exploited         SET

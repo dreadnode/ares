@@ -259,15 +259,18 @@ impl Dispatcher {
                 None
             }
             .or_else(|| {
-                // Fall back to any credential for the vuln's domain
+                // Fall back to any non-delegation credential for the vuln's domain
                 if !domain.is_empty() {
+                    state.credentials.iter().find(|c| {
+                        c.domain.to_lowercase() == domain.to_lowercase()
+                            && !state.is_delegation_account(&c.username)
+                    })
+                } else {
+                    // Fall back to first available non-delegation credential
                     state
                         .credentials
                         .iter()
-                        .find(|c| c.domain.to_lowercase() == domain.to_lowercase())
-                } else {
-                    // Fall back to first available credential
-                    state.credentials.first()
+                        .find(|c| !state.is_delegation_account(&c.username))
                 }
             });
 

@@ -28,6 +28,10 @@ pub(super) fn tool_definitions() -> Vec<ToolDefinition> {
                         "type": "string",
                         "description": "Path to a custom wordlist file. If omitted, the default wordlist (e.g. rockyou.txt) is used."
                     },
+                    "rules_file": {
+                        "type": "string",
+                        "description": "Path to a hashcat rules file (e.g. /usr/share/hashcat/rules/best64.rule). If omitted, default rules (best64 + d3ad0ne) are applied automatically after the straight wordlist phase."
+                    },
                     "max_time_minutes": {
                         "type": "integer",
                         "description": "Maximum time in minutes before aborting the crack attempt. Defaults to 10.",

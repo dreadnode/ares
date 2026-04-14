@@ -528,10 +528,6 @@ impl OrchestratorCallbackHandler {
             task_id.as_deref().unwrap_or("queued")
         )))
     }
-    // -----------------------------------------------------------------------
-    // Recording tools — persist weaknesses & timeline events to state/Redis
-    // -----------------------------------------------------------------------
-
     /// record_credential is disabled — credentials come only from tool output parsing.
     /// This handler exists as a safety net in case the LLM somehow invokes it.
     async fn record_credential(&self, _call: &ToolCall) -> Result<CallbackResult> {
@@ -540,21 +536,6 @@ impl OrchestratorCallbackHandler {
             "This tool is disabled. Credentials are automatically extracted from tool output. \
              Focus on running tools that produce credential data (secretsdump, lsassy, netexec, etc.) \
              and the system will parse and store credentials automatically."
-                .to_string(),
-        ))
-    }
-
-    /// record_weakness is disabled — weaknesses are extracted from parsed tool output
-    /// (nmap scripts, netexec banners, etc.) via output_extraction.rs.
-    /// This handler exists as a safety net in case the LLM somehow invokes it.
-    async fn record_weakness(&self, _call: &ToolCall) -> Result<CallbackResult> {
-        warn!(
-            "record_weakness called but disabled — weaknesses are auto-extracted from tool output"
-        );
-        Ok(CallbackResult::Continue(
-            "This tool is disabled. Weaknesses are automatically extracted from tool output. \
-             Focus on running tools that reveal vulnerabilities (nmap scripts, netexec, \
-             BloodHound queries, etc.) and the system will parse and store findings automatically."
                 .to_string(),
         ))
     }
@@ -636,7 +617,6 @@ impl CallbackHandler for OrchestratorCallbackHandler {
             "get_operation_summary" => Some(self.get_operation_summary().await),
             // Recording tools — persist to state and Redis
             "record_credential" => Some(self.record_credential(call).await),
-            "record_weakness" => Some(self.record_weakness(call).await),
             "record_timeline_event" => Some(self.record_timeline_event(call).await),
             // Dispatch tools
             "dispatch_recon" => Some(self.dispatch_recon(call).await),

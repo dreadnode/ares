@@ -34,6 +34,10 @@ pub async fn auto_delegation_enumeration(
             state
                 .credentials
                 .iter()
+                // Skip delegation accounts — delegation enum is already done
+                // with other creds, and using a delegation account's cred
+                // burns auth budget reserved for S4U.
+                .filter(|c| !state.is_delegation_account(&c.username))
                 .filter_map(|cred| {
                     if cred.domain.is_empty() {
                         return None;

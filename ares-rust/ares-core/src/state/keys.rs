@@ -20,8 +20,6 @@ pub const KEY_HOSTS: &str = "hosts";
 pub const KEY_USERS: &str = "users";
 /// Redis SET key suffix for discovered SMB shares.
 pub const KEY_SHARES: &str = "shares";
-/// Redis SET key suffix for identified weaknesses.
-pub const KEY_WEAKNESSES: &str = "weaknesses";
 /// Redis SET key suffix for discovered domain names.
 pub const KEY_DOMAINS: &str = "domains";
 /// Redis SET key suffix for discovered vulnerabilities.

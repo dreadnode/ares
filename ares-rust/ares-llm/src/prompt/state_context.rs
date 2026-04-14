@@ -43,12 +43,24 @@ pub fn format_state_context(
         let _ = writeln!(ctx, "### Discovered Credentials");
         for cred in state.credentials.iter().take(MAX_CREDENTIALS) {
             let admin_marker = if cred.is_admin { " [ADMIN]" } else { "" };
+            let deleg_marker = if state
+                .delegation_accounts
+                .contains(&cred.username.to_lowercase())
+            {
+                " [DELEGATION ONLY — do NOT use for auth]"
+            } else {
+                ""
+            };
             let domain_part = if cred.domain.is_empty() {
                 String::new()
             } else {
                 format!("@{}", cred.domain)
             };
-            let _ = writeln!(ctx, "- {}{}{}", cred.username, domain_part, admin_marker);
+            let _ = writeln!(
+                ctx,
+                "- {}{}{}{}",
+                cred.username, domain_part, admin_marker, deleg_marker
+            );
         }
         if state.credentials.len() > MAX_CREDENTIALS {
             let _ = writeln!(

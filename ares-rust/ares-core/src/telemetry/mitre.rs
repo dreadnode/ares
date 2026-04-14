@@ -157,7 +157,6 @@ pub static TOOL_TO_TECHNIQUE: Lazy<HashMap<&str, &str>> = Lazy::new(|| {
         ("create_machine_account", "T1136.002"),
         // Reporting
         ("record_credential", "T1087.002"),
-        ("record_weakness", "T1518.001"),
         ("record_timeline_event", "T1087"),
     ])
 });
@@ -260,7 +259,6 @@ pub static TOOL_TO_CATEGORY: Lazy<HashMap<&str, &str>> = Lazy::new(|| {
         ("create_machine_account", "GoldenTicketTools"),
         // ReportingTools
         ("record_credential", "ReportingTools"),
-        ("record_weakness", "ReportingTools"),
         ("record_timeline_event", "ReportingTools"),
     ])
 });

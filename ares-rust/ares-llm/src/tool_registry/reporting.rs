@@ -11,8 +11,6 @@ use crate::ToolDefinition;
 pub(super) fn tool_definitions() -> Vec<ToolDefinition> {
     vec![
         // NOTE: record_credential removed — credentials come only from tool output parsing.
-        // NOTE: record_weakness removed — weaknesses come only from parsed tool output
-        //       (nmap scripts, netexec banners, etc.) via output_extraction.rs.
         // NOTE: record_timeline_event removed — timeline events are auto-generated from
         //       state changes in result_processing.rs (credential/hash/host discoveries).
         // NOTE: record_compromised_host is log-only (no state write), kept as a signal.
@@ -62,22 +60,10 @@ pub(super) fn tool_definitions() -> Vec<ToolDefinition> {
             }),
         },
         ToolDefinition {
-            name: "list_weaknesses".into(),
-            description: "List all security weaknesses and vulnerabilities recorded during \
-                the operation. Returns titles, descriptions, affected resources, and \
-                impact assessments."
-                .into(),
-            input_schema: json!({
-                "type": "object",
-                "properties": {},
-                "required": []
-            }),
-        },
-        ToolDefinition {
             name: "get_operation_summary".into(),
             description: "Get a high-level summary of the current operation status. \
                 Includes counts of compromised hosts, collected credentials, discovered \
-                weaknesses, active agents, and pending tasks."
+                vulnerabilities, active agents, and pending tasks."
                 .into(),
             input_schema: json!({
                 "type": "object",

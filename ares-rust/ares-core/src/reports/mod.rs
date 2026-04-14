@@ -12,14 +12,12 @@ mod redteam;
 mod templates;
 mod util;
 mod vuln_details;
-mod weakness;
 
 pub use blueteam::*;
 pub use dedup::*;
 pub use mitre::*;
 pub use redteam::*;
 pub use vuln_details::*;
-pub use weakness::*;
 
 #[cfg(test)]
 mod tests {
@@ -124,17 +122,6 @@ mod tests {
     }
 
     #[test]
-    fn test_weakness_dedup() {
-        let weaknesses = vec![
-            "### Weak Password\n**Vulnerability:** test\n**Impact:** high".to_string(),
-            "### Weak Password\n**Vulnerability:** test\n**Impact:** high".to_string(),
-            "### Different Issue\n**Vulnerability:** other".to_string(),
-        ];
-        let deduped = deduplicate_weaknesses(&weaknesses);
-        assert_eq!(deduped.len(), 2);
-    }
-
-    #[test]
     fn test_redteam_summary_renders() {
         let gen = RedTeamReportGenerator::new().unwrap();
         let state = SharedRedTeamState {
@@ -154,7 +141,6 @@ mod tests {
             all_hosts: Vec::new(),
             all_users: Vec::new(),
             all_shares: Vec::new(),
-            all_weaknesses: Vec::new(),
             discovered_vulnerabilities: HashMap::new(),
             exploited_vulnerabilities: HashSet::new(),
             has_domain_admin: false,
@@ -163,6 +149,8 @@ mod tests {
             domain_controllers: HashMap::new(),
             netbios_to_fqdn: HashMap::new(),
             trusted_domains: HashMap::new(),
+            all_timeline_events: Vec::new(),
+            all_techniques: Vec::new(),
         };
 
         let result = gen.generate_summary(&state, &[], &[], false);
@@ -223,7 +211,6 @@ mod tests {
             }],
             all_users: Vec::new(),
             all_shares: Vec::new(),
-            all_weaknesses: Vec::new(),
             discovered_vulnerabilities: HashMap::new(),
             exploited_vulnerabilities: HashSet::new(),
             has_domain_admin: true,
@@ -232,6 +219,8 @@ mod tests {
             domain_controllers: HashMap::new(),
             netbios_to_fqdn: HashMap::new(),
             trusted_domains: HashMap::new(),
+            all_timeline_events: Vec::new(),
+            all_techniques: Vec::new(),
         };
 
         let result = gen.generate_comprehensive(&state, &[], &["T1003.006".to_string()]);

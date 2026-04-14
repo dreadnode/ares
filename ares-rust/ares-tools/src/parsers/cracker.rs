@@ -12,9 +12,10 @@ static RE_CRACKED_TGS: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"\$krb5tgs\$\d+\$\*([^$*]+)\$([^$*]+)\$[^*]+\*\$[a-fA-F0-9$]+:(.+)$").unwrap()
 });
 
-/// Hashcat cracked AS-REP: $krb5asrep$23$user@DOMAIN:hash:plaintext
+/// Cracked AS-REP: $krb5asrep$23$user@DOMAIN:hash:plaintext (hashcat)
+/// or $krb5asrep$23$user@DOMAIN:plaintext (john --show, no hex section)
 static RE_CRACKED_ASREP: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"\$krb5asrep\$\d+\$([^@:]+)@([^:]+):[a-fA-F0-9$]+:(.+)$").unwrap()
+    Regex::new(r"\$krb5asrep\$\d+\$([^@:]+)@([^:]+):(?:[a-fA-F0-9$]+:)?(.+)$").unwrap()
 });
 
 /// Hashcat cracked NTLM: 32-char-hex:plaintext
@@ -25,6 +26,17 @@ static RE_CRACKED_NTLM: LazyLock<Regex> =
 static RE_JOHN_SHOW: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"^([^:\s$][^:]*):([^:]+):\d*:(?:[a-fA-F0-9]*:){0,3}:*\s*$").unwrap()
 });
+
+/// John --show unknown user: ?:plaintext (john can't determine username from TGS hashes)
+static RE_JOHN_UNKNOWN_USER: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^\?:(.+)$").unwrap());
+
+/// Extract username/domain from TGS hash value: $krb5tgs$TYPE$*USERNAME$REALM$...
+static RE_TGS_HASH_USER: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\$krb5tgs\$\d+\$\*([^$*]+)\$([^$*]+)").unwrap());
+
+/// Extract username/domain from AS-REP hash value: $krb5asrep$TYPE$USERNAME@REALM:...
+static RE_ASREP_HASH_USER: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\$krb5asrep\$\d+\$([^@:]+)@([^:]+)").unwrap());
 
 /// Parse cracker tool output and return credentials.
 ///
@@ -112,6 +124,42 @@ pub fn parse_cracker_output(output: &str, params: &Value) -> Vec<Value> {
 
         // John --show output (only if we detected john context)
         if is_john_output {
+            // John --show with unknown user: ?:password (common for TGS hashes)
+            if let Some(caps) = RE_JOHN_UNKNOWN_USER.captures(stripped) {
+                let password = caps.get(1).unwrap().as_str().trim();
+                if is_valid_password(password) {
+                    // Extract username/domain from the hash_value parameter
+                    let hash_value = params
+                        .get("hash_value")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    let (user, hash_domain) =
+                        if let Some(tgs_caps) = RE_TGS_HASH_USER.captures(hash_value) {
+                            (
+                                tgs_caps.get(1).unwrap().as_str().to_string(),
+                                tgs_caps.get(2).unwrap().as_str().to_string(),
+                            )
+                        } else if let Some(asrep_caps) = RE_ASREP_HASH_USER.captures(hash_value) {
+                            (
+                                asrep_caps.get(1).unwrap().as_str().to_string(),
+                                asrep_caps.get(2).unwrap().as_str().to_string(),
+                            )
+                        } else {
+                            continue; // Can't determine username
+                        };
+                    let key = format!("{}@{}", user.to_lowercase(), hash_domain.to_lowercase());
+                    if seen.insert(key) {
+                        credentials.push(json!({
+                            "username": user,
+                            "password": password,
+                            "domain": hash_domain,
+                            "source": "cracked:john",
+                        }));
+                    }
+                }
+                continue;
+            }
+
             if let Some(caps) = RE_JOHN_SHOW.captures(stripped) {
                 let user = caps.get(1).unwrap().as_str();
                 let password = caps.get(2).unwrap().as_str();
@@ -212,6 +260,50 @@ $krb5asrep$23$missandei@ESSOS.LOCAL:8a7a0b3264590ef6:fr3edom
     #[test]
     fn test_no_cracked_output() {
         let output = "hashcat (v6.2.6) starting...\nExhausted\n--- hashcat --show ---\n";
+        let params = json!({"domain": "contoso.local"});
+        let creds = parse_cracker_output(output, &params);
+        assert!(creds.is_empty());
+    }
+
+    #[test]
+    fn test_john_show_asrep_no_hex_section() {
+        // John --show for AS-REP omits the hex hash — just user@REALM:password
+        let output = "--- john --show ---\n\
+            $krb5asrep$23$brandon.stark@NORTH.SEVENKINGDOMS.LOCAL:iseedeadpeople\n\n\
+            1 password hash cracked, 0 left\n";
+        let params = json!({
+            "hash_value": "$krb5asrep$23$brandon.stark@NORTH.SEVENKINGDOMS.LOCAL:abcdef1234$5678"
+        });
+        let creds = parse_cracker_output(output, &params);
+        assert_eq!(creds.len(), 1);
+        assert_eq!(creds[0]["username"], "brandon.stark");
+        assert_eq!(creds[0]["password"], "iseedeadpeople");
+        assert_eq!(creds[0]["domain"], "NORTH.SEVENKINGDOMS.LOCAL");
+    }
+
+    #[test]
+    fn test_john_show_tgs_unknown_user() {
+        // John --show for TGS shows ?:password (can't determine username)
+        let output = "--- john --show ---\n\
+            ?:iknownothing\n\n\
+            1 password hash cracked, 0 left\n";
+        let params = json!({
+            "hash_value": "$krb5tgs$23$*jon.snow$NORTH.SEVENKINGDOMS.LOCAL$CIFS/thewall*$abcdef$123456"
+        });
+        let creds = parse_cracker_output(output, &params);
+        assert_eq!(creds.len(), 1);
+        assert_eq!(creds[0]["username"], "jon.snow");
+        assert_eq!(creds[0]["password"], "iknownothing");
+        assert_eq!(creds[0]["domain"], "NORTH.SEVENKINGDOMS.LOCAL");
+        assert_eq!(creds[0]["source"], "cracked:john");
+    }
+
+    #[test]
+    fn test_john_show_tgs_unknown_user_no_hash_param() {
+        // Without hash_value param, ?:password is skipped
+        let output = "--- john --show ---\n\
+            ?:iknownothing\n\n\
+            1 password hash cracked, 0 left\n";
         let params = json!({"domain": "contoso.local"});
         let creds = parse_cracker_output(output, &params);
         assert!(creds.is_empty());

@@ -383,7 +383,6 @@ pub struct SharedRedTeamState {
     pub all_hosts: Vec<Host>,
     pub all_users: Vec<User>,
     pub all_shares: Vec<Share>,
-    pub all_weaknesses: Vec<String>,
 
     // Vulnerability registry
     pub discovered_vulnerabilities: HashMap<String, VulnerabilityInfo>,
@@ -400,6 +399,10 @@ pub struct SharedRedTeamState {
 
     // Trust relationships (domain FQDN → trust metadata)
     pub trusted_domains: HashMap<String, TrustInfo>,
+
+    // Timeline and MITRE ATT&CK tracking
+    pub all_timeline_events: Vec<serde_json::Value>,
+    pub all_techniques: Vec<String>,
 }
 
 impl SharedRedTeamState {
@@ -417,7 +420,6 @@ impl SharedRedTeamState {
             all_hosts: Vec::new(),
             all_users: Vec::new(),
             all_shares: Vec::new(),
-            all_weaknesses: Vec::new(),
             discovered_vulnerabilities: HashMap::new(),
             exploited_vulnerabilities: HashSet::new(),
             has_domain_admin: false,
@@ -426,6 +428,8 @@ impl SharedRedTeamState {
             domain_controllers: HashMap::new(),
             netbios_to_fqdn: HashMap::new(),
             trusted_domains: HashMap::new(),
+            all_timeline_events: Vec::new(),
+            all_techniques: Vec::new(),
         }
     }
 }

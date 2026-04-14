@@ -113,17 +113,6 @@ impl RedisStateReader {
         Ok(result)
     }
 
-    /// Load all weaknesses from `ares:op:{id}:weaknesses` HASH.
-    ///
-    /// Values are the weakness description blocks (markdown strings).
-    pub async fn get_weaknesses(
-        &self,
-        conn: &mut impl AsyncCommands,
-    ) -> Result<Vec<String>, redis::RedisError> {
-        let items: HashMap<String, String> = conn.hgetall(self.key(KEY_WEAKNESSES)).await?;
-        Ok(items.into_values().collect())
-    }
-
     /// Load all domains from `ares:op:{id}:domains` SET.
     pub async fn get_domains(
         &self,
@@ -206,7 +195,6 @@ impl RedisStateReader {
         let users = self.get_users(conn).await?;
         let shares = self.get_shares(conn).await?;
         let domains = self.get_domains(conn).await?;
-        let weaknesses = self.get_weaknesses(conn).await?;
         let vulnerabilities = self.get_vulnerabilities(conn).await?;
         let exploited = self.get_exploited_vulnerabilities(conn).await?;
         let dc_map = self.get_dc_map(conn).await?;
@@ -226,6 +214,8 @@ impl RedisStateReader {
         };
 
         let trusted_domains = self.get_trusted_domains(conn).await.unwrap_or_default();
+        let timeline_events = self.get_timeline(conn).await.unwrap_or_default();
+        let techniques = self.get_techniques(conn).await.unwrap_or_default();
 
         let state = SharedRedTeamState {
             operation_id: self.operation_id.clone(),
@@ -239,7 +229,6 @@ impl RedisStateReader {
             all_hosts: hosts,
             all_users: users,
             all_shares: shares,
-            all_weaknesses: weaknesses,
             discovered_vulnerabilities: vulnerabilities,
             exploited_vulnerabilities: exploited,
             has_domain_admin: meta.has_domain_admin,
@@ -248,6 +237,8 @@ impl RedisStateReader {
             domain_controllers: dc_map,
             netbios_to_fqdn: netbios_map,
             trusted_domains,
+            all_timeline_events: timeline_events,
+            all_techniques: techniques,
         };
 
         Ok(Some(state))
@@ -405,21 +396,6 @@ impl RedisStateReader {
         let data = serde_json::to_string(share).unwrap_or_default();
 
         let added: bool = conn.hset_nx(&key, &dedup_field, &data).await?;
-        if added {
-            let _: () = conn.expire(&key, 86400).await?;
-        }
-        Ok(added)
-    }
-
-    /// Add a weakness block to `ares:op:{id}:weaknesses` HASH (with dedup by title).
-    pub async fn add_weakness(
-        &self,
-        conn: &mut impl AsyncCommands,
-        block: &str,
-        dedup_key: &str,
-    ) -> Result<bool, redis::RedisError> {
-        let key = self.key(KEY_WEAKNESSES);
-        let added: bool = conn.hset_nx(&key, dedup_key, block).await?;
         if added {
             let _: () = conn.expire(&key, 86400).await?;
         }

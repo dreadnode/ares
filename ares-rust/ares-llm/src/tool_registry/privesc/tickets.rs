@@ -164,14 +164,18 @@ pub fn definitions() -> Vec<ToolDefinition> {
                     },
                     "password": {
                         "type": "string",
-                        "description": "Password for authentication"
+                        "description": "Password for authentication (use this OR hash)"
+                    },
+                    "hash": {
+                        "type": "string",
+                        "description": "NTLM hash for pass-the-hash authentication (e.g. aad3b435b51404eeaad3b435b51404ee:31d6cfe0d16ae931b73c59d7e0c089c0). Use this OR password."
                     },
                     "dc_ip": {
                         "type": "string",
                         "description": "Domain controller IP address"
                     }
                 },
-                "required": ["domain", "username", "password"]
+                "required": ["domain", "username", "dc_ip"]
             }),
         },
         // NOTE: dnstool removed — dnstool.py not in privesc container.

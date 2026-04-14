@@ -10,7 +10,7 @@ use ares_core::models::*;
 use ares_core::state::{self, RedisStateReader};
 
 use super::{SharedState, KEY_VULN_QUEUE};
-use crate::output_extraction::is_valid_credential;
+use crate::output_extraction::{is_valid_credential, strip_ansi};
 use crate::task_queue::TaskQueue;
 
 /// Regex matching `Password` (case-insensitive) followed by optional `:` and space.
@@ -28,6 +28,11 @@ fn sanitize_credential(
     mut cred: Credential,
     netbios_to_fqdn: &std::collections::HashMap<String, String>,
 ) -> Option<Credential> {
+    // Strip ANSI escape codes (tools like NetExec emit colored output)
+    cred.username = strip_ansi(&cred.username);
+    cred.password = strip_ansi(&cred.password);
+    cred.domain = strip_ansi(&cred.domain);
+
     // Trim whitespace
     cred.username = cred.username.trim().to_string();
     cred.password = cred.password.trim().to_string();
@@ -695,35 +700,6 @@ impl SharedState {
         if added {
             let mut state = self.inner.write().await;
             state.shares.push(share);
-        }
-        Ok(added)
-    }
-
-    /// Add a weakness block to state and Redis (with dedup by title).
-    pub async fn publish_weakness(
-        &self,
-        queue: &TaskQueue,
-        block: String,
-        dedup_key: String,
-    ) -> Result<bool> {
-        // Check for duplicate in memory
-        {
-            let state = self.inner.read().await;
-            if state.weaknesses.contains(&block) {
-                return Ok(false);
-            }
-        }
-
-        let operation_id = {
-            let state = self.inner.read().await;
-            state.operation_id.clone()
-        };
-        let reader = RedisStateReader::new(operation_id);
-        let mut conn = queue.connection();
-        let added = reader.add_weakness(&mut conn, &block, &dedup_key).await?;
-        if added {
-            let mut state = self.inner.write().await;
-            state.weaknesses.push(block);
         }
         Ok(added)
     }

@@ -106,6 +106,13 @@ pub(crate) fn dedup_users(users: &[User], netbios_to_fqdn: &HashMap<String, Stri
     result
 }
 
+/// Strip ANSI escape sequences from text.
+static RE_ANSI: Lazy<Regex> = Lazy::new(|| Regex::new(r"\x1b\[[0-9;]*m").unwrap());
+
+fn strip_ansi(s: &str) -> String {
+    RE_ANSI.replace_all(s, "").to_string()
+}
+
 /// Regex matching `Password` (case-insensitive) followed by optional `:` and space.
 static PASSWORD_PREFIX_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?i)^password\s*:\s*").unwrap());
 
@@ -116,6 +123,11 @@ static TRAILING_PAREN_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"\s+\([^)]+\)\s
 /// with embedded `@domain` suffixes, and remove garbage entries.
 pub(crate) fn sanitize_credentials(creds: &mut Vec<Credential>) {
     for cred in creds.iter_mut() {
+        // Strip ANSI escape codes from all fields
+        cred.username = strip_ansi(&cred.username);
+        cred.password = strip_ansi(&cred.password);
+        cred.domain = strip_ansi(&cred.domain);
+
         // Strip trailing dots from domains
         cred.domain = strip_trailing_dot(cred.domain.trim()).to_string();
 
@@ -156,16 +168,20 @@ pub(crate) fn sanitize_credentials(creds: &mut Vec<Credential>) {
         if pw.is_empty() || pw.to_lowercase() == "password" {
             return false;
         }
-        // Filter password == username (LLM-hallucinated credential guesses)
-        if pw.to_lowercase() == username {
-            return false;
-        }
         // Filter "Discovered" as password (not a real credential)
         if pw.eq_ignore_ascii_case("discovered") {
             return false;
         }
+        // Filter hash markers misclassified as credentials (NetExec LSA dump)
+        if pw.contains("[NT]") || pw.contains("[SHA1]") {
+            return false;
+        }
         // Filter usernames containing path separators (file path artifacts)
         if username.contains('/') || username.contains('\\') {
+            return false;
+        }
+        // Filter credentials where password matches username (case-insensitive)
+        if pw.to_lowercase() == username {
             return false;
         }
         // Filter EVIL\d+$ impacket RBCD artifacts
@@ -216,41 +232,23 @@ pub(crate) fn dedup_hashes(hashes: &[Hash]) -> Vec<Hash> {
     let mut result = Vec::new();
     for h in hashes {
         let domain = strip_trailing_dot(h.domain.trim()).to_lowercase();
+        let hash_value = strip_ansi(&h.hash_value);
         let key = (
             domain.clone(),
             h.username.trim().to_lowercase(),
             h.hash_type.trim().to_lowercase(),
-            h.hash_value.trim().to_lowercase(),
+            hash_value.trim().to_lowercase(),
         );
         if seen.insert(key) {
             let mut cleaned = h.clone();
             cleaned.domain = strip_trailing_dot(cleaned.domain.trim()).to_lowercase();
             cleaned.hash_type = normalize_hash_type(&cleaned.hash_type);
+            cleaned.hash_value = hash_value.trim().to_string();
+            cleaned.username = strip_ansi(&cleaned.username);
             result.push(cleaned);
         }
     }
     result
-}
-
-pub(crate) fn extract_weakness_title(block: &str) -> &str {
-    for line in block.lines() {
-        let trimmed = line.trim();
-        if let Some(rest) = trimmed.strip_prefix("### ") {
-            return rest.trim();
-        }
-        if trimmed.starts_with("**") && trimmed.ends_with("**") && !trimmed.contains(":**") {
-            let inner = trimmed.trim_matches('*').trim();
-            if !inner.is_empty() {
-                return inner;
-            }
-        }
-    }
-    let first = block.lines().next().unwrap_or("Untitled Weakness");
-    if first.len() > 60 {
-        &first[..60]
-    } else {
-        first
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -351,119 +349,6 @@ pub(crate) fn normalize_source_label(source: &str) -> String {
         })
         .collect::<Vec<_>>()
         .join(" ")
-}
-
-// ---------------------------------------------------------------------------
-// Weakness noise filtering (matches Python _filter_real_weaknesses)
-// ---------------------------------------------------------------------------
-
-const WEAKNESS_NOISE_PREFIXES: &[&str] = &[
-    "next step:",
-    "next action:",
-    "next task",
-    "task suggestion:",
-    "recommendation:",
-    "todo:",
-    "to do:",
-    "action item:",
-];
-
-static WEAKNESS_FIELD_RE: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"\*\*([^*:]+):\*\*\s*(.*)$").unwrap());
-
-/// Regex for plain-text weakness fields: `Key: value` or `Key : value`
-static WEAKNESS_PLAIN_FIELD_RE: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(
-        r"^(Title|Vulnerability|Affected[_ ]Resource|Impact|Discovery[_ ]Method)\s*:\s*(.+)$",
-    )
-    .unwrap()
-});
-
-/// Parsed weakness fields for display.
-pub(crate) struct ParsedWeaknessDisplay {
-    pub title: String,
-    pub vulnerability: String,
-    pub affected_resource: String,
-    pub impact: String,
-}
-
-pub(crate) fn parse_weakness_block_display(block: &str) -> ParsedWeaknessDisplay {
-    let mut result = ParsedWeaknessDisplay {
-        title: String::new(),
-        vulnerability: String::new(),
-        affected_resource: String::new(),
-        impact: String::new(),
-    };
-    if block.is_empty() {
-        return result;
-    }
-
-    for raw_line in block.lines() {
-        let stripped = raw_line.trim();
-        if stripped.is_empty() {
-            continue;
-        }
-
-        // Markdown format: ### Title
-        if let Some(rest) = stripped.strip_prefix("### ") {
-            result.title = rest.trim().to_string();
-        } else if stripped.starts_with("**")
-            && !stripped.contains(":**")
-            && stripped.ends_with("**")
-        {
-            // Markdown format: **Bold Title**
-            result.title = stripped.trim_matches('*').trim().to_string();
-        } else if stripped.contains(":**") {
-            // Markdown format: **Field:** value or - **Field:** value
-            let clean = stripped.trim_start_matches('-').trim();
-            if let Some(caps) = WEAKNESS_FIELD_RE.captures(clean) {
-                let key = caps[1].trim().to_lowercase().replace(' ', "_");
-                let value = caps[2].trim().to_string();
-                match key.as_str() {
-                    "vulnerability" => result.vulnerability = value,
-                    "affected_resource" => result.affected_resource = value,
-                    "impact" => result.impact = value,
-                    "title" => result.title = value,
-                    _ => {}
-                }
-            }
-        } else if let Some(caps) = WEAKNESS_PLAIN_FIELD_RE.captures(stripped) {
-            // Plain-text format: Field: value (written by Rust orchestrator LLM)
-            let key = caps[1].to_lowercase().replace(' ', "_");
-            let value = caps[2].trim().to_string();
-            match key.as_str() {
-                "title" => result.title = value,
-                "vulnerability" => result.vulnerability = value,
-                "affected_resource" => result.affected_resource = value,
-                "impact" => result.impact = value,
-                _ => {}
-            }
-        }
-    }
-
-    if result.title.is_empty() {
-        result.title = extract_weakness_title(block).to_string();
-    }
-
-    result
-}
-
-/// Filter out agent task suggestions incorrectly recorded as weaknesses.
-/// Returns (raw_block, parsed) tuples for real weaknesses only, deduplicated by title.
-pub(crate) fn filter_real_weaknesses(weaknesses: &[String]) -> Vec<(&str, ParsedWeaknessDisplay)> {
-    let mut result = Vec::new();
-    let mut seen_titles: HashSet<String> = HashSet::new();
-    for w in weaknesses {
-        let parsed = parse_weakness_block_display(w);
-        let title_lower = parsed.title.trim().to_lowercase();
-        let is_noise = WEAKNESS_NOISE_PREFIXES
-            .iter()
-            .any(|prefix| title_lower.starts_with(prefix));
-        if !is_noise && seen_titles.insert(title_lower) {
-            result.push((w.as_str(), parsed));
-        }
-    }
-    result
 }
 
 // ---------------------------------------------------------------------------
@@ -794,35 +679,6 @@ mod tests {
         assert_eq!(deduped.len(), 1);
     }
 
-    #[test]
-    fn test_extract_weakness_title_h3() {
-        let block = "### SMB Signing Disabled\nSome details...";
-        assert_eq!(extract_weakness_title(block), "SMB Signing Disabled");
-    }
-
-    #[test]
-    fn test_extract_weakness_title_bold() {
-        let block = "**Kerberoastable Account**\nDetails...";
-        assert_eq!(extract_weakness_title(block), "Kerberoastable Account");
-    }
-
-    #[test]
-    fn test_extract_weakness_title_fallback_first_line() {
-        let block = "Some weakness description\nMore details";
-        assert_eq!(extract_weakness_title(block), "Some weakness description");
-    }
-
-    #[test]
-    fn test_extract_weakness_title_long_fallback_truncated() {
-        let block = "A".repeat(100);
-        assert_eq!(extract_weakness_title(&block).len(), 60);
-    }
-
-    #[test]
-    fn test_extract_weakness_title_empty() {
-        assert_eq!(extract_weakness_title(""), "Untitled Weakness");
-    }
-
     // --- normalize_source_label tests ---
 
     #[test]
@@ -875,72 +731,6 @@ mod tests {
             normalize_source_label("some_custom_source"),
             "Some Custom Source"
         );
-    }
-
-    // --- filter_real_weaknesses tests ---
-
-    #[test]
-    fn test_filter_real_weaknesses_removes_noise() {
-        let weaknesses = vec![
-            "### SMB Signing Disabled\n**Vulnerability:** Not required".to_string(),
-            "### Next step: do something".to_string(),
-            "### Task suggestion: try this".to_string(),
-            "### Kerberoast\n**Vulnerability:** Weak SPN".to_string(),
-        ];
-        let filtered = filter_real_weaknesses(&weaknesses);
-        assert_eq!(filtered.len(), 2);
-        assert_eq!(filtered[0].1.title, "SMB Signing Disabled");
-        assert_eq!(filtered[1].1.title, "Kerberoast");
-    }
-
-    #[test]
-    fn test_filter_real_weaknesses_keeps_all_real() {
-        let weaknesses = vec!["### Constrained Delegation\n**Impact:** High".to_string()];
-        let filtered = filter_real_weaknesses(&weaknesses);
-        assert_eq!(filtered.len(), 1);
-    }
-
-    // --- parse_weakness_block_display tests ---
-
-    #[test]
-    fn test_parse_weakness_block_display_full() {
-        let block = "\
-### ADCS ESC1
-- **Vulnerability:** Certificate template misconfiguration
-- **Affected Resource:** contoso-DC01-CA
-- **Impact:** Domain admin escalation";
-        let parsed = parse_weakness_block_display(block);
-        assert_eq!(parsed.title, "ADCS ESC1");
-        assert_eq!(
-            parsed.vulnerability,
-            "Certificate template misconfiguration"
-        );
-        assert_eq!(parsed.affected_resource, "contoso-DC01-CA");
-        assert_eq!(parsed.impact, "Domain admin escalation");
-    }
-
-    #[test]
-    fn test_parse_weakness_block_display_empty() {
-        let parsed = parse_weakness_block_display("");
-        assert_eq!(parsed.title, "");
-    }
-
-    #[test]
-    fn test_parse_weakness_block_display_plain_text() {
-        // Plain-text format written by Rust orchestrator LLM
-        let block = "Title: Password in User Description (samwell.tarly)\nVulnerability: Password found in AD description\nAffected Resource: 10.1.2.150\nImpact: Information disclosure";
-        let parsed = parse_weakness_block_display(block);
-        assert_eq!(parsed.title, "Password in User Description (samwell.tarly)");
-        assert_eq!(parsed.vulnerability, "Password found in AD description");
-        assert_eq!(parsed.affected_resource, "10.1.2.150");
-        assert_eq!(parsed.impact, "Information disclosure");
-    }
-
-    #[test]
-    fn test_parse_weakness_block_display_no_title() {
-        let parsed = parse_weakness_block_display("just some text without a title marker");
-        // Falls back to extract_weakness_title which uses first line
-        assert_eq!(parsed.title, "just some text without a title marker");
     }
 
     // --- normalize_state_domains tests ---

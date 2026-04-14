@@ -14,6 +14,14 @@ const DEFAULT_WORDLISTS: &[&str] = &[
 ];
 const DEFAULT_MAX_TIME_MINUTES: i64 = 10;
 
+/// Default hashcat rules tried during the rules phase.
+/// best64 covers common mutations (capitalize, suffix digits/symbols);
+/// d3ad0ne is broader and catches passwords like MyPrettyPassword123#.
+const DEFAULT_RULES: &[&str] = &[
+    "/usr/share/hashcat/rules/best64.rule",
+    "/usr/share/hashcat/rules/d3ad0ne.rule",
+];
+
 /// Auto-detect hashcat mode from hash prefix.
 ///
 /// Returns the appropriate `-m` mode number:
@@ -38,7 +46,9 @@ fn build_dynamic_wordlist(known_usernames: &[&str]) -> Option<tempfile::NamedTem
     if known_usernames.is_empty() {
         return None;
     }
-    let suffixes = ["", "1", "123", "!", "2024", "2025", "2026"];
+    let suffixes = [
+        "", "1", "123", "!", "#", "@", "1!", "123!", "123#", "2024", "2025", "2026",
+    ];
     let mut file = tempfile::NamedTempFile::new().ok()?;
     for username in known_usernames {
         let base_variants = [
@@ -81,6 +91,7 @@ fn capitalize(s: &str) -> String {
 pub async fn crack_with_hashcat(args: &Value) -> Result<ToolOutput> {
     let hash_value = required_str(args, "hash_value")?;
     let explicit_wordlist = optional_str(args, "wordlist_path");
+    let explicit_rules = optional_str(args, "rules_file");
     let max_time_minutes =
         optional_i64(args, "max_time_minutes").unwrap_or(DEFAULT_MAX_TIME_MINUTES);
     let max_time_secs = max_time_minutes * 60;
@@ -119,12 +130,32 @@ pub async fn crack_with_hashcat(args: &Value) -> Result<ToolOutput> {
         None
     };
 
-    // Split time budget across wordlists
-    let total_lists = wordlists.len() + if dynamic_file.is_some() { 1 } else { 0 };
-    let per_list_secs = if total_lists > 0 {
-        max_time_secs / total_lists as i64
+    // Build rules list: explicit rule OR default cascade
+    let rules: Vec<&str> = if let Some(r) = explicit_rules {
+        vec![r]
+    } else {
+        DEFAULT_RULES
+            .iter()
+            .filter(|p| std::path::Path::new(p).exists())
+            .copied()
+            .collect()
+    };
+
+    // Split time budget: 60% for straight wordlist passes, 40% for rules passes.
+    // This ensures rules get meaningful runtime without starving the wordlist phase.
+    let has_rules = !rules.is_empty() && !wordlists.is_empty();
+    let wordlist_budget = if has_rules {
+        max_time_secs * 60 / 100
     } else {
         max_time_secs
+    };
+    let rules_budget = max_time_secs - wordlist_budget;
+
+    let total_lists = wordlists.len() + if dynamic_file.is_some() { 1 } else { 0 };
+    let per_list_secs = if total_lists > 0 {
+        wordlist_budget / total_lists as i64
+    } else {
+        wordlist_budget
     }
     .max(60); // At least 60s per list
 
@@ -151,7 +182,7 @@ pub async fn crack_with_hashcat(args: &Value) -> Result<ToolOutput> {
         }
     }
 
-    // Try each wordlist
+    // Try each wordlist (straight attack, no rules)
     for wordlist in &wordlists {
         let timeout_secs = (per_list_secs + 60) as u64;
         let result = CommandBuilder::new("hashcat")
@@ -168,6 +199,38 @@ pub async fn crack_with_hashcat(args: &Value) -> Result<ToolOutput> {
         if let Ok(out) = result {
             all_output.push_str(&out.combined());
             all_output.push('\n');
+        }
+    }
+
+    // Rules-based attack: rockyou + mutation rules (catches passwords like
+    // MyPrettyPassword123# that are rule-derived variants of common words).
+    if has_rules {
+        let rules_per_combo = if !rules.is_empty() {
+            (rules_budget / rules.len() as i64).max(60)
+        } else {
+            rules_budget
+        };
+        // Use only the primary wordlist (rockyou) for rules — applying rules
+        // to all wordlists would blow the time budget.
+        let rules_wordlist = wordlists.first().copied().unwrap_or(DEFAULT_WORDLISTS[0]);
+        for rule in &rules {
+            let timeout_secs = (rules_per_combo + 60) as u64;
+            let result = CommandBuilder::new("hashcat")
+                .flag("-m", mode.to_string())
+                .arg("-a")
+                .arg("0")
+                .arg(&hash_path)
+                .arg(rules_wordlist)
+                .flag("-r", rule.to_string())
+                .flag("--runtime", rules_per_combo.to_string())
+                .arg("--force")
+                .timeout_secs(timeout_secs)
+                .execute()
+                .await;
+            if let Ok(out) = result {
+                all_output.push_str(&out.combined());
+                all_output.push('\n');
+            }
         }
     }
 

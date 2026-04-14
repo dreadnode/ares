@@ -3,11 +3,11 @@ use std::collections::{HashMap, HashSet};
 use once_cell::sync::Lazy;
 use regex::Regex;
 
-use ares_core::models::{Host, SharedRedTeamState};
+use ares_core::models::{Host, SharedRedTeamState, VulnerabilityInfo};
 
 use crate::dedup::{
-    dedup_credentials, dedup_hashes, dedup_users, filter_real_weaknesses, normalize_source_label,
-    normalize_state_domains, sanitize_credentials,
+    dedup_credentials, dedup_hashes, dedup_users, normalize_source_label, normalize_state_domains,
+    sanitize_credentials,
 };
 
 /// Regex to strip NetExec parenthesized metadata from OS strings.
@@ -29,6 +29,24 @@ fn is_real_service(svc: &str) -> bool {
     }
     // Must contain port/proto pattern
     trimmed.contains("/tcp") || trimmed.contains("/udp")
+}
+
+/// Format a duration as a human-readable string (e.g. "1h 23m 45s").
+fn format_duration(dur: chrono::Duration) -> String {
+    let total_secs = dur.num_seconds();
+    if total_secs < 0 {
+        return "0s".to_string();
+    }
+    let hours = total_secs / 3600;
+    let minutes = (total_secs % 3600) / 60;
+    let seconds = total_secs % 60;
+    if hours > 0 {
+        format!("{hours}h {minutes:02}m {seconds:02}s")
+    } else if minutes > 0 {
+        format!("{minutes}m {seconds:02}s")
+    } else {
+        format!("{seconds}s")
+    }
 }
 
 pub(crate) fn print_loot(state: &SharedRedTeamState, json_output: bool) {
@@ -68,7 +86,6 @@ fn print_loot_json(
     let unique_users = dedup_users(&state.all_users, &state.netbios_to_fqdn);
     let unique_creds = dedup_credentials(credentials);
     let unique_hashes = dedup_hashes(hashes);
-    let real_weaknesses = filter_real_weaknesses(&state.all_weaknesses);
     let merged_hosts = dedup_hosts(
         &state.all_hosts,
         &state.netbios_to_fqdn,
@@ -77,6 +94,8 @@ fn print_loot_json(
 
     let output = serde_json::json!({
         "operation_id": state.operation_id,
+        "started_at": state.started_at.to_rfc3339(),
+        "completed_at": state.completed_at.map(|dt| dt.to_rfc3339()),
         "has_domain_admin": state.has_domain_admin,
         "domain_admin_path": state.domain_admin_path,
         "has_golden_ticket": state.has_golden_ticket,
@@ -112,7 +131,17 @@ fn print_loot_json(
             "name": s.name,
             "permissions": s.permissions,
         })).collect::<Vec<_>>(),
-        "weaknesses": real_weaknesses.iter().map(|(raw, _)| *raw).collect::<Vec<_>>(),
+        "vulnerabilities": state.discovered_vulnerabilities.iter().map(|(vuln_id, v)| serde_json::json!({
+            "vuln_id": vuln_id,
+            "vuln_type": v.vuln_type,
+            "target": v.target,
+            "priority": v.priority,
+            "exploited": state.exploited_vulnerabilities.contains(vuln_id),
+            "details": v.details,
+            "discovered_by": v.discovered_by,
+        })).collect::<Vec<_>>(),
+        "timeline": state.all_timeline_events,
+        "techniques": state.all_techniques,
     });
 
     println!(
@@ -336,6 +365,20 @@ fn print_loot_human(
     domains_input: &[String],
 ) {
     println!("Operation: {}", state.operation_id);
+
+    // Timing
+    let started = state.started_at.format("%Y-%m-%d %H:%M:%S UTC");
+    if let Some(completed) = state.completed_at {
+        let ended = completed.format("%Y-%m-%d %H:%M:%S UTC");
+        let elapsed = format_duration(completed - state.started_at);
+        println!("Started:   {started}");
+        println!("Completed: {ended} ({elapsed})");
+    } else {
+        let elapsed = format_duration(chrono::Utc::now() - state.started_at);
+        println!("Started:   {started}");
+        println!("Running:   {elapsed}");
+    }
+
     if state.has_domain_admin {
         println!("*** DOMAIN ADMIN ACHIEVED ***");
         if let Some(path) = &state.domain_admin_path {
@@ -568,33 +611,281 @@ fn print_loot_human(
     }
     println!();
 
-    // Weaknesses - filtered and structured
-    let real_weaknesses = filter_real_weaknesses(&state.all_weaknesses);
-    println!("Weaknesses ({}):", real_weaknesses.len());
-    if real_weaknesses.is_empty() {
-        println!("  None");
-    } else {
-        for (i, (_raw, parsed)) in real_weaknesses.iter().enumerate() {
-            println!("  {}. {}", i + 1, parsed.title);
-            if !parsed.vulnerability.is_empty() {
-                let vuln_display = if parsed.vulnerability.len() > 80 {
-                    format!("{}...", &parsed.vulnerability[..80])
-                } else {
-                    parsed.vulnerability.clone()
-                };
-                println!("     \u{2514}\u{2500} {vuln_display}");
-            }
-            if !parsed.affected_resource.is_empty() {
-                println!("     Resource: {}", parsed.affected_resource);
-            }
-            if !parsed.impact.is_empty() {
-                let impact_display = if parsed.impact.len() > 60 {
-                    format!("{}...", &parsed.impact[..60])
-                } else {
-                    parsed.impact.clone()
-                };
-                println!("     Impact: {impact_display}");
+    // Discovered Vulnerabilities
+    print_vulnerabilities(
+        &state.discovered_vulnerabilities,
+        &state.exploited_vulnerabilities,
+    );
+
+    // Attack Path / Timeline
+    print_attack_path(&state.all_timeline_events);
+
+    // MITRE ATT&CK Mapping
+    print_mitre_techniques(&state.all_techniques, &state.all_timeline_events);
+}
+
+/// Print discovered vulnerabilities table.
+fn print_vulnerabilities(
+    discovered: &HashMap<String, VulnerabilityInfo>,
+    exploited: &HashSet<String>,
+) {
+    if discovered.is_empty() {
+        return;
+    }
+
+    // Sort by priority (lower = higher priority), then by type
+    let mut vulns: Vec<(&String, &VulnerabilityInfo)> = discovered.iter().collect();
+    vulns.sort_by(|a, b| {
+        a.1.priority
+            .cmp(&b.1.priority)
+            .then(a.1.vuln_type.cmp(&b.1.vuln_type))
+    });
+
+    println!("Discovered Vulnerabilities ({}):", vulns.len());
+    println!(
+        "  {:<30} {:<20} {:>8} {:>9}  Details",
+        "Type", "Target", "Priority", "Exploited"
+    );
+    println!("  {}", "-".repeat(100));
+    for (vuln_id, vuln) in &vulns {
+        let is_exploited = exploited.contains(*vuln_id);
+        let exploited_mark = if is_exploited { "\u{2713}" } else { "\u{2717}" };
+
+        // Build details string from the details HashMap
+        let details = format_vuln_details(&vuln.details);
+        let details_display = if details.len() > 80 {
+            format!("{}...", &details[..80])
+        } else {
+            details
+        };
+
+        println!(
+            "  {:<30} {:<20} {:>8} {:>9}  {}",
+            vuln.vuln_type, vuln.target, vuln.priority, exploited_mark, details_display
+        );
+    }
+    println!();
+}
+
+/// Format vulnerability details HashMap into a readable string.
+fn format_vuln_details(details: &HashMap<String, serde_json::Value>) -> String {
+    if details.is_empty() {
+        return String::new();
+    }
+    let mut parts = Vec::new();
+    // Display key fields in a consistent order
+    let priority_keys = [
+        "hostname",
+        "account_name",
+        "account",
+        "domain",
+        "target_spn",
+        "type",
+        "note",
+    ];
+    let mut seen = HashSet::new();
+    for key in &priority_keys {
+        if let Some(val) = details.get(*key) {
+            let val_str = match val {
+                serde_json::Value::String(s) => s.clone(),
+                other => other.to_string(),
+            };
+            if !val_str.is_empty() && val_str != "null" {
+                parts.push(format!("{}: {}", capitalize(key), val_str));
+                seen.insert(*key);
             }
         }
+    }
+    // Add remaining keys alphabetically
+    let mut remaining: Vec<_> = details
+        .keys()
+        .filter(|k| !seen.contains(k.as_str()))
+        .collect();
+    remaining.sort();
+    for key in remaining {
+        if let Some(val) = details.get(key) {
+            let val_str = match val {
+                serde_json::Value::String(s) => s.clone(),
+                other => other.to_string(),
+            };
+            if !val_str.is_empty() && val_str != "null" {
+                parts.push(format!("{}: {}", capitalize(key), val_str));
+            }
+        }
+    }
+    parts.join("; ")
+}
+
+fn capitalize(s: &str) -> String {
+    let mut c = s.chars();
+    match c.next() {
+        None => String::new(),
+        Some(f) => f.to_uppercase().to_string() + c.as_str(),
+    }
+}
+
+/// Print the attack path timeline sorted by timestamp.
+fn print_attack_path(timeline_events: &[serde_json::Value]) {
+    if timeline_events.is_empty() {
+        return;
+    }
+
+    // Sort events by timestamp
+    let mut events: Vec<&serde_json::Value> = timeline_events.iter().collect();
+    events.sort_by(|a, b| {
+        let ts_a = a.get("timestamp").and_then(|v| v.as_str()).unwrap_or("");
+        let ts_b = b.get("timestamp").and_then(|v| v.as_str()).unwrap_or("");
+        ts_a.cmp(ts_b)
+    });
+
+    println!("Attack Path ({} events):", events.len());
+    println!("  {:<23} {:<70} MITRE", "Time (UTC)", "Event");
+    println!("  {}", "-".repeat(110));
+    for event in &events {
+        let timestamp = event
+            .get("timestamp")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown");
+        // Format timestamp: strip timezone suffix for cleaner display
+        let ts_display = format_timeline_timestamp(timestamp);
+
+        let description = event
+            .get("description")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown event");
+
+        // Check if this is a critical event (krbtgt, administrator, domain admin)
+        let desc_lower = description.to_lowercase();
+        let is_critical = desc_lower.contains("krbtgt")
+            || (desc_lower.contains("administrator") && desc_lower.contains("hash"))
+            || desc_lower.contains("domain admin");
+        let prefix = if is_critical { "CRITICAL: " } else { "" };
+
+        let mitre = extract_mitre_from_event(event);
+
+        let desc_display = if description.len() > 65 {
+            format!("{prefix}{}...", &description[..65])
+        } else {
+            format!("{prefix}{description}")
+        };
+
+        println!("  {:<23} {:<70} {}", ts_display, desc_display, mitre);
+    }
+    println!();
+}
+
+/// Format a timeline timestamp for display.
+fn format_timeline_timestamp(ts: &str) -> String {
+    // Try to parse as RFC3339 and reformat
+    if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(ts) {
+        return dt.format("%Y-%m-%d %H:%M:%S").to_string();
+    }
+    // Try common variants
+    if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(ts, "%Y-%m-%dT%H:%M:%S%.f") {
+        return dt.format("%Y-%m-%d %H:%M:%S").to_string();
+    }
+    // Return as-is, truncated
+    if ts.len() > 23 {
+        ts[..23].to_string()
+    } else {
+        ts.to_string()
+    }
+}
+
+/// Extract MITRE technique IDs from a timeline event.
+fn extract_mitre_from_event(event: &serde_json::Value) -> String {
+    if let Some(techniques) = event.get("mitre_techniques") {
+        match techniques {
+            serde_json::Value::Array(arr) => {
+                let ids: Vec<String> = arr
+                    .iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .collect();
+                return ids.join(", ");
+            }
+            serde_json::Value::String(s) => return s.clone(),
+            _ => {}
+        }
+    }
+    String::new()
+}
+
+/// Print MITRE ATT&CK technique summary.
+///
+/// Collects techniques from both the dedicated techniques set and
+/// any techniques referenced in timeline events.
+fn print_mitre_techniques(techniques: &[String], timeline_events: &[serde_json::Value]) {
+    // Collect all unique techniques
+    let mut all_techniques: HashSet<String> = techniques.iter().cloned().collect();
+
+    // Also extract from timeline events
+    for event in timeline_events {
+        if let Some(serde_json::Value::Array(arr)) = event.get("mitre_techniques") {
+            for t in arr {
+                if let Some(s) = t.as_str() {
+                    all_techniques.insert(s.to_string());
+                }
+            }
+        }
+    }
+
+    if all_techniques.is_empty() {
+        return;
+    }
+
+    let mut sorted: Vec<String> = all_techniques.into_iter().collect();
+    sorted.sort();
+
+    println!("MITRE ATT&CK Techniques ({}):", sorted.len());
+    for technique in &sorted {
+        let name = mitre_technique_name(technique);
+        if name.is_empty() {
+            println!("  - {technique}");
+        } else {
+            println!("  - {technique} ({name})");
+        }
+    }
+    println!();
+}
+
+/// Map common MITRE ATT&CK technique IDs to human-readable names.
+fn mitre_technique_name(id: &str) -> &'static str {
+    match id {
+        "T1003" => "OS Credential Dumping",
+        "T1003.001" => "LSASS Memory",
+        "T1003.002" => "Security Account Manager",
+        "T1003.003" => "NTDS",
+        "T1003.004" => "LSA Secrets",
+        "T1003.006" => "DCSync",
+        "T1021" => "Remote Services",
+        "T1021.002" => "SMB/Windows Admin Shares",
+        "T1021.006" => "Windows Remote Management",
+        "T1046" => "Network Service Discovery",
+        "T1047" => "WMI",
+        "T1053" => "Scheduled Task/Job",
+        "T1069" => "Permission Groups Discovery",
+        "T1078" => "Valid Accounts",
+        "T1087" => "Account Discovery",
+        "T1110" => "Brute Force",
+        "T1110.002" => "Password Cracking",
+        "T1110.003" => "Password Spraying",
+        "T1134" => "Access Token Manipulation",
+        "T1135" => "Network Share Discovery",
+        "T1187" => "Forced Authentication",
+        "T1482" => "Domain Trust Discovery",
+        "T1550" => "Use Alternate Authentication Material",
+        "T1550.002" => "Pass the Hash",
+        "T1550.003" => "Pass the Ticket",
+        "T1552" => "Unsecured Credentials",
+        "T1552.006" => "Group Policy Preferences",
+        "T1555" => "Credentials from Password Stores",
+        "T1557" => "Adversary-in-the-Middle",
+        "T1558" => "Steal or Forge Kerberos Tickets",
+        "T1558.001" => "Golden Ticket",
+        "T1558.003" => "Kerberoasting",
+        "T1558.004" => "AS-REP Roasting",
+        "T1569" => "System Services",
+        "T1574" => "Hijack Execution Flow",
+        _ => "",
     }
 }

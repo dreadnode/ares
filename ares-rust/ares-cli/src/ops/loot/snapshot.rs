@@ -12,7 +12,6 @@ pub(crate) struct LootSnapshot {
     pub cred_keys: HashSet<(String, String, String)>,
     pub hash_keys: HashSet<(String, String, String, String)>,
     pub share_keys: HashSet<(String, String)>,
-    pub weaknesses: HashSet<String>,
 }
 
 pub(crate) fn loot_snapshot(state: &SharedRedTeamState) -> LootSnapshot {
@@ -66,7 +65,6 @@ pub(crate) fn loot_snapshot(state: &SharedRedTeamState) -> LootSnapshot {
             .iter()
             .map(|s| (s.host.clone(), s.name.clone()))
             .collect(),
-        weaknesses: state.all_weaknesses.iter().cloned().collect(),
     }
 }
 
@@ -77,15 +75,13 @@ pub(crate) fn print_diff(prev: &LootSnapshot, curr: &LootSnapshot) {
     let new_creds: Vec<_> = curr.cred_keys.difference(&prev.cred_keys).collect();
     let new_hashes: Vec<_> = curr.hash_keys.difference(&prev.hash_keys).collect();
     let new_shares: Vec<_> = curr.share_keys.difference(&prev.share_keys).collect();
-    let new_weaknesses: Vec<_> = curr.weaknesses.difference(&prev.weaknesses).collect();
 
     let total = new_domains.len()
         + new_hosts.len()
         + new_users.len()
         + new_creds.len()
         + new_hashes.len()
-        + new_shares.len()
-        + new_weaknesses.len();
+        + new_shares.len();
 
     if total == 0 {
         return;
@@ -131,8 +127,5 @@ pub(crate) fn print_diff(prev: &LootSnapshot, curr: &LootSnapshot) {
     }
     for (host, name) in &new_shares {
         println!("  [share] {host}/{name}");
-    }
-    for w in &new_weaknesses {
-        println!("  [weakness] {w}");
     }
 }

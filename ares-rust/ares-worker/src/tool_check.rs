@@ -165,6 +165,7 @@ mod tests {
             "impacket-secretsdump",
             "lsassy",
             "smbclient",
+            "gMSADumper",
         ] {
             assert!(
                 tools.contains(expected),
@@ -202,6 +203,11 @@ mod tests {
         for expected in &[
             "certipy",
             "lsassy",
+            "nopac",
+            "printnightmare",
+            "printerbug",
+            "addspn",
+            "dnstool",
             "impacket-findDelegation",
             "impacket-getST",
             "impacket-ticketer",
@@ -245,6 +251,9 @@ mod tests {
             "mitm6",
             "coercer",
             "dfscoerce",
+            "printerbug",
+            "addspn",
+            "dnstool",
             "impacket-ntlmrelayx",
         ] {
             assert!(

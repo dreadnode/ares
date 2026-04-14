@@ -17,7 +17,7 @@ use anyhow::{Context, Result};
 use redis::AsyncCommands;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
-use tracing::{debug, info, warn};
+use tracing::{debug, warn};
 
 use ares_llm::{ToolCall, ToolExecResult};
 
@@ -190,7 +190,7 @@ impl AuthThrottle {
                 window - elapsed + Duration::from_millis(100)
             };
 
-            info!(
+            debug!(
                 credential = credential_key,
                 wait_secs = sleep_dur.as_secs_f32(),
                 "Auth throttle: delaying tool dispatch to avoid account lockout"
@@ -211,6 +211,7 @@ fn extract_credential_key(call: &ToolCall) -> Option<String> {
         .arguments
         .get("domain")
         .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
         .unwrap_or("unknown");
     Some(format!(
         "{}@{}",

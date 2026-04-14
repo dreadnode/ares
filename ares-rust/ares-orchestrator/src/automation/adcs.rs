@@ -30,7 +30,12 @@ pub async fn auto_adcs_enumeration(
         // Find CertEnroll shares on unprocessed hosts + get a credential
         let work: Vec<(String, String, ares_core::models::Credential)> = {
             let state = dispatcher.state.read().await;
-            let cred = match state.credentials.first() {
+            let cred = match state
+                .credentials
+                .iter()
+                .find(|c| !state.is_delegation_account(&c.username))
+                .or_else(|| state.credentials.first())
+            {
                 Some(c) => c.clone(),
                 None => continue,
             };

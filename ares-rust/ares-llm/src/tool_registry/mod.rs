@@ -45,6 +45,20 @@ impl AgentRole {
             Self::Orchestrator => "orchestrator",
         }
     }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.to_lowercase().as_str() {
+            "recon" => Some(Self::Recon),
+            "credential_access" => Some(Self::CredentialAccess),
+            "cracker" | "crack" => Some(Self::Cracker),
+            "acl" | "acl_analysis" => Some(Self::Acl),
+            "privesc" | "privesc_enumeration" => Some(Self::Privesc),
+            "lateral" | "lateral_movement" => Some(Self::Lateral),
+            "coercion" => Some(Self::Coercion),
+            "orchestrator" => Some(Self::Orchestrator),
+            _ => None,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -67,11 +81,9 @@ pub const CALLBACK_TOOLS: &[&str] = &[
     "complete_operation",
     // Reporting tools (handled in-process, not dispatched to workers)
     // NOTE: record_credential removed — credentials come only from tool output parsing
-    // NOTE: record_weakness removed — weaknesses come only from parsed tool output
     // NOTE: record_timeline_event removed — timeline events auto-generated from discoveries
     "record_compromised_host",
     "list_credentials",
-    "list_weaknesses",
     // Orchestrator query tools (handled by OrchestratorCallbackHandler)
     "get_credential_summary",
     "get_hash_summary",
@@ -276,8 +288,8 @@ mod tests {
         assert!(!is_callback_tool("record_weakness"));
         assert!(!is_callback_tool("record_timeline_event"));
         assert!(!is_callback_tool("report_cracked_credential"));
+        assert!(!is_callback_tool("list_weaknesses"));
         assert!(is_callback_tool("list_credentials"));
-        assert!(is_callback_tool("list_weaknesses"));
         assert!(!is_callback_tool("nmap_scan"));
         assert!(!is_callback_tool("secretsdump"));
     }
@@ -380,10 +392,15 @@ mod tests {
                 "Role {:?} missing record_compromised_host",
                 role
             );
-            // State-writing reporting tools must NOT be present
+            // Removed reporting tools must NOT be present
             assert!(
                 !names.contains(&"record_weakness"),
                 "Role {:?} has removed tool record_weakness",
+                role
+            );
+            assert!(
+                !names.contains(&"list_weaknesses"),
+                "Role {:?} has removed tool list_weaknesses",
                 role
             );
             assert!(

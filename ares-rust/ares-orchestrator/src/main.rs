@@ -320,9 +320,10 @@ async fn main() -> Result<()> {
         ares_llm::create_provider(&model_spec).context("Failed to create LLM provider")?;
 
     // Credential auth throttle — prevents AD account lockout by rate-limiting
-    // auth-bearing tool calls per credential. Default: max 3 attempts per 60s,
-    // well under the typical AD lockout threshold (5 in 5 min).
-    let auth_throttle = tool_dispatcher::AuthThrottle::new(3, std::time::Duration::from_secs(60));
+    // auth-bearing tool calls per credential. Max 3 attempts per 30s window.
+    // GOAD lockout: 3 bad attempts / 30 min. With multiple concurrent agents,
+    // even correct passwords can fail if the account is already locked.
+    let auth_throttle = tool_dispatcher::AuthThrottle::new(3, std::time::Duration::from_secs(30));
 
     // Choose tool dispatch strategy:
     // ARES_TOOL_DISPATCH=local → in-process via ares_tools::dispatch()

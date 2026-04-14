@@ -92,8 +92,9 @@ impl Dispatcher {
 
     /// Direct submit (bypasses throttle). Returns task_id.
     ///
-    /// Routes the task to the Rust LLM agent loop. If the task type
-    /// has no mapped role, logs a warning and drops the task.
+    /// Routes the task to the Rust LLM agent loop. Prefers `target_role`
+    /// when it maps to a valid AgentRole (e.g. MSSQL exploit → lateral),
+    /// falling back to `role_for_task_type` for the default mapping.
     pub async fn do_submit(
         &self,
         task_type: &str,
@@ -101,12 +102,19 @@ impl Dispatcher {
         payload: serde_json::Value,
         _priority: i32,
     ) -> Result<Option<String>> {
-        let role = match crate::llm_runner::role_for_task_type(task_type) {
+        // Prefer the caller-specified target_role (from recommended_agent)
+        // over the static task_type → role mapping. This lets automation
+        // modules like MSSQL route exploits to lateral instead of privesc.
+        let role = ares_llm::tool_registry::AgentRole::parse(target_role)
+            .or_else(|| crate::llm_runner::role_for_task_type(task_type));
+
+        let role = match role {
             Some(r) => r,
             None => {
                 warn!(
                     task_type = task_type,
-                    "No LLM role mapping for task type, dropping"
+                    target_role = target_role,
+                    "No LLM role mapping for task type or target role, dropping"
                 );
                 return Ok(None);
             }
@@ -267,57 +275,16 @@ impl Dispatcher {
                                         "tool_calls": outcome.tool_calls_dispatched,
                                     })
                                 };
-                            // Strip ALL discovery-like keys from the LLM's
-                            // task_complete result. The LLM can hallucinate
-                            // hosts, credentials, hashes, users, vulns, trusts,
-                            // etc. Only parser-extracted discoveries (from tool
-                            // output regex in ares-tools) are authoritative.
-                            //
-                            // Keys stripped at both top-level and inside
-                            // "discoveries":
-                            //   - discovered_users, hosts, credentials,
-                            //     credential, hashes, vulnerabilities,
-                            //     vulnerability, shares, trusted_domains
-                            //   - has_domain_admin (prevents LLM from faking DA)
-                            //   - cracked_password (prevents fake cred injection)
-                            const STRIPPED_DISCOVERY_KEYS: &[&str] = &[
-                                "discovered_users",
-                                "hosts",
-                                "credentials",
-                                "credential",
-                                "hashes",
-                                "vulnerabilities",
-                                "vulnerability",
-                                "shares",
-                                "trusted_domains",
-                                "has_domain_admin",
-                                "cracked_password",
-                            ];
+                            // Overwrite "discoveries" with parser-extracted data only.
+                            // The LLM's task_complete result is untrusted prose —
+                            // any discovery-like keys it contains are ignored.
+                            // Only ares-tools parsers (run on real tool stdout)
+                            // produce authoritative discoveries.
                             if let Some(obj) = result_json.as_object_mut() {
-                                for key in STRIPPED_DISCOVERY_KEYS {
-                                    obj.remove(*key);
-                                }
-                                if let Some(disc) = obj.get_mut("discoveries") {
-                                    if let Some(d) = disc.as_object_mut() {
-                                        for key in STRIPPED_DISCOVERY_KEYS {
-                                            d.remove(*key);
-                                        }
-                                    }
-                                }
+                                obj.remove("discoveries");
                             }
-
-                            // Merge parser-extracted discoveries (from tool outputs).
-                            // These are the only trusted source for all
-                            // discovery types.
                             if let Some(disc) = merged_discoveries {
-                                if result_json.get("discoveries").is_some() {
-                                    let llm_disc = result_json["discoveries"].take();
-                                    let combined =
-                                        ares_tools::parsers::merge_discoveries(&[llm_disc, disc]);
-                                    result_json["discoveries"] = combined;
-                                } else {
-                                    result_json["discoveries"] = disc;
-                                }
+                                result_json["discoveries"] = disc;
                             }
                             if !tool_outputs_json.is_empty() {
                                 result_json["tool_outputs"] =

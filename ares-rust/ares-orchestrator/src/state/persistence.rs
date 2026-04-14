@@ -158,7 +158,6 @@ impl SharedState {
         state.users = loaded.all_users;
         state.shares = loaded.all_shares;
         state.domains = loaded.all_domains;
-        state.weaknesses = loaded.all_weaknesses;
         state.discovered_vulnerabilities = loaded.discovered_vulnerabilities;
         state.exploited_vulnerabilities = loaded.exploited_vulnerabilities;
         state.domain_controllers = loaded.domain_controllers;

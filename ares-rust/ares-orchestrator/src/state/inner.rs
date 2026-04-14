@@ -19,7 +19,6 @@ pub struct StateInner {
     pub users: Vec<User>,
     pub shares: Vec<Share>,
     pub domains: Vec<String>,
-    pub weaknesses: Vec<String>,
 
     // Vulnerability tracking
     pub discovered_vulnerabilities: HashMap<String, VulnerabilityInfo>,
@@ -78,7 +77,6 @@ impl StateInner {
             users: Vec::new(),
             shares: Vec::new(),
             domains: Vec::new(),
-            weaknesses: Vec::new(),
             discovered_vulnerabilities: HashMap::new(),
             exploited_vulnerabilities: HashSet::new(),
             domain_controllers: HashMap::new(),
@@ -97,6 +95,26 @@ impl StateInner {
             completed_tasks: HashMap::new(),
             completed: false,
         }
+    }
+
+    /// Check if a username is the delegating account for a constrained
+    /// delegation or RBCD vulnerability.  These accounts must be reserved
+    /// for S4U exploitation — spraying or secretsdump with their creds
+    /// causes lockout before S4U can use them.
+    pub fn is_delegation_account(&self, username: &str) -> bool {
+        let u = username.to_lowercase();
+        self.discovered_vulnerabilities.values().any(|vuln| {
+            let vtype = vuln.vuln_type.to_lowercase();
+            if vtype != "constrained_delegation" && vtype != "rbcd" {
+                return false;
+            }
+            vuln.details
+                .get("account_name")
+                .or_else(|| vuln.details.get("AccountName"))
+                .and_then(|v| v.as_str())
+                .map(|a| a.to_lowercase() == u)
+                .unwrap_or(false)
+        })
     }
 
     /// Check if a dedup key exists in the named set.
@@ -258,5 +276,32 @@ mod tests {
                 "Missing from ALL_DEDUP_SETS: {name}"
             );
         }
+    }
+
+    #[test]
+    fn test_is_delegation_account() {
+        let mut state = StateInner::new("op-1".into());
+        assert!(!state.is_delegation_account("jon.snow"));
+
+        // Add a constrained delegation vuln for jon.snow
+        let mut details = std::collections::HashMap::new();
+        details.insert("account_name".to_string(), serde_json::json!("jon.snow"));
+        state.discovered_vulnerabilities.insert(
+            "constrained_delegation_jon.snow".into(),
+            ares_core::models::VulnerabilityInfo {
+                vuln_id: "constrained_delegation_jon.snow".into(),
+                vuln_type: "constrained_delegation".into(),
+                target: "".into(),
+                discovered_by: "".into(),
+                discovered_at: chrono::Utc::now(),
+                details,
+                recommended_agent: "".into(),
+                priority: 8,
+            },
+        );
+
+        assert!(state.is_delegation_account("jon.snow"));
+        assert!(state.is_delegation_account("Jon.Snow")); // case insensitive
+        assert!(!state.is_delegation_account("samwell.tarly"));
     }
 }

@@ -19,6 +19,7 @@ pub fn parse_certipy_find(output: &str, params: &Value) -> Vec<Value> {
                 "vuln_id": format!("adcs_{}_{}", esc_type, target_ip),
                 "vuln_type": format!("adcs_{}", esc_type),
                 "target": target_ip,
+                "discovered_by": "certipy_find",
                 "details": {
                     "esc_type": esc_type,
                 },

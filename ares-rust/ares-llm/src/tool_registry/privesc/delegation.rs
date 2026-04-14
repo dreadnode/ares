@@ -150,6 +150,40 @@ pub fn definitions() -> Vec<ToolDefinition> {
                 "required": ["target_computer", "attacker_sid", "domain", "username", "password", "dc_ip"]
             }),
         },
-        // NOTE: krbrelayup removed — KrbRelayUp binary not in privesc container.
+        ToolDefinition {
+            name: "krbrelayup".into(),
+            description: "Perform local privilege escalation via Kerberos relay (KrbRelayUp). \
+                Abuses Kerberos authentication to relay credentials and escalate privileges \
+                on the local machine. Supports RBCD and Shadow Credentials methods."
+                .into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "domain": {
+                        "type": "string",
+                        "description": "Target domain (e.g. contoso.local)"
+                    },
+                    "dc_ip": {
+                        "type": "string",
+                        "description": "Domain controller IP address"
+                    },
+                    "method": {
+                        "type": "string",
+                        "enum": ["rbcd", "shadowcred"],
+                        "description": "Relay method: 'rbcd' (default) creates a computer account and configures RBCD, 'shadowcred' uses shadow credentials",
+                        "default": "rbcd"
+                    },
+                    "create_user": {
+                        "type": "string",
+                        "description": "Computer account name to create (for RBCD method)"
+                    },
+                    "create_password": {
+                        "type": "string",
+                        "description": "Password for the created computer account"
+                    }
+                },
+                "required": ["domain", "dc_ip"]
+            }),
+        },
     ]
 }

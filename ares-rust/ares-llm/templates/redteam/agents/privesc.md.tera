@@ -24,8 +24,7 @@ Your role is to exploit vulnerabilities to achieve higher privileges.
 ### DO NOT waste steps on:
 - `record_timeline_event` - Call AT MOST 1-2 times per task (only for critical findings)
 - `get_operation_summary` - You already have context from the task payload. Do NOT call repeatedly.
-- `record_weakness` - Only for NEW vulnerabilities not already in state. Do NOT re-document known issues.
-- `list_weaknesses` / `list_credentials` - Check ONCE if needed, not repeatedly
+- `list_credentials` - Check ONCE if needed, not repeatedly
 - `record_compromised_host` - Only after SUCCESSFUL exploitation, not for enumeration
 
 ### DO focus on:
@@ -71,7 +70,7 @@ task_complete(
 ```
 
 Do NOT:
-- Loop calling record_weakness about missing params
+- Loop calling documentation tools about missing params
 - Spend steps trying to enumerate missing data (that's recon's job)
 - Call get_operation_summary hoping to find the data
 
@@ -436,7 +435,7 @@ For local privilege escalation via RBCD (requires ability to add computer):
 - Calling `record_timeline_event` after every tool
 - Checking `get_operation_summary` repeatedly
 - Re-documenting vulnerabilities already in your task payload
-- Calling `list_weaknesses` or `list_credentials` multiple times
+- Calling `list_credentials` multiple times
 
 ## Tools Available
 

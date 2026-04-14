@@ -289,6 +289,19 @@ pub fn spawn_deferred_processor(
 
                 match decision {
                     ThrottleDecision::Allow => {
+                        // Pre-check credential concurrency to avoid a hot
+                        // re-enqueue loop: submit_to_llm would re-defer the
+                        // task if the credential is at capacity, but this
+                        // drain loop would immediately pop it again.
+                        if let Some(cred_key) =
+                            crate::dispatcher::credential_key_from_payload(&task.payload)
+                        {
+                            if !dispatcher.credential_inflight.can_acquire(&cred_key).await {
+                                let _ = deferred.enqueue(&task).await;
+                                break;
+                            }
+                        }
+
                         // Route directly to the LLM agent loop via Dispatcher.
                         // do_submit handles tracker.add() and throttler.record_dispatch().
                         match dispatcher
@@ -309,11 +322,10 @@ pub fn spawn_deferred_processor(
                                 );
                             }
                             Ok(None) => {
-                                // No role mapping — task was dropped
-                                debug!(
-                                    task_type = %task.task_type,
-                                    "Deferred task dropped (no role mapping)"
-                                );
+                                // Credential concurrency block or no role mapping.
+                                // Task may have been re-enqueued by submit_to_llm;
+                                // break to avoid hot loop.
+                                break;
                             }
                             Err(e) => {
                                 warn!(err = %e, "Failed to dispatch deferred task");

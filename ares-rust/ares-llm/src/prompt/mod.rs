@@ -48,6 +48,10 @@ pub struct StateSnapshot {
     pub has_golden_ticket: bool,
     /// Forest root domains that still need krbtgt hashes (computed at snapshot time).
     pub undominated_forests: Vec<String>,
+    /// Usernames (lowercased) that are delegating accounts for constrained
+    /// delegation or RBCD vulnerabilities.  Agents must NOT use these
+    /// credentials for generic auth — they are reserved for S4U.
+    pub delegation_accounts: std::collections::HashSet<String>,
 }
 
 // ---------------------------------------------------------------------------

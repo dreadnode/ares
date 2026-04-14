@@ -52,6 +52,15 @@ impl CredentialInflight {
         }
     }
 
+    /// Check if a slot is available WITHOUT acquiring it.
+    pub async fn can_acquire(&self, key: &str) -> bool {
+        let map = self.inner.lock().await;
+        match map.get(key) {
+            Some(count) => *count < self.max_per_credential,
+            None => true,
+        }
+    }
+
     /// Release a slot when the task completes (success or failure).
     pub async fn release(&self, key: &str) {
         let mut map = self.inner.lock().await;

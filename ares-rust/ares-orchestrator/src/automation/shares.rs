@@ -26,7 +26,14 @@ pub async fn auto_share_spider(dispatcher: Arc<Dispatcher>, mut shutdown: watch:
 
         let work: Vec<(String, String, String, ares_core::models::Credential)> = {
             let state = dispatcher.state.read().await;
-            let cred = match state.credentials.first() {
+            // Use first non-delegation credential to avoid burning auth budget
+            // on accounts reserved for S4U exploitation.
+            let cred = match state
+                .credentials
+                .iter()
+                .find(|c| !state.is_delegation_account(&c.username))
+                .or_else(|| state.credentials.first())
+            {
                 Some(c) => c.clone(),
                 None => continue,
             };

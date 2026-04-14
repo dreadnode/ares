@@ -46,6 +46,21 @@ impl SharedState {
             has_domain_admin: s.has_domain_admin,
             has_golden_ticket: s.has_golden_ticket,
             undominated_forests: undominated,
+            delegation_accounts: s
+                .discovered_vulnerabilities
+                .values()
+                .filter(|v| {
+                    let vt = v.vuln_type.to_lowercase();
+                    vt == "constrained_delegation" || vt == "rbcd"
+                })
+                .filter_map(|v| {
+                    v.details
+                        .get("account_name")
+                        .or_else(|| v.details.get("AccountName"))
+                        .and_then(|x| x.as_str())
+                        .map(|s| s.to_lowercase())
+                })
+                .collect(),
         }
     }
 

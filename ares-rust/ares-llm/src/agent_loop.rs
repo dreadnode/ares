@@ -278,17 +278,6 @@ fn handle_builtin_callback(call: &ToolCall) -> Result<CallbackResult> {
                  and the system will parse and store credentials automatically.".to_string()
             ))
         }
-        "record_weakness" => {
-            let title = call.arguments["title"].as_str().unwrap_or("").to_string();
-            let affected = call.arguments["affected_resource"]
-                .as_str()
-                .unwrap_or("")
-                .to_string();
-            info!(title = %title, affected = %affected, "Weakness recorded via callback");
-            Ok(CallbackResult::Continue(format!(
-                "Weakness recorded: {title} ({affected})"
-            )))
-        }
         "record_compromised_host" => {
             let ip = call.arguments["ip"].as_str().unwrap_or("").to_string();
             let hostname = call.arguments["hostname"]
@@ -320,9 +309,6 @@ fn handle_builtin_callback(call: &ToolCall) -> Result<CallbackResult> {
                 "Use get_all_credentials for full credential listing.".to_string(),
             ))
         }
-        "list_weaknesses" => Ok(CallbackResult::Continue(
-            "Weaknesses listing is available via the orchestrator.".to_string(),
-        )),
         // Orchestrator-only tools — these require a custom CallbackHandler
         // (OrchestratorCallbackHandler) to provide meaningful state. When called
         // without one (e.g., by a worker), return a generic message.

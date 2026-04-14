@@ -145,9 +145,7 @@ No timeline events recorded.
 
 ---
 
-## Vulnerabilities & Weaknesses
-
-### Discovered Vulnerabilities
+## Discovered Vulnerabilities
 
 {% if discovered_vulns | length > 0 %}
 {% for vuln in discovered_vulns %}
@@ -163,18 +161,6 @@ No timeline events recorded.
 {% endfor %}
 {% else %}
 No specific vulnerabilities discovered.
-{% endif %}
-
-### Security Weaknesses
-
-{% if weaknesses | length > 0 %}
-| Finding | Affected Resource | Discovery Method | Impact |
-|---------|-------------------|------------------|--------|
-{% for w in weaknesses %}
-| **{{ w.title | default(value="Unknown") }}**<br>{{ w.vulnerability | default(value="-") }} | {{ w.affected_resource | default(value="-") }} | {{ w.discovery_method | default(value="-") }} | {{ w.impact | default(value="-") }} |
-{% endfor %}
-{% else %}
-No significant weaknesses recorded.
 {% endif %}
 
 ---

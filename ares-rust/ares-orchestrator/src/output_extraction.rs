@@ -14,6 +14,12 @@ use regex::Regex;
 
 use ares_core::models::{Credential, Hash, Host, Share, User};
 
+/// Strip ANSI escape sequences from text (e.g., color codes from tool output).
+pub(crate) fn strip_ansi(s: &str) -> String {
+    static RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"\x1b\[[0-9;]*m").unwrap());
+    RE.replace_all(s, "").into_owned()
+}
+
 /// All discoveries extracted from raw output text.
 #[derive(Debug, Default)]
 pub struct TextExtractions {
@@ -568,6 +574,15 @@ pub(crate) fn is_valid_credential(username: &str, password: &str) -> bool {
     if password.len() < 3 {
         return false;
     }
+    // Reject passwords that are too long (hash fragments, raw hash bodies)
+    if password.len() > 128 {
+        return false;
+    }
+    // Reject hex+dollar strings that look like Kerberos hash bodies
+    // (e.g., "7dae198e2c$ef0c20c7d3abaaf..." from raw AS-REP output)
+    if password.len() > 40 && password.chars().all(|c| c.is_ascii_hexdigit() || c == '$') {
+        return false;
+    }
     true
 }
 
@@ -835,15 +850,24 @@ static RE_CRACKED_TGS: Lazy<Regex> = Lazy::new(|| {
     Regex::new(r"\$krb5tgs\$\d+\$\*([^$*]+)\$([^$*]+)\$[^*]+\*\$[a-fA-F0-9$]+:(.+)$").unwrap()
 });
 
-/// Hashcat cracked AS-REP: $krb5asrep$23$user@DOMAIN:hash:plaintext
-static RE_CRACKED_ASREP: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"\$krb5asrep\$\d+\$([^@:]+)@([^:]+):[a-fA-F0-9$]+:(.+)$").unwrap());
+/// Cracked AS-REP: $krb5asrep$23$user@DOMAIN:hash:plaintext (hashcat)
+/// or $krb5asrep$23$user@DOMAIN:plaintext (john --show, no hex section)
+static RE_CRACKED_ASREP: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"\$krb5asrep\$\d+\$([^@:]+)@([^:]+):(?:[a-fA-F0-9$]+:)?(.+)$").unwrap()
+});
 
 /// John --show output: user:plaintext (with optional trailing :::... fields)
 /// Only matches lines that look like john --show format — username followed by
 /// password, then optional RID and empty LM/NT fields.
 static RE_JOHN_SHOW: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"^([^:\s$][^:]*):([^:]+):\d*:(?:[a-fA-F0-9]*:){0,3}:*\s*$").unwrap());
+
+/// John --show unknown user: ?:plaintext (john can't determine username from TGS hashes)
+static RE_JOHN_UNKNOWN_USER: Lazy<Regex> = Lazy::new(|| Regex::new(r"^\?:(.+)$").unwrap());
+
+/// Extract username/domain from a TGS hash in the output text.
+static RE_TGS_HASH_USER: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"\$krb5tgs\$\d+\$\*([^$*]+)\$([^$*]+)").unwrap());
 
 fn extract_cracked_passwords(output: &str, default_domain: &str) -> Vec<Credential> {
     let mut credentials = Vec::new();
@@ -907,6 +931,33 @@ fn extract_cracked_passwords(output: &str, default_domain: &str) -> Vec<Credenti
 
         // John --show output (only if we detected john context)
         if is_john_output {
+            // John --show unknown user: ?:password (TGS hashes)
+            // Try to extract username from a $krb5tgs$ line in the same output.
+            if let Some(caps) = RE_JOHN_UNKNOWN_USER.captures(stripped) {
+                let password = caps.get(1).unwrap().as_str().trim();
+                if is_valid_credential("?", password) {
+                    // Scan output for a TGS hash line to get username/domain
+                    if let Some(tgs_caps) = RE_TGS_HASH_USER.captures(output) {
+                        let username = tgs_caps.get(1).unwrap().as_str();
+                        let domain = tgs_caps.get(2).unwrap().as_str();
+                        let key = format!(
+                            "cracked:{}@{}",
+                            username.to_lowercase(),
+                            domain.to_lowercase()
+                        );
+                        if seen.insert(key) {
+                            credentials.push(make_credential(
+                                username,
+                                password,
+                                domain,
+                                "cracked:john",
+                            ));
+                        }
+                    }
+                }
+                continue;
+            }
+
             if let Some(caps) = RE_JOHN_SHOW.captures(stripped) {
                 let username = caps.get(1).unwrap().as_str();
                 let password = caps.get(2).unwrap().as_str();
@@ -1434,5 +1485,67 @@ $krb5tgs$23$*svc_sql$CONTOSO.LOCAL$contoso.local/svc_sql*$def:Summer2024!";
             creds.is_empty(),
             "John format without context should not match"
         );
+    }
+
+    #[test]
+    fn test_extract_cracked_asrep_john_show_no_hex() {
+        // John --show for AS-REP omits the hex hash section
+        let output = "--- john --show ---\n\
+            $krb5asrep$23$brandon.stark@NORTH.SEVENKINGDOMS.LOCAL:iseedeadpeople\n\n\
+            1 password hash cracked, 0 left\n";
+        let creds = extract_cracked_passwords(output, "north.sevenkingdoms.local");
+        assert_eq!(creds.len(), 1);
+        assert_eq!(creds[0].username, "brandon.stark");
+        assert_eq!(creds[0].password, "iseedeadpeople");
+        assert_eq!(creds[0].domain, "NORTH.SEVENKINGDOMS.LOCAL");
+    }
+
+    #[test]
+    fn test_extract_cracked_tgs_john_show_unknown_user() {
+        // John --show for TGS shows ?:password — extract user from TGS hash in same output
+        let output = "Loaded 1 password hash (krb5tgs)\n\
+            $krb5tgs$23$*jon.snow$NORTH.SEVENKINGDOMS.LOCAL$CIFS/thewall*$abcdef$123456\n\
+            --- john --show ---\n\
+            ?:iknownothing\n\n\
+            1 password hash cracked, 0 left\n";
+        let creds = extract_cracked_passwords(output, "north.sevenkingdoms.local");
+        assert_eq!(creds.len(), 1);
+        assert_eq!(creds[0].username, "jon.snow");
+        assert_eq!(creds[0].password, "iknownothing");
+        assert_eq!(creds[0].domain, "NORTH.SEVENKINGDOMS.LOCAL");
+        assert_eq!(creds[0].source, "cracked:john");
+    }
+
+    #[test]
+    fn test_extract_cracked_tgs_john_unknown_user_no_hash_context() {
+        // Without a TGS hash line in the output, ?:password is skipped
+        let output = "--- john --show ---\n\
+            ?:iknownothing\n\n\
+            1 password hash cracked, 0 left\n";
+        let creds = extract_cracked_passwords(output, "contoso.local");
+        assert!(creds.is_empty(), "No TGS hash context = no credential");
+    }
+
+    #[test]
+    fn test_extract_cracked_no_false_positive_on_raw_asrep_hash() {
+        // Raw GetNPUsers AS-REP hash should NOT produce a cracked credential.
+        // The hash body is long hex+$ which is_valid_credential must reject.
+        let output = "$krb5asrep$23$brandon.stark@NORTH.SEVENKINGDOMS.LOCAL:7dae198e2c2fd940e1cbb59d7817c755$ef0c20c7d3abaaf411eb7c9bfe28c6aeae8410170fd08daf198b9269344aa64b9ad78f3f5b807dee0e8573e3bdec9fd90d0b46fa56baba08708f716d9b43a9f9bb2481ab56453d7a340f60ac478f6114f4fb0db7a424fd075f4cef9061954bf53ac6ac6dc3b0cc153b1bc909cac6cdcad9337022bf24ad2069d1991e9ca6eced54eb31f0016f3d9a2983c7f95c7f92261a8a1c435300576a98943a34046f4c08ecc4c6e81d9ca7aa3ae9a4baeb0e4071cd27c82203a225e741f4867afd15405552a47145ec3d79f1d5d19a90109b24ea593c26169fbccc54816f288a30c08ff34dc11bc105366685769b3edf9027be1dbad2f770edfa3ccd3f9524e93de40033464f07cdefb0";
+        let creds = extract_cracked_passwords(output, "north.sevenkingdoms.local");
+        assert!(
+            creds.is_empty(),
+            "Raw AS-REP hash body should not be treated as cracked password"
+        );
+    }
+
+    #[test]
+    fn test_valid_credential_rejects_hash_body_password() {
+        // Long hex+$ strings should be rejected as hash fragments
+        assert!(!is_valid_credential(
+            "brandon.stark",
+            "7dae198e2c2fd940e1cbb59d7817c755$ef0c20c7d3abaaf411eb7c9bfe28c6aeae"
+        ));
+        // Short real passwords should still pass
+        assert!(is_valid_credential("brandon.stark", "iseedeadpeople"));
     }
 }

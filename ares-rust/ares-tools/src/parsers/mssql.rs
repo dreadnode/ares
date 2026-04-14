@@ -57,8 +57,10 @@ pub fn parse_mssql_impersonation(output: &str, params: &Value) -> Vec<Value> {
 
     if has_impersonation {
         vulns.push(json!({
+            "vuln_id": format!("mssql_impersonation_{}", target),
             "vuln_type": "mssql_impersonation",
             "target": target,
+            "discovered_by": "mssql_enum_impersonation",
             "priority": 3,
             "recommended_agent": "privesc",
             "details": {
@@ -130,8 +132,10 @@ pub fn parse_mssql_linked_servers(output: &str, params: &Value) -> Vec<Value> {
 
     for server in &linked {
         vulns.push(json!({
+            "vuln_id": format!("mssql_linked_server_{}_{}", target, server),
             "vuln_type": "mssql_linked_server",
             "target": target,
+            "discovered_by": "mssql_enum_linked_servers",
             "priority": 3,
             "recommended_agent": "privesc",
             "details": {

@@ -96,9 +96,7 @@
 
 ---
 
-## Vulnerabilities and Weaknesses
-
-### Discovered Vulnerabilities ({{ discovered_vulns | length }})
+## Discovered Vulnerabilities ({{ discovered_vulns | length }})
 
 {% if discovered_vulns | length > 0 %}
 | Type | Target | Priority | Exploited | Details |
@@ -108,18 +106,6 @@
 {% endfor %}
 {% else %}
 No structured vulnerabilities discovered.
-{% endif %}
-
-### Security Weaknesses ({{ weaknesses | length }})
-
-{% if weaknesses | length > 0 %}
-| Finding | Affected Resource | Impact |
-|---------|-------------------|--------|
-{% for w in weaknesses %}
-| **{{ w.title | default(value="Unknown") }}**<br>{{ w.vulnerability | default(value="-") }} | {{ w.affected_resource | default(value="-") }} | {{ w.impact | default(value="-") }} |
-{% endfor %}
-{% else %}
-No significant weaknesses recorded.
 {% endif %}
 
 ---

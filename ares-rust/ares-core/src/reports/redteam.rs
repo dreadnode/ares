@@ -12,7 +12,6 @@ use super::dedup::{dedup_credentials, dedup_hashes, dedup_users};
 use super::mitre::get_technique_display;
 use super::templates::{REDTEAM_COMPREHENSIVE_TEMPLATE, REDTEAM_SUMMARY_TEMPLATE};
 use super::util::{format_duration_chrono, timeline_event_from_json};
-use super::weakness::deduplicate_weaknesses;
 
 /// Generates markdown reports from red team operation state using Tera templates.
 pub struct RedTeamReportGenerator {
@@ -86,8 +85,6 @@ impl RedTeamReportGenerator {
             .map(timeline_event_from_json)
             .collect();
 
-        let weaknesses = deduplicate_weaknesses(&state.all_weaknesses);
-
         let hosts: Vec<HostCtx> = state.all_hosts.iter().map(HostCtx::from).collect();
         let users: Vec<UserCtx> = unique_users.iter().map(UserCtx::from).collect();
         let credentials: Vec<CredCtx> = unique_creds.iter().map(CredCtx::from).collect();
@@ -146,7 +143,6 @@ impl RedTeamReportGenerator {
         ctx.insert("users", &users);
         ctx.insert("credentials", &credentials);
         ctx.insert("shares", &shares);
-        ctx.insert("weaknesses", &weaknesses);
         ctx.insert("discovered_vulns", &discovered_vulns);
         ctx.insert("timeline", &timeline);
         ctx.insert("techniques_identified", &techniques_enriched);
@@ -204,8 +200,6 @@ impl RedTeamReportGenerator {
             .iter()
             .map(timeline_event_from_json)
             .collect();
-
-        let weaknesses = deduplicate_weaknesses(&state.all_weaknesses);
 
         // Domains sorted, deduped, lowercased
         let mut domains: Vec<String> = state
@@ -280,7 +274,6 @@ impl RedTeamReportGenerator {
         ctx.insert("credentials", &credentials);
         ctx.insert("hashes", &hashes);
         ctx.insert("shares", &shares);
-        ctx.insert("weaknesses", &weaknesses);
         ctx.insert("timeline", &timeline);
         ctx.insert("techniques", &techniques_enriched);
         ctx.insert("discovered_vulns", &discovered_vulns);

@@ -120,6 +120,7 @@ pub struct VulnerabilityInfo {
     pub vuln_id: String,
     pub vuln_type: String,
     pub target: String,
+    #[serde(default)]
     pub discovered_by: String,
     #[serde(default = "chrono::Utc::now")]
     pub discovered_at: DateTime<Utc>,

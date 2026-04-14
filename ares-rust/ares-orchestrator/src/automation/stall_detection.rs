@@ -108,13 +108,36 @@ pub async fn auto_stall_detection(
         recovery_attempts += 1;
 
         // --- Fallback 1: Password spray with discovered users ---
+        // Skip domains with pending delegation vulns — sprays lock delegation
+        // accounts and prevent S4U exploitation from succeeding.
         if has_users && has_dcs {
             let spray_work: Vec<(String, String)> = {
                 let state = dispatcher.state.read().await;
+                // Collect domains that have pending delegation vulns
+                let delegation_domains: std::collections::HashSet<String> = state
+                    .discovered_vulnerabilities
+                    .values()
+                    .filter(|v| {
+                        let vt = v.vuln_type.to_lowercase();
+                        (vt == "constrained_delegation" || vt == "rbcd")
+                            && !state.exploited_vulnerabilities.contains(&v.vuln_id)
+                    })
+                    .filter_map(|v| {
+                        v.details
+                            .get("domain")
+                            .or_else(|| v.details.get("Domain"))
+                            .and_then(|d| d.as_str())
+                            .map(|d| d.to_lowercase())
+                    })
+                    .collect();
                 state
                     .domain_controllers
                     .iter()
                     .filter(|(domain, _)| {
+                        // Skip domains with pending delegation vulns
+                        if delegation_domains.contains(&domain.to_lowercase()) {
+                            return false;
+                        }
                         // Use recovery_attempts in key so each round dispatches fresh sprays
                         let key = format!(
                             "stall_spray:{}:{}",
