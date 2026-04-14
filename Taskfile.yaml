@@ -36,6 +36,8 @@ includes:
       EC2_NAME: '{{.EC2_NAME}}'
       EC2_PROFILE: '{{.EC2_PROFILE}}'
       EC2_REGION: '{{.EC2_REGION}}'
+      BLUE_ENABLED: '{{.BLUE_ENABLED}}'
+      BLUE_LLM_MODEL: '{{.BLUE_LLM_MODEL}}'
   ec2:
     taskfile: .taskfiles/ec2/Taskfile.yaml
     optional: true
@@ -94,6 +96,9 @@ vars:
   EC2_NAME: '{{.EC2_NAME | default "ares-tools"}}'
   EC2_PROFILE: '{{.EC2_PROFILE | default "lab"}}'
   EC2_REGION: '{{.EC2_REGION | default "us-west-1"}}'
+  # Blue team (set BLUE_ENABLED=1 to run blue alongside red)
+  BLUE_ENABLED: '{{.BLUE_ENABLED | default "0"}}'
+  BLUE_LLM_MODEL: '{{.BLUE_LLM_MODEL | default ""}}'
 
 tasks:
   default:

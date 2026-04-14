@@ -1127,6 +1127,8 @@ tasks:
       EC2_NAME: '{{.EC2_NAME | default "kali-ares"}}'
       EC2_PROFILE: '{{.EC2_PROFILE | default "lab"}}'
       EC2_REGION: '{{.EC2_REGION | default "us-west-1"}}'
+      BLUE_ENABLED: '{{.BLUE_ENABLED | default "0"}}'
+      BLUE_LLM_MODEL: '{{.BLUE_LLM_MODEL | default ""}}'
       RESOLVED_TARGETS:
         sh: |
           TARGET="{{.TARGET}}"
@@ -1272,6 +1274,8 @@ tasks:
               -e "s|__GRAFANA_TOKEN__|${GRAFANA_SERVICE_ACCOUNT_TOKEN:-}|" \
               -e "s|__GRAFANA_URL__|{{.GRAFANA_URL}}|" \
               -e "s|__ARES_LLM_MODEL__|{{.MODEL}}|" \
+              -e "s|__ARES_BLUE_ENABLED__|{{.BLUE_ENABLED}}|" \
+              -e "s|__ARES_BLUE_LLM_MODEL__|{{.BLUE_LLM_MODEL}}|" \
               .taskfiles/ec2/scripts/launch-orchestrator.sh.tmpl > "$ORCH_SCRIPT"
           jq -Rs '{"commands": [.]}' < "$ORCH_SCRIPT" > "$ORCH_PARAMS"
 
