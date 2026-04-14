@@ -95,12 +95,13 @@ tasks:
       - |
         BUILD_TOOL="{{.BUILD_TOOL}}"
 
-        # Resolve 'auto': on macOS prefer remote (native EC2 build) to avoid
-        # Zig's OPEN_MAX=10240 fd cap and Docker emulation overhead.
-        # On Linux, prefer zigbuild (fast native cross-compilation).
+        # Resolve 'auto': on macOS prefer cross (Docker) to avoid Zig's
+        # OPEN_MAX=10240 fd cap that causes ProcessFdQuotaExceeded when
+        # linking binaries with 200+ .rlib deps.
+        # On Linux, prefer zigbuild (fast, no fd limit issues).
         if [ "$BUILD_TOOL" = "auto" ]; then
-          if [ "$(uname)" = "Darwin" ]; then
-            BUILD_TOOL="remote"
+          if [ "$(uname)" = "Darwin" ] && command -v cross >/dev/null 2>&1; then
+            BUILD_TOOL="cross"
           elif command -v cargo-zigbuild >/dev/null 2>&1; then
             BUILD_TOOL="zigbuild"
           elif command -v cross >/dev/null 2>&1; then
@@ -245,10 +246,7 @@ tasks:
 
       # Upload to S3 staging (skip for remote builds)
       - |
-        # Re-resolve BUILD_TOOL to detect remote path
-        _BT="{{.BUILD_TOOL}}"
-        if [ "$_BT" = "auto" ] && [ "$(uname)" = "Darwin" ]; then _BT="remote"; fi
-        if [ "$_BT" = "remote" ]; then exit 0; fi
+        if [ "{{.BUILD_TOOL}}" = "remote" ]; then exit 0; fi
 
         echo -e "{{.INFO}} Uploading binaries to s3://{{.BCP_BUCKET}}/{{.S3_DEPLOY_PREFIX}}/..."
 
@@ -261,10 +259,7 @@ tasks:
 
       # Pull from S3 on EC2 via SSM + verify (skip for remote builds)
       - |
-        # Re-resolve BUILD_TOOL to detect remote path
-        _BT="{{.BUILD_TOOL}}"
-        if [ "$_BT" = "auto" ] && [ "$(uname)" = "Darwin" ]; then _BT="remote"; fi
-        if [ "$_BT" = "remote" ]; then exit 0; fi
+        if [ "{{.BUILD_TOOL}}" = "remote" ]; then exit 0; fi
 
         INSTANCE_ID=$(aws ec2 describe-instances \
           --profile "{{.EC2_PROFILE}}" \
@@ -335,10 +330,10 @@ tasks:
           EC2_NAME: '{{.EC2_NAME}}'
 
   deploy:config:
-    desc: "Push config.yaml to EC2 via S3 staging (usage: task ec2:deploy:config [EC2_NAME=ares-tools] [ARES_CONFIG=./config/multi-agent-production.yaml])"
+    desc: "Push config.yaml to EC2 via S3 staging (usage: task ec2:deploy:config [EC2_NAME=ares-tools] [ARES_CONFIG=./config/ares.yaml])"
     silent: true
     vars:
-      ARES_CONFIG: '{{.ARES_CONFIG | default "./config/multi-agent-production.yaml"}}'
+      ARES_CONFIG: '{{.ARES_CONFIG | default "./config/ares.yaml"}}'
       S3_DEPLOY_PREFIX: 'ares-deploy'
     preconditions:
       - sh: test -f "{{.ARES_CONFIG}}"

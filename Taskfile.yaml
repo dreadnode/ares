@@ -80,7 +80,7 @@ vars:
   DREADNODE_WORKSPACE: '{{.DREADNODE_WORKSPACE | default "ares-protocol"}}'
   DREADNODE_PROJECT: '{{.DREADNODE_PROJECT | default "ares-soc"}}'
   # Config file (single source of truth for model assignments)
-  ARES_CONFIG: '{{.ARES_CONFIG | default "./config/multi-agent-production.yaml"}}'
+  ARES_CONFIG: '{{.ARES_CONFIG | default "./config/ares.yaml"}}'
   # Rust CLI binary
   ARES_CLI: '{{.ARES_CLI | default "./ares-rust/target/release/ares-cli"}}'
   # Infrastructure

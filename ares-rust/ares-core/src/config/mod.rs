@@ -22,8 +22,8 @@ use defaults::default_max_steps;
 
 /// Default search paths for the config file, in priority order.
 const DEFAULT_PATHS: &[&str] = &[
-    "./config/multi-agent-production.yaml",
-    "/ares/config/multi-agent-production.yaml",
+    "./config/ares.yaml",
+    "/ares/config/ares.yaml",
     "/etc/ares/config.yaml",
 ];
 
@@ -73,7 +73,7 @@ impl AresConfig {
     ///
     /// Resolution order:
     /// 1. `ARES_CONFIG` env var
-    /// 2. `./config/multi-agent-production.yaml`
+    /// 2. `./config/ares.yaml`
     /// 3. `/etc/ares/config.yaml`
     pub fn from_env() -> Result<Self> {
         let path = Self::resolve_path()?;
@@ -325,7 +325,7 @@ security: {}
             .unwrap()
             .parent()
             .unwrap()
-            .join("config/multi-agent-production.yaml");
+            .join("config/ares.yaml");
 
         if prod_path.exists() {
             let cfg = AresConfig::load(&prod_path).unwrap();

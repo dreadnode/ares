@@ -1205,7 +1205,7 @@ tasks:
     desc: "Deploy config YAML to pods as ConfigMap"
     silent: true
     vars:
-      CONFIG_FILE: '{{.CONFIG_FILE | default "config/multi-agent-production.yaml"}}'
+      CONFIG_FILE: '{{.CONFIG_FILE | default "config/ares.yaml"}}'
     cmds:
       - |
         echo -e "{{.INFO}} Creating/updating ConfigMap from {{.CONFIG_FILE}}"

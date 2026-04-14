@@ -1,7 +1,6 @@
 ---
-# Multi-Agent Red Team Production Configuration
-# This configuration defines the operational parameters for multi-agent
-# red team operations in a Kubernetes environment.
+# Ares Red Team Configuration
+# Operational parameters for red team multi-agent operations.
 
 operation:
   name: "ares-multi-agent"

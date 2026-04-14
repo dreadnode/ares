@@ -86,9 +86,9 @@ tool assignments. For detailed responsibilities, see sections below.
 
 ### Configuration Sources
 
-- **Pod selectors**: `config/multi-agent-production.yaml`
+- **Pod selectors**: `config/ares.yaml`
 - **Tool assignments**: `src/ares/core/factories/red_agents.py` → `ROLE_TOOLSETS`
-- **Max steps defaults**: `config/multi-agent-production.yaml` → per-agent `max_steps`
+- **Max steps defaults**: `config/ares.yaml` → per-agent `max_steps`
 - **Agent instructions**: `src/ares/templates/redteam/agents/*.md.jinja`
 
 ### Model Selection
@@ -436,7 +436,7 @@ The dispatcher automatically detects the current engagement phase:
 
 ### Configuration
 
-Phase detection thresholds in `config/multi-agent-production.yaml`:
+Phase detection thresholds in `config/ares.yaml`:
 
 ```yaml
 phase_detection:
@@ -722,7 +722,7 @@ for cred in state.all_credentials:
 
 **Configuration**:
 
-- `config/multi-agent-production.yaml` - Production config (thresholds, timeouts)
+- `config/ares.yaml` - Production config (thresholds, timeouts)
 - `docs/phase-priority.md` - Expert analysis of agent utility by phase
 
 **Agent Templates**:

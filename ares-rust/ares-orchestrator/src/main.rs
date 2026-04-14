@@ -300,7 +300,7 @@ async fn main() -> Result<()> {
     // Priority: ARES_LLM_MODEL env var > config YAML agents.orchestrator.model
     let model_spec = std::env::var("ARES_LLM_MODEL").ok().or_else(|| {
         let config_path = std::env::var("ARES_CONFIG")
-            .unwrap_or_else(|_| "/ares/config/multi-agent-production.yaml".to_string());
+            .unwrap_or_else(|_| "/ares/config/ares.yaml".to_string());
         std::fs::read_to_string(&config_path)
             .ok()
             .and_then(|content| {
