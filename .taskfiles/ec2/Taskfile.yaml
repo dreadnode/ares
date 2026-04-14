@@ -39,8 +39,10 @@ vars:
   # Build config
   RUST_TARGET: '{{.RUST_TARGET | default "x86_64-unknown-linux-gnu"}}'
   BIN_DIR: 'ares-rust/target/{{.RUST_TARGET}}/release'
-  # Cross-compilation tool: auto (zigbuild→cross→cargo), cross, zigbuild, cargo
+  # Build tool: auto (cross on macOS, zigbuild on Linux), cross, zigbuild, cargo, remote
+  # remote: builds natively on EC2 (fastest, no cross-compilation)
   BUILD_TOOL: '{{.BUILD_TOOL | default "auto"}}'
+  REMOTE_BUILD_DIR: '/tmp/ares-build'
   # Worker roles
   WORKER_ROLES: 'recon credential_access cracker acl privesc lateral coercion'
   # Worker mode: tool_exec (Rust LLM orchestrator) or task (Python-style)
@@ -89,24 +91,17 @@ tasks:
       - sh: test -n "{{.BCP_BUCKET}}"
         msg: "BCP_BUCKET not set. Either create ~/.bcp/config.yaml with 'bucket: your-bucket' or pass BCP_BUCKET=your-bucket"
     cmds:
-      # Cross-compile
+      # Build binaries (local cross-compile or remote native build)
       - |
-        echo -e "{{.INFO}} Cross-compiling for {{.RUST_TARGET}}..."
-
-        # zig 0.15+ cannot handle RLIM_INFINITY — it needs a concrete fd limit.
-        # Force a numeric value even if the current limit is "unlimited".
-        CURRENT_FD_LIMIT=$(ulimit -n 2>/dev/null || echo "256")
-        if [ "$CURRENT_FD_LIMIT" = "unlimited" ] || [ "$CURRENT_FD_LIMIT" -lt "{{.MAX_OPEN_FILES}}" ] 2>/dev/null; then
-          ulimit -n {{.MAX_OPEN_FILES}} 2>/dev/null || ulimit -n 10240 2>/dev/null || ulimit -n 4096 2>/dev/null || true
-        fi
-
-        export CARGO_BUILD_JOBS="{{.CARGO_BUILD_JOBS}}"
-
         BUILD_TOOL="{{.BUILD_TOOL}}"
 
-        # Resolve 'auto': prefer zigbuild, fall back to cross, then plain cargo.
+        # Resolve 'auto': on macOS prefer remote (native EC2 build) to avoid
+        # Zig's OPEN_MAX=10240 fd cap and Docker emulation overhead.
+        # On Linux, prefer zigbuild (fast native cross-compilation).
         if [ "$BUILD_TOOL" = "auto" ]; then
-          if command -v cargo-zigbuild >/dev/null 2>&1; then
+          if [ "$(uname)" = "Darwin" ]; then
+            BUILD_TOOL="remote"
+          elif command -v cargo-zigbuild >/dev/null 2>&1; then
             BUILD_TOOL="zigbuild"
           elif command -v cross >/dev/null 2>&1; then
             BUILD_TOOL="cross"
@@ -117,9 +112,117 @@ tasks:
 
         echo -e "{{.INFO}} Using build tool: $BUILD_TOOL"
 
+        # --- remote: build natively on EC2 (no cross-compilation) ---
+        if [ "$BUILD_TOOL" = "remote" ]; then
+          echo -e "{{.INFO}} Building natively on EC2..."
+
+          # Resolve instance
+          INSTANCE_ID=$(aws ec2 describe-instances \
+            --profile "{{.EC2_PROFILE}}" \
+            --region "{{.EC2_REGION}}" \
+            --filters "Name=instance-state-name,Values=running" \
+                      "Name=tag:Name,Values=*{{.EC2_NAME}}*" \
+            --query "Reservations[*].Instances[*].InstanceId" \
+            --output text | head -1)
+          if [ -z "$INSTANCE_ID" ]; then
+            echo -e "{{.ERROR}} No running instance found matching: {{.EC2_NAME}}"
+            exit 1
+          fi
+
+          # Create source tarball (exclude build artifacts and git metadata)
+          SRC_TAR=$(mktemp /tmp/ares-src-XXXXXX.tar.gz)
+          trap "rm -f $SRC_TAR" EXIT
+          tar -czf "$SRC_TAR" \
+            --exclude='target' --exclude='.git' --exclude='*.o' --exclude='*.d' \
+            -C "$(pwd)" ares-rust/
+
+          # Upload source to S3
+          echo -e "{{.INFO}} Uploading source to S3..."
+          aws s3 cp "$SRC_TAR" "s3://{{.BCP_BUCKET}}/{{.S3_DEPLOY_PREFIX}}/ares-src.tar.gz" \
+            --profile "{{.EC2_PROFILE}}" --region "{{.EC2_REGION}}"
+
+          # Build on EC2 via SSM
+          echo -e "{{.INFO}} Building on $INSTANCE_ID (this may take a few minutes on first run)..."
+          PARAMS_FILE=$(mktemp)
+          trap "rm -f $SRC_TAR $PARAMS_FILE" EXIT
+          jq -n \
+            --arg bucket "{{.BCP_BUCKET}}" \
+            --arg prefix "{{.S3_DEPLOY_PREFIX}}" \
+            --arg build_dir "{{.REMOTE_BUILD_DIR}}" \
+            '{"commands": [
+              "set -ex",
+              "mkdir -p " + $build_dir,
+              "aws s3 cp s3://" + $bucket + "/" + $prefix + "/ares-src.tar.gz /tmp/ares-src.tar.gz",
+              "tar -xzf /tmp/ares-src.tar.gz -C " + $build_dir + " --strip-components=1",
+              "cd " + $build_dir + " && CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER=gcc cargo build --release -p ares-cli -p ares-orchestrator -p ares-worker 2>&1",
+              "for bin in ares-cli ares-orchestrator ares-worker; do cp " + $build_dir + "/target/release/$bin /usr/local/bin/$bin && chmod +x /usr/local/bin/$bin; done",
+              "echo Deployed: && ls -lh /usr/local/bin/ares-cli /usr/local/bin/ares-orchestrator /usr/local/bin/ares-worker"
+            ]}' > "$PARAMS_FILE"
+
+          CMD_ID=$(aws ssm send-command \
+            --profile "{{.EC2_PROFILE}}" \
+            --region "{{.EC2_REGION}}" \
+            --instance-ids "$INSTANCE_ID" \
+            --document-name "AWS-RunShellScript" \
+            --parameters "file://$PARAMS_FILE" \
+            --timeout-seconds 600 \
+            --query "Command.CommandId" --output text)
+
+          # Poll for completion (up to 10 minutes)
+          for i in $(seq 1 300); do
+            STATUS=$(aws ssm get-command-invocation \
+              --profile "{{.EC2_PROFILE}}" \
+              --region "{{.EC2_REGION}}" \
+              --command-id "$CMD_ID" \
+              --instance-id "$INSTANCE_ID" \
+              --query "Status" --output text 2>/dev/null) || true
+            case "$STATUS" in
+              Success|Failed|Cancelled|TimedOut) break ;;
+            esac
+            sleep 2
+          done
+
+          # Show build output
+          OUTPUT=$(aws ssm get-command-invocation \
+            --profile "{{.EC2_PROFILE}}" \
+            --region "{{.EC2_REGION}}" \
+            --command-id "$CMD_ID" \
+            --instance-id "$INSTANCE_ID" \
+            --query "StandardOutputContent" --output text 2>/dev/null)
+          echo "$OUTPUT" | tail -20
+
+          if [ "$STATUS" != "Success" ]; then
+            echo -e "{{.ERROR}} Remote build failed (status: $STATUS)"
+            aws ssm get-command-invocation \
+              --profile "{{.EC2_PROFILE}}" \
+              --region "{{.EC2_REGION}}" \
+              --command-id "$CMD_ID" \
+              --instance-id "$INSTANCE_ID" \
+              --query "StandardErrorContent" --output text
+            exit 1
+          fi
+
+          echo -e "{{.SUCCESS}} Remote build + deploy complete"
+          exit 0
+        fi
+
+        # --- local cross-compilation path ---
+        echo -e "{{.INFO}} Cross-compiling for {{.RUST_TARGET}}..."
+
+        # zig 0.15+ cannot handle RLIM_INFINITY — it needs a concrete fd limit.
+        CURRENT_FD_LIMIT=$(ulimit -n 2>/dev/null || echo "256")
+        if [ "$CURRENT_FD_LIMIT" = "unlimited" ] || [ "$CURRENT_FD_LIMIT" -lt "{{.MAX_OPEN_FILES}}" ] 2>/dev/null; then
+          ulimit -n {{.MAX_OPEN_FILES}} 2>/dev/null || ulimit -n 10240 2>/dev/null || ulimit -n 4096 2>/dev/null || true
+        fi
+
+        export CARGO_BUILD_JOBS="{{.CARGO_BUILD_JOBS}}"
+
         case "$BUILD_TOOL" in
           cross)
-            cd ares-rust && cross build --release --target {{.RUST_TARGET}} -j "{{.CARGO_BUILD_JOBS}}"
+            cd ares-rust
+            # Override linker: container has x86_64-linux-gnu-gcc, not x86_64-unknown-linux-gnu-gcc.
+            export CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER=x86_64-linux-gnu-gcc
+            cross build --release --target {{.RUST_TARGET}} -j "{{.CARGO_BUILD_JOBS}}"
             ;;
           zigbuild)
             cd ares-rust
@@ -132,7 +235,7 @@ tasks:
             cd ares-rust && cargo build --release --target {{.RUST_TARGET}} -j "{{.CARGO_BUILD_JOBS}}"
             ;;
           *)
-            echo -e "{{.ERROR}} Unknown BUILD_TOOL: $BUILD_TOOL (valid: auto, cross, zigbuild, cargo)"
+            echo -e "{{.ERROR}} Unknown BUILD_TOOL: $BUILD_TOOL (valid: auto, cross, zigbuild, cargo, remote)"
             exit 1
             ;;
         esac
@@ -140,8 +243,13 @@ tasks:
         echo -e "{{.SUCCESS}} Binaries built:"
         ls -lh {{.BIN_DIR}}/ares-cli {{.BIN_DIR}}/ares-orchestrator {{.BIN_DIR}}/ares-worker 2>/dev/null || true
 
-      # Upload to S3 staging
+      # Upload to S3 staging (skip for remote builds)
       - |
+        # Re-resolve BUILD_TOOL to detect remote path
+        _BT="{{.BUILD_TOOL}}"
+        if [ "$_BT" = "auto" ] && [ "$(uname)" = "Darwin" ]; then _BT="remote"; fi
+        if [ "$_BT" = "remote" ]; then exit 0; fi
+
         echo -e "{{.INFO}} Uploading binaries to s3://{{.BCP_BUCKET}}/{{.S3_DEPLOY_PREFIX}}/..."
 
         for bin in ares-cli ares-orchestrator ares-worker; do
@@ -151,8 +259,13 @@ tasks:
 
         echo -e "{{.SUCCESS}} Binaries staged in S3"
 
-      # Pull from S3 on EC2 via SSM + verify
+      # Pull from S3 on EC2 via SSM + verify (skip for remote builds)
       - |
+        # Re-resolve BUILD_TOOL to detect remote path
+        _BT="{{.BUILD_TOOL}}"
+        if [ "$_BT" = "auto" ] && [ "$(uname)" = "Darwin" ]; then _BT="remote"; fi
+        if [ "$_BT" = "remote" ]; then exit 0; fi
+
         INSTANCE_ID=$(aws ec2 describe-instances \
           --profile "{{.EC2_PROFILE}}" \
           --region "{{.EC2_REGION}}" \
