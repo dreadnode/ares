@@ -192,7 +192,11 @@ impl BlueTeamReportGenerator {
                                         let val =
                                             ev.get("value").and_then(|v| v.as_str()).unwrap_or("");
                                         if val.len() > 80 {
-                                            format!("{}...", &val[..80])
+                                            let mut end = 80;
+                                            while !val.is_char_boundary(end) {
+                                                end -= 1;
+                                            }
+                                            format!("{}...", &val[..end])
                                         } else {
                                             val.to_string()
                                         }
@@ -295,7 +299,11 @@ impl BlueTeamReportGenerator {
                         .to_string(),
                     description: desc.to_string(),
                     description_short: if desc.len() > 60 {
-                        format!("{}...", &desc[..60])
+                        let mut end = 60;
+                        while !desc.is_char_boundary(end) {
+                            end -= 1;
+                        }
+                        format!("{}...", &desc[..end])
                     } else {
                         desc.to_string()
                     },
@@ -553,7 +561,11 @@ impl BlueTeamReportGenerator {
         for ev in &all_evidence {
             let val = ev.value.clone();
             let truncated = if val.len() > 80 {
-                format!("{}...", &val[..80])
+                let mut end = 80;
+                while !val.is_char_boundary(end) {
+                    end -= 1;
+                }
+                format!("{}...", &val[..end])
             } else {
                 val
             };
@@ -892,7 +904,11 @@ impl BlueTeamReportGenerator {
                                 .join(", ")
                         };
                         let value = if ev.value.len() > 40 {
-                            format!("{}...", &ev.value[..40])
+                            let mut end = 40;
+                            while !ev.value.is_char_boundary(end) {
+                                end -= 1;
+                            }
+                            format!("{}...", &ev.value[..end])
                         } else {
                             ev.value.clone()
                         };
@@ -925,7 +941,11 @@ impl BlueTeamReportGenerator {
                     timestamp: e.timestamp.clone(),
                     description: desc.clone(),
                     description_short: if desc.len() > 60 {
-                        format!("{}...", &desc[..60])
+                        let mut end = 60;
+                        while !desc.is_char_boundary(end) {
+                            end -= 1;
+                        }
+                        format!("{}...", &desc[..end])
                     } else {
                         desc.clone()
                     },

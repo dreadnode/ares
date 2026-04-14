@@ -100,6 +100,41 @@ pub async fn process_completed_task(
         auto_chain_s4u_secretsdump(payload, dispatcher, &completed.task_id).await;
     }
 
+    // Golden ticket detection: when a golden ticket task completes successfully,
+    // set the has_golden_ticket flag. Matches Python's announce_golden_ticket().
+    if result.success {
+        if let Some(ref payload) = result.result {
+            check_golden_ticket_completion(payload, &completed.task_id, dispatcher).await;
+        }
+    }
+
+    // Mark exploited: if this was a successful exploit task with a vuln_id, mark it
+    // so the exploitation workflow stops re-dispatching it.
+    if result.success {
+        if let Some(vuln_id) = completed
+            .task_id
+            .starts_with("exploit_")
+            .then(|| {
+                result
+                    .result
+                    .as_ref()
+                    .and_then(|r| r.get("vuln_id"))
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string())
+            })
+            .flatten()
+        {
+            info!(vuln_id = %vuln_id, task_id = %task_id, "Marking vulnerability as exploited");
+            if let Err(e) = dispatcher
+                .state
+                .mark_exploited(&dispatcher.queue, &vuln_id)
+                .await
+            {
+                warn!(err = %e, vuln_id = %vuln_id, "Failed to mark vulnerability exploited");
+            }
+        }
+    }
+
     // Notify all listeners (credential access, delegation enum, S4U automation)
     // to wake up for potential new creds. Use notify_waiters to wake ALL listeners.
     dispatcher.credential_access_notify.notify_waiters();
@@ -991,6 +1026,86 @@ async fn check_domain_admin_indicators(payload: &Value, dispatcher: &Arc<Dispatc
         warn!(err = %e, "Failed to set domain admin flag");
     } else {
         info!("🎯 Domain Admin achieved!");
+    }
+}
+
+/// Detect golden ticket completion from task output.
+///
+/// impacket-ticketer outputs "Saving ticket in Administrator.ccache" on success.
+/// When detected in a golden_ticket task, set `has_golden_ticket = true`.
+/// Matches Python's `announce_golden_ticket()`.
+async fn check_golden_ticket_completion(
+    payload: &Value,
+    task_id: &str,
+    dispatcher: &Arc<Dispatcher>,
+) {
+    // Only check tasks that look like golden ticket tasks
+    if !task_id.contains("exploit") && !task_id.contains("golden") {
+        return;
+    }
+
+    // Already set?
+    {
+        let state = dispatcher.state.read().await;
+        if state.has_golden_ticket {
+            return;
+        }
+    }
+
+    // Scan raw tool outputs for ticketer success indicators
+    let mut found_ticket = false;
+    let mut domain = String::new();
+
+    // Check tool_outputs array
+    if let Some(arr) = payload.get("tool_outputs").and_then(|v| v.as_array()) {
+        for item in arr {
+            let text = item
+                .as_str()
+                .or_else(|| item.get("output").and_then(|v| v.as_str()))
+                .unwrap_or("");
+            if text.contains("Saving ticket in") && text.contains(".ccache") {
+                found_ticket = true;
+                break;
+            }
+        }
+    }
+
+    // Check single output fields
+    if !found_ticket {
+        for key in &["tool_output", "output", "summary"] {
+            if let Some(text) = payload.get(*key).and_then(|v| v.as_str()) {
+                if text.contains("Saving ticket in") && text.contains(".ccache") {
+                    found_ticket = true;
+                    break;
+                }
+            }
+        }
+    }
+
+    // Also check if the payload explicitly marks golden ticket
+    if !found_ticket && payload.get("has_golden_ticket").and_then(|v| v.as_bool()) == Some(true) {
+        found_ticket = true;
+    }
+
+    if !found_ticket {
+        return;
+    }
+
+    // Extract domain from payload
+    if let Some(d) = payload.get("domain").and_then(|v| v.as_str()) {
+        domain = d.to_string();
+    }
+    if domain.is_empty() {
+        let state = dispatcher.state.read().await;
+        domain = state.domains.first().cloned().unwrap_or_default();
+    }
+
+    if let Err(e) = dispatcher
+        .state
+        .set_golden_ticket(&dispatcher.queue, &domain)
+        .await
+    {
+        warn!(err = %e, "Failed to set golden ticket flag");
     }
 }
 

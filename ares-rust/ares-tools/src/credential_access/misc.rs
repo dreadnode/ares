@@ -285,7 +285,11 @@ async fn read_spider_downloads(target: &str) -> String {
                 extra.push_str(&format!("\n--- {rel} ---\n"));
                 // Cap per-file output at 8KB to avoid blowing up context
                 if contents.len() > 8192 {
-                    extra.push_str(&contents[..8192]);
+                    let mut end = 8192;
+                    while !contents.is_char_boundary(end) {
+                        end -= 1;
+                    }
+                    extra.push_str(&contents[..end]);
                     extra.push_str("\n... [truncated]\n");
                 } else {
                     extra.push_str(&contents);

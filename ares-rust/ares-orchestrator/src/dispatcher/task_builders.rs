@@ -282,6 +282,30 @@ impl Dispatcher {
                 });
             }
 
+            // For MSSQL vulns, include ALL available credentials for the domain
+            // so the LLM can try each one (different users have different MSSQL
+            // permissions — e.g. samwell.tarly can EXECUTE AS LOGIN = 'sa').
+            if vuln.vuln_type.starts_with("mssql") && !domain.is_empty() {
+                let all_creds: Vec<_> = state
+                    .credentials
+                    .iter()
+                    .filter(|c| {
+                        c.domain.to_lowercase() == domain.to_lowercase()
+                            && !state.is_delegation_account(&c.username)
+                    })
+                    .map(|c| {
+                        json!({
+                            "username": c.username,
+                            "password": c.password,
+                            "domain": c.domain,
+                        })
+                    })
+                    .collect();
+                if all_creds.len() > 1 {
+                    payload["all_credentials"] = json!(all_creds);
+                }
+            }
+
             // Also attach a hash if available for the account
             if let Some(acct) = account_name {
                 if let Some(hash) = state

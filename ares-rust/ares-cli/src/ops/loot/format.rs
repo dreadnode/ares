@@ -654,7 +654,11 @@ fn print_vulnerabilities(
         // Build details string from the details HashMap
         let details = format_vuln_details(&vuln.details);
         let details_display = if details.len() > 80 {
-            format!("{}...", &details[..80])
+            let mut end = 80;
+            while !details.is_char_boundary(end) {
+                end -= 1;
+            }
+            format!("{}...", &details[..end])
         } else {
             details
         };
@@ -764,7 +768,11 @@ fn print_attack_path(timeline_events: &[serde_json::Value]) {
         let mitre = extract_mitre_from_event(event);
 
         let desc_display = if description.len() > 65 {
-            format!("{prefix}{}...", &description[..65])
+            let mut end = 65;
+            while !description.is_char_boundary(end) {
+                end -= 1;
+            }
+            format!("{prefix}{}...", &description[..end])
         } else {
             format!("{prefix}{description}")
         };

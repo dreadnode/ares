@@ -389,7 +389,11 @@ fn format_annotations_response(body: &str) -> String {
         if !text.is_empty() {
             // Truncate long annotation text
             let display = if text.len() > 200 {
-                format!("{}...", &text[..200])
+                let mut end = 200;
+                while !text.is_char_boundary(end) {
+                    end -= 1;
+                }
+                format!("{}...", &text[..end])
             } else {
                 text.to_string()
             };

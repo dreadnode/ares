@@ -219,6 +219,12 @@ impl Dispatcher {
         };
         let _ = self.state.track_pending_task(&self.queue, task_info).await;
 
+        // Capture vuln_id from exploit payloads so it survives into the result.
+        let vuln_id_for_result = payload
+            .get("vuln_id")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+
         // Spawn the LLM agent loop as a background task
         let queue = self.queue.clone();
         let tid = task_id.clone();
@@ -232,7 +238,7 @@ impl Dispatcher {
             // CallbackHandler::on_token_usage — no batch recording needed here.
 
             // Convert outcome to TaskResult and push to result queue
-            let result = match outcome {
+            let mut result = match outcome {
                 Ok(outcome) => {
                     // Merge all structured discoveries from tool results
                     let merged_discoveries = if outcome.discoveries.is_empty() {
@@ -408,6 +414,15 @@ impl Dispatcher {
                     agent_name: Some(tt.clone()),
                 },
             };
+
+            // Inject vuln_id into result so process_completed_task can mark_exploited.
+            if let Some(ref vid) = vuln_id_for_result {
+                if let Some(ref mut res) = result.result {
+                    if let Some(obj) = res.as_object_mut() {
+                        obj.insert("vuln_id".to_string(), json!(vid));
+                    }
+                }
+            }
 
             // Release per-credential concurrency slot
             if let Some(ref key) = cred_key_owned {

@@ -226,7 +226,11 @@ async fn blue_operation_status_once(
                 .unwrap_or("?");
             let error = inv.get("error").and_then(|v| v.as_str()).unwrap_or("");
             let error_display = if error.len() > 60 {
-                &error[..60]
+                let mut end = 60;
+                while !error.is_char_boundary(end) {
+                    end -= 1;
+                }
+                &error[..end]
             } else {
                 error
             };

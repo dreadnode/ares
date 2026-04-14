@@ -74,7 +74,11 @@ pub(crate) async fn blue_evidence(
                     .unwrap_or_else(|| value.to_string())
             };
             if display.len() > 80 {
-                println!("  - {}...", &display[..80]);
+                let mut end = 80;
+                while !display.is_char_boundary(end) {
+                    end -= 1;
+                }
+                println!("  - {}...", &display[..end]);
             } else {
                 println!("  - {display}");
             }

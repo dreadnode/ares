@@ -409,14 +409,17 @@ pub async fn auto_credential_access(
                         state.is_processed(DEDUP_ASREP_DOMAINS, domain)
                             || state.is_processed(DEDUP_ASREP_DOMAINS, &domain.to_lowercase())
                     })
-                    // Skip domains with Kerberoast hashes pending crack —
+                    // Skip domains with UNCRACKED Kerberoast hashes —
                     // offline cracking is safer (no lockout risk) and handles
                     // complex passwords that spray would never find.
+                    // Once all hashes are cracked (or none exist), spray proceeds
+                    // as a fallback path for accounts without SPNs.
                     .filter(|(domain, _)| {
                         let d = domain.to_lowercase();
                         !state.hashes.iter().any(|h| {
                             h.hash_type.to_lowercase().contains("kerberoast")
                                 && h.domain.to_lowercase() == d
+                                && h.cracked_password.is_none()
                         })
                     })
                     .map(|(domain, dc_ip)| (domain.clone(), dc_ip.clone()))

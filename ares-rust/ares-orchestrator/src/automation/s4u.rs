@@ -97,7 +97,14 @@ pub async fn auto_s4u_exploitation(
                             // The cooldown timer is already set from dispatch time.
                         }
                     } else {
-                        task_vuln_map.remove(&tid);
+                        // Success or non-revocation error — reset failure count so
+                        // subsequent dispatches aren't permanently blocked by the
+                        // S4U_MAX_FAILURES threshold.
+                        if let Some(vid) = task_vuln_map.remove(&tid) {
+                            if let Some(entry) = dispatch_tracker.get_mut(&vid) {
+                                entry.1 = 0;
+                            }
+                        }
                     }
                 }
             }

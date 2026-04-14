@@ -180,10 +180,6 @@ pub(crate) fn sanitize_credentials(creds: &mut Vec<Credential>) {
         if username.contains('/') || username.contains('\\') {
             return false;
         }
-        // Filter credentials where password matches username (case-insensitive)
-        if pw.to_lowercase() == username {
-            return false;
-        }
         // Filter EVIL\d+$ impacket RBCD artifacts
         if username.starts_with("evil") && username.ends_with('$') {
             return false;
@@ -801,12 +797,13 @@ mod tests {
             make_cred("contoso.local", "user1", "PASSWORD: MyPass123"),
         ];
         sanitize_credentials(&mut creds);
-        // "Password: hodor" → "hodor" → filtered (password == username)
+        // "Password: hodor" → "hodor" → kept (password == username is valid)
         // "password:secret" → "secret" → kept
         // "PASSWORD: MyPass123" → "MyPass123" → kept
-        assert_eq!(creds.len(), 2);
-        assert_eq!(creds[0].password, "secret");
-        assert_eq!(creds[1].password, "MyPass123");
+        assert_eq!(creds.len(), 3);
+        assert_eq!(creds[0].password, "hodor");
+        assert_eq!(creds[1].password, "secret");
+        assert_eq!(creds[2].password, "MyPass123");
     }
 
     #[test]
@@ -830,10 +827,11 @@ mod tests {
             make_cred("contoso.local", "admin", "P@ss1 (Pwn3d!)"),
         ];
         sanitize_credentials(&mut creds);
-        // "svc_test (Guest)" → "svc_test" → filtered (password == username)
+        // "svc_test (Guest)" → "svc_test" → kept (password == username is valid)
         // "P@ss1 (Pwn3d!)" → "P@ss1" → kept
-        assert_eq!(creds.len(), 1);
-        assert_eq!(creds[0].password, "P@ss1");
+        assert_eq!(creds.len(), 2);
+        assert_eq!(creds[0].password, "svc_test");
+        assert_eq!(creds[1].password, "P@ss1");
     }
 
     #[test]
@@ -883,8 +881,8 @@ mod tests {
 
     #[test]
     fn test_sanitize_then_dedup_collapses_variants() {
-        // Simulates the real scenario: hodor appears with multiple dirty variants
-        // All variants resolve to password == username, so all get filtered
+        // hodor:hodor is a valid credential; "Password: hodor" strips to "hodor" (dup);
+        // "Password" is filtered as noise
         let mut creds = vec![
             make_cred("contoso.local", "hodor", "hodor"),
             make_cred("contoso.local", "hodor", "Password: hodor"),
@@ -892,18 +890,22 @@ mod tests {
         ];
         sanitize_credentials(&mut creds);
         let deduped = dedup_credentials(&creds);
-        assert_eq!(deduped.len(), 0);
+        assert_eq!(deduped.len(), 1);
+        assert_eq!(deduped[0].password, "hodor");
     }
 
     #[test]
-    fn test_sanitize_filters_password_equals_username() {
+    fn test_sanitize_keeps_password_equals_username() {
+        // password == username is valid (e.g. hodor:hodor in GOAD)
         let mut creds = vec![
             make_cred("contoso.local", "admin", "admin"),
             make_cred("contoso.local", "user1", "DifferentPass"),
             make_cred("contoso.local", "jdoe", "Discovered"),
         ];
         sanitize_credentials(&mut creds);
-        assert_eq!(creds.len(), 1);
-        assert_eq!(creds[0].username, "user1");
+        assert_eq!(creds.len(), 2);
+        assert_eq!(creds[0].username, "admin");
+        assert_eq!(creds[0].password, "admin");
+        assert_eq!(creds[1].username, "user1");
     }
 }

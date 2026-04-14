@@ -42,18 +42,36 @@ pub async fn auto_delegation_enumeration(
                     if cred.domain.is_empty() {
                         return None;
                     }
-                    let dedup = format!(
-                        "{}:{}",
-                        cred.domain.to_lowercase(),
-                        cred.username.to_lowercase()
-                    );
+                    let cred_domain = cred.domain.to_lowercase();
+                    let dedup = format!("{}:{}", cred_domain, cred.username.to_lowercase());
                     if state.is_processed(DEDUP_DELEGATION_CREDS, &dedup) {
                         return None;
                     }
+                    // Exact match first
                     let dc_ip = state
                         .domain_controllers
-                        .get(&cred.domain.to_lowercase())
-                        .cloned()?;
+                        .get(&cred_domain)
+                        .cloned()
+                        .or_else(|| {
+                            // Child-domain fallback: cred domain is parent,
+                            // DC is registered under child (e.g. cred=sevenkingdoms.local,
+                            // DC=north.sevenkingdoms.local)
+                            let suffix = format!(".{cred_domain}");
+                            state
+                                .domain_controllers
+                                .iter()
+                                .find(|(d, _)| d.ends_with(&suffix))
+                                .map(|(_, ip)| ip.clone())
+                        })
+                        .or_else(|| {
+                            // Parent-domain fallback: cred domain is child,
+                            // DC is registered under parent
+                            state
+                                .domain_controllers
+                                .iter()
+                                .find(|(d, _)| cred_domain.ends_with(&format!(".{d}")))
+                                .map(|(_, ip)| ip.clone())
+                        })?;
                     Some((dedup, cred.domain.clone(), dc_ip, cred.clone()))
                 })
                 .collect()

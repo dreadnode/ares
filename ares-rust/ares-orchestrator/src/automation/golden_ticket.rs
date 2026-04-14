@@ -125,6 +125,16 @@ pub async fn auto_golden_ticket(dispatcher: Arc<Dispatcher>, mut shutdown: watch
         {
             Ok(Some(task_id)) => {
                 info!(task_id = %task_id, domain = %domain, "Golden ticket task dispatched");
+                // Mark has_golden_ticket immediately to prevent re-dispatch.
+                // The result processing will also confirm on task completion
+                // (detects "Saving ticket in *.ccache" in tool output).
+                if let Err(e) = dispatcher
+                    .state
+                    .set_golden_ticket(&dispatcher.queue, &domain)
+                    .await
+                {
+                    warn!(err = %e, "Failed to set golden ticket flag after dispatch");
+                }
             }
             Ok(None) => {}
             Err(e) => warn!(err = %e, "Failed to dispatch golden ticket"),

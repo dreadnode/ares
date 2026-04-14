@@ -865,6 +865,34 @@ impl SharedState {
         Ok(added)
     }
 
+    /// Set has_golden_ticket flag and persist to Redis.
+    pub async fn set_golden_ticket(&self, queue: &TaskQueue, domain: &str) -> Result<()> {
+        {
+            let state = self.inner.read().await;
+            if state.has_golden_ticket {
+                return Ok(());
+            }
+        }
+        let operation_id = {
+            let state = self.inner.read().await;
+            state.operation_id.clone()
+        };
+        let reader = RedisStateReader::new(operation_id);
+        let mut conn = queue.connection();
+        reader
+            .set_meta_field(
+                &mut conn,
+                "has_golden_ticket",
+                &serde_json::Value::Bool(true),
+            )
+            .await?;
+
+        let mut state = self.inner.write().await;
+        state.has_golden_ticket = true;
+        tracing::info!(domain = %domain, "🏆 Golden ticket flag set");
+        Ok(())
+    }
+
     /// Set has_domain_admin flag and persist to Redis.
     pub async fn set_domain_admin(&self, queue: &TaskQueue, path: Option<String>) -> Result<()> {
         let operation_id = {

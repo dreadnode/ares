@@ -151,7 +151,11 @@ pub(crate) async fn blue_triage_status(
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
             if reasoning.len() > 100 {
-                println!("      Reasoning: {}...", &reasoning[..100]);
+                let mut end = 100;
+                while !reasoning.is_char_boundary(end) {
+                    end -= 1;
+                }
+                println!("      Reasoning: {}...", &reasoning[..end]);
             } else {
                 println!("      Reasoning: {reasoning}");
             }
