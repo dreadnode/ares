@@ -133,7 +133,10 @@ pub async fn run_blue_task_loop(
                     retry_delay = (retry_delay * 2).min(max_retry_delay);
                 } else {
                     error!("Blue task loop: non-connection error: {e}");
-                    tokio::time::sleep(Duration::from_secs(5)).await;
+                    tokio::select! {
+                        _ = tokio::time::sleep(Duration::from_secs(5)) => {}
+                        _ = shutdown.notified() => return Ok(()),
+                    }
                     retry_delay = Duration::from_secs(1);
                 }
             }

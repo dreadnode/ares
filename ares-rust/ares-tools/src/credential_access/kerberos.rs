@@ -132,8 +132,9 @@ pub async fn kerberos_user_enum_noauth(args: &Value) -> Result<ToolOutput> {
         .execute()
         .await;
 
-    // Clean up temp file if we created one
-    if users_file.is_none() {
+    // Clean up temp file if we created one (only when we wrote it ourselves)
+    let wrote_tmp = users_file.is_none() && !std::path::Path::new(seclists).exists();
+    if wrote_tmp {
         let _ = std::fs::remove_file(&wordlist_path);
     }
 

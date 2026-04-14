@@ -161,7 +161,10 @@ pub async fn run_tool_exec_loop(
                     retry_delay = (retry_delay * 2).min(max_retry_delay);
                 } else {
                     error!("Tool executor: non-connection error: {e}");
-                    tokio::time::sleep(Duration::from_secs(5)).await;
+                    tokio::select! {
+                        _ = tokio::time::sleep(Duration::from_secs(5)) => {}
+                        _ = shutdown.notified() => return Ok(()),
+                    }
                     retry_delay = Duration::from_secs(1);
                 }
             }

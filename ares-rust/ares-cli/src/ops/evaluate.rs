@@ -1,6 +1,7 @@
 use std::path::Path;
 
 use anyhow::{Context, Result};
+use tracing::error;
 
 use ares_core::eval::workflow::{
     evaluate_dataset, evaluate_scenario, save_evaluation_result, save_gap_analysis,
@@ -65,7 +66,7 @@ pub(crate) fn ops_evaluate(
                     }
                 }
                 Err(e) => {
-                    eprintln!("Failed to evaluate {}: {e:#}", scenario.name);
+                    error!("Failed to evaluate {}: {e:#}", scenario.name);
                 }
             }
         }

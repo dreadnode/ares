@@ -64,7 +64,9 @@ pub(crate) fn collect_env_vars(names: &[&str]) -> HashMap<String, String> {
 /// Resolve the effective model from --model flag or environment variables.
 pub(crate) fn resolve_model(model: &Option<String>) -> Option<String> {
     model
-        .clone()
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
         .or_else(|| std::env::var("ARES_ORCHESTRATOR_MODEL").ok())
         .or_else(|| std::env::var("ARES_MODEL").ok())
         .filter(|s| !s.is_empty())

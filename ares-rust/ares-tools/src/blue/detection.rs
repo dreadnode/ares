@@ -1274,7 +1274,10 @@ pub async fn get_user_activity(args: &Value) -> Result<ToolOutput> {
     let hours_back = optional_i64(args, "hours_back").unwrap_or(1);
 
     let sel = build_selector(WIN_SECURITY, None);
-    let logql = format!(r#"{sel} |~ "(?i){username}""#);
+    // Escape regex metacharacters in the username so that special characters
+    // (e.g. `.`, `+`, `(`) do not corrupt the LogQL regex or match unintended lines.
+    let escaped_username = regex::escape(username);
+    let logql = format!(r#"{sel} |~ "(?i){escaped_username}""#);
 
     let now = chrono::Utc::now();
     let start = now - chrono::Duration::hours(hours_back);
