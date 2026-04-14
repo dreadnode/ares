@@ -15,8 +15,8 @@ use serde::Deserialize;
 use super::gap_analysis::{analyze_detection_gaps, GapAnalysisReport};
 use super::ground_truth::{create_ground_truth_from_red_state, EvaluationGroundTruth};
 use super::results::{DatasetEvaluationResult, EvaluationResult};
-use super::scorers;
-use crate::models::SharedRedTeamState;
+use super::scorers::{self, InvestigationSnapshot};
+use crate::models::{SharedBlueTeamState, SharedRedTeamState};
 
 /// Model cost rates per million tokens.
 #[derive(Debug, Clone)]
@@ -416,6 +416,62 @@ pub fn load_red_state_from_file(path: &Path) -> Result<(SharedRedTeamState, Vec<
     state.domain_admin_path = saved.domain_admin_path;
 
     Ok((state, saved.identified_techniques))
+}
+
+/// Evaluate a completed live investigation against red team ground truth.
+///
+/// Called post-investigation with the blue team's state loaded from Redis
+/// and the red team's state (also from Redis). Returns the scored result
+/// and gap analysis.
+pub fn evaluate_live_investigation(
+    blue_state: &SharedBlueTeamState,
+    red_state: &SharedRedTeamState,
+    model: &str,
+    duration_seconds: f64,
+) -> LiveEvaluationOutput {
+    let techniques: Vec<String> = red_state.all_techniques.clone();
+    let ground_truth = create_ground_truth_from_red_state(red_state, &techniques);
+    let snap = InvestigationSnapshot::from_blue_state(blue_state);
+
+    let eval_id = format!(
+        "live-eval-{}-{}",
+        red_state.operation_id,
+        blue_state
+            .investigation_id
+            .chars()
+            .take(8)
+            .collect::<String>()
+    );
+
+    let result = scorers::evaluate(
+        &eval_id,
+        &snap,
+        &ground_truth,
+        true,
+        model,
+        duration_seconds,
+    );
+    let gap_analysis = analyze_detection_gaps(&result);
+
+    LiveEvaluationOutput {
+        evaluation_id: eval_id,
+        investigation_id: blue_state.investigation_id.clone(),
+        operation_id: red_state.operation_id.clone(),
+        ground_truth,
+        result,
+        gap_analysis,
+    }
+}
+
+/// Output from a live post-investigation evaluation.
+#[derive(Debug)]
+pub struct LiveEvaluationOutput {
+    pub evaluation_id: String,
+    pub investigation_id: String,
+    pub operation_id: String,
+    pub ground_truth: EvaluationGroundTruth,
+    pub result: EvaluationResult,
+    pub gap_analysis: GapAnalysisReport,
 }
 
 /// Evaluate a single scenario from a saved red team state file.

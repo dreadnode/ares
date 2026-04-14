@@ -93,9 +93,15 @@ impl BlueOrchestrator {
                         .unwrap_or(&self.model_name)
                         .to_string();
 
+                    let operation_id = request
+                        .get("operation_id")
+                        .and_then(|v| v.as_str())
+                        .map(String::from);
+
                     info!(
                         investigation_id = %investigation_id,
                         model = %model,
+                        operation_id = ?operation_id,
                         "Received investigation request"
                     );
 
@@ -108,7 +114,8 @@ impl BlueOrchestrator {
                     }
 
                     // Run the investigation
-                    let investigation = Investigation::new(investigation_id.clone(), alert, model);
+                    let investigation =
+                        Investigation::new(investigation_id.clone(), alert, model, operation_id);
 
                     let mut conn = redis::Client::open(self.redis_url.as_str())?
                         .get_connection_manager()

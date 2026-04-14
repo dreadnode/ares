@@ -10,8 +10,9 @@ use anyhow::{Context, Result};
 use chrono::Utc;
 use tracing::{info, warn};
 
+use ares_core::eval::workflow::evaluate_live_investigation;
 use ares_core::state::blue_task_queue::{BlueTaskMessage, BlueTaskQueue, BlueTaskResult};
-use ares_core::state::BlueStateWriter;
+use ares_core::state::{BlueStateReader, BlueStateWriter, RedisStateReader};
 use ares_llm::tool_registry::blue::BlueAgentRole;
 use ares_llm::{
     run_agent_loop, AgentLoopConfig, AgentLoopOutcome, LlmProvider, LoopEndReason, ToolDispatcher,
@@ -24,16 +25,24 @@ pub struct Investigation {
     pub investigation_id: String,
     pub alert: serde_json::Value,
     pub model: String,
+    /// Red team operation ID for post-investigation scoring against ground truth.
+    pub operation_id: Option<String>,
     pub state_writer: BlueStateWriter,
 }
 
 impl Investigation {
-    pub fn new(investigation_id: String, alert: serde_json::Value, model: String) -> Self {
+    pub fn new(
+        investigation_id: String,
+        alert: serde_json::Value,
+        model: String,
+        operation_id: Option<String>,
+    ) -> Self {
         let state_writer = BlueStateWriter::new(investigation_id.clone());
         Self {
             investigation_id,
             alert,
             model,
+            operation_id,
             state_writer,
         }
     }
@@ -171,6 +180,18 @@ pub async fn run_investigation(
             count = chained_task_ids.len(),
             "Evidence auto-chaining dispatched follow-up tasks"
         );
+    }
+
+    // Score investigation against red team ground truth
+    if let Some(op_id) = &investigation.operation_id {
+        score_against_ground_truth(
+            conn,
+            &investigation.investigation_id,
+            op_id,
+            &investigation.model,
+            &outcome,
+        )
+        .await;
     }
 
     // Update investigation status
@@ -323,6 +344,84 @@ pub async fn dispatch_subtask(
     );
 
     Ok(task_id)
+}
+
+/// Score a completed investigation against red team ground truth.
+///
+/// Loads the blue team investigation state and the red team operation state
+/// from Redis, then runs all six scorers to produce a grade and gap analysis.
+async fn score_against_ground_truth(
+    conn: &mut redis::aio::ConnectionManager,
+    investigation_id: &str,
+    operation_id: &str,
+    model: &str,
+    outcome: &AgentLoopOutcome,
+) {
+    // Load blue team state
+    let blue_reader = BlueStateReader::new(investigation_id.to_string());
+    let blue_state = match blue_reader.load_state(conn).await {
+        Ok(Some(state)) => state,
+        Ok(None) => {
+            warn!(
+                investigation_id = investigation_id,
+                "Skipping evaluation: blue team state not found in Redis"
+            );
+            return;
+        }
+        Err(e) => {
+            warn!(
+                investigation_id = investigation_id,
+                error = %e,
+                "Skipping evaluation: failed to load blue team state"
+            );
+            return;
+        }
+    };
+
+    // Load red team state
+    let red_reader = RedisStateReader::new(operation_id.to_string());
+    let red_state = match red_reader.load_state(conn).await {
+        Ok(Some(state)) => state,
+        Ok(None) => {
+            warn!(
+                operation_id = operation_id,
+                "Skipping evaluation: red team state not found in Redis"
+            );
+            return;
+        }
+        Err(e) => {
+            warn!(
+                operation_id = operation_id,
+                error = %e,
+                "Skipping evaluation: failed to load red team state"
+            );
+            return;
+        }
+    };
+
+    // Estimate duration from outcome step count (rough heuristic: ~10s per step)
+    let duration_seconds = outcome.steps as f64 * 10.0;
+
+    let eval_output = evaluate_live_investigation(&blue_state, &red_state, model, duration_seconds);
+
+    info!(
+        investigation_id = investigation_id,
+        operation_id = operation_id,
+        grade = eval_output.result.grade(),
+        overall_score = format!("{:.2}", eval_output.result.overall_score),
+        ioc_detection = format!("{:.2}", eval_output.result.ioc_detection_rate),
+        technique_coverage = format!("{:.2}", eval_output.result.technique_coverage),
+        evidence_count = eval_output.result.evidence_count,
+        "Investigation evaluation complete"
+    );
+
+    if !eval_output.gap_analysis.detection_gaps.is_empty() {
+        info!(
+            investigation_id = investigation_id,
+            gaps = eval_output.gap_analysis.detection_gaps.len(),
+            "Detection gaps identified — see gap analysis for recommendations"
+        );
+    }
 }
 
 #[cfg(test)]
