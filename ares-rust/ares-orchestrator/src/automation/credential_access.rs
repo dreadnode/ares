@@ -409,6 +409,14 @@ pub async fn auto_credential_access(
                         state.is_processed(DEDUP_ASREP_DOMAINS, domain)
                             || state.is_processed(DEDUP_ASREP_DOMAINS, &domain.to_lowercase())
                     })
+                    // Only spray after delegation enumeration has dispatched for
+                    // at least one credential in this domain. Spraying before
+                    // delegation can lock out accounts and prevent find_delegation
+                    // from using valid credentials.
+                    .filter(|(domain, _)| {
+                        let prefix = format!("{}:", domain.to_lowercase());
+                        state.has_processed_prefix(DEDUP_DELEGATION_CREDS, &prefix)
+                    })
                     // Skip domains with UNCRACKED Kerberoast hashes —
                     // offline cracking is safer (no lockout risk) and handles
                     // complex passwords that spray would never find.

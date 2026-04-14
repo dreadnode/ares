@@ -920,7 +920,54 @@ impl SharedState {
 
         let mut state = self.inner.write().await;
         state.has_domain_admin = true;
-        state.domain_admin_path = path;
+        state.domain_admin_path = path.clone();
+
+        // Emit OTel span recording domain admin achievement.
+        // Walk parent_id chain from krbtgt hash to compute attack depth.
+        let (attack_path_str, depth) = {
+            let krbtgt = state.hashes.iter().find(|h| {
+                h.username.eq_ignore_ascii_case("krbtgt")
+                    && h.hash_type.to_lowercase().contains("ntlm")
+            });
+            let depth = match krbtgt {
+                Some(h) => {
+                    // Count chain depth by walking parent_id
+                    let mut d = 1usize;
+                    let mut current_id = h.parent_id.clone();
+                    let mut seen = std::collections::HashSet::new();
+                    while let Some(ref pid) = current_id {
+                        if !seen.insert(pid.clone()) {
+                            break;
+                        }
+                        d += 1;
+                        // Check credentials then hashes for the parent
+                        if let Some(c) = state.credentials.iter().find(|c| c.id == *pid) {
+                            current_id = c.parent_id.clone();
+                        } else if let Some(h2) = state.hashes.iter().find(|h2| h2.id == *pid) {
+                            current_id = h2.parent_id.clone();
+                        } else {
+                            break;
+                        }
+                    }
+                    d
+                }
+                None => 0,
+            };
+            let ap = path
+                .as_deref()
+                .filter(|s| !s.is_empty())
+                .unwrap_or("domain_admin_achieved")
+                .to_string();
+            (ap, depth)
+        };
+        let op_id = state.operation_id.clone();
+        drop(state);
+
+        let span =
+            ares_core::telemetry::spans::trace_domain_admin(&attack_path_str, depth, Some(&op_id));
+        let _guard = span.enter();
+        tracing::info!(attack_path = %attack_path_str, depth = depth, "🏆 Domain admin achieved");
+
         Ok(())
     }
 }

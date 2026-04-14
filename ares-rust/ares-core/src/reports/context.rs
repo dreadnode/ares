@@ -162,6 +162,21 @@ pub(crate) struct TimelineEventCtx {
     pub confidence_display: String,
 }
 
+/// Tera context for a single step in the domain admin credential chain.
+///
+/// The comprehensive report template iterates these as `domain_admin_chain`.
+#[derive(Serialize)]
+pub(crate) struct ChainStepCtx {
+    pub step_number: i32,
+    /// `"hash"` or `"credential"`
+    #[serde(rename = "type")]
+    pub item_type: String,
+    pub username: String,
+    pub domain: String,
+    pub source: String,
+    pub hash_type: String,
+}
+
 #[derive(Serialize)]
 pub(crate) struct VulnCtx {
     pub vuln_id: String,

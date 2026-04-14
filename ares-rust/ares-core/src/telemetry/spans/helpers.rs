@@ -99,6 +99,29 @@ pub fn trace_decision(
     )
 }
 
+/// Create a domain admin achievement span with the full attack path.
+///
+/// Emitted when DA is achieved. The `attack_path` attribute is queryable
+/// in Grafana/Tempo to reconstruct how the operation reached domain admin.
+pub fn trace_domain_admin(
+    attack_path: &str,
+    attack_depth: usize,
+    operation_id: Option<&str>,
+) -> tracing::Span {
+    tracing::info_span!(
+        "ares.discovery",
+        otel.name = "discovery.domain_admin",
+        "service.namespace" = "ares",
+        attack_team = "red",
+        attack_phase = "credential-access",
+        "discovery.type" = "domain_admin",
+        attack_path = attack_path,
+        "attack.depth" = attack_depth,
+        "mitre.technique.id" = "T1003.006",
+        attack_operation_id = operation_id.unwrap_or(""),
+    )
+}
+
 /// Create a CLIENT span for outgoing service-to-service calls.
 ///
 /// Equivalent to Python's `client_span()`.

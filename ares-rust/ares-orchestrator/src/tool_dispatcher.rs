@@ -17,8 +17,10 @@ use anyhow::{Context, Result};
 use redis::AsyncCommands;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
-use tracing::{debug, warn};
+use tracing::{debug, warn, Instrument};
 
+use ares_core::telemetry::propagation::inject_traceparent;
+use ares_core::telemetry::spans::{producer_span, Team};
 use ares_llm::{ToolCall, ToolExecResult};
 
 use crate::state::DISCOVERY_KEY_PREFIX;
@@ -49,6 +51,9 @@ pub struct ToolExecRequest {
     pub task_id: String,
     pub tool_name: String,
     pub arguments: serde_json::Value,
+    /// W3C traceparent header for cross-service span linking.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub traceparent: Option<String>,
 }
 
 /// Message returned by the worker on the result mailbox.
@@ -262,9 +267,28 @@ impl RedisToolDispatcher {
 
     /// Push structured discoveries from a tool result to the real-time
     /// discovery list so the discovery poller publishes them to state.
-    async fn push_realtime_discoveries(&self, discoveries: &serde_json::Value, tool_name: &str) {
+    ///
+    /// `tool_args` carries the tool call's input arguments — used to extract
+    /// the authenticating credential (username/domain) for lineage tracking.
+    async fn push_realtime_discoveries(
+        &self,
+        discoveries: &serde_json::Value,
+        tool_name: &str,
+        tool_args: &serde_json::Value,
+    ) {
         let discovery_key = format!("{DISCOVERY_KEY_PREFIX}:{}", self.operation_id);
         let mut conn = self.queue.connection();
+
+        // Extract input credential context for lineage tracking
+        let input_username = tool_args
+            .get("username")
+            .or_else(|| tool_args.get("user"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let input_domain = tool_args
+            .get("domain")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
 
         // Push each discovery type as individual entries
         let type_map: &[(&str, &str)] = &[
@@ -280,11 +304,17 @@ impl RedisToolDispatcher {
         for &(key, disc_type) in type_map {
             if let Some(items) = discoveries.get(key).and_then(|v| v.as_array()) {
                 for item in items {
-                    let entry = serde_json::json!({
+                    let mut entry = serde_json::json!({
                         "type": disc_type,
                         "data": item,
                         "source_tool": tool_name,
                     });
+                    // Attach input credential context for lineage resolution
+                    if !input_username.is_empty() {
+                        entry["input_username"] =
+                            serde_json::Value::String(input_username.to_string());
+                        entry["input_domain"] = serde_json::Value::String(input_domain.to_string());
+                    }
                     if let Ok(json) = serde_json::to_string(&entry) {
                         let _: Result<(), _> = conn.lpush(&discovery_key, &json).await;
                         pushed += 1;
@@ -311,97 +341,113 @@ impl ares_llm::ToolDispatcher for RedisToolDispatcher {
         task_id: &str,
         call: &ToolCall,
     ) -> Result<ToolExecResult> {
-        // Rate-limit auth-bearing tools to prevent AD account lockout
-        if let Some(cred_key) = extract_credential_key(call) {
-            self.auth_throttle.acquire(&cred_key).await;
-        }
-
-        let call_id = format!("{}_{}", call.name, uuid::Uuid::new_v4().simple());
-
-        let request = ToolExecRequest {
-            call_id: call_id.clone(),
-            task_id: task_id.to_string(),
-            tool_name: call.name.clone(),
-            arguments: call.arguments.clone(),
-        };
-
         let effective_role = resolve_queue_role(role, &call.name);
-        let queue_key = format!("{TOOL_EXEC_PREFIX}:{effective_role}");
-        let result_key = format!("{TOOL_RESULT_PREFIX}:{call_id}");
-        let payload =
-            serde_json::to_string(&request).context("Failed to serialize tool exec request")?;
-
-        debug!(
-            tool = %call.name,
-            call_id = %call_id,
-            queue = %queue_key,
-            effective_role = %effective_role,
-            "Dispatching tool call to worker"
+        let span = producer_span(
+            &format!("dispatch.{}", call.name),
+            role,
+            Team::Red,
+            &format!("ares-worker-{effective_role}"),
         );
 
-        // Push request to worker queue
-        let mut conn = self.queue.connection();
-        conn.lpush::<_, _, ()>(&queue_key, &payload)
-            .await
-            .context("Failed to push tool exec request to Redis")?;
-
-        // Wait for result with timeout
-        let timeout_secs = self.tool_timeout.as_secs().max(1) as f64;
-        let brpop_result: Option<(String, String)> = redis::cmd("BRPOP")
-            .arg(&result_key)
-            .arg(timeout_secs)
-            .query_async(&mut conn)
-            .await
-            .context("BRPOP failed for tool result")?;
-
-        match brpop_result {
-            Some((_key, value)) => {
-                let response: ToolExecResponse = serde_json::from_str(&value)
-                    .context("Failed to deserialize tool exec response")?;
-
-                debug!(
-                    tool = %call.name,
-                    call_id = %call_id,
-                    has_error = response.error.is_some(),
-                    "Tool result received"
-                );
-
-                // Push discoveries to the real-time discovery list so
-                // the discovery poller publishes them to state immediately,
-                // independent of the task result consumer.
-                if let Some(ref disc) = response.discoveries {
-                    self.push_realtime_discoveries(disc, &call.name).await;
-                }
-
-                Ok(ToolExecResult {
-                    output: response.output,
-                    error: response.error,
-                    discoveries: response.discoveries,
-                })
+        async {
+            // Rate-limit auth-bearing tools to prevent AD account lockout
+            if let Some(cred_key) = extract_credential_key(call) {
+                self.auth_throttle.acquire(&cred_key).await;
             }
-            None => {
-                warn!(
-                    tool = %call.name,
-                    call_id = %call_id,
-                    timeout_secs = timeout_secs,
-                    "Tool execution timed out"
-                );
 
-                // Clean up any late result
-                let _: Result<(), _> = conn
-                    .expire::<_, ()>(&result_key, RESULT_TTL_SECS as i64)
-                    .await;
+            let call_id = format!("{}_{}", call.name, uuid::Uuid::new_v4().simple());
 
-                Ok(ToolExecResult {
-                    output: String::new(),
-                    error: Some(format!(
-                        "Tool '{}' timed out after {timeout_secs}s",
-                        call.name
-                    )),
-                    discoveries: None,
-                })
+            // Inject trace context for cross-service span linking
+            let traceparent = inject_traceparent(&tracing::Span::current());
+
+            let request = ToolExecRequest {
+                call_id: call_id.clone(),
+                task_id: task_id.to_string(),
+                tool_name: call.name.clone(),
+                arguments: call.arguments.clone(),
+                traceparent,
+            };
+
+            let queue_key = format!("{TOOL_EXEC_PREFIX}:{effective_role}");
+            let result_key = format!("{TOOL_RESULT_PREFIX}:{call_id}");
+            let payload =
+                serde_json::to_string(&request).context("Failed to serialize tool exec request")?;
+
+            debug!(
+                tool = %call.name,
+                call_id = %call_id,
+                queue = %queue_key,
+                effective_role = %effective_role,
+                "Dispatching tool call to worker"
+            );
+
+            // Push request to worker queue
+            let mut conn = self.queue.connection();
+            conn.lpush::<_, _, ()>(&queue_key, &payload)
+                .await
+                .context("Failed to push tool exec request to Redis")?;
+
+            // Wait for result with timeout
+            let timeout_secs = self.tool_timeout.as_secs().max(1) as f64;
+            let brpop_result: Option<(String, String)> = redis::cmd("BRPOP")
+                .arg(&result_key)
+                .arg(timeout_secs)
+                .query_async(&mut conn)
+                .await
+                .context("BRPOP failed for tool result")?;
+
+            match brpop_result {
+                Some((_key, value)) => {
+                    let response: ToolExecResponse = serde_json::from_str(&value)
+                        .context("Failed to deserialize tool exec response")?;
+
+                    debug!(
+                        tool = %call.name,
+                        call_id = %call_id,
+                        has_error = response.error.is_some(),
+                        "Tool result received"
+                    );
+
+                    // Push discoveries to the real-time discovery list so
+                    // the discovery poller publishes them to state immediately,
+                    // independent of the task result consumer.
+                    if let Some(ref disc) = response.discoveries {
+                        self.push_realtime_discoveries(disc, &call.name, &call.arguments)
+                            .await;
+                    }
+
+                    Ok(ToolExecResult {
+                        output: response.output,
+                        error: response.error,
+                        discoveries: response.discoveries,
+                    })
+                }
+                None => {
+                    warn!(
+                        tool = %call.name,
+                        call_id = %call_id,
+                        timeout_secs = timeout_secs,
+                        "Tool execution timed out"
+                    );
+
+                    // Clean up any late result
+                    let _: Result<(), _> = conn
+                        .expire::<_, ()>(&result_key, RESULT_TTL_SECS as i64)
+                        .await;
+
+                    Ok(ToolExecResult {
+                        output: String::new(),
+                        error: Some(format!(
+                            "Tool '{}' timed out after {timeout_secs}s",
+                            call.name
+                        )),
+                        discoveries: None,
+                    })
+                }
             }
         }
+        .instrument(span)
+        .await
     }
 }
 
@@ -429,9 +475,24 @@ impl LocalToolDispatcher {
     }
 
     /// Push discoveries to the real-time discovery list (same as RedisToolDispatcher).
-    async fn push_realtime_discoveries(&self, discoveries: &serde_json::Value, tool_name: &str) {
+    async fn push_realtime_discoveries(
+        &self,
+        discoveries: &serde_json::Value,
+        tool_name: &str,
+        tool_args: &serde_json::Value,
+    ) {
         let discovery_key = format!("{DISCOVERY_KEY_PREFIX}:{}", self.operation_id);
         let mut conn = self.queue.connection();
+
+        let input_username = tool_args
+            .get("username")
+            .or_else(|| tool_args.get("user"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let input_domain = tool_args
+            .get("domain")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
 
         let type_map: &[(&str, &str)] = &[
             ("hosts", "host"),
@@ -446,11 +507,16 @@ impl LocalToolDispatcher {
         for &(key, disc_type) in type_map {
             if let Some(items) = discoveries.get(key).and_then(|v| v.as_array()) {
                 for item in items {
-                    let entry = serde_json::json!({
+                    let mut entry = serde_json::json!({
                         "type": disc_type,
                         "data": item,
                         "source_tool": tool_name,
                     });
+                    if !input_username.is_empty() {
+                        entry["input_username"] =
+                            serde_json::Value::String(input_username.to_string());
+                        entry["input_domain"] = serde_json::Value::String(input_domain.to_string());
+                    }
                     if let Ok(json) = serde_json::to_string(&entry) {
                         let _: Result<(), _> = conn.lpush(&discovery_key, &json).await;
                         pushed += 1;
@@ -505,7 +571,8 @@ impl ares_llm::ToolDispatcher for LocalToolDispatcher {
 
                 // Push discoveries to real-time list immediately (like RedisToolDispatcher)
                 if let Some(ref disc) = discoveries {
-                    self.push_realtime_discoveries(disc, &call.name).await;
+                    self.push_realtime_discoveries(disc, &call.name, &call.arguments)
+                        .await;
                 }
 
                 Ok(ToolExecResult {
@@ -534,6 +601,7 @@ mod tests {
             task_id: "recon_def456".into(),
             tool_name: "nmap_scan".into(),
             arguments: serde_json::json!({"target": "192.168.1.0/24"}),
+            traceparent: None,
         };
 
         let json = serde_json::to_string(&req).unwrap();

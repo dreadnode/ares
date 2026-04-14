@@ -12,6 +12,7 @@ mod mssql;
 mod nmap;
 mod secrets;
 mod smb;
+mod spider;
 mod trust;
 mod users_shares;
 
@@ -28,6 +29,7 @@ pub use mssql::{parse_mssql_impersonation, parse_mssql_linked_servers};
 pub use nmap::{flush_nmap_host, parse_nmap_output};
 pub use secrets::{parse_asrep_roast, parse_kerberoast, parse_secretsdump};
 pub use smb::{parse_netexec_smb, parse_smb_signing};
+pub use spider::parse_spider_credentials;
 pub use trust::parse_domain_trusts;
 pub use users_shares::{parse_netexec_shares, parse_netexec_users};
 
@@ -232,6 +234,12 @@ pub fn parse_tool_output(tool_name: &str, output: &str, params: &Value) -> Value
         }
         "crack_with_hashcat" | "crack_with_john" => {
             let creds = parse_cracker_output(output, params);
+            if !creds.is_empty() {
+                discoveries["credentials"] = Value::Array(creds);
+            }
+        }
+        "sysvol_script_search" | "smbclient_spider" => {
+            let creds = parse_spider_credentials(output, params);
             if !creds.is_empty() {
                 discoveries["credentials"] = Value::Array(creds);
             }

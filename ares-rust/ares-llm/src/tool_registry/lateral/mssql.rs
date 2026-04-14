@@ -46,7 +46,8 @@ pub fn definitions() -> Vec<ToolDefinition> {
         ToolDefinition {
             name: "mssql_enable_xp_cmdshell".into(),
             description: "Enable xp_cmdshell on a MSSQL server. Required before executing \
-                OS commands through MSSQL."
+                OS commands through MSSQL. Pass impersonate_user='sa' when the connecting \
+                account lacks sysadmin but can impersonate sa."
                 .into(),
             input_schema: json!({
                 "type": "object",
@@ -71,6 +72,10 @@ pub fn definitions() -> Vec<ToolDefinition> {
                         "type": "boolean",
                         "description": "Use Windows authentication instead of SQL auth",
                         "default": true
+                    },
+                    "impersonate_user": {
+                        "type": "string",
+                        "description": "SQL login to impersonate via EXECUTE AS LOGIN before enabling xp_cmdshell (e.g. 'sa'). Required when the connecting user is not sysadmin but has IMPERSONATE privilege."
                     }
                 },
                 "required": ["target", "username", "password"]

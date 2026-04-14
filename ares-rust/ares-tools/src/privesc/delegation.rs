@@ -10,21 +10,28 @@ use crate::ToolOutput;
 
 /// Find delegation configurations in the domain using impacket-findDelegation.
 ///
-/// Required args: `domain`, `username`, `password`, `dc_ip`
+/// Required args: `domain`, `username`, `dc_ip`
+/// Optional args: `password`, `hash` (at least one required)
 pub async fn find_delegation(args: &Value) -> Result<ToolOutput> {
     let domain = required_str(args, "domain")?;
     let username = required_str(args, "username")?;
-    let password = required_str(args, "password")?;
+    let password = optional_str(args, "password");
+    let hash = optional_str(args, "hash");
     let dc_ip = required_str(args, "dc_ip")?;
 
-    let target = format!("{domain}/{username}:{password}");
+    let mut cmd = CommandBuilder::new("impacket-findDelegation");
 
-    CommandBuilder::new("impacket-findDelegation")
-        .arg(target)
-        .flag("-dc-ip", dc_ip)
-        .timeout_secs(120)
-        .execute()
-        .await
+    if let Some(h) = hash {
+        cmd = cmd
+            .arg(format!("{domain}/{username}"))
+            .args(credentials::hash_args(h));
+    } else if let Some(p) = password {
+        cmd = cmd.arg(format!("{domain}/{username}:{p}"));
+    } else {
+        anyhow::bail!("find_delegation requires either password or hash");
+    }
+
+    cmd.flag("-dc-ip", dc_ip).timeout_secs(120).execute().await
 }
 
 /// Perform an S4U (constrained delegation) attack to obtain a service ticket.

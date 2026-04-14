@@ -16,6 +16,8 @@ export GRAFANA_URL='__GRAFANA_URL__'
 export ARES_LLM_MODEL='__ARES_LLM_MODEL__'
 export ARES_TOOL_DISPATCH=local
 export ARES_CONFIG=/etc/ares/config.yaml
+export OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317
+export OTEL_RESOURCE_ATTRIBUTES='service.namespace=ares,deployment.environment=staging,attack.team=red'
 pkill -f ares-orchestrator 2>/dev/null || true
 sleep 1
 nohup /usr/local/bin/ares-orchestrator >/var/log/ares/orchestrator.log 2>&1 &

@@ -14,7 +14,9 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
-use tracing::{debug, info, warn};
+use tracing::{debug, info, warn, Instrument};
+
+use ares_core::telemetry::spans::{trace_decision, trace_tool_call, Team};
 
 use crate::provider::{
     ChatMessage, ContentPart, LlmError, LlmProvider, LlmRequest, LlmResponse, Role, StopReason,
@@ -578,6 +580,16 @@ pub async fn run_agent_loop(
             response.tool_calls.clone(),
         ));
 
+        // Record LLM tool selection decisions for observability
+        {
+            let available: Vec<String> = active_tools.iter().map(|t| t.name.clone()).collect();
+            for tc in &response.tool_calls {
+                let span =
+                    trace_decision(role, Team::Red, &tc.name, &available, None, Some(task_id));
+                let _guard = span.enter();
+            }
+        }
+
         // Partition into external tools (dispatched to workers) and callbacks
         // (handled in Rust). External tools are dispatched first so their
         // results are available before callbacks like task_complete fire.
@@ -601,7 +613,17 @@ pub async fn run_agent_loop(
                 let r = role.to_string();
                 let tid = task_id.to_string();
                 let c = (*call).clone();
-                join_set.spawn(dispatch_one(disp, r, tid, c));
+                let span = trace_tool_call(
+                    role,
+                    Team::Red,
+                    &call.name,
+                    None,
+                    None,
+                    Some(task_id),
+                    false,
+                    None,
+                );
+                join_set.spawn(dispatch_one(disp, r, tid, c).instrument(span));
             }
 
             // Collect results preserving call ordering
@@ -706,7 +728,17 @@ pub async fn run_agent_loop(
         // Handle callbacks (may short-circuit the loop)
         let cb_handler = callback_handler.as_deref();
         for call in &callbacks {
-            match handle_callback(call, cb_handler).await {
+            let cb_span = trace_tool_call(
+                role,
+                Team::Red,
+                &call.name,
+                None,
+                None,
+                Some(task_id),
+                false,
+                None,
+            );
+            match handle_callback(call, cb_handler).instrument(cb_span).await {
                 Ok(CallbackResult::TaskComplete { task_id, result }) => {
                     info!(
                         task_id = %task_id,

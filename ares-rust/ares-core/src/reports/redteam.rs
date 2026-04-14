@@ -260,13 +260,28 @@ impl RedTeamReportGenerator {
                 "Not Generated"
             },
         );
-        ctx.insert(
-            "domain_admin_path",
-            &state.domain_admin_path.as_deref().unwrap_or(""),
-        );
-        // domain_admin_chain would need attack chain data - pass empty vec for now
-        let empty_chain: Vec<serde_json::Value> = Vec::new();
-        ctx.insert("domain_admin_chain", &empty_chain);
+        // Build the credential chain to DA from parent_id lineage
+        let da_chain = state.build_domain_admin_chain();
+        let da_path_from_chain = SharedRedTeamState::format_attack_chain(&da_chain);
+        // Use the chain-derived path if the explicit path isn't set
+        let domain_admin_path = state
+            .domain_admin_path
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .unwrap_or(&da_path_from_chain);
+        ctx.insert("domain_admin_path", domain_admin_path);
+        let chain_ctx: Vec<ChainStepCtx> = da_chain
+            .iter()
+            .map(|step| ChainStepCtx {
+                step_number: step.step_number,
+                item_type: step.item_type.clone(),
+                username: step.username.clone(),
+                domain: step.domain.clone(),
+                source: step.source.clone(),
+                hash_type: step.hash_type.clone(),
+            })
+            .collect();
+        ctx.insert("domain_admin_chain", &chain_ctx);
         ctx.insert("domains", &domains);
         ctx.insert("dc_count", &dc_count);
         ctx.insert("hosts", &hosts);

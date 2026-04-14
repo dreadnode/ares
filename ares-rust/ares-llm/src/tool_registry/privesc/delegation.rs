@@ -27,12 +27,16 @@ pub fn definitions() -> Vec<ToolDefinition> {
                         "type": "string",
                         "description": "Password for authentication"
                     },
+                    "hash": {
+                        "type": "string",
+                        "description": "NTLM hash for authentication (alternative to password)"
+                    },
                     "dc_ip": {
                         "type": "string",
                         "description": "Domain controller IP address"
                     }
                 },
-                "required": ["domain", "username", "password", "dc_ip"]
+                "required": ["domain", "username", "dc_ip"]
             }),
         },
         ToolDefinition {

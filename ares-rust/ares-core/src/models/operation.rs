@@ -405,6 +405,20 @@ pub struct SharedRedTeamState {
     pub all_techniques: Vec<String>,
 }
 
+/// A single step in a credential attack chain.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct AttackChainStep {
+    pub step_number: i32,
+    /// `"credential"` or `"hash"`
+    pub item_type: String,
+    pub username: String,
+    pub domain: String,
+    pub source: String,
+    /// Hash type if this step is a hash (e.g., `"ntlm"`, `"aes256"`).
+    pub hash_type: String,
+    pub item_id: String,
+}
+
 impl SharedRedTeamState {
     /// Create a new empty state for an operation.
     pub fn new(operation_id: String) -> Self {
@@ -431,5 +445,106 @@ impl SharedRedTeamState {
             all_timeline_events: Vec::new(),
             all_techniques: Vec::new(),
         }
+    }
+
+    /// Build the credential attack chain by walking `parent_id` backward.
+    ///
+    /// Starting from a credential or hash, follows the `parent_id` links back
+    /// to the initial access credential. Returns steps in forward order
+    /// (initial access first, target item last).
+    pub fn build_attack_chain(&self, item_id: &str) -> Vec<AttackChainStep> {
+        let mut chain = Vec::new();
+        let mut current_id = Some(item_id.to_string());
+        let mut visited = HashSet::new();
+
+        while let Some(ref id) = current_id {
+            if visited.contains(id) {
+                break; // cycle guard
+            }
+            visited.insert(id.clone());
+
+            // Try credentials first
+            if let Some(cred) = self.all_credentials.iter().find(|c| c.id == *id) {
+                chain.push(AttackChainStep {
+                    step_number: cred.attack_step,
+                    item_type: "credential".to_string(),
+                    username: cred.username.clone(),
+                    domain: cred.domain.clone(),
+                    source: cred.source.clone(),
+                    hash_type: String::new(),
+                    item_id: cred.id.clone(),
+                });
+                current_id = cred.parent_id.clone();
+                continue;
+            }
+
+            // Then hashes
+            if let Some(hash) = self.all_hashes.iter().find(|h| h.id == *id) {
+                chain.push(AttackChainStep {
+                    step_number: hash.attack_step,
+                    item_type: "hash".to_string(),
+                    username: hash.username.clone(),
+                    domain: hash.domain.clone(),
+                    source: hash.source.clone(),
+                    hash_type: hash.hash_type.clone(),
+                    item_id: hash.id.clone(),
+                });
+                current_id = hash.parent_id.clone();
+                continue;
+            }
+
+            break; // ID not found
+        }
+
+        chain.reverse(); // Forward order: initial access → target
+        chain
+    }
+
+    /// Build the attack chain to domain admin (krbtgt hash).
+    ///
+    /// Finds the krbtgt NTLM hash and walks its `parent_id` chain backward.
+    /// Returns an empty vec if no krbtgt hash exists or DA was not achieved.
+    pub fn build_domain_admin_chain(&self) -> Vec<AttackChainStep> {
+        // Find the krbtgt hash (the DA indicator)
+        let krbtgt = self.all_hashes.iter().find(|h| {
+            h.username.eq_ignore_ascii_case("krbtgt") && h.hash_type.to_lowercase().contains("ntlm")
+        });
+
+        match krbtgt {
+            Some(h) => self.build_attack_chain(&h.id),
+            None => Vec::new(),
+        }
+    }
+
+    /// Format an attack chain as an arrow-delimited string.
+    ///
+    /// Example: `kerberoast → contoso.local\svc_sql (password) → secretsdump → contoso.local\krbtgt (ntlm hash)`
+    pub fn format_attack_chain(chain: &[AttackChainStep]) -> String {
+        if chain.is_empty() {
+            return String::new();
+        }
+
+        let mut parts = Vec::new();
+        for step in chain {
+            let cred_desc = if step.item_type == "hash" {
+                format!(
+                    "{}\\{} ({} hash)",
+                    step.domain, step.username, step.hash_type
+                )
+            } else {
+                format!("{}\\{} (password)", step.domain, step.username)
+            };
+
+            if !step.source.is_empty() && parts.is_empty() {
+                // First step: show source → credential
+                parts.push(step.source.clone());
+            } else if !step.source.is_empty() {
+                // Subsequent steps: show source before credential
+                parts.push(step.source.clone());
+            }
+            parts.push(cred_desc);
+        }
+
+        parts.join(" → ")
     }
 }

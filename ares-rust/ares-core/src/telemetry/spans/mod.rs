@@ -17,7 +17,7 @@ mod helpers;
 pub use builder::AgentSpanBuilder;
 pub use helpers::{
     client_span, consumer_span, producer_span, server_span, trace_decision, trace_discovery,
-    trace_tool_call,
+    trace_domain_admin, trace_tool_call,
 };
 
 /// Team affiliation for span attributes.

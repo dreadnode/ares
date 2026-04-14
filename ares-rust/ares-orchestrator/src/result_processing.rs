@@ -622,7 +622,43 @@ async fn extract_and_cache_domain_sid(payload: &Value, dispatcher: &Arc<Dispatch
 
 /// Extract credentials, hashes, hosts, vulns, and shares from a result payload.
 async fn extract_discoveries(payload: &Value, dispatcher: &Arc<Dispatcher>) -> Result<()> {
-    let parsed = parse_discoveries(payload);
+    let mut parsed = parse_discoveries(payload);
+
+    // Resolve credential lineage (parent_id / attack_step) before publishing.
+    // Read lock is released before any publish calls (which take write locks).
+    {
+        let state = dispatcher.state.read().await;
+        for cred in &mut parsed.credentials {
+            if cred.parent_id.is_none() {
+                let (pid, step) = resolve_parent_id(
+                    &state.credentials,
+                    &state.hashes,
+                    &cred.source,
+                    &cred.username,
+                    &cred.domain,
+                    None,
+                    None,
+                );
+                cred.parent_id = pid;
+                cred.attack_step = step;
+            }
+        }
+        for hash in &mut parsed.hashes {
+            if hash.parent_id.is_none() {
+                let (pid, step) = resolve_parent_id(
+                    &state.credentials,
+                    &state.hashes,
+                    &hash.source,
+                    &hash.username,
+                    &hash.domain,
+                    None,
+                    None,
+                );
+                hash.parent_id = pid;
+                hash.attack_step = step;
+            }
+        }
+    }
 
     for cred in parsed.credentials {
         // Capture fields before move for timeline event
@@ -875,6 +911,70 @@ pub(crate) struct ParsedDiscoveries {
     pub users: Vec<User>,
     pub vulnerabilities: Vec<VulnerabilityInfo>,
     pub shares: Vec<Share>,
+}
+
+/// Resolve the parent credential or hash for a newly discovered item.
+///
+/// Establishes credential lineage by finding which existing credential/hash
+/// was used as input to discover this new item. Returns `(parent_id, attack_step)`.
+///
+/// Resolution strategy:
+/// 1. **Cracked passwords**: parent is the hash with matching username+domain
+/// 2. **Input credential context** (from tool arguments): parent is the credential/hash
+///    that authenticated the tool invocation
+/// 3. **No context**: returns `(None, 0)`
+pub(crate) fn resolve_parent_id(
+    credentials: &[Credential],
+    hashes: &[Hash],
+    source: &str,
+    username: &str,
+    domain: &str,
+    input_username: Option<&str>,
+    input_domain: Option<&str>,
+) -> (Option<String>, i32) {
+    // Case 1: Cracked password → parent is the original hash
+    if source.starts_with("cracked") {
+        if let Some(h) = hashes.iter().rev().find(|h| {
+            h.username.eq_ignore_ascii_case(username)
+                && (domain.is_empty() || h.domain.eq_ignore_ascii_case(domain))
+        }) {
+            return (Some(h.id.clone()), h.attack_step + 1);
+        }
+    }
+
+    // Case 2: Explicit input credential context (from tool arguments)
+    if let Some(in_user) = input_username.filter(|u| !u.is_empty()) {
+        let in_domain = input_domain.unwrap_or("");
+
+        // Don't self-reference (same user discovered by itself)
+        let is_same = in_user.eq_ignore_ascii_case(username)
+            && (in_domain.eq_ignore_ascii_case(domain)
+                || in_domain.is_empty()
+                || domain.is_empty());
+
+        if !is_same {
+            // Try credentials first (password auth)
+            if let Some(c) = credentials.iter().rev().find(|c| {
+                c.username.eq_ignore_ascii_case(in_user)
+                    && (in_domain.is_empty()
+                        || c.domain.is_empty()
+                        || c.domain.eq_ignore_ascii_case(in_domain))
+            }) {
+                return (Some(c.id.clone()), c.attack_step + 1);
+            }
+            // Then hashes (pass-the-hash auth)
+            if let Some(h) = hashes.iter().rev().find(|h| {
+                h.username.eq_ignore_ascii_case(in_user)
+                    && (in_domain.is_empty()
+                        || h.domain.is_empty()
+                        || h.domain.eq_ignore_ascii_case(in_domain))
+            }) {
+                return (Some(h.id.clone()), h.attack_step + 1);
+            }
+        }
+    }
+
+    (None, 0)
 }
 
 /// Parse discoveries from a JSON payload into typed structs.
@@ -1171,9 +1271,29 @@ async fn poll_discoveries(dispatcher: &Dispatcher) -> Result<()> {
             None => continue,
         };
 
+        // Extract input credential context for lineage tracking
+        let input_username = discovery.get("input_username").and_then(|v| v.as_str());
+        let input_domain = discovery.get("input_domain").and_then(|v| v.as_str());
+
         match disc_type {
             "credential" => match serde_json::from_value::<Credential>(data.clone()) {
-                Ok(cred) => {
+                Ok(mut cred) => {
+                    // Resolve parent lineage from input credential context
+                    if cred.parent_id.is_none() {
+                        let state = dispatcher.state.read().await;
+                        let (pid, step) = resolve_parent_id(
+                            &state.credentials,
+                            &state.hashes,
+                            &cred.source,
+                            &cred.username,
+                            &cred.domain,
+                            input_username,
+                            input_domain,
+                        );
+                        cred.parent_id = pid;
+                        cred.attack_step = step;
+                        drop(state);
+                    }
                     let user_domain = format!("{}@{}", cred.username, cred.domain);
                     match dispatcher
                         .state
@@ -1194,7 +1314,22 @@ async fn poll_discoveries(dispatcher: &Dispatcher) -> Result<()> {
                 Err(e) => warn!(err = %e, "Failed to deserialize credential discovery"),
             },
             "hash" => {
-                if let Ok(hash) = serde_json::from_value::<Hash>(data.clone()) {
+                if let Ok(mut hash) = serde_json::from_value::<Hash>(data.clone()) {
+                    if hash.parent_id.is_none() {
+                        let state = dispatcher.state.read().await;
+                        let (pid, step) = resolve_parent_id(
+                            &state.credentials,
+                            &state.hashes,
+                            &hash.source,
+                            &hash.username,
+                            &hash.domain,
+                            input_username,
+                            input_domain,
+                        );
+                        hash.parent_id = pid;
+                        hash.attack_step = step;
+                        drop(state);
+                    }
                     let _ = dispatcher.state.publish_hash(&dispatcher.queue, hash).await;
                 }
             }

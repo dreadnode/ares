@@ -278,6 +278,12 @@ async fn read_spider_downloads(target: &str) -> String {
                 continue;
             }
             if let Ok(contents) = tokio::fs::read_to_string(&path).await {
+                // Skip empty files — SYSVOL often has many 0-byte .txt
+                // placeholders that fill the file cap before reaching
+                // high-value scripts (secret.ps1, etc.)
+                if contents.is_empty() {
+                    continue;
+                }
                 let rel = path
                     .strip_prefix(&spider_dir)
                     .unwrap_or(&path)

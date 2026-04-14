@@ -23,7 +23,10 @@ use std::time::Duration;
 
 use redis::AsyncCommands;
 use serde::{Deserialize, Serialize};
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info, warn, Instrument};
+
+use ares_core::telemetry::propagation::set_span_parent;
+use ares_core::telemetry::spans::{trace_discovery, AgentSpanBuilder, SpanKind, Team};
 
 use crate::config::WorkerConfig;
 use crate::heartbeat::WorkerStatus;
@@ -45,6 +48,9 @@ struct ToolExecRequest {
     task_id: String,
     tool_name: String,
     arguments: serde_json::Value,
+    /// W3C traceparent header for cross-service span linking.
+    #[serde(default)]
+    traceparent: Option<String>,
 }
 
 /// Response pushed back to the orchestrator.
@@ -108,7 +114,16 @@ pub async fn run_tool_exec_loop(
                     current_task: Some(format!("{}:{}", request.tool_name, request.call_id)),
                 });
 
-                execute_and_respond(&mut conn, &request, &mut unavailable_tools).await;
+                let exec_span = AgentSpanBuilder::new("tool_exec", &config.worker_role, Team::Red)
+                    .tool(&request.tool_name)
+                    .kind(SpanKind::Consumer)
+                    .build();
+                if let Some(ref tp) = request.traceparent {
+                    set_span_parent(&exec_span, tp);
+                }
+                execute_and_respond(&mut conn, &request, &mut unavailable_tools)
+                    .instrument(exec_span)
+                    .await;
 
                 // Back to idle
                 let _ = status_tx.send(WorkerStatus {
@@ -244,6 +259,26 @@ async fn execute_and_respond(
             } else {
                 Some(discoveries)
             };
+
+            // Emit discovery spans for observability
+            if let Some(ref disc) = discoveries {
+                if let Some(obj) = disc.as_object() {
+                    for (disc_type, items) in obj {
+                        let count = items.as_array().map(|a| a.len()).unwrap_or(0);
+                        if count > 0 {
+                            let span = trace_discovery(
+                                disc_type,
+                                &request.tool_name,
+                                None,
+                                None,
+                                None,
+                                None,
+                            );
+                            let _guard = span.enter();
+                        }
+                    }
+                }
+            }
 
             ToolExecResponse {
                 call_id: request.call_id.clone(),
