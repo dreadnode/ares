@@ -96,9 +96,10 @@ fn extract_spn_from_parts(parts: &[&str]) -> Option<String> {
             continue;
         }
         // Must look like service/host (alphabetic after the slash)
-        let slash_idx = part.find('/').unwrap();
-        if slash_idx + 1 < part.len() && part.as_bytes()[slash_idx + 1].is_ascii_alphabetic() {
-            return Some(part.to_string());
+        if let Some(slash_idx) = part.find('/') {
+            if slash_idx + 1 < part.len() && part.as_bytes()[slash_idx + 1].is_ascii_alphabetic() {
+                return Some(part.to_string());
+            }
         }
     }
     None

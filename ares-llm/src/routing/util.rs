@@ -23,12 +23,19 @@ pub fn is_pass_the_hash_compatible(hash_value: &str) -> bool {
 
 /// Extract a .ccache ticket path from command output.
 pub fn extract_ticket_path(output: &str) -> Option<String> {
-    let saving_re = regex::Regex::new(r"Saving ticket in ([^\s]+\.ccache)").ok()?;
+    use std::sync::OnceLock;
+    static SAVING_RE: OnceLock<regex::Regex> = OnceLock::new();
+    static FALLBACK_RE: OnceLock<regex::Regex> = OnceLock::new();
+
+    let saving_re = SAVING_RE.get_or_init(|| {
+        regex::Regex::new(r"Saving ticket in ([^\s]+\.ccache)").expect("valid regex")
+    });
     if let Some(caps) = saving_re.captures(output) {
         return Some(caps[1].to_string());
     }
 
-    let fallback_re = regex::Regex::new(r"([A-Za-z0-9_.-]+\.ccache)").ok()?;
+    let fallback_re = FALLBACK_RE
+        .get_or_init(|| regex::Regex::new(r"([A-Za-z0-9_.-]+\.ccache)").expect("valid regex"));
     if let Some(caps) = fallback_re.captures(output) {
         return Some(caps[1].to_string());
     }
