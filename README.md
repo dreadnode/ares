@@ -4,7 +4,7 @@
 
 [![Rust](https://github.com/dreadnode/ares/actions/workflows/rust.yaml/badge.svg)](https://github.com/dreadnode/ares/actions/workflows/rust.yaml)
 [![Pre-Commit](https://github.com/dreadnode/ares/actions/workflows/pre-commit.yaml/badge.svg)](https://github.com/dreadnode/ares/actions/workflows/pre-commit.yaml)
-[![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
+[![License](https://img.shields.io/github/license/dreadnode/ares?label=License&style=flat&color=blue&logo=github)](https://github.com/dreadnode/ares/blob/main/LICENSE)
 [![Rust](https://img.shields.io/badge/rust-stable-orange.svg)](https://www.rust-lang.org/)
 
 <!-- END_AUTO_BADGES -->
