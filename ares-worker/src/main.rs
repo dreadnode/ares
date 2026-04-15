@@ -8,6 +8,7 @@
 //! Heartbeat runs on a separate tokio task.
 //! Graceful shutdown: finish current task before exiting on SIGTERM.
 
+#[cfg(feature = "blue")]
 mod blue_task_loop;
 mod config;
 mod heartbeat;
@@ -32,6 +33,7 @@ async fn main() -> anyhow::Result<()> {
     let mode_str = match config.mode {
         config::WorkerMode::Task => "task",
         config::WorkerMode::ToolExec => "tool_exec",
+        #[cfg(feature = "blue")]
         config::WorkerMode::BlueTask => "blue_task",
     };
     info!(
@@ -94,6 +96,7 @@ async fn main() -> anyhow::Result<()> {
         config::WorkerMode::ToolExec => {
             tool_executor::run_tool_exec_loop(&config, conn, status_tx, shutdown_signal).await
         }
+        #[cfg(feature = "blue")]
         config::WorkerMode::BlueTask => {
             // Blue team mode requires an LLM provider
             let model_spec = std::env::var("ARES_LLM_MODEL")

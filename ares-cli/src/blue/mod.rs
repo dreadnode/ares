@@ -5,9 +5,10 @@ mod operation;
 mod report;
 mod runtime;
 mod status;
-mod submit;
+pub(super) mod submit;
 mod techniques;
 mod triage;
+mod watch;
 
 use anyhow::{Context, Result};
 use redis::AsyncCommands;
@@ -101,6 +102,23 @@ pub(crate) async fn run_blue(cmd: BlueCommands, redis_url: Option<String>) -> Re
                 max_steps,
                 multi_agent,
                 !no_auto_route,
+                grafana_url,
+                grafana_api_key,
+            )
+            .await
+        }
+        BlueCommands::Watch {
+            poll_interval,
+            model,
+            max_steps,
+            grafana_url,
+            grafana_api_key,
+        } => {
+            watch::blue_watch(
+                redis_url,
+                poll_interval,
+                model,
+                max_steps,
                 grafana_url,
                 grafana_api_key,
             )

@@ -24,14 +24,17 @@ pub(crate) fn default_agent_status() -> String {
     "idle".to_string()
 }
 
+#[cfg(feature = "blue")]
 pub(crate) fn default_confidence() -> f64 {
     0.5
 }
 
+#[cfg(feature = "blue")]
 pub(crate) fn default_timeline_source() -> String {
     "investigation".to_string()
 }
 
+#[cfg(feature = "blue")]
 pub(crate) fn default_blue_task_status() -> String {
     "pending".to_string()
 }
@@ -80,16 +83,19 @@ mod tests {
         assert_eq!(default_agent_status(), "idle");
     }
 
+    #[cfg(feature = "blue")]
     #[test]
     fn test_default_confidence() {
         assert!((default_confidence() - 0.5).abs() < f64::EPSILON);
     }
 
+    #[cfg(feature = "blue")]
     #[test]
     fn test_default_timeline_source() {
         assert_eq!(default_timeline_source(), "investigation");
     }
 
+    #[cfg(feature = "blue")]
     #[test]
     fn test_default_blue_task_status() {
         assert_eq!(default_blue_task_status(), "pending");

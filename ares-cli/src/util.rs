@@ -1,3 +1,4 @@
+#[cfg(feature = "blue")]
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 
@@ -15,6 +16,7 @@ pub(crate) fn format_duration(seconds: u64) -> String {
     }
 }
 
+#[cfg(feature = "blue")]
 pub(crate) fn parse_datetime(s: &str) -> Result<DateTime<Utc>> {
     let fixed = s.replace('Z', "+00:00");
     DateTime::parse_from_rfc3339(&fixed)
@@ -43,6 +45,7 @@ pub(crate) fn format_number(n: u64) -> String {
 /// Scan Redis keys matching a pattern using cursor iteration.
 ///
 /// Replaces `KEYS` commands which block Redis on large datasets.
+#[cfg(feature = "blue")]
 pub(crate) async fn scan_redis_keys(
     conn: &mut redis::aio::MultiplexedConnection,
     pattern: &str,
@@ -116,24 +119,28 @@ mod tests {
         assert_eq!(format_duration(7200), "2h 0m 0s");
     }
 
+    #[cfg(feature = "blue")]
     #[test]
     fn test_parse_datetime_rfc3339() {
         let dt = parse_datetime("2026-04-08T12:00:00+00:00").unwrap();
         assert_eq!(dt.year(), 2026);
     }
 
+    #[cfg(feature = "blue")]
     #[test]
     fn test_parse_datetime_with_z() {
         let dt = parse_datetime("2026-04-08T12:00:00Z").unwrap();
         assert_eq!(dt.month(), 4);
     }
 
+    #[cfg(feature = "blue")]
     #[test]
     fn test_parse_datetime_naive() {
         let dt = parse_datetime("2026-04-08T12:00:00.000").unwrap();
         assert_eq!(dt.day(), 8);
     }
 
+    #[cfg(feature = "blue")]
     #[test]
     fn test_parse_datetime_invalid() {
         assert!(parse_datetime("not-a-date").is_err());
@@ -169,5 +176,6 @@ mod tests {
         assert!(s.contains("(running)"));
     }
 
+    #[cfg(feature = "blue")]
     use chrono::Datelike;
 }

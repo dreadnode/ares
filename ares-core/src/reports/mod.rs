@@ -4,6 +4,7 @@
 //! reports from shared operation state. Templates are embedded at compile time
 //! using `include_str!`.
 
+#[cfg(feature = "blue")]
 mod blueteam;
 mod context;
 mod dedup;
@@ -13,6 +14,7 @@ mod templates;
 mod util;
 mod vuln_details;
 
+#[cfg(feature = "blue")]
 pub use blueteam::*;
 pub use dedup::*;
 pub use mitre::*;
@@ -233,6 +235,7 @@ mod tests {
         assert!(report.contains("administrator"));
     }
 
+    #[cfg(feature = "blue")]
     #[test]
     fn test_blueteam_report_renders() {
         let gen = BlueTeamReportGenerator::new().unwrap();
@@ -272,6 +275,7 @@ mod tests {
         assert!(report.contains("ESCALATIONS REQUIRED"));
     }
 
+    #[cfg(feature = "blue")]
     #[test]
     fn test_blueteam_investigation_report_renders() {
         use crate::models::{Evidence, SharedBlueTeamState, TimelineEvent};
@@ -369,6 +373,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "blue")]
     #[test]
     fn test_blueteam_generate_from_states() {
         use crate::models::{Evidence, SharedBlueTeamState};

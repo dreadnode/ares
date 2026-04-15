@@ -23,6 +23,7 @@ pub enum WorkerMode {
     /// Blue team task execution: consume from `ares:blue:tasks:global:{role}`,
     /// run the blue team LLM agent loop with HTTP-based tools (Loki,
     /// Prometheus, detection queries), push results to `ares:blue:results:`.
+    #[cfg(feature = "blue")]
     BlueTask,
 }
 
@@ -96,6 +97,7 @@ impl WorkerConfig {
 
         let mode = match env::var("ARES_WORKER_MODE").as_deref() {
             Ok("tool_exec") => WorkerMode::ToolExec,
+            #[cfg(feature = "blue")]
             Ok("blue_task") => WorkerMode::BlueTask,
             _ => WorkerMode::Task,
         };
@@ -177,10 +179,13 @@ mod tests {
         assert_eq!(c.mode, WorkerMode::ToolExec);
 
         // Worker mode: blue_task
-        std::env::set_var("ARES_WORKER_MODE", "blue_task");
-        let c = WorkerConfig::from_env().unwrap();
-        assert_eq!(c.mode, WorkerMode::BlueTask);
-        std::env::remove_var("ARES_WORKER_MODE");
+        #[cfg(feature = "blue")]
+        {
+            std::env::set_var("ARES_WORKER_MODE", "blue_task");
+            let c = WorkerConfig::from_env().unwrap();
+            assert_eq!(c.mode, WorkerMode::BlueTask);
+            std::env::remove_var("ARES_WORKER_MODE");
+        }
 
         // Agent name from role
         std::env::set_var("ARES_WORKER_ROLE", "credential_access");

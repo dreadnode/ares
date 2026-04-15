@@ -8,6 +8,10 @@ description = "Worker binary for Ares red team multi-agent system"
 name = "ares-worker"
 path = "src/main.rs"
 
+[features]
+default = ["blue"]
+blue = ["ares-core/blue", "ares-llm/blue", "ares-tools/blue"]
+
 [dependencies]
 ares-core = { path = "../ares-core", features = ["telemetry"] }
 ares-llm = { path = "../ares-llm" }

@@ -30,9 +30,13 @@
 //! Task status keys:
 //!     ares:task_status:{task_id}         STRING (JSON TaskStatusRecord)
 
+#[cfg(feature = "blue")]
 mod blue_operations;
+#[cfg(feature = "blue")]
 mod blue_reader;
+#[cfg(feature = "blue")]
 pub mod blue_task_queue;
+#[cfg(feature = "blue")]
 mod blue_writer;
 pub mod circuit_breaker;
 mod dedup_keys;
@@ -40,9 +44,13 @@ mod keys;
 mod operations;
 mod reader;
 
+#[cfg(feature = "blue")]
 pub use blue_operations::*;
+#[cfg(feature = "blue")]
 pub use blue_reader::*;
+#[cfg(feature = "blue")]
 pub use blue_task_queue::BlueTaskQueue;
+#[cfg(feature = "blue")]
 pub use blue_writer::*;
 pub use circuit_breaker::CircuitBreaker;
 pub use dedup_keys::*;
@@ -90,11 +98,13 @@ pub fn build_lock_key(operation_id: &str) -> String {
 /// use ares_core::state::build_blue_key;
 /// assert_eq!(build_blue_key("inv-123", "meta"), "ares:blue:inv:inv-123:meta");
 /// ```
+#[cfg(feature = "blue")]
 pub fn build_blue_key(investigation_id: &str, suffix: &str) -> String {
     format!("{BLUE_KEY_PREFIX}:{investigation_id}:{suffix}")
 }
 
 /// Build a Redis lock key for a blue team investigation.
+#[cfg(feature = "blue")]
 pub fn build_blue_lock_key(investigation_id: &str) -> String {
     format!("{BLUE_LOCK_PREFIX}:{investigation_id}")
 }

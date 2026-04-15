@@ -8,6 +8,7 @@ use tracing::{info, warn};
 use crate::redis_conn::connect_redis;
 
 /// Environment variable names to capture for blue team investigations.
+#[cfg(feature = "blue")]
 pub(crate) const BLUE_ENV_VAR_NAMES: &[&str] = &[
     "OPENAI_API_KEY",
     "ANTHROPIC_API_KEY",
@@ -86,9 +87,12 @@ pub(crate) async fn ops_submit(
     model: Option<String>,
     max_steps: u32,
     env: Option<String>,
-) -> Result<()> {
+    pin_active: bool,
+) -> Result<String> {
     if ips.is_empty() {
-        anyhow::bail!("No target IPs specified. Use --ips to provide target IPs.");
+        anyhow::bail!(
+            "No target IPs specified. Use --ips or --resolve-targets to provide target IPs."
+        );
     }
 
     // Generate operation ID if not provided
@@ -171,7 +175,13 @@ pub(crate) async fn ops_submit(
 
     let mut conn = connect_redis(redis_url).await?;
 
-    // Stored separately to avoid exposing secrets in the main queue
+    // Pin this operation as the active one (workers will prefer it)
+    if pin_active {
+        info!("Pinning active operation: {op_id}");
+        let _: () = conn.set("ares:operation:active", &op_id).await?;
+    }
+
+    // Store env_vars separately to avoid exposing secrets in the main queue
     if !env_vars.is_empty() {
         let env_vars_key = format!("ares:op:{op_id}:env_vars");
         let env_json = serde_json::to_string(&env_vars)?;
@@ -185,6 +195,100 @@ pub(crate) async fn ops_submit(
 
     info!("Operation submitted: {op_id}");
     println!("{op_id}");
+
+    Ok(op_id)
+}
+
+/// Follow an operation's progress by polling Redis until it completes.
+pub(crate) async fn follow_operation(
+    redis_url: Option<String>,
+    op_id: &str,
+    interval_secs: u64,
+) -> Result<()> {
+    use ares_core::state::RedisStateReader;
+
+    println!("\nFollowing operation {op_id} (poll every {interval_secs}s, Ctrl+C to stop)...\n");
+
+    let mut conn = crate::redis_conn::connect_redis(redis_url).await?;
+    let reader = RedisStateReader::new(op_id.to_string());
+
+    let mut prev_creds: usize = 0;
+    let mut prev_hosts: usize = 0;
+    let mut prev_vulns: usize = 0;
+    let mut prev_da = false;
+    let mut prev_gt = false;
+    let mut started = false;
+
+    loop {
+        tokio::time::sleep(std::time::Duration::from_secs(interval_secs)).await;
+
+        let now = chrono::Utc::now().format("%H:%M:%S");
+
+        // Check if operation has been picked up
+        let is_running = reader.is_running(&mut conn).await.unwrap_or(false);
+        if !started && is_running {
+            started = true;
+            println!("[{now}] Operation started");
+        }
+
+        // Read current state
+        let meta = match reader.get_meta(&mut conn).await {
+            Ok(m) => m,
+            Err(_) => continue, // operation not yet initialized
+        };
+
+        let creds = reader
+            .get_credentials(&mut conn)
+            .await
+            .map(|c| c.len())
+            .unwrap_or(0);
+        let hosts = reader
+            .get_hosts(&mut conn)
+            .await
+            .map(|h| h.len())
+            .unwrap_or(0);
+        let vulns = reader
+            .get_vulnerabilities(&mut conn)
+            .await
+            .map(|v| v.len())
+            .unwrap_or(0);
+
+        // Print milestones
+        if meta.has_domain_admin && !prev_da {
+            println!("[{now}] *** DOMAIN ADMIN ACHIEVED ***");
+            prev_da = true;
+        }
+        if meta.has_golden_ticket && !prev_gt {
+            println!("[{now}] *** GOLDEN TICKET OBTAINED ***");
+            prev_gt = true;
+        }
+
+        // Print count changes
+        if creds != prev_creds || hosts != prev_hosts || vulns != prev_vulns {
+            println!(
+                "[{now}] credentials: {} (+{})  hosts: {} (+{})  vulns: {} (+{})",
+                creds,
+                creds.saturating_sub(prev_creds),
+                hosts,
+                hosts.saturating_sub(prev_hosts),
+                vulns,
+                vulns.saturating_sub(prev_vulns),
+            );
+            prev_creds = creds;
+            prev_hosts = hosts;
+            prev_vulns = vulns;
+        }
+
+        // Check for completion
+        if meta.completed_at.is_some() {
+            println!("[{now}] Operation completed");
+            break;
+        }
+        if started && !is_running {
+            println!("[{now}] Operation stopped");
+            break;
+        }
+    }
 
     Ok(())
 }

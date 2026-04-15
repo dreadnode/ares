@@ -87,7 +87,7 @@ Agent SDK and MITRE ATT&CK framework.
 - [uv](https://docs.astral.sh/uv/getting-started/installation/) package manager
 - [Task](https://taskfile.dev/installation/) (optional but recommended)
 - [1Password CLI](https://developer.1password.com/docs/cli/get-started/)
-  for credential management
+  for credential management (optional — `.env` file also supported)
 - [mcp-grafana](https://github.com/grafana/mcp-grafana) MCP server:
   `go install github.com/grafana/mcp-grafana/cmd/mcp-grafana@latest`
 
@@ -122,12 +122,15 @@ uv run python -m ares --help
 **Without 1Password:**
 
 ```bash
-# Create .env file with your credentials
+# Create .env file with your credentials (auto-loaded by CLI)
 cp .env.example .env
 # Edit .env with your API keys
 
-# Run using local environment
-task blue:poll:local
+# Run normally — the CLI auto-loads .env if present
+task blue:poll
+
+# Or explicitly load from 1Password
+ares-cli --secrets-from 1password blue from-operation --latest
 ```
 
 ## Usage
@@ -160,7 +163,6 @@ task blue:reports:latest      # Show latest report
 | ------------------------------------ | ----------------------------------------------------------- |
 | `task blue:poll`                     | Run blue team agent in poll mode (checks Grafana every 30s) |
 | `task blue:once`                     | Run blue team once and exit                                 |
-| `task blue:poll:local`               | Run blue team using .env file instead of 1Password          |
 | `task blue:investigate ALERT=<file>` | Investigate a specific alert from JSON file                 |
 | `task ares:config:check`             | Verify configuration and 1Password access                   |
 | `task ares:config:show`              | Display current configuration (no secrets)                  |
@@ -194,9 +196,62 @@ task blue:reports:latest      # Show latest report
 | `task remote:sync:full`              | Sync local code to K8s pods                |
 | `task red:multi:sync:align`          | Full sync + Redis clear + pod rollout      |
 
+**EC2 Tasks:**
+
+| Command                                    | Description                           |
+| ------------------------------------------ | ------------------------------------- |
+| `task ec2:deploy EC2_NAME=kali-ares`       | Build and deploy binaries to EC2      |
+| `task ec2:launch EC2_NAME=kali-ares`       | Launch orchestrator on EC2            |
+| `task ec2:loot EC2_NAME=kali-ares`         | Dump loot via SSM                     |
+| `task ec2:runtime EC2_NAME=kali-ares`      | Show operation runtime via SSM        |
+| `task ec2:ops EC2_NAME=kali-ares`          | List operations via SSM               |
+| `task ec2:report EC2_NAME=kali-ares`       | Generate and fetch report via SSM     |
+| `task ec2:redis:forward EC2_NAME=kali-ares`| Port-forward Redis for local CLI      |
+
 See [Taskfile Usage Guide](docs/taskfile_usage.md) for detailed documentation.
 
 ### Direct CLI Usage (Advanced)
+
+#### Transport Flags (Remote Execution)
+
+The CLI can transparently execute commands on remote infrastructure via
+transport flags. These are pre-parsed before any subcommand processing.
+
+**K8s (kubectl exec):**
+
+```bash
+# Run any CLI command on the K8s orchestrator pod
+ares-cli --k8s ares-red ops loot --latest
+ares-cli --k8s ares-red ops status --latest
+
+# Blue team (auto-detects ares-blue-orchestrator deployment)
+ares-cli --k8s ares-blue blue list --latest
+
+# Override deployment name
+ares-cli --k8s ares-red --k8s-deploy ares-orchestrator ops runtime --latest
+```
+
+**EC2 (AWS SSM):**
+
+```bash
+# Run any CLI command on an EC2 instance (resolved by Name tag)
+ares-cli --ec2 kali-ares ops loot --latest
+ares-cli --ec2 kali-ares ops runtime --latest
+ares-cli --ec2 kali-ares ops list
+
+# Custom AWS profile and region
+ares-cli --ec2 kali-ares --ec2-profile prod --ec2-region us-east-1 ops status --latest
+```
+
+| Flag              | Default     | Description                                    |
+| ----------------- | ----------- | ---------------------------------------------- |
+| `--k8s`           |             | K8s namespace (triggers kubectl exec)          |
+| `--k8s-deploy`    | auto-detect | K8s deployment name                            |
+| `--ec2`           |             | EC2 Name tag pattern (triggers SSM execution)  |
+| `--ec2-profile`   | `lab`       | AWS CLI profile for EC2/SSM                    |
+| `--ec2-region`    | `us-west-1` | AWS region for EC2/SSM                         |
+| `--env-file`      |             | Load env vars from file (default: auto .env)   |
+| `--secrets-from`  |             | Load secrets from provider (e.g., `1password`) |
 
 #### Blue Team - Poll Mode (Continuous)
 

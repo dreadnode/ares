@@ -50,7 +50,10 @@ pub(crate) async fn blue_list(redis_url: Option<String>, latest: bool) -> Result
 
     if latest {
         // Prefer running
-        if let Some(running) = investigations.iter().find(|inv| inv.status == "running") {
+        if let Some(running) = investigations
+            .iter()
+            .find(|inv| inv.status == "in_progress" || inv.status == "running")
+        {
             println!("{}", running.id);
         } else if let Some(first) = investigations.first() {
             println!("{}", first.id);

@@ -36,61 +36,15 @@ tasks:
         export GRAFANA_SERVICE_ACCOUNT_TOKEN="{{.GRAFANA_SERVICE_ACCOUNT_TOKEN}}"
         export OPENAI_API_KEY="{{.OPENAI_API_KEY}}"
 
-        mkdir -p {{.LOG_DIR}}
-        LOGFILE="{{.LOG_DIR}}/blue-$(date +%Y%m%d-%H%M%S).log"
-        echo "Logging to: $LOGFILE"
-        echo "Poll interval: {{.POLL_INTERVAL}}s"
-        echo "NOTE: Continuous polling is handled by the Rust orchestrator with ARES_BLUE_ENABLED=1."
-        echo "      This task submits from-operation investigations on a timer as a local fallback."
-        echo ""
-
-        while true; do
-          echo "[$(date)] Submitting blue investigation from latest operation..."
-          MODEL_FLAG=""
-          if [ -n "{{.MODEL_ARG}}" ]; then
-            MODEL_FLAG="--model {{.MODEL_ARG}}"
-          fi
-          {{.ARES_CLI}} blue from-operation --latest \
-            $MODEL_FLAG \
-            --max-steps {{.MAX_STEPS_BLUE}} \
-            --grafana-url {{.GRAFANA_URL}} \
-            2>&1 | tee -a "$LOGFILE"
-          echo "[$(date)] Sleeping {{.POLL_INTERVAL}}s..."
-          sleep {{.POLL_INTERVAL}}
-        done
-
-  poll:local:
-    desc: "Submit blue investigation from latest operation using .env file, re-polling every POLL_INTERVAL seconds"
-    silent: true
-    preconditions:
-      - sh: test -f .env
-        msg: ".env file not found"
-    cmds:
-      - |
-        set -a
-        . ./.env
-        set +a
-
-        mkdir -p {{.LOG_DIR}}
-        LOGFILE="{{.LOG_DIR}}/blue-$(date +%Y%m%d-%H%M%S).log"
-        echo "Logging to: $LOGFILE"
-        echo "Poll interval: {{.POLL_INTERVAL}}s"
-        echo ""
-
-        while true; do
-          echo "[$(date)] Submitting blue investigation from latest operation..."
-          MODEL_FLAG=""
-          if [ -n "{{.MODEL_ARG}}" ]; then
-            MODEL_FLAG="--model {{.MODEL_ARG}}"
-          fi
-          {{.ARES_CLI}} blue from-operation --latest \
-            $MODEL_FLAG \
-            --max-steps {{.MAX_STEPS_BLUE}} \
-            --grafana-url {{.GRAFANA_URL}} \
-            2>&1 | tee -a "$LOGFILE"
-          echo "[$(date)] Sleeping {{.POLL_INTERVAL}}s..."
-          sleep {{.POLL_INTERVAL}}
-        done
+        MODEL_FLAG=""
+        if [ -n "{{.MODEL_ARG}}" ]; then
+          MODEL_FLAG="--model {{.MODEL_ARG}}"
+        fi
+        {{.ARES_CLI}} blue watch \
+          --poll-interval {{.POLL_INTERVAL}} \
+          $MODEL_FLAG \
+          --max-steps {{.MAX_STEPS_BLUE}} \
+          --grafana-url {{.GRAFANA_URL}}
 
   once:
     desc: "Submit one blue investigation from a red team operation (usage: task blue:once [OPERATION_ID=op-xxx] [LATEST=true])"
@@ -165,44 +119,6 @@ tasks:
           --max-steps {{.MAX_STEPS_BLUE_ONCE}} \
           --grafana-url "{{.GRAFANA_URL}}"
 
-  once:local:
-    desc: "Submit one blue investigation using .env file (usage: task blue:once:local [OPERATION_ID=op-xxx] [LATEST=true])"
-    silent: true
-    vars:
-      OPERATION_ID: '{{.OPERATION_ID | default ""}}'
-      LATEST: '{{.LATEST | default ""}}'
-    preconditions:
-      - sh: test -f .env
-        msg: ".env file not found"
-    cmds:
-      - |
-        set -a
-        . ./.env
-        set +a
-
-        mkdir -p {{.LOG_DIR}}
-        LOGFILE="{{.LOG_DIR}}/blue-$(date +%Y%m%d-%H%M%S).log"
-        echo "Logging to: $LOGFILE"
-
-        # Build operation context args
-        OP_ARGS=""
-        if [ "{{.LATEST}}" = "true" ]; then
-          OP_ARGS="--latest"
-        elif [ -n "{{.OPERATION_ID}}" ]; then
-          OP_ARGS="{{.OPERATION_ID}}"
-        fi
-
-        MODEL_FLAG=""
-        if [ -n "{{.MODEL_ARG}}" ]; then
-          MODEL_FLAG="--model {{.MODEL_ARG}}"
-        fi
-
-        {{.ARES_CLI}} blue from-operation $OP_ARGS \
-          $MODEL_FLAG \
-          --max-steps {{.MAX_STEPS_BLUE_ONCE}} \
-          --grafana-url {{.GRAFANA_URL}} \
-          2>&1 | tee -a "$LOGFILE"
-
   investigate:
     desc: "Submit a specific alert for investigation (usage: task blue:investigate ALERT=alert.json)"
     silent: true
@@ -275,23 +191,16 @@ tasks:
       - cmd: mkdir -p "{{.OUTPUT_DIR}}"
         silent: true
       - |
-        LATEST_FLAG=""
-        if [ "{{.LATEST}}" = "true" ]; then
-          LATEST_FLAG="--latest"
-        fi
-        OP_ID_ARG=""
-        if [ -n "{{.OPERATION_ID}}" ]; then
-          OP_ID_ARG="{{.OPERATION_ID}}"
-        fi
-        JSON_FLAG=""
-        if [ "{{.JSON}}" = "true" ]; then
-          JSON_FLAG="--json"
-        fi
-        kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-orchestrator -- ares-cli ops export-detection $OP_ID_ARG $LATEST_FLAG $JSON_FLAG --output-dir /tmp/reports
+        # Generate playbook on pod (uses red team orchestrator, not blue)
+        {{.ARES_CLI}} --k8s {{.K8S_NAMESPACE}} --k8s-deploy ares-orchestrator ops export-detection \
+          {{if ne .OPERATION_ID ""}}{{.OPERATION_ID}}{{end}} \
+          {{if eq .LATEST "true"}}--latest{{end}} \
+          {{if eq .JSON "true"}}--json{{end}} \
+          --output-dir /tmp/reports
 
-        # Get the operation ID if we used --latest
-        if [ -n "$LATEST_FLAG" ]; then
-          RESOLVED_OP_ID=$(kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-orchestrator -- ares-cli ops list --latest 2>/dev/null | tr -d '\n')
+        # Resolve operation ID for kubectl cp
+        if [ "{{.LATEST}}" = "true" ]; then
+          RESOLVED_OP_ID=$({{.ARES_CLI}} --k8s {{.K8S_NAMESPACE}} --k8s-deploy ares-orchestrator ops list --latest 2>/dev/null | tr -d '\n')
         else
           RESOLVED_OP_ID="{{.OPERATION_ID}}"
         fi
@@ -306,41 +215,6 @@ tasks:
             echo "Detection playbook saved to: {{.OUTPUT_DIR}}/${RESOLVED_OP_ID}_detection_playbook.md"
           fi
         fi
-
-  playbook:local:
-    desc: "Export detection playbook locally using .env file (usage: task blue:playbook:local [OPERATION_ID=op-xxx] [LATEST=true])"
-    silent: true
-    vars:
-      OPERATION_ID: '{{.OPERATION_ID | default ""}}'
-      LATEST: '{{.LATEST | default ""}}'
-      OUTPUT_DIR: '{{.OUTPUT_DIR | default "./reports"}}'
-      JSON: '{{.JSON | default "false"}}'
-    preconditions:
-      - sh: test -f .env
-        msg: ".env file not found"
-      - sh: test -n "{{.OPERATION_ID}}" || test "{{.LATEST}}" = "true"
-        msg: "Either OPERATION_ID or LATEST=true is required. Usage: task blue:playbook:local OPERATION_ID=op-xxx  OR  task blue:playbook:local LATEST=true"
-    cmds:
-      - cmd: mkdir -p "{{.OUTPUT_DIR}}"
-        silent: true
-      - |
-        set -a
-        . ./.env
-        set +a
-
-        LATEST_FLAG=""
-        if [ "{{.LATEST}}" = "true" ]; then
-          LATEST_FLAG="--latest"
-        fi
-        OP_ID_ARG=""
-        if [ -n "{{.OPERATION_ID}}" ]; then
-          OP_ID_ARG="{{.OPERATION_ID}}"
-        fi
-        JSON_FLAG=""
-        if [ "{{.JSON}}" = "true" ]; then
-          JSON_FLAG="--json"
-        fi
-        {{.ARES_CLI}} ops export-detection $OP_ID_ARG $LATEST_FLAG $JSON_FLAG --output-dir "{{.OUTPUT_DIR}}"
 
   reports:consolidate:
     desc: "Generate a consolidated report from Redis state (usage: task blue:reports:consolidate [OPERATION_ID=op-xxx] [LATEST=true])"
@@ -461,53 +335,6 @@ tasks:
           --max-steps {{.MAX_STEPS_BLUE}} \
           $MULTI_AGENT_FLAG
 
-  multi:local:
-    desc: "Submit investigation using .env file (usage: task blue:multi:local ALERT=alert.json)"
-    silent: true
-    vars:
-      ALERT: '{{.ALERT | default ""}}'
-      INVESTIGATION_ID: '{{.INVESTIGATION_ID | default ""}}'
-      MULTI_AGENT: '{{.MULTI_AGENT | default "false"}}'
-      MODEL_ARG: '{{.MODEL}}'
-    preconditions:
-      - sh: test -f .env
-        msg: ".env file not found"
-      - sh: test -n "{{.ALERT}}"
-        msg: "ALERT variable is required. Usage: task blue:multi:local ALERT=alert.json"
-      - sh: test -f "{{.ALERT}}"
-        msg: "Alert file not found: {{.ALERT}}"
-    cmds:
-      - |
-        set -a
-        . ./.env
-        set +a
-
-        echo "Submitting investigation to blue orchestrator service..."
-        echo "Alert file: {{.ALERT}}"
-        echo ""
-
-        INV_ID_ARG=""
-        if [ -n "{{.INVESTIGATION_ID}}" ]; then
-          INV_ID_ARG="--investigation-id {{.INVESTIGATION_ID}}"
-        fi
-
-        MULTI_AGENT_FLAG=""
-        if [ "{{.MULTI_AGENT}}" = "true" ]; then
-          MULTI_AGENT_FLAG="--multi-agent"
-        fi
-
-        MODEL_FLAG=""
-        if [ -n "{{.MODEL_ARG}}" ]; then
-          MODEL_FLAG="--model {{.MODEL_ARG}}"
-        fi
-
-        {{.ARES_CLI}} blue submit {{.ALERT}} \
-          $INV_ID_ARG \
-          $MODEL_FLAG \
-          --max-steps {{.MAX_STEPS_BLUE}} \
-          --grafana-url {{.GRAFANA_URL}} \
-          $MULTI_AGENT_FLAG
-
   multi:remote:
     desc: "Submit multi-agent blue investigation from red team operation (usage: task blue:multi:remote [OPERATION_ID=op-xxx] [LATEST=true])"
     silent: true
@@ -557,22 +384,16 @@ tasks:
       - sh: test -n "{{.INVESTIGATION_ID}}" || test "{{.LATEST}}" = "true"
         msg: "Either INVESTIGATION_ID or LATEST=true is required"
     cmds:
-      - |
-        LATEST_FLAG=""
-        if [ "{{.LATEST}}" = "true" ]; then
-          LATEST_FLAG="--latest"
-        fi
-        INV_ID_ARG=""
-        if [ -n "{{.INVESTIGATION_ID}}" ]; then
-          INV_ID_ARG="{{.INVESTIGATION_ID}}"
-        fi
-        kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-blue-orchestrator -- ares-cli blue status $INV_ID_ARG $LATEST_FLAG
+      - >-
+        {{.ARES_CLI}} --k8s {{.K8S_NAMESPACE}} blue status
+        {{if ne .INVESTIGATION_ID ""}}{{.INVESTIGATION_ID}}{{end}}
+        {{if eq .LATEST "true"}}--latest{{end}}
 
   multi:list:
     desc: "List all investigations"
     silent: true
     cmds:
-      - kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-blue-orchestrator -- ares-cli blue list
+      - '{{.ARES_CLI}} --k8s {{.K8S_NAMESPACE}} blue list'
 
   multi:evidence:
     desc: "Show evidence for an investigation (usage: task blue:multi:evidence [INVESTIGATION_ID=inv-xxx] [LATEST=true])"
@@ -585,20 +406,11 @@ tasks:
       - sh: test -n "{{.INVESTIGATION_ID}}" || test "{{.LATEST}}" = "true"
         msg: "Either INVESTIGATION_ID or LATEST=true is required"
     cmds:
-      - |
-        LATEST_FLAG=""
-        if [ "{{.LATEST}}" = "true" ]; then
-          LATEST_FLAG="--latest"
-        fi
-        INV_ID_ARG=""
-        if [ -n "{{.INVESTIGATION_ID}}" ]; then
-          INV_ID_ARG="{{.INVESTIGATION_ID}}"
-        fi
-        JSON_FLAG=""
-        if [ "{{.JSON}}" = "true" ]; then
-          JSON_FLAG="--json"
-        fi
-        kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-blue-orchestrator -- ares-cli blue evidence $INV_ID_ARG $LATEST_FLAG $JSON_FLAG
+      - >-
+        {{.ARES_CLI}} --k8s {{.K8S_NAMESPACE}} blue evidence
+        {{if ne .INVESTIGATION_ID ""}}{{.INVESTIGATION_ID}}{{end}}
+        {{if eq .LATEST "true"}}--latest{{end}}
+        {{if eq .JSON "true"}}--json{{end}}
 
   multi:techniques:
     desc: "Show MITRE techniques identified (usage: task blue:multi:techniques [INVESTIGATION_ID=inv-xxx] [LATEST=true])"
@@ -610,16 +422,10 @@ tasks:
       - sh: test -n "{{.INVESTIGATION_ID}}" || test "{{.LATEST}}" = "true"
         msg: "Either INVESTIGATION_ID or LATEST=true is required"
     cmds:
-      - |
-        LATEST_FLAG=""
-        if [ "{{.LATEST}}" = "true" ]; then
-          LATEST_FLAG="--latest"
-        fi
-        INV_ID_ARG=""
-        if [ -n "{{.INVESTIGATION_ID}}" ]; then
-          INV_ID_ARG="{{.INVESTIGATION_ID}}"
-        fi
-        kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-blue-orchestrator -- ares-cli blue techniques $INV_ID_ARG $LATEST_FLAG
+      - >-
+        {{.ARES_CLI}} --k8s {{.K8S_NAMESPACE}} blue techniques
+        {{if ne .INVESTIGATION_ID ""}}{{.INVESTIGATION_ID}}{{end}}
+        {{if eq .LATEST "true"}}--latest{{end}}
 
   multi:runtime:
     desc: "Show runtime for an investigation (usage: task blue:multi:runtime [INVESTIGATION_ID=inv-xxx] [LATEST=true])"
@@ -631,16 +437,10 @@ tasks:
       - sh: test -n "{{.INVESTIGATION_ID}}" || test "{{.LATEST}}" = "true"
         msg: "Either INVESTIGATION_ID or LATEST=true is required"
     cmds:
-      - |
-        LATEST_FLAG=""
-        if [ "{{.LATEST}}" = "true" ]; then
-          LATEST_FLAG="--latest"
-        fi
-        INV_ID_ARG=""
-        if [ -n "{{.INVESTIGATION_ID}}" ]; then
-          INV_ID_ARG="{{.INVESTIGATION_ID}}"
-        fi
-        kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-blue-orchestrator -- ares-cli blue runtime $INV_ID_ARG $LATEST_FLAG
+      - >-
+        {{.ARES_CLI}} --k8s {{.K8S_NAMESPACE}} blue runtime
+        {{if ne .INVESTIGATION_ID ""}}{{.INVESTIGATION_ID}}{{end}}
+        {{if eq .LATEST "true"}}--latest{{end}}
 
   multi:triage-status:
     desc: "Show triage status for an investigation (usage: task blue:multi:triage-status [INVESTIGATION_ID=inv-xxx] [LATEST=true])"
@@ -652,16 +452,10 @@ tasks:
       - sh: test -n "{{.INVESTIGATION_ID}}" || test "{{.LATEST}}" = "true"
         msg: "Either INVESTIGATION_ID or LATEST=true is required"
     cmds:
-      - |
-        LATEST_FLAG=""
-        if [ "{{.LATEST}}" = "true" ]; then
-          LATEST_FLAG="--latest"
-        fi
-        INV_ID_ARG=""
-        if [ -n "{{.INVESTIGATION_ID}}" ]; then
-          INV_ID_ARG="{{.INVESTIGATION_ID}}"
-        fi
-        kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-blue-orchestrator -- ares-cli blue triage-status $INV_ID_ARG $LATEST_FLAG
+      - >-
+        {{.ARES_CLI}} --k8s {{.K8S_NAMESPACE}} blue triage-status
+        {{if ne .INVESTIGATION_ID ""}}{{.INVESTIGATION_ID}}{{end}}
+        {{if eq .LATEST "true"}}--latest{{end}}
 
   multi:operation-status:
     desc: "Show aggregate status for all investigations from a red team operation (usage: task blue:multi:operation-status [OPERATION_ID=op-xxx] [LATEST=true] [WATCH=10])"
@@ -674,20 +468,11 @@ tasks:
       - sh: test -n "{{.OPERATION_ID}}" || test "{{.LATEST}}" = "true"
         msg: "Either OPERATION_ID or LATEST=true is required"
     cmds:
-      - |
-        LATEST_FLAG=""
-        if [ "{{.LATEST}}" = "true" ]; then
-          LATEST_FLAG="--latest"
-        fi
-        OP_ID_ARG=""
-        if [ -n "{{.OPERATION_ID}}" ]; then
-          OP_ID_ARG="{{.OPERATION_ID}}"
-        fi
-        WATCH_ARG=""
-        if [ "{{.WATCH}}" != "0" ]; then
-          WATCH_ARG="--watch {{.WATCH}}"
-        fi
-        kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-blue-orchestrator -- ares-cli blue operation-status $OP_ID_ARG $LATEST_FLAG $WATCH_ARG
+      - >-
+        {{.ARES_CLI}} --k8s {{.K8S_NAMESPACE}} blue operation-status
+        {{if ne .OPERATION_ID ""}}{{.OPERATION_ID}}{{end}}
+        {{if eq .LATEST "true"}}--latest{{end}}
+        {{if ne .WATCH "0"}}--watch {{.WATCH}}{{end}}
 
   multi:delete:
     desc: "Delete an investigation and all its data (usage: task blue:multi:delete INVESTIGATION_ID=inv-xxx)"
@@ -698,7 +483,7 @@ tasks:
       - sh: test -n "{{.INVESTIGATION_ID}}"
         msg: "INVESTIGATION_ID variable is required"
     cmds:
-      - kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-blue-orchestrator -- ares-cli blue delete "{{.INVESTIGATION_ID}}" --force
+      - '{{.ARES_CLI}} --k8s {{.K8S_NAMESPACE}} blue delete "{{.INVESTIGATION_ID}}" --force'
 
   multi:delete-operation:
     desc: "Delete an operation and all its investigations (usage: task blue:multi:delete-operation OPERATION_ID=op-xxx)"
@@ -709,7 +494,7 @@ tasks:
       - sh: test -n "{{.OPERATION_ID}}"
         msg: "OPERATION_ID variable is required"
     cmds:
-      - kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-blue-orchestrator -- ares-cli blue delete-operation "{{.OPERATION_ID}}" --force
+      - '{{.ARES_CLI}} --k8s {{.K8S_NAMESPACE}} blue delete-operation "{{.OPERATION_ID}}" --force'
 
   multi:cleanup:
     desc: "Clean up old investigations (usage: task blue:multi:cleanup [MAX_AGE_HOURS=24] [ALL=true])"
@@ -719,16 +504,11 @@ tasks:
       ALL: '{{.ALL | default "false"}}'
       DRY_RUN: '{{.DRY_RUN | default "false"}}'
     cmds:
-      - |
-        ALL_FLAG=""
-        if [ "{{.ALL}}" = "true" ]; then
-          ALL_FLAG="--all --force"
-        fi
-        DRY_RUN_FLAG=""
-        if [ "{{.DRY_RUN}}" = "true" ]; then
-          DRY_RUN_FLAG="--dry-run"
-        fi
-        kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-blue-orchestrator -- ares-cli blue cleanup --max-age-hours {{.MAX_AGE_HOURS}} $ALL_FLAG $DRY_RUN_FLAG
+      - >-
+        {{.ARES_CLI}} --k8s {{.K8S_NAMESPACE}} blue cleanup
+        --max-age-hours {{.MAX_AGE_HOURS}}
+        {{if eq .ALL "true"}}--all --force{{end}}
+        {{if eq .DRY_RUN "true"}}--dry-run{{end}}
 
   multi:logs:
     desc: "Follow blue team logs (usage: task blue:multi:logs [ALL=true] [ROLE=orchestrator|triage|threat-hunter|lateral-analyst])"

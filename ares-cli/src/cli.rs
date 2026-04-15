@@ -14,6 +14,34 @@ pub(crate) struct Cli {
     /// Redis URL (default: from ARES_REDIS_URL or redis://localhost:6379)
     #[arg(long, global = true, env = "ARES_REDIS_URL")]
     pub redis_url: Option<String>,
+
+    /// Load environment variables from a file (default: auto-loads .env if present)
+    #[arg(long, global = true)]
+    pub env_file: Option<String>,
+
+    /// Load secrets from an external provider (supported: 1password)
+    #[arg(long, global = true)]
+    pub secrets_from: Option<String>,
+
+    /// Run command on a K8s pod via kubectl exec (value: namespace, e.g. ares-red)
+    #[arg(long, global = true)]
+    pub k8s: Option<String>,
+
+    /// K8s deployment name for --k8s (default: auto-detected from subcommand)
+    #[arg(long, global = true)]
+    pub k8s_deploy: Option<String>,
+
+    /// Run command on an EC2 instance via AWS SSM (value: Name tag pattern, e.g. kali-ares)
+    #[arg(long, global = true)]
+    pub ec2: Option<String>,
+
+    /// AWS profile for --ec2 (default: lab)
+    #[arg(long, global = true, default_value = "lab")]
+    pub ec2_profile: String,
+
+    /// AWS region for --ec2 (default: us-west-1)
+    #[arg(long, global = true, default_value = "us-west-1")]
+    pub ec2_region: String,
 }
 
 #[derive(Subcommand)]
@@ -23,6 +51,7 @@ pub(crate) enum Commands {
     Ops(OpsCommands),
 
     /// Blue team investigations
+    #[cfg(feature = "blue")]
     #[command(subcommand)]
     Blue(BlueCommands),
 
@@ -228,6 +257,15 @@ pub(crate) enum OpsCommands {
         force: bool,
     },
 
+    /// Kill running operations (stop + delete). By default keeps the latest running operation.
+    Kill {
+        /// Kill a specific operation (instead of all running)
+        operation_id: Option<String>,
+        /// Kill ALL running operations (by default the latest is kept)
+        #[arg(long)]
+        all: bool,
+    },
+
     /// Backfill domain list from discovered data
     BackfillDomains {
         /// Operation ID
@@ -269,6 +307,7 @@ pub(crate) enum OpsCommands {
     },
 
     /// Run red-blue correlation analysis on report files
+    #[cfg(feature = "blue")]
     Correlate {
         /// Directory containing red team and investigation report files
         #[arg(long, default_value = "./reports")]
@@ -282,6 +321,7 @@ pub(crate) enum OpsCommands {
     },
 
     /// Evaluate blue team detection against red team operation state
+    #[cfg(feature = "blue")]
     Evaluate {
         /// Directory containing red team state JSON files
         #[arg(long)]
@@ -302,12 +342,12 @@ pub(crate) enum OpsCommands {
 
     /// Submit a new red team operation to the orchestrator service
     Submit {
-        /// Target name or identifier
+        /// Target name or EC2 Name tag pattern (resolved to IPs with --resolve-targets)
         target: String,
         /// Target domain (e.g., contoso.local)
         domain: String,
-        /// Target IP addresses (comma-separated or repeated)
-        #[arg(long, value_delimiter = ',', required = true)]
+        /// Target IP addresses (comma-separated or repeated). Optional if --resolve-targets is used.
+        #[arg(long, value_delimiter = ',')]
         ips: Vec<String>,
         /// Operation ID (auto-generated if not provided)
         #[arg(long)]
@@ -333,6 +373,36 @@ pub(crate) enum OpsCommands {
         /// Target environment for tracing (e.g., dev, staging, prod)
         #[arg(long)]
         env: Option<String>,
+
+        // ── Target resolution ──
+        /// Resolve target name to IPs via AWS EC2 Name tag lookup
+        #[arg(long)]
+        resolve_targets: bool,
+        /// AWS profile for target resolution (default: lab)
+        #[arg(long, default_value = "lab")]
+        aws_profile: String,
+        /// AWS region for target resolution (default: us-west-1)
+        #[arg(long, default_value = "us-west-1")]
+        aws_region: String,
+
+        // ── Redis active-op pinning ──
+        /// Set this operation as the active operation in Redis (workers will prefer it)
+        #[arg(long)]
+        pin_active: bool,
+
+        // ── Follow mode ──
+        /// Follow operation progress after submit (poll Redis for status updates)
+        #[arg(long)]
+        follow: bool,
+        /// Poll interval in seconds for --follow mode
+        #[arg(long, default_value = "5")]
+        follow_interval: u64,
+        /// Auto-fetch report when operation completes (requires --follow)
+        #[arg(long)]
+        auto_report: bool,
+        /// Output directory for auto-report
+        #[arg(long, default_value = "./reports")]
+        report_dir: String,
     },
 }
 
@@ -340,6 +410,7 @@ pub(crate) enum OpsCommands {
 // Blue Team Investigations (blue)
 // ============================================================================
 
+#[cfg(feature = "blue")]
 #[derive(Subcommand)]
 pub(crate) enum BlueCommands {
     /// List all investigations
@@ -484,6 +555,25 @@ pub(crate) enum BlueCommands {
         /// Disable auto-routing HIGH/CRITICAL to multi-agent
         #[arg(long)]
         no_auto_route: bool,
+        /// Grafana URL
+        #[arg(long, env = "GRAFANA_URL")]
+        grafana_url: Option<String>,
+        /// Grafana API key
+        #[arg(long, env = "GRAFANA_SERVICE_ACCOUNT_TOKEN")]
+        grafana_api_key: Option<String>,
+    },
+
+    /// Continuously poll and submit investigations from the latest red team operation
+    Watch {
+        /// Seconds between polls
+        #[arg(long, default_value = "30")]
+        poll_interval: u64,
+        /// LLM model to use
+        #[arg(long)]
+        model: Option<String>,
+        /// Maximum agent steps per investigation
+        #[arg(long, default_value = "25")]
+        max_steps: u32,
         /// Grafana URL
         #[arg(long, env = "GRAFANA_URL")]
         grafana_url: Option<String>,

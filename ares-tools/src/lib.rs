@@ -6,6 +6,7 @@
 
 pub mod acl;
 pub mod args;
+#[cfg(feature = "blue")]
 pub mod blue;
 pub mod coercion;
 pub mod cracker;

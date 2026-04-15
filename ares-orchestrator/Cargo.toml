@@ -8,6 +8,10 @@ description = "Rust-native orchestration loop for the Ares red team system"
 name = "ares-orchestrator"
 path = "src/main.rs"
 
+[features]
+default = ["blue"]
+blue = ["ares-core/blue", "ares-llm/blue", "ares-tools/blue"]
+
 [dependencies]
 ares-core = { path = "../ares-core", features = ["telemetry"] }
 ares-llm = { path = "../ares-llm" }

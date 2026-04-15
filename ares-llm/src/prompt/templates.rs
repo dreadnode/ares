@@ -66,15 +66,21 @@ const TASK_COMMAND_TEMPLATE: &str = include_str!("../../templates/redteam/tasks/
 // Embedded templates — blue team agent instruction templates
 // ---------------------------------------------------------------------------
 
+#[cfg(feature = "blue")]
 const BLUE_TRIAGE_TEMPLATE: &str = include_str!("../../templates/blueteam/agents/triage.md.tera");
+#[cfg(feature = "blue")]
 const BLUE_THREAT_HUNTER_TEMPLATE: &str =
     include_str!("../../templates/blueteam/agents/threat_hunter.md.tera");
+#[cfg(feature = "blue")]
 const BLUE_LATERAL_ANALYST_TEMPLATE: &str =
     include_str!("../../templates/blueteam/agents/lateral_analyst.md.tera");
+#[cfg(feature = "blue")]
 const BLUE_ORCHESTRATOR_TEMPLATE: &str =
     include_str!("../../templates/blueteam/agents/orchestrator.md.tera");
+#[cfg(feature = "blue")]
 const BLUE_ESCALATION_TRIAGE_TEMPLATE: &str =
     include_str!("../../templates/blueteam/agents/escalation_triage.md.tera");
+#[cfg(feature = "blue")]
 const BLUE_INITIAL_ALERT_PROMPT_TEMPLATE: &str =
     include_str!("../../templates/blueteam/agents/initial_alert_prompt.md.tera");
 
@@ -82,14 +88,19 @@ const BLUE_INITIAL_ALERT_PROMPT_TEMPLATE: &str =
 // Embedded templates — blue team task templates
 // ---------------------------------------------------------------------------
 
+#[cfg(feature = "blue")]
 const BLUE_TASK_TRIAGE_TEMPLATE: &str =
     include_str!("../../templates/blueteam/tasks/triage_task.md.tera");
+#[cfg(feature = "blue")]
 const BLUE_TASK_THREAT_HUNT_TEMPLATE: &str =
     include_str!("../../templates/blueteam/tasks/threat_hunt_task.md.tera");
+#[cfg(feature = "blue")]
 const BLUE_TASK_LATERAL_TEMPLATE: &str =
     include_str!("../../templates/blueteam/tasks/lateral_task.md.tera");
+#[cfg(feature = "blue")]
 const BLUE_TASK_USER_INVESTIGATION_TEMPLATE: &str =
     include_str!("../../templates/blueteam/tasks/user_investigation_task.md.tera");
+#[cfg(feature = "blue")]
 const BLUE_TASK_HOST_INVESTIGATION_TEMPLATE: &str =
     include_str!("../../templates/blueteam/tasks/host_investigation_task.md.tera");
 
@@ -129,18 +140,29 @@ pub const TASK_ACL_ANALYSIS: &str = "redteam/tasks/acl_analysis";
 pub const TASK_COMMAND: &str = "redteam/tasks/command";
 
 // Blue team agent instruction templates
+#[cfg(feature = "blue")]
 pub const TEMPLATE_BLUE_TRIAGE: &str = "blueteam/agents/triage";
+#[cfg(feature = "blue")]
 pub const TEMPLATE_BLUE_THREAT_HUNTER: &str = "blueteam/agents/threat_hunter";
+#[cfg(feature = "blue")]
 pub const TEMPLATE_BLUE_LATERAL_ANALYST: &str = "blueteam/agents/lateral_analyst";
+#[cfg(feature = "blue")]
 pub const TEMPLATE_BLUE_ORCHESTRATOR: &str = "blueteam/agents/orchestrator";
+#[cfg(feature = "blue")]
 pub const TEMPLATE_BLUE_ESCALATION_TRIAGE: &str = "blueteam/agents/escalation_triage";
+#[cfg(feature = "blue")]
 pub const TEMPLATE_BLUE_INITIAL_ALERT_PROMPT: &str = "blueteam/agents/initial_alert_prompt";
 
 // Blue team task templates
+#[cfg(feature = "blue")]
 pub const BLUE_TASK_TRIAGE: &str = "blueteam/tasks/triage_task";
+#[cfg(feature = "blue")]
 pub const BLUE_TASK_THREAT_HUNT: &str = "blueteam/tasks/threat_hunt_task";
+#[cfg(feature = "blue")]
 pub const BLUE_TASK_LATERAL: &str = "blueteam/tasks/lateral_task";
+#[cfg(feature = "blue")]
 pub const BLUE_TASK_USER_INVESTIGATION: &str = "blueteam/tasks/user_investigation_task";
+#[cfg(feature = "blue")]
 pub const BLUE_TASK_HOST_INVESTIGATION: &str = "blueteam/tasks/host_investigation_task";
 
 // ---------------------------------------------------------------------------
@@ -186,36 +208,45 @@ static TEMPLATES: LazyLock<Tera> = LazyLock::new(|| {
         (TASK_PRIVESC_ENUMERATION, TASK_PRIVESC_ENUMERATION_TEMPLATE),
         (TASK_ACL_ANALYSIS, TASK_ACL_ANALYSIS_TEMPLATE),
         (TASK_COMMAND, TASK_COMMAND_TEMPLATE),
-        // Blue team agent templates
-        (TEMPLATE_BLUE_TRIAGE, BLUE_TRIAGE_TEMPLATE),
-        (TEMPLATE_BLUE_THREAT_HUNTER, BLUE_THREAT_HUNTER_TEMPLATE),
-        (TEMPLATE_BLUE_LATERAL_ANALYST, BLUE_LATERAL_ANALYST_TEMPLATE),
-        (TEMPLATE_BLUE_ORCHESTRATOR, BLUE_ORCHESTRATOR_TEMPLATE),
-        (
-            TEMPLATE_BLUE_ESCALATION_TRIAGE,
-            BLUE_ESCALATION_TRIAGE_TEMPLATE,
-        ),
-        (
-            TEMPLATE_BLUE_INITIAL_ALERT_PROMPT,
-            BLUE_INITIAL_ALERT_PROMPT_TEMPLATE,
-        ),
-        // Blue team task templates
-        (BLUE_TASK_TRIAGE, BLUE_TASK_TRIAGE_TEMPLATE),
-        (BLUE_TASK_THREAT_HUNT, BLUE_TASK_THREAT_HUNT_TEMPLATE),
-        (BLUE_TASK_LATERAL, BLUE_TASK_LATERAL_TEMPLATE),
-        (
-            BLUE_TASK_USER_INVESTIGATION,
-            BLUE_TASK_USER_INVESTIGATION_TEMPLATE,
-        ),
-        (
-            BLUE_TASK_HOST_INVESTIGATION,
-            BLUE_TASK_HOST_INVESTIGATION_TEMPLATE,
-        ),
     ];
 
     for (name, content) in templates {
         tera.add_raw_template(name, content)
             .unwrap_or_else(|e| panic!("Failed to register template '{name}': {e}"));
+    }
+
+    // Blue team templates (behind "blue" feature)
+    #[cfg(feature = "blue")]
+    {
+        let blue_templates: &[(&str, &str)] = &[
+            (TEMPLATE_BLUE_TRIAGE, BLUE_TRIAGE_TEMPLATE),
+            (TEMPLATE_BLUE_THREAT_HUNTER, BLUE_THREAT_HUNTER_TEMPLATE),
+            (TEMPLATE_BLUE_LATERAL_ANALYST, BLUE_LATERAL_ANALYST_TEMPLATE),
+            (TEMPLATE_BLUE_ORCHESTRATOR, BLUE_ORCHESTRATOR_TEMPLATE),
+            (
+                TEMPLATE_BLUE_ESCALATION_TRIAGE,
+                BLUE_ESCALATION_TRIAGE_TEMPLATE,
+            ),
+            (
+                TEMPLATE_BLUE_INITIAL_ALERT_PROMPT,
+                BLUE_INITIAL_ALERT_PROMPT_TEMPLATE,
+            ),
+            (BLUE_TASK_TRIAGE, BLUE_TASK_TRIAGE_TEMPLATE),
+            (BLUE_TASK_THREAT_HUNT, BLUE_TASK_THREAT_HUNT_TEMPLATE),
+            (BLUE_TASK_LATERAL, BLUE_TASK_LATERAL_TEMPLATE),
+            (
+                BLUE_TASK_USER_INVESTIGATION,
+                BLUE_TASK_USER_INVESTIGATION_TEMPLATE,
+            ),
+            (
+                BLUE_TASK_HOST_INVESTIGATION,
+                BLUE_TASK_HOST_INVESTIGATION_TEMPLATE,
+            ),
+        ];
+        for (name, content) in blue_templates {
+            tera.add_raw_template(name, content)
+                .unwrap_or_else(|e| panic!("Failed to register template '{name}': {e}"));
+        }
     }
 
     tera

@@ -5,6 +5,7 @@
 //! in Rust without dispatching to Python workers.
 
 mod acl;
+#[cfg(feature = "blue")]
 pub mod blue;
 mod coercion;
 mod cracker;

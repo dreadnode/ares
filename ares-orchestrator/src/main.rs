@@ -16,6 +16,7 @@
 
 mod automation;
 mod automation_spawner;
+#[cfg(feature = "blue")]
 mod blue;
 mod bootstrap;
 pub(crate) mod callback_handler;
@@ -412,6 +413,7 @@ async fn run() -> Result<()> {
     let auto_handles = spawn_automation_tasks(dispatcher.clone(), shutdown_rx.clone());
 
     // --- Blue team orchestrator (optional — enabled when ARES_BLUE_ENABLED=1) ---
+    #[cfg(feature = "blue")]
     let blue_handle = if std::env::var("ARES_BLUE_ENABLED").as_deref() == Ok("1") {
         // Create a separate LLM provider for the blue team
         let blue_model_spec = std::env::var("ARES_BLUE_LLM_MODEL")
@@ -447,6 +449,8 @@ async fn run() -> Result<()> {
     } else {
         None
     };
+    #[cfg(not(feature = "blue"))]
+    let blue_handle: Option<tokio::task::JoinHandle<()>> = None;
 
     // --- Recovery check ---
     {

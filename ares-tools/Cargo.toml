@@ -16,6 +16,9 @@ regex = { workspace = true }
 redis = { workspace = true }
 tempfile = "3"
 
+[features]
+blue = []
+
 [dev-dependencies]
 rstest = "0.18"
 approx = "0.5"

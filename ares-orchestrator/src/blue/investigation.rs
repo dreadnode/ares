@@ -18,6 +18,7 @@ use ares_llm::{
     run_agent_loop, AgentLoopConfig, AgentLoopOutcome, LlmProvider, LoopEndReason, ToolDispatcher,
 };
 
+use super::callbacks::BlueCallbackHandler;
 use super::chaining;
 
 /// Represents a running investigation.
@@ -54,9 +55,10 @@ impl Investigation {
 /// analysis by calling `dispatch_task` and processing results.
 pub async fn run_investigation(
     investigation: &Investigation,
-    provider: &dyn LlmProvider,
+    provider: Arc<dyn LlmProvider>,
     dispatcher: Arc<dyn ToolDispatcher>,
     _task_queue: &mut BlueTaskQueue,
+    redis_url: &str,
     conn: &mut redis::aio::ConnectionManager,
 ) -> Result<InvestigationOutcome> {
     info!(
@@ -72,7 +74,7 @@ pub async fn run_investigation(
 
     investigation
         .state_writer
-        .set_status(conn, &serde_json::Value::String("in_progress".into()))
+        .set_status(conn, "in_progress", None)
         .await
         .ok();
 
@@ -103,9 +105,19 @@ pub async fn run_investigation(
         ..AgentLoopConfig::default()
     };
 
+    // Wire blue callback handler for dispatch + query + lifecycle tools
+    let callback_handler = Arc::new(BlueCallbackHandler::new(
+        Arc::clone(&provider),
+        Arc::clone(&dispatcher),
+        investigation.model.clone(),
+        investigation.investigation_id.clone(),
+        investigation.alert.clone(),
+        redis_url.to_string(),
+    ));
+
     // Run the orchestrator agent loop
     let outcome = run_agent_loop(
-        provider,
+        provider.as_ref(),
         dispatcher,
         &config,
         &system_prompt,
@@ -113,7 +125,7 @@ pub async fn run_investigation(
         role.as_str(),
         &investigation.investigation_id,
         &tools,
-        None, // Blue team doesn't need custom callbacks
+        Some(callback_handler),
     )
     .await;
 
@@ -202,18 +214,13 @@ pub async fn run_investigation(
         }
     };
 
+    let error_msg = match &investigation_outcome {
+        InvestigationOutcome::Failed { error } => Some(error.as_str()),
+        _ => None,
+    };
     investigation
         .state_writer
-        .set_status(conn, &serde_json::Value::String(final_status.into()))
-        .await
-        .ok();
-    investigation
-        .state_writer
-        .set_meta(
-            conn,
-            "completed_at",
-            &serde_json::Value::String(Utc::now().to_rfc3339()),
-        )
+        .set_status(conn, final_status, error_msg)
         .await
         .ok();
 

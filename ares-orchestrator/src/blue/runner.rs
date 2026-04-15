@@ -21,7 +21,7 @@ use super::investigation::{self, Investigation};
 /// Owns the LLM provider and tool dispatcher, and drives investigations
 /// from alert to completion.
 pub struct BlueOrchestrator {
-    provider: Box<dyn LlmProvider>,
+    provider: Arc<dyn LlmProvider>,
     model_name: String,
     dispatcher: Arc<dyn ToolDispatcher>,
     redis_url: String,
@@ -35,7 +35,7 @@ impl BlueOrchestrator {
         redis_url: String,
     ) -> Self {
         Self {
-            provider,
+            provider: Arc::from(provider),
             model_name,
             dispatcher,
             redis_url,
@@ -87,10 +87,15 @@ impl BlueOrchestrator {
                         .cloned()
                         .unwrap_or(serde_json::json!({}));
 
-                    let model = request
+                    let raw_model = request
                         .get("model")
                         .and_then(|v| v.as_str())
-                        .unwrap_or(&self.model_name)
+                        .unwrap_or(&self.model_name);
+                    // Strip provider prefix (e.g. "openai/gpt-5.2" → "gpt-5.2")
+                    let model = raw_model
+                        .split_once('/')
+                        .map(|(_, name)| name)
+                        .unwrap_or(raw_model)
                         .to_string();
 
                     let operation_id = request
@@ -123,9 +128,10 @@ impl BlueOrchestrator {
 
                     match investigation::run_investigation(
                         &investigation,
-                        self.provider.as_ref(),
+                        Arc::clone(&self.provider),
                         Arc::clone(&self.dispatcher),
                         &mut task_queue,
+                        &self.redis_url,
                         &mut conn,
                     )
                     .await

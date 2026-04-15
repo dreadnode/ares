@@ -374,13 +374,43 @@ impl BlueStateWriter {
     }
 
     /// Set the investigation status in `ares:blue:inv:{id}:status` STRING.
+    ///
+    /// Stores a JSON object with `status`, `started_at`, and optional
+    /// `completed_at`/`error` fields so CLI readers can display them.
     pub async fn set_status(
         &self,
         conn: &mut impl AsyncCommands,
-        status: &serde_json::Value,
+        status: &str,
+        error: Option<&str>,
     ) -> Result<(), redis::RedisError> {
         let key = format!("{}:{}:status", BLUE_STATUS_PREFIX, self.investigation_id);
-        let data = serde_json::to_string(status).unwrap_or_default();
+        let now = chrono::Utc::now().to_rfc3339();
+
+        // Preserve started_at from previous status if it exists
+        let started_at = if let Ok(existing) = conn.get::<_, Option<String>>(&key).await {
+            existing
+                .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+                .and_then(|v| {
+                    v.get("started_at")
+                        .and_then(|s| s.as_str())
+                        .map(String::from)
+                })
+                .unwrap_or_else(|| now.clone())
+        } else {
+            now.clone()
+        };
+
+        let mut obj = serde_json::json!({
+            "status": status,
+            "started_at": started_at,
+        });
+        if matches!(status, "completed" | "escalated" | "failed") {
+            obj["completed_at"] = serde_json::Value::String(now.clone());
+        }
+        if let Some(err) = error {
+            obj["error"] = serde_json::Value::String(err.to_string());
+        }
+        let data = serde_json::to_string(&obj).unwrap_or_default();
         let _: () = conn.set_ex(&key, &data, 86400).await?;
         Ok(())
     }

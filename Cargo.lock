@@ -108,6 +108,7 @@ dependencies = [
  "ares-core",
  "chrono",
  "clap",
+ "dotenvy",
  "redis",
  "regex",
  "serde",

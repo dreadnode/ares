@@ -1,12 +1,16 @@
 mod backfill;
+#[cfg(feature = "blue")]
 mod correlate;
 mod delete;
+#[cfg(feature = "blue")]
 mod evaluate;
 mod inject;
+mod kill;
 mod list;
 mod loot;
 mod queue;
 mod report;
+pub(crate) mod resolve;
 mod runtime;
 mod status;
 mod stop;
@@ -99,6 +103,9 @@ pub(crate) async fn run_ops(cmd: OpsCommands, redis_url: Option<String>) -> Resu
             operation_id,
             force,
         } => delete::ops_delete(redis_url, operation_id, force).await,
+        OpsCommands::Kill { operation_id, all } => {
+            kill::ops_kill(redis_url, operation_id, all).await
+        }
         OpsCommands::InjectHash {
             operation_id,
             username,
@@ -158,11 +165,13 @@ pub(crate) async fn run_ops(cmd: OpsCommands, redis_url: Option<String>) -> Resu
         OpsCommands::Cleanup { max_age_hours } => {
             delete::ops_cleanup(redis_url, max_age_hours).await
         }
+        #[cfg(feature = "blue")]
         OpsCommands::Correlate {
             reports_dir,
             time_window,
             json,
         } => correlate::ops_correlate(reports_dir, time_window, json),
+        #[cfg(feature = "blue")]
         OpsCommands::Evaluate {
             states_dir,
             state_file,
@@ -173,7 +182,7 @@ pub(crate) async fn run_ops(cmd: OpsCommands, redis_url: Option<String>) -> Resu
         OpsCommands::Submit {
             target,
             domain,
-            ips,
+            mut ips,
             operation_id,
             username,
             password,
@@ -182,9 +191,26 @@ pub(crate) async fn run_ops(cmd: OpsCommands, redis_url: Option<String>) -> Resu
             model,
             max_steps,
             env,
+            resolve_targets,
+            aws_profile,
+            aws_region,
+            pin_active,
+            follow,
+            follow_interval,
+            auto_report,
+            report_dir,
         } => {
-            submit::ops_submit(
-                redis_url,
+            // Resolve targets from EC2 if requested and no IPs provided
+            if ips.is_empty() {
+                if resolve_targets || !resolve::looks_like_ip(&target) {
+                    ips = resolve::resolve_ec2_targets(&target, &aws_profile, &aws_region)?;
+                } else {
+                    // Target itself looks like IPs (e.g., "192.168.1.1,10.0.0.2")
+                    ips = target.split(',').map(|s| s.trim().to_string()).collect();
+                }
+            }
+            let op_id = submit::ops_submit(
+                redis_url.clone(),
                 target,
                 domain,
                 ips,
@@ -196,8 +222,16 @@ pub(crate) async fn run_ops(cmd: OpsCommands, redis_url: Option<String>) -> Resu
                 model,
                 max_steps,
                 env,
+                pin_active,
             )
-            .await
+            .await?;
+            if follow {
+                submit::follow_operation(redis_url.clone(), &op_id, follow_interval).await?;
+            }
+            if auto_report {
+                report::ops_report(redis_url, Some(op_id), false, false, report_dir).await?;
+            }
+            Ok(())
         }
     }
 }

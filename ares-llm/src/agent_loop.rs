@@ -161,6 +161,12 @@ pub enum CallbackResult {
 pub trait CallbackHandler: Send + Sync {
     async fn handle_callback(&self, call: &ToolCall) -> Option<Result<CallbackResult>>;
 
+    /// Check if a tool name should be routed as a callback rather than
+    /// dispatched to a worker. Default returns false for all tools.
+    fn is_callback(&self, _tool_name: &str) -> bool {
+        false
+    }
+
     /// Called after each LLM API response with the incremental token usage.
     /// Default implementation is a no-op. Override this to record per-call
     /// token usage (e.g. persist to Redis so CLI shows live cost data).
@@ -593,10 +599,13 @@ pub async fn run_agent_loop(
         // Partition into external tools (dispatched to workers) and callbacks
         // (handled in Rust). External tools are dispatched first so their
         // results are available before callbacks like task_complete fire.
+        let cb_handler_ref = callback_handler.as_deref();
         let mut external: Vec<&ToolCall> = Vec::new();
         let mut callbacks: Vec<&ToolCall> = Vec::new();
         for call in &response.tool_calls {
-            if tool_registry::is_callback_tool(&call.name) {
+            if tool_registry::is_callback_tool(&call.name)
+                || cb_handler_ref.is_some_and(|h| h.is_callback(&call.name))
+            {
                 callbacks.push(call);
             } else {
                 external.push(call);

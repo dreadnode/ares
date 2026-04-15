@@ -622,71 +622,14 @@ tasks:
     vars:
       OPERATION_ID: '{{.OPERATION_ID | default ""}}'
       LATEST: '{{.LATEST | default "false"}}'
-    cmds:
-      - |
-        INSTANCE_ID=$(aws ec2 describe-instances \
-          --profile "{{.EC2_PROFILE}}" \
-          --region "{{.EC2_REGION}}" \
-          --filters "Name=instance-state-name,Values=running" \
-                    "Name=tag:Name,Values=*{{.EC2_NAME}}*" \
-          --query "Reservations[*].Instances[*].InstanceId" \
-          --output text | head -1)
-
-        if [ -z "$INSTANCE_ID" ]; then
-          echo -e "{{.ERROR}} No running instance found matching: {{.EC2_NAME}}"
-          exit 1
-        fi
-
-        CLI_CMD="ares-cli ops stop"
-        {{if ne .OPERATION_ID ""}}CLI_CMD="$CLI_CMD {{.OPERATION_ID}}"{{end}}
-        {{if eq .LATEST "true"}}CLI_CMD="$CLI_CMD --latest"{{end}}
-
-        if [ -z "{{.OPERATION_ID}}" ] && [ "{{.LATEST}}" != "true" ]; then
-          echo -e "{{.ERROR}} Provide OPERATION_ID=op-xxx or LATEST=true"
-          exit 1
-        fi
-
-        PARAMS_FILE=$(mktemp)
-        trap "rm -f $PARAMS_FILE" EXIT
-        jq -n --arg cmd "$CLI_CMD" '{"commands": [$cmd]}' > "$PARAMS_FILE"
-
-        CMD_ID=$(aws ssm send-command \
-          --profile "{{.EC2_PROFILE}}" \
-          --region "{{.EC2_REGION}}" \
-          --instance-ids "$INSTANCE_ID" \
-          --document-name "AWS-RunShellScript" \
-          --parameters "file://$PARAMS_FILE" \
-          --query "Command.CommandId" --output text)
-
-        for i in $(seq 1 15); do
-          STATUS=$(aws ssm get-command-invocation \
-            --profile "{{.EC2_PROFILE}}" \
-            --region "{{.EC2_REGION}}" \
-            --command-id "$CMD_ID" \
-            --instance-id "$INSTANCE_ID" \
-            --query "Status" --output text 2>/dev/null) || true
-          case "$STATUS" in
-            Success|Failed|Cancelled|TimedOut) break ;;
-          esac
-          sleep 1
-        done
-
-        aws ssm get-command-invocation \
-          --profile "{{.EC2_PROFILE}}" \
-          --region "{{.EC2_REGION}}" \
-          --command-id "$CMD_ID" \
-          --instance-id "$INSTANCE_ID" \
-          --query "StandardOutputContent" --output text
-
-        if [ "$STATUS" != "Success" ]; then
-          aws ssm get-command-invocation \
-            --profile "{{.EC2_PROFILE}}" \
-            --region "{{.EC2_REGION}}" \
-            --command-id "$CMD_ID" \
-            --instance-id "$INSTANCE_ID" \
-            --query "StandardErrorContent" --output text >&2
-          exit 1
-        fi
+    preconditions:
+      - sh: '[ -n "{{.OPERATION_ID}}" ] || [ "{{.LATEST}}" = "true" ]'
+        msg: "Provide OPERATION_ID=op-xxx or LATEST=true"
+    cmd: >-
+      ares-cli --ec2 {{.EC2_NAME}} --ec2-profile {{.EC2_PROFILE}} --ec2-region {{.EC2_REGION}}
+      ops stop
+      {{if ne .OPERATION_ID ""}}{{.OPERATION_ID}}{{end}}
+      {{if eq .LATEST "true"}}--latest{{end}}
 
   restart:
     desc: "Restart all worker roles on EC2 (usage: task ec2:restart [EC2_NAME=ares-tools])"
@@ -817,7 +760,8 @@ tasks:
           --parameters '{"portNumber":["6379"],"localPortNumber":["16379"]}'
 
   # ============================================================================
-  # CLI Operations (loot, runtime, status, list, queue)
+  # CLI Operations (loot, runtime, report, list)
+  # These use `ares-cli --ec2` which handles instance resolution and SSM.
   # ============================================================================
   loot:
     desc: "Dump loot from EC2 via SSM (usage: task ec2:loot [EC2_NAME=ares-tools] [LATEST=true] [OPERATION_ID=op-xxx] [JSON=false] [DIFF=false])"
@@ -827,68 +771,13 @@ tasks:
       LATEST: '{{.LATEST | default "true"}}'
       JSON: '{{.JSON | default "false"}}'
       DIFF: '{{.DIFF | default "false"}}'
-    cmds:
-      - |
-        INSTANCE_ID=$(aws ec2 describe-instances \
-          --profile "{{.EC2_PROFILE}}" \
-          --region "{{.EC2_REGION}}" \
-          --filters "Name=instance-state-name,Values=running" \
-                    "Name=tag:Name,Values=*{{.EC2_NAME}}*" \
-          --query "Reservations[*].Instances[*].InstanceId" \
-          --output text | head -1)
-
-        if [ -z "$INSTANCE_ID" ]; then
-          echo -e "{{.ERROR}} No running instance found matching: {{.EC2_NAME}}"
-          exit 1
-        fi
-
-        CLI_CMD="ares-cli ops loot"
-        {{if ne .OPERATION_ID ""}}CLI_CMD="$CLI_CMD {{.OPERATION_ID}}"{{end}}
-        {{if eq .LATEST "true"}}CLI_CMD="$CLI_CMD --latest"{{end}}
-        {{if eq .JSON "true"}}CLI_CMD="$CLI_CMD --json"{{end}}
-        {{if eq .DIFF "true"}}CLI_CMD="$CLI_CMD --diff"{{end}}
-
-        PARAMS_FILE=$(mktemp)
-        trap "rm -f $PARAMS_FILE" EXIT
-        jq -n --arg cmd "$CLI_CMD" '{"commands": [$cmd]}' > "$PARAMS_FILE"
-
-        CMD_ID=$(aws ssm send-command \
-          --profile "{{.EC2_PROFILE}}" \
-          --region "{{.EC2_REGION}}" \
-          --instance-ids "$INSTANCE_ID" \
-          --document-name "AWS-RunShellScript" \
-          --parameters "file://$PARAMS_FILE" \
-          --query "Command.CommandId" --output text)
-
-        for i in $(seq 1 60); do
-          STATUS=$(aws ssm get-command-invocation \
-            --profile "{{.EC2_PROFILE}}" \
-            --region "{{.EC2_REGION}}" \
-            --command-id "$CMD_ID" \
-            --instance-id "$INSTANCE_ID" \
-            --query "Status" --output text 2>/dev/null) || true
-          case "$STATUS" in
-            Success|Failed|Cancelled|TimedOut) break ;;
-          esac
-          sleep 1
-        done
-
-        aws ssm get-command-invocation \
-          --profile "{{.EC2_PROFILE}}" \
-          --region "{{.EC2_REGION}}" \
-          --command-id "$CMD_ID" \
-          --instance-id "$INSTANCE_ID" \
-          --query "StandardOutputContent" --output text
-
-        if [ "$STATUS" != "Success" ]; then
-          aws ssm get-command-invocation \
-            --profile "{{.EC2_PROFILE}}" \
-            --region "{{.EC2_REGION}}" \
-            --command-id "$CMD_ID" \
-            --instance-id "$INSTANCE_ID" \
-            --query "StandardErrorContent" --output text >&2
-          exit 1
-        fi
+    cmd: >-
+      ares-cli --ec2 {{.EC2_NAME}} --ec2-profile {{.EC2_PROFILE}} --ec2-region {{.EC2_REGION}}
+      ops loot
+      {{if ne .OPERATION_ID ""}}{{.OPERATION_ID}}{{end}}
+      {{if eq .LATEST "true"}}--latest{{end}}
+      {{if eq .JSON "true"}}--json{{end}}
+      {{if eq .DIFF "true"}}--diff{{end}}
 
   runtime:
     desc: "Show operation runtime from EC2 via SSM (usage: task ec2:runtime [EC2_NAME=ares-tools] [LATEST=true] [OPERATION_ID=op-xxx])"
@@ -896,66 +785,11 @@ tasks:
     vars:
       OPERATION_ID: '{{.OPERATION_ID | default ""}}'
       LATEST: '{{.LATEST | default "true"}}'
-    cmds:
-      - |
-        INSTANCE_ID=$(aws ec2 describe-instances \
-          --profile "{{.EC2_PROFILE}}" \
-          --region "{{.EC2_REGION}}" \
-          --filters "Name=instance-state-name,Values=running" \
-                    "Name=tag:Name,Values=*{{.EC2_NAME}}*" \
-          --query "Reservations[*].Instances[*].InstanceId" \
-          --output text | head -1)
-
-        if [ -z "$INSTANCE_ID" ]; then
-          echo -e "{{.ERROR}} No running instance found matching: {{.EC2_NAME}}"
-          exit 1
-        fi
-
-        CLI_CMD="ares-cli ops runtime"
-        {{if ne .OPERATION_ID ""}}CLI_CMD="$CLI_CMD {{.OPERATION_ID}}"{{end}}
-        {{if eq .LATEST "true"}}CLI_CMD="$CLI_CMD --latest"{{end}}
-
-        PARAMS_FILE=$(mktemp)
-        trap "rm -f $PARAMS_FILE" EXIT
-        jq -n --arg cmd "$CLI_CMD" '{"commands": [$cmd]}' > "$PARAMS_FILE"
-
-        CMD_ID=$(aws ssm send-command \
-          --profile "{{.EC2_PROFILE}}" \
-          --region "{{.EC2_REGION}}" \
-          --instance-ids "$INSTANCE_ID" \
-          --document-name "AWS-RunShellScript" \
-          --parameters "file://$PARAMS_FILE" \
-          --query "Command.CommandId" --output text)
-
-        for i in $(seq 1 60); do
-          STATUS=$(aws ssm get-command-invocation \
-            --profile "{{.EC2_PROFILE}}" \
-            --region "{{.EC2_REGION}}" \
-            --command-id "$CMD_ID" \
-            --instance-id "$INSTANCE_ID" \
-            --query "Status" --output text 2>/dev/null) || true
-          case "$STATUS" in
-            Success|Failed|Cancelled|TimedOut) break ;;
-          esac
-          sleep 1
-        done
-
-        aws ssm get-command-invocation \
-          --profile "{{.EC2_PROFILE}}" \
-          --region "{{.EC2_REGION}}" \
-          --command-id "$CMD_ID" \
-          --instance-id "$INSTANCE_ID" \
-          --query "StandardOutputContent" --output text
-
-        if [ "$STATUS" != "Success" ]; then
-          aws ssm get-command-invocation \
-            --profile "{{.EC2_PROFILE}}" \
-            --region "{{.EC2_REGION}}" \
-            --command-id "$CMD_ID" \
-            --instance-id "$INSTANCE_ID" \
-            --query "StandardErrorContent" --output text >&2
-          exit 1
-        fi
+    cmd: >-
+      ares-cli --ec2 {{.EC2_NAME}} --ec2-profile {{.EC2_PROFILE}} --ec2-region {{.EC2_REGION}}
+      ops runtime
+      {{if ne .OPERATION_ID ""}}{{.OPERATION_ID}}{{end}}
+      {{if eq .LATEST "true"}}--latest{{end}}
 
   report:
     desc: "Generate and fetch report from EC2 (usage: task ec2:report [EC2_NAME=kali-ares] [LATEST=true] [OPERATION_ID=op-xxx] [REGENERATE=false])"
@@ -1070,65 +904,10 @@ tasks:
     silent: true
     vars:
       LATEST: '{{.LATEST | default "false"}}'
-    cmds:
-      - |
-        INSTANCE_ID=$(aws ec2 describe-instances \
-          --profile "{{.EC2_PROFILE}}" \
-          --region "{{.EC2_REGION}}" \
-          --filters "Name=instance-state-name,Values=running" \
-                    "Name=tag:Name,Values=*{{.EC2_NAME}}*" \
-          --query "Reservations[*].Instances[*].InstanceId" \
-          --output text | head -1)
-
-        if [ -z "$INSTANCE_ID" ]; then
-          echo -e "{{.ERROR}} No running instance found matching: {{.EC2_NAME}}"
-          exit 1
-        fi
-
-        CLI_CMD="ares-cli ops list"
-        {{if eq .LATEST "true"}}CLI_CMD="$CLI_CMD --latest"{{end}}
-
-        PARAMS_FILE=$(mktemp)
-        trap "rm -f $PARAMS_FILE" EXIT
-        jq -n --arg cmd "$CLI_CMD" '{"commands": [$cmd]}' > "$PARAMS_FILE"
-
-        CMD_ID=$(aws ssm send-command \
-          --profile "{{.EC2_PROFILE}}" \
-          --region "{{.EC2_REGION}}" \
-          --instance-ids "$INSTANCE_ID" \
-          --document-name "AWS-RunShellScript" \
-          --parameters "file://$PARAMS_FILE" \
-          --query "Command.CommandId" --output text)
-
-        for i in $(seq 1 60); do
-          STATUS=$(aws ssm get-command-invocation \
-            --profile "{{.EC2_PROFILE}}" \
-            --region "{{.EC2_REGION}}" \
-            --command-id "$CMD_ID" \
-            --instance-id "$INSTANCE_ID" \
-            --query "Status" --output text 2>/dev/null) || true
-          case "$STATUS" in
-            Success|Failed|Cancelled|TimedOut) break ;;
-          esac
-          sleep 1
-        done
-
-        aws ssm get-command-invocation \
-          --profile "{{.EC2_PROFILE}}" \
-          --region "{{.EC2_REGION}}" \
-          --command-id "$CMD_ID" \
-          --instance-id "$INSTANCE_ID" \
-          --query "StandardOutputContent" --output text
-
-        if [ "$STATUS" != "Success" ]; then
-          aws ssm get-command-invocation \
-            --profile "{{.EC2_PROFILE}}" \
-            --region "{{.EC2_REGION}}" \
-            --command-id "$CMD_ID" \
-            --instance-id "$INSTANCE_ID" \
-            --query "StandardErrorContent" --output text >&2
-          exit 1
-        fi
+    cmd: >-
+      ares-cli --ec2 {{.EC2_NAME}} --ec2-profile {{.EC2_PROFILE}} --ec2-region {{.EC2_REGION}}
+      ops list
+      {{if eq .LATEST "true"}}--latest{{end}}
 
   # ============================================================================
   # Operation Launch

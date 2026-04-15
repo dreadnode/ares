@@ -134,8 +134,9 @@ async fn blue_operation_status_once(
     // Calculate duration
     let now = Utc::now();
     let elapsed = if let Some(start) = earliest_start {
-        let has_running =
-            status_counts.contains_key("running") || status_counts.contains_key("submitted");
+        let has_running = status_counts.contains_key("running")
+            || status_counts.contains_key("in_progress")
+            || status_counts.contains_key("submitted");
         if has_running {
             (now - start).num_seconds().max(0) as u64
         } else if let Some(end) = latest_end {
@@ -148,7 +149,8 @@ async fn blue_operation_status_once(
     };
 
     let total = sorted_ids.len();
-    let running = status_counts.get("running").map_or(0, |v| v.len());
+    let running = status_counts.get("running").map_or(0, |v| v.len())
+        + status_counts.get("in_progress").map_or(0, |v| v.len());
     let completed = status_counts.get("completed").map_or(0, |v| v.len());
     let escalated = status_counts.get("escalated").map_or(0, |v| v.len());
     let routed = status_counts.get("routed").map_or(0, |v| v.len());
@@ -200,7 +202,13 @@ async fn blue_operation_status_once(
         }
     }
 
-    if let Some(running_invs) = status_counts.get("running") {
+    let running_invs: Vec<_> = status_counts
+        .get("running")
+        .into_iter()
+        .chain(status_counts.get("in_progress"))
+        .flat_map(|v| v.iter())
+        .collect();
+    if !running_invs.is_empty() {
         println!("\nRunning investigations:");
         for inv in running_invs {
             let inv_id = inv

@@ -8,6 +8,10 @@ description = "CLI for the Ares red team orchestration system"
 name = "ares-cli"
 path = "src/main.rs"
 
+[features]
+default = ["blue"]
+blue = ["ares-core/blue"]
+
 [dependencies]
 ares-core = { path = "../ares-core", features = ["telemetry"] }
 serde = { workspace = true }
@@ -23,3 +27,4 @@ anyhow = { workspace = true }
 uuid = { workspace = true }
 sqlx = { workspace = true }
 regex = { workspace = true }
+dotenvy = "0.15"
