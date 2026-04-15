@@ -51,11 +51,6 @@ pub use shares::auto_share_spider;
 pub use stall_detection::auto_stall_detection;
 pub use trust::auto_trust_follow;
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-/// Build a deduplication key for crack requests.
 pub(crate) fn crack_dedup_key(hash: &ares_core::models::Hash) -> String {
     let prefix = &hash.hash_value[..32.min(hash.hash_value.len())];
     format!(

@@ -24,10 +24,6 @@ use crate::provider::{
 };
 use crate::tool_registry;
 
-// ---------------------------------------------------------------------------
-// Configuration
-// ---------------------------------------------------------------------------
-
 /// Configuration for an agent loop execution.
 #[derive(Debug, Clone)]
 pub struct AgentLoopConfig {
@@ -102,10 +98,6 @@ impl Default for RetryConfig {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Tool execution interface
-// ---------------------------------------------------------------------------
-
 /// Result of executing an external tool on a worker.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolExecResult {
@@ -133,10 +125,6 @@ pub trait ToolDispatcher: Send + Sync {
         call: &ToolCall,
     ) -> Result<ToolExecResult>;
 }
-
-// ---------------------------------------------------------------------------
-// Callback handling
-// ---------------------------------------------------------------------------
 
 /// Result of handling a callback tool.
 #[derive(Debug)]
@@ -355,10 +343,6 @@ async fn handle_callback(
     handle_builtin_callback(call)
 }
 
-// ---------------------------------------------------------------------------
-// Tool dispatch helper
-// ---------------------------------------------------------------------------
-
 /// Result of dispatching a single tool call.
 struct DispatchResult {
     call_id: String,
@@ -401,10 +385,6 @@ async fn dispatch_one(
     }
 }
 
-// ---------------------------------------------------------------------------
-// Agent loop outcome
-// ---------------------------------------------------------------------------
-
 /// Outcome of running the agent loop.
 #[derive(Debug)]
 pub struct AgentLoopOutcome {
@@ -438,10 +418,6 @@ pub enum LoopEndReason {
     /// Error during execution.
     Error(String),
 }
-
-// ---------------------------------------------------------------------------
-// Agent loop execution
-// ---------------------------------------------------------------------------
 
 /// Execute the multi-step LLM agent loop.
 ///
@@ -792,10 +768,6 @@ pub async fn run_agent_loop(
     }
 }
 
-// ---------------------------------------------------------------------------
-// Context window management
-// ---------------------------------------------------------------------------
-
 /// Estimate token count for a string using the chars/4 heuristic.
 /// This approximation works well for English text and code with
 /// Anthropic and OpenAI tokenizers.
@@ -985,10 +957,6 @@ fn has_tool_calls(msg: &ChatMessage) -> bool {
     false
 }
 
-// ---------------------------------------------------------------------------
-// Retry logic
-// ---------------------------------------------------------------------------
-
 /// Call the LLM with retry on transient errors (rate limits, network failures).
 ///
 /// Uses exponential backoff with jitter. Respects `Retry-After` headers from
@@ -1056,10 +1024,6 @@ fn simple_hash(attempt: u32, task_id: &str) -> u64 {
     h = h.wrapping_mul(0x100000001b3);
     h
 }
-
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {

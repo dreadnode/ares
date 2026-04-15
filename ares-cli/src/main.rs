@@ -27,7 +27,6 @@ use cli::{Cli, Commands};
 
 #[tokio::main]
 async fn main() {
-    // ── Phase 0: Transport intercept ──
     // If --k8s or --ec2 is present, re-exec via kubectl/SSM and exit.
     if let Some(code) = transport::maybe_exec_k8s() {
         process::exit(code);
@@ -36,7 +35,7 @@ async fn main() {
         process::exit(code);
     }
 
-    // ── Phase 1: Load secrets BEFORE clap parses ──
+    // ── Load secrets BEFORE clap parses ──
     // This ensures clap's `env = "..."` attributes and `collect_env_vars()`
     // see values from .env files or 1Password.
     let (env_file, secrets_from) = secrets::prescan_secrets_args();
@@ -71,7 +70,7 @@ async fn main() {
         }
     }
 
-    // ── Phase 2: Normal CLI parsing (env vars are now populated) ──
+    // ── Normal CLI parsing (env vars are now populated) ──
     // Initialize telemetry (console + OTLP when endpoint is configured)
     let _telemetry = ares_core::telemetry::init_telemetry(
         ares_core::telemetry::TelemetryConfig::new("ares-cli")

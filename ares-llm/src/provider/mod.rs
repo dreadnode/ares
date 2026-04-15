@@ -9,10 +9,6 @@ pub mod openai;
 
 use serde::{Deserialize, Serialize};
 
-// ---------------------------------------------------------------------------
-// Core types
-// ---------------------------------------------------------------------------
-
 /// Message role in a conversation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -156,10 +152,6 @@ pub struct TokenUsage {
     pub cache_read_input_tokens: u32,
 }
 
-// ---------------------------------------------------------------------------
-// LLM error types
-// ---------------------------------------------------------------------------
-
 /// Typed error for LLM provider calls, enabling retry classification.
 #[derive(Debug, thiserror::Error)]
 pub enum LlmError {
@@ -210,10 +202,6 @@ impl LlmError {
         }
     }
 }
-
-// ---------------------------------------------------------------------------
-// Request / Response
-// ---------------------------------------------------------------------------
 
 /// A request to the LLM provider.
 #[derive(Debug, Clone)]
