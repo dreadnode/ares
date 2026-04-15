@@ -18,7 +18,7 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: pre-commit-${{ github.run_id }}
+  group: pre-commit-${{ github.ref }}
   cancel-in-progress: true
 
 env:
@@ -54,4 +54,4 @@ jobs:
           task-version: ${{ env.TASK_VERSION }}
 
       - name: Run pre-commit
-        run: export TASK_X_REMOTE_TASKFILES=1 task run-pre-commit -y || true
+        run: TASK_X_REMOTE_TASKFILES=1 task run-pre-commit -y

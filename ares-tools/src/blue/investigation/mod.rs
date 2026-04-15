@@ -41,7 +41,7 @@ pub(super) async fn get_redis_connection() -> anyhow::Result<redis::aio::Multipl
 
     let client = redis::Client::open(url.as_str()).context("failed to create Redis client")?;
     let conn = client
-        .get_multiplexed_tokio_connection()
+        .get_multiplexed_async_connection()
         .await
         .context("failed to connect to Redis")?;
     Ok(conn)

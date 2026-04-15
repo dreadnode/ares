@@ -34,7 +34,7 @@ pub async fn get_attack_playbook(args: &Value) -> anyhow::Result<ToolOutput> {
             })
         }
     };
-    let mut conn = match client.get_multiplexed_tokio_connection().await {
+    let mut conn = match client.get_multiplexed_async_connection().await {
         Ok(c) => c,
         Err(e) => {
             return Ok(ToolOutput {
