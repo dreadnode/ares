@@ -48,7 +48,7 @@ jobs:
       - name: Semgrep Analysis
         env:
           SEMGREP_RULES: >-
-            p/python
+            p/rust
             p/security-audit
             p/secrets
             p/owasp-top-ten

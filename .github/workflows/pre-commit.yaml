@@ -22,7 +22,6 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  PYTHON_VERSION: 3.12.6
   TASK_VERSION: 3.38.0
 
 permissions:
@@ -40,12 +39,12 @@ jobs:
       - name: Set up git repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
-      - name: Set up Python
+      - name: Set up Python (for pre-commit)
         uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
         with:
-          python-version: ${{ env.PYTHON_VERSION }}
+          python-version: "3.12"
 
-      - name: Install python dependencies
+      - name: Install pre-commit
         run: python3 -m pip install pre-commit
 
       - name: Setup go-task

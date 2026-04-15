@@ -24,7 +24,7 @@ Returns instructions for listing all available label names in Loki.
 
 **Example Usage by Agent:**
 
-```python
+```text
 # Agent calls the guide
 guide = list_loki_label_names_guide()
 
@@ -45,7 +45,7 @@ Returns instructions for listing all values for a specific label.
 
 **Example Usage by Agent:**
 
-```python
+```text
 # Agent calls the guide with label name
 guide = list_loki_label_values_guide("environment")
 
@@ -68,7 +68,7 @@ Returns instructions for getting statistics about log streams.
 
 **Example Usage by Agent:**
 
-```python
+```text
 # Agent calls the guide with LogQL selector
 guide = query_loki_stats_guide('{environment="staging"}')
 
@@ -100,7 +100,7 @@ Returns instructions for querying Loki logs with full LogQL support.
 
 **Example Usage by Agent:**
 
-```python
+```text
 # Agent calls the guide
 guide = query_loki_logs_guide('{environment="staging"} |~ "error"', limit=10)
 
@@ -125,7 +125,7 @@ Returns pre-built LogQL queries for common attack indicators.
 
 **Example Usage by Agent:**
 
-```python
+```text
 # Agent calls the guide
 guide = search_attack_indicators_guide("staging")
 ```
@@ -147,7 +147,7 @@ Returns a complete step-by-step guide for discovering environment structure.
 
 **Example Usage by Agent:**
 
-```python
+```text
 # Agent calls the guide
 guide = discover_environment_guide("staging")
 ```
@@ -165,7 +165,7 @@ The agent can use these tools during investigation stages:
 
 ### Stage 1: TRIAGE
 
-```python
+```text
 # Discover environment structure
 discover_environment_guide("staging")
 
@@ -178,7 +178,7 @@ mcp__grafana__list_loki_label_values(datasourceUid="loki", labelName="environmen
 
 ### Stage 2: CAUSATION
 
-```python
+```text
 # Check log volume first
 mcp__grafana__query_loki_stats(
     datasourceUid="loki",
@@ -196,7 +196,7 @@ mcp__grafana__query_loki_logs(
 
 ### Stage 3: LATERAL
 
-```python
+```text
 # Search for attack indicators
 mcp__grafana__query_loki_logs(
     datasourceUid="loki",
@@ -221,7 +221,7 @@ mcp__grafana__query_loki_logs(
 
 ## Example Investigation Flow
 
-```python
+```text
 # 1. Discover environment
 agent.call("discover_environment_guide", environment="staging")
 
@@ -294,13 +294,13 @@ You have access to enhanced Grafana MCP tools for more powerful querying:
 
 The GrafanaMCPTools toolset is configured with:
 
-```python
+```text
 grafana_mcp_tools = GrafanaMCPTools(datasource_uid="loki")
 ```
 
 The datasource UID can be changed to target different Loki datasources:
 
-```python
+```text
 grafana_mcp_tools = GrafanaMCPTools(datasource_uid="custom-loki-ds")
 ```
 

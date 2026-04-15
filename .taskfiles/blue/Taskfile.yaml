@@ -256,35 +256,6 @@ tasks:
   # Development / Testing
   # ===========================================================================
 
-  mitre:test:
-    desc: Test MITRE ATT&CK data loading (requires Python ares module)
-    silent: true
-    cmds:
-      - |
-        if ! command -v uv &>/dev/null; then
-          echo "uv not found. This task requires the Python ares module."
-          exit 1
-        fi
-        uv run python -c "
-        import asyncio
-        from ares.integrations.mitre import MITREAttackClient
-
-        async def test():
-            client = MITREAttackClient()
-            await client.load()
-            print(f'Loaded {len(client._techniques)} techniques')
-            print(f'Loaded {len(client._tactics)} tactics')
-
-            # Show a sample technique
-            sample = list(client._techniques.values())[0]
-            print(f'\nSample technique:')
-            print(f'  ID: {sample.id}')
-            print(f'  Name: {sample.name}')
-            print(f'  Tactic: {sample.tactic}')
-
-        asyncio.run(test())
-        "
-
   # ===========================================================================
   # Multi-Agent Blue Team Tasks (via K8s orchestrator service)
   # ===========================================================================

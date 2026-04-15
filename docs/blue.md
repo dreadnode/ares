@@ -25,9 +25,9 @@ findings to MITRE ATT&CK, and writes investigation reports.
 
 #### Investigation Orchestrator
 
-**Location:** `src/ares/agents/blue/soc_investigator.py`
+**Location:** `ares-orchestrator/src/blue/`
 
-The `InvestigationOrchestrator` manages the full investigation lifecycle:
+The investigation orchestrator manages the full investigation lifecycle:
 
 - Creates and configures Dreadnode Agents for investigating Grafana alerts
 - Establishes MCP (Model Context Protocol) connections to Grafana
@@ -37,7 +37,7 @@ The `InvestigationOrchestrator` manages the full investigation lifecycle:
 
 #### Investigation Agent Factory
 
-**Location:** `src/ares/core/factories/blue_factory.py`
+**Location:** `ares-worker/src/blue_task_loop.rs`
 
 Creates pre-configured investigation agents with:
 
@@ -49,7 +49,7 @@ Creates pre-configured investigation agents with:
 
 #### Investigation State Model
 
-**Location:** `src/ares/core/models.py`
+**Location:** `ares-core/src/models/`
 
 The `InvestigationState` model tracks:
 
@@ -121,19 +121,19 @@ Report Delivered
 
 ### Investigation Tools
 
-**Location:** `src/ares/tools/blue/investigation.py`
+**Location:** `ares-tools/src/` (blue feature)
 
 #### Evidence Recording
 
-```python
+```text
 record_evidence(
-    evidence_type: EvidenceType,  # ip, domain, hash, process, file, user, etc.
-    value: str,
-    pyramid_level: int,  # 1=Hash Values, 6=TTPs
-    mitre_techniques: List[str],
-    confidence: float,  # 0.0-1.0
-    description: str,
-    source_query: Optional[str]
+    evidence_type: EvidenceType,  // ip, domain, hash, process, file, user, etc.
+    value: String,
+    pyramid_level: i32,           // 1=Hash Values, 6=TTPs
+    mitre_techniques: Vec<String>,
+    confidence: f64,              // 0.0-1.0
+    description: String,
+    source_query: Option<String>
 )
 ```
 
@@ -162,33 +162,31 @@ record_evidence(
 
 #### Timeline Management
 
-```python
+```text
 add_timeline_event(
-    timestamp: str,
-    description: str,
-    mitre_technique: Optional[str],
-    evidence_ids: List[str],
-    severity: str  # info, low, medium, high, critical
+    timestamp: String,
+    description: String,
+    mitre_technique: Option<String>,
+    evidence_ids: Vec<String>,
+    severity: String  // info, low, medium, high, critical
 )
 ```
 
 #### Investigation Tracking
 
-```python
-track_host_investigation(hostname: str)
-track_user_investigation(username: str)
+```text
+track_host_investigation(hostname: String)
+track_user_investigation(username: String)
 ```
 
 ### Completion Tools
 
-**Location:** `src/ares/tools/blue/actions.py`
-
-```python
+```text
 complete_investigation(
-    attack_synopsis: str,
-    recommendations: List[str],
-    should_escalate: bool = False,
-    escalation_reason: Optional[str] = None
+    attack_synopsis: String,
+    recommendations: Vec<String>,
+    should_escalate: bool,
+    escalation_reason: Option<String>
 )
 ```
 
@@ -201,13 +199,11 @@ Finalizes investigation with:
 
 ### Grafana Integration Tools
 
-**Location:** `src/ares/tools/blue/grafana.py`
-
-```python
-get_firing_alerts() -> List[Alert]
-get_alert_history(alert_name: str, lookback_hours: int) -> List[Alert]
-post_investigation_started(investigation_id: str, alert_name: str)
-post_investigation_completed(investigation_id: str, report_url: str)
+```text
+get_firing_alerts() -> Vec<Alert>
+get_alert_history(alert_name, lookback_hours) -> Vec<Alert>
+post_investigation_started(investigation_id, alert_name)
+post_investigation_completed(investigation_id, report_url)
 ```
 
 Features:
@@ -218,17 +214,15 @@ Features:
 
 ### Observability Tools
 
-**Location:** `src/ares/tools/blue/observability.py`
-
 #### LokiTools - LogQL Queries
 
-```python
+```text
 query_loki(
-    logql: str,
-    start_time: str,
-    end_time: str,
-    limit: int = 100
-) -> List[LogLine]
+    logql: String,
+    start_time: String,
+    end_time: String,
+    limit: i32 = 100
+) -> Vec<LogLine>
 ```
 
 Features:
@@ -241,15 +235,13 @@ Features:
 
 #### PrometheusTools - PromQL Queries
 
-```python
-query_prometheus_instant(query: str, time: str)
-query_prometheus_range(query: str, start: str, end: str, step: str)
-get_metric_metadata(metric: str)
+```text
+query_prometheus_instant(query: String, time: String)
+query_prometheus_range(query: String, start: String, end: String, step: String)
+get_metric_metadata(metric: String)
 ```
 
 ### Query Template Tools
-
-**Location:** `src/ares/tools/blue/query_templates.py`
 
 Pre-built LogQL queries optimized for detecting red team attack patterns:
 
@@ -268,10 +260,8 @@ Example templates:
 
 ### Question Engine Tools
 
-**Location:** `src/ares/tools/blue/investigation.py`
-
-```python
-get_combined_questions() -> List[InvestigativeQuestion]
+```text
+get_combined_questions() -> Vec<InvestigativeQuestion>
 ```
 
 Generates investigative questions from three engines:
@@ -293,14 +283,12 @@ Generates investigative questions from three engines:
 
 ### Learning Tools
 
-**Location:** `src/ares/tools/blue/learning.py`
-
-```python
+```text
 find_similar_investigations(
-    alert_name: str,
-    mitre_techniques: List[str],
-    severity: str
-) -> List[Investigation]
+    alert_name: String,
+    mitre_techniques: Vec<String>,
+    severity: String
+) -> Vec<Investigation>
 ```
 
 Features:
@@ -312,8 +300,6 @@ Features:
 
 ### MITRE Lookup Tools
 
-**Location:** `src/ares/tools/blue/mitre.py`
-
 - Technique name resolution
 - Tactic mapping (Reconnaissance, Initial Access, Execution, etc.)
 - Attack lifecycle coverage analysis
@@ -323,7 +309,7 @@ Features:
 
 ### Alert Correlation
 
-**Location:** `src/ares/core/alert_correlation.py`
+**Location:** `ares-core/src/correlation/`
 
 The `AlertCluster` class groups related alerts using similarity scoring:
 
@@ -342,7 +328,7 @@ The `AlertCluster` class groups related alerts using similarity scoring:
 
 ### Lateral Movement Analysis
 
-**Location:** `src/ares/core/lateral_analyzer.py`
+**Location:** `ares-core/src/state/`
 
 The `LateralGraph` tracks host-to-host connections and attack spread:
 
@@ -365,7 +351,7 @@ The `LateralGraph` tracks host-to-host connections and attack spread:
 
 ### Red-Blue Correlation
 
-**Location:** `src/ares/core/correlation.py`
+**Location:** `ares-core/src/correlation/`
 
 Correlates red team activities with blue team detections to identify gaps:
 
@@ -386,7 +372,7 @@ Correlates red team activities with blue team detections to identify gaps:
 
 ### Evidence Validation
 
-**Location:** `src/ares/core/evidence_validation.py`
+**Location:** `ares-core/src/`
 
 Automatic validation of recorded evidence:
 
@@ -398,7 +384,7 @@ Automatic validation of recorded evidence:
 
 ### Query Resilience
 
-**Location:** `src/ares/core/query_resilience.py`
+**Location:** `ares-core/src/`
 
 Ensures reliable query execution:
 
@@ -484,11 +470,11 @@ The blue agent uses MCP to connect to Grafana and access observability data:
 - Multi-architecture image rendering
 
 **Setup:**
-See `.claude/CLAUDE.md` for MCP server installation instructions.
+See [Grafana MCP Setup](grafana-mcp-setup.md) for MCP server installation instructions.
 
 ### Markdown Report Generation
 
-**Location:** `src/ares/reports/investigation.py`
+**Location:** `ares-core/src/reports/`
 
 Investigation reports include:
 
@@ -608,20 +594,15 @@ Provides structured investigation workflows:
 
 | Component | Path |
 | ----------- | ------ |
-| Investigation Orchestrator | `src/ares/agents/blue/soc_investigator.py` |
-| Agent Factory & Query Limits | `src/ares/core/factories/blue_factory.py` |
-| Investigation Tools | `src/ares/tools/blue/investigation.py` |
-| Completion Tools | `src/ares/tools/blue/actions.py` |
-| Grafana Integration | `src/ares/tools/blue/grafana.py` |
-| Query Templates | `src/ares/tools/blue/query_templates.py` |
-| Learning Tools | `src/ares/tools/blue/learning.py` |
-| Observability (Loki/Prometheus) | `src/ares/tools/blue/observability.py` |
-| Alert Correlation | `src/ares/core/alert_correlation.py` |
-| Lateral Movement Analysis | `src/ares/core/lateral_analyzer.py` |
-| Red-Blue Correlation | `src/ares/core/correlation.py` |
-| Evidence Validation | `src/ares/core/evidence_validation.py` |
-| Report Generation | `src/ares/reports/investigation.py` |
-| Investigation Models | `src/ares/core/models.py` |
+| Blue Orchestrator | `ares-orchestrator/src/blue/` |
+| Blue Worker Task Loop | `ares-worker/src/blue_task_loop.rs` |
+| Blue CLI Commands | `ares-cli/src/blue/` |
+| Core Models | `ares-core/src/models/` |
+| State Management | `ares-core/src/state/` |
+| Correlation Engine | `ares-core/src/correlation/` |
+| Report Generation | `ares-core/src/reports/` |
+| Tool Dispatch | `ares-tools/src/` |
+| Configuration | `config/ares.yaml` |
 
 ## Configuration
 
@@ -652,31 +633,32 @@ blue_team:
 
 ### Running an Investigation
 
-```python
-from ares.agents.blue.soc_investigator import InvestigationOrchestrator
-from ares.core.models import AlertContext
+```bash
+# Submit a single alert for investigation
+ares-cli --k8s ares-blue blue submit '{"alert_title":"Suspicious PowerShell Execution","severity":"high"}'
 
-# Create alert context
-alert = AlertContext(
-    alert_name="Suspicious PowerShell Execution",
-    firing_timestamp="2024-01-27T10:00:00Z",
-    severity="high",
-    labels={"host": "web-01", "job": "eventlog"},
-    annotations={"description": "Encoded PowerShell command detected"}
-)
+# Submit investigations from a red team operation
+ares-cli --k8s ares-blue blue from-operation --latest
 
-# Run investigation
-orchestrator = InvestigationOrchestrator()
-result = await orchestrator.investigate(alert)
+# Continuous poll mode (watches Grafana for new alerts)
+ares-cli --k8s ares-blue blue watch --poll-interval 30
 
-# Result includes:
-# - investigation_id
-# - report_path (markdown)
-# - report_json_path (JSON)
-# - investigation_state (complete state object)
+# Monitor progress
+ares-cli --k8s ares-blue blue operation-status --latest --watch 10
 ```
 
 ### Viewing Investigation Results
+
+```bash
+# View evidence collected
+ares-cli --k8s ares-blue blue evidence --latest
+
+# Generate markdown report
+ares-cli --k8s ares-blue blue report --latest
+
+# View MITRE techniques identified
+ares-cli --k8s ares-blue blue techniques --latest
+```
 
 Investigation reports are written to the configured output directory and include:
 

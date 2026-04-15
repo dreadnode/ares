@@ -20,10 +20,10 @@
   description: >-
     Changes made to pre-commit hooks
 
-- name: area/python
-  color: "7BD7E0"  # Turquoise
+- name: area/rust
+  color: "DEA584"  # Rust orange
   description: >-
-    Changes to Python package configuration and dependencies
+    Changes to Rust crates, Cargo configuration, and dependencies
 
 - name: area/security
   color: "FF6600"  # Orange

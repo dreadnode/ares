@@ -124,7 +124,7 @@ tasks:
       - task: check-command
         vars: { COMMAND: docker }
       - task: check-command
-        vars: { COMMAND: python3 }
+        vars: { COMMAND: cargo }
       - task: check-command
         vars: { COMMAND: ruby }
 
@@ -160,9 +160,9 @@ tasks:
     cmds:
       - task: setup-env
       - task: setup-git-hooks
-      - poetry install
+      - cargo build
       - task: pre-commit:install
-      - echo "Project is ready to go! 🚀"
+      - echo "Project is ready to go!"
 
   # Tools and pre-commit tasks
   run-pre-commit:
@@ -174,15 +174,10 @@ tasks:
       - task: pre-commit:run-hooks
 
   clean:
-    desc: Clean Python artifacts and cache directories
+    desc: Clean build artifacts
     silent: true
     cmds:
-      - |
-        find . -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
-        find . -type f -name "*.pyc" -delete
-        find . -type f -name "*.pyo" -delete
-        find . -type f -name "*.pyd" -delete
-        rm -rf .coverage htmlcov/ .pytest_cache/ .mypy_cache/ build/ dist/ ./*.egg-info/
+      - cargo clean
 
   # Rust CLI tasks
   rust:build:
@@ -222,41 +217,6 @@ tasks:
     cmds:
       - task: remote:rust:deploy:quick
 
-  # Poetry and API tasks
-  poetry:
-    desc: Run poetry in the API directory
-    silent: true
-    vars:
-      ARGS: '{{.CLI_ARGS}}'
-    cmds:
-      - task: deactivate
-      - cd {{.API_DIR}} && export PYTHONPATH="$(pwd)" && poetry {{.ARGS}}
-
-  mypy:
-    desc: Run type checking with mypy
-    silent: true
-    cmds:
-      - task: poetry
-        vars: { ARGS: "run mypy ." }
-
-  ruff:
-    desc: Run linting and formatting with ruff
-    silent: true
-    cmds:
-      - task: poetry
-        vars: { ARGS: "run ruff check ." }
-      - task: poetry
-        vars: { ARGS: "run ruff format ." }
-
-  pytest:
-    desc: Run tests with pytest and coverage reporting
-    silent: true
-    vars:
-      ARGS: '{{default "--cov=. --cov-report=term-missing tests/" .CLI_ARGS}}'
-    cmds:
-      - task: poetry
-        vars: { ARGS: "run pytest {{.ARGS}}" }
-
   # GitHub tasks
   create-release:
     desc: Create a release on GitHub
@@ -276,8 +236,8 @@ tasks:
         echo "Checking Ares configuration..."
         echo ""
         echo "Environment:"
-        echo "  Python: $(python --version)"
-        echo "  uv: $(uv --version 2>/dev/null || echo 'not installed')"
+        echo "  Rust: $(rustc --version 2>/dev/null || echo 'not installed')"
+        echo "  ares-cli: $({{.ARES_CLI}} --version 2>/dev/null || echo 'not built — run task rust:release')"
         echo ""
         echo "Configuration:"
         echo "  Platform: {{.DREADNODE_SERVER_URL}}"
@@ -361,7 +321,7 @@ tasks:
     desc: Show Ares version information
     silent: true
     cmds:
-      - uv run python -c "import ares; print('Ares version:', ares.__version__)"
+      - '{{.ARES_CLI}} --version'
 
   # ===========================================================================
   # Config Management Tasks
