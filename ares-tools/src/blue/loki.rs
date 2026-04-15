@@ -2,10 +2,9 @@
 //!
 //! HTTP-based queries against Loki's REST API for LogQL log retrieval.
 //!
-//! When `LOKI_URL` is set, queries go directly to the Loki endpoint.
-//! Otherwise, if `GRAFANA_URL` is set, queries are routed through
-//! Grafana's datasource proxy (`/api/datasources/proxy/uid/loki`)
-//! using `GRAFANA_API_KEY` or `GRAFANA_SERVICE_ACCOUNT_TOKEN` for auth.
+//! Set `LOKI_URL` to the Loki endpoint (e.g. `http://localhost:3100`).
+//! Optionally set `LOKI_AUTH_TOKEN` for Bearer auth.
+//! Defaults to `http://localhost:3100` if `LOKI_URL` is not set.
 
 use anyhow::{Context, Result};
 use serde_json::Value;
@@ -21,19 +20,9 @@ struct LokiConfig {
 
 fn loki_config() -> LokiConfig {
     if let Ok(url) = std::env::var("LOKI_URL") {
+        let token = std::env::var("LOKI_AUTH_TOKEN").ok();
         return LokiConfig {
-            base_url: url,
-            auth_token: None,
-        };
-    }
-
-    if let Ok(grafana_url) = std::env::var("GRAFANA_URL") {
-        let token = std::env::var("GRAFANA_API_KEY")
-            .or_else(|_| std::env::var("GRAFANA_SERVICE_ACCOUNT_TOKEN"))
-            .ok();
-        let base = grafana_url.trim_end_matches('/');
-        return LokiConfig {
-            base_url: format!("{base}/api/datasources/proxy/uid/loki"),
+            base_url: url.trim_end_matches('/').to_string(),
             auth_token: token,
         };
     }
@@ -44,7 +33,15 @@ fn loki_config() -> LokiConfig {
     }
 }
 
-/// Build a GET request with optional Grafana auth header.
+/// Build a reqwest client with a 30-second timeout.
+fn http_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .unwrap_or_default()
+}
+
+/// Build a GET request with optional auth header.
 fn build_get(client: &reqwest::Client, url: &str, config: &LokiConfig) -> reqwest::RequestBuilder {
     let mut req = client.get(url);
     if let Some(token) = &config.auth_token {
@@ -79,7 +76,7 @@ pub async fn query_logs(args: &Value) -> Result<ToolOutput> {
     let limit = optional_i64(args, "limit").unwrap_or(100);
 
     let config = loki_config();
-    let client = reqwest::Client::new();
+    let client = http_client();
     let resp = build_get(
         &client,
         &format!("{}/loki/api/v1/query_range", config.base_url),
@@ -180,7 +177,7 @@ pub async fn get_label_values(args: &Value) -> Result<ToolOutput> {
     let label = required_str(args, "label")?;
 
     let config = loki_config();
-    let client = reqwest::Client::new();
+    let client = http_client();
     let resp = build_get(
         &client,
         &format!("{}/loki/api/v1/label/{}/values", config.base_url, label),

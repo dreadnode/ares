@@ -12,6 +12,13 @@ fn prometheus_url() -> String {
     std::env::var("PROMETHEUS_URL").unwrap_or_else(|_| "http://localhost:9090".to_string())
 }
 
+fn http_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .unwrap_or_default()
+}
+
 fn make_output(body: &str) -> ToolOutput {
     ToolOutput {
         stdout: body.to_string(),
@@ -35,7 +42,7 @@ pub async fn query_instant(args: &Value) -> Result<ToolOutput> {
     let promql = required_str(args, "promql")?;
     let time = optional_str(args, "time");
 
-    let client = reqwest::Client::new();
+    let client = http_client();
     let mut params = vec![("query", promql.to_string())];
     if let Some(t) = time {
         params.push(("time", t.to_string()));
@@ -65,7 +72,7 @@ pub async fn query_range(args: &Value) -> Result<ToolOutput> {
     let end_time = required_str(args, "end_time")?;
     let step = optional_str(args, "step").unwrap_or("60s");
 
-    let client = reqwest::Client::new();
+    let client = http_client();
     let resp = client
         .get(format!("{}/api/v1/query_range", prometheus_url()))
         .query(&[
@@ -92,7 +99,7 @@ pub async fn query_range(args: &Value) -> Result<ToolOutput> {
 pub async fn get_metric_names(args: &Value) -> Result<ToolOutput> {
     let search = optional_str(args, "search");
 
-    let client = reqwest::Client::new();
+    let client = http_client();
     let resp = client
         .get(format!("{}/api/v1/label/__name__/values", prometheus_url()))
         .send()

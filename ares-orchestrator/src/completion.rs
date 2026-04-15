@@ -208,12 +208,19 @@ pub async fn wait_for_completion(
 
             // When blue team is enabled, wait for active investigations and
             // the investigation queue to drain before signalling stop.
+            // Cap at 20 minutes to avoid hanging forever if an investigation is stuck.
             if std::env::var("ARES_BLUE_ENABLED").as_deref() == Ok("1") {
                 info!("Blue team enabled — waiting for investigations to finish before shutdown");
                 let mut conn = dispatcher.queue.connection();
+                let blue_deadline = tokio::time::Instant::now() + Duration::from_secs(1200);
                 loop {
                     if *shutdown_rx.borrow() {
                         info!("Completion monitor interrupted by shutdown while waiting for blue");
+                        break;
+                    }
+
+                    if tokio::time::Instant::now() >= blue_deadline {
+                        warn!("Blue team wait deadline reached (20m) — proceeding with shutdown");
                         break;
                     }
 

@@ -47,6 +47,7 @@ fn build_client() -> Result<reqwest::Client> {
     }
     reqwest::Client::builder()
         .default_headers(headers)
+        .timeout(std::time::Duration::from_secs(30))
         .build()
         .context("Failed to build HTTP client")
 }

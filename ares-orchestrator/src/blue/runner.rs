@@ -16,8 +16,11 @@ use ares_llm::{LlmProvider, ToolDispatcher};
 
 use super::investigation::{self, Investigation};
 
-/// Threshold for considering a running investigation as stale (1 hour).
-const STALE_INVESTIGATION_THRESHOLD_SECS: i64 = 3600;
+/// Timeout for a single investigation run (15 minutes).
+const INVESTIGATION_TIMEOUT_SECS: u64 = 900;
+
+/// Threshold for considering a running investigation as stale (15 minutes).
+const STALE_INVESTIGATION_THRESHOLD_SECS: i64 = 900;
 
 /// Interval between periodic stale investigation checks (5 minutes).
 const STALE_CHECK_INTERVAL_SECS: u64 = 300;
@@ -254,28 +257,38 @@ impl BlueOrchestrator {
                         .get_connection_manager()
                         .await?;
 
-                    match investigation::run_investigation(
-                        &investigation,
-                        Arc::clone(&self.provider),
-                        Arc::clone(&self.dispatcher),
-                        &mut task_queue,
-                        &self.redis_url,
-                        &mut conn,
+                    match tokio::time::timeout(
+                        Duration::from_secs(INVESTIGATION_TIMEOUT_SECS),
+                        investigation::run_investigation(
+                            &investigation,
+                            Arc::clone(&self.provider),
+                            Arc::clone(&self.dispatcher),
+                            &mut task_queue,
+                            &self.redis_url,
+                            &mut conn,
+                        ),
                     )
                     .await
                     {
-                        Ok(outcome) => {
+                        Ok(Ok(outcome)) => {
                             info!(
                                 investigation_id = %investigation_id,
                                 outcome = ?outcome,
                                 "Investigation finished"
                             );
                         }
-                        Err(e) => {
+                        Ok(Err(e)) => {
                             error!(
                                 investigation_id = %investigation_id,
                                 err = %e,
                                 "Investigation failed with error"
+                            );
+                        }
+                        Err(_elapsed) => {
+                            error!(
+                                investigation_id = %investigation_id,
+                                timeout_secs = INVESTIGATION_TIMEOUT_SECS,
+                                "Investigation timed out — cancelling"
                             );
                         }
                     }

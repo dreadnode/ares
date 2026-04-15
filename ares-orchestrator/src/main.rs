@@ -413,6 +413,21 @@ async fn run() -> Result<()> {
     let auto_handles = spawn_automation_tasks(dispatcher.clone(), shutdown_rx.clone());
 
     // --- Blue team orchestrator (optional — enabled when ARES_BLUE_ENABLED=1) ---
+    // Inject observability URLs from YAML config into env vars (blue tools read env vars).
+    #[cfg(feature = "blue")]
+    if let Some(ref cfg) = ares_config {
+        if let Some(ref obs) = cfg.observability {
+            if !obs.loki_url.is_empty() && std::env::var("LOKI_URL").is_err() {
+                std::env::set_var("LOKI_URL", &obs.loki_url);
+            }
+            if !obs.loki_auth_token.is_empty() && std::env::var("LOKI_AUTH_TOKEN").is_err() {
+                std::env::set_var("LOKI_AUTH_TOKEN", &obs.loki_auth_token);
+            }
+            if !obs.prometheus_url.is_empty() && std::env::var("PROMETHEUS_URL").is_err() {
+                std::env::set_var("PROMETHEUS_URL", &obs.prometheus_url);
+            }
+        }
+    }
     #[cfg(feature = "blue")]
     let blue_handle = if std::env::var("ARES_BLUE_ENABLED").as_deref() == Ok("1") {
         // Create a separate LLM provider for the blue team

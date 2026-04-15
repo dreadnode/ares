@@ -243,3 +243,17 @@ pub struct GrafanaConfig {
     #[serde(default)]
     pub dashboard_uid: String,
 }
+
+/// Observability backend URLs for blue team tools.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ObservabilityConfig {
+    /// Direct Loki URL (e.g. `http://localhost:3100`).
+    #[serde(default)]
+    pub loki_url: String,
+    /// Optional Bearer token for Loki auth.
+    #[serde(default)]
+    pub loki_auth_token: String,
+    /// Direct Prometheus URL (e.g. `http://localhost:9090`).
+    #[serde(default)]
+    pub prometheus_url: String,
+}

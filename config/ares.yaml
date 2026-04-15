@@ -342,3 +342,10 @@ grafana:
   base_url: "${GRAFANA_URL}"
   api_key: "${GRAFANA_SERVICE_ACCOUNT_TOKEN}"
   dashboard_uid: "ares-redteam"
+
+# Observability backends (for blue team log/metric queries)
+# Loki port-forward: kubectl port-forward -n observability svc/loki-gateway 3100:80
+# Prometheus port-forward: kubectl port-forward -n observability svc/kube-prometheus-stack-prometheus 9090:9090
+observability:
+  loki_url: "http://localhost:3100"
+  prometheus_url: "http://localhost:9090"
