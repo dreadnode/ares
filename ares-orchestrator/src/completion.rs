@@ -406,7 +406,7 @@ async fn auto_submit_blue_investigation(
     let max_steps: u32 = std::env::var("ARES_BLUE_MAX_STEPS")
         .ok()
         .and_then(|s| s.parse().ok())
-        .unwrap_or(15);
+        .unwrap_or(75);
 
     let request = serde_json::json!({
         "investigation_id": inv_id,
