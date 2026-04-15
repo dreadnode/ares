@@ -306,16 +306,15 @@ grafana_mcp_tools = GrafanaMCPTools(datasource_uid="custom-loki-ds")
 
 ## Benefits
 
-1. **Guided Discovery**: The guide tools help the agent understand how to use
-   the native MCP tools correctly
-2. **Pre-built Queries**: Common security queries are provided for faster
-   investigation
-3. **Best Practices**: The guides include best practices like checking stats
-   before querying logs
-4. **Flexibility**: The agent can use both MCP tools and direct Loki API calls
-   as needed
-5. **Integration**: Seamlessly integrates with the existing investigation
-   workflow
+- **Guided Discovery**: The guide tools help the agent understand how to use
+  the native MCP tools correctly
+- **Pre-built Queries**: Common security queries are provided for faster
+  investigation
+- **Best Practices**: The guides include best practices like checking stats
+  before querying logs
+- **Flexibility**: The agent can use both MCP tools and direct Loki API calls
+  as needed
+- **Integration**: Works alongside the existing investigation workflow
 
 ## Next Steps
 

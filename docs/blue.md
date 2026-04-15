@@ -2,11 +2,9 @@
 
 ## Overview
 
-The **Ares Blue Agent** is an autonomous SOC (Security Operations Center)
-investigation system that ingests Grafana alerts and conducts intelligent,
-multi-stage security investigations. It queries observability data (Loki logs,
-Prometheus metrics), extracts validated evidence, maps findings to the MITRE
-ATT&CK framework, and generates comprehensive investigation reports.
+The **Ares Blue Agent** is an autonomous SOC investigation system. It picks up
+Grafana alerts, queries Loki logs and Prometheus metrics for evidence, maps
+findings to MITRE ATT&CK, and writes investigation reports.
 
 **Key Capabilities:**
 
@@ -688,20 +686,19 @@ Investigation reports are written to the configured output directory and include
 
 ## Summary
 
-The **Ares Blue Agent** provides autonomous, intelligent SOC investigation
-capabilities that:
+The **Ares Blue Agent** handles autonomous SOC investigation:
 
-1. **Ingest alerts** from Grafana and initiate investigations
-2. **Query observability data** (Loki, Prometheus) with intelligent rate limiting
-3. **Extract validated evidence** using the Pyramid of Pain framework
-4. **Map to MITRE ATT&CK** for tactical context and gap analysis
-5. **Identify attack precursors** to build complete attack chains
-6. **Detect lateral movement** and expand investigation scope
-7. **Correlate related alerts** to identify campaign patterns
-8. **Learn from history** using past investigations as guidance
-9. **Generate comprehensive reports** with timelines, recommendations, and evidence
-10. **Integrate with Grafana** for seamless alert management
+1. Picks up alerts from Grafana
+2. Queries Loki and Prometheus with intelligent rate limiting
+3. Extracts evidence using the Pyramid of Pain framework
+4. Maps to MITRE ATT&CK for tactical context and gap analysis
+5. Identifies attack precursors to build complete attack chains
+6. Detects lateral movement and expands investigation scope
+7. Correlates related alerts to identify campaign patterns
+8. Learns from past investigations
+9. Generates reports with timelines, recommendations, and evidence
+10. Posts annotations back to Grafana
 
-The blue agent accelerates SOC workflows, improves detection coverage through
-Red-Blue correlation, and provides consistent, thorough investigations at
-scale.
+The blue agent cuts investigation time by automating the triage-to-report
+pipeline, and the Red-Blue correlation loop surfaces detection gaps that
+manual review tends to miss.
