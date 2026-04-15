@@ -292,6 +292,63 @@ impl BlueCallbackHandler {
         )))
     }
 
+    /// Dispatch escalation triage sub-agent.
+    ///
+    /// Instead of immediately returning `RequestAssistance`, we launch an
+    /// `EscalationTriage` sub-agent that reviews the investigation context and
+    /// decides whether to confirm, downgrade, reinvestigate, or route.
+    async fn dispatch_escalation_triage(&self, call: &ToolCall) -> Result<CallbackResult> {
+        let reason = call.arguments["reason"].as_str().unwrap_or("unknown");
+        let severity = call.arguments["severity"].as_str().unwrap_or("high");
+
+        info!(
+            investigation_id = %self.investigation_id,
+            severity = severity,
+            reason = reason,
+            "Dispatching escalation triage sub-agent"
+        );
+
+        let task_prompt = format!(
+            "You are performing escalation triage for investigation {}.\n\n\
+             Escalation reason: {}\n\
+             Severity: {}\n\n\
+             Review the full investigation context using get_investigation_context. \
+             Then make ONE of these decisions:\n\
+             1. confirm_escalation — if the evidence warrants human review\n\
+             2. downgrade_escalation — if this is a false positive or low severity\n\
+             3. request_reinvestigation — if more evidence is needed before deciding\n\
+             4. route_to_team — if a specialist team should handle this\n\n\
+             Be decisive. Evaluate the evidence quality, technique severity, and \
+             scope of compromise before making your decision.",
+            self.investigation_id, reason, severity
+        );
+
+        let result = self
+            .run_sub_agent(BlueAgentRole::EscalationTriage, &task_prompt)
+            .await?;
+
+        info!(
+            investigation_id = %self.investigation_id,
+            "Escalation triage sub-agent completed"
+        );
+
+        // If the triage confirmed escalation, propagate as RequestAssistance
+        // so the orchestrator loop terminates with escalated status.
+        // Otherwise return the triage decision as a Continue so the orchestrator
+        // can incorporate the finding (e.g., downgrade → complete investigation).
+        let lower = result.to_lowercase();
+        if lower.contains("escalation confirmed") || lower.contains("confirm") {
+            Ok(CallbackResult::RequestAssistance {
+                issue: format!("Escalation confirmed by triage ({severity}): {reason}"),
+                context: result,
+            })
+        } else {
+            Ok(CallbackResult::Continue(format!(
+                "Escalation triage result:\n{result}"
+            )))
+        }
+    }
+
     /// Handle query tools that read investigation state from Redis.
     async fn handle_query_tool(&self, call: &ToolCall) -> Result<CallbackResult> {
         match call.name.as_str() {
@@ -390,19 +447,7 @@ impl BlueCallbackHandler {
                     result: result.to_string(),
                 })
             }
-            "escalate_investigation" => {
-                let reason = call.arguments["reason"].as_str().unwrap_or("unknown");
-                let severity = call.arguments["severity"].as_str().unwrap_or("high");
-                Some(CallbackResult::RequestAssistance {
-                    issue: format!("Escalation ({severity}): {reason}"),
-                    context: call
-                        .arguments
-                        .get("context")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("")
-                        .to_string(),
-                })
-            }
+            // escalate_investigation is handled async in dispatch_escalation_triage
             "confirm_escalation" => {
                 let action = call.arguments["action"].as_str().unwrap_or("escalate");
                 Some(CallbackResult::TaskComplete {
@@ -448,6 +493,9 @@ impl CallbackHandler for BlueCallbackHandler {
             "dispatch_triage" => Some(self.dispatch_triage(call).await),
             "dispatch_threat_hunt" => Some(self.dispatch_threat_hunt(call).await),
             "dispatch_lateral_analysis" => Some(self.dispatch_lateral_analysis(call).await),
+
+            // Escalation — launches escalation triage sub-agent
+            "escalate_investigation" => Some(self.dispatch_escalation_triage(call).await),
 
             // Query tools
             "get_investigation_status" | "get_task_result" | "wait_for_all_tasks" => {
@@ -508,7 +556,9 @@ mod tests {
     }
 
     #[test]
-    fn test_escalate_investigation_callback() {
+    fn test_escalate_investigation_not_in_lifecycle_callbacks() {
+        // escalate_investigation is now handled async via dispatch_escalation_triage,
+        // not the static handle_lifecycle_callback
         let call = ToolCall {
             id: "c2".into(),
             name: "escalate_investigation".into(),
@@ -517,14 +567,7 @@ mod tests {
                 "severity": "critical",
             }),
         };
-        let result = BlueCallbackHandler::handle_lifecycle_callback(&call).unwrap();
-        match result {
-            CallbackResult::RequestAssistance { issue, .. } => {
-                assert!(issue.contains("critical"));
-                assert!(issue.contains("lateral movement"));
-            }
-            _ => panic!("Expected RequestAssistance"),
-        }
+        assert!(BlueCallbackHandler::handle_lifecycle_callback(&call).is_none());
     }
 
     #[test]

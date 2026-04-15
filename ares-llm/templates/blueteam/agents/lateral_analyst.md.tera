@@ -46,7 +46,7 @@ Analyze lateral movement patterns, identify compromised hosts and accounts, and 
 ## Connection Tracking (MANDATORY)
 
 For EVERY authentication connection discovered:
-1. Record with `record_lateral_connection(source_host, destination_host, method, user, timestamp)`
+1. Record with `add_lateral_connection(source_host, destination_host, method, user, timestamp)`
 2. Investigate the source host if not already investigated
 3. Investigate the destination host if not already investigated
 4. Call `track_host_investigation` for each host
@@ -79,7 +79,7 @@ This pattern indicates mass deployment (ransomware prep, data staging). CRITICAL
 - **Use deployment label** when available
 
 ## Evidence Recording
-- Record lateral connections with `record_lateral_connection`
+- Record lateral connections with `add_lateral_connection`
 - Track all investigated hosts with `track_host_investigation`
 - Track all investigated users with `track_user_investigation`
 - Build timeline showing movement sequence with timestamps

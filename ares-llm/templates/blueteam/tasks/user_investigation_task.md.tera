@@ -29,7 +29,7 @@ Investigate the activity of user **{{ username }}** across all systems:
    - Unusual service ticket requests (Kerberoasting indicator)
 
 4. **Map the user's movement**:
-   - Record each host-to-host connection with `record_lateral_connection()`
+   - Record each host-to-host connection with `add_lateral_connection()`
    - Identify the first and last hosts in the movement chain
    - Determine the direction of movement (inward toward DCs, or outward)
 
@@ -38,7 +38,7 @@ Investigate the activity of user **{{ username }}** across all systems:
    - Look for recent group membership changes (Event 4728, 4732, 4756)
    - Check for SPN modifications on the account
 
-6. **Record all evidence**: Every finding must be recorded with `record_evidence()`:
+6. **Record all evidence**: Every finding must be recorded with `add_evidence()`:
    - Hosts accessed: evidence_type="artifact", pyramid_level=4
    - Source IPs: evidence_type="ip", pyramid_level=2
    - Techniques observed: evidence_type="technique", pyramid_level=6

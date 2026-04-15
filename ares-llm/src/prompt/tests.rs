@@ -488,7 +488,8 @@ fn test_exploit_unconstrained_delegation() {
     let prompt = generate_task_prompt("exploit", "t-23", &payload, None).unwrap();
     assert!(prompt.contains("UNCONSTRAINED DELEGATION EXPLOITATION"));
     assert!(prompt.contains("WEB01$"));
-    assert!(prompt.contains("PetitPotam"));
+    assert!(prompt.contains("unconstrained_coerce_and_capture"));
+    assert!(prompt.contains("unconstrained_tgt_dump"));
     assert!(prompt.contains("DCSync"));
 }
 

@@ -39,6 +39,7 @@ pub(crate) fn spawn_automation_tasks(
     spawn_auto!(auto_trust_follow);
     spawn_auto!(auto_s4u_exploitation);
     spawn_auto!(auto_gmsa_extraction);
+    spawn_auto!(auto_unconstrained_exploitation);
     spawn_auto!(auto_stall_detection);
 
     info!(count = handles.len(), "Automation tasks spawned");

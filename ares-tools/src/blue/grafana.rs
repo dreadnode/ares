@@ -884,6 +884,186 @@ pub async fn create_detection_rule(args: &Value) -> Result<ToolOutput> {
     )))
 }
 
+/// Get alert rule definitions from Grafana's provisioning API.
+pub async fn get_alert_history(args: &Value) -> Result<ToolOutput> {
+    let _hours = optional_i64(args, "hours_back"); // reserved for future use
+    let client = build_client()?;
+
+    let url = format!("{}/api/v1/provisioning/alert-rules", grafana_url());
+    let resp = client.get(&url).send().await;
+
+    let resp = match resp {
+        Ok(r) => r,
+        Err(e) => return Ok(make_error(&format!("Failed to query Grafana: {e}"))),
+    };
+
+    let status = resp.status();
+    let body = resp.text().await.unwrap_or_default();
+
+    if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
+        return Ok(make_error(&format!(
+            "Grafana authentication failed ({status}): {body}"
+        )));
+    }
+
+    if !status.is_success() {
+        return Ok(make_error(&format!("Grafana returned {status}: {body}")));
+    }
+
+    // Format the rules list
+    if let Ok(rules) = serde_json::from_str::<Vec<Value>>(&body) {
+        let mut parts = Vec::new();
+        parts.push(format!("Alert rules ({} total):\n", rules.len()));
+        for rule in &rules {
+            let title = rule
+                .get("title")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unnamed");
+            let uid = rule.get("uid").and_then(|v| v.as_str()).unwrap_or("-");
+            let folder = rule
+                .get("folderUID")
+                .and_then(|v| v.as_str())
+                .unwrap_or("-");
+            let interval = rule
+                .get("intervalSeconds")
+                .and_then(|v| v.as_i64())
+                .unwrap_or(0);
+            parts.push(format!(
+                "  - {title} (uid={uid}, folder={folder}, interval={interval}s)"
+            ));
+        }
+        Ok(make_output(&parts.join("\n")))
+    } else {
+        Ok(make_output(&body))
+    }
+}
+
+/// Get alerts that fired within a specific time range.
+///
+/// Queries Grafana's annotations API for alert annotations within the given
+/// time window (with configurable buffer), then transforms annotations into
+/// a normalized alert format.
+pub async fn get_alerts_in_time_range(args: &Value) -> Result<ToolOutput> {
+    let from_time = required_str(args, "from_time")?;
+    let to_time = required_str(args, "to_time")?;
+    let buffer_minutes = optional_i64(args, "buffer_minutes").unwrap_or(30);
+
+    // Parse timestamps
+    let from_dt = chrono::DateTime::parse_from_rfc3339(from_time)
+        .or_else(|_| chrono::DateTime::parse_from_str(from_time, "%Y-%m-%dT%H:%M:%S%.fZ"))
+        .unwrap_or_else(|_| chrono::Utc::now().into());
+    let to_dt = chrono::DateTime::parse_from_rfc3339(to_time)
+        .or_else(|_| chrono::DateTime::parse_from_str(to_time, "%Y-%m-%dT%H:%M:%S%.fZ"))
+        .unwrap_or_else(|_| chrono::Utc::now().into());
+
+    // Apply buffer
+    let from_buffered = from_dt - chrono::Duration::minutes(buffer_minutes);
+    let to_buffered = to_dt + chrono::Duration::minutes(buffer_minutes);
+
+    let from_ms = from_buffered.timestamp_millis();
+    let to_ms = to_buffered.timestamp_millis();
+
+    let client = build_client()?;
+    let url = format!("{}/api/annotations", grafana_url());
+
+    let resp = client
+        .get(&url)
+        .query(&[
+            ("from", from_ms.to_string()),
+            ("to", to_ms.to_string()),
+            ("type", "alert".to_string()),
+        ])
+        .send()
+        .await
+        .context("Failed to query Grafana annotations")?;
+
+    let status = resp.status();
+    let body = resp.text().await.unwrap_or_default();
+
+    if !status.is_success() {
+        return Ok(make_error(&format!("Grafana returned {status}: {body}")));
+    }
+
+    let annotations: Vec<Value> = serde_json::from_str(&body).unwrap_or_default();
+
+    // Transform annotations to alert format with dedup
+    let mut seen_fingerprints = std::collections::HashSet::new();
+    let mut alerts = Vec::new();
+
+    for ann in &annotations {
+        let alert_id = ann.get("alertId").and_then(|v| v.as_i64()).unwrap_or(0);
+        if alert_id == 0 {
+            continue; // skip non-alert annotations
+        }
+        let panel_id = ann.get("panelId").and_then(|v| v.as_i64()).unwrap_or(0);
+        let fingerprint = format!("ann-{alert_id}-{panel_id}");
+
+        if !seen_fingerprints.insert(fingerprint.clone()) {
+            continue; // deduplicate
+        }
+
+        // Extract labels from tags
+        let mut labels = serde_json::Map::new();
+        if let Some(tags) = ann.get("tags").and_then(|v| v.as_array()) {
+            for tag in tags {
+                if let Some(s) = tag.as_str() {
+                    if let Some((k, v)) = s.split_once(':').or_else(|| s.split_once('=')) {
+                        labels.insert(k.to_string(), Value::String(v.to_string()));
+                    } else {
+                        labels.insert("alertname".to_string(), Value::String(s.to_string()));
+                    }
+                }
+            }
+        }
+        if !labels.contains_key("alertname") {
+            if let Some(name) = ann.get("alertName").and_then(|v| v.as_str()) {
+                labels.insert("alertname".to_string(), Value::String(name.to_string()));
+            }
+        }
+
+        let text = ann
+            .get("text")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let time_ms = ann.get("time").and_then(|v| v.as_i64()).unwrap_or(0);
+        let time_end_ms = ann.get("timeEnd").and_then(|v| v.as_i64());
+
+        let starts_at = chrono::DateTime::from_timestamp_millis(time_ms)
+            .map(|dt| dt.to_rfc3339())
+            .unwrap_or_default();
+        let ends_at = time_end_ms
+            .and_then(chrono::DateTime::from_timestamp_millis)
+            .map(|dt| dt.to_rfc3339())
+            .unwrap_or_default();
+        let state = if time_end_ms.is_some() {
+            "resolved"
+        } else {
+            "firing"
+        };
+
+        alerts.push(serde_json::json!({
+            "fingerprint": fingerprint,
+            "labels": labels,
+            "annotations": { "summary": text, "description": text },
+            "startsAt": starts_at,
+            "endsAt": ends_at,
+            "status": { "state": state },
+        }));
+    }
+
+    if alerts.is_empty() {
+        return Ok(make_output("No alerts found in the specified time range."));
+    }
+
+    let output = serde_json::to_string_pretty(&alerts).unwrap_or_default();
+    Ok(make_output(&format!(
+        "Found {} alerts in time range:\n\n{}",
+        alerts.len(),
+        output
+    )))
+}
+
 /// Pretty-print JSON as a fallback when structured formatting isn't possible.
 fn format_json_pretty(value: &Value) -> String {
     serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string())

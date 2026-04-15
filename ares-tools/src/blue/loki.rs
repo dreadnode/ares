@@ -1,6 +1,11 @@
 //! Loki log query tools.
 //!
 //! HTTP-based queries against Loki's REST API for LogQL log retrieval.
+//!
+//! When `LOKI_URL` is set, queries go directly to the Loki endpoint.
+//! Otherwise, if `GRAFANA_URL` is set, queries are routed through
+//! Grafana's datasource proxy (`/api/datasources/proxy/uid/loki`)
+//! using `GRAFANA_API_KEY` or `GRAFANA_SERVICE_ACCOUNT_TOKEN` for auth.
 
 use anyhow::{Context, Result};
 use serde_json::Value;
@@ -8,8 +13,44 @@ use serde_json::Value;
 use crate::args::{optional_i64, required_str};
 use crate::ToolOutput;
 
-fn loki_url() -> String {
-    std::env::var("LOKI_URL").unwrap_or_else(|_| "http://localhost:3100".to_string())
+/// Loki connection configuration.
+struct LokiConfig {
+    base_url: String,
+    auth_token: Option<String>,
+}
+
+fn loki_config() -> LokiConfig {
+    if let Ok(url) = std::env::var("LOKI_URL") {
+        return LokiConfig {
+            base_url: url,
+            auth_token: None,
+        };
+    }
+
+    if let Ok(grafana_url) = std::env::var("GRAFANA_URL") {
+        let token = std::env::var("GRAFANA_API_KEY")
+            .or_else(|_| std::env::var("GRAFANA_SERVICE_ACCOUNT_TOKEN"))
+            .ok();
+        let base = grafana_url.trim_end_matches('/');
+        return LokiConfig {
+            base_url: format!("{base}/api/datasources/proxy/uid/loki"),
+            auth_token: token,
+        };
+    }
+
+    LokiConfig {
+        base_url: "http://localhost:3100".to_string(),
+        auth_token: None,
+    }
+}
+
+/// Build a GET request with optional Grafana auth header.
+fn build_get(client: &reqwest::Client, url: &str, config: &LokiConfig) -> reqwest::RequestBuilder {
+    let mut req = client.get(url);
+    if let Some(token) = &config.auth_token {
+        req = req.bearer_auth(token);
+    }
+    req
 }
 
 fn make_output(body: &str) -> ToolOutput {
@@ -37,18 +78,22 @@ pub async fn query_logs(args: &Value) -> Result<ToolOutput> {
     let end_time = required_str(args, "end_time")?;
     let limit = optional_i64(args, "limit").unwrap_or(100);
 
+    let config = loki_config();
     let client = reqwest::Client::new();
-    let resp = client
-        .get(format!("{}/loki/api/v1/query_range", loki_url()))
-        .query(&[
-            ("query", logql),
-            ("start", start_time),
-            ("end", end_time),
-            ("limit", &limit.to_string()),
-        ])
-        .send()
-        .await
-        .context("Failed to query Loki")?;
+    let resp = build_get(
+        &client,
+        &format!("{}/loki/api/v1/query_range", config.base_url),
+        &config,
+    )
+    .query(&[
+        ("query", logql),
+        ("start", start_time),
+        ("end", end_time),
+        ("limit", &limit.to_string()),
+    ])
+    .send()
+    .await
+    .context("Failed to query Loki")?;
 
     let status = resp.status();
     let body = resp.text().await.context("Failed to read Loki response")?;
@@ -57,7 +102,14 @@ pub async fn query_logs(args: &Value) -> Result<ToolOutput> {
         return Ok(make_error(&format!("Loki returned {status}: {body}")));
     }
 
-    Ok(make_output(&format_loki_response(&body)))
+    let formatted = format_loki_response(&body);
+
+    // Store result for evidence validation (auto-extract IOCs)
+    if formatted != "No results found." {
+        super::evidence_validator::store_query_result(&formatted);
+    }
+
+    Ok(make_output(&formatted))
 }
 
 /// Query logs around a specific timestamp.
@@ -127,12 +179,16 @@ pub async fn query_logs_progressive(args: &Value) -> Result<ToolOutput> {
 pub async fn get_label_values(args: &Value) -> Result<ToolOutput> {
     let label = required_str(args, "label")?;
 
+    let config = loki_config();
     let client = reqwest::Client::new();
-    let resp = client
-        .get(format!("{}/loki/api/v1/label/{}/values", loki_url(), label))
-        .send()
-        .await
-        .context("Failed to query Loki label values")?;
+    let resp = build_get(
+        &client,
+        &format!("{}/loki/api/v1/label/{}/values", config.base_url, label),
+        &config,
+    )
+    .send()
+    .await
+    .context("Failed to query Loki label values")?;
 
     let status = resp.status();
     let body = resp.text().await?;

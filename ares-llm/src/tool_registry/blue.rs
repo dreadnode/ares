@@ -62,14 +62,6 @@ pub fn blue_tools_for_role(role: BlueAgentRole) -> Vec<ToolDefinition> {
         BlueAgentRole::EscalationTriage => escalation_triage_tool_definitions(),
     };
 
-    // Investigation state tools for all worker roles
-    match role {
-        BlueAgentRole::Triage | BlueAgentRole::ThreatHunter | BlueAgentRole::LateralAnalyst => {
-            tools.extend(investigation_tool_definitions());
-        }
-        _ => {}
-    }
-
     // Redis-backed investigation state mutation tools
     match role {
         BlueAgentRole::Triage
@@ -217,6 +209,47 @@ fn loki_tool_definitions() -> Vec<ToolDefinition> {
                 "required": ["queries", "start_time", "end_time"]
             }),
         },
+        ToolDefinition {
+            name: "query_logs_recent".into(),
+            description: "Query logs relative to NOW. Convenience wrapper for investigating stale or ongoing alerts without computing time ranges.".into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "logql": {
+                        "type": "string",
+                        "description": "LogQL query string"
+                    },
+                    "hours_back": {
+                        "type": "integer",
+                        "description": "How many hours back from now to search (default: 1)"
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum log entries (default: 100)"
+                    }
+                },
+                "required": ["logql"]
+            }),
+        },
+        ToolDefinition {
+            name: "combine_query_patterns".into(),
+            description: "Combine multiple regex patterns into a single LogQL filter using regex alternation. Returns a combined query ready for execution.".into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "base_selector": {
+                        "type": "string",
+                        "description": "Base LogQL log selector (e.g., '{job=\"windows\"}')"
+                    },
+                    "patterns": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "List of patterns to combine with regex OR"
+                    }
+                },
+                "required": ["base_selector", "patterns"]
+            }),
+        },
     ]
 }
 
@@ -264,6 +297,20 @@ fn prometheus_tool_definitions() -> Vec<ToolDefinition> {
                     }
                 },
                 "required": ["promql", "start_time", "end_time"]
+            }),
+        },
+        ToolDefinition {
+            name: "get_metric_names".into(),
+            description: "Get available Prometheus metric names with optional search filter."
+                .into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "search": {
+                        "type": "string",
+                        "description": "Optional case-insensitive search filter for metric names"
+                    }
+                }
             }),
         },
     ]
@@ -371,164 +418,6 @@ fn detection_query_tool_definitions() -> Vec<ToolDefinition> {
                     }
                 },
                 "required": ["username"]
-            }),
-        },
-    ]
-}
-
-// ---------------------------------------------------------------------------
-// Investigation state tools (used by worker agents)
-// ---------------------------------------------------------------------------
-
-fn investigation_tool_definitions() -> Vec<ToolDefinition> {
-    vec![
-        ToolDefinition {
-            name: "record_evidence".into(),
-            description: "Record a piece of evidence discovered during investigation.".into(),
-            input_schema: json!({
-                "type": "object",
-                "properties": {
-                    "evidence_type": {
-                        "type": "string",
-                        "enum": ["ip", "domain", "hash", "process", "user", "file", "artifact", "tool", "technique"],
-                        "description": "Type of evidence"
-                    },
-                    "value": {
-                        "type": "string",
-                        "description": "The evidence value (IP address, hash, username, etc.)"
-                    },
-                    "source": {
-                        "type": "string",
-                        "description": "Where this evidence was found"
-                    },
-                    "pyramid_level": {
-                        "type": "integer",
-                        "description": "Pyramid of Pain level (1=hashes, 2=IPs, 3=domains, 4=artifacts, 5=tools, 6=TTPs)"
-                    },
-                    "mitre_techniques": {
-                        "type": "array",
-                        "items": { "type": "string" },
-                        "description": "Associated MITRE ATT&CK technique IDs"
-                    },
-                    "confidence": {
-                        "type": "number",
-                        "description": "Confidence level (0.0-1.0)"
-                    }
-                },
-                "required": ["evidence_type", "value", "source", "pyramid_level"]
-            }),
-        },
-        ToolDefinition {
-            name: "add_timeline_event".into(),
-            description: "Add an event to the investigation timeline.".into(),
-            input_schema: json!({
-                "type": "object",
-                "properties": {
-                    "timestamp": {
-                        "type": "string",
-                        "description": "Event timestamp in ISO8601 format"
-                    },
-                    "description": {
-                        "type": "string",
-                        "description": "Description of the event"
-                    },
-                    "evidence_ids": {
-                        "type": "array",
-                        "items": { "type": "string" },
-                        "description": "IDs of related evidence items"
-                    },
-                    "mitre_techniques": {
-                        "type": "array",
-                        "items": { "type": "string" },
-                        "description": "MITRE ATT&CK technique IDs"
-                    },
-                    "confidence": {
-                        "type": "number",
-                        "description": "Confidence level (0.0-1.0)"
-                    }
-                },
-                "required": ["timestamp", "description"]
-            }),
-        },
-        ToolDefinition {
-            name: "record_lateral_connection".into(),
-            description: "Record a lateral movement connection between two hosts.".into(),
-            input_schema: json!({
-                "type": "object",
-                "properties": {
-                    "source_host": {
-                        "type": "string",
-                        "description": "Source hostname or IP"
-                    },
-                    "destination_host": {
-                        "type": "string",
-                        "description": "Destination hostname or IP"
-                    },
-                    "connection_type": {
-                        "type": "string",
-                        "description": "Type of connection (e.g., 'smb', 'wmi', 'rdp', 'winrm', 'psexec')"
-                    },
-                    "user": {
-                        "type": "string",
-                        "description": "User account used for the connection"
-                    },
-                    "mitre_technique": {
-                        "type": "string",
-                        "description": "MITRE ATT&CK technique ID"
-                    }
-                },
-                "required": ["source_host", "destination_host", "connection_type"]
-            }),
-        },
-        ToolDefinition {
-            name: "track_host_investigation".into(),
-            description: "Mark a host as investigated and get suggested queries for it.".into(),
-            input_schema: json!({
-                "type": "object",
-                "properties": {
-                    "hostname": {
-                        "type": "string",
-                        "description": "Hostname or IP to track"
-                    }
-                },
-                "required": ["hostname"]
-            }),
-        },
-        ToolDefinition {
-            name: "track_user_investigation".into(),
-            description: "Mark a user as investigated and get suggested queries for them.".into(),
-            input_schema: json!({
-                "type": "object",
-                "properties": {
-                    "username": {
-                        "type": "string",
-                        "description": "Username to track"
-                    }
-                },
-                "required": ["username"]
-            }),
-        },
-        ToolDefinition {
-            name: "get_investigation_summary".into(),
-            description: "Get a summary of the current investigation state including evidence, techniques, and progress.".into(),
-            input_schema: json!({
-                "type": "object",
-                "properties": {}
-            }),
-        },
-        ToolDefinition {
-            name: "transition_stage".into(),
-            description: "Transition the investigation to a new stage (triage -> causation -> lateral -> synthesis).".into(),
-            input_schema: json!({
-                "type": "object",
-                "properties": {
-                    "new_stage": {
-                        "type": "string",
-                        "enum": ["triage", "causation", "lateral", "synthesis"],
-                        "description": "Target investigation stage"
-                    }
-                },
-                "required": ["new_stage"]
             }),
         },
     ]
@@ -823,7 +712,13 @@ fn escalation_triage_tool_definitions() -> Vec<ToolDefinition> {
             description: "Get the full investigation context for triage evaluation.".into(),
             input_schema: json!({
                 "type": "object",
-                "properties": {}
+                "properties": {
+                    "investigation_id": {
+                        "type": "string",
+                        "description": "Investigation ID"
+                    }
+                },
+                "required": ["investigation_id"]
             }),
         },
         ToolDefinition {
@@ -1006,6 +901,41 @@ fn grafana_tool_definitions() -> Vec<ToolDefinition> {
                     }
                 },
                 "required": ["uid"]
+            }),
+        },
+        ToolDefinition {
+            name: "get_alert_history".into(),
+            description: "Get alert rule definitions from Grafana's provisioning API. Returns all configured alert rules with their UIDs, folders, and evaluation intervals.".into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "hours_back": {
+                        "type": "integer",
+                        "description": "Reserved for future use"
+                    }
+                }
+            }),
+        },
+        ToolDefinition {
+            name: "get_alerts_in_time_range".into(),
+            description: "Get alerts that fired within a specific time range. Queries Grafana annotations API and transforms results into normalized alert format with deduplication.".into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "from_time": {
+                        "type": "string",
+                        "description": "Start time in ISO8601 format"
+                    },
+                    "to_time": {
+                        "type": "string",
+                        "description": "End time in ISO8601 format"
+                    },
+                    "buffer_minutes": {
+                        "type": "integer",
+                        "description": "Minutes to expand the time window on each side (default: 30)"
+                    }
+                },
+                "required": ["from_time", "to_time"]
             }),
         },
         ToolDefinition {
@@ -1264,6 +1194,175 @@ fn investigation_state_tool_definitions() -> Vec<ToolDefinition> {
                 "required": ["investigation_id"]
             }),
         },
+        ToolDefinition {
+            name: "transition_stage".into(),
+            description: "Transition the investigation to a new stage (triage -> causation -> lateral -> synthesis).".into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "investigation_id": {
+                        "type": "string",
+                        "description": "Investigation ID"
+                    },
+                    "new_stage": {
+                        "type": "string",
+                        "enum": ["triage", "causation", "lateral", "synthesis"],
+                        "description": "Target investigation stage"
+                    }
+                },
+                "required": ["investigation_id", "new_stage"]
+            }),
+        },
+        ToolDefinition {
+            name: "track_host_investigation".into(),
+            description: "Mark a host as investigated and track it in the investigation state.".into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "investigation_id": {
+                        "type": "string",
+                        "description": "Investigation ID"
+                    },
+                    "hostname": {
+                        "type": "string",
+                        "description": "Hostname or IP to track"
+                    }
+                },
+                "required": ["investigation_id", "hostname"]
+            }),
+        },
+        ToolDefinition {
+            name: "track_user_investigation".into(),
+            description: "Mark a user as investigated and track them in the investigation state.".into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "investigation_id": {
+                        "type": "string",
+                        "description": "Investigation ID"
+                    },
+                    "username": {
+                        "type": "string",
+                        "description": "Username to track"
+                    }
+                },
+                "required": ["investigation_id", "username"]
+            }),
+        },
+        ToolDefinition {
+            name: "list_evidence".into(),
+            description: "List all evidence items grouped by Pyramid of Pain level. Optionally filter to a specific level.".into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "investigation_id": {
+                        "type": "string",
+                        "description": "Investigation ID"
+                    },
+                    "pyramid_level": {
+                        "type": "integer",
+                        "description": "Filter to specific pyramid level (1=hashes, 2=IPs, 3=domains, 4=artifacts, 5=tools, 6=TTPs)"
+                    }
+                },
+                "required": ["investigation_id"]
+            }),
+        },
+        ToolDefinition {
+            name: "get_investigation_context".into(),
+            description: "Get full investigation context for escalation triage. Returns evidence, timeline, techniques with implied capabilities, hosts, users, and lateral connections.".into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "investigation_id": {
+                        "type": "string",
+                        "description": "Investigation ID"
+                    }
+                },
+                "required": ["investigation_id"]
+            }),
+        },
+        ToolDefinition {
+            name: "pop_all_queued".into(),
+            description: "Pop all queued pivot and chain queries, deduplicated and ready for execution. Drains both queues atomically.".into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "investigation_id": {
+                        "type": "string",
+                        "description": "Investigation ID"
+                    }
+                },
+                "required": ["investigation_id"]
+            }),
+        },
+        ToolDefinition {
+            name: "get_suggested_evidence".into(),
+            description: "Get auto-extracted IOCs (IPs, hostnames, users, hashes) from recent query results. No parameters required — reads from the in-memory query result store.".into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {}
+            }),
+        },
+        ToolDefinition {
+            name: "analyze_lateral_movement".into(),
+            description: "Analyze lateral movement connections for an investigation. Builds a connection graph, computes attack paths via DFS from entry points, and suggests pivots for uninvestigated hosts.".into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "investigation_id": {
+                        "type": "string",
+                        "description": "Investigation ID"
+                    },
+                    "focus_host": {
+                        "type": "string",
+                        "description": "Optional host to focus analysis on"
+                    }
+                },
+                "required": ["investigation_id"]
+            }),
+        },
+        ToolDefinition {
+            name: "get_correlated_alerts".into(),
+            description: "Get correlated alerts for an investigation. Returns related alerts, common hosts/users, and shared MITRE techniques from the investigation's correlation context.".into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "investigation_id": {
+                        "type": "string",
+                        "description": "Investigation ID"
+                    }
+                },
+                "required": ["investigation_id"]
+            }),
+        },
+        ToolDefinition {
+            name: "get_queued_queries".into(),
+            description: "Get queued investigation queries (pivot and chaining queues). Shows pending and executed queries to avoid duplicate work.".into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "investigation_id": {
+                        "type": "string",
+                        "description": "Investigation ID"
+                    }
+                },
+                "required": ["investigation_id"]
+            }),
+        },
+        ToolDefinition {
+            name: "get_formatted_summary".into(),
+            description: "Get a rate-limited formatted investigation summary with Pyramid of Pain progress, milestone checklist, and key metrics. Rate-limited to once per 30 seconds.".into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "investigation_id": {
+                        "type": "string",
+                        "description": "Investigation ID"
+                    }
+                },
+                "required": ["investigation_id"]
+            }),
+        },
     ]
 }
 
@@ -1405,6 +1504,141 @@ fn learning_tool_definitions() -> Vec<ToolDefinition> {
             input_schema: json!({
                 "type": "object",
                 "properties": {}
+            }),
+        },
+        ToolDefinition {
+            name: "generate_mitre_questions".into(),
+            description: "Generate MITRE ATT&CK-based investigative questions from identified techniques. Uses attack chain precursors, detection recipes, and follow-on technique analysis.".into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "investigation_id": {
+                        "type": "string",
+                        "description": "Investigation ID to load techniques from"
+                    },
+                    "max_questions": {
+                        "type": "integer",
+                        "description": "Maximum questions to return (default: 10)"
+                    }
+                },
+                "required": ["investigation_id"]
+            }),
+        },
+        ToolDefinition {
+            name: "generate_pyramid_questions".into(),
+            description: "Generate Pyramid of Pain climbing questions from current evidence. Suggests how to elevate lower-level indicators (hashes, IPs) to higher-level insights (tools, TTPs).".into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "investigation_id": {
+                        "type": "string",
+                        "description": "Investigation ID to load evidence from"
+                    },
+                    "max_questions": {
+                        "type": "integer",
+                        "description": "Maximum questions to return (default: 10)"
+                    }
+                },
+                "required": ["investigation_id"]
+            }),
+        },
+        ToolDefinition {
+            name: "assess_pyramid_state".into(),
+            description: "Assess current Pyramid of Pain state for an investigation. Returns evidence distribution, elevation score (0-1), and recommendations.".into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "investigation_id": {
+                        "type": "string",
+                        "description": "Investigation ID"
+                    }
+                },
+                "required": ["investigation_id"]
+            }),
+        },
+        ToolDefinition {
+            name: "get_combined_questions".into(),
+            description: "Get combined questions from both MITRE and Pyramid engines, sorted by priority score. Most effective way to get next investigation steps.".into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "investigation_id": {
+                        "type": "string",
+                        "description": "Investigation ID"
+                    },
+                    "max_questions": {
+                        "type": "integer",
+                        "description": "Maximum questions to return (default: 10)"
+                    }
+                },
+                "required": ["investigation_id"]
+            }),
+        },
+        ToolDefinition {
+            name: "get_attack_chain_precursors".into(),
+            description: "Get attack chain data for a MITRE technique including precursors, Windows events, log patterns, and investigation questions.".into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "technique_id": {
+                        "type": "string",
+                        "description": "MITRE ATT&CK technique ID (e.g., 'T1003.006')"
+                    }
+                },
+                "required": ["technique_id"]
+            }),
+        },
+        ToolDefinition {
+            name: "get_detection_recipe".into(),
+            description: "Get a detection recipe by name with indicators, Windows events, LogQL queries, and investigation steps.".into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "recipe_name": {
+                        "type": "string",
+                        "description": "Recipe name (e.g., 'dcsync', 'password_spray', 'kerberos_attacks')"
+                    }
+                },
+                "required": ["recipe_name"]
+            }),
+        },
+        ToolDefinition {
+            name: "list_detection_recipes".into(),
+            description: "List all available detection recipes with their names, MITRE mappings, and descriptions.".into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {}
+            }),
+        },
+        ToolDefinition {
+            name: "get_attack_playbook".into(),
+            description: "Get detection playbook based on active red team operations. Reads real-time red team state from Redis to generate prioritized detection queries.".into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "operation_id": {
+                        "type": "string",
+                        "description": "Red team operation ID. If omitted, finds the latest running operation."
+                    }
+                }
+            }),
+        },
+        ToolDefinition {
+            name: "get_detection_queries_for_technique".into(),
+            description: "Get specific detection queries for a MITRE ATT&CK technique, enriched with context from active red team operations.".into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "technique_id": {
+                        "type": "string",
+                        "description": "MITRE ATT&CK technique ID (e.g., 'T1003.006', 'T1558.003')"
+                    },
+                    "operation_id": {
+                        "type": "string",
+                        "description": "Red team operation ID for context enrichment"
+                    }
+                },
+                "required": ["technique_id"]
             }),
         },
     ]

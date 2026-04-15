@@ -3,6 +3,9 @@
 //! When constrained or RBCD delegation vulnerabilities are discovered (via
 //! `find_delegation` or BloodHound), this automation dispatches S4U attacks
 //! using available credentials for the delegating account.
+//!
+//! NOTE: Unconstrained delegation is handled by `auto_unconstrained_exploitation`
+//! which orchestrates the coerce → dump → secretsdump chain.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -123,10 +126,7 @@ pub async fn auto_s4u_exploitation(
                 .values()
                 .filter_map(|vuln| {
                     let vtype = vuln.vuln_type.to_lowercase();
-                    if vtype != "constrained_delegation"
-                        && vtype != "unconstrained_delegation"
-                        && vtype != "rbcd"
-                    {
+                    if vtype != "constrained_delegation" && vtype != "rbcd" {
                         return None;
                     }
 

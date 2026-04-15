@@ -29,10 +29,10 @@ You have LIMITED steps. Do NOT loop endlessly, but DO investigate thoroughly.
 
 ## Query-Record Pattern (MANDATORY)
 ```
-Query -> record_evidence() -> Query -> record_evidence() -> triage_complete()
+Query -> add_evidence() -> Query -> add_evidence() -> triage_complete()
 ```
 **Never** run multiple queries without recording findings between them.
-**YOU ARE STUCK IN A LOOP IF**: You make 2+ queries without calling record_evidence().
+**YOU ARE STUCK IN A LOOP IF**: You make 2+ queries without calling add_evidence().
 
 ## Scope Tracking (MANDATORY)
 For **EVERY** host in query results (computer, WorkstationName fields), call `track_host_investigation`.
@@ -78,7 +78,7 @@ T1039 is specifically about exfiltrating business data from file shares — NOT 
 
 ## Evidence Recording
 
-For EVERY finding, call `record_evidence` with:
+For EVERY finding, call `add_evidence` with:
 
 | Parameter | Description |
 |-----------|-------------|

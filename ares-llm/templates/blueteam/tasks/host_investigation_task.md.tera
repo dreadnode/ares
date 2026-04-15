@@ -32,14 +32,14 @@ Investigate all activity on host **{{ hostname }}**:
    - Kerberos anomalies: TGS requests with RC4, unusual service tickets
 
 4. **Identify inbound connections**: For every authentication TO this host
-   - Record with `record_lateral_connection(source_host=<source>, destination_host="{{ hostname }}", ...)`
+   - Record with `add_lateral_connection(source_host=<source>, destination_host="{{ hostname }}", ...)`
    - Investigate the source host if not already investigated
 
 5. **Identify outbound connections**: For every authentication FROM this host
-   - Record with `record_lateral_connection(source_host="{{ hostname }}", destination_host=<dest>, ...)`
+   - Record with `add_lateral_connection(source_host="{{ hostname }}", destination_host=<dest>, ...)`
    - Investigate the destination host if not already investigated
 
-6. **Record all evidence**: Every finding must be recorded with `record_evidence()`:
+6. **Record all evidence**: Every finding must be recorded with `add_evidence()`:
    - Users seen: evidence_type="user", pyramid_level=4
    - Source IPs: evidence_type="ip", pyramid_level=2
    - Processes: evidence_type="artifact", pyramid_level=4

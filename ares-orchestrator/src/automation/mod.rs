@@ -30,6 +30,7 @@ mod share_enum;
 mod shares;
 mod stall_detection;
 mod trust;
+mod unconstrained;
 
 // Re-export all public task functions at the same paths they had before the split.
 pub use acl::auto_acl_chain_follow;
@@ -50,6 +51,7 @@ pub use share_enum::auto_share_enumeration;
 pub use shares::auto_share_spider;
 pub use stall_detection::auto_stall_detection;
 pub use trust::auto_trust_follow;
+pub use unconstrained::auto_unconstrained_exploitation;
 
 pub(crate) fn crack_dedup_key(hash: &ares_core::models::Hash) -> String {
     let prefix = &hash.hash_value[..32.min(hash.hash_value.len())];

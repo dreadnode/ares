@@ -43,11 +43,16 @@ pub(crate) async fn bootstrap_meta(queue: &TaskQueue, config: &OrchestratorConfi
     );
 
     let now = Utc::now().to_rfc3339();
+
+    // started_at must only be set once — use HSETNX so restarts/recoveries
+    // don't overwrite the original start time (which would break runtime calc).
+    let started_at_json = serde_json::to_string(&now).unwrap_or_default();
+    let _: bool = conn
+        .hset_nx(&meta_key, "started_at", &started_at_json)
+        .await?;
+
+    // Remaining fields are safe to overwrite on restart
     let fields: Vec<(&str, String)> = vec![
-        (
-            "started_at",
-            serde_json::to_string(&now).unwrap_or_default(),
-        ),
         ("initialized", "true".to_string()),
         (
             "target_domain",

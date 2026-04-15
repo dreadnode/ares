@@ -16,6 +16,12 @@ use ares_llm::{LlmProvider, ToolDispatcher};
 
 use super::investigation::{self, Investigation};
 
+/// Threshold for considering a running investigation as stale (1 hour).
+const STALE_INVESTIGATION_THRESHOLD_SECS: i64 = 3600;
+
+/// Interval between periodic stale investigation checks (5 minutes).
+const STALE_CHECK_INTERVAL_SECS: u64 = 300;
+
 /// Blue team investigation orchestrator.
 ///
 /// Owns the LLM provider and tool dispatcher, and drives investigations
@@ -42,6 +48,112 @@ impl BlueOrchestrator {
         }
     }
 
+    /// Clean up stale investigations left in "running" status.
+    ///
+    /// Scans `ares:blue:active_investigations` for investigation IDs whose
+    /// status has been `in_progress` for longer than the threshold. Marks
+    /// them as `failed` with an orphaned message and removes from the active set.
+    async fn cleanup_stale_investigations(&self) {
+        let conn = match redis::Client::open(self.redis_url.as_str()) {
+            Ok(client) => match client.get_connection_manager().await {
+                Ok(c) => c,
+                Err(e) => {
+                    warn!("Stale cleanup: failed to connect to Redis: {e}");
+                    return;
+                }
+            },
+            Err(e) => {
+                warn!("Stale cleanup: failed to open Redis client: {e}");
+                return;
+            }
+        };
+        let mut conn = conn;
+
+        // Get all active investigation IDs
+        let active_ids: Vec<String> = match conn
+            .smembers::<_, Vec<String>>(ares_core::state::BLUE_ACTIVE_INVESTIGATIONS)
+            .await
+        {
+            Ok(ids) => ids,
+            Err(e) => {
+                warn!("Stale cleanup: failed to read active investigations: {e}");
+                return;
+            }
+        };
+
+        if active_ids.is_empty() {
+            return;
+        }
+
+        let now = chrono::Utc::now();
+        let mut cleaned = 0u32;
+
+        for inv_id in &active_ids {
+            let status_key = format!("ares:blue:inv:{inv_id}:status");
+            let status_json: Option<String> = conn.get(&status_key).await.unwrap_or(None);
+
+            let status_obj = match status_json
+                .as_deref()
+                .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
+            {
+                Some(v) => v,
+                None => continue,
+            };
+
+            let status = status_obj
+                .get("status")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if status != "in_progress" {
+                continue;
+            }
+
+            let started_at = status_obj
+                .get("started_at")
+                .and_then(|v| v.as_str())
+                .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                .map(|dt| dt.with_timezone(&chrono::Utc));
+
+            let elapsed_secs = match started_at {
+                Some(dt) => (now - dt).num_seconds(),
+                None => STALE_INVESTIGATION_THRESHOLD_SECS + 1, // no timestamp = assume stale
+            };
+
+            if elapsed_secs > STALE_INVESTIGATION_THRESHOLD_SECS {
+                let hours = elapsed_secs as f64 / 3600.0;
+                let error_msg = format!(
+                    "Investigation orphaned after orchestrator restart (was running {hours:.1}h)"
+                );
+
+                // Update status to failed
+                let updated = serde_json::json!({
+                    "status": "failed",
+                    "started_at": status_obj.get("started_at").unwrap_or(&serde_json::Value::Null),
+                    "failed_at": now.to_rfc3339(),
+                    "error": error_msg,
+                });
+                let data = serde_json::to_string(&updated).unwrap_or_default();
+                let _: Result<(), _> = conn.set_ex::<_, _, ()>(&status_key, &data, 86400).await;
+
+                // Remove from active set
+                let _: Result<(), _> = conn
+                    .srem::<_, _, ()>(ares_core::state::BLUE_ACTIVE_INVESTIGATIONS, inv_id)
+                    .await;
+
+                warn!(
+                    investigation_id = %inv_id,
+                    elapsed_hours = format!("{hours:.1}"),
+                    "Marked stale investigation as failed"
+                );
+                cleaned += 1;
+            }
+        }
+
+        if cleaned > 0 {
+            info!(count = cleaned, "Stale investigation cleanup complete");
+        }
+    }
+
     /// Run the blue team orchestration loop until shutdown.
     ///
     /// Polls `ares:blue:investigations` for new investigation requests.
@@ -49,12 +161,16 @@ impl BlueOrchestrator {
     pub async fn run(&self, mut shutdown_rx: watch::Receiver<bool>) -> Result<()> {
         info!("Blue team orchestrator starting");
 
+        // Clean up stale investigations from previous runs
+        self.cleanup_stale_investigations().await;
+
         let mut task_queue = BlueTaskQueue::connect(&self.redis_url)
             .await
             .context("Failed to connect blue task queue to Redis")?;
 
         let mut retry_delay = Duration::from_secs(1);
         let max_retry_delay = Duration::from_secs(30);
+        let mut last_stale_check = std::time::Instant::now();
 
         loop {
             // Check shutdown
@@ -103,6 +219,13 @@ impl BlueOrchestrator {
                         .and_then(|v| v.as_str())
                         .map(String::from);
 
+                    // Report directory: request > ARES_REPORT_DIR env > ~/.ares/reports/
+                    let report_dir = request
+                        .get("report_dir")
+                        .and_then(|v| v.as_str())
+                        .map(String::from)
+                        .or_else(|| std::env::var("ARES_REPORT_DIR").ok());
+
                     info!(
                         investigation_id = %investigation_id,
                         model = %model,
@@ -119,8 +242,13 @@ impl BlueOrchestrator {
                     }
 
                     // Run the investigation
-                    let investigation =
-                        Investigation::new(investigation_id.clone(), alert, model, operation_id);
+                    let investigation = Investigation::new(
+                        investigation_id.clone(),
+                        alert,
+                        model,
+                        operation_id,
+                        report_dir,
+                    );
 
                     let mut conn = redis::Client::open(self.redis_url.as_str())?
                         .get_connection_manager()
@@ -161,8 +289,13 @@ impl BlueOrchestrator {
                         .await;
                 }
                 Ok(None) => {
-                    // No request, just loop
                     retry_delay = Duration::from_secs(1);
+                    // Periodic stale investigation cleanup
+                    if last_stale_check.elapsed() >= Duration::from_secs(STALE_CHECK_INTERVAL_SECS)
+                    {
+                        self.cleanup_stale_investigations().await;
+                        last_stale_check = std::time::Instant::now();
+                    }
                 }
                 Err(e) => {
                     let error_str = e.to_string().to_lowercase();

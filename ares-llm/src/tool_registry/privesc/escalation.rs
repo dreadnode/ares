@@ -1,12 +1,9 @@
 //! Windows privilege escalation and enumeration tool definitions.
 //!
-//! NOTE: The following tools are excluded because their binaries are not in the
-//! privesc container image:
-//! - gmsa_dump_passwords (netexec)
-//! - unconstrained_coerce_and_capture (printerbug.py)
+//! NOTE: The following tools are excluded because they have no executor
+//! implemented (Windows binaries run on-target, not locally):
 //! - printspoofer, godpotato, sweetpotato, seatbelt, sharpup, powerup,
-//!   winpeas, linpeas, runas_cs, scm_uac_bypass, powerupsql (no executor
-//!   implemented; Windows binaries run on-target, not locally)
+//!   winpeas, linpeas, runas_cs, scm_uac_bypass, powerupsql
 
 use serde_json::json;
 
@@ -14,6 +11,40 @@ use crate::ToolDefinition;
 
 pub fn definitions() -> Vec<ToolDefinition> {
     vec![
+        ToolDefinition {
+            name: "unconstrained_coerce_and_capture".into(),
+            description: "Coerce authentication from a remote host to an unconstrained \
+                    delegation host using SpoolService (PrinterBug). The target's TGT \
+                    is cached in LSASS on the listener. Follow up with \
+                    unconstrained_tgt_dump to extract the TGT."
+                .into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "domain": {
+                        "type": "string",
+                        "description": "Target domain (e.g. contoso.local)"
+                    },
+                    "username": {
+                        "type": "string",
+                        "description": "Username for authentication"
+                    },
+                    "password": {
+                        "type": "string",
+                        "description": "Password for authentication"
+                    },
+                    "coerce_from": {
+                        "type": "string",
+                        "description": "Host to coerce authentication FROM (typically a DC IP)"
+                    },
+                    "listener_ip": {
+                        "type": "string",
+                        "description": "IP of the unconstrained delegation host (where the TGT will be cached)"
+                    }
+                },
+                "required": ["domain", "username", "password", "coerce_from", "listener_ip"]
+            }),
+        },
         ToolDefinition {
             name: "unconstrained_tgt_dump".into(),
             description: "Dump cached TGTs from a host with unconstrained delegation. \

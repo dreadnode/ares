@@ -28,6 +28,9 @@ pub struct Investigation {
     pub model: String,
     /// Red team operation ID for post-investigation scoring against ground truth.
     pub operation_id: Option<String>,
+    /// Custom report output directory. Falls back to `ARES_REPORT_DIR` env var,
+    /// then `~/.ares/reports/`.
+    pub report_dir: Option<String>,
     pub state_writer: BlueStateWriter,
 }
 
@@ -37,6 +40,7 @@ impl Investigation {
         alert: serde_json::Value,
         model: String,
         operation_id: Option<String>,
+        report_dir: Option<String>,
     ) -> Self {
         let state_writer = BlueStateWriter::new(investigation_id.clone());
         Self {
@@ -44,6 +48,7 @@ impl Investigation {
             alert,
             model,
             operation_id,
+            report_dir,
             state_writer,
         }
     }
@@ -65,6 +70,29 @@ pub async fn run_investigation(
         investigation_id = %investigation.investigation_id,
         "Starting blue team investigation"
     );
+
+    // Load investigation env vars from Redis and inject into process environment.
+    // These are set by `ares-cli blue from-operation` and include GRAFANA_URL,
+    // GRAFANA_SERVICE_ACCOUNT_TOKEN, etc. needed by blue tools (e.g. Loki queries
+    // routed through Grafana's datasource proxy).
+    let env_key = format!("ares:blue:inv:{}:env_vars", investigation.investigation_id);
+    if let Ok(env_json) = redis::AsyncCommands::get::<_, String>(conn, &env_key).await {
+        if let Ok(env_map) =
+            serde_json::from_str::<std::collections::HashMap<String, String>>(&env_json)
+        {
+            for (key, value) in &env_map {
+                // Only set if not already present — don't clobber orchestrator's own env
+                if std::env::var(key).is_err() {
+                    std::env::set_var(key, value);
+                }
+            }
+            info!(
+                investigation_id = %investigation.investigation_id,
+                count = env_map.len(),
+                "Injected investigation env vars"
+            );
+        }
+    }
 
     investigation
         .state_writer
@@ -224,7 +252,106 @@ pub async fn run_investigation(
         .await
         .ok();
 
+    // Auto-generate investigation report
+    generate_report(
+        conn,
+        &investigation.investigation_id,
+        investigation.report_dir.as_deref(),
+    )
+    .await;
+
     Ok(investigation_outcome)
+}
+
+/// Resolve the report output directory.
+///
+/// Priority: explicit `report_dir` > `ARES_REPORT_DIR` env var > `~/.ares/reports/`.
+fn resolve_report_dir(report_dir: Option<&str>) -> std::path::PathBuf {
+    if let Some(dir) = report_dir {
+        return std::path::PathBuf::from(dir);
+    }
+    if let Ok(dir) = std::env::var("ARES_REPORT_DIR") {
+        return std::path::PathBuf::from(dir);
+    }
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    std::path::PathBuf::from(home).join(".ares").join("reports")
+}
+
+/// Generate a markdown investigation report and write it to disk.
+///
+/// Best-effort: logs warnings on failure rather than propagating errors.
+async fn generate_report(
+    conn: &mut redis::aio::ConnectionManager,
+    investigation_id: &str,
+    report_dir: Option<&str>,
+) {
+    let reader = BlueStateReader::new(investigation_id.to_string());
+    let state = match reader.load_state(conn).await {
+        Ok(Some(s)) => s,
+        Ok(None) => {
+            warn!(
+                investigation_id = investigation_id,
+                "Skipping report: investigation state not found"
+            );
+            return;
+        }
+        Err(e) => {
+            warn!(
+                investigation_id = investigation_id,
+                error = %e,
+                "Skipping report: failed to load state"
+            );
+            return;
+        }
+    };
+
+    let generator = match ares_core::reports::BlueTeamReportGenerator::new() {
+        Ok(g) => g,
+        Err(e) => {
+            warn!(error = %e, "Skipping report: failed to create report generator");
+            return;
+        }
+    };
+
+    let report = match generator.generate_investigation(&state, &[]) {
+        Ok(r) => r,
+        Err(e) => {
+            warn!(
+                investigation_id = investigation_id,
+                error = %e,
+                "Failed to generate investigation report"
+            );
+            return;
+        }
+    };
+
+    let reports_dir = resolve_report_dir(report_dir);
+
+    if let Err(e) = std::fs::create_dir_all(&reports_dir) {
+        warn!(
+            error = %e,
+            "Failed to create reports directory"
+        );
+        return;
+    }
+
+    let report_path = reports_dir.join(format!("{investigation_id}_report.md"));
+    match std::fs::write(&report_path, &report) {
+        Ok(()) => {
+            info!(
+                investigation_id = investigation_id,
+                path = %report_path.display(),
+                "Investigation report written"
+            );
+        }
+        Err(e) => {
+            warn!(
+                investigation_id = investigation_id,
+                error = %e,
+                "Failed to write investigation report"
+            );
+        }
+    }
 }
 
 /// Outcome of a completed investigation.
