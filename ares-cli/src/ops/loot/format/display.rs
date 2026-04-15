@@ -1,365 +1,12 @@
 use std::collections::{HashMap, HashSet};
 
-use regex::Regex;
-use std::sync::LazyLock;
+use ares_core::models::{SharedRedTeamState, VulnerabilityInfo};
 
-use ares_core::models::{Host, SharedRedTeamState, VulnerabilityInfo};
+use super::format_duration;
+use super::hosts::{clean_os_string, dedup_hosts, is_real_service};
+use crate::dedup::{dedup_credentials, dedup_hashes, dedup_users, normalize_source_label};
 
-use crate::dedup::{
-    dedup_credentials, dedup_hashes, dedup_users, normalize_source_label, normalize_state_domains,
-    sanitize_credentials,
-};
-
-/// Regex to strip NetExec parenthesized metadata from OS strings.
-/// Matches `(name:...)`, `(domain:...)`, `(signing:...)`, `(SMBv1:...)`, `(Null Auth:...)`.
-static OS_PAREN_METADATA_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"\s*\([^)]*\)").unwrap());
-
-/// Clean OS string by stripping NetExec metadata like `(name:X) (domain:Y) (signing:True)`.
-fn clean_os_string(os: &str) -> String {
-    let cleaned = OS_PAREN_METADATA_RE.replace_all(os, "");
-    cleaned.trim().to_string()
-}
-
-/// Check if a service entry is a real network service (not metadata like `smb_signing_disabled`).
-fn is_real_service(svc: &str) -> bool {
-    // Real services contain port/proto format like "445/tcp"
-    let trimmed = svc.trim();
-    if trimmed.is_empty() {
-        return false;
-    }
-    // Must contain port/proto pattern
-    trimmed.contains("/tcp") || trimmed.contains("/udp")
-}
-
-/// Format a duration as a human-readable string (e.g. "1h 23m 45s").
-fn format_duration(dur: chrono::Duration) -> String {
-    let total_secs = dur.num_seconds();
-    if total_secs < 0 {
-        return "0s".to_string();
-    }
-    let hours = total_secs / 3600;
-    let minutes = (total_secs % 3600) / 60;
-    let seconds = total_secs % 60;
-    if hours > 0 {
-        format!("{hours}h {minutes:02}m {seconds:02}s")
-    } else if minutes > 0 {
-        format!("{minutes}m {seconds:02}s")
-    } else {
-        format!("{seconds}s")
-    }
-}
-
-pub(crate) fn print_loot(state: &SharedRedTeamState, json_output: bool) {
-    // Clone mutable parts for domain normalization
-    let mut credentials = state.all_credentials.clone();
-    let mut hashes = state.all_hashes.clone();
-    let mut domains: Vec<String> = state.all_domains.clone();
-
-    // Sanitize credentials: strip "Password: " prefixes, "(Guest)" suffixes,
-    // normalize user@domain@domain usernames, remove noise entries
-    sanitize_credentials(&mut credentials);
-
-    let target_domain = state.target.as_ref().map(|t| t.domain.as_str());
-
-    normalize_state_domains(
-        &state.all_users,
-        &mut credentials,
-        &mut hashes,
-        &mut domains,
-        &state.all_hosts,
-        target_domain,
-    );
-
-    if json_output {
-        print_loot_json(state, &credentials, &hashes, &domains);
-    } else {
-        print_loot_human(state, &credentials, &hashes, &domains);
-    }
-}
-
-fn print_loot_json(
-    state: &SharedRedTeamState,
-    credentials: &[ares_core::models::Credential],
-    hashes: &[ares_core::models::Hash],
-    domains: &[String],
-) {
-    let unique_users = dedup_users(&state.all_users, &state.netbios_to_fqdn);
-    let unique_creds = dedup_credentials(credentials);
-    let unique_hashes = dedup_hashes(hashes);
-    let merged_hosts = dedup_hosts(
-        &state.all_hosts,
-        &state.netbios_to_fqdn,
-        &state.domain_controllers,
-    );
-
-    let output = serde_json::json!({
-        "operation_id": state.operation_id,
-        "started_at": state.started_at.to_rfc3339(),
-        "completed_at": state.completed_at.map(|dt| dt.to_rfc3339()),
-        "has_domain_admin": state.has_domain_admin,
-        "domain_admin_path": state.domain_admin_path,
-        "has_golden_ticket": state.has_golden_ticket,
-        "domains": domains,
-        "hosts": merged_hosts.iter().map(|h| serde_json::json!({
-            "ip": h.ip,
-            "hostname": h.hostname,
-            "os": h.os,
-            "is_dc": h.is_dc,
-            "services": h.services,
-        })).collect::<Vec<_>>(),
-        "users": unique_users.iter().map(|u| serde_json::json!({
-            "username": u.username,
-            "domain": u.domain,
-            "is_admin": u.is_admin,
-            "source": u.source,
-        })).collect::<Vec<_>>(),
-        "credentials": unique_creds.iter().map(|c| serde_json::json!({
-            "username": c.username,
-            "password": c.password,
-            "domain": c.domain,
-            "is_admin": c.is_admin,
-        })).collect::<Vec<_>>(),
-        "hashes": unique_hashes.iter().map(|h| serde_json::json!({
-            "username": h.username,
-            "domain": h.domain,
-            "hash_type": h.hash_type,
-            "hash_value": h.hash_value,
-            "source": h.source,
-        })).collect::<Vec<_>>(),
-        "shares": state.all_shares.iter().map(|s| serde_json::json!({
-            "host": s.host,
-            "name": s.name,
-            "permissions": s.permissions,
-        })).collect::<Vec<_>>(),
-        "vulnerabilities": state.discovered_vulnerabilities.iter().map(|(vuln_id, v)| serde_json::json!({
-            "vuln_id": vuln_id,
-            "vuln_type": v.vuln_type,
-            "target": v.target,
-            "priority": v.priority,
-            "exploited": state.exploited_vulnerabilities.contains(vuln_id),
-            "details": v.details,
-            "discovered_by": v.discovered_by,
-        })).collect::<Vec<_>>(),
-        "timeline": state.all_timeline_events,
-        "techniques": state.all_techniques,
-    });
-
-    println!(
-        "{}",
-        serde_json::to_string_pretty(&output).unwrap_or_default()
-    );
-}
-
-/// Check if a hostname is an AWS internal PTR name (e.g. `ip-10-1-2-150.us-west-2.compute.internal`).
-fn is_aws_hostname(hostname: &str) -> bool {
-    let lower = hostname.to_lowercase();
-    lower.starts_with("ip-") && lower.contains("compute.internal")
-}
-
-/// Resolve a host's display hostname, matching Python's `add_host` logic:
-/// 1. Strip AWS internal hostnames (ip-*.compute.internal).
-/// 2. Strip trailing DNS root dots.
-/// 3. If hostname is short (no dots), try netbios_to_fqdn to build an FQDN.
-/// 4. Otherwise use the hostname as-is.
-fn resolve_display_hostname(host: &Host, netbios_to_fqdn: &HashMap<String, String>) -> String {
-    let hostname = host.hostname.trim().trim_end_matches('.');
-
-    // If it's an AWS PTR or empty, blank it out (matches Python's add_host behavior)
-    if hostname.is_empty() || is_aws_hostname(hostname) {
-        return String::new();
-    }
-
-    // If hostname has no dots (short/NetBIOS name), try to resolve to FQDN
-    if !hostname.contains('.') {
-        // netbios_to_fqdn keys are UPPERCASE (from publish_netbios)
-        let upper = hostname.to_uppercase();
-        if let Some(fqdn) = netbios_to_fqdn.get(&upper) {
-            return fqdn.to_lowercase();
-        }
-        let lower = hostname.to_lowercase();
-        // Try as hostname prefix: check if any netbios entry has this as a prefix
-        for (nb, fqdn) in netbios_to_fqdn {
-            if fqdn.to_lowercase().starts_with(&format!("{lower}.")) || nb.to_lowercase() == lower {
-                return fqdn.to_lowercase();
-            }
-        }
-    }
-
-    hostname.to_lowercase()
-}
-
-/// Check if `new_hostname` is a more-specific FQDN than `existing` (matching
-/// Python's `add_host` logic: same short name but more domain levels).
-fn is_more_specific_fqdn(existing: &str, new: &str) -> bool {
-    let ex_parts: Vec<&str> = existing.split('.').collect();
-    let new_parts: Vec<&str> = new.split('.').collect();
-    // Both must be FQDNs with dots
-    if ex_parts.len() < 2 || new_parts.len() < 2 {
-        return false;
-    }
-    // Same short hostname (first component)
-    if ex_parts[0].to_lowercase() != new_parts[0].to_lowercase() {
-        return false;
-    }
-    // New has more domain levels
-    new_parts.len() > ex_parts.len()
-}
-
-/// Check if a string looks like a valid IP address (v4).
-fn looks_like_ip(s: &str) -> bool {
-    !s.is_empty() && s.chars().all(|c| c.is_ascii_digit() || c == '.')
-}
-
-/// Deduplicate hosts by IP, merging services, preferring FQDN hostnames over
-/// short names. Cross-references `domain_controllers` (dc_map) to detect DCs
-/// and resolve hostnames. Matches Python's `add_host` merge logic.
-fn dedup_hosts(
-    hosts: &[Host],
-    netbios_to_fqdn: &HashMap<String, String>,
-    domain_controllers: &HashMap<String, String>,
-) -> Vec<Host> {
-    let mut by_ip: HashMap<String, Host> = HashMap::new();
-    // Track hostname-in-IP entries to merge later
-    let mut hostname_only: Vec<Host> = Vec::new();
-
-    for host in hosts {
-        let ip = host.ip.trim();
-
-        // Skip CIDR subnet entries (e.g. "10.1.2.0/24") — not real hosts
-        if ip.contains('/') {
-            continue;
-        }
-
-        let resolved = resolve_display_hostname(host, netbios_to_fqdn);
-
-        // Detect hostname-in-IP: the IP field contains a hostname (not a valid IP)
-        if !looks_like_ip(ip) && !ip.is_empty() {
-            let mut h = host.clone();
-            // Move the hostname-like value to the hostname field
-            if h.hostname.is_empty() {
-                h.hostname = ip.trim_end_matches('.').to_string();
-            }
-            h.ip = String::new();
-            hostname_only.push(h);
-            continue;
-        }
-
-        if ip.is_empty() {
-            // Skip entries with no IP at all
-            continue;
-        }
-
-        if let Some(existing) = by_ip.get_mut(ip) {
-            let existing_is_short = !existing.hostname.contains('.');
-            let new_is_fqdn = !resolved.is_empty() && resolved.contains('.');
-
-            // Replace hostname if: existing is empty, existing is short but new
-            // is FQDN, or new is a more-specific FQDN (more domain levels).
-            if (existing.hostname.is_empty() && !resolved.is_empty())
-                || (existing_is_short && new_is_fqdn)
-                || is_more_specific_fqdn(&existing.hostname, &resolved)
-            {
-                existing.hostname = resolved;
-            }
-
-            // Merge services (union)
-            for svc in &host.services {
-                if !existing.services.contains(svc) {
-                    existing.services.push(svc.clone());
-                }
-            }
-
-            // Upgrade DC status
-            if host.is_dc {
-                existing.is_dc = true;
-            }
-
-            // Fill in missing OS
-            if existing.os.is_empty() && !host.os.is_empty() {
-                existing.os = host.os.clone();
-            }
-
-            // Merge roles
-            for role in &host.roles {
-                if !existing.roles.contains(role) {
-                    existing.roles.push(role.clone());
-                }
-            }
-        } else {
-            let mut merged = host.clone();
-            merged.hostname = resolved;
-            by_ip.insert(ip.to_string(), merged);
-        }
-    }
-
-    // Merge hostname-only entries into existing hosts by matching hostname
-    for h in hostname_only {
-        let hostname_lower = h.hostname.to_lowercase();
-        let mut merged = false;
-        for existing in by_ip.values_mut() {
-            if existing.hostname.to_lowercase() == hostname_lower {
-                // Merge services
-                for svc in &h.services {
-                    if !existing.services.contains(svc) {
-                        existing.services.push(svc.clone());
-                    }
-                }
-                if h.is_dc {
-                    existing.is_dc = true;
-                }
-                if existing.os.is_empty() && !h.os.is_empty() {
-                    existing.os = h.os.clone();
-                }
-                merged = true;
-                break;
-            }
-        }
-        // If no match found, skip — don't add entries without a valid IP
-        if !merged && !h.services.is_empty() {
-            // Only add if it has useful data (services)
-            by_ip.insert(format!("_hostname_{}", h.hostname), h);
-        }
-    }
-
-    // Build IP → domains reverse map from dc_map for DC detection and hostname resolution
-    let mut ip_to_domains: HashMap<&str, Vec<&str>> = HashMap::new();
-    for (domain, ip) in domain_controllers {
-        ip_to_domains
-            .entry(ip.as_str())
-            .or_default()
-            .push(domain.as_str());
-    }
-
-    // Cross-reference dc_map: mark DCs and resolve hostnames for DC hosts
-    for host in by_ip.values_mut() {
-        if let Some(domains) = ip_to_domains.get(host.ip.as_str()) {
-            host.is_dc = true;
-
-            // Try to resolve hostname from netbios_to_fqdn if still empty
-            if host.hostname.is_empty() {
-                for domain in domains {
-                    let suffix = format!(".{}", domain.to_lowercase());
-                    for fqdn in netbios_to_fqdn.values() {
-                        if fqdn.to_lowercase().ends_with(&suffix) {
-                            host.hostname = fqdn.clone();
-                            break;
-                        }
-                    }
-                    if !host.hostname.is_empty() {
-                        break;
-                    }
-                }
-            }
-        }
-    }
-
-    let mut result: Vec<Host> = by_ip.into_values().collect();
-    result.sort_by(|a, b| a.ip.cmp(&b.ip));
-    result
-}
-
-fn print_loot_human(
+pub(super) fn print_loot_human(
     state: &SharedRedTeamState,
     credentials: &[ares_core::models::Credential],
     hashes: &[ares_core::models::Hash],
@@ -367,7 +14,6 @@ fn print_loot_human(
 ) {
     println!("Operation: {}", state.operation_id);
 
-    // Timing
     let started = state.started_at.format("%Y-%m-%d %H:%M:%S UTC");
     if let Some(completed) = state.completed_at {
         let ended = completed.format("%Y-%m-%d %H:%M:%S UTC");
@@ -391,7 +37,6 @@ fn print_loot_human(
     }
     println!();
 
-    // Domains with hierarchy
     let mut domains: Vec<String> = domains_input
         .iter()
         .map(|d| d.trim().trim_end_matches('.').to_lowercase())
@@ -416,7 +61,6 @@ fn print_loot_human(
         }
     }
 
-    // Sort forest roots for deterministic output
     forest_roots.sort();
 
     println!("Domains ({}):", domains.len());
@@ -427,7 +71,6 @@ fn print_loot_human(
         for root in &forest_roots {
             println!("  - {root} (forest root)");
             displayed.insert(root.clone());
-            // Sort children for deterministic output
             let mut children: Vec<_> = child_domains
                 .iter()
                 .filter(|(_, parent)| *parent == root)
@@ -439,7 +82,6 @@ fn print_loot_human(
                 displayed.insert(child.clone());
             }
         }
-        // Display any remaining child domains (whose parent isn't a direct forest root)
         let mut remaining: Vec<_> = child_domains
             .keys()
             .filter(|c| !displayed.contains(*c))
@@ -453,7 +95,6 @@ fn print_loot_human(
     }
     println!();
 
-    // Hosts — deduplicated by IP with hostname resolution
     let merged_hosts = dedup_hosts(
         &state.all_hosts,
         &state.netbios_to_fqdn,
@@ -482,32 +123,24 @@ fn print_loot_human(
             line = format!("{line} [DC]");
         }
         println!("  - {line}");
-        // Normalize and deduplicate services for display
-        // Use a map keyed by port/proto so each port only appears once
         let mut port_map: HashMap<String, String> = HashMap::new();
         for svc in &host.services {
             if !is_real_service(svc) {
                 continue;
             }
-            // Strip parens: "445/tcp (microsoft-ds)" → "445/tcp microsoft-ds"
             let stripped = svc.replace(" (", " ").replace(')', "");
-            // Strip nmap version/product info: keep only "port/proto service_name"
             let parts: Vec<&str> = stripped.split_whitespace().collect();
             let normalized = if parts.len() >= 2 && parts[0].contains('/') {
-                // Strip trailing '?' from uncertain nmap identifications
                 let svc_name = parts[1].trim_end_matches('?');
                 format!("{} {}", parts[0], svc_name)
             } else {
-                // Still strip trailing '?' even for non-standard formats
                 stripped.trim_end_matches('?').to_string()
             };
-            // Extract port/proto key (e.g. "445/tcp")
             let port_key = normalized
                 .split_whitespace()
                 .next()
                 .unwrap_or("")
                 .to_string();
-            // Keep the longer (more descriptive) service name per port
             port_map
                 .entry(port_key)
                 .and_modify(|existing| {
@@ -539,7 +172,6 @@ fn print_loot_human(
     }
     println!();
 
-    // Users grouped by source (with label normalization)
     let unique_users = dedup_users(&state.all_users, &state.netbios_to_fqdn);
     println!("Users ({}):", unique_users.len());
     let mut users_by_source: HashMap<String, Vec<_>> = HashMap::new();
@@ -569,7 +201,6 @@ fn print_loot_human(
     }
     println!();
 
-    // Credentials
     let unique_creds = dedup_credentials(credentials);
     println!("Credentials ({}):", unique_creds.len());
     for cred in &unique_creds {
@@ -583,7 +214,6 @@ fn print_loot_human(
     }
     println!();
 
-    // Hashes
     let unique_hashes = dedup_hashes(hashes);
     println!("Hashes ({}):", unique_hashes.len());
     for h in &unique_hashes {
@@ -596,7 +226,6 @@ fn print_loot_human(
     }
     println!();
 
-    // Shares
     println!("Shares ({}):", state.all_shares.len());
     for share in &state.all_shares {
         let line = if share.host.is_empty() {
@@ -612,16 +241,12 @@ fn print_loot_human(
     }
     println!();
 
-    // Discovered Vulnerabilities
     print_vulnerabilities(
         &state.discovered_vulnerabilities,
         &state.exploited_vulnerabilities,
     );
 
-    // Attack Path / Timeline
     print_attack_path(&state.all_timeline_events);
-
-    // MITRE ATT&CK Mapping
     print_mitre_techniques(&state.all_techniques, &state.all_timeline_events);
 }
 
@@ -634,7 +259,6 @@ fn print_vulnerabilities(
         return;
     }
 
-    // Sort by priority (lower = higher priority), then by type
     let mut vulns: Vec<(&String, &VulnerabilityInfo)> = discovered.iter().collect();
     vulns.sort_by(|a, b| {
         a.1.priority
@@ -652,7 +276,6 @@ fn print_vulnerabilities(
         let is_exploited = exploited.contains(*vuln_id);
         let exploited_mark = if is_exploited { "\u{2713}" } else { "\u{2717}" };
 
-        // Build details string from the details HashMap
         let details = format_vuln_details(&vuln.details);
         let details_display = if details.len() > 80 {
             let mut end = 80;
@@ -678,7 +301,6 @@ fn format_vuln_details(details: &HashMap<String, serde_json::Value>) -> String {
         return String::new();
     }
     let mut parts = Vec::new();
-    // Display key fields in a consistent order
     let priority_keys = [
         "hostname",
         "account_name",
@@ -701,7 +323,6 @@ fn format_vuln_details(details: &HashMap<String, serde_json::Value>) -> String {
             }
         }
     }
-    // Add remaining keys alphabetically
     let mut remaining: Vec<_> = details
         .keys()
         .filter(|k| !seen.contains(k.as_str()))
@@ -735,7 +356,6 @@ fn print_attack_path(timeline_events: &[serde_json::Value]) {
         return;
     }
 
-    // Sort events by timestamp
     let mut events: Vec<&serde_json::Value> = timeline_events.iter().collect();
     events.sort_by(|a, b| {
         let ts_a = a.get("timestamp").and_then(|v| v.as_str()).unwrap_or("");
@@ -751,7 +371,6 @@ fn print_attack_path(timeline_events: &[serde_json::Value]) {
             .get("timestamp")
             .and_then(|v| v.as_str())
             .unwrap_or("unknown");
-        // Format timestamp: strip timezone suffix for cleaner display
         let ts_display = format_timeline_timestamp(timestamp);
 
         let description = event
@@ -759,7 +378,6 @@ fn print_attack_path(timeline_events: &[serde_json::Value]) {
             .and_then(|v| v.as_str())
             .unwrap_or("unknown event");
 
-        // Check if this is a critical event (krbtgt, administrator, domain admin)
         let desc_lower = description.to_lowercase();
         let is_critical = desc_lower.contains("krbtgt")
             || (desc_lower.contains("administrator") && desc_lower.contains("hash"))
@@ -824,10 +442,7 @@ fn extract_mitre_from_event(event: &serde_json::Value) -> String {
 /// Collects techniques from both the dedicated techniques set and
 /// any techniques referenced in timeline events.
 fn print_mitre_techniques(techniques: &[String], timeline_events: &[serde_json::Value]) {
-    // Collect all unique techniques
     let mut all_techniques: HashSet<String> = techniques.iter().cloned().collect();
-
-    // Also extract from timeline events
     for event in timeline_events {
         if let Some(serde_json::Value::Array(arr)) = event.get("mitre_techniques") {
             for t in arr {

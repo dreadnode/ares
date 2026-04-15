@@ -43,7 +43,6 @@ impl LlmProvider for MockProvider {
     async fn chat(&self, _request: &LlmRequest) -> Result<LlmResponse, LlmError> {
         let step = self.step.fetch_add(1, Ordering::SeqCst);
         match step {
-            // Step 0: LLM decides to run nmap_scan
             0 => Ok(LlmResponse {
                 content: "I'll start with a port scan on the target.".into(),
                 tool_calls: vec![ToolCall {
@@ -61,7 +60,6 @@ impl LlmProvider for MockProvider {
                     ..Default::default()
                 },
             }),
-            // Step 1: LLM processes nmap results and calls task_complete
             _ => Ok(LlmResponse {
                 content: "Scan complete. Found SMB, LDAP, and Kerberos services.".into(),
                 tool_calls: vec![ToolCall {

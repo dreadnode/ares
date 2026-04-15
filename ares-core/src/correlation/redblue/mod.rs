@@ -7,7 +7,11 @@ mod engine;
 mod report;
 mod types;
 
+#[cfg(test)]
+mod tests;
+
 pub use engine::RedBlueCorrelator;
+pub use report::generate_report_markdown;
 pub use types::{
     BlueTeamDetection, CorrelationMatch, CorrelationReport, DetectionGap, RedTeamActivity,
     TechniqueCoverage,

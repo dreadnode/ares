@@ -98,14 +98,12 @@ fn is_noise_line(line: &str) -> bool {
 /// 4. Collapse excessive blank lines (3+ → 2)
 /// 5. Trim leading/trailing whitespace
 pub fn filter_output(raw: &str) -> String {
-    // Step 1+2: line-level filtering
     let filtered: Vec<&str> = raw
         .lines()
         .filter(|line| !is_motd_line(line) && !is_noise_line(line))
         .collect();
 
-    // Step 3: remove empty section headers (header followed by another header
-    // or end-of-input with no content between them)
+    // Remove empty section headers (header followed by another header or EOF)
     let mut result_lines: Vec<&str> = Vec::with_capacity(filtered.len());
     for (i, line) in filtered.iter().enumerate() {
         if SECTION_HEADER_RE.is_match(line) {
@@ -124,10 +122,8 @@ pub fn filter_output(raw: &str) -> String {
 
     let mut result = result_lines.join("\n");
 
-    // Step 4: collapse excessive blank lines
     result = EXCESS_BLANKS_RE.replace_all(&result, "\n\n\n").to_string();
 
-    // Step 5: trim
     result.trim().to_string()
 }
 

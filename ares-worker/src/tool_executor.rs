@@ -16,7 +16,6 @@
 //! }
 //! ```
 //!
-//! This is the Phase 3 "thin executor" pattern from the LLM architecture.
 
 use std::sync::Arc;
 use std::time::Duration;

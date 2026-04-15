@@ -34,7 +34,7 @@ pub async fn auto_trust_follow(dispatcher: Arc<Dispatcher>, mut shutdown: watch:
             break;
         }
 
-        // --- Phase 1: Auto-enumerate trusts when DA is achieved ---
+        // Auto-enumerate trusts when DA is achieved
         {
             let state = dispatcher.state.read().await;
             if state.has_domain_admin {
@@ -109,7 +109,7 @@ pub async fn auto_trust_follow(dispatcher: Arc<Dispatcher>, mut shutdown: watch:
             }
         }
 
-        // --- Phase 2: Extract trust keys for known cross-forest trusts ---
+        // Extract trust keys for known cross-forest trusts
         {
             let state = dispatcher.state.read().await;
             if state.has_domain_admin && !state.trusted_domains.is_empty() {
@@ -187,7 +187,7 @@ pub async fn auto_trust_follow(dispatcher: Arc<Dispatcher>, mut shutdown: watch:
             }
         }
 
-        // --- Phase 3: Follow trust keys (inter-realm ticket + foreign secretsdump) ---
+        // Follow trust keys (inter-realm ticket + foreign secretsdump)
         let (work, admin_cred_phase3): (
             Vec<TrustFollowWork>,
             Option<ares_core::models::Credential>,

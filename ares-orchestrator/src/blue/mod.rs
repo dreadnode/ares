@@ -12,5 +12,6 @@ mod callbacks;
 pub mod chaining;
 mod investigation;
 mod runner;
+mod sub_agent;
 
 pub use runner::spawn_blue_orchestrator;

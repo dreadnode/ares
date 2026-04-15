@@ -33,9 +33,8 @@ fn domain_to_base_dn(domain: &str) -> String {
 
 /// Run a multi-phase nmap TCP connect scan against a target.
 ///
-/// Phase 1: Fast port discovery (top-100 ports)
-/// Phase 2: Service version detection (-sV) on discovered ports
-/// Phase 3: NetBIOS enrichment for hosts missing hostnames
+/// Runs fast port discovery, then service version detection on discovered ports,
+/// then NetBIOS enrichment for hosts missing hostnames.
 ///
 /// Required args: `target`
 /// Optional args: `ports`, `arguments`
@@ -44,7 +43,6 @@ pub async fn nmap_scan(args: &Value) -> Result<ToolOutput> {
     let ports = optional_str(args, "ports");
     let extra = optional_str(args, "arguments");
 
-    // Phase 1: Fast port discovery
     let mut cmd = CommandBuilder::new("nmap")
         .args(["-Pn", "-sT", "-T4", "--open"])
         .timeout_secs(120);
@@ -70,7 +68,6 @@ pub async fn nmap_scan(args: &Value) -> Result<ToolOutput> {
     cmd = cmd.arg(target);
     let phase1 = cmd.execute().await?;
 
-    // Extract discovered open ports from phase 1
     let mut discovered_ports: Vec<String> = Vec::new();
     for line in phase1.stdout.lines() {
         let line = line.trim();
@@ -81,13 +78,11 @@ pub async fn nmap_scan(args: &Value) -> Result<ToolOutput> {
         }
     }
 
-    // If no ports found, return phase 1 output as-is
     if discovered_ports.is_empty() {
         return Ok(phase1);
     }
 
-    // Phase 2: Service version detection on discovered ports
-    // Only use -sV here; skip extra args (-sC, -O) to avoid slow script/OS scans
+    // Service version detection on discovered ports (-sV only, skip -sC/-O to avoid slow scans)
     let port_spec = discovered_ports.join(",");
     let cmd2 = CommandBuilder::new("nmap")
         .args(["-Pn", "-sT", "-T4", "--open", "-sV", "--reason"])
@@ -96,8 +91,7 @@ pub async fn nmap_scan(args: &Value) -> Result<ToolOutput> {
         .arg(target);
     let phase2 = cmd2.execute().await?;
 
-    // Phase 3: NetBIOS enrichment for hosts without hostnames
-    // Parse phase 2 output to find IPs without hostnames
+    // Find IPs without hostnames for NetBIOS enrichment
     let mut ips_needing_nbstat: Vec<String> = Vec::new();
     for line in phase2.stdout.lines() {
         let line = line.trim();
@@ -123,7 +117,6 @@ pub async fn nmap_scan(args: &Value) -> Result<ToolOutput> {
         .execute()
         .await;
 
-    // Merge phase 2 + NetBIOS output
     match nbstat_result {
         Ok(nbstat) if !nbstat.stdout.is_empty() => {
             let mut combined_stdout = phase2.stdout;
@@ -178,7 +171,6 @@ pub async fn enumerate_users(args: &Value) -> Result<ToolOutput> {
         }
     };
 
-    // Phase 1: Try --users
     let result = CommandBuilder::new("netexec")
         .arg("smb")
         .arg(target)
@@ -205,7 +197,7 @@ pub async fn enumerate_users(args: &Value) -> Result<ToolOutput> {
         return Ok(result);
     }
 
-    // Phase 2: Fallback to --rid-brute
+    // --users returned no data, fall back to --rid-brute
     let rid_result = CommandBuilder::new("netexec")
         .arg("smb")
         .arg(target)

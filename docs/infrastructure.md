@@ -36,7 +36,7 @@ ansible/                            Ansible collection (dreadnode.nimbus_range v
     windows/
       target_setup.yml              Windows target telemetry setup
   roles/
-    base/                           Python + uv + workspace setup
+    base/                           System deps + workspace setup
     recon_tools/                    Network scanning and AD enumeration tools
     credential_access_tools/        Password attacks and credential extraction
     cracking_tools/                 Hashcat, John, wordlists
@@ -56,8 +56,8 @@ ansible/                            Ansible collection (dreadnode.nimbus_range v
     merge_list_dicts_into_list.py   Data transformation utility
 
 warpgate-templates/                 Container image build templates
-  ares-base/                        Base: Kali + Python 3.13 + Ansible base role
-  ares-orchestrator/                Orchestrator: python:3.13-slim + pip install ares
+  ares-base/                        Base: Kali + Ansible base role + security tools
+  ares-orchestrator/                Orchestrator: Rust binary + Redis client
   ares-worker/                      Generic worker (inherits ares-base)
   ares-{recon,credential-access,cracker,acl,privesc,lateral-movement,coercion}-agent/
   ares-cracker-{agent-gpu,base-gpu}/
@@ -76,7 +76,7 @@ warpgate-templates/                 Container image build templates
 
 ```text
 kalilinux/kali-rolling
-  └── ares-base (apt + Ansible base role + pip install ares)
+  └── ares-base (apt + Ansible base role + Rust binaries)
         ├── ares-recon-agent         (+recon_tools)
         ├── ares-credential-access-agent (+credential_access_tools)
         ├── ares-cracker-agent       (+cracking_tools)
@@ -91,8 +91,8 @@ nvidia/cuda:12.6.0-runtime-ubuntu24.04
   └── ares-cracker-base-gpu (hashcat compiled from source with CUDA)
         └── ares-cracker-agent-gpu (+john, wordlists)
 
-python:3.13.7-slim
-  └── ares-orchestrator (pip install ares[postgres], no Ansible)
+debian:bookworm-slim
+  └── ares-orchestrator (Rust binary, no Ansible)
 ```
 
 ### Building
@@ -118,7 +118,7 @@ Each template's `warpgate.yaml` references:
 
 - `${PROVISION_REPO_PATH}/playbooks/ares/<role>.yml` -- the Ansible playbook
 - `${PROVISION_REPO_PATH}/requirements.yml` -- collection dependencies
-- `${sources.ares}` -- the ares Python package (cloned from GitHub)
+- `${sources.ares}` -- the ares Rust binaries (built from source or downloaded)
 
 ### Multi-Architecture Support
 
@@ -130,7 +130,7 @@ GPU templates (`ares-cracker-agent-gpu`, `ares-cracker-base-gpu`) which are
 
 | Playbook | Template | Ansible Role | Key Tools |
 | --- | --- | --- | --- |
-| `base.yml` | `ares-base` | `base` | python3.13, uv, /ares workspace |
+| `base.yml` | `ares-base` | `base` | Rust binaries, security tool deps, /ares workspace |
 | `recon.yml` | `ares-recon-agent` | `recon_tools` | nmap, netexec, bloodhound, certipy, impacket |
 | `credential_access.yml` | `ares-credential-access-agent` | `credential_access_tools` | sprayhound, lsassy, gMSADumper, impacket |
 | `cracker.yml` | `ares-cracker-agent` | `cracking_tools` | hashcat, john, rockyou, seclists |

@@ -381,7 +381,6 @@ pub(crate) fn maybe_exec_ec2() -> Option<i32> {
     let (instance_name, profile, region) = prescan_ec2_args()?;
     let inner_args = strip_transport_args();
 
-    // Step 1: Resolve instance ID from Name tag
     eprintln!("Resolving EC2 instance: {instance_name}...");
     let instance_id = match resolve_ec2_instance(&instance_name, &profile, &region) {
         Ok(id) => {
@@ -394,10 +393,8 @@ pub(crate) fn maybe_exec_ec2() -> Option<i32> {
         }
     };
 
-    // Step 2: Build ares-cli command from remaining args
     let cli_cmd = format!("RUST_LOG=error ares-cli {}", shell_join(&inner_args));
 
-    // Step 3: Send via SSM
     let cmd_id = match ssm_send_command(&instance_id, &cli_cmd, &profile, &region) {
         Ok(id) => id,
         Err(e) => {
@@ -406,10 +403,8 @@ pub(crate) fn maybe_exec_ec2() -> Option<i32> {
         }
     };
 
-    // Step 4: Poll for completion (up to 120s)
     let status = ssm_poll(&cmd_id, &instance_id, &profile, &region, 120);
 
-    // Step 5: Print stdout
     if let Ok(stdout) = ssm_get_output(
         &cmd_id,
         &instance_id,
@@ -420,7 +415,6 @@ pub(crate) fn maybe_exec_ec2() -> Option<i32> {
         print!("{stdout}");
     }
 
-    // Step 6: On failure, print stderr
     if status != "Success" {
         if let Ok(stderr) = ssm_get_output(
             &cmd_id,

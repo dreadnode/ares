@@ -24,6 +24,17 @@ target/
 # Secrets baseline (local)
 .secrets.baseline
 
+# Claude Code
+.claude/
+!.claude/agents/
+!.claude/agents/ares-operator.md
+
+# Python caches (from dev tools)
+__pycache__/
+.ruff_cache/
+.mypy_cache/
+*.pyc
+
 # Misc
 TODO
 .tool-versions

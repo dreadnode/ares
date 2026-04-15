@@ -329,8 +329,8 @@ ansible/                          # Ansible collection: dreadnode.nimbus_range v
   roles/                          # 14 roles (8 agent tool roles + base + infra)
 
 warpgate-templates/               # Container image build templates
-  ares-base/                      # Base: Kali + Python 3.13 + uv + Ansible
-  ares-orchestrator/              # Orchestrator: lightweight Python + Redis
+  ares-base/                      # Base: Kali + security tool dependencies
+  ares-orchestrator/              # Orchestrator: Rust binary + Redis
   ares-worker/                    # Generic worker
   ares-{recon,credential-access,cracker,acl,privesc,lateral-movement,coercion}-agent/
   ares-blue-{agent,triage-agent,threat-hunter-agent,lateral-analyst-agent}/
@@ -455,7 +455,7 @@ Contributions are welcome! Please:
 
 ## License
 
-This project is licensed under the Apache License 2.0 - see the
+This project is licensed under the MIT License - see the
 [LICENSE](LICENSE) file for details.
 
 ## Security

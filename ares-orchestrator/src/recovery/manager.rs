@@ -87,7 +87,6 @@ impl OperationRecoveryManager {
         let mut conn = queue.connection();
         let reader = RedisStateReader::new(operation_id.to_string());
 
-        // Step 1: Check operation exists
         let exists = reader
             .exists(&mut conn)
             .await
