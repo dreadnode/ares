@@ -7,7 +7,9 @@ pub(crate) async fn connect_redis(
     redis_url: Option<String>,
 ) -> Result<redis::aio::MultiplexedConnection> {
     let url = redis_url.unwrap_or_else(|| {
-        std::env::var("ARES_REDIS_URL").unwrap_or_else(|_| "redis://localhost:6379".to_string())
+        std::env::var("ARES_REDIS_URL")
+            .or_else(|_| std::env::var("REDIS_URL"))
+            .unwrap_or_else(|_| "redis://localhost:6379".to_string())
     });
     let client = redis::Client::open(url.as_str())
         .with_context(|| format!("Failed to create Redis client from URL: {url}"))?;

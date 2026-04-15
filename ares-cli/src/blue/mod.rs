@@ -11,17 +11,9 @@ mod triage;
 mod watch;
 
 use anyhow::{Context, Result};
-use redis::AsyncCommands;
 use tracing::info;
 
 use crate::cli::BlueCommands;
-
-/// Metadata for an investigation candidate when resolving the latest.
-struct InvestigationCandidate {
-    id: String,
-    status: String,
-    started_at: String,
-}
 
 pub(crate) async fn run_blue(cmd: BlueCommands, redis_url: Option<String>) -> Result<()> {
     match cmd {
@@ -149,52 +141,10 @@ pub(crate) async fn run_blue(cmd: BlueCommands, redis_url: Option<String>) -> Re
 pub(super) async fn resolve_latest_investigation(
     conn: &mut redis::aio::MultiplexedConnection,
 ) -> Result<Option<String>> {
-    let status_keys = crate::util::scan_redis_keys(conn, "ares:blue:inv:*:status").await?;
-
-    let mut candidates: Vec<InvestigationCandidate> = Vec::new();
-
-    for key in &status_keys {
-        let parts: Vec<&str> = key.split(':').collect();
-        if parts.len() < 4 {
-            continue;
-        }
-        let inv_id = parts[3].to_string();
-
-        let raw: Option<String> = conn.get(key).await?;
-        if let Some(json_str) = raw {
-            if let Ok(data) = serde_json::from_str::<serde_json::Value>(&json_str) {
-                let status = data
-                    .get("status")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("unknown")
-                    .to_string();
-                let started = data
-                    .get("started_at")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                candidates.push(InvestigationCandidate {
-                    id: inv_id,
-                    status,
-                    started_at: started,
-                });
-            }
-        }
-    }
-
-    if candidates.is_empty() {
-        return Ok(None);
-    }
-
-    // Sort by started_at descending
-    candidates.sort_by(|a, b| b.started_at.cmp(&a.started_at));
-
-    // Prefer running investigations
-    if let Some(running) = candidates.iter().find(|c| c.status == "running") {
-        return Ok(Some(running.id.clone()));
-    }
-
-    Ok(candidates.first().map(|c| c.id.clone()))
+    let id = ares_core::state::resolve_latest_investigation(conn)
+        .await
+        .context("Failed to resolve latest investigation from Redis")?;
+    Ok(id)
 }
 
 pub(super) async fn resolve_investigation_id(

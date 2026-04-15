@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use redis::AsyncCommands;
 
 use crate::redis_conn::connect_redis;
@@ -13,18 +13,21 @@ struct InvestigationSummary {
 pub(crate) async fn blue_list(redis_url: Option<String>, latest: bool) -> Result<()> {
     let mut conn = connect_redis(redis_url).await?;
 
-    let status_keys = crate::util::scan_redis_keys(&mut conn, "ares:blue:inv:*:status").await?;
+    if latest {
+        let id = ares_core::state::resolve_latest_investigation(&mut conn)
+            .await?
+            .context("No investigations found")?;
+        println!("{id}");
+        return Ok(());
+    }
+
+    let inv_ids = ares_core::state::list_investigation_ids(&mut conn).await?;
 
     let mut investigations: Vec<InvestigationSummary> = Vec::new();
 
-    for key in &status_keys {
-        let parts: Vec<&str> = key.split(':').collect();
-        if parts.len() < 4 {
-            continue;
-        }
-        let inv_id = parts[3].to_string();
-
-        let raw: Option<String> = conn.get(key).await?;
+    for inv_id in inv_ids {
+        let status_key = format!("ares:blue:inv:{inv_id}:status");
+        let raw: Option<String> = conn.get(status_key).await?;
         if let Some(json_str) = raw {
             if let Ok(data) = serde_json::from_str::<serde_json::Value>(&json_str) {
                 let status = data
@@ -47,19 +50,6 @@ pub(crate) async fn blue_list(redis_url: Option<String>, latest: bool) -> Result
     }
 
     investigations.sort_by(|a, b| b.started_at.cmp(&a.started_at));
-
-    if latest {
-        // Prefer running
-        if let Some(running) = investigations
-            .iter()
-            .find(|inv| inv.status == "in_progress" || inv.status == "running")
-        {
-            println!("{}", running.id);
-        } else if let Some(first) = investigations.first() {
-            println!("{}", first.id);
-        }
-        return Ok(());
-    }
 
     if investigations.is_empty() {
         println!("No investigations found");

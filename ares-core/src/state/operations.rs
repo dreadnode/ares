@@ -178,9 +178,19 @@ pub async fn resolve_latest_operation(
         let started_at = data
             .get("started_at")
             .and_then(|s| {
-                DateTime::parse_from_rfc3339(s)
-                    .ok()
-                    .or_else(|| s.parse().ok())
+                // Try JSON-decoding first (Python/Rust stores as json.dumps(value))
+                if let Ok(serde_json::Value::String(inner)) =
+                    serde_json::from_str::<serde_json::Value>(s)
+                {
+                    DateTime::parse_from_rfc3339(&inner)
+                        .ok()
+                        .or_else(|| inner.parse().ok())
+                } else {
+                    // Fall back to raw string
+                    DateTime::parse_from_rfc3339(s)
+                        .ok()
+                        .or_else(|| s.parse().ok())
+                }
             })
             .map(|dt| dt.with_timezone(&Utc));
         let is_running = running_ops.contains(op_id);

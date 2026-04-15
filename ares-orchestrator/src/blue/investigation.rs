@@ -100,6 +100,14 @@ pub async fn run_investigation(
         .await
         .context("Failed to initialize investigation state")?;
 
+    // Acquire investigation lock (TTL 1 hour)
+    if let Ok(true) = investigation.state_writer.acquire_lock(conn, 3600).await {
+        info!(
+            investigation_id = %investigation.investigation_id,
+            "Acquired investigation lock"
+        );
+    }
+
     investigation
         .state_writer
         .set_status(conn, "in_progress", None)
@@ -251,6 +259,9 @@ pub async fn run_investigation(
         .set_status(conn, final_status, error_msg)
         .await
         .ok();
+
+    // Release investigation lock
+    investigation.state_writer.release_lock(conn).await.ok();
 
     // Auto-generate investigation report
     generate_report(

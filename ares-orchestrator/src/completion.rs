@@ -14,6 +14,8 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 
+use chrono::Utc;
+use redis::AsyncCommands;
 use tokio::sync::watch;
 use tracing::{debug, info, warn};
 
@@ -206,12 +208,33 @@ pub async fn wait_for_completion(
                 "Completion condition met"
             );
 
-            // When blue team is enabled, wait for active investigations and
-            // the investigation queue to drain before signalling stop.
+            // When blue team is enabled, auto-submit an investigation from the
+            // operation state if none have been submitted yet, then wait for all
+            // investigations to drain before signalling stop.
             // Cap at 20 minutes to avoid hanging forever if an investigation is stuck.
             if std::env::var("ARES_BLUE_ENABLED").as_deref() == Ok("1") {
                 info!("Blue team enabled — waiting for investigations to finish before shutdown");
                 let mut conn = dispatcher.queue.connection();
+
+                // Check if any blue investigations already exist for this operation.
+                // If not, auto-submit one so blue always gets at least one run.
+                let op_inv_key = format!(
+                    "ares:blue:op:{}:investigations",
+                    dispatcher.config.operation_id
+                );
+                let existing: i64 = redis::cmd("SCARD")
+                    .arg(&op_inv_key)
+                    .query_async(&mut conn)
+                    .await
+                    .unwrap_or(0);
+                if existing == 0 {
+                    info!("No blue investigations found — auto-submitting from operation state");
+                    if let Err(e) =
+                        auto_submit_blue_investigation(state, dispatcher, &mut conn).await
+                    {
+                        warn!(err = %e, "Failed to auto-submit blue investigation");
+                    }
+                }
                 let blue_deadline = tokio::time::Instant::now() + Duration::from_secs(1200);
                 loop {
                     if *shutdown_rx.borrow() {
@@ -290,6 +313,162 @@ pub async fn wait_for_completion(
             }
         }
     }
+}
+
+/// Auto-submit a blue team investigation from the current red team operation state.
+///
+/// Mirrors the logic in `ares-cli/src/blue/submit.rs::blue_from_operation()` but
+/// runs inline within the orchestrator process so blue always gets at least one
+/// investigation even when the red operation completes before blue's first poll.
+async fn auto_submit_blue_investigation(
+    state: &SharedState,
+    dispatcher: &Arc<Dispatcher>,
+    conn: &mut redis::aio::ConnectionManager,
+) -> Result<(), anyhow::Error> {
+    let op_id = &dispatcher.config.operation_id;
+    let now = Utc::now();
+    let inv_id = format!("inv-{}", now.format("%Y%m%d-%H%M%S"));
+
+    // Read state snapshot for building the synthetic alert
+    let (target_domain, target_env, cred_count, host_count, vuln_count, has_da, target_ips) = {
+        let inner = state.read().await;
+        let domain = inner
+            .target
+            .as_ref()
+            .map(|t| t.domain.clone())
+            .unwrap_or_default();
+        let env = inner
+            .target
+            .as_ref()
+            .map(|t| t.environment.clone())
+            .unwrap_or_default();
+        let ips: Vec<String> = inner.hosts.iter().map(|h| h.ip.clone()).collect();
+        (
+            domain,
+            env,
+            inner.credentials.len(),
+            inner.hosts.len(),
+            inner.discovered_vulnerabilities.len(),
+            inner.has_domain_admin,
+            ips,
+        )
+    };
+
+    // Collect attack techniques from Redis
+    let techniques_key = format!("ares:op:{op_id}:techniques");
+    let techniques: Vec<String> = redis::cmd("SMEMBERS")
+        .arg(&techniques_key)
+        .query_async(conn)
+        .await
+        .unwrap_or_default();
+
+    let operation_context = serde_json::json!({
+        "operation_id": op_id,
+        "attack_window_start": now.to_rfc3339(),
+        "attack_window_end": now.to_rfc3339(),
+        "techniques_used": &techniques[..std::cmp::min(techniques.len(), 20)],
+        "deployment": target_env,
+    });
+
+    let alert = serde_json::json!({
+        "labels": {
+            "alertname": format!("RedTeamOperation_{}", op_id),
+            "severity": "critical",
+            "source": "ares-red-team",
+            "deployment": target_env,
+        },
+        "annotations": {
+            "summary": format!(
+                "Red team operation {op_id} - {cred_count} credentials, {host_count} hosts, {vuln_count} vulnerabilities",
+            ),
+            "description": format!(
+                "Investigate blue team detection coverage for red team operation {op_id}. \
+                 Domain: {target_domain}. Domain admin: {has_da}.",
+            ),
+        },
+        "operation_context": operation_context,
+        "startsAt": now.to_rfc3339(),
+        "endsAt": now.to_rfc3339(),
+        "target_ips": &target_ips[..std::cmp::min(target_ips.len(), 50)],
+    });
+
+    // Resolve model from env (same precedence as CLI)
+    let model = std::env::var("ARES_BLUE_LLM_MODEL")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .or_else(|| std::env::var("ARES_MODEL_OVERRIDE").ok())
+        .or_else(|| std::env::var("ARES_ORCHESTRATOR_MODEL").ok())
+        .or_else(|| std::env::var("ARES_MODEL").ok());
+
+    let grafana_url = std::env::var("GRAFANA_URL").ok();
+    let grafana_api_key = std::env::var("GRAFANA_SERVICE_ACCOUNT_TOKEN").ok();
+
+    let max_steps: u32 = std::env::var("ARES_BLUE_MAX_STEPS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(15);
+
+    let request = serde_json::json!({
+        "investigation_id": inv_id,
+        "alert": alert,
+        "correlation_context": null,
+        "model": model,
+        "max_steps": max_steps,
+        "multi_agent": true,
+        "auto_route": false,
+        "report_dir": null,
+        "grafana_url": grafana_url,
+        "grafana_api_key": grafana_api_key,
+        "submitted_at": now.to_rfc3339(),
+    });
+
+    // Store env vars for the blue runner (Grafana token, API keys)
+    let env_vars: std::collections::HashMap<String, String> = [
+        "ANTHROPIC_API_KEY",
+        "OPENAI_API_KEY",
+        "GRAFANA_SERVICE_ACCOUNT_TOKEN",
+        "GRAFANA_URL",
+    ]
+    .iter()
+    .filter_map(|&key| std::env::var(key).ok().map(|v| (key.to_string(), v)))
+    .collect();
+
+    if !env_vars.is_empty() {
+        let env_vars_key = format!("ares:blue:inv:{inv_id}:env_vars");
+        let env_json = serde_json::to_string(&env_vars)?;
+        let _: () = conn.set(&env_vars_key, &env_json).await?;
+        let _: () = conn.expire(&env_vars_key, 3600).await?;
+    }
+
+    // Pre-register as active BEFORE pushing to queue to avoid TOCTOU race:
+    // without this, the completion wait loop can observe both queued==0 and
+    // active==0 in the window between the blue orchestrator's BRPOP (drains
+    // the queue) and its register_investigation (SADDs to active set).
+    let _: () = conn
+        .sadd(ares_core::state::BLUE_ACTIVE_INVESTIGATIONS, &inv_id)
+        .await?;
+    let _: () = conn
+        .expire(ares_core::state::BLUE_ACTIVE_INVESTIGATIONS, 86400)
+        .await?;
+
+    // Push investigation request to queue
+    let request_json = serde_json::to_string(&request)?;
+    let _: () = conn
+        .rpush("ares:blue:investigations", &request_json)
+        .await?;
+
+    // Track investigation against operation
+    let op_inv_key = format!("ares:blue:op:{op_id}:investigations");
+    let _: () = conn.sadd(&op_inv_key, &inv_id).await?;
+    let _: () = conn.expire(&op_inv_key, 7 * 24 * 3600).await?;
+
+    info!(
+        investigation_id = inv_id,
+        operation_id = op_id,
+        "Auto-submitted blue investigation from operation state"
+    );
+
+    Ok(())
 }
 
 #[cfg(test)]
