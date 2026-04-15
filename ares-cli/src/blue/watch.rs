@@ -31,7 +31,6 @@ pub(crate) async fn blue_watch(
             Ok(()) => info!("Investigation submitted successfully"),
             Err(e) => {
                 error!("Investigation failed: {e:#}");
-                eprintln!("[{now}] Error: {e:#}");
             }
         }
 

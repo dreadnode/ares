@@ -21,7 +21,7 @@ use std::process;
 
 use anyhow::Result;
 use clap::Parser;
-use tracing::error;
+use tracing::{error, info};
 
 use cli::{Cli, Commands};
 
@@ -54,29 +54,30 @@ async fn main() {
         secrets::try_load_default_env();
     }
 
+    // ── Initialize telemetry before using tracing macros ──
+    // This must happen before any tracing calls below.
+    let _telemetry = ares_core::telemetry::init_telemetry(
+        ares_core::telemetry::TelemetryConfig::new("ares-cli")
+            .with_default_filter("warn,ares_cli=info"),
+    );
+
     if let Some(ref source) = secrets_from {
         match source.as_str() {
             "1password" | "1pass" | "op" => match secrets::load_1password_secrets() {
-                Ok(n) => eprintln!("Loaded {n} secret(s) from 1Password"),
+                Ok(n) => info!("Loaded {n} secret(s) from 1Password"),
                 Err(e) => {
-                    eprintln!("Error loading 1Password secrets: {e:#}");
+                    error!("Error loading 1Password secrets: {e:#}");
                     process::exit(1);
                 }
             },
             other => {
-                eprintln!("Unknown secrets source: {other} (supported: 1password)");
+                error!("Unknown secrets source: {other} (supported: 1password)");
                 process::exit(1);
             }
         }
     }
 
     // ── Normal CLI parsing (env vars are now populated) ──
-    // Initialize telemetry (console + OTLP when endpoint is configured)
-    let _telemetry = ares_core::telemetry::init_telemetry(
-        ares_core::telemetry::TelemetryConfig::new("ares-cli")
-            .with_default_filter("warn,ares_cli=info"),
-    );
-
     let cli = Cli::parse();
 
     if let Err(e) = run(cli).await {

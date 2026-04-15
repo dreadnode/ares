@@ -29,7 +29,7 @@ fn prescan_k8s_args() -> Option<(String, Option<String>)> {
                 continue;
             }
         } else if args[i].starts_with("--k8s=") {
-            namespace = Some(args[i].strip_prefix("--k8s=").unwrap().to_string());
+            namespace = args[i].strip_prefix("--k8s=").map(|s| s.to_string());
         } else if args[i] == "--k8s-deploy" {
             if i + 1 < args.len() {
                 deploy = Some(args[i + 1].clone());
@@ -37,7 +37,7 @@ fn prescan_k8s_args() -> Option<(String, Option<String>)> {
                 continue;
             }
         } else if args[i].starts_with("--k8s-deploy=") {
-            deploy = Some(args[i].strip_prefix("--k8s-deploy=").unwrap().to_string());
+            deploy = args[i].strip_prefix("--k8s-deploy=").map(|s| s.to_string());
         }
         i += 1;
     }
@@ -70,13 +70,13 @@ fn prescan_ec2_args() -> Option<(String, String, String)> {
                 continue;
             }
             s if s.starts_with("--ec2=") => {
-                name = Some(s.strip_prefix("--ec2=").unwrap().to_string());
+                name = s.strip_prefix("--ec2=").map(|v| v.to_string());
             }
             s if s.starts_with("--ec2-profile=") => {
-                profile = Some(s.strip_prefix("--ec2-profile=").unwrap().to_string());
+                profile = s.strip_prefix("--ec2-profile=").map(|v| v.to_string());
             }
             s if s.starts_with("--ec2-region=") => {
-                region = Some(s.strip_prefix("--ec2-region=").unwrap().to_string());
+                region = s.strip_prefix("--ec2-region=").map(|v| v.to_string());
             }
             _ => {}
         }
