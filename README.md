@@ -271,25 +271,43 @@ mapping findings to MITRE ATT&CK techniques and the Pyramid of Pain.
 3. **Lateral Movement** — Scope analysis across hosts, users, and IOCs
 4. **Synthesis** — Generate report with timeline, techniques, recommendations
 
-### Usage
+### Quick Start
 
 ```bash
-# Submit from red team operation alerts
-ares-cli --k8s ares-blue blue from-operation --latest
+# Start investigation from latest red team operation
+task blue:once LATEST=true
 
-# Single alert investigation
-ares-cli --k8s ares-blue blue submit '{"alert_title":"Suspicious LSASS","severity":"high"}'
+# Or via K8s multi-agent orchestrator
+task blue:multi:remote LATEST=true
 
-# Continuous poll mode
-ares-cli --k8s ares-blue blue watch --poll-interval 30
+# Monitor progress
+task blue:multi:status LATEST=true
+task blue:multi:operation-status LATEST=true WATCH=10
 
-# Monitor
-ares-cli --k8s ares-blue blue operation-status --latest --watch 10
-ares-cli --k8s ares-blue blue evidence --latest
-ares-cli --k8s ares-blue blue report --latest
+# View results
+task blue:multi:evidence LATEST=true
+task blue:multi:techniques LATEST=true
+task blue:reports:consolidate LATEST=true
 ```
 
-See [Blue Team Documentation](docs/blue.md) for detailed workflow.
+### Key Tasks
+
+| Task | Description |
+|------|-------------|
+| `blue:once` | Single investigation from red op (local) |
+| `blue:once:remote` | Single investigation (K8s) |
+| `blue:multi:remote` | Multi-agent investigation (K8s) |
+| `blue:investigate` | Submit a specific alert JSON file |
+| `blue:poll` | Continuous poll mode |
+| `blue:multi:status` | Investigation status |
+| `blue:multi:evidence` | Collected evidence |
+| `blue:multi:techniques` | MITRE techniques identified |
+| `blue:multi:logs` | Follow blue team logs |
+| `blue:reports:consolidate` | Generate report from Redis state |
+| `blue:playbook` | Export detection playbook |
+| `blue:multi:cleanup` | Clean up old investigations |
+
+See [Blue Team Documentation](docs/blue.md) for full command reference.
 
 ## Infrastructure
 

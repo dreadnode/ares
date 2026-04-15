@@ -631,40 +631,200 @@ blue_team:
 
 ## Usage
 
-### Running an Investigation
+### Prerequisites
+
+- **API keys** in `.env` or 1Password: `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`,
+  `GRAFANA_SERVICE_ACCOUNT_TOKEN`, `DREADNODE_API_KEY`
+- **Grafana MCP** configured (see [Grafana MCP Usage](grafana_mcp_usage.md))
+- **Redis** accessible (K8s in-cluster, or port-forwarded for local/EC2)
+- **ares-cli** binary built (`cargo build --release`)
+
+### Quick Start
 
 ```bash
-# Submit a single alert for investigation
-ares-cli --k8s ares-blue blue submit '{"alert_title":"Suspicious PowerShell Execution","severity":"high"}'
+# 1. Start a blue investigation from the latest red team operation
+task blue:once LATEST=true
 
-# Submit investigations from a red team operation
-ares-cli --k8s ares-blue blue from-operation --latest
+# 2. Monitor progress
+task blue:multi:status LATEST=true
 
-# Continuous poll mode (watches Grafana for new alerts)
-ares-cli --k8s ares-blue blue watch --poll-interval 30
-
-# Monitor progress
-ares-cli --k8s ares-blue blue operation-status --latest --watch 10
+# 3. View results
+task blue:multi:evidence LATEST=true
+task blue:multi:techniques LATEST=true
+task blue:reports:consolidate LATEST=true
 ```
 
-### Viewing Investigation Results
+### Taskfile Commands
+
+All blue team tasks are invoked via `task blue:<command>`. Most accept
+`OPERATION_ID=op-xxx` or `LATEST=true` to identify the target.
+
+#### Starting Investigations
 
 ```bash
-# View evidence collected
-ares-cli --k8s ares-blue blue evidence --latest
+# Single investigation from a red team operation (local execution)
+task blue:once OPERATION_ID=op-xxx
+task blue:once LATEST=true
 
-# Generate markdown report
-ares-cli --k8s ares-blue blue report --latest
+# Single investigation from a red team operation (K8s remote)
+task blue:once:remote LATEST=true
 
-# View MITRE techniques identified
-ares-cli --k8s ares-blue blue techniques --latest
+# Submit a specific alert JSON file
+task blue:investigate ALERT=alert.json
+
+# Continuous poll mode (re-checks every POLL_INTERVAL seconds)
+task blue:poll
+
+# Multi-agent investigation via K8s orchestrator
+task blue:multi ALERT=alert.json
+task blue:multi ALERT=alert.json INVESTIGATION_ID=inv-xxx MULTI_AGENT=true
+
+# Multi-agent from red team operation (K8s remote)
+task blue:multi:remote LATEST=true
+task blue:multi:remote OPERATION_ID=op-xxx
 ```
 
-Investigation reports are written to the configured output directory and include:
+#### Monitoring Investigations
 
-- Markdown report with full analysis
-- JSON export for programmatic access
-- Grafana annotations linking to the report
+```bash
+# Investigation status
+task blue:multi:status LATEST=true
+task blue:multi:status INVESTIGATION_ID=inv-xxx
+
+# Aggregate status for all investigations in an operation
+task blue:multi:operation-status LATEST=true
+task blue:multi:operation-status LATEST=true WATCH=10  # auto-refresh
+
+# List all investigations
+task blue:multi:list
+
+# Runtime info
+task blue:multi:runtime LATEST=true
+
+# Triage decision audit trail
+task blue:multi:triage-status LATEST=true
+
+# Follow logs
+task blue:multi:logs                          # orchestrator only
+task blue:multi:logs ALL=true                 # all blue pods
+task blue:multi:logs ROLE=threat-hunter       # specific role
+```
+
+#### Viewing Results
+
+```bash
+# Evidence collected (Pyramid of Pain items)
+task blue:multi:evidence LATEST=true
+task blue:multi:evidence LATEST=true JSON=true  # machine-readable
+
+# MITRE ATT&CK techniques identified
+task blue:multi:techniques LATEST=true
+```
+
+#### Reports
+
+```bash
+# Generate consolidated report from Redis state
+task blue:reports:consolidate LATEST=true
+task blue:reports:consolidate OPERATION_ID=op-xxx OUTPUT_DIR=./reports
+
+# Export detection playbook (runs on red orchestrator pod)
+task blue:playbook LATEST=true
+task blue:playbook OPERATION_ID=op-xxx JSON=true
+
+# List / view local reports
+task blue:reports:list
+task blue:reports:latest
+
+# Clean up reports
+task blue:reports:clean
+```
+
+#### Cleanup
+
+```bash
+# Delete a single investigation
+task blue:multi:delete INVESTIGATION_ID=inv-xxx
+
+# Delete an operation and all its investigations
+task blue:multi:delete-operation OPERATION_ID=op-xxx
+
+# Clean up investigations older than N hours
+task blue:multi:cleanup MAX_AGE_HOURS=24
+task blue:multi:cleanup ALL=true DRY_RUN=true  # preview before deleting
+```
+
+### Direct CLI Commands
+
+For environments without Taskfile, or when you need more control, use
+`ares-cli` directly. Add `--k8s <NAMESPACE>` for K8s or `--ec2 <NAME>` for
+EC2 transport.
+
+```bash
+# Submit from red team operation alerts
+ares-cli blue from-operation --latest
+ares-cli --k8s attack-simulation blue from-operation op-xxx
+
+# Submit a single alert
+ares-cli blue submit '{"alert_title":"Suspicious LSASS","severity":"high"}'
+
+# Continuous poll mode
+ares-cli blue watch --poll-interval 30 --max-steps 50
+
+# Investigation status and results
+ares-cli blue list
+ares-cli blue status --latest
+ares-cli blue evidence --latest
+ares-cli blue evidence --latest --json
+ares-cli blue techniques --latest
+ares-cli blue runtime --latest
+ares-cli blue triage-status --latest
+ares-cli blue operation-status --latest --watch 10
+
+# Report generation
+ares-cli blue report --latest --output-dir ./reports
+ares-cli blue report --operation-id op-xxx --regenerate
+
+# Cleanup
+ares-cli blue delete inv-xxx --force
+ares-cli blue delete-operation op-xxx --force
+ares-cli blue cleanup --max-age-hours 24 --all --force
+ares-cli blue cleanup --dry-run
+```
+
+### EC2 Deployment
+
+When running on EC2 instead of K8s, port-forward Redis first:
+
+```bash
+# Start SSM port-forward (Redis on localhost:16379)
+task ec2:redis:forward EC2_NAME=ares-tools
+
+# In another terminal, run blue commands with the forwarded Redis
+ARES_REDIS_URL=redis://localhost:16379 ares-cli blue from-operation --latest
+```
+
+### Running Blue Alongside Red
+
+Set `BLUE_ENABLED=1` to start blue team investigations automatically when
+a red team operation runs:
+
+```bash
+task red:ec2:multi TARGET=dreadgoad DOMAIN=sevenkingdoms.local BLUE_ENABLED=1
+```
+
+### Taskfile Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `MODEL` | config file | LLM model override |
+| `POLL_INTERVAL` | `30` | Seconds between poll cycles |
+| `MAX_STEPS_BLUE` | `50` | Max agent steps (watch/poll mode) |
+| `MAX_STEPS_BLUE_ONCE` | `15` | Max agent steps (once/investigate mode) |
+| `GRAFANA_URL` | `https://grafana.dev.plundr.ai` | Grafana instance |
+| `K8S_NAMESPACE` | `attack-simulation` | K8s namespace for remote commands |
+| `REPORT_DIR` | `./reports` | Report output directory |
+| `LOG_DIR` | `./logs` | Log output directory |
 
 ## Summary
 
