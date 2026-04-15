@@ -2,62 +2,57 @@
 
 <!-- BEGIN_AUTO_BADGES -->
 
-[![Tests](https://github.com/dreadnode/ares/actions/workflows/tests.yaml/badge.svg)](https://github.com/dreadnode/ares/actions/workflows/tests.yaml)
+[![Rust](https://github.com/dreadnode/ares/actions/workflows/rust.yaml/badge.svg)](https://github.com/dreadnode/ares/actions/workflows/rust.yaml)
 [![Pre-Commit](https://github.com/dreadnode/ares/actions/workflows/pre-commit.yaml/badge.svg)](https://github.com/dreadnode/ares/actions/workflows/pre-commit.yaml)
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
-[![Python](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
+[![Rust](https://img.shields.io/badge/rust-stable-orange.svg)](https://www.rust-lang.org/)
 
 <!-- END_AUTO_BADGES -->
 
-Autonomous security agent with dual capabilities: **Blue Team** (SOC alert
-investigation) and **Red Team** (penetration testing). Built with the Dreadnode
-Agent SDK and MITRE ATT&CK framework.
+Autonomous security agent with dual capabilities: **Red Team** (multi-agent
+penetration testing) and **Blue Team** (SOC alert investigation). Built in
+Rust with MITRE ATT&CK framework integration.
 
 ## Table of Contents
 
-- [Capabilities](#capabilities)
+- [Architecture](#architecture)
 - [Quick Start](#quick-start)
-- [Usage](#usage)
-- [Blue Team Investigation Workflow](#blue-team-investigation-workflow)
-- [Red Team Operation Workflow](#red-team-operation-workflow)
-- [Blue Team Evaluation](#blue-team-evaluation)
+- [CLI Reference](#cli-reference)
+- [Red Team Operations](#red-team-operations)
+- [Blue Team Investigations](#blue-team-investigations)
 - [Infrastructure](#infrastructure)
 - [Development](#development)
 - [Configuration](#configuration)
-- [Observability](#observability)
 - [Contributing](#contributing)
 - [License](#license)
 
-## Capabilities
+## Architecture
 
-### Blue Team - SOC Investigation
+Ares is a Rust workspace with six crates:
 
-- Polls Grafana for firing alerts
-- Autonomously investigates Windows security events
-- Queries Loki for logs (Event IDs 4624, 4662, etc.)
-- Maps findings to MITRE ATT&CK techniques
-- Generates markdown reports with timeline and recommendations
-- Detects DCSync, authentication patterns, and attack indicators
+| Crate | Binary | Purpose |
+|-------|--------|---------|
+| `ares-cli` | `ares-cli` | Unified CLI — ops, blue, history, config management |
+| `ares-orchestrator` | `ares-orchestrator` | LLM-powered coordination loop, task dispatch, strategy |
+| `ares-worker` | `ares-worker` | Task execution agents (one per role in K8s) |
+| `ares-core` | — | Shared models, state management, Redis schema, telemetry |
+| `ares-llm` | — | Model-agnostic LLM provider abstraction |
+| `ares-tools` | — | Tool dispatch and execution framework |
 
-### Evaluation Framework
+### Red Team Multi-Agent System
 
-- Measures blue team investigation effectiveness against red team ground truth
-- Scores IOC detection, MITRE technique coverage, Pyramid of Pain elevation,
-  timeline accuracy, and evidence quality
-- Supports both real Grafana alert polling and synthetic alert injection
-- Generates gap analysis reports with prioritized detection recommendations
-- CI-compatible with JSON output, exit codes, and configurable pass thresholds
-- Dataset evaluation for batch scoring across multiple scenarios
+```
+Local (this machine)              Remote (K8s or EC2)
+────────────────────              ───────────────────
+ares-cli --k8s / --ec2    →      ares-orchestrator (LLM coordination loop)
+  or `task` commands              ares-worker x7 (recon, credential_access,
+                                    cracker, acl, privesc, lateral, coercion)
+                                  Redis (state store + message broker)
+```
 
-### Red Team - Multi-Agent Penetration Testing
-
-**Multi-Agent Architecture:**
-
-- Orchestrator coordinates 7 specialized worker agents via Redis
-- Each agent runs in its own Kubernetes pod with role-specific tools
-- Shared state enables credential/hash broadcasting across agents
-- Phase-aware task prioritization
-  (initial access → enumeration → privesc → lateral → DA)
+The orchestrator dispatches tasks to specialized worker agents via Redis
+queues. Workers execute tools (nmap, secretsdump, hashcat, etc.) and push
+results back. The orchestrator never executes exploitation tools directly.
 
 **Agent Roles:**
 
@@ -69,854 +64,366 @@ Agent SDK and MITRE ATT&CK framework.
 - **LATERAL**: PSExec/WMI/WinRM, credential harvesting from compromised hosts
 - **COERCION**: Responder, ntlmrelayx, PetitPotam
 
-**Attack Capabilities:**
+### Blue Team Multi-Agent System
 
-- Autonomous Active Directory enumeration
-- Credential harvesting (secretsdump, kerberoasting, AS-REP roasting)
-- Password hash cracking (hashcat, John the Ripper)
-- SMB share pilfering for embedded credentials
-- BloodHound integration for ACL abuse paths
-- ADCS exploitation (ESC1-15 vulnerabilities)
-- Golden ticket generation for domain persistence
-- Delegation attacks (RBCD, unconstrained, constrained)
+- **Orchestrator**: Coordinates investigations, dispatches to workers
+- **Triage Agent**: Initial alert analysis and evidence collection
+- **Threat Hunter Agent**: Deep-dive investigation and technique mapping
+- **Lateral Analyst Agent**: Scope analysis across hosts and users
 
 ## Quick Start
 
 **Prerequisites:**
 
-- Python 3.11+
-- [uv](https://docs.astral.sh/uv/getting-started/installation/) package manager
-- [Task](https://taskfile.dev/installation/) (optional but recommended)
+- [Rust](https://rustup.rs/) (stable toolchain)
+- [Task](https://taskfile.dev/installation/) (recommended)
 - [1Password CLI](https://developer.1password.com/docs/cli/get-started/)
   for credential management (optional — `.env` file also supported)
-- [mcp-grafana](https://github.com/grafana/mcp-grafana) MCP server:
-  `go install github.com/grafana/mcp-grafana/cmd/mcp-grafana@latest`
+- Redis (for orchestrator/worker communication)
 
-**Setup:**
+**Build:**
 
 ```bash
-# 1. Clone and install
+# Clone and build
 git clone https://github.com/dreadnode/ares.git && cd ares
-uv sync
+task rust:build          # debug build
+task rust:release        # release build (recommended)
 
-# 2. Configure API keys in 1Password (or set environment variables):
-#    - "Dreadnode Dev Platform" -> api-key field
-#    - "Ares Grafana MCP" -> grafana-token field
-#    - "Dreadnode Claude" -> dreadnode-api-key field
-
-# 3. Verify configuration
-task ares:config:check
-# Expected output: ✓ All configuration checks passed
-
-# 4. Run the blue team agent (polls Grafana for alerts)
-task blue:poll
+# Verify
+./target/release/ares-cli --help
 ```
 
-**Verification:**
+**Configure:**
 
 ```bash
-# Confirm installation
-uv run python -m ares --help
-# Should display available commands: investigate-alert, multi-agent, worker, evaluate, evaluate-dataset, version
-```
-
-**Without 1Password:**
-
-```bash
-# Create .env file with your credentials (auto-loaded by CLI)
+# Option 1: .env file
 cp .env.example .env
-# Edit .env with your API keys
+# Edit .env with your API keys (ANTHROPIC_API_KEY, GRAFANA_SERVICE_ACCOUNT_TOKEN, etc.)
 
-# Run normally — the CLI auto-loads .env if present
-task blue:poll
+# Option 2: 1Password (auto-loaded by CLI)
+# Configure items in 1Password, CLI loads them at startup
 
-# Or explicitly load from 1Password
-ares-cli --secrets-from 1password blue from-operation --latest
-```
-
-## Usage
-
-### Using Taskfile (Recommended)
-
-The easiest way to run Ares is using the provided Taskfile with 1Password integration:
-
-```bash
-# Check configuration and 1Password access
+# Verify configuration
 task ares:config:check
-
-# Blue Team: Run SOC agent in poll mode
-task blue:poll
-
-# Blue Team: Process current alerts once and exit
-task blue:once
-
-# Blue Team: Investigate a specific alert from JSON file
-task blue:investigate ALERT=test-alerts/example-alert.json
-
-# View investigation reports
-task blue:reports:list        # List all reports
-task blue:reports:latest      # Show latest report
 ```
 
-**Available Tasks:**
+## CLI Reference
 
-| Command                              | Description                                                 |
-| ------------------------------------ | ----------------------------------------------------------- |
-| `task blue:poll`                     | Run blue team agent in poll mode (checks Grafana every 30s) |
-| `task blue:once`                     | Run blue team once and exit                                 |
-| `task blue:investigate ALERT=<file>` | Investigate a specific alert from JSON file                 |
-| `task ares:config:check`             | Verify configuration and 1Password access                   |
-| `task ares:config:show`              | Display current configuration (no secrets)                  |
-| `task blue:reports:list`             | List all investigation reports                              |
-| `task blue:reports:latest`           | Show the most recent report                                 |
-| `task blue:reports:clean`            | Delete all reports (asks for confirmation)                  |
-| `task blue:mitre:test`               | Test MITRE ATT&CK data loading                              |
+The `ares-cli` binary is the unified interface for all operations. It supports
+transparent remote execution via transport flags.
 
-**Blue Team Multi-Agent Tasks (K8s):**
-
-| Command                                         | Description                                                         |
-| ----------------------------------------------- | ------------------------------------------------------------------- |
-| `task blue:multi:remote LATEST=true`            | Submit investigations from latest red team operation                |
-| `task blue:multi:operation-status LATEST=true`  | Show aggregate status of all investigations from an operation       |
-| `task blue:multi:operation-status ... WATCH=10` | Watch mode: refresh every N seconds                                 |
-| `task blue:multi:logs ALL=true`                 | Follow all blue team agent logs                                     |
-| `task blue:multi:logs ROLE=triage`              | Follow specific agent logs (triage, threat-hunter, lateral-analyst) |
-| `task blue:multi:status LATEST=true`            | Check individual investigation status                               |
-| `task blue:multi:list`                          | List all investigations                                             |
-| `task blue:multi:evidence LATEST=true`          | Show collected evidence                                             |
-
-**Red Team Tasks (Multi-Agent):**
-
-| Command                              | Description                                |
-| ------------------------------------ | ------------------------------------------ |
-| `task red:multi TARGET=<name>`       | Run multi-agent red team operation         |
-| `task red:multi:status LATEST=true`  | Check operation status                     |
-| `task red:multi:loot LATEST=true`    | Show discovered credentials, hashes, hosts |
-| `task red:multi:list`                | List all operations                        |
-| `task remote:logs ROLE=orchestrator` | Tail orchestrator logs                     |
-| `task remote:sync:full`              | Sync local code to K8s pods                |
-| `task red:multi:sync:align`          | Full sync + Redis clear + pod rollout      |
-
-**EC2 Tasks:**
-
-| Command                                    | Description                           |
-| ------------------------------------------ | ------------------------------------- |
-| `task ec2:deploy EC2_NAME=kali-ares`       | Build and deploy binaries to EC2      |
-| `task ec2:launch EC2_NAME=kali-ares`       | Launch orchestrator on EC2            |
-| `task ec2:loot EC2_NAME=kali-ares`         | Dump loot via SSM                     |
-| `task ec2:runtime EC2_NAME=kali-ares`      | Show operation runtime via SSM        |
-| `task ec2:ops EC2_NAME=kali-ares`          | List operations via SSM               |
-| `task ec2:report EC2_NAME=kali-ares`       | Generate and fetch report via SSM     |
-| `task ec2:redis:forward EC2_NAME=kali-ares`| Port-forward Redis for local CLI      |
-
-See [Taskfile Usage Guide](docs/taskfile_usage.md) for detailed documentation.
-
-### Direct CLI Usage (Advanced)
-
-#### Transport Flags (Remote Execution)
-
-The CLI can transparently execute commands on remote infrastructure via
-transport flags. These are pre-parsed before any subcommand processing.
-
-**K8s (kubectl exec):**
+### Transport Flags
 
 ```bash
-# Run any CLI command on the K8s orchestrator pod
+# K8s: execute on orchestrator pod via kubectl
 ares-cli --k8s ares-red ops loot --latest
-ares-cli --k8s ares-red ops status --latest
+ares-cli --k8s ares-blue blue status --latest
 
-# Blue team (auto-detects ares-blue-orchestrator deployment)
-ares-cli --k8s ares-blue blue list --latest
-
-# Override deployment name
-ares-cli --k8s ares-red --k8s-deploy ares-orchestrator ops runtime --latest
-```
-
-**EC2 (AWS SSM):**
-
-```bash
-# Run any CLI command on an EC2 instance (resolved by Name tag)
+# EC2: execute on instance via AWS SSM
 ares-cli --ec2 kali-ares ops loot --latest
-ares-cli --ec2 kali-ares ops runtime --latest
-ares-cli --ec2 kali-ares ops list
 
-# Custom AWS profile and region
-ares-cli --ec2 kali-ares --ec2-profile prod --ec2-region us-east-1 ops status --latest
+# Override defaults
+ares-cli --k8s ares-red --k8s-deploy ares-orchestrator ops list
+ares-cli --ec2 kali-ares --ec2-profile prod --ec2-region us-east-1 ops list
 ```
 
-| Flag              | Default     | Description                                    |
-| ----------------- | ----------- | ---------------------------------------------- |
-| `--k8s`           |             | K8s namespace (triggers kubectl exec)          |
-| `--k8s-deploy`    | auto-detect | K8s deployment name                            |
-| `--ec2`           |             | EC2 Name tag pattern (triggers SSM execution)  |
-| `--ec2-profile`   | `lab`       | AWS CLI profile for EC2/SSM                    |
-| `--ec2-region`    | `us-west-1` | AWS region for EC2/SSM                         |
-| `--env-file`      |             | Load env vars from file (default: auto .env)   |
-| `--secrets-from`  |             | Load secrets from provider (e.g., `1password`) |
-
-#### Blue Team - Poll Mode (Continuous)
-
-Run Ares in continuous polling mode to automatically investigate alerts:
-
-```bash
-# Set required environment variables
-export GRAFANA_SERVICE_ACCOUNT_TOKEN="your-grafana-token"  # pragma: allowlist secret
-export ANTHROPIC_API_KEY="your-anthropic-key"  # pragma: allowlist secret
-export DREADNODE_API_KEY="your-dreadnode-key"  # optional  # pragma: allowlist secret
-
-# Run the blue team agent (continuous polling)
-uv run python -m ares \
-  --args.model claude-sonnet-4-20250514 \
-  --args.grafana-url https://grafana.example.com \
-  --args.poll-interval 30 \
-  --args.max-steps 30 \
-  --args.report-dir ./reports
-
-# Run once and exit (process current alerts only)
-uv run python -m ares --args.once
-```
-
-#### Blue Team - Single Alert Investigation
-
-Investigate a specific alert by providing it as JSON:
-
-```bash
-uv run python -m ares investigate-alert test-alerts/example-alert.json \
-  --args.model claude-sonnet-4-20250514 \
-  --args.grafana-url https://grafana.example.com \
-  --args.max-steps 30
-```
-
-#### Red Team - Multi-Agent Operation
-
-Run a coordinated multi-agent penetration test:
-
-```bash
-# Run multi-agent operation
-uv run ares multi-agent contoso.local "192.168.58.10,192.168.58.11" \
-  --args.model gpt-4o \
-  --multi-args.redis-url redis://redis:6379
-
-# Run a worker agent (typically started by K8s, but can be run manually)
-uv run ares worker lateral op-12345678 \
-  --worker-args.redis-url redis://redis:6379
-```
-
-### Command-Line Options
-
-**Agent Arguments (`--args.*`):**
-
-| Option                 | Default                         | Description                               |
-| ---------------------- | ------------------------------- | ----------------------------------------- |
-| `--args.model`         | `claude-sonnet-4-20250514`      | LLM model to use                          |
-| `--args.grafana-url`   | `https://grafana.dev.plundr.ai` | Grafana URL for alerts and MCP            |
-| `--args.poll-interval` | `30`                            | Seconds between alert polls               |
-| `--args.max-steps`     | `30`                            | Maximum LLM round trips per investigation |
-| `--args.report-dir`    | `./reports`                     | Directory for markdown reports            |
-| `--args.once`          | `false`                         | Process current alerts once and exit      |
-
-**Stop Conditions:**
-
-The agent stops when **any** of these conditions are met:
-
-- `complete_investigation()` tool is called (normal completion)
-- `escalate_investigation()` tool is called (escalation to human)
-- 5 Loki/Prometheus queries executed
-- 20 total tool calls made (prevents infinite loops)
-- `max_steps` LLM round trips reached
-
-**Timeout Behavior:**
-
-The agent has multiple timeout layers:
-
-- Hard timeout: `max_steps × 60 seconds` (1 minute per step)
-- Watchdog thread: Force-exits if timeout exceeded
-- When using Taskfile, defaults are 15 steps (once mode) or 50 steps (polling mode)
-
-**Dreadnode Platform Arguments (`--dn-args.*`):**
-
-| Option                   | Default                           | Description                   |
-| ------------------------ | --------------------------------- | ----------------------------- |
-| `--dn-args.server`       | `https://platform.dev.plundr.ai/` | Dreadnode platform server URL |
-| `--dn-args.token`        | from `DREADNODE_API_KEY`          | Dreadnode API token           |
-| `--dn-args.organization` | `ares`                            | Dreadnode organization name   |
-| `--dn-args.workspace`    | `ares-protocol`                   | Dreadnode workspace name      |
-| `--dn-args.project`      | `ares-soc`                        | Dreadnode project name        |
-
-## Blue Team Investigation Workflow
-
-The SOC agent follows a structured 4-stage investigation process:
-
-### 1. Triage (WHAT is happening?)
-
-- Parse alert payload
-- Generate initial questions using question engines
-- Execute parallel queries to gather evidence
-- Understand what triggered the alert
-
-### 2. Causation (WHY did it happen?)
-
-- Expand time windows to find precursor events
-- Trace back through the attack chain
-- Build a coherent timeline
-- Identify root cause
-
-### 3. Lateral Movement (What is the SCOPE?)
-
-- Investigate across multiple dimensions:
-  - Same host: What else is this host doing?
-  - Same user: Where else has this user been?
-  - Same indicators: Where else do these IOCs appear?
-- Track host and user investigations
-- Determine blast radius
-
-### 4. Synthesis (Generate report)
-
-- Review all findings
-- Assess Pyramid of Pain state (are we at TTPs?)
-- Generate comprehensive markdown report
-- Provide actionable recommendations
-
-### Multi-Agent Blue Team (K8s)
-
-For large-scale investigations, the blue team can run as a multi-agent system
-on Kubernetes. This is particularly useful for investigating alerts generated
-during a red team operation.
-
-**Architecture:**
-
-- **Orchestrator**: Coordinates investigations, dispatches tasks to workers
-- **Triage Agent**: Initial alert analysis and evidence collection
-- **Threat Hunter Agent**: Deep-dive investigation and technique mapping
-- **Lateral Analyst Agent**: Scope analysis across hosts and users
-
-**Workflow:**
-
-```bash
-# Terminal 1: Submit investigations from a red team operation
-task blue:multi:remote LATEST=true
-# Output includes: "Track progress with: task blue:multi:operation-status OPERATION_ID=op-xxx"
-
-# Terminal 2: Follow all blue team agent logs
-task blue:multi:logs ALL=true
-
-# Check aggregate status of all investigations from the operation
-task blue:multi:operation-status LATEST=true
-
-# Watch mode: auto-refresh every 10 seconds until all complete
-task blue:multi:operation-status LATEST=true WATCH=10
-
-# View collected evidence
-task blue:multi:evidence LATEST=true
-```
-
-The `from-operation` command fetches alerts from Grafana that occurred during
-the red team operation's time window, batches related alerts into clusters,
-and submits each cluster as a multi-agent investigation.
-
-**Log Streaming Options:**
-
-```bash
-# All blue team pods (orchestrator + workers)
-task blue:multi:logs ALL=true
-
-# Specific agent role
-task blue:multi:logs ROLE=triage
-task blue:multi:logs ROLE=threat-hunter
-task blue:multi:logs ROLE=lateral-analyst
-
-# Just orchestrator (default)
-task blue:multi:logs
-```
-
-**Development: Syncing Code Changes**
-
-After modifying code locally, sync to the K8s pods:
-
-```bash
-# Sync code to blue team pods
-task remote:sync:full TEAM=blue
-
-# Rollout to pick up changes (required for orchestrator - it's a long-running process)
-task remote:rollout TEAM=blue
-```
-
-Workers spawn fresh for each task and will pick up new code automatically.
-The orchestrator is long-running and requires a rollout to reload modules.
-
-**Cleanup:**
-
-```bash
-# Clear ALL investigations (clean slate)
-task blue:multi:cleanup ALL=true
-
-# Clean up old investigations (default: older than 24h)
-task blue:multi:cleanup MAX_AGE_HOURS=48
-```
-
-## Question Engines
-
-### MITRE ATT&CK Navigator
-
-Generates questions based on:
-
-- **Follow-on techniques**: What techniques commonly follow identified
-  ones?
-- **Tactical gaps**: What attack phases haven't we checked?
-- **Evidence mapping**: How does evidence map to MITRE techniques?
-
-### Pyramid of Pain Climber
-
-The Pyramid of Pain ranks indicators by difficulty for adversaries to change:
-
-```text
-       6. TTPs (Tough!) ← GOAL
-      5. Tools (Challenging)
-     4. Network/Host Artifacts (Annoying)
-    3. Domain Names (Simple)
-   2. IP Addresses (Easy)
-  1. Hash Values (Trivial)
-```
-
-The engine generates questions to climb from trivial indicators to
-behavioral TTPs.
-
-## Investigation Reports
-
-Generated reports include:
-
-- **Executive Summary**: Key findings, scope, and risk assessment
-- **Timeline**: Chronological sequence of events
-- **Evidence Table**: All collected indicators with pyramid levels
-- **MITRE ATT&CK Mapping**: Identified techniques and tactics
-- **Pyramid of Pain Assessment**: Indicator distribution and elevation score
-- **Scope Analysis**: Affected hosts, users, and timeframes
-- **Recommendations**: Containment, detection rules, and follow-up actions
-
-Example report location: `reports/inv-<id>-<timestamp>.md`
-
-## Red Team Operation Workflow
-
-The multi-agent red team system follows a phase-driven attack workflow:
-
-### Phase 1: Initial Access
-
-- RECON scans networks, enumerates hosts/users/shares
-- COERCION starts Responder for LLMNR/NBT-NS poisoning
-- CREDENTIAL_ACCESS attempts password spraying
-
-### Phase 2: Enumeration (First Credentials)
-
-- RECON runs BloodHound collection for attack path analysis
-- CREDENTIAL_ACCESS performs Kerberoasting, AS-REP roasting
-- CRACKER cracks discovered hashes
-- Orchestrator queues vulnerabilities for exploitation
-
-### Phase 3: Privilege Escalation
-
-- PRIVESC exploits ADCS vulnerabilities (ESC1-8), delegation attacks
-- ACL exploits WriteDACL, shadow credentials, targeted Kerberoast
-- Credential expansion loop continues
-
-### Phase 4: Lateral Movement
-
-- LATERAL moves to new hosts with discovered credentials
-- CREDENTIAL_ACCESS runs secretsdump on each compromised host
-- CRACKER processes new hashes
-
-### Phase 5: Domain Dominance
-
-- DCSync to extract all domain hashes
-- Golden ticket generation for persistence
-- Operation completion with full report
-
-### Running Multi-Agent Operations
-
-```bash
-# Run multi-agent operation (requires K8s cluster with agents deployed)
-task red:multi TARGET=dreadgoad DOMAIN=contoso.local
-
-# Monitor operation progress
-task red:multi:loot LATEST=true WATCH=10
-
-# View orchestrator logs
-task remote:logs ROLE=orchestrator FOLLOW=true
-```
-
-Example report location: `reports/redteam-<operation-id>_report.md`
-
-See [Red Team Architecture](docs/red.md) for detailed multi-agent documentation.
-
-## Blue Team Evaluation
-
-The evaluation framework measures how effectively the blue team SOC agent
-detects and investigates red team activities. It uses the red team's operation
-state as ground truth — extracting expected IOCs, MITRE techniques, timeline
-events, and vulnerabilities — then scores the blue team's investigation against
-those expectations.
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--k8s <NAMESPACE>` | | K8s namespace (triggers kubectl exec) |
+| `--k8s-deploy <NAME>` | auto-detect | K8s deployment name |
+| `--ec2 <NAME_TAG>` | | EC2 Name tag (triggers SSM execution) |
+| `--ec2-profile <PROFILE>` | `lab` | AWS CLI profile |
+| `--ec2-region <REGION>` | `us-west-1` | AWS region |
+| `--env-file <PATH>` | auto `.env` | Load env vars from file |
+| `--secrets-from <SOURCE>` | | Load secrets from provider (e.g., `1password`) |
 
 ### Commands
 
-#### Single Scenario
+**`ops`** — Red team operation management:
 
-Evaluate the blue team against one red team operation:
+| Subcommand | Description |
+|------------|-------------|
+| `submit` | Submit a new red team operation |
+| `list` | List all operations |
+| `status [--latest]` | Operation status |
+| `loot [--latest] [--watch N] [--diff]` | Credentials, hashes, hosts |
+| `tasks [--latest] [--status STATUS] [--role ROLE]` | Task listing |
+| `runtime [--latest]` | Operation runtime |
+| `report [--latest] [--regenerate]` | Generate report |
+| `inject-credential` | Inject credential into state |
+| `inject-hash` | Inject hash into state |
+| `inject-host` | Inject host into state |
+| `inject-vulnerability` | Inject vulnerability into state |
+| `inject-domain-sid` | Inject domain SID |
+| `stop [--latest]` | Graceful shutdown |
+| `kill [--all]` | Stop + delete operations |
+| `delete <ID> --force` | Delete operation data |
+| `cleanup [--max-age-hours N]` | Clean old checkpoints |
+| `export-detection [--latest]` | Detection playbook export |
+| `correlate` | Red-blue correlation analysis |
+| `evaluate` | Evaluate blue team detection |
+
+**`blue`** — Blue team investigation management:
+
+| Subcommand | Description |
+|------------|-------------|
+| `submit <ALERT_JSON>` | Submit investigation from alert |
+| `from-operation [--latest]` | Submit from red team operation alerts |
+| `watch [--poll-interval N]` | Continuous poll mode |
+| `list` | List investigations |
+| `status [--latest]` | Investigation status |
+| `evidence [--latest]` | Collected evidence |
+| `techniques [--latest]` | MITRE ATT&CK techniques |
+| `triage-status [--latest]` | Triage decision audit trail |
+| `operation-status [--latest] [--watch N]` | Aggregate status |
+| `report [--latest] [--regenerate]` | Generate report |
+| `cleanup [--all] [--max-age-hours N]` | Clean investigations |
+
+**`history`** — Historical queries (PostgreSQL):
+
+| Subcommand | Description |
+|------------|-------------|
+| `list [--domain D] [--since-days N]` | List past operations |
+| `get <ID>` | Detailed operation info |
+| `search-creds [--domain D] [--admin]` | Search credentials |
+| `search-hashes [--cracked]` | Search hashes |
+| `mitre-coverage [--since-days N]` | Technique coverage |
+| `cost [--since-days N]` | Token usage and cost |
+
+**`config`** — Configuration management:
+
+| Subcommand | Description |
+|------------|-------------|
+| `show [--models]` | Show resolved config |
+| `validate` | Validate config file |
+| `set-model <ROLE> <MODEL> [--all]` | Set LLM model |
+
+## Red Team Operations
+
+### Start an Operation
 
 ```bash
-# Evaluate with real Grafana alerts
-uv run ares evaluate ./red_state.json \
-  --args.model claude-sonnet-4-20250514 \
-  --args.grafana-url https://grafana.example.com
+# Via Taskfile (recommended)
+task red:multi TARGET=dreadgoad DOMAIN=sevenkingdoms.local
 
-# Evaluate with synthetic alerts (no Grafana required)
-uv run ares evaluate ./red_state.json --eval-args.synthetic
+# Via CLI directly
+ares-cli ops submit dreadgoad sevenkingdoms.local \
+  --ips 192.168.58.10,192.168.58.11 \
+  --model gpt-5.2 --follow
 
-# CI mode: JSON output, exit code 0/1 based on thresholds
-uv run ares evaluate ./red_state.json \
-  --eval-args.ci \
-  --eval-args.synthetic \
-  --eval-args.min-score 0.6 \
-  --eval-args.min-ioc-rate 0.5 \
-  --eval-args.min-technique-rate 0.5
+# EC2
+task ec2:launch DOMAIN=sevenkingdoms.local TARGETS=192.168.58.10,192.168.58.11
 ```
 
-#### Dataset Evaluation
-
-Evaluate against multiple scenarios at once:
+### Monitor
 
 ```bash
-# From a directory of red team state JSON files
-uv run ares evaluate-dataset ./red_states/
-
-# From a dataset manifest JSON file, with parallel execution
-uv run ares evaluate-dataset ./scenarios.json \
-  --eval-args.parallel 4 \
-  --eval-args.output-dir ./results/
+ares-cli --k8s ares-red ops status --latest
+ares-cli --k8s ares-red ops loot --latest --watch 10
+ares-cli --k8s ares-red ops tasks --latest --status failed
+ares-cli --k8s ares-red ops runtime --latest
+task remote:logs ROLE=orchestrator
 ```
 
-#### Evaluation Arguments (`--eval-args.*`)
+### Inject State (Unblock Stuck Operations)
 
-| Option                           | Default          | Description                                     |
-| -------------------------------- | ---------------- | ----------------------------------------------- |
-| `--eval-args.output-dir`         | `./eval_results` | Directory for evaluation result JSON files      |
-| `--eval-args.poll-timeout`       | `60`             | Seconds to wait for Grafana alerts per scenario |
-| `--eval-args.ci`                 | `false`          | CI mode — JSON to stdout, exit code 0/1         |
-| `--eval-args.synthetic`          | `false`          | Use synthetic alerts instead of polling Grafana |
-| `--eval-args.min-score`          | `0.5`            | Minimum overall score to pass (CI mode)         |
-| `--eval-args.min-ioc-rate`       | `0.5`            | Minimum IOC detection rate to pass (CI mode)    |
-| `--eval-args.min-technique-rate` | `0.5`            | Minimum technique coverage to pass (CI mode)    |
-| `--eval-args.parallel`           | `1`              | Concurrent scenarios for dataset evaluation     |
+```bash
+ares-cli --k8s ares-red ops inject-credential op-xxx administrator P@ssw0rd \
+  --domain contoso.local
 
-### Scoring
+ares-cli --k8s ares-red ops inject-hash op-xxx krbtgt \
+  "aad3b435b51404eeaad3b435b51404ee:313b6f423a..." \
+  --domain sevenkingdoms.local --aes-key "f8b6c5e4d3a2b109..."
 
-Each investigation is scored across six dimensions, grouped into three
-categories:
+ares-cli --k8s ares-red ops inject-host op-xxx 192.168.58.20 dc01.essos.local
 
-| Component          | Category     | Effective Weight |
-| ------------------ | ------------ | ---------------- |
-| IOC Detection      | Detection    | 17.5%            |
-| Technique Coverage | Detection    | 17.5%            |
-| Pyramid Elevation  | Quality      | 15%              |
-| Evidence Quality   | Quality      | 15%              |
-| Stage Progress     | Completeness | 17.5%            |
-| Timeline Accuracy  | Completeness | 17.5%            |
+ares-cli --k8s ares-red ops inject-domain-sid op-xxx \
+  --domain north.sevenkingdoms.local --sid "S-1-5-21-..."
+```
 
-**Category weights:** Detection 35%, Quality 30%, Completeness 35%.
+### Reports
 
-**Component details:**
+```bash
+ares-cli --k8s ares-red ops report --latest
+ares-cli --k8s ares-red ops report --latest --regenerate
+ares-cli --k8s ares-red ops export-detection --latest
+```
 
-- **IOC Detection** — Compares evidence found against expected IOCs (IPs,
-  hostnames, users, hashes). Uses fuzzy matching for hostnames and
-  `domain\user` formats. Required IOCs are weighted 60%, optional 40%.
-- **Technique Coverage** — Compares identified MITRE techniques against
-  expected techniques. Supports parent/sub-technique matching (T1003 matches
-  T1003.001 and vice versa). Required techniques weighted 60%, optional 40%.
-- **Pyramid Elevation** — Measures how high up the Pyramid of Pain the
-  investigation climbed. 70% weight on highest level reached, 30% on the ratio
-  of evidence at Tools/TTPs level.
-- **Evidence Quality** — Evaluates average confidence (40%), validation rate
-  (30%), and TTP-level evidence ratio (30%).
-- **Stage Progress** — How far through the investigation stages the agent
-  progressed: Triage (0.25), Causation (0.50), Lateral (0.75), Synthesis (1.0).
-- **Timeline Accuracy** — Matches investigation timeline events against
-  expected events using regex, substring, and keyword overlap matching (60%),
-  plus technique association accuracy (40%).
+### Operation Phases
 
-Results are graded A through F based on overall score, with pass/fail
-determined by configurable thresholds on overall score, IOC detection rate,
-and technique coverage.
+1. **Initial Access** — RECON scans, COERCION starts Responder, CREDENTIAL_ACCESS sprays
+2. **Enumeration** — BloodHound, Kerberoasting, AS-REP roasting, hash cracking
+3. **Privilege Escalation** — ADCS exploitation, delegation attacks, ACL abuse
+4. **Lateral Movement** — PSExec/WMI/WinRM, credential harvesting on compromised hosts
+5. **Domain Dominance** — DCSync, golden ticket generation, operation report
 
-### Synthetic Alerts
+See [Red Team Architecture](docs/red.md) for detailed documentation.
 
-The `--eval-args.synthetic` flag bypasses Grafana polling and generates a
-synthetic alert from the red team ground truth. The alert type and severity
-are chosen based on the most significant expected techniques:
+## Blue Team Investigations
 
-| Technique Pattern | Alert Name                  | Severity |
-| ----------------- | --------------------------- | -------- |
-| T1003 (cred dump) | `CredentialDumpingDetected` | Critical |
-| T1558 (Kerberos)  | `KerberosAttackDetected`    | Critical |
-| T1021 (lateral)   | `LateralMovementDetected`   | High     |
-| Other             | `SuspiciousActivity`        | Warning  |
+The blue team runs autonomous SOC investigations against Grafana alerts,
+mapping findings to MITRE ATT&CK techniques and the Pyramid of Pain.
 
-This is useful for testing investigation quality in isolation without
-requiring a live Grafana instance. Note that synthetic mode always reports
-`alert_fired: true`, so it does not test detection coverage.
+### Investigation Stages
 
-### Gap Analysis
+1. **Triage** — Parse alert, gather evidence via Loki/Prometheus queries
+2. **Causation** — Trace attack chain, identify root cause
+3. **Lateral Movement** — Scope analysis across hosts, users, and IOCs
+4. **Synthesis** — Generate report with timeline, techniques, recommendations
 
-After evaluation, the framework can generate a gap analysis report identifying:
+### Usage
 
-- Missed IOCs and techniques with prioritized recommendations
-- Missing alert coverage (no alert fired)
-- Low Pyramid of Pain elevation with log source recommendations
-- Incomplete investigations with workflow improvement suggestions
+```bash
+# Submit from red team operation alerts
+ares-cli --k8s ares-blue blue from-operation --latest
 
-Recommendations are categorized (log source, detection rule, query,
-training) and prioritized (critical, high, medium, low) with MITRE technique
-mappings and implementation hints.
+# Single alert investigation
+ares-cli --k8s ares-blue blue submit '{"alert_title":"Suspicious LSASS","severity":"high"}'
+
+# Continuous poll mode
+ares-cli --k8s ares-blue blue watch --poll-interval 30
+
+# Monitor
+ares-cli --k8s ares-blue blue operation-status --latest --watch 10
+ares-cli --k8s ares-blue blue evidence --latest
+ares-cli --k8s ares-blue blue report --latest
+```
+
+See [Blue Team Documentation](docs/blue.md) for detailed workflow.
 
 ## Infrastructure
-
-This repo is self-contained for building agent images and deploying
-infrastructure. Everything needed lives under four directories:
 
 ### Repository Layout
 
 ```text
-ansible/                          # Ansible collection: dreadnode.nimbus_range v1.5.0
-  playbooks/ares/                 # Agent provisioning playbooks (one per role)
-  playbooks/linux/                # Attacker box, Sliver C2 setup
-  playbooks/windows/              # Windows target setup
-  roles/                          # 14 roles (8 agent tool roles + base + infra)
-  requirements.yml                # Collection dependencies
-  galaxy.yml                      # Collection metadata
+ares-cli/                         # CLI binary crate
+ares-core/                        # Shared library (models, state, telemetry)
+ares-llm/                         # LLM provider abstraction
+ares-orchestrator/                # Orchestrator binary crate
+ares-tools/                       # Tool dispatch framework
+ares-worker/                      # Worker binary crate
 
-warpgate-templates/               # Container image build templates (Warpgate)
-  ares-base/                      # Base image: Kali + Python 3.13 + uv + Ansible
-  ares-orchestrator/              # Orchestrator: lightweight Python + Redis client
-  ares-worker/                    # Generic worker (inherits from ares-base)
-  ares-recon-agent/               # Recon tools (nmap, netexec, bloodhound, certipy)
-  ares-credential-access-agent/   # Cred tools (sprayhound, lsassy, impacket)
-  ares-cracker-agent/             # Cracking tools (hashcat, john, wordlists)
-  ares-cracker-agent-gpu/         # GPU cracking (CUDA/OpenCL)
-  ares-cracker-base-gpu/          # GPU base image (NVIDIA CUDA)
-  ares-acl-agent/                 # ACL tools (bloodyAD, pywhisker, dacledit)
-  ares-privesc-agent/             # Privesc tools (certipy, krbrelayx, potato, nopac)
-  ares-lateral-movement-agent/    # Lateral tools (evil-winrm, xfreerdp, pth-*)
-  ares-coercion-agent/            # Coercion tools (responder, mitm6, ntlmrelayx)
-  ares-blue-agent/                # Blue team base
-  ares-blue-triage-agent/         # Blue triage agent
-  ares-blue-threat-hunter-agent/  # Blue threat hunter
-  ares-blue-lateral-analyst-agent/# Blue lateral analyst
+config/                           # Configuration files
+  ares.yaml                       # Master config (models, timeouts, capabilities)
+
+ansible/                          # Ansible collection: dreadnode.nimbus_range v1.5.0
+  playbooks/ares/                 # Agent provisioning playbooks
+  roles/                          # 14 roles (8 agent tool roles + base + infra)
+
+warpgate-templates/               # Container image build templates
+  ares-base/                      # Base: Kali + Python 3.13 + uv + Ansible
+  ares-orchestrator/              # Orchestrator: lightweight Python + Redis
+  ares-worker/                    # Generic worker
+  ares-{recon,credential-access,cracker,acl,privesc,lateral-movement,coercion}-agent/
+  ares-blue-{agent,triage-agent,threat-hunter-agent,lateral-analyst-agent}/
 
 infra/                            # Terragrunt deployment configs
-  root.hcl                        # Shared Terragrunt root config
-  ares-deployment/
-    host-registry.yaml            # Host metadata (kali-ares golden image)
-    dev/us-west-2/
-      ares-storage/               # S3 artifact bucket (dev-argonaut-ares)
-    staging/us-west-1/
-      kali-ares/                  # Golden image EC2 instance (t3.xlarge, Kali)
-
 modules/                          # Terraform modules
-  terraform-aws-project-storage/  # S3 bucket creation + lifecycle
-  terraform-aws-instance-factory/ # EC2 instance creation + IAM + SSM
 ```
 
-### Building Container Images
-
-Agent images are built with [Warpgate](https://github.com/cowdogmoo/warpgate).
-Each template references Ansible playbooks via `${PROVISION_REPO_PATH}`:
+### Building
 
 ```bash
-# Build the base image first (all agents inherit from it)
+# Rust binaries
+task rust:build              # debug
+task rust:release            # release
+task rust:test               # tests
+task rust:check              # compile check
+
+# Deploy to K8s
+task remote:rust:deploy              # cross-compile + kubectl cp
+task remote:rust:deploy:config       # push config YAML as ConfigMap
+task remote:check                    # verify binary sync
+
+# Deploy to EC2
+task ec2:deploy                      # cross-compile + S3 + SSM install
+task ec2:deploy:config               # push config.yaml
+```
+
+### Container Images
+
+Built with [Warpgate](https://github.com/cowdogmoo/warpgate). Each template
+uses Ansible playbooks for tool provisioning:
+
+```bash
 PROVISION_REPO_PATH=./ansible warpgate build warpgate-templates/ares-base
-
-# Build a specific agent image
 PROVISION_REPO_PATH=./ansible warpgate build warpgate-templates/ares-recon-agent
-
-# Build all templates
-for t in warpgate-templates/ares-*/; do
-  PROVISION_REPO_PATH=./ansible warpgate build "$t"
-done
 ```
 
-The build chain is:
-
-```text
-ares-base (Kali + Python + Ansible base role)
-  ├── ares-recon-agent         (+recon_tools role)
-  ├── ares-credential-access-agent (+credential_access_tools role)
-  ├── ares-cracker-agent       (+cracking_tools role)
-  ├── ares-acl-agent           (+acl_tools role)
-  ├── ares-privesc-agent       (+privesc_tools role)
-  ├── ares-lateral-movement-agent (+lateral_movement_tools role)
-  └── ares-coercion-agent      (+coercion_tools role)
-
-ares-orchestrator (python:3.13-slim, no Ansible — just pip install ares)
-```
-
-### Ansible Collection
-
-The `ansible/` directory contains the full `dreadnode.nimbus_range` v1.5.0
-collection. Playbooks in `ansible/playbooks/ares/` map 1:1 with `tools.yaml`
-and `config/ares.yaml`:
-
-| Playbook | Warpgate Template | Ansible Role |
-| --- | --- | --- |
-| `base.yml` | `ares-base` | `dreadnode.nimbus_range.base` |
-| `recon.yml` | `ares-recon-agent` | `dreadnode.nimbus_range.recon_tools` |
-| `credential_access.yml` | `ares-credential-access-agent` | `dreadnode.nimbus_range.credential_access_tools` |
-| `cracker.yml` | `ares-cracker-agent` | `dreadnode.nimbus_range.cracking_tools` |
-| `acl_abuse.yml` | `ares-acl-agent` | `dreadnode.nimbus_range.acl_tools` |
-| `privesc.yml` | `ares-privesc-agent` | `dreadnode.nimbus_range.privesc_tools` |
-| `lateral_movement.yml` | `ares-lateral-movement-agent` | `dreadnode.nimbus_range.lateral_movement_tools` |
-| `coercion.yml` | `ares-coercion-agent` | `dreadnode.nimbus_range.coercion_tools` |
-
-### AWS Infrastructure
-
-Infrastructure is managed with Terragrunt. Two deployment targets:
-
-**Kubernetes (EKS)** -- Primary deployment for multi-agent operations:
-
-- Namespace: `attack-simulation`
-- 7 agent IRSA roles with S3 access to `dev-argonaut-ares` bucket
-
-**EC2 (Golden Image)** -- Single-instance deployment:
-
-- Kali Linux t3.xlarge with all tools pre-installed
-- Provisioned via Ansible (`goad_attack_box.yml`)
-- SSM-managed (no SSH keys)
-- See `infra/ares-deployment/staging/us-west-1/kali-ares/`
-
-```bash
-# Deploy S3 artifact bucket
-cd infra/ares-deployment/dev/us-west-2/ares-storage && terragrunt apply
-
-# Deploy golden image instance
-cd infra/ares-deployment/staging/us-west-1/kali-ares && terragrunt apply
-```
-
-See [Infrastructure Reference](docs/infrastructure.md) for detailed deployment
+See [Infrastructure Reference](docs/infrastructure.md) for full deployment
 documentation.
 
 ## Development
 
 ### Prerequisites
 
-- Python 3.11+
-- [uv](https://github.com/astral-sh/uv) or pip
+- [Rust](https://rustup.rs/) (stable)
 - [pre-commit](https://pre-commit.com/)
-- [Task](https://taskfile.dev/installation/) (optional)
+- [Task](https://taskfile.dev/installation/) (recommended)
 
-### Setup Development Environment
+### Build & Test
 
 ```bash
-# Install dependencies
-uv pip install -e ".[dev]"
-
-# Set up pre-commit hooks
-pre-commit install
-
-# Run tests
-pytest
-
-# Run linting
-ruff check .
-
-# Run type checking
-mypy src/
+task rust:build          # debug build
+task rust:release        # release build
+task rust:test           # run tests
+task rust:check          # compile check only
+cargo clippy --workspace # lint
+cargo fmt --all          # format
 ```
 
-### Common Development Tasks
+### Deploy & Test on Remote
 
 ```bash
-# Run all pre-commit checks
-pre-commit run --all-files
+# Deploy to K8s pods
+task remote:rust:deploy
 
-# Format code
-ruff format .
+# Verify binaries match
+task remote:check
 
-# Run tests with coverage
-pytest --cov=src tests/
+# Check pod health
+task remote:status
 ```
 
 ## Configuration
 
-### Environment Variables
+### Config File
 
-**Blue Team (SOC Investigation):**
+The master config lives at `config/ares.yaml`. It defines:
 
-| Variable                        | Required | Description                                                |
-| ------------------------------- | -------- | ---------------------------------------------------------- |
-| `GRAFANA_URL`                   | Yes      | Grafana instance URL (e.g., `https://grafana.example.com`) |
-| `GRAFANA_SERVICE_ACCOUNT_TOKEN` | Yes      | Grafana service account token for API access               |
-| `ANTHROPIC_API_KEY`             | Yes      | Anthropic API key for Claude models                        |
-| `DREADNODE_API_KEY`             | No       | Dreadnode platform token for observability                 |
-
-**Red Team (Penetration Testing):**
-
-| Variable            | Required | Description                                |
-| ------------------- | -------- | ------------------------------------------ |
-| `ANTHROPIC_API_KEY` | Yes      | Anthropic API key for Claude models        |
-| `DREADNODE_API_KEY` | No       | Dreadnode platform token for observability |
-
-**Multi-Agent Model Overrides:**
-
-| Variable                  | Required | Description                                                   |
-| ------------------------- | -------- | ------------------------------------------------------------- |
-| `ARES_MODEL`              | No       | Default model for all multi-agent roles                       |
-| `ARES_ORCHESTRATOR_MODEL` | No       | Override orchestrator model                                   |
-| `ARES_WORKER_MODEL`       | No       | Override all worker models                                    |
-| `ARES_AGENT_<ROLE>_MODEL` | No       | Role-specific model override (e.g., `ARES_AGENT_RECON_MODEL`) |
-
-Precedence (highest first): `ARES_AGENT_<ROLE>_MODEL` >
-`ARES_ORCHESTRATOR_MODEL`/`ARES_WORKER_MODEL` > `ARES_MODEL` > config file.
-
-**Note:** `GRAFANA_API_KEY` is deprecated. Use `GRAFANA_SERVICE_ACCOUNT_TOKEN`
-instead. See [Grafana's service account
-documentation](https://grafana.com/docs/grafana/latest/administration/service-accounts/)
-for details.
-
-### Supported LLM Models
-
-Ares uses [litellm](https://github.com/BerriAI/litellm) format for model
-selection:
-
-- `claude-sonnet-4-20250514` (recommended)
-- `gpt-4o`
-- `gpt-4-turbo`
-- Any other litellm-compatible model
-
-## Observability
-
-Ares integrates with the Dreadnode Platform at
-<https://platform.dev.plundr.ai/> for comprehensive observability:
-
-- **Metrics**: Evidence count, pyramid levels, tool usage
-- **Traces**: Full investigation execution traces
-- **Logs**: Structured logs with context
-- **Artifacts**: Evidence items, questions, and reports
-
-### Configuring the Platform
-
-The Dreadnode platform can be configured via command-line arguments or
-environment variables:
+- Per-role LLM model assignments
+- Agent capabilities and tool inventories
+- Operation timeouts and limits
+- Vulnerability exploitation priorities
+- Recovery and context management settings
 
 ```bash
-# Via command line (blue team)
-uv run python -m ares \
-  --dn-args.server https://platform.dev.plundr.ai/ \
-  --dn-args.token your-api-token \
-  --dn-args.organization ares \
-  --dn-args.workspace ares-protocol \
-  --dn-args.project ares-soc
-
-# Via environment variable
-export DREADNODE_API_KEY="your-dreadnode-api-key"  # pragma: allowlist secret
+ares-cli config show --models              # show model assignments
+ares-cli config set-model orchestrator gpt-5.2
+ares-cli config set-model --all gpt-5.2
+ares-cli config validate
 ```
 
-The default platform URL is `https://platform.dev.plundr.ai/`
+### Environment Variables
+
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `ANTHROPIC_API_KEY` | Yes | Anthropic API key for Claude models |
+| `GRAFANA_URL` | Blue | Grafana instance URL |
+| `GRAFANA_SERVICE_ACCOUNT_TOKEN` | Blue | Grafana service account token |
+| `DREADNODE_API_KEY` | No | Dreadnode platform token for observability |
+| `ARES_REDIS_URL` | No | Redis URL (default: `redis://localhost:6379`) |
+| `ARES_LLM_MODEL` | No | Default LLM model override |
+| `ARES_CONFIG` | No | Config file path (default: `./config/ares.yaml`) |
+
+**Model Override Precedence** (highest first):
+`ARES_AGENT_<ROLE>_MODEL` > `ARES_ORCHESTRATOR_MODEL`/`ARES_WORKER_MODEL` > `ARES_MODEL` > config file.
+
+### Observability
+
+Ares supports OpenTelemetry for traces and metrics, with console and OTLP
+export. Grafana integration provides dashboards for operation monitoring
+via the [Grafana MCP](docs/grafana_mcp_usage.md) server.
 
 ## Contributing
 
@@ -936,12 +443,3 @@ This project is licensed under the Apache License 2.0 - see the
 ## Security
 
 For security vulnerabilities, please see our [Security Policy](SECURITY.md).
-
-## Acknowledgments
-
-- Built with
-  [Dreadnode SDK](https://github.com/dreadnode/sdk)
-- MITRE ATT&CK data via
-  [TAXII server](https://github.com/mitre-attack/attack-stix-data)
-- Pyramid of Pain concept by
-  [David J. Bianco](http://detect-respond.blogspot.com/2013/03/the-pyramid-of-pain.html)

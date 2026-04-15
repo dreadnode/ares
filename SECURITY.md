@@ -15,7 +15,7 @@ This project uses Semgrep for automated security analysis. The checker runs on:
 
 ### Enabled Rulesets
 
-- `p/python`: Python-specific checks
+- `p/rust`: Rust-specific checks
 - `p/security-audit`: General security best practices
 - `p/secrets`: Detection of hardcoded secrets
 - `p/owasp-top-ten`: OWASP Top 10 vulnerability checks
@@ -32,6 +32,5 @@ This project uses Semgrep for automated security analysis. The checker runs on:
 Run Semgrep locally before pushing:
 
 ```bash
-pip install semgrep
 semgrep --config=auto
 ```
