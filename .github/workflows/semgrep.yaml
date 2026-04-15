@@ -16,7 +16,7 @@ on:
     - cron: "0 0 * * *" # Run daily at midnight UTC
 
 concurrency:
-  group: pre-commit-${{ github.run_id }}
+  group: semgrep-${{ github.ref }}
   cancel-in-progress: true
 
 permissions:
