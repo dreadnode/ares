@@ -9,7 +9,8 @@ multi-agent system.
 
 The red team system uses a **coordinator/worker architecture** where a central
 orchestrator delegates tasks to specialized worker agents. Each agent runs in
-its own Kubernetes pod with role-specific tools installed.
+its own container (Kubernetes pod or EC2 instance) with role-specific tools
+installed.
 
 ```text
 ┌────────────────────────────────────────────────────────────────────────┐
