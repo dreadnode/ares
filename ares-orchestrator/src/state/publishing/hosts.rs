@@ -31,7 +31,7 @@ impl SharedState {
         }
 
         // Auto-extract domain from FQDN hostname (matches Python add_host)
-        // e.g. "winterfell.north.sevenkingdoms.local" → "north.sevenkingdoms.local"
+        // e.g. "dc02.child.contoso.local" → "child.contoso.local"
         if !host.hostname.is_empty()
             && host.hostname.contains('.')
             && !is_aws_hostname(&host.hostname)
@@ -62,7 +62,7 @@ impl SharedState {
                 }
 
                 // Auto-populate netbios_to_fqdn map so CLI can resolve short names.
-                // e.g. "winterfell.north.sevenkingdoms.local" → WINTERFELL → winterfell.north.sevenkingdoms.local
+                // e.g. "dc02.child.contoso.local" → DC02 → dc02.child.contoso.local
                 let short_name = parts[0].to_uppercase();
                 let fqdn = host.hostname.to_lowercase();
                 let _ = self.publish_netbios(queue, &short_name, &fqdn).await;

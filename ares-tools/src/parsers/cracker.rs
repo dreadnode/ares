@@ -209,28 +209,28 @@ Session....: hashcat
 Status......: Cracked
 
 --- hashcat --show ---
-$krb5tgs$23$*sansa.stark$NORTH.SEVENKINGDOMS.LOCAL$north.sevenkingdoms.local/sansa.stark*$abc123:MyPassword1
+$krb5tgs$23$*sarah.connor$CHILD.CONTOSO.LOCAL$child.contoso.local/sarah.connor*$abc123:MyPassword1
 "#;
-        let params = json!({"domain": "north.sevenkingdoms.local"});
+        let params = json!({"domain": "child.contoso.local"});
         let creds = parse_cracker_output(output, &params);
         assert_eq!(creds.len(), 1);
-        assert_eq!(creds[0]["username"], "sansa.stark");
+        assert_eq!(creds[0]["username"], "sarah.connor");
         assert_eq!(creds[0]["password"], "MyPassword1");
-        assert_eq!(creds[0]["domain"], "NORTH.SEVENKINGDOMS.LOCAL");
+        assert_eq!(creds[0]["domain"], "CHILD.CONTOSO.LOCAL");
         assert_eq!(creds[0]["source"], "cracked:hashcat");
     }
 
     #[test]
     fn test_parse_hashcat_asrep_cracked() {
         let output = r#"--- hashcat --show ---
-$krb5asrep$23$missandei@ESSOS.LOCAL:8a7a0b3264590ef6:fr3edom
+$krb5asrep$23$michelle@FABRIKAM.LOCAL:8a7a0b3264590ef6:fr3edom
 "#;
-        let params = json!({"domain": "essos.local"});
+        let params = json!({"domain": "fabrikam.local"});
         let creds = parse_cracker_output(output, &params);
         assert_eq!(creds.len(), 1);
-        assert_eq!(creds[0]["username"], "missandei");
+        assert_eq!(creds[0]["username"], "michelle");
         assert_eq!(creds[0]["password"], "fr3edom");
-        assert_eq!(creds[0]["domain"], "ESSOS.LOCAL");
+        assert_eq!(creds[0]["domain"], "FABRIKAM.LOCAL");
     }
 
     #[test]
@@ -247,12 +247,12 @@ $krb5asrep$23$missandei@ESSOS.LOCAL:8a7a0b3264590ef6:fr3edom
     fn test_parse_john_show_cracked() {
         let output = "Using default input encoding: UTF-8\n\
             Loaded 1 password hash\n\
-            sansa.stark:MyPassword1:1234:::\n\
+            sarah.connor:MyPassword1:1234:::\n\
             1 password hash cracked, 0 left\n";
-        let params = json!({"domain": "north.sevenkingdoms.local"});
+        let params = json!({"domain": "child.contoso.local"});
         let creds = parse_cracker_output(output, &params);
         assert_eq!(creds.len(), 1);
-        assert_eq!(creds[0]["username"], "sansa.stark");
+        assert_eq!(creds[0]["username"], "sarah.connor");
         assert_eq!(creds[0]["password"], "MyPassword1");
         assert_eq!(creds[0]["source"], "cracked:john");
     }
@@ -269,16 +269,16 @@ $krb5asrep$23$missandei@ESSOS.LOCAL:8a7a0b3264590ef6:fr3edom
     fn test_john_show_asrep_no_hex_section() {
         // John --show for AS-REP omits the hex hash — just user@REALM:password
         let output = "--- john --show ---\n\
-            $krb5asrep$23$brandon.stark@NORTH.SEVENKINGDOMS.LOCAL:iseedeadpeople\n\n\
+            $krb5asrep$23$brian.davis@CHILD.CONTOSO.LOCAL:letmein2025\n\n\
             1 password hash cracked, 0 left\n";
         let params = json!({
-            "hash_value": "$krb5asrep$23$brandon.stark@NORTH.SEVENKINGDOMS.LOCAL:abcdef1234$5678"
+            "hash_value": "$krb5asrep$23$brian.davis@CHILD.CONTOSO.LOCAL:abcdef1234$5678"
         });
         let creds = parse_cracker_output(output, &params);
         assert_eq!(creds.len(), 1);
-        assert_eq!(creds[0]["username"], "brandon.stark");
-        assert_eq!(creds[0]["password"], "iseedeadpeople");
-        assert_eq!(creds[0]["domain"], "NORTH.SEVENKINGDOMS.LOCAL");
+        assert_eq!(creds[0]["username"], "brian.davis");
+        assert_eq!(creds[0]["password"], "letmein2025");
+        assert_eq!(creds[0]["domain"], "CHILD.CONTOSO.LOCAL");
     }
 
     #[test]
@@ -288,13 +288,13 @@ $krb5asrep$23$missandei@ESSOS.LOCAL:8a7a0b3264590ef6:fr3edom
             ?:iknownothing\n\n\
             1 password hash cracked, 0 left\n";
         let params = json!({
-            "hash_value": "$krb5tgs$23$*jon.snow$NORTH.SEVENKINGDOMS.LOCAL$CIFS/thewall*$abcdef$123456"
+            "hash_value": "$krb5tgs$23$*john.smith$CHILD.CONTOSO.LOCAL$CIFS/filesvr01*$abcdef$123456"
         });
         let creds = parse_cracker_output(output, &params);
         assert_eq!(creds.len(), 1);
-        assert_eq!(creds[0]["username"], "jon.snow");
+        assert_eq!(creds[0]["username"], "john.smith");
         assert_eq!(creds[0]["password"], "iknownothing");
-        assert_eq!(creds[0]["domain"], "NORTH.SEVENKINGDOMS.LOCAL");
+        assert_eq!(creds[0]["domain"], "CHILD.CONTOSO.LOCAL");
         assert_eq!(creds[0]["source"], "cracked:john");
     }
 

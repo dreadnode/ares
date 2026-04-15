@@ -328,7 +328,7 @@ mod tests {
         let calls = vec![ToolCall {
             id: "call_1".into(),
             name: "nmap_scan".into(),
-            arguments: serde_json::json!({"target": "192.168.1.0/24"}),
+            arguments: serde_json::json!({"target": "192.168.58.0/24"}),
         }];
         let msg = ChatMessage::assistant_tool_use(Some("Let me scan".into()), calls);
         assert_eq!(msg.role, Role::Assistant);

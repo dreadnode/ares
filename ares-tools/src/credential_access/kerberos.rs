@@ -85,21 +85,21 @@ svc_admin\n\
 svc_test\n\
 testuser\ntest\n\
 user1\nuser2\nuser3\n\
-samwell.tarly\njohn.snow\njon.snow\n\
-arya.stark\nsansa.stark\nbrandon.stark\neddard.stark\n\
-cersei.lannister\njaime.lannister\ntyrion.lannister\n\
-daenerys.targaryen\njorah.mormont\n\
-stannis.baratheon\nrobert.baratheon\n\
-hodor\nrobb.stark\ntheon.greyjoy\n\
-missandei\nkhal.drogo\nviserys.targaryen\n\
-joffrey.baratheon\ntommen.baratheon\n\
+sam.wilson\njohn.smith\njohn.smith\n\
+alice.jones\nsarah.connor\nbrian.davis\nedward.davis\n\
+carol.lane\njames.lane\ntim.lane\n\
+diana.torres\njoe.morgan\n\
+steve.baker\nrichard.baker\n\
+jdoe\nrobert.davis\ntom.green\n\
+michelle\nkarl.davidson\nvictor.torres\n\
+jeff.baker\ntony.baker\n\
 petyr.baelish\nvarys\nbronn\n\
-tywin.lannister\nbrienne.tarth\n\
+terry.lane\nbetty.taylor\n\
 sandor.clegane\ngregor.clegane\n\
 margaery.tyrell\nloras.tyrell\n\
 oberyn.martell\nellaria.sand\n\
 davos.seaworth\nmelisandre\n\
-samwell\njsnow\nrcon\n\
+swilson\njsnow\nrcon\n\
 ";
 
 /// Enumerate valid usernames via Kerberos pre-auth without credentials.

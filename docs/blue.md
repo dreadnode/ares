@@ -29,17 +29,18 @@ findings to MITRE ATT&CK, and writes investigation reports.
 
 The investigation orchestrator manages the full investigation lifecycle:
 
-- Creates and configures Dreadnode Agents for investigating Grafana alerts
-- Establishes MCP (Model Context Protocol) connections to Grafana
+- Coordinates LLM-powered investigation agents for Grafana alerts
+- Dispatches tasks to specialized sub-agents (triage, threat hunter, lateral analyst, escalation)
+- Chains follow-up investigations based on discovered evidence types
 - Enforces hard timeout watchdog (1 min/step + 2 min buffer)
 - Generates partial reports on timeout
-- Handles investigation state persistence
+- Handles investigation state persistence via Redis
 
-#### Investigation Agent Factory
+#### Blue Worker Task Loop
 
 **Location:** `ares-worker/src/blue_task_loop.rs`
 
-Creates pre-configured investigation agents with:
+Runs the worker-side investigation loop with:
 
 - Adaptive query limits based on alert severity and stage
 - Query optimization and duplicate detection
@@ -49,9 +50,9 @@ Creates pre-configured investigation agents with:
 
 #### Investigation State Model
 
-**Location:** `ares-core/src/models/`
+**Location:** `ares-core/src/models/blue.rs`
 
-The `InvestigationState` model tracks:
+The `SharedBlueTeamState` model tracks:
 
 - Investigation ID, alert context, current stage
 - Evidence inventory with pyramid level classification

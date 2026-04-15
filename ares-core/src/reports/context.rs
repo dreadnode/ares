@@ -424,7 +424,7 @@ mod tests {
     #[test]
     fn test_host_ctx_deduplicates_services() {
         let host = Host {
-            ip: "10.1.2.220".to_string(),
+            ip: "192.168.58.10".to_string(),
             hostname: "dc01.contoso.local".to_string(),
             os: String::new(),
             roles: vec![],
@@ -443,7 +443,7 @@ mod tests {
     #[test]
     fn test_host_ctx_filters_pseudo_services() {
         let host = Host {
-            ip: "10.1.2.51".to_string(),
+            ip: "192.168.58.23".to_string(),
             hostname: String::new(),
             os: String::new(),
             roles: vec![],
@@ -483,7 +483,7 @@ mod tests {
             username: "admin".to_string(),
             hash_value: "aabb".to_string(),
             hash_type: "ntlm".to_string(),
-            domain: "NORTH.SEVENKINGDOMS.LOCAL".to_string(),
+            domain: "CHILD.CONTOSO.LOCAL".to_string(),
             cracked_password: None,
             source: String::new(),
             discovered_at: None,
@@ -492,6 +492,6 @@ mod tests {
             aes_key: None,
         };
         let ctx = HashCtx::from(&hash);
-        assert_eq!(ctx.domain, "north.sevenkingdoms.local");
+        assert_eq!(ctx.domain, "child.contoso.local");
     }
 }

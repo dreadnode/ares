@@ -148,7 +148,7 @@ mod tests {
 
     #[test]
     fn valid_evidence_passes() {
-        let result = validate_evidence("suspicious_ip", "192.168.1.1", "siem");
+        let result = validate_evidence("suspicious_ip", "192.168.58.10", "siem");
         assert!(result.valid);
         assert!(result.warnings.is_empty());
         assert_eq!(result.normalized_type, "suspicious_ip");
@@ -224,7 +224,7 @@ mod tests {
 
     #[test]
     fn normalizes_type_to_lowercase() {
-        let result = validate_evidence("Suspicious_IP", "10.0.0.1", "siem");
+        let result = validate_evidence("Suspicious_IP", "192.168.58.10", "siem");
         // Type is normalized but won't match known types in case-sensitive list,
         // however we normalize first, so "suspicious_ip" should match.
         assert!(result.valid);

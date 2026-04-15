@@ -284,7 +284,7 @@ impl Dispatcher {
 
             // For MSSQL vulns, include ALL available credentials for the domain
             // so the LLM can try each one (different users have different MSSQL
-            // permissions — e.g. samwell.tarly can EXECUTE AS LOGIN = 'sa').
+            // permissions — e.g. sam.wilson can EXECUTE AS LOGIN = 'sa').
             if vuln.vuln_type.starts_with("mssql") && !domain.is_empty() {
                 let all_creds: Vec<_> = state
                     .credentials

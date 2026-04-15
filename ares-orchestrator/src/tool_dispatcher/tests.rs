@@ -6,7 +6,7 @@ fn test_tool_exec_request_serialization() {
         call_id: "nmap_scan_abc123".into(),
         task_id: "recon_def456".into(),
         tool_name: "nmap_scan".into(),
-        arguments: serde_json::json!({"target": "192.168.1.0/24"}),
+        arguments: serde_json::json!({"target": "192.168.58.0/24"}),
         traceparent: None,
         operation_id: Some("op-20260415-120000".into()),
     };

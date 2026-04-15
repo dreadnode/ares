@@ -456,7 +456,7 @@ mod tests {
                         "type": "function",
                         "function": {
                             "name": "nmap_scan",
-                            "arguments": "{\"target\":\"192.168.1.0/24\"}"
+                            "arguments": "{\"target\":\"192.168.58.0/24\"}"
                         }
                     }]
                 },

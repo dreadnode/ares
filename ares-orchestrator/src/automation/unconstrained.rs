@@ -1,7 +1,7 @@
 //! auto_unconstrained_exploitation -- coerce-and-dump for unconstrained delegation.
 //!
 //! When a machine account with unconstrained delegation is discovered (e.g.
-//! `WINTERFELL$`), this automation orchestrates the full attack chain:
+//! `DC02$`), this automation orchestrates the full attack chain:
 //!
 //!   1. **Coerce** a DC to authenticate to the unconstrained delegation host
 //!      (PetitPotam / PrinterBug). The DC's TGT is cached in LSASS on that host.
@@ -9,7 +9,7 @@
 //!   3. **Chain** — result_processing's `auto_chain_s4u_secretsdump` picks up any
 //!      `.ccache` ticket and dispatches secretsdump automatically.
 //!
-//! User accounts with unconstrained delegation (e.g. `sansa.stark`) are left to
+//! User accounts with unconstrained delegation (e.g. `sarah.connor`) are left to
 //! the LLM-driven exploit path since we can't determine the target host.
 
 use std::collections::HashMap;
@@ -108,13 +108,13 @@ pub async fn auto_unconstrained_exploitation(
                     }
 
                     // Only automate machine accounts — we can resolve hostname → IP.
-                    // User accounts (sansa.stark) go through the LLM exploit path.
+                    // User accounts (sarah.connor) go through the LLM exploit path.
                     if !account_name.ends_with('$') {
                         return None;
                     }
 
                     // Resolve machine hostname → IP from discovered hosts.
-                    // WINTERFELL$ → look for host with hostname starting with "winterfell".
+                    // DC02$ → look for host with hostname starting with "dc02".
                     let hostname_prefix = account_name.trim_end_matches('$').to_lowercase();
                     let host_ip = state.hosts.iter().find_map(|h| {
                         let h_lower = h.hostname.to_lowercase();
@@ -357,13 +357,13 @@ struct UnconstrainedWork {
 mod tests {
     #[test]
     fn test_hostname_resolution_machine_account() {
-        // WINTERFELL$ → "winterfell"
-        let account = "WINTERFELL$";
+        // DC02$ → "dc02"
+        let account = "DC02$";
         let prefix = account.trim_end_matches('$').to_lowercase();
-        assert_eq!(prefix, "winterfell");
+        assert_eq!(prefix, "dc02");
 
-        // Should match "winterfell.north.sevenkingdoms.local"
-        let hostname = "winterfell.north.sevenkingdoms.local";
+        // Should match "dc02.child.contoso.local"
+        let hostname = "dc02.child.contoso.local";
         let h_lower = hostname.to_lowercase();
         assert!(h_lower == prefix || h_lower.starts_with(&format!("{prefix}.")));
     }

@@ -61,7 +61,7 @@ fn split_domain_user(raw: &str) -> (Option<&str>, &str) {
 }
 
 /// Resolve a NetBIOS domain name to FQDN if it matches the first label.
-/// e.g., "NORTH" + fqdn "north.sevenkingdoms.local" → "north.sevenkingdoms.local".
+/// e.g., "CHILD" + fqdn "child.contoso.local" → "child.contoso.local".
 /// Returns the extracted domain unchanged if it doesn't match.
 fn resolve_domain_from_fqdn<'a>(extracted: &str, fqdn: &'a str) -> Option<&'a str> {
     if fqdn.is_empty() || extracted.is_empty() {
@@ -234,34 +234,34 @@ mod tests {
 # fake script in netlogon with creds
 $task = '/c TODO'
 $taskName = "fake task"
-$user = "NORTH\jeor.mormont"
-$password = "_L0ngCl@w_"
+$user = "CHILD\jeff.morgan"
+$password = "_S3cur3P@ss_"
 
 # passwords in sysvol still ...
 "#;
-        let params = json!({"domain": "north.sevenkingdoms.local"});
+        let params = json!({"domain": "child.contoso.local"});
         let creds = parse_spider_credentials(output, &params);
 
         assert_eq!(creds.len(), 1);
-        assert_eq!(creds[0]["username"], "jeor.mormont");
-        assert_eq!(creds[0]["password"], "_L0ngCl@w_");
-        // NetBIOS "NORTH" resolved to FQDN since first label matches param domain
-        assert_eq!(creds[0]["domain"], "north.sevenkingdoms.local");
+        assert_eq!(creds[0]["username"], "jeff.morgan");
+        assert_eq!(creds[0]["password"], "_S3cur3P@ss_");
+        // NetBIOS "CHILD" resolved to FQDN since first label matches param domain
+        assert_eq!(creds[0]["domain"], "child.contoso.local");
     }
 
     #[test]
     fn test_net_use_command() {
         let output = r#"
 --- SYSVOL/scripts/map_drive.bat ---
-net use \\winterfell\share /user:NORTH\jeor.mormont _L0ngCl@w_
+net use \\dc02\share /user:CHILD\jeff.morgan _S3cur3P@ss_
 "#;
-        let params = json!({"domain": "north.sevenkingdoms.local"});
+        let params = json!({"domain": "child.contoso.local"});
         let creds = parse_spider_credentials(output, &params);
 
         assert_eq!(creds.len(), 1);
-        assert_eq!(creds[0]["username"], "jeor.mormont");
-        assert_eq!(creds[0]["password"], "_L0ngCl@w_");
-        assert_eq!(creds[0]["domain"], "north.sevenkingdoms.local");
+        assert_eq!(creds[0]["username"], "jeff.morgan");
+        assert_eq!(creds[0]["password"], "_S3cur3P@ss_");
+        assert_eq!(creds[0]["domain"], "child.contoso.local");
     }
 
     #[test]

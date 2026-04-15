@@ -464,7 +464,7 @@ SMB         192.168.58.121  445    DC01       carol.williams                2026
 SMB         192.168.58.121  445    DC01       dave.miller                   2026-03-25 23:22:25 0       Dave Miller (Password : Summer2026!)
 SMB         192.168.58.121  445    DC01       eve.davis                     2026-03-25 23:22:25 0       Eve Davis
 SMB         192.168.58.121  445    DC01       Guest                         <never>             0       Built-in account for guest access
-SMB         192.168.58.121  445    DC01       [*] Enumerated 10 local users: NORTH"#;
+SMB         192.168.58.121  445    DC01       [*] Enumerated 10 local users: CHILD"#;
 
         let users = parse_netexec_users(output);
 
@@ -503,8 +503,8 @@ SMB         192.168.58.121  445    DC01       [*] Enumerated 10 local users: NOR
     #[test]
     fn test_parse_netexec_users_rid_brute_format() {
         let output = r#"SMB  192.168.58.121  445  DC01  [+] north.contoso.local\:
-SMB  192.168.58.121  445  DC01  NORTH\alice.johnson (SidTypeUser)
-SMB  192.168.58.121  445  DC01  NORTH\bob.smith (SidTypeUser)"#;
+SMB  192.168.58.121  445  DC01  CHILD\alice.johnson (SidTypeUser)
+SMB  192.168.58.121  445  DC01  CHILD\bob.smith (SidTypeUser)"#;
 
         let users = parse_netexec_users(output);
         let user_entries: Vec<_> = users
@@ -513,7 +513,7 @@ SMB  192.168.58.121  445  DC01  NORTH\bob.smith (SidTypeUser)"#;
             .collect();
         assert_eq!(user_entries.len(), 2);
         assert_eq!(user_entries[0]["username"], "alice.johnson");
-        assert_eq!(user_entries[0]["domain"], "NORTH");
+        assert_eq!(user_entries[0]["domain"], "CHILD");
     }
 
     #[test]
@@ -543,7 +543,7 @@ SMB  192.168.58.121  445  DC01  bob         2026-03-25 23:21:09 0  Bob"#;
     #[test]
     fn test_looks_like_ip_valid() {
         assert!(looks_like_ip("192.168.58.10"));
-        assert!(looks_like_ip("10.0.0.1"));
+        assert!(looks_like_ip("192.168.58.10"));
         assert!(looks_like_ip("0.0.0.0"));
         assert!(looks_like_ip("255.255.255.255"));
     }

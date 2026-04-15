@@ -28,7 +28,7 @@ pub(super) const NOISE_USERNAMES: &[&str] = &[
 ];
 
 /// Prefixes for machine-local service accounts that should be filtered.
-/// e.g. SQLServer2005SQLBrowserUser$BRAAVOS
+/// e.g. SQLServer2005SQLBrowserUser$SQL01
 pub(super) const NOISE_USERNAME_PREFIXES: &[&str] = &["sqlserver", "mssql", "healthmailbox"];
 
 /// Resolve a NetBIOS domain name to FQDN using the netbios_to_fqdn map.

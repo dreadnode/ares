@@ -75,11 +75,11 @@ pub fn parse_nmap_output(output: &str, params: &Value) -> Vec<Value> {
 
         // Extract FQDN from nmap script output when hostname is empty or a
         // short NetBIOS name (no dots).  Look for common patterns:
-        //   smb-os-discovery:  |   FQDN: kingslanding.sevenkingdoms.local
-        //   rdp-ntlm-info:    |   DNS_Computer_Name: meereen.essos.local
-        //   ldap service:     |   dnsHostName: winterfell.north.sevenkingdoms.local
-        //   ssl-cert:         | ssl-cert: Subject: commonName=kingslanding.sevenkingdoms.local
-        //   ssl-cert SAN:     | Subject Alternative Name: ..., DNS:kingslanding.sevenkingdoms.local
+        //   smb-os-discovery:  |   FQDN: dc01.contoso.local
+        //   rdp-ntlm-info:    |   DNS_Computer_Name: dc03.fabrikam.local
+        //   ldap service:     |   dnsHostName: dc02.child.contoso.local
+        //   ssl-cert:         | ssl-cert: Subject: commonName=dc01.contoso.local
+        //   ssl-cert SAN:     | Subject Alternative Name: ..., DNS:dc01.contoso.local
         if !current_ip.is_empty() && !hostname.contains('.') {
             let trimmed = line.trim_start_matches('|').trim_start_matches('_').trim();
 
@@ -134,7 +134,7 @@ pub fn parse_nmap_output(output: &str, params: &Value) -> Vec<Value> {
     }
 
     // If no hosts were found but we have a target_ip, create a minimal host entry
-    // Skip CIDR notation (e.g. "10.1.2.0/24") — individual hosts will be discovered
+    // Skip CIDR notation (e.g. "192.168.58.0/24") — individual hosts will be discovered
     // by their own scan results; a subnet target should never become a host entry.
     if hosts.is_empty() && !target_ip.is_empty() && !target_ip.contains('/') {
         hosts.push(json!({
@@ -299,19 +299,19 @@ OS details: Microsoft Windows Server 2019";
     #[test]
     fn test_parse_nmap_fqdn_from_script_output() {
         let output = "\
-Nmap scan report for 10.1.2.220
+Nmap scan report for 192.168.58.10
 PORT    STATE SERVICE
 88/tcp  open  kerberos-sec
 389/tcp open  ldap
 445/tcp open  microsoft-ds
 | rdp-ntlm-info:
-|   DNS_Domain_Name: sevenkingdoms.local
-|   DNS_Computer_Name: kingslanding.sevenkingdoms.local
-|   FQDN: kingslanding.sevenkingdoms.local";
-        let params = json!({"target": "10.1.2.220"});
+|   DNS_Domain_Name: contoso.local
+|   DNS_Computer_Name: dc01.contoso.local
+|   FQDN: dc01.contoso.local";
+        let params = json!({"target": "192.168.58.10"});
         let hosts = parse_nmap_output(output, &params);
         assert_eq!(hosts.len(), 1);
-        assert_eq!(hosts[0]["hostname"], "kingslanding.sevenkingdoms.local");
+        assert_eq!(hosts[0]["hostname"], "dc01.contoso.local");
         assert!(hosts[0]["is_dc"].as_bool().unwrap());
     }
 
@@ -319,72 +319,69 @@ PORT    STATE SERVICE
     fn test_parse_nmap_fqdn_does_not_override_existing() {
         // When nmap header already has the FQDN, script output shouldn't override
         let output = "\
-Nmap scan report for kingslanding.sevenkingdoms.local (10.1.2.220)
+Nmap scan report for dc01.contoso.local (192.168.58.10)
 PORT    STATE SERVICE
 88/tcp  open  kerberos-sec
-|   DNS_Computer_Name: kingslanding.sevenkingdoms.local";
-        let params = json!({"target": "10.1.2.220"});
+|   DNS_Computer_Name: dc01.contoso.local";
+        let params = json!({"target": "192.168.58.10"});
         let hosts = parse_nmap_output(output, &params);
-        assert_eq!(hosts[0]["hostname"], "kingslanding.sevenkingdoms.local");
+        assert_eq!(hosts[0]["hostname"], "dc01.contoso.local");
     }
 
     #[test]
     fn test_parse_nmap_fqdn_from_dns_host_name() {
         let output = "\
-Nmap scan report for 10.1.2.150
+Nmap scan report for 192.168.58.11
 PORT    STATE SERVICE
 88/tcp  open  kerberos-sec
 389/tcp open  ldap
-|   dnsHostName: winterfell.north.sevenkingdoms.local";
-        let params = json!({"target": "10.1.2.150"});
+|   dnsHostName: dc02.child.contoso.local";
+        let params = json!({"target": "192.168.58.11"});
         let hosts = parse_nmap_output(output, &params);
-        assert_eq!(hosts[0]["hostname"], "winterfell.north.sevenkingdoms.local");
+        assert_eq!(hosts[0]["hostname"], "dc02.child.contoso.local");
     }
 
     #[test]
     fn test_parse_nmap_aws_internal_hostname_replaced_by_fqdn() {
         // AWS internal hostnames should be discarded, allowing FQDN extraction
         let output = "\
-Nmap scan report for ip-10-1-2-220.us-west-2.compute.internal (10.1.2.220)
+Nmap scan report for ip-192-168-58-10.us-west-2.compute.internal (192.168.58.10)
 PORT    STATE SERVICE
 88/tcp  open  kerberos-sec
 389/tcp open  ldap
-| ssl-cert: Subject: commonName=kingslanding.sevenkingdoms.local
-| Subject Alternative Name: othername: 1.3.6.1.4.1.311.25.1:<unsupported>, DNS:kingslanding.sevenkingdoms.local";
-        let params = json!({"target": "10.1.2.220"});
+| ssl-cert: Subject: commonName=dc01.contoso.local
+| Subject Alternative Name: othername: 1.3.6.1.4.1.311.25.1:<unsupported>, DNS:dc01.contoso.local";
+        let params = json!({"target": "192.168.58.10"});
         let hosts = parse_nmap_output(output, &params);
         assert_eq!(hosts.len(), 1);
-        assert_eq!(hosts[0]["ip"], "10.1.2.220");
-        assert_eq!(hosts[0]["hostname"], "kingslanding.sevenkingdoms.local");
+        assert_eq!(hosts[0]["ip"], "192.168.58.10");
+        assert_eq!(hosts[0]["hostname"], "dc01.contoso.local");
         assert!(hosts[0]["is_dc"].as_bool().unwrap());
     }
 
     #[test]
     fn test_parse_nmap_fqdn_from_ssl_cert_commonname() {
         let output = "\
-Nmap scan report for 10.1.2.58
+Nmap scan report for 192.168.58.22
 PORT    STATE SERVICE
 389/tcp open  ldap
-| ssl-cert: Subject: commonName=meereen.essos.local
+| ssl-cert: Subject: commonName=dc03.fabrikam.local
 |_Not valid after:  2027-04-09T06:53:55";
-        let params = json!({"target": "10.1.2.58"});
+        let params = json!({"target": "192.168.58.22"});
         let hosts = parse_nmap_output(output, &params);
-        assert_eq!(hosts[0]["hostname"], "meereen.essos.local");
+        assert_eq!(hosts[0]["hostname"], "dc03.fabrikam.local");
     }
 
     #[test]
     fn test_parse_nmap_fqdn_from_ssl_cert_san_dns() {
         let output = "\
-Nmap scan report for 10.1.2.51
+Nmap scan report for 192.168.58.23
 PORT     STATE SERVICE
 3389/tcp open  ms-wbt-server
-| Subject Alternative Name: DNS:castelblack.north.sevenkingdoms.local";
-        let params = json!({"target": "10.1.2.51"});
+| Subject Alternative Name: DNS:srv01.child.contoso.local";
+        let params = json!({"target": "192.168.58.23"});
         let hosts = parse_nmap_output(output, &params);
-        assert_eq!(
-            hosts[0]["hostname"],
-            "castelblack.north.sevenkingdoms.local"
-        );
+        assert_eq!(hosts[0]["hostname"], "srv01.child.contoso.local");
     }
 
     #[test]
@@ -392,15 +389,15 @@ PORT     STATE SERVICE
         // nmap -sV output includes version/product info after the service name.
         // We should only capture the service name, not the version string.
         let output = "\
-Nmap scan report for 10.1.2.150
+Nmap scan report for 192.168.58.11
 PORT     STATE SERVICE       VERSION
 88/tcp   open  kerberos-sec  Microsoft Windows Kerberos
 135/tcp  open  msrpc         Microsoft Windows RPC
 139/tcp  open  netbios-ssn   Microsoft Windows netbios-ssn
-389/tcp  open  ldap          Microsoft Windows Active Directory LDAP (Domain: sevenkingdoms.local0., Site: Default-First-Site-Name)
+389/tcp  open  ldap          Microsoft Windows Active Directory LDAP (Domain: contoso.local0., Site: Default-First-Site-Name)
 445/tcp  open  microsoft-ds
 3389/tcp open  ms-wbt-server Microsoft Terminal Services";
-        let params = json!({"target": "10.1.2.150"});
+        let params = json!({"target": "192.168.58.11"});
         let hosts = parse_nmap_output(output, &params);
         assert_eq!(hosts.len(), 1);
         let services = hosts[0]["services"].as_array().unwrap();

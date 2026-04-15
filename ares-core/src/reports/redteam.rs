@@ -85,7 +85,7 @@ impl RedTeamReportGenerator {
             .map(timeline_event_from_json)
             .collect();
 
-        // Filter out CIDR subnet entries (e.g. "10.1.2.0/24") — these aren't hosts.
+        // Filter out CIDR subnet entries (e.g. "192.168.58.0/24") — these aren't hosts.
         let hosts: Vec<HostCtx> = state
             .all_hosts
             .iter()
@@ -235,7 +235,7 @@ impl RedTeamReportGenerator {
         domains.sort();
         domains.dedup();
 
-        // Filter out CIDR subnet entries (e.g. "10.1.2.0/24") — these aren't hosts.
+        // Filter out CIDR subnet entries (e.g. "192.168.58.0/24") — these aren't hosts.
         let hosts: Vec<HostCtx> = state
             .all_hosts
             .iter()

@@ -54,7 +54,7 @@ pub async fn auto_mssql_detection(
                     d.insert("target_ip".to_string(), json!(ip));
                     if !hostname.is_empty() {
                         d.insert("hostname".to_string(), json!(hostname));
-                        // Extract domain from FQDN: "braavos.essos.local" → "essos.local"
+                        // Extract domain from FQDN: "sql01.fabrikam.local" → "fabrikam.local"
                         if let Some(dot_pos) = hostname.find('.') {
                             let domain = &hostname[dot_pos + 1..];
                             if !domain.is_empty() {

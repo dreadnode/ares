@@ -40,8 +40,8 @@ pub(crate) fn sanitize_credentials(creds: &mut Vec<Credential>) {
             cred.password = TRAILING_PAREN_RE.replace(&cred.password, "").to_string();
         }
 
-        // e.g. "samwell.tarly@north.sevenkingdoms.local@essos.local"
-        //   → username="samwell.tarly", domain="north.sevenkingdoms.local"
+        // e.g. "sam.wilson@child.contoso.local@fabrikam.local"
+        //   → username="sam.wilson", domain="child.contoso.local"
         if cred.username.contains('@') {
             let username_clone = cred.username.clone();
             let parts: Vec<&str> = username_clone.splitn(2, '@').collect();

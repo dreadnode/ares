@@ -167,7 +167,7 @@ async fn run() -> Result<()> {
                     );
 
                     // Also register the credential's domain (may differ from target_domain,
-                    // e.g., north.sevenkingdoms.local vs sevenkingdoms.local).
+                    // e.g., child.contoso.local vs contoso.local).
                     // This ensures automation tasks (spray, kerberoast) can find a DC
                     // for the credential's domain.
                     if let Some(ref cred) = config.initial_credential {

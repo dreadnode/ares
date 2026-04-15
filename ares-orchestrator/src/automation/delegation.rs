@@ -55,8 +55,8 @@ pub async fn auto_delegation_enumeration(
                         .cloned()
                         .or_else(|| {
                             // Child-domain fallback: cred domain is parent,
-                            // DC is registered under child (e.g. cred=sevenkingdoms.local,
-                            // DC=north.sevenkingdoms.local)
+                            // DC is registered under child (e.g. cred=contoso.local,
+                            // DC=child.contoso.local)
                             let suffix = format!(".{cred_domain}");
                             state
                                 .domain_controllers

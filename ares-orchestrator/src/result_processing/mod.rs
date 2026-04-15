@@ -358,7 +358,7 @@ async fn extract_from_raw_text(
     // Process each tool output independently to prevent stateful parsers
     // (e.g. extract_plaintext_passwords's current_user tracker) from leaking
     // context across unrelated tool calls — a joined string caused false
-    // credential attribution (e.g. jon.snow:Heartsbane from stale context).
+    // credential attribution (e.g. john.smith:Summer2025 from stale context).
     let mut extracted = output_extraction::TextExtractions::default();
     for part in &text_parts {
         let partial = output_extraction::extract_from_output_text(part, default_domain);

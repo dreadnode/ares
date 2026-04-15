@@ -58,8 +58,8 @@ pub(super) fn sanitize_credential(
     }
 
     // Normalize username with embedded @domain suffixes
-    // e.g. "samwell.tarly@north.sevenkingdoms.local@essos.local"
-    //   → username="samwell.tarly", domain="north.sevenkingdoms.local"
+    // e.g. "sam.wilson@child.contoso.local@fabrikam.local"
+    //   → username="sam.wilson", domain="child.contoso.local"
     if cred.username.contains('@') {
         let username_clone = cred.username.clone();
         let parts: Vec<&str> = username_clone.splitn(2, '@').collect();
@@ -73,7 +73,7 @@ pub(super) fn sanitize_credential(
         }
     }
 
-    // Resolve NetBIOS domain to FQDN (e.g. "NORTH" → "north.sevenkingdoms.local")
+    // Resolve NetBIOS domain to FQDN (e.g. "CHILD" → "child.contoso.local")
     if !cred.domain.is_empty() && !cred.domain.contains('.') {
         let domain_upper = cred.domain.to_uppercase();
         if let Some(fqdn) = netbios_to_fqdn.get(&domain_upper) {

@@ -5,315 +5,153 @@ Protocol) tools to query Loki datasources and investigate security incidents.
 
 ## Overview
 
-Ares now includes a `GrafanaMCPTools` toolset that provides guide methods to
-help the agent use the native `mcp__grafana__*` tools available in the
-environment. These tools enable:
+Ares blue team agents use Grafana MCP (Model Context Protocol) tools to query
+observability data during investigations. The tool registry at
+`ares-llm/src/tool_registry/blue/grafana.rs` defines individual tool
+definitions that wrap the native `mcp__grafana__*` tools. These enable:
 
 - Label discovery (finding available labels and their values)
 - Log volume statistics
 - LogQL queries for searching logs
 - Pre-built queries for common attack indicators
 
-## Available Tools
+## How Agents Use Grafana MCP
 
-### 1. Label Discovery
+Blue team agents interact with Grafana through two paths:
 
-#### list_loki_label_names_guide()
+1. **Direct Loki/Prometheus tools** — `query_loki_logs`, `query_logs_around_timestamp`,
+   `execute_parallel_queries`, etc. These are defined in the tool registry and executed
+   via HTTP against the Loki/Prometheus APIs.
 
-Returns instructions for listing all available label names in Loki.
+2. **Native MCP tools** — `mcp__grafana__*` tools provided by the Grafana MCP server.
+   These handle label discovery, log stats, dashboard access, and annotation management.
 
-**Example Usage by Agent:**
-
-```text
-# Agent calls the guide
-guide = list_loki_label_names_guide()
-
-# Then uses the native MCP tool
-mcp__grafana__list_loki_label_names(
-    datasourceUid="loki",
-    startRfc3339="2024-01-15T00:00:00Z",  # optional
-    endRfc3339="2024-01-15T23:59:59Z"      # optional
-)
-```
-
-**Returns:** List of label names like
-`["environment", "deployment", "host", "job", "namespace"]`
-
-#### list_loki_label_values_guide(label_name)
-
-Returns instructions for listing all values for a specific label.
-
-**Example Usage by Agent:**
-
-```text
-# Agent calls the guide with label name
-guide = list_loki_label_values_guide("environment")
-
-# Then uses the native MCP tool
-mcp__grafana__list_loki_label_values(
-    datasourceUid="loki",
-    labelName="environment",
-    startRfc3339="2024-01-15T00:00:00Z",  # optional
-    endRfc3339="2024-01-15T23:59:59Z"      # optional
-)
-```
-
-**Returns:** List of values like `["staging", "production", "dev"]`
-
-### 2. Log Statistics
-
-#### query_loki_stats_guide(logql_selector)
-
-Returns instructions for getting statistics about log streams.
-
-**Example Usage by Agent:**
-
-```text
-# Agent calls the guide with LogQL selector
-guide = query_loki_stats_guide('{environment="staging"}')
-
-# Then uses the native MCP tool
-mcp__grafana__query_loki_stats(
-    datasourceUid="loki",
-    logql='{environment="staging"}',
-    startRfc3339="2024-01-15T00:00:00Z",  # optional
-    endRfc3339="2024-01-15T23:59:59Z"      # optional
-)
-```
-
-**Returns:**
-
-```json
-{
-  "streams": 42,
-  "chunks": 1500,
-  "entries": 50000,
-  "bytes": 25000000
-}
-```
-
-### 3. Log Queries
-
-#### query_loki_logs_guide(logql, limit)
-
-Returns instructions for querying Loki logs with full LogQL support.
-
-**Example Usage by Agent:**
-
-```text
-# Agent calls the guide
-guide = query_loki_logs_guide('{environment="staging"} |~ "error"', limit=10)
-
-# Then uses the native MCP tool
-mcp__grafana__query_loki_logs(
-    datasourceUid="loki",
-    logql='{environment="staging"} |~ "error"',
-    limit=10,
-    direction="backward",  # newest first
-    startRfc3339="2024-01-15T00:00:00Z",  # optional
-    endRfc3339="2024-01-15T23:59:59Z"      # optional
-)
-```
-
-**Returns:** List of log entries with timestamps, labels, and log lines
-
-### 4. Attack Indicator Searches
-
-#### search_attack_indicators_guide(environment)
-
-Returns pre-built LogQL queries for common attack indicators.
-
-**Example Usage by Agent:**
-
-```text
-# Agent calls the guide
-guide = search_attack_indicators_guide("staging")
-```
-
-**Returns queries for:**
-
-1. General attack indicators (exploit, payload, shell, mimikatz, impacket, etc.)
-2. DCSync activity (Event ID 4662)
-3. Authentication events (Event ID 4624)
-4. Failed authentication (Event ID 4625)
-5. PowerShell activity
-6. Suspicious network activity
-
-### 5. Environment Discovery
-
-#### discover_environment_guide(environment)
-
-Returns a complete step-by-step guide for discovering environment structure.
-
-**Example Usage by Agent:**
-
-```text
-# Agent calls the guide
-guide = discover_environment_guide("staging")
-```
-
-**Returns a workflow for:**
-
-1. Listing available labels
-2. Getting values for important labels (environment, deployment, host, job, namespace)
-3. Checking data volume
-4. Querying sample logs
+The tool descriptions include usage guidance so the LLM agent knows when to use
+each tool and how to construct efficient queries.
 
 ## Integration with Investigation Workflow
-
-The agent can use these tools during investigation stages:
 
 ### Stage 1: TRIAGE
 
 ```text
-# Discover environment structure
-discover_environment_guide("staging")
+# Discover available data sources and labels
+get_loki_label_values(label_name="job")
+get_loki_label_values(label_name="host")
 
-# List available labels
-mcp__grafana__list_loki_label_names(datasourceUid="loki")
-
-# Get label values
-mcp__grafana__list_loki_label_values(datasourceUid="loki", labelName="environment")
+# Run detection templates matching the alert
+run_detection_query(technique_id="T1003", time_range="1h")
 ```
 
 ### Stage 2: CAUSATION
 
 ```text
-# Check log volume first
-mcp__grafana__query_loki_stats(
-    datasourceUid="loki",
-    logql='{environment="staging"}'
+# Query logs around the alert timestamp
+query_logs_around_timestamp(
+    logql='{job="eventlog"} |= "4662"',
+    timestamp="2024-01-15T10:30:00Z",
+    window_minutes=15
 )
 
-# Query logs around alert time
-mcp__grafana__query_loki_logs(
-    datasourceUid="loki",
-    logql='{environment="staging"} |~ "(?i)error"',
-    limit=10,
-    direction="backward"
-)
+# Run parallel detections for related techniques
+run_parallel_detections(technique_ids=["T1003", "T1003.006", "T1558"])
 ```
 
 ### Stage 3: LATERAL
 
 ```text
-# Search for attack indicators
-mcp__grafana__query_loki_logs(
-    datasourceUid="loki",
-    logql='{environment="staging"} |~ "(?i)(exploit|payload|shell|mimikatz)"',
-    limit=10
+# Pivot by compromised host
+get_host_activity(hostname="dc01.corp.local")
+
+# Check for lateral movement indicators
+query_loki_logs(
+    logql='{job="eventlog"} |~ "(?i)(psexec|wmiexec|smbexec)"',
+    start_time="2024-01-15T00:00:00Z",
+    end_time="2024-01-15T23:59:59Z"
 )
 
-# Check for DCSync activity
-mcp__grafana__query_loki_logs(
-    datasourceUid="loki",
-    logql='{environment="staging"} | json | event_id="4662"',
-    limit=5
-)
-
-# Check authentication events
-mcp__grafana__query_loki_logs(
-    datasourceUid="loki",
-    logql='{environment="staging"} | json | event_id="4624"',
-    limit=5
-)
+# Pivot by suspicious user
+get_user_activity(username="admin")
 ```
 
 ## Example Investigation Flow
 
-```text
-# 1. Discover environment
-agent.call("discover_environment_guide", environment="staging")
-
-# 2. List labels
-labels = mcp__grafana__list_loki_label_names(datasourceUid="loki")
-
-# 3. Get label values for important labels
-for label in ["environment", "deployment", "host", "job"]:
-    values = mcp__grafana__list_loki_label_values(
-        datasourceUid="loki",
-        labelName=label
-    )
-    # Record evidence for each value found
-
-# 4. Check log volume
-stats = mcp__grafana__query_loki_stats(
-    datasourceUid="loki",
-    logql='{environment="staging"}'
-)
-
-# 5. Search for attack indicators
-indicators = mcp__grafana__query_loki_logs(
-    datasourceUid="loki",
-    logql='{environment="staging"} |~ "(?i)(exploit|payload|shell)"',
-    limit=10
-)
-
-# 6. Check specific Windows events
-dcsync = mcp__grafana__query_loki_logs(
-    datasourceUid="loki",
-    logql='{environment="staging"} | json | event_id="4662"',
-    limit=5
-)
-
-auth = mcp__grafana__query_loki_logs(
-    datasourceUid="loki",
-    logql='{environment="staging"} | json | event_id="4624"',
-    limit=5
-)
-```
-
-## System Instructions Update
-
-The agent's system instructions now include:
+A typical agent investigation follows this pattern (the LLM agent calls
+these tools automatically during each investigation stage):
 
 ```text
-## Grafana MCP Tools (Enhanced Querying)
+# 1. Discover available labels (TRIAGE stage)
+get_loki_label_values(label_name="job")
+get_loki_label_values(label_name="host")
 
-You have access to enhanced Grafana MCP tools for more powerful querying:
+# 2. Run detection templates for the alert type
+run_parallel_detections(technique_ids=["T1003", "T1003.006"])
 
-**Discovery Phase:**
-1. list_loki_label_names() - Discover available labels
-2. list_loki_label_values(label_name) - Get values for specific labels
-3. discover_environment(environment) - Get complete environment structure
+# 3. Query logs around the alert timestamp
+query_logs_around_timestamp(
+    logql='{job="eventlog"} |= "4662"',
+    timestamp="2024-01-15T10:30:00Z",
+    window_minutes=15
+)
 
-**Investigation Phase:**
-1. query_loki_stats(logql) - Check data volume BEFORE querying
-2. query_loki_logs(logql, limit, direction) - Query logs with full LogQL support
-3. search_attack_indicators(environment) - Pre-built attack indicator searches
-4. check_dcsync_activity(environment) - Look for DCSync (Event ID 4662)
-5. check_authentication_events(environment) - Check auth events (Event ID 4624)
+# 4. Pivot by host and user (LATERAL stage)
+get_host_activity(hostname="dc01.corp.local")
+get_user_activity(username="admin")
 
-**When to use MCP vs Direct Loki:**
-- Use MCP tools for: label discovery, stats checks, and convenience methods
-- Use direct LokiTools for: custom queries with specific time windows
-- Both are valid - choose based on the task
+# 5. Check for attack indicators across hosts
+query_loki_logs(
+    logql='{job="eventlog"} |~ "(?i)(mimikatz|secretsdump|psexec)"',
+    start_time="2024-01-15T00:00:00Z",
+    end_time="2024-01-15T23:59:59Z"
+)
+
+# 6. Post investigation completion annotation
+post_investigation_completed(investigation_id="inv-xxx", report_url="/reports/inv-xxx.md")
 ```
+
+## Tool Reference
+
+Blue team agents have access to the following tool categories:
+
+**Loki Query Tools** (`ares-llm/src/tool_registry/blue/loki.rs`):
+
+- `query_loki_logs` — LogQL queries with time range and limit
+- `query_logs_around_timestamp` — Context-aware log retrieval around an event
+- `query_logs_progressive` — Iterative query refinement
+- `get_loki_label_values` — Label enumeration for filter discovery
+- `execute_parallel_queries` — Concurrent multi-source queries
+- `query_logs_recent` — Quick recent log lookup
+- `combine_query_patterns` — Merge multiple query patterns
+
+**Grafana Tools** (`ares-llm/src/tool_registry/blue/grafana.rs`):
+
+- `get_grafana_alerts` / `get_alert_history` / `get_alerts_in_time_range` — Alert queries
+- `get_grafana_annotations` — Investigation context from annotations
+- `search_grafana_dashboards` / `get_grafana_dashboard` — Dashboard access
+- `create_annotation` — Write investigation markers back to Grafana
+- `create_detection_rule` — Auto-create alert rules from LogQL queries
+- `post_investigation_started` / `post_investigation_completed` — Investigation lifecycle annotations
+
+**Detection Tools** (`ares-llm/src/tool_registry/blue/detection.rs`):
+
+- `run_detection_query` / `run_parallel_detections` — Execute MITRE-mapped detection templates
+- `list_detection_templates` — Browse available templates
+- `get_host_activity` / `get_user_activity` — Pivot investigations by host or user
 
 ## Configuration
 
-The GrafanaMCPTools toolset is configured with:
-
-```text
-grafana_mcp_tools = GrafanaMCPTools(datasource_uid="loki")
-```
-
-The datasource UID can be changed to target different Loki datasources:
-
-```text
-grafana_mcp_tools = GrafanaMCPTools(datasource_uid="custom-loki-ds")
-```
+Grafana tools are registered in the blue team tool registry at
+`ares-llm/src/tool_registry/blue/grafana.rs`. The datasource UID defaults to
+`"loki"` and can be overridden via environment variables or the config file.
 
 ## Benefits
 
-- **Guided Discovery**: The guide tools help the agent understand how to use
-  the native MCP tools correctly
+- **Guided Discovery**: Tool definitions include usage guidance to help the
+  LLM agent use the native MCP tools correctly
 - **Pre-built Queries**: Common security queries are provided for faster
-  investigation
-- **Best Practices**: The guides include best practices like checking stats
-  before querying logs
-- **Flexibility**: The agent can use both MCP tools and direct Loki API calls
-  as needed
+  investigation via detection templates
+- **Best Practices**: Tool descriptions include best practices like checking
+  stats before querying logs
+- **Flexibility**: Agents can use both MCP tools and direct Loki HTTP API calls
 - **Integration**: Works alongside the existing investigation workflow
 
 ## Next Steps
@@ -322,10 +160,10 @@ To use these capabilities:
 
 1. Ensure the Grafana MCP server is configured and running
 2. Set the `GRAFANA_URL` and `GRAFANA_SERVICE_ACCOUNT_TOKEN` environment variables
-3. Run an investigation: `ares investigate`
-4. The agent will automatically have access to the GrafanaMCPTools
+3. Start a blue team investigation: `ares-cli blue from-operation --latest`
+4. Agents will automatically use Grafana tools during investigation
 
 For more information, see:
 
 - [Grafana MCP Setup Guide](topics/grafana-mcp-setup.md)
-- [Home](index.md)
+- [Blue Team Documentation](blue.md)

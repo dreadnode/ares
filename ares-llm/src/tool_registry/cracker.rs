@@ -39,7 +39,7 @@ pub(super) fn tool_definitions() -> Vec<ToolDefinition> {
                     },
                     "use_dynamic_wordlist": {
                         "type": "boolean",
-                        "description": "When true, augments the wordlist with username-derived password candidates (e.g. jon.snow -> Jon, Snow, jon1, Snow123). Defaults to true.",
+                        "description": "When true, augments the wordlist with username-derived password candidates (e.g. john.smith -> John, Smith, john1, Smith123). Defaults to true.",
                         "default": true
                     },
                     "known_usernames": {

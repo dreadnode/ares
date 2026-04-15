@@ -142,9 +142,9 @@ mod tests {
 
     #[test]
     fn strips_motd_markers() {
-        let input = "Welcome to Kali GNU/Linux\nThe programs included with Debian GNU/Linux\ncome with ABSOLUTELY NO WARRANTY\nNmap scan report for 10.0.0.1";
+        let input = "Welcome to Kali GNU/Linux\nThe programs included with Debian GNU/Linux\ncome with ABSOLUTELY NO WARRANTY\nNmap scan report for 192.168.58.10";
         let out = filter_output(input);
-        assert_eq!(out, "Nmap scan report for 10.0.0.1");
+        assert_eq!(out, "Nmap scan report for 192.168.58.10");
     }
 
     #[test]
@@ -156,7 +156,7 @@ mod tests {
 
     #[test]
     fn strips_last_login() {
-        let input = "Last login: Mon Apr  7 12:34:56 2025 from 10.0.0.1\nActual output";
+        let input = "Last login: Mon Apr  7 12:34:56 2025 from 192.168.58.10\nActual output";
         let out = filter_output(input);
         assert_eq!(out, "Actual output");
     }
@@ -177,7 +177,7 @@ mod tests {
 
     #[test]
     fn preserves_clean_output() {
-        let input = "Nmap scan report for 192.168.1.1\nPORT   STATE SERVICE\n22/tcp open  ssh\n80/tcp open  http";
+        let input = "Nmap scan report for 192.168.58.10\nPORT   STATE SERVICE\n22/tcp open  ssh\n80/tcp open  http";
         let out = filter_output(input);
         assert_eq!(out, input);
     }
@@ -192,11 +192,11 @@ mod tests {
     fn mixed_noise_and_real_output() {
         let input = "\
 ┌──(kali㉿kali)-[~]
-└─$ nmap -sV 10.0.0.1
+└─$ nmap -sV 192.168.58.10
 Last login: Mon Apr  7 12:00:00 2025
 The programs included with Debian GNU/Linux are free software
 Starting Nmap 7.94 ( https://nmap.org )
-Nmap scan report for 10.0.0.1
+Nmap scan report for 192.168.58.10
 PORT   STATE SERVICE
 22/tcp open  ssh
 

@@ -205,7 +205,7 @@ pub(crate) async fn run_ops(cmd: OpsCommands, redis_url: Option<String>) -> Resu
                 if resolve_targets || !resolve::looks_like_ip(&target) {
                     ips = resolve::resolve_ec2_targets(&target, &aws_profile, &aws_region)?;
                 } else {
-                    // Target itself looks like IPs (e.g., "192.168.1.1,10.0.0.2")
+                    // Target itself looks like IPs (e.g., "192.168.58.10,192.168.58.11")
                     ips = target.split(',').map(|s| s.trim().to_string()).collect();
                 }
             }

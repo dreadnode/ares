@@ -207,48 +207,48 @@ Impacket v0.13.0.dev0+20251022.125034.d843881f - Copyright Fortra, LLC and its a
 
 AccountName   AccountType  DelegationType                       DelegationRightsTo                         SPN Exists
 ------------  -----------  -----------------------------------  -----------------------------------------  ----------
-sansa.stark   Person       Unconstrained                        N/A                                        No
-jon.snow      Person       Constrained w/ Protocol Transition   CIFS/winterfell                            No
-jon.snow      Person       Constrained w/ Protocol Transition   CIFS/winterfell.north.sevenkingdoms.local  No
-CASTELBLACK$  Computer     Constrained w/o Protocol Transition  HTTP/winterfell                            No
-CASTELBLACK$  Computer     Constrained w/o Protocol Transition  HTTP/winterfell.north.sevenkingdoms.local  Yes
-WINTERFELL$   Computer     Unconstrained                        N/A                                        Yes
+sarah.connor   Person       Unconstrained                        N/A                                        No
+john.smith      Person       Constrained w/ Protocol Transition   CIFS/dc02                            No
+john.smith      Person       Constrained w/ Protocol Transition   CIFS/dc02.child.contoso.local  No
+SRV01$  Computer     Constrained w/o Protocol Transition  HTTP/dc02                            No
+SRV01$  Computer     Constrained w/o Protocol Transition  HTTP/dc02.child.contoso.local  Yes
+DC02$   Computer     Unconstrained                        N/A                                        Yes
 
 ";
-        let params = json!({"domain": "north.sevenkingdoms.local", "target_ip": "10.1.2.150"});
+        let params = json!({"domain": "child.contoso.local", "target_ip": "192.168.58.11"});
         let vulns = parse_delegation(output, &params);
 
-        // Dedup: sansa.stark unconstrained, jon.snow constrained,
-        // CASTELBLACK$ constrained, WINTERFELL$ unconstrained = 4
+        // Dedup: sarah.connor unconstrained, john.smith constrained,
+        // SRV01$ constrained, DC02$ unconstrained = 4
         assert_eq!(vulns.len(), 4, "Expected 4 deduped vulns, got {:?}", vulns);
 
-        // sansa.stark → unconstrained
+        // sarah.connor → unconstrained
         assert_eq!(vulns[0]["vuln_type"], "unconstrained_delegation");
-        assert_eq!(vulns[0]["details"]["account_name"], "sansa.stark");
+        assert_eq!(vulns[0]["details"]["account_name"], "sarah.connor");
 
-        // jon.snow → constrained with SPN
+        // john.smith → constrained with SPN
         assert_eq!(vulns[1]["vuln_type"], "constrained_delegation");
-        assert_eq!(vulns[1]["details"]["account_name"], "jon.snow");
+        assert_eq!(vulns[1]["details"]["account_name"], "john.smith");
         let spn = vulns[1]["details"]["delegation_target"].as_str().unwrap();
         assert!(
-            spn.starts_with("CIFS/winterfell"),
-            "Expected CIFS/winterfell SPN, got {}",
+            spn.starts_with("CIFS/dc02"),
+            "Expected CIFS/dc02 SPN, got {}",
             spn
         );
 
-        // CASTELBLACK$ → constrained with HTTP SPN
+        // SRV01$ → constrained with HTTP SPN
         assert_eq!(vulns[2]["vuln_type"], "constrained_delegation");
-        assert_eq!(vulns[2]["details"]["account_name"], "CASTELBLACK$");
+        assert_eq!(vulns[2]["details"]["account_name"], "SRV01$");
         let spn = vulns[2]["details"]["delegation_target"].as_str().unwrap();
         assert!(
-            spn.starts_with("HTTP/winterfell"),
-            "Expected HTTP/winterfell SPN, got {}",
+            spn.starts_with("HTTP/dc02"),
+            "Expected HTTP/dc02 SPN, got {}",
             spn
         );
 
-        // WINTERFELL$ → unconstrained
+        // DC02$ → unconstrained
         assert_eq!(vulns[3]["vuln_type"], "unconstrained_delegation");
-        assert_eq!(vulns[3]["details"]["account_name"], "WINTERFELL$");
+        assert_eq!(vulns[3]["details"]["account_name"], "DC02$");
 
         // All should have discovered_by
         for v in &vulns {

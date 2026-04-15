@@ -95,7 +95,7 @@ fn test_analyze_no_gaps() {
 fn test_ioc_gap_descriptions() {
     let ioc = ExpectedIOC {
         ioc_type: "ip".to_string(),
-        value: "10.0.0.1".to_string(),
+        value: "192.168.58.10".to_string(),
         pyramid_level: PyramidLevel::IpAddresses,
         mitre_techniques: vec![],
         required: true,
@@ -103,7 +103,7 @@ fn test_ioc_gap_descriptions() {
     };
     let gap = describe_ioc_gap(&ioc);
     assert!(gap.contains("ip IOC"));
-    assert!(gap.contains("10.0.0.1"));
+    assert!(gap.contains("192.168.58.10"));
     assert!(gap.contains("(required)"));
 }
 
@@ -167,7 +167,7 @@ fn test_recommend_for_unknown_technique() {
 fn test_recommend_for_ioc_types() {
     let ip_ioc = ExpectedIOC {
         ioc_type: "ip".to_string(),
-        value: "10.0.0.1".to_string(),
+        value: "192.168.58.10".to_string(),
         pyramid_level: PyramidLevel::IpAddresses,
         mitre_techniques: vec![],
         required: true,

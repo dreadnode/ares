@@ -143,8 +143,8 @@ pub fn extract_plaintext_passwords(output: &str, default_domain: &str) -> Vec<Cr
             // current_user — LDAP doesn't guarantee attribute order, so
             // description may appear before sAMAccountName within an entry,
             // causing stale current_user from a previous entry to be
-            // misattributed (e.g. jon.snow:Heartsbane instead of
-            // samwell.tarly:Heartsbane). Per-tool parsers handle structured
+            // misattributed (e.g. john.smith:Summer2025 instead of
+            // sam.wilson:Summer2025). Per-tool parsers handle structured
             // extraction; this safety net only catches same-line patterns.
             let username = if let Some(smb_caps) = RE_SMB_TIMESTAMP_PASSWORD.captures(stripped) {
                 smb_caps.get(1).unwrap().as_str().to_string()

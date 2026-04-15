@@ -321,15 +321,15 @@ mod tests {
     #[test]
     fn test_is_delegation_account() {
         let mut state = StateInner::new("op-1".into());
-        assert!(!state.is_delegation_account("jon.snow"));
+        assert!(!state.is_delegation_account("john.smith"));
 
-        // Add a constrained delegation vuln for jon.snow
+        // Add a constrained delegation vuln for john.smith
         let mut details = std::collections::HashMap::new();
-        details.insert("account_name".to_string(), serde_json::json!("jon.snow"));
+        details.insert("account_name".to_string(), serde_json::json!("john.smith"));
         state.discovered_vulnerabilities.insert(
-            "constrained_delegation_jon.snow".into(),
+            "constrained_delegation_john.smith".into(),
             ares_core::models::VulnerabilityInfo {
-                vuln_id: "constrained_delegation_jon.snow".into(),
+                vuln_id: "constrained_delegation_john.smith".into(),
                 vuln_type: "constrained_delegation".into(),
                 target: "".into(),
                 discovered_by: "".into(),
@@ -340,9 +340,9 @@ mod tests {
             },
         );
 
-        assert!(state.is_delegation_account("jon.snow"));
-        assert!(state.is_delegation_account("Jon.Snow")); // case insensitive
-        assert!(!state.is_delegation_account("samwell.tarly"));
+        assert!(state.is_delegation_account("john.smith"));
+        assert!(state.is_delegation_account("John.Smith")); // case insensitive
+        assert!(!state.is_delegation_account("sam.wilson"));
     }
 
     #[test]
@@ -350,15 +350,15 @@ mod tests {
         let mut state = StateInner::new("op-1".into());
 
         // Not quarantined initially
-        assert!(!state.is_credential_quarantined("hodor", "north.sevenkingdoms.local"));
+        assert!(!state.is_credential_quarantined("jdoe", "child.contoso.local"));
 
         // Quarantine a credential
-        state.quarantine_credential("hodor", "north.sevenkingdoms.local");
-        assert!(state.is_credential_quarantined("hodor", "north.sevenkingdoms.local"));
-        assert!(state.is_credential_quarantined("HODOR", "NORTH.SEVENKINGDOMS.LOCAL")); // case insensitive
+        state.quarantine_credential("jdoe", "child.contoso.local");
+        assert!(state.is_credential_quarantined("jdoe", "child.contoso.local"));
+        assert!(state.is_credential_quarantined("JDOE", "CHILD.CONTOSO.LOCAL")); // case insensitive
 
         // Different credential not affected
-        assert!(!state.is_credential_quarantined("jon.snow", "north.sevenkingdoms.local"));
+        assert!(!state.is_credential_quarantined("john.smith", "child.contoso.local"));
     }
 
     #[test]
@@ -366,12 +366,12 @@ mod tests {
         let mut state = StateInner::new("op-1".into());
 
         // Insert with an already-expired time
-        let key = "hodor@north.sevenkingdoms.local".to_string();
+        let key = "jdoe@child.contoso.local".to_string();
         state
             .quarantined_credentials
             .insert(key, Utc::now() - chrono::Duration::seconds(1));
 
         // Should not be quarantined (expired)
-        assert!(!state.is_credential_quarantined("hodor", "north.sevenkingdoms.local"));
+        assert!(!state.is_credential_quarantined("jdoe", "child.contoso.local"));
     }
 }

@@ -165,11 +165,11 @@ class   class_desc   major_id   minor_id   grantee_principal_id   grantor_princi
 -----   ----------   --------   --------   --------------------   --------------------   ----   ---------------   -----   ----------
 101     SERVER_PRINCIPAL   261   0          267                    261                    IM     IMPERSONATE       G       GRANT
 "#;
-        let params = json!({"target": "10.1.2.254", "username": "svc_sql", "domain": "north.sevenkingdoms.local"});
+        let params = json!({"target": "192.168.58.12", "username": "svc_sql", "domain": "child.contoso.local"});
         let vulns = parse_mssql_impersonation(output, &params);
         assert_eq!(vulns.len(), 1);
         assert_eq!(vulns[0]["vuln_type"], "mssql_impersonation");
-        assert_eq!(vulns[0]["target"], "10.1.2.254");
+        assert_eq!(vulns[0]["target"], "192.168.58.12");
         assert_eq!(vulns[0]["priority"], 3);
     }
 
@@ -180,15 +180,15 @@ SQL> SELECT * FROM sys.server_permissions WHERE type = 'IM';
 class   class_desc   major_id   minor_id   grantee_principal_id   grantor_principal_id   type   permission_name   state   state_desc
 -----   ----------   --------   --------   --------------------   --------------------   ----   ---------------   -----   ----------
 "#;
-        let params = json!({"target": "10.1.2.254", "username": "svc_sql"});
+        let params = json!({"target": "192.168.58.12", "username": "svc_sql"});
         let vulns = parse_mssql_impersonation(output, &params);
         assert!(vulns.is_empty());
     }
 
     #[test]
     fn test_parse_impersonation_login_failed() {
-        let output = "[-] ERROR(BRAAVOS): Login failed for user 'test'";
-        let params = json!({"target": "10.1.2.254", "username": "test"});
+        let output = "[-] ERROR(SQL01): Login failed for user 'test'";
+        let params = json!({"target": "192.168.58.12", "username": "test"});
         let vulns = parse_mssql_impersonation(output, &params);
         assert!(vulns.is_empty());
     }
@@ -199,14 +199,14 @@ class   class_desc   major_id   minor_id   grantee_principal_id   grantor_princi
 SQL> EXEC sp_linkedservers;
 SRV_NAME              SRV_PROVIDERNAME   SRV_PRODUCT   SRV_DATASOURCE
 --------------------  ----------------   -----------   --------------
-BRAAVOS               SQLNCLI            SQL Server    BRAAVOS
-CASTELBLACK           SQLNCLI            SQL Server    CASTELBLACK\SQLEXPRESS
+SQL01               SQLNCLI            SQL Server    SQL01
+SRV01           SQLNCLI            SQL Server    SRV01\SQLEXPRESS
 "#;
-        let params = json!({"target": "10.1.2.254", "domain": "essos.local"});
+        let params = json!({"target": "192.168.58.12", "domain": "fabrikam.local"});
         let vulns = parse_mssql_linked_servers(output, &params);
-        assert_eq!(vulns.len(), 1); // Only CASTELBLACK, not BRAAVOS (self)
+        assert_eq!(vulns.len(), 1); // Only SRV01, not SQL01 (self)
         assert_eq!(vulns[0]["vuln_type"], "mssql_linked_server");
-        assert_eq!(vulns[0]["details"]["linked_server"], "CASTELBLACK");
+        assert_eq!(vulns[0]["details"]["linked_server"], "SRV01");
     }
 
     #[test]
@@ -214,9 +214,9 @@ CASTELBLACK           SQLNCLI            SQL Server    CASTELBLACK\SQLEXPRESS
         let output = r#"SQL> EXEC sp_linkedservers;
 SRV_NAME   SRV_PROVIDERNAME
 --------   ----------------
-BRAAVOS    SQLNCLI
+SQL01    SQLNCLI
 "#;
-        let params = json!({"target": "10.1.2.254"});
+        let params = json!({"target": "192.168.58.12"});
         let vulns = parse_mssql_linked_servers(output, &params);
         assert!(vulns.is_empty()); // Only self, no linked servers
     }

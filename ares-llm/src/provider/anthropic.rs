@@ -394,7 +394,7 @@ mod tests {
         let json = r#"{
             "content": [
                 {"type": "text", "text": "I'll scan the network."},
-                {"type": "tool_use", "id": "call_1", "name": "nmap_scan", "input": {"target": "192.168.1.0/24"}}
+                {"type": "tool_use", "id": "call_1", "name": "nmap_scan", "input": {"target": "192.168.58.0/24"}}
             ],
             "stop_reason": "tool_use",
             "usage": {"input_tokens": 100, "output_tokens": 50}

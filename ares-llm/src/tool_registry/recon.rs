@@ -14,7 +14,7 @@ pub(super) fn tool_definitions() -> Vec<ToolDefinition> {
                 "properties": {
                     "target": {
                         "type": "string",
-                        "description": "Target IP, hostname, or CIDR range (e.g. 192.168.1.0/24)"
+                        "description": "Target IP, hostname, or CIDR range (e.g. 192.168.58.0/24)"
                     },
                     "ports": {
                         "type": "string",
@@ -36,7 +36,7 @@ pub(super) fn tool_definitions() -> Vec<ToolDefinition> {
                 "properties": {
                     "targets": {
                         "type": "string",
-                        "description": "Target IP range or CIDR (e.g. 192.168.1.0/24)"
+                        "description": "Target IP range or CIDR (e.g. 192.168.58.0/24)"
                     }
                 },
                 "required": ["targets"]

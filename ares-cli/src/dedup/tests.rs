@@ -235,16 +235,16 @@ fn test_normalize_state_domains_preserves_well_known() {
 #[test]
 fn test_sanitize_strips_password_prefix() {
     let mut creds = vec![
-        make_cred("contoso.local", "hodor", "Password: hodor"),
+        make_cred("contoso.local", "jdoe", "Password: jdoe"),
         make_cred("contoso.local", "admin", "password:secret"),
         make_cred("contoso.local", "user1", "PASSWORD: MyPass123"),
     ];
     sanitize_credentials(&mut creds);
-    // "Password: hodor" → "hodor" → kept (password == username is valid)
+    // "Password: jdoe" → "jdoe" → kept (password == username is valid)
     // "password:secret" → "secret" → kept
     // "PASSWORD: MyPass123" → "MyPass123" → kept
     assert_eq!(creds.len(), 3);
-    assert_eq!(creds[0].password, "hodor");
+    assert_eq!(creds[0].password, "jdoe");
     assert_eq!(creds[1].password, "secret");
     assert_eq!(creds[2].password, "MyPass123");
 }
@@ -252,7 +252,7 @@ fn test_sanitize_strips_password_prefix() {
 #[test]
 fn test_sanitize_removes_password_only() {
     let mut creds = vec![
-        make_cred("contoso.local", "hodor", "Password"),
+        make_cred("contoso.local", "jdoe", "Password"),
         make_cred("contoso.local", "admin", "password"),
         make_cred("contoso.local", "user1", "RealPassword"),
     ];
@@ -281,22 +281,22 @@ fn test_sanitize_strips_trailing_paren_metadata() {
 fn test_sanitize_normalizes_username_with_at_domain() {
     let mut creds = vec![
         make_cred(
-            "essos.local",
-            "samwell.tarly@north.sevenkingdoms.local@essos.local",
-            "Heartsbane",
+            "fabrikam.local",
+            "sam.wilson@child.contoso.local@fabrikam.local",
+            "Summer2025",
         ),
         make_cred(
-            "essos.local",
-            "samwell.tarly@north.sevenkingdoms.local",
-            "Heartsbane",
+            "fabrikam.local",
+            "sam.wilson@child.contoso.local",
+            "Summer2025",
         ),
     ];
     sanitize_credentials(&mut creds);
-    // Both should resolve to username=samwell.tarly, domain=north.sevenkingdoms.local
-    assert_eq!(creds[0].username, "samwell.tarly");
-    assert_eq!(creds[0].domain, "north.sevenkingdoms.local");
-    assert_eq!(creds[1].username, "samwell.tarly");
-    assert_eq!(creds[1].domain, "north.sevenkingdoms.local");
+    // Both should resolve to username=sam.wilson, domain=child.contoso.local
+    assert_eq!(creds[0].username, "sam.wilson");
+    assert_eq!(creds[0].domain, "child.contoso.local");
+    assert_eq!(creds[1].username, "sam.wilson");
+    assert_eq!(creds[1].domain, "child.contoso.local");
 }
 
 #[test]
@@ -315,7 +315,7 @@ fn test_sanitize_preserves_clean_credentials() {
 #[test]
 fn test_sanitize_removes_empty_password_after_strip() {
     let mut creds = vec![
-        make_cred("contoso.local", "hodor", "Password: "),
+        make_cred("contoso.local", "jdoe", "Password: "),
         make_cred("contoso.local", "admin", ""),
     ];
     sanitize_credentials(&mut creds);
@@ -324,22 +324,22 @@ fn test_sanitize_removes_empty_password_after_strip() {
 
 #[test]
 fn test_sanitize_then_dedup_collapses_variants() {
-    // hodor:hodor is a valid credential; "Password: hodor" strips to "hodor" (dup);
+    // jdoe:jdoe is a valid credential; "Password: jdoe" strips to "jdoe" (dup);
     // "Password" is filtered as noise
     let mut creds = vec![
-        make_cred("contoso.local", "hodor", "hodor"),
-        make_cred("contoso.local", "hodor", "Password: hodor"),
-        make_cred("contoso.local", "hodor", "Password"),
+        make_cred("contoso.local", "jdoe", "jdoe"),
+        make_cred("contoso.local", "jdoe", "Password: jdoe"),
+        make_cred("contoso.local", "jdoe", "Password"),
     ];
     sanitize_credentials(&mut creds);
     let deduped = dedup_credentials(&creds);
     assert_eq!(deduped.len(), 1);
-    assert_eq!(deduped[0].password, "hodor");
+    assert_eq!(deduped[0].password, "jdoe");
 }
 
 #[test]
 fn test_sanitize_keeps_password_equals_username() {
-    // password == username is valid (e.g. hodor:hodor in GOAD)
+    // password == username is valid (e.g. jdoe:jdoe in GOAD)
     let mut creds = vec![
         make_cred("contoso.local", "admin", "admin"),
         make_cred("contoso.local", "user1", "DifferentPass"),

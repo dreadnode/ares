@@ -9,9 +9,25 @@
 
 <!-- END_AUTO_BADGES -->
 
-Autonomous security agent with dual capabilities: **Red Team** (multi-agent
-penetration testing) and **Blue Team** (SOC alert investigation). Built in
-Rust with MITRE ATT&CK framework integration.
+LLM-coordinated autonomous security operations platform with two modes:
+
+**Red Team** — 7 specialized agents (recon, credential access, cracker, ACL,
+privesc, lateral movement, coercion) orchestrated by an LLM coordination loop
+that autonomously chains 64+ Active Directory attack tools across the full kill
+chain: network discovery, credential harvesting (Kerberoast, AS-REP, secretsdump,
+LAPS, GPP), hash cracking, privilege escalation (ADCS, delegation, trust abuse,
+ACL exploitation), lateral movement (PSExec/WMI/WinRM/MSSQL), and domain
+dominance (golden tickets, multi-forest traversal). 14 concurrent automation
+modules continuously monitor discovered state and dispatch attack chains without
+manual sequencing.
+
+**Blue Team** — Multi-agent SOC investigation system (triage, threat hunter,
+lateral analyst, escalation) that queries live Loki logs and Prometheus metrics,
+runs MITRE ATT&CK-mapped detection templates, auto-extracts and validates IOCs,
+tracks lateral movement paths across hosts, learns from past investigations to
+reduce false positives, climbs the Pyramid of Pain from network artifacts to
+TTPs, and writes detection rules back to Grafana. Evidence-driven chaining
+automatically dispatches follow-up investigations as new indicators surface.
 
 ## Table of Contents
 
@@ -30,14 +46,14 @@ Rust with MITRE ATT&CK framework integration.
 
 Ares is a Rust workspace with six crates:
 
-| Crate | Binary | Purpose |
-|-------|--------|---------|
-| `ares-cli` | `ares-cli` | Unified CLI — ops, blue, history, config management |
-| `ares-orchestrator` | `ares-orchestrator` | LLM-powered coordination loop, task dispatch, strategy |
-| `ares-worker` | `ares-worker` | Task execution agents (one per role in K8s) |
-| `ares-core` | — | Shared models, state management, Redis schema, telemetry |
-| `ares-llm` | — | Model-agnostic LLM provider abstraction |
-| `ares-tools` | — | Tool dispatch and execution framework |
+| Crate               | Binary              | Purpose                                                  |
+| ------------------- | ------------------- | -------------------------------------------------------- |
+| `ares-cli`          | `ares-cli`          | Unified CLI — ops, blue, history, config management      |
+| `ares-orchestrator` | `ares-orchestrator` | LLM-powered coordination loop, task dispatch, strategy   |
+| `ares-worker`       | `ares-worker`       | Task execution agents (one per role, K8s or EC2)         |
+| `ares-core`         | —                   | Shared models, state management, Redis schema, telemetry |
+| `ares-llm`          | —                   | LLM providers (Anthropic, OpenAI, Ollama) + tool registry|
+| `ares-tools`        | —                   | Tool dispatch and execution framework                    |
 
 ### Red Team Multi-Agent System
 
@@ -66,10 +82,28 @@ results back. The orchestrator never executes exploitation tools directly.
 
 ### Blue Team Multi-Agent System
 
-- **Orchestrator**: Coordinates investigations, dispatches to workers
-- **Triage Agent**: Initial alert analysis and evidence collection
-- **Threat Hunter Agent**: Deep-dive investigation and technique mapping
-- **Lateral Analyst Agent**: Scope analysis across hosts and users
+```
+Local (this machine)              Remote (K8s or EC2)
+────────────────────              ───────────────────
+ares-cli --k8s / --ec2    →      ares-orchestrator (investigation coordination)
+  or `task` commands              ares-worker x4 (triage, threat_hunter,
+                                    lateral_analyst, escalation_triage)
+                                  Redis (state store + message broker)
+                                  Grafana (Loki logs + Prometheus metrics)
+```
+
+The blue orchestrator dispatches investigation tasks to specialized agents
+via Redis queues. Agents query Loki/Prometheus for evidence and report
+findings back. The orchestrator chains follow-up investigations based on
+discovered evidence types.
+
+**Agent Roles:**
+
+- **ORCHESTRATOR**: Investigation lifecycle management, evidence-driven task chaining, report generation
+- **TRIAGE**: Initial alert assessment, severity routing, first-pass IOC extraction, datasource discovery
+- **THREAT_HUNTER**: Deep investigation with MITRE-mapped detection templates, evidence validation, attack chain reconstruction
+- **LATERAL_ANALYST**: Multi-host compromise tracking, lateral movement graph construction, scope expansion
+- **ESCALATION_TRIAGE**: High/critical severity review, escalation decisions, cross-investigation correlation
 
 ## Quick Start
 
@@ -127,76 +161,76 @@ ares-cli --k8s ares-red --k8s-deploy ares-orchestrator ops list
 ares-cli --ec2 kali-ares --ec2-profile prod --ec2-region us-east-1 ops list
 ```
 
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--k8s <NAMESPACE>` | | K8s namespace (triggers kubectl exec) |
-| `--k8s-deploy <NAME>` | auto-detect | K8s deployment name |
-| `--ec2 <NAME_TAG>` | | EC2 Name tag (triggers SSM execution) |
-| `--ec2-profile <PROFILE>` | `lab` | AWS CLI profile |
-| `--ec2-region <REGION>` | `us-west-1` | AWS region |
-| `--env-file <PATH>` | auto `.env` | Load env vars from file |
-| `--secrets-from <SOURCE>` | | Load secrets from provider (e.g., `1password`) |
+| Flag                      | Default     | Description                                    |
+| ------------------------- | ----------- | ---------------------------------------------- |
+| `--k8s <NAMESPACE>`       |             | K8s namespace (triggers kubectl exec)          |
+| `--k8s-deploy <NAME>`     | auto-detect | K8s deployment name                            |
+| `--ec2 <NAME_TAG>`        |             | EC2 Name tag (triggers SSM execution)          |
+| `--ec2-profile <PROFILE>` | `lab`       | AWS CLI profile                                |
+| `--ec2-region <REGION>`   | `us-west-1` | AWS region                                     |
+| `--env-file <PATH>`       | auto `.env` | Load env vars from file                        |
+| `--secrets-from <SOURCE>` |             | Load secrets from provider (e.g., `1password`) |
 
 ### Commands
 
 **`ops`** — Red team operation management:
 
-| Subcommand | Description |
-|------------|-------------|
-| `submit` | Submit a new red team operation |
-| `list` | List all operations |
-| `status [--latest]` | Operation status |
-| `loot [--latest] [--watch N] [--diff]` | Credentials, hashes, hosts |
-| `tasks [--latest] [--status STATUS] [--role ROLE]` | Task listing |
-| `runtime [--latest]` | Operation runtime |
-| `report [--latest] [--regenerate]` | Generate report |
-| `inject-credential` | Inject credential into state |
-| `inject-hash` | Inject hash into state |
-| `inject-host` | Inject host into state |
-| `inject-vulnerability` | Inject vulnerability into state |
-| `inject-domain-sid` | Inject domain SID |
-| `stop [--latest]` | Graceful shutdown |
-| `kill [--all]` | Stop + delete operations |
-| `delete <ID> --force` | Delete operation data |
-| `cleanup [--max-age-hours N]` | Clean old checkpoints |
-| `export-detection [--latest]` | Detection playbook export |
-| `correlate` | Red-blue correlation analysis |
-| `evaluate` | Evaluate blue team detection |
+| Subcommand                                         | Description                     |
+| -------------------------------------------------- | ------------------------------- |
+| `submit`                                           | Submit a new red team operation |
+| `list`                                             | List all operations             |
+| `status [--latest]`                                | Operation status                |
+| `loot [--latest] [--watch N] [--diff]`             | Credentials, hashes, hosts      |
+| `tasks [--latest] [--status STATUS] [--role ROLE]` | Task listing                    |
+| `runtime [--latest]`                               | Operation runtime               |
+| `report [--latest] [--regenerate]`                 | Generate report                 |
+| `inject-credential`                                | Inject credential into state    |
+| `inject-hash`                                      | Inject hash into state          |
+| `inject-host`                                      | Inject host into state          |
+| `inject-vulnerability`                             | Inject vulnerability into state |
+| `inject-domain-sid`                                | Inject domain SID               |
+| `stop [--latest]`                                  | Graceful shutdown               |
+| `kill [--all]`                                     | Stop + delete operations        |
+| `delete <ID> --force`                              | Delete operation data           |
+| `cleanup [--max-age-hours N]`                      | Clean old checkpoints           |
+| `export-detection [--latest]`                      | Detection playbook export       |
+| `correlate`                                        | Red-blue correlation analysis   |
+| `evaluate`                                         | Evaluate blue team detection    |
 
 **`blue`** — Blue team investigation management:
 
-| Subcommand | Description |
-|------------|-------------|
-| `submit <ALERT_JSON>` | Submit investigation from alert |
-| `from-operation [--latest]` | Submit from red team operation alerts |
-| `watch [--poll-interval N]` | Continuous poll mode |
-| `list` | List investigations |
-| `status [--latest]` | Investigation status |
-| `evidence [--latest]` | Collected evidence |
-| `techniques [--latest]` | MITRE ATT&CK techniques |
-| `triage-status [--latest]` | Triage decision audit trail |
-| `operation-status [--latest] [--watch N]` | Aggregate status |
-| `report [--latest] [--regenerate]` | Generate report |
-| `cleanup [--all] [--max-age-hours N]` | Clean investigations |
+| Subcommand                                | Description                           |
+| ----------------------------------------- | ------------------------------------- |
+| `submit <ALERT_JSON>`                     | Submit investigation from alert       |
+| `from-operation [--latest]`               | Submit from red team operation alerts |
+| `watch [--poll-interval N]`               | Continuous poll mode                  |
+| `list`                                    | List investigations                   |
+| `status [--latest]`                       | Investigation status                  |
+| `evidence [--latest]`                     | Collected evidence                    |
+| `techniques [--latest]`                   | MITRE ATT&CK techniques               |
+| `triage-status [--latest]`                | Triage decision audit trail           |
+| `operation-status [--latest] [--watch N]` | Aggregate status                      |
+| `report [--latest] [--regenerate]`        | Generate report                       |
+| `cleanup [--all] [--max-age-hours N]`     | Clean investigations                  |
 
 **`history`** — Historical queries (PostgreSQL):
 
-| Subcommand | Description |
-|------------|-------------|
-| `list [--domain D] [--since-days N]` | List past operations |
-| `get <ID>` | Detailed operation info |
-| `search-creds [--domain D] [--admin]` | Search credentials |
-| `search-hashes [--cracked]` | Search hashes |
-| `mitre-coverage [--since-days N]` | Technique coverage |
-| `cost [--since-days N]` | Token usage and cost |
+| Subcommand                            | Description             |
+| ------------------------------------- | ----------------------- |
+| `list [--domain D] [--since-days N]`  | List past operations    |
+| `get <ID>`                            | Detailed operation info |
+| `search-creds [--domain D] [--admin]` | Search credentials      |
+| `search-hashes [--cracked]`           | Search hashes           |
+| `mitre-coverage [--since-days N]`     | Technique coverage      |
+| `cost [--since-days N]`               | Token usage and cost    |
 
 **`config`** — Configuration management:
 
-| Subcommand | Description |
-|------------|-------------|
-| `show [--models]` | Show resolved config |
-| `validate` | Validate config file |
-| `set-model <ROLE> <MODEL> [--all]` | Set LLM model |
+| Subcommand                         | Description          |
+| ---------------------------------- | -------------------- |
+| `show [--models]`                  | Show resolved config |
+| `validate`                         | Validate config file |
+| `set-model <ROLE> <MODEL> [--all]` | Set LLM model        |
 
 ## Red Team Operations
 
@@ -261,15 +295,26 @@ See [Red Team Architecture](docs/red.md) for detailed documentation.
 
 ## Blue Team Investigations
 
-The blue team runs autonomous SOC investigations against Grafana alerts,
-mapping findings to MITRE ATT&CK techniques and the Pyramid of Pain.
+The blue team runs autonomous SOC investigations against Grafana alerts. Each
+investigation dispatches specialized agents that query Loki and Prometheus,
+extract IOCs, validate evidence against query results, map findings to MITRE
+ATT&CK techniques, and climb the Pyramid of Pain from hash values toward TTPs.
 
 ### Investigation Stages
 
-1. **Triage** — Parse alert, gather evidence via Loki/Prometheus queries
-2. **Causation** — Trace attack chain, identify root cause
-3. **Lateral Movement** — Scope analysis across hosts, users, and IOCs
-4. **Synthesis** — Generate report with timeline, techniques, recommendations
+1. **Triage** — Parse alert, discover datasources, first-pass IOC extraction via Loki/Prometheus (8-12 queries)
+2. **Causation** — Root cause analysis, precursor attack identification, attack chain reconstruction (14 queries)
+3. **Lateral Movement** — Multi-host scope expansion, lateral movement graph construction, pivot detection (20 queries)
+4. **Synthesis** — Evidence consolidation, MITRE mapping, Pyramid of Pain assessment, report generation (20 queries)
+
+### Key Capabilities
+
+- **Detection Templates**: Pre-built MITRE-mapped LogQL queries covering credential dumping (T1003), DCSync (T1003.006), Kerberoasting (T1558), lateral movement (T1550.002), ADCS exploitation (T1649), golden tickets (T1558.001), and more
+- **4 Question Engines**: Precursor attack chain, MITRE Navigator, Pyramid of Pain climber, and detection recipes drive investigation toward complete attack chain coverage
+- **Evidence Validation**: Auto-extracted IOCs from query results are validated against recent data with confidence scoring (15% penalty for unvalidated evidence)
+- **Investigation Learning**: Historical investigation store tracks query effectiveness, false positive patterns, and technique frequency across investigations
+- **Red-Blue Correlation**: Links red team attack activities to blue team detections, surfaces detection gaps, and scores coverage by MITRE technique
+- **Evidence-Driven Chaining**: Discovered evidence types automatically trigger follow-up investigations (e.g., `credential_access` evidence chains to threat hunt, `lateral_movement` chains to lateral analysis)
 
 ### Quick Start
 
@@ -292,20 +337,20 @@ task blue:reports:consolidate LATEST=true
 
 ### Key Tasks
 
-| Task | Description |
-|------|-------------|
-| `blue:once` | Single investigation from red op (local) |
-| `blue:once:remote` | Single investigation (K8s) |
-| `blue:multi:remote` | Multi-agent investigation (K8s) |
-| `blue:investigate` | Submit a specific alert JSON file |
-| `blue:poll` | Continuous poll mode |
-| `blue:multi:status` | Investigation status |
-| `blue:multi:evidence` | Collected evidence |
-| `blue:multi:techniques` | MITRE techniques identified |
-| `blue:multi:logs` | Follow blue team logs |
-| `blue:reports:consolidate` | Generate report from Redis state |
-| `blue:playbook` | Export detection playbook |
-| `blue:multi:cleanup` | Clean up old investigations |
+| Task                       | Description                              |
+| -------------------------- | ---------------------------------------- |
+| `blue:once`                | Single investigation from red op (local) |
+| `blue:once:remote`         | Single investigation (K8s)               |
+| `blue:multi:remote`        | Multi-agent investigation (K8s)          |
+| `blue:investigate`         | Submit a specific alert JSON file        |
+| `blue:poll`                | Continuous poll mode                     |
+| `blue:multi:status`        | Investigation status                     |
+| `blue:multi:evidence`      | Collected evidence                       |
+| `blue:multi:techniques`    | MITRE techniques identified              |
+| `blue:multi:logs`          | Follow blue team logs                    |
+| `blue:reports:consolidate` | Generate report from Redis state         |
+| `blue:playbook`            | Export detection playbook                |
+| `blue:multi:cleanup`       | Clean up old investigations              |
 
 See [Blue Team Documentation](docs/blue.md) for full command reference.
 
@@ -424,15 +469,18 @@ ares-cli config validate
 
 ### Environment Variables
 
-| Variable | Required | Description |
-|----------|----------|-------------|
-| `ANTHROPIC_API_KEY` | Yes | Anthropic API key for Claude models |
-| `GRAFANA_URL` | Blue | Grafana instance URL |
-| `GRAFANA_SERVICE_ACCOUNT_TOKEN` | Blue | Grafana service account token |
-| `DREADNODE_API_KEY` | No | Dreadnode platform token for observability |
-| `ARES_REDIS_URL` | No | Redis URL (default: `redis://localhost:6379`) |
-| `ARES_LLM_MODEL` | No | Default LLM model override |
-| `ARES_CONFIG` | No | Config file path (default: `./config/ares.yaml`) |
+| Variable                        | Required | Description                                      |
+| ------------------------------- | -------- | ------------------------------------------------ |
+| `ANTHROPIC_API_KEY`             | Yes*     | Anthropic API key (Claude models)                |
+| `OPENAI_API_KEY`                | Yes*     | OpenAI API key (GPT models)                      |
+| `GRAFANA_URL`                   | Blue     | Grafana instance URL                             |
+| `GRAFANA_SERVICE_ACCOUNT_TOKEN` | Blue     | Grafana service account token                    |
+| `DREADNODE_API_KEY`             | No       | Dreadnode platform token for observability       |
+| `ARES_REDIS_URL`                | No       | Redis URL (default: `redis://localhost:6379`)    |
+| `ARES_LLM_MODEL`                | No       | Default LLM model override                       |
+| `ARES_CONFIG`                   | No       | Config file path (default: `./config/ares.yaml`) |
+
+\* At least one LLM provider key required. Supports Anthropic, OpenAI, and Ollama (local, no key needed).
 
 **Model Override Precedence** (highest first):
 `ARES_AGENT_<ROLE>_MODEL` > `ARES_ORCHESTRATOR_MODEL`/`ARES_WORKER_MODEL` > `ARES_MODEL` > config file.

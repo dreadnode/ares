@@ -7,7 +7,7 @@ pub(crate) mod users;
 #[cfg(test)]
 mod tests;
 
-/// Strip trailing DNS root dot from domain strings (e.g. `north.sevenkingdoms.local.` → `north.sevenkingdoms.local`).
+/// Strip trailing DNS root dot from domain strings (e.g. `child.contoso.local.` → `child.contoso.local`).
 pub(super) fn strip_trailing_dot(s: &str) -> &str {
     s.strip_suffix('.').unwrap_or(s)
 }

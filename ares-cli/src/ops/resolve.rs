@@ -86,13 +86,13 @@ mod tests {
 
     #[test]
     fn test_looks_like_ip_single() {
-        assert!(looks_like_ip("192.168.1.1"));
-        assert!(looks_like_ip("10.0.0.1"));
+        assert!(looks_like_ip("192.168.58.10"));
+        assert!(looks_like_ip("192.168.58.10"));
     }
 
     #[test]
     fn test_looks_like_ip_comma_separated() {
-        assert!(looks_like_ip("192.168.1.1,10.0.0.2"));
+        assert!(looks_like_ip("192.168.58.10,192.168.58.11"));
     }
 
     #[test]

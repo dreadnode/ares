@@ -205,8 +205,8 @@ mod tests {
 
     #[test]
     fn test_cred_param_str_nested_password() {
-        let payload = json!({"credential": {"username": "admin", "domain": "contoso.local", "password": "Heartsbane"}});
-        assert_eq!(cred_param_str(&payload, None), "password='Heartsbane'");
+        let payload = json!({"credential": {"username": "admin", "domain": "contoso.local", "password": "Summer2025"}});
+        assert_eq!(cred_param_str(&payload, None), "password='Summer2025'");
     }
 
     #[test]
@@ -252,8 +252,8 @@ mod tests {
 
     #[test]
     fn test_cred_display_str_nested_password() {
-        let payload = json!({"credential": {"password": "Heartsbane"}});
-        assert_eq!(cred_display_str(&payload, None), "Heartsbane");
+        let payload = json!({"credential": {"password": "Summer2025"}});
+        assert_eq!(cred_display_str(&payload, None), "Summer2025");
     }
 
     #[test]

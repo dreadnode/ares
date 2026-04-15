@@ -400,10 +400,10 @@ mod tests {
 
     #[test]
     fn test_extract_ips() {
-        let text = "Source IP: 192.168.58.10, Destination: 10.0.0.1";
+        let text = "Source IP: 192.168.58.10, Destination: 192.168.58.10";
         let iocs = extract_iocs_from_text(text);
         assert!(iocs.contains("192.168.58.10"));
-        assert!(iocs.contains("10.0.0.1"));
+        assert!(iocs.contains("192.168.58.10"));
     }
 
     #[test]
@@ -458,7 +458,7 @@ mod tests {
 
     #[test]
     fn test_classify_ioc() {
-        assert_eq!(classify_ioc("192.168.1.1"), Some("ip"));
+        assert_eq!(classify_ioc("192.168.58.10"), Some("ip"));
         assert_eq!(classify_ioc("dc01.contoso.local"), Some("hostname"));
         assert_eq!(
             classify_ioc("aad3b435b51404eeaad3b435b51404ee"),

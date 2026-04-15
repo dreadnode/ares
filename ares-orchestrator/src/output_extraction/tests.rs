@@ -75,20 +75,20 @@ fn test_extract_hosts_banner() {
 #[test]
 fn test_extract_hosts_banner_fqdn_construction() {
     // Verify FQDN is built from (name:X)(domain:Y) → x.y
-    let output = "SMB  10.1.2.150  445  WINTERFELL  [*] Windows Server 2019 (name:WINTERFELL) (domain:north.sevenkingdoms.local) (signing:True)";
+    let output = "SMB  192.168.58.11  445  DC02  [*] Windows Server 2019 (name:DC02) (domain:child.contoso.local) (signing:True)";
     let hosts = extract_hosts(output);
     assert_eq!(hosts.len(), 1);
-    assert_eq!(hosts[0].hostname, "winterfell.north.sevenkingdoms.local");
+    assert_eq!(hosts[0].hostname, "dc02.child.contoso.local");
     assert!(hosts[0].is_dc);
 }
 
 #[test]
 fn test_extract_hosts_banner_domain_trailing_zero() {
     // netexec sometimes appends "0." to domain — verify it's stripped
-    let output = "SMB  10.1.2.150  445  WINTERFELL  [*] Windows Server 2019 (name:WINTERFELL) (domain:sevenkingdoms.local0.) (signing:True)";
+    let output = "SMB  192.168.58.11  445  DC02  [*] Windows Server 2019 (name:DC02) (domain:contoso.local0.) (signing:True)";
     let hosts = extract_hosts(output);
     assert_eq!(hosts.len(), 1);
-    assert_eq!(hosts[0].hostname, "winterfell.sevenkingdoms.local");
+    assert_eq!(hosts[0].hostname, "dc02.contoso.local");
 }
 
 #[test]
@@ -209,9 +209,9 @@ fn test_extract_password_rejects_paths() {
 }
 
 /// Regression: stale current_user must never be used for password attribution.
-/// Previously, NORTH\jon.snow on an earlier line would set current_user, and a
-/// later "Password: Heartsbane" (belonging to samwell.tarly) would be falsely
-/// attributed to jon.snow.
+/// Previously, CHILD\john.smith on an earlier line would set current_user, and a
+/// later "Password: Summer2025" (belonging to sam.wilson) would be falsely
+/// attributed to john.smith.
 ///
 /// Fix: password lines without a same-line username are skipped entirely.
 /// Per-tool parsers handle structured extraction (LDIF, nxc table format).
@@ -219,9 +219,9 @@ fn test_extract_password_rejects_paths() {
 fn test_stale_context_does_not_leak_across_passwords() {
     // Simulate secretsdump output followed by LDAP description output
     let output = "\
-NORTH\\jon.snow:1103:aad3b435b51404eeaad3b435b51404ee:abc123def456abc123def456abc123de:::\n\
-Password: Heartsbane";
-    let creds = extract_plaintext_passwords(output, "sevenkingdoms.local");
+CHILD\\john.smith:1103:aad3b435b51404eeaad3b435b51404ee:abc123def456abc123def456abc123de:::\n\
+Password: Summer2025";
+    let creds = extract_plaintext_passwords(output, "contoso.local");
     // The password line has no same-line username, so it must be skipped.
     // Per-tool parsers handle the structured extraction correctly.
     assert!(
@@ -237,23 +237,23 @@ Password: Heartsbane";
 #[test]
 fn test_ldif_attribute_order_no_misattribution() {
     // ldapsearch output where description comes BEFORE sAMAccountName
-    // and jon.snow's entry appears before samwell.tarly's
+    // and john.smith's entry appears before sam.wilson's
     let output = "\
-# jon.snow, Users, north.sevenkingdoms.local\n\
-dn: CN=Jon Snow,CN=Users,DC=north,DC=sevenkingdoms,DC=local\n\
-sAMAccountName: jon.snow\n\
-description: Jon Snow\n\
-userPrincipalName: jon.snow@north.sevenkingdoms.local\n\
+# john.smith, Users, child.contoso.local\n\
+dn: CN=John Smith,CN=Users,DC=child,DC=contoso,DC=local\n\
+sAMAccountName: john.smith\n\
+description: John Smith\n\
+userPrincipalName: john.smith@child.contoso.local\n\
 \n\
-# samwell.tarly, Users, north.sevenkingdoms.local\n\
-dn: CN=Samwell Tarly,CN=Users,DC=north,DC=sevenkingdoms,DC=local\n\
-description: Samwell Tarly (Password : Heartsbane)\n\
-sAMAccountName: samwell.tarly\n\
-userPrincipalName: samwell.tarly@north.sevenkingdoms.local";
+# sam.wilson, Users, child.contoso.local\n\
+dn: CN=Sam Wilson,CN=Users,DC=child,DC=contoso,DC=local\n\
+description: Sam Wilson (Password : Summer2025)\n\
+sAMAccountName: sam.wilson\n\
+userPrincipalName: sam.wilson@child.contoso.local";
 
-    let creds = extract_plaintext_passwords(output, "north.sevenkingdoms.local");
+    let creds = extract_plaintext_passwords(output, "child.contoso.local");
     // The description line has no same-line username — must be skipped.
-    // jon.snow:Heartsbane must NEVER be produced.
+    // john.smith:Summer2025 must NEVER be produced.
     assert!(
         creds.is_empty(),
         "LDIF description without same-line username must not produce credentials, got: {:?}",
@@ -276,22 +276,22 @@ fn test_smb_line_without_timestamp() {
 /// cross-contaminate username context.
 #[test]
 fn test_separate_outputs_no_cross_contamination() {
-    // Tool output 1: secretsdump mentions jon.snow
-    let output1 = "NORTH\\jon.snow:1103:aad3b435b51404eeaad3b435b51404ee:abc123:::\n";
-    // Tool output 2: LDAP description with password for samwell.tarly
-    let output2 = "SMB  10.1.2.58  445  WINTERFELL  samwell.tarly  2026-04-13 Password: Heartsbane";
+    // Tool output 1: secretsdump mentions john.smith
+    let output1 = "CHILD\\john.smith:1103:aad3b435b51404eeaad3b435b51404ee:abc123:::\n";
+    // Tool output 2: LDAP description with password for sam.wilson
+    let output2 = "SMB  192.168.58.22  445  DC02  sam.wilson  2026-04-13 Password: Summer2025";
 
     // Process separately (as the fix does)
-    let creds1 = extract_plaintext_passwords(output1, "sevenkingdoms.local");
-    let creds2 = extract_plaintext_passwords(output2, "sevenkingdoms.local");
+    let creds1 = extract_plaintext_passwords(output1, "contoso.local");
+    let creds2 = extract_plaintext_passwords(output2, "contoso.local");
 
     // output1 should not produce a plaintext credential (it's a hash line)
     assert!(creds1.is_empty());
 
-    // output2 should attribute Heartsbane to samwell.tarly, not jon.snow
+    // output2 should attribute Summer2025 to sam.wilson, not john.smith
     assert_eq!(creds2.len(), 1);
-    assert_eq!(creds2[0].username, "samwell.tarly");
-    assert_eq!(creds2[0].password, "Heartsbane");
+    assert_eq!(creds2[0].username, "sam.wilson");
+    assert_eq!(creds2[0].password, "Summer2025");
 }
 
 #[test]
@@ -337,21 +337,21 @@ fn test_empty_output() {
 #[test]
 fn test_extract_netexec_success_credential() {
     let output = "\
-SMB  10.1.2.150  445  WINTERFELL  [*] Windows 10 / Server 2019 Build 17763 x64 (name:WINTERFELL) (domain:north.sevenkingdoms.local) (signing:True)\n\
-SMB  10.1.2.150  445  WINTERFELL  [-] north.sevenkingdoms.local\\admin:admin STATUS_LOGON_FAILURE\n\
-SMB  10.1.2.150  445  WINTERFELL  [+] north.sevenkingdoms.local\\hodor:hodor";
+SMB  192.168.58.11  445  DC02  [*] Windows 10 / Server 2019 Build 17763 x64 (name:DC02) (domain:child.contoso.local) (signing:True)\n\
+SMB  192.168.58.11  445  DC02  [-] child.contoso.local\\admin:admin STATUS_LOGON_FAILURE\n\
+SMB  192.168.58.11  445  DC02  [+] child.contoso.local\\jdoe:jdoe";
 
-    let result = extract_from_output_text(output, "north.sevenkingdoms.local");
+    let result = extract_from_output_text(output, "child.contoso.local");
     assert_eq!(result.credentials.len(), 1);
-    assert_eq!(result.credentials[0].username, "hodor");
-    assert_eq!(result.credentials[0].password, "hodor");
-    assert_eq!(result.credentials[0].domain, "north.sevenkingdoms.local");
+    assert_eq!(result.credentials[0].username, "jdoe");
+    assert_eq!(result.credentials[0].password, "jdoe");
+    assert_eq!(result.credentials[0].domain, "child.contoso.local");
     assert_eq!(result.credentials[0].source, "netexec_auth");
 }
 
 #[test]
 fn test_extract_netexec_success_with_pwned() {
-    let output = "SMB  10.1.2.150  445  DC01  [+] contoso.local\\Administrator:P@ssw0rd(Pwn3d!)";
+    let output = "SMB  192.168.58.11  445  DC01  [+] contoso.local\\Administrator:P@ssw0rd(Pwn3d!)";
 
     let result = extract_from_output_text(output, "contoso.local");
     assert_eq!(result.credentials.len(), 1);
@@ -362,11 +362,11 @@ fn test_extract_netexec_success_with_pwned() {
 #[test]
 fn test_extract_netexec_guest_filtered() {
     let output = "\
-SMB  10.1.2.150  445  WINTERFELL  [+] north.sevenkingdoms.local\\admin:admin (Guest)\n\
-SMB  10.1.2.150  445  WINTERFELL  [+] north.sevenkingdoms.local\\hodor:hodor (Guest)\n\
-SMB  10.1.2.150  445  WINTERFELL  [+] north.sevenkingdoms.local\\realuser:realpass";
+SMB  192.168.58.11  445  DC02  [+] child.contoso.local\\admin:admin (Guest)\n\
+SMB  192.168.58.11  445  DC02  [+] child.contoso.local\\jdoe:jdoe (Guest)\n\
+SMB  192.168.58.11  445  DC02  [+] child.contoso.local\\realuser:realpass";
 
-    let result = extract_from_output_text(output, "north.sevenkingdoms.local");
+    let result = extract_from_output_text(output, "child.contoso.local");
     assert_eq!(
         result.credentials.len(),
         1,
@@ -407,7 +407,7 @@ fn test_valid_credential_rejects_noise_passwords() {
 #[test]
 fn test_valid_credential_accepts_real_passwords() {
     assert!(is_valid_credential("admin", "P@ss1"));
-    assert!(is_valid_credential("hodor", "hodor"));
+    assert!(is_valid_credential("jdoe", "jdoe"));
     assert!(is_valid_credential("svc_test", "svc_test"));
 }
 
@@ -479,28 +479,28 @@ fn test_extract_cracked_john_not_triggered_without_context() {
 fn test_extract_cracked_asrep_john_show_no_hex() {
     // John --show for AS-REP omits the hex hash section
     let output = "--- john --show ---\n\
-        $krb5asrep$23$brandon.stark@NORTH.SEVENKINGDOMS.LOCAL:iseedeadpeople\n\n\
+        $krb5asrep$23$brian.davis@CHILD.CONTOSO.LOCAL:letmein2025\n\n\
         1 password hash cracked, 0 left\n";
-    let creds = extract_cracked_passwords(output, "north.sevenkingdoms.local");
+    let creds = extract_cracked_passwords(output, "child.contoso.local");
     assert_eq!(creds.len(), 1);
-    assert_eq!(creds[0].username, "brandon.stark");
-    assert_eq!(creds[0].password, "iseedeadpeople");
-    assert_eq!(creds[0].domain, "NORTH.SEVENKINGDOMS.LOCAL");
+    assert_eq!(creds[0].username, "brian.davis");
+    assert_eq!(creds[0].password, "letmein2025");
+    assert_eq!(creds[0].domain, "CHILD.CONTOSO.LOCAL");
 }
 
 #[test]
 fn test_extract_cracked_tgs_john_show_unknown_user() {
     // John --show for TGS shows ?:password — extract user from TGS hash in same output
     let output = "Loaded 1 password hash (krb5tgs)\n\
-        $krb5tgs$23$*jon.snow$NORTH.SEVENKINGDOMS.LOCAL$CIFS/thewall*$abcdef$123456\n\
+        $krb5tgs$23$*john.smith$CHILD.CONTOSO.LOCAL$CIFS/filesvr01*$abcdef$123456\n\
         --- john --show ---\n\
         ?:iknownothing\n\n\
         1 password hash cracked, 0 left\n";
-    let creds = extract_cracked_passwords(output, "north.sevenkingdoms.local");
+    let creds = extract_cracked_passwords(output, "child.contoso.local");
     assert_eq!(creds.len(), 1);
-    assert_eq!(creds[0].username, "jon.snow");
+    assert_eq!(creds[0].username, "john.smith");
     assert_eq!(creds[0].password, "iknownothing");
-    assert_eq!(creds[0].domain, "NORTH.SEVENKINGDOMS.LOCAL");
+    assert_eq!(creds[0].domain, "CHILD.CONTOSO.LOCAL");
     assert_eq!(creds[0].source, "cracked:john");
 }
 
@@ -518,8 +518,8 @@ fn test_extract_cracked_tgs_john_unknown_user_no_hash_context() {
 fn test_extract_cracked_no_false_positive_on_raw_asrep_hash() {
     // Raw GetNPUsers AS-REP hash should NOT produce a cracked credential.
     // The hash body is long hex+$ which is_valid_credential must reject.
-    let output = "$krb5asrep$23$brandon.stark@NORTH.SEVENKINGDOMS.LOCAL:7dae198e2c2fd940e1cbb59d7817c755$ef0c20c7d3abaaf411eb7c9bfe28c6aeae8410170fd08daf198b9269344aa64b9ad78f3f5b807dee0e8573e3bdec9fd90d0b46fa56baba08708f716d9b43a9f9bb2481ab56453d7a340f60ac478f6114f4fb0db7a424fd075f4cef9061954bf53ac6ac6dc3b0cc153b1bc909cac6cdcad9337022bf24ad2069d1991e9ca6eced54eb31f0016f3d9a2983c7f95c7f92261a8a1c435300576a98943a34046f4c08ecc4c6e81d9ca7aa3ae9a4baeb0e4071cd27c82203a225e741f4867afd15405552a47145ec3d79f1d5d19a90109b24ea593c26169fbccc54816f288a30c08ff34dc11bc105366685769b3edf9027be1dbad2f770edfa3ccd3f9524e93de40033464f07cdefb0";
-    let creds = extract_cracked_passwords(output, "north.sevenkingdoms.local");
+    let output = "$krb5asrep$23$brian.davis@CHILD.CONTOSO.LOCAL:7dae198e2c2fd940e1cbb59d7817c755$ef0c20c7d3abaaf411eb7c9bfe28c6aeae8410170fd08daf198b9269344aa64b9ad78f3f5b807dee0e8573e3bdec9fd90d0b46fa56baba08708f716d9b43a9f9bb2481ab56453d7a340f60ac478f6114f4fb0db7a424fd075f4cef9061954bf53ac6ac6dc3b0cc153b1bc909cac6cdcad9337022bf24ad2069d1991e9ca6eced54eb31f0016f3d9a2983c7f95c7f92261a8a1c435300576a98943a34046f4c08ecc4c6e81d9ca7aa3ae9a4baeb0e4071cd27c82203a225e741f4867afd15405552a47145ec3d79f1d5d19a90109b24ea593c26169fbccc54816f288a30c08ff34dc11bc105366685769b3edf9027be1dbad2f770edfa3ccd3f9524e93de40033464f07cdefb0";
+    let creds = extract_cracked_passwords(output, "child.contoso.local");
     assert!(
         creds.is_empty(),
         "Raw AS-REP hash body should not be treated as cracked password"
@@ -530,9 +530,9 @@ fn test_extract_cracked_no_false_positive_on_raw_asrep_hash() {
 fn test_valid_credential_rejects_hash_body_password() {
     // Long hex+$ strings should be rejected as hash fragments
     assert!(!is_valid_credential(
-        "brandon.stark",
+        "brian.davis",
         "7dae198e2c2fd940e1cbb59d7817c755$ef0c20c7d3abaaf411eb7c9bfe28c6aeae"
     ));
     // Short real passwords should still pass
-    assert!(is_valid_credential("brandon.stark", "iseedeadpeople"));
+    assert!(is_valid_credential("brian.davis", "letmein2025"));
 }

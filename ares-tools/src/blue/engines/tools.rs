@@ -398,7 +398,7 @@ mod tests {
     fn test_generate_pyramid_questions() {
         let evidence = vec![
             EvidenceItem {
-                value: "192.168.1.1".to_string(),
+                value: "192.168.58.10".to_string(),
                 pyramid_level: "ip_addresses".to_string(),
             },
             EvidenceItem {
@@ -436,7 +436,7 @@ mod tests {
     fn test_assess_pyramid() {
         let evidence = vec![
             EvidenceItem {
-                value: "192.168.1.1".to_string(),
+                value: "192.168.58.10".to_string(),
                 pyramid_level: "ip_addresses".to_string(),
             },
             EvidenceItem {

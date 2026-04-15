@@ -392,7 +392,7 @@ mod tests {
             "call_id": "nmap_scan_abc123",
             "task_id": "recon_def456",
             "tool_name": "nmap_scan",
-            "arguments": {"target": "192.168.1.0/24"}
+            "arguments": {"target": "192.168.58.0/24"}
         }"#;
         let req: ToolExecRequest = serde_json::from_str(json).unwrap();
         assert_eq!(req.call_id, "nmap_scan_abc123");

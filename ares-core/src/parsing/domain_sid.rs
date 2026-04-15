@@ -66,9 +66,9 @@ mod tests {
     #[test]
     fn test_extract_rid500_name_standard() {
         let output = "[*] Domain SID is: S-1-5-21-1328384573-4090356449-2552632942\n\
-                       500: SEVENKINGDOMS\\Administrator (SidTypeUser)\n\
-                       501: SEVENKINGDOMS\\Guest (SidTypeUser)\n\
-                       502: SEVENKINGDOMS\\krbtgt (SidTypeUser)\n";
+                       500: CONTOSO\\Administrator (SidTypeUser)\n\
+                       501: CONTOSO\\Guest (SidTypeUser)\n\
+                       502: CONTOSO\\krbtgt (SidTypeUser)\n";
         assert_eq!(
             extract_rid500_name(output),
             Some("Administrator".to_string())

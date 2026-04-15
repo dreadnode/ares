@@ -80,7 +80,7 @@ pub fn parse_netexec_smb(output: &str) -> Vec<Value> {
     let mut hosts = Vec::new();
 
     // NetExec SMB output:
-    //   "SMB  10.1.2.254  445  KINGSLANDING  [*] Windows Server 2019 ... (name:KINGSLANDING) (domain:sevenkingdoms.local) (signing:True)"
+    //   "SMB  192.168.58.12  445  DC01  [*] Windows Server 2019 ... (name:DC01) (domain:contoso.local) (signing:True)"
     for line in output.lines() {
         if !line.contains("SMB") {
             continue;
@@ -195,25 +195,22 @@ SMB  192.168.58.20  445  SRV01  [*] Windows Server 2016 Build 14393 x64 (name:SR
 
     #[test]
     fn test_extract_fqdn_from_line() {
-        let line = "SMB  10.1.2.254  445  KINGSLANDING  [*] Windows 10 / Server 2019 Build 17763 x64 (name:KINGSLANDING) (domain:sevenkingdoms.local) (signing:True)";
-        assert_eq!(
-            extract_fqdn_from_line(line, "KINGSLANDING"),
-            "kingslanding.sevenkingdoms.local"
-        );
+        let line = "SMB  192.168.58.12  445  DC01  [*] Windows 10 / Server 2019 Build 17763 x64 (name:DC01) (domain:contoso.local) (signing:True)";
+        assert_eq!(extract_fqdn_from_line(line, "DC01"), "dc01.contoso.local");
     }
 
     #[test]
     fn test_extract_fqdn_trailing_zero() {
-        let line = "SMB  10.1.2.58  445  CASTELBLACK  [*] ... (name:CASTELBLACK) (domain:north.sevenkingdoms.local0.) (signing:False)";
+        let line = "SMB  192.168.58.22  445  SRV01  [*] ... (name:SRV01) (domain:child.contoso.local0.) (signing:False)";
         assert_eq!(
-            extract_fqdn_from_line(line, "CASTELBLACK"),
-            "castelblack.north.sevenkingdoms.local"
+            extract_fqdn_from_line(line, "SRV01"),
+            "srv01.child.contoso.local"
         );
     }
 
     #[test]
     fn test_extract_fqdn_no_domain() {
-        let line = "SMB  10.1.2.254  445  DC01  [*] Windows Server 2019";
+        let line = "SMB  192.168.58.12  445  DC01  [*] Windows Server 2019";
         assert_eq!(extract_fqdn_from_line(line, "DC01"), "DC01");
     }
 }

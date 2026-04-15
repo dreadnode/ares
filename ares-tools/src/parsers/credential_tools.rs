@@ -230,9 +230,9 @@ static DESC_PASSWORD_RE: LazyLock<Regex> =
 ///
 /// 2. ldapsearch LDIF output (attribute order NOT guaranteed by LDAP):
 /// ```text
-/// dn: CN=Samwell Tarly,CN=Users,DC=north,DC=sevenkingdoms,DC=local
-/// sAMAccountName: samwell.tarly
-/// description: Samwell Tarly (Password : Heartsbane)
+/// dn: CN=Sam Wilson,CN=Users,DC=child,DC=contoso,DC=local
+/// sAMAccountName: sam.wilson
+/// description: Sam Wilson (Password : Summer2025)
 /// ```
 pub fn parse_ldap_descriptions(output: &str, params: &Value) -> Vec<Value> {
     let default_domain = params.get("domain").and_then(|v| v.as_str()).unwrap_or("");
@@ -472,10 +472,10 @@ SMB  192.168.58.121  445  DC01  [+] contoso.local\\admin:Admin123 (Pwn3d!)";
     #[test]
     fn spray_filters_guest_sessions() {
         let output = "\
-SMB  10.1.2.150  445  WINTERFELL  [+] north.sevenkingdoms.local\\admin:admin (Guest)
-SMB  10.1.2.150  445  WINTERFELL  [+] north.sevenkingdoms.local\\hodor:hodor (Guest)
-SMB  10.1.2.150  445  WINTERFELL  [+] north.sevenkingdoms.local\\realuser:realpass";
-        let params = json!({"domain": "north.sevenkingdoms.local"});
+SMB  192.168.58.11  445  DC02  [+] child.contoso.local\\admin:admin (Guest)
+SMB  192.168.58.11  445  DC02  [+] child.contoso.local\\jdoe:jdoe (Guest)
+SMB  192.168.58.11  445  DC02  [+] child.contoso.local\\realuser:realpass";
+        let params = json!({"domain": "child.contoso.local"});
         let creds = parse_spray_success(output, &params);
         assert_eq!(creds.len(), 1, "Guest sessions should be filtered out");
         assert_eq!(creds[0]["username"], "realuser");
@@ -501,22 +501,22 @@ SMB  192.168.58.121  445  DC01  backup   Backup svc pwd=BackupPass1";
     #[test]
     fn ldap_descriptions_extracts_from_ldif() {
         let output = "\
-# jon.snow, Users, north.sevenkingdoms.local
-dn: CN=Jon Snow,CN=Users,DC=north,DC=sevenkingdoms,DC=local
-sAMAccountName: jon.snow
-description: Jon Snow
-userPrincipalName: jon.snow@north.sevenkingdoms.local
+# john.smith, Users, child.contoso.local
+dn: CN=John Smith,CN=Users,DC=child,DC=contoso,DC=local
+sAMAccountName: john.smith
+description: John Smith
+userPrincipalName: john.smith@child.contoso.local
 
-# samwell.tarly, Users, north.sevenkingdoms.local
-dn: CN=Samwell Tarly,CN=Users,DC=north,DC=sevenkingdoms,DC=local
-sAMAccountName: samwell.tarly
-description: Samwell Tarly (Password : Heartsbane)
-userPrincipalName: samwell.tarly@north.sevenkingdoms.local";
-        let params = json!({"domain": "north.sevenkingdoms.local"});
+# sam.wilson, Users, child.contoso.local
+dn: CN=Sam Wilson,CN=Users,DC=child,DC=contoso,DC=local
+sAMAccountName: sam.wilson
+description: Sam Wilson (Password : Summer2025)
+userPrincipalName: sam.wilson@child.contoso.local";
+        let params = json!({"domain": "child.contoso.local"});
         let creds = parse_ldap_descriptions(output, &params);
         assert_eq!(creds.len(), 1);
-        assert_eq!(creds[0]["username"], "samwell.tarly");
-        assert_eq!(creds[0]["password"], "Heartsbane");
+        assert_eq!(creds[0]["username"], "sam.wilson");
+        assert_eq!(creds[0]["password"], "Summer2025");
         assert_eq!(creds[0]["source"], "ldap_description");
     }
 
@@ -524,20 +524,20 @@ userPrincipalName: samwell.tarly@north.sevenkingdoms.local";
     #[test]
     fn ldap_descriptions_ldif_reverse_attribute_order() {
         let output = "\
-# jon.snow, Users, north.sevenkingdoms.local
-dn: CN=Jon Snow,CN=Users,DC=north,DC=sevenkingdoms,DC=local
-description: Jon Snow
-sAMAccountName: jon.snow
+# john.smith, Users, child.contoso.local
+dn: CN=John Smith,CN=Users,DC=child,DC=contoso,DC=local
+description: John Smith
+sAMAccountName: john.smith
 
-# samwell.tarly, Users, north.sevenkingdoms.local
-dn: CN=Samwell Tarly,CN=Users,DC=north,DC=sevenkingdoms,DC=local
-description: Samwell Tarly (Password : Heartsbane)
-sAMAccountName: samwell.tarly";
-        let params = json!({"domain": "north.sevenkingdoms.local"});
+# sam.wilson, Users, child.contoso.local
+dn: CN=Sam Wilson,CN=Users,DC=child,DC=contoso,DC=local
+description: Sam Wilson (Password : Summer2025)
+sAMAccountName: sam.wilson";
+        let params = json!({"domain": "child.contoso.local"});
         let creds = parse_ldap_descriptions(output, &params);
         assert_eq!(creds.len(), 1);
-        assert_eq!(creds[0]["username"], "samwell.tarly");
-        assert_eq!(creds[0]["password"], "Heartsbane");
+        assert_eq!(creds[0]["username"], "sam.wilson");
+        assert_eq!(creds[0]["password"], "Summer2025");
     }
 
     #[test]

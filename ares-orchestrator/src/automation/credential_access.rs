@@ -100,8 +100,8 @@ pub async fn auto_credential_access(
                     if let Some(dc_ip) = state.domain_controllers.get(&cred_domain).cloned() {
                         return Some((dedup, dc_ip, cred_domain, cred.clone()));
                     }
-                    // Fallback: check child domains (e.g. cred has "sevenkingdoms.local"
-                    // but user is actually in "north.sevenkingdoms.local")
+                    // Fallback: check child domains (e.g. cred has "contoso.local"
+                    // but user is actually in "child.contoso.local")
                     let suffix = format!(".{cred_domain}");
                     for (domain, dc_ip) in &state.domain_controllers {
                         if domain.ends_with(&suffix) {

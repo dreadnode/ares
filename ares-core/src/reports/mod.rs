@@ -388,7 +388,7 @@ mod tests {
         state1.evidence = vec![Evidence {
             id: "ev-001".to_string(),
             evidence_type: "ip".to_string(),
-            value: "10.0.0.1".to_string(),
+            value: "192.168.58.10".to_string(),
             source: "firewall".to_string(),
             timestamp: None,
             pyramid_level: 2,

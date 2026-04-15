@@ -160,7 +160,7 @@ cn: north.contoso.local
 trustDirection: 3
 trustType: 1
 trustAttributes: 0
-flatName: NORTH
+flatName: CHILD
 "#;
         let trusts = parse_domain_trusts(output);
         assert_eq!(trusts.len(), 1);
@@ -183,7 +183,7 @@ cn: north.contoso.local
 trustDirection: 3
 trustType: 1
 trustAttributes: 0
-flatName: NORTH
+flatName: CHILD
 "#;
         let trusts = parse_domain_trusts(output);
         assert_eq!(trusts.len(), 2);

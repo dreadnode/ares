@@ -65,8 +65,8 @@ pub async fn auto_credential_expansion(
                     // domains). Cross-domain lateral attempts with wrong-domain
                     // creds generate failed auth that triggers AD lockout.
                     // Domain is extracted from hostname (e.g.,
-                    // winterfell.north.sevenkingdoms.local → north.sevenkingdoms.local).
-                    // Resolve NetBIOS domain names (e.g. "NORTH") to FQDN
+                    // dc02.child.contoso.local → child.contoso.local).
+                    // Resolve NetBIOS domain names (e.g. "CHILD") to FQDN
                     // via the netbios_to_fqdn map before matching.
                     let cred_dom = {
                         let raw = cred.domain.to_lowercase();
