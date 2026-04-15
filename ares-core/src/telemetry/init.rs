@@ -154,8 +154,11 @@ fn try_init_otel_provider(service_name: &str) -> Option<SdkTracerProvider> {
         }
     };
 
-    // Build resource with service name + optional OTEL_RESOURCE_ATTRIBUTES.
-    let mut resource_attrs = vec![KeyValue::new("service.name", service_name.to_string())];
+    // Build resource with service name, namespace, and optional OTEL_RESOURCE_ATTRIBUTES.
+    let mut resource_attrs = vec![
+        KeyValue::new("service.name", service_name.to_string()),
+        KeyValue::new("service.namespace", "attack-simulation"),
+    ];
 
     // Parse OTEL_RESOURCE_ATTRIBUTES (comma-separated key=value pairs).
     if let Ok(extra) = std::env::var("OTEL_RESOURCE_ATTRIBUTES") {
