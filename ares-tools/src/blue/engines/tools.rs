@@ -23,7 +23,7 @@ pub async fn load_investigation_evidence(
         .unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string());
 
     let client = redis::Client::open(url.as_str())?;
-    let mut conn = client.get_multiplexed_tokio_connection().await?;
+    let mut conn = client.get_multiplexed_async_connection().await?;
 
     // Load techniques
     let tech_key = format!("ares:blue:inv:{investigation_id}:techniques");
