@@ -4,30 +4,16 @@
 
 [![Rust](https://github.com/dreadnode/ares/actions/workflows/rust.yaml/badge.svg)](https://github.com/dreadnode/ares/actions/workflows/rust.yaml)
 [![Pre-Commit](https://github.com/dreadnode/ares/actions/workflows/pre-commit.yaml/badge.svg)](https://github.com/dreadnode/ares/actions/workflows/pre-commit.yaml)
-[![License](https://img.shields.io/github/license/dreadnode/ares?label=License&style=flat&color=blue&logo=github)](https://github.com/dreadnode/ares/blob/main/LICENSE)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://github.com/dreadnode/ares/blob/main/LICENSE)
 [![Rust](https://img.shields.io/badge/rust-stable-orange.svg)](https://www.rust-lang.org/)
 
 <!-- END_AUTO_BADGES -->
 
 LLM-coordinated autonomous security operations platform with two modes:
 
-**Red Team** — 7 specialized agents (recon, credential access, cracker, ACL,
-privesc, lateral movement, coercion) orchestrated by an LLM coordination loop
-that autonomously chains 64+ Active Directory attack tools across the full kill
-chain: network discovery, credential harvesting (Kerberoast, AS-REP, secretsdump,
-LAPS, GPP), hash cracking, privilege escalation (ADCS, delegation, trust abuse,
-ACL exploitation), lateral movement (PSExec/WMI/WinRM/MSSQL), and domain
-dominance (golden tickets, multi-forest traversal). 14 concurrent automation
-modules continuously monitor discovered state and dispatch attack chains without
-manual sequencing.
+**Red Team** - 7 specialized agents orchestrated by an LLM coordination loop that autonomously chains 64+ Active Directory attack tools across the full kill chain, from recon through domain dominance. 14 concurrent automation modules monitor discovered state and dispatch attack chains without manual sequencing.
 
-**Blue Team** — Multi-agent SOC investigation system (triage, threat hunter,
-lateral analyst, escalation) that queries live Loki logs and Prometheus metrics,
-runs MITRE ATT&CK-mapped detection templates, auto-extracts and validates IOCs,
-tracks lateral movement paths across hosts, learns from past investigations to
-reduce false positives, climbs the Pyramid of Pain from network artifacts to
-TTPs, and writes detection rules back to Grafana. Evidence-driven chaining
-automatically dispatches follow-up investigations as new indicators surface.
+**Blue Team** - Multi-agent SOC investigation system that queries live Loki logs and Prometheus metrics, runs MITRE ATT&CK-mapped detection templates, tracks lateral movement, and writes detection rules back to Grafana. Evidence-driven chaining automatically dispatches follow-up investigations as new indicators surface.
 
 ## Table of Contents
 
@@ -48,12 +34,12 @@ Ares is a Rust workspace with six crates:
 
 | Crate               | Binary              | Purpose                                                  |
 | ------------------- | ------------------- | -------------------------------------------------------- |
-| `ares-cli`          | `ares-cli`          | Unified CLI — ops, blue, history, config management      |
+| `ares-cli`          | `ares-cli`          | Unified CLI - ops, blue, history, config management      |
 | `ares-orchestrator` | `ares-orchestrator` | LLM-powered coordination loop, task dispatch, strategy   |
 | `ares-worker`       | `ares-worker`       | Task execution agents (one per role, K8s or EC2)         |
-| `ares-core`         | —                   | Shared models, state management, Redis schema, telemetry |
-| `ares-llm`          | —                   | LLM providers (Anthropic, OpenAI, Ollama) + tool registry|
-| `ares-tools`        | —                   | Tool dispatch and execution framework                    |
+| `ares-core`         | -                   | Shared models, state management, Redis schema, telemetry |
+| `ares-llm`          | -                   | LLM providers (Anthropic, OpenAI, Ollama) + tool registry|
+| `ares-tools`        | -                   | Tool dispatch and execution framework                    |
 
 ### Red Team Multi-Agent System
 
@@ -112,7 +98,7 @@ discovered evidence types.
 - [Rust](https://rustup.rs/) (stable toolchain)
 - [Task](https://taskfile.dev/installation/) (recommended)
 - [1Password CLI](https://developer.1password.com/docs/cli/get-started/)
-  for credential management (optional — `.env` file also supported)
+  for credential management (optional - `.env` file also supported)
 - Redis (for orchestrator/worker communication)
 
 **Build:**
@@ -173,7 +159,7 @@ ares-cli --ec2 kali-ares --ec2-profile prod --ec2-region us-east-1 ops list
 
 ### Commands
 
-**`ops`** — Red team operation management:
+**`ops`** - Red team operation management:
 
 | Subcommand                                         | Description                     |
 | -------------------------------------------------- | ------------------------------- |
@@ -197,7 +183,7 @@ ares-cli --ec2 kali-ares --ec2-profile prod --ec2-region us-east-1 ops list
 | `correlate`                                        | Red-blue correlation analysis   |
 | `evaluate`                                         | Evaluate blue team detection    |
 
-**`blue`** — Blue team investigation management:
+**`blue`** - Blue team investigation management:
 
 | Subcommand                                | Description                           |
 | ----------------------------------------- | ------------------------------------- |
@@ -213,7 +199,7 @@ ares-cli --ec2 kali-ares --ec2-profile prod --ec2-region us-east-1 ops list
 | `report [--latest] [--regenerate]`        | Generate report                       |
 | `cleanup [--all] [--max-age-hours N]`     | Clean investigations                  |
 
-**`history`** — Historical queries (PostgreSQL):
+**`history`** - Historical queries (PostgreSQL):
 
 | Subcommand                            | Description             |
 | ------------------------------------- | ----------------------- |
@@ -224,7 +210,7 @@ ares-cli --ec2 kali-ares --ec2-profile prod --ec2-region us-east-1 ops list
 | `mitre-coverage [--since-days N]`     | Technique coverage      |
 | `cost [--since-days N]`               | Token usage and cost    |
 
-**`config`** — Configuration management:
+**`config`** - Configuration management:
 
 | Subcommand                         | Description          |
 | ---------------------------------- | -------------------- |
@@ -285,11 +271,11 @@ ares-cli --k8s ares-red ops export-detection --latest
 
 ### Operation Phases
 
-1. **Initial Access** — RECON scans, COERCION starts Responder, CREDENTIAL_ACCESS sprays
-2. **Enumeration** — BloodHound, Kerberoasting, AS-REP roasting, hash cracking
-3. **Privilege Escalation** — ADCS exploitation, delegation attacks, ACL abuse
-4. **Lateral Movement** — PSExec/WMI/WinRM, credential harvesting on compromised hosts
-5. **Domain Dominance** — DCSync, golden ticket generation, operation report
+1. **Initial Access** - RECON scans, COERCION starts Responder, CREDENTIAL_ACCESS sprays
+2. **Enumeration** - BloodHound, Kerberoasting, AS-REP roasting, hash cracking
+3. **Privilege Escalation** - ADCS exploitation, delegation attacks, ACL abuse
+4. **Lateral Movement** - PSExec/WMI/WinRM, credential harvesting on compromised hosts
+5. **Domain Dominance** - DCSync, golden ticket generation, operation report
 
 See [Red Team Architecture](docs/red.md) for detailed documentation.
 
@@ -302,10 +288,10 @@ ATT&CK techniques, and climb the Pyramid of Pain from hash values toward TTPs.
 
 ### Investigation Stages
 
-1. **Triage** — Parse alert, discover datasources, first-pass IOC extraction via Loki/Prometheus (8-12 queries)
-2. **Causation** — Root cause analysis, precursor attack identification, attack chain reconstruction (14 queries)
-3. **Lateral Movement** — Multi-host scope expansion, lateral movement graph construction, pivot detection (20 queries)
-4. **Synthesis** — Evidence consolidation, MITRE mapping, Pyramid of Pain assessment, report generation (20 queries)
+1. **Triage** - Parse alert, discover datasources, first-pass IOC extraction via Loki/Prometheus (8-12 queries)
+2. **Causation** - Root cause analysis, precursor attack identification, attack chain reconstruction (14 queries)
+3. **Lateral Movement** - Multi-host scope expansion, lateral movement graph construction, pivot detection (20 queries)
+4. **Synthesis** - Evidence consolidation, MITRE mapping, Pyramid of Pain assessment, report generation (20 queries)
 
 ### Key Capabilities
 
@@ -469,21 +455,72 @@ ares-cli config validate
 
 ### Environment Variables
 
-| Variable                        | Required | Description                                      |
-| ------------------------------- | -------- | ------------------------------------------------ |
-| `ANTHROPIC_API_KEY`             | Yes*     | Anthropic API key (Claude models)                |
-| `OPENAI_API_KEY`                | Yes*     | OpenAI API key (GPT models)                      |
-| `GRAFANA_URL`                   | Blue     | Grafana instance URL                             |
-| `GRAFANA_SERVICE_ACCOUNT_TOKEN` | Blue     | Grafana service account token                    |
-| `DREADNODE_API_KEY`             | No       | Dreadnode platform token for observability       |
-| `ARES_REDIS_URL`                | No       | Redis URL (default: `redis://localhost:6379`)    |
-| `ARES_LLM_MODEL`                | No       | Default LLM model override                       |
-| `ARES_CONFIG`                   | No       | Config file path (default: `./config/ares.yaml`) |
+**LLM Providers** (at least one required):
 
-\* At least one LLM provider key required. Supports Anthropic, OpenAI, and Ollama (local, no key needed).
+| Variable                        | Default  | Description                          |
+| ------------------------------- | -------- | ------------------------------------ |
+| `ANTHROPIC_API_KEY`             |          | Anthropic API key (Claude models)    |
+| `OPENAI_API_KEY`                |          | OpenAI API key (GPT models)         |
+| `OLLAMA_BASE_URL`               | `http://localhost:11434` | Local Ollama server URL  |
 
-**Model Override Precedence** (highest first):
-`ARES_AGENT_<ROLE>_MODEL` > `ARES_ORCHESTRATOR_MODEL`/`ARES_WORKER_MODEL` > `ARES_MODEL` > config file.
+**Model Selection:**
+
+| Variable                        | Default  | Description                          |
+| ------------------------------- | -------- | ------------------------------------ |
+| `ARES_LLM_MODEL`               |          | Primary model (`anthropic/<model>`, `openai/<model>`, `ollama/<model>`) |
+| `ARES_ORCHESTRATOR_MODEL`       |          | Override model for orchestrator      |
+| `ARES_WORKER_MODEL`             |          | Override model for workers           |
+| `ARES_BLUE_LLM_MODEL`          |          | Override model for blue team         |
+| `ARES_MODEL`                    |          | Generic fallback for both sides      |
+| `ARES_AGENT_<ROLE>_MODEL`      |          | Per-role override (e.g. `ARES_AGENT_RECON_MODEL`) |
+
+Precedence (highest first):
+`ARES_AGENT_<ROLE>_MODEL` > `ARES_ORCHESTRATOR_MODEL`/`ARES_WORKER_MODEL` > `ARES_MODEL` > `ARES_LLM_MODEL` > config file.
+
+**Infrastructure:**
+
+| Variable                        | Default                    | Description                          |
+| ------------------------------- | -------------------------- | ------------------------------------ |
+| `ARES_REDIS_URL`                | `redis://127.0.0.1:6379/0` | Redis URL (falls back to `REDIS_URL`) |
+| `ARES_CONFIG`                   | auto-discovered            | Path to `ares.yaml` config file      |
+| `ARES_DATABASE_URL`             |                            | PostgreSQL URL (persistent store, disabled if absent) |
+| `ARES_TOOL_DISPATCH`            | `redis`                    | Set to `local` for in-process tool execution |
+
+**Blue Team:**
+
+| Variable                        | Default                    | Description                          |
+| ------------------------------- | -------------------------- | ------------------------------------ |
+| `ARES_BLUE_ENABLED`             |                            | Set to `1` to activate blue team     |
+| `ARES_BLUE_MAX_STEPS`           | `75`                       | Max agent loop steps per investigation |
+| `ARES_REPORT_DIR`               | `$HOME/ares_reports`       | Report output directory              |
+| `GRAFANA_URL`                   | `http://localhost:3000`    | Grafana instance URL                 |
+| `GRAFANA_SERVICE_ACCOUNT_TOKEN` |                            | Grafana service account token        |
+| `LOKI_URL`                      | `http://localhost:3100`    | Loki endpoint for LogQL queries      |
+| `LOKI_AUTH_TOKEN`               |                            | Bearer token for Loki auth           |
+| `PROMETHEUS_URL`                | `http://localhost:9090`    | Prometheus endpoint for PromQL       |
+
+**Orchestrator Tuning:**
+
+| Variable                        | Default | Description                          |
+| ------------------------------- | ------- | ------------------------------------ |
+| `ARES_OPERATION_ID`             |         | Operation ID (or JSON payload with targets) |
+| `ARES_TARGET_DOMAIN`            |         | Target AD domain                     |
+| `ARES_TARGET_IPS`               |         | Comma-separated target IPs           |
+| `ARES_INITIAL_CREDENTIAL`       |         | Seed credential (`user:pass@domain`) |
+| `ARES_MAX_CONCURRENT_TASKS`     | `8`     | Max concurrent tasks across roles    |
+| `ARES_MAX_TASKS_PER_ROLE`       | `3`     | Max in-flight tasks per role         |
+| `ARES_STALE_TASK_TIMEOUT_SECS`  | `900`   | Stale task timeout (seconds)         |
+| `ARES_LOCK_TTL_SECS`            | `300`   | Operation lock TTL                   |
+
+**Worker Tuning:**
+
+| Variable                        | Default | Description                          |
+| ------------------------------- | ------- | ------------------------------------ |
+| `ARES_WORKER_ROLE`              |         | Agent role (required for workers)    |
+| `ARES_WORKER_MODE`              | `task`  | Mode: `task`, `tool_exec`, or `blue_task` |
+| `ARES_AGENT_TASK_TIMEOUT`       | `600`   | Max seconds per task                 |
+| `ARES_POD_NAME`                 | hostname | Worker pod identity in Redis        |
+
 
 ### Observability
 

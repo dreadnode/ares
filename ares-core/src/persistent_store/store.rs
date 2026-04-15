@@ -582,7 +582,7 @@ pub struct OperationOffload {
 /// SHA-256 hash of a string, truncated to `len` hex chars.
 fn sha256_prefix(input: &str, len: usize) -> String {
     let hash = Sha256::digest(input.as_bytes());
-    let hex = format!("{:x}", hash);
+    let hex: String = hash.iter().map(|b| format!("{b:02x}")).collect();
     hex[..hex.len().min(len)].to_string()
 }
 
