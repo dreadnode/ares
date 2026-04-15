@@ -90,33 +90,13 @@ pub async fn run_investigation(
         ares_llm::prompt::blue::build_blue_system_prompt(role.as_str(), &capabilities)
             .context("Failed to build blue orchestrator system prompt")?;
 
-    // Build the task prompt with alert context
-    let alert_summary = investigation
-        .alert
-        .get("summary")
-        .and_then(|v| v.as_str())
-        .unwrap_or("Unknown alert");
-    let now_str = Utc::now().to_rfc3339();
-    let alert_timestamp = investigation
-        .alert
-        .get("timestamp")
-        .and_then(|v| v.as_str())
-        .unwrap_or(&now_str);
-
-    let task_prompt = format!(
-        "## New Investigation: {}\n\n\
-         **Alert Summary**: {}\n\
-         **Timestamp**: {}\n\
-         **Investigation ID**: {}\n\n\
-         Full alert data:\n```json\n{}\n```\n\n\
-         Coordinate the investigation using your available tools. \
-         Start with triage, then dispatch threat hunting and lateral analysis as needed.",
-        investigation.investigation_id,
-        alert_summary,
-        alert_timestamp,
-        investigation.investigation_id,
-        serde_json::to_string_pretty(&investigation.alert).unwrap_or_default()
-    );
+    // Build the task prompt with alert context using the initial alert prompt template
+    let task_prompt = ares_llm::prompt::blue::build_initial_alert_prompt(
+        &investigation.investigation_id,
+        &investigation.alert,
+        investigation.operation_id.as_deref(),
+    )
+    .context("Failed to build initial alert prompt")?;
 
     let config = AgentLoopConfig {
         model: investigation.model.clone(),

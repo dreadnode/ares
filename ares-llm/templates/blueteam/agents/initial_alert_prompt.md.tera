@@ -1,0 +1,119 @@
+ALERT RECEIVED - BEGIN INVESTIGATION
+
+## Alert Details
+- **Alert Name**: {{ alert_name }}
+- **Severity**: {{ severity }}
+{% if deployment %}- **Deployment**: {{ deployment }}{% endif %}
+{% if instance %}- **Instance**: {{ instance }}{% endif %}
+{% if job %}- **Job**: {{ job }}{% endif %}
+- **Alert Started At**: {{ starts_at }}
+- **Summary**: {{ summary }}
+{% if description %}- **Description**: {{ description }}{% endif %}
+
+{% if alert_name == "DatasourceNoData" and rulename %}
+## IMPORTANT: This is a Health Alert for a Security Rule
+This "DatasourceNoData" alert was generated because the **{{ rulename }}** rule
+could not evaluate (Loki returned no data). However, the security context (MITRE technique,
+description) is from the original rule.
+
+**INVESTIGATE**: {{ rulename }} — NOT "DatasourceNoData"
+{% endif %}
+
+{% if mitre_technique %}
+## MITRE TECHNIQUE FROM ALERT
+**The alert has identified: {{ mitre_technique }}**
+You MUST investigate this technique specifically and dispatch workers accordingly.
+
+### Precursor Investigation Required
+Attacks NEVER happen in isolation. Investigate what came BEFORE.
+
+{% if "DCSync" in mitre_technique or "T1003.006" in mitre_technique %}
+**For DCSync (T1003.006), investigate precursors:**
+1. User enumeration (T1087) — LDAP queries for users
+2. Share enumeration (T1135) — Access to SYSVOL, NETLOGON
+3. Password guessing (T1110) — Failed logons (Event 4625)
+4. Credential theft — Files accessed on shares
+5. Host discovery (T1018) — DNS queries, ping sweeps
+{% endif %}
+
+{% if "Kerberoast" in mitre_technique or "T1558.003" in mitre_technique %}
+**For Kerberoasting (T1558.003), investigate precursors:**
+1. SPN enumeration (T1087.002) — Queries for servicePrincipalName
+2. User enumeration (T1087) — Discovery of service accounts
+3. TGS requests (Event 4769) — Especially with RC4 encryption
+{% endif %}
+
+{% if "Pass" in mitre_technique or "T1550" in mitre_technique %}
+**For Pass-the-Hash/Ticket, investigate precursors:**
+1. Credential dumping (T1003) — LSASS access, SAM dumps
+2. Lateral movement sources — Where did credentials come from?
+{% endif %}
+
+**General Precursor Checklist:**
+- Check for authentication failures 24-48 hours before the attack
+- Check for share access from the source IP/user
+- Check for enumeration activity (LDAP, DNS, SMB)
+- Identify ALL users who interacted with the source system
+- Identify ALL hosts the attacker communicated with
+{% endif %}
+
+---
+
+## TIME VALUES FOR QUERIES
+
+{% if attack_window_start and attack_window_end %}
+## RED TEAM OPERATION CONTEXT — FOCUSED HUNTING MODE
+
+**You are investigating a KNOWN red team operation: {{ operation_id }}**
+
+**ATTACK WINDOW**: {{ attack_window_start }} to {{ attack_window_end }}
+**FOCUS YOUR QUERIES ON THIS WINDOW** — the red team was active during this time.
+
+{% if techniques_used %}
+### Known Techniques Used by Red Team
+The following MITRE ATT&CK techniques were used in this operation:
+{% for tech in techniques_used %}
+- **{{ tech }}**
+{% endfor %}
+
+**HUNT FOR EVIDENCE OF THESE SPECIFIC TECHNIQUES**
+{% endif %}
+
+**Investigation Strategy:**
+1. Focus queries on the attack window: {{ attack_window_start }} to {{ attack_window_end }}
+2. Look for evidence of the known techniques listed above
+3. Correlate findings with expected red team activity
+4. Dispatch workers with specific technique IDs from this list
+
+{% else %}
+**CURRENT TIME**: {{ current_time }}
+**QUERY START (1h ago)**: {{ current_time_minus_1h }}
+**QUERY START (2h ago)**: {{ current_time_minus_2h }}
+
+The alert's `startsAt` ({{ starts_at }}) may be HOURS or DAYS old.
+**DO NOT** query around the alert timestamp.
+**DO** query from {{ current_time_minus_2h }} to {{ current_time }}.
+{% endif %}
+
+---
+
+## Target Scope
+
+{% if deployment %}- **Deployment**: `{{ deployment }}` — FILTER ALL QUERIES with `{deployment="{{ deployment }}"}`{% endif %}
+{% if target_ips %}- **Target IPs**: {{ target_ips }}{% endif %}
+{% if target_users %}- **Target Users**: {{ target_users }}{% endif %}
+
+---
+
+## Investigation ID: {{ investigation_id }}
+
+Full alert data:
+```json
+{{ alert_json }}
+```
+
+## MANDATORY FIRST STEP
+
+Dispatch triage immediately with the alert details above. After triage results, dispatch threat hunting and lateral analysis as needed based on findings.
+
+Coordinate the investigation using your available tools. Start with triage, then expand based on findings.

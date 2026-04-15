@@ -166,3 +166,164 @@ pub fn build_blue_system_prompt(role: &str, capabilities: &[String]) -> Result<S
     let template_name = blue_role_template(role);
     templates::render_agent_instructions(template_name, capabilities, false, &[])
 }
+
+/// Build the initial alert prompt for a blue team investigation.
+///
+/// Extracts alert metadata, red team operation context, and time window
+/// information to produce a context-rich initial prompt for the orchestrator.
+pub fn build_initial_alert_prompt(
+    investigation_id: &str,
+    alert: &serde_json::Value,
+    operation_id: Option<&str>,
+) -> Result<String> {
+    use tera::Context;
+
+    let mut ctx = Context::new();
+    ctx.insert("investigation_id", investigation_id);
+
+    // Extract alert labels
+    let labels = alert
+        .get("labels")
+        .cloned()
+        .unwrap_or(serde_json::json!({}));
+    let annotations = alert
+        .get("annotations")
+        .cloned()
+        .unwrap_or(serde_json::json!({}));
+
+    let alert_name = labels
+        .get("alertname")
+        .and_then(|v| v.as_str())
+        .unwrap_or("Unknown");
+    ctx.insert("alert_name", alert_name);
+
+    let severity = labels
+        .get("severity")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown");
+    ctx.insert("severity", severity);
+
+    let deployment = labels.get("deployment").and_then(|v| v.as_str());
+    ctx.insert("deployment", &deployment);
+
+    let instance = labels.get("instance").and_then(|v| v.as_str());
+    ctx.insert("instance", &instance);
+
+    let job = labels.get("job").and_then(|v| v.as_str());
+    ctx.insert("job", &job);
+
+    let rulename = labels.get("rulename").and_then(|v| v.as_str());
+    ctx.insert("rulename", &rulename);
+
+    let starts_at = alert
+        .get("startsAt")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown");
+    ctx.insert("starts_at", starts_at);
+
+    let summary = annotations
+        .get("summary")
+        .and_then(|v| v.as_str())
+        .or_else(|| alert.get("summary").and_then(|v| v.as_str()))
+        .unwrap_or("No summary available");
+    ctx.insert("summary", summary);
+
+    let description = annotations
+        .get("description")
+        .and_then(|v| v.as_str())
+        .or_else(|| alert.get("description").and_then(|v| v.as_str()));
+    ctx.insert("description", &description);
+
+    // Extract MITRE technique from labels or annotations
+    let mitre_technique = ["mitre_technique", "mitre", "technique_id", "technique"]
+        .iter()
+        .find_map(|key| {
+            labels
+                .get(*key)
+                .and_then(|v| v.as_str())
+                .or_else(|| annotations.get(*key).and_then(|v| v.as_str()))
+        });
+    ctx.insert("mitre_technique", &mitre_technique);
+
+    // Extract operation context (from `blue from-operation` submissions)
+    let op_ctx = alert.get("operation_context");
+    let op_id = operation_id.or_else(|| {
+        op_ctx
+            .and_then(|c| c.get("operation_id"))
+            .and_then(|v| v.as_str())
+    });
+    ctx.insert("operation_id", &op_id);
+
+    let attack_window_start = op_ctx
+        .and_then(|c| c.get("attack_window_start"))
+        .and_then(|v| v.as_str());
+    ctx.insert("attack_window_start", &attack_window_start);
+
+    let attack_window_end = op_ctx
+        .and_then(|c| c.get("attack_window_end"))
+        .and_then(|v| v.as_str());
+    ctx.insert("attack_window_end", &attack_window_end);
+
+    // Techniques used (array of strings)
+    let techniques_used: Vec<String> = op_ctx
+        .and_then(|c| c.get("techniques_used"))
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+    ctx.insert("techniques_used", &techniques_used);
+
+    // Target IPs and users (from `blue from-operation`)
+    let target_ips: Vec<String> = alert
+        .get("target_ips")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .take(20)
+                .collect()
+        })
+        .unwrap_or_default();
+    if !target_ips.is_empty() {
+        ctx.insert("target_ips", &target_ips.join(", "));
+    } else {
+        ctx.insert("target_ips", &None::<String>);
+    }
+
+    let target_users: Vec<String> = alert
+        .get("target_users")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .take(20)
+                .collect()
+        })
+        .unwrap_or_default();
+    if !target_users.is_empty() {
+        ctx.insert("target_users", &target_users.join(", "));
+    } else {
+        ctx.insert("target_users", &None::<String>);
+    }
+
+    // Current time values for queries
+    let now = chrono::Utc::now();
+    ctx.insert("current_time", &now.to_rfc3339());
+    ctx.insert(
+        "current_time_minus_1h",
+        &(now - chrono::Duration::hours(1)).to_rfc3339(),
+    );
+    ctx.insert(
+        "current_time_minus_2h",
+        &(now - chrono::Duration::hours(2)).to_rfc3339(),
+    );
+
+    // Full alert JSON for reference
+    let alert_json = serde_json::to_string_pretty(alert).unwrap_or_else(|_| "{}".to_string());
+    ctx.insert("alert_json", &alert_json);
+
+    templates::render_template_with_context(templates::TEMPLATE_BLUE_INITIAL_ALERT_PROMPT, &ctx)
+}

@@ -21,9 +21,6 @@ target/
 # Taskfile
 .task/
 
-# Claude Code
-.claude/
-
 # Secrets baseline (local)
 .secrets.baseline
 

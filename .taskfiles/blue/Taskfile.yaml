@@ -28,54 +28,45 @@ tasks:
   # ===========================================================================
 
   poll:
-    desc: "Run blue team agent in poll mode (uses 1Password for API keys)"
+    desc: "Submit blue investigation from latest operation, re-polling every POLL_INTERVAL seconds"
     silent: true
     cmds:
       - |
-        # Verify AWS auth
-        if ! aws sts get-caller-identity --profile "{{.PROFILE}}" --region "{{.REGION}}" >/dev/null 2>&1; then
-            echo "AWS authentication failed for profile: {{.PROFILE}}"
-            echo "Run: aws sso login --profile {{.PROFILE}}"
-            exit 1
-        fi
-
         export ANTHROPIC_API_KEY="{{.ANTHROPIC_API_KEY}}"
-        export DREADNODE_API_KEY="{{.DREADNODE_API_KEY}}"
         export GRAFANA_SERVICE_ACCOUNT_TOKEN="{{.GRAFANA_SERVICE_ACCOUNT_TOKEN}}"
         export OPENAI_API_KEY="{{.OPENAI_API_KEY}}"
 
         mkdir -p {{.LOG_DIR}}
         LOGFILE="{{.LOG_DIR}}/blue-$(date +%Y%m%d-%H%M%S).log"
         echo "Logging to: $LOGFILE"
+        echo "Poll interval: {{.POLL_INTERVAL}}s"
+        echo "NOTE: Continuous polling is handled by the Rust orchestrator with ARES_BLUE_ENABLED=1."
+        echo "      This task submits from-operation investigations on a timer as a local fallback."
+        echo ""
 
-        uv run python -m ares \
-          --args.model "{{.MODEL_ARG}}" \
-          --args.grafana-url {{.GRAFANA_URL}} \
-          --args.poll-interval {{.POLL_INTERVAL}} \
-          --args.max-steps {{.MAX_STEPS_BLUE}} \
-          --args.report-dir {{.REPORT_DIR}} \
-          --dn-args.server {{.DREADNODE_SERVER_URL}} \
-          --dn-args.token "$DREADNODE_API_KEY" \
-          --dn-args.organization {{.DREADNODE_ORGANIZATION}} \
-          --dn-args.workspace {{.DREADNODE_WORKSPACE}} \
-          --dn-args.project {{.DREADNODE_PROJECT}} \
-          2>&1 | tee -a "$LOGFILE"
+        while true; do
+          echo "[$(date)] Submitting blue investigation from latest operation..."
+          MODEL_FLAG=""
+          if [ -n "{{.MODEL_ARG}}" ]; then
+            MODEL_FLAG="--model {{.MODEL_ARG}}"
+          fi
+          {{.ARES_CLI}} blue from-operation --latest \
+            $MODEL_FLAG \
+            --max-steps {{.MAX_STEPS_BLUE}} \
+            --grafana-url {{.GRAFANA_URL}} \
+            2>&1 | tee -a "$LOGFILE"
+          echo "[$(date)] Sleeping {{.POLL_INTERVAL}}s..."
+          sleep {{.POLL_INTERVAL}}
+        done
 
   poll:local:
-    desc: "Run blue team agent in poll mode using .env file"
+    desc: "Submit blue investigation from latest operation using .env file, re-polling every POLL_INTERVAL seconds"
     silent: true
     preconditions:
       - sh: test -f .env
         msg: ".env file not found"
     cmds:
       - |
-        # Verify AWS auth
-        if ! aws sts get-caller-identity --profile "{{.PROFILE}}" --region "{{.REGION}}" >/dev/null 2>&1; then
-            echo "AWS authentication failed for profile: {{.PROFILE}}"
-            echo "Run: aws sso login --profile {{.PROFILE}}"
-            exit 1
-        fi
-
         set -a
         . ./.env
         set +a
@@ -83,36 +74,33 @@ tasks:
         mkdir -p {{.LOG_DIR}}
         LOGFILE="{{.LOG_DIR}}/blue-$(date +%Y%m%d-%H%M%S).log"
         echo "Logging to: $LOGFILE"
+        echo "Poll interval: {{.POLL_INTERVAL}}s"
+        echo ""
 
-        uv run python -m ares \
-          --args.model "{{.MODEL_ARG}}" \
-          --args.grafana-url {{.GRAFANA_URL}} \
-          --args.poll-interval {{.POLL_INTERVAL}} \
-          --args.max-steps {{.MAX_STEPS_BLUE}} \
-          --args.report-dir {{.REPORT_DIR}} \
-          --dn-args.server {{.DREADNODE_SERVER_URL}} \
-          --dn-args.organization {{.DREADNODE_ORGANIZATION}} \
-          --dn-args.workspace {{.DREADNODE_WORKSPACE}} \
-          --dn-args.project {{.DREADNODE_PROJECT}} \
-          2>&1 | tee -a "$LOGFILE"
+        while true; do
+          echo "[$(date)] Submitting blue investigation from latest operation..."
+          MODEL_FLAG=""
+          if [ -n "{{.MODEL_ARG}}" ]; then
+            MODEL_FLAG="--model {{.MODEL_ARG}}"
+          fi
+          {{.ARES_CLI}} blue from-operation --latest \
+            $MODEL_FLAG \
+            --max-steps {{.MAX_STEPS_BLUE}} \
+            --grafana-url {{.GRAFANA_URL}} \
+            2>&1 | tee -a "$LOGFILE"
+          echo "[$(date)] Sleeping {{.POLL_INTERVAL}}s..."
+          sleep {{.POLL_INTERVAL}}
+        done
 
   once:
-    desc: "Run blue team agent once and exit (usage: task blue:once [OPERATION_ID=op-xxx] [LATEST=true])"
+    desc: "Submit one blue investigation from a red team operation (usage: task blue:once [OPERATION_ID=op-xxx] [LATEST=true])"
     silent: true
     vars:
       OPERATION_ID: '{{.OPERATION_ID | default ""}}'
       LATEST: '{{.LATEST | default ""}}'
     cmds:
       - |
-        # Verify AWS auth
-        if ! aws sts get-caller-identity --profile "{{.PROFILE}}" --region "{{.REGION}}" >/dev/null 2>&1; then
-            echo "AWS authentication failed for profile: {{.PROFILE}}"
-            echo "Run: aws sso login --profile {{.PROFILE}}"
-            exit 1
-        fi
-
         export ANTHROPIC_API_KEY="{{.ANTHROPIC_API_KEY}}"
-        export DREADNODE_API_KEY="{{.DREADNODE_API_KEY}}"
         export GRAFANA_SERVICE_ACCOUNT_TOKEN="{{.GRAFANA_SERVICE_ACCOUNT_TOKEN}}"
         export OPENAI_API_KEY="{{.OPENAI_API_KEY}}"
 
@@ -123,28 +111,24 @@ tasks:
         # Build operation context args
         OP_ARGS=""
         if [ "{{.LATEST}}" = "true" ]; then
-          OP_ARGS="--args.latest"
+          OP_ARGS="--latest"
         elif [ -n "{{.OPERATION_ID}}" ]; then
-          OP_ARGS="--args.operation-id {{.OPERATION_ID}}"
+          OP_ARGS="{{.OPERATION_ID}}"
         fi
 
-        uv run python -m ares \
-          --args.model "{{.MODEL_ARG}}" \
-          --args.grafana-url {{.GRAFANA_URL}} \
-          --args.poll-interval {{.POLL_INTERVAL}} \
-          --args.max-steps {{.MAX_STEPS_BLUE_ONCE}} \
-          --args.report-dir {{.REPORT_DIR}} \
-          --args.once \
-          $OP_ARGS \
-          --dn-args.server {{.DREADNODE_SERVER_URL}} \
-          --dn-args.token "$DREADNODE_API_KEY" \
-          --dn-args.organization {{.DREADNODE_ORGANIZATION}} \
-          --dn-args.workspace {{.DREADNODE_WORKSPACE}} \
-          --dn-args.project {{.DREADNODE_PROJECT}} \
+        MODEL_FLAG=""
+        if [ -n "{{.MODEL_ARG}}" ]; then
+          MODEL_FLAG="--model {{.MODEL_ARG}}"
+        fi
+
+        {{.ARES_CLI}} blue from-operation $OP_ARGS \
+          $MODEL_FLAG \
+          --max-steps {{.MAX_STEPS_BLUE_ONCE}} \
+          --grafana-url {{.GRAFANA_URL}} \
           2>&1 | tee -a "$LOGFILE"
 
   once:remote:
-    desc: "Run blue team agent once on K8s cluster (usage: task blue:once:remote [OPERATION_ID=op-xxx] [LATEST=true])"
+    desc: "Submit blue investigation on K8s cluster (usage: task blue:once:remote [OPERATION_ID=op-xxx] [LATEST=true])"
     silent: true
     vars:
       OPERATION_ID: '{{.OPERATION_ID | default ""}}'
@@ -154,43 +138,35 @@ tasks:
         msg: "Either OPERATION_ID or LATEST=true is required. Usage: task blue:once:remote OPERATION_ID=op-xxx  OR  task blue:once:remote LATEST=true"
     cmds:
       - |
-        echo "Running blue team agent on K8s cluster..."
+        echo "Submitting blue investigation on K8s cluster..."
         echo "K8s namespace: {{.K8S_NAMESPACE}}"
         echo ""
 
         # Build operation context args
         OP_ARGS=""
         if [ "{{.LATEST}}" = "true" ]; then
-          OP_ARGS="--args.latest"
+          OP_ARGS="--latest"
         elif [ -n "{{.OPERATION_ID}}" ]; then
-          OP_ARGS="--args.operation-id {{.OPERATION_ID}}"
+          OP_ARGS="{{.OPERATION_ID}}"
+        fi
+
+        MODEL_FLAG=""
+        if [ -n "{{.MODEL_ARG}}" ]; then
+          MODEL_FLAG="--model {{.MODEL_ARG}}"
         fi
 
         kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-blue-orchestrator -- \
           env OPENAI_API_KEY="{{.OPENAI_API_KEY}}" \
           ANTHROPIC_API_KEY="{{.ANTHROPIC_API_KEY}}" \
-          DREADNODE_API_KEY="{{.DREADNODE_API_KEY}}" \
-          DREADNODE_SERVER_URL="{{.DREADNODE_SERVER_URL}}" \
-          DREADNODE_ORGANIZATION="{{.DREADNODE_ORGANIZATION}}" \
-          DREADNODE_WORKSPACE="{{.DREADNODE_WORKSPACE}}" \
-          DREADNODE_PROJECT="{{.DREADNODE_PROJECT}}" \
           GRAFANA_SERVICE_ACCOUNT_TOKEN="{{.GRAFANA_SERVICE_ACCOUNT_TOKEN}}" \
           GRAFANA_URL="{{.GRAFANA_URL}}" \
-          /usr/bin/python3 -m ares \
-          --args.model "{{.MODEL_ARG}}" \
-          --args.grafana-url "{{.GRAFANA_URL}}" \
-          --args.max-steps {{.MAX_STEPS_BLUE_ONCE}} \
-          --args.report-dir /tmp/reports \
-          --args.once \
-          $OP_ARGS \
-          --dn-args.server "{{.DREADNODE_SERVER_URL}}" \
-          --dn-args.token "$DREADNODE_API_KEY" \
-          --dn-args.organization "{{.DREADNODE_ORGANIZATION}}" \
-          --dn-args.workspace "{{.DREADNODE_WORKSPACE}}" \
-          --dn-args.project "{{.DREADNODE_PROJECT}}"
+          ares-cli blue from-operation $OP_ARGS \
+          $MODEL_FLAG \
+          --max-steps {{.MAX_STEPS_BLUE_ONCE}} \
+          --grafana-url "{{.GRAFANA_URL}}"
 
   once:local:
-    desc: "Run blue team agent once and exit using .env file (usage: task blue:once:local [OPERATION_ID=op-xxx] [LATEST=true])"
+    desc: "Submit one blue investigation using .env file (usage: task blue:once:local [OPERATION_ID=op-xxx] [LATEST=true])"
     silent: true
     vars:
       OPERATION_ID: '{{.OPERATION_ID | default ""}}'
@@ -200,13 +176,6 @@ tasks:
         msg: ".env file not found"
     cmds:
       - |
-        # Verify AWS auth
-        if ! aws sts get-caller-identity --profile "{{.PROFILE}}" --region "{{.REGION}}" >/dev/null 2>&1; then
-            echo "AWS authentication failed for profile: {{.PROFILE}}"
-            echo "Run: aws sso login --profile {{.PROFILE}}"
-            exit 1
-        fi
-
         set -a
         . ./.env
         set +a
@@ -218,27 +187,24 @@ tasks:
         # Build operation context args
         OP_ARGS=""
         if [ "{{.LATEST}}" = "true" ]; then
-          OP_ARGS="--args.latest"
+          OP_ARGS="--latest"
         elif [ -n "{{.OPERATION_ID}}" ]; then
-          OP_ARGS="--args.operation-id {{.OPERATION_ID}}"
+          OP_ARGS="{{.OPERATION_ID}}"
         fi
 
-        uv run python -m ares \
-          --args.model "{{.MODEL_ARG}}" \
-          --args.grafana-url {{.GRAFANA_URL}} \
-          --args.poll-interval {{.POLL_INTERVAL}} \
-          --args.max-steps {{.MAX_STEPS_BLUE_ONCE}} \
-          --args.report-dir {{.REPORT_DIR}} \
-          --args.once \
-          $OP_ARGS \
-          --dn-args.server {{.DREADNODE_SERVER_URL}} \
-          --dn-args.organization {{.DREADNODE_ORGANIZATION}} \
-          --dn-args.workspace {{.DREADNODE_WORKSPACE}} \
-          --dn-args.project {{.DREADNODE_PROJECT}} \
+        MODEL_FLAG=""
+        if [ -n "{{.MODEL_ARG}}" ]; then
+          MODEL_FLAG="--model {{.MODEL_ARG}}"
+        fi
+
+        {{.ARES_CLI}} blue from-operation $OP_ARGS \
+          $MODEL_FLAG \
+          --max-steps {{.MAX_STEPS_BLUE_ONCE}} \
+          --grafana-url {{.GRAFANA_URL}} \
           2>&1 | tee -a "$LOGFILE"
 
   investigate:
-    desc: "Investigate a specific alert from JSON file (usage: task blue:investigate ALERT=alert.json)"
+    desc: "Submit a specific alert for investigation (usage: task blue:investigate ALERT=alert.json)"
     silent: true
     vars:
       ALERT: '{{.ALERT | default ""}}'
@@ -249,28 +215,19 @@ tasks:
         msg: "Alert file not found: {{.ALERT}}"
     cmds:
       - |
-        # Verify AWS auth
-        if ! aws sts get-caller-identity --profile "{{.PROFILE}}" --region "{{.REGION}}" >/dev/null 2>&1; then
-            echo "AWS authentication failed for profile: {{.PROFILE}}"
-            echo "Run: aws sso login --profile {{.PROFILE}}"
-            exit 1
-        fi
-
         export ANTHROPIC_API_KEY="{{.ANTHROPIC_API_KEY}}"
-        export DREADNODE_API_KEY="{{.DREADNODE_API_KEY}}"
         export GRAFANA_SERVICE_ACCOUNT_TOKEN="{{.GRAFANA_SERVICE_ACCOUNT_TOKEN}}"
         export OPENAI_API_KEY="{{.OPENAI_API_KEY}}"
 
-        uv run python -m ares investigate-alert {{.ALERT}} \
-          --args.model "{{.MODEL_ARG}}" \
-          --args.grafana-url {{.GRAFANA_URL}} \
-          --args.max-steps {{.MAX_STEPS_BLUE_ONCE}} \
-          --args.report-dir {{.REPORT_DIR}} \
-          --dn-args.server {{.DREADNODE_SERVER_URL}} \
-          --dn-args.token "$DREADNODE_API_KEY" \
-          --dn-args.organization {{.DREADNODE_ORGANIZATION}} \
-          --dn-args.workspace {{.DREADNODE_WORKSPACE}} \
-          --dn-args.project {{.DREADNODE_PROJECT}}
+        MODEL_FLAG=""
+        if [ -n "{{.MODEL_ARG}}" ]; then
+          MODEL_FLAG="--model {{.MODEL_ARG}}"
+        fi
+
+        {{.ARES_CLI}} blue submit {{.ALERT}} \
+          $MODEL_FLAG \
+          --max-steps {{.MAX_STEPS_BLUE_ONCE}} \
+          --grafana-url {{.GRAFANA_URL}}
 
   # ===========================================================================
   # Reports
@@ -386,118 +343,28 @@ tasks:
         {{.ARES_CLI}} ops export-detection $OP_ID_ARG $LATEST_FLAG $JSON_FLAG --output-dir "{{.OUTPUT_DIR}}"
 
   reports:consolidate:
-    desc: Generate a consolidated report from all investigation reports in a directory
+    desc: "Generate a consolidated report from Redis state (usage: task blue:reports:consolidate [OPERATION_ID=op-xxx] [LATEST=true])"
     silent: true
     vars:
-      INPUT_DIR: '{{.INPUT_DIR | default "./reports"}}'
+      OPERATION_ID: '{{.OPERATION_ID | default ""}}'
+      LATEST: '{{.LATEST | default ""}}'
       OUTPUT_DIR: '{{.OUTPUT_DIR | default "./reports"}}'
+    preconditions:
+      - sh: test -n "{{.OPERATION_ID}}" || test "{{.LATEST}}" = "true"
+        msg: "Either OPERATION_ID or LATEST=true is required"
     cmds:
+      - cmd: mkdir -p "{{.OUTPUT_DIR}}"
+        silent: true
       - |
-        uv run python -c "
-        import sys
-        from pathlib import Path
-        from datetime import datetime, timezone
-
-        from ares.reports import (
-            BlueTeamOperation,
-            generate_operation_report,
-        )
-        from ares.reports.investigation import MarkdownReportGenerator
-        from ares.core.models import (
-            InvestigationState,
-            InvestigationStage,
-            Evidence,
-            TimelineEvent,
-            PyramidLevel,
-        )
-        from ares.core.lateral_analyzer import LateralGraph
-        import re
-        import json
-
-        input_dir = Path('{{.INPUT_DIR}}')
-        output_dir = Path('{{.OUTPUT_DIR}}')
-
-        if not input_dir.exists():
-            print(f'Input directory not found: {input_dir}')
-            sys.exit(1)
-
-        # Find investigation reports
-        reports = list(input_dir.glob('investigation_*.md'))
-        if not reports:
-            print(f'No investigation reports found in {input_dir}')
-            sys.exit(1)
-
-        print(f'Found {len(reports)} investigation report(s)')
-
-        # Parse reports back into states (simplified - extracts key data)
-        investigations = []
-        for report_path in reports:
-            content = report_path.read_text()
-
-            # Extract investigation ID
-            inv_id_match = re.search(r'\*\*Investigation ID:\*\*\s*\`?(\S+?)\`?', content)
-            inv_id = inv_id_match.group(1) if inv_id_match else report_path.stem
-
-            # Extract alert info
-            alert_match = re.search(r'\|\s*Alert Name\s*\|\s*(.+?)\s*\|', content)
-            alert_name = alert_match.group(1).strip() if alert_match else 'Unknown'
-
-            severity_match = re.search(r'\|\s*Severity\s*\|\s*(\w+)\s*\|', content)
-            severity = severity_match.group(1).strip() if severity_match else 'unknown'
-
-            # Extract techniques
-            techniques = set(re.findall(r'(T\d{4}(?:\.\d{3})?)', content))
-
-            # Extract pyramid level
-            pyramid_match = re.search(r'\*\*Highest Pyramid Level:\*\*\s*(\d+)', content)
-            highest_level = int(pyramid_match.group(1)) if pyramid_match else 0
-
-            # Create a minimal state
-            state = InvestigationState(
-                investigation_id=inv_id,
-                alert={'labels': {'alertname': alert_name, 'severity': severity}},
-                started_at=datetime.now(timezone.utc),
-                stage=InvestigationStage.SYNTHESIS,
-                evidence=[],
-                timeline=[],
-                questions=[],
-                identified_techniques=techniques,
-                identified_tactics=set(),
-                technique_names={t: t for t in techniques},
-                technique_to_tactic={},
-                queried_hosts=set(),
-                queried_users=set(),
-                executed_queries=[],
-                escalated='ESCALATED' in content,
-                escalation_reason=None,
-                attack_synopsis=None,
-                recommendations=[],
-                lateral_graph=LateralGraph(),
-            )
-            investigations.append(state)
-            print(f'  - {inv_id}: {alert_name} ({len(techniques)} techniques)')
-
-        # Create operation and generate report
-        timestamp = datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')
-        operation_id = f'blue-op-{timestamp}'
-
-        operation = BlueTeamOperation(
-            operation_id=operation_id,
-            started_at=min(s.started_at for s in investigations),
-            completed_at=datetime.now(timezone.utc),
-            investigations=investigations,
-        )
-
-        report_content = generate_operation_report(operation)
-
-        output_path = output_dir / f'blueteam-{operation_id}.md'
-        output_path.write_text(report_content)
-
-        print(f'')
-        print(f'✅ Consolidated report generated: {output_path}')
-        print(f'   Investigations: {len(investigations)}')
-        print(f'   Techniques: {len(operation.all_techniques)}')
-        "
+        LATEST_FLAG=""
+        if [ "{{.LATEST}}" = "true" ]; then
+          LATEST_FLAG="--latest"
+        fi
+        OP_ID_ARG=""
+        if [ -n "{{.OPERATION_ID}}" ]; then
+          OP_ID_ARG="--operation-id {{.OPERATION_ID}}"
+        fi
+        {{.ARES_CLI}} blue report $OP_ID_ARG $LATEST_FLAG --output-dir "{{.OUTPUT_DIR}}"
 
   reports:clean:
     desc: Remove all investigation reports
@@ -516,10 +383,14 @@ tasks:
   # ===========================================================================
 
   mitre:test:
-    desc: Test MITRE ATT&CK data loading
+    desc: Test MITRE ATT&CK data loading (requires Python ares module)
     silent: true
     cmds:
       - |
+        if ! command -v uv &>/dev/null; then
+          echo "uv not found. This task requires the Python ares module."
+          exit 1
+        fi
         uv run python -c "
         import asyncio
         from ares.integrations.mitre import MITREAttackClient
@@ -527,8 +398,8 @@ tasks:
         async def test():
             client = MITREAttackClient()
             await client.load()
-            print(f'✅ Loaded {len(client._techniques)} techniques')
-            print(f'✅ Loaded {len(client._tactics)} tactics')
+            print(f'Loaded {len(client._techniques)} techniques')
+            print(f'Loaded {len(client._tactics)} tactics')
 
             # Show a sample technique
             sample = list(client._techniques.values())[0]
@@ -539,12 +410,6 @@ tasks:
 
         asyncio.run(test())
         "
-
-  example:grafana-windows:
-    desc: Show example Grafana MCP queries for Windows attack detection
-    silent: true
-    cmds:
-      - python examples/grafana_mcp_windows_example.py
 
   # ===========================================================================
   # Multi-Agent Blue Team Tasks (via K8s orchestrator service)
@@ -580,22 +445,19 @@ tasks:
           MULTI_AGENT_FLAG="--multi-agent"
         fi
 
-        # TODO: Replace with `ares-cli blue submit` once implemented in Rust CLI
+        MODEL_FLAG=""
+        if [ -n "{{.MODEL_ARG}}" ]; then
+          MODEL_FLAG="--model {{.MODEL_ARG}}"
+        fi
+
         kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-blue-orchestrator -- \
           env OPENAI_API_KEY="{{.OPENAI_API_KEY}}" \
           ANTHROPIC_API_KEY="{{.ANTHROPIC_API_KEY}}" \
-          DREADNODE_API_KEY="{{.DREADNODE_API_KEY}}" \
-          DREADNODE_SERVER_URL="{{.DREADNODE_SERVER_URL}}" \
-          DREADNODE_ORGANIZATION="{{.DREADNODE_ORGANIZATION}}" \
-          DREADNODE_WORKSPACE="{{.DREADNODE_WORKSPACE}}" \
-          DREADNODE_PROJECT="{{.DREADNODE_PROJECT}}" \
           GRAFANA_SERVICE_ACCOUNT_TOKEN="{{.GRAFANA_SERVICE_ACCOUNT_TOKEN}}" \
           GRAFANA_URL="{{.GRAFANA_URL}}" \
-          ARES_MODEL="{{.MODEL_ARG}}" \
-          ARES_ORCHESTRATOR_MODEL="{{.MODEL_ARG}}" \
-          python -m ares.cli_blue_ops submit "$(cat {{.ALERT}})" \
+          ares-cli blue submit "$(cat {{.ALERT}})" \
           $INV_ID_ARG \
-          --model "{{.MODEL_ARG}}" \
+          $MODEL_FLAG \
           --max-steps {{.MAX_STEPS_BLUE}} \
           $MULTI_AGENT_FLAG
 
@@ -607,14 +469,6 @@ tasks:
       INVESTIGATION_ID: '{{.INVESTIGATION_ID | default ""}}'
       MULTI_AGENT: '{{.MULTI_AGENT | default "false"}}'
       MODEL_ARG: '{{.MODEL}}'
-      REDIS_URL:
-        sh: |
-          REDIS_PASS=$(kubectl get secret redis-secret -n {{.K8S_NAMESPACE}} -o jsonpath='{.data.password}' 2>/dev/null | base64 -d || echo "")
-          if [ -n "$REDIS_PASS" ]; then
-            echo "redis://:${REDIS_PASS}@redis:6379"
-          else
-            echo "redis://redis:6379"
-          fi
     preconditions:
       - sh: test -f .env
         msg: ".env file not found"
@@ -642,28 +496,20 @@ tasks:
           MULTI_AGENT_FLAG="--multi-agent"
         fi
 
-        # TODO: Replace with `ares-cli blue submit` once implemented in Rust CLI
-        kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-blue-orchestrator -- \
-          env OPENAI_API_KEY="$OPENAI_API_KEY" \
-          ANTHROPIC_API_KEY="$ANTHROPIC_API_KEY" \
-          DREADNODE_API_KEY="$DREADNODE_API_KEY" \
-          DREADNODE_SERVER_URL="$DREADNODE_SERVER_URL" \
-          DREADNODE_ORGANIZATION="$DREADNODE_ORGANIZATION" \
-          DREADNODE_WORKSPACE="$DREADNODE_WORKSPACE" \
-          DREADNODE_PROJECT="$DREADNODE_PROJECT" \
-          GRAFANA_SERVICE_ACCOUNT_TOKEN="$GRAFANA_SERVICE_ACCOUNT_TOKEN" \
-          GRAFANA_URL="$GRAFANA_URL" \
-          ARES_MODEL="{{.MODEL_ARG}}" \
-          ARES_ORCHESTRATOR_MODEL="{{.MODEL_ARG}}" \
-          python -m ares.cli_blue_ops submit "$(cat {{.ALERT}})" \
+        MODEL_FLAG=""
+        if [ -n "{{.MODEL_ARG}}" ]; then
+          MODEL_FLAG="--model {{.MODEL_ARG}}"
+        fi
+
+        {{.ARES_CLI}} blue submit {{.ALERT}} \
           $INV_ID_ARG \
-          --model "{{.MODEL_ARG}}" \
+          $MODEL_FLAG \
           --max-steps {{.MAX_STEPS_BLUE}} \
-          --redis-url "{{.REDIS_URL}}" \
+          --grafana-url {{.GRAFANA_URL}} \
           $MULTI_AGENT_FLAG
 
   multi:remote:
-    desc: "Run multi-agent blue investigation from red team operation (usage: task blue:multi:remote [OPERATION_ID=op-xxx] [LATEST=true])"
+    desc: "Submit multi-agent blue investigation from red team operation (usage: task blue:multi:remote [OPERATION_ID=op-xxx] [LATEST=true])"
     silent: true
     vars:
       OPERATION_ID: '{{.OPERATION_ID | default ""}}'
@@ -674,7 +520,7 @@ tasks:
         msg: "Either OPERATION_ID or LATEST=true is required. Usage: task blue:multi:remote OPERATION_ID=op-xxx  OR  task blue:multi:remote LATEST=true"
     cmds:
       - |
-        echo "Running multi-agent blue investigation from red team operation..."
+        echo "Submitting multi-agent blue investigation from red team operation..."
         echo "K8s namespace: {{.K8S_NAMESPACE}}"
         echo ""
 
@@ -686,21 +532,18 @@ tasks:
           OP_ARGS="{{.OPERATION_ID}}"
         fi
 
-        # TODO: Replace with `ares-cli blue from-operation` once implemented in Rust CLI
+        MODEL_FLAG=""
+        if [ -n "{{.MODEL_ARG}}" ]; then
+          MODEL_FLAG="--model {{.MODEL_ARG}}"
+        fi
+
         kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-blue-orchestrator -- \
           env OPENAI_API_KEY="{{.OPENAI_API_KEY}}" \
           ANTHROPIC_API_KEY="{{.ANTHROPIC_API_KEY}}" \
-          DREADNODE_API_KEY="{{.DREADNODE_API_KEY}}" \
-          DREADNODE_SERVER_URL="{{.DREADNODE_SERVER_URL}}" \
-          DREADNODE_ORGANIZATION="{{.DREADNODE_ORGANIZATION}}" \
-          DREADNODE_WORKSPACE="{{.DREADNODE_WORKSPACE}}" \
-          DREADNODE_PROJECT="{{.DREADNODE_PROJECT}}" \
           GRAFANA_SERVICE_ACCOUNT_TOKEN="{{.GRAFANA_SERVICE_ACCOUNT_TOKEN}}" \
           GRAFANA_URL="{{.GRAFANA_URL}}" \
-          ARES_MODEL="{{.MODEL_ARG}}" \
-          ARES_ORCHESTRATOR_MODEL="{{.MODEL_ARG}}" \
-          /usr/bin/python3 -m ares.cli_blue_ops from-operation $OP_ARGS \
-          --model "{{.MODEL_ARG}}" \
+          ares-cli blue from-operation $OP_ARGS \
+          $MODEL_FLAG \
           --max-steps {{.MAX_STEPS_BLUE}} \
           --grafana-url "{{.GRAFANA_URL}}"
 

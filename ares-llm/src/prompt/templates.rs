@@ -75,6 +75,8 @@ const BLUE_ORCHESTRATOR_TEMPLATE: &str =
     include_str!("../../templates/blueteam/agents/orchestrator.md.tera");
 const BLUE_ESCALATION_TRIAGE_TEMPLATE: &str =
     include_str!("../../templates/blueteam/agents/escalation_triage.md.tera");
+const BLUE_INITIAL_ALERT_PROMPT_TEMPLATE: &str =
+    include_str!("../../templates/blueteam/agents/initial_alert_prompt.md.tera");
 
 // ---------------------------------------------------------------------------
 // Embedded templates — blue team task templates
@@ -132,6 +134,7 @@ pub const TEMPLATE_BLUE_THREAT_HUNTER: &str = "blueteam/agents/threat_hunter";
 pub const TEMPLATE_BLUE_LATERAL_ANALYST: &str = "blueteam/agents/lateral_analyst";
 pub const TEMPLATE_BLUE_ORCHESTRATOR: &str = "blueteam/agents/orchestrator";
 pub const TEMPLATE_BLUE_ESCALATION_TRIAGE: &str = "blueteam/agents/escalation_triage";
+pub const TEMPLATE_BLUE_INITIAL_ALERT_PROMPT: &str = "blueteam/agents/initial_alert_prompt";
 
 // Blue team task templates
 pub const BLUE_TASK_TRIAGE: &str = "blueteam/tasks/triage_task";
@@ -191,6 +194,10 @@ static TEMPLATES: LazyLock<Tera> = LazyLock::new(|| {
         (
             TEMPLATE_BLUE_ESCALATION_TRIAGE,
             BLUE_ESCALATION_TRIAGE_TEMPLATE,
+        ),
+        (
+            TEMPLATE_BLUE_INITIAL_ALERT_PROMPT,
+            BLUE_INITIAL_ALERT_PROMPT_TEMPLATE,
         ),
         // Blue team task templates
         (BLUE_TASK_TRIAGE, BLUE_TASK_TRIAGE_TEMPLATE),
