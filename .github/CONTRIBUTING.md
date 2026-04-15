@@ -1,7 +1,47 @@
-# Contributing to this project
+# Contributing to Ares
 
 We want to make contributing to this project as easy and transparent as
 possible.
+
+## Development Setup
+
+### Prerequisites
+
+- [Rust](https://rustup.rs/) (stable toolchain)
+- [pre-commit](https://pre-commit.com/)
+- [Task](https://taskfile.dev/installation/) (recommended, not required)
+
+### Getting Started
+
+```bash
+# Clone and build
+git clone https://github.com/dreadnode/ares.git && cd ares
+cargo build
+
+# Install pre-commit hooks
+pre-commit install
+
+# Run tests
+cargo test --workspace
+
+# Run the full check suite
+cargo fmt --all -- --check
+cargo clippy --workspace -- -D warnings
+cargo test --workspace
+```
+
+### Project Structure
+
+Ares is a Cargo workspace with six crates:
+
+| Crate | Type | Purpose |
+|-------|------|---------|
+| `ares-cli` | Binary | Unified CLI for ops, blue, history, config |
+| `ares-orchestrator` | Binary | LLM-powered coordination loop |
+| `ares-worker` | Binary | Task execution agents |
+| `ares-core` | Library | Shared models, state, Redis schema, telemetry |
+| `ares-llm` | Library | Model-agnostic LLM provider abstraction |
+| `ares-tools` | Library | Tool dispatch and execution framework |
 
 ## Pull Request Guidelines
 
@@ -10,9 +50,8 @@ We actively welcome your pull requests.
 1. Fork the repo and create your branch from `main`.
 2. If you've added code that should be tested, add tests.
 3. If you've changed APIs, update the documentation.
-4. Ensure the test suite passes.
-5. Make sure your code lints.
-6. If you haven't already, complete the Contributor License Agreement ("CLA").
+4. Ensure the test suite passes (`cargo test --workspace`).
+5. Make sure your code passes `cargo clippy` and `cargo fmt`.
 
 ### PR Description Format
 

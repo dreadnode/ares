@@ -9,7 +9,8 @@ multi-agent system.
 
 The red team system uses a **coordinator/worker architecture** where a central
 orchestrator delegates tasks to specialized worker agents. Each agent runs in
-its own Kubernetes pod with role-specific tools installed.
+its own container (Kubernetes pod or EC2 instance) with role-specific tools
+installed.
 
 ```text
 ┌────────────────────────────────────────────────────────────────────────┐
@@ -86,10 +87,10 @@ tool assignments. For detailed responsibilities, see sections below.
 
 ### Configuration Sources
 
-- **Pod selectors**: `config/multi-agent-production.yaml`
-- **Tool assignments**: `src/ares/core/factories/red_agents.py` → `ROLE_TOOLSETS`
-- **Max steps defaults**: `config/multi-agent-production.yaml` → per-agent `max_steps`
-- **Agent instructions**: `src/ares/templates/redteam/agents/*.md.jinja`
+- **Pod selectors**: `config/ares.yaml`
+- **Tool assignments**: `config/ares.yaml` → per-agent `capabilities`
+- **Max steps defaults**: `config/ares.yaml` → per-agent `max_steps`
+- **Agent instructions**: `ares-orchestrator/src/` prompt templates
 
 ### Model Selection
 
@@ -330,26 +331,26 @@ This loop continues until:
 
 As vulnerabilities are discovered, orchestrator queues them:
 
-```python
+```text
 # ADCS vulnerabilities
 queue_vulnerability_for_exploitation(
     vuln_type="ADCS_ESC1",
     target="CA-NAME",
-    details='{"template": "VulnTemplate", "ca": "domain\\CA"}'
+    details={"template": "VulnTemplate", "ca": "domain\\CA"}
 )
 
 # Delegation attacks
 queue_vulnerability_for_exploitation(
     vuln_type="constrained_delegation",
     target="SERVER-NAME",
-    details='{"allowed_to": "TARGET-SPN"}'
+    details={"allowed_to": "TARGET-SPN"}
 )
 
 # MSSQL exploitation
 queue_vulnerability_for_exploitation(
     vuln_type="mssql_linked_server",
     target="SQL-SERVER-IP",
-    details='{"username": "sql_user", "domain": "DOMAIN.COM"}'
+    details={"username": "sql_user", "domain": "DOMAIN.COM"}
 )
 ```
 
@@ -436,7 +437,7 @@ The dispatcher automatically detects the current engagement phase:
 
 ### Configuration
 
-Phase detection thresholds in `config/multi-agent-production.yaml`:
+Phase detection thresholds in `config/ares.yaml`:
 
 ```yaml
 phase_detection:
@@ -481,16 +482,16 @@ Redis is the **durable store**. In-memory dicts are **write-through caches**.
 
 All agents access shared state via Redis:
 
-```python
+```text
 SharedRedTeamState:
-    operation_id: str
-    credentials: list[Credential]  # Auto-broadcast on discovery
-    hashes: list[Hash]             # Tracked for cracking status
-    users: list[User]              # Enumerated users
-    hosts: list[Host]              # Discovered hosts
-    shares: list[Share]            # Accessible shares
-    vulnerabilities: list[VulnerabilityInfo]
-    domains: set[str]              # Discovered domains
+    operation_id: String
+    credentials: Vec<Credential>          // Auto-broadcast on discovery
+    hashes: Vec<Hash>                     // Tracked for cracking status
+    users: Vec<User>                      // Enumerated users
+    hosts: Vec<Host>                      // Discovered hosts
+    shares: Vec<Share>                    // Accessible shares
+    vulnerabilities: Vec<VulnerabilityInfo>
+    domains: HashSet<String>              // Discovered domains
 ```
 
 ### Automatic Broadcasting
@@ -584,49 +585,9 @@ When any agent discovers a credential:
 For debugging or testing specific tools, you can exec into a worker pod and run
 tools directly without going through the orchestrator dispatch system.
 
-#### Method 1: Direct Python Tool Invocation
+#### Direct Shell Commands
 
-Exec into the appropriate agent pod and call the tool class directly:
-
-```bash
-# Run SYSVOL script search on credential-access agent
-kubectl -n attack-simulation exec -it ares-credential-access-agent-0 -- python -c "
-from ares.tools.red import SharePilferingTools
-tools = SharePilferingTools()
-result = tools.sysvol_script_search(
-    target='10.1.2.240',
-    username='karimm',
-    password='C0ntr0ller#2024',  # pragma: allowlist secret
-    domain='contoso.local'
-)
-print(result)
-"
-
-# Run secretsdump on credential-access agent
-kubectl -n attack-simulation exec -it ares-credential-access-agent-0 -- python -c "
-from ares.tools.red import CredentialHarvestingTools
-tools = CredentialHarvestingTools()
-result = tools.secretsdump(
-    target='10.1.2.240',
-    username='administrator',
-    password='AdminPass123',  # pragma: allowlist secret
-    domain='contoso.local'
-)
-print(result)
-"
-
-# Run nmap scan on recon agent
-kubectl -n attack-simulation exec -it ares-recon-agent-0 -- python -c "
-from ares.tools.red import NetworkEnumerationTools
-tools = NetworkEnumerationTools()
-result = tools.nmap_scan(target='10.1.2.0/24', scan_type='quick')
-print(result)
-"
-```
-
-#### Method 2: Direct Shell Command
-
-Run the underlying tool binaries directly:
+Run the underlying tool binaries directly on the appropriate agent pod:
 
 ```bash
 # Run smbclient directly
@@ -640,106 +601,45 @@ kubectl -n attack-simulation exec -it ares-recon-agent-0 -- \
 # Run secretsdump directly
 kubectl -n attack-simulation exec -it ares-credential-access-agent-0 -- \
     secretsdump.py 'DOMAIN/user:password@10.1.2.240'
+
+# Run nmap directly
+kubectl -n attack-simulation exec -it ares-recon-agent-0 -- \
+    nmap -sV --top-ports 1000 10.1.2.0/24
 ```
 
-#### Available Tool Classes by Agent
+#### Available Tools by Agent Pod
 
-| Agent Pod | Tool Classes |
-| --------- | ------------ |
-| `ares-recon-agent-*` | `NetworkEnumerationTools`, `BloodHoundTools`, `RedTeamReportingTools` |
-| `ares-credential-access-agent-*` | `CredentialDiscoveryTools`, `CredentialHarvestingTools`, `SharePilferingTools`, `GMSATools` |
-| `ares-cracker-agent-*` | `CrackingTools`, `CrackerCallbackTools` |
-| `ares-acl-agent-*` | `ACLExploitTools` |
-| `ares-privesc-agent-*` | `CertipyTools`, `DelegationTools`, `MSSQLTools`, `CVEExploitTools`, `GoldenTicketTools`, `TrustAttackTools`, `LateralMovementTools`, `CredentialHarvestingTools` |
-| `ares-lateral-movement-agent-*` | `LateralMovementTools`, `CredentialHarvestingTools`, `SharePilferingTools`, `PostureValidationTools`, `LateralCallbackTools` |
-| `ares-coercion-agent-*` | `CoercionTools`, `CoercionNetworkTools` |
-
-#### Importing Tool Classes
-
-All red team tools can be imported from `ares.tools.red`:
-
-```python
-from ares.tools.red import (
-    NetworkEnumerationTools,
-    BloodHoundTools,
-    CredentialDiscoveryTools,
-    CredentialHarvestingTools,
-    SharePilferingTools,
-    CrackingTools,
-    ACLExploitTools,
-    CertipyTools,
-    DelegationTools,
-    MSSQLTools,
-    LateralMovementTools,
-    CoercionTools,
-)
-```
-
-#### Testing with State
-
-To test tools that need shared state (for credential resolution or result
-reporting):
-
-```python
-kubectl -n attack-simulation exec -it ares-credential-access-agent-0 -- python -c "
-from ares.core.models import SharedRedTeamState, Target
-from ares.tools.red import SharePilferingTools
-
-# Create minimal state
-state = SharedRedTeamState(operation_id='test-op')
-state.target = Target(ip='10.1.2.240', hostname='dc01', domain='contoso.local')
-
-# Initialize tools with state
-tools = SharePilferingTools()
-tools.set_state(state)
-
-# Run tool - credentials found will be added to state
-result = tools.sysvol_script_search(
-    target='10.1.2.240',
-    username='karimm',
-    password='C0ntr0ller#2024',  # pragma: allowlist secret
-    domain='contoso.local'
-)
-print(result)
-
-# Check if any credentials were extracted
-print(f'Credentials found: {len(state.all_credentials)}')
-for cred in state.all_credentials:
-    print(f'  {cred.domain}\\\\{cred.username}: {cred.password}')
-"
-```
+| Agent Pod | Installed Tools |
+| --------- | --------------- |
+| `ares-recon-agent-*` | nmap, netexec, enum4linux, bloodhound-python, certipy, ldapsearch, adidnsdump |
+| `ares-credential-access-agent-*` | secretsdump, sprayhound, lsassy, gMSADumper, targetedKerberoast, smbclient |
+| `ares-cracker-agent-*` | hashcat, john, wordlists (rockyou, seclists) |
+| `ares-acl-agent-*` | bloodyAD, pywhisker, dacledit, targetedKerberoast |
+| `ares-privesc-agent-*` | certipy, krbrelayx, nopac, impacket-findDelegation, impacket-mssqlclient |
+| `ares-lateral-movement-agent-*` | evil-winrm, xfreerdp, pth-winexe, impacket-psexec, impacket-wmiexec, impacket-smbexec |
+| `ares-coercion-agent-*` | responder, ntlmrelayx, coercer, petitpotam, mitm6 |
 
 ## File Reference
 
 **Core Components**:
 
-- `src/ares/core/orchestrator/` - Main orchestrator coordination engine
-- `src/ares/core/orchestrator_service.py` - Orchestrator service (K8s pod)
-- `src/ares/core/orchestrator_client.py` - Client for submitting operations
-- `src/ares/core/dispatcher/` - Task routing, throttling, and state management
-- `src/ares/core/worker/` - Worker agent task loop
-- `src/ares/core/config.py` - Configuration loading (phase thresholds, rate limits)
+- `ares-orchestrator/src/` - Main orchestrator coordination loop, task dispatch, LLM runner
+- `ares-orchestrator/src/dispatcher/` - Task routing, throttling, and state management
+- `ares-orchestrator/src/state/` - Operation state management
+- `ares-orchestrator/src/config.rs` - Orchestrator configuration
+- `ares-worker/src/` - Worker agent task loop, tool execution
+- `ares-core/src/` - Shared models, state, Redis schema, telemetry
+
+**CLI**:
+
+- `ares-cli/src/cli.rs` - CLI command definitions
+- `ares-cli/src/ops/` - Red team operation commands
+- `ares-cli/src/blue/` - Blue team investigation commands
+- `ares-cli/src/transport.rs` - K8s/EC2 transport layer
 
 **Configuration**:
 
-- `config/multi-agent-production.yaml` - Production config (thresholds, timeouts)
-- `docs/phase-priority.md` - Expert analysis of agent utility by phase
-
-**Agent Templates**:
-
-- `src/ares/core/factories/red_agents.py` - Agent creation and toolset assignment
-- `src/ares/templates/redteam/agents/orchestrator.md.jinja` - Orchestrator instructions
-- `src/ares/templates/redteam/agents/recon.md.jinja` - RECON agent instructions
-- `src/ares/templates/redteam/agents/credential_access.md.jinja` - CRED_ACCESS
-- `src/ares/templates/redteam/agents/privesc.md.jinja` - PRIVESC instructions
-- `src/ares/templates/redteam/agents/lateral.md.jinja` - LATERAL instructions
-- `src/ares/templates/redteam/agents/acl.md.jinja` - ACL instructions
-- `src/ares/templates/redteam/agents/cracker.md.jinja` - CRACKER instructions
-- `src/ares/templates/redteam/agents/coercion.md.jinja` - COERCION instructions
-
-**Tools**:
-
-- `src/ares/tools/red/` - Tool implementations
+- `config/ares.yaml` - Production config (models, thresholds, timeouts, capabilities)
 
 ## Installed Tools by Agent Role
 
@@ -750,18 +650,16 @@ availability can vary by distro and role flags.
 
 All agents inherit these foundational tools:
 
-- **Runtime**: python3, pip3, uv, rust/cargo (via rustup), pipx
+- **Runtime**: Rust binaries (ares-worker), python3, pip3
 - **Utilities**: git, curl, wget, netcat-traditional, vim, jq, tmux, htop
 - **Network diagnostics**: dnsutils (dig, nslookup), net-tools, iproute2, tcpdump, telnet
 - **Debugging**: procps (ps, top), strace, lsof
 - **Build**: build-essential, libffi-dev, libssl-dev
-- **Python packages**: python-dotenv, dreadnode, rigging, pydantic, asyncio
 
 ### Orchestrator Service Pod
 
-- **Python runtime**: python3, pip3, dreadnode SDK
+- **Runtime**: Rust binary (ares-orchestrator)
 - **Redis client**: For dispatcher and state management
-- **Kubernetes client**: For pod discovery and health monitoring
 - **No pentesting tools**: Orchestrator only coordinates, never executes tools directly
 
 ### RECON Agent

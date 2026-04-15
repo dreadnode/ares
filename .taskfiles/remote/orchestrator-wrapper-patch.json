@@ -1,0 +1,14 @@
+[
+  {
+    "op": "replace",
+    "path": "/spec/template/spec/containers/0/command",
+    "value": ["/bin/sh", "-c"]
+  },
+  {
+    "op": "replace",
+    "path": "/spec/template/spec/containers/0/args",
+    "value": [
+      "echo \"ares-orchestrator queue dispatcher starting\" >&2\nwhile true; do\n  OP_REQUEST=$(RUST_LOG=error ares-cli ops claim-next --timeout 30 2>/dev/null | tail -n 1 || true)\n  if [ -n \"$OP_REQUEST\" ]; then\n    OP_ID=$(printf '%s\\n' \"$OP_REQUEST\" | sed -n 's/.*\"operation_id\"[[:space:]]*:[[:space:]]*\"\\([^\"]*\\)\".*/\\1/p')\n    echo \"Starting operation: ${OP_ID:-unknown}\" >&2\n    export ARES_OPERATION_ID=\"$OP_REQUEST\"\n    ares-orchestrator\n    status=$?\n    echo \"Operation ${OP_ID:-unknown} exited with status $status\" >&2\n  fi\ndone"
+    ]
+  }
+]

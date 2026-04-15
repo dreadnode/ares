@@ -1,0 +1,50 @@
+# User Investigation Task: {{ username }}
+
+## Task ID: {{ task_id }}
+
+## Target User
+- **Username**: {{ username }}
+{% if domain %}- **Domain**: {{ domain }}{% endif %}
+{% if context %}- **Context**: {{ context }}{% endif %}
+
+## Investigation State
+{{ state_summary }}
+
+## Instructions
+Investigate the activity of user **{{ username }}** across all systems:
+
+1. **Get full user activity**: Query authentication logs for this user across all hosts
+   - Search for Event 4624 (successful logon), 4625 (failed logon), 4634 (logoff)
+   - Look for logon types: Type 2 (interactive), Type 3 (network), Type 10 (RDP)
+
+2. **Identify all hosts**: Extract every host where {{ username }} authenticated
+   - For each host: what logon type, source IP/workstation, success/failure
+   - Call `track_host_investigation()` for each host discovered
+
+3. **Check for credential abuse patterns**:
+   - Multiple failed logons followed by success (brute force / password spray)
+   - Network logons from unusual source hosts (lateral movement)
+   - Access to ADMIN$, C$, or IPC$ shares (remote admin activity)
+   - Kerberos TGS requests with RC4 encryption (pass-the-hash indicator)
+   - Unusual service ticket requests (Kerberoasting indicator)
+
+4. **Map the user's movement**:
+   - Record each host-to-host connection with `add_lateral_connection()`
+   - Identify the first and last hosts in the movement chain
+   - Determine the direction of movement (inward toward DCs, or outward)
+
+5. **Investigate group memberships and privilege**:
+   - Check if the user is in privileged groups (Domain Admins, Enterprise Admins, etc.)
+   - Look for recent group membership changes (Event 4728, 4732, 4756)
+   - Check for SPN modifications on the account
+
+6. **Record all evidence**: Every finding must be recorded with `add_evidence()`:
+   - Hosts accessed: evidence_type="artifact", pyramid_level=4
+   - Source IPs: evidence_type="ip", pyramid_level=2
+   - Techniques observed: evidence_type="technique", pyramid_level=6
+
+7. **Complete**: Call `hunt_complete` with your findings including:
+   - All hosts this user accessed
+   - All lateral paths involving this user
+   - Assessment of whether the activity is malicious or legitimate
+   - Containment recommendation if needed (disable account, reset password, monitor)

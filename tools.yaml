@@ -1,0 +1,157 @@
+# Installed tools by agent role.
+#
+# This file is the single source of truth for which external binaries
+# are expected on each worker role's container image AND for mapping
+# Rust tool function names to their binary, category, and role.
+#
+# Two build scripts consume this file:
+#   - ares-worker/build.rs  → tools_for_role() binary availability check
+#   - ares-core/build.rs    → tool_meta() telemetry/OTel span enrichment
+#
+# When Ansible provisioning changes, update THIS file — the generated
+# Rust code and docs/red.md will follow automatically.
+
+roles:
+  recon:
+    provisioned_by: ansible/playbooks/ares/recon.yml
+    tools:
+      - category: Network scanning
+        binaries: [nmap]
+        fn_names: [nmap_scan, smb_signing_check, check_rdp_reachability, check_winrm_reachability]
+      - category: SMB/AD enumeration
+        binaries: [netexec, enum4linux, enum4linux-ng, rpcclient]
+        fn_names: [smb_sweep, enumerate_users, enumerate_shares, zerologon_check, save_users_to_file, rpcclient_command]
+      - category: LDAP
+        binaries: [ldapsearch]
+        fn_names: [ldap_search, enumerate_domain_trusts]
+      - category: DNS
+        binaries: [dig, nslookup, whois, adidnsdump]
+        fn_names: [dig_query, adidnsdump]
+      - category: AD tools
+        binaries: [bloodhound-python, certipy]
+        fn_names: [run_bloodhound]
+      - category: Impacket
+        binaries: [impacket-GetNPUsers, impacket-GetUserSPNs]
+        fn_names: [smbclient_kerberos_shares]
+
+  credential_access:
+    provisioned_by: ansible/playbooks/ares/credential_access.yml
+    notes: "netexec is NOT installed on this agent (only on RECON)"
+    tools:
+      - category: SMB
+        binaries: [smbclient, rpcclient]
+        fn_names: [smbclient_spider, check_credman_entries, check_autologon_registry]
+      - category: Password spraying
+        binaries: [sprayhound]
+        fn_names: [password_spray, password_policy, username_as_password, domain_admin_checker, gpp_password_finder, sysvol_script_search, laps_dump]
+      - category: Kerberoasting
+        binaries: [targetedKerberoast]
+        fn_names: [kerberoast, asrep_roast, kerberos_user_enum_noauth]
+      - category: Credential extraction
+        binaries: [lsassy, gMSADumper]
+        fn_names: [lsassy, ldap_search_descriptions]
+      - category: Impacket
+        binaries: [impacket-GetNPUsers, impacket-GetUserSPNs, impacket-secretsdump]
+        fn_names: [secretsdump, ntds_dit_extract]
+
+  cracker:
+    provisioned_by: ansible/playbooks/ares/cracker.yml
+    tools:
+      - category: Cracking
+        binaries: [hashcat, john]
+        fn_names: [crack_with_hashcat, crack_with_john]
+
+  acl:
+    provisioned_by: ansible/playbooks/ares/acl_abuse.yml
+    tools:
+      - category: ACL abuse
+        binaries: [bloodyAD, pywhisker]
+        fn_names: [bloodyad_add_group_member, bloodyad_set_password, bloodyad_add_genericall, adminsd_holder_add_ace, gmsa_read_password_bloodyad, pywhisker]
+      - category: Kerberoasting
+        binaries: [targetedKerberoast]
+        fn_names: [targeted_kerberoast]
+      - category: SMB
+        binaries: [rpcclient]
+        fn_names: []
+      - category: Impacket
+        binaries: [impacket-dacledit]
+        fn_names: [dacl_edit]
+      - category: GPO abuse
+        binaries: [dacledit.py]
+        fn_names: [sharpgpoabuse, pygpoabuse_immediate_task]
+
+  privesc:
+    provisioned_by: ansible/playbooks/ares/privesc.yml
+    tools:
+      - category: ADCS
+        binaries: [certipy]
+        fn_names: [certipy_find, certipy_request, certipy_auth, certipy_shadow, certipy_template_esc4, certipy_esc4_full_chain]
+      - category: Credential extraction
+        binaries: [lsassy]
+        fn_names: [gmsa_dump_passwords]
+      - category: CVE exploits
+        binaries: [nopac, printnightmare]
+        fn_names: [nopac, printnightmare, petitpotam_unauth]
+      - category: Kerberos relay toolkit
+        binaries: [printerbug, addspn, dnstool]
+        fn_names: [unconstrained_tgt_dump, unconstrained_coerce_and_capture, addspn, dnstool]
+      - category: Delegation and kerberos
+        binaries: [KrbRelayUp, pygpoabuse, raiseChild.py]
+        fn_names: [find_delegation, s4u_attack, krbrelayup, raise_child]
+      - category: Impacket
+        binaries:
+          - impacket-findDelegation
+          - impacket-getST
+          - impacket-getTGT
+          - impacket-rbcd
+          - impacket-addcomputer
+          - impacket-lookupsid
+          - impacket-mssqlclient
+          - impacket-ticketer
+          - impacket-secretsdump
+          - impacket-psexec
+        fn_names: [generate_golden_ticket, add_computer, rbcd_write, extract_trust_key, create_inter_realm_ticket, get_sid]
+
+  lateral:
+    provisioned_by: ansible/playbooks/ares/lateral_movement.yml
+    tools:
+      - category: WinRM
+        binaries: [evil-winrm]
+        fn_names: [evil_winrm]
+      - category: RDP
+        binaries: [xfreerdp]
+        fn_names: [xfreerdp]
+      - category: SSH
+        binaries: [sshpass]
+        fn_names: [ssh_with_password]
+      - category: SMB
+        binaries: [smbclient]
+        fn_names: []
+      - category: Pivoting
+        binaries: [proxychains4]
+        fn_names: []
+      - category: Pass-the-Hash
+        binaries: [pth-winexe, pth-smbclient, pth-rpcclient, pth-net, pth-wmic]
+        fn_names: [pth_winexe, pth_smbclient, pth_rpcclient, pth_wmic]
+      - category: Impacket
+        binaries: [impacket-psexec, impacket-wmiexec, impacket-smbexec, impacket-secretsdump]
+        fn_names: [psexec, psexec_kerberos, wmiexec, wmiexec_kerberos, smbexec, smbexec_kerberos, secretsdump_kerberos, get_tgt]
+      - category: MSSQL
+        binaries: []
+        fn_names: [mssql_command, mssql_enable_xp_cmdshell, mssql_enum_impersonation, mssql_impersonate, mssql_enum_linked_servers, mssql_exec_linked, mssql_linked_enable_xpcmdshell, mssql_linked_xpcmdshell, mssql_ntlm_coerce]
+
+  coercion:
+    provisioned_by: ansible/playbooks/ares/coercion.yml
+    tools:
+      - category: Poisoning
+        binaries: [responder, mitm6]
+        fn_names: [start_responder, start_mitm6]
+      - category: Coercion
+        binaries: [coercer, petitpotam, dfscoerce]
+        fn_names: [coercer, petitpotam, dfscoerce]
+      - category: Kerberos relay toolkit
+        binaries: [printerbug, addspn, dnstool]
+        fn_names: []
+      - category: NTLM relay
+        binaries: [impacket-ntlmrelayx]
+        fn_names: [ntlmrelayx_to_ldaps, ntlmrelayx_to_adcs, ntlmrelayx_to_smb, ntlmrelayx_multirelay]

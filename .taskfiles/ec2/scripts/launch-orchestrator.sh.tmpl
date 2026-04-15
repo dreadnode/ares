@@ -1,0 +1,26 @@
+#!/bin/bash
+# Launch ares-orchestrator with environment variables
+# Placeholders are substituted by the calling task via envsubst/sed
+export ARES_REDIS_URL=redis://127.0.0.1:6379
+export RUST_LOG=info
+export ARES_OPERATION_ID='__ARES_PAYLOAD__'
+export OPENAI_API_KEY='__OPENAI_API_KEY__'
+export ANTHROPIC_API_KEY='__ANTHROPIC_API_KEY__'
+export DREADNODE_API_KEY='__DREADNODE_API_KEY__'
+export DREADNODE_SERVER_URL='__DREADNODE_SERVER_URL__'
+export DREADNODE_ORGANIZATION='__DREADNODE_ORGANIZATION__'
+export DREADNODE_WORKSPACE='__DREADNODE_WORKSPACE__'
+export DREADNODE_PROJECT='__DREADNODE_PROJECT__'
+export GRAFANA_SERVICE_ACCOUNT_TOKEN='__GRAFANA_TOKEN__'
+export GRAFANA_URL='__GRAFANA_URL__'
+[ -n '__ARES_LLM_MODEL__' ] && export ARES_LLM_MODEL='__ARES_LLM_MODEL__'
+export ARES_TOOL_DISPATCH=local
+export ARES_BLUE_ENABLED='__ARES_BLUE_ENABLED__'
+[ -n '__ARES_BLUE_LLM_MODEL__' ] && export ARES_BLUE_LLM_MODEL='__ARES_BLUE_LLM_MODEL__'
+export ARES_CONFIG=/etc/ares/config.yaml
+export OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317
+export OTEL_RESOURCE_ATTRIBUTES='service.namespace=ares,deployment.environment=staging,attack.team=red'
+pkill -f ares-orchestrator 2>/dev/null || true
+sleep 1
+nohup /usr/local/bin/ares-orchestrator >/var/log/ares/orchestrator.log 2>&1 &
+echo "Orchestrator started (PID: $!)"

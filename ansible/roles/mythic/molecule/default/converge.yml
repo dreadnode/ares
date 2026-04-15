@@ -1,0 +1,24 @@
+---
+# Partial testing for mythic role
+# Only tests components that don't require Docker-in-Docker
+# See README.md in this directory for details
+- name: Converge
+  hosts: all
+  gather_facts: true
+
+  tasks:
+    - name: Include default variables
+      ansible.builtin.include_vars:
+        file: "../../defaults/main.yml"
+
+    # Test user creation
+    - name: Include user setup tasks
+      ansible.builtin.import_tasks: ../../tasks/user.yml
+
+    # Test package installation
+    - name: Include package installation tasks
+      ansible.builtin.import_tasks: ../../tasks/packages.yml
+
+    # Note: Docker installation, Mythic setup, agents, and service tasks
+    # are skipped because they require Docker-in-Docker which has known
+    # limitations in containerized testing environments

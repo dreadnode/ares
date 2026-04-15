@@ -1,0 +1,30 @@
+---
+galaxy_info:
+  author: Dreadnode
+  namespace: dreadnode
+  description: Install and configure password cracking tools for Ares agents
+  company: dreadnode
+  license: MIT
+  role_name: cracking_tools
+  min_ansible_version: "2.18.4"
+  platforms:
+    - name: Ubuntu
+      versions:
+        - all
+    - name: Debian
+      versions:
+        - all
+    - name: Kali
+      versions:
+        - all
+  galaxy_tags:
+    - ares
+    - security
+    - pentesting
+    - password
+    - cracking
+    - hashcat
+    - john
+
+dependencies:
+  - role: dreadnode.nimbus_range.base

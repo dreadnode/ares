@@ -1,0 +1,331 @@
+---
+- name: Wait for apt locks to be released
+  ansible.builtin.shell: |
+    while fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1 || \
+          fuser /var/lib/dpkg/lock >/dev/null 2>&1 || \
+          fuser /var/cache/apt/archives/lock >/dev/null 2>&1; do
+      echo "Waiting for apt locks to be released..."
+      sleep 2
+    done
+  become: true
+  changed_when: false
+  when: ansible_facts['os_family'] == 'Debian'
+
+- name: Set DEBIAN_FRONTEND to noninteractive
+  ansible.builtin.lineinfile:
+    path: /etc/environment
+    line: 'DEBIAN_FRONTEND=noninteractive'
+    create: true
+    mode: '0644'
+  become: true
+  when: ansible_facts['os_family'] == 'Debian'
+
+- name: Update apt cache
+  ansible.builtin.apt:
+    update_cache: true
+    cache_valid_time: 3600
+  become: true
+  when:
+    - coercion_tools_update_cache
+    - ansible_facts['os_family'] == 'Debian'
+
+- name: Remove conflicting python3-responder package on Kali
+  ansible.builtin.apt:
+    name: python3-responder
+    state: absent
+  become: true
+  when:
+    - ansible_facts['os_family'] == 'Debian'
+    - ansible_facts['distribution'] == 'Kali'
+    - coercion_tools_install_responder
+
+- name: Install Kali-specific poisoning tools (includes responder from apt)
+  ansible.builtin.apt:
+    name: "{{ coercion_tools_kali_packages }}"
+    state: present
+  become: true
+  when:
+    - ansible_facts['os_family'] == 'Debian'
+    - ansible_facts['distribution'] == 'Kali'
+
+- name: Install Ubuntu-compatible dependencies
+  ansible.builtin.apt:
+    name: "{{ coercion_tools_ubuntu_packages }}"
+    state: present
+  become: true
+  when:
+    - ansible_facts['os_family'] == 'Debian'
+    - ansible_facts['distribution'] != 'Kali'
+
+- name: Install Impacket from source for ntlmrelayx
+  ansible.builtin.include_tasks: impacket_source.yml
+  when:
+    - ansible_facts['os_family'] == 'Debian'
+    - coercion_tools_install_ntlmrelayx
+    - coercion_tools_impacket_from_source
+
+- name: Check for ntlmrelayx.py wrapper
+  ansible.builtin.stat:
+    path: /usr/local/bin/ntlmrelayx.py
+  register: coercion_tools_ntlmrelayx_py
+  when:
+    - ansible_facts['os_family'] == 'Debian'
+    - coercion_tools_install_ntlmrelayx
+
+- name: Create ntlmrelayx wrapper script
+  ansible.builtin.copy:
+    content: |
+      #!/bin/sh
+      exec /usr/local/bin/ntlmrelayx.py "$@"
+    dest: /usr/local/bin/ntlmrelayx
+    mode: '0755'
+  become: true
+  when:
+    - ansible_facts['os_family'] == 'Debian'
+    - coercion_tools_install_ntlmrelayx
+    - coercion_tools_ntlmrelayx_py.stat.exists | default(false)
+
+- name: Clone Responder from GitHub
+  ansible.builtin.git:
+    repo: "{{ coercion_tools_responder_repo }}"
+    dest: "{{ coercion_tools_responder_install_dir }}"
+    version: "{{ coercion_tools_responder_version }}"
+  become: true
+  when:
+    - ansible_facts['os_family'] == 'Debian'
+    - ansible_facts['distribution'] != 'Kali'
+    - coercion_tools_install_responder
+
+# Install Responder Python dependencies
+- name: Check if Responder dependencies are installed
+  ansible.builtin.command: python3 -c "import cryptography, netifaces, aioquic"
+  register: coercion_tools_responder_deps_check
+  changed_when: false
+  failed_when: false
+  when:
+    - ansible_facts['os_family'] == 'Debian'
+    - ansible_facts['distribution'] != 'Kali'
+    - coercion_tools_install_responder
+
+- name: Install Responder dependencies (non-Kali)
+  ansible.builtin.pip:
+    name:
+      - netifaces
+      - aioquic
+      - certifi
+      - cryptography>=42.0.0
+      - pylsqpack>=0.3.3,<0.4.0
+      - pyopenssl>=24
+      - service-identity>=24.1.0
+    executable: pip3
+    # Use --ignore-installed to handle system packages (e.g., cryptography)
+    # that can't be uninstalled because they were installed by apt (no RECORD file)
+    extra_args: "{{ ('--break-system-packages ' if (base_pip_break_required | default(false)) else '') ~ '--ignore-installed' }}"
+  become: true
+  when:
+    - ansible_facts['os_family'] == 'Debian'
+    - ansible_facts['distribution'] != 'Kali'
+    - coercion_tools_install_responder
+    - coercion_tools_responder_deps_check.rc != 0
+
+- name: Make Responder.py executable
+  ansible.builtin.file:
+    path: "{{ coercion_tools_responder_install_dir }}/Responder.py"
+    mode: '0755'
+  become: true
+  when:
+    - ansible_facts['os_family'] == 'Debian'
+    - ansible_facts['distribution'] != 'Kali'
+    - coercion_tools_install_responder
+
+- name: Create symlink for Responder
+  ansible.builtin.file:
+    src: "{{ coercion_tools_responder_install_dir }}/Responder.py"
+    dest: "/usr/local/bin/responder"
+    state: link
+  become: true
+  when:
+    - ansible_facts['os_family'] == 'Debian'
+    - ansible_facts['distribution'] != 'Kali'
+    - coercion_tools_install_responder
+
+- name: Install mitm6 via pipx
+  ansible.builtin.include_tasks: mitm6_pipx.yml
+  when:
+    - ansible_facts['os_family'] == 'Debian'
+    - ansible_facts['distribution'] != 'Kali'
+    - coercion_tools_install_mitm6
+
+- name: Install mitm6 via apt (Kali)
+  ansible.builtin.apt:
+    name: "{{ coercion_tools_mitm6_package }}"
+    state: present
+  become: true
+  when:
+    - ansible_facts['os_family'] == 'Debian'
+    - ansible_facts['distribution'] == 'Kali'
+    - coercion_tools_install_mitm6
+
+- name: Install Coercer via apt (Kali)
+  ansible.builtin.apt:
+    name: "{{ coercion_tools_coercer_package }}"
+    state: present
+  become: true
+  when:
+    - ansible_facts['os_family'] == 'Debian'
+    - ansible_facts['distribution'] == 'Kali'
+    - coercion_tools_install_coercer
+
+- name: Check if Coercer is already installed
+  ansible.builtin.command: pip3 show coercer
+  register: coercion_tools_coercer_check
+  changed_when: false
+  failed_when: false
+  when:
+    - ansible_facts['os_family'] == 'Debian'
+    - ansible_facts['distribution'] != 'Kali'
+    - coercion_tools_install_coercer
+
+- name: Install Coercer via pip (non-Kali)
+  ansible.builtin.pip:
+    name: "{{ coercion_tools_coercer_package }}"
+    executable: pip3
+    # Use --ignore-installed to handle system packages that can't be uninstalled
+    extra_args: "{{ ('--break-system-packages ' if (base_pip_break_required | default(false)) else '') ~ '--ignore-installed' }}"
+  become: true
+  when:
+    - ansible_facts['os_family'] == 'Debian'
+    - ansible_facts['distribution'] != 'Kali'
+    - coercion_tools_install_coercer
+    - coercion_tools_coercer_check.rc != 0
+
+- name: Clone PetitPotam from GitHub (ly4k's improved version)
+  ansible.builtin.git:
+    repo: "{{ coercion_tools_petitpotam_repo }}"
+    dest: "{{ coercion_tools_petitpotam_install_dir }}"
+    version: "{{ coercion_tools_petitpotam_version }}"
+    force: true
+  become: true
+  register: coercion_tools_petitpotam_clone
+  when:
+    - ansible_facts['os_family'] == 'Debian'
+    - coercion_tools_install_petitpotam
+
+- name: Make petitpotam.py executable
+  ansible.builtin.file:
+    path: "{{ coercion_tools_petitpotam_install_dir }}/petitpotam.py"
+    mode: '0755'
+  become: true
+  when:
+    - ansible_facts['os_family'] == 'Debian'
+    - coercion_tools_install_petitpotam
+    - coercion_tools_petitpotam_clone is not skipped
+
+- name: Create symlink for PetitPotam
+  ansible.builtin.file:
+    src: "{{ coercion_tools_petitpotam_install_dir }}/petitpotam.py"
+    dest: "/usr/local/bin/petitpotam"
+    state: link
+  become: true
+  when:
+    - ansible_facts['os_family'] == 'Debian'
+    - coercion_tools_install_petitpotam
+    - coercion_tools_petitpotam_clone is not skipped
+
+# krbrelayx - Kerberos relay attacks (alternative to ntlmrelayx for Kerberos)
+- name: Clone krbrelayx from GitHub
+  ansible.builtin.git:
+    repo: "{{ coercion_tools_krbrelayx_repo }}"
+    dest: "{{ coercion_tools_krbrelayx_install_dir }}"
+    version: "{{ coercion_tools_krbrelayx_version }}"
+    update: true
+  become: true
+  register: coercion_tools_krbrelayx_clone
+  when:
+    - ansible_facts['os_family'] == 'Debian'
+    - coercion_tools_install_krbrelayx
+
+- name: Configure git to ignore filemode changes in krbrelayx repo  # noqa: command-instead-of-module
+  ansible.builtin.command:
+    cmd: git config core.filemode false
+    chdir: "{{ coercion_tools_krbrelayx_install_dir }}"
+  become: true
+  changed_when: false
+  when:
+    - ansible_facts['os_family'] == 'Debian'
+    - coercion_tools_install_krbrelayx
+    - coercion_tools_krbrelayx_clone is not skipped
+
+- name: Create virtual environment for krbrelayx
+  ansible.builtin.command:
+    cmd: python3 -m venv {{ coercion_tools_krbrelayx_install_dir }}/venv
+  become: true
+  args:
+    creates: "{{ coercion_tools_krbrelayx_install_dir }}/venv"
+  when:
+    - ansible_facts['os_family'] == 'Debian'
+    - coercion_tools_install_krbrelayx
+
+- name: Install krbrelayx dependencies in venv
+  ansible.builtin.pip:
+    name:
+      - dnspython
+      - ldap3
+      - impacket
+    virtualenv: "{{ coercion_tools_krbrelayx_install_dir }}/venv"
+  become: true
+  when:
+    - ansible_facts['os_family'] == 'Debian'
+    - coercion_tools_install_krbrelayx
+
+- name: Create wrapper scripts for krbrelayx tools
+  ansible.builtin.copy:
+    content: |
+      #!/bin/bash
+      exec {{ coercion_tools_krbrelayx_install_dir }}/venv/bin/python \
+           {{ coercion_tools_krbrelayx_install_dir }}/{{ item.src }} "$@"
+    dest: "/usr/local/bin/{{ item.dest }}"
+    mode: '0755'
+  become: true
+  loop:
+    - { src: "krbrelayx.py", dest: "krbrelayx" }
+    - { src: "addspn.py", dest: "addspn" }
+    - { src: "dnstool.py", dest: "dnstool" }
+    - { src: "printerbug.py", dest: "printerbug" }
+  when:
+    - ansible_facts['os_family'] == 'Debian'
+    - coercion_tools_install_krbrelayx
+
+- name: Clone dfscoerce from GitHub
+  ansible.builtin.git:
+    repo: "{{ coercion_tools_dfscoerce_repo }}"
+    dest: "{{ coercion_tools_dfscoerce_install_dir }}"
+    version: "{{ coercion_tools_dfscoerce_version }}"
+    update: false
+  become: true
+  register: coercion_tools_dfscoerce_clone
+  when:
+    - ansible_facts['os_family'] == 'Debian'
+    - coercion_tools_install_dfscoerce
+
+- name: Make dfscoerce.py executable
+  ansible.builtin.file:
+    path: "{{ coercion_tools_dfscoerce_install_dir }}/dfscoerce.py"
+    mode: '0755'
+  become: true
+  when:
+    - ansible_facts['os_family'] == 'Debian'
+    - coercion_tools_install_dfscoerce
+    - coercion_tools_dfscoerce_clone is not skipped
+
+- name: Create symlink for dfscoerce
+  ansible.builtin.file:
+    src: "{{ coercion_tools_dfscoerce_install_dir }}/dfscoerce.py"
+    dest: "/usr/local/bin/dfscoerce"
+    state: link
+    force: true
+  become: true
+  when:
+    - ansible_facts['os_family'] == 'Debian'
+    - coercion_tools_install_dfscoerce
+    - coercion_tools_dfscoerce_clone is not skipped

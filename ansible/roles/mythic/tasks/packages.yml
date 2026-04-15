@@ -1,0 +1,42 @@
+---
+- name: Update apt cache
+  ansible.builtin.apt:
+    update_cache: yes
+  become: true
+
+- name: Install essential packages
+  ansible.builtin.apt:
+    name:
+      - build-essential
+      - pkg-config
+      - git
+      - curl
+      - wget
+      - vim
+      - net-tools
+      - unzip
+      - golang
+      - ca-certificates
+      - gnupg
+      - acl
+      - binutils
+      - cargo
+      - gettext
+      - libssl-dev
+      - rustc
+    state: present
+  become: true
+
+- name: Install development tools
+  ansible.builtin.apt:
+    name:
+      - make
+      - gcc
+      - g++
+      - jq
+      - tree
+      - htop
+      - tmux
+    state: present
+  become: true
+  when: mythic_install_dev_tools | bool

@@ -1,0 +1,78 @@
+---
+# Python configuration
+base_python_version: "3.13.7"
+# Common Python packages (all Debian-based systems)
+base_python_packages:
+  - python3
+  - python3-pip
+  - python3-dev
+# Ubuntu-specific packages (python3-venv not available on Kali - venv is built-in)
+base_python_packages_ubuntu:
+  - python3-venv
+
+# UV package manager
+base_install_uv: true
+base_uv_version: "latest"
+base_uv_install_script: "https://astral.sh/uv/install.sh"
+
+# Rust toolchain (required for building NetExec and other tools)
+# See: https://www.netexec.wiki/getting-started/installation/installation-on-unix
+base_install_rust: true
+base_rust_install_script: "https://sh.rustup.rs"
+
+# pipx (recommended for NetExec installation)
+# See: https://www.netexec.wiki/getting-started/installation/installation-on-unix
+base_install_pipx: true
+
+# Ares Python dependencies (installed via pip)
+base_pip_packages:
+  - python-dotenv
+  - dreadnode
+  - rigging
+  - pydantic
+  - asyncio
+
+# Pip/PEP 668 handling
+base_pip_externally_managed: false
+base_pip_break_required: false
+
+# System utilities (common across all Debian-based systems)
+base_system_packages:
+  - curl
+  - wget
+  - git
+  - build-essential
+  - cargo
+  - libffi-dev
+  - libssl-dev
+  - netcat-traditional
+  - procps # ps, top, kill, etc.
+  - strace # system call tracing
+  - lsof # list open files
+  - tcpdump # network packet analyzer
+  - net-tools # netstat, ifconfig, arp, route
+  - iproute2 # modern networking tools: ip, ss, etc.
+  - telnet # connectivity testing
+  - vim # text editor
+  - jq # JSON processor
+  - htop # interactive process viewer
+  - tmux # terminal multiplexer
+
+# Ubuntu-specific system packages (dnsutils is the traditional name)
+base_system_packages_ubuntu:
+  - dnsutils # dig, nslookup
+
+# Kali-specific system packages (uses bind9-dnsutils instead of dnsutils)
+base_system_packages_kali:
+  - bind9-dnsutils # dig, nslookup (Kali uses bind9-dnsutils as replacement)
+
+# Workspace configuration
+base_workspace_dir: "/opt/ares"
+base_create_workspace: true
+base_workspace_owner: "root"
+base_workspace_group: "root"
+base_workspace_mode: "0755"
+
+# Pip configuration
+base_pip_break_system_packages: true
+base_pip_executable: "pip3"

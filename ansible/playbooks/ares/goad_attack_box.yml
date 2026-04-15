@@ -1,0 +1,202 @@
+---
+# GOAD Attack Box Provisioning Playbook
+# Deploys all tools needed for GOAD (Game of Active Directory) exploitation
+#
+# This playbook includes comprehensive tooling for:
+# - Initial reconnaissance and enumeration
+# - Credential discovery and cracking
+# - Network poisoning and relay attacks
+# - Kerberos attacks (AS-REP roasting, Kerberoasting)
+# - ADCS attacks (ESC1-15, Certifried)
+# - ACL abuse and permission exploitation
+# - Delegation attacks (Unconstrained, Constrained, RBCD)
+# - MSSQL exploitation
+# - Privilege escalation
+# - Lateral movement
+# - Domain trust exploitation
+#
+# Usage:
+#   ansible-playbook goad_attack_box.yml -i inventory.yml
+#
+# For SSM deployment:
+#   ansible-playbook goad_attack_box.yml -i aws_ec2.yml --limit "tag_Name_*kali*"
+
+- name: Provision GOAD Attack Box
+  hosts: all
+  gather_facts: true
+  become: true
+
+  vars:
+    # Environment configuration
+    alloy_env: "{{ lookup('env', 'ENVIRONMENT') | default('goad', true) }}"
+    alloy_deployment_name: "goad-attack-box"
+
+    # Python version
+    base_python_version: "3.13.7"
+
+    # Impacket from packages for stability
+    recon_tools_impacket_from_source: false
+
+    # Cracking tools configuration - full wordlists for GOAD
+    cracking_tools_install_hashcat: true
+    cracking_tools_install_john: true
+    cracking_tools_install_seclists: true
+    cracking_tools_wordlists:
+      - rockyou
+      - seclists_passwords
+
+    # Enable all poisoning tools for GOAD
+    coercion_tools_install_responder: true
+    coercion_tools_install_mitm6: true
+    coercion_tools_install_coercer: true
+    coercion_tools_install_petitpotam: true
+    coercion_tools_install_krbrelayx: true
+
+    # Enable all network/AD tools for GOAD
+    recon_tools_install_bloodhound: true
+    recon_tools_install_certipy: true
+    recon_tools_install_adidnsdump: true
+
+    # Enable credential access tools for GOAD
+    credential_access_tools_install_sprayhound: true
+    credential_access_tools_install_targetedkerberoast: true
+
+    # Enable all lateral movement tools
+    lateral_movement_tools_install_evil_winrm: true
+    credential_access_tools_install_lsassy: true
+    lateral_movement_tools_install_xfreerdp: true
+    lateral_movement_tools_install_sshpass: true
+
+    # Enable all ACL tools for GOAD
+    acl_tools_install_bloodyad: true
+    acl_tools_install_pywhisker: true
+
+    # Enable all privilege escalation tools for GOAD
+    privesc_tools_install_printspoofer: true
+    privesc_tools_install_godpotato: true
+    privesc_tools_install_sweetpotato: true
+    privesc_tools_install_krbrelayup: true
+    privesc_tools_install_sharpgpoabuse: true
+    privesc_tools_install_winpeas: true
+    privesc_tools_install_linpeas: true
+    privesc_tools_install_nopac: true
+    privesc_tools_install_printnightmare: true
+    privesc_tools_install_runascs: true
+    privesc_tools_install_powerupsql: true
+
+  roles:
+    # Base Ares requirements
+    - role: dreadnode.nimbus_range.base
+      vars:
+        base_install_uv: true
+        base_verify_install: true
+
+    # Network reconnaissance tools (nmap, netexec, impacket, bloodhound, certipy, etc.)
+    - role: dreadnode.nimbus_range.recon_tools
+      vars:
+        recon_tools_verify_install: true
+
+    # Credential access tools (GetNPUsers, secretsdump, lsassy, sprayhound)
+    - role: dreadnode.nimbus_range.credential_access_tools
+      vars:
+        credential_access_tools_verify_install: true
+
+    # Network poisoning and relay tools (Responder, mitm6, Coercer, PetitPotam)
+    - role: dreadnode.nimbus_range.coercion_tools
+      vars:
+        coercion_tools_verify_install: true
+
+    # Lateral movement tools (evil-winrm, xfreerdp, smbclient, impacket)
+    - role: dreadnode.nimbus_range.lateral_movement_tools
+      vars:
+        lateral_movement_tools_verify_install: true
+
+    # ACL exploitation tools (bloodyAD, pywhisker)
+    - role: dreadnode.nimbus_range.acl_tools
+      vars:
+        acl_tools_verify_install: true
+
+    # Password cracking tools (hashcat, john, wordlists)
+    - role: dreadnode.nimbus_range.cracking_tools
+      vars:
+        cracking_tools_verify_install: true
+
+    # Privilege escalation tools (PrintSpoofer, noPac, PrintNightmare, etc.)
+    - role: dreadnode.nimbus_range.privesc_tools
+      vars:
+        privesc_tools_verify_install: true
+
+  post_tasks:
+    - name: Display GOAD attack box provisioning summary
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "GOAD Attack Box Provisioned Successfully"
+          - "=========================================="
+          - ""
+          - "GOAD Attack Categories Covered:"
+          - ""
+          - "1. Initial Access & Reconnaissance:"
+          - "   - nmap, netexec (with slinky/scuffy coercion)"
+          - "   - enum4linux-ng, bloodhound"
+          - "   - adidnsdump, rpcclient"
+          - ""
+          - "2. Credential Discovery:"
+          - "   - Password spraying (sprayhound)"
+          - "   - Hash cracking (hashcat, john)"
+          - "   - Wordlists (rockyou, seclists)"
+          - ""
+          - "3. Network Poisoning & Relay:"
+          - "   - Responder (LLMNR/NBT-NS)"
+          - "   - mitm6 (DHCPv6)"
+          - "   - ntlmrelayx (via impacket)"
+          - "   - krbrelayx (Kerberos relay)"
+          - ""
+          - "4. Kerberos Attacks:"
+          - "   - AS-REP Roasting (GetNPUsers.py)"
+          - "   - Kerberoasting (GetUserSPNs.py)"
+          - "   - targetedKerberoast"
+          - ""
+          - "5. ADCS Attacks (ESC1-15):"
+          - "   - Certipy-AD"
+          - "   - Coercer (for ESC8)"
+          - "   - PetitPotam (for ESC8)"
+          - ""
+          - "6. ACL Abuse:"
+          - "   - bloodyAD"
+          - "   - dacledit.py (via impacket)"
+          - ""
+          - "7. Delegation Attacks:"
+          - "   - rbcd.py (via impacket)"
+          - "   - getST.py (via impacket)"
+          - "   - Shadow credentials (pywhisker)"
+          - ""
+          - "8. MSSQL Exploitation:"
+          - "   - mssqlclient.py (via impacket)"
+          - "   - PowerUpSQL (PowerShell MSSQL toolkit)"
+          - ""
+          - "9. Privilege Escalation:"
+          - "   - PrintSpoofer, GodPotato"
+          - "   - noPac (CVE-2021-42287)"
+          - "   - PrintNightmare (CVE-2021-1675)"
+          - "   - KrbRelayUp"
+          - "   - WinPEAS, LinPEAS"
+          - ""
+          - "10. Lateral Movement:"
+          - "    - evil-winrm"
+          - "    - lsassy"
+          - "    - xfreerdp (RDP PTH)"
+          - "    - impacket (psexec, wmiexec, smbexec)"
+          - ""
+          - "11. Domain Trust Exploitation:"
+          - "    - raiseChild.py (via impacket)"
+          - "    - ticketer.py (via impacket)"
+          - ""
+          - "Tools Location:"
+          - "  - Ares workspace: /opt/ares"
+          - "  - PrivEsc tools: /opt/privesc"
+          - "  - Wordlists: /usr/share/wordlists"
+          - ""
+          - "=========================================="
+          - "Ready to attack GOAD!"
+          - "=========================================="

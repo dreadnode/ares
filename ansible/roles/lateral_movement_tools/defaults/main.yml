@@ -1,0 +1,66 @@
+---
+# Lateral movement tool packages (Kali-specific, available in apt)
+# Note: python3-venv not needed - venv is built into Kali's Python
+lateral_movement_tools_kali_packages:
+  - evil-winrm
+  - ruby
+  - freerdp3-x11  # xfreerdp for RDP pass-the-hash (freerdp3 on Kali rolling)
+  - smbclient
+  - sshpass  # SSH with password
+  - proxychains4  # TCP connection proxying for pivoting
+
+# Lateral movement tool packages (Ubuntu-compatible)
+lateral_movement_tools_ubuntu_packages:
+  - git
+  - python3
+  - python3-pip
+  - python3-dev
+  - python3-venv
+  - build-essential
+  - ruby
+  - ruby-dev
+  - rubygems
+  - libffi-dev  # Required for building ffi gem (evil-winrm dependency)
+  - clang  # Required for building native gem extensions
+  - freerdp2-x11  # xfreerdp for RDP pass-the-hash
+  - smbclient
+  - sshpass  # SSH with password
+  - proxychains4  # TCP connection proxying for pivoting
+
+# evil-winrm configuration (WinRM lateral movement)
+lateral_movement_tools_install_evil_winrm: true
+lateral_movement_tools_evil_winrm_gem: "evil-winrm"
+
+# xfreerdp configuration (RDP pass-the-hash)
+lateral_movement_tools_install_xfreerdp: true
+
+# sshpass configuration (SSH with password)
+lateral_movement_tools_install_sshpass: true
+
+# proxychains configuration (TCP connection proxying)
+lateral_movement_tools_install_proxychains: true
+
+# pth-toolkit configuration (Pass-The-Hash toolkit)
+lateral_movement_tools_install_pth_toolkit: true
+lateral_movement_tools_pth_toolkit_package: "passing-the-hash"
+
+# Impacket configuration (for psexec/wmiexec/smbexec/secretsdump)
+lateral_movement_tools_install_impacket: true
+lateral_movement_tools_impacket_from_source: true
+lateral_movement_tools_impacket_repo: "https://github.com/fortra/impacket.git"
+lateral_movement_tools_impacket_version: "impacket_0_13_0"
+lateral_movement_tools_impacket_install_dir: "/opt/impacket"
+
+lateral_movement_tools_update_cache: true
+
+# Tool binary paths (for verification)
+lateral_movement_tools_binaries:
+  evil-winrm: "/usr/local/bin/evil-winrm"
+  xfreerdp: "/usr/bin/xfreerdp"
+  sshpass: "/usr/bin/sshpass"
+  proxychains: "/usr/bin/proxychains4"
+  impacket_psexec: "/usr/local/bin/impacket-psexec"
+  impacket_wmiexec: "/usr/local/bin/impacket-wmiexec"
+  impacket_smbexec: "/usr/local/bin/impacket-smbexec"
+  impacket_secretsdump: "/usr/local/bin/impacket-secretsdump"
+  smbclient: "/usr/bin/smbclient"

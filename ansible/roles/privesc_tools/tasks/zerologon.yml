@@ -1,0 +1,60 @@
+---
+# Install zerologon (CVE-2020-1472) exploit
+# Exploits Netlogon vulnerability to gain domain admin privileges
+
+- name: Clone zerologon from GitHub
+  ansible.builtin.git:
+    repo: "{{ privesc_tools_zerologon_repo }}"
+    dest: "{{ privesc_tools_zerologon_install_dir }}"
+    version: "{{ privesc_tools_zerologon_version }}"
+    force: true
+  become: true
+  when:
+    - ansible_facts['os_family'] == 'Debian'
+    - privesc_tools_install_zerologon
+
+- name: Create virtual environment for zerologon
+  ansible.builtin.command:
+    cmd: python3 -m venv {{ privesc_tools_zerologon_install_dir }}/venv
+  become: true
+  args:
+    creates: "{{ privesc_tools_zerologon_install_dir }}/venv"
+  when:
+    - ansible_facts['os_family'] == 'Debian'
+    - privesc_tools_install_zerologon
+
+- name: Install zerologon dependencies in venv
+  ansible.builtin.pip:
+    name:
+      - impacket
+    virtualenv: "{{ privesc_tools_zerologon_install_dir }}/venv"
+  become: true
+  when:
+    - ansible_facts['os_family'] == 'Debian'
+    - privesc_tools_install_zerologon
+
+- name: Create wrapper script for zerologon (cve-2020-1472-exploit)
+  ansible.builtin.copy:
+    content: |
+      #!/bin/bash
+      exec {{ privesc_tools_zerologon_install_dir }}/venv/bin/python \
+           {{ privesc_tools_zerologon_install_dir }}/cve-2020-1472-exploit.py "$@"
+    dest: /usr/local/bin/zerologon
+    mode: '0755'
+  become: true
+  when:
+    - ansible_facts['os_family'] == 'Debian'
+    - privesc_tools_install_zerologon
+
+- name: Create wrapper script for zerologon restore password
+  ansible.builtin.copy:
+    content: |
+      #!/bin/bash
+      exec {{ privesc_tools_zerologon_install_dir }}/venv/bin/python \
+           {{ privesc_tools_zerologon_install_dir }}/restorepassword.py "$@"
+    dest: /usr/local/bin/zerologon-restore
+    mode: '0755'
+  become: true
+  when:
+    - ansible_facts['os_family'] == 'Debian'
+    - privesc_tools_install_zerologon

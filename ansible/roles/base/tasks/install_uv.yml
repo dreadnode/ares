@@ -1,0 +1,32 @@
+---
+- name: Check if uv is already installed
+  ansible.builtin.command: uv --version
+  register: base_uv_check
+  changed_when: false
+  failed_when: false
+
+- name: Download uv installer
+  ansible.builtin.get_url:
+    url: "{{ base_uv_install_script }}"
+    dest: /tmp/uv-install.sh
+    mode: '0755'
+  when: base_uv_check.rc != 0
+
+- name: Install uv
+  ansible.builtin.command: /tmp/uv-install.sh
+  environment:
+    UV_INSTALL_DIR: /usr/local/bin
+  when: base_uv_check.rc != 0
+  changed_when: true
+  become: true
+
+- name: Clean up uv installer
+  ansible.builtin.file:
+    path: /tmp/uv-install.sh
+    state: absent
+  when: base_uv_check.rc != 0
+
+- name: Verify uv installation
+  ansible.builtin.command: uv --version
+  register: base_uv_version
+  changed_when: false

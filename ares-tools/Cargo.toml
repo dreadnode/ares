@@ -1,0 +1,25 @@
+[package]
+name = "ares-tools"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = { workspace = true }
+chrono = { workspace = true }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
+regex = { workspace = true }
+redis = { workspace = true }
+tempfile = "3"
+
+[features]
+blue = []
+
+[dev-dependencies]
+rstest = "0.18"
+approx = "0.5"

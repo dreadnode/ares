@@ -17,11 +17,11 @@ area/pre-commit:
       - any-glob-to-any-file: ".pre-commit-config.yaml"
       - any-glob-to-any-file: ".hooks/**/*"
 
-area/python:
+area/rust:
   - changed-files:
-      - any-glob-to-any-file: "pyproject.toml"
-      - any-glob-to-any-file: "requirements.txt"
-      - any-glob-to-any-file: "*.py"
+      - any-glob-to-any-file: "Cargo.toml"
+      - any-glob-to-any-file: "Cargo.lock"
+      - any-glob-to-any-file: "**/*.rs"
 
 area/security:
   - changed-files:
@@ -38,7 +38,7 @@ area/tests:
 
 area/workspace:
   - changed-files:
-      - any-glob-to-any-file: "python.code-workspace"
+      - any-glob-to-any-file: "*.code-workspace"
 
 area/assets:
   - changed-files:
@@ -50,7 +50,12 @@ area/scripts:
 
 area/src:
   - changed-files:
-      - any-glob-to-any-file: "src/**/*"
+      - any-glob-to-any-file: "ares-cli/**/*"
+      - any-glob-to-any-file: "ares-core/**/*"
+      - any-glob-to-any-file: "ares-llm/**/*"
+      - any-glob-to-any-file: "ares-orchestrator/**/*"
+      - any-glob-to-any-file: "ares-tools/**/*"
+      - any-glob-to-any-file: "ares-worker/**/*"
 
 area/templates:
   - changed-files:

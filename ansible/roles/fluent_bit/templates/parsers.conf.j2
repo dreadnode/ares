@@ -1,0 +1,50 @@
+[PARSER]
+    Name    ssm_cmd
+    Format  regex
+    Regex   ^┌──\((?<user>[^)]+)\)-\[(?<path>[^\]]+)\]$|^└─#\s+(?<raw_command>.+)$|^(?<raw_output>.+)$
+    Time_Keep   On
+
+[PARSER]
+    Name        syslog-rfc3164
+    Format      regex
+    Regex       ^\<(?<pri>[0-9]+)\>(?<time>[^ ]* {1,2}[^ ]* [^ ]*) (?<host>[^ ]*) (?<ident>[^:]*): (?<message>.*)$
+    Time_Key    time
+    Time_Format %b %d %H:%M:%S
+    Time_Keep   On
+
+[PARSER]
+    Name        syslog
+    Format      regex
+    Regex       ^(?<time>[^ ]* {1,2}[^ ]* [^ ]*) (?<host>[^ ]*) (?<ident>[^:]*): (?<message>.*)$
+    Time_Key    time
+    Time_Format %b %d %H:%M:%S
+    Time_Keep   On
+
+[PARSER]
+    Name        json
+    Format      json
+    Time_Key    time
+    Time_Format %d/%b/%Y:%H:%M:%S %z
+    Time_Keep   On
+
+[PARSER]
+    Name        docker
+    Format      json
+    Time_Key    time
+    Time_Format %Y-%m-%dT%H:%M:%S.%L
+    Time_Keep   On
+
+# Custom parsers
+{% for parser in fluent_bit_parsers %}
+[PARSER]
+    Name        {{ parser.name }}
+    Format      {{ parser.format }}
+{% if parser.format == 'regex' %}
+    Regex       {{ parser.regex }}
+{% endif %}
+    Time_Key    {{ parser.time_key }}
+{% if parser.time_format is defined %}
+    Time_Format {{ parser.time_format }}
+{% endif %}
+    Time_Keep   {{ parser.time_keep | default('On') }}
+{% endfor %}

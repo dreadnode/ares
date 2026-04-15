@@ -1,0 +1,53 @@
+---
+# Password cracking tools
+cracking_tools_install_hashcat: true
+cracking_tools_install_john: true
+cracking_tools_install_crackmapexec: false  # Legacy, prefer netexec
+
+# Hashcat configuration
+cracking_tools_hashcat_package: "hashcat"
+cracking_tools_hashcat_from_source: false
+cracking_tools_hashcat_repo: "https://github.com/hashcat/hashcat.git"
+cracking_tools_hashcat_version: "master"
+cracking_tools_libgcc_package_primary: "libgcc-s1"
+cracking_tools_libgcc_package_fallback: "libgcc1"
+cracking_tools_gcc_package_primary: "gcc"
+cracking_tools_gcc_package_fallback: "gcc-15"
+
+# John the Ripper configuration
+cracking_tools_john_package: "john"
+cracking_tools_john_from_source: false
+cracking_tools_john_repo: "https://github.com/openwall/john.git"
+cracking_tools_john_version: "bleeding-jumbo"
+
+# Wordlists configuration
+cracking_tools_install_wordlists: true
+cracking_tools_wordlists:
+  - rockyou
+  - seclists_passwords
+
+# RockYou wordlist
+cracking_tools_rockyou_path: "/usr/share/wordlists/rockyou.txt"
+cracking_tools_rockyou_gz_path: "/usr/share/wordlists/rockyou.txt.gz"
+cracking_tools_extract_rockyou: true
+
+# SecLists
+cracking_tools_install_seclists: true
+cracking_tools_seclists_repo: "https://github.com/danielmiessler/SecLists.git"
+cracking_tools_seclists_path: "/usr/share/wordlists/seclists"
+
+# Wordlist directory
+cracking_tools_wordlist_dir: "/usr/share/wordlists"
+
+# GPU support (for hashcat)
+cracking_tools_gpu_support: false
+cracking_tools_opencl_packages:
+  - ocl-icd-libopencl1
+  - opencl-headers
+  - clinfo
+
+# NVIDIA-specific GPU support
+# Set to true when using nvidia/cuda base image to register NVIDIA OpenCL ICD
+cracking_tools_nvidia_opencl_icd: false
+
+cracking_tools_update_cache: true

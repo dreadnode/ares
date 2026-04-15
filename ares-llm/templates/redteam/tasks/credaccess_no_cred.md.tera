@@ -1,0 +1,27 @@
+**MANDATORY TECHNIQUE EXECUTION (NO CREDENTIALS)**
+
+Domain: {{ domain }}
+DC IP: {{ dc_ip_display }}
+Targets: {{ targets_display }}
+Task ID: {{ task_id }}
+
+**CRITICAL: YOU MUST EXECUTE THESE TECHNIQUES IN ORDER:**
+**DO NOT run smb_sweep or other slow recon first!**
+**Complete assigned techniques BEFORE doing anything else.**
+
+{{ instructions_text }}
+
+**WORKFLOW:**
+1. Execute EACH technique above in order
+2. Report ANY credentials/hashes found immediately
+3. Only after completing ALL assigned techniques, mark task complete
+
+**DO NOT:**
+- Run smb_sweep (wastes 5+ minutes, not your job)
+- Do additional enumeration before completing assigned techniques
+{% if state_context %}
+
+## Current Operation State
+
+{{ state_context }}
+{% endif -%}

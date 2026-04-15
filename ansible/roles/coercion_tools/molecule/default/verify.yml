@@ -1,0 +1,322 @@
+---
+- name: Verify
+  hosts: all
+  gather_facts: true
+  tasks:
+    - name: Include default variables
+      ansible.builtin.include_vars:
+        file: "../../defaults/main.yml"
+
+    # Build dependency verification - prevents netifaces/mitm6 compilation failures
+    - name: Verify gcc is available (required for compiling Python C extensions)
+      ansible.builtin.command: which gcc
+      register: coercion_tools_gcc_check
+      changed_when: false
+      when: ansible_facts['os_family'] == 'Debian'
+
+    - name: Assert gcc is installed
+      ansible.builtin.assert:
+        that:
+          - coercion_tools_gcc_check.rc == 0
+        fail_msg: "gcc is not installed - required for compiling Python C extensions (httptools, netifaces)"
+        success_msg: "gcc is available at {{ coercion_tools_gcc_check.stdout }}"
+      when: ansible_facts['os_family'] == 'Debian'
+
+    - name: Check build-essential package status
+      ansible.builtin.command: dpkg -s build-essential
+      register: coercion_tools_build_essential_check
+      changed_when: false
+      failed_when: false
+      when: ansible_facts['os_family'] == 'Debian'
+
+    - name: Assert build-essential is installed
+      ansible.builtin.assert:
+        that:
+          - coercion_tools_build_essential_check.rc == 0
+        fail_msg: "build-essential is not installed - required for compiling Python C extensions (httptools, netifaces)"
+        success_msg: "build-essential is installed"
+      when: ansible_facts['os_family'] == 'Debian'
+
+    - name: Check python3-dev package status
+      ansible.builtin.command: dpkg -s python3-dev
+      register: coercion_tools_python3_dev_check
+      changed_when: false
+      failed_when: false
+      when: ansible_facts['os_family'] == 'Debian'
+
+    - name: Assert python3-dev is installed
+      ansible.builtin.assert:
+        that:
+          - coercion_tools_python3_dev_check.rc == 0
+        fail_msg: "python3-dev is not installed - required for compiling Python C extensions (httptools, netifaces)"
+        success_msg: "python3-dev is installed"
+      when: ansible_facts['os_family'] == 'Debian'
+
+    - name: Get Python version for package verification
+      ansible.builtin.command: python3 -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')"
+      register: coercion_tools_verify_python_version
+      changed_when: false
+      when: ansible_facts['os_family'] == 'Debian'
+
+    - name: Check version-specific python dev package status
+      ansible.builtin.command: dpkg -s python{{ coercion_tools_verify_python_version.stdout }}-dev
+      register: coercion_tools_python_version_dev_check
+      changed_when: false
+      failed_when: false
+      when: ansible_facts['os_family'] == 'Debian'
+
+    - name: Note version-specific python dev package status
+      ansible.builtin.debug:
+        msg: "python{{ coercion_tools_verify_python_version.stdout }}-dev: {{ 'Installed' if coercion_tools_python_version_dev_check.rc == 0 else 'Not available (may be bundled in python3-dev)' }}"
+      when: ansible_facts['os_family'] == 'Debian'
+
+    - name: Verify Python.h header exists (confirms python3-dev working)
+      ansible.builtin.shell: |
+        set -o pipefail
+        # Find Python.h in system include paths (handles multiple Python versions)
+        find /usr/include -name "Python.h" -path "*/python3*" 2>/dev/null | head -1 | grep -q .
+      args:
+        executable: /bin/bash
+      register: coercion_tools_python_header_check
+      changed_when: false
+      failed_when: false
+      when: ansible_facts['os_family'] == 'Debian'
+
+    - name: Assert Python development headers are available
+      ansible.builtin.assert:
+        that:
+          - coercion_tools_python_header_check.rc == 0
+        fail_msg: "Python.h header not found - python3-dev may not be properly installed"
+        success_msg: "Python development headers are available"
+      when: ansible_facts['os_family'] == 'Debian'
+
+    - name: Check which Responder command is available
+      ansible.builtin.shell: which responder || which Responder.py || which /root/.local/bin/responder
+      register: coercion_tools_responder_which
+      changed_when: false
+      failed_when: false
+      environment:
+        PATH: "/root/.local/bin:{{ ansible_facts['env']['PATH'] }}"
+      when: coercion_tools_install_responder | default(true)
+
+    - name: Verify Responder is installed
+      ansible.builtin.command: "{{ coercion_tools_responder_which.stdout }} --version"
+      register: coercion_tools_responder_version
+      changed_when: false
+      failed_when: false
+      when:
+        - coercion_tools_install_responder | default(true)
+        - coercion_tools_responder_which.rc == 0
+
+    - name: Assert Responder is available
+      ansible.builtin.assert:
+        that:
+          - coercion_tools_responder_which.rc == 0
+          - coercion_tools_responder_which.stdout is defined
+        fail_msg: "Responder is not properly installed"
+        success_msg: "Responder is installed at {{ coercion_tools_responder_which.stdout }}"
+      when: coercion_tools_install_responder | default(true)
+
+    - name: Verify mitm6 is installed
+      ansible.builtin.command: which mitm6
+      register: coercion_tools_mitm6_check
+      changed_when: false
+      failed_when: false
+      environment:
+        PATH: "/root/.local/bin:{{ ansible_facts['env']['PATH'] }}"
+      when: coercion_tools_install_mitm6 | default(true)
+
+    - name: Get mitm6 version
+      ansible.builtin.command: mitm6 --version
+      register: coercion_tools_mitm6_version
+      changed_when: false
+      failed_when: false
+      environment:
+        PATH: "/root/.local/bin:{{ ansible_facts['env']['PATH'] }}"
+      when:
+        - coercion_tools_install_mitm6 | default(true)
+        - coercion_tools_mitm6_check.rc == 0
+
+    - name: Assert mitm6 is available
+      ansible.builtin.assert:
+        that:
+          - coercion_tools_mitm6_check.rc == 0
+          - coercion_tools_mitm6_check.stdout is defined
+        fail_msg: "mitm6 is not properly installed"
+        success_msg: "mitm6 is installed at {{ coercion_tools_mitm6_check.stdout }}"
+      when: coercion_tools_install_mitm6 | default(true)
+
+    - name: Verify Coercer is installed
+      ansible.builtin.command: which coercer
+      register: coercion_tools_coercer_check
+      changed_when: false
+      failed_when: false
+      environment:
+        PATH: "/root/.local/bin:{{ ansible_facts['env']['PATH'] }}"
+      when: coercion_tools_install_coercer | default(true)
+
+    - name: Get Coercer version
+      ansible.builtin.command: coercer --version
+      register: coercion_tools_coercer_version
+      changed_when: false
+      failed_when: false
+      environment:
+        PATH: "/root/.local/bin:{{ ansible_facts['env']['PATH'] }}"
+      when:
+        - coercion_tools_install_coercer | default(true)
+        - coercion_tools_coercer_check.rc == 0
+
+    - name: Assert Coercer is available
+      ansible.builtin.assert:
+        that:
+          - coercion_tools_coercer_check.rc == 0
+          - coercion_tools_coercer_check.stdout is defined
+        fail_msg: "Coercer is not properly installed"
+        success_msg: "Coercer is installed at {{ coercion_tools_coercer_check.stdout }}"
+      when: coercion_tools_install_coercer | default(true)
+
+    - name: Verify PetitPotam is installed
+      ansible.builtin.stat:
+        path: "{{ coercion_tools_petitpotam_install_dir }}/petitpotam.py"
+      register: coercion_tools_petitpotam_stat
+      when: coercion_tools_install_petitpotam | default(true)
+
+    - name: Assert PetitPotam is available
+      ansible.builtin.assert:
+        that:
+          - coercion_tools_petitpotam_stat.stat.exists
+          - coercion_tools_petitpotam_stat.stat.executable
+        fail_msg: "PetitPotam is not properly installed"
+        success_msg: "PetitPotam is installed at {{ coercion_tools_petitpotam_install_dir }}/petitpotam.py"
+      when: coercion_tools_install_petitpotam | default(true)
+
+    - name: Verify krbrelayx is installed
+      ansible.builtin.stat:
+        path: "{{ coercion_tools_krbrelayx_install_dir }}/krbrelayx.py"
+      register: coercion_tools_krbrelayx_stat
+      when: coercion_tools_install_krbrelayx | default(true)
+
+    - name: Assert krbrelayx is available
+      ansible.builtin.assert:
+        that:
+          - coercion_tools_krbrelayx_stat.stat.exists
+          - coercion_tools_krbrelayx_stat.stat.executable
+        fail_msg: "krbrelayx is not properly installed"
+        success_msg: "krbrelayx is installed at {{ coercion_tools_krbrelayx_install_dir }}/krbrelayx.py"
+      when: coercion_tools_install_krbrelayx | default(true)
+
+    - name: Verify krbrelayx wrapper script exists
+      ansible.builtin.stat:
+        path: /usr/local/bin/krbrelayx
+      register: coercion_tools_krbrelayx_wrapper
+      when: coercion_tools_install_krbrelayx | default(true)
+
+    - name: Assert krbrelayx wrapper is available
+      ansible.builtin.assert:
+        that:
+          - coercion_tools_krbrelayx_wrapper.stat.exists
+          - coercion_tools_krbrelayx_wrapper.stat.executable
+        fail_msg: "krbrelayx wrapper not created at /usr/local/bin/krbrelayx"
+        success_msg: "krbrelayx wrapper is available at /usr/local/bin/krbrelayx"
+      when: coercion_tools_install_krbrelayx | default(true)
+
+    - name: Check impacket is installed in krbrelayx venv
+      ansible.builtin.command: "{{ coercion_tools_krbrelayx_install_dir }}/venv/bin/pip show impacket"
+      register: coercion_tools_krbrelayx_impacket
+      changed_when: false
+      failed_when: false
+      when: coercion_tools_install_krbrelayx | default(true)
+
+    - name: Assert impacket is installed in krbrelayx venv
+      ansible.builtin.assert:
+        that:
+          - coercion_tools_krbrelayx_impacket.rc == 0
+        fail_msg: "impacket is not installed in krbrelayx venv (required for printerbug.py)"
+        success_msg: "impacket is installed in krbrelayx venv"
+      when: coercion_tools_install_krbrelayx | default(true)
+
+    - name: Verify ntlmrelayx wrapper script exists
+      ansible.builtin.stat:
+        path: /usr/local/bin/ntlmrelayx
+      register: coercion_tools_ntlmrelayx_wrapper
+      when: coercion_tools_install_ntlmrelayx | default(true)
+
+    - name: Verify ntlmrelayx.py exists
+      ansible.builtin.stat:
+        path: /usr/local/bin/ntlmrelayx.py
+      register: coercion_tools_ntlmrelayx_py
+      when: coercion_tools_install_ntlmrelayx | default(true)
+
+    - name: Assert ntlmrelayx wrapper is available
+      ansible.builtin.assert:
+        that:
+          - coercion_tools_ntlmrelayx_wrapper.stat.exists
+          - coercion_tools_ntlmrelayx_wrapper.stat.executable
+          - coercion_tools_ntlmrelayx_py.stat.exists
+        fail_msg: "ntlmrelayx wrapper not created at /usr/local/bin/ntlmrelayx"
+        success_msg: "ntlmrelayx wrapper is available at /usr/local/bin/ntlmrelayx"
+      when: coercion_tools_install_ntlmrelayx | default(true)
+
+    - name: Verify dfscoerce is installed
+      ansible.builtin.stat:
+        path: "{{ coercion_tools_dfscoerce_install_dir }}/dfscoerce.py"
+      register: coercion_tools_dfscoerce_stat
+      when: coercion_tools_install_dfscoerce | default(true)
+
+    - name: Verify dfscoerce wrapper exists
+      ansible.builtin.stat:
+        path: /usr/local/bin/dfscoerce
+      register: coercion_tools_dfscoerce_wrapper
+      when: coercion_tools_install_dfscoerce | default(true)
+
+    - name: Assert dfscoerce is available
+      ansible.builtin.assert:
+        that:
+          - coercion_tools_dfscoerce_stat.stat.exists
+          - coercion_tools_dfscoerce_wrapper.stat.exists
+        fail_msg: "dfscoerce is not properly installed"
+        success_msg: "dfscoerce is installed at {{ coercion_tools_dfscoerce_install_dir }}/dfscoerce.py"
+      when: coercion_tools_install_dfscoerce | default(true)
+
+    - name: Test Responder help output
+      ansible.builtin.shell: set -o pipefail && {{ coercion_tools_responder_which.stdout }} --help 2>&1 | head -5
+      register: coercion_tools_responder_test
+      changed_when: false
+      failed_when: false
+      environment:
+        PATH: "/root/.local/bin:{{ ansible_facts['env']['PATH'] }}"
+      args:
+        executable: /bin/bash
+      when:
+        - coercion_tools_install_responder | default(true)
+        - coercion_tools_responder_which.rc == 0
+
+    - name: Assert Responder is functional
+      ansible.builtin.assert:
+        that:
+          - coercion_tools_responder_test.rc != 127
+        fail_msg: "Responder is not functioning (rc={{ coercion_tools_responder_test.rc }})"
+        success_msg: "Responder is functional"
+      when:
+        - coercion_tools_install_responder | default(true)
+        - coercion_tools_responder_which.rc == 0
+
+    - name: Display verification summary
+      ansible.builtin.debug:
+        msg:
+          - "=== Ares Poisoning Tools Verification Complete ==="
+          - "--- Build Dependencies ---"
+          - "gcc: {{ coercion_tools_gcc_check.stdout if coercion_tools_gcc_check is defined and coercion_tools_gcc_check.rc == 0 else 'Not installed' }}"
+          - "build-essential: {{ 'Installed' if coercion_tools_build_essential_check is defined and coercion_tools_build_essential_check.rc == 0 else 'Not installed' }}"
+          - "python3-dev: {{ 'Installed' if coercion_tools_python3_dev_check is defined and coercion_tools_python3_dev_check.rc == 0 else 'Not installed' }}"
+          - "python{{ coercion_tools_verify_python_version.stdout }}-dev: {{ 'Installed' if coercion_tools_python_version_dev_check is defined and coercion_tools_python_version_dev_check.rc == 0 else 'Not installed' }}"
+          - "--- Tools ---"
+          - "Responder: {{ coercion_tools_responder_which.stdout if coercion_tools_responder_which is defined and coercion_tools_responder_which.rc == 0 else 'Not installed' }}"
+          - "mitm6: {{ coercion_tools_mitm6_check.stdout if coercion_tools_mitm6_check is defined and coercion_tools_mitm6_check.rc == 0 else 'Not installed' }}"
+          - "Coercer: {{ coercion_tools_coercer_check.stdout if coercion_tools_coercer_check is defined and coercion_tools_coercer_check.rc == 0 else 'Not installed' }}"
+          - "PetitPotam: {{ 'Installed' if coercion_tools_petitpotam_stat is defined and coercion_tools_petitpotam_stat.stat.exists else 'Not installed' }}"
+          - "krbrelayx: {{ 'Installed' if coercion_tools_krbrelayx_stat is defined and coercion_tools_krbrelayx_stat.stat.exists else 'Not installed' }}"
+          - "krbrelayx impacket: {{ 'Installed' if coercion_tools_krbrelayx_impacket is defined and coercion_tools_krbrelayx_impacket.rc == 0 else 'Not installed' }}"
+          - "ntlmrelayx wrapper: {{ 'Installed' if coercion_tools_ntlmrelayx_wrapper is defined and coercion_tools_ntlmrelayx_wrapper.stat.exists else 'Not installed' }}"
+          - "dfscoerce: {{ 'Installed' if coercion_tools_dfscoerce_stat is defined and coercion_tools_dfscoerce_stat.stat.exists else 'Not installed' }}"
+          - "===================================================="

@@ -1,0 +1,44 @@
+---
+mythic_user: mythic
+mythic_home: "/home/{{ mythic_user }}"
+mythic_repo: "https://github.com/its-a-feature/Mythic.git"
+mythic_install_dir: "{{ mythic_home }}/Mythic"
+mythic_go_version: "1.21"
+mythic_install_dev_tools: true
+mythic_setup_systemd: true
+
+# Mythic configuration
+mythic_admin_user: "mythic_admin"
+mythic_credentials_path: "{{ lookup('env', 'HOME') }}/.ansible/credentials/mythic"
+mythic_admin_password: "{{ lookup('ansible.builtin.password', mythic_credentials_path + '/admin_password length=32 chars=ascii_letters,digits') }}"
+mythic_hasura_secret: "{{ lookup('ansible.builtin.password', mythic_credentials_path + '/hasura_secret length=32 chars=ascii_letters,digits') }}"
+mythic_jwt_secret: "{{ lookup('ansible.builtin.password', mythic_credentials_path + '/jwt_secret length=32 chars=ascii_letters,digits') }}"
+mythic_postgres_password: "{{ lookup('ansible.builtin.password', mythic_credentials_path + '/postgres_password length=32 chars=ascii_letters,digits') }}"
+mythic_rabbitmq_password: "{{ lookup('ansible.builtin.password', mythic_credentials_path + '/rabbitmq_password length=32 chars=ascii_letters,digits') }}"
+
+# Service configuration
+mythic_postgres_user: "mythic_user"
+mythic_postgres_db: "mythic_db"
+mythic_rabbitmq_user: "mythic_user"
+mythic_rabbitmq_vhost: "mythic_vhost"
+
+# Network configuration
+mythic_bind_all_interfaces: true
+mythic_nginx_port: 7443
+mythic_server_port: 17443
+mythic_server_grpc_port: 17444
+mythic_dynamic_ports: "7000-7010,1080"
+
+# Timing configurations
+mythic_initial_pull_timeout: 600
+mythic_jupyter_timeout: 300
+mythic_service_timeout: 180
+mythic_retry_delay: 10
+mythic_max_retries: 30
+
+# Systemd service configuration
+mythic_service_description: "Mythic C2 Framework Service"
+mythic_service_start_command: "./mythic-cli start"
+mythic_service_stop_command: "./mythic-cli stop"
+mythic_service_restart_sec: 100
+mythic_service_timeout_start_sec: 300

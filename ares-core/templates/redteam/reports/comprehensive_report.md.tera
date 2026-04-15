@@ -1,0 +1,200 @@
+# Red Team Operation Report
+
+**Operation ID**: {{ operation_id }}
+
+**Target{% if target_ips | length > 1 %}s{% endif %}**: {% if target_ips %}{{ target_ips | join(sep=", ") }}{% else %}{{ target_ip }}{% endif %} ({{ target_domain }})
+
+**Started**: {{ started_at }}
+
+**Completed**: {{ completed_at }}
+
+**Duration**: {{ duration }}
+
+---
+
+## Executive Summary
+
+{% if has_domain_admin %}
+### DOMAIN ADMIN ACHIEVED
+
+**Attack Path**: {{ domain_admin_path | default(value="Path not recorded") }}
+
+{% if domain_admin_chain %}
+#### Credential Chain to Domain Admin
+
+{% for step in domain_admin_chain %}
+{{ loop.index }}. **{{ step.domain }}\{{ step.username }}** {% if step.type == "hash" %}({{ step.hash_type }} hash){% else %}(password){% endif %}
+   - Discovered via: {{ step.source }}
+{% endfor %}
+{% endif %}
+{% else %}
+Domain Admin access was **not achieved** during this operation.
+{% endif %}
+
+{% if has_golden_ticket %}
+### GOLDEN TICKET GENERATED
+
+Persistent domain access has been established via Golden Ticket.
+{% endif %}
+
+---
+
+## Success Metrics
+
+| Metric | Value |
+|--------|-------|
+| Domain Admin Access | {{ da_display }} |
+| Golden Ticket | {{ gt_display }} |
+| Domains Discovered | {{ domains | length }} |
+| Hosts Discovered | {{ hosts | length }} ({{ dc_count }} DCs) |
+| Users Discovered | {{ users | length }} |
+| Credentials Obtained | {{ credentials | length }} |
+| NTLM Hashes Captured | {{ hashes | length }} |
+| Vulnerabilities Found | {{ vulnerabilities_found }} |
+| Vulnerabilities Exploited | {{ vulnerabilities_exploited }} |
+| Network Shares | {{ shares | length }} |
+
+---
+
+## Domains
+
+{% for domain in domains %}
+- {{ domain }}
+{% endfor %}
+
+---
+
+## Discovered Hosts
+
+{% for host in hosts %}
+### {{ host.label }}{% if host.is_dc %} [DOMAIN CONTROLLER]{% endif %}
+
+- **IP**: {{ host.ip }}
+- **OS**: {{ host.os | default(value="Unknown") }}
+{% if host.services | length > 0 %}
+- **Services**:
+{% for svc in host.services %}
+  - {{ svc }}
+{% endfor %}
+{% endif %}
+
+{% endfor %}
+
+---
+
+## Network Shares
+
+{% if shares | length > 0 %}
+| Share | Host | Permissions |
+|-------|------|-------------|
+{% for share in shares %}
+| {{ share.name }} | {{ share.host }} | {{ share.permissions | default(value="-") }} |
+{% endfor %}
+{% else %}
+No network shares discovered.
+{% endif %}
+
+---
+
+## Credentials & Hashes
+
+### Plaintext Credentials ({{ credentials | length }})
+
+{% if credentials | length > 0 %}
+| Domain | Username | Password | Source | Admin |
+|--------|----------|----------|--------|-------|
+{% for cred in credentials %}
+| {{ cred.domain }} | {{ cred.username }} | `{{ cred.password }}` | {{ cred.source }} | {{ cred.admin_display }} |
+{% endfor %}
+{% else %}
+No plaintext credentials captured.
+{% endif %}
+
+### NTLM Hashes ({{ hashes | length }})
+
+{% if hashes | length > 0 %}
+{% for hash in hashes %}
+- `{{ hash.domain }}\{{ hash.username }}:{{ hash.hash_type }}:{{ hash.hash_value }}`{% if hash.source %} ({{ hash.source }}){% endif %}
+
+{% endfor %}
+{% else %}
+No NTLM hashes captured.
+{% endif %}
+
+---
+
+## Attack Path & Timeline
+
+{% if domain_admin_path %}
+### Path to Domain Admin
+
+{{ domain_admin_path }}
+{% endif %}
+
+### Key Events
+
+{% if timeline | length > 0 %}
+| Time (UTC) | Event | MITRE |
+|------------|-------|-------|
+{% for event in timeline %}
+| {{ event.timestamp }} | {{ event.description }} | {{ event.mitre_display }} |
+{% endfor %}
+{% else %}
+No timeline events recorded.
+{% endif %}
+
+---
+
+## Discovered Vulnerabilities
+
+{% if discovered_vulns | length > 0 %}
+{% for vuln in discovered_vulns %}
+#### {{ vuln.vuln_type }} on {{ vuln.target_host }}
+
+- **Target IP**: {{ vuln.target_ip }}
+- **Priority**: {{ vuln.priority }}
+- **Status**: {{ vuln.status_display }}
+{% if vuln.details %}
+- **Details**: {{ vuln.details }}
+{% endif %}
+
+{% endfor %}
+{% else %}
+No specific vulnerabilities discovered.
+{% endif %}
+
+---
+
+## MITRE ATT&CK Mapping
+
+{% if techniques | length > 0 %}
+{% for technique in techniques %}
+- {{ technique }}
+{% endfor %}
+{% else %}
+No MITRE techniques mapped.
+{% endif %}
+
+---
+
+## Recommendations
+
+### Immediate Actions
+
+1. **Reset all compromised credentials** - All passwords listed above should be changed immediately
+2. **Revoke any generated tickets** - If golden ticket was created, full krbtgt password reset required (twice)
+3. **Investigate lateral movement** - Review access logs on all compromised hosts
+4. **Patch identified vulnerabilities** - Address all discovered vulnerabilities by priority
+
+### Long-term Improvements
+
+1. Implement credential tiering and reduce credential exposure
+2. Enable and monitor for Kerberos anomalies (unconstrained delegation, S4U abuse)
+3. Segment network to limit lateral movement paths
+4. Deploy endpoint detection for common attack tools (Impacket, Mimikatz)
+5. Regular vulnerability assessments for ADCS, MSSQL, and delegation misconfigurations
+
+---
+
+*Report generated by Ares Red Team Agent*
+*{{ generated_at }}*

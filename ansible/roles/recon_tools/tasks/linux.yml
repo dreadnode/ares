@@ -1,0 +1,267 @@
+---
+- name: Set DEBIAN_FRONTEND to noninteractive
+  ansible.builtin.lineinfile:
+    path: /etc/environment
+    line: 'DEBIAN_FRONTEND=noninteractive'
+    create: true
+    mode: '0644'
+  become: true
+  when: ansible_facts['os_family'] == 'Debian'
+
+- name: Update apt cache
+  ansible.builtin.apt:
+    update_cache: true
+    cache_valid_time: 3600
+  become: true
+  when:
+    - recon_tools_update_cache
+    - ansible_facts['os_family'] == 'Debian'
+
+- name: Install Kali-specific network tools
+  ansible.builtin.apt:
+    name: "{{ recon_tools_kali_packages }}"
+    state: present
+  become: true
+  when:
+    - ansible_facts['os_family'] == 'Debian'
+    - ansible_facts['distribution'] == 'Kali'
+
+- name: Install NetExec via apt (Kali)
+  ansible.builtin.apt:
+    name: "{{ recon_tools_netexec_package }}"
+    state: present
+  become: true
+  when:
+    - ansible_facts['os_family'] == 'Debian'
+    - ansible_facts['distribution'] == 'Kali'
+    - recon_tools_install_netexec
+
+- name: Install Ubuntu-compatible network tools
+  ansible.builtin.apt:
+    name: "{{ recon_tools_ubuntu_packages | reject('equalto', 'enum4linux') | list }}"
+    state: present
+  become: true
+  when:
+    - ansible_facts['os_family'] == 'Debian'
+    - ansible_facts['distribution'] != 'Kali'
+
+- name: Check if enum4linux package is available (non-Kali)
+  ansible.builtin.command: apt-cache show enum4linux
+  register: recon_tools_enum4linux_apt_check
+  changed_when: false
+  failed_when: false
+  become: true
+  when:
+    - ansible_facts['os_family'] == 'Debian'
+    - ansible_facts['distribution'] != 'Kali'
+
+- name: Install enum4linux via apt when available (non-Kali)
+  ansible.builtin.apt:
+    name: enum4linux
+    state: present
+  become: true
+  when:
+    - ansible_facts['os_family'] == 'Debian'
+    - ansible_facts['distribution'] != 'Kali'
+    - recon_tools_enum4linux_apt_check.rc == 0
+
+- name: Clone enum4linux from GitHub when apt is unavailable (non-Kali)
+  ansible.builtin.git:
+    repo: "{{ recon_tools_enum4linux_repo }}"
+    dest: "{{ recon_tools_enum4linux_install_dir }}"
+    version: "{{ recon_tools_enum4linux_version }}"
+    force: true
+  become: true
+  when:
+    - ansible_facts['os_family'] == 'Debian'
+    - ansible_facts['distribution'] != 'Kali'
+    - recon_tools_enum4linux_apt_check.rc != 0
+
+- name: Ensure enum4linux script is executable (non-Kali, GitHub fallback)
+  ansible.builtin.file:
+    path: "{{ recon_tools_enum4linux_install_dir }}/enum4linux.pl"
+    mode: '0755'
+  become: true
+  when:
+    - ansible_facts['os_family'] == 'Debian'
+    - ansible_facts['distribution'] != 'Kali'
+    - recon_tools_enum4linux_apt_check.rc != 0
+
+- name: Create enum4linux symlink in /usr/local/bin (non-Kali, GitHub fallback)
+  ansible.builtin.file:
+    src: "{{ recon_tools_enum4linux_install_dir }}/enum4linux.pl"
+    dest: /usr/local/bin/enum4linux
+    state: link
+    force: true
+  become: true
+  when:
+    - ansible_facts['os_family'] == 'Debian'
+    - ansible_facts['distribution'] != 'Kali'
+    - recon_tools_enum4linux_apt_check.rc != 0
+
+- name: Install enum4linux-ng via pipx (non-Kali)
+  when:
+    - ansible_facts['os_family'] == 'Debian'
+    - ansible_facts['distribution'] != 'Kali'
+    - recon_tools_install_enum4linuxng | bool
+    - recon_tools_enum4linuxng_use_pipx | default(true) | bool
+  block:
+    - name: Check if pipx is available
+      ansible.builtin.command: pipx --version
+      register: recon_tools_enum4linuxng_pipx_check
+      changed_when: false
+      failed_when: false
+
+    - name: Fail if pipx is not available
+      ansible.builtin.fail:
+        msg: >-
+          pipx is required for enum4linux-ng installation but was not found.
+          Ensure the base role was run with base_install_pipx: true
+          or install pipx manually: apt install pipx && pipx ensurepath
+      when: recon_tools_enum4linuxng_pipx_check.rc != 0
+
+    - name: Check if enum4linux-ng is already installed via pipx
+      ansible.builtin.command: pipx list
+      register: recon_tools_enum4linuxng_pipx_list
+      changed_when: false
+
+    - name: Install enum4linux-ng via pipx
+      ansible.builtin.command: >-
+        pipx install "{{ recon_tools_enum4linuxng_install_source }}"
+      register: recon_tools_enum4linuxng_pipx_install
+      changed_when: "'installed package' in recon_tools_enum4linuxng_pipx_install.stdout"
+      environment:
+        PATH: "{{ base_rust_bin_path }}:{{ base_pipx_bin_path }}:{{ ansible_env.PATH }}"
+      when: recon_tools_enum4linuxng_install_source
+        not in (recon_tools_enum4linuxng_pipx_list.stdout | default(''))
+
+- name: Find enum4linux-ng binary location
+  ansible.builtin.command: which enum4linux-ng
+  environment:
+    PATH: "{{ base_pipx_bin_path | default('/root/.local/bin') }}:/usr/local/bin:/usr/bin:/bin"
+  register: recon_tools_enum4linuxng_path
+  changed_when: false
+  failed_when: false
+  become: true
+  when:
+    - ansible_facts['os_family'] == 'Debian'
+    - recon_tools_install_enum4linuxng | bool
+    - ansible_facts['distribution'] != 'Kali'
+
+- name: Create symlink for enum4linux-ng in /usr/bin
+  ansible.builtin.file:
+    src: "{{ recon_tools_enum4linuxng_path.stdout }}"
+    dest: /usr/bin/enum4linux-ng
+    state: link
+    force: true
+  become: true
+  when:
+    - ansible_facts['os_family'] == 'Debian'
+    - recon_tools_install_enum4linuxng | bool
+    - ansible_facts['distribution'] != 'Kali'
+    - recon_tools_enum4linuxng_path.rc == 0
+    - recon_tools_enum4linuxng_path.stdout != '/usr/bin/enum4linux-ng'
+
+- name: Set pip break-system-packages args (when supported)
+  ansible.builtin.set_fact:
+    recon_tools_pip_break_args: >-
+      {{ '--break-system-packages'
+      if (base_pip_break_required | default(false))
+      and (base_pip_break_system_packages | default(true))
+      and (base_pip_supports_break_system_packages | default(false))
+      else '' }}
+  when: ansible_facts['os_family'] == 'Debian'
+
+# Impacket - MUST be installed from GitHub to get regsecrets module
+# See: https://github.com/Pennyw0rth/NetExec/issues/685
+# The PyPI version and Kali apt packages don't include impacket.examples.regsecrets
+# which NetExec 1.4.0+ requires for SMB module functionality
+- name: Install impacket from source (required for NetExec compatibility)
+  ansible.builtin.include_tasks: impacket_source.yml
+  when:
+    - ansible_facts['os_family'] == 'Debian'
+    - recon_tools_impacket_from_source
+
+# NetExec installation via pipx from GitHub (recommended method)
+# See: https://www.netexec.wiki/getting-started/installation/installation-on-unix
+# Requires: Rust toolchain (for aardwolf), git, pipx
+- name: Install NetExec via pipx from GitHub
+  ansible.builtin.include_tasks: netexec_pipx.yml
+  when:
+    - recon_tools_install_netexec
+    - ansible_facts['os_family'] == 'Debian'
+    - ansible_facts['distribution'] != 'Kali'
+    - recon_tools_netexec_use_pipx | default(true)
+
+- name: Install BloodHound Python via pipx
+  ansible.builtin.include_tasks: bloodhound_pipx.yml
+  when:
+    - ansible_facts['os_family'] == 'Debian'
+    - recon_tools_install_bloodhound
+
+- name: Install Certipy via pipx
+  ansible.builtin.include_tasks: certipy_pipx.yml
+  when:
+    - ansible_facts['os_family'] == 'Debian'
+    - recon_tools_install_certipy
+
+- name: Install adidnsdump via pipx
+  when:
+    - ansible_facts['os_family'] == 'Debian'
+    - recon_tools_install_adidnsdump | bool
+    - recon_tools_adidnsdump_use_pipx | default(true) | bool
+  block:
+    - name: Check if pipx is available
+      ansible.builtin.command: pipx --version
+      register: recon_tools_adidnsdump_pipx_check
+      changed_when: false
+      failed_when: false
+
+    - name: Fail if pipx is not available
+      ansible.builtin.fail:
+        msg: >-
+          pipx is required for adidnsdump installation but was not found.
+          Ensure the base role was run with base_install_pipx: true
+          or install pipx manually: apt install pipx && pipx ensurepath
+      when: recon_tools_adidnsdump_pipx_check.rc != 0
+
+    - name: Check if adidnsdump is already installed via pipx
+      ansible.builtin.command: pipx list
+      register: recon_tools_adidnsdump_pipx_list
+      changed_when: false
+
+    - name: Install adidnsdump via pipx
+      ansible.builtin.command: >-
+        pipx install "{{ recon_tools_adidnsdump_install_source
+        | default(recon_tools_adidnsdump_package) }}"
+      register: recon_tools_adidnsdump_pipx_install
+      changed_when: "'installed package' in recon_tools_adidnsdump_pipx_install.stdout"
+      environment:
+        PATH: "{{ base_rust_bin_path }}:{{ base_pipx_bin_path }}:{{ ansible_env.PATH }}"
+      when: recon_tools_adidnsdump_package not in (recon_tools_adidnsdump_pipx_list.stdout | default(''))
+
+# Create symlink for adidnsdump in /usr/bin for PATH accessibility
+- name: Find adidnsdump binary location
+  ansible.builtin.command: which adidnsdump
+  environment:
+    PATH: "{{ base_pipx_bin_path | default('/root/.local/bin') }}:/usr/local/bin:/usr/bin:/bin"
+  register: recon_tools_adidnsdump_path
+  changed_when: false
+  failed_when: false
+  become: true
+  when:
+    - ansible_facts['os_family'] == 'Debian'
+    - recon_tools_install_adidnsdump | bool
+
+- name: Create symlink for adidnsdump in /usr/bin
+  ansible.builtin.file:
+    src: "{{ recon_tools_adidnsdump_path.stdout }}"
+    dest: /usr/bin/adidnsdump
+    state: link
+    force: true
+  become: true
+  when:
+    - ansible_facts['os_family'] == 'Debian'
+    - recon_tools_install_adidnsdump | bool
+    - recon_tools_adidnsdump_path.rc == 0
+    - recon_tools_adidnsdump_path.stdout != '/usr/bin/adidnsdump'

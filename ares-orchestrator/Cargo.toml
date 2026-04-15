@@ -1,0 +1,34 @@
+[package]
+name = "ares-orchestrator"
+version = "0.1.0"
+edition = "2021"
+description = "Rust-native orchestration loop for the Ares red team system"
+
+[[bin]]
+name = "ares-orchestrator"
+path = "src/main.rs"
+
+[features]
+default = ["blue"]
+blue = ["ares-core/blue", "ares-llm/blue", "ares-tools/blue"]
+
+[dependencies]
+ares-core = { path = "../ares-core", features = ["telemetry"] }
+ares-llm = { path = "../ares-llm" }
+ares-tools = { path = "../ares-tools" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }
+tokio = { workspace = true }
+redis = { workspace = true }
+chrono = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
+uuid = { workspace = true }
+async-trait = "0.1"
+regex = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }
+rstest = "0.18"

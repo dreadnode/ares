@@ -1,0 +1,98 @@
+---
+- name: Set DEBIAN_FRONTEND to noninteractive
+  ansible.builtin.lineinfile:
+    path: /etc/environment
+    line: 'DEBIAN_FRONTEND=noninteractive'
+    create: true
+    mode: '0644'
+  become: true
+  when: ansible_facts['os_family'] == 'Debian'
+
+- name: Update apt cache
+  ansible.builtin.apt:
+    update_cache: true
+    cache_valid_time: 3600
+  become: true
+  when:
+    - cracking_tools_update_cache
+    - ansible_facts['os_family'] == 'Debian'
+
+- name: Create wordlist directory
+  ansible.builtin.file:
+    path: "{{ cracking_tools_wordlist_dir }}"
+    state: directory
+    mode: '0755'
+  become: true
+
+- name: Install GPU support packages
+  ansible.builtin.apt:
+    name: "{{ cracking_tools_opencl_packages }}"
+    state: present
+  become: true
+  when:
+    - cracking_tools_gpu_support | bool
+    - ansible_facts['os_family'] == 'Debian'
+
+- name: Create OpenCL vendors directory
+  ansible.builtin.file:
+    path: /etc/OpenCL/vendors
+    state: directory
+    mode: '0755'
+  become: true
+  when: cracking_tools_gpu_support | bool
+
+- name: Register NVIDIA OpenCL ICD
+  ansible.builtin.copy:
+    content: "libnvidia-opencl.so.1\n"
+    dest: /etc/OpenCL/vendors/nvidia.icd
+    mode: '0644'
+  become: true
+  when:
+    - cracking_tools_gpu_support | bool
+    - cracking_tools_nvidia_opencl_icd | default(false) | bool
+
+- name: Ensure libgcc runtime is present for hashcat
+  when:
+    - cracking_tools_install_hashcat
+    - ansible_facts['os_family'] == 'Debian'
+  block:
+    - name: Install primary libgcc package
+      ansible.builtin.apt:
+        name: "{{ cracking_tools_libgcc_package_primary }}"
+        state: present
+      become: true
+  rescue:
+    - name: Install fallback libgcc package
+      ansible.builtin.apt:
+        name: "{{ cracking_tools_libgcc_package_fallback }}"
+        state: present
+      become: true
+
+- name: Ensure libgcc static archive is present for hashcat
+  when:
+    - cracking_tools_install_hashcat
+    - ansible_facts['os_family'] == 'Debian'
+  block:
+    - name: Install primary gcc package
+      ansible.builtin.apt:
+        name: "{{ cracking_tools_gcc_package_primary }}"
+        state: present
+      become: true
+  rescue:
+    - name: Install fallback gcc package
+      ansible.builtin.apt:
+        name: "{{ cracking_tools_gcc_package_fallback }}"
+        state: present
+      become: true
+
+- name: Install hashcat
+  ansible.builtin.include_tasks: hashcat.yml
+  when: cracking_tools_install_hashcat
+
+- name: Install John the Ripper
+  ansible.builtin.include_tasks: john.yml
+  when: cracking_tools_install_john
+
+- name: Install wordlists
+  ansible.builtin.include_tasks: wordlists.yml
+  when: cracking_tools_install_wordlists

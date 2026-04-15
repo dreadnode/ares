@@ -1,0 +1,23 @@
+---
+- name: Provision Windows Attack Range Target
+  hosts: all
+  gather_facts: false
+  vars:
+    ansible_os_family: "Windows"
+    alloy_env: dev
+    alloy_deployment_name: ""
+    alloy_server_id: ""
+    alloy_instance_id: ""
+    alloy_loki_endpoint: "https://loki.dev.plundr.ai/loki/api/v1/push"
+    alloy_version: "1.10.1"
+
+  roles:
+    # Nimbus Range roles for Ansible system configuration and monitoring
+    - role: dreadnode.nimbus_range.aws_ssm_agent
+    - role: dreadnode.nimbus_range.aws_cloudwatch_agent
+
+    # Install and configure Grafana Alloy for log shipping
+    - role: dreadnode.nimbus_range.alloy
+
+    # Configure SACL auditing on Domain Controllers for DCSync detection
+    - role: dreadnode.nimbus_range.dc_audit_sacl

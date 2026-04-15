@@ -1,0 +1,163 @@
+---
+- name: Provision Linux Attack Range Box
+  hosts: all
+  gather_facts: true
+  vars:
+    # Alloy and monitoring vars
+    alloy_env: dev
+    alloy_deployment_name: ""
+    alloy_server_id: ""
+    alloy_instance_id: ""
+    alloy_loki_endpoint: "https://loki.dev.plundr.ai/loki/api/v1/push"
+    alloy_version: "1.10.1"
+
+    # VNC configuration vars
+    vnc_setup_client_options: "-geometry 1920x1080"
+    vnc_setup_depth: "24"
+    vnc_setup_systemd: true
+    vnc_setup_users:
+      - username: "{{ vnc_setup_default_username }}"
+        usergroup: "{{ vnc_setup_default_username }}"
+        vnc_num: 1
+    vnc_setup_default_username: "{{ ansible_distribution | lower }}"
+    vnc_setup_vncpwd_clone_path: /tmp/vncpwd
+    vnc_setup_vncpwd_path: /usr/local/bin/vncpwd
+
+  roles:
+    # Nimbus Range roles for Ansible system configuration and monitoring
+    - role: dreadnode.nimbus_range.aws_ssm_agent
+    - role: dreadnode.nimbus_range.aws_cloudwatch_agent
+
+    # Ares pentesting tools
+    - role: dreadnode.nimbus_range.recon_tools
+    - role: dreadnode.nimbus_range.credential_access_tools
+    - role: dreadnode.nimbus_range.coercion_tools
+    - role: dreadnode.nimbus_range.lateral_movement_tools
+    - role: dreadnode.nimbus_range.acl_tools
+    - role: dreadnode.nimbus_range.cracking_tools
+
+    # Install and configure Grafana Alloy for log shipping
+    - name: Install and configure Grafana Alloy
+      role: grafana.grafana.alloy
+      become: true
+      vars:
+        alloy_config: |
+          // Enable debug logging to help troubleshoot
+          logging {
+            level  = "debug"
+            format = "logfmt"
+          }
+
+          // Read system logs
+          loki.source.file "syslog" {
+            targets = [
+              {__path__ = "/var/log/syslog", job = "syslog"},
+              {__path__ = "/var/log/auth.log", job = "auth"},
+              {__path__ = "/var/log/user-data.log", job = "user-data"},
+            ]
+            forward_to = [loki.process.linux.receiver]
+          }
+
+          // Read shell history for attack activity tracking
+          loki.source.file "shell_history" {
+            targets = [
+              {__path__ = "/home/kali/.zsh_history", job = "zsh_history", user = "kali"},
+              {__path__ = "/root/.zsh_history", job = "zsh_history", user = "root"},
+              {__path__ = "/home/kali/.bash_history", job = "bash_history", user = "kali"},
+              {__path__ = "/root/.bash_history", job = "bash_history", user = "root"},
+            ]
+            forward_to = [loki.process.attack_tools.receiver]
+          }
+
+          // Process attack tool logs separately for better filtering
+          loki.process "attack_tools" {
+            // Add static labels
+            stage.static_labels {
+              values = {
+                environment  = "{{ alloy_env }}",
+                deployment   = "{{ alloy_deployment_name }}",
+                server       = "{{ alloy_server_id }}",
+                instance_id  = "{{ ansible_ec2_instance_id | default(alloy_instance_id) }}",
+                host         = constants.hostname,
+                os           = "linux",
+                log_type     = "attack_activity",
+              }
+            }
+            forward_to = [loki.write.remote.receiver]
+          }
+
+          // Process Linux system logs
+          loki.process "linux" {
+            // Add static labels
+            stage.static_labels {
+              values = {
+                environment  = "{{ alloy_env }}",
+                deployment   = "{{ alloy_deployment_name }}",
+                server       = "{{ alloy_server_id }}",
+                instance_id  = "{{ ansible_ec2_instance_id | default(alloy_instance_id) }}",
+                host         = constants.hostname,
+                os           = "linux",
+              }
+            }
+            forward_to = [loki.write.remote.receiver]
+          }
+
+          // Send logs to Loki
+          loki.write "remote" {
+            endpoint {
+              url = "{{ alloy_loki_endpoint }}"
+            }
+          }
+
+    # CowDogMoo workstation roles for user environment and VNC
+    - role: cowdogmoo.workstation.user_setup
+    - role: cowdogmoo.workstation.zsh_setup
+    - role: cowdogmoo.workstation.vnc_setup
+
+  post_tasks:
+    - name: Setup shell history file permissions for Alloy
+      block:
+        - name: Create shell history files if they don't exist
+          ansible.builtin.file:
+            path: "{{ item }}"
+            state: touch
+            owner: "{{ 'kali' if 'kali' in item else 'root' }}"
+            group: "{{ 'kali' if 'kali' in item else 'root' }}"
+            mode: '0644'
+            modification_time: preserve
+            access_time: preserve
+          loop:
+            - /home/kali/.zsh_history
+            - /home/kali/.bash_history
+            - /root/.zsh_history
+            - /root/.bash_history
+          become: true
+
+        - name: Set ACL on /home/kali directory for alloy user
+          ansible.posix.acl:
+            path: /home/kali
+            entity: alloy
+            etype: user
+            permissions: rx
+            state: present
+          become: true
+
+        - name: Set ACL on shell history files for alloy user
+          ansible.posix.acl:
+            path: "{{ item }}"
+            entity: alloy
+            etype: user
+            permissions: r
+            state: present
+          loop:
+            - /home/kali/.zsh_history
+            - /home/kali/.bash_history
+            - /root/.zsh_history
+            - /root/.bash_history
+          become: true
+
+        - name: Restart alloy service to pick up file permissions
+          ansible.builtin.systemd:
+            name: alloy
+            state: restarted
+          become: true

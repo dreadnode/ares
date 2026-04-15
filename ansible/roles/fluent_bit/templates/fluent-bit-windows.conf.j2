@@ -1,0 +1,152 @@
+[SERVICE]
+    Flush        5
+    Daemon       Off
+    Log_Level    info
+    HTTP_Server  Off
+    HTTP_Listen  0.0.0.0
+    HTTP_Port    2020
+    HTTP_Client_Buffer 1M
+
+# Windows Event Logs
+[INPUT]
+    Name              winlog
+    Tag               windows.system
+    Channels          System
+    Interval_Sec      10
+    DB                {{ fluent_bit_windows_state_dir }}\system.db
+
+[INPUT]
+    Name              winlog
+    Tag               windows.application
+    Channels          Application
+    Interval_Sec      10
+    DB                {{ fluent_bit_windows_state_dir }}\application.db
+
+[INPUT]
+    Name              winlog
+    Tag               windows.security
+    Channels          Security
+    Interval_Sec      10
+    DB                {{ fluent_bit_windows_state_dir }}\security.db
+
+[INPUT]
+    Name              winlog
+    Tag               windows.setup
+    Channels          Setup
+    Interval_Sec      10
+    DB                {{ fluent_bit_windows_state_dir }}\setup.db
+
+# PowerShell logs
+[INPUT]
+    Name              winevtlog
+    Channels          System,Application,Security,Setup
+    Interval_Sec      10
+    DB                {{ fluent_bit_windows_state_dir }}\winevtlog.sqlite
+    Read_Existing_Events False
+
+{% if sysmon_installed is defined and sysmon_installed %}
+# Sysmon logs
+[INPUT]
+    Name              winlog
+    Tag               windows.sysmon
+    Channels          Microsoft-Windows-Sysmon/Operational
+    Interval_Sec      10
+    DB                {{ fluent_bit_windows_state_dir }}\sysmon.db
+{% endif %}
+
+# SSM Agent Event Logs
+[INPUT]
+    Name              winlog
+    Tag               windows.ssm.events
+    Channels          AWS Systems Manager
+    Interval_Sec      10
+    DB                {{ fluent_bit_windows_state_dir }}\ssm-events.db
+
+[INPUT]
+    Name              winlog
+    Tag               windows.powershell.operational
+    Channels          Microsoft-Windows-PowerShell/Operational
+    Interval_Sec      10
+    DB                {{ fluent_bit_windows_state_dir }}\powershell-operational.db
+
+[INPUT]
+    Name              tail
+    Tag               windows.ssm.session
+    Path              C:\ProgramData\Amazon\SSM\InstanceData\*\session\orchestration\*\Standard_Stream\ipcTempFile.log
+    Path_Key          log_path
+    DB                {{ fluent_bit_windows_state_dir }}\ssm-session.db
+    Mem_Buf_Limit     5MB
+    Skip_Long_Lines   On
+    Refresh_Interval  10
+
+# Log OS and Arch
+[FILTER]
+    Name          lua
+    Match         *
+    Code          function add_system_info(tag, timestamp, record) record["os"] = "Windows"; local f = io.popen("wmic OS get OSArchitecture"); local arch = f:read("*a"):match("(%d+)%-bit"); record["architecture"] = arch and arch .. "-bit" or "unknown"; f:close(); return 2, timestamp, record; end
+    Call          add_system_info
+    Protected_Mode false
+
+# AWS metadata filter
+[FILTER]
+    Name              aws
+    Match             *
+    imds_version      v2
+    az                true
+    ec2_instance_id   true
+    ec2_instance_type true
+    private_ip        true
+    ami_id            true
+    account_id        true
+    hostname          true
+    vpc_id            true
+
+[FILTER]
+    Name              record_modifier
+    Match             *
+    Record            environment {{ fluent_bit_env }}
+    Record            deployment {{ fluent_bit_deployment_name }}
+    Record            hostname {{ ansible_hostname | default(ansible_host) }}
+    Record            platform windows
+
+# Extract PowerShell commands filter
+[FILTER]
+    Name              grep
+    Match             windows.powershell.operational
+    Regex             CommandLine (.+)
+
+# Create a specific command field
+[FILTER]
+    Name              modify
+    Match             windows.powershell.operational
+    Rename            CommandLine command
+
+# Create a specific user field
+[FILTER]
+    Name              grep
+    Match             windows.powershell.operational
+    Regex             UserId (.+)
+
+[FILTER]
+    Name              modify
+    Match             windows.powershell.operational
+    Rename            UserId user
+
+[OUTPUT]
+    Name                  opensearch
+    Match                 *
+    Host                  {{ fluent_bit_opensearch_custom_domain }}
+    Port                  443
+    HTTP_User             {{ fluent_bit_opensearch_username }}
+    HTTP_Passwd           {{ fluent_bit_opensearch_password }}
+    Suppress_Type_Name    On
+    Logstash_Format       On
+    Logstash_Prefix       {{ fluent_bit_env }}-{{ fluent_bit_deployment_name }}-windows
+    Logstash_DateFormat   %Y.%m.%d
+    Include_Tag_Key       On
+    Tag_Key               fluentbit_tag
+    Generate_ID           Off
+    tls                   On
+    tls.verify            Off
+    Retry_Limit           5
+    Buffer_Size           512k

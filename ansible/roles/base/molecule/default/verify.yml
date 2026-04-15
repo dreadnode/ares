@@ -1,0 +1,243 @@
+---
+- name: Verify
+  hosts: all
+  gather_facts: true
+  tasks:
+    - name: Include default variables
+      ansible.builtin.include_vars:
+        file: "../../defaults/main.yml"
+
+    - name: Verify Python 3 is installed
+      ansible.builtin.command: python3 --version
+      register: base_python_version
+      changed_when: false
+      failed_when: base_python_version.rc != 0
+
+    - name: Assert Python version is displayed
+      ansible.builtin.assert:
+        that:
+          - base_python_version.stdout is defined
+          - "'Python 3' in base_python_version.stdout"
+        fail_msg: "Python 3 is not properly installed"
+        success_msg: "Python 3 is installed: {{ base_python_version.stdout }}"
+
+    - name: Verify pip3 is installed
+      ansible.builtin.command: pip3 --version
+      register: base_pip_version
+      changed_when: false
+      failed_when: false
+
+    - name: Assert pip3 is working
+      ansible.builtin.assert:
+        that:
+          - base_pip_version.rc == 0
+          - base_pip_version.stdout is defined
+        fail_msg: "pip3 is not properly installed"
+        success_msg: "pip3 is installed: {{ base_pip_version.stdout }}"
+
+    - name: Verify uv is installed
+      ansible.builtin.command: uv --version
+      register: base_uv_version
+      changed_when: false
+      failed_when: false
+      when: base_install_uv
+
+    - name: Assert uv is working
+      ansible.builtin.assert:
+        that:
+          - base_uv_version.rc == 0
+          - base_uv_version.stdout is defined
+        fail_msg: "uv is not properly installed"
+        success_msg: "uv is installed: {{ base_uv_version.stdout }}"
+      when: base_install_uv
+
+    # Rust verification (required for NetExec installation)
+    - name: Verify Rust is installed
+      ansible.builtin.shell: /root/.cargo/bin/rustc --version || rustc --version
+      register: base_rust_version
+      changed_when: false
+      failed_when: false
+      become: true
+      args:
+        executable: /bin/bash
+      when: base_install_rust | default(true)
+
+    - name: Assert Rust is working (required for NetExec)
+      ansible.builtin.assert:
+        that:
+          - base_rust_version.rc == 0
+          - base_rust_version.stdout is defined
+        fail_msg: |
+          Rust is not properly installed. NetExec requires Rust to build.
+          See: https://www.netexec.wiki/getting-started/installation/installation-on-unix
+        success_msg: "Rust is installed: {{ base_rust_version.stdout }}"
+      when: base_install_rust | default(true)
+
+    - name: Verify cargo is installed
+      ansible.builtin.command: cargo --version
+      register: base_cargo_version
+      changed_when: false
+      failed_when: false
+      when:
+        - ansible_facts['os_family'] == 'Debian'
+        - "'cargo' in base_system_packages"
+
+    - name: Assert cargo is working
+      ansible.builtin.assert:
+        that:
+          - base_cargo_version.rc == 0
+          - base_cargo_version.stdout is defined
+        fail_msg: "cargo is not properly installed"
+        success_msg: "cargo is installed: {{ base_cargo_version.stdout }}"
+      when:
+        - ansible_facts['os_family'] == 'Debian'
+        - "'cargo' in base_system_packages"
+
+    # pipx verification (recommended for NetExec installation)
+    - name: Verify pipx is installed
+      ansible.builtin.command: pipx --version
+      register: base_pipx_version
+      changed_when: false
+      failed_when: false
+      when: base_install_pipx | default(true)
+
+    - name: Assert pipx is working
+      ansible.builtin.assert:
+        that:
+          - base_pipx_version.rc == 0
+          - base_pipx_version.stdout is defined
+        fail_msg: "pipx is not properly installed (recommended for NetExec)"
+        success_msg: "pipx is installed: {{ base_pipx_version.stdout }}"
+      when: base_install_pipx | default(true)
+
+    - name: Gather package facts
+      ansible.builtin.package_facts:
+        manager: auto
+      when: ansible_facts['os_family'] == 'Debian'
+
+    - name: Assert Python packages are installed
+      ansible.builtin.assert:
+        that:
+          - item in ansible_facts.packages
+        fail_msg: "{{ item }} is not installed"
+        success_msg: "{{ item }} is installed"
+      loop: "{{ base_python_packages }}"
+      when: ansible_facts['os_family'] == 'Debian'
+
+    - name: Assert system packages are installed
+      ansible.builtin.assert:
+        that:
+          - item in ansible_facts.packages
+        fail_msg: "{{ item }} is not installed"
+        success_msg: "{{ item }} is installed"
+      loop: "{{ base_system_packages }}"
+      when: ansible_facts['os_family'] == 'Debian'
+
+    - name: Assert Ubuntu-specific system packages are installed
+      ansible.builtin.assert:
+        that:
+          - item in ansible_facts.packages
+        fail_msg: "{{ item }} is not installed"
+        success_msg: "{{ item }} is installed"
+      loop: "{{ base_system_packages_ubuntu }}"
+      when:
+        - ansible_facts['os_family'] == 'Debian'
+        - ansible_facts['distribution'] != 'Kali'
+
+    - name: Assert Kali-specific system packages are installed
+      ansible.builtin.assert:
+        that:
+          - item in ansible_facts.packages
+        fail_msg: "{{ item }} is not installed"
+        success_msg: "{{ item }} is installed"
+      loop: "{{ base_system_packages_kali }}"
+      when:
+        - ansible_facts['os_family'] == 'Debian'
+        - ansible_facts['distribution'] == 'Kali'
+
+    - name: Verify kali-motd is removed
+      ansible.builtin.stat:
+        path: /usr/bin/kali-motd
+      register: base_kali_motd_check
+      when:
+        - ansible_facts['os_family'] == 'Debian'
+        - ansible_facts['distribution'] == 'Kali'
+
+    - name: Assert kali-motd is absent
+      ansible.builtin.assert:
+        that:
+          - not base_kali_motd_check.stat.exists
+        fail_msg: "kali-motd was not removed"
+        success_msg: "kali-motd has been removed"
+      when:
+        - ansible_facts['os_family'] == 'Debian'
+        - ansible_facts['distribution'] == 'Kali'
+
+    - name: Verify dreadnode package is importable
+      ansible.builtin.command: python3 -c "import dreadnode; print(dreadnode.__version__)"
+      register: base_dreadnode_check
+      changed_when: false
+      failed_when: false
+
+    - name: Assert dreadnode package is available
+      ansible.builtin.assert:
+        that:
+          - base_dreadnode_check.rc == 0
+          - base_dreadnode_check.stdout is defined
+          - base_dreadnode_check.stdout | length > 0
+        fail_msg: "dreadnode package is not importable"
+        success_msg: "dreadnode package version: {{ base_dreadnode_check.stdout }}"
+
+    - name: Verify rigging package is importable
+      ansible.builtin.command: python3 -c "import rigging; print(rigging.__version__)"
+      register: base_rigging_check
+      changed_when: false
+      failed_when: false
+
+    - name: Assert rigging package is available
+      ansible.builtin.assert:
+        that:
+          - base_rigging_check.rc == 0
+          - base_rigging_check.stdout is defined
+          - base_rigging_check.stdout | length > 0
+        fail_msg: "rigging package is not importable"
+        success_msg: "rigging package version: {{ base_rigging_check.stdout }}"
+
+    - name: Check workspace directory exists
+      ansible.builtin.stat:
+        path: "{{ base_workspace_dir }}"
+      register: base_workspace_stat
+      when: base_create_workspace
+
+    - name: Assert workspace directory exists with correct permissions
+      ansible.builtin.assert:
+        that:
+          - base_workspace_stat.stat.exists
+          - base_workspace_stat.stat.isdir
+          - base_workspace_stat.stat.mode == base_workspace_mode
+        fail_msg: "Workspace directory does not exist or has incorrect permissions"
+        success_msg: "Workspace directory exists at {{ base_workspace_dir }}"
+      when: base_create_workspace
+
+    - name: Display verification summary
+      ansible.builtin.debug:
+        msg:
+          - "========== Ares Base Verification Complete =========="
+          - ""
+          - "--- Core Tools ---"
+          - "Python: {{ base_python_version.stdout }}"
+          - "pip: {{ base_pip_version.stdout }}"
+          - "uv: {{ base_uv_version.stdout if base_install_uv else 'Not tested' }}"
+          - ""
+          - "--- Build Tools (for NetExec) ---"
+          - "Rust: {{ base_rust_version.stdout | default('Not tested') if base_install_rust | default(true) else 'Not configured' }}"
+          - "pipx: {{ base_pipx_version.stdout | default('Not tested') if base_install_pipx | default(true) else 'Not configured' }}"
+          - ""
+          - "--- Python Packages ---"
+          - "dreadnode: {{ 'Installed' if base_dreadnode_check.rc == 0 else 'Not available' }}"
+          - "rigging: {{ 'Installed' if base_rigging_check.rc == 0 else 'Not available' }}"
+          - ""
+          - "--- Configuration ---"
+          - "Workspace: {{ base_workspace_dir if base_create_workspace else 'Not created' }}"
+          - ""
+          - "====================================================="

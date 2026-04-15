@@ -1,0 +1,31 @@
+---
+# Install bloodhound-python via pipx for dependency isolation
+# This prevents conflicts with other tools that depend on impacket
+
+- name: Check if bloodhound-python is already installed via pipx
+  ansible.builtin.command: pipx list
+  register: recon_tools_bloodhound_pipx_list
+  changed_when: false
+  failed_when: false
+  become: true
+  environment:
+    HOME: /root
+
+- name: Install bloodhound-python via pipx
+  ansible.builtin.command: pipx install bloodhound
+  register: recon_tools_bloodhound_pipx_install
+  changed_when: "'installed package bloodhound' in recon_tools_bloodhound_pipx_install.stdout"
+  failed_when: false
+  become: true
+  environment:
+    HOME: /root
+    PATH: "{{ base_rust_bin_path }}:{{ base_pipx_bin_path }}:{{ ansible_env.PATH }}"
+  when: "'bloodhound' not in recon_tools_bloodhound_pipx_list.stdout | default('')"
+
+- name: Create symlink for bloodhound-python in /usr/bin
+  ansible.builtin.file:
+    src: "{{ base_pipx_bin_path }}/bloodhound-python"
+    dest: /usr/bin/bloodhound-python
+    state: link
+    force: true
+  become: true

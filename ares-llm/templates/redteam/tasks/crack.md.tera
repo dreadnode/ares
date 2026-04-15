@@ -1,0 +1,11 @@
+## Crack Task: {{ task_id }}
+
+**Hash Type:** {{ hash_type }}
+**Hash:** {{ hash_value }}
+{% if username %}**Username:** {{ username }}
+{% endif -%}
+{% if domain %}**Domain:** {{ domain }}
+{% endif -%}
+
+Crack this hash using hashcat or john. Try rockyou.txt first, then rules.
+Call `task_complete` with the cracked password or report failure.

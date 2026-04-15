@@ -1,0 +1,13 @@
+---
+- name: Restart fluent-bit (Linux)
+  ansible.builtin.systemd:
+    name: fluent-bit
+    state: restarted
+  become: true
+  when: ansible_os_family != 'Windows'
+
+- name: Restart fluent-bit (Windows)
+  ansible.windows.win_service:
+    name: fluent-bit
+    state: restarted
+  when: ansible_os_family == 'Windows'

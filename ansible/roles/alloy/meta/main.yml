@@ -1,0 +1,21 @@
+---
+galaxy_info:
+  role_name: alloy
+  author: Dreadnode
+  description: Install and configure Grafana Alloy for Windows hosts
+  company: Dreadnode
+  license: MIT
+  min_ansible_version: "2.13"
+  platforms:
+    - name: Windows
+      versions:
+        - all
+  galaxy_tags:
+    - alloy
+    - grafana
+    - observability
+    - monitoring
+    - windows
+    - telemetry
+
+dependencies: []

@@ -1,0 +1,47 @@
+---
+- name: Provision Cracker Agent
+  hosts: "{{ target_hosts | default('localhost') }}"
+  connection: "{{ 'local' if container_build | default(false) else 'ssh' }}"
+  gather_facts: true
+  become: true
+
+  vars:
+    _container_build: "{{ (container_build | default(false)) | bool }}"
+
+    # Focus on cracking capabilities
+    cracking_tools_install_hashcat: true
+    cracking_tools_install_john: true
+    cracking_tools_gpu_support: true
+
+    # Install comprehensive wordlists
+    cracking_tools_wordlists:
+      - rockyou
+      - seclists_passwords
+    cracking_tools_install_seclists: true
+
+  roles:
+    - role: dreadnode.nimbus_range.base
+      vars:
+        base_update_cache: "{{ not _container_build }}"
+
+    - role: dreadnode.nimbus_range.cracking_tools
+      vars:
+        cracking_tools_update_cache: "{{ not _container_build }}"
+
+    - role: cowdogmoo.workstation.build_cleanup
+      when: _container_build
+      vars:
+        build_cleanup_enabled: true
+        build_cleanup_install_path: "/usr/local/bin"
+        build_cleanup_user_home: "/root"
+        build_cleanup_username: "root"
+        build_cleanup_is_container: true
+        build_cleanup_generate_post_script: true
+        build_cleanup_post_script_path: /tmp/post_ansible_cleanup.sh
+        build_cleanup_clear_histories: true
+        build_cleanup_final_apt_cleanup: true
+        build_cleanup_final_temp_cleanup: true
+        build_cleanup_final_sync: true
+        build_cleanup_preserve_static_libs: true
+        build_cleanup_protected_packages:
+          - gcc

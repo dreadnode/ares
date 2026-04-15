@@ -860,3 +860,398 @@ tasks:
           kubectl exec -n {{.K8S_NAMESPACE}} $POD -- \
             head -50 {{.PVC_PATH}}/src/ares/{{.FILE}}
         fi
+
+  # ============================================================================
+  # RUST BINARY DEPLOYMENT
+  # ============================================================================
+  rust:build:
+    desc: "Cross-compile Rust binaries for Linux (K8s pods)"
+    silent: true
+    vars:
+      RUST_TARGET: '{{.RUST_TARGET | default "x86_64-unknown-linux-gnu"}}'
+      MAX_OPEN_FILES: '{{.MAX_OPEN_FILES | default "8192"}}'
+      CARGO_BUILD_JOBS: '{{.CARGO_BUILD_JOBS | default "4"}}'
+    cmds:
+      - |
+        bash <<'EOF'
+        set -euo pipefail
+
+        echo -e "{{.INFO}} Cross-compiling for {{.RUST_TARGET}}..."
+
+        BEFORE_ULIMIT=$(ulimit -n)
+        if ulimit -n {{.MAX_OPEN_FILES}} 2>/dev/null; then
+          echo -e "{{.INFO}} maxfiles: $BEFORE_ULIMIT -> $(ulimit -n)"
+        else
+          echo -e "{{.WARN}} Could not raise maxfiles (current: $BEFORE_ULIMIT)"
+        fi
+
+        export CARGO_BUILD_JOBS="{{.CARGO_BUILD_JOBS}}"
+        echo -e "{{.INFO}} cargo build jobs: $CARGO_BUILD_JOBS"
+
+        # Cross-compile: prefer cargo-zigbuild (works on Apple Silicon),
+        # fall back to cross, then raw cargo
+        if command -v cargo-zigbuild >/dev/null 2>&1; then
+          cargo zigbuild --release --target {{.RUST_TARGET}}
+        elif command -v cross >/dev/null 2>&1; then
+          cross build --release --target {{.RUST_TARGET}}
+        else
+          echo -e "{{.WARN}} No cross-compilation tool found, trying cargo with target..."
+          echo -e "{{.INFO}} Install: cargo install cargo-zigbuild"
+          cargo build --release --target {{.RUST_TARGET}}
+        fi
+
+        echo -e "{{.SUCCESS}} Binaries built:"
+        ls -lh target/{{.RUST_TARGET}}/release/ares-cli \
+               target/{{.RUST_TARGET}}/release/ares-orchestrator \
+               target/{{.RUST_TARGET}}/release/ares-worker 2>/dev/null || true
+        EOF
+
+  orchestrator:patch-wrapper:
+    desc: "Patch the red orchestrator deployment wrapper to use ares-cli instead of redis-cli"
+    silent: true
+    cmds:
+      - |
+        set -euo pipefail
+
+        echo -e "{{.INFO}} Patching ares-orchestrator deployment wrapper..."
+        kubectl patch deployment ares-orchestrator \
+          -n {{.K8S_NAMESPACE}} \
+          --type='json' \
+          --patch-file .taskfiles/remote/orchestrator-wrapper-patch.json >/dev/null
+        echo -e "{{.SUCCESS}} ares-orchestrator wrapper patched"
+
+  check:
+    desc: "Check if local Rust binaries match remote pods (usage: task remote:check [TEAM=red|blue|all])"
+    silent: true
+    vars:
+      RUST_TARGET: '{{.RUST_TARGET | default "x86_64-unknown-linux-gnu"}}'
+      BIN_DIR: 'target/{{.RUST_TARGET}}/release'
+      REMOTE_BIN_DIR: '/usr/local/bin'
+    cmds:
+      - |
+        echo -e "{{.INFO}} Comparing local Rust binaries to remote pods (team={{.TEAM}})"
+        echo ""
+
+        # Check local binaries exist
+        LOCAL_BINS_FOUND=0
+        for bin in ares-cli ares-orchestrator ares-worker; do
+          if [ -f "{{.BIN_DIR}}/$bin" ]; then
+            LOCAL_BINS_FOUND=$((LOCAL_BINS_FOUND + 1))
+          else
+            echo -e "{{.WARN}} Local binary not found: {{.BIN_DIR}}/$bin"
+          fi
+        done
+
+        if [ $LOCAL_BINS_FOUND -eq 0 ]; then
+          echo -e "{{.ERROR}} No local binaries found. Run: task remote:rust:build"
+          exit 1
+        fi
+
+        # Get pods based on team
+        ORCH_PODS=""
+        WORKER_PODS=""
+
+        if [ "{{.TEAM}}" = "red" ] || [ "{{.TEAM}}" = "all" ]; then
+          RED_ORCH=$(kubectl get pods -n {{.K8S_NAMESPACE}} \
+            -l {{.RED_ORCH_LABEL}} \
+            --field-selector=status.phase=Running \
+            -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
+          if [ -n "$RED_ORCH" ]; then
+            ORCH_PODS="$RED_ORCH"
+          fi
+
+          RED_WORKERS=$(kubectl get pods -n {{.K8S_NAMESPACE}} \
+            -l {{.RED_COMPONENT_LABEL}} \
+            --field-selector=status.phase=Running \
+            -o json | jq -r --arg orch "$RED_ORCH" \
+              '.items[] | select(.metadata.name != $orch) | .metadata.name' \
+              2>/dev/null | tr '\n' ' ')
+          WORKER_PODS="$RED_WORKERS"
+        fi
+
+        if [ "{{.TEAM}}" = "blue" ] || [ "{{.TEAM}}" = "all" ]; then
+          BLUE_ORCH=$(kubectl get pods -n {{.K8S_NAMESPACE}} \
+            -l {{.BLUE_ORCH_LABEL}} \
+            --field-selector=status.phase=Running \
+            -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
+          if [ -n "$BLUE_ORCH" ]; then
+            ORCH_PODS="$ORCH_PODS $BLUE_ORCH"
+          fi
+        fi
+
+        ORCH_PODS=$(echo "$ORCH_PODS" | xargs)
+        WORKER_PODS=$(echo "$WORKER_PODS" | xargs)
+
+        if [ -z "$ORCH_PODS" ] && [ -z "$WORKER_PODS" ]; then
+          echo -e "{{.ERROR}} No running pods found for team={{.TEAM}}"
+          exit 1
+        fi
+
+        ORCH_COUNT=$(echo "$ORCH_PODS" | wc -w | xargs)
+        WORKER_COUNT=0
+        [ -n "$WORKER_PODS" ] && WORKER_COUNT=$(echo "$WORKER_PODS" | wc -w | xargs)
+        echo -e "{{.INFO}} Checking against $ORCH_COUNT orchestrator(s) + $WORKER_COUNT worker(s)"
+        echo ""
+
+        TOTAL_CHECKED=0
+        TOTAL_MATCH=0
+        TOTAL_DIFFER=0
+        TOTAL_MISSING=0
+        FAILED_PODS=""
+
+        check_binary() {
+          local bin_name="$1"
+          local pod="$2"
+          local local_hash="$3"
+
+          remote_hash=$(kubectl exec -n {{.K8S_NAMESPACE}} "$pod" -- \
+            sha256sum "{{.REMOTE_BIN_DIR}}/$bin_name" 2>/dev/null | awk '{print $1}')
+
+          if [ -z "$remote_hash" ]; then
+            echo "MISSING"
+          elif [ "$remote_hash" != "$local_hash" ]; then
+            echo "DIFFERS"
+          else
+            echo "OK"
+          fi
+        }
+
+        # Check orchestrator pods: ares-cli + ares-orchestrator
+        for pod in $ORCH_PODS; do
+          for bin in ares-cli ares-orchestrator; do
+            [ ! -f "{{.BIN_DIR}}/$bin" ] && continue
+            local_hash=$(shasum -a 256 "{{.BIN_DIR}}/$bin" | awk '{print $1}')
+            TOTAL_CHECKED=$((TOTAL_CHECKED + 1))
+
+            result=$(check_binary "$bin" "$pod" "$local_hash")
+            case "$result" in
+              OK)
+                echo -e "{{.SUCCESS}} $bin @ $pod: OK"
+                TOTAL_MATCH=$((TOTAL_MATCH + 1))
+                ;;
+              MISSING)
+                echo -e "{{.WARN}} $bin @ $pod: MISSING"
+                TOTAL_MISSING=$((TOTAL_MISSING + 1))
+                echo "$FAILED_PODS" | grep -q "$pod" || FAILED_PODS="$FAILED_PODS $pod"
+                ;;
+              DIFFERS)
+                echo -e "{{.ERROR}} $bin @ $pod: DIFFERS"
+                TOTAL_DIFFER=$((TOTAL_DIFFER + 1))
+                echo "$FAILED_PODS" | grep -q "$pod" || FAILED_PODS="$FAILED_PODS $pod"
+                ;;
+            esac
+          done
+        done
+
+        # Check worker pods: ares-worker only
+        if [ -n "$WORKER_PODS" ] && [ -f "{{.BIN_DIR}}/ares-worker" ]; then
+          local_hash=$(shasum -a 256 "{{.BIN_DIR}}/ares-worker" | awk '{print $1}')
+          for pod in $WORKER_PODS; do
+            TOTAL_CHECKED=$((TOTAL_CHECKED + 1))
+
+            result=$(check_binary "ares-worker" "$pod" "$local_hash")
+            case "$result" in
+              OK)
+                echo -e "{{.SUCCESS}} ares-worker @ $pod: OK"
+                TOTAL_MATCH=$((TOTAL_MATCH + 1))
+                ;;
+              MISSING)
+                echo -e "{{.WARN}} ares-worker @ $pod: MISSING"
+                TOTAL_MISSING=$((TOTAL_MISSING + 1))
+                echo "$FAILED_PODS" | grep -q "$pod" || FAILED_PODS="$FAILED_PODS $pod"
+                ;;
+              DIFFERS)
+                echo -e "{{.ERROR}} ares-worker @ $pod: DIFFERS"
+                TOTAL_DIFFER=$((TOTAL_DIFFER + 1))
+                echo "$FAILED_PODS" | grep -q "$pod" || FAILED_PODS="$FAILED_PODS $pod"
+                ;;
+            esac
+          done
+        fi
+
+        echo ""
+        echo "========================================"
+        echo -e "{{.INFO}} Summary: $TOTAL_CHECKED checked, $TOTAL_MATCH match, $TOTAL_DIFFER differ, $TOTAL_MISSING missing"
+
+        if [ "$TOTAL_DIFFER" -gt 0 ] || [ "$TOTAL_MISSING" -gt 0 ]; then
+          FAILED_PODS=$(echo "$FAILED_PODS" | xargs)
+          FAILED_COUNT=$(echo "$FAILED_PODS" | wc -w | xargs)
+          echo -e "{{.WARN}} $FAILED_COUNT pod(s) out of sync"
+          echo ""
+          echo -e "{{.WARN}} Run 'task remote:rust:deploy TEAM={{.TEAM}}' to deploy binaries"
+          exit 1
+        else
+          echo -e "{{.SUCCESS}} All binaries match on all pods"
+        fi
+
+  rust:deploy:
+    desc: "Deploy Rust binaries to K8s pods (usage: task remote:rust:deploy [TEAM=red|blue|all])"
+    silent: true
+    vars:
+      RUST_TARGET: '{{.RUST_TARGET | default "x86_64-unknown-linux-gnu"}}'
+      BIN_DIR: 'target/{{.RUST_TARGET}}/release'
+      REMOTE_BIN_DIR: '/usr/local/bin'
+    preconditions:
+      - sh: test -f {{.BIN_DIR}}/ares-cli
+        msg: "Binary not found. Run: task remote:rust:build"
+    cmds:
+      - |
+        echo -e "{{.INFO}} Deploying Rust binaries to pods in {{.K8S_NAMESPACE}}"
+
+        ORCH_PODS=""
+        WORKER_PODS=""
+
+        if [ "{{.TEAM}}" = "red" ] || [ "{{.TEAM}}" = "all" ]; then
+          ORCH_POD=$(kubectl get pods -n {{.K8S_NAMESPACE}} \
+            -l {{.RED_ORCH_LABEL}} \
+            --field-selector=status.phase=Running \
+            -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
+          [ -n "$ORCH_POD" ] && ORCH_PODS="$ORCH_POD"
+
+          WORKER_PODS=$(kubectl get pods -n {{.K8S_NAMESPACE}} \
+            -l {{.RED_COMPONENT_LABEL}} \
+            --field-selector=status.phase=Running \
+            -o json | jq -r ".items[] | select(.metadata.name != \"$ORCH_POD\") | .metadata.name" | tr '\n' ' ')
+        fi
+
+        if [ "{{.TEAM}}" = "blue" ] || [ "{{.TEAM}}" = "all" ]; then
+          BLUE_ORCH=$(kubectl get pods -n {{.K8S_NAMESPACE}} \
+            -l {{.BLUE_ORCH_LABEL}} \
+            --field-selector=status.phase=Running \
+            -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
+          [ -n "$BLUE_ORCH" ] && ORCH_PODS="$ORCH_PODS $BLUE_ORCH"
+        fi
+
+        FAILED=0
+
+        # Deploy to orchestrator pods: ares-cli + ares-orchestrator
+        for pod in $ORCH_PODS; do
+          echo -e "{{.INFO}} Deploying to orchestrator: $pod"
+          for bin in ares-cli ares-orchestrator; do
+            if kubectl cp "{{.BIN_DIR}}/$bin" "$pod:{{.REMOTE_BIN_DIR}}/$bin" \
+                -n {{.K8S_NAMESPACE}} 2>/dev/null; then
+              # Make executable
+              kubectl exec -n {{.K8S_NAMESPACE}} "$pod" -- chmod +x "{{.REMOTE_BIN_DIR}}/$bin" 2>/dev/null
+              echo -e "{{.SUCCESS}}   $bin -> $pod"
+            else
+              echo -e "{{.ERROR}}   $bin -> $pod FAILED"
+              FAILED=$((FAILED + 1))
+            fi
+          done
+        done
+
+        # Deploy to worker pods: ares-worker only
+        for pod in $WORKER_PODS; do
+          echo -e "{{.INFO}} Deploying to worker: $pod"
+          if kubectl cp "{{.BIN_DIR}}/ares-worker" "$pod:{{.REMOTE_BIN_DIR}}/ares-worker" \
+              -n {{.K8S_NAMESPACE}} 2>/dev/null; then
+            kubectl exec -n {{.K8S_NAMESPACE}} "$pod" -- chmod +x "{{.REMOTE_BIN_DIR}}/ares-worker" 2>/dev/null
+            echo -e "{{.SUCCESS}}   ares-worker -> $pod"
+          else
+            echo -e "{{.ERROR}}   ares-worker -> $pod FAILED"
+            FAILED=$((FAILED + 1))
+          fi
+        done
+
+        if [ $FAILED -eq 0 ]; then
+          echo -e "{{.SUCCESS}} All binaries deployed successfully"
+        else
+          echo -e "{{.ERROR}} $FAILED deployment(s) failed"
+          exit 1
+        fi
+
+  rust:deploy:quick:
+    desc: "Build and deploy in one step (cross-compile + deploy)"
+    cmds:
+      - task: rust:build
+      - task: rust:deploy
+
+  rust:deploy:verify:
+    desc: "Verify deployed binary versions on all pods"
+    silent: true
+    cmds:
+      - |
+        echo -e "{{.INFO}} Checking binary versions on pods..."
+
+        ALL_PODS=$(kubectl get pods -n {{.K8S_NAMESPACE}} \
+          --field-selector=status.phase=Running \
+          -l 'ares.dreadnode.io/component in (red-team,blue-team)' \
+          -o jsonpath='{.items[*].metadata.name}' 2>/dev/null || true)
+
+        ORCH_POD=$(kubectl get pods -n {{.K8S_NAMESPACE}} \
+          -l {{.RED_ORCH_LABEL}} \
+          --field-selector=status.phase=Running \
+          -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
+
+        # Check orchestrator
+        if [ -n "$ORCH_POD" ]; then
+          echo -e "\n{{.INFO}} Orchestrator: $ORCH_POD"
+          for bin in ares-cli ares-orchestrator; do
+            VER=$(kubectl exec -n {{.K8S_NAMESPACE}} "$ORCH_POD" -- \
+              $bin --version 2>/dev/null || echo "NOT FOUND")
+            echo "  $bin: $VER"
+          done
+        fi
+
+        # Check workers
+        for pod in $ALL_PODS; do
+          [ "$pod" = "$ORCH_POD" ] && continue
+          VER=$(kubectl exec -n {{.K8S_NAMESPACE}} "$pod" -- \
+            ares-worker --version 2>/dev/null || echo "NOT FOUND")
+          echo "  $pod: ares-worker $VER"
+        done
+
+  rust:deploy:config:
+    desc: "Deploy config YAML to pods as ConfigMap"
+    silent: true
+    vars:
+      CONFIG_FILE: '{{.CONFIG_FILE | default "config/ares.yaml"}}'
+    cmds:
+      - |
+        echo -e "{{.INFO}} Creating/updating ConfigMap from {{.CONFIG_FILE}}"
+        kubectl create configmap ares-config \
+          --from-file=config.yaml={{.CONFIG_FILE}} \
+          -n {{.K8S_NAMESPACE}} \
+          --dry-run=client -o yaml | kubectl apply -f -
+        echo -e "{{.SUCCESS}} ConfigMap ares-config updated"
+        echo -e "{{.INFO}} Pods will pick up changes on next restart"
+        echo -e "{{.INFO}} To restart now: task remote:rollout TEAM=red"
+
+  rust:deploy:agents:
+    desc: "Sync Python agent scripts to pods (minimal set needed by Rust worker)"
+    silent: true
+    cmds:
+      - |
+        echo -e "{{.INFO}} Syncing Python agent scripts..."
+
+        # Only these Python files are needed by the Rust worker/orchestrator:
+        AGENT_FILES=(
+          "src/ares/agents/__init__.py"
+          "src/ares/agents/red_team.py"
+          "src/ares/agents/blue_team.py"
+          "src/ares/tools/"
+          "src/ares/templates/"
+        )
+
+        # Find all pods
+        PODS=$(kubectl get pods -n {{.K8S_NAMESPACE}} \
+          --field-selector=status.phase=Running \
+          -l 'ares.dreadnode.io/component' \
+          -o jsonpath='{.items[*].metadata.name}')
+
+        for pod in $PODS; do
+          echo -e "{{.INFO}} Syncing agents to $pod"
+          for path in "${AGENT_FILES[@]}"; do
+            if [ -d "$path" ]; then
+              kubectl cp "$path" "$pod:/opt/ares/$(basename $path)" \
+                -n {{.K8S_NAMESPACE}} 2>/dev/null && \
+              echo -e "{{.SUCCESS}}   $path -> $pod" || \
+              echo -e "{{.WARN}}   $path -> $pod (failed)"
+            elif [ -f "$path" ]; then
+              kubectl cp "$path" "$pod:/opt/ares/agents/$(basename $path)" \
+                -n {{.K8S_NAMESPACE}} 2>/dev/null && \
+              echo -e "{{.SUCCESS}}   $path -> $pod" || \
+              echo -e "{{.WARN}}   $path -> $pod (failed)"
+            fi
+          done
+        done

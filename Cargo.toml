@@ -1,0 +1,27 @@
+[workspace]
+resolver = "2"
+members = ["ares-core", "ares-cli", "ares-llm", "ares-orchestrator", "ares-worker", "ares-tools"]
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+redis = { version = "0.27", features = ["tokio-comp", "connection-manager"] }
+chrono = { version = "0.4", features = ["serde"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+uuid = { version = "1.11", features = ["v4"] }
+thiserror = "1"
+anyhow = "1"
+clap = { version = "4.5.23", features = ["derive", "env"] }
+serde_yaml = "0.9"
+regex = "1"
+sqlx = { version = "0.8", features = ["runtime-tokio", "postgres", "chrono", "json", "uuid"] }
+tera = "1"
+
+# OpenTelemetry
+opentelemetry = "0.31"
+opentelemetry_sdk = { version = "0.31", features = ["trace"] }
+opentelemetry-otlp = { version = "0.31", features = ["grpc-tonic", "trace"] }
+tracing-opentelemetry = "0.32"
+opentelemetry-semantic-conventions = "0.31"

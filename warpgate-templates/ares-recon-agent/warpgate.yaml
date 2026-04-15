@@ -1,0 +1,76 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/cowdogmoo/warpgate/main/schema/warpgate-template.json
+metadata:
+    name: ares-recon-agent
+    version: 1.0.0
+    description: Ares reconnaissance agent with network tools for Active Directory enumeration
+    author: Dreadnode <info@dreadnode.io>
+    license: MIT
+    tags:
+        - ares
+        - reconnaissance
+        - active-directory
+    requires:
+        warpgate: '>=1.0.0'
+name: ares-recon-agent
+version: latest
+base:
+    image: ghcr.io/dreadnode/ares-base:latest
+    pull: true
+    privileged: true
+    volumes:
+        /sys/fs/cgroup: /sys/fs/cgroup:rw
+    run_command:
+        - -d
+        - -i
+        - -t
+        - --cgroupns=host
+        - '{{ .Image }}'
+    environment:
+        DEBIAN_FRONTEND: noninteractive
+        TZ: UTC
+    changes:
+        - ENTRYPOINT ${ENTRYPOINT}
+        - ENV DEBIAN_FRONTEND=noninteractive
+        - ENV TZ=UTC
+provisioners:
+    - type: shell
+      only:
+        - docker.arm64
+        - docker.amd64
+      inline:
+        - apt-get update
+    - type: ansible
+      only:
+        - docker.arm64
+        - docker.amd64
+      playbook_path: ${PROVISION_REPO_PATH}/playbooks/ares/recon.yml
+      galaxy_file: ${PROVISION_REPO_PATH}/requirements.yml
+      extra_vars:
+        container_build: true
+        build_cleanup_install_path: /usr/local/bin
+        build_cleanup_user_home: /root
+        build_cleanup_username: root
+        ansible_shell_executable: /bin/bash
+      ansible_env_vars:
+        - ANSIBLE_REMOTE_TMP=/tmp/ansible-tmp-$USER
+        - PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+    - type: shell
+      only:
+        - docker.arm64
+        - docker.amd64
+      inline:
+        - /tmp/post_ansible_cleanup.sh
+    - type: shell
+      only:
+        - docker.arm64
+        - docker.amd64
+      inline:
+        - echo "Build completed successfully"
+      changes:
+        - USER root
+        - WORKDIR /root
+targets:
+    - type: container
+      platforms:
+        - linux/amd64
+        - linux/arm64

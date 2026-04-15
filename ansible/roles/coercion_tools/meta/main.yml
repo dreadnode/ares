@@ -1,0 +1,30 @@
+---
+galaxy_info:
+  author: Dreadnode
+  namespace: dreadnode
+  description: Install and configure network poisoning and relay attack tools for Ares agents
+  company: dreadnode
+  license: MIT
+  role_name: coercion_tools
+  min_ansible_version: "2.18.4"
+  platforms:
+    - name: Ubuntu
+      versions:
+        - all
+    - name: Debian
+      versions:
+        - all
+    - name: Kali
+      versions:
+        - all
+  galaxy_tags:
+    - ares
+    - security
+    - pentesting
+    - network
+    - poisoning
+    - relay
+    - kali
+
+dependencies:
+  - role: dreadnode.nimbus_range.base

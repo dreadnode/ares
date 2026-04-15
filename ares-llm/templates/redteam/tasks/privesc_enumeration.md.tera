@@ -1,0 +1,18 @@
+## Privilege Escalation Enumeration: {{ task_id }}
+
+**Technique:** {{ technique }}
+**Target:** {{ target_ip }}
+{% if domain %}**Domain:** {{ domain }}
+{% endif -%}
+{% if credential_username %}**Credential:** {{ credential_username }}@{{ credential_domain }}{% if credential_password %} / Password: {{ credential_password }}{% endif %}
+{% endif -%}
+
+Enumerate privilege escalation opportunities using {{ technique }}.
+
+{% if state_context %}
+## Current Operation State
+
+{{ state_context }}
+{% endif -%}
+
+Call `task_complete` with discovered escalation paths.

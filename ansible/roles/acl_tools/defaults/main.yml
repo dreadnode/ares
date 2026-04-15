@@ -1,0 +1,44 @@
+---
+# ACL exploitation tool packages (Ubuntu-compatible)
+acl_tools_ubuntu_packages:
+  - git
+  - python3
+  - python3-pip
+  - python3-dev
+  - python3-venv
+  - build-essential
+  - smbclient
+  - samba-common-bin
+
+# bloodyAD configuration (ACL exploitation framework)
+acl_tools_install_bloodyad: true
+acl_tools_bloodyad_package: "bloodyAD"
+acl_tools_bloodyad_apt_package: "bloodyad"
+
+# Pywhisker configuration (shadow credentials manipulation)
+acl_tools_install_pywhisker: true
+acl_tools_pywhisker_package: "pywhisker"
+
+# dacledit configuration (Impacket ACL editing)
+acl_tools_install_dacledit: true
+acl_tools_impacket_from_source: true
+acl_tools_impacket_repo: "https://github.com/fortra/impacket.git"
+acl_tools_impacket_version: "impacket_0_13_0"
+acl_tools_impacket_install_dir: "/opt/impacket"
+
+# targetedKerberoast configuration (targeted kerberoasting via ACLs)
+# Reference: https://github.com/ShutdownRepo/targetedKerberoast
+acl_tools_install_targetedkerberoast: true
+acl_tools_targetedkerberoast_repo: "https://github.com/ShutdownRepo/targetedKerberoast.git"
+acl_tools_targetedkerberoast_install_dir: "/opt/targetedKerberoast"
+acl_tools_targetedkerberoast_version: "main"
+
+acl_tools_update_cache: true
+
+# Tool binary paths (for verification)
+acl_tools_binaries:
+  bloodyad: "/usr/local/bin/bloodyAD"
+  pywhisker: "/usr/local/bin/pywhisker"
+  dacledit: "/usr/local/bin/impacket-dacledit"
+  targetedkerberoast: "/usr/local/bin/targetedKerberoast"
+  rpcclient: "/usr/bin/rpcclient"

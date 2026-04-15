@@ -1,0 +1,32 @@
+## Recon Task: {{ task_id }}
+
+**Target:** {{ target_ip }}
+{% if domain %}**Domain:** {{ domain }}
+{% endif -%}
+{% if credential_username %}**Credential:** {{ credential_username }}@{{ credential_domain }}{% if credential_password %} / Password: {{ credential_password }}{% endif %}
+{% endif -%}
+
+{% if techniques -%}
+**Requested Techniques:**
+{% for t in techniques -%}
+- {{ t }}
+{% endfor -%}
+{% else -%}
+Perform a comprehensive reconnaissance scan of the target.
+{% endif -%}
+
+{% if state_context %}
+## Current Operation State
+
+{{ state_context }}
+{% endif -%}
+
+## Output Requirements
+
+When calling `task_complete`, provide a summary of your findings. Do NOT include hosts, users, credentials, hashes, vulnerabilities, shares, or trusted_domains in your result — these are automatically extracted from tool output by the parser. Just describe what you found:
+
+```json
+{
+  "summary": "Brief description of findings and tools executed"
+}
+```

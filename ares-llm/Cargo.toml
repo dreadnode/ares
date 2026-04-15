@@ -1,0 +1,28 @@
+[package]
+name = "ares-llm"
+version = "0.1.0"
+edition = "2021"
+description = "Model-agnostic LLM provider, prompt builder, and agent loop for Ares"
+
+[dependencies]
+ares-core = { path = "../ares-core", features = ["telemetry"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+chrono = { workspace = true }
+tracing = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+uuid = { workspace = true }
+tera = { workspace = true }
+regex = { workspace = true }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+async-trait = "0.1"
+
+[features]
+blue = []
+
+[dev-dependencies]
+tokio = { workspace = true }
+serde_json = { workspace = true }
+async-trait = "0.1"

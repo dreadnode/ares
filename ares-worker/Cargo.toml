@@ -1,0 +1,33 @@
+[package]
+name = "ares-worker"
+version = "0.1.0"
+edition = "2021"
+description = "Worker binary for Ares red team multi-agent system"
+
+[[bin]]
+name = "ares-worker"
+path = "src/main.rs"
+
+[features]
+default = ["blue"]
+blue = ["ares-core/blue", "ares-llm/blue", "ares-tools/blue"]
+
+[dependencies]
+ares-core = { path = "../ares-core", features = ["telemetry"] }
+ares-llm = { path = "../ares-llm" }
+ares-tools = { path = "../ares-tools" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+redis = { workspace = true }
+chrono = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+uuid = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+async-trait = "0.1"
+
+[build-dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_yaml = "0.9"

@@ -1,0 +1,19 @@
+[Unit]
+Description={{ mythic_service_description }}
+After=network.target docker.service
+Requires=docker.service
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+Restart=on-failure
+RestartSec={{ mythic_service_restart_sec }}
+User={{ mythic_user }}
+Group={{ mythic_user }}
+WorkingDirectory={{ mythic_install_dir }}
+ExecStart=/usr/bin/docker compose up
+ExecStop=/usr/bin/docker compose down
+TimeoutStartSec={{ mythic_service_timeout_start_sec }}
+
+[Install]
+WantedBy=multi-user.target

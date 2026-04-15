@@ -1,0 +1,31 @@
+---
+# Install lsassy via pipx for dependency isolation
+# Required for extracting TGTs from LSASS on unconstrained delegation hosts
+
+- name: Check if lsassy is already installed via pipx
+  ansible.builtin.command: pipx list
+  register: privesc_tools_lsassy_pipx_list
+  changed_when: false
+  failed_when: false
+  become: true
+  environment:
+    HOME: /root
+
+- name: Install lsassy via pipx
+  ansible.builtin.command: pipx install lsassy
+  register: privesc_tools_lsassy_pipx_install
+  changed_when: "'installed package lsassy' in privesc_tools_lsassy_pipx_install.stdout"
+  failed_when: false
+  become: true
+  environment:
+    HOME: /root
+    PATH: "{{ base_rust_bin_path }}:{{ base_pipx_bin_path }}:{{ ansible_facts['env']['PATH'] }}"
+  when: "'lsassy' not in privesc_tools_lsassy_pipx_list.stdout | default('')"
+
+- name: Create symlink for lsassy in /usr/local/bin
+  ansible.builtin.file:
+    src: "{{ base_pipx_bin_path }}/lsassy"
+    dest: /usr/local/bin/lsassy
+    state: link
+    force: true
+  become: true

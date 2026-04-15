@@ -1,0 +1,6 @@
+[target.x86_64-unknown-linux-gnu]
+# Create symlink so .cargo/config.toml's linker = "x86_64-unknown-linux-gnu-gcc"
+# resolves inside the container (which has x86_64-linux-gnu-gcc).
+pre-build = [
+    "ln -sf /usr/bin/x86_64-linux-gnu-gcc /usr/bin/x86_64-unknown-linux-gnu-gcc",
+]

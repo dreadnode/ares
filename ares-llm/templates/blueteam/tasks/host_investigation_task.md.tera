@@ -1,0 +1,53 @@
+# Host Investigation Task: {{ hostname }}
+
+## Task ID: {{ task_id }}
+
+## Target Host
+- **Hostname/IP**: {{ hostname }}
+{% if context %}- **Context**: {{ context }}{% endif %}
+
+## Investigation State
+{{ state_summary }}
+
+## Instructions
+Investigate all activity on host **{{ hostname }}**:
+
+1. **Get full host activity**: Query all log sources for this host
+   - Authentication events (Event 4624/4625/4634)
+   - Process creation (Event 4688)
+   - Service installation (Event 7045)
+   - Share access (Event 5140/5145)
+   - Scheduled task creation (Event 4698)
+
+2. **Identify all users**: Extract every user who authenticated to {{ hostname }}
+   - For each user: logon type, source IP/workstation, legitimate vs suspicious
+   - Call `track_user_investigation()` for each user discovered
+
+3. **Check for compromise indicators**:
+   - Service creation: PsExec (PSEXESVC), remote execution frameworks (Event 7045)
+   - Admin share access: ADMIN$, C$ access from remote hosts (Event 5140)
+   - Multiple auth sources: Different IPs authenticating as the same user
+   - Unusual processes: Suspicious binaries, PowerShell encoded commands, cmd chains (Event 4688)
+   - Scheduled tasks: Persistence mechanisms with suspicious actions (Event 4698)
+   - Kerberos anomalies: TGS requests with RC4, unusual service tickets
+
+4. **Identify inbound connections**: For every authentication TO this host
+   - Record with `add_lateral_connection(source_host=<source>, destination_host="{{ hostname }}", ...)`
+   - Investigate the source host if not already investigated
+
+5. **Identify outbound connections**: For every authentication FROM this host
+   - Record with `add_lateral_connection(source_host="{{ hostname }}", destination_host=<dest>, ...)`
+   - Investigate the destination host if not already investigated
+
+6. **Record all evidence**: Every finding must be recorded with `add_evidence()`:
+   - Users seen: evidence_type="user", pyramid_level=4
+   - Source IPs: evidence_type="ip", pyramid_level=2
+   - Processes: evidence_type="artifact", pyramid_level=4
+   - Services created: evidence_type="artifact", pyramid_level=4
+   - Techniques observed: evidence_type="technique", pyramid_level=6
+
+7. **Complete**: Call `lateral_complete` with your findings including:
+   - All users who accessed this host
+   - All hosts connected to/from this host
+   - Assessment of whether the host is compromised
+   - Containment recommendation (isolate host, block network segment, forensic image)

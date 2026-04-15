@@ -1,0 +1,68 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/cowdogmoo/warpgate/main/schema/warpgate-template.json
+metadata:
+  name: ares-orchestrator
+  version: 1.0.0
+  description: Ares orchestrator that coordinates multi-agent red team operations via Redis
+  author: Dreadnode <info@dreadnode.io>
+  license: MIT
+  tags:
+    - ares
+    - orchestrator
+    - multi-agent
+    - red-team
+  requires:
+    warpgate: ">=1.0.0"
+name: ares-orchestrator
+version: latest
+base:
+  image: python:3.13.7-slim
+  pull: true
+  run_command:
+    - -d
+    - -i
+    - -t
+  environment:
+    DEBIAN_FRONTEND: noninteractive
+    TZ: UTC
+  changes:
+    - ENTRYPOINT ["/bin/bash"]
+    - ENV DEBIAN_FRONTEND=noninteractive
+    - ENV TZ=UTC
+sources:
+  - name: ares
+    git:
+      repository: https://github.com/dreadnode/ares.git
+      ref: main
+      depth: 1
+      auth:
+        token: ${GITHUB_TOKEN}
+provisioners:
+  - type: file
+    source: ${sources.ares}
+    destination: /tmp/ares-build
+  - type: shell
+    only:
+      - docker.arm64
+      - docker.amd64
+    inline:
+      - apt-get update
+      - apt-get install -y --no-install-recommends ca-certificates curl git jq
+      - pip install --no-cache-dir uv
+      - pip install --no-cache-dir "/tmp/ares-build[postgres]"
+      - rm -rf /tmp/ares-build
+      - apt-get clean
+      - rm -rf /var/lib/apt/lists/*
+  - type: shell
+    only:
+      - docker.arm64
+      - docker.amd64
+    inline:
+      - echo "Build completed successfully"
+    changes:
+      - USER root
+      - WORKDIR /root
+targets:
+  - type: container
+    platforms:
+      - linux/amd64
+      - linux/arm64

@@ -1,0 +1,235 @@
+# Blue Team Operation Report
+
+**Operation ID**: {{ operation_id }}
+**Started**: {{ started_at }}
+**Completed**: {{ completed_at }}
+**Duration**: {{ duration }}
+
+---
+
+## Executive Summary
+
+{% if escalation_count > 0 %}
+### ESCALATIONS REQUIRED
+
+**{{ escalation_count }}** investigation(s) require human analyst review.
+{% endif %}
+
+| Metric | Value |
+|--------|-------|
+| Investigations | {{ investigation_count }} |
+| Alerts Processed | {{ alert_count }} |
+| Evidence Collected | {{ evidence_count }} |
+| MITRE Techniques | {{ technique_count }} |
+| MITRE Tactics | {{ tactic_count }} |
+| Hosts Investigated | {{ host_count }} |
+| Users Investigated | {{ user_count }} |
+| Highest Pyramid Level | {{ highest_pyramid_level }}/6 |
+| TTPs Identified | {{ ttp_count }} |
+| Escalations | {{ escalation_count }} |
+
+{% if attack_synopses | length > 0 %}
+### Attack Synopsis
+
+{% for synopsis in attack_synopses %}
+{{ synopsis }}
+
+{% endfor %}
+{% endif %}
+
+---
+
+## Investigation Summary
+
+{% if alert_summaries | length > 0 %}
+| Investigation | Alert | Severity | Evidence | Pyramid | Status |
+|--------------|-------|----------|----------|---------|--------|
+{% for alert in alert_summaries %}
+| {{ alert.investigation_id_short }}... | {{ alert.alert_name }} | {{ alert.severity }} | {{ alert.evidence_count }} | {{ alert.highest_pyramid_level }}/6 | {{ alert.status_display }} |
+{% endfor %}
+{% else %}
+No investigations recorded.
+{% endif %}
+
+---
+
+## MITRE ATT&CK Coverage
+
+### Tactics
+
+{% if tactics | length > 0 %}
+{% for tactic in tactics %}
+- {{ tactic }}
+{% endfor %}
+{% else %}
+No tactics identified.
+{% endif %}
+
+### Techniques
+
+{% if techniques | length > 0 %}
+| ID | Name | Tactic |
+|----|------|--------|
+{% for tech in techniques %}
+| {{ tech.id }} | {{ tech.name }} | {{ tech.tactic }} |
+{% endfor %}
+{% else %}
+No techniques identified.
+{% endif %}
+
+---
+
+## Pyramid of Pain Assessment
+
+| Level | Category | Count | Adversary Pain |
+|-------|----------|-------|----------------|
+{% for entry in pyramid_entries %}
+| {{ entry.level }} | {{ entry.category }} | {{ entry.count }} | {{ entry.pain }} |
+{% endfor %}
+
+{% if highest_pyramid_level >= 6 %}
+**Assessment**: Investigation reached TTP level - actionable intelligence produced.
+{% elif highest_pyramid_level >= 5 %}
+**Assessment**: Tool-level indicators identified. Consider further elevation to TTPs.
+{% elif highest_pyramid_level >= 3 %}
+**Assessment**: Moderate indicators identified. Deeper analysis recommended.
+{% else %}
+**Assessment**: Limited to trivial indicators. More investigation may be needed.
+{% endif %}
+
+---
+
+## Evidence Inventory
+
+{% for level_group in evidence_levels %}
+{% if level_group.evidence | length > 0 %}
+### Level {{ level_group.level }}: {{ level_group.name }}
+
+| ID | Type | Value | Techniques | Confidence |
+|----|------|-------|------------|------------|
+{% for ev in level_group.evidence %}
+| {{ ev.id_short }}... | {{ ev.type }} | `{{ ev.value }}` | {{ ev.techniques_display }} | {{ ev.confidence_display }} |
+{% endfor %}
+
+{% endif %}
+{% endfor %}
+
+{% if evidence_count == 0 %}
+No evidence collected.
+{% endif %}
+
+---
+
+## Timeline
+
+{% if timeline | length > 0 %}
+| Time (UTC) | Event | Techniques | Confidence |
+|------------|-------|------------|------------|
+{% for event in timeline %}
+| {{ event.timestamp }} | {{ event.description_short }} | {{ event.mitre_display }} | {{ event.confidence_display }} |
+{% endfor %}
+{% else %}
+No timeline events recorded.
+{% endif %}
+
+---
+
+## Scope
+
+### Hosts Investigated ({{ host_count }})
+
+{% if hosts | length > 0 %}
+{% for host in hosts %}
+- `{{ host }}`
+{% endfor %}
+{% else %}
+No hosts investigated.
+{% endif %}
+
+### Users Investigated ({{ user_count }})
+
+{% if users | length > 0 %}
+{% for user in users %}
+- `{{ user }}`
+{% endfor %}
+{% else %}
+No users investigated.
+{% endif %}
+
+---
+
+## Recommendations
+
+{% if escalation_count > 0 %}
+### Escalation Required
+
+{{ escalation_count }} investigation(s) flagged for human analyst review. Priority action recommended.
+{% endif %}
+
+### Immediate Actions
+
+{% if recommendations | length > 0 %}
+{% for rec in recommendations %}
+{{ loop.index }}. {{ rec }}
+{% endfor %}
+{% else %}
+No specific recommendations generated.
+{% endif %}
+
+### Detection Improvements
+
+{% if techniques | length > 0 %}
+Consider adding or tuning detection rules for:
+{% for tech in detection_techniques %}
+- **{{ tech.id }}** ({{ tech.name }})
+{% endfor %}
+{% endif %}
+
+---
+
+{% if investigation_details | length > 0 %}
+## Appendix: Investigation Details
+
+{% for inv in investigation_details %}
+<details>
+<summary><strong>{{ inv.investigation_id }}</strong> - {{ inv.alert_name }} ({{ inv.severity }})</summary>
+
+**Status:** {{ inv.status }}
+**Evidence:** {{ inv.evidence_count }} items
+**Techniques:** {{ inv.techniques_display }}
+
+{% if inv.alert_payload %}
+### Alert Payload
+
+```json
+{{ inv.alert_payload }}
+```
+{% endif %}
+
+{% if inv.queries | length > 0 %}
+### Queries Executed ({{ inv.queries | length }})
+
+{% for q in inv.queries_display %}
+**{{ loop.index }}.** `{{ q.type }}`
+```
+{{ q.query }}
+```
+Results: {{ q.result_count }} items
+
+{% endfor %}
+{% if inv.extra_query_count > 0 %}
+_... and {{ inv.extra_query_count }} more queries_
+{% endif %}
+{% else %}
+_No queries recorded._
+{% endif %}
+
+</details>
+
+{% endfor %}
+
+---
+
+{% endif %}
+*Report generated by Ares Blue Team Agent*
+*{{ generated_at }}*

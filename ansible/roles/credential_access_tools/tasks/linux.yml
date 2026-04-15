@@ -1,0 +1,166 @@
+---
+- name: Set DEBIAN_FRONTEND to noninteractive
+  ansible.builtin.lineinfile:
+    path: /etc/environment
+    line: 'DEBIAN_FRONTEND=noninteractive'
+    create: true
+    mode: '0644'
+  become: true
+  when: ansible_facts['os_family'] == 'Debian'
+
+- name: Update apt cache
+  ansible.builtin.apt:
+    update_cache: true
+    cache_valid_time: 3600
+  become: true
+  when:
+    - credential_access_tools_update_cache
+    - ansible_facts['os_family'] == 'Debian'
+
+- name: Install Kali-specific credential access tools
+  ansible.builtin.apt:
+    name: "{{ credential_access_tools_kali_packages }}"
+    state: present
+  become: true
+  when:
+    - ansible_facts['os_family'] == 'Debian'
+    - ansible_facts['distribution'] == 'Kali'
+
+- name: Install Ubuntu-compatible credential access tools
+  ansible.builtin.apt:
+    name: "{{ credential_access_tools_ubuntu_packages }}"
+    state: present
+  become: true
+  when:
+    - ansible_facts['os_family'] == 'Debian'
+    - ansible_facts['distribution'] != 'Kali'
+
+- name: Set pip break-system-packages args (when supported)
+  ansible.builtin.set_fact:
+    credential_access_tools_pip_break_args: >-
+      {{ '--break-system-packages'
+      if (base_pip_break_required | default(false))
+      and (base_pip_break_system_packages | default(true))
+      and (base_pip_supports_break_system_packages | default(false))
+      else '' }}
+  when: ansible_facts['os_family'] == 'Debian'
+
+# Impacket - required for GetNPUsers and secretsdump
+- name: Install Impacket from source
+  ansible.builtin.include_tasks: impacket_source.yml
+  when:
+    - ansible_facts['os_family'] == 'Debian'
+    - credential_access_tools_install_impacket
+    - credential_access_tools_impacket_from_source
+
+- name: Install lsassy via pipx
+  ansible.builtin.include_tasks: lsassy_pipx.yml
+  when:
+    - ansible_facts['os_family'] == 'Debian'
+    - credential_access_tools_install_lsassy
+
+- name: Install sprayhound via apt (Kali)
+  ansible.builtin.apt:
+    name: "{{ credential_access_tools_sprayhound_package }}"
+    state: present
+  become: true
+  when:
+    - ansible_facts['os_family'] == 'Debian'
+    - ansible_facts['distribution'] == 'Kali'
+    - credential_access_tools_install_sprayhound
+
+- name: Install sprayhound via pip
+  ansible.builtin.pip:
+    name: "{{ credential_access_tools_sprayhound_package }}"
+    executable: pip3
+    extra_args: "{{ credential_access_tools_pip_break_args | default('') }}"
+  become: true
+  when:
+    - ansible_facts['os_family'] == 'Debian'
+    - ansible_facts['distribution'] != 'Kali'
+    - credential_access_tools_install_sprayhound
+
+- name: Find sprayhound binary location
+  ansible.builtin.command: which sprayhound
+  environment:
+    PATH: "/usr/local/bin:/usr/bin:/bin"
+  register: credential_access_tools_sprayhound_path
+  changed_when: false
+  failed_when: false
+  become: true
+  when:
+    - ansible_facts['os_family'] == 'Debian'
+    - credential_access_tools_install_sprayhound
+
+- name: Create symlink for sprayhound in /usr/bin
+  ansible.builtin.file:
+    src: "{{ credential_access_tools_sprayhound_path.stdout }}"
+    dest: /usr/bin/sprayhound
+    state: link
+    force: true
+  become: true
+  when:
+    - ansible_facts['os_family'] == 'Debian'
+    - credential_access_tools_install_sprayhound
+    - credential_access_tools_sprayhound_path.rc == 0
+    - credential_access_tools_sprayhound_path.stdout != '/usr/bin/sprayhound'
+
+- name: Clone targetedKerberoast from GitHub
+  ansible.builtin.git:
+    repo: "{{ credential_access_tools_targetedkerberoast_repo }}"
+    dest: "{{ credential_access_tools_targetedkerberoast_install_dir }}"
+    version: "{{ credential_access_tools_targetedkerberoast_version }}"
+    force: true
+  become: true
+  when:
+    - ansible_facts['os_family'] == 'Debian'
+    - credential_access_tools_install_targetedkerberoast
+
+- name: Create virtual environment for targetedKerberoast
+  ansible.builtin.command:
+    cmd: python3 -m venv {{ credential_access_tools_targetedkerberoast_install_dir }}/venv
+  become: true
+  args:
+    creates: "{{ credential_access_tools_targetedkerberoast_install_dir }}/venv"
+  when:
+    - ansible_facts['os_family'] == 'Debian'
+    - credential_access_tools_install_targetedkerberoast
+
+- name: Install targetedKerberoast dependencies in venv
+  ansible.builtin.pip:
+    requirements: "{{ credential_access_tools_targetedkerberoast_install_dir }}/requirements.txt"
+    virtualenv: "{{ credential_access_tools_targetedkerberoast_install_dir }}/venv"
+  become: true
+  when:
+    - ansible_facts['os_family'] == 'Debian'
+    - credential_access_tools_install_targetedkerberoast
+
+- name: Create wrapper script for targetedKerberoast
+  ansible.builtin.copy:
+    content: |
+      #!/bin/bash
+      exec {{ credential_access_tools_targetedkerberoast_install_dir }}/venv/bin/python \
+           {{ credential_access_tools_targetedkerberoast_install_dir }}/targetedKerberoast.py "$@"
+    dest: /usr/local/bin/targetedKerberoast
+    mode: '0755'
+  become: true
+  when:
+    - ansible_facts['os_family'] == 'Debian'
+    - credential_access_tools_install_targetedkerberoast
+
+- name: Create .py symlink for targetedKerberoast
+  ansible.builtin.file:
+    src: /usr/local/bin/targetedKerberoast
+    dest: /usr/local/bin/targetedKerberoast.py
+    state: link
+    force: true
+  become: true
+  when:
+    - ansible_facts['os_family'] == 'Debian'
+    - credential_access_tools_install_targetedkerberoast
+
+- name: Install gMSADumper
+  ansible.builtin.include_tasks: gmsadumper.yml
+  when:
+    - ansible_facts['os_family'] == 'Debian'
+    - credential_access_tools_install_gmsadumper

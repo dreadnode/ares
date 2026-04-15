@@ -1,0 +1,82 @@
+---
+recon_tools_kali_packages:
+  - nmap
+  - ldap-utils
+  - enum4linux
+  - enum4linux-ng
+  - dnsutils
+  - whois
+  - samba-common-bin
+
+# Network reconnaissance tool packages (Ubuntu-compatible, no netexec in apt)
+recon_tools_ubuntu_packages:
+  - nmap
+  - ldap-utils
+  - enum4linux
+  - dnsutils
+  - whois
+  - samba-common-bin  # includes rpcclient
+
+# enum4linux-ng configuration (installed via apt on Kali, pipx elsewhere)
+recon_tools_install_enum4linuxng: true
+recon_tools_enum4linuxng_install_source: "git+https://github.com/cddmp/enum4linux-ng.git"
+recon_tools_enum4linuxng_use_pipx: true
+
+# enum4linux configuration (apt when available, GitHub fallback)
+recon_tools_enum4linux_repo: "https://github.com/CiscoCXSecurity/enum4linux.git"
+recon_tools_enum4linux_version: "master"
+recon_tools_enum4linux_install_dir: "/opt/enum4linux"
+
+# Impacket configuration
+# IMPORTANT: NetExec requires impacket from GitHub (not PyPI) to get the regsecrets module
+# See: https://github.com/Pennyw0rth/NetExec/issues/685
+# The regsecrets module was added in development versions after the 0.12.0 release
+recon_tools_impacket_from_source: true
+recon_tools_impacket_repo: "https://github.com/fortra/impacket.git"
+# Use stable release 0.13.0 which includes regsecrets module required by NetExec 1.4.0+
+# Note: impacket_0_12_0 does NOT have regsecrets.py, but 0.13.0 does (released Oct 2025)
+recon_tools_impacket_version: "impacket_0_13_0"
+recon_tools_impacket_install_dir: "/opt/impacket"
+
+# NetExec configuration (CrackMapExec successor)
+# On non-Kali systems, NetExec should be installed via pipx from GitHub
+# This ensures proper dependency isolation and gets the latest fixes
+# Requires Rust toolchain for building (aardwolf dependency)
+# See: https://www.netexec.wiki/getting-started/installation/installation-on-unix
+recon_tools_install_netexec: true
+recon_tools_netexec_repo: "https://github.com/Pennyw0rth/NetExec.git"
+# Pin to latest stable tag for reproducibility
+recon_tools_netexec_version: "v1.4.0"
+recon_tools_netexec_package: "netexec"
+# Use pipx for installation (recommended by NetExec docs)
+recon_tools_netexec_use_pipx: true
+
+# BloodHound Python configuration
+recon_tools_install_bloodhound: true
+recon_tools_bloodhound_package: "bloodhound"
+
+# Certipy configuration (AD certificate abuse tool)
+recon_tools_install_certipy: true
+recon_tools_certipy_package: "certipy-ad"
+
+# adidnsdump configuration (DNS record enumeration)
+recon_tools_install_adidnsdump: true
+recon_tools_adidnsdump_package: "adidnsdump"
+# Install from GitHub for latest fixes and parity with manual install steps.
+recon_tools_adidnsdump_install_source: "git+https://github.com/dirkjanm/adidnsdump#egg=adidnsdump"
+recon_tools_adidnsdump_use_pipx: true
+
+recon_tools_update_cache: true
+
+# Tool binary paths (for verification)
+# Note: Paths vary between Kali (apt) and Ubuntu (pipx/pip)
+# Kali: /usr/bin/netexec, /usr/bin/impacket-secretsdump
+# Ubuntu: /usr/local/bin/netexec (symlink), /usr/local/bin/impacket-secretsdump (symlink)
+# pipx: /root/.local/bin/nxc, /root/.local/bin/netexec
+#
+# The verification tasks search multiple locations to handle all cases
+recon_tools_binary_search_paths:
+  - /usr/local/bin
+  - /usr/bin
+  - /root/.local/bin
+  - /opt/impacket/examples

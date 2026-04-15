@@ -1,0 +1,358 @@
+---
+# Ares Red Team Configuration
+# Operational parameters for red team multi-agent operations.
+
+operation:
+  name: "ares-multi-agent"
+  namespace: "attack-simulation"
+  # redis_url is derived from namespace (redis://redis.{namespace}.svc.cluster.local:6379)
+  checkpoint_interval: 60  # seconds
+  # Rate limiting - balance concurrency with 500k TPM budget
+  # 8 concurrent tasks matches worker pod count while staying under TPM limit
+  # At ~35k tokens/task, 8 concurrent = 280k TPM (safe margin under 500k)
+  max_concurrent_tasks: 8
+  task_dispatch_delay: 1.0
+  rate_limit_backoff: 15.0
+  rate_limit_threshold: 2
+  # Stop operation immediately when domain admin is achieved (default: false)
+  # NOTE: stop_on_domain_admin and stop_on_golden_ticket are mutually exclusive
+  # stop_on_domain_admin: true
+  # Stop operation when golden ticket is forged (for child→parent forest escalation)
+  # When true, operation continues past DA to forge golden ticket with ExtraSid
+  stop_on_golden_ticket: true
+
+# Agent configurations
+agents:
+  orchestrator:
+    model: "gpt-5.2"
+    max_steps: 200
+    pod_selector: "app.kubernetes.io/name=ares-orchestrator"
+    # Tools: OrchestratorTools, RedTeamReportingTools
+    # NOTE: Orchestrator NEVER executes tools directly - it dispatches to workers
+    tools:
+      # Dispatch to worker agents
+      - dispatch_recon
+      - dispatch_credential_access
+      - dispatch_crack_hash
+      - dispatch_acl_analysis
+      - dispatch_lateral_movement
+      - dispatch_privesc_exploit
+      - start_coercion
+      # Workflow triggers
+      - trigger_credential_expansion
+      - queue_vulnerability_for_exploitation
+      # State queries
+      - get_pending_tasks
+      - get_all_credentials
+      - get_all_hashes
+      - get_exploitation_status
+      - get_agent_status
+      - get_operation_summary
+      # Reporting
+      - broadcast_credential
+      - announce_domain_admin
+      - complete_operation
+
+  recon:
+    model: "gpt-5.2"
+    max_steps: 100
+    pod_selector: "ares.dreadnode.io/role=recon"
+    # Provisioned by: ansible/playbooks/ares/recon.yml → dreadnode.nimbus_range.recon_tools
+    capabilities:
+      # Network scanning (apt: nmap)
+      - nmap
+      # LDAP enumeration (apt: ldap-utils)
+      - ldapsearch
+      # SMB enumeration (apt: enum4linux, enum4linux-ng, samba-common-bin)
+      - enum4linux
+      - enum4linux-ng
+      - rpcclient
+      # DNS utilities (apt: dnsutils, whois)
+      - dig
+      - nslookup
+      - whois
+      # AD DNS enumeration (pipx: adidnsdump)
+      - adidnsdump
+      # AD enumeration (pipx: netexec, bloodhound, certipy-ad)
+      - netexec
+      - bloodhound-python
+      - certipy
+      # Impacket enumeration scripts (source: /opt/impacket)
+      - impacket-GetNPUsers
+      - impacket-GetUserSPNs
+
+  credential_access:
+    model: "gpt-5.2"
+    max_steps: 100
+    pod_selector: "ares.dreadnode.io/role=credential_access"
+    # Provisioned by: ansible/playbooks/ares/credential_access.yml → dreadnode.nimbus_range.credential_access_tools
+    capabilities:
+      # SMB access (apt: smbclient, samba-common-bin)
+      - smbclient
+      - rpcclient
+      # Password spraying (pipx: sprayhound)
+      - sprayhound
+      # Targeted kerberoasting (git: /opt/targetedKerberoast)
+      - targetedKerberoast
+      # LSASS credential extraction (pipx: lsassy)
+      - lsassy
+      # gMSA password extraction (git: /opt/gMSADumper)
+      - gMSADumper
+      # Impacket credential scripts (source: /opt/impacket)
+      - impacket-GetNPUsers
+      - impacket-GetUserSPNs
+      - impacket-secretsdump
+
+  cracker:
+    model: "gpt-5.2"
+    max_steps: 150
+    pod_selector: "ares.dreadnode.io/role=cracker"
+    # Provisioned by: ansible/playbooks/ares/cracker.yml → dreadnode.nimbus_range.cracking_tools
+    capabilities:
+      # Password cracking (apt: hashcat, john)
+      - hashcat
+      - john
+      # Wordlists (/usr/share/wordlists/)
+      - rockyou
+      - seclists
+
+  acl:
+    model: "gpt-5.2"
+    max_steps: 150  # ACL analysis requires complex path finding
+    pod_selector: "ares.dreadnode.io/role=acl"
+    # Provisioned by: ansible/playbooks/ares/acl_abuse.yml → dreadnode.nimbus_range.acl_tools
+    capabilities:
+      # ACL exploitation framework (apt/pipx: bloodyAD)
+      - bloodyAD
+      # Shadow credentials manipulation (pipx: pywhisker)
+      - pywhisker
+      # Targeted kerberoasting via ACLs (git: /opt/targetedKerberoast)
+      - targetedKerberoast
+      # RPC enumeration (apt: samba-common-bin)
+      - rpcclient
+      # Impacket ACL editing (source: /opt/impacket)
+      - impacket-dacledit
+
+  privesc:
+    model: "gpt-5.2"
+    max_steps: 100
+    pod_selector: "ares.dreadnode.io/role=privesc"
+    # Provisioned by: ansible/playbooks/ares/privesc.yml → dreadnode.nimbus_range.privesc_tools
+    capabilities:
+      # ADCS exploitation (pipx: certipy-ad)
+      - certipy
+      # LSASS credential extraction (pipx: lsassy)
+      - lsassy
+      # CVE-2021-42287/CVE-2021-42278 (git: /opt/privesc/noPac → /usr/local/bin/nopac)
+      - nopac
+      # Kerberos relay toolkit (git: /opt/krbrelayx) - includes printerbug, addspn, dnstool
+      - krbrelayx
+      - printerbug
+      - addspn
+      - dnstool
+      # Impacket delegation/ticket/MSSQL scripts (source: /opt/impacket)
+      - impacket-findDelegation
+      - impacket-getST
+      - impacket-getTGT
+      - impacket-rbcd
+      - impacket-addcomputer
+      - impacket-lookupsid
+      - impacket-mssqlclient
+      - impacket-raiseChild
+      - impacket-ticketer
+      - impacket-secretsdump  # S4U → secretsdump chain must complete on same pod
+      - impacket-psexec       # S4U → psexec chain must complete on same pod
+      # Windows potato exploits (/opt/privesc/)
+      - PrintSpoofer          # SeImpersonatePrivilege (binary: PrintSpoofer64.exe)
+      - GodPotato             # SeImpersonatePrivilege (binary: GodPotato-NET4.exe)
+      - SweetPotato           # SeImpersonatePrivilege (source repo)
+      # Kerberos relay local privesc (git: /opt/privesc/KrbRelayUp)
+      - KrbRelayUp
+      # GPO abuse tools
+      - SharpGPOAbuse         # .NET GPO abuse (git: /opt/privesc/SharpGPOAbuse)
+      - pygpoabuse            # Python GPO abuse (pipx)
+      # Windows enumeration (binaries from Ghostpack)
+      - Seatbelt
+      - SharpUp
+      # Run commands as another user (binary: /opt/privesc/RunasCs)
+      - RunasCs
+      # PowerShell privesc scripts (/opt/privesc/)
+      - PowerUp               # PowerUp.ps1
+      - PowerUpSQL            # PowerUpSQL.ps1 (MSSQL enumeration/exploitation)
+      # PEAS enumeration scripts (/opt/privesc/)
+      - winPEAS
+      - linPEAS
+      # CVE exploits
+      - printnightmare        # CVE-2021-1675 (/usr/local/bin/printnightmare)
+      - zerologon             # CVE-2020-1472 (git: /opt/privesc/zerologon)
+      - SCMUACBypass          # UAC bypass (git: /opt/privesc/SCMUACBypass)
+
+  lateral:
+    model: "gpt-5.2"
+    max_steps: 300
+    pod_selector: "ares.dreadnode.io/role=lateral"
+    # Provisioned by: ansible/playbooks/ares/lateral_movement.yml → dreadnode.nimbus_range.lateral_movement_tools
+    capabilities:
+      # WinRM remote access (gem: evil-winrm)
+      - evil-winrm
+      # RDP pass-the-hash (apt: freerdp2-x11/freerdp3-x11)
+      - xfreerdp
+      # SSH with password (apt: sshpass)
+      - sshpass
+      # SMB file access (apt: smbclient)
+      - smbclient
+      # TCP connection proxying (apt: proxychains4)
+      - proxychains4
+      # Pass-the-Hash toolkit (apt: passing-the-hash)
+      - pth-winexe
+      - pth-smbclient
+      - pth-rpcclient
+      - pth-net
+      - pth-wmic
+      # Pre-connection validation (Ares internal function)
+      - posture_validation  # check_rdp_reachability, check_winrm_reachability
+      # Impacket remote execution scripts (source: /opt/impacket)
+      - impacket-psexec
+      - impacket-wmiexec
+      - impacket-smbexec
+      - impacket-secretsdump
+
+  coercion:
+    model: "gpt-5.2"
+    max_steps: 30
+    pod_selector: "ares.dreadnode.io/role=coercion"
+    # Provisioned by: ansible/playbooks/ares/coercion.yml → dreadnode.nimbus_range.coercion_tools
+    capabilities:
+      # LLMNR/NBT-NS/MDNS poisoning (/usr/sbin/responder)
+      - responder
+      # DHCPv6 poisoning (/usr/bin/mitm6)
+      - mitm6
+      # Authentication coercion framework (/usr/bin/coercer)
+      - coercer
+      # MS-EFSRPC coercion (/usr/local/bin/petitpotam)
+      - petitpotam
+      # DFS coercion (/usr/local/bin/dfscoerce)
+      - dfscoerce
+      # Kerberos relay toolkit (/usr/local/bin/) - includes addspn, dnstool
+      - krbrelayx
+      - printerbug
+      - addspn
+      - dnstool
+      # NTLM relay (/usr/local/bin/impacket-ntlmrelayx)
+      - impacket-ntlmrelayx
+
+# Timeout configurations
+timeouts:
+  agent_heartbeat: 180  # seconds - agent considered offline after this
+  task_timeout: 300  # seconds - default task timeout
+  operation_timeout: 7200  # seconds - 2 hours max operation time
+  lateral_movement: 180  # seconds
+  hash_cracking: 600  # seconds - 10 minutes
+  exploitation: 900  # seconds - ACL tasks can take 10+ minutes
+
+# Recovery configuration
+recovery:
+  enabled: true
+  max_retries: 3
+  retry_delay: 10  # seconds
+  checkpoint_on_credential: true
+  checkpoint_on_vulnerability: true
+
+# Phase detection thresholds (see PRIORITY.md for rationale)
+# Used to determine operation phase for task prioritization
+phase_detection:
+  # Transition to lateral_movement phase when:
+  lateral_movement_admin_creds: 3  # >= this many admin credentials
+  lateral_movement_owned_hosts: 5  # >= this many owned hosts
+  # Minimum slots per worker role (prevents starvation)
+  min_slots_per_role: 1
+
+# Context management settings
+# Prevents context window exhaustion in long-running operations
+context_management:
+  # Trigger conversation summarization when orchestrator exceeds this token count
+  # Lowered from 100k to 50k to prevent 3.6M+ token accumulation over operations
+  max_context_tokens: 50000
+  # Keep this many recent messages after summarization
+  # Increased from 10 to 15 to retain more context when summarizing earlier
+  min_messages_to_keep: 15
+  # Truncate task outputs to this size in broadcasts to orchestrator
+  # Structured discoveries are preserved; only raw output is truncated
+  # Increased from 2000 to 3000 for better output visibility
+  max_output_chars: 3000
+
+# Vulnerability priorities (lower = higher priority)
+# NOTE: constrained_delegation gets boosted to priority 2 dynamically when
+# credentials are available (see vulnerability.py _adjust_priority_for_prerequisites)
+vulnerability_priorities:
+  # Tier 1: ADCS (1-3) - lowercase to match vuln_type normalization
+  adcs_esc1: 1
+  adcs_esc4: 2
+  adcs_esc8: 3
+  # Tier 2: Delegation (4-6) - constrained boosted to 2 when creds available
+  constrained_delegation: 4
+  unconstrained_delegation: 5
+  rbcd: 6
+  # Tier 3: Kerberos keys (7-8)
+  krbtgt_hash: 7
+  domain_admin_hash: 8
+  # Tier 4: ACL abuse (9)
+  acl_abuse: 9
+  # Tier 5: MSSQL (10-11)
+  mssql_impersonation: 10
+  mssql_linked: 11
+  # Tier 6: GPO/LAPS/DCSync (12-15)
+  gpo_abuse: 12
+  laps_abuse: 13
+  dcsync: 14
+  shadow_credentials: 15
+  # Tier 7: Credential attacks (20-21)
+  kerberoast: 20
+  asreproast: 21
+  # Tier 8: Low priority
+  password_spray: 50
+
+# Logging configuration
+logging:
+  level: "INFO"
+  format: "%(asctime)s | %(levelname)s | %(name)s | %(message)s"
+  file: "/var/log/ares/operation.log"
+  max_size_mb: 100
+  backup_count: 5
+
+# Resource limits
+resources:
+  max_concurrent_tasks: 10
+  max_credentials_per_expansion: 100
+  max_hosts_per_scan: 50
+  credential_cache_ttl: 3600  # seconds
+
+# Security settings
+security:
+  verify_ssl: true
+  encrypted_state: false  # Enable for sensitive operations
+  audit_logging: true
+  rate_limiting:
+    enabled: true
+    max_requests_per_minute: 60
+
+# Grafana integration (for alerting)
+grafana:
+  enabled: true
+  base_url: "${GRAFANA_URL}"
+  api_key: "${GRAFANA_SERVICE_ACCOUNT_TOKEN}"
+  dashboard_uid: "ares-redteam"
+
+# Observability backends (for blue team log/metric queries)
+# In K8s: use cluster-internal URLs
+#   loki_url: "http://loki-gateway.observability.svc.cluster.local"
+#   prometheus_url: "http://kube-prometheus-stack-prometheus.observability.svc.cluster.local:9090"
+# On EC2: use external URLs
+#   loki_url: "https://loki.dev.plundr.ai"
+#   prometheus_url: "https://prometheus.dev.plundr.ai"
+# Local dev (port-forward):
+#   kubectl port-forward -n observability svc/loki-gateway 3100:80
+#   kubectl port-forward -n observability svc/kube-prometheus-stack-prometheus 9090:9090
+observability:
+  loki_url: "https://loki.dev.plundr.ai"
+  prometheus_url: "http://localhost:9090"

@@ -1,0 +1,192 @@
+---
+- name: Set DEBIAN_FRONTEND to noninteractive
+  ansible.builtin.lineinfile:
+    path: /etc/environment
+    line: 'DEBIAN_FRONTEND=noninteractive'
+    create: true
+    mode: '0644'
+  become: true
+  when: ansible_facts['os_family'] == 'Debian'
+
+- name: Update apt cache
+  ansible.builtin.apt:
+    update_cache: true
+    cache_valid_time: 3600
+  become: true
+  when:
+    - acl_tools_update_cache
+    - ansible_facts['os_family'] == 'Debian'
+
+- name: Install Ubuntu-compatible dependencies
+  ansible.builtin.apt:
+    name: "{{ acl_tools_ubuntu_packages }}"
+    state: present
+  become: true
+  when: ansible_facts['os_family'] == 'Debian'
+
+- name: Check rpcclient availability
+  ansible.builtin.command: command -v rpcclient
+  environment:
+    PATH: "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+  register: acl_tools_rpcclient_check
+  changed_when: false
+  failed_when: false
+  when: ansible_facts['os_family'] == 'Debian'
+
+- name: Install smbclient when rpcclient is missing
+  ansible.builtin.apt:
+    name: smbclient
+    state: present
+  become: true
+  when:
+    - ansible_facts['os_family'] == 'Debian'
+    - acl_tools_rpcclient_check.rc != 0
+
+- name: Recheck rpcclient availability after smbclient install
+  ansible.builtin.command: command -v rpcclient
+  environment:
+    PATH: "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+  register: acl_tools_rpcclient_recheck
+  changed_when: false
+  failed_when: false
+  when:
+    - ansible_facts['os_family'] == 'Debian'
+    - acl_tools_rpcclient_check.rc != 0
+
+- name: Check if samba-common-bin package is available
+  ansible.builtin.command: apt-cache show samba-common-bin
+  register: acl_tools_samba_common_bin_available
+  changed_when: false
+  failed_when: false
+  become: true
+  when:
+    - ansible_facts['os_family'] == 'Debian'
+    - acl_tools_rpcclient_check.rc != 0
+    - acl_tools_rpcclient_recheck.rc != 0
+
+- name: Install samba-common-bin when rpcclient is still missing
+  ansible.builtin.apt:
+    name: samba-common-bin
+    state: present
+  become: true
+  when:
+    - ansible_facts['os_family'] == 'Debian'
+    - acl_tools_rpcclient_check.rc != 0
+    - acl_tools_rpcclient_recheck.rc != 0
+    - acl_tools_samba_common_bin_available.rc == 0
+
+- name: Install Impacket from source for dacledit
+  ansible.builtin.include_tasks: impacket_source.yml
+  when:
+    - ansible_facts['os_family'] == 'Debian'
+    - acl_tools_install_dacledit
+    - acl_tools_impacket_from_source
+
+- name: Install bloodyAD via apt (Kali)
+  ansible.builtin.apt:
+    name: "{{ acl_tools_bloodyad_apt_package }}"
+    state: present
+  become: true
+  when:
+    - ansible_facts['os_family'] == 'Debian'
+    - ansible_facts['distribution'] == 'Kali'
+    - acl_tools_install_bloodyad
+
+- name: Check if bloodyAD is already installed
+  ansible.builtin.command: pip3 show bloodyAD
+  register: acl_tools_bloodyad_check
+  changed_when: false
+  failed_when: false
+  when:
+    - ansible_facts['os_family'] == 'Debian'
+    - ansible_facts['distribution'] != 'Kali'
+    - acl_tools_install_bloodyad
+
+- name: Install bloodyAD via pip
+  ansible.builtin.pip:
+    name: "{{ acl_tools_bloodyad_package }}"
+    executable: pip3
+    # Use --ignore-installed to handle system packages (e.g., cryptography on Kali/Ubuntu)
+    # that can't be uninstalled because they were installed by apt (no RECORD file)
+    extra_args: "{{ ('--break-system-packages ' if (base_pip_break_required | default(false)) else '') ~ '--ignore-installed' }}"
+  become: true
+  when:
+    - ansible_facts['os_family'] == 'Debian'
+    - ansible_facts['distribution'] != 'Kali'
+    - acl_tools_install_bloodyad
+    - acl_tools_bloodyad_check.rc != 0
+
+- name: Check if pywhisker is already installed
+  ansible.builtin.command: pip3 show pywhisker
+  register: acl_tools_pywhisker_check
+  changed_when: false
+  failed_when: false
+  when:
+    - ansible_facts['os_family'] == 'Debian'
+    - acl_tools_install_pywhisker
+
+- name: Install pywhisker via pip
+  ansible.builtin.pip:
+    name: "{{ acl_tools_pywhisker_package }}"
+    executable: pip3
+    # Use --ignore-installed to handle system packages that can't be uninstalled
+    extra_args: "{{ ('--break-system-packages ' if (base_pip_break_required | default(false)) else '') ~ '--ignore-installed' }}"
+  become: true
+  when:
+    - ansible_facts['os_family'] == 'Debian'
+    - acl_tools_install_pywhisker
+    - acl_tools_pywhisker_check.rc != 0
+
+- name: Clone targetedKerberoast from GitHub
+  ansible.builtin.git:
+    repo: "{{ acl_tools_targetedkerberoast_repo }}"
+    dest: "{{ acl_tools_targetedkerberoast_install_dir }}"
+    version: "{{ acl_tools_targetedkerberoast_version }}"
+    force: true
+  become: true
+  when:
+    - ansible_facts['os_family'] == 'Debian'
+    - acl_tools_install_targetedkerberoast
+
+- name: Create virtual environment for targetedKerberoast
+  ansible.builtin.command:
+    cmd: python3 -m venv {{ acl_tools_targetedkerberoast_install_dir }}/venv
+  become: true
+  args:
+    creates: "{{ acl_tools_targetedkerberoast_install_dir }}/venv"
+  when:
+    - ansible_facts['os_family'] == 'Debian'
+    - acl_tools_install_targetedkerberoast
+
+- name: Install targetedKerberoast dependencies in venv
+  ansible.builtin.pip:
+    requirements: "{{ acl_tools_targetedkerberoast_install_dir }}/requirements.txt"
+    virtualenv: "{{ acl_tools_targetedkerberoast_install_dir }}/venv"
+  become: true
+  when:
+    - ansible_facts['os_family'] == 'Debian'
+    - acl_tools_install_targetedkerberoast
+
+- name: Create wrapper script for targetedKerberoast
+  ansible.builtin.copy:
+    content: |
+      #!/bin/bash
+      exec {{ acl_tools_targetedkerberoast_install_dir }}/venv/bin/python \
+           {{ acl_tools_targetedkerberoast_install_dir }}/targetedKerberoast.py "$@"
+    dest: /usr/local/bin/targetedKerberoast
+    mode: '0755'
+  become: true
+  when:
+    - ansible_facts['os_family'] == 'Debian'
+    - acl_tools_install_targetedkerberoast
+
+- name: Create .py symlink for targetedKerberoast
+  ansible.builtin.file:
+    src: /usr/local/bin/targetedKerberoast
+    dest: /usr/local/bin/targetedKerberoast.py
+    state: link
+    force: true
+  become: true
+  when:
+    - ansible_facts['os_family'] == 'Debian'
+    - acl_tools_install_targetedkerberoast

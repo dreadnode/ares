@@ -1,0 +1,9 @@
+## Command Task: {{ task_id }}
+
+Execute the following command:
+
+```
+{{ command }}
+```
+
+Call `task_complete` with the command output.

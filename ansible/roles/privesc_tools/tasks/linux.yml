@@ -1,0 +1,412 @@
+---
+- name: Wait for apt locks to be released
+  ansible.builtin.shell: |
+    while fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1 || \
+          fuser /var/lib/dpkg/lock >/dev/null 2>&1 || \
+          fuser /var/cache/apt/archives/lock >/dev/null 2>&1; do
+      echo "Waiting for apt locks to be released..."
+      sleep 2
+    done
+  become: true
+  changed_when: false
+  when: ansible_facts['os_family'] == 'Debian'
+
+- name: Set DEBIAN_FRONTEND to noninteractive
+  ansible.builtin.lineinfile:
+    path: /etc/environment
+    line: 'DEBIAN_FRONTEND=noninteractive'
+    create: true
+    mode: '0644'
+  become: true
+  when: ansible_facts['os_family'] == 'Debian'
+
+- name: Update apt cache
+  ansible.builtin.apt:
+    update_cache: true
+    cache_valid_time: 3600
+  become: true
+  when:
+    - privesc_tools_update_cache
+    - ansible_facts['os_family'] == 'Debian'
+
+- name: Install Kali-specific privesc dependencies
+  ansible.builtin.apt:
+    name: "{{ privesc_tools_kali_packages }}"
+    state: present
+  become: true
+  when:
+    - ansible_facts['os_family'] == 'Debian'
+    - ansible_facts['distribution'] == 'Kali'
+
+- name: Install Ubuntu-compatible privesc dependencies
+  ansible.builtin.apt:
+    name: "{{ privesc_tools_ubuntu_packages }}"
+    state: present
+  become: true
+  when:
+    - ansible_facts['os_family'] == 'Debian'
+    - ansible_facts['distribution'] != 'Kali'
+
+- name: Install unzip for extracting archives
+  ansible.builtin.apt:
+    name: unzip
+    state: present
+  become: true
+  when: ansible_facts['os_family'] == 'Debian'
+
+- name: Create base privesc tools directory
+  ansible.builtin.file:
+    path: "{{ privesc_tools_base_dir }}"
+    state: directory
+    mode: '0755'
+  become: true
+
+# Impacket - required for delegation, ticket, and MSSQL tools
+- name: Install Impacket from source
+  ansible.builtin.include_tasks: impacket_source.yml
+  when:
+    - ansible_facts['os_family'] == 'Debian'
+    - privesc_tools_install_impacket
+    - privesc_tools_impacket_from_source
+
+- name: Install Certipy via pipx
+  ansible.builtin.include_tasks: certipy_pipx.yml
+  when:
+    - ansible_facts['os_family'] == 'Debian'
+    - privesc_tools_install_certipy
+
+- name: Install lsassy via pipx
+  ansible.builtin.include_tasks: lsassy_pipx.yml
+  when:
+    - ansible_facts['os_family'] == 'Debian'
+    - privesc_tools_install_lsassy
+
+- name: Create PrintSpoofer directory
+  ansible.builtin.file:
+    path: "{{ privesc_tools_printspoofer_install_dir }}"
+    state: directory
+    mode: '0755'
+  become: true
+  when: privesc_tools_install_printspoofer
+
+- name: Download PrintSpoofer
+  ansible.builtin.get_url:
+    url: "{{ privesc_tools_printspoofer_url }}"
+    dest: "{{ privesc_tools_printspoofer_install_dir }}/PrintSpoofer64.exe"
+    mode: '0755'
+  become: true
+  when: privesc_tools_install_printspoofer
+
+- name: Create GodPotato directory
+  ansible.builtin.file:
+    path: "{{ privesc_tools_godpotato_install_dir }}"
+    state: directory
+    mode: '0755'
+  become: true
+  when: privesc_tools_install_godpotato
+
+- name: Download GodPotato
+  ansible.builtin.get_url:
+    url: "{{ privesc_tools_godpotato_url }}"
+    dest: "{{ privesc_tools_godpotato_install_dir }}/GodPotato-NET4.exe"
+    mode: '0755'
+  become: true
+  when: privesc_tools_install_godpotato
+
+- name: Clone SweetPotato from GitHub
+  ansible.builtin.git:
+    repo: "{{ privesc_tools_sweetpotato_repo }}"
+    dest: "{{ privesc_tools_sweetpotato_install_dir }}"
+    version: "{{ privesc_tools_sweetpotato_version }}"
+    force: true
+  become: true
+  when: privesc_tools_install_sweetpotato
+
+- name: Clone KrbRelayUp from GitHub
+  ansible.builtin.git:
+    repo: "{{ privesc_tools_krbrelayup_repo }}"
+    dest: "{{ privesc_tools_krbrelayup_install_dir }}"
+    version: "{{ privesc_tools_krbrelayup_version }}"
+    force: true
+  become: true
+  when: privesc_tools_install_krbrelayup
+
+# SharpGPOAbuse (clone from byronkg's fork which includes precompiled binary)
+- name: Clone SharpGPOAbuse from GitHub
+  ansible.builtin.git:
+    repo: "{{ privesc_tools_sharpgpoabuse_repo }}"
+    dest: "{{ privesc_tools_sharpgpoabuse_install_dir }}"
+    version: "{{ privesc_tools_sharpgpoabuse_version }}"
+    force: true
+  become: true
+  when: privesc_tools_install_sharpgpoabuse
+
+- name: Create Seatbelt directory
+  ansible.builtin.file:
+    path: "{{ privesc_tools_seatbelt_install_dir }}"
+    state: directory
+    mode: '0755'
+  become: true
+  when: privesc_tools_install_seatbelt
+
+- name: Download Seatbelt
+  ansible.builtin.get_url:
+    url: "{{ privesc_tools_seatbelt_url }}"
+    dest: "{{ privesc_tools_seatbelt_install_dir }}/Seatbelt.exe"
+    mode: '0755'
+  become: true
+  when: privesc_tools_install_seatbelt
+
+- name: Create SharpUp directory
+  ansible.builtin.file:
+    path: "{{ privesc_tools_sharpup_install_dir }}"
+    state: directory
+    mode: '0755'
+  become: true
+  when: privesc_tools_install_sharpup
+
+- name: Download SharpUp
+  ansible.builtin.get_url:
+    url: "{{ privesc_tools_sharpup_url }}"
+    dest: "{{ privesc_tools_sharpup_install_dir }}/SharpUp.exe"
+    mode: '0755'
+  become: true
+  when: privesc_tools_install_sharpup
+
+- name: Create PowerUp directory
+  ansible.builtin.file:
+    path: "{{ privesc_tools_powerup_install_dir }}"
+    state: directory
+    mode: '0755'
+  become: true
+  when: privesc_tools_install_powerup
+
+- name: Download PowerUp.ps1
+  ansible.builtin.get_url:
+    url: "{{ privesc_tools_powerup_url }}"
+    dest: "{{ privesc_tools_powerup_install_dir }}/PowerUp.ps1"
+    mode: '0755'
+  become: true
+  when: privesc_tools_install_powerup
+
+- name: Create PowerUpSQL directory
+  ansible.builtin.file:
+    path: "{{ privesc_tools_powerupsql_install_dir }}"
+    state: directory
+    mode: '0755'
+  become: true
+  when: privesc_tools_install_powerupsql
+
+- name: Download PowerUpSQL.ps1
+  ansible.builtin.get_url:
+    url: "{{ privesc_tools_powerupsql_url }}"
+    dest: "{{ privesc_tools_powerupsql_install_dir }}/PowerUpSQL.ps1"
+    mode: '0755'
+  become: true
+  when: privesc_tools_install_powerupsql
+
+- name: Create WinPEAS directory
+  ansible.builtin.file:
+    path: "{{ privesc_tools_winpeas_install_dir }}"
+    state: directory
+    mode: '0755'
+  become: true
+  when: privesc_tools_install_winpeas
+
+- name: Download WinPEAS
+  ansible.builtin.get_url:
+    url: "{{ privesc_tools_winpeas_url }}"
+    dest: "{{ privesc_tools_winpeas_install_dir }}/winPEASany_ofs.exe"
+    mode: '0755'
+  become: true
+  when: privesc_tools_install_winpeas
+
+- name: Create LinPEAS directory
+  ansible.builtin.file:
+    path: "{{ privesc_tools_linpeas_install_dir }}"
+    state: directory
+    mode: '0755'
+  become: true
+  when: privesc_tools_install_linpeas
+
+- name: Download LinPEAS
+  ansible.builtin.get_url:
+    url: "{{ privesc_tools_linpeas_url }}"
+    dest: "{{ privesc_tools_linpeas_install_dir }}/linpeas.sh"
+    mode: '0755'
+  become: true
+  when: privesc_tools_install_linpeas
+
+- name: Create RunasCs directory
+  ansible.builtin.file:
+    path: "{{ privesc_tools_runascs_install_dir }}"
+    state: directory
+    mode: '0755'
+  become: true
+  when: privesc_tools_install_runascs
+
+- name: Download RunasCs zip
+  ansible.builtin.get_url:
+    url: "{{ privesc_tools_runascs_url }}"
+    dest: "/tmp/RunasCs.zip"
+    mode: '0644'
+  become: true
+  when: privesc_tools_install_runascs
+
+- name: Extract RunasCs
+  ansible.builtin.unarchive:
+    src: "/tmp/RunasCs.zip"
+    dest: "{{ privesc_tools_runascs_install_dir }}"
+    remote_src: true
+  become: true
+  when: privesc_tools_install_runascs
+
+# SCMUACBypass
+- name: Clone SCMUACBypass from GitHub
+  ansible.builtin.git:
+    repo: "{{ privesc_tools_scmuacbypass_repo }}"
+    dest: "{{ privesc_tools_scmuacbypass_install_dir }}"
+    version: "{{ privesc_tools_scmuacbypass_version }}"
+    force: true
+  become: true
+  when: privesc_tools_install_scmuacbypass
+
+# noPac (CVE-2021-42287/CVE-2021-42278)
+- name: Clone noPac from GitHub
+  ansible.builtin.git:
+    repo: "{{ privesc_tools_nopac_repo }}"
+    dest: "{{ privesc_tools_nopac_install_dir }}"
+    version: "{{ privesc_tools_nopac_version }}"
+    force: true
+  become: true
+  when: privesc_tools_install_nopac
+
+- name: Create virtual environment for noPac
+  ansible.builtin.command:
+    cmd: python3 -m venv {{ privesc_tools_nopac_install_dir }}/venv
+  become: true
+  args:
+    creates: "{{ privesc_tools_nopac_install_dir }}/venv"
+  when: privesc_tools_install_nopac
+
+- name: Install noPac dependencies in venv
+  ansible.builtin.pip:
+    requirements: "{{ privesc_tools_nopac_install_dir }}/requirements.txt"
+    virtualenv: "{{ privesc_tools_nopac_install_dir }}/venv"
+  become: true
+  when: privesc_tools_install_nopac
+  failed_when: false
+
+- name: Create wrapper script for noPac
+  ansible.builtin.copy:
+    content: |
+      #!/bin/bash
+      exec {{ privesc_tools_nopac_install_dir }}/venv/bin/python \
+           {{ privesc_tools_nopac_install_dir }}/noPac.py "$@"
+    dest: /usr/local/bin/nopac
+    mode: '0755'
+  become: true
+  when: privesc_tools_install_nopac
+
+# PrintNightmare (CVE-2021-1675)
+- name: Clone PrintNightmare from GitHub
+  ansible.builtin.git:
+    repo: "{{ privesc_tools_printnightmare_repo }}"
+    dest: "{{ privesc_tools_printnightmare_install_dir }}"
+    version: "{{ privesc_tools_printnightmare_version }}"
+    force: true
+  become: true
+  when: privesc_tools_install_printnightmare
+
+- name: Make PrintNightmare script executable
+  ansible.builtin.file:
+    path: "{{ privesc_tools_printnightmare_install_dir }}/CVE-2021-1675.py"
+    mode: '0755'
+  become: true
+  when: privesc_tools_install_printnightmare
+
+- name: Create symlink for PrintNightmare
+  ansible.builtin.file:
+    src: "{{ privesc_tools_printnightmare_install_dir }}/CVE-2021-1675.py"
+    dest: "/usr/local/bin/printnightmare"
+    state: link
+  become: true
+  when: privesc_tools_install_printnightmare
+
+# krbrelayx - needed for unconstrained delegation coercion (printerbug)
+- name: Clone krbrelayx from GitHub
+  ansible.builtin.git:
+    repo: "{{ privesc_tools_krbrelayx_repo }}"
+    dest: "{{ privesc_tools_krbrelayx_install_dir }}"
+    version: "{{ privesc_tools_krbrelayx_version }}"
+    update: true
+  become: true
+  register: privesc_tools_krbrelayx_clone
+  when:
+    - ansible_facts['os_family'] == 'Debian'
+    - privesc_tools_install_krbrelayx
+
+- name: Configure git to ignore filemode changes in krbrelayx repo  # noqa: command-instead-of-module
+  ansible.builtin.command:
+    cmd: git config core.filemode false
+    chdir: "{{ privesc_tools_krbrelayx_install_dir }}"
+  become: true
+  changed_when: false
+  when:
+    - ansible_facts['os_family'] == 'Debian'
+    - privesc_tools_install_krbrelayx
+    - privesc_tools_krbrelayx_clone is not skipped
+
+- name: Create virtual environment for krbrelayx
+  ansible.builtin.command:
+    cmd: python3 -m venv {{ privesc_tools_krbrelayx_install_dir }}/venv
+  become: true
+  args:
+    creates: "{{ privesc_tools_krbrelayx_install_dir }}/venv"
+  when:
+    - ansible_facts['os_family'] == 'Debian'
+    - privesc_tools_install_krbrelayx
+
+- name: Install krbrelayx dependencies in venv
+  ansible.builtin.pip:
+    name:
+      - dnspython
+      - ldap3
+      - impacket
+    virtualenv: "{{ privesc_tools_krbrelayx_install_dir }}/venv"
+  become: true
+  when:
+    - ansible_facts['os_family'] == 'Debian'
+    - privesc_tools_install_krbrelayx
+
+- name: Create wrapper scripts for krbrelayx tools
+  ansible.builtin.copy:
+    content: |
+      #!/bin/bash
+      exec {{ privesc_tools_krbrelayx_install_dir }}/venv/bin/python \
+           {{ privesc_tools_krbrelayx_install_dir }}/{{ item.src }} "$@"
+    dest: "/usr/local/bin/{{ item.dest }}"
+    mode: '0755'
+  become: true
+  loop:
+    - { src: "krbrelayx.py", dest: "krbrelayx" }
+    - { src: "addspn.py", dest: "addspn" }
+    - { src: "dnstool.py", dest: "dnstool" }
+    - { src: "printerbug.py", dest: "printerbug" }
+  when:
+    - ansible_facts['os_family'] == 'Debian'
+    - privesc_tools_install_krbrelayx
+
+# zerologon (CVE-2020-1472) - Netlogon vulnerability exploit
+- name: Install zerologon (CVE-2020-1472)
+  ansible.builtin.include_tasks: zerologon.yml
+  when:
+    - ansible_facts['os_family'] == 'Debian'
+    - privesc_tools_install_zerologon
+
+# pygpoabuse - Python GPO abuse for privilege escalation
+- name: Install pygpoabuse via pipx
+  ansible.builtin.include_tasks: pygpoabuse_pipx.yml
+  when:
+    - ansible_facts['os_family'] == 'Debian'
+    - privesc_tools_install_pygpoabuse

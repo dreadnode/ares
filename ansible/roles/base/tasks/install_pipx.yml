@@ -1,0 +1,53 @@
+---
+# Install pipx for isolated Python application installation
+# Recommended for NetExec installation
+# Reference: https://www.netexec.wiki/getting-started/installation/installation-on-unix
+
+- name: Install pipx via apt (Debian/Ubuntu)
+  ansible.builtin.apt:
+    name:
+      - pipx
+    state: present
+  become: true
+  when: ansible_facts['os_family'] == 'Debian'
+
+- name: Check if pipx path is already in bashrc
+  ansible.builtin.command: grep -q '.local/bin' /root/.bashrc
+  register: base_pipx_path_check
+  changed_when: false
+  failed_when: false
+  become: true
+
+- name: Ensure pipx path is configured
+  ansible.builtin.command: pipx ensurepath
+  register: base_pipx_ensurepath
+  changed_when: base_pipx_path_check.rc != 0
+  failed_when: false
+  become: true
+  environment:
+    HOME: /root
+  when: base_pipx_path_check.rc != 0
+
+- name: Add pipx bin to system PATH via profile.d
+  ansible.builtin.copy:
+    content: |
+      # pipx installations PATH
+      if [ -d "/root/.local/bin" ]; then
+        export PATH="/root/.local/bin:$PATH"
+      fi
+      if [ -d "$HOME/.local/bin" ]; then
+        export PATH="$HOME/.local/bin:$PATH"
+      fi
+    dest: /etc/profile.d/pipx.sh
+    mode: '0644'
+  become: true
+
+- name: Verify pipx installation
+  ansible.builtin.command: pipx --version
+  register: base_pipx_version
+  changed_when: false
+  failed_when: false
+
+- name: Display pipx version
+  ansible.builtin.debug:
+    msg: "pipx installed: {{ base_pipx_version.stdout | default('Not available') }}"

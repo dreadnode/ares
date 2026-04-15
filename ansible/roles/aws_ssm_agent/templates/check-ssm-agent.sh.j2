@@ -1,0 +1,8 @@
+#!/bin/bash
+set -euo pipefail
+
+# Check if SSM Agent is running
+if ! systemctl is-active amazon-ssm-agent >/dev/null 2>&1; then
+  echo "[$(date)] WARNING: SSM Agent is not running, restarting it"
+  systemctl restart amazon-ssm-agent
+fi

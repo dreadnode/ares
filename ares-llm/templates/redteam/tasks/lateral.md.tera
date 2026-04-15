@@ -1,0 +1,16 @@
+## Lateral Movement Task: {{ task_id }}
+
+**Technique:** {{ technique }}
+**Target:** {{ target_ip }}
+{% if credential_username %}**Credential:** {{ credential_username }}@{{ credential_domain }}{% if credential_password %} / Password: {{ credential_password }}{% endif %}
+{% endif -%}
+
+Move laterally to the target using {{ technique }}.
+
+{% if state_context %}
+## Current Operation State
+
+{{ state_context }}
+{% endif -%}
+
+Call `task_complete` when lateral movement succeeds or fails.

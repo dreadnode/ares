@@ -1,0 +1,62 @@
+---
+- name: Provision Ares Base Image
+  hosts: "{{ target_hosts | default('localhost') }}"
+  connection: "{{ 'local' if container_build | default(false) else 'ssh' }}"
+  gather_facts: true
+  become: true
+
+  vars:
+    _container_build: "{{ (container_build | default(false)) | bool }}"
+
+    # Base configuration
+    base_workspace_dir: "/ares"
+    base_workspace_owner: "root"
+    base_workspace_group: "root"
+
+    # Skip cache update in container builds (done in pre-provisioner)
+    base_update_cache: "{{ not _container_build }}"
+
+    # Python version
+    base_python_version: "3.13.7"
+
+    # Install uv and verify
+    base_install_uv: true
+    base_verify_install: true
+
+  roles:
+    - role: dreadnode.nimbus_range.base
+
+    - role: cowdogmoo.workstation.build_cleanup
+      when: _container_build
+      vars:
+        build_cleanup_enabled: true
+        build_cleanup_install_path: "/usr/local/bin"
+        build_cleanup_user_home: "/root"
+        build_cleanup_username: "root"
+        build_cleanup_is_container: true
+        build_cleanup_generate_post_script: true
+        build_cleanup_post_script_path: "/tmp/post_ansible_cleanup.sh"
+        build_cleanup_clear_histories: true
+        build_cleanup_final_apt_cleanup: true
+        build_cleanup_final_temp_cleanup: true
+        build_cleanup_final_sync: true
+        build_cleanup_preserve_includes: true
+        build_cleanup_preserve_static_libs: true
+        build_cleanup_protected_packages:
+          - python3-dev
+          - build-essential
+          - libffi-dev
+          - libssl-dev
+
+  post_tasks:
+    - name: Display base image provisioning summary
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "Ares Base Image Provisioned"
+          - "=========================================="
+          - "Image Type: Base Framework"
+          - "Python: {{ base_python_version }}"
+          - "Package Manager: uv"
+          - "Workspace: {{ base_workspace_dir }}"
+          - "=========================================="

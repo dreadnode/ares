@@ -1,0 +1,154 @@
+---
+- name: Set DEBIAN_FRONTEND to noninteractive
+  ansible.builtin.lineinfile:
+    path: /etc/environment
+    line: 'DEBIAN_FRONTEND=noninteractive'
+    create: true
+    mode: '0644'
+  become: true
+  when: ansible_facts['os_family'] == 'Debian'
+
+- name: Update apt cache
+  ansible.builtin.apt:
+    update_cache: true
+    cache_valid_time: 3600
+  become: true
+  when: ansible_facts['os_family'] == 'Debian'
+
+- name: Install Python packages
+  ansible.builtin.apt:
+    name: "{{ base_python_packages }}"
+    state: present
+  become: true
+  when: ansible_facts['os_family'] == 'Debian'
+
+- name: Install Ubuntu-specific Python packages
+  ansible.builtin.apt:
+    name: "{{ base_python_packages_ubuntu }}"
+    state: present
+  become: true
+  when:
+    - ansible_facts['os_family'] == 'Debian'
+    - ansible_facts['distribution'] != 'Kali'
+
+- name: Install system utilities
+  ansible.builtin.apt:
+    name: "{{ base_system_packages }}"
+    state: present
+  become: true
+  when: ansible_facts['os_family'] == 'Debian'
+
+- name: Install Ubuntu-specific system packages
+  ansible.builtin.apt:
+    name: "{{ base_system_packages_ubuntu }}"
+    state: present
+  become: true
+  when:
+    - ansible_facts['os_family'] == 'Debian'
+    - ansible_facts['distribution'] != 'Kali'
+
+- name: Install Kali-specific system packages
+  ansible.builtin.apt:
+    name: "{{ base_system_packages_kali }}"
+    state: present
+  become: true
+  when:
+    - ansible_facts['os_family'] == 'Debian'
+    - ansible_facts['distribution'] == 'Kali'
+
+# Suppress Kali MOTD (profile.d/kali.sh calls kali-motd which ignores .hushlogin)
+- name: Remove kali-motd to suppress MOTD spam
+  ansible.builtin.file:
+    path: /usr/bin/kali-motd
+    state: absent
+  become: true
+  when:
+    - ansible_facts['os_family'] == 'Debian'
+    - ansible_facts['distribution'] == 'Kali'
+
+- name: Install uv package manager
+  ansible.builtin.include_tasks: install_uv.yml
+  when: base_install_uv
+
+# Rust toolchain - required for building NetExec (aardwolf dependency)
+# See: https://www.netexec.wiki/getting-started/installation/installation-on-unix
+- name: Install Rust toolchain
+  ansible.builtin.include_tasks: install_rust.yml
+  when: base_install_rust
+
+# pipx - recommended for NetExec installation
+# See: https://www.netexec.wiki/getting-started/installation/installation-on-unix
+- name: Install pipx
+  ansible.builtin.include_tasks: install_pipx.yml
+  when: base_install_pipx
+
+- name: Set base tool paths for dependent roles
+  ansible.builtin.set_fact:
+    base_rust_bin_path: "/root/.cargo/bin"
+    base_pipx_bin_path: "/root/.local/bin"
+    base_pipx_venv_path: "/root/.local/pipx/venvs"
+    cacheable: yes
+
+- name: Check pip version
+  ansible.builtin.command: "{{ base_pip_executable }} --version"
+  register: base_pip_version_check
+  changed_when: false
+  failed_when: false
+
+- name: Set fact for pip supports break-system-packages
+  ansible.builtin.set_fact:
+    base_pip_supports_break_system_packages: >-
+      {{ base_pip_version_check.stdout is search('pip (2[3-9]|[3-9][0-9])')
+      or base_pip_version_check.stdout is search('pip 2[2-9]\\.[1-9]') }}
+
+- name: Check for externally managed Python
+  ansible.builtin.shell: "ls /usr/lib/python3*/EXTERNALLY-MANAGED >/dev/null 2>&1"
+  register: base_pip_externally_managed_check
+  changed_when: false
+  failed_when: false
+
+- name: Set fact for pip externally managed
+  ansible.builtin.set_fact:
+    base_pip_externally_managed: "{{ base_pip_externally_managed_check.rc == 0 }}"
+    base_pip_break_required: "{{ base_pip_externally_managed_check.rc == 0 }}"
+
+- name: Fail when break-system-packages is required but disabled
+  ansible.builtin.fail:
+    msg: >-
+      This host is externally managed (PEP 668). Set base_pip_break_system_packages: true
+      to allow pip installs or use a venv/pipx.
+  when:
+    - base_pip_break_required
+    - not base_pip_break_system_packages
+
+- name: Fail when break-system-packages is required but unsupported by pip
+  ansible.builtin.fail:
+    msg: >-
+      This host is externally managed (PEP 668) but pip does not support --break-system-packages.
+      Upgrade pip or use a venv/pipx.
+  when:
+    - base_pip_break_required
+    - not base_pip_supports_break_system_packages
+
+- name: Install Ares Python dependencies
+  ansible.builtin.pip:
+    name: "{{ base_pip_packages }}"
+    executable: "{{ base_pip_executable }}"
+    extra_args: >-
+      {{ '--break-system-packages' if base_pip_break_required else '' }}
+      {{ '--ignore-installed' if ansible_facts['distribution'] == 'Kali' else '' }}
+  become: true
+  register: base_pip_install
+  changed_when:
+    - base_pip_install.changed
+    - ansible_facts['distribution'] != 'Kali'
+
+- name: Create Ares workspace directory
+  ansible.builtin.file:
+    path: "{{ base_workspace_dir }}"
+    state: directory
+    owner: "{{ base_workspace_owner }}"
+    group: "{{ base_workspace_group }}"
+    mode: "{{ base_workspace_mode }}"
+  become: true
+  when: base_create_workspace

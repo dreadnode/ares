@@ -1,0 +1,68 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/cowdogmoo/warpgate/main/schema/warpgate-template.json
+metadata:
+    name: ares-cracker-agent-gpu
+    version: 1.0.0
+    description: Ares password cracking agent with CUDA/OpenCL GPU-accelerated hashcat
+    author: Dreadnode <info@dreadnode.io>
+    license: MIT
+    tags:
+        - ares
+        - password-cracking
+        - hashcat
+        - john
+        - cuda
+        - gpu
+        - nvidia
+    requires:
+        warpgate: '>=1.0.0'
+name: ares-cracker-agent-gpu
+version: latest
+base:
+    image: ghcr.io/dreadnode/ares-cracker-base-gpu:latest
+    pull: true
+    privileged: true
+    volumes:
+        /sys/fs/cgroup: /sys/fs/cgroup:rw
+    run_command:
+        - -d
+        - -i
+        - -t
+        - --cgroupns=host
+        - '{{ .Image }}'
+    environment:
+        DEBIAN_FRONTEND: noninteractive
+        TZ: UTC
+    changes:
+        - ENTRYPOINT ${ENTRYPOINT}
+        - ENV DEBIAN_FRONTEND=noninteractive
+        - ENV TZ=UTC
+        - ENV NVIDIA_VISIBLE_DEVICES=all
+        - ENV NVIDIA_DRIVER_CAPABILITIES=compute,utility
+sources:
+    - name: ares
+      git:
+        repository: https://github.com/dreadnode/ares.git
+        ref: main
+        depth: 1
+        auth:
+          token: ${GITHUB_TOKEN}
+provisioners:
+    # Only install ares - hashcat is already in the base image
+    - type: file
+      source: ${sources.ares}
+      destination: /tmp/ares-build
+    - type: shell
+      only:
+        - docker.amd64
+      inline:
+        - python3.13 -m pip install --break-system-packages --no-cache-dir /tmp/ares-build
+        - rm -rf /tmp/ares-build
+        - echo "Build completed successfully"
+      changes:
+        - USER root
+        - WORKDIR /root
+targets:
+    - type: container
+      platforms:
+        - linux/amd64

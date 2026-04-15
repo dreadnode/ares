@@ -1,0 +1,52 @@
+---
+- name: Check if Alloy is already installed
+  ansible.windows.win_service:
+    name: "{{ alloy_service_name }}"
+  register: alloy_service_info
+  failed_when: false
+
+- name: Download Alloy installer
+  ansible.windows.win_get_url:
+    url: "{{ alloy_windows_installer_url }}"
+    dest: "{{ alloy_windows_temp_dir }}\\alloy-installer-windows-amd64.exe.zip"
+  when: alloy_service_info.exists is not defined or not alloy_service_info.exists
+
+- name: Extract Alloy installer
+  community.windows.win_unzip:
+    src: "{{ alloy_windows_temp_dir }}\\alloy-installer-windows-amd64.exe.zip"
+    dest: "{{ alloy_windows_temp_dir }}"
+  when: alloy_service_info.exists is not defined or not alloy_service_info.exists
+
+- name: Install Alloy silently
+  ansible.windows.win_command: '"{{ alloy_windows_temp_dir }}\alloy-installer-windows-amd64.exe" /S'
+  when: alloy_service_info.exists is not defined or not alloy_service_info.exists
+  register: alloy_install_result
+
+- name: Wait for Alloy service to be created
+  ansible.windows.win_service:
+    name: "{{ alloy_service_name }}"
+  register: alloy_service_check
+  until: alloy_service_check.exists
+  retries: 10
+  delay: 5
+  when: alloy_service_info.exists is not defined or not alloy_service_info.exists
+
+- name: Create Alloy configuration file
+  ansible.windows.win_template:
+    src: config.alloy.j2
+    dest: "{{ alloy_windows_config_path }}"
+  notify: Restart alloy service
+
+- name: Ensure Alloy service is running
+  ansible.windows.win_service:
+    name: "{{ alloy_service_name }}"
+    state: started
+    start_mode: auto
+
+- name: Clean up installer files
+  ansible.windows.win_file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - "{{ alloy_windows_temp_dir }}\\alloy-installer-windows-amd64.exe.zip"
+    - "{{ alloy_windows_temp_dir }}\\alloy-installer-windows-amd64.exe"

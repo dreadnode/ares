@@ -1,0 +1,215 @@
+---
+# Install NetExec via pipx from GitHub (recommended method)
+# Reference: https://www.netexec.wiki/getting-started/installation/installation-on-unix
+#
+# Prerequisites (should be installed via base role):
+# - Rust toolchain (for building aardwolf dependency)
+# - pipx
+# - git
+
+- name: Check if Rust is available
+  ansible.builtin.command: /root/.cargo/bin/rustc --version
+  register: recon_tools_rust_check
+  changed_when: false
+  failed_when: false
+  become: true
+
+- name: Warn if Rust is not available
+  ansible.builtin.debug:
+    msg: |
+      WARNING: Rust toolchain not found. NetExec requires Rust to build.
+      Ensure the base role was run with base_install_rust: true
+      Or install Rust manually: curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+  when: recon_tools_rust_check.rc != 0
+
+- name: Check if pipx is available
+  ansible.builtin.command: pipx --version
+  register: recon_tools_pipx_check
+  changed_when: false
+  failed_when: false
+
+- name: Reinstall pipx if not available (may have been broken by package removal)
+  ansible.builtin.apt:
+    name: pipx
+    state: present
+    update_cache: true
+  become: true
+  when:
+    - recon_tools_pipx_check.rc != 0
+    - ansible_facts['os_family'] == 'Debian'
+
+- name: Run pipx ensurepath after reinstall
+  ansible.builtin.command: pipx ensurepath
+  become: true
+  changed_when: false
+  when:
+    - recon_tools_pipx_check.rc != 0
+    - ansible_facts['os_family'] == 'Debian'
+
+- name: Verify pipx is now available
+  ansible.builtin.command: pipx --version
+  register: recon_tools_pipx_recheck
+  changed_when: false
+  failed_when: false
+  when: recon_tools_pipx_check.rc != 0
+
+- name: Fail if pipx is still not available
+  ansible.builtin.fail:
+    msg: |
+      pipx is required for NetExec installation but was not found.
+      Ensure the base role was run with base_install_pipx: true
+      Or install pipx manually: apt install pipx && pipx ensurepath
+  when:
+    - recon_tools_pipx_check.rc != 0
+    - recon_tools_pipx_recheck.rc | default(1) != 0
+
+- name: Check if NetExec is already installed via pipx
+  ansible.builtin.command: pipx list
+  register: recon_tools_pipx_list
+  changed_when: false
+  failed_when: false
+  become: true
+  environment:
+    HOME: /root
+    PATH: "/root/.cargo/bin:/root/.local/bin:/usr/local/bin:/usr/bin:/bin"
+
+- name: Install NetExec via pipx from GitHub
+  ansible.builtin.command: >
+    pipx install git+{{ recon_tools_netexec_repo }}
+  register: recon_tools_netexec_pipx_install
+  changed_when: "'installed package netexec' in recon_tools_netexec_pipx_install.stdout"
+  failed_when: false
+  become: true
+  environment:
+    HOME: /root
+    PATH: "/root/.cargo/bin:/root/.local/bin:/usr/local/bin:/usr/bin:/bin"
+  when: "'netexec' not in recon_tools_pipx_list.stdout | default('')"
+
+- name: Upgrade NetExec if already installed
+  ansible.builtin.command: pipx upgrade netexec
+  register: recon_tools_netexec_pipx_upgrade
+  changed_when: "'upgraded package netexec' in recon_tools_netexec_pipx_upgrade.stdout"
+  failed_when: false
+  become: true
+  environment:
+    HOME: /root
+    PATH: "/root/.cargo/bin:/root/.local/bin:/usr/local/bin:/usr/bin:/bin"
+  when: "'netexec' in recon_tools_pipx_list.stdout | default('')"
+
+- name: Report NetExec installation result
+  ansible.builtin.debug:
+    msg: |
+      NetExec installation via pipx: {{ 'SUCCESS' if (recon_tools_netexec_pipx_install.rc | default(0) == 0 or recon_tools_netexec_pipx_upgrade.rc | default(0) == 0) else 'FAILED' }}
+      {% if recon_tools_netexec_pipx_install.stderr | default('') %}
+      Error: {{ recon_tools_netexec_pipx_install.stderr }}
+      {% endif %}
+      {% if recon_tools_netexec_pipx_upgrade.stderr | default('') %}
+      Error: {{ recon_tools_netexec_pipx_upgrade.stderr }}
+      {% endif %}
+
+- name: Inject source impacket into NetExec pipx venv
+  ansible.builtin.command: >-
+    pipx inject netexec {{ recon_tools_impacket_install_dir }} --editable
+  register: recon_tools_netexec_impacket_inject
+  changed_when: false
+  failed_when: false
+  become: true
+  environment:
+    HOME: /root
+    PATH: "/root/.cargo/bin:/root/.local/bin:/usr/local/bin:/usr/bin:/bin"
+  when:
+    - recon_tools_impacket_from_source | default(false)
+    - recon_tools_netexec_use_pipx | default(true)
+
+- name: Find nxc binary location
+  ansible.builtin.shell: |
+    set -o pipefail
+    # Try which first with pipx paths
+    if command -v nxc >/dev/null 2>&1; then
+      command -v nxc
+      exit 0
+    fi
+    # Check pipx venv first, then .local/bin (use -e for symlinks)
+    for path in /root/.local/pipx/venvs/netexec/bin/nxc /root/.local/bin/nxc; do
+      if [ -e "$path" ]; then echo "$path"; exit 0; fi
+    done
+    echo "NOT_FOUND"
+  args:
+    executable: /bin/bash
+  environment:
+    HOME: /root
+    PATH: "/root/.local/bin:/root/.cargo/bin:/usr/local/bin:/usr/bin:/bin"
+  register: recon_tools_nxc_path
+  changed_when: false
+  become: true
+
+- name: Create symlink for nxc in /usr/local/bin
+  ansible.builtin.file:
+    src: "{{ recon_tools_nxc_path.stdout }}"
+    dest: /usr/local/bin/nxc
+    state: link
+    force: true
+  become: true
+  when: recon_tools_nxc_path.stdout != 'NOT_FOUND'
+
+- name: Find netexec binary location
+  ansible.builtin.shell: |
+    set -o pipefail
+    # Try which first with pipx paths
+    if command -v netexec >/dev/null 2>&1; then
+      command -v netexec
+      exit 0
+    fi
+    # Check pipx venv first, then .local/bin (use -e for symlinks)
+    for path in /root/.local/pipx/venvs/netexec/bin/netexec /root/.local/bin/netexec; do
+      if [ -e "$path" ]; then echo "$path"; exit 0; fi
+    done
+    echo "NOT_FOUND"
+  args:
+    executable: /bin/bash
+  environment:
+    HOME: /root
+    PATH: "/root/.local/bin:/root/.cargo/bin:/usr/local/bin:/usr/bin:/bin"
+  register: recon_tools_netexec_path
+  changed_when: false
+  become: true
+
+- name: Create symlink for netexec in /usr/local/bin
+  ansible.builtin.file:
+    src: "{{ recon_tools_netexec_path.stdout }}"
+    dest: /usr/local/bin/netexec
+    state: link
+    force: true
+  become: true
+  when: recon_tools_netexec_path.stdout != 'NOT_FOUND'
+
+- name: Find nxcdb binary location
+  ansible.builtin.shell: |
+    set -o pipefail
+    # Try which first with pipx paths
+    if command -v nxcdb >/dev/null 2>&1; then
+      command -v nxcdb
+      exit 0
+    fi
+    # Check pipx venv first, then .local/bin (use -e for symlinks)
+    for path in /root/.local/pipx/venvs/netexec/bin/nxcdb /root/.local/bin/nxcdb; do
+      if [ -e "$path" ]; then echo "$path"; exit 0; fi
+    done
+    echo "NOT_FOUND"
+  args:
+    executable: /bin/bash
+  environment:
+    HOME: /root
+    PATH: "/root/.local/bin:/root/.cargo/bin:/usr/local/bin:/usr/bin:/bin"
+  register: recon_tools_nxcdb_path
+  changed_when: false
+  become: true
+
+- name: Create symlink for nxcdb in /usr/local/bin
+  ansible.builtin.file:
+    src: "{{ recon_tools_nxcdb_path.stdout }}"
+    dest: /usr/local/bin/nxcdb
+    state: link
+    force: true
+  become: true
+  when: recon_tools_nxcdb_path.stdout != 'NOT_FOUND'

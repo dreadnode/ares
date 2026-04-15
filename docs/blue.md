@@ -2,11 +2,9 @@
 
 ## Overview
 
-The **Ares Blue Agent** is an autonomous SOC (Security Operations Center)
-investigation system that ingests Grafana alerts and conducts intelligent,
-multi-stage security investigations. It queries observability data (Loki logs,
-Prometheus metrics), extracts validated evidence, maps findings to the MITRE
-ATT&CK framework, and generates comprehensive investigation reports.
+The **Ares Blue Agent** is an autonomous SOC investigation system. It picks up
+Grafana alerts, queries Loki logs and Prometheus metrics for evidence, maps
+findings to MITRE ATT&CK, and writes investigation reports.
 
 **Key Capabilities:**
 
@@ -27,21 +25,22 @@ ATT&CK framework, and generates comprehensive investigation reports.
 
 #### Investigation Orchestrator
 
-**Location:** `src/ares/agents/blue/soc_investigator.py`
+**Location:** `ares-orchestrator/src/blue/`
 
-The `InvestigationOrchestrator` manages the full investigation lifecycle:
+The investigation orchestrator manages the full investigation lifecycle:
 
-- Creates and configures Dreadnode Agents for investigating Grafana alerts
-- Establishes MCP (Model Context Protocol) connections to Grafana
+- Coordinates LLM-powered investigation agents for Grafana alerts
+- Dispatches tasks to specialized sub-agents (triage, threat hunter, lateral analyst, escalation)
+- Chains follow-up investigations based on discovered evidence types
 - Enforces hard timeout watchdog (1 min/step + 2 min buffer)
 - Generates partial reports on timeout
-- Handles investigation state persistence
+- Handles investigation state persistence via Redis
 
-#### Investigation Agent Factory
+#### Blue Worker Task Loop
 
-**Location:** `src/ares/core/factories/blue_factory.py`
+**Location:** `ares-worker/src/blue_task_loop.rs`
 
-Creates pre-configured investigation agents with:
+Runs the worker-side investigation loop with:
 
 - Adaptive query limits based on alert severity and stage
 - Query optimization and duplicate detection
@@ -51,9 +50,9 @@ Creates pre-configured investigation agents with:
 
 #### Investigation State Model
 
-**Location:** `src/ares/core/models.py`
+**Location:** `ares-core/src/models/blue.rs`
 
-The `InvestigationState` model tracks:
+The `SharedBlueTeamState` model tracks:
 
 - Investigation ID, alert context, current stage
 - Evidence inventory with pyramid level classification
@@ -123,19 +122,19 @@ Report Delivered
 
 ### Investigation Tools
 
-**Location:** `src/ares/tools/blue/investigation.py`
+**Location:** `ares-tools/src/` (blue feature)
 
 #### Evidence Recording
 
-```python
+```text
 record_evidence(
-    evidence_type: EvidenceType,  # ip, domain, hash, process, file, user, etc.
-    value: str,
-    pyramid_level: int,  # 1=Hash Values, 6=TTPs
-    mitre_techniques: List[str],
-    confidence: float,  # 0.0-1.0
-    description: str,
-    source_query: Optional[str]
+    evidence_type: EvidenceType,  // ip, domain, hash, process, file, user, etc.
+    value: String,
+    pyramid_level: i32,           // 1=Hash Values, 6=TTPs
+    mitre_techniques: Vec<String>,
+    confidence: f64,              // 0.0-1.0
+    description: String,
+    source_query: Option<String>
 )
 ```
 
@@ -164,33 +163,31 @@ record_evidence(
 
 #### Timeline Management
 
-```python
+```text
 add_timeline_event(
-    timestamp: str,
-    description: str,
-    mitre_technique: Optional[str],
-    evidence_ids: List[str],
-    severity: str  # info, low, medium, high, critical
+    timestamp: String,
+    description: String,
+    mitre_technique: Option<String>,
+    evidence_ids: Vec<String>,
+    severity: String  // info, low, medium, high, critical
 )
 ```
 
 #### Investigation Tracking
 
-```python
-track_host_investigation(hostname: str)
-track_user_investigation(username: str)
+```text
+track_host_investigation(hostname: String)
+track_user_investigation(username: String)
 ```
 
 ### Completion Tools
 
-**Location:** `src/ares/tools/blue/actions.py`
-
-```python
+```text
 complete_investigation(
-    attack_synopsis: str,
-    recommendations: List[str],
-    should_escalate: bool = False,
-    escalation_reason: Optional[str] = None
+    attack_synopsis: String,
+    recommendations: Vec<String>,
+    should_escalate: bool,
+    escalation_reason: Option<String>
 )
 ```
 
@@ -203,13 +200,11 @@ Finalizes investigation with:
 
 ### Grafana Integration Tools
 
-**Location:** `src/ares/tools/blue/grafana.py`
-
-```python
-get_firing_alerts() -> List[Alert]
-get_alert_history(alert_name: str, lookback_hours: int) -> List[Alert]
-post_investigation_started(investigation_id: str, alert_name: str)
-post_investigation_completed(investigation_id: str, report_url: str)
+```text
+get_firing_alerts() -> Vec<Alert>
+get_alert_history(alert_name, lookback_hours) -> Vec<Alert>
+post_investigation_started(investigation_id, alert_name)
+post_investigation_completed(investigation_id, report_url)
 ```
 
 Features:
@@ -220,17 +215,15 @@ Features:
 
 ### Observability Tools
 
-**Location:** `src/ares/tools/blue/observability.py`
-
 #### LokiTools - LogQL Queries
 
-```python
+```text
 query_loki(
-    logql: str,
-    start_time: str,
-    end_time: str,
-    limit: int = 100
-) -> List[LogLine]
+    logql: String,
+    start_time: String,
+    end_time: String,
+    limit: i32 = 100
+) -> Vec<LogLine>
 ```
 
 Features:
@@ -243,15 +236,13 @@ Features:
 
 #### PrometheusTools - PromQL Queries
 
-```python
-query_prometheus_instant(query: str, time: str)
-query_prometheus_range(query: str, start: str, end: str, step: str)
-get_metric_metadata(metric: str)
+```text
+query_prometheus_instant(query: String, time: String)
+query_prometheus_range(query: String, start: String, end: String, step: String)
+get_metric_metadata(metric: String)
 ```
 
 ### Query Template Tools
-
-**Location:** `src/ares/tools/blue/query_templates.py`
 
 Pre-built LogQL queries optimized for detecting red team attack patterns:
 
@@ -270,10 +261,8 @@ Example templates:
 
 ### Question Engine Tools
 
-**Location:** `src/ares/tools/blue/investigation.py`
-
-```python
-get_combined_questions() -> List[InvestigativeQuestion]
+```text
+get_combined_questions() -> Vec<InvestigativeQuestion>
 ```
 
 Generates investigative questions from three engines:
@@ -295,14 +284,12 @@ Generates investigative questions from three engines:
 
 ### Learning Tools
 
-**Location:** `src/ares/tools/blue/learning.py`
-
-```python
+```text
 find_similar_investigations(
-    alert_name: str,
-    mitre_techniques: List[str],
-    severity: str
-) -> List[Investigation]
+    alert_name: String,
+    mitre_techniques: Vec<String>,
+    severity: String
+) -> Vec<Investigation>
 ```
 
 Features:
@@ -314,8 +301,6 @@ Features:
 
 ### MITRE Lookup Tools
 
-**Location:** `src/ares/tools/blue/mitre.py`
-
 - Technique name resolution
 - Tactic mapping (Reconnaissance, Initial Access, Execution, etc.)
 - Attack lifecycle coverage analysis
@@ -325,7 +310,7 @@ Features:
 
 ### Alert Correlation
 
-**Location:** `src/ares/core/alert_correlation.py`
+**Location:** `ares-core/src/correlation/`
 
 The `AlertCluster` class groups related alerts using similarity scoring:
 
@@ -344,7 +329,7 @@ The `AlertCluster` class groups related alerts using similarity scoring:
 
 ### Lateral Movement Analysis
 
-**Location:** `src/ares/core/lateral_analyzer.py`
+**Location:** `ares-core/src/state/`
 
 The `LateralGraph` tracks host-to-host connections and attack spread:
 
@@ -367,7 +352,7 @@ The `LateralGraph` tracks host-to-host connections and attack spread:
 
 ### Red-Blue Correlation
 
-**Location:** `src/ares/core/correlation.py`
+**Location:** `ares-core/src/correlation/`
 
 Correlates red team activities with blue team detections to identify gaps:
 
@@ -388,7 +373,7 @@ Correlates red team activities with blue team detections to identify gaps:
 
 ### Evidence Validation
 
-**Location:** `src/ares/core/evidence_validation.py`
+**Location:** `ares-core/src/`
 
 Automatic validation of recorded evidence:
 
@@ -400,7 +385,7 @@ Automatic validation of recorded evidence:
 
 ### Query Resilience
 
-**Location:** `src/ares/core/query_resilience.py`
+**Location:** `ares-core/src/`
 
 Ensures reliable query execution:
 
@@ -486,11 +471,11 @@ The blue agent uses MCP to connect to Grafana and access observability data:
 - Multi-architecture image rendering
 
 **Setup:**
-See `.claude/CLAUDE.md` for MCP server installation instructions.
+See [Grafana MCP Setup](grafana-mcp-setup.md) for MCP server installation instructions.
 
 ### Markdown Report Generation
 
-**Location:** `src/ares/reports/investigation.py`
+**Location:** `ares-core/src/reports/`
 
 Investigation reports include:
 
@@ -610,20 +595,15 @@ Provides structured investigation workflows:
 
 | Component | Path |
 | ----------- | ------ |
-| Investigation Orchestrator | `src/ares/agents/blue/soc_investigator.py` |
-| Agent Factory & Query Limits | `src/ares/core/factories/blue_factory.py` |
-| Investigation Tools | `src/ares/tools/blue/investigation.py` |
-| Completion Tools | `src/ares/tools/blue/actions.py` |
-| Grafana Integration | `src/ares/tools/blue/grafana.py` |
-| Query Templates | `src/ares/tools/blue/query_templates.py` |
-| Learning Tools | `src/ares/tools/blue/learning.py` |
-| Observability (Loki/Prometheus) | `src/ares/tools/blue/observability.py` |
-| Alert Correlation | `src/ares/core/alert_correlation.py` |
-| Lateral Movement Analysis | `src/ares/core/lateral_analyzer.py` |
-| Red-Blue Correlation | `src/ares/core/correlation.py` |
-| Evidence Validation | `src/ares/core/evidence_validation.py` |
-| Report Generation | `src/ares/reports/investigation.py` |
-| Investigation Models | `src/ares/core/models.py` |
+| Blue Orchestrator | `ares-orchestrator/src/blue/` |
+| Blue Worker Task Loop | `ares-worker/src/blue_task_loop.rs` |
+| Blue CLI Commands | `ares-cli/src/blue/` |
+| Core Models | `ares-core/src/models/` |
+| State Management | `ares-core/src/state/` |
+| Correlation Engine | `ares-core/src/correlation/` |
+| Report Generation | `ares-core/src/reports/` |
+| Tool Dispatch | `ares-tools/src/` |
+| Configuration | `config/ares.yaml` |
 
 ## Configuration
 
@@ -652,56 +632,216 @@ blue_team:
 
 ## Usage
 
-### Running an Investigation
+### Prerequisites
 
-```python
-from ares.agents.blue.soc_investigator import InvestigationOrchestrator
-from ares.core.models import AlertContext
+- **API keys** in `.env` or 1Password: `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`,
+  `GRAFANA_SERVICE_ACCOUNT_TOKEN`, `DREADNODE_API_KEY`
+- **Grafana MCP** configured (see [Grafana MCP Usage](grafana_mcp_usage.md))
+- **Redis** accessible (K8s in-cluster, or port-forwarded for local/EC2)
+- **ares-cli** binary built (`cargo build --release`)
 
-# Create alert context
-alert = AlertContext(
-    alert_name="Suspicious PowerShell Execution",
-    firing_timestamp="2024-01-27T10:00:00Z",
-    severity="high",
-    labels={"host": "web-01", "job": "eventlog"},
-    annotations={"description": "Encoded PowerShell command detected"}
-)
+### Quick Start
 
-# Run investigation
-orchestrator = InvestigationOrchestrator()
-result = await orchestrator.investigate(alert)
+```bash
+# 1. Start a blue investigation from the latest red team operation
+task blue:once LATEST=true
 
-# Result includes:
-# - investigation_id
-# - report_path (markdown)
-# - report_json_path (JSON)
-# - investigation_state (complete state object)
+# 2. Monitor progress
+task blue:multi:status LATEST=true
+
+# 3. View results
+task blue:multi:evidence LATEST=true
+task blue:multi:techniques LATEST=true
+task blue:reports:consolidate LATEST=true
 ```
 
-### Viewing Investigation Results
+### Taskfile Commands
 
-Investigation reports are written to the configured output directory and include:
+All blue team tasks are invoked via `task blue:<command>`. Most accept
+`OPERATION_ID=op-xxx` or `LATEST=true` to identify the target.
 
-- Markdown report with full analysis
-- JSON export for programmatic access
-- Grafana annotations linking to the report
+#### Starting Investigations
+
+```bash
+# Single investigation from a red team operation (local execution)
+task blue:once OPERATION_ID=op-xxx
+task blue:once LATEST=true
+
+# Single investigation from a red team operation (K8s remote)
+task blue:once:remote LATEST=true
+
+# Submit a specific alert JSON file
+task blue:investigate ALERT=alert.json
+
+# Continuous poll mode (re-checks every POLL_INTERVAL seconds)
+task blue:poll
+
+# Multi-agent investigation via K8s orchestrator
+task blue:multi ALERT=alert.json
+task blue:multi ALERT=alert.json INVESTIGATION_ID=inv-xxx MULTI_AGENT=true
+
+# Multi-agent from red team operation (K8s remote)
+task blue:multi:remote LATEST=true
+task blue:multi:remote OPERATION_ID=op-xxx
+```
+
+#### Monitoring Investigations
+
+```bash
+# Investigation status
+task blue:multi:status LATEST=true
+task blue:multi:status INVESTIGATION_ID=inv-xxx
+
+# Aggregate status for all investigations in an operation
+task blue:multi:operation-status LATEST=true
+task blue:multi:operation-status LATEST=true WATCH=10  # auto-refresh
+
+# List all investigations
+task blue:multi:list
+
+# Runtime info
+task blue:multi:runtime LATEST=true
+
+# Triage decision audit trail
+task blue:multi:triage-status LATEST=true
+
+# Follow logs
+task blue:multi:logs                          # orchestrator only
+task blue:multi:logs ALL=true                 # all blue pods
+task blue:multi:logs ROLE=threat-hunter       # specific role
+```
+
+#### Viewing Results
+
+```bash
+# Evidence collected (Pyramid of Pain items)
+task blue:multi:evidence LATEST=true
+task blue:multi:evidence LATEST=true JSON=true  # machine-readable
+
+# MITRE ATT&CK techniques identified
+task blue:multi:techniques LATEST=true
+```
+
+#### Reports
+
+```bash
+# Generate consolidated report from Redis state
+task blue:reports:consolidate LATEST=true
+task blue:reports:consolidate OPERATION_ID=op-xxx OUTPUT_DIR=./reports
+
+# Export detection playbook (runs on red orchestrator pod)
+task blue:playbook LATEST=true
+task blue:playbook OPERATION_ID=op-xxx JSON=true
+
+# List / view local reports
+task blue:reports:list
+task blue:reports:latest
+
+# Clean up reports
+task blue:reports:clean
+```
+
+#### Cleanup
+
+```bash
+# Delete a single investigation
+task blue:multi:delete INVESTIGATION_ID=inv-xxx
+
+# Delete an operation and all its investigations
+task blue:multi:delete-operation OPERATION_ID=op-xxx
+
+# Clean up investigations older than N hours
+task blue:multi:cleanup MAX_AGE_HOURS=24
+task blue:multi:cleanup ALL=true DRY_RUN=true  # preview before deleting
+```
+
+### Direct CLI Commands
+
+For environments without Taskfile, or when you need more control, use
+`ares-cli` directly. Add `--k8s <NAMESPACE>` for K8s or `--ec2 <NAME>` for
+EC2 transport.
+
+```bash
+# Submit from red team operation alerts
+ares-cli blue from-operation --latest
+ares-cli --k8s attack-simulation blue from-operation op-xxx
+
+# Submit a single alert
+ares-cli blue submit '{"alert_title":"Suspicious LSASS","severity":"high"}'
+
+# Continuous poll mode
+ares-cli blue watch --poll-interval 30 --max-steps 50
+
+# Investigation status and results
+ares-cli blue list
+ares-cli blue status --latest
+ares-cli blue evidence --latest
+ares-cli blue evidence --latest --json
+ares-cli blue techniques --latest
+ares-cli blue runtime --latest
+ares-cli blue triage-status --latest
+ares-cli blue operation-status --latest --watch 10
+
+# Report generation
+ares-cli blue report --latest --output-dir ./reports
+ares-cli blue report --operation-id op-xxx --regenerate
+
+# Cleanup
+ares-cli blue delete inv-xxx --force
+ares-cli blue delete-operation op-xxx --force
+ares-cli blue cleanup --max-age-hours 24 --all --force
+ares-cli blue cleanup --dry-run
+```
+
+### EC2 Deployment
+
+When running on EC2 instead of K8s, port-forward Redis first:
+
+```bash
+# Start SSM port-forward (Redis on localhost:16379)
+task ec2:redis:forward EC2_NAME=ares-tools
+
+# In another terminal, run blue commands with the forwarded Redis
+ARES_REDIS_URL=redis://localhost:16379 ares-cli blue from-operation --latest
+```
+
+### Running Blue Alongside Red
+
+Set `BLUE_ENABLED=1` to start blue team investigations automatically when
+a red team operation runs:
+
+```bash
+task red:ec2:multi TARGET=dreadgoad DOMAIN=sevenkingdoms.local BLUE_ENABLED=1
+```
+
+### Taskfile Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `MODEL` | config file | LLM model override |
+| `POLL_INTERVAL` | `30` | Seconds between poll cycles |
+| `MAX_STEPS_BLUE` | `50` | Max agent steps (watch/poll mode) |
+| `MAX_STEPS_BLUE_ONCE` | `15` | Max agent steps (once/investigate mode) |
+| `GRAFANA_URL` | `https://grafana.dev.plundr.ai` | Grafana instance |
+| `K8S_NAMESPACE` | `attack-simulation` | K8s namespace for remote commands |
+| `REPORT_DIR` | `./reports` | Report output directory |
+| `LOG_DIR` | `./logs` | Log output directory |
 
 ## Summary
 
-The **Ares Blue Agent** provides autonomous, intelligent SOC investigation
-capabilities that:
+The **Ares Blue Agent** handles autonomous SOC investigation:
 
-1. **Ingest alerts** from Grafana and initiate investigations
-2. **Query observability data** (Loki, Prometheus) with intelligent rate limiting
-3. **Extract validated evidence** using the Pyramid of Pain framework
-4. **Map to MITRE ATT&CK** for tactical context and gap analysis
-5. **Identify attack precursors** to build complete attack chains
-6. **Detect lateral movement** and expand investigation scope
-7. **Correlate related alerts** to identify campaign patterns
-8. **Learn from history** using past investigations as guidance
-9. **Generate comprehensive reports** with timelines, recommendations, and evidence
-10. **Integrate with Grafana** for seamless alert management
+1. Picks up alerts from Grafana
+2. Queries Loki and Prometheus with intelligent rate limiting
+3. Extracts evidence using the Pyramid of Pain framework
+4. Maps to MITRE ATT&CK for tactical context and gap analysis
+5. Identifies attack precursors to build complete attack chains
+6. Detects lateral movement and expands investigation scope
+7. Correlates related alerts to identify campaign patterns
+8. Learns from past investigations
+9. Generates reports with timelines, recommendations, and evidence
+10. Posts annotations back to Grafana
 
-The blue agent accelerates SOC workflows, improves detection coverage through
-Red-Blue correlation, and provides consistent, thorough investigations at
-scale.
+The blue agent cuts investigation time by automating the triage-to-report
+pipeline, and the Red-Blue correlation loop surfaces detection gaps that
+manual review tends to miss.
