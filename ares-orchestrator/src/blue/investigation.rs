@@ -11,7 +11,7 @@ use chrono::Utc;
 use tracing::{info, warn};
 
 use ares_core::eval::workflow::evaluate_live_investigation;
-use ares_core::state::blue_task_queue::{BlueTaskMessage, BlueTaskQueue, BlueTaskResult};
+use ares_core::state::blue_task_queue::{BlueTaskQueue, BlueTaskResult};
 use ares_core::state::{BlueStateReader, BlueStateWriter, RedisStateReader};
 use ares_llm::tool_registry::blue::BlueAgentRole;
 use ares_llm::{
@@ -306,46 +306,6 @@ fn extract_verdict(text: &str) -> String {
     } else {
         "inconclusive".into()
     }
-}
-
-/// Dispatch a sub-task to a blue team worker agent.
-///
-/// Called by the orchestrator's LLM when it uses `dispatch_task` tool.
-#[allow(dead_code)]
-pub async fn dispatch_subtask(
-    task_queue: &mut BlueTaskQueue,
-    investigation_id: &str,
-    task_type: &str,
-    role: BlueAgentRole,
-    params: serde_json::Value,
-) -> Result<String> {
-    let task_id = format!(
-        "{}_{}_{}",
-        task_type,
-        investigation_id.chars().take(8).collect::<String>(),
-        &uuid::Uuid::new_v4().simple().to_string()[..8]
-    );
-
-    let task = BlueTaskMessage {
-        task_id: task_id.clone(),
-        investigation_id: investigation_id.to_string(),
-        task_type: task_type.to_string(),
-        role: role.as_str().to_string(),
-        params,
-        created_at: Utc::now().to_rfc3339(),
-    };
-
-    task_queue.submit_task(&task).await?;
-
-    info!(
-        task_id = %task_id,
-        task_type = task_type,
-        role = role.as_str(),
-        investigation_id = investigation_id,
-        "Dispatched blue team sub-task"
-    );
-
-    Ok(task_id)
 }
 
 /// Score a completed investigation against red team ground truth.

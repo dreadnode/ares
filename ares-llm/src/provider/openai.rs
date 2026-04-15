@@ -66,16 +66,6 @@ struct ApiMessage {
 #[serde(untagged)]
 enum ApiContent {
     Text(String),
-    #[allow(dead_code)]
-    Parts(Vec<ApiContentPart>),
-}
-
-#[derive(Serialize)]
-struct ApiContentPart {
-    #[serde(rename = "type")]
-    part_type: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    text: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -155,7 +145,6 @@ struct ApiErrorResponse {
 struct ApiErrorDetail {
     message: String,
     #[serde(rename = "type")]
-    #[allow(dead_code)]
     error_type: Option<String>,
 }
 

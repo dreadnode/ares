@@ -60,18 +60,6 @@ impl LlmTaskRunner {
         }
     }
 
-    /// Return the model name used by this runner (e.g. "gpt-5.2").
-    #[allow(dead_code)]
-    pub fn model_name(&self) -> &str {
-        &self.model_name
-    }
-
-    #[allow(dead_code)]
-    pub fn with_config(mut self, config: AgentLoopConfig) -> Self {
-        self.config = config;
-        self
-    }
-
     /// Set the callback handler after construction.
     ///
     /// This is safe to call from `&self` (interior mutability via `OnceLock`),

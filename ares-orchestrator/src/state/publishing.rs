@@ -768,19 +768,6 @@ impl SharedState {
         Ok(())
     }
 
-    /// Add a MITRE ATT&CK technique to Redis SET.
-    #[allow(dead_code)]
-    pub async fn add_technique(&self, queue: &TaskQueue, technique_id: &str) -> Result<bool> {
-        let operation_id = {
-            let state = self.inner.read().await;
-            state.operation_id.clone()
-        };
-        let reader = RedisStateReader::new(operation_id);
-        let mut conn = queue.connection();
-        let added = reader.add_technique(&mut conn, technique_id).await?;
-        Ok(added)
-    }
-
     /// Record a pending task in memory and persist to Redis HASH.
     ///
     /// Key: `ares:op:{id}:pending_tasks` — matches Python's state_backend.

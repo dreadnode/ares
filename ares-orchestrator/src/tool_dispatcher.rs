@@ -260,12 +260,6 @@ impl RedisToolDispatcher {
         }
     }
 
-    #[allow(dead_code)]
-    pub fn with_timeout(mut self, timeout: Duration) -> Self {
-        self.tool_timeout = timeout;
-        self
-    }
-
     /// Push structured discoveries from a tool result to the real-time
     /// discovery list so the discovery poller publishes them to state.
     ///

@@ -49,43 +49,6 @@ impl SharedState {
         Ok(())
     }
 
-    /// Increment a vulnerability type failure counter in Redis.
-    ///
-    /// Returns the new failure count. Matches Python's `vuln_type_failures` HINCRBY.
-    #[allow(dead_code)]
-    pub async fn increment_vuln_failure(&self, queue: &TaskQueue, vuln_type: &str) -> Result<i64> {
-        let operation_id = {
-            let state = self.inner.read().await;
-            state.operation_id.clone()
-        };
-        let reader = ares_core::state::RedisStateReader::new(operation_id);
-        let mut conn = queue.connection();
-        let count = reader
-            .increment_vuln_type_failure(&mut conn, vuln_type)
-            .await?;
-        Ok(count)
-    }
-
-    /// Check if a vulnerability type has exceeded its max failures.
-    #[allow(dead_code)]
-    pub async fn vuln_type_exceeded_failures(
-        &self,
-        queue: &TaskQueue,
-        vuln_type: &str,
-        max_failures: i64,
-    ) -> Result<bool> {
-        let operation_id = {
-            let state = self.inner.read().await;
-            state.operation_id.clone()
-        };
-        let reader = ares_core::state::RedisStateReader::new(operation_id);
-        let mut conn = queue.connection();
-        let count = reader
-            .get_vuln_type_failure_count(&mut conn, vuln_type)
-            .await?;
-        Ok(count >= max_failures)
-    }
-
     /// Persist MSSQL enum dispatched entry to Redis.
     pub async fn persist_mssql_dispatched(&self, queue: &TaskQueue, ip: &str) -> Result<()> {
         let operation_id = {

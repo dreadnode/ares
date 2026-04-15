@@ -20,15 +20,6 @@ use tracing::{debug, info, warn};
 use crate::dispatcher::Dispatcher;
 use crate::state::SharedState;
 
-/// Golden ticket processing statuses that indicate the domain is "done".
-#[allow(dead_code)]
-const GT_DONE_STATUSES: &[&str] = &[
-    "success",
-    "failed_no_dc",
-    "failed_no_sid",
-    "failed_ticketer",
-];
-
 /// Pure computation: given state fields, return undominated forest root domains.
 ///
 /// Used by both the async `undominated_forests()` and `SharedState::snapshot()`.
@@ -101,147 +92,6 @@ fn forest_root_of(domain: &str) -> String {
         // Walk up to find the 2-part root (assumes .local/.com TLD)
         parts[parts.len() - 2..].join(".")
     }
-}
-
-/// Wait until all domains with krbtgt hashes have had their golden tickets
-/// processed (or timeout).
-///
-/// Returns `true` if a golden ticket was successfully forged for at least one domain.
-#[allow(dead_code)]
-pub async fn wait_for_golden_ticket(
-    state: &SharedState,
-    mut shutdown_rx: watch::Receiver<bool>,
-    timeout: Duration,
-    interval: Duration,
-) -> bool {
-    let deadline = tokio::time::Instant::now() + timeout;
-    let mut processed_domains: HashSet<String> = HashSet::new();
-
-    info!(
-        timeout_secs = timeout.as_secs(),
-        "Waiting for golden ticket completion"
-    );
-
-    loop {
-        // Check shutdown
-        if *shutdown_rx.borrow() {
-            info!("Golden ticket wait interrupted by shutdown");
-            return false;
-        }
-
-        // Check timeout
-        if tokio::time::Instant::now() >= deadline {
-            warn!("Golden ticket wait timed out");
-            break;
-        }
-
-        let (has_gt, all_done, domains_needing_gt) = {
-            let inner = state.read().await;
-
-            // Find domains that have krbtgt NTLM hashes
-            let krbtgt_domains: HashSet<String> = inner
-                .hashes
-                .iter()
-                .filter(|h| h.username.to_lowercase() == "krbtgt")
-                .map(|h| {
-                    if h.domain.is_empty() {
-                        inner.domains.first().cloned().unwrap_or_default()
-                    } else {
-                        h.domain.to_lowercase()
-                    }
-                })
-                .filter(|d| !d.is_empty())
-                .collect();
-
-            if krbtgt_domains.is_empty() {
-                debug!("No krbtgt hashes found, nothing to wait for");
-                return inner.has_golden_ticket;
-            }
-
-            // Check which domains still need processing
-            let domains_needing_gt: Vec<String> = krbtgt_domains
-                .iter()
-                .filter(|d| !processed_domains.contains(*d))
-                .cloned()
-                .collect();
-
-            let all_done = domains_needing_gt.is_empty();
-            (inner.has_golden_ticket, all_done, domains_needing_gt)
-        };
-
-        // If has_golden_ticket flag is set, we're done
-        if has_gt {
-            info!("Golden ticket flag set, wait complete");
-            return true;
-        }
-
-        // If all domains are processed, we're done
-        if all_done {
-            info!("All krbtgt domains processed for golden ticket");
-            break;
-        }
-
-        debug!(
-            pending = domains_needing_gt.len(),
-            "Waiting for golden ticket on domains"
-        );
-
-        // Check completed tasks for golden ticket results
-        {
-            let inner = state.read().await;
-            for (task_id, result) in &inner.completed_tasks {
-                if let Some(ref payload) = result.result {
-                    // Check if this is a golden ticket result
-                    let is_gt = payload
-                        .get("technique")
-                        .and_then(|v| v.as_str())
-                        .map(|t| t == "golden_ticket")
-                        .unwrap_or(false);
-
-                    if !is_gt {
-                        continue;
-                    }
-
-                    let status = payload.get("status").and_then(|v| v.as_str()).unwrap_or(
-                        if result.success {
-                            "success"
-                        } else {
-                            "failed_ticketer"
-                        },
-                    );
-
-                    if GT_DONE_STATUSES.contains(&status) {
-                        if let Some(domain) = payload.get("domain").and_then(|v| v.as_str()) {
-                            if !processed_domains.contains(domain) {
-                                info!(
-                                    task_id = %task_id,
-                                    domain = domain,
-                                    status = status,
-                                    "Golden ticket result processed"
-                                );
-                                processed_domains.insert(domain.to_lowercase());
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // Sleep until next check or shutdown
-        tokio::select! {
-            _ = tokio::time::sleep(interval) => {}
-            _ = shutdown_rx.changed() => {
-                if *shutdown_rx.borrow() {
-                    info!("Golden ticket wait interrupted by shutdown");
-                    return false;
-                }
-            }
-        }
-    }
-
-    // Final check
-    let inner = state.read().await;
-    inner.has_golden_ticket
 }
 
 /// Main operation completion loop.
@@ -394,29 +244,6 @@ pub async fn wait_for_completion(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_gt_done_statuses_contains_success() {
-        assert!(GT_DONE_STATUSES.contains(&"success"));
-    }
-
-    #[test]
-    fn test_gt_done_statuses_contains_failures() {
-        assert!(GT_DONE_STATUSES.contains(&"failed_no_dc"));
-        assert!(GT_DONE_STATUSES.contains(&"failed_no_sid"));
-        assert!(GT_DONE_STATUSES.contains(&"failed_ticketer"));
-    }
-
-    #[test]
-    fn test_gt_done_statuses_does_not_contain_pending() {
-        assert!(!GT_DONE_STATUSES.contains(&"pending"));
-        assert!(!GT_DONE_STATUSES.contains(&"in_progress"));
-    }
-
-    #[test]
-    fn test_gt_done_statuses_count() {
-        assert_eq!(GT_DONE_STATUSES.len(), 4);
-    }
 
     #[test]
     fn test_forest_root_of_simple() {

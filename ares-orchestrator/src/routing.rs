@@ -6,13 +6,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use anyhow::Result;
-use serde_json::Value;
 use tokio::sync::Mutex;
-use tracing::{debug, info};
-
-use crate::config::OrchestratorConfig;
-use crate::task_queue::TaskQueue;
 
 // ---------------------------------------------------------------------------
 // Active-task tracker (shared across routing + monitoring + throttling)
@@ -121,97 +115,6 @@ const NON_LLM_TYPES: &[&str] = &["crack", "command"];
 
 pub fn is_non_llm_task(task_type: &str) -> bool {
     NON_LLM_TYPES.contains(&task_type)
-}
-
-// ---------------------------------------------------------------------------
-// Router — submits tasks to the correct queue with concurrency enforcement
-// ---------------------------------------------------------------------------
-
-/// Routes tasks to agent queues, respecting per-role concurrency limits.
-#[allow(dead_code)]
-pub struct TaskRouter {
-    queue: TaskQueue,
-    tracker: ActiveTaskTracker,
-    config: Arc<OrchestratorConfig>,
-}
-
-#[allow(dead_code)]
-impl TaskRouter {
-    pub fn new(
-        queue: TaskQueue,
-        tracker: ActiveTaskTracker,
-        config: Arc<OrchestratorConfig>,
-    ) -> Self {
-        Self {
-            queue,
-            tracker,
-            config,
-        }
-    }
-
-    /// Route a task to the appropriate role queue.
-    ///
-    /// Returns the task ID if submitted, `None` if the role is at capacity.
-    pub async fn route(
-        &self,
-        task_type: &str,
-        target_role: &str,
-        payload: Value,
-        source_agent: &str,
-        priority: i32,
-    ) -> Result<Option<String>> {
-        // Check per-role concurrency limit
-        let role_count = self.tracker.count_for_role(target_role).await;
-        if role_count >= self.config.max_tasks_per_role {
-            // Also check the Redis queue depth — if the queue is already long,
-            // there is no point adding more work.
-            let queue_depth = self.queue.queue_length(target_role).await.unwrap_or(0);
-            if queue_depth > 0 {
-                debug!(
-                    role = target_role,
-                    active = role_count,
-                    queue_depth,
-                    "Role at capacity, rejecting task"
-                );
-                return Ok(None);
-            }
-            // Queue empty but active count high — a task might be about to
-            // finish, allow submission to keep workers busy.
-            info!(
-                role = target_role,
-                active = role_count,
-                "Role at capacity but queue empty — allowing submission"
-            );
-        }
-
-        // Submit to Redis
-        let task_id = self
-            .queue
-            .submit_task(task_type, target_role, payload, source_agent, priority)
-            .await?;
-
-        // Track it
-        self.tracker
-            .add(ActiveTask {
-                task_id: task_id.clone(),
-                task_type: task_type.to_string(),
-                role: target_role.to_string(),
-                submitted_at: std::time::Instant::now(),
-            })
-            .await;
-
-        Ok(Some(task_id))
-    }
-
-    /// Access the underlying tracker (used by monitoring and throttling).
-    pub fn tracker(&self) -> &ActiveTaskTracker {
-        &self.tracker
-    }
-
-    /// Access the underlying queue (used by result consumer).
-    pub fn queue(&self) -> &TaskQueue {
-        &self.queue
-    }
 }
 
 #[cfg(test)]

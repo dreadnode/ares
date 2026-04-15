@@ -172,69 +172,6 @@ impl StateInner {
             .or_default()
             .insert(key);
     }
-
-    /// Build the credential attack chain by walking `parent_id` backward.
-    ///
-    /// Starting from a credential or hash, follows the `parent_id` links back
-    /// to the initial access credential. Returns steps in forward order.
-    #[allow(dead_code)]
-    fn build_attack_chain(&self, item_id: &str) -> Vec<AttackChainStep> {
-        let mut chain = Vec::new();
-        let mut current_id = Some(item_id.to_string());
-        let mut visited = HashSet::new();
-
-        while let Some(ref id) = current_id {
-            if visited.contains(id) {
-                break;
-            }
-            visited.insert(id.clone());
-
-            if let Some(cred) = self.credentials.iter().find(|c| c.id == *id) {
-                chain.push(AttackChainStep {
-                    step_number: cred.attack_step,
-                    item_type: "credential".to_string(),
-                    username: cred.username.clone(),
-                    domain: cred.domain.clone(),
-                    source: cred.source.clone(),
-                    hash_type: String::new(),
-                    item_id: cred.id.clone(),
-                });
-                current_id = cred.parent_id.clone();
-                continue;
-            }
-
-            if let Some(hash) = self.hashes.iter().find(|h| h.id == *id) {
-                chain.push(AttackChainStep {
-                    step_number: hash.attack_step,
-                    item_type: "hash".to_string(),
-                    username: hash.username.clone(),
-                    domain: hash.domain.clone(),
-                    source: hash.source.clone(),
-                    hash_type: hash.hash_type.clone(),
-                    item_id: hash.id.clone(),
-                });
-                current_id = hash.parent_id.clone();
-                continue;
-            }
-
-            break;
-        }
-
-        chain.reverse();
-        chain
-    }
-
-    /// Build the attack chain to domain admin (krbtgt hash).
-    #[allow(dead_code)]
-    pub fn build_domain_admin_chain(&self) -> Vec<AttackChainStep> {
-        let krbtgt = self.hashes.iter().find(|h| {
-            h.username.eq_ignore_ascii_case("krbtgt") && h.hash_type.to_lowercase().contains("ntlm")
-        });
-        match krbtgt {
-            Some(h) => self.build_attack_chain(&h.id),
-            None => Vec::new(),
-        }
-    }
 }
 
 #[cfg(test)]
