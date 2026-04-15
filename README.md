@@ -469,21 +469,72 @@ ares-cli config validate
 
 ### Environment Variables
 
-| Variable                        | Required | Description                                      |
-| ------------------------------- | -------- | ------------------------------------------------ |
-| `ANTHROPIC_API_KEY`             | Yes*     | Anthropic API key (Claude models)                |
-| `OPENAI_API_KEY`                | Yes*     | OpenAI API key (GPT models)                      |
-| `GRAFANA_URL`                   | Blue     | Grafana instance URL                             |
-| `GRAFANA_SERVICE_ACCOUNT_TOKEN` | Blue     | Grafana service account token                    |
-| `DREADNODE_API_KEY`             | No       | Dreadnode platform token for observability       |
-| `ARES_REDIS_URL`                | No       | Redis URL (default: `redis://localhost:6379`)    |
-| `ARES_LLM_MODEL`                | No       | Default LLM model override                       |
-| `ARES_CONFIG`                   | No       | Config file path (default: `./config/ares.yaml`) |
+**LLM Providers** (at least one required):
 
-\* At least one LLM provider key required. Supports Anthropic, OpenAI, and Ollama (local, no key needed).
+| Variable                        | Default  | Description                          |
+| ------------------------------- | -------- | ------------------------------------ |
+| `ANTHROPIC_API_KEY`             |          | Anthropic API key (Claude models)    |
+| `OPENAI_API_KEY`                |          | OpenAI API key (GPT models)         |
+| `OLLAMA_BASE_URL`               | `http://localhost:11434` | Local Ollama server URL  |
 
-**Model Override Precedence** (highest first):
-`ARES_AGENT_<ROLE>_MODEL` > `ARES_ORCHESTRATOR_MODEL`/`ARES_WORKER_MODEL` > `ARES_MODEL` > config file.
+**Model Selection:**
+
+| Variable                        | Default  | Description                          |
+| ------------------------------- | -------- | ------------------------------------ |
+| `ARES_LLM_MODEL`               |          | Primary model (`anthropic/<model>`, `openai/<model>`, `ollama/<model>`) |
+| `ARES_ORCHESTRATOR_MODEL`       |          | Override model for orchestrator      |
+| `ARES_WORKER_MODEL`             |          | Override model for workers           |
+| `ARES_BLUE_LLM_MODEL`          |          | Override model for blue team         |
+| `ARES_MODEL`                    |          | Generic fallback for both sides      |
+| `ARES_AGENT_<ROLE>_MODEL`      |          | Per-role override (e.g. `ARES_AGENT_RECON_MODEL`) |
+
+Precedence (highest first):
+`ARES_AGENT_<ROLE>_MODEL` > `ARES_ORCHESTRATOR_MODEL`/`ARES_WORKER_MODEL` > `ARES_MODEL` > `ARES_LLM_MODEL` > config file.
+
+**Infrastructure:**
+
+| Variable                        | Default                    | Description                          |
+| ------------------------------- | -------------------------- | ------------------------------------ |
+| `ARES_REDIS_URL`                | `redis://127.0.0.1:6379/0` | Redis URL (falls back to `REDIS_URL`) |
+| `ARES_CONFIG`                   | auto-discovered            | Path to `ares.yaml` config file      |
+| `ARES_DATABASE_URL`             |                            | PostgreSQL URL (persistent store, disabled if absent) |
+| `ARES_TOOL_DISPATCH`            | `redis`                    | Set to `local` for in-process tool execution |
+
+**Blue Team:**
+
+| Variable                        | Default                    | Description                          |
+| ------------------------------- | -------------------------- | ------------------------------------ |
+| `ARES_BLUE_ENABLED`             |                            | Set to `1` to activate blue team     |
+| `ARES_BLUE_MAX_STEPS`           | `75`                       | Max agent loop steps per investigation |
+| `ARES_REPORT_DIR`               | `$HOME/ares_reports`       | Report output directory              |
+| `GRAFANA_URL`                   | `http://localhost:3000`    | Grafana instance URL                 |
+| `GRAFANA_SERVICE_ACCOUNT_TOKEN` |                            | Grafana service account token        |
+| `LOKI_URL`                      | `http://localhost:3100`    | Loki endpoint for LogQL queries      |
+| `LOKI_AUTH_TOKEN`               |                            | Bearer token for Loki auth           |
+| `PROMETHEUS_URL`                | `http://localhost:9090`    | Prometheus endpoint for PromQL       |
+
+**Orchestrator Tuning:**
+
+| Variable                        | Default | Description                          |
+| ------------------------------- | ------- | ------------------------------------ |
+| `ARES_OPERATION_ID`             |         | Operation ID (or JSON payload with targets) |
+| `ARES_TARGET_DOMAIN`            |         | Target AD domain                     |
+| `ARES_TARGET_IPS`               |         | Comma-separated target IPs           |
+| `ARES_INITIAL_CREDENTIAL`       |         | Seed credential (`user:pass@domain`) |
+| `ARES_MAX_CONCURRENT_TASKS`     | `8`     | Max concurrent tasks across roles    |
+| `ARES_MAX_TASKS_PER_ROLE`       | `3`     | Max in-flight tasks per role         |
+| `ARES_STALE_TASK_TIMEOUT_SECS`  | `900`   | Stale task timeout (seconds)         |
+| `ARES_LOCK_TTL_SECS`            | `300`   | Operation lock TTL                   |
+
+**Worker Tuning:**
+
+| Variable                        | Default | Description                          |
+| ------------------------------- | ------- | ------------------------------------ |
+| `ARES_WORKER_ROLE`              |         | Agent role (required for workers)    |
+| `ARES_WORKER_MODE`              | `task`  | Mode: `task`, `tool_exec`, or `blue_task` |
+| `ARES_AGENT_TASK_TIMEOUT`       | `600`   | Max seconds per task                 |
+| `ARES_POD_NAME`                 | hostname | Worker pod identity in Redis        |
+
 
 ### Observability
 
