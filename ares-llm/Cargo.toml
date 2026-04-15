@@ -16,7 +16,7 @@ thiserror = { workspace = true }
 uuid = { workspace = true }
 tera = { workspace = true }
 regex = { workspace = true }
-reqwest = { version = "0.13", default-features = false, features = ["json", "rustls-tls"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "query"] }
 async-trait = "0.1"
 
 [features]

@@ -11,7 +11,11 @@ pub fn build_credential_dedup_key(cred: &Credential) -> String {
     let username = cred.username.trim().to_lowercase();
     let mut hasher = Md5::new();
     hasher.update(cred.password.as_bytes());
-    let password_hash = format!("{:x}", hasher.finalize());
+    let digest = hasher.finalize();
+    let password_hash = digest
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect::<String>();
     let password_hash_short = &password_hash[..16.min(password_hash.len())];
 
     format!("cred:{domain}:{username}:{password_hash_short}")
