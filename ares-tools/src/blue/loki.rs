@@ -33,10 +33,14 @@ fn loki_config() -> LokiConfig {
     }
 }
 
-/// Build a reqwest client with a 30-second timeout.
+/// Build a reqwest client with configurable timeout (default 120s).
 fn http_client() -> reqwest::Client {
+    let timeout_secs = std::env::var("LOKI_TIMEOUT_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(120);
     reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
+        .timeout(std::time::Duration::from_secs(timeout_secs))
         .build()
         .unwrap_or_default()
 }
