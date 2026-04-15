@@ -922,7 +922,7 @@ tasks:
       CRED_PASS: '{{.CRED_PASS | default "Heartsbane"}}'
       CRED_DOMAIN: '{{.CRED_DOMAIN | default "north.sevenkingdoms.local"}}'
       SECRETS_ID: '{{.SECRETS_ID | default "ares/api-keys"}}'
-      LLM_MODEL: '{{.LLM_MODEL | default "openai/gpt-4.1"}}'
+      LLM_MODEL: '{{.LLM_MODEL | default ""}}'
       FLUSH_REDIS: '{{.FLUSH_REDIS | default "true"}}'
     cmds:
       - |
@@ -987,7 +987,9 @@ tasks:
         export OPENAI_API_KEY='${OPENAI_KEY}'
         export ANTHROPIC_API_KEY='${ANTHROPIC_KEY}'
         export ARES_REDIS_URL=redis://127.0.0.1:6379
+        {{- if .LLM_MODEL}}
         export ARES_LLM_MODEL='{{.LLM_MODEL}}'
+        {{- end}}
         export RUST_LOG=info
         export ARES_CONFIG={{.ARES_REMOTE_CONFIG}}
         export ARES_TOOL_DISPATCH=local
