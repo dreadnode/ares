@@ -16,10 +16,6 @@ pub use sections::*;
 
 use defaults::default_max_steps;
 
-// ============================================================================
-// Top-level config
-// ============================================================================
-
 /// Default search paths for the config file, in priority order.
 const DEFAULT_PATHS: &[&str] = &[
     "./config/ares.yaml",
@@ -152,10 +148,6 @@ impl AresConfig {
         }
     }
 }
-
-// ============================================================================
-// Tests
-// ============================================================================
 
 #[cfg(test)]
 mod tests {

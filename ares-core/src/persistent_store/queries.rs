@@ -14,10 +14,6 @@ use uuid::Uuid;
 
 use super::config::PersistentStoreConfig;
 
-// ============================================================================
-// Row types (sqlx::FromRow)
-// ============================================================================
-
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct OperationRow {
     pub id: Uuid,
@@ -79,10 +75,6 @@ pub struct CostRow {
     pub model_usage: Option<serde_json::Value>,
 }
 
-// ============================================================================
-// Result types
-// ============================================================================
-
 #[derive(Debug, Clone)]
 pub struct OperationSummary {
     pub id: Uuid,
@@ -107,10 +99,6 @@ pub struct MitreCoverage {
     pub occurrence_count: usize,
     pub operations: Vec<String>,
 }
-
-// ============================================================================
-// HistoricalQueryService
-// ============================================================================
 
 /// Service for querying historical operation data.
 ///

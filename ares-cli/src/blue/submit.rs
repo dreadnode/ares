@@ -36,11 +36,9 @@ pub(crate) async fn blue_submit(
         anyhow::bail!("No model specified. Use --model or set ARES_ORCHESTRATOR_MODEL/ARES_MODEL");
     }
 
-    // Generate investigation ID
     let inv_id = investigation_id
         .unwrap_or_else(|| format!("inv-{}", chrono::Utc::now().format("%Y%m%d-%H%M%S")));
 
-    // Collect env vars
     let env_vars = collect_env_vars(BLUE_ENV_VAR_NAMES);
     if !env_vars.is_empty() {
         let mut keys: Vec<&str> = env_vars.keys().map(|s| s.as_str()).collect();
@@ -53,7 +51,7 @@ pub(crate) async fn blue_submit(
 
     let now = Utc::now();
 
-    // Build investigation request (matches Python blue_orchestrator_client.py format)
+    // Format must match Python blue_orchestrator_client.py
     let request = serde_json::json!({
         "investigation_id": inv_id,
         "alert": alert,
@@ -70,7 +68,7 @@ pub(crate) async fn blue_submit(
 
     let mut conn = connect_redis(redis_url).await?;
 
-    // Store env_vars separately (matches Python pattern)
+    // Stored separately to avoid exposing secrets in the main queue
     if !env_vars.is_empty() {
         let env_vars_key = format!("ares:blue:inv:{inv_id}:env_vars");
         let env_json = serde_json::to_string(&env_vars)?;
@@ -145,7 +143,6 @@ pub(crate) async fn blue_from_operation(
         );
     }
 
-    // Collect env vars
     let env_vars = collect_env_vars(BLUE_ENV_VAR_NAMES);
 
     // Build operation context that will be attached to each investigation
@@ -229,7 +226,7 @@ pub(crate) async fn blue_from_operation(
         "submitted_at": now.to_rfc3339(),
     });
 
-    // Store env_vars separately
+    // Stored separately to avoid exposing secrets in the main queue
     if !env_vars.is_empty() {
         let env_vars_key = format!("ares:blue:inv:{inv_id}:env_vars");
         let env_json = serde_json::to_string(&env_vars)?;

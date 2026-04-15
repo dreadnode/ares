@@ -200,12 +200,12 @@ impl OrchestratorConfig {
 /// (contains a dot). This avoids misinterpreting `@` characters within
 /// passwords (e.g., `admin:P@ssw0rd` stays intact).
 fn parse_credential_spec(spec: &str, default_domain: &str) -> Option<InitialCredential> {
-    // Find the first colon — everything before it is the username
     let colon_pos = spec.find(':')?;
     let username = &spec[..colon_pos];
     let rest = &spec[colon_pos + 1..]; // password[@domain]
 
-    // Split domain from password: only if the part after the last '@' contains a dot
+    // Only treat text after the last '@' as a domain if it contains a dot,
+    // to avoid misinterpreting '@' in passwords (e.g. P@ssw0rd).
     let (password, domain) = if let Some(at_pos) = rest.rfind('@') {
         let candidate = &rest[at_pos + 1..];
         if candidate.contains('.') {

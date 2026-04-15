@@ -64,7 +64,6 @@ pub async fn run_investigation(
         "Starting blue team investigation"
     );
 
-    // Initialize investigation state in Redis
     investigation
         .state_writer
         .initialize(conn, &investigation.alert)
@@ -299,7 +298,6 @@ async fn score_against_ground_truth(
     model: &str,
     outcome: &AgentLoopOutcome,
 ) {
-    // Load blue team state
     let blue_reader = BlueStateReader::new(investigation_id.to_string());
     let blue_state = match blue_reader.load_state(conn).await {
         Ok(Some(state)) => state,
@@ -320,7 +318,6 @@ async fn score_against_ground_truth(
         }
     };
 
-    // Load red team state
     let red_reader = RedisStateReader::new(operation_id.to_string());
     let red_state = match red_reader.load_state(conn).await {
         Ok(Some(state)) => state,

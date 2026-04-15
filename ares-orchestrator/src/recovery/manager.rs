@@ -99,7 +99,6 @@ impl OperationRecoveryManager {
             );
         }
 
-        // Step 2: Load full state
         let mut loaded_state = reader
             .load_state(&mut conn)
             .await
@@ -115,7 +114,6 @@ impl OperationRecoveryManager {
             "State loaded for recovery"
         );
 
-        // Step 3: Deduplicate hashes
         let original_hash_count = loaded_state.all_hashes.len();
         loaded_state.all_hashes = dedupe_hashes(loaded_state.all_hashes);
         let deduped = original_hash_count - loaded_state.all_hashes.len();
@@ -123,7 +121,6 @@ impl OperationRecoveryManager {
             info!(removed = deduped, "Deduplicated hashes during recovery");
         }
 
-        // Step 4: Normalize domains (NetBIOS -> FQDN)
         let cred_fixed = normalize_credential_domains(
             &mut loaded_state.all_credentials,
             &loaded_state.netbios_to_fqdn,
@@ -138,7 +135,6 @@ impl OperationRecoveryManager {
                 "Normalized domains during recovery"
             );
 
-            // Persist corrections back to Redis
             if cred_fixed > 0 {
                 for cred in &loaded_state.all_credentials {
                     let _ = reader.add_credential(&mut conn, cred).await;
@@ -151,7 +147,6 @@ impl OperationRecoveryManager {
             }
         }
 
-        // Step 5: Load pending tasks from ares:op:{id}:pending_tasks HASH
         let pending_tasks_key = state::build_key(operation_id, state::KEY_PENDING_TASKS);
         let raw_tasks: HashMap<String, String> =
             conn.hgetall(&pending_tasks_key).await.unwrap_or_default();
@@ -178,7 +173,6 @@ impl OperationRecoveryManager {
             "Loaded pending tasks for recovery"
         );
 
-        // Step 6: Requeue interrupted tasks
         let mut requeued_task_ids = Vec::new();
         let mut failed_task_ids = Vec::new();
 
@@ -195,7 +189,6 @@ impl OperationRecoveryManager {
             let max_retries = task.max_retries.max(MAX_RETRIES);
 
             if task.retry_count <= max_retries {
-                // Requeue the task
                 task.status = TaskStatus::Retrying;
                 if task.retry_count > 0 {
                     task.error = Some(format!(
@@ -206,7 +199,6 @@ impl OperationRecoveryManager {
                     task.error = Some("Requeued after pod restart (task was pending)".to_string());
                 }
 
-                // Build TaskMessage and push to the role queue
                 match requeue_task(queue, task_id, task).await {
                     Ok(()) => {
                         requeued_task_ids.push(task_id.clone());

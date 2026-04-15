@@ -71,7 +71,6 @@ async fn run() -> Result<()> {
         "ares-orchestrator starting"
     );
 
-    // --- Configuration ---
     let config =
         Arc::new(OrchestratorConfig::from_env().context("Failed to load config from environment")?);
 
@@ -98,12 +97,10 @@ async fn run() -> Result<()> {
         "Configuration loaded"
     );
 
-    // --- Redis connection ---
     let queue = TaskQueue::connect(&config.redis_url)
         .await
         .context("Failed to connect to Redis")?;
 
-    // --- Operation lock ---
     let acquired = queue
         .try_acquire_lock(&config.operation_id, config.lock_ttl)
         .await?;
@@ -114,14 +111,12 @@ async fn run() -> Result<()> {
         );
     }
 
-    // --- Shared state ---
     let shared_state = SharedState::new(config.operation_id.clone());
     shared_state
         .load_from_redis(&queue)
         .await
         .context("Failed to load state from Redis")?;
 
-    // --- Seed state from config (fresh operations have no Redis state yet) ---
     {
         let mut state = shared_state.write().await;
         if state.target_ips.is_empty() && !config.target_ips.is_empty() {
@@ -244,7 +239,6 @@ async fn run() -> Result<()> {
         }
     }
 
-    // --- Inject initial credential (if provided) ---
     if let Some(ref cred) = config.initial_credential {
         let credential = ares_core::models::Credential {
             id: uuid::Uuid::new_v4().to_string(),
@@ -276,7 +270,6 @@ async fn run() -> Result<()> {
     let throttler = Arc::new(Throttler::new(config.clone(), tracker.clone()));
     let deferred = Arc::new(DeferredQueue::new(queue.clone(), config.clone()));
 
-    // --- LLM provider ---
     // Priority: ARES_LLM_MODEL env var > config YAML agents.orchestrator.model
     let model_spec = std::env::var("ARES_LLM_MODEL").ok().or_else(|| {
         let config_path = std::env::var("ARES_CONFIG")

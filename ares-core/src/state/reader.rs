@@ -299,7 +299,6 @@ impl RedisStateReader {
         user: &User,
     ) -> Result<bool, redis::RedisError> {
         let key = self.key(KEY_USERS);
-        // Simple dedup: check existing users
         let existing: Vec<String> = conn.lrange(&key, 0, -1).await?;
         let dedup_key = format!(
             "{}@{}",

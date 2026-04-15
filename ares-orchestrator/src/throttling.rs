@@ -98,7 +98,6 @@ impl Throttler {
             return ThrottleDecision::Allow;
         }
 
-        // Global backoff check
         {
             let backoff = self.backoff_until.lock().await;
             if let Some(deadline) = *backoff {

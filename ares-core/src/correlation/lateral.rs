@@ -316,7 +316,6 @@ impl LateralMovementAnalyzer {
             }
         }
 
-        // Return references to newly added connections
         self.graph.connections[start_idx..].iter().collect()
     }
 
@@ -375,7 +374,6 @@ impl LateralMovementAnalyzer {
             })
             .collect();
 
-        // Sort by priority (most connections first)
         suggestions.sort_by(|a, b| {
             let pa = a["priority"].as_u64().unwrap_or(0);
             let pb = b["priority"].as_u64().unwrap_or(0);

@@ -24,10 +24,6 @@ use crate::throttling::{ThrottleDecision, Throttler};
 /// Redis key prefix for deferred queues (matches Python `DEFERRED_QUEUE_PREFIX`).
 pub const DEFERRED_QUEUE_PREFIX: &str = "ares:deferred";
 
-// ---------------------------------------------------------------------------
-// DeferredTask — serialized into the ZSET member value
-// ---------------------------------------------------------------------------
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeferredTask {
     pub priority: i32,
@@ -44,10 +40,6 @@ impl DeferredTask {
         (self.priority as f64) * 1_000_000_000.0 + self.enqueue_time * 1000.0
     }
 }
-
-// ---------------------------------------------------------------------------
-// DeferredQueue
-// ---------------------------------------------------------------------------
 
 /// Manages the Redis ZSET-backed deferred queue.
 pub struct DeferredQueue {
@@ -235,10 +227,6 @@ async fn scan_keys_async(conn: &mut redis::aio::ConnectionManager, pattern: &str
     }
     all_keys
 }
-
-// ---------------------------------------------------------------------------
-// Background processor
-// ---------------------------------------------------------------------------
 
 /// Spawn a tokio task that periodically drains the deferred queue whenever
 /// the throttler allows new submissions.

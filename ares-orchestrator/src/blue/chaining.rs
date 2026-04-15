@@ -137,7 +137,6 @@ pub async fn process_task_result(
     investigation_id: &str,
     dispatched_chains: &mut HashSet<String>,
 ) -> Result<Vec<String>> {
-    // Only process successful results that carry a payload.
     let payload = match (&result.success, &result.result) {
         (true, Some(val)) => val,
         _ => return Ok(Vec::new()),

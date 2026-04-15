@@ -171,7 +171,7 @@ pub(crate) async fn ops_submit(
 
     let mut conn = connect_redis(redis_url).await?;
 
-    // Store env_vars separately (matches Python: avoids exposing secrets in main queue)
+    // Stored separately to avoid exposing secrets in the main queue
     if !env_vars.is_empty() {
         let env_vars_key = format!("ares:op:{op_id}:env_vars");
         let env_json = serde_json::to_string(&env_vars)?;
