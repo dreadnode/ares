@@ -1,0 +1,23 @@
+---
+galaxy_info:
+  role_name: mythic
+  author: Dreadnode
+  description: Install and configure Mythic C2 framework
+  company: Dreadnode
+  license: MIT
+  min_ansible_version: "2.13"
+  platforms:
+    - name: Ubuntu
+      versions:
+        - all
+    - name: Debian
+      versions:
+        - all
+  galaxy_tags:
+    - mythic
+    - c2
+    - security
+    - redteam
+    - commandcontrol
+
+dependencies: []

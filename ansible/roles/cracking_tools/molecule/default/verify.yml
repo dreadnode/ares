@@ -1,0 +1,103 @@
+---
+- name: Verify
+  hosts: all
+  gather_facts: true
+  tasks:
+    - name: Include default variables
+      ansible.builtin.include_vars:
+        file: "../../defaults/main.yml"
+
+    - name: Verify hashcat is installed
+      ansible.builtin.command: hashcat --version
+      register: cracking_tools_hashcat_version
+      changed_when: false
+      failed_when: cracking_tools_hashcat_version.rc != 0
+      when: cracking_tools_install_hashcat
+
+    - name: Assert hashcat is working
+      ansible.builtin.assert:
+        that:
+          - cracking_tools_hashcat_version.rc == 0
+          - cracking_tools_hashcat_version.stdout is defined
+        fail_msg: "hashcat is not properly installed"
+        success_msg: "hashcat is installed and working"
+      when: cracking_tools_install_hashcat
+
+    - name: Locate libgcc static archive
+      ansible.builtin.command: gcc -print-libgcc-file-name
+      register: cracking_tools_libgcc_a_path
+      changed_when: false
+      failed_when: cracking_tools_libgcc_a_path.rc != 0
+      when: cracking_tools_install_hashcat
+
+    - name: Check libgcc static archive exists
+      ansible.builtin.stat:
+        path: "{{ cracking_tools_libgcc_a_path.stdout | trim }}"
+      register: cracking_tools_libgcc_a_stat
+      when: cracking_tools_install_hashcat
+
+    - name: Assert libgcc static archive is available
+      ansible.builtin.assert:
+        that:
+          - cracking_tools_libgcc_a_stat.stat.exists
+          - cracking_tools_libgcc_a_stat.stat.isreg
+          - (cracking_tools_libgcc_a_path.stdout | trim | regex_search('libgcc\\.a$')) is not none
+        fail_msg: "libgcc.a is not available (hashcat kernel build will fail)"
+        success_msg: "libgcc.a is available at {{ cracking_tools_libgcc_a_path.stdout | trim }}"
+      when: cracking_tools_install_hashcat
+
+    - name: Verify John the Ripper is installed
+      ansible.builtin.command: which john
+      register: cracking_tools_john_check
+      changed_when: false
+      failed_when: cracking_tools_john_check.rc != 0
+      when: cracking_tools_install_john
+
+    - name: Assert John is working
+      ansible.builtin.assert:
+        that:
+          - cracking_tools_john_check.rc == 0
+          - cracking_tools_john_check.stdout is defined
+        fail_msg: "John the Ripper is not properly installed"
+        success_msg: "John the Ripper is installed and working at {{ cracking_tools_john_check.stdout }}"
+      when: cracking_tools_install_john
+
+    - name: Check wordlist directory exists
+      ansible.builtin.stat:
+        path: "{{ cracking_tools_wordlist_dir }}"
+      register: cracking_tools_wordlist_dir_stat
+
+    - name: Assert wordlist directory exists
+      ansible.builtin.assert:
+        that:
+          - cracking_tools_wordlist_dir_stat.stat.exists
+          - cracking_tools_wordlist_dir_stat.stat.isdir
+        fail_msg: "Wordlist directory does not exist"
+        success_msg: "Wordlist directory exists at {{ cracking_tools_wordlist_dir }}"
+
+    - name: Check rockyou wordlist exists
+      ansible.builtin.stat:
+        path: "{{ cracking_tools_rockyou_path }}"
+      register: cracking_tools_rockyou_stat
+      when: cracking_tools_install_wordlists
+
+    - name: Assert rockyou wordlist is available
+      ansible.builtin.assert:
+        that:
+          - cracking_tools_rockyou_stat.stat.exists
+          - cracking_tools_rockyou_stat.stat.isreg
+        fail_msg: "rockyou.txt wordlist is not available"
+        success_msg: "rockyou.txt wordlist is available"
+      when:
+        - cracking_tools_install_wordlists
+        - "'rockyou' in cracking_tools_wordlists"
+
+    - name: Display verification summary
+      ansible.builtin.debug:
+        msg:
+          - "=== Ares Cracking Tools Verification Complete ==="
+          - "hashcat: {{ 'Installed' if cracking_tools_install_hashcat else 'Skipped' }}"
+          - "john: {{ 'Installed' if cracking_tools_install_john else 'Skipped' }}"
+          - "rockyou.txt: {{ 'Available' if (cracking_tools_rockyou_stat.stat.exists | default(false)) else 'Not checked' }}"
+          - "Wordlist directory: {{ cracking_tools_wordlist_dir }}"
+          - "===================================================="

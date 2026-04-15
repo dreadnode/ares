@@ -1,0 +1,29 @@
+---
+galaxy_info:
+  author: Dreadnode
+  namespace: dreadnode
+  description: Install and configure network reconnaissance tools for Ares agents
+  company: dreadnode
+  license: MIT
+  role_name: recon_tools
+  min_ansible_version: "2.18.4"
+  platforms:
+    - name: Ubuntu
+      versions:
+        - all
+    - name: Debian
+      versions:
+        - all
+    - name: Kali
+      versions:
+        - all
+  galaxy_tags:
+    - ares
+    - security
+    - pentesting
+    - network
+    - reconnaissance
+    - kali
+
+dependencies:
+  - role: dreadnode.nimbus_range.base

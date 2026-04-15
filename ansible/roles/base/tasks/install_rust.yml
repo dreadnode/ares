@@ -1,0 +1,75 @@
+---
+# Install Rust toolchain via rustup
+# Required for building NetExec (aardwolf dependency requires Rust compiler)
+# Reference: https://www.netexec.wiki/getting-started/installation/installation-on-unix
+
+- name: Check if Rust is already installed
+  ansible.builtin.command: rustc --version
+  register: base_rust_check
+  changed_when: false
+  failed_when: false
+
+- name: Check if Cargo is already installed
+  ansible.builtin.command: cargo --version
+  register: base_cargo_check
+  changed_when: false
+  failed_when: false
+
+# Install Rust via rustup - this is the officially recommended method
+# See: https://www.rust-lang.org/tools/install
+# noqa: command-instead-of-module risky-shell-pipe
+- name: Install Rust via rustup (non-interactive)
+  ansible.builtin.shell: |
+    set -o pipefail
+    curl --proto '=https' --tlsv1.2 -sSf {{ base_rust_install_script }} | sh -s -- -y
+  args:
+    executable: /bin/bash
+    creates: /root/.cargo/bin/rustc
+  become: true
+  environment:
+    HOME: /root
+  when:
+    - base_rust_check.rc != 0 or base_cargo_check.rc != 0
+
+- name: Add Rust to system PATH via profile.d
+  ansible.builtin.copy:
+    content: |
+      # Rust toolchain PATH
+      if [ -d "/root/.cargo/bin" ]; then
+        export PATH="/root/.cargo/bin:$PATH"
+      fi
+      if [ -d "$HOME/.cargo/bin" ]; then
+        export PATH="$HOME/.cargo/bin:$PATH"
+      fi
+    dest: /etc/profile.d/rust.sh
+    mode: '0644'
+  become: true
+
+- name: Check root shell profiles for rustup env sourcing
+  ansible.builtin.stat:
+    path: "{{ item }}"
+  loop:
+    - /root/.profile
+    - /root/.bashrc
+  register: base_rust_profile_files
+  become: true
+
+- name: Guard rustup env sourcing to avoid missing file errors
+  ansible.builtin.replace:
+    path: "{{ item.stat.path }}"
+    regexp: '^[ \t]*(?:\\.|source)[ \t]+(\"?\\$HOME/\\.cargo/env\"?|\"?/root/\\.cargo/env\"?)'
+    replace: '[ -f "$HOME/.cargo/env" ] && . "$HOME/.cargo/env"'
+  loop: "{{ base_rust_profile_files.results | selectattr('stat.exists', 'equalto', true) | list }}"
+  become: true
+
+- name: Verify Rust installation
+  ansible.builtin.command: /root/.cargo/bin/rustc --version
+  register: base_rust_version
+  changed_when: false
+  failed_when: false
+  become: true
+
+- name: Display Rust version
+  ansible.builtin.debug:
+    msg: "Rust installed: {{ base_rust_version.stdout | default('Installation pending - reload shell') }}"
+  when: base_rust_version is defined

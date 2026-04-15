@@ -1,0 +1,160 @@
+---
+- name: Set DEBIAN_FRONTEND to noninteractive
+  ansible.builtin.lineinfile:
+    path: /etc/fluent_bit_environment
+    line: 'DEBIAN_FRONTEND=noninteractive'
+    create: true
+    mode: '0644'
+  become: true
+  when: ansible_facts['os_family'] == 'Debian'
+
+- name: Install required packages for Fluent Bit
+  ansible.builtin.include_role:
+    name: cowdogmoo.workstation.package_management
+  vars:
+    package_management_common_install_packages: "{{ fluent_bit_common_install_packages }}"
+    package_management_debian_specific_packages: "{{ fluent_bit_debian_specific_packages | reject('equalto', 'fluent-bit') | list }}"
+    package_management_redhat_specific_packages: "{{ fluent_bit_redhat_specific_packages }}"
+  when: fluent_bit_common_install_packages | length > 0 or
+        (ansible_facts['os_family'] == 'Debian' and fluent_bit_debian_specific_packages | reject('equalto', 'fluent-bit') | list | length > 0) or
+        (ansible_facts['os_family'] == 'RedHat' and fluent_bit_redhat_specific_packages | length > 0)
+
+- name: Add Fluent Bit repository key
+  ansible.builtin.uri:
+    url: "{{ fluent_bit_repo_key_url }}"
+    dest: "/tmp/fluentbit.key"
+    mode: '0644'
+  become: true
+  when: ansible_facts['os_family'] == 'Debian'
+
+- name: Convert key to GPG format
+  ansible.builtin.shell: set -o pipefail && cat /tmp/fluentbit.key | gpg --dearmor > /usr/share/keyrings/fluentbit-keyring.gpg
+  args:
+    creates: /usr/share/keyrings/fluentbit-keyring.gpg
+    executable: /bin/bash
+  become: true
+  when: ansible_facts['os_family'] == 'Debian'
+
+- name: Add Fluent Bit repository to sources list
+  ansible.builtin.lineinfile:
+    path: /etc/apt/sources.list.d/fluent-bit.list
+    line: >-
+      deb [signed-by=/usr/share/keyrings/fluentbit-keyring.gpg] {{ fluent_bit_repo_url }}
+      {{ "bookworm" if (ansible_facts['distribution'] == 'Kali' or ansible_facts['distribution_release'] == "kali-rolling")
+      else ansible_facts['distribution_release'] }} main
+    create: true
+    mode: '0644'
+  become: true
+  when: ansible_facts['os_family'] == 'Debian'
+
+- name: Install Fluent Bit package
+  ansible.builtin.include_role:
+    name: cowdogmoo.workstation.package_management
+  vars:
+    package_management_common_install_packages: []
+    package_management_debian_specific_packages: "{{ fluent_bit_debian_specific_packages | select('equalto', 'fluent-bit') | list }}"
+    package_management_redhat_specific_packages: []
+  when: ansible_facts['os_family'] == 'Debian'
+
+- name: Create scripts directory for Fluent Bit
+  ansible.builtin.file:
+    path: "{{ fluent_bit_linux_config_dir }}/scripts"
+    state: directory
+    mode: '0755'
+  become: true
+
+- name: Copy cmd_output_parser.lua script to Fluent Bit
+  ansible.builtin.copy:
+    src: cmd_output_parser.lua
+    dest: "{{ fluent_bit_linux_config_dir }}/scripts/cmd_output_parser.lua"
+    owner: root
+    group: root
+    mode: '0644'
+  become: true
+  notify: Restart fluent-bit (Linux)
+
+- name: Create directory for Fluent Bit state files
+  ansible.builtin.file:
+    path: "{{ fluent_bit_linux_state_dir }}"
+    state: directory
+    mode: '0755'
+  become: true
+
+- name: Check if default Fluent Bit config exists
+  ansible.builtin.stat:
+    path: "{{ fluent_bit_linux_config_dir }}/fluent-bit.conf"
+  register: fluent_bit_config_stat
+  become: true
+
+- name: Backup default Fluent Bit config if exists
+  ansible.builtin.copy:
+    src: "{{ fluent_bit_linux_config_dir }}/fluent-bit.conf"
+    dest: "{{ fluent_bit_linux_config_dir }}/fluent-bit.conf.bak"
+    remote_src: true
+    mode: '0644'
+  become: true
+  when: fluent_bit_config_stat.stat.exists | bool
+
+- name: Create Fluent Bit configuration for OpenSearch
+  ansible.builtin.template:
+    src: fluent-bit-linux.conf.j2
+    dest: "{{ fluent_bit_linux_config_dir }}/fluent-bit.conf"
+    owner: root
+    group: root
+    mode: '0644'
+  become: true
+  notify: Restart fluent-bit (Linux)
+
+- name: Create Fluent Bit parsers configuration
+  ansible.builtin.template:
+    src: parsers.conf.j2
+    dest: "{{ fluent_bit_linux_config_dir }}/parsers.conf"
+    owner: root
+    group: root
+    mode: '0644'
+  become: true
+  notify: Restart fluent-bit (Linux)
+
+- name: Pause to ensure services have fully started
+  ansible.builtin.pause:
+    seconds: 5
+  become: true
+
+- name: Enable and start Fluent Bit service
+  ansible.builtin.systemd:
+    name: fluent-bit
+    enabled: true
+    state: started
+  become: true
+
+- name: Wait for Fluent Bit to initialize
+  ansible.builtin.pause:
+    seconds: 10
+  become: true
+
+- name: Stop Fluent Bit for DB cleanup (if fluent_bit_force_reread_user_data is enabled)
+  ansible.builtin.systemd:
+    name: fluent-bit
+    state: stopped
+  become: true
+  when: fluent_bit_force_reread_user_data | bool
+
+- name: Remove user-data.db to force re-read (if fluent_bit_force_reread_user_data is enabled)
+  ansible.builtin.file:
+    path: "{{ fluent_bit_linux_state_dir }}/user-data.db"
+    state: absent
+  become: true
+  when: fluent_bit_force_reread_user_data | bool
+
+- name: Start Fluent Bit after DB cleanup (if fluent_bit_force_reread_user_data is enabled)
+  ansible.builtin.systemd:
+    name: fluent-bit
+    state: started
+  become: true
+  when: fluent_bit_force_reread_user_data | bool
+
+- name: Check Fluent Bit service status
+  ansible.builtin.systemd:
+    name: fluent-bit
+    state: started
+  become: true

@@ -1,0 +1,31 @@
+---
+# Install certipy-ad via pipx for dependency isolation
+# This prevents conflicts with other tools that depend on cryptography
+
+- name: Check if certipy-ad is already installed via pipx
+  ansible.builtin.command: pipx list
+  register: recon_tools_certipy_pipx_list
+  changed_when: false
+  failed_when: false
+  become: true
+  environment:
+    HOME: /root
+
+- name: Install certipy-ad via pipx
+  ansible.builtin.command: pipx install certipy-ad
+  register: recon_tools_certipy_pipx_install
+  changed_when: "'installed package certipy-ad' in recon_tools_certipy_pipx_install.stdout"
+  failed_when: false
+  become: true
+  environment:
+    HOME: /root
+    PATH: "{{ base_rust_bin_path }}:{{ base_pipx_bin_path }}:{{ ansible_env.PATH }}"
+  when: "'certipy-ad' not in recon_tools_certipy_pipx_list.stdout | default('')"
+
+- name: Create symlink for certipy in /usr/bin
+  ansible.builtin.file:
+    src: "{{ base_pipx_bin_path }}/certipy"
+    dest: /usr/bin/certipy
+    state: link
+    force: true
+  become: true

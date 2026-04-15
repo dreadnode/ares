@@ -1,0 +1,60 @@
+---
+- name: Provision Mythic C2
+  hosts: all
+  gather_facts: true
+  vars:
+    # Alloy and monitoring vars
+    alloy_env: dev
+    alloy_deployment_name: default
+    alloy_loki_endpoint: "https://loki.dev.plundr.ai/loki/api/v1/push"
+    alloy_version: "1.10.1"
+    mythic_setup_systemd: true
+
+  roles:
+    # Nimbus Range roles for Ansible system configuration and monitoring
+    - role: dreadnode.nimbus_range.aws_cloudwatch_agent
+
+    # Install and configure Grafana Alloy for log shipping
+    - name: Install and configure Grafana Alloy
+      role: grafana.grafana.alloy
+      become: true
+      vars:
+        alloy_config: |
+          // Enable debug logging to help troubleshoot
+          logging {
+            level  = "debug"
+            format = "logfmt"
+          }
+
+          // Read system logs
+          loki.source.file "syslog" {
+            targets = [
+              {__path__ = "/var/log/syslog", job = "syslog"},
+              {__path__ = "/var/log/auth.log", job = "auth"},
+              {__path__ = "/var/log/user-data.log", job = "user-data"},
+            ]
+            forward_to = [loki.process.linux.receiver]
+          }
+
+          // Process Linux logs
+          loki.process "linux" {
+            // Add static labels
+            stage.static_labels {
+              values = {
+                environment  = "{{ alloy_env }}",
+                deployment   = "{{ alloy_deployment_name }}",
+                host         = constants.hostname,
+              }
+            }
+            forward_to = [loki.write.remote.receiver]
+          }
+
+          // Send logs to Loki
+          loki.write "remote" {
+            endpoint {
+              url = "{{ alloy_loki_endpoint }}"
+            }
+          }
+
+    # Nimbus Range role for mythic c2 configuration
+    - role: dreadnode.nimbus_range.mythic

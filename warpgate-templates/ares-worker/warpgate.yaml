@@ -1,0 +1,34 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/cowdogmoo/warpgate/main/schema/warpgate-template.json
+metadata:
+  name: ares-worker
+  version: 1.0.0
+  description: Ares worker agent that polls Redis for tasks and orchestrates tool execution
+  author: Dreadnode <info@dreadnode.io>
+  license: MIT
+  tags:
+    - ares
+    - worker
+    - agent
+  requires:
+    warpgate: ">=1.0.0"
+name: ares-worker
+version: latest
+base:
+  image: ghcr.io/dreadnode/ares-base:latest
+  pull: true
+  run_command:
+    - -d
+    - -i
+    - -t
+  environment:
+    DEBIAN_FRONTEND: noninteractive
+    TZ: UTC
+  changes:
+    - ENTRYPOINT ["python", "-m", "ares", "worker"]
+    - ENV DEBIAN_FRONTEND=noninteractive
+    - ENV TZ=UTC
+targets:
+  - type: container
+    platforms:
+      - linux/amd64
+      - linux/arm64

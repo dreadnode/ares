@@ -1,0 +1,6 @@
+---
+# Linux
+aws_cloudwatch_agent_deb_url: "https://s3.amazonaws.com/amazoncloudwatch-agent/debian/amd64/latest/amazon-cloudwatch-agent.deb"
+
+# Windows
+aws_cloudwatch_agent_win_url: "https://s3.amazonaws.com/amazoncloudwatch-agent/windows/amd64/latest/amazon-cloudwatch-agent.msi"

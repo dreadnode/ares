@@ -1,0 +1,74 @@
+---
+- name: Set DEBIAN_FRONTEND to noninteractive
+  ansible.builtin.lineinfile:
+    path: /etc/environment
+    line: 'DEBIAN_FRONTEND=noninteractive'
+    create: true
+    mode: '0644'
+  become: true
+  when: ansible_facts['os_family'] == 'Debian'
+
+- name: Create temporary directory for CloudWatch installation
+  ansible.builtin.file:
+    path: "{{ aws_cloudwatch_agent_temp_dir }}"
+    state: directory
+    mode: '0755'
+  become: true
+
+- name: Download CloudWatch agent (Debian/Ubuntu)
+  ansible.builtin.get_url:
+    url: "{{ aws_cloudwatch_agent_deb_url }}"
+    dest: "{{ aws_cloudwatch_agent_temp_dir }}/amazon-cloudwatch-agent.deb"
+    mode: '0644'
+  become: true
+  when: ansible_facts['os_family'] == 'Debian'
+
+- name: Install CloudWatch agent (Debian/Ubuntu)
+  ansible.builtin.apt:
+    deb: "{{ aws_cloudwatch_agent_temp_dir }}/amazon-cloudwatch-agent.deb"
+    state: present
+  become: true
+  when: ansible_facts['os_family'] == 'Debian'
+
+- name: Ensure CloudWatch Agent config directory exists
+  ansible.builtin.file:
+    path: "{{ aws_cloudwatch_agent_linux_config_dir }}"
+    state: directory
+    mode: '0755'
+  become: true
+
+- name: Create CloudWatch Agent configuration
+  ansible.builtin.template:
+    src: amazon-cloudwatch-agent.json.j2
+    dest: "{{ aws_cloudwatch_agent_linux_config_dir }}/amazon-cloudwatch-agent.json"
+    owner: root
+    group: root
+    mode: '0644'
+  become: true
+  notify: Restart cloudwatch_agent (Linux)
+
+- name: Start CloudWatch Agent
+  ansible.builtin.shell: >
+    /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl -a fetch-config -m ec2 -s -c
+    file:{{ aws_cloudwatch_agent_linux_config_dir }}/amazon-cloudwatch-agent.json
+  become: true
+  args:
+    creates: "/var/run/amazon-cloudwatch-agent.pid"
+
+- name: Reload systemd
+  ansible.builtin.systemd:
+    daemon_reload: true
+  become: true
+
+- name: Enable and start CloudWatch agent
+  ansible.builtin.systemd:
+    name: amazon-cloudwatch-agent
+    enabled: true
+    state: started
+  become: true
+
+- name: Clean up temporary files
+  ansible.builtin.file:
+    path: "{{ aws_cloudwatch_agent_temp_dir }}"
+    state: absent
+  become: true

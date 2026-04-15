@@ -1,0 +1,24 @@
+---
+galaxy_info:
+  author: Dreadnode
+  namespace: dreadnode
+  description: Base requirements for Ares AI agents
+  company: dreadnode
+  license: MIT
+  role_name: base
+  min_ansible_version: "2.18.4"
+  platforms:
+    - name: Ubuntu
+      versions:
+        - all
+    - name: Debian
+      versions:
+        - all
+    - name: Kali
+      versions:
+        - all
+  galaxy_tags:
+    - ares
+    - python
+    - ai
+    - agent

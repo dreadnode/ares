@@ -1,0 +1,24 @@
+---
+- name: Download SSM agent installer (Windows)
+  ansible.windows.win_get_url:
+    url: "{{ aws_ssm_agent_windows_install_url }}"
+    dest: "{{ aws_ssm_agent_windows_temp_dir }}\\{{ aws_ssm_agent_windows_installer }}"
+
+- name: Install SSM agent (Windows)
+  ansible.windows.win_package:
+    path: "{{ aws_ssm_agent_windows_temp_dir }}\\{{ aws_ssm_agent_windows_installer }}"
+    arguments: /S
+    state: present
+
+- name: Make sure SSM agent service is running (Windows)
+  ansible.windows.win_service:
+    name: AmazonSSMAgent
+    start_mode: auto
+    state: started
+
+- name: Clean up temporary files (Windows)
+  ansible.windows.win_file:
+    path: "{{ aws_ssm_agent_windows_temp_dir }}\\{{ aws_ssm_agent_windows_installer }}"
+    state: absent
+  register: aws_ssm_agent_cleanup
+  failed_when: false

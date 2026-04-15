@@ -1,0 +1,17 @@
+---
+- name: Create mythic user
+  ansible.builtin.user:
+    name: "{{ mythic_user }}"
+    shell: /bin/bash
+    groups: sudo
+    append: true
+  become: true
+
+- name: Add mythic user to sudoers with NOPASSWD
+  ansible.builtin.lineinfile:
+    path: /etc/sudoers.d/mythic
+    line: "{{ mythic_user }} ALL=(ALL) NOPASSWD:ALL"
+    create: true
+    mode: '0440'
+    validate: 'visudo -cf %s'
+  become: true

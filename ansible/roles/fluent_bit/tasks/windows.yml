@@ -1,0 +1,150 @@
+---
+- name: Create temporary directory for Fluent Bit installation (Windows)
+  ansible.windows.win_file:
+    path: "{{ fluent_bit_windows_temp_dir }}"
+    state: directory
+
+- name: Set installer filename and URL based on version choice (Windows)
+  ansible.builtin.set_fact:
+    fluent_bit_windows_installer: >-
+      fluent-bit-{{ fluent_bit_version }}-win64.zip
+    fluent_bit_windows_url: >-
+      https://packages.fluentbit.io/windows/fluent-bit-{{ fluent_bit_version }}-win64.zip
+
+- name: Download Fluent Bit installer (Windows)
+  ansible.windows.win_get_url:
+    url: "{{ fluent_bit_windows_url }}"
+    dest: "{{ fluent_bit_windows_temp_dir }}\\{{ fluent_bit_windows_installer }}"
+
+- name: Check if Fluent Bit service exists (Windows)
+  ansible.windows.win_service:
+    name: fluent-bit
+  register: fluent_bit_service
+  failed_when: false
+
+- name: Stop Fluent Bit service if exists (Windows)
+  ansible.windows.win_service:
+    name: fluent-bit
+    state: stopped
+  when: fluent_bit_service.exists
+  failed_when: false
+
+- name: Remove existing Fluent Bit service if exists (Windows)
+  ansible.windows.win_service:
+    name: fluent-bit
+    state: absent
+  when: fluent_bit_service.exists
+  failed_when: false
+
+- name: Create Fluent Bit installation directory (Windows)
+  ansible.windows.win_file:
+    path: "{{ fluent_bit_windows_install_dir }}"
+    state: directory
+
+- name: Extract Fluent Bit ZIP archive (Windows)
+  community.windows.win_unzip:
+    src: "{{ fluent_bit_windows_temp_dir }}\\{{ fluent_bit_windows_installer }}"
+    dest: "{{ fluent_bit_windows_install_dir }}"
+
+- name: Find Fluent Bit executable (Windows)
+  ansible.windows.win_find:
+    paths: "{{ fluent_bit_windows_install_dir }}"
+    patterns: "fluent-bit.exe"
+    recurse: yes
+  register: fluent_bit_find_exe
+
+- name: Set executable path and directory (Windows)
+  ansible.builtin.set_fact:
+    fluent_bit_exe_path: "{{ fluent_bit_find_exe.files[0].path }}"
+    fluent_bit_exe_dir: "{{ fluent_bit_find_exe.files[0].path | regex_replace('\\\\fluent-bit.exe$', '') }}"
+  when: fluent_bit_find_exe.matched > 0
+
+- name: Create Fluent Bit configuration directory (Windows)
+  ansible.windows.win_file:
+    path: "{{ fluent_bit_windows_config_dir }}"
+    state: directory
+
+- name: Create Fluent Bit state directory (Windows)
+  ansible.windows.win_file:
+    path: "{{ fluent_bit_windows_state_dir }}"
+    state: directory
+
+- name: Create Fluent Bit log directory (Windows)
+  ansible.windows.win_file:
+    path: "{{ fluent_bit_windows_log_dir }}"
+    state: directory
+
+- name: Check if Sysmon is installed (Windows)
+  ansible.windows.win_shell: |
+    $ErrorActionPreference = "SilentlyContinue"
+    $sysmonLog = Get-WinEvent -ListLog "Microsoft-Windows-Sysmon/Operational" -ErrorAction SilentlyContinue
+    if ($sysmonLog) { Write-Output "true" } else { Write-Output "false" }
+  register: fluent_bit_sysmon_check
+  changed_when: false
+
+- name: Set sysmon_installed fact (Windows)
+  ansible.builtin.set_fact:
+    fluent_bit_sysmon_installed: "{{ fluent_bit_sysmon_check.stdout | trim == 'true' }}"
+
+- name: Create Fluent Bit configuration (Windows)
+  ansible.windows.win_template:
+    src: fluent-bit-windows.conf.j2
+    dest: "{{ fluent_bit_windows_config_dir }}\\fluent-bit.conf"
+  notify: Restart fluent-bit (Windows)
+
+- name: Install Fluent Bit as a service
+  ansible.windows.win_service:
+    name: fluent-bit
+    path: '"{{ fluent_bit_exe_path }}" -c "{{ fluent_bit_windows_config_dir }}\fluent-bit.conf"'
+    start_mode: auto
+    display_name: Fluent Bit
+    description: Fluent Bit log processor and forwarder
+    state: "{{ 'stopped' if fluent_bit_force_reread_user_data | bool else 'started' }}"
+
+- name: Verify Fluent Bit configuration and paths (Windows)
+  ansible.windows.win_shell: |
+    # Check executable exists
+    if (-not (Test-Path "{{ fluent_bit_exe_path }}")) {
+      Write-Output "ERROR: Fluent Bit executable not found at {{ fluent_bit_exe_path }}"
+      exit 1
+    }
+
+    # Check config exists
+    if (-not (Test-Path "{{ fluent_bit_windows_config_dir }}\fluent-bit.conf")) {
+      Write-Output "ERROR: Configuration file not found at {{ fluent_bit_windows_config_dir }}\fluent-bit.conf"
+      exit 1
+    }
+
+    # Check state directory exists
+    if (-not (Test-Path "{{ fluent_bit_windows_state_dir }}")) {
+      Write-Output "ERROR: State directory not found at {{ fluent_bit_windows_state_dir }}"
+      exit 1
+    }
+
+    # Verify the service command - fixing the quoting
+    $servicePath = '"{0}" -c "{1}\fluent-bit.conf"' -f "{{ fluent_bit_exe_path }}", "{{ fluent_bit_windows_config_dir }}"
+    Write-Output "Service path verified: $servicePath"
+
+- name: Remove Windows state DB files to force re-read (Windows)
+  ansible.windows.win_file:
+    path: "{{ fluent_bit_windows_state_dir }}\\{{ item }}.db"
+    state: absent
+  loop: "{{ ['system', 'application', 'security', 'setup', 'powershell'] + (['sysmon'] if fluent_bit_sysmon_installed else []) }}"
+  when: fluent_bit_force_reread_user_data | bool
+
+- name: Start Fluent Bit after DB cleanup (Windows)
+  ansible.windows.win_service:
+    name: fluent-bit
+    state: started
+  when: fluent_bit_force_reread_user_data | bool
+  register: fluent_bit_service_start_result
+  failed_when:
+    - fluent_bit_service_start_result.failed is defined
+    - fluent_bit_service_start_result.failed
+    - "'An error occurred during service start Timeout' not in fluent_bit_service_start_result.msg | default('')"
+    - "'The service did not respond to the start' not in fluent_bit_service_start_result.msg | default('')"
+
+- name: Clean up temporary files (Windows)
+  ansible.windows.win_file:
+    path: "{{ fluent_bit_windows_temp_dir }}\\{{ fluent_bit_windows_installer }}"
+    state: absent

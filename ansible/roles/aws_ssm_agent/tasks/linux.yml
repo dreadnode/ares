@@ -1,0 +1,57 @@
+---
+- name: Set DEBIAN_FRONTEND to noninteractive
+  ansible.builtin.lineinfile:
+    path: /etc/environment
+    line: 'DEBIAN_FRONTEND=noninteractive'
+    create: true
+    mode: '0644'
+  become: true
+  when: ansible_facts['os_family'] == 'Debian'
+
+- name: Install packages
+  become: true
+  ansible.builtin.package:
+    name: "{{ aws_ssm_agent_install_packages }}"
+    state: present
+    update_cache: true
+  when: ansible_os_family in ['Debian']
+  tags: packages
+
+- name: Create temporary directory for SSM installation
+  ansible.builtin.file:
+    path: "{{ aws_ssm_agent_temp_dir }}"
+    state: directory
+    mode: '0755'
+  become: true
+
+- name: Download SSM agent
+  ansible.builtin.get_url:
+    url: "{{ aws_ssm_agent_linux_install_url }}"
+    dest: "{{ aws_ssm_agent_temp_dir }}/amazon-ssm-agent.deb"
+    mode: '0644'
+  become: true
+
+- name: Install SSM agent (Debian/Ubuntu)
+  ansible.builtin.apt:
+    deb: "{{ aws_ssm_agent_temp_dir }}/amazon-ssm-agent.deb"
+    state: present
+  become: true
+  when: ansible_facts['os_family'] == 'Debian'
+
+- name: Reload systemd
+  ansible.builtin.systemd:
+    daemon_reload: true
+  become: true
+
+- name: Enable and start SSM agent
+  ansible.builtin.systemd:
+    name: amazon-ssm-agent
+    enabled: true
+    state: started
+  become: true
+
+- name: Clean up temporary files
+  ansible.builtin.file:
+    path: "{{ aws_ssm_agent_temp_dir }}"
+    state: absent
+  become: true

@@ -21,6 +21,7 @@ Agent SDK and MITRE ATT&CK framework.
 - [Blue Team Investigation Workflow](#blue-team-investigation-workflow)
 - [Red Team Operation Workflow](#red-team-operation-workflow)
 - [Blue Team Evaluation](#blue-team-evaluation)
+- [Infrastructure](#infrastructure)
 - [Development](#development)
 - [Configuration](#configuration)
 - [Observability](#observability)
@@ -673,6 +674,131 @@ After evaluation, the framework can generate a gap analysis report identifying:
 Recommendations are categorized (log source, detection rule, query,
 training) and prioritized (critical, high, medium, low) with MITRE technique
 mappings and implementation hints.
+
+## Infrastructure
+
+This repo is self-contained for building agent images and deploying
+infrastructure. Everything needed lives under four directories:
+
+### Repository Layout
+
+```text
+ansible/                          # Ansible collection: dreadnode.nimbus_range v1.5.0
+  playbooks/ares/                 # Agent provisioning playbooks (one per role)
+  playbooks/linux/                # Attacker box, Sliver C2 setup
+  playbooks/windows/              # Windows target setup
+  roles/                          # 14 roles (8 agent tool roles + base + infra)
+  requirements.yml                # Collection dependencies
+  galaxy.yml                      # Collection metadata
+
+warpgate-templates/               # Container image build templates (Warpgate)
+  ares-base/                      # Base image: Kali + Python 3.13 + uv + Ansible
+  ares-orchestrator/              # Orchestrator: lightweight Python + Redis client
+  ares-worker/                    # Generic worker (inherits from ares-base)
+  ares-recon-agent/               # Recon tools (nmap, netexec, bloodhound, certipy)
+  ares-credential-access-agent/   # Cred tools (sprayhound, lsassy, impacket)
+  ares-cracker-agent/             # Cracking tools (hashcat, john, wordlists)
+  ares-cracker-agent-gpu/         # GPU cracking (CUDA/OpenCL)
+  ares-cracker-base-gpu/          # GPU base image (NVIDIA CUDA)
+  ares-acl-agent/                 # ACL tools (bloodyAD, pywhisker, dacledit)
+  ares-privesc-agent/             # Privesc tools (certipy, krbrelayx, potato, nopac)
+  ares-lateral-movement-agent/    # Lateral tools (evil-winrm, xfreerdp, pth-*)
+  ares-coercion-agent/            # Coercion tools (responder, mitm6, ntlmrelayx)
+  ares-blue-agent/                # Blue team base
+  ares-blue-triage-agent/         # Blue triage agent
+  ares-blue-threat-hunter-agent/  # Blue threat hunter
+  ares-blue-lateral-analyst-agent/# Blue lateral analyst
+
+infra/                            # Terragrunt deployment configs
+  root.hcl                        # Shared Terragrunt root config
+  ares-deployment/
+    host-registry.yaml            # Host metadata (kali-ares golden image)
+    dev/us-west-2/
+      ares-storage/               # S3 artifact bucket (dev-argonaut-ares)
+    staging/us-west-1/
+      kali-ares/                  # Golden image EC2 instance (t3.xlarge, Kali)
+
+modules/                          # Terraform modules
+  terraform-aws-project-storage/  # S3 bucket creation + lifecycle
+  terraform-aws-instance-factory/ # EC2 instance creation + IAM + SSM
+```
+
+### Building Container Images
+
+Agent images are built with [Warpgate](https://github.com/cowdogmoo/warpgate).
+Each template references Ansible playbooks via `${PROVISION_REPO_PATH}`:
+
+```bash
+# Build the base image first (all agents inherit from it)
+PROVISION_REPO_PATH=./ansible warpgate build warpgate-templates/ares-base
+
+# Build a specific agent image
+PROVISION_REPO_PATH=./ansible warpgate build warpgate-templates/ares-recon-agent
+
+# Build all templates
+for t in warpgate-templates/ares-*/; do
+  PROVISION_REPO_PATH=./ansible warpgate build "$t"
+done
+```
+
+The build chain is:
+
+```text
+ares-base (Kali + Python + Ansible base role)
+  ├── ares-recon-agent         (+recon_tools role)
+  ├── ares-credential-access-agent (+credential_access_tools role)
+  ├── ares-cracker-agent       (+cracking_tools role)
+  ├── ares-acl-agent           (+acl_tools role)
+  ├── ares-privesc-agent       (+privesc_tools role)
+  ├── ares-lateral-movement-agent (+lateral_movement_tools role)
+  └── ares-coercion-agent      (+coercion_tools role)
+
+ares-orchestrator (python:3.13-slim, no Ansible — just pip install ares)
+```
+
+### Ansible Collection
+
+The `ansible/` directory contains the full `dreadnode.nimbus_range` v1.5.0
+collection. Playbooks in `ansible/playbooks/ares/` map 1:1 with `tools.yaml`
+and `config/ares.yaml`:
+
+| Playbook | Warpgate Template | Ansible Role |
+| --- | --- | --- |
+| `base.yml` | `ares-base` | `dreadnode.nimbus_range.base` |
+| `recon.yml` | `ares-recon-agent` | `dreadnode.nimbus_range.recon_tools` |
+| `credential_access.yml` | `ares-credential-access-agent` | `dreadnode.nimbus_range.credential_access_tools` |
+| `cracker.yml` | `ares-cracker-agent` | `dreadnode.nimbus_range.cracking_tools` |
+| `acl_abuse.yml` | `ares-acl-agent` | `dreadnode.nimbus_range.acl_tools` |
+| `privesc.yml` | `ares-privesc-agent` | `dreadnode.nimbus_range.privesc_tools` |
+| `lateral_movement.yml` | `ares-lateral-movement-agent` | `dreadnode.nimbus_range.lateral_movement_tools` |
+| `coercion.yml` | `ares-coercion-agent` | `dreadnode.nimbus_range.coercion_tools` |
+
+### AWS Infrastructure
+
+Infrastructure is managed with Terragrunt. Two deployment targets:
+
+**Kubernetes (EKS)** -- Primary deployment for multi-agent operations:
+
+- Namespace: `attack-simulation`
+- 7 agent IRSA roles with S3 access to `dev-argonaut-ares` bucket
+
+**EC2 (Golden Image)** -- Single-instance deployment:
+
+- Kali Linux t3.xlarge with all tools pre-installed
+- Provisioned via Ansible (`goad_attack_box.yml`)
+- SSM-managed (no SSH keys)
+- See `infra/ares-deployment/staging/us-west-1/kali-ares/`
+
+```bash
+# Deploy S3 artifact bucket
+cd infra/ares-deployment/dev/us-west-2/ares-storage && terragrunt apply
+
+# Deploy golden image instance
+cd infra/ares-deployment/staging/us-west-1/kali-ares && terragrunt apply
+```
+
+See [Infrastructure Reference](docs/infrastructure.md) for detailed deployment
+documentation.
 
 ## Development
 

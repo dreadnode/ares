@@ -1,0 +1,134 @@
+---
+- name: Verify
+  hosts: all
+  become: true
+  gather_facts: true
+
+  tasks:
+    - name: Include default variables
+      ansible.builtin.include_vars:
+        file: "../../defaults/main.yml"
+
+    # rubyzip verification (dependency for evil-winrm)
+    - name: Check rubyzip gem is installed
+      ansible.builtin.command: gem list rubyzip
+      register: lateral_movement_tools_rubyzip_check
+      changed_when: false
+      failed_when: false
+      when:
+        - lateral_movement_tools_install_evil_winrm | default(true)
+
+    - name: Assert rubyzip gem is installed
+      ansible.builtin.assert:
+        that:
+          - "'rubyzip' in lateral_movement_tools_rubyzip_check.stdout"
+        fail_msg: "rubyzip gem is not installed"
+        success_msg: "rubyzip gem is installed"
+      when:
+        - lateral_movement_tools_install_evil_winrm | default(true)
+
+    # evil-winrm verification
+    - name: Check evil-winrm is installed
+      ansible.builtin.command: which evil-winrm
+      register: lateral_movement_tools_evil_winrm_check
+      changed_when: false
+      failed_when: lateral_movement_tools_evil_winrm_check.rc != 0
+      when:
+        - lateral_movement_tools_install_evil_winrm | default(true)
+        - ansible_facts['distribution'] != 'Kali'
+
+    - name: Verify evil-winrm works
+      ansible.builtin.command: evil-winrm --help
+      register: lateral_movement_tools_evil_winrm_test
+      changed_when: false
+      failed_when: lateral_movement_tools_evil_winrm_test.rc != 0
+      when:
+        - lateral_movement_tools_install_evil_winrm | default(true)
+        - ansible_facts['distribution'] != 'Kali'
+
+    - name: Check evil-winrm is installed (Kali - via apt)
+      ansible.builtin.command: which evil-winrm
+      register: lateral_movement_tools_evil_winrm_kali_check
+      changed_when: false
+      failed_when: lateral_movement_tools_evil_winrm_kali_check.rc != 0
+      when:
+        - lateral_movement_tools_install_evil_winrm | default(true)
+        - ansible_facts['distribution'] == 'Kali'
+
+    # xfreerdp verification (handles both xfreerdp and xfreerdp3)
+    - name: Check xfreerdp is installed
+      ansible.builtin.command: which xfreerdp
+      register: lateral_movement_tools_xfreerdp_check
+      changed_when: false
+      failed_when: false
+      when: lateral_movement_tools_install_xfreerdp | default(true)
+
+    - name: Check xfreerdp3 is installed (Kali rolling fallback)
+      ansible.builtin.command: which xfreerdp3
+      register: lateral_movement_tools_xfreerdp3_check
+      changed_when: false
+      failed_when: false
+      when:
+        - lateral_movement_tools_install_xfreerdp | default(true)
+        - lateral_movement_tools_xfreerdp_check.rc != 0
+
+    - name: Assert xfreerdp or xfreerdp3 is available
+      ansible.builtin.assert:
+        that:
+          - lateral_movement_tools_xfreerdp_check.rc == 0 or (lateral_movement_tools_xfreerdp3_check.rc | default(1)) == 0
+        fail_msg: "Neither xfreerdp nor xfreerdp3 is installed"
+        success_msg: "xfreerdp is available"
+      when: lateral_movement_tools_install_xfreerdp | default(true)
+
+    # sshpass verification
+    - name: Check sshpass is installed
+      ansible.builtin.command: which sshpass
+      register: lateral_movement_tools_sshpass_check
+      changed_when: false
+      failed_when: lateral_movement_tools_sshpass_check.rc != 0
+      when: lateral_movement_tools_install_sshpass | default(true)
+
+    # proxychains verification
+    - name: Check proxychains4 is installed
+      ansible.builtin.command: which proxychains4
+      register: lateral_movement_tools_proxychains_check
+      changed_when: false
+      failed_when: lateral_movement_tools_proxychains_check.rc != 0
+      when: lateral_movement_tools_install_proxychains | default(true)
+
+    # pth-toolkit (passing-the-hash) verification - Kali only
+    - name: Check pth-winexe is installed (Kali only)
+      ansible.builtin.command: which pth-winexe
+      register: lateral_movement_tools_pth_winexe_check
+      changed_when: false
+      failed_when: false
+      when:
+        - lateral_movement_tools_install_pth_toolkit | default(true)
+        - ansible_facts['distribution'] == 'Kali'
+
+    - name: Check pth-smbclient is installed (Kali only)
+      ansible.builtin.command: which pth-smbclient
+      register: lateral_movement_tools_pth_smbclient_check
+      changed_when: false
+      failed_when: false
+      when:
+        - lateral_movement_tools_install_pth_toolkit | default(true)
+        - ansible_facts['distribution'] == 'Kali'
+
+    - name: Assert pth-toolkit binaries are available (Kali only)
+      ansible.builtin.assert:
+        that:
+          - lateral_movement_tools_pth_winexe_check.rc == 0
+          - lateral_movement_tools_pth_smbclient_check.rc == 0
+        fail_msg: "pth-toolkit binaries (pth-winexe, pth-smbclient) are not installed"
+        success_msg: "pth-toolkit (passing-the-hash) is installed"
+      when:
+        - lateral_movement_tools_install_pth_toolkit | default(true)
+        - ansible_facts['distribution'] == 'Kali'
+
+    - name: Display verification summary
+      ansible.builtin.debug:
+        msg: |
+          Verification Complete
+          ====================
+          All lateral movement tools installed and functional.

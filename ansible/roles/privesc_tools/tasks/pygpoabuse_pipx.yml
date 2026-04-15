@@ -1,0 +1,42 @@
+---
+# Install pygpoabuse via pipx for dependency isolation
+# pygpoabuse is a Python implementation of GPO abuse for privilege escalation
+# Note: pyGPOAbuse installs as pygpoabuse.py (uses scripts= not entry_points)
+
+- name: Check if pygpoabuse is already installed via pipx
+  ansible.builtin.command: pipx list
+  register: privesc_tools_pygpoabuse_pipx_list
+  changed_when: false
+  failed_when: false
+  become: true
+  environment:
+    HOME: /root
+
+- name: Install pygpoabuse via pipx
+  ansible.builtin.command: pipx install git+{{ privesc_tools_pygpoabuse_repo }}
+  register: privesc_tools_pygpoabuse_pipx_install
+  changed_when: "'installed package' in privesc_tools_pygpoabuse_pipx_install.stdout"
+  failed_when: false
+  become: true
+  environment:
+    HOME: /root
+    PATH: "{{ base_rust_bin_path }}:{{ base_pipx_bin_path }}:{{ ansible_facts['env']['PATH'] }}"
+  when: "'pygpoabuse' not in privesc_tools_pygpoabuse_pipx_list.stdout | default('')"
+
+# pyGPOAbuse uses scripts=['pygpoabuse.py'] so binary is pygpoabuse.py
+- name: Create symlink for pygpoabuse.py in /usr/local/bin
+  ansible.builtin.file:
+    src: "{{ base_pipx_bin_path }}/pygpoabuse.py"
+    dest: /usr/local/bin/pygpoabuse.py
+    state: link
+    force: true
+  become: true
+
+# Also create pygpoabuse symlink for convenience
+- name: Create pygpoabuse symlink (without .py extension)
+  ansible.builtin.file:
+    src: /usr/local/bin/pygpoabuse.py
+    dest: /usr/local/bin/pygpoabuse
+    state: link
+    force: true
+  become: true

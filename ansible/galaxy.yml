@@ -1,0 +1,12 @@
+---
+namespace: dreadnode
+name: nimbus_range
+version: 1.5.0
+readme: README.md
+authors:
+  - Dreadnode <dreadnode.io>
+description: Install and configure telemetry agents, logging utilities, and security tools for cloud systems. Includes Ares agent roles for enumeration, cracking, privilege escalation, and lateral movement capabilities.
+license_file: "LICENSE"
+tags: [aws, ssm, cloudwatch, fluentbit, logging, telemetry, windows, linux, security, redteam, enumeration, cracking, privesc, privilege_escalation, lateral_movement, pass_the_hash, exploitation, pentest]
+repository: https://github.com/dreadnode/ansible-collection-nimbus_range
+issues: https://github.com/dreadnode/ansible-collection-nimbus_range/issues

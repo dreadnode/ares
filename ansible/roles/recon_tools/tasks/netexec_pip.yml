@@ -1,0 +1,28 @@
+---
+- name: Check pip version
+  ansible.builtin.command: pip3 --version
+  register: recon_tools_pip_version_check
+  changed_when: false
+  failed_when: false
+
+- name: Set fact for pip supports break-system-packages
+  ansible.builtin.set_fact:
+    recon_tools_pip_supports_break_system_packages: >-
+      {{ recon_tools_pip_version_check.stdout is search('pip (2[3-9]|[3-9][0-9])')
+      or recon_tools_pip_version_check.stdout is search('pip 2[2-9]\\.[1-9]') }}
+
+- name: Install netexec from pip
+  ansible.builtin.pip:
+    name: netexec
+    state: "{{ 'latest' if recon_tools_netexec_version == 'latest' else 'present' }}"
+    version: "{{ recon_tools_netexec_version if recon_tools_netexec_version != 'latest' else omit }}"
+    executable: pip3
+    extra_args: "{{ '--break-system-packages' if recon_tools_pip_supports_break_system_packages else '' }}"
+  become: true
+  ignore_errors: true
+  register: recon_tools_netexec_install
+
+- name: Warn if netexec installation failed
+  ansible.builtin.debug:
+    msg: "WARNING: netexec could not be installed from pip. This is expected on Ubuntu. netexec is only available via apt on Kali Linux."
+  when: recon_tools_netexec_install.failed | default(false)

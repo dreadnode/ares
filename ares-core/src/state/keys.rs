@@ -75,10 +75,6 @@ pub const KEY_STOP_REQUESTED: &str = "stop_requested";
 /// Pub/Sub channel prefix for state update notifications.
 pub const STATE_UPDATE_CHANNEL_PREFIX: &str = "ares:state:updates";
 
-// ---------------------------------------------------------------------------
-// Blue team key constants (behind "blue" feature)
-// ---------------------------------------------------------------------------
-
 /// Redis key prefix for all blue team investigation state.
 #[cfg(feature = "blue")]
 pub const BLUE_KEY_PREFIX: &str = "ares:blue:inv";

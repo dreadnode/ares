@@ -1,0 +1,66 @@
+---
+# Linux configuration
+fluent_bit_linux_config_dir: "/etc/fluent-bit"
+fluent_bit_linux_state_dir: "/var/lib/fluent-bit"
+fluent_bit_linux_log_dir: "/var/log/fluent-bit"
+fluent_bit_force_reread_user_data: true
+fluent_bit_inputs:
+  - name: tail
+    path: /var/log/user-data.log
+    tag: user-data
+    db: "{{ fluent_bit_linux_state_dir }}/user-data.db"
+    parser: syslog
+    refresh_interval: 5
+    ignore_older: 24h
+  - name: tail
+    path: /var/log/syslog
+    tag: syslog
+    db: "{{ fluent_bit_linux_state_dir }}/syslog.db"
+    parser: syslog
+    refresh_interval: 5
+    ignore_older: 24h
+  - name: tail
+    path: /var/log/auth.log
+    tag: auth
+    db: "{{ fluent_bit_linux_state_dir }}/auth.db"
+    parser: syslog
+    refresh_interval: 5
+    ignore_older: 24h
+
+# Windows configuration
+fluent_bit_windows_url: "https://fluentbit.io/releases/latest/fluent-bit-latest-win64.zip"
+fluent_bit_windows_temp_dir: "C:\\Windows\\Temp"
+fluent_bit_windows_installer: "fluent-bit-latest-win64.zip"
+fluent_bit_windows_install_dir: "C:\\Program Files\\fluent-bit"
+fluent_bit_windows_config_dir: "C:\\Program Files\\fluent-bit\\conf"
+fluent_bit_windows_state_dir: "C:\\ProgramData\\fluent-bit"
+fluent_bit_windows_log_dir: "C:\\ProgramData\\fluent-bit\\logs"
+
+# OpenSearch configuration
+fluent_bit_opensearch_host: "localhost"
+fluent_bit_opensearch_port: 9200
+fluent_bit_opensearch_index: "fluent-bit"
+fluent_bit_opensearch_type: "_doc"
+fluent_bit_opensearch_http_user: ""
+fluent_bit_opensearch_http_passwd: ""
+fluent_bit_opensearch_tls: "false"
+fluent_bit_opensearch_tls_verify: "false"
+fluent_bit_opensearch_custom_domain: "localhost"
+fluent_bit_opensearch_username: ""
+fluent_bit_opensearch_password: ""
+
+# fluent_bit_environment variables
+fluent_bit_env: "dev"
+fluent_bit_deployment_name: "default"
+
+# Parsers configuration
+fluent_bit_parsers:
+  - name: syslog
+    format: regex
+    regex: '^(?<time>[^ ]* {1,2}[^ ]* [^ ]*) (?<host>[^ ]*) (?<ident>[^:]*): (?<message>.*)$'
+    time_key: time
+    time_format: '%b %d %H:%M:%S'
+    time_keep: true
+  - name: json
+    format: json
+    time_key: time

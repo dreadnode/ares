@@ -1,0 +1,158 @@
+---
+# Install Impacket from GitHub source
+# REQUIRED: NetExec 1.4.0+ needs impacket.examples.regsecrets module
+# which is only available in development versions from GitHub
+# Reference: https://github.com/Pennyw0rth/NetExec/issues/685
+
+- name: Install git for cloning impacket
+  ansible.builtin.apt:
+    name: git
+    state: present
+  become: true
+  when: ansible_facts['os_family'] == 'Debian'
+
+- name: Remove conflicting apt impacket packages (Ubuntu only - Kali netexec depends on them)
+  ansible.builtin.apt:
+    name:
+      - python3-impacket
+      - impacket-scripts
+    state: absent
+    purge: true
+  become: true
+  failed_when: false
+  when:
+    - ansible_facts['os_family'] == 'Debian'
+    - ansible_facts['distribution'] != 'Kali'
+
+- name: Check if impacket is installed from source
+  ansible.builtin.stat:
+    path: "{{ recon_tools_impacket_install_dir }}/impacket/__init__.py"
+  register: recon_tools_impacket_source_check
+
+- name: Check if impacket repo already exists
+  ansible.builtin.stat:
+    path: "{{ recon_tools_impacket_install_dir }}/.git"
+  register: recon_tools_impacket_git_check
+
+- name: Clone impacket repository from GitHub (initial clone)
+  ansible.builtin.git:
+    repo: "{{ recon_tools_impacket_repo }}"
+    dest: "{{ recon_tools_impacket_install_dir }}"
+    version: "{{ recon_tools_impacket_version }}"
+  become: true
+  register: recon_tools_impacket_clone
+  when: not recon_tools_impacket_git_check.stat.exists
+
+- name: Set impacket venv path
+  ansible.builtin.set_fact:
+    recon_tools_impacket_venv: "{{ recon_tools_impacket_install_dir }}/venv"
+
+- name: Check if impacket venv exists
+  ansible.builtin.stat:
+    path: "{{ recon_tools_impacket_venv }}/bin/python"
+  register: recon_tools_impacket_venv_check
+
+- name: Check if we need to install or reinstall impacket
+  ansible.builtin.set_fact:
+    recon_tools_needs_impacket_install: >-
+      {{
+        (not recon_tools_impacket_venv_check.stat.exists)
+        or (recon_tools_impacket_clone.changed | default(false))
+      }}
+    recon_tools_force_impacket_reinstall: >-
+      {{
+        (recon_tools_impacket_clone.changed | default(false))
+      }}
+
+- name: Create impacket virtual environment
+  ansible.builtin.command:
+    cmd: "python3 -m venv {{ recon_tools_impacket_venv }}"
+  become: true
+  args:
+    creates: "{{ recon_tools_impacket_venv }}/bin/python"
+  when: recon_tools_needs_impacket_install | bool
+
+- name: Install impacket from source
+  ansible.builtin.pip:
+    name: "{{ recon_tools_impacket_install_dir }}"
+    virtualenv: "{{ recon_tools_impacket_venv }}"
+    editable: true
+    # Use forcereinstall when we removed the wrong installation or git repo changed
+    # Otherwise use present for idempotent behavior (won't reinstall if already installed)
+    state: "{{ 'forcereinstall' if recon_tools_force_impacket_reinstall else 'present' }}"
+    # Add --ignore-installed when force reinstalling to handle cached packages in the venv.
+    extra_args: "{{ '--ignore-installed' if recon_tools_force_impacket_reinstall else '' }}"
+  become: true
+  register: recon_tools_impacket_install
+  when: recon_tools_needs_impacket_install | bool
+
+- name: Check if impacket is correctly installed in venv
+  ansible.builtin.command: "{{ recon_tools_impacket_venv }}/bin/python -c \"import impacket; print(impacket.__file__)\""
+  register: recon_tools_impacket_import_check
+  changed_when: false
+  failed_when: false
+
+- name: Make impacket example scripts executable
+  ansible.builtin.shell: |
+    chmod +x {{ recon_tools_impacket_install_dir }}/examples/*.py
+  args:
+    executable: /bin/bash
+  become: true
+  changed_when: false
+
+- name: Check if \_\_init\_\_.py exists in impacket/examples
+  ansible.builtin.stat:
+    path: "{{ recon_tools_impacket_install_dir }}/impacket/examples/__init__.py"
+  register: recon_tools_impacket_init_check
+
+- name: Create \_\_init\_\_.py in impacket/examples to make it a proper Python package
+  ansible.builtin.copy:
+    content: "# Auto-generated __init__.py to make impacket.examples importable\n# Required for NetExec SMB functionality (regsecrets module)\n"
+    dest: "{{ recon_tools_impacket_install_dir }}/impacket/examples/__init__.py"
+    mode: '0644'
+  become: true
+  when: not recon_tools_impacket_init_check.stat.exists
+
+- name: Create symlinks for impacket scripts (impacket-* style for Kali compatibility)
+  ansible.builtin.shell: |
+    for script in {{ recon_tools_impacket_install_dir }}/examples/*.py; do
+      script_name=$(basename "$script" .py)
+      # Create wrapper scripts that use the impacket venv Python
+      printf '%s\n' '#!/bin/bash' \
+        "exec {{ recon_tools_impacket_venv }}/bin/python \"$script\" \"\$@\"" \
+        > "/usr/local/bin/impacket-$script_name"
+      chmod +x "/usr/local/bin/impacket-$script_name"
+
+      printf '%s\n' '#!/bin/bash' \
+        "exec {{ recon_tools_impacket_venv }}/bin/python \"$script\" \"\$@\"" \
+        > "/usr/local/bin/${script_name}.py"
+      chmod +x "/usr/local/bin/${script_name}.py"
+    done
+  args:
+    executable: /bin/bash
+  become: true
+  changed_when: false
+
+- name: Verify impacket regsecrets module is available
+  ansible.builtin.command: "{{ recon_tools_impacket_venv }}/bin/python -c \"from impacket.examples import regsecrets; print('regsecrets module OK')\""
+  register: recon_tools_regsecrets_check
+  changed_when: false
+  failed_when: false
+
+- name: Report impacket installation status
+  ansible.builtin.debug:
+    msg: |
+      Impacket installation from source: {{ 'SUCCESS' if recon_tools_impacket_install.changed | default(false) or not recon_tools_impacket_install.failed | default(false) else 'FAILED' }}
+      Impacket version: {{ recon_tools_impacket_version }}
+      regsecrets module: {{ 'AVAILABLE' if recon_tools_regsecrets_check.rc == 0 else 'NOT FOUND - NetExec SMB will fail!' }}
+      Install directory: {{ recon_tools_impacket_install_dir }}
+
+- name: Fail if regsecrets module is not available
+  ansible.builtin.fail:
+    msg: |
+      CRITICAL: impacket.examples.regsecrets module not found!
+      NetExec SMB module will not work without this module.
+      Check the impacket installation at {{ recon_tools_impacket_install_dir }}
+  when:
+    - recon_tools_regsecrets_check.rc != 0
+    - recon_tools_install_netexec | default(true)

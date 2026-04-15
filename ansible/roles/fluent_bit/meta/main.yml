@@ -1,0 +1,25 @@
+---
+galaxy_info:
+  author: Jayson Grace
+  namespace: dreadnode
+  description: Install and configure Fluent Bit for log management
+  company: dreadnode
+  license: MIT
+  role_name: fluent_bit
+  min_ansible_version: "2.18.4"
+  platforms:
+    - name: Ubuntu
+      versions:
+        - all
+    - name: Debian
+      versions:
+        - all
+    - name: Windows
+      versions:
+        - all
+  galaxy_tags:
+    - fluentbit
+    - linux
+    - logging
+    - monitoring
+    - windows

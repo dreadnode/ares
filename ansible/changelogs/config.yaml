@@ -1,0 +1,12 @@
+---
+changelog_filename_template: CHANGELOG.rst
+changelog_filename_version_depth: 3
+changes_file: changelog.yaml
+changes_format: combined
+new_plugins_after_name: removed_features
+sections:
+  - ["added", "Added"]
+  - ["changed", "Changed"]
+  - ["removed", "Removed"]
+  - ["fixed", "Fixed"]
+title: Dreadnode Nimbus Range Ansible Collection

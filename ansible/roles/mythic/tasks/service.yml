@@ -1,0 +1,19 @@
+---
+- name: Configure systemd service for Mythic
+  ansible.builtin.template:
+    src: mythic.service.j2
+    dest: /etc/systemd/system/mythic.service
+    mode: '0644'
+  become: true
+
+- name: Reload systemd daemon
+  ansible.builtin.systemd:
+    daemon_reload: true
+  become: true
+
+- name: Enable and restart Mythic service
+  ansible.builtin.systemd:
+    name: mythic
+    state: restarted
+    enabled: true
+  become: true

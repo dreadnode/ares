@@ -1,0 +1,35 @@
+---
+# Alloy version configuration
+alloy_version: "1.10.1"
+
+# Alloy configuration
+alloy_env: "dev"
+alloy_deployment_name: ""
+alloy_instance_id: ""
+alloy_loki_endpoint: "https://loki.dev.plundr.ai/loki/api/v1/push"
+
+# Windows-specific configuration
+alloy_windows_installer_url: "https://github.com/grafana/alloy/releases/download/v{{ alloy_version }}/alloy-installer-windows-amd64.exe.zip"
+alloy_windows_temp_dir: "C:\\Windows\\Temp"
+alloy_windows_install_dir: "C:\\Program Files\\GrafanaLabs\\Alloy"
+alloy_windows_config_path: "C:\\Program Files\\GrafanaLabs\\Alloy\\config.alloy"
+alloy_windows_data_path: "C:\\ProgramData\\GrafanaLabs\\Alloy\\data"
+
+# Disable reporting and profiling
+alloy_disable_reporting: true
+alloy_disable_profiling: true
+
+# Service configuration
+alloy_service_name: "Alloy"
+alloy_service_user: "NT AUTHORITY\\LocalSystem"
+alloy_runtime_priority: "normal"
+alloy_stability: "generally-available"
+
+# Log sources configuration
+alloy_log_sources:
+  - path: "C:\\Windows\\System32\\winevt\\Logs\\System.evtx"
+    job: "system"
+  - path: "C:\\Windows\\System32\\winevt\\Logs\\Application.evtx"
+    job: "application"
+  - path: "C:\\Windows\\System32\\winevt\\Logs\\Security.evtx"
+    job: "security"

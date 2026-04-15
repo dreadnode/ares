@@ -1,0 +1,30 @@
+---
+# Common packages for all operating systems
+fluent_bit_common_install_packages:
+  - ca-certificates
+
+# Debian-specific packages
+fluent_bit_debian_specific_packages:
+  - gpg
+  - fluent-bit
+
+# Repository URLs and keys
+fluent_bit_install_script_url: "https://raw.githubusercontent.com/fluent/fluent-bit/master/install.sh"
+fluent_bit_repo_key_url: "https://packages.fluentbit.io/fluentbit.key"
+fluent_bit_repo_url: "{% if ansible_facts['distribution'] == 'Ubuntu' %}https://packages.fluentbit.io/ubuntu/{{ ansible_facts['distribution_release'] }}{% elif ansible_facts['distribution'] == 'Kali' %}https://packages.fluentbit.io/debian/bookworm{% else %}https://packages.fluentbit.io/debian/{{ 'bookworm' if ansible_facts['distribution_release'] == 'kali-rolling' else ansible_facts['distribution_release'] }}{% endif %}"
+
+# Configuration directories
+fluent_bit_linux_config_dir: "/etc/fluent-bit"
+fluent_bit_linux_state_dir: "/var/lib/fluent-bit"
+
+# Force reread flag
+fluent_bit_force_reread_user_data: false
+
+# Fluent Bit Version
+fluent_bit_version: "4.0.1"
+
+# Windows specific variables
+fluent_bit_windows_url: "https://packages.fluentbit.io/windows/fluent-bit-{{ fluent_bit_version }}-win64.zip"
+fluent_bit_windows_temp_dir: "C:\\Windows\\Temp"
+fluent_bit_windows_installer: "fluent-bit-{{ fluent_bit_version }}-win64.zip"
+fluent_bit_windows_install_dir: "C:\\Program Files\\fluent-bit"

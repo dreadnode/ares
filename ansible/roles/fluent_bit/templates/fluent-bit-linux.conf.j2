@@ -1,0 +1,279 @@
+[SERVICE]
+    Flush        5
+    Daemon       Off
+    Log_Level    info
+    Parsers_File parsers.conf
+    Plugins_File plugins.conf
+    HTTP_Server  Off
+    HTTP_Listen  0.0.0.0
+    HTTP_Port    2020
+    HTTP_Client_Buffer 1M
+
+[INPUT]
+    Name              tail
+    Tag               system.user-data
+    Path              /var/log/user-data.log
+    Path_Key          log_path
+    Parser            syslog-rfc3164
+    DB                {{ fluent_bit_linux_state_dir }}/user-data.db
+    Mem_Buf_Limit     5MB
+    Skip_Long_Lines   On
+    Refresh_Interval  10
+    Read_from_Head    true
+
+[INPUT]
+    Name              tail
+    Tag               system.syslog
+    Path              /var/log/syslog
+    Path_Key          log_path
+    Parser            syslog-rfc3164
+    DB                {{ fluent_bit_linux_state_dir }}/syslog.db
+    Mem_Buf_Limit     5MB
+    Skip_Long_Lines   On
+    Refresh_Interval  10
+
+[INPUT]
+    Name              tail
+    Tag               system.auth
+    Path              /var/log/auth.log
+    Path_Key          log_path
+    Parser            syslog-rfc3164
+    DB                {{ fluent_bit_linux_state_dir }}/auth.db
+    Mem_Buf_Limit     5MB
+    Skip_Long_Lines   On
+    Refresh_Interval  10
+
+[INPUT]
+    Name              tail
+    Tag               system.kern
+    Path              /var/log/kern.log
+    Path_Key          log_path
+    Parser            syslog-rfc3164
+    DB                {{ fluent_bit_linux_state_dir }}/kern.db
+    Mem_Buf_Limit     5MB
+    Skip_Long_Lines   On
+    Refresh_Interval  10
+
+[INPUT]
+    Name              tail
+    Tag               system.dpkg
+    Path              /var/log/dpkg.log
+    Path_Key          log_path
+    Parser            syslog-rfc3164
+    DB                {{ fluent_bit_linux_state_dir }}/dpkg.db
+    Mem_Buf_Limit     5MB
+    Skip_Long_Lines   On
+    Refresh_Interval  10
+
+[INPUT]
+    Name              tail
+    Tag               system.apt
+    Path              /var/log/apt/history.log
+    Path_Key          log_path
+    Parser            syslog-rfc3164
+    DB                {{ fluent_bit_linux_state_dir }}/apt.db
+    Mem_Buf_Limit     5MB
+    Skip_Long_Lines   On
+    Refresh_Interval  10
+
+[INPUT]
+    Name              tail
+    Tag               system.audit
+    Path              /var/log/audit/audit.log
+    Path_Key          log_path
+    Parser            syslog-rfc3164
+    DB                {{ fluent_bit_linux_state_dir }}/audit.db
+    Mem_Buf_Limit     5MB
+    Skip_Long_Lines   On
+    Refresh_Interval  10
+
+[INPUT]
+    Name              tail
+    Tag               zsh_history.root
+    Path              /root/.zsh_history
+    Path_Key          log_path
+    Parser            ssm_cmd
+    DB                {{ fluent_bit_linux_state_dir }}/zsh-root.db
+    Mem_Buf_Limit     5MB
+    Skip_Long_Lines   On
+    Refresh_Interval  10
+
+{% if ansible_user is defined %}
+[INPUT]
+    Name              tail
+    Tag               zsh_history.user
+    Path              /home/{{ ansible_user }}/.zsh_history
+    Path_Key          log_path
+    Parser            ssm_cmd
+    DB                {{ fluent_bit_linux_state_dir }}/zsh-user.db
+    Mem_Buf_Limit     5MB
+    Skip_Long_Lines   On
+    Refresh_Interval  10
+{% endif %}
+
+[INPUT]
+    Name              tail
+    Tag               system.ssm.session
+    Path              /var/lib/amazon/ssm/*/session/orchestration/*/Standard_Stream/ipcTempFile.log
+    Path_Key          log_path
+    Parser            ssm_cmd
+    DB                {{ fluent_bit_linux_state_dir }}/ssm-session.db
+    Mem_Buf_Limit     10MB
+    Skip_Long_Lines   On
+    Refresh_Interval  5
+    Read_from_Head    true
+
+[INPUT]
+    Name              exec
+    Tag               command.execution
+    Command           bash -c "HISTTIMEFORMAT='%s ' history | tail -20"
+    Parser            ssm_cmd
+    Interval_Sec      1
+    Interval_NSec     0
+    Buf_Size          8kb
+
+[INPUT]
+    Name  tail
+    Path  /var/log/syslog
+    Exclude_Path /var/log/fluent*.log
+
+# ANSI color strip
+[FILTER]
+    Name          lua
+    Match         system.ssm.session
+    Code          function strip_ansi(tag, timestamp, record) if type(record["output"]) == "string" then record["output"] = record["output"]:gsub('\27%[[0-9;]*[A-Za-z]', ''):gsub('\27%[[0-9]+;[0-9]+[Hf]', ''):gsub('\27%[[0-9]+[ABCDEFGJKST]', ''):gsub('\27%[%??[0-9;]*[hl]', ''):gsub('\27%[[0-9]+[mGKH]', ''):gsub('\27%[%d+[XJ]', ''):gsub("\27%[%dK", "") end; if type(record["command"]) == "string" then record["command"] = record["command"]:gsub('\27%[[0-9;]*[A-Za-z]', ''):gsub('\27%[[0-9]+;[0-9]+[Hf]', '') end; return 1, timestamp, record; end
+    Call          strip_ansi
+    Protected_Mode true
+
+# Tag each line as either a command or an output for command.execution stream
+[FILTER]
+    Name       modify
+    Match      command.execution
+    Condition  Key_exists command
+    Add        log_type command
+
+[FILTER]
+    Name       modify
+    Match      command.execution
+    Condition  Key_exists output
+    Add        log_type output
+
+[FILTER]
+    Name              grep
+    Match             command.execution
+    Regex             output .+
+    Exclude           output ^\s*$
+
+# Filter empty output lines for SSM session logs
+[FILTER]
+    Name              grep
+    Match             system.ssm.session
+    Exclude           output ^\s*$
+
+[FILTER]
+    Name           lua
+    Match          system.ssm.session
+    Script         /etc/fluent-bit/scripts/cmd_output_parser.lua
+    Call           process_ssm_logs
+    Protected_Mode true
+
+# Process command and output capture for SSM session logs
+[FILTER]
+    Name           lua
+    Match          system.ssm.session
+    Code           command_storage = {}; function tag_and_corr(tag, timestamp, record) if record.raw_output then if record.raw_output:match("└─[#$]%s+") then local cmd = record.raw_output:match("└─[#$]%s+(.+)"); if cmd then local clean_cmd = cmd:gsub('\27%[%([^)]+%)', ''):gsub('\27%[[0-9;]*[mGKH]', ''):gsub('\r.*$', ''); record.log_type = "command"; record.command = clean_cmd; command_storage[tag] = clean_cmd; end else if command_storage[tag] then local clean_output = record.raw_output:gsub('\27%[%([^)]+%)', ''):gsub('\27%[[0-9;]*[mGKH]', ''):gsub('\r', ' '); local lines = {}; for line in clean_output:gmatch("[^\r\n]+") do if not line:match("^May") and line:match("%S") then table.insert(lines, line:match("^%s*(.-)%s*$")); end end if #lines > 0 then record.log_type = "output"; record.command = command_storage[tag]; record.command_output = lines[1]; end end end end return 1, timestamp, record end
+    Call           tag_and_corr
+    Protected_Mode true
+
+[FILTER]
+    Name               record_modifier
+    Match              system.ssm.session
+    Condition          Key_exists command_output
+    Record             has_command_output true
+
+[FILTER]
+    Name               record_modifier
+    Match              system.ssm.session
+    Condition          Key_exists related_command
+    Record             command_correlated true
+
+# Mark records that have commands for command.execution stream
+[FILTER]
+    Name              record_modifier
+    Match             command.execution
+    Condition         Key_value_matches command .+
+    Record            command_executed true
+
+# Log OS and Arch
+[FILTER]
+    Name          lua
+    Match         *
+    Code          function add_system_info(tag, timestamp, record) local f1 = io.popen(". /etc/os-release && echo \"$NAME $VERSION_ID\""); local f2 = io.popen("arch"); record["os"] = f1:read("*a"):gsub("%s+$", ""); record["architecture"] = f2:read("*a"):gsub("%s+$", ""); f1:close(); f2:close(); return 2, timestamp, record; end
+    Call          add_system_info
+    Protected_Mode false
+
+# Extract user and session ID from SSM path
+[FILTER]
+    Name          lua
+    Match         system.ssm.session
+    Code          function parse_path(tag, timestamp, record) local path = record["log_path"] or ""; local user = path:match("/([^/]+@[^/%-]+)%-"); local session_id = path:match("%-([a-zA-Z0-9]+)/Standard_Stream"); if user then record["ssm_user"] = user; end; if session_id then record["ssm_session_id"] = session_id; end; return 1, timestamp, record; end
+    Call          parse_path
+    Protected_Mode false
+
+[FILTER]
+    Name          lua
+    Match         command.execution
+    Code          function extract_cmd(tag, ts, record) if record.command then record.is_shell_cmd = true; record.shell_cmd = record.command; end; return 1, ts, record; end
+    Call          extract_cmd
+    Protected_Mode false
+
+[FILTER]
+    Name              record_modifier
+    Match             *
+    Record            environment {{ fluent_bit_env }}
+    Record            deployment {{ fluent_bit_deployment_name }}
+    Record            hostname {{ ansible_hostname | default(ansible_host) }}
+    Record            platform linux
+
+# AWS metadata filter
+[FILTER]
+    Name          aws
+    Match         *
+    imds_version  v2
+    az            true
+    ec2_instance_id true
+    ec2_instance_type true
+    private_ip    true
+    ami_id        true
+    account_id    true
+    hostname      true
+    vpc_id        true
+
+[OUTPUT]
+    Name                  stdout
+    Match                 system.ssm.session
+    Format                json_structured
+
+[OUTPUT]
+    Name                  opensearch
+    Match                 system.ssm.session
+    Host                  {{ fluent_bit_opensearch_custom_domain }}
+    Port                  443
+    HTTP_User             {{ fluent_bit_opensearch_username }}
+    HTTP_Passwd           {{ fluent_bit_opensearch_password }}
+    Suppress_Type_Name    On
+    Logstash_Format       On
+    Logstash_Prefix       {{ fluent_bit_env }}-{{ fluent_bit_deployment_name }}-linux
+    Logstash_DateFormat   %Y.%m.%d
+    Include_Tag_Key       On
+    Tag_Key               fluentbit_tag
+    Generate_ID           Off
+    tls                   On
+    tls.verify            Off
+    Retry_Limit           5
+    Buffer_Size           512k
+
+[OUTPUT]
+    Name              stdout
+    Match             zsh_history.*
+    Format            json_pretty

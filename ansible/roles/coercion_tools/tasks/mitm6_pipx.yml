@@ -1,0 +1,31 @@
+---
+# Install mitm6 via pipx for dependency isolation
+# This eliminates netifaces compilation issues and dependency conflicts
+
+- name: Check if mitm6 is already installed via pipx
+  ansible.builtin.command: pipx list
+  register: coercion_tools_mitm6_pipx_list
+  changed_when: false
+  failed_when: false
+  become: true
+  environment:
+    HOME: /root
+
+- name: Install mitm6 via pipx
+  ansible.builtin.command: pipx install mitm6
+  register: coercion_tools_mitm6_pipx_install
+  changed_when: "'installed package mitm6' in coercion_tools_mitm6_pipx_install.stdout"
+  failed_when: false
+  become: true
+  environment:
+    HOME: /root
+    PATH: "{{ base_rust_bin_path }}:{{ base_pipx_bin_path }}:{{ ansible_env.PATH }}"
+  when: "'mitm6' not in coercion_tools_mitm6_pipx_list.stdout | default('')"
+
+- name: Create symlink for mitm6 in /usr/local/bin
+  ansible.builtin.file:
+    src: "{{ base_pipx_bin_path }}/mitm6"
+    dest: /usr/local/bin/mitm6
+    state: link
+    force: true
+  become: true

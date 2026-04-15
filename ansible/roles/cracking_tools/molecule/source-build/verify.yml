@@ -1,0 +1,72 @@
+---
+- name: Verify
+  hosts: all
+  gather_facts: true
+  tasks:
+    - name: Include default variables
+      ansible.builtin.include_vars:
+        file: "../../defaults/main.yml"
+
+    - name: Verify Rust is installed
+      ansible.builtin.command: /root/.cargo/bin/rustc --version
+      register: cracking_tools_rust_version
+      changed_when: false
+      failed_when: cracking_tools_rust_version.rc != 0
+
+    - name: Assert Rust version supports edition 2024
+      ansible.builtin.assert:
+        that:
+          - cracking_tools_rust_version.rc == 0
+          - cracking_tools_rust_version.stdout is regex('^rustc 1\.(8[5-9]|9[0-9]|[1-9][0-9]{2,})\.')
+        fail_msg: "Rust version {{ cracking_tools_rust_version.stdout }} does not support edition 2024 (requires 1.85.0+)"
+        success_msg: "Rust {{ cracking_tools_rust_version.stdout }} supports edition 2024"
+
+    - name: Verify hashcat is installed from source
+      ansible.builtin.command: /usr/local/bin/hashcat --version
+      register: cracking_tools_hashcat_version
+      changed_when: false
+      failed_when: cracking_tools_hashcat_version.rc != 0
+
+    - name: Assert hashcat is working
+      ansible.builtin.assert:
+        that:
+          - cracking_tools_hashcat_version.rc == 0
+          - cracking_tools_hashcat_version.stdout is defined
+        fail_msg: "hashcat is not properly installed from source"
+        success_msg: "hashcat {{ cracking_tools_hashcat_version.stdout }} is installed from source"
+
+    - name: Verify hashcat binary location (source build)
+      ansible.builtin.stat:
+        path: /usr/local/bin/hashcat
+      register: cracking_tools_hashcat_bin
+
+    - name: Assert hashcat binary exists at expected location
+      ansible.builtin.assert:
+        that:
+          - cracking_tools_hashcat_bin.stat.exists
+          - cracking_tools_hashcat_bin.stat.executable
+        fail_msg: "hashcat binary not found at /usr/local/bin/hashcat"
+        success_msg: "hashcat binary installed at /usr/local/bin/hashcat"
+
+    - name: Verify hashcat source directory exists
+      ansible.builtin.stat:
+        path: /opt/hashcat
+      register: cracking_tools_hashcat_src
+
+    - name: Assert hashcat source directory exists
+      ansible.builtin.assert:
+        that:
+          - cracking_tools_hashcat_src.stat.exists
+          - cracking_tools_hashcat_src.stat.isdir
+        fail_msg: "hashcat source directory not found at /opt/hashcat"
+        success_msg: "hashcat source directory exists at /opt/hashcat"
+
+    - name: Display verification summary
+      ansible.builtin.debug:
+        msg:
+          - "=== Hashcat Source Build Verification Complete ==="
+          - "Rust: {{ cracking_tools_rust_version.stdout }}"
+          - "hashcat: {{ cracking_tools_hashcat_version.stdout }}"
+          - "Binary: /usr/local/bin/hashcat"
+          - "Source: /opt/hashcat"
+          - "==================================================="

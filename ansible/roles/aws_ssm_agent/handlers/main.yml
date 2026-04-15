@@ -1,0 +1,13 @@
+---
+- name: Restart ssm_agent (Linux)
+  ansible.builtin.systemd:
+    name: amazon-ssm-agent
+    state: restarted
+  become: true
+  when: ansible_os_family != 'Windows'
+
+- name: Restart ssm_agent (Windows)
+  ansible.windows.win_service:
+    name: AmazonSSMAgent
+    state: restarted
+  when: ansible_os_family == 'Windows'
