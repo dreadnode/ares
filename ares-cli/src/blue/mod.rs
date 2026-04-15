@@ -17,7 +17,11 @@ use crate::cli::BlueCommands;
 
 pub(crate) async fn run_blue(cmd: BlueCommands, redis_url: Option<String>) -> Result<()> {
     match cmd {
-        BlueCommands::List { latest } => list::blue_list(redis_url, latest).await,
+        BlueCommands::List {
+            latest,
+            operation_id,
+            json,
+        } => list::blue_list(redis_url, latest, operation_id, json).await,
         BlueCommands::Status {
             investigation_id,
             latest,
@@ -44,7 +48,8 @@ pub(crate) async fn run_blue(cmd: BlueCommands, redis_url: Option<String>) -> Re
             operation_id,
             latest,
             watch,
-        } => operation::blue_operation_status(redis_url, operation_id, latest, watch).await,
+            json,
+        } => operation::blue_operation_status(redis_url, operation_id, latest, watch, json).await,
         BlueCommands::Report {
             operation_id,
             investigation_id,

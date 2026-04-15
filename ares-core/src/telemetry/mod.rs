@@ -15,5 +15,6 @@ mod init;
 pub mod mitre;
 pub mod propagation;
 pub mod spans;
+pub mod target;
 
 pub use init::{init_telemetry, shutdown_telemetry, TelemetryConfig, TelemetryGuard};

@@ -17,6 +17,7 @@ use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn, Instrument};
 
 use ares_core::telemetry::spans::{trace_decision, trace_tool_call, Team};
+use ares_core::telemetry::target::{extract_target_info, infer_target_type_from_info};
 
 use crate::provider::{
     ChatMessage, ContentPart, LlmError, LlmProvider, LlmRequest, LlmResponse, Role, StopReason,
@@ -598,12 +599,16 @@ pub async fn run_agent_loop(
                 let r = role.to_string();
                 let tid = task_id.to_string();
                 let c = (*call).clone();
+                let ti = extract_target_info(&call.arguments);
+                let tt = infer_target_type_from_info(&ti);
                 let span = trace_tool_call(
                     role,
                     Team::Red,
                     &call.name,
-                    None,
-                    None,
+                    ti.target_ip.as_deref(),
+                    ti.target_fqdn.as_deref(),
+                    ti.target_user.as_deref(),
+                    tt,
                     Some(task_id),
                     false,
                     None,
@@ -717,6 +722,8 @@ pub async fn run_agent_loop(
                 role,
                 Team::Red,
                 &call.name,
+                None,
+                None,
                 None,
                 None,
                 Some(task_id),

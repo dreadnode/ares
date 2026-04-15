@@ -418,6 +418,12 @@ pub(crate) enum BlueCommands {
         /// Only print the latest investigation ID
         #[arg(long)]
         latest: bool,
+        /// Filter by red team operation ID
+        #[arg(long)]
+        operation_id: Option<String>,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
     },
 
     /// Get the status of an investigation
@@ -481,6 +487,9 @@ pub(crate) enum BlueCommands {
         /// Watch mode: refresh every N seconds (0=off)
         #[arg(long, default_value = "0")]
         watch: u64,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
     },
 
     /// Delete an investigation

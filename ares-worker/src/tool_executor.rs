@@ -27,6 +27,7 @@ use tracing::{debug, error, info, warn, Instrument};
 
 use ares_core::telemetry::propagation::set_span_parent;
 use ares_core::telemetry::spans::{trace_discovery, AgentSpanBuilder, SpanKind, Team};
+use ares_core::telemetry::target::{extract_target_info, infer_target_type_from_info};
 
 use crate::config::WorkerConfig;
 use crate::heartbeat::WorkerStatus;
@@ -51,6 +52,9 @@ struct ToolExecRequest {
     /// W3C traceparent header for cross-service span linking.
     #[serde(default)]
     traceparent: Option<String>,
+    /// Operation ID for span correlation with dashboards.
+    #[serde(default)]
+    operation_id: Option<String>,
 }
 
 /// Response pushed back to the orchestrator.
@@ -114,10 +118,28 @@ pub async fn run_tool_exec_loop(
                     current_task: Some(format!("{}:{}", request.tool_name, request.call_id)),
                 });
 
-                let exec_span = AgentSpanBuilder::new("tool_exec", &config.worker_role, Team::Red)
-                    .tool(&request.tool_name)
-                    .kind(SpanKind::Consumer)
-                    .build();
+                let ti = extract_target_info(&request.arguments);
+                let tt = infer_target_type_from_info(&ti);
+                let mut span_builder =
+                    AgentSpanBuilder::new("tool_exec", &config.worker_role, Team::Red)
+                        .tool(&request.tool_name)
+                        .kind(SpanKind::Consumer);
+                if let Some(ref ip) = ti.target_ip {
+                    span_builder = span_builder.target_ip(ip);
+                }
+                if let Some(ref fqdn) = ti.target_fqdn {
+                    span_builder = span_builder.target_fqdn(fqdn);
+                }
+                if let Some(ref user) = ti.target_user {
+                    span_builder = span_builder.target_user(user);
+                }
+                if let Some(target_type) = tt {
+                    span_builder = span_builder.target_type(target_type);
+                }
+                if let Some(ref op) = request.operation_id {
+                    span_builder = span_builder.operation_id(op);
+                }
+                let exec_span = span_builder.build();
                 if let Some(ref tp) = request.traceparent {
                     set_span_parent(&exec_span, tp);
                 }
@@ -239,6 +261,9 @@ async fn execute_and_respond(
         "Executing tool"
     );
 
+    let di = extract_target_info(&request.arguments);
+    let dt = infer_target_type_from_info(&di);
+
     let response = match ares_tools::dispatch(&request.tool_name, &request.arguments).await {
         Ok(output) => {
             // Raw output for structured parsers (need unfiltered data)
@@ -272,10 +297,12 @@ async fn execute_and_respond(
                             let span = trace_discovery(
                                 disc_type,
                                 &request.tool_name,
+                                di.target_user.as_deref(),
                                 None,
-                                None,
-                                None,
-                                None,
+                                di.target_ip.as_deref(),
+                                di.target_fqdn.as_deref(),
+                                dt,
+                                request.operation_id.as_deref(),
                             );
                             let _guard = span.enter();
                         }

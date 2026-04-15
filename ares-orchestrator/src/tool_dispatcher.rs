@@ -54,6 +54,9 @@ pub struct ToolExecRequest {
     /// W3C traceparent header for cross-service span linking.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub traceparent: Option<String>,
+    /// Operation ID for span correlation with dashboards.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub operation_id: Option<String>,
 }
 
 /// Message returned by the worker on the result mailbox.
@@ -361,6 +364,7 @@ impl ares_llm::ToolDispatcher for RedisToolDispatcher {
                 tool_name: call.name.clone(),
                 arguments: call.arguments.clone(),
                 traceparent,
+                operation_id: Some(self.operation_id.clone()),
             };
 
             let queue_key = format!("{TOOL_EXEC_PREFIX}:{effective_role}");
@@ -597,6 +601,7 @@ mod tests {
             tool_name: "nmap_scan".into(),
             arguments: serde_json::json!({"target": "192.168.1.0/24"}),
             traceparent: None,
+            operation_id: Some("op-20260415-120000".into()),
         };
 
         let json = serde_json::to_string(&req).unwrap();

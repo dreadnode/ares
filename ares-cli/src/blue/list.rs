@@ -1,16 +1,23 @@
 use anyhow::{Context, Result};
 use redis::AsyncCommands;
+use serde::Serialize;
 
 use crate::redis_conn::connect_redis;
 
 /// Summary of an investigation for display in the list view.
+#[derive(Serialize)]
 struct InvestigationSummary {
     id: String,
     status: String,
     started_at: String,
 }
 
-pub(crate) async fn blue_list(redis_url: Option<String>, latest: bool) -> Result<()> {
+pub(crate) async fn blue_list(
+    redis_url: Option<String>,
+    latest: bool,
+    operation_id: Option<String>,
+    json: bool,
+) -> Result<()> {
     let mut conn = connect_redis(redis_url).await?;
 
     if latest {
@@ -21,7 +28,20 @@ pub(crate) async fn blue_list(redis_url: Option<String>, latest: bool) -> Result
         return Ok(());
     }
 
-    let inv_ids = ares_core::state::list_investigation_ids(&mut conn).await?;
+    let inv_ids = if let Some(ref op_id) = operation_id {
+        let ids = ares_core::state::list_investigations_for_operation(&mut conn, op_id).await?;
+        if ids.is_empty() {
+            if json {
+                println!("[]");
+            } else {
+                println!("No investigations found for operation: {op_id}");
+            }
+            return Ok(());
+        }
+        ids
+    } else {
+        ares_core::state::list_investigation_ids(&mut conn).await?
+    };
 
     let mut investigations: Vec<InvestigationSummary> = Vec::new();
 
@@ -52,8 +72,22 @@ pub(crate) async fn blue_list(redis_url: Option<String>, latest: bool) -> Result
     investigations.sort_by(|a, b| b.started_at.cmp(&a.started_at));
 
     if investigations.is_empty() {
-        println!("No investigations found");
+        if json {
+            println!("[]");
+        } else {
+            println!("No investigations found");
+        }
         return Ok(());
+    }
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&investigations)?);
+        return Ok(());
+    }
+
+    if let Some(ref op_id) = operation_id {
+        println!("Investigations for operation: {op_id}");
+        println!();
     }
 
     println!(

@@ -55,7 +55,9 @@ pub(crate) async fn blue_delete_operation(
     let mut conn = connect_redis(redis_url).await?;
 
     let op_inv_key = format!("ares:blue:op:{operation_id}:investigations");
-    let inv_ids: HashSet<String> = conn.smembers(&op_inv_key).await?;
+    let inv_ids_vec =
+        ares_core::state::list_investigations_for_operation(&mut conn, &operation_id).await?;
+    let inv_ids: HashSet<String> = inv_ids_vec.into_iter().collect();
 
     if inv_ids.is_empty() {
         println!("No investigations found for operation: {operation_id}");

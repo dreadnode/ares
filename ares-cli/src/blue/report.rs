@@ -1,7 +1,6 @@
 use std::collections::HashMap;
 
 use anyhow::{Context, Result};
-use redis::AsyncCommands;
 
 use ares_core::reports::BlueTeamReportGenerator;
 use ares_core::state::BlueStateReader;
@@ -36,8 +35,8 @@ pub(crate) async fn blue_report(
         let op_id = ares_core::state::resolve_latest_operation(&mut conn).await?;
         if let Some(ref op_id) = op_id {
             // Check if there are blue team investigations for this operation
-            let op_inv_key = format!("ares:blue:op:{op_id}:investigations");
-            let inv_ids: std::collections::HashSet<String> = conn.smembers(&op_inv_key).await?;
+            let inv_ids =
+                ares_core::state::list_investigations_for_operation(&mut conn, op_id).await?;
             if !inv_ids.is_empty() {
                 let report = generate_operation_report(&mut conn, &generator, op_id).await?;
                 let path = save_report(&output_dir, op_id, &report)?;
@@ -81,8 +80,7 @@ async fn generate_operation_report(
     generator: &BlueTeamReportGenerator,
     operation_id: &str,
 ) -> Result<String> {
-    let op_inv_key = format!("ares:blue:op:{operation_id}:investigations");
-    let inv_ids: std::collections::HashSet<String> = conn.smembers(&op_inv_key).await?;
+    let inv_ids = ares_core::state::list_investigations_for_operation(conn, operation_id).await?;
 
     if inv_ids.is_empty() {
         anyhow::bail!("No investigations found for operation: {operation_id}");

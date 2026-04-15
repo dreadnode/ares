@@ -26,6 +26,7 @@ pub struct AgentSpanBuilder {
     team: Team,
     tool_name: Option<String>,
     target: Target,
+    target_type: Option<String>,
     credential_domain: Option<String>,
     operation_id: Option<String>,
     span_kind: SpanKind,
@@ -42,6 +43,7 @@ impl AgentSpanBuilder {
             team,
             tool_name: None,
             target: Target::default(),
+            target_type: None,
             credential_domain: None,
             operation_id: None,
             span_kind: SpanKind::Internal,
@@ -83,6 +85,11 @@ impl AgentSpanBuilder {
 
     pub fn target_environment(mut self, env: impl Into<String>) -> Self {
         self.target.environment = Some(env.into());
+        self
+    }
+
+    pub fn target_type(mut self, target_type: impl Into<String>) -> Self {
+        self.target_type = Some(target_type.into());
         self
     }
 
@@ -197,6 +204,7 @@ impl AgentSpanBuilder {
             "server.address" = self.target.fqdn.as_deref().unwrap_or(""),
             "host.name" = hostname.as_deref().unwrap_or(""),
             "user.name" = self.target.user.as_deref().unwrap_or(""),
+            attack_target_type = self.target_type.as_deref().unwrap_or(""),
             attack_target_domain = target_domain.as_deref().unwrap_or(""),
             "target.environment" = self.target.environment.as_deref().unwrap_or(""),
             "credential.domain" = self.credential_domain.as_deref().unwrap_or(""),

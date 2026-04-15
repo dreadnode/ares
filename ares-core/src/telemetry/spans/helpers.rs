@@ -15,6 +15,8 @@ pub fn trace_tool_call(
     tool_name: &str,
     target_ip: Option<&str>,
     target_fqdn: Option<&str>,
+    target_user: Option<&str>,
+    target_type: Option<&str>,
     operation_id: Option<&str>,
     is_error: bool,
     error_message: Option<&str>,
@@ -26,6 +28,12 @@ pub fn trace_tool_call(
     }
     if let Some(fqdn) = target_fqdn {
         builder = builder.target_fqdn(fqdn);
+    }
+    if let Some(user) = target_user {
+        builder = builder.target_user(user);
+    }
+    if let Some(tt) = target_type {
+        builder = builder.target_type(tt);
     }
     if let Some(op) = operation_id {
         builder = builder.operation_id(op);
@@ -40,12 +48,15 @@ pub fn trace_tool_call(
 /// Create a discovery event span.
 ///
 /// Equivalent to Python's `trace_discovery()`.
+#[allow(clippy::too_many_arguments)]
 pub fn trace_discovery(
     discovery_type: &str,
     source_agent: &str,
     target_user: Option<&str>,
     target_domain: Option<&str>,
     target_ip: Option<&str>,
+    target_fqdn: Option<&str>,
+    target_type: Option<&str>,
     operation_id: Option<&str>,
 ) -> tracing::Span {
     tracing::info_span!(
@@ -57,7 +68,9 @@ pub fn trace_discovery(
         "discovery.type" = discovery_type,
         "discovery.source_agent" = source_agent,
         "user.name" = target_user.unwrap_or(""),
+        attack_target_type = target_type.unwrap_or(""),
         attack_target_domain = target_domain.unwrap_or(""),
+        "destination.address" = target_fqdn.unwrap_or(""),
         "destination.ip" = target_ip.unwrap_or(""),
         attack_operation_id = operation_id.unwrap_or(""),
     )
@@ -120,6 +133,40 @@ pub fn trace_domain_admin(
         "mitre.technique.id" = "T1003.006",
         attack_operation_id = operation_id.unwrap_or(""),
     )
+}
+
+/// Extract target info from tool call arguments for span attributes.
+///
+/// Tool arguments commonly include `target` (IP/hostname), `username`/`user`,
+/// and `domain`. This helper pulls them out so span builders can populate
+/// `destination.address`, `user.name`, and `attack_target_domain`.
+pub fn extract_target_from_args(
+    args: &serde_json::Value,
+) -> (Option<String>, Option<String>, Option<String>) {
+    let target = args
+        .get("target")
+        .or_else(|| args.get("host"))
+        .or_else(|| args.get("dc_ip"))
+        .or_else(|| args.get("dc"))
+        .or_else(|| args.get("ip"))
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(String::from);
+
+    let user = args
+        .get("username")
+        .or_else(|| args.get("user"))
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(String::from);
+
+    let domain = args
+        .get("domain")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(String::from);
+
+    (target, user, domain)
 }
 
 /// Create a CLIENT span for outgoing service-to-service calls.
