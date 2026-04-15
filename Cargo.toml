@@ -11,7 +11,7 @@ chrono = { version = "0.4", features = ["serde"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 uuid = { version = "1.11", features = ["v4"] }
-thiserror = "1"
+thiserror = "2"
 anyhow = "1"
 clap = { version = "4.5.23", features = ["derive", "env"] }
 serde_yaml = "0.9"
