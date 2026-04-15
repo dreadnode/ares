@@ -40,6 +40,11 @@ pub struct AgentLoopConfig {
     pub retry: RetryConfig,
     /// Context window management configuration.
     pub context: ContextConfig,
+    /// Maximum times a single tool can be called within one agent loop before
+    /// it is removed from the tool definitions to force the LLM to try
+    /// a different approach. Blue investigations need higher limits since
+    /// detection queries are the primary tool.
+    pub max_tool_calls_per_name: u32,
 }
 
 impl Default for AgentLoopConfig {
@@ -51,6 +56,7 @@ impl Default for AgentLoopConfig {
             temperature: None,
             retry: RetryConfig::default(),
             context: ContextConfig::default(),
+            max_tool_calls_per_name: 10,
         }
     }
 }
@@ -455,10 +461,7 @@ pub async fn run_agent_loop(
     let mut active_tools: Vec<crate::ToolDefinition> = tools.to_vec();
     let mut tool_call_counts: std::collections::HashMap<String, u32> =
         std::collections::HashMap::new();
-    /// Max times a single tool can be called within one agent loop before
-    /// it is removed from the tool definitions to force the LLM to try
-    /// a different approach.
-    const MAX_TOOL_CALLS_PER_NAME: u32 = 10;
+    let max_tool_calls_per_name = config.max_tool_calls_per_name;
 
     loop {
         if steps >= config.max_steps {
@@ -676,7 +679,7 @@ pub async fn run_agent_loop(
                 }
 
                 // Check if tool has exceeded max call count
-                if *tool_call_counts.get(&call.name).unwrap_or(&0) >= MAX_TOOL_CALLS_PER_NAME
+                if *tool_call_counts.get(&call.name).unwrap_or(&0) >= max_tool_calls_per_name
                     && !tools_to_remove.contains(&call.name)
                 {
                     warn!(

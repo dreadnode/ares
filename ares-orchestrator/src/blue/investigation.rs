@@ -137,7 +137,8 @@ pub async fn run_investigation(
 
     let config = AgentLoopConfig {
         model: investigation.model.clone(),
-        max_steps: 50,
+        max_steps: 75,
+        max_tool_calls_per_name: 25,
         ..AgentLoopConfig::default()
     };
 

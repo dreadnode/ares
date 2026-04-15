@@ -177,6 +177,7 @@ async fn main() -> Result<()> {
         temperature: None,
         retry: RetryConfig::default(),
         context: ContextConfig::default(),
+        max_tool_calls_per_name: 10,
     };
 
     let outcome = run_agent_loop(

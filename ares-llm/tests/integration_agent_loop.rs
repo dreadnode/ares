@@ -105,6 +105,7 @@ fn default_config(max_steps: u32) -> AgentLoopConfig {
             max_tool_output_chars: 0, // No truncation in tests
             min_recent_messages: 10,
         },
+        max_tool_calls_per_name: 10,
     }
 }
 

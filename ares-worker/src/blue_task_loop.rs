@@ -209,7 +209,8 @@ async fn execute_blue_task(
 
     let config = AgentLoopConfig {
         model: model_name.to_string(),
-        max_steps: 30, // Worker tasks are more focused than orchestrator
+        max_steps: 50,
+        max_tool_calls_per_name: 25,
         ..AgentLoopConfig::default()
     };
 

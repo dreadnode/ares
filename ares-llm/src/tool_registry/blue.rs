@@ -115,7 +115,7 @@ fn loki_tool_definitions() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: "query_logs_around_timestamp".into(),
-            description: "Query logs in a window around a specific timestamp. Useful for investigating events near an alert.".into(),
+            description: "Query logs in a window around a single timestamp. For multiple queries at once, use execute_parallel_queries instead — it runs up to 10 queries concurrently in one call.".into(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -177,7 +177,7 @@ fn loki_tool_definitions() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: "execute_parallel_queries".into(),
-            description: "Execute multiple LogQL queries in parallel and return combined results. Max 10 queries.".into(),
+            description: "Execute up to 10 LogQL queries in parallel and return combined results. PREFERRED over calling query_loki_logs or query_logs_around_timestamp multiple times — batch your queries here to get all results in one call.".into(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -1080,7 +1080,7 @@ fn investigation_state_tool_definitions() -> Vec<ToolDefinition> {
     vec![
         ToolDefinition {
             name: "add_evidence".into(),
-            description: "Add evidence to the investigation state. Uses Redis HSETNX for deduplication.".into(),
+            description: "Add a single evidence item to the investigation. For multiple items, prefer add_evidence_batch to record them all in one call.".into(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -1116,6 +1116,56 @@ fn investigation_state_tool_definitions() -> Vec<ToolDefinition> {
                     }
                 },
                 "required": ["investigation_id", "evidence_type", "value", "source"]
+            }),
+        },
+        ToolDefinition {
+            name: "add_evidence_batch".into(),
+            description: "Add multiple evidence items in a single call. Use this instead of calling add_evidence repeatedly — it records all items in one Redis pipeline round-trip and has its own separate call budget.".into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "investigation_id": {
+                        "type": "string",
+                        "description": "Investigation ID"
+                    },
+                    "items": {
+                        "type": "array",
+                        "description": "Array of evidence items to add (max 50 per call)",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "evidence_type": {
+                                    "type": "string",
+                                    "enum": ["ip", "domain", "hash", "process", "user", "file", "artifact", "tool", "technique"],
+                                    "description": "Type of evidence"
+                                },
+                                "value": {
+                                    "type": "string",
+                                    "description": "The evidence value"
+                                },
+                                "source": {
+                                    "type": "string",
+                                    "description": "Where this evidence was found"
+                                },
+                                "confidence": {
+                                    "type": "number",
+                                    "description": "Confidence level (0.0-1.0, default: 0.5)"
+                                },
+                                "pyramid_level": {
+                                    "type": "string",
+                                    "enum": ["hash_values", "ip_addresses", "domain_names", "network_host_artifacts", "tools", "ttps"],
+                                    "description": "Pyramid of Pain level (auto-assigned if omitted)"
+                                },
+                                "timestamp": {
+                                    "type": "string",
+                                    "description": "ISO8601 timestamp (default: now)"
+                                }
+                            },
+                            "required": ["evidence_type", "value", "source"]
+                        }
+                    }
+                },
+                "required": ["investigation_id", "items"]
             }),
         },
         ToolDefinition {

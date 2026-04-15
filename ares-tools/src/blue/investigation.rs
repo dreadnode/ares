@@ -180,6 +180,200 @@ pub async fn add_evidence(args: &Value) -> Result<ToolOutput> {
 }
 
 // ---------------------------------------------------------------------------
+// 1b. add_evidence_batch
+// ---------------------------------------------------------------------------
+
+/// Add multiple evidence items in a single call using a Redis pipeline.
+///
+/// Required: `investigation_id`, `items` (array of evidence objects)
+/// Each item requires: `evidence_type`, `value`, `source`
+/// Each item optionally: `confidence`, `pyramid_level`, `timestamp`
+pub async fn add_evidence_batch(args: &Value) -> Result<ToolOutput> {
+    let investigation_id = required_str(args, "investigation_id")?;
+    let items = args
+        .get("items")
+        .and_then(|v| v.as_array())
+        .context("items must be an array")?;
+
+    if items.is_empty() {
+        return Ok(make_output("[*] No items provided"));
+    }
+
+    // Cap at 50 items per call to bound output size
+    let items: Vec<&Value> = items.iter().take(50).collect();
+
+    let mut conn = match get_redis_connection().await {
+        Ok(c) => c,
+        Err(e) => return Ok(make_error(&format!("Redis connection failed: {e}"))),
+    };
+
+    let key = blue_key(investigation_id, BLUE_KEY_EVIDENCE);
+    let now = chrono::Utc::now().to_rfc3339();
+
+    // Prepare all items: validate, build JSON, compute dedup keys
+    struct PreparedItem {
+        dedup_key: String,
+        data: String,
+        label: String,
+        evidence_id: String,
+        confidence: f64,
+        pyramid_level: String,
+    }
+
+    let mut prepared = Vec::with_capacity(items.len());
+    let mut validation_errors = Vec::new();
+
+    for (i, item) in items.iter().enumerate() {
+        let evidence_type = match item.get("evidence_type").and_then(|v| v.as_str()) {
+            Some(s) => s,
+            None => {
+                validation_errors.push(format!("item[{i}]: missing evidence_type"));
+                continue;
+            }
+        };
+        let value = match item.get("value").and_then(|v| v.as_str()) {
+            Some(s) => s,
+            None => {
+                validation_errors.push(format!("item[{i}]: missing value"));
+                continue;
+            }
+        };
+        let source = match item.get("source").and_then(|v| v.as_str()) {
+            Some(s) => s,
+            None => {
+                validation_errors.push(format!("item[{i}]: missing source"));
+                continue;
+            }
+        };
+
+        let vr = validation::validate_evidence(evidence_type, value, source);
+        if !vr.valid {
+            validation_errors.push(format!(
+                "item[{i}] {evidence_type}={value}: {}",
+                vr.warnings.join("; ")
+            ));
+            continue;
+        }
+
+        let (query_validated, _) = super::evidence_validator::validate_evidence_value(value);
+        let raw_confidence = item
+            .get("confidence")
+            .and_then(Value::as_f64)
+            .unwrap_or(0.5);
+        let confidence =
+            super::evidence_validator::adjust_confidence(raw_confidence, query_validated);
+
+        let pyramid_level = item
+            .get("pyramid_level")
+            .and_then(|v| v.as_str())
+            .unwrap_or_else(|| validation::assign_pyramid_level(&vr.normalized_type));
+
+        let timestamp = item
+            .get("timestamp")
+            .and_then(|v| v.as_str())
+            .unwrap_or(&now);
+
+        let pyramid_level_int = match pyramid_level {
+            "hash_values" => 1,
+            "ip_addresses" => 2,
+            "domain_names" => 3,
+            "network_host_artifacts" => 4,
+            "tools" => 5,
+            "ttps" => 6,
+            _ => pyramid_level.parse::<i32>().unwrap_or(2),
+        };
+
+        let evidence_id = Uuid::new_v4().to_string();
+
+        let evidence = serde_json::json!({
+            "id": evidence_id,
+            "type": vr.normalized_type,
+            "value": value,
+            "source": source,
+            "timestamp": timestamp,
+            "pyramid_level": pyramid_level_int,
+            "confidence": confidence,
+            "mitre_techniques": [],
+            "metadata": {},
+            "validated": true,
+        });
+
+        let dedup_key = format!("{}:{}:{}", vr.normalized_type, value.to_lowercase(), source);
+        let data = serde_json::to_string(&evidence).unwrap_or_default();
+
+        prepared.push(PreparedItem {
+            dedup_key,
+            data,
+            label: format!("{evidence_type}={value}"),
+            evidence_id,
+            confidence,
+            pyramid_level: pyramid_level.to_string(),
+        });
+    }
+
+    if prepared.is_empty() {
+        let err_summary = validation_errors.join("\n");
+        return Ok(make_error(&format!(
+            "All items failed validation:\n{err_summary}"
+        )));
+    }
+
+    // Execute all HSETNX in a single Redis pipeline round-trip
+    let mut pipe = redis::pipe();
+    for item in &prepared {
+        pipe.cmd("HSETNX")
+            .arg(&key)
+            .arg(&item.dedup_key)
+            .arg(&item.data);
+    }
+
+    let results: Vec<bool> = pipe
+        .query_async(&mut conn)
+        .await
+        .context("Redis pipeline failed")?;
+
+    // Set TTL once if any items were added
+    if results.iter().any(|&added| added) {
+        let _: () = conn.expire(&key, TTL_SECS).await?;
+    }
+
+    // Build output summary
+    let mut added_count = 0;
+    let mut dup_count = 0;
+    let mut output_lines = Vec::new();
+
+    for (item, &added) in prepared.iter().zip(results.iter()) {
+        if added {
+            added_count += 1;
+            output_lines.push(format!(
+                "[+] {} (id={}, confidence={:.1}, pyramid={})",
+                item.label, item.evidence_id, item.confidence, item.pyramid_level
+            ));
+        } else {
+            dup_count += 1;
+        }
+    }
+
+    if dup_count > 0 {
+        output_lines.push(format!("[*] {dup_count} duplicate(s) skipped"));
+    }
+    if !validation_errors.is_empty() {
+        output_lines.push(format!(
+            "[!] {} item(s) failed validation",
+            validation_errors.len()
+        ));
+    }
+
+    let summary = format!(
+        "Batch complete: {added_count} added, {dup_count} duplicates, {} invalid",
+        validation_errors.len()
+    );
+    output_lines.insert(0, summary);
+
+    Ok(make_output(&output_lines.join("\n")))
+}
+
+// ---------------------------------------------------------------------------
 // 2. record_timeline_event
 // ---------------------------------------------------------------------------
 

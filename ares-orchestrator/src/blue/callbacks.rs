@@ -212,7 +212,8 @@ impl BlueCallbackHandler {
 
         let config = AgentLoopConfig {
             model: self.model.clone(),
-            max_steps: 30,
+            max_steps: 50,
+            max_tool_calls_per_name: 25,
             ..AgentLoopConfig::default()
         };
 
