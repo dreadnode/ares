@@ -1,0 +1,34 @@
+Perform credential access against the target environment:
+Domain: {{ domain }}
+Targets: {{ targets_display }}
+DC IP: {{ dc_ip_display }}
+Username: {{ user_display }}
+Credential ({{ cred_type }}): {{ cred_value }}
+{% if hash_type -%}
+Hash Type: {{ hash_type }}
+{% endif -%}
+{% if source -%}
+Credential Source: {{ source }}
+{% endif -%}
+{% if reason -%}
+Reason: {{ reason }}
+{% endif -%}
+Techniques: {{ techniques_display }}
+Task ID: {{ task_id }}
+
+{% if hash_note -%}
+{{ hash_note }}
+
+{% endif -%}
+Use the exact credential value above; do not substitute placeholders. If DC IP is provided, pass -dc-ip to Kerberos/LDAP tools to avoid DNS issues. **PRIORITY ORDER when creds available:**
+1. gpp_password_finder + sysvol_script_search (LOW HANGING FRUIT - run first!)
+2. Kerberoast for service account hashes
+3. secretsdump if admin access exists
+4. LSASS dumping if viable
+Report any hashes or credentials found.
+{% if state_context %}
+
+## Current Operation State
+
+{{ state_context }}
+{% endif -%}

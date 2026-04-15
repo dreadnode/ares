@@ -2,7 +2,10 @@
 
 use std::collections::HashMap;
 
-use crate::prompt::state_context::format_state_context;
+use tera::Context;
+
+use crate::prompt::helpers::insert_state_context;
+use crate::prompt::templates::{render_template_with_context, TASK_CREDACCESS_NO_CRED};
 use crate::prompt::StateSnapshot;
 
 use super::Params;
@@ -74,28 +77,17 @@ pub(super) fn try_generate(
     } else {
         p.targets.join(", ")
     };
-    let mut prompt = format!(
-        "**MANDATORY TECHNIQUE EXECUTION (NO CREDENTIALS)**\n\n\
-         Domain: {domain}\n\
-         DC IP: {dc_ip_display}\n\
-         Targets: {targets_display}\n\
-         Task ID: {task_id}\n\n\
-         **CRITICAL: YOU MUST EXECUTE THESE TECHNIQUES IN ORDER:**\n\
-         **DO NOT run smb_sweep or other slow recon first!**\n\
-         **Complete assigned techniques BEFORE doing anything else.**\n\n\
-         {instructions_text}\n\n\
-         **WORKFLOW:**\n\
-         1. Execute EACH technique above in order\n\
-         2. Report ANY credentials/hashes found immediately\n\
-         3. Only after completing ALL assigned techniques, mark task complete\n\n\
-         **DO NOT:**\n\
-         - Run smb_sweep (wastes 5+ minutes, not your job)\n\
-         - Do additional enumeration before completing assigned techniques\n",
-        dc_ip_display = if dc_ip.is_empty() { "N/A" } else { dc_ip },
-        instructions_text = instructions.join("\n"),
+
+    let mut ctx = Context::new();
+    ctx.insert("task_id", task_id);
+    ctx.insert("domain", domain);
+    ctx.insert(
+        "dc_ip_display",
+        if dc_ip.is_empty() { "N/A" } else { dc_ip },
     );
-    if let Some(s) = state {
-        prompt.push_str(&format_state_context(s, "credential_access", Some(dc_ip)));
-    }
-    Some(Ok(prompt))
+    ctx.insert("targets_display", &targets_display);
+    ctx.insert("instructions_text", &instructions.join("\n"));
+    insert_state_context(&mut ctx, state, "credential_access", Some(dc_ip));
+
+    Some(render_template_with_context(TASK_CREDACCESS_NO_CRED, &ctx))
 }

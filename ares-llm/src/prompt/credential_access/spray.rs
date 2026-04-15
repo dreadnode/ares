@@ -2,7 +2,10 @@
 
 use std::fmt::Write;
 
-use crate::prompt::state_context::format_state_context;
+use tera::Context;
+
+use crate::prompt::helpers::insert_state_context;
+use crate::prompt::templates::{render_template_with_context, TASK_CREDACCESS_SPRAY};
 use crate::prompt::StateSnapshot;
 
 use super::Params;
@@ -21,7 +24,6 @@ pub(super) fn try_generate(
     }
 
     let dc_ip = p.dc_ip;
-    let domain = p.domain;
     let username = p.username;
     let password = p.password;
     let mut cred_line = String::new();
@@ -30,28 +32,25 @@ pub(super) fn try_generate(
             cred_line,
             "**Use these credentials for user enumeration:**\n\
              Username: {username}\n\
-             Password: {password}\n\n"
+             Password: {password}\n"
         )
         .unwrap();
     }
-    let mut prompt = format!(
-        "Perform USERNAME_AS_PASSWORD spray to find weak credentials:\n\
-         Domain: {domain}\n\
-         DC IP: {dc_ip_display}\n\
-         Task ID: {task_id}\n\n\
-         {cred_line}\
-         **EXECUTE username_as_password:**\n\
-         1. First save users: save_users_to_file(target='{dc_ip}', username='{username}', \
-            password='{password}', domain='{domain}')\n\
-         2. Then spray: username_as_password(target='{dc_ip}', domain='{domain}', \
-            users_file='/tmp/users.txt')\n\n\
-         This tests if users have username=password (e.g., testuser:testuser).\n\
-         Zero lockout risk, one attempt per user.\n\
-         Report any credentials found immediately.",
-        dc_ip_display = if dc_ip.is_empty() { "N/A" } else { dc_ip },
+
+    let mut ctx = Context::new();
+    ctx.insert("task_id", task_id);
+    ctx.insert("domain", p.domain);
+    ctx.insert("dc_ip", dc_ip);
+    ctx.insert(
+        "dc_ip_display",
+        if dc_ip.is_empty() { "N/A" } else { dc_ip },
     );
-    if let Some(s) = state {
-        prompt.push_str(&format_state_context(s, "credential_access", Some(dc_ip)));
+    ctx.insert("username", username);
+    ctx.insert("password", password);
+    if !cred_line.is_empty() {
+        ctx.insert("cred_line", &cred_line);
     }
-    Some(Ok(prompt))
+    insert_state_context(&mut ctx, state, "credential_access", Some(dc_ip));
+
+    Some(render_template_with_context(TASK_CREDACCESS_SPRAY, &ctx))
 }

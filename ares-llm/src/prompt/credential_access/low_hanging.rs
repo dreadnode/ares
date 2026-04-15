@@ -1,6 +1,12 @@
 //! Low-hanging fruit and share spider prompt branches.
 
-use crate::prompt::state_context::format_state_context;
+use tera::Context;
+
+use crate::prompt::helpers::insert_state_context;
+use crate::prompt::templates::{
+    render_template_with_context, TASK_CREDACCESS_LOW_HANGING_NO_CREDS,
+    TASK_CREDACCESS_LOW_HANGING_WITH_CREDS, TASK_CREDACCESS_SHARE_SPIDER,
+};
 use crate::prompt::StateSnapshot;
 
 use super::Params;
@@ -12,30 +18,26 @@ pub(super) fn generate_with_creds(
     state: Option<&StateSnapshot>,
 ) -> anyhow::Result<String> {
     let dc_ip = p.dc_ip;
-    let domain = p.domain;
-    let username = p.username;
-    let password = p.password;
-    let mut prompt = format!(
-        "Perform LOW HANGING FRUIT credential harvesting:\n\
-         Domain: {domain}\n\
-         DC IP: {dc_ip_display}\n\
-         Username: {user_display}\n\
-         Password: {password}\n\
-         Task ID: {task_id}\n\n\
-         **EXECUTE IN THIS ORDER:**\n\
-         1. gpp_password_finder(target=DC_IP, username=USER, password=PASS, domain=DOMAIN)\n\
-         2. sysvol_script_search(target=DC_IP, username=USER, password=PASS, domain=DOMAIN)\n\
-         3. ldap_search_descriptions(...) - check for passwords in LDAP descriptions\n\
-         4. username_as_password(...) - check for user=password accounts\n\n\
-         These are HIGH SUCCESS RATE techniques that find hardcoded credentials.\n\
-         Report any credentials found immediately.",
-        dc_ip_display = if dc_ip.is_empty() { "N/A" } else { dc_ip },
-        user_display = if username.is_empty() { "N/A" } else { username },
+
+    let mut ctx = Context::new();
+    ctx.insert("task_id", task_id);
+    ctx.insert("domain", p.domain);
+    ctx.insert(
+        "dc_ip_display",
+        if dc_ip.is_empty() { "N/A" } else { dc_ip },
     );
-    if let Some(s) = state {
-        prompt.push_str(&format_state_context(s, "credential_access", Some(dc_ip)));
-    }
-    Ok(prompt)
+    ctx.insert(
+        "user_display",
+        if p.username.is_empty() {
+            "N/A"
+        } else {
+            p.username
+        },
+    );
+    ctx.insert("password", p.password);
+    insert_state_context(&mut ctx, state, "credential_access", Some(dc_ip));
+
+    render_template_with_context(TASK_CREDACCESS_LOW_HANGING_WITH_CREDS, &ctx)
 }
 
 /// Generate low-hanging fruit prompt WITHOUT credentials (Branch 6).
@@ -45,32 +47,17 @@ pub(super) fn generate_without_creds(
     state: Option<&StateSnapshot>,
 ) -> anyhow::Result<String> {
     let dc_ip = p.dc_ip;
-    let domain = p.domain;
-    let mut prompt = format!(
-        "Perform LOW HANGING FRUIT credential discovery (NO CREDENTIALS):\n\
-         Domain: {domain}\n\
-         DC IP: {dc_ip_display}\n\
-         Task ID: {task_id}\n\n\
-         **CRITICAL: These techniques work WITHOUT credentials to discover passwords:**\n\
-         1. username_as_password(target=DC_IP, domain=DOMAIN) - HIGH SUCCESS RATE\n\
-            Tests if users have username=password (e.g., testuser:testuser)\n\
-            Zero lockout risk, one attempt per user\n\n\
-         2. password_spray - YOU MUST CALL THIS ONCE FOR EACH PASSWORD:\n\
-            password_spray(target=DC_IP, domain=DOMAIN, password='Password1')\n\
-            password_spray(target=DC_IP, domain=DOMAIN, password='Welcome1')\n\
-            password_spray(target=DC_IP, domain=DOMAIN, password='Summer2024')\n\
-            password_spray(target=DC_IP, domain=DOMAIN, password='Company123')\n\
-            password_spray(target=DC_IP, domain=DOMAIN, password='Passw0rd!')\n\
-            **Call spray for EACH password above - common weak passwords**\n\n\
-         3. password_policy(target=DC_IP, domain=DOMAIN) - Check lockout before spraying\n\n\
-         These are the FIRST techniques to run when you have no credentials.\n\
-         Report any credentials found immediately.",
-        dc_ip_display = if dc_ip.is_empty() { "N/A" } else { dc_ip },
+
+    let mut ctx = Context::new();
+    ctx.insert("task_id", task_id);
+    ctx.insert("domain", p.domain);
+    ctx.insert(
+        "dc_ip_display",
+        if dc_ip.is_empty() { "N/A" } else { dc_ip },
     );
-    if let Some(s) = state {
-        prompt.push_str(&format_state_context(s, "credential_access", Some(dc_ip)));
-    }
-    Ok(prompt)
+    insert_state_context(&mut ctx, state, "credential_access", Some(dc_ip));
+
+    render_template_with_context(TASK_CREDACCESS_LOW_HANGING_NO_CREDS, &ctx)
 }
 
 /// Try to generate a share spider prompt (Branch 4).
@@ -86,9 +73,6 @@ pub(super) fn try_share_spider(
     }
 
     let target_ip = p.targets.first().copied().unwrap_or("");
-    let domain = p.domain;
-    let username = p.username;
-    let password = p.password;
     let reason = p.reason;
     let share_name = if reason.to_lowercase().contains("auto_share_spider_") {
         reason
@@ -111,36 +95,18 @@ pub(super) fn try_share_spider(
         &share_name
     };
 
-    let mut prompt = format!(
-        "**SHARE SPIDER TASK - Search SMB shares for credentials**\n\n\
-         Target: {target_ip}\n\
-         Domain: {domain}\n\
-         Username: {username}\n\
-         Password: {password}\n\
-         Share hint: {share_hint}\n\
-         Task ID: {task_id}\n\n\
-         **INSTRUCTIONS:**\n\
-         1. Use smbclient_spider(target='{target_ip}', share='{share_param}', \
-            username='{username}', password='{password}', domain='{domain}')\n\
-         2. Look for interesting files containing credentials:\n\
-            - *.txt files (passwords, connection strings)\n\
-            - *.xml, *.ini, *.config files (configuration with creds)\n\
-            - *.ps1, *.bat, *.cmd files (scripts with hardcoded passwords)\n\
-         3. If files are found, use smbclient_spider to retrieve them\n\
-         4. Parse downloaded files for credentials\n\n\
-         **COMMON FINDINGS:**\n\
-         - Service account passwords in config files\n\
-         - Database connection strings with credentials\n\
-         - Admin passwords in deployment scripts\n\
-         - User credentials in text files (e.g., secret.txt)\n\n\
-         Report any credentials found immediately!"
-    );
-    if let Some(s) = state {
-        prompt.push_str(&format_state_context(
-            s,
-            "credential_access",
-            Some(target_ip),
-        ));
-    }
-    Some(Ok(prompt))
+    let mut ctx = Context::new();
+    ctx.insert("task_id", task_id);
+    ctx.insert("target_ip", target_ip);
+    ctx.insert("domain", p.domain);
+    ctx.insert("username", p.username);
+    ctx.insert("password", p.password);
+    ctx.insert("share_hint", share_hint);
+    ctx.insert("share_param", share_param);
+    insert_state_context(&mut ctx, state, "credential_access", Some(target_ip));
+
+    Some(render_template_with_context(
+        TASK_CREDACCESS_SHARE_SPIDER,
+        &ctx,
+    ))
 }

@@ -1,8 +1,9 @@
 //! Kerberos ticket-based secretsdump prompt branch.
 
-use std::fmt::Write;
+use tera::Context;
 
-use crate::prompt::state_context::format_state_context;
+use crate::prompt::helpers::insert_state_context;
+use crate::prompt::templates::{render_template_with_context, TASK_CREDACCESS_KERBEROS};
 use crate::prompt::StateSnapshot;
 
 use super::Params;
@@ -27,44 +28,21 @@ pub(super) fn try_generate(
     let ticket = p.ticket_path.unwrap_or("");
     let dc_ip = p.dc_ip;
     let domain = p.domain;
-    let mut prompt = format!(
-        "**KERBEROS TICKET-BASED SECRETSDUMP**\n\n\
-         Target: {target}\n\
-         Domain: {domain}\n\
-         Username: {user}\n\
-         Ticket Path: {ticket}\n\
-         DC IP: {dc_ip_display}\n\
-         Task ID: {task_id}\n\n\
-         **CRITICAL: You have a Kerberos ticket from S4U attack!**\n\
-         This ticket allows you to impersonate Administrator to the target.\n\n\
-         **EXECUTE secretsdump with Kerberos ticket:**\n\
-         secretsdump(\n\
-             target='{target}',\n\
-             username='{user}',\n\
-             no_pass=True,\n\
-             ticket_path='{ticket}'",
-        dc_ip_display = if dc_ip.is_empty() { "N/A" } else { dc_ip },
+
+    let mut ctx = Context::new();
+    ctx.insert("task_id", task_id);
+    ctx.insert("target", target);
+    ctx.insert("domain", domain);
+    ctx.insert("user", user);
+    ctx.insert("ticket", ticket);
+    ctx.insert(
+        "dc_ip_display",
+        if dc_ip.is_empty() { "N/A" } else { dc_ip },
     );
     if !dc_ip.is_empty() {
-        write!(prompt, ",\n    dc_ip='{dc_ip}'").unwrap();
+        ctx.insert("dc_ip", dc_ip);
     }
-    prompt.push_str(
-        "\n)\n\n\
-         **IMPORTANT:**\n\
-         - The ticket_path sets KRB5CCNAME for Kerberos auth\n\
-         - no_pass=True tells secretsdump to use -k -no-pass\n\
-         - This will dump SAM, LSA secrets, and domain hashes if on a DC\n\n\
-         If secretsdump succeeds, look for:\n\
-         - krbtgt hash -> GOLDEN TICKET capability\n\
-         - Administrator hash -> DOMAIN ADMIN ACHIEVED\n\n\
-         Report any hashes found in JSON format:\n\
-         ```json\n\
-         {\"hash\": {\"username\": \"Administrator\", \"hash_value\": \"...\", \
-          \"hash_type\": \"NTLM\", \"domain\": \"...\"}}\n\
-         ```",
-    );
-    if let Some(s) = state {
-        prompt.push_str(&format_state_context(s, "credential_access", Some(target)));
-    }
-    Some(Ok(prompt))
+    insert_state_context(&mut ctx, state, "credential_access", Some(target));
+
+    Some(render_template_with_context(TASK_CREDACCESS_KERBEROS, &ctx))
 }

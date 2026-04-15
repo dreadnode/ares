@@ -1,12 +1,14 @@
 //! Generic fallback and technique-with-credentials prompt branches.
 
 use std::collections::HashMap;
-use std::fmt::Write;
 
 use serde_json::Value;
+use tera::Context;
 
-use crate::prompt::helpers::{cred_display_str, cred_param_str};
-use crate::prompt::state_context::format_state_context;
+use crate::prompt::helpers::{cred_display_str, cred_param_str, insert_state_context};
+use crate::prompt::templates::{
+    render_template_with_context, TASK_CREDACCESS_FALLBACK, TASK_CREDACCESS_WITH_CREDS,
+};
 use crate::prompt::StateSnapshot;
 
 use super::Params;
@@ -109,34 +111,27 @@ pub(super) fn try_generate_with_creds(
     } else {
         p.targets.join(", ")
     };
-    let mut prompt = format!(
-        "**MANDATORY TECHNIQUE EXECUTION**\n\n\
-         Domain: {domain}\n\
-         DC IP: {dc_ip_display}\n\
-         Targets: {targets_display}\n\
-         Username: {user_display}\n\
-         Credential: {cred_display}\n\
-         Task ID: {task_id}\n\n\
-         **CRITICAL: YOU MUST EXECUTE THESE TECHNIQUES IN ORDER:**\n\
-         **DO NOT run smb_sweep, kerberos_user_enum, or other recon first!**\n\
-         **These techniques are FAST (~2-5 seconds each) and HIGH VALUE.**\n\n\
-         {instructions_text}\n\n\
-         **WORKFLOW:**\n\
-         1. Execute EACH technique above in order - they are FAST\n\
-         2. Report ANY credentials found immediately\n\
-         3. Only after completing ALL assigned techniques, mark task complete\n\n\
-         **DO NOT:**\n\
-         - Run smb_sweep (wastes 5+ minutes)\n\
-         - Run kerberos_user_enum_noauth (not your job)\n\
-         - Do additional recon before completing assigned techniques\n",
-        dc_ip_display = if dc_ip.is_empty() { "N/A" } else { dc_ip },
-        user_display = if username.is_empty() { "N/A" } else { username },
-        instructions_text = instructions.join("\n"),
+
+    let mut ctx = Context::new();
+    ctx.insert("task_id", task_id);
+    ctx.insert("domain", domain);
+    ctx.insert(
+        "dc_ip_display",
+        if dc_ip.is_empty() { "N/A" } else { dc_ip },
     );
-    if let Some(s) = state {
-        prompt.push_str(&format_state_context(s, "credential_access", Some(dc_ip)));
-    }
-    Some(Ok(prompt))
+    ctx.insert("targets_display", &targets_display);
+    ctx.insert(
+        "user_display",
+        if username.is_empty() { "N/A" } else { username },
+    );
+    ctx.insert("cred_display", &cred_display);
+    ctx.insert("instructions_text", &instructions.join("\n"));
+    insert_state_context(&mut ctx, state, "credential_access", Some(dc_ip));
+
+    Some(render_template_with_context(
+        TASK_CREDACCESS_WITH_CREDS,
+        &ctx,
+    ))
 }
 
 /// Generate the generic fallback prompt.
@@ -147,10 +142,6 @@ pub(super) fn generate_fallback(
     state: Option<&StateSnapshot>,
 ) -> anyhow::Result<String> {
     let dc_ip = p.dc_ip;
-    let domain = p.domain;
-    let username = p.username;
-    let password = p.password;
-    let reason = p.reason;
 
     let cred_type = if p.has_password {
         "password"
@@ -165,12 +156,12 @@ pub(super) fn generate_fallback(
     };
     let hash_note = if p.has_hash && !p.hash_is_pth {
         "NOTE: Provided hash is not NTLM pass-the-hash compatible; \
-         do not attempt secretsdump/lsassy with it.\n"
+         do not attempt secretsdump/lsassy with it."
     } else {
         ""
     };
     let cred_value = if p.has_password {
-        password
+        p.password
     } else {
         p.hash_value.unwrap_or("N/A")
     };
@@ -193,42 +184,38 @@ pub(super) fn generate_fallback(
         p.targets.join(", ")
     };
 
-    let mut prompt = format!(
-        "Perform credential access against the target environment:\n\
-         Domain: {domain}\n\
-         Targets: {targets_display}\n\
-         DC IP: {dc_ip_display}\n\
-         Username: {user_display}\n\
-         Credential ({cred_type}): {cred_value}\n",
-        dc_ip_display = if dc_ip.is_empty() { "N/A" } else { dc_ip },
-        user_display = if username.is_empty() { "N/A" } else { username },
+    let mut ctx = Context::new();
+    ctx.insert("task_id", task_id);
+    ctx.insert("domain", p.domain);
+    ctx.insert("targets_display", &targets_display);
+    ctx.insert(
+        "dc_ip_display",
+        if dc_ip.is_empty() { "N/A" } else { dc_ip },
     );
+    ctx.insert(
+        "user_display",
+        if p.username.is_empty() {
+            "N/A"
+        } else {
+            p.username
+        },
+    );
+    ctx.insert("cred_type", cred_type);
+    ctx.insert("cred_value", cred_value);
+    ctx.insert("techniques_display", &techniques_display);
     if !hash_type.is_empty() {
-        let _ = writeln!(prompt, "Hash Type: {hash_type}");
+        ctx.insert("hash_type", hash_type);
     }
     if !source.is_empty() {
-        let _ = writeln!(prompt, "Credential Source: {source}");
+        ctx.insert("source", source);
     }
-    if !reason.is_empty() {
-        let _ = writeln!(prompt, "Reason: {reason}");
+    if !p.reason.is_empty() {
+        ctx.insert("reason", p.reason);
     }
-    let _ = writeln!(prompt, "Techniques: {techniques_display}");
-    let _ = writeln!(prompt, "Task ID: {task_id}\n");
     if !hash_note.is_empty() {
-        let _ = writeln!(prompt, "{hash_note}");
+        ctx.insert("hash_note", hash_note);
     }
-    prompt.push_str(
-        "Use the exact credential value above; do not substitute placeholders. \
-         If DC IP is provided, pass -dc-ip to Kerberos/LDAP tools to avoid DNS issues. \
-         **PRIORITY ORDER when creds available:**\n\
-         1. gpp_password_finder + sysvol_script_search (LOW HANGING FRUIT - run first!)\n\
-         2. Kerberoast for service account hashes\n\
-         3. secretsdump if admin access exists\n\
-         4. LSASS dumping if viable\n\
-         Report any hashes or credentials found.",
-    );
-    if let Some(s) = state {
-        prompt.push_str(&format_state_context(s, "credential_access", Some(dc_ip)));
-    }
-    Ok(prompt)
+    insert_state_context(&mut ctx, state, "credential_access", Some(dc_ip));
+
+    render_template_with_context(TASK_CREDACCESS_FALLBACK, &ctx)
 }

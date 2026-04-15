@@ -51,16 +51,57 @@ const SHARE_PILFER_TASK_TEMPLATE: &str =
 
 const TASK_RECON_TEMPLATE: &str = include_str!("../../templates/redteam/tasks/recon.md.tera");
 const TASK_CRACK_TEMPLATE: &str = include_str!("../../templates/redteam/tasks/crack.md.tera");
-const TASK_CREDENTIAL_ACCESS_TEMPLATE: &str =
-    include_str!("../../templates/redteam/tasks/credential_access.md.tera");
 const TASK_LATERAL_TEMPLATE: &str = include_str!("../../templates/redteam/tasks/lateral.md.tera");
-const TASK_EXPLOIT_TEMPLATE: &str = include_str!("../../templates/redteam/tasks/exploit.md.tera");
 const TASK_COERCION_TEMPLATE: &str = include_str!("../../templates/redteam/tasks/coercion.md.tera");
 const TASK_PRIVESC_ENUMERATION_TEMPLATE: &str =
     include_str!("../../templates/redteam/tasks/privesc_enumeration.md.tera");
 const TASK_ACL_ANALYSIS_TEMPLATE: &str =
     include_str!("../../templates/redteam/tasks/acl_analysis.md.tera");
 const TASK_COMMAND_TEMPLATE: &str = include_str!("../../templates/redteam/tasks/command.md.tera");
+
+// ---------------------------------------------------------------------------
+// Embedded templates — exploit task templates
+// ---------------------------------------------------------------------------
+
+const TASK_EXPLOIT_ADCS_ENUMERATE_TEMPLATE: &str =
+    include_str!("../../templates/redteam/tasks/exploit_adcs_enumerate.md.tera");
+const TASK_EXPLOIT_ADCS_ESC_TEMPLATE: &str =
+    include_str!("../../templates/redteam/tasks/exploit_adcs_esc.md.tera");
+const TASK_EXPLOIT_DELEGATION_TEMPLATE: &str =
+    include_str!("../../templates/redteam/tasks/exploit_delegation.md.tera");
+const TASK_EXPLOIT_GENERIC_TEMPLATE: &str =
+    include_str!("../../templates/redteam/tasks/exploit_generic.md.tera");
+const TASK_EXPLOIT_MSSQL_LATERAL_TEMPLATE: &str =
+    include_str!("../../templates/redteam/tasks/exploit_mssql_lateral.md.tera");
+const TASK_EXPLOIT_MSSQL_TEMPLATE: &str =
+    include_str!("../../templates/redteam/tasks/exploit_mssql.md.tera");
+const TASK_EXPLOIT_TRUST_TEMPLATE: &str =
+    include_str!("../../templates/redteam/tasks/exploit_trust.md.tera");
+const TASK_EXPLOIT_UNCONSTRAINED_TEMPLATE: &str =
+    include_str!("../../templates/redteam/tasks/exploit_unconstrained.md.tera");
+const TASK_EXPLOIT_GOLDEN_TICKET_TEMPLATE: &str =
+    include_str!("../../templates/redteam/tasks/exploit_golden_ticket.md.tera");
+
+// ---------------------------------------------------------------------------
+// Embedded templates — credential access task templates
+// ---------------------------------------------------------------------------
+
+const TASK_CREDACCESS_KERBEROS_TEMPLATE: &str =
+    include_str!("../../templates/redteam/tasks/credaccess_kerberos.md.tera");
+const TASK_CREDACCESS_LOW_HANGING_WITH_CREDS_TEMPLATE: &str =
+    include_str!("../../templates/redteam/tasks/credaccess_low_hanging_with_creds.md.tera");
+const TASK_CREDACCESS_LOW_HANGING_NO_CREDS_TEMPLATE: &str =
+    include_str!("../../templates/redteam/tasks/credaccess_low_hanging_no_creds.md.tera");
+const TASK_CREDACCESS_SHARE_SPIDER_TEMPLATE: &str =
+    include_str!("../../templates/redteam/tasks/credaccess_share_spider.md.tera");
+const TASK_CREDACCESS_NO_CRED_TEMPLATE: &str =
+    include_str!("../../templates/redteam/tasks/credaccess_no_cred.md.tera");
+const TASK_CREDACCESS_SPRAY_TEMPLATE: &str =
+    include_str!("../../templates/redteam/tasks/credaccess_spray.md.tera");
+const TASK_CREDACCESS_WITH_CREDS_TEMPLATE: &str =
+    include_str!("../../templates/redteam/tasks/credaccess_with_creds.md.tera");
+const TASK_CREDACCESS_FALLBACK_TEMPLATE: &str =
+    include_str!("../../templates/redteam/tasks/credaccess_fallback.md.tera");
 
 // ---------------------------------------------------------------------------
 // Embedded templates — blue team agent instruction templates
@@ -131,13 +172,34 @@ pub const TEMPLATE_SHARE_PILFER_TASK: &str = "redteam/agents/share_pilfer_task";
 // Per-task-type prompt templates (ported from prompts.py)
 pub const TASK_RECON: &str = "redteam/tasks/recon";
 pub const TASK_CRACK: &str = "redteam/tasks/crack";
-pub const TASK_CREDENTIAL_ACCESS: &str = "redteam/tasks/credential_access";
 pub const TASK_LATERAL: &str = "redteam/tasks/lateral";
-pub const TASK_EXPLOIT: &str = "redteam/tasks/exploit";
 pub const TASK_COERCION: &str = "redteam/tasks/coercion";
 pub const TASK_PRIVESC_ENUMERATION: &str = "redteam/tasks/privesc_enumeration";
 pub const TASK_ACL_ANALYSIS: &str = "redteam/tasks/acl_analysis";
 pub const TASK_COMMAND: &str = "redteam/tasks/command";
+
+// Exploit task templates
+pub const TASK_EXPLOIT_ADCS_ENUMERATE: &str = "redteam/tasks/exploit_adcs_enumerate";
+pub const TASK_EXPLOIT_ADCS_ESC: &str = "redteam/tasks/exploit_adcs_esc";
+pub const TASK_EXPLOIT_DELEGATION: &str = "redteam/tasks/exploit_delegation";
+pub const TASK_EXPLOIT_GENERIC: &str = "redteam/tasks/exploit_generic";
+pub const TASK_EXPLOIT_MSSQL_LATERAL: &str = "redteam/tasks/exploit_mssql_lateral";
+pub const TASK_EXPLOIT_MSSQL: &str = "redteam/tasks/exploit_mssql";
+pub const TASK_EXPLOIT_TRUST: &str = "redteam/tasks/exploit_trust";
+pub const TASK_EXPLOIT_UNCONSTRAINED: &str = "redteam/tasks/exploit_unconstrained";
+pub const TASK_EXPLOIT_GOLDEN_TICKET: &str = "redteam/tasks/exploit_golden_ticket";
+
+// Credential access task templates
+pub const TASK_CREDACCESS_KERBEROS: &str = "redteam/tasks/credaccess_kerberos";
+pub const TASK_CREDACCESS_LOW_HANGING_WITH_CREDS: &str =
+    "redteam/tasks/credaccess_low_hanging_with_creds";
+pub const TASK_CREDACCESS_LOW_HANGING_NO_CREDS: &str =
+    "redteam/tasks/credaccess_low_hanging_no_creds";
+pub const TASK_CREDACCESS_SHARE_SPIDER: &str = "redteam/tasks/credaccess_share_spider";
+pub const TASK_CREDACCESS_NO_CRED: &str = "redteam/tasks/credaccess_no_cred";
+pub const TASK_CREDACCESS_SPRAY: &str = "redteam/tasks/credaccess_spray";
+pub const TASK_CREDACCESS_WITH_CREDS: &str = "redteam/tasks/credaccess_with_creds";
+pub const TASK_CREDACCESS_FALLBACK: &str = "redteam/tasks/credaccess_fallback";
 
 // Blue team agent instruction templates
 #[cfg(feature = "blue")]
@@ -201,13 +263,54 @@ static TEMPLATES: LazyLock<Tera> = LazyLock::new(|| {
         // Per-task-type prompt templates
         (TASK_RECON, TASK_RECON_TEMPLATE),
         (TASK_CRACK, TASK_CRACK_TEMPLATE),
-        (TASK_CREDENTIAL_ACCESS, TASK_CREDENTIAL_ACCESS_TEMPLATE),
         (TASK_LATERAL, TASK_LATERAL_TEMPLATE),
-        (TASK_EXPLOIT, TASK_EXPLOIT_TEMPLATE),
         (TASK_COERCION, TASK_COERCION_TEMPLATE),
         (TASK_PRIVESC_ENUMERATION, TASK_PRIVESC_ENUMERATION_TEMPLATE),
         (TASK_ACL_ANALYSIS, TASK_ACL_ANALYSIS_TEMPLATE),
         (TASK_COMMAND, TASK_COMMAND_TEMPLATE),
+        // Exploit task templates
+        (
+            TASK_EXPLOIT_ADCS_ENUMERATE,
+            TASK_EXPLOIT_ADCS_ENUMERATE_TEMPLATE,
+        ),
+        (TASK_EXPLOIT_ADCS_ESC, TASK_EXPLOIT_ADCS_ESC_TEMPLATE),
+        (TASK_EXPLOIT_DELEGATION, TASK_EXPLOIT_DELEGATION_TEMPLATE),
+        (TASK_EXPLOIT_GENERIC, TASK_EXPLOIT_GENERIC_TEMPLATE),
+        (
+            TASK_EXPLOIT_MSSQL_LATERAL,
+            TASK_EXPLOIT_MSSQL_LATERAL_TEMPLATE,
+        ),
+        (TASK_EXPLOIT_MSSQL, TASK_EXPLOIT_MSSQL_TEMPLATE),
+        (TASK_EXPLOIT_TRUST, TASK_EXPLOIT_TRUST_TEMPLATE),
+        (
+            TASK_EXPLOIT_UNCONSTRAINED,
+            TASK_EXPLOIT_UNCONSTRAINED_TEMPLATE,
+        ),
+        (
+            TASK_EXPLOIT_GOLDEN_TICKET,
+            TASK_EXPLOIT_GOLDEN_TICKET_TEMPLATE,
+        ),
+        // Credential access task templates
+        (TASK_CREDACCESS_KERBEROS, TASK_CREDACCESS_KERBEROS_TEMPLATE),
+        (
+            TASK_CREDACCESS_LOW_HANGING_WITH_CREDS,
+            TASK_CREDACCESS_LOW_HANGING_WITH_CREDS_TEMPLATE,
+        ),
+        (
+            TASK_CREDACCESS_LOW_HANGING_NO_CREDS,
+            TASK_CREDACCESS_LOW_HANGING_NO_CREDS_TEMPLATE,
+        ),
+        (
+            TASK_CREDACCESS_SHARE_SPIDER,
+            TASK_CREDACCESS_SHARE_SPIDER_TEMPLATE,
+        ),
+        (TASK_CREDACCESS_NO_CRED, TASK_CREDACCESS_NO_CRED_TEMPLATE),
+        (TASK_CREDACCESS_SPRAY, TASK_CREDACCESS_SPRAY_TEMPLATE),
+        (
+            TASK_CREDACCESS_WITH_CREDS,
+            TASK_CREDACCESS_WITH_CREDS_TEMPLATE,
+        ),
+        (TASK_CREDACCESS_FALLBACK, TASK_CREDACCESS_FALLBACK_TEMPLATE),
     ];
 
     for (name, content) in templates {

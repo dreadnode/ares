@@ -1,0 +1,21 @@
+Perform USERNAME_AS_PASSWORD spray to find weak credentials:
+Domain: {{ domain }}
+DC IP: {{ dc_ip_display }}
+Task ID: {{ task_id }}
+
+{% if cred_line -%}
+{{ cred_line }}
+{% endif -%}
+**EXECUTE username_as_password:**
+1. First save users: save_users_to_file(target='{{ dc_ip }}', username='{{ username }}', password='{{ password }}', domain='{{ domain }}')
+2. Then spray: username_as_password(target='{{ dc_ip }}', domain='{{ domain }}', users_file='/tmp/users.txt')
+
+This tests if users have username=password (e.g., testuser:testuser).
+Zero lockout risk, one attempt per user.
+Report any credentials found immediately.
+{% if state_context %}
+
+## Current Operation State
+
+{{ state_context }}
+{% endif -%}

@@ -1,0 +1,31 @@
+**SHARE SPIDER TASK - Search SMB shares for credentials**
+
+Target: {{ target_ip }}
+Domain: {{ domain }}
+Username: {{ username }}
+Password: {{ password }}
+Share hint: {{ share_hint }}
+Task ID: {{ task_id }}
+
+**INSTRUCTIONS:**
+1. Use smbclient_spider(target='{{ target_ip }}', share='{{ share_param }}', username='{{ username }}', password='{{ password }}', domain='{{ domain }}')
+2. Look for interesting files containing credentials:
+   - *.txt files (passwords, connection strings)
+   - *.xml, *.ini, *.config files (configuration with creds)
+   - *.ps1, *.bat, *.cmd files (scripts with hardcoded passwords)
+3. If files are found, use smbclient_spider to retrieve them
+4. Parse downloaded files for credentials
+
+**COMMON FINDINGS:**
+- Service account passwords in config files
+- Database connection strings with credentials
+- Admin passwords in deployment scripts
+- User credentials in text files (e.g., secret.txt)
+
+Report any credentials found immediately!
+{% if state_context %}
+
+## Current Operation State
+
+{{ state_context }}
+{% endif -%}

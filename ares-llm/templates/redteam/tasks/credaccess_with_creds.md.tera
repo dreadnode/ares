@@ -1,0 +1,30 @@
+**MANDATORY TECHNIQUE EXECUTION**
+
+Domain: {{ domain }}
+DC IP: {{ dc_ip_display }}
+Targets: {{ targets_display }}
+Username: {{ user_display }}
+Credential: {{ cred_display }}
+Task ID: {{ task_id }}
+
+**CRITICAL: YOU MUST EXECUTE THESE TECHNIQUES IN ORDER:**
+**DO NOT run smb_sweep, kerberos_user_enum, or other recon first!**
+**These techniques are FAST (~2-5 seconds each) and HIGH VALUE.**
+
+{{ instructions_text }}
+
+**WORKFLOW:**
+1. Execute EACH technique above in order - they are FAST
+2. Report ANY credentials found immediately
+3. Only after completing ALL assigned techniques, mark task complete
+
+**DO NOT:**
+- Run smb_sweep (wastes 5+ minutes)
+- Run kerberos_user_enum_noauth (not your job)
+- Do additional recon before completing assigned techniques
+{% if state_context %}
+
+## Current Operation State
+
+{{ state_context }}
+{% endif -%}
