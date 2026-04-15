@@ -11,13 +11,57 @@
 use std::sync::Arc;
 
 use anyhow::Result;
-use tracing::info;
+use tracing::{debug, info};
 
 use ares_llm::agent_loop::CallbackResult;
 use ares_llm::tool_registry::blue::{self, BlueAgentRole};
 use ares_llm::{
     run_agent_loop, AgentLoopConfig, CallbackHandler, LlmProvider, ToolCall, ToolDispatcher,
+    ToolExecResult,
 };
+
+// ---------------------------------------------------------------------------
+// Blue-aware tool dispatcher wrapper
+// ---------------------------------------------------------------------------
+
+/// Wraps an existing (red-team) dispatcher and intercepts blue tool names,
+/// routing them to `ares_tools::blue::dispatch_blue()` for local execution.
+/// Non-blue tools fall through to the inner dispatcher.
+struct BlueToolDispatcher {
+    inner: Arc<dyn ToolDispatcher>,
+}
+
+#[async_trait::async_trait]
+impl ToolDispatcher for BlueToolDispatcher {
+    async fn dispatch_tool(
+        &self,
+        role: &str,
+        task_id: &str,
+        call: &ToolCall,
+    ) -> Result<ToolExecResult> {
+        if ares_tools::blue::is_blue_tool(&call.name) {
+            debug!(tool = %call.name, "Executing blue tool locally");
+            match ares_tools::blue::dispatch_blue(&call.name, &call.arguments).await {
+                Ok(output) => Ok(ToolExecResult {
+                    output: output.combined(),
+                    error: if output.success {
+                        None
+                    } else {
+                        Some(format!("tool exited with code {:?}", output.exit_code))
+                    },
+                    discoveries: None,
+                }),
+                Err(e) => Ok(ToolExecResult {
+                    output: String::new(),
+                    error: Some(e.to_string()),
+                    discoveries: None,
+                }),
+            }
+        } else {
+            self.inner.dispatch_tool(role, task_id, call).await
+        }
+    }
+}
 
 /// All tool names this handler recognizes as callbacks.
 const BLUE_HANDLED_TOOLS: &[&str] = &[
@@ -91,9 +135,16 @@ impl BlueCallbackHandler {
             ..AgentLoopConfig::default()
         };
 
+        // Wrap the dispatcher so blue tools (add_evidence, add_technique, etc.)
+        // are executed locally via dispatch_blue() instead of going through
+        // the red-team dispatcher which doesn't know about them.
+        let blue_dispatcher: Arc<dyn ToolDispatcher> = Arc::new(BlueToolDispatcher {
+            inner: Arc::clone(&self.dispatcher),
+        });
+
         let outcome = run_agent_loop(
             self.provider.as_ref(),
-            Arc::clone(&self.dispatcher),
+            blue_dispatcher,
             &config,
             &system_prompt,
             task_prompt,

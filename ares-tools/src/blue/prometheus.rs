@@ -88,6 +88,55 @@ pub async fn query_range(args: &Value) -> Result<ToolOutput> {
     Ok(make_output(&format_prometheus_response(&body)))
 }
 
+/// Get available Prometheus metric names with optional search filter.
+pub async fn get_metric_names(args: &Value) -> Result<ToolOutput> {
+    let search = optional_str(args, "search");
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .get(format!("{}/api/v1/label/__name__/values", prometheus_url()))
+        .send()
+        .await
+        .context("Failed to query Prometheus metric names")?;
+
+    let status = resp.status();
+    let body = resp.text().await?;
+
+    if !status.is_success() {
+        return Ok(make_error(&format!("Prometheus returned {status}: {body}")));
+    }
+
+    let json: Value = serde_json::from_str(&body).unwrap_or_default();
+    let names = json
+        .get("data")
+        .and_then(|d| d.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str())
+                .filter(|name| {
+                    search
+                        .map(|s| name.to_lowercase().contains(&s.to_lowercase()))
+                        .unwrap_or(true)
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    if names.is_empty() {
+        let msg = match search {
+            Some(s) => format!("No metric names matching '{s}'."),
+            None => "No metric names found.".to_string(),
+        };
+        return Ok(make_output(&msg));
+    }
+
+    Ok(make_output(&format!(
+        "Metric names ({} total):\n{}",
+        names.len(),
+        names.join("\n")
+    )))
+}
+
 fn format_prometheus_response(body: &str) -> String {
     let json: Value = match serde_json::from_str(body) {
         Ok(v) => v,

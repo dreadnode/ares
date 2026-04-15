@@ -340,5 +340,5 @@ security:
 grafana:
   enabled: true
   base_url: "${GRAFANA_URL}"
-  api_key: "${GRAFANA_API_KEY}"
+  api_key: "${GRAFANA_SERVICE_ACCOUNT_TOKEN}"
   dashboard_uid: "ares-redteam"

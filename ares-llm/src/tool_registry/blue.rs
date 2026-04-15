@@ -1008,6 +1008,136 @@ fn grafana_tool_definitions() -> Vec<ToolDefinition> {
                 "required": ["uid"]
             }),
         },
+        ToolDefinition {
+            name: "create_annotation".into(),
+            description: "Create an annotation in Grafana to mark investigation events or findings.".into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "text": {
+                        "type": "string",
+                        "description": "Annotation text (supports markdown)"
+                    },
+                    "tags": {
+                        "type": "string",
+                        "description": "Comma-separated tags (default: 'ares,investigation')"
+                    },
+                    "dashboard_uid": {
+                        "type": "string",
+                        "description": "Scope to a specific dashboard"
+                    },
+                    "time_start": {
+                        "type": "integer",
+                        "description": "Start time as epoch milliseconds (default: now)"
+                    },
+                    "time_end": {
+                        "type": "integer",
+                        "description": "End time as epoch milliseconds"
+                    }
+                },
+                "required": ["text"]
+            }),
+        },
+        ToolDefinition {
+            name: "create_detection_rule".into(),
+            description: "Create a Grafana alert rule for automated detection. Wraps a LogQL query as a count_over_time threshold.".into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "title": {
+                        "type": "string",
+                        "description": "Alert rule name"
+                    },
+                    "logql_query": {
+                        "type": "string",
+                        "description": "LogQL query for detection (e.g., '{job=\"windows\"} |= \"4662\"')"
+                    },
+                    "description": {
+                        "type": "string",
+                        "description": "Rule description"
+                    },
+                    "mitre_technique": {
+                        "type": "string",
+                        "description": "Associated MITRE ATT&CK technique ID"
+                    },
+                    "severity": {
+                        "type": "string",
+                        "enum": ["critical", "high", "medium", "low"],
+                        "description": "Alert severity (default: medium)"
+                    },
+                    "evaluation_interval": {
+                        "type": "string",
+                        "description": "Evaluation interval (default: '5m')"
+                    },
+                    "pending_period": {
+                        "type": "string",
+                        "description": "Pending period before firing (default: '0s')"
+                    }
+                },
+                "required": ["title", "logql_query"]
+            }),
+        },
+        ToolDefinition {
+            name: "post_investigation_started".into(),
+            description: "Post an annotation marking that an ARES investigation has started.".into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "investigation_id": {
+                        "type": "string",
+                        "description": "Investigation ID"
+                    },
+                    "alert_name": {
+                        "type": "string",
+                        "description": "Name of the alert being investigated"
+                    },
+                    "severity": {
+                        "type": "string",
+                        "description": "Alert severity"
+                    }
+                },
+                "required": ["investigation_id", "alert_name", "severity"]
+            }),
+        },
+        ToolDefinition {
+            name: "post_investigation_completed".into(),
+            description: "Post an annotation marking that an ARES investigation has completed with results summary.".into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "investigation_id": {
+                        "type": "string",
+                        "description": "Investigation ID"
+                    },
+                    "alert_name": {
+                        "type": "string",
+                        "description": "Alert name"
+                    },
+                    "status": {
+                        "type": "string",
+                        "enum": ["completed", "escalated", "failed"],
+                        "description": "Investigation outcome"
+                    },
+                    "evidence_count": {
+                        "type": "integer",
+                        "description": "Number of evidence items found"
+                    },
+                    "techniques": {
+                        "type": "string",
+                        "description": "Comma-separated MITRE technique IDs"
+                    },
+                    "pyramid_level": {
+                        "type": "integer",
+                        "description": "Highest Pyramid of Pain level reached"
+                    },
+                    "summary": {
+                        "type": "string",
+                        "description": "Investigation summary (max 500 chars)"
+                    }
+                },
+                "required": ["investigation_id", "alert_name", "status"]
+            }),
+        },
     ]
 }
 
@@ -1207,6 +1337,74 @@ fn learning_tool_definitions() -> Vec<ToolDefinition> {
                     }
                 },
                 "required": ["evidence_type"]
+            }),
+        },
+        ToolDefinition {
+            name: "find_similar_investigations".into(),
+            description: "Find similar past investigations to learn from. Returns historical investigation outcomes, effective queries, and guidance.".into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "alert_name": {
+                        "type": "string",
+                        "description": "Alert name to search for"
+                    },
+                    "technique_id": {
+                        "type": "string",
+                        "description": "MITRE technique ID to match"
+                    },
+                    "severity": {
+                        "type": "string",
+                        "description": "Severity level to match"
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum results to return (default: 5)"
+                    }
+                }
+            }),
+        },
+        ToolDefinition {
+            name: "get_effective_queries".into(),
+            description: "Get historically effective detection queries ranked by evidence production rate.".into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "alert_name": {
+                        "type": "string",
+                        "description": "Filter by alert type"
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum results (default: 10)"
+                    }
+                }
+            }),
+        },
+        ToolDefinition {
+            name: "check_false_positive_pattern".into(),
+            description: "Check if an alert matches known false positive patterns from historical investigations.".into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "alert_name": {
+                        "type": "string",
+                        "description": "Alert name to check"
+                    },
+                    "alert_fingerprint": {
+                        "type": "string",
+                        "description": "Alert fingerprint for precise matching"
+                    }
+                },
+                "required": ["alert_name"]
+            }),
+        },
+        ToolDefinition {
+            name: "get_investigation_statistics".into(),
+            description: "Get aggregate statistics across all past investigations including completion rates, TP/FP rates, and averages.".into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {}
             }),
         },
     ]

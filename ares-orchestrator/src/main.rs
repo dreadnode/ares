@@ -473,6 +473,16 @@ async fn run() -> Result<()> {
         }
     }
 
+    // --- Clear stale stop signal ---
+    // On restart (e.g. re-running with BLUE_ENABLED after a completed op),
+    // the previous run's stop signal may still be in Redis. Clear it so the
+    // main loop doesn't exit immediately.
+    {
+        let mut conn = queue.connection();
+        let stop_key = ares_core::state::build_key(&config.operation_id, "stop_requested");
+        let _: Result<(), _> = redis::AsyncCommands::del(&mut conn, &stop_key).await;
+    }
+
     // --- Completion monitor ---
     let completion_disp = dispatcher.clone();
     let completion_state = shared_state.clone();

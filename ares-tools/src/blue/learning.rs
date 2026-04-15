@@ -562,6 +562,743 @@ fn truncate_description(s: &str, max_len: usize) -> String {
 }
 
 // ---------------------------------------------------------------------------
+// Investigation learning tools (backed by persistence store)
+// ---------------------------------------------------------------------------
+
+/// Find similar past investigations for learning and guidance.
+///
+/// Parameters:
+/// - `alert_name` (optional)
+/// - `technique_id` (optional)
+/// - `severity` (optional)
+/// - `limit` (optional, default: 5)
+pub fn find_similar_investigations(args: &Value) -> Result<ToolOutput> {
+    let alert_name = args.get("alert_name").and_then(Value::as_str);
+    let technique_id = args.get("technique_id").and_then(Value::as_str);
+    let severity = args.get("severity").and_then(Value::as_str);
+    let limit = args.get("limit").and_then(Value::as_u64).unwrap_or(5) as usize;
+
+    if alert_name.is_none() && technique_id.is_none() && severity.is_none() {
+        return Ok(ToolOutput {
+            stdout: String::new(),
+            stderr: "At least one of alert_name, technique_id, or severity is required".into(),
+            exit_code: Some(1),
+            success: false,
+        });
+    }
+
+    let store = super::persistence::get_investigation_store();
+    let similar = store.find_similar_investigations(
+        alert_name,
+        None, // fingerprint not available in tool context
+        technique_id,
+        severity,
+        limit,
+    );
+
+    if similar.is_empty() {
+        return Ok(ToolOutput {
+            stdout: "No similar past investigations found.".into(),
+            stderr: String::new(),
+            exit_code: Some(0),
+            success: true,
+        });
+    }
+
+    let mut lines = vec![format!(
+        "Found {} similar investigation(s):\n",
+        similar.len()
+    )];
+
+    let completed_count = similar
+        .iter()
+        .filter(|s| s.investigation.status == "completed")
+        .count();
+    let tp_count = similar
+        .iter()
+        .filter(|s| s.investigation.is_true_positive == Some(true))
+        .count();
+    let fp_count = similar
+        .iter()
+        .filter(|s| s.investigation.is_true_positive == Some(false))
+        .count();
+
+    lines.push(format!(
+        "Summary: {completed_count} completed, {tp_count} true positive(s), {fp_count} false positive(s)\n"
+    ));
+
+    for (i, sim) in similar.iter().enumerate() {
+        let inv = &sim.investigation;
+        let tp_label = match inv.is_true_positive {
+            Some(true) => " [TRUE POSITIVE]",
+            Some(false) => " [FALSE POSITIVE]",
+            None => "",
+        };
+
+        lines.push(format!(
+            "{}. {} (similarity: {:.0}%, matched: {}){tp_label}",
+            i + 1,
+            inv.alert_name,
+            sim.similarity_score * 100.0,
+            sim.matching_factors.join(", "),
+        ));
+        lines.push(format!(
+            "   Status: {}, Evidence: {}, Techniques: {}, Duration: {:.0}s",
+            inv.status,
+            inv.evidence_count,
+            inv.techniques_identified.len(),
+            inv.duration_seconds,
+        ));
+        if !inv.effective_queries.is_empty() {
+            lines.push(format!(
+                "   Effective queries: {}",
+                inv.effective_queries.join(", ")
+            ));
+        }
+    }
+
+    // Generate guidance from best completed investigation
+    if let Some(best) = similar
+        .iter()
+        .find(|s| {
+            s.investigation.status == "completed" && s.investigation.is_true_positive == Some(true)
+        })
+        .or_else(|| {
+            similar
+                .iter()
+                .find(|s| s.investigation.status == "completed")
+        })
+    {
+        lines.push(String::new());
+        lines.push("**Guidance from best match**:".to_string());
+        if !best.investigation.techniques_identified.is_empty() {
+            lines.push(format!(
+                "- Previously identified techniques: {}",
+                best.investigation.techniques_identified.join(", ")
+            ));
+        }
+        if !best.investigation.effective_queries.is_empty() {
+            lines.push(format!(
+                "- Recommended queries: {}",
+                best.investigation.effective_queries.join(", ")
+            ));
+        }
+        lines.push(format!(
+            "- Previous query success rate: {:.0}%",
+            best.investigation.query_success_rate * 100.0
+        ));
+    }
+
+    Ok(ToolOutput {
+        stdout: lines.join("\n"),
+        stderr: String::new(),
+        exit_code: Some(0),
+        success: true,
+    })
+}
+
+/// Get effective queries that have historically produced evidence.
+///
+/// Parameters:
+/// - `alert_name` (optional): Filter by alert type
+/// - `limit` (optional, default: 10)
+pub fn get_effective_queries(args: &Value) -> Result<ToolOutput> {
+    let alert_name = args.get("alert_name").and_then(Value::as_str);
+    let limit = args.get("limit").and_then(Value::as_u64).unwrap_or(10) as usize;
+
+    let store = super::persistence::get_investigation_store();
+    let queries = store.get_effective_queries(alert_name, 0.2, limit);
+
+    if queries.is_empty() {
+        return Ok(ToolOutput {
+            stdout: "No effective queries found yet. Query effectiveness is tracked as investigations are completed.".into(),
+            stderr: String::new(),
+            exit_code: Some(0),
+            success: true,
+        });
+    }
+
+    let mut lines = vec![format!(
+        "Top {} effective queries (min 3 executions, 20%+ evidence rate):\n",
+        queries.len()
+    )];
+
+    for (i, q) in queries.iter().enumerate() {
+        lines.push(format!(
+            "{}. {} — success: {:.0}%, evidence: {:.0}% ({} executions)",
+            i + 1,
+            q.query_pattern,
+            q.success_rate() * 100.0,
+            q.evidence_rate() * 100.0,
+            q.total_executions,
+        ));
+    }
+
+    Ok(ToolOutput {
+        stdout: lines.join("\n"),
+        stderr: String::new(),
+        exit_code: Some(0),
+        success: true,
+    })
+}
+
+/// Check if an alert matches known false positive patterns.
+///
+/// Parameters:
+/// - `alert_name` (required)
+/// - `alert_fingerprint` (optional)
+pub fn check_false_positive_pattern(args: &Value) -> Result<ToolOutput> {
+    let alert_name = required_str(args, "alert_name")?;
+    let alert_fingerprint = args.get("alert_fingerprint").and_then(Value::as_str);
+
+    let store = super::persistence::get_investigation_store();
+
+    // Find similar investigations to compute FP rate
+    let similar =
+        store.find_similar_investigations(Some(alert_name), alert_fingerprint, None, None, 20);
+
+    if similar.is_empty() {
+        return Ok(ToolOutput {
+            stdout: format!(
+                "No historical data for alert '{alert_name}'. Cannot assess false positive likelihood."
+            ),
+            stderr: String::new(),
+            exit_code: Some(0),
+            success: true,
+        });
+    }
+
+    let labeled = similar
+        .iter()
+        .filter(|s| s.investigation.is_true_positive.is_some())
+        .count();
+    let fp_count = similar
+        .iter()
+        .filter(|s| s.investigation.is_true_positive == Some(false))
+        .count();
+
+    let fp_rate = if labeled > 0 {
+        fp_count as f64 / labeled as f64
+    } else {
+        0.0
+    };
+
+    // Check known FP patterns
+    let fp_patterns = store.get_false_positive_patterns(2);
+    let matching_pattern = fp_patterns
+        .iter()
+        .find(|p| p.alert_name.to_lowercase() == alert_name.to_lowercase());
+
+    let confidence = if fp_rate > 0.8 {
+        "HIGH"
+    } else if fp_rate > 0.5 {
+        "MEDIUM"
+    } else {
+        "LOW"
+    };
+
+    let mut lines = Vec::new();
+    lines.push(format!("False positive assessment for '{alert_name}':"));
+    lines.push(format!(
+        "  Historical FP rate: {:.0}% ({fp_count}/{labeled} labeled investigations)",
+        fp_rate * 100.0
+    ));
+    lines.push(format!("  Confidence: {confidence}"));
+    lines.push(format!("  Total similar investigations: {}", similar.len()));
+
+    if let Some(pattern) = matching_pattern {
+        lines.push(format!(
+            "  Known FP pattern: {} occurrences, {:.0}% FP rate",
+            pattern.occurrences,
+            pattern.fp_rate * 100.0
+        ));
+    }
+
+    if fp_rate > 0.5 {
+        lines.push(String::new());
+        lines.push(
+            "  Recommendation: This alert has a high false positive rate. \
+             Consider tuning the detection rule or adding exclusions."
+                .to_string(),
+        );
+    }
+
+    Ok(ToolOutput {
+        stdout: lines.join("\n"),
+        stderr: String::new(),
+        exit_code: Some(0),
+        success: true,
+    })
+}
+
+/// Get aggregate investigation statistics.
+pub fn get_investigation_statistics(_args: &Value) -> Result<ToolOutput> {
+    let store = super::persistence::get_investigation_store();
+    let stats = store.get_statistics();
+
+    if stats.total_investigations == 0 {
+        return Ok(ToolOutput {
+            stdout: "No investigations recorded yet.".into(),
+            stderr: String::new(),
+            exit_code: Some(0),
+            success: true,
+        });
+    }
+
+    let fp_rate = if stats.labeled > 0 {
+        stats.false_positives as f64 / stats.labeled as f64
+    } else {
+        0.0
+    };
+
+    let lines = [
+        "=== Investigation Statistics ===".to_string(),
+        format!("Total investigations: {}", stats.total_investigations),
+        format!(
+            "  Completed: {}, Escalated: {}, Failed: {}",
+            stats.completed, stats.escalated, stats.failed
+        ),
+        format!(
+            "  True positives: {}, False positives: {} ({} labeled, {:.0}% FP rate)",
+            stats.true_positives,
+            stats.false_positives,
+            stats.labeled,
+            fp_rate * 100.0
+        ),
+        format!(
+            "  Avg duration: {:.0}s, Avg evidence: {:.1} items",
+            stats.avg_duration_seconds, stats.avg_evidence_count
+        ),
+    ];
+
+    Ok(ToolOutput {
+        stdout: lines.join("\n"),
+        stderr: String::new(),
+        exit_code: Some(0),
+        success: true,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Red team playbook integration
+// ---------------------------------------------------------------------------
+
+/// Load a red team operation's state from Redis and generate a detection
+/// playbook with prioritized LogQL queries.
+///
+/// Parameters:
+/// - `operation_id` (optional): Specific op ID. If omitted, finds latest.
+/// - `redis_url` (optional): Redis URL override.
+pub async fn get_attack_playbook(args: &Value) -> anyhow::Result<ToolOutput> {
+    let operation_id = args.get("operation_id").and_then(Value::as_str);
+    let redis_url = args
+        .get("redis_url")
+        .and_then(Value::as_str)
+        .unwrap_or("redis://127.0.0.1:6379");
+
+    let redis_url = std::env::var("ARES_REDIS_URL")
+        .or_else(|_| std::env::var("REDIS_URL"))
+        .unwrap_or_else(|_| redis_url.to_string());
+
+    let client = match redis::Client::open(redis_url.as_str()) {
+        Ok(c) => c,
+        Err(e) => {
+            return Ok(ToolOutput {
+                stdout: String::new(),
+                stderr: format!("Failed to connect to Redis: {e}"),
+                exit_code: Some(1),
+                success: false,
+            })
+        }
+    };
+    let mut conn = match client.get_multiplexed_tokio_connection().await {
+        Ok(c) => c,
+        Err(e) => {
+            return Ok(ToolOutput {
+                stdout: String::new(),
+                stderr: format!("Redis connection failed: {e}"),
+                exit_code: Some(1),
+                success: false,
+            })
+        }
+    };
+
+    // Find operation ID
+    let op_id = if let Some(id) = operation_id {
+        id.to_string()
+    } else {
+        // Scan for latest operation
+        match find_latest_operation(&mut conn).await {
+            Some(id) => id,
+            None => {
+                return Ok(ToolOutput {
+                    stdout: "No red team operations found in Redis.".into(),
+                    stderr: String::new(),
+                    exit_code: Some(0),
+                    success: true,
+                })
+            }
+        }
+    };
+
+    // Load red team state: credentials, techniques, targets
+    let meta_key = format!("ares:op:{op_id}:meta");
+    let meta_exists: bool = redis::AsyncCommands::exists(&mut conn, &meta_key)
+        .await
+        .unwrap_or(false);
+    if !meta_exists {
+        return Ok(ToolOutput {
+            stdout: format!("Operation {op_id} not found in Redis."),
+            stderr: String::new(),
+            exit_code: Some(0),
+            success: true,
+        });
+    }
+
+    // Get credentials (compromised accounts)
+    let creds_key = format!("ares:op:{op_id}:credentials");
+    let creds: Vec<String> = redis::AsyncCommands::lrange(&mut conn, &creds_key, 0, -1)
+        .await
+        .unwrap_or_default();
+
+    // Get discovered hosts
+    let hosts_key = format!("ares:op:{op_id}:hosts");
+    let hosts: std::collections::HashSet<String> =
+        redis::AsyncCommands::smembers(&mut conn, &hosts_key)
+            .await
+            .unwrap_or_default();
+
+    // Get loot/techniques
+    let loot_key = format!("ares:op:{op_id}:loot");
+    let loot: Vec<String> = redis::AsyncCommands::lrange(&mut conn, &loot_key, 0, -1)
+        .await
+        .unwrap_or_default();
+
+    // Get operation metadata
+    let meta: std::collections::HashMap<String, String> =
+        redis::AsyncCommands::hgetall(&mut conn, &meta_key)
+            .await
+            .unwrap_or_default();
+
+    // Build playbook
+    let mut lines = Vec::new();
+    lines.push(format!(
+        "=== Detection Playbook for Operation {op_id} ===\n"
+    ));
+
+    if let Some(started) = meta.get("started_at") {
+        lines.push(format!("Operation started: {started}"));
+    }
+    if let Some(domain) = meta.get("domain") {
+        lines.push(format!("Target domain: {domain}"));
+    }
+
+    // Extract usernames and IPs from credentials for targeted queries
+    let mut target_users = Vec::new();
+    let mut target_ips = Vec::new();
+    for cred in &creds {
+        if let Ok(cred_json) = serde_json::from_str::<Value>(cred) {
+            if let Some(user) = cred_json.get("username").and_then(|u| u.as_str()) {
+                if !target_users.contains(&user.to_string()) {
+                    target_users.push(user.to_string());
+                }
+            }
+            if let Some(ip) = cred_json.get("ip").and_then(|i| i.as_str()) {
+                if !target_ips.contains(&ip.to_string()) {
+                    target_ips.push(ip.to_string());
+                }
+            }
+        }
+    }
+
+    // Extract techniques from loot
+    let mut techniques_used = Vec::new();
+    for item in &loot {
+        if let Ok(loot_json) = serde_json::from_str::<Value>(item) {
+            if let Some(technique) = loot_json.get("technique").and_then(|t| t.as_str()) {
+                if !techniques_used.contains(&technique.to_string()) {
+                    techniques_used.push(technique.to_string());
+                }
+            }
+        }
+    }
+
+    // Priority queries based on what the red team actually did
+    lines.push("\n--- Priority Detection Queries ---".to_string());
+
+    let mut query_count = 0;
+    let technique_queries: Vec<(&str, &str, &str)> = vec![
+        ("T1003.006", "detect_dcsync", "DCSync replication attack"),
+        ("T1003", "detect_secretsdump", "Credential dumping"),
+        ("T1558.003", "detect_kerberoasting", "Kerberoasting"),
+        ("T1558.004", "detect_asrep_roasting", "AS-REP Roasting"),
+        ("T1558.001", "detect_golden_ticket", "Golden ticket usage"),
+        ("T1550.002", "detect_pass_the_hash", "Pass-the-Hash"),
+        ("T1021", "detect_lateral_movement", "Lateral movement"),
+        ("T1110", "detect_brute_force", "Brute force / spray"),
+        (
+            "T1649",
+            "detect_adcs_exploitation",
+            "ADCS certificate abuse",
+        ),
+    ];
+
+    for (tech_id, query_name, description) in &technique_queries {
+        if techniques_used.iter().any(|t| t.starts_with(tech_id)) || query_count < 5 {
+            let priority = if techniques_used.iter().any(|t| t.starts_with(tech_id)) {
+                "HIGH (confirmed red team technique)"
+            } else {
+                "MEDIUM (recommended baseline)"
+            };
+            lines.push(format!(
+                "  [{priority}] {query_name} — {description} ({tech_id})"
+            ));
+            query_count += 1;
+        }
+    }
+
+    // IOC targets
+    if !target_users.is_empty() {
+        lines.push(format!(
+            "\n--- Compromised Accounts ({}) ---",
+            target_users.len()
+        ));
+        for user in target_users.iter().take(20) {
+            lines.push(format!("  {user}"));
+        }
+    }
+
+    if !target_ips.is_empty() {
+        lines.push(format!("\n--- Target IPs ({}) ---", target_ips.len()));
+        for ip in target_ips.iter().take(20) {
+            lines.push(format!("  {ip}"));
+        }
+    }
+
+    if !hosts.is_empty() {
+        lines.push(format!("\n--- Discovered Hosts ({}) ---", hosts.len()));
+        let mut sorted_hosts: Vec<&String> = hosts.iter().collect();
+        sorted_hosts.sort();
+        for host in sorted_hosts.iter().take(20) {
+            lines.push(format!("  {host}"));
+        }
+    }
+
+    if !techniques_used.is_empty() {
+        lines.push(format!(
+            "\n--- Techniques Used ({}) ---",
+            techniques_used.len()
+        ));
+        for tech in &techniques_used {
+            lines.push(format!("  {tech}"));
+        }
+    }
+
+    Ok(ToolOutput {
+        stdout: lines.join("\n"),
+        stderr: String::new(),
+        exit_code: Some(0),
+        success: true,
+    })
+}
+
+/// Get detection queries specific to a MITRE technique, optionally informed
+/// by red team operation state.
+///
+/// Parameters:
+/// - `technique_id` (required)
+/// - `operation_id` (optional)
+/// - `redis_url` (optional)
+pub async fn get_detection_queries_for_technique(args: &Value) -> anyhow::Result<ToolOutput> {
+    let technique_id = crate::args::required_str(args, "technique_id")?;
+
+    // Normalize
+    let normalized = if technique_id.starts_with('t') || technique_id.starts_with('T') {
+        let mut s = technique_id.to_string();
+        s.replace_range(0..1, "T");
+        s
+    } else {
+        technique_id.to_string()
+    };
+
+    // Static technique → detection template mapping
+    let technique_to_queries: HashMap<&str, Vec<(&str, &str)>> = {
+        let mut m = HashMap::new();
+        m.insert(
+            "T1003",
+            vec![
+                ("detect_secretsdump", "Credential dumping via secretsdump"),
+                ("detect_dcsync", "DCSync replication attack"),
+                ("detect_lsa_secrets_access", "LSA secrets registry access"),
+            ],
+        );
+        m.insert(
+            "T1003.006",
+            vec![
+                ("detect_dcsync", "DCSync replication attack"),
+                (
+                    "detect_dcsync_replication",
+                    "DCSync via RPC replication calls",
+                ),
+            ],
+        );
+        m.insert(
+            "T1558.003",
+            vec![(
+                "detect_kerberoasting",
+                "Kerberoasting TGS requests with RC4",
+            )],
+        );
+        m.insert(
+            "T1558.004",
+            vec![
+                ("detect_asrep_roasting", "AS-REP Roasting pre-auth disabled"),
+                ("detect_asrep_roasting_bulk", "Bulk AS-REP Roasting"),
+            ],
+        );
+        m.insert(
+            "T1558.001",
+            vec![("detect_golden_ticket", "Golden ticket anomalous TGT")],
+        );
+        m.insert(
+            "T1550.002",
+            vec![("detect_pass_the_hash", "Pass-the-Hash NTLM authentication")],
+        );
+        m.insert(
+            "T1021",
+            vec![
+                ("detect_lateral_movement", "Remote service lateral movement"),
+                ("detect_smb_file_access", "SMB share access"),
+            ],
+        );
+        m.insert(
+            "T1021.002",
+            vec![
+                ("detect_smb_file_access", "SMB/admin share access"),
+                ("detect_lateral_movement", "SMB lateral movement"),
+            ],
+        );
+        m.insert(
+            "T1110",
+            vec![
+                ("detect_brute_force", "Password brute force"),
+                ("detect_password_spray", "Password spray"),
+            ],
+        );
+        m.insert(
+            "T1078",
+            vec![("detect_lateral_movement", "Anomalous logon patterns")],
+        );
+        m.insert(
+            "T1649",
+            vec![
+                ("detect_adcs_exploitation", "ADCS exploitation"),
+                ("detect_certipy_enumeration", "Certipy enumeration"),
+                ("detect_esc1_attack", "ESC1 template abuse"),
+            ],
+        );
+        m.insert(
+            "T1134",
+            vec![
+                ("detect_s4u_delegation", "S4U delegation abuse"),
+                ("detect_delegation_abuse", "Kerberos delegation abuse"),
+            ],
+        );
+        m
+    };
+
+    // Try exact match, then parent technique
+    let queries = technique_to_queries.get(normalized.as_str()).or_else(|| {
+        normalized
+            .split('.')
+            .next()
+            .and_then(|parent| technique_to_queries.get(parent))
+    });
+
+    let mut lines = vec![format!("Detection queries for {normalized}:\n")];
+
+    match queries {
+        Some(query_list) => {
+            for (name, desc) in query_list {
+                lines.push(format!("  run_detection_query(\"{name}\") — {desc}"));
+            }
+        }
+        None => {
+            lines.push("  No specific detection templates for this technique.".to_string());
+            lines.push(
+                "  Try using suggest_techniques or list_detection_templates to find relevant queries."
+                    .to_string(),
+            );
+        }
+    }
+
+    // If an operation ID is provided, add context from the playbook
+    if args.get("operation_id").is_some() {
+        lines.push("\nFetching operation context...".to_string());
+        let playbook_result = get_attack_playbook(args).await?;
+        if playbook_result.success && !playbook_result.stdout.is_empty() {
+            lines.push(String::new());
+            lines.push("--- Operation Context ---".to_string());
+            // Extract just the relevant IOC lines
+            for line in playbook_result.stdout.lines() {
+                if line.contains("Compromised")
+                    || line.contains("Target IP")
+                    || line.starts_with("  ")
+                {
+                    lines.push(line.to_string());
+                }
+            }
+        }
+    }
+
+    Ok(ToolOutput {
+        stdout: lines.join("\n"),
+        stderr: String::new(),
+        exit_code: Some(0),
+        success: true,
+    })
+}
+
+/// Find the latest operation ID in Redis by scanning `ares:op:*:meta` keys.
+async fn find_latest_operation(conn: &mut redis::aio::MultiplexedConnection) -> Option<String> {
+    let mut cursor: u64 = 0;
+    let mut latest_id: Option<String> = None;
+
+    loop {
+        let (new_cursor, keys): (u64, Vec<String>) = redis::cmd("SCAN")
+            .arg(cursor)
+            .arg("MATCH")
+            .arg("ares:op:*:meta")
+            .arg("COUNT")
+            .arg(100)
+            .query_async(conn)
+            .await
+            .ok()?;
+
+        for key in keys {
+            // Extract op ID from "ares:op:{id}:meta"
+            let parts: Vec<&str> = key.split(':').collect();
+            if parts.len() >= 3 {
+                let id = parts[2].to_string();
+                // Pick latest alphabetically (UUIDs sort chronologically for v7,
+                // otherwise just pick the last one found)
+                latest_id = Some(match latest_id {
+                    Some(prev) if prev > id => prev,
+                    _ => id,
+                });
+            }
+        }
+
+        cursor = new_cursor;
+        if cursor == 0 {
+            break;
+        }
+    }
+
+    latest_id
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 

@@ -222,6 +222,63 @@ pub async fn execute_parallel_queries(args: &Value) -> Result<ToolOutput> {
     Ok(make_output(&output_parts.join("\n---\n\n")))
 }
 
+/// Query logs relative to NOW (not alert timestamp).
+///
+/// Convenience wrapper for investigating stale or ongoing alerts.
+pub async fn query_logs_recent(args: &Value) -> Result<ToolOutput> {
+    let logql = required_str(args, "logql")?;
+    let hours_back = optional_i64(args, "hours_back").unwrap_or(1);
+    let limit = optional_i64(args, "limit").unwrap_or(100);
+
+    let now = chrono::Utc::now();
+    let start = now - chrono::Duration::hours(hours_back);
+
+    let modified_args = serde_json::json!({
+        "logql": logql,
+        "start_time": start.to_rfc3339(),
+        "end_time": now.to_rfc3339(),
+        "limit": limit,
+    });
+
+    query_logs(&modified_args).await
+}
+
+/// Combine multiple regex patterns into a single LogQL filter.
+///
+/// Takes a base log selector and list of patterns, returns a combined
+/// LogQL query using `|~` regex alternation.
+pub fn combine_query_patterns(args: &Value) -> Result<ToolOutput> {
+    let base_selector = required_str(args, "base_selector")?;
+    let patterns = args
+        .get("patterns")
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| anyhow::anyhow!("missing required argument: patterns"))?;
+
+    if patterns.is_empty() {
+        return Ok(make_error("patterns array must not be empty"));
+    }
+
+    let pattern_strs: Vec<&str> = patterns.iter().filter_map(|v| v.as_str()).collect();
+
+    if pattern_strs.is_empty() {
+        return Ok(make_error("patterns array must contain strings"));
+    }
+
+    // Escape special regex chars in patterns and join with |
+    let combined = pattern_strs
+        .iter()
+        .map(|p| regex::escape(p))
+        .collect::<Vec<_>>()
+        .join("|");
+
+    let query = format!("{base_selector} |~ \"(?i)({combined})\"");
+
+    Ok(make_output(&format!(
+        "Combined query ({} patterns):\n{query}",
+        pattern_strs.len()
+    )))
+}
+
 /// Format a Loki JSON response into readable text.
 fn format_loki_response(body: &str) -> String {
     let json: Value = match serde_json::from_str(body) {

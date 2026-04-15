@@ -206,6 +206,50 @@ pub async fn wait_for_completion(
                 "Completion condition met"
             );
 
+            // When blue team is enabled, wait for active investigations and
+            // the investigation queue to drain before signalling stop.
+            if std::env::var("ARES_BLUE_ENABLED").as_deref() == Ok("1") {
+                info!("Blue team enabled — waiting for investigations to finish before shutdown");
+                let mut conn = dispatcher.queue.connection();
+                loop {
+                    if *shutdown_rx.borrow() {
+                        info!("Completion monitor interrupted by shutdown while waiting for blue");
+                        break;
+                    }
+
+                    let active: i64 = redis::cmd("SCARD")
+                        .arg(ares_core::state::BLUE_ACTIVE_INVESTIGATIONS)
+                        .query_async(&mut conn)
+                        .await
+                        .unwrap_or(0);
+                    let queued: i64 = redis::cmd("LLEN")
+                        .arg("ares:blue:investigations")
+                        .query_async(&mut conn)
+                        .await
+                        .unwrap_or(0);
+
+                    if active == 0 && queued == 0 {
+                        info!("All blue investigations finished");
+                        break;
+                    }
+
+                    info!(
+                        active_investigations = active,
+                        queued_investigations = queued,
+                        "Waiting for blue team to finish..."
+                    );
+
+                    tokio::select! {
+                        _ = tokio::time::sleep(Duration::from_secs(10)) => {}
+                        _ = shutdown_rx.changed() => {
+                            if *shutdown_rx.borrow() {
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+
             // Signal the main loop to stop via Redis so it breaks out of its
             // select! within the next 5-second poll cycle.
             {

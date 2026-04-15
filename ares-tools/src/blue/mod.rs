@@ -8,6 +8,7 @@ pub mod grafana;
 pub mod investigation;
 pub mod learning;
 pub mod loki;
+pub mod persistence;
 pub mod prometheus;
 pub mod validation;
 
@@ -49,9 +50,21 @@ pub async fn dispatch_blue(tool_name: &str, arguments: &Value) -> Result<ToolOut
         "search_grafana_dashboards" => grafana::search_dashboards(arguments).await,
         "get_grafana_dashboard" => grafana::get_dashboard(arguments).await,
 
+        // ── Grafana write-back ──────────────────────────────────
+        "create_annotation" => grafana::create_annotation(arguments).await,
+        "create_detection_rule" => grafana::create_detection_rule(arguments).await,
+        "post_investigation_started" => grafana::post_investigation_started(arguments).await,
+        "post_investigation_completed" => grafana::post_investigation_completed(arguments).await,
+
         // ── MITRE ATT&CK learning ─────────────────────────────────
         "lookup_technique" => Ok(learning::lookup_technique(arguments)?),
         "suggest_techniques" => Ok(learning::suggest_techniques(arguments)?),
+
+        // ── Investigation learning ──────────────────────────────
+        "find_similar_investigations" => Ok(learning::find_similar_investigations(arguments)?),
+        "get_effective_queries" => Ok(learning::get_effective_queries(arguments)?),
+        "check_false_positive_pattern" => Ok(learning::check_false_positive_pattern(arguments)?),
+        "get_investigation_statistics" => Ok(learning::get_investigation_statistics(arguments)?),
 
         // ── Investigation state mutation ─────────────────────────
         "add_evidence" => investigation::add_evidence(arguments).await,
@@ -84,8 +97,16 @@ pub fn is_blue_tool(name: &str) -> bool {
             | "get_grafana_annotations"
             | "search_grafana_dashboards"
             | "get_grafana_dashboard"
+            | "create_annotation"
+            | "create_detection_rule"
+            | "post_investigation_started"
+            | "post_investigation_completed"
             | "lookup_technique"
             | "suggest_techniques"
+            | "find_similar_investigations"
+            | "get_effective_queries"
+            | "check_false_positive_pattern"
+            | "get_investigation_statistics"
             | "add_evidence"
             | "record_timeline_event"
             | "add_technique"
