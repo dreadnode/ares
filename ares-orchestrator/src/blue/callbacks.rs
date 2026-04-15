@@ -16,8 +16,8 @@ use tracing::{debug, info, warn};
 use ares_llm::agent_loop::CallbackResult;
 use ares_llm::tool_registry::blue::{self, BlueAgentRole};
 use ares_llm::{
-    run_agent_loop, AgentLoopConfig, CallbackHandler, LlmProvider, ToolCall, ToolDispatcher,
-    ToolExecResult,
+    run_agent_loop, AgentLoopConfig, CallbackHandler, LlmProvider, TokenUsage, ToolCall,
+    ToolDispatcher, ToolExecResult,
 };
 
 // ---------------------------------------------------------------------------
@@ -117,7 +117,12 @@ const BLUE_HANDLED_TOOLS: &[&str] = &[
 /// Recognizes lifecycle completion tools (`triage_complete`, `hunt_complete`,
 /// `lateral_complete`, etc.) so they end the sub-agent loop with `TaskComplete`
 /// instead of falling through to the Redis dispatcher.
-struct SubAgentCallbackHandler;
+///
+/// Also tracks token usage per-investigation so blue team cost is visible.
+struct SubAgentCallbackHandler {
+    investigation_id: String,
+    redis_url: String,
+}
 
 #[async_trait::async_trait]
 impl CallbackHandler for SubAgentCallbackHandler {
@@ -137,6 +142,27 @@ impl CallbackHandler for SubAgentCallbackHandler {
 
     async fn handle_callback(&self, call: &ToolCall) -> Option<Result<CallbackResult>> {
         BlueCallbackHandler::handle_lifecycle_callback(call).map(Ok)
+    }
+
+    async fn on_token_usage(&self, usage: &TokenUsage, model: &str) {
+        if usage.input_tokens == 0 && usage.output_tokens == 0 {
+            return;
+        }
+        if let Ok(client) = redis::Client::open(self.redis_url.as_str()) {
+            if let Ok(mut conn) = client.get_connection_manager().await {
+                if let Err(e) = ares_core::token_usage::increment_blue_token_usage(
+                    &mut conn,
+                    &self.investigation_id,
+                    usage.input_tokens.into(),
+                    usage.output_tokens.into(),
+                    model,
+                )
+                .await
+                {
+                    warn!(err = %e, "Failed to record blue sub-agent token usage");
+                }
+            }
+        }
     }
 }
 
@@ -197,7 +223,10 @@ impl BlueCallbackHandler {
             inner: Arc::clone(&self.dispatcher),
         });
 
-        let sub_agent_cb: Arc<dyn CallbackHandler> = Arc::new(SubAgentCallbackHandler);
+        let sub_agent_cb: Arc<dyn CallbackHandler> = Arc::new(SubAgentCallbackHandler {
+            investigation_id: self.investigation_id.clone(),
+            redis_url: self.redis_url.clone(),
+        });
 
         let outcome = run_agent_loop(
             self.provider.as_ref(),
@@ -561,6 +590,27 @@ impl CallbackHandler for BlueCallbackHandler {
 
             // Lifecycle callbacks
             _ => Self::handle_lifecycle_callback(call).map(Ok),
+        }
+    }
+
+    async fn on_token_usage(&self, usage: &TokenUsage, model: &str) {
+        if usage.input_tokens == 0 && usage.output_tokens == 0 {
+            return;
+        }
+        if let Ok(client) = redis::Client::open(self.redis_url.as_str()) {
+            if let Ok(mut conn) = client.get_connection_manager().await {
+                if let Err(e) = ares_core::token_usage::increment_blue_token_usage(
+                    &mut conn,
+                    &self.investigation_id,
+                    usage.input_tokens.into(),
+                    usage.output_tokens.into(),
+                    model,
+                )
+                .await
+                {
+                    warn!(err = %e, "Failed to record blue token usage");
+                }
+            }
         }
     }
 }

@@ -3,7 +3,7 @@ use chrono::Utc;
 use redis::AsyncCommands;
 
 use crate::redis_conn::connect_redis;
-use crate::util::{format_duration, parse_datetime};
+use crate::util::{format_duration, format_number, parse_datetime};
 
 use super::resolve_investigation_id;
 
@@ -59,6 +59,68 @@ pub(crate) async fn blue_runtime(
 
             if let Some(completed) = completed_at {
                 println!("Completed: {completed}");
+            }
+
+            // Token usage & estimated cost
+            match ares_core::token_usage::get_blue_token_usage(&mut conn, &inv_id).await {
+                Ok(Some(usage)) if usage.input_tokens > 0 || usage.output_tokens > 0 => {
+                    let in_tok = usage.input_tokens;
+                    let out_tok = usage.output_tokens;
+                    let total_tok = in_tok + out_tok;
+
+                    println!(
+                        "\nTokens: {} (in: {}  out: {})",
+                        format_number(total_tok),
+                        format_number(in_tok),
+                        format_number(out_tok)
+                    );
+
+                    if !usage.models.is_empty() {
+                        let mut model_names: Vec<_> = usage.models.keys().collect();
+                        model_names.sort();
+                        let label = if model_names.len() > 1 {
+                            "Models"
+                        } else {
+                            "Model"
+                        };
+                        println!(
+                            "{label}:  {}",
+                            model_names
+                                .iter()
+                                .map(|s| s.as_str())
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        );
+
+                        let (total_cost, breakdown, unpriced) =
+                            ares_core::token_usage::estimate_usage_cost(&usage);
+
+                        if let Some(cost) = total_cost {
+                            let suffix = if breakdown.len() > 1 {
+                                " (blended)"
+                            } else {
+                                ""
+                            };
+                            println!("Cost:   ${cost:.4}{suffix}");
+                        } else if !usage.model.is_empty() {
+                            println!("Cost:   unavailable");
+                        }
+
+                        if breakdown.len() > 1 {
+                            for item in &breakdown {
+                                println!(
+                                    "  - {}: {} tokens (${:.4})",
+                                    item.model, item.total_tokens, item.cost
+                                );
+                            }
+                        }
+
+                        if !unpriced.is_empty() {
+                            println!("Unpriced models: {}", unpriced.join(", "));
+                        }
+                    }
+                }
+                _ => {}
             }
         }
         None => {

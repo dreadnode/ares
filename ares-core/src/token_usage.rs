@@ -180,6 +180,105 @@ pub fn token_usage_key(operation_id: &str) -> String {
     format!("ares:op:{operation_id}:token_usage")
 }
 
+/// Build the Redis key for a blue team investigation's token usage HASH.
+pub fn blue_token_usage_key(investigation_id: &str) -> String {
+    format!("ares:blue:inv:{investigation_id}:token_usage")
+}
+
+/// Atomically increment token usage counters for a blue team investigation.
+pub async fn increment_blue_token_usage(
+    conn: &mut impl AsyncCommands,
+    investigation_id: &str,
+    input_tokens: u64,
+    output_tokens: u64,
+    model: &str,
+) -> Result<(), redis::RedisError> {
+    let key = blue_token_usage_key(investigation_id);
+
+    let input_i64 = i64::try_from(input_tokens).map_err(|_| {
+        redis::RedisError::from((
+            redis::ErrorKind::InvalidClientConfig,
+            "input_tokens overflows i64",
+        ))
+    })?;
+    let output_i64 = i64::try_from(output_tokens).map_err(|_| {
+        redis::RedisError::from((
+            redis::ErrorKind::InvalidClientConfig,
+            "output_tokens overflows i64",
+        ))
+    })?;
+
+    let mut pipe = redis::pipe();
+    pipe.atomic();
+    pipe.cmd("HINCRBY")
+        .arg(&key)
+        .arg("input_tokens")
+        .arg(input_i64);
+    pipe.cmd("HINCRBY")
+        .arg(&key)
+        .arg("output_tokens")
+        .arg(output_i64);
+
+    if !model.is_empty() {
+        pipe.cmd("HSET").arg(&key).arg("model").arg(model);
+        pipe.cmd("HINCRBY")
+            .arg(&key)
+            .arg(model_field(model, "input_tokens"))
+            .arg(input_i64);
+        pipe.cmd("HINCRBY")
+            .arg(&key)
+            .arg(model_field(model, "output_tokens"))
+            .arg(output_i64);
+    }
+
+    pipe.query_async::<()>(conn).await?;
+    Ok(())
+}
+
+/// Read aggregated token usage for a blue team investigation.
+///
+/// Returns `None` if the key does not exist.
+pub async fn get_blue_token_usage(
+    conn: &mut impl AsyncCommands,
+    investigation_id: &str,
+) -> Result<Option<OperationTokenUsage>, redis::RedisError> {
+    let key = blue_token_usage_key(investigation_id);
+    let data: HashMap<String, String> = conn.hgetall(&key).await?;
+    if data.is_empty() {
+        return Ok(None);
+    }
+
+    let input_tokens = data
+        .get("input_tokens")
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(0);
+    let output_tokens = data
+        .get("output_tokens")
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(0);
+    let model = data.get("model").cloned().unwrap_or_default();
+
+    let mut models: HashMap<String, ModelTokenUsage> = HashMap::new();
+    for (field, value) in &data {
+        if let Some((model_name, token_type)) = parse_model_field(field) {
+            let entry = models.entry(model_name).or_default();
+            let count = value.parse::<u64>().unwrap_or(0);
+            match token_type.as_str() {
+                "input_tokens" => entry.input_tokens = count,
+                "output_tokens" => entry.output_tokens = count,
+                _ => {}
+            }
+        }
+    }
+
+    Ok(Some(OperationTokenUsage {
+        input_tokens,
+        output_tokens,
+        model,
+        models,
+    }))
+}
+
 /// Encode a per-model HASH field name matching Python's `_token_usage_model_field`.
 ///
 /// Format: `model:{url_safe_base64(model_name)}:{token_type}`
