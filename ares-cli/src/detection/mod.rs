@@ -36,11 +36,12 @@ pub(crate) async fn ops_export_detection(
         let json = serde_json::to_string_pretty(&detection_playbook)?;
         println!("{json}");
     } else {
-        std::fs::create_dir_all(&output_dir)
-            .with_context(|| format!("Failed to create output directory: {output_dir}"))?;
+        let dir = format!("{output_dir}/{op_id}");
+        std::fs::create_dir_all(&dir)
+            .with_context(|| format!("Failed to create output directory: {dir}"))?;
 
         // Save JSON
-        let json_path = format!("{output_dir}/{op_id}_detection_playbook.json");
+        let json_path = format!("{dir}/detection_playbook.json");
         let json = serde_json::to_string_pretty(&detection_playbook)?;
         std::fs::write(&json_path, &json)
             .with_context(|| format!("Failed to write JSON playbook to {json_path}"))?;
@@ -48,7 +49,7 @@ pub(crate) async fn ops_export_detection(
 
         // Save Markdown
         if markdown_output {
-            let md_path = format!("{output_dir}/{op_id}_detection_playbook.md");
+            let md_path = format!("{dir}/detection_playbook.md");
             let md = markdown::generate_detection_markdown(&detection_playbook);
             std::fs::write(&md_path, &md)
                 .with_context(|| format!("Failed to write markdown playbook to {md_path}"))?;

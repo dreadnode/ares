@@ -1080,47 +1080,7 @@ fn investigation_state_tool_definitions() -> Vec<ToolDefinition> {
     vec![
         ToolDefinition {
             name: "add_evidence".into(),
-            description: "Add a single evidence item to the investigation. For multiple items, prefer add_evidence_batch to record them all in one call.".into(),
-            input_schema: json!({
-                "type": "object",
-                "properties": {
-                    "investigation_id": {
-                        "type": "string",
-                        "description": "Investigation ID"
-                    },
-                    "evidence_type": {
-                        "type": "string",
-                        "enum": ["ip", "domain", "hash", "process", "user", "file", "artifact", "tool", "technique"],
-                        "description": "Type of evidence"
-                    },
-                    "value": {
-                        "type": "string",
-                        "description": "The evidence value (IP address, hash, username, etc.)"
-                    },
-                    "source": {
-                        "type": "string",
-                        "description": "Where this evidence was found"
-                    },
-                    "confidence": {
-                        "type": "number",
-                        "description": "Confidence level (0.0-1.0, default: 0.5)"
-                    },
-                    "pyramid_level": {
-                        "type": "string",
-                        "enum": ["hash_values", "ip_addresses", "domain_names", "network_host_artifacts", "tools", "ttps"],
-                        "description": "Pyramid of Pain level (default: ip_addresses)"
-                    },
-                    "timestamp": {
-                        "type": "string",
-                        "description": "Evidence timestamp in ISO8601 format (default: now)"
-                    }
-                },
-                "required": ["investigation_id", "evidence_type", "value", "source"]
-            }),
-        },
-        ToolDefinition {
-            name: "add_evidence_batch".into(),
-            description: "Add multiple evidence items in a single call. Use this instead of calling add_evidence repeatedly — it records all items in one Redis pipeline round-trip and has its own separate call budget.".into(),
+            description: "Add one or more evidence items to the investigation. Always pass an items array — use items: [{...}] for one item or items: [{...}, {...}, ...] for many. All items are written in a single Redis pipeline round-trip with HSETNX deduplication.".into(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -1130,7 +1090,8 @@ fn investigation_state_tool_definitions() -> Vec<ToolDefinition> {
                     },
                     "items": {
                         "type": "array",
-                        "description": "Array of evidence items to add (max 50 per call)",
+                        "minItems": 1,
+                        "description": "Evidence items to add (max 50 per call)",
                         "items": {
                             "type": "object",
                             "properties": {
@@ -1141,7 +1102,7 @@ fn investigation_state_tool_definitions() -> Vec<ToolDefinition> {
                                 },
                                 "value": {
                                     "type": "string",
-                                    "description": "The evidence value"
+                                    "description": "The evidence value (IP address, hash, username, etc.)"
                                 },
                                 "source": {
                                     "type": "string",
@@ -1154,7 +1115,7 @@ fn investigation_state_tool_definitions() -> Vec<ToolDefinition> {
                                 "pyramid_level": {
                                     "type": "string",
                                     "enum": ["hash_values", "ip_addresses", "domain_names", "network_host_artifacts", "tools", "ttps"],
-                                    "description": "Pyramid of Pain level (auto-assigned if omitted)"
+                                    "description": "Pyramid of Pain level (auto-assigned from evidence_type if omitted)"
                                 },
                                 "timestamp": {
                                     "type": "string",

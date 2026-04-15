@@ -18,9 +18,36 @@ pub(crate) struct HostCtx {
     pub is_dc: bool,
 }
 
+/// Pseudo-services that represent findings rather than actual network services.
+const NON_SERVICE_ENTRIES: &[&str] = &["smb_signing_disabled", "smb_signing_enabled"];
+
 impl From<&Host> for HostCtx {
     fn from(h: &Host) -> Self {
         let is_dc = h.is_dc || h.detect_dc();
+
+        // Deduplicate services: strip nmap uncertainty suffix (`?`) for the
+        // dedup key so `445/tcp (microsoft-ds)` and `445/tcp (microsoft-ds?)`
+        // collapse.  Also filter out pseudo-service entries like
+        // `smb_signing_disabled`.
+        let mut seen_ports = HashSet::new();
+        let mut services = Vec::new();
+        for svc in &h.services {
+            let svc_trimmed = svc.trim();
+            // Skip non-service entries
+            if NON_SERVICE_ENTRIES
+                .iter()
+                .any(|ns| svc_trimmed.eq_ignore_ascii_case(ns))
+            {
+                continue;
+            }
+            // Normalize: strip trailing `?` inside parens for dedup key
+            let key = svc_trimmed.replace("?)", ")").to_lowercase();
+            if seen_ports.insert(key) {
+                // Prefer the non-`?` variant; strip the `?` from display too
+                services.push(svc_trimmed.replace("?)", ")").replace("?", ""));
+            }
+        }
+
         Self {
             label: if h.hostname.is_empty() {
                 h.ip.clone()
@@ -38,7 +65,7 @@ impl From<&Host> for HostCtx {
             } else {
                 h.roles.join(", ")
             },
-            services: h.services.clone(),
+            services,
             is_dc,
         }
     }
@@ -90,7 +117,7 @@ impl From<&Credential> for CredCtx {
             domain: if c.domain.is_empty() {
                 "Unknown".to_string()
             } else {
-                c.domain.clone()
+                c.domain.to_lowercase()
             },
             password: c.password.clone(),
             source: c.source.clone(),
@@ -116,7 +143,7 @@ pub(crate) struct HashCtx {
 impl From<&Hash> for HashCtx {
     fn from(h: &Hash) -> Self {
         Self {
-            domain: h.domain.clone(),
+            domain: h.domain.to_lowercase(),
             username: h.username.clone(),
             hash_type: h.hash_type.clone(),
             hash_value: h.hash_value.clone(),
@@ -392,5 +419,79 @@ mod tests {
         assert_eq!(ctx.status_display, "EXPLOITED");
         assert_eq!(ctx.exploited_display, "\u{2713}");
         assert_eq!(ctx.priority, 10);
+    }
+
+    #[test]
+    fn test_host_ctx_deduplicates_services() {
+        let host = Host {
+            ip: "10.1.2.220".to_string(),
+            hostname: "dc01.contoso.local".to_string(),
+            os: String::new(),
+            roles: vec![],
+            services: vec![
+                "445/tcp (microsoft-ds)".to_string(),
+                "445/tcp (microsoft-ds?)".to_string(),
+            ],
+            is_dc: false,
+            owned: false,
+        };
+        let ctx = HostCtx::from(&host);
+        assert_eq!(ctx.services.len(), 1);
+        assert_eq!(ctx.services[0], "445/tcp (microsoft-ds)");
+    }
+
+    #[test]
+    fn test_host_ctx_filters_pseudo_services() {
+        let host = Host {
+            ip: "10.1.2.51".to_string(),
+            hostname: String::new(),
+            os: String::new(),
+            roles: vec![],
+            services: vec![
+                "445/tcp (microsoft-ds)".to_string(),
+                "smb_signing_disabled".to_string(),
+            ],
+            is_dc: false,
+            owned: false,
+        };
+        let ctx = HostCtx::from(&host);
+        assert_eq!(ctx.services.len(), 1);
+        assert_eq!(ctx.services[0], "445/tcp (microsoft-ds)");
+    }
+
+    #[test]
+    fn test_cred_ctx_lowercases_domain() {
+        let cred = Credential {
+            id: String::new(),
+            username: "admin".to_string(),
+            password: "pass".to_string(),
+            domain: "CONTOSO.LOCAL".to_string(),
+            source: String::new(),
+            discovered_at: None,
+            is_admin: false,
+            parent_id: None,
+            attack_step: 0,
+        };
+        let ctx = CredCtx::from(&cred);
+        assert_eq!(ctx.domain, "contoso.local");
+    }
+
+    #[test]
+    fn test_hash_ctx_lowercases_domain() {
+        let hash = Hash {
+            id: String::new(),
+            username: "admin".to_string(),
+            hash_value: "aabb".to_string(),
+            hash_type: "ntlm".to_string(),
+            domain: "NORTH.SEVENKINGDOMS.LOCAL".to_string(),
+            cracked_password: None,
+            source: String::new(),
+            discovered_at: None,
+            parent_id: None,
+            attack_step: 0,
+            aes_key: None,
+        };
+        let ctx = HashCtx::from(&hash);
+        assert_eq!(ctx.domain, "north.sevenkingdoms.local");
     }
 }

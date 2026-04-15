@@ -78,117 +78,14 @@ fn make_error(msg: &str) -> ToolOutput {
 // 1. add_evidence
 // ---------------------------------------------------------------------------
 
-/// Add evidence to investigation state.
-///
-/// Required: `investigation_id`, `evidence_type`, `value`, `source`
-/// Optional: `confidence` (f64), `pyramid_level` (string), `timestamp`
-///
-/// Uses HSETNX for O(1) deduplication, matching BlueStateWriter.
-pub async fn add_evidence(args: &Value) -> Result<ToolOutput> {
-    let investigation_id = required_str(args, "investigation_id")?;
-    let evidence_type = required_str(args, "evidence_type")?;
-    let value = required_str(args, "value")?;
-    let source = required_str(args, "source")?;
-
-    // ── Validate evidence before writing ─────────────────────────────
-    let vr = validation::validate_evidence(evidence_type, value, source);
-    if !vr.valid {
-        return Ok(make_error(&format!(
-            "Evidence validation failed: {}",
-            vr.warnings.join("; "),
-        )));
-    }
-
-    // Validate evidence against recent query results and adjust confidence
-    let (query_validated, _source_query_id) =
-        super::evidence_validator::validate_evidence_value(value);
-    let raw_confidence = args
-        .get("confidence")
-        .and_then(Value::as_f64)
-        .unwrap_or(0.5);
-    let confidence = super::evidence_validator::adjust_confidence(raw_confidence, query_validated);
-
-    // Auto-assign pyramid level from evidence type when caller omits it
-    let pyramid_level = optional_str(args, "pyramid_level")
-        .unwrap_or_else(|| validation::assign_pyramid_level(&vr.normalized_type));
-
-    let timestamp = optional_str(args, "timestamp")
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| chrono::Utc::now().to_rfc3339());
-
-    let pyramid_level_int = match pyramid_level {
-        "hash_values" => 1,
-        "ip_addresses" => 2,
-        "domain_names" => 3,
-        "network_host_artifacts" => 4,
-        "tools" => 5,
-        "ttps" => 6,
-        _ => pyramid_level.parse::<i32>().unwrap_or(2),
-    };
-
-    let evidence_id = Uuid::new_v4().to_string();
-
-    let evidence = serde_json::json!({
-        "id": evidence_id,
-        "type": vr.normalized_type,
-        "value": value,
-        "source": source,
-        "timestamp": timestamp,
-        "pyramid_level": pyramid_level_int,
-        "confidence": confidence,
-        "mitre_techniques": [],
-        "metadata": {},
-        "validated": true,
-    });
-
-    // Dedup key matches BlueStateWriter: type:value_lower:source
-    let dedup_key = format!("{}:{}:{}", vr.normalized_type, value.to_lowercase(), source,);
-
-    let mut conn = match get_redis_connection().await {
-        Ok(c) => c,
-        Err(e) => return Ok(make_error(&format!("Redis connection failed: {e}"))),
-    };
-
-    let key = blue_key(investigation_id, BLUE_KEY_EVIDENCE);
-    let data = serde_json::to_string(&evidence).unwrap_or_default();
-
-    let added: bool = conn
-        .hset_nx(&key, &dedup_key, &data)
-        .await
-        .context("HSETNX failed")?;
-
-    if added {
-        let _: () = conn.expire(&key, TTL_SECS).await?;
-    }
-
-    // Build output, including any warnings
-    let warning_str = if vr.warnings.is_empty() {
-        String::new()
-    } else {
-        format!(" [warnings: {}]", vr.warnings.join("; "))
-    };
-
-    if added {
-        Ok(make_output(&format!(
-            "[+] Evidence added: {evidence_type}={value} (id={evidence_id}, confidence={confidence:.1}, pyramid={pyramid_level}){warning_str}"
-        )))
-    } else {
-        Ok(make_output(&format!(
-            "[*] Duplicate evidence (already recorded): {evidence_type}={value}{warning_str}"
-        )))
-    }
-}
-
-// ---------------------------------------------------------------------------
-// 1b. add_evidence_batch
-// ---------------------------------------------------------------------------
-
-/// Add multiple evidence items in a single call using a Redis pipeline.
+/// Add one or more evidence items to the investigation using a Redis pipeline.
 ///
 /// Required: `investigation_id`, `items` (array of evidence objects)
 /// Each item requires: `evidence_type`, `value`, `source`
 /// Each item optionally: `confidence`, `pyramid_level`, `timestamp`
-pub async fn add_evidence_batch(args: &Value) -> Result<ToolOutput> {
+///
+/// Uses HSETNX for O(1) deduplication, matching BlueStateWriter.
+pub async fn add_evidence(args: &Value) -> Result<ToolOutput> {
     let investigation_id = required_str(args, "investigation_id")?;
     let items = args
         .get("items")
@@ -365,7 +262,7 @@ pub async fn add_evidence_batch(args: &Value) -> Result<ToolOutput> {
     }
 
     let summary = format!(
-        "Batch complete: {added_count} added, {dup_count} duplicates, {} invalid",
+        "Evidence recorded: {added_count} added, {dup_count} duplicates, {} invalid",
         validation_errors.len()
     );
     output_lines.insert(0, summary);

@@ -48,9 +48,10 @@ pub(crate) async fn ops_report(
 }
 
 fn save_report(output_dir: &str, op_id: &str, report: &str) -> Result<String> {
-    std::fs::create_dir_all(output_dir)
-        .with_context(|| format!("Failed to create report directory: {output_dir}"))?;
-    let path = format!("{output_dir}/{op_id}_report.md");
+    let dir = format!("{output_dir}/{op_id}");
+    std::fs::create_dir_all(&dir)
+        .with_context(|| format!("Failed to create report directory: {dir}"))?;
+    let path = format!("{dir}/red_report.md");
     std::fs::write(&path, report).with_context(|| format!("Failed to write report to {path}"))?;
     Ok(path)
 }

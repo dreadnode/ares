@@ -1,6 +1,6 @@
 //! Red team report generator.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use chrono::Utc;
 use tera::{Context, Tera};
@@ -85,10 +85,34 @@ impl RedTeamReportGenerator {
             .map(timeline_event_from_json)
             .collect();
 
-        let hosts: Vec<HostCtx> = state.all_hosts.iter().map(HostCtx::from).collect();
+        // Filter out CIDR subnet entries (e.g. "10.1.2.0/24") — these aren't hosts.
+        let hosts: Vec<HostCtx> = state
+            .all_hosts
+            .iter()
+            .filter(|h| !h.ip.contains('/'))
+            .map(HostCtx::from)
+            .collect();
         let users: Vec<UserCtx> = unique_users.iter().map(UserCtx::from).collect();
         let credentials: Vec<CredCtx> = unique_creds.iter().map(CredCtx::from).collect();
-        let shares: Vec<ShareCtx> = state.all_shares.iter().map(ShareCtx::from).collect();
+
+        // Build IP → hostname map so shares can display hostnames instead of IPs.
+        let ip_to_hostname: HashMap<&str, &str> = state
+            .all_hosts
+            .iter()
+            .filter(|h| !h.hostname.is_empty())
+            .map(|h| (h.ip.as_str(), h.hostname.as_str()))
+            .collect();
+        let shares: Vec<ShareCtx> = state
+            .all_shares
+            .iter()
+            .map(|s| {
+                let mut ctx = ShareCtx::from(s);
+                if let Some(hostname) = ip_to_hostname.get(ctx.host.as_str()) {
+                    ctx.host = hostname.to_string();
+                }
+                ctx
+            })
+            .collect();
 
         let target_ip = state
             .target
@@ -211,11 +235,35 @@ impl RedTeamReportGenerator {
         domains.sort();
         domains.dedup();
 
-        let hosts: Vec<HostCtx> = state.all_hosts.iter().map(HostCtx::from).collect();
+        // Filter out CIDR subnet entries (e.g. "10.1.2.0/24") — these aren't hosts.
+        let hosts: Vec<HostCtx> = state
+            .all_hosts
+            .iter()
+            .filter(|h| !h.ip.contains('/'))
+            .map(HostCtx::from)
+            .collect();
         let users: Vec<UserCtx> = state.all_users.iter().map(UserCtx::from).collect();
         let credentials: Vec<CredCtx> = unique_creds.iter().map(CredCtx::from).collect();
         let hashes: Vec<HashCtx> = unique_hashes.iter().map(HashCtx::from).collect();
-        let shares: Vec<ShareCtx> = state.all_shares.iter().map(ShareCtx::from).collect();
+
+        // Build IP → hostname map so shares can display hostnames instead of IPs.
+        let ip_to_hostname: HashMap<&str, &str> = state
+            .all_hosts
+            .iter()
+            .filter(|h| !h.hostname.is_empty())
+            .map(|h| (h.ip.as_str(), h.hostname.as_str()))
+            .collect();
+        let shares: Vec<ShareCtx> = state
+            .all_shares
+            .iter()
+            .map(|s| {
+                let mut ctx = ShareCtx::from(s);
+                if let Some(hostname) = ip_to_hostname.get(ctx.host.as_str()) {
+                    ctx.host = hostname.to_string();
+                }
+                ctx
+            })
+            .collect();
 
         let target_ip = state
             .target

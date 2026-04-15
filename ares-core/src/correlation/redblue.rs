@@ -504,7 +504,11 @@ impl RedBlueCorrelator {
         }))
     }
 
-    /// Load all reports from the reports directory.
+    /// Load all reports from the reports directory (recursively).
+    ///
+    /// Recognises both the new per-operation layout (`{op_id}/red_report.md`,
+    /// `{op_id}/blue_investigation_*.md`) and the legacy flat layout
+    /// (`redteam-*.md`, `investigation_*.md`).
     #[allow(clippy::type_complexity)]
     pub fn load_all_reports(
         &self,
@@ -512,26 +516,26 @@ impl RedBlueCorrelator {
         let mut red_team_reports = Vec::new();
         let mut blue_team_detections = Vec::new();
 
-        let entries = std::fs::read_dir(&self.reports_dir)?;
-        for entry in entries {
-            let entry = entry?;
-            let path = entry.path();
-            if path.extension().is_none_or(|ext| ext != "md") {
-                continue;
-            }
+        let md_files = Self::collect_md_files(&self.reports_dir);
+        for path in md_files {
             let filename = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
 
-            if filename.starts_with("redteam-") {
+            // New layout: red_report.md | Legacy: redteam-*.md
+            if filename == "red_report.md" || filename.starts_with("redteam-") {
                 match self.load_red_team_report(&path) {
                     Ok((op_id, activities)) => red_team_reports.push((op_id, activities)),
                     Err(e) => {
                         warn!(path = %path.display(), error = %e, "Failed to parse red team report")
                     }
                 }
-            } else if filename.starts_with("investigation_") {
+            }
+            // New layout: blue_investigation_*.md | Legacy: investigation_*.md
+            else if filename.starts_with("blue_investigation_")
+                || filename.starts_with("investigation_")
+            {
                 match self.load_investigation_report(&path) {
                     Ok(Some(detection)) => blue_team_detections.push(detection),
-                    Ok(None) => {} // Skipped (e.g., DatasourceNoData)
+                    Ok(None) => {}
                     Err(e) => {
                         warn!(path = %path.display(), error = %e, "Failed to parse investigation report")
                     }
@@ -545,6 +549,22 @@ impl RedBlueCorrelator {
             "Loaded reports"
         );
         Ok((red_team_reports, blue_team_detections))
+    }
+
+    /// Recursively collect all `.md` files under `dir`.
+    fn collect_md_files(dir: &std::path::Path) -> Vec<PathBuf> {
+        let mut files = Vec::new();
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    files.extend(Self::collect_md_files(&path));
+                } else if path.extension().is_some_and(|ext| ext == "md") {
+                    files.push(path);
+                }
+            }
+        }
+        files
     }
 
     /// Correlate red team activities with blue team detections.
@@ -1014,11 +1034,11 @@ impl RedBlueCorrelator {
         for (operation_id, activities) in &red_reports {
             let report = self.correlate(activities, &blue_detections, operation_id);
 
-            // Save markdown report
+            // Save markdown report under {op_id}/ subdirectory
             let markdown = Self::generate_report_markdown(&report);
-            let report_path = self
-                .reports_dir
-                .join(format!("correlation_{operation_id}.md"));
+            let op_dir = self.reports_dir.join(operation_id);
+            std::fs::create_dir_all(&op_dir)?;
+            let report_path = op_dir.join("correlation.md");
             std::fs::write(&report_path, &markdown)?;
             info!(path = %report_path.display(), "Generated correlation report");
 

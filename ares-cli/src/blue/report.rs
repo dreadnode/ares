@@ -21,14 +21,14 @@ pub(crate) async fn blue_report(
 
     // Determine what to generate: operation report or single investigation report
     if let Some(ref inv_id) = investigation_id {
-        // Single investigation report
+        // Single investigation report (no operation context)
         let report = generate_investigation_report(&mut conn, &generator, inv_id).await?;
-        let path = save_report(&output_dir, inv_id, &report)?;
+        let path = save_investigation_report(&output_dir, None, inv_id, &report)?;
         println!("Investigation report saved to {path}");
     } else if let Some(ref op_id) = operation_id {
         // Operation report (multi-investigation)
         let report = generate_operation_report(&mut conn, &generator, op_id).await?;
-        let path = save_report(&output_dir, op_id, &report)?;
+        let path = save_operation_report(&output_dir, op_id, &report)?;
         println!("Operation report saved to {path}");
     } else if latest {
         // Try operation first, fall back to investigation
@@ -39,7 +39,7 @@ pub(crate) async fn blue_report(
                 ares_core::state::list_investigations_for_operation(&mut conn, op_id).await?;
             if !inv_ids.is_empty() {
                 let report = generate_operation_report(&mut conn, &generator, op_id).await?;
-                let path = save_report(&output_dir, op_id, &report)?;
+                let path = save_operation_report(&output_dir, op_id, &report)?;
                 println!("Operation report saved to {path}");
                 return Ok(());
             }
@@ -49,7 +49,7 @@ pub(crate) async fn blue_report(
             .await?
             .context("No investigations or operations found")?;
         let report = generate_investigation_report(&mut conn, &generator, &inv_id).await?;
-        let path = save_report(&output_dir, &inv_id, &report)?;
+        let path = save_investigation_report(&output_dir, None, &inv_id, &report)?;
         println!("Investigation report saved to {path}");
     } else {
         anyhow::bail!("Either --operation-id, --investigation-id, or --latest is required");
@@ -103,10 +103,33 @@ async fn generate_operation_report(
         .context("Failed to render operation report")
 }
 
-fn save_report(output_dir: &str, id: &str, report: &str) -> Result<String> {
-    std::fs::create_dir_all(output_dir)
-        .with_context(|| format!("Failed to create report directory: {output_dir}"))?;
-    let path = format!("{output_dir}/{id}_report.md");
+/// Save a blue team operation report under `{output_dir}/{op_id}/`.
+fn save_operation_report(output_dir: &str, op_id: &str, report: &str) -> Result<String> {
+    let dir = format!("{output_dir}/{op_id}");
+    std::fs::create_dir_all(&dir)
+        .with_context(|| format!("Failed to create report directory: {dir}"))?;
+    let path = format!("{dir}/blue_operation.md");
+    std::fs::write(&path, report).with_context(|| format!("Failed to write report to {path}"))?;
+    Ok(path)
+}
+
+/// Save a blue team investigation report.
+///
+/// When `op_id` is provided, saves under `{output_dir}/{op_id}/`.
+/// Otherwise saves directly in `{output_dir}/`.
+fn save_investigation_report(
+    output_dir: &str,
+    op_id: Option<&str>,
+    inv_id: &str,
+    report: &str,
+) -> Result<String> {
+    let dir = match op_id {
+        Some(op) => format!("{output_dir}/{op}"),
+        None => output_dir.to_string(),
+    };
+    std::fs::create_dir_all(&dir)
+        .with_context(|| format!("Failed to create report directory: {dir}"))?;
+    let path = format!("{dir}/blue_investigation_{inv_id}.md");
     std::fs::write(&path, report).with_context(|| format!("Failed to write report to {path}"))?;
     Ok(path)
 }

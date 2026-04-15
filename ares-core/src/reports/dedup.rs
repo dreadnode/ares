@@ -30,6 +30,10 @@ pub fn dedup_credentials(creds: &[Credential]) -> Vec<Credential> {
 }
 
 /// Deduplicate hashes by (domain, username, hash_value) case-insensitively.
+///
+/// Empty-domain entries (from secretsdump local account dumps) are dropped when
+/// a domain-qualified entry with the same username and hash value already exists.
+///
 /// Sorts with Administrator and krbtgt first.
 pub fn dedup_hashes(hashes: &[Hash]) -> Vec<Hash> {
     let mut seen = HashSet::new();
@@ -44,6 +48,31 @@ pub fn dedup_hashes(hashes: &[Hash]) -> Vec<Hash> {
             result.push(h.clone());
         }
     }
+
+    // Build a set of (username, hash_value) pairs that have a domain-qualified entry.
+    let qualified: HashSet<(String, String)> = result
+        .iter()
+        .filter(|h| !h.domain.trim().is_empty())
+        .map(|h| {
+            (
+                h.username.trim().to_lowercase(),
+                h.hash_value.trim().to_lowercase(),
+            )
+        })
+        .collect();
+
+    // Drop empty-domain entries that are duplicated by a domain-qualified entry.
+    result.retain(|h| {
+        if h.domain.trim().is_empty() {
+            let key = (
+                h.username.trim().to_lowercase(),
+                h.hash_value.trim().to_lowercase(),
+            );
+            !qualified.contains(&key)
+        } else {
+            true
+        }
+    });
 
     // Sort: Administrator first, then krbtgt, then alphabetical
     result.sort_by(|a, b| {
@@ -234,5 +263,36 @@ mod tests {
     fn dedup_users_empty_input() {
         let result = dedup_users(&[]);
         assert!(result.is_empty());
+    }
+
+    #[test]
+    fn dedup_hashes_collapses_empty_domain_when_qualified_exists() {
+        let hashes = vec![
+            make_hash("Administrator", "contoso.local", "aabb1122"),
+            make_hash("Administrator", "", "aabb1122"), // secretsdump local
+        ];
+        let result = dedup_hashes(&hashes);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].domain, "contoso.local");
+    }
+
+    #[test]
+    fn dedup_hashes_keeps_empty_domain_when_no_qualified() {
+        let hashes = vec![make_hash("localuser", "", "aabb1122")];
+        let result = dedup_hashes(&hashes);
+        assert_eq!(result.len(), 1);
+    }
+
+    #[test]
+    fn dedup_hashes_collapses_multiple_empty_domain_entries() {
+        let hashes = vec![
+            make_hash("admin", "contoso.local", "hash1"),
+            make_hash("admin", "", "hash1"),
+            make_hash("svc_user", "fabrikam.local", "hash2"),
+            make_hash("svc_user", "", "hash2"),
+        ];
+        let result = dedup_hashes(&hashes);
+        assert_eq!(result.len(), 2);
+        assert!(result.iter().all(|h| !h.domain.is_empty()));
     }
 }
