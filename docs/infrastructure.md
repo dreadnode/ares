@@ -2,20 +2,15 @@
 
 # Infrastructure Reference
 
-This document covers how to build agent container images, deploy AWS
-infrastructure, and manage the provisioning pipeline.
+This document covers how to build agent container images and manage the
+provisioning pipeline.
 
 ## Overview
 
-Ares agents run on two deployment targets:
-
-1. **Kubernetes (EKS)** -- Multi-agent operations with orchestrator + 7
-   specialized worker pods in the `attack-simulation` namespace.
-2. **EC2 (Golden Image)** -- Single Kali instance with all tools, managed
-   via AWS SSM.
-
-Both targets use the same Ansible roles for tool installation, and Warpgate
-for image building.
+Ares agents run as container images built with
+[Warpgate](https://github.com/cowdogmoo/warpgate) and provisioned with the
+`dreadnode.nimbus_range` Ansible collection. Deploy them however fits your
+environment -- Kubernetes, Docker Compose, standalone containers, or bare metal.
 
 ## Directory Layout
 
@@ -67,25 +62,6 @@ warpgate-templates/                 Container image build templates
   ares-{recon,credential-access,cracker,acl,privesc,lateral-movement,coercion}-agent/
   ares-cracker-{agent-gpu,base-gpu}/
   ares-blue-{agent,triage-agent,threat-hunter-agent,lateral-analyst-agent}/
-
-infra/                              Terragrunt deployment configs
-  root.hcl                          Shared root (S3 remote state, AWS provider)
-  ares-deployment/
-    host-registry.yaml              Host metadata
-    dev/
-      env.hcl                       Argonaut dev env (account 897722667582, VPC 172.16.0.0/16)
-      us-west-2/
-        region.hcl
-        ares-storage/               S3 bucket for agent artifacts
-    staging/
-      env.hcl                       Alpha-operator-range staging (account 381491903301, VPC 10.1.0.0/16)
-      us-west-1/
-        region.hcl
-        kali-ares/                  Golden image EC2 instance
-
-modules/                            Terraform modules
-  terraform-aws-project-storage/    S3 bucket + versioning + lifecycle rules
-  terraform-aws-instance-factory/   EC2 instance + IAM + SSM + security groups
 ```
 
 ## Building Container Images
@@ -110,6 +86,10 @@ kalilinux/kali-rolling
         ├── ares-coercion-agent      (+coercion_tools)
         ├── ares-blue-*              (blue team agents)
         └── ares-worker              (generic worker, no extra tools)
+
+nvidia/cuda:12.6.0-runtime-ubuntu24.04
+  └── ares-cracker-base-gpu (hashcat compiled from source with CUDA)
+        └── ares-cracker-agent-gpu (+john, wordlists)
 
 python:3.13.7-slim
   └── ares-orchestrator (pip install ares[postgres], no Ansible)
@@ -163,92 +143,6 @@ The `tools.yaml` file at the repo root is the single source of truth for
 which binaries are expected per role. The build scripts
 (`ares-worker/build.rs`, `ares-core/build.rs`) validate against it.
 
-## AWS Infrastructure
-
-### S3 Artifact Storage
-
-**Location:** `infra/ares-deployment/dev/us-west-2/ares-storage/`
-
-- Bucket: `dev-argonaut-ares`
-- Versioning enabled
-- Lifecycle: 30d -> STANDARD_IA, 90d -> GLACIER, 365d expiration
-- All agents have read/write access via IRSA
-
-```bash
-cd infra/ares-deployment/dev/us-west-2/ares-storage
-terragrunt apply
-```
-
-### EKS / Kubernetes
-
-The EKS cluster is shared infrastructure managed in the DreadOps repo:
-
-- **Cluster config:** `DreadOps/dread-infra/argonaut/dev/us-west-2/eks/terragrunt.hcl`
-- **Cluster:** `dev-argonaut`, K8s 1.34, us-west-2
-- **Namespace:** `attack-simulation`
-
-7 IRSA roles are defined in the EKS config for ares agents:
-
-| Service Account | Agent | S3 Access |
-| --- | --- | --- |
-| `ares-enum-agent` | Recon | `dev-argonaut-ares` (rw) |
-| `ares-cracker-agent` | Cracker | `dev-argonaut-ares` (rw) |
-| `ares-acl-agent` | ACL | `dev-argonaut-ares` (rw) |
-| `ares-privesc-agent` | Privesc | `dev-argonaut-ares` (rw) |
-| `ares-lateral-movement-agent` | Lateral | `dev-argonaut-ares` (rw) |
-| `ares-poisoning-agent` | Coercion | `dev-argonaut-ares` (rw) |
-| `atomic-red-team` | Atomic Red Team | `dev-argonaut-ares` (rw) |
-
-To modify IRSA roles, edit the `application_irsa_roles` block in the DreadOps
-EKS terragrunt config and apply from that repo.
-
-### EC2 Golden Image (kali-ares)
-
-**Location:** `infra/ares-deployment/staging/us-west-1/kali-ares/`
-
-- Instance: t3.xlarge, Kali Linux
-- AMI: `ami-0632f108c12bf9dbd` (pre-built Ares golden image)
-- Provisioned post-deploy via Ansible (`goad_attack_box.yml`)
-- SSM-managed (no SSH keys, no open ports)
-- Encrypted EBS gp3 100GB
-- Workspace: `/ares`
-
-```bash
-cd infra/ares-deployment/staging/us-west-1/kali-ares
-terragrunt apply
-```
-
-### Environments
-
-| Environment | Account | Region | VPC CIDR | Purpose |
-| --- | --- | --- | --- | --- |
-| Argonaut dev | 897722667582 | us-west-2 | 172.16.0.0/16 | EKS + S3 storage |
-| Alpha-operator-range staging | 381491903301 | us-west-1 | 10.1.0.0/16 | Golden images + GOAD range |
-
-Cross-account VPC peering connects the two for agent-to-range communication.
-
-## Terraform Modules
-
-### terraform-aws-project-storage
-
-Creates S3 buckets with:
-
-- Versioning and lifecycle policies
-- KMS or AES256 encryption
-- Public access blocking
-- Optional access logging and CORS
-
-### terraform-aws-instance-factory
-
-Creates EC2 instances with:
-
-- IAM instance profiles (SSM + CloudWatch)
-- Security groups (internal VPC only)
-- Encrypted EBS volumes
-- User data templates
-- IMDSv2 enforcement
-- Optional Ansible provisioning hooks
-
 ## Ansible Collection Details
 
 ### Installing Dependencies
@@ -256,7 +150,6 @@ Creates EC2 instances with:
 ```bash
 cd ansible
 ansible-galaxy collection install -r requirements.yml
-ansible-galaxy role install -r requirements.yml
 ```
 
 ### Collection Dependencies
@@ -298,3 +191,44 @@ Three roles provide the telemetry layer for deployed infrastructure:
 
 These are used by `playbooks/linux/attacker_setup.yml` and
 `playbooks/windows/target_setup.yml` for range host telemetry.
+
+## Deployment Examples
+
+### Kubernetes
+
+Deploy the orchestrator and workers in a namespace:
+
+```bash
+# Orchestrator pod (interactive)
+kubectl run ares-orchestrator \
+  --image=ghcr.io/dreadnode/ares-orchestrator:latest \
+  -it --rm \
+  --env="REDIS_URL=redis://redis:6379" \
+  --env="ANTHROPIC_API_KEY=$ANTHROPIC_API_KEY"
+
+# Worker deployment (long-running)
+kubectl create deployment ares-recon \
+  --image=ghcr.io/dreadnode/ares-recon-agent:latest
+```
+
+### Docker Compose
+
+```yaml
+services:
+  redis:
+    image: redis:7-alpine
+    ports: ["6379:6379"]
+
+  orchestrator:
+    image: ghcr.io/dreadnode/ares-orchestrator:latest
+    environment:
+      REDIS_URL: redis://redis:6379
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+    depends_on: [redis]
+
+  recon-worker:
+    image: ghcr.io/dreadnode/ares-recon-agent:latest
+    environment:
+      REDIS_URL: redis://redis:6379
+    depends_on: [redis]
+```
