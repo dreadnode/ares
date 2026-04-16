@@ -84,7 +84,7 @@ fn test_graph_summary() {
 #[test]
 fn test_looks_like_hostname() {
     assert!(looks_like_hostname("dc01.contoso.local"));
-    assert!(looks_like_hostname("web.example.com"));
+    assert!(looks_like_hostname("web.contoso.local"));
     assert!(!looks_like_hostname("192.168.58.10"));
     assert!(!looks_like_hostname("abc"));
     assert!(!looks_like_hostname("1.2.3.4"));

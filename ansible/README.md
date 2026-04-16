@@ -161,7 +161,7 @@ Installs and configures the **Mythic C2 framework** and optional agent packages.
   vars:
     fluent_bit_env: dev
     fluent_bit_deployment_name: default
-    fluent_bit_opensearch_custom_domain: example.com
+    fluent_bit_opensearch_custom_domain: contoso.local
     fluent_bit_opensearch_username: admin
     fluent_bit_opensearch_password: password
     fluent_bit_version: "4.0.1"
@@ -182,7 +182,7 @@ Installs and configures the **Mythic C2 framework** and optional agent packages.
   vars:
     fluent_bit_env: dev
     fluent_bit_deployment_name: default
-    fluent_bit_opensearch_custom_domain: example.com
+    fluent_bit_opensearch_custom_domain: contoso.local
     fluent_bit_opensearch_username: admin
     fluent_bit_opensearch_password: password
     fluent_bit_version: "4.0.1"

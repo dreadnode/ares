@@ -77,7 +77,7 @@ pub(super) fn sanitize_credential(
     if !cred.domain.is_empty() && !cred.domain.contains('.') {
         let domain_upper = cred.domain.to_uppercase();
         if let Some(fqdn) = netbios_to_fqdn.get(&domain_upper) {
-            // netbios_to_fqdn maps SHORTNAME → host.domain.local
+            // netbios_to_fqdn maps SHORTNAME → host.contoso.local
             // Extract the domain suffix
             let parts: Vec<&str> = fqdn.split('.').collect();
             if parts.len() >= 3 {

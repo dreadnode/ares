@@ -60,7 +60,7 @@ run_parallel_detections(technique_ids=["T1003", "T1003.006", "T1558"])
 
 ```text
 # Pivot by compromised host
-get_host_activity(hostname="dc01.corp.local")
+get_host_activity(hostname="dc01.contoso.local")
 
 # Check for lateral movement indicators
 query_loki_logs(
@@ -94,7 +94,7 @@ query_logs_around_timestamp(
 )
 
 # 4. Pivot by host and user (LATERAL stage)
-get_host_activity(hostname="dc01.corp.local")
+get_host_activity(hostname="dc01.contoso.local")
 get_user_activity(username="admin")
 
 # 5. Check for attack indicators across hosts

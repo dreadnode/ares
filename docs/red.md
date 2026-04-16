@@ -272,15 +272,15 @@ dispatch_recon(task_type="network_scan", targets="10.0.0.0/24")
 → RECON executes: nmap_scan - Discover live hosts and services
 
 # User enumeration (unauthenticated)
-dispatch_recon(task_type="user_enumeration", targets="DC_IP", domain="corp.local")
+dispatch_recon(task_type="user_enumeration", targets="DC_IP", domain="contoso.local")
 → RECON executes: enumerate_users - Get domain user list
 
 # Share enumeration
-dispatch_recon(task_type="share_enumeration", targets="DC_IP", domain="corp.local")
+dispatch_recon(task_type="share_enumeration", targets="DC_IP", domain="contoso.local")
 → RECON executes: enumerate_shares - Find accessible shares
 
 # Domain information
-dispatch_recon(task_type="domain_info", targets="DC_IP", domain="corp.local")
+dispatch_recon(task_type="domain_info", targets="DC_IP", domain="contoso.local")
 → RECON executes: get_domain_info - Domain controllers, trusts, etc.
 ```
 
@@ -304,7 +304,7 @@ CREDENTIAL_ACCESS executes:
 **Every time a credential is found**, orchestrator dispatches:
 
 ```text
-1. dispatch_recon(task_type="bloodhound", domain="corp.local", username="user", password="pass")  # pragma: allowlist secret
+1. dispatch_recon(task_type="bloodhound", domain="contoso.local", username="user", password="pass")  # pragma: allowlist secret
    → Run BloodHound collection for attack path analysis
 
 2. dispatch_credential_access(task="secretsdump", targets="ALL_DCs")
