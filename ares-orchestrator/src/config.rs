@@ -356,9 +356,9 @@ mod tests {
         // No colon
         assert!(parse_credential_spec("admin", "").is_none());
         // Empty username
-        assert!(parse_credential_spec(":pass@domain.local", "").is_none());
+        assert!(parse_credential_spec(":pass@contoso.local", "").is_none());
         // Empty password
-        assert!(parse_credential_spec("admin:@domain.local", "").is_none());
+        assert!(parse_credential_spec("admin:@contoso.local", "").is_none());
         // Empty password without domain
         assert!(parse_credential_spec("admin:", "").is_none());
     }
