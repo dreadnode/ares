@@ -10,13 +10,13 @@ on:
       - synchronize
       - reopened
     paths:
-      - 'templates/**'
+      - 'warpgate-templates/**'
       - '.github/workflows/validate-templates.yaml'
   push:
     branches:
       - main
     paths:
-      - 'templates/**'
+      - 'warpgate-templates/**'
       - '.github/workflows/validate-templates.yaml'
   workflow_dispatch:
 
@@ -83,7 +83,7 @@ jobs:
       - name: Find all templates
         id: find-templates
         run: |
-          templates=$(find templates -name 'warpgate.yaml' -type f)
+          templates=$(find warpgate-templates -name 'warpgate.yaml' -type f)
           echo "Found templates:"
           echo "$templates"
           {
@@ -118,7 +118,7 @@ jobs:
       - name: Check required files
         run: |
           failed=0
-          for template_dir in templates/*/; do
+          for template_dir in warpgate-templates/*/; do
             template_name=$(basename "$template_dir")
             echo "::group::Checking $template_name"
 
@@ -142,7 +142,7 @@ jobs:
       - name: Validate YAML syntax
         run: |
           pip install yamllint
-          find templates -name '*.yaml' -o -name '*.yml' | while read -r file; do
+          find warpgate-templates -name '*.yaml' -o -name '*.yml' | while read -r file; do
             echo "Checking YAML syntax: $file"
             yamllint -d "{extends: relaxed, rules: {line-length: {max: 120}}}" "$file"
           done
@@ -182,7 +182,7 @@ jobs:
 
           has_errors = False
 
-          for template_file in Path('templates').rglob('warpgate.yaml'):
+          for template_file in Path('warpgate-templates').rglob('warpgate.yaml'):
               print(f"{'='*80}")
               print(f"Validating schema for: {template_file}")
               print('='*80)
@@ -242,7 +242,7 @@ jobs:
           required_fields = ['name', 'version', 'description', 'author', 'license']
           failed = False
 
-          for template_file in Path('templates').rglob('warpgate.yaml'):
+          for template_file in Path('warpgate-templates').rglob('warpgate.yaml'):
               print(f"\nChecking metadata in: {template_file}")
 
               with open(template_file) as f:
@@ -296,7 +296,7 @@ jobs:
           failed = False
           env_vars_found = set()
 
-          for template_file in Path('templates').rglob('warpgate.yaml'):
+          for template_file in Path('warpgate-templates').rglob('warpgate.yaml'):
               print(f"\n{'='*80}")
               print(f"Checking provisioners in: {template_file}")
               print('='*80)

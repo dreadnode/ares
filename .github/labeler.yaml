@@ -1,7 +1,7 @@
 ---
 area/templates:
   - changed-files:
-      - any-glob-to-any-file: "templates/**/*"
+      - any-glob-to-any-file: "warpgate-templates/**/*"
 
 area/docs:
   - changed-files:

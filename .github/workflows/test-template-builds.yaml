@@ -10,7 +10,7 @@ on:
       - synchronize
       - reopened
     paths:
-      - 'templates/**'
+      - 'warpgate-templates/**'
       - '.github/workflows/test-template-builds.yaml'
 
 permissions:
@@ -46,13 +46,13 @@ jobs:
         id: detect
         run: |
           # Get list of changed files in templates/
-          CHANGED_FILES=$(git diff --name-only origin/${{ github.base_ref }}...HEAD -- templates/)
+          CHANGED_FILES=$(git diff --name-only origin/${{ github.base_ref }}...HEAD -- warpgate-templates/)
 
           echo "Changed files:"
           echo "$CHANGED_FILES"
 
           # Extract unique template names from changed paths
-          CHANGED_TEMPLATES=$(echo "$CHANGED_FILES" | grep -oP 'templates/\K[^/]+' | sort -u)
+          CHANGED_TEMPLATES=$(echo "$CHANGED_FILES" | grep -oP 'warpgate-templates/\K[^/]+' | sort -u)
 
           echo ""
           echo "Changed templates:"
@@ -81,7 +81,7 @@ jobs:
           CHANGED_BASE_LIST="[]"
 
           for template_name in $CHANGED_TEMPLATES; do
-            template_dir="templates/$template_name"
+            template_dir="warpgate-templates/$template_name"
 
             if [ ! -f "${template_dir}/warpgate.yaml" ]; then
               echo "Warning: $template_name has no warpgate.yaml, skipping"
@@ -364,7 +364,7 @@ jobs:
 
       - name: Test build ${{ matrix.name }} (amd64)
         run: |
-          cd "$GITHUB_WORKSPACE/templates/${{ matrix.name }}"
+          cd "$GITHUB_WORKSPACE/warpgate-templates/${{ matrix.name }}"
 
           export PROVISION_REPO_PATH="$HOME/${{ matrix.provision_repo_path }}"
 
@@ -617,7 +617,7 @@ jobs:
 
       - name: Test build ${{ matrix.name }} (amd64)
         run: |
-          cd "$GITHUB_WORKSPACE/templates/${{ matrix.name }}"
+          cd "$GITHUB_WORKSPACE/warpgate-templates/${{ matrix.name }}"
 
           export PROVISION_REPO_PATH="$HOME/${{ matrix.provision_repo_path }}"
 

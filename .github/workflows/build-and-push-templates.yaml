@@ -10,13 +10,13 @@ on:
       - synchronize
       - reopened
     paths:
-      - 'templates/**'
+      - 'warpgate-templates/**'
       - '.github/workflows/build-and-push-templates.yaml'
   push:
     branches:
       - main
     paths:
-      - 'templates/**'
+      - 'warpgate-templates/**'
       - '.github/workflows/build-and-push-templates.yaml'
   workflow_dispatch:
     inputs:
@@ -195,7 +195,7 @@ jobs:
           PLATFORMS_MAP="{}"
           ANSIBLE_MAP="{}"
           AMI_TEMPLATES=()
-          for template_dir in "$GITHUB_WORKSPACE"/templates/*/; do
+          for template_dir in "$GITHUB_WORKSPACE"/warpgate-templates/*/; do
             if [ -f "${template_dir}warpgate.yaml" ]; then
               template_name=$(basename "$template_dir")
 
@@ -660,7 +660,7 @@ jobs:
 
       - name: Validate template configuration
         run: |
-          cd "$GITHUB_WORKSPACE/templates/${{ matrix.name }}"
+          cd "$GITHUB_WORKSPACE/warpgate-templates/${{ matrix.name }}"
 
           # Verify warpgate.yaml exists
           if [ ! -f "warpgate.yaml" ]; then
@@ -673,7 +673,7 @@ jobs:
 
       - name: Pre-load base image into BuildKit cache
         run: |
-          cd "$GITHUB_WORKSPACE/templates/${{ matrix.name }}"
+          cd "$GITHUB_WORKSPACE/warpgate-templates/${{ matrix.name }}"
 
           # Extract base image from warpgate.yaml
           BASE_IMAGE=$(grep -A2 "^base:" warpgate.yaml | grep "image:" | head -1 | awk '{print $2}' | tr -d '"'"'")
@@ -1152,7 +1152,7 @@ jobs:
 
       - name: Validate template configuration
         run: |
-          cd "$GITHUB_WORKSPACE/templates/${{ matrix.name }}"
+          cd "$GITHUB_WORKSPACE/warpgate-templates/${{ matrix.name }}"
 
           # Verify warpgate.yaml exists
           if [ ! -f "warpgate.yaml" ]; then
@@ -1165,7 +1165,7 @@ jobs:
 
       - name: Pre-load base image into BuildKit cache
         run: |
-          cd "$GITHUB_WORKSPACE/templates/${{ matrix.name }}"
+          cd "$GITHUB_WORKSPACE/warpgate-templates/${{ matrix.name }}"
 
           # Extract base image from warpgate.yaml
           BASE_IMAGE=$(grep -A2 "^base:" warpgate.yaml | grep "image:" | head -1 | awk '{print $2}' | tr -d '"'"'")
@@ -1576,13 +1576,13 @@ jobs:
 
       - name: Validate template configuration
         run: |
-          cd "$GITHUB_WORKSPACE/templates/${{ matrix.name }}"
+          cd "$GITHUB_WORKSPACE/warpgate-templates/${{ matrix.name }}"
           [ ! -f "warpgate.yaml" ] && echo "ERROR: warpgate.yaml not found" && exit 1
           cat warpgate.yaml
 
       - name: Pre-load base image into BuildKit cache
         run: |
-          cd "$GITHUB_WORKSPACE/templates/${{ matrix.name }}"
+          cd "$GITHUB_WORKSPACE/warpgate-templates/${{ matrix.name }}"
           BASE_IMAGE=$(grep -A2 "^base:" warpgate.yaml | grep "image:" | head -1 | awk '{print $2}' | tr -d '"'"'")
           if [ -n "$BASE_IMAGE" ]; then
             echo "Pre-loading base image: $BASE_IMAGE"
@@ -1905,13 +1905,13 @@ jobs:
 
       - name: Validate template configuration
         run: |
-          cd "$GITHUB_WORKSPACE/templates/${{ matrix.name }}"
+          cd "$GITHUB_WORKSPACE/warpgate-templates/${{ matrix.name }}"
           [ ! -f "warpgate.yaml" ] && echo "ERROR: warpgate.yaml not found" && exit 1
           cat warpgate.yaml
 
       - name: Pre-load base image into BuildKit cache
         run: |
-          cd "$GITHUB_WORKSPACE/templates/${{ matrix.name }}"
+          cd "$GITHUB_WORKSPACE/warpgate-templates/${{ matrix.name }}"
           BASE_IMAGE=$(grep -A2 "^base:" warpgate.yaml | grep "image:" | head -1 | awk '{print $2}' | tr -d '"'"'")
           if [ -n "$BASE_IMAGE" ]; then
             echo "Pre-loading base image: $BASE_IMAGE"
