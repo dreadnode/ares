@@ -209,6 +209,7 @@ impl BlueOrchestrator {
                     let raw_model = request
                         .get("model")
                         .and_then(|v| v.as_str())
+                        .filter(|s| !s.is_empty())
                         .unwrap_or(&self.model_name);
                     // Strip provider prefix (e.g. "openai/gpt-5.2" → "gpt-5.2")
                     let model = raw_model
@@ -290,6 +291,36 @@ impl BlueOrchestrator {
                                 timeout_secs = INVESTIGATION_TIMEOUT_SECS,
                                 "Investigation timed out — cancelling"
                             );
+
+                            // Write timed_out status so downstream consumers know
+                            // what happened (the future was dropped before it could
+                            // write its own final status).
+                            investigation
+                                .state_writer
+                                .set_status(
+                                    &mut conn,
+                                    "timed_out",
+                                    Some("Investigation exceeded timeout"),
+                                )
+                                .await
+                                .ok();
+
+                            // Release the lock that was acquired inside the
+                            // now-cancelled future.
+                            investigation
+                                .state_writer
+                                .release_lock(&mut conn)
+                                .await
+                                .ok();
+
+                            // Generate a partial report from whatever evidence was
+                            // collected before the timeout.
+                            investigation::generate_report(
+                                &mut conn,
+                                &investigation.investigation_id,
+                                investigation.report_dir.as_deref(),
+                            )
+                            .await;
                         }
                     }
 
@@ -319,13 +350,25 @@ impl BlueOrchestrator {
                     if is_conn_error {
                         warn!(
                             delay_secs = retry_delay.as_secs(),
-                            "Blue orchestrator: connection error, retrying: {e}"
+                            "Blue orchestrator: connection error, will reconnect: {e}"
                         );
                         tokio::select! {
                             _ = tokio::time::sleep(retry_delay) => {}
                             _ = shutdown_rx.changed() => break,
                         }
                         retry_delay = (retry_delay * 2).min(max_retry_delay);
+
+                        // Reconnect the task queue — the previous ConnectionManager
+                        // can be stuck after Redis restarts or prolonged outages.
+                        match BlueTaskQueue::connect(&self.redis_url).await {
+                            Ok(new_queue) => {
+                                task_queue = new_queue;
+                                info!("Blue orchestrator: reconnected to Redis");
+                            }
+                            Err(reconnect_err) => {
+                                warn!("Blue orchestrator: reconnect failed: {reconnect_err}");
+                            }
+                        }
                     } else {
                         error!("Blue orchestrator: non-connection error: {e}");
                         tokio::time::sleep(Duration::from_secs(5)).await;

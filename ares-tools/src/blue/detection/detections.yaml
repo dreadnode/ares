@@ -1,0 +1,657 @@
+# Detection Configuration
+#
+# This file defines all detection templates, activity scopes, and event ID
+# reference data. It is the single source of truth for the blue team detection
+# system. The Rust code loads this at compile time via include_str!() and
+# composes LogQL queries from the structured fields.
+#
+# To add a new detection:
+#   1. Add an entry under `templates:` with the required fields
+#   2. Use `event_ids` for Windows Event ID pre-filters
+#   3. Use `patterns` for a single regex filter stage (OR within)
+#   4. Use `filter_stages` for multiple chained regex filters (AND between stages)
+#   5. Rebuild — the catalog and query builder pick it up automatically
+#
+# LogQL composition order:
+#   {selector} + event_filter(event_ids) + pattern_filter(patterns) + pattern_filter(filter_stages[0]) + ...
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Event ID Reference
+# ═══════════════════════════════════════════════════════════════════════════════
+# Gives the agent context about what each Windows Security/System event means.
+# Not used for query building — purely informational.
+
+event_id_reference:
+  "4624": "Successful logon"
+  "4625": "Failed logon"
+  "4648": "Logon with explicit credentials"
+  "4656": "Handle to object requested"
+  "4658": "Handle to object closed"
+  "4662": "Operation performed on directory service object"
+  "4663": "Attempt to access object"
+  "4672": "Special privileges assigned to new logon"
+  "4688": "New process created"
+  "4697": "Service installed on system"
+  "4698": "Scheduled task created"
+  "4699": "Scheduled task deleted"
+  "4700": "Scheduled task enabled"
+  "4701": "Scheduled task disabled"
+  "4768": "Kerberos TGT requested (AS-REQ)"
+  "4769": "Kerberos service ticket requested (TGS-REQ)"
+  "4771": "Kerberos pre-authentication failed"
+  "4798": "User local group membership enumerated"
+  "4799": "Security-enabled local group membership enumerated"
+  "4876": "Certificate Services backup performed"
+  "4886": "Certificate Services received certificate request"
+  "4887": "Certificate Services approved and issued certificate"
+  "5136": "Directory service object modified"
+  "5140": "Network share accessed"
+  "5145": "Network share object access checked"
+  "7036": "Service state changed (System log)"
+  "7045": "New service installed (System log)"
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Activity Scopes
+# ═══════════════════════════════════════════════════════════════════════════════
+# Event ID groups used by get_host_activity and get_user_activity to pre-filter
+# the log stream to security-relevant events.
+
+activity_scopes:
+  host_attack_patterns:
+    - "4625"
+    - "4624"
+    - "4662"
+    - "4769"
+    - "4768"
+    - "5140"
+    - "7045"
+    - "4688"
+  host_all_security:
+    - "4624"
+    - "4625"
+    - "4648"
+    - "4662"
+    - "4663"
+    - "4672"
+    - "4688"
+    - "4768"
+    - "4769"
+    - "5140"
+    - "5145"
+    - "7045"
+    - "4697"
+    - "4698"
+  user_activity:
+    - "4624"
+    - "4625"
+    - "4648"
+    - "4662"
+    - "4768"
+    - "4769"
+    - "4672"
+    - "5140"
+    - "5145"
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Detection Templates
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+# Fields:
+#   description   - Human-readable name (required)
+#   mitre_id      - MITRE ATT&CK technique ID (required)
+#   tactic        - ATT&CK tactic (required)
+#   severity      - critical / high / medium / low (required)
+#   aliases       - Alternative names for this template (optional)
+#   red_team_tool - Ares red team tool that triggers this (optional)
+#   auto_pivot    - Whether blue agent should auto-investigate hits (default: false)
+#   log_source    - "windows-security" (default) or "windows-system"
+#   host_as_filter - Also add hostname as |= line filter (default: false)
+#   event_ids     - Windows Event IDs for pre-filtering (optional)
+#   patterns      - Single-stage regex patterns, OR'd (optional)
+#   filter_stages - Multi-stage regex filters, AND'd between stages (optional)
+#
+# Use `patterns` OR `filter_stages`, not both. `patterns` is shorthand for a
+# single filter stage.
+
+templates:
+  # ─── Reconnaissance & Discovery (TA0007) ──────────────────────────────────
+
+  detect_port_scanning:
+    description: "Network Port Scanning Detection"
+    mitre_id: "T1046"
+    tactic: discovery
+    severity: medium
+    red_team_tool: nmap_scan
+    auto_pivot: false
+    host_as_filter: true
+    patterns:
+      - 'nmap'
+      - 'masscan'
+      - 'syn.scan'
+      - 'port.scan'
+      - 'connection.refused'
+
+  detect_user_enumeration:
+    description: "AD User/Account Enumeration Detection"
+    aliases: [detect_account_enumeration]
+    mitre_id: "T1087.002"
+    tactic: discovery
+    severity: medium
+    red_team_tool: enumerate_users
+    event_ids: ["4662", "4798", "4799"]
+    patterns:
+      - 'samr'
+      - 'lsarpc'
+      - 'ldap'
+      - 'net.user'
+      - 'net.group'
+      - 'enumerate'
+      - 'crackmapexec'
+      - 'netexec'
+      - 'ldapsearch'
+
+  detect_share_enumeration:
+    description: "SMB Share Enumeration Detection"
+    mitre_id: "T1135"
+    tactic: discovery
+    severity: medium
+    red_team_tool: enumerate_shares
+    event_ids: ["5140", "5145"]
+    patterns:
+      - 'srvsvc'
+      - 'netuse'
+      - 'net.share'
+      - 'net.view'
+      - 'smbclient'
+      - 'crackmapexec'
+      - 'netexec'
+      - 'enum.share'
+      - 'share.enum'
+
+  # ─── Credential Access (TA0006) ────────────────────────────────────────────
+
+  detect_secretsdump:
+    description: "Credential Dumping Detection (secretsdump)"
+    mitre_id: "T1003"
+    tactic: credential_access
+    severity: critical
+    red_team_tool: secretsdump
+    patterns:
+      - 'drsuapi'
+      - 'samr'
+      - 'secretsdump'
+      - 'lsadump'
+      - 'ntds.dit'
+      - 'sam.dump'
+      - 'replicate'
+      - '1131f6'
+      - 'ds-replication'
+      - 'mimikatz'
+      - 'impacket'
+
+  detect_dcsync:
+    description: "DCSync Attack Detection"
+    mitre_id: "T1003.006"
+    tactic: credential_access
+    severity: critical
+    red_team_tool: secretsdump
+    event_ids: ["4662"]
+    patterns:
+      - 'dcsync'
+      - 'ds-replication'
+      - '1131f6aa'
+      - '1131f6ad'
+      - 'replication'
+      - 'drsuapi'
+      - 'directory.service.access'
+
+  detect_dcsync_replication:
+    description: "DCSync Replication GUID Detection"
+    mitre_id: "T1003.006"
+    tactic: credential_access
+    severity: critical
+    red_team_tool: secretsdump
+    event_ids: ["4662"]
+    patterns:
+      - '1131f6aa-9c07-11d1-f79f-00c04fc2dcd2'
+      - '1131f6ad-9c07-11d1-f79f-00c04fc2dcd2'
+      - '89e95b76-444d-4c62-991a-0facbeda640c'
+      - '1131f6aa'
+      - '1131f6ad'
+      - '89e95b76'
+
+  detect_kerberoasting:
+    description: "Kerberoasting Detection (TGS with RC4)"
+    mitre_id: "T1558.003"
+    tactic: credential_access
+    severity: high
+    red_team_tool: kerberoast
+    event_ids: ["4769"]
+    patterns:
+      - 'encryption.*type.*(0x17|rc4)'
+      - 'ticket.*encryption.*(0x17|rc4)'
+      - 'servicename.*(mssql|http|ldap|cifs)'
+
+  detect_asrep_roasting:
+    description: "AS-REP Roasting Detection (TGT without pre-auth)"
+    mitre_id: "T1558.004"
+    tactic: credential_access
+    severity: high
+    red_team_tool: asrep_roast
+    event_ids: ["4768"]
+    patterns:
+      - 'preauthtype.*0'
+      - 'pre.?auth.*type.*0'
+      - 'encryption.*type.*(0x17|rc4)'
+      - 'ticket.*options.*0x4'
+
+  detect_asrep_roasting_bulk:
+    description: "Bulk AS-REP Roasting Spray Detection"
+    mitre_id: "T1558.004"
+    tactic: credential_access
+    severity: high
+    red_team_tool: asrep_roast
+    event_ids: ["4768"]
+
+  detect_brute_force:
+    description: "Brute Force / Password Spray Detection"
+    aliases: [detect_password_spray]
+    mitre_id: "T1110"
+    tactic: credential_access
+    severity: medium
+    event_ids: ["4625", "4771"]
+    filter_stages:
+      - ['failed', 'invalid', 'denied']
+      - ['logon', 'auth']
+
+  detect_s4u_delegation:
+    description: "S4U Constrained Delegation Abuse Detection"
+    mitre_id: "T1558.003"
+    tactic: credential_access
+    severity: critical
+    red_team_tool: get_st
+    event_ids: ["4769"]
+    patterns:
+      - 's4u2self'
+      - 's4u2proxy'
+      - 'constrained.delegation'
+      - 'impersonate'
+      - 'forwardable'
+      - 'getst'
+      - 'cifs/'
+      - 'http/'
+      - 'administrator'
+      - 'trustedfordelegation'
+
+  detect_lsa_secrets_access:
+    description: "LSA Secrets Extraction Detection"
+    mitre_id: "T1003.004"
+    tactic: credential_access
+    severity: high
+    red_team_tool: secretsdump
+    event_ids: ["4656", "4663", "4658"]
+    patterns:
+      - 'security.policy.secrets'
+      - 'lsa.secrets'
+      - 'dpapi'
+      - 'defaultpassword'
+      - 'nlkm'
+      - 'cachedlogon'
+      - 'lsadump'
+      - 'reg.query.*security'
+
+  detect_ntlm_relay:
+    description: "NTLM Relay Attack Detection"
+    mitre_id: "T1557"
+    tactic: credential_access
+    severity: high
+    red_team_tool: ntlmrelayx
+    filter_stages:
+      - ['ntlm', 'relay', 'responder', 'inveigh']
+      - ['ntlmrelayx', 'smbrelay', 'signing.*not.*required', 'coerce']
+
+  detect_certificate_authentication:
+    description: "Certificate-Based Authentication Detection"
+    mitre_id: "T1649"
+    tactic: credential_access
+    severity: high
+    red_team_tool: certipy_auth
+    filter_stages:
+      - ['pkinit', 'pkca', 'smartcard', 'certificate.*auth']
+      - ['4768', 'tgt.*request', 'kerberos', 'certipy.*auth']
+
+  # ─── Lateral Movement (TA0008) ─────────────────────────────────────────────
+
+  detect_pass_the_hash:
+    description: "Pass-the-Hash Detection"
+    mitre_id: "T1550.002"
+    tactic: lateral_movement
+    severity: high
+    red_team_tool: domain_admin_checker
+    auto_pivot: true
+    event_ids: ["4624"]
+    patterns:
+      - 'ntlm'
+      - 'ntlmssp'
+      - 'pass.the.hash'
+      - 'logon.type.3'
+      - 'network.logon'
+      - 'crackmapexec'
+      - 'netexec'
+
+  detect_lateral_movement:
+    description: "Lateral Movement Detection (PSExec/WMI/WinRM)"
+    mitre_id: "T1021"
+    tactic: lateral_movement
+    severity: high
+    auto_pivot: true
+    event_ids: ["7045", "4648"]
+    patterns:
+      - 'psexec'
+      - 'wmic'
+      - 'winrm'
+      - 'powershell.-session'
+      - 'admin\$'
+      - 'c\$'
+      - 'ipc\$'
+      - 'service.install'
+      - 'remote.execution'
+
+  detect_smb_file_access:
+    description: "Suspicious SMB File Access Detection"
+    mitre_id: "T1039"
+    tactic: collection
+    severity: medium
+    red_team_tool: download_file_content
+    filter_stages:
+      - ['5145', 'file.*access', 'share.*access', 'smbclient']
+      - ['\.ps1', '\.bat', '\.cmd', '\.xml', '\.config', 'sysvol', 'netlogon', 'groups\.xml']
+
+  # ─── Privilege Escalation (TA0004) ─────────────────────────────────────────
+
+  detect_adcs_exploitation:
+    description: "ADCS Certificate Abuse Detection (ESC1-ESC15)"
+    aliases: [detect_certificate_abuse]
+    mitre_id: "T1649"
+    tactic: privilege_escalation
+    severity: high
+    red_team_tool: "certipy_*"
+    filter_stages:
+      - ['4886', '4887', '4876', 'certipy', 'certificate.*request']
+      - ['esc[0-9]', 'enrollee.*supplies.*subject', 'altname', 'upn']
+
+  detect_delegation_abuse:
+    description: "Kerberos Delegation Abuse Detection"
+    mitre_id: "T1134.001"
+    tactic: privilege_escalation
+    severity: high
+    red_team_tool: rbcd_write
+    filter_stages:
+      - ['delegation', 'msds-allowedtoactonbehalf', 'rbcd', 's4u']
+      - ['impersonate', 'constrained', 'unconstrained', 'getst', 'addcomputer']
+
+  detect_bloodhound:
+    description: "BloodHound/SharpHound Collection Detection"
+    aliases: [detect_bloodhound_collection]
+    mitre_id: "T1087"
+    tactic: discovery
+    severity: medium
+    red_team_tool: run_bloodhound
+    filter_stages:
+      - ['bloodhound', 'sharphound', 'adexplorer', 'ldap.*query']
+      - ['acl', 'objectsid', 'memberof', 'primarygroup', 'msds']
+
+  # ─── Persistence (TA0003) ──────────────────────────────────────────────────
+
+  detect_golden_ticket:
+    description: "Golden Ticket Detection"
+    mitre_id: "T1558.001"
+    tactic: persistence
+    severity: critical
+    red_team_tool: generate_golden_ticket
+    filter_stages:
+      - ['golden.*ticket', 'krbtgt', 'ticketer', 'krbcred']
+      - ['forged', '4769', 'kerberos.*ticket', 'enterprise.*admin']
+
+  # ─── Execution (TA0002) ────────────────────────────────────────────────────
+
+  detect_suspicious_execution:
+    description: "Suspicious Command Execution Detection"
+    mitre_id: "T1059"
+    tactic: execution
+    severity: medium
+    filter_stages:
+      - ['4688', 'powershell', 'pwsh', 'cmd\.exe', 'wscript', 'cscript']
+      - ['encodedcommand', 'bypass', 'hidden', 'downloadstring', 'invoke']
+
+  detect_service_creation:
+    description: "Suspicious Service Creation Detection"
+    mitre_id: "T1543.003"
+    tactic: execution
+    severity: high
+    red_team_tool: psexec
+    auto_pivot: true
+    event_ids: ["7045"]
+    patterns:
+      - 'PSEXE'
+      - 'BTOBTO'
+      - 'cmd\.exe'
+      - 'powershell'
+      - 'remcom'
+
+  detect_scheduled_task:
+    description: "Suspicious Scheduled Task Detection"
+    mitre_id: "T1053.005"
+    tactic: execution
+    severity: medium
+    red_team_tool: atexec
+    event_ids: ["4698"]
+    patterns:
+      - 'cmd\.exe'
+      - 'powershell'
+      - 'mshta'
+      - 'atexec'
+      - 'schtasks'
+
+  # ─── ADCS / Certipy Specific ───────────────────────────────────────────────
+
+  detect_certipy_enumeration:
+    description: "Certipy Certificate Template Recon Detection"
+    mitre_id: "T1649"
+    tactic: discovery
+    severity: medium
+    red_team_tool: certipy_find
+    filter_stages:
+      - ['certipy', 'ldap', '389', '636']
+      - ['mspki', 'pkienrollmentservice', 'certificatetemplates', 'pki']
+
+  detect_esc1_attack:
+    description: "ESC1 — Enrollee Supplies Subject Attack Detection"
+    mitre_id: "T1649"
+    tactic: privilege_escalation
+    severity: critical
+    red_team_tool: certipy_req_esc1
+    filter_stages:
+      - ['4886', '4887', 'certificate.*request', 'certipy']
+      - ['san=', 'subjectaltname', 'upn=', 'enrollee.*supplies', 'ct_flag']
+
+  detect_esc4_attack:
+    description: "ESC4 — Certificate Template ACL Modification Detection"
+    mitre_id: "T1649"
+    tactic: privilege_escalation
+    severity: high
+    filter_stages:
+      - ['5136', 'ldap.*modify', 'template.*modif']
+      - ['pki', 'certificatetemplate', 'mspki', 'enrollmentflag']
+
+  detect_esc8_attack:
+    description: "ESC8 — NTLM Relay to AD CS HTTP Endpoints Detection"
+    mitre_id: "T1649"
+    tactic: privilege_escalation
+    severity: critical
+    red_team_tool: ntlmrelayx
+    filter_stages:
+      - ['certsrv', 'certfnsh', 'certenroll', 'ntlmrelayx']
+      - ['relay', 'coerce', 'petitpotam', 'printerbug', 'dfscoerce']
+
+  # ─── BloodHound LDAP Signatures ────────────────────────────────────────────
+
+  detect_bloodhound_domain_enum:
+    description: "BloodHound Domain Trust Recon Detection"
+    mitre_id: "T1482"
+    tactic: discovery
+    severity: medium
+    red_team_tool: run_bloodhound
+    filter_stages:
+      - ['ldap', '389', '636', 'bloodhound', 'sharphound']
+      - ['trusteddomain', 'crossref', 'trusttype', 'trustdirection', 'trustattributes']
+
+  detect_bloodhound_acl_enum:
+    description: "BloodHound ACL/DACL Collection Detection"
+    mitre_id: "T1069.002"
+    tactic: discovery
+    severity: medium
+    red_team_tool: run_bloodhound
+    filter_stages:
+      - ['ldap', '389', '636', 'bloodhound', 'sharphound']
+      - ['ntsecuritydescriptor', 'dacl', 'securitydescriptor', 'allowedtoactonbehalf']
+
+  detect_bloodhound_session_enum:
+    description: "BloodHound Session Recon Detection"
+    mitre_id: "T1033"
+    tactic: discovery
+    severity: medium
+    red_team_tool: run_bloodhound
+    filter_stages:
+      - ['srvsvc', 'wkssvc', 'netsession', 'netwksta']
+      - ['enum', 'bloodhound', 'sharphound', 'session.*collection']
+
+  detect_bloodhound_gpo_enum:
+    description: "BloodHound GPO Recon Detection"
+    mitre_id: "T1615"
+    tactic: discovery
+    severity: medium
+    red_team_tool: run_bloodhound
+    filter_stages:
+      - ['ldap', '389', '636', 'bloodhound', 'sharphound']
+      - ['grouppolicycontainer', 'gplink', 'gpcfilesyspath', 'gpo']
+
+  detect_bloodhound_computer_enum:
+    description: "BloodHound Computer Object Recon Detection"
+    mitre_id: "T1018"
+    tactic: discovery
+    severity: medium
+    red_team_tool: run_bloodhound
+    filter_stages:
+      - ['ldap', '389', '636', 'bloodhound', 'sharphound']
+      - ['objectclass=computer', 'operatingsystem', 'serviceprincipalname', 'allowedtodelegateto']
+
+  # ─── Impacket Tool Fingerprints ────────────────────────────────────────────
+
+  detect_impacket_wmiexec:
+    description: "Impacket wmiexec WMI Remote Execution Detection"
+    mitre_id: "T1047"
+    tactic: execution
+    severity: high
+    red_team_tool: wmiexec
+    auto_pivot: true
+    filter_stages:
+      - ['wmi', 'win32_process', 'root\\cimv2']
+      - ['wmiexec', 'impacket', 'cmd.*/q.*/c', '127\.0\.0\.1.*admin\$']
+
+  detect_impacket_psexec:
+    description: "Impacket psexec Service-Based Execution Detection"
+    mitre_id: "T1569.002"
+    tactic: execution
+    severity: high
+    red_team_tool: psexec
+    auto_pivot: true
+    filter_stages:
+      - ['7045', 'service.*install', 'psexec', 'remcom']
+      - ['admin\$', '\\\\.*\\admin', 'service.*creat', 'cmd\.exe']
+
+  detect_impacket_smbexec:
+    description: "Impacket smbexec Stealthy Service Execution Detection"
+    mitre_id: "T1569.002"
+    tactic: execution
+    severity: high
+    red_team_tool: smbexec
+    auto_pivot: true
+    filter_stages:
+      - ['7045', 'service', 'smbexec']
+      - ['btobto', 'cmd.*echo.*\^>', '__output', 'execute\.bat']
+
+  detect_impacket_atexec:
+    description: "Impacket atexec Scheduled Task Execution Detection"
+    mitre_id: "T1053.002"
+    tactic: execution
+    severity: medium
+    red_team_tool: atexec
+    filter_stages:
+      - ['4698', '4699', '4700', '4701', 'schtask', 'taskscheduler', 'atsvc']
+      - ['atexec', 'impacket', 'cmd.*/c', 'schtasks']
+
+  detect_impacket_dcomexec:
+    description: "Impacket dcomexec DCOM Remote Execution Detection"
+    mitre_id: "T1021.003"
+    tactic: lateral_movement
+    severity: high
+    red_team_tool: dcomexec
+    auto_pivot: true
+    filter_stages:
+      - ['dcom', '135/tcp', 'rpc', 'mmc20', 'shellwindows', 'shellbrowser']
+      - ['dcomexec', 'impacket', 'executeshellcommand', 'document\.application']
+
+  detect_impacket_secretsdump_sam:
+    description: "Secretsdump SAM Database Extraction Detection"
+    mitre_id: "T1003.002"
+    tactic: credential_access
+    severity: high
+    red_team_tool: secretsdump
+    filter_stages:
+      - ['registry', 'hklm', 'winreg', 'samr']
+      - ['sam', 'system', 'security', 'secretsdump', 'reg.*save']
+
+  detect_impacket_secretsdump_lsa:
+    description: "Secretsdump LSA Secrets Extraction Detection"
+    mitre_id: "T1003.004"
+    tactic: credential_access
+    severity: high
+    red_team_tool: secretsdump
+    filter_stages:
+      - ['lsa', 'security', 'policy', 'secrets']
+      - ['\$machine', 'defaultpassword', 'nl\$', 'dpapi', 'secretsdump']
+
+  detect_impacket_ntlmrelayx:
+    description: "Impacket ntlmrelayx NTLM Relay Detection"
+    mitre_id: "T1557.001"
+    tactic: credential_access
+    severity: high
+    red_team_tool: ntlmrelayx
+    filter_stages:
+      - ['ntlm', 'relay', 'responder', 'inveigh']
+      - ['ntlmrelayx', 'smbrelay', 'signing.*not.*required', 'coerce']
+
+  detect_impacket_smbclient:
+    description: "Impacket smbclient Share Access Detection"
+    mitre_id: "T1021.002"
+    tactic: lateral_movement
+    severity: medium
+    red_team_tool: smbclient
+    filter_stages:
+      - ['smb', '445/tcp', 'cifs', 'smbclient']
+      - ['impacket', 'tree.*connect', 'shares.*enum', 'file.*access']
+
+  # ─── Service / Registry Precursors ─────────────────────────────────────────
+
+  detect_remote_registry_start:
+    description: "RemoteRegistry Service Start Detection"
+    mitre_id: "T1569.002"
+    tactic: execution
+    severity: medium
+    red_team_tool: secretsdump
+    log_source: windows-system
+    event_ids: ["7036", "7045"]
+    filter_stages:
+      - ['remoteregistry', 'remote.registry']
+      - ['running', 'started', 'start']

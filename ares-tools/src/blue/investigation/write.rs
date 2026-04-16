@@ -66,6 +66,17 @@ pub async fn add_evidence(args: &Value) -> Result<ToolOutput> {
         _ => pyramid_level.parse::<i32>().unwrap_or(2),
     };
 
+    let mitre_techniques: Vec<String> = args
+        .get("mitre_techniques")
+        .and_then(Value::as_array)
+        .map(|arr| {
+            arr.iter()
+                .filter_map(Value::as_str)
+                .map(String::from)
+                .collect()
+        })
+        .unwrap_or_default();
+
     let evidence_id = Uuid::new_v4().to_string();
 
     let evidence = serde_json::json!({
@@ -76,7 +87,7 @@ pub async fn add_evidence(args: &Value) -> Result<ToolOutput> {
         "timestamp": timestamp,
         "pyramid_level": pyramid_level_int,
         "confidence": confidence,
-        "mitre_techniques": [],
+        "mitre_techniques": mitre_techniques,
         "metadata": {},
         "validated": true,
     });
@@ -222,6 +233,17 @@ pub async fn add_evidence_batch(args: &Value) -> Result<ToolOutput> {
             _ => pyramid_level.parse::<i32>().unwrap_or(2),
         };
 
+        let mitre_techniques: Vec<String> = item
+            .get("mitre_techniques")
+            .and_then(Value::as_array)
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(Value::as_str)
+                    .map(String::from)
+                    .collect()
+            })
+            .unwrap_or_default();
+
         let evidence_id = Uuid::new_v4().to_string();
 
         let evidence = serde_json::json!({
@@ -232,7 +254,7 @@ pub async fn add_evidence_batch(args: &Value) -> Result<ToolOutput> {
             "timestamp": timestamp,
             "pyramid_level": pyramid_level_int,
             "confidence": confidence,
-            "mitre_techniques": [],
+            "mitre_techniques": mitre_techniques,
             "metadata": {},
             "validated": true,
         });
