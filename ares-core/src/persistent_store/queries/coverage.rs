@@ -65,7 +65,7 @@ impl HistoricalQueryService {
             .collect();
 
         // Sort by occurrence count descending
-        result.sort_by(|a, b| b.occurrence_count.cmp(&a.occurrence_count));
+        result.sort_by_key(|a| std::cmp::Reverse(a.occurrence_count));
 
         Ok(result)
     }

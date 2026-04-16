@@ -79,10 +79,8 @@ impl LateralMovementAnalyzer {
     /// Extract searchable string values from a JSON value.
     fn extract_searchable_values(value: &Value, out: &mut HashSet<String>) {
         match value {
-            Value::String(s) => {
-                if looks_like_hostname(s) {
-                    out.insert(s.to_lowercase());
-                }
+            Value::String(s) if looks_like_hostname(s) => {
+                out.insert(s.to_lowercase());
             }
             Value::Object(map) => {
                 for v in map.values() {

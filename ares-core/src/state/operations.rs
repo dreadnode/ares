@@ -215,7 +215,7 @@ pub(crate) fn pick_latest(items: &[&(Option<DateTime<Utc>>, String, bool)]) -> S
     // Prefer items with a timestamp, sort descending
     let mut with_time: Vec<_> = items.iter().filter(|(t, _, _)| t.is_some()).collect();
     if !with_time.is_empty() {
-        with_time.sort_by(|a, b| b.0.cmp(&a.0));
+        with_time.sort_by_key(|x| std::cmp::Reverse(x.0));
         return with_time[0].1.clone();
     }
     // Fallback: sort by op_id descending

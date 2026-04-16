@@ -120,13 +120,13 @@ pub async fn resolve_latest_investigation(
         .cloned()
         .collect();
     if !running.is_empty() {
-        running.sort_by(|a, b| b.0.cmp(&a.0));
+        running.sort_by_key(|x| std::cmp::Reverse(x.0));
         return Ok(Some(running[0].1.clone()));
     }
 
     // Fall back to latest by started_at
     let mut all: Vec<_> = invs;
-    all.sort_by(|a, b| b.0.cmp(&a.0));
+    all.sort_by_key(|x| std::cmp::Reverse(x.0));
     Ok(Some(all[0].1.clone()))
 }
 
