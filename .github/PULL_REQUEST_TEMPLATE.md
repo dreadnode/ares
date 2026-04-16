@@ -1,30 +1,33 @@
-# [Title of Your PR]
+<!--
+Start your PR title with a conventional-commit style prefix
+(e.g., feat:, fix:, chore:, docs:, refactor:, perf:, test:)
+-->
+
+<type>: <short, imperative summary of the change>
 
 **Key Changes:**
 
-- [ ] List major changes and core updates
-- [ ] Keep each line under 80 characters
-- [ ] Focus on the "what" and "why"
+- <High-level change #1>
+- <High-level change #2>
+- …
 
 **Added:**
 
-- [ ] New features/functionality
-- [ ] New files/configurations
-- [ ] New dependencies
+- <New file, endpoint, method, feature, etc.>
+- …
 
 **Changed:**
 
-- [ ] Updates to existing code
-- [ ] Configuration changes
-- [ ] Dependency updates
+- <Modified behavior, refactor, dependency, etc.>
+- …
 
 **Removed:**
 
-- [ ] Deleted files/code
-- [ ] Removed dependencies
-- [ ] Cleaned up configurations
+- <Deleted code, deprecated API, unused config, etc.>
+- …
 
----
+**Test Plan:**
 
-<!-- Delete any sections that are not applicable -->
-<!-- Add screenshots or code examples if relevant -->
+- <How to test the changes, e.g., run specific commands, check logs, etc.>
+- <Any new tests added, if applicable>
+- <Expected outcomes of the tests>

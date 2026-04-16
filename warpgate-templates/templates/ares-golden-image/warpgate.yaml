@@ -1,0 +1,84 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/cowdogmoo/warpgate/main/schema/warpgate-template.json
+metadata:
+  name: ares-golden-image
+  version: 1.0.0
+  description: Golden AMI with all Ares red team tools - recon, credential access, privesc, cracking, lateral movement, ACL abuse, and coercion
+  author: Dreadnode <info@dreadnode.io>
+  license: MIT
+  tags:
+    - ares
+    - golden-image
+    - red-team
+    - ami
+    - reconnaissance
+    - credential-access
+    - privilege-escalation
+    - password-cracking
+    - lateral-movement
+    - acl
+    - coercion
+  requires:
+    warpgate: '>=1.0.0'
+
+name: ares-golden-image
+version: latest
+
+base:
+  image: kalilinux/kali-rolling:latest
+  ami_filters:
+    owners:
+      - "679593333241"
+    filters:
+      name: "debian-kali-last-snapshot-amd64-*"
+      architecture: "x86_64"
+    most_recent: true
+
+provisioners:
+  # Install pipx, Ansible, and clone private repos
+  - type: shell
+    inline:
+      - apt-get update
+      - apt-get install -y --no-install-recommends ca-certificates git procps sudo python3-apt python3-pip python3-venv pipx
+      - 'sed -i ''s|^PATH="|PATH="/root/.local/bin:/root/.cargo/bin:|'' /etc/environment || echo ''PATH="/root/.local/bin:/root/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"'' > /etc/environment'
+      - pipx install --force uv
+      - pipx install --force ansible-core
+      - pipx ensurepath
+      - git clone --depth 1 https://${GITHUB_TOKEN}@github.com/dreadnode/ansible-collection-nimbus_range.git /tmp/nimbus_range
+      - mkdir -p /root/.ansible/collections/ansible_collections/dreadnode/nimbus_range
+      - cp -r /tmp/nimbus_range/* /root/.ansible/collections/ansible_collections/dreadnode/nimbus_range/
+      - rm -rf /tmp/nimbus_range
+
+  # GOAD Attack Box - all red team tools + Alloy telemetry
+  # NOTE: Using shell instead of ansible provisioner because the playbook
+  # exceeds EC2 Image Builder's 16000 character component limit.
+  - type: shell
+    inline:
+      - PATH=/root/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin ansible-galaxy collection install -r /root/.ansible/collections/ansible_collections/dreadnode/nimbus_range/requirements.yml --force
+      - ANSIBLE_REMOTE_TMP=/tmp/ansible-tmp-$USER PATH=/root/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin ansible-playbook /root/.ansible/collections/ansible_collections/dreadnode/nimbus_range/playbooks/ares/goad_attack_box.yml -i localhost, -c local -e ansible_shell_executable=/bin/bash -e ansible_python_interpreter=/usr/bin/python3
+
+  # Clone and install the Ares framework
+  - type: shell
+    inline:
+      - git clone --depth 1 https://${GITHUB_TOKEN}@github.com/dreadnode/ares.git /tmp/ares-build
+      - pipx install --force /tmp/ares-build
+      - rm -rf /tmp/ares-build
+
+  # Cleanup
+  - type: shell
+    inline:
+      - apt-get clean
+      - rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
+      - echo "Ares golden image build completed successfully"
+
+targets:
+  - type: ami
+    region: us-west-1
+    instance_type: t3.large
+    ami_name: "ares-golden-image-{{timestamp}}"
+    volume_size: 100
+    ami_tags:
+      Name: ares-golden-image
+      Project: ares
+      Role: RedTeamAttackBox
+      ManagedBy: warpgate
+      Tools: recon,credential-access,privesc,cracker,lateral-movement,acl-abuse,coercion

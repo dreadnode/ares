@@ -1,0 +1,63 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/cowdogmoo/warpgate/main/schema/warpgate-template.json
+metadata:
+  name: ares-rust-worker
+  version: 1.0.0
+  description: Rust-native Ares worker agent with embedded Python for LLM agent steps
+  author: Dreadnode <info@dreadnode.io>
+  license: MIT
+  tags:
+    - ares
+    - rust
+    - worker
+    - agent
+  requires:
+    warpgate: ">=1.0.0"
+name: ares-rust-worker
+version: latest
+base:
+  image: ghcr.io/dreadnode/ares-base:latest
+  pull: true
+  run_command:
+    - -d
+    - -i
+    - -t
+  environment:
+    DEBIAN_FRONTEND: noninteractive
+    TZ: UTC
+  changes:
+    - ENTRYPOINT ["ares-worker"]
+    - ENV DEBIAN_FRONTEND=noninteractive
+    - ENV TZ=UTC
+sources:
+  - name: ares
+    git:
+      repository: https://github.com/dreadnode/ares.git
+      ref: feature/rust-cli
+      depth: 1
+      auth:
+        token: ${GITHUB_TOKEN}
+provisioners:
+  - type: file
+    source: ${sources.ares}
+    destination: /tmp/ares-build
+  - type: shell
+    only:
+      - docker.arm64
+      - docker.amd64
+    inline:
+      - apt-get update && apt-get install -y --reinstall --no-install-recommends libc6-dev libssl-dev pkg-config libgcc-$(gcc -dumpversion | cut -d. -f1)-dev
+      - ln -sf /usr/bin/gcc /usr/local/bin/x86_64-unknown-linux-gnu-gcc
+      - ln -sf /usr/bin/gcc /usr/local/bin/aarch64-unknown-linux-gnu-gcc
+      - cd /tmp/ares-build/ares-rust && cargo build --release --bin ares-worker
+      - cp /tmp/ares-build/ares-rust/target/release/ares-worker /usr/local/bin/ares-worker
+  - type: shell
+    only:
+      - docker.arm64
+      - docker.amd64
+    inline:
+      - rm -rf /tmp/ares-build /usr/local/bin/x86_64-unknown-linux-gnu-gcc /usr/local/bin/aarch64-unknown-linux-gnu-gcc
+targets:
+  - type: container
+    platforms:
+      - linux/amd64
+      - linux/arm64

@@ -1,0 +1,2151 @@
+---
+name: Build and Push Templates
+on:
+  merge_group:
+  pull_request:
+    branches:
+      - main
+    types:
+      - opened
+      - synchronize
+      - reopened
+    paths:
+      - 'warpgate-templates/**'
+      - '.github/workflows/build-and-push-templates.yaml'
+  push:
+    branches:
+      - main
+    paths:
+      - 'warpgate-templates/**'
+      - '.github/workflows/build-and-push-templates.yaml'
+  workflow_dispatch:
+    inputs:
+      template_filter:
+        description: 'Comma-separated template name prefixes to build (e.g. "ares" or "ares,ray"). Empty builds all.'
+        required: false
+        default: ''
+        type: string
+
+# Required for OIDC and pushing to GHCR
+permissions:
+  id-token: write
+  contents: read
+  packages: write
+
+concurrency:
+  cancel-in-progress: true
+  group: "${{ github.workflow }}-${{ github.ref }}"
+
+env:
+  DEBIAN_FRONTEND: noninteractive
+  PYTHON_VERSION: 3.13.7
+  TASK_VERSION: 3.45.5
+  TASK_X_REMOTE_TASKFILES: 1
+  WARPGATE_VERSION: "v4.4.0"
+
+jobs:
+  discover-templates:
+    name: Discover templates
+    runs-on: ubuntu24.04-amd64-8-core
+    outputs:
+      # Base templates (use external base images like ubuntu:22.04)
+      base_matrix: ${{ steps.discover.outputs.base_matrix }}
+      base_templates: ${{ steps.discover.outputs.base_templates }}
+      has_base_templates: ${{ steps.discover.outputs.has_base_templates }}
+      # Dependent templates (use other warpgate templates as base)
+      dependent_matrix: ${{ steps.discover.outputs.dependent_matrix }}
+      dependent_templates: ${{ steps.discover.outputs.dependent_templates }}
+      has_dependent_templates: ${{ steps.discover.outputs.has_dependent_templates }}
+      # GPU chain templates (separate dependency chain for faster builds)
+      gpu_base_matrix: ${{ steps.discover.outputs.gpu_base_matrix }}
+      gpu_base_templates: ${{ steps.discover.outputs.gpu_base_templates }}
+      has_gpu_base_templates: ${{ steps.discover.outputs.has_gpu_base_templates }}
+      gpu_dependent_matrix: ${{ steps.discover.outputs.gpu_dependent_matrix }}
+      gpu_dependent_templates: ${{ steps.discover.outputs.gpu_dependent_templates }}
+      has_gpu_dependent_templates: ${{ steps.discover.outputs.has_gpu_dependent_templates }}
+    steps:
+      - name: Checkout git repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Setup XDG directories
+        run: |
+          # Set XDG directories and ensure they exist
+          USER_ID="$(id -u)"
+          export XDG_RUNTIME_DIR="/run/user/$USER_ID"
+          export XDG_CONFIG_HOME="$HOME/.config"
+          export XDG_DATA_HOME="$HOME/.local/share"
+
+          # Create directories if they don't exist
+          mkdir -p "$XDG_CONFIG_HOME"
+          mkdir -p "$XDG_DATA_HOME"
+          mkdir -p "$HOME/.local/bin"
+
+          {
+            echo "XDG_RUNTIME_DIR=/run/user/$USER_ID"
+            echo "XDG_CONFIG_HOME=$HOME/.config"
+            echo "XDG_DATA_HOME=$HOME/.local/share"
+          } >> "$GITHUB_ENV"
+
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Cache Warpgate binary
+        uses: actions/cache@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
+        id: warpgate-cache
+        with:
+          path: ~/.local/bin/warpgate
+          key: warpgate-${{ env.WARPGATE_VERSION }}-${{ runner.arch }}
+
+      - name: Install Warpgate from release
+        if: steps.warpgate-cache.outputs.cache-hit != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          VERSION="${{ env.WARPGATE_VERSION }}"
+          ARCH="$(uname -m)"
+          case "$ARCH" in
+            x86_64)
+              ARCH="amd64"
+              ALT_ARCH="x86_64"
+              ;;
+            aarch64|arm64)
+              ARCH="arm64"
+              ALT_ARCH="aarch64"
+              ;;
+            *)
+              echo "Unsupported arch: $ARCH"
+              exit 1
+              ;;
+          esac
+
+          TMP_DIR="$(mktemp -d)"
+          gh release download "$VERSION" \
+            -R CowDogMoo/warpgate \
+            -D "$TMP_DIR" \
+            -p "*linux*${ARCH}*" \
+            -p "*Linux*${ARCH}*" \
+            -p "*linux*${ALT_ARCH}*" \
+            -p "*Linux*${ALT_ARCH}*"
+
+          ASSET_PATH="$(find "$TMP_DIR" -maxdepth 1 -type f -print -quit)"
+          ASSET="$(basename "$ASSET_PATH")"
+          case "$ASSET" in
+            *.tar.gz)
+              tar -xzf "$TMP_DIR/$ASSET" -C "$TMP_DIR"
+              ;;
+            *.zip)
+              unzip -q "$TMP_DIR/$ASSET" -d "$TMP_DIR"
+              ;;
+            *)
+              echo "Unknown archive: $ASSET"
+              exit 1
+              ;;
+          esac
+
+          WARPGATE_BIN="$(find "$TMP_DIR" -maxdepth 3 -type f -name warpgate | head -n 1)"
+          if [ -z "$WARPGATE_BIN" ]; then
+            echo "warpgate binary not found in release asset"
+            exit 1
+          fi
+
+          install -m 0755 "$WARPGATE_BIN" "$HOME/.local/bin/warpgate"
+          rm -rf "$TMP_DIR"
+
+      - name: Verify Warpgate installation
+        run: warpgate version
+
+      - name: Discover templates
+        id: discover
+        env:
+          TEMPLATE_FILTER: ${{ github.event.inputs.template_filter }}
+        run: |
+          # Add this repo as a local template source
+          warpgate config init
+
+          # Configure warpgate with default settings
+          cat > ~/.config/warpgate/config.yaml <<EOF
+          container:
+              defaultbaseimage: ubuntu
+              defaultbaseversion: latest
+              defaultplatform: linux/amd64
+              defaultplatforms:
+                  - linux/amd64
+                  - linux/arm64
+          EOF
+
+          echo "Warpgate configuration:"
+          cat ~/.config/warpgate/config.yaml
+
+          warpgate templates add "$GITHUB_WORKSPACE"
+
+          # Generate GHA matrix from local templates
+          RAW_MATRIX=$(warpgate templates list --source local --format gha-matrix --quiet)
+
+          # Convert repository owner to lowercase for Docker compatibility
+          REPO_OWNER_LOWER=$(echo "${GITHUB_REPOSITORY_OWNER}" | tr '[:upper:]' '[:lower:]')
+
+          # Read each template's warpgate.yaml to determine if it's a base or dependent template
+          # Base templates use external images (ubuntu, debian, etc.)
+          # Dependent templates use ghcr.io images from this repo
+          echo "Analyzing template dependencies and platforms..."
+
+          # Create JSON objects mapping template names to their dependency status, supported platforms, and ansible usage
+          DEPENDENCY_MAP="{}"
+          PLATFORMS_MAP="{}"
+          ANSIBLE_MAP="{}"
+          AMI_TEMPLATES=()
+          for template_dir in "$GITHUB_WORKSPACE"/warpgate-templates/*/; do
+            if [ -f "${template_dir}warpgate.yaml" ]; then
+              template_name=$(basename "$template_dir")
+
+              # Skip AMI-only templates - they cannot be built as containers
+              if grep -q "type: ami" "${template_dir}warpgate.yaml" && ! grep -q "type: container" "${template_dir}warpgate.yaml"; then
+                echo "  $template_name: SKIPPED (AMI-only template)"
+                AMI_TEMPLATES+=("$template_name")
+                continue
+              fi
+
+              base_image=$(grep -A2 "^base:" "${template_dir}warpgate.yaml" | grep "image:" | head -1 | awk '{print $2}' | tr -d '"'"'" || echo "")
+
+              # Extract supported platforms from warpgate.yaml
+              platforms=$(grep -A10 "platforms:" "${template_dir}warpgate.yaml" | grep -E "^\s+- linux/(amd64|arm64)" | sed 's/.*linux\///' | tr '\n' ',' | sed 's/,$//')
+              if [ -z "$platforms" ]; then
+                # Default to amd64+arm64 if not specified
+                platforms="amd64,arm64"
+              fi
+
+              # Check if base image is from ghcr.io (dependent) or external (base)
+              if echo "$base_image" | grep -qE "^ghcr\.io/${REPO_OWNER_LOWER}/"; then
+                is_dependent="true"
+                echo "  $template_name: DEPENDENT (base: $base_image, platforms: $platforms)"
+              else
+                is_dependent="false"
+                echo "  $template_name: BASE (base: $base_image, platforms: $platforms)"
+              fi
+
+              # Check if template uses ansible provisioners
+              needs_ansible="false"
+              if grep -q "type: ansible" "${template_dir}warpgate.yaml"; then
+                needs_ansible="true"
+              fi
+
+              DEPENDENCY_MAP=$(echo "$DEPENDENCY_MAP" | jq --arg name "$template_name" --arg dep "$is_dependent" '. + {($name): ($dep == "true")}')
+              PLATFORMS_MAP=$(echo "$PLATFORMS_MAP" | jq --arg name "$template_name" --arg plat "$platforms" '. + {($name): ($plat | split(","))}')
+              ANSIBLE_MAP=$(echo "$ANSIBLE_MAP" | jq --arg name "$template_name" --arg ansible "$needs_ansible" '. + {($name): ($ansible == "true")}')
+            fi
+          done
+
+          echo ""
+          echo "Dependency map:"
+          echo "$DEPENDENCY_MAP" | jq .
+          echo ""
+          echo "Platforms map:"
+          echo "$PLATFORMS_MAP" | jq .
+          echo ""
+          echo "Ansible map:"
+          echo "$ANSIBLE_MAP" | jq .
+          # Build the full matrix with architecture and provisioning info
+          # Only include architectures that each template supports
+          FULL_MATRIX=$(echo "$RAW_MATRIX" | jq --arg namespace "${REPO_OWNER_LOWER}" --argjson dep_map "$DEPENDENCY_MAP" --argjson platforms_map "$PLATFORMS_MAP" --argjson ansible_map "$ANSIBLE_MAP" '{
+            include: [
+              .template[] |
+              . as $template |
+              # Get supported platforms for this template
+              ($platforms_map[.name] // ["amd64", "arm64"]) as $supported_platforms |
+              # Create entries only for supported architectures
+              (
+                if ($supported_platforms | index("amd64")) then
+                  [{
+                    "arch": "amd64",
+                    "runner": "ubuntu24.04-amd64-8-core"
+                  }]
+                else [] end +
+                if ($supported_platforms | index("arm64")) then
+                  [{
+                    "arch": "arm64",
+                    "runner": "ubuntu24.04-arm64-8-core"
+                  }]
+                else [] end
+              )[] |
+              . as $arch_config |
+              $template |
+              if ((.name | startswith("ares-")) and (.name != "ares-worker") and (.name != "ares-rust-worker")) then
+                . + {"provision_repo": "ansible-collection-nimbus_range", "provision_repo_path": "ansible-collection-nimbus_range", "namespace": $namespace}
+              else
+                . + {"namespace": $namespace}
+              end |
+              . + {
+                "architecture": $arch_config,
+                "is_dependent": ($dep_map[.name] // false),
+                "needs_ansible": ($ansible_map[.name] // false),
+                "supported_platforms": $supported_platforms
+              }
+            ]
+          }')
+
+          # Remove AMI-only templates from matrix (they have no dependency/platform maps)
+          if [ ${#AMI_TEMPLATES[@]} -gt 0 ]; then
+            AMI_JSON=$(printf '%s\n' "${AMI_TEMPLATES[@]}" | jq -R . | jq -s .)
+            FULL_MATRIX=$(echo "$FULL_MATRIX" | jq --argjson ami "$AMI_JSON" '{
+              include: [.include[] | select(.name as $n | $ami | index($n) | not)]
+            }')
+            echo "Excluded AMI-only templates from container build matrix: ${AMI_TEMPLATES[*]}"
+          fi
+
+          # Apply template filter if provided via workflow_dispatch
+          if [ -n "$TEMPLATE_FILTER" ]; then
+            echo ""
+            echo "========================================="
+            echo "Applying template filter: $TEMPLATE_FILTER"
+            echo "========================================="
+            FULL_MATRIX=$(echo "$FULL_MATRIX" | jq --arg filter "$TEMPLATE_FILTER" '{
+              include: [
+                .include[] |
+                select(
+                  .name as $name |
+                  ($filter | split(",") | map(gsub("^\\s+|\\s+$"; "")) | map(select(length > 0)) | any(. as $prefix | $name | startswith($prefix)))
+                )
+              ]
+            }')
+            echo "Filtered templates:"
+            echo "$FULL_MATRIX" | jq '[.include[].name] | unique'
+          fi
+
+          # GPU chain templates run in a separate dependency chain for faster builds
+          # ares-cracker-base-gpu -> ares-cracker-agent-gpu / ares-rust-worker-gpu runs independently of ares-base chain
+          GPU_BASE_TEMPLATES_LIST='[]'
+          GPU_DEPENDENT_TEMPLATES_LIST='["ares-rust-cracker-agent-gpu"]'
+
+          # Split into base and dependent matrices, excluding GPU chain
+          BASE_MATRIX=$(echo "$FULL_MATRIX" | jq --argjson gpu_bases "$GPU_BASE_TEMPLATES_LIST" '{include: [.include[] | select(.is_dependent == false) | select(.name as $n | $gpu_bases | index($n) | not)]}')
+          DEPENDENT_MATRIX=$(echo "$FULL_MATRIX" | jq --argjson gpu_deps "$GPU_DEPENDENT_TEMPLATES_LIST" '{include: [.include[] | select(.is_dependent == true) | select(.name as $n | $gpu_deps | index($n) | not)]}')
+
+          # GPU chain matrices
+          GPU_BASE_MATRIX=$(echo "$FULL_MATRIX" | jq --argjson gpu_bases "$GPU_BASE_TEMPLATES_LIST" '{include: [.include[] | select(.is_dependent == false) | select(.name as $n | $gpu_bases | index($n))]}')
+          GPU_DEPENDENT_MATRIX=$(echo "$FULL_MATRIX" | jq --argjson gpu_deps "$GPU_DEPENDENT_TEMPLATES_LIST" '{include: [.include[] | select(.is_dependent == true) | select(.name as $n | $gpu_deps | index($n))]}')
+
+          # Create templates-only matrices (without architecture duplication)
+          BASE_TEMPLATES=$(echo "$BASE_MATRIX" | jq '{
+            include: [
+              .include |
+              group_by(.name) |
+              .[] |
+              .[0] |
+              del(.architecture)
+            ]
+          }')
+
+          DEPENDENT_TEMPLATES=$(echo "$DEPENDENT_MATRIX" | jq '{
+            include: [
+              .include |
+              group_by(.name) |
+              .[] |
+              .[0] |
+              del(.architecture)
+            ]
+          }')
+
+          GPU_BASE_TEMPLATES=$(echo "$GPU_BASE_MATRIX" | jq '{
+            include: [
+              .include |
+              group_by(.name) |
+              .[] |
+              .[0] |
+              del(.architecture)
+            ]
+          }')
+
+          GPU_DEPENDENT_TEMPLATES=$(echo "$GPU_DEPENDENT_MATRIX" | jq '{
+            include: [
+              .include |
+              group_by(.name) |
+              .[] |
+              .[0] |
+              del(.architecture)
+            ]
+          }')
+
+          # Determine if we have templates in each category
+          HAS_BASE=$(echo "$BASE_MATRIX" | jq '.include | length > 0')
+          HAS_DEPENDENT=$(echo "$DEPENDENT_MATRIX" | jq '.include | length > 0')
+          HAS_GPU_BASE=$(echo "$GPU_BASE_MATRIX" | jq '.include | length > 0')
+          HAS_GPU_DEPENDENT=$(echo "$GPU_DEPENDENT_MATRIX" | jq '.include | length > 0')
+
+          # Output all matrices to GITHUB_OUTPUT
+          {
+            echo "base_matrix<<EOF"
+            echo "$BASE_MATRIX"
+            echo "EOF"
+            echo "base_templates<<EOF"
+            echo "$BASE_TEMPLATES"
+            echo "EOF"
+            echo "has_base_templates=$HAS_BASE"
+            echo "dependent_matrix<<EOF"
+            echo "$DEPENDENT_MATRIX"
+            echo "EOF"
+            echo "dependent_templates<<EOF"
+            echo "$DEPENDENT_TEMPLATES"
+            echo "EOF"
+            echo "has_dependent_templates=$HAS_DEPENDENT"
+            echo "gpu_base_matrix<<EOF"
+            echo "$GPU_BASE_MATRIX"
+            echo "EOF"
+            echo "gpu_base_templates<<EOF"
+            echo "$GPU_BASE_TEMPLATES"
+            echo "EOF"
+            echo "has_gpu_base_templates=$HAS_GPU_BASE"
+            echo "gpu_dependent_matrix<<EOF"
+            echo "$GPU_DEPENDENT_MATRIX"
+            echo "EOF"
+            echo "gpu_dependent_templates<<EOF"
+            echo "$GPU_DEPENDENT_TEMPLATES"
+            echo "EOF"
+            echo "has_gpu_dependent_templates=$HAS_GPU_DEPENDENT"
+          } >> "$GITHUB_OUTPUT"
+
+          # Display discovered templates for debugging
+          echo ""
+          echo "========================================="
+          echo "BASE templates matrix (build first):"
+          echo "========================================="
+          echo "$BASE_MATRIX" | jq .
+          echo ""
+          echo "BASE templates-only:"
+          echo "$BASE_TEMPLATES" | jq .
+          echo ""
+          echo "========================================="
+          echo "DEPENDENT templates matrix (build after base):"
+          echo "========================================="
+          echo "$DEPENDENT_MATRIX" | jq .
+          echo ""
+          echo "DEPENDENT templates-only:"
+          echo "$DEPENDENT_TEMPLATES" | jq .
+          echo ""
+          echo "========================================="
+          echo "GPU BASE templates matrix (independent chain):"
+          echo "========================================="
+          echo "$GPU_BASE_MATRIX" | jq .
+          echo ""
+          echo "GPU DEPENDENT templates matrix (independent chain):"
+          echo "========================================="
+          echo "$GPU_DEPENDENT_MATRIX" | jq .
+
+  # ===========================================
+  # Build base images
+  # ===========================================
+  build-base-images:
+    name: "[Base] Build ${{ matrix.name }} (${{ matrix.architecture.arch }})"
+    needs: discover-templates
+    if: github.event_name != 'pull_request' && needs.discover-templates.outputs.has_base_templates == 'true'
+    runs-on: ${{ matrix.architecture.runner }}
+    timeout-minutes: 120
+    strategy:
+      matrix: ${{ fromJson(needs.discover-templates.outputs.base_matrix) }}
+      fail-fast: false
+      max-parallel: 20
+    steps:
+      - name: Generate GitHub App Token
+        if: matrix.provision_repo == 'ansible-collection-nimbus_range'
+        uses: actions/create-github-app-token@f8d387b68d61c58ab83c6c016672934102569859 # v3.0.0-beta.4
+        id: app-token
+        with:
+          app-id: ${{ secrets.BOT_APP_ID }}
+          private-key: ${{ secrets.BOT_APP_PRIVATE_KEY }}
+          repositories: |
+            ares-warpgate-templates
+            ansible-collection-nimbus_range
+            ares
+
+      - name: Checkout git repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          token: ${{ steps.app-token.outputs.token || github.token }}
+
+      - name: Setup XDG directories
+        run: |
+          # Set XDG directories and ensure they exist
+          USER_ID="$(id -u)"
+          export XDG_RUNTIME_DIR="/run/user/$USER_ID"
+          export XDG_CONFIG_HOME="$HOME/.config"
+          export XDG_DATA_HOME="$HOME/.local/share"
+
+          # Create directories if they don't exist
+          mkdir -p "$XDG_CONFIG_HOME"
+          mkdir -p "$XDG_DATA_HOME"
+          mkdir -p "$HOME/.local/bin"
+
+          {
+            echo "XDG_RUNTIME_DIR=/run/user/$USER_ID"
+            echo "XDG_CONFIG_HOME=$HOME/.config"
+            echo "XDG_DATA_HOME=$HOME/.local/share"
+          } >> "$GITHUB_ENV"
+
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Setup Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install Ansible
+        if: matrix.needs_ansible == true
+        run: python3 -m pip install ansible
+
+      - name: Clone ansible-collection repository
+        if: matrix.needs_ansible == true
+        run: |
+          # Use GitHub tarball API for deterministic content without metadata variations
+          # This ensures BuildKit cache hits by avoiding UID/GID and timestamp differences
+          # See: https://github.com/moby/moby/issues/32816
+          if [ "${{ matrix.provision_repo }}" == "ansible-collection-nimbus_range" ]; then
+            mkdir -p "$HOME/ansible-collection-nimbus_range"
+            # For private repos, use token-authenticated API
+            curl -sL -H "Authorization: token ${{ steps.app-token.outputs.token }}" \
+              "https://api.github.com/repos/dreadnode/ansible-collection-nimbus_range/tarball/HEAD" | \
+              tar -xzf - --strip-components=1 -C "$HOME/ansible-collection-nimbus_range"
+          fi
+
+          # Normalize permissions to ensure deterministic cache keys across runners
+          # All files get 644, all dirs get 755
+          if [ "${{ matrix.provision_repo }}" == "ansible-collection-nimbus_range" ]; then
+            find "$HOME/ansible-collection-nimbus_range" -type f -exec chmod 644 {} \;
+            find "$HOME/ansible-collection-nimbus_range" -type d -exec chmod 755 {} \;
+          fi
+
+      - name: Install Ansible Collection
+        if: matrix.needs_ansible == true
+        run: |
+          # Create the ansible collections directory
+          mkdir -p "$HOME/.ansible/collections"
+
+          # Build and install the required collection
+          if [ "${{ matrix.provision_repo }}" == "ansible-collection-nimbus_range" ]; then
+            cd "$HOME/ansible-collection-nimbus_range"
+            ansible-galaxy collection build --force
+            ansible-galaxy collection install \
+              dreadnode-nimbus_range-*.tar.gz \
+              -p "$HOME/.ansible/collections" \
+              --force \
+              --pre
+          fi
+
+      - name: Login to GitHub Container Registry (Docker)
+        uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.WG_IMAGE_BUILDER_PAT }}
+
+      - name: Free up disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /opt/ghc
+          sudo rm -rf "/usr/local/share/boost"
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /opt/hostedtoolcache/CodeQL
+          df -h
+
+      - name: Add swap space
+        run: |
+          # Add 16GB swap for large image builds (GPU images can be 2GB+)
+          sudo fallocate -l 16G /swapfile
+          sudo chmod 600 /swapfile
+          sudo mkswap /swapfile
+          sudo swapon /swapfile
+          echo "Swap enabled:"
+          free -h
+
+      - name: Prune Docker BuildKit cache
+        run: |
+          docker buildx prune -af --verbose || true
+          docker system prune -af || true
+
+      - name: Cache Warpgate binary
+        uses: actions/cache@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
+        id: warpgate-cache
+        with:
+          path: ~/.local/bin/warpgate
+          key: warpgate-${{ env.WARPGATE_VERSION }}-${{ runner.arch }}
+
+      - name: Install Warpgate from release
+        if: steps.warpgate-cache.outputs.cache-hit != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          VERSION="${{ env.WARPGATE_VERSION }}"
+          ARCH="$(uname -m)"
+          case "$ARCH" in
+            x86_64)
+              ARCH="amd64"
+              ALT_ARCH="x86_64"
+              ;;
+            aarch64|arm64)
+              ARCH="arm64"
+              ALT_ARCH="aarch64"
+              ;;
+            *)
+              echo "Unsupported arch: $ARCH"
+              exit 1
+              ;;
+          esac
+
+          TMP_DIR="$(mktemp -d)"
+          gh release download "$VERSION" \
+            -R CowDogMoo/warpgate \
+            -D "$TMP_DIR" \
+            -p "*linux*${ARCH}*" \
+            -p "*Linux*${ARCH}*" \
+            -p "*linux*${ALT_ARCH}*" \
+            -p "*Linux*${ALT_ARCH}*"
+
+          ASSET_PATH="$(find "$TMP_DIR" -maxdepth 1 -type f -print -quit)"
+          ASSET="$(basename "$ASSET_PATH")"
+          case "$ASSET" in
+            *.tar.gz)
+              tar -xzf "$TMP_DIR/$ASSET" -C "$TMP_DIR"
+              ;;
+            *.zip)
+              unzip -q "$TMP_DIR/$ASSET" -d "$TMP_DIR"
+              ;;
+            *)
+              echo "Unknown archive: $ASSET"
+              exit 1
+              ;;
+          esac
+
+          WARPGATE_BIN="$(find "$TMP_DIR" -maxdepth 3 -type f -name warpgate | head -n 1)"
+          if [ -z "$WARPGATE_BIN" ]; then
+            echo "warpgate binary not found in release asset"
+            exit 1
+          fi
+
+          install -m 0755 "$WARPGATE_BIN" "$HOME/.local/bin/warpgate"
+          rm -rf "$TMP_DIR"
+
+      - name: Verify Warpgate installation
+        run: warpgate version
+
+      - name: Configure Warpgate
+        run: |
+          # Initialize warpgate config
+          warpgate config init
+
+          # Configure warpgate with default settings (BuildKit doesn't need VFS storage)
+          cat > ~/.config/warpgate/config.yaml <<EOF
+          container:
+              defaultbaseimage: ubuntu
+              defaultbaseversion: latest
+              defaultplatform: linux/amd64
+              defaultplatforms:
+                  - linux/amd64
+                  - linux/arm64
+          EOF
+
+          echo "Warpgate configuration:"
+          cat ~/.config/warpgate/config.yaml
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4
+
+      - name: Register templates with Warpgate
+        run: |
+          # Add this repo as a local template source to enable caching
+          # Using --template flag (instead of warpgate.yaml path) enables BuildKit cache
+          warpgate templates add "$GITHUB_WORKSPACE"
+          echo "Registered templates:"
+          warpgate templates list --source local
+
+      - name: Validate template configuration
+        run: |
+          cd "$GITHUB_WORKSPACE/warpgate-templates/${{ matrix.name }}"
+
+          # Verify warpgate.yaml exists
+          if [ ! -f "warpgate.yaml" ]; then
+            echo "ERROR: warpgate.yaml not found in template directory"
+            exit 1
+          fi
+
+          echo "Template configuration found for ${{ matrix.name }}"
+          cat warpgate.yaml
+
+      - name: Pre-load base image into BuildKit cache
+        run: |
+          cd "$GITHUB_WORKSPACE/warpgate-templates/${{ matrix.name }}"
+
+          # Extract base image from warpgate.yaml
+          BASE_IMAGE=$(grep -A2 "^base:" warpgate.yaml | grep "image:" | head -1 | awk '{print $2}' | tr -d '"'"'")
+
+          if [ -n "$BASE_IMAGE" ]; then
+            echo "Pre-loading base image into BuildKit cache: $BASE_IMAGE"
+
+            # Use docker buildx build to pull the image into BuildKit's cache
+            # This properly passes credentials from docker/login-action to BuildKit
+            # Workaround for https://github.com/docker/buildx/issues/1613
+            # Using --no-cache to force fresh pull and avoid stale CDN cache issues
+            echo "FROM $BASE_IMAGE" | docker buildx build \
+              --platform linux/${{ matrix.architecture.arch }} \
+              --pull \
+              --no-cache \
+              -
+
+            echo "Base image loaded into BuildKit cache"
+          fi
+
+      - name: Build ${{ matrix.architecture.arch }} Image
+        run: |
+          export PROVISION_REPO_PATH="$HOME/${{ matrix.provision_repo_path }}"
+
+          # Build using --template flag to enable BuildKit cache
+          # Using template name (not file path) sets IsLocalTemplate=false, enabling cache
+          warpgate build --template ${{ matrix.name }} \
+            --arch ${{ matrix.architecture.arch }} \
+            --push-digest \
+            --registry ghcr.io/${{ matrix.namespace }} \
+            --save-digests \
+            --digest-dir "$GITHUB_WORKSPACE" \
+            --verbose \
+            --cache-from type=registry,ref=ghcr.io/${{ matrix.namespace }}/${{ matrix.name }}:buildcache-${{ matrix.architecture.arch }} \
+            --cache-to type=registry,ref=ghcr.io/${{ matrix.namespace }}/${{ matrix.name }}:buildcache-${{ matrix.architecture.arch }},mode=max
+
+          # Check if the specific digest file exists
+          DIGEST_FILE="$GITHUB_WORKSPACE/digest-${{ matrix.name }}-${{ matrix.architecture.arch }}.txt"
+          if [ -f "$DIGEST_FILE" ]; then
+            echo "Digest file found! Contents:"
+            cat "$DIGEST_FILE"
+          else
+            echo "ERROR: Digest file was not created"
+            exit 1
+          fi
+        env:
+          GITHUB_TOKEN: ${{ steps.app-token.outputs.token || secrets.WG_IMAGE_BUILDER_PAT }}
+          # Disable provenance attestations to reduce memory usage and avoid gRPC size limits
+          # See: https://github.com/docker/buildx/issues/2208
+          BUILDX_NO_DEFAULT_ATTESTATIONS: 1
+
+      - name: Upload digest
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7
+        with:
+          name: base-digests-${{ matrix.name }}-tag-${{ matrix.architecture.arch }}
+          path: ${{ github.workspace }}/digest-${{ matrix.name }}-${{ matrix.architecture.arch }}.txt
+          retention-days: 1
+
+  merge-base-manifests:
+    name: "[Base] Create manifest for ${{ matrix.name }}"
+    needs: [discover-templates, build-base-images]
+    if: github.event_name != 'pull_request' && needs.discover-templates.outputs.has_base_templates == 'true'
+    runs-on: ubuntu24.04-amd64-8-core
+    strategy:
+      matrix: ${{ fromJson(needs.discover-templates.outputs.base_templates) }}
+      fail-fast: false
+    steps:
+      - name: Checkout git repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Setup XDG directories
+        run: |
+          # Set XDG directories and ensure they exist
+          USER_ID="$(id -u)"
+          export XDG_RUNTIME_DIR="/run/user/$USER_ID"
+          export XDG_CONFIG_HOME="$HOME/.config"
+          export XDG_DATA_HOME="$HOME/.local/share"
+
+          # Create directories if they don't exist
+          mkdir -p "$XDG_CONFIG_HOME"
+          mkdir -p "$XDG_DATA_HOME"
+          mkdir -p "$HOME/.local/bin"
+
+          {
+            echo "XDG_RUNTIME_DIR=/run/user/$USER_ID"
+            echo "XDG_CONFIG_HOME=$HOME/.config"
+            echo "XDG_DATA_HOME=$HOME/.local/share"
+          } >> "$GITHUB_ENV"
+
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Cache Warpgate binary
+        uses: actions/cache@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
+        id: warpgate-cache
+        with:
+          path: ~/.local/bin/warpgate
+          key: warpgate-${{ env.WARPGATE_VERSION }}-${{ runner.arch }}
+
+      - name: Install Warpgate from release
+        if: steps.warpgate-cache.outputs.cache-hit != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          VERSION="${{ env.WARPGATE_VERSION }}"
+          ARCH="$(uname -m)"
+          case "$ARCH" in
+            x86_64)
+              ARCH="amd64"
+              ALT_ARCH="x86_64"
+              ;;
+            aarch64|arm64)
+              ARCH="arm64"
+              ALT_ARCH="aarch64"
+              ;;
+            *)
+              echo "Unsupported arch: $ARCH"
+              exit 1
+              ;;
+          esac
+
+          TMP_DIR="$(mktemp -d)"
+          gh release download "$VERSION" \
+            -R CowDogMoo/warpgate \
+            -D "$TMP_DIR" \
+            -p "*linux*${ARCH}*" \
+            -p "*Linux*${ARCH}*" \
+            -p "*linux*${ALT_ARCH}*" \
+            -p "*Linux*${ALT_ARCH}*"
+
+          ASSET_PATH="$(find "$TMP_DIR" -maxdepth 1 -type f -print -quit)"
+          ASSET="$(basename "$ASSET_PATH")"
+          case "$ASSET" in
+            *.tar.gz)
+              tar -xzf "$TMP_DIR/$ASSET" -C "$TMP_DIR"
+              ;;
+            *.zip)
+              unzip -q "$TMP_DIR/$ASSET" -d "$TMP_DIR"
+              ;;
+            *)
+              echo "Unknown archive: $ASSET"
+              exit 1
+              ;;
+          esac
+
+          WARPGATE_BIN="$(find "$TMP_DIR" -maxdepth 3 -type f -name warpgate | head -n 1)"
+          if [ -z "$WARPGATE_BIN" ]; then
+            echo "warpgate binary not found in release asset"
+            exit 1
+          fi
+
+          install -m 0755 "$WARPGATE_BIN" "$HOME/.local/bin/warpgate"
+          rm -rf "$TMP_DIR"
+
+      - name: Verify Warpgate installation
+        run: warpgate version
+
+      - name: Download digests
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          pattern: base-digests-${{ matrix.name }}-tag-*
+          path: .
+          merge-multiple: true
+
+      - name: List downloaded digest files
+        run: |
+          echo "Current directory: $PWD"
+          echo "Files in current directory:"
+          ls -la
+          echo ""
+          echo "Digest files:"
+          ls -la digest-*.txt || echo "No digest files found"
+
+      - name: Verify digest files
+        run: |
+          # Verify digest files for this template exist
+          echo "Verifying digest files for template: ${{ matrix.name }}"
+
+          for file in digest-${{ matrix.name }}-*.txt; do
+            if [ ! -f "$file" ]; then
+              echo "ERROR: Expected digest file not found: $file"
+              ls -la
+              exit 1
+            fi
+
+            # Verify digest format (sha256:hex)
+            if ! grep -qE '^sha256:[a-f0-9]{64}$' "$file"; then
+              echo "ERROR: Invalid digest format in $file:"
+              cat "$file"
+              exit 1
+            fi
+
+            echo "Verified digest file: $file"
+            cat "$file"
+          done
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.WG_IMAGE_BUILDER_PAT }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4
+        with:
+          driver: docker-container
+
+      - name: Ensure required digests exist
+        run: |
+          # Read supported platforms from matrix
+          SUPPORTED_PLATFORMS="${{ join(matrix.supported_platforms, ',') }}"
+          IFS=',' read -ra ARCHS <<< "$SUPPORTED_PLATFORMS"
+
+          for arch in "${ARCHS[@]}"; do
+            file="digest-${{ matrix.name }}-${arch}.txt"
+            if [ ! -f "$file" ]; then
+              echo "ERROR: Missing digest file: $file"
+              ls -la
+              exit 1
+            fi
+          done
+
+      - name: Create multi-arch manifest
+        run: |
+          # Use supported platforms from matrix for this template
+          REQUIRED_ARCHS="${{ join(matrix.supported_platforms, ',') }}"
+
+          warpgate manifests create \
+            --name ${{ matrix.name }} \
+            --registry ghcr.io \
+            --namespace ${{ matrix.namespace }} \
+            --tag latest \
+            --digest-dir . \
+            --require-arch "$REQUIRED_ARCHS"
+        env:
+          GITHUB_TOKEN: ${{ secrets.WG_IMAGE_BUILDER_PAT }}
+
+      - name: Verify multi-arch manifest
+        run: |
+          docker buildx imagetools inspect ghcr.io/${{ matrix.namespace }}/${{ matrix.name }}:latest
+
+  # ===========================================
+  # Build dependent images (after base images are ready)
+  # ===========================================
+  build-dependent-images:
+    name: "[Dependent] Build ${{ matrix.name }} (${{ matrix.architecture.arch }})"
+    needs: [discover-templates, merge-base-manifests]
+    if: |
+      always() &&
+      github.event_name != 'pull_request' &&
+      needs.discover-templates.outputs.has_dependent_templates == 'true' &&
+      (needs.merge-base-manifests.result == 'success' || needs.merge-base-manifests.result == 'skipped')
+    runs-on: ${{ matrix.architecture.runner }}
+    timeout-minutes: 120
+    strategy:
+      matrix: ${{ fromJson(needs.discover-templates.outputs.dependent_matrix) }}
+      fail-fast: false
+      max-parallel: 20
+    steps:
+      - name: Generate GitHub App Token
+        if: matrix.provision_repo == 'ansible-collection-nimbus_range'
+        uses: actions/create-github-app-token@f8d387b68d61c58ab83c6c016672934102569859 # v3.0.0-beta.4
+        id: app-token
+        with:
+          app-id: ${{ secrets.BOT_APP_ID }}
+          private-key: ${{ secrets.BOT_APP_PRIVATE_KEY }}
+          repositories: |
+            ares-warpgate-templates
+            ansible-collection-nimbus_range
+            ares
+
+      - name: Checkout git repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          token: ${{ steps.app-token.outputs.token || github.token }}
+
+      - name: Setup XDG directories
+        run: |
+          # Set XDG directories and ensure they exist
+          USER_ID="$(id -u)"
+          export XDG_RUNTIME_DIR="/run/user/$USER_ID"
+          export XDG_CONFIG_HOME="$HOME/.config"
+          export XDG_DATA_HOME="$HOME/.local/share"
+
+          # Create directories if they don't exist
+          mkdir -p "$XDG_CONFIG_HOME"
+          mkdir -p "$XDG_DATA_HOME"
+          mkdir -p "$HOME/.local/bin"
+
+          {
+            echo "XDG_RUNTIME_DIR=/run/user/$USER_ID"
+            echo "XDG_CONFIG_HOME=$HOME/.config"
+            echo "XDG_DATA_HOME=$HOME/.local/share"
+          } >> "$GITHUB_ENV"
+
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Setup Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install Ansible
+        if: matrix.needs_ansible == true
+        run: python3 -m pip install ansible
+
+      - name: Clone ansible-collection repository
+        if: matrix.needs_ansible == true
+        run: |
+          # Use GitHub tarball API for deterministic content without metadata variations
+          # This ensures BuildKit cache hits by avoiding UID/GID and timestamp differences
+          # See: https://github.com/moby/moby/issues/32816
+          if [ "${{ matrix.provision_repo }}" == "ansible-collection-nimbus_range" ]; then
+            mkdir -p "$HOME/ansible-collection-nimbus_range"
+            # For private repos, use token-authenticated API
+            curl -sL -H "Authorization: token ${{ steps.app-token.outputs.token }}" \
+              "https://api.github.com/repos/dreadnode/ansible-collection-nimbus_range/tarball/HEAD" | \
+              tar -xzf - --strip-components=1 -C "$HOME/ansible-collection-nimbus_range"
+          fi
+
+          # Normalize permissions to ensure deterministic cache keys across runners
+          # All files get 644, all dirs get 755
+          if [ "${{ matrix.provision_repo }}" == "ansible-collection-nimbus_range" ]; then
+            find "$HOME/ansible-collection-nimbus_range" -type f -exec chmod 644 {} \;
+            find "$HOME/ansible-collection-nimbus_range" -type d -exec chmod 755 {} \;
+          fi
+
+      - name: Install Ansible Collection
+        if: matrix.needs_ansible == true
+        run: |
+          # Create the ansible collections directory
+          mkdir -p "$HOME/.ansible/collections"
+
+          # Build and install the required collection
+          if [ "${{ matrix.provision_repo }}" == "ansible-collection-nimbus_range" ]; then
+            cd "$HOME/ansible-collection-nimbus_range"
+            ansible-galaxy collection build --force
+            ansible-galaxy collection install \
+              dreadnode-nimbus_range-*.tar.gz \
+              -p "$HOME/.ansible/collections" \
+              --force \
+              --pre
+          fi
+
+      - name: Login to GitHub Container Registry (Docker)
+        uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.WG_IMAGE_BUILDER_PAT }}
+
+      - name: Free up disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /opt/ghc
+          sudo rm -rf "/usr/local/share/boost"
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /opt/hostedtoolcache/CodeQL
+          df -h
+
+      - name: Add swap space
+        run: |
+          # Add 16GB swap for large image builds (GPU images can be 2GB+)
+          sudo fallocate -l 16G /swapfile
+          sudo chmod 600 /swapfile
+          sudo mkswap /swapfile
+          sudo swapon /swapfile
+          echo "Swap enabled:"
+          free -h
+
+      - name: Prune Docker BuildKit cache
+        run: |
+          docker buildx prune -af --verbose || true
+          docker system prune -af || true
+
+      - name: Cache Warpgate binary
+        uses: actions/cache@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
+        id: warpgate-cache
+        with:
+          path: ~/.local/bin/warpgate
+          key: warpgate-${{ env.WARPGATE_VERSION }}-${{ runner.arch }}
+
+      - name: Install Warpgate from release
+        if: steps.warpgate-cache.outputs.cache-hit != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          VERSION="${{ env.WARPGATE_VERSION }}"
+          ARCH="$(uname -m)"
+          case "$ARCH" in
+            x86_64)
+              ARCH="amd64"
+              ALT_ARCH="x86_64"
+              ;;
+            aarch64|arm64)
+              ARCH="arm64"
+              ALT_ARCH="aarch64"
+              ;;
+            *)
+              echo "Unsupported arch: $ARCH"
+              exit 1
+              ;;
+          esac
+
+          TMP_DIR="$(mktemp -d)"
+          gh release download "$VERSION" \
+            -R CowDogMoo/warpgate \
+            -D "$TMP_DIR" \
+            -p "*linux*${ARCH}*" \
+            -p "*Linux*${ARCH}*" \
+            -p "*linux*${ALT_ARCH}*" \
+            -p "*Linux*${ALT_ARCH}*"
+
+          ASSET_PATH="$(find "$TMP_DIR" -maxdepth 1 -type f -print -quit)"
+          ASSET="$(basename "$ASSET_PATH")"
+          case "$ASSET" in
+            *.tar.gz)
+              tar -xzf "$TMP_DIR/$ASSET" -C "$TMP_DIR"
+              ;;
+            *.zip)
+              unzip -q "$TMP_DIR/$ASSET" -d "$TMP_DIR"
+              ;;
+            *)
+              echo "Unknown archive: $ASSET"
+              exit 1
+              ;;
+          esac
+
+          WARPGATE_BIN="$(find "$TMP_DIR" -maxdepth 3 -type f -name warpgate | head -n 1)"
+          if [ -z "$WARPGATE_BIN" ]; then
+            echo "warpgate binary not found in release asset"
+            exit 1
+          fi
+
+          install -m 0755 "$WARPGATE_BIN" "$HOME/.local/bin/warpgate"
+          rm -rf "$TMP_DIR"
+
+      - name: Verify Warpgate installation
+        run: warpgate version
+
+      - name: Configure Warpgate
+        run: |
+          # Initialize warpgate config
+          warpgate config init
+
+          # Configure warpgate with default settings (BuildKit doesn't need VFS storage)
+          cat > ~/.config/warpgate/config.yaml <<EOF
+          container:
+              defaultbaseimage: ubuntu
+              defaultbaseversion: latest
+              defaultplatform: linux/amd64
+              defaultplatforms:
+                  - linux/amd64
+                  - linux/arm64
+          EOF
+
+          echo "Warpgate configuration:"
+          cat ~/.config/warpgate/config.yaml
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4
+
+      - name: Register templates with Warpgate
+        run: |
+          # Add this repo as a local template source to enable caching
+          # Using --template flag (instead of warpgate.yaml path) enables BuildKit cache
+          warpgate templates add "$GITHUB_WORKSPACE"
+          echo "Registered templates:"
+          warpgate templates list --source local
+
+      - name: Validate template configuration
+        run: |
+          cd "$GITHUB_WORKSPACE/warpgate-templates/${{ matrix.name }}"
+
+          # Verify warpgate.yaml exists
+          if [ ! -f "warpgate.yaml" ]; then
+            echo "ERROR: warpgate.yaml not found in template directory"
+            exit 1
+          fi
+
+          echo "Template configuration found for ${{ matrix.name }}"
+          cat warpgate.yaml
+
+      - name: Pre-load base image into BuildKit cache
+        run: |
+          cd "$GITHUB_WORKSPACE/warpgate-templates/${{ matrix.name }}"
+
+          # Extract base image from warpgate.yaml
+          BASE_IMAGE=$(grep -A2 "^base:" warpgate.yaml | grep "image:" | head -1 | awk '{print $2}' | tr -d '"'"'")
+
+          if [ -n "$BASE_IMAGE" ]; then
+            echo "Pre-loading base image into BuildKit cache: $BASE_IMAGE"
+
+            # Use docker buildx build to pull the image into BuildKit's cache
+            # This properly passes credentials from docker/login-action to BuildKit
+            # Workaround for https://github.com/docker/buildx/issues/1613
+            # Using --no-cache to force fresh pull and avoid stale CDN cache issues
+            echo "FROM $BASE_IMAGE" | docker buildx build \
+              --platform linux/${{ matrix.architecture.arch }} \
+              --pull \
+              --no-cache \
+              -
+
+            echo "Base image loaded into BuildKit cache"
+          fi
+
+      - name: Build ${{ matrix.architecture.arch }} Image
+        run: |
+          export PROVISION_REPO_PATH="$HOME/${{ matrix.provision_repo_path }}"
+
+          # Build using --template flag to enable BuildKit cache
+          # Using template name (not file path) sets IsLocalTemplate=false, enabling cache
+          warpgate build --template ${{ matrix.name }} \
+            --arch ${{ matrix.architecture.arch }} \
+            --push-digest \
+            --registry ghcr.io/${{ matrix.namespace }} \
+            --save-digests \
+            --digest-dir "$GITHUB_WORKSPACE" \
+            --verbose \
+            --cache-from type=registry,ref=ghcr.io/${{ matrix.namespace }}/${{ matrix.name }}:buildcache-${{ matrix.architecture.arch }} \
+            --cache-to type=registry,ref=ghcr.io/${{ matrix.namespace }}/${{ matrix.name }}:buildcache-${{ matrix.architecture.arch }},mode=max
+
+          # Check if the specific digest file exists
+          DIGEST_FILE="$GITHUB_WORKSPACE/digest-${{ matrix.name }}-${{ matrix.architecture.arch }}.txt"
+          if [ -f "$DIGEST_FILE" ]; then
+            echo "Digest file found! Contents:"
+            cat "$DIGEST_FILE"
+          else
+            echo "ERROR: Digest file was not created"
+            exit 1
+          fi
+        env:
+          GITHUB_TOKEN: ${{ steps.app-token.outputs.token || secrets.WG_IMAGE_BUILDER_PAT }}
+          # Disable provenance attestations to reduce memory usage and avoid gRPC size limits
+          # See: https://github.com/docker/buildx/issues/2208
+          BUILDX_NO_DEFAULT_ATTESTATIONS: 1
+
+      - name: Upload digest
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7
+        with:
+          name: dependent-digests-${{ matrix.name }}-tag-${{ matrix.architecture.arch }}
+          path: ${{ github.workspace }}/digest-${{ matrix.name }}-${{ matrix.architecture.arch }}.txt
+          retention-days: 1
+
+  merge-dependent-manifests:
+    name: "[Dependent] Create manifest for ${{ matrix.name }}"
+    needs: [discover-templates, build-dependent-images]
+    if: |
+      always() &&
+      github.event_name != 'pull_request' &&
+      needs.discover-templates.outputs.has_dependent_templates == 'true' &&
+      needs.build-dependent-images.result == 'success'
+    runs-on: ubuntu24.04-amd64-8-core
+    strategy:
+      matrix: ${{ fromJson(needs.discover-templates.outputs.dependent_templates) }}
+      fail-fast: false
+    steps:
+      - name: Checkout git repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Setup XDG directories
+        run: |
+          # Set XDG directories and ensure they exist
+          USER_ID="$(id -u)"
+          export XDG_RUNTIME_DIR="/run/user/$USER_ID"
+          export XDG_CONFIG_HOME="$HOME/.config"
+          export XDG_DATA_HOME="$HOME/.local/share"
+
+          # Create directories if they don't exist
+          mkdir -p "$XDG_CONFIG_HOME"
+          mkdir -p "$XDG_DATA_HOME"
+          mkdir -p "$HOME/.local/bin"
+
+          {
+            echo "XDG_RUNTIME_DIR=/run/user/$USER_ID"
+            echo "XDG_CONFIG_HOME=$HOME/.config"
+            echo "XDG_DATA_HOME=$HOME/.local/share"
+          } >> "$GITHUB_ENV"
+
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Cache Warpgate binary
+        uses: actions/cache@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
+        id: warpgate-cache
+        with:
+          path: ~/.local/bin/warpgate
+          key: warpgate-${{ env.WARPGATE_VERSION }}-${{ runner.arch }}
+
+      - name: Install Warpgate from release
+        if: steps.warpgate-cache.outputs.cache-hit != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          VERSION="${{ env.WARPGATE_VERSION }}"
+          ARCH="$(uname -m)"
+          case "$ARCH" in
+            x86_64)
+              ARCH="amd64"
+              ALT_ARCH="x86_64"
+              ;;
+            aarch64|arm64)
+              ARCH="arm64"
+              ALT_ARCH="aarch64"
+              ;;
+            *)
+              echo "Unsupported arch: $ARCH"
+              exit 1
+              ;;
+          esac
+
+          TMP_DIR="$(mktemp -d)"
+          gh release download "$VERSION" \
+            -R CowDogMoo/warpgate \
+            -D "$TMP_DIR" \
+            -p "*linux*${ARCH}*" \
+            -p "*Linux*${ARCH}*" \
+            -p "*linux*${ALT_ARCH}*" \
+            -p "*Linux*${ALT_ARCH}*"
+
+          ASSET_PATH="$(find "$TMP_DIR" -maxdepth 1 -type f -print -quit)"
+          ASSET="$(basename "$ASSET_PATH")"
+          case "$ASSET" in
+            *.tar.gz)
+              tar -xzf "$TMP_DIR/$ASSET" -C "$TMP_DIR"
+              ;;
+            *.zip)
+              unzip -q "$TMP_DIR/$ASSET" -d "$TMP_DIR"
+              ;;
+            *)
+              echo "Unknown archive: $ASSET"
+              exit 1
+              ;;
+          esac
+
+          WARPGATE_BIN="$(find "$TMP_DIR" -maxdepth 3 -type f -name warpgate | head -n 1)"
+          if [ -z "$WARPGATE_BIN" ]; then
+            echo "warpgate binary not found in release asset"
+            exit 1
+          fi
+
+          install -m 0755 "$WARPGATE_BIN" "$HOME/.local/bin/warpgate"
+          rm -rf "$TMP_DIR"
+
+      - name: Verify Warpgate installation
+        run: warpgate version
+
+      - name: Download digests
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          pattern: dependent-digests-${{ matrix.name }}-tag-*
+          path: .
+          merge-multiple: true
+
+      - name: List downloaded digest files
+        run: |
+          echo "Current directory: $PWD"
+          echo "Files in current directory:"
+          ls -la
+          echo ""
+          echo "Digest files:"
+          ls -la digest-*.txt || echo "No digest files found"
+
+      - name: Verify digest files
+        run: |
+          # Verify digest files for this template exist
+          echo "Verifying digest files for template: ${{ matrix.name }}"
+
+          for file in digest-${{ matrix.name }}-*.txt; do
+            if [ ! -f "$file" ]; then
+              echo "ERROR: Expected digest file not found: $file"
+              ls -la
+              exit 1
+            fi
+
+            # Verify digest format (sha256:hex)
+            if ! grep -qE '^sha256:[a-f0-9]{64}$' "$file"; then
+              echo "ERROR: Invalid digest format in $file:"
+              cat "$file"
+              exit 1
+            fi
+
+            echo "Verified digest file: $file"
+            cat "$file"
+          done
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.WG_IMAGE_BUILDER_PAT }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4
+        with:
+          driver: docker-container
+
+      - name: Ensure required digests exist
+        run: |
+          # Read supported platforms from matrix
+          SUPPORTED_PLATFORMS="${{ join(matrix.supported_platforms, ',') }}"
+          IFS=',' read -ra ARCHS <<< "$SUPPORTED_PLATFORMS"
+
+          for arch in "${ARCHS[@]}"; do
+            file="digest-${{ matrix.name }}-${arch}.txt"
+            if [ ! -f "$file" ]; then
+              echo "ERROR: Missing digest file: $file"
+              ls -la
+              exit 1
+            fi
+          done
+
+      - name: Create multi-arch manifest
+        run: |
+          # Use supported platforms from matrix for this template
+          REQUIRED_ARCHS="${{ join(matrix.supported_platforms, ',') }}"
+
+          warpgate manifests create \
+            --name ${{ matrix.name }} \
+            --registry ghcr.io \
+            --namespace ${{ matrix.namespace }} \
+            --tag latest \
+            --digest-dir . \
+            --require-arch "$REQUIRED_ARCHS"
+        env:
+          GITHUB_TOKEN: ${{ secrets.WG_IMAGE_BUILDER_PAT }}
+
+      - name: Verify multi-arch manifest
+        run: |
+          docker buildx imagetools inspect ghcr.io/${{ matrix.namespace }}/${{ matrix.name }}:latest
+
+  # ===========================================
+  # GPU Chain: Build GPU base images (runs in parallel with main chain)
+  # ===========================================
+  build-gpu-base-images:
+    name: "[GPU] Build ${{ matrix.name }} (${{ matrix.architecture.arch }})"
+    needs: discover-templates
+    if: github.event_name != 'pull_request' && needs.discover-templates.outputs.has_gpu_base_templates == 'true'
+    runs-on: ${{ matrix.architecture.runner }}
+    timeout-minutes: 120
+    strategy:
+      matrix: ${{ fromJson(needs.discover-templates.outputs.gpu_base_matrix) }}
+      fail-fast: false
+    steps:
+      - name: Generate GitHub App Token
+        if: matrix.provision_repo == 'ansible-collection-nimbus_range'
+        uses: actions/create-github-app-token@f8d387b68d61c58ab83c6c016672934102569859 # v3.0.0-beta.4
+        id: app-token
+        with:
+          app-id: ${{ secrets.BOT_APP_ID }}
+          private-key: ${{ secrets.BOT_APP_PRIVATE_KEY }}
+          repositories: |
+            ares-warpgate-templates
+            ansible-collection-nimbus_range
+            ares
+
+      - name: Checkout git repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          token: ${{ steps.app-token.outputs.token || github.token }}
+
+      - name: Setup XDG directories
+        run: |
+          USER_ID="$(id -u)"
+          export XDG_RUNTIME_DIR="/run/user/$USER_ID"
+          export XDG_CONFIG_HOME="$HOME/.config"
+          export XDG_DATA_HOME="$HOME/.local/share"
+          mkdir -p "$XDG_CONFIG_HOME" "$XDG_DATA_HOME" "$HOME/.local/bin"
+          {
+            echo "XDG_RUNTIME_DIR=/run/user/$USER_ID"
+            echo "XDG_CONFIG_HOME=$HOME/.config"
+            echo "XDG_DATA_HOME=$HOME/.local/share"
+          } >> "$GITHUB_ENV"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Setup Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install Ansible
+        if: matrix.needs_ansible == true
+        run: python3 -m pip install ansible
+
+      - name: Clone ansible-collection repository
+        if: matrix.needs_ansible == true
+        run: |
+          if [ "${{ matrix.provision_repo }}" == "ansible-collection-nimbus_range" ]; then
+            mkdir -p "$HOME/ansible-collection-nimbus_range"
+            curl -sL -H "Authorization: token ${{ steps.app-token.outputs.token }}" \
+              "https://api.github.com/repos/dreadnode/ansible-collection-nimbus_range/tarball/HEAD" | \
+              tar -xzf - --strip-components=1 -C "$HOME/ansible-collection-nimbus_range"
+            find "$HOME/ansible-collection-nimbus_range" -type f -exec chmod 644 {} \;
+            find "$HOME/ansible-collection-nimbus_range" -type d -exec chmod 755 {} \;
+          fi
+
+      - name: Install Ansible Collection
+        if: matrix.needs_ansible == true
+        run: |
+          mkdir -p "$HOME/.ansible/collections"
+          if [ "${{ matrix.provision_repo }}" == "ansible-collection-nimbus_range" ]; then
+            cd "$HOME/ansible-collection-nimbus_range"
+            ansible-galaxy collection build --force
+            ansible-galaxy collection install dreadnode-nimbus_range-*.tar.gz -p "$HOME/.ansible/collections" --force --pre
+          fi
+
+      - name: Login to GitHub Container Registry (Docker)
+        uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.WG_IMAGE_BUILDER_PAT }}
+
+      - name: Free up disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc "/usr/local/share/boost" /usr/local/lib/android /opt/hostedtoolcache/CodeQL
+          df -h
+
+      - name: Add swap space
+        run: |
+          sudo fallocate -l 16G /swapfile
+          sudo chmod 600 /swapfile
+          sudo mkswap /swapfile
+          sudo swapon /swapfile
+          free -h
+
+      - name: Prune Docker BuildKit cache
+        run: |
+          docker buildx prune -af --verbose || true
+          docker system prune -af || true
+
+      - name: Cache Warpgate binary
+        uses: actions/cache@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
+        id: warpgate-cache
+        with:
+          path: ~/.local/bin/warpgate
+          key: warpgate-${{ env.WARPGATE_VERSION }}-${{ runner.arch }}
+
+      - name: Install Warpgate from release
+        if: steps.warpgate-cache.outputs.cache-hit != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          VERSION="${{ env.WARPGATE_VERSION }}"
+          ARCH="$(uname -m)"
+          case "$ARCH" in
+            x86_64) ARCH="amd64"; ALT_ARCH="x86_64" ;;
+            aarch64|arm64) ARCH="arm64"; ALT_ARCH="aarch64" ;;
+            *) echo "Unsupported arch: $ARCH"; exit 1 ;;
+          esac
+          TMP_DIR="$(mktemp -d)"
+          gh release download "$VERSION" -R CowDogMoo/warpgate -D "$TMP_DIR" \
+            -p "*linux*${ARCH}*" -p "*Linux*${ARCH}*" -p "*linux*${ALT_ARCH}*" -p "*Linux*${ALT_ARCH}*"
+          ASSET_PATH="$(find "$TMP_DIR" -maxdepth 1 -type f -print -quit)"
+          ASSET="$(basename "$ASSET_PATH")"
+          case "$ASSET" in
+            *.tar.gz) tar -xzf "$TMP_DIR/$ASSET" -C "$TMP_DIR" ;;
+            *.zip) unzip -q "$TMP_DIR/$ASSET" -d "$TMP_DIR" ;;
+            *) echo "Unknown archive: $ASSET"; exit 1 ;;
+          esac
+          WARPGATE_BIN="$(find "$TMP_DIR" -maxdepth 3 -type f -name warpgate | head -n 1)"
+          [ -z "$WARPGATE_BIN" ] && echo "warpgate binary not found" && exit 1
+          install -m 0755 "$WARPGATE_BIN" "$HOME/.local/bin/warpgate"
+          rm -rf "$TMP_DIR"
+
+      - name: Verify Warpgate installation
+        run: warpgate version
+
+      - name: Configure Warpgate
+        run: |
+          warpgate config init
+          cat > ~/.config/warpgate/config.yaml <<EOF
+          container:
+              defaultbaseimage: ubuntu
+              defaultbaseversion: latest
+              defaultplatform: linux/amd64
+              defaultplatforms:
+                  - linux/amd64
+                  - linux/arm64
+          EOF
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4
+
+      - name: Register templates with Warpgate
+        run: |
+          warpgate templates add "$GITHUB_WORKSPACE"
+          warpgate templates list --source local
+
+      - name: Validate template configuration
+        run: |
+          cd "$GITHUB_WORKSPACE/warpgate-templates/${{ matrix.name }}"
+          [ ! -f "warpgate.yaml" ] && echo "ERROR: warpgate.yaml not found" && exit 1
+          cat warpgate.yaml
+
+      - name: Pre-load base image into BuildKit cache
+        run: |
+          cd "$GITHUB_WORKSPACE/warpgate-templates/${{ matrix.name }}"
+          BASE_IMAGE=$(grep -A2 "^base:" warpgate.yaml | grep "image:" | head -1 | awk '{print $2}' | tr -d '"'"'")
+          if [ -n "$BASE_IMAGE" ]; then
+            echo "Pre-loading base image: $BASE_IMAGE"
+            echo "FROM $BASE_IMAGE" | docker buildx build --platform linux/${{ matrix.architecture.arch }} --pull --no-cache -
+          fi
+
+      - name: Build ${{ matrix.architecture.arch }} Image
+        run: |
+          export PROVISION_REPO_PATH="$HOME/${{ matrix.provision_repo_path }}"
+          warpgate build --template ${{ matrix.name }} \
+            --arch ${{ matrix.architecture.arch }} \
+            --push-digest \
+            --registry ghcr.io/${{ matrix.namespace }} \
+            --save-digests \
+            --digest-dir "$GITHUB_WORKSPACE" \
+            --verbose \
+            --cache-from type=registry,ref=ghcr.io/${{ matrix.namespace }}/${{ matrix.name }}:buildcache-${{ matrix.architecture.arch }} \
+            --cache-to type=registry,ref=ghcr.io/${{ matrix.namespace }}/${{ matrix.name }}:buildcache-${{ matrix.architecture.arch }},mode=max
+          DIGEST_FILE="$GITHUB_WORKSPACE/digest-${{ matrix.name }}-${{ matrix.architecture.arch }}.txt"
+          if [ -f "$DIGEST_FILE" ]; then
+            cat "$DIGEST_FILE"
+          else
+            echo "ERROR: Digest file not created"
+            exit 1
+          fi
+        env:
+          GITHUB_TOKEN: ${{ steps.app-token.outputs.token || secrets.WG_IMAGE_BUILDER_PAT }}
+          BUILDX_NO_DEFAULT_ATTESTATIONS: 1
+
+      - name: Upload digest
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7
+        with:
+          name: gpu-base-digests-${{ matrix.name }}-tag-${{ matrix.architecture.arch }}
+          path: ${{ github.workspace }}/digest-${{ matrix.name }}-${{ matrix.architecture.arch }}.txt
+          retention-days: 1
+
+  merge-gpu-base-manifests:
+    name: "[GPU] Create manifest for ${{ matrix.name }}"
+    needs: [discover-templates, build-gpu-base-images]
+    if: github.event_name != 'pull_request' && needs.discover-templates.outputs.has_gpu_base_templates == 'true'
+    runs-on: ubuntu24.04-amd64-8-core
+    strategy:
+      matrix: ${{ fromJson(needs.discover-templates.outputs.gpu_base_templates) }}
+      fail-fast: false
+    steps:
+      - name: Checkout git repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Setup XDG directories
+        run: |
+          USER_ID="$(id -u)"
+          mkdir -p "$HOME/.config" "$HOME/.local/share" "$HOME/.local/bin"
+          {
+            echo "XDG_RUNTIME_DIR=/run/user/$USER_ID"
+            echo "XDG_CONFIG_HOME=$HOME/.config"
+            echo "XDG_DATA_HOME=$HOME/.local/share"
+          } >> "$GITHUB_ENV"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Cache Warpgate binary
+        uses: actions/cache@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
+        id: warpgate-cache
+        with:
+          path: ~/.local/bin/warpgate
+          key: warpgate-${{ env.WARPGATE_VERSION }}-${{ runner.arch }}
+
+      - name: Install Warpgate from release
+        if: steps.warpgate-cache.outputs.cache-hit != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          VERSION="${{ env.WARPGATE_VERSION }}"
+          ARCH="$(uname -m)"
+          case "$ARCH" in
+            x86_64) ARCH="amd64"; ALT_ARCH="x86_64" ;;
+            aarch64|arm64) ARCH="arm64"; ALT_ARCH="aarch64" ;;
+            *) echo "Unsupported arch: $ARCH"; exit 1 ;;
+          esac
+          TMP_DIR="$(mktemp -d)"
+          gh release download "$VERSION" -R CowDogMoo/warpgate -D "$TMP_DIR" \
+            -p "*linux*${ARCH}*" -p "*Linux*${ARCH}*" -p "*linux*${ALT_ARCH}*" -p "*Linux*${ALT_ARCH}*"
+          ASSET_PATH="$(find "$TMP_DIR" -maxdepth 1 -type f -print -quit)"
+          ASSET="$(basename "$ASSET_PATH")"
+          case "$ASSET" in
+            *.tar.gz) tar -xzf "$TMP_DIR/$ASSET" -C "$TMP_DIR" ;;
+            *.zip) unzip -q "$TMP_DIR/$ASSET" -d "$TMP_DIR" ;;
+            *) echo "Unknown archive: $ASSET"; exit 1 ;;
+          esac
+          WARPGATE_BIN="$(find "$TMP_DIR" -maxdepth 3 -type f -name warpgate | head -n 1)"
+          [ -z "$WARPGATE_BIN" ] && echo "warpgate binary not found" && exit 1
+          install -m 0755 "$WARPGATE_BIN" "$HOME/.local/bin/warpgate"
+          rm -rf "$TMP_DIR"
+
+      - name: Verify Warpgate installation
+        run: warpgate version
+
+      - name: Download digests
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          pattern: gpu-base-digests-${{ matrix.name }}-tag-*
+          path: .
+          merge-multiple: true
+
+      - name: List downloaded digest files
+        run: |
+          echo "Files in current directory:"
+          ls -la
+          ls -la digest-*.txt || echo "No digest files found"
+
+      - name: Verify digest files
+        run: |
+          for file in digest-${{ matrix.name }}-*.txt; do
+            [ ! -f "$file" ] && echo "ERROR: Expected digest file not found: $file" && exit 1
+            grep -qE '^sha256:[a-f0-9]{64}$' "$file" || (echo "ERROR: Invalid digest in $file" && exit 1)
+            echo "Verified: $file" && cat "$file"
+          done
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.WG_IMAGE_BUILDER_PAT }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4
+        with:
+          driver: docker-container
+
+      - name: Ensure required digests exist
+        run: |
+          SUPPORTED_PLATFORMS="${{ join(matrix.supported_platforms, ',') }}"
+          IFS=',' read -ra ARCHS <<< "$SUPPORTED_PLATFORMS"
+          for arch in "${ARCHS[@]}"; do
+            file="digest-${{ matrix.name }}-${arch}.txt"
+            if [ ! -f "$file" ]; then
+              echo "ERROR: Missing digest file: $file"
+              exit 1
+            fi
+          done
+
+      - name: Create multi-arch manifest
+        run: |
+          REQUIRED_ARCHS="${{ join(matrix.supported_platforms, ',') }}"
+          warpgate manifests create \
+            --name ${{ matrix.name }} \
+            --registry ghcr.io \
+            --namespace ${{ matrix.namespace }} \
+            --tag latest \
+            --digest-dir . \
+            --require-arch "$REQUIRED_ARCHS"
+        env:
+          GITHUB_TOKEN: ${{ secrets.WG_IMAGE_BUILDER_PAT }}
+
+      - name: Verify multi-arch manifest
+        run: |
+          docker buildx imagetools inspect ghcr.io/${{ matrix.namespace }}/${{ matrix.name }}:latest
+
+  # ===========================================
+  # GPU Chain: Build GPU dependent images
+  # ===========================================
+  build-gpu-dependent-images:
+    name: "[GPU Dep] Build ${{ matrix.name }} (${{ matrix.architecture.arch }})"
+    needs: [discover-templates, merge-gpu-base-manifests]
+    if: |
+      always() &&
+      github.event_name != 'pull_request' &&
+      needs.discover-templates.outputs.has_gpu_dependent_templates == 'true' &&
+      (needs.merge-gpu-base-manifests.result == 'success' || needs.merge-gpu-base-manifests.result == 'skipped')
+    runs-on: ${{ matrix.architecture.runner }}
+    timeout-minutes: 120
+    strategy:
+      matrix: ${{ fromJson(needs.discover-templates.outputs.gpu_dependent_matrix) }}
+      fail-fast: false
+    steps:
+      - name: Generate GitHub App Token
+        if: matrix.provision_repo == 'ansible-collection-nimbus_range'
+        uses: actions/create-github-app-token@f8d387b68d61c58ab83c6c016672934102569859 # v3.0.0-beta.4
+        id: app-token
+        with:
+          app-id: ${{ secrets.BOT_APP_ID }}
+          private-key: ${{ secrets.BOT_APP_PRIVATE_KEY }}
+          repositories: |
+            ares-warpgate-templates
+            ansible-collection-nimbus_range
+            ares
+
+      - name: Checkout git repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          token: ${{ steps.app-token.outputs.token || github.token }}
+
+      - name: Setup XDG directories
+        run: |
+          USER_ID="$(id -u)"
+          mkdir -p "$HOME/.config" "$HOME/.local/share" "$HOME/.local/bin"
+          {
+            echo "XDG_RUNTIME_DIR=/run/user/$USER_ID"
+            echo "XDG_CONFIG_HOME=$HOME/.config"
+            echo "XDG_DATA_HOME=$HOME/.local/share"
+          } >> "$GITHUB_ENV"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Setup Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install Ansible
+        if: matrix.needs_ansible == true
+        run: python3 -m pip install ansible
+
+      - name: Clone ansible-collection repository
+        if: matrix.needs_ansible == true
+        run: |
+          if [ "${{ matrix.provision_repo }}" == "ansible-collection-nimbus_range" ]; then
+            mkdir -p "$HOME/ansible-collection-nimbus_range"
+            curl -sL -H "Authorization: token ${{ steps.app-token.outputs.token }}" \
+              "https://api.github.com/repos/dreadnode/ansible-collection-nimbus_range/tarball/HEAD" | \
+              tar -xzf - --strip-components=1 -C "$HOME/ansible-collection-nimbus_range"
+            find "$HOME/ansible-collection-nimbus_range" -type f -exec chmod 644 {} \;
+            find "$HOME/ansible-collection-nimbus_range" -type d -exec chmod 755 {} \;
+          fi
+
+      - name: Install Ansible Collection
+        if: matrix.needs_ansible == true
+        run: |
+          mkdir -p "$HOME/.ansible/collections"
+          if [ "${{ matrix.provision_repo }}" == "ansible-collection-nimbus_range" ]; then
+            cd "$HOME/ansible-collection-nimbus_range"
+            ansible-galaxy collection build --force
+            ansible-galaxy collection install dreadnode-nimbus_range-*.tar.gz -p "$HOME/.ansible/collections" --force --pre
+          fi
+
+      - name: Login to GitHub Container Registry (Docker)
+        uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.WG_IMAGE_BUILDER_PAT }}
+
+      - name: Free up disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc "/usr/local/share/boost" /usr/local/lib/android /opt/hostedtoolcache/CodeQL
+          df -h
+
+      - name: Add swap space
+        run: |
+          sudo fallocate -l 16G /swapfile
+          sudo chmod 600 /swapfile
+          sudo mkswap /swapfile
+          sudo swapon /swapfile
+          free -h
+
+      - name: Prune Docker BuildKit cache
+        run: |
+          docker buildx prune -af --verbose || true
+          docker system prune -af || true
+
+      - name: Cache Warpgate binary
+        uses: actions/cache@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
+        id: warpgate-cache
+        with:
+          path: ~/.local/bin/warpgate
+          key: warpgate-${{ env.WARPGATE_VERSION }}-${{ runner.arch }}
+
+      - name: Install Warpgate from release
+        if: steps.warpgate-cache.outputs.cache-hit != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          VERSION="${{ env.WARPGATE_VERSION }}"
+          ARCH="$(uname -m)"
+          case "$ARCH" in
+            x86_64) ARCH="amd64"; ALT_ARCH="x86_64" ;;
+            aarch64|arm64) ARCH="arm64"; ALT_ARCH="aarch64" ;;
+            *) echo "Unsupported arch: $ARCH"; exit 1 ;;
+          esac
+          TMP_DIR="$(mktemp -d)"
+          gh release download "$VERSION" -R CowDogMoo/warpgate -D "$TMP_DIR" \
+            -p "*linux*${ARCH}*" -p "*Linux*${ARCH}*" -p "*linux*${ALT_ARCH}*" -p "*Linux*${ALT_ARCH}*"
+          ASSET_PATH="$(find "$TMP_DIR" -maxdepth 1 -type f -print -quit)"
+          ASSET="$(basename "$ASSET_PATH")"
+          case "$ASSET" in
+            *.tar.gz) tar -xzf "$TMP_DIR/$ASSET" -C "$TMP_DIR" ;;
+            *.zip) unzip -q "$TMP_DIR/$ASSET" -d "$TMP_DIR" ;;
+            *) echo "Unknown archive: $ASSET"; exit 1 ;;
+          esac
+          WARPGATE_BIN="$(find "$TMP_DIR" -maxdepth 3 -type f -name warpgate | head -n 1)"
+          [ -z "$WARPGATE_BIN" ] && echo "warpgate binary not found" && exit 1
+          install -m 0755 "$WARPGATE_BIN" "$HOME/.local/bin/warpgate"
+          rm -rf "$TMP_DIR"
+
+      - name: Verify Warpgate installation
+        run: warpgate version
+
+      - name: Configure Warpgate
+        run: |
+          warpgate config init
+          cat > ~/.config/warpgate/config.yaml <<EOF
+          container:
+              defaultbaseimage: ubuntu
+              defaultbaseversion: latest
+              defaultplatform: linux/amd64
+              defaultplatforms:
+                  - linux/amd64
+                  - linux/arm64
+          EOF
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4
+
+      - name: Register templates with Warpgate
+        run: |
+          warpgate templates add "$GITHUB_WORKSPACE"
+          warpgate templates list --source local
+
+      - name: Validate template configuration
+        run: |
+          cd "$GITHUB_WORKSPACE/warpgate-templates/${{ matrix.name }}"
+          [ ! -f "warpgate.yaml" ] && echo "ERROR: warpgate.yaml not found" && exit 1
+          cat warpgate.yaml
+
+      - name: Pre-load base image into BuildKit cache
+        run: |
+          cd "$GITHUB_WORKSPACE/warpgate-templates/${{ matrix.name }}"
+          BASE_IMAGE=$(grep -A2 "^base:" warpgate.yaml | grep "image:" | head -1 | awk '{print $2}' | tr -d '"'"'")
+          if [ -n "$BASE_IMAGE" ]; then
+            echo "Pre-loading base image: $BASE_IMAGE"
+            echo "FROM $BASE_IMAGE" | docker buildx build --platform linux/${{ matrix.architecture.arch }} --pull --no-cache -
+          fi
+
+      - name: Build ${{ matrix.architecture.arch }} Image
+        run: |
+          export PROVISION_REPO_PATH="$HOME/${{ matrix.provision_repo_path }}"
+          warpgate build --template ${{ matrix.name }} \
+            --arch ${{ matrix.architecture.arch }} \
+            --push-digest \
+            --registry ghcr.io/${{ matrix.namespace }} \
+            --save-digests \
+            --digest-dir "$GITHUB_WORKSPACE" \
+            --verbose \
+            --cache-from type=registry,ref=ghcr.io/${{ matrix.namespace }}/${{ matrix.name }}:buildcache-${{ matrix.architecture.arch }} \
+            --cache-to type=registry,ref=ghcr.io/${{ matrix.namespace }}/${{ matrix.name }}:buildcache-${{ matrix.architecture.arch }},mode=max
+          DIGEST_FILE="$GITHUB_WORKSPACE/digest-${{ matrix.name }}-${{ matrix.architecture.arch }}.txt"
+          if [ -f "$DIGEST_FILE" ]; then
+            cat "$DIGEST_FILE"
+          else
+            echo "ERROR: Digest file not created"
+            exit 1
+          fi
+        env:
+          GITHUB_TOKEN: ${{ steps.app-token.outputs.token || secrets.WG_IMAGE_BUILDER_PAT }}
+          BUILDX_NO_DEFAULT_ATTESTATIONS: 1
+
+      - name: Upload digest
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7
+        with:
+          name: gpu-dependent-digests-${{ matrix.name }}-tag-${{ matrix.architecture.arch }}
+          path: ${{ github.workspace }}/digest-${{ matrix.name }}-${{ matrix.architecture.arch }}.txt
+          retention-days: 1
+
+  merge-gpu-dependent-manifests:
+    name: "[GPU Dep] Create manifest for ${{ matrix.name }}"
+    needs: [discover-templates, build-gpu-dependent-images]
+    if: |
+      always() &&
+      github.event_name != 'pull_request' &&
+      needs.discover-templates.outputs.has_gpu_dependent_templates == 'true' &&
+      needs.build-gpu-dependent-images.result == 'success'
+    runs-on: ubuntu24.04-amd64-8-core
+    strategy:
+      matrix: ${{ fromJson(needs.discover-templates.outputs.gpu_dependent_templates) }}
+      fail-fast: false
+    steps:
+      - name: Checkout git repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Setup XDG directories
+        run: |
+          USER_ID="$(id -u)"
+          mkdir -p "$HOME/.config" "$HOME/.local/share" "$HOME/.local/bin"
+          {
+            echo "XDG_RUNTIME_DIR=/run/user/$USER_ID"
+            echo "XDG_CONFIG_HOME=$HOME/.config"
+            echo "XDG_DATA_HOME=$HOME/.local/share"
+          } >> "$GITHUB_ENV"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Cache Warpgate binary
+        uses: actions/cache@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
+        id: warpgate-cache
+        with:
+          path: ~/.local/bin/warpgate
+          key: warpgate-${{ env.WARPGATE_VERSION }}-${{ runner.arch }}
+
+      - name: Install Warpgate from release
+        if: steps.warpgate-cache.outputs.cache-hit != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          VERSION="${{ env.WARPGATE_VERSION }}"
+          ARCH="$(uname -m)"
+          case "$ARCH" in
+            x86_64) ARCH="amd64"; ALT_ARCH="x86_64" ;;
+            aarch64|arm64) ARCH="arm64"; ALT_ARCH="aarch64" ;;
+            *) echo "Unsupported arch: $ARCH"; exit 1 ;;
+          esac
+          TMP_DIR="$(mktemp -d)"
+          gh release download "$VERSION" -R CowDogMoo/warpgate -D "$TMP_DIR" \
+            -p "*linux*${ARCH}*" -p "*Linux*${ARCH}*" -p "*linux*${ALT_ARCH}*" -p "*Linux*${ALT_ARCH}*"
+          ASSET_PATH="$(find "$TMP_DIR" -maxdepth 1 -type f -print -quit)"
+          ASSET="$(basename "$ASSET_PATH")"
+          case "$ASSET" in
+            *.tar.gz) tar -xzf "$TMP_DIR/$ASSET" -C "$TMP_DIR" ;;
+            *.zip) unzip -q "$TMP_DIR/$ASSET" -d "$TMP_DIR" ;;
+            *) echo "Unknown archive: $ASSET"; exit 1 ;;
+          esac
+          WARPGATE_BIN="$(find "$TMP_DIR" -maxdepth 3 -type f -name warpgate | head -n 1)"
+          [ -z "$WARPGATE_BIN" ] && echo "warpgate binary not found" && exit 1
+          install -m 0755 "$WARPGATE_BIN" "$HOME/.local/bin/warpgate"
+          rm -rf "$TMP_DIR"
+
+      - name: Verify Warpgate installation
+        run: warpgate version
+
+      - name: Download digests
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          pattern: gpu-dependent-digests-${{ matrix.name }}-tag-*
+          path: .
+          merge-multiple: true
+
+      - name: List downloaded digest files
+        run: |
+          echo "Files in current directory:"
+          ls -la
+          ls -la digest-*.txt || echo "No digest files found"
+
+      - name: Verify digest files
+        run: |
+          for file in digest-${{ matrix.name }}-*.txt; do
+            [ ! -f "$file" ] && echo "ERROR: Expected digest file not found: $file" && exit 1
+            grep -qE '^sha256:[a-f0-9]{64}$' "$file" || (echo "ERROR: Invalid digest in $file" && exit 1)
+            echo "Verified: $file" && cat "$file"
+          done
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.WG_IMAGE_BUILDER_PAT }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4
+        with:
+          driver: docker-container
+
+      - name: Ensure required digests exist
+        run: |
+          SUPPORTED_PLATFORMS="${{ join(matrix.supported_platforms, ',') }}"
+          IFS=',' read -ra ARCHS <<< "$SUPPORTED_PLATFORMS"
+          for arch in "${ARCHS[@]}"; do
+            file="digest-${{ matrix.name }}-${arch}.txt"
+            if [ ! -f "$file" ]; then
+              echo "ERROR: Missing digest file: $file"
+              exit 1
+            fi
+          done
+
+      - name: Create multi-arch manifest
+        run: |
+          REQUIRED_ARCHS="${{ join(matrix.supported_platforms, ',') }}"
+          warpgate manifests create \
+            --name ${{ matrix.name }} \
+            --registry ghcr.io \
+            --namespace ${{ matrix.namespace }} \
+            --tag latest \
+            --digest-dir . \
+            --require-arch "$REQUIRED_ARCHS"
+        env:
+          GITHUB_TOKEN: ${{ secrets.WG_IMAGE_BUILDER_PAT }}
+
+      - name: Verify multi-arch manifest
+        run: |
+          docker buildx imagetools inspect ghcr.io/${{ matrix.namespace }}/${{ matrix.name }}:latest
+
+  build-summary:
+    name: Build Summary
+    runs-on: ubuntu24.04-amd64-8-core
+    needs: [discover-templates, build-base-images, merge-base-manifests, build-dependent-images, merge-dependent-manifests, build-gpu-base-images, merge-gpu-base-manifests, build-gpu-dependent-images, merge-gpu-dependent-manifests]
+    if: always()
+    steps:
+      - name: Check build results
+        run: |
+          echo "=== Build Results Summary ==="
+          echo ""
+          echo "Main Chain - Base Images:"
+          echo "  build-base-images: ${{ needs.build-base-images.result }}"
+          echo "  merge-base-manifests: ${{ needs.merge-base-manifests.result }}"
+          echo ""
+          echo "Main Chain - Dependent Images:"
+          echo "  build-dependent-images: ${{ needs.build-dependent-images.result }}"
+          echo "  merge-dependent-manifests: ${{ needs.merge-dependent-manifests.result }}"
+          echo ""
+          echo "GPU Chain - Base Images:"
+          echo "  build-gpu-base-images: ${{ needs.build-gpu-base-images.result }}"
+          echo "  merge-gpu-base-manifests: ${{ needs.merge-gpu-base-manifests.result }}"
+          echo ""
+          echo "GPU Chain - Dependent Images:"
+          echo "  build-gpu-dependent-images: ${{ needs.build-gpu-dependent-images.result }}"
+          echo "  merge-gpu-dependent-manifests: ${{ needs.merge-gpu-dependent-manifests.result }}"
+          echo ""
+
+          # Check main chain base image builds
+          if [ "${{ needs.build-base-images.result }}" != "success" ] && [ "${{ needs.build-base-images.result }}" != "skipped" ]; then
+            echo "::error::One or more base image builds failed"
+            exit 1
+          fi
+
+          if [ "${{ needs.merge-base-manifests.result }}" != "success" ] && [ "${{ needs.merge-base-manifests.result }}" != "skipped" ]; then
+            echo "::error::One or more base manifest merges failed"
+            exit 1
+          fi
+
+          # Check main chain dependent image builds
+          if [ "${{ needs.build-dependent-images.result }}" != "success" ] && [ "${{ needs.build-dependent-images.result }}" != "skipped" ]; then
+            echo "::error::One or more dependent image builds failed"
+            exit 1
+          fi
+
+          if [ "${{ needs.merge-dependent-manifests.result }}" != "success" ] && [ "${{ needs.merge-dependent-manifests.result }}" != "skipped" ]; then
+            echo "::error::One or more dependent manifest merges failed"
+            exit 1
+          fi
+
+          # Check GPU chain base image builds
+          if [ "${{ needs.build-gpu-base-images.result }}" != "success" ] && [ "${{ needs.build-gpu-base-images.result }}" != "skipped" ]; then
+            echo "::error::One or more GPU base image builds failed"
+            exit 1
+          fi
+
+          if [ "${{ needs.merge-gpu-base-manifests.result }}" != "success" ] && [ "${{ needs.merge-gpu-base-manifests.result }}" != "skipped" ]; then
+            echo "::error::One or more GPU base manifest merges failed"
+            exit 1
+          fi
+
+          # Check GPU chain dependent image builds
+          if [ "${{ needs.build-gpu-dependent-images.result }}" != "success" ] && [ "${{ needs.build-gpu-dependent-images.result }}" != "skipped" ]; then
+            echo "::error::One or more GPU dependent image builds failed"
+            exit 1
+          fi
+
+          if [ "${{ needs.merge-gpu-dependent-manifests.result }}" != "success" ] && [ "${{ needs.merge-gpu-dependent-manifests.result }}" != "skipped" ]; then
+            echo "::error::One or more GPU dependent manifest merges failed"
+            exit 1
+          fi
+
+          # Summary
+          MAIN_SKIPPED="${{ needs.build-base-images.result == 'skipped' && needs.build-dependent-images.result == 'skipped' }}"
+          GPU_SKIPPED="${{ needs.build-gpu-base-images.result == 'skipped' && needs.build-gpu-dependent-images.result == 'skipped' }}"
+          if [ "$MAIN_SKIPPED" == "true" ] && [ "$GPU_SKIPPED" == "true" ]; then
+            echo "All builds were skipped (likely a PR)"
+          else
+            echo "All image builds and manifest merges completed successfully"
+          fi

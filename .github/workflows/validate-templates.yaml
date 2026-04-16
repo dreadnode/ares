@@ -1,0 +1,413 @@
+---
+name: Validate Templates
+on:
+  merge_group:
+  pull_request:
+    branches:
+      - main
+    types:
+      - opened
+      - synchronize
+      - reopened
+    paths:
+      - 'warpgate-templates/**'
+      - '.github/workflows/validate-templates.yaml'
+  push:
+    branches:
+      - main
+    paths:
+      - 'warpgate-templates/**'
+      - '.github/workflows/validate-templates.yaml'
+  workflow_dispatch:
+
+env:
+  WARPGATE_VERSION: "v4.4.0"
+  PYTHON_VERSION: "3.13.7"
+  TASK_VERSION: "3.45.5"
+  TASK_X_REMOTE_TASKFILES: 1
+
+jobs:
+  validate:
+    name: Validate Template Configurations
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout git repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Install Warpgate
+        run: |
+          set -euo pipefail
+
+          OS="$(uname -s | tr '[:upper:]' '[:lower:]')"
+          ARCH="$(uname -m)"
+
+          # Map architecture names to Go conventions
+          case "$ARCH" in
+            x86_64)
+              ARCH="amd64"
+              ;;
+            aarch64|arm64)
+              ARCH="arm64"
+              ;;
+            armv7l)
+              ARCH="armv7"
+              ;;
+            armv6l)
+              ARCH="armv6"
+              ;;
+            *)
+              echo "Unsupported architecture: $ARCH"
+              exit 1
+              ;;
+          esac
+
+          VERSION="${{ env.WARPGATE_VERSION }}"
+          echo "Downloading warpgate ${VERSION} for ${OS}/${ARCH}..."
+
+          gh release download "${VERSION}" \
+            --repo CowDogMoo/warpgate \
+            --pattern "warpgate_*_${OS}_${ARCH}*.tar.gz" \
+            --dir /tmp
+
+          shopt -s nullglob
+          tarball=(/tmp/warpgate_*_"${OS}"_"${ARCH}"*.tar.gz)
+          sudo tar -xzf "${tarball[0]}" -C /usr/local/bin warpgate
+          sudo chmod +x /usr/local/bin/warpgate
+          rm "${tarball[@]}"
+
+          warpgate version
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Find all templates
+        id: find-templates
+        run: |
+          templates=$(find warpgate-templates -name 'warpgate.yaml' -type f)
+          echo "Found templates:"
+          echo "$templates"
+          {
+            echo "templates<<EOF"
+            echo "$templates"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Validate templates with warpgate (syntax-only)
+        run: |
+          failed=0
+          while IFS= read -r template; do
+            if [ -n "$template" ]; then
+              template_name=$(basename "$(dirname "$template")")
+              echo "::group::Validating $template_name ($template)"
+
+              if warpgate validate --syntax-only "$template"; then
+                echo "✓ $template_name syntax is valid"
+              else
+                echo "::error file=$template::Syntax validation failed for $template_name"
+                failed=1
+              fi
+              echo "::endgroup::"
+            fi
+          done <<< "${{ steps.find-templates.outputs.templates }}"
+
+          if [ $failed -eq 1 ]; then
+            echo "::error::One or more templates failed syntax validation"
+            exit 1
+          fi
+
+      - name: Check required files
+        run: |
+          failed=0
+          for template_dir in warpgate-templates/templates/*/; do
+            template_name=$(basename "$template_dir")
+            echo "::group::Checking $template_name"
+
+            # Check for required files
+            if [ ! -f "${template_dir}warpgate.yaml" ]; then
+              echo "::error::Missing warpgate.yaml in $template_name"
+              failed=1
+            fi
+
+            if [ ! -f "${template_dir}README.md" ]; then
+              echo "::warning::Missing README.md in $template_name"
+            fi
+
+            echo "::endgroup::"
+          done
+
+          if [ $failed -eq 1 ]; then
+            exit 1
+          fi
+
+      - name: Validate YAML syntax
+        run: |
+          pip install yamllint
+          find warpgate-templates -name '*.yaml' -o -name '*.yml' | while read -r file; do
+            echo "Checking YAML syntax: $file"
+            yamllint -d "{extends: relaxed, rules: {line-length: {max: 120}}}" "$file"
+          done
+
+      - name: Validate against JSON schema
+        continue-on-error: true
+        run: |
+          pip install jsonschema pyyaml requests
+          python << 'EOF'
+          import yaml
+          import json
+          import sys
+          import requests
+          from pathlib import Path
+          from jsonschema import Draft7Validator
+
+          # Download the schema
+          schema_url = "https://raw.githubusercontent.com/cowdogmoo/warpgate/main/schema/warpgate-template.json"
+          print(f"Downloading schema from: {schema_url}")
+
+          try:
+              response = requests.get(schema_url, timeout=10)
+              response.raise_for_status()
+              schema = response.json()
+              print("✓ Schema downloaded successfully\n")
+          except requests.exceptions.HTTPError as e:
+              if e.response.status_code == 404:
+                  print(f"::warning::Schema not found at {schema_url}")
+                  print("Skipping schema validation (schema not yet published)")
+                  sys.exit(0)
+              else:
+                  print(f"::error::Failed to download schema: {e}")
+                  sys.exit(1)
+          except Exception as e:
+              print(f"::error::Failed to download schema: {e}")
+              sys.exit(1)
+
+          has_errors = False
+
+          for template_file in Path('warpgate-templates').rglob('warpgate.yaml'):
+              print(f"{'='*80}")
+              print(f"Validating schema for: {template_file}")
+              print('='*80)
+
+              with open(template_file) as f:
+                  template_data = yaml.safe_load(f)
+
+              try:
+                  validator = Draft7Validator(schema)
+                  errors = sorted(validator.iter_errors(template_data), key=lambda e: e.path)
+
+                  if errors:
+                      print(f"::warning file={template_file}::Schema validation issues found")
+                      for error in errors:
+                          path = '.'.join(str(p) for p in error.path) if error.path else 'root'
+                          print(f"  ⚠ [{path}]: {error.message}")
+                      has_errors = True
+                  else:
+                      print(f"  ✓ Schema validation passed")
+
+              except Exception as e:
+                  print(f"::warning file={template_file}::Validation error: {e}")
+                  has_errors = True
+
+              print()
+
+          if has_errors:
+              print("::warning::Some templates have schema validation issues")
+              print("Note: Schema validation is currently non-blocking while schema is being updated")
+          else:
+              print("✓ All templates passed schema validation")
+          EOF
+
+  metadata-check:
+    name: Check Template Metadata
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout git repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Setup Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install dependencies
+        run: pip install pyyaml
+
+      - name: Check metadata completeness
+        run: |
+          python << 'EOF'
+          import yaml
+          import sys
+          from pathlib import Path
+
+          required_fields = ['name', 'version', 'description', 'author', 'license']
+          failed = False
+
+          for template_file in Path('warpgate-templates').rglob('warpgate.yaml'):
+              print(f"\nChecking metadata in: {template_file}")
+
+              with open(template_file) as f:
+                  data = yaml.safe_load(f)
+
+              metadata = data.get('metadata', {})
+
+              for field in required_fields:
+                  if field not in metadata or not metadata[field]:
+                      print(f"  ✗ Missing required field: {field}")
+                      failed = True
+                  else:
+                      print(f"  ✓ {field}: {metadata[field]}")
+
+              # Check warpgate version requirement
+              requires = metadata.get('requires', {})
+              if 'warpgate' not in requires:
+                  print("  ⚠ Warning: No warpgate version requirement specified")
+
+          if failed:
+              print("\n::error::One or more templates have incomplete metadata")
+              sys.exit(1)
+          else:
+              print("\n✓ All templates have complete metadata")
+          EOF
+
+  provisioner-check:
+    name: Check Provisioner Configuration
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout git repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Setup Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install dependencies
+        run: pip install pyyaml
+
+      - name: Validate provisioner configurations
+        run: |
+          python << 'EOF'
+          import yaml
+          import sys
+          import re
+          from pathlib import Path
+
+          failed = False
+          env_vars_found = set()
+
+          for template_file in Path('warpgate-templates').rglob('warpgate.yaml'):
+              print(f"\n{'='*80}")
+              print(f"Checking provisioners in: {template_file}")
+              print('='*80)
+
+              template_dir = template_file.parent
+
+              with open(template_file) as f:
+                  data = yaml.safe_load(f)
+
+              provisioners = data.get('provisioners', [])
+
+              if not provisioners:
+                  print("  ⚠ Warning: No provisioners defined")
+                  continue
+
+              for idx, prov in enumerate(provisioners, 1):
+                  prov_type = prov.get('type', 'unknown')
+                  print(f"\n  Provisioner {idx}: {prov_type}")
+
+                  # Check Ansible provisioners
+                  if prov_type == 'ansible':
+                      playbook = prov.get('playbook_path', '')
+                      galaxy = prov.get('galaxy_file', '')
+
+                      # Check for environment variables in paths
+                      env_var_pattern = r'\$\{(\w+)\}'
+                      playbook_vars = re.findall(env_var_pattern, playbook)
+                      galaxy_vars = re.findall(env_var_pattern, galaxy)
+
+                      for var in playbook_vars + galaxy_vars:
+                          env_vars_found.add(var)
+
+                      if playbook:
+                          print(f"    ✓ Playbook path: {playbook}")
+                      else:
+                          print(f"    ✗ Missing playbook_path")
+                          failed = True
+
+                      if galaxy:
+                          print(f"    ✓ Galaxy file: {galaxy}")
+
+                      # Check extra_vars
+                      extra_vars = prov.get('extra_vars', {})
+                      if extra_vars:
+                          print(f"    ✓ Extra vars: {list(extra_vars.keys())}")
+
+                      # Check ansible_env_vars
+                      ansible_env_vars = prov.get('ansible_env_vars', [])
+                      if ansible_env_vars:
+                          print(f"    ✓ Ansible env vars: {len(ansible_env_vars)} defined")
+
+                  # Check shell provisioners
+                  elif prov_type == 'shell':
+                      inline = prov.get('inline', [])
+                      script = prov.get('script', '')
+
+                      if inline:
+                          print(f"    ✓ Inline commands: {len(inline)} commands")
+                      elif script:
+                          print(f"    ✓ Script: {script}")
+                      else:
+                          print(f"    ⚠ Warning: No inline commands or script defined")
+
+                  # Check for 'only' targets
+                  only = prov.get('only', [])
+                  if only:
+                      print(f"    ✓ Target filters: {', '.join(only)}")
+
+              # Check targets
+              targets = data.get('targets', [])
+              if targets:
+                  print(f"\n  Targets defined:")
+                  for target in targets:
+                      target_type = target.get('type', 'unknown')
+                      platforms = target.get('platforms', [])
+                      print(f"    ✓ {target_type}: {', '.join(platforms) if platforms else 'N/A'}")
+              else:
+                  print("\n  ⚠ Warning: No targets defined")
+
+          # Report environment variables found
+          if env_vars_found:
+              print(f"\n{'='*80}")
+              print("Environment Variables Found:")
+              print('='*80)
+              for var in sorted(env_vars_found):
+                  print(f"  • ${var}")
+              print("\nNote: These environment variables should be documented in the README")
+
+          if failed:
+              print("\n::error::One or more provisioner configurations are invalid")
+              sys.exit(1)
+          else:
+              print("\n✓ All provisioner configurations are valid")
+          EOF
+
+  summary:
+    name: Validation Summary
+    runs-on: ubuntu-latest
+    needs: [validate, metadata-check, provisioner-check]
+    if: always()
+
+    steps:
+      - name: Check results
+        run: |
+          if [ "${{ needs.validate.result }}" != "success" ] || [ "${{ needs.metadata-check.result }}" != "success" ] || [ "${{ needs.provisioner-check.result }}" != "success" ]; then
+            echo "::error::Template validation failed"
+            echo ""
+            echo "Job Results:"
+            echo "  validate: ${{ needs.validate.result }}"
+            echo "  metadata-check: ${{ needs.metadata-check.result }}"
+            echo "  provisioner-check: ${{ needs.provisioner-check.result }}"
+            exit 1
+          fi
+          echo "✓ All validations passed"

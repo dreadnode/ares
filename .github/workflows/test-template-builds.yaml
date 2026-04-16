@@ -1,0 +1,683 @@
+---
+name: Test Template Builds
+
+on:
+  pull_request:
+    branches:
+      - main
+    types:
+      - opened
+      - synchronize
+      - reopened
+    paths:
+      - 'warpgate-templates/**'
+      - '.github/workflows/test-template-builds.yaml'
+
+permissions:
+  contents: read
+  packages: read
+
+concurrency:
+  cancel-in-progress: true
+  group: "${{ github.workflow }}-${{ github.ref }}"
+
+env:
+  DEBIAN_FRONTEND: noninteractive
+  PYTHON_VERSION: "3.13.7"
+  WARPGATE_VERSION: "v4.4.0"
+
+jobs:
+  detect-changes:
+    name: Detect changed templates
+    runs-on: ubuntu-latest
+    outputs:
+      base_matrix: ${{ steps.detect.outputs.base_matrix }}
+      dependent_matrix: ${{ steps.detect.outputs.dependent_matrix }}
+      has_base_changes: ${{ steps.detect.outputs.has_base_changes }}
+      has_dependent_changes: ${{ steps.detect.outputs.has_dependent_changes }}
+      changed_base_templates: ${{ steps.detect.outputs.changed_base_templates }}
+    steps:
+      - name: Checkout git repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+
+      - name: Detect changed templates
+        id: detect
+        run: |
+          # Get list of changed files in templates/
+          CHANGED_FILES=$(git diff --name-only origin/${{ github.base_ref }}...HEAD -- warpgate-templates/)
+
+          echo "Changed files:"
+          echo "$CHANGED_FILES"
+
+          # Extract unique template names from changed paths
+          CHANGED_TEMPLATES=$(echo "$CHANGED_FILES" | grep -oP 'warpgate-templates/\K[^/]+' | sort -u)
+
+          echo ""
+          echo "Changed templates:"
+          echo "$CHANGED_TEMPLATES"
+
+          if [ -z "$CHANGED_TEMPLATES" ]; then
+            echo "No template changes detected"
+            {
+              echo "has_base_changes=false"
+              echo "has_dependent_changes=false"
+              echo "base_matrix={\"include\":[]}"
+              echo "dependent_matrix={\"include\":[]}"
+              echo "changed_base_templates=[]"
+            } >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Convert repository owner to lowercase for Docker compatibility
+          REPO_OWNER_LOWER=$(echo "${GITHUB_REPOSITORY_OWNER}" | tr '[:upper:]' '[:lower:]')
+
+          # Build matrices for changed templates, separating base vs dependent
+          BASE_MATRIX_INCLUDES="[]"
+          DEPENDENT_MATRIX_INCLUDES="[]"
+          BASE_COUNT=0
+          DEPENDENT_COUNT=0
+          CHANGED_BASE_LIST="[]"
+
+          for template_name in $CHANGED_TEMPLATES; do
+            template_dir="warpgate-templates/$template_name"
+
+            if [ ! -f "${template_dir}/warpgate.yaml" ]; then
+              echo "Warning: $template_name has no warpgate.yaml, skipping"
+              continue
+            fi
+
+            # Extract supported platforms from warpgate.yaml
+            platforms=$(grep -A10 "platforms:" "${template_dir}/warpgate.yaml" | grep -E "^\s+- linux/(amd64|arm64)" | sed 's/.*linux\///' | tr '\n' ',' | sed 's/,$//')
+            if [ -z "$platforms" ]; then
+              platforms="amd64,arm64"
+            fi
+
+            # Test workflow runs on ubuntu-latest (amd64), so only test if template supports amd64
+            if ! echo "$platforms" | grep -q "amd64"; then
+              echo "Skipping $template_name: does not support amd64 (supported: $platforms)"
+              continue
+            fi
+
+            # Skip AMI templates - they require AWS credentials and cannot be tested in CI
+            if grep -qE '^\s+- type: ami' "${template_dir}/warpgate.yaml"; then
+              echo "Skipping $template_name: AMI target type cannot be tested in CI"
+              continue
+            fi
+
+            # Determine provisioning requirements based on template name
+            provision_repo=""
+            provision_repo_path=""
+            namespace="$REPO_OWNER_LOWER"
+
+            case "$template_name" in
+              ares-*)
+                provision_repo="ansible-collection-nimbus_range"
+                provision_repo_path="ansible-collection-nimbus_range"
+                ;;
+            esac
+
+            # Check if template actually uses ansible provisioners
+            needs_ansible=false
+            if grep -q "type: ansible" "${template_dir}/warpgate.yaml"; then
+              needs_ansible=true
+            fi
+
+            # Check if this is a base or dependent template
+            base_image=$(grep -A2 "^base:" "${template_dir}/warpgate.yaml" | grep "image:" | head -1 | awk '{print $2}' | tr -d '"'"'" || echo "")
+
+            if echo "$base_image" | grep -qE "^ghcr\.io/${REPO_OWNER_LOWER}/"; then
+              # Dependent template - extract base template name
+              base_template_name=$(echo "$base_image" | sed -E "s|ghcr\.io/${REPO_OWNER_LOWER}/([^:]+):.*|\1|")
+              echo "  $template_name: DEPENDENT (base: $base_image, base_template: $base_template_name)"
+
+              DEPENDENT_MATRIX_INCLUDES=$(echo "$DEPENDENT_MATRIX_INCLUDES" | jq \
+                --arg name "$template_name" \
+                --arg provision_repo "$provision_repo" \
+                --arg provision_repo_path "$provision_repo_path" \
+                --arg namespace "$namespace" \
+                --arg platforms "$platforms" \
+                --arg base_image "$base_image" \
+                --arg base_template "$base_template_name" \
+                --argjson needs_ansible "$needs_ansible" \
+                '. + [{
+                  "name": $name,
+                  "provision_repo": $provision_repo,
+                  "provision_repo_path": $provision_repo_path,
+                  "namespace": $namespace,
+                  "needs_ansible": $needs_ansible,
+                  "supported_platforms": ($platforms | split(",")),
+                  "base_image": $base_image,
+                  "base_template": $base_template
+                }]')
+              DEPENDENT_COUNT=$((DEPENDENT_COUNT + 1))
+            else
+              # Base template
+              echo "  $template_name: BASE (base: ${base_image:-dockerfile})"
+
+              BASE_MATRIX_INCLUDES=$(echo "$BASE_MATRIX_INCLUDES" | jq \
+                --arg name "$template_name" \
+                --arg provision_repo "$provision_repo" \
+                --arg provision_repo_path "$provision_repo_path" \
+                --arg namespace "$namespace" \
+                --arg platforms "$platforms" \
+                --argjson needs_ansible "$needs_ansible" \
+                '. + [{
+                  "name": $name,
+                  "provision_repo": $provision_repo,
+                  "provision_repo_path": $provision_repo_path,
+                  "namespace": $namespace,
+                  "needs_ansible": $needs_ansible,
+                  "supported_platforms": ($platforms | split(","))
+                }]')
+              BASE_COUNT=$((BASE_COUNT + 1))
+              CHANGED_BASE_LIST=$(echo "$CHANGED_BASE_LIST" | jq --arg name "$template_name" '. + [$name]')
+            fi
+          done
+
+          BASE_MATRIX="{\"include\": $BASE_MATRIX_INCLUDES}"
+          DEPENDENT_MATRIX="{\"include\": $DEPENDENT_MATRIX_INCLUDES}"
+
+          echo ""
+          echo "Base templates matrix:"
+          echo "$BASE_MATRIX" | jq .
+          echo ""
+          echo "Dependent templates matrix:"
+          echo "$DEPENDENT_MATRIX" | jq .
+          echo ""
+          echo "Changed base templates list:"
+          echo "$CHANGED_BASE_LIST" | jq .
+
+          {
+            echo "base_matrix<<EOF"
+            echo "$BASE_MATRIX"
+            echo "EOF"
+
+            echo "dependent_matrix<<EOF"
+            echo "$DEPENDENT_MATRIX"
+            echo "EOF"
+
+            echo "changed_base_templates<<EOF"
+            echo "$CHANGED_BASE_LIST"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+          {
+            if [ "$BASE_COUNT" -eq 0 ]; then
+              echo "has_base_changes=false"
+            else
+              echo "has_base_changes=true"
+            fi
+
+            if [ "$DEPENDENT_COUNT" -eq 0 ]; then
+              echo "has_dependent_changes=false"
+            else
+              echo "has_dependent_changes=true"
+            fi
+          } >> "$GITHUB_OUTPUT"
+
+  # ===========================================================================
+  # Phase 1: Build base templates first
+  # These templates use external base images (not from our registry)
+  # We save them as artifacts so dependent templates can use them
+  # ===========================================================================
+  test-build-base:
+    name: "[Base] Test ${{ matrix.name }}"
+    needs: detect-changes
+    if: needs.detect-changes.outputs.has_base_changes == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      matrix: ${{ fromJson(needs.detect-changes.outputs.base_matrix) }}
+      fail-fast: false
+    steps:
+      - name: Generate GitHub App Token
+        if: matrix.provision_repo == 'ansible-collection-nimbus_range'
+        uses: actions/create-github-app-token@f8d387b68d61c58ab83c6c016672934102569859 # v3.0.0-beta.4
+        id: app-token
+        with:
+          app-id: ${{ secrets.BOT_APP_ID }}
+          private-key: ${{ secrets.BOT_APP_PRIVATE_KEY }}
+          repositories: |
+            ares-warpgate-templates
+            ansible-collection-nimbus_range
+            ares
+
+      - name: Checkout git repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          token: ${{ steps.app-token.outputs.token || github.token }}
+
+      - name: Setup XDG directories
+        run: |
+          USER_ID="$(id -u)"
+          mkdir -p "$HOME/.config" "$HOME/.local/share" "$HOME/.local/bin"
+          {
+            echo "XDG_RUNTIME_DIR=/run/user/$USER_ID"
+            echo "XDG_CONFIG_HOME=$HOME/.config"
+            echo "XDG_DATA_HOME=$HOME/.local/share"
+          } >> "$GITHUB_ENV"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Setup Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install Ansible
+        if: matrix.needs_ansible == true
+        run: python3 -m pip install ansible
+
+      - name: Clone ansible-collection repository
+        if: matrix.needs_ansible == true
+        run: |
+          if [ "${{ matrix.provision_repo }}" == "ansible-collection-nimbus_range" ]; then
+            git clone "https://x-access-token:${{ steps.app-token.outputs.token }}@github.com/dreadnode/ansible-collection-nimbus_range.git" "$HOME/ansible-collection-nimbus_range"
+          fi
+
+      - name: Install Ansible Collection
+        if: matrix.needs_ansible == true
+        run: |
+          mkdir -p "$HOME/.ansible/collections"
+
+          if [ "${{ matrix.provision_repo }}" == "ansible-collection-nimbus_range" ]; then
+            cd "$HOME/ansible-collection-nimbus_range"
+            ansible-galaxy collection build --force
+            ansible-galaxy collection install dreadnode-nimbus_range-*.tar.gz -p "$HOME/.ansible/collections" --force --pre
+          fi
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.WG_IMAGE_BUILDER_PAT }}
+
+      - name: Free up disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc "/usr/local/share/boost" \
+            /usr/local/lib/android /usr/share/swift
+          docker system prune -af --volumes || true
+          df -h /
+
+      - name: Install Warpgate
+        run: |
+          set -euo pipefail
+
+          OS="$(uname -s | tr '[:upper:]' '[:lower:]')"
+          ARCH="$(uname -m)"
+
+          case "$ARCH" in
+            x86_64)
+              ARCH="amd64"
+              ;;
+            aarch64|arm64)
+              ARCH="arm64"
+              ;;
+            armv7l)
+              ARCH="armv7"
+              ;;
+            armv6l)
+              ARCH="armv6"
+              ;;
+            *)
+              echo "Unsupported architecture: $ARCH"
+              exit 1
+              ;;
+          esac
+
+          VERSION="${{ env.WARPGATE_VERSION }}"
+          echo "Downloading warpgate ${VERSION} for ${OS}/${ARCH}..."
+
+          gh release download "${VERSION}" \
+            --repo CowDogMoo/warpgate \
+            --pattern "warpgate_*_${OS}_${ARCH}*.tar.gz" \
+            --dir /tmp
+
+          shopt -s nullglob
+          tarball=(/tmp/warpgate_*_"${OS}"_"${ARCH}"*.tar.gz)
+          tar -xzf "${tarball[0]}" -C "$HOME/.local/bin" warpgate
+          chmod +x "$HOME/.local/bin/warpgate"
+          rm "${tarball[@]}"
+
+          warpgate version
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Configure Warpgate
+        run: |
+          warpgate config init
+          cat > ~/.config/warpgate/config.yaml <<EOF
+          container:
+              defaultbaseimage: ubuntu
+              defaultbaseversion: latest
+              defaultplatform: linux/amd64
+              defaultplatforms:
+                  - linux/amd64
+          EOF
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4
+        with:
+          driver-opts: |
+            image=moby/buildkit:latest
+
+      - name: Test build ${{ matrix.name }} (amd64)
+        run: |
+          cd "$GITHUB_WORKSPACE/warpgate-templates/${{ matrix.name }}"
+
+          export PROVISION_REPO_PATH="$HOME/${{ matrix.provision_repo_path }}"
+
+          echo "Building ${{ matrix.name }} for amd64..."
+
+          # Build and push to registry with test tag
+          # We push to make the image available, then pull locally for artifact creation
+          warpgate build warpgate.yaml \
+            --arch amd64 \
+            --registry ghcr.io/${{ matrix.namespace }} \
+            --tag test-${{ github.run_id }} \
+            --push \
+            --verbose
+
+          echo "Build successful for ${{ matrix.name }}"
+        env:
+          GITHUB_TOKEN: ${{ steps.app-token.outputs.token || github.token }}
+
+      - name: Free up disk space after build
+        run: |
+          # Remove buildx cache and unused images to make room for docker save
+          docker buildx prune -af || true
+          docker system prune -af || true
+          df -h /
+
+      - name: Pull image for local use
+        run: |
+          IMAGE_NAME="ghcr.io/${{ matrix.namespace }}/${{ matrix.name }}:test-${{ github.run_id }}"
+          echo "Pulling $IMAGE_NAME..."
+          docker pull "$IMAGE_NAME"
+
+      - name: Save image for dependent templates
+        run: |
+          IMAGE_NAME="ghcr.io/${{ matrix.namespace }}/${{ matrix.name }}:test-${{ github.run_id }}"
+          ARTIFACT_NAME="${{ matrix.name }}-image.tar"
+
+          echo "Saving $IMAGE_NAME to $ARTIFACT_NAME..."
+          docker save "$IMAGE_NAME" -o "/tmp/$ARTIFACT_NAME"
+
+          # Compress the image
+          gzip -1 "/tmp/$ARTIFACT_NAME"
+          ls -lh "/tmp/${ARTIFACT_NAME}.gz"
+
+      - name: Upload image artifact
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7
+        with:
+          name: ${{ matrix.name }}-image
+          path: /tmp/${{ matrix.name }}-image.tar.gz
+          retention-days: 1
+          compression-level: 0  # Already compressed with gzip
+
+  # ===========================================================================
+  # Phase 2: Build dependent templates
+  # These templates use base images from our registry (ghcr.io/dreadnode/*)
+  # If their base template was changed in this PR, load it from artifacts
+  # ===========================================================================
+  test-build-dependent:
+    name: "[Dependent] Test ${{ matrix.name }}"
+    needs: [detect-changes, test-build-base]
+    if: |
+      always() &&
+      needs.detect-changes.outputs.has_dependent_changes == 'true' &&
+      (needs.test-build-base.result == 'success' || needs.test-build-base.result == 'skipped')
+    runs-on: ubuntu-latest
+    strategy:
+      matrix: ${{ fromJson(needs.detect-changes.outputs.dependent_matrix) }}
+      fail-fast: false
+    steps:
+      - name: Generate GitHub App Token
+        if: matrix.provision_repo == 'ansible-collection-nimbus_range'
+        uses: actions/create-github-app-token@f8d387b68d61c58ab83c6c016672934102569859 # v3.0.0-beta.4
+        id: app-token
+        with:
+          app-id: ${{ secrets.BOT_APP_ID }}
+          private-key: ${{ secrets.BOT_APP_PRIVATE_KEY }}
+          repositories: |
+            ares-warpgate-templates
+            ansible-collection-nimbus_range
+            ares
+
+      - name: Checkout git repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          token: ${{ steps.app-token.outputs.token || github.token }}
+
+      - name: Setup XDG directories
+        run: |
+          USER_ID="$(id -u)"
+          mkdir -p "$HOME/.config" "$HOME/.local/share" "$HOME/.local/bin"
+          {
+            echo "XDG_RUNTIME_DIR=/run/user/$USER_ID"
+            echo "XDG_CONFIG_HOME=$HOME/.config"
+            echo "XDG_DATA_HOME=$HOME/.local/share"
+          } >> "$GITHUB_ENV"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Setup Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install Ansible
+        if: matrix.needs_ansible == true
+        run: python3 -m pip install ansible
+
+      - name: Clone ansible-collection repository
+        if: matrix.needs_ansible == true
+        run: |
+          if [ "${{ matrix.provision_repo }}" == "ansible-collection-nimbus_range" ]; then
+            git clone "https://x-access-token:${{ steps.app-token.outputs.token }}@github.com/dreadnode/ansible-collection-nimbus_range.git" "$HOME/ansible-collection-nimbus_range"
+          fi
+
+      - name: Install Ansible Collection
+        if: matrix.needs_ansible == true
+        run: |
+          mkdir -p "$HOME/.ansible/collections"
+
+          if [ "${{ matrix.provision_repo }}" == "ansible-collection-nimbus_range" ]; then
+            cd "$HOME/ansible-collection-nimbus_range"
+            ansible-galaxy collection build --force
+            ansible-galaxy collection install dreadnode-nimbus_range-*.tar.gz -p "$HOME/.ansible/collections" --force --pre
+          fi
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.WG_IMAGE_BUILDER_PAT }}
+
+      - name: Free up disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc "/usr/local/share/boost" \
+            /usr/local/lib/android /usr/share/swift
+          docker system prune -af --volumes || true
+          df -h /
+
+      - name: Install Warpgate
+        run: |
+          set -euo pipefail
+
+          OS="$(uname -s | tr '[:upper:]' '[:lower:]')"
+          ARCH="$(uname -m)"
+
+          case "$ARCH" in
+            x86_64)
+              ARCH="amd64"
+              ;;
+            aarch64|arm64)
+              ARCH="arm64"
+              ;;
+            armv7l)
+              ARCH="armv7"
+              ;;
+            armv6l)
+              ARCH="armv6"
+              ;;
+            *)
+              echo "Unsupported architecture: $ARCH"
+              exit 1
+              ;;
+          esac
+
+          VERSION="${{ env.WARPGATE_VERSION }}"
+          echo "Downloading warpgate ${VERSION} for ${OS}/${ARCH}..."
+
+          gh release download "${VERSION}" \
+            --repo CowDogMoo/warpgate \
+            --pattern "warpgate_*_${OS}_${ARCH}*.tar.gz" \
+            --dir /tmp
+
+          shopt -s nullglob
+          tarball=(/tmp/warpgate_*_"${OS}"_"${ARCH}"*.tar.gz)
+          tar -xzf "${tarball[0]}" -C "$HOME/.local/bin" warpgate
+          chmod +x "$HOME/.local/bin/warpgate"
+          rm "${tarball[@]}"
+
+          warpgate version
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Configure Warpgate
+        run: |
+          warpgate config init
+          cat > ~/.config/warpgate/config.yaml <<EOF
+          container:
+              defaultbaseimage: ubuntu
+              defaultbaseversion: latest
+              defaultplatform: linux/amd64
+              defaultplatforms:
+                  - linux/amd64
+          EOF
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4
+        with:
+          driver-opts: |
+            image=moby/buildkit:latest
+
+      - name: Check if base template was changed
+        id: check-base
+        run: |
+          CHANGED_BASE_TEMPLATES='${{ needs.detect-changes.outputs.changed_base_templates }}'
+          BASE_TEMPLATE="${{ matrix.base_template }}"
+
+          echo "Base template: $BASE_TEMPLATE"
+          echo "Changed base templates: $CHANGED_BASE_TEMPLATES"
+
+          if echo "$CHANGED_BASE_TEMPLATES" | jq -e --arg t "$BASE_TEMPLATE" 'index($t) != null' > /dev/null 2>&1; then
+            echo "Base template '$BASE_TEMPLATE' was changed in this PR"
+            echo "base_changed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "Base template '$BASE_TEMPLATE' was NOT changed in this PR"
+            echo "base_changed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Download base image artifact
+        if: steps.check-base.outputs.base_changed == 'true'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: ${{ matrix.base_template }}-image
+          path: /tmp
+
+      - name: Load base image from artifact
+        if: steps.check-base.outputs.base_changed == 'true'
+        run: |
+          BASE_TEMPLATE="${{ matrix.base_template }}"
+          ARTIFACT_FILE="/tmp/${BASE_TEMPLATE}-image.tar.gz"
+
+          echo "Loading base image from artifact..."
+          gunzip "$ARTIFACT_FILE"
+          docker load -i "/tmp/${BASE_TEMPLATE}-image.tar"
+
+          # Tag it as :latest so warpgate.yaml works without modification
+          # The artifact contains the image with test-${{ github.run_id }} tag
+          REPO_OWNER_LOWER=$(echo "${GITHUB_REPOSITORY_OWNER}" | tr '[:upper:]' '[:lower:]')
+          docker tag "ghcr.io/${REPO_OWNER_LOWER}/${BASE_TEMPLATE}:test-${{ github.run_id }}" \
+                     "ghcr.io/${REPO_OWNER_LOWER}/${BASE_TEMPLATE}:latest"
+
+          echo "Available images:"
+          docker images | grep "$BASE_TEMPLATE" || true
+
+      - name: Pull base image from registry
+        if: steps.check-base.outputs.base_changed != 'true'
+        run: |
+          BASE_IMAGE="${{ matrix.base_image }}"
+          echo "Pulling base image from registry: $BASE_IMAGE"
+          docker pull "$BASE_IMAGE"
+
+      - name: Test build ${{ matrix.name }} (amd64)
+        run: |
+          cd "$GITHUB_WORKSPACE/warpgate-templates/${{ matrix.name }}"
+
+          export PROVISION_REPO_PATH="$HOME/${{ matrix.provision_repo_path }}"
+
+          echo "Building ${{ matrix.name }} for amd64 (test only)..."
+
+          # Build without pushing - just validate the build succeeds
+          warpgate build warpgate.yaml \
+            --arch amd64 \
+            --verbose
+
+          echo "Build successful for ${{ matrix.name }}"
+        env:
+          GITHUB_TOKEN: ${{ steps.app-token.outputs.token || github.token }}
+
+  summary:
+    name: Test Build Summary
+    runs-on: ubuntu-latest
+    needs: [detect-changes, test-build-base, test-build-dependent]
+    if: always()
+    steps:
+      - name: Check results
+        run: |
+          echo "=== PR Build Test Results ==="
+          echo ""
+          echo "Base changes detected: ${{ needs.detect-changes.outputs.has_base_changes }}"
+          echo "Dependent changes detected: ${{ needs.detect-changes.outputs.has_dependent_changes }}"
+          echo "Base build result: ${{ needs.test-build-base.result }}"
+          echo "Dependent build result: ${{ needs.test-build-dependent.result }}"
+
+          HAS_BASE="${{ needs.detect-changes.outputs.has_base_changes }}"
+          HAS_DEPENDENT="${{ needs.detect-changes.outputs.has_dependent_changes }}"
+
+          if [ "$HAS_BASE" == "false" ] && [ "$HAS_DEPENDENT" == "false" ]; then
+            echo "No template changes to test"
+            exit 0
+          fi
+
+          FAILED=false
+
+          # Check base build results
+          if [ "$HAS_BASE" == "true" ]; then
+            if [ "${{ needs.test-build-base.result }}" != "success" ]; then
+              echo "::error::Base template builds failed"
+              FAILED=true
+            else
+              echo "Base template builds passed"
+            fi
+          fi
+
+          # Check dependent build results
+          if [ "$HAS_DEPENDENT" == "true" ]; then
+            if [ "${{ needs.test-build-dependent.result }}" != "success" ]; then
+              echo "::error::Dependent template builds failed"
+              FAILED=true
+            else
+              echo "Dependent template builds passed"
+            fi
+          fi
+
+          if [ "$FAILED" == "true" ]; then
+            exit 1
+          fi
+
+          echo "All template builds passed"
