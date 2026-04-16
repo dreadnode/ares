@@ -113,6 +113,27 @@
   become: true
   when: not recon_tools_impacket_init_check.stat.exists
 
+- name: Check system impacket version (Kali)
+  ansible.builtin.command: python3 -c "import importlib.metadata; print(importlib.metadata.version('impacket'))"
+  register: recon_tools_system_impacket_version
+  changed_when: false
+  failed_when: false
+  when:
+    - ansible_facts['distribution'] == 'Kali'
+
+- name: Install source impacket into system Python (Kali apt netexec needs it system-wide)
+  ansible.builtin.pip:
+    name: "{{ recon_tools_impacket_install_dir }}"
+    executable: pip3
+    editable: true
+    state: forcereinstall
+    extra_args: "--break-system-packages --ignore-installed"
+  become: true
+  when:
+    - ansible_facts['distribution'] == 'Kali'
+    - (recon_tools_system_impacket_version.stdout | default('0.0.0', true)) is version('0.13.0', '<')
+      or recon_tools_impacket_clone.changed | default(false)
+
 - name: Create symlinks for impacket scripts (impacket-* style for Kali compatibility)
   ansible.builtin.shell: |
     for script in {{ recon_tools_impacket_install_dir }}/examples/*.py; do

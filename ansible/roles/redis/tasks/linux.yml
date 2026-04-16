@@ -1,0 +1,77 @@
+---
+- name: Install Redis server
+  ansible.builtin.apt:
+    name: redis-server
+    state: present
+    update_cache: true
+  become: true
+
+- name: Configure Redis bind address
+  ansible.builtin.lineinfile:
+    path: /etc/redis/redis.conf
+    regexp: '^bind '
+    line: "bind {{ redis_bind_address }}"
+  become: true
+  notify: Restart redis
+
+- name: Configure Redis port
+  ansible.builtin.lineinfile:
+    path: /etc/redis/redis.conf
+    regexp: '^port '
+    line: "port {{ redis_port }}"
+  become: true
+  notify: Restart redis
+
+- name: Configure Redis maxmemory
+  ansible.builtin.lineinfile:
+    path: /etc/redis/redis.conf
+    regexp: '^# ?maxmemory '
+    line: "maxmemory {{ redis_maxmemory }}"
+  become: true
+  notify: Restart redis
+
+- name: Configure Redis maxmemory-policy
+  ansible.builtin.lineinfile:
+    path: /etc/redis/redis.conf
+    regexp: '^# ?maxmemory-policy '
+    line: "maxmemory-policy {{ redis_maxmemory_policy }}"
+  become: true
+  notify: Restart redis
+
+- name: Enable and start Redis
+  ansible.builtin.systemd:
+    name: redis-server
+    enabled: true
+    state: started
+  become: true
+
+- name: Create Ares directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    mode: '0755'
+  loop:
+    - "{{ redis_ares_log_dir }}"
+    - "{{ redis_ares_config_dir }}"
+  become: true
+
+- name: Install Ares worker systemd template unit
+  ansible.builtin.template:
+    src: ares-worker@.service.j2
+    dest: /etc/systemd/system/ares-worker@.service
+    mode: '0644'
+  become: true
+  when: redis_install_ares_worker_unit
+  notify: Reload systemd
+
+- name: Verify Redis is responding
+  ansible.builtin.command:
+    cmd: redis-cli ping
+  register: redis_ping
+  changed_when: false
+  when: redis_verify_install
+
+- name: Display Redis verification
+  ansible.builtin.debug:
+    msg: "Redis ping response: {{ redis_ping.stdout }}"
+  when: redis_verify_install

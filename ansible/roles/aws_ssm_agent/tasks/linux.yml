@@ -1,4 +1,12 @@
 ---
+- name: Check if SSM agent is installed via snap
+  ansible.builtin.command:
+    cmd: snap list amazon-ssm-agent
+  register: aws_ssm_agent_snap_check
+  changed_when: false
+  failed_when: false
+  become: true
+
 - name: Set DEBIAN_FRONTEND to noninteractive
   ansible.builtin.lineinfile:
     path: /etc/environment
@@ -6,7 +14,9 @@
     create: true
     mode: '0644'
   become: true
-  when: ansible_facts['os_family'] == 'Debian'
+  when:
+    - ansible_facts['os_family'] == 'Debian'
+    - aws_ssm_agent_snap_check.rc != 0
 
 - name: Install packages
   become: true
@@ -14,8 +24,19 @@
     name: "{{ aws_ssm_agent_install_packages }}"
     state: present
     update_cache: true
-  when: ansible_os_family in ['Debian']
+  when:
+    - ansible_os_family in ['Debian']
+    - aws_ssm_agent_snap_check.rc != 0
   tags: packages
+
+- name: Check if SSM agent is already installed via dpkg
+  ansible.builtin.command:
+    cmd: dpkg -s amazon-ssm-agent
+  register: aws_ssm_agent_dpkg_check
+  changed_when: false
+  failed_when: false
+  become: true
+  when: aws_ssm_agent_snap_check.rc != 0
 
 - name: Create temporary directory for SSM installation
   ansible.builtin.file:
@@ -23,6 +44,9 @@
     state: directory
     mode: '0755'
   become: true
+  when:
+    - aws_ssm_agent_snap_check.rc != 0
+    - aws_ssm_agent_dpkg_check.rc != 0
 
 - name: Download SSM agent
   ansible.builtin.get_url:
@@ -30,18 +54,25 @@
     dest: "{{ aws_ssm_agent_temp_dir }}/amazon-ssm-agent.deb"
     mode: '0644'
   become: true
+  when:
+    - aws_ssm_agent_snap_check.rc != 0
+    - aws_ssm_agent_dpkg_check.rc != 0
 
 - name: Install SSM agent (Debian/Ubuntu)
   ansible.builtin.apt:
     deb: "{{ aws_ssm_agent_temp_dir }}/amazon-ssm-agent.deb"
     state: present
   become: true
-  when: ansible_facts['os_family'] == 'Debian'
+  when:
+    - ansible_facts['os_family'] == 'Debian'
+    - aws_ssm_agent_snap_check.rc != 0
+    - aws_ssm_agent_dpkg_check.rc != 0
 
 - name: Reload systemd
   ansible.builtin.systemd:
     daemon_reload: true
   become: true
+  when: aws_ssm_agent_snap_check.rc != 0
 
 - name: Enable and start SSM agent
   ansible.builtin.systemd:
@@ -49,9 +80,29 @@
     enabled: true
     state: started
   become: true
+  when: aws_ssm_agent_snap_check.rc != 0
+
+- name: Refresh snap SSM agent
+  ansible.builtin.command:
+    cmd: snap refresh amazon-ssm-agent
+  changed_when: false
+  failed_when: false
+  become: true
+  when: aws_ssm_agent_snap_check.rc == 0
+
+- name: Ensure snap SSM agent service is running
+  ansible.builtin.command:
+    cmd: snap start amazon-ssm-agent
+  changed_when: false
+  failed_when: false
+  become: true
+  when: aws_ssm_agent_snap_check.rc == 0
 
 - name: Clean up temporary files
   ansible.builtin.file:
     path: "{{ aws_ssm_agent_temp_dir }}"
     state: absent
   become: true
+  when:
+    - aws_ssm_agent_snap_check.rc != 0
+    - aws_ssm_agent_dpkg_check.rc != 0

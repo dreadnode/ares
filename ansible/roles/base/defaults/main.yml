@@ -15,6 +15,9 @@ base_install_uv: true
 base_uv_version: "latest"
 base_uv_install_script: "https://astral.sh/uv/install.sh"
 
+# AWS CLI v2
+base_install_awscli: true
+
 # Rust toolchain (required for building NetExec and other tools)
 # See: https://www.netexec.wiki/getting-started/installation/installation-on-unix
 base_install_rust: true
@@ -27,8 +30,7 @@ base_install_pipx: true
 # Ares Python dependencies (installed via pip)
 base_pip_packages:
   - python-dotenv
-  - dreadnode
-  - rigging
+  - "rigging>=3.0"
   - pydantic
   - asyncio
 
@@ -57,6 +59,7 @@ base_system_packages:
   - jq # JSON processor
   - htop # interactive process viewer
   - tmux # terminal multiplexer
+  - acl # setfacl/getfacl for POSIX ACLs (required by ansible.posix.acl)
 
 # Ubuntu-specific system packages (dnsutils is the traditional name)
 base_system_packages_ubuntu:

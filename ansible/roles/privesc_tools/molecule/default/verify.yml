@@ -168,19 +168,18 @@
       when: privesc_tools_install_printnightmare | default(true)
 
     # KrbRelayUp verification
-    - name: Check KrbRelayUp is cloned
+    - name: Check KrbRelayUp binary exists
       ansible.builtin.stat:
-        path: "{{ privesc_tools_krbrelayup_install_dir }}"
+        path: "{{ privesc_tools_krbrelayup_install_dir }}/KrbRelayUp.exe"
       register: privesc_tools_krbrelayup_stat
       when: privesc_tools_install_krbrelayup | default(true)
 
-    - name: Assert KrbRelayUp directory exists
+    - name: Assert KrbRelayUp binary exists
       ansible.builtin.assert:
         that:
           - privesc_tools_krbrelayup_stat.stat.exists
-          - privesc_tools_krbrelayup_stat.stat.isdir
-        fail_msg: "KrbRelayUp was not cloned to {{ privesc_tools_krbrelayup_install_dir }}"
-        success_msg: "KrbRelayUp is available at {{ privesc_tools_krbrelayup_install_dir }}"
+        fail_msg: "KrbRelayUp binary was not downloaded to {{ privesc_tools_krbrelayup_install_dir }}/KrbRelayUp.exe"
+        success_msg: "KrbRelayUp is available at {{ privesc_tools_krbrelayup_install_dir }}/KrbRelayUp.exe"
       when: privesc_tools_install_krbrelayup | default(true)
 
     # SharpGPOAbuse verification
@@ -258,6 +257,20 @@
         fail_msg: "printerbug wrapper not created at /usr/local/bin/printerbug"
         success_msg: "printerbug wrapper is available at /usr/local/bin/printerbug"
       when: privesc_tools_install_krbrelayx | default(true)
+
+    # Verify impacket regsecrets module is available (required for NetExec SMB)
+    - name: Verify impacket regsecrets module in source venv
+      ansible.builtin.command: /opt/impacket/venv/bin/python -c "from impacket.examples import regsecrets; print('OK')"
+      register: privesc_tools_regsecrets_check
+      changed_when: false
+      failed_when: false
+
+    - name: Assert impacket regsecrets module is available
+      ansible.builtin.assert:
+        that:
+          - privesc_tools_regsecrets_check.rc == 0
+        fail_msg: "impacket.examples.regsecrets not found in impacket venv"
+        success_msg: "impacket regsecrets module available in venv"
 
     - name: Check impacket is installed in krbrelayx venv
       ansible.builtin.command: "{{ privesc_tools_krbrelayx_install_dir }}/venv/bin/pip show impacket"

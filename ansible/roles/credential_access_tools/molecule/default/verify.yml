@@ -37,6 +37,22 @@
         success_msg: "impacket-secretsdump is installed"
       when: credential_access_tools_install_impacket | default(true)
 
+    # Verify impacket regsecrets module is available (required for NetExec SMB)
+    - name: Verify impacket regsecrets module in venv
+      ansible.builtin.command: /opt/impacket/venv/bin/python -c "from impacket.examples import regsecrets; print('OK')"
+      register: credential_access_tools_regsecrets_check
+      changed_when: false
+      failed_when: false
+      when: credential_access_tools_install_impacket | default(true)
+
+    - name: Assert impacket regsecrets module is available
+      ansible.builtin.assert:
+        that:
+          - credential_access_tools_regsecrets_check.rc == 0
+        fail_msg: "impacket.examples.regsecrets not found in impacket venv"
+        success_msg: "impacket regsecrets module available in venv"
+      when: credential_access_tools_install_impacket | default(true)
+
     - name: Check lsassy is installed
       ansible.builtin.command: which lsassy
       register: credential_access_tools_lsassy_check

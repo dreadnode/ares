@@ -38,14 +38,6 @@
     - recon_tools_pipx_check.rc != 0
     - ansible_facts['os_family'] == 'Debian'
 
-- name: Run pipx ensurepath after reinstall
-  ansible.builtin.command: pipx ensurepath
-  become: true
-  changed_when: false
-  when:
-    - recon_tools_pipx_check.rc != 0
-    - ansible_facts['os_family'] == 'Debian'
-
 - name: Verify pipx is now available
   ansible.builtin.command: pipx --version
   register: recon_tools_pipx_recheck
@@ -109,7 +101,7 @@
 
 - name: Inject source impacket into NetExec pipx venv
   ansible.builtin.command: >-
-    pipx inject netexec {{ recon_tools_impacket_install_dir }} --editable
+    pipx inject netexec {{ recon_tools_impacket_install_dir }} --editable --force
   register: recon_tools_netexec_impacket_inject
   changed_when: false
   failed_when: false
@@ -120,6 +112,29 @@
   when:
     - recon_tools_impacket_from_source | default(false)
     - recon_tools_netexec_use_pipx | default(true)
+
+- name: Verify regsecrets is importable from NetExec pipx venv
+  ansible.builtin.command: >-
+    /root/.local/pipx/venvs/netexec/bin/python -c
+    "from impacket.examples import regsecrets; print('regsecrets OK')"
+  register: recon_tools_netexec_regsecrets_check
+  changed_when: false
+  failed_when: false
+  become: true
+  when:
+    - recon_tools_impacket_from_source | default(false)
+    - recon_tools_netexec_use_pipx | default(true)
+
+- name: Fail if regsecrets not available in NetExec venv
+  ansible.builtin.fail:
+    msg: |
+      CRITICAL: impacket.examples.regsecrets not importable from NetExec pipx venv.
+      The pipx inject may have failed. Check: pipx inject netexec /opt/impacket --editable --force
+      Inject output: {{ recon_tools_netexec_impacket_inject.stderr | default('none') }}
+  when:
+    - recon_tools_impacket_from_source | default(false)
+    - recon_tools_netexec_use_pipx | default(true)
+    - recon_tools_netexec_regsecrets_check.rc | default(1) != 0
 
 - name: Find nxc binary location
   ansible.builtin.shell: |

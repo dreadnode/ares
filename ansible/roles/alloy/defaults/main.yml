@@ -8,6 +8,13 @@ alloy_deployment_name: ""
 alloy_instance_id: ""
 alloy_loki_endpoint: "https://loki.dev.plundr.ai/loki/api/v1/push"
 
+# Optional labels for dashboard compatibility with Kubernetes workloads.
+# Set these when running app workloads (e.g. ares agents) on EC2 so that
+# Grafana dashboards using {namespace=..., app=...} selectors pick up
+# the logs automatically.
+alloy_namespace: ""
+alloy_app: ""
+
 # Windows-specific configuration
 alloy_windows_installer_url: "https://github.com/grafana/alloy/releases/download/v{{ alloy_version }}/alloy-installer-windows-amd64.exe.zip"
 alloy_windows_temp_dir: "C:\\Windows\\Temp"

@@ -108,6 +108,52 @@
           Set recon_tools_impacket_from_source: true
         success_msg: "impacket regsecrets module is available (required for NetExec SMB)"
 
+    # Verify regsecrets is importable from the NetExec pipx venv (non-Kali)
+    # This catches the case where pipx inject fails to replace PyPI impacket
+    - name: Verify regsecrets is importable from NetExec pipx venv
+      ansible.builtin.command: >-
+        /root/.local/pipx/venvs/netexec/bin/python -c
+        "from impacket.examples import regsecrets; print('OK')"
+      register: recon_tools_pipx_regsecrets_check
+      changed_when: false
+      failed_when: false
+      when:
+        - ansible_facts['distribution'] != 'Kali'
+        - recon_tools_netexec_pipx_python is defined
+        - recon_tools_netexec_pipx_python.stat.exists | default(false)
+
+    - name: Assert regsecrets is importable from NetExec pipx venv
+      ansible.builtin.assert:
+        that:
+          - recon_tools_pipx_regsecrets_check.rc == 0
+        fail_msg: |
+          impacket.examples.regsecrets not importable from NetExec pipx venv.
+          The pipx inject likely failed to replace PyPI impacket with the source version.
+        success_msg: "regsecrets importable from NetExec pipx venv"
+      when:
+        - ansible_facts['distribution'] != 'Kali'
+        - recon_tools_netexec_pipx_python is defined
+        - recon_tools_netexec_pipx_python.stat.exists | default(false)
+
+    # Verify regsecrets is importable from system Python (Kali)
+    # Kali apt netexec uses system Python, so impacket 0.13.0 must be installed system-wide
+    - name: Verify regsecrets is importable from system Python (Kali)
+      ansible.builtin.command: python3 -c "from impacket.examples import regsecrets; print('OK')"
+      register: recon_tools_system_regsecrets_check
+      changed_when: false
+      failed_when: false
+      when: ansible_facts['distribution'] == 'Kali'
+
+    - name: Assert regsecrets is importable from system Python (Kali)
+      ansible.builtin.assert:
+        that:
+          - recon_tools_system_regsecrets_check.rc == 0
+        fail_msg: |
+          impacket.examples.regsecrets not importable from system Python on Kali.
+          The system-wide impacket install may have failed or been downgraded.
+        success_msg: "regsecrets importable from system Python (Kali apt netexec will work)"
+      when: ansible_facts['distribution'] == 'Kali'
+
     - name: "Check impacket secretsdump is available (Kali: impacket-secretsdump, Ubuntu: secretsdump.py)"
       ansible.builtin.shell: which impacket-secretsdump || which secretsdump.py
       environment:
@@ -344,8 +390,13 @@
           - ""
           - "--- Impacket Tools ---"
           - >-
-            regsecrets module: {{ 'OK' if recon_tools_regsecrets_check.rc == 0
+            regsecrets module (venv): {{ 'OK' if recon_tools_regsecrets_check.rc == 0
             else 'MISSING!' }}
+          - >-
+            regsecrets module (runtime): {{
+            'OK (pipx venv)' if (recon_tools_pipx_regsecrets_check.rc | default(1) == 0)
+            else ('OK (system python)' if (recon_tools_system_regsecrets_check.rc | default(1) == 0)
+            else 'NOT VERIFIED') }}
           - "impacket-secretsdump: {{ recon_tools_secretsdump_check.stdout }}"
           - >-
             impacket-GetUserSPNs: {{

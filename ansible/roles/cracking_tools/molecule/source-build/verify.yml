@@ -61,6 +61,26 @@
         fail_msg: "hashcat source directory not found at /opt/hashcat"
         success_msg: "hashcat source directory exists at /opt/hashcat"
 
+    - name: Verify hashcat share directory symlinks
+      ansible.builtin.stat:
+        path: "{{ item }}"
+      register: cracking_tools_share_symlinks
+      loop:
+        - /usr/local/share/hashcat/OpenCL
+        - /usr/local/share/hashcat/modules
+        - /usr/local/share/hashcat/hashcat.hcstat2
+
+    - name: Assert hashcat share directory symlinks exist
+      ansible.builtin.assert:
+        that:
+          - item.stat.exists
+          - item.stat.islnk
+        fail_msg: "Missing symlink: {{ item.item }}"
+        success_msg: "Symlink exists: {{ item.item }}"
+      loop: "{{ cracking_tools_share_symlinks.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+
     - name: Display verification summary
       ansible.builtin.debug:
         msg:
@@ -69,4 +89,5 @@
           - "hashcat: {{ cracking_tools_hashcat_version.stdout }}"
           - "Binary: /usr/local/bin/hashcat"
           - "Source: /opt/hashcat"
+          - "Symlinks: OpenCL, modules, hashcat.hcstat2"
           - "==================================================="

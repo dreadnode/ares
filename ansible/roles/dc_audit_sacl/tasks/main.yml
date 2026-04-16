@@ -7,13 +7,19 @@
     name: AD-Domain-Services
   register: dc_audit_sacl_adds_feature
 
+# win_feature_info.exists means the feature name was found in Windows' catalog (always true on Server)
+# We need to check if the feature is actually INSTALLED
+- name: Set DC detection fact
+  ansible.builtin.set_fact:
+    dc_audit_sacl_is_dc: "{{ dc_audit_sacl_adds_feature.features[0].installed | default(false) }}"
+
 - name: Skip if not a Domain Controller
   ansible.builtin.debug:
-    msg: "Skipping dc_audit_sacl role - host is not a Domain Controller"
-  when: not dc_audit_sacl_adds_feature.exists
+    msg: "Skipping dc_audit_sacl role - host is not a Domain Controller (AD-Domain-Services not installed)"
+  when: not dc_audit_sacl_is_dc
 
 - name: Configure SACL auditing on Domain Controller
-  when: dc_audit_sacl_adds_feature.exists
+  when: dc_audit_sacl_is_dc
   block:
     - name: Configure auditpol for Directory Service Access
       ansible.windows.win_shell: |

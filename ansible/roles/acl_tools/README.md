@@ -1,4 +1,5 @@
 <!-- DOCSIBLE START -->
+<!-- DOCSIBLE START -->
 # acl_tools
 
 ## Description
@@ -70,6 +71,8 @@ Install and configure Active Directory ACL exploitation tools for Ares agents
 - **Make impacket example scripts executable** (ansible.builtin.shell)
 - **Check if \_\_init\_\_.py exists in impacket/examples** (ansible.builtin.stat)
 - **Create \_\_init\_\_.py in impacket/examples to make it a proper Python package** (ansible.builtin.copy) - Conditional
+- **Check system impacket version (Kali)** (ansible.builtin.command) - Conditional
+- **Install source impacket into system Python (Kali apt netexec needs it system-wide)** (ansible.builtin.pip) - Conditional
 - **Create symlinks for impacket scripts (impacket-* style for Kali compatibility)** (ansible.builtin.shell)
 - **Verify impacket regsecrets module is available** (ansible.builtin.command)
 - **Report impacket installation status** (ansible.builtin.debug)
@@ -122,4 +125,5 @@ Install and configure Active Directory ACL exploitation tools for Ares agents
 - Ubuntu: all
 - Debian: all
 - Kali: all
+<!-- DOCSIBLE END -->
 <!-- DOCSIBLE END -->

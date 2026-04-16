@@ -122,12 +122,19 @@
   become: true
   when: privesc_tools_install_sweetpotato
 
-- name: Clone KrbRelayUp from GitHub
-  ansible.builtin.git:
-    repo: "{{ privesc_tools_krbrelayup_repo }}"
-    dest: "{{ privesc_tools_krbrelayup_install_dir }}"
-    version: "{{ privesc_tools_krbrelayup_version }}"
-    force: true
+- name: Create KrbRelayUp directory
+  ansible.builtin.file:
+    path: "{{ privesc_tools_krbrelayup_install_dir }}"
+    state: directory
+    mode: '0755'
+  become: true
+  when: privesc_tools_install_krbrelayup
+
+- name: Download KrbRelayUp
+  ansible.builtin.get_url:
+    url: "{{ privesc_tools_krbrelayup_url }}"
+    dest: "{{ privesc_tools_krbrelayup_install_dir }}/KrbRelayUp.exe"
+    mode: '0755'
   become: true
   when: privesc_tools_install_krbrelayup
 

@@ -109,3 +109,10 @@
         dest: /usr/local/share/hashcat/modules
         state: link
       become: true
+
+    - name: Symlink hashcat hcstat2 (Markov chains statistics)
+      ansible.builtin.file:
+        src: /opt/hashcat/hashcat.hcstat2
+        dest: /usr/local/share/hashcat/hashcat.hcstat2
+        state: link
+      become: true

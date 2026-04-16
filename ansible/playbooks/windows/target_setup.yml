@@ -18,6 +18,3 @@
 
     # Install and configure Grafana Alloy for log shipping
     - role: dreadnode.nimbus_range.alloy
-
-    # Configure SACL auditing on Domain Controllers for DCSync detection
-    - role: dreadnode.nimbus_range.dc_audit_sacl

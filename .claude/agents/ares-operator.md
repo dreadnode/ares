@@ -66,6 +66,7 @@ IMPORTANT: After code changes, ALWAYS deploy before testing. Use `task remote:ch
 ## Red Team Operations
 
 ### Start an operation
+
 ```bash
 # via Taskfile (convenience wrappers)
 task red:multi TARGET=dreadgoad DOMAIN=sevenkingdoms.local
@@ -80,6 +81,7 @@ task ec2:launch DOMAIN=sevenkingdoms.local TARGETS=192.168.58.10
 ```
 
 ### Monitor
+
 ```bash
 # Direct CLI with transport (preferred)
 ares-cli --k8s ares-red ops status --latest
@@ -95,6 +97,7 @@ task red:multi:tasks:list LATEST=true STATUS=failed
 ```
 
 ### State injection (unblock stuck operations)
+
 When natural progression stalls, inject state to skip past blockers:
 
 ```bash
@@ -114,6 +117,7 @@ ares-cli --k8s ares-red ops inject-vulnerability op-xxx constrained_delegation 1
 ```
 
 ### Reports & Playbooks
+
 ```bash
 ares-cli --k8s ares-red ops report --latest --regenerate
 ares-cli --k8s ares-red ops export-detection --latest     # Export markdown/JSON detection playbook
@@ -121,6 +125,7 @@ ares-cli --k8s ares-red ops offload-cost --latest         # Sync token costs to 
 ```
 
 ### Maintenance
+
 ```bash
 ares-cli --k8s ares-red ops backfill-domains op-xxx       # Re-scan state to populate domain list
 ares-cli --k8s ares-red ops kill --all                    # Kill all running ops
@@ -130,6 +135,7 @@ ares-cli --k8s ares-red ops cleanup --max-age-hours 24    # Delete old checkpoin
 ## Blue Team Operations
 
 ### Submit investigations
+
 ```bash
 # From red team operation
 ares-cli --k8s ares-blue blue from-operation --latest
@@ -142,6 +148,7 @@ ares-cli --k8s ares-blue blue watch --poll-interval 30
 ```
 
 ### Monitor & Reports
+
 ```bash
 ares-cli --k8s ares-blue blue status --latest
 ares-cli --k8s ares-blue blue evidence --latest --json
@@ -183,6 +190,7 @@ task config:set-model -- orchestrator gpt-5.2
 ## Infrastructure & Debugging
 
 ### Health Checks
+
 ```bash
 task ares:config:check                     # Check 1Password access and API keys
 task remote:status                         # K8s pod health
@@ -191,6 +199,7 @@ task remote:logs ROLE=orchestrator         # Read logs
 ```
 
 ### Debugging Stuck Operations
+
 1. **Check Grafana** (`grafana.dev.plundr.ai`) for token usage and Loki errors.
 2. **Check failed tasks**: `ares-cli --k8s ares-red ops tasks --latest --status failed`.
 3. **Verify binary sync**: `task remote:check`.

@@ -129,8 +129,9 @@
   ansible.builtin.pip:
     name: "{{ acl_tools_pywhisker_package }}"
     executable: pip3
-    # Use --ignore-installed to handle system packages that can't be uninstalled
-    extra_args: "{{ ('--break-system-packages ' if (base_pip_break_required | default(false)) else '') ~ '--ignore-installed' }}"
+    # --no-deps prevents pywhisker from downgrading impacket to 0.12.0 (its stale pin)
+    # impacket 0.13.0 is managed separately via impacket_source.yml
+    extra_args: "{{ ('--break-system-packages ' if (base_pip_break_required | default(false)) else '') ~ '--no-deps --ignore-installed' }}"
   become: true
   when:
     - ansible_facts['os_family'] == 'Debian'

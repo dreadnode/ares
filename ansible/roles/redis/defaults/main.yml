@@ -1,0 +1,15 @@
+---
+# Redis configuration
+redis_bind_address: "127.0.0.1"
+redis_port: 6379
+redis_maxmemory: "256mb"
+redis_maxmemory_policy: "allkeys-lru"
+
+# Ares worker configuration
+redis_install_ares_worker_unit: true
+redis_ares_worker_binary: "/usr/local/bin/ares-worker"
+redis_ares_log_dir: "/var/log/ares"
+redis_ares_config_dir: "/etc/ares"
+
+# Verification
+redis_verify_install: false

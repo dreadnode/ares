@@ -1,4 +1,5 @@
 <!-- DOCSIBLE START -->
+<!-- DOCSIBLE START -->
 # alloy
 
 ## Description
@@ -20,6 +21,8 @@ Install and configure Grafana Alloy for Windows hosts
 | `alloy_deployment_name` | str | <code></code> | No description |
 | `alloy_instance_id` | str | <code></code> | No description |
 | `alloy_loki_endpoint` | str | <code>https://loki.dev.plundr.ai/loki/api/v1/push</code> | No description |
+| `alloy_namespace` | str | <code></code> | No description |
+| `alloy_app` | str | <code></code> | No description |
 | `alloy_windows_installer_url` | str | <code>https://github.com/grafana/alloy/releases/download/v{{ alloy_version }}/alloy-installer-windows-amd64.exe.zip</code> | No description |
 | `alloy_windows_temp_dir` | str | <code>C:\Windows\Temp</code> | No description |
 | `alloy_windows_install_dir` | str | <code>C:\Program Files\GrafanaLabs\Alloy</code> | No description |
@@ -73,4 +76,5 @@ Install and configure Grafana Alloy for Windows hosts
 
 
 - Windows: all
+<!-- DOCSIBLE END -->
 <!-- DOCSIBLE END -->

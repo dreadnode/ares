@@ -10,6 +10,7 @@ You are an expert on the **Python ares codebase** located at `/Users/l/dreadnode
 ## Project Overview
 
 Ares is an autonomous security operations multi-agent system with:
+
 - **Red Team**: LLM-powered penetration testing with coordinator/worker architecture
 - **Blue Team**: SOC alert investigation and threat hunting
 

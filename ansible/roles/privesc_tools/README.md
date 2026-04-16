@@ -1,4 +1,5 @@
 <!-- DOCSIBLE START -->
+<!-- DOCSIBLE START -->
 # privesc_tools
 
 ## Description
@@ -42,9 +43,8 @@ Install and configure privilege escalation tools for Ares agents
 | `privesc_tools_godpotato_url` | str | <code>https://github.com/BeichenDream/GodPotato/releases/download/V1.20/GodPotato-NET4.exe</code> | No description |
 | `privesc_tools_godpotato_install_dir` | str | <code>/opt/privesc/GodPotato</code> | No description |
 | `privesc_tools_install_krbrelayup` | bool | <code>True</code> | No description |
-| `privesc_tools_krbrelayup_repo` | str | <code>https://github.com/Dec0ne/KrbRelayUp.git</code> | No description |
+| `privesc_tools_krbrelayup_url` | str | <code>https://github.com/Flangvik/SharpCollection/raw/master/NetFramework_4.7_Any/KrbRelayUp.exe</code> | No description |
 | `privesc_tools_krbrelayup_install_dir` | str | <code>/opt/privesc/KrbRelayUp</code> | No description |
-| `privesc_tools_krbrelayup_version` | str | <code>main</code> | No description |
 | `privesc_tools_install_sharpgpoabuse` | bool | <code>True</code> | No description |
 | `privesc_tools_sharpgpoabuse_repo` | str | <code>https://github.com/byronkg/SharpGPOAbuse.git</code> | No description |
 | `privesc_tools_sharpgpoabuse_install_dir` | str | <code>/opt/privesc/SharpGPOAbuse</code> | No description |
@@ -105,6 +105,7 @@ Install and configure privilege escalation tools for Ares agents
 | `privesc_tools_binaries` | dict | <code>{}</code> | No description |
 | `privesc_tools_binaries.printspoofer` | str | <code>/opt/privesc/PrintSpoofer/PrintSpoofer64.exe</code> | No description |
 | `privesc_tools_binaries.godpotato` | str | <code>/opt/privesc/GodPotato/GodPotato-NET4.exe</code> | No description |
+| `privesc_tools_binaries.krbrelayup` | str | <code>/opt/privesc/KrbRelayUp/KrbRelayUp.exe</code> | No description |
 | `privesc_tools_binaries.winpeas` | str | <code>/opt/privesc/WinPEAS/winPEASany_ofs.exe</code> | No description |
 | `privesc_tools_binaries.linpeas` | str | <code>/opt/privesc/LinPEAS/linpeas.sh</code> | No description |
 | `privesc_tools_binaries.powerup` | str | <code>/opt/privesc/PowerUp/PowerUp.ps1</code> | No description |
@@ -148,6 +149,8 @@ Install and configure privilege escalation tools for Ares agents
 - **Make impacket example scripts executable** (ansible.builtin.shell)
 - **Check if \_\_init\_\_.py exists in impacket/examples** (ansible.builtin.stat)
 - **Create \_\_init\_\_.py in impacket/examples to make it a proper Python package** (ansible.builtin.copy) - Conditional
+- **Check system impacket version (Kali)** (ansible.builtin.command) - Conditional
+- **Install source impacket into system Python (Kali apt netexec needs it system-wide)** (ansible.builtin.pip) - Conditional
 - **Create symlinks for impacket scripts (impacket-* style for Kali compatibility)** (ansible.builtin.shell)
 - **Verify impacket regsecrets module is available** (ansible.builtin.command)
 - **Report impacket installation status** (ansible.builtin.debug)
@@ -170,7 +173,8 @@ Install and configure privilege escalation tools for Ares agents
 - **Create GodPotato directory** (ansible.builtin.file) - Conditional
 - **Download GodPotato** (ansible.builtin.get_url) - Conditional
 - **Clone SweetPotato from GitHub** (ansible.builtin.git) - Conditional
-- **Clone KrbRelayUp from GitHub** (ansible.builtin.git) - Conditional
+- **Create KrbRelayUp directory** (ansible.builtin.file) - Conditional
+- **Download KrbRelayUp** (ansible.builtin.get_url) - Conditional
 - **Clone SharpGPOAbuse from GitHub** (ansible.builtin.git) - Conditional
 - **Create Seatbelt directory** (ansible.builtin.file) - Conditional
 - **Download Seatbelt** (ansible.builtin.get_url) - Conditional
@@ -220,8 +224,7 @@ Install and configure privilege escalation tools for Ares agents
 
 - **Check if pygpoabuse is already installed via pipx** (ansible.builtin.command)
 - **Install pygpoabuse via pipx** (ansible.builtin.command) - Conditional
-- **Create symlink for pygpoabuse.py in /usr/local/bin** (ansible.builtin.file)
-- **Create pygpoabuse symlink (without .py extension)** (ansible.builtin.file)
+- **Create pygpoabuse symlink in /usr/local/bin** (ansible.builtin.file)
 
 ### zerologon.yml
 
@@ -252,4 +255,5 @@ Install and configure privilege escalation tools for Ares agents
 - Ubuntu: all
 - Debian: all
 - Kali: all
+<!-- DOCSIBLE END -->
 <!-- DOCSIBLE END -->

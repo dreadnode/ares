@@ -220,6 +220,20 @@
         success_msg: "krbrelayx wrapper is available at /usr/local/bin/krbrelayx"
       when: coercion_tools_install_krbrelayx | default(true)
 
+    # Verify impacket regsecrets module is available (required for NetExec SMB)
+    - name: Verify impacket regsecrets module in source venv
+      ansible.builtin.command: /opt/impacket/venv/bin/python -c "from impacket.examples import regsecrets; print('OK')"
+      register: coercion_tools_regsecrets_check
+      changed_when: false
+      failed_when: false
+
+    - name: Assert impacket regsecrets module is available
+      ansible.builtin.assert:
+        that:
+          - coercion_tools_regsecrets_check.rc == 0
+        fail_msg: "impacket.examples.regsecrets not found in impacket venv"
+        success_msg: "impacket regsecrets module available in venv"
+
     - name: Check impacket is installed in krbrelayx venv
       ansible.builtin.command: "{{ coercion_tools_krbrelayx_install_dir }}/venv/bin/pip show impacket"
       register: coercion_tools_krbrelayx_impacket

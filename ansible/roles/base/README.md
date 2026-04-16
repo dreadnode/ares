@@ -1,4 +1,5 @@
 <!-- DOCSIBLE START -->
+<!-- DOCSIBLE START -->
 # base
 
 ## Description
@@ -25,15 +26,15 @@ Base requirements for Ares AI agents
 | `base_install_uv` | bool | <code>True</code> | No description |
 | `base_uv_version` | str | <code>latest</code> | No description |
 | `base_uv_install_script` | str | <code>https://astral.sh/uv/install.sh</code> | No description |
+| `base_install_awscli` | bool | <code>True</code> | No description |
 | `base_install_rust` | bool | <code>True</code> | No description |
 | `base_rust_install_script` | str | <code>https://sh.rustup.rs</code> | No description |
 | `base_install_pipx` | bool | <code>True</code> | No description |
 | `base_pip_packages` | list | <code>&#91;&#93;</code> | No description |
 | `base_pip_packages.0` | str | <code>python-dotenv</code> | No description |
-| `base_pip_packages.1` | str | <code>dreadnode</code> | No description |
-| `base_pip_packages.2` | str | <code>rigging</code> | No description |
-| `base_pip_packages.3` | str | <code>pydantic</code> | No description |
-| `base_pip_packages.4` | str | <code>asyncio</code> | No description |
+| `base_pip_packages.1` | str | <code>rigging>=3.0</code> | No description |
+| `base_pip_packages.2` | str | <code>pydantic</code> | No description |
+| `base_pip_packages.3` | str | <code>asyncio</code> | No description |
 | `base_pip_externally_managed` | bool | <code>False</code> | No description |
 | `base_pip_break_required` | bool | <code>False</code> | No description |
 | `base_system_packages` | list | <code>&#91;&#93;</code> | No description |
@@ -56,6 +57,7 @@ Base requirements for Ares AI agents
 | `base_system_packages.16` | str | <code>jq</code> | No description |
 | `base_system_packages.17` | str | <code>htop</code> | No description |
 | `base_system_packages.18` | str | <code>tmux</code> | No description |
+| `base_system_packages.19` | str | <code>acl</code> | No description |
 | `base_system_packages_ubuntu` | list | <code>&#91;&#93;</code> | No description |
 | `base_system_packages_ubuntu.0` | str | <code>dnsutils</code> | No description |
 | `base_system_packages_kali` | list | <code>&#91;&#93;</code> | No description |
@@ -70,12 +72,23 @@ Base requirements for Ares AI agents
 
 ## Tasks
 
+### install_awscli.yml
+
+
+- **Check if AWS CLI is already installed** (ansible.builtin.command)
+- **Install AWS CLI v2** (block) - Conditional
+- **Download AWS CLI v2 installer** (ansible.builtin.get_url)
+- **Install unzip** (ansible.builtin.apt)
+- **Unzip AWS CLI installer** (ansible.builtin.unarchive)
+- **Run AWS CLI installer** (ansible.builtin.command)
+- **Clean up AWS CLI installer** (ansible.builtin.file)
+- **Verify AWS CLI installation** (ansible.builtin.command) - Conditional
+- **Display AWS CLI version** (ansible.builtin.debug) - Conditional
+
 ### install_pipx.yml
 
 
 - **Install pipx via apt (Debian/Ubuntu)** (ansible.builtin.apt) - Conditional
-- **Check if pipx path is already in bashrc** (ansible.builtin.command)
-- **Ensure pipx path is configured** (ansible.builtin.command) - Conditional
 - **Add pipx bin to system PATH via profile.d** (ansible.builtin.copy)
 - **Verify pipx installation** (ansible.builtin.command)
 - **Display pipx version** (ansible.builtin.debug)
@@ -112,6 +125,7 @@ Base requirements for Ares AI agents
 - **Install Ubuntu-specific system packages** (ansible.builtin.apt) - Conditional
 - **Install Kali-specific system packages** (ansible.builtin.apt) - Conditional
 - **Remove kali-motd to suppress MOTD spam** (ansible.builtin.file) - Conditional
+- **Install AWS CLI v2** (ansible.builtin.include_tasks) - Conditional
 - **Install uv package manager** (ansible.builtin.include_tasks) - Conditional
 - **Install Rust toolchain** (ansible.builtin.include_tasks) - Conditional
 - **Install pipx** (ansible.builtin.include_tasks) - Conditional
@@ -150,4 +164,5 @@ Base requirements for Ares AI agents
 - Ubuntu: all
 - Debian: all
 - Kali: all
+<!-- DOCSIBLE END -->
 <!-- DOCSIBLE END -->

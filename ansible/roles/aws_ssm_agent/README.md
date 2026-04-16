@@ -1,4 +1,5 @@
 <!-- DOCSIBLE START -->
+<!-- DOCSIBLE START -->
 # aws_ssm_agent
 
 ## Description
@@ -34,14 +35,18 @@ Install and configure AWS SSM Agent
 ### linux.yml
 
 
+- **Check if SSM agent is installed via snap** (ansible.builtin.command)
 - **Set DEBIAN_FRONTEND to noninteractive** (ansible.builtin.lineinfile) - Conditional
 - **Install packages** (ansible.builtin.package) - Conditional
-- **Create temporary directory for SSM installation** (ansible.builtin.file)
-- **Download SSM agent** (ansible.builtin.get_url)
+- **Check if SSM agent is already installed via dpkg** (ansible.builtin.command) - Conditional
+- **Create temporary directory for SSM installation** (ansible.builtin.file) - Conditional
+- **Download SSM agent** (ansible.builtin.get_url) - Conditional
 - **Install SSM agent (Debian/Ubuntu)** (ansible.builtin.apt) - Conditional
-- **Reload systemd** (ansible.builtin.systemd)
-- **Enable and start SSM agent** (ansible.builtin.systemd)
-- **Clean up temporary files** (ansible.builtin.file)
+- **Reload systemd** (ansible.builtin.systemd) - Conditional
+- **Enable and start SSM agent** (ansible.builtin.systemd) - Conditional
+- **Refresh snap SSM agent** (ansible.builtin.command) - Conditional
+- **Ensure snap SSM agent service is running** (ansible.builtin.command) - Conditional
+- **Clean up temporary files** (ansible.builtin.file) - Conditional
 
 ### main.yml
 
@@ -77,4 +82,5 @@ Install and configure AWS SSM Agent
 - Ubuntu: all
 - Debian: all
 - Windows: all
+<!-- DOCSIBLE END -->
 <!-- DOCSIBLE END -->

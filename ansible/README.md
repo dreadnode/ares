@@ -1,127 +1,207 @@
-# Dreadnode Nimbus Range Ansible Collection
+# Ansible Collection: Dreadnode Nimbus Range
 
-Ansible collection for provisioning Ares security operations agents. Includes
-roles for reconnaissance, credential access, privilege escalation, lateral
-movement, coercion, hash cracking, and observability tooling.
+[![Pre-Commit](https://github.com/dreadnode/ansible-collection-nimbus_range/actions/workflows/pre-commit.yaml/badge.svg)](https://github.com/dreadnode/ansible-collection-nimbus_range/actions/workflows/pre-commit.yaml)
+[![Renovate](https://github.com/dreadnode/ansible-collection-nimbus_range/actions/workflows/renovate.yaml/badge.svg)](https://github.com/dreadnode/ansible-collection-nimbus_range/actions/workflows/renovate.yaml)
 
-**Namespace:** `dreadnode.nimbus_range`
-**Version:** 1.5.0
+This Ansible collection provides agent and logging setup functionality for
+cloud-based ephemeral environments, focusing on operational telemetry
+collection, session management, and centralized log forwarding.
+
+## Architecture Diagram
+
+```mermaid
+graph TD
+    Collection[Ansible Collection]
+    Collection --> Plugins[Plugins]
+    Plugins --> P0[getent_passwd]
+    Plugins --> P1[merge_list_dicts_into_list]
+    Plugins --> P2[vnc_pw]
+    Collection --> Roles[Roles]
+    Roles --> R0[acl_tools *]
+    Roles --> R1[alloy]
+    Roles --> R2[aws_cloudwatch_agent]
+    Roles --> R3[aws_ssm_agent]
+    Roles --> R4[base *]
+    Roles --> R5[coercion_tools *]
+    Roles --> R6[cracking_tools *]
+    Roles --> R7[credential_access_tools *]
+    Roles --> R8[dc_audit_sacl]
+    Roles --> R9[fluent_bit]
+    Roles --> R10[lateral_movement_tools *]
+    Roles --> R11[mythic *]
+    Roles --> R12[privesc_tools *]
+    Roles --> R13[recon_tools *]
+    Roles --> R14[redis]
+    Collection --> Playbooks[Playbooks]
+    Playbooks --> PB0[ares]
+    Playbooks --> PB1[linux]
+    Playbooks --> PB2[windows]
+```
 
 ## Requirements
 
-- Ansible >= 2.15.0
-- Python 3.13+
+- Ansible 2.18.4 or higher
 
 ## Installation
 
-Install collection dependencies:
+Install the latest version of the Nimbus Range collection:
 
 ```bash
-cd ansible
-ansible-galaxy collection install -r requirements.yml
+ansible-galaxy collection install git+https://github.com/dreadnode/ansible-collection-nimbus_range.git,main
 ```
 
 ## Roles
 
-### Agent Roles
+### AWS CloudWatch Agent Setup
 
-| Role | Description |
-| --- | --- |
-| `base` | Python 3.13, uv, `/ares` workspace setup |
-| `recon_tools` | nmap, netexec, bloodhound-python, certipy, impacket, rpcclient |
-| `credential_access_tools` | sprayhound, lsassy, gMSADumper, kerberoasting, secretsdump |
-| `cracking_tools` | hashcat, John the Ripper, rockyou.txt, SecLists (optional GPU/CUDA) |
-| `acl_tools` | bloodyAD, pywhisker, dacledit |
-| `privesc_tools` | certipy, krbrelayx, nopac, potato exploits, SharpGPOAbuse, WinPEAS, LinPEAS |
-| `lateral_movement_tools` | evil-winrm, xfreerdp, lsassy, sshpass, pth-toolkit, impacket |
-| `coercion_tools` | Responder, mitm6, Coercer, PetitPotam, ntlmrelayx |
+Installs and configures the **AWS CloudWatch Agent** for metrics and log
+collection on Unix-like and Windows systems.
 
-### Infrastructure Roles
+- Role docs: [`roles/aws_cloudwatch_agent/README.md`](roles/aws_cloudwatch_agent/README.md)
 
-| Role | Description |
-| --- | --- |
-| `aws_ssm_agent` | AWS Systems Manager agent for remote management |
-| `aws_cloudwatch_agent` | CloudWatch metrics and log collection |
-| `fluent_bit` | Log forwarding to OpenSearch/Loki |
-| `alloy` | Grafana Alloy observability agent |
-| `mythic` | Mythic C2 framework deployment |
-| `dc_audit_sacl` | Domain controller audit SACL configuration |
+- Collects system metrics such as CPU, disk, memory, and network.
+- Enriches metrics with AWS EC2 metadata.
+- Automatically installs, configures, and ensures the CloudWatch Agent is running.
 
-## Playbooks
+### AWS SSM Agent Setup
 
-### Agent Provisioning (`playbooks/ares/`)
+Installs and configures the **AWS Systems Manager (SSM) Agent** for secure
+remote management and automation.
 
-Each playbook provisions a specialized agent container or host:
+- Role docs: [`roles/aws_ssm_agent/README.md`](roles/aws_ssm_agent/README.md)
 
-| Playbook | Purpose |
-| --- | --- |
-| `base.yml` | Base image with Python, uv, and core dependencies |
-| `recon.yml` | Network reconnaissance and AD enumeration |
-| `credential_access.yml` | Credential harvesting and Kerberos attacks |
-| `cracker.yml` | Password cracking (CPU or GPU) |
-| `acl_abuse.yml` | AD ACL/DACL exploitation |
-| `privesc.yml` | Privilege escalation |
-| `lateral_movement.yml` | Lateral movement and remote access |
-| `coercion.yml` | NTLM relay and authentication coercion |
-| `goad_attack_box.yml` | All-in-one attack workstation with all tools |
+- Installs SSM Agent on Linux and Windows systems.
+- Configures services to automatically restart and provides monitoring scripts.
+- Ensures the SSM Agent is enabled and healthy after deployment.
 
-### Infrastructure (`playbooks/linux/`, `playbooks/windows/`)
+### Fluent Bit Setup
 
-| Playbook | Purpose |
-| --- | --- |
-| `linux/attacker_setup.yml` | Linux attacker box with SSM, CloudWatch, Fluent Bit |
-| `linux/sliver.yml` | Sliver C2 server |
-| `windows/target_setup.yml` | Windows target telemetry |
+Installs and configures **Fluent Bit** for log collection, enrichment, and
+forwarding to OpenSearch.
+
+- Role docs: [`roles/fluent_bit/README.md`](roles/fluent_bit/README.md)
+
+- Collects Linux system logs and Windows Event logs.
+- Captures AWS SSM session activity logs.
+- Enriches logs with environment metadata and deployment context.
+- Forwards logs securely to an OpenSearch cluster.
+
+### Base Setup
+
+Installs the base dependencies and workspace layout required for **Ares AI agents**.
+
+- Role docs: [`roles/base/README.md`](roles/base/README.md)
+
+- Bootstraps Python toolchains, pip packages, and system utilities.
+- Optionally installs uv, Rust, and pipx for downstream tooling.
+
+### ACL Tools Setup
+
+Installs and configures **Active Directory ACL exploitation tools** for Ares agents.
+
+- Role docs: [`roles/acl_tools/README.md`](roles/acl_tools/README.md)
+
+### Cracking Tools Setup
+
+Installs and configures **password cracking tools** and wordlists for Ares agents.
+
+- Role docs: [`roles/cracking_tools/README.md`](roles/cracking_tools/README.md)
+
+### Lateral Movement Tools Setup
+
+Installs and configures **lateral movement tooling** for Ares agents.
+
+- Role docs: [`roles/lateral_movement_tools/README.md`](roles/lateral_movement_tools/README.md)
+
+### Recon Tools Setup
+
+Installs and configures **reconnaissance tooling** for Ares agents.
+
+- Role docs: [`roles/recon_tools/README.md`](roles/recon_tools/README.md)
+
+### Credential Access Tools Setup
+
+Installs and configures **credential access tooling** for Ares agents.
+
+- Role docs: [`roles/credential_access_tools/README.md`](roles/credential_access_tools/README.md)
+
+### Coercion Tools Setup
+
+Installs and configures **coercion and relay attack tooling** for Ares agents.
+
+- Role docs: [`roles/coercion_tools/README.md`](roles/coercion_tools/README.md)
+
+### Privilege Escalation Tools Setup
+
+Installs and configures **privilege escalation tooling** for Ares agents.
+
+- Role docs: [`roles/privesc_tools/README.md`](roles/privesc_tools/README.md)
+
+### Grafana Alloy Setup
+
+Installs and configures **Grafana Alloy** on Windows hosts for log shipping.
+
+- Role docs: [`roles/alloy/README.md`](roles/alloy/README.md)
+
+### Mythic Setup
+
+Installs and configures the **Mythic C2 framework** and optional agent packages.
+
+- Role docs: [`roles/mythic/README.md`](roles/mythic/README.md)
 
 ## Usage
 
-### Container Builds (via Warpgate)
+### Linux Example
 
-Playbooks are invoked automatically by Warpgate templates during image builds:
+```yaml
+---
+- name: Provision Linux Attack Range Box
+  hosts: all
+  gather_facts: true
+  vars:
+    fluent_bit_env: dev
+    fluent_bit_deployment_name: default
+    fluent_bit_opensearch_custom_domain: example.com
+    fluent_bit_opensearch_username: admin
+    fluent_bit_opensearch_password: password
+    fluent_bit_version: "4.0.1"
 
-```bash
-export PROVISION_REPO_PATH=./ansible
-warpgate build warpgate-templates/ares-recon-agent
+  roles:
+    # Nimbus Range roles for Ansible system configuration and monitoring
+    - role: dreadnode.nimbus_range.aws_ssm_agent
+    - role: dreadnode.nimbus_range.aws_cloudwatch_agent
+    - role: dreadnode.nimbus_range.fluent_bit
 ```
 
-### Standalone Provisioning
+### Windows Example
 
-Playbooks can provision existing hosts directly:
+```yaml
+---
+- name: Provision Windows Attack Range Target
+  hosts: all
+  vars:
+    fluent_bit_env: dev
+    fluent_bit_deployment_name: default
+    fluent_bit_opensearch_custom_domain: example.com
+    fluent_bit_opensearch_username: admin
+    fluent_bit_opensearch_password: password
+    fluent_bit_version: "4.0.1"
 
-```bash
-# Provision a recon agent on a remote host
-ansible-playbook ansible/playbooks/ares/recon.yml \
-  -i inventory.yml \
-  -e target_hosts=recon-host
-
-# Provision inside a container
-ansible-playbook ansible/playbooks/ares/recon.yml \
-  -e container_build=true \
-  -e target_hosts=localhost \
-  -c local
+  roles:
+    # Nimbus Range roles for Ansible system configuration and monitoring
+    - role: dreadnode.nimbus_range.aws_ssm_agent
+    - role: dreadnode.nimbus_range.aws_cloudwatch_agent
+    - role: dreadnode.nimbus_range.fluent_bit
 ```
 
-## Custom Modules
+## Development
 
-| Module | Description |
-| --- | --- |
-| `vnc_pw` | VNC password management |
-| `getent_passwd` | Cross-platform user enumeration |
-| `merge_list_dicts_into_list` | Data transformation utility |
+### Release Process
 
-## Collection Dependencies
+For information on creating new releases of this collection, see our
+[Release Process Documentation](docs/releases.md).
 
-| Collection | Version |
-| --- | --- |
-| `amazon.aws` | 11.2.0 |
-| `ansible.windows` | 3.5.0 |
-| `community.windows` | 3.1.0 |
-| `community.docker` | 5.0.6 |
-| `community.general` | 12.4.0 |
-| `grafana.grafana` | 6.0.6 |
-| `cowdogmoo.workstation` | main (git) |
-| `l50.arsenal` | main (git) |
+## Support
 
-## License
-
-MIT
+- Repository: [dreadnode/ansible-collection-nimbus_range](https://github.com/dreadnode/ansible-collection-nimbus_range)
+- Issue Tracker: [GitHub Issues](https://github.com/dreadnode/ansible-collection-nimbus_range/issues)

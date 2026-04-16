@@ -35,11 +35,10 @@ privesc_tools_godpotato_url: "https://github.com/BeichenDream/GodPotato/releases
 privesc_tools_godpotato_install_dir: "/opt/privesc/GodPotato"
 
 # KrbRelayUp configuration (Kerberos relay local privesc)
-# Note: Repository has no release tags, using main branch
+# Note: Dec0ne/KrbRelayUp has no precompiled releases; using Flangvik/SharpCollection nightly build
 privesc_tools_install_krbrelayup: true
-privesc_tools_krbrelayup_repo: "https://github.com/Dec0ne/KrbRelayUp.git"
+privesc_tools_krbrelayup_url: "https://github.com/Flangvik/SharpCollection/raw/master/NetFramework_4.7_Any/KrbRelayUp.exe"
 privesc_tools_krbrelayup_install_dir: "/opt/privesc/KrbRelayUp"
-privesc_tools_krbrelayup_version: "main"
 
 # SharpGPOAbuse configuration (GPO privilege escalation)
 # Note: FSecureLABS doesn't provide precompiled releases, using byronkg's fork
@@ -150,6 +149,7 @@ privesc_tools_update_cache: true
 privesc_tools_binaries:
   printspoofer: "/opt/privesc/PrintSpoofer/PrintSpoofer64.exe"
   godpotato: "/opt/privesc/GodPotato/GodPotato-NET4.exe"
+  krbrelayup: "/opt/privesc/KrbRelayUp/KrbRelayUp.exe"
   winpeas: "/opt/privesc/WinPEAS/winPEASany_ofs.exe"
   linpeas: "/opt/privesc/LinPEAS/linpeas.sh"
   powerup: "/opt/privesc/PowerUp/PowerUp.ps1"

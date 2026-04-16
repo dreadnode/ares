@@ -10,6 +10,7 @@ You are an expert on the **Rust ares codebase** located at `/Users/l/dreadnode/a
 ## Project Overview
 
 Ares is an autonomous security operations multi-agent system ported from Python to Rust. It has:
+
 - **Red Team**: LLM-powered penetration testing with coordinator/worker architecture
 - **Blue Team**: SOC alert investigation and threat hunting
 - **Correlation**: Red-blue activity matching and gap analysis
@@ -32,12 +33,14 @@ Ares is an autonomous security operations multi-agent system ported from Python 
 ### ares-core — Models, State, Config
 
 **models/** — Core data types:
+
 - `core.rs`: Target, Host, User, Credential, Hash, Share
 - `task.rs`: AgentRole, TaskStatus, TaskInfo, TaskResult, VulnerabilityInfo, AgentInfo
 - `operation.rs`: OperationMeta
 - `blue.rs`: Evidence, TimelineEvent, BlueTaskInfo, PyramidLevel, InvestigationStage, TriageDecision
 
 **state/** — Redis state management:
+
 - `reader.rs`: RedisStateReader — loads all state from Redis
 - `operations.rs`: State write operations
 - `blue_reader.rs` / `blue_writer.rs`: Blue team state
@@ -47,11 +50,13 @@ Ares is an autonomous security operations multi-agent system ported from Python 
 - `keys.rs`: Redis key pattern constants (ares:op:{id}:credentials, etc.)
 
 **config/** — YAML config:
+
 - `mod.rs`: AresConfig (loads from ARES_CONFIG env or default paths)
 - `sections.rs`: Agent roles, timeouts, recovery, phase detection, vuln priorities
 - `defaults.rs`: Default values
 
 **parsing/** — Tool output parsers:
+
 - `secretsdump.rs`, `kerberos.rs`, `ntlm.rs`, `delegation.rs`, `shares.rs`, `domain_sid.rs`, `hosts.rs`
 
 **reports/**: `redteam.rs`, `blueteam.rs`, `mitre.rs`, `dedup.rs`
@@ -64,12 +69,14 @@ Ares is an autonomous security operations multi-agent system ported from Python 
 ### ares-llm — LLM Integration
 
 **provider/** — Multi-provider abstraction:
+
 - `mod.rs`: LlmProvider trait, ChatMessage, ToolCall, ToolDefinition, Role, StopReason, TokenUsage
 - `anthropic.rs`: Anthropic Messages API
 - `openai.rs`: OpenAI Chat Completions API
 - `ollama.rs`: Local Ollama
 
 **agent_loop.rs** — Multi-step agent execution:
+
 - AgentLoopConfig: max_steps, max_tokens, temperature, retry, context management
 - ContextConfig: max_context_tokens (180k default), max_tool_output_chars (30k)
 - RetryConfig: exponential backoff with jitter
@@ -78,11 +85,13 @@ Ares is an autonomous security operations multi-agent system ported from Python 
 - `run_agent_loop()`: Main loop (prompt → LLM → tool_use → accumulate → repeat)
 
 **tool_registry/** — Tool definitions per role:
+
 - `mod.rs`: tools_for_role(), is_callback_tool()
 - `recon.rs`, `credential_access/`, `lateral/`, `privesc/`, `cracker.rs`, `coercion.rs`, `acl.rs`, `blue.rs`
 - Each tool has JSON Schema for LLM tool_use
 
 **prompt/** — Task-specific prompt generation:
+
 - `mod.rs`: StateSnapshot, generate_task_prompt()
 - Role-specific modules + Tera templates
 - `state_context.rs`: Format state for prompts
@@ -90,6 +99,7 @@ Ares is an autonomous security operations multi-agent system ported from Python 
 - `templates.rs`: Tera template loading
 
 **routing/** — Task payload enrichment:
+
 - `domain.rs`: Domain normalization, NetBIOS→FQDN
 - `dc_discovery.rs`: Multi-tier DC discovery (DcTier)
 - `credentials.rs`: Find credentials for domain
@@ -100,6 +110,7 @@ Ares is an autonomous security operations multi-agent system ported from Python 
 **lib.rs**: `dispatch()` — routes tool name to implementation (100+ tools)
 
 **Tool modules**:
+
 - `recon.rs`: nmap_scan, smb_sweep, ldap_search, bloodhound, dig_query, adidnsdump
 - `credential_access/`: kerberoast, secretsdump, lsassy, asrep_roast, spray, laps_dump, misc.rs, netexec_tools.rs
 - `cracker.rs`: hashcat, john
@@ -124,6 +135,7 @@ Ares is an autonomous security operations multi-agent system ported from Python 
 **config.rs**: OrchestratorConfig from env vars (ARES_OPERATION_ID, ARES_REDIS_URL, ARES_LLM_MODEL, etc.)
 
 **state/**:
+
 - `shared.rs`: SharedState — Arc<RwLock<StateInner>>
 - `inner.rs`: StateInner (credentials, hashes, hosts, users, shares, domains, vulns, dedup sets)
 - `persistence.rs`: Load/save from/to Redis
@@ -131,11 +143,13 @@ Ares is an autonomous security operations multi-agent system ported from Python 
 - `dedup.rs`: Deduplication
 
 **dispatcher/**:
+
 - `mod.rs`: Dispatcher (queue + tracker + throttler + state)
 - `submission.rs`: throttled_submit()
 - `task_builders.rs`: request_recon(), request_crack(), etc.
 
 **automation/** — 16 background tasks:
+
 - `crack.rs`, `credential_access.rs`, `credential_expansion.rs`, `secretsdump.rs`
 - `coercion.rs`, `delegation.rs`, `adcs.rs`, `privesc/acl.rs`, `s4u.rs`
 - `trust.rs`, `gmsa.rs`, `golden_ticket.rs`, `mssql.rs`, `bloodhound.rs`, `shares.rs`

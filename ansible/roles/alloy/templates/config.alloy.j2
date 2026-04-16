@@ -108,6 +108,12 @@ loki.process "windows" {
       instance_id  = "{{ alloy_instance_id }}",
       host         = constants.hostname,
       os           = "windows",
+{% if alloy_namespace %}
+      namespace    = "{{ alloy_namespace }}",
+{% endif %}
+{% if alloy_app %}
+      app          = "{{ alloy_app }}",
+{% endif %}
     }
   }
   forward_to = [loki.write.remote.receiver]
@@ -135,6 +141,12 @@ loki.process "linux" {
       instance_id  = "{{ alloy_instance_id }}",
       host         = constants.hostname,
       os           = "linux",
+{% if alloy_namespace %}
+      namespace    = "{{ alloy_namespace }}",
+{% endif %}
+{% if alloy_app %}
+      app          = "{{ alloy_app }}",
+{% endif %}
     }
   }
   forward_to = [loki.write.remote.receiver]

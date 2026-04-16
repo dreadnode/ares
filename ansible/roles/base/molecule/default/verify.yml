@@ -185,7 +185,7 @@
           - base_dreadnode_check.rc == 0
           - base_dreadnode_check.stdout is defined
           - base_dreadnode_check.stdout | length > 0
-        fail_msg: "dreadnode package is not importable"
+        fail_msg: "dreadnode package is not importable: {{ base_dreadnode_check.stderr | default('no stderr') }}"
         success_msg: "dreadnode package version: {{ base_dreadnode_check.stdout }}"
 
     - name: Verify rigging package is importable
@@ -194,13 +194,18 @@
       changed_when: false
       failed_when: false
 
+    - name: Debug rigging import failure
+      ansible.builtin.debug:
+        msg: "rigging import stderr: {{ base_rigging_check.stderr }}"
+      when: base_rigging_check.rc != 0
+
     - name: Assert rigging package is available
       ansible.builtin.assert:
         that:
           - base_rigging_check.rc == 0
           - base_rigging_check.stdout is defined
           - base_rigging_check.stdout | length > 0
-        fail_msg: "rigging package is not importable"
+        fail_msg: "rigging package is not importable: {{ base_rigging_check.stderr | default('no stderr') }}"
         success_msg: "rigging package version: {{ base_rigging_check.stdout }}"
 
     - name: Check workspace directory exists

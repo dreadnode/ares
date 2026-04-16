@@ -1,4 +1,5 @@
 <!-- DOCSIBLE START -->
+<!-- DOCSIBLE START -->
 # cracking_tools
 
 ## Description
@@ -74,6 +75,7 @@ Install and configure password cracking tools for Ares agents
 - **Create hashcat share directory** (ansible.builtin.file)
 - **Symlink hashcat OpenCL kernels** (ansible.builtin.file)
 - **Symlink hashcat modules** (ansible.builtin.file)
+- **Symlink hashcat hcstat2 (Markov chains statistics)** (ansible.builtin.file)
 
 ### john.yml
 
@@ -140,4 +142,5 @@ Install and configure password cracking tools for Ares agents
 - Ubuntu: all
 - Debian: all
 - Kali: all
+<!-- DOCSIBLE END -->
 <!-- DOCSIBLE END -->

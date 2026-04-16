@@ -126,6 +126,22 @@
         - lateral_movement_tools_install_pth_toolkit | default(true)
         - ansible_facts['distribution'] == 'Kali'
 
+    # Verify impacket regsecrets module is available (required for NetExec SMB)
+    - name: Verify impacket regsecrets module in source venv
+      ansible.builtin.command: /opt/impacket/venv/bin/python -c "from impacket.examples import regsecrets; print('OK')"
+      register: lateral_movement_tools_regsecrets_check
+      changed_when: false
+      failed_when: false
+      when: lateral_movement_tools_impacket_from_source | default(false)
+
+    - name: Assert impacket regsecrets module is available
+      ansible.builtin.assert:
+        that:
+          - lateral_movement_tools_regsecrets_check.rc == 0
+        fail_msg: "impacket.examples.regsecrets not found in impacket venv"
+        success_msg: "impacket regsecrets module available in venv"
+      when: lateral_movement_tools_impacket_from_source | default(false)
+
     - name: Display verification summary
       ansible.builtin.debug:
         msg: |

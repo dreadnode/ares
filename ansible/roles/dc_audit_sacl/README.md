@@ -1,4 +1,5 @@
 <!-- DOCSIBLE START -->
+<!-- DOCSIBLE START -->
 # dc_audit_sacl
 
 ## Description
@@ -32,6 +33,7 @@ Configure SACL auditing on Domain Controllers for attack detection
 
 
 - **Check if host is a Domain Controller** (ansible.windows.win_feature_info)
+- **Set DC detection fact** (ansible.builtin.set_fact)
 - **Skip if not a Domain Controller** (ansible.builtin.debug) - Conditional
 - **Configure SACL auditing on Domain Controller** (block) - Conditional
 - **Configure auditpol for Directory Service Access** (ansible.windows.win_shell) - Conditional
@@ -58,4 +60,5 @@ Configure SACL auditing on Domain Controllers for attack detection
 
 
 - Windows: 2019, 2022
+<!-- DOCSIBLE END -->
 <!-- DOCSIBLE END -->

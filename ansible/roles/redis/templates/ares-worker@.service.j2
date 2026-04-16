@@ -1,0 +1,19 @@
+[Unit]
+Description=Ares Worker (%i)
+After=redis.service
+Wants=redis.service
+
+[Service]
+Type=simple
+ExecStart={{ redis_ares_worker_binary }}
+Environment=ARES_REDIS_URL=redis://{{ redis_bind_address }}:{{ redis_port }}
+Environment=ARES_WORKER_ROLE=%i
+Environment=ARES_WORKER_MODE=tool_exec
+Environment=RUST_LOG=info
+Restart=on-failure
+RestartSec=5
+StandardOutput=append:{{ redis_ares_log_dir }}/%i.log
+StandardError=append:{{ redis_ares_log_dir }}/%i.log
+
+[Install]
+WantedBy=multi-user.target

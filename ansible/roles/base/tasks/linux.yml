@@ -11,7 +11,6 @@
 - name: Update apt cache
   ansible.builtin.apt:
     update_cache: true
-    cache_valid_time: 3600
   become: true
   when: ansible_facts['os_family'] == 'Debian'
 
@@ -65,6 +64,10 @@
   when:
     - ansible_facts['os_family'] == 'Debian'
     - ansible_facts['distribution'] == 'Kali'
+
+- name: Install AWS CLI v2
+  ansible.builtin.include_tasks: install_awscli.yml
+  when: base_install_awscli
 
 - name: Install uv package manager
   ansible.builtin.include_tasks: install_uv.yml
@@ -133,15 +136,13 @@
 - name: Install Ares Python dependencies
   ansible.builtin.pip:
     name: "{{ base_pip_packages }}"
+    state: present
     executable: "{{ base_pip_executable }}"
     extra_args: >-
       {{ '--break-system-packages' if base_pip_break_required else '' }}
-      {{ '--ignore-installed' if ansible_facts['distribution'] == 'Kali' else '' }}
+      {{ '--ignore-installed' if (ansible_facts['distribution'] == 'Kali' or base_pip_break_required) else '' }}
   become: true
-  register: base_pip_install
-  changed_when:
-    - base_pip_install.changed
-    - ansible_facts['distribution'] != 'Kali'
+  changed_when: false
 
 - name: Create Ares workspace directory
   ansible.builtin.file:

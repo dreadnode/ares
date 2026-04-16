@@ -1,4 +1,5 @@
 <!-- DOCSIBLE START -->
+<!-- DOCSIBLE START -->
 # recon_tools
 
 ## Description
@@ -98,6 +99,8 @@ Install and configure network reconnaissance tools for Ares agents
 - **Make impacket example scripts executable** (ansible.builtin.shell)
 - **Check if \_\_init\_\_.py exists in impacket/examples** (ansible.builtin.stat)
 - **Create \_\_init\_\_.py in impacket/examples to make it a proper Python package** (ansible.builtin.copy) - Conditional
+- **Check system impacket version (Kali)** (ansible.builtin.command) - Conditional
+- **Install source impacket into system Python (Kali apt netexec needs it system-wide)** (ansible.builtin.pip) - Conditional
 - **Create symlinks for impacket scripts (impacket-* style for Kali compatibility)** (ansible.builtin.shell)
 - **Verify impacket regsecrets module is available** (ansible.builtin.command)
 - **Report impacket installation status** (ansible.builtin.debug)
@@ -156,7 +159,6 @@ Install and configure network reconnaissance tools for Ares agents
 - **Warn if Rust is not available** (ansible.builtin.debug) - Conditional
 - **Check if pipx is available** (ansible.builtin.command)
 - **Reinstall pipx if not available (may have been broken by package removal)** (ansible.builtin.apt) - Conditional
-- **Run pipx ensurepath after reinstall** (ansible.builtin.command) - Conditional
 - **Verify pipx is now available** (ansible.builtin.command) - Conditional
 - **Fail if pipx is still not available** (ansible.builtin.fail) - Conditional
 - **Check if NetExec is already installed via pipx** (ansible.builtin.command)
@@ -164,6 +166,8 @@ Install and configure network reconnaissance tools for Ares agents
 - **Upgrade NetExec if already installed** (ansible.builtin.command) - Conditional
 - **Report NetExec installation result** (ansible.builtin.debug)
 - **Inject source impacket into NetExec pipx venv** (ansible.builtin.command) - Conditional
+- **Verify regsecrets is importable from NetExec pipx venv** (ansible.builtin.command) - Conditional
+- **Fail if regsecrets not available in NetExec venv** (ansible.builtin.fail) - Conditional
 - **Find nxc binary location** (ansible.builtin.shell)
 - **Create symlink for nxc in /usr/local/bin** (ansible.builtin.file) - Conditional
 - **Find netexec binary location** (ansible.builtin.shell)
@@ -191,4 +195,5 @@ Install and configure network reconnaissance tools for Ares agents
 - Ubuntu: all
 - Debian: all
 - Kali: all
+<!-- DOCSIBLE END -->
 <!-- DOCSIBLE END -->
