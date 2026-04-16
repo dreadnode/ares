@@ -12,6 +12,8 @@ pub mod config;
 #[cfg(feature = "blue")]
 pub mod correlation;
 #[cfg(feature = "blue")]
+pub mod detection;
+#[cfg(feature = "blue")]
 pub mod eval;
 pub mod models;
 pub mod parsing;

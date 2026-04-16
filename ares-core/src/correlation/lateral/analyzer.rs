@@ -4,7 +4,7 @@ use std::collections::HashSet;
 
 use serde_json::Value;
 
-use super::graph::{HostConnection, LateralGraph, TECHNIQUE_MAPPINGS};
+use super::graph::{mitre_for_connection, HostConnection, LateralGraph};
 use super::patterns::{LateralPatterns, HOSTNAME_RE, IP_RE};
 
 /// Analyzes query results for lateral movement patterns.
@@ -67,7 +67,7 @@ impl LateralMovementAnalyzer {
                         None,
                         None,
                         None,
-                        TECHNIQUE_MAPPINGS.get(conn_type).copied(),
+                        mitre_for_connection(conn_type),
                     );
                 }
             }
@@ -111,20 +111,26 @@ impl LateralMovementAnalyzer {
                 let conn_types: HashSet<&str> =
                     conns.iter().map(|c| c.connection_type.as_str()).collect();
 
+                // Derive relevant detection templates from connection types
+                let detection_templates: Vec<&str> = conn_types
+                    .iter()
+                    .flat_map(|ct| crate::detection::templates_for_connection_type(ct))
+                    .collect();
+
                 serde_json::json!({
                     "host": host,
                     "discovered_from": sources.into_iter().collect::<Vec<_>>(),
                     "connection_types": conn_types.into_iter().collect::<Vec<_>>(),
                     "priority": conns.len(),
                     "suggested_queries": [
-                        format!(r#"{{hostname=~".*{host}.*"}} |~ "(?i)4624|4625|logon""#),
+                        format!(r#"{{computer=~".*{host}.*"}} |~ "(?i)4624|4625|logon""#),
                         format!(r#"{{job="windows-security"}} |~ "(?i){host}""#),
                     ],
                     "suggested_actions": [
                         format!("Call track_host_investigation('{host}')"),
-                        format!("Run detect_lateral_movement(source_host='{host}')"),
                         format!("Run get_host_activity('{host}')"),
                     ],
+                    "suggested_detections": detection_templates,
                 })
             })
             .collect();

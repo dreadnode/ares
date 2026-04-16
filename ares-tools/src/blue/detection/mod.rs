@@ -27,7 +27,9 @@ pub(super) const WIN_SYSTEM: &str = r#"job="windows-system""#;
 /// Build an optimized label selector.
 ///
 /// Starts with a base job label, auto-injects `deployment` from env var
-/// to narrow stream selection, optionally adds hostname regex match.
+/// to narrow stream selection, optionally adds computer regex match.
+/// The `computer` label contains the FQDN (e.g. `dc01.contoso.local`),
+/// so regex match (`=~`) is used to allow partial hostname or IP matches.
 pub(super) fn build_selector(base: &str, hostname: Option<&str>) -> String {
     let deployment = std::env::var("ARES_DEPLOYMENT").ok();
     let mut labels = base.to_string();
@@ -35,7 +37,7 @@ pub(super) fn build_selector(base: &str, hostname: Option<&str>) -> String {
         labels.push_str(&format!(r#", deployment="{dep}""#));
     }
     match hostname {
-        Some(host) => format!("{{{labels}, hostname=~\"{host}\"}}"),
+        Some(host) => format!("{{{labels}, computer=~\"{host}\"}}"),
         None => format!("{{{labels}}}"),
     }
 }

@@ -11,7 +11,7 @@ mod graph;
 mod patterns;
 
 pub use analyzer::{looks_like_hostname, LateralMovementAnalyzer};
-pub use graph::{HostConnection, LateralGraph, TECHNIQUE_MAPPINGS};
+pub use graph::{mitre_for_connection, HostConnection, LateralGraph};
 pub use patterns::{LateralPatterns, HOSTNAME_RE, IP_RE};
 
 #[cfg(test)]

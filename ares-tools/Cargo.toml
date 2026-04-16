@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+ares-core = { path = "../ares-core", features = ["blue"] }
 anyhow = { workspace = true }
 chrono = { workspace = true }
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "json", "query"] }

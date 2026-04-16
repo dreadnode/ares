@@ -1,6 +1,6 @@
 //! `BlueTeamReportGenerator::generate_investigation` — render a per-investigation report.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use chrono::Utc;
 use tera::Context;
@@ -80,7 +80,15 @@ impl BlueTeamReportGenerator {
             "COMPLETED".to_string()
         };
 
-        let technique_count = state.identified_techniques.len();
+        // Merge state-level and evidence-level techniques
+        let mut all_techniques: HashSet<String> =
+            state.identified_techniques.iter().cloned().collect();
+        for ev in &state.evidence {
+            all_techniques.extend(ev.mitre_techniques.iter().cloned());
+        }
+        let mut sorted_techniques: Vec<String> = all_techniques.into_iter().collect();
+        sorted_techniques.sort();
+        let technique_count = sorted_techniques.len();
         let evidence_count = state.evidence.len();
         let ttp_count = state
             .evidence
@@ -107,9 +115,8 @@ impl BlueTeamReportGenerator {
 
         // Key findings
         let mut key_findings = Vec::new();
-        if !state.identified_techniques.is_empty() {
-            let tech_list: Vec<&str> = state
-                .identified_techniques
+        if !sorted_techniques.is_empty() {
+            let tech_list: Vec<&str> = sorted_techniques
                 .iter()
                 .take(5)
                 .map(|s| s.as_str())
@@ -261,9 +268,7 @@ impl BlueTeamReportGenerator {
             })
             .collect();
 
-        // Techniques table
-        let mut sorted_techniques: Vec<&String> = state.identified_techniques.iter().collect();
-        sorted_techniques.sort();
+        // Techniques table (merged state-level + evidence-level)
         let techniques: Vec<BlueTeamTechnique> = sorted_techniques
             .iter()
             .map(|tech_id| {

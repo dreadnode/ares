@@ -1,7 +1,6 @@
 //! Lateral movement graph: host connections and traversal.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::LazyLock;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -143,17 +142,11 @@ impl LateralGraph {
     }
 }
 
-/// MITRE technique mappings for lateral movement connection types.
-pub static TECHNIQUE_MAPPINGS: LazyLock<HashMap<&'static str, &'static str>> =
-    LazyLock::new(|| {
-        HashMap::from([
-            ("smb", "T1021.002"),
-            ("rdp", "T1021.001"),
-            ("wmi", "T1047"),
-            ("psexec", "T1569.002"),
-            ("winrm", "T1021.006"),
-            ("ssh", "T1021.004"),
-            ("dcom", "T1021.003"),
-            ("scheduled_task", "T1053.005"),
-        ])
-    });
+/// Look up the MITRE technique ID for a lateral movement connection type.
+///
+/// Delegates to [`crate::detection::mitre_for_connection_type`] which derives
+/// mappings from `detections.yaml` at runtime, so new templates are picked up
+/// automatically without hardcoding here.
+pub fn mitre_for_connection(conn_type: &str) -> Option<&'static str> {
+    crate::detection::mitre_for_connection_type(conn_type)
+}

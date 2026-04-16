@@ -139,7 +139,21 @@ fn make_error(msg: &str) -> ToolOutput {
     }
 }
 
+/// Max retry attempts for transient Loki failures.
+const MAX_RETRIES: u32 = 3;
+
+/// Base backoff delay between retries.
+const RETRY_BASE_DELAY: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// Check whether an HTTP status code is transient and worth retrying.
+fn is_retryable_status(status: reqwest::StatusCode) -> bool {
+    matches!(status.as_u16(), 408 | 429 | 502 | 503 | 504)
+}
+
 /// Query logs from Loki using LogQL.
+///
+/// Retries up to 3 times on transient failures (timeouts, 429/502/503/504)
+/// with exponential backoff (1s, 2s, 4s).
 pub async fn query_logs(args: &Value) -> Result<ToolOutput> {
     let logql = required_str(args, "logql")?;
     let start_time = required_str(args, "start_time")?;
@@ -148,36 +162,68 @@ pub async fn query_logs(args: &Value) -> Result<ToolOutput> {
 
     let config = loki_config().await;
     let client = http_client();
-    let resp = build_get(
-        client,
-        &format!("{}/loki/api/v1/query_range", config.base_url),
-        &config,
-    )
-    .query(&[
-        ("query", logql),
-        ("start", start_time),
-        ("end", end_time),
-        ("limit", &limit.to_string()),
-    ])
-    .send()
-    .await
-    .context("Failed to query Loki")?;
+    let url = format!("{}/loki/api/v1/query_range", config.base_url);
 
-    let status = resp.status();
-    let body = resp.text().await.context("Failed to read Loki response")?;
+    let mut last_err: Option<String> = None;
 
-    if !status.is_success() {
+    for attempt in 0..MAX_RETRIES {
+        if attempt > 0 {
+            let delay = RETRY_BASE_DELAY * 2u32.pow(attempt - 1);
+            warn!(
+                attempt,
+                delay_ms = delay.as_millis() as u64,
+                "Retrying Loki query after transient failure"
+            );
+            tokio::time::sleep(delay).await;
+        }
+
+        let resp = match build_get(client, &url, &config)
+            .query(&[
+                ("query", logql),
+                ("start", start_time),
+                ("end", end_time),
+                ("limit", &limit.to_string()),
+            ])
+            .send()
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                // Connection or timeout error — retryable
+                let msg = format!("Loki request failed: {e}");
+                warn!(attempt, error = %e, "Loki request error (retryable)");
+                last_err = Some(msg);
+                continue;
+            }
+        };
+
+        let status = resp.status();
+        let body = resp.text().await.context("Failed to read Loki response")?;
+
+        if status.is_success() {
+            let formatted = format_loki_response(&body);
+            if formatted != "No results found." {
+                super::evidence_validator::store_query_result(&formatted);
+            }
+            return Ok(make_output(&formatted));
+        }
+
+        if is_retryable_status(status) {
+            let msg = format!("Loki returned {status}: {body}");
+            warn!(attempt, %status, "Loki transient error (retryable)");
+            last_err = Some(msg);
+            continue;
+        }
+
+        // Non-retryable error (400 bad query, 401 auth, etc.)
         return Ok(make_error(&format!("Loki returned {status}: {body}")));
     }
 
-    let formatted = format_loki_response(&body);
-
-    // Store result for evidence validation (auto-extract IOCs)
-    if formatted != "No results found." {
-        super::evidence_validator::store_query_result(&formatted);
-    }
-
-    Ok(make_output(&formatted))
+    // All retries exhausted
+    let err_msg = last_err.unwrap_or_else(|| "Unknown error".to_string());
+    Ok(make_error(&format!(
+        "Loki query failed after {MAX_RETRIES} attempts: {err_msg}"
+    )))
 }
 
 /// Query logs around a specific timestamp.
