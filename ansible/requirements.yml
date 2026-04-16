@@ -8,6 +8,8 @@ collections:
     version: 3.1.0
   - name: community.docker
     version: 5.2.0
+  - name: ansible.posix
+    version: 2.1.0
   - name: community.general
     version: 12.5.0
   - name: grafana.grafana
