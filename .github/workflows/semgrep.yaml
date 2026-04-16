@@ -49,6 +49,8 @@ jobs:
         env:
           SEMGREP_RULES: >-
             p/rust
+            p/python
+            p/github-actions
             p/security-audit
             p/secrets
             p/owasp-top-ten
@@ -60,3 +62,11 @@ jobs:
             --config="${SEMGREP_RULES}" \
             --timeout="${SEMGREP_TIMEOUT}" \
             --sarif --output=semgrep-results.sarif
+
+      - name: Upload SARIF to GitHub Security tab
+        if: always()
+        uses: github/codeql-action/upload-sarif@fca7ace96b7d713c7035871441bd52efbe39f72b # v3.28.19
+        with:
+          sarif_file: semgrep-results.sarif
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

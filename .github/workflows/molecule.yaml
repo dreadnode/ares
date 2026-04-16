@@ -11,11 +11,15 @@ on:
       - reopened
     paths:
       - 'ansible/**'
+      - '.github/workflows/molecule.yaml'
+      - '.hooks/requirements.txt'
   push:
     branches:
       - main
     paths:
       - 'ansible/**'
+      - '.github/workflows/molecule.yaml'
+      - '.hooks/requirements.txt'
   schedule:
     # Runs every Sunday at 4 AM (see https://crontab.guru)
     - cron: "0 4 * * 0"
@@ -50,9 +54,7 @@ env:
   ANSIBLE_COLLECTIONS_PATH: ~/.ansible/collections
 
 permissions:
-  actions: write
-  contents: write
-  issues: write
+  contents: read
   pull-requests: write
 
 jobs:
@@ -71,12 +73,15 @@ jobs:
 
       - name: Check event type
         id: check-event
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_ROLE: ${{ env.ROLE }}
         run: |
           # Test all on: push to main, schedule, workflow_dispatch without specific inputs, merge_group
-          if [[ "${{ github.event_name }}" == "push" ]] || \
-             [[ "${{ github.event_name }}" == "schedule" ]] || \
-             [[ "${{ github.event_name }}" == "merge_group" ]] || \
-             [[ "${{ github.event_name }}" == "workflow_dispatch" && -z "${{ env.ROLE }}" ]]; then
+          if [[ "${EVENT_NAME}" == "push" ]] || \
+             [[ "${EVENT_NAME}" == "schedule" ]] || \
+             [[ "${EVENT_NAME}" == "merge_group" ]] || \
+             [[ "${EVENT_NAME}" == "workflow_dispatch" && -z "${INPUT_ROLE}" ]]; then
             echo "test_all=true" >> "$GITHUB_OUTPUT"
           else
             echo "test_all=false" >> "$GITHUB_OUTPUT"
@@ -85,10 +90,14 @@ jobs:
       - name: Detect changed files
         id: filter
         if: steps.check-event.outputs.test_all == 'false'
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
-          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
-            BASE="${{ github.event.pull_request.base.sha }}"
-            HEAD="${{ github.event.pull_request.head.sha }}"
+          if [[ "${EVENT_NAME}" == "pull_request" ]]; then
+            BASE="${PR_BASE_SHA}"
+            HEAD="${PR_HEAD_SHA}"
           else
             BASE="origin/main"
             HEAD="HEAD"
@@ -106,6 +115,10 @@ jobs:
 
       - name: Generate test matrix
         id: generate-matrix
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          TEST_ALL: ${{ steps.check-event.outputs.test_all }}
+          CHANGED_ROLES: ${{ steps.filter.outputs.roles }}
         run: |
           # Define roles with molecule tests
           ROLES_WITH_MOLECULE=(
@@ -123,14 +136,14 @@ jobs:
           # Define additional scenarios (role:scenario format)
           # These only run on schedule/workflow_dispatch (too slow for PR CI)
           declare -A ADDITIONAL_SCENARIOS=()
-          if [[ "${{ github.event_name }}" == "schedule" ]] || \
-             [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+          if [[ "${EVENT_NAME}" == "schedule" ]] || \
+             [[ "${EVENT_NAME}" == "workflow_dispatch" ]]; then
             ADDITIONAL_SCENARIOS=(
               ["cracking_tools"]="source-build"
             )
           fi
 
-          if [[ "${{ steps.check-event.outputs.test_all }}" == "true" ]]; then
+          if [[ "${TEST_ALL}" == "true" ]]; then
             # Test all roles that have molecule tests
             MATRIX_JSON='['
             FIRST=true
@@ -153,7 +166,7 @@ jobs:
             MATRIX_JSON+=']'
           else
             # Test only changed roles that have molecule tests
-            ROLES="${{ steps.filter.outputs.roles }}"
+            ROLES="${CHANGED_ROLES}"
             MATRIX_JSON="["
             FIRST=true
 
@@ -206,6 +219,8 @@ jobs:
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
       - name: Validate inputs
+        env:
+          INPUT_ROLE: ${{ env.ROLE }}
         run: |
           ROLES_WITH_MOLECULE=(
             "acl_tools"
@@ -219,13 +234,13 @@ jobs:
             "recon_tools"
           )
 
-          if [[ -n "${{ env.ROLE }}" ]]; then
-            if [[ ! -d "ansible/roles/${{ env.ROLE }}" ]]; then
-              echo "::error::Role '${{ env.ROLE }}' not found in ansible/roles/"
+          if [[ -n "${INPUT_ROLE}" ]]; then
+            if [[ ! -d "ansible/roles/${INPUT_ROLE}" ]]; then
+              echo "::error::Role '${INPUT_ROLE}' not found in ansible/roles/"
               exit 1
             fi
-            if [[ ! " ${ROLES_WITH_MOLECULE[*]} " == *" ${{ env.ROLE }} "* ]]; then
-              echo "::error::Role '${{ env.ROLE }}' does not have molecule tests"
+            if [[ ! " ${ROLES_WITH_MOLECULE[*]} " == *" ${INPUT_ROLE} "* ]]; then
+              echo "::error::Role '${INPUT_ROLE}' does not have molecule tests"
               exit 1
             fi
           fi
@@ -269,12 +284,15 @@ jobs:
         uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
         with:
           path: ~/.ansible/collections
-          key: ${{ runner.os }}-ansible-${{ hashFiles('**/requirements.yml') }}
+          key: ${{ runner.os }}-ansible-${{ github.ref }}-${{ hashFiles('**/requirements.yml') }}
 
       - name: Install dependencies
         shell: bash
+        env:
+          COLL_PATH: ${{ env.COLLECTION_PATH }}
+          REQS_FILE: ${{ env.REQUIREMENTS_FILE }}
         run: |
-          python3 -m pip install -r "${{ env.COLLECTION_PATH }}/${{ env.REQUIREMENTS_FILE }}"
+          python3 -m pip install -r "${COLL_PATH}/${REQS_FILE}"
 
       - name: Install galaxy dependencies
         working-directory: ${{ env.COLLECTION_PATH }}/ansible
@@ -297,12 +315,13 @@ jobs:
           ANSIBLE_CONFIG: ${{ env.COLLECTION_PATH }}/ansible/ansible.cfg
           ANSIBLE_ROLES_PATH: ${{ env.COLLECTION_PATH }}/ansible/roles
           MOLECULE_NO_LOG: "false"
+          MOLECULE_SCENARIO: ${{ env.SCENARIO }}
         run: |
           set -e
           molecule --version
           molecule list
 
-          if ! MOLECULE_DEBUG=1 molecule test -s "${{ env.SCENARIO }}"; then
+          if ! MOLECULE_DEBUG=1 molecule test -s "${MOLECULE_SCENARIO}"; then
             echo "Molecule test failed. Collecting debug information..."
 
             echo "Docker containers:"
@@ -362,12 +381,15 @@ jobs:
         uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
         with:
           path: ~/.ansible/collections
-          key: ${{ runner.os }}-ansible-${{ hashFiles('**/requirements.yml') }}
+          key: ${{ runner.os }}-ansible-${{ github.ref }}-${{ hashFiles('**/requirements.yml') }}
 
       - name: Install dependencies
         shell: bash
+        env:
+          COLL_PATH: ${{ env.COLLECTION_PATH }}
+          REQS_FILE: ${{ env.REQUIREMENTS_FILE }}
         run: |
-          python3 -m pip install -r "${{ env.COLLECTION_PATH }}/${{ env.REQUIREMENTS_FILE }}"
+          python3 -m pip install -r "${COLL_PATH}/${REQS_FILE}"
 
       - name: Install galaxy dependencies
         working-directory: ${{ env.COLLECTION_PATH }}/ansible
@@ -388,13 +410,13 @@ jobs:
         shell: bash
         env:
           ANSIBLE_CONFIG: ${{ env.COLLECTION_PATH }}/ansible/ansible.cfg
+          MOLECULE_SCENARIO: ${{ matrix.scenario }}
         run: |
           set -e
           molecule --version
           molecule list
 
-          SCENARIO="${{ matrix.scenario }}"
-          SCENARIO="${SCENARIO:-default}"
+          SCENARIO="${MOLECULE_SCENARIO:-default}"
 
           if ! MOLECULE_DEBUG=1 molecule test -s "$SCENARIO"; then
             echo "Molecule test failed. Collecting debug information..."

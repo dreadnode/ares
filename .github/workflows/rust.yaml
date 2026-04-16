@@ -9,9 +9,19 @@ on:
       - opened
       - synchronize
       - reopened
+    paths:
+      - 'ares-*/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.github/workflows/rust.yaml'
   push:
     branches:
       - main
+    paths:
+      - 'ares-*/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.github/workflows/rust.yaml'
   workflow_dispatch:
 
 concurrency:
@@ -29,30 +39,9 @@ permissions:
   pull-requests: write
 
 jobs:
-  detect-changes:
-    name: "\U0001F50E Detect changes"
-    runs-on: ubuntu-latest
-    outputs:
-      rust: ${{ steps.filter.outputs.rust }}
-    steps:
-      - name: Set up git repository
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-
-      - name: Check for Rust changes
-        uses: dorny/paths-filter@de90cc6fb38fc0963ad72b210f1f284cd68cea36 # v3.0.2
-        id: filter
-        with:
-          filters: |
-            rust:
-              - 'ares-*/**'
-              - 'Cargo.toml'
-              - 'Cargo.lock'
-
   check:
     name: "\U0001F50D Cargo check"
     runs-on: ubuntu-latest
-    needs: detect-changes
-    if: needs.detect-changes.outputs.rust == 'true'
     steps:
       - name: Set up git repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -67,9 +56,10 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-cargo-check-${{ hashFiles('Cargo.lock', 'Cargo.toml') }}
+          key: ${{ runner.os }}-cargo-check-${{ github.ref }}-${{ hashFiles('Cargo.lock', 'Cargo.toml') }}
           restore-keys: |
-            ${{ runner.os }}-cargo-check-
+            ${{ runner.os }}-cargo-check-${{ github.ref }}-
+            ${{ runner.os }}-cargo-check-refs/heads/main-
 
       - name: Run cargo check
         run: cargo check --workspace
@@ -77,39 +67,31 @@ jobs:
   test:
     name: "\U0001F9EA Tests"
     runs-on: ubuntu-latest
-    needs: [detect-changes, check]
-    if: always() && (needs.detect-changes.outputs.rust != 'true' || needs.check.result == 'success')
+    needs: check
     steps:
-      - name: Skip (no Rust changes)
-        if: needs.detect-changes.outputs.rust != 'true'
-        run: echo "No Rust changes detected, skipping tests"
-
       - name: Set up git repository
-        if: needs.detect-changes.outputs.rust == 'true'
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
       - name: Install Rust toolchain
-        if: needs.detect-changes.outputs.rust == 'true'
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
 
       - name: Cache cargo registry and build
-        if: needs.detect-changes.outputs.rust == 'true'
         uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-cargo-test-${{ hashFiles('Cargo.lock', 'Cargo.toml') }}
+          key: ${{ runner.os }}-cargo-test-${{ github.ref }}-${{ hashFiles('Cargo.lock', 'Cargo.toml') }}
           restore-keys: |
-            ${{ runner.os }}-cargo-test-
+            ${{ runner.os }}-cargo-test-${{ github.ref }}-
+            ${{ runner.os }}-cargo-test-refs/heads/main-
 
       - name: Run tests
-        if: needs.detect-changes.outputs.rust == 'true'
         run: cargo test --workspace
 
       - name: Add test summary
-        if: always() && needs.detect-changes.outputs.rust == 'true'
+        if: always()
         run: |
           {
             echo "## \U0001F980 Rust Test Results"
@@ -122,8 +104,6 @@ jobs:
   fmt:
     name: "\U0001F4D0 Format"
     runs-on: ubuntu-latest
-    needs: detect-changes
-    if: needs.detect-changes.outputs.rust == 'true'
     steps:
       - name: Set up git repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -139,8 +119,7 @@ jobs:
   clippy:
     name: "\U0001F4CE Clippy"
     runs-on: ubuntu-latest
-    needs: [detect-changes, check]
-    if: needs.detect-changes.outputs.rust == 'true'
+    needs: check
     steps:
       - name: Set up git repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -157,9 +136,10 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-cargo-clippy-${{ hashFiles('Cargo.lock', 'Cargo.toml') }}
+          key: ${{ runner.os }}-cargo-clippy-${{ github.ref }}-${{ hashFiles('Cargo.lock', 'Cargo.toml') }}
           restore-keys: |
-            ${{ runner.os }}-cargo-clippy-
+            ${{ runner.os }}-cargo-clippy-${{ github.ref }}-
+            ${{ runner.os }}-cargo-clippy-refs/heads/main-
 
       - name: Run clippy
         run: cargo clippy --workspace -- -D warnings
