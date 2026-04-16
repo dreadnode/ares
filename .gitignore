@@ -4,6 +4,9 @@ target/
 *.pdb
 .cargo/config.toml
 
+# Ansible
+.ansible/
+
 # Reports and logs
 /reports/
 /logs/
