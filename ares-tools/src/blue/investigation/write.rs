@@ -584,12 +584,12 @@ pub async fn track_host_investigation(args: &Value) -> Result<ToolOutput> {
 
     let suggested_queries = format!(
         "\n\nSuggested queries for {hostname}:\n\
-         - Authentication: {{job=\"windows\"}} |~ \"(?i){hostname}\" |~ \"4624|4625|4648\"\n\
-         - Process creation: {{job=\"windows\"}} |~ \"(?i){hostname}\" |~ \"4688|1\"\n\
-         - Lateral movement: {{job=\"windows\"}} |~ \"(?i){hostname}\" |~ \"5140|5145|4624\"\n\
-         - Service installation: {{job=\"windows\"}} |~ \"(?i){hostname}\" |~ \"7045|4697\"\n\
-         - Scheduled tasks: {{job=\"windows\"}} |~ \"(?i){hostname}\" |~ \"4698|4702\"\n\
-         - All activity: {{job=\"windows\"}} |~ \"(?i){hostname}\""
+         - Authentication: {{job=\"windows-security\", computer=~\"{hostname}\"}} |~ \"4624|4625|4648\"\n\
+         - Process creation: {{job=\"windows-security\", computer=~\"{hostname}\"}} |~ \"4688|1\"\n\
+         - Lateral movement: {{job=\"windows-security\", computer=~\"{hostname}\"}} |~ \"5140|5145|4624\"\n\
+         - Service installation: {{job=\"windows-system\", computer=~\"{hostname}\"}} |~ \"7045|4697\"\n\
+         - Scheduled tasks: {{job=\"windows-security\", computer=~\"{hostname}\"}} |~ \"4698|4702\"\n\
+         - All activity: {{job=\"windows-security\", computer=~\"{hostname}\"}}"
     );
 
     if added > 0 {
@@ -628,12 +628,12 @@ pub async fn track_user_investigation(args: &Value) -> Result<ToolOutput> {
 
     let suggested_queries = format!(
         "\n\nSuggested queries for {username}:\n\
-         - Logon events: {{job=\"windows\"}} |~ \"(?i){username}\" |~ \"4624|4625|4648\"\n\
-         - Kerberos: {{job=\"windows\"}} |~ \"(?i){username}\" |~ \"4768|4769|4771\"\n\
-         - Privilege use: {{job=\"windows\"}} |~ \"(?i){username}\" |~ \"4672|4673\"\n\
-         - Object access: {{job=\"windows\"}} |~ \"(?i){username}\" |~ \"4662|4663\"\n\
-         - Account changes: {{job=\"windows\"}} |~ \"(?i){username}\" |~ \"4720|4722|4738\"\n\
-         - All activity: {{job=\"windows\"}} |~ \"(?i){username}\""
+         - Logon events: {{job=\"windows-security\"}} |~ \"(?i){username}\" |~ \"4624|4625|4648\"\n\
+         - Kerberos: {{job=\"windows-security\"}} |~ \"(?i){username}\" |~ \"4768|4769|4771\"\n\
+         - Privilege use: {{job=\"windows-security\"}} |~ \"(?i){username}\" |~ \"4672|4673\"\n\
+         - Object access: {{job=\"windows-security\"}} |~ \"(?i){username}\" |~ \"4662|4663\"\n\
+         - Account changes: {{job=\"windows-security\"}} |~ \"(?i){username}\" |~ \"4720|4722|4738\"\n\
+         - All activity: {{job=\"windows-security\"}} |~ \"(?i){username}\""
     );
 
     if added > 0 {

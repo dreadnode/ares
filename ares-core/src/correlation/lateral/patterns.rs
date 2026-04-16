@@ -30,7 +30,7 @@ static COMPILED: LazyLock<Vec<CompiledPattern>> = LazyLock::new(|| {
                 .filter_map(|p| Regex::new(&format!("(?i){p}")).ok())
                 .collect();
             CompiledPattern {
-                conn_type: Box::leak(conn_type.clone().into_boxed_str()),
+                conn_type: conn_type.as_str(),
                 regexes,
             }
         })

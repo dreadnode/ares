@@ -152,8 +152,8 @@ fn is_retryable_status(status: reqwest::StatusCode) -> bool {
 
 /// Query logs from Loki using LogQL.
 ///
-/// Retries up to 3 times on transient failures (timeouts, 429/502/503/504)
-/// with exponential backoff (1s, 2s, 4s).
+/// Retries up to 2 times on transient failures (timeouts, 429/502/503/504)
+/// with exponential backoff (1s, 2s). Respects `Retry-After` header on 429s.
 pub async fn query_logs(args: &Value) -> Result<ToolOutput> {
     let logql = required_str(args, "logql")?;
     let start_time = required_str(args, "start_time")?;
@@ -165,10 +165,13 @@ pub async fn query_logs(args: &Value) -> Result<ToolOutput> {
     let url = format!("{}/loki/api/v1/query_range", config.base_url);
 
     let mut last_err: Option<String> = None;
+    let mut retry_after: Option<std::time::Duration> = None;
 
     for attempt in 0..MAX_RETRIES {
         if attempt > 0 {
-            let delay = RETRY_BASE_DELAY * 2u32.pow(attempt - 1);
+            let delay = retry_after
+                .take()
+                .unwrap_or(RETRY_BASE_DELAY * 2u32.pow(attempt - 1));
             warn!(
                 attempt,
                 delay_ms = delay.as_millis() as u64,
@@ -197,8 +200,24 @@ pub async fn query_logs(args: &Value) -> Result<ToolOutput> {
             }
         };
 
+        // Extract Retry-After before consuming the response body.
         let status = resp.status();
-        let body = resp.text().await.context("Failed to read Loki response")?;
+        retry_after = resp
+            .headers()
+            .get(reqwest::header::RETRY_AFTER)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.parse::<u64>().ok())
+            .map(std::time::Duration::from_secs);
+
+        let body = match resp.text().await {
+            Ok(b) => b,
+            Err(e) => {
+                let msg = format!("Loki response body read failed: {e}");
+                warn!(attempt, error = %e, "Loki body read error (retryable)");
+                last_err = Some(msg);
+                continue;
+            }
+        };
 
         if status.is_success() {
             let formatted = format_loki_response(&body);

@@ -48,6 +48,13 @@ pub struct TemplateEntry {
     /// Negative regex patterns — exclude lines matching any of these.
     #[serde(default)]
     pub exclude_patterns: Vec<String>,
+    /// Lateral movement connection types this template is relevant to.
+    ///
+    /// Used by `templates_for_connection_type()`. Values come from the
+    /// `lateral_patterns` keys (smb, psexec, wmi, dcom, mssql, winrm, rdp,
+    /// ssh, scheduled_task, constrained_delegation, ntlm_relay).
+    #[serde(default)]
+    pub connection_types: Vec<String>,
 }
 
 fn default_log_source() -> String {
@@ -85,106 +92,64 @@ pub fn find_template(name: &str) -> Option<(&'static str, &'static TemplateEntry
 
 // ─── Lateral movement helpers ──────────────────────────────────────────────
 
-/// Mapping from connection type to MITRE technique ID, derived from templates.
+/// Mapping from connection type to MITRE technique ID.
 ///
-/// Falls back to well-known defaults for connection types not covered by YAML.
+/// YAML templates are authoritative: any template whose `connection_types`
+/// includes a given key contributes its `mitre_id` for that key.  When
+/// multiple templates cover the same connection type the first one wins
+/// (BTreeMap iteration order is alphabetical, giving stable results).
+///
+/// Hardcoded values are inserted last with `or_insert`, acting as fallbacks
+/// only for connection types that have no YAML template coverage.
 pub fn mitre_for_connection_type(conn_type: &str) -> Option<&'static str> {
-    // First check if any template's red_team_tool or tactic maps to this type
     static MAPPING: OnceLock<BTreeMap<&'static str, &'static str>> = OnceLock::new();
     let map = MAPPING.get_or_init(|| {
-        let mut m = BTreeMap::new();
-        // Hardcoded baseline for connection types without explicit templates
-        m.insert("smb", "T1021.002");
-        m.insert("rdp", "T1021.001");
-        m.insert("wmi", "T1047");
-        m.insert("psexec", "T1569.002");
-        m.insert("winrm", "T1021.006");
-        m.insert("ssh", "T1021.004");
-        m.insert("dcom", "T1021.003");
-        m.insert("scheduled_task", "T1053.005");
-
-        // Enrich from YAML templates
         let config = detection_config();
+        let mut m: BTreeMap<&'static str, &'static str> = BTreeMap::new();
+
+        // Primary source: derive from connection_types declared in YAML templates.
+        // Templates are iterated in alphabetical key order; first writer wins per
+        // connection type, so the canonical template for each type takes precedence.
         for entry in config.templates.values() {
-            match entry.tactic.as_str() {
-                "lateral_movement" => {
-                    if let Some(tool) = &entry.red_team_tool {
-                        m.entry(leak_str(tool)).or_insert(leak_str(&entry.mitre_id));
-                    }
-                }
-                _ => {
-                    // Map specific tools to connection types
-                    if let Some(tool) = &entry.red_team_tool {
-                        match tool.as_str() {
-                            "mssql_relay" => {
-                                m.entry("mssql").or_insert(leak_str(&entry.mitre_id));
-                            }
-                            "get_st" => {
-                                m.entry("constrained_delegation")
-                                    .or_insert(leak_str(&entry.mitre_id));
-                            }
-                            "ntlmrelayx" => {
-                                m.entry("ntlm_relay").or_insert(leak_str(&entry.mitre_id));
-                            }
-                            _ => {}
-                        }
-                    }
-                }
+            for ct in &entry.connection_types {
+                m.entry(ct.as_str()).or_insert(entry.mitre_id.as_str());
             }
         }
+
+        // Fallbacks for connection types not yet covered by any YAML template.
+        m.entry("smb").or_insert("T1021.002");
+        m.entry("rdp").or_insert("T1021.001");
+        m.entry("wmi").or_insert("T1047");
+        m.entry("psexec").or_insert("T1569.002");
+        m.entry("winrm").or_insert("T1021.006");
+        m.entry("ssh").or_insert("T1021.004");
+        m.entry("dcom").or_insert("T1021.003");
+        m.entry("scheduled_task").or_insert("T1053.005");
+        m.entry("mssql").or_insert("T1210");
+        m.entry("constrained_delegation").or_insert("T1550.003");
+        m.entry("ntlm_relay").or_insert("T1557");
+
         m
     });
     map.get(conn_type).copied()
 }
 
 /// Return template names relevant to a lateral movement connection type.
+///
+/// Templates declare which connection types they cover via the `connection_types`
+/// field in `detections.yaml`.  This function simply filters by that field,
+/// replacing the previous hardcoded match arms.
 pub fn templates_for_connection_type(conn_type: &str) -> Vec<&'static str> {
     let config = detection_config();
-    let mut out = Vec::new();
-
-    for (name, entry) in &config.templates {
-        let dominated = match conn_type {
-            "smb" => {
-                entry.tactic == "lateral_movement"
-                    || matches!(
-                        name.as_str(),
-                        "detect_share_enumeration"
-                            | "detect_mass_share_enumeration"
-                            | "detect_smb_signing_disabled"
-                            | "detect_smb_file_access"
-                    )
-            }
-            "psexec" => {
-                matches!(
-                    entry.red_team_tool.as_deref(),
-                    Some("psexec") | Some("smbexec")
-                ) || name == "detect_service_creation"
-            }
-            "wmi" => entry.red_team_tool.as_deref() == Some("wmiexec"),
-            "dcom" => entry.red_team_tool.as_deref() == Some("dcomexec"),
-            "mssql" => entry.red_team_tool.as_deref() == Some("mssql_relay"),
-            "constrained_delegation" => {
-                entry.red_team_tool.as_deref() == Some("get_st")
-                    || entry.red_team_tool.as_deref() == Some("rbcd_write")
-            }
-            "ntlm_relay" => {
-                entry.red_team_tool.as_deref() == Some("ntlmrelayx")
-                    || name == "detect_smb_signing_disabled"
-            }
-            "scheduled_task" => entry.red_team_tool.as_deref() == Some("atexec"),
-            "rdp" => entry.tactic == "lateral_movement" && name.contains("rdp"),
-            "winrm" => entry.tactic == "lateral_movement" && name.contains("winrm"),
-            _ => entry.tactic == "lateral_movement",
-        };
-        if dominated {
-            out.push(name.as_str());
-        }
-    }
-    out
-}
-
-/// Leak a string into 'static lifetime for the singleton maps.
-/// Safe because these are only called once during OnceLock init.
-fn leak_str(s: &str) -> &'static str {
-    Box::leak(s.to_string().into_boxed_str())
+    config
+        .templates
+        .iter()
+        .filter(|(_, entry)| {
+            entry
+                .connection_types
+                .iter()
+                .any(|ct| ct.as_str() == conn_type)
+        })
+        .map(|(name, _)| name.as_str())
+        .collect()
 }
