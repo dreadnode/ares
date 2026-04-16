@@ -1,0 +1,81 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/cowdogmoo/warpgate/main/schema/warpgate-template.json
+metadata:
+  name: ares-rust-cli
+  version: 1.0.0
+  description: Pure Rust CLI for the Ares red team orchestration system
+  author: Dreadnode <info@dreadnode.io>
+  license: MIT
+  tags:
+    - ares
+    - rust
+    - cli
+  requires:
+    warpgate: ">=1.0.0"
+name: ares-rust-cli
+version: latest
+base:
+  image: debian:trixie-slim
+  pull: true
+  run_command:
+    - -d
+    - -i
+    - -t
+  environment:
+    DEBIAN_FRONTEND: noninteractive
+    TZ: UTC
+  changes:
+    - ENTRYPOINT ["ares-cli"]
+    - ENV DEBIAN_FRONTEND=noninteractive
+    - ENV TZ=UTC
+sources:
+  - name: ares
+    git:
+      repository: https://github.com/dreadnode/ares.git
+      ref: feature/rust-cli
+      depth: 1
+      auth:
+        token: ${GITHUB_TOKEN}
+provisioners:
+  - type: file
+    source: ${sources.ares}
+    destination: /tmp/ares-build
+  - type: shell
+    only:
+      - docker.arm64
+      - docker.amd64
+    inline:
+      - rm -f /var/lib/apt/lists/lock /var/cache/apt/archives/lock /var/lib/dpkg/lock*
+      - apt-get update
+      - apt-get install -y --no-install-recommends ca-certificates curl build-essential pkg-config libssl-dev
+      - curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
+      - export PATH="/root/.cargo/bin:$PATH"
+      - ln -sf /usr/bin/gcc /usr/local/bin/x86_64-unknown-linux-gnu-gcc
+      - ln -sf /usr/bin/gcc /usr/local/bin/aarch64-unknown-linux-gnu-gcc
+      - cd /tmp/ares-build/ares-rust && cargo build --release --bin ares-cli
+      - cp /tmp/ares-build/ares-rust/target/release/ares-cli /usr/local/bin/ares-cli
+  - type: shell
+    only:
+      - docker.arm64
+      - docker.amd64
+    inline:
+      - rm -rf /tmp/ares-build
+      - rm -rf /root/.cargo /root/.rustup /usr/local/bin/x86_64-unknown-linux-gnu-gcc /usr/local/bin/aarch64-unknown-linux-gnu-gcc
+      - rm -f /var/lib/apt/lists/lock /var/cache/apt/archives/lock /var/lib/dpkg/lock*
+      - apt-get purge -y build-essential pkg-config libssl-dev || true
+      - apt-get autoremove -y || true
+      - apt-get clean || true
+      - rm -rf /var/lib/apt/lists/*
+  - type: shell
+    only:
+      - docker.arm64
+      - docker.amd64
+    inline:
+      - echo "Build completed successfully"
+    changes:
+      - USER root
+      - WORKDIR /root
+targets:
+  - type: container
+    platforms:
+      - linux/amd64
+      - linux/arm64
