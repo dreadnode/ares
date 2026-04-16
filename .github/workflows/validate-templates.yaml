@@ -118,7 +118,7 @@ jobs:
       - name: Check required files
         run: |
           failed=0
-          for template_dir in warpgate-templates/*/; do
+          for template_dir in warpgate-templates/templates/*/; do
             template_name=$(basename "$template_dir")
             echo "::group::Checking $template_name"
 
