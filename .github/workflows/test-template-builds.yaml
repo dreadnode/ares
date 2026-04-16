@@ -376,7 +376,6 @@ jobs:
             --arch amd64 \
             --registry ghcr.io/${{ matrix.namespace }} \
             --tag test-${{ github.run_id }} \
-            --build-arg "GITHUB_TOKEN=${GITHUB_TOKEN}" \
             --push \
             --verbose
 
@@ -626,7 +625,6 @@ jobs:
           # Build without pushing - just validate the build succeeds
           warpgate build warpgate.yaml \
             --arch amd64 \
-            --build-arg "GITHUB_TOKEN=${GITHUB_TOKEN}" \
             --verbose
 
           echo "Build successful for ${{ matrix.name }}"

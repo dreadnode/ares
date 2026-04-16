@@ -700,7 +700,6 @@ jobs:
 
           # Build using --template flag to enable BuildKit cache
           # Using template name (not file path) sets IsLocalTemplate=false, enabling cache
-          # GITHUB_TOKEN is passed as build-arg for container access during shell provisioner
           warpgate build --template ${{ matrix.name }} \
             --arch ${{ matrix.architecture.arch }} \
             --push-digest \
@@ -708,7 +707,6 @@ jobs:
             --save-digests \
             --digest-dir "$GITHUB_WORKSPACE" \
             --verbose \
-            --build-arg "GITHUB_TOKEN=${GITHUB_TOKEN}" \
             --cache-from type=registry,ref=ghcr.io/${{ matrix.namespace }}/${{ matrix.name }}:buildcache-${{ matrix.architecture.arch }} \
             --cache-to type=registry,ref=ghcr.io/${{ matrix.namespace }}/${{ matrix.name }}:buildcache-${{ matrix.architecture.arch }},mode=max
 
@@ -1192,7 +1190,6 @@ jobs:
 
           # Build using --template flag to enable BuildKit cache
           # Using template name (not file path) sets IsLocalTemplate=false, enabling cache
-          # GITHUB_TOKEN is passed as build-arg for container access during shell provisioner
           warpgate build --template ${{ matrix.name }} \
             --arch ${{ matrix.architecture.arch }} \
             --push-digest \
@@ -1200,7 +1197,6 @@ jobs:
             --save-digests \
             --digest-dir "$GITHUB_WORKSPACE" \
             --verbose \
-            --build-arg "GITHUB_TOKEN=${GITHUB_TOKEN}" \
             --cache-from type=registry,ref=ghcr.io/${{ matrix.namespace }}/${{ matrix.name }}:buildcache-${{ matrix.architecture.arch }} \
             --cache-to type=registry,ref=ghcr.io/${{ matrix.namespace }}/${{ matrix.name }}:buildcache-${{ matrix.architecture.arch }},mode=max
 
@@ -1599,7 +1595,6 @@ jobs:
             --save-digests \
             --digest-dir "$GITHUB_WORKSPACE" \
             --verbose \
-            --build-arg "GITHUB_TOKEN=${GITHUB_TOKEN}" \
             --cache-from type=registry,ref=ghcr.io/${{ matrix.namespace }}/${{ matrix.name }}:buildcache-${{ matrix.architecture.arch }} \
             --cache-to type=registry,ref=ghcr.io/${{ matrix.namespace }}/${{ matrix.name }}:buildcache-${{ matrix.architecture.arch }},mode=max
           DIGEST_FILE="$GITHUB_WORKSPACE/digest-${{ matrix.name }}-${{ matrix.architecture.arch }}.txt"
@@ -1928,7 +1923,6 @@ jobs:
             --save-digests \
             --digest-dir "$GITHUB_WORKSPACE" \
             --verbose \
-            --build-arg "GITHUB_TOKEN=${GITHUB_TOKEN}" \
             --cache-from type=registry,ref=ghcr.io/${{ matrix.namespace }}/${{ matrix.name }}:buildcache-${{ matrix.architecture.arch }} \
             --cache-to type=registry,ref=ghcr.io/${{ matrix.namespace }}/${{ matrix.name }}:buildcache-${{ matrix.architecture.arch }},mode=max
           DIGEST_FILE="$GITHUB_WORKSPACE/digest-${{ matrix.name }}-${{ matrix.architecture.arch }}.txt"
