@@ -50,6 +50,16 @@ jobs:
       - name: Install dependencies
         run: python3 -m pip install -r .hooks/requirements.txt
 
+      - name: Install Ansible collections
+        run: |
+          ansible-galaxy collection install -r ansible/requirements.yml --force
+
+      - name: Build and install local collection
+        working-directory: ansible
+        run: |
+          ansible-galaxy collection build --force
+          ansible-galaxy collection install dreadnode-nimbus_range-*.tar.gz -p ~/.ansible/collections --force --pre
+
       - name: Setup go-task
         run: |
           sh -c "$(curl --location https://taskfile.dev/install.sh)" -- -d -b /usr/local/bin v${{ env.TASK_VERSION }}
