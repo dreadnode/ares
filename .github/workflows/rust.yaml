@@ -47,7 +47,6 @@ jobs:
               - 'ares-*/**'
               - 'Cargo.toml'
               - 'Cargo.lock'
-              - '.github/workflows/rust.yaml'
 
   check:
     name: "\U0001F50D Cargo check"
