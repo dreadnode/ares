@@ -24,6 +24,7 @@ name: ares-golden-image
 version: latest
 
 base:
+    image: kalilinux/kali-rolling:latest
     ami_filters:
         owners:
             - "679593333241"
