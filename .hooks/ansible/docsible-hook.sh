@@ -19,7 +19,7 @@ if ! command -v docsible &>/dev/null; then
 fi
 
 # Check if template exists
-TEMPLATE_PATH="$REPO_ROOT/.hooks/templates/docsible-template.md.j2"
+TEMPLATE_PATH="$REPO_ROOT/.hooks/ansible/templates/docsible-template.md.j2"
 if [ ! -f "$TEMPLATE_PATH" ]; then
 	echo -e "${RED}Error: Template file not found at $TEMPLATE_PATH${NC}"
 	echo "Please ensure the template file exists before running this hook."

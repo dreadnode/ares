@@ -18,11 +18,13 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: pre-commit-${{ github.ref }}
   cancel-in-progress: true
+  group: pre-commit-${{ github.workflow }}-${{ github.ref }}
 
 env:
-  TASK_VERSION: 3.38.0
+  PYTHON_VERSION: "3.14.3"
+  TASK_X_REMOTE_TASKFILES: "1"
+  TASK_VERSION: 3.49.1
 
 permissions:
   actions: read
@@ -38,19 +40,20 @@ jobs:
       - name: Set up git repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
-      - name: Set up Python (for pre-commit)
+      - name: Set up Python
         uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
         with:
-          python-version: "3.14"
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+          cache-dependency-path: '.hooks/requirements.txt'
 
-      - name: Install pre-commit
-        run: python3 -m pip install pre-commit
+      - name: Install dependencies
+        run: python3 -m pip install -r .hooks/requirements.txt
 
       - name: Setup go-task
-        if: always()
         run: |
           sh -c "$(curl --location https://taskfile.dev/install.sh)" -- -d -b /usr/local/bin v${{ env.TASK_VERSION }}
           task --version
 
       - name: Run pre-commit
-        run: TASK_X_REMOTE_TASKFILES=1 task run-pre-commit -y
+        run: task -y run-pre-commit
