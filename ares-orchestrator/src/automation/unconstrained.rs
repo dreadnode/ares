@@ -172,12 +172,13 @@ pub async fn auto_unconstrained_exploitation(
                         }
 
                         // Coercion dispatched, waiting for delay before dump.
-                        Some(p) if p.coercion_dispatched_at.is_some() && p.dump_attempts == 0 => {
-                            if p.coercion_dispatched_at.unwrap().elapsed() >= COERCE_TO_DUMP_DELAY {
-                                Action::Dump
-                            } else {
-                                return None;
-                            }
+                        Some(p)
+                            if p.coercion_dispatched_at.is_some()
+                                && p.dump_attempts == 0
+                                && p.coercion_dispatched_at.unwrap().elapsed()
+                                    >= COERCE_TO_DUMP_DELAY =>
+                        {
+                            Action::Dump
                         }
 
                         // Dump retry — previous attempt didn't yield TGTs.

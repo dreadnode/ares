@@ -235,7 +235,7 @@ impl TaskQueue {
             .context("Pipeline check_results_batch failed")?;
 
         let mut out = HashMap::with_capacity(task_ids.len());
-        for (tid, data) in task_ids.iter().zip(raw.into_iter()) {
+        for (tid, data) in task_ids.iter().zip(raw) {
             let parsed = match data {
                 Some(json) => match serde_json::from_str::<TaskResult>(&json) {
                     Ok(r) => Some(r),
