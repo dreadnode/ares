@@ -1,0 +1,35 @@
+# Warpgate build artifacts
+manifest.json
+digest-*.txt
+*.tar.gz
+
+# Template build outputs
+builds/
+dist/
+
+# Generated logs
+*.log
+
+# Custom attributes files created by macOS
+.DS_Store
+
+# Secrets
+.secrets
+*.pem
+*.key
+
+# Pre-commit artifacts
+node_modules/
+
+# IDE and editor files
+.vscode/
+.idea/
+.claude/
+*.swp
+*.swo
+*~
+
+# Temporary files
+.task/
+tmp/
+temp/

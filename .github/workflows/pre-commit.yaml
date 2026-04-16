@@ -40,7 +40,7 @@ jobs:
     name: Pre-commit
     runs-on: ubuntu-latest
     steps:
-      - name: Set up git repository
+      - name: Checkout git repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
       - name: Set up Python ${{ env.PYTHON_VERSION_ANSIBLE_LINT }} (for ansible-lint pre-commit hook)

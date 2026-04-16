@@ -1,129 +1,57 @@
 ---
-# Area Labels
-- name: area/docs
-  color: "72CCF3"  # Light Blue
+# Area
+- name: area/templates
+  color: "00ADD8" # go blue
   description: >-
-    Changes to documentation and guides
+    Changes made to warpgate template configurations
 
-- name: area/examples
-  color: "BC9BE3"  # Lavender
+- name: area/docs
+  color: "8fbc8f" # light green
   description: >-
-    Changes to example code and demonstrations
+    Changes made to project documentation
 
 - name: area/github
-  color: "F4D1B7"  # Peach
+  color: "72ccf3" # light blue
   description: >-
-    Changes made to GitHub Actions
+    Changes made to GitHub Actions workflows
 
 - name: area/pre-commit
-  color: "84B6EB"  # Steel Blue
+  color: "BC9BE3" # lavender
   description: >-
     Changes made to pre-commit hooks
 
-- name: area/rust
-  color: "DEA584"  # Rust orange
-  description: >-
-    Changes to Rust crates, Cargo configuration, and dependencies
-
-- name: area/security
-  color: "FF6600"  # Orange
-  description: >-
-    Changes to security policies and configurations
-
-- name: area/taskfiles
-  color: "66CCFF"  # Sky Blue
-  description: >-
-    Changes made to Taskfiles
-
-- name: area/tests
-  color: "99CC00"  # Lime Green
-  description: >-
-    Changes to test files and testing infrastructure
-
-- name: area/workspace
-  color: "FF99CC"  # Pink
-  description: >-
-    Changes to VSCode workspace configuration
-
-- name: area/assets
-  color: "FFA07A"  # Light Salmon
-  description: >-
-    Changes to asset files
-
-- name: area/templates
-  color: "DA70D6"  # Orchid
-  description: >-
-    Changes to templates
-
-- name: area/scripts
-  color: "40E0D0"  # Turquoise
-  description: >-
-    Changes to script files
-
-- name: area/src
-  color: "4682B4"  # Steel Blue
-  description: >-
-    Changes to source code
-
-- name: area/ci
-  color: "FF4500"  # Orange Red
-  description: >-
-    Changes related to CI/CD configurations
-
-- name: area/shell
-  color: "556B2F"  # Dark Olive Green
-  description: >-
-    Changes to shell scripts
-
-# Renovate Labels
-- name: renovate/container
-  color: "9933CC"  # Purple
-  description: >-
-    Docker container updates via Renovate
-
+# Renovate
+- name: renovate
+  color: "ffc300"
 - name: renovate/github-action
-  color: "FF3366"  # Hot Pink
-  description: >-
-    GitHub Action updates via Renovate
-
+  color: "ffc300"
 - name: renovate/github-release
-  color: "3399FF"  # Bright Blue
-  description: >-
-    GitHub Release updates via Renovate
+  color: "ffc300"
+- name: renovate-dashboard
+  color: "ffc300"
 
-# Semantic Type Labels
+# Semantic Type
 - name: type/digest
-  color: "FF66CC"  # Bright Pink
-  description: >-
-    Dependency digest updates
-
+  color: "FFEC19"
 - name: type/patch
-  color: "FFC300"  # Golden Yellow
-  description: >-
-    Patch changes (fixes, updates)
-
+  color: "FFEC19"
 - name: type/minor
-  color: "FFD700"  # Gold
-  description: >-
-    Minor changes (features, improvements)
-
+  color: "FF9800"
 - name: type/major
-  color: "F6412D"  # Red Orange
-  description: >-
-    Major changes
-
+  color: "F6412D"
 - name: type/break
-  color: "FF0000"  # Bright Red
-  description: >-
-    Breaking changes
+  color: "F6412D"
 
-# Documentation Labels
-- name: type/docs
-  color: "0075CA"  # Documentation Blue
+# Uncategorized
+- name: bug
+  color: "ee0701"
+- name: do-not-merge
+  color: "ee0701"
+- name: docs
+  color: "F4D1B7"
+- name: enhancement
+  color: "84b6eb"
+- name: question
   description: >-
-    Documentation updates and improvements
-
-- name: type/core
-  color: "A2EEEF"  # Light Blue
-  description: >-
-    Changes to core repository files and configurations
+    Clarification and/or additional information required to move forward
+  color: "cc317c"

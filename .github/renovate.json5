@@ -1,35 +1,87 @@
 {
-  $schema: "https://docs.renovatebot.com/renovate-schema.json",
+  $schema: 'https://docs.renovatebot.com/renovate-schema.json',
   extends: [
-    "config:base",
-    ":disableRateLimiting",
-    ":dependencyDashboard",
-    ":semanticCommits",
-    ":enablePreCommit",
-    ":automergeDigest",
-    ":automergeBranch",
+    'config:recommended',
+    ':disableRateLimiting',
+    ':dependencyDashboard',
+    ':semanticCommits',
+    ':enablePreCommit',
+    ':automergeDigest',
+    ':automergeBranch',
+    'helpers:pinGitHubActionDigests',
   ],
-  dependencyDashboardTitle: "Renovate Dashboard 🤖",
-  suppressNotifications: ["prIgnoreNotification"],
-  rebaseWhen: "conflicted",
+  dependencyDashboardLabels: [
+    'renovate-dashboard',
+  ],
+  dependencyDashboardTitle: 'Renovate Dashboard',
+  suppressNotifications: [
+    'prIgnoreNotification',
+  ],
+  rebaseWhen: 'conflicted',
   commitBodyTable: true,
-  "pre-commit": {
+  labels: [
+    'renovate',
+  ],
+  platformAutomerge: true,
+  'pre-commit': {
+    enabled: true,
+  },
+  'github-actions': {
     enabled: true,
   },
   packageRules: [
     {
-      description: "Auto merge non-major updates",
-      matchUpdateTypes: ["minor", "patch"],
-      automerge: true,
-      automergeType: "pr",
+      description: 'Group AWS SDK packages together (boto3, aioboto3, aiobotocore have tight version coupling)',
+      matchPackageNames: [
+        'boto3',
+        'botocore',
+        'aioboto3',
+        'aiobotocore',
+      ],
+      groupName: 'aws-sdk',
     },
     {
-      description: "Auto merge GitHub Actions",
-      matchManagers: ["github-actions"],
-      matchUpdateTypes: ["minor", "patch", "pin", "digest"],
+      description: 'Auto merge GitHub Actions updates',
+      matchManagers: [
+        'github-actions',
+      ],
+      matchDatasources: [
+        'github-tags',
+      ],
+      matchUpdateTypes: [
+        'major',
+        'minor',
+        'patch',
+      ],
       automerge: true,
-      automergeType: "pr",
-    }
+      automergeType: 'branch',
+    },
+    {
+      description: 'Auto merge warpgate patch and minor updates',
+      matchPackageNames: [
+        'CowDogMoo/warpgate',
+      ],
+      matchUpdateTypes: [
+        'patch',
+        'minor',
+      ],
+      automerge: true,
+      automergeType: 'pr',
+    },
   ],
-  ignorePaths: [],
+  customManagers: [
+    {
+      customType: 'regex',
+      description: 'Update WARPGATE_VERSION environment variable in workflows',
+      managerFilePatterns: [
+        '/^\\.github/workflows/[^/]+\\.ya?ml$/',
+      ],
+      matchStrings: [
+        'WARPGATE_VERSION:\\s*["\']?(?<currentValue>v?[0-9.]+)["\']?',
+      ],
+      depNameTemplate: 'CowDogMoo/warpgate',
+      datasourceTemplate: 'github-releases',
+      versioningTemplate: 'semver',
+    },
+  ],
 }
