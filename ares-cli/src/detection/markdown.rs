@@ -91,7 +91,7 @@ pub(crate) fn generate_detection_markdown(playbook: &DetectionPlaybook) -> Strin
         md.push_str("|------|-------|---------------|----------|\n");
 
         let mut sorted_targets: Vec<_> = playbook.detection_targets.iter().collect();
-        sorted_targets.sort_by(|a, b| b.pyramid_level.cmp(&a.pyramid_level));
+        sorted_targets.sort_by_key(|b| std::cmp::Reverse(b.pyramid_level));
 
         for target in sorted_targets.iter().take(20) {
             let value_display = truncate_str(&target.value, 40);
@@ -111,7 +111,7 @@ pub(crate) fn generate_detection_markdown(playbook: &DetectionPlaybook) -> Strin
     // Technique-Specific Detections
     md.push_str("## Technique-Specific Detections\n\n");
     let mut sorted_techniques: Vec<_> = playbook.technique_detections.iter().collect();
-    sorted_techniques.sort_by(|(a, _), (b, _)| a.cmp(b));
+    sorted_techniques.sort_by_key(|(a, _)| *a);
 
     for (tech_id, detection) in sorted_techniques {
         md.push_str(&format!(

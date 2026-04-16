@@ -48,7 +48,7 @@ pub(crate) async fn ops_list(redis_url: Option<String>, latest: bool) -> Result<
     }
 
     // Sort by started_at descending
-    ops.sort_by(|a, b| b.checkpoint_time.cmp(&a.checkpoint_time));
+    ops.sort_by_key(|b| std::cmp::Reverse(b.checkpoint_time));
 
     println!("Multi-Agent Operations:");
     println!("{}", "=".repeat(70));
