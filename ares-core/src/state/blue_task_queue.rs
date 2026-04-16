@@ -3,7 +3,10 @@
 //! Matches the Python `BlueTaskQueue` key patterns for task submission,
 //! result polling, heartbeat, and investigation registration.
 
+use std::time::Duration;
+
 use chrono::Utc;
+use redis::aio::ConnectionManagerConfig;
 use redis::AsyncCommands;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
@@ -82,7 +85,11 @@ pub struct BlueTaskQueue {
 impl BlueTaskQueue {
     pub async fn connect(redis_url: &str) -> anyhow::Result<Self> {
         let client = redis::Client::open(redis_url)?;
-        let conn = client.get_connection_manager().await?;
+        // Default response_timeout is 500ms which is too short for BRPOP
+        // blocking calls. Set to 30s to accommodate blocking operations.
+        let config =
+            ConnectionManagerConfig::new().set_response_timeout(Some(Duration::from_secs(30)));
+        let conn = client.get_connection_manager_with_config(config).await?;
         Ok(Self { conn })
     }
 

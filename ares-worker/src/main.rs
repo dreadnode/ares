@@ -47,8 +47,16 @@ async fn main() -> anyhow::Result<()> {
     );
 
     // Single shared Redis connection — cloned cheaply to all subsystems
+    // Default response_timeout is 500ms which is too short for BRPOP
+    // blocking calls (5s+). Without this, the client-side timeout cancels
+    // the future but the server-side BRPOP remains, consuming queue items
+    // that get silently dropped.
     let redis_client = redis::Client::open(config.redis_url.as_str())?;
-    let conn = redis::aio::ConnectionManager::new(redis_client).await?;
+    let cm_config = redis::aio::ConnectionManagerConfig::new()
+        .set_response_timeout(Some(std::time::Duration::from_secs(30)));
+    let conn = redis_client
+        .get_connection_manager_with_config(cm_config)
+        .await?;
 
     // Shared shutdown signal
     let shutdown = Arc::new(tokio::sync::Notify::new());

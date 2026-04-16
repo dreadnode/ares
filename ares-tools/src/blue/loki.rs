@@ -2,23 +2,49 @@
 //!
 //! HTTP-based queries against Loki's REST API for LogQL log retrieval.
 //!
-//! Set `LOKI_URL` to the Loki endpoint (e.g. `http://localhost:3100`).
-//! Optionally set `LOKI_AUTH_TOKEN` for Bearer auth.
-//! Defaults to `http://localhost:3100` if `LOKI_URL` is not set.
+//! Configuration priority:
+//! 1. `LOKI_URL` + `LOKI_AUTH_TOKEN` — direct Loki endpoint
+//! 2. `GRAFANA_URL` + `GRAFANA_SERVICE_ACCOUNT_TOKEN` — Grafana datasource proxy
+//!    (auto-resolves Loki datasource ID, matching the Python approach)
+//! 3. `http://localhost:3100` fallback
 
 use anyhow::{Context, Result};
 use serde_json::Value;
+use std::sync::OnceLock;
+use tokio::sync::OnceCell;
+use tracing::{info, warn};
 
 use crate::args::{optional_i64, required_str};
 use crate::ToolOutput;
 
 /// Loki connection configuration.
+#[derive(Clone)]
 struct LokiConfig {
     base_url: String,
     auth_token: Option<String>,
 }
 
-fn loki_config() -> LokiConfig {
+/// Cached Grafana-resolved Loki proxy config.
+static GRAFANA_LOKI_PROXY: OnceCell<Option<LokiConfig>> = OnceCell::const_new();
+
+/// Resolve Loki config with Grafana datasource proxy preferred.
+///
+/// Priority: Grafana proxy → LOKI_URL env var → localhost:3100.
+///
+/// The Grafana datasource proxy is preferred because it goes through
+/// Grafana's authenticated, health-checked connection to Loki, which
+/// is more reliable than direct Loki API access (especially cross-region).
+async fn loki_config() -> LokiConfig {
+    // Preferred: Grafana datasource proxy (resolved once, cached)
+    let grafana_config = GRAFANA_LOKI_PROXY
+        .get_or_init(|| async { resolve_grafana_proxy().await })
+        .await;
+
+    if let Some(config) = grafana_config {
+        return config.clone();
+    }
+
+    // Fallback: explicit LOKI_URL
     if let Ok(url) = std::env::var("LOKI_URL") {
         let token = std::env::var("LOKI_AUTH_TOKEN").ok();
         return LokiConfig {
@@ -27,22 +53,63 @@ fn loki_config() -> LokiConfig {
         };
     }
 
+    // Default: local Loki
     LokiConfig {
         base_url: "http://localhost:3100".to_string(),
         auth_token: None,
     }
 }
 
-/// Build a reqwest client with configurable timeout (default 120s).
-fn http_client() -> reqwest::Client {
-    let timeout_secs = std::env::var("LOKI_TIMEOUT_SECS")
-        .ok()
-        .and_then(|v| v.parse::<u64>().ok())
-        .unwrap_or(120);
-    reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(timeout_secs))
-        .build()
-        .unwrap_or_default()
+/// Resolve Loki datasource proxy URL from Grafana API.
+///
+/// Queries `GET /api/datasources/uid/loki` to get the numeric datasource ID,
+/// then constructs the proxy base URL as `{GRAFANA_URL}/api/datasources/proxy/{id}`.
+async fn resolve_grafana_proxy() -> Option<LokiConfig> {
+    let grafana_url = std::env::var("GRAFANA_URL").ok()?;
+    let token = std::env::var("GRAFANA_SERVICE_ACCOUNT_TOKEN")
+        .or_else(|_| std::env::var("GRAFANA_API_KEY"))
+        .ok()?;
+
+    let grafana_url = grafana_url.trim_end_matches('/');
+    let client = http_client();
+    let ds_url = format!("{grafana_url}/api/datasources/uid/loki");
+
+    let resp = client.get(&ds_url).bearer_auth(&token).send().await.ok()?;
+
+    if !resp.status().is_success() {
+        warn!(
+            status = %resp.status(),
+            "Failed to resolve Loki datasource from Grafana"
+        );
+        return None;
+    }
+
+    let body: Value = resp.json().await.ok()?;
+    let ds_id = body.get("id")?.as_u64()?;
+
+    let proxy_url = format!("{grafana_url}/api/datasources/proxy/{ds_id}");
+    info!(proxy_url, "Resolved Loki via Grafana datasource proxy");
+
+    Some(LokiConfig {
+        base_url: proxy_url,
+        auth_token: Some(token),
+    })
+}
+
+/// Shared HTTP client — reuses connection pool across all Loki calls.
+static HTTP_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+
+fn http_client() -> &'static reqwest::Client {
+    HTTP_CLIENT.get_or_init(|| {
+        let timeout_secs = std::env::var("LOKI_TIMEOUT_SECS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(30);
+        reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(timeout_secs))
+            .build()
+            .unwrap_or_default()
+    })
 }
 
 /// Build a GET request with optional auth header.
@@ -79,10 +146,10 @@ pub async fn query_logs(args: &Value) -> Result<ToolOutput> {
     let end_time = required_str(args, "end_time")?;
     let limit = optional_i64(args, "limit").unwrap_or(100);
 
-    let config = loki_config();
+    let config = loki_config().await;
     let client = http_client();
     let resp = build_get(
-        &client,
+        client,
         &format!("{}/loki/api/v1/query_range", config.base_url),
         &config,
     )
@@ -147,8 +214,8 @@ pub async fn query_logs_progressive(args: &Value) -> Result<ToolOutput> {
     let ts = chrono::DateTime::parse_from_rfc3339(reference_timestamp)
         .unwrap_or_else(|_| chrono::Utc::now().into());
 
-    // Progressive windows: 30min, 1h, 6h, 24h
-    for window_minutes in [30, 60, 360, 1440] {
+    // Progressive windows: 30min, 1h, 6h (24h removed — causes Loki timeouts)
+    for window_minutes in [30, 60, 360] {
         let start = ts - chrono::Duration::minutes(window_minutes);
         let end = ts + chrono::Duration::minutes(window_minutes);
 
@@ -180,10 +247,10 @@ pub async fn query_logs_progressive(args: &Value) -> Result<ToolOutput> {
 pub async fn get_label_values(args: &Value) -> Result<ToolOutput> {
     let label = required_str(args, "label")?;
 
-    let config = loki_config();
+    let config = loki_config().await;
     let client = http_client();
     let resp = build_get(
-        &client,
+        client,
         &format!("{}/loki/api/v1/label/{}/values", config.base_url, label),
         &config,
     )
@@ -224,8 +291,9 @@ pub async fn execute_parallel_queries(args: &Value) -> Result<ToolOutput> {
     let end_time = required_str(args, "end_time")?;
     let limit = optional_i64(args, "limit").unwrap_or(50);
 
-    // Cap at 10 queries
+    // Cap at 10 queries, max 3 concurrent to avoid saturating Loki
     let queries: Vec<&Value> = queries.iter().take(10).collect();
+    let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(3));
     let mut handles = Vec::with_capacity(queries.len());
 
     for q in &queries {
@@ -241,8 +309,10 @@ pub async fn execute_parallel_queries(args: &Value) -> Result<ToolOutput> {
             .to_string();
         let st = start_time.to_string();
         let et = end_time.to_string();
+        let sem = semaphore.clone();
 
         handles.push(tokio::spawn(async move {
+            let _permit = sem.acquire().await;
             let query_args = serde_json::json!({
                 "logql": logql,
                 "start_time": st,

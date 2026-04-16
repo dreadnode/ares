@@ -31,4 +31,4 @@ regex = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true }
-rstest = "0.18"
+rstest = "0.26"

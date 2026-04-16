@@ -7,6 +7,7 @@ use crate::args::{optional_i64, optional_str, required_str};
 use crate::ToolOutput;
 
 use super::super::loki;
+use super::config::detection_config;
 use super::templates::build_detection_template;
 use super::{build_event_filter, build_selector, WIN_SECURITY};
 
@@ -37,7 +38,7 @@ pub async fn run_detection_query(args: &Value) -> Result<ToolOutput> {
         "logql": tmpl.logql,
         "start_time": start.to_rfc3339(),
         "end_time": now.to_rfc3339(),
-        "limit": 500,
+        "limit": 100,
     });
 
     let mut result = loki::query_logs(&query_args).await?;
@@ -123,14 +124,16 @@ pub async fn get_host_activity(args: &Value) -> Result<ToolOutput> {
 
     let sel = build_selector(WIN_SECURITY, Some(hostname));
 
-    let logql = if attack_patterns_only {
-        let event_filter = build_event_filter(&[
-            "4625", "4624", "4662", "4769", "4768", "5140", "7045", "4688",
-        ]);
-        format!("{sel}{event_filter}")
+    let config = detection_config();
+    let scope = if attack_patterns_only {
+        "host_attack_patterns"
     } else {
-        sel
+        "host_all_security"
     };
+    let scope_ids = &config.activity_scopes[scope];
+    let id_refs: Vec<&str> = scope_ids.iter().map(|s| s.as_str()).collect();
+    let event_filter = build_event_filter(&id_refs);
+    let logql = format!("{sel}{event_filter}");
 
     let now = chrono::Utc::now();
     let start = now - chrono::Duration::hours(hours_back);
@@ -139,7 +142,7 @@ pub async fn get_host_activity(args: &Value) -> Result<ToolOutput> {
         "logql": logql,
         "start_time": start.to_rfc3339(),
         "end_time": now.to_rfc3339(),
-        "limit": 1000,
+        "limit": 200,
     });
 
     let mut result = loki::query_logs(&query_args).await?;
@@ -156,10 +159,14 @@ pub async fn get_user_activity(args: &Value) -> Result<ToolOutput> {
     let hours_back = optional_i64(args, "hours_back").unwrap_or(1);
 
     let sel = build_selector(WIN_SECURITY, None);
+    let config = detection_config();
+    let scope_ids = &config.activity_scopes["user_activity"];
+    let id_refs: Vec<&str> = scope_ids.iter().map(|s| s.as_str()).collect();
+    let event_filter = build_event_filter(&id_refs);
     // Escape regex metacharacters in the username so that special characters
     // (e.g. `.`, `+`, `(`) do not corrupt the LogQL regex or match unintended lines.
     let escaped_username = regex::escape(username);
-    let logql = format!(r#"{sel} |~ "(?i){escaped_username}""#);
+    let logql = format!(r#"{sel}{event_filter} |~ "(?i){escaped_username}""#);
 
     let now = chrono::Utc::now();
     let start = now - chrono::Duration::hours(hours_back);
@@ -168,7 +175,7 @@ pub async fn get_user_activity(args: &Value) -> Result<ToolOutput> {
         "logql": logql,
         "start_time": start.to_rfc3339(),
         "end_time": now.to_rfc3339(),
-        "limit": 1000,
+        "limit": 200,
     });
 
     let mut result = loki::query_logs(&query_args).await?;
