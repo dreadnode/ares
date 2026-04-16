@@ -37,8 +37,11 @@ repos:
       - id: script-must-have-extension
         name: Ensure shell scripts end with .sh
         types: [shell]
+        exclude: '\.tmpl$'
       - id: shellcheck
+        exclude: '\.tmpl$'
       - id: shfmt
+        exclude: '\.tmpl$'
 
   - repo: https://github.com/igorshubovych/markdownlint-cli
     rev: v0.48.0

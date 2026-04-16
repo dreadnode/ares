@@ -22,6 +22,7 @@ concurrency:
   group: pre-commit-${{ github.workflow }}-${{ github.ref }}
 
 env:
+  GO_VERSION: "1.26.1"
   PYTHON_VERSION: "3.14.3"
   TASK_X_REMOTE_TASKFILES: "1"
   TASK_VERSION: 3.49.1
@@ -49,6 +50,15 @@ jobs:
 
       - name: Install dependencies
         run: python3 -m pip install -r .hooks/requirements.txt
+
+      - name: Set up Go
+        uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - name: Install go module dependencies
+        run: |
+          go install mvdan.cc/sh/v3/cmd/shfmt@latest
 
       - name: Install Ansible collections
         run: |
