@@ -150,30 +150,37 @@ tasks:
   # ===========================================================================
 
   reports:list:
-    desc: List all investigation reports
+    desc: List all blue team reports
     silent: true
     cmds:
       - |
-        echo "Investigation Reports:"
-        echo "======================"
-        if [ -d {{.REPORT_DIR}} ]; then
-          ls -lht {{.REPORT_DIR}}/*.md 2>/dev/null || echo "No reports found"
+        echo "Blue Team Reports:"
+        echo "==================="
+        BLUE_DIR="{{.REPORT_DIR}}/blue"
+        if [ -d "$BLUE_DIR" ]; then
+          echo ""
+          echo "Operation Reports:"
+          ls -lht "$BLUE_DIR"/*.md 2>/dev/null || echo "  (none)"
+          echo ""
+          echo "Investigation Reports:"
+          ls -lht "$BLUE_DIR"/investigations/*.md 2>/dev/null || echo "  (none)"
         else
-          echo "Report directory not found: {{.REPORT_DIR}}"
+          echo "Report directory not found: $BLUE_DIR"
         fi
 
   reports:latest:
-    desc: Show the latest investigation report
+    desc: Show the latest blue team report
     silent: true
     cmds:
       - |
-        LATEST=$(ls -t {{.REPORT_DIR}}/*.md 2>/dev/null | head -1)
+        BLUE_DIR="{{.REPORT_DIR}}/blue"
+        LATEST=$(find "$BLUE_DIR" -name '*.md' -type f 2>/dev/null | xargs ls -t 2>/dev/null | head -1)
         if [ -n "$LATEST" ]; then
           echo "Latest report: $LATEST"
           echo "===================="
           cat "$LATEST"
         else
-          echo "No reports found in {{.REPORT_DIR}}"
+          echo "No reports found in $BLUE_DIR"
         fi
 
   playbook:
@@ -241,15 +248,16 @@ tasks:
         {{.ARES_CLI}} blue report $OP_ID_ARG $LATEST_FLAG --output-dir "{{.OUTPUT_DIR}}"
 
   reports:clean:
-    desc: Remove all investigation reports
+    desc: Remove all blue team reports
     silent: true
     cmds:
       - |
-        read -p "Delete all reports in {{.REPORT_DIR}}? (y/N) " -n 1 -r
+        BLUE_DIR="{{.REPORT_DIR}}/blue"
+        read -p "Delete all reports in ${BLUE_DIR}? (y/N) " -n 1 -r
         echo
         if [[ $REPLY =~ ^[Yy]$ ]]; then
-          rm -rf {{.REPORT_DIR}}/*.md
-          echo "✅ Reports cleaned"
+          rm -rf "${BLUE_DIR}"
+          echo "Blue team reports cleaned"
         fi
 
   # ===========================================================================

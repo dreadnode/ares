@@ -337,7 +337,9 @@ pub(super) async fn generate_report(
         }
     };
 
-    let reports_dir = resolve_report_dir(report_dir);
+    let reports_dir = resolve_report_dir(report_dir)
+        .join("blue")
+        .join("investigations");
 
     if let Err(e) = std::fs::create_dir_all(&reports_dir) {
         warn!(
@@ -347,7 +349,7 @@ pub(super) async fn generate_report(
         return;
     }
 
-    let report_path = reports_dir.join(format!("{investigation_id}_report.md"));
+    let report_path = reports_dir.join(format!("{investigation_id}.md"));
     match std::fs::write(&report_path, &report) {
         Ok(()) => {
             info!(

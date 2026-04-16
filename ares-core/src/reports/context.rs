@@ -137,7 +137,29 @@ pub(crate) struct HashCtx {
     pub username: String,
     pub hash_type: String,
     pub hash_value: String,
+    /// Truncated hash for display (Kerberoast/AS-REP hashes are 1000+ chars).
+    pub hash_display: String,
     pub source: String,
+}
+
+/// Max length before a hash value gets truncated in reports.
+const HASH_DISPLAY_MAX: usize = 64;
+
+fn truncate_hash(value: &str) -> String {
+    if value.len() <= HASH_DISPLAY_MAX {
+        return value.to_string();
+    }
+    // Show first 32 chars + ... + last 16 chars
+    let prefix: String = value.chars().take(32).collect();
+    let suffix: String = value
+        .chars()
+        .rev()
+        .take(16)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+    format!("{prefix}...{suffix}")
 }
 
 impl From<&Hash> for HashCtx {
@@ -146,6 +168,7 @@ impl From<&Hash> for HashCtx {
             domain: h.domain.to_lowercase(),
             username: h.username.clone(),
             hash_type: h.hash_type.clone(),
+            hash_display: truncate_hash(&h.hash_value),
             hash_value: h.hash_value.clone(),
             source: h.source.clone(),
         }
@@ -216,6 +239,8 @@ pub(crate) struct VulnCtx {
     pub exploited_display: String,
     pub status_display: String,
     pub details: String,
+    /// Individual detail items for bullet-point rendering.
+    pub details_list: Vec<String>,
 }
 
 pub(crate) fn build_vuln_ctx(
@@ -224,6 +249,12 @@ pub(crate) fn build_vuln_ctx(
     exploited_set: &HashSet<String>,
 ) -> VulnCtx {
     let exploited = exploited_set.contains(vuln_id);
+    let details_str = format_vuln_details(&vuln.details);
+    let details_list = if details_str == "-" {
+        Vec::new()
+    } else {
+        details_str.split("; ").map(|s| s.to_string()).collect()
+    };
     VulnCtx {
         vuln_id: vuln_id.to_string(),
         vuln_type: vuln.vuln_type.clone(),
@@ -242,7 +273,8 @@ pub(crate) fn build_vuln_ctx(
         } else {
             "Not Exploited".to_string()
         },
-        details: format_vuln_details(&vuln.details),
+        details: details_str,
+        details_list,
     }
 }
 
@@ -352,6 +384,32 @@ mod tests {
         assert_eq!(ctx.username, "krbtgt");
         assert_eq!(ctx.hash_type, "ntlm");
         assert_eq!(ctx.domain, "contoso.local");
+        // Short hash should not be truncated
+        assert_eq!(ctx.hash_display, "aabbccdd");
+    }
+
+    #[test]
+    fn test_hash_ctx_truncates_long_hash() {
+        let long_hash = "a".repeat(200);
+        let hash = Hash {
+            id: String::new(),
+            username: "jon.snow".to_string(),
+            hash_value: long_hash.clone(),
+            hash_type: "Kerberoast".to_string(),
+            domain: "contoso.local".to_string(),
+            cracked_password: None,
+            source: "kerberoast".to_string(),
+            discovered_at: None,
+            parent_id: None,
+            attack_step: 0,
+            aes_key: None,
+        };
+        let ctx = HashCtx::from(&hash);
+        // Full value preserved
+        assert_eq!(ctx.hash_value, long_hash);
+        // Display truncated: 32 + "..." + 16 = 51 chars
+        assert_eq!(ctx.hash_display.len(), 51);
+        assert!(ctx.hash_display.contains("..."));
     }
 
     #[test]
@@ -398,6 +456,29 @@ mod tests {
         assert!(!ctx.exploited);
         assert_eq!(ctx.status_display, "Not Exploited");
         assert_eq!(ctx.exploited_display, "\u{2717}");
+        assert!(ctx.details_list.is_empty());
+    }
+
+    #[test]
+    fn test_build_vuln_ctx_details_list() {
+        let mut details = HashMap::new();
+        details.insert("account".to_string(), serde_json::json!("jon.snow"));
+        details.insert("domain".to_string(), serde_json::json!("contoso.local"));
+        let vuln = VulnerabilityInfo {
+            vuln_id: "cd_jon".to_string(),
+            vuln_type: "constrained_delegation".to_string(),
+            target: "192.168.58.10".to_string(),
+            discovered_by: "recon".to_string(),
+            discovered_at: chrono::Utc::now(),
+            details,
+            recommended_agent: "exploit".to_string(),
+            priority: 8,
+        };
+        let exploited = HashSet::new();
+        let ctx = build_vuln_ctx("cd_jon", &vuln, &exploited);
+        assert!(ctx.details_list.len() >= 2);
+        assert!(ctx.details_list.iter().any(|d| d.contains("jon.snow")));
+        assert!(ctx.details_list.iter().any(|d| d.contains("contoso.local")));
     }
 
     #[test]

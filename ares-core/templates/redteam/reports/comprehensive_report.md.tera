@@ -110,15 +110,16 @@ No network shares discovered.
 No plaintext credentials captured.
 {% endif %}
 
-### NTLM Hashes ({{ hashes | length }})
+### Hashes ({{ hashes | length }})
 
 {% if hashes | length > 0 %}
+| Domain | Username | Type | Hash | Source |
+|--------|----------|------|------|--------|
 {% for hash in hashes %}
-- `{{ hash.domain }}\{{ hash.username }}:{{ hash.hash_type }}:{{ hash.hash_value }}`{% if hash.source %} ({{ hash.source }}){% endif %}
-
+| {{ hash.domain }} | {{ hash.username }} | {{ hash.hash_type }} | `{{ hash.hash_display }}` | {{ hash.source }} |
 {% endfor %}
 {% else %}
-No NTLM hashes captured.
+No hashes captured.
 {% endif %}
 
 ---
@@ -154,9 +155,9 @@ No timeline events recorded.
 - **Target IP**: {{ vuln.target_ip }}
 - **Priority**: {{ vuln.priority }}
 - **Status**: {{ vuln.status_display }}
-{% if vuln.details %}
-- **Details**: {{ vuln.details }}
-{% endif %}
+{% for detail in vuln.details_list %}
+- {{ detail }}
+{% endfor %}
 
 {% endfor %}
 {% else %}

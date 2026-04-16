@@ -823,7 +823,7 @@ tasks:
         {{if eq .REGENERATE "true"}}REPORT_CMD="$REPORT_CMD --regenerate"{{end}}
         REPORT_CMD="$REPORT_CMD --output-dir /tmp/reports 2>&1"
         # After generation, output the report file content with a marker
-        REPORT_CMD="$REPORT_CMD; echo '===REPORT_FILES==='; for f in /tmp/reports/*_report.md; do echo \"FILE:\$(basename \$f)\"; cat \"\$f\"; done"
+        REPORT_CMD="$REPORT_CMD; echo '===REPORT_FILES==='; find /tmp/reports/red -name '*.md' -type f 2>/dev/null | while read f; do echo \"FILE:red/\$(basename \$f)\"; cat \"\$f\"; done"
 
         PARAMS_FILE=$(mktemp)
         trap "rm -f $PARAMS_FILE" EXIT
@@ -872,7 +872,7 @@ tasks:
         fi
 
         # Step 2: Extract report content and save locally
-        mkdir -p "{{.OUTPUT_DIR}}"
+        mkdir -p "{{.OUTPUT_DIR}}/red"
 
         # Parse the output — everything after ===REPORT_FILES=== contains FILE:name + content
         BEFORE_MARKER=$(echo "$OUTPUT" | sed '/===REPORT_FILES===/,$d')
