@@ -67,9 +67,23 @@ jobs:
         run: |
           go install mvdan.cc/sh/v3/cmd/shfmt@latest
 
+      - name: Cache Ansible collections
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: ~/.ansible/collections
+          key: ${{ runner.os }}-ansible-collections-${{ hashFiles('ansible/requirements.yml') }}
+
       - name: Install Ansible collections
+        env:
+          ANSIBLE_GALAXY_SERVER_TIMEOUT: "120"
         run: |
-          ansible-galaxy collection install -r ansible/requirements.yml --force --no-deps
+          for i in 1 2 3 4 5; do
+            ansible-galaxy collection install -r ansible/requirements.yml --force --no-deps --timeout 120 && exit 0
+            echo "Attempt $i/5 failed, retrying in $((i * 10))s..."
+            sleep $((i * 10))
+          done
+          echo "All attempts failed"
+          exit 1
 
       - name: Build and install local collection
         working-directory: ansible
