@@ -72,6 +72,12 @@ async fn run() -> Result<()> {
         "ares-orchestrator starting"
     );
 
+    // --- Blue-only mode: skip red orchestrator, just run blue investigation poller ---
+    #[cfg(feature = "blue")]
+    if std::env::var("ARES_BLUE_ONLY").as_deref() == Ok("1") {
+        return run_blue_only().await;
+    }
+
     let config =
         Arc::new(OrchestratorConfig::from_env().context("Failed to load config from environment")?);
 
@@ -454,18 +460,27 @@ async fn run() -> Result<()> {
             };
 
         info!(model = %blue_model, "Starting blue team orchestrator");
-        Some(blue::spawn_blue_orchestrator(
-            blue_provider,
-            blue_model,
-            blue_disp,
-            config.redis_url.clone(),
-            shutdown_rx.clone(),
+        Some((
+            blue::spawn_blue_orchestrator(
+                blue_provider,
+                blue_model,
+                blue_disp,
+                config.redis_url.clone(),
+                shutdown_rx.clone(),
+            ),
+            blue::spawn_blue_auto_submit(
+                queue.clone(),
+                shared_state.clone(),
+                config.clone(),
+                blue_model_spec,
+                shutdown_rx.clone(),
+            ),
         ))
     } else {
         None
     };
     #[cfg(not(feature = "blue"))]
-    let blue_handle: Option<tokio::task::JoinHandle<()>> = None;
+    let blue_handle: Option<(tokio::task::JoinHandle<()>, tokio::task::JoinHandle<()>)> = None;
 
     // --- Recovery check ---
     {
@@ -612,7 +627,9 @@ async fn run() -> Result<()> {
     info!("Shutting down background tasks...");
     let _ = shutdown_tx.send(true);
 
-    let shutdown_timeout = std::time::Duration::from_secs(10);
+    // Blue investigations need time to finalize: score_against_ground_truth,
+    // set_status("completed"), release_lock, generate_report. 10s was too short.
+    let shutdown_timeout = std::time::Duration::from_secs(120);
     tokio::select! {
         _ = async {
             let _ = tokio::join!(
@@ -628,8 +645,9 @@ async fn run() -> Result<()> {
             for h in auto_handles {
                 let _ = h.await;
             }
-            if let Some(h) = blue_handle {
+            if let Some((h, auto)) = blue_handle {
                 let _ = h.await;
+                let _ = auto.await;
             }
         } => {
             info!("All background tasks stopped");
@@ -661,5 +679,75 @@ async fn run() -> Result<()> {
     }
 
     info!("ares-orchestrator stopped");
+    Ok(())
+}
+
+/// Run in blue-only mode: just the investigation poller, no red team.
+///
+/// Requires only `ARES_REDIS_URL` and an LLM model. No operation ID needed.
+#[cfg(feature = "blue")]
+async fn run_blue_only() -> Result<()> {
+    info!("Running in BLUE-ONLY mode (no red team orchestrator)");
+
+    let redis_url =
+        std::env::var("ARES_REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379/0".to_string());
+
+    // Load YAML config for observability URLs
+    if let Ok(cfg) = ares_core::config::AresConfig::from_env() {
+        if let Some(ref obs) = cfg.observability {
+            if !obs.loki_url.is_empty() && std::env::var("LOKI_URL").is_err() {
+                std::env::set_var("LOKI_URL", &obs.loki_url);
+            }
+            if !obs.loki_auth_token.is_empty() && std::env::var("LOKI_AUTH_TOKEN").is_err() {
+                std::env::set_var("LOKI_AUTH_TOKEN", &obs.loki_auth_token);
+            }
+            if !obs.prometheus_url.is_empty() && std::env::var("PROMETHEUS_URL").is_err() {
+                std::env::set_var("PROMETHEUS_URL", &obs.prometheus_url);
+            }
+        }
+    }
+
+    let model_spec = std::env::var("ARES_LLM_MODEL")
+        .or_else(|_| std::env::var("ARES_BLUE_LLM_MODEL"))
+        .context("Set ARES_LLM_MODEL or ARES_BLUE_LLM_MODEL for blue-only mode")?;
+
+    let (provider, model_name) =
+        ares_llm::create_provider(&model_spec).context("Failed to create LLM provider")?;
+
+    // Blue uses a simple Redis-based tool dispatcher (no operation-scoped auth throttle)
+    let queue = crate::task_queue::TaskQueue::connect(&redis_url)
+        .await
+        .context("Failed to connect to Redis")?;
+    let auth_throttle = tool_dispatcher::AuthThrottle::new(3, std::time::Duration::from_secs(30));
+    let blue_disp: Arc<dyn ares_llm::ToolDispatcher> =
+        Arc::new(tool_dispatcher::RedisToolDispatcher::new(
+            queue,
+            "blue-orchestrator".to_string(),
+            auth_throttle,
+        ));
+
+    info!(model = %model_name, redis = %redis_url, "Blue-only orchestrator ready");
+
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+
+    let blue_handle =
+        blue::spawn_blue_orchestrator(provider, model_name, blue_disp, redis_url, shutdown_rx);
+
+    // Wait for shutdown signal
+    signal::ctrl_c().await?;
+    info!("Shutdown signal received");
+    let _ = shutdown_tx.send(true);
+
+    let shutdown_timeout = std::time::Duration::from_secs(120);
+    tokio::select! {
+        _ = blue_handle => {
+            info!("Blue orchestrator stopped");
+        }
+        _ = tokio::time::sleep(shutdown_timeout) => {
+            warn!("Blue orchestrator shutdown timed out");
+        }
+    }
+
+    info!("ares-orchestrator (blue-only) stopped");
     Ok(())
 }

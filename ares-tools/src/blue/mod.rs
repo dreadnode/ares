@@ -90,6 +90,7 @@ pub async fn dispatch_blue(tool_name: &str, arguments: &Value) -> Result<ToolOut
 
         // ── Investigation state mutation ─────────────────────────
         "add_evidence" => investigation::add_evidence(arguments).await,
+        "add_evidence_batch" => investigation::add_evidence_batch(arguments).await,
         "record_timeline_event" => investigation::record_timeline_event(arguments).await,
         "add_technique" => investigation::add_technique(arguments).await,
         "add_lateral_connection" => investigation::add_lateral_connection(arguments).await,
@@ -152,6 +153,7 @@ pub fn is_blue_tool(name: &str) -> bool {
             | "combine_query_patterns"
             | "get_metric_names"
             | "add_evidence"
+            | "add_evidence_batch"
             | "record_timeline_event"
             | "add_technique"
             | "add_lateral_connection"

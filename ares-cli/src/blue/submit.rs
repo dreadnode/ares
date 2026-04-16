@@ -30,11 +30,8 @@ pub(crate) async fn blue_submit(
         serde_json::from_str(&alert_json).context("Invalid alert JSON string")?
     };
 
-    // Resolve model
+    // Resolve model — if not specified, the orchestrator will use its config default
     let effective_model = resolve_model(&model);
-    if effective_model.is_none() {
-        anyhow::bail!("No model specified. Use --model or set ARES_ORCHESTRATOR_MODEL/ARES_MODEL");
-    }
 
     let inv_id = investigation_id
         .unwrap_or_else(|| format!("inv-{}", chrono::Utc::now().format("%Y%m%d-%H%M%S")));
@@ -123,11 +120,8 @@ pub(crate) async fn blue_from_operation(
     );
     info!("Running: {is_running}");
 
-    // Resolve model
+    // Resolve model — if not specified, the orchestrator will use its config default
     let effective_model = resolve_model(&model);
-    if effective_model.is_none() {
-        anyhow::bail!("No model specified. Use --model or set ARES_ORCHESTRATOR_MODEL/ARES_MODEL");
-    }
 
     // Resolve Grafana config
     let grafana_url = grafana_url.or_else(|| std::env::var("GRAFANA_URL").ok());

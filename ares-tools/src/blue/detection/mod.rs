@@ -10,6 +10,7 @@
 //! - Avoid broad patterns like `{job=~".+"}` — use specific labels
 
 mod catalog;
+pub(super) mod config;
 mod runner;
 mod templates;
 
@@ -25,13 +26,17 @@ pub(super) const WIN_SYSTEM: &str = r#"job="windows-system""#;
 
 /// Build an optimized label selector.
 ///
-/// Starts with a base job label, optionally adds hostname regex match.
-/// Per Grafana docs: Loki optimizes `hostname=~"dc"` better than
-/// `hostname=~".*dc.*"`.
+/// Starts with a base job label, auto-injects `deployment` from env var
+/// to narrow stream selection, optionally adds hostname regex match.
 pub(super) fn build_selector(base: &str, hostname: Option<&str>) -> String {
+    let deployment = std::env::var("ARES_DEPLOYMENT").ok();
+    let mut labels = base.to_string();
+    if let Some(dep) = &deployment {
+        labels.push_str(&format!(r#", deployment="{dep}""#));
+    }
     match hostname {
-        Some(host) => format!("{{{base}, hostname=~\"{host}\"}}"),
-        None => format!("{{{base}}}"),
+        Some(host) => format!("{{{labels}, hostname=~\"{host}\"}}"),
+        None => format!("{{{labels}}}"),
     }
 }
 

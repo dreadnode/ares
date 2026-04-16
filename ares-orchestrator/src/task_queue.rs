@@ -110,7 +110,14 @@ impl TaskQueue {
     pub async fn connect(redis_url: &str) -> Result<Self> {
         let client = redis::Client::open(redis_url)
             .with_context(|| format!("Invalid Redis URL: {redis_url}"))?;
-        let conn = ConnectionManager::new(client)
+        // Default response_timeout is 500ms which is too short for BRPOP
+        // blocking calls (tool results can take minutes). Without this fix,
+        // the client-side timeout cancels the future but the server-side
+        // BRPOP remains registered, consuming results that are silently lost.
+        let config = redis::aio::ConnectionManagerConfig::new()
+            .set_response_timeout(Some(Duration::from_secs(1800)));
+        let conn = client
+            .get_connection_manager_with_config(config)
             .await
             .with_context(|| format!("Failed to connect to Redis at {redis_url}"))?;
         info!(url = %redis_url, "Connected to Redis");
