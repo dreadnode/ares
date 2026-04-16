@@ -291,6 +291,36 @@ impl BlueOrchestrator {
                                 timeout_secs = INVESTIGATION_TIMEOUT_SECS,
                                 "Investigation timed out — cancelling"
                             );
+
+                            // Write timed_out status so downstream consumers know
+                            // what happened (the future was dropped before it could
+                            // write its own final status).
+                            investigation
+                                .state_writer
+                                .set_status(
+                                    &mut conn,
+                                    "timed_out",
+                                    Some("Investigation exceeded timeout"),
+                                )
+                                .await
+                                .ok();
+
+                            // Release the lock that was acquired inside the
+                            // now-cancelled future.
+                            investigation
+                                .state_writer
+                                .release_lock(&mut conn)
+                                .await
+                                .ok();
+
+                            // Generate a partial report from whatever evidence was
+                            // collected before the timeout.
+                            investigation::generate_report(
+                                &mut conn,
+                                &investigation.investigation_id,
+                                investigation.report_dir.as_deref(),
+                            )
+                            .await;
                         }
                     }
 

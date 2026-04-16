@@ -292,7 +292,7 @@ fn resolve_report_dir(report_dir: Option<&str>) -> std::path::PathBuf {
 /// Generate a markdown investigation report and write it to disk.
 ///
 /// Best-effort: logs warnings on failure rather than propagating errors.
-async fn generate_report(
+pub(super) async fn generate_report(
     conn: &mut redis::aio::ConnectionManager,
     investigation_id: &str,
     report_dir: Option<&str>,
