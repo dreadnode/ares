@@ -359,11 +359,11 @@ ansible/                          # Ansible collection: dreadnode.nimbus_range v
   roles/                          # 14 roles (8 agent tool roles + base + infra)
 
 warpgate-templates/               # Container image build templates
-  ares-base/                      # Base: Kali + security tool dependencies
-  ares-orchestrator/              # Orchestrator: Rust binary + Redis
-  ares-worker/                    # Generic worker
-  ares-{recon,credential-access,cracker,acl,privesc,lateral-movement,coercion}-agent/
-  ares-blue-{agent,triage-agent,threat-hunter-agent,lateral-analyst-agent}/
+  ares-python-base/               # Base: Kali + security tool dependencies
+  ares-python-orchestrator/       # Orchestrator: Rust binary + Redis
+  ares-python-worker/             # Generic worker
+  ares-python-{recon,credential-access,cracker,acl,privesc,lateral-movement,coercion}-agent/
+  ares-python-blue-{agent,triage-agent,threat-hunter-agent,lateral-analyst-agent}/
 
 infra/                            # Terragrunt deployment configs
 modules/                          # Terraform modules
@@ -394,8 +394,8 @@ Built with [Warpgate](https://github.com/cowdogmoo/warpgate). Each template
 uses Ansible playbooks for tool provisioning:
 
 ```bash
-PROVISION_REPO_PATH=./ansible warpgate build warpgate-templates/ares-base
-PROVISION_REPO_PATH=./ansible warpgate build warpgate-templates/ares-recon-agent
+PROVISION_REPO_PATH=./ansible warpgate build warpgate-templates/ares-python-base
+PROVISION_REPO_PATH=./ansible warpgate build warpgate-templates/ares-python-recon-agent
 ```
 
 See [Infrastructure Reference](docs/infrastructure.md) for full deployment

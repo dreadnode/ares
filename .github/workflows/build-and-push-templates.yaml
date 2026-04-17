@@ -270,7 +270,7 @@ jobs:
               )[] |
               . as $arch_config |
               $template |
-              if ((.name | startswith("ares-")) and (.name != "ares-worker") and (.name != "ares-rust-worker")) then
+              if ((.name | startswith("ares-")) and (.name != "ares-worker")) then
                 . + {"provision_repo": "ansible-collection-nimbus_range", "provision_repo_path": "ansible-collection-nimbus_range", "namespace": $namespace}
               else
                 . + {"namespace": $namespace}
@@ -313,9 +313,9 @@ jobs:
           fi
 
           # GPU chain templates run in a separate dependency chain for faster builds
-          # ares-cracker-base-gpu -> ares-cracker-agent-gpu / ares-rust-worker-gpu runs independently of ares-base chain
+          # ares-python-cracker-base-gpu -> ares-python-cracker-agent-gpu / ares-worker-gpu runs independently of ares-python-base chain
           GPU_BASE_TEMPLATES_LIST='[]'
-          GPU_DEPENDENT_TEMPLATES_LIST='["ares-rust-cracker-agent-gpu"]'
+          GPU_DEPENDENT_TEMPLATES_LIST='["ares-cracker-agent-gpu"]'
 
           # Split into base and dependent matrices, excluding GPU chain
           BASE_MATRIX=$(echo "$FULL_MATRIX" | jq --argjson gpu_bases "$GPU_BASE_TEMPLATES_LIST" '{include: [.include[] | select(.is_dependent == false) | select(.name as $n | $gpu_bases | index($n) | not)]}')

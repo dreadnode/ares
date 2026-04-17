@@ -30,10 +30,10 @@ Templates support multi-architecture builds (amd64/arm64) where applicable and a
 go install github.com/CowDogMoo/warpgate/cmd/warpgate@latest
 
 # Build an Ares agent
-warpgate build templates/ares-base/warpgate.yaml --arch amd64
+warpgate build templates/ares-python-base/warpgate.yaml --arch amd64
 
 # Build and push to registry
-warpgate build templates/ares-recon-agent/warpgate.yaml \
+warpgate build templates/ares-python-recon-agent/warpgate.yaml \
   --arch amd64 \
   --registry ghcr.io/dreadnode \
   --push
@@ -45,32 +45,32 @@ warpgate build templates/ares-recon-agent/warpgate.yaml \
 
 | Template | Description | Base Image | Platforms |
 | -------- | ----------- | ---------- | --------- |
-| [ares-base](./templates/ares-base) | Base Ares framework with Python and core dependencies | kalilinux/kali-rolling | Container (amd64, arm64) |
-| [ares-orchestrator](./templates/ares-orchestrator) | Redis-based multi-agent coordinator | python:3.13.7-slim | Container (amd64, arm64) |
-| [ares-worker](./templates/ares-worker) | Task polling agent for orchestration | ares-base | Container (amd64, arm64) |
-| [ares-acl-agent](./templates/ares-acl-agent) | Active Directory ACL exploitation agent | ares-base | Container (amd64, arm64) |
-| [ares-coercion-agent](./templates/ares-coercion-agent) | NTLM relay and authentication coercion tools | ares-base | Container (amd64, arm64) |
-| [ares-cracker-agent](./templates/ares-cracker-agent) | Password cracking agent with hashcat and john | ares-base | Container (amd64, arm64) |
-| [ares-credential-access-agent](./templates/ares-credential-access-agent) | Kerberos attacks and credential dumping tools | ares-base | Container (amd64, arm64) |
-| [ares-lateral-movement-agent](./templates/ares-lateral-movement-agent) | Post-exploitation lateral movement tools | ares-base | Container (amd64, arm64) |
-| [ares-privesc-agent](./templates/ares-privesc-agent) | Privilege escalation tools | ares-base | Container (amd64, arm64) |
-| [ares-recon-agent](./templates/ares-recon-agent) | Network reconnaissance and AD enumeration tools | ares-base | Container (amd64, arm64) |
+| [ares-python-base](./templates/ares-python-base) | Base Ares framework with Python and core dependencies | kalilinux/kali-rolling | Container (amd64, arm64) |
+| [ares-python-orchestrator](./templates/ares-python-orchestrator) | Redis-based multi-agent coordinator | python:3.13.7-slim | Container (amd64, arm64) |
+| [ares-python-worker](./templates/ares-python-worker) | Task polling agent for orchestration | ares-python-base | Container (amd64, arm64) |
+| [ares-python-acl-agent](./templates/ares-python-acl-agent) | Active Directory ACL exploitation agent | ares-python-base | Container (amd64, arm64) |
+| [ares-python-coercion-agent](./templates/ares-python-coercion-agent) | NTLM relay and authentication coercion tools | ares-python-base | Container (amd64, arm64) |
+| [ares-python-cracker-agent](./templates/ares-python-cracker-agent) | Password cracking agent with hashcat and john | ares-python-base | Container (amd64, arm64) |
+| [ares-python-credential-access-agent](./templates/ares-python-credential-access-agent) | Kerberos attacks and credential dumping tools | ares-python-base | Container (amd64, arm64) |
+| [ares-python-lateral-movement-agent](./templates/ares-python-lateral-movement-agent) | Post-exploitation lateral movement tools | ares-python-base | Container (amd64, arm64) |
+| [ares-python-privesc-agent](./templates/ares-python-privesc-agent) | Privilege escalation tools | ares-python-base | Container (amd64, arm64) |
+| [ares-python-recon-agent](./templates/ares-python-recon-agent) | Network reconnaissance and AD enumeration tools | ares-python-base | Container (amd64, arm64) |
 
 ### Ares Blue Team Templates
 
 | Template | Description | Base Image | Platforms |
 | -------- | ----------- | ---------- | --------- |
-| [ares-blue-agent](./templates/ares-blue-agent) | Defensive security operations agent | ares-base | Container (amd64, arm64) |
-| [ares-blue-triage-agent](./templates/ares-blue-triage-agent) | Initial incident assessment and alerting | ares-base | Container (amd64, arm64) |
-| [ares-blue-threat-hunter-agent](./templates/ares-blue-threat-hunter-agent) | Proactive threat detection and investigation | ares-base | Container (amd64, arm64) |
-| [ares-blue-lateral-analyst-agent](./templates/ares-blue-lateral-analyst-agent) | Lateral movement detection and analysis | ares-base | Container (amd64, arm64) |
+| [ares-python-blue-agent](./templates/ares-python-blue-agent) | Defensive security operations agent | ares-python-base | Container (amd64, arm64) |
+| [ares-python-blue-triage-agent](./templates/ares-python-blue-triage-agent) | Initial incident assessment and alerting | ares-python-base | Container (amd64, arm64) |
+| [ares-python-blue-threat-hunter-agent](./templates/ares-python-blue-threat-hunter-agent) | Proactive threat detection and investigation | ares-python-base | Container (amd64, arm64) |
+| [ares-python-blue-lateral-analyst-agent](./templates/ares-python-blue-lateral-analyst-agent) | Lateral movement detection and analysis | ares-python-base | Container (amd64, arm64) |
 
 ### GPU-Accelerated Cracking Templates
 
 | Template | Description | Base Image | Platforms |
 | -------- | ----------- | ---------- | --------- |
-| [ares-cracker-base-gpu](./templates/ares-cracker-base-gpu) | Base image with CUDA/OpenCL GPU-accelerated hashcat | nvidia/cuda:12.6.0-runtime-ubuntu24.04 | Container (amd64) |
-| [ares-cracker-agent-gpu](./templates/ares-cracker-agent-gpu) | Ares cracking agent with GPU-accelerated hashcat | ares-cracker-base-gpu | Container (amd64) |
+| [ares-python-cracker-base-gpu](./templates/ares-python-cracker-base-gpu) | Base image with CUDA/OpenCL GPU-accelerated hashcat | nvidia/cuda:12.6.0-runtime-ubuntu24.04 | Container (amd64) |
+| [ares-python-cracker-agent-gpu](./templates/ares-python-cracker-agent-gpu) | Ares cracking agent with GPU-accelerated hashcat | ares-python-cracker-base-gpu | Container (amd64) |
 
 ### Ray Cluster Templates
 
@@ -146,23 +146,23 @@ warpgate build templates/ares-recon-agent/warpgate.yaml \
 
 ```bash
 # Single architecture
-warpgate build templates/ares-base/warpgate.yaml --arch amd64
+warpgate build templates/ares-python-base/warpgate.yaml --arch amd64
 
 # Multi-architecture
-warpgate build templates/ares-base/warpgate.yaml --arch amd64,arm64
+warpgate build templates/ares-python-base/warpgate.yaml --arch amd64,arm64
 ```
 
 #### Build Specialized Agents
 
 ```bash
 # Cracker agent for password recovery
-warpgate build templates/ares-cracker-agent/warpgate.yaml \
+warpgate build templates/ares-python-cracker-agent/warpgate.yaml \
   --arch amd64 \
   --registry ghcr.io/dreadnode \
   --push
 
 # Recon agent for network reconnaissance
-warpgate build templates/ares-recon-agent/warpgate.yaml \
+warpgate build templates/ares-python-recon-agent/warpgate.yaml \
   --arch amd64 \
   --registry ghcr.io/dreadnode \
   --push
@@ -172,19 +172,19 @@ warpgate build templates/ares-recon-agent/warpgate.yaml \
 
 ```bash
 # Run base agent
-docker run -it ghcr.io/dreadnode/ares-base:latest bash
+docker run -it ghcr.io/dreadnode/ares-python-base:latest bash
 
 # Run cracking workload
-docker run -it ghcr.io/dreadnode/ares-cracker-agent:latest \
+docker run -it ghcr.io/dreadnode/ares-python-cracker-agent:latest \
   hashcat -m 1000 -a 0 hashes.txt /usr/share/wordlists/rockyou.txt
 
 # Run reconnaissance scan
-docker run -it ghcr.io/dreadnode/ares-recon-agent:latest \
+docker run -it ghcr.io/dreadnode/ares-python-recon-agent:latest \
   netexec smb 192.168.1.0/24 -u user -p password
 
 # Orchestrate multiple agents for comprehensive assessment
-docker run -d ghcr.io/dreadnode/ares-recon-agent:latest netexec smb 192.168.1.0/24
-docker run -d ghcr.io/dreadnode/ares-cracker-agent:latest hashcat -m 1000 hashes.txt
+docker run -d ghcr.io/dreadnode/ares-python-recon-agent:latest netexec smb 192.168.1.0/24
+docker run -d ghcr.io/dreadnode/ares-python-cracker-agent:latest hashcat -m 1000 hashes.txt
 ```
 
 ## Template Structure
@@ -282,22 +282,22 @@ warpgate validate templates/your-template/warpgate.yaml
 ```text
 warpgate-templates/
 ├── templates/                         # All template definitions
-│   ├── ares-base/                     # Ares framework base image
-│   ├── ares-orchestrator/             # Multi-agent coordinator
-│   ├── ares-worker/                   # Task polling agent
-│   ├── ares-acl-agent/                # AD ACL exploitation
-│   ├── ares-blue-agent/               # Blue team defensive agent
-│   ├── ares-blue-lateral-analyst-agent/ # Lateral movement analysis
-│   ├── ares-blue-threat-hunter-agent/ # Proactive threat hunting
-│   ├── ares-blue-triage-agent/        # Incident triage
-│   ├── ares-coercion-agent/           # NTLM relay tools
-│   ├── ares-cracker-agent/            # Password cracking (CPU)
-│   ├── ares-cracker-agent-gpu/        # Password cracking (GPU)
-│   ├── ares-cracker-base-gpu/         # GPU hashcat base image
-│   ├── ares-credential-access-agent/  # Kerberos attacks
-│   ├── ares-lateral-movement-agent/   # Post-exploitation
-│   ├── ares-privesc-agent/            # Privilege escalation
-│   ├── ares-recon-agent/              # Network reconnaissance
+│   ├── ares-python-base/              # Ares framework base image
+│   ├── ares-python-orchestrator/      # Multi-agent coordinator
+│   ├── ares-python-worker/            # Task polling agent
+│   ├── ares-python-acl-agent/         # AD ACL exploitation
+│   ├── ares-python-blue-agent/        # Blue team defensive agent
+│   ├── ares-python-blue-lateral-analyst-agent/ # Lateral movement analysis
+│   ├── ares-python-blue-threat-hunter-agent/ # Proactive threat hunting
+│   ├── ares-python-blue-triage-agent/ # Incident triage
+│   ├── ares-python-coercion-agent/    # NTLM relay tools
+│   ├── ares-python-cracker-agent/     # Password cracking (CPU)
+│   ├── ares-python-cracker-agent-gpu/ # Password cracking (GPU)
+│   ├── ares-python-cracker-base-gpu/  # GPU hashcat base image
+│   ├── ares-python-credential-access-agent/ # Kerberos attacks
+│   ├── ares-python-lateral-movement-agent/ # Post-exploitation
+│   ├── ares-python-privesc-agent/     # Privilege escalation
+│   ├── ares-python-recon-agent/       # Network reconnaissance
 │   ├── crucible-challenge-core/       # FastAPI challenge base
 │   ├── crucible-challenge-torch/      # Challenge with PyTorch CPU
 │   ├── crucible-challenge-torch-gpu/  # Challenge with PyTorch GPU

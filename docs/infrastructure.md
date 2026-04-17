@@ -56,12 +56,12 @@ ansible/                            Ansible collection (dreadnode.nimbus_range v
     merge_list_dicts_into_list.py   Data transformation utility
 
 warpgate-templates/                 Container image build templates
-  ares-base/                        Base: Kali + Ansible base role + security tools
-  ares-orchestrator/                Orchestrator: Rust binary + Redis client
-  ares-worker/                      Generic worker (inherits ares-base)
-  ares-{recon,credential-access,cracker,acl,privesc,lateral-movement,coercion}-agent/
-  ares-cracker-{agent-gpu,base-gpu}/
-  ares-blue-{agent,triage-agent,threat-hunter-agent,lateral-analyst-agent}/
+  ares-python-base/                  Base: Kali + Ansible base role + security tools
+  ares-python-orchestrator/          Orchestrator: Rust binary + Redis client
+  ares-python-worker/                Generic worker (inherits ares-python-base)
+  ares-python-{recon,credential-access,cracker,acl,privesc,lateral-movement,coercion}-agent/
+  ares-python-cracker-{agent-gpu,base-gpu}/
+  ares-python-blue-{agent,triage-agent,threat-hunter-agent,lateral-analyst-agent}/
   ares-golden-image/                All-in-one red team EC2 AMI (all tools)
 ```
 
@@ -77,23 +77,23 @@ warpgate-templates/                 Container image build templates
 
 ```text
 kalilinux/kali-rolling
-  └── ares-base (apt + Ansible base role + Rust binaries)
-        ├── ares-recon-agent         (+recon_tools)
-        ├── ares-credential-access-agent (+credential_access_tools)
-        ├── ares-cracker-agent       (+cracking_tools)
-        ├── ares-acl-agent           (+acl_tools)
-        ├── ares-privesc-agent       (+privesc_tools)
-        ├── ares-lateral-movement-agent (+lateral_movement_tools)
-        ├── ares-coercion-agent      (+coercion_tools)
-        ├── ares-blue-*              (blue team agents)
-        └── ares-worker              (generic worker, no extra tools)
+  └── ares-python-base (apt + Ansible base role + Rust binaries)
+        ├── ares-python-recon-agent         (+recon_tools)
+        ├── ares-python-credential-access-agent (+credential_access_tools)
+        ├── ares-python-cracker-agent       (+cracking_tools)
+        ├── ares-python-acl-agent           (+acl_tools)
+        ├── ares-python-privesc-agent       (+privesc_tools)
+        ├── ares-python-lateral-movement-agent (+lateral_movement_tools)
+        ├── ares-python-coercion-agent      (+coercion_tools)
+        ├── ares-python-blue-*              (blue team agents)
+        └── ares-python-worker              (generic worker, no extra tools)
 
 nvidia/cuda:12.6.0-runtime-ubuntu24.04
-  └── ares-cracker-base-gpu (hashcat compiled from source with CUDA)
-        └── ares-cracker-agent-gpu (+john, wordlists)
+  └── ares-python-cracker-base-gpu (hashcat compiled from source with CUDA)
+        └── ares-python-cracker-agent-gpu (+john, wordlists)
 
 debian:bookworm-slim
-  └── ares-orchestrator (Rust binary, no Ansible)
+  └── ares-python-orchestrator (Rust binary, no Ansible)
 
 kalilinux/kali-rolling (AMI)
   └── ares-golden-image (all red team tools in one EC2 AMI)
@@ -107,10 +107,10 @@ export PROVISION_REPO_PATH=./ansible
 export GITHUB_TOKEN=ghp_...
 
 # Build base first (all agents depend on it)
-warpgate build warpgate-templates/ares-base
+warpgate build warpgate-templates/ares-python-base
 
 # Build individual agent
-warpgate build warpgate-templates/ares-recon-agent
+warpgate build warpgate-templates/ares-python-recon-agent
 
 # Build all agent images
 for t in warpgate-templates/ares-*/; do
@@ -149,21 +149,21 @@ Each template's `warpgate.yaml` references:
 ### Multi-Architecture Support
 
 All container templates build for `linux/amd64` and `linux/arm64`, except
-GPU templates (`ares-cracker-agent-gpu`, `ares-cracker-base-gpu`) which are
+GPU templates (`ares-python-cracker-agent-gpu`, `ares-python-cracker-base-gpu`) which are
 `amd64` only.
 
 ### Playbook-to-Template Mapping
 
 | Playbook | Template | Ansible Role | Key Tools |
 | --- | --- | --- | --- |
-| `base.yml` | `ares-base` | `base` | Rust binaries, security tool deps, /ares workspace |
-| `recon.yml` | `ares-recon-agent` | `recon_tools` | nmap, netexec, bloodhound, certipy, impacket |
-| `credential_access.yml` | `ares-credential-access-agent` | `credential_access_tools` | sprayhound, lsassy, gMSADumper, impacket |
-| `cracker.yml` | `ares-cracker-agent` | `cracking_tools` | hashcat, john, rockyou, seclists |
-| `acl_abuse.yml` | `ares-acl-agent` | `acl_tools` | bloodyAD, pywhisker, dacledit |
-| `privesc.yml` | `ares-privesc-agent` | `privesc_tools` | certipy, krbrelayx, nopac, potato, SharpGPOAbuse |
-| `lateral_movement.yml` | `ares-lateral-movement-agent` | `lateral_movement_tools` | evil-winrm, xfreerdp, pth-*, impacket |
-| `coercion.yml` | `ares-coercion-agent` | `coercion_tools` | responder, mitm6, coercer, ntlmrelayx |
+| `base.yml` | `ares-python-base` | `base` | Rust binaries, security tool deps, /ares workspace |
+| `recon.yml` | `ares-python-recon-agent` | `recon_tools` | nmap, netexec, bloodhound, certipy, impacket |
+| `credential_access.yml` | `ares-python-credential-access-agent` | `credential_access_tools` | sprayhound, lsassy, gMSADumper, impacket |
+| `cracker.yml` | `ares-python-cracker-agent` | `cracking_tools` | hashcat, john, rockyou, seclists |
+| `acl_abuse.yml` | `ares-python-acl-agent` | `acl_tools` | bloodyAD, pywhisker, dacledit |
+| `privesc.yml` | `ares-python-privesc-agent` | `privesc_tools` | certipy, krbrelayx, nopac, potato, SharpGPOAbuse |
+| `lateral_movement.yml` | `ares-python-lateral-movement-agent` | `lateral_movement_tools` | evil-winrm, xfreerdp, pth-*, impacket |
+| `coercion.yml` | `ares-python-coercion-agent` | `coercion_tools` | responder, mitm6, coercer, ntlmrelayx |
 | `goad_attack_box.yml` | `ares-golden-image` | all roles | All red team tools (AMI, not container) |
 
 The `tools.yaml` file at the repo root is the single source of truth for
@@ -228,14 +228,14 @@ Deploy the orchestrator and workers in a namespace:
 ```bash
 # Orchestrator pod (interactive)
 kubectl run ares-orchestrator \
-  --image=ghcr.io/dreadnode/ares-orchestrator:latest \
+  --image=ghcr.io/dreadnode/ares-python-orchestrator:latest \
   -it --rm \
   --env="REDIS_URL=redis://redis:6379" \
   --env="ANTHROPIC_API_KEY=$ANTHROPIC_API_KEY"
 
 # Worker deployment (long-running)
 kubectl create deployment ares-recon \
-  --image=ghcr.io/dreadnode/ares-recon-agent:latest
+  --image=ghcr.io/dreadnode/ares-python-recon-agent:latest
 ```
 
 ### Docker Compose
@@ -247,14 +247,14 @@ services:
     ports: ["6379:6379"]
 
   orchestrator:
-    image: ghcr.io/dreadnode/ares-orchestrator:latest
+    image: ghcr.io/dreadnode/ares-python-orchestrator:latest
     environment:
       REDIS_URL: redis://redis:6379
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
     depends_on: [redis]
 
   recon-worker:
-    image: ghcr.io/dreadnode/ares-recon-agent:latest
+    image: ghcr.io/dreadnode/ares-python-recon-agent:latest
     environment:
       REDIS_URL: redis://redis:6379
     depends_on: [redis]
