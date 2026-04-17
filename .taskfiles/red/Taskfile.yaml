@@ -796,7 +796,7 @@ tasks:
           echo "Monitor with:"
           echo "  task ec2:logs EC2_NAME={{.EC2_NAME}} ROLE=orchestrator"
           echo "  task ec2:redis:forward EC2_NAME={{.EC2_NAME}}  # then:"
-          echo "  ARES_REDIS_URL=redis://localhost:16379 ares-cli ops loot --latest"
+          echo "  ARES_REDIS_URL=redis://localhost:16379 ares ops loot --latest"
         silent: false
         ignore_error: true
 

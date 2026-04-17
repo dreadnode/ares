@@ -57,11 +57,19 @@ async fn main() {
     }
 
     // ── Initialize telemetry before using tracing macros ──
-    // This must happen before any tracing calls below.
-    let _telemetry = ares_core::telemetry::init_telemetry(
-        ares_core::telemetry::TelemetryConfig::new("ares-cli")
-            .with_default_filter("warn,ares_cli=info"),
-    );
+    // Skip for orchestrator/worker subcommands — they init their own telemetry
+    // with the correct service name.
+    let is_service_subcommand = std::env::args()
+        .nth(1)
+        .is_some_and(|a| a == "orchestrator" || a == "worker");
+    let _telemetry = if !is_service_subcommand {
+        Some(ares_core::telemetry::init_telemetry(
+            ares_core::telemetry::TelemetryConfig::new("ares-cli")
+                .with_default_filter("warn,ares_cli=info"),
+        ))
+    } else {
+        None
+    };
 
     if let Some(ref source) = secrets_from {
         match source.as_str() {
