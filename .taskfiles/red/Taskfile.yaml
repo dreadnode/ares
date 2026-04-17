@@ -597,6 +597,7 @@ tasks:
       EC2_REGION: '{{.EC2_REGION | default "us-west-1"}}'
       BLUE_ENABLED: '{{.BLUE_ENABLED | default "0"}}'
       BLUE_LLM_MODEL: '{{.BLUE_LLM_MODEL | default ""}}'
+      EC2_DEPLOYMENT: '{{.EC2_DEPLOYMENT | default "alpha-operator-range"}}'
       RESOLVED_TARGETS:
         sh: |
           TARGET="{{.TARGET}}"
@@ -744,6 +745,7 @@ tasks:
               -e "s|__ARES_LLM_MODEL__|{{.MODEL}}|" \
               -e "s|__ARES_BLUE_ENABLED__|{{.BLUE_ENABLED}}|" \
               -e "s|__ARES_BLUE_LLM_MODEL__|{{.BLUE_LLM_MODEL}}|" \
+              -e "s|__ARES_DEPLOYMENT__|{{.EC2_DEPLOYMENT}}|" \
               .taskfiles/ec2/scripts/launch-orchestrator.sh.tmpl > "$ORCH_SCRIPT"
           jq -Rs '{"commands": [.]}' < "$ORCH_SCRIPT" > "$ORCH_PARAMS"
 

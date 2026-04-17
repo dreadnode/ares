@@ -8,7 +8,7 @@ pub(super) fn loki_tool_definitions() -> Vec<ToolDefinition> {
     vec![
         ToolDefinition {
             name: "query_loki_logs".into(),
-            description: "Query logs from Loki using LogQL. Returns matching log entries within the specified time range.".into(),
+            description: "Query logs from Loki using LogQL. IMPORTANT: Always include a line filter (|= or |~) — bare selectors like {job=\"windows-security\"} timeout. Example: {job=\"windows-security\"} |= \"4769\" |~ \"RC4\". Keep time windows under 30 minutes.".into(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -34,7 +34,7 @@ pub(super) fn loki_tool_definitions() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: "query_logs_around_timestamp".into(),
-            description: "Query logs in a window around a single timestamp. For multiple queries at once, use execute_parallel_queries instead — it runs up to 10 queries concurrently in one call.".into(),
+            description: "Query logs around a timestamp (±15min default). MUST include a line filter (|= or |~). Use execute_parallel_queries for batching up to 5 queries.".into(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -96,7 +96,7 @@ pub(super) fn loki_tool_definitions() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: "execute_parallel_queries".into(),
-            description: "Execute up to 10 LogQL queries in parallel and return combined results. PREFERRED over calling query_loki_logs or query_logs_around_timestamp multiple times — batch your queries here to get all results in one call.".into(),
+            description: "Execute up to 5 LogQL queries in parallel (2 concurrent). Each query MUST include a line filter (|= or |~) — bare label selectors like {job=\"windows-security\"} will be rejected. Keep time windows under 30 minutes. Prefer this over sequential calls.".into(),
             input_schema: json!({
                 "type": "object",
                 "properties": {

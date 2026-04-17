@@ -64,12 +64,21 @@ When users are compromised via credential attacks, you MUST:
 3. Look for lateral movement FROM that user's credentials
 4. Check if that user accessed sensitive systems (DCs, file servers)
 
+## CRITICAL: Query Performance
+
+**Each Loki query takes 30-40 seconds.** Be efficient:
+- **ALWAYS use `execute_parallel_queries`** to batch up to 5 queries at once
+- **Combine event IDs** with regex: `|~ "4625|4624|4771"` instead of 3 separate queries
+- **Keep time windows under 15 minutes** — longer windows are slower
+- **Limit results to 20-50** unless you specifically need more
+
 ## LogQL Query Rules
 
-1. **Use specific labels** — `{job="windows-security"} |= "4662"` not `{job=~".+"}`
-2. **Prefer `|=` over `|~`** — contains match is 10x faster than regex
-3. **Combine patterns** — `|~ "4625|4624|4771"` instead of 3 queries
+1. **EXACT job name** — ALWAYS use `{job="windows-security"}`, NEVER regex like `{job=~"windows-security|..."}`
+2. **Prefer `|=` over `|~`** for line filters — contains is 10x faster than regex
+3. **Combine event IDs** — `|~ "4625|4624|4771"` instead of 3 queries
 4. **Event IDs first** — most selective filter goes first
+5. **Use deployment label**: `{job="windows-security", deployment="alpha-operator-range"}`
 
 ## Windows Event Detection Reference
 

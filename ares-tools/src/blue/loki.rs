@@ -140,7 +140,9 @@ fn make_error(msg: &str) -> ToolOutput {
 }
 
 /// Max retry attempts for transient Loki failures.
-const MAX_RETRIES: u32 = 3;
+/// Keep low — each Loki query through the Grafana proxy can take 30-40s,
+/// so retries compound quickly against investigation timeouts.
+const MAX_RETRIES: u32 = 2;
 
 /// Base backoff delay between retries.
 const RETRY_BASE_DELAY: std::time::Duration = std::time::Duration::from_secs(1);
@@ -158,7 +160,21 @@ pub async fn query_logs(args: &Value) -> Result<ToolOutput> {
     let logql = required_str(args, "logql")?;
     let start_time = required_str(args, "start_time")?;
     let end_time = required_str(args, "end_time")?;
-    let limit = optional_i64(args, "limit").unwrap_or(100);
+    let limit = optional_i64(args, "limit").unwrap_or(50).min(100);
+
+    // Reject bare label selectors with no line filter — these scan too much data
+    // and cause Loki timeouts on high-volume streams like windows-security.
+    let has_line_filter = logql.contains("|=")
+        || logql.contains("|~")
+        || logql.contains("| json")
+        || logql.contains("| logfmt");
+    if !has_line_filter {
+        return Ok(make_output(
+            "Query rejected: bare label selector with no line filter (|= or |~) would scan \
+             too much data and timeout. Add a filter like |= \"4769\" or |~ \"event_id\" \
+             to narrow the results.",
+        ));
+    }
 
     let config = loki_config().await;
     let client = http_client();
@@ -249,8 +265,8 @@ pub async fn query_logs(args: &Value) -> Result<ToolOutput> {
 pub async fn query_logs_around_timestamp(args: &Value) -> Result<ToolOutput> {
     let logql = required_str(args, "logql")?;
     let timestamp = required_str(args, "timestamp")?;
-    let window_minutes = optional_i64(args, "window_minutes").unwrap_or(30);
-    let limit = optional_i64(args, "limit").unwrap_or(100);
+    let window_minutes = optional_i64(args, "window_minutes").unwrap_or(15);
+    let limit = optional_i64(args, "limit").unwrap_or(50);
 
     // Parse timestamp and compute window
     let ts = chrono::DateTime::parse_from_rfc3339(timestamp)
@@ -356,9 +372,9 @@ pub async fn execute_parallel_queries(args: &Value) -> Result<ToolOutput> {
     let end_time = required_str(args, "end_time")?;
     let limit = optional_i64(args, "limit").unwrap_or(50);
 
-    // Cap at 10 queries, max 3 concurrent to avoid saturating Loki
-    let queries: Vec<&Value> = queries.iter().take(10).collect();
-    let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(3));
+    // Cap at 5 queries, max 2 concurrent — Grafana proxy + Loki is slow (~25s/query)
+    let queries: Vec<&Value> = queries.iter().take(5).collect();
+    let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(2));
     let mut handles = Vec::with_capacity(queries.len());
 
     for q in &queries {
