@@ -156,7 +156,7 @@ tasks:
               "set -ex",
               "mkdir -p " + $build_dir,
               "aws s3 cp s3://" + $bucket + "/" + $prefix + "/ares-src.tar.gz /tmp/ares-src.tar.gz",
-              "tar -xzf /tmp/ares-src.tar.gz -C " + $build_dir + " --strip-components=1",
+              "tar -xzf /tmp/ares-src.tar.gz -C " + $build_dir,
               "cd " + $build_dir + " && CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER=gcc cargo build --release -p ares-cli -p ares-orchestrator -p ares-worker 2>&1",
               "for bin in ares-cli ares-orchestrator ares-worker; do cp " + $build_dir + "/target/release/$bin /usr/local/bin/$bin && chmod +x /usr/local/bin/$bin; done",
               "echo Deployed: && ls -lh /usr/local/bin/ares-cli /usr/local/bin/ares-orchestrator /usr/local/bin/ares-worker"
