@@ -64,7 +64,7 @@ Example efficient triage: batch 3-5 queries in ONE `execute_parallel_queries` ca
 
 4. **Event IDs first** — most selective filter goes first in the pipeline
 
-5. **Use deployment label**: `{job="windows-security", deployment="alpha-operator-range"} |= "4625"`
+{% if deployment %}5. **Use deployment label**: `{job="windows-security", deployment="{{ deployment }}"} |= "4625"`{% else %}5. **Use deployment label** if known: include `deployment="<name>"` in label selector{% endif %}
 
 ## Windows Event Detection Reference
 
@@ -77,6 +77,34 @@ Example efficient triage: batch 3-5 queries in ONE `execute_parallel_queries` ca
 | 4769 | Kerberoasting | `{job="windows-security"} \|= "4769" \|= "0x17"` |
 | 5140 | Share access | `{job="windows-security"} \|= "5140"` |
 | 4672 | Privilege assigned | `{job="windows-security"} \|= "4672"` |
+
+## Quick Detection Queries for Triage
+
+When triaging, batch these high-priority checks with `execute_parallel_queries` to scan for the most dangerous techniques in one call:
+
+{% if deployment %}
+```json
+{
+  "queries": [
+    {"logql": "{job=\"windows-security\", deployment=\"{{ deployment }}\"} |= \"4662\" |= \"1131f6aa\"", "description": "DCSync replication"},
+    {"logql": "{job=\"windows-security\", deployment=\"{{ deployment }}\"} |= \"4769\" |= \"0x17\"", "description": "Kerberoasting (RC4 TGS)"},
+    {"logql": "{job=\"windows-security\", deployment=\"{{ deployment }}\"} |= \"4769\" |= \"krbtgt\"", "description": "Golden Ticket (krbtgt TGS)"},
+    {"logql": "{job=\"windows-security\", deployment=\"{{ deployment }}\"} |~ \"5140|5145\" |~ \"ADMIN\\\\$|C\\\\$\"", "description": "Admin share access"}
+  ],
+  "start_time": "<alert_time - 15min>",
+  "end_time": "<alert_time + 15min>",
+  "limit": 30
+}
+```
+{% else %}
+Use queries like `{job="windows-security"} |= "4662" |= "1131f6aa"` for DCSync, `|= "4769" |= "0x17"` for Kerberoasting, etc.
+{% endif %}
+
+**Key interpretation rules:**
+- Event 4662 with `1131f6aa` from a **machine account** (name ending in `$`) = normal AD replication, NOT an attack
+- Event 4662 with `1131f6aa` from a **user account** (no `$` suffix) = DCSync attack, CRITICAL
+- Event 4769 with `TicketEncryptionType: 0x17` = RC4 = Kerberoasting
+- Event 4769 with `TicketEncryptionType: 0x12` = AES-256 = normal Kerberos, not an attack
 
 ## Common MITRE Misclassifications — AVOID THESE
 

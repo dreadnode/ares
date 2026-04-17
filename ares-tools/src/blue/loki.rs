@@ -10,6 +10,7 @@
 
 use anyhow::{Context, Result};
 use serde_json::Value;
+use std::collections::HashMap;
 use std::sync::OnceLock;
 use tokio::sync::OnceCell;
 use tracing::{info, warn};
@@ -153,10 +154,44 @@ fn is_retryable_status(status: reqwest::StatusCode) -> bool {
     matches!(status.as_u16(), 408 | 429 | 502 | 503 | 504)
 }
 
+// ---------------------------------------------------------------------------
+// Query result cache
+// ---------------------------------------------------------------------------
+
+/// TTL for cached query results (5 minutes). Historical log data is immutable,
+/// so a short TTL is safe and eliminates duplicate queries within a single
+/// investigation that re-query the same time range / event IDs.
+const QUERY_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// Maximum cached entries.
+const QUERY_CACHE_MAX: usize = 100;
+
+struct CachedResult {
+    output: ToolOutput,
+    expires_at: std::time::Instant,
+}
+
+fn query_cache() -> &'static tokio::sync::Mutex<HashMap<u64, CachedResult>> {
+    static CACHE: OnceLock<tokio::sync::Mutex<HashMap<u64, CachedResult>>> = OnceLock::new();
+    CACHE.get_or_init(|| tokio::sync::Mutex::new(HashMap::with_capacity(QUERY_CACHE_MAX)))
+}
+
+fn cache_key(logql: &str, start: &str, end: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    logql.hash(&mut hasher);
+    start.hash(&mut hasher);
+    end.hash(&mut hasher);
+    hasher.finish()
+}
+
 /// Query logs from Loki using LogQL.
 ///
-/// Retries up to 2 times on transient failures (timeouts, 429/502/503/504)
-/// with exponential backoff (1s, 2s). Respects `Retry-After` header on 429s.
+/// Results are cached for 5 minutes keyed on (logql, start_time, end_time) to
+/// eliminate duplicate queries within a single investigation.
+///
+/// Retries up to 3 times on transient failures (timeouts, 429/502/503/504)
+/// with exponential backoff (1s, 2s, 4s). Respects `Retry-After` header on 429s.
 pub async fn query_logs(args: &Value) -> Result<ToolOutput> {
     let logql = required_str(args, "logql")?;
     let start_time = required_str(args, "start_time")?;
@@ -175,6 +210,18 @@ pub async fn query_logs(args: &Value) -> Result<ToolOutput> {
              too much data and timeout. Add a filter like |= \"4769\" or |~ \"event_id\" \
              to narrow the results.",
         ));
+    }
+
+    // Check cache for identical query
+    let key = cache_key(logql, start_time, end_time);
+    {
+        let cache = query_cache().lock().await;
+        if let Some(cached) = cache.get(&key) {
+            if cached.expires_at > std::time::Instant::now() {
+                info!("Loki query cache hit");
+                return Ok(cached.output.clone());
+            }
+        }
     }
 
     let config = loki_config().await;
@@ -241,7 +288,23 @@ pub async fn query_logs(args: &Value) -> Result<ToolOutput> {
             if formatted != "No results found." {
                 super::evidence_validator::store_query_result(&formatted);
             }
-            return Ok(make_output(&formatted));
+            let output = make_output(&formatted);
+
+            // Cache the result
+            let mut cache = query_cache().lock().await;
+            if cache.len() >= QUERY_CACHE_MAX {
+                let now = std::time::Instant::now();
+                cache.retain(|_, v| v.expires_at > now);
+            }
+            cache.insert(
+                key,
+                CachedResult {
+                    output: output.clone(),
+                    expires_at: std::time::Instant::now() + QUERY_CACHE_TTL,
+                },
+            );
+
+            return Ok(output);
         }
 
         if is_retryable_status(status) {
@@ -321,7 +384,7 @@ pub async fn query_logs_progressive(args: &Value) -> Result<ToolOutput> {
     }
 
     Ok(make_output(
-        "No results found across all time windows (30min to 24h).",
+        "No results found across all time windows (30min to 6h).",
     ))
 }
 

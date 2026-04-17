@@ -55,6 +55,7 @@ pub struct BlueCallbackHandler {
     investigation_id: String,
     alert: serde_json::Value,
     redis_url: String,
+    deployment: Option<String>,
 }
 
 impl BlueCallbackHandler {
@@ -66,6 +67,14 @@ impl BlueCallbackHandler {
         alert: serde_json::Value,
         redis_url: String,
     ) -> Self {
+        // Extract deployment from alert labels or fall back to env var
+        let deployment = alert
+            .get("labels")
+            .and_then(|l| l.get("deployment"))
+            .and_then(|v| v.as_str())
+            .map(String::from)
+            .or_else(|| std::env::var("ARES_DEPLOYMENT").ok());
+
         Self {
             provider,
             dispatcher,
@@ -73,6 +82,7 @@ impl BlueCallbackHandler {
             investigation_id,
             alert,
             redis_url,
+            deployment,
         }
     }
 
@@ -85,8 +95,11 @@ impl BlueCallbackHandler {
             .map(|t| t.name.clone())
             .collect();
 
-        let system_prompt =
-            ares_llm::prompt::blue::build_blue_system_prompt(role.as_str(), &capabilities)?;
+        let system_prompt = ares_llm::prompt::blue::build_blue_system_prompt(
+            role.as_str(),
+            &capabilities,
+            self.deployment.as_deref(),
+        )?;
 
         let config = AgentLoopConfig {
             model: self.model.clone(),
@@ -508,6 +521,7 @@ mod tests {
             investigation_id: "inv-test".into(),
             alert: json!({}),
             redis_url: "redis://localhost".into(),
+            deployment: None,
         };
 
         assert!(handler.is_callback("dispatch_triage"));

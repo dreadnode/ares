@@ -32,9 +32,28 @@ fn event_filter_empty() {
 }
 
 #[test]
-fn pattern_filter_builds_case_insensitive() {
+fn pattern_filter_uses_contains_for_few_literals() {
+    // 2 simple literals: chain |= filters (faster than regex)
     let filter = build_pattern_filter(&["nmap", "masscan"]);
-    assert_eq!(filter, r#" |~ "(?i)(nmap|masscan)""#);
+    assert_eq!(filter, r#" |= "nmap" |= "masscan""#);
+}
+
+#[test]
+fn pattern_filter_uses_regex_for_many_literals() {
+    let filter = build_pattern_filter(&["nmap", "masscan", "rustscan", "zmap"]);
+    assert_eq!(filter, r#" |~ "(?i)(nmap|masscan|rustscan|zmap)""#);
+}
+
+#[test]
+fn pattern_filter_uses_regex_for_metacharacters() {
+    let filter = build_pattern_filter(&["golden.*ticket"]);
+    assert_eq!(filter, r#" |~ "(?i)(golden.*ticket)""#);
+}
+
+#[test]
+fn pattern_filter_single_literal_uses_contains() {
+    let filter = build_pattern_filter(&["drsuapi"]);
+    assert_eq!(filter, r#" |= "drsuapi""#);
 }
 
 #[test]

@@ -572,6 +572,7 @@ templates:
     tactic: persistence
     severity: critical
     red_team_tool: generate_golden_ticket
+    event_ids: ["4768", "4769"]
     filter_stages:
       - ['golden.*ticket', 'krbtgt', 'ticketer', 'krbcred']
       - ['forged', '4769', 'kerberos.*ticket', 'enterprise.*admin']
