@@ -103,7 +103,7 @@ warpgate validate ares-cracker-agent
   - `ares_cracking_tools` - hashcat, john, wordlists
 - **Rust Binary:**
   - Compiled from `feature/rust-cli` branch with PyO3 Python bindings
-  - Installed to `/usr/local/bin/ares-worker`
+  - Installed to `/usr/local/bin/ares`
 - **Installed Tools:**
   - **hashcat** - Industry-leading password recovery tool
   - **John the Ripper** - Classic password cracker with extensive format support
@@ -118,7 +118,7 @@ warpgate validate ares-cracker-agent
   - `/ares/results/` - Cracking results storage
   - `/usr/share/wordlists/` - Wordlist collection
   - `/usr/share/hashcat/rules/` - Hashcat rules
-  - `/usr/local/bin/ares-worker` - Compiled worker binary
+  - `/usr/local/bin/ares` - Compiled Ares binary
 - The build includes cleanup steps to remove temporary files, Ansible artifacts, and Rust build artifacts.
 
 ---

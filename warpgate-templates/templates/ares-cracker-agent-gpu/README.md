@@ -1,6 +1,6 @@
-# Ares Cracker Agent GPU Warp Gate Template
+# Ares Rust Cracker Agent GPU Warp Gate Template
 
-This template builds **Ares Cracker Agent GPU** images using Warp Gate. It provides
+This template builds **Ares Rust Cracker Agent GPU** images using Warp Gate. It provides
 GPU-accelerated password cracking using hashcat with CUDA/OpenCL support for NVIDIA GPUs,
 using a compiled Rust binary with embedded Python.
 
@@ -30,13 +30,13 @@ This image is built on the NVIDIA CUDA runtime image and supports:
 To run the container with GPU access:
 
 ```bash
-docker run --gpus all -it ghcr.io/dreadnode/ares-cracker-agent-gpu:latest
+docker run --gpus all -it ghcr.io/dreadnode/ares-rust-cracker-agent-gpu:latest
 ```
 
 Or with specific GPUs:
 
 ```bash
-docker run --gpus '"device=0,1"' -it ghcr.io/dreadnode/ares-cracker-agent-gpu:latest
+docker run --gpus '"device=0,1"' -it ghcr.io/dreadnode/ares-rust-cracker-agent-gpu:latest
 ```
 
 ### Verifying GPU Access
@@ -54,7 +54,7 @@ clinfo
 hashcat -I
 
 # Verify the Rust binary
-ares-worker --version
+ares worker --version
 ```
 
 ---
@@ -63,7 +63,7 @@ ares-worker --version
 
 The template configuration is managed in `warpgate.yaml`. Key settings include:
 
-- `name`: Template name (`ares-cracker-agent-gpu`)
+- `name`: Template name (`ares-rust-cracker-agent-gpu`)
 - `base.image`: Base Docker image (`ares-cracker-base-gpu`)
 - `sources`: Clones the ares repository for Rust compilation
 - `targets`: Defines build targets (container images)
@@ -72,18 +72,18 @@ The template configuration is managed in `warpgate.yaml`. Key settings include:
 
 ## Building Docker Images
 
-This builds GPU-accelerated Ares Cracker Agent Docker images for `amd64` architecture.
+This builds GPU-accelerated Ares Rust Cracker Agent Docker images for `amd64` architecture.
 
 **Initialize the template:**
 
 ```bash
-warpgate init ares-cracker-agent-gpu
+warpgate init ares-rust-cracker-agent-gpu
 ```
 
 **Build Docker images:**
 
 ```bash
-warpgate build ares-cracker-agent-gpu --only 'docker.*'
+warpgate build ares-rust-cracker-agent-gpu --only 'docker.*'
 ```
 
 **Build with registry push:**
@@ -93,16 +93,17 @@ cd /path/to/warpgate-templates
 
 export GITHUB_TOKEN="your-github-token"
 
-warpgate build --template ares-cracker-agent-gpu \
+warpgate build --template ares-rust-cracker-agent-gpu \
   --arch amd64 \
   --registry ghcr.io/dreadnode \
   --tag latest \
   --push \
-  --cache-from type=registry,ref=ghcr.io/dreadnode/ares-cracker-agent-gpu:buildcache-amd64 \
-  --cache-to type=registry,ref=ghcr.io/dreadnode/ares-cracker-agent-gpu:buildcache-amd64,mode=max
+  --cache-from type=registry,ref=ghcr.io/dreadnode/ares-rust-cracker-agent-gpu:buildcache-amd64 \
+  --cache-to type=registry,ref=ghcr.io/dreadnode/ares-rust-cracker-agent-gpu:buildcache-amd64,mode=max
 ```
 
-After the build, Ares Cracker Agent GPU Docker images will be available
+After the build, Ares Rust Cracker Agent GPU Docker images will be available
+locally as `ares-rust-cracker-agent-gpu:latest`.
 
 ---
 
@@ -112,17 +113,17 @@ After the build, Ares Cracker Agent GPU Docker images will be available
 - **John the Ripper** - Classic password cracker
 - **rockyou.txt** - Famous password wordlist
 - **SecLists passwords** - Common password lists
-- **ares-worker** - Rust-compiled binary with PyO3 Python bindings
+- **ares** - Rust-compiled binary with PyO3 Python bindings
 - **Ares Python framework** - Agent orchestration and tool execution
 
 ---
 
 ## CPU vs GPU Comparison
 
-| Image                    | GPU Support     | Use Case                         |
-| ------------------------ | --------------- | -------------------------------- |
-| `ares-cracker-agent`     | CPU only (PoCL) | CI/CD, testing, ARM support      |
-| `ares-cracker-agent-gpu` | CUDA/OpenCL     | Production cracking, NVIDIA GPUs |
+| Image                          | GPU Support      | Use Case                          |
+|--------------------------------|------------------|-----------------------------------|
+| `ares-rust-cracker-agent`      | CPU only (PoCL)  | CI/CD, testing, ARM support       |
+| `ares-rust-cracker-agent-gpu`  | CUDA/OpenCL      | Production cracking, NVIDIA GPUs  |
 
 ---
 
@@ -139,24 +140,24 @@ After the build, Ares Cracker Agent GPU Docker images will be available
   - `NVIDIA_DRIVER_CAPABILITIES=compute,utility`
   - CUDA and OpenCL runtime support
 - **Installed Components:**
-  - Provided by `ares-python-cracker-base-gpu` (hashcat, john, wordlists, CUDA runtime)
-  - Rust-compiled `ares-worker` binary with PyO3 Python bindings
+  - Provided by `ares-cracker-base-gpu` (hashcat, john, wordlists, CUDA runtime)
+  - Rust-compiled `ares` binary with PyO3 Python bindings
   - Ares Python framework
 - **Build Process:**
   - Clones ares repository from `feature/rust-cli` branch
   - Installs Rust toolchain, compiles binary with `--features python`
-  - Installs binary to `/usr/local/bin/ares-worker`
+  - Installs binary to `/usr/local/bin/ares`
   - Cleans up Rust toolchain, build artifacts, and build-only dependencies
 - **Directory Structure:**
   - `/root/` - Default working directory
-  - `/usr/local/bin/ares-worker` - Compiled worker binary
+  - `/usr/local/bin/ares` - Compiled Ares binary
   - `/usr/share/wordlists/` - Wordlist collection
   - `/usr/share/hashcat/rules/` - Hashcat rules
 - **Architecture**: Only `amd64` is supported (NVIDIA CUDA not available for ARM)
 - **Memory**: GPU cracking may require significant VRAM for large wordlists
 - **Kubernetes**: Use NVIDIA device plugin for GPU scheduling
 
-For CPU-only cracking, use the `ares-cracker-agent` template instead.
+For CPU-only cracking, use the `ares-rust-cracker-agent` template instead.
 
 ---
 

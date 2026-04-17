@@ -102,7 +102,7 @@ warpgate validate ares-lateral-movement-agent
   - `ares_lateral_movement_tools` - evil-winrm, lsassy, xfreerdp, sshpass
 - **Rust Binary:**
   - Compiled from `feature/rust-cli` branch with PyO3 Python bindings
-  - Installed to `/usr/local/bin/ares-worker`
+  - Installed to `/usr/local/bin/ares`
 - **Installed Tools:**
   - **evil-winrm** - WinRM shell with pass-the-hash support
   - **lsassy** - Remote LSASS credential extraction
@@ -111,7 +111,7 @@ warpgate validate ares-lateral-movement-agent
 - **Directory Structure:**
   - `/ares/` - Main Ares workspace directory
   - `/ares/.venv/` - Python virtual environment
-  - `/usr/local/bin/ares-worker` - Compiled worker binary
+  - `/usr/local/bin/ares` - Compiled Ares binary
 - The build includes cleanup steps to remove temporary files, Ansible artifacts, and Rust build artifacts.
 
 ---

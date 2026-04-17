@@ -102,7 +102,7 @@ warpgate validate ares-credential-access-agent
   - `ares_credential_access_tools` - Kerberos and credential tools
 - **Rust Binary:**
   - Compiled from `feature/rust-cli` branch with PyO3 Python bindings
-  - Installed to `/usr/local/bin/ares-worker`
+  - Installed to `/usr/local/bin/ares`
 - **Installed Tools:**
   - **Kerberos Tools** - Rubeus, GetNPUsers, GetUserSPNs for Kerberoasting and AS-REP roasting
   - **Impacket** - secretsdump, ntlmrelayx for credential extraction
@@ -111,7 +111,7 @@ warpgate validate ares-credential-access-agent
 - **Directory Structure:**
   - `/ares/` - Main Ares workspace directory
   - `/ares/.venv/` - Python virtual environment
-  - `/usr/local/bin/ares-worker` - Compiled worker binary
+  - `/usr/local/bin/ares` - Compiled Ares binary
 - The build includes cleanup steps to remove temporary files, Ansible artifacts, and Rust build artifacts.
 
 ---

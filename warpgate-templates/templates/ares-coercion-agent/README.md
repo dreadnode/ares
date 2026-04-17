@@ -103,7 +103,7 @@ warpgate validate ares-coercion-agent
   - `ares_coercion_tools` - Responder, mitm6, Coercer, PetitPotam
 - **Rust Binary:**
   - Compiled from `feature/rust-cli` branch with PyO3 Python bindings
-  - Installed to `/usr/local/bin/ares-worker`
+  - Installed to `/usr/local/bin/ares`
 - **Installed Tools:**
   - **Responder** - LLMNR/NBT-NS/mDNS poisoning for credential capture
   - **mitm6** - DHCPv6 poisoning for IPv6 MITM attacks
@@ -114,7 +114,7 @@ warpgate validate ares-coercion-agent
   - `/ares/.venv/` - Python virtual environment
   - `/opt/Responder/` - Responder installation
   - `/opt/PetitPotam/` - PetitPotam installation
-  - `/usr/local/bin/ares-worker` - Compiled worker binary
+  - `/usr/local/bin/ares` - Compiled Ares binary
 - The build includes cleanup steps to remove temporary files, Ansible artifacts, and Rust build artifacts.
 
 ---

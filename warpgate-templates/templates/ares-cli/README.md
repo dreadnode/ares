@@ -108,18 +108,18 @@ warpgate validate ares-cli
   - Lightweight base image (`debian:trixie-slim`)
   - Default user: `root`
   - Working directory: `/root`
-  - Entrypoint: `ares-cli` (compiled Rust binary)
+  - Entrypoint: `ares` (compiled Rust binary)
 - **Installed Components:**
-  - Pure Rust `ares-cli` binary (no Python dependencies)
+  - Pure Rust `ares` binary (no Python dependencies)
 - **Build Process:**
   - Clones ares repository from `feature/rust-cli` branch
   - Installs Rust toolchain and build dependencies
-  - Compiles binary with `cargo build --release --bin ares-cli`
-  - Installs binary to `/usr/local/bin/ares-cli`
+  - Compiles binary with `cargo build --release --bin ares`
+  - Installs binary to `/usr/local/bin/ares`
   - Cleans up Rust toolchain, build artifacts, and build-only dependencies
 - **Directory Structure:**
   - `/root/` - Default working directory
-  - `/usr/local/bin/ares-cli` - Compiled CLI binary
+  - `/usr/local/bin/ares` - Compiled Ares binary
 
 ---
 

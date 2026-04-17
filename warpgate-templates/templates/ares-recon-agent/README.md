@@ -104,7 +104,7 @@ warpgate validate ares-recon-agent
   - `ares_recon_tools` - nmap, netexec, impacket, bloodhound, certipy, rpcclient
 - **Rust Binary:**
   - Compiled from `feature/rust-cli` branch with PyO3 Python bindings
-  - Installed to `/usr/local/bin/ares-worker`
+  - Installed to `/usr/local/bin/ares`
 - **Installed Tools:**
   - **Network:** nmap, smbclient, ldap-utils, dnsutils, netcat
   - **AD Recon:** netexec, impacket, bloodhound-python, certipy
@@ -113,7 +113,7 @@ warpgate validate ares-recon-agent
   - `/ares/.venv/` - Python virtual environment
   - `/ares/agents/` - Agent storage directory
   - `/ares/data/` - Data storage directory
-  - `/usr/local/bin/ares-worker` - Compiled worker binary
+  - `/usr/local/bin/ares` - Compiled Ares binary
 - The build includes cleanup steps to remove temporary files, Ansible artifacts, and Rust build artifacts.
 
 ---
