@@ -16,8 +16,8 @@ pub(crate) use blue::BlueCommands;
 
 #[derive(Parser)]
 #[command(
-    name = "ares-cli",
-    about = "Ares red team orchestration CLI",
+    name = "ares",
+    about = "Ares red team orchestration system",
     version,
     propagate_version = true
 )]
@@ -76,4 +76,10 @@ pub(crate) enum Commands {
     /// Configuration management (single source of truth)
     #[command(subcommand)]
     Config(ConfigCommands),
+
+    /// Run the orchestrator (long-running service)
+    Orchestrator,
+
+    /// Run a worker (task executor)
+    Worker,
 }

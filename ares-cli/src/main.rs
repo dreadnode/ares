@@ -1,7 +1,7 @@
-//! Ares CLI — unified command-line interface for the Ares red team orchestration system.
+//! Ares — unified binary for the Ares red team orchestration system.
 //!
-//! Replaces the Python CLI scripts (cli_ops.py, cli_blue_ops.py, cli_history.py)
-//! with a single native binary. Pure Redis/Postgres client, no Python interop.
+//! Consolidates CLI, orchestrator, and worker into a single binary with
+//! subcommands: `ares ops`, `ares orchestrator`, `ares worker`, etc.
 
 #[cfg(feature = "blue")]
 mod blue;
@@ -11,9 +11,11 @@ mod dedup;
 mod detection;
 mod history;
 mod ops;
+mod orchestrator;
 mod redis_conn;
 mod secrets;
 mod util;
+mod worker;
 
 mod transport;
 
@@ -93,5 +95,7 @@ async fn run(cli: Cli) -> Result<()> {
         Commands::Blue(cmd) => blue::run_blue(cmd, cli.redis_url).await,
         Commands::History(cmd) => history::run_history(cmd).await,
         Commands::Config(cmd) => config::run_config(cmd),
+        Commands::Orchestrator => orchestrator::run().await,
+        Commands::Worker => worker::run().await,
     }
 }

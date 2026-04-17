@@ -112,15 +112,20 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "ares-core",
+ "ares-llm",
+ "ares-tools",
+ "async-trait",
  "chrono",
  "clap",
  "dotenvy",
  "redis",
  "regex",
+ "rstest",
  "serde",
  "serde_json",
  "serde_yaml",
  "sqlx",
+ "thiserror 2.0.18",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -177,28 +182,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "ares-orchestrator"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "ares-core",
- "ares-llm",
- "ares-tools",
- "async-trait",
- "chrono",
- "redis",
- "regex",
- "rstest",
- "serde",
- "serde_json",
- "serde_yaml",
- "tokio",
- "tracing",
- "tracing-subscriber",
- "uuid",
-]
-
-[[package]]
 name = "ares-tools"
 version = "0.1.0"
 dependencies = [
@@ -216,27 +199,6 @@ dependencies = [
  "tempfile",
  "tokio",
  "tracing",
- "uuid",
-]
-
-[[package]]
-name = "ares-worker"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "ares-core",
- "ares-llm",
- "ares-tools",
- "async-trait",
- "chrono",
- "redis",
- "serde",
- "serde_json",
- "serde_yaml",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
- "tracing-subscriber",
  "uuid",
 ]
 

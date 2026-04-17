@@ -4,7 +4,7 @@ version: "3"
 
 vars:
   # Rust CLI binary path (passed from parent Taskfile)
-  ARES_CLI: '{{.ARES_CLI | default "./target/release/ares-cli"}}'
+  ARES_CLI: '{{.ARES_CLI | default "./target/release/ares"}}'
   # AWS defaults for Grafana access
   PROFILE: '{{.PROFILE | default "infrastructure"}}'
   REGION: '{{.REGION | default "us-west-2"}}'

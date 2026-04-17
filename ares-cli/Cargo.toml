@@ -2,29 +2,41 @@
 name = "ares-cli"
 version = "0.1.0"
 edition = "2021"
-description = "CLI for the Ares red team orchestration system"
+description = "Unified binary for the Ares red team orchestration system"
 
 [[bin]]
-name = "ares-cli"
+name = "ares"
 path = "src/main.rs"
 
 [features]
 default = ["blue"]
-blue = ["ares-core/blue"]
+blue = ["ares-core/blue", "ares-llm/blue", "ares-tools/blue"]
 
 [dependencies]
 ares-core = { path = "../ares-core", features = ["telemetry"] }
+ares-llm = { path = "../ares-llm" }
+ares-tools = { path = "../ares-tools" }
 serde = { workspace = true }
 serde_json = { workspace = true }
+serde_yaml = { workspace = true }
 tokio = { workspace = true }
 redis = { workspace = true }
 chrono = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 clap = { workspace = true }
-serde_yaml = { workspace = true }
 anyhow = { workspace = true }
 uuid = { workspace = true }
 sqlx = { workspace = true }
 regex = { workspace = true }
 dotenvy = "0.15"
+async-trait = "0.1"
+thiserror = { workspace = true }
+
+[build-dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_yaml = "0.9"
+
+[dev-dependencies]
+tokio = { workspace = true }
+rstest = "0.26"

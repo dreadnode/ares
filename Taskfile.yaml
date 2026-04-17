@@ -84,7 +84,7 @@ vars:
   # Config file (single source of truth for model assignments)
   ARES_CONFIG: '{{.ARES_CONFIG | default "./config/ares.yaml"}}'
   # Rust CLI binary
-  ARES_CLI: '{{.ARES_CLI | default "./target/release/ares-cli"}}'
+  ARES_CLI: '{{.ARES_CLI | default "./target/release/ares"}}'
   # Infrastructure
   K8S_NAMESPACE: '{{.K8S_NAMESPACE | default "attack-simulation"}}'
   TARGET_PROFILE: '{{.TARGET_PROFILE | default "lab"}}'
@@ -237,7 +237,7 @@ tasks:
         echo ""
         echo "Environment:"
         echo "  Rust: $(rustc --version 2>/dev/null || echo 'not installed')"
-        echo "  ares-cli: $({{.ARES_CLI}} --version 2>/dev/null || echo 'not built — run task rust:release')"
+        echo "  ares: $({{.ARES_CLI}} --version 2>/dev/null || echo 'not built — run task rust:release')"
         echo ""
         echo "Configuration:"
         echo "  Platform: {{.DREADNODE_SERVER_URL}}"

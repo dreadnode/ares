@@ -1,8 +1,8 @@
-//! K8s and EC2 transport: re-exec ares-cli commands via kubectl or SSM.
+//! K8s and EC2 transport: re-exec ares commands via kubectl or SSM.
 //!
 //! When `--k8s <namespace>` is passed, this module strips the transport flags
 //! from argv and re-runs the command on the target pod. This eliminates ~25
-//! boilerplate Taskfile wrappers that just do `kubectl exec ... ares-cli ...`.
+//! boilerplate Taskfile wrappers that just do `kubectl exec ... ares ...`.
 //!
 //! When `--ec2 <name>` is passed, this module resolves the EC2 instance by
 //! Name tag and executes via AWS SSM send-command, polling for results.
@@ -167,7 +167,7 @@ pub(crate) fn maybe_exec_k8s() -> Option<i32> {
         "--",
         "env",
         "RUST_LOG=error",
-        "ares-cli",
+        "ares",
     ]);
     cmd.args(&inner_args);
 
@@ -393,7 +393,7 @@ pub(crate) fn maybe_exec_ec2() -> Option<i32> {
         }
     };
 
-    let cli_cmd = format!("RUST_LOG=error ares-cli {}", shell_join(&inner_args));
+    let cli_cmd = format!("RUST_LOG=error ares {}", shell_join(&inner_args));
 
     let cmd_id = match ssm_send_command(&instance_id, &cli_cmd, &profile, &region) {
         Ok(id) => id,

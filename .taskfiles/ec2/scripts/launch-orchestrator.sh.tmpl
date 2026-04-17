@@ -29,7 +29,7 @@ export OTEL_EXPORTER_OTLP_TRACES_ENDPOINT='__OTEL_TRACES_ENDPOINT__'
 export OTEL_EXPORTER_OTLP_PROTOCOL='http/protobuf'
 export OTEL_EXPORTER_OTLP_HEADERS='X-Api-Key=__DREADNODE_API_KEY__'
 export OTEL_RESOURCE_ATTRIBUTES='deployment.environment=staging,attack.team=red'
-pkill -f ares-orchestrator 2>/dev/null || true
+pkill -f 'ares orchestrator' 2>/dev/null || true
 sleep 1
-nohup /usr/local/bin/ares-orchestrator >/var/log/ares/orchestrator.log 2>&1 &
+nohup /usr/local/bin/ares orchestrator >/var/log/ares/orchestrator.log 2>&1 &
 echo "Orchestrator started (PID: $!)"

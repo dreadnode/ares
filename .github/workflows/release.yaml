@@ -72,7 +72,7 @@ jobs:
         shell: bash
         run: |
           TAG="${GITHUB_REF#refs/tags/}"
-          BINS=("ares-cli" "ares-orchestrator" "ares-worker")
+          BINS=("ares")
 
           for bin in "${BINS[@]}"; do
             ARCHIVE="${bin}-${TAG}-${{ matrix.target }}"

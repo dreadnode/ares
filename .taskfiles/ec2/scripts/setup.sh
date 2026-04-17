@@ -30,7 +30,7 @@ Wants=redis.service
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/ares-worker
+ExecStart=/usr/local/bin/ares worker
 EnvironmentFile=-/etc/ares/env
 Environment=ARES_REDIS_URL=redis://127.0.0.1:6379
 Environment=ARES_WORKER_ROLE=%i

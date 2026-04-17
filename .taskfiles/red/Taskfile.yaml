@@ -9,7 +9,7 @@ shopt: [globstar]
 
 vars:
   # Rust CLI binary path (passed from parent Taskfile)
-  ARES_CLI: '{{.ARES_CLI | default "./target/release/ares-cli"}}'
+  ARES_CLI: '{{.ARES_CLI | default "./target/release/ares"}}'
   # Remote paths (local to this taskfile)
   REMOTE_REPORT_DIR: '{{.REMOTE_REPORT_DIR | default "/reports"}}'
 
