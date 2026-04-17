@@ -20,7 +20,9 @@ use super::callbacks::BlueCallbackHandler;
 // ---------------------------------------------------------------------------
 
 /// Timeout for individual blue tool executions (e.g. Loki/Grafana queries).
-const BLUE_TOOL_TIMEOUT_SECS: u64 = 120;
+/// `execute_parallel_queries` runs up to 5 queries (2 concurrent), each with
+/// a 90s HTTP timeout and up to 2 retries — worst-case ~540s.  Give headroom.
+const BLUE_TOOL_TIMEOUT_SECS: u64 = 600;
 
 /// Wraps an existing (red-team) dispatcher and intercepts blue tool names,
 /// routing them to `ares_tools::blue::dispatch_blue()` for local execution.

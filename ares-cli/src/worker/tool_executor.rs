@@ -445,7 +445,7 @@ mod tests {
 
     #[test]
     fn redis_key_prefixes_match_orchestrator() {
-        // These must match tool_dispatcher.rs in ares-orchestrator
+        // These must match crate::orchestrator::tool_dispatcher
         assert_eq!(TOOL_EXEC_PREFIX, "ares:tool_exec");
         assert_eq!(TOOL_RESULT_PREFIX, "ares:tool_results");
     }
