@@ -595,7 +595,7 @@ async fn run_inner() -> Result<()> {
                 }
             }
 
-            // Poll for remote stop signal from `ares-cli ops stop`
+            // Poll for remote stop signal from `ares ops stop`
             _ = stop_check.tick() => {
                 let mut conn = queue.connection();
                 match ares_core::state::is_stop_requested(&mut conn, &config.operation_id).await {

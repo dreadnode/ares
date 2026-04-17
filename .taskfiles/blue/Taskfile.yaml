@@ -114,7 +114,7 @@ tasks:
           ANTHROPIC_API_KEY="{{.ANTHROPIC_API_KEY}}" \
           GRAFANA_SERVICE_ACCOUNT_TOKEN="{{.GRAFANA_SERVICE_ACCOUNT_TOKEN}}" \
           GRAFANA_URL="{{.GRAFANA_URL}}" \
-          ares-cli blue from-operation $OP_ARGS \
+          ares blue from-operation $OP_ARGS \
           $MODEL_FLAG \
           --max-steps {{.MAX_STEPS_BLUE_ONCE}} \
           --grafana-url "{{.GRAFANA_URL}}"
@@ -308,7 +308,7 @@ tasks:
           ANTHROPIC_API_KEY="{{.ANTHROPIC_API_KEY}}" \
           GRAFANA_SERVICE_ACCOUNT_TOKEN="{{.GRAFANA_SERVICE_ACCOUNT_TOKEN}}" \
           GRAFANA_URL="{{.GRAFANA_URL}}" \
-          ares-cli blue submit "$(cat {{.ALERT}})" \
+          ares blue submit "$(cat {{.ALERT}})" \
           $INV_ID_ARG \
           $MODEL_FLAG \
           --max-steps {{.MAX_STEPS_BLUE}} \
@@ -348,7 +348,7 @@ tasks:
           ANTHROPIC_API_KEY="{{.ANTHROPIC_API_KEY}}" \
           GRAFANA_SERVICE_ACCOUNT_TOKEN="{{.GRAFANA_SERVICE_ACCOUNT_TOKEN}}" \
           GRAFANA_URL="{{.GRAFANA_URL}}" \
-          ares-cli blue from-operation $OP_ARGS \
+          ares blue from-operation $OP_ARGS \
           $MODEL_FLAG \
           --max-steps {{.MAX_STEPS_BLUE}} \
           --grafana-url "{{.GRAFANA_URL}}"

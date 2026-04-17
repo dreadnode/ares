@@ -185,14 +185,14 @@ tasks:
     silent: true
     cmds:
       - cargo build
-      - echo "Debug binary built at target/debug/ares-cli"
+      - echo "Debug binary built at target/debug/ares"
 
   rust:release:
     desc: Build the Rust CLI binary (release)
     silent: true
     cmds:
       - cargo build --release
-      - echo "Release binary built at target/release/ares-cli"
+      - echo "Release binary built at target/release/ares"
 
   rust:test:
     desc: Run Rust tests

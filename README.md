@@ -29,24 +29,24 @@ LLM-coordinated autonomous security operations platform with two modes:
 
 ## Architecture
 
-Ares is a Rust workspace with six crates:
+Ares is a Rust workspace that compiles to a single `ares` binary with
+subcommands (`ares ops`, `ares orchestrator`, `ares worker`, `ares blue`,
+`ares history`, `ares config`):
 
-| Crate               | Binary              | Purpose                                                   |
-| ------------------- | ------------------- | --------------------------------------------------------- |
-| `ares-cli`          | `ares-cli`          | Unified CLI - ops, blue, history, config management       |
-| `ares-orchestrator` | `ares-orchestrator` | LLM-powered coordination loop, task dispatch, strategy    |
-| `ares-worker`       | `ares-worker`       | Task execution agents (one per role, K8s or EC2)          |
-| `ares-core`         | -                   | Shared models, state management, Redis schema, telemetry  |
-| `ares-llm`          | -                   | LLM providers (Anthropic, OpenAI, Ollama) + tool registry |
-| `ares-tools`        | -                   | Tool dispatch and execution framework                     |
+| Crate        | Purpose                                                   |
+| ------------ | --------------------------------------------------------- |
+| `ares-cli`   | Unified binary — CLI, orchestrator, and worker            |
+| `ares-core`  | Shared models, state management, Redis schema, telemetry  |
+| `ares-llm`   | LLM providers (Anthropic, OpenAI, Ollama) + tool registry |
+| `ares-tools` | Tool dispatch and execution framework                     |
 
 ### Red Team Multi-Agent System
 
 ```
 Local (this machine)              Remote (K8s or EC2)
 ────────────────────              ───────────────────
-ares-cli --k8s / --ec2    →      ares-orchestrator (LLM coordination loop)
-  or `task` commands              ares-worker x7 (recon, credential_access,
+ares --k8s / --ec2        →      ares orchestrator (LLM coordination loop)
+  or `task` commands              ares worker x7 (recon, credential_access,
                                     cracker, acl, privesc, lateral, coercion)
                                   Redis (state store + message broker)
 ```
@@ -70,8 +70,8 @@ results back. The orchestrator never executes exploitation tools directly.
 ```
 Local (this machine)              Remote (K8s or EC2)
 ────────────────────              ───────────────────
-ares-cli --k8s / --ec2    →      ares-orchestrator (investigation coordination)
-  or `task` commands              ares-worker x4 (triage, threat_hunter,
+ares --k8s / --ec2        →      ares orchestrator (investigation coordination)
+  or `task` commands              ares worker x4 (triage, threat_hunter,
                                     lateral_analyst, escalation_triage)
                                   Redis (state store + message broker)
                                   Grafana (Loki logs + Prometheus metrics)
@@ -109,7 +109,7 @@ task rust:build          # debug build
 task rust:release        # release build (recommended)
 
 # Verify
-./target/release/ares-cli --help
+./target/release/ares --help
 ```
 
 **Configure:**
@@ -128,22 +128,22 @@ task ares:config:check
 
 ## CLI Reference
 
-The `ares-cli` binary is the unified interface for all operations. It supports
+The `ares` binary is the unified interface for all operations. It supports
 transparent remote execution via transport flags.
 
 ### Transport Flags
 
 ```bash
 # K8s: execute on orchestrator pod via kubectl
-ares-cli --k8s ares-red ops loot --latest
-ares-cli --k8s ares-blue blue status --latest
+ares --k8s ares-red ops loot --latest
+ares --k8s ares-blue blue status --latest
 
 # EC2: execute on instance via AWS SSM
-ares-cli --ec2 kali-ares ops loot --latest
+ares --ec2 kali-ares ops loot --latest
 
 # Override defaults
-ares-cli --k8s ares-red --k8s-deploy ares-orchestrator ops list
-ares-cli --ec2 kali-ares --ec2-profile prod --ec2-region us-east-1 ops list
+ares --k8s ares-red --k8s-deploy ares-orchestrator ops list
+ares --ec2 kali-ares --ec2-profile prod --ec2-region us-east-1 ops list
 ```
 
 | Flag                      | Default     | Description                                    |
@@ -226,7 +226,7 @@ ares-cli --ec2 kali-ares --ec2-profile prod --ec2-region us-east-1 ops list
 task red:multi TARGET=dreadgoad DOMAIN=sevenkingdoms.local
 
 # Via CLI directly
-ares-cli ops submit dreadgoad sevenkingdoms.local \
+ares ops submit dreadgoad sevenkingdoms.local \
   --ips 192.168.58.10,192.168.58.11 \
   --model gpt-5.2 --follow
 
@@ -237,35 +237,35 @@ task ec2:launch DOMAIN=sevenkingdoms.local TARGETS=192.168.58.10,192.168.58.11
 ### Monitor
 
 ```bash
-ares-cli --k8s ares-red ops status --latest
-ares-cli --k8s ares-red ops loot --latest --watch 10
-ares-cli --k8s ares-red ops tasks --latest --status failed
-ares-cli --k8s ares-red ops runtime --latest
+ares --k8s ares-red ops status --latest
+ares --k8s ares-red ops loot --latest --watch 10
+ares --k8s ares-red ops tasks --latest --status failed
+ares --k8s ares-red ops runtime --latest
 task remote:logs ROLE=orchestrator
 ```
 
 ### Inject State (Unblock Stuck Operations)
 
 ```bash
-ares-cli --k8s ares-red ops inject-credential op-xxx administrator P@ssw0rd \
+ares --k8s ares-red ops inject-credential op-xxx administrator P@ssw0rd \
   --domain contoso.local
 
-ares-cli --k8s ares-red ops inject-hash op-xxx krbtgt \
+ares --k8s ares-red ops inject-hash op-xxx krbtgt \
   "aad3b435b51404eeaad3b435b51404ee:313b6f423a..." \
   --domain sevenkingdoms.local --aes-key "f8b6c5e4d3a2b109..."
 
-ares-cli --k8s ares-red ops inject-host op-xxx 192.168.58.20 dc01.essos.local
+ares --k8s ares-red ops inject-host op-xxx 192.168.58.20 dc01.essos.local
 
-ares-cli --k8s ares-red ops inject-domain-sid op-xxx \
+ares --k8s ares-red ops inject-domain-sid op-xxx \
   --domain north.sevenkingdoms.local --sid "S-1-5-21-..."
 ```
 
 ### Reports
 
 ```bash
-ares-cli --k8s ares-red ops report --latest
-ares-cli --k8s ares-red ops report --latest --regenerate
-ares-cli --k8s ares-red ops export-detection --latest
+ares --k8s ares-red ops report --latest
+ares --k8s ares-red ops report --latest --regenerate
+ares --k8s ares-red ops export-detection --latest
 ```
 
 ### Operation Phases
@@ -344,12 +344,10 @@ See [Blue Team Documentation](docs/blue.md) for full command reference.
 ### Repository Layout
 
 ```text
-ares-cli/                         # CLI binary crate
+ares-cli/                         # Unified binary (CLI + orchestrator + worker)
 ares-core/                        # Shared library (models, state, telemetry)
 ares-llm/                         # LLM provider abstraction
-ares-orchestrator/                # Orchestrator binary crate
 ares-tools/                       # Tool dispatch framework
-ares-worker/                      # Worker binary crate
 
 config/                           # Configuration files
   ares.yaml                       # Master config (models, timeouts, capabilities)
@@ -446,10 +444,10 @@ The master config lives at `config/ares.yaml`. It defines:
 - Recovery and context management settings
 
 ```bash
-ares-cli config show --models              # show model assignments
-ares-cli config set-model orchestrator gpt-5.2
-ares-cli config set-model --all gpt-5.2
-ares-cli config validate
+ares config show --models              # show model assignments
+ares config set-model orchestrator gpt-5.2
+ares config set-model --all gpt-5.2
+ares config validate
 ```
 
 ### Environment Variables

@@ -242,7 +242,7 @@ pub(crate) async fn blue_from_operation(
     info!("Investigation submitted: {inv_id}");
     println!("Investigation submitted: {inv_id} (from operation {op_id})");
     println!("Status: submitted");
-    println!("\nTrack progress with: ares-cli blue operation-status {op_id}");
+    println!("\nTrack progress with: ares blue operation-status {op_id}");
 
     Ok(())
 }

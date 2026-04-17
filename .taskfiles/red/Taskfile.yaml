@@ -81,7 +81,7 @@ tasks:
             ARES_CONFIG="/etc/ares/config.yaml" \
             ARES_MULTI_FOREST_MODE=false \
             GRAFANA_URL="{{.GRAFANA_URL}}" \
-            ares-cli --redis-url "{{.REDIS_URL}}" ops submit \
+            ares --redis-url "{{.REDIS_URL}}" ops submit \
             "{{.TARGET}}" "{{.DOMAIN}}" \
             --resolve-targets \
             --aws-profile "{{.TARGET_PROFILE}}" \
@@ -181,7 +181,7 @@ tasks:
         ignore_error: true
 
   # ===========================================================================
-  # K8s CLI wrappers — run ares-cli on the orchestrator pod
+  # K8s CLI wrappers — run ares on the orchestrator pod
   # ===========================================================================
 
   multi:loot:
@@ -929,7 +929,7 @@ tasks:
       # 2. Clear Redis (no longer rescales orchestrator)
       - cmd: echo "=== CLEARING REDIS CACHE ==="
       - task: multi:redis:clear
-      # 3. Patch orchestrator wrapper to use ares-cli instead of redis-cli
+      # 3. Patch orchestrator wrapper to use ares instead of redis-cli
       - cmd: echo "=== PATCHING ORCHESTRATOR WRAPPER ==="
       - task: :remote:orchestrator:patch-wrapper
       # 4. Rollout pods (fresh containers)

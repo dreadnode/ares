@@ -5,7 +5,7 @@
 # Rust tool function names to their binary, category, and role.
 #
 # Two build scripts consume this file:
-#   - ares-worker/build.rs  → tools_for_role() binary availability check
+#   - ares-cli/build.rs     → tools_for_role() binary availability check
 #   - ares-core/build.rs    → tool_meta() telemetry/OTel span enrichment
 #
 # When Ansible provisioning changes, update THIS file — the generated

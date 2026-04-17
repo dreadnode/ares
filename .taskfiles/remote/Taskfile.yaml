@@ -905,7 +905,7 @@ tasks:
         EOF
 
   orchestrator:patch-wrapper:
-    desc: "Patch the red orchestrator deployment wrapper to use ares-cli instead of redis-cli"
+    desc: "Patch the red orchestrator deployment wrapper to use ares instead of redis-cli"
     silent: true
     cmds:
       - |

@@ -56,12 +56,12 @@ ansible/                            Ansible collection (dreadnode.nimbus_range v
     merge_list_dicts_into_list.py   Data transformation utility
 
 warpgate-templates/                 Container image build templates
-  ares-python-base/                  Base: Kali + Ansible base role + security tools
-  ares-python-orchestrator/          Orchestrator: Rust binary + Redis client
-  ares-python-worker/                Generic worker (inherits ares-python-base)
-  ares-python-{recon,credential-access,cracker,acl,privesc,lateral-movement,coercion}-agent/
-  ares-python-cracker-{agent-gpu,base-gpu}/
-  ares-python-blue-{agent,triage-agent,threat-hunter-agent,lateral-analyst-agent}/
+  ares-base/                        Base: Kali + Ansible base role + security tools
+  ares-orchestrator/                Orchestrator: unified Ares binary + Redis client
+  ares-worker/                      Generic worker (inherits ares-base)
+  ares-{recon,credential-access,cracker,acl,privesc,lateral-movement,coercion}-agent/
+  ares-cracker-{agent-gpu,base-gpu}/
+  ares-blue-{agent,triage-agent,threat-hunter-agent,lateral-analyst-agent}/
   ares-golden-image/                All-in-one red team EC2 AMI (all tools)
 ```
 
@@ -93,7 +93,7 @@ nvidia/cuda:12.6.0-runtime-ubuntu24.04
         └── ares-python-cracker-agent-gpu (+john, wordlists)
 
 debian:bookworm-slim
-  └── ares-python-orchestrator (Rust binary, no Ansible)
+  └── ares-orchestrator (unified `ares` binary, no Ansible)
 
 kalilinux/kali-rolling (AMI)
   └── ares-golden-image (all red team tools in one EC2 AMI)
@@ -168,7 +168,7 @@ GPU templates (`ares-python-cracker-agent-gpu`, `ares-python-cracker-base-gpu`) 
 
 The `tools.yaml` file at the repo root is the single source of truth for
 which binaries are expected per role. The build scripts
-(`ares-worker/build.rs`, `ares-core/build.rs`) validate against it.
+(`ares-cli/build.rs`, `ares-core/build.rs`) validate against it.
 
 ## Ansible Collection Details
 
@@ -231,7 +231,8 @@ kubectl run ares-orchestrator \
   --image=ghcr.io/dreadnode/ares-python-orchestrator:latest \
   -it --rm \
   --env="REDIS_URL=redis://redis:6379" \
-  --env="ANTHROPIC_API_KEY=$ANTHROPIC_API_KEY"
+  --env="ANTHROPIC_API_KEY=$ANTHROPIC_API_KEY" \
+  -- ares orchestrator
 
 # Worker deployment (long-running)
 kubectl create deployment ares-recon \
@@ -247,15 +248,18 @@ services:
     ports: ["6379:6379"]
 
   orchestrator:
-    image: ghcr.io/dreadnode/ares-python-orchestrator:latest
+    image: ghcr.io/dreadnode/ares-orchestrator:latest
+    command: ["ares", "orchestrator"]
     environment:
       REDIS_URL: redis://redis:6379
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
     depends_on: [redis]
 
   recon-worker:
-    image: ghcr.io/dreadnode/ares-python-recon-agent:latest
+    image: ghcr.io/dreadnode/ares-recon-agent:latest
+    command: ["ares", "worker"]
     environment:
       REDIS_URL: redis://redis:6379
+      ARES_WORKER_ROLE: recon
     depends_on: [redis]
 ```

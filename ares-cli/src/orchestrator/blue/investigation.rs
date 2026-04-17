@@ -72,7 +72,7 @@ pub async fn run_investigation(
     );
 
     // Load investigation env vars from Redis and inject into process environment.
-    // These are set by `ares-cli blue from-operation` and include GRAFANA_URL,
+    // These are set by `ares blue from-operation` and include GRAFANA_URL,
     // GRAFANA_SERVICE_ACCOUNT_TOKEN, etc. needed by blue tools (e.g. Loki queries
     // routed through Grafana's datasource proxy).
     let env_key = format!("ares:blue:inv:{}:env_vars", investigation.investigation_id);

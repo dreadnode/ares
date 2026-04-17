@@ -25,7 +25,7 @@ findings to MITRE ATT&CK, and writes investigation reports.
 
 #### Investigation Orchestrator
 
-**Location:** `ares-orchestrator/src/blue/`
+**Location:** `ares-cli/src/orchestrator/blue/`
 
 The investigation orchestrator manages the full investigation lifecycle:
 
@@ -38,7 +38,7 @@ The investigation orchestrator manages the full investigation lifecycle:
 
 #### Blue Worker Task Loop
 
-**Location:** `ares-worker/src/blue_task_loop.rs`
+**Location:** `ares-cli/src/worker/blue_task_loop.rs`
 
 Runs the worker-side investigation loop with:
 
@@ -595,8 +595,8 @@ Provides structured investigation workflows:
 
 | Component | Path |
 | ----------- | ------ |
-| Blue Orchestrator | `ares-orchestrator/src/blue/` |
-| Blue Worker Task Loop | `ares-worker/src/blue_task_loop.rs` |
+| Blue Orchestrator | `ares-cli/src/orchestrator/blue/` |
+| Blue Worker Task Loop | `ares-cli/src/worker/blue_task_loop.rs` |
 | Blue CLI Commands | `ares-cli/src/blue/` |
 | Core Models | `ares-core/src/models/` |
 | State Management | `ares-core/src/state/` |
@@ -638,7 +638,7 @@ blue_team:
   `GRAFANA_SERVICE_ACCOUNT_TOKEN`, `DREADNODE_API_KEY`
 - **Grafana MCP** configured (see [Grafana MCP Usage](grafana_mcp_usage.md))
 - **Redis** accessible (K8s in-cluster, or port-forwarded for local/EC2)
-- **ares-cli** binary built (`cargo build --release`)
+- **ares** binary built (`cargo build --release`)
 
 ### Quick Start
 
@@ -758,39 +758,39 @@ task blue:multi:cleanup ALL=true DRY_RUN=true  # preview before deleting
 ### Direct CLI Commands
 
 For environments without Taskfile, or when you need more control, use
-`ares-cli` directly. Add `--k8s <NAMESPACE>` for K8s or `--ec2 <NAME>` for
+`ares` directly. Add `--k8s <NAMESPACE>` for K8s or `--ec2 <NAME>` for
 EC2 transport.
 
 ```bash
 # Submit from red team operation alerts
-ares-cli blue from-operation --latest
-ares-cli --k8s attack-simulation blue from-operation op-xxx
+ares blue from-operation --latest
+ares --k8s attack-simulation blue from-operation op-xxx
 
 # Submit a single alert
-ares-cli blue submit '{"alert_title":"Suspicious LSASS","severity":"high"}'
+ares blue submit '{"alert_title":"Suspicious LSASS","severity":"high"}'
 
 # Continuous poll mode
-ares-cli blue watch --poll-interval 30 --max-steps 50
+ares blue watch --poll-interval 30 --max-steps 50
 
 # Investigation status and results
-ares-cli blue list
-ares-cli blue status --latest
-ares-cli blue evidence --latest
-ares-cli blue evidence --latest --json
-ares-cli blue techniques --latest
-ares-cli blue runtime --latest
-ares-cli blue triage-status --latest
-ares-cli blue operation-status --latest --watch 10
+ares blue list
+ares blue status --latest
+ares blue evidence --latest
+ares blue evidence --latest --json
+ares blue techniques --latest
+ares blue runtime --latest
+ares blue triage-status --latest
+ares blue operation-status --latest --watch 10
 
 # Report generation
-ares-cli blue report --latest --output-dir ./reports
-ares-cli blue report --operation-id op-xxx --regenerate
+ares blue report --latest --output-dir ./reports
+ares blue report --operation-id op-xxx --regenerate
 
 # Cleanup
-ares-cli blue delete inv-xxx --force
-ares-cli blue delete-operation op-xxx --force
-ares-cli blue cleanup --max-age-hours 24 --all --force
-ares-cli blue cleanup --dry-run
+ares blue delete inv-xxx --force
+ares blue delete-operation op-xxx --force
+ares blue cleanup --max-age-hours 24 --all --force
+ares blue cleanup --dry-run
 ```
 
 ### EC2 Deployment
@@ -802,7 +802,7 @@ When running on EC2 instead of K8s, port-forward Redis first:
 task ec2:redis:forward EC2_NAME=ares-tools
 
 # In another terminal, run blue commands with the forwarded Redis
-ARES_REDIS_URL=redis://localhost:16379 ares-cli blue from-operation --latest
+ARES_REDIS_URL=redis://localhost:16379 ares blue from-operation --latest
 ```
 
 ### Running Blue Alongside Red

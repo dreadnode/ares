@@ -90,7 +90,7 @@ tool assignments. For detailed responsibilities, see sections below.
 - **Pod selectors**: `config/ares.yaml`
 - **Tool assignments**: `config/ares.yaml` → per-agent `capabilities`
 - **Max steps defaults**: `config/ares.yaml` → per-agent `max_steps`
-- **Agent instructions**: `ares-orchestrator/src/` prompt templates
+- **Agent instructions**: `ares-cli/src/orchestrator/` prompt templates
 
 ### Model Selection
 
@@ -623,16 +623,16 @@ kubectl -n attack-simulation exec -it ares-recon-agent-0 -- \
 
 **Core Components**:
 
-- `ares-orchestrator/src/` - Main orchestrator coordination loop, task dispatch, LLM runner
-- `ares-orchestrator/src/dispatcher/` - Task routing, throttling, and state management
-- `ares-orchestrator/src/state/` - Operation state management
-- `ares-orchestrator/src/config.rs` - Orchestrator configuration
-- `ares-worker/src/` - Worker agent task loop, tool execution
+- `ares-cli/src/orchestrator/` - Main orchestrator coordination loop, task dispatch, LLM runner
+- `ares-cli/src/orchestrator/dispatcher/` - Task routing, throttling, and state management
+- `ares-cli/src/orchestrator/state/` - Operation state management
+- `ares-cli/src/orchestrator/config.rs` - Orchestrator configuration
+- `ares-cli/src/worker/` - Worker agent task loop, tool execution
 - `ares-core/src/` - Shared models, state, Redis schema, telemetry
 
 **CLI**:
 
-- `ares-cli/src/cli.rs` - CLI command definitions
+- `ares-cli/src/cli/` - CLI command definitions
 - `ares-cli/src/ops/` - Red team operation commands
 - `ares-cli/src/blue/` - Blue team investigation commands
 - `ares-cli/src/transport.rs` - K8s/EC2 transport layer
@@ -650,7 +650,7 @@ availability can vary by distro and role flags.
 
 All agents inherit these foundational tools:
 
-- **Runtime**: Rust binaries (ares-worker), python3, pip3
+- **Runtime**: Rust binary (`ares worker`), python3, pip3
 - **Utilities**: git, curl, wget, netcat-traditional, vim, jq, tmux, htop
 - **Network diagnostics**: dnsutils (dig, nslookup), net-tools, iproute2, tcpdump, telnet
 - **Debugging**: procps (ps, top), strace, lsof
@@ -658,7 +658,7 @@ All agents inherit these foundational tools:
 
 ### Orchestrator Service Pod
 
-- **Runtime**: Rust binary (ares-orchestrator)
+- **Runtime**: Rust binary (`ares orchestrator`)
 - **Redis client**: For dispatcher and state management
 - **No pentesting tools**: Orchestrator only coordinates, never executes tools directly
 

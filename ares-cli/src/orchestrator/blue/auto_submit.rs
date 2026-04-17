@@ -169,7 +169,7 @@ async fn submit_investigation(
     let grafana_url = std::env::var("GRAFANA_URL").ok();
     let grafana_token = std::env::var("GRAFANA_SERVICE_ACCOUNT_TOKEN").ok();
 
-    // Build synthetic alert (mirrors ares-cli blue from-operation)
+    // Build synthetic alert (mirrors `ares blue from-operation`)
     let operation_context = serde_json::json!({
         "operation_id": op_id,
         "attack_window_start": now.to_rfc3339(),
