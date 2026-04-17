@@ -79,7 +79,7 @@ tasks:
             DREADNODE_WORKSPACE="{{.DREADNODE_WORKSPACE}}" \
             DREADNODE_PROJECT="{{.DREADNODE_PROJECT}}" \
             ARES_CONFIG="/etc/ares/config.yaml" \
-            ARES_MULTI_FOREST_MODE=false \
+            ARES_MULTI_FOREST_MODE=true \
             GRAFANA_URL="{{.GRAFANA_URL}}" \
             ares --redis-url "{{.REDIS_URL}}" ops submit \
             "{{.TARGET}}" "{{.DOMAIN}}" \
@@ -554,6 +554,142 @@ tasks:
         {{if ne .ACCOUNT_NAME ""}}--account-name "{{.ACCOUNT_NAME}}"{{end}}
         {{if ne .DOMAIN ""}}--domain "{{.DOMAIN}}"{{end}}
         --details '{{.DETAILS}}'
+
+  multi:inject-trust:
+    desc: "Inject a trust relationship into operation shared state (usage: task red:multi:inject-trust OPERATION_ID=op-xxx DOMAIN=essos.local [TRUST_TYPE=forest] [DIRECTION=bidirectional] [FLAT_NAME=ESSOS])"
+    silent: true
+    vars:
+      OPERATION_ID: '{{.OPERATION_ID | default ""}}'
+      DOMAIN: '{{.DOMAIN | default ""}}'
+      TRUST_TYPE: '{{.TRUST_TYPE | default "forest"}}'
+      DIRECTION: '{{.DIRECTION | default "bidirectional"}}'
+      FLAT_NAME: '{{.FLAT_NAME | default ""}}'
+      SID_FILTERING: '{{.SID_FILTERING | default "false"}}'
+    preconditions:
+      - sh: test -n "{{.OPERATION_ID}}"
+        msg: "OPERATION_ID variable is required"
+      - sh: test -n "{{.DOMAIN}}"
+        msg: "DOMAIN variable is required"
+    cmds:
+      - >-
+        {{.ARES_CLI}} --k8s {{.K8S_NAMESPACE}} ops inject-trust
+        "{{.OPERATION_ID}}" "{{.DOMAIN}}"
+        --trust-type "{{.TRUST_TYPE}}"
+        --direction "{{.DIRECTION}}"
+        {{if ne .FLAT_NAME ""}}--flat-name "{{.FLAT_NAME}}"{{end}}
+        {{if eq .SID_FILTERING "true"}}--sid-filtering{{end}}
+
+  multi:inject-essos:
+    desc: "Inject essos.local forest state into a running operation (usage: task red:multi:inject-essos OPERATION_ID=op-xxx)"
+    silent: true
+    vars:
+      OPERATION_ID: '{{.OPERATION_ID | default ""}}'
+      # Resolve essos host IPs from AWS EC2 at runtime
+      MEEREEN_IP:
+        sh: |
+          aws ec2 describe-instances \
+            --profile "{{.TARGET_PROFILE}}" \
+            --region "{{.TARGET_REGION}}" \
+            --filters "Name=instance-state-name,Values=running" "Name=tag:Name,Values=*meereen*" \
+            --query "Reservations[*].Instances[*].PrivateIpAddress" \
+            --output text 2>/dev/null | head -1
+      BRAAVOS_IP:
+        sh: |
+          aws ec2 describe-instances \
+            --profile "{{.TARGET_PROFILE}}" \
+            --region "{{.TARGET_REGION}}" \
+            --filters "Name=instance-state-name,Values=running" "Name=tag:Name,Values=*braavos*" \
+            --query "Reservations[*].Instances[*].PrivateIpAddress" \
+            --output text 2>/dev/null | head -1
+    preconditions:
+      - sh: test -n "{{.OPERATION_ID}}"
+        msg: "OPERATION_ID variable is required"
+      - sh: test -n "{{.MEEREEN_IP}}"
+        msg: "Could not resolve meereen IP from AWS EC2 (profile={{.TARGET_PROFILE}}, region={{.TARGET_REGION}})"
+      - sh: test -n "{{.BRAAVOS_IP}}"
+        msg: "Could not resolve braavos IP from AWS EC2 (profile={{.TARGET_PROFILE}}, region={{.TARGET_REGION}})"
+    cmds:
+      - cmd: |
+          echo "Injecting essos.local forest state into operation {{.OPERATION_ID}}"
+          echo "  meereen DC: {{.MEEREEN_IP}}"
+          echo "  braavos:    {{.BRAAVOS_IP}}"
+          echo ""
+
+      # 1. Inject trust relationship (essos.local is a separate forest with bidirectional trust)
+      - task: multi:inject-trust
+        vars:
+          OPERATION_ID: "{{.OPERATION_ID}}"
+          DOMAIN: "essos.local"
+          TRUST_TYPE: "forest"
+          DIRECTION: "bidirectional"
+          FLAT_NAME: "ESSOS"
+          SID_FILTERING: "true"
+
+      # 2. Inject hosts
+      - task: multi:inject-host
+        vars:
+          OPERATION_ID: "{{.OPERATION_ID}}"
+          IP: "{{.MEEREEN_IP}}"
+          HOSTNAME: "meereen.essos.local"
+
+      - task: multi:inject-host
+        vars:
+          OPERATION_ID: "{{.OPERATION_ID}}"
+          IP: "{{.BRAAVOS_IP}}"
+          HOSTNAME: "braavos.essos.local"
+
+      # 3. Inject MSSQL vulnerability on braavos
+      - task: multi:inject-vulnerability
+        vars:
+          OPERATION_ID: "{{.OPERATION_ID}}"
+          VULN_TYPE: "mssql_access"
+          TARGET_IP: "{{.BRAAVOS_IP}}"
+          TARGET_HOSTNAME: "braavos.essos.local"
+          DOMAIN: "essos.local"
+          DETAILS: '{"service": "MSSQL", "port": "1433", "note": "MSSQL on braavos — check impersonation and linked servers to castelblack"}'
+
+      - cmd: |
+          echo ""
+          echo "Essos state injected. The orchestrator will now:"
+          echo "  - See essos.local as an undominated forest"
+          echo "  - Run AS-REP roast and Kerberoast against essos.local"
+          echo "  - Attempt trust key extraction and cross-forest exploitation"
+          echo ""
+          echo "Monitor: task red:multi:loot OPERATION_ID={{.OPERATION_ID}} WATCH=5"
+
+  multi:fast-essos:
+    desc: "Run a GOAD operation with essos.local forest targeting (usage: task red:multi:fast-essos [MODEL=gpt-5.2])"
+    silent: true
+    vars:
+      OPERATION_ID:
+        sh: echo "op-essos-$(date +%Y%m%d-%H%M%S)"
+    cmds:
+      # 1. Submit operation targeting all GOAD hosts
+      - task: multi
+        vars:
+          TARGET: "dreadgoad"
+          DOMAIN: "sevenkingdoms.local"
+          OPERATION_ID: "{{.OPERATION_ID}}"
+
+      # 2. Wait for operation to initialize in Redis
+      - cmd: |
+          echo ""
+          echo "Waiting 15s for operation {{.OPERATION_ID}} to initialize..."
+          sleep 15
+
+      # 3. Inject essos.local state
+      - task: multi:inject-essos
+        vars:
+          OPERATION_ID: "{{.OPERATION_ID}}"
+
+      - cmd: |
+          echo ""
+          echo "Fast-essos operation started: {{.OPERATION_ID}}"
+          echo "Targets: sevenkingdoms.local + essos.local (cross-forest)"
+          echo ""
+          echo "Monitor:"
+          echo "  task red:multi:loot OPERATION_ID={{.OPERATION_ID}} WATCH=5"
+          echo "  task red:multi:status"
 
   # ===========================================================================
   # Shell-based tasks (cannot be moved to Python)

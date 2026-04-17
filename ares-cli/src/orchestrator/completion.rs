@@ -174,11 +174,22 @@ pub async fn wait_for_completion(
                 // Config says stop immediately on DA — skip forest check
                 Some("domain admin achieved (stop_on_domain_admin)")
             } else if stop_on_gt {
-                // stop_on_golden_ticket: keep running until GT is forged.
-                // Do NOT fall through to the "all forests dominated" default
-                // path — that would exit without the golden ticket.
+                // stop_on_golden_ticket: keep running until GT is forged AND
+                // all cross-forest trusts are dominated.  Without the forest
+                // check the operation exits after the first GT (e.g.
+                // sevenkingdoms.local) while trusted forests like essos.local
+                // remain uncompromised.
                 if has_gt {
-                    Some("golden ticket forged (stop_on_golden_ticket)")
+                    let remaining = undominated_forests(state).await;
+                    if remaining.is_empty() {
+                        Some("golden ticket forged and all forests dominated")
+                    } else {
+                        debug!(
+                            undominated = ?remaining,
+                            "Golden ticket forged but forests remain undominated"
+                        );
+                        None // Continue — other forests still need krbtgt
+                    }
                 } else {
                     None // Continue — waiting for golden ticket
                 }
@@ -488,5 +499,116 @@ mod tests {
     #[test]
     fn test_forest_root_of_deep_child() {
         assert_eq!(forest_root_of("sub.north.contoso.local"), "contoso.local");
+    }
+
+    fn make_trust(domain: &str, trust_type: &str) -> ares_core::models::TrustInfo {
+        ares_core::models::TrustInfo {
+            domain: domain.to_string(),
+            flat_name: domain.split('.').next().unwrap_or(domain).to_uppercase(),
+            direction: "bidirectional".to_string(),
+            trust_type: trust_type.to_string(),
+            sid_filtering: false,
+        }
+    }
+
+    #[test]
+    fn test_undominated_single_domain_no_trusts() {
+        let trusted = std::collections::HashMap::new();
+        let mut dominated = HashSet::new();
+        // Target domain not yet dominated
+        let result = compute_undominated_forests(
+            Some("contoso.local"),
+            Some("contoso.local"),
+            &trusted,
+            &dominated,
+        );
+        assert_eq!(result, vec!["contoso.local"]);
+
+        // Now dominated
+        dominated.insert("contoso.local".to_string());
+        let result = compute_undominated_forests(
+            Some("contoso.local"),
+            Some("contoso.local"),
+            &trusted,
+            &dominated,
+        );
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_undominated_cross_forest_trust() {
+        let mut trusted = std::collections::HashMap::new();
+        trusted.insert(
+            "essos.local".to_string(),
+            make_trust("essos.local", "forest"),
+        );
+
+        // Only sevenkingdoms dominated — essos remains
+        let mut dominated = HashSet::new();
+        dominated.insert("sevenkingdoms.local".to_string());
+        let result = compute_undominated_forests(
+            Some("sevenkingdoms.local"),
+            Some("sevenkingdoms.local"),
+            &trusted,
+            &dominated,
+        );
+        assert_eq!(result, vec!["essos.local"]);
+    }
+
+    #[test]
+    fn test_undominated_all_forests_dominated() {
+        let mut trusted = std::collections::HashMap::new();
+        trusted.insert(
+            "essos.local".to_string(),
+            make_trust("essos.local", "forest"),
+        );
+
+        let mut dominated = HashSet::new();
+        dominated.insert("sevenkingdoms.local".to_string());
+        dominated.insert("essos.local".to_string());
+        let result = compute_undominated_forests(
+            Some("sevenkingdoms.local"),
+            Some("sevenkingdoms.local"),
+            &trusted,
+            &dominated,
+        );
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_undominated_child_domain_not_separate_forest() {
+        // parent_child trust should NOT add a separate required forest
+        let mut trusted = std::collections::HashMap::new();
+        trusted.insert(
+            "north.contoso.local".to_string(),
+            make_trust("north.contoso.local", "parent_child"),
+        );
+
+        let mut dominated = HashSet::new();
+        dominated.insert("contoso.local".to_string());
+        let result = compute_undominated_forests(
+            Some("contoso.local"),
+            Some("contoso.local"),
+            &trusted,
+            &dominated,
+        );
+        // parent_child is NOT cross-forest, so north.contoso.local is not required
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_undominated_child_domain_dominated_covers_forest() {
+        // Dominating north.contoso.local should cover the contoso.local forest root
+        let trusted = std::collections::HashMap::new();
+        let mut dominated = HashSet::new();
+        dominated.insert("north.contoso.local".to_string());
+        let result = compute_undominated_forests(
+            Some("contoso.local"),
+            Some("contoso.local"),
+            &trusted,
+            &dominated,
+        );
+        // forest_root_of("north.contoso.local") = "contoso.local" → matches target
+        assert!(result.is_empty());
     }
 }

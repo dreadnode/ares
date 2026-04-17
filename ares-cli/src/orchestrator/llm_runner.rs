@@ -155,7 +155,7 @@ fn build_system_prompt(role: AgentRole, snapshot: &StateSnapshot) -> Result<Stri
     let agent_instructions = templates::render_agent_instructions(
         template_name,
         &capabilities,
-        false,
+        !snapshot.undominated_forests.is_empty(),
         &snapshot.undominated_forests,
     )?;
 

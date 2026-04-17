@@ -171,6 +171,26 @@ pub(crate) enum OpsCommands {
         sid: String,
     },
 
+    /// Inject a trust relationship into an operation's shared state
+    InjectTrust {
+        /// Operation ID
+        operation_id: String,
+        /// Trusted domain FQDN (e.g., essos.local)
+        domain: String,
+        /// Trust type: parent_child, forest, external
+        #[arg(long, default_value = "forest")]
+        trust_type: String,
+        /// Trust direction: inbound, outbound, bidirectional
+        #[arg(long, default_value = "bidirectional")]
+        direction: String,
+        /// NetBIOS / flat name (e.g., ESSOS)
+        #[arg(long, default_value = "")]
+        flat_name: String,
+        /// Whether SID filtering is active
+        #[arg(long)]
+        sid_filtering: bool,
+    },
+
     /// Stop a running operation (signals graceful shutdown)
     Stop {
         /// Operation ID (omit to stop the latest running operation)
