@@ -106,6 +106,7 @@ fn http_client() -> &'static reqwest::Client {
             .and_then(|v| v.parse::<u64>().ok())
             .unwrap_or(90);
         reqwest::Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(10))
             .timeout(std::time::Duration::from_secs(timeout_secs))
             .build()
             .unwrap_or_default()
@@ -140,9 +141,9 @@ fn make_error(msg: &str) -> ToolOutput {
 }
 
 /// Max retry attempts for transient Loki failures.
-/// Keep low — each Loki query through the Grafana proxy can take 30-40s,
-/// so retries compound quickly against investigation timeouts.
-const MAX_RETRIES: u32 = 2;
+/// Loki queries through the Grafana proxy take 20-50s from EC2,
+/// so we allow 3 attempts to ride through transient proxy hiccups.
+const MAX_RETRIES: u32 = 3;
 
 /// Base backoff delay between retries.
 const RETRY_BASE_DELAY: std::time::Duration = std::time::Duration::from_secs(1);

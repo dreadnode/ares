@@ -16,13 +16,13 @@ use ares_llm::{LlmProvider, ToolDispatcher};
 
 use super::investigation::{self, Investigation};
 
-/// Timeout for a single investigation run (30 minutes).
+/// Timeout for a single investigation run (45 minutes).
 /// Loki queries via the Grafana proxy take 30-40s each from EC2,
 /// so the agent needs more headroom to complete triage + hunting.
-const INVESTIGATION_TIMEOUT_SECS: u64 = 1800;
+const INVESTIGATION_TIMEOUT_SECS: u64 = 2700;
 
-/// Threshold for considering a running investigation as stale (35 minutes).
-const STALE_INVESTIGATION_THRESHOLD_SECS: i64 = 2100;
+/// Threshold for considering a running investigation as stale (50 minutes).
+const STALE_INVESTIGATION_THRESHOLD_SECS: i64 = 3000;
 
 /// Interval between periodic stale investigation checks (5 minutes).
 const STALE_CHECK_INTERVAL_SECS: u64 = 300;
