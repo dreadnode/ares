@@ -228,6 +228,36 @@ fn s4u_template_has_exclude_patterns() {
 }
 
 #[test]
+fn dcsync_template_excludes_machine_accounts() {
+    let tmpl = build_detection_template("detect_dcsync", None).unwrap();
+    assert!(
+        tmpl.logql.contains("!~"),
+        "DCSync template should have exclusion filter for machine accounts"
+    );
+    assert!(
+        tmpl.logql.contains("SubjectUserName"),
+        "DCSync exclusion should filter on SubjectUserName"
+    );
+    assert!(
+        tmpl.logql.contains("[$]"),
+        "DCSync exclusion should match machine account $ suffix"
+    );
+}
+
+#[test]
+fn dcsync_replication_template_excludes_machine_accounts() {
+    let tmpl = build_detection_template("detect_dcsync_replication", None).unwrap();
+    assert!(
+        tmpl.logql.contains("!~"),
+        "DCSync replication template should have exclusion filter"
+    );
+    assert!(
+        tmpl.logql.contains("SubjectUserName"),
+        "DCSync replication exclusion should filter on SubjectUserName"
+    );
+}
+
+#[test]
 fn mssql_templates_exist_and_resolve() {
     let names = [
         "detect_mssql_linked_server",

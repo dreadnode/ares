@@ -101,16 +101,32 @@ When users are compromised via credential attacks, you MUST:
 Use these exact LogQL queries. They are optimized for the Loki pipeline and tested against live data. {% if deployment %}Replace `DEPLOYMENT` with `{{ deployment }}`.{% endif %}
 
 ### DCSync Detection (T1003.006) — Event 4662
+
+**Use TWO queries** — one to find attacker DCSync, one for full context:
+
+**Query 1 — Attacker DCSync ONLY (excludes machine accounts):**
+```
+{% if deployment %}{job="windows-security", deployment="{{ deployment }}"} |= "4662" |= "1131f6aa" !~ "SubjectUserName'>[A-Z0-9_-]+[$]"{% else %}{job="windows-security"} |= "4662" |= "1131f6aa" !~ "SubjectUserName'>[A-Z0-9_-]+[$]"{% endif %}
+```
+
+**Query 2 — ALL replication events (for context/timeline):**
 ```
 {% if deployment %}{job="windows-security", deployment="{{ deployment }}"} |= "4662" |= "1131f6aa"{% else %}{job="windows-security"} |= "4662" |= "1131f6aa"{% endif %}
 ```
-**CRITICAL: Distinguishing real DCSync from normal AD replication.**
-- Normal replication uses **machine accounts** (names ending in `$` like `DC01$`, `KINGSLANDING$`)
-- An attacker DCSync uses a **user account** (e.g., `administrator`, `carol.ng`, any non-`$` account)
-- In query results, check `SubjectUserName` — if it does NOT end in `$`, it is almost certainly an attack
-- Also look for `1131f6ad` (DS-Replication-Get-Changes-All) — both GUIDs together confirm DCSync
-- The replication GUID `1131f6aa-9c07-11d1-f79f-00c04fc2dcd2` = DS-Replication-Get-Changes
-- The replication GUID `1131f6ad-9c07-11d1-f79f-00c04fc2dcd2` = DS-Replication-Get-Changes-All
+
+**DCSync Attribution Decision Tree (MANDATORY):**
+1. Run Query 1 first. If it returns results → **CONFIRMED DCSync ATTACK** (confidence 0.9+)
+   - These are user accounts performing domain replication = always malicious
+   - Record as T1003.006, pyramid level 6 (TTP), severity CRITICAL
+2. If Query 1 returns empty but Query 2 returns results → **normal AD replication** (confidence 0.1)
+   - All replication is from machine accounts (e.g., `KINGSLANDING$`, `DC01$`) = legitimate DCs
+   - Do NOT report as DCSync. Record as "normal replication observed, no attack confirmed"
+3. If both queries return empty → no replication events in time window
+
+**How to tell machine accounts from user accounts in results:**
+- Machine accounts: `SubjectUserName` ends with `$` (e.g., `KINGSLANDING$`, `WINTERFELL$`, `GUARDIAN-APP$`)
+- User accounts: no `$` suffix (e.g., `administrator`, `samwell.tarly`, `jon.snow`)
+- GUIDs: `1131f6aa` = DS-Replication-Get-Changes, `1131f6ad` = DS-Replication-Get-Changes-All
 
 ### Kerberoasting Detection (T1558.003) — Event 4769
 ```
@@ -159,7 +175,7 @@ For a comprehensive hunt, batch these queries with `execute_parallel_queries`:
 ```json
 {
   "queries": [
-    {"logql": "<DCSync query>", "description": "DCSync (4662 + replication GUID)"},
+    {"logql": "<DCSync attacker-only query>", "description": "DCSync ATTACK (4662 + replication GUID, machine accounts excluded)"},
     {"logql": "<Kerberoasting query>", "description": "Kerberoasting (4769 + RC4)"},
     {"logql": "<Golden Ticket query>", "description": "Golden Ticket (krbtgt TGS)"},
     {"logql": "<Admin shares query>", "description": "Lateral movement (admin shares)"},
