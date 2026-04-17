@@ -83,7 +83,19 @@ impl WorkerConfig {
     pub fn from_env() -> anyhow::Result<Self> {
         let redis_url = env::var("ARES_REDIS_URL")
             .or_else(|_| env::var("REDIS_URL"))
-            .map_err(|_| anyhow::anyhow!("ARES_REDIS_URL (or REDIS_URL) is required"))?;
+            .or_else(|_| {
+                // Construct from individual components (K8s pods expose these)
+                let host = env::var("REDIS_HOST")?;
+                let port = env::var("REDIS_PORT").unwrap_or_else(|_| "6379".to_string());
+                let db = env::var("REDIS_DB").unwrap_or_else(|_| "0".to_string());
+                match env::var("REDIS_PASSWORD") {
+                    Ok(pass) => Ok(format!("redis://:{pass}@{host}:{port}/{db}")),
+                    Err(_) => Ok(format!("redis://{host}:{port}/{db}")),
+                }
+            })
+            .map_err(|_: env::VarError| {
+                anyhow::anyhow!("Redis URL required: set ARES_REDIS_URL, REDIS_URL, or REDIS_HOST")
+            })?;
 
         let worker_role = env::var("ARES_WORKER_ROLE")
             .or_else(|_| env::var("ARES_ROLE"))
