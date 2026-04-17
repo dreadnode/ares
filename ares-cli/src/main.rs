@@ -109,6 +109,6 @@ async fn run(cli: Cli) -> Result<()> {
         Commands::History(cmd) => history::run_history(cmd).await,
         Commands::Config(cmd) => config::run_config(cmd),
         Commands::Orchestrator => orchestrator::run().await,
-        Commands::Worker => worker::run().await,
+        Commands::Worker { .. } => worker::run().await,
     }
 }

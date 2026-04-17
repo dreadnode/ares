@@ -81,5 +81,13 @@ pub(crate) enum Commands {
     Orchestrator,
 
     /// Run a worker (task executor)
-    Worker,
+    Worker {
+        /// Legacy positional role argument (ignored; use ARES_WORKER_ROLE env var)
+        #[arg(hide = true)]
+        _role: Option<String>,
+
+        /// Accept and ignore legacy Python-style --worker-args.* flags
+        #[arg(long = "worker-args.redis-url", hide = true)]
+        _legacy_redis_url: Option<String>,
+    },
 }

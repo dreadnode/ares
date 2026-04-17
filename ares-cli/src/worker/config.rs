@@ -86,7 +86,8 @@ impl WorkerConfig {
             .map_err(|_| anyhow::anyhow!("ARES_REDIS_URL (or REDIS_URL) is required"))?;
 
         let worker_role = env::var("ARES_WORKER_ROLE")
-            .map_err(|_| anyhow::anyhow!("ARES_WORKER_ROLE is required"))?;
+            .or_else(|_| env::var("ARES_ROLE"))
+            .map_err(|_| anyhow::anyhow!("ARES_WORKER_ROLE (or ARES_ROLE) is required"))?;
 
         let pod_name = env::var("ARES_POD_NAME")
             .or_else(|_| env::var("HOSTNAME"))

@@ -84,8 +84,12 @@ impl OrchestratorConfig {
 
         // ARES_OPERATION_ID may be a plain operation-id string OR a full JSON
         // payload (the queue dispatcher passes the entire operation request JSON).
-        let (operation_id, target_domain, target_ips, json_cred) = if raw_op.starts_with('{') {
-            let v: serde_json::Value = serde_json::from_str(&raw_op)
+        // The value may also be prefixed with log/telemetry output from the
+        // wrapper script, so we search for the first `{` in the string.
+        let json_start = raw_op.find('{');
+        let (operation_id, target_domain, target_ips, json_cred) = if let Some(pos) = json_start {
+            let json_str = &raw_op[pos..];
+            let v: serde_json::Value = serde_json::from_str(json_str)
                 .map_err(|e| anyhow::anyhow!("Failed to parse ARES_OPERATION_ID JSON: {e}"))?;
             let op_id = v["operation_id"]
                 .as_str()
@@ -291,6 +295,14 @@ mod tests {
         // JSON payload → parsed operation_id, target_domain, target_ips
         let payload = r#"{"operation_id":"op-json-test","target_domain":"contoso.local","target_ips":["192.168.58.1","192.168.58.2"],"model":"gpt-4"}"#;
         std::env::set_var("ARES_OPERATION_ID", payload);
+        let c = OrchestratorConfig::from_env().unwrap();
+        assert_eq!(c.operation_id, "op-json-test");
+        assert_eq!(c.target_domain, "contoso.local");
+        assert_eq!(c.target_ips, vec!["192.168.58.1", "192.168.58.2"]);
+
+        // JSON payload prefixed with telemetry output (wrapper script noise)
+        let noisy = format!("2026-04-17T21:35:33Z INFO telemetry initialized\n{payload}");
+        std::env::set_var("ARES_OPERATION_ID", &noisy);
         let c = OrchestratorConfig::from_env().unwrap();
         assert_eq!(c.operation_id, "op-json-test");
         assert_eq!(c.target_domain, "contoso.local");
