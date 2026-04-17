@@ -104,7 +104,7 @@ fn http_client() -> &'static reqwest::Client {
         let timeout_secs = std::env::var("LOKI_TIMEOUT_SECS")
             .ok()
             .and_then(|v| v.parse::<u64>().ok())
-            .unwrap_or(30);
+            .unwrap_or(90);
         reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(timeout_secs))
             .build()

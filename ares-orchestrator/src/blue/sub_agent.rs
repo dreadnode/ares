@@ -20,7 +20,7 @@ use super::callbacks::BlueCallbackHandler;
 // ---------------------------------------------------------------------------
 
 /// Timeout for individual blue tool executions (e.g. Loki/Grafana queries).
-const BLUE_TOOL_TIMEOUT_SECS: u64 = 120;
+const BLUE_TOOL_TIMEOUT_SECS: u64 = 300;
 
 /// Wraps an existing (red-team) dispatcher and intercepts blue tool names,
 /// routing them to `ares_tools::blue::dispatch_blue()` for local execution.
