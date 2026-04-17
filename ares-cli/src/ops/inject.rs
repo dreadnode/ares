@@ -4,7 +4,7 @@ use anyhow::Result;
 use chrono::Utc;
 use tracing::info;
 
-use ares_core::models::{Credential, Hash, Host, VulnerabilityInfo};
+use ares_core::models::{Credential, Hash, Host, TrustInfo, VulnerabilityInfo};
 use ares_core::state::{self, RedisStateReader};
 
 use crate::redis_conn::connect_redis;
@@ -266,6 +266,53 @@ pub(crate) async fn ops_inject_domain_sid(
         .await
         .unwrap_or(0);
     info!("Injected domain SID: {domain} = {sid} ({n} subscribers notified)");
+
+    Ok(())
+}
+
+pub(crate) async fn ops_inject_trust(
+    redis_url: Option<String>,
+    operation_id: String,
+    domain: String,
+    trust_type: String,
+    direction: String,
+    flat_name: String,
+    sid_filtering: bool,
+) -> Result<()> {
+    let mut conn = connect_redis(redis_url).await?;
+    let reader = RedisStateReader::new(operation_id.clone());
+
+    if !reader.exists(&mut conn).await? {
+        anyhow::bail!("No state found for operation: {operation_id}");
+    }
+
+    // Derive flat_name from domain if not provided
+    let flat_name = if flat_name.is_empty() {
+        domain.split('.').next().unwrap_or(&domain).to_uppercase()
+    } else {
+        flat_name
+    };
+
+    let trust = TrustInfo {
+        domain: domain.clone(),
+        flat_name: flat_name.clone(),
+        direction,
+        trust_type: trust_type.clone(),
+        sid_filtering,
+    };
+
+    let added = reader.add_trusted_domain(&mut conn, &trust).await?;
+
+    if added {
+        let n = state::publish_state_update(&mut conn, &operation_id)
+            .await
+            .unwrap_or(0);
+        info!(
+            "Injected trust: {domain} (type={trust_type}, flat={flat_name}, {n} subscribers notified)"
+        );
+    } else {
+        info!("Trust already exists: {domain}");
+    }
 
     Ok(())
 }
