@@ -75,8 +75,9 @@ pub struct InitialCredential {
 impl OrchestratorConfig {
     /// Load configuration from environment variables with sensible defaults.
     pub fn from_env() -> anyhow::Result<Self> {
-        let redis_url =
-            env::var("ARES_REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379/0".to_string());
+        let redis_url = env::var("ARES_REDIS_URL")
+            .or_else(|_| env::var("REDIS_URL"))
+            .unwrap_or_else(|_| "redis://127.0.0.1:6379/0".to_string());
 
         let raw_op = env::var("ARES_OPERATION_ID")
             .map_err(|_| anyhow::anyhow!("ARES_OPERATION_ID is required"))?;

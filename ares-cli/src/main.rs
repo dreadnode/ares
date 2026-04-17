@@ -88,7 +88,12 @@ async fn main() {
     }
 
     // ── Normal CLI parsing (env vars are now populated) ──
-    let cli = Cli::parse();
+    let mut cli = Cli::parse();
+
+    // Fall back to REDIS_URL if ARES_REDIS_URL wasn't set (K8s pods expose REDIS_URL)
+    if cli.redis_url.is_none() {
+        cli.redis_url = std::env::var("REDIS_URL").ok();
+    }
 
     if let Err(e) = run(cli).await {
         error!("{e:#}");

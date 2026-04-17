@@ -684,8 +684,9 @@ async fn run_inner() -> Result<()> {
 async fn run_blue_only() -> Result<()> {
     info!("Running in BLUE-ONLY mode (no red team orchestrator)");
 
-    let redis_url =
-        std::env::var("ARES_REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379/0".to_string());
+    let redis_url = std::env::var("ARES_REDIS_URL")
+        .or_else(|_| std::env::var("REDIS_URL"))
+        .unwrap_or_else(|_| "redis://127.0.0.1:6379/0".to_string());
 
     // Load YAML config for observability URLs
     if let Ok(cfg) = ares_core::config::AresConfig::from_env() {

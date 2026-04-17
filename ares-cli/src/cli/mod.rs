@@ -25,7 +25,7 @@ pub(crate) struct Cli {
     #[command(subcommand)]
     pub command: Commands,
 
-    /// Redis URL (default: from ARES_REDIS_URL or redis://localhost:6379)
+    /// Redis URL (default: from ARES_REDIS_URL / REDIS_URL or redis://localhost:6379)
     #[arg(long, global = true, env = "ARES_REDIS_URL")]
     pub redis_url: Option<String>,
 

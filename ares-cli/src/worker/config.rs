@@ -82,7 +82,8 @@ impl WorkerConfig {
     /// - `ARES_POLL_TIMEOUT` — BLPOP timeout in seconds (default: 5)
     pub fn from_env() -> anyhow::Result<Self> {
         let redis_url = env::var("ARES_REDIS_URL")
-            .map_err(|_| anyhow::anyhow!("ARES_REDIS_URL is required"))?;
+            .or_else(|_| env::var("REDIS_URL"))
+            .map_err(|_| anyhow::anyhow!("ARES_REDIS_URL (or REDIS_URL) is required"))?;
 
         let worker_role = env::var("ARES_WORKER_ROLE")
             .map_err(|_| anyhow::anyhow!("ARES_WORKER_ROLE is required"))?;
