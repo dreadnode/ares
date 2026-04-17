@@ -156,7 +156,7 @@ tasks:
               "set -ex",
               "mkdir -p " + $build_dir,
               "aws s3 cp s3://" + $bucket + "/" + $prefix + "/ares-src.tar.gz /tmp/ares-src.tar.gz",
-              "tar -xzf /tmp/ares-src.tar.gz -C " + $build_dir + " --strip-components=1",
+              "tar -xzf /tmp/ares-src.tar.gz -C " + $build_dir,
               "cd " + $build_dir + " && CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER=gcc cargo build --release -p ares-cli -p ares-orchestrator -p ares-worker 2>&1",
               "for bin in ares-cli ares-orchestrator ares-worker; do cp " + $build_dir + "/target/release/$bin /usr/local/bin/$bin && chmod +x /usr/local/bin/$bin; done",
               "echo Deployed: && ls -lh /usr/local/bin/ares-cli /usr/local/bin/ares-orchestrator /usr/local/bin/ares-worker"
@@ -823,7 +823,7 @@ tasks:
         {{if eq .REGENERATE "true"}}REPORT_CMD="$REPORT_CMD --regenerate"{{end}}
         REPORT_CMD="$REPORT_CMD --output-dir /tmp/reports 2>&1"
         # After generation, output the report file content with a marker
-        REPORT_CMD="$REPORT_CMD; echo '===REPORT_FILES==='; for f in /tmp/reports/*_report.md; do echo \"FILE:\$(basename \$f)\"; cat \"\$f\"; done"
+        REPORT_CMD="$REPORT_CMD; echo '===REPORT_FILES==='; find /tmp/reports/red -name '*.md' -type f 2>/dev/null | while read f; do echo \"FILE:red/\$(basename \$f)\"; cat \"\$f\"; done"
 
         PARAMS_FILE=$(mktemp)
         trap "rm -f $PARAMS_FILE" EXIT
@@ -872,7 +872,7 @@ tasks:
         fi
 
         # Step 2: Extract report content and save locally
-        mkdir -p "{{.OUTPUT_DIR}}"
+        mkdir -p "{{.OUTPUT_DIR}}/red"
 
         # Parse the output — everything after ===REPORT_FILES=== contains FILE:name + content
         BEFORE_MARKER=$(echo "$OUTPUT" | sed '/===REPORT_FILES===/,$d')
@@ -978,6 +978,8 @@ tasks:
         ANTHROPIC_KEY=$(echo "$SECRETS" | jq -r .ANTHROPIC_API_KEY)
         GRAFANA_URL_VAL=$(echo "$SECRETS" | jq -r '.GRAFANA_URL // empty')
         GRAFANA_TOKEN_VAL=$(echo "$SECRETS" | jq -r '.GRAFANA_SERVICE_ACCOUNT_TOKEN // empty')
+        DREADNODE_API_KEY=$(echo "$SECRETS" | jq -r '.DREADNODE_API_KEY // empty')
+        OTEL_TRACES_ENDPOINT="https://platform.dev.plundr.ai/api/otel/traces"
 
         FLUSH_CMD=""
         if [ "{{.FLUSH_REDIS}}" = "true" ]; then
@@ -994,6 +996,12 @@ tasks:
           fi
         fi
         ENV_FILE_CMD="$ENV_FILE_CMD; echo 'ARES_DEPLOYMENT={{.EC2_DEPLOYMENT}}' >> /etc/ares/env"
+        # OTEL: send traces directly to Dreadnode Platform via HTTP/protobuf
+        if [ -n "$DREADNODE_API_KEY" ]; then
+          ENV_FILE_CMD="$ENV_FILE_CMD; echo 'OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=${OTEL_TRACES_ENDPOINT}' >> /etc/ares/env"
+          ENV_FILE_CMD="$ENV_FILE_CMD; echo 'OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf' >> /etc/ares/env"
+          ENV_FILE_CMD="$ENV_FILE_CMD; echo 'OTEL_EXPORTER_OTLP_HEADERS=X-Api-Key=${DREADNODE_API_KEY}' >> /etc/ares/env"
+        fi
         ENV_FILE_CMD="$ENV_FILE_CMD; chmod 600 /etc/ares/env; echo Wrote /etc/ares/env"
         # Restart workers so they pick up the new env file
         ENV_FILE_CMD="$ENV_FILE_CMD; for role in recon credential_access cracker acl privesc lateral coercion; do systemctl restart ares-worker@\${role} 2>/dev/null || true; done; echo Workers restarted"
@@ -1016,6 +1024,10 @@ tasks:
         export ARES_TOOL_DISPATCH=local
         export ARES_BLUE_ENABLED=1
         export ARES_DEPLOYMENT='{{.EC2_DEPLOYMENT}}'
+        export OTEL_EXPORTER_OTLP_TRACES_ENDPOINT='${OTEL_TRACES_ENDPOINT}'
+        export OTEL_EXPORTER_OTLP_PROTOCOL='http/protobuf'
+        export OTEL_EXPORTER_OTLP_HEADERS='X-Api-Key=${DREADNODE_API_KEY}'
+        export OTEL_RESOURCE_ATTRIBUTES='deployment.environment=staging,attack.team=red'
         export ARES_OPERATION_ID='${PAYLOAD}'
         mkdir -p {{.ARES_LOG_DIR}}
         nohup /usr/local/bin/ares-orchestrator >{{.ARES_LOG_DIR}}/orchestrator.log 2>&1 &

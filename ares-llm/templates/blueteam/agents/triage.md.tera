@@ -39,19 +39,32 @@ For **EVERY** host in query results (computer, WorkstationName fields), call `tr
 For **EVERY** user in query results (TargetUserName, SubjectUserName fields), call `track_user_investigation`.
 If a query mentions 5 hosts and 3 users, track all 8 — not just the primary target.
 
+## CRITICAL: Query Performance
+
+**Each Loki query takes 30-40 seconds.** You have limited time. Be efficient:
+
+- **ALWAYS use `execute_parallel_queries`** to batch up to 5 queries at once (runs 2 concurrently)
+- **NEVER run single queries sequentially** when you could batch them
+- **Combine event IDs** with regex: `|~ "4625|4624|4771"` instead of 3 separate queries
+- **Keep time windows under 15 minutes** to reduce scan time
+- **Limit results to 20-50** unless you need more
+
+Example efficient triage: batch 3-5 queries in ONE `execute_parallel_queries` call instead of 5 sequential `query_loki_logs` calls.
+
 ## LogQL Query Rules
 
-1. **Use specific labels** — discover with `list_loki_label_names` first
+1. **EXACT job name** — ALWAYS use `{job="windows-security"}`, NEVER regex like `{job=~"windows-security|..."}`
    - GOOD: `{job="windows-security"} |= "4662"`
-   - BAD: `{job=~".+"}` (scans all streams — will timeout)
+   - BAD: `{job=~"windows-security|win-security|security"}` — regex label selectors TIMEOUT
+   - BAD: `{job=~".+"}` — scans all streams, will timeout
 
-2. **Prefer `|=` over `|~`** — contains match is 10x faster than regex
+2. **Prefer `|=` over `|~`** for line filters — contains match is 10x faster than regex
 
-3. **Combine patterns** — `|~ "4625|4624|4771"` instead of 3 separate queries
+3. **Combine event IDs** — `|~ "4625|4624|4771"` instead of 3 separate queries
 
 4. **Event IDs first** — most selective filter goes first in the pipeline
 
-5. **Use deployment label** when available: `{deployment="<deployment>"} |= "4625"`
+5. **Use deployment label**: `{job="windows-security", deployment="alpha-operator-range"} |= "4625"`
 
 ## Windows Event Detection Reference
 

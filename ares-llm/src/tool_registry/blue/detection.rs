@@ -23,7 +23,7 @@ pub(super) fn detection_query_tool_definitions() -> Vec<ToolDefinition> {
                     },
                     "hours_back": {
                         "type": "integer",
-                        "description": "How many hours back to search (default: 1). Shorter ranges are faster."
+                        "description": "How many hours back to search (default: 1, max recommended: 1). Values >1 will likely timeout through the Grafana proxy. Use 1 unless you have a specific reason."
                     }
                 },
                 "required": ["query_name"]
@@ -46,7 +46,7 @@ pub(super) fn detection_query_tool_definitions() -> Vec<ToolDefinition> {
                     },
                     "hours_back": {
                         "type": "integer",
-                        "description": "Hours back to search (default: 1)"
+                        "description": "Hours back to search (default: 1, max recommended: 1). Values >1 will likely timeout."
                     },
                     "max_concurrent": {
                         "type": "integer",

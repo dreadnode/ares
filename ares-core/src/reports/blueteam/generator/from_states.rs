@@ -76,6 +76,8 @@ impl BlueTeamReportGenerator {
                 if seen_evidence_ids.insert(&ev.id) {
                     all_evidence.push(ev);
                 }
+                // Aggregate techniques from evidence items (not just state-level)
+                all_techniques.extend(ev.mitre_techniques.iter().cloned());
             }
             all_techniques.extend(state.identified_techniques.iter().cloned());
             all_tactics.extend(state.identified_tactics.iter().cloned());

@@ -62,6 +62,7 @@ warpgate-templates/                 Container image build templates
   ares-{recon,credential-access,cracker,acl,privesc,lateral-movement,coercion}-agent/
   ares-cracker-{agent-gpu,base-gpu}/
   ares-blue-{agent,triage-agent,threat-hunter-agent,lateral-analyst-agent}/
+  ares-golden-image/                All-in-one red team EC2 AMI (all tools)
 ```
 
 ## Building Container Images
@@ -93,6 +94,9 @@ nvidia/cuda:12.6.0-runtime-ubuntu24.04
 
 debian:bookworm-slim
   └── ares-orchestrator (Rust binary, no Ansible)
+
+kalilinux/kali-rolling (AMI)
+  └── ares-golden-image (all red team tools in one EC2 AMI)
 ```
 
 ### Building
@@ -113,6 +117,28 @@ for t in warpgate-templates/ares-*/; do
   warpgate build "$t"
 done
 ```
+
+### Building the Golden Image (EC2 AMI)
+
+The `ares-golden-image` template builds a Kali-based EC2 AMI with every red
+team tool pre-installed (recon, credential access, privesc, cracking, lateral
+movement, ACL abuse, coercion) plus the Ares framework and Alloy telemetry.
+Unlike the container templates, this produces an AMI in `us-west-1`.
+
+```bash
+# Build the golden image AMI
+GITHUB_TOKEN=$(gh auth token); warpgate build \
+  --template ares-golden-image \
+  --arch amd64 \
+  --verbose \
+  --stream-logs \
+  --show-ec2-status
+```
+
+The `GITHUB_TOKEN` is required because the build clones private repos
+(`dreadnode/ansible-collection-nimbus_range` and `dreadnode/ares`) into the
+image. The resulting AMI is tagged `ares-golden-image-<timestamp>` and can be
+used to launch attack boxes for GOAD lab engagements.
 
 Each template's `warpgate.yaml` references:
 
@@ -138,6 +164,7 @@ GPU templates (`ares-cracker-agent-gpu`, `ares-cracker-base-gpu`) which are
 | `privesc.yml` | `ares-privesc-agent` | `privesc_tools` | certipy, krbrelayx, nopac, potato, SharpGPOAbuse |
 | `lateral_movement.yml` | `ares-lateral-movement-agent` | `lateral_movement_tools` | evil-winrm, xfreerdp, pth-*, impacket |
 | `coercion.yml` | `ares-coercion-agent` | `coercion_tools` | responder, mitm6, coercer, ntlmrelayx |
+| `goad_attack_box.yml` | `ares-golden-image` | all roles | All red team tools (AMI, not container) |
 
 The `tools.yaml` file at the repo root is the single source of truth for
 which binaries are expected per role. The build scripts

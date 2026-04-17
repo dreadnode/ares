@@ -10,7 +10,7 @@ fn build_selector_no_host() {
 #[test]
 fn build_selector_with_host() {
     let sel = build_selector(WIN_SECURITY, Some("dc01"));
-    assert_eq!(sel, r#"{job="windows-security", hostname=~"dc01"}"#);
+    assert_eq!(sel, r#"{job="windows-security", computer=~"dc01"}"#);
 }
 
 #[test]
@@ -49,6 +49,11 @@ fn all_templates_resolve() {
         "detect_user_enumeration",
         "detect_account_enumeration",
         "detect_share_enumeration",
+        "detect_smb_signing_disabled",
+        "detect_mass_share_enumeration",
+        "detect_mssql_linked_server",
+        "detect_mssql_xp_cmdshell",
+        "detect_mssql_impersonation",
         "detect_secretsdump",
         "detect_dcsync",
         "detect_dcsync_replication",
@@ -107,9 +112,9 @@ fn unknown_template_returns_none() {
 }
 
 #[test]
-fn template_with_host_includes_hostname() {
+fn template_with_host_includes_computer() {
     let tmpl = build_detection_template("detect_kerberoasting", Some("dc01")).unwrap();
-    assert!(tmpl.logql.contains(r#"hostname=~"dc01""#));
+    assert!(tmpl.logql.contains(r#"computer=~"dc01""#));
 }
 
 #[test]
@@ -144,6 +149,9 @@ fn critical_templates_have_critical_severity() {
         "detect_golden_ticket",
         "detect_esc1_attack",
         "detect_esc8_attack",
+        "detect_mssql_linked_server",
+        "detect_mssql_xp_cmdshell",
+        "detect_delegation_abuse",
     ];
     for name in &critical {
         let tmpl = build_detection_template(name, None).unwrap();
@@ -164,6 +172,11 @@ fn auto_pivot_templates() {
         "detect_impacket_psexec",
         "detect_impacket_smbexec",
         "detect_impacket_dcomexec",
+        "detect_s4u_delegation",
+        "detect_smb_signing_disabled",
+        "detect_mssql_linked_server",
+        "detect_mssql_xp_cmdshell",
+        "detect_delegation_abuse",
     ];
     for name in &pivots {
         let tmpl = build_detection_template(name, None).unwrap();
@@ -179,4 +192,61 @@ fn header_format_includes_metadata() {
     assert!(header.contains("high"));
     assert!(header.contains("credential_access"));
     assert!(header.contains("kerberoast"));
+}
+
+#[test]
+fn s4u_template_has_exclude_patterns() {
+    let tmpl = build_detection_template("detect_s4u_delegation", None).unwrap();
+    // Should contain negative filter for machine accounts and empty TransmittedServices
+    assert!(
+        tmpl.logql.contains("!~"),
+        "S4U template should have exclusion filters"
+    );
+    assert!(
+        tmpl.logql.contains("TransmittedServices"),
+        "S4U template should filter on TransmittedServices field"
+    );
+}
+
+#[test]
+fn mssql_templates_exist_and_resolve() {
+    let names = [
+        "detect_mssql_linked_server",
+        "detect_mssql_xp_cmdshell",
+        "detect_mssql_impersonation",
+    ];
+    for name in &names {
+        let tmpl = build_detection_template(name, None).unwrap();
+        assert!(
+            !tmpl.logql.is_empty(),
+            "{name} should produce a LogQL query"
+        );
+    }
+}
+
+#[test]
+fn lateral_patterns_load_from_yaml() {
+    let cfg = ares_core::detection::detection_config();
+    assert!(
+        !cfg.lateral_patterns.is_empty(),
+        "lateral_patterns should not be empty"
+    );
+    assert!(
+        cfg.lateral_patterns.contains_key("smb"),
+        "should have smb patterns"
+    );
+    assert!(
+        cfg.lateral_patterns.contains_key("mssql"),
+        "should have mssql patterns"
+    );
+}
+
+#[test]
+fn brute_force_no_host_line_filter() {
+    let tmpl = build_detection_template("detect_brute_force", Some("192.168.58.10")).unwrap();
+    // host_as_filter should be false — computer label selector is sufficient
+    assert!(
+        !tmpl.logql.contains(r#"|= "192.168.58.10""#),
+        "brute_force should not use host as line filter"
+    );
 }

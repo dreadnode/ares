@@ -170,7 +170,7 @@ tasks:
 
           if {{.ARES_CLI}} ops report "{{.OPERATION_ID_COMPUTED}}" --output-dir ./reports 2>&1; then
             echo ""
-            echo "Report saved: ./reports/{{.OPERATION_ID_COMPUTED}}_report.md"
+            echo "Report saved: ./reports/red/{{.OPERATION_ID_COMPUTED}}.md"
           else
             echo ""
             echo "ERROR: Report fetch failed"
@@ -286,10 +286,11 @@ tasks:
 
         # Copy report from pod to local machine
         if [ -n "$RESOLVED_OP_ID" ]; then
+          mkdir -p "{{.OUTPUT_DIR}}/red"
           ORCH_POD=$(kubectl get pods -n {{.K8S_NAMESPACE}} -l app.kubernetes.io/name=ares-orchestrator -o jsonpath='{.items[0].metadata.name}')
-          kubectl cp "{{.K8S_NAMESPACE}}/${ORCH_POD}:/tmp/reports/${RESOLVED_OP_ID}_report.md" "{{.OUTPUT_DIR}}/${RESOLVED_OP_ID}_report.md" 2>/dev/null || true
-          if [ -f "{{.OUTPUT_DIR}}/${RESOLVED_OP_ID}_report.md" ]; then
-            echo "Report saved to: {{.OUTPUT_DIR}}/${RESOLVED_OP_ID}_report.md"
+          kubectl cp "{{.K8S_NAMESPACE}}/${ORCH_POD}:/tmp/reports/red/${RESOLVED_OP_ID}.md" "{{.OUTPUT_DIR}}/red/${RESOLVED_OP_ID}.md" 2>/dev/null || true
+          if [ -f "{{.OUTPUT_DIR}}/red/${RESOLVED_OP_ID}.md" ]; then
+            echo "Report saved to: {{.OUTPUT_DIR}}/red/${RESOLVED_OP_ID}.md"
           fi
         fi
 
@@ -302,10 +303,10 @@ tasks:
       - |
         echo "Red Team Reports:"
         echo "================="
-        if [ -d {{.OUTPUT_DIR}} ]; then
-          ls -lht {{.OUTPUT_DIR}}/*_report.md 2>/dev/null || echo "No reports found"
+        if [ -d "{{.OUTPUT_DIR}}/red" ]; then
+          ls -lht "{{.OUTPUT_DIR}}/red/"*.md 2>/dev/null || echo "No reports found"
         else
-          echo "Report directory not found: {{.OUTPUT_DIR}}"
+          echo "Report directory not found: {{.OUTPUT_DIR}}/red"
         fi
 
   reports:latest:
@@ -315,13 +316,13 @@ tasks:
       OUTPUT_DIR: '{{.OUTPUT_DIR | default "./reports"}}'
     cmds:
       - |
-        LATEST=$(ls -t {{.OUTPUT_DIR}}/*_report.md 2>/dev/null | head -1)
+        LATEST=$(ls -t "{{.OUTPUT_DIR}}/red/"*.md 2>/dev/null | head -1)
         if [ -n "$LATEST" ]; then
           echo "Latest report: $LATEST"
           echo "===================="
           cat "$LATEST"
         else
-          echo "No reports found in {{.OUTPUT_DIR}}"
+          echo "No reports found in {{.OUTPUT_DIR}}/red"
         fi
 
   multi:watch:
@@ -596,6 +597,7 @@ tasks:
       EC2_REGION: '{{.EC2_REGION | default "us-west-1"}}'
       BLUE_ENABLED: '{{.BLUE_ENABLED | default "0"}}'
       BLUE_LLM_MODEL: '{{.BLUE_LLM_MODEL | default ""}}'
+      EC2_DEPLOYMENT: '{{.EC2_DEPLOYMENT | default "alpha-operator-range"}}'
       RESOLVED_TARGETS:
         sh: |
           TARGET="{{.TARGET}}"
@@ -743,6 +745,7 @@ tasks:
               -e "s|__ARES_LLM_MODEL__|{{.MODEL}}|" \
               -e "s|__ARES_BLUE_ENABLED__|{{.BLUE_ENABLED}}|" \
               -e "s|__ARES_BLUE_LLM_MODEL__|{{.BLUE_LLM_MODEL}}|" \
+              -e "s|__ARES_DEPLOYMENT__|{{.EC2_DEPLOYMENT}}|" \
               .taskfiles/ec2/scripts/launch-orchestrator.sh.tmpl > "$ORCH_SCRIPT"
           jq -Rs '{"commands": [.]}' < "$ORCH_SCRIPT" > "$ORCH_PARAMS"
 

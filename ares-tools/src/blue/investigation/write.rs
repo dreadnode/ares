@@ -582,14 +582,18 @@ pub async fn track_host_investigation(args: &Value) -> Result<ToolOutput> {
         .context("SADD hosts failed")?;
     let _: () = conn.expire(&hosts_key, TTL_SECS).await?;
 
+    let dep_label = std::env::var("ARES_DEPLOYMENT")
+        .map(|d| format!(r#", deployment="{d}""#))
+        .unwrap_or_default();
+
     let suggested_queries = format!(
         "\n\nSuggested queries for {hostname}:\n\
-         - Authentication: {{job=\"windows\"}} |~ \"(?i){hostname}\" |~ \"4624|4625|4648\"\n\
-         - Process creation: {{job=\"windows\"}} |~ \"(?i){hostname}\" |~ \"4688|1\"\n\
-         - Lateral movement: {{job=\"windows\"}} |~ \"(?i){hostname}\" |~ \"5140|5145|4624\"\n\
-         - Service installation: {{job=\"windows\"}} |~ \"(?i){hostname}\" |~ \"7045|4697\"\n\
-         - Scheduled tasks: {{job=\"windows\"}} |~ \"(?i){hostname}\" |~ \"4698|4702\"\n\
-         - All activity: {{job=\"windows\"}} |~ \"(?i){hostname}\""
+         - Authentication: {{job=\"windows-security\"{dep_label}, computer=~\"{hostname}\"}} |~ \"4624|4625|4648\"\n\
+         - Process creation: {{job=\"windows-security\"{dep_label}, computer=~\"{hostname}\"}} |~ \"4688|1\"\n\
+         - Lateral movement: {{job=\"windows-security\"{dep_label}, computer=~\"{hostname}\"}} |~ \"5140|5145|4624\"\n\
+         - Service installation: {{job=\"windows-system\"{dep_label}, computer=~\"{hostname}\"}} |~ \"7045|4697\"\n\
+         - Scheduled tasks: {{job=\"windows-security\"{dep_label}, computer=~\"{hostname}\"}} |~ \"4698|4702\"\n\
+         - All activity: {{job=\"windows-security\"{dep_label}, computer=~\"{hostname}\"}}"
     );
 
     if added > 0 {
@@ -626,14 +630,18 @@ pub async fn track_user_investigation(args: &Value) -> Result<ToolOutput> {
         .context("SADD users failed")?;
     let _: () = conn.expire(&users_key, TTL_SECS).await?;
 
+    let dep_label = std::env::var("ARES_DEPLOYMENT")
+        .map(|d| format!(r#", deployment="{d}""#))
+        .unwrap_or_default();
+
     let suggested_queries = format!(
         "\n\nSuggested queries for {username}:\n\
-         - Logon events: {{job=\"windows\"}} |~ \"(?i){username}\" |~ \"4624|4625|4648\"\n\
-         - Kerberos: {{job=\"windows\"}} |~ \"(?i){username}\" |~ \"4768|4769|4771\"\n\
-         - Privilege use: {{job=\"windows\"}} |~ \"(?i){username}\" |~ \"4672|4673\"\n\
-         - Object access: {{job=\"windows\"}} |~ \"(?i){username}\" |~ \"4662|4663\"\n\
-         - Account changes: {{job=\"windows\"}} |~ \"(?i){username}\" |~ \"4720|4722|4738\"\n\
-         - All activity: {{job=\"windows\"}} |~ \"(?i){username}\""
+         - Logon events: {{job=\"windows-security\"{dep_label}}} |~ \"(?i){username}\" |~ \"4624|4625|4648\"\n\
+         - Kerberos: {{job=\"windows-security\"{dep_label}}} |~ \"(?i){username}\" |~ \"4768|4769|4771\"\n\
+         - Privilege use: {{job=\"windows-security\"{dep_label}}} |~ \"(?i){username}\" |~ \"4672|4673\"\n\
+         - Object access: {{job=\"windows-security\"{dep_label}}} |~ \"(?i){username}\" |~ \"4662|4663\"\n\
+         - Account changes: {{job=\"windows-security\"{dep_label}}} |~ \"(?i){username}\" |~ \"4720|4722|4738\"\n\
+         - All activity: {{job=\"windows-security\"{dep_label}}} |~ \"(?i){username}\""
     );
 
     if added > 0 {

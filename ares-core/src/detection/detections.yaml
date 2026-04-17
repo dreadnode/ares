@@ -93,22 +93,77 @@ activity_scopes:
     - "5145"
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# Lateral Movement Patterns
+# ═══════════════════════════════════════════════════════════════════════════════
+# Connection-type classifiers for the lateral movement analyzer. Each entry
+# maps a connection type name to a list of case-insensitive regex patterns.
+# If ANY pattern matches query result text, the connection is classified as
+# that type. These are separate from detection templates — they classify
+# observed evidence, not compose LogQL queries.
+
+lateral_patterns:
+  smb:
+    - 'smb|445|admin\$|c\$|ipc\$'
+    - 'tree.*connect|share.*access'
+    - '5140|5145'
+  rdp:
+    - 'rdp|3389|remote.*desktop'
+    - '4624.*logon.*type.*10'
+    - 'termsrv|mstsc'
+  wmi:
+    - 'wmi|135|win32_process|root\\cimv2'
+    - 'wmic|wmiprvse'
+  psexec:
+    - 'psexec|7045|service.*install'
+    - 'psexesvc|remcom'
+  winrm:
+    - 'winrm|5985|5986|powershell.*session'
+    - 'wsman|enter-pssession'
+  ssh:
+    - 'ssh|22/tcp|publickey|openssh'
+  dcom:
+    - 'dcom|135/tcp|mmc20|shellwindows'
+    - 'dcomexec|ole32'
+  scheduled_task:
+    - '4698|schtasks|taskscheduler'
+    - 'at.*exec|scheduled.*task'
+  mssql:
+    - 'openquery|openrowset|sp_linkedservers'
+    - 'exec.{0,30}at.*\[|linked.server'
+    - 'xp_cmdshell|sp_configure.{0,30}xp_cmdshell'
+    - 'mssqlclient|execute.as|impersonate'
+  constrained_delegation:
+    - 'TransmittedServices'
+    - 's4u2self|s4u2proxy|getST'
+    - 'allowedtodelegateto|trustedfordelegation'
+    - 'constrained.delegation|protocol.transition'
+  ntlm_relay:
+    - 'ntlmrelayx|smbrelay|responder'
+    - 'signing.*not.*required|signing.*disabled'
+    - 'ntlm.*relay|relay.*attack'
+    - 'petitpotam|printerbug|coerce'
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # Detection Templates
 # ═══════════════════════════════════════════════════════════════════════════════
 #
 # Fields:
-#   description   - Human-readable name (required)
-#   mitre_id      - MITRE ATT&CK technique ID (required)
-#   tactic        - ATT&CK tactic (required)
-#   severity      - critical / high / medium / low (required)
-#   aliases       - Alternative names for this template (optional)
-#   red_team_tool - Ares red team tool that triggers this (optional)
-#   auto_pivot    - Whether blue agent should auto-investigate hits (default: false)
-#   log_source    - "windows-security" (default) or "windows-system"
-#   host_as_filter - Also add hostname as |= line filter (default: false)
-#   event_ids     - Windows Event IDs for pre-filtering (optional)
-#   patterns      - Single-stage regex patterns, OR'd (optional)
-#   filter_stages - Multi-stage regex filters, AND'd between stages (optional)
+#   description      - Human-readable name (required)
+#   mitre_id         - MITRE ATT&CK technique ID (required)
+#   tactic           - ATT&CK tactic (required)
+#   severity         - critical / high / medium / low (required)
+#   aliases          - Alternative names for this template (optional)
+#   red_team_tool    - Ares red team tool that triggers this (optional)
+#   auto_pivot       - Whether blue agent should auto-investigate hits (default: false)
+#   log_source       - "windows-security" (default) or "windows-system"
+#   host_as_filter   - Also add hostname as |= line filter (default: false)
+#   event_ids        - Windows Event IDs for pre-filtering (optional)
+#   patterns         - Single-stage regex patterns, OR'd (optional)
+#   filter_stages    - Multi-stage regex filters, AND'd between stages (optional)
+#   connection_types - Lateral movement connection types this template covers (optional)
+#                      Used by templates_for_connection_type() to filter templates.
+#                      Values: smb, psexec, wmi, dcom, mssql, winrm, rdp, ssh,
+#                              scheduled_task, constrained_delegation, ntlm_relay
 #
 # Use `patterns` OR `filter_stages`, not both. `patterns` is shorthand for a
 # single filter stage.
@@ -155,6 +210,7 @@ templates:
     mitre_id: "T1135"
     tactic: discovery
     severity: medium
+    connection_types: [smb]
     red_team_tool: enumerate_shares
     event_ids: ["5140", "5145"]
     patterns:
@@ -167,6 +223,98 @@ templates:
       - 'netexec'
       - 'enum.share'
       - 'share.enum'
+
+  detect_smb_signing_disabled:
+    description: "SMB Signing Disabled Exploitation Detection"
+    mitre_id: "T1557.001"
+    tactic: credential_access
+    severity: high
+    connection_types: [smb, ntlm_relay]
+    red_team_tool: ntlmrelayx
+    auto_pivot: true
+    filter_stages:
+      - ['smb', 'signing', '445']
+      - ['signing.*not.*required', 'signing.*disabled', 'signing.*false', 'ntlmrelayx', 'smbrelay', 'relay.*attack']
+
+  detect_mass_share_enumeration:
+    description: "Mass SMB Share Enumeration Detection"
+    mitre_id: "T1135"
+    tactic: discovery
+    severity: medium
+    connection_types: [smb]
+    red_team_tool: enumerate_shares
+    auto_pivot: false
+    event_ids: ["5140", "5145"]
+    host_as_filter: false
+    patterns:
+      - 'ipc\$'
+      - 'admin\$'
+      - 'c\$'
+      - 'sysvol'
+      - 'netlogon'
+      - 'shares'
+      - 'srvsvc'
+      - 'smbclient'
+      - 'crackmapexec'
+      - 'netexec'
+
+  # ─── MSSQL Exploitation (TA0002/TA0008) ────────────────────────────────────
+
+  detect_mssql_linked_server:
+    description: "MSSQL Linked Server Exploitation Detection"
+    mitre_id: "T1210"
+    tactic: lateral_movement
+    severity: critical
+    connection_types: [mssql]
+    red_team_tool: mssql_relay
+    auto_pivot: true
+    # Matches OPENQUERY/EXEC AT patterns from Grafana alert rules.
+    patterns:
+      - 'openquery'
+      - 'openrowset'
+      - 'exec.{0,30}at.*\['
+      - 'sp_linkedservers'
+      - 'sp_addlinkedserver'
+      - 'linked.server'
+      - 'rpc.*out'
+      - 'oledb'
+      - 'mssqlclient'
+
+  detect_mssql_xp_cmdshell:
+    description: "MSSQL xp_cmdshell Command Execution Detection"
+    mitre_id: "T1059"
+    tactic: execution
+    severity: critical
+    connection_types: [mssql]
+    red_team_tool: mssql_relay
+    auto_pivot: true
+    # Matches xp_cmdshell patterns from Grafana alert rules.
+    patterns:
+      - 'xp_cmdshell'
+      - 'sp_configure.{0,30}xp_cmdshell'
+      - 'xp_dirtree'
+      - 'xp_fileexist'
+      - 'xp_subdirs'
+      - 'xp_regread'
+      - 'sp_oacreate'
+      - 'sp_oamethod'
+
+  detect_mssql_impersonation:
+    description: "MSSQL User Impersonation Detection"
+    mitre_id: "T1134"
+    tactic: privilege_escalation
+    severity: high
+    connection_types: [mssql]
+    red_team_tool: mssql_relay
+    patterns:
+      - 'execute.as'
+      - 'impersonate'
+      - 'login.*impersonat'
+      - 'sysadmin'
+      - 'trustworthy'
+      - 'db_owner'
+      - 'alter.*login'
+      - 'mssqlclient'
 
   # ─── Credential Access (TA0006) ────────────────────────────────────────────
 
@@ -259,29 +407,35 @@ templates:
     mitre_id: "T1110"
     tactic: credential_access
     severity: medium
+    host_as_filter: false
+    # Event 4625 = failed logon, 4771 = pre-auth failed.
+    # Single-stage OR is sufficient — event IDs already narrow to failures.
     event_ids: ["4625", "4771"]
-    filter_stages:
-      - ['failed', 'invalid', 'denied']
-      - ['logon', 'auth']
+    patterns:
+      - 'failed'
+      - 'failure'
+      - 'logon'
+      - 'pre.?auth'
+      - 'denied'
+      - 'invalid'
 
   detect_s4u_delegation:
     description: "S4U Constrained Delegation Abuse Detection"
-    mitre_id: "T1558.003"
-    tactic: credential_access
+    mitre_id: "T1550.003"
+    tactic: privilege_escalation
     severity: critical
+    connection_types: [constrained_delegation]
     red_team_tool: get_st
+    auto_pivot: true
     event_ids: ["4769"]
-    patterns:
-      - 's4u2self'
-      - 's4u2proxy'
-      - 'constrained.delegation'
-      - 'impersonate'
-      - 'forwardable'
-      - 'getst'
-      - 'cifs/'
-      - 'http/'
-      - 'administrator'
-      - 'trustedfordelegation'
+    # Match TransmittedServices field (populated during S4U2Proxy) targeting
+    # sensitive SPNs. Matches TransmittedServices patterns from Grafana alert rules.
+    filter_stages:
+      - ['TransmittedServices']
+      - ['cifs/', 'ldap/', 'host/', 'http/', 'mssql/', 'krbtgt']
+    exclude_patterns:
+      - 'TransmittedServices\s*:\s*-\s*$'
+      - 'TargetUserName.{0,30}\$'
 
   detect_lsa_secrets_access:
     description: "LSA Secrets Extraction Detection"
@@ -305,6 +459,7 @@ templates:
     mitre_id: "T1557"
     tactic: credential_access
     severity: high
+    connection_types: [ntlm_relay]
     red_team_tool: ntlmrelayx
     filter_stages:
       - ['ntlm', 'relay', 'responder', 'inveigh']
@@ -327,6 +482,7 @@ templates:
     mitre_id: "T1550.002"
     tactic: lateral_movement
     severity: high
+    connection_types: [smb]
     red_team_tool: domain_admin_checker
     auto_pivot: true
     event_ids: ["4624"]
@@ -344,6 +500,7 @@ templates:
     mitre_id: "T1021"
     tactic: lateral_movement
     severity: high
+    connection_types: [smb, psexec, winrm]
     auto_pivot: true
     event_ids: ["7045", "4648"]
     patterns:
@@ -362,6 +519,7 @@ templates:
     mitre_id: "T1039"
     tactic: collection
     severity: medium
+    connection_types: [smb]
     red_team_tool: download_file_content
     filter_stages:
       - ['5145', 'file.*access', 'share.*access', 'smbclient']
@@ -381,14 +539,19 @@ templates:
       - ['esc[0-9]', 'enrollee.*supplies.*subject', 'altname', 'upn']
 
   detect_delegation_abuse:
-    description: "Kerberos Delegation Abuse Detection"
-    mitre_id: "T1134.001"
+    description: "Kerberos Delegation Abuse Detection (RBCD)"
+    mitre_id: "T1098"
     tactic: privilege_escalation
-    severity: high
+    severity: critical
+    connection_types: [constrained_delegation]
     red_team_tool: rbcd_write
-    filter_stages:
-      - ['delegation', 'msds-allowedtoactonbehalf', 'rbcd', 's4u']
-      - ['impersonate', 'constrained', 'unconstrained', 'getst', 'addcomputer']
+    auto_pivot: true
+    # RBCD: Event 5136 = attribute modification on AD objects
+    event_ids: ["5136"]
+    patterns:
+      - 'msDS-AllowedToActOnBehalfOfOtherIdentity'
+      - 'msds-allowedtoactonbehalf'
+      - 'rbcd'
 
   detect_bloodhound:
     description: "BloodHound/SharpHound Collection Detection"
@@ -429,6 +592,7 @@ templates:
     mitre_id: "T1543.003"
     tactic: execution
     severity: high
+    connection_types: [psexec]
     red_team_tool: psexec
     auto_pivot: true
     event_ids: ["7045"]
@@ -553,6 +717,7 @@ templates:
     mitre_id: "T1047"
     tactic: execution
     severity: high
+    connection_types: [wmi]
     red_team_tool: wmiexec
     auto_pivot: true
     filter_stages:
@@ -564,6 +729,7 @@ templates:
     mitre_id: "T1569.002"
     tactic: execution
     severity: high
+    connection_types: [psexec]
     red_team_tool: psexec
     auto_pivot: true
     filter_stages:
@@ -575,6 +741,7 @@ templates:
     mitre_id: "T1569.002"
     tactic: execution
     severity: high
+    connection_types: [psexec]
     red_team_tool: smbexec
     auto_pivot: true
     filter_stages:
@@ -586,6 +753,7 @@ templates:
     mitre_id: "T1053.002"
     tactic: execution
     severity: medium
+    connection_types: [scheduled_task]
     red_team_tool: atexec
     filter_stages:
       - ['4698', '4699', '4700', '4701', 'schtask', 'taskscheduler', 'atsvc']
@@ -596,6 +764,7 @@ templates:
     mitre_id: "T1021.003"
     tactic: lateral_movement
     severity: high
+    connection_types: [dcom]
     red_team_tool: dcomexec
     auto_pivot: true
     filter_stages:
@@ -637,6 +806,7 @@ templates:
     mitre_id: "T1021.002"
     tactic: lateral_movement
     severity: medium
+    connection_types: [smb]
     red_team_tool: smbclient
     filter_stages:
       - ['smb', '445/tcp', 'cifs', 'smbclient']

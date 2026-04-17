@@ -72,11 +72,19 @@ Host A -> Host B, Host C, Host D (parallel)
 ```
 This pattern indicates mass deployment (ransomware prep, data staging). CRITICAL.
 
+## CRITICAL: Query Performance
+
+**Each Loki query takes 30-40 seconds.** Be efficient:
+- **ALWAYS use `execute_parallel_queries`** to batch up to 5 queries at once
+- **Combine event IDs** with regex: `|~ "4624|5140|7045"` instead of 3 separate queries
+- **Keep time windows under 15 minutes** — longer windows are slower
+- **Limit results to 20-50** unless you specifically need more
+
 ## LogQL Query Rules
-- **Use specific labels**: `{job="windows-security"} |= "4624"` not `{job=~".+"}`
-- **Prefer `|=` over `|~`**: contains is 10x faster than regex
-- **Combine patterns**: `|~ "4624|5140|7045"` for auth + share + service in one query
-- **Use deployment label** when available
+- **EXACT job name**: ALWAYS use `{job="windows-security"}`, NEVER regex like `{job=~"windows-security|..."}`
+- **Prefer `|=` over `|~`** for line filters: contains is 10x faster than regex
+- **Combine event IDs**: `|~ "4624|5140|7045"` for auth + share + service in one query
+- **Use deployment label**: `{job="windows-security", deployment="alpha-operator-range"}`
 
 ## Evidence Recording
 - Record lateral connections with `add_lateral_connection`

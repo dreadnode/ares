@@ -204,6 +204,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "approx",
+ "ares-core",
  "chrono",
  "redis",
  "regex",

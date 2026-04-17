@@ -22,6 +22,6 @@ tera = "1"
 # OpenTelemetry
 opentelemetry = "0.31"
 opentelemetry_sdk = { version = "0.31", features = ["trace"] }
-opentelemetry-otlp = { version = "0.31", features = ["grpc-tonic", "trace"] }
+opentelemetry-otlp = { version = "0.31", features = ["grpc-tonic", "http-proto", "trace"] }
 tracing-opentelemetry = "0.32"
 opentelemetry-semantic-conventions = "0.31"

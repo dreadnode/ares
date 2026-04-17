@@ -211,7 +211,7 @@ pub async fn wait_for_completion(
             // When blue team is enabled, auto-submit an investigation from the
             // operation state if none have been submitted yet, then wait for all
             // investigations to drain before signalling stop.
-            // Cap at 20 minutes to avoid hanging forever if an investigation is stuck.
+            // Cap at 45 minutes to avoid hanging forever if an investigation is stuck.
             if std::env::var("ARES_BLUE_ENABLED").as_deref() == Ok("1") {
                 info!("Blue team enabled — waiting for investigations to finish before shutdown");
                 let mut conn = dispatcher.queue.connection();
@@ -235,7 +235,7 @@ pub async fn wait_for_completion(
                         warn!(err = %e, "Failed to auto-submit blue investigation");
                     }
                 }
-                let blue_deadline = tokio::time::Instant::now() + Duration::from_secs(1200);
+                let blue_deadline = tokio::time::Instant::now() + Duration::from_secs(2700);
                 loop {
                     if *shutdown_rx.borrow() {
                         info!("Completion monitor interrupted by shutdown while waiting for blue");
@@ -243,7 +243,7 @@ pub async fn wait_for_completion(
                     }
 
                     if tokio::time::Instant::now() >= blue_deadline {
-                        warn!("Blue team wait deadline reached (20m) — proceeding with shutdown");
+                        warn!("Blue team wait deadline reached (45m) — proceeding with shutdown");
                         break;
                     }
 

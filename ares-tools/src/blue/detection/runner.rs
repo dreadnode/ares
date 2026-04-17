@@ -15,7 +15,8 @@ use super::{build_event_filter, build_selector, WIN_SECURITY};
 pub async fn run_detection_query(args: &Value) -> Result<ToolOutput> {
     let query_name = required_str(args, "query_name")?;
     let target_host = optional_str(args, "target_host");
-    let hours_back = optional_i64(args, "hours_back").unwrap_or(1);
+    // Clamp to max 2h — larger windows timeout through Grafana proxy (~90s per query)
+    let hours_back = optional_i64(args, "hours_back").unwrap_or(1).min(2);
 
     let tmpl = match build_detection_template(query_name, target_host) {
         Some(t) => t,
@@ -59,7 +60,7 @@ pub async fn run_parallel_detections(args: &Value) -> Result<ToolOutput> {
         .unwrap_or_default();
 
     let target_host = optional_str(args, "target_host");
-    let hours_back = optional_i64(args, "hours_back").unwrap_or(1);
+    let hours_back = optional_i64(args, "hours_back").unwrap_or(1).min(2);
     let max_concurrent = optional_i64(args, "max_concurrent").unwrap_or(5) as usize;
 
     let mut output_parts = Vec::new();
@@ -116,7 +117,7 @@ pub async fn run_parallel_detections(args: &Value) -> Result<ToolOutput> {
 /// Get all activity for a specific host.
 pub async fn get_host_activity(args: &Value) -> Result<ToolOutput> {
     let hostname = required_str(args, "hostname")?;
-    let hours_back = optional_i64(args, "hours_back").unwrap_or(1);
+    let hours_back = optional_i64(args, "hours_back").unwrap_or(1).min(2);
     let attack_patterns_only = args
         .get("attack_patterns_only")
         .and_then(|v| v.as_bool())
@@ -156,7 +157,7 @@ pub async fn get_host_activity(args: &Value) -> Result<ToolOutput> {
 /// Get all activity for a specific user.
 pub async fn get_user_activity(args: &Value) -> Result<ToolOutput> {
     let username = required_str(args, "username")?;
-    let hours_back = optional_i64(args, "hours_back").unwrap_or(1);
+    let hours_back = optional_i64(args, "hours_back").unwrap_or(1).min(2);
 
     let sel = build_selector(WIN_SECURITY, None);
     let config = detection_config();
