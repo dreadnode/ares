@@ -106,7 +106,7 @@ Use these exact LogQL queries. They are optimized for the Loki pipeline and test
 
 **Query 1 — Attacker DCSync ONLY (excludes machine accounts):**
 ```
-{% if deployment %}{job="windows-security", deployment="{{ deployment }}"} |= "4662" |= "1131f6aa" !~ "SubjectUserName'>[A-Z0-9_-]+[$]"{% else %}{job="windows-security"} |= "4662" |= "1131f6aa" !~ "SubjectUserName'>[A-Z0-9_-]+[$]"{% endif %}
+{% if deployment %}{job="windows-security", deployment="{{ deployment }}"} |= "4662" |= "1131f6aa" !~ "SubjectUserName'.u003e[A-Z0-9_-]+[$]"{% else %}{job="windows-security"} |= "4662" |= "1131f6aa" !~ "SubjectUserName'.u003e[A-Z0-9_-]+[$]"{% endif %}
 ```
 
 **Query 2 — ALL replication events (for context/timeline):**

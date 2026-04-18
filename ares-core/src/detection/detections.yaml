@@ -355,8 +355,10 @@ templates:
     # Exclude machine accounts (ending in $) performing normal AD replication.
     # Machine accounts like KINGSLANDING$, DC01$ are legitimate domain controllers.
     # Only user accounts (no $ suffix) performing replication indicate DCSync attack.
+    # NOTE: XML ">" is stored as JSON-escaped "\u003e" in Loki, so we use
+    # ".u003e" (dot matches the literal backslash) instead of ">" in the regex.
     exclude_patterns:
-      - "SubjectUserName'>[A-Z0-9_-]+[$]"
+      - "SubjectUserName'.u003e[A-Z0-9_-]+[$]"
 
   detect_dcsync_replication:
     description: "DCSync Replication GUID Detection"
@@ -373,7 +375,7 @@ templates:
       - '1131f6ad'
       - '89e95b76'
     exclude_patterns:
-      - "SubjectUserName'>[A-Z0-9_-]+[$]"
+      - "SubjectUserName'.u003e[A-Z0-9_-]+[$]"
 
   detect_kerberoasting:
     description: "Kerberoasting Detection (TGS with RC4)"

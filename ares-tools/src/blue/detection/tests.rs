@@ -242,6 +242,10 @@ fn dcsync_template_excludes_machine_accounts() {
         tmpl.logql.contains("[$]"),
         "DCSync exclusion should match machine account $ suffix"
     );
+    assert!(
+        tmpl.logql.contains(".u003e"),
+        "DCSync exclusion must use .u003e (not >) because Loki stores XML > as JSON-escaped \\u003e"
+    );
 }
 
 #[test]
@@ -254,6 +258,10 @@ fn dcsync_replication_template_excludes_machine_accounts() {
     assert!(
         tmpl.logql.contains("SubjectUserName"),
         "DCSync replication exclusion should filter on SubjectUserName"
+    );
+    assert!(
+        tmpl.logql.contains(".u003e"),
+        "DCSync replication exclusion must use .u003e for Loki JSON-escaped XML"
     );
 }
 

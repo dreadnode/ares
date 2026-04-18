@@ -86,7 +86,7 @@ When triaging, batch these high-priority checks with `execute_parallel_queries` 
 ```json
 {
   "queries": [
-    {"logql": "{job=\"windows-security\", deployment=\"{{ deployment }}\"} |= \"4662\" |= \"1131f6aa\" !~ \"SubjectUserName'>[A-Z0-9_-]+[$]\"", "description": "DCSync ATTACK (excludes machine accounts)"},
+    {"logql": "{job=\"windows-security\", deployment=\"{{ deployment }}\"} |= \"4662\" |= \"1131f6aa\" !~ \"SubjectUserName'.u003e[A-Z0-9_-]+[$]\"", "description": "DCSync ATTACK (excludes machine accounts)"},
     {"logql": "{job=\"windows-security\", deployment=\"{{ deployment }}\"} |= \"4769\" |= \"0x17\"", "description": "Kerberoasting (RC4 TGS)"},
     {"logql": "{job=\"windows-security\", deployment=\"{{ deployment }}\"} |= \"4769\" |= \"krbtgt\"", "description": "Golden Ticket (krbtgt TGS)"},
     {"logql": "{job=\"windows-security\", deployment=\"{{ deployment }}\"} |~ \"5140|5145\" |~ \"ADMIN\\\\$|C\\\\$\"", "description": "Admin share access"}
@@ -97,7 +97,7 @@ When triaging, batch these high-priority checks with `execute_parallel_queries` 
 }
 ```
 {% else %}
-Use queries like `{job="windows-security"} |= "4662" |= "1131f6aa" !~ "SubjectUserName'>[A-Z0-9_-]+[$]"` for DCSync (excludes machine accounts), `|= "4769" |= "0x17"` for Kerberoasting, etc.
+Use queries like `{job="windows-security"} |= "4662" |= "1131f6aa" !~ "SubjectUserName'.u003e[A-Z0-9_-]+[$]"` for DCSync (excludes machine accounts), `|= "4769" |= "0x17"` for Kerberoasting, etc.
 {% endif %}
 
 **DCSync interpretation (CRITICAL):**
