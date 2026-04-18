@@ -47,7 +47,8 @@ provisioners:
       - docker.arm64
       - docker.amd64
     inline:
-      - apt-get update && apt-get install -y --no-install-recommends python3
+      - apt-get update && apt-get install -y --no-install-recommends python3 python3-pip
+      - pip install --no-cache-dir --break-system-packages ansible-core
   - type: ansible
     only:
       - docker.arm64
