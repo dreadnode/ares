@@ -165,6 +165,7 @@ Install and configure network reconnaissance tools for Ares agents
 - **Install NetExec via pipx from GitHub** (ansible.builtin.command) - Conditional
 - **Upgrade NetExec if already installed** (ansible.builtin.command) - Conditional
 - **Report NetExec installation result** (ansible.builtin.debug)
+- **Discover pipx venvs directory** (ansible.builtin.shell) - Conditional
 - **Inject source impacket into NetExec pipx venv** (ansible.builtin.command) - Conditional
 - **Verify regsecrets is importable from NetExec pipx venv** (ansible.builtin.command) - Conditional
 - **Install impacket from source into NetExec venv (fallback for pipx inject)** (ansible.builtin.shell) - Conditional
