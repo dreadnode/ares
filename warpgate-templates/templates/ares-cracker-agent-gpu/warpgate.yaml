@@ -18,7 +18,7 @@ metadata:
 name: ares-cracker-agent-gpu
 version: latest
 base:
-  image: ghcr.io/dreadnode/ares-python-cracker-base-gpu:latest
+  image: ghcr.io/dreadnode/ares-cracker-base-gpu:latest
   pull: true
   privileged: true
   volumes:
@@ -56,7 +56,7 @@ provisioners:
     inline:
       - rm -f /var/lib/apt/lists/lock /var/cache/apt/archives/lock /var/lib/dpkg/lock*
       - apt-get update
-      - apt-get install -y --no-install-recommends build-essential pkg-config libssl-dev curl
+      - apt-get install -y --no-install-recommends ca-certificates curl build-essential pkg-config libssl-dev
       - curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
       - export PATH="/root/.cargo/bin:$PATH"
       - ln -sf /usr/bin/gcc /usr/local/bin/x86_64-unknown-linux-gnu-gcc
