@@ -167,6 +167,8 @@ Install and configure network reconnaissance tools for Ares agents
 - **Report NetExec installation result** (ansible.builtin.debug)
 - **Inject source impacket into NetExec pipx venv** (ansible.builtin.command) - Conditional
 - **Verify regsecrets is importable from NetExec pipx venv** (ansible.builtin.command) - Conditional
+- **Install impacket from source into NetExec venv (fallback for pipx inject)** (ansible.builtin.shell) - Conditional
+- **Re-verify regsecrets after examples copy** (ansible.builtin.command) - Conditional
 - **Fail if regsecrets not available in NetExec venv** (ansible.builtin.fail) - Conditional
 - **Find nxc binary location** (ansible.builtin.shell)
 - **Create symlink for nxc in /usr/local/bin** (ansible.builtin.file) - Conditional

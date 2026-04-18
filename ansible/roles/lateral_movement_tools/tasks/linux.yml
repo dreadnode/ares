@@ -153,7 +153,7 @@
   ansible.builtin.shell: |
     set -e
     apt-get update
-    apt-get install --reinstall -y gcc cpp gcc-11 libgcc-11-dev libgcc-s1 build-essential libc6-dev
+    apt-get install --reinstall -y gcc cpp libgcc-s1 build-essential libc6-dev
   args:
     executable: /bin/bash
   become: true

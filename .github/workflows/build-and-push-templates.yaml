@@ -1,17 +1,6 @@
 ---
 name: Build and Push Templates
 on:
-  merge_group:
-  pull_request:
-    branches:
-      - main
-    types:
-      - opened
-      - synchronize
-      - reopened
-    paths:
-      - 'warpgate-templates/**'
-      - '.github/workflows/build-and-push-templates.yaml'
   push:
     branches:
       - main
@@ -177,7 +166,7 @@ jobs:
           echo "Warpgate configuration:"
           cat ~/.config/warpgate/config.yaml
 
-          warpgate templates add "$GITHUB_WORKSPACE"
+          warpgate templates add "$GITHUB_WORKSPACE/warpgate-templates"
 
           # Generate GHA matrix from local templates
           RAW_MATRIX=$(warpgate templates list --source local --format gha-matrix --quiet)
@@ -195,7 +184,7 @@ jobs:
           PLATFORMS_MAP="{}"
           ANSIBLE_MAP="{}"
           AMI_TEMPLATES=()
-          for template_dir in "$GITHUB_WORKSPACE"/warpgate-templates/*/; do
+          for template_dir in "$GITHUB_WORKSPACE"/warpgate-templates/templates/*/; do
             if [ -f "${template_dir}warpgate.yaml" ]; then
               template_name=$(basename "$template_dir")
 
@@ -313,8 +302,8 @@ jobs:
           fi
 
           # GPU chain templates run in a separate dependency chain for faster builds
-          # ares-python-cracker-base-gpu -> ares-python-cracker-agent-gpu / ares-worker-gpu runs independently of ares-python-base chain
-          GPU_BASE_TEMPLATES_LIST='[]'
+          # ares-cracker-base-gpu -> ares-cracker-agent-gpu runs independently of the base chain
+          GPU_BASE_TEMPLATES_LIST='["ares-cracker-base-gpu"]'
           GPU_DEPENDENT_TEMPLATES_LIST='["ares-cracker-agent-gpu"]'
 
           # Split into base and dependent matrices, excluding GPU chain
@@ -445,22 +434,10 @@ jobs:
       fail-fast: false
       max-parallel: 20
     steps:
-      - name: Generate GitHub App Token
-        if: matrix.provision_repo == 'ansible-collection-nimbus_range'
-        uses: actions/create-github-app-token@1b10c78c7865c340bc4f6099eb2f838309f1e8c3 # v3.1.1-beta.4
-        id: app-token
-        with:
-          app-id: ${{ secrets.BOT_APP_ID }}
-          private-key: ${{ secrets.BOT_APP_PRIVATE_KEY }}
-          repositories: |
-            ares-warpgate-templates
-            ansible-collection-nimbus_range
-            ares
-
       - name: Checkout git repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          token: ${{ steps.app-token.outputs.token || github.token }}
+          token: ${{ github.token }}
 
       - name: Setup XDG directories
         run: |
@@ -492,23 +469,13 @@ jobs:
         if: matrix.needs_ansible == true
         run: python3 -m pip install ansible
 
-      - name: Clone ansible-collection repository
+      - name: Copy ansible-collection from repo
         if: matrix.needs_ansible == true
         run: |
-          # Use GitHub tarball API for deterministic content without metadata variations
-          # This ensures BuildKit cache hits by avoiding UID/GID and timestamp differences
-          # See: https://github.com/moby/moby/issues/32816
+          # Copy ansible collection from the local checkout
+          # Normalize permissions to ensure deterministic BuildKit cache keys across runners
           if [ "${{ matrix.provision_repo }}" == "ansible-collection-nimbus_range" ]; then
-            mkdir -p "$HOME/ansible-collection-nimbus_range"
-            # For private repos, use token-authenticated API
-            curl -sL -H "Authorization: token ${{ steps.app-token.outputs.token }}" \
-              "https://api.github.com/repos/dreadnode/ansible-collection-nimbus_range/tarball/HEAD" | \
-              tar -xzf - --strip-components=1 -C "$HOME/ansible-collection-nimbus_range"
-          fi
-
-          # Normalize permissions to ensure deterministic cache keys across runners
-          # All files get 644, all dirs get 755
-          if [ "${{ matrix.provision_repo }}" == "ansible-collection-nimbus_range" ]; then
+            cp -r "$GITHUB_WORKSPACE/ansible" "$HOME/ansible-collection-nimbus_range"
             find "$HOME/ansible-collection-nimbus_range" -type f -exec chmod 644 {} \;
             find "$HOME/ansible-collection-nimbus_range" -type d -exec chmod 755 {} \;
           fi
@@ -535,7 +502,7 @@ jobs:
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
-          password: ${{ secrets.WG_IMAGE_BUILDER_PAT }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Free up disk space
         run: |
@@ -549,6 +516,10 @@ jobs:
       - name: Add swap space
         run: |
           # Add 16GB swap for large image builds (GPU images can be 2GB+)
+          if [ -f /swapfile ]; then
+            sudo swapoff /swapfile || true
+            sudo rm -f /swapfile
+          fi
           sudo fallocate -l 16G /swapfile
           sudo chmod 600 /swapfile
           sudo mkswap /swapfile
@@ -654,13 +625,13 @@ jobs:
         run: |
           # Add this repo as a local template source to enable caching
           # Using --template flag (instead of warpgate.yaml path) enables BuildKit cache
-          warpgate templates add "$GITHUB_WORKSPACE"
+          warpgate templates add "$GITHUB_WORKSPACE/warpgate-templates"
           echo "Registered templates:"
           warpgate templates list --source local
 
       - name: Validate template configuration
         run: |
-          cd "$GITHUB_WORKSPACE/warpgate-templates/${{ matrix.name }}"
+          cd "$GITHUB_WORKSPACE/warpgate-templates/templates/${{ matrix.name }}"
 
           # Verify warpgate.yaml exists
           if [ ! -f "warpgate.yaml" ]; then
@@ -673,7 +644,7 @@ jobs:
 
       - name: Pre-load base image into BuildKit cache
         run: |
-          cd "$GITHUB_WORKSPACE/warpgate-templates/${{ matrix.name }}"
+          cd "$GITHUB_WORKSPACE/warpgate-templates/templates/${{ matrix.name }}"
 
           # Extract base image from warpgate.yaml
           BASE_IMAGE=$(grep -A2 "^base:" warpgate.yaml | grep "image:" | head -1 | awk '{print $2}' | tr -d '"'"'")
@@ -697,6 +668,7 @@ jobs:
       - name: Build ${{ matrix.architecture.arch }} Image
         run: |
           export PROVISION_REPO_PATH="$HOME/${{ matrix.provision_repo_path }}"
+          cd "$GITHUB_WORKSPACE/warpgate-templates"
 
           # Build using --template flag to enable BuildKit cache
           # Using template name (not file path) sets IsLocalTemplate=false, enabling cache
@@ -720,7 +692,7 @@ jobs:
             exit 1
           fi
         env:
-          GITHUB_TOKEN: ${{ steps.app-token.outputs.token || secrets.WG_IMAGE_BUILDER_PAT }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # Disable provenance attestations to reduce memory usage and avoid gRPC size limits
           # See: https://github.com/docker/buildx/issues/2208
           BUILDX_NO_DEFAULT_ATTESTATIONS: 1
@@ -876,7 +848,7 @@ jobs:
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
-          password: ${{ secrets.WG_IMAGE_BUILDER_PAT }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4
@@ -935,22 +907,10 @@ jobs:
       fail-fast: false
       max-parallel: 20
     steps:
-      - name: Generate GitHub App Token
-        if: matrix.provision_repo == 'ansible-collection-nimbus_range'
-        uses: actions/create-github-app-token@1b10c78c7865c340bc4f6099eb2f838309f1e8c3 # v3.1.1-beta.4
-        id: app-token
-        with:
-          app-id: ${{ secrets.BOT_APP_ID }}
-          private-key: ${{ secrets.BOT_APP_PRIVATE_KEY }}
-          repositories: |
-            ares-warpgate-templates
-            ansible-collection-nimbus_range
-            ares
-
       - name: Checkout git repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          token: ${{ steps.app-token.outputs.token || github.token }}
+          token: ${{ github.token }}
 
       - name: Setup XDG directories
         run: |
@@ -982,23 +942,13 @@ jobs:
         if: matrix.needs_ansible == true
         run: python3 -m pip install ansible
 
-      - name: Clone ansible-collection repository
+      - name: Copy ansible-collection from repo
         if: matrix.needs_ansible == true
         run: |
-          # Use GitHub tarball API for deterministic content without metadata variations
-          # This ensures BuildKit cache hits by avoiding UID/GID and timestamp differences
-          # See: https://github.com/moby/moby/issues/32816
+          # Copy ansible collection from the local checkout
+          # Normalize permissions to ensure deterministic BuildKit cache keys across runners
           if [ "${{ matrix.provision_repo }}" == "ansible-collection-nimbus_range" ]; then
-            mkdir -p "$HOME/ansible-collection-nimbus_range"
-            # For private repos, use token-authenticated API
-            curl -sL -H "Authorization: token ${{ steps.app-token.outputs.token }}" \
-              "https://api.github.com/repos/dreadnode/ansible-collection-nimbus_range/tarball/HEAD" | \
-              tar -xzf - --strip-components=1 -C "$HOME/ansible-collection-nimbus_range"
-          fi
-
-          # Normalize permissions to ensure deterministic cache keys across runners
-          # All files get 644, all dirs get 755
-          if [ "${{ matrix.provision_repo }}" == "ansible-collection-nimbus_range" ]; then
+            cp -r "$GITHUB_WORKSPACE/ansible" "$HOME/ansible-collection-nimbus_range"
             find "$HOME/ansible-collection-nimbus_range" -type f -exec chmod 644 {} \;
             find "$HOME/ansible-collection-nimbus_range" -type d -exec chmod 755 {} \;
           fi
@@ -1025,7 +975,7 @@ jobs:
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
-          password: ${{ secrets.WG_IMAGE_BUILDER_PAT }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Free up disk space
         run: |
@@ -1039,6 +989,10 @@ jobs:
       - name: Add swap space
         run: |
           # Add 16GB swap for large image builds (GPU images can be 2GB+)
+          if [ -f /swapfile ]; then
+            sudo swapoff /swapfile || true
+            sudo rm -f /swapfile
+          fi
           sudo fallocate -l 16G /swapfile
           sudo chmod 600 /swapfile
           sudo mkswap /swapfile
@@ -1144,13 +1098,13 @@ jobs:
         run: |
           # Add this repo as a local template source to enable caching
           # Using --template flag (instead of warpgate.yaml path) enables BuildKit cache
-          warpgate templates add "$GITHUB_WORKSPACE"
+          warpgate templates add "$GITHUB_WORKSPACE/warpgate-templates"
           echo "Registered templates:"
           warpgate templates list --source local
 
       - name: Validate template configuration
         run: |
-          cd "$GITHUB_WORKSPACE/warpgate-templates/${{ matrix.name }}"
+          cd "$GITHUB_WORKSPACE/warpgate-templates/templates/${{ matrix.name }}"
 
           # Verify warpgate.yaml exists
           if [ ! -f "warpgate.yaml" ]; then
@@ -1163,7 +1117,7 @@ jobs:
 
       - name: Pre-load base image into BuildKit cache
         run: |
-          cd "$GITHUB_WORKSPACE/warpgate-templates/${{ matrix.name }}"
+          cd "$GITHUB_WORKSPACE/warpgate-templates/templates/${{ matrix.name }}"
 
           # Extract base image from warpgate.yaml
           BASE_IMAGE=$(grep -A2 "^base:" warpgate.yaml | grep "image:" | head -1 | awk '{print $2}' | tr -d '"'"'")
@@ -1187,6 +1141,7 @@ jobs:
       - name: Build ${{ matrix.architecture.arch }} Image
         run: |
           export PROVISION_REPO_PATH="$HOME/${{ matrix.provision_repo_path }}"
+          cd "$GITHUB_WORKSPACE/warpgate-templates"
 
           # Build using --template flag to enable BuildKit cache
           # Using template name (not file path) sets IsLocalTemplate=false, enabling cache
@@ -1210,7 +1165,7 @@ jobs:
             exit 1
           fi
         env:
-          GITHUB_TOKEN: ${{ steps.app-token.outputs.token || secrets.WG_IMAGE_BUILDER_PAT }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # Disable provenance attestations to reduce memory usage and avoid gRPC size limits
           # See: https://github.com/docker/buildx/issues/2208
           BUILDX_NO_DEFAULT_ATTESTATIONS: 1
@@ -1370,7 +1325,7 @@ jobs:
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
-          password: ${{ secrets.WG_IMAGE_BUILDER_PAT }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4
@@ -1424,22 +1379,10 @@ jobs:
       matrix: ${{ fromJson(needs.discover-templates.outputs.gpu_base_matrix) }}
       fail-fast: false
     steps:
-      - name: Generate GitHub App Token
-        if: matrix.provision_repo == 'ansible-collection-nimbus_range'
-        uses: actions/create-github-app-token@1b10c78c7865c340bc4f6099eb2f838309f1e8c3 # v3.1.1-beta.4
-        id: app-token
-        with:
-          app-id: ${{ secrets.BOT_APP_ID }}
-          private-key: ${{ secrets.BOT_APP_PRIVATE_KEY }}
-          repositories: |
-            ares-warpgate-templates
-            ansible-collection-nimbus_range
-            ares
-
       - name: Checkout git repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          token: ${{ steps.app-token.outputs.token || github.token }}
+          token: ${{ github.token }}
 
       - name: Setup XDG directories
         run: |
@@ -1464,14 +1407,11 @@ jobs:
         if: matrix.needs_ansible == true
         run: python3 -m pip install ansible
 
-      - name: Clone ansible-collection repository
+      - name: Copy ansible-collection from repo
         if: matrix.needs_ansible == true
         run: |
           if [ "${{ matrix.provision_repo }}" == "ansible-collection-nimbus_range" ]; then
-            mkdir -p "$HOME/ansible-collection-nimbus_range"
-            curl -sL -H "Authorization: token ${{ steps.app-token.outputs.token }}" \
-              "https://api.github.com/repos/dreadnode/ansible-collection-nimbus_range/tarball/HEAD" | \
-              tar -xzf - --strip-components=1 -C "$HOME/ansible-collection-nimbus_range"
+            cp -r "$GITHUB_WORKSPACE/ansible" "$HOME/ansible-collection-nimbus_range"
             find "$HOME/ansible-collection-nimbus_range" -type f -exec chmod 644 {} \;
             find "$HOME/ansible-collection-nimbus_range" -type d -exec chmod 755 {} \;
           fi
@@ -1491,7 +1431,7 @@ jobs:
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
-          password: ${{ secrets.WG_IMAGE_BUILDER_PAT }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Free up disk space
         run: |
@@ -1500,6 +1440,10 @@ jobs:
 
       - name: Add swap space
         run: |
+          if [ -f /swapfile ]; then
+            sudo swapoff /swapfile || true
+            sudo rm -f /swapfile
+          fi
           sudo fallocate -l 16G /swapfile
           sudo chmod 600 /swapfile
           sudo mkswap /swapfile
@@ -1567,18 +1511,18 @@ jobs:
 
       - name: Register templates with Warpgate
         run: |
-          warpgate templates add "$GITHUB_WORKSPACE"
+          warpgate templates add "$GITHUB_WORKSPACE/warpgate-templates"
           warpgate templates list --source local
 
       - name: Validate template configuration
         run: |
-          cd "$GITHUB_WORKSPACE/warpgate-templates/${{ matrix.name }}"
+          cd "$GITHUB_WORKSPACE/warpgate-templates/templates/${{ matrix.name }}"
           [ ! -f "warpgate.yaml" ] && echo "ERROR: warpgate.yaml not found" && exit 1
           cat warpgate.yaml
 
       - name: Pre-load base image into BuildKit cache
         run: |
-          cd "$GITHUB_WORKSPACE/warpgate-templates/${{ matrix.name }}"
+          cd "$GITHUB_WORKSPACE/warpgate-templates/templates/${{ matrix.name }}"
           BASE_IMAGE=$(grep -A2 "^base:" warpgate.yaml | grep "image:" | head -1 | awk '{print $2}' | tr -d '"'"'")
           if [ -n "$BASE_IMAGE" ]; then
             echo "Pre-loading base image: $BASE_IMAGE"
@@ -1605,7 +1549,7 @@ jobs:
             exit 1
           fi
         env:
-          GITHUB_TOKEN: ${{ steps.app-token.outputs.token || secrets.WG_IMAGE_BUILDER_PAT }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           BUILDX_NO_DEFAULT_ATTESTATIONS: 1
 
       - name: Upload digest
@@ -1702,7 +1646,7 @@ jobs:
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
-          password: ${{ secrets.WG_IMAGE_BUILDER_PAT }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4
@@ -1755,22 +1699,10 @@ jobs:
       matrix: ${{ fromJson(needs.discover-templates.outputs.gpu_dependent_matrix) }}
       fail-fast: false
     steps:
-      - name: Generate GitHub App Token
-        if: matrix.provision_repo == 'ansible-collection-nimbus_range'
-        uses: actions/create-github-app-token@1b10c78c7865c340bc4f6099eb2f838309f1e8c3 # v3.1.1-beta.4
-        id: app-token
-        with:
-          app-id: ${{ secrets.BOT_APP_ID }}
-          private-key: ${{ secrets.BOT_APP_PRIVATE_KEY }}
-          repositories: |
-            ares-warpgate-templates
-            ansible-collection-nimbus_range
-            ares
-
       - name: Checkout git repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          token: ${{ steps.app-token.outputs.token || github.token }}
+          token: ${{ github.token }}
 
       - name: Setup XDG directories
         run: |
@@ -1792,14 +1724,11 @@ jobs:
         if: matrix.needs_ansible == true
         run: python3 -m pip install ansible
 
-      - name: Clone ansible-collection repository
+      - name: Copy ansible-collection from repo
         if: matrix.needs_ansible == true
         run: |
           if [ "${{ matrix.provision_repo }}" == "ansible-collection-nimbus_range" ]; then
-            mkdir -p "$HOME/ansible-collection-nimbus_range"
-            curl -sL -H "Authorization: token ${{ steps.app-token.outputs.token }}" \
-              "https://api.github.com/repos/dreadnode/ansible-collection-nimbus_range/tarball/HEAD" | \
-              tar -xzf - --strip-components=1 -C "$HOME/ansible-collection-nimbus_range"
+            cp -r "$GITHUB_WORKSPACE/ansible" "$HOME/ansible-collection-nimbus_range"
             find "$HOME/ansible-collection-nimbus_range" -type f -exec chmod 644 {} \;
             find "$HOME/ansible-collection-nimbus_range" -type d -exec chmod 755 {} \;
           fi
@@ -1819,7 +1748,7 @@ jobs:
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
-          password: ${{ secrets.WG_IMAGE_BUILDER_PAT }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Free up disk space
         run: |
@@ -1828,6 +1757,10 @@ jobs:
 
       - name: Add swap space
         run: |
+          if [ -f /swapfile ]; then
+            sudo swapoff /swapfile || true
+            sudo rm -f /swapfile
+          fi
           sudo fallocate -l 16G /swapfile
           sudo chmod 600 /swapfile
           sudo mkswap /swapfile
@@ -1895,18 +1828,18 @@ jobs:
 
       - name: Register templates with Warpgate
         run: |
-          warpgate templates add "$GITHUB_WORKSPACE"
+          warpgate templates add "$GITHUB_WORKSPACE/warpgate-templates"
           warpgate templates list --source local
 
       - name: Validate template configuration
         run: |
-          cd "$GITHUB_WORKSPACE/warpgate-templates/${{ matrix.name }}"
+          cd "$GITHUB_WORKSPACE/warpgate-templates/templates/${{ matrix.name }}"
           [ ! -f "warpgate.yaml" ] && echo "ERROR: warpgate.yaml not found" && exit 1
           cat warpgate.yaml
 
       - name: Pre-load base image into BuildKit cache
         run: |
-          cd "$GITHUB_WORKSPACE/warpgate-templates/${{ matrix.name }}"
+          cd "$GITHUB_WORKSPACE/warpgate-templates/templates/${{ matrix.name }}"
           BASE_IMAGE=$(grep -A2 "^base:" warpgate.yaml | grep "image:" | head -1 | awk '{print $2}' | tr -d '"'"'")
           if [ -n "$BASE_IMAGE" ]; then
             echo "Pre-loading base image: $BASE_IMAGE"
@@ -1933,7 +1866,7 @@ jobs:
             exit 1
           fi
         env:
-          GITHUB_TOKEN: ${{ steps.app-token.outputs.token || secrets.WG_IMAGE_BUILDER_PAT }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           BUILDX_NO_DEFAULT_ATTESTATIONS: 1
 
       - name: Upload digest
@@ -2034,7 +1967,7 @@ jobs:
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
-          password: ${{ secrets.WG_IMAGE_BUILDER_PAT }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4

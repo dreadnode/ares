@@ -22,7 +22,7 @@ lateral_movement_tools_ubuntu_packages:
   - rubygems
   - libffi-dev  # Required for building ffi gem (evil-winrm dependency)
   - clang  # Required for building native gem extensions
-  - freerdp2-x11  # xfreerdp for RDP pass-the-hash
+  - freerdp3-x11  # xfreerdp for RDP pass-the-hash
   - smbclient
   - sshpass  # SSH with password
   - proxychains4  # TCP connection proxying for pivoting
