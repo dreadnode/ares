@@ -143,6 +143,7 @@ pub(crate) async fn ops_inject_host(
     operation_id: String,
     ip: String,
     hostname: String,
+    dc: bool,
 ) -> Result<()> {
     let mut conn = connect_redis(redis_url).await?;
     let reader = RedisStateReader::new(operation_id.clone());
@@ -157,16 +158,18 @@ pub(crate) async fn ops_inject_host(
         os: String::new(),
         roles: Vec::new(),
         services: Vec::new(),
-        is_dc: false,
+        is_dc: dc,
         owned: false,
     };
-    host.is_dc = host.detect_dc();
+    if !host.is_dc {
+        host.is_dc = host.detect_dc();
+    }
 
     reader.add_host(&mut conn, &host).await?;
-    info!("Injected host: {hostname} / {ip}");
+    info!("Injected host: {hostname} / {ip} (dc={dc})");
 
     // Also add the domain if hostname has a domain part
-    if hostname.contains('.') {
+    let domain = if hostname.contains('.') {
         let parts: Vec<&str> = hostname.split('.').collect();
         if parts.len() > 1 {
             let domain = parts[1..].join(".");
@@ -174,6 +177,27 @@ pub(crate) async fn ops_inject_host(
             if added {
                 info!("Added domain from hostname: {domain}");
             }
+            Some(domain)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    // Register DC in domain_controllers map so the orchestrator can route
+    // trust key extraction and cross-domain attacks to this DC.
+    if host.is_dc {
+        if let Some(domain) = domain {
+            let dc_key = format!(
+                "{}:{}:{}",
+                state::KEY_PREFIX,
+                operation_id,
+                state::KEY_DC_MAP
+            );
+            let domain_lower = domain.to_lowercase();
+            let _: () = redis::AsyncCommands::hset(&mut conn, &dc_key, &domain_lower, &ip).await?;
+            info!("Registered DC: {domain_lower} -> {ip}");
         }
     }
 

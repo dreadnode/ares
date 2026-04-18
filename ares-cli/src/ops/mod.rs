@@ -94,7 +94,8 @@ pub(crate) async fn run_ops(cmd: OpsCommands, redis_url: Option<String>) -> Resu
             operation_id,
             ip,
             hostname,
-        } => inject::ops_inject_host(redis_url, operation_id, ip, hostname).await,
+            dc,
+        } => inject::ops_inject_host(redis_url, operation_id, ip, hostname, dc).await,
         OpsCommands::Stop {
             operation_id,
             latest,

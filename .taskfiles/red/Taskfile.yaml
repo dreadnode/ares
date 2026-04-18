@@ -493,12 +493,13 @@ tasks:
         {{if ne .AES_KEY ""}}--aes-key "{{.AES_KEY}}"{{end}}
 
   multi:inject-host:
-    desc: "Inject a host into operation shared state (usage: task red:multi:inject-host OPERATION_ID=op-xxx IP=192.168.58.20 HOSTNAME=dc01.essos.local)"
+    desc: "Inject a host into operation shared state (usage: task red:multi:inject-host OPERATION_ID=op-xxx IP=192.168.58.20 HOSTNAME=dc01.essos.local [DC=true])"
     silent: true
     vars:
       OPERATION_ID: '{{.OPERATION_ID | default ""}}'
       IP: '{{.IP | default ""}}'
       HOSTNAME: '{{.HOSTNAME | default ""}}'
+      DC: '{{.DC | default "false"}}'
     preconditions:
       - sh: test -n "{{.OPERATION_ID}}"
         msg: "OPERATION_ID variable is required"
@@ -507,7 +508,10 @@ tasks:
       - sh: test -n "{{.HOSTNAME}}"
         msg: "HOSTNAME variable is required"
     cmds:
-      - '{{.ARES_CLI}} --k8s {{.K8S_NAMESPACE}} ops inject-host "{{.OPERATION_ID}}" "{{.IP}}" "{{.HOSTNAME}}"'
+      - >-
+        {{.ARES_CLI}} --k8s {{.K8S_NAMESPACE}} ops inject-host
+        "{{.OPERATION_ID}}" "{{.IP}}" "{{.HOSTNAME}}"
+        {{if eq .DC "true"}}--dc{{end}}
 
   multi:inject-domain-sid:
     desc: "Inject a domain SID into operation shared state (usage: task red:multi:inject-domain-sid OPERATION_ID=op-xxx DOMAIN=north.sevenkingdoms.local SID=S-1-5-21-...)"
@@ -625,12 +629,13 @@ tasks:
           FLAT_NAME: "ESSOS"
           SID_FILTERING: "true"
 
-      # 2. Inject hosts
+      # 2. Inject hosts (meereen is the essos.local DC)
       - task: multi:inject-host
         vars:
           OPERATION_ID: "{{.OPERATION_ID}}"
           IP: "{{.MEEREEN_IP}}"
           HOSTNAME: "meereen.essos.local"
+          DC: "true"
 
       - task: multi:inject-host
         vars:

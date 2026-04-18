@@ -93,7 +93,21 @@ impl SharedState {
             // Track per-domain domination when krbtgt NTLM hash arrives
             if is_krbtgt {
                 let krbtgt_domain = if hash_domain.is_empty() {
-                    state.domains.first().cloned().unwrap_or_default()
+                    // Resolve domain from sibling hashes produced by the same
+                    // secretsdump run (same parent_id) that DO carry a domain.
+                    let just_pushed = state.hashes.last();
+                    let parent = just_pushed.and_then(|h| h.parent_id.as_deref());
+                    parent
+                        .and_then(|pid| {
+                            state.hashes.iter().find_map(|h| {
+                                if h.parent_id.as_deref() == Some(pid) && !h.domain.is_empty() {
+                                    Some(h.domain.to_lowercase())
+                                } else {
+                                    None
+                                }
+                            })
+                        })
+                        .unwrap_or_default()
                 } else {
                     hash_domain.to_lowercase()
                 };

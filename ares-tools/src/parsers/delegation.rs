@@ -7,6 +7,7 @@ pub fn parse_delegation(output: &str, params: &Value) -> Vec<Value> {
     let target_ip = params
         .get("target")
         .or_else(|| params.get("target_ip"))
+        .or_else(|| params.get("dc_ip"))
         .and_then(|v| v.as_str())
         .unwrap_or("");
 

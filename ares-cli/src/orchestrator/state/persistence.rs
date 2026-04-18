@@ -184,7 +184,21 @@ impl SharedState {
             })
             .map(|h| {
                 if h.domain.is_empty() {
-                    state.domains.first().cloned().unwrap_or_default()
+                    // Resolve from sibling hashes (same parent_id / secretsdump run)
+                    h.parent_id
+                        .as_deref()
+                        .and_then(|pid| {
+                            state.hashes.iter().find_map(|other| {
+                                if other.parent_id.as_deref() == Some(pid)
+                                    && !other.domain.is_empty()
+                                {
+                                    Some(other.domain.to_lowercase())
+                                } else {
+                                    None
+                                }
+                            })
+                        })
+                        .unwrap_or_default()
                 } else {
                     h.domain.to_lowercase()
                 }
@@ -231,6 +245,7 @@ impl SharedState {
         let credentials = reader.get_credentials(&mut conn).await.unwrap_or_default();
         let hashes = reader.get_hashes(&mut conn).await.unwrap_or_default();
         let hosts = reader.get_hosts(&mut conn).await.unwrap_or_default();
+        let domains = reader.get_domains(&mut conn).await.unwrap_or_default();
         let vulns = reader
             .get_vulnerabilities(&mut conn)
             .await
@@ -298,6 +313,7 @@ impl SharedState {
         state.credentials = credentials;
         state.hashes = hashes;
         state.hosts = hosts;
+        state.domains = domains;
         state.discovered_vulnerabilities = vulns;
         state.exploited_vulnerabilities = exploited;
         state.has_domain_admin = meta.has_domain_admin;
@@ -317,7 +333,21 @@ impl SharedState {
             })
             .map(|h| {
                 if h.domain.is_empty() {
-                    state.domains.first().cloned().unwrap_or_default()
+                    // Resolve from sibling hashes (same parent_id / secretsdump run)
+                    h.parent_id
+                        .as_deref()
+                        .and_then(|pid| {
+                            state.hashes.iter().find_map(|other| {
+                                if other.parent_id.as_deref() == Some(pid)
+                                    && !other.domain.is_empty()
+                                {
+                                    Some(other.domain.to_lowercase())
+                                } else {
+                                    None
+                                }
+                            })
+                        })
+                        .unwrap_or_default()
                 } else {
                     h.domain.to_lowercase()
                 }

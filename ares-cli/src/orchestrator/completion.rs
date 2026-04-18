@@ -30,6 +30,7 @@ pub fn compute_undominated_forests(
     first_domain: Option<&str>,
     trusted_domains: &std::collections::HashMap<String, ares_core::models::TrustInfo>,
     dominated_domains: &HashSet<String>,
+    domain_controllers: &std::collections::HashMap<String, String>,
 ) -> Vec<String> {
     let mut required_forests: HashSet<String> = HashSet::new();
 
@@ -45,6 +46,16 @@ pub fn compute_undominated_forests(
     for trust in trusted_domains.values() {
         if trust.is_cross_forest() {
             required_forests.insert(forest_root_of(&trust.domain));
+        }
+    }
+
+    // Include forest roots from all known DCs. This prevents premature
+    // completion when trust enumeration hasn't finished yet — domains
+    // discovered via recon (e.g. essos.local with a known DC) are tracked
+    // as required forests even before trust relationships are enumerated.
+    for dc_domain in domain_controllers.keys() {
+        if !dc_domain.is_empty() {
+            required_forests.insert(forest_root_of(dc_domain));
         }
     }
 
@@ -78,6 +89,7 @@ pub async fn undominated_forests(state: &SharedState) -> Vec<String> {
         inner.domains.first().map(|d| d.as_str()),
         &inner.trusted_domains,
         &inner.dominated_domains,
+        &inner.domain_controllers,
     )
 }
 
@@ -514,6 +526,7 @@ mod tests {
     #[test]
     fn test_undominated_single_domain_no_trusts() {
         let trusted = std::collections::HashMap::new();
+        let dcs = std::collections::HashMap::new();
         let mut dominated = HashSet::new();
         // Target domain not yet dominated
         let result = compute_undominated_forests(
@@ -521,6 +534,7 @@ mod tests {
             Some("contoso.local"),
             &trusted,
             &dominated,
+            &dcs,
         );
         assert_eq!(result, vec!["contoso.local"]);
 
@@ -531,6 +545,7 @@ mod tests {
             Some("contoso.local"),
             &trusted,
             &dominated,
+            &dcs,
         );
         assert!(result.is_empty());
     }
@@ -546,11 +561,13 @@ mod tests {
         // Only sevenkingdoms dominated — essos remains
         let mut dominated = HashSet::new();
         dominated.insert("sevenkingdoms.local".to_string());
+        let dcs = std::collections::HashMap::new();
         let result = compute_undominated_forests(
             Some("sevenkingdoms.local"),
             Some("sevenkingdoms.local"),
             &trusted,
             &dominated,
+            &dcs,
         );
         assert_eq!(result, vec!["essos.local"]);
     }
@@ -566,11 +583,13 @@ mod tests {
         let mut dominated = HashSet::new();
         dominated.insert("sevenkingdoms.local".to_string());
         dominated.insert("essos.local".to_string());
+        let dcs = std::collections::HashMap::new();
         let result = compute_undominated_forests(
             Some("sevenkingdoms.local"),
             Some("sevenkingdoms.local"),
             &trusted,
             &dominated,
+            &dcs,
         );
         assert!(result.is_empty());
     }
@@ -586,11 +605,13 @@ mod tests {
 
         let mut dominated = HashSet::new();
         dominated.insert("contoso.local".to_string());
+        let dcs = std::collections::HashMap::new();
         let result = compute_undominated_forests(
             Some("contoso.local"),
             Some("contoso.local"),
             &trusted,
             &dominated,
+            &dcs,
         );
         // parent_child is NOT cross-forest, so north.contoso.local is not required
         assert!(result.is_empty());
@@ -602,13 +623,37 @@ mod tests {
         let trusted = std::collections::HashMap::new();
         let mut dominated = HashSet::new();
         dominated.insert("north.contoso.local".to_string());
+        let dcs = std::collections::HashMap::new();
         let result = compute_undominated_forests(
             Some("contoso.local"),
             Some("contoso.local"),
             &trusted,
             &dominated,
+            &dcs,
         );
         // forest_root_of("north.contoso.local") = "contoso.local" → matches target
         assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_undominated_dc_discovered_before_trust_enum() {
+        // essos.local DC discovered via recon but trust not yet enumerated.
+        // The DC should be included in required_forests to prevent premature
+        // completion.
+        let trusted = std::collections::HashMap::new();
+        let mut dominated = HashSet::new();
+        dominated.insert("sevenkingdoms.local".to_string());
+        let mut dcs = std::collections::HashMap::new();
+        dcs.insert("sevenkingdoms.local".to_string(), "10.1.2.220".to_string());
+        dcs.insert("essos.local".to_string(), "10.1.2.58".to_string());
+        let result = compute_undominated_forests(
+            Some("sevenkingdoms.local"),
+            Some("north.sevenkingdoms.local"),
+            &trusted,
+            &dominated,
+            &dcs,
+        );
+        // essos.local DC is known but not dominated → should appear
+        assert_eq!(result, vec!["essos.local"]);
     }
 }

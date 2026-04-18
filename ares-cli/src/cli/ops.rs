@@ -137,6 +137,9 @@ pub(crate) enum OpsCommands {
         ip: String,
         /// Hostname
         hostname: String,
+        /// Mark this host as a domain controller
+        #[arg(long)]
+        dc: bool,
     },
 
     /// Inject a hash into an operation's shared state

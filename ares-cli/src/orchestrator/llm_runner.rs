@@ -69,6 +69,11 @@ impl LlmTaskRunner {
         let _ = self.callback_handler.set(handler);
     }
 
+    /// Get a reference to the tool dispatcher for direct tool calls.
+    pub fn tool_dispatcher(&self) -> &Arc<dyn ToolDispatcher> {
+        &self.dispatcher
+    }
+
     /// Execute a task through the LLM agent loop.
     ///
     /// This is the main entry point called by the orchestrator when

@@ -31,6 +31,7 @@ impl SharedState {
             s.domains.first().map(|d| d.as_str()),
             &s.trusted_domains,
             &s.dominated_domains,
+            &s.domain_controllers,
         );
 
         ares_llm::prompt::StateSnapshot {
