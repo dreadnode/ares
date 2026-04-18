@@ -123,9 +123,20 @@ pub async fn run_investigation(
         .map(|t| t.name.clone())
         .collect();
 
-    let system_prompt =
-        ares_llm::prompt::blue::build_blue_system_prompt(role.as_str(), &capabilities)
-            .context("Failed to build blue orchestrator system prompt")?;
+    let deployment = investigation
+        .alert
+        .get("labels")
+        .and_then(|l| l.get("deployment"))
+        .and_then(|v| v.as_str())
+        .map(String::from)
+        .or_else(|| std::env::var("ARES_DEPLOYMENT").ok());
+
+    let system_prompt = ares_llm::prompt::blue::build_blue_system_prompt(
+        role.as_str(),
+        &capabilities,
+        deployment.as_deref(),
+    )
+    .context("Failed to build blue orchestrator system prompt")?;
 
     // Build the task prompt with alert context using the initial alert prompt template
     let task_prompt = ares_llm::prompt::blue::build_initial_alert_prompt(

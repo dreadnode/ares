@@ -54,11 +54,37 @@ pub(super) fn build_event_filter(ids: &[&str]) -> String {
     }
 }
 
-/// Build a case-insensitive regex filter for tool/attack patterns.
+/// Check if a pattern contains regex metacharacters that require `|~`.
+fn is_regex_pattern(pattern: &str) -> bool {
+    pattern.chars().any(|c| {
+        matches!(
+            c,
+            '.' | '*' | '+' | '?' | '(' | ')' | '[' | ']' | '{' | '}' | '|' | '^' | '$' | '\\'
+        )
+    })
+}
+
+/// Build an optimized filter for tool/attack patterns.
+///
+/// Uses `|=` (case-sensitive contains) for single literal patterns since Loki
+/// evaluates contains ~10x faster than regex. Falls back to `|~` (regex) when
+/// patterns contain metacharacters or when multiple patterns need alternation.
 pub(super) fn build_pattern_filter(patterns: &[&str]) -> String {
     if patterns.is_empty() {
         return String::new();
     }
+    // Single literal pattern: use fast contains match
+    if patterns.len() == 1 && !is_regex_pattern(patterns[0]) {
+        return format!(r#" |= "{}""#, patterns[0]);
+    }
+    // 2-3 simple literals: chain |= filters (faster than regex alternation)
+    if patterns.len() <= 3 && patterns.iter().all(|p| !is_regex_pattern(p)) {
+        return patterns
+            .iter()
+            .map(|p| format!(r#" |= "{}""#, p))
+            .collect::<String>();
+    }
+    // Multiple or regex patterns: use case-insensitive regex alternation
     format!(r#" |~ "(?i)({})""#, patterns.join("|"))
 }
 

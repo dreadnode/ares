@@ -170,18 +170,21 @@ async fn execute_blue_task(
         .collect();
 
     // Build system prompt
-    let system_prompt =
-        match ares_llm::prompt::blue::build_blue_system_prompt(role.as_str(), &capabilities) {
-            Ok(p) => p,
-            Err(e) => {
-                return BlueTaskResult::failure(
-                    &task.task_id,
-                    &task.investigation_id,
-                    format!("Failed to build system prompt: {e}"),
-                    agent_name,
-                );
-            }
-        };
+    let system_prompt = match ares_llm::prompt::blue::build_blue_system_prompt(
+        role.as_str(),
+        &capabilities,
+        None,
+    ) {
+        Ok(p) => p,
+        Err(e) => {
+            return BlueTaskResult::failure(
+                &task.task_id,
+                &task.investigation_id,
+                format!("Failed to build system prompt: {e}"),
+                agent_name,
+            );
+        }
+    };
 
     // Build task prompt
     // First try to load investigation state summary (best-effort)

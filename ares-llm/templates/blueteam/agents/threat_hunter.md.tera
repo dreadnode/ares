@@ -78,7 +78,7 @@ When users are compromised via credential attacks, you MUST:
 2. **Prefer `|=` over `|~`** for line filters — contains is 10x faster than regex
 3. **Combine event IDs** — `|~ "4625|4624|4771"` instead of 3 queries
 4. **Event IDs first** — most selective filter goes first
-5. **Use deployment label**: `{job="windows-security", deployment="alpha-operator-range"}`
+{% if deployment %}5. **Use deployment label**: `{job="windows-security", deployment="{{ deployment }}"}`{% else %}5. **Use deployment label** if known: include `deployment="<name>"` in label selector{% endif %}
 
 ## Windows Event Detection Reference
 
@@ -95,6 +95,98 @@ When users are compromised via credential attacks, you MUST:
 | 7045 | Service install | PsExec (PSEXESVC), remote execution |
 | 4698 | Scheduled task | Persistence mechanisms |
 | 4728/4732/4756 | Group membership | Users added to privileged groups |
+
+## Ready-to-Use Detection Queries (CRITICAL)
+
+Use these exact LogQL queries. They are optimized for the Loki pipeline and tested against live data. {% if deployment %}Replace `DEPLOYMENT` with `{{ deployment }}`.{% endif %}
+
+### DCSync Detection (T1003.006) — Event 4662
+
+**Use TWO queries** — one to find attacker DCSync, one for full context:
+
+**Query 1 — Attacker DCSync ONLY (excludes machine accounts):**
+```
+{% if deployment %}{job="windows-security", deployment="{{ deployment }}"} |= "4662" |= "1131f6aa" !~ "SubjectUserName'.u003e[A-Z0-9_-]+[$]"{% else %}{job="windows-security"} |= "4662" |= "1131f6aa" !~ "SubjectUserName'.u003e[A-Z0-9_-]+[$]"{% endif %}
+```
+
+**Query 2 — ALL replication events (for context/timeline):**
+```
+{% if deployment %}{job="windows-security", deployment="{{ deployment }}"} |= "4662" |= "1131f6aa"{% else %}{job="windows-security"} |= "4662" |= "1131f6aa"{% endif %}
+```
+
+**DCSync Attribution Decision Tree (MANDATORY):**
+1. Run Query 1 first. If it returns results → **CONFIRMED DCSync ATTACK** (confidence 0.9+)
+   - These are user accounts performing domain replication = always malicious
+   - Record as T1003.006, pyramid level 6 (TTP), severity CRITICAL
+2. If Query 1 returns empty but Query 2 returns results → **normal AD replication** (confidence 0.1)
+   - All replication is from machine accounts (e.g., `KINGSLANDING$`, `DC01$`) = legitimate DCs
+   - Do NOT report as DCSync. Record as "normal replication observed, no attack confirmed"
+3. If both queries return empty → no replication events in time window
+
+**How to tell machine accounts from user accounts in results:**
+- Machine accounts: `SubjectUserName` ends with `$` (e.g., `KINGSLANDING$`, `WINTERFELL$`, `GUARDIAN-APP$`)
+- User accounts: no `$` suffix (e.g., `administrator`, `samwell.tarly`, `jon.snow`)
+- GUIDs: `1131f6aa` = DS-Replication-Get-Changes, `1131f6ad` = DS-Replication-Get-Changes-All
+
+### Kerberoasting Detection (T1558.003) — Event 4769
+```
+{% if deployment %}{job="windows-security", deployment="{{ deployment }}"} |= "4769" |= "0x17"{% else %}{job="windows-security"} |= "4769" |= "0x17"{% endif %}
+```
+- `TicketEncryptionType: 0x17` = RC4-HMAC — this is the Kerberoasting indicator
+- Normal Kerberos uses `0x12` (AES-256) or `0x11` (AES-128)
+- RC4 TGS requests for service accounts are almost always Kerberoasting
+- Check `ServiceName` — attacks target SPNs on user accounts, not machine accounts
+- High volume of 0x17 requests from one IP in a short window = bulk Kerberoasting
+
+### Golden Ticket Detection (T1558.001) — Events 4768/4769
+```
+{% if deployment %}{job="windows-security", deployment="{{ deployment }}"} |= "4769" |= "krbtgt"{% else %}{job="windows-security"} |= "4769" |= "krbtgt"{% endif %}
+```
+- Look for TGS requests where `ServiceName` contains `krbtgt` from non-DC IPs
+- Golden Tickets often have unusual `TicketOptions` values (e.g., `0x40810000` or `0x50800000`)
+- Check if the requesting IP is a known Domain Controller — if not, it's suspicious
+- Also search for `ticketer` or `mimikatz` in process/command-line logs (event 4688)
+
+### Constrained Delegation / S4U (T1558.003) — Event 4769
+```
+{% if deployment %}{job="windows-security", deployment="{{ deployment }}"} |= "4769" |= "TransmittedServices"{% else %}{job="windows-security"} |= "4769" |= "TransmittedServices"{% endif %}
+```
+- `TransmittedServices` field populated = S4U2Proxy (constrained delegation) in use
+- Check if the delegating account is expected to use delegation
+- Cross-reference with the SPN being accessed
+
+### AS-REP Roasting (T1558.004) — Event 4768
+```
+{% if deployment %}{job="windows-security", deployment="{{ deployment }}"} |= "4768" |= "0x17"{% else %}{job="windows-security"} |= "4768" |= "0x17"{% endif %}
+```
+- TGT requests with RC4 encryption for accounts with "Do not require Kerberos preauthentication"
+- Similar to Kerberoasting but targets AS-REQ instead of TGS-REQ
+
+### Lateral Movement via Admin Shares — Events 5140/5145
+```
+{% if deployment %}{job="windows-security", deployment="{{ deployment }}"} |~ "5140|5145" |~ "ADMIN\\$|C\\$|IPC\\$"{% else %}{job="windows-security"} |~ "5140|5145" |~ "ADMIN\\$|C\\$|IPC\\$"{% endif %}
+```
+- ADMIN$ + C$ access from non-admin workstations = PsExec or similar
+- IPC$ access from many hosts = potential enumeration
+
+## Efficient Query Batching
+
+For a comprehensive hunt, batch these queries with `execute_parallel_queries`:
+```json
+{
+  "queries": [
+    {"logql": "<DCSync attacker-only query>", "description": "DCSync ATTACK (4662 + replication GUID, machine accounts excluded)"},
+    {"logql": "<Kerberoasting query>", "description": "Kerberoasting (4769 + RC4)"},
+    {"logql": "<Golden Ticket query>", "description": "Golden Ticket (krbtgt TGS)"},
+    {"logql": "<Admin shares query>", "description": "Lateral movement (admin shares)"},
+    {"logql": "<Service install query>", "description": "Remote execution (7045)"}
+  ],
+  "start_time": "<alert_time - 15min>",
+  "end_time": "<alert_time + 15min>",
+  "limit": 50
+}
+```
+This runs all 5 detection queries in one tool call (~30s total) instead of 5 sequential calls (~150s).
 
 ## Evidence Recording
 - Record ALL indicators of compromise as evidence

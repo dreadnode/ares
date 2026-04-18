@@ -32,9 +32,28 @@ fn event_filter_empty() {
 }
 
 #[test]
-fn pattern_filter_builds_case_insensitive() {
+fn pattern_filter_uses_contains_for_few_literals() {
+    // 2 simple literals: chain |= filters (faster than regex)
     let filter = build_pattern_filter(&["nmap", "masscan"]);
-    assert_eq!(filter, r#" |~ "(?i)(nmap|masscan)""#);
+    assert_eq!(filter, r#" |= "nmap" |= "masscan""#);
+}
+
+#[test]
+fn pattern_filter_uses_regex_for_many_literals() {
+    let filter = build_pattern_filter(&["nmap", "masscan", "rustscan", "zmap"]);
+    assert_eq!(filter, r#" |~ "(?i)(nmap|masscan|rustscan|zmap)""#);
+}
+
+#[test]
+fn pattern_filter_uses_regex_for_metacharacters() {
+    let filter = build_pattern_filter(&["golden.*ticket"]);
+    assert_eq!(filter, r#" |~ "(?i)(golden.*ticket)""#);
+}
+
+#[test]
+fn pattern_filter_single_literal_uses_contains() {
+    let filter = build_pattern_filter(&["drsuapi"]);
+    assert_eq!(filter, r#" |= "drsuapi""#);
 }
 
 #[test]
@@ -205,6 +224,44 @@ fn s4u_template_has_exclude_patterns() {
     assert!(
         tmpl.logql.contains("TransmittedServices"),
         "S4U template should filter on TransmittedServices field"
+    );
+}
+
+#[test]
+fn dcsync_template_excludes_machine_accounts() {
+    let tmpl = build_detection_template("detect_dcsync", None).unwrap();
+    assert!(
+        tmpl.logql.contains("!~"),
+        "DCSync template should have exclusion filter for machine accounts"
+    );
+    assert!(
+        tmpl.logql.contains("SubjectUserName"),
+        "DCSync exclusion should filter on SubjectUserName"
+    );
+    assert!(
+        tmpl.logql.contains("[$]"),
+        "DCSync exclusion should match machine account $ suffix"
+    );
+    assert!(
+        tmpl.logql.contains(".u003e"),
+        "DCSync exclusion must use .u003e (not >) because Loki stores XML > as JSON-escaped \\u003e"
+    );
+}
+
+#[test]
+fn dcsync_replication_template_excludes_machine_accounts() {
+    let tmpl = build_detection_template("detect_dcsync_replication", None).unwrap();
+    assert!(
+        tmpl.logql.contains("!~"),
+        "DCSync replication template should have exclusion filter"
+    );
+    assert!(
+        tmpl.logql.contains("SubjectUserName"),
+        "DCSync replication exclusion should filter on SubjectUserName"
+    );
+    assert!(
+        tmpl.logql.contains(".u003e"),
+        "DCSync replication exclusion must use .u003e for Loki JSON-escaped XML"
     );
 }
 

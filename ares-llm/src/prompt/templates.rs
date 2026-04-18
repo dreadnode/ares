@@ -375,10 +375,31 @@ pub fn render_agent_instructions(
     multi_forest_mode: bool,
     undominated_forests: &[String],
 ) -> Result<String> {
+    render_agent_instructions_with_extras(
+        template_name,
+        capabilities,
+        multi_forest_mode,
+        undominated_forests,
+        &[],
+    )
+}
+
+/// Like `render_agent_instructions` but accepts additional (key, value) pairs
+/// to insert into the Tera context (e.g. `deployment` for blue team templates).
+pub fn render_agent_instructions_with_extras(
+    template_name: &str,
+    capabilities: &[String],
+    multi_forest_mode: bool,
+    undominated_forests: &[String],
+    extras: &[(&str, &str)],
+) -> Result<String> {
     let mut ctx = Context::new();
     ctx.insert("capabilities", capabilities);
     ctx.insert("multi_forest_mode", &multi_forest_mode);
     ctx.insert("undominated_forests", undominated_forests);
+    for (k, v) in extras {
+        ctx.insert(*k, v);
+    }
 
     TEMPLATES
         .render(template_name, &ctx)
