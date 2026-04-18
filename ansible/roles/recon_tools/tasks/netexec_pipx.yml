@@ -101,7 +101,7 @@
 
 - name: Inject source impacket into NetExec pipx venv
   ansible.builtin.command: >-
-    pipx inject netexec {{ recon_tools_impacket_install_dir }} --editable --force
+    pipx inject netexec {{ recon_tools_impacket_install_dir }} --force
   register: recon_tools_netexec_impacket_inject
   changed_when: false
   failed_when: false
@@ -125,16 +125,51 @@
     - recon_tools_impacket_from_source | default(false)
     - recon_tools_netexec_use_pipx | default(true)
 
-- name: Fail if regsecrets not available in NetExec venv
-  ansible.builtin.fail:
-    msg: |
-      CRITICAL: impacket.examples.regsecrets not importable from NetExec pipx venv.
-      The pipx inject may have failed. Check: pipx inject netexec /opt/impacket --editable --force
-      Inject output: {{ recon_tools_netexec_impacket_inject.stderr | default('none') }}
+- name: Copy impacket examples to NetExec venv site-packages (fallback for pipx inject)
+  ansible.builtin.shell: |
+    set -o pipefail
+    SITE_PACKAGES=$(/root/.local/pipx/venvs/netexec/bin/python -c "import site; print(site.getsitepackages()[0])")
+    if [ -d "$SITE_PACKAGES/impacket" ]; then
+      cp -r {{ recon_tools_impacket_install_dir }}/impacket/examples "$SITE_PACKAGES/impacket/"
+      echo "Copied examples to $SITE_PACKAGES/impacket/examples"
+    else
+      echo "impacket not in site-packages, using .pth fallback"
+      echo "{{ recon_tools_impacket_install_dir }}" > "$SITE_PACKAGES/impacket-source.pth"
+    fi
+  args:
+    executable: /bin/bash
+  register: recon_tools_netexec_examples_copy
+  changed_when: "'Copied examples' in recon_tools_netexec_examples_copy.stdout"
+  become: true
   when:
     - recon_tools_impacket_from_source | default(false)
     - recon_tools_netexec_use_pipx | default(true)
     - recon_tools_netexec_regsecrets_check.rc | default(1) != 0
+
+- name: Re-verify regsecrets after examples copy
+  ansible.builtin.command: >-
+    /root/.local/pipx/venvs/netexec/bin/python -c
+    "from impacket.examples import regsecrets; print('regsecrets OK')"
+  register: recon_tools_netexec_regsecrets_recheck
+  changed_when: false
+  failed_when: false
+  become: true
+  when:
+    - recon_tools_impacket_from_source | default(false)
+    - recon_tools_netexec_use_pipx | default(true)
+    - recon_tools_netexec_regsecrets_check.rc | default(1) != 0
+
+- name: Fail if regsecrets not available in NetExec venv
+  ansible.builtin.fail:
+    msg: |
+      CRITICAL: impacket.examples.regsecrets not importable from NetExec pipx venv.
+      pipx inject output: {{ recon_tools_netexec_impacket_inject.stderr | default('none') }}
+      Examples copy output: {{ recon_tools_netexec_examples_copy.stdout | default('none') }}
+  when:
+    - recon_tools_impacket_from_source | default(false)
+    - recon_tools_netexec_use_pipx | default(true)
+    - recon_tools_netexec_regsecrets_check.rc | default(1) != 0
+    - recon_tools_netexec_regsecrets_recheck.rc | default(1) != 0
 
 - name: Find nxc binary location
   ansible.builtin.shell: |

@@ -60,7 +60,6 @@ provisioners:
   - type: shell
     inline:
       - git clone --depth 1 https://${GITHUB_TOKEN}@github.com/dreadnode/ares.git /tmp/ares-build
-      - pipx install --force /tmp/ares-build
       - rm -rf /tmp/ares-build
 
   # Cleanup

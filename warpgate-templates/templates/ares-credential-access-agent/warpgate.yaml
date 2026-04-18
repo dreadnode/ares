@@ -15,7 +15,7 @@ metadata:
 name: ares-credential-access-agent
 version: latest
 base:
-  image: ghcr.io/dreadnode/ares-python-base:latest
+  image: debian:trixie-slim
   pull: true
   privileged: true
   volumes:
@@ -47,7 +47,22 @@ provisioners:
       - docker.arm64
       - docker.amd64
     inline:
-      - apt-get update
+      - apt-get update && apt-get install -y --no-install-recommends python3 python3-pip ansible-core git ca-certificates curl build-essential pkg-config libssl-dev libc6-dev
+  - type: file
+    source: ${sources.ares}
+    destination: /tmp/ares-build
+  - type: shell
+    only:
+      - docker.arm64
+      - docker.amd64
+    inline:
+      - curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
+      - export PATH="/root/.cargo/bin:$PATH"
+      - ln -sf /usr/bin/gcc /usr/local/bin/x86_64-unknown-linux-gnu-gcc
+      - ln -sf /usr/bin/gcc /usr/local/bin/aarch64-unknown-linux-gnu-gcc
+      - cd /tmp/ares-build && cargo build --release --bin ares
+      - cp /tmp/ares-build/target/release/ares /usr/local/bin/ares
+      - rm -rf /tmp/ares-build /root/.cargo /root/.rustup /usr/local/bin/x86_64-unknown-linux-gnu-gcc /usr/local/bin/aarch64-unknown-linux-gnu-gcc
   - type: ansible
     only:
       - docker.arm64
@@ -63,31 +78,12 @@ provisioners:
     ansible_env_vars:
       - ANSIBLE_REMOTE_TMP=/tmp/ansible-tmp-$USER
       - PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-  - type: file
-    source: ${sources.ares}
-    destination: /tmp/ares-build
-  - type: shell
-    only:
-      - docker.arm64
-      - docker.amd64
-    inline:
-      - apt-get update && apt-get install -y --reinstall --no-install-recommends libc6-dev libssl-dev pkg-config libgcc-$(gcc -dumpversion | cut -d. -f1)-dev
-      - ln -sf /usr/bin/gcc /usr/local/bin/x86_64-unknown-linux-gnu-gcc
-      - ln -sf /usr/bin/gcc /usr/local/bin/aarch64-unknown-linux-gnu-gcc
-      - cd /tmp/ares-build/ares-rust && cargo build --release --bin ares
-      - cp /tmp/ares-build/ares-rust/target/release/ares /usr/local/bin/ares
   - type: shell
     only:
       - docker.arm64
       - docker.amd64
     inline:
       - /tmp/post_ansible_cleanup.sh
-  - type: shell
-    only:
-      - docker.arm64
-      - docker.amd64
-    inline:
-      - rm -rf /tmp/ares-build /usr/local/bin/x86_64-unknown-linux-gnu-gcc /usr/local/bin/aarch64-unknown-linux-gnu-gcc
   - type: shell
     only:
       - docker.arm64

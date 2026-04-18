@@ -231,22 +231,10 @@ jobs:
       matrix: ${{ fromJson(needs.detect-changes.outputs.base_matrix) }}
       fail-fast: false
     steps:
-      - name: Generate GitHub App Token
-        if: matrix.provision_repo == 'ansible-collection-nimbus_range'
-        uses: actions/create-github-app-token@1b10c78c7865c340bc4f6099eb2f838309f1e8c3 # v3.1.1-beta.4
-        id: app-token
-        with:
-          app-id: ${{ secrets.BOT_APP_ID }}
-          private-key: ${{ secrets.BOT_APP_PRIVATE_KEY }}
-          repositories: |
-            ares-warpgate-templates
-            ansible-collection-nimbus_range
-            ares
-
       - name: Checkout git repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          token: ${{ steps.app-token.outputs.token || github.token }}
+          token: ${{ github.token }}
 
       - name: Setup XDG directories
         run: |
@@ -268,11 +256,11 @@ jobs:
         if: matrix.needs_ansible == true
         run: python3 -m pip install ansible
 
-      - name: Clone ansible-collection repository
+      - name: Copy ansible-collection from repo
         if: matrix.needs_ansible == true
         run: |
           if [ "${{ matrix.provision_repo }}" == "ansible-collection-nimbus_range" ]; then
-            git clone "https://x-access-token:${{ steps.app-token.outputs.token }}@github.com/dreadnode/ansible-collection-nimbus_range.git" "$HOME/ansible-collection-nimbus_range"
+            cp -r "$GITHUB_WORKSPACE/ansible" "$HOME/ansible-collection-nimbus_range"
           fi
 
       - name: Install Ansible Collection
@@ -291,7 +279,7 @@ jobs:
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
-          password: ${{ secrets.WG_IMAGE_BUILDER_PAT }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Free up disk space
         run: |
@@ -364,7 +352,7 @@ jobs:
 
       - name: Test build ${{ matrix.name }} (amd64)
         run: |
-          cd "$GITHUB_WORKSPACE/warpgate-templates/${{ matrix.name }}"
+          cd "$GITHUB_WORKSPACE/warpgate-templates/templates/${{ matrix.name }}"
 
           export PROVISION_REPO_PATH="$HOME/${{ matrix.provision_repo_path }}"
 
@@ -381,7 +369,7 @@ jobs:
 
           echo "Build successful for ${{ matrix.name }}"
         env:
-          GITHUB_TOKEN: ${{ steps.app-token.outputs.token || github.token }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Free up disk space after build
         run: |
@@ -433,22 +421,10 @@ jobs:
       matrix: ${{ fromJson(needs.detect-changes.outputs.dependent_matrix) }}
       fail-fast: false
     steps:
-      - name: Generate GitHub App Token
-        if: matrix.provision_repo == 'ansible-collection-nimbus_range'
-        uses: actions/create-github-app-token@1b10c78c7865c340bc4f6099eb2f838309f1e8c3 # v3.1.1-beta.4
-        id: app-token
-        with:
-          app-id: ${{ secrets.BOT_APP_ID }}
-          private-key: ${{ secrets.BOT_APP_PRIVATE_KEY }}
-          repositories: |
-            ares-warpgate-templates
-            ansible-collection-nimbus_range
-            ares
-
       - name: Checkout git repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          token: ${{ steps.app-token.outputs.token || github.token }}
+          token: ${{ github.token }}
 
       - name: Setup XDG directories
         run: |
@@ -470,11 +446,11 @@ jobs:
         if: matrix.needs_ansible == true
         run: python3 -m pip install ansible
 
-      - name: Clone ansible-collection repository
+      - name: Copy ansible-collection from repo
         if: matrix.needs_ansible == true
         run: |
           if [ "${{ matrix.provision_repo }}" == "ansible-collection-nimbus_range" ]; then
-            git clone "https://x-access-token:${{ steps.app-token.outputs.token }}@github.com/dreadnode/ansible-collection-nimbus_range.git" "$HOME/ansible-collection-nimbus_range"
+            cp -r "$GITHUB_WORKSPACE/ansible" "$HOME/ansible-collection-nimbus_range"
           fi
 
       - name: Install Ansible Collection
@@ -493,7 +469,7 @@ jobs:
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
-          password: ${{ secrets.WG_IMAGE_BUILDER_PAT }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Free up disk space
         run: |
@@ -616,7 +592,7 @@ jobs:
 
       - name: Test build ${{ matrix.name }} (amd64)
         run: |
-          cd "$GITHUB_WORKSPACE/warpgate-templates/${{ matrix.name }}"
+          cd "$GITHUB_WORKSPACE/warpgate-templates/templates/${{ matrix.name }}"
 
           export PROVISION_REPO_PATH="$HOME/${{ matrix.provision_repo_path }}"
 
@@ -629,7 +605,7 @@ jobs:
 
           echo "Build successful for ${{ matrix.name }}"
         env:
-          GITHUB_TOKEN: ${{ steps.app-token.outputs.token || github.token }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   summary:
     name: Test Build Summary
