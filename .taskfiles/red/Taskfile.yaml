@@ -79,7 +79,6 @@ tasks:
             DREADNODE_WORKSPACE="{{.DREADNODE_WORKSPACE}}" \
             DREADNODE_PROJECT="{{.DREADNODE_PROJECT}}" \
             ARES_CONFIG="/etc/ares/config.yaml" \
-            ARES_MULTI_FOREST_MODE=true \
             GRAFANA_URL="{{.GRAFANA_URL}}" \
             ares --redis-url "{{.REDIS_URL}}" ops submit \
             "{{.TARGET}}" "{{.DOMAIN}}" \

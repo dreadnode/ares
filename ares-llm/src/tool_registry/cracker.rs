@@ -34,8 +34,8 @@ pub(super) fn tool_definitions() -> Vec<ToolDefinition> {
                     },
                     "max_time_minutes": {
                         "type": "integer",
-                        "description": "Maximum time in minutes before aborting the crack attempt. Defaults to 10.",
-                        "default": 10
+                        "description": "Maximum time in minutes before aborting the crack attempt. Defaults to 20. Do NOT set below 20 — CPU-only cracking needs time to traverse large wordlists.",
+                        "default": 20
                     },
                     "use_dynamic_wordlist": {
                         "type": "boolean",
@@ -75,8 +75,8 @@ pub(super) fn tool_definitions() -> Vec<ToolDefinition> {
                     },
                     "max_time_minutes": {
                         "type": "integer",
-                        "description": "Maximum time in minutes before aborting the crack attempt. Defaults to 10.",
-                        "default": 10
+                        "description": "Maximum time in minutes before aborting the crack attempt. Defaults to 20. Do NOT set below 20 — CPU-only cracking needs time to traverse large wordlists.",
+                        "default": 20
                     },
                     "use_dynamic_wordlist": {
                         "type": "boolean",

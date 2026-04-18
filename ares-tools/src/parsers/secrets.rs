@@ -3,7 +3,13 @@
 use serde_json::{json, Value};
 
 pub fn parse_secretsdump(output: &str, params: &Value) -> (Vec<Value>, Vec<Value>) {
-    let domain = params.get("domain").and_then(|v| v.as_str()).unwrap_or("");
+    // Prefer target_domain (the domain being dumped) over domain (auth credential's domain)
+    // to correctly attribute hashes when authenticating cross-domain.
+    let domain = params
+        .get("target_domain")
+        .or_else(|| params.get("domain"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
 
     let mut hashes = Vec::new();
     let creds = Vec::new();

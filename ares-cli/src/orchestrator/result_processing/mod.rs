@@ -49,14 +49,19 @@ pub async fn process_completed_task(
     let task_id = &completed.task_id;
     let result = &completed.result;
 
-    let cred_key = {
+    // Extract task-level metadata from pending_tasks before complete_task removes it.
+    let (cred_key, task_domain) = {
         let state = dispatcher.state.read().await;
-        state
-            .pending_tasks
-            .get(task_id.as_str())
+        let task = state.pending_tasks.get(task_id.as_str());
+        let ck = task
             .and_then(|t| t.params.get("credential_key"))
             .and_then(|v| v.as_str())
-            .map(|s| s.to_string())
+            .map(|s| s.to_string());
+        let td = task
+            .and_then(|t| t.params.get("domain"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        (ck, td)
     };
 
     {
@@ -107,7 +112,11 @@ pub async fn process_completed_task(
     // Secondary pass: regex-based extraction from raw text in the result.
     // This catches discoveries that the per-tool parsers or LLM may have missed.
     if let Some(ref payload) = result.result {
-        let default_domain = get_default_domain(dispatcher).await;
+        let default_domain = if let Some(ref td) = task_domain {
+            td.clone()
+        } else {
+            get_default_domain(dispatcher).await
+        };
         extract_from_raw_text(payload, dispatcher, &default_domain).await;
     }
 
@@ -221,42 +230,48 @@ async fn auto_chain_s4u_secretsdump(payload: &Value, dispatcher: &Arc<Dispatcher
         "Detected .ccache ticket — chaining secretsdump"
     );
 
-    // Try to extract target from the task params (target_spn → host) or ccache filename
-    let target_ip = payload
-        .get("target_spn")
-        .and_then(|v| v.as_str())
+    // Look up original task request params (the result payload is LLM output,
+    // which won't have target_spn/target/target_ip).
+    let original_params: Option<serde_json::Value> = {
+        let state = dispatcher.state.read().await;
+        state
+            .pending_tasks
+            .get(task_id)
+            .map(|t| serde_json::to_value(&t.params).unwrap_or_default())
+    };
+
+    // Helper: look up a string field from original params first, then result payload.
+    let get_param = |key: &str| -> Option<&str> {
+        original_params
+            .as_ref()
+            .and_then(|p| p.get(key))
+            .and_then(|v| v.as_str())
+            .or_else(|| payload.get(key).and_then(|v| v.as_str()))
+    };
+
+    // Try to extract target from the original task params or ccache filename
+    let target_ip = get_param("target_spn")
         .and_then(ares_llm::routing::extract_host_from_spn)
         .or_else(|| {
             // Try to parse target from ccache filename:
-            // Administrator@cifs_dc01.contoso.local@CONTOSO.LOCAL.ccache
+            // Administrator@CIFS_winterfell@NORTH.SEVENKINGDOMS.LOCAL.ccache
             let fname = ticket_path.rsplit('/').next().unwrap_or(&ticket_path);
             if let Some(at_pos) = fname.find('@') {
                 let after = &fname[at_pos + 1..];
-                // Extract hostname: cifs_dc01.contoso.local@REALM.ccache
+                // Extract hostname: CIFS_winterfell@REALM.ccache → CIFS.winterfell
                 let host_part = after.split('@').next().unwrap_or(after).replace('_', ".");
-                // Remove the service prefix (cifs. → dc01.contoso.local)
+                // Remove the service prefix (CIFS. → winterfell)
                 if let Some(dot_pos) = host_part.find('.') {
                     let candidate = &host_part[dot_pos + 1..];
-                    if candidate.contains('.') {
+                    if !candidate.is_empty() {
                         return Some(candidate.to_string());
                     }
                 }
             }
             None
         })
-        .or_else(|| {
-            // Fallback: use target_ip from the task payload
-            payload
-                .get("target_ip")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string())
-        })
-        .or_else(|| {
-            payload
-                .get("target")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string())
-        });
+        .or_else(|| get_param("target_ip").map(|s| s.to_string()))
+        .or_else(|| get_param("target").map(|s| s.to_string()));
 
     let target_ip = match target_ip {
         Some(ip) => ip,
@@ -283,15 +298,12 @@ async fn auto_chain_s4u_secretsdump(payload: &Value, dispatcher: &Arc<Dispatcher
         }
     };
 
-    let domain = payload.get("domain").and_then(|v| v.as_str()).unwrap_or("");
+    let domain = get_param("domain").unwrap_or("");
 
     // Dispatch secretsdump with ticket (no password needed).
     // Must include username — secretsdump requires it even with -k -no-pass.
     // The S4U impersonates Administrator, so use that as default.
-    let username = payload
-        .get("impersonate")
-        .and_then(|v| v.as_str())
-        .unwrap_or("Administrator");
+    let username = get_param("impersonate").unwrap_or("Administrator");
     let sd_payload = serde_json::json!({
         "technique": "secretsdump",
         "techniques": ["secretsdump"],

@@ -72,20 +72,29 @@ pub async fn auto_trust_follow(dispatcher: Arc<Dispatcher>, mut shutdown: watch:
                         let s = dispatcher.state.read().await;
                         let dd = domain.to_lowercase();
 
+                        // On hash-based retry, skip password creds entirely —
+                        // they already failed on the first attempt (typically a
+                        // child-domain credential that can't LDAP-bind to the
+                        // parent DC with the wrong domain context).
+                        let is_hash_retry = key.starts_with("trust_enum_hash:");
+
                         // First try: password credential (exact or child↔parent match)
-                        let pw_cred = s
-                            .credentials
-                            .iter()
-                            .find(|c| {
-                                if c.password.is_empty() {
-                                    return false;
-                                }
-                                let cd = c.domain.to_lowercase();
-                                cd == dd
-                                    || cd.ends_with(&format!(".{}", dd))
-                                    || dd.ends_with(&format!(".{}", cd))
-                            })
-                            .cloned();
+                        let pw_cred = if !is_hash_retry {
+                            s.credentials
+                                .iter()
+                                .find(|c| {
+                                    if c.password.is_empty() {
+                                        return false;
+                                    }
+                                    let cd = c.domain.to_lowercase();
+                                    cd == dd
+                                        || cd.ends_with(&format!(".{}", dd))
+                                        || dd.ends_with(&format!(".{}", cd))
+                                })
+                                .cloned()
+                        } else {
+                            None
+                        };
 
                         if let Some(cred) = pw_cred {
                             (
@@ -99,7 +108,7 @@ pub async fn auto_trust_follow(dispatcher: Arc<Dispatcher>, mut shutdown: watch:
                         } else {
                             // Fallback: find an admin NTLM hash for this exact domain
                             let admin_hash = s.hashes.iter().find(|h| {
-                                h.hash_type == "ntlm"
+                                h.hash_type.to_lowercase() == "ntlm"
                                     && h.domain.to_lowercase() == dd
                                     && h.username.to_lowercase() == "administrator"
                             });
