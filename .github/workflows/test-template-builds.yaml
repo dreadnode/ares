@@ -352,7 +352,7 @@ jobs:
 
       - name: Test build ${{ matrix.name }} (amd64)
         run: |
-          cd "$GITHUB_WORKSPACE/warpgate-templates/${{ matrix.name }}"
+          cd "$GITHUB_WORKSPACE/warpgate-templates/templates/${{ matrix.name }}"
 
           export PROVISION_REPO_PATH="$HOME/${{ matrix.provision_repo_path }}"
 
@@ -592,7 +592,7 @@ jobs:
 
       - name: Test build ${{ matrix.name }} (amd64)
         run: |
-          cd "$GITHUB_WORKSPACE/warpgate-templates/${{ matrix.name }}"
+          cd "$GITHUB_WORKSPACE/warpgate-templates/templates/${{ matrix.name }}"
 
           export PROVISION_REPO_PATH="$HOME/${{ matrix.provision_repo_path }}"
 

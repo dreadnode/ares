@@ -668,6 +668,7 @@ jobs:
       - name: Build ${{ matrix.architecture.arch }} Image
         run: |
           export PROVISION_REPO_PATH="$HOME/${{ matrix.provision_repo_path }}"
+          cd "$GITHUB_WORKSPACE/warpgate-templates"
 
           # Build using --template flag to enable BuildKit cache
           # Using template name (not file path) sets IsLocalTemplate=false, enabling cache
@@ -1140,6 +1141,7 @@ jobs:
       - name: Build ${{ matrix.architecture.arch }} Image
         run: |
           export PROVISION_REPO_PATH="$HOME/${{ matrix.provision_repo_path }}"
+          cd "$GITHUB_WORKSPACE/warpgate-templates"
 
           # Build using --template flag to enable BuildKit cache
           # Using template name (not file path) sets IsLocalTemplate=false, enabling cache
