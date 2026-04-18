@@ -516,6 +516,10 @@ jobs:
       - name: Add swap space
         run: |
           # Add 16GB swap for large image builds (GPU images can be 2GB+)
+          if [ -f /swapfile ]; then
+            sudo swapoff /swapfile || true
+            sudo rm -f /swapfile
+          fi
           sudo fallocate -l 16G /swapfile
           sudo chmod 600 /swapfile
           sudo mkswap /swapfile
@@ -984,6 +988,10 @@ jobs:
       - name: Add swap space
         run: |
           # Add 16GB swap for large image builds (GPU images can be 2GB+)
+          if [ -f /swapfile ]; then
+            sudo swapoff /swapfile || true
+            sudo rm -f /swapfile
+          fi
           sudo fallocate -l 16G /swapfile
           sudo chmod 600 /swapfile
           sudo mkswap /swapfile
@@ -1430,6 +1438,10 @@ jobs:
 
       - name: Add swap space
         run: |
+          if [ -f /swapfile ]; then
+            sudo swapoff /swapfile || true
+            sudo rm -f /swapfile
+          fi
           sudo fallocate -l 16G /swapfile
           sudo chmod 600 /swapfile
           sudo mkswap /swapfile
@@ -1743,6 +1755,10 @@ jobs:
 
       - name: Add swap space
         run: |
+          if [ -f /swapfile ]; then
+            sudo swapoff /swapfile || true
+            sudo rm -f /swapfile
+          fi
           sudo fallocate -l 16G /swapfile
           sudo chmod 600 /swapfile
           sudo mkswap /swapfile
