@@ -101,7 +101,7 @@
 
 - name: Inject source impacket into NetExec pipx venv
   ansible.builtin.command: >-
-    pipx inject netexec {{ recon_tools_impacket_install_dir }} --editable --force
+    pipx inject netexec {{ recon_tools_impacket_install_dir }} --force
   register: recon_tools_netexec_impacket_inject
   changed_when: false
   failed_when: false
@@ -127,10 +127,11 @@
 
 - name: Reinstall source impacket into NetExec venv via pip (fallback for pipx inject)
   ansible.builtin.command: >-
-    /root/.local/pipx/venvs/netexec/bin/pip install
+    /root/.local/pipx/venvs/netexec/bin/python -m pip install
     {{ recon_tools_impacket_install_dir }} --force-reinstall --no-deps
   register: recon_tools_netexec_pip_fallback
   changed_when: "'Successfully installed' in recon_tools_netexec_pip_fallback.stdout"
+  failed_when: false
   become: true
   when:
     - recon_tools_impacket_from_source | default(false)
@@ -154,7 +155,7 @@
   ansible.builtin.fail:
     msg: |
       CRITICAL: impacket.examples.regsecrets not importable from NetExec pipx venv.
-      The pipx inject may have failed. Check: pipx inject netexec /opt/impacket --editable --force
+      The pipx inject may have failed. Check: pipx inject netexec /opt/impacket --force
       Inject output: {{ recon_tools_netexec_impacket_inject.stderr | default('none') }}
       Pip fallback output: {{ recon_tools_netexec_pip_fallback.stdout | default('none') }}
   when:
