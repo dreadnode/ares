@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
-use ares_core::models::{SharedRedTeamState, VulnerabilityInfo};
+use ares_core::models::{Credential, Hash, SharedRedTeamState, VulnerabilityInfo};
 
 use super::format_duration;
 use super::hosts::{clean_os_string, dedup_hosts, is_real_service};
@@ -26,17 +26,7 @@ pub(super) fn print_loot_human(
         println!("Running:   {elapsed}");
     }
 
-    if state.has_domain_admin {
-        println!("*** DOMAIN ADMIN ACHIEVED ***");
-        if let Some(path) = &state.domain_admin_path {
-            println!("  Path: {path}");
-        }
-    }
-    if state.has_golden_ticket {
-        println!("*** GOLDEN TICKET OBTAINED ***");
-    }
-    println!();
-
+    // --- Compute domains and forest structure ---
     let mut domains: Vec<String> = domains_input
         .iter()
         .map(|d| d.trim().trim_end_matches('.').to_lowercase())
@@ -60,16 +50,99 @@ pub(super) fn print_loot_human(
             forest_roots.push(domain.clone());
         }
     }
-
     forest_roots.sort();
 
+    // --- Build per-domain achievement status ---
+    let achievements = build_domain_achievements(state, hashes, credentials);
+    let compromised_count = achievements
+        .values()
+        .filter(|a| a.has_da || a.has_golden_ticket)
+        .count();
+    let compromised_forests: Vec<_> = forest_roots
+        .iter()
+        .filter(|root| {
+            let root_hit = achievements
+                .get(*root)
+                .map(|a| a.has_da || a.has_golden_ticket)
+                .unwrap_or(false);
+            let child_hit = child_domains
+                .iter()
+                .filter(|(_, parent)| *parent == *root)
+                .any(|(child, _)| {
+                    achievements
+                        .get(child)
+                        .map(|a| a.has_da || a.has_golden_ticket)
+                        .unwrap_or(false)
+                });
+            root_hit || child_hit
+        })
+        .cloned()
+        .collect();
+
+    // --- Achievement section ---
+    if state.has_domain_admin || state.has_golden_ticket || !achievements.is_empty() {
+        println!("========================================");
+        if state.has_domain_admin {
+            if let Some(path) = &state.domain_admin_path {
+                println!("  DOMAIN ADMIN ACHIEVED  (path: {path})");
+            } else {
+                println!("  DOMAIN ADMIN ACHIEVED");
+            }
+        }
+        if state.has_golden_ticket {
+            println!("  GOLDEN TICKET OBTAINED");
+        }
+        println!("========================================");
+
+        if !achievements.is_empty() {
+            println!();
+            println!(
+                "Domain Compromise ({}/{} domains, {}/{} forests):",
+                compromised_count,
+                domains.len(),
+                compromised_forests.len(),
+                forest_roots.len()
+            );
+
+            // Print in forest-root -> children order
+            let mut printed: HashSet<String> = HashSet::new();
+            for root in &forest_roots {
+                print_domain_achievement(root, &achievements, "  ");
+                printed.insert(root.clone());
+                let mut children: Vec<_> = child_domains
+                    .iter()
+                    .filter(|(_, parent)| *parent == root)
+                    .map(|(child, _)| child.clone())
+                    .collect();
+                children.sort();
+                for child in &children {
+                    print_domain_achievement(child, &achievements, "    ");
+                    printed.insert(child.clone());
+                }
+            }
+            // Any achievement domains not in the discovered domain list
+            let mut extra: Vec<_> = achievements
+                .keys()
+                .filter(|d| !printed.contains(*d))
+                .cloned()
+                .collect();
+            extra.sort();
+            for domain in &extra {
+                print_domain_achievement(domain, &achievements, "  ");
+            }
+        }
+        println!();
+    }
+
+    // --- Domains ---
     println!("Domains ({}):", domains.len());
     if domains.is_empty() {
         println!("  - None");
     } else {
         let mut displayed = HashSet::new();
         for root in &forest_roots {
-            println!("  - {root} (forest root)");
+            let tags = domain_compromise_tags(root, &achievements);
+            println!("  - {root} (forest root){tags}");
             displayed.insert(root.clone());
             let mut children: Vec<_> = child_domains
                 .iter()
@@ -78,7 +151,8 @@ pub(super) fn print_loot_human(
                 .collect();
             children.sort();
             for child in &children {
-                println!("    \u{2514}\u{2500} {child} (child)");
+                let tags = domain_compromise_tags(child, &achievements);
+                println!("    \u{2514}\u{2500} {child} (child){tags}");
                 displayed.insert(child.clone());
             }
         }
@@ -90,7 +164,8 @@ pub(super) fn print_loot_human(
         remaining.sort();
         for child in &remaining {
             let parent = &child_domains[child];
-            println!("  - {child} (child of {parent})");
+            let tags = domain_compromise_tags(child, &achievements);
+            println!("  - {child} (child of {parent}){tags}");
         }
     }
     println!();
@@ -470,6 +545,160 @@ fn print_mitre_techniques(techniques: &[String], timeline_events: &[serde_json::
         }
     }
     println!();
+}
+
+// ---------------------------------------------------------------------------
+// Per-domain compromise helpers
+// ---------------------------------------------------------------------------
+
+/// Resolve a domain to its FQDN using the NetBIOS mapping.
+fn resolve_domain_fqdn(domain: &str, netbios_to_fqdn: &HashMap<String, String>) -> String {
+    let lower = domain.trim().trim_end_matches('.').to_lowercase();
+    if lower.is_empty() || lower.contains('.') {
+        return lower;
+    }
+    if let Some(fqdn) = netbios_to_fqdn.get(&lower) {
+        return fqdn.to_lowercase();
+    }
+    if let Some(fqdn) = netbios_to_fqdn.get(&domain.to_uppercase()) {
+        return fqdn.to_lowercase();
+    }
+    lower
+}
+
+/// Per-domain achievement status.
+#[derive(Default)]
+pub(super) struct DomainAchievement {
+    pub has_da: bool,
+    pub has_golden_ticket: bool,
+    pub krbtgt_hash_types: Vec<String>,
+    pub admin_users: Vec<String>,
+}
+
+/// Build per-domain achievements from hashes, credentials, and vulnerabilities.
+pub(super) fn build_domain_achievements(
+    state: &SharedRedTeamState,
+    hashes: &[Hash],
+    credentials: &[Credential],
+) -> HashMap<String, DomainAchievement> {
+    let mut achievements: HashMap<String, DomainAchievement> = HashMap::new();
+
+    // krbtgt hashes indicate DA for that domain
+    for h in hashes {
+        if h.username.eq_ignore_ascii_case("krbtgt") {
+            let domain = resolve_domain_fqdn(&h.domain, &state.netbios_to_fqdn);
+            if domain.is_empty() {
+                continue;
+            }
+            let entry = achievements.entry(domain).or_default();
+            entry.has_da = true;
+            if !entry.krbtgt_hash_types.contains(&h.hash_type) {
+                entry.krbtgt_hash_types.push(h.hash_type.clone());
+            }
+        }
+    }
+
+    // golden_ticket vulnerabilities
+    for vuln in state.discovered_vulnerabilities.values() {
+        if vuln.vuln_type == "golden_ticket" {
+            if let Some(domain_val) = vuln.details.get("domain") {
+                let raw = domain_val.as_str().unwrap_or("");
+                let domain = resolve_domain_fqdn(raw, &state.netbios_to_fqdn);
+                if !domain.is_empty() {
+                    achievements.entry(domain).or_default().has_golden_ticket = true;
+                }
+            }
+        }
+    }
+
+    // Admin credentials
+    for c in credentials {
+        if c.is_admin {
+            let domain = resolve_domain_fqdn(&c.domain, &state.netbios_to_fqdn);
+            if domain.is_empty() {
+                continue;
+            }
+            let entry = achievements.entry(domain).or_default();
+            let username = c.username.to_lowercase();
+            if !entry.admin_users.contains(&username) {
+                entry.admin_users.push(username);
+            }
+        }
+    }
+
+    // Administrator hashes also indicate DA
+    for h in hashes {
+        if h.username.eq_ignore_ascii_case("administrator") {
+            let domain = resolve_domain_fqdn(&h.domain, &state.netbios_to_fqdn);
+            if domain.is_empty() {
+                continue;
+            }
+            let entry = achievements.entry(domain).or_default();
+            entry.has_da = true;
+            let name = "administrator".to_string();
+            if !entry.admin_users.contains(&name) {
+                entry.admin_users.push(name);
+            }
+        }
+    }
+
+    achievements
+}
+
+/// Print a single domain's achievement line in the compromise summary.
+fn print_domain_achievement(
+    domain: &str,
+    achievements: &HashMap<String, DomainAchievement>,
+    indent: &str,
+) {
+    let Some(status) = achievements.get(domain) else {
+        return;
+    };
+    if !status.has_da && !status.has_golden_ticket {
+        return;
+    }
+    let mut tags = Vec::new();
+    if status.has_da {
+        tags.push("DA");
+    }
+    if status.has_golden_ticket {
+        tags.push("GT");
+    }
+    let tag_str = tags.join(" + ");
+
+    let mut details = Vec::new();
+    if !status.krbtgt_hash_types.is_empty() {
+        details.push(format!("krbtgt: {}", status.krbtgt_hash_types.join(", ")));
+    }
+    if !status.admin_users.is_empty() {
+        details.push(format!("admin: {}", status.admin_users.join(", ")));
+    }
+    let detail_str = if details.is_empty() {
+        String::new()
+    } else {
+        format!("  ({})", details.join("; "))
+    };
+    println!("{indent}{domain:<40} {tag_str}{detail_str}");
+}
+
+/// Format [DA] [GT] tags for a domain in the domain list.
+fn domain_compromise_tags(
+    domain: &str,
+    achievements: &HashMap<String, DomainAchievement>,
+) -> String {
+    if let Some(status) = achievements.get(domain) {
+        let mut tags = Vec::new();
+        if status.has_da {
+            tags.push("[DA]");
+        }
+        if status.has_golden_ticket {
+            tags.push("[GT]");
+        }
+        if !tags.is_empty() {
+            return format!(" {}", tags.join(" "));
+        }
+    }
+    String::new()
 }
 
 /// Map common MITRE ATT&CK technique IDs to human-readable names.

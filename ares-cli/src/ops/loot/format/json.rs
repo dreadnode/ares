@@ -1,5 +1,8 @@
+use std::collections::HashMap;
+
 use ares_core::models::SharedRedTeamState;
 
+use super::display::build_domain_achievements;
 use super::hosts::dedup_hosts;
 use crate::dedup::{dedup_credentials, dedup_hashes, dedup_users};
 
@@ -18,6 +21,97 @@ pub(super) fn print_loot_json(
         &state.domain_controllers,
     );
 
+    // Build per-domain compromise status
+    let achievements = build_domain_achievements(state, &unique_hashes, &unique_creds);
+
+    // Build forest structure
+    let mut all_domains: Vec<String> = domains
+        .iter()
+        .map(|d| d.trim().trim_end_matches('.').to_lowercase())
+        .filter(|d| !d.is_empty())
+        .collect();
+    all_domains.sort();
+    all_domains.dedup();
+
+    let mut forest_roots: Vec<String> = Vec::new();
+    let mut child_map: HashMap<String, String> = HashMap::new();
+    for domain in &all_domains {
+        let parts: Vec<&str> = domain.split('.').collect();
+        if parts.len() >= 3 {
+            let parent = parts[1..].join(".");
+            if all_domains.contains(&parent) {
+                child_map.insert(domain.clone(), parent);
+            } else {
+                forest_roots.push(domain.clone());
+            }
+        } else {
+            forest_roots.push(domain.clone());
+        }
+    }
+
+    let domain_compromise: Vec<serde_json::Value> = all_domains
+        .iter()
+        .map(|d| {
+            let (has_da, has_gt, krbtgt_types, admin_users) = if let Some(a) = achievements.get(d) {
+                (
+                    a.has_da,
+                    a.has_golden_ticket,
+                    a.krbtgt_hash_types.clone(),
+                    a.admin_users.clone(),
+                )
+            } else {
+                (false, false, vec![], vec![])
+            };
+            let role = if forest_roots.contains(d) {
+                "forest_root"
+            } else if child_map.contains_key(d) {
+                "child"
+            } else {
+                "unknown"
+            };
+            serde_json::json!({
+                "domain": d,
+                "role": role,
+                "parent": child_map.get(d),
+                "has_domain_admin": has_da,
+                "has_golden_ticket": has_gt,
+                "krbtgt_hash_types": krbtgt_types,
+                "admin_users": admin_users,
+            })
+        })
+        .collect();
+
+    let forest_compromise: Vec<serde_json::Value> = forest_roots
+        .iter()
+        .map(|root| {
+            let root_compromised = achievements
+                .get(root)
+                .map(|a| a.has_da || a.has_golden_ticket)
+                .unwrap_or(false);
+            let children: Vec<String> = child_map
+                .iter()
+                .filter(|(_, parent)| *parent == root)
+                .map(|(child, _)| child.clone())
+                .collect();
+            let compromised_children: Vec<&String> = children
+                .iter()
+                .filter(|c| {
+                    achievements
+                        .get(*c)
+                        .map(|a| a.has_da || a.has_golden_ticket)
+                        .unwrap_or(false)
+                })
+                .collect();
+            serde_json::json!({
+                "forest_root": root,
+                "compromised": root_compromised || !compromised_children.is_empty(),
+                "root_compromised": root_compromised,
+                "total_domains": 1 + children.len(),
+                "compromised_domains": (if root_compromised { 1 } else { 0 }) + compromised_children.len(),
+            })
+        })
+        .collect();
+
     let output = serde_json::json!({
         "operation_id": state.operation_id,
         "started_at": state.started_at.to_rfc3339(),
@@ -25,6 +119,8 @@ pub(super) fn print_loot_json(
         "has_domain_admin": state.has_domain_admin,
         "domain_admin_path": state.domain_admin_path,
         "has_golden_ticket": state.has_golden_ticket,
+        "domain_compromise": domain_compromise,
+        "forest_compromise": forest_compromise,
         "domains": domains,
         "hosts": merged_hosts.iter().map(|h| serde_json::json!({
             "ip": h.ip,

