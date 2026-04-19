@@ -65,34 +65,32 @@ pub static BLUE_ROLE_TO_PHASE: LazyLock<HashMap<&str, &str>> = LazyLock::new(|| 
 
 // =============================================================================
 // Tool → MITRE Technique ID
+//
+// Keys MUST match the tool names in ares_tools::dispatch().
 // =============================================================================
 
 /// Tool name → MITRE ATT&CK technique ID.
 pub static TOOL_TO_TECHNIQUE: LazyLock<HashMap<&str, &str>> = LazyLock::new(|| {
     HashMap::from([
-        // Reconnaissance / Discovery
+        // ── Reconnaissance / Discovery ──────────────────────────────────
         ("nmap_scan", "T1046"),
-        ("portscan", "T1046"),
-        ("ping_sweep", "T1018"),
         ("smb_sweep", "T1046"),
-        ("resolve_domain_controllers", "T1018"),
-        ("ldap_domain_dump", "T1087.002"),
+        ("smb_signing_check", "T1046"),
+        ("enumerate_users", "T1087.002"),
+        ("enumerate_shares", "T1135"),
+        ("run_bloodhound", "T1087.002"),
         ("ldap_search", "T1087.002"),
         ("ldap_search_descriptions", "T1087.002"),
-        ("bloodhound_collection", "T1087.002"),
-        ("run_bloodhound", "T1087.002"),
-        ("sharphound", "T1087.002"),
-        ("get_domain_info", "T1087.002"),
-        ("enumerate_users", "T1087.002"),
-        ("enum_domain_trusts", "T1482"),
-        ("enumerate_forest", "T1482"),
-        ("enum_constrained_delegation", "T1087.002"),
-        ("enum_unconstrained_delegation", "T1087.002"),
-        ("enum_rbcd_targets", "T1087.002"),
-        ("smb_share_enum", "T1135"),
-        ("enumerate_shares", "T1135"),
-        ("smbclient_ls", "T1135"),
-        // Credential Access
+        ("rpcclient_command", "T1087.002"),
+        ("dig_query", "T1018"),
+        ("enumerate_domain_trusts", "T1482"),
+        ("check_rdp_reachability", "T1046"),
+        ("check_winrm_reachability", "T1046"),
+        ("zerologon_check", "T1518.001"),
+        ("adidnsdump", "T1018"),
+        ("smbclient_kerberos_shares", "T1135"),
+        ("save_users_to_file", "T1087.002"),
+        // ── Credential Access ───────────────────────────────────────────
         ("secretsdump", "T1003.006"),
         ("secretsdump_kerberos", "T1003.006"),
         ("ntds_dit_extract", "T1003.003"),
@@ -102,95 +100,126 @@ pub static TOOL_TO_TECHNIQUE: LazyLock<HashMap<&str, &str>> = LazyLock::new(|| {
         ("certipy_auth", "T1649"),
         ("certipy_find", "T1649"),
         ("laps_dump", "T1003.008"),
-        ("dump_lsass", "T1003.001"),
+        ("lsassy", "T1003.001"),
         ("gpp_password_finder", "T1552.006"),
         ("gmsa_dump_passwords", "T1003.006"),
         ("extract_trust_key", "T1003.006"),
         ("smbclient_spider", "T1552.001"),
         ("sysvol_script_search", "T1552.001"),
-        // Credential Cracking
-        ("hashcat_crack", "T1110.002"),
-        ("crack_hash", "T1110.002"),
-        // Privilege Escalation
-        ("certipy_req", "T1649"),
-        ("rbcd_attack", "T1134.001"),
-        ("constrained_delegation_attack", "T1134.001"),
-        ("unconstrained_delegation_attack", "T1558.001"),
-        ("dcsync", "T1003.006"),
-        ("add_shadow_credentials", "T1556.006"),
-        ("set_rbcd", "T1098.001"),
+        ("kerberos_user_enum_noauth", "T1087.002"),
+        ("domain_admin_checker", "T1087.002"),
+        ("password_policy", "T1087.002"),
+        ("password_spray", "T1110.003"),
+        ("username_as_password", "T1110.001"),
+        ("check_credman_entries", "T1552.001"),
+        ("check_autologon_registry", "T1552.001"),
+        // ── Credential Cracking ─────────────────────────────────────────
+        ("crack_with_hashcat", "T1110.002"),
+        ("crack_with_john", "T1110.002"),
+        // ── Privilege Escalation ────────────────────────────────────────
+        ("certipy_request", "T1649"),
+        ("certipy_shadow", "T1556.006"),
+        ("certipy_template_esc4", "T1649"),
+        ("certipy_esc4_full_chain", "T1649"),
+        ("rbcd_write", "T1134.001"),
+        ("s4u_attack", "T1134.001"),
+        ("find_delegation", "T1087.002"),
+        ("unconstrained_tgt_dump", "T1558.001"),
+        ("unconstrained_coerce_and_capture", "T1558.001"),
+        ("generate_golden_ticket", "T1558.001"),
         ("add_computer", "T1136.002"),
-        // ACL Exploitation
+        ("addspn", "T1098.001"),
+        ("krbrelayup", "T1134.001"),
+        ("raise_child", "T1134.001"),
+        ("create_inter_realm_ticket", "T1558.001"),
+        ("get_sid", "T1087.002"),
+        ("dnstool", "T1484.001"),
+        ("nopac", "T1068"),
+        ("printnightmare", "T1068"),
+        ("petitpotam_unauth", "T1187"),
+        // ── ACL Exploitation ────────────────────────────────────────────
         ("dacl_edit", "T1222.001"),
-        ("add_user_to_group", "T1098.001"),
-        ("modify_owner", "T1222.001"),
-        ("modify_dacl", "T1222.001"),
-        ("write_gpo", "T1484.001"),
-        // Lateral Movement
+        ("bloodyad_add_group_member", "T1098.001"),
+        ("bloodyad_set_password", "T1098.001"),
+        ("bloodyad_add_genericall", "T1222.001"),
+        ("adminsd_holder_add_ace", "T1222.001"),
+        ("gmsa_read_password_bloodyad", "T1003.006"),
+        ("pywhisker", "T1556.006"),
+        ("sharpgpoabuse", "T1484.001"),
+        ("pygpoabuse_immediate_task", "T1484.001"),
+        // ── Lateral Movement ────────────────────────────────────────────
         ("psexec", "T1021.002"),
+        ("psexec_kerberos", "T1021.002"),
         ("wmiexec", "T1047"),
+        ("wmiexec_kerberos", "T1047"),
         ("smbexec", "T1021.002"),
+        ("smbexec_kerberos", "T1021.002"),
         ("atexec", "T1053.005"),
         ("dcomexec", "T1021.003"),
         ("evil_winrm", "T1021.006"),
-        ("rdp_connect", "T1021.001"),
-        ("ssh_connect", "T1021.004"),
-        ("mssql_exec", "T1021.002"),
-        // Coercion / Relay
+        ("xfreerdp", "T1021.001"),
+        ("ssh_with_password", "T1021.004"),
+        ("pth_winexe", "T1021.002"),
+        ("pth_smbclient", "T1021.002"),
+        ("pth_rpcclient", "T1021.002"),
+        ("pth_wmic", "T1047"),
+        ("get_tgt", "T1558"),
+        ("mssql_command", "T1021.002"),
+        ("mssql_enable_xp_cmdshell", "T1059.001"),
+        ("mssql_exec_linked", "T1021.002"),
+        ("mssql_linked_enable_xpcmdshell", "T1059.001"),
+        ("mssql_linked_xpcmdshell", "T1059.001"),
+        ("mssql_ntlm_coerce", "T1187"),
+        // ── Coercion / Relay ────────────────────────────────────────────
         ("petitpotam", "T1187"),
-        ("printerbug", "T1187"),
         ("dfscoerce", "T1187"),
-        ("shadowcoerce", "T1187"),
-        ("coerce_auth", "T1187"),
-        ("ntlm_relay", "T1557.001"),
-        ("relay_to_ldap", "T1557.001"),
-        ("relay_to_smb", "T1557.001"),
-        // MSSQL
+        ("coercer", "T1187"),
+        ("start_responder", "T1557.001"),
+        ("start_mitm6", "T1557.001"),
+        ("ntlmrelayx_to_ldaps", "T1557.001"),
+        ("ntlmrelayx_to_adcs", "T1557.001"),
+        ("ntlmrelayx_to_smb", "T1557.001"),
+        ("ntlmrelayx_multirelay", "T1557.001"),
+        // ── MSSQL ───────────────────────────────────────────────────────
         ("mssql_enum_impersonation", "T1078.002"),
         ("mssql_enum_linked_servers", "T1021.002"),
         ("mssql_impersonate", "T1134.001"),
-        ("mssql_xp_cmdshell", "T1059.001"),
-        // Golden Ticket / Persistence
-        ("generate_golden_ticket", "T1558.001"),
-        ("forge_golden_ticket", "T1558.001"),
-        ("forge_silver_ticket", "T1558.002"),
-        ("create_machine_account", "T1136.002"),
-        // Reporting
-        ("record_credential", "T1087.002"),
-        ("record_timeline_event", "T1087"),
     ])
 });
 
 // =============================================================================
 // Tool → Category
+//
+// Keys MUST match the tool names in ares_tools::dispatch().
 // =============================================================================
 
 /// Tool name → toolset category (for dashboard grouping).
 pub static TOOL_TO_CATEGORY: LazyLock<HashMap<&str, &str>> = LazyLock::new(|| {
     HashMap::from([
-        // NetworkEnumerationTools
+        // ── NetworkEnumerationTools ─────────────────────────────────────
         ("nmap_scan", "NetworkEnumerationTools"),
-        ("portscan", "NetworkEnumerationTools"),
-        ("ping_sweep", "NetworkEnumerationTools"),
         ("smb_sweep", "NetworkEnumerationTools"),
-        ("resolve_domain_controllers", "NetworkEnumerationTools"),
-        ("ldap_domain_dump", "NetworkEnumerationTools"),
+        ("smb_signing_check", "NetworkEnumerationTools"),
+        ("enumerate_users", "NetworkEnumerationTools"),
+        ("enumerate_shares", "NetworkEnumerationTools"),
         ("ldap_search", "NetworkEnumerationTools"),
         ("ldap_search_descriptions", "NetworkEnumerationTools"),
-        ("bloodhound_collection", "NetworkEnumerationTools"),
+        ("rpcclient_command", "NetworkEnumerationTools"),
+        ("dig_query", "NetworkEnumerationTools"),
+        ("enumerate_domain_trusts", "NetworkEnumerationTools"),
+        ("check_rdp_reachability", "NetworkEnumerationTools"),
+        ("check_winrm_reachability", "NetworkEnumerationTools"),
+        ("zerologon_check", "NetworkEnumerationTools"),
+        ("adidnsdump", "NetworkEnumerationTools"),
+        ("smbclient_kerberos_shares", "NetworkEnumerationTools"),
+        ("save_users_to_file", "NetworkEnumerationTools"),
+        ("kerberos_user_enum_noauth", "NetworkEnumerationTools"),
+        ("password_policy", "NetworkEnumerationTools"),
+        ("get_sid", "NetworkEnumerationTools"),
+        ("find_delegation", "NetworkEnumerationTools"),
+        // ── BloodHoundTools ─────────────────────────────────────────────
         ("run_bloodhound", "BloodHoundTools"),
-        ("sharphound", "NetworkEnumerationTools"),
-        ("get_domain_info", "NetworkEnumerationTools"),
-        ("enumerate_users", "NetworkEnumerationTools"),
-        ("enum_domain_trusts", "NetworkEnumerationTools"),
-        ("enumerate_forest", "NetworkEnumerationTools"),
-        ("enum_constrained_delegation", "NetworkEnumerationTools"),
-        ("enum_unconstrained_delegation", "NetworkEnumerationTools"),
-        ("enum_rbcd_targets", "NetworkEnumerationTools"),
-        ("smb_share_enum", "NetworkEnumerationTools"),
-        ("enumerate_shares", "NetworkEnumerationTools"),
-        ("smbclient_ls", "NetworkEnumerationTools"),
-        // CredentialHarvestingTools
+        // ── CredentialHarvestingTools ────────────────────────────────────
         ("secretsdump", "CredentialHarvestingTools"),
         ("secretsdump_kerberos", "CredentialHarvestingTools"),
         ("ntds_dit_extract", "CredentialHarvestingTools"),
@@ -198,68 +227,96 @@ pub static TOOL_TO_CATEGORY: LazyLock<HashMap<&str, &str>> = LazyLock::new(|| {
         ("targeted_kerberoast", "CredentialHarvestingTools"),
         ("asrep_roast", "CredentialHarvestingTools"),
         ("laps_dump", "CredentialHarvestingTools"),
-        ("dump_lsass", "CredentialHarvestingTools"),
+        ("lsassy", "CredentialHarvestingTools"),
         ("gpp_password_finder", "CredentialHarvestingTools"),
-        // SharePilferingTools
+        ("domain_admin_checker", "CredentialHarvestingTools"),
+        ("password_spray", "CredentialHarvestingTools"),
+        ("username_as_password", "CredentialHarvestingTools"),
+        ("check_credman_entries", "CredentialHarvestingTools"),
+        ("check_autologon_registry", "CredentialHarvestingTools"),
+        ("get_tgt", "CredentialHarvestingTools"),
+        // ── SharePilferingTools ─────────────────────────────────────────
         ("smbclient_spider", "SharePilferingTools"),
         ("sysvol_script_search", "SharePilferingTools"),
-        // GMSATools
+        // ── GMSATools ───────────────────────────────────────────────────
         ("gmsa_dump_passwords", "GMSATools"),
-        // TrustAttackTools
+        ("gmsa_read_password_bloodyad", "GMSATools"),
+        // ── TrustAttackTools ────────────────────────────────────────────
         ("extract_trust_key", "TrustAttackTools"),
-        // CertipyTools
+        ("raise_child", "TrustAttackTools"),
+        ("create_inter_realm_ticket", "TrustAttackTools"),
+        // ── CertipyTools ────────────────────────────────────────────────
         ("certipy_auth", "CertipyTools"),
         ("certipy_find", "CertipyTools"),
-        ("certipy_req", "CertipyTools"),
-        // CrackingTools
-        ("hashcat_crack", "CrackingTools"),
-        ("crack_hash", "CrackingTools"),
-        // DelegationTools
-        ("rbcd_attack", "DelegationTools"),
-        ("constrained_delegation_attack", "DelegationTools"),
-        ("unconstrained_delegation_attack", "DelegationTools"),
-        ("set_rbcd", "DelegationTools"),
-        // PrivilegeEscalationTools
-        ("dcsync", "PrivilegeEscalationTools"),
-        ("add_shadow_credentials", "PrivilegeEscalationTools"),
+        ("certipy_request", "CertipyTools"),
+        ("certipy_shadow", "CertipyTools"),
+        ("certipy_template_esc4", "CertipyTools"),
+        ("certipy_esc4_full_chain", "CertipyTools"),
+        // ── CrackingTools ───────────────────────────────────────────────
+        ("crack_with_hashcat", "CrackingTools"),
+        ("crack_with_john", "CrackingTools"),
+        // ── DelegationTools ─────────────────────────────────────────────
+        ("rbcd_write", "DelegationTools"),
+        ("s4u_attack", "DelegationTools"),
+        ("unconstrained_tgt_dump", "DelegationTools"),
+        ("unconstrained_coerce_and_capture", "DelegationTools"),
+        ("addspn", "DelegationTools"),
+        // ── PrivilegeEscalationTools ────────────────────────────────────
+        ("krbrelayup", "PrivilegeEscalationTools"),
+        ("dnstool", "PrivilegeEscalationTools"),
         ("add_computer", "PrivilegeEscalationTools"),
-        // ACLExploitTools
+        // ── CVEExploitTools ─────────────────────────────────────────────
+        ("nopac", "CVEExploitTools"),
+        ("printnightmare", "CVEExploitTools"),
+        ("petitpotam_unauth", "CVEExploitTools"),
+        // ── ACLExploitTools ─────────────────────────────────────────────
         ("dacl_edit", "ACLExploitTools"),
-        ("add_user_to_group", "ACLExploitTools"),
-        ("modify_owner", "ACLExploitTools"),
-        ("modify_dacl", "ACLExploitTools"),
-        ("write_gpo", "ACLExploitTools"),
-        // LateralMovementTools
+        ("bloodyad_add_group_member", "ACLExploitTools"),
+        ("bloodyad_set_password", "ACLExploitTools"),
+        ("bloodyad_add_genericall", "ACLExploitTools"),
+        ("adminsd_holder_add_ace", "ACLExploitTools"),
+        ("pywhisker", "ACLExploitTools"),
+        ("sharpgpoabuse", "ACLExploitTools"),
+        ("pygpoabuse_immediate_task", "ACLExploitTools"),
+        // ── LateralMovementTools ────────────────────────────────────────
         ("psexec", "LateralMovementTools"),
+        ("psexec_kerberos", "LateralMovementTools"),
         ("wmiexec", "LateralMovementTools"),
+        ("wmiexec_kerberos", "LateralMovementTools"),
         ("smbexec", "LateralMovementTools"),
+        ("smbexec_kerberos", "LateralMovementTools"),
         ("atexec", "LateralMovementTools"),
         ("dcomexec", "LateralMovementTools"),
         ("evil_winrm", "LateralMovementTools"),
-        ("rdp_connect", "LateralMovementTools"),
-        ("ssh_connect", "LateralMovementTools"),
-        ("mssql_exec", "LateralMovementTools"),
-        // CoercionTools
+        ("xfreerdp", "LateralMovementTools"),
+        ("ssh_with_password", "LateralMovementTools"),
+        ("pth_winexe", "LateralMovementTools"),
+        ("pth_smbclient", "LateralMovementTools"),
+        ("pth_rpcclient", "LateralMovementTools"),
+        ("pth_wmic", "LateralMovementTools"),
+        ("mssql_command", "LateralMovementTools"),
+        // ── CoercionTools ───────────────────────────────────────────────
         ("petitpotam", "CoercionTools"),
-        ("printerbug", "CoercionTools"),
         ("dfscoerce", "CoercionTools"),
-        ("shadowcoerce", "CoercionTools"),
-        ("coerce_auth", "CoercionTools"),
-        ("ntlm_relay", "CoercionTools"),
-        ("relay_to_ldap", "CoercionTools"),
-        ("relay_to_smb", "CoercionTools"),
-        // MSSQLTools
+        ("coercer", "CoercionTools"),
+        ("mssql_ntlm_coerce", "CoercionTools"),
+        ("ntlmrelayx_to_ldaps", "CoercionTools"),
+        ("ntlmrelayx_to_adcs", "CoercionTools"),
+        ("ntlmrelayx_to_smb", "CoercionTools"),
+        ("ntlmrelayx_multirelay", "CoercionTools"),
+        // ── CoercionNetworkTools ────────────────────────────────────────
+        ("start_responder", "CoercionNetworkTools"),
+        ("start_mitm6", "CoercionNetworkTools"),
+        // ── MSSQLTools ──────────────────────────────────────────────────
         ("mssql_enum_impersonation", "MSSQLTools"),
         ("mssql_enum_linked_servers", "MSSQLTools"),
         ("mssql_impersonate", "MSSQLTools"),
-        ("mssql_xp_cmdshell", "MSSQLTools"),
-        // GoldenTicketTools
-        ("forge_golden_ticket", "GoldenTicketTools"),
-        ("forge_silver_ticket", "GoldenTicketTools"),
-        ("create_machine_account", "GoldenTicketTools"),
-        // ReportingTools
-        ("record_credential", "ReportingTools"),
-        ("record_timeline_event", "ReportingTools"),
+        ("mssql_enable_xp_cmdshell", "MSSQLTools"),
+        ("mssql_exec_linked", "MSSQLTools"),
+        ("mssql_linked_enable_xpcmdshell", "MSSQLTools"),
+        ("mssql_linked_xpcmdshell", "MSSQLTools"),
+        // ── GoldenTicketTools ───────────────────────────────────────────
+        ("generate_golden_ticket", "GoldenTicketTools"),
     ])
 });
 
@@ -322,7 +379,9 @@ pub fn tactic_from_technique(technique_id: &str) -> Option<&'static str> {
         "T1003" | "T1558" | "T1187" | "T1557" | "T1552" | "T1110" | "T1649" => {
             Some("credential-access")
         }
-        "T1134" | "T1098" | "T1078" | "T1222" | "T1484" | "T1556" => Some("privilege-escalation"),
+        "T1134" | "T1098" | "T1078" | "T1222" | "T1484" | "T1556" | "T1068" => {
+            Some("privilege-escalation")
+        }
         "T1021" | "T1047" | "T1053" => Some("lateral-movement"),
         "T1136" => Some("persistence"),
         "T1059" => Some("execution"),
@@ -365,6 +424,20 @@ mod tests {
         assert_eq!(TOOL_TO_TECHNIQUE.get("nmap_scan"), Some(&"T1046"));
         assert_eq!(TOOL_TO_TECHNIQUE.get("secretsdump"), Some(&"T1003.006"));
         assert_eq!(TOOL_TO_TECHNIQUE.get("psexec"), Some(&"T1021.002"));
+        // Verify corrected dispatch names
+        assert_eq!(TOOL_TO_TECHNIQUE.get("lsassy"), Some(&"T1003.001"));
+        assert_eq!(TOOL_TO_TECHNIQUE.get("xfreerdp"), Some(&"T1021.001"));
+        assert_eq!(
+            TOOL_TO_TECHNIQUE.get("crack_with_hashcat"),
+            Some(&"T1110.002")
+        );
+        assert_eq!(TOOL_TO_TECHNIQUE.get("coercer"), Some(&"T1187"));
+        assert_eq!(TOOL_TO_TECHNIQUE.get("certipy_request"), Some(&"T1649"));
+        assert_eq!(TOOL_TO_TECHNIQUE.get("rbcd_write"), Some(&"T1134.001"));
+        assert_eq!(
+            TOOL_TO_TECHNIQUE.get("bloodyad_add_group_member"),
+            Some(&"T1098.001")
+        );
     }
 
     #[test]
@@ -375,6 +448,15 @@ mod tests {
         );
         assert_eq!(
             TOOL_TO_CATEGORY.get("psexec"),
+            Some(&"LateralMovementTools")
+        );
+        // Verify corrected dispatch names
+        assert_eq!(
+            TOOL_TO_CATEGORY.get("lsassy"),
+            Some(&"CredentialHarvestingTools")
+        );
+        assert_eq!(
+            TOOL_TO_CATEGORY.get("xfreerdp"),
             Some(&"LateralMovementTools")
         );
     }
@@ -388,6 +470,7 @@ mod tests {
         );
         assert_eq!(tactic_from_technique("T1021.002"), Some("lateral-movement"));
         assert_eq!(tactic_from_technique("T1059.001"), Some("execution"));
+        assert_eq!(tactic_from_technique("T1068"), Some("privilege-escalation"));
         assert_eq!(tactic_from_technique("T9999"), None);
     }
 
