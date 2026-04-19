@@ -131,6 +131,7 @@ pub fn trace_domain_admin(
         attack_path = attack_path,
         "attack.depth" = attack_depth,
         "mitre.technique.id" = "T1003.006",
+        "mitre.tactic" = "credential-access",
         attack_operation_id = operation_id.unwrap_or(""),
     )
 }
