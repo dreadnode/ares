@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - main
+      - fix/warpgate-templates
     paths:
       - 'warpgate-templates/**'
       - '.github/workflows/build-and-push-templates.yaml'
