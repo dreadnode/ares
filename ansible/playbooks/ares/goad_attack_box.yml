@@ -46,6 +46,11 @@
       - rockyou
       - seclists_passwords
 
+    # GPU-accelerated hashcat (NVIDIA T4 on g4dn instances)
+    cracking_tools_gpu_support: true
+    cracking_tools_hashcat_from_source: true
+    cracking_tools_nvidia_opencl_icd: true
+
     # Enable all poisoning tools for GOAD
     coercion_tools_install_responder: true
     coercion_tools_install_mitm6: true

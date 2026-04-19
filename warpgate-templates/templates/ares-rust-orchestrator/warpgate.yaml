@@ -16,7 +16,7 @@ metadata:
 name: ares-rust-orchestrator
 version: latest
 base:
-  image: python:3.13.7-slim
+  image: debian:trixie-slim
   pull: true
   run_command:
     - -d
@@ -48,9 +48,7 @@ provisioners:
     inline:
       - rm -f /var/lib/apt/lists/lock /var/cache/apt/archives/lock /var/lib/dpkg/lock*
       - apt-get update
-      - apt-get install -y --no-install-recommends ca-certificates curl git jq build-essential pkg-config libssl-dev
-      - pip install --no-cache-dir uv
-      - pip install --no-cache-dir "/tmp/ares-build[postgres]"
+      - apt-get install -y --no-install-recommends ca-certificates curl build-essential pkg-config libssl-dev
       - curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
       - export PATH="/root/.cargo/bin:$PATH"
       - ln -sf /usr/bin/gcc /usr/local/bin/x86_64-unknown-linux-gnu-gcc
