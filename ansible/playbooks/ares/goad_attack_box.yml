@@ -42,6 +42,7 @@
     cracking_tools_install_hashcat: true
     cracking_tools_install_john: true
     cracking_tools_install_seclists: true
+    cracking_tools_gpu_support: true
     cracking_tools_wordlists:
       - rockyou
       - seclists_passwords
