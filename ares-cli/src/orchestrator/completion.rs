@@ -7,8 +7,8 @@
 //! Two config flags control early-exit behaviour (mutually exclusive):
 //! - `stop_on_domain_admin`: stop as soon as DA is achieved on any domain,
 //!   without waiting for all trusted forests to be dominated.
-//! - `stop_on_golden_ticket`: continue past DA to forge a golden ticket with
-//!   ExtraSid for child→parent escalation, then stop once forged.
+//! - `stop_on_golden_ticket`: continue past DA to forge a golden ticket, then
+//!   stop immediately once forged on any domain.
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -118,9 +118,8 @@ fn forest_root_of(domain: &str) -> String {
 /// Behaviour is influenced by two mutually exclusive config flags:
 /// - `stop_on_domain_admin`: stop as soon as DA is achieved on *any* domain,
 ///   without waiting for forests or golden tickets.
-/// - `stop_on_golden_ticket`: continue past DA to forge a golden ticket with
-///   ExtraSid, then stop. If the ticket isn't forged within 60 s of DA, stop
-///   anyway.
+/// - `stop_on_golden_ticket`: continue past DA to forge a golden ticket, then
+///   stop immediately once forged on any domain.
 ///
 /// When neither flag is set (default), the operation continues until all
 /// trusted forests are dominated or max runtime is exceeded.
@@ -186,22 +185,14 @@ pub async fn wait_for_completion(
                 // Config says stop immediately on DA — skip forest check
                 Some("domain admin achieved (stop_on_domain_admin)")
             } else if stop_on_gt {
-                // stop_on_golden_ticket: keep running until GT is forged AND
-                // all cross-forest trusts are dominated.  Without the forest
-                // check the operation exits after the first GT (e.g.
-                // sevenkingdoms.local) while trusted forests like essos.local
-                // remain uncompromised.
+                // stop_on_golden_ticket: stop as soon as a golden ticket is
+                // forged on ANY domain.  The user explicitly opted into early
+                // exit — requiring all forests to be dominated would make this
+                // flag equivalent to the default mode and prevent exit when
+                // the target domain is compromised but other discovered
+                // forests (e.g. via trust enumeration) are not.
                 if has_gt {
-                    let remaining = undominated_forests(state).await;
-                    if remaining.is_empty() {
-                        Some("golden ticket forged and all forests dominated")
-                    } else {
-                        debug!(
-                            undominated = ?remaining,
-                            "Golden ticket forged but forests remain undominated"
-                        );
-                        None // Continue — other forests still need krbtgt
-                    }
+                    Some("golden ticket forged (stop_on_golden_ticket)")
                 } else {
                     None // Continue — waiting for golden ticket
                 }
