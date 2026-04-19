@@ -1,2 +1,5 @@
 # https://docs.github.com/en/github/creating-cloning-and-archiving-repositories/about-code-owners
 * @l50
+
+# Changes to this workflow MUST be reviewed carefully.
+.github/workflows/meta-labeler.yaml @l50

@@ -15,9 +15,8 @@ on:
         default: ''
         type: string
 
-# Required for OIDC and pushing to GHCR
+# Required for pushing to GHCR
 permissions:
-  id-token: write
   contents: read
   packages: write
 
@@ -115,9 +114,18 @@ jobs:
             -p "*linux*${ARCH}*" \
             -p "*Linux*${ARCH}*" \
             -p "*linux*${ALT_ARCH}*" \
-            -p "*Linux*${ALT_ARCH}*"
+            -p "*Linux*${ALT_ARCH}*" \
+            -p "checksums.txt"
 
-          ASSET_PATH="$(find "$TMP_DIR" -maxdepth 1 -type f -print -quit)"
+          # Verify downloaded asset integrity against release checksums
+          if [ -f "$TMP_DIR/checksums.txt" ]; then
+            echo "Verifying download integrity..."
+            (cd "$TMP_DIR" && sha256sum -c checksums.txt --ignore-missing)
+          else
+            echo "::warning::checksums.txt not found in release — skipping integrity check"
+          fi
+
+          ASSET_PATH="$(find "$TMP_DIR" -maxdepth 1 -type f ! -name 'checksums.txt' -print -quit)"
           ASSET="$(basename "$ASSET_PATH")"
           case "$ASSET" in
             *.tar.gz)
@@ -570,9 +578,18 @@ jobs:
             -p "*linux*${ARCH}*" \
             -p "*Linux*${ARCH}*" \
             -p "*linux*${ALT_ARCH}*" \
-            -p "*Linux*${ALT_ARCH}*"
+            -p "*Linux*${ALT_ARCH}*" \
+            -p "checksums.txt"
 
-          ASSET_PATH="$(find "$TMP_DIR" -maxdepth 1 -type f -print -quit)"
+          # Verify downloaded asset integrity against release checksums
+          if [ -f "$TMP_DIR/checksums.txt" ]; then
+            echo "Verifying download integrity..."
+            (cd "$TMP_DIR" && sha256sum -c checksums.txt --ignore-missing)
+          else
+            echo "::warning::checksums.txt not found in release — skipping integrity check"
+          fi
+
+          ASSET_PATH="$(find "$TMP_DIR" -maxdepth 1 -type f ! -name 'checksums.txt' -print -quit)"
           ASSET="$(basename "$ASSET_PATH")"
           case "$ASSET" in
             *.tar.gz)
@@ -775,9 +792,18 @@ jobs:
             -p "*linux*${ARCH}*" \
             -p "*Linux*${ARCH}*" \
             -p "*linux*${ALT_ARCH}*" \
-            -p "*Linux*${ALT_ARCH}*"
+            -p "*Linux*${ALT_ARCH}*" \
+            -p "checksums.txt"
 
-          ASSET_PATH="$(find "$TMP_DIR" -maxdepth 1 -type f -print -quit)"
+          # Verify downloaded asset integrity against release checksums
+          if [ -f "$TMP_DIR/checksums.txt" ]; then
+            echo "Verifying download integrity..."
+            (cd "$TMP_DIR" && sha256sum -c checksums.txt --ignore-missing)
+          else
+            echo "::warning::checksums.txt not found in release — skipping integrity check"
+          fi
+
+          ASSET_PATH="$(find "$TMP_DIR" -maxdepth 1 -type f ! -name 'checksums.txt' -print -quit)"
           ASSET="$(basename "$ASSET_PATH")"
           case "$ASSET" in
             *.tar.gz)
@@ -1043,9 +1069,18 @@ jobs:
             -p "*linux*${ARCH}*" \
             -p "*Linux*${ARCH}*" \
             -p "*linux*${ALT_ARCH}*" \
-            -p "*Linux*${ALT_ARCH}*"
+            -p "*Linux*${ALT_ARCH}*" \
+            -p "checksums.txt"
 
-          ASSET_PATH="$(find "$TMP_DIR" -maxdepth 1 -type f -print -quit)"
+          # Verify downloaded asset integrity against release checksums
+          if [ -f "$TMP_DIR/checksums.txt" ]; then
+            echo "Verifying download integrity..."
+            (cd "$TMP_DIR" && sha256sum -c checksums.txt --ignore-missing)
+          else
+            echo "::warning::checksums.txt not found in release — skipping integrity check"
+          fi
+
+          ASSET_PATH="$(find "$TMP_DIR" -maxdepth 1 -type f ! -name 'checksums.txt' -print -quit)"
           ASSET="$(basename "$ASSET_PATH")"
           case "$ASSET" in
             *.tar.gz)
@@ -1252,9 +1287,18 @@ jobs:
             -p "*linux*${ARCH}*" \
             -p "*Linux*${ARCH}*" \
             -p "*linux*${ALT_ARCH}*" \
-            -p "*Linux*${ALT_ARCH}*"
+            -p "*Linux*${ALT_ARCH}*" \
+            -p "checksums.txt"
 
-          ASSET_PATH="$(find "$TMP_DIR" -maxdepth 1 -type f -print -quit)"
+          # Verify downloaded asset integrity against release checksums
+          if [ -f "$TMP_DIR/checksums.txt" ]; then
+            echo "Verifying download integrity..."
+            (cd "$TMP_DIR" && sha256sum -c checksums.txt --ignore-missing)
+          else
+            echo "::warning::checksums.txt not found in release — skipping integrity check"
+          fi
+
+          ASSET_PATH="$(find "$TMP_DIR" -maxdepth 1 -type f ! -name 'checksums.txt' -print -quit)"
           ASSET="$(basename "$ASSET_PATH")"
           case "$ASSET" in
             *.tar.gz)
@@ -1477,8 +1521,17 @@ jobs:
           esac
           TMP_DIR="$(mktemp -d)"
           gh release download "$VERSION" -R CowDogMoo/warpgate -D "$TMP_DIR" \
-            -p "*linux*${ARCH}*" -p "*Linux*${ARCH}*" -p "*linux*${ALT_ARCH}*" -p "*Linux*${ALT_ARCH}*"
-          ASSET_PATH="$(find "$TMP_DIR" -maxdepth 1 -type f -print -quit)"
+            -p "*linux*${ARCH}*" -p "*Linux*${ARCH}*" -p "*linux*${ALT_ARCH}*" -p "*Linux*${ALT_ARCH}*" \
+            -p "checksums.txt"
+
+          # Verify downloaded asset integrity against release checksums
+          if [ -f "$TMP_DIR/checksums.txt" ]; then
+            (cd "$TMP_DIR" && sha256sum -c checksums.txt --ignore-missing)
+          else
+            echo "::warning::checksums.txt not found in release — skipping integrity check"
+          fi
+
+          ASSET_PATH="$(find "$TMP_DIR" -maxdepth 1 -type f ! -name 'checksums.txt' -print -quit)"
           ASSET="$(basename "$ASSET_PATH")"
           case "$ASSET" in
             *.tar.gz) tar -xzf "$TMP_DIR/$ASSET" -C "$TMP_DIR" ;;
@@ -1604,8 +1657,17 @@ jobs:
           esac
           TMP_DIR="$(mktemp -d)"
           gh release download "$VERSION" -R CowDogMoo/warpgate -D "$TMP_DIR" \
-            -p "*linux*${ARCH}*" -p "*Linux*${ARCH}*" -p "*linux*${ALT_ARCH}*" -p "*Linux*${ALT_ARCH}*"
-          ASSET_PATH="$(find "$TMP_DIR" -maxdepth 1 -type f -print -quit)"
+            -p "*linux*${ARCH}*" -p "*Linux*${ARCH}*" -p "*linux*${ALT_ARCH}*" -p "*Linux*${ALT_ARCH}*" \
+            -p "checksums.txt"
+
+          # Verify downloaded asset integrity against release checksums
+          if [ -f "$TMP_DIR/checksums.txt" ]; then
+            (cd "$TMP_DIR" && sha256sum -c checksums.txt --ignore-missing)
+          else
+            echo "::warning::checksums.txt not found in release — skipping integrity check"
+          fi
+
+          ASSET_PATH="$(find "$TMP_DIR" -maxdepth 1 -type f ! -name 'checksums.txt' -print -quit)"
           ASSET="$(basename "$ASSET_PATH")"
           case "$ASSET" in
             *.tar.gz) tar -xzf "$TMP_DIR/$ASSET" -C "$TMP_DIR" ;;
@@ -1794,8 +1856,17 @@ jobs:
           esac
           TMP_DIR="$(mktemp -d)"
           gh release download "$VERSION" -R CowDogMoo/warpgate -D "$TMP_DIR" \
-            -p "*linux*${ARCH}*" -p "*Linux*${ARCH}*" -p "*linux*${ALT_ARCH}*" -p "*Linux*${ALT_ARCH}*"
-          ASSET_PATH="$(find "$TMP_DIR" -maxdepth 1 -type f -print -quit)"
+            -p "*linux*${ARCH}*" -p "*Linux*${ARCH}*" -p "*linux*${ALT_ARCH}*" -p "*Linux*${ALT_ARCH}*" \
+            -p "checksums.txt"
+
+          # Verify downloaded asset integrity against release checksums
+          if [ -f "$TMP_DIR/checksums.txt" ]; then
+            (cd "$TMP_DIR" && sha256sum -c checksums.txt --ignore-missing)
+          else
+            echo "::warning::checksums.txt not found in release — skipping integrity check"
+          fi
+
+          ASSET_PATH="$(find "$TMP_DIR" -maxdepth 1 -type f ! -name 'checksums.txt' -print -quit)"
           ASSET="$(basename "$ASSET_PATH")"
           case "$ASSET" in
             *.tar.gz) tar -xzf "$TMP_DIR/$ASSET" -C "$TMP_DIR" ;;
@@ -1925,8 +1996,17 @@ jobs:
           esac
           TMP_DIR="$(mktemp -d)"
           gh release download "$VERSION" -R CowDogMoo/warpgate -D "$TMP_DIR" \
-            -p "*linux*${ARCH}*" -p "*Linux*${ARCH}*" -p "*linux*${ALT_ARCH}*" -p "*Linux*${ALT_ARCH}*"
-          ASSET_PATH="$(find "$TMP_DIR" -maxdepth 1 -type f -print -quit)"
+            -p "*linux*${ARCH}*" -p "*Linux*${ARCH}*" -p "*linux*${ALT_ARCH}*" -p "*Linux*${ALT_ARCH}*" \
+            -p "checksums.txt"
+
+          # Verify downloaded asset integrity against release checksums
+          if [ -f "$TMP_DIR/checksums.txt" ]; then
+            (cd "$TMP_DIR" && sha256sum -c checksums.txt --ignore-missing)
+          else
+            echo "::warning::checksums.txt not found in release — skipping integrity check"
+          fi
+
+          ASSET_PATH="$(find "$TMP_DIR" -maxdepth 1 -type f ! -name 'checksums.txt' -print -quit)"
           ASSET="$(basename "$ASSET_PATH")"
           case "$ASSET" in
             *.tar.gz) tar -xzf "$TMP_DIR/$ASSET" -C "$TMP_DIR" ;;

@@ -94,8 +94,14 @@ jobs:
       - name: Setup go-task
         env:
           TASK_VER: ${{ env.TASK_VERSION }}
+          GH_TOKEN: ${{ github.token }}
         run: |
-          sh -c "$(curl --location https://taskfile.dev/install.sh)" -- -d -b /usr/local/bin "v${TASK_VER}"
+          # Download install script pinned to the specific version tag (not floating main)
+          curl --location --fail --silent \
+            "https://raw.githubusercontent.com/go-task/task/v${TASK_VER}/install-task.sh" \
+            -o /tmp/install-task.sh
+          sh /tmp/install-task.sh -d -b /usr/local/bin "v${TASK_VER}"
+          rm -f /tmp/install-task.sh
           task --version
 
       - name: Run pre-commit
