@@ -133,11 +133,15 @@ tasks:
           fi
 
           # Create source tarball (exclude build artifacts and git metadata)
-          SRC_TAR=$(mktemp /tmp/ares-src-XXXXXX.tar.gz)
+          SRC_TAR="$(mktemp /tmp/ares-src-XXXXXX).tar.gz"
           trap "rm -f $SRC_TAR" EXIT
+          TAR_INPUTS="Cargo.toml Cargo.lock tools.yaml ares-core/ ares-cli/ ares-llm/ ares-tools/"
+          for optional in Cross.toml .cargo/; do
+            [ -e "$optional" ] && TAR_INPUTS="$TAR_INPUTS $optional" || true
+          done
           tar -czf "$SRC_TAR" \
             --exclude='target' --exclude='.git' --exclude='*.o' --exclude='*.d' \
-            -C "$(pwd)" Cargo.toml Cargo.lock Cross.toml tools.yaml .cargo/ ares-core/ ares-cli/ ares-llm/ ares-tools/
+            -C "$(pwd)" $TAR_INPUTS
 
           # Upload source to S3
           echo -e "{{.INFO}} Uploading source to S3..."
