@@ -586,9 +586,10 @@ tasks:
 
         echo -e "{{.INFO}} Stopping ares services on $INSTANCE_ID..."
 
+        STOP_CMD="systemctl stop $WORKER_UNITS 2>/dev/null || true; pkill -f 'ares orchestrator' 2>/dev/null || true; echo Stopped all ares workers and orchestrator"
         PARAMS_FILE=$(mktemp)
         trap "rm -f $PARAMS_FILE" EXIT
-        jq -n --arg units "$WORKER_UNITS" '{"commands": ["systemctl stop " + $units + " 2>/dev/null || true; pkill -f '\\''ares orchestrator'\\'' 2>/dev/null || true; echo Stopped all ares workers and orchestrator"]}' > "$PARAMS_FILE"
+        jq -n --arg cmd "$STOP_CMD" '{"commands": [$cmd]}' > "$PARAMS_FILE"
 
         CMD_ID=$(aws ssm send-command \
           --profile "{{.EC2_PROFILE}}" \
