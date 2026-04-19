@@ -18,13 +18,22 @@ use std::sync::Arc;
 use tracing::{error, info};
 
 pub async fn run() -> anyhow::Result<()> {
+    // Parse config from environment FIRST so we can derive the service name
+    let config = config::WorkerConfig::from_env()?;
+
+    // Derive telemetry service name from worker config instead of hardcoding
+    let service_name = match config.mode {
+        #[cfg(feature = "blue")]
+        config::WorkerMode::BlueTask => {
+            format!("ares-blue-{}", config.worker_role.replace('_', "-"))
+        }
+        _ => config.agent_name.clone(),
+    };
+
     // Initialize telemetry (console + OTLP when endpoint is configured)
     let _telemetry = ares_core::telemetry::init_telemetry(
-        ares_core::telemetry::TelemetryConfig::new("ares-worker"),
+        ares_core::telemetry::TelemetryConfig::new(&service_name),
     );
-
-    // Parse config from environment
-    let config = config::WorkerConfig::from_env()?;
     let mode_str = match config.mode {
         config::WorkerMode::Task => "task",
         config::WorkerMode::ToolExec => "tool_exec",

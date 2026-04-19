@@ -70,7 +70,7 @@ pub fn trace_discovery(
         "user.name" = target_user.unwrap_or(""),
         attack_target_type = target_type.unwrap_or(""),
         attack_target_domain = target_domain.unwrap_or(""),
-        "destination.address" = target_fqdn.unwrap_or(""),
+        "destination.address" = target_fqdn.or(target_ip).unwrap_or(""),
         "destination.ip" = target_ip.unwrap_or(""),
         attack_operation_id = operation_id.unwrap_or(""),
     )
@@ -131,6 +131,7 @@ pub fn trace_domain_admin(
         attack_path = attack_path,
         "attack.depth" = attack_depth,
         "mitre.technique.id" = "T1003.006",
+        "mitre.tactic" = "credential-access",
         attack_operation_id = operation_id.unwrap_or(""),
     )
 }
