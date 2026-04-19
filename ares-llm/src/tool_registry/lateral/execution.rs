@@ -427,3 +427,50 @@ pub fn definitions() -> Vec<ToolDefinition> {
         },
     ]
 }
+
+/// Secretsdump-kerberos definition, shared with the privesc role so that
+/// the trust-follow automation can forge a ticket and dump the target DC
+/// in a single agent task.
+pub fn secretsdump_kerberos_definition() -> Vec<ToolDefinition> {
+    vec![ToolDefinition {
+        name: "secretsdump_kerberos".into(),
+        description: "Dump secrets (NTLM hashes, Kerberos keys) from a remote host using \
+            Kerberos ticket authentication. Uses impacket-secretsdump with -k flag."
+            .into(),
+        input_schema: json!({
+            "type": "object",
+            "properties": {
+                "target": {
+                    "type": "string",
+                    "description": "Target hostname (must match SPN in ticket)"
+                },
+                "username": {
+                    "type": "string",
+                    "description": "Username associated with the Kerberos ticket"
+                },
+                "domain": {
+                    "type": "string",
+                    "description": "Domain name (e.g. contoso.local)"
+                },
+                "ticket_path": {
+                    "type": "string",
+                    "description": "Path to the Kerberos ticket (.ccache file)"
+                },
+                "dc_ip": {
+                    "type": "string",
+                    "description": "Domain controller IP for Kerberos communication"
+                },
+                "target_ip": {
+                    "type": "string",
+                    "description": "Target IP address (if different from hostname resolution)"
+                },
+                "timeout_minutes": {
+                    "type": "integer",
+                    "description": "Maximum time in minutes before aborting the dump",
+                    "default": 5
+                }
+            },
+            "required": ["target", "username", "domain"]
+        }),
+    }]
+}

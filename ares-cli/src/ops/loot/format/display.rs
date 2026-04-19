@@ -79,70 +79,45 @@ pub(super) fn print_loot_human(
         .cloned()
         .collect();
 
-    // --- Achievement section ---
-    if state.has_domain_admin || state.has_golden_ticket || !achievements.is_empty() {
-        println!("========================================");
+    // --- Achievement banner ---
+    if state.has_domain_admin || state.has_golden_ticket {
+        let mut lines = Vec::new();
         if state.has_domain_admin {
+            lines.push("\u{2605} DOMAIN ADMIN ACHIEVED".to_string());
             if let Some(path) = &state.domain_admin_path {
-                println!("  DOMAIN ADMIN ACHIEVED  (path: {path})");
-            } else {
-                println!("  DOMAIN ADMIN ACHIEVED");
+                lines.push(format!("  path: {path}"));
             }
         }
         if state.has_golden_ticket {
-            println!("  GOLDEN TICKET OBTAINED");
+            lines.push("\u{2605} GOLDEN TICKET OBTAINED".to_string());
         }
-        println!("========================================");
-
-        if !achievements.is_empty() {
-            println!();
+        let inner_width = lines.iter().map(|l| l.len()).max().unwrap_or(0) + 2;
+        println!("\u{250c}{}\u{2510}", "\u{2500}".repeat(inner_width));
+        for line in &lines {
             println!(
-                "Domain Compromise ({}/{} domains, {}/{} forests):",
-                compromised_count,
-                domains.len(),
-                compromised_forests.len(),
-                forest_roots.len()
+                "\u{2502} {:<width$} \u{2502}",
+                line,
+                width = inner_width - 2
             );
-
-            // Print in forest-root -> children order
-            let mut printed: HashSet<String> = HashSet::new();
-            for root in &forest_roots {
-                print_domain_achievement(root, &achievements, "  ");
-                printed.insert(root.clone());
-                let mut children: Vec<_> = child_domains
-                    .iter()
-                    .filter(|(_, parent)| *parent == root)
-                    .map(|(child, _)| child.clone())
-                    .collect();
-                children.sort();
-                for child in &children {
-                    print_domain_achievement(child, &achievements, "    ");
-                    printed.insert(child.clone());
-                }
-            }
-            // Any achievement domains not in the discovered domain list
-            let mut extra: Vec<_> = achievements
-                .keys()
-                .filter(|d| !printed.contains(*d))
-                .cloned()
-                .collect();
-            extra.sort();
-            for domain in &extra {
-                print_domain_achievement(domain, &achievements, "  ");
-            }
         }
+        println!("\u{2514}{}\u{2518}", "\u{2500}".repeat(inner_width));
         println!();
     }
 
-    // --- Domains ---
-    println!("Domains ({}):", domains.len());
+    // --- Domains (single unified section) ---
     if domains.is_empty() {
-        println!("  - None");
+        println!("Domains: None");
     } else {
+        println!(
+            "Domains ({}/{} compromised, {}/{} forests):",
+            compromised_count,
+            domains.len(),
+            compromised_forests.len(),
+            forest_roots.len()
+        );
         let mut displayed = HashSet::new();
         for root in &forest_roots {
-            let tags = domain_compromise_tags(root, &achievements);
-            println!("  - {root} (forest root){tags}");
+            print_domain_line(root, "(forest root)", "  ", &achievements);
             displayed.insert(root.clone());
             let mut children: Vec<_> = child_domains
                 .iter()
@@ -151,21 +126,19 @@ pub(super) fn print_loot_human(
                 .collect();
             children.sort();
             for child in &children {
-                let tags = domain_compromise_tags(child, &achievements);
-                println!("    \u{2514}\u{2500} {child} (child){tags}");
+                print_domain_line(child, "(child)", "    \u{2514}\u{2500} ", &achievements);
                 displayed.insert(child.clone());
             }
         }
-        let mut remaining: Vec<_> = child_domains
+        // Any achievement domains not in the discovered domain list
+        let mut extra: Vec<_> = achievements
             .keys()
-            .filter(|c| !displayed.contains(*c))
+            .filter(|d| !displayed.contains(*d))
             .cloned()
             .collect();
-        remaining.sort();
-        for child in &remaining {
-            let parent = &child_domains[child];
-            let tags = domain_compromise_tags(child, &achievements);
-            println!("  - {child} (child of {parent}){tags}");
+        extra.sort();
+        for domain in &extra {
+            print_domain_line(domain, "", "  ", &achievements);
         }
     }
     println!();
@@ -645,60 +618,48 @@ pub(super) fn build_domain_achievements(
     achievements
 }
 
-/// Print a single domain's achievement line in the compromise summary.
-fn print_domain_achievement(
+/// Print a single domain line with role, compromise tags, and details.
+fn print_domain_line(
     domain: &str,
+    role: &str,
+    prefix: &str,
     achievements: &HashMap<String, DomainAchievement>,
-    indent: &str,
 ) {
-    let Some(status) = achievements.get(domain) else {
-        return;
-    };
-    if !status.has_da && !status.has_golden_ticket {
-        return;
-    }
-    let mut tags = Vec::new();
-    if status.has_da {
-        tags.push("DA");
-    }
-    if status.has_golden_ticket {
-        tags.push("GT");
-    }
-    let tag_str = tags.join(" + ");
-
-    let mut details = Vec::new();
-    if !status.krbtgt_hash_types.is_empty() {
-        details.push(format!("krbtgt: {}", status.krbtgt_hash_types.join(", ")));
-    }
-    if !status.admin_users.is_empty() {
-        details.push(format!("admin: {}", status.admin_users.join(", ")));
-    }
-    let detail_str = if details.is_empty() {
+    let role_str = if role.is_empty() {
         String::new()
     } else {
-        format!("  ({})", details.join("; "))
+        format!(" {role}")
     };
-    println!("{indent}{domain:<40} {tag_str}{detail_str}");
-}
+    let label = format!("{domain}{role_str}");
 
-/// Format [DA] [GT] tags for a domain in the domain list.
-fn domain_compromise_tags(
-    domain: &str,
-    achievements: &HashMap<String, DomainAchievement>,
-) -> String {
     if let Some(status) = achievements.get(domain) {
-        let mut tags = Vec::new();
-        if status.has_da {
-            tags.push("[DA]");
-        }
-        if status.has_golden_ticket {
-            tags.push("[GT]");
-        }
-        if !tags.is_empty() {
-            return format!(" {}", tags.join(" "));
+        if status.has_da || status.has_golden_ticket {
+            let mut tags = Vec::new();
+            if status.has_da {
+                tags.push("DA");
+            }
+            if status.has_golden_ticket {
+                tags.push("GT");
+            }
+            let tag_str = tags.join("+");
+
+            let mut details = Vec::new();
+            if !status.krbtgt_hash_types.is_empty() {
+                details.push(format!("krbtgt: {}", status.krbtgt_hash_types.join(",")));
+            }
+            if !status.admin_users.is_empty() {
+                details.push(format!("admin: {}", status.admin_users.join(",")));
+            }
+            let detail_str = if details.is_empty() {
+                String::new()
+            } else {
+                format!("  {}", details.join(", "))
+            };
+            println!("{prefix}{label:<40} {tag_str}{detail_str}");
+            return;
         }
     }
-    String::new()
+    println!("{prefix}{label}");
 }
 
 /// Map common MITRE ATT&CK technique IDs to human-readable names.

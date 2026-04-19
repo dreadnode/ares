@@ -172,6 +172,26 @@ impl StateInner {
             .or_default()
             .insert(key);
     }
+
+    /// Check if all discovered forests have been dominated (krbtgt obtained).
+    ///
+    /// Returns `true` when `compute_undominated_forests()` returns an empty list,
+    /// meaning every forest root (initial target, trusted domains, and DCs) has
+    /// a corresponding entry in `dominated_domains`.
+    ///
+    /// Automations should check `has_domain_admin && all_forests_dominated()`
+    /// before going idle — DA in one forest doesn't mean we're done if cross-forest
+    /// targets remain.
+    pub fn all_forests_dominated(&self) -> bool {
+        crate::orchestrator::completion::compute_undominated_forests(
+            self.target.as_ref().map(|t| t.domain.as_str()),
+            self.domains.first().map(|d| d.as_str()),
+            &self.trusted_domains,
+            &self.dominated_domains,
+            &self.domain_controllers,
+        )
+        .is_empty()
+    }
 }
 
 #[cfg(test)]
@@ -359,6 +379,54 @@ mod tests {
 
         // Different credential not affected
         assert!(!state.is_credential_quarantined("john.smith", "child.contoso.local"));
+    }
+
+    #[test]
+    fn test_all_forests_dominated_no_forests() {
+        let state = StateInner::new("op-1".into());
+        // No domains, no DCs, no trusts → vacuously true
+        assert!(state.all_forests_dominated());
+    }
+
+    #[test]
+    fn test_all_forests_dominated_single_forest() {
+        let mut state = StateInner::new("op-1".into());
+        state
+            .domain_controllers
+            .insert("contoso.local".into(), "192.168.58.10".into());
+        // Not dominated yet
+        assert!(!state.all_forests_dominated());
+
+        // Dominate it
+        state.dominated_domains.insert("contoso.local".into());
+        assert!(state.all_forests_dominated());
+    }
+
+    #[test]
+    fn test_all_forests_dominated_multi_forest() {
+        let mut state = StateInner::new("op-1".into());
+        state
+            .domain_controllers
+            .insert("north.sevenkingdoms.local".into(), "192.168.56.11".into());
+        state
+            .domain_controllers
+            .insert("sevenkingdoms.local".into(), "192.168.56.10".into());
+        state
+            .domain_controllers
+            .insert("essos.local".into(), "192.168.56.23".into());
+
+        // Dominate only the sevenkingdoms forest
+        state
+            .dominated_domains
+            .insert("north.sevenkingdoms.local".into());
+        state.dominated_domains.insert("sevenkingdoms.local".into());
+
+        // essos.local is still undominated
+        assert!(!state.all_forests_dominated());
+
+        // Dominate essos too
+        state.dominated_domains.insert("essos.local".into());
+        assert!(state.all_forests_dominated());
     }
 
     #[test]

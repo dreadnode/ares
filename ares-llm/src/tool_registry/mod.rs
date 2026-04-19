@@ -204,6 +204,9 @@ pub fn tools_for_role(role: AgentRole) -> Vec<ToolDefinition> {
             // agents need them for SQL Server privilege escalation. The privesc
             // container has impacket-mssqlclient installed.
             t.extend(lateral::mssql::definitions());
+            // secretsdump_kerberos lets the trust-follow automation forge an
+            // inter-realm ticket and dump the target DC in one agent task.
+            t.extend(lateral::execution::secretsdump_kerberos_definition());
             t
         }
         AgentRole::Lateral => lateral::tool_definitions(),
@@ -485,6 +488,8 @@ mod tests {
         assert!(names.contains(&"mssql_command"));
         assert!(names.contains(&"mssql_enum_impersonation"));
         assert!(names.contains(&"mssql_enum_linked_servers"));
+        // secretsdump_kerberos shared from lateral for cross-forest trust exploitation
+        assert!(names.contains(&"secretsdump_kerberos"));
     }
 
     #[test]

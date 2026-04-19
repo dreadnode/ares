@@ -38,8 +38,9 @@ pub async fn auto_credential_expansion(
         let work: Vec<ExpansionWork> = {
             let state = dispatcher.state.read().await;
 
-            // Skip if already domain admin
-            if state.has_domain_admin {
+            // Skip only when ALL forests are dominated — DA in one forest
+            // must not block credential expansion against undominated forests.
+            if state.has_domain_admin && state.all_forests_dominated() {
                 continue;
             }
 
@@ -234,7 +235,7 @@ pub async fn auto_credential_expansion(
         let hash_work: Vec<HashExpansionWork> = {
             let state = dispatcher.state.read().await;
 
-            if state.has_domain_admin {
+            if state.has_domain_admin && state.all_forests_dominated() {
                 continue;
             }
 

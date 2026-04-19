@@ -300,8 +300,8 @@ pub async fn auto_credential_access(
         let sd_work: Vec<(String, String, ares_core::models::Credential)> = {
             let state = dispatcher.state.read().await;
 
-            // Skip if already DA
-            if state.has_domain_admin {
+            // Skip only when ALL forests are dominated
+            if state.has_domain_admin && state.all_forests_dominated() {
                 Vec::new()
             } else {
                 let mut items = Vec::new();
@@ -396,8 +396,10 @@ pub async fn auto_credential_access(
         // Keep spraying common passwords until we find admin or achieve DA.
         let common_spray_work: Vec<(String, String)> = {
             let state = dispatcher.state.read().await;
-            if state.has_domain_admin || state.credentials.iter().any(|c| c.is_admin) {
-                // Already have admin creds or DA — skip common spray
+            if (state.has_domain_admin && state.all_forests_dominated())
+                || state.credentials.iter().any(|c| c.is_admin)
+            {
+                // All forests dominated or have admin creds — skip common spray
                 Vec::new()
             } else {
                 state

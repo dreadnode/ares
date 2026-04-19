@@ -30,10 +30,11 @@ pub async fn auto_acl_chain_follow(
             break;
         }
 
-        // Skip if domain admin already achieved
+        // Skip only when ALL forests are dominated — ACL chains in
+        // undominated forests must still be followed after initial DA.
         {
             let state = dispatcher.state.read().await;
-            if state.has_domain_admin {
+            if state.has_domain_admin && state.all_forests_dominated() {
                 continue;
             }
         }

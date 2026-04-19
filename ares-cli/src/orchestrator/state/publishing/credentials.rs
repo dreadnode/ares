@@ -95,25 +95,54 @@ impl SharedState {
                 let krbtgt_domain = if hash_domain.is_empty() {
                     // Resolve domain from sibling hashes produced by the same
                     // secretsdump run (same parent_id) that DO carry a domain.
+                    // Prefer siblings whose domain matches a known DC domain to
+                    // avoid misattribution when hashes from different domains
+                    // share a parent_id.
                     let just_pushed = state.hashes.last();
                     let parent = just_pushed.and_then(|h| h.parent_id.as_deref());
                     parent
                         .and_then(|pid| {
-                            state.hashes.iter().find_map(|h| {
+                            // First pass: find a sibling whose domain matches a known DC
+                            let from_dc = state.hashes.iter().find_map(|h| {
                                 if h.parent_id.as_deref() == Some(pid) && !h.domain.is_empty() {
-                                    Some(h.domain.to_lowercase())
-                                } else {
-                                    None
+                                    let d = h.domain.to_lowercase();
+                                    if state.domain_controllers.contains_key(&d) {
+                                        return Some(d);
+                                    }
                                 }
+                                None
+                            });
+                            // Fallback: any sibling with a domain
+                            from_dc.or_else(|| {
+                                state.hashes.iter().find_map(|h| {
+                                    if h.parent_id.as_deref() == Some(pid) && !h.domain.is_empty() {
+                                        Some(h.domain.to_lowercase())
+                                    } else {
+                                        None
+                                    }
+                                })
                             })
                         })
                         .unwrap_or_default()
                 } else {
                     hash_domain.to_lowercase()
                 };
-                if !krbtgt_domain.is_empty() {
-                    state.dominated_domains.insert(krbtgt_domain.clone());
-                    tracing::info!(domain = %krbtgt_domain, "Domain dominated (krbtgt hash obtained)");
+                // Only mark as dominated if the domain is a known DC domain.
+                // This prevents false domination claims from misattributed hashes
+                // (e.g. when secretsdump output lacks a domain prefix and sibling
+                // resolution picks up a hash from an unrelated domain).
+                if !krbtgt_domain.is_empty()
+                    && (state.domain_controllers.contains_key(&krbtgt_domain)
+                        || state.domains.contains(&krbtgt_domain))
+                {
+                    if state.dominated_domains.insert(krbtgt_domain.clone()) {
+                        tracing::info!(domain = %krbtgt_domain, "Domain dominated (krbtgt hash obtained)");
+                    }
+                } else if !krbtgt_domain.is_empty() {
+                    tracing::warn!(
+                        domain = %krbtgt_domain,
+                        "krbtgt hash domain not in known domains/DCs — skipping domination"
+                    );
                 }
 
                 // Resolve DC target IP for vulnerability entry

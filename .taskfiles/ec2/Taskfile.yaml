@@ -228,6 +228,9 @@ tasks:
           cross)
             # Override linker: container has x86_64-linux-gnu-gcc, not x86_64-unknown-linux-gnu-gcc.
             export CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER=x86_64-linux-gnu-gcc
+            # Use CMake builder to avoid aws-lc-sys memcmp bug detection with older GCC
+            # (https://gcc.gnu.org/bugzilla/show_bug.cgi?id=95189)
+            export AWS_LC_SYS_CMAKE_BUILDER=1
             cross build --release --target {{.RUST_TARGET}} -j "{{.CARGO_BUILD_JOBS}}"
             ;;
           zigbuild)

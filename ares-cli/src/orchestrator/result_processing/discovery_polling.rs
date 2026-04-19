@@ -9,7 +9,7 @@ use serde_json::Value;
 use tokio::sync::watch;
 use tracing::{debug, info, warn};
 
-use ares_core::models::{Credential, Hash, Host, Share, User, VulnerabilityInfo};
+use ares_core::models::{Credential, Hash, Host, Share, TrustInfo, User, VulnerabilityInfo};
 
 use super::parsing::resolve_parent_id;
 use super::LOCKOUT_PATTERNS;
@@ -147,6 +147,19 @@ async fn poll_discoveries(dispatcher: &Dispatcher) -> Result<()> {
                 if let Ok(user) = serde_json::from_value::<User>(data.clone()) {
                     if ["kerberos_enum", "netexec_user_enum"].contains(&user.source.as_str()) {
                         let _ = dispatcher.state.publish_user(&dispatcher.queue, user).await;
+                    }
+                }
+            }
+            "trust" => {
+                if let Ok(trust) = serde_json::from_value::<TrustInfo>(data.clone()) {
+                    match dispatcher
+                        .state
+                        .publish_trust_info(&dispatcher.queue, trust)
+                        .await
+                    {
+                        Ok(true) => info!("Discovery: trust relationship published"),
+                        Ok(false) => debug!("Discovery: trust already known"),
+                        Err(e) => warn!(err = %e, "Failed to publish discovered trust"),
                     }
                 }
             }

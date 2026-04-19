@@ -194,6 +194,7 @@ pub(super) async fn push_realtime_discoveries(
         ("vulnerabilities", "vulnerability"),
         ("shares", "share"),
         ("discovered_users", "user"),
+        ("trusted_domains", "trust"),
     ];
 
     let mut pushed = 0usize;

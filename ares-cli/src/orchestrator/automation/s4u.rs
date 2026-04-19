@@ -116,8 +116,9 @@ pub async fn auto_s4u_exploitation(
         let work: Vec<S4uWork> = {
             let state = dispatcher.state.read().await;
 
-            // Skip if already domain admin
-            if state.has_domain_admin {
+            // Skip only when ALL forests are dominated — delegation vulns
+            // in undominated forests must still be exploited after initial DA.
+            if state.has_domain_admin && state.all_forests_dominated() {
                 continue;
             }
 

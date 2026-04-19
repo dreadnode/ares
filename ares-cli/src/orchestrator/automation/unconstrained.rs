@@ -74,7 +74,7 @@ pub async fn auto_unconstrained_exploitation(
         let work: Vec<UnconstrainedWork> = {
             let state = dispatcher.state.read().await;
 
-            if state.has_domain_admin {
+            if state.has_domain_admin && state.all_forests_dominated() {
                 continue;
             }
 
