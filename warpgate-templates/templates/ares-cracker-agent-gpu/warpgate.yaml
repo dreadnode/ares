@@ -18,7 +18,7 @@ metadata:
 name: ares-cracker-agent-gpu
 version: latest
 base:
-  image: ghcr.io/dreadnode/ares-python-cracker-base-gpu:latest
+  image: ghcr.io/dreadnode/ares-cracker-base-gpu:latest
   pull: true
   privileged: true
   volumes:
@@ -56,16 +56,18 @@ provisioners:
     inline:
       - rm -f /var/lib/apt/lists/lock /var/cache/apt/archives/lock /var/lib/dpkg/lock*
       - apt-get update
-      - apt-get install -y --no-install-recommends build-essential pkg-config libssl-dev curl
-      - python3.13 -m pip install --break-system-packages --no-cache-dir /tmp/ares-build
+      - apt-get install -y --no-install-recommends ca-certificates curl gcc-14 g++-14 pkg-config libssl-dev cmake
+      - apt-get install -y --reinstall libc6-dev linux-libc-dev
+      - update-alternatives --install /usr/bin/cc cc /usr/bin/gcc-14 100
       - curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
       - export PATH="/root/.cargo/bin:$PATH"
-      - ln -sf /usr/bin/gcc /usr/local/bin/x86_64-unknown-linux-gnu-gcc
-      - cd /tmp/ares-build/ares-rust && cargo build --release --bin ares
-      - cp /tmp/ares-build/ares-rust/target/release/ares /usr/local/bin/ares
+      - export CC=/usr/bin/gcc-14
+      - ln -sf /usr/bin/gcc-14 /usr/local/bin/x86_64-unknown-linux-gnu-gcc
+      - cd /tmp/ares-build && cargo build --release --bin ares
+      - cp /tmp/ares-build/target/release/ares /usr/local/bin/ares
       - rm -rf /tmp/ares-build /root/.cargo /root/.rustup /usr/local/bin/x86_64-unknown-linux-gnu-gcc
       - rm -f /var/lib/apt/lists/lock /var/cache/apt/archives/lock /var/lib/dpkg/lock*
-      - apt-get purge -y build-essential pkg-config libssl-dev || true
+      - apt-get purge -y gcc-14 g++-14 pkg-config libssl-dev cmake || true
       - apt-get autoremove -y || true
       - apt-get clean || true
       - rm -rf /var/lib/apt/lists/*

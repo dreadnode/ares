@@ -99,9 +99,33 @@
       Error: {{ recon_tools_netexec_pipx_upgrade.stderr }}
       {% endif %}
 
+- name: Discover pipx venvs directory
+  ansible.builtin.shell: |
+    set -o pipefail
+    # Use pipx environment to find actual venvs path (varies by version/distro)
+    VENVS=$(pipx environment --value PIPX_LOCAL_VENVS 2>/dev/null || true)
+    if [ -z "$VENVS" ] || [ ! -d "$VENVS" ]; then
+      # Fallback: check known locations
+      for d in /root/.local/share/pipx/venvs /root/.local/pipx/venvs; do
+        if [ -d "$d/netexec" ]; then VENVS="$d"; break; fi
+      done
+    fi
+    echo "${VENVS:-NOT_FOUND}"
+  args:
+    executable: /bin/bash
+  register: recon_tools_pipx_venvs_dir
+  changed_when: false
+  become: true
+  environment:
+    HOME: /root
+    PATH: "/root/.local/bin:/root/.cargo/bin:/usr/local/bin:/usr/bin:/bin"
+  when:
+    - recon_tools_impacket_from_source | default(false)
+    - recon_tools_netexec_use_pipx | default(true)
+
 - name: Inject source impacket into NetExec pipx venv
   ansible.builtin.command: >-
-    pipx inject netexec {{ recon_tools_impacket_install_dir }} --editable --force
+    pipx inject netexec {{ recon_tools_impacket_install_dir }} --force
   register: recon_tools_netexec_impacket_inject
   changed_when: false
   failed_when: false
@@ -115,7 +139,7 @@
 
 - name: Verify regsecrets is importable from NetExec pipx venv
   ansible.builtin.command: >-
-    /root/.local/pipx/venvs/netexec/bin/python -c
+    {{ recon_tools_pipx_venvs_dir.stdout }}/netexec/bin/python -c
     "from impacket.examples import regsecrets; print('regsecrets OK')"
   register: recon_tools_netexec_regsecrets_check
   changed_when: false
@@ -124,17 +148,61 @@
   when:
     - recon_tools_impacket_from_source | default(false)
     - recon_tools_netexec_use_pipx | default(true)
+    - recon_tools_pipx_venvs_dir.stdout | default('NOT_FOUND') != 'NOT_FOUND'
+
+- name: Install impacket from source into NetExec venv (fallback for pipx inject)
+  ansible.builtin.shell: |
+    set -o pipefail
+    VENV="{{ recon_tools_pipx_venvs_dir.stdout }}/netexec"
+    VENV_PYTHON="$VENV/bin/python"
+
+    # Construct site-packages path from venv layout
+    PY_VER=$($VENV_PYTHON -c "import sys; print(f'python{sys.version_info.major}.{sys.version_info.minor}')")
+    SITE_PACKAGES="$VENV/lib/$PY_VER/site-packages"
+
+    if [ ! -d "$SITE_PACKAGES" ]; then
+      echo "ERROR: site-packages not found at $SITE_PACKAGES"
+      exit 1
+    fi
+
+    # Copy full impacket package from source (overrides broken installs, adds examples)
+    cp -r {{ recon_tools_impacket_install_dir }}/impacket "$SITE_PACKAGES/"
+    echo "Installed impacket from source to $SITE_PACKAGES/impacket"
+  args:
+    executable: /bin/bash
+  register: recon_tools_netexec_examples_copy
+  changed_when: "'Installed' in recon_tools_netexec_examples_copy.stdout"
+  become: true
+  when:
+    - recon_tools_impacket_from_source | default(false)
+    - recon_tools_netexec_use_pipx | default(true)
+    - recon_tools_netexec_regsecrets_check.rc | default(1) != 0
+
+- name: Re-verify regsecrets after examples copy
+  ansible.builtin.command: >-
+    {{ recon_tools_pipx_venvs_dir.stdout }}/netexec/bin/python -c
+    "from impacket.examples import regsecrets; print('regsecrets OK')"
+  register: recon_tools_netexec_regsecrets_recheck
+  changed_when: false
+  failed_when: false
+  become: true
+  when:
+    - recon_tools_impacket_from_source | default(false)
+    - recon_tools_netexec_use_pipx | default(true)
+    - recon_tools_netexec_regsecrets_check.rc | default(1) != 0
 
 - name: Fail if regsecrets not available in NetExec venv
   ansible.builtin.fail:
     msg: |
       CRITICAL: impacket.examples.regsecrets not importable from NetExec pipx venv.
-      The pipx inject may have failed. Check: pipx inject netexec /opt/impacket --editable --force
-      Inject output: {{ recon_tools_netexec_impacket_inject.stderr | default('none') }}
+      Pipx venvs dir: {{ recon_tools_pipx_venvs_dir.stdout | default('unknown') }}
+      pipx inject output: {{ recon_tools_netexec_impacket_inject.stderr | default('none') }}
+      Examples copy output: {{ recon_tools_netexec_examples_copy.stdout | default('none') }}
   when:
     - recon_tools_impacket_from_source | default(false)
     - recon_tools_netexec_use_pipx | default(true)
     - recon_tools_netexec_regsecrets_check.rc | default(1) != 0
+    - recon_tools_netexec_regsecrets_recheck.rc | default(1) != 0
 
 - name: Find nxc binary location
   ansible.builtin.shell: |
@@ -144,8 +212,8 @@
       command -v nxc
       exit 0
     fi
-    # Check pipx venv first, then .local/bin (use -e for symlinks)
-    for path in /root/.local/pipx/venvs/netexec/bin/nxc /root/.local/bin/nxc; do
+    # Check pipx venv first (both XDG and legacy paths), then .local/bin (use -e for symlinks)
+    for path in /root/.local/share/pipx/venvs/netexec/bin/nxc /root/.local/pipx/venvs/netexec/bin/nxc /root/.local/bin/nxc; do
       if [ -e "$path" ]; then echo "$path"; exit 0; fi
     done
     echo "NOT_FOUND"
@@ -175,8 +243,8 @@
       command -v netexec
       exit 0
     fi
-    # Check pipx venv first, then .local/bin (use -e for symlinks)
-    for path in /root/.local/pipx/venvs/netexec/bin/netexec /root/.local/bin/netexec; do
+    # Check pipx venv first (both XDG and legacy paths), then .local/bin (use -e for symlinks)
+    for path in /root/.local/share/pipx/venvs/netexec/bin/netexec /root/.local/pipx/venvs/netexec/bin/netexec /root/.local/bin/netexec; do
       if [ -e "$path" ]; then echo "$path"; exit 0; fi
     done
     echo "NOT_FOUND"
@@ -206,8 +274,8 @@
       command -v nxcdb
       exit 0
     fi
-    # Check pipx venv first, then .local/bin (use -e for symlinks)
-    for path in /root/.local/pipx/venvs/netexec/bin/nxcdb /root/.local/bin/nxcdb; do
+    # Check pipx venv first (both XDG and legacy paths), then .local/bin (use -e for symlinks)
+    for path in /root/.local/share/pipx/venvs/netexec/bin/nxcdb /root/.local/pipx/venvs/netexec/bin/nxcdb /root/.local/bin/nxcdb; do
       if [ -e "$path" ]; then echo "$path"; exit 0; fi
     done
     echo "NOT_FOUND"
