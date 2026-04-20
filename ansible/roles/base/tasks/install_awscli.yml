@@ -18,6 +18,7 @@
       ansible.builtin.apt:
         name: unzip
         state: present
+        update_cache: true
       become: true
 
     - name: Unzip AWS CLI installer
