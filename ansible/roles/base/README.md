@@ -37,6 +37,7 @@ Base requirements for Ares AI agents
 | `base_pip_packages.3` | str | <code>asyncio</code> | No description |
 | `base_pip_packages.4` | str | <code>aiohttp>=3.13.4</code> | No description |
 | `base_pip_packages.5` | str | <code>cryptography>=44.0.1</code> | No description |
+| `base_pip_packages.6` | str | <code>requests>=2.33.0</code> | No description |
 | `base_pip_externally_managed` | bool | <code>False</code> | No description |
 | `base_pip_break_required` | bool | <code>False</code> | No description |
 | `base_system_packages` | list | <code>&#91;&#93;</code> | No description |
@@ -138,6 +139,7 @@ Base requirements for Ares AI agents
 - **Set fact for pip externally managed** (ansible.builtin.set_fact)
 - **Fail when break-system-packages is required but disabled** (ansible.builtin.fail) - Conditional
 - **Fail when break-system-packages is required but unsupported by pip** (ansible.builtin.fail) - Conditional
+- **Upgrade pip to latest (CVE fixes)** (ansible.builtin.pip)
 - **Install Ares Python dependencies** (ansible.builtin.pip)
 - **Create Ares workspace directory** (ansible.builtin.file) - Conditional
 

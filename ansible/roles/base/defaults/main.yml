@@ -35,6 +35,7 @@ base_pip_packages:
   - asyncio
   - "aiohttp>=3.13.4"
   - "cryptography>=44.0.1"
+  - "requests>=2.33.0"
 
 # Pip/PEP 668 handling
 base_pip_externally_managed: false

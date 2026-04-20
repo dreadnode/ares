@@ -229,6 +229,14 @@
     - ansible_facts['distribution'] != 'Kali'
     - lateral_movement_tools_install_evil_winrm
 
+- name: Update vulnerable ruby gem dependencies (net-imap, resolv, rexml, uri, zlib)
+  ansible.builtin.command: gem update net-imap resolv rexml uri zlib
+  become: true
+  changed_when: true
+  when:
+    - ansible_facts['os_family'] == 'Debian'
+    - lateral_movement_tools_install_evil_winrm
+
 - name: Install pth-toolkit (Kali only - may not be available in all repos)
   ansible.builtin.apt:
     name: "{{ lateral_movement_tools_pth_toolkit_package }}"
