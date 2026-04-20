@@ -25,3 +25,14 @@ opentelemetry_sdk = { version = "0.31", features = ["trace"] }
 opentelemetry-otlp = { version = "0.31", features = ["grpc-tonic", "http-proto", "reqwest-rustls", "trace"] }
 tracing-opentelemetry = "0.32"
 opentelemetry-semantic-conventions = "0.31"
+
+# Fast deploy profile: optimized for compile speed, acceptable runtime perf.
+# Use `task ec2:deploy BUILD_PROFILE=release` for production-grade optimization.
+[profile.dev-deploy]
+inherits = "release"
+opt-level = 2          # ~40% faster compile vs opt-level=3, negligible perf difference for I/O-bound code
+lto = "thin"           # ~3x faster link than fat LTO, still gets cross-crate inlining
+codegen-units = 16     # Max parallelism during codegen (default release=1 is slow)
+debug = false          # No debuginfo = smaller binary, faster link
+strip = "symbols"      # Strip in cargo itself (no separate strip step needed)
+incremental = true     # Huge win for iterative deploys (only recompile changed crates)

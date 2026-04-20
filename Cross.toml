@@ -1,7 +1,9 @@
 [target.x86_64-unknown-linux-gnu]
-# Install cmake so aws-lc-sys can use its CMake builder path
-# (the CC builder path fails due to GCC memcmp bug #95189)
-pre-build = ["apt-get update && apt-get install -y cmake"]
+# Install cmake (for aws-lc-sys CMake builder) and mold (fast linker, ~3-5x faster link phase)
+pre-build = ["""
+apt-get update && apt-get install -y cmake curl &&
+curl -sL https://github.com/rui314/mold/releases/download/v2.35.1/mold-2.35.1-x86_64-linux.tar.gz | tar -xz -C /usr/local --strip-components=1
+"""]
 
 [target.x86_64-unknown-linux-gnu.env]
 passthrough = ["AWS_LC_SYS_CMAKE_BUILDER"]

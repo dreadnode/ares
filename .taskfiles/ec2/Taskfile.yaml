@@ -38,10 +38,12 @@ vars:
   ARES_LOG_DIR: '/var/log/ares'
   # Build config
   RUST_TARGET: '{{.RUST_TARGET | default "x86_64-unknown-linux-gnu"}}'
-  BIN_DIR: 'target/{{.RUST_TARGET}}/release'
-  # Build tool: auto (cross on macOS, zigbuild on Linux), cross, zigbuild, cargo, remote
-  # remote: builds natively on EC2 (fastest, no cross-compilation)
+  BIN_DIR: 'target/{{.RUST_TARGET}}/{{.BUILD_PROFILE | default "dev-deploy"}}'
+  # Build tool: auto (cross on macOS due to aws-lc-sys, zigbuild on Linux), cross, zigbuild, cargo, remote
+  # remote: builds natively on EC2 (fastest for iteration, no cross-compilation)
   BUILD_TOOL: '{{.BUILD_TOOL | default "auto"}}'
+  # Build profile: release (optimized) or dev-deploy (fast compile, less optimized)
+  BUILD_PROFILE: '{{.BUILD_PROFILE | default "dev-deploy"}}'
   REMOTE_BUILD_DIR: '/tmp/ares-build'
   # Worker roles
   WORKER_ROLES: 'recon credential_access cracker acl privesc lateral coercion'
@@ -87,7 +89,7 @@ tasks:
     silent: true
     vars:
       MAX_OPEN_FILES: '{{.MAX_OPEN_FILES | default "65536"}}'
-      CARGO_BUILD_JOBS: '{{.CARGO_BUILD_JOBS | default "1"}}'
+      CARGO_BUILD_JOBS: '{{.CARGO_BUILD_JOBS | default "0"}}'
       S3_DEPLOY_PREFIX: 'ares-deploy'
     preconditions:
       - sh: aws sts get-caller-identity --profile "{{.EC2_PROFILE}}" --region "{{.EC2_REGION}}" >/dev/null 2>&1
@@ -99,10 +101,9 @@ tasks:
       - |
         BUILD_TOOL="{{.BUILD_TOOL}}"
 
-        # Resolve 'auto': on macOS prefer cross (Docker) to avoid Zig's
-        # OPEN_MAX=10240 fd cap that causes ProcessFdQuotaExceeded when
-        # linking binaries with 200+ .rlib deps.
-        # On Linux, prefer zigbuild (fast, no fd limit issues).
+        # Resolve 'auto': cross is required on macOS because aws-lc-sys
+        # (pulled by rustls/reqwest) fails under zigbuild's Zig AR wrapper.
+        # On Linux, prefer zigbuild (no Docker overhead).
         if [ "$BUILD_TOOL" = "auto" ]; then
           if [ "$(uname)" = "Darwin" ] && command -v cross >/dev/null 2>&1; then
             BUILD_TOOL="cross"
@@ -159,8 +160,8 @@ tasks:
               "mkdir -p " + $build_dir,
               "aws s3 cp s3://" + $bucket + "/" + $prefix + "/ares-src.tar.gz /tmp/ares-src.tar.gz",
               "tar -xzf /tmp/ares-src.tar.gz -C " + $build_dir,
-              "cd " + $build_dir + " && CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER=gcc cargo build --release -p ares-cli 2>&1",
-              "cp " + $build_dir + "/target/release/ares /usr/local/bin/ares && chmod +x /usr/local/bin/ares",
+              "cd " + $build_dir + " && cargo build --profile dev-deploy -p ares-cli 2>&1",
+              "cp " + $build_dir + "/target/dev-deploy/ares /usr/local/bin/ares && chmod +x /usr/local/bin/ares",
               "echo Deployed: && ls -lh /usr/local/bin/ares"
             ]}' > "$PARAMS_FILE"
 
@@ -212,7 +213,16 @@ tasks:
         fi
 
         # --- local cross-compilation path ---
-        echo -e "{{.INFO}} Cross-compiling for {{.RUST_TARGET}}..."
+        PROFILE="{{.BUILD_PROFILE}}"
+        if [ "$PROFILE" = "release" ]; then
+          PROFILE_FLAG="--release"
+          BIN_SUBDIR="release"
+        else
+          PROFILE_FLAG="--profile $PROFILE"
+          BIN_SUBDIR="$PROFILE"
+        fi
+
+        echo -e "{{.INFO}} Cross-compiling for {{.RUST_TARGET}} (profile: $PROFILE, jobs: {{.CARGO_BUILD_JOBS}})..."
 
         # zig 0.15+ cannot handle RLIM_INFINITY — it needs a concrete fd limit.
         CURRENT_FD_LIMIT=$(ulimit -n 2>/dev/null || echo "256")
@@ -220,7 +230,19 @@ tasks:
           ulimit -n {{.MAX_OPEN_FILES}} 2>/dev/null || ulimit -n 10240 2>/dev/null || ulimit -n 4096 2>/dev/null || true
         fi
 
-        export CARGO_BUILD_JOBS="{{.CARGO_BUILD_JOBS}}"
+        JOBS="{{.CARGO_BUILD_JOBS}}"
+        if [ "$JOBS" = "0" ]; then
+          # 0 = use all available cores (cargo default)
+          JOBS_FLAG=""
+        else
+          JOBS_FLAG="-j $JOBS"
+        fi
+
+        # Use sccache if available for dependency caching
+        if command -v sccache >/dev/null 2>&1; then
+          export RUSTC_WRAPPER=sccache
+          echo -e "{{.INFO}} Using sccache for compilation caching"
+        fi
 
         case "$BUILD_TOOL" in
           cross)
@@ -228,14 +250,14 @@ tasks:
             export CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER=x86_64-linux-gnu-gcc
             # Use CMake builder for aws-lc-sys (CC builder fails due to GCC memcmp bug #95189)
             export AWS_LC_SYS_CMAKE_BUILDER=1
-            cross build --release --target {{.RUST_TARGET}} -j "{{.CARGO_BUILD_JOBS}}"
+            cross build $PROFILE_FLAG --target {{.RUST_TARGET}} $JOBS_FLAG -p ares-cli
             ;;
           zigbuild)
-            cargo zigbuild --release --target {{.RUST_TARGET}} -j "{{.CARGO_BUILD_JOBS}}" -p ares-cli
+            cargo zigbuild $PROFILE_FLAG --target {{.RUST_TARGET}} $JOBS_FLAG -p ares-cli
             ;;
           cargo)
             echo -e "{{.WARN}} Using plain cargo (no cross-compilation toolchain)..."
-            cargo build --release --target {{.RUST_TARGET}} -j "{{.CARGO_BUILD_JOBS}}"
+            cargo build $PROFILE_FLAG --target {{.RUST_TARGET}} $JOBS_FLAG -p ares-cli
             ;;
           *)
             echo -e "{{.ERROR}} Unknown BUILD_TOOL: $BUILD_TOOL (valid: auto, cross, zigbuild, cargo, remote)"
@@ -244,20 +266,36 @@ tasks:
         esac
 
         echo -e "{{.SUCCESS}} Binary built:"
-        ls -lh {{.BIN_DIR}}/ares 2>/dev/null || true
+        ls -lh "target/{{.RUST_TARGET}}/$BIN_SUBDIR/ares" 2>/dev/null || true
 
       # Upload to S3 staging (skip for remote builds)
       - |
         if [ "{{.BUILD_TOOL}}" = "remote" ]; then exit 0; fi
 
-        echo -e "{{.INFO}} Uploading binaries to s3://{{.BCP_BUCKET}}/{{.S3_DEPLOY_PREFIX}}/..."
+        PROFILE="{{.BUILD_PROFILE}}"
+        if [ "$PROFILE" = "release" ]; then
+          BIN_SUBDIR="release"
+        else
+          BIN_SUBDIR="$PROFILE"
+        fi
+        BIN_PATH="target/{{.RUST_TARGET}}/$BIN_SUBDIR/ares"
 
-        for bin in ares; do
-          aws s3 cp "{{.BIN_DIR}}/$bin" "s3://{{.BCP_BUCKET}}/{{.S3_DEPLOY_PREFIX}}/$bin" \
-            --profile "{{.EC2_PROFILE}}" --region "{{.EC2_REGION}}"
-        done
+        # Strip debug symbols if profile doesn't handle it (release profile without strip)
+        if [ "$PROFILE" = "release" ]; then
+          echo -e "{{.INFO}} Stripping binary..."
+          STRIP_BIN="x86_64-linux-gnu-strip"
+          if ! command -v "$STRIP_BIN" >/dev/null 2>&1; then
+            STRIP_BIN="strip"
+          fi
+          $STRIP_BIN "$BIN_PATH" 2>/dev/null || echo -e "{{.WARN}} Strip failed (non-fatal)"
+        fi
+        ls -lh "$BIN_PATH"
 
-        echo -e "{{.SUCCESS}} Binaries staged in S3"
+        echo -e "{{.INFO}} Uploading binary to s3://{{.BCP_BUCKET}}/{{.S3_DEPLOY_PREFIX}}/..."
+        aws s3 cp "$BIN_PATH" "s3://{{.BCP_BUCKET}}/{{.S3_DEPLOY_PREFIX}}/ares" \
+          --profile "{{.EC2_PROFILE}}" --region "{{.EC2_REGION}}"
+
+        echo -e "{{.SUCCESS}} Binary staged in S3"
 
       # Pull from S3 on EC2 via SSM + verify (skip for remote builds)
       - |
