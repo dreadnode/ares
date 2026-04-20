@@ -407,25 +407,23 @@ mod tests {
         let mut state = StateInner::new("op-1".into());
         state
             .domain_controllers
-            .insert("north.sevenkingdoms.local".into(), "192.168.56.11".into());
+            .insert("child.contoso.local".into(), "192.168.58.11".into());
         state
             .domain_controllers
-            .insert("sevenkingdoms.local".into(), "192.168.56.10".into());
+            .insert("contoso.local".into(), "192.168.58.10".into());
         state
             .domain_controllers
-            .insert("essos.local".into(), "192.168.56.23".into());
+            .insert("fabrikam.local".into(), "192.168.58.23".into());
 
-        // Dominate only the sevenkingdoms forest
-        state
-            .dominated_domains
-            .insert("north.sevenkingdoms.local".into());
-        state.dominated_domains.insert("sevenkingdoms.local".into());
+        // Dominate only the contoso forest
+        state.dominated_domains.insert("child.contoso.local".into());
+        state.dominated_domains.insert("contoso.local".into());
 
-        // essos.local is still undominated
+        // fabrikam.local is still undominated
         assert!(!state.all_forests_dominated());
 
-        // Dominate essos too
-        state.dominated_domains.insert("essos.local".into());
+        // Dominate fabrikam too
+        state.dominated_domains.insert("fabrikam.local".into());
         assert!(state.all_forests_dominated());
     }
 

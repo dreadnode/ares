@@ -886,6 +886,7 @@ tasks:
               -e "s|__ARES_BLUE_ENABLED__|{{.BLUE_ENABLED}}|" \
               -e "s|__ARES_BLUE_LLM_MODEL__|{{.BLUE_LLM_MODEL}}|" \
               -e "s|__ARES_DEPLOYMENT__|{{.EC2_DEPLOYMENT}}|" \
+              -e "s|__OTEL_TRACES_ENDPOINT__|{{.DREADNODE_SERVER_URL}}api/otel/traces|" \
               .taskfiles/ec2/scripts/launch-orchestrator.sh.tmpl > "$ORCH_SCRIPT"
           jq -Rs '{"commands": [.]}' < "$ORCH_SCRIPT" > "$ORCH_PARAMS"
 

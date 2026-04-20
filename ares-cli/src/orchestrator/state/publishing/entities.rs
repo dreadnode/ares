@@ -11,8 +11,15 @@ use crate::orchestrator::task_queue::TaskQueue;
 
 impl SharedState {
     /// Add a user to state and Redis (with dedup).
+    ///
+    /// Cross-domain dedup: if the same username already exists in a different
+    /// domain that shares a trust relationship with the new domain, the new
+    /// entry is rejected. This prevents Global Catalog queries (port 3268)
+    /// from creating phantom users attributed to the wrong domain — e.g.
+    /// a user in `child.contoso.local` appearing as `fabrikam.local\user`
+    /// when enumerated via a cross-forest GC query.
     pub async fn publish_user(&self, queue: &TaskQueue, user: User) -> Result<bool> {
-        // Check for duplicate in memory
+        // Check for duplicate in memory (exact match or cross-domain trust match)
         {
             let state = self.inner.read().await;
             let dedup = format!(
@@ -20,10 +27,37 @@ impl SharedState {
                 user.username.to_lowercase(),
                 user.domain.to_lowercase()
             );
-            if state.users.iter().any(|u| {
-                format!("{}@{}", u.username.to_lowercase(), u.domain.to_lowercase()) == dedup
-            }) {
-                return Ok(false);
+            let username_lower = user.username.to_lowercase();
+            let domain_lower = user.domain.to_lowercase();
+
+            for existing in &state.users {
+                let existing_key = format!(
+                    "{}@{}",
+                    existing.username.to_lowercase(),
+                    existing.domain.to_lowercase()
+                );
+                // Exact duplicate
+                if existing_key == dedup {
+                    return Ok(false);
+                }
+                // Cross-domain duplicate: same username, different domain, trust exists
+                if existing.username.to_lowercase() == username_lower
+                    && existing.domain.to_lowercase() != domain_lower
+                {
+                    let existing_domain = existing.domain.to_lowercase();
+                    let domains_are_trusted = state.trusted_domains.contains_key(&domain_lower)
+                        || state.trusted_domains.contains_key(&existing_domain)
+                        || are_in_same_forest(&domain_lower, &existing_domain);
+                    if domains_are_trusted {
+                        tracing::debug!(
+                            username = %user.username,
+                            new_domain = %user.domain,
+                            existing_domain = %existing.domain,
+                            "Skipping cross-domain duplicate user (trust/forest relationship)"
+                        );
+                        return Ok(false);
+                    }
+                }
             }
         }
 
@@ -249,4 +283,16 @@ impl SharedState {
         }
         Ok(added)
     }
+}
+
+/// Check if two domains share a forest (one is a subdomain of the other).
+///
+/// e.g. `child.contoso.local` and `contoso.local` are in the same forest.
+/// This catches parent/child domain relationships without requiring an
+/// explicit trust entry.
+fn are_in_same_forest(a: &str, b: &str) -> bool {
+    if a == b {
+        return true;
+    }
+    a.ends_with(&format!(".{b}")) || b.ends_with(&format!(".{a}"))
 }

@@ -178,7 +178,7 @@ pub(crate) enum OpsCommands {
     InjectTrust {
         /// Operation ID
         operation_id: String,
-        /// Trusted domain FQDN (e.g., essos.local)
+        /// Trusted domain FQDN (e.g., fabrikam.local)
         domain: String,
         /// Trust type: parent_child, forest, external
         #[arg(long, default_value = "forest")]

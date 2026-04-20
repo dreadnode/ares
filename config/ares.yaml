@@ -357,3 +357,8 @@ grafana:
 observability:
   loki_url: "https://loki.dev.plundr.ai"
   prometheus_url: "http://localhost:9090"
+  # OTEL resource attributes — set via env var at runtime:
+  #   OTEL_RESOURCE_ATTRIBUTES=deployment.environment=staging,attack.team=red
+  # Required by Grafana Cloud for resource.deployment.environment grouping.
+  # Configured in: .taskfiles/ec2/Taskfile.yaml (env file), setup.sh (systemd),
+  #                launch-orchestrator.sh.tmpl (orchestrator process)

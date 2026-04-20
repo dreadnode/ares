@@ -254,13 +254,13 @@ async fn auto_chain_s4u_secretsdump(payload: &Value, dispatcher: &Arc<Dispatcher
         .and_then(ares_llm::routing::extract_host_from_spn)
         .or_else(|| {
             // Try to parse target from ccache filename:
-            // Administrator@CIFS_winterfell@NORTH.SEVENKINGDOMS.LOCAL.ccache
+            // Administrator@CIFS_dc01@CHILD.CONTOSO.LOCAL.ccache
             let fname = ticket_path.rsplit('/').next().unwrap_or(&ticket_path);
             if let Some(at_pos) = fname.find('@') {
                 let after = &fname[at_pos + 1..];
-                // Extract hostname: CIFS_winterfell@REALM.ccache → CIFS.winterfell
+                // Extract hostname: CIFS_dc01@REALM.ccache → CIFS.dc01
                 let host_part = after.split('@').next().unwrap_or(after).replace('_', ".");
-                // Remove the service prefix (CIFS. → winterfell)
+                // Remove the service prefix (CIFS. → dc01)
                 if let Some(dot_pos) = host_part.find('.') {
                     let candidate = &host_part[dot_pos + 1..];
                     if !candidate.is_empty() {

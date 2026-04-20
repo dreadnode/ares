@@ -25,10 +25,13 @@ if [ -n "$_blue_model" ] && [ "$_blue_model" = "${_blue_model#__}" ]; then
 fi
 export ARES_DEPLOYMENT='__ARES_DEPLOYMENT__'
 export ARES_CONFIG=/etc/ares/config.yaml
-export OTEL_EXPORTER_OTLP_TRACES_ENDPOINT='__OTEL_TRACES_ENDPOINT__'
-export OTEL_EXPORTER_OTLP_PROTOCOL='http/protobuf'
-export OTEL_EXPORTER_OTLP_HEADERS='X-Api-Key=__DREADNODE_API_KEY__'
-export OTEL_RESOURCE_ATTRIBUTES='deployment.environment=staging,attack.team=red'
+_otel_endpoint='__OTEL_TRACES_ENDPOINT__'
+if [ -n "$_otel_endpoint" ] && [ "$_otel_endpoint" = "${_otel_endpoint#__}" ]; then
+  export OTEL_EXPORTER_OTLP_TRACES_ENDPOINT="$_otel_endpoint"
+  export OTEL_EXPORTER_OTLP_PROTOCOL='http/protobuf'
+  export OTEL_EXPORTER_OTLP_HEADERS='X-Api-Key=__DREADNODE_API_KEY__'
+  export OTEL_RESOURCE_ATTRIBUTES='deployment.environment=staging,attack.team=red'
+fi
 pkill -f 'ares orchestrator' 2>/dev/null || true
 sleep 1
 nohup /usr/local/bin/ares orchestrator >/var/log/ares/orchestrator.log 2>&1 &

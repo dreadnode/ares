@@ -1007,6 +1007,7 @@ tasks:
           ENV_FILE_CMD="$ENV_FILE_CMD; echo 'OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=${OTEL_TRACES_ENDPOINT}' >> /etc/ares/env"
           ENV_FILE_CMD="$ENV_FILE_CMD; echo 'OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf' >> /etc/ares/env"
           ENV_FILE_CMD="$ENV_FILE_CMD; echo 'OTEL_EXPORTER_OTLP_HEADERS=X-Api-Key=${DREADNODE_API_KEY}' >> /etc/ares/env"
+          ENV_FILE_CMD="$ENV_FILE_CMD; echo 'OTEL_RESOURCE_ATTRIBUTES=deployment.environment=staging,attack.team=red' >> /etc/ares/env"
         fi
         ENV_FILE_CMD="$ENV_FILE_CMD; chmod 600 /etc/ares/env; echo Wrote /etc/ares/env"
         # Restart workers so they pick up the new env file
@@ -1030,10 +1031,12 @@ tasks:
         export ARES_TOOL_DISPATCH=local
         export ARES_BLUE_ENABLED=1
         export ARES_DEPLOYMENT='{{.EC2_DEPLOYMENT}}'
-        export OTEL_EXPORTER_OTLP_TRACES_ENDPOINT='${OTEL_TRACES_ENDPOINT}'
-        export OTEL_EXPORTER_OTLP_PROTOCOL='http/protobuf'
-        export OTEL_EXPORTER_OTLP_HEADERS='X-Api-Key=${DREADNODE_API_KEY}'
-        export OTEL_RESOURCE_ATTRIBUTES='deployment.environment=staging,attack.team=red'
+        if [ -n '${DREADNODE_API_KEY}' ]; then
+          export OTEL_EXPORTER_OTLP_TRACES_ENDPOINT='${OTEL_TRACES_ENDPOINT}'
+          export OTEL_EXPORTER_OTLP_PROTOCOL='http/protobuf'
+          export OTEL_EXPORTER_OTLP_HEADERS='X-Api-Key=${DREADNODE_API_KEY}'
+          export OTEL_RESOURCE_ATTRIBUTES='deployment.environment=staging,attack.team=red'
+        fi
         export ARES_OPERATION_ID='${PAYLOAD}'
         mkdir -p {{.ARES_LOG_DIR}}
         nohup /usr/local/bin/ares orchestrator >{{.ARES_LOG_DIR}}/orchestrator.log 2>&1 &

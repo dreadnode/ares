@@ -135,12 +135,20 @@ pub fn shutdown_telemetry(guard: &mut TelemetryGuard) {
 /// nor `OTEL_EXPORTER_OTLP_ENDPOINT`).
 fn try_init_otel_provider(service_name: &str) -> Option<SdkTracerProvider> {
     // The OTel SDK reads OTEL_EXPORTER_OTLP_* env vars automatically.
-    // We check presence so we can skip provider creation entirely when no
-    // collector is reachable — avoids noisy connection-refused errors.
-    let has_endpoint = std::env::var("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT").is_ok()
-        || std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT").is_ok();
+    // We check presence and validity so we can skip provider creation entirely
+    // when no collector is reachable — avoids noisy connection-refused or
+    // RelativeUrlWithoutBase errors from the BatchSpanProcessor.
+    let endpoint = std::env::var("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT")
+        .or_else(|_| std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT"))
+        .ok()
+        .filter(|v| !v.is_empty());
 
-    if !has_endpoint {
+    let endpoint = endpoint?;
+
+    // Reject non-absolute URLs early (e.g. un-substituted template placeholders)
+    // to avoid noisy BatchSpanProcessor errors every flush interval.
+    if !endpoint.starts_with("http://") && !endpoint.starts_with("https://") {
+        eprintln!("ignoring OTEL endpoint: not an absolute URL: {endpoint:?}");
         return None;
     }
 

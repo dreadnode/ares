@@ -97,8 +97,8 @@ pub async fn auto_local_admin_secretsdump(
 
         // Hash-based secretsdump: when we dominate a child domain, use the
         // Administrator NTLM hash to PTH against parent domain DCs.
-        // This covers child-to-parent escalation (e.g. north.sevenkingdoms.local
-        // → sevenkingdoms.local) where password-based creds won't have admin
+        // This covers child-to-parent escalation (e.g. child.contoso.local
+        // → contoso.local) where password-based creds won't have admin
         // rights on the parent DC.
         let hash_work: Vec<(String, String, String, String, String)> = {
             let state = dispatcher.state.read().await;
