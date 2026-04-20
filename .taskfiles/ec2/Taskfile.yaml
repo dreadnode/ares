@@ -226,6 +226,8 @@ tasks:
           cross)
             # Override linker: container has x86_64-linux-gnu-gcc, not x86_64-unknown-linux-gnu-gcc.
             export CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER=x86_64-linux-gnu-gcc
+            # Use CMake builder for aws-lc-sys (CC builder fails due to GCC memcmp bug #95189)
+            export AWS_LC_SYS_CMAKE_BUILDER=1
             cross build --release --target {{.RUST_TARGET}} -j "{{.CARGO_BUILD_JOBS}}"
             ;;
           zigbuild)
@@ -586,7 +588,7 @@ tasks:
 
         PARAMS_FILE=$(mktemp)
         trap "rm -f $PARAMS_FILE" EXIT
-        jq -n --arg units "$WORKER_UNITS" '{"commands": ["systemctl stop " + $units + " 2>/dev/null || true; pkill -f '\\''ares orchestrator'\\'' 2>/dev/null || true; echo Stopped all ares workers and orchestrator"]}' > "$PARAMS_FILE"
+        jq -n --arg units "$WORKER_UNITS" '{"commands": ["systemctl stop " + $units + " 2>/dev/null || true; pkill -f \"ares orchestrator\" 2>/dev/null || true; echo Stopped all ares workers and orchestrator"]}' > "$PARAMS_FILE"
 
         CMD_ID=$(aws ssm send-command \
           --profile "{{.EC2_PROFILE}}" \
