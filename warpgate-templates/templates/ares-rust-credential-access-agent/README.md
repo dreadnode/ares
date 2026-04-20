@@ -39,12 +39,7 @@ Environment variables required:
 
 ## Building Docker Images
 
-<<<<<<<< HEAD:warpgate-templates/templates/ares-credential-access-agent/README.md
-This builds **Ares Credential Access Agent** Docker images for `amd64` and `arm64`
-========
-This builds **Ares Rust Credential Access Agent** Docker images for `amd64` and `arm64`
->>>>>>>> 750a111 (feat: add Rust-based Ares agent templates and golden image, modernize template set):warpgate-templates/templates/ares-rust-credential-access-agent/README.md
-architectures, installs prerequisites, provisions using Ansible roles, and
+This builds **Ares Rust Credential Access Agent** Docker images for `amd64` and `arm64`architectures, installs prerequisites, provisions using Ansible roles, and
 compiles the Rust worker binary.
 
 **Initialize the template:**
@@ -60,12 +55,8 @@ export PROVISION_REPO_PATH="${HOME}/ansible-collection-nimbus_range"
 warpgate build ares-rust-credential-access-agent --only 'docker.*'
 ```
 
-<<<<<<<< HEAD:warpgate-templates/templates/ares-credential-access-agent/README.md
-After the build, multi-arch Ares Credential Access Agent Docker images will be available locally as `ares-credential-access-agent:latest`.
-========
 After the build, multi-arch Ares Rust Credential Access Agent Docker images will be available
 locally as `ares-rust-credential-access-agent:latest`.
->>>>>>>> 750a111 (feat: add Rust-based Ares agent templates and golden image, modernize template set):warpgate-templates/templates/ares-rust-credential-access-agent/README.md
 
 ---
 
@@ -111,12 +102,7 @@ warpgate validate ares-rust-credential-access-agent
   - `ares_credential_access_tools` - Kerberos and credential tools
 - **Rust Binary:**
   - Compiled from `feature/rust-cli` branch with PyO3 Python bindings
-<<<<<<<< HEAD:warpgate-templates/templates/ares-credential-access-agent/README.md
-  - Installed to `/usr/local/bin/ares`
-========
-  - Installed to `/usr/local/bin/ares-worker`
->>>>>>>> 750a111 (feat: add Rust-based Ares agent templates and golden image, modernize template set):warpgate-templates/templates/ares-rust-credential-access-agent/README.md
-- **Installed Tools:**
+- Installed to `/usr/local/bin/ares-worker`- **Installed Tools:**
   - **Kerberos Tools** - Rubeus, GetNPUsers, GetUserSPNs for Kerberoasting and AS-REP roasting
   - **Impacket** - secretsdump, ntlmrelayx for credential extraction
   - **DCSync Tools** - mimikatz, pypykatz for domain credential extraction
@@ -124,12 +110,7 @@ warpgate validate ares-rust-credential-access-agent
 - **Directory Structure:**
   - `/ares/` - Main Ares workspace directory
   - `/ares/.venv/` - Python virtual environment
-<<<<<<<< HEAD:warpgate-templates/templates/ares-credential-access-agent/README.md
-  - `/usr/local/bin/ares` - Compiled Ares binary
-========
-  - `/usr/local/bin/ares-worker` - Compiled worker binary
->>>>>>>> 750a111 (feat: add Rust-based Ares agent templates and golden image, modernize template set):warpgate-templates/templates/ares-rust-credential-access-agent/README.md
-- The build includes cleanup steps to remove temporary files, Ansible artifacts, and Rust build artifacts.
+- `/usr/local/bin/ares-worker` - Compiled worker binary- The build includes cleanup steps to remove temporary files, Ansible artifacts, and Rust build artifacts.
 
 ---
 

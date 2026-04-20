@@ -1,6 +1,6 @@
-# Ares Rust ACL Agent Warp Gate Template
+# Ares ACL Agent Warp Gate Template
 
-This template builds **Ares Rust ACL Agent** images using Warp Gate. It supports
+This template builds **Ares ACL Agent** images using Warp Gate. It supports
 building **Docker images** (for `amd64` and `arm64`). The build provisions
 Active Directory ACL exploitation tools using Ansible roles from the nimbus_range
 collection, plus a compiled Rust worker binary with embedded Python.
@@ -24,7 +24,7 @@ collection, plus a compiled Rust worker binary with embedded Python.
 
 The template configuration is managed in `warpgate.yaml`. Key settings include:
 
-- `name`: Template name (`ares-rust-acl-agent`)
+- `name`: Template name (`ares-acl-agent`)
 - `base.image`: Base Docker image (ares-base)
 - `sources`: Clones the ares repository for Rust compilation
 - `provisioners`: Shell, Ansible, and file provisioners for setup
@@ -39,33 +39,24 @@ Environment variables required:
 
 ## Building Docker Images
 
-<<<<<<<< HEAD:warpgate-templates/templates/ares-acl-agent/README.md
-This builds **Ares ACL Agent** Docker images for `amd64` and `arm64`
-========
-This builds **Ares Rust ACL Agent** Docker images for `amd64` and `arm64`
->>>>>>>> 750a111 (feat: add Rust-based Ares agent templates and golden image, modernize template set):warpgate-templates/templates/ares-rust-acl-agent/README.md
-architectures, installs prerequisites, provisions using Ansible roles, and
+This builds **Ares ACL Agent** Docker images for `amd64` and `arm64`architectures, installs prerequisites, provisions using Ansible roles, and
 compiles the Rust worker binary.
 
 **Initialize the template:**
 
 ```bash
-warpgate init ares-rust-acl-agent
+warpgate init ares-acl-agent
 ```
 
 **Build Docker images:**
 
 ```bash
 export PROVISION_REPO_PATH="${HOME}/ansible-collection-nimbus_range"
-warpgate build ares-rust-acl-agent --only 'docker.*'
+warpgate build ares-acl-agent --only 'docker.*'
 ```
 
-<<<<<<<< HEAD:warpgate-templates/templates/ares-acl-agent/README.md
 After the build, multi-arch Ares ACL Agent Docker images will be available
-========
-After the build, multi-arch Ares Rust ACL Agent Docker images will be available
-locally as `ares-rust-acl-agent:latest`.
->>>>>>>> 750a111 (feat: add Rust-based Ares agent templates and golden image, modernize template set):warpgate-templates/templates/ares-rust-acl-agent/README.md
+locally as `ares-acl-agent:latest`.
 
 ---
 
@@ -75,13 +66,13 @@ After building the Docker image, you can push it to GHCR:
 
 ```bash
 # Tag the image
-docker tag ares-rust-acl-agent:latest ghcr.io/dreadnode/ares-rust-acl-agent:latest
+docker tag ares-acl-agent:latest ghcr.io/dreadnode/ares-acl-agent:latest
 
 # Authenticate with GHCR
 echo $GITHUB_TOKEN | docker login ghcr.io -u YOUR_USERNAME --password-stdin
 
 # Push the image
-docker push ghcr.io/dreadnode/ares-rust-acl-agent:latest
+docker push ghcr.io/dreadnode/ares-acl-agent:latest
 ```
 
 ---
@@ -91,7 +82,7 @@ docker push ghcr.io/dreadnode/ares-rust-acl-agent:latest
 To validate the template configuration before building:
 
 ```bash
-warpgate validate ares-rust-acl-agent
+warpgate validate ares-acl-agent
 ```
 
 ---
@@ -111,23 +102,13 @@ warpgate validate ares-rust-acl-agent
   - `ares_acl_tools` - bloodyAD, pywhisker
 - **Rust Binary:**
   - Compiled from `feature/rust-cli` branch with PyO3 Python bindings
-<<<<<<<< HEAD:warpgate-templates/templates/ares-acl-agent/README.md
-  - Installed to `/usr/local/bin/ares`
-========
-  - Installed to `/usr/local/bin/ares-worker`
->>>>>>>> 750a111 (feat: add Rust-based Ares agent templates and golden image, modernize template set):warpgate-templates/templates/ares-rust-acl-agent/README.md
-- **Installed Tools:**
+- Installed to `/usr/local/bin/ares`- **Installed Tools:**
   - **bloodyAD** - Active Directory ACL exploitation framework
   - **pywhisker** - Shadow credentials manipulation tool
 - **Directory Structure:**
   - `/ares/` - Main Ares workspace directory
   - `/ares/.venv/` - Python virtual environment
-<<<<<<<< HEAD:warpgate-templates/templates/ares-acl-agent/README.md
-  - `/usr/local/bin/ares` - Compiled Ares binary
-========
-  - `/usr/local/bin/ares-worker` - Compiled worker binary
->>>>>>>> 750a111 (feat: add Rust-based Ares agent templates and golden image, modernize template set):warpgate-templates/templates/ares-rust-acl-agent/README.md
-- The build includes cleanup steps to remove temporary files, Ansible artifacts, and Rust build artifacts.
+- `/usr/local/bin/ares` - Compiled Ares binary- The build includes cleanup steps to remove temporary files, Ansible artifacts, and Rust build artifacts.
 
 ---
 

@@ -39,12 +39,7 @@ Environment variables required:
 
 ## Building Docker Images
 
-<<<<<<<< HEAD:warpgate-templates/templates/ares-acl-agent/README.md
-This builds **Ares ACL Agent** Docker images for `amd64` and `arm64`
-========
-This builds **Ares Rust ACL Agent** Docker images for `amd64` and `arm64`
->>>>>>>> 750a111 (feat: add Rust-based Ares agent templates and golden image, modernize template set):warpgate-templates/templates/ares-rust-acl-agent/README.md
-architectures, installs prerequisites, provisions using Ansible roles, and
+This builds **Ares Rust ACL Agent** Docker images for `amd64` and `arm64`architectures, installs prerequisites, provisions using Ansible roles, and
 compiles the Rust worker binary.
 
 **Initialize the template:**
@@ -60,12 +55,8 @@ export PROVISION_REPO_PATH="${HOME}/ansible-collection-nimbus_range"
 warpgate build ares-rust-acl-agent --only 'docker.*'
 ```
 
-<<<<<<<< HEAD:warpgate-templates/templates/ares-acl-agent/README.md
-After the build, multi-arch Ares ACL Agent Docker images will be available
-========
 After the build, multi-arch Ares Rust ACL Agent Docker images will be available
 locally as `ares-rust-acl-agent:latest`.
->>>>>>>> 750a111 (feat: add Rust-based Ares agent templates and golden image, modernize template set):warpgate-templates/templates/ares-rust-acl-agent/README.md
 
 ---
 
@@ -111,23 +102,13 @@ warpgate validate ares-rust-acl-agent
   - `ares_acl_tools` - bloodyAD, pywhisker
 - **Rust Binary:**
   - Compiled from `feature/rust-cli` branch with PyO3 Python bindings
-<<<<<<<< HEAD:warpgate-templates/templates/ares-acl-agent/README.md
-  - Installed to `/usr/local/bin/ares`
-========
-  - Installed to `/usr/local/bin/ares-worker`
->>>>>>>> 750a111 (feat: add Rust-based Ares agent templates and golden image, modernize template set):warpgate-templates/templates/ares-rust-acl-agent/README.md
-- **Installed Tools:**
+- Installed to `/usr/local/bin/ares-worker`- **Installed Tools:**
   - **bloodyAD** - Active Directory ACL exploitation framework
   - **pywhisker** - Shadow credentials manipulation tool
 - **Directory Structure:**
   - `/ares/` - Main Ares workspace directory
   - `/ares/.venv/` - Python virtual environment
-<<<<<<<< HEAD:warpgate-templates/templates/ares-acl-agent/README.md
-  - `/usr/local/bin/ares` - Compiled Ares binary
-========
-  - `/usr/local/bin/ares-worker` - Compiled worker binary
->>>>>>>> 750a111 (feat: add Rust-based Ares agent templates and golden image, modernize template set):warpgate-templates/templates/ares-rust-acl-agent/README.md
-- The build includes cleanup steps to remove temporary files, Ansible artifacts, and Rust build artifacts.
+- `/usr/local/bin/ares-worker` - Compiled worker binary- The build includes cleanup steps to remove temporary files, Ansible artifacts, and Rust build artifacts.
 
 ---
 

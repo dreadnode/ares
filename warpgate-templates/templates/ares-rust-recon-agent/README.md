@@ -40,12 +40,7 @@ Environment variables required:
 
 ## Building Docker Images
 
-<<<<<<<< HEAD:warpgate-templates/templates/ares-recon-agent/README.md
-This builds **Ares Recon Agent** Docker images for `amd64` and `arm64`
-========
-This builds **Ares Rust Recon Agent** Docker images for `amd64` and `arm64`
->>>>>>>> 750a111 (feat: add Rust-based Ares agent templates and golden image, modernize template set):warpgate-templates/templates/ares-rust-recon-agent/README.md
-architectures, installs prerequisites, provisions using Ansible roles, and
+This builds **Ares Rust Recon Agent** Docker images for `amd64` and `arm64`architectures, installs prerequisites, provisions using Ansible roles, and
 compiles the Rust worker binary.
 
 **Initialize the template:**
@@ -108,12 +103,7 @@ warpgate validate ares-rust-recon-agent
   - `ares_recon_tools` - nmap, netexec, impacket, bloodhound, certipy, rpcclient
 - **Rust Binary:**
   - Compiled from `feature/rust-cli` branch with PyO3 Python bindings
-<<<<<<<< HEAD:warpgate-templates/templates/ares-recon-agent/README.md
-  - Installed to `/usr/local/bin/ares`
-========
-  - Installed to `/usr/local/bin/ares-worker`
->>>>>>>> 750a111 (feat: add Rust-based Ares agent templates and golden image, modernize template set):warpgate-templates/templates/ares-rust-recon-agent/README.md
-- **Installed Tools:**
+- Installed to `/usr/local/bin/ares-worker`- **Installed Tools:**
   - **Network:** nmap, smbclient, ldap-utils, dnsutils, netcat
   - **AD Recon:** netexec, impacket, bloodhound-python, certipy
 - **Directory Structure:**
@@ -121,12 +111,7 @@ warpgate validate ares-rust-recon-agent
   - `/ares/.venv/` - Python virtual environment
   - `/ares/agents/` - Agent storage directory
   - `/ares/data/` - Data storage directory
-<<<<<<<< HEAD:warpgate-templates/templates/ares-recon-agent/README.md
-  - `/usr/local/bin/ares` - Compiled Ares binary
-========
-  - `/usr/local/bin/ares-worker` - Compiled worker binary
->>>>>>>> 750a111 (feat: add Rust-based Ares agent templates and golden image, modernize template set):warpgate-templates/templates/ares-rust-recon-agent/README.md
-- The build includes cleanup steps to remove temporary files, Ansible artifacts, and Rust build artifacts.
+- `/usr/local/bin/ares-worker` - Compiled worker binary- The build includes cleanup steps to remove temporary files, Ansible artifacts, and Rust build artifacts.
 
 ---
 

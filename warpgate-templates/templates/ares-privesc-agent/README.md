@@ -1,6 +1,6 @@
-# Ares Rust PrivEsc Agent Warp Gate Template
+# Ares PrivEsc Agent Warp Gate Template
 
-This template builds **Ares Rust PrivEsc Agent** images using Warp Gate. It supports
+This template builds **Ares PrivEsc Agent** images using Warp Gate. It supports
 building **Docker images** (for `amd64` and `arm64`). The build provisions
 privilege escalation tools for Windows and Linux targets using Ansible roles
 from the nimbus_range collection, plus a compiled Rust worker binary with embedded Python.
@@ -24,7 +24,7 @@ from the nimbus_range collection, plus a compiled Rust worker binary with embedd
 
 The template configuration is managed in `warpgate.yaml`. Key settings include:
 
-- `name`: Template name (`ares-rust-privesc-agent`)
+- `name`: Template name (`ares-privesc-agent`)
 - `base.image`: Base Docker image (ares-base)
 - `sources`: Clones the ares repository for Rust compilation
 - `provisioners`: Shell, Ansible, and file provisioners for setup
@@ -39,29 +39,24 @@ Environment variables required:
 
 ## Building Docker Images
 
-<<<<<<<< HEAD:warpgate-templates/templates/ares-privesc-agent/README.md
-This builds **Ares PrivEsc Agent** Docker images for `amd64` and `arm64`
-========
-This builds **Ares Rust PrivEsc Agent** Docker images for `amd64` and `arm64`
->>>>>>>> 750a111 (feat: add Rust-based Ares agent templates and golden image, modernize template set):warpgate-templates/templates/ares-rust-privesc-agent/README.md
-architectures, installs prerequisites, provisions using Ansible roles, and
+This builds **Ares PrivEsc Agent** Docker images for `amd64` and `arm64`architectures, installs prerequisites, provisions using Ansible roles, and
 compiles the Rust worker binary.
 
 **Initialize the template:**
 
 ```bash
-warpgate init ares-rust-privesc-agent
+warpgate init ares-privesc-agent
 ```
 
 **Build Docker images:**
 
 ```bash
 export PROVISION_REPO_PATH="${HOME}/ansible-collection-nimbus_range"
-warpgate build ares-rust-privesc-agent --only 'docker.*'
+warpgate build ares-privesc-agent --only 'docker.*'
 ```
 
-After the build, multi-arch Ares Rust PrivEsc Agent Docker images will be available
-locally as `ares-rust-privesc-agent:latest`.
+After the build, multi-arch Ares PrivEsc Agent Docker images will be available
+locally as `ares-privesc-agent:latest`.
 
 ---
 
@@ -71,13 +66,13 @@ After building the Docker image, you can push it to GHCR:
 
 ```bash
 # Tag the image
-docker tag ares-rust-privesc-agent:latest ghcr.io/dreadnode/ares-rust-privesc-agent:latest
+docker tag ares-privesc-agent:latest ghcr.io/dreadnode/ares-privesc-agent:latest
 
 # Authenticate with GHCR
 echo $GITHUB_TOKEN | docker login ghcr.io -u YOUR_USERNAME --password-stdin
 
 # Push the image
-docker push ghcr.io/dreadnode/ares-rust-privesc-agent:latest
+docker push ghcr.io/dreadnode/ares-privesc-agent:latest
 ```
 
 ---
@@ -87,7 +82,7 @@ docker push ghcr.io/dreadnode/ares-rust-privesc-agent:latest
 To validate the template configuration before building:
 
 ```bash
-warpgate validate ares-rust-privesc-agent
+warpgate validate ares-privesc-agent
 ```
 
 ---
@@ -107,12 +102,7 @@ warpgate validate ares-rust-privesc-agent
   - `ares_privesc_tools` - Comprehensive privilege escalation toolkit
 - **Rust Binary:**
   - Compiled from `feature/rust-cli` branch with PyO3 Python bindings
-<<<<<<<< HEAD:warpgate-templates/templates/ares-privesc-agent/README.md
-  - Installed to `/usr/local/bin/ares`
-========
-  - Installed to `/usr/local/bin/ares-worker`
->>>>>>>> 750a111 (feat: add Rust-based Ares agent templates and golden image, modernize template set):warpgate-templates/templates/ares-rust-privesc-agent/README.md
-- **Installed Tools:**
+- Installed to `/usr/local/bin/ares`- **Installed Tools:**
 
   **Potato Exploits (SeImpersonatePrivilege):**
   - **PrintSpoofer** - Named pipe impersonation
@@ -152,12 +142,7 @@ warpgate validate ares-rust-privesc-agent
     - `/opt/privesc/RunasCs/`
     - `/opt/privesc/noPac/`
     - `/opt/privesc/PrintNightmare/`
-<<<<<<<< HEAD:warpgate-templates/templates/ares-privesc-agent/README.md
-  - `/usr/local/bin/ares` - Compiled Ares binary
-========
-  - `/usr/local/bin/ares-worker` - Compiled worker binary
->>>>>>>> 750a111 (feat: add Rust-based Ares agent templates and golden image, modernize template set):warpgate-templates/templates/ares-rust-privesc-agent/README.md
-- The build includes cleanup steps to remove temporary files, Ansible artifacts, and Rust build artifacts.
+- `/usr/local/bin/ares` - Compiled Ares binary- The build includes cleanup steps to remove temporary files, Ansible artifacts, and Rust build artifacts.
 
 ---
 

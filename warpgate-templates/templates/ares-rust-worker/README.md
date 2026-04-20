@@ -92,12 +92,7 @@ docker run -it --rm \
 
 ```bash
 # Check the Rust binary is available
-<<<<<<<< HEAD:warpgate-templates/templates/ares-worker/README.md
-docker run --rm ares-rust-worker:latest ares worker --version
-========
-docker run --rm ares-rust-worker:latest ares-worker --version
->>>>>>>> 750a111 (feat: add Rust-based Ares agent templates and golden image, modernize template set):warpgate-templates/templates/ares-rust-worker/README.md
-```
+docker run --rm ares-rust-worker:latest ares-worker --version```
 
 **Test with local Redis:**
 
@@ -138,21 +133,7 @@ warpgate validate ares-rust-worker
   - Multi-arch (`amd64` + `arm64`) support
   - Default user: `root`
   - Working directory: `/root`
-<<<<<<<< HEAD:warpgate-templates/templates/ares-worker/README.md
-  - Entrypoint: `ares worker` (compiled Rust binary)
-- **Installed Components:**
-  - Provided by `ares-base` (Python 3.13.x, uv, Ares framework, dependencies, procps)
-  - Rust-compiled `ares` binary with PyO3 Python bindings
-- **Build Process:**
-  - Clones ares repository from `feature/rust-cli` branch
-  - Compiles Rust binary with `--features python` for Python interop
-  - Installs binary to `/usr/local/bin/ares`
-  - Cleans up build artifacts (source, compiler symlinks)
-- **Directory Structure:**
-  - `/root/` - Default working directory
-  - `/usr/local/bin/ares` - Compiled Ares binary
-========
-  - Entrypoint: `ares-worker` (compiled Rust binary)
+- Entrypoint: `ares-worker` (compiled Rust binary)
 - **Installed Components:**
   - Provided by `ares-base` (Python 3.13.x, uv, Ares framework, dependencies, procps)
   - Rust-compiled `ares-worker` binary with PyO3 Python bindings
@@ -163,9 +144,7 @@ warpgate validate ares-rust-worker
   - Cleans up build artifacts (source, compiler symlinks)
 - **Directory Structure:**
   - `/root/` - Default working directory
-  - `/usr/local/bin/ares-worker` - Compiled worker binary
->>>>>>>> 750a111 (feat: add Rust-based Ares agent templates and golden image, modernize template set):warpgate-templates/templates/ares-rust-worker/README.md
-  - Python packages installed system-wide
+  - `/usr/local/bin/ares-worker` - Compiled worker binary  - Python packages installed system-wide
 - The worker requires Redis and an Anthropic API key to function.
 
 ---
@@ -198,12 +177,7 @@ kubectl apply -k environments/dev/platforms/attack-simulation/ares-rust-worker
 
 | Component | ares-worker (Python) | ares-rust-worker |
 | ----------- | ---------------------- | ------------------ |
-<<<<<<<< HEAD:warpgate-templates/templates/ares-worker/README.md
-| Entrypoint | `python -m ares worker` | `ares worker` (binary) |
-========
-| Entrypoint | `python -m ares worker` | `ares-worker` (binary) |
->>>>>>>> 750a111 (feat: add Rust-based Ares agent templates and golden image, modernize template set):warpgate-templates/templates/ares-rust-worker/README.md
-| Runtime | Python interpreter | Compiled Rust + embedded Python |
+| Entrypoint | `python -m ares worker` | `ares-worker` (binary) || Runtime | Python interpreter | Compiled Rust + embedded Python |
 | Build | No compilation needed | Rust compilation with PyO3 |
 | Performance | Standard Python | Native Rust with Python FFI |
 

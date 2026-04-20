@@ -24,12 +24,7 @@ the nimbus_range collection, plus a compiled Rust worker binary with embedded Py
 
 The template configuration is managed in `warpgate.yaml`. Key settings include:
 
-<<<<<<<< HEAD:warpgate-templates/templates/ares-cracker-agent/README.md
-- `name`: Template name (`ares-cracker-agent`)
-========
-- `name`: Template name (`ares-rust-cracker-agent`)
->>>>>>>> 750a111 (feat: add Rust-based Ares agent templates and golden image, modernize template set):warpgate-templates/templates/ares-rust-cracker-agent/README.md
-- `base.image`: Base Docker image (ares-base)
+- `name`: Template name (`ares-rust-cracker-agent`)- `base.image`: Base Docker image (ares-base)
 - `sources`: Clones the ares repository for Rust compilation
 - `provisioners`: Shell, Ansible, and file provisioners for setup
 - `targets`: Defines build targets (container images)
@@ -43,12 +38,7 @@ Environment variables required:
 
 ## Building Docker Images
 
-<<<<<<<< HEAD:warpgate-templates/templates/ares-cracker-agent/README.md
-This builds **Ares Cracker Agent** Docker images for `amd64` and `arm64`
-========
-This builds **Ares Rust Cracker Agent** Docker images for `amd64` and `arm64`
->>>>>>>> 750a111 (feat: add Rust-based Ares agent templates and golden image, modernize template set):warpgate-templates/templates/ares-rust-cracker-agent/README.md
-architectures, installs prerequisites, provisions using Ansible roles, and
+This builds **Ares Rust Cracker Agent** Docker images for `amd64` and `arm64`architectures, installs prerequisites, provisions using Ansible roles, and
 compiles the Rust worker binary.
 
 **Initialize the template:**
@@ -64,12 +54,8 @@ export PROVISION_REPO_PATH="${HOME}/ansible-collection-nimbus_range"
 warpgate build ares-rust-cracker-agent --only 'docker.*'
 ```
 
-<<<<<<<< HEAD:warpgate-templates/templates/ares-cracker-agent/README.md
-After the build, multi-arch Ares Cracker Agent Docker images will be available
-========
 After the build, multi-arch Ares Rust Cracker Agent Docker images will be available
 locally as `ares-rust-cracker-agent:latest`.
->>>>>>>> 750a111 (feat: add Rust-based Ares agent templates and golden image, modernize template set):warpgate-templates/templates/ares-rust-cracker-agent/README.md
 
 ---
 
@@ -116,12 +102,7 @@ warpgate validate ares-rust-cracker-agent
   - `ares_cracking_tools` - hashcat, john, wordlists
 - **Rust Binary:**
   - Compiled from `feature/rust-cli` branch with PyO3 Python bindings
-<<<<<<<< HEAD:warpgate-templates/templates/ares-cracker-agent/README.md
-  - Installed to `/usr/local/bin/ares`
-========
-  - Installed to `/usr/local/bin/ares-worker`
->>>>>>>> 750a111 (feat: add Rust-based Ares agent templates and golden image, modernize template set):warpgate-templates/templates/ares-rust-cracker-agent/README.md
-- **Installed Tools:**
+- Installed to `/usr/local/bin/ares-worker`- **Installed Tools:**
   - **hashcat** - Industry-leading password recovery tool
   - **John the Ripper** - Classic password cracker with extensive format support
   - **rockyou.txt** - Famous password wordlist
@@ -135,12 +116,7 @@ warpgate validate ares-rust-cracker-agent
   - `/ares/results/` - Cracking results storage
   - `/usr/share/wordlists/` - Wordlist collection
   - `/usr/share/hashcat/rules/` - Hashcat rules
-<<<<<<<< HEAD:warpgate-templates/templates/ares-cracker-agent/README.md
-  - `/usr/local/bin/ares` - Compiled Ares binary
-========
-  - `/usr/local/bin/ares-worker` - Compiled worker binary
->>>>>>>> 750a111 (feat: add Rust-based Ares agent templates and golden image, modernize template set):warpgate-templates/templates/ares-rust-cracker-agent/README.md
-- The build includes cleanup steps to remove temporary files, Ansible artifacts, and Rust build artifacts.
+- `/usr/local/bin/ares-worker` - Compiled worker binary- The build includes cleanup steps to remove temporary files, Ansible artifacts, and Rust build artifacts.
 
 ---
 
@@ -150,19 +126,6 @@ This image is configured for CPU-only cracking workloads for maximum Docker
 compatibility and ARM support. For GPU-accelerated cracking, use the dedicated
 GPU-enabled image:
 
-<<<<<<<< HEAD:warpgate-templates/templates/ares-cracker-agent/README.md
-**Use `ares-worker-gpu` for NVIDIA CUDA/OpenCL support:**
-
-```bash
-# Build GPU-enabled image
-warpgate build --template ares-worker-gpu
-
-# Run with GPU access
-docker run --gpus all -it ghcr.io/dreadnode/ares-worker-gpu:latest
-```
-
-See the [ares-worker-gpu](../ares-worker-gpu/README.md) template
-========
 **Use `ares-rust-worker-gpu` for NVIDIA CUDA/OpenCL support:**
 
 ```bash
@@ -173,9 +136,7 @@ warpgate build --template ares-rust-worker-gpu
 docker run --gpus all -it ghcr.io/dreadnode/ares-rust-worker-gpu:latest
 ```
 
-See the [ares-rust-worker-gpu](../ares-rust-worker-gpu/README.md) template
->>>>>>>> 750a111 (feat: add Rust-based Ares agent templates and golden image, modernize template set):warpgate-templates/templates/ares-rust-cracker-agent/README.md
-for full GPU configuration and usage details.
+See the [ares-rust-worker-gpu](../ares-rust-worker-gpu/README.md) templatefor full GPU configuration and usage details.
 
 ---
 

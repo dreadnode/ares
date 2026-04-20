@@ -39,12 +39,7 @@ Environment variables required:
 
 ## Building Docker Images
 
-<<<<<<<< HEAD:warpgate-templates/templates/ares-coercion-agent/README.md
-This builds **Ares Coercion Agent** Docker images for `amd64` and `arm64`
-========
-This builds **Ares Rust Coercion Agent** Docker images for `amd64` and `arm64`
->>>>>>>> 750a111 (feat: add Rust-based Ares agent templates and golden image, modernize template set):warpgate-templates/templates/ares-rust-coercion-agent/README.md
-architectures, installs prerequisites, provisions using Ansible roles, and
+This builds **Ares Rust Coercion Agent** Docker images for `amd64` and `arm64`architectures, installs prerequisites, provisions using Ansible roles, and
 compiles the Rust worker binary.
 
 **Initialize the template:**
@@ -107,12 +102,7 @@ warpgate validate ares-rust-coercion-agent
   - `ares_coercion_tools` - Responder, mitm6, Coercer, PetitPotam
 - **Rust Binary:**
   - Compiled from `feature/rust-cli` branch with PyO3 Python bindings
-<<<<<<<< HEAD:warpgate-templates/templates/ares-coercion-agent/README.md
-  - Installed to `/usr/local/bin/ares`
-========
-  - Installed to `/usr/local/bin/ares-worker`
->>>>>>>> 750a111 (feat: add Rust-based Ares agent templates and golden image, modernize template set):warpgate-templates/templates/ares-rust-coercion-agent/README.md
-- **Installed Tools:**
+- Installed to `/usr/local/bin/ares-worker`- **Installed Tools:**
   - **Responder** - LLMNR/NBT-NS/mDNS poisoning for credential capture
   - **mitm6** - DHCPv6 poisoning for IPv6 MITM attacks
   - **Coercer** - Authentication coercion framework (multiple protocols)
@@ -122,12 +112,7 @@ warpgate validate ares-rust-coercion-agent
   - `/ares/.venv/` - Python virtual environment
   - `/opt/Responder/` - Responder installation
   - `/opt/PetitPotam/` - PetitPotam installation
-<<<<<<<< HEAD:warpgate-templates/templates/ares-coercion-agent/README.md
-  - `/usr/local/bin/ares` - Compiled Ares binary
-========
-  - `/usr/local/bin/ares-worker` - Compiled worker binary
->>>>>>>> 750a111 (feat: add Rust-based Ares agent templates and golden image, modernize template set):warpgate-templates/templates/ares-rust-coercion-agent/README.md
-- The build includes cleanup steps to remove temporary files, Ansible artifacts, and Rust build artifacts.
+- `/usr/local/bin/ares-worker` - Compiled worker binary- The build includes cleanup steps to remove temporary files, Ansible artifacts, and Rust build artifacts.
 
 ---
 

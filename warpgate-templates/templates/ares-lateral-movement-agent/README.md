@@ -1,6 +1,6 @@
-# Ares Rust Lateral Movement Agent Warp Gate Template
+# Ares Lateral Movement Agent Warp Gate Template
 
-This template builds **Ares Rust Lateral Movement Agent** images using Warp Gate. It supports
+This template builds **Ares Lateral Movement Agent** images using Warp Gate. It supports
 building **Docker images** (for `amd64` and `arm64`). The build provisions
 lateral movement and credential extraction tools using Ansible roles from the nimbus_range
 collection, plus a compiled Rust worker binary with embedded Python.
@@ -24,7 +24,7 @@ collection, plus a compiled Rust worker binary with embedded Python.
 
 The template configuration is managed in `warpgate.yaml`. Key settings include:
 
-- `name`: Template name (`ares-rust-lateral-movement-agent`)
+- `name`: Template name (`ares-lateral-movement-agent`)
 - `base.image`: Base Docker image (ares-base)
 - `sources`: Clones the ares repository for Rust compilation
 - `provisioners`: Shell, Ansible, and file provisioners for setup
@@ -39,33 +39,23 @@ Environment variables required:
 
 ## Building Docker Images
 
-<<<<<<<< HEAD:warpgate-templates/templates/ares-lateral-movement-agent/README.md
-This builds **Ares Lateral Movement Agent** Docker images for `amd64` and `arm64`
-========
-This builds **Ares Rust Lateral Movement Agent** Docker images for `amd64` and `arm64`
->>>>>>>> 750a111 (feat: add Rust-based Ares agent templates and golden image, modernize template set):warpgate-templates/templates/ares-rust-lateral-movement-agent/README.md
-architectures, installs prerequisites, provisions using Ansible roles, and
+This builds **Ares Lateral Movement Agent** Docker images for `amd64` and `arm64`architectures, installs prerequisites, provisions using Ansible roles, and
 compiles the Rust worker binary.
 
 **Initialize the template:**
 
 ```bash
-warpgate init ares-rust-lateral-movement-agent
+warpgate init ares-lateral-movement-agent
 ```
 
 **Build Docker images:**
 
 ```bash
 export PROVISION_REPO_PATH="${HOME}/ansible-collection-nimbus_range"
-warpgate build ares-rust-lateral-movement-agent --only 'docker.*'
+warpgate build ares-lateral-movement-agent --only 'docker.*'
 ```
 
-<<<<<<<< HEAD:warpgate-templates/templates/ares-lateral-movement-agent/README.md
 After the build, multi-arch Ares Lateral Movement Agent Docker images will be available locally as `ares-lateral-movement-agent:latest`.
-========
-After the build, multi-arch Ares Rust Lateral Movement Agent Docker images will be available
-locally as `ares-rust-lateral-movement-agent:latest`.
->>>>>>>> 750a111 (feat: add Rust-based Ares agent templates and golden image, modernize template set):warpgate-templates/templates/ares-rust-lateral-movement-agent/README.md
 
 ---
 
@@ -75,13 +65,13 @@ After building the Docker image, you can push it to GHCR:
 
 ```bash
 # Tag the image
-docker tag ares-rust-lateral-movement-agent:latest ghcr.io/dreadnode/ares-rust-lateral-movement-agent:latest
+docker tag ares-lateral-movement-agent:latest ghcr.io/dreadnode/ares-lateral-movement-agent:latest
 
 # Authenticate with GHCR
 echo $GITHUB_TOKEN | docker login ghcr.io -u YOUR_USERNAME --password-stdin
 
 # Push the image
-docker push ghcr.io/dreadnode/ares-rust-lateral-movement-agent:latest
+docker push ghcr.io/dreadnode/ares-lateral-movement-agent:latest
 ```
 
 ---
@@ -91,7 +81,7 @@ docker push ghcr.io/dreadnode/ares-rust-lateral-movement-agent:latest
 To validate the template configuration before building:
 
 ```bash
-warpgate validate ares-rust-lateral-movement-agent
+warpgate validate ares-lateral-movement-agent
 ```
 
 ---
@@ -111,12 +101,7 @@ warpgate validate ares-rust-lateral-movement-agent
   - `ares_lateral_movement_tools` - evil-winrm, lsassy, xfreerdp, sshpass
 - **Rust Binary:**
   - Compiled from `feature/rust-cli` branch with PyO3 Python bindings
-<<<<<<<< HEAD:warpgate-templates/templates/ares-lateral-movement-agent/README.md
-  - Installed to `/usr/local/bin/ares`
-========
-  - Installed to `/usr/local/bin/ares-worker`
->>>>>>>> 750a111 (feat: add Rust-based Ares agent templates and golden image, modernize template set):warpgate-templates/templates/ares-rust-lateral-movement-agent/README.md
-- **Installed Tools:**
+- Installed to `/usr/local/bin/ares`- **Installed Tools:**
   - **evil-winrm** - WinRM shell with pass-the-hash support
   - **lsassy** - Remote LSASS credential extraction
   - **xfreerdp** - RDP client with pass-the-hash support
@@ -124,12 +109,7 @@ warpgate validate ares-rust-lateral-movement-agent
 - **Directory Structure:**
   - `/ares/` - Main Ares workspace directory
   - `/ares/.venv/` - Python virtual environment
-<<<<<<<< HEAD:warpgate-templates/templates/ares-lateral-movement-agent/README.md
-  - `/usr/local/bin/ares` - Compiled Ares binary
-========
-  - `/usr/local/bin/ares-worker` - Compiled worker binary
->>>>>>>> 750a111 (feat: add Rust-based Ares agent templates and golden image, modernize template set):warpgate-templates/templates/ares-rust-lateral-movement-agent/README.md
-- The build includes cleanup steps to remove temporary files, Ansible artifacts, and Rust build artifacts.
+- `/usr/local/bin/ares` - Compiled Ares binary- The build includes cleanup steps to remove temporary files, Ansible artifacts, and Rust build artifacts.
 
 ---
 
