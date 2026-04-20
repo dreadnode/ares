@@ -184,7 +184,7 @@ The pod has the following environment variables pre-configured:
 >>>>>>>> 750a111 (feat: add Rust-based Ares agent templates and golden image, modernize template set):warpgate-templates/templates/ares-rust-orchestrator/README.md
   - curl and jq for debugging
 - **Build Process:**
-  - Clones ares repository from `feature/rust-cli` branch
+  - Clones ares repository from `main` branch
   - Installs Rust toolchain, compiles binary with `--features python`
 <<<<<<<< HEAD:warpgate-templates/templates/ares-orchestrator/README.md
   - Installs binary to `/usr/local/bin/ares`

@@ -144,7 +144,7 @@ locally as `ares-rust-cracker-agent-gpu:latest`.
   - Rust-compiled `ares-worker` binary with PyO3 Python bindings
   - Ares Python framework
 - **Build Process:**
-  - Clones ares repository from `feature/rust-cli` branch
+  - Clones ares repository from `main` branch
   - Installs Rust toolchain, compiles binary with `--features python`
   - Installs binary to `/usr/local/bin/ares-worker`
   - Cleans up Rust toolchain, build artifacts, and build-only dependencies
