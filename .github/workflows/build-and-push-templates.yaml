@@ -36,7 +36,7 @@ env:
 jobs:
   discover-templates:
     name: Discover templates
-    runs-on: ubuntu24.04-amd64-8-core
+    runs-on: ubuntu-latest
     outputs:
       # Base templates (use external base images like ubuntu:22.04)
       base_matrix: ${{ steps.discover.outputs.base_matrix }}
@@ -248,13 +248,13 @@ jobs:
                 if ($supported_platforms | index("amd64")) then
                   [{
                     "arch": "amd64",
-                    "runner": "ubuntu24.04-amd64-8-core"
+                    "runner": "ubuntu-latest"
                   }]
                 else [] end +
                 if ($supported_platforms | index("arm64")) then
                   [{
                     "arch": "arm64",
-                    "runner": "ubuntu24.04-arm64-8-core"
+                    "runner": "ubuntu-latest"
                   }]
                 else [] end
               )[] |
@@ -709,7 +709,7 @@ jobs:
     name: "[Base] Create manifest for ${{ matrix.name }}"
     needs: [discover-templates, build-base-images]
     if: github.event_name != 'pull_request' && needs.discover-templates.outputs.has_base_templates == 'true'
-    runs-on: ubuntu24.04-amd64-8-core
+    runs-on: ubuntu-latest
     strategy:
       matrix: ${{ fromJson(needs.discover-templates.outputs.base_templates) }}
       fail-fast: false
@@ -1186,7 +1186,7 @@ jobs:
       github.event_name != 'pull_request' &&
       needs.discover-templates.outputs.has_dependent_templates == 'true' &&
       needs.build-dependent-images.result == 'success'
-    runs-on: ubuntu24.04-amd64-8-core
+    runs-on: ubuntu-latest
     strategy:
       matrix: ${{ fromJson(needs.discover-templates.outputs.dependent_templates) }}
       fail-fast: false
@@ -1564,7 +1564,7 @@ jobs:
     name: "[GPU] Create manifest for ${{ matrix.name }}"
     needs: [discover-templates, build-gpu-base-images]
     if: github.event_name != 'pull_request' && needs.discover-templates.outputs.has_gpu_base_templates == 'true'
-    runs-on: ubuntu24.04-amd64-8-core
+    runs-on: ubuntu-latest
     strategy:
       matrix: ${{ fromJson(needs.discover-templates.outputs.gpu_base_templates) }}
       fail-fast: false
@@ -1885,7 +1885,7 @@ jobs:
       github.event_name != 'pull_request' &&
       needs.discover-templates.outputs.has_gpu_dependent_templates == 'true' &&
       needs.build-gpu-dependent-images.result == 'success'
-    runs-on: ubuntu24.04-amd64-8-core
+    runs-on: ubuntu-latest
     strategy:
       matrix: ${{ fromJson(needs.discover-templates.outputs.gpu_dependent_templates) }}
       fail-fast: false
