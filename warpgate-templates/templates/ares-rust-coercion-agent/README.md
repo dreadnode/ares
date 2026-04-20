@@ -102,7 +102,7 @@ warpgate validate ares-rust-coercion-agent
   - `ares_base` - Python 3.13.7, uv, core dependencies
   - `ares_coercion_tools` - Responder, mitm6, Coercer, PetitPotam
 - **Rust Binary:**
-  - Compiled from `feature/rust-cli` branch with PyO3 Python bindings
+  - Compiled from `main` branch with PyO3 Python bindings
   - Installed to `/usr/local/bin/ares-worker`
 - **Installed Tools:**
   - **Responder** - LLMNR/NBT-NS/mDNS poisoning for credential capture

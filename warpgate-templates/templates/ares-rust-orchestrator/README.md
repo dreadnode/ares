@@ -168,7 +168,7 @@ The pod has the following environment variables pre-configured:
   - Rust-compiled `ares-orchestrator` binary with PyO3 Python bindings
   - curl and jq for debugging
 - **Build Process:**
-  - Clones ares repository from `feature/rust-cli` branch
+  - Clones ares repository from `main` branch
   - Installs Rust toolchain, compiles binary with `--features python`
   - Installs binary to `/usr/local/bin/ares-orchestrator`
   - Cleans up Rust toolchain, build artifacts, and build-only dependencies

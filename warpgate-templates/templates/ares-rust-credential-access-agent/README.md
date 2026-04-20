@@ -102,7 +102,7 @@ warpgate validate ares-rust-credential-access-agent
   - `ares_base` - Python 3.13.7, uv, core dependencies
   - `ares_credential_access_tools` - Kerberos and credential tools
 - **Rust Binary:**
-  - Compiled from `feature/rust-cli` branch with PyO3 Python bindings
+  - Compiled from `main` branch with PyO3 Python bindings
   - Installed to `/usr/local/bin/ares-worker`
 - **Installed Tools:**
   - **Kerberos Tools** - Rubeus, GetNPUsers, GetUserSPNs for Kerberoasting and AS-REP roasting

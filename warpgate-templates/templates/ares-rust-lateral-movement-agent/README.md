@@ -102,7 +102,7 @@ warpgate validate ares-rust-lateral-movement-agent
   - `ares_base` - Python 3.13.7, uv, core dependencies
   - `ares_lateral_movement_tools` - evil-winrm, lsassy, xfreerdp, sshpass
 - **Rust Binary:**
-  - Compiled from `feature/rust-cli` branch with PyO3 Python bindings
+  - Compiled from `main` branch with PyO3 Python bindings
   - Installed to `/usr/local/bin/ares-worker`
 - **Installed Tools:**
   - **evil-winrm** - WinRM shell with pass-the-hash support

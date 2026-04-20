@@ -103,7 +103,7 @@ warpgate validate ares-rust-cracker-agent
   - `ares_base` - Python 3.13.7, uv, core dependencies
   - `ares_cracking_tools` - hashcat, john, wordlists
 - **Rust Binary:**
-  - Compiled from `feature/rust-cli` branch with PyO3 Python bindings
+  - Compiled from `main` branch with PyO3 Python bindings
   - Installed to `/usr/local/bin/ares-worker`
 - **Installed Tools:**
   - **hashcat** - Industry-leading password recovery tool

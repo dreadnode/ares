@@ -102,7 +102,7 @@ warpgate validate ares-rust-privesc-agent
   - `ares_base` - Python 3.13.7, uv, core dependencies
   - `ares_privesc_tools` - Comprehensive privilege escalation toolkit
 - **Rust Binary:**
-  - Compiled from `feature/rust-cli` branch with PyO3 Python bindings
+  - Compiled from `main` branch with PyO3 Python bindings
   - Installed to `/usr/local/bin/ares-worker`
 - **Installed Tools:**
 

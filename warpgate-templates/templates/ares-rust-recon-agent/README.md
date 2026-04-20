@@ -103,7 +103,7 @@ warpgate validate ares-rust-recon-agent
   - `ares_base` - Python 3.13.7, uv, core dependencies
   - `ares_recon_tools` - nmap, netexec, impacket, bloodhound, certipy, rpcclient
 - **Rust Binary:**
-  - Compiled from `feature/rust-cli` branch with PyO3 Python bindings
+  - Compiled from `main` branch with PyO3 Python bindings
   - Installed to `/usr/local/bin/ares-worker`
 - **Installed Tools:**
   - **Network:** nmap, smbclient, ldap-utils, dnsutils, netcat

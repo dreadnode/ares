@@ -102,7 +102,7 @@ warpgate validate ares-rust-acl-agent
   - `ares_base` - Python 3.13.7, uv, core dependencies
   - `ares_acl_tools` - bloodyAD, pywhisker
 - **Rust Binary:**
-  - Compiled from `feature/rust-cli` branch with PyO3 Python bindings
+  - Compiled from `main` branch with PyO3 Python bindings
   - Installed to `/usr/local/bin/ares-worker`
 - **Installed Tools:**
   - **bloodyAD** - Active Directory ACL exploitation framework

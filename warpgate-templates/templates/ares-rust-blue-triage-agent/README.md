@@ -90,7 +90,7 @@ docker run --rm --entrypoint mcp-grafana ares-rust-blue-triage-agent:latest --ve
   - `mcp-grafana` for Grafana observability integration
 - **Build Process:**
   - Installs `mcp-grafana` binary (architecture-specific)
-  - Clones ares repository from `feature/rust-cli` branch
+  - Clones ares repository from `main` branch
   - Compiles Rust binary with `--features python` for Python interop
   - Installs binary to `/usr/local/bin/ares-worker`
   - Cleans up build artifacts
