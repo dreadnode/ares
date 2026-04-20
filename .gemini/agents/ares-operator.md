@@ -207,7 +207,7 @@ task remote:logs ROLE=orchestrator         # Read logs
 
 ### Debugging Stuck Operations
 
-1. **Check Grafana** (`grafana.dev.plundr.ai`) for token usage and Loki errors.
+1. **Check Grafana** (URL from `GRAFANA_URL` env var) for token usage and Loki errors.
 2. **Check failed tasks**: `ares --k8s ares-red ops tasks --latest --status failed`.
 3. **Verify binary sync**: `task remote:check`.
 4. **Inject state**: If the LLM is stuck on a specific discovery step, manually inject the result.

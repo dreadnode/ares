@@ -979,7 +979,7 @@ tasks:
         GRAFANA_URL_VAL=$(echo "$SECRETS" | jq -r '.GRAFANA_URL // empty')
         GRAFANA_TOKEN_VAL=$(echo "$SECRETS" | jq -r '.GRAFANA_SERVICE_ACCOUNT_TOKEN // empty')
         DREADNODE_API_KEY=$(echo "$SECRETS" | jq -r '.DREADNODE_API_KEY // empty')
-        OTEL_TRACES_ENDPOINT="https://platform.dev.plundr.ai/api/otel/traces"
+        OTEL_TRACES_ENDPOINT="{{.OTEL_TRACES_ENDPOINT}}"
 
         FLUSH_CMD=""
         if [ "{{.FLUSH_REDIS}}" = "true" ]; then
@@ -996,12 +996,10 @@ tasks:
           fi
         fi
         ENV_FILE_CMD="$ENV_FILE_CMD; echo 'ARES_DEPLOYMENT={{.EC2_DEPLOYMENT}}' >> /etc/ares/env"
-        # OTEL: send traces directly to Dreadnode Platform via HTTP/protobuf
-        if [ -n "$DREADNODE_API_KEY" ]; then
-          ENV_FILE_CMD="$ENV_FILE_CMD; echo 'OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=${OTEL_TRACES_ENDPOINT}' >> /etc/ares/env"
-          ENV_FILE_CMD="$ENV_FILE_CMD; echo 'OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf' >> /etc/ares/env"
-          ENV_FILE_CMD="$ENV_FILE_CMD; echo 'OTEL_EXPORTER_OTLP_HEADERS=X-Api-Key=${DREADNODE_API_KEY}' >> /etc/ares/env"
-        fi
+        # OTEL: send traces to Alloy OTLP gateway → Tempo via HTTP/protobuf
+        ENV_FILE_CMD="$ENV_FILE_CMD; echo 'OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=${OTEL_TRACES_ENDPOINT}' >> /etc/ares/env"
+        ENV_FILE_CMD="$ENV_FILE_CMD; echo 'OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf' >> /etc/ares/env"
+        ENV_FILE_CMD="$ENV_FILE_CMD; echo 'OTEL_RESOURCE_ATTRIBUTES=deployment.environment=staging,attack.team=red' >> /etc/ares/env"
         ENV_FILE_CMD="$ENV_FILE_CMD; chmod 600 /etc/ares/env; echo Wrote /etc/ares/env"
         # Restart workers so they pick up the new env file
         ENV_FILE_CMD="$ENV_FILE_CMD; for role in recon credential_access cracker acl privesc lateral coercion; do systemctl restart ares-worker@\${role} 2>/dev/null || true; done; echo Workers restarted"
@@ -1026,7 +1024,6 @@ tasks:
         export ARES_DEPLOYMENT='{{.EC2_DEPLOYMENT}}'
         export OTEL_EXPORTER_OTLP_TRACES_ENDPOINT='${OTEL_TRACES_ENDPOINT}'
         export OTEL_EXPORTER_OTLP_PROTOCOL='http/protobuf'
-        export OTEL_EXPORTER_OTLP_HEADERS='X-Api-Key=${DREADNODE_API_KEY}'
         export OTEL_RESOURCE_ATTRIBUTES='deployment.environment=staging,attack.team=red'
         export ARES_OPERATION_ID='${PAYLOAD}'
         mkdir -p {{.ARES_LOG_DIR}}

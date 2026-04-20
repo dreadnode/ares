@@ -29,7 +29,6 @@ _otel_endpoint='__OTEL_TRACES_ENDPOINT__'
 if [ -n "$_otel_endpoint" ] && [ "$_otel_endpoint" = "${_otel_endpoint#__}" ]; then
   export OTEL_EXPORTER_OTLP_TRACES_ENDPOINT="$_otel_endpoint"
   export OTEL_EXPORTER_OTLP_PROTOCOL='http/protobuf'
-  export OTEL_EXPORTER_OTLP_HEADERS='X-Api-Key=__DREADNODE_API_KEY__'
   export OTEL_RESOURCE_ATTRIBUTES='deployment.environment=staging,attack.team=red'
 fi
 pkill -f 'ares orchestrator' 2>/dev/null || true

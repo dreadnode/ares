@@ -172,7 +172,7 @@ task remote:logs ROLE=orchestrator
 
 When an operation is stuck:
 
-1. Check Grafana (`grafana.dev.plundr.ai`) for token use and Loki errors.
+1. Check Grafana (URL from `GRAFANA_URL` env var) for token use and Loki errors.
 2. Check failed tasks with `ares --k8s ares-red ops tasks --latest --status failed`.
 3. Verify binary sync with `task remote:check`.
 4. Inject known state if the model is blocked on a discovery step.

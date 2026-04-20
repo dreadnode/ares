@@ -2,6 +2,8 @@
 # yaml-language-server: $schema=https://taskfile.dev/schema.json
 version: "3"
 
+dotenv: ['.env']
+
 includes:
   aws: "https://raw.githubusercontent.com/CowDogMoo/taskfile-templates/main/aws/Taskfile.yaml"
   github: "https://raw.githubusercontent.com/CowDogMoo/taskfile-templates/main/github/Taskfile.yaml"
@@ -38,6 +40,7 @@ includes:
       EC2_REGION: '{{.EC2_REGION}}'
       BLUE_ENABLED: '{{.BLUE_ENABLED}}'
       BLUE_LLM_MODEL: '{{.BLUE_LLM_MODEL}}'
+      OTEL_TRACES_ENDPOINT: '{{.OTEL_TRACES_ENDPOINT}}'
   ec2:
     taskfile: .taskfiles/ec2/Taskfile.yaml
     optional: true
@@ -46,6 +49,8 @@ includes:
       EC2_PROFILE: '{{.EC2_PROFILE}}'
       EC2_REGION: '{{.EC2_REGION}}'
       ARES_CONFIG: '{{.ARES_CONFIG}}'
+      OTEL_TRACES_ENDPOINT: '{{.OTEL_TRACES_ENDPOINT}}'
+      ALLOY_LOKI_ENDPOINT: '{{.ALLOY_LOKI_ENDPOINT}}'
   blue:
     taskfile: .taskfiles/blue/Taskfile.yaml
     optional: true
@@ -70,14 +75,14 @@ vars:
   # Ares configuration
   # MODEL: '{{.MODEL | default "claude-sonnet-4-5-20250929"}}'
   MODEL: '{{.MODEL | default "gpt-5.2"}}'
-  GRAFANA_URL: '{{.GRAFANA_URL | default "https://grafana.dev.plundr.ai"}}'
+  GRAFANA_URL: '{{.GRAFANA_URL}}'
   POLL_INTERVAL: '{{.POLL_INTERVAL | default "30"}}'
   MAX_STEPS_BLUE: '{{.MAX_STEPS_BLUE | default "50"}}'
   MAX_STEPS_BLUE_ONCE: '{{.MAX_STEPS_BLUE_ONCE | default "15"}}'  # ~15 min max for once mode
   MAX_STEPS_RED: '{{.MAX_STEPS_RED | default "150"}}'
   REPORT_DIR: '{{.REPORT_DIR | default "./reports"}}'
   LOG_DIR: '{{.LOG_DIR | default "./logs"}}'
-  DREADNODE_SERVER_URL: '{{.DREADNODE_SERVER_URL | default "https://platform.dev.plundr.ai/"}}'
+  DREADNODE_SERVER_URL: '{{.DREADNODE_SERVER_URL}}'
   DREADNODE_ORGANIZATION: '{{.DREADNODE_ORGANIZATION | default "ares"}}'
   DREADNODE_WORKSPACE: '{{.DREADNODE_WORKSPACE | default "ares-protocol"}}'
   DREADNODE_PROJECT: '{{.DREADNODE_PROJECT | default "ares-soc"}}'
@@ -92,6 +97,9 @@ vars:
   # Red team defaults
   TARGET: '{{.TARGET | default "dreadgoad"}}'
   DOMAIN: '{{.DOMAIN | default "sevenkingdoms.local"}}'
+  # Observability
+  OTEL_TRACES_ENDPOINT: '{{.OTEL_TRACES_ENDPOINT}}'
+  ALLOY_LOKI_ENDPOINT: '{{.ALLOY_LOKI_ENDPOINT}}'
   # EC2 deployment (alternative to K8s)
   EC2_NAME: '{{.EC2_NAME | default "ares-tools"}}'
   EC2_PROFILE: '{{.EC2_PROFILE | default "lab"}}'

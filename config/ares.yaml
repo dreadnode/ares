@@ -348,14 +348,12 @@ grafana:
 # In K8s: use cluster-internal URLs
 #   loki_url: "http://loki-gateway.observability.svc.cluster.local"
 #   prometheus_url: "http://kube-prometheus-stack-prometheus.observability.svc.cluster.local:9090"
-# On EC2: use external URLs
-#   loki_url: "https://loki.dev.plundr.ai"
-#   prometheus_url: "https://prometheus.dev.plundr.ai"
+# On EC2: use external URLs (set via GRAFANA_URL / LOKI_URL env vars)
 # Local dev (port-forward):
 #   kubectl port-forward -n observability svc/loki-gateway 3100:80
 #   kubectl port-forward -n observability svc/kube-prometheus-stack-prometheus 9090:9090
 observability:
-  loki_url: "https://loki.dev.plundr.ai"
+  loki_url: ""
   prometheus_url: "http://localhost:9090"
   # OTEL resource attributes — set via env var at runtime:
   #   OTEL_RESOURCE_ATTRIBUTES=deployment.environment=staging,attack.team=red
