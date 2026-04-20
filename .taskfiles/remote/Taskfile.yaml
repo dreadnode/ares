@@ -900,14 +900,12 @@ tasks:
           cargo build --release --target {{.RUST_TARGET}}
         fi
 
-        echo -e "{{.SUCCESS}} Binaries built:"
-        ls -lh target/{{.RUST_TARGET}}/release/ares-cli \
-               target/{{.RUST_TARGET}}/release/ares-orchestrator \
-               target/{{.RUST_TARGET}}/release/ares-worker 2>/dev/null || true
+        echo -e "{{.SUCCESS}} Binary built:"
+        ls -lh target/{{.RUST_TARGET}}/release/ares 2>/dev/null || true
         EOF
 
   orchestrator:patch-wrapper:
-    desc: "Patch the red orchestrator deployment wrapper to use ares-cli instead of redis-cli"
+    desc: "Patch the red orchestrator deployment wrapper to use ares instead of redis-cli"
     silent: true
     cmds:
       - |
@@ -932,18 +930,9 @@ tasks:
         echo -e "{{.INFO}} Comparing local Rust binaries to remote pods (team={{.TEAM}})"
         echo ""
 
-        # Check local binaries exist
-        LOCAL_BINS_FOUND=0
-        for bin in ares-cli ares-orchestrator ares-worker; do
-          if [ -f "{{.BIN_DIR}}/$bin" ]; then
-            LOCAL_BINS_FOUND=$((LOCAL_BINS_FOUND + 1))
-          else
-            echo -e "{{.WARN}} Local binary not found: {{.BIN_DIR}}/$bin"
-          fi
-        done
-
-        if [ $LOCAL_BINS_FOUND -eq 0 ]; then
-          echo -e "{{.ERROR}} No local binaries found. Run: task remote:rust:build"
+        # Check local binary exists
+        if [ ! -f "{{.BIN_DIR}}/ares" ]; then
+          echo -e "{{.ERROR}} Local binary not found: {{.BIN_DIR}}/ares. Run: task remote:rust:build"
           exit 1
         fi
 
@@ -1016,58 +1005,31 @@ tasks:
           fi
         }
 
-        # Check orchestrator pods: ares-cli + ares-orchestrator
-        for pod in $ORCH_PODS; do
-          for bin in ares-cli ares-orchestrator; do
-            [ ! -f "{{.BIN_DIR}}/$bin" ] && continue
-            local_hash=$(shasum -a 256 "{{.BIN_DIR}}/$bin" | awk '{print $1}')
-            TOTAL_CHECKED=$((TOTAL_CHECKED + 1))
+        # Check all pods: single ares binary
+        local_hash=$(shasum -a 256 "{{.BIN_DIR}}/ares" | awk '{print $1}')
+        ALL_PODS="$ORCH_PODS $WORKER_PODS"
+        for pod in $ALL_PODS; do
+          [ -z "$pod" ] && continue
+          TOTAL_CHECKED=$((TOTAL_CHECKED + 1))
 
-            result=$(check_binary "$bin" "$pod" "$local_hash")
-            case "$result" in
-              OK)
-                echo -e "{{.SUCCESS}} $bin @ $pod: OK"
-                TOTAL_MATCH=$((TOTAL_MATCH + 1))
-                ;;
-              MISSING)
-                echo -e "{{.WARN}} $bin @ $pod: MISSING"
-                TOTAL_MISSING=$((TOTAL_MISSING + 1))
-                echo "$FAILED_PODS" | grep -q "$pod" || FAILED_PODS="$FAILED_PODS $pod"
-                ;;
-              DIFFERS)
-                echo -e "{{.ERROR}} $bin @ $pod: DIFFERS"
-                TOTAL_DIFFER=$((TOTAL_DIFFER + 1))
-                echo "$FAILED_PODS" | grep -q "$pod" || FAILED_PODS="$FAILED_PODS $pod"
-                ;;
-            esac
-          done
+          result=$(check_binary "ares" "$pod" "$local_hash")
+          case "$result" in
+            OK)
+              echo -e "{{.SUCCESS}} ares @ $pod: OK"
+              TOTAL_MATCH=$((TOTAL_MATCH + 1))
+              ;;
+            MISSING)
+              echo -e "{{.WARN}} ares @ $pod: MISSING"
+              TOTAL_MISSING=$((TOTAL_MISSING + 1))
+              echo "$FAILED_PODS" | grep -q "$pod" || FAILED_PODS="$FAILED_PODS $pod"
+              ;;
+            DIFFERS)
+              echo -e "{{.ERROR}} ares @ $pod: DIFFERS"
+              TOTAL_DIFFER=$((TOTAL_DIFFER + 1))
+              echo "$FAILED_PODS" | grep -q "$pod" || FAILED_PODS="$FAILED_PODS $pod"
+              ;;
+          esac
         done
-
-        # Check worker pods: ares-worker only
-        if [ -n "$WORKER_PODS" ] && [ -f "{{.BIN_DIR}}/ares-worker" ]; then
-          local_hash=$(shasum -a 256 "{{.BIN_DIR}}/ares-worker" | awk '{print $1}')
-          for pod in $WORKER_PODS; do
-            TOTAL_CHECKED=$((TOTAL_CHECKED + 1))
-
-            result=$(check_binary "ares-worker" "$pod" "$local_hash")
-            case "$result" in
-              OK)
-                echo -e "{{.SUCCESS}} ares-worker @ $pod: OK"
-                TOTAL_MATCH=$((TOTAL_MATCH + 1))
-                ;;
-              MISSING)
-                echo -e "{{.WARN}} ares-worker @ $pod: MISSING"
-                TOTAL_MISSING=$((TOTAL_MISSING + 1))
-                echo "$FAILED_PODS" | grep -q "$pod" || FAILED_PODS="$FAILED_PODS $pod"
-                ;;
-              DIFFERS)
-                echo -e "{{.ERROR}} ares-worker @ $pod: DIFFERS"
-                TOTAL_DIFFER=$((TOTAL_DIFFER + 1))
-                echo "$FAILED_PODS" | grep -q "$pod" || FAILED_PODS="$FAILED_PODS $pod"
-                ;;
-            esac
-          done
-        fi
 
         echo ""
         echo "========================================"
@@ -1092,7 +1054,7 @@ tasks:
       BIN_DIR: 'target/{{.RUST_TARGET}}/release'
       REMOTE_BIN_DIR: '/usr/local/bin'
     preconditions:
-      - sh: test -f {{.BIN_DIR}}/ares-cli
+      - sh: test -f {{.BIN_DIR}}/ares
         msg: "Binary not found. Run: task remote:rust:build"
     cmds:
       - |
@@ -1124,31 +1086,17 @@ tasks:
 
         FAILED=0
 
-        # Deploy to orchestrator pods: ares-cli + ares-orchestrator
-        for pod in $ORCH_PODS; do
-          echo -e "{{.INFO}} Deploying to orchestrator: $pod"
-          for bin in ares-cli ares-orchestrator; do
-            if kubectl cp "{{.BIN_DIR}}/$bin" "$pod:{{.REMOTE_BIN_DIR}}/$bin" \
-                -n {{.K8S_NAMESPACE}} 2>/dev/null; then
-              # Make executable
-              kubectl exec -n {{.K8S_NAMESPACE}} "$pod" -- chmod +x "{{.REMOTE_BIN_DIR}}/$bin" 2>/dev/null
-              echo -e "{{.SUCCESS}}   $bin -> $pod"
-            else
-              echo -e "{{.ERROR}}   $bin -> $pod FAILED"
-              FAILED=$((FAILED + 1))
-            fi
-          done
-        done
-
-        # Deploy to worker pods: ares-worker only
-        for pod in $WORKER_PODS; do
-          echo -e "{{.INFO}} Deploying to worker: $pod"
-          if kubectl cp "{{.BIN_DIR}}/ares-worker" "$pod:{{.REMOTE_BIN_DIR}}/ares-worker" \
+        # Deploy single ares binary to all pods
+        ALL_PODS="$ORCH_PODS $WORKER_PODS"
+        for pod in $ALL_PODS; do
+          [ -z "$pod" ] && continue
+          echo -e "{{.INFO}} Deploying to: $pod"
+          if kubectl cp "{{.BIN_DIR}}/ares" "$pod:{{.REMOTE_BIN_DIR}}/ares" \
               -n {{.K8S_NAMESPACE}} 2>/dev/null; then
-            kubectl exec -n {{.K8S_NAMESPACE}} "$pod" -- chmod +x "{{.REMOTE_BIN_DIR}}/ares-worker" 2>/dev/null
-            echo -e "{{.SUCCESS}}   ares-worker -> $pod"
+            kubectl exec -n {{.K8S_NAMESPACE}} "$pod" -- chmod +x "{{.REMOTE_BIN_DIR}}/ares" 2>/dev/null
+            echo -e "{{.SUCCESS}}   ares -> $pod"
           else
-            echo -e "{{.ERROR}}   ares-worker -> $pod FAILED"
+            echo -e "{{.ERROR}}   ares -> $pod FAILED"
             FAILED=$((FAILED + 1))
           fi
         done
@@ -1183,22 +1131,11 @@ tasks:
           --field-selector=status.phase=Running \
           -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
 
-        # Check orchestrator
-        if [ -n "$ORCH_POD" ]; then
-          echo -e "\n{{.INFO}} Orchestrator: $ORCH_POD"
-          for bin in ares-cli ares-orchestrator; do
-            VER=$(kubectl exec -n {{.K8S_NAMESPACE}} "$ORCH_POD" -- \
-              $bin --version 2>/dev/null || echo "NOT FOUND")
-            echo "  $bin: $VER"
-          done
-        fi
-
-        # Check workers
+        # Check all pods
         for pod in $ALL_PODS; do
-          [ "$pod" = "$ORCH_POD" ] && continue
           VER=$(kubectl exec -n {{.K8S_NAMESPACE}} "$pod" -- \
-            ares-worker --version 2>/dev/null || echo "NOT FOUND")
-          echo "  $pod: ares-worker $VER"
+            ares --version 2>/dev/null || echo "NOT FOUND")
+          echo "  $pod: $VER"
         done
 
   rust:deploy:config:

@@ -17,7 +17,7 @@ done
 echo ""
 
 echo "=== Orchestrator ==="
-ORCH_PID=$(pgrep -f ares-orchestrator 2>/dev/null || true)
+ORCH_PID=$(pgrep -f 'ares orchestrator' 2>/dev/null || true)
 if [ -n "$ORCH_PID" ]; then
 	echo "  Running (PID: $ORCH_PID)"
 	ps -p "$ORCH_PID" -o etime=,args= 2>/dev/null | head -1

@@ -62,14 +62,18 @@ pub fn definitions() -> Vec<ToolDefinition> {
                     },
                     "password": {
                         "type": "string",
-                        "description": "Password for authentication"
+                        "description": "Password for authentication (use this OR hash)"
+                    },
+                    "hash": {
+                        "type": "string",
+                        "description": "NTLM hash for pass-the-hash authentication (e.g. aad3b435b51404eeaad3b435b51404ee:31d6cfe0d16ae931b73c59d7e0c089c0). Use this OR password."
                     },
                     "target_domain": {
                         "type": "string",
                         "description": "Parent domain FQDN (auto-detected from child if omitted)"
                     }
                 },
-                "required": ["child_domain", "username", "password"]
+                "required": ["child_domain", "username"]
             }),
         },
         // -----------------------------------------------------------------

@@ -9,7 +9,7 @@ shopt: [globstar]
 
 vars:
   # Rust CLI binary path (passed from parent Taskfile)
-  ARES_CLI: '{{.ARES_CLI | default "./target/release/ares-cli"}}'
+  ARES_CLI: '{{.ARES_CLI | default "./target/release/ares"}}'
   # Remote paths (local to this taskfile)
   REMOTE_REPORT_DIR: '{{.REMOTE_REPORT_DIR | default "/reports"}}'
 
@@ -79,9 +79,8 @@ tasks:
             DREADNODE_WORKSPACE="{{.DREADNODE_WORKSPACE}}" \
             DREADNODE_PROJECT="{{.DREADNODE_PROJECT}}" \
             ARES_CONFIG="/etc/ares/config.yaml" \
-            ARES_MULTI_FOREST_MODE=false \
             GRAFANA_URL="{{.GRAFANA_URL}}" \
-            ares-cli --redis-url "{{.REDIS_URL}}" ops submit \
+            ares --redis-url "{{.REDIS_URL}}" ops submit \
             "{{.TARGET}}" "{{.DOMAIN}}" \
             --resolve-targets \
             --aws-profile "{{.TARGET_PROFILE}}" \
@@ -170,7 +169,7 @@ tasks:
 
           if {{.ARES_CLI}} ops report "{{.OPERATION_ID_COMPUTED}}" --output-dir ./reports 2>&1; then
             echo ""
-            echo "Report saved: ./reports/{{.OPERATION_ID_COMPUTED}}_report.md"
+            echo "Report saved: ./reports/red/{{.OPERATION_ID_COMPUTED}}.md"
           else
             echo ""
             echo "ERROR: Report fetch failed"
@@ -181,7 +180,7 @@ tasks:
         ignore_error: true
 
   # ===========================================================================
-  # K8s CLI wrappers — run ares-cli on the orchestrator pod
+  # K8s CLI wrappers — run ares on the orchestrator pod
   # ===========================================================================
 
   multi:loot:
@@ -286,10 +285,11 @@ tasks:
 
         # Copy report from pod to local machine
         if [ -n "$RESOLVED_OP_ID" ]; then
+          mkdir -p "{{.OUTPUT_DIR}}/red"
           ORCH_POD=$(kubectl get pods -n {{.K8S_NAMESPACE}} -l app.kubernetes.io/name=ares-orchestrator -o jsonpath='{.items[0].metadata.name}')
-          kubectl cp "{{.K8S_NAMESPACE}}/${ORCH_POD}:/tmp/reports/${RESOLVED_OP_ID}_report.md" "{{.OUTPUT_DIR}}/${RESOLVED_OP_ID}_report.md" 2>/dev/null || true
-          if [ -f "{{.OUTPUT_DIR}}/${RESOLVED_OP_ID}_report.md" ]; then
-            echo "Report saved to: {{.OUTPUT_DIR}}/${RESOLVED_OP_ID}_report.md"
+          kubectl cp "{{.K8S_NAMESPACE}}/${ORCH_POD}:/tmp/reports/red/${RESOLVED_OP_ID}.md" "{{.OUTPUT_DIR}}/red/${RESOLVED_OP_ID}.md" 2>/dev/null || true
+          if [ -f "{{.OUTPUT_DIR}}/red/${RESOLVED_OP_ID}.md" ]; then
+            echo "Report saved to: {{.OUTPUT_DIR}}/red/${RESOLVED_OP_ID}.md"
           fi
         fi
 
@@ -302,10 +302,10 @@ tasks:
       - |
         echo "Red Team Reports:"
         echo "================="
-        if [ -d {{.OUTPUT_DIR}} ]; then
-          ls -lht {{.OUTPUT_DIR}}/*_report.md 2>/dev/null || echo "No reports found"
+        if [ -d "{{.OUTPUT_DIR}}/red" ]; then
+          ls -lht "{{.OUTPUT_DIR}}/red/"*.md 2>/dev/null || echo "No reports found"
         else
-          echo "Report directory not found: {{.OUTPUT_DIR}}"
+          echo "Report directory not found: {{.OUTPUT_DIR}}/red"
         fi
 
   reports:latest:
@@ -315,13 +315,13 @@ tasks:
       OUTPUT_DIR: '{{.OUTPUT_DIR | default "./reports"}}'
     cmds:
       - |
-        LATEST=$(ls -t {{.OUTPUT_DIR}}/*_report.md 2>/dev/null | head -1)
+        LATEST=$(ls -t "{{.OUTPUT_DIR}}/red/"*.md 2>/dev/null | head -1)
         if [ -n "$LATEST" ]; then
           echo "Latest report: $LATEST"
           echo "===================="
           cat "$LATEST"
         else
-          echo "No reports found in {{.OUTPUT_DIR}}"
+          echo "No reports found in {{.OUTPUT_DIR}}/red"
         fi
 
   multi:watch:
@@ -492,12 +492,13 @@ tasks:
         {{if ne .AES_KEY ""}}--aes-key "{{.AES_KEY}}"{{end}}
 
   multi:inject-host:
-    desc: "Inject a host into operation shared state (usage: task red:multi:inject-host OPERATION_ID=op-xxx IP=192.168.58.20 HOSTNAME=dc01.essos.local)"
+    desc: "Inject a host into operation shared state (usage: task red:multi:inject-host OPERATION_ID=op-xxx IP=192.168.58.20 HOSTNAME=dc01.essos.local [DC=true])"
     silent: true
     vars:
       OPERATION_ID: '{{.OPERATION_ID | default ""}}'
       IP: '{{.IP | default ""}}'
       HOSTNAME: '{{.HOSTNAME | default ""}}'
+      DC: '{{.DC | default "false"}}'
     preconditions:
       - sh: test -n "{{.OPERATION_ID}}"
         msg: "OPERATION_ID variable is required"
@@ -506,7 +507,10 @@ tasks:
       - sh: test -n "{{.HOSTNAME}}"
         msg: "HOSTNAME variable is required"
     cmds:
-      - '{{.ARES_CLI}} --k8s {{.K8S_NAMESPACE}} ops inject-host "{{.OPERATION_ID}}" "{{.IP}}" "{{.HOSTNAME}}"'
+      - >-
+        {{.ARES_CLI}} --k8s {{.K8S_NAMESPACE}} ops inject-host
+        "{{.OPERATION_ID}}" "{{.IP}}" "{{.HOSTNAME}}"
+        {{if eq .DC "true"}}--dc{{end}}
 
   multi:inject-domain-sid:
     desc: "Inject a domain SID into operation shared state (usage: task red:multi:inject-domain-sid OPERATION_ID=op-xxx DOMAIN=north.sevenkingdoms.local SID=S-1-5-21-...)"
@@ -554,6 +558,143 @@ tasks:
         {{if ne .DOMAIN ""}}--domain "{{.DOMAIN}}"{{end}}
         --details '{{.DETAILS}}'
 
+  multi:inject-trust:
+    desc: "Inject a trust relationship into operation shared state (usage: task red:multi:inject-trust OPERATION_ID=op-xxx DOMAIN=essos.local [TRUST_TYPE=forest] [DIRECTION=bidirectional] [FLAT_NAME=ESSOS])"
+    silent: true
+    vars:
+      OPERATION_ID: '{{.OPERATION_ID | default ""}}'
+      DOMAIN: '{{.DOMAIN | default ""}}'
+      TRUST_TYPE: '{{.TRUST_TYPE | default "forest"}}'
+      DIRECTION: '{{.DIRECTION | default "bidirectional"}}'
+      FLAT_NAME: '{{.FLAT_NAME | default ""}}'
+      SID_FILTERING: '{{.SID_FILTERING | default "false"}}'
+    preconditions:
+      - sh: test -n "{{.OPERATION_ID}}"
+        msg: "OPERATION_ID variable is required"
+      - sh: test -n "{{.DOMAIN}}"
+        msg: "DOMAIN variable is required"
+    cmds:
+      - >-
+        {{.ARES_CLI}} --k8s {{.K8S_NAMESPACE}} ops inject-trust
+        "{{.OPERATION_ID}}" "{{.DOMAIN}}"
+        --trust-type "{{.TRUST_TYPE}}"
+        --direction "{{.DIRECTION}}"
+        {{if ne .FLAT_NAME ""}}--flat-name "{{.FLAT_NAME}}"{{end}}
+        {{if eq .SID_FILTERING "true"}}--sid-filtering{{end}}
+
+  multi:inject-essos:
+    desc: "Inject essos.local forest state into a running operation (usage: task red:multi:inject-essos OPERATION_ID=op-xxx)"
+    silent: true
+    vars:
+      OPERATION_ID: '{{.OPERATION_ID | default ""}}'
+      # Resolve essos host IPs from AWS EC2 at runtime
+      MEEREEN_IP:
+        sh: |
+          aws ec2 describe-instances \
+            --profile "{{.TARGET_PROFILE}}" \
+            --region "{{.TARGET_REGION}}" \
+            --filters "Name=instance-state-name,Values=running" "Name=tag:Name,Values=*meereen*" \
+            --query "Reservations[*].Instances[*].PrivateIpAddress" \
+            --output text 2>/dev/null | head -1
+      BRAAVOS_IP:
+        sh: |
+          aws ec2 describe-instances \
+            --profile "{{.TARGET_PROFILE}}" \
+            --region "{{.TARGET_REGION}}" \
+            --filters "Name=instance-state-name,Values=running" "Name=tag:Name,Values=*braavos*" \
+            --query "Reservations[*].Instances[*].PrivateIpAddress" \
+            --output text 2>/dev/null | head -1
+    preconditions:
+      - sh: test -n "{{.OPERATION_ID}}"
+        msg: "OPERATION_ID variable is required"
+      - sh: test -n "{{.MEEREEN_IP}}"
+        msg: "Could not resolve meereen IP from AWS EC2 (profile={{.TARGET_PROFILE}}, region={{.TARGET_REGION}})"
+      - sh: test -n "{{.BRAAVOS_IP}}"
+        msg: "Could not resolve braavos IP from AWS EC2 (profile={{.TARGET_PROFILE}}, region={{.TARGET_REGION}})"
+    cmds:
+      - cmd: |
+          echo "Injecting essos.local forest state into operation {{.OPERATION_ID}}"
+          echo "  meereen DC: {{.MEEREEN_IP}}"
+          echo "  braavos:    {{.BRAAVOS_IP}}"
+          echo ""
+
+      # 1. Inject trust relationship (essos.local is a separate forest with bidirectional trust)
+      - task: multi:inject-trust
+        vars:
+          OPERATION_ID: "{{.OPERATION_ID}}"
+          DOMAIN: "essos.local"
+          TRUST_TYPE: "forest"
+          DIRECTION: "bidirectional"
+          FLAT_NAME: "ESSOS"
+          SID_FILTERING: "true"
+
+      # 2. Inject hosts (meereen is the essos.local DC)
+      - task: multi:inject-host
+        vars:
+          OPERATION_ID: "{{.OPERATION_ID}}"
+          IP: "{{.MEEREEN_IP}}"
+          HOSTNAME: "meereen.essos.local"
+          DC: "true"
+
+      - task: multi:inject-host
+        vars:
+          OPERATION_ID: "{{.OPERATION_ID}}"
+          IP: "{{.BRAAVOS_IP}}"
+          HOSTNAME: "braavos.essos.local"
+
+      # 3. Inject MSSQL vulnerability on braavos
+      - task: multi:inject-vulnerability
+        vars:
+          OPERATION_ID: "{{.OPERATION_ID}}"
+          VULN_TYPE: "mssql_access"
+          TARGET_IP: "{{.BRAAVOS_IP}}"
+          TARGET_HOSTNAME: "braavos.essos.local"
+          DOMAIN: "essos.local"
+          DETAILS: '{"service": "MSSQL", "port": "1433", "note": "MSSQL on braavos — check impersonation and linked servers to castelblack"}'
+
+      - cmd: |
+          echo ""
+          echo "Essos state injected. The orchestrator will now:"
+          echo "  - See essos.local as an undominated forest"
+          echo "  - Run AS-REP roast and Kerberoast against essos.local"
+          echo "  - Attempt trust key extraction and cross-forest exploitation"
+          echo ""
+          echo "Monitor: task red:multi:loot OPERATION_ID={{.OPERATION_ID}} WATCH=5"
+
+  multi:fast-essos:
+    desc: "Run a GOAD operation with essos.local forest targeting (usage: task red:multi:fast-essos [MODEL=gpt-5.2])"
+    silent: true
+    vars:
+      OPERATION_ID:
+        sh: echo "op-essos-$(date +%Y%m%d-%H%M%S)"
+    cmds:
+      # 1. Submit operation targeting all GOAD hosts
+      - task: multi
+        vars:
+          TARGET: "dreadgoad"
+          DOMAIN: "sevenkingdoms.local"
+          OPERATION_ID: "{{.OPERATION_ID}}"
+
+      # 2. Wait for operation to initialize in Redis
+      - cmd: |
+          echo ""
+          echo "Waiting 15s for operation {{.OPERATION_ID}} to initialize..."
+          sleep 15
+
+      # 3. Inject essos.local state
+      - task: multi:inject-essos
+        vars:
+          OPERATION_ID: "{{.OPERATION_ID}}"
+
+      - cmd: |
+          echo ""
+          echo "Fast-essos operation started: {{.OPERATION_ID}}"
+          echo "Targets: sevenkingdoms.local + essos.local (cross-forest)"
+          echo ""
+          echo "Monitor:"
+          echo "  task red:multi:loot OPERATION_ID={{.OPERATION_ID}} WATCH=5"
+          echo "  task red:multi:status"
+
   # ===========================================================================
   # Shell-based tasks (cannot be moved to Python)
   # ===========================================================================
@@ -596,6 +737,7 @@ tasks:
       EC2_REGION: '{{.EC2_REGION | default "us-west-1"}}'
       BLUE_ENABLED: '{{.BLUE_ENABLED | default "0"}}'
       BLUE_LLM_MODEL: '{{.BLUE_LLM_MODEL | default ""}}'
+      EC2_DEPLOYMENT: '{{.EC2_DEPLOYMENT | default "alpha-operator-range"}}'
       RESOLVED_TARGETS:
         sh: |
           TARGET="{{.TARGET}}"
@@ -743,6 +885,8 @@ tasks:
               -e "s|__ARES_LLM_MODEL__|{{.MODEL}}|" \
               -e "s|__ARES_BLUE_ENABLED__|{{.BLUE_ENABLED}}|" \
               -e "s|__ARES_BLUE_LLM_MODEL__|{{.BLUE_LLM_MODEL}}|" \
+              -e "s|__ARES_DEPLOYMENT__|{{.EC2_DEPLOYMENT}}|" \
+              -e "s|__OTEL_TRACES_ENDPOINT__|{{.OTEL_TRACES_ENDPOINT}}|" \
               .taskfiles/ec2/scripts/launch-orchestrator.sh.tmpl > "$ORCH_SCRIPT"
           jq -Rs '{"commands": [.]}' < "$ORCH_SCRIPT" > "$ORCH_PARAMS"
 
@@ -793,7 +937,7 @@ tasks:
           echo "Monitor with:"
           echo "  task ec2:logs EC2_NAME={{.EC2_NAME}} ROLE=orchestrator"
           echo "  task ec2:redis:forward EC2_NAME={{.EC2_NAME}}  # then:"
-          echo "  ARES_REDIS_URL=redis://localhost:16379 ares-cli ops loot --latest"
+          echo "  ARES_REDIS_URL=redis://localhost:16379 ares ops loot --latest"
         silent: false
         ignore_error: true
 
@@ -926,7 +1070,7 @@ tasks:
       # 2. Clear Redis (no longer rescales orchestrator)
       - cmd: echo "=== CLEARING REDIS CACHE ==="
       - task: multi:redis:clear
-      # 3. Patch orchestrator wrapper to use ares-cli instead of redis-cli
+      # 3. Patch orchestrator wrapper to use ares instead of redis-cli
       - cmd: echo "=== PATCHING ORCHESTRATOR WRAPPER ==="
       - task: :remote:orchestrator:patch-wrapper
       # 4. Rollout pods (fresh containers)

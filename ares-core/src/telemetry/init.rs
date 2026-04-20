@@ -71,8 +71,9 @@ impl Drop for TelemetryGuard {
 /// Initialize the telemetry pipeline.
 ///
 /// When `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` or `OTEL_EXPORTER_OTLP_ENDPOINT`
-/// is set, spans are exported via OTLP/gRPC. Otherwise only console logging is
-/// active (no-op for traces).
+/// is set, spans are exported via OTLP. Transport is selected by
+/// `OTEL_EXPORTER_OTLP_PROTOCOL`: `http/protobuf` for HTTP, gRPC otherwise.
+/// Without an endpoint, only console logging is active (no-op for traces).
 ///
 /// Returns a [`TelemetryGuard`] that must be kept alive for the duration of the
 /// program. Dropping it flushes remaining spans.
@@ -134,37 +135,63 @@ pub fn shutdown_telemetry(guard: &mut TelemetryGuard) {
 /// nor `OTEL_EXPORTER_OTLP_ENDPOINT`).
 fn try_init_otel_provider(service_name: &str) -> Option<SdkTracerProvider> {
     // The OTel SDK reads OTEL_EXPORTER_OTLP_* env vars automatically.
-    // We check presence so we can skip provider creation entirely when no
-    // collector is reachable — avoids noisy connection-refused errors.
-    let has_endpoint = std::env::var("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT").is_ok()
-        || std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT").is_ok();
+    // We check presence and validity so we can skip provider creation entirely
+    // when no collector is reachable — avoids noisy connection-refused or
+    // RelativeUrlWithoutBase errors from the BatchSpanProcessor.
+    let endpoint = std::env::var("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT")
+        .or_else(|_| std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT"))
+        .ok()
+        .filter(|v| !v.is_empty());
 
-    if !has_endpoint {
+    let endpoint = endpoint?;
+
+    // Reject non-absolute URLs early (e.g. un-substituted template placeholders)
+    // to avoid noisy BatchSpanProcessor errors every flush interval.
+    if !endpoint.starts_with("http://") && !endpoint.starts_with("https://") {
+        eprintln!("ignoring OTEL endpoint: not an absolute URL: {endpoint:?}");
         return None;
     }
 
     // W3C TraceContext propagator for cross-service context propagation.
     opentelemetry::global::set_text_map_propagator(TraceContextPropagator::new());
 
-    let exporter = match SpanExporter::builder().with_tonic().build() {
-        Ok(exp) => exp,
-        Err(e) => {
-            eprintln!("failed to create OTLP span exporter: {e}");
-            return None;
+    // Select transport based on OTEL_EXPORTER_OTLP_PROTOCOL (default: gRPC).
+    let protocol = std::env::var("OTEL_EXPORTER_OTLP_PROTOCOL").unwrap_or_default();
+    let exporter = if protocol == "http/protobuf" {
+        match SpanExporter::builder().with_http().build() {
+            Ok(exp) => exp,
+            Err(e) => {
+                eprintln!("failed to create OTLP HTTP span exporter: {e}");
+                return None;
+            }
+        }
+    } else {
+        match SpanExporter::builder().with_tonic().build() {
+            Ok(exp) => exp,
+            Err(e) => {
+                eprintln!("failed to create OTLP gRPC span exporter: {e}");
+                return None;
+            }
         }
     };
 
     // Build resource with service name, namespace, and optional OTEL_RESOURCE_ATTRIBUTES.
+    // service.name and service.namespace are authoritative — env vars cannot override them.
     let mut resource_attrs = vec![
         KeyValue::new("service.name", service_name.to_string()),
         KeyValue::new("service.namespace", "attack-simulation"),
     ];
 
     // Parse OTEL_RESOURCE_ATTRIBUTES (comma-separated key=value pairs).
+    // Skip service.name and service.namespace to prevent env-var clobbering.
     if let Ok(extra) = std::env::var("OTEL_RESOURCE_ATTRIBUTES") {
         for pair in extra.split(',') {
             if let Some((k, v)) = pair.split_once('=') {
-                resource_attrs.push(KeyValue::new(k.trim().to_string(), v.trim().to_string()));
+                let key = k.trim();
+                if key == "service.name" || key == "service.namespace" {
+                    continue;
+                }
+                resource_attrs.push(KeyValue::new(key.to_string(), v.trim().to_string()));
             }
         }
     }

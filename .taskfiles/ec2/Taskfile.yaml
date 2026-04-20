@@ -47,6 +47,8 @@ vars:
   WORKER_ROLES: 'recon credential_access cracker acl privesc lateral coercion'
   # Worker mode: tool_exec (Rust LLM orchestrator) or task (Python-style)
   WORKER_MODE: '{{.WORKER_MODE | default "tool_exec"}}'
+  # Loki deployment label for blue team queries
+  EC2_DEPLOYMENT: '{{.EC2_DEPLOYMENT | default "alpha-operator-range"}}'
 
 tasks:
   # ============================================================================
@@ -88,6 +90,8 @@ tasks:
       CARGO_BUILD_JOBS: '{{.CARGO_BUILD_JOBS | default "1"}}'
       S3_DEPLOY_PREFIX: 'ares-deploy'
     preconditions:
+      - sh: aws sts get-caller-identity --profile "{{.EC2_PROFILE}}" --region "{{.EC2_REGION}}" >/dev/null 2>&1
+        msg: "Not logged into AWS (profile: {{.EC2_PROFILE}}). Run: aws sso login --profile {{.EC2_PROFILE}}"
       - sh: test -n "{{.BCP_BUCKET}}"
         msg: "BCP_BUCKET not set. Either create ~/.bcp/config.yaml with 'bucket: your-bucket' or pass BCP_BUCKET=your-bucket"
     cmds:
@@ -135,7 +139,7 @@ tasks:
           trap "rm -f $SRC_TAR" EXIT
           tar -czf "$SRC_TAR" \
             --exclude='target' --exclude='.git' --exclude='*.o' --exclude='*.d' \
-            -C "$(pwd)" Cargo.toml Cargo.lock Cross.toml tools.yaml .cargo/ ares-core/ ares-cli/ ares-llm/ ares-orchestrator/ ares-tools/ ares-worker/
+            -C "$(pwd)" Cargo.toml Cargo.lock Cross.toml tools.yaml .cargo/ ares-core/ ares-cli/ ares-llm/ ares-tools/
 
           # Upload source to S3
           echo -e "{{.INFO}} Uploading source to S3..."
@@ -154,10 +158,10 @@ tasks:
               "set -ex",
               "mkdir -p " + $build_dir,
               "aws s3 cp s3://" + $bucket + "/" + $prefix + "/ares-src.tar.gz /tmp/ares-src.tar.gz",
-              "tar -xzf /tmp/ares-src.tar.gz -C " + $build_dir + " --strip-components=1",
-              "cd " + $build_dir + " && CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER=gcc cargo build --release -p ares-cli -p ares-orchestrator -p ares-worker 2>&1",
-              "for bin in ares-cli ares-orchestrator ares-worker; do cp " + $build_dir + "/target/release/$bin /usr/local/bin/$bin && chmod +x /usr/local/bin/$bin; done",
-              "echo Deployed: && ls -lh /usr/local/bin/ares-cli /usr/local/bin/ares-orchestrator /usr/local/bin/ares-worker"
+              "tar -xzf /tmp/ares-src.tar.gz -C " + $build_dir,
+              "cd " + $build_dir + " && CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER=gcc cargo build --release -p ares-cli 2>&1",
+              "cp " + $build_dir + "/target/release/ares /usr/local/bin/ares && chmod +x /usr/local/bin/ares",
+              "echo Deployed: && ls -lh /usr/local/bin/ares"
             ]}' > "$PARAMS_FILE"
 
           CMD_ID=$(aws ssm send-command \
@@ -222,12 +226,12 @@ tasks:
           cross)
             # Override linker: container has x86_64-linux-gnu-gcc, not x86_64-unknown-linux-gnu-gcc.
             export CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER=x86_64-linux-gnu-gcc
+            # Use CMake builder for aws-lc-sys (CC builder fails due to GCC memcmp bug #95189)
+            export AWS_LC_SYS_CMAKE_BUILDER=1
             cross build --release --target {{.RUST_TARGET}} -j "{{.CARGO_BUILD_JOBS}}"
             ;;
           zigbuild)
-            for pkg in ares-cli ares-orchestrator ares-worker; do
-              cargo zigbuild --release --target {{.RUST_TARGET}} -j "{{.CARGO_BUILD_JOBS}}" -p $pkg
-            done
+            cargo zigbuild --release --target {{.RUST_TARGET}} -j "{{.CARGO_BUILD_JOBS}}" -p ares-cli
             ;;
           cargo)
             echo -e "{{.WARN}} Using plain cargo (no cross-compilation toolchain)..."
@@ -239,8 +243,8 @@ tasks:
             ;;
         esac
 
-        echo -e "{{.SUCCESS}} Binaries built:"
-        ls -lh {{.BIN_DIR}}/ares-cli {{.BIN_DIR}}/ares-orchestrator {{.BIN_DIR}}/ares-worker 2>/dev/null || true
+        echo -e "{{.SUCCESS}} Binary built:"
+        ls -lh {{.BIN_DIR}}/ares 2>/dev/null || true
 
       # Upload to S3 staging (skip for remote builds)
       - |
@@ -248,7 +252,7 @@ tasks:
 
         echo -e "{{.INFO}} Uploading binaries to s3://{{.BCP_BUCKET}}/{{.S3_DEPLOY_PREFIX}}/..."
 
-        for bin in ares-cli ares-orchestrator ares-worker; do
+        for bin in ares; do
           aws s3 cp "{{.BIN_DIR}}/$bin" "s3://{{.BCP_BUCKET}}/{{.S3_DEPLOY_PREFIX}}/$bin" \
             --profile "{{.EC2_PROFILE}}" --region "{{.EC2_REGION}}"
         done
@@ -277,7 +281,7 @@ tasks:
         PARAMS_FILE=$(mktemp)
         trap "rm -f $PARAMS_FILE" EXIT
         jq -n --arg bucket "{{.BCP_BUCKET}}" --arg prefix "{{.S3_DEPLOY_PREFIX}}" \
-          '{"commands": ["set -e; for bin in ares-cli ares-orchestrator ares-worker; do aws s3 cp s3://" + $bucket + "/" + $prefix + "/$bin /usr/local/bin/$bin; chmod +x /usr/local/bin/$bin; done; echo Deployed:; ls -lh /usr/local/bin/ares-*"]}' \
+          '{"commands": ["set -e; aws s3 cp s3://" + $bucket + "/" + $prefix + "/ares /usr/local/bin/ares; chmod +x /usr/local/bin/ares; echo Deployed:; ls -lh /usr/local/bin/ares"]}' \
           > "$PARAMS_FILE"
 
         CMD_ID=$(aws ssm send-command \
@@ -584,7 +588,7 @@ tasks:
 
         PARAMS_FILE=$(mktemp)
         trap "rm -f $PARAMS_FILE" EXIT
-        jq -n --arg units "$WORKER_UNITS" '{"commands": ["systemctl stop " + $units + " 2>/dev/null || true; pkill -f ares-orchestrator 2>/dev/null || true; echo Stopped all ares workers and orchestrator"]}' > "$PARAMS_FILE"
+        jq -n --arg units "$WORKER_UNITS" '{"commands": ["systemctl stop " + $units + " 2>/dev/null || true; pkill -f \"ares orchestrator\" 2>/dev/null || true; echo Stopped all ares workers and orchestrator"]}' > "$PARAMS_FILE"
 
         CMD_ID=$(aws ssm send-command \
           --profile "{{.EC2_PROFILE}}" \
@@ -626,7 +630,7 @@ tasks:
       - sh: '[ -n "{{.OPERATION_ID}}" ] || [ "{{.LATEST}}" = "true" ]'
         msg: "Provide OPERATION_ID=op-xxx or LATEST=true"
     cmd: >-
-      ares-cli --ec2 {{.EC2_NAME}} --ec2-profile {{.EC2_PROFILE}} --ec2-region {{.EC2_REGION}}
+      ares --ec2 {{.EC2_NAME}} --ec2-profile {{.EC2_PROFILE}} --ec2-region {{.EC2_REGION}}
       ops stop
       {{if ne .OPERATION_ID ""}}{{.OPERATION_ID}}{{end}}
       {{if eq .LATEST "true"}}--latest{{end}}
@@ -748,7 +752,7 @@ tasks:
         sleep 1
 
         echo -e "{{.INFO}} Port-forwarding Redis: localhost:16379 -> $INSTANCE_ID:6379"
-        echo -e "{{.INFO}} Use: ARES_REDIS_URL=redis://localhost:16379 ares-cli ops loot --latest"
+        echo -e "{{.INFO}} Use: ARES_REDIS_URL=redis://localhost:16379 ares ops loot --latest"
         echo -e "{{.INFO}} Press Ctrl+C to stop"
         echo ""
 
@@ -761,7 +765,7 @@ tasks:
 
   # ============================================================================
   # CLI Operations (loot, runtime, report, list)
-  # These use `ares-cli --ec2` which handles instance resolution and SSM.
+  # These use `ares --ec2` which handles instance resolution and SSM.
   # ============================================================================
   loot:
     desc: "Dump loot from EC2 via SSM (usage: task ec2:loot [EC2_NAME=ares-tools] [LATEST=true] [OPERATION_ID=op-xxx] [JSON=false] [DIFF=false])"
@@ -772,7 +776,7 @@ tasks:
       JSON: '{{.JSON | default "false"}}'
       DIFF: '{{.DIFF | default "false"}}'
     cmd: >-
-      ares-cli --ec2 {{.EC2_NAME}} --ec2-profile {{.EC2_PROFILE}} --ec2-region {{.EC2_REGION}}
+      ares --ec2 {{.EC2_NAME}} --ec2-profile {{.EC2_PROFILE}} --ec2-region {{.EC2_REGION}}
       ops loot
       {{if ne .OPERATION_ID ""}}{{.OPERATION_ID}}{{end}}
       {{if eq .LATEST "true"}}--latest{{end}}
@@ -786,7 +790,7 @@ tasks:
       OPERATION_ID: '{{.OPERATION_ID | default ""}}'
       LATEST: '{{.LATEST | default "true"}}'
     cmd: >-
-      ares-cli --ec2 {{.EC2_NAME}} --ec2-profile {{.EC2_PROFILE}} --ec2-region {{.EC2_REGION}}
+      ares --ec2 {{.EC2_NAME}} --ec2-profile {{.EC2_PROFILE}} --ec2-region {{.EC2_REGION}}
       ops runtime
       {{if ne .OPERATION_ID ""}}{{.OPERATION_ID}}{{end}}
       {{if eq .LATEST "true"}}--latest{{end}}
@@ -815,13 +819,13 @@ tasks:
         fi
 
         # Step 1: Generate report on EC2 and get the operation ID + report content
-        REPORT_CMD="set -e; RUST_LOG=error ares-cli ops report"
+        REPORT_CMD="set -e; RUST_LOG=error ares ops report"
         {{if ne .OPERATION_ID ""}}REPORT_CMD="$REPORT_CMD {{.OPERATION_ID}}"{{end}}
         {{if eq .LATEST "true"}}REPORT_CMD="$REPORT_CMD --latest"{{end}}
         {{if eq .REGENERATE "true"}}REPORT_CMD="$REPORT_CMD --regenerate"{{end}}
         REPORT_CMD="$REPORT_CMD --output-dir /tmp/reports 2>&1"
         # After generation, output the report file content with a marker
-        REPORT_CMD="$REPORT_CMD; echo '===REPORT_FILES==='; for f in /tmp/reports/*_report.md; do echo \"FILE:\$(basename \$f)\"; cat \"\$f\"; done"
+        REPORT_CMD="$REPORT_CMD; echo '===REPORT_FILES==='; find /tmp/reports/red -name '*.md' -type f 2>/dev/null | while read f; do echo \"FILE:red/\$(basename \$f)\"; cat \"\$f\"; done"
 
         PARAMS_FILE=$(mktemp)
         trap "rm -f $PARAMS_FILE" EXIT
@@ -870,7 +874,7 @@ tasks:
         fi
 
         # Step 2: Extract report content and save locally
-        mkdir -p "{{.OUTPUT_DIR}}"
+        mkdir -p "{{.OUTPUT_DIR}}/red"
 
         # Parse the output — everything after ===REPORT_FILES=== contains FILE:name + content
         BEFORE_MARKER=$(echo "$OUTPUT" | sed '/===REPORT_FILES===/,$d')
@@ -905,7 +909,7 @@ tasks:
     vars:
       LATEST: '{{.LATEST | default "false"}}'
     cmd: >-
-      ares-cli --ec2 {{.EC2_NAME}} --ec2-profile {{.EC2_PROFILE}} --ec2-region {{.EC2_REGION}}
+      ares --ec2 {{.EC2_NAME}} --ec2-profile {{.EC2_PROFILE}} --ec2-region {{.EC2_REGION}}
       ops list
       {{if eq .LATEST "true"}}--latest{{end}}
 
@@ -974,18 +978,43 @@ tasks:
 
         OPENAI_KEY=$(echo "$SECRETS" | jq -r .OPENAI_API_KEY)
         ANTHROPIC_KEY=$(echo "$SECRETS" | jq -r .ANTHROPIC_API_KEY)
+        GRAFANA_URL_VAL=$(echo "$SECRETS" | jq -r '.GRAFANA_URL // empty')
+        GRAFANA_TOKEN_VAL=$(echo "$SECRETS" | jq -r '.GRAFANA_SERVICE_ACCOUNT_TOKEN // empty')
+        DREADNODE_API_KEY=$(echo "$SECRETS" | jq -r '.DREADNODE_API_KEY // empty')
+        OTEL_TRACES_ENDPOINT="{{.OTEL_TRACES_ENDPOINT}}"
 
         FLUSH_CMD=""
         if [ "{{.FLUSH_REDIS}}" = "true" ]; then
           FLUSH_CMD="redis-cli FLUSHDB; echo Redis flushed;"
         fi
 
+        # Write shared env vars for workers (EnvironmentFile in systemd template)
+        ENV_FILE_CMD="mkdir -p /etc/ares"
+        ENV_FILE_CMD="$ENV_FILE_CMD; echo 'OPENAI_API_KEY=${OPENAI_KEY}' > /etc/ares/env"
+        if [ -n "$GRAFANA_URL_VAL" ]; then
+          ENV_FILE_CMD="$ENV_FILE_CMD; echo 'GRAFANA_URL=${GRAFANA_URL_VAL}' >> /etc/ares/env"
+          if [ -n "$GRAFANA_TOKEN_VAL" ]; then
+            ENV_FILE_CMD="$ENV_FILE_CMD; echo 'GRAFANA_SERVICE_ACCOUNT_TOKEN=${GRAFANA_TOKEN_VAL}' >> /etc/ares/env"
+          fi
+        fi
+        ENV_FILE_CMD="$ENV_FILE_CMD; echo 'ARES_DEPLOYMENT={{.EC2_DEPLOYMENT}}' >> /etc/ares/env"
+        # OTEL: send traces to Alloy OTLP gateway → Tempo via HTTP/protobuf
+        ENV_FILE_CMD="$ENV_FILE_CMD; echo 'OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=${OTEL_TRACES_ENDPOINT}' >> /etc/ares/env"
+        ENV_FILE_CMD="$ENV_FILE_CMD; echo 'OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf' >> /etc/ares/env"
+        ENV_FILE_CMD="$ENV_FILE_CMD; echo 'OTEL_RESOURCE_ATTRIBUTES=deployment.environment=staging,attack.team=red' >> /etc/ares/env"
+        ENV_FILE_CMD="$ENV_FILE_CMD; chmod 600 /etc/ares/env; echo Wrote /etc/ares/env"
+        # Restart workers so they pick up the new env file
+        ENV_FILE_CMD="$ENV_FILE_CMD; for role in recon credential_access cracker acl privesc lateral coercion; do systemctl restart ares-worker@\${role} 2>/dev/null || true; done; echo Workers restarted"
+
         LAUNCH_SCRIPT="#!/bin/bash
         set -e
+        ${ENV_FILE_CMD}
         ${FLUSH_CMD}
-        pkill -f ares-orchestrator 2>/dev/null || true; sleep 1
+        pkill -f 'ares orchestrator' 2>/dev/null || true; sleep 1
         export OPENAI_API_KEY='${OPENAI_KEY}'
         export ANTHROPIC_API_KEY='${ANTHROPIC_KEY}'
+        export GRAFANA_URL='${GRAFANA_URL_VAL}'
+        export GRAFANA_SERVICE_ACCOUNT_TOKEN='${GRAFANA_TOKEN_VAL}'
         export ARES_REDIS_URL=redis://127.0.0.1:6379
         {{- if .LLM_MODEL}}
         export ARES_LLM_MODEL='{{.LLM_MODEL}}'
@@ -993,11 +1022,16 @@ tasks:
         export RUST_LOG=info
         export ARES_CONFIG={{.ARES_REMOTE_CONFIG}}
         export ARES_TOOL_DISPATCH=local
+        export ARES_BLUE_ENABLED=1
+        export ARES_DEPLOYMENT='{{.EC2_DEPLOYMENT}}'
+        export OTEL_EXPORTER_OTLP_TRACES_ENDPOINT='${OTEL_TRACES_ENDPOINT}'
+        export OTEL_EXPORTER_OTLP_PROTOCOL='http/protobuf'
+        export OTEL_RESOURCE_ATTRIBUTES='deployment.environment=staging,attack.team=red'
         export ARES_OPERATION_ID='${PAYLOAD}'
         mkdir -p {{.ARES_LOG_DIR}}
-        nohup /usr/local/bin/ares-orchestrator >{{.ARES_LOG_DIR}}/orchestrator.log 2>&1 &
+        nohup /usr/local/bin/ares orchestrator >{{.ARES_LOG_DIR}}/orchestrator.log 2>&1 &
         sleep 2
-        if pgrep -f ares-orchestrator >/dev/null; then
+        if pgrep -f 'ares orchestrator' >/dev/null; then
           echo Orchestrator started for ${OP_ID}
           head -5 {{.ARES_LOG_DIR}}/orchestrator.log
         else

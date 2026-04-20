@@ -5,7 +5,7 @@ Wants=redis.service
 
 [Service]
 Type=simple
-ExecStart={{ redis_ares_worker_binary }}
+ExecStart={{ redis_ares_worker_binary }} worker
 Environment=ARES_REDIS_URL=redis://{{ redis_bind_address }}:{{ redis_port }}
 Environment=ARES_WORKER_ROLE=%i
 Environment=ARES_WORKER_MODE=tool_exec

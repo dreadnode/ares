@@ -1,9 +1,14 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use tracing::{debug, info, warn, Instrument};
 
 use ares_core::telemetry::spans::{trace_decision, trace_tool_call, Team};
 use ares_core::telemetry::target::{extract_target_info, infer_target_type_from_info};
+
+/// Optional IP→FQDN map for enriching span `destination.address` with hostnames
+/// discovered during the operation (e.g. from SMB/DNS enumeration).
+pub type HostnameMap = Arc<HashMap<String, String>>;
 
 use crate::provider::{
     ChatMessage, LlmProvider, LlmRequest, Role, StopReason, TokenUsage, ToolCall,
@@ -81,6 +86,7 @@ pub async fn run_agent_loop(
     task_id: &str,
     tools: &[crate::ToolDefinition],
     callback_handler: Option<Arc<dyn CallbackHandler>>,
+    hostname_map: Option<HostnameMap>,
 ) -> AgentLoopOutcome {
     let mut messages: Vec<ChatMessage> = vec![ChatMessage::text(Role::User, task_prompt)];
 
@@ -236,7 +242,18 @@ pub async fn run_agent_loop(
                 let r = role.to_string();
                 let tid = task_id.to_string();
                 let c = (*call).clone();
-                let ti = extract_target_info(&call.arguments);
+                let mut ti = extract_target_info(&call.arguments);
+                // Enrich: resolve IP→FQDN from discovered hosts when the
+                // LLM only passed an IP in the tool arguments.
+                if ti.target_fqdn.is_none() {
+                    if let Some(ref map) = hostname_map {
+                        if let Some(ip) = ti.target_ip.as_deref() {
+                            if let Some(fqdn) = map.get(ip) {
+                                ti.target_fqdn = Some(fqdn.clone());
+                            }
+                        }
+                    }
+                }
                 let tt = infer_target_type_from_info(&ti);
                 let span = trace_tool_call(
                     role,
@@ -352,60 +369,225 @@ pub async fn run_agent_loop(
             }
         }
 
-        // Handle callbacks (may short-circuit the loop)
-        let cb_handler = callback_handler.as_deref();
-        for call in &callbacks {
-            let cb_span = trace_tool_call(
-                role,
-                Team::Red,
-                &call.name,
-                None,
-                None,
-                None,
-                None,
-                Some(task_id),
-                false,
-                None,
-            );
-            match handle_callback(call, cb_handler).instrument(cb_span).await {
-                Ok(CallbackResult::TaskComplete { task_id, result }) => {
-                    info!(
-                        task_id = %task_id,
-                        steps = steps,
-                        "Task completed"
+        // Handle callbacks — dispatch tools (sub-agent loops) run in parallel,
+        // lifecycle callbacks run sequentially after since they may short-circuit.
+        if !callbacks.is_empty() {
+            // Partition: dispatch_* tools can run concurrently; everything else is sequential
+            let mut dispatch_calls: Vec<&ToolCall> = Vec::new();
+            let mut sequential_calls: Vec<&ToolCall> = Vec::new();
+            for call in &callbacks {
+                if call.name.starts_with("dispatch_") {
+                    dispatch_calls.push(call);
+                } else {
+                    sequential_calls.push(call);
+                }
+            }
+
+            // Run dispatch callbacks concurrently via JoinSet when >1
+            if dispatch_calls.len() > 1 {
+                if let Some(ref handler) = callback_handler {
+                    let mut join_set = tokio::task::JoinSet::new();
+                    for call in &dispatch_calls {
+                        let h = Arc::clone(handler);
+                        let c = (*call).clone();
+                        let r = role.to_string();
+                        let tid = task_id.to_string();
+                        join_set.spawn(async move {
+                            let cb_span = trace_tool_call(
+                                &r,
+                                Team::Red,
+                                &c.name,
+                                None,
+                                None,
+                                None,
+                                None,
+                                Some(&tid),
+                                false,
+                                None,
+                            );
+                            let result = handle_callback(&c, Some(h.as_ref()))
+                                .instrument(cb_span)
+                                .await;
+                            (c.id.clone(), result)
+                        });
+                    }
+
+                    while let Some(res) = join_set.join_next().await {
+                        let (call_id, cb_result) = match res {
+                            Ok(r) => r,
+                            Err(e) => {
+                                warn!(error = %e, "Dispatch callback join error");
+                                continue;
+                            }
+                        };
+                        match cb_result {
+                            Ok(CallbackResult::TaskComplete {
+                                task_id: tid,
+                                result,
+                            }) => {
+                                info!(task_id = %tid, steps = steps, "Task completed");
+                                messages.push(ChatMessage::tool_result(
+                                    &call_id,
+                                    "Task marked as complete.",
+                                ));
+                                return AgentLoopOutcome {
+                                    reason: LoopEndReason::TaskComplete {
+                                        task_id: tid,
+                                        result,
+                                    },
+                                    total_usage,
+                                    steps,
+                                    tool_calls_dispatched,
+                                    discoveries: all_discoveries,
+                                    tool_outputs: all_tool_outputs,
+                                };
+                            }
+                            Ok(CallbackResult::RequestAssistance { issue, context }) => {
+                                info!(issue = %issue, "Assistance requested");
+                                return AgentLoopOutcome {
+                                    reason: LoopEndReason::RequestAssistance { issue, context },
+                                    total_usage,
+                                    steps,
+                                    tool_calls_dispatched,
+                                    discoveries: all_discoveries,
+                                    tool_outputs: all_tool_outputs,
+                                };
+                            }
+                            Ok(CallbackResult::Continue(msg)) => {
+                                messages.push(ChatMessage::tool_result(&call_id, &msg));
+                            }
+                            Err(e) => {
+                                messages.push(ChatMessage::tool_result(
+                                    &call_id,
+                                    format!("Callback error: {e}"),
+                                ));
+                            }
+                        }
+                    }
+                }
+            } else {
+                // Single dispatch or no dispatches: run sequentially
+                for call in &dispatch_calls {
+                    let cb_span = trace_tool_call(
+                        role,
+                        Team::Red,
+                        &call.name,
+                        None,
+                        None,
+                        None,
+                        None,
+                        Some(task_id),
+                        false,
+                        None,
                     );
-                    messages.push(ChatMessage::tool_result(
-                        &call.id,
-                        "Task marked as complete.",
-                    ));
-                    return AgentLoopOutcome {
-                        reason: LoopEndReason::TaskComplete { task_id, result },
-                        total_usage,
-                        steps,
-                        tool_calls_dispatched,
-                        discoveries: all_discoveries,
-                        tool_outputs: all_tool_outputs,
-                    };
+                    match handle_callback(call, callback_handler.as_deref())
+                        .instrument(cb_span)
+                        .await
+                    {
+                        Ok(CallbackResult::TaskComplete {
+                            task_id: tid,
+                            result,
+                        }) => {
+                            info!(task_id = %tid, steps = steps, "Task completed");
+                            messages.push(ChatMessage::tool_result(
+                                &call.id,
+                                "Task marked as complete.",
+                            ));
+                            return AgentLoopOutcome {
+                                reason: LoopEndReason::TaskComplete {
+                                    task_id: tid,
+                                    result,
+                                },
+                                total_usage,
+                                steps,
+                                tool_calls_dispatched,
+                                discoveries: all_discoveries,
+                                tool_outputs: all_tool_outputs,
+                            };
+                        }
+                        Ok(CallbackResult::RequestAssistance { issue, context }) => {
+                            info!(issue = %issue, "Assistance requested");
+                            return AgentLoopOutcome {
+                                reason: LoopEndReason::RequestAssistance { issue, context },
+                                total_usage,
+                                steps,
+                                tool_calls_dispatched,
+                                discoveries: all_discoveries,
+                                tool_outputs: all_tool_outputs,
+                            };
+                        }
+                        Ok(CallbackResult::Continue(msg)) => {
+                            messages.push(ChatMessage::tool_result(&call.id, &msg));
+                        }
+                        Err(e) => {
+                            messages.push(ChatMessage::tool_result(
+                                &call.id,
+                                format!("Callback error: {e}"),
+                            ));
+                        }
+                    }
                 }
-                Ok(CallbackResult::RequestAssistance { issue, context }) => {
-                    info!(issue = %issue, "Assistance requested");
-                    return AgentLoopOutcome {
-                        reason: LoopEndReason::RequestAssistance { issue, context },
-                        total_usage,
-                        steps,
-                        tool_calls_dispatched,
-                        discoveries: all_discoveries,
-                        tool_outputs: all_tool_outputs,
-                    };
-                }
-                Ok(CallbackResult::Continue(msg)) => {
-                    messages.push(ChatMessage::tool_result(&call.id, &msg));
-                }
-                Err(e) => {
-                    messages.push(ChatMessage::tool_result(
-                        &call.id,
-                        format!("Callback error: {e}"),
-                    ));
+            }
+
+            // Handle sequential callbacks (lifecycle tools that may short-circuit)
+            for call in &sequential_calls {
+                let cb_span = trace_tool_call(
+                    role,
+                    Team::Red,
+                    &call.name,
+                    None,
+                    None,
+                    None,
+                    None,
+                    Some(task_id),
+                    false,
+                    None,
+                );
+                match handle_callback(call, callback_handler.as_deref())
+                    .instrument(cb_span)
+                    .await
+                {
+                    Ok(CallbackResult::TaskComplete {
+                        task_id: tid,
+                        result,
+                    }) => {
+                        info!(task_id = %tid, steps = steps, "Task completed");
+                        messages.push(ChatMessage::tool_result(
+                            &call.id,
+                            "Task marked as complete.",
+                        ));
+                        return AgentLoopOutcome {
+                            reason: LoopEndReason::TaskComplete {
+                                task_id: tid,
+                                result,
+                            },
+                            total_usage,
+                            steps,
+                            tool_calls_dispatched,
+                            discoveries: all_discoveries,
+                            tool_outputs: all_tool_outputs,
+                        };
+                    }
+                    Ok(CallbackResult::RequestAssistance { issue, context }) => {
+                        info!(issue = %issue, "Assistance requested");
+                        return AgentLoopOutcome {
+                            reason: LoopEndReason::RequestAssistance { issue, context },
+                            total_usage,
+                            steps,
+                            tool_calls_dispatched,
+                            discoveries: all_discoveries,
+                            tool_outputs: all_tool_outputs,
+                        };
+                    }
+                    Ok(CallbackResult::Continue(msg)) => {
+                        messages.push(ChatMessage::tool_result(&call.id, &msg));
+                    }
+                    Err(e) => {
+                        messages.push(ChatMessage::tool_result(
+                            &call.id,
+                            format!("Callback error: {e}"),
+                        ));
+                    }
                 }
             }
         }

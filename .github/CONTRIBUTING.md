@@ -32,13 +32,11 @@ cargo test --workspace
 
 ### Project Structure
 
-Ares is a Cargo workspace with six crates:
+Ares is a Cargo workspace that compiles to a single `ares` binary:
 
 | Crate | Type | Purpose |
 |-------|------|---------|
-| `ares-cli` | Binary | Unified CLI for ops, blue, history, config |
-| `ares-orchestrator` | Binary | LLM-powered coordination loop |
-| `ares-worker` | Binary | Task execution agents |
+| `ares-cli` | Binary | Unified binary — CLI, orchestrator, and worker |
 | `ares-core` | Library | Shared models, state, Redis schema, telemetry |
 | `ares-llm` | Library | Model-agnostic LLM provider abstraction |
 | `ares-tools` | Library | Tool dispatch and execution framework |

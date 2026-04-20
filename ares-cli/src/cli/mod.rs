@@ -16,8 +16,8 @@ pub(crate) use blue::BlueCommands;
 
 #[derive(Parser)]
 #[command(
-    name = "ares-cli",
-    about = "Ares red team orchestration CLI",
+    name = "ares",
+    about = "Ares red team orchestration system",
     version,
     propagate_version = true
 )]
@@ -25,7 +25,7 @@ pub(crate) struct Cli {
     #[command(subcommand)]
     pub command: Commands,
 
-    /// Redis URL (default: from ARES_REDIS_URL or redis://localhost:6379)
+    /// Redis URL (default: from ARES_REDIS_URL / REDIS_URL or redis://localhost:6379)
     #[arg(long, global = true, env = "ARES_REDIS_URL")]
     pub redis_url: Option<String>,
 
@@ -76,4 +76,18 @@ pub(crate) enum Commands {
     /// Configuration management (single source of truth)
     #[command(subcommand)]
     Config(ConfigCommands),
+
+    /// Run the orchestrator (long-running service)
+    Orchestrator,
+
+    /// Run a worker (task executor)
+    Worker {
+        /// Legacy positional role argument (ignored; use ARES_WORKER_ROLE env var)
+        #[arg(hide = true)]
+        _role: Option<String>,
+
+        /// Accept and ignore legacy Python-style --worker-args.* flags
+        #[arg(long = "worker-args.redis-url", hide = true)]
+        _legacy_redis_url: Option<String>,
+    },
 }

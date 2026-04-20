@@ -137,6 +137,9 @@ pub(crate) enum OpsCommands {
         ip: String,
         /// Hostname
         hostname: String,
+        /// Mark this host as a domain controller
+        #[arg(long)]
+        dc: bool,
     },
 
     /// Inject a hash into an operation's shared state
@@ -169,6 +172,26 @@ pub(crate) enum OpsCommands {
         domain: String,
         /// Domain SID (e.g., S-1-5-21-...)
         sid: String,
+    },
+
+    /// Inject a trust relationship into an operation's shared state
+    InjectTrust {
+        /// Operation ID
+        operation_id: String,
+        /// Trusted domain FQDN (e.g., fabrikam.local)
+        domain: String,
+        /// Trust type: parent_child, forest, external
+        #[arg(long, default_value = "forest")]
+        trust_type: String,
+        /// Trust direction: inbound, outbound, bidirectional
+        #[arg(long, default_value = "bidirectional")]
+        direction: String,
+        /// NetBIOS / flat name of the trusted domain
+        #[arg(long, default_value = "")]
+        flat_name: String,
+        /// Whether SID filtering is active
+        #[arg(long)]
+        sid_filtering: bool,
     },
 
     /// Stop a running operation (signals graceful shutdown)

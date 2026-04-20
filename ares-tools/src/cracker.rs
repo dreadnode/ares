@@ -12,7 +12,7 @@ const DEFAULT_WORDLISTS: &[&str] = &[
     "/usr/share/wordlists/rockyou.txt",
     "/usr/share/wordlists/seclists/Passwords/Common-Credentials/Pwdb_top-10000000.txt",
 ];
-const DEFAULT_MAX_TIME_MINUTES: i64 = 10;
+const DEFAULT_MAX_TIME_MINUTES: i64 = 20;
 
 /// Default hashcat rules tried during the rules phase.
 /// best64 covers common mutations (capitalize, suffix digits/symbols);
@@ -92,8 +92,9 @@ pub async fn crack_with_hashcat(args: &Value) -> Result<ToolOutput> {
     let hash_value = required_str(args, "hash_value")?;
     let explicit_wordlist = optional_str(args, "wordlist_path");
     let explicit_rules = optional_str(args, "rules_file");
-    let max_time_minutes =
-        optional_i64(args, "max_time_minutes").unwrap_or(DEFAULT_MAX_TIME_MINUTES);
+    let max_time_minutes = optional_i64(args, "max_time_minutes")
+        .unwrap_or(DEFAULT_MAX_TIME_MINUTES)
+        .max(DEFAULT_MAX_TIME_MINUTES);
     let max_time_secs = max_time_minutes * 60;
     let use_dynamic = optional_bool(args, "use_dynamic_wordlist").unwrap_or(true);
 
@@ -267,8 +268,9 @@ pub async fn crack_with_john(args: &Value) -> Result<ToolOutput> {
     let hash_value = required_str(args, "hash_value")?;
     let hash_format = optional_str(args, "hash_format");
     let explicit_wordlist = optional_str(args, "wordlist_path");
-    let max_time_minutes =
-        optional_i64(args, "max_time_minutes").unwrap_or(DEFAULT_MAX_TIME_MINUTES);
+    let max_time_minutes = optional_i64(args, "max_time_minutes")
+        .unwrap_or(DEFAULT_MAX_TIME_MINUTES)
+        .max(DEFAULT_MAX_TIME_MINUTES);
     let max_time_secs = max_time_minutes * 60;
     let use_dynamic = optional_bool(args, "use_dynamic_wordlist").unwrap_or(true);
 

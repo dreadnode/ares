@@ -174,7 +174,8 @@ pub(super) fn tool_definitions() -> Vec<ToolDefinition> {
                     "target": {"type": "string", "description": "DC IP"},
                     "domain": {"type": "string"},
                     "username": {"type": "string"},
-                    "password": {"type": "string"}
+                    "password": {"type": "string"},
+                    "hash": {"type": "string", "description": "NTLM hash for pass-the-hash auth (use instead of password)"}
                 },
                 "required": ["target", "domain"]
             }),

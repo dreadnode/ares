@@ -94,7 +94,8 @@ pub(crate) async fn run_ops(cmd: OpsCommands, redis_url: Option<String>) -> Resu
             operation_id,
             ip,
             hostname,
-        } => inject::ops_inject_host(redis_url, operation_id, ip, hostname).await,
+            dc,
+        } => inject::ops_inject_host(redis_url, operation_id, ip, hostname, dc).await,
         OpsCommands::Stop {
             operation_id,
             latest,
@@ -132,6 +133,25 @@ pub(crate) async fn run_ops(cmd: OpsCommands, redis_url: Option<String>) -> Resu
             domain,
             sid,
         } => inject::ops_inject_domain_sid(redis_url, operation_id, domain, sid).await,
+        OpsCommands::InjectTrust {
+            operation_id,
+            domain,
+            trust_type,
+            direction,
+            flat_name,
+            sid_filtering,
+        } => {
+            inject::ops_inject_trust(
+                redis_url,
+                operation_id,
+                domain,
+                trust_type,
+                direction,
+                flat_name,
+                sid_filtering,
+            )
+            .await
+        }
         OpsCommands::BackfillDomains { operation_id } => {
             backfill::ops_backfill_domains(redis_url, operation_id).await
         }

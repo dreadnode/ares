@@ -46,8 +46,8 @@ warpgate build templates/ares-recon-agent/warpgate.yaml \
 | Template | Description | Base Image | Platforms |
 | -------- | ----------- | ---------- | --------- |
 | [ares-base](./templates/ares-base) | Base Ares framework with Python and core dependencies | kalilinux/kali-rolling | Container (amd64, arm64) |
-| [ares-orchestrator](./templates/ares-orchestrator) | Redis-based multi-agent coordinator | python:3.13.7-slim | Container (amd64, arm64) |
-| [ares-worker](./templates/ares-worker) | Task polling agent for orchestration | ares-base | Container (amd64, arm64) |
+| [ares-orchestrator](./templates/ares-orchestrator) | Redis-based multi-agent coordinator (`ares orchestrator`) | python:3.13.7-slim | Container (amd64, arm64) |
+| [ares-worker](./templates/ares-worker) | Task polling agent for orchestration (`ares worker`) | ares-base | Container (amd64, arm64) |
 | [ares-acl-agent](./templates/ares-acl-agent) | Active Directory ACL exploitation agent | ares-base | Container (amd64, arm64) |
 | [ares-coercion-agent](./templates/ares-coercion-agent) | NTLM relay and authentication coercion tools | ares-base | Container (amd64, arm64) |
 | [ares-cracker-agent](./templates/ares-cracker-agent) | Password cracking agent with hashcat and john | ares-base | Container (amd64, arm64) |

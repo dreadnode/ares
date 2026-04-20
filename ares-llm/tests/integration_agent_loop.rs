@@ -210,6 +210,7 @@ async fn test_multi_turn_tool_use_then_task_complete() {
         "task-recon-001",
         &test_tools(),
         None,
+        None,
     )
     .await;
 
@@ -273,6 +274,7 @@ async fn test_max_steps_limit() {
         "task-recon-002",
         &test_tools(),
         None,
+        None,
     )
     .await;
 
@@ -312,6 +314,7 @@ async fn test_end_turn_no_tool_calls() {
         "recon",
         "task-recon-003",
         &test_tools(),
+        None,
         None,
     )
     .await;
@@ -373,6 +376,7 @@ async fn test_tool_dispatch_error_fed_back() {
         "task-recon-004",
         &test_tools(),
         None,
+        None,
     )
     .await;
 
@@ -430,6 +434,7 @@ async fn test_tool_dispatch_hard_error_fed_back() {
         "task-recon-004b",
         &test_tools(),
         None,
+        None,
     )
     .await;
 
@@ -472,6 +477,7 @@ async fn test_request_assistance_callback() {
         "recon",
         "task-recon-005",
         &test_tools(),
+        None,
         None,
     )
     .await;
@@ -551,6 +557,7 @@ async fn test_token_usage_accumulates() {
         "task-recon-006",
         &test_tools(),
         None,
+        None,
     )
     .await;
 
@@ -580,6 +587,7 @@ async fn test_llm_error_returns_error_outcome() {
         "recon",
         "task-recon-007",
         &test_tools(),
+        None,
         None,
     )
     .await;
@@ -667,6 +675,7 @@ async fn test_rate_limit_retry_succeeds() {
         "task-recon-008",
         &test_tools(),
         None,
+        None,
     )
     .await;
 
@@ -720,6 +729,7 @@ async fn test_auth_error_fails_immediately() {
         "recon",
         "task-recon-009",
         &test_tools(),
+        None,
         None,
     )
     .await;

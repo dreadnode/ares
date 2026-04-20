@@ -93,13 +93,13 @@ steve.baker\nrichard.baker\n\
 jdoe\nrobert.davis\ntom.green\n\
 michelle\nkarl.davidson\nvictor.torres\n\
 jeff.baker\ntony.baker\n\
-petyr.baelish\nvarys\nbronn\n\
+paul.jackson\nlaura.chen\nmark.reed\n\
 terry.lane\nbetty.taylor\n\
-sandor.clegane\ngregor.clegane\n\
-margaery.tyrell\nloras.tyrell\n\
-oberyn.martell\nellaria.sand\n\
-davos.seaworth\nmelisandre\n\
-swilson\njsnow\nrcon\n\
+frank.ward\ndavid.ward\n\
+lisa.murray\nkevin.murray\n\
+nina.cole\nrosa.west\n\
+derek.hunt\nclaire.hunt\n\
+swilson\njdavis\nrcon\n\
 ";
 
 /// Enumerate valid usernames via Kerberos pre-auth without credentials.

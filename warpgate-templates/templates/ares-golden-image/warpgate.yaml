@@ -55,7 +55,7 @@ provisioners:
       - apt-get install -y --no-install-recommends nvidia-driver firmware-misc-nonfree
       - nvidia-smi || echo "nvidia-smi not available during AMI build (expected if no GPU attached)"
 
-  # GOAD Attack Box - all red team tools + Alloy telemetry
+  # Attack Box - all red team tools + Alloy telemetry
   # NOTE: Using shell instead of ansible provisioner because the playbook
   # exceeds EC2 Image Builder's 16000 character component limit.
   - type: shell
@@ -63,11 +63,13 @@ provisioners:
       - PATH=/root/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin ansible-galaxy collection install -r /root/.ansible/collections/ansible_collections/dreadnode/nimbus_range/requirements.yml --force
       - HOME=/root ANSIBLE_REMOTE_TMP=/tmp/ansible-tmp-$USER PATH=/root/.local/bin:/root/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin ansible-playbook /root/.ansible/collections/ansible_collections/dreadnode/nimbus_range/playbooks/ares/goad_attack_box.yml -i localhost, -c local -e ansible_shell_executable=/bin/bash -e ansible_python_interpreter=/usr/bin/python3 -e cracking_tools_gpu_support=true -e cracking_tools_hashcat_from_source=true -e cracking_tools_nvidia_opencl_icd=true
 
-  # Clone and install the Ares framework
+  # NVIDIA GPU drivers + CUDA toolkit for hashcat GPU acceleration.
+  # Kernel headers + dkms are required so the nvidia module builds for the
+  # running kernel. The AMI then works on GPU instances (e.g. g4dn.xlarge)
+  # without manual driver setup.
   - type: shell
     inline:
-      - git clone --depth 1 https://${GITHUB_TOKEN}@github.com/dreadnode/ares.git /tmp/ares-build
-      - rm -rf /tmp/ares-build
+      - DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends linux-headers-$(uname -r) dkms nvidia-driver nvidia-cuda-toolkit
 
   # Cleanup
   - type: shell

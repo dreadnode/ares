@@ -57,13 +57,14 @@ task remote:check                    # verify binaries match between local and r
 task remote:rust:deploy:config       # push config YAML as ConfigMap
 
 # Deploy to EC2
-task ec2:deploy                      # cross-compile + S3 staging + SSM install
-task ec2:deploy:config               # push config.yaml to EC2
+task ec2:deploy EC2_NAME=kali-ares                    # cross-compile + S3 staging + SSM install
+task ec2:deploy:config EC2_NAME=kali-ares             # push config.yaml to EC2
+task ec2:deploy EC2_NAME=kali-ares BUILD_TOOL=remote  # build natively on EC2 (fastest)
 ```
 
-IMPORTANT: After code changes, ALWAYS deploy before testing. Use `task remote:check` to verify sync.
+IMPORTANT: After code changes, ALWAYS deploy before testing. Use `task remote:check` (K8s) or `task ec2:status` (EC2) to verify.
 
-## Red Team Operations
+## Red Team Operations (K8s)
 
 ### Start an operation
 
@@ -75,9 +76,6 @@ task red:multi TARGET=dreadgoad DOMAIN=sevenkingdoms.local
 ares-cli ops submit dreadgoad contoso.local \
   --username administrator --password P@ssw0rd \
   --model gpt-5.2 --max-steps 200 --follow
-
-# EC2
-task ec2:launch DOMAIN=sevenkingdoms.local TARGETS=192.168.58.10
 ```
 
 ### Monitor
@@ -132,7 +130,86 @@ ares-cli --k8s ares-red ops kill --all                    # Kill all running ops
 ares-cli --k8s ares-red ops cleanup --max-age-hours 24    # Delete old checkpoints
 ```
 
-## Blue Team Operations
+## Red Team Operations (EC2)
+
+EC2 runs everything on a single instance: Redis + 7 systemd worker units + orchestrator (run per-operation). Access is via AWS SSM, no SSH/public IP.
+
+**Default instance**: `kali-ares` (full name: `staging-alpha-operator-range-kali-ares`)
+
+### Full EC2 Lifecycle
+
+```bash
+# 1. One-time setup (Redis, systemd units, log dirs)
+task ec2:setup EC2_NAME=kali-ares
+
+# 2. Install pentest tools (impacket, netexec, certipy, etc.)
+task ec2:setup:tools EC2_NAME=kali-ares
+
+# 3. Deploy binaries + config
+task ec2:deploy EC2_NAME=kali-ares                     # cross-compile locally, push via S3
+task ec2:deploy EC2_NAME=kali-ares BUILD_TOOL=remote   # build natively on EC2 (fastest)
+
+# 4. Start Redis + all workers
+task ec2:start EC2_NAME=kali-ares
+
+# 5. Launch red team operation
+task ec2:launch EC2_NAME=kali-ares \
+  DOMAIN=sevenkingdoms.local \
+  TARGETS=10.1.2.150,10.1.2.220 \
+  CRED_USER=samwell.tarly CRED_PASS=Heartsbane
+
+# 6. Monitor
+task ec2:status EC2_NAME=kali-ares                     # process status
+task ec2:logs EC2_NAME=kali-ares ROLE=orchestrator     # tail logs (also: recon, lateral, etc.)
+task ec2:loot EC2_NAME=kali-ares LATEST=true           # dump loot
+task ec2:runtime EC2_NAME=kali-ares LATEST=true        # operation timing
+task ec2:ops EC2_NAME=kali-ares                        # list all operations
+task ec2:report EC2_NAME=kali-ares LATEST=true         # generate + fetch report
+
+# 7. Stop
+task ec2:stop EC2_NAME=kali-ares                       # stop workers (Redis stays)
+task ec2:stop-op EC2_NAME=kali-ares LATEST=true        # gracefully stop one operation
+task ec2:restart EC2_NAME=kali-ares                    # restart workers
+```
+
+### Convenience wrapper (red:ec2:multi)
+
+Combines deploy + launch + monitoring in one command, similar to `task red:multi` for K8s:
+
+```bash
+task red:ec2:multi TARGET=dreadgoad EC2_NAME=kali-ares
+
+# With blue team enabled (auto-triggers investigations)
+task red:ec2:multi TARGET=dreadgoad EC2_NAME=kali-ares BLUE_ENABLED=1
+```
+
+### Arbitrary command execution
+
+```bash
+task ec2:exec EC2_NAME=kali-ares CMD='redis-cli info keyspace'
+task ec2:exec EC2_NAME=kali-ares CMD='systemctl status ares-worker@lateral'
+```
+
+### EC2 build tools
+
+`BUILD_TOOL` controls cross-compilation strategy:
+
+- `auto` (default): `cross` on macOS, `zigbuild` on Linux
+- `remote`: uploads source to S3, builds natively on EC2 (fastest, avoids fd limits)
+- `cross`: Docker-based cross-compilation
+- `zigbuild`: Zig-based cross-compilation (fast but has fd limit issues on macOS)
+- `cargo`: plain cargo (only if target matches host)
+
+### EC2 environment
+
+- **Secrets**: Fetched from AWS Secrets Manager (`ares/api-keys`) during `ec2:launch`
+- **Worker env**: Written to `/etc/ares/env` (EnvironmentFile for systemd units)
+- **Deployment label**: `EC2_DEPLOYMENT` (default: `alpha-operator-range`) tags Loki logs and OTEL traces
+- **Config**: `/etc/ares/config.yaml` on EC2
+- **Logs**: `/var/log/ares/{role}.log`
+- **Workers**: `ares-worker@{recon,credential_access,cracker,acl,privesc,lateral,coercion}.service`
+
+## Blue Team Operations (K8s)
 
 ### Submit investigations
 
@@ -159,6 +236,53 @@ ares-cli --k8s ares-blue blue operation-status --latest --watch 5
 ares-cli --k8s ares-blue blue report --latest             # Multi-investigation summary
 ares-cli --k8s ares-blue blue report --investigation-id inv-xxx  # Single report
 ```
+
+### Taskfile wrappers
+
+```bash
+task blue:once LATEST=true                 # Single investigation from latest red operation
+task blue:multi LATEST=true                # Multi-agent investigation
+task blue:multi:status LATEST=true         # Check investigation status
+task blue:multi:evidence LATEST=true       # View evidence (Pyramid of Pain)
+task blue:multi:techniques LATEST=true     # MITRE ATT&CK techniques
+task blue:reports:consolidate LATEST=true  # Generate markdown report
+task blue:playbook LATEST=true             # Export detection playbook
+```
+
+## Blue Team Operations (EC2)
+
+Blue team on EC2 connects to the **same Redis** as the red team via port-forwarding. There are no dedicated EC2 blue tasks — you use the standard blue CLI/tasks against the forwarded Redis.
+
+### Manual blue investigation against EC2 Redis
+
+```bash
+# Terminal 1: Port-forward Redis from EC2 to localhost:16379
+task ec2:redis:forward EC2_NAME=kali-ares
+
+# Terminal 2: Run blue investigations against forwarded Redis
+ARES_REDIS_URL=redis://localhost:16379 ares-cli blue from-operation --latest
+ARES_REDIS_URL=redis://localhost:16379 ares-cli blue status --latest
+ARES_REDIS_URL=redis://localhost:16379 ares-cli blue report --latest
+```
+
+### Automatic blue during EC2 red operations
+
+The `ec2:launch` task sets `ARES_BLUE_ENABLED=1` by default, so the orchestrator auto-triggers blue investigations as the red team discovers attack evidence. Both teams share the same Redis and write to the same Grafana Loki/OTEL endpoints.
+
+```bash
+# Explicit: use red:ec2:multi with BLUE_ENABLED
+task red:ec2:multi TARGET=dreadgoad EC2_NAME=kali-ares BLUE_ENABLED=1
+```
+
+### Red/Blue coordination summary
+
+| Aspect | K8s | EC2 |
+|--------|-----|-----|
+| Red launch | `task red:multi TARGET=dreadgoad` | `task ec2:launch EC2_NAME=kali-ares` |
+| Blue launch | `ares-cli --k8s ares-blue blue from-operation --latest` | `ARES_REDIS_URL=redis://localhost:16379 ares-cli blue from-operation --latest` |
+| Enable both | Separate deployments | `ARES_BLUE_ENABLED=1` (default in ec2:launch) |
+| State store | Redis pod in K8s | Redis on EC2 (port-forward via `ec2:redis:forward`) |
+| Observability | Grafana Loki + OTEL | Same (tagged with `ARES_DEPLOYMENT` label) |
 
 ## Historical Data (Requires Postgres)
 
@@ -192,19 +316,38 @@ task config:set-model -- orchestrator gpt-5.2
 ### Health Checks
 
 ```bash
+# K8s
 task ares:config:check                     # Check 1Password access and API keys
 task remote:status                         # K8s pod health
 task remote:check                          # binary sync verification
 task remote:logs ROLE=orchestrator         # Read logs
+
+# EC2
+task ec2:resolve EC2_NAME=kali-ares        # Verify instance is running, get ID/IP
+task ec2:status EC2_NAME=kali-ares         # Redis + worker process status
+task ec2:logs EC2_NAME=kali-ares           # Tail orchestrator logs
+task ec2:exec EC2_NAME=kali-ares CMD='redis-cli ping'  # Arbitrary health check
 ```
 
 ### Debugging Stuck Operations
+
+**K8s:**
 
 1. **Check Grafana** (`grafana.dev.plundr.ai`) for token usage and Loki errors.
 2. **Check failed tasks**: `ares-cli --k8s ares-red ops tasks --latest --status failed`.
 3. **Verify binary sync**: `task remote:check`.
 4. **Inject state**: If the LLM is stuck on a specific discovery step, manually inject the result.
 5. **Restart**: `ares-cli --k8s ares-red ops kill --all` then re-submit.
+
+**EC2:**
+
+1. **Check Grafana** — same dashboards, filter by `ARES_DEPLOYMENT=alpha-operator-range`.
+2. **Check logs**: `task ec2:logs EC2_NAME=kali-ares ROLE=orchestrator` (or any worker role).
+3. **Check worker health**: `task ec2:status EC2_NAME=kali-ares`.
+4. **Check Redis**: `task ec2:exec EC2_NAME=kali-ares CMD='redis-cli info keyspace'`.
+5. **Inject state**: Port-forward Redis, then use `ares-cli ops inject-*` commands locally.
+6. **Restart workers**: `task ec2:restart EC2_NAME=kali-ares`.
+7. **Stop operation**: `task ec2:stop-op EC2_NAME=kali-ares LATEST=true`.
 
 ## GOAD Lab Reference
 

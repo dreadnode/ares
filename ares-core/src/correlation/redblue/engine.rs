@@ -326,9 +326,10 @@ impl RedBlueCorrelator {
 
     /// Load all reports from the reports directory (recursively).
     ///
-    /// Recognises both the new per-operation layout (`{op_id}/red_report.md`,
-    /// `{op_id}/blue_investigation_*.md`) and the legacy flat layout
-    /// (`redteam-*.md`, `investigation_*.md`).
+    /// Recognises the current layout (`red/{op_id}.md`,
+    /// `blue/investigations/{inv_id}.md`), the intermediate layout
+    /// (`{op_id}/red_report.md`, `{op_id}/blue_investigation_*.md`), and the
+    /// legacy flat layout (`redteam-*.md`, `investigation_*.md`).
     #[allow(clippy::type_complexity)]
     pub fn load_all_reports(
         &self,
@@ -339,20 +340,30 @@ impl RedBlueCorrelator {
         let md_files = Self::collect_md_files(&self.reports_dir);
         for path in md_files {
             let filename = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            let parent_name = path
+                .parent()
+                .and_then(|p| p.file_name())
+                .and_then(|n| n.to_str())
+                .unwrap_or("");
 
-            // New layout: red_report.md | Legacy: redteam-*.md
-            if filename == "red_report.md" || filename.starts_with("redteam-") {
+            // Current: red/{op_id}.md | Intermediate: {op_id}/red_report.md | Legacy: redteam-*.md
+            let is_red = parent_name == "red"
+                || filename == "red_report.md"
+                || filename.starts_with("redteam-");
+
+            // Current: blue/investigations/{inv_id}.md | Intermediate: blue_investigation_*.md | Legacy: investigation_*.md
+            let is_blue = parent_name == "investigations"
+                || filename.starts_with("blue_investigation_")
+                || filename.starts_with("investigation_");
+
+            if is_red {
                 match self.load_red_team_report(&path) {
                     Ok((op_id, activities)) => red_team_reports.push((op_id, activities)),
                     Err(e) => {
                         warn!(path = %path.display(), error = %e, "Failed to parse red team report")
                     }
                 }
-            }
-            // New layout: blue_investigation_*.md | Legacy: investigation_*.md
-            else if filename.starts_with("blue_investigation_")
-                || filename.starts_with("investigation_")
-            {
+            } else if is_blue {
                 match self.load_investigation_report(&path) {
                     Ok(Some(detection)) => blue_team_detections.push(detection),
                     Ok(None) => {}

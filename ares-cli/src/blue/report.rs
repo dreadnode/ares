@@ -103,20 +103,20 @@ async fn generate_operation_report(
         .context("Failed to render operation report")
 }
 
-/// Save a blue team operation report under `{output_dir}/{op_id}/`.
+/// Save a blue team operation report under `{output_dir}/blue/`.
 fn save_operation_report(output_dir: &str, op_id: &str, report: &str) -> Result<String> {
-    let dir = format!("{output_dir}/{op_id}");
+    let dir = format!("{output_dir}/blue");
     std::fs::create_dir_all(&dir)
         .with_context(|| format!("Failed to create report directory: {dir}"))?;
-    let path = format!("{dir}/blue_operation.md");
+    let path = format!("{dir}/{op_id}.md");
     std::fs::write(&path, report).with_context(|| format!("Failed to write report to {path}"))?;
     Ok(path)
 }
 
 /// Save a blue team investigation report.
 ///
-/// When `op_id` is provided, saves under `{output_dir}/{op_id}/`.
-/// Otherwise saves directly in `{output_dir}/`.
+/// When `op_id` is provided, saves under `{output_dir}/blue/{op_id}/`.
+/// Otherwise saves under `{output_dir}/blue/investigations/`.
 fn save_investigation_report(
     output_dir: &str,
     op_id: Option<&str>,
@@ -124,12 +124,12 @@ fn save_investigation_report(
     report: &str,
 ) -> Result<String> {
     let dir = match op_id {
-        Some(op) => format!("{output_dir}/{op}"),
-        None => output_dir.to_string(),
+        Some(op) => format!("{output_dir}/blue/{op}"),
+        None => format!("{output_dir}/blue/investigations"),
     };
     std::fs::create_dir_all(&dir)
         .with_context(|| format!("Failed to create report directory: {dir}"))?;
-    let path = format!("{dir}/blue_investigation_{inv_id}.md");
+    let path = format!("{dir}/{inv_id}.md");
     std::fs::write(&path, report).with_context(|| format!("Failed to write report to {path}"))?;
     Ok(path)
 }

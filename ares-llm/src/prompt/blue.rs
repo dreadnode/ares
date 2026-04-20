@@ -162,9 +162,26 @@ pub fn blue_role_template(role: &str) -> &'static str {
 }
 
 /// Build a system prompt for a blue team agent role.
-pub fn build_blue_system_prompt(role: &str, capabilities: &[String]) -> Result<String> {
+///
+/// If `deployment` is provided, it is injected into the template context so
+/// sub-agent prompts use the correct deployment label for Loki queries instead
+/// of a hardcoded value.
+pub fn build_blue_system_prompt(
+    role: &str,
+    capabilities: &[String],
+    deployment: Option<&str>,
+) -> Result<String> {
     let template_name = blue_role_template(role);
-    templates::render_agent_instructions(template_name, capabilities, false, &[])
+    let extras: Vec<(&str, &str)> = deployment
+        .map(|d| vec![("deployment", d)])
+        .unwrap_or_default();
+    templates::render_agent_instructions_with_extras(
+        template_name,
+        capabilities,
+        false,
+        &[],
+        &extras,
+    )
 }
 
 /// Build the initial alert prompt for a blue team investigation.

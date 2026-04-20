@@ -42,6 +42,11 @@ pub(super) fn investigation_state_tool_definitions() -> Vec<ToolDefinition> {
                     "timestamp": {
                         "type": "string",
                         "description": "Evidence timestamp in ISO8601 format (default: now)"
+                    },
+                    "mitre_techniques": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "MITRE ATT&CK technique IDs observed in this evidence (e.g. [\"T1558.003\", \"T1003.006\"])"
                     }
                 },
                 "required": ["investigation_id", "evidence_type", "value", "source"]
@@ -88,6 +93,11 @@ pub(super) fn investigation_state_tool_definitions() -> Vec<ToolDefinition> {
                                 "timestamp": {
                                     "type": "string",
                                     "description": "ISO8601 timestamp (default: now)"
+                                },
+                                "mitre_techniques": {
+                                    "type": "array",
+                                    "items": { "type": "string" },
+                                    "description": "MITRE ATT&CK technique IDs (e.g. [\"T1558.003\"])"
                                 }
                             },
                             "required": ["evidence_type", "value", "source"]

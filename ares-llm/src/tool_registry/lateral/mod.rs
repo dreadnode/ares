@@ -8,7 +8,7 @@
 //! - `callbacks` -- Lateral movement result reporting
 
 mod callbacks;
-mod execution;
+pub(super) mod execution;
 mod kerberos;
 pub(super) mod mssql;
 mod pth;

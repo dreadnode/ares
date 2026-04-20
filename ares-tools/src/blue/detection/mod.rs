@@ -10,6 +10,7 @@
 //! - Avoid broad patterns like `{job=~".+"}` — use specific labels
 
 mod catalog;
+pub(super) mod config;
 mod runner;
 mod templates;
 
@@ -25,13 +26,19 @@ pub(super) const WIN_SYSTEM: &str = r#"job="windows-system""#;
 
 /// Build an optimized label selector.
 ///
-/// Starts with a base job label, optionally adds hostname regex match.
-/// Per Grafana docs: Loki optimizes `hostname=~"dc"` better than
-/// `hostname=~".*dc.*"`.
+/// Starts with a base job label, auto-injects `deployment` from env var
+/// to narrow stream selection, optionally adds computer regex match.
+/// The `computer` label contains the FQDN (e.g. `dc01.contoso.local`),
+/// so regex match (`=~`) is used to allow partial hostname or IP matches.
 pub(super) fn build_selector(base: &str, hostname: Option<&str>) -> String {
+    let deployment = std::env::var("ARES_DEPLOYMENT").ok();
+    let mut labels = base.to_string();
+    if let Some(dep) = &deployment {
+        labels.push_str(&format!(r#", deployment="{dep}""#));
+    }
     match hostname {
-        Some(host) => format!("{{{base}, hostname=~\"{host}\"}}"),
-        None => format!("{{{base}}}"),
+        Some(host) => format!("{{{labels}, computer=~\"{host}\"}}"),
+        None => format!("{{{labels}}}"),
     }
 }
 
@@ -47,11 +54,37 @@ pub(super) fn build_event_filter(ids: &[&str]) -> String {
     }
 }
 
-/// Build a case-insensitive regex filter for tool/attack patterns.
+/// Check if a pattern contains regex metacharacters that require `|~`.
+fn is_regex_pattern(pattern: &str) -> bool {
+    pattern.chars().any(|c| {
+        matches!(
+            c,
+            '.' | '*' | '+' | '?' | '(' | ')' | '[' | ']' | '{' | '}' | '|' | '^' | '$' | '\\'
+        )
+    })
+}
+
+/// Build an optimized filter for tool/attack patterns.
+///
+/// Uses `|=` (case-sensitive contains) for single literal patterns since Loki
+/// evaluates contains ~10x faster than regex. Falls back to `|~` (regex) when
+/// patterns contain metacharacters or when multiple patterns need alternation.
 pub(super) fn build_pattern_filter(patterns: &[&str]) -> String {
     if patterns.is_empty() {
         return String::new();
     }
+    // Single literal pattern: use fast contains match
+    if patterns.len() == 1 && !is_regex_pattern(patterns[0]) {
+        return format!(r#" |= "{}""#, patterns[0]);
+    }
+    // 2-3 simple literals: chain |= filters (faster than regex alternation)
+    if patterns.len() <= 3 && patterns.iter().all(|p| !is_regex_pattern(p)) {
+        return patterns
+            .iter()
+            .map(|p| format!(r#" |= "{}""#, p))
+            .collect::<String>();
+    }
+    // Multiple or regex patterns: use case-insensitive regex alternation
     format!(r#" |~ "(?i)({})""#, patterns.join("|"))
 }
 

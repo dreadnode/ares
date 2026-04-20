@@ -1,7 +1,7 @@
 //! Core library for the Ares red team orchestration system.
 //!
 //! This crate provides the data models and Redis state backend used by the
-//! `ares-cli` binary to interact with the Ares orchestrator system.
+//! `ares` binary to interact with the Ares orchestrator system.
 //!
 //! # Modules
 //!
@@ -11,6 +11,8 @@
 pub mod config;
 #[cfg(feature = "blue")]
 pub mod correlation;
+#[cfg(feature = "blue")]
+pub mod detection;
 #[cfg(feature = "blue")]
 pub mod eval;
 pub mod models;

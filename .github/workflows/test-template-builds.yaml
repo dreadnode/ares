@@ -320,7 +320,17 @@ jobs:
           gh release download "${VERSION}" \
             --repo CowDogMoo/warpgate \
             --pattern "warpgate_*_${OS}_${ARCH}*.tar.gz" \
+            --pattern "checksums.txt" \
             --dir /tmp
+
+          # Verify downloaded asset integrity against release checksums
+          if [ -f /tmp/checksums.txt ]; then
+            echo "Verifying download integrity..."
+            (cd /tmp && sha256sum -c checksums.txt --ignore-missing)
+            rm -f /tmp/checksums.txt
+          else
+            echo "::warning::checksums.txt not found in release — skipping integrity check"
+          fi
 
           shopt -s nullglob
           tarball=(/tmp/warpgate_*_"${OS}"_"${ARCH}"*.tar.gz)
@@ -510,7 +520,17 @@ jobs:
           gh release download "${VERSION}" \
             --repo CowDogMoo/warpgate \
             --pattern "warpgate_*_${OS}_${ARCH}*.tar.gz" \
+            --pattern "checksums.txt" \
             --dir /tmp
+
+          # Verify downloaded asset integrity against release checksums
+          if [ -f /tmp/checksums.txt ]; then
+            echo "Verifying download integrity..."
+            (cd /tmp && sha256sum -c checksums.txt --ignore-missing)
+            rm -f /tmp/checksums.txt
+          else
+            echo "::warning::checksums.txt not found in release — skipping integrity check"
+          fi
 
           shopt -s nullglob
           tarball=(/tmp/warpgate_*_"${OS}"_"${ARCH}"*.tar.gz)

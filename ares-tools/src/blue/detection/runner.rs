@@ -7,6 +7,7 @@ use crate::args::{optional_i64, optional_str, required_str};
 use crate::ToolOutput;
 
 use super::super::loki;
+use super::config::detection_config;
 use super::templates::build_detection_template;
 use super::{build_event_filter, build_selector, WIN_SECURITY};
 
@@ -14,7 +15,8 @@ use super::{build_event_filter, build_selector, WIN_SECURITY};
 pub async fn run_detection_query(args: &Value) -> Result<ToolOutput> {
     let query_name = required_str(args, "query_name")?;
     let target_host = optional_str(args, "target_host");
-    let hours_back = optional_i64(args, "hours_back").unwrap_or(1);
+    // Clamp to max 2h — larger windows timeout through Grafana proxy (~90s per query)
+    let hours_back = optional_i64(args, "hours_back").unwrap_or(1).min(2);
 
     let tmpl = match build_detection_template(query_name, target_host) {
         Some(t) => t,
@@ -37,7 +39,7 @@ pub async fn run_detection_query(args: &Value) -> Result<ToolOutput> {
         "logql": tmpl.logql,
         "start_time": start.to_rfc3339(),
         "end_time": now.to_rfc3339(),
-        "limit": 500,
+        "limit": 100,
     });
 
     let mut result = loki::query_logs(&query_args).await?;
@@ -58,7 +60,7 @@ pub async fn run_parallel_detections(args: &Value) -> Result<ToolOutput> {
         .unwrap_or_default();
 
     let target_host = optional_str(args, "target_host");
-    let hours_back = optional_i64(args, "hours_back").unwrap_or(1);
+    let hours_back = optional_i64(args, "hours_back").unwrap_or(1).min(2);
     let max_concurrent = optional_i64(args, "max_concurrent").unwrap_or(5) as usize;
 
     let mut output_parts = Vec::new();
@@ -115,7 +117,7 @@ pub async fn run_parallel_detections(args: &Value) -> Result<ToolOutput> {
 /// Get all activity for a specific host.
 pub async fn get_host_activity(args: &Value) -> Result<ToolOutput> {
     let hostname = required_str(args, "hostname")?;
-    let hours_back = optional_i64(args, "hours_back").unwrap_or(1);
+    let hours_back = optional_i64(args, "hours_back").unwrap_or(1).min(2);
     let attack_patterns_only = args
         .get("attack_patterns_only")
         .and_then(|v| v.as_bool())
@@ -123,14 +125,16 @@ pub async fn get_host_activity(args: &Value) -> Result<ToolOutput> {
 
     let sel = build_selector(WIN_SECURITY, Some(hostname));
 
-    let logql = if attack_patterns_only {
-        let event_filter = build_event_filter(&[
-            "4625", "4624", "4662", "4769", "4768", "5140", "7045", "4688",
-        ]);
-        format!("{sel}{event_filter}")
+    let config = detection_config();
+    let scope = if attack_patterns_only {
+        "host_attack_patterns"
     } else {
-        sel
+        "host_all_security"
     };
+    let scope_ids = &config.activity_scopes[scope];
+    let id_refs: Vec<&str> = scope_ids.iter().map(|s| s.as_str()).collect();
+    let event_filter = build_event_filter(&id_refs);
+    let logql = format!("{sel}{event_filter}");
 
     let now = chrono::Utc::now();
     let start = now - chrono::Duration::hours(hours_back);
@@ -139,7 +143,7 @@ pub async fn get_host_activity(args: &Value) -> Result<ToolOutput> {
         "logql": logql,
         "start_time": start.to_rfc3339(),
         "end_time": now.to_rfc3339(),
-        "limit": 1000,
+        "limit": 200,
     });
 
     let mut result = loki::query_logs(&query_args).await?;
@@ -153,13 +157,17 @@ pub async fn get_host_activity(args: &Value) -> Result<ToolOutput> {
 /// Get all activity for a specific user.
 pub async fn get_user_activity(args: &Value) -> Result<ToolOutput> {
     let username = required_str(args, "username")?;
-    let hours_back = optional_i64(args, "hours_back").unwrap_or(1);
+    let hours_back = optional_i64(args, "hours_back").unwrap_or(1).min(2);
 
     let sel = build_selector(WIN_SECURITY, None);
+    let config = detection_config();
+    let scope_ids = &config.activity_scopes["user_activity"];
+    let id_refs: Vec<&str> = scope_ids.iter().map(|s| s.as_str()).collect();
+    let event_filter = build_event_filter(&id_refs);
     // Escape regex metacharacters in the username so that special characters
     // (e.g. `.`, `+`, `(`) do not corrupt the LogQL regex or match unintended lines.
     let escaped_username = regex::escape(username);
-    let logql = format!(r#"{sel} |~ "(?i){escaped_username}""#);
+    let logql = format!(r#"{sel}{event_filter} |~ "(?i){escaped_username}""#);
 
     let now = chrono::Utc::now();
     let start = now - chrono::Duration::hours(hours_back);
@@ -168,7 +176,7 @@ pub async fn get_user_activity(args: &Value) -> Result<ToolOutput> {
         "logql": logql,
         "start_time": start.to_rfc3339(),
         "end_time": now.to_rfc3339(),
-        "limit": 1000,
+        "limit": 200,
     });
 
     let mut result = loki::query_logs(&query_args).await?;

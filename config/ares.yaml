@@ -19,7 +19,8 @@ operation:
   # stop_on_domain_admin: true
   # Stop operation when golden ticket is forged (for child→parent forest escalation)
   # When true, operation continues past DA to forge golden ticket with ExtraSid
-  stop_on_golden_ticket: true
+  # Disabled: default mode waits until ALL forests are dominated
+  stop_on_golden_ticket: false
 
 # Agent configurations
 agents:
@@ -347,12 +348,15 @@ grafana:
 # In K8s: use cluster-internal URLs
 #   loki_url: "http://loki-gateway.observability.svc.cluster.local"
 #   prometheus_url: "http://kube-prometheus-stack-prometheus.observability.svc.cluster.local:9090"
-# On EC2: use external URLs
-#   loki_url: "https://loki.dev.plundr.ai"
-#   prometheus_url: "https://prometheus.dev.plundr.ai"
+# On EC2: use external URLs (set via GRAFANA_URL / LOKI_URL env vars)
 # Local dev (port-forward):
 #   kubectl port-forward -n observability svc/loki-gateway 3100:80
 #   kubectl port-forward -n observability svc/kube-prometheus-stack-prometheus 9090:9090
 observability:
-  loki_url: "https://loki.dev.plundr.ai"
+  loki_url: ""
   prometheus_url: "http://localhost:9090"
+  # OTEL resource attributes — set via env var at runtime:
+  #   OTEL_RESOURCE_ATTRIBUTES=deployment.environment=staging,attack.team=red
+  # Required by Grafana Cloud for resource.deployment.environment grouping.
+  # Configured in: .taskfiles/ec2/Taskfile.yaml (env file), setup.sh (systemd),
+  #                launch-orchestrator.sh.tmpl (orchestrator process)

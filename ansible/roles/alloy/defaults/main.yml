@@ -6,7 +6,7 @@ alloy_version: "1.10.1"
 alloy_env: "dev"
 alloy_deployment_name: ""
 alloy_instance_id: ""
-alloy_loki_endpoint: "https://loki.dev.plundr.ai/loki/api/v1/push"
+alloy_loki_endpoint: ""
 
 # Optional labels for dashboard compatibility with Kubernetes workloads.
 # Set these when running app workloads (e.g. ares agents) on EC2 so that

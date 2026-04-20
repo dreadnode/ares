@@ -9,8 +9,10 @@ use std::sync::{Mutex, OnceLock};
 
 use regex::Regex;
 
-/// Maximum stored query results.
-const MAX_STORED_RESULTS: usize = 10;
+/// Maximum stored query results. Investigations may issue 30+ queries across
+/// sub-agents; storing only 10 evicts early evidence and reduces confidence
+/// scores unnecessarily.
+const MAX_STORED_RESULTS: usize = 50;
 
 /// Confidence penalty when evidence is not validated against query results.
 const UNVALIDATED_PENALTY: f64 = 0.15;

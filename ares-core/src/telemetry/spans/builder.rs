@@ -199,7 +199,9 @@ impl AgentSpanBuilder {
             "tool.provisioned_category" = tool_yaml_category.unwrap_or(""),
             "tool.status" = tool_status,
             // Target (OTel semantic conventions)
-            "destination.address" = self.target.fqdn.as_deref().unwrap_or(""),
+            // Fall back to IP when no FQDN is available so IP-targeted tools
+            // produce a non-empty destination.address for the attack graph.
+            "destination.address" = self.target.fqdn.as_deref().or(self.target.ip.as_deref()).unwrap_or(""),
             "destination.ip" = self.target.ip.as_deref().unwrap_or(""),
             "server.address" = self.target.fqdn.as_deref().unwrap_or(""),
             "host.name" = hostname.as_deref().unwrap_or(""),

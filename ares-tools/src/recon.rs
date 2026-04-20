@@ -378,13 +378,66 @@ pub async fn dig_query(args: &Value) -> Result<ToolOutput> {
 /// Enumerate Active Directory domain trusts via LDAP.
 ///
 /// Required args: `target`, `domain`
-/// Optional args: `username`, `password`, `base_dn`
+/// Optional args: `username`, `password`, `hash`, `base_dn`
+///
+/// When `hash` is provided (NTLM format `lm:nt`), uses `netexec ldap` for
+/// pass-the-hash authentication instead of `ldapsearch` simple bind.
 pub async fn enumerate_domain_trusts(args: &Value) -> Result<ToolOutput> {
     let target = required_str(args, "target")?;
     let domain = required_str(args, "domain")?;
     let username = optional_str(args, "username");
     let password = optional_str(args, "password");
+    let hash = optional_str(args, "hash");
     let base_dn = optional_str(args, "base_dn");
+
+    // Hash-based auth: use impacket LDAP client with pass-the-hash (NTLM)
+    if let (Some(u), Some(h)) = (username, hash) {
+        let computed_base_dn = match base_dn {
+            Some(dn) => dn.to_string(),
+            None => domain_to_base_dn(domain),
+        };
+        // Strip LM hash prefix if present (e.g. "aad3b435b51404ee:nthash" → "nthash")
+        let nt_hash = if h.contains(':') {
+            h.rsplit(':').next().unwrap_or(h)
+        } else {
+            h
+        };
+        // Use impacket's LDAP client for pass-the-hash authentication.
+        // Output mimics ldapsearch format so the trust parser can handle it.
+        let ldap_query = format!(
+            r#"python3 -c "
+from impacket.ldap import ldap as ldap_mod
+conn = ldap_mod.LDAPConnection('ldap://{target}', '{base_dn}', '{target}')
+conn.login('{u}', '', '{domain}', lmhash='', nthash='{nt_hash}')
+sc = ldap_mod.SimplePagedResultsControl(size=1000)
+resp = conn.search(searchFilter='(objectClass=trustedDomain)', attributes=['cn','trustDirection','trustType','trustAttributes','flatName'], searchControls=[sc])
+for item in resp:
+    try:
+        dn = str(item['objectName'])
+        if not dn:
+            continue
+        print(f'dn: {{dn}}')
+        for attr in item['attributes']:
+            name = str(attr['type'])
+            for val in attr['vals']:
+                print(f'{{name}}: {{val}}')
+        print()
+    except Exception:
+        pass
+"
+"#,
+            target = target,
+            domain = domain,
+            u = u,
+            nt_hash = nt_hash,
+            base_dn = computed_base_dn,
+        );
+        return CommandBuilder::new("bash")
+            .args(["-c", &ldap_query])
+            .timeout_secs(120)
+            .execute()
+            .await;
+    }
 
     let computed_base_dn = match base_dn {
         Some(dn) => dn.to_string(),

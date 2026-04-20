@@ -39,6 +39,9 @@ __pycache__/
 .mypy_cache/
 *.pyc
 
+# Warp Gate
+.warpgate-sources/
+
 # Misc
 TODO
 .tool-versions

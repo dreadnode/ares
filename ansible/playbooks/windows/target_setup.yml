@@ -8,7 +8,7 @@
     alloy_deployment_name: ""
     alloy_server_id: ""
     alloy_instance_id: ""
-    alloy_loki_endpoint: "https://loki.dev.plundr.ai/loki/api/v1/push"
+    alloy_loki_endpoint: "{{ alloy_loki_endpoint }}"
     alloy_version: "1.10.1"
 
   roles:

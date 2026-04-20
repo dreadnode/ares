@@ -58,7 +58,8 @@ repos:
         # corrupting it with stale blob references.
         entry: env -u GIT_INDEX_FILE ansible-lint -v --force-color -c .hooks/ansible/ansible-lint.yaml
         language: python
-        always_run: true
+        always_run: false
+        files: ^ansible/
         additional_dependencies: [".[community]"]
 
   - repo: https://github.com/Yelp/detect-secrets
@@ -109,7 +110,8 @@ repos:
         name: Generate Ansible documentation with docsible
         entry: .hooks/ansible/docsible-hook.sh
         language: script
-        always_run: true
+        always_run: false
+        files: ^ansible/
         pass_filenames: false
         stages: [pre-commit]
 

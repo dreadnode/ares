@@ -32,7 +32,7 @@
     alloy_deployment_name: "goad-attack-box"
     alloy_server_id: ""
     alloy_instance_id: ""
-    alloy_loki_endpoint: "https://loki.dev.plundr.ai/loki/api/v1/push"
+    alloy_loki_endpoint: "{{ alloy_loki_endpoint }}"
     alloy_version: "1.10.1"
 
     # Python version
@@ -42,14 +42,12 @@
     cracking_tools_install_hashcat: true
     cracking_tools_install_john: true
     cracking_tools_install_seclists: true
-    cracking_tools_wordlists:
-      - rockyou
-      - seclists_passwords
-
-    # GPU-accelerated hashcat (NVIDIA T4 on g4dn instances)
     cracking_tools_gpu_support: true
     cracking_tools_hashcat_from_source: true
     cracking_tools_nvidia_opencl_icd: true
+    cracking_tools_wordlists:
+      - rockyou
+      - seclists_passwords
 
     # Enable all poisoning tools for GOAD
     coercion_tools_install_responder: true

@@ -60,7 +60,7 @@ run_parallel_detections(technique_ids=["T1003", "T1003.006", "T1558"])
 
 ```text
 # Pivot by compromised host
-get_host_activity(hostname="dc01.corp.local")
+get_host_activity(hostname="dc01.contoso.local")
 
 # Check for lateral movement indicators
 query_loki_logs(
@@ -94,7 +94,7 @@ query_logs_around_timestamp(
 )
 
 # 4. Pivot by host and user (LATERAL stage)
-get_host_activity(hostname="dc01.corp.local")
+get_host_activity(hostname="dc01.contoso.local")
 get_user_activity(username="admin")
 
 # 5. Check for attack indicators across hosts
@@ -160,7 +160,7 @@ To use these capabilities:
 
 1. Ensure the Grafana MCP server is configured and running
 2. Set the `GRAFANA_URL` and `GRAFANA_SERVICE_ACCOUNT_TOKEN` environment variables
-3. Start a blue team investigation: `ares-cli blue from-operation --latest`
+3. Start a blue team investigation: `ares blue from-operation --latest`
 4. Agents will automatically use Grafana tools during investigation
 
 For more information, see:

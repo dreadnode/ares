@@ -3,7 +3,13 @@
 use serde_json::{json, Value};
 
 pub fn parse_secretsdump(output: &str, params: &Value) -> (Vec<Value>, Vec<Value>) {
-    let domain = params.get("domain").and_then(|v| v.as_str()).unwrap_or("");
+    // Prefer target_domain (the domain being dumped) over domain (auth credential's domain)
+    // to correctly attribute hashes when authenticating cross-domain.
+    let domain = params
+        .get("target_domain")
+        .or_else(|| params.get("domain"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
 
     let mut hashes = Vec::new();
     let creds = Vec::new();
@@ -19,7 +25,11 @@ pub fn parse_secretsdump(output: &str, params: &Value) -> (Vec<Value>, Vec<Value
                 let raw_user = parts[0];
                 let (user_domain, username) = if raw_user.contains('\\') {
                     let split: Vec<&str> = raw_user.splitn(2, '\\').collect();
-                    (split[0].to_string(), split[1].to_string())
+                    let netbios = split[0];
+                    // Resolve NetBIOS domain prefix to FQDN using target_domain.
+                    // e.g. "CONTOSO" → "contoso.local" when target_domain="contoso.local"
+                    let resolved = resolve_netbios_to_fqdn(netbios, domain);
+                    (resolved, split[1].to_string())
                 } else {
                     (domain.to_string(), raw_user.to_string())
                 };
@@ -46,6 +56,32 @@ pub fn parse_secretsdump(output: &str, params: &Value) -> (Vec<Value>, Vec<Value
     }
 
     (hashes, creds)
+}
+
+/// Resolve a NetBIOS domain name to FQDN using the target domain as reference.
+///
+/// When secretsdump outputs `CONTOSO\username`, the domain prefix is the NetBIOS
+/// name. If we know the target FQDN is `contoso.local`, we can resolve it by
+/// matching the first label. Returns the original name if no match is found.
+fn resolve_netbios_to_fqdn(netbios: &str, target_domain: &str) -> String {
+    if target_domain.is_empty() || netbios.is_empty() {
+        return netbios.to_string();
+    }
+
+    // If the NetBIOS name already looks like an FQDN, keep it
+    if netbios.contains('.') {
+        return netbios.to_string();
+    }
+
+    // Match NetBIOS against the first label of the target FQDN.
+    // e.g. "CONTOSO" matches "contoso.local", "CHILD" matches "child.contoso.local"
+    let first_label = target_domain.split('.').next().unwrap_or("");
+    if netbios.eq_ignore_ascii_case(first_label) {
+        return target_domain.to_string();
+    }
+
+    // No match — keep the raw NetBIOS name (recovery normalization will resolve it later)
+    netbios.to_string()
 }
 
 pub fn parse_kerberoast(output: &str, params: &Value) -> Vec<Value> {
@@ -147,7 +183,64 @@ svc_sql:1001:aad3b435b51404eeaad3b435b51404ee:abcdef1234567890abcdef1234567890::
         let (hashes, _) = parse_secretsdump(output, &params);
         assert_eq!(hashes.len(), 1);
         assert_eq!(hashes[0]["username"], "Administrator");
-        assert_eq!(hashes[0]["domain"], "CONTOSO");
+        // NetBIOS "CONTOSO" resolved to FQDN "contoso.local" via target_domain
+        assert_eq!(hashes[0]["domain"], "contoso.local");
+    }
+
+    #[test]
+    fn test_parse_secretsdump_netbios_resolved_to_fqdn() {
+        // NetBIOS prefix should be resolved to FQDN via target_domain
+        let output = "\
+FABRIKAM\\alice:1103:aad3b435b51404eeaad3b435b51404ee:abcdef1234567890abcdef1234567890:::
+FABRIKAM\\bob:1104:aad3b435b51404eeaad3b435b51404ee:1234567890abcdef1234567890abcdef:::";
+        let params = json!({"target_domain": "fabrikam.local"});
+        let (hashes, _) = parse_secretsdump(output, &params);
+        assert_eq!(hashes.len(), 2);
+        assert_eq!(hashes[0]["username"], "alice");
+        assert_eq!(hashes[0]["domain"], "fabrikam.local");
+        assert_eq!(hashes[1]["username"], "bob");
+        assert_eq!(hashes[1]["domain"], "fabrikam.local");
+    }
+
+    #[test]
+    fn test_parse_secretsdump_target_domain_preferred() {
+        // target_domain should take precedence over domain for attribution
+        let output = "FABRIKAM\\svc_sql:1105:aad3b435b51404eeaad3b435b51404ee:abcdef1234567890abcdef1234567890:::";
+        let params = json!({"domain": "contoso.local", "target_domain": "fabrikam.local"});
+        let (hashes, _) = parse_secretsdump(output, &params);
+        assert_eq!(hashes.len(), 1);
+        assert_eq!(hashes[0]["domain"], "fabrikam.local");
+    }
+
+    #[test]
+    fn test_parse_secretsdump_mismatched_netbios_kept() {
+        // If NetBIOS doesn't match target_domain's first label, keep it raw
+        let output = "CHILD\\jsmith:1001:aad3b435b51404eeaad3b435b51404ee:abcdef1234567890abcdef1234567890:::";
+        let params = json!({"target_domain": "fabrikam.local"});
+        let (hashes, _) = parse_secretsdump(output, &params);
+        assert_eq!(hashes.len(), 1);
+        assert_eq!(hashes[0]["username"], "jsmith");
+        // "CHILD" doesn't match "fabrikam" so it stays as-is
+        assert_eq!(hashes[0]["domain"], "CHILD");
+    }
+
+    #[test]
+    fn test_resolve_netbios_to_fqdn() {
+        assert_eq!(
+            resolve_netbios_to_fqdn("FABRIKAM", "fabrikam.local"),
+            "fabrikam.local"
+        );
+        assert_eq!(
+            resolve_netbios_to_fqdn("CHILD", "child.contoso.local"),
+            "child.contoso.local"
+        );
+        assert_eq!(resolve_netbios_to_fqdn("CHILD", "fabrikam.local"), "CHILD"); // no match
+        assert_eq!(
+            resolve_netbios_to_fqdn("fabrikam.local", "fabrikam.local"),
+            "fabrikam.local"
+        ); // already FQDN
+        assert_eq!(resolve_netbios_to_fqdn("", "fabrikam.local"), "");
+        assert_eq!(resolve_netbios_to_fqdn("FABRIKAM", ""), "FABRIKAM");
     }
 
     #[test]

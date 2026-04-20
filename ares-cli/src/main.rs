@@ -1,7 +1,7 @@
-//! Ares CLI — unified command-line interface for the Ares red team orchestration system.
+//! Ares — unified binary for the Ares red team orchestration system.
 //!
-//! Replaces the Python CLI scripts (cli_ops.py, cli_blue_ops.py, cli_history.py)
-//! with a single native binary. Pure Redis/Postgres client, no Python interop.
+//! Consolidates CLI, orchestrator, and worker into a single binary with
+//! subcommands: `ares ops`, `ares orchestrator`, `ares worker`, etc.
 
 #[cfg(feature = "blue")]
 mod blue;
@@ -11,9 +11,11 @@ mod dedup;
 mod detection;
 mod history;
 mod ops;
+mod orchestrator;
 mod redis_conn;
 mod secrets;
 mod util;
+mod worker;
 
 mod transport;
 
@@ -55,11 +57,19 @@ async fn main() {
     }
 
     // ── Initialize telemetry before using tracing macros ──
-    // This must happen before any tracing calls below.
-    let _telemetry = ares_core::telemetry::init_telemetry(
-        ares_core::telemetry::TelemetryConfig::new("ares-cli")
-            .with_default_filter("warn,ares_cli=info"),
-    );
+    // Skip for orchestrator/worker subcommands — they init their own telemetry
+    // with the correct service name.
+    let is_service_subcommand = std::env::args()
+        .nth(1)
+        .is_some_and(|a| a == "orchestrator" || a == "worker");
+    let _telemetry = if !is_service_subcommand {
+        Some(ares_core::telemetry::init_telemetry(
+            ares_core::telemetry::TelemetryConfig::new("ares-cli")
+                .with_default_filter("warn,ares_cli=info"),
+        ))
+    } else {
+        None
+    };
 
     if let Some(ref source) = secrets_from {
         match source.as_str() {
@@ -78,7 +88,12 @@ async fn main() {
     }
 
     // ── Normal CLI parsing (env vars are now populated) ──
-    let cli = Cli::parse();
+    let mut cli = Cli::parse();
+
+    // Fall back to REDIS_URL if ARES_REDIS_URL wasn't set (K8s pods expose REDIS_URL)
+    if cli.redis_url.is_none() {
+        cli.redis_url = std::env::var("REDIS_URL").ok();
+    }
 
     if let Err(e) = run(cli).await {
         error!("{e:#}");
@@ -93,5 +108,7 @@ async fn run(cli: Cli) -> Result<()> {
         Commands::Blue(cmd) => blue::run_blue(cmd, cli.redis_url).await,
         Commands::History(cmd) => history::run_history(cmd).await,
         Commands::Config(cmd) => config::run_config(cmd),
+        Commands::Orchestrator => orchestrator::run().await,
+        Commands::Worker { .. } => worker::run().await,
     }
 }

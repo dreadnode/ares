@@ -413,7 +413,7 @@ steve.baker\nrichard.baker\n\
 jdoe\nrobert.davis\ntom.green\n\
 michelle\nkarl.davidson\nvictor.torres\n\
 jeff.baker\ntony.baker\n\
-petyr.baelish\nvarys\nbronn\n\
+paul.jackson\nlaura.chen\nmark.reed\n\
 sql_admin\ndb_admin\n\
 webadmin\nnetadmin\n\
 helpdesk\nsupport\nservice\n";

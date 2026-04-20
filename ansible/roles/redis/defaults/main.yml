@@ -7,7 +7,7 @@ redis_maxmemory_policy: "allkeys-lru"
 
 # Ares worker configuration
 redis_install_ares_worker_unit: true
-redis_ares_worker_binary: "/usr/local/bin/ares-worker"
+redis_ares_worker_binary: "/usr/local/bin/ares"
 redis_ares_log_dir: "/var/log/ares"
 redis_ares_config_dir: "/etc/ares"
 

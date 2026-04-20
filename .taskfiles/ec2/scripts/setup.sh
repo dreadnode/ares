@@ -30,13 +30,13 @@ Wants=redis.service
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/ares-worker
+ExecStart=/usr/local/bin/ares worker
+EnvironmentFile=-/etc/ares/env
 Environment=ARES_REDIS_URL=redis://127.0.0.1:6379
 Environment=ARES_WORKER_ROLE=%i
 Environment=ARES_WORKER_MODE=tool_exec
 Environment=RUST_LOG=info
-Environment=OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317
-Environment=OTEL_RESOURCE_ATTRIBUTES=service.namespace=ares,deployment.environment=staging,attack.team=red
+Environment=OTEL_RESOURCE_ATTRIBUTES=deployment.environment=staging,attack.team=red
 Restart=on-failure
 RestartSec=5
 StandardOutput=append:/var/log/ares/%i.log

@@ -4,7 +4,6 @@ on:
   push:
     branches:
       - main
-      - fix/warpgate-templates
     paths:
       - 'warpgate-templates/**'
       - '.github/workflows/build-and-push-templates.yaml'
@@ -16,15 +15,14 @@ on:
         default: ''
         type: string
 
-# Required for OIDC and pushing to GHCR
+# Required for pushing to GHCR
 permissions:
-  id-token: write
   contents: read
   packages: write
 
 concurrency:
   cancel-in-progress: true
-  group: "${{ github.workflow }}-${{ github.ref }}-${{ github.run_id }}"
+  group: "${{ github.workflow }}-${{ github.ref }}"
 
 env:
   DEBIAN_FRONTEND: noninteractive
@@ -36,7 +34,7 @@ env:
 jobs:
   discover-templates:
     name: Discover templates
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     outputs:
       # Base templates (use external base images like ubuntu:22.04)
       base_matrix: ${{ steps.discover.outputs.base_matrix }}
@@ -116,9 +114,18 @@ jobs:
             -p "*linux*${ARCH}*" \
             -p "*Linux*${ARCH}*" \
             -p "*linux*${ALT_ARCH}*" \
-            -p "*Linux*${ALT_ARCH}*"
+            -p "*Linux*${ALT_ARCH}*" \
+            -p "checksums.txt"
 
-          ASSET_PATH="$(find "$TMP_DIR" -maxdepth 1 -type f -print -quit)"
+          # Verify downloaded asset integrity against release checksums
+          if [ -f "$TMP_DIR/checksums.txt" ]; then
+            echo "Verifying download integrity..."
+            (cd "$TMP_DIR" && sha256sum -c checksums.txt --ignore-missing)
+          else
+            echo "::warning::checksums.txt not found in release — skipping integrity check"
+          fi
+
+          ASSET_PATH="$(find "$TMP_DIR" -maxdepth 1 -type f ! -name 'checksums.txt' -print -quit)"
           ASSET="$(basename "$ASSET_PATH")"
           case "$ASSET" in
             *.tar.gz)
@@ -248,7 +255,7 @@ jobs:
                 if ($supported_platforms | index("amd64")) then
                   [{
                     "arch": "amd64",
-                    "runner": "ubuntu-latest"
+                    "runner": "ubuntu-24.04"
                   }]
                 else [] end +
                 if ($supported_platforms | index("arm64")) then
@@ -260,7 +267,7 @@ jobs:
               )[] |
               . as $arch_config |
               $template |
-              if ((.name | startswith("ares-")) and (.name != "ares-worker") and (.name != "ares-rust-worker")) then
+              if ((.name | startswith("ares-")) and (.name != "ares-worker")) then
                 . + {"provision_repo": "ansible-collection-nimbus_range", "provision_repo_path": "ansible-collection-nimbus_range", "namespace": $namespace}
               else
                 . + {"namespace": $namespace}
@@ -571,9 +578,18 @@ jobs:
             -p "*linux*${ARCH}*" \
             -p "*Linux*${ARCH}*" \
             -p "*linux*${ALT_ARCH}*" \
-            -p "*Linux*${ALT_ARCH}*"
+            -p "*Linux*${ALT_ARCH}*" \
+            -p "checksums.txt"
 
-          ASSET_PATH="$(find "$TMP_DIR" -maxdepth 1 -type f -print -quit)"
+          # Verify downloaded asset integrity against release checksums
+          if [ -f "$TMP_DIR/checksums.txt" ]; then
+            echo "Verifying download integrity..."
+            (cd "$TMP_DIR" && sha256sum -c checksums.txt --ignore-missing)
+          else
+            echo "::warning::checksums.txt not found in release — skipping integrity check"
+          fi
+
+          ASSET_PATH="$(find "$TMP_DIR" -maxdepth 1 -type f ! -name 'checksums.txt' -print -quit)"
           ASSET="$(basename "$ASSET_PATH")"
           case "$ASSET" in
             *.tar.gz)
@@ -709,7 +725,7 @@ jobs:
     name: "[Base] Create manifest for ${{ matrix.name }}"
     needs: [discover-templates, build-base-images]
     if: github.event_name != 'pull_request' && needs.discover-templates.outputs.has_base_templates == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     strategy:
       matrix: ${{ fromJson(needs.discover-templates.outputs.base_templates) }}
       fail-fast: false
@@ -776,9 +792,18 @@ jobs:
             -p "*linux*${ARCH}*" \
             -p "*Linux*${ARCH}*" \
             -p "*linux*${ALT_ARCH}*" \
-            -p "*Linux*${ALT_ARCH}*"
+            -p "*Linux*${ALT_ARCH}*" \
+            -p "checksums.txt"
 
-          ASSET_PATH="$(find "$TMP_DIR" -maxdepth 1 -type f -print -quit)"
+          # Verify downloaded asset integrity against release checksums
+          if [ -f "$TMP_DIR/checksums.txt" ]; then
+            echo "Verifying download integrity..."
+            (cd "$TMP_DIR" && sha256sum -c checksums.txt --ignore-missing)
+          else
+            echo "::warning::checksums.txt not found in release — skipping integrity check"
+          fi
+
+          ASSET_PATH="$(find "$TMP_DIR" -maxdepth 1 -type f ! -name 'checksums.txt' -print -quit)"
           ASSET="$(basename "$ASSET_PATH")"
           case "$ASSET" in
             *.tar.gz)
@@ -1044,9 +1069,18 @@ jobs:
             -p "*linux*${ARCH}*" \
             -p "*Linux*${ARCH}*" \
             -p "*linux*${ALT_ARCH}*" \
-            -p "*Linux*${ALT_ARCH}*"
+            -p "*Linux*${ALT_ARCH}*" \
+            -p "checksums.txt"
 
-          ASSET_PATH="$(find "$TMP_DIR" -maxdepth 1 -type f -print -quit)"
+          # Verify downloaded asset integrity against release checksums
+          if [ -f "$TMP_DIR/checksums.txt" ]; then
+            echo "Verifying download integrity..."
+            (cd "$TMP_DIR" && sha256sum -c checksums.txt --ignore-missing)
+          else
+            echo "::warning::checksums.txt not found in release — skipping integrity check"
+          fi
+
+          ASSET_PATH="$(find "$TMP_DIR" -maxdepth 1 -type f ! -name 'checksums.txt' -print -quit)"
           ASSET="$(basename "$ASSET_PATH")"
           case "$ASSET" in
             *.tar.gz)
@@ -1186,7 +1220,7 @@ jobs:
       github.event_name != 'pull_request' &&
       needs.discover-templates.outputs.has_dependent_templates == 'true' &&
       needs.build-dependent-images.result == 'success'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     strategy:
       matrix: ${{ fromJson(needs.discover-templates.outputs.dependent_templates) }}
       fail-fast: false
@@ -1253,9 +1287,18 @@ jobs:
             -p "*linux*${ARCH}*" \
             -p "*Linux*${ARCH}*" \
             -p "*linux*${ALT_ARCH}*" \
-            -p "*Linux*${ALT_ARCH}*"
+            -p "*Linux*${ALT_ARCH}*" \
+            -p "checksums.txt"
 
-          ASSET_PATH="$(find "$TMP_DIR" -maxdepth 1 -type f -print -quit)"
+          # Verify downloaded asset integrity against release checksums
+          if [ -f "$TMP_DIR/checksums.txt" ]; then
+            echo "Verifying download integrity..."
+            (cd "$TMP_DIR" && sha256sum -c checksums.txt --ignore-missing)
+          else
+            echo "::warning::checksums.txt not found in release — skipping integrity check"
+          fi
+
+          ASSET_PATH="$(find "$TMP_DIR" -maxdepth 1 -type f ! -name 'checksums.txt' -print -quit)"
           ASSET="$(basename "$ASSET_PATH")"
           case "$ASSET" in
             *.tar.gz)
@@ -1478,8 +1521,17 @@ jobs:
           esac
           TMP_DIR="$(mktemp -d)"
           gh release download "$VERSION" -R CowDogMoo/warpgate -D "$TMP_DIR" \
-            -p "*linux*${ARCH}*" -p "*Linux*${ARCH}*" -p "*linux*${ALT_ARCH}*" -p "*Linux*${ALT_ARCH}*"
-          ASSET_PATH="$(find "$TMP_DIR" -maxdepth 1 -type f -print -quit)"
+            -p "*linux*${ARCH}*" -p "*Linux*${ARCH}*" -p "*linux*${ALT_ARCH}*" -p "*Linux*${ALT_ARCH}*" \
+            -p "checksums.txt"
+
+          # Verify downloaded asset integrity against release checksums
+          if [ -f "$TMP_DIR/checksums.txt" ]; then
+            (cd "$TMP_DIR" && sha256sum -c checksums.txt --ignore-missing)
+          else
+            echo "::warning::checksums.txt not found in release — skipping integrity check"
+          fi
+
+          ASSET_PATH="$(find "$TMP_DIR" -maxdepth 1 -type f ! -name 'checksums.txt' -print -quit)"
           ASSET="$(basename "$ASSET_PATH")"
           case "$ASSET" in
             *.tar.gz) tar -xzf "$TMP_DIR/$ASSET" -C "$TMP_DIR" ;;
@@ -1564,7 +1616,7 @@ jobs:
     name: "[GPU] Create manifest for ${{ matrix.name }}"
     needs: [discover-templates, build-gpu-base-images]
     if: github.event_name != 'pull_request' && needs.discover-templates.outputs.has_gpu_base_templates == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     strategy:
       matrix: ${{ fromJson(needs.discover-templates.outputs.gpu_base_templates) }}
       fail-fast: false
@@ -1605,8 +1657,17 @@ jobs:
           esac
           TMP_DIR="$(mktemp -d)"
           gh release download "$VERSION" -R CowDogMoo/warpgate -D "$TMP_DIR" \
-            -p "*linux*${ARCH}*" -p "*Linux*${ARCH}*" -p "*linux*${ALT_ARCH}*" -p "*Linux*${ALT_ARCH}*"
-          ASSET_PATH="$(find "$TMP_DIR" -maxdepth 1 -type f -print -quit)"
+            -p "*linux*${ARCH}*" -p "*Linux*${ARCH}*" -p "*linux*${ALT_ARCH}*" -p "*Linux*${ALT_ARCH}*" \
+            -p "checksums.txt"
+
+          # Verify downloaded asset integrity against release checksums
+          if [ -f "$TMP_DIR/checksums.txt" ]; then
+            (cd "$TMP_DIR" && sha256sum -c checksums.txt --ignore-missing)
+          else
+            echo "::warning::checksums.txt not found in release — skipping integrity check"
+          fi
+
+          ASSET_PATH="$(find "$TMP_DIR" -maxdepth 1 -type f ! -name 'checksums.txt' -print -quit)"
           ASSET="$(basename "$ASSET_PATH")"
           case "$ASSET" in
             *.tar.gz) tar -xzf "$TMP_DIR/$ASSET" -C "$TMP_DIR" ;;
@@ -1795,8 +1856,17 @@ jobs:
           esac
           TMP_DIR="$(mktemp -d)"
           gh release download "$VERSION" -R CowDogMoo/warpgate -D "$TMP_DIR" \
-            -p "*linux*${ARCH}*" -p "*Linux*${ARCH}*" -p "*linux*${ALT_ARCH}*" -p "*Linux*${ALT_ARCH}*"
-          ASSET_PATH="$(find "$TMP_DIR" -maxdepth 1 -type f -print -quit)"
+            -p "*linux*${ARCH}*" -p "*Linux*${ARCH}*" -p "*linux*${ALT_ARCH}*" -p "*Linux*${ALT_ARCH}*" \
+            -p "checksums.txt"
+
+          # Verify downloaded asset integrity against release checksums
+          if [ -f "$TMP_DIR/checksums.txt" ]; then
+            (cd "$TMP_DIR" && sha256sum -c checksums.txt --ignore-missing)
+          else
+            echo "::warning::checksums.txt not found in release — skipping integrity check"
+          fi
+
+          ASSET_PATH="$(find "$TMP_DIR" -maxdepth 1 -type f ! -name 'checksums.txt' -print -quit)"
           ASSET="$(basename "$ASSET_PATH")"
           case "$ASSET" in
             *.tar.gz) tar -xzf "$TMP_DIR/$ASSET" -C "$TMP_DIR" ;;
@@ -1885,7 +1955,7 @@ jobs:
       github.event_name != 'pull_request' &&
       needs.discover-templates.outputs.has_gpu_dependent_templates == 'true' &&
       needs.build-gpu-dependent-images.result == 'success'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     strategy:
       matrix: ${{ fromJson(needs.discover-templates.outputs.gpu_dependent_templates) }}
       fail-fast: false
@@ -1926,8 +1996,17 @@ jobs:
           esac
           TMP_DIR="$(mktemp -d)"
           gh release download "$VERSION" -R CowDogMoo/warpgate -D "$TMP_DIR" \
-            -p "*linux*${ARCH}*" -p "*Linux*${ARCH}*" -p "*linux*${ALT_ARCH}*" -p "*Linux*${ALT_ARCH}*"
-          ASSET_PATH="$(find "$TMP_DIR" -maxdepth 1 -type f -print -quit)"
+            -p "*linux*${ARCH}*" -p "*Linux*${ARCH}*" -p "*linux*${ALT_ARCH}*" -p "*Linux*${ALT_ARCH}*" \
+            -p "checksums.txt"
+
+          # Verify downloaded asset integrity against release checksums
+          if [ -f "$TMP_DIR/checksums.txt" ]; then
+            (cd "$TMP_DIR" && sha256sum -c checksums.txt --ignore-missing)
+          else
+            echo "::warning::checksums.txt not found in release — skipping integrity check"
+          fi
+
+          ASSET_PATH="$(find "$TMP_DIR" -maxdepth 1 -type f ! -name 'checksums.txt' -print -quit)"
           ASSET="$(basename "$ASSET_PATH")"
           case "$ASSET" in
             *.tar.gz) tar -xzf "$TMP_DIR/$ASSET" -C "$TMP_DIR" ;;
@@ -2006,9 +2085,9 @@ jobs:
 
   build-summary:
     name: Build Summary
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: [discover-templates, build-base-images, merge-base-manifests, build-dependent-images, merge-dependent-manifests, build-gpu-base-images, merge-gpu-base-manifests, build-gpu-dependent-images, merge-gpu-dependent-manifests]
-    if: always()
+    if: always() && !cancelled()
     steps:
       - name: Check build results
         run: |

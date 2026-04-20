@@ -163,7 +163,7 @@ pub(crate) async fn ops_offload_cost(
     if rows_affected == 0 {
         println!(
             "Warning: Operation {op_id} not found in PostgreSQL. \
-             Run 'ares-cli ops offload' to persist the operation first."
+             Run 'ares ops offload' to persist the operation first."
         );
         return Ok(());
     }
