@@ -19,7 +19,7 @@ metadata:
 name: ares-cracker-base-gpu
 version: latest
 base:
-  image: nvidia/cuda:12.6.0-runtime-ubuntu24.04
+  image: nvidia/cuda:12.6.0-runtime-ubuntu24.04@sha256:e456eeda7b9ca6a3d16cd69019ac723d75f538fb185904f93e592aafabbe7b71
   pull: true
   privileged: true
   volumes:
@@ -43,7 +43,7 @@ provisioners:
     only:
       - docker.amd64
     inline:
-      - apt-get update && apt-get install -y --no-install-recommends python3 python3-pip ansible-core git
+      - apt-get update && apt-get upgrade -y && apt-get install -y --no-install-recommends python3 python3-pip ansible-core git
   - type: ansible
     only:
       - docker.amd64

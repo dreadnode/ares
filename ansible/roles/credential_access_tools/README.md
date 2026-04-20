@@ -85,6 +85,7 @@ Install and configure credential access tooling for Ares agents
 - **Check if we need to install or reinstall impacket** (ansible.builtin.set_fact)
 - **Create impacket virtual environment** (ansible.builtin.command) - Conditional
 - **Install impacket from source** (ansible.builtin.pip) - Conditional
+- **Upgrade pycryptodome in impacket venv (CVE fix - GHSA-j225-cvw7-qrx7)** (ansible.builtin.pip) - Conditional
 - **Check if impacket is correctly installed in venv** (ansible.builtin.command)
 - **Make impacket example scripts executable** (ansible.builtin.shell)
 - **Check if \_\_init\_\_.py exists in impacket/examples** (ansible.builtin.stat)

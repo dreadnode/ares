@@ -33,6 +33,8 @@ base_pip_packages:
   - "rigging>=3.0"
   - pydantic
   - asyncio
+  - "aiohttp>=3.13.4"
+  - "cryptography>=44.0.1"
 
 # Pip/PEP 668 handling
 base_pip_externally_managed: false

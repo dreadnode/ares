@@ -18,7 +18,7 @@ metadata:
 name: ares-cracker-agent-gpu
 version: latest
 base:
-  image: ghcr.io/dreadnode/ares-cracker-base-gpu:latest
+  image: ghcr.io/dreadnode/ares-cracker-base-gpu@sha256:c72bc94f627c75b87be551b1daa1ad35427a8fa4fff45a7344897eef0b9f88ad
   pull: true
   privileged: true
   volumes:

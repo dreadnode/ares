@@ -85,6 +85,14 @@
   register: credential_access_tools_impacket_install
   when: credential_access_tools_needs_impacket_install | bool
 
+- name: Upgrade pycryptodome in impacket venv (CVE fix - GHSA-j225-cvw7-qrx7)
+  ansible.builtin.pip:
+    name: "pycryptodome>=3.19.1"
+    virtualenv: "{{ credential_access_tools_impacket_venv }}"
+    state: latest
+  become: true
+  when: credential_access_tools_needs_impacket_install | bool
+
 - name: Check if impacket is correctly installed in venv
   ansible.builtin.command: "{{ credential_access_tools_impacket_venv }}/bin/python -c \"import impacket; print(impacket.__file__)\""
   register: credential_access_tools_impacket_import_check

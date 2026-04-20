@@ -15,7 +15,7 @@ metadata:
 name: ares-base
 version: latest
 base:
-    image: kalilinux/kali-rolling
+    image: kalilinux/kali-rolling@sha256:dddc31e0f4bc57b4b91e9027762544506bf91c7cdd7ff52104daaa4449b4c726
     pull: true
     privileged: true
     volumes:

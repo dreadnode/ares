@@ -113,9 +113,9 @@
       - netifaces
       - aioquic
       - certifi
-      - cryptography>=42.0.0
+      - cryptography>=44.0.1
       - pylsqpack>=0.3.3,<0.4.0
-      - pyopenssl>=24
+      - pyopenssl>=26.0.0
       - service-identity>=24.1.0
     executable: pip3
     # Use --ignore-installed to handle system packages (e.g., cryptography)

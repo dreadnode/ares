@@ -16,7 +16,7 @@ metadata:
 name: ares-acl-agent
 version: latest
 base:
-  image: debian:trixie-slim
+  image: debian:trixie-slim@sha256:4ffb3a1511099754cddc70eb1b12e50ffdb67619aa0ab6c13fcd800a78ef7c7a
   pull: true
   privileged: true
   volumes:
