@@ -689,4 +689,46 @@ SMB  192.168.58.121  445  DC01  bob         2026-03-25 23:21:09 0  Bob"#;
             assert_eq!(u["source"], "kerberos_enum");
         }
     }
+
+    #[test]
+    fn test_parse_tool_output_username_as_password_filters() {
+        // Only creds where password == username should be kept
+        let output = "[+] 192.168.1.1 CONTOSO\\alice:alice (Pwn3d!)\n\
+                      [+] 192.168.1.1 CONTOSO\\bob:Password1 (Pwn3d!)";
+        let params = json!({"domain": "contoso.local", "target_ip": "192.168.1.1"});
+        let disc = parse_tool_output("username_as_password", output, &params);
+        let creds = disc["credentials"].as_array().unwrap();
+        assert_eq!(creds.len(), 1, "Only alice:alice should match");
+        assert_eq!(creds[0]["username"].as_str().unwrap(), "alice");
+    }
+
+    #[test]
+    fn test_parse_tool_output_adidnsdump() {
+        let output = "dc01  A  192.168.1.10\nweb01  A  192.168.1.20";
+        let disc = parse_tool_output("adidnsdump", output, &json!({}));
+        let hosts = disc["hosts"].as_array().unwrap();
+        assert_eq!(hosts.len(), 2);
+    }
+
+    #[test]
+    fn test_merge_discoveries_trusted_domains_dedup() {
+        let d1 =
+            json!({"trusted_domains": [{"domain": "child.contoso.local", "type": "ParentChild"}]});
+        let d2 =
+            json!({"trusted_domains": [{"domain": "child.contoso.local", "type": "ParentChild"}]});
+        let merged = merge_discoveries(&[d1, d2]);
+        let td = merged["trusted_domains"].as_array().unwrap();
+        assert_eq!(td.len(), 1, "Duplicate trusted domains should be deduped");
+    }
+
+    #[test]
+    fn test_merge_discoveries_host_more_services_wins() {
+        let d1 = json!({"hosts": [{"ip": "10.0.0.1", "services": ["445/tcp"]}]});
+        let d2 =
+            json!({"hosts": [{"ip": "10.0.0.1", "services": ["80/tcp", "443/tcp", "445/tcp"]}]});
+        let merged = merge_discoveries(&[d1, d2]);
+        let hosts = merged["hosts"].as_array().unwrap();
+        assert_eq!(hosts.len(), 1);
+        assert_eq!(hosts[0]["services"].as_array().unwrap().len(), 3);
+    }
 }

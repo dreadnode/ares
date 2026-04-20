@@ -213,4 +213,47 @@ flatName: CHILD
         let trusts = parse_domain_trusts(output);
         assert!(trusts.is_empty());
     }
+
+    #[test]
+    fn test_parse_outbound_trust() {
+        let output = "cn: external.com\ntrustDirection: 2\ntrustType: 3\ntrustAttributes: 0\nflatName: EXTERNAL\n";
+        let trusts = parse_domain_trusts(output);
+        assert_eq!(trusts.len(), 1);
+        assert_eq!(trusts[0]["direction"], "outbound");
+        assert_eq!(trusts[0]["trust_type"], "external");
+        assert!(!trusts[0]["sid_filtering"].as_bool().unwrap());
+    }
+
+    #[test]
+    fn test_parse_trust_unknown_direction() {
+        let output = "cn: mystery.local\ntrustDirection: 99\ntrustType: 1\ntrustAttributes: 0\nflatName: MYSTERY\n";
+        let trusts = parse_domain_trusts(output);
+        assert_eq!(trusts.len(), 1);
+        assert_eq!(trusts[0]["direction"], "unknown");
+    }
+
+    #[test]
+    fn test_parse_trust_tree_root_short_domain() {
+        // trustType=2 with short domain (< 3 labels) → forest
+        let output = "cn: fabrikam.com\ntrustDirection: 3\ntrustType: 2\ntrustAttributes: 0\nflatName: FABRIKAM\n";
+        let trusts = parse_domain_trusts(output);
+        assert_eq!(trusts.len(), 1);
+        assert_eq!(trusts[0]["trust_type"], "forest");
+    }
+
+    #[test]
+    fn test_parse_trust_tree_root_long_domain() {
+        // trustType=2 with 3+ labels → parent_child
+        let output = "cn: child.contoso.local\ntrustDirection: 3\ntrustType: 2\ntrustAttributes: 0\nflatName: CHILD\n";
+        let trusts = parse_domain_trusts(output);
+        assert_eq!(trusts.len(), 1);
+        assert_eq!(trusts[0]["trust_type"], "parent_child");
+    }
+
+    #[test]
+    fn test_parse_trust_domain_lowercased() {
+        let output = "cn: FABRIKAM.LOCAL\ntrustDirection: 3\ntrustType: 2\ntrustAttributes: 8\nflatName: FABRIKAM\n";
+        let trusts = parse_domain_trusts(output);
+        assert_eq!(trusts[0]["domain"], "fabrikam.local");
+    }
 }

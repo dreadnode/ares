@@ -538,4 +538,68 @@ mod tests {
             "ares:op:op-abc-123:token_usage"
         );
     }
+
+    #[test]
+    fn blue_token_usage_key_format() {
+        assert_eq!(
+            blue_token_usage_key("inv-xyz-456"),
+            "ares:blue:inv:inv-xyz-456:token_usage"
+        );
+    }
+
+    #[test]
+    fn lookup_model_cost_exact_match() {
+        let result = lookup_model_cost("gpt-4o");
+        assert!(result.is_some());
+        let (input, output) = result.unwrap();
+        assert!((input - 2.50).abs() < 0.001);
+        assert!((output - 10.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn lookup_model_cost_case_insensitive() {
+        // Model names are lowercased before lookup
+        let result = lookup_model_cost("GPT-4O");
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn lookup_model_cost_unknown_returns_none() {
+        let result = lookup_model_cost("totally-unknown-model-xyz");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn model_field_roundtrip_simple() {
+        let field = model_field("gpt-4o", "input_tokens");
+        let (model, token_type) = parse_model_field(&field).unwrap();
+        assert_eq!(model, "gpt-4o");
+        assert_eq!(token_type, "input_tokens");
+    }
+
+    #[test]
+    fn parse_model_field_invalid_prefix() {
+        assert!(parse_model_field("something_else").is_none());
+        assert!(parse_model_field("").is_none());
+    }
+
+    #[test]
+    fn estimate_usage_cost_breakdown_total_tokens() {
+        let usage = OperationTokenUsage {
+            input_tokens: 500_000,
+            output_tokens: 500_000,
+            model: "gpt-4o".to_string(),
+            models: HashMap::from([(
+                "gpt-4o".to_string(),
+                ModelTokenUsage {
+                    input_tokens: 500_000,
+                    output_tokens: 500_000,
+                },
+            )]),
+        };
+        let (_, breakdown, _) = estimate_usage_cost(&usage);
+        assert_eq!(breakdown[0].total_tokens, 1_000_000);
+        assert_eq!(breakdown[0].input_tokens, 500_000);
+        assert_eq!(breakdown[0].output_tokens, 500_000);
+    }
 }
