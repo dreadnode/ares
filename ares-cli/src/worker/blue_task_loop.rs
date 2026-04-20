@@ -228,6 +228,7 @@ async fn execute_blue_task(
         &task.task_id,
         &tools,
         None, // No custom callback handler for worker tasks
+        None, // No hostname map for blue team workers
     )
     .await;
 

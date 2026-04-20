@@ -130,6 +130,7 @@ impl BlueCallbackHandler {
             &self.investigation_id,
             &tools,
             Some(sub_agent_cb),
+            None,
         )
         .await;
 

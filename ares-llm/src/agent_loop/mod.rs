@@ -20,7 +20,7 @@ mod runner;
 mod tests;
 
 pub use config::{AgentLoopConfig, ContextConfig, RetryConfig};
-pub use runner::run_agent_loop;
+pub use runner::{run_agent_loop, HostnameMap};
 pub use types::{
     AgentLoopOutcome, CallbackHandler, CallbackResult, LoopEndReason, ToolDispatcher,
     ToolExecResult,

@@ -11,5 +11,5 @@ pub use provider::{
 
 pub use agent_loop::{
     run_agent_loop, AgentLoopConfig, AgentLoopOutcome, CallbackHandler, CallbackResult,
-    ContextConfig, LoopEndReason, RetryConfig, ToolDispatcher, ToolExecResult,
+    ContextConfig, HostnameMap, LoopEndReason, RetryConfig, ToolDispatcher, ToolExecResult,
 };

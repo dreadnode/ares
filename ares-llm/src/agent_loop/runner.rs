@@ -1,9 +1,14 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use tracing::{debug, info, warn, Instrument};
 
 use ares_core::telemetry::spans::{trace_decision, trace_tool_call, Team};
 use ares_core::telemetry::target::{extract_target_info, infer_target_type_from_info};
+
+/// Optional IP→FQDN map for enriching span `destination.address` with hostnames
+/// discovered during the operation (e.g. from SMB/DNS enumeration).
+pub type HostnameMap = Arc<HashMap<String, String>>;
 
 use crate::provider::{
     ChatMessage, LlmProvider, LlmRequest, Role, StopReason, TokenUsage, ToolCall,
@@ -81,6 +86,7 @@ pub async fn run_agent_loop(
     task_id: &str,
     tools: &[crate::ToolDefinition],
     callback_handler: Option<Arc<dyn CallbackHandler>>,
+    hostname_map: Option<HostnameMap>,
 ) -> AgentLoopOutcome {
     let mut messages: Vec<ChatMessage> = vec![ChatMessage::text(Role::User, task_prompt)];
 
@@ -236,7 +242,18 @@ pub async fn run_agent_loop(
                 let r = role.to_string();
                 let tid = task_id.to_string();
                 let c = (*call).clone();
-                let ti = extract_target_info(&call.arguments);
+                let mut ti = extract_target_info(&call.arguments);
+                // Enrich: resolve IP→FQDN from discovered hosts when the
+                // LLM only passed an IP in the tool arguments.
+                if ti.target_fqdn.is_none() {
+                    if let Some(ref map) = hostname_map {
+                        if let Some(ip) = ti.target_ip.as_deref() {
+                            if let Some(fqdn) = map.get(ip) {
+                                ti.target_fqdn = Some(fqdn.clone());
+                            }
+                        }
+                    }
+                }
                 let tt = infer_target_type_from_info(&ti);
                 let span = trace_tool_call(
                     role,

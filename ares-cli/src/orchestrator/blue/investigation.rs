@@ -174,6 +174,7 @@ pub async fn run_investigation(
         &investigation.investigation_id,
         &tools,
         Some(callback_handler),
+        None,
     )
     .await;
 

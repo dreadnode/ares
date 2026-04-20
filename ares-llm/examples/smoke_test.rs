@@ -188,6 +188,7 @@ async fn main() -> Result<()> {
         "t-smoke-1",
         &tools,
         None::<Arc<dyn CallbackHandler>>,
+        None,
     )
     .await;
 
