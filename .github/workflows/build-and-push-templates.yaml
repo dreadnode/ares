@@ -254,7 +254,7 @@ jobs:
                 if ($supported_platforms | index("arm64")) then
                   [{
                     "arch": "arm64",
-                    "runner": "ubuntu-24.04-arm64"
+                    "runner": "ubuntu24.04-arm64-8-core"
                   }]
                 else [] end
               )[] |
