@@ -5,6 +5,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://github.com/dreadnode/ares/blob/main/LICENSE)
 [![Tests](https://github.com/dreadnode/ares/actions/workflows/rust.yaml/badge.svg)](https://github.com/dreadnode/ares/actions/workflows/rust.yaml)
 [![Pre-Commit](https://github.com/dreadnode/ares/actions/workflows/pre-commit.yaml/badge.svg)](https://github.com/dreadnode/ares/actions/workflows/pre-commit.yaml)
+[![codecov](https://codecov.io/github/dreadnode/ares/graph/badge.svg)](https://codecov.io/github/dreadnode/ares)
 
 <!-- END_AUTO_BADGES -->
 
