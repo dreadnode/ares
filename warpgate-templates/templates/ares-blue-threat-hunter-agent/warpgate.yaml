@@ -43,7 +43,7 @@ provisioners:
     inline:
       - apt-get update
       - apt-get install -y --no-install-recommends ca-certificates curl
-      - curl -fsSL https://github.com/grafana/mcp-grafana/releases/latest/download/mcp-grafana_Linux_x86_64.tar.gz -o /tmp/mcp-grafana.tar.gz
+      - curl -fsSL https://github.com/grafana/mcp-grafana/releases/download/v0.11.6/mcp-grafana_Linux_x86_64.tar.gz -o /tmp/mcp-grafana.tar.gz
       - tar -xzf /tmp/mcp-grafana.tar.gz -C /usr/local/bin mcp-grafana
       - chmod +x /usr/local/bin/mcp-grafana
       - rm -f /tmp/mcp-grafana.tar.gz
@@ -55,7 +55,7 @@ provisioners:
     inline:
       - apt-get update
       - apt-get install -y --no-install-recommends ca-certificates curl
-      - curl -fsSL https://github.com/grafana/mcp-grafana/releases/latest/download/mcp-grafana_Linux_arm64.tar.gz -o /tmp/mcp-grafana.tar.gz
+      - curl -fsSL https://github.com/grafana/mcp-grafana/releases/download/v0.11.6/mcp-grafana_Linux_arm64.tar.gz -o /tmp/mcp-grafana.tar.gz
       - tar -xzf /tmp/mcp-grafana.tar.gz -C /usr/local/bin mcp-grafana
       - chmod +x /usr/local/bin/mcp-grafana
       - rm -f /tmp/mcp-grafana.tar.gz
