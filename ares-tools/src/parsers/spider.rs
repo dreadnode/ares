@@ -226,7 +226,6 @@ mod tests {
 
     #[test]
     fn test_powershell_variable_assignments() {
-        // Matches actual GOAD script format
         let output = r#"
 === Downloaded File Contents ===
 

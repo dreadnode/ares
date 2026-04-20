@@ -76,7 +76,7 @@ warpgate validate ares-golden-image
   4. Clones and installs the Ares framework via `pipx`
   5. Cleans up build artifacts
 - **Installed Components:**
-  - All GOAD attack box tools (via Ansible)
+  - All attack box tools (via Ansible)
   - Alloy telemetry agent
   - Ares framework (installed via pipx)
   - Python 3, uv, pipx

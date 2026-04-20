@@ -811,7 +811,7 @@ Set `BLUE_ENABLED=1` to start blue team investigations automatically when
 a red team operation runs:
 
 ```bash
-task red:ec2:multi TARGET=dreadgoad DOMAIN=sevenkingdoms.local BLUE_ENABLED=1
+task red:ec2:multi TARGET=dreadgoad DOMAIN=contoso.local BLUE_ENABLED=1
 ```
 
 ### Taskfile Variables

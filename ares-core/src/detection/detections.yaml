@@ -353,7 +353,7 @@ templates:
       - 'drsuapi'
       - 'directory.service.access'
     # Exclude machine accounts (ending in $) performing normal AD replication.
-    # Machine accounts like KINGSLANDING$, DC01$ are legitimate domain controllers.
+    # Machine accounts like DC01$, SQL01$ are legitimate domain controllers.
     # Only user accounts (no $ suffix) performing replication indicate DCSync attack.
     # NOTE: XML ">" is stored as JSON-escaped "\u003e" in Loki, so we use
     # ".u003e" (dot matches the literal backslash) instead of ">" in the regex.

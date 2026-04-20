@@ -296,7 +296,7 @@ async fn run_inner() -> Result<()> {
 
     // Credential auth throttle — prevents AD account lockout by rate-limiting
     // auth-bearing tool calls per credential. Max 3 attempts per 30s window.
-    // GOAD lockout: 3 bad attempts / 30 min. With multiple concurrent agents,
+    // AD lockout: 3 bad attempts / 30 min. With multiple concurrent agents,
     // even correct passwords can fail if the account is already locked.
     let auth_throttle = tool_dispatcher::AuthThrottle::new(3, std::time::Duration::from_secs(30));
 

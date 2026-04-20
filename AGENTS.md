@@ -64,7 +64,7 @@ After code changes, always deploy before testing remote behavior. Use `task remo
 
 ```bash
 # Taskfile wrapper
-task red:multi TARGET=dreadgoad DOMAIN=sevenkingdoms.local
+task red:multi TARGET=dreadgoad DOMAIN=contoso.local
 
 # Direct CLI
 ares ops submit dreadgoad contoso.local \
@@ -72,7 +72,7 @@ ares ops submit dreadgoad contoso.local \
   --model gpt-5.2 --max-steps 200 --follow
 
 # EC2
-task ec2:launch DOMAIN=sevenkingdoms.local TARGETS=192.168.58.10
+task ec2:launch DOMAIN=contoso.local TARGETS=192.168.58.10
 ```
 
 ### Monitor
@@ -178,7 +178,7 @@ When an operation is stuck:
 4. Inject known state if the model is blocked on a discovery step.
 5. Restart with `ares --k8s ares-red ops kill --all`, then resubmit.
 
-## GOAD Lab Reference
+## Lab Reference
 
 - Primary: `contoso.local` (`dc01`, `192.168.58.10`)
 - Foreign: `fabrikam.local` (`dc02`, `192.168.58.20`)

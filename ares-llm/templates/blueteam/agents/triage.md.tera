@@ -104,7 +104,7 @@ Use queries like `{job="windows-security"} |= "4662" |= "1131f6aa" !~ "SubjectUs
 - The DCSync query above **already filters out machine accounts** (names ending in `$`)
 - If this query returns results → **CONFIRMED DCSync ATTACK** (user account performing replication = always malicious)
 - If this query returns empty → normal AD replication only, no attack. Do NOT report as DCSync.
-- Machine accounts like `KINGSLANDING$`, `DC01$` are legitimate domain controllers replicating normally.
+- Machine accounts like `DC01$`, `DC02$` are legitimate domain controllers replicating normally.
 
 **Other interpretation rules:**
 - Event 4769 with `TicketEncryptionType: 0x17` = RC4 = Kerberoasting

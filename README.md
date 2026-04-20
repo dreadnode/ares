@@ -223,15 +223,15 @@ ares --ec2 kali-ares --ec2-profile prod --ec2-region us-east-1 ops list
 
 ```bash
 # Via Taskfile (recommended)
-task red:multi TARGET=dreadgoad DOMAIN=sevenkingdoms.local
+task red:multi TARGET=dreadgoad DOMAIN=contoso.local
 
 # Via CLI directly
-ares ops submit dreadgoad sevenkingdoms.local \
+ares ops submit dreadgoad contoso.local \
   --ips 192.168.58.10,192.168.58.11 \
   --model gpt-5.2 --follow
 
 # EC2
-task ec2:launch DOMAIN=sevenkingdoms.local TARGETS=192.168.58.10,192.168.58.11
+task ec2:launch DOMAIN=contoso.local TARGETS=192.168.58.10,192.168.58.11
 ```
 
 ### Monitor
@@ -252,12 +252,12 @@ ares --k8s ares-red ops inject-credential op-xxx administrator P@ssw0rd \
 
 ares --k8s ares-red ops inject-hash op-xxx krbtgt \
   "aad3b435b51404eeaad3b435b51404ee:313b6f423a..." \
-  --domain sevenkingdoms.local --aes-key "f8b6c5e4d3a2b109..."
+  --domain contoso.local --aes-key "f8b6c5e4d3a2b109..."
 
-ares --k8s ares-red ops inject-host op-xxx 192.168.58.20 dc01.essos.local
+ares --k8s ares-red ops inject-host op-xxx 192.168.58.20 dc01.fabrikam.local
 
 ares --k8s ares-red ops inject-domain-sid op-xxx \
-  --domain north.sevenkingdoms.local --sid "S-1-5-21-..."
+  --domain child.contoso.local --sid "S-1-5-21-..."
 ```
 
 ### Reports

@@ -90,6 +90,8 @@ tasks:
       CARGO_BUILD_JOBS: '{{.CARGO_BUILD_JOBS | default "1"}}'
       S3_DEPLOY_PREFIX: 'ares-deploy'
     preconditions:
+      - sh: aws sts get-caller-identity --profile "{{.EC2_PROFILE}}" --region "{{.EC2_REGION}}" >/dev/null 2>&1
+        msg: "Not logged into AWS (profile: {{.EC2_PROFILE}}). Run: aws sso login --profile {{.EC2_PROFILE}}"
       - sh: test -n "{{.BCP_BUCKET}}"
         msg: "BCP_BUCKET not set. Either create ~/.bcp/config.yaml with 'bucket: your-bucket' or pass BCP_BUCKET=your-bucket"
     cmds:
@@ -133,15 +135,11 @@ tasks:
           fi
 
           # Create source tarball (exclude build artifacts and git metadata)
-          SRC_TAR="$(mktemp /tmp/ares-src-XXXXXX).tar.gz"
+          SRC_TAR=$(mktemp /tmp/ares-src-XXXXXX.tar.gz)
           trap "rm -f $SRC_TAR" EXIT
-          TAR_INPUTS="Cargo.toml Cargo.lock tools.yaml ares-core/ ares-cli/ ares-llm/ ares-tools/"
-          for optional in Cross.toml .cargo/; do
-            [ -e "$optional" ] && TAR_INPUTS="$TAR_INPUTS $optional" || true
-          done
           tar -czf "$SRC_TAR" \
             --exclude='target' --exclude='.git' --exclude='*.o' --exclude='*.d' \
-            -C "$(pwd)" $TAR_INPUTS
+            -C "$(pwd)" Cargo.toml Cargo.lock Cross.toml tools.yaml .cargo/ ares-core/ ares-cli/ ares-llm/ ares-tools/
 
           # Upload source to S3
           echo -e "{{.INFO}} Uploading source to S3..."
@@ -228,9 +226,6 @@ tasks:
           cross)
             # Override linker: container has x86_64-linux-gnu-gcc, not x86_64-unknown-linux-gnu-gcc.
             export CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER=x86_64-linux-gnu-gcc
-            # Use CMake builder to avoid aws-lc-sys memcmp bug detection with older GCC
-            # (https://gcc.gnu.org/bugzilla/show_bug.cgi?id=95189)
-            export AWS_LC_SYS_CMAKE_BUILDER=1
             cross build --release --target {{.RUST_TARGET}} -j "{{.CARGO_BUILD_JOBS}}"
             ;;
           zigbuild)
@@ -589,10 +584,9 @@ tasks:
 
         echo -e "{{.INFO}} Stopping ares services on $INSTANCE_ID..."
 
-        STOP_CMD="systemctl stop $WORKER_UNITS 2>/dev/null || true; pkill -f 'ares orchestrator' 2>/dev/null || true; echo Stopped all ares workers and orchestrator"
         PARAMS_FILE=$(mktemp)
         trap "rm -f $PARAMS_FILE" EXIT
-        jq -n --arg cmd "$STOP_CMD" '{"commands": [$cmd]}' > "$PARAMS_FILE"
+        jq -n --arg units "$WORKER_UNITS" '{"commands": ["systemctl stop " + $units + " 2>/dev/null || true; pkill -f '\\''ares orchestrator'\\'' 2>/dev/null || true; echo Stopped all ares workers and orchestrator"]}' > "$PARAMS_FILE"
 
         CMD_ID=$(aws ssm send-command \
           --profile "{{.EC2_PROFILE}}" \
@@ -1007,7 +1001,6 @@ tasks:
           ENV_FILE_CMD="$ENV_FILE_CMD; echo 'OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=${OTEL_TRACES_ENDPOINT}' >> /etc/ares/env"
           ENV_FILE_CMD="$ENV_FILE_CMD; echo 'OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf' >> /etc/ares/env"
           ENV_FILE_CMD="$ENV_FILE_CMD; echo 'OTEL_EXPORTER_OTLP_HEADERS=X-Api-Key=${DREADNODE_API_KEY}' >> /etc/ares/env"
-          ENV_FILE_CMD="$ENV_FILE_CMD; echo 'OTEL_RESOURCE_ATTRIBUTES=deployment.environment=staging,attack.team=red' >> /etc/ares/env"
         fi
         ENV_FILE_CMD="$ENV_FILE_CMD; chmod 600 /etc/ares/env; echo Wrote /etc/ares/env"
         # Restart workers so they pick up the new env file
@@ -1031,12 +1024,10 @@ tasks:
         export ARES_TOOL_DISPATCH=local
         export ARES_BLUE_ENABLED=1
         export ARES_DEPLOYMENT='{{.EC2_DEPLOYMENT}}'
-        if [ -n '${DREADNODE_API_KEY}' ]; then
-          export OTEL_EXPORTER_OTLP_TRACES_ENDPOINT='${OTEL_TRACES_ENDPOINT}'
-          export OTEL_EXPORTER_OTLP_PROTOCOL='http/protobuf'
-          export OTEL_EXPORTER_OTLP_HEADERS='X-Api-Key=${DREADNODE_API_KEY}'
-          export OTEL_RESOURCE_ATTRIBUTES='deployment.environment=staging,attack.team=red'
-        fi
+        export OTEL_EXPORTER_OTLP_TRACES_ENDPOINT='${OTEL_TRACES_ENDPOINT}'
+        export OTEL_EXPORTER_OTLP_PROTOCOL='http/protobuf'
+        export OTEL_EXPORTER_OTLP_HEADERS='X-Api-Key=${DREADNODE_API_KEY}'
+        export OTEL_RESOURCE_ATTRIBUTES='deployment.environment=staging,attack.team=red'
         export ARES_OPERATION_ID='${PAYLOAD}'
         mkdir -p {{.ARES_LOG_DIR}}
         nohup /usr/local/bin/ares orchestrator >{{.ARES_LOG_DIR}}/orchestrator.log 2>&1 &

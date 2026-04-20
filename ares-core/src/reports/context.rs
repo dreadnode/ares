@@ -393,7 +393,7 @@ mod tests {
         let long_hash = "a".repeat(200);
         let hash = Hash {
             id: String::new(),
-            username: "jon.snow".to_string(),
+            username: "john.smith".to_string(),
             hash_value: long_hash.clone(),
             hash_type: "Kerberoast".to_string(),
             domain: "contoso.local".to_string(),
@@ -462,10 +462,10 @@ mod tests {
     #[test]
     fn test_build_vuln_ctx_details_list() {
         let mut details = HashMap::new();
-        details.insert("account".to_string(), serde_json::json!("jon.snow"));
+        details.insert("account".to_string(), serde_json::json!("john.smith"));
         details.insert("domain".to_string(), serde_json::json!("contoso.local"));
         let vuln = VulnerabilityInfo {
-            vuln_id: "cd_jon".to_string(),
+            vuln_id: "cd_john".to_string(),
             vuln_type: "constrained_delegation".to_string(),
             target: "192.168.58.10".to_string(),
             discovered_by: "recon".to_string(),
@@ -475,9 +475,9 @@ mod tests {
             priority: 8,
         };
         let exploited = HashSet::new();
-        let ctx = build_vuln_ctx("cd_jon", &vuln, &exploited);
+        let ctx = build_vuln_ctx("cd_john", &vuln, &exploited);
         assert!(ctx.details_list.len() >= 2);
-        assert!(ctx.details_list.iter().any(|d| d.contains("jon.snow")));
+        assert!(ctx.details_list.iter().any(|d| d.contains("john.smith")));
         assert!(ctx.details_list.iter().any(|d| d.contains("contoso.local")));
     }
 

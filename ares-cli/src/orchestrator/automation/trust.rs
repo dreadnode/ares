@@ -385,9 +385,9 @@ pub async fn auto_trust_follow(dispatcher: Arc<Dispatcher>, mut shutdown: watch:
             if state.has_domain_admin && !state.trusted_domains.is_empty() {
                 // Collect trust work with per-trust source domain:
                 // use a dominated domain that has a known DC (excluding the trust target).
-                // IMPORTANT: prefer the forest root DC — trust accounts (e.g. ESSOS$)
+                // IMPORTANT: prefer the forest root DC — trust accounts (e.g. FOREIGNDOMAIN$)
                 // live on the forest root DC, not child domain DCs. A secretsdump with
-                // -just-dc-user ESSOS$ against a child DC returns nothing.
+                // -just-dc-user FOREIGNDOMAIN$ against a child DC returns nothing.
                 let extract_work: Vec<(String, String, String, String, String)> = state
                     .trusted_domains
                     .values()

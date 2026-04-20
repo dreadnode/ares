@@ -29,7 +29,7 @@ ansible/                            Ansible collection (dreadnode.nimbus_range v
       privesc.yml                   Privesc agent (certipy, krbrelayx, potato, nopac)
       lateral_movement.yml          Lateral agent (evil-winrm, xfreerdp, pth-*)
       coercion.yml                  Coercion agent (responder, mitm6, ntlmrelayx)
-      goad_attack_box.yml           All-in-one GOAD attack workstation
+      goad_attack_box.yml           All-in-one attack workstation
     linux/
       attacker_setup.yml            Linux attacker box (SSM + CloudWatch + Fluent Bit)
       sliver.yml                    Sliver C2 server setup
@@ -138,7 +138,7 @@ GITHUB_TOKEN=$(gh auth token); warpgate build \
 The `GITHUB_TOKEN` is required because the build clones private repos
 (`dreadnode/ansible-collection-nimbus_range` and `dreadnode/ares`) into the
 image. The resulting AMI is tagged `ares-golden-image-<timestamp>` and can be
-used to launch attack boxes for GOAD lab engagements.
+used to launch attack boxes for lab engagements.
 
 Each template's `warpgate.yaml` references:
 

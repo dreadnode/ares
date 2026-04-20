@@ -199,10 +199,10 @@ DC01$        Computer     Unconstrained   N/A";
         assert_eq!(extract_delegation_account(""), "");
     }
 
-    /// Test with real GOAD lab output format including "SPN Exists" column
-    /// and multi-word DelegationType like "Constrained w/ Protocol Transition".
+    /// Test with "SPN Exists" column and multi-word DelegationType
+    /// like "Constrained w/ Protocol Transition".
     #[test]
-    fn test_parse_delegation_goad_format() {
+    fn test_parse_delegation_extended_format() {
         let output = "\
 Impacket v0.13.0.dev0+20251022.125034.d843881f - Copyright Fortra, LLC and its affiliated companies
 

@@ -143,7 +143,7 @@ Then exec into the pod to run operations:
 kubectl exec -it -n attack-simulation deploy/ares-rust-orchestrator -- bash
 
 # Run a multi-agent operation
-ares orchestrator multi-agent sevenkingdoms.local "192.168.56.10,192.168.56.11"
+ares orchestrator multi-agent contoso.local "192.168.58.10,192.168.58.11"
 ```
 
 The pod has the following environment variables pre-configured:

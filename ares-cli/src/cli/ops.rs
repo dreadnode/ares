@@ -186,7 +186,7 @@ pub(crate) enum OpsCommands {
         /// Trust direction: inbound, outbound, bidirectional
         #[arg(long, default_value = "bidirectional")]
         direction: String,
-        /// NetBIOS / flat name (e.g., ESSOS)
+        /// NetBIOS / flat name of the trusted domain
         #[arg(long, default_value = "")]
         flat_name: String,
         /// Whether SID filtering is active

@@ -339,7 +339,7 @@ fn test_sanitize_then_dedup_collapses_variants() {
 
 #[test]
 fn test_sanitize_keeps_password_equals_username() {
-    // password == username is valid (e.g. jdoe:jdoe in GOAD)
+    // password == username is valid (e.g. jdoe:jdoe)
     let mut creds = vec![
         make_cred("contoso.local", "admin", "admin"),
         make_cred("contoso.local", "user1", "DifferentPass"),

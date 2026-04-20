@@ -119,13 +119,13 @@ Use these exact LogQL queries. They are optimized for the Loki pipeline and test
    - These are user accounts performing domain replication = always malicious
    - Record as T1003.006, pyramid level 6 (TTP), severity CRITICAL
 2. If Query 1 returns empty but Query 2 returns results → **normal AD replication** (confidence 0.1)
-   - All replication is from machine accounts (e.g., `KINGSLANDING$`, `DC01$`) = legitimate DCs
+   - All replication is from machine accounts (e.g., `DC01$`, `DC02$`) = legitimate DCs
    - Do NOT report as DCSync. Record as "normal replication observed, no attack confirmed"
 3. If both queries return empty → no replication events in time window
 
 **How to tell machine accounts from user accounts in results:**
-- Machine accounts: `SubjectUserName` ends with `$` (e.g., `KINGSLANDING$`, `WINTERFELL$`, `GUARDIAN-APP$`)
-- User accounts: no `$` suffix (e.g., `administrator`, `samwell.tarly`, `jon.snow`)
+- Machine accounts: `SubjectUserName` ends with `$` (e.g., `DC01$`, `FILESERVER$`, `APP-SERVER$`)
+- User accounts: no `$` suffix (e.g., `administrator`, `admin`, `svc_sql`)
 - GUIDs: `1131f6aa` = DS-Replication-Get-Changes, `1131f6ad` = DS-Replication-Get-Changes-All
 
 ### Kerberoasting Detection (T1558.003) — Event 4769
