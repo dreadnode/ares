@@ -181,4 +181,10 @@ mod tests {
         assert_eq!(KerberosHashType::TGS, KerberosHashType::TGS);
         assert_ne!(KerberosHashType::TGS, KerberosHashType::AsRep);
     }
+
+    #[test]
+    fn test_parse_delegation_type_error_display() {
+        let err = ParseDelegationTypeError("bogus".to_string());
+        assert_eq!(err.to_string(), "unknown delegation type: bogus");
+    }
 }

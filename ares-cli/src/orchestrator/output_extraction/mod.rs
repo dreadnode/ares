@@ -158,3 +158,93 @@ pub(crate) fn make_credential(
         attack_step: 0,
     }
 }
+
+#[cfg(test)]
+mod unit_tests {
+    use super::*;
+
+    #[test]
+    fn is_valid_credential_accepts_normal() {
+        assert!(is_valid_credential("alice", "P@ssw0rd!"));
+    }
+
+    #[test]
+    fn is_valid_credential_rejects_empty_user() {
+        assert!(!is_valid_credential("", "P@ssw0rd!"));
+    }
+
+    #[test]
+    fn is_valid_credential_rejects_empty_pass() {
+        assert!(!is_valid_credential("alice", ""));
+    }
+
+    #[test]
+    fn is_valid_credential_rejects_path_in_user() {
+        assert!(!is_valid_credential("alice/bob", "P@ssw0rd!"));
+    }
+
+    #[test]
+    fn is_valid_credential_rejects_txt_suffix_pass() {
+        assert!(!is_valid_credential("alice", "users.txt"));
+    }
+
+    #[test]
+    fn is_valid_credential_rejects_none_user() {
+        assert!(!is_valid_credential("none", "P@ssw0rd!"));
+        assert!(!is_valid_credential("(none)", "P@ssw0rd!"));
+    }
+
+    #[test]
+    fn is_valid_credential_rejects_short_pass() {
+        assert!(!is_valid_credential("alice", "ab"));
+    }
+
+    #[test]
+    fn is_valid_credential_rejects_long_pass() {
+        let long = "a".repeat(129);
+        assert!(!is_valid_credential("alice", &long));
+    }
+
+    #[test]
+    fn is_valid_credential_rejects_hash_body_pass() {
+        // >40 chars, all hex+$ → hash fragment
+        let hash = "aabbccddeeff00112233445566778899aabbccdd$";
+        assert!(!is_valid_credential("alice", hash));
+    }
+
+    #[test]
+    fn is_valid_credential_rejects_evil_machine_account() {
+        assert!(!is_valid_credential("EVIL123$", "P@ssw0rd!"));
+    }
+
+    #[test]
+    fn is_valid_credential_rejects_noise_passwords() {
+        for pw in &["(null)", "*blank*", "<blank>", "password", "none", "fail"] {
+            assert!(!is_valid_credential("alice", pw), "should reject: {pw}");
+        }
+    }
+
+    #[test]
+    fn strip_ansi_removes_color_codes() {
+        let input = "\x1b[32mGreen\x1b[0m text";
+        assert_eq!(strip_ansi(input), "Green text");
+    }
+
+    #[test]
+    fn strip_ansi_no_codes_unchanged() {
+        let input = "plain text";
+        assert_eq!(strip_ansi(input), "plain text");
+    }
+
+    #[test]
+    fn text_extractions_is_empty_default() {
+        let e = TextExtractions::default();
+        assert!(e.is_empty());
+    }
+
+    #[test]
+    fn extract_from_output_text_empty() {
+        let result = extract_from_output_text("", "corp.local");
+        assert!(result.is_empty());
+    }
+}

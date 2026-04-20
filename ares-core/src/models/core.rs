@@ -197,6 +197,69 @@ mod tests {
         let host = make_host("DC01.CONTOSO.LOCAL", vec![], vec![]);
         assert!(host.detect_dc());
     }
+
+    #[test]
+    fn test_detect_dc_by_kerberos_service_name() {
+        let host = make_host("server", vec!["kerberos"], vec![]);
+        assert!(host.detect_dc());
+    }
+
+    #[test]
+    fn test_detect_dc_by_ldap_service_name() {
+        let host = make_host("server", vec!["ldap"], vec![]);
+        assert!(host.detect_dc());
+    }
+
+    #[test]
+    fn test_trust_info_is_parent_child() {
+        let t = TrustInfo {
+            domain: "child.corp.local".to_string(),
+            flat_name: "CHILD".to_string(),
+            direction: "bidirectional".to_string(),
+            trust_type: "parent_child".to_string(),
+            sid_filtering: false,
+        };
+        assert!(t.is_parent_child());
+        assert!(!t.is_cross_forest());
+    }
+
+    #[test]
+    fn test_trust_info_is_cross_forest() {
+        let t = TrustInfo {
+            domain: "fabrikam.local".to_string(),
+            flat_name: "FABRIKAM".to_string(),
+            direction: "outbound".to_string(),
+            trust_type: "forest".to_string(),
+            sid_filtering: true,
+        };
+        assert!(t.is_cross_forest());
+        assert!(!t.is_parent_child());
+    }
+
+    #[test]
+    fn test_trust_info_external_is_cross_forest() {
+        let t = TrustInfo {
+            domain: "other.local".to_string(),
+            flat_name: "OTHER".to_string(),
+            direction: "inbound".to_string(),
+            trust_type: "external".to_string(),
+            sid_filtering: false,
+        };
+        assert!(t.is_cross_forest());
+    }
+
+    #[test]
+    fn test_trust_info_unknown_type_not_cross_forest() {
+        let t = TrustInfo {
+            domain: "x.local".to_string(),
+            flat_name: String::new(),
+            direction: String::new(),
+            trust_type: "unknown".to_string(),
+            sid_filtering: false,
+        };
+        assert!(!t.is_cross_forest());
+        assert!(!t.is_parent_child());
+    }
 }
 
 /// Trust relationship metadata for an AD domain trust.

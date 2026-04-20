@@ -306,3 +306,74 @@ pub fn extract_cracked_passwords(output: &str, default_domain: &str) -> Vec<Cred
 
     credentials
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extract_hashes_ntlm_plain() {
+        let output = "Administrator:500:aad3b435b51404eeaad3b435b51404ee:31d6cfe0d16ae931b73c59d7e0c089c0:::";
+        let hashes = extract_hashes(output, "CORP");
+        assert_eq!(hashes.len(), 1);
+        assert_eq!(hashes[0].username, "Administrator");
+        assert_eq!(hashes[0].hash_type, "ntlm");
+        assert_eq!(hashes[0].domain, "CORP");
+    }
+
+    #[test]
+    fn extract_hashes_ntlm_with_domain() {
+        let output =
+            "CORP\\jdoe:1001:aad3b435b51404eeaad3b435b51404ee:31d6cfe0d16ae931b73c59d7e0c089c0:::";
+        let hashes = extract_hashes(output, "DEFAULT");
+        assert_eq!(hashes.len(), 1);
+        assert_eq!(hashes[0].username, "jdoe");
+        assert_eq!(hashes[0].domain, "CORP");
+    }
+
+    #[test]
+    fn extract_hashes_tgs_kerberoast() {
+        let output = "$krb5tgs$23$*svc_sql$CONTOSO.LOCAL$MSSQLSvc/db01*$aabb$ccdd";
+        let hashes = extract_hashes(output, "CONTOSO.LOCAL");
+        assert_eq!(hashes.len(), 1);
+        assert_eq!(hashes[0].hash_type, "kerberoast");
+        assert_eq!(hashes[0].username, "svc_sql");
+    }
+
+    #[test]
+    fn extract_hashes_asrep() {
+        let output = "$krb5asrep$23$jdoe@CORP.LOCAL:aabbccddeeff00112233445566778899";
+        let hashes = extract_hashes(output, "CORP.LOCAL");
+        assert_eq!(hashes.len(), 1);
+        assert_eq!(hashes[0].hash_type, "asrep");
+        assert_eq!(hashes[0].username, "jdoe");
+    }
+
+    #[test]
+    fn extract_hashes_dedup_same_user_domain() {
+        let line = "Administrator:500:aad3b435b51404eeaad3b435b51404ee:31d6cfe0d16ae931b73c59d7e0c089c0:::";
+        let output = format!("{line}\n{line}");
+        let hashes = extract_hashes(&output, "CORP");
+        assert_eq!(hashes.len(), 1);
+    }
+
+    #[test]
+    fn extract_hashes_empty_output() {
+        assert!(extract_hashes("", "CORP").is_empty());
+    }
+
+    #[test]
+    fn extract_cracked_passwords_hashcat_tgs() {
+        let output = "$krb5tgs$23$*svc_sql$CORP.LOCAL$MSSQLSvc/db01*$aabb$ccdd:Summer2024!";
+        let creds = extract_cracked_passwords(output, "CORP.LOCAL");
+        assert_eq!(creds.len(), 1);
+        assert_eq!(creds[0].username, "svc_sql");
+        assert_eq!(creds[0].password, "Summer2024!");
+        assert_eq!(creds[0].source, "cracked:hashcat");
+    }
+
+    #[test]
+    fn extract_cracked_passwords_empty() {
+        assert!(extract_cracked_passwords("", "CORP").is_empty());
+    }
+}

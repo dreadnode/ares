@@ -146,3 +146,74 @@ pub fn extract_users(output: &str, default_domain: &str) -> Vec<User> {
 
     users
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn is_valid_extracted_user_accepts_normal() {
+        assert!(is_valid_extracted_user("alice", "corp.local"));
+    }
+
+    #[test]
+    fn is_valid_extracted_user_rejects_machine_account() {
+        assert!(!is_valid_extracted_user("DC01$", "corp.local"));
+    }
+
+    #[test]
+    fn is_valid_extracted_user_rejects_empty() {
+        assert!(!is_valid_extracted_user("", "corp.local"));
+    }
+
+    #[test]
+    fn is_valid_extracted_user_rejects_single_char() {
+        assert!(!is_valid_extracted_user("a", "corp.local"));
+    }
+
+    #[test]
+    fn is_valid_extracted_user_rejects_noise_names() {
+        for name in &["anonymous", "none", "null", "unknown", "local"] {
+            assert!(
+                !is_valid_extracted_user(name, "corp.local"),
+                "should reject: {name}"
+            );
+        }
+    }
+
+    #[test]
+    fn is_valid_extracted_user_rejects_underscore_domain() {
+        assert!(!is_valid_extracted_user("alice", "_corp.local"));
+    }
+
+    #[test]
+    fn is_valid_extracted_user_rejects_long_netbios() {
+        // NetBIOS names > 15 chars without a dot are invalid
+        assert!(!is_valid_extracted_user("alice", "TOOLONGNETBIOSNAME"));
+    }
+
+    #[test]
+    fn extract_users_domain_backslash() {
+        let users = extract_users("CORP\\alice (SidTypeUser)", "corp.local");
+        assert_eq!(users.len(), 1);
+        assert_eq!(users[0].username, "alice");
+        assert_eq!(users[0].domain, "CORP");
+    }
+
+    #[test]
+    fn extract_users_upn_format() {
+        let users = extract_users("bob@corp.local", "corp.local");
+        assert!(users.iter().any(|u| u.username == "bob"));
+    }
+
+    #[test]
+    fn extract_users_skips_machine_accounts() {
+        let users = extract_users("CORP\\DC01$", "corp.local");
+        assert!(users.is_empty());
+    }
+
+    #[test]
+    fn extract_users_empty_output() {
+        assert!(extract_users("", "corp.local").is_empty());
+    }
+}

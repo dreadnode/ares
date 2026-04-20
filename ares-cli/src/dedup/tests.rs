@@ -351,3 +351,39 @@ fn test_sanitize_keeps_password_equals_username() {
     assert_eq!(creds[0].password, "admin");
     assert_eq!(creds[1].username, "user1");
 }
+
+#[test]
+fn strip_trailing_dot_removes_dot() {
+    use super::strip_trailing_dot;
+    assert_eq!(strip_trailing_dot("contoso.local."), "contoso.local");
+    assert_eq!(strip_trailing_dot("contoso.local"), "contoso.local");
+    assert_eq!(strip_trailing_dot(""), "");
+    assert_eq!(strip_trailing_dot("."), "");
+}
+
+#[test]
+fn strip_ansi_removes_escape_sequences() {
+    use super::credentials::strip_ansi;
+    let input = "\x1b[31mred text\x1b[0m";
+    assert_eq!(strip_ansi(input), "red text");
+    assert_eq!(strip_ansi("plain"), "plain");
+    assert_eq!(strip_ansi(""), "");
+}
+
+#[test]
+fn dedup_credentials_skips_empty_password() {
+    let creds = vec![
+        make_cred("contoso.local", "admin", ""),
+        make_cred("contoso.local", "admin", "P@ss1"),
+    ];
+    let deduped = dedup_credentials(&creds);
+    assert_eq!(deduped.len(), 1);
+    assert_eq!(deduped[0].password, "P@ss1");
+}
+
+#[test]
+fn dedup_credentials_normalizes_domain_case() {
+    let creds = vec![make_cred("CONTOSO.LOCAL", "admin", "P@ss1")];
+    let deduped = dedup_credentials(&creds);
+    assert_eq!(deduped[0].domain, "contoso.local");
+}

@@ -178,4 +178,44 @@ mod tests {
 
     #[cfg(feature = "blue")]
     use chrono::Datelike;
+
+    #[test]
+    fn format_number_small() {
+        assert_eq!(format_number(0), "0");
+        assert_eq!(format_number(999), "999");
+    }
+
+    #[test]
+    fn format_number_thousands() {
+        assert_eq!(format_number(1000), "1,000");
+        assert_eq!(format_number(1234567), "1,234,567");
+    }
+
+    #[test]
+    fn format_number_millions() {
+        assert_eq!(format_number(1_000_000), "1,000,000");
+        assert_eq!(format_number(12_345_678), "12,345,678");
+    }
+
+    #[test]
+    fn format_duration_boundary_59s() {
+        assert_eq!(format_duration(59), "59s");
+    }
+
+    #[test]
+    fn format_duration_boundary_3600s() {
+        assert_eq!(format_duration(3600), "1h 0m 0s");
+    }
+
+    #[test]
+    fn truncate_str_unicode() {
+        // Unicode chars should count as single chars
+        let s = "héllo";
+        assert_eq!(truncate_str(s, 3), "hél...");
+    }
+
+    #[test]
+    fn truncate_str_empty() {
+        assert_eq!(truncate_str("", 5), "");
+    }
 }
