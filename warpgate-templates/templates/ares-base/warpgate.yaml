@@ -46,6 +46,7 @@ provisioners:
         - python3.13 -m pip install --break-system-packages --no-cache-dir uv
         - python3.13 -m pip install --break-system-packages cffi cryptography
         - python3.13 -m pip install --break-system-packages ansible-core
+        - apt-get update && apt-get install -y python3-dev || true
     - type: ansible
       only:
         - docker.arm64
