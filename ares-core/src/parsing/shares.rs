@@ -108,4 +108,39 @@ mod tests {
     fn test_extract_shares_empty() {
         assert!(extract_shares("").is_empty());
     }
+
+    #[test]
+    fn extract_shares_no_access_permission() {
+        let output = "SMB  192.168.58.10  445  DC01  SHARE1  NO ACCESS  Some comment\n";
+        let shares = extract_shares(output);
+        assert_eq!(shares.len(), 1);
+        assert_eq!(shares[0].permissions, "NO ACCESS");
+    }
+
+    #[test]
+    fn extract_shares_write_only() {
+        let output = "SMB  192.168.58.10  445  DC01  UPLOADS  WRITE  Upload folder\n";
+        let shares = extract_shares(output);
+        assert_eq!(shares.len(), 1);
+        assert_eq!(shares[0].name, "UPLOADS");
+        assert_eq!(shares[0].permissions, "WRITE");
+    }
+
+    #[test]
+    fn extract_shares_skips_status_markers() {
+        let output = "SMB  192.168.58.10  445  DC01  [+] Authenticated successfully\n";
+        assert!(extract_shares(output).is_empty());
+    }
+
+    #[test]
+    fn extract_shares_skips_minus_markers() {
+        let output = "SMB  192.168.58.10  445  DC01  [-] Auth failed\n";
+        assert!(extract_shares(output).is_empty());
+    }
+
+    #[test]
+    fn extract_shares_non_smb_lines_ignored() {
+        let output = "random text\nnot SMB\n";
+        assert!(extract_shares(output).is_empty());
+    }
 }

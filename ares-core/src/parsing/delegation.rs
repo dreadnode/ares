@@ -194,4 +194,42 @@ web_svc         Person        Unconstrained      N/A
         );
         assert_eq!(delegations[0].target_spn, None);
     }
+
+    #[test]
+    fn extract_delegations_unknown_type_skipped() {
+        let output = r#"AccountName    AccountType  DelegationType   DelegationRightsTo
+-----------    -----------  ---------------  ------------------
+svc_x          Person       SomethingElse    cifs/dc01.contoso.local
+"#;
+        let delegations = extract_delegations(output);
+        assert!(delegations.is_empty());
+    }
+
+    #[test]
+    fn extract_delegations_short_line_fallback() {
+        let output = r#"AccountName AccountType DelegationType DelegationRightsTo
+----------- ----------- -------------- ------------------
+svc short Constrained target
+"#;
+        let delegations = extract_delegations(output);
+        // Should parse via whitespace splitting without panicking
+        assert_eq!(delegations.len(), 1);
+        assert_eq!(delegations[0].account, "svc");
+    }
+
+    #[test]
+    fn extract_delegations_no_header() {
+        let output = "svc_sql  Person  Constrained  cifs/dc01.contoso.local\n";
+        let delegations = extract_delegations(output);
+        assert!(delegations.is_empty());
+    }
+
+    #[test]
+    fn extract_delegations_only_separator() {
+        let output = r#"AccountName    AccountType  DelegationType   DelegationRightsTo
+------  ------  ------  ------
+"#;
+        let delegations = extract_delegations(output);
+        assert!(delegations.is_empty());
+    }
 }

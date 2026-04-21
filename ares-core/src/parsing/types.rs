@@ -187,4 +187,10 @@ mod tests {
         let err = ParseDelegationTypeError("bogus".to_string());
         assert_eq!(err.to_string(), "unknown delegation type: bogus");
     }
+
+    #[test]
+    fn test_delegation_type_constrained_lowercase() {
+        let dt: DelegationType = "constrained delegation".parse().unwrap();
+        assert_eq!(dt, DelegationType::Constrained);
+    }
 }

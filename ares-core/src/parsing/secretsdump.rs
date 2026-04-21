@@ -167,4 +167,47 @@ DC01$:1000:aad3b435b51404eeaad3b435b51404ee:7c4f7e73b23d56a3c48c0c8c1e4b8a6f:::
         assert_eq!(hashes[0].domain, "");
         assert_eq!(hashes[0].username, "localuser");
     }
+
+    #[test]
+    fn parse_secretsdump_all_empty_hashes_skipped() {
+        let output = "CONTOSO\\svc_backup:1100:aad3b435b51404eeaad3b435b51404ee:31d6cfe0d16ae931b73c59d7e0c089c0:::\nCONTOSO\\svc_web:1101:aad3b435b51404eeaad3b435b51404ee:31d6cfe0d16ae931b73c59d7e0c089c0:::\n";
+        assert!(parse_secretsdump(output).is_empty());
+    }
+
+    #[test]
+    fn parse_secretsdump_malformed_rid() {
+        // RID is not a number — should be skipped
+        let output = "CONTOSO\\svc_sql:abc:aad3b435b51404eeaad3b435b51404ee:abcdef0123456789abcdef0123456789:::\n";
+        assert!(parse_secretsdump(output).is_empty());
+    }
+
+    #[test]
+    fn parse_secretsdump_uppercase_hashes_lowered() {
+        let output = "CONTOSO\\Administrator:500:AAD3B435B51404EEAAD3B435B51404EE:ABCDEF0123456789ABCDEF0123456789:::\n";
+        let hashes = parse_secretsdump(output);
+        assert_eq!(hashes.len(), 1);
+        assert_eq!(hashes[0].nt_hash, "abcdef0123456789abcdef0123456789");
+        assert_eq!(hashes[0].lm_hash, "aad3b435b51404eeaad3b435b51404ee");
+    }
+
+    #[test]
+    fn parse_secretsdump_whitespace_only() {
+        assert!(parse_secretsdump("   \n  \n").is_empty());
+    }
+
+    #[test]
+    fn parse_secretsdump_whitespace_lines_with_valid_entry() {
+        let output = "   \n\n  \nCONTOSO\\Administrator:500:aad3b435b51404eeaad3b435b51404ee:209c6174da490caeb422f3fa5a7ae634:::\n";
+        let hashes = parse_secretsdump(output);
+        assert_eq!(hashes.len(), 1);
+        assert_eq!(hashes[0].username, "Administrator");
+    }
+
+    #[test]
+    fn parse_secretsdump_krbtgt_by_rid_not_name() {
+        let output = "CONTOSO\\svc_random:502:aad3b435b51404eeaad3b435b51404ee:abcdef0123456789abcdef0123456789:::\n";
+        let hashes = parse_secretsdump(output);
+        assert_eq!(hashes.len(), 1);
+        assert!(hashes[0].is_krbtgt);
+    }
 }

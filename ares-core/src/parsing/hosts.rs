@@ -122,4 +122,44 @@ mod tests {
         assert_eq!(hosts[0].os, "Windows Server 2022");
         assert_eq!(hosts[0].domain, "contoso.local");
     }
+
+    #[test]
+    fn extract_hosts_skips_blank_lines() {
+        let output = "\n\n\n";
+        assert!(extract_hosts(output).is_empty());
+    }
+
+    #[test]
+    fn extract_hosts_multiple_same_ip() {
+        let output = "SMB  192.168.58.10  445  SRV01  [*]  Windows 10 (name:SRV01) (domain:contoso.local) (signing:True)\nSMB  192.168.58.10  445  SRV01  [*]  Windows 10 (name:SRV01) (domain:contoso.local) (signing:True)\n";
+        let hosts = extract_hosts(output);
+        // Function does not deduplicate — both entries returned
+        assert_eq!(hosts.len(), 2);
+        assert_eq!(hosts[0].ip, "192.168.58.10");
+    }
+
+    #[test]
+    fn extract_hosts_no_domain_field() {
+        let output = "SMB  192.168.58.20  445  STANDALONE  [*]  Windows 10 (name:STANDALONE)\n";
+        let hosts = extract_hosts(output);
+        assert_eq!(hosts.len(), 1);
+        assert_eq!(hosts[0].hostname, "STANDALONE");
+        assert_eq!(hosts[0].domain, "");
+    }
+
+    #[test]
+    fn extract_hosts_mixed_banner_and_simple() {
+        let output = "\
+SMB  192.168.58.10  445  DC01  [*]  Windows Server 2019 (name:DC01) (domain:contoso.local)\n\
+SMB  192.168.58.11  445  SRV01  [*]  Windows Server 2016 (name:SRV01) (domain:contoso.local)\n\
+SMB  192.168.58.12  445  WS01  some other data\n";
+        let hosts = extract_hosts(output);
+        assert_eq!(hosts.len(), 3);
+        assert_eq!(hosts[0].ip, "192.168.58.10");
+        assert_eq!(hosts[1].ip, "192.168.58.11");
+        assert_eq!(hosts[2].ip, "192.168.58.12");
+        // Third entry falls back to simple pattern
+        assert_eq!(hosts[2].hostname, "WS01");
+        assert_eq!(hosts[2].domain, "");
+    }
 }
