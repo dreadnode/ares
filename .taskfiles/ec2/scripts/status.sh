@@ -7,10 +7,10 @@ echo ""
 
 echo "=== Workers ==="
 for role in recon credential_access cracker acl privesc lateral coercion; do
-	st=$(systemctl is-active ares-worker@${role} 2>/dev/null || echo dead)
+	st=$(systemctl is-active ares@${role} 2>/dev/null || echo dead)
 	pid=""
 	if [ "$st" = "active" ]; then
-		pid=$(systemctl show ares-worker@${role} --property=MainPID --value 2>/dev/null || echo "?")
+		pid=$(systemctl show ares@${role} --property=MainPID --value 2>/dev/null || echo "?")
 	fi
 	printf "  %-20s %-8s %s\n" "$role" "$st" "${pid:+PID: $pid}"
 done

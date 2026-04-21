@@ -1,6 +1,6 @@
-# Ares Rust Blue Threat Hunter Agent Warp Gate Template
+# Ares Blue Threat Hunter Agent Warp Gate Template
 
-This template builds **Ares Rust Blue Threat Hunter Agent** images using Warp Gate. It supports
+This template builds **Ares Blue Threat Hunter Agent** images using Warp Gate. It supports
 building **Docker images** (for `amd64` and `arm64`). The threat hunter agent performs
 proactive threat detection and investigation using a compiled Rust binary with embedded
 Python and Grafana MCP integration.
@@ -21,7 +21,7 @@ Python and Grafana MCP integration.
 
 The template configuration is managed in `warpgate.yaml`. Key settings include:
 
-- `name`: Template name (`ares-rust-blue-threat-hunter-agent`)
+- `name`: Template name (`ares-blue-threat-hunter-agent`)
 - `base.image`: Base Docker image (`ares-base`)
 - `sources`: Clones the ares repository for Rust compilation
 - `targets`: Defines build targets (container images)
@@ -30,24 +30,24 @@ The template configuration is managed in `warpgate.yaml`. Key settings include:
 
 ## Building Docker Images
 
-This builds **Ares Rust Blue Threat Hunter Agent** Docker images for `amd64` and `arm64`
+This builds **Ares Blue Threat Hunter Agent** Docker images for `amd64` and `arm64`
 architectures, installs Grafana MCP tooling, compiles the Rust worker binary with
 Python bindings, and configures it for threat hunting operations.
 
 **Initialize the template:**
 
 ```bash
-warpgate init ares-rust-blue-threat-hunter-agent
+warpgate init ares-blue-threat-hunter-agent
 ```
 
 **Build Docker images:**
 
 ```bash
-warpgate build ares-rust-blue-threat-hunter-agent --only 'docker.*'
+warpgate build ares-blue-threat-hunter-agent --only 'docker.*'
 ```
 
 After the build, Docker images will be available locally as
-`ares-rust-blue-threat-hunter-agent:latest`.
+`ares-blue-threat-hunter-agent:latest`.
 
 ---
 
@@ -60,11 +60,11 @@ After building the image, you can test it locally:
 docker run -it --rm \
   -e REDIS_URL="redis://localhost:6379" \
   -e ANTHROPIC_API_KEY="your-api-key" \
-  ares-rust-blue-threat-hunter-agent:latest
+  ares-blue-threat-hunter-agent:latest
 
 # Verify installed components
-docker run --rm ares-rust-blue-threat-hunter-agent:latest ares worker --version
-docker run --rm --entrypoint mcp-grafana ares-rust-blue-threat-hunter-agent:latest --version
+docker run --rm ares-blue-threat-hunter-agent:latest ares worker --version
+docker run --rm --entrypoint mcp-grafana ares-blue-threat-hunter-agent:latest --version
 ```
 
 ---

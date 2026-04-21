@@ -3,7 +3,7 @@
 # Alternative to K8s for faster testing iterations.
 #
 # Architecture: single EC2 with Redis + orchestrator + all worker roles.
-# Workers run as systemd template units (ares-worker@{role}).
+# Workers run as systemd template units (ares@{role}).
 # Orchestrator runs per-operation (not a service).
 #
 # Usage:
@@ -544,7 +544,7 @@ tasks:
         # Build systemctl start command for all roles
         WORKER_UNITS=""
         for role in {{.WORKER_ROLES}}; do
-          WORKER_UNITS="$WORKER_UNITS ares-worker@${role}.service"
+          WORKER_UNITS="$WORKER_UNITS ares@${role}.service"
         done
 
         echo -e "{{.INFO}} Starting ares services on $INSTANCE_ID..."
@@ -554,7 +554,7 @@ tasks:
         START_CMD="systemctl start redis-server 2>/dev/null || systemctl start redis; sleep 1; redis-cli ping; "
         START_CMD+="systemctl start $WORKER_UNITS; sleep 2; echo Worker status:; "
         START_CMD+='for role in recon credential_access cracker acl privesc lateral coercion; do '
-        START_CMD+='st=$(systemctl is-active ares-worker@${role} 2>/dev/null || echo dead); '
+        START_CMD+='st=$(systemctl is-active ares@${role} 2>/dev/null || echo dead); '
         START_CMD+='printf "  %-20s %s\n" $role $st; done'
         jq -n --arg cmd "$START_CMD" '{"commands": [$cmd]}' > "$PARAMS_FILE"
 
@@ -619,7 +619,7 @@ tasks:
 
         WORKER_UNITS=""
         for role in {{.WORKER_ROLES}}; do
-          WORKER_UNITS="$WORKER_UNITS ares-worker@${role}.service"
+          WORKER_UNITS="$WORKER_UNITS ares@${role}.service"
         done
 
         echo -e "{{.INFO}} Stopping ares services on $INSTANCE_ID..."
@@ -1042,7 +1042,7 @@ tasks:
         ENV_FILE_CMD="$ENV_FILE_CMD; echo 'OTEL_RESOURCE_ATTRIBUTES=deployment.environment=staging,attack.team=red' >> /etc/ares/env"
         ENV_FILE_CMD="$ENV_FILE_CMD; chmod 600 /etc/ares/env; echo Wrote /etc/ares/env"
         # Restart workers so they pick up the new env file
-        ENV_FILE_CMD="$ENV_FILE_CMD; for role in recon credential_access cracker acl privesc lateral coercion; do systemctl restart ares-worker@\${role} 2>/dev/null || true; done; echo Workers restarted"
+        ENV_FILE_CMD="$ENV_FILE_CMD; for role in recon credential_access cracker acl privesc lateral coercion; do systemctl restart ares@\${role} 2>/dev/null || true; done; echo Workers restarted"
 
         LAUNCH_SCRIPT="#!/bin/bash
         set -e
@@ -1189,14 +1189,14 @@ tasks:
         fi
 
         echo "=== Fixing worker PATH ==="
-        if ! grep -q "^Environment=PATH=" /etc/systemd/system/ares-worker@.service 2>/dev/null; then
-          sed -i '/\[Service\]/a Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/root/.local/bin' /etc/systemd/system/ares-worker@.service
+        if ! grep -q "^Environment=PATH=" /etc/systemd/system/ares@.service 2>/dev/null; then
+          sed -i '/\[Service\]/a Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/root/.local/bin' /etc/systemd/system/ares@.service
           systemctl daemon-reload
         fi
 
         echo "=== Restarting workers ==="
         for role in recon credential_access cracker acl privesc lateral coercion; do
-          systemctl restart ares-worker@$role 2>/dev/null || true
+          systemctl restart ares@$role 2>/dev/null || true
         done
 
         echo "=== Verifying ==="
