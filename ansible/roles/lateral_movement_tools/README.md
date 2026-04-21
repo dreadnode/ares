@@ -40,7 +40,7 @@ Install and configure lateral movement and credential extraction tools for Ares 
 | `lateral_movement_tools_ubuntu_packages.8` | str | <code>rubygems</code> | No description |
 | `lateral_movement_tools_ubuntu_packages.9` | str | <code>libffi-dev</code> | No description |
 | `lateral_movement_tools_ubuntu_packages.10` | str | <code>clang</code> | No description |
-| `lateral_movement_tools_ubuntu_packages.11` | str | <code>freerdp2-x11</code> | No description |
+| `lateral_movement_tools_ubuntu_packages.11` | str | <code>freerdp3-x11</code> | No description |
 | `lateral_movement_tools_ubuntu_packages.12` | str | <code>smbclient</code> | No description |
 | `lateral_movement_tools_ubuntu_packages.13` | str | <code>sshpass</code> | No description |
 | `lateral_movement_tools_ubuntu_packages.14` | str | <code>proxychains4</code> | No description |

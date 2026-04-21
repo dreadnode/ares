@@ -135,12 +135,10 @@
     - not base_pip_supports_break_system_packages
 
 - name: Upgrade pip to latest (CVE fixes)
-  ansible.builtin.pip:
-    name: "pip>=25.3"
-    state: latest
-    executable: "{{ base_pip_executable }}"
-    extra_args: >-
-      {{ '--break-system-packages' if base_pip_break_required else '' }}
+  ansible.builtin.command: >-
+    {{ base_pip_executable }} install --ignore-installed
+    {{ '--break-system-packages' if base_pip_break_required else '' }}
+    'pip>=25.3'
   become: true
   changed_when: false
 
@@ -151,7 +149,7 @@
     executable: "{{ base_pip_executable }}"
     extra_args: >-
       {{ '--break-system-packages' if base_pip_break_required else '' }}
-      {{ '--ignore-installed' if (ansible_facts['distribution'] == 'Kali' or base_pip_break_required) else '' }}
+      {{ '--ignore-installed' if ansible_facts['os_family'] == 'Debian' else '' }}
   become: true
   changed_when: false
 
