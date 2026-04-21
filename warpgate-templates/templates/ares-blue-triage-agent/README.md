@@ -1,6 +1,6 @@
-# Ares Rust Blue Triage Agent Warp Gate Template
+# Ares Blue Triage Agent Warp Gate Template
 
-This template builds **Ares Rust Blue Triage Agent** images using Warp Gate. It supports
+This template builds **Ares Blue Triage Agent** images using Warp Gate. It supports
 building **Docker images** (for `amd64` and `arm64`). The triage agent performs initial
 incident assessment and alerting using a compiled Rust binary with embedded Python and
 Grafana MCP integration.
@@ -21,7 +21,7 @@ Grafana MCP integration.
 
 The template configuration is managed in `warpgate.yaml`. Key settings include:
 
-- `name`: Template name (`ares-rust-blue-triage-agent`)
+- `name`: Template name (`ares-blue-triage-agent`)
 - `base.image`: Base Docker image (`ares-base`)
 - `sources`: Clones the ares repository for Rust compilation
 - `targets`: Defines build targets (container images)
@@ -30,24 +30,24 @@ The template configuration is managed in `warpgate.yaml`. Key settings include:
 
 ## Building Docker Images
 
-This builds **Ares Rust Blue Triage Agent** Docker images for `amd64` and `arm64`
+This builds **Ares Blue Triage Agent** Docker images for `amd64` and `arm64`
 architectures, installs Grafana MCP tooling, compiles the Rust worker binary with
 Python bindings, and configures it for incident triage operations.
 
 **Initialize the template:**
 
 ```bash
-warpgate init ares-rust-blue-triage-agent
+warpgate init ares-blue-triage-agent
 ```
 
 **Build Docker images:**
 
 ```bash
-warpgate build ares-rust-blue-triage-agent --only 'docker.*'
+warpgate build ares-blue-triage-agent --only 'docker.*'
 ```
 
 After the build, Docker images will be available locally as
-`ares-rust-blue-triage-agent:latest`.
+`ares-blue-triage-agent:latest`.
 
 ---
 
@@ -60,11 +60,11 @@ After building the image, you can test it locally:
 docker run -it --rm \
   -e REDIS_URL="redis://localhost:6379" \
   -e ANTHROPIC_API_KEY="your-api-key" \
-  ares-rust-blue-triage-agent:latest
+  ares-blue-triage-agent:latest
 
 # Verify installed components
-docker run --rm ares-rust-blue-triage-agent:latest ares worker --version
-docker run --rm --entrypoint mcp-grafana ares-rust-blue-triage-agent:latest --version
+docker run --rm ares-blue-triage-agent:latest ares worker --version
+docker run --rm --entrypoint mcp-grafana ares-blue-triage-agent:latest --version
 ```
 
 ---

@@ -310,9 +310,9 @@ jobs:
           fi
 
           # GPU chain templates run in a separate dependency chain for faster builds
-          # ares-cracker-base-gpu -> ares-cracker-agent-gpu + ares-rust-cracker-agent-gpu runs independently of the base chain
+          # ares-cracker-base-gpu -> ares-cracker-agent-gpu + ares-cracker-agent-gpu runs independently of the base chain
           GPU_BASE_TEMPLATES_LIST='["ares-cracker-base-gpu"]'
-          GPU_DEPENDENT_TEMPLATES_LIST='["ares-cracker-agent-gpu", "ares-rust-cracker-agent-gpu"]'
+          GPU_DEPENDENT_TEMPLATES_LIST='["ares-cracker-agent-gpu", "ares-cracker-agent-gpu"]'
 
           # Split into base and dependent matrices, excluding GPU chain
           BASE_MATRIX=$(echo "$FULL_MATRIX" | jq --argjson gpu_bases "$GPU_BASE_TEMPLATES_LIST" '{include: [.include[] | select(.is_dependent == false) | select(.name as $n | $gpu_bases | index($n) | not)]}')

@@ -1,6 +1,6 @@
-# Ares Rust Blue Agent Warp Gate Template
+# Ares Blue Agent Warp Gate Template
 
-This template builds **Ares Rust Blue Agent** images using Warp Gate. It supports
+This template builds **Ares Blue Agent** images using Warp Gate. It supports
 building **Docker images** (for `amd64` and `arm64`). The blue team agent performs
 defensive security operations using a compiled Rust binary with embedded Python.
 
@@ -20,7 +20,7 @@ defensive security operations using a compiled Rust binary with embedded Python.
 
 The template configuration is managed in `warpgate.yaml`. Key settings include:
 
-- `name`: Template name (`ares-rust-blue-agent`)
+- `name`: Template name (`ares-blue-agent`)
 - `base.image`: Base Docker image (`ares-base`)
 - `sources`: Clones the ares repository for Rust compilation
 - `targets`: Defines build targets (container images)
@@ -29,24 +29,24 @@ The template configuration is managed in `warpgate.yaml`. Key settings include:
 
 ## Building Docker Images
 
-This builds **Ares Rust Blue Agent** Docker images for `amd64` and `arm64`
+This builds **Ares Blue Agent** Docker images for `amd64` and `arm64`
 architectures, compiles the Rust worker binary with Python bindings,
 and configures it for defensive security operations.
 
 **Initialize the template:**
 
 ```bash
-warpgate init ares-rust-blue-agent
+warpgate init ares-blue-agent
 ```
 
 **Build Docker images:**
 
 ```bash
-warpgate build ares-rust-blue-agent --only 'docker.*'
+warpgate build ares-blue-agent --only 'docker.*'
 ```
 
-After the build, Ares Rust Blue Agent Docker images will be available
-locally as `ares-rust-blue-agent:latest`.
+After the build, Ares Blue Agent Docker images will be available
+locally as `ares-blue-agent:latest`.
 
 ---
 
@@ -59,10 +59,10 @@ After building the image, you can test it locally:
 docker run -it --rm \
   -e REDIS_URL="redis://localhost:6379" \
   -e ANTHROPIC_API_KEY="your-api-key" \
-  ares-rust-blue-agent:latest
+  ares-blue-agent:latest
 
 # Verify the Rust binary is available
-docker run --rm ares-rust-blue-agent:latest ares worker --version
+docker run --rm ares-blue-agent:latest ares worker --version
 ```
 
 ---
@@ -87,7 +87,7 @@ docker run --rm ares-rust-blue-agent:latest ares worker --version
 
 ## Differences from ares-blue-agent (Python)
 
-| Component | ares-blue-agent (Python) | ares-rust-blue-agent |
+| Component | ares-blue-agent (Python) | ares-blue-agent |
 | ----------- | ---------------------- | ------------------ |
 | Entrypoint | `python -m ares --args.multi-agent` | `ares worker` (binary) |
 | Runtime | Python interpreter | Compiled Rust + embedded Python |

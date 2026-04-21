@@ -22,7 +22,7 @@ echo "=== Creating directories ==="
 mkdir -p /var/log/ares /etc/ares
 
 echo "=== Creating systemd worker template unit ==="
-cat >/etc/systemd/system/ares-worker@.service <<'UNIT_EOF'
+cat >/etc/systemd/system/ares@.service <<'UNIT_EOF'
 [Unit]
 Description=Ares Worker (%i)
 After=redis.service

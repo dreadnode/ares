@@ -57,8 +57,8 @@
 
 - name: Install Ares worker systemd template unit
   ansible.builtin.template:
-    src: ares-worker@.service.j2
-    dest: /etc/systemd/system/ares-worker@.service
+    src: ares@.service.j2
+    dest: /etc/systemd/system/ares@.service
     mode: '0644'
   become: true
   when: redis_install_ares_worker_unit
