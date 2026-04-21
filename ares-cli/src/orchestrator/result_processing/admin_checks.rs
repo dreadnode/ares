@@ -217,6 +217,9 @@ pub(crate) async fn detect_and_upgrade_admin_credentials(text: &str, dispatcher:
                             .collect()
                     };
                     for (target_ip, cred) in work {
+                        if !dispatcher.is_technique_allowed("secretsdump") {
+                            break;
+                        }
                         match dispatcher.request_secretsdump(&target_ip, &cred, 1).await {
                             Ok(Some(task_id)) => {
                                 info!(

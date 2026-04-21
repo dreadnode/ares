@@ -151,50 +151,55 @@ pub async fn auto_credential_expansion(
         for item in work {
             let mut any_dispatched = false;
 
-            // 1. Try secretsdump on DCs FIRST — this is the highest-value op
-            // for a new credential. Must run before lateral movement to avoid
-            // burning CredentialInflight slots on lower-value tasks.
+            // 1. Try secretsdump on DCs FIRST (unless strategy excludes it).
+            // Must run before lateral movement to avoid burning
+            // CredentialInflight slots on lower-value tasks.
             // Admin creds get priority 2; non-admin get priority 3 (higher
             // than lateral at 5) since secretsdump is the fastest path to
             // krbtgt → DA → golden ticket.
-            for dc_ip in &item.dc_ips {
-                let sd_dedup = format!(
-                    "{}:{}:{}",
-                    dc_ip,
-                    item.credential.domain.to_lowercase(),
-                    item.credential.username.to_lowercase()
-                );
-                let already_dumped = {
-                    let state = dispatcher.state.read().await;
-                    state.is_processed(DEDUP_SECRETSDUMP, &sd_dedup)
-                };
+            if !dispatcher.is_technique_allowed("secretsdump") {
+                // Skip secretsdump dispatch entirely when strategy excludes it.
+                // Fall through to lateral movement and other expansion paths.
+            } else {
+                for dc_ip in &item.dc_ips {
+                    let sd_dedup = format!(
+                        "{}:{}:{}",
+                        dc_ip,
+                        item.credential.domain.to_lowercase(),
+                        item.credential.username.to_lowercase()
+                    );
+                    let already_dumped = {
+                        let state = dispatcher.state.read().await;
+                        state.is_processed(DEDUP_SECRETSDUMP, &sd_dedup)
+                    };
 
-                if !already_dumped {
-                    let priority = if item.is_admin { 2 } else { 3 };
-                    if let Ok(Some(task_id)) = dispatcher
-                        .request_secretsdump(dc_ip, &item.credential, priority)
-                        .await
-                    {
-                        any_dispatched = true;
-                        debug!(
-                            task_id = %task_id,
-                            dc = %dc_ip,
-                            is_admin = item.is_admin,
-                            "Credential secretsdump dispatched"
-                        );
-
-                        dispatcher
-                            .state
-                            .write()
+                    if !already_dumped {
+                        let priority = if item.is_admin { 2 } else { 3 };
+                        if let Ok(Some(task_id)) = dispatcher
+                            .request_secretsdump(dc_ip, &item.credential, priority)
                             .await
-                            .mark_processed(DEDUP_SECRETSDUMP, sd_dedup.clone());
-                        let _ = dispatcher
-                            .state
-                            .persist_dedup(&dispatcher.queue, DEDUP_SECRETSDUMP, &sd_dedup)
-                            .await;
+                        {
+                            any_dispatched = true;
+                            debug!(
+                                task_id = %task_id,
+                                dc = %dc_ip,
+                                is_admin = item.is_admin,
+                                "Credential secretsdump dispatched"
+                            );
+
+                            dispatcher
+                                .state
+                                .write()
+                                .await
+                                .mark_processed(DEDUP_SECRETSDUMP, sd_dedup.clone());
+                            let _ = dispatcher
+                                .state
+                                .persist_dedup(&dispatcher.queue, DEDUP_SECRETSDUMP, &sd_dedup)
+                                .await;
+                        }
                     }
                 }
-            }
+            } // end else (secretsdump allowed)
 
             // 2. Try lateral movement on non-DC hosts (up to 5 targets).
             // Runs after secretsdump so the high-value op gets credential
@@ -317,43 +322,47 @@ pub async fn auto_credential_expansion(
                 let dc_ips: Vec<String> = state.domain_controllers.values().cloned().collect();
                 drop(state);
 
-                for dc_ip in dc_ips {
-                    let sd_dedup = format!(
-                        "{}:{}:{}",
-                        dc_ip,
-                        item.hash.domain.to_lowercase(),
-                        item.hash.username.to_lowercase()
-                    );
-                    let already = {
-                        let state = dispatcher.state.read().await;
-                        state.is_processed(DEDUP_SECRETSDUMP, &sd_dedup)
-                    };
-                    if !already {
-                        let priority = dispatcher.effective_priority("secretsdump");
-                        if let Ok(Some(task_id)) = dispatcher
-                            .request_secretsdump(&dc_ip, &pth_cred, priority)
-                            .await
-                        {
-                            dc_sd_dispatched = true;
-                            debug!(
-                                task_id = %task_id,
-                                dc = %dc_ip,
-                                username = %item.hash.username,
-                                "Hash-based secretsdump dispatched"
-                            );
-                            dispatcher
-                                .state
-                                .write()
+                if !dispatcher.is_technique_allowed("secretsdump") {
+                    // Strategy excludes secretsdump — skip hash-based expansion too.
+                } else {
+                    for dc_ip in dc_ips {
+                        let sd_dedup = format!(
+                            "{}:{}:{}",
+                            dc_ip,
+                            item.hash.domain.to_lowercase(),
+                            item.hash.username.to_lowercase()
+                        );
+                        let already = {
+                            let state = dispatcher.state.read().await;
+                            state.is_processed(DEDUP_SECRETSDUMP, &sd_dedup)
+                        };
+                        if !already {
+                            let priority = dispatcher.effective_priority("secretsdump");
+                            if let Ok(Some(task_id)) = dispatcher
+                                .request_secretsdump(&dc_ip, &pth_cred, priority)
                                 .await
-                                .mark_processed(DEDUP_SECRETSDUMP, sd_dedup.clone());
-                            let _ = dispatcher
-                                .state
-                                .persist_dedup(&dispatcher.queue, DEDUP_SECRETSDUMP, &sd_dedup)
-                                .await;
+                            {
+                                dc_sd_dispatched = true;
+                                debug!(
+                                    task_id = %task_id,
+                                    dc = %dc_ip,
+                                    username = %item.hash.username,
+                                    "Hash-based secretsdump dispatched"
+                                );
+                                dispatcher
+                                    .state
+                                    .write()
+                                    .await
+                                    .mark_processed(DEDUP_SECRETSDUMP, sd_dedup.clone());
+                                let _ = dispatcher
+                                    .state
+                                    .persist_dedup(&dispatcher.queue, DEDUP_SECRETSDUMP, &sd_dedup)
+                                    .await;
+                            }
                         }
                     }
                 }
-            }
+            } // end else (secretsdump allowed for hash expansion)
 
             // Only mark as fully processed once DC secretsdump has been dispatched.
             // PTH lateral alone is not sufficient — the critical path is hash→DC→krbtgt.
