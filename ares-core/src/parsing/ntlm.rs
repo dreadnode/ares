@@ -241,4 +241,66 @@ mod tests {
         assert!(hashes[1].is_krbtgt);
         assert!(hashes[2].is_machine_account);
     }
+
+    #[test]
+    fn test_extract_ntlm_empty_input() {
+        assert!(extract_ntlm_hashes("").is_empty());
+    }
+
+    #[test]
+    fn test_extract_ntlm_no_match_lines() {
+        let output = "[*] Starting dump\n[*] Done\nrandom text\n";
+        assert!(extract_ntlm_hashes(output).is_empty());
+    }
+
+    #[test]
+    fn test_extract_ntlm_hash_value_format() {
+        let output =
+            "CONTOSO\\svc_sql:1105:aad3b435b51404eeaad3b435b51404ee:a87f3a337d73085c45f9416be5787d86:::\n";
+        let hashes = extract_ntlm_hashes(output);
+        assert_eq!(hashes.len(), 1);
+        assert_eq!(
+            hashes[0].hash_value,
+            "aad3b435b51404eeaad3b435b51404ee:a87f3a337d73085c45f9416be5787d86"
+        );
+    }
+
+    #[test]
+    fn test_extract_ntlm_krbtgt_by_rid() {
+        let output =
+            "CONTOSO\\someuser:502:aad3b435b51404eeaad3b435b51404ee:abcdef0123456789abcdef0123456789:::\n";
+        let hashes = extract_ntlm_hashes(output);
+        assert_eq!(hashes.len(), 1);
+        assert!(hashes[0].is_krbtgt);
+    }
+
+    #[test]
+    fn test_extract_ntlm_krbtgt_by_name() {
+        let output =
+            "CONTOSO\\krbtgt:9999:aad3b435b51404eeaad3b435b51404ee:abcdef0123456789abcdef0123456789:::\n";
+        let hashes = extract_ntlm_hashes(output);
+        assert_eq!(hashes.len(), 1);
+        assert!(hashes[0].is_krbtgt);
+    }
+
+    #[test]
+    fn test_extract_ntlm_uppercase_hashes_lowered() {
+        let output =
+            "CONTOSO\\admin:500:AAD3B435B51404EEAAD3B435B51404EE:ABCDEF0123456789ABCDEF0123456789:::\n";
+        let hashes = extract_ntlm_hashes(output);
+        assert_eq!(hashes.len(), 1);
+        assert_eq!(hashes[0].lm_hash, "aad3b435b51404eeaad3b435b51404ee");
+        assert_eq!(hashes[0].nt_hash, "abcdef0123456789abcdef0123456789");
+    }
+
+    #[test]
+    fn test_extract_ntlm_plain_line_wrapped() {
+        let output =
+            "localuser:1001:aad3b435b51404eeaad3b435b51404ee:a87f3a337d73085c\n45f9416be5787d86\n";
+        let hashes = extract_ntlm_hashes(output);
+        assert_eq!(hashes.len(), 1);
+        assert_eq!(hashes[0].username, "localuser");
+        assert_eq!(hashes[0].domain, "");
+        assert_eq!(hashes[0].nt_hash, "a87f3a337d73085c45f9416be5787d86");
+    }
 }
