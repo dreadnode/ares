@@ -63,8 +63,17 @@ pub fn compute_undominated_forests(
         return Vec::new();
     }
 
+    // Only count a domain as covering a forest root when that domain IS the
+    // forest root.  Dominating a child domain (e.g. north.sevenkingdoms.local)
+    // does NOT mean the forest root (sevenkingdoms.local) is compromised — its
+    // DC has a separate krbtgt.  The child-to-parent escalation (ExtraSid /
+    // trust key) must still happen before we declare the forest dominated.
     let dominated_roots: HashSet<String> = dominated_domains
         .iter()
+        .filter(|d| {
+            let root = forest_root_of(d);
+            root == d.to_lowercase()
+        })
         .map(|d| forest_root_of(d))
         .collect();
 
@@ -609,8 +618,10 @@ mod tests {
     }
 
     #[test]
-    fn test_undominated_child_domain_dominated_covers_forest() {
-        // Dominating north.contoso.local should cover the contoso.local forest root
+    fn test_undominated_child_domain_does_not_cover_forest() {
+        // Dominating a child domain does NOT cover the forest root — the
+        // forest root DC has its own krbtgt and must be secretsdumped via
+        // trust escalation (ExtraSid / trust key).
         let trusted = std::collections::HashMap::new();
         let mut dominated = HashSet::new();
         dominated.insert("north.contoso.local".to_string());
@@ -622,7 +633,24 @@ mod tests {
             &dominated,
             &dcs,
         );
-        // forest_root_of("north.contoso.local") = "contoso.local" → matches target
+        // Child DA does not satisfy the forest root requirement
+        assert_eq!(result, vec!["contoso.local"]);
+    }
+
+    #[test]
+    fn test_undominated_forest_root_dominated_directly() {
+        // Dominating the forest root itself should satisfy the requirement
+        let trusted = std::collections::HashMap::new();
+        let mut dominated = HashSet::new();
+        dominated.insert("contoso.local".to_string());
+        let dcs = std::collections::HashMap::new();
+        let result = compute_undominated_forests(
+            Some("contoso.local"),
+            Some("contoso.local"),
+            &trusted,
+            &dominated,
+            &dcs,
+        );
         assert!(result.is_empty());
     }
 

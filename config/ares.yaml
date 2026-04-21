@@ -14,12 +14,16 @@ operation:
   task_dispatch_delay: 1.0
   rate_limit_backoff: 15.0
   rate_limit_threshold: 2
-  # Stop operation immediately when domain admin is achieved (default: false)
-  # NOTE: stop_on_domain_admin and stop_on_golden_ticket are mutually exclusive
+  # Completion mode (mutually exclusive — enable at most one):
+  #
+  # stop_on_domain_admin: true   — stop immediately on DA (any domain)
+  # stop_on_golden_ticket: true  — stop after golden ticket + all forests dominated
+  #
+  # Default (both false): wait until ALL forest root DCs are secretsdumped.
+  # Child domain DA does NOT count — e.g. north.sevenkingdoms.local krbtgt
+  # does not satisfy sevenkingdoms.local; trust escalation must complete first.
+  # See docs/red.md "Operation Completion" for details.
   # stop_on_domain_admin: true
-  # Stop operation when golden ticket is forged (for child→parent forest escalation)
-  # When true, operation continues past DA to forge golden ticket with ExtraSid
-  # Disabled: default mode waits until ALL forests are dominated
   stop_on_golden_ticket: false
 
 # Agent configurations

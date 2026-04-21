@@ -387,6 +387,81 @@ When krbtgt or Administrator hash is found:
 4. Calls complete_operation() with summary
 ```
 
+## Operation Completion
+
+The orchestrator's completion monitor checks every few seconds whether the
+operation should stop. Three modes control this behavior, configured via
+`config/ares.yaml` under `operation:`. The two flags are **mutually exclusive**
+-- enabling both causes a config validation error.
+
+### Mode 1: Default (both flags false)
+
+```yaml
+operation:
+  # stop_on_domain_admin: false  (default)
+  # stop_on_golden_ticket: false (default)
+```
+
+The operation continues until **every forest root domain** has its `krbtgt`
+NTLM hash obtained via `secretsdump`. This is the most thorough mode and the
+recommended default.
+
+**Important**: dominating a child domain does **not** count as dominating the
+forest root. For example, obtaining `krbtgt` from `north.sevenkingdoms.local`
+(child DC: winterfell) does **not** satisfy the `sevenkingdoms.local` forest
+requirement. The forest root DC (kingslanding) must be separately compromised,
+typically via trust escalation (ExtraSid attack using the trust key from the
+child domain's `secretsdump` output).
+
+The required forest roots are derived from:
+
+- The target domain
+- Cross-forest trust relationships (trust type `forest` or `external`)
+- Domain controllers discovered during recon
+
+### Mode 2: Stop on Domain Admin
+
+```yaml
+operation:
+  stop_on_domain_admin: true
+```
+
+Stops **immediately** when domain admin is achieved on any single domain. No
+forest enumeration, no golden ticket, no trust escalation. Useful for fast
+validation runs or single-domain environments.
+
+### Mode 3: Stop on Golden Ticket
+
+```yaml
+operation:
+  stop_on_golden_ticket: true
+```
+
+Continues past initial DA to forge a golden ticket, then stops once the golden
+ticket is forged **and** all forest roots are dominated. This mode is useful
+when you want persistent access (golden ticket) but also full multi-forest
+coverage.
+
+### Completion Priority Order
+
+Regardless of mode, conditions are checked in this order:
+
+1. External stop signal (CLI `stop` command or Redis flag)
+2. Max runtime exceeded (`timeouts.operation_timeout`)
+3. Mode-specific DA/GT/forest check (described above)
+
+### Debugging Premature Completion
+
+If an operation stops before expected, check the orchestrator logs for:
+
+```text
+Completion condition met  reason="..."  has_domain_admin=true  has_golden_ticket=false
+```
+
+The `reason` field tells you which condition fired. If it says
+`"all forests dominated"` but not all DCs were secretsdumped, the
+`dominated_domains` set in state may be incorrect.
+
 ## Vulnerability Priority Queue
 
 Vulnerabilities are processed in priority order:
