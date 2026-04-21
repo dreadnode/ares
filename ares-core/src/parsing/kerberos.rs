@@ -54,28 +54,50 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_extract_kerberos_tgs() {
+    fn extract_tgs_valid_line() {
         let output = "$krb5tgs$23$*svc_sql$CONTOSO.LOCAL$cifs/dc01.contoso.local@CONTOSO.LOCAL$abc123def456\n";
-        let hashes = extract_kerberos_hashes(output);
-        assert_eq!(hashes.len(), 1);
-        assert_eq!(hashes[0].username, "svc_sql");
-        assert_eq!(hashes[0].domain, "CONTOSO.LOCAL");
-        assert_eq!(hashes[0].hash_type, KerberosHashType::TGS);
-        assert!(hashes[0].hash_value.starts_with("$krb5tgs$"));
+        let results = extract_kerberos_hashes(output);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].username, "svc_sql");
+        assert_eq!(results[0].domain, "CONTOSO.LOCAL");
+        assert_eq!(results[0].hash_type, KerberosHashType::TGS);
+        assert!(results[0].hash_value.starts_with("$krb5tgs$"));
     }
 
     #[test]
-    fn test_extract_kerberos_asrep() {
-        let output = "$krb5asrep$23$jsmith@CONTOSO.LOCAL:abc123def456\n";
-        let hashes = extract_kerberos_hashes(output);
-        assert_eq!(hashes.len(), 1);
-        assert_eq!(hashes[0].username, "jsmith");
-        assert_eq!(hashes[0].domain, "CONTOSO.LOCAL");
-        assert_eq!(hashes[0].hash_type, KerberosHashType::AsRep);
+    fn extract_tgs_multiple() {
+        let output = "$krb5tgs$23$*svc_a$DOM.LOCAL$http/web@DOM.LOCAL$aabb1122\n\
+                       $krb5tgs$23$*svc_b$DOM.LOCAL$cifs/fs@DOM.LOCAL$ccdd3344\n";
+        let results = extract_kerberos_hashes(output);
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].username, "svc_a");
+        assert_eq!(results[1].username, "svc_b");
     }
 
     #[test]
-    fn test_extract_kerberos_mixed() {
+    fn extract_tgs_empty_input() {
+        assert!(extract_kerberos_hashes("").is_empty());
+    }
+
+    #[test]
+    fn extract_tgs_no_match() {
+        let output = "some random output\nno hashes here\n";
+        assert!(extract_kerberos_hashes(output).is_empty());
+    }
+
+    #[test]
+    fn extract_asrep_valid() {
+        let output = "$krb5asrep$23$user1@CONTOSO.LOCAL:abcdef0123456789\n";
+        let results = extract_kerberos_hashes(output);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].username, "user1");
+        assert_eq!(results[0].domain, "CONTOSO.LOCAL");
+        assert_eq!(results[0].hash_type, KerberosHashType::AsRep);
+        assert_eq!(results[0].hash_value, output.trim());
+    }
+
+    #[test]
+    fn extract_mixed_tgs_and_asrep() {
         let output = "Some preamble text\n$krb5tgs$23$*svc_http$CONTOSO.LOCAL$http/web01.contoso.local@CONTOSO.LOCAL$aabbccdd\n[*] Some status line\n$krb5asrep$23$nopreauth@FABRIKAM.LOCAL:11223344\n";
         let hashes = extract_kerberos_hashes(output);
         assert_eq!(hashes.len(), 2);
@@ -84,20 +106,5 @@ mod tests {
         assert_eq!(hashes[1].hash_type, KerberosHashType::AsRep);
         assert_eq!(hashes[1].username, "nopreauth");
         assert_eq!(hashes[1].domain, "FABRIKAM.LOCAL");
-    }
-
-    #[test]
-    fn test_extract_kerberos_empty() {
-        assert!(extract_kerberos_hashes("").is_empty());
-        assert!(extract_kerberos_hashes("no hashes here\n").is_empty());
-    }
-
-    #[test]
-    fn test_kerberos_tgs_full_hash() {
-        let output = "$krb5tgs$23$*svc_sql$CONTOSO.LOCAL$cifs/dc01.contoso.local@CONTOSO.LOCAL$abcdef1234567890abcdef1234567890abcdef1234567890\n";
-        let hashes = extract_kerberos_hashes(output);
-        assert_eq!(hashes.len(), 1);
-        assert_eq!(hashes[0].username, "svc_sql");
-        assert_eq!(hashes[0].domain, "CONTOSO.LOCAL");
     }
 }
