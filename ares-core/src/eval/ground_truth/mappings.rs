@@ -53,3 +53,85 @@ pub fn get_techniques_for_vuln_type(vuln_type: &str) -> Vec<String> {
         .map(|v| v.iter().map(|s| s.to_string()).collect())
         .unwrap_or_else(|| vec!["T1068".to_string()])
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn is_technique_required_credential_dumping() {
+        assert!(is_technique_required("T1003"));
+        assert!(is_technique_required("T1003.001"));
+        assert!(is_technique_required("T1003.006"));
+    }
+
+    #[test]
+    fn is_technique_required_valid_accounts() {
+        assert!(is_technique_required("T1078"));
+        assert!(is_technique_required("T1078.002"));
+    }
+
+    #[test]
+    fn is_technique_required_kerberos() {
+        assert!(is_technique_required("T1558"));
+        assert!(is_technique_required("T1558.003"));
+    }
+
+    #[test]
+    fn is_technique_required_brute_force() {
+        assert!(is_technique_required("T1110"));
+    }
+
+    #[test]
+    fn is_technique_required_remote_services() {
+        assert!(is_technique_required("T1021"));
+    }
+
+    #[test]
+    fn is_technique_required_alternate_auth() {
+        assert!(is_technique_required("T1550"));
+    }
+
+    #[test]
+    fn is_technique_not_required_unknown() {
+        assert!(!is_technique_required("T1046"));
+        assert!(!is_technique_required("T9999"));
+        assert!(!is_technique_required(""));
+    }
+
+    #[test]
+    fn get_techniques_adcs_esc1() {
+        let techs = get_techniques_for_vuln_type("ADCS_ESC1");
+        assert_eq!(techs, vec!["T1649"]);
+    }
+
+    #[test]
+    fn get_techniques_case_insensitive() {
+        let techs = get_techniques_for_vuln_type("adcs_esc1");
+        assert_eq!(techs, vec!["T1649"]);
+    }
+
+    #[test]
+    fn get_techniques_kerberoasting() {
+        let techs = get_techniques_for_vuln_type("KERBEROASTING");
+        assert_eq!(techs, vec!["T1558.003"]);
+    }
+
+    #[test]
+    fn get_techniques_acl_abuse_multiple() {
+        let techs = get_techniques_for_vuln_type("ACL_ABUSE");
+        assert_eq!(techs, vec!["T1222", "T1484"]);
+    }
+
+    #[test]
+    fn get_techniques_unknown_returns_default() {
+        let techs = get_techniques_for_vuln_type("UNKNOWN_VULN");
+        assert_eq!(techs, vec!["T1068"]);
+    }
+
+    #[test]
+    fn get_techniques_dcsync() {
+        let techs = get_techniques_for_vuln_type("DCSYNC");
+        assert_eq!(techs, vec!["T1003.006"]);
+    }
+}

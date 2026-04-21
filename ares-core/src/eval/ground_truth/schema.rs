@@ -167,3 +167,133 @@ impl EvaluationGroundTruth {
             .collect()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_technique(id: &str, required: bool) -> ExpectedTechnique {
+        ExpectedTechnique {
+            technique_id: id.to_string(),
+            technique_name: String::new(),
+            required,
+            parent_id: None,
+        }
+    }
+
+    fn make_ioc(ioc_type: &str, value: &str, required: bool) -> ExpectedIOC {
+        ExpectedIOC {
+            ioc_type: ioc_type.to_string(),
+            value: value.to_string(),
+            pyramid_level: PyramidLevel::IpAddresses,
+            mitre_techniques: vec![],
+            required,
+            source: String::new(),
+        }
+    }
+
+    fn make_gt() -> EvaluationGroundTruth {
+        EvaluationGroundTruth {
+            operation_id: "op-1".to_string(),
+            target_ip: "10.0.0.1".to_string(),
+            expected_iocs: vec![
+                make_ioc("ip", "10.0.0.1", true),
+                make_ioc("user", "admin", true),
+                make_ioc("hash", "abc", false),
+            ],
+            expected_techniques: vec![
+                make_technique("T1003", true),
+                make_technique("T1046", false),
+            ],
+            expected_timeline: vec![],
+            expected_shares: vec![],
+            expected_vulnerabilities: vec![],
+            min_pyramid_level: 4,
+            target_pyramid_level: 6,
+            min_technique_coverage: 0.6,
+            min_ioc_detection_rate: 0.5,
+        }
+    }
+
+    // -- ExpectedTechnique::matches --
+
+    #[test]
+    fn matches_exact_technique_id() {
+        let t = make_technique("T1003", true);
+        assert!(t.matches("T1003"));
+    }
+
+    #[test]
+    fn matches_parent_to_subtechnique() {
+        let t = make_technique("T1003", true);
+        assert!(t.matches("T1003.001"));
+    }
+
+    #[test]
+    fn matches_subtechnique_to_parent() {
+        let t = make_technique("T1003.001", true);
+        assert!(t.matches("T1003"));
+    }
+
+    #[test]
+    fn no_match_unrelated_technique() {
+        let t = make_technique("T1003", true);
+        assert!(!t.matches("T1046"));
+    }
+
+    #[test]
+    fn no_match_different_subtechnique() {
+        let t = make_technique("T1003.001", true);
+        assert!(!t.matches("T1003.002"));
+    }
+
+    // -- EvaluationGroundTruth filter methods --
+
+    #[test]
+    fn required_iocs_filters_correctly() {
+        let gt = make_gt();
+        let required = gt.required_iocs();
+        assert_eq!(required.len(), 2);
+        assert!(required.iter().all(|i| i.required));
+    }
+
+    #[test]
+    fn optional_iocs_filters_correctly() {
+        let gt = make_gt();
+        let optional = gt.optional_iocs();
+        assert_eq!(optional.len(), 1);
+        assert!(optional.iter().all(|i| !i.required));
+    }
+
+    #[test]
+    fn required_techniques_filters_correctly() {
+        let gt = make_gt();
+        let required = gt.required_techniques();
+        assert_eq!(required.len(), 1);
+        assert_eq!(required[0].technique_id, "T1003");
+    }
+
+    #[test]
+    fn optional_techniques_filters_correctly() {
+        let gt = make_gt();
+        let optional = gt.optional_techniques();
+        assert_eq!(optional.len(), 1);
+        assert_eq!(optional[0].technique_id, "T1046");
+    }
+
+    #[test]
+    fn empty_iocs_returns_empty() {
+        let mut gt = make_gt();
+        gt.expected_iocs.clear();
+        assert!(gt.required_iocs().is_empty());
+        assert!(gt.optional_iocs().is_empty());
+    }
+
+    #[test]
+    fn empty_techniques_returns_empty() {
+        let mut gt = make_gt();
+        gt.expected_techniques.clear();
+        assert!(gt.required_techniques().is_empty());
+        assert!(gt.optional_techniques().is_empty());
+    }
+}
