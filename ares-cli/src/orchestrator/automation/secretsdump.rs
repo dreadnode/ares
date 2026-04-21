@@ -135,8 +135,15 @@ pub async fn auto_local_admin_secretsdump(
         for (dedup_key, dc_ip, hash_domain, hash_value, _parent_domain) in
             hash_work.into_iter().take(2)
         {
+            let priority = dispatcher.effective_priority("dc_secretsdump");
             match dispatcher
-                .request_secretsdump_hash(&dc_ip, "Administrator", &hash_domain, &hash_value, 2)
+                .request_secretsdump_hash(
+                    &dc_ip,
+                    "Administrator",
+                    &hash_domain,
+                    &hash_value,
+                    priority,
+                )
                 .await
             {
                 Ok(Some(task_id)) => {

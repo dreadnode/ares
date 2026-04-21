@@ -7,6 +7,8 @@
 use std::env;
 use std::time::Duration;
 
+use crate::orchestrator::strategy::Strategy;
+
 /// All tunables for the orchestrator, loaded once at startup.
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
@@ -62,6 +64,9 @@ pub struct OrchestratorConfig {
     /// Initial credential to seed at startup (optional).
     /// Format: `user:pass@domain` or from JSON payload.
     pub initial_credential: Option<InitialCredential>,
+
+    /// Strategy controlling technique weights, filtering, and path diversity.
+    pub strategy: Strategy,
 }
 
 /// A credential provided at operation launch time.
@@ -73,8 +78,11 @@ pub struct InitialCredential {
 }
 
 impl OrchestratorConfig {
-    /// Load configuration from environment variables with sensible defaults.
-    pub fn from_env() -> anyhow::Result<Self> {
+    /// Load configuration from environment variables, merging strategy
+    /// settings from the optional YAML config.
+    pub fn from_env_with_yaml(
+        yaml: Option<&ares_core::config::AresConfig>,
+    ) -> anyhow::Result<Self> {
         let redis_url = env::var("ARES_REDIS_URL")
             .or_else(|_| env::var("REDIS_URL"))
             .unwrap_or_else(|_| "redis://127.0.0.1:6379/0".to_string());
@@ -87,7 +95,9 @@ impl OrchestratorConfig {
         // The value may also be prefixed with log/telemetry output from the
         // wrapper script, so we search for the first `{` in the string.
         let json_start = raw_op.find('{');
-        let (operation_id, target_domain, target_ips, json_cred) = if let Some(pos) = json_start {
+        let (operation_id, target_domain, target_ips, json_cred, json_value) = if let Some(pos) =
+            json_start
+        {
             let json_str = &raw_op[pos..];
             let v: serde_json::Value = serde_json::from_str(json_str)
                 .map_err(|e| anyhow::anyhow!("Failed to parse ARES_OPERATION_ID JSON: {e}"))?;
@@ -137,7 +147,7 @@ impl OrchestratorConfig {
                     _ => None,
                 }
             };
-            (op_id, domain, ips, cred)
+            (op_id, domain, ips, cred, Some(v))
         } else {
             // Plain operation ID — read target info from separate env vars
             let domain = env::var("ARES_TARGET_DOMAIN").unwrap_or_default();
@@ -147,7 +157,7 @@ impl OrchestratorConfig {
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty())
                 .collect();
-            (raw_op, domain, ips, None)
+            (raw_op, domain, ips, None, None)
         };
 
         // Initial credential: JSON payload takes precedence, then env var.
@@ -157,6 +167,9 @@ impl OrchestratorConfig {
                 .ok()
                 .and_then(|raw| parse_credential_spec(&raw, &target_domain))
         });
+
+        // Resolve strategy from env vars + JSON payload + YAML config
+        let strategy = Strategy::resolve(json_value.as_ref(), yaml);
 
         let max_concurrent_tasks = parse_env("ARES_MAX_CONCURRENT_TASKS", 8);
         let heartbeat_interval_secs = parse_env("ARES_HEARTBEAT_INTERVAL_SECS", 30);
@@ -189,6 +202,7 @@ impl OrchestratorConfig {
             target_domain,
             target_ips,
             initial_credential,
+            strategy,
         })
     }
 
@@ -241,6 +255,14 @@ fn parse_env<T: std::str::FromStr>(key: &str, default: T) -> T {
 }
 
 #[cfg(test)]
+impl OrchestratorConfig {
+    /// Test-only convenience: load from env vars without YAML config.
+    pub fn from_env() -> anyhow::Result<Self> {
+        Self::from_env_with_yaml(None)
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -264,6 +286,7 @@ mod tests {
             target_domain: String::new(),
             target_ips: Vec::new(),
             initial_credential: None,
+            strategy: Strategy::default(),
         }
     }
 

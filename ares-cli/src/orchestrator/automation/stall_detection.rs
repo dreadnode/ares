@@ -69,7 +69,8 @@ pub async fn auto_stall_detection(
 
         // Skip only when ALL forests are dominated — stall recovery must
         // keep firing if undominated forests remain after initial DA.
-        if has_da {
+        // In comprehensive mode, never skip — keep discovering.
+        if has_da && !dispatcher.config.strategy.should_continue_after_da() {
             let state = dispatcher.state.read().await;
             if state.all_forests_dominated() {
                 continue;

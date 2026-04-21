@@ -277,7 +277,9 @@ ares --k8s ares-red ops export-detection --latest
 4. **Lateral Movement** - PSExec/WMI/WinRM, credential harvesting on compromised hosts
 5. **Domain Dominance** - DCSync, golden ticket generation, operation report
 
-See [Red Team Architecture](docs/red.md) for detailed documentation.
+See [Red Team Architecture](docs/red.md) for detailed documentation and
+[Attack Strategy Configuration](docs/strategy.md) for technique weights,
+path diversity controls, and strategy presets.
 
 ## Blue Team Investigations
 
@@ -438,6 +440,7 @@ task remote:status
 
 The master config lives at `config/ares.yaml`. It defines:
 
+- **[Attack strategy](docs/strategy.md)** — technique weights, path diversity, completion modes
 - Per-role LLM model assignments
 - Agent capabilities and tool inventories
 - Operation timeouts and limits

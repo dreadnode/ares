@@ -31,7 +31,9 @@ pub async fn auto_credential_access(
         }
 
         // --- AS-REP Roast: one per domain (unauthenticated — no credentials required) ---
-        let asrep_work: Vec<(String, String)> = {
+        let asrep_work: Vec<(String, String)> = if !dispatcher.is_technique_allowed("asrep_roast") {
+            Vec::new()
+        } else {
             let state = dispatcher.state.read().await;
             state
                 .domains
@@ -56,8 +58,9 @@ pub async fn auto_credential_access(
                 "domain": domain,
             });
 
+            let priority = dispatcher.effective_priority("asrep_roast");
             match dispatcher
-                .throttled_submit("credential_access", "credential_access", payload, 5)
+                .throttled_submit("credential_access", "credential_access", payload, priority)
                 .await
             {
                 Ok(Some(task_id)) => {
@@ -78,59 +81,67 @@ pub async fn auto_credential_access(
         }
 
         // --- Kerberoast: one per domain + credential pair ---
-        let kerberoast_work: Vec<(String, String, String, ares_core::models::Credential)> = {
-            let state = dispatcher.state.read().await;
-            state
-                .credentials
-                .iter()
-                .filter(|c| !c.domain.is_empty())
-                // Skip delegation accounts — Kerberoast is already done with
-                // other creds, and burning auth on delegation accounts risks
-                // lockout before S4U can use them.
-                .filter(|c| !state.is_delegation_account(&c.username))
-                // Skip quarantined credentials — locked out, retry after expiry.
-                .filter(|c| !state.is_credential_quarantined(&c.username, &c.domain))
-                .filter_map(|cred| {
-                    let cred_domain = cred.domain.to_lowercase();
-                    let dedup = format!("krb:{}:{}", cred_domain, cred.username.to_lowercase());
-                    if state.is_processed(DEDUP_CRACK_REQUESTS, &dedup) {
-                        return None;
-                    }
-                    // Exact domain match first
-                    if let Some(dc_ip) = state.domain_controllers.get(&cred_domain).cloned() {
-                        return Some((dedup, dc_ip, cred_domain, cred.clone()));
-                    }
-                    // Fallback: check child domains (e.g. cred has "contoso.local"
-                    // but user is actually in "child.contoso.local")
-                    let suffix = format!(".{cred_domain}");
-                    for (domain, dc_ip) in &state.domain_controllers {
-                        if domain.ends_with(&suffix) {
+        let kerberoast_work: Vec<(String, String, String, ares_core::models::Credential)> =
+            if !dispatcher.is_technique_allowed("kerberoast") {
+                Vec::new()
+            } else {
+                let state = dispatcher.state.read().await;
+                state
+                    .credentials
+                    .iter()
+                    .filter(|c| !c.domain.is_empty())
+                    // Skip delegation accounts — Kerberoast is already done with
+                    // other creds, and burning auth on delegation accounts risks
+                    // lockout before S4U can use them.
+                    .filter(|c| !state.is_delegation_account(&c.username))
+                    // Skip quarantined credentials — locked out, retry after expiry.
+                    .filter(|c| !state.is_credential_quarantined(&c.username, &c.domain))
+                    .filter_map(|cred| {
+                        let cred_domain = cred.domain.to_lowercase();
+                        let dedup = format!("krb:{}:{}", cred_domain, cred.username.to_lowercase());
+                        if state.is_processed(DEDUP_CRACK_REQUESTS, &dedup) {
+                            return None;
+                        }
+                        // Exact domain match first
+                        if let Some(dc_ip) = state.domain_controllers.get(&cred_domain).cloned() {
+                            return Some((dedup, dc_ip, cred_domain, cred.clone()));
+                        }
+                        // Fallback: check child domains (e.g. cred has "contoso.local"
+                        // but user is actually in "child.contoso.local")
+                        let suffix = format!(".{cred_domain}");
+                        for (domain, dc_ip) in &state.domain_controllers {
+                            if domain.ends_with(&suffix) {
+                                debug!(
+                                    cred_domain = %cred_domain,
+                                    child_domain = %domain,
+                                    "Kerberoast: using child domain DC for parent-domain credential"
+                                );
+                                return Some((dedup, dc_ip.clone(), domain.clone(), cred.clone()));
+                            }
+                        }
+                        // Last resort: use target_ips[0] if DC map has no entry for this domain
+                        if let Some(fallback_ip) = state.target_ips.first().cloned() {
                             debug!(
                                 cred_domain = %cred_domain,
-                                child_domain = %domain,
-                                "Kerberoast: using child domain DC for parent-domain credential"
+                                fallback_ip = %fallback_ip,
+                                "Kerberoast: using target IP fallback (no DC in map)"
                             );
-                            return Some((dedup, dc_ip.clone(), domain.clone(), cred.clone()));
+                            return Some((dedup, fallback_ip, cred_domain, cred.clone()));
                         }
-                    }
-                    // Last resort: use target_ips[0] if DC map has no entry for this domain
-                    if let Some(fallback_ip) = state.target_ips.first().cloned() {
-                        debug!(
-                            cred_domain = %cred_domain,
-                            fallback_ip = %fallback_ip,
-                            "Kerberoast: using target IP fallback (no DC in map)"
-                        );
-                        return Some((dedup, fallback_ip, cred_domain, cred.clone()));
-                    }
-                    None
-                })
-                .take(2)
-                .collect()
-        };
+                        None
+                    })
+                    .take(if dispatcher.config.strategy.is_comprehensive() {
+                        10
+                    } else {
+                        2
+                    })
+                    .collect()
+            };
 
         for (dedup_key, dc_ip, resolved_domain, cred) in kerberoast_work {
+            let priority = dispatcher.effective_priority("kerberoast");
             match dispatcher
-                .request_credential_access("kerberoast", &dc_ip, &resolved_domain, &cred, 5)
+                .request_credential_access("kerberoast", &dc_ip, &resolved_domain, &cred, priority)
                 .await
             {
                 Ok(Some(task_id)) => {
@@ -182,7 +193,11 @@ pub async fn auto_credential_access(
                         })?;
                     Some((dedup, dc_ip, u.domain.clone()))
                 })
-                .take(5)
+                .take(if dispatcher.config.strategy.is_comprehensive() {
+                    20
+                } else {
+                    5
+                })
                 .collect()
         };
 
@@ -260,13 +275,18 @@ pub async fn auto_credential_access(
                         .or_else(|| state.target_ips.first().cloned())?;
                     Some((dedup, dc_ip, cred.clone()))
                 })
-                .take(2) // Max 2 per cycle
+                .take(if dispatcher.config.strategy.is_comprehensive() {
+                    10
+                } else {
+                    2
+                })
                 .collect()
         };
 
         for (dedup_key, dc_ip, cred) in low_hanging_work {
+            let priority = dispatcher.effective_priority("low_hanging_fruit");
             match dispatcher
-                .request_low_hanging_fruit(&dc_ip, &cred.domain, &cred, 4)
+                .request_low_hanging_fruit(&dc_ip, &cred.domain, &cred, priority)
                 .await
             {
                 Ok(Some(task_id)) => {
@@ -297,72 +317,83 @@ pub async fn auto_credential_access(
         // failed auths that trigger AD account lockout.
         // Credentials may be local admin on member servers — secretsdump fails
         // fast if not, but when it succeeds it's the fastest path to DA.
-        let sd_work: Vec<(String, String, ares_core::models::Credential)> = {
-            let state = dispatcher.state.read().await;
-
-            // Skip only when ALL forests are dominated
-            if state.has_domain_admin && state.all_forests_dominated() {
+        let sd_work: Vec<(String, String, ares_core::models::Credential)> =
+            if !dispatcher.is_technique_allowed("secretsdump") {
                 Vec::new()
             } else {
-                let mut items = Vec::new();
-                for cred in state
-                    .credentials
-                    .iter()
-                    .filter(|c| !c.domain.is_empty() && !c.password.is_empty())
-                    // Skip delegation accounts — secretsdump will always fail
-                    // (they're not admin) and burns auth budget needed for S4U.
-                    .filter(|c| c.is_admin || !state.is_delegation_account(&c.username))
-                    .filter(|c| !state.is_credential_quarantined(&c.username, &c.domain))
-                {
-                    let cred_domain = cred.domain.to_lowercase();
-                    for host in &state.hosts {
-                        // Resolve host domain: prefer hostname FQDN, fall back
-                        // to domain_controllers map for bare-IP hosts.
-                        let host_domain = {
-                            let from_hostname = host
-                                .hostname
-                                .to_lowercase()
-                                .split_once('.')
-                                .map(|x| x.1)
-                                .unwrap_or("")
-                                .to_string();
-                            if from_hostname.is_empty() {
-                                // Check if this IP is a known DC
-                                state
-                                    .domain_controllers
-                                    .iter()
-                                    .find(|(_, ip)| ip.as_str() == host.ip)
-                                    .map(|(d, _)| d.to_lowercase())
-                                    .unwrap_or_default()
-                            } else {
-                                from_hostname
-                            }
-                        };
-                        // Only target same-domain hosts. Skip unknown-domain
-                        // hosts — they'll be retried next cycle after nmap
-                        // populates hostnames.
-                        if host_domain.is_empty()
-                            || (host_domain != cred_domain
-                                && !host_domain.ends_with(&format!(".{cred_domain}"))
-                                && !cred_domain.ends_with(&format!(".{host_domain}")))
-                        {
-                            continue;
-                        }
+                let state = dispatcher.state.read().await;
 
-                        let dedup = format!(
-                            "{}:{}:{}",
-                            host.ip,
-                            cred_domain,
-                            cred.username.to_lowercase()
-                        );
-                        if !state.is_processed(DEDUP_SECRETSDUMP, &dedup) {
-                            items.push((dedup, host.ip.clone(), cred.clone()));
+                // Skip only when ALL forests are dominated (unless continue_after_da)
+                if !dispatcher.config.strategy.should_continue_after_da()
+                    && state.has_domain_admin
+                    && state.all_forests_dominated()
+                {
+                    Vec::new()
+                } else {
+                    let mut items = Vec::new();
+                    for cred in state
+                        .credentials
+                        .iter()
+                        .filter(|c| !c.domain.is_empty() && !c.password.is_empty())
+                        // Skip delegation accounts — secretsdump will always fail
+                        // (they're not admin) and burns auth budget needed for S4U.
+                        .filter(|c| c.is_admin || !state.is_delegation_account(&c.username))
+                        .filter(|c| !state.is_credential_quarantined(&c.username, &c.domain))
+                    {
+                        let cred_domain = cred.domain.to_lowercase();
+                        for host in &state.hosts {
+                            // Resolve host domain: prefer hostname FQDN, fall back
+                            // to domain_controllers map for bare-IP hosts.
+                            let host_domain = {
+                                let from_hostname = host
+                                    .hostname
+                                    .to_lowercase()
+                                    .split_once('.')
+                                    .map(|x| x.1)
+                                    .unwrap_or("")
+                                    .to_string();
+                                if from_hostname.is_empty() {
+                                    // Check if this IP is a known DC
+                                    state
+                                        .domain_controllers
+                                        .iter()
+                                        .find(|(_, ip)| ip.as_str() == host.ip)
+                                        .map(|(d, _)| d.to_lowercase())
+                                        .unwrap_or_default()
+                                } else {
+                                    from_hostname
+                                }
+                            };
+                            // Only target same-domain hosts. Skip unknown-domain
+                            // hosts — they'll be retried next cycle after nmap
+                            // populates hostnames.
+                            if host_domain.is_empty()
+                                || (host_domain != cred_domain
+                                    && !host_domain.ends_with(&format!(".{cred_domain}"))
+                                    && !cred_domain.ends_with(&format!(".{host_domain}")))
+                            {
+                                continue;
+                            }
+
+                            let dedup = format!(
+                                "{}:{}:{}",
+                                host.ip,
+                                cred_domain,
+                                cred.username.to_lowercase()
+                            );
+                            if !state.is_processed(DEDUP_SECRETSDUMP, &dedup) {
+                                items.push((dedup, host.ip.clone(), cred.clone()));
+                            }
                         }
                     }
+                    let limit = if dispatcher.config.strategy.is_comprehensive() {
+                        20
+                    } else {
+                        5
+                    };
+                    items.into_iter().take(limit).collect()
                 }
-                items.into_iter().take(5).collect() // Max 5 per cycle
-            }
-        };
+            };
 
         for (dedup_key, target_ip, cred) in sd_work {
             let priority = if cred.is_admin { 2 } else { 7 };
@@ -394,53 +425,56 @@ pub async fn auto_credential_access(
 
         // --- Common password spray: per domain when no admin creds found yet ---
         // Keep spraying common passwords until we find admin or achieve DA.
-        let common_spray_work: Vec<(String, String)> = {
-            let state = dispatcher.state.read().await;
-            if (state.has_domain_admin && state.all_forests_dominated())
-                || state.credentials.iter().any(|c| c.is_admin)
-            {
-                // All forests dominated or have admin creds — skip common spray
+        let common_spray_work: Vec<(String, String)> =
+            if !dispatcher.is_technique_allowed("password_spray") {
                 Vec::new()
             } else {
-                state
-                    .domain_controllers
-                    .iter()
-                    .filter(|(domain, _)| {
-                        let key = format!("common:{}", domain.to_lowercase());
-                        !state.is_processed(DEDUP_PASSWORD_SPRAY, &key)
-                    })
-                    // Only spray after initial recon (AS-REP) has completed.
-                    // This prevents spraying in the first cycle when Kerberoast
-                    // hasn't had time to collect hashes yet.
-                    .filter(|(domain, _)| {
-                        state.is_processed(DEDUP_ASREP_DOMAINS, domain)
-                            || state.is_processed(DEDUP_ASREP_DOMAINS, &domain.to_lowercase())
-                    })
-                    // Only spray after delegation enumeration has dispatched for
-                    // at least one credential in this domain. Spraying before
-                    // delegation can lock out accounts and prevent find_delegation
-                    // from using valid credentials.
-                    .filter(|(domain, _)| {
-                        let prefix = format!("{}:", domain.to_lowercase());
-                        state.has_processed_prefix(DEDUP_DELEGATION_CREDS, &prefix)
-                    })
-                    // Skip domains with UNCRACKED Kerberoast hashes —
-                    // offline cracking is safer (no lockout risk) and handles
-                    // complex passwords that spray would never find.
-                    // Once all hashes are cracked (or none exist), spray proceeds
-                    // as a fallback path for accounts without SPNs.
-                    .filter(|(domain, _)| {
-                        let d = domain.to_lowercase();
-                        !state.hashes.iter().any(|h| {
-                            h.hash_type.to_lowercase().contains("kerberoast")
-                                && h.domain.to_lowercase() == d
-                                && h.cracked_password.is_none()
+                let state = dispatcher.state.read().await;
+                if (state.has_domain_admin && state.all_forests_dominated())
+                    || state.credentials.iter().any(|c| c.is_admin)
+                {
+                    // All forests dominated or have admin creds — skip common spray
+                    Vec::new()
+                } else {
+                    state
+                        .domain_controllers
+                        .iter()
+                        .filter(|(domain, _)| {
+                            let key = format!("common:{}", domain.to_lowercase());
+                            !state.is_processed(DEDUP_PASSWORD_SPRAY, &key)
                         })
-                    })
-                    .map(|(domain, dc_ip)| (domain.clone(), dc_ip.clone()))
-                    .collect()
-            }
-        };
+                        // Only spray after initial recon (AS-REP) has completed.
+                        // This prevents spraying in the first cycle when Kerberoast
+                        // hasn't had time to collect hashes yet.
+                        .filter(|(domain, _)| {
+                            state.is_processed(DEDUP_ASREP_DOMAINS, domain)
+                                || state.is_processed(DEDUP_ASREP_DOMAINS, &domain.to_lowercase())
+                        })
+                        // Only spray after delegation enumeration has dispatched for
+                        // at least one credential in this domain. Spraying before
+                        // delegation can lock out accounts and prevent find_delegation
+                        // from using valid credentials.
+                        .filter(|(domain, _)| {
+                            let prefix = format!("{}:", domain.to_lowercase());
+                            state.has_processed_prefix(DEDUP_DELEGATION_CREDS, &prefix)
+                        })
+                        // Skip domains with UNCRACKED Kerberoast hashes —
+                        // offline cracking is safer (no lockout risk) and handles
+                        // complex passwords that spray would never find.
+                        // Once all hashes are cracked (or none exist), spray proceeds
+                        // as a fallback path for accounts without SPNs.
+                        .filter(|(domain, _)| {
+                            let d = domain.to_lowercase();
+                            !state.hashes.iter().any(|h| {
+                                h.hash_type.to_lowercase().contains("kerberoast")
+                                    && h.domain.to_lowercase() == d
+                                    && h.cracked_password.is_none()
+                            })
+                        })
+                        .map(|(domain, dc_ip)| (domain.clone(), dc_ip.clone()))
+                        .collect()
+                }
+            };
 
         for (domain, dc_ip) in common_spray_work {
             let payload = json!({
@@ -464,8 +498,9 @@ pub async fn auto_credential_access(
                 .persist_dedup(&dispatcher.queue, DEDUP_PASSWORD_SPRAY, &key)
                 .await;
 
+            let priority = dispatcher.effective_priority("password_spray");
             match dispatcher
-                .throttled_submit("credential_access", "credential_access", payload, 3)
+                .throttled_submit("credential_access", "credential_access", payload, priority)
                 .await
             {
                 Ok(Some(task_id)) => {

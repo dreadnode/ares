@@ -121,8 +121,9 @@ pub async fn auto_acl_chain_follow(
                 },
             });
 
+            let priority = dispatcher.effective_priority("acl_abuse");
             match dispatcher
-                .throttled_submit("acl_chain_step", "acl", payload, 4)
+                .throttled_submit("acl_chain_step", "acl", payload, priority)
                 .await
             {
                 Ok(Some(task_id)) => {

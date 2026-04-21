@@ -406,16 +406,21 @@ pub fn render_agent_instructions_with_extras(
         .with_context(|| format!("Failed to render template '{template_name}'"))
 }
 
-/// Render the system_instructions template which needs `all_capabilities` as a
-/// map of role → tool list (e.g. `{"recon": ["nmap_scan", ...], "lateral": [...]}`).
+/// Render the system_instructions template.
 ///
-/// If `all_capabilities` is `None`, the template falls back to hardcoded defaults.
+/// - `all_capabilities`: map of role → tool list. Falls back to hardcoded defaults if None.
+/// - `technique_priorities`: sorted list of (technique, weight) pairs for the priority table.
+///   If provided, renders a dynamic "ATTACK FALLBACK CHAINS" section.
 pub fn render_system_instructions(
     all_capabilities: Option<&HashMap<String, Vec<String>>>,
+    technique_priorities: Option<&[(String, i32)]>,
 ) -> Result<String> {
     let mut ctx = Context::new();
     if let Some(caps) = all_capabilities {
         ctx.insert("all_capabilities", caps);
+    }
+    if let Some(priorities) = technique_priorities {
+        ctx.insert("technique_priorities", priorities);
     }
 
     TEMPLATES
@@ -556,16 +561,44 @@ mod tests {
         caps.insert("privesc".to_string(), vec!["certipy".to_string()]);
         caps.insert("lateral".to_string(), vec!["psexec".to_string()]);
 
-        let result = render_system_instructions(Some(&caps)).unwrap();
+        let result = render_system_instructions(Some(&caps), None).unwrap();
         assert!(result.contains("RECON"));
         assert!(result.contains("nmap_scan"));
     }
 
     #[test]
     fn test_render_system_instructions_without_capabilities() {
-        let result = render_system_instructions(None).unwrap();
+        let result = render_system_instructions(None, None).unwrap();
         // Falls back to hardcoded defaults
         assert!(result.contains("nmap, netexec, rpcclient"));
+        // Hardcoded fallback table
+        assert!(result.contains("ADCS ESC1"));
+        assert!(result.contains("certipy_request"));
+    }
+
+    #[test]
+    fn test_render_system_instructions_with_priorities() {
+        let priorities = vec![
+            ("dc_secretsdump".to_string(), 1),
+            ("golden_ticket".to_string(), 1),
+            ("secretsdump".to_string(), 2),
+            ("esc1".to_string(), 5),
+            ("acl_abuse".to_string(), 6),
+        ];
+        let result = render_system_instructions(None, Some(&priorities)).unwrap();
+        // Dynamic table rendered
+        assert!(
+            result.contains("operator strategy"),
+            "Should mention strategy: {result}"
+        );
+        assert!(result.contains("dc_secretsdump"));
+        assert!(result.contains("esc1"));
+        assert!(result.contains("acl_abuse"));
+        // Hardcoded table should NOT appear
+        assert!(
+            !result.contains("certipy_request → certipy_auth → secretsdump"),
+            "Hardcoded table should not appear when priorities are provided"
+        );
     }
 
     #[test]

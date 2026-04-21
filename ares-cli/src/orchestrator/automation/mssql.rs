@@ -43,6 +43,11 @@ pub async fn auto_mssql_detection(
         };
 
         for (ip, hostname) in work {
+            // Check strategy filter before publishing
+            if !dispatcher.is_technique_allowed("mssql_access") {
+                continue;
+            }
+
             let vuln = ares_core::models::VulnerabilityInfo {
                 vuln_id: format!("mssql_{}", ip.replace('.', "_")),
                 vuln_type: "mssql_access".to_string(),
@@ -65,12 +70,16 @@ pub async fn auto_mssql_detection(
                     d
                 },
                 recommended_agent: "lateral".to_string(),
-                priority: 4,
+                priority: dispatcher.effective_priority("mssql_access"),
             };
 
             match dispatcher
                 .state
-                .publish_vulnerability(&dispatcher.queue, vuln)
+                .publish_vulnerability_with_strategy(
+                    &dispatcher.queue,
+                    vuln,
+                    Some(&dispatcher.config.strategy),
+                )
                 .await
             {
                 Ok(true) => {

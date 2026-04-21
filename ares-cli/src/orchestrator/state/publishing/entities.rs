@@ -76,11 +76,39 @@ impl SharedState {
     }
 
     /// Add a vulnerability to state and Redis.
+    ///
+    /// If a `strategy` is provided, its technique weights override the vuln's
+    /// hardcoded priority before insertion into the exploitation ZSET.
     pub async fn publish_vulnerability(
         &self,
         queue: &TaskQueue,
         vuln: VulnerabilityInfo,
     ) -> Result<bool> {
+        self.publish_vulnerability_with_strategy(queue, vuln, None)
+            .await
+    }
+
+    /// Publish a vulnerability with optional strategy-based priority override.
+    pub async fn publish_vulnerability_with_strategy(
+        &self,
+        queue: &TaskQueue,
+        mut vuln: VulnerabilityInfo,
+        strategy: Option<&crate::orchestrator::strategy::Strategy>,
+    ) -> Result<bool> {
+        // Apply strategy weight override if provided
+        if let Some(strategy_cfg) = strategy {
+            let effective = strategy_cfg.effective_priority(&vuln.vuln_type);
+            if effective != vuln.priority {
+                tracing::debug!(
+                    vuln_type = %vuln.vuln_type,
+                    original = vuln.priority,
+                    effective = effective,
+                    "Strategy override applied to vuln priority"
+                );
+                vuln.priority = effective;
+            }
+        }
+
         let operation_id = {
             let state = self.inner.read().await;
             state.operation_id.clone()

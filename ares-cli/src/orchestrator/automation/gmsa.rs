@@ -103,8 +103,9 @@ pub async fn auto_gmsa_extraction(
                 },
             });
 
+            let priority = dispatcher.effective_priority("gmsa");
             match dispatcher
-                .throttled_submit("credential_access", "credential_access", payload, 3)
+                .throttled_submit("credential_access", "credential_access", payload, priority)
                 .await
             {
                 Ok(Some(task_id)) => {

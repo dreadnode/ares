@@ -103,6 +103,16 @@ pub struct Dispatcher {
 }
 
 impl Dispatcher {
+    /// Check if a technique is allowed by the active strategy.
+    pub fn is_technique_allowed(&self, technique: &str) -> bool {
+        self.config.strategy.is_technique_allowed(technique)
+    }
+
+    /// Get the effective priority for a vulnerability type from the strategy.
+    pub fn effective_priority(&self, vuln_type: &str) -> i32 {
+        self.config.strategy.effective_priority(vuln_type)
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         queue: TaskQueue,

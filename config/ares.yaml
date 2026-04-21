@@ -26,6 +26,39 @@ operation:
   # stop_on_domain_admin: true
   stop_on_golden_ticket: false
 
+  # Strategy controls which attack techniques the operator prioritises.
+  # Presets: "fast" (default), "comprehensive", "stealth"
+  #   fast          — shortest path to DA (secretsdump → golden ticket)
+  #   comprehensive — exploit ALL discovered vulns, don't stop on first DA
+  #   stealth       — avoid noisy techniques (no sprays, deprioritise secretsdump)
+  # strategy: fast
+
+  # Keep exploiting after Domain Admin is achieved.
+  # Comprehensive preset sets this to true automatically.
+  # continue_after_da: false
+
+  # Techniques to completely exclude (never dispatch).
+  # Values are lowercase vuln_type strings. Examples:
+  #   secretsdump, dc_secretsdump, golden_ticket, password_spray, kerberoast,
+  #   asrep_roast, esc1, esc4, esc8, mssql_access, mssql_linked_server,
+  #   constrained_delegation, unconstrained_delegation, rbcd, acl_abuse,
+  #   credential_reuse, forest_trust_escalation
+  # exclude_techniques: []
+
+  # If non-empty, ONLY these techniques are allowed (allowlist mode).
+  # include_techniques: []
+
+  # Per-technique priority overrides (lower = higher priority, 1-10).
+  # Merged on top of the preset defaults. Overrides vulnerability_priorities below.
+  # technique_weights:
+  #   secretsdump: 2
+  #   esc1: 5
+  #   acl_abuse: 6
+
+  # LLM temperature override (0.0-2.0). Higher values = more creative technique
+  # selection. None/omit = provider default.
+  # llm_temperature: 1.0
+
 # Agent configurations
 agents:
   orchestrator:

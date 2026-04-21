@@ -23,6 +23,31 @@ pub struct OperationConfig {
     pub stop_on_domain_admin: bool,
     #[serde(default)]
     pub stop_on_golden_ticket: bool,
+
+    /// Strategy preset: "fast" (default), "comprehensive", or "stealth".
+    #[serde(default)]
+    pub strategy: String,
+
+    /// Keep exploiting after Domain Admin is achieved.
+    #[serde(default)]
+    pub continue_after_da: bool,
+
+    /// Techniques to completely exclude (never dispatch).
+    #[serde(default)]
+    pub exclude_techniques: Vec<String>,
+
+    /// If non-empty, ONLY these techniques are allowed.
+    #[serde(default)]
+    pub include_techniques: Vec<String>,
+
+    /// Per-technique priority overrides (lower = higher priority, 1-10).
+    /// Merged on top of the preset's defaults.
+    #[serde(default)]
+    pub technique_weights: std::collections::HashMap<String, i32>,
+
+    /// LLM temperature override (0.0-2.0). None = provider default.
+    #[serde(default)]
+    pub llm_temperature: Option<f32>,
 }
 
 /// Per-agent configuration: model selection, step limits, and tool allowlist.

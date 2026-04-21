@@ -34,6 +34,9 @@ pub struct LlmTaskRunner {
     dispatcher: Arc<dyn ToolDispatcher>,
     state: SharedState,
     config: AgentLoopConfig,
+    /// Sorted technique priorities from strategy (technique, weight).
+    /// Passed to the system prompt template to render a dynamic priority table.
+    technique_priorities: Vec<(String, i32)>,
     /// Deferred callback handler — set after construction to break the
     /// `LlmTaskRunner → Dispatcher → LlmTaskRunner` circular dependency.
     callback_handler: OnceLock<Arc<dyn CallbackHandler>>,
@@ -45,9 +48,12 @@ impl LlmTaskRunner {
         model_name: String,
         dispatcher: Arc<dyn ToolDispatcher>,
         state: SharedState,
+        temperature: Option<f32>,
+        technique_priorities: Vec<(String, i32)>,
     ) -> Self {
         let config = AgentLoopConfig {
             model: model_name.clone(),
+            temperature,
             ..AgentLoopConfig::default()
         };
         Self {
@@ -56,6 +62,7 @@ impl LlmTaskRunner {
             dispatcher,
             state,
             config,
+            technique_priorities,
             callback_handler: OnceLock::new(),
         }
     }
@@ -92,7 +99,7 @@ impl LlmTaskRunner {
         let snapshot = self.state.snapshot().await;
 
         // 2. Build system prompt from agent template
-        let system_prompt = build_system_prompt(role, &snapshot)?;
+        let system_prompt = build_system_prompt(role, &snapshot, &self.technique_priorities)?;
 
         // 3. Build task prompt from Tera template + payload
         let task_prompt = build_task_prompt(task_type, task_id, payload, &snapshot)?;
@@ -163,7 +170,11 @@ impl LlmTaskRunner {
 // ---------------------------------------------------------------------------
 
 /// Build the system prompt for a given agent role.
-fn build_system_prompt(role: AgentRole, snapshot: &StateSnapshot) -> Result<String> {
+fn build_system_prompt(
+    role: AgentRole,
+    snapshot: &StateSnapshot,
+    technique_priorities: &[(String, i32)],
+) -> Result<String> {
     // Get capabilities from the tool definitions for this role
     let tools = tool_registry::tools_for_role(role);
     let capabilities: Vec<String> = tools
@@ -183,8 +194,13 @@ fn build_system_prompt(role: AgentRole, snapshot: &StateSnapshot) -> Result<Stri
         AgentRole::Orchestrator => templates::TEMPLATE_ORCHESTRATOR,
     };
 
-    // Render system instructions (no per-role capability map for now)
-    let system_instructions = templates::render_system_instructions(None)?;
+    // Render system instructions with strategy-driven priority table
+    let priorities = if technique_priorities.is_empty() {
+        None
+    } else {
+        Some(technique_priorities)
+    };
+    let system_instructions = templates::render_system_instructions(None, priorities)?;
 
     // Render agent-specific instructions
     let agent_instructions = templates::render_agent_instructions(
@@ -372,7 +388,7 @@ mod tests {
             AgentRole::Coercion,
             AgentRole::Orchestrator,
         ] {
-            let result = build_system_prompt(*role, &snapshot);
+            let result = build_system_prompt(*role, &snapshot, &[]);
             assert!(result.is_ok(), "Failed for role: {:?}", role);
             let prompt = result.unwrap();
             assert!(!prompt.is_empty(), "Empty prompt for role: {:?}", role);

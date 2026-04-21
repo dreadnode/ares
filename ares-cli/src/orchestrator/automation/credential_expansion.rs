@@ -329,8 +329,10 @@ pub async fn auto_credential_expansion(
                         state.is_processed(DEDUP_SECRETSDUMP, &sd_dedup)
                     };
                     if !already {
-                        if let Ok(Some(task_id)) =
-                            dispatcher.request_secretsdump(&dc_ip, &pth_cred, 2).await
+                        let priority = dispatcher.effective_priority("secretsdump");
+                        if let Ok(Some(task_id)) = dispatcher
+                            .request_secretsdump(&dc_ip, &pth_cred, priority)
+                            .await
                         {
                             dc_sd_dispatched = true;
                             debug!(

@@ -41,6 +41,7 @@ pub(crate) fn spawn_automation_tasks(
     spawn_auto!(auto_gmsa_extraction);
     spawn_auto!(auto_unconstrained_exploitation);
     spawn_auto!(auto_stall_detection);
+    spawn_auto!(auto_credential_reuse);
 
     info!(count = handles.len(), "Automation tasks spawned");
     handles

@@ -234,8 +234,9 @@ pub async fn auto_unconstrained_exploitation(
                         "reason": "unconstrained_delegation_coercion",
                     });
 
+                    let priority = dispatcher.effective_priority("unconstrained_delegation");
                     match dispatcher
-                        .throttled_submit("coercion", "coercion", payload, 8)
+                        .throttled_submit("coercion", "coercion", payload, priority)
                         .await
                     {
                         Ok(Some(task_id)) => {
@@ -291,8 +292,9 @@ pub async fn auto_unconstrained_exploitation(
                         },
                     });
 
+                    let priority = dispatcher.effective_priority("unconstrained_delegation");
                     match dispatcher
-                        .throttled_submit("exploit", "privesc", payload, 9)
+                        .throttled_submit("exploit", "privesc", payload, priority)
                         .await
                     {
                         Ok(Some(task_id)) => {
