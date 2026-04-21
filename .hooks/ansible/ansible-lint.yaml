@@ -5,20 +5,9 @@
 exclude_paths:
   - .github/
   - ansible/roles/mythic/tests/
-  # Exclude paths that depend on external collection dreadnode.nimbus_range
-  # which is not available locally during pre-commit linting
-  - ansible/playbooks/
-  - ansible/roles/acl_tools/meta/
-  - ansible/roles/coercion_tools/meta/
-  - ansible/roles/cracking_tools/meta/
-  - ansible/roles/credential_access_tools/meta/
-  - ansible/roles/lateral_movement_tools/meta/
-  - ansible/roles/privesc_tools/meta/
-  - ansible/roles/recon_tools/meta/
 
 skip_list:
   - yaml
-  # - command-instead-of-shell
   - role-name
   - git-latest
   - package-latest
