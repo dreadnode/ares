@@ -208,3 +208,103 @@ pub fn looks_like_hostname(value: &str) -> bool {
     }
     (4..=255).contains(&value.len())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn looks_like_hostname_valid() {
+        assert!(looks_like_hostname("dc01.corp.local"));
+        assert!(looks_like_hostname("web.example.com"));
+    }
+
+    #[test]
+    fn looks_like_hostname_no_dot() {
+        assert!(!looks_like_hostname("localhost"));
+    }
+
+    #[test]
+    fn looks_like_hostname_ip_address() {
+        assert!(!looks_like_hostname("10.0.0.1"));
+        assert!(!looks_like_hostname("192.168.1.100"));
+    }
+
+    #[test]
+    fn looks_like_hostname_starts_with_digit() {
+        assert!(!looks_like_hostname("1host.corp.local"));
+    }
+
+    #[test]
+    fn looks_like_hostname_too_short() {
+        assert!(!looks_like_hostname("a.b"));
+    }
+
+    #[test]
+    fn analyzer_default_creates_empty_graph() {
+        let analyzer = LateralMovementAnalyzer::default();
+        assert!(analyzer.graph.connections.is_empty());
+    }
+
+    #[test]
+    fn analyze_query_result_extracts_hosts() {
+        let mut analyzer = LateralMovementAnalyzer::default();
+        let data = json!({
+            "computer": "dc01.corp.local",
+            "message": "logon from ws01.corp.local"
+        });
+        let conns = analyzer.analyze_query_result(&data, Some("ws01.corp.local"));
+        // Should find dc01 as destination from ws01
+        assert!(!conns.is_empty());
+    }
+
+    #[test]
+    fn analyze_query_result_no_source_no_connections() {
+        let mut analyzer = LateralMovementAnalyzer::default();
+        let data = json!({"computer": "dc01.corp.local"});
+        let conns = analyzer.analyze_query_result(&data, None);
+        assert!(conns.is_empty());
+    }
+
+    #[test]
+    fn analyze_query_result_same_host_no_self_connection() {
+        let mut analyzer = LateralMovementAnalyzer::default();
+        let data = json!({"computer": "dc01.corp.local"});
+        let conns = analyzer.analyze_query_result(&data, Some("dc01.corp.local"));
+        assert!(conns.is_empty());
+    }
+
+    #[test]
+    fn get_attack_path_empty_graph() {
+        let analyzer = LateralMovementAnalyzer::default();
+        let path = analyzer.get_attack_path();
+        assert!(path.is_empty());
+    }
+
+    #[test]
+    fn get_attack_path_linear_chain() {
+        let mut analyzer = LateralMovementAnalyzer::default();
+        // ws01 -> dc01
+        let data1 = json!({"computer": "dc01.corp.local"});
+        analyzer.analyze_query_result(&data1, Some("ws01.corp.local"));
+        let path = analyzer.get_attack_path();
+        assert!(!path.is_empty());
+        // ws01 should be the entry point
+        assert_eq!(path[0], "ws01.corp.local");
+    }
+
+    #[test]
+    fn get_pivot_suggestions_returns_uninvestigated() {
+        let mut analyzer = LateralMovementAnalyzer::default();
+        let data = json!({"computer": "dc01.corp.local"});
+        analyzer.analyze_query_result(&data, Some("ws01.corp.local"));
+        let suggestions = analyzer.get_pivot_suggestions();
+        // dc01 is uninvestigated target
+        let hosts: Vec<&str> = suggestions
+            .iter()
+            .filter_map(|s| s["host"].as_str())
+            .collect();
+        assert!(hosts.contains(&"dc01.corp.local"));
+    }
+}
