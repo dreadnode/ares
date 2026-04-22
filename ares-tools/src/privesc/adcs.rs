@@ -413,4 +413,94 @@ mod tests {
         let user_at_domain = format!("{username}@{domain}");
         assert_eq!(user_at_domain, "admin@contoso.local");
     }
+
+    // --- mock executor tests ---
+
+    use crate::executor::mock;
+
+    #[tokio::test]
+    async fn certipy_find_executes() {
+        mock::push(mock::success());
+        let args = json!({
+            "username": "admin", "domain": "contoso.local",
+            "password": "P@ss", "dc_ip": "10.0.0.1"
+        });
+        assert!(super::certipy_find(&args).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn certipy_find_vulnerable_executes() {
+        mock::push(mock::success());
+        let args = json!({
+            "username": "admin", "domain": "contoso.local",
+            "password": "P@ss", "dc_ip": "10.0.0.1", "vulnerable": true
+        });
+        assert!(super::certipy_find(&args).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn certipy_request_executes() {
+        mock::push(mock::success());
+        let args = json!({
+            "username": "admin", "domain": "contoso.local",
+            "password": "P@ss", "ca": "contoso-CA", "template": "ESC1",
+            "dc_ip": "10.0.0.1"
+        });
+        assert!(super::certipy_request(&args).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn certipy_request_with_upn_executes() {
+        mock::push(mock::success());
+        let args = json!({
+            "username": "admin", "domain": "contoso.local",
+            "password": "P@ss", "ca": "contoso-CA", "template": "ESC1",
+            "dc_ip": "10.0.0.1", "upn": "administrator@contoso.local"
+        });
+        assert!(super::certipy_request(&args).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn certipy_auth_executes() {
+        mock::push(mock::success());
+        let args = json!({
+            "pfx_path": "/tmp/admin.pfx", "dc_ip": "10.0.0.1",
+            "domain": "contoso.local"
+        });
+        assert!(super::certipy_auth(&args).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn certipy_shadow_executes() {
+        mock::push(mock::success());
+        let args = json!({
+            "username": "admin", "domain": "contoso.local",
+            "password": "P@ss", "target": "dc01$", "dc_ip": "10.0.0.1"
+        });
+        assert!(super::certipy_shadow(&args).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn certipy_template_esc4_executes() {
+        mock::push(mock::success());
+        let args = json!({
+            "username": "admin", "domain": "contoso.local",
+            "password": "P@ss", "template": "ESC4", "dc_ip": "10.0.0.1"
+        });
+        assert!(super::certipy_template_esc4(&args).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn certipy_esc4_full_chain_executes() {
+        // 3 execute calls: template, request, auth
+        mock::push(mock::success());
+        mock::push(mock::success());
+        mock::push(mock::success());
+        let args = json!({
+            "username": "admin", "domain": "contoso.local",
+            "password": "P@ss", "template": "ESC4", "dc_ip": "10.0.0.1",
+            "ca": "contoso-CA", "pfx_path": "/tmp/admin.pfx"
+        });
+        assert!(super::certipy_esc4_full_chain(&args).await.is_ok());
+    }
 }

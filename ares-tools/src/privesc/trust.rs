@@ -399,4 +399,102 @@ mod tests {
         let user_spec = format!("{domain}\\{username}");
         assert_eq!(user_spec, "contoso.local\\admin");
     }
+
+    // --- mock executor tests ---
+
+    use super::*;
+    use crate::executor::mock;
+
+    #[tokio::test]
+    async fn extract_trust_key_executes() {
+        mock::push(mock::success());
+        let args = json!({
+            "domain": "contoso.local",
+            "username": "admin",
+            "password": "P@ssw0rd!",
+            "dc_ip": "192.168.58.10",
+            "trusted_domain": "child.contoso.local"
+        });
+        assert!(extract_trust_key(&args).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn create_inter_realm_ticket_executes() {
+        mock::push(mock::success());
+        let args = json!({
+            "trust_key": "aabbccdd",
+            "source_sid": "S-1-5-21-111",
+            "source_domain": "child.contoso.local",
+            "target_sid": "S-1-5-21-222",
+            "target_domain": "contoso.local"
+        });
+        assert!(create_inter_realm_ticket(&args).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn create_inter_realm_ticket_with_username_executes() {
+        mock::push(mock::success());
+        let args = json!({
+            "trust_key": "aabbccdd",
+            "source_sid": "S-1-5-21-111",
+            "source_domain": "child.contoso.local",
+            "target_sid": "S-1-5-21-222",
+            "target_domain": "contoso.local",
+            "username": "fakeuser"
+        });
+        assert!(create_inter_realm_ticket(&args).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn get_sid_with_password_executes() {
+        mock::push(mock::success());
+        let args = json!({
+            "domain": "contoso.local",
+            "username": "admin",
+            "password": "P@ssw0rd!",
+            "dc_ip": "192.168.58.10"
+        });
+        assert!(get_sid(&args).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn get_sid_with_hash_executes() {
+        mock::push(mock::success());
+        let args = json!({
+            "domain": "contoso.local",
+            "username": "admin",
+            "hash": "31d6cfe0d16ae931b73c59d7e0c089c0",
+            "dc_ip": "192.168.58.10"
+        });
+        assert!(get_sid(&args).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn dnstool_executes() {
+        mock::push(mock::success());
+        let args = json!({
+            "domain": "contoso.local",
+            "username": "admin",
+            "password": "P@ssw0rd!",
+            "dc_ip": "192.168.58.10",
+            "record_name": "evil.contoso.local",
+            "record_data": "10.0.0.99"
+        });
+        assert!(dnstool(&args).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn dnstool_with_action_executes() {
+        mock::push(mock::success());
+        let args = json!({
+            "domain": "contoso.local",
+            "username": "admin",
+            "password": "P@ssw0rd!",
+            "dc_ip": "192.168.58.10",
+            "record_name": "evil.contoso.local",
+            "record_data": "10.0.0.99",
+            "action": "remove"
+        });
+        assert!(dnstool(&args).await.is_ok());
+    }
 }

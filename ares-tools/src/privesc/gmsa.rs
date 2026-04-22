@@ -222,4 +222,53 @@ mod tests {
         let creds = format!("{domain}/{username}:{password}@{coerce_from}");
         assert_eq!(creds, "contoso.local/admin:P@ssw0rd!@dc01.contoso.local");
     }
+
+    // --- mock executor tests ---
+
+    use super::*;
+    use crate::executor::mock;
+
+    #[tokio::test]
+    async fn gmsa_dump_passwords_executes() {
+        mock::push(mock::success());
+        let args = json!({
+            "dc_ip": "192.168.58.10",
+            "username": "admin",
+            "password": "P@ssw0rd!",
+            "domain": "contoso.local"
+        });
+        assert!(gmsa_dump_passwords(&args).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn gmsa_dump_passwords_minimal_args() {
+        mock::push(mock::success());
+        let args = json!({"dc_ip": "192.168.58.10"});
+        assert!(gmsa_dump_passwords(&args).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn unconstrained_tgt_dump_executes() {
+        mock::push(mock::success());
+        let args = json!({
+            "domain": "contoso.local",
+            "username": "admin",
+            "password": "P@ssw0rd!",
+            "target_host": "web01.contoso.local"
+        });
+        assert!(unconstrained_tgt_dump(&args).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn unconstrained_coerce_and_capture_executes() {
+        mock::push(mock::success());
+        let args = json!({
+            "domain": "contoso.local",
+            "username": "admin",
+            "password": "P@ssw0rd!",
+            "coerce_from": "dc01.contoso.local",
+            "listener_ip": "10.0.0.5"
+        });
+        assert!(unconstrained_coerce_and_capture(&args).await.is_ok());
+    }
 }

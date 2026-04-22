@@ -685,4 +685,173 @@ mod tests {
         assert_eq!(key, "KRB5CCNAME");
         assert_eq!(val, "/tmp/admin.ccache");
     }
+
+    // --- mock executor tests ---
+
+    use super::*;
+    use crate::executor::mock;
+
+    #[tokio::test]
+    async fn find_delegation_with_password_executes() {
+        mock::push(mock::success());
+        let args = json!({
+            "domain": "contoso.local",
+            "username": "admin",
+            "password": "P@ssw0rd!",
+            "dc_ip": "192.168.58.10"
+        });
+        assert!(find_delegation(&args).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn find_delegation_with_hash_executes() {
+        mock::push(mock::success());
+        let args = json!({
+            "domain": "contoso.local",
+            "username": "admin",
+            "hash": "aad3b435b51404eeaad3b435b51404ee:31d6cfe0d16ae931b73c59d7e0c089c0",
+            "dc_ip": "192.168.58.10"
+        });
+        assert!(find_delegation(&args).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn s4u_attack_with_password_executes() {
+        mock::push(mock::success());
+        let args = json!({
+            "domain": "contoso.local",
+            "username": "svc_web$",
+            "password": "P@ssw0rd!",
+            "target_spn": "cifs/dc01.contoso.local",
+            "impersonate": "Administrator"
+        });
+        assert!(s4u_attack(&args).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn s4u_attack_with_hash_and_dc_ip_executes() {
+        mock::push(mock::success());
+        let args = json!({
+            "domain": "contoso.local",
+            "username": "svc_web$",
+            "hash": "31d6cfe0d16ae931b73c59d7e0c089c0",
+            "target_spn": "cifs/dc01.contoso.local",
+            "impersonate": "Administrator",
+            "dc_ip": "192.168.58.10"
+        });
+        assert!(s4u_attack(&args).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn generate_golden_ticket_executes() {
+        mock::push(mock::success());
+        let args = json!({
+            "krbtgt_hash": "31d6cfe0d16ae931b73c59d7e0c089c0",
+            "domain_sid": "S-1-5-21-1234567890-987654321-1122334455",
+            "domain": "contoso.local"
+        });
+        assert!(generate_golden_ticket(&args).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn generate_golden_ticket_with_extra_sid_executes() {
+        mock::push(mock::success());
+        let args = json!({
+            "krbtgt_hash": "31d6cfe0d16ae931b73c59d7e0c089c0",
+            "domain_sid": "S-1-5-21-1234567890-987654321-1122334455",
+            "domain": "contoso.local",
+            "extra_sid": "S-1-5-21-0000000000-000000000-000000000-519",
+            "username": "fakeadmin"
+        });
+        assert!(generate_golden_ticket(&args).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn add_computer_executes() {
+        mock::push(mock::success());
+        let args = json!({
+            "domain": "contoso.local",
+            "username": "jsmith",
+            "password": "P@ssw0rd!",
+            "computer_name": "EVIL$",
+            "computer_password": "CompP@ss123!",
+            "dc_ip": "192.168.58.10"
+        });
+        assert!(add_computer(&args).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn addspn_executes() {
+        mock::push(mock::success());
+        let args = json!({
+            "domain": "contoso.local",
+            "username": "admin",
+            "password": "P@ssw0rd!",
+            "dc_ip": "192.168.58.10",
+            "action": "add",
+            "target_account": "svc_sql",
+            "spn": "MSSQLSvc/sql01.contoso.local:1433"
+        });
+        assert!(addspn(&args).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn rbcd_write_executes() {
+        mock::push(mock::success());
+        let args = json!({
+            "domain": "contoso.local",
+            "username": "admin",
+            "password": "P@ssw0rd!",
+            "target_computer": "dc01$",
+            "attacker_sid": "S-1-5-21-1234567890-987654321-1122334455-1234",
+            "dc_ip": "192.168.58.10"
+        });
+        assert!(rbcd_write(&args).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn krbrelayup_executes() {
+        mock::push(mock::success());
+        let args = json!({
+            "domain": "contoso.local",
+            "dc_ip": "192.168.58.10"
+        });
+        assert!(krbrelayup(&args).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn krbrelayup_with_options_executes() {
+        mock::push(mock::success());
+        let args = json!({
+            "domain": "contoso.local",
+            "dc_ip": "192.168.58.10",
+            "method": "rbcd",
+            "create_user": "eviluser",
+            "create_password": "Ev1lP@ss!"
+        });
+        assert!(krbrelayup(&args).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn raise_child_with_password_executes() {
+        mock::push(mock::success());
+        let args = json!({
+            "child_domain": "child.contoso.local",
+            "username": "admin",
+            "password": "P@ssw0rd!"
+        });
+        assert!(raise_child(&args).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn raise_child_with_hash_executes() {
+        mock::push(mock::success());
+        let args = json!({
+            "child_domain": "child.contoso.local",
+            "username": "admin",
+            "hash": "31d6cfe0d16ae931b73c59d7e0c089c0",
+            "target_domain": "contoso.local"
+        });
+        assert!(raise_child(&args).await.is_ok());
+    }
 }
