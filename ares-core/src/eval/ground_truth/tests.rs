@@ -243,3 +243,132 @@ fn create_ground_truth_deduplicates() {
         .collect();
     assert_eq!(admin_iocs.len(), 1, "admin IOC should be deduplicated");
 }
+
+#[test]
+fn golden_ticket_adds_t1558_001_technique() {
+    use crate::models::SharedRedTeamState;
+
+    let mut state = SharedRedTeamState::new("op-gt".to_string());
+    state.has_golden_ticket = true;
+
+    let gt = create_ground_truth_from_red_state(&state, &[]);
+
+    let golden = gt
+        .expected_techniques
+        .iter()
+        .find(|t| t.technique_id == "T1558.001");
+    assert!(
+        golden.is_some(),
+        "T1558.001 must be present when has_golden_ticket is true"
+    );
+    let golden = golden.unwrap();
+    assert!(golden.required, "T1558.001 must be required");
+    assert_eq!(golden.technique_name, "Golden Ticket");
+}
+
+#[test]
+fn writable_share_is_marked_required() {
+    use crate::models::{Share, SharedRedTeamState};
+
+    let mut state = SharedRedTeamState::new("op-shares".to_string());
+    state.all_shares = vec![
+        Share {
+            host: "192.168.58.20".to_string(),
+            name: "NETLOGON".to_string(),
+            permissions: "READ".to_string(),
+            comment: String::new(),
+        },
+        Share {
+            host: "192.168.58.21".to_string(),
+            name: "DATA".to_string(),
+            permissions: "READ/WRITE".to_string(),
+            comment: String::new(),
+        },
+        Share {
+            host: "192.168.58.22".to_string(),
+            name: "BACKUP".to_string(),
+            permissions: "WRITE".to_string(),
+            comment: String::new(),
+        },
+        Share {
+            host: "192.168.58.23".to_string(),
+            name: "PUBLIC".to_string(),
+            permissions: "READ ONLY".to_string(),
+            comment: String::new(),
+        },
+    ];
+
+    let gt = create_ground_truth_from_red_state(&state, &[]);
+    assert_eq!(gt.expected_shares.len(), 4);
+
+    let find = |name: &str| {
+        gt.expected_shares
+            .iter()
+            .find(|s| s.name == name)
+            .unwrap_or_else(|| panic!("share '{}' missing", name))
+    };
+
+    // READ alone is not writable in the codebase logic — only WRITE or READ/WRITE
+    assert!(
+        !find("NETLOGON").required,
+        "READ-only share must not be required"
+    );
+    assert!(find("DATA").required, "READ/WRITE share must be required");
+    assert!(find("BACKUP").required, "WRITE share must be required");
+    assert!(
+        !find("PUBLIC").required,
+        "READ ONLY share must not be required"
+    );
+}
+
+#[test]
+fn technique_deduplication_across_vulns() {
+    use crate::models::{SharedRedTeamState, VulnerabilityInfo};
+    use std::collections::HashMap;
+
+    let mut state = SharedRedTeamState::new("op-dedup-tech".to_string());
+
+    // Two different vulns that both map to T1558.003 (KERBEROASTING)
+    let mut vulns: HashMap<String, VulnerabilityInfo> = HashMap::new();
+    vulns.insert(
+        "vuln-1".to_string(),
+        VulnerabilityInfo {
+            vuln_id: "vuln-1".to_string(),
+            vuln_type: "KERBEROASTING".to_string(),
+            target: "svc_http".to_string(),
+            discovered_by: String::new(),
+            discovered_at: chrono::Utc::now(),
+            details: HashMap::new(),
+            recommended_agent: String::new(),
+            priority: 1,
+        },
+    );
+    vulns.insert(
+        "vuln-2".to_string(),
+        VulnerabilityInfo {
+            vuln_id: "vuln-2".to_string(),
+            vuln_type: "KERBEROASTING".to_string(),
+            target: "svc_sql".to_string(),
+            discovered_by: String::new(),
+            discovered_at: chrono::Utc::now(),
+            details: HashMap::new(),
+            recommended_agent: String::new(),
+            priority: 1,
+        },
+    );
+    state.discovered_vulnerabilities = vulns;
+
+    let gt = create_ground_truth_from_red_state(&state, &[]);
+
+    // T1558.003 from both vulns must appear exactly once after deduplication
+    let t1558_count = gt
+        .expected_techniques
+        .iter()
+        .filter(|t| t.technique_id == "T1558.003")
+        .count();
+    assert_eq!(
+        t1558_count, 1,
+        "T1558.003 must be deduplicated across vulns: found {} copies",
+        t1558_count
+    );
+}

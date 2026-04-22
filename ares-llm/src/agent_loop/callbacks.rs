@@ -307,4 +307,157 @@ mod tests {
         let result = handle_builtin_callback(&call);
         assert!(result.is_err());
     }
+
+    #[test]
+    fn report_cracked_credential_removed() {
+        let call = make_call(
+            "report_cracked_credential",
+            serde_json::json!({"username": "administrator", "password": "Welcome1"}),
+        );
+        let result = handle_builtin_callback(&call).unwrap();
+        match result {
+            CallbackResult::Continue(msg) => {
+                assert!(msg.contains("no longer exists"));
+                assert!(msg.contains("task_complete"));
+            }
+            other => panic!("Expected Continue, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn report_crack_failed() {
+        let call = make_call(
+            "report_crack_failed",
+            serde_json::json!({"username": "jdoe", "hash_type": "ntlm"}),
+        );
+        let result = handle_builtin_callback(&call).unwrap();
+        match result {
+            CallbackResult::Continue(msg) => {
+                assert!(msg.contains("jdoe"));
+                assert!(msg.contains("ntlm"));
+            }
+            other => panic!("Expected Continue, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn report_finding() {
+        let call = make_call(
+            "report_finding",
+            serde_json::json!({"finding_type": "kerberoastable_account", "description": "Found SPN"}),
+        );
+        let result = handle_builtin_callback(&call).unwrap();
+        match result {
+            CallbackResult::Continue(msg) => {
+                assert!(msg.contains("kerberoastable_account"));
+            }
+            other => panic!("Expected Continue, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn report_lateral_success_with_target_ip() {
+        let call = make_call(
+            "report_lateral_success",
+            serde_json::json!({"target_ip": "192.168.58.10", "technique": "psexec"}),
+        );
+        let result = handle_builtin_callback(&call).unwrap();
+        match result {
+            CallbackResult::Continue(msg) => {
+                assert!(msg.contains("psexec"));
+                assert!(msg.contains("192.168.58.10"));
+            }
+            other => panic!("Expected Continue, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn report_lateral_success_with_target_fallback() {
+        // When target_ip is absent the handler falls back to the "target" key.
+        let call = make_call(
+            "report_lateral_success",
+            serde_json::json!({"target": "srv01.contoso.local", "technique": "wmiexec"}),
+        );
+        let result = handle_builtin_callback(&call).unwrap();
+        match result {
+            CallbackResult::Continue(msg) => {
+                assert!(msg.contains("wmiexec"));
+                assert!(msg.contains("srv01.contoso.local"));
+            }
+            other => panic!("Expected Continue, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn report_lateral_failed() {
+        let call = make_call(
+            "report_lateral_failed",
+            serde_json::json!({
+                "target_ip": "192.168.58.20",
+                "technique": "smbexec",
+                "reason": "access denied"
+            }),
+        );
+        let result = handle_builtin_callback(&call).unwrap();
+        match result {
+            CallbackResult::Continue(msg) => {
+                assert!(msg.contains("smbexec"));
+                assert!(msg.contains("192.168.58.20"));
+                assert!(msg.contains("access denied"));
+            }
+            other => panic!("Expected Continue, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn record_compromised_host() {
+        let call = make_call(
+            "record_compromised_host",
+            serde_json::json!({
+                "ip": "192.168.58.10",
+                "hostname": "dc01.contoso.local",
+                "access_level": "SYSTEM"
+            }),
+        );
+        let result = handle_builtin_callback(&call).unwrap();
+        match result {
+            CallbackResult::Continue(msg) => {
+                assert!(msg.contains("192.168.58.10"));
+                assert!(msg.contains("dc01.contoso.local"));
+                assert!(msg.contains("SYSTEM"));
+            }
+            other => panic!("Expected Continue, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn record_timeline_event() {
+        let call = make_call(
+            "record_timeline_event",
+            serde_json::json!({"description": "Obtained DA via AS-REP roasting"}),
+        );
+        let result = handle_builtin_callback(&call).unwrap();
+        match result {
+            CallbackResult::Continue(msg) => {
+                assert!(msg.contains("Obtained DA via AS-REP roasting"));
+            }
+            other => panic!("Expected Continue, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn complete_operation() {
+        let call = make_call(
+            "complete_operation",
+            serde_json::json!({"summary": "Achieved domain admin across all forests"}),
+        );
+        let result = handle_builtin_callback(&call).unwrap();
+        match result {
+            CallbackResult::TaskComplete { task_id, result } => {
+                assert_eq!(task_id, "operation");
+                assert!(result.contains("domain admin"));
+            }
+            other => panic!("Expected TaskComplete, got {other:?}"),
+        }
+    }
 }

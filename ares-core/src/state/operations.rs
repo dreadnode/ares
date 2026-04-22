@@ -312,3 +312,56 @@ async fn scan_keys(
     }
     Ok(all_keys)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::TimeZone;
+
+    fn ts(year: i32, month: u32, day: u32) -> Option<DateTime<Utc>> {
+        Utc.with_ymd_and_hms(year, month, day, 0, 0, 0).single()
+    }
+
+    #[test]
+    fn pick_latest_returns_most_recent_timestamp() {
+        let older = (ts(2024, 1, 1), "op-older".to_string(), false);
+        let newer = (ts(2024, 6, 1), "op-newer".to_string(), false);
+        let oldest = (ts(2023, 3, 15), "op-oldest".to_string(), false);
+        let items = [&older, &newer, &oldest];
+        assert_eq!(pick_latest(&items), "op-newer");
+    }
+
+    #[test]
+    fn pick_latest_no_timestamps_uses_lexicographic_descending() {
+        let a = (None, "op-alpha".to_string(), false);
+        let b = (None, "op-zeta".to_string(), false);
+        let c = (None, "op-beta".to_string(), false);
+        let items = [&a, &b, &c];
+        // "op-zeta" sorts last lexicographically in descending order → picked
+        assert_eq!(pick_latest(&items), "op-zeta");
+    }
+
+    #[test]
+    fn pick_latest_mixed_prefers_timestamped() {
+        let no_ts = (None, "op-zzz".to_string(), false);
+        let with_ts = (ts(2024, 1, 1), "op-aaa".to_string(), false);
+        let items = [&no_ts, &with_ts];
+        // Even though "op-zzz" sorts higher lexicographically, the timestamped
+        // entry wins because items with a timestamp are always preferred.
+        assert_eq!(pick_latest(&items), "op-aaa");
+    }
+
+    #[test]
+    fn pick_latest_single_item_with_timestamp() {
+        let only = (ts(2024, 3, 10), "op-solo".to_string(), true);
+        let items = [&only];
+        assert_eq!(pick_latest(&items), "op-solo");
+    }
+
+    #[test]
+    fn pick_latest_single_item_without_timestamp() {
+        let only = (None, "op-solo".to_string(), false);
+        let items = [&only];
+        assert_eq!(pick_latest(&items), "op-solo");
+    }
+}

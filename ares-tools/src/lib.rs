@@ -191,3 +191,136 @@ pub async fn dispatch(tool_name: &str, arguments: &Value) -> Result<ToolOutput> 
         _ => Err(anyhow::anyhow!("unknown tool: {tool_name}")),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── ToolOutput::combined ─────────────────────────────────────────────────
+
+    #[test]
+    fn combined_stdout_and_stderr_joined_with_separator() {
+        let out = ToolOutput {
+            stdout: "scan results here".to_string(),
+            stderr: "some warning".to_string(),
+            exit_code: Some(0),
+            success: true,
+        };
+        let combined = out.combined();
+        // Both pieces must appear in the merged output
+        assert!(combined.contains("scan results here"), "stdout missing");
+        assert!(combined.contains("some warning"), "stderr missing");
+        // Separator between them
+        assert!(combined.contains("--- stderr ---"), "separator missing");
+    }
+
+    #[test]
+    fn combined_empty_stderr_no_separator() {
+        let out = ToolOutput {
+            stdout: "clean output".to_string(),
+            stderr: String::new(),
+            exit_code: Some(0),
+            success: true,
+        };
+        let combined = out.combined();
+        assert!(combined.contains("clean output"), "stdout missing");
+        assert!(!combined.contains("--- stderr ---"), "unexpected separator");
+    }
+
+    #[test]
+    fn combined_empty_stdout_with_stderr() {
+        let out = ToolOutput {
+            stdout: String::new(),
+            stderr: "error message".to_string(),
+            exit_code: Some(1),
+            success: false,
+        };
+        let combined = out.combined();
+        assert!(combined.contains("error message"), "stderr missing");
+        // No separator when stdout was empty
+        assert!(
+            !combined.contains("--- stderr ---"),
+            "unexpected separator with empty stdout"
+        );
+    }
+
+    #[test]
+    fn combined_both_empty() {
+        let out = ToolOutput {
+            stdout: String::new(),
+            stderr: String::new(),
+            exit_code: Some(0),
+            success: true,
+        };
+        assert_eq!(out.combined(), "");
+    }
+
+    // ── ToolOutput::combined_raw ─────────────────────────────────────────────
+
+    #[test]
+    fn combined_raw_stdout_and_stderr_joined() {
+        let out = ToolOutput {
+            stdout: "raw stdout".to_string(),
+            stderr: "raw stderr".to_string(),
+            exit_code: Some(0),
+            success: true,
+        };
+        let raw = out.combined_raw();
+        assert!(raw.contains("raw stdout"));
+        assert!(raw.contains("raw stderr"));
+        assert!(raw.contains("--- stderr ---"));
+    }
+
+    #[test]
+    fn combined_raw_empty_stderr_no_separator() {
+        let out = ToolOutput {
+            stdout: "data".to_string(),
+            stderr: String::new(),
+            exit_code: Some(0),
+            success: true,
+        };
+        let raw = out.combined_raw();
+        assert_eq!(raw, "data");
+    }
+
+    #[test]
+    fn combined_raw_does_not_filter_noise() {
+        // combined_raw must NOT strip MOTD/noise — it's for structured parsers.
+        // We verify that a known-noise string is preserved verbatim.
+        let motd = "Last login: Mon Apr  7 12:00:00 2025 from 192.168.1.1";
+        let out = ToolOutput {
+            stdout: motd.to_string(),
+            stderr: String::new(),
+            exit_code: Some(0),
+            success: true,
+        };
+        assert_eq!(out.combined_raw(), motd);
+        // combined() would strip it; combined_raw() must not
+        assert!(out.combined_raw().contains("Last login"));
+    }
+
+    // ── dispatch ─────────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn dispatch_unknown_tool_returns_error() {
+        let args = serde_json::json!({});
+        let result = dispatch("__no_such_tool__", &args).await;
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("unknown tool"),
+            "expected 'unknown tool' in error, got: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatch_unknown_tool_includes_name_in_error() {
+        let args = serde_json::json!({});
+        let result = dispatch("definitely_not_real", &args).await;
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("definitely_not_real"),
+            "expected tool name in error message, got: {msg}"
+        );
+    }
+}

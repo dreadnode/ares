@@ -33,3 +33,37 @@ pub fn set_span_parent(span: &tracing::Span, traceparent: &str) {
     let context = global::get_text_map_propagator(|prop| prop.extract(&carrier));
     let _ = span.set_parent(context);
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn inject_traceparent_returns_none_without_propagator() {
+        // No OTel provider is configured in unit tests. The global propagator
+        // is the no-op default which injects nothing into the carrier, so
+        // `inject_traceparent` must return None rather than panic.
+        let span = tracing::Span::none();
+        let result = inject_traceparent(&span);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn set_span_parent_does_not_panic_with_no_provider() {
+        // Calling set_span_parent with a well-formed traceparent value when no
+        // OTel provider is configured should be a no-op — not a panic.
+        let span = tracing::Span::none();
+        // Valid W3C traceparent format: version-trace_id-parent_id-flags
+        set_span_parent(
+            &span,
+            "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+        );
+    }
+
+    #[test]
+    fn set_span_parent_does_not_panic_with_malformed_header() {
+        // A malformed traceparent should be silently ignored, not panic.
+        let span = tracing::Span::none();
+        set_span_parent(&span, "not-a-valid-traceparent");
+    }
+}

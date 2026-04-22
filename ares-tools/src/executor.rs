@@ -168,3 +168,135 @@ pub async fn run(program: &str, args: &[&str]) -> Result<ToolOutput> {
         .execute()
         .await
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── sanitize_tool_output ─────────────────────────────────────────────────
+
+    #[test]
+    fn sanitize_valid_utf8_passthrough() {
+        let input = b"hello world";
+        assert_eq!(sanitize_tool_output(input), "hello world");
+    }
+
+    #[test]
+    fn sanitize_strips_null_bytes() {
+        let input = b"hel\x00lo";
+        assert_eq!(sanitize_tool_output(input), "hello");
+    }
+
+    #[test]
+    fn sanitize_strips_c0_control_chars() {
+        // \x01 (SOH), \x07 (BEL), \x1b (ESC) are C0 controls that must be stripped
+        let input = b"he\x01ll\x07o\x1b";
+        assert_eq!(sanitize_tool_output(input), "hello");
+    }
+
+    #[test]
+    fn sanitize_preserves_newline_tab_cr() {
+        let input = b"line1\nline2\ttabbed\r\nwindows";
+        assert_eq!(
+            sanitize_tool_output(input),
+            "line1\nline2\ttabbed\r\nwindows"
+        );
+    }
+
+    #[test]
+    fn sanitize_empty_input() {
+        assert_eq!(sanitize_tool_output(b""), "");
+    }
+
+    #[test]
+    fn sanitize_lossy_utf8() {
+        // 0xff is not valid UTF-8; from_utf8_lossy replaces it with U+FFFD.
+        // U+FFFD (0xFFFD) is >= ' ', so it should be kept.
+        let input = b"ok\xff!";
+        let result = sanitize_tool_output(input);
+        assert!(result.starts_with("ok"));
+        assert!(result.ends_with('!'));
+        // Replacement char is present somewhere between them
+        assert!(result.contains('\u{FFFD}'));
+    }
+
+    #[test]
+    fn sanitize_mixed_control_and_printable() {
+        // BEL (\x07) stripped, space and printable kept, newline kept
+        let input = b"alert\x07\nsafe text";
+        assert_eq!(sanitize_tool_output(input), "alert\nsafe text");
+    }
+
+    // ── CommandBuilder builder API ───────────────────────────────────────────
+
+    #[test]
+    fn builder_new_does_not_panic() {
+        let _b = CommandBuilder::new("echo");
+    }
+
+    #[test]
+    fn builder_arg_chains() {
+        let _b = CommandBuilder::new("echo").arg("hello").arg("world");
+    }
+
+    #[test]
+    fn builder_args_chains() {
+        let _b = CommandBuilder::new("ls").args(["-l", "-a"]);
+    }
+
+    #[test]
+    fn builder_arg_if_true_adds_arg() {
+        // We can't inspect private fields, but we verify it returns Self (compiles & doesn't panic).
+        let _b = CommandBuilder::new("cmd").arg_if(true, "--verbose");
+    }
+
+    #[test]
+    fn builder_arg_if_false_skips_arg() {
+        let _b = CommandBuilder::new("cmd").arg_if(false, "--verbose");
+    }
+
+    #[test]
+    fn builder_flag_chains() {
+        let _b = CommandBuilder::new("nmap").flag("-p", "445");
+    }
+
+    #[test]
+    fn builder_flag_opt_some_chains() {
+        let _b = CommandBuilder::new("cmd").flag_opt("-u", Some("admin"));
+    }
+
+    #[test]
+    fn builder_flag_opt_none_skips() {
+        let _b = CommandBuilder::new("cmd").flag_opt("-u", Option::<String>::None);
+    }
+
+    #[test]
+    fn builder_env_chains() {
+        let _b = CommandBuilder::new("cmd").env("MY_VAR", "value");
+    }
+
+    #[test]
+    fn builder_timeout_secs_chains() {
+        let _b = CommandBuilder::new("cmd").timeout_secs(30);
+    }
+
+    #[test]
+    fn builder_stdin_chains() {
+        let _b = CommandBuilder::new("cmd").stdin("input data");
+    }
+
+    #[test]
+    fn builder_full_chain_does_not_panic() {
+        let _b = CommandBuilder::new("netexec")
+            .arg("smb")
+            .args(["192.168.58.10", "-u", "admin"])
+            .flag("-p", "Password1")
+            .flag_opt("--domain", Some("contoso.local"))
+            .flag_opt("--extra", Option::<String>::None)
+            .arg_if(true, "--shares")
+            .arg_if(false, "--sam")
+            .env("KRB5CCNAME", "/tmp/ticket.ccache")
+            .timeout_secs(60)
+            .stdin("y\n");
+    }
+}

@@ -367,4 +367,74 @@ mod tests {
         let json = serde_json::to_value(&tool).unwrap();
         assert_eq!(json["name"], "nmap_scan");
     }
+
+    #[test]
+    fn llm_error_is_retryable() {
+        assert!(LlmError::RateLimited {
+            retry_after_ms: None
+        }
+        .is_retryable());
+        assert!(LlmError::RateLimited {
+            retry_after_ms: Some(1000)
+        }
+        .is_retryable());
+        assert!(LlmError::Network("connection refused".into()).is_retryable());
+        assert!(LlmError::ApiError {
+            status: 500,
+            message: "internal server error".into()
+        }
+        .is_retryable());
+        assert!(LlmError::ApiError {
+            status: 503,
+            message: "unavailable".into()
+        }
+        .is_retryable());
+        assert!(!LlmError::ApiError {
+            status: 400,
+            message: "bad request".into()
+        }
+        .is_retryable());
+        assert!(!LlmError::ApiError {
+            status: 404,
+            message: "not found".into()
+        }
+        .is_retryable());
+        assert!(!LlmError::AuthError("invalid key".into()).is_retryable());
+        assert!(!LlmError::ContextTooLong("prompt too long".into()).is_retryable());
+    }
+
+    #[test]
+    fn llm_error_retry_after_ms() {
+        // RateLimited with explicit value propagates it.
+        assert_eq!(
+            LlmError::RateLimited {
+                retry_after_ms: Some(3000)
+            }
+            .retry_after_ms(),
+            Some(3000),
+        );
+        // RateLimited with None returns None.
+        assert_eq!(
+            LlmError::RateLimited {
+                retry_after_ms: None
+            }
+            .retry_after_ms(),
+            None,
+        );
+        // All other variants return None.
+        assert_eq!(LlmError::Network("timeout".into()).retry_after_ms(), None);
+        assert_eq!(
+            LlmError::ApiError {
+                status: 503,
+                message: "overloaded".into()
+            }
+            .retry_after_ms(),
+            None,
+        );
+        assert_eq!(LlmError::AuthError("bad key".into()).retry_after_ms(), None);
+        assert_eq!(
+            LlmError::ContextTooLong("too big".into()).retry_after_ms(),
+            None
+        );
+    }
 }

@@ -319,3 +319,48 @@ impl BlueTaskQueue {
         Ok(len)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn success_sets_success_true_and_stores_result() {
+        let result_payload = serde_json::json!({"found": 42});
+        let r = BlueTaskResult::success("task-1", "inv-1", result_payload.clone(), "agent-alpha");
+        assert!(r.success);
+        assert_eq!(r.task_id, "task-1");
+        assert_eq!(r.investigation_id, "inv-1");
+        assert_eq!(r.result, Some(result_payload));
+        assert!(r.error.is_none());
+        assert_eq!(r.worker_agent.as_deref(), Some("agent-alpha"));
+    }
+
+    #[test]
+    fn failure_sets_success_false_and_stores_error() {
+        let r = BlueTaskResult::failure(
+            "task-2",
+            "inv-2",
+            "connection timeout".to_string(),
+            "agent-beta",
+        );
+        assert!(!r.success);
+        assert_eq!(r.task_id, "task-2");
+        assert_eq!(r.investigation_id, "inv-2");
+        assert!(r.result.is_none());
+        assert_eq!(r.error.as_deref(), Some("connection timeout"));
+        assert_eq!(r.worker_agent.as_deref(), Some("agent-beta"));
+    }
+
+    #[test]
+    fn completed_at_is_populated_by_both_constructors() {
+        let success = BlueTaskResult::success("t", "i", serde_json::Value::Null, "a");
+        let failure = BlueTaskResult::failure("t", "i", "err".to_string(), "a");
+
+        // Both should have a non-empty RFC 3339 timestamp.
+        assert!(!success.completed_at.is_empty());
+        assert!(!failure.completed_at.is_empty());
+        assert!(chrono::DateTime::parse_from_rfc3339(&success.completed_at).is_ok());
+        assert!(chrono::DateTime::parse_from_rfc3339(&failure.completed_at).is_ok());
+    }
+}

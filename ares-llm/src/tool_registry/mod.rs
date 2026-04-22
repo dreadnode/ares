@@ -500,4 +500,292 @@ mod tests {
         assert!(names.contains(&"ntlmrelayx_to_ldaps"));
         assert!(names.contains(&"coercer"));
     }
+
+    // -----------------------------------------------------------------------
+    // Blue team tool registry tests
+    // -----------------------------------------------------------------------
+
+    #[cfg(feature = "blue")]
+    mod blue_tests {
+        use crate::tool_registry::blue::{
+            blue_tools_for_role, is_blue_callback_tool, BlueAgentRole, BLUE_CALLBACK_TOOLS,
+        };
+
+        #[test]
+        fn blue_agent_role_as_str() {
+            assert_eq!(BlueAgentRole::Orchestrator.as_str(), "blue_orchestrator");
+            assert_eq!(BlueAgentRole::Triage.as_str(), "triage");
+            assert_eq!(BlueAgentRole::ThreatHunter.as_str(), "threat_hunter");
+            assert_eq!(BlueAgentRole::LateralAnalyst.as_str(), "lateral_analyst");
+            assert_eq!(
+                BlueAgentRole::EscalationTriage.as_str(),
+                "escalation_triage"
+            );
+        }
+
+        #[test]
+        fn is_blue_callback_tool_positive() {
+            for name in BLUE_CALLBACK_TOOLS {
+                assert!(
+                    is_blue_callback_tool(name),
+                    "Expected '{name}' to be recognized as a blue callback tool"
+                );
+            }
+        }
+
+        #[test]
+        fn is_blue_callback_tool_negative() {
+            assert!(!is_blue_callback_tool("query_loki_logs"));
+            assert!(!is_blue_callback_tool("add_evidence"));
+            assert!(!is_blue_callback_tool("nmap_scan"));
+            assert!(!is_blue_callback_tool(""));
+        }
+
+        #[test]
+        fn blue_triage_tools_non_empty() {
+            let tools = blue_tools_for_role(BlueAgentRole::Triage);
+            assert!(!tools.is_empty(), "Triage role should have tools");
+            let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
+            // Loki tools
+            assert!(names.contains(&"query_loki_logs"));
+            assert!(names.contains(&"query_logs_around_timestamp"));
+            assert!(names.contains(&"query_logs_progressive"));
+            assert!(names.contains(&"get_loki_label_values"));
+            assert!(names.contains(&"execute_parallel_queries"));
+            assert!(names.contains(&"query_logs_recent"));
+            assert!(names.contains(&"combine_query_patterns"));
+            // Grafana tools
+            assert!(names.contains(&"get_grafana_alerts"));
+            assert!(names.contains(&"get_grafana_annotations"));
+            assert!(names.contains(&"search_grafana_dashboards"));
+            assert!(names.contains(&"get_grafana_dashboard"));
+            assert!(names.contains(&"get_alert_history"));
+            assert!(names.contains(&"get_alerts_in_time_range"));
+            assert!(names.contains(&"create_annotation"));
+            assert!(names.contains(&"create_detection_rule"));
+            assert!(names.contains(&"post_investigation_started"));
+            assert!(names.contains(&"post_investigation_completed"));
+            // Learning tools
+            assert!(names.contains(&"lookup_technique"));
+            assert!(names.contains(&"suggest_techniques"));
+            assert!(names.contains(&"find_similar_investigations"));
+            assert!(names.contains(&"get_effective_queries"));
+            assert!(names.contains(&"check_false_positive_pattern"));
+            assert!(names.contains(&"get_investigation_statistics"));
+            assert!(names.contains(&"generate_mitre_questions"));
+            assert!(names.contains(&"generate_pyramid_questions"));
+            assert!(names.contains(&"assess_pyramid_state"));
+            assert!(names.contains(&"get_combined_questions"));
+            assert!(names.contains(&"get_attack_chain_precursors"));
+            assert!(names.contains(&"get_detection_recipe"));
+            assert!(names.contains(&"list_detection_recipes"));
+            assert!(names.contains(&"get_attack_playbook"));
+            assert!(names.contains(&"get_detection_queries_for_technique"));
+            // Worker callbacks
+            assert!(names.contains(&"triage_complete"));
+            assert!(names.contains(&"get_investigation_context"));
+            // Investigation state tools
+            assert!(names.contains(&"add_evidence"));
+            assert!(names.contains(&"add_evidence_batch"));
+            assert!(names.contains(&"record_timeline_event"));
+            assert!(names.contains(&"add_technique"));
+            assert!(names.contains(&"get_investigation_summary"));
+            assert!(names.contains(&"transition_stage"));
+            assert!(names.contains(&"track_host_investigation"));
+            assert!(names.contains(&"track_user_investigation"));
+            assert!(names.contains(&"list_evidence"));
+            assert!(names.contains(&"get_investigation_context"));
+            assert!(names.contains(&"pop_all_queued"));
+            assert!(names.contains(&"get_suggested_evidence"));
+            assert!(names.contains(&"analyze_lateral_movement"));
+            assert!(names.contains(&"get_correlated_alerts"));
+            assert!(names.contains(&"get_queued_queries"));
+            assert!(names.contains(&"get_formatted_summary"));
+        }
+
+        #[test]
+        fn blue_threat_hunter_tools() {
+            let tools = blue_tools_for_role(BlueAgentRole::ThreatHunter);
+            let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
+            // Has loki
+            assert!(names.contains(&"query_loki_logs"));
+            // Has prometheus (hunter-specific)
+            assert!(names.contains(&"query_prometheus"));
+            assert!(names.contains(&"query_prometheus_range"));
+            assert!(names.contains(&"get_metric_names"));
+            // Has grafana
+            assert!(names.contains(&"get_grafana_alerts"));
+            // Has detection
+            assert!(names.contains(&"run_detection_query"));
+            assert!(names.contains(&"run_parallel_detections"));
+            assert!(names.contains(&"list_detection_templates"));
+            assert!(names.contains(&"get_host_activity"));
+            assert!(names.contains(&"get_user_activity"));
+            // Has learning
+            assert!(names.contains(&"lookup_technique"));
+            // Has callbacks
+            assert!(names.contains(&"hunt_complete"));
+            // Has investigation state
+            assert!(names.contains(&"add_evidence"));
+        }
+
+        #[test]
+        fn blue_lateral_analyst_tools() {
+            let tools = blue_tools_for_role(BlueAgentRole::LateralAnalyst);
+            let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
+            // Has loki
+            assert!(names.contains(&"query_loki_logs"));
+            // Has grafana
+            assert!(names.contains(&"get_grafana_alerts"));
+            // Has detection
+            assert!(names.contains(&"run_detection_query"));
+            // Has learning
+            assert!(names.contains(&"lookup_technique"));
+            // Has callbacks
+            assert!(names.contains(&"lateral_complete"));
+            // Has investigation state
+            assert!(names.contains(&"add_evidence"));
+            // Lateral-specific: add_lateral_connection
+            assert!(
+                names.contains(&"add_lateral_connection"),
+                "LateralAnalyst should have add_lateral_connection tool"
+            );
+        }
+
+        #[test]
+        fn blue_orchestrator_tools() {
+            let tools = blue_tools_for_role(BlueAgentRole::Orchestrator);
+            let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
+            // Orchestrator-specific dispatch tools
+            assert!(names.contains(&"dispatch_triage"));
+            assert!(names.contains(&"dispatch_threat_hunt"));
+            assert!(names.contains(&"dispatch_lateral_analysis"));
+            assert!(names.contains(&"get_investigation_status"));
+            assert!(names.contains(&"get_task_result"));
+            assert!(names.contains(&"wait_for_all_tasks"));
+            assert!(names.contains(&"complete_investigation"));
+            assert!(names.contains(&"escalate_investigation"));
+            // Has investigation state tools
+            assert!(names.contains(&"add_evidence"));
+            assert!(names.contains(&"get_investigation_summary"));
+        }
+
+        #[test]
+        fn blue_escalation_triage_tools() {
+            let tools = blue_tools_for_role(BlueAgentRole::EscalationTriage);
+            let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
+            // Escalation-specific callbacks
+            assert!(names.contains(&"confirm_escalation"));
+            assert!(names.contains(&"downgrade_escalation"));
+            assert!(names.contains(&"request_reinvestigation"));
+            assert!(names.contains(&"route_to_team"));
+            // Has investigation state tools
+            assert!(names.contains(&"add_evidence"));
+            assert!(names.contains(&"get_investigation_summary"));
+        }
+
+        #[test]
+        fn lateral_analyst_only_role_with_lateral_connection() {
+            for role in [
+                BlueAgentRole::Orchestrator,
+                BlueAgentRole::Triage,
+                BlueAgentRole::ThreatHunter,
+                BlueAgentRole::EscalationTriage,
+            ] {
+                let tools = blue_tools_for_role(role);
+                let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
+                assert!(
+                    !names.contains(&"add_lateral_connection"),
+                    "{:?} should NOT have add_lateral_connection",
+                    role
+                );
+            }
+        }
+
+        #[test]
+        fn blue_tool_schemas_valid_json() {
+            for role in [
+                BlueAgentRole::Orchestrator,
+                BlueAgentRole::Triage,
+                BlueAgentRole::ThreatHunter,
+                BlueAgentRole::LateralAnalyst,
+                BlueAgentRole::EscalationTriage,
+            ] {
+                let tools = blue_tools_for_role(role);
+                for tool in &tools {
+                    assert!(
+                        tool.input_schema.is_object(),
+                        "Tool '{}' (role {:?}) has non-object schema",
+                        tool.name,
+                        role
+                    );
+                    assert!(
+                        tool.input_schema.get("type").is_some(),
+                        "Tool '{}' (role {:?}) missing 'type' in schema",
+                        tool.name,
+                        role
+                    );
+                }
+            }
+        }
+
+        #[test]
+        fn no_duplicate_blue_tool_names_per_role() {
+            // Known duplicate: get_investigation_context appears in both
+            // escalation_triage callbacks and investigation_state tools.
+            let known_dupes: std::collections::HashSet<(&str, &str)> =
+                [("escalation_triage", "get_investigation_context")]
+                    .into_iter()
+                    .collect();
+            for role in [
+                BlueAgentRole::Orchestrator,
+                BlueAgentRole::Triage,
+                BlueAgentRole::ThreatHunter,
+                BlueAgentRole::LateralAnalyst,
+                BlueAgentRole::EscalationTriage,
+            ] {
+                let tools = blue_tools_for_role(role);
+                let mut seen = std::collections::HashSet::new();
+                for tool in &tools {
+                    if !seen.insert(&tool.name) {
+                        assert!(
+                            known_dupes.contains(&(role.as_str(), tool.name.as_str())),
+                            "Unexpected duplicate tool '{}' in blue role {:?}",
+                            tool.name,
+                            role
+                        );
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn all_blue_roles_have_investigation_state_tools() {
+            for role in [
+                BlueAgentRole::Orchestrator,
+                BlueAgentRole::Triage,
+                BlueAgentRole::ThreatHunter,
+                BlueAgentRole::LateralAnalyst,
+                BlueAgentRole::EscalationTriage,
+            ] {
+                let tools = blue_tools_for_role(role);
+                let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
+                assert!(
+                    names.contains(&"add_evidence"),
+                    "{:?} missing add_evidence",
+                    role
+                );
+                assert!(
+                    names.contains(&"get_investigation_summary"),
+                    "{:?} missing get_investigation_summary",
+                    role
+                );
+                assert!(
+                    names.contains(&"add_technique"),
+                    "{:?} missing add_technique",
+                    role
+                );
+            }
+        }
+    }
 }

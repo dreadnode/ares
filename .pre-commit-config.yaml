@@ -29,7 +29,7 @@ repos:
     rev: v2.4.2
     hooks:
       - id: codespell
-        entry: codespell -q 3 -f --skip=".git,.github,README.md,target,Cargo.lock" --ignore-words-list="astroid,braket,unstall,infinit,sems,te"
+        entry: codespell -q 3 -f --skip=".git,.github,README.md,target,Cargo.lock" --ignore-words-list="astroid,braket,unstall,infinit,sems,te,hel"
 
   - repo: https://github.com/jumanjihouse/pre-commit-hooks
     rev: 3.0.0

@@ -174,7 +174,7 @@ pub fn format_state_context(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ares_core::models::{Credential, Hash, Host};
+    use ares_core::models::{Credential, Hash, Host, VulnerabilityInfo};
 
     fn make_snapshot() -> StateSnapshot {
         StateSnapshot::default()
@@ -323,5 +323,52 @@ mod tests {
         }];
         let ctx = format_state_context(&snap, "recon", None);
         assert!(!ctx.contains("### Cracked Hashes"));
+    }
+
+    #[test]
+    fn format_state_context_delegation_marker() {
+        // A credential whose username is in delegation_accounts must show
+        // the [DELEGATION ONLY] warning so the LLM avoids generic auth with it.
+        let mut snap = make_snapshot();
+        snap.credentials = vec![Credential {
+            id: String::new(),
+            username: "svc_rbcd".to_string(),
+            password: "P@ss1".to_string(),
+            domain: "contoso.local".to_string(),
+            source: String::new(),
+            discovered_at: None,
+            is_admin: false,
+            parent_id: None,
+            attack_step: 0,
+        }];
+        snap.delegation_accounts.insert("svc_rbcd".to_string());
+        let ctx = format_state_context(&snap, "lateral", None);
+        assert!(ctx.contains("### Discovered Credentials"));
+        assert!(ctx.contains("[DELEGATION ONLY"));
+        assert!(ctx.contains("svc_rbcd"));
+    }
+
+    #[test]
+    fn format_state_context_pending_vulns_for_exploit() {
+        // Pending (un-exploited) vulnerabilities must appear for task_type "exploit".
+        let mut snap = make_snapshot();
+        let vuln = VulnerabilityInfo {
+            vuln_id: "VULN-001".to_string(),
+            vuln_type: "esc1".to_string(),
+            target: "ca01.contoso.local".to_string(),
+            discovered_by: String::new(),
+            discovered_at: chrono::Utc::now(),
+            details: std::collections::HashMap::new(),
+            recommended_agent: String::new(),
+            priority: 10,
+        };
+        snap.discovered_vulnerabilities
+            .insert("VULN-001".to_string(), vuln);
+        // exploited_vulnerabilities is empty — so VULN-001 is pending
+        let ctx = format_state_context(&snap, "exploit", None);
+        assert!(ctx.contains("### Pending Vulnerabilities"));
+        assert!(ctx.contains("VULN-001"));
+        assert!(ctx.contains("esc1"));
+        assert!(ctx.contains("ca01.contoso.local"));
     }
 }
