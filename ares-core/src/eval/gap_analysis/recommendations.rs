@@ -239,3 +239,190 @@ pub fn recommend_for_technique(tech: &ExpectedTechnique) -> Option<DetectionReco
             .to_string(),
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::PyramidLevel;
+
+    fn make_ioc(ioc_type: &str, value: &str, required: bool) -> ExpectedIOC {
+        ExpectedIOC {
+            ioc_type: ioc_type.to_string(),
+            value: value.to_string(),
+            pyramid_level: PyramidLevel::IpAddresses,
+            mitre_techniques: vec!["T1046".to_string()],
+            required,
+            source: String::new(),
+        }
+    }
+
+    fn make_technique(id: &str, name: &str, required: bool) -> ExpectedTechnique {
+        ExpectedTechnique {
+            technique_id: id.to_string(),
+            technique_name: name.to_string(),
+            required,
+            parent_id: None,
+        }
+    }
+
+    // ── recommend_for_ioc ──────────────────────────────────────────
+
+    #[test]
+    fn ioc_ip_recommendation() {
+        let ioc = make_ioc("ip", "10.0.0.1", true);
+        let rec = recommend_for_ioc(&ioc).unwrap();
+        assert_eq!(rec.category, "query");
+        assert_eq!(rec.priority, "high");
+        assert!(rec.title.contains("10.0.0.1"));
+        assert!(rec.description.contains("10.0.0.1"));
+    }
+
+    #[test]
+    fn ioc_ip_optional_medium_priority() {
+        let ioc = make_ioc("ip", "10.0.0.1", false);
+        let rec = recommend_for_ioc(&ioc).unwrap();
+        assert_eq!(rec.priority, "medium");
+    }
+
+    #[test]
+    fn ioc_user_recommendation() {
+        let ioc = make_ioc("user", "admin", true);
+        let rec = recommend_for_ioc(&ioc).unwrap();
+        assert_eq!(rec.priority, "critical");
+        assert!(rec.title.contains("admin"));
+    }
+
+    #[test]
+    fn ioc_user_optional_high_priority() {
+        let ioc = make_ioc("user", "admin", false);
+        let rec = recommend_for_ioc(&ioc).unwrap();
+        assert_eq!(rec.priority, "high");
+    }
+
+    #[test]
+    fn ioc_hostname_recommendation() {
+        let ioc = make_ioc("hostname", "dc01.corp.local", true);
+        let rec = recommend_for_ioc(&ioc).unwrap();
+        assert_eq!(rec.category, "query");
+        assert!(rec.title.contains("dc01.corp.local"));
+    }
+
+    #[test]
+    fn ioc_domain_recommendation() {
+        let ioc = make_ioc("domain", "corp.local", false);
+        let rec = recommend_for_ioc(&ioc).unwrap();
+        assert!(rec.title.contains("corp.local"));
+    }
+
+    #[test]
+    fn ioc_hash_recommendation() {
+        let ioc = make_ioc("hash", "aabbccdd11223344aabbccdd11223344", false);
+        let rec = recommend_for_ioc(&ioc).unwrap();
+        assert_eq!(rec.category, "rule");
+        assert_eq!(rec.priority, "medium");
+        assert!(rec.description.contains("aabbccdd11223344"));
+    }
+
+    #[test]
+    fn ioc_unknown_type_returns_none() {
+        let ioc = make_ioc("foobar", "something", true);
+        assert!(recommend_for_ioc(&ioc).is_none());
+    }
+
+    #[test]
+    fn ioc_preserves_mitre_techniques() {
+        let ioc = make_ioc("ip", "10.0.0.1", true);
+        let rec = recommend_for_ioc(&ioc).unwrap();
+        assert_eq!(rec.techniques, vec!["T1046"]);
+    }
+
+    // ── recommend_for_technique ────────────────────────────────────
+
+    #[test]
+    fn technique_t1003_known() {
+        let tech = make_technique("T1003", "Credential Dumping", true);
+        let rec = recommend_for_technique(&tech).unwrap();
+        assert_eq!(rec.priority, "critical");
+        assert!(rec.title.contains("credential dumping"));
+    }
+
+    #[test]
+    fn technique_t1003_optional_high() {
+        let tech = make_technique("T1003", "Credential Dumping", false);
+        let rec = recommend_for_technique(&tech).unwrap();
+        assert_eq!(rec.priority, "high");
+    }
+
+    #[test]
+    fn technique_t1003_006_exact_match() {
+        let tech = make_technique("T1003.006", "DCSync", true);
+        let rec = recommend_for_technique(&tech).unwrap();
+        assert!(rec.title.contains("DCSync"));
+    }
+
+    #[test]
+    fn technique_t1558_003_kerberoasting() {
+        let tech = make_technique("T1558.003", "Kerberoasting", true);
+        let rec = recommend_for_technique(&tech).unwrap();
+        assert!(rec.title.contains("Kerberoasting"));
+    }
+
+    #[test]
+    fn technique_t1558_004_asrep() {
+        let tech = make_technique("T1558.004", "AS-REP Roasting", false);
+        let rec = recommend_for_technique(&tech).unwrap();
+        assert!(rec.title.contains("AS-REP Roasting"));
+    }
+
+    #[test]
+    fn technique_t1558_001_golden_ticket() {
+        let tech = make_technique("T1558.001", "Golden Ticket", true);
+        let rec = recommend_for_technique(&tech).unwrap();
+        assert!(rec.title.contains("Golden Ticket"));
+    }
+
+    #[test]
+    fn technique_t1110_brute_force() {
+        let tech = make_technique("T1110", "Brute Force", true);
+        let rec = recommend_for_technique(&tech).unwrap();
+        assert!(rec.title.contains("brute force"));
+    }
+
+    #[test]
+    fn technique_t1649_certificate() {
+        let tech = make_technique("T1649", "Certificate Abuse", false);
+        let rec = recommend_for_technique(&tech).unwrap();
+        assert!(rec.title.contains("certificate"));
+    }
+
+    #[test]
+    fn technique_sub_falls_back_to_parent() {
+        // T1550.003 is in the table, check it
+        let tech = make_technique("T1550.003", "Constrained Delegation", true);
+        let rec = recommend_for_technique(&tech).unwrap();
+        assert!(rec.title.contains("Constrained Delegation"));
+    }
+
+    #[test]
+    fn technique_unknown_gets_generic() {
+        let tech = make_technique("T9999", "Unknown Tech", true);
+        let rec = recommend_for_technique(&tech).unwrap();
+        assert!(rec.title.contains("T9999"));
+        assert_eq!(rec.priority, "high");
+    }
+
+    #[test]
+    fn technique_unknown_optional_medium() {
+        let tech = make_technique("T9999", "", false);
+        let rec = recommend_for_technique(&tech).unwrap();
+        assert_eq!(rec.priority, "medium");
+        assert!(rec.description.contains("Unknown"));
+    }
+
+    #[test]
+    fn technique_preserves_id() {
+        let tech = make_technique("T1003.006", "DCSync", true);
+        let rec = recommend_for_technique(&tech).unwrap();
+        assert_eq!(rec.techniques, vec!["T1003.006"]);
+    }
+}

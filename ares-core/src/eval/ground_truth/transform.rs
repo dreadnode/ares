@@ -200,3 +200,285 @@ pub fn create_ground_truth_from_red_state(
         min_ioc_detection_rate: 0.5,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::{Credential, Hash, Host, Share, SharedRedTeamState, User};
+
+    fn empty_state() -> SharedRedTeamState {
+        SharedRedTeamState::new("op-test".to_string())
+    }
+
+    // ── basic ──────────────────────────────────────────────────────
+
+    #[test]
+    fn empty_state_produces_empty_gt() {
+        let state = empty_state();
+        let gt = create_ground_truth_from_red_state(&state, &[]);
+        assert_eq!(gt.operation_id, "op-test");
+        assert!(gt.expected_iocs.is_empty());
+        assert!(gt.expected_techniques.is_empty());
+        assert!(gt.expected_shares.is_empty());
+        assert!(gt.expected_vulnerabilities.is_empty());
+    }
+
+    // ── hosts → IOCs ───────────────────────────────────────────────
+
+    #[test]
+    fn hosts_produce_ip_iocs() {
+        let mut state = empty_state();
+        state.all_hosts.push(Host {
+            ip: "10.0.0.1".to_string(),
+            hostname: String::new(),
+            os: String::new(),
+            roles: vec![],
+            services: vec![],
+            is_dc: false,
+            owned: false,
+        });
+        let gt = create_ground_truth_from_red_state(&state, &[]);
+        assert_eq!(gt.expected_iocs.len(), 1);
+        assert_eq!(gt.expected_iocs[0].ioc_type, "ip");
+        assert_eq!(gt.expected_iocs[0].value, "10.0.0.1");
+        assert!(gt.expected_iocs[0].required);
+    }
+
+    #[test]
+    fn hosts_with_hostname_produce_two_iocs() {
+        let mut state = empty_state();
+        state.all_hosts.push(Host {
+            ip: "10.0.0.1".to_string(),
+            hostname: "dc01.corp.local".to_string(),
+            os: String::new(),
+            roles: vec![],
+            services: vec![],
+            is_dc: false,
+            owned: false,
+        });
+        let gt = create_ground_truth_from_red_state(&state, &[]);
+        assert_eq!(gt.expected_iocs.len(), 2);
+        let types: Vec<_> = gt.expected_iocs.iter().map(|i| &i.ioc_type).collect();
+        assert!(types.contains(&&"ip".to_string()));
+        assert!(types.contains(&&"hostname".to_string()));
+    }
+
+    // ── users → IOCs ───────────────────────────────────────────────
+
+    #[test]
+    fn users_produce_user_iocs() {
+        let mut state = empty_state();
+        state.all_users.push(User {
+            username: "admin".to_string(),
+            domain: "corp.local".to_string(),
+            description: String::new(),
+            is_admin: true,
+            source: String::new(),
+        });
+        let gt = create_ground_truth_from_red_state(&state, &[]);
+        let user_iocs: Vec<_> = gt
+            .expected_iocs
+            .iter()
+            .filter(|i| i.ioc_type == "user")
+            .collect();
+        assert_eq!(user_iocs.len(), 1);
+        assert!(user_iocs[0].required); // admin → required
+    }
+
+    #[test]
+    fn non_admin_user_not_required() {
+        let mut state = empty_state();
+        state.all_users.push(User {
+            username: "jsmith".to_string(),
+            domain: "corp.local".to_string(),
+            description: String::new(),
+            is_admin: false,
+            source: String::new(),
+        });
+        let gt = create_ground_truth_from_red_state(&state, &[]);
+        let user_iocs: Vec<_> = gt
+            .expected_iocs
+            .iter()
+            .filter(|i| i.ioc_type == "user")
+            .collect();
+        assert!(!user_iocs[0].required);
+    }
+
+    // ── credentials → IOCs ─────────────────────────────────────────
+
+    #[test]
+    fn credentials_produce_user_iocs() {
+        let mut state = empty_state();
+        state.all_credentials.push(Credential {
+            id: "c1".to_string(),
+            username: "svc_account".to_string(),
+            password: "pass123".to_string(),
+            domain: "corp.local".to_string(),
+            source: String::new(),
+            discovered_at: None,
+            is_admin: false,
+            parent_id: None,
+            attack_step: 0,
+        });
+        let gt = create_ground_truth_from_red_state(&state, &[]);
+        let user_iocs: Vec<_> = gt
+            .expected_iocs
+            .iter()
+            .filter(|i| i.ioc_type == "user")
+            .collect();
+        assert_eq!(user_iocs.len(), 1);
+        assert_eq!(user_iocs[0].value, "svc_account");
+    }
+
+    // ── hashes → IOCs ──────────────────────────────────────────────
+
+    #[test]
+    fn hashes_produce_hash_iocs() {
+        let mut state = empty_state();
+        state.all_hashes.push(Hash {
+            id: "h1".to_string(),
+            username: "admin".to_string(),
+            hash_value: "aabbccdd11223344".to_string(),
+            hash_type: "ntlm".to_string(),
+            domain: "corp.local".to_string(),
+            source: String::new(),
+            cracked_password: None,
+            discovered_at: None,
+            parent_id: None,
+            attack_step: 0,
+            aes_key: None,
+        });
+        let gt = create_ground_truth_from_red_state(&state, &[]);
+        let hash_iocs: Vec<_> = gt
+            .expected_iocs
+            .iter()
+            .filter(|i| i.ioc_type == "hash")
+            .collect();
+        assert_eq!(hash_iocs.len(), 1);
+        assert!(!hash_iocs[0].required);
+    }
+
+    // ── techniques ─────────────────────────────────────────────────
+
+    #[test]
+    fn identified_techniques_produce_expected() {
+        let state = empty_state();
+        let gt =
+            create_ground_truth_from_red_state(&state, &["T1003".to_string(), "T1046".to_string()]);
+        assert_eq!(gt.expected_techniques.len(), 2);
+    }
+
+    #[test]
+    fn sub_technique_has_parent_id() {
+        let state = empty_state();
+        let gt = create_ground_truth_from_red_state(&state, &["T1003.006".to_string()]);
+        assert_eq!(
+            gt.expected_techniques[0].parent_id,
+            Some("T1003".to_string())
+        );
+    }
+
+    #[test]
+    fn parent_technique_has_no_parent_id() {
+        let state = empty_state();
+        let gt = create_ground_truth_from_red_state(&state, &["T1003".to_string()]);
+        assert!(gt.expected_techniques[0].parent_id.is_none());
+    }
+
+    // ── domain admin / golden ticket flags ──────────────────────────
+
+    #[test]
+    fn domain_admin_adds_technique() {
+        let mut state = empty_state();
+        state.has_domain_admin = true;
+        let gt = create_ground_truth_from_red_state(&state, &[]);
+        assert!(gt
+            .expected_techniques
+            .iter()
+            .any(|t| t.technique_id == "T1078.002"));
+    }
+
+    #[test]
+    fn golden_ticket_adds_technique() {
+        let mut state = empty_state();
+        state.has_golden_ticket = true;
+        let gt = create_ground_truth_from_red_state(&state, &[]);
+        assert!(gt
+            .expected_techniques
+            .iter()
+            .any(|t| t.technique_id == "T1558.001"));
+    }
+
+    // ── shares ─────────────────────────────────────────────────────
+
+    #[test]
+    fn shares_produce_expected_shares() {
+        let mut state = empty_state();
+        state.all_shares.push(Share {
+            host: "10.0.0.1".to_string(),
+            name: "ADMIN$".to_string(),
+            permissions: "READ/WRITE".to_string(),
+            comment: String::new(),
+        });
+        let gt = create_ground_truth_from_red_state(&state, &[]);
+        assert_eq!(gt.expected_shares.len(), 1);
+        assert!(gt.expected_shares[0].required); // writable → required
+    }
+
+    #[test]
+    fn readonly_share_not_required() {
+        let mut state = empty_state();
+        state.all_shares.push(Share {
+            host: "10.0.0.1".to_string(),
+            name: "SYSVOL".to_string(),
+            permissions: "READ".to_string(),
+            comment: String::new(),
+        });
+        let gt = create_ground_truth_from_red_state(&state, &[]);
+        assert!(!gt.expected_shares[0].required);
+    }
+
+    // ── deduplication ──────────────────────────────────────────────
+
+    #[test]
+    fn deduplicates_iocs_by_value() {
+        let mut state = empty_state();
+        // Same IP from host and share
+        state.all_hosts.push(Host {
+            ip: "10.0.0.1".to_string(),
+            hostname: String::new(),
+            os: String::new(),
+            roles: vec![],
+            services: vec![],
+            is_dc: false,
+            owned: false,
+        });
+        state.all_shares.push(Share {
+            host: "10.0.0.1".to_string(),
+            name: "C$".to_string(),
+            permissions: "READ".to_string(),
+            comment: String::new(),
+        });
+        let gt = create_ground_truth_from_red_state(&state, &[]);
+        let ip_iocs: Vec<_> = gt
+            .expected_iocs
+            .iter()
+            .filter(|i| i.value == "10.0.0.1")
+            .collect();
+        assert_eq!(ip_iocs.len(), 1);
+    }
+
+    #[test]
+    fn deduplicates_techniques_by_id() {
+        let mut state = empty_state();
+        state.has_domain_admin = true;
+        // Also explicitly identified T1078.002
+        let gt = create_ground_truth_from_red_state(&state, &["T1078.002".to_string()]);
+        let t1078_count = gt
+            .expected_techniques
+            .iter()
+            .filter(|t| t.technique_id == "T1078.002")
+            .count();
+        assert_eq!(t1078_count, 1);
+    }
+}

@@ -130,3 +130,241 @@ pub fn evaluate(
         ..Default::default()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::eval::ground_truth::{ExpectedIOC, ExpectedTechnique};
+    use crate::eval::scorers::types::{EvidenceItem, InvestigationSnapshot};
+    use crate::models::PyramidLevel;
+
+    fn empty_snap() -> InvestigationSnapshot {
+        InvestigationSnapshot::default()
+    }
+
+    fn empty_gt() -> EvaluationGroundTruth {
+        EvaluationGroundTruth {
+            operation_id: "op-1".into(),
+            target_ip: "10.0.0.1".into(),
+            expected_iocs: vec![],
+            expected_techniques: vec![],
+            expected_timeline: vec![],
+            expected_shares: vec![],
+            expected_vulnerabilities: vec![],
+            min_pyramid_level: 4,
+            target_pyramid_level: 6,
+            min_technique_coverage: 0.6,
+            min_ioc_detection_rate: 0.5,
+        }
+    }
+
+    fn make_ioc(ioc_type: &str, value: &str, required: bool) -> ExpectedIOC {
+        ExpectedIOC {
+            ioc_type: ioc_type.into(),
+            value: value.into(),
+            pyramid_level: PyramidLevel::IpAddresses,
+            mitre_techniques: vec![],
+            required,
+            source: String::new(),
+        }
+    }
+
+    fn make_technique(id: &str, required: bool) -> ExpectedTechnique {
+        ExpectedTechnique {
+            technique_id: id.into(),
+            technique_name: String::new(),
+            required,
+            parent_id: None,
+        }
+    }
+
+    fn make_evidence(etype: &str, value: &str, pyramid: u32) -> EvidenceItem {
+        EvidenceItem {
+            evidence_type: etype.into(),
+            value: value.into(),
+            pyramid_level: pyramid,
+            confidence: 0.9,
+            validated: true,
+        }
+    }
+
+    // ── get_missed_iocs ────────────────────────────────────────────
+
+    #[test]
+    fn missed_iocs_all_missed() {
+        let snap = empty_snap();
+        let mut gt = empty_gt();
+        gt.expected_iocs = vec![make_ioc("ip", "10.0.0.1", true)];
+        let missed = get_missed_iocs(&snap, &gt);
+        assert_eq!(missed.len(), 1);
+        assert_eq!(missed[0].value, "10.0.0.1");
+    }
+
+    #[test]
+    fn missed_iocs_none_missed() {
+        let mut snap = empty_snap();
+        snap.evidence_values
+            .push(make_evidence("ip", "10.0.0.1", 1));
+        let mut gt = empty_gt();
+        gt.expected_iocs = vec![make_ioc("ip", "10.0.0.1", true)];
+        assert!(get_missed_iocs(&snap, &gt).is_empty());
+    }
+
+    #[test]
+    fn missed_iocs_empty_gt() {
+        let snap = empty_snap();
+        let gt = empty_gt();
+        assert!(get_missed_iocs(&snap, &gt).is_empty());
+    }
+
+    // ── get_found_iocs ─────────────────────────────────────────────
+
+    #[test]
+    fn found_iocs_all_found() {
+        let mut snap = empty_snap();
+        snap.evidence_values
+            .push(make_evidence("ip", "10.0.0.1", 1));
+        let mut gt = empty_gt();
+        gt.expected_iocs = vec![make_ioc("ip", "10.0.0.1", true)];
+        let found = get_found_iocs(&snap, &gt);
+        assert_eq!(found.len(), 1);
+    }
+
+    #[test]
+    fn found_iocs_none_found() {
+        let snap = empty_snap();
+        let mut gt = empty_gt();
+        gt.expected_iocs = vec![make_ioc("ip", "10.0.0.1", true)];
+        assert!(get_found_iocs(&snap, &gt).is_empty());
+    }
+
+    #[test]
+    fn found_iocs_partial() {
+        let mut snap = empty_snap();
+        snap.evidence_values
+            .push(make_evidence("ip", "10.0.0.1", 1));
+        let mut gt = empty_gt();
+        gt.expected_iocs = vec![
+            make_ioc("ip", "10.0.0.1", true),
+            make_ioc("ip", "10.0.0.2", true),
+        ];
+        assert_eq!(get_found_iocs(&snap, &gt).len(), 1);
+    }
+
+    // ── get_missed_techniques ──────────────────────────────────────
+
+    #[test]
+    fn missed_techniques_all_missed() {
+        let snap = empty_snap();
+        let mut gt = empty_gt();
+        gt.expected_techniques = vec![make_technique("T1003", true)];
+        let missed = get_missed_techniques(&snap, &gt);
+        assert_eq!(missed.len(), 1);
+    }
+
+    #[test]
+    fn missed_techniques_none_missed() {
+        let mut snap = empty_snap();
+        snap.identified_techniques.insert("T1003".into());
+        let mut gt = empty_gt();
+        gt.expected_techniques = vec![make_technique("T1003", true)];
+        assert!(get_missed_techniques(&snap, &gt).is_empty());
+    }
+
+    // ── get_found_techniques ───────────────────────────────────────
+
+    #[test]
+    fn found_techniques_all_found() {
+        let mut snap = empty_snap();
+        snap.identified_techniques.insert("T1003".into());
+        let mut gt = empty_gt();
+        gt.expected_techniques = vec![make_technique("T1003", true)];
+        assert_eq!(get_found_techniques(&snap, &gt).len(), 1);
+    }
+
+    #[test]
+    fn found_techniques_parent_matches_sub() {
+        let mut snap = empty_snap();
+        snap.identified_techniques.insert("T1003.001".into());
+        let mut gt = empty_gt();
+        gt.expected_techniques = vec![make_technique("T1003", true)];
+        assert_eq!(get_found_techniques(&snap, &gt).len(), 1);
+    }
+
+    // ── evaluate ───────────────────────────────────────────────────
+
+    #[test]
+    fn evaluate_empty_returns_valid_result() {
+        let snap = empty_snap();
+        let gt = empty_gt();
+        let result = evaluate("eval-1", &snap, &gt, false, "gpt-4o", 60.0);
+        assert_eq!(result.evaluation_id, "eval-1");
+        assert_eq!(result.operation_id, "op-1");
+        assert!(!result.alert_fired);
+        assert_eq!(result.model, "gpt-4o");
+        assert!((0.0..=1.0).contains(&result.overall_score));
+    }
+
+    #[test]
+    fn evaluate_with_findings() {
+        let mut snap = empty_snap();
+        snap.stage = Some("synthesis".to_string());
+        snap.evidence_values
+            .push(make_evidence("ip", "10.0.0.1", 2));
+        snap.identified_techniques.insert("T1003".into());
+        snap.highest_pyramid_level = 5;
+
+        let mut gt = empty_gt();
+        gt.expected_iocs = vec![
+            make_ioc("ip", "10.0.0.1", true),
+            make_ioc("ip", "10.0.0.2", true),
+        ];
+        gt.expected_techniques = vec![make_technique("T1003", true)];
+
+        let result = evaluate("eval-2", &snap, &gt, true, "claude", 120.0);
+        assert!(result.investigation_started);
+        assert!(result.investigation_completed);
+        assert!(result.alert_fired);
+        assert_eq!(result.found_iocs.len(), 1);
+        assert_eq!(result.missed_iocs.len(), 1);
+        assert_eq!(result.found_techniques.len(), 1);
+        assert!(result.missed_techniques.is_empty());
+        assert_eq!(result.evidence_count, 1);
+    }
+
+    #[test]
+    fn evaluate_ttp_count() {
+        let mut snap = empty_snap();
+        snap.evidence_values.push(make_evidence("ttp", "T1003", 6));
+        snap.evidence_values.push(make_evidence("ttp", "T1046", 6));
+        snap.evidence_values
+            .push(make_evidence("ip", "10.0.0.1", 2));
+        snap.highest_pyramid_level = 6;
+
+        let gt = empty_gt();
+        let result = evaluate("eval-3", &snap, &gt, false, "test", 30.0);
+        assert_eq!(result.ttp_count, 2);
+        assert_eq!(result.evidence_count, 3);
+    }
+
+    #[test]
+    fn evaluate_not_started() {
+        let snap = empty_snap();
+        let gt = empty_gt();
+        let result = evaluate("eval-4", &snap, &gt, false, "test", 0.0);
+        assert!(!result.investigation_started);
+        assert!(!result.investigation_completed);
+    }
+
+    #[test]
+    fn evaluate_scores_bounded() {
+        let mut snap = empty_snap();
+        snap.stage = Some("triage".to_string());
+        let gt = empty_gt();
+        let result = evaluate("eval-5", &snap, &gt, false, "test", 10.0);
+        assert!((0.0..=1.0).contains(&result.detection_score));
+        assert!((0.0..=1.0).contains(&result.quality_score));
+        assert!((0.0..=1.0).contains(&result.completeness_score));
+        assert!((0.0..=1.0).contains(&result.overall_score));
+    }
+}

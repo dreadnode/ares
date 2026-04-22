@@ -682,3 +682,482 @@ impl RedBlueCorrelator {
         Ok(reports)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::TimeZone;
+
+    fn make_red(
+        technique_id: Option<&str>,
+        target_ip: Option<&str>,
+        action: &str,
+        timestamp: DateTime<Utc>,
+    ) -> RedTeamActivity {
+        RedTeamActivity {
+            timestamp,
+            technique_id: technique_id.map(String::from),
+            technique_name: None,
+            action: action.to_string(),
+            target_ip: target_ip.map(String::from),
+            target_host: None,
+            credential_used: None,
+            success: true,
+            metadata: HashMap::new(),
+        }
+    }
+
+    fn make_blue(
+        technique_id: Option<&str>,
+        alert_name: &str,
+        target_ip: Option<&str>,
+        timestamp: DateTime<Utc>,
+    ) -> BlueTeamDetection {
+        BlueTeamDetection {
+            timestamp,
+            alert_name: alert_name.to_string(),
+            technique_id: technique_id.map(String::from),
+            severity: "high".to_string(),
+            target_ip: target_ip.map(String::from),
+            target_host: None,
+            investigation_id: None,
+            status: "completed".to_string(),
+            evidence_count: 3,
+            highest_pyramid_level: 4,
+            metadata: HashMap::new(),
+        }
+    }
+
+    fn base_time() -> DateTime<Utc> {
+        Utc.with_ymd_and_hms(2024, 1, 15, 10, 0, 0).unwrap()
+    }
+
+    // ── techniques_match ───────────────────────────────────────────
+
+    #[test]
+    fn techniques_match_exact() {
+        assert!(RedBlueCorrelator::techniques_match(
+            Some("T1003"),
+            Some("T1003")
+        ));
+    }
+
+    #[test]
+    fn techniques_match_parent_to_child() {
+        assert!(RedBlueCorrelator::techniques_match(
+            Some("T1003"),
+            Some("T1003.006")
+        ));
+    }
+
+    #[test]
+    fn techniques_match_child_to_parent() {
+        assert!(RedBlueCorrelator::techniques_match(
+            Some("T1003.006"),
+            Some("T1003")
+        ));
+    }
+
+    #[test]
+    fn techniques_match_different() {
+        assert!(!RedBlueCorrelator::techniques_match(
+            Some("T1003"),
+            Some("T1046")
+        ));
+    }
+
+    #[test]
+    fn techniques_match_none_red() {
+        assert!(!RedBlueCorrelator::techniques_match(None, Some("T1003")));
+    }
+
+    #[test]
+    fn techniques_match_none_blue() {
+        assert!(!RedBlueCorrelator::techniques_match(Some("T1003"), None));
+    }
+
+    #[test]
+    fn techniques_match_both_none() {
+        assert!(!RedBlueCorrelator::techniques_match(None, None));
+    }
+
+    #[test]
+    fn techniques_match_case_insensitive() {
+        assert!(RedBlueCorrelator::techniques_match(
+            Some("t1003"),
+            Some("T1003")
+        ));
+    }
+
+    #[test]
+    fn techniques_match_different_sub() {
+        assert!(RedBlueCorrelator::techniques_match(
+            Some("T1003.001"),
+            Some("T1003.006")
+        ));
+    }
+
+    // ── determine_gap_reason ───────────────────────────────────────
+
+    #[test]
+    fn gap_reason_no_technique() {
+        let activity = make_red(None, Some("10.0.0.1"), "scan", base_time());
+        let reason = RedBlueCorrelator::determine_gap_reason(&activity, &[]);
+        assert!(reason.contains("no associated MITRE technique"));
+    }
+
+    #[test]
+    fn gap_reason_no_alert_rules() {
+        let activity = make_red(Some("T1003"), Some("10.0.0.1"), "dump", base_time());
+        let reason = RedBlueCorrelator::determine_gap_reason(&activity, &[]);
+        assert!(reason.contains("No alert rules configured"));
+        assert!(reason.contains("T1003"));
+    }
+
+    #[test]
+    fn gap_reason_alert_exists_but_no_trigger() {
+        let activity = make_red(Some("T1003"), Some("10.0.0.1"), "dump", base_time());
+        let detections = vec![make_blue(
+            Some("T1003"),
+            "Cred Dump Alert",
+            Some("10.0.0.2"),
+            base_time() + Duration::hours(2),
+        )];
+        let reason = RedBlueCorrelator::determine_gap_reason(&activity, &detections);
+        assert!(reason.contains("Alert exists but did not trigger"));
+    }
+
+    // ── recommend_detection ────────────────────────────────────────
+
+    #[test]
+    fn recommend_detection_t1046() {
+        let activity = make_red(Some("T1046"), None, "scan", base_time());
+        let rec = RedBlueCorrelator::recommend_detection(&activity);
+        assert!(rec.is_some());
+        assert!(rec.unwrap().contains("scanning"));
+    }
+
+    #[test]
+    fn recommend_detection_t1003() {
+        let activity = make_red(Some("T1003"), None, "dump", base_time());
+        let rec = RedBlueCorrelator::recommend_detection(&activity);
+        assert!(rec.is_some());
+        assert!(rec.unwrap().contains("LSASS"));
+    }
+
+    #[test]
+    fn recommend_detection_t1110() {
+        let activity = make_red(Some("T1110"), None, "brute", base_time());
+        let rec = RedBlueCorrelator::recommend_detection(&activity);
+        assert!(rec.is_some());
+        assert!(rec.unwrap().contains("authentication"));
+    }
+
+    #[test]
+    fn recommend_detection_unknown_technique() {
+        let activity = make_red(Some("T9999"), None, "unknown", base_time());
+        assert!(RedBlueCorrelator::recommend_detection(&activity).is_none());
+    }
+
+    #[test]
+    fn recommend_detection_no_technique() {
+        let activity = make_red(None, None, "stuff", base_time());
+        assert!(RedBlueCorrelator::recommend_detection(&activity).is_none());
+    }
+
+    // ── calculate_technique_coverage ───────────────────────────────
+
+    #[test]
+    fn coverage_empty() {
+        let cov = RedBlueCorrelator::calculate_technique_coverage(&[], &[], &[]);
+        assert!(cov.is_empty());
+    }
+
+    #[test]
+    fn coverage_all_detected() {
+        let t = base_time();
+        let activities = vec![make_red(Some("T1003"), Some("10.0.0.1"), "dump", t)];
+        let matches = vec![CorrelationMatch {
+            red_activity: activities[0].clone(),
+            blue_detection: make_blue(Some("T1003"), "Alert", Some("10.0.0.1"), t),
+            time_delta_seconds: 60.0,
+            technique_match: true,
+            target_match: true,
+            confidence: 0.9,
+        }];
+        let cov = RedBlueCorrelator::calculate_technique_coverage(&activities, &matches, &[]);
+        assert_eq!(cov["T1003"].total, 1);
+        assert_eq!(cov["T1003"].detected, 1);
+        assert_eq!(cov["T1003"].missed, 0);
+        assert!((cov["T1003"].detection_rate - 1.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn coverage_all_missed() {
+        let t = base_time();
+        let activities = vec![make_red(Some("T1003"), Some("10.0.0.1"), "dump", t)];
+        let gaps = vec![DetectionGap {
+            red_activity: activities[0].clone(),
+            reason: "No alert".to_string(),
+            recommended_detection: None,
+            mitre_data_sources: vec![],
+        }];
+        let cov = RedBlueCorrelator::calculate_technique_coverage(&activities, &[], &gaps);
+        assert_eq!(cov["T1003"].total, 1);
+        assert_eq!(cov["T1003"].detected, 0);
+        assert_eq!(cov["T1003"].missed, 1);
+        assert!((cov["T1003"].detection_rate).abs() < 0.001);
+    }
+
+    #[test]
+    fn coverage_mixed() {
+        let t = base_time();
+        let activities = vec![
+            make_red(Some("T1003"), Some("10.0.0.1"), "dump1", t),
+            make_red(
+                Some("T1003"),
+                Some("10.0.0.2"),
+                "dump2",
+                t + Duration::minutes(1),
+            ),
+        ];
+        let matches = vec![CorrelationMatch {
+            red_activity: activities[0].clone(),
+            blue_detection: make_blue(Some("T1003"), "Alert", Some("10.0.0.1"), t),
+            time_delta_seconds: 30.0,
+            technique_match: true,
+            target_match: true,
+            confidence: 0.9,
+        }];
+        let gaps = vec![DetectionGap {
+            red_activity: activities[1].clone(),
+            reason: "missed".to_string(),
+            recommended_detection: None,
+            mitre_data_sources: vec![],
+        }];
+        let cov = RedBlueCorrelator::calculate_technique_coverage(&activities, &matches, &gaps);
+        assert_eq!(cov["T1003"].total, 2);
+        assert_eq!(cov["T1003"].detected, 1);
+        assert_eq!(cov["T1003"].missed, 1);
+        assert!((cov["T1003"].detection_rate - 0.5).abs() < 0.001);
+    }
+
+    // ── correlate ──────────────────────────────────────────────────
+
+    #[test]
+    fn correlate_empty() {
+        let correlator = RedBlueCorrelator::new("/tmp/test", None);
+        let report = correlator.correlate(&[], &[], "op-1");
+        assert_eq!(report.total_red_activities, 0);
+        assert_eq!(report.total_blue_detections, 0);
+        assert_eq!(report.matched_activities, 0);
+        assert!(report.matches.is_empty());
+        assert!(report.gaps.is_empty());
+        assert!((report.detection_rate).abs() < 0.001);
+    }
+
+    #[test]
+    fn correlate_exact_match() {
+        let t = base_time();
+        let red = vec![make_red(Some("T1003"), Some("10.0.0.1"), "dump", t)];
+        let blue = vec![make_blue(
+            Some("T1003"),
+            "Cred Alert",
+            Some("10.0.0.1"),
+            t + Duration::minutes(2),
+        )];
+        let correlator = RedBlueCorrelator::new("/tmp/test", None);
+        let report = correlator.correlate(&red, &blue, "op-1");
+        assert_eq!(report.matched_activities, 1);
+        assert!(report.gaps.is_empty());
+        assert!(report.detection_rate > 0.9);
+        assert!(report.matches[0].technique_match);
+        assert!(report.matches[0].target_match);
+    }
+
+    #[test]
+    fn correlate_technique_only_match() {
+        let t = base_time();
+        let red = vec![make_red(Some("T1003"), Some("10.0.0.1"), "dump", t)];
+        let blue = vec![make_blue(
+            Some("T1003"),
+            "Alert",
+            Some("10.0.0.2"),
+            t + Duration::minutes(5),
+        )];
+        let correlator = RedBlueCorrelator::new("/tmp/test", None);
+        let report = correlator.correlate(&red, &blue, "op-1");
+        assert_eq!(report.matched_activities, 1);
+        assert!(report.matches[0].technique_match);
+        assert!(!report.matches[0].target_match);
+    }
+
+    #[test]
+    fn correlate_no_match_outside_window() {
+        let t = base_time();
+        let red = vec![make_red(Some("T1003"), Some("10.0.0.1"), "dump", t)];
+        let blue = vec![make_blue(
+            Some("T1003"),
+            "Alert",
+            Some("10.0.0.1"),
+            t + Duration::hours(2),
+        )];
+        let correlator = RedBlueCorrelator::new("/tmp/test", None);
+        let report = correlator.correlate(&red, &blue, "op-1");
+        assert_eq!(report.matched_activities, 0);
+        assert_eq!(report.gaps.len(), 1);
+    }
+
+    #[test]
+    fn correlate_gap_has_recommendation() {
+        let t = base_time();
+        let red = vec![make_red(Some("T1046"), Some("10.0.0.1"), "scan", t)];
+        let correlator = RedBlueCorrelator::new("/tmp/test", None);
+        let report = correlator.correlate(&red, &[], "op-1");
+        assert_eq!(report.gaps.len(), 1);
+        assert!(report.gaps[0].recommended_detection.is_some());
+    }
+
+    #[test]
+    fn correlate_false_positives() {
+        let t = base_time();
+        let red = vec![make_red(Some("T1003"), Some("10.0.0.1"), "dump", t)];
+        let blue = vec![
+            make_blue(
+                Some("T1003"),
+                "Real Alert",
+                Some("10.0.0.1"),
+                t + Duration::minutes(2),
+            ),
+            make_blue(
+                Some("T1046"),
+                "Unrelated Alert",
+                Some("10.0.0.5"),
+                t + Duration::minutes(10),
+            ),
+        ];
+        let correlator = RedBlueCorrelator::new("/tmp/test", None);
+        let report = correlator.correlate(&red, &blue, "op-1");
+        assert_eq!(report.matched_activities, 1);
+        assert_eq!(report.false_positives.len(), 1);
+    }
+
+    #[test]
+    fn correlate_detection_rate() {
+        let t = base_time();
+        let red = vec![
+            make_red(Some("T1003"), Some("10.0.0.1"), "dump", t),
+            make_red(
+                Some("T1046"),
+                Some("10.0.0.2"),
+                "scan",
+                t + Duration::minutes(1),
+            ),
+        ];
+        let blue = vec![make_blue(
+            Some("T1003"),
+            "Alert",
+            Some("10.0.0.1"),
+            t + Duration::minutes(2),
+        )];
+        let correlator = RedBlueCorrelator::new("/tmp/test", None);
+        let report = correlator.correlate(&red, &blue, "op-1");
+        // One match out of two activities
+        assert_eq!(report.matched_activities, 1);
+        assert!((report.detection_rate - 0.5).abs() < 0.001);
+    }
+
+    #[test]
+    fn correlate_mean_time_to_detect() {
+        let t = base_time();
+        let red = vec![make_red(Some("T1003"), Some("10.0.0.1"), "dump", t)];
+        let blue = vec![make_blue(
+            Some("T1003"),
+            "Alert",
+            Some("10.0.0.1"),
+            t + Duration::minutes(5),
+        )];
+        let correlator = RedBlueCorrelator::new("/tmp/test", None);
+        let report = correlator.correlate(&red, &blue, "op-1");
+        assert!(report.mean_time_to_detect.is_some());
+        let mttd = report.mean_time_to_detect.unwrap();
+        assert!((mttd - 300.0).abs() < 1.0);
+    }
+
+    #[test]
+    fn correlate_no_mttd_when_no_matches() {
+        let correlator = RedBlueCorrelator::new("/tmp/test", None);
+        let report = correlator.correlate(&[], &[], "op-1");
+        assert!(report.mean_time_to_detect.is_none());
+    }
+
+    #[test]
+    fn correlate_custom_time_window() {
+        let t = base_time();
+        let red = vec![make_red(Some("T1003"), Some("10.0.0.1"), "dump", t)];
+        let blue = vec![make_blue(
+            Some("T1003"),
+            "Alert",
+            Some("10.0.0.1"),
+            t + Duration::minutes(10),
+        )];
+        // 5-minute window should miss a 10-minute delta
+        let correlator = RedBlueCorrelator::new("/tmp/test", Some(5));
+        let report = correlator.correlate(&red, &blue, "op-1");
+        assert_eq!(report.matched_activities, 0);
+    }
+
+    #[test]
+    fn correlate_multiple_techniques() {
+        let t = base_time();
+        let red = vec![
+            make_red(Some("T1003"), Some("10.0.0.1"), "dump", t),
+            make_red(
+                Some("T1046"),
+                Some("10.0.0.2"),
+                "scan",
+                t + Duration::minutes(1),
+            ),
+            make_red(
+                Some("T1078.002"),
+                Some("10.0.0.3"),
+                "da",
+                t + Duration::minutes(5),
+            ),
+        ];
+        let blue = vec![
+            make_blue(
+                Some("T1003"),
+                "Cred Alert",
+                Some("10.0.0.1"),
+                t + Duration::minutes(2),
+            ),
+            make_blue(
+                Some("T1046"),
+                "Scan Alert",
+                Some("10.0.0.2"),
+                t + Duration::minutes(3),
+            ),
+        ];
+        let correlator = RedBlueCorrelator::new("/tmp/test", None);
+        let report = correlator.correlate(&red, &blue, "op-1");
+        // T1003 and T1046 matched, T1078.002 is a gap
+        assert_eq!(report.matched_activities, 2);
+        assert_eq!(report.gaps.len(), 1);
+        assert_eq!(report.technique_coverage.len(), 3);
+    }
+
+    // ── constructor ────────────────────────────────────────────────
+
+    #[test]
+    fn new_default_window() {
+        let c = RedBlueCorrelator::new("/tmp/test", None);
+        assert_eq!(c.time_window.num_minutes(), 30);
+    }
+
+    #[test]
+    fn new_custom_window() {
+        let c = RedBlueCorrelator::new("/tmp/test", Some(60));
+        assert_eq!(c.time_window.num_minutes(), 60);
+    }
+}

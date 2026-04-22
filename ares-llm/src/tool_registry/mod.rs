@@ -501,6 +501,78 @@ mod tests {
         assert!(names.contains(&"coercer"));
     }
 
+    // ── AgentRole::parse ────────────────────────────────────────────
+
+    #[test]
+    fn parse_role_exact() {
+        assert_eq!(AgentRole::parse("recon"), Some(AgentRole::Recon));
+        assert_eq!(
+            AgentRole::parse("credential_access"),
+            Some(AgentRole::CredentialAccess)
+        );
+        assert_eq!(AgentRole::parse("cracker"), Some(AgentRole::Cracker));
+        assert_eq!(AgentRole::parse("acl"), Some(AgentRole::Acl));
+        assert_eq!(AgentRole::parse("privesc"), Some(AgentRole::Privesc));
+        assert_eq!(AgentRole::parse("lateral"), Some(AgentRole::Lateral));
+        assert_eq!(AgentRole::parse("coercion"), Some(AgentRole::Coercion));
+        assert_eq!(
+            AgentRole::parse("orchestrator"),
+            Some(AgentRole::Orchestrator)
+        );
+    }
+
+    #[test]
+    fn parse_role_aliases() {
+        assert_eq!(AgentRole::parse("crack"), Some(AgentRole::Cracker));
+        assert_eq!(AgentRole::parse("acl_analysis"), Some(AgentRole::Acl));
+        assert_eq!(
+            AgentRole::parse("privesc_enumeration"),
+            Some(AgentRole::Privesc)
+        );
+        assert_eq!(
+            AgentRole::parse("lateral_movement"),
+            Some(AgentRole::Lateral)
+        );
+    }
+
+    #[test]
+    fn parse_role_case_insensitive() {
+        assert_eq!(AgentRole::parse("RECON"), Some(AgentRole::Recon));
+        assert_eq!(AgentRole::parse("Lateral"), Some(AgentRole::Lateral));
+        assert_eq!(
+            AgentRole::parse("CREDENTIAL_ACCESS"),
+            Some(AgentRole::CredentialAccess)
+        );
+    }
+
+    #[test]
+    fn parse_role_unknown() {
+        assert!(AgentRole::parse("unknown").is_none());
+        assert!(AgentRole::parse("").is_none());
+        assert!(AgentRole::parse("blue").is_none());
+    }
+
+    #[test]
+    fn parse_roundtrip() {
+        for role in [
+            AgentRole::Recon,
+            AgentRole::CredentialAccess,
+            AgentRole::Cracker,
+            AgentRole::Acl,
+            AgentRole::Privesc,
+            AgentRole::Lateral,
+            AgentRole::Coercion,
+            AgentRole::Orchestrator,
+        ] {
+            assert_eq!(
+                AgentRole::parse(role.as_str()),
+                Some(role),
+                "Roundtrip failed for {:?}",
+                role
+            );
+        }
+    }
+
     // -----------------------------------------------------------------------
     // Blue team tool registry tests
     // -----------------------------------------------------------------------
