@@ -101,6 +101,8 @@ async fn run_inner() -> Result<()> {
         operation_id = %config.operation_id,
         max_concurrent = config.max_concurrent_tasks,
         has_yaml_config = ares_config.is_some(),
+        listener_ip = config.listener_ip.as_deref().unwrap_or("none"),
+        strategy = ?config.strategy.preset,
         "Configuration loaded"
     );
 

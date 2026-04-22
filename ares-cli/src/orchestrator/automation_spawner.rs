@@ -42,6 +42,9 @@ pub(crate) fn spawn_automation_tasks(
     spawn_auto!(auto_unconstrained_exploitation);
     spawn_auto!(auto_stall_detection);
     spawn_auto!(auto_credential_reuse);
+    spawn_auto!(auto_shadow_credentials);
+    spawn_auto!(auto_rbcd_exploitation);
+    spawn_auto!(auto_mssql_exploitation);
 
     info!(count = handles.len(), "Automation tasks spawned");
     handles

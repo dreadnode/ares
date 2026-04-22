@@ -67,6 +67,11 @@ pub struct OrchestratorConfig {
 
     /// Strategy controlling technique weights, filtering, and path diversity.
     pub strategy: Strategy,
+
+    /// Local IP of the attacker machine (for NTLM relay listeners, coercion, etc.).
+    /// Resolved from `ARES_LISTENER_IP` env var, or auto-detected via UDP socket
+    /// probe toward the first target IP.
+    pub listener_ip: Option<String>,
 }
 
 /// A credential provided at operation launch time.
@@ -171,6 +176,11 @@ impl OrchestratorConfig {
         // Resolve strategy from env vars + JSON payload + YAML config
         let strategy = Strategy::resolve(json_value.as_ref(), yaml);
 
+        // Listener IP: explicit env var, or auto-detect from first target IP.
+        let listener_ip = env::var("ARES_LISTENER_IP")
+            .ok()
+            .or_else(|| detect_local_ip(target_ips.first().map(|s| s.as_str())));
+
         let max_concurrent_tasks = parse_env("ARES_MAX_CONCURRENT_TASKS", 8);
         let heartbeat_interval_secs = parse_env("ARES_HEARTBEAT_INTERVAL_SECS", 30);
         let heartbeat_timeout_secs = parse_env("ARES_HEARTBEAT_TIMEOUT_SECS", 120);
@@ -203,6 +213,7 @@ impl OrchestratorConfig {
             target_ips,
             initial_credential,
             strategy,
+            listener_ip,
         })
     }
 
@@ -246,6 +257,22 @@ fn parse_credential_spec(spec: &str, default_domain: &str) -> Option<InitialCred
     })
 }
 
+/// Auto-detect the local IP by opening a UDP socket aimed at the first target.
+/// This never sends traffic — the OS resolves which interface would route to the
+/// target and we read the bound local address.
+fn detect_local_ip(target: Option<&str>) -> Option<String> {
+    let dest = target.unwrap_or("8.8.8.8");
+    let socket = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
+    socket.connect(format!("{dest}:53")).ok()?;
+    let addr = socket.local_addr().ok()?;
+    let ip = addr.ip().to_string();
+    // Reject loopback — not useful as a relay listener
+    if ip.starts_with("127.") {
+        return None;
+    }
+    Some(ip)
+}
+
 /// Parse an environment variable into a numeric type, falling back to `default`.
 fn parse_env<T: std::str::FromStr>(key: &str, default: T) -> T {
     env::var(key)
@@ -287,6 +314,7 @@ mod tests {
             target_ips: Vec::new(),
             initial_credential: None,
             strategy: Strategy::default(),
+            listener_ip: None,
         }
     }
 

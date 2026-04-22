@@ -144,9 +144,12 @@ pub(super) fn handle_builtin_callback(call: &ToolCall) -> Result<CallbackResult>
             )))
         }
         "list_credentials" => {
-            // Minimal response — real data comes from OrchestratorCallbackHandler
+            // Fallback when no OrchestratorCallbackHandler is wired (e.g. standalone worker).
+            // When the orchestrator handler IS present, it intercepts this before we get here.
             Ok(CallbackResult::Continue(
-                "Use get_all_credentials for full credential listing.".to_string(),
+                "No credentials available in this context. Credentials are injected \
+                 into your task payload at dispatch time — check the task description."
+                    .to_string(),
             ))
         }
         // Orchestrator-only tools — these require a custom CallbackHandler

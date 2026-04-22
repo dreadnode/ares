@@ -71,6 +71,9 @@ impl CallbackHandler for OrchestratorCallbackHandler {
             "get_pending_tasks" => Some(self.get_pending_tasks().await),
             "get_agent_status" => Some(self.get_agent_status().await),
             "get_operation_summary" => Some(self.get_operation_summary().await),
+            // list_credentials delegates to get_all_credentials so non-orchestrator
+            // agents (lateral, exploit) get real credential data instead of a stub.
+            "list_credentials" => Some(self.get_all_credentials(call).await),
             // Recording tools — persist to state and Redis
             "record_credential" => Some(self.record_credential(call).await),
             "record_timeline_event" => Some(self.record_timeline_event(call).await),

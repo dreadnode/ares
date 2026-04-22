@@ -115,7 +115,8 @@ pub async fn auto_stall_detection(
         // --- Fallback 1: Password spray with discovered users ---
         // Skip domains with pending delegation vulns — sprays lock delegation
         // accounts and prevent S4U exploitation from succeeding.
-        if has_users && has_dcs {
+        // Also respect strategy gate — don't spray when excluded.
+        if has_users && has_dcs && dispatcher.is_technique_allowed("password_spray") {
             let spray_work: Vec<(String, String)> = {
                 let state = dispatcher.state.read().await;
                 // Collect domains that have pending delegation vulns

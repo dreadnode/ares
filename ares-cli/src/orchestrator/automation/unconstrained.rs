@@ -74,7 +74,13 @@ pub async fn auto_unconstrained_exploitation(
         let work: Vec<UnconstrainedWork> = {
             let state = dispatcher.state.read().await;
 
-            if state.has_domain_admin && state.all_forests_dominated() {
+            // Skip only when ALL forests are dominated AND strategy says to stop.
+            // When continue_after_da is true, keep exploiting unconstrained
+            // delegation for path diversity even after full domination.
+            if state.has_domain_admin
+                && state.all_forests_dominated()
+                && !dispatcher.config.strategy.should_continue_after_da()
+            {
                 continue;
             }
 
@@ -107,25 +113,10 @@ pub async fn auto_unconstrained_exploitation(
                         return None;
                     }
 
-                    // Only automate machine accounts — we can resolve hostname → IP.
-                    // User accounts (sarah.connor) go through the LLM exploit path.
-                    if !account_name.ends_with('$') {
-                        return None;
-                    }
-
-                    // Resolve machine hostname → IP from discovered hosts.
-                    // DC02$ → look for host with hostname starting with "dc02".
-                    let hostname_prefix = account_name.trim_end_matches('$').to_lowercase();
-                    let host_ip = state.hosts.iter().find_map(|h| {
-                        let h_lower = h.hostname.to_lowercase();
-                        if h_lower == hostname_prefix
-                            || h_lower.starts_with(&format!("{hostname_prefix}."))
-                        {
-                            Some(h.ip.clone())
-                        } else {
-                            None
-                        }
-                    })?;
+                    // Machine accounts: resolve hostname → IP for coerce+dump chain.
+                    // User accounts (sansa.stark): dispatch LLM exploit task since we
+                    // can't determine which host to coerce from just the account name.
+                    let is_machine = account_name.ends_with('$');
 
                     // Find a DC in the same domain — this is what we coerce FROM.
                     let dc_ip = state
@@ -133,12 +124,32 @@ pub async fn auto_unconstrained_exploitation(
                         .get(&domain.to_lowercase())
                         .cloned();
 
-                    // Find any non-quarantined credential for this domain.
+                    let host_ip = if is_machine {
+                        let hostname_prefix = account_name.trim_end_matches('$').to_lowercase();
+                        state.hosts.iter().find_map(|h| {
+                            let h_lower = h.hostname.to_lowercase();
+                            if h_lower == hostname_prefix
+                                || h_lower.starts_with(&format!("{hostname_prefix}."))
+                            {
+                                Some(h.ip.clone())
+                            } else {
+                                None
+                            }
+                        })?
+                    } else {
+                        // For user accounts, use the DC IP as the target — the LLM
+                        // exploit agent will determine the right approach (e.g. find
+                        // where the user is logged in, or use S4U).
+                        dc_ip.as_ref().cloned()?
+                    };
+
+                    // Find any non-quarantined credential with a password for this domain.
                     let credential = state
                         .credentials
                         .iter()
                         .find(|c| {
-                            c.domain.to_lowercase() == domain.to_lowercase()
+                            !c.password.is_empty()
+                                && c.domain.to_lowercase() == domain.to_lowercase()
                                 && !state.is_credential_quarantined(&c.username, &c.domain)
                         })
                         .cloned();
@@ -151,7 +162,25 @@ pub async fn auto_unconstrained_exploitation(
                         return None;
                     }
 
-                    // Determine action based on current phase.
+                    // User accounts go straight to LLM exploit (one-shot, no coerce+dump).
+                    if !is_machine {
+                        let dedup_key = format!("uc_user:{}", account_name.to_lowercase());
+                        if phases.get(&vuln.vuln_id).is_some_and(|p| p.completed) {
+                            return None;
+                        }
+                        return Some(UnconstrainedWork {
+                            vuln_id: vuln.vuln_id.clone(),
+                            account_name,
+                            domain,
+                            host_ip,
+                            dc_ip,
+                            credential,
+                            action: Action::LlmExploit,
+                            _dedup_key: Some(dedup_key),
+                        });
+                    }
+
+                    // Determine action based on current phase (machine accounts only).
                     let phase = phases.get(&vuln.vuln_id);
 
                     // If auto_coercion already coerced this DC, skip straight to dump.
@@ -202,6 +231,7 @@ pub async fn auto_unconstrained_exploitation(
                         dc_ip,
                         credential,
                         action,
+                        _dedup_key: None,
                     })
                 })
                 .collect()
@@ -335,6 +365,66 @@ pub async fn auto_unconstrained_exploitation(
                         }
                     }
                 }
+
+                Action::LlmExploit => {
+                    // User-account unconstrained delegation — dispatch to LLM
+                    // exploit agent which can determine the right approach
+                    // (find where user is logged in, monitor for TGTs, etc.)
+                    let cred = match &item.credential {
+                        Some(c) => c,
+                        None => continue,
+                    };
+
+                    let payload = json!({
+                        "technique": "unconstrained_delegation_exploit",
+                        "vuln_type": "unconstrained_delegation",
+                        "vuln_id": item.vuln_id,
+                        "target": item.host_ip,
+                        "target_ip": item.host_ip,
+                        "domain": item.domain,
+                        "account_name": item.account_name,
+                        "is_user_account": true,
+                        "credential": {
+                            "username": cred.username,
+                            "password": cred.password,
+                            "domain": cred.domain,
+                        },
+                    });
+
+                    let priority = dispatcher.effective_priority("unconstrained_delegation");
+                    match dispatcher
+                        .throttled_submit("exploit", "privesc", payload, priority)
+                        .await
+                    {
+                        Ok(Some(task_id)) => {
+                            info!(
+                                task_id = %task_id,
+                                vuln_id = %item.vuln_id,
+                                account = %item.account_name,
+                                "Unconstrained delegation: LLM exploit dispatched (user account)"
+                            );
+                            phases.insert(
+                                item.vuln_id.clone(),
+                                PhaseState {
+                                    coercion_dispatched_at: None,
+                                    dump_attempts: 0,
+                                    last_dump_at: None,
+                                    completed: true,
+                                },
+                            );
+                        }
+                        Ok(None) => {
+                            debug!(vuln_id = %item.vuln_id, "LLM exploit deferred by throttler");
+                        }
+                        Err(e) => {
+                            warn!(
+                                err = %e,
+                                vuln_id = %item.vuln_id,
+                                "Failed to dispatch unconstrained LLM exploit"
+                            );
+                        }
+                    }
+                }
             }
         }
     }
@@ -344,6 +434,8 @@ pub async fn auto_unconstrained_exploitation(
 enum Action {
     Coerce,
     Dump,
+    /// Dispatch to LLM exploit agent (for user accounts).
+    LlmExploit,
 }
 
 struct UnconstrainedWork {
@@ -354,6 +446,7 @@ struct UnconstrainedWork {
     dc_ip: Option<String>,
     credential: Option<ares_core::models::Credential>,
     action: Action,
+    _dedup_key: Option<String>,
 }
 
 #[cfg(test)]

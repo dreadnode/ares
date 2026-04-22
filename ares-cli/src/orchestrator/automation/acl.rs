@@ -30,11 +30,14 @@ pub async fn auto_acl_chain_follow(
             break;
         }
 
-        // Skip only when ALL forests are dominated — ACL chains in
-        // undominated forests must still be followed after initial DA.
+        // Skip only when ALL forests are dominated AND strategy says to stop.
+        // When continue_after_da is true, keep following ACL chains for path diversity.
         {
             let state = dispatcher.state.read().await;
-            if state.has_domain_admin && state.all_forests_dominated() {
+            if state.has_domain_admin
+                && state.all_forests_dominated()
+                && !dispatcher.config.strategy.should_continue_after_da()
+            {
                 continue;
             }
         }
