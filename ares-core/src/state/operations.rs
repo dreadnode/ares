@@ -364,4 +364,348 @@ mod tests {
         let items = [&only];
         assert_eq!(pick_latest(&items), "op-solo");
     }
+
+    // -- async tests using MockRedisConnection --------------------------------
+
+    use crate::state::mock_redis::MockRedisConnection;
+    use redis::AsyncCommands;
+
+    #[tokio::test]
+    async fn publish_state_update_returns_zero_without_subscribers() {
+        let mut conn = MockRedisConnection::new();
+        let count = publish_state_update(&mut conn, "op-1").await.unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[tokio::test]
+    async fn set_operation_status_stores_json_with_status_field() {
+        let mut conn = MockRedisConnection::new();
+        set_operation_status(&mut conn, "op-1", "running")
+            .await
+            .unwrap();
+
+        let key = build_key("op-1", KEY_STATUS);
+        let raw: String = conn.get(&key).await.unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(parsed["status"], "running");
+        assert_eq!(parsed["operation_id"], "op-1");
+        assert!(parsed["updated_at"].is_string());
+    }
+
+    #[tokio::test]
+    async fn set_operation_status_overwrites_previous() {
+        let mut conn = MockRedisConnection::new();
+        set_operation_status(&mut conn, "op-1", "running")
+            .await
+            .unwrap();
+        set_operation_status(&mut conn, "op-1", "completed")
+            .await
+            .unwrap();
+
+        let key = build_key("op-1", KEY_STATUS);
+        let raw: String = conn.get(&key).await.unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(parsed["status"], "completed");
+    }
+
+    #[tokio::test]
+    async fn finalize_operation_sets_completed_metadata() {
+        let mut conn = MockRedisConnection::new();
+        let meta_key = build_key("op-1", KEY_META);
+
+        // Set up initial meta hash
+        let _: () = conn
+            .hset(&meta_key, "started_at", "\"2024-06-01T00:00:00Z\"")
+            .await
+            .unwrap();
+
+        // Set up lock key and active pointer
+        let lock_key = build_lock_key("op-1");
+        let _: () = conn.set(&lock_key, "1").await.unwrap();
+        let _: () = conn.set("ares:op:active", "op-1").await.unwrap();
+
+        finalize_operation(&mut conn, "op-1", "completed")
+            .await
+            .unwrap();
+
+        // Verify completed fields in meta hash
+        let completed: String = conn.hget(&meta_key, "completed").await.unwrap();
+        assert_eq!(completed, "true");
+
+        let completed_at: String = conn.hget(&meta_key, "completed_at").await.unwrap();
+        assert!(!completed_at.is_empty());
+    }
+
+    #[tokio::test]
+    async fn finalize_operation_deletes_lock_key() {
+        let mut conn = MockRedisConnection::new();
+        let meta_key = build_key("op-1", KEY_META);
+        let _: () = conn
+            .hset(&meta_key, "started_at", "\"2024-06-01T00:00:00Z\"")
+            .await
+            .unwrap();
+        let lock_key = build_lock_key("op-1");
+        let _: () = conn.set(&lock_key, "1").await.unwrap();
+
+        finalize_operation(&mut conn, "op-1", "completed")
+            .await
+            .unwrap();
+
+        let exists: bool = conn.exists(&lock_key).await.unwrap();
+        assert!(!exists);
+    }
+
+    #[tokio::test]
+    async fn finalize_operation_clears_active_when_matching() {
+        let mut conn = MockRedisConnection::new();
+        let meta_key = build_key("op-1", KEY_META);
+        let _: () = conn
+            .hset(&meta_key, "started_at", "\"2024-06-01T00:00:00Z\"")
+            .await
+            .unwrap();
+        let _: () = conn.set("ares:op:active", "op-1").await.unwrap();
+
+        finalize_operation(&mut conn, "op-1", "completed")
+            .await
+            .unwrap();
+
+        let active: Option<String> = conn.get("ares:op:active").await.unwrap();
+        assert!(active.is_none());
+    }
+
+    #[tokio::test]
+    async fn finalize_operation_preserves_active_when_different() {
+        let mut conn = MockRedisConnection::new();
+        let meta_key = build_key("op-1", KEY_META);
+        let _: () = conn
+            .hset(&meta_key, "started_at", "\"2024-06-01T00:00:00Z\"")
+            .await
+            .unwrap();
+        let _: () = conn.set("ares:op:active", "op-other").await.unwrap();
+
+        finalize_operation(&mut conn, "op-1", "completed")
+            .await
+            .unwrap();
+
+        let active: Option<String> = conn.get("ares:op:active").await.unwrap();
+        assert_eq!(active.as_deref(), Some("op-other"));
+    }
+
+    #[tokio::test]
+    async fn list_operation_ids_returns_sorted_ids() {
+        let mut conn = MockRedisConnection::new();
+
+        // Insert meta hashes for three operations
+        let _: () = conn
+            .hset(
+                "ares:op:op-c:meta",
+                "started_at",
+                "\"2024-01-01T00:00:00Z\"",
+            )
+            .await
+            .unwrap();
+        let _: () = conn
+            .hset(
+                "ares:op:op-a:meta",
+                "started_at",
+                "\"2024-03-01T00:00:00Z\"",
+            )
+            .await
+            .unwrap();
+        let _: () = conn
+            .hset(
+                "ares:op:op-b:meta",
+                "started_at",
+                "\"2024-02-01T00:00:00Z\"",
+            )
+            .await
+            .unwrap();
+
+        let ids = list_operation_ids(&mut conn).await.unwrap();
+        assert_eq!(ids, vec!["op-a", "op-b", "op-c"]);
+    }
+
+    #[tokio::test]
+    async fn list_operation_ids_empty_when_no_ops() {
+        let mut conn = MockRedisConnection::new();
+        let ids = list_operation_ids(&mut conn).await.unwrap();
+        assert!(ids.is_empty());
+    }
+
+    #[tokio::test]
+    async fn list_running_operations_returns_locked_ids() {
+        let mut conn = MockRedisConnection::new();
+        let _: () = conn.set("ares:lock:op-1", "1").await.unwrap();
+        let _: () = conn.set("ares:lock:op-2", "1").await.unwrap();
+
+        let running = list_running_operations(&mut conn).await.unwrap();
+        assert_eq!(running.len(), 2);
+        assert!(running.contains("op-1"));
+        assert!(running.contains("op-2"));
+    }
+
+    #[tokio::test]
+    async fn list_running_operations_empty_when_no_locks() {
+        let mut conn = MockRedisConnection::new();
+        let running = list_running_operations(&mut conn).await.unwrap();
+        assert!(running.is_empty());
+    }
+
+    #[tokio::test]
+    async fn resolve_latest_operation_returns_none_when_empty() {
+        let mut conn = MockRedisConnection::new();
+        let result = resolve_latest_operation(&mut conn).await.unwrap();
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn resolve_latest_operation_picks_most_recent() {
+        let mut conn = MockRedisConnection::new();
+
+        let _: () = conn
+            .hset(
+                "ares:op:op-old:meta",
+                "started_at",
+                "\"2024-01-01T00:00:00Z\"",
+            )
+            .await
+            .unwrap();
+        let _: () = conn
+            .hset(
+                "ares:op:op-new:meta",
+                "started_at",
+                "\"2024-06-15T00:00:00Z\"",
+            )
+            .await
+            .unwrap();
+
+        let result = resolve_latest_operation(&mut conn).await.unwrap();
+        assert_eq!(result.as_deref(), Some("op-new"));
+    }
+
+    #[tokio::test]
+    async fn resolve_latest_operation_prefers_running() {
+        let mut conn = MockRedisConnection::new();
+
+        // op-new is newer but not running
+        let _: () = conn
+            .hset(
+                "ares:op:op-new:meta",
+                "started_at",
+                "\"2024-06-15T00:00:00Z\"",
+            )
+            .await
+            .unwrap();
+        // op-old is older but running (has a lock key)
+        let _: () = conn
+            .hset(
+                "ares:op:op-old:meta",
+                "started_at",
+                "\"2024-01-01T00:00:00Z\"",
+            )
+            .await
+            .unwrap();
+        let _: () = conn.set("ares:lock:op-old", "1").await.unwrap();
+
+        let result = resolve_latest_operation(&mut conn).await.unwrap();
+        assert_eq!(result.as_deref(), Some("op-old"));
+    }
+
+    #[tokio::test]
+    async fn delete_operation_removes_all_related_keys() {
+        let mut conn = MockRedisConnection::new();
+
+        // Set up operation keys
+        let _: () = conn
+            .hset(
+                "ares:op:op-1:meta",
+                "started_at",
+                "\"2024-06-01T00:00:00Z\"",
+            )
+            .await
+            .unwrap();
+        let _: () = conn.set("ares:op:op-1:status", "running").await.unwrap();
+        let _: () = conn.set("ares:lock:op-1", "1").await.unwrap();
+
+        let deleted = delete_operation(&mut conn, "op-1").await.unwrap();
+        assert!(deleted >= 2); // at least meta + lock
+
+        // Verify keys are gone
+        let exists_meta: bool = conn.exists("ares:op:op-1:meta").await.unwrap();
+        let exists_lock: bool = conn.exists("ares:lock:op-1").await.unwrap();
+        let exists_status: bool = conn.exists("ares:op:op-1:status").await.unwrap();
+        assert!(!exists_meta);
+        assert!(!exists_lock);
+        assert!(!exists_status);
+    }
+
+    #[tokio::test]
+    async fn delete_operation_removes_matching_task_status_keys() {
+        let mut conn = MockRedisConnection::new();
+
+        // Set up a task status key that references op-1
+        let task_json = serde_json::json!({
+            "operation_id": "op-1",
+            "task": "nmap_scan",
+            "status": "done"
+        });
+        let _: () = conn
+            .set(
+                "ares:task_status:task-abc",
+                serde_json::to_string(&task_json).unwrap(),
+            )
+            .await
+            .unwrap();
+
+        // Set up a task status key for a different operation (should not be deleted)
+        let other_json = serde_json::json!({
+            "operation_id": "op-2",
+            "task": "smb_enum",
+            "status": "done"
+        });
+        let _: () = conn
+            .set(
+                "ares:task_status:task-xyz",
+                serde_json::to_string(&other_json).unwrap(),
+            )
+            .await
+            .unwrap();
+
+        delete_operation(&mut conn, "op-1").await.unwrap();
+
+        let exists_op1: bool = conn.exists("ares:task_status:task-abc").await.unwrap();
+        let exists_op2: bool = conn.exists("ares:task_status:task-xyz").await.unwrap();
+        assert!(!exists_op1);
+        assert!(exists_op2);
+    }
+
+    #[tokio::test]
+    async fn request_stop_then_is_stop_requested_returns_true() {
+        let mut conn = MockRedisConnection::new();
+
+        request_stop_operation(&mut conn, "op-1").await.unwrap();
+
+        let stopped = is_stop_requested(&mut conn, "op-1").await.unwrap();
+        assert!(stopped);
+    }
+
+    #[tokio::test]
+    async fn is_stop_requested_returns_false_when_not_set() {
+        let mut conn = MockRedisConnection::new();
+
+        let stopped = is_stop_requested(&mut conn, "op-1").await.unwrap();
+        assert!(!stopped);
+    }
+
+    #[tokio::test]
+    async fn stop_request_is_per_operation() {
+        let mut conn = MockRedisConnection::new();
+
+        request_stop_operation(&mut conn, "op-1").await.unwrap();
+
+        let stopped_op1 = is_stop_requested(&mut conn, "op-1").await.unwrap();
+        let stopped_op2 = is_stop_requested(&mut conn, "op-2").await.unwrap();
+        assert!(stopped_op1);
+        assert!(!stopped_op2);
+    }
 }

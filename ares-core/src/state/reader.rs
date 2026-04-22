@@ -552,3 +552,721 @@ impl RedisStateReader {
         format!("{KEY_PREFIX}:{}", self.operation_id)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::*;
+    use crate::state::mock_redis::MockRedisConnection;
+    use redis::AsyncCommands;
+    use serde_json::json;
+
+    fn make_reader() -> RedisStateReader {
+        RedisStateReader::new("op-test".to_string())
+    }
+
+    fn make_credential(user: &str, domain: &str, pass: &str) -> Credential {
+        Credential {
+            id: format!("cred-{user}"),
+            username: user.to_string(),
+            password: pass.to_string(),
+            domain: domain.to_string(),
+            source: "test".to_string(),
+            discovered_at: None,
+            is_admin: false,
+            parent_id: None,
+            attack_step: 0,
+        }
+    }
+
+    fn make_hash(user: &str, domain: &str, hash_value: &str) -> Hash {
+        Hash {
+            id: format!("hash-{user}"),
+            username: user.to_string(),
+            hash_value: hash_value.to_string(),
+            hash_type: "NTLM".to_string(),
+            domain: domain.to_string(),
+            cracked_password: None,
+            source: "secretsdump".to_string(),
+            discovered_at: None,
+            parent_id: None,
+            attack_step: 0,
+            aes_key: None,
+        }
+    }
+
+    fn make_host(ip: &str, hostname: &str) -> Host {
+        Host {
+            ip: ip.to_string(),
+            hostname: hostname.to_string(),
+            os: String::new(),
+            roles: vec![],
+            services: vec![],
+            is_dc: false,
+            owned: false,
+        }
+    }
+
+    fn make_user(username: &str, domain: &str) -> User {
+        User {
+            username: username.to_string(),
+            domain: domain.to_string(),
+            description: String::new(),
+            is_admin: false,
+            source: "ldap".to_string(),
+        }
+    }
+
+    fn make_share(host: &str, name: &str) -> Share {
+        Share {
+            host: host.to_string(),
+            name: name.to_string(),
+            permissions: "READ".to_string(),
+            comment: String::new(),
+        }
+    }
+
+    fn make_vuln(vuln_id: &str, vuln_type: &str, target: &str) -> VulnerabilityInfo {
+        VulnerabilityInfo {
+            vuln_id: vuln_id.to_string(),
+            vuln_type: vuln_type.to_string(),
+            target: target.to_string(),
+            discovered_by: "recon-1".to_string(),
+            discovered_at: chrono::Utc::now(),
+            details: HashMap::new(),
+            recommended_agent: String::new(),
+            priority: 5,
+        }
+    }
+
+    fn make_trust(domain: &str, trust_type: &str) -> TrustInfo {
+        TrustInfo {
+            domain: domain.to_string(),
+            flat_name: domain.split('.').next().unwrap_or("").to_uppercase(),
+            direction: "bidirectional".to_string(),
+            trust_type: trust_type.to_string(),
+            sid_filtering: false,
+        }
+    }
+
+    // -- exists ---------------------------------------------------------------
+
+    #[tokio::test]
+    async fn exists_empty_returns_false() {
+        let mut conn = MockRedisConnection::new();
+        let reader = make_reader();
+        assert!(!reader.exists(&mut conn).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn exists_after_set_meta_field_returns_true() {
+        let mut conn = MockRedisConnection::new();
+        let reader = make_reader();
+        reader
+            .set_meta_field(&mut conn, "target_ip", &json!("10.0.0.1"))
+            .await
+            .unwrap();
+        assert!(reader.exists(&mut conn).await.unwrap());
+    }
+
+    // -- get_meta / set_meta_field -------------------------------------------
+
+    #[tokio::test]
+    async fn get_meta_empty_returns_defaults() {
+        let mut conn = MockRedisConnection::new();
+        let reader = make_reader();
+        let meta = reader.get_meta(&mut conn).await.unwrap();
+        assert!(!meta.has_domain_admin);
+        assert!(!meta.has_golden_ticket);
+        assert!(meta.target_ip.is_none());
+        assert!(meta.target_domain.is_none());
+    }
+
+    #[tokio::test]
+    async fn set_and_get_meta_fields() {
+        let mut conn = MockRedisConnection::new();
+        let reader = make_reader();
+        reader
+            .set_meta_field(&mut conn, "target_ip", &json!("192.168.1.10"))
+            .await
+            .unwrap();
+        reader
+            .set_meta_field(&mut conn, "target_domain", &json!("contoso.local"))
+            .await
+            .unwrap();
+        reader
+            .set_meta_field(&mut conn, "has_domain_admin", &json!(true))
+            .await
+            .unwrap();
+
+        let meta = reader.get_meta(&mut conn).await.unwrap();
+        assert_eq!(meta.target_ip.as_deref(), Some("192.168.1.10"));
+        assert_eq!(meta.target_domain.as_deref(), Some("contoso.local"));
+        assert!(meta.has_domain_admin);
+    }
+
+    // -- get_credentials / add_credential ------------------------------------
+
+    #[tokio::test]
+    async fn get_credentials_empty() {
+        let mut conn = MockRedisConnection::new();
+        let reader = make_reader();
+        let creds = reader.get_credentials(&mut conn).await.unwrap();
+        assert!(creds.is_empty());
+    }
+
+    #[tokio::test]
+    async fn add_and_get_credential() {
+        let mut conn = MockRedisConnection::new();
+        let reader = make_reader();
+        let cred = make_credential("admin", "contoso.local", "P@ssw0rd!");
+        let added = reader.add_credential(&mut conn, &cred).await.unwrap();
+        assert!(added);
+
+        let creds = reader.get_credentials(&mut conn).await.unwrap();
+        assert_eq!(creds.len(), 1);
+        assert_eq!(creds[0].username, "admin");
+        assert_eq!(creds[0].domain, "contoso.local");
+    }
+
+    #[tokio::test]
+    async fn add_credential_dedup_rejects_duplicate() {
+        let mut conn = MockRedisConnection::new();
+        let reader = make_reader();
+        let cred = make_credential("admin", "contoso.local", "P@ssw0rd!");
+        assert!(reader.add_credential(&mut conn, &cred).await.unwrap());
+        assert!(!reader.add_credential(&mut conn, &cred).await.unwrap());
+
+        let creds = reader.get_credentials(&mut conn).await.unwrap();
+        assert_eq!(creds.len(), 1);
+    }
+
+    // -- get_hashes / add_hash -----------------------------------------------
+
+    #[tokio::test]
+    async fn get_hashes_empty() {
+        let mut conn = MockRedisConnection::new();
+        let reader = make_reader();
+        let hashes = reader.get_hashes(&mut conn).await.unwrap();
+        assert!(hashes.is_empty());
+    }
+
+    #[tokio::test]
+    async fn add_and_get_hash() {
+        let mut conn = MockRedisConnection::new();
+        let reader = make_reader();
+        let hash = make_hash("admin", "contoso.local", "aad3b435b51404eeaad3b435b51404ee");
+        let added = reader.add_hash(&mut conn, &hash).await.unwrap();
+        assert!(added);
+
+        let hashes = reader.get_hashes(&mut conn).await.unwrap();
+        assert_eq!(hashes.len(), 1);
+        assert_eq!(hashes[0].username, "admin");
+    }
+
+    #[tokio::test]
+    async fn add_hash_dedup_rejects_duplicate() {
+        let mut conn = MockRedisConnection::new();
+        let reader = make_reader();
+        let hash = make_hash("admin", "contoso.local", "aad3b435b51404eeaad3b435b51404ee");
+        assert!(reader.add_hash(&mut conn, &hash).await.unwrap());
+        assert!(!reader.add_hash(&mut conn, &hash).await.unwrap());
+
+        let hashes = reader.get_hashes(&mut conn).await.unwrap();
+        assert_eq!(hashes.len(), 1);
+    }
+
+    // -- get_hosts / add_host ------------------------------------------------
+
+    #[tokio::test]
+    async fn get_hosts_empty() {
+        let mut conn = MockRedisConnection::new();
+        let reader = make_reader();
+        let hosts = reader.get_hosts(&mut conn).await.unwrap();
+        assert!(hosts.is_empty());
+    }
+
+    #[tokio::test]
+    async fn add_and_get_host() {
+        let mut conn = MockRedisConnection::new();
+        let reader = make_reader();
+        let host = make_host("10.0.0.5", "dc01.contoso.local");
+        reader.add_host(&mut conn, &host).await.unwrap();
+
+        let hosts = reader.get_hosts(&mut conn).await.unwrap();
+        assert_eq!(hosts.len(), 1);
+        assert_eq!(hosts[0].ip, "10.0.0.5");
+        assert_eq!(hosts[0].hostname, "dc01.contoso.local");
+    }
+
+    // -- get_users / add_user ------------------------------------------------
+
+    #[tokio::test]
+    async fn get_users_empty() {
+        let mut conn = MockRedisConnection::new();
+        let reader = make_reader();
+        let users = reader.get_users(&mut conn).await.unwrap();
+        assert!(users.is_empty());
+    }
+
+    #[tokio::test]
+    async fn add_and_get_user() {
+        let mut conn = MockRedisConnection::new();
+        let reader = make_reader();
+        let user = make_user("jdoe", "contoso.local");
+        let added = reader.add_user(&mut conn, &user).await.unwrap();
+        assert!(added);
+
+        let users = reader.get_users(&mut conn).await.unwrap();
+        assert_eq!(users.len(), 1);
+        assert_eq!(users[0].username, "jdoe");
+    }
+
+    #[tokio::test]
+    async fn add_user_dedup_by_username_domain() {
+        let mut conn = MockRedisConnection::new();
+        let reader = make_reader();
+        let user = make_user("jdoe", "contoso.local");
+        assert!(reader.add_user(&mut conn, &user).await.unwrap());
+        // Same user again, possibly different case
+        let user_dup = make_user("JDoe", "CONTOSO.LOCAL");
+        assert!(!reader.add_user(&mut conn, &user_dup).await.unwrap());
+
+        let users = reader.get_users(&mut conn).await.unwrap();
+        assert_eq!(users.len(), 1);
+    }
+
+    // -- get_shares / add_share ----------------------------------------------
+
+    #[tokio::test]
+    async fn get_shares_empty() {
+        let mut conn = MockRedisConnection::new();
+        let reader = make_reader();
+        let shares = reader.get_shares(&mut conn).await.unwrap();
+        assert!(shares.is_empty());
+    }
+
+    #[tokio::test]
+    async fn add_and_get_share() {
+        let mut conn = MockRedisConnection::new();
+        let reader = make_reader();
+        let share = make_share("10.0.0.5", "ADMIN$");
+        let added = reader.add_share(&mut conn, &share).await.unwrap();
+        assert!(added);
+
+        let shares = reader.get_shares(&mut conn).await.unwrap();
+        assert_eq!(shares.len(), 1);
+        assert_eq!(shares[0].name, "ADMIN$");
+    }
+
+    #[tokio::test]
+    async fn add_share_dedup_by_host_name() {
+        let mut conn = MockRedisConnection::new();
+        let reader = make_reader();
+        let share = make_share("10.0.0.5", "ADMIN$");
+        assert!(reader.add_share(&mut conn, &share).await.unwrap());
+        assert!(!reader.add_share(&mut conn, &share).await.unwrap());
+
+        let shares = reader.get_shares(&mut conn).await.unwrap();
+        assert_eq!(shares.len(), 1);
+    }
+
+    // -- get_domains / add_domain --------------------------------------------
+
+    #[tokio::test]
+    async fn get_domains_empty() {
+        let mut conn = MockRedisConnection::new();
+        let reader = make_reader();
+        let domains = reader.get_domains(&mut conn).await.unwrap();
+        assert!(domains.is_empty());
+    }
+
+    #[tokio::test]
+    async fn add_and_get_domain() {
+        let mut conn = MockRedisConnection::new();
+        let reader = make_reader();
+        let added = reader.add_domain(&mut conn, "contoso.local").await.unwrap();
+        assert!(added);
+
+        let domains = reader.get_domains(&mut conn).await.unwrap();
+        assert_eq!(domains.len(), 1);
+        assert_eq!(domains[0], "contoso.local");
+    }
+
+    #[tokio::test]
+    async fn add_domain_dedup_via_set() {
+        let mut conn = MockRedisConnection::new();
+        let reader = make_reader();
+        assert!(reader.add_domain(&mut conn, "contoso.local").await.unwrap());
+        assert!(!reader.add_domain(&mut conn, "contoso.local").await.unwrap());
+
+        let domains = reader.get_domains(&mut conn).await.unwrap();
+        assert_eq!(domains.len(), 1);
+    }
+
+    // -- get_vulnerabilities / add_vulnerability -----------------------------
+
+    #[tokio::test]
+    async fn get_vulnerabilities_empty() {
+        let mut conn = MockRedisConnection::new();
+        let reader = make_reader();
+        let vulns = reader.get_vulnerabilities(&mut conn).await.unwrap();
+        assert!(vulns.is_empty());
+    }
+
+    #[tokio::test]
+    async fn add_and_get_vulnerability() {
+        let mut conn = MockRedisConnection::new();
+        let reader = make_reader();
+        let vuln = make_vuln("esc1_10.0.0.5", "ADCS_ESC1", "10.0.0.5");
+        let added = reader.add_vulnerability(&mut conn, &vuln).await.unwrap();
+        assert!(added);
+
+        let vulns = reader.get_vulnerabilities(&mut conn).await.unwrap();
+        assert_eq!(vulns.len(), 1);
+        assert!(vulns.contains_key("esc1_10.0.0.5"));
+        assert_eq!(vulns["esc1_10.0.0.5"].vuln_type, "ADCS_ESC1");
+    }
+
+    // -- get_exploited_vulnerabilities (via mock directly) -------------------
+
+    #[tokio::test]
+    async fn get_exploited_vulnerabilities_empty() {
+        let mut conn = MockRedisConnection::new();
+        let reader = make_reader();
+        let exploited = reader
+            .get_exploited_vulnerabilities(&mut conn)
+            .await
+            .unwrap();
+        assert!(exploited.is_empty());
+    }
+
+    #[tokio::test]
+    async fn get_exploited_vulnerabilities_with_data() {
+        let mut conn = MockRedisConnection::new();
+        let reader = make_reader();
+        let key = "ares:op:op-test:exploited".to_string();
+        let _: () = conn.sadd(&key, "esc1_10.0.0.5").await.unwrap();
+        let _: () = conn.sadd(&key, "deleg_svc_sql").await.unwrap();
+
+        let exploited = reader
+            .get_exploited_vulnerabilities(&mut conn)
+            .await
+            .unwrap();
+        assert_eq!(exploited.len(), 2);
+        assert!(exploited.contains("esc1_10.0.0.5"));
+        assert!(exploited.contains("deleg_svc_sql"));
+    }
+
+    // -- get_dc_map / get_netbios_map (via mock directly) --------------------
+
+    #[tokio::test]
+    async fn get_dc_map_empty() {
+        let mut conn = MockRedisConnection::new();
+        let reader = make_reader();
+        let dc_map = reader.get_dc_map(&mut conn).await.unwrap();
+        assert!(dc_map.is_empty());
+    }
+
+    #[tokio::test]
+    async fn get_dc_map_with_data() {
+        let mut conn = MockRedisConnection::new();
+        let reader = make_reader();
+        let key = "ares:op:op-test:dc_map".to_string();
+        let _: () = conn
+            .hset(&key, "10.0.0.5", "dc01.contoso.local")
+            .await
+            .unwrap();
+
+        let dc_map = reader.get_dc_map(&mut conn).await.unwrap();
+        assert_eq!(dc_map.len(), 1);
+        assert_eq!(dc_map["10.0.0.5"], "dc01.contoso.local");
+    }
+
+    #[tokio::test]
+    async fn get_netbios_map_with_data() {
+        let mut conn = MockRedisConnection::new();
+        let reader = make_reader();
+        let key = "ares:op:op-test:netbios_map".to_string();
+        let _: () = conn.hset(&key, "CONTOSO", "contoso.local").await.unwrap();
+
+        let nb_map = reader.get_netbios_map(&mut conn).await.unwrap();
+        assert_eq!(nb_map.len(), 1);
+        assert_eq!(nb_map["CONTOSO"], "contoso.local");
+    }
+
+    // -- is_running ----------------------------------------------------------
+
+    #[tokio::test]
+    async fn is_running_false_when_no_lock() {
+        let mut conn = MockRedisConnection::new();
+        let reader = make_reader();
+        assert!(!reader.is_running(&mut conn).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn is_running_true_when_lock_exists() {
+        let mut conn = MockRedisConnection::new();
+        let reader = make_reader();
+        let lock_key = "ares:lock:op-test";
+        let _: () = conn.set(lock_key, "1").await.unwrap();
+        assert!(reader.is_running(&mut conn).await.unwrap());
+    }
+
+    // -- add_timeline_event / get_timeline -----------------------------------
+
+    #[tokio::test]
+    async fn get_timeline_empty() {
+        let mut conn = MockRedisConnection::new();
+        let reader = make_reader();
+        let timeline = reader.get_timeline(&mut conn).await.unwrap();
+        assert!(timeline.is_empty());
+    }
+
+    #[tokio::test]
+    async fn add_and_get_timeline_events() {
+        let mut conn = MockRedisConnection::new();
+        let reader = make_reader();
+        let event = json!({
+            "timestamp": "2025-01-28T12:00:00Z",
+            "description": "Initial access via kerberoast",
+            "mitre_techniques": ["T1558.003"]
+        });
+        reader.add_timeline_event(&mut conn, &event).await.unwrap();
+
+        let timeline = reader.get_timeline(&mut conn).await.unwrap();
+        assert_eq!(timeline.len(), 1);
+        assert_eq!(timeline[0]["description"], "Initial access via kerberoast");
+    }
+
+    // -- add_technique / get_techniques --------------------------------------
+
+    #[tokio::test]
+    async fn get_techniques_empty() {
+        let mut conn = MockRedisConnection::new();
+        let reader = make_reader();
+        let techniques = reader.get_techniques(&mut conn).await.unwrap();
+        assert!(techniques.is_empty());
+    }
+
+    #[tokio::test]
+    async fn add_and_get_techniques() {
+        let mut conn = MockRedisConnection::new();
+        let reader = make_reader();
+        assert!(reader.add_technique(&mut conn, "T1558.003").await.unwrap());
+        assert!(reader.add_technique(&mut conn, "T1003.006").await.unwrap());
+        // Duplicate is rejected by set
+        assert!(!reader.add_technique(&mut conn, "T1558.003").await.unwrap());
+
+        let techniques = reader.get_techniques(&mut conn).await.unwrap();
+        assert_eq!(techniques.len(), 2);
+    }
+
+    // -- get_report ----------------------------------------------------------
+
+    #[tokio::test]
+    async fn get_report_none_when_missing() {
+        let mut conn = MockRedisConnection::new();
+        let reader = make_reader();
+        let report = reader.get_report(&mut conn).await.unwrap();
+        assert!(report.is_none());
+    }
+
+    #[tokio::test]
+    async fn get_report_returns_stored_string() {
+        let mut conn = MockRedisConnection::new();
+        let reader = make_reader();
+        let key = "ares:op:op-test:report";
+        let _: () = conn
+            .set(key, "# Report\nDomain admin achieved.")
+            .await
+            .unwrap();
+
+        let report = reader.get_report(&mut conn).await.unwrap();
+        assert_eq!(report.as_deref(), Some("# Report\nDomain admin achieved."));
+    }
+
+    // -- increment_vuln_type_failure / get_vuln_type_failure_count / get_all --
+
+    #[tokio::test]
+    async fn vuln_type_failure_count_starts_at_zero() {
+        let mut conn = MockRedisConnection::new();
+        let reader = make_reader();
+        let count = reader
+            .get_vuln_type_failure_count(&mut conn, "ADCS_ESC1")
+            .await
+            .unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[tokio::test]
+    async fn increment_and_get_vuln_type_failure() {
+        let mut conn = MockRedisConnection::new();
+        let reader = make_reader();
+        let c1 = reader
+            .increment_vuln_type_failure(&mut conn, "ADCS_ESC1")
+            .await
+            .unwrap();
+        assert_eq!(c1, 1);
+        let c2 = reader
+            .increment_vuln_type_failure(&mut conn, "ADCS_ESC1")
+            .await
+            .unwrap();
+        assert_eq!(c2, 2);
+
+        let count = reader
+            .get_vuln_type_failure_count(&mut conn, "ADCS_ESC1")
+            .await
+            .unwrap();
+        assert_eq!(count, 2);
+    }
+
+    #[tokio::test]
+    async fn get_all_vuln_type_failures() {
+        let mut conn = MockRedisConnection::new();
+        let reader = make_reader();
+        reader
+            .increment_vuln_type_failure(&mut conn, "ADCS_ESC1")
+            .await
+            .unwrap();
+        reader
+            .increment_vuln_type_failure(&mut conn, "ADCS_ESC1")
+            .await
+            .unwrap();
+        reader
+            .increment_vuln_type_failure(&mut conn, "delegation")
+            .await
+            .unwrap();
+
+        let all = reader.get_all_vuln_type_failures(&mut conn).await.unwrap();
+        assert_eq!(all.len(), 2);
+        assert_eq!(all["ADCS_ESC1"], 2);
+        assert_eq!(all["delegation"], 1);
+    }
+
+    // -- get_trusted_domains / add_trusted_domain ----------------------------
+
+    #[tokio::test]
+    async fn get_trusted_domains_empty() {
+        let mut conn = MockRedisConnection::new();
+        let reader = make_reader();
+        let trusted = reader.get_trusted_domains(&mut conn).await.unwrap();
+        assert!(trusted.is_empty());
+    }
+
+    #[tokio::test]
+    async fn add_and_get_trusted_domain() {
+        let mut conn = MockRedisConnection::new();
+        let reader = make_reader();
+        let trust = make_trust("child.contoso.local", "parent_child");
+        let added = reader.add_trusted_domain(&mut conn, &trust).await.unwrap();
+        assert!(added);
+
+        let trusted = reader.get_trusted_domains(&mut conn).await.unwrap();
+        assert_eq!(trusted.len(), 1);
+        assert!(trusted.contains_key("child.contoso.local"));
+        assert!(trusted["child.contoso.local"].is_parent_child());
+    }
+
+    #[tokio::test]
+    async fn add_trusted_domain_dedup() {
+        let mut conn = MockRedisConnection::new();
+        let reader = make_reader();
+        let trust = make_trust("child.contoso.local", "parent_child");
+        assert!(reader.add_trusted_domain(&mut conn, &trust).await.unwrap());
+        assert!(!reader.add_trusted_domain(&mut conn, &trust).await.unwrap());
+    }
+
+    // -- set_domain_sid / set_admin_name -------------------------------------
+
+    #[tokio::test]
+    async fn set_domain_sid_stores_value() {
+        let mut conn = MockRedisConnection::new();
+        let reader = make_reader();
+        reader
+            .set_domain_sid(&mut conn, "contoso.local", "S-1-5-21-123456789")
+            .await
+            .unwrap();
+
+        let key = "ares:op:op-test:domain_sids";
+        let sid: Option<String> = conn.hget(key, "contoso.local").await.unwrap();
+        assert_eq!(sid.as_deref(), Some("S-1-5-21-123456789"));
+    }
+
+    #[tokio::test]
+    async fn set_admin_name_stores_value() {
+        let mut conn = MockRedisConnection::new();
+        let reader = make_reader();
+        reader
+            .set_admin_name(&mut conn, "contoso.local", "Administrator")
+            .await
+            .unwrap();
+
+        let key = "ares:op:op-test:admin_names";
+        let name: Option<String> = conn.hget(key, "contoso.local").await.unwrap();
+        assert_eq!(name.as_deref(), Some("Administrator"));
+    }
+
+    // -- load_state ----------------------------------------------------------
+
+    #[tokio::test]
+    async fn load_state_returns_none_when_empty() {
+        let mut conn = MockRedisConnection::new();
+        let reader = make_reader();
+        let state = reader.load_state(&mut conn).await.unwrap();
+        assert!(state.is_none());
+    }
+
+    #[tokio::test]
+    async fn load_state_full_roundtrip() {
+        let mut conn = MockRedisConnection::new();
+        let reader = make_reader();
+
+        // Set meta fields
+        reader
+            .set_meta_field(&mut conn, "target_ip", &json!("192.168.1.10"))
+            .await
+            .unwrap();
+        reader
+            .set_meta_field(&mut conn, "target_domain", &json!("contoso.local"))
+            .await
+            .unwrap();
+        reader
+            .set_meta_field(&mut conn, "has_domain_admin", &json!(true))
+            .await
+            .unwrap();
+
+        // Add data
+        let cred = make_credential("admin", "contoso.local", "P@ssw0rd!");
+        reader.add_credential(&mut conn, &cred).await.unwrap();
+
+        let host = make_host("10.0.0.5", "dc01.contoso.local");
+        reader.add_host(&mut conn, &host).await.unwrap();
+
+        reader.add_domain(&mut conn, "contoso.local").await.unwrap();
+
+        reader.add_technique(&mut conn, "T1558.003").await.unwrap();
+
+        let event = json!({"timestamp": "2025-01-28T12:00:00Z", "description": "started"});
+        reader.add_timeline_event(&mut conn, &event).await.unwrap();
+
+        let trust = make_trust("child.contoso.local", "parent_child");
+        reader.add_trusted_domain(&mut conn, &trust).await.unwrap();
+
+        // Load full state
+        let state = reader.load_state(&mut conn).await.unwrap();
+        assert!(state.is_some());
+        let state = state.unwrap();
+
+        assert_eq!(state.operation_id, "op-test");
+        assert!(state.has_domain_admin);
+        assert!(state.target.is_some());
+        assert_eq!(state.target.as_ref().unwrap().ip, "192.168.1.10");
+        assert_eq!(state.all_credentials.len(), 1);
+        assert_eq!(state.all_hosts.len(), 1);
+        assert_eq!(state.all_domains.len(), 1);
+        assert_eq!(state.all_techniques.len(), 1);
+        assert_eq!(state.all_timeline_events.len(), 1);
+        assert_eq!(state.trusted_domains.len(), 1);
+    }
+}

@@ -110,6 +110,9 @@ pub fn build_blue_lock_key(investigation_id: &str) -> String {
 }
 
 #[cfg(test)]
+pub(crate) mod mock_redis;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::models::Credential;

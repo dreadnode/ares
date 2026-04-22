@@ -166,3 +166,166 @@ pub async fn delete_investigation(
 
     Ok(deleted)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::state::mock_redis::MockRedisConnection;
+    use redis::AsyncCommands;
+
+    #[tokio::test]
+    async fn list_investigation_ids_empty() {
+        let mut conn = MockRedisConnection::new();
+        let ids = list_investigation_ids(&mut conn).await.unwrap();
+        assert!(ids.is_empty());
+    }
+
+    #[tokio::test]
+    async fn list_investigation_ids_returns_sorted() {
+        let mut conn = MockRedisConnection::new();
+        let _: () = conn
+            .hset("ares:blue:inv:inv-b:meta", "stage", "triage")
+            .await
+            .unwrap();
+        let _: () = conn
+            .hset("ares:blue:inv:inv-a:meta", "stage", "triage")
+            .await
+            .unwrap();
+        let _: () = conn
+            .hset("ares:blue:inv:inv-c:meta", "stage", "triage")
+            .await
+            .unwrap();
+        let ids = list_investigation_ids(&mut conn).await.unwrap();
+        assert_eq!(ids, vec!["inv-a", "inv-b", "inv-c"]);
+    }
+
+    #[tokio::test]
+    async fn list_running_investigations_empty() {
+        let mut conn = MockRedisConnection::new();
+        let running = list_running_investigations(&mut conn).await.unwrap();
+        assert!(running.is_empty());
+    }
+
+    #[tokio::test]
+    async fn list_running_investigations_finds_locks() {
+        let mut conn = MockRedisConnection::new();
+        let _: () = conn
+            .set("ares:blue:lock:inv-1", "2024-01-01T00:00:00Z")
+            .await
+            .unwrap();
+        let _: () = conn
+            .set("ares:blue:lock:inv-2", "2024-01-01T00:00:00Z")
+            .await
+            .unwrap();
+        let running = list_running_investigations(&mut conn).await.unwrap();
+        assert_eq!(running.len(), 2);
+        assert!(running.contains("inv-1"));
+        assert!(running.contains("inv-2"));
+    }
+
+    #[tokio::test]
+    async fn resolve_latest_investigation_empty() {
+        let mut conn = MockRedisConnection::new();
+        let latest = resolve_latest_investigation(&mut conn).await.unwrap();
+        assert!(latest.is_none());
+    }
+
+    #[tokio::test]
+    async fn resolve_latest_investigation_by_started_at() {
+        let mut conn = MockRedisConnection::new();
+        let _: () = conn
+            .hset(
+                "ares:blue:inv:inv-old:meta",
+                "started_at",
+                "\"2024-01-01T00:00:00Z\"",
+            )
+            .await
+            .unwrap();
+        let _: () = conn
+            .hset(
+                "ares:blue:inv:inv-new:meta",
+                "started_at",
+                "\"2024-06-01T00:00:00Z\"",
+            )
+            .await
+            .unwrap();
+        let latest = resolve_latest_investigation(&mut conn).await.unwrap();
+        assert_eq!(latest, Some("inv-new".to_string()));
+    }
+
+    #[tokio::test]
+    async fn resolve_latest_investigation_prefers_running() {
+        let mut conn = MockRedisConnection::new();
+        // inv-old is newer by timestamp but not running
+        let _: () = conn
+            .hset(
+                "ares:blue:inv:inv-old:meta",
+                "started_at",
+                "\"2024-06-01T00:00:00Z\"",
+            )
+            .await
+            .unwrap();
+        // inv-running is older but has a lock
+        let _: () = conn
+            .hset(
+                "ares:blue:inv:inv-running:meta",
+                "started_at",
+                "\"2024-01-01T00:00:00Z\"",
+            )
+            .await
+            .unwrap();
+        let _: () = conn
+            .set("ares:blue:lock:inv-running", "2024-01-01T00:00:00Z")
+            .await
+            .unwrap();
+        let latest = resolve_latest_investigation(&mut conn).await.unwrap();
+        assert_eq!(latest, Some("inv-running".to_string()));
+    }
+
+    #[tokio::test]
+    async fn list_investigations_for_operation_empty() {
+        let mut conn = MockRedisConnection::new();
+        let ids = list_investigations_for_operation(&mut conn, "op-1")
+            .await
+            .unwrap();
+        assert!(ids.is_empty());
+    }
+
+    #[tokio::test]
+    async fn list_investigations_for_operation_returns_sorted() {
+        let mut conn = MockRedisConnection::new();
+        let key = "ares:blue:op:op-1:investigations";
+        let _: () = conn.sadd(key, "inv-b").await.unwrap();
+        let _: () = conn.sadd(key, "inv-a").await.unwrap();
+        let ids = list_investigations_for_operation(&mut conn, "op-1")
+            .await
+            .unwrap();
+        assert_eq!(ids, vec!["inv-a", "inv-b"]);
+    }
+
+    #[tokio::test]
+    async fn delete_investigation_removes_keys() {
+        let mut conn = MockRedisConnection::new();
+        let _: () = conn
+            .hset("ares:blue:inv:inv-1:meta", "stage", "triage")
+            .await
+            .unwrap();
+        let _: () = conn
+            .hset("ares:blue:inv:inv-1:evidence", "e1", "{}")
+            .await
+            .unwrap();
+        let _: () = conn
+            .set("ares:blue:lock:inv-1", "2024-01-01T00:00:00Z")
+            .await
+            .unwrap();
+
+        let deleted = delete_investigation(&mut conn, "inv-1").await.unwrap();
+        assert!(deleted >= 2); // at least meta + lock
+
+        // Verify keys are gone
+        let exists: bool = conn.exists("ares:blue:inv:inv-1:meta").await.unwrap();
+        assert!(!exists);
+        let exists: bool = conn.exists("ares:blue:lock:inv-1").await.unwrap();
+        assert!(!exists);
+    }
+}

@@ -464,6 +464,8 @@ mod tests {
 
     #[test]
     fn config_json_with_strategy() {
+        // Clear ARES_STRATEGY so it doesn't override the JSON payload's strategy
+        std::env::remove_var("ARES_STRATEGY");
         let payload = r#"{"operation_id":"op-strat","target_domain":"contoso.local","target_ips":[],"strategy":"comprehensive"}"#;
         std::env::set_var("ARES_OPERATION_ID", payload);
         let c = OrchestratorConfig::from_env().unwrap();
