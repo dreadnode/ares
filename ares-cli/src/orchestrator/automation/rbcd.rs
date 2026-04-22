@@ -58,24 +58,10 @@ pub async fn auto_rbcd_exploitation(
                 .discovered_vulnerabilities
                 .values()
                 .filter_map(|vuln| {
-                    let vtype = vuln.vuln_type.to_lowercase();
-
                     // Match vulns where a user has write access on a COMPUTER object.
                     // These come from BloodHound edges or ACL analysis.
-                    let is_rbcd_candidate = vtype == "rbcd"
-                        || vtype == "genericall_computer"
-                        || vtype == "genericwrite_computer"
-                        || (matches!(vtype.as_str(), "genericall" | "genericwrite")
-                            && vuln
-                                .details
-                                .get("target_type")
-                                .and_then(|v| v.as_str())
-                                .is_some_and(|t| {
-                                    t.to_lowercase() == "computer"
-                                        || t.to_lowercase().ends_with('$')
-                                }));
-
-                    if !is_rbcd_candidate {
+                    let target_type = vuln.details.get("target_type").and_then(|v| v.as_str());
+                    if !is_rbcd_candidate(&vuln.vuln_type, target_type) {
                         return None;
                     }
 
@@ -154,18 +140,13 @@ pub async fn auto_rbcd_exploitation(
                         .cloned();
 
                     // Resolve target computer IP from hosts
-                    let target_ip = state.hosts.iter().find_map(|h| {
-                        let tc = target_computer
-                            .to_lowercase()
-                            .trim_end_matches('$')
-                            .to_string();
-                        let h_lower = h.hostname.to_lowercase();
-                        if h_lower == tc || h_lower.starts_with(&format!("{tc}.")) {
-                            Some(h.ip.clone())
-                        } else {
-                            None
-                        }
-                    });
+                    let target_ip = resolve_computer_ip(
+                        &target_computer,
+                        state
+                            .hosts
+                            .iter()
+                            .map(|h| (h.hostname.as_str(), h.ip.as_str())),
+                    );
 
                     Some(RbcdWork {
                         vuln_id: vuln.vuln_id.clone(),
@@ -254,4 +235,113 @@ struct RbcdWork {
     dc_ip: Option<String>,
     credential: Option<ares_core::models::Credential>,
     hash: Option<ares_core::models::Hash>,
+}
+
+/// Returns `true` if a vulnerability type and optional target_type represent an
+/// RBCD attack candidate (computer object with GenericAll/GenericWrite).
+pub(crate) fn is_rbcd_candidate(vuln_type: &str, target_type: Option<&str>) -> bool {
+    let vtype = vuln_type.to_lowercase();
+    vtype == "rbcd"
+        || vtype == "genericall_computer"
+        || vtype == "genericwrite_computer"
+        || (matches!(vtype.as_str(), "genericall" | "genericwrite")
+            && target_type
+                .is_some_and(|t| t.to_lowercase() == "computer" || t.to_lowercase().ends_with('$')))
+}
+
+/// Resolve a target computer hostname to an IP from a list of known hosts.
+/// Strips trailing `$` from machine account names before matching.
+pub(crate) fn resolve_computer_ip<'a>(
+    target_computer: &str,
+    hosts: impl Iterator<Item = (&'a str, &'a str)>,
+) -> Option<String> {
+    let tc = target_computer
+        .to_lowercase()
+        .trim_end_matches('$')
+        .to_string();
+    for (hostname, ip) in hosts {
+        let h_lower = hostname.to_lowercase();
+        if h_lower == tc || h_lower.starts_with(&format!("{tc}.")) {
+            return Some(ip.to_string());
+        }
+    }
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_is_rbcd_candidate_direct_types() {
+        assert!(is_rbcd_candidate("rbcd", None));
+        assert!(is_rbcd_candidate("RBCD", None));
+        assert!(is_rbcd_candidate("genericall_computer", None));
+        assert!(is_rbcd_candidate("GenericWrite_Computer", None));
+    }
+
+    #[test]
+    fn test_is_rbcd_candidate_with_target_type() {
+        assert!(is_rbcd_candidate("genericall", Some("Computer")));
+        assert!(is_rbcd_candidate("genericwrite", Some("DC01$")));
+        assert!(is_rbcd_candidate("GenericAll", Some("computer")));
+    }
+
+    #[test]
+    fn test_is_rbcd_candidate_negative() {
+        assert!(!is_rbcd_candidate("genericall", None));
+        assert!(!is_rbcd_candidate("genericall", Some("User")));
+        assert!(!is_rbcd_candidate("genericwrite", Some("Group")));
+        assert!(!is_rbcd_candidate("esc1", None));
+        assert!(!is_rbcd_candidate("shadow_credentials", Some("Computer")));
+    }
+
+    #[test]
+    fn test_resolve_computer_ip_exact_match() {
+        let hosts = vec![
+            ("dc01", "192.168.58.10"),
+            ("sql01.contoso.local", "192.168.58.20"),
+        ];
+        let result = resolve_computer_ip("DC01$", hosts.into_iter());
+        assert_eq!(result, Some("192.168.58.10".to_string()));
+    }
+
+    #[test]
+    fn test_resolve_computer_ip_fqdn_match() {
+        let hosts = vec![
+            ("dc01.contoso.local", "192.168.58.10"),
+            ("sql01.contoso.local", "192.168.58.20"),
+        ];
+        let result = resolve_computer_ip("dc01$", hosts.into_iter());
+        assert_eq!(result, Some("192.168.58.10".to_string()));
+    }
+
+    #[test]
+    fn test_resolve_computer_ip_no_match() {
+        let hosts = vec![("dc01.contoso.local", "192.168.58.10")];
+        let result = resolve_computer_ip("dc02$", hosts.into_iter());
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_resolve_computer_ip_no_dollar_suffix() {
+        let hosts = vec![("web01.contoso.local", "192.168.58.30")];
+        let result = resolve_computer_ip("web01", hosts.into_iter());
+        assert_eq!(result, Some("192.168.58.30".to_string()));
+    }
+
+    #[test]
+    fn test_resolve_computer_ip_partial_no_match() {
+        // "dc01" should not match "dc011.contoso.local"
+        let hosts = vec![("dc011.contoso.local", "192.168.58.11")];
+        let result = resolve_computer_ip("dc01$", hosts.into_iter());
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_dedup_key_format() {
+        let vuln_id = "vuln-123";
+        let dedup_key = format!("{DEDUP_RBCD}:{vuln_id}");
+        assert_eq!(dedup_key, "rbcd_exploit:vuln-123");
+    }
 }

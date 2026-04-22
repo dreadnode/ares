@@ -57,19 +57,8 @@ pub async fn auto_shadow_credentials(
                 .discovered_vulnerabilities
                 .values()
                 .filter_map(|vuln| {
-                    let vtype = vuln.vuln_type.to_lowercase();
                     // Look for ACL-based vulns that grant write access to another principal
-                    if !matches!(
-                        vtype.as_str(),
-                        "genericall"
-                            | "genericwrite"
-                            | "writedacl"
-                            | "writeowner"
-                            | "shadow_credentials"
-                            | "acl_genericall"
-                            | "acl_genericwrite"
-                            | "acl_writedacl"
-                    ) {
+                    if !is_shadow_cred_candidate(&vuln.vuln_type) {
                         return None;
                     }
 
@@ -230,4 +219,62 @@ struct ShadowCredWork {
     dc_ip: Option<String>,
     credential: Option<ares_core::models::Credential>,
     hash: Option<ares_core::models::Hash>,
+}
+
+/// Returns `true` if the given vulnerability type is a candidate for shadow
+/// credentials exploitation (ACL-based write access on another principal).
+pub(crate) fn is_shadow_cred_candidate(vuln_type: &str) -> bool {
+    matches!(
+        vuln_type.to_lowercase().as_str(),
+        "genericall"
+            | "genericwrite"
+            | "writedacl"
+            | "writeowner"
+            | "shadow_credentials"
+            | "acl_genericall"
+            | "acl_genericwrite"
+            | "acl_writedacl"
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_is_shadow_cred_candidate_positive() {
+        assert!(is_shadow_cred_candidate("genericall"));
+        assert!(is_shadow_cred_candidate("GenericAll"));
+        assert!(is_shadow_cred_candidate("genericwrite"));
+        assert!(is_shadow_cred_candidate("writedacl"));
+        assert!(is_shadow_cred_candidate("writeowner"));
+        assert!(is_shadow_cred_candidate("shadow_credentials"));
+        assert!(is_shadow_cred_candidate("acl_genericall"));
+        assert!(is_shadow_cred_candidate("acl_genericwrite"));
+        assert!(is_shadow_cred_candidate("acl_writedacl"));
+    }
+
+    #[test]
+    fn test_is_shadow_cred_candidate_negative() {
+        assert!(!is_shadow_cred_candidate("rbcd"));
+        assert!(!is_shadow_cred_candidate("esc1"));
+        assert!(!is_shadow_cred_candidate("mssql_access"));
+        assert!(!is_shadow_cred_candidate("unconstrained_delegation"));
+        assert!(!is_shadow_cred_candidate("genericall_computer"));
+        assert!(!is_shadow_cred_candidate(""));
+    }
+
+    #[test]
+    fn test_is_shadow_cred_candidate_case_insensitive() {
+        assert!(is_shadow_cred_candidate("GENERICALL"));
+        assert!(is_shadow_cred_candidate("WriteDacl"));
+        assert!(is_shadow_cred_candidate("ACL_GENERICWRITE"));
+    }
+
+    #[test]
+    fn test_dedup_key_format() {
+        let vuln_id = "vuln-456";
+        let dedup_key = format!("{DEDUP_SHADOW_CREDS}:{vuln_id}");
+        assert_eq!(dedup_key, "shadow_creds:vuln-456");
+    }
 }

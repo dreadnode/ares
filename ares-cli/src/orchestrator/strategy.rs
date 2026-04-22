@@ -599,4 +599,88 @@ mod tests {
         // JSON weight wins over YAML weight
         assert_eq!(s.effective_priority("esc1"), 2);
     }
+
+    #[test]
+    fn test_is_comprehensive() {
+        assert!(Strategy::from_preset(StrategyPreset::Comprehensive).is_comprehensive());
+        assert!(!Strategy::from_preset(StrategyPreset::Fast).is_comprehensive());
+        assert!(!Strategy::from_preset(StrategyPreset::Stealth).is_comprehensive());
+    }
+
+    #[test]
+    fn test_should_continue_after_da() {
+        let fast = Strategy::from_preset(StrategyPreset::Fast);
+        assert!(!fast.should_continue_after_da());
+
+        let comp = Strategy::from_preset(StrategyPreset::Comprehensive);
+        assert!(comp.should_continue_after_da());
+
+        let stealth = Strategy::from_preset(StrategyPreset::Stealth);
+        assert!(!stealth.should_continue_after_da());
+    }
+
+    #[test]
+    fn test_new_technique_weights_in_presets() {
+        // Verify that new techniques added in this branch are in all presets
+        let new_techniques = ["rbcd", "shadow_credentials", "mssql_deep_exploitation"];
+        for preset in [
+            StrategyPreset::Fast,
+            StrategyPreset::Comprehensive,
+            StrategyPreset::Stealth,
+        ] {
+            let s = Strategy::from_preset(preset);
+            for tech in &new_techniques {
+                assert!(
+                    s.weights.contains_key(*tech),
+                    "Preset {:?} missing weight for {tech}",
+                    preset
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_comprehensive_has_equal_weights() {
+        let s = Strategy::from_preset(StrategyPreset::Comprehensive);
+        // All comprehensive weights should be 3
+        for (tech, weight) in &s.weights {
+            assert_eq!(*weight, 3, "Technique {tech} has weight {weight} != 3");
+        }
+    }
+
+    #[test]
+    fn test_stealth_penalizes_noisy_techniques() {
+        let s = Strategy::from_preset(StrategyPreset::Stealth);
+        // Password spray and SMB signing should be most penalized (8)
+        assert_eq!(s.effective_priority("password_spray"), 8);
+        assert_eq!(s.effective_priority("smb_signing_disabled"), 8);
+        // ADCS/ACL should be most prioritized (1)
+        assert_eq!(s.effective_priority("esc1"), 1);
+        assert_eq!(s.effective_priority("acl_abuse"), 1);
+    }
+
+    #[test]
+    fn test_fast_prioritizes_secretsdump() {
+        let s = Strategy::from_preset(StrategyPreset::Fast);
+        assert_eq!(s.effective_priority("dc_secretsdump"), 1);
+        assert_eq!(s.effective_priority("golden_ticket"), 1);
+        assert_eq!(s.effective_priority("secretsdump"), 2);
+    }
+
+    #[test]
+    fn test_preset_implies_continue_after_da() {
+        assert!(StrategyPreset::Comprehensive.implies_continue_after_da());
+        assert!(!StrategyPreset::Fast.implies_continue_after_da());
+        assert!(!StrategyPreset::Stealth.implies_continue_after_da());
+    }
+
+    #[test]
+    fn test_include_and_exclude_interact() {
+        let mut s = Strategy::default();
+        // Include-only list
+        s.include_techniques.insert("esc1".to_string());
+        // Exclude takes precedence over include
+        s.exclude_techniques.insert("esc1".to_string());
+        assert!(!s.is_technique_allowed("esc1"));
+    }
 }

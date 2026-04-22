@@ -227,4 +227,114 @@ mod tests {
         assert!(esc_priority("esc1") < esc_priority("esc4"));
         assert!(esc_priority("esc4") < esc_priority("esc5"));
     }
+
+    #[test]
+    fn test_esc_priority_all_values() {
+        assert_eq!(esc_priority("esc1"), 1);
+        assert_eq!(esc_priority("esc6"), 1);
+        assert_eq!(esc_priority("esc4"), 2);
+        assert_eq!(esc_priority("esc8"), 2);
+        assert_eq!(esc_priority("esc2"), 3);
+        assert_eq!(esc_priority("esc3"), 3);
+        assert_eq!(esc_priority("esc7"), 4);
+        assert_eq!(esc_priority("esc9"), 4);
+        assert_eq!(esc_priority("esc5"), 5);
+        assert_eq!(esc_priority("esc10"), 6);
+        assert_eq!(esc_priority("esc11"), 6);
+        assert_eq!(esc_priority("esc13"), 6);
+        assert_eq!(esc_priority("unknown"), 6);
+    }
+
+    #[test]
+    fn test_extract_ca_name_standard() {
+        let output =
+            "CA Name                             : CONTOSO-CA\nDNS Name  : ca01.contoso.local";
+        assert_eq!(extract_ca_name(output), Some("CONTOSO-CA".to_string()));
+    }
+
+    #[test]
+    fn test_extract_ca_name_no_spaces() {
+        let output = "CA Name:MYCA\nother line";
+        assert_eq!(extract_ca_name(output), Some("MYCA".to_string()));
+    }
+
+    #[test]
+    fn test_extract_ca_name_missing() {
+        assert_eq!(extract_ca_name("No CA info here"), None);
+        assert_eq!(extract_ca_name(""), None);
+    }
+
+    #[test]
+    fn test_extract_ca_name_empty_value() {
+        assert_eq!(extract_ca_name("CA Name : "), None);
+    }
+
+    #[test]
+    fn test_extract_template_for_esc() {
+        let output = "Template Name                       : VulnTemplate\n    Permissions\n      ESC1 : 'DOMAIN\\Users' can enroll";
+        assert_eq!(
+            extract_template_for_esc(output, "esc1"),
+            Some("VulnTemplate".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_template_for_esc_not_found() {
+        let output = "ESC1 : 'DOMAIN\\Users' can enroll";
+        assert_eq!(extract_template_for_esc(output, "esc1"), None);
+    }
+
+    #[test]
+    fn test_extract_template_for_esc_multiple_templates() {
+        let output = "Template Name : Template1\n    ESC4 : misconfigured\nTemplate Name : Template2\n    ESC1 : enrollable";
+        // ESC4 should get Template1
+        assert_eq!(
+            extract_template_for_esc(output, "esc4"),
+            Some("Template1".to_string())
+        );
+        // ESC1 should get Template2
+        assert_eq!(
+            extract_template_for_esc(output, "esc1"),
+            Some("Template2".to_string())
+        );
+    }
+
+    #[test]
+    fn test_esc_types_constant() {
+        assert_eq!(ESC_TYPES.len(), 14);
+        assert!(ESC_TYPES.contains(&"esc1"));
+        assert!(ESC_TYPES.contains(&"esc8"));
+        assert!(ESC_TYPES.contains(&"esc13"));
+        assert!(ESC_TYPES.contains(&"esc15"));
+        assert!(!ESC_TYPES.contains(&"esc12"));
+        assert!(!ESC_TYPES.contains(&"esc16"));
+    }
+
+    #[test]
+    fn test_parse_certipy_with_template_name() {
+        let output = "Template Name                       : ESC1-Vuln\n    [!] Vulnerabilities\n    ESC1 : 'CONTOSO\\Users' can enroll";
+        let params = json!({"target": "192.168.58.10", "domain": "contoso.local"});
+        let vulns = parse_certipy_find(output, &params);
+        assert_eq!(vulns.len(), 1);
+        assert_eq!(vulns[0]["details"]["template_name"], "ESC1-Vuln");
+    }
+
+    #[test]
+    fn test_parse_certipy_vulnerability_inline_keyword() {
+        // "vulnerab" keyword present alongside ESC type but no [!] Vulnerabilities header
+        let output = "Certificate template is vulnerable to ESC1 attack";
+        let params = json!({"target": "192.168.58.10"});
+        let vulns = parse_certipy_find(output, &params);
+        assert_eq!(vulns.len(), 1);
+    }
+
+    #[test]
+    fn test_parse_certipy_colon_format() {
+        // "ESC8:" format without spaces
+        let output = "ESC8:web enrollment enabled";
+        let params = json!({"target": "192.168.58.10"});
+        let vulns = parse_certipy_find(output, &params);
+        assert_eq!(vulns.len(), 1);
+        assert_eq!(vulns[0]["vuln_type"], "adcs_esc8");
+    }
 }

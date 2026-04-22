@@ -426,4 +426,49 @@ mod tests {
         // Empty password without domain
         assert!(parse_credential_spec("admin:", "").is_none());
     }
+
+    #[test]
+    fn detect_local_ip_returns_some() {
+        // Uses 8.8.8.8 as default destination — should resolve to a local interface
+        // unless we're running in a network-less sandbox.
+        let ip = detect_local_ip(None);
+        if let Some(ref addr) = ip {
+            assert!(!addr.starts_with("127."), "Should reject loopback: {addr}");
+        }
+        // Also test with an explicit target
+        let ip2 = detect_local_ip(Some("192.168.58.10"));
+        if let Some(ref addr) = ip2 {
+            assert!(!addr.starts_with("127."));
+        }
+    }
+
+    #[test]
+    fn make_config_has_strategy() {
+        let cfg = make_config(8);
+        assert!(cfg.listener_ip.is_none());
+        assert!(cfg.initial_credential.is_none());
+        // Default strategy should be Fast
+        assert!(!cfg.strategy.should_continue_after_da());
+    }
+
+    #[test]
+    fn config_with_listener_ip_env() {
+        // JSON payload with strategy and listener IP
+        std::env::set_var("ARES_LISTENER_IP", "10.0.0.50");
+        std::env::set_var("ARES_OPERATION_ID", "test-listener");
+        let c = OrchestratorConfig::from_env().unwrap();
+        assert_eq!(c.listener_ip, Some("10.0.0.50".to_string()));
+        std::env::remove_var("ARES_LISTENER_IP");
+        std::env::remove_var("ARES_OPERATION_ID");
+    }
+
+    #[test]
+    fn config_json_with_strategy() {
+        let payload = r#"{"operation_id":"op-strat","target_domain":"contoso.local","target_ips":[],"strategy":"comprehensive"}"#;
+        std::env::set_var("ARES_OPERATION_ID", payload);
+        let c = OrchestratorConfig::from_env().unwrap();
+        assert!(c.strategy.should_continue_after_da());
+        assert!(c.strategy.is_comprehensive());
+        std::env::remove_var("ARES_OPERATION_ID");
+    }
 }

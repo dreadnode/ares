@@ -189,3 +189,122 @@ pub(super) async fn handle_callback(
     // Fall back to built-in handlers
     handle_builtin_callback(call)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_call(name: &str, args: serde_json::Value) -> ToolCall {
+        ToolCall {
+            id: "test-id".to_string(),
+            name: name.to_string(),
+            arguments: args,
+        }
+    }
+
+    #[test]
+    fn test_list_credentials_fallback() {
+        let call = make_call("list_credentials", serde_json::json!({}));
+        let result = handle_builtin_callback(&call).unwrap();
+        match result {
+            CallbackResult::Continue(msg) => {
+                assert!(msg.contains("No credentials available"));
+                assert!(msg.contains("task payload"));
+            }
+            other => panic!("Expected Continue, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_task_complete_string_result() {
+        let call = make_call(
+            "task_complete",
+            serde_json::json!({"task_id": "t-123", "result": "done"}),
+        );
+        let result = handle_builtin_callback(&call).unwrap();
+        match result {
+            CallbackResult::TaskComplete { task_id, result } => {
+                assert_eq!(task_id, "t-123");
+                assert_eq!(result, "done");
+            }
+            other => panic!("Expected TaskComplete, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_task_complete_json_result() {
+        let call = make_call(
+            "task_complete",
+            serde_json::json!({"task_id": "t-456", "result": {"status": "success"}}),
+        );
+        let result = handle_builtin_callback(&call).unwrap();
+        match result {
+            CallbackResult::TaskComplete { task_id, result } => {
+                assert_eq!(task_id, "t-456");
+                assert!(result.contains("success"));
+            }
+            other => panic!("Expected TaskComplete, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_request_assistance() {
+        let call = make_call(
+            "request_assistance",
+            serde_json::json!({"issue": "stuck", "context": "ldap failed"}),
+        );
+        let result = handle_builtin_callback(&call).unwrap();
+        match result {
+            CallbackResult::RequestAssistance { issue, context } => {
+                assert_eq!(issue, "stuck");
+                assert_eq!(context, "ldap failed");
+            }
+            other => panic!("Expected RequestAssistance, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_record_credential_disabled() {
+        let call = make_call(
+            "record_credential",
+            serde_json::json!({
+                "username": "admin",
+                "password": "P@ssw0rd",
+                "domain": "contoso.local"
+            }),
+        );
+        let result = handle_builtin_callback(&call).unwrap();
+        match result {
+            CallbackResult::Continue(msg) => {
+                assert!(msg.contains("disabled"));
+            }
+            other => panic!("Expected Continue, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_orchestrator_only_tools() {
+        for tool_name in [
+            "get_credential_summary",
+            "get_hash_summary",
+            "get_all_credentials",
+            "dispatch_recon",
+        ] {
+            let call = make_call(tool_name, serde_json::json!({}));
+            let result = handle_builtin_callback(&call).unwrap();
+            match result {
+                CallbackResult::Continue(msg) => {
+                    assert!(msg.contains("orchestrator callback handler"));
+                }
+                other => panic!("Expected Continue for {tool_name}, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_unknown_callback() {
+        let call = make_call("nonexistent_tool", serde_json::json!({}));
+        let result = handle_builtin_callback(&call);
+        assert!(result.is_err());
+    }
+}

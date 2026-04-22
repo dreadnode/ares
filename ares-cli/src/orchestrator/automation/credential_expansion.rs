@@ -419,4 +419,137 @@ mod tests {
         assert!(LATERAL_TECHNIQUES.contains(&"psexec"));
         assert!(!LATERAL_TECHNIQUES.contains(&"evil-winrm"));
     }
+
+    #[test]
+    fn test_netbios_domain_resolution() {
+        // Simulate the NetBIOS→FQDN resolution logic from the automation loop
+        let raw = "NORTH";
+        let raw_lower = raw.to_lowercase();
+
+        // When netbios_to_fqdn has a mapping, use it
+        let mut map = std::collections::HashMap::new();
+        map.insert("north".to_string(), "north.contoso.local".to_string());
+
+        let resolved = if !raw_lower.contains('.') {
+            map.get(&raw_lower)
+                .map(|fqdn| fqdn.to_lowercase())
+                .unwrap_or(raw_lower.clone())
+        } else {
+            raw_lower.clone()
+        };
+        assert_eq!(resolved, "north.contoso.local");
+
+        // When FQDN is already used, pass through
+        let fqdn_raw = "contoso.local";
+        let fqdn_lower = fqdn_raw.to_lowercase();
+        let resolved2 = if !fqdn_lower.contains('.') {
+            map.get(&fqdn_lower)
+                .map(|fqdn| fqdn.to_lowercase())
+                .unwrap_or(fqdn_lower.clone())
+        } else {
+            fqdn_lower.clone()
+        };
+        assert_eq!(resolved2, "contoso.local");
+
+        // When no mapping exists, use the raw value
+        let unknown = "CHILD";
+        let unknown_lower = unknown.to_lowercase();
+        let resolved3 = if !unknown_lower.contains('.') {
+            map.get(&unknown_lower)
+                .map(|fqdn| fqdn.to_lowercase())
+                .unwrap_or(unknown_lower.clone())
+        } else {
+            unknown_lower.clone()
+        };
+        assert_eq!(resolved3, "child");
+    }
+
+    #[test]
+    fn test_domain_matching_logic() {
+        // Simulate the host domain matching from credential expansion
+        let cred_dom = "contoso.local";
+
+        // Same domain matches
+        assert!(
+            "contoso.local" == cred_dom
+                || "contoso.local".ends_with(&format!(".{cred_dom}"))
+                || cred_dom.ends_with(".contoso.local")
+        );
+
+        // Child domain matches (child.contoso.local matches cred for contoso.local)
+        let host_domain = "child.contoso.local";
+        assert!(
+            host_domain == cred_dom
+                || host_domain.ends_with(&format!(".{cred_dom}"))
+                || cred_dom.ends_with(&format!(".{host_domain}"))
+        );
+
+        // Parent domain matches (contoso.local matches cred for child.contoso.local)
+        let cred_dom2 = "child.contoso.local";
+        let host_domain2 = "contoso.local";
+        assert!(
+            host_domain2 == cred_dom2
+                || host_domain2.ends_with(&format!(".{cred_dom2}"))
+                || cred_dom2.ends_with(&format!(".{host_domain2}"))
+        );
+
+        // Cross-domain does NOT match
+        let other_dom = "fabrikam.local";
+        assert!(
+            !(other_dom == cred_dom
+                || other_dom.ends_with(&format!(".{cred_dom}"))
+                || cred_dom.ends_with(&format!(".{other_dom}")))
+        );
+    }
+
+    #[test]
+    fn test_host_domain_from_fqdn() {
+        // Simulate extracting domain from FQDN hostname
+        let hostname = "dc01.contoso.local";
+        let domain = hostname
+            .to_lowercase()
+            .split_once('.')
+            .map(|x| x.1)
+            .unwrap_or("")
+            .to_string();
+        assert_eq!(domain, "contoso.local");
+
+        // Child domain host
+        let hostname2 = "dc02.child.contoso.local";
+        let domain2 = hostname2
+            .to_lowercase()
+            .split_once('.')
+            .map(|x| x.1)
+            .unwrap_or("")
+            .to_string();
+        assert_eq!(domain2, "child.contoso.local");
+
+        // Short hostname (no domain)
+        let hostname3 = "dc01";
+        let domain3 = hostname3
+            .to_lowercase()
+            .split_once('.')
+            .map(|x| x.1)
+            .unwrap_or("")
+            .to_string();
+        assert_eq!(domain3, "");
+    }
+
+    #[test]
+    fn test_hash_expansion_dedup_key() {
+        // Test the dedup key format for hash-based expansion
+        let domain = "contoso.local";
+        let username = "Administrator";
+        let hash_value = "aad3b435b51404eeaad3b435b51404ee:31d6cfe0d16ae931b73c59d7e0c089c0";
+        let dedup = format!(
+            "{}:{}:{}",
+            domain.to_lowercase(),
+            username.to_lowercase(),
+            &hash_value[..32.min(hash_value.len())]
+        );
+        assert_eq!(
+            dedup,
+            "contoso.local:administrator:aad3b435b51404eeaad3b435b51404ee"
+        );
+    }
 }

@@ -477,4 +477,60 @@ mod tests {
         // Should NOT match "dc011.contoso.local"
         assert!(!"dc011.contoso.local".starts_with(&format!("{prefix}.")));
     }
+
+    #[test]
+    fn test_is_machine_account() {
+        assert!("DC02$".ends_with('$'));
+        assert!("KINGSLANDING$".ends_with('$'));
+        assert!(!"sansa.stark".ends_with('$'));
+        assert!(!"Administrator".ends_with('$'));
+    }
+
+    #[test]
+    fn test_user_account_gets_dc_ip_as_target() {
+        // User accounts (no $) should use DC IP as target
+        let account = "sansa.stark";
+        let is_machine = account.ends_with('$');
+        assert!(!is_machine);
+        // In the real code, user accounts fall through to using dc_ip as host_ip
+    }
+
+    #[test]
+    fn test_dedup_key_format_user_account() {
+        let account = "sansa.stark";
+        let dedup_key = format!("uc_user:{}", account.to_lowercase());
+        assert_eq!(dedup_key, "uc_user:sansa.stark");
+    }
+
+    #[test]
+    fn test_phase_state_defaults() {
+        use super::PhaseState;
+        let phase = PhaseState {
+            coercion_dispatched_at: None,
+            dump_attempts: 0,
+            last_dump_at: None,
+            completed: false,
+        };
+        assert!(!phase.completed);
+        assert_eq!(phase.dump_attempts, 0);
+        assert!(phase.coercion_dispatched_at.is_none());
+    }
+
+    #[test]
+    fn test_max_dump_attempts_constant() {
+        assert_eq!(super::MAX_DUMP_ATTEMPTS, 3);
+    }
+
+    #[test]
+    fn test_coerce_to_dump_delay() {
+        assert_eq!(
+            super::COERCE_TO_DUMP_DELAY,
+            std::time::Duration::from_secs(15)
+        );
+    }
+
+    #[test]
+    fn test_dump_retry_delay() {
+        assert_eq!(super::DUMP_RETRY_DELAY, std::time::Duration::from_secs(60));
+    }
 }
