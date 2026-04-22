@@ -191,9 +191,7 @@ mod tests {
     fn find_template_by_direct_name() {
         let config = detection_config();
         let first_name = config.templates.keys().next().unwrap();
-        let result = find_template(first_name);
-        let (key, _) =
-            result.unwrap_or_else(|| panic!("should find template by name: {first_name}"));
+        let (key, _) = find_template(first_name).expect("should find template by name");
         assert_eq!(key, first_name.as_str());
     }
 
@@ -207,9 +205,7 @@ mod tests {
         let config = detection_config();
         for (name, entry) in &config.templates {
             if let Some(alias) = entry.aliases.first() {
-                let result = find_template(alias);
-                let (key, _) =
-                    result.unwrap_or_else(|| panic!("should find '{name}' by alias '{alias}'"));
+                let (key, _) = find_template(alias).expect("should find template by alias");
                 assert_eq!(key, name.as_str());
                 return;
             }
@@ -265,6 +261,12 @@ mod tests {
             mitre.starts_with("T1021"),
             "SMB should map to T1021.x, got {mitre}"
         );
+    }
+
+    #[test]
+    fn templates_for_connection_type_smb_returns_entries() {
+        let t = templates_for_connection_type("smb");
+        assert!(!t.is_empty(), "smb should have matching templates");
     }
 
     #[test]
