@@ -14,7 +14,7 @@ pub(crate) async fn history_search_creds(
     let pool = connect_postgres().await?;
 
     let mut query = String::from(
-        "SELECT c.username, c.domain, c.is_admin, c.source, c.attack_step, \
+        "SELECT c.username, c.domain, c.is_admin, c.source, \
          o.operation_id \
          FROM credentials c JOIN operations o ON c.operation_id = o.id \
          WHERE 1=1",

@@ -22,9 +22,9 @@ use crate::orchestrator::task_queue::TaskQueue;
 
 /// Live state for a registered agent.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct AgentState {
     pub name: String,
+    #[allow(dead_code)]
     pub role: String,
     pub status: String,
     pub last_heartbeat: DateTime<Utc>,
@@ -45,7 +45,7 @@ impl AgentRegistry {
     }
 
     /// Register an agent (or update it if already known).
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub async fn register(&self, name: &str, role: &str) {
         let mut agents = self.agents.lock().await;
         agents

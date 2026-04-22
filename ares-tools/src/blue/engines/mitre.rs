@@ -18,10 +18,6 @@ pub struct InvestigativeQuestion {
     pub rationale: String,
     pub target_technique: Option<String>,
     pub priority_score: f64,
-    #[allow(dead_code)]
-    pub pyramid_elevation_score: f64,
-    #[allow(dead_code)]
-    pub confidence_impact_score: f64,
 }
 
 impl InvestigativeQuestion {
@@ -80,8 +76,6 @@ pub fn generate_mitre_questions(
                     rationale: precursor.rationale.clone(),
                     target_technique: Some(precursor.technique.clone()),
                     priority_score: priority,
-                    pyramid_elevation_score: pyramid_elevation,
-                    confidence_impact_score: confidence_impact,
                 });
             }
 
@@ -95,8 +89,6 @@ pub fn generate_mitre_questions(
                     rationale: format!("Follow-up question for {tech_id} investigation"),
                     target_technique: q.target_technique.clone(),
                     priority_score: priority,
-                    pyramid_elevation_score: 0.7,
-                    confidence_impact_score: 0.8,
                 });
             }
         }
@@ -118,8 +110,6 @@ pub fn generate_mitre_questions(
                                 rationale: format!("Detection indicator from {recipe_name} recipe"),
                                 target_technique: Some(tech_id.clone()),
                                 priority_score: 0.7 * 3.0 + 0.8 * 2.0 + 0.6 * 2.0,
-                                pyramid_elevation_score: 0.7,
-                                confidence_impact_score: 0.8,
                             });
                         }
                     }
@@ -147,8 +137,6 @@ pub fn generate_mitre_questions(
                             rationale: format!("LogQL query from {recipe_name} recipe"),
                             target_technique: Some(tech_id.clone()),
                             priority_score: 0.6 * 3.0 + 0.7 * 2.0 + 0.8 * 2.0,
-                            pyramid_elevation_score: 0.6,
-                            confidence_impact_score: 0.7,
                         });
                     }
                 }
@@ -171,8 +159,6 @@ pub fn generate_mitre_questions(
                             rationale: format!("Investigation step from {recipe_name} recipe"),
                             target_technique: Some(tech_id.clone()),
                             priority_score: 0.5 * 3.0 + 0.6 * 2.0 + 0.7 * 2.0,
-                            pyramid_elevation_score: 0.5,
-                            confidence_impact_score: 0.6,
                         });
                     }
                 }

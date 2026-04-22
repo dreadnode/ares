@@ -34,36 +34,14 @@ pub fn is_connection_error(err: &anyhow::Error) -> bool {
 
 /// Result of a recovery operation.
 #[derive(Debug)]
-#[allow(dead_code)]
 pub struct RecoveredState {
     /// The full shared state loaded from Redis.
+    #[allow(dead_code)]
     pub state: SharedRedTeamState,
     /// Task IDs that were re-enqueued for retry.
     pub requeued_task_ids: Vec<String>,
     /// Task IDs that exceeded max retries and were marked failed.
     pub failed_task_ids: Vec<String>,
-}
-
-/// Info about a permanently failed task (exceeded max retries).
-#[derive(Debug, Clone)]
-#[allow(dead_code)]
-pub struct InterruptedTask {
-    pub task_id: String,
-    pub task_type: String,
-    pub assigned_agent: String,
-    pub retry_count: i32,
-    pub error: String,
-}
-
-/// Info about a task that was auto-requeued for retry.
-#[derive(Debug, Clone)]
-#[allow(dead_code)]
-pub struct RetryingTask {
-    pub task_id: String,
-    pub task_type: String,
-    pub assigned_agent: String,
-    pub retry_count: i32,
-    pub max_retries: i32,
 }
 
 #[cfg(test)]

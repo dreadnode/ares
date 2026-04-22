@@ -50,8 +50,6 @@ pub fn generate_pyramid_questions(evidence: &[EvidenceItem]) -> Vec<Investigativ
                     ),
                     target_technique: None,
                     priority_score: priority,
-                    pyramid_elevation_score: elevation_score,
-                    confidence_impact_score: 0.5,
                 });
             }
         }

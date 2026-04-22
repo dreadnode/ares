@@ -107,13 +107,7 @@ pub type TaskQueue = TaskQueueCore<ConnectionManager>;
 
 // -- ConnectionManager-specific methods ------------------------------------
 
-#[allow(dead_code)]
 impl TaskQueue {
-    /// Create a new queue from an existing connection manager.
-    pub fn new(conn: ConnectionManager) -> Self {
-        Self { conn }
-    }
-
     /// Connect to Redis and return a TaskQueue.
     pub async fn connect(redis_url: &str) -> Result<Self> {
         let client = redis::Client::open(redis_url)

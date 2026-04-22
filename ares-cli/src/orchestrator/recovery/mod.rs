@@ -14,24 +14,13 @@
 //! - **State normalization** -- fixes NetBIOS -> FQDN domain mismatches on
 //!   credentials and hashes, persists corrections back to Redis.
 //! - **Connection error detection** with retry logic.
-//! - **`OperationResumeHelper`** -- analysis methods for post-recovery summary.
-
 mod dedup;
 mod manager;
 mod normalize;
 mod requeue;
-mod resume_helper;
 mod types;
 
-// Re-export all public items at the same paths they had before the split.
-// Allow unused -- these re-exports document the module API and are needed by
-// tests and by main.rs (OperationRecoveryManager). The remaining types are
-// returned from public methods and would be needed by any future library consumer.
 pub use manager::OperationRecoveryManager;
-#[allow(unused_imports)]
-pub use resume_helper::OperationResumeHelper;
-#[allow(unused_imports)]
-pub use types::{InterruptedTask, RecoveredState, RetryingTask};
 
 // Items that were module-private in the original single file; re-exported
 // here only for intra-crate use and tests.

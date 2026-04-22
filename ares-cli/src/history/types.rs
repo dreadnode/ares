@@ -38,8 +38,6 @@ pub(crate) struct CredentialSearchRow {
     pub domain: Option<String>,
     pub is_admin: bool,
     pub source: Option<String>,
-    #[allow(dead_code)]
-    pub attack_step: Option<i32>,
     pub operation_id: String,
 }
 
@@ -49,7 +47,6 @@ pub(crate) struct HashSearchRow {
     pub domain: Option<String>,
     pub hash_type: Option<String>,
     pub is_cracked: Option<bool>,
-    #[allow(dead_code)]
     pub source: Option<String>,
     pub operation_id: String,
 }

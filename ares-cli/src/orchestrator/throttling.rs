@@ -60,11 +60,11 @@ pub enum ThrottleDecision {
 // ---------------------------------------------------------------------------
 
 /// Concurrency controller that mirrors the Python throttling logic.
-#[allow(dead_code)]
 pub struct Throttler {
     config: Arc<OrchestratorConfig>,
     tracker: ActiveTaskTracker,
-    /// Per-role semaphores (lazily populated).
+    /// Per-role semaphores (lazily populated, used in tests).
+    #[allow(dead_code)]
     role_semaphores: tokio::sync::Mutex<HashMap<String, Arc<Semaphore>>>,
     /// Timestamp of the last successful dispatch.
     last_dispatch: tokio::sync::Mutex<Instant>,
@@ -202,7 +202,7 @@ impl Throttler {
     }
 
     /// Acquire a per-role semaphore permit. Returns a guard that releases on drop.
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub async fn acquire_role_permit(
         &self,
         role: &str,

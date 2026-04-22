@@ -27,10 +27,8 @@ use crate::orchestrator::state::SharedState;
 ///
 /// Owns an LLM provider and tool dispatcher, and builds prompts from
 /// the current operation state.
-#[allow(dead_code)]
 pub struct LlmTaskRunner {
     provider: Box<dyn LlmProvider>,
-    model_name: String,
     dispatcher: Arc<dyn ToolDispatcher>,
     state: SharedState,
     config: AgentLoopConfig,
@@ -52,13 +50,12 @@ impl LlmTaskRunner {
         technique_priorities: Vec<(String, i32)>,
     ) -> Self {
         let config = AgentLoopConfig {
-            model: model_name.clone(),
+            model: model_name,
             temperature,
             ..AgentLoopConfig::default()
         };
         Self {
             provider,
-            model_name,
             dispatcher,
             state,
             config,

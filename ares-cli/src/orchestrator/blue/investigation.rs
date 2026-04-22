@@ -382,15 +382,15 @@ pub(super) async fn generate_report(
 
 /// Outcome of a completed investigation.
 #[derive(Debug)]
-#[allow(dead_code)]
 pub enum InvestigationOutcome {
     Completed {
         verdict: String,
-        summary: String,
+        #[allow(dead_code)]
         steps: u32,
     },
     Escalated {
         reason: String,
+        #[allow(dead_code)]
         severity: String,
     },
     Failed {
@@ -402,7 +402,6 @@ fn process_outcome(outcome: &AgentLoopOutcome, investigation_id: &str) -> Invest
     match &outcome.reason {
         LoopEndReason::TaskComplete { result, .. } => InvestigationOutcome::Completed {
             verdict: extract_verdict(result),
-            summary: result.clone(),
             steps: outcome.steps,
         },
         LoopEndReason::RequestAssistance { issue, .. } => InvestigationOutcome::Escalated {
@@ -415,7 +414,6 @@ fn process_outcome(outcome: &AgentLoopOutcome, investigation_id: &str) -> Invest
         },
         LoopEndReason::EndTurn { content } => InvestigationOutcome::Completed {
             verdict: extract_verdict(content),
-            summary: content.clone(),
             steps: outcome.steps,
         },
         LoopEndReason::MaxSteps => InvestigationOutcome::Failed {

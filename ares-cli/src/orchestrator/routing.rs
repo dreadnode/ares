@@ -85,7 +85,7 @@ impl ActiveTaskTracker {
     }
 
     /// Total active tasks across all roles.
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub async fn total(&self) -> usize {
         let inner = self.inner.lock().await;
         inner.tasks.len()
