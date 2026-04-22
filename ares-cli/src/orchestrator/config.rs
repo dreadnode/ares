@@ -386,6 +386,21 @@ mod tests {
         assert_eq!(cred.password, "secret");
         assert_eq!(cred.domain, "fabrikam.local");
 
+        // Listener IP from env
+        std::env::set_var("ARES_LISTENER_IP", "192.168.58.50");
+        std::env::set_var("ARES_OPERATION_ID", "test-listener");
+        let c = OrchestratorConfig::from_env().unwrap();
+        assert_eq!(c.listener_ip, Some("192.168.58.50".to_string()));
+        std::env::remove_var("ARES_LISTENER_IP");
+
+        // JSON payload with strategy
+        std::env::remove_var("ARES_STRATEGY");
+        let payload = r#"{"operation_id":"op-strat","target_domain":"contoso.local","target_ips":[],"strategy":"comprehensive"}"#;
+        std::env::set_var("ARES_OPERATION_ID", payload);
+        let c = OrchestratorConfig::from_env().unwrap();
+        assert!(c.strategy.should_continue_after_da());
+        assert!(c.strategy.is_comprehensive());
+
         std::env::remove_var("ARES_OPERATION_ID");
         std::env::remove_var("ARES_INITIAL_CREDENTIAL");
     }
@@ -449,28 +464,5 @@ mod tests {
         assert!(cfg.initial_credential.is_none());
         // Default strategy should be Fast
         assert!(!cfg.strategy.should_continue_after_da());
-    }
-
-    #[test]
-    fn config_with_listener_ip_env() {
-        // JSON payload with strategy and listener IP
-        std::env::set_var("ARES_LISTENER_IP", "192.168.58.50");
-        std::env::set_var("ARES_OPERATION_ID", "test-listener");
-        let c = OrchestratorConfig::from_env().unwrap();
-        assert_eq!(c.listener_ip, Some("192.168.58.50".to_string()));
-        std::env::remove_var("ARES_LISTENER_IP");
-        std::env::remove_var("ARES_OPERATION_ID");
-    }
-
-    #[test]
-    fn config_json_with_strategy() {
-        // Clear ARES_STRATEGY so it doesn't override the JSON payload's strategy
-        std::env::remove_var("ARES_STRATEGY");
-        let payload = r#"{"operation_id":"op-strat","target_domain":"contoso.local","target_ips":[],"strategy":"comprehensive"}"#;
-        std::env::set_var("ARES_OPERATION_ID", payload);
-        let c = OrchestratorConfig::from_env().unwrap();
-        assert!(c.strategy.should_continue_after_da());
-        assert!(c.strategy.is_comprehensive());
-        std::env::remove_var("ARES_OPERATION_ID");
     }
 }
