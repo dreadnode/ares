@@ -31,15 +31,13 @@ operation:
   #   fast          — shortest path to DA (secretsdump → golden ticket)
   #   comprehensive — exploit ALL discovered vulns, don't stop on first DA
   #   stealth       — avoid noisy techniques (no sprays, deprioritise secretsdump)
-  strategy: stealth
+  strategy: comprehensive
 
   # Keep exploiting after Domain Admin is achieved.
   continue_after_da: true
 
   # Force alternative paths: block the fast secretsdump chain
-  exclude_techniques:
-    - secretsdump
-    - dc_secretsdump
+  exclude_techniques: []
 
   # If non-empty, ONLY these techniques are allowed (allowlist mode).
   # include_techniques: []
