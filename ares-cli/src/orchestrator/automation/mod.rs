@@ -14,6 +14,7 @@
 
 mod acl;
 mod adcs;
+mod adcs_exploitation;
 mod bloodhound;
 mod coercion;
 mod crack;
@@ -23,6 +24,8 @@ mod credential_reuse;
 mod delegation;
 mod gmsa;
 mod golden_ticket;
+mod gpo;
+mod laps;
 mod mssql;
 mod mssql_exploitation;
 mod rbcd;
@@ -39,6 +42,7 @@ mod unconstrained;
 // Re-export all public task functions at the same paths they had before the split.
 pub use acl::auto_acl_chain_follow;
 pub use adcs::auto_adcs_enumeration;
+pub use adcs_exploitation::auto_adcs_exploitation;
 pub use bloodhound::auto_bloodhound;
 pub use coercion::auto_coercion;
 pub use crack::auto_crack_dispatch;
@@ -48,6 +52,8 @@ pub use credential_reuse::auto_credential_reuse;
 pub use delegation::auto_delegation_enumeration;
 pub use gmsa::auto_gmsa_extraction;
 pub use golden_ticket::auto_golden_ticket;
+pub use gpo::auto_gpo_abuse;
+pub use laps::auto_laps_extraction;
 pub use mssql::auto_mssql_detection;
 pub use mssql_exploitation::auto_mssql_exploitation;
 pub use rbcd::auto_rbcd_exploitation;

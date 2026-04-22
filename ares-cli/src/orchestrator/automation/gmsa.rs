@@ -42,50 +42,138 @@ pub async fn auto_gmsa_extraction(
                 continue;
             }
 
-            // Find gMSA-like accounts from discovered users
-            let gmsa_accounts: Vec<GmsaWork> = state
-                .users
-                .iter()
-                .filter_map(|user| {
-                    // gMSA accounts typically end with $ and have "managed service"
-                    // in description, or their name contains "gmsa" / "msds"
-                    let is_gmsa = user.username.ends_with('$')
-                        && (user.description.to_lowercase().contains("managed service")
-                            || user.username.to_lowercase().contains("gmsa"));
+            let mut gmsa_accounts: Vec<GmsaWork> = Vec::new();
+            let mut seen_accounts = std::collections::HashSet::new();
 
-                    if !is_gmsa {
-                        return None;
-                    }
+            // Path 1: Detect from discovered users (original path)
+            for user in &state.users {
+                // gMSA accounts typically end with $ and have "managed service"
+                // in description, or their name contains "gmsa" / "msds"
+                let is_gmsa = user.username.ends_with('$')
+                    && (user.description.to_lowercase().contains("managed service")
+                        || user.username.to_lowercase().contains("gmsa"));
 
-                    let dedup_key = format!(
-                        "{}:{}",
-                        user.domain.to_lowercase(),
-                        user.username.to_lowercase()
-                    );
-                    if state.is_processed(DEDUP_GMSA_ACCOUNTS, &dedup_key) {
-                        return None;
-                    }
+                if !is_gmsa {
+                    continue;
+                }
 
-                    // Find a credential we can use to query this domain
-                    let cred = state
-                        .credentials
-                        .iter()
-                        .find(|c| c.domain.to_lowercase() == user.domain.to_lowercase())?;
+                let key = format!(
+                    "{}:{}",
+                    user.domain.to_lowercase(),
+                    user.username.to_lowercase()
+                );
+                if state.is_processed(DEDUP_GMSA_ACCOUNTS, &key)
+                    || !seen_accounts.insert(key.clone())
+                {
+                    continue;
+                }
 
-                    let dc_ip = state
-                        .domain_controllers
-                        .get(&user.domain.to_lowercase())
-                        .cloned()?;
+                let cred = match state
+                    .credentials
+                    .iter()
+                    .find(|c| c.domain.to_lowercase() == user.domain.to_lowercase())
+                {
+                    Some(c) => c.clone(),
+                    None => continue,
+                };
 
-                    Some(GmsaWork {
-                        dedup_key,
-                        gmsa_account: user.username.clone(),
-                        domain: user.domain.clone(),
-                        dc_ip,
-                        credential: cred.clone(),
+                let dc_ip = match state
+                    .domain_controllers
+                    .get(&user.domain.to_lowercase())
+                    .cloned()
+                {
+                    Some(ip) => ip,
+                    None => continue,
+                };
+
+                gmsa_accounts.push(GmsaWork {
+                    dedup_key: key,
+                    gmsa_account: user.username.clone(),
+                    domain: user.domain.clone(),
+                    dc_ip,
+                    credential: cred,
+                });
+            }
+
+            // Path 2: Detect from discovered vulnerabilities (BloodHound edges)
+            // BloodHound may report gMSA reader edges or gMSA-related vulns
+            for vuln in state.discovered_vulnerabilities.values() {
+                let vtype = vuln.vuln_type.to_lowercase();
+                if vtype != "gmsa" && vtype != "gmsa_reader" && vtype != "readgmsapassword" {
+                    continue;
+                }
+                if state.exploited_vulnerabilities.contains(&vuln.vuln_id) {
+                    continue;
+                }
+
+                let gmsa_account = match vuln
+                    .details
+                    .get("target")
+                    .or_else(|| vuln.details.get("gmsa_account"))
+                    .or_else(|| vuln.details.get("account_name"))
+                    .and_then(|v| v.as_str())
+                {
+                    Some(a) => a.to_string(),
+                    None => continue,
+                };
+
+                let reader = vuln
+                    .details
+                    .get("source")
+                    .or_else(|| vuln.details.get("reader"))
+                    .and_then(|v| v.as_str());
+
+                let domain = vuln
+                    .details
+                    .get("domain")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+
+                let key = format!("{}:{}", domain.to_lowercase(), gmsa_account.to_lowercase());
+                if state.is_processed(DEDUP_GMSA_ACCOUNTS, &key)
+                    || !seen_accounts.insert(key.clone())
+                {
+                    continue;
+                }
+
+                // Find credential for the reader (who has ReadGMSAPassword)
+                let cred = reader
+                    .and_then(|r| {
+                        state.credentials.iter().find(|c| {
+                            c.username.to_lowercase() == r.to_lowercase()
+                                && (domain.is_empty()
+                                    || c.domain.to_lowercase() == domain.to_lowercase())
+                        })
                     })
-                })
-                .collect();
+                    .or_else(|| {
+                        state.credentials.iter().find(|c| {
+                            !domain.is_empty() && c.domain.to_lowercase() == domain.to_lowercase()
+                        })
+                    });
+
+                let cred = match cred {
+                    Some(c) => c.clone(),
+                    None => continue,
+                };
+
+                let dc_ip = match state
+                    .domain_controllers
+                    .get(&domain.to_lowercase())
+                    .cloned()
+                {
+                    Some(ip) => ip,
+                    None => continue,
+                };
+
+                gmsa_accounts.push(GmsaWork {
+                    dedup_key: key,
+                    gmsa_account,
+                    domain,
+                    dc_ip,
+                    credential: cred,
+                });
+            }
 
             gmsa_accounts
         };

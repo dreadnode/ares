@@ -291,6 +291,11 @@ fn fast_weights() -> HashMap<String, i32> {
         ("gmsa", 3),
         ("low_hanging_fruit", 4),
         ("smb_signing_disabled", 7),
+        ("adcs_esc1", 5),
+        ("adcs_esc4", 5),
+        ("adcs_esc8", 5),
+        ("gpo_abuse", 6),
+        ("laps", 4),
     ]
     .into_iter()
     .map(|(k, v)| (k.to_string(), v))
@@ -325,6 +330,11 @@ fn comprehensive_weights() -> HashMap<String, i32> {
         ("gmsa", 3),
         ("low_hanging_fruit", 3),
         ("smb_signing_disabled", 3),
+        ("adcs_esc1", 3),
+        ("adcs_esc4", 3),
+        ("adcs_esc8", 3),
+        ("gpo_abuse", 3),
+        ("laps", 3),
     ]
     .into_iter()
     .map(|(k, v)| (k.to_string(), v))
@@ -359,6 +369,11 @@ fn stealth_weights() -> HashMap<String, i32> {
         ("gmsa", 3),
         ("low_hanging_fruit", 4),
         ("smb_signing_disabled", 8),
+        ("adcs_esc1", 1),
+        ("adcs_esc4", 1),
+        ("adcs_esc8", 2),
+        ("gpo_abuse", 3),
+        ("laps", 3),
     ]
     .into_iter()
     .map(|(k, v)| (k.to_string(), v))

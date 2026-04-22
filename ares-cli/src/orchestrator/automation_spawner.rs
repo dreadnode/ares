@@ -26,6 +26,7 @@ pub(crate) fn spawn_automation_tasks(
     spawn_auto!(auto_crack_dispatch);
     spawn_auto!(auto_mssql_detection);
     spawn_auto!(auto_adcs_enumeration);
+    spawn_auto!(auto_adcs_exploitation);
     spawn_auto!(auto_share_enumeration);
     spawn_auto!(auto_share_spider);
     spawn_auto!(auto_bloodhound);
@@ -45,6 +46,8 @@ pub(crate) fn spawn_automation_tasks(
     spawn_auto!(auto_shadow_credentials);
     spawn_auto!(auto_rbcd_exploitation);
     spawn_auto!(auto_mssql_exploitation);
+    spawn_auto!(auto_gpo_abuse);
+    spawn_auto!(auto_laps_extraction);
 
     info!(count = handles.len(), "Automation tasks spawned");
     handles

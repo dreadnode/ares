@@ -328,6 +328,9 @@ mod tests {
             DEDUP_LOW_HANGING,
             DEDUP_CRED_SECRETSDUMP,
             DEDUP_SHARE_ENUM,
+            DEDUP_ADCS_EXPLOIT,
+            DEDUP_GPO_ABUSE,
+            DEDUP_LAPS,
         ];
         assert_eq!(expected.len(), ALL_DEDUP_SETS.len());
         for name in expected {

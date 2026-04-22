@@ -42,6 +42,9 @@ pub const DEDUP_GMSA_ACCOUNTS: &str = "gmsa_accounts";
 pub const DEDUP_LOW_HANGING: &str = "low_hanging";
 pub const DEDUP_CRED_SECRETSDUMP: &str = "cred_secretsdump";
 pub const DEDUP_SHARE_ENUM: &str = "share_enum";
+pub const DEDUP_ADCS_EXPLOIT: &str = "adcs_exploit";
+pub const DEDUP_GPO_ABUSE: &str = "gpo_abuse";
+pub const DEDUP_LAPS: &str = "laps_extract";
 
 /// Vuln queue ZSET key suffix.
 pub const KEY_VULN_QUEUE: &str = "vuln_queue";
@@ -72,4 +75,7 @@ const ALL_DEDUP_SETS: &[&str] = &[
     DEDUP_GMSA_ACCOUNTS,
     DEDUP_LOW_HANGING,
     DEDUP_CRED_SECRETSDUMP,
+    DEDUP_ADCS_EXPLOIT,
+    DEDUP_GPO_ABUSE,
+    DEDUP_LAPS,
 ];
