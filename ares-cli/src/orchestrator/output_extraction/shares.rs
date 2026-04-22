@@ -78,3 +78,58 @@ pub fn extract_shares(output: &str) -> Vec<Share> {
 
     shares
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extract_shares_from_table() {
+        let output = "\
+SMB  192.168.58.10  445  DC01  [*]  Windows Server 2019 Build 17763 (name:DC01) (domain:contoso.local) (signing:True)
+SMB  192.168.58.10  445  DC01  Share           Permissions     Remark
+SMB  192.168.58.10  445  DC01  -----           -----------     ------
+SMB  192.168.58.10  445  DC01  ADMIN$          READ,WRITE      Remote Admin
+SMB  192.168.58.10  445  DC01  C$              READ,WRITE      Default share
+SMB  192.168.58.10  445  DC01  NETLOGON        READ            Logon server share
+SMB  192.168.58.10  445  DC01  SYSVOL          READ            Logon server share";
+        let shares = extract_shares(output);
+        assert_eq!(shares.len(), 4);
+        assert_eq!(shares[0].host, "192.168.58.10");
+        assert_eq!(shares[0].name, "ADMIN$");
+        assert_eq!(shares[0].permissions, "READ,WRITE");
+    }
+
+    #[test]
+    fn extract_shares_dedup_by_ip_name() {
+        let output = "\
+SMB  192.168.58.10  445  DC01  Share           Permissions     Remark
+SMB  192.168.58.10  445  DC01  -----           -----------     ------
+SMB  192.168.58.10  445  DC01  SYSVOL          READ            Logon server share
+SMB  192.168.58.10  445  DC01  SYSVOL          READ            Logon server share";
+        let shares = extract_shares(output);
+        assert_eq!(shares.len(), 1);
+    }
+
+    #[test]
+    fn extract_shares_empty_input() {
+        assert!(extract_shares("").is_empty());
+    }
+
+    #[test]
+    fn extract_shares_no_table() {
+        let output = "SMB  192.168.58.10  445  DC01  [*]  Some banner info";
+        assert!(extract_shares(output).is_empty());
+    }
+
+    #[test]
+    fn extract_shares_with_comment() {
+        let output = "\
+SMB  192.168.58.10  445  DC01  Share           Permissions     Remark
+SMB  192.168.58.10  445  DC01  -----           -----------     ------
+SMB  192.168.58.10  445  DC01  Data$           READ            Company data share";
+        let shares = extract_shares(output);
+        assert_eq!(shares.len(), 1);
+        assert_eq!(shares[0].comment, "Company data share");
+    }
+}
