@@ -515,7 +515,7 @@ mod tests {
             .submit_task(
                 "recon",
                 "scanner",
-                serde_json::json!({"target": "10.0.0.1"}),
+                serde_json::json!({"target": "192.168.58.1"}),
                 "orchestrator",
                 5,
             )
@@ -828,7 +828,7 @@ mod tests {
     #[tokio::test]
     async fn set_task_status_full_with_payload() {
         let q = mock_queue();
-        let payload = serde_json::json!({"target": "10.0.0.1"});
+        let payload = serde_json::json!({"target": "192.168.58.1"});
         q.set_task_status_full(
             "task-1",
             "in_progress",
@@ -843,7 +843,7 @@ mod tests {
         let raw = q.get_task_status("task-1").await.unwrap().unwrap();
         let v: serde_json::Value = serde_json::from_str(&raw).unwrap();
         assert_eq!(v["status"], "in_progress");
-        assert_eq!(v["payload"]["target"], "10.0.0.1");
+        assert_eq!(v["payload"]["target"], "192.168.58.1");
         assert!(v.get("started_at").is_some());
     }
 
@@ -914,7 +914,7 @@ mod tests {
             task_type: "recon".to_string(),
             source_agent: "orchestrator".to_string(),
             target_agent: "scanner".to_string(),
-            payload: serde_json::json!({"host": "10.0.0.1"}),
+            payload: serde_json::json!({"host": "192.168.58.1"}),
             priority: 5,
             created_at: None,
             callback_queue: Some("ares:results:test_abc".to_string()),

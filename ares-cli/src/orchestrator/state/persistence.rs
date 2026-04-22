@@ -399,7 +399,7 @@ mod tests {
         let reader = RedisStateReader::new(op_id.to_string());
         let mut conn = q.connection();
         reader
-            .set_meta_field(&mut conn, "target_ip", &serde_json::json!("10.0.0.1"))
+            .set_meta_field(&mut conn, "target_ip", &serde_json::json!("192.168.58.1"))
             .await
             .unwrap();
     }
@@ -413,7 +413,7 @@ mod tests {
         seed_meta(&q, "op-1").await;
 
         let host = ares_core::models::Host {
-            ip: "10.0.0.5".to_string(),
+            ip: "192.168.58.5".to_string(),
             hostname: "srv01.contoso.local".to_string(),
             os: String::new(),
             roles: vec![],
@@ -442,7 +442,7 @@ mod tests {
 
         let s = state2.inner.read().await;
         assert_eq!(s.hosts.len(), 1);
-        assert_eq!(s.hosts[0].ip, "10.0.0.5");
+        assert_eq!(s.hosts[0].ip, "192.168.58.5");
         assert_eq!(s.credentials.len(), 1);
         assert_eq!(s.credentials[0].username, "admin");
         assert!(s.domains.contains(&"contoso.local".to_string()));
@@ -476,7 +476,7 @@ mod tests {
 
         // Seed a host via publishing
         let host = ares_core::models::Host {
-            ip: "10.0.0.5".to_string(),
+            ip: "192.168.58.5".to_string(),
             hostname: "srv01.contoso.local".to_string(),
             os: String::new(),
             roles: vec![],
@@ -495,7 +495,7 @@ mod tests {
 
         let s = state2.inner.read().await;
         assert_eq!(s.hosts.len(), 1);
-        assert_eq!(s.hosts[0].ip, "10.0.0.5");
+        assert_eq!(s.hosts[0].ip, "192.168.58.5");
     }
 
     #[tokio::test]

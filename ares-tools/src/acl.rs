@@ -894,7 +894,7 @@ mod tests {
         mock::push(mock::success());
         let args = json!({
             "domain": "contoso.local", "username": "admin", "password": "P@ssw0rd!",
-            "dc_ip": "10.0.0.1", "group": "Domain Admins", "target_user": "jsmith"
+            "dc_ip": "192.168.58.1", "group": "Domain Admins", "target_user": "jsmith"
         });
         assert!(super::bloodyad_add_group_member(&args).await.is_ok());
     }
@@ -904,7 +904,7 @@ mod tests {
         mock::push(mock::success());
         let args = json!({
             "domain": "contoso.local", "username": "admin", "password": "P@ssw0rd!",
-            "dc_ip": "10.0.0.1", "target_user": "victim", "new_password": "NewP@ss!"
+            "dc_ip": "192.168.58.1", "target_user": "victim", "new_password": "NewP@ss!"
         });
         assert!(super::bloodyad_set_password(&args).await.is_ok());
     }
@@ -914,7 +914,7 @@ mod tests {
         mock::push(mock::success());
         let args = json!({
             "domain": "contoso.local", "username": "admin", "password": "P@ssw0rd!",
-            "dc_ip": "10.0.0.1", "target_dn": "CN=Users,DC=contoso,DC=local", "principal": "jsmith"
+            "dc_ip": "192.168.58.1", "target_dn": "CN=Users,DC=contoso,DC=local", "principal": "jsmith"
         });
         assert!(super::bloodyad_add_genericall(&args).await.is_ok());
     }
@@ -924,7 +924,7 @@ mod tests {
         mock::push(mock::success());
         let args = json!({
             "domain": "contoso.local", "username": "admin", "password": "P@ssw0rd!",
-            "dc_ip": "10.0.0.1", "principal": "jsmith"
+            "dc_ip": "192.168.58.1", "principal": "jsmith"
         });
         assert!(super::adminsd_holder_add_ace(&args).await.is_ok());
     }
@@ -934,7 +934,7 @@ mod tests {
         mock::push(mock::success());
         let args = json!({
             "domain": "contoso.local", "username": "admin", "password": "P@ssw0rd!",
-            "dc_ip": "10.0.0.1", "gmsa_account": "svc_web$"
+            "dc_ip": "192.168.58.1", "gmsa_account": "svc_web$"
         });
         assert!(super::gmsa_read_password_bloodyad(&args).await.is_ok());
     }
@@ -944,7 +944,7 @@ mod tests {
         mock::push(mock::success());
         let args = json!({
             "domain": "contoso.local", "username": "admin", "password": "P@ssw0rd!",
-            "dc_ip": "10.0.0.1", "target_samaccountname": "dc01$"
+            "dc_ip": "192.168.58.1", "target_samaccountname": "dc01$"
         });
         assert!(super::pywhisker(&args).await.is_ok());
     }
@@ -954,7 +954,7 @@ mod tests {
         mock::push(mock::success());
         let args = json!({
             "domain": "contoso.local", "username": "admin", "password": "P@ssw0rd!",
-            "dc_ip": "10.0.0.1", "target_user": "svc_sql"
+            "dc_ip": "192.168.58.1", "target_user": "svc_sql"
         });
         assert!(super::targeted_kerberoast(&args).await.is_ok());
     }
@@ -964,7 +964,7 @@ mod tests {
         mock::push(mock::success());
         let args = json!({
             "gpo_name": "Default Domain Policy", "domain": "contoso.local",
-            "username": "admin", "password": "P@ssw0rd!", "dc_ip": "10.0.0.1"
+            "username": "admin", "password": "P@ssw0rd!", "dc_ip": "192.168.58.1"
         });
         assert!(super::sharpgpoabuse(&args).await.is_ok());
     }
@@ -974,7 +974,7 @@ mod tests {
         mock::push(mock::success());
         let args = json!({
             "domain": "contoso.local", "username": "admin", "password": "P@ssw0rd!",
-            "gpo_id": "{6AC1786C}", "command": "whoami", "dc_ip": "10.0.0.1"
+            "gpo_id": "{6AC1786C}", "command": "whoami", "dc_ip": "192.168.58.1"
         });
         assert!(super::pygpoabuse_immediate_task(&args).await.is_ok());
     }
@@ -984,7 +984,7 @@ mod tests {
         mock::push(mock::success());
         let args = json!({
             "domain": "contoso.local", "username": "admin", "password": "P@ssw0rd!",
-            "dc_ip": "10.0.0.1", "principal": "jsmith", "rights": "FullControl",
+            "dc_ip": "192.168.58.1", "principal": "jsmith", "rights": "FullControl",
             "target_dn": "CN=Users,DC=contoso,DC=local"
         });
         assert!(super::dacl_edit(&args).await.is_ok());

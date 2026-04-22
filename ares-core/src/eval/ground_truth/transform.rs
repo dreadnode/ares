@@ -229,7 +229,7 @@ mod tests {
     fn hosts_produce_ip_iocs() {
         let mut state = empty_state();
         state.all_hosts.push(Host {
-            ip: "10.0.0.1".to_string(),
+            ip: "192.168.58.1".to_string(),
             hostname: String::new(),
             os: String::new(),
             roles: vec![],
@@ -240,7 +240,7 @@ mod tests {
         let gt = create_ground_truth_from_red_state(&state, &[]);
         assert_eq!(gt.expected_iocs.len(), 1);
         assert_eq!(gt.expected_iocs[0].ioc_type, "ip");
-        assert_eq!(gt.expected_iocs[0].value, "10.0.0.1");
+        assert_eq!(gt.expected_iocs[0].value, "192.168.58.1");
         assert!(gt.expected_iocs[0].required);
     }
 
@@ -248,8 +248,8 @@ mod tests {
     fn hosts_with_hostname_produce_two_iocs() {
         let mut state = empty_state();
         state.all_hosts.push(Host {
-            ip: "10.0.0.1".to_string(),
-            hostname: "dc01.corp.local".to_string(),
+            ip: "192.168.58.1".to_string(),
+            hostname: "dc01.contoso.local".to_string(),
             os: String::new(),
             roles: vec![],
             services: vec![],
@@ -270,7 +270,7 @@ mod tests {
         let mut state = empty_state();
         state.all_users.push(User {
             username: "admin".to_string(),
-            domain: "corp.local".to_string(),
+            domain: "contoso.local".to_string(),
             description: String::new(),
             is_admin: true,
             source: String::new(),
@@ -290,7 +290,7 @@ mod tests {
         let mut state = empty_state();
         state.all_users.push(User {
             username: "jsmith".to_string(),
-            domain: "corp.local".to_string(),
+            domain: "contoso.local".to_string(),
             description: String::new(),
             is_admin: false,
             source: String::new(),
@@ -313,7 +313,7 @@ mod tests {
             id: "c1".to_string(),
             username: "svc_account".to_string(),
             password: "pass123".to_string(),
-            domain: "corp.local".to_string(),
+            domain: "contoso.local".to_string(),
             source: String::new(),
             discovered_at: None,
             is_admin: false,
@@ -340,7 +340,7 @@ mod tests {
             username: "admin".to_string(),
             hash_value: "aabbccdd11223344".to_string(),
             hash_type: "ntlm".to_string(),
-            domain: "corp.local".to_string(),
+            domain: "contoso.local".to_string(),
             source: String::new(),
             cracked_password: None,
             discovered_at: None,
@@ -415,7 +415,7 @@ mod tests {
     fn shares_produce_expected_shares() {
         let mut state = empty_state();
         state.all_shares.push(Share {
-            host: "10.0.0.1".to_string(),
+            host: "192.168.58.1".to_string(),
             name: "ADMIN$".to_string(),
             permissions: "READ/WRITE".to_string(),
             comment: String::new(),
@@ -429,7 +429,7 @@ mod tests {
     fn readonly_share_not_required() {
         let mut state = empty_state();
         state.all_shares.push(Share {
-            host: "10.0.0.1".to_string(),
+            host: "192.168.58.1".to_string(),
             name: "SYSVOL".to_string(),
             permissions: "READ".to_string(),
             comment: String::new(),
@@ -445,7 +445,7 @@ mod tests {
         let mut state = empty_state();
         // Same IP from host and share
         state.all_hosts.push(Host {
-            ip: "10.0.0.1".to_string(),
+            ip: "192.168.58.1".to_string(),
             hostname: String::new(),
             os: String::new(),
             roles: vec![],
@@ -454,7 +454,7 @@ mod tests {
             owned: false,
         });
         state.all_shares.push(Share {
-            host: "10.0.0.1".to_string(),
+            host: "192.168.58.1".to_string(),
             name: "C$".to_string(),
             permissions: "READ".to_string(),
             comment: String::new(),
@@ -463,7 +463,7 @@ mod tests {
         let ip_iocs: Vec<_> = gt
             .expected_iocs
             .iter()
-            .filter(|i| i.value == "10.0.0.1")
+            .filter(|i| i.value == "192.168.58.1")
             .collect();
         assert_eq!(ip_iocs.len(), 1);
     }

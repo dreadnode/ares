@@ -783,8 +783,8 @@ fn extract_ip_not_enough_octets() {
 
 #[test]
 fn extract_ip_first_match_returned() {
-    let line = "10.0.0.1 and 192.168.1.1 are both IPs";
-    assert_eq!(extract_ip_from_line(line), Some("10.0.0.1".to_string()));
+    let line = "192.168.58.1 and 192.168.58.1 are both IPs";
+    assert_eq!(extract_ip_from_line(line), Some("192.168.58.1".to_string()));
 }
 
 #[test]

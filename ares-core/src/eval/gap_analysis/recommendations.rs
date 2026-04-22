@@ -269,17 +269,17 @@ mod tests {
 
     #[test]
     fn ioc_ip_recommendation() {
-        let ioc = make_ioc("ip", "10.0.0.1", true);
+        let ioc = make_ioc("ip", "192.168.58.1", true);
         let rec = recommend_for_ioc(&ioc).unwrap();
         assert_eq!(rec.category, "query");
         assert_eq!(rec.priority, "high");
-        assert!(rec.title.contains("10.0.0.1"));
-        assert!(rec.description.contains("10.0.0.1"));
+        assert!(rec.title.contains("192.168.58.1"));
+        assert!(rec.description.contains("192.168.58.1"));
     }
 
     #[test]
     fn ioc_ip_optional_medium_priority() {
-        let ioc = make_ioc("ip", "10.0.0.1", false);
+        let ioc = make_ioc("ip", "192.168.58.1", false);
         let rec = recommend_for_ioc(&ioc).unwrap();
         assert_eq!(rec.priority, "medium");
     }
@@ -301,17 +301,17 @@ mod tests {
 
     #[test]
     fn ioc_hostname_recommendation() {
-        let ioc = make_ioc("hostname", "dc01.corp.local", true);
+        let ioc = make_ioc("hostname", "dc01.contoso.local", true);
         let rec = recommend_for_ioc(&ioc).unwrap();
         assert_eq!(rec.category, "query");
-        assert!(rec.title.contains("dc01.corp.local"));
+        assert!(rec.title.contains("dc01.contoso.local"));
     }
 
     #[test]
     fn ioc_domain_recommendation() {
-        let ioc = make_ioc("domain", "corp.local", false);
+        let ioc = make_ioc("domain", "contoso.local", false);
         let rec = recommend_for_ioc(&ioc).unwrap();
-        assert!(rec.title.contains("corp.local"));
+        assert!(rec.title.contains("contoso.local"));
     }
 
     #[test]
@@ -331,7 +331,7 @@ mod tests {
 
     #[test]
     fn ioc_preserves_mitre_techniques() {
-        let ioc = make_ioc("ip", "10.0.0.1", true);
+        let ioc = make_ioc("ip", "192.168.58.1", true);
         let rec = recommend_for_ioc(&ioc).unwrap();
         assert_eq!(rec.techniques, vec!["T1046"]);
     }

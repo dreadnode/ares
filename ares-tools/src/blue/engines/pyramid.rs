@@ -150,7 +150,7 @@ mod tests {
     fn pyramid_questions_sorted_by_priority() {
         let evidence = vec![
             EvidenceItem {
-                value: "10.0.0.1".to_string(),
+                value: "192.168.58.1".to_string(),
                 pyramid_level: "ip_addresses".to_string(),
             },
             EvidenceItem {
@@ -210,7 +210,7 @@ mod tests {
     fn assess_pyramid_recommends_ip_to_domain() {
         let evidence: Vec<EvidenceItem> = (0..5)
             .map(|i| EvidenceItem {
-                value: format!("10.0.0.{i}"),
+                value: format!("192.168.58.{i}"),
                 pyramid_level: "ip_addresses".to_string(),
             })
             .collect();

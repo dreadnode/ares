@@ -636,8 +636,8 @@ mod tests {
     #[test]
     fn credential_secretsdump_dedup_key_basic() {
         assert_eq!(
-            credential_secretsdump_dedup_key("10.0.0.1", "CONTOSO.LOCAL", "Admin"),
-            "10.0.0.1:contoso.local:admin"
+            credential_secretsdump_dedup_key("192.168.58.1", "CONTOSO.LOCAL", "Admin"),
+            "192.168.58.1:contoso.local:admin"
         );
     }
 
@@ -645,8 +645,8 @@ mod tests {
     fn credential_secretsdump_dedup_key_preserves_ip() {
         // IP should not be lowercased (it's already case-insensitive)
         assert_eq!(
-            credential_secretsdump_dedup_key("192.168.1.100", "Corp.Net", "SVC"),
-            "192.168.1.100:corp.net:svc"
+            credential_secretsdump_dedup_key("192.168.58.100", "Corp.Net", "SVC"),
+            "192.168.58.100:corp.net:svc"
         );
     }
 

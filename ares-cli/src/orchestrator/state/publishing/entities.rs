@@ -479,7 +479,7 @@ mod tests {
         let state = SharedState::new("op-1".to_string());
         let q = mock_queue();
 
-        let vuln = make_vuln("VULN-001", "smb_signing", "10.0.0.1");
+        let vuln = make_vuln("VULN-001", "smb_signing", "192.168.58.1");
         let added = state.publish_vulnerability(&q, vuln).await.unwrap();
         assert!(added);
 
@@ -487,7 +487,7 @@ mod tests {
         assert!(s.discovered_vulnerabilities.contains_key("VULN-001"));
         let v = &s.discovered_vulnerabilities["VULN-001"];
         assert_eq!(v.vuln_type, "smb_signing");
-        assert_eq!(v.target, "10.0.0.1");
+        assert_eq!(v.target, "192.168.58.1");
     }
 
     #[tokio::test]
@@ -495,8 +495,8 @@ mod tests {
         let state = SharedState::new("op-1".to_string());
         let q = mock_queue();
 
-        let vuln1 = make_vuln("VULN-001", "smb_signing", "10.0.0.1");
-        let vuln2 = make_vuln("VULN-001", "smb_signing", "10.0.0.1");
+        let vuln1 = make_vuln("VULN-001", "smb_signing", "192.168.58.1");
+        let vuln2 = make_vuln("VULN-001", "smb_signing", "192.168.58.1");
         assert!(state.publish_vulnerability(&q, vuln1).await.unwrap());
         assert!(!state.publish_vulnerability(&q, vuln2).await.unwrap());
 
@@ -509,13 +509,13 @@ mod tests {
         let state = SharedState::new("op-1".to_string());
         let q = mock_queue();
 
-        let share = make_share("10.0.0.1", "ADMIN$");
+        let share = make_share("192.168.58.1", "ADMIN$");
         let added = state.publish_share(&q, share).await.unwrap();
         assert!(added);
 
         let s = state.inner.read().await;
         assert_eq!(s.shares.len(), 1);
-        assert_eq!(s.shares[0].host, "10.0.0.1");
+        assert_eq!(s.shares[0].host, "192.168.58.1");
         assert_eq!(s.shares[0].name, "ADMIN$");
     }
 
@@ -524,8 +524,8 @@ mod tests {
         let state = SharedState::new("op-1".to_string());
         let q = mock_queue();
 
-        let share1 = make_share("10.0.0.1", "ADMIN$");
-        let share2 = make_share("10.0.0.1", "ADMIN$");
+        let share1 = make_share("192.168.58.1", "ADMIN$");
+        let share2 = make_share("192.168.58.1", "ADMIN$");
         assert!(state.publish_share(&q, share1).await.unwrap());
         assert!(!state.publish_share(&q, share2).await.unwrap());
 

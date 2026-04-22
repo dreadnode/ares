@@ -275,16 +275,16 @@ mod tests {
     fn certipy_request_user_at_domain_format() {
         let args = json!({
             "username": "lowpriv",
-            "domain": "corp.local",
+            "domain": "contoso.local",
             "password": "Secret123",
             "ca": "corp-CA",
             "template": "VulnTemplate",
-            "dc_ip": "10.0.0.1"
+            "dc_ip": "192.168.58.1"
         });
         let username = required_str(&args, "username").unwrap();
         let domain = required_str(&args, "domain").unwrap();
         let user_at_domain = format!("{username}@{domain}");
-        assert_eq!(user_at_domain, "lowpriv@corp.local");
+        assert_eq!(user_at_domain, "lowpriv@contoso.local");
     }
 
     #[test]
@@ -423,7 +423,7 @@ mod tests {
         mock::push(mock::success());
         let args = json!({
             "username": "admin", "domain": "contoso.local",
-            "password": "P@ss", "dc_ip": "10.0.0.1"
+            "password": "P@ss", "dc_ip": "192.168.58.1"
         });
         assert!(super::certipy_find(&args).await.is_ok());
     }
@@ -433,7 +433,7 @@ mod tests {
         mock::push(mock::success());
         let args = json!({
             "username": "admin", "domain": "contoso.local",
-            "password": "P@ss", "dc_ip": "10.0.0.1", "vulnerable": true
+            "password": "P@ss", "dc_ip": "192.168.58.1", "vulnerable": true
         });
         assert!(super::certipy_find(&args).await.is_ok());
     }
@@ -444,7 +444,7 @@ mod tests {
         let args = json!({
             "username": "admin", "domain": "contoso.local",
             "password": "P@ss", "ca": "contoso-CA", "template": "ESC1",
-            "dc_ip": "10.0.0.1"
+            "dc_ip": "192.168.58.1"
         });
         assert!(super::certipy_request(&args).await.is_ok());
     }
@@ -455,7 +455,7 @@ mod tests {
         let args = json!({
             "username": "admin", "domain": "contoso.local",
             "password": "P@ss", "ca": "contoso-CA", "template": "ESC1",
-            "dc_ip": "10.0.0.1", "upn": "administrator@contoso.local"
+            "dc_ip": "192.168.58.1", "upn": "administrator@contoso.local"
         });
         assert!(super::certipy_request(&args).await.is_ok());
     }
@@ -464,7 +464,7 @@ mod tests {
     async fn certipy_auth_executes() {
         mock::push(mock::success());
         let args = json!({
-            "pfx_path": "/tmp/admin.pfx", "dc_ip": "10.0.0.1",
+            "pfx_path": "/tmp/admin.pfx", "dc_ip": "192.168.58.1",
             "domain": "contoso.local"
         });
         assert!(super::certipy_auth(&args).await.is_ok());
@@ -475,7 +475,7 @@ mod tests {
         mock::push(mock::success());
         let args = json!({
             "username": "admin", "domain": "contoso.local",
-            "password": "P@ss", "target": "dc01$", "dc_ip": "10.0.0.1"
+            "password": "P@ss", "target": "dc01$", "dc_ip": "192.168.58.1"
         });
         assert!(super::certipy_shadow(&args).await.is_ok());
     }
@@ -485,7 +485,7 @@ mod tests {
         mock::push(mock::success());
         let args = json!({
             "username": "admin", "domain": "contoso.local",
-            "password": "P@ss", "template": "ESC4", "dc_ip": "10.0.0.1"
+            "password": "P@ss", "template": "ESC4", "dc_ip": "192.168.58.1"
         });
         assert!(super::certipy_template_esc4(&args).await.is_ok());
     }
@@ -498,7 +498,7 @@ mod tests {
         mock::push(mock::success());
         let args = json!({
             "username": "admin", "domain": "contoso.local",
-            "password": "P@ss", "template": "ESC4", "dc_ip": "10.0.0.1",
+            "password": "P@ss", "template": "ESC4", "dc_ip": "192.168.58.1",
             "ca": "contoso-CA", "pfx_path": "/tmp/admin.pfx"
         });
         assert!(super::certipy_esc4_full_chain(&args).await.is_ok());

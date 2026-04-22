@@ -258,7 +258,7 @@ mod tests {
 
     #[test]
     fn same_forest_domain_unrelated() {
-        assert!(!is_same_forest_domain("fabrikam.com", "contoso.local"));
+        assert!(!is_same_forest_domain("fabrikam.local", "contoso.local"));
     }
 
     #[test]
@@ -275,18 +275,18 @@ mod tests {
     fn cross_reuse_dedup_key_basic() {
         assert_eq!(
             cross_reuse_dedup_key(
-                "10.0.0.1",
-                "fabrikam.com",
+                "192.168.58.1",
+                "fabrikam.local",
                 "Administrator",
                 "aabbccdd11223344"
             ),
-            "10.0.0.1:fabrikam.com:administrator:aabbccdd11223344"
+            "192.168.58.1:fabrikam.local:administrator:aabbccdd11223344"
         );
     }
 
     #[test]
     fn cross_reuse_dedup_key_lowercases_username() {
-        let key = cross_reuse_dedup_key("10.0.0.1", "fab.com", "ADMIN", "abcd");
+        let key = cross_reuse_dedup_key("192.168.58.1", "fabrikam.local", "ADMIN", "abcd");
         assert!(key.contains(":admin:"));
     }
 

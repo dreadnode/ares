@@ -850,16 +850,16 @@ mod tests {
     #[test]
     fn forest_trust_vuln_id_basic() {
         assert_eq!(
-            forest_trust_vuln_id("contoso.local", "fabrikam.com"),
-            "forest_trust_contoso.local_fabrikam.com"
+            forest_trust_vuln_id("contoso.local", "fabrikam.local"),
+            "forest_trust_contoso.local_fabrikam.local"
         );
     }
 
     #[test]
     fn forest_trust_vuln_id_case_insensitive() {
         assert_eq!(
-            forest_trust_vuln_id("CONTOSO.LOCAL", "Fabrikam.COM"),
-            "forest_trust_contoso.local_fabrikam.com"
+            forest_trust_vuln_id("CONTOSO.LOCAL", "FABRIKAM.LOCAL"),
+            "forest_trust_contoso.local_fabrikam.local"
         );
     }
 
@@ -910,7 +910,7 @@ mod tests {
 
     #[test]
     fn is_domain_related_unrelated_domains() {
-        assert!(!is_domain_related("fabrikam.com", "contoso.local"));
+        assert!(!is_domain_related("fabrikam.local", "contoso.local"));
     }
 
     #[test]

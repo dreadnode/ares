@@ -109,9 +109,9 @@ mod tests {
         let args = json!({
             "domain": "contoso.local",
             "username": "admin",
-            "dc_ip": "10.0.0.1"
+            "dc_ip": "192.168.58.1"
         });
-        assert_eq!(optional_str(&args, "dc_ip"), Some("10.0.0.1"));
+        assert_eq!(optional_str(&args, "dc_ip"), Some("192.168.58.1"));
     }
 
     #[test]
@@ -141,7 +141,7 @@ mod tests {
         mock::push(mock::success());
         let args = json!({
             "domain": "contoso.local", "username": "admin",
-            "hash": "aabbccdd", "dc_ip": "10.0.0.1"
+            "hash": "aabbccdd", "dc_ip": "192.168.58.1"
         });
         assert!(super::get_tgt(&args).await.is_ok());
     }

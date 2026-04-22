@@ -10,7 +10,7 @@ use crate::orchestrator::dispatcher::Dispatcher;
 use crate::orchestrator::state::*;
 
 /// Extract domain from an ADCS host's FQDN.
-/// e.g. "braavos.essos.local" -> "essos.local"
+/// e.g. "srv01.fabrikam.local" -> "fabrikam.local"
 fn extract_domain_from_fqdn(fqdn: &str) -> Option<String> {
     fqdn.to_lowercase()
         .split_once('.')
@@ -123,8 +123,8 @@ mod tests {
     #[test]
     fn extract_domain_from_fqdn_typical() {
         assert_eq!(
-            extract_domain_from_fqdn("braavos.essos.local"),
-            Some("essos.local".to_string())
+            extract_domain_from_fqdn("srv01.fabrikam.local"),
+            Some("fabrikam.local".to_string())
         );
     }
 

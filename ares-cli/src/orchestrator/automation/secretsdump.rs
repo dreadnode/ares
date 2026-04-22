@@ -238,7 +238,7 @@ mod tests {
     #[test]
     fn valid_secretsdump_target_unrelated_rejected() {
         assert!(!is_valid_secretsdump_target(
-            "fabrikam.com",
+            "fabrikam.local",
             "contoso.local"
         ));
     }
@@ -280,7 +280,7 @@ mod tests {
 
     #[test]
     fn is_child_of_unrelated_rejected() {
-        assert!(!is_child_of("fabrikam.com", "contoso.local"));
+        assert!(!is_child_of("fabrikam.local", "contoso.local"));
     }
 
     #[test]
@@ -291,16 +291,16 @@ mod tests {
     #[test]
     fn secretsdump_dedup_key_basic() {
         assert_eq!(
-            secretsdump_dedup_key("10.0.0.1", "contoso.local", "Administrator"),
-            "10.0.0.1:contoso.local:administrator"
+            secretsdump_dedup_key("192.168.58.1", "contoso.local", "Administrator"),
+            "192.168.58.1:contoso.local:administrator"
         );
     }
 
     #[test]
     fn secretsdump_dedup_key_lowercases() {
         assert_eq!(
-            secretsdump_dedup_key("10.0.0.1", "CONTOSO.LOCAL", "ADMIN"),
-            "10.0.0.1:contoso.local:admin"
+            secretsdump_dedup_key("192.168.58.1", "CONTOSO.LOCAL", "ADMIN"),
+            "192.168.58.1:contoso.local:admin"
         );
     }
 
@@ -312,15 +312,15 @@ mod tests {
     #[test]
     fn pth_secretsdump_dedup_key_basic() {
         assert_eq!(
-            pth_secretsdump_dedup_key("10.0.0.1", "contoso.local"),
-            "10.0.0.1:contoso.local:pth_admin"
+            pth_secretsdump_dedup_key("192.168.58.1", "contoso.local"),
+            "192.168.58.1:contoso.local:pth_admin"
         );
     }
 
     #[test]
     fn pth_secretsdump_dedup_key_preserves_ip() {
-        let key = pth_secretsdump_dedup_key("192.168.1.100", "domain.local");
-        assert!(key.starts_with("192.168.1.100:"));
+        let key = pth_secretsdump_dedup_key("192.168.58.100", "contoso.local");
+        assert!(key.starts_with("192.168.58.100:"));
     }
 
     #[test]

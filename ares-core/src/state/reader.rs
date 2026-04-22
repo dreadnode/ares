@@ -663,7 +663,7 @@ mod tests {
         let mut conn = MockRedisConnection::new();
         let reader = make_reader();
         reader
-            .set_meta_field(&mut conn, "target_ip", &json!("10.0.0.1"))
+            .set_meta_field(&mut conn, "target_ip", &json!("192.168.58.1"))
             .await
             .unwrap();
         assert!(reader.exists(&mut conn).await.unwrap());
@@ -687,7 +687,7 @@ mod tests {
         let mut conn = MockRedisConnection::new();
         let reader = make_reader();
         reader
-            .set_meta_field(&mut conn, "target_ip", &json!("192.168.1.10"))
+            .set_meta_field(&mut conn, "target_ip", &json!("192.168.58.10"))
             .await
             .unwrap();
         reader
@@ -700,7 +700,7 @@ mod tests {
             .unwrap();
 
         let meta = reader.get_meta(&mut conn).await.unwrap();
-        assert_eq!(meta.target_ip.as_deref(), Some("192.168.1.10"));
+        assert_eq!(meta.target_ip.as_deref(), Some("192.168.58.10"));
         assert_eq!(meta.target_domain.as_deref(), Some("contoso.local"));
         assert!(meta.has_domain_admin);
     }
@@ -790,12 +790,12 @@ mod tests {
     async fn add_and_get_host() {
         let mut conn = MockRedisConnection::new();
         let reader = make_reader();
-        let host = make_host("10.0.0.5", "dc01.contoso.local");
+        let host = make_host("192.168.58.5", "dc01.contoso.local");
         reader.add_host(&mut conn, &host).await.unwrap();
 
         let hosts = reader.get_hosts(&mut conn).await.unwrap();
         assert_eq!(hosts.len(), 1);
-        assert_eq!(hosts[0].ip, "10.0.0.5");
+        assert_eq!(hosts[0].ip, "192.168.58.5");
         assert_eq!(hosts[0].hostname, "dc01.contoso.local");
     }
 
@@ -850,7 +850,7 @@ mod tests {
     async fn add_and_get_share() {
         let mut conn = MockRedisConnection::new();
         let reader = make_reader();
-        let share = make_share("10.0.0.5", "ADMIN$");
+        let share = make_share("192.168.58.5", "ADMIN$");
         let added = reader.add_share(&mut conn, &share).await.unwrap();
         assert!(added);
 
@@ -863,7 +863,7 @@ mod tests {
     async fn add_share_dedup_by_host_name() {
         let mut conn = MockRedisConnection::new();
         let reader = make_reader();
-        let share = make_share("10.0.0.5", "ADMIN$");
+        let share = make_share("192.168.58.5", "ADMIN$");
         assert!(reader.add_share(&mut conn, &share).await.unwrap());
         assert!(!reader.add_share(&mut conn, &share).await.unwrap());
 
@@ -918,14 +918,14 @@ mod tests {
     async fn add_and_get_vulnerability() {
         let mut conn = MockRedisConnection::new();
         let reader = make_reader();
-        let vuln = make_vuln("esc1_10.0.0.5", "ADCS_ESC1", "10.0.0.5");
+        let vuln = make_vuln("esc1_192.168.58.5", "ADCS_ESC1", "192.168.58.5");
         let added = reader.add_vulnerability(&mut conn, &vuln).await.unwrap();
         assert!(added);
 
         let vulns = reader.get_vulnerabilities(&mut conn).await.unwrap();
         assert_eq!(vulns.len(), 1);
-        assert!(vulns.contains_key("esc1_10.0.0.5"));
-        assert_eq!(vulns["esc1_10.0.0.5"].vuln_type, "ADCS_ESC1");
+        assert!(vulns.contains_key("esc1_192.168.58.5"));
+        assert_eq!(vulns["esc1_192.168.58.5"].vuln_type, "ADCS_ESC1");
     }
 
     // -- get_exploited_vulnerabilities (via mock directly) -------------------
@@ -946,7 +946,7 @@ mod tests {
         let mut conn = MockRedisConnection::new();
         let reader = make_reader();
         let key = "ares:op:op-test:exploited".to_string();
-        let _: () = conn.sadd(&key, "esc1_10.0.0.5").await.unwrap();
+        let _: () = conn.sadd(&key, "esc1_192.168.58.5").await.unwrap();
         let _: () = conn.sadd(&key, "deleg_svc_sql").await.unwrap();
 
         let exploited = reader
@@ -954,7 +954,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(exploited.len(), 2);
-        assert!(exploited.contains("esc1_10.0.0.5"));
+        assert!(exploited.contains("esc1_192.168.58.5"));
         assert!(exploited.contains("deleg_svc_sql"));
     }
 
@@ -974,13 +974,13 @@ mod tests {
         let reader = make_reader();
         let key = "ares:op:op-test:dc_map".to_string();
         let _: () = conn
-            .hset(&key, "10.0.0.5", "dc01.contoso.local")
+            .hset(&key, "192.168.58.5", "dc01.contoso.local")
             .await
             .unwrap();
 
         let dc_map = reader.get_dc_map(&mut conn).await.unwrap();
         assert_eq!(dc_map.len(), 1);
-        assert_eq!(dc_map["10.0.0.5"], "dc01.contoso.local");
+        assert_eq!(dc_map["192.168.58.5"], "dc01.contoso.local");
     }
 
     #[tokio::test]
@@ -1224,7 +1224,7 @@ mod tests {
 
         // Set meta fields
         reader
-            .set_meta_field(&mut conn, "target_ip", &json!("192.168.1.10"))
+            .set_meta_field(&mut conn, "target_ip", &json!("192.168.58.10"))
             .await
             .unwrap();
         reader
@@ -1240,7 +1240,7 @@ mod tests {
         let cred = make_credential("admin", "contoso.local", "P@ssw0rd!");
         reader.add_credential(&mut conn, &cred).await.unwrap();
 
-        let host = make_host("10.0.0.5", "dc01.contoso.local");
+        let host = make_host("192.168.58.5", "dc01.contoso.local");
         reader.add_host(&mut conn, &host).await.unwrap();
 
         reader.add_domain(&mut conn, "contoso.local").await.unwrap();
@@ -1261,7 +1261,7 @@ mod tests {
         assert_eq!(state.operation_id, "op-test");
         assert!(state.has_domain_admin);
         assert!(state.target.is_some());
-        assert_eq!(state.target.as_ref().unwrap().ip, "192.168.1.10");
+        assert_eq!(state.target.as_ref().unwrap().ip, "192.168.58.10");
         assert_eq!(state.all_credentials.len(), 1);
         assert_eq!(state.all_hosts.len(), 1);
         assert_eq!(state.all_domains.len(), 1);

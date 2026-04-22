@@ -162,7 +162,7 @@ mod tests {
         let args = json!({
             "username": "admin",
             "password": "P@ss",
-            "dc_ip": "10.0.0.1"
+            "dc_ip": "192.168.58.1"
         });
         assert!(required_str(&args, "domain").is_err());
     }
@@ -172,7 +172,7 @@ mod tests {
         let args = json!({
             "domain": "contoso.local",
             "password": "P@ss",
-            "dc_ip": "10.0.0.1"
+            "dc_ip": "192.168.58.1"
         });
         assert!(required_str(&args, "username").is_err());
     }
@@ -182,7 +182,7 @@ mod tests {
         let args = json!({
             "domain": "contoso.local",
             "username": "admin",
-            "dc_ip": "10.0.0.1"
+            "dc_ip": "192.168.58.1"
         });
         assert!(required_str(&args, "password").is_err());
     }
@@ -230,7 +230,7 @@ mod tests {
     fn asrep_roast_username_default_empty() {
         let args = json!({
             "domain": "contoso.local",
-            "dc_ip": "10.0.0.1"
+            "dc_ip": "192.168.58.1"
         });
         let username = optional_str(&args, "username").unwrap_or("");
         let password = optional_str(&args, "password").unwrap_or("");
@@ -242,7 +242,7 @@ mod tests {
     fn asrep_roast_with_users_file() {
         let args = json!({
             "domain": "contoso.local",
-            "dc_ip": "10.0.0.1",
+            "dc_ip": "192.168.58.1",
             "users_file": "/tmp/users.txt"
         });
         let users_file = optional_str(&args, "users_file");
@@ -270,7 +270,7 @@ mod tests {
 
     #[test]
     fn kerberos_user_enum_requires_domain() {
-        let args = json!({"dc_ip": "10.0.0.1"});
+        let args = json!({"dc_ip": "192.168.58.1"});
         assert!(required_str(&args, "domain").is_err());
     }
 
@@ -291,7 +291,7 @@ mod tests {
     fn kerberos_user_enum_optional_users_file() {
         let args = json!({
             "domain": "contoso.local",
-            "dc_ip": "10.0.0.1",
+            "dc_ip": "192.168.58.1",
             "users_file": "/tmp/custom_users.txt"
         });
         assert_eq!(
@@ -304,7 +304,7 @@ mod tests {
     fn kerberos_user_enum_no_users_file() {
         let args = json!({
             "domain": "contoso.local",
-            "dc_ip": "10.0.0.1"
+            "dc_ip": "192.168.58.1"
         });
         assert!(optional_str(&args, "users_file").is_none());
     }
@@ -318,7 +318,7 @@ mod tests {
         mock::push(mock::success());
         let args = json!({
             "domain": "contoso.local", "username": "admin",
-            "password": "P@ss", "dc_ip": "10.0.0.1"
+            "password": "P@ss", "dc_ip": "192.168.58.1"
         });
         assert!(super::kerberoast(&args).await.is_ok());
     }
@@ -327,7 +327,7 @@ mod tests {
     async fn asrep_roast_authenticated_executes() {
         mock::push(mock::success());
         let args = json!({
-            "domain": "contoso.local", "dc_ip": "10.0.0.1",
+            "domain": "contoso.local", "dc_ip": "192.168.58.1",
             "username": "admin", "password": "P@ss"
         });
         assert!(super::asrep_roast(&args).await.is_ok());
@@ -337,7 +337,7 @@ mod tests {
     async fn asrep_roast_with_users_file_executes() {
         mock::push(mock::success());
         let args = json!({
-            "domain": "contoso.local", "dc_ip": "10.0.0.1",
+            "domain": "contoso.local", "dc_ip": "192.168.58.1",
             "users_file": "/tmp/users.txt"
         });
         assert!(super::asrep_roast(&args).await.is_ok());
@@ -347,7 +347,7 @@ mod tests {
     async fn kerberos_user_enum_with_file_executes() {
         mock::push(mock::success());
         let args = json!({
-            "domain": "contoso.local", "dc_ip": "10.0.0.1",
+            "domain": "contoso.local", "dc_ip": "192.168.58.1",
             "users_file": "/tmp/users.txt"
         });
         assert!(super::kerberos_user_enum_noauth(&args).await.is_ok());

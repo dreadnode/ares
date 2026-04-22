@@ -76,7 +76,7 @@ mod tests {
     /// Verify secretsdump timeout default is 180 seconds when no timeout_minutes.
     #[test]
     fn secretsdump_timeout_default() {
-        let args = json!({"target": "10.0.0.1", "username": "admin"});
+        let args = json!({"target": "192.168.58.1", "username": "admin"});
         let timeout_minutes = optional_i64(&args, "timeout_minutes");
         let timeout_secs = timeout_minutes.map(|m| (m * 60) as u64).unwrap_or(180);
         assert_eq!(timeout_secs, 180);

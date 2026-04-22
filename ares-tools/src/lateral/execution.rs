@@ -302,13 +302,13 @@ mod tests {
 
     #[test]
     fn psexec_requires_username() {
-        let args = json!({"target": "10.0.0.1"});
+        let args = json!({"target": "192.168.58.1"});
         assert!(required_str(&args, "username").is_err());
     }
 
     #[test]
     fn psexec_default_command() {
-        let args = json!({"target": "10.0.0.1", "username": "admin"});
+        let args = json!({"target": "192.168.58.1", "username": "admin"});
         let command = optional_str(&args, "command")
             .unwrap_or(r#"cmd.exe /c "whoami && hostname && ipconfig""#);
         assert_eq!(command, r#"cmd.exe /c "whoami && hostname && ipconfig""#);
@@ -316,7 +316,7 @@ mod tests {
 
     #[test]
     fn psexec_custom_command() {
-        let args = json!({"target": "10.0.0.1", "username": "admin", "command": "dir C:\\"});
+        let args = json!({"target": "192.168.58.1", "username": "admin", "command": "dir C:\\"});
         let command = optional_str(&args, "command")
             .unwrap_or(r#"cmd.exe /c "whoami && hostname && ipconfig""#);
         assert_eq!(command, "dir C:\\");
@@ -325,7 +325,7 @@ mod tests {
     #[test]
     fn psexec_impacket_auth_with_password() {
         let args = json!({
-            "target": "10.0.0.1",
+            "target": "192.168.58.1",
             "username": "admin",
             "password": "P@ss",
             "domain": "CONTOSO"
@@ -337,14 +337,14 @@ mod tests {
         let domain = optional_str(&args, "domain");
         let (auth_str, extra_args) =
             credentials::impacket_auth(domain, username, password, hash, target);
-        assert_eq!(auth_str, "CONTOSO/admin:P@ss@10.0.0.1");
+        assert_eq!(auth_str, "CONTOSO/admin:P@ss@192.168.58.1");
         assert!(extra_args.is_empty());
     }
 
     #[test]
     fn psexec_impacket_auth_with_hash() {
         let args = json!({
-            "target": "10.0.0.1",
+            "target": "192.168.58.1",
             "username": "admin",
             "hash": "aabbccdd",
             "domain": "CONTOSO"
@@ -356,7 +356,7 @@ mod tests {
         let domain = optional_str(&args, "domain");
         let (auth_str, extra_args) =
             credentials::impacket_auth(domain, username, password, hash, target);
-        assert_eq!(auth_str, "CONTOSO/admin@10.0.0.1");
+        assert_eq!(auth_str, "CONTOSO/admin@192.168.58.1");
         assert_eq!(extra_args, vec!["-hashes", ":aabbccdd"]);
     }
 
@@ -431,9 +431,9 @@ mod tests {
             "username": "admin",
             "domain": "contoso.local",
             "ticket_path": "/tmp/admin.ccache",
-            "dc_ip": "10.0.0.1"
+            "dc_ip": "192.168.58.1"
         });
-        assert_eq!(optional_str(&args, "dc_ip"), Some("10.0.0.1"));
+        assert_eq!(optional_str(&args, "dc_ip"), Some("192.168.58.1"));
     }
 
     // --- wmiexec ---
@@ -446,13 +446,13 @@ mod tests {
 
     #[test]
     fn wmiexec_requires_username() {
-        let args = json!({"target": "10.0.0.1"});
+        let args = json!({"target": "192.168.58.1"});
         assert!(required_str(&args, "username").is_err());
     }
 
     #[test]
     fn wmiexec_default_command() {
-        let args = json!({"target": "10.0.0.1", "username": "admin"});
+        let args = json!({"target": "192.168.58.1", "username": "admin"});
         let command = optional_str(&args, "command").unwrap_or("whoami");
         assert_eq!(command, "whoami");
     }
@@ -490,13 +490,13 @@ mod tests {
 
     #[test]
     fn smbexec_requires_username() {
-        let args = json!({"target": "10.0.0.1"});
+        let args = json!({"target": "192.168.58.1"});
         assert!(required_str(&args, "username").is_err());
     }
 
     #[test]
     fn smbexec_default_command() {
-        let args = json!({"target": "10.0.0.1", "username": "admin"});
+        let args = json!({"target": "192.168.58.1", "username": "admin"});
         let command = optional_str(&args, "command").unwrap_or("whoami");
         assert_eq!(command, "whoami");
     }
@@ -519,7 +519,7 @@ mod tests {
 
     #[test]
     fn evil_winrm_default_command() {
-        let args = json!({"target": "10.0.0.1", "username": "admin"});
+        let args = json!({"target": "192.168.58.1", "username": "admin"});
         let command = optional_str(&args, "command").unwrap_or("whoami && hostname && ipconfig");
         assert_eq!(command, "whoami && hostname && ipconfig");
     }
@@ -527,7 +527,7 @@ mod tests {
     #[test]
     fn evil_winrm_hash_takes_precedence_over_password() {
         let args = json!({
-            "target": "10.0.0.1",
+            "target": "192.168.58.1",
             "username": "admin",
             "password": "P@ss",
             "hash": "aabbccdd"
@@ -551,7 +551,7 @@ mod tests {
     #[test]
     fn evil_winrm_password_only() {
         let args = json!({
-            "target": "10.0.0.1",
+            "target": "192.168.58.1",
             "username": "admin",
             "password": "Secret123"
         });
@@ -570,7 +570,7 @@ mod tests {
     #[test]
     fn evil_winrm_no_creds() {
         let args = json!({
-            "target": "10.0.0.1",
+            "target": "192.168.58.1",
             "username": "admin"
         });
         let hash = optional_str(&args, "hash");
@@ -589,8 +589,8 @@ mod tests {
 
     #[test]
     fn xfreerdp_target_format() {
-        let target = "10.0.0.1";
-        assert_eq!(format!("/v:{target}"), "/v:10.0.0.1");
+        let target = "192.168.58.1";
+        assert_eq!(format!("/v:{target}"), "/v:192.168.58.1");
     }
 
     #[test]
@@ -620,7 +620,7 @@ mod tests {
     #[test]
     fn xfreerdp_hash_precedence() {
         let args = json!({
-            "target": "10.0.0.1",
+            "target": "192.168.58.1",
             "username": "admin",
             "password": "P@ss",
             "hash": "aabbccdd"
@@ -642,21 +642,21 @@ mod tests {
     #[test]
     fn ssh_user_host_format() {
         let username = "root";
-        let target = "10.0.0.5";
+        let target = "192.168.58.5";
         let user_host = format!("{username}@{target}");
-        assert_eq!(user_host, "root@10.0.0.5");
+        assert_eq!(user_host, "root@192.168.58.5");
     }
 
     #[test]
     fn ssh_requires_password() {
-        let args = json!({"target": "10.0.0.1", "username": "root"});
+        let args = json!({"target": "192.168.58.1", "username": "root"});
         assert!(required_str(&args, "password").is_err());
     }
 
     #[test]
     fn ssh_default_command() {
         let args = json!({
-            "target": "10.0.0.1",
+            "target": "192.168.58.1",
             "username": "root",
             "password": "toor"
         });
@@ -667,7 +667,7 @@ mod tests {
     #[test]
     fn ssh_optional_port() {
         let args = json!({
-            "target": "10.0.0.1",
+            "target": "192.168.58.1",
             "username": "root",
             "password": "toor",
             "port": "2222"
@@ -678,7 +678,7 @@ mod tests {
     #[test]
     fn ssh_no_port() {
         let args = json!({
-            "target": "10.0.0.1",
+            "target": "192.168.58.1",
             "username": "root",
             "password": "toor"
         });
@@ -753,7 +753,7 @@ mod tests {
     async fn psexec_password_executes() {
         mock::push(mock::success());
         let args = json!({
-            "target": "10.0.0.1", "username": "admin",
+            "target": "192.168.58.1", "username": "admin",
             "password": "P@ss", "domain": "CONTOSO"
         });
         assert!(super::psexec(&args).await.is_ok());
@@ -763,7 +763,7 @@ mod tests {
     async fn psexec_hash_executes() {
         mock::push(mock::success());
         let args = json!({
-            "target": "10.0.0.1", "username": "admin",
+            "target": "192.168.58.1", "username": "admin",
             "hash": "aabbccdd", "domain": "CONTOSO"
         });
         assert!(super::psexec(&args).await.is_ok());
@@ -785,7 +785,7 @@ mod tests {
         let args = json!({
             "target": "dc01.contoso.local", "username": "admin",
             "domain": "contoso.local", "ticket_path": "/tmp/admin.ccache",
-            "dc_ip": "10.0.0.1", "target_ip": "10.0.0.1"
+            "dc_ip": "192.168.58.1", "target_ip": "192.168.58.1"
         });
         assert!(super::psexec_kerberos(&args).await.is_ok());
     }
@@ -794,7 +794,7 @@ mod tests {
     async fn wmiexec_password_executes() {
         mock::push(mock::success());
         let args = json!({
-            "target": "10.0.0.1", "username": "admin",
+            "target": "192.168.58.1", "username": "admin",
             "password": "P@ss", "domain": "CONTOSO"
         });
         assert!(super::wmiexec(&args).await.is_ok());
@@ -814,7 +814,7 @@ mod tests {
     async fn smbexec_password_executes() {
         mock::push(mock::success());
         let args = json!({
-            "target": "10.0.0.1", "username": "admin", "password": "P@ss"
+            "target": "192.168.58.1", "username": "admin", "password": "P@ss"
         });
         assert!(super::smbexec(&args).await.is_ok());
     }
@@ -833,7 +833,7 @@ mod tests {
     async fn evil_winrm_password_executes() {
         mock::push(mock::success());
         let args = json!({
-            "target": "10.0.0.1", "username": "admin", "password": "P@ss"
+            "target": "192.168.58.1", "username": "admin", "password": "P@ss"
         });
         assert!(super::evil_winrm(&args).await.is_ok());
     }
@@ -842,7 +842,7 @@ mod tests {
     async fn evil_winrm_hash_executes() {
         mock::push(mock::success());
         let args = json!({
-            "target": "10.0.0.1", "username": "admin", "hash": "aabbccdd"
+            "target": "192.168.58.1", "username": "admin", "hash": "aabbccdd"
         });
         assert!(super::evil_winrm(&args).await.is_ok());
     }
@@ -851,7 +851,7 @@ mod tests {
     async fn evil_winrm_no_creds_executes() {
         mock::push(mock::success());
         let args = json!({
-            "target": "10.0.0.1", "username": "admin"
+            "target": "192.168.58.1", "username": "admin"
         });
         assert!(super::evil_winrm(&args).await.is_ok());
     }
@@ -860,7 +860,7 @@ mod tests {
     async fn xfreerdp_password_executes() {
         mock::push(mock::success());
         let args = json!({
-            "target": "10.0.0.1", "username": "admin", "password": "P@ss"
+            "target": "192.168.58.1", "username": "admin", "password": "P@ss"
         });
         assert!(super::xfreerdp(&args).await.is_ok());
     }
@@ -869,7 +869,7 @@ mod tests {
     async fn xfreerdp_hash_executes() {
         mock::push(mock::success());
         let args = json!({
-            "target": "10.0.0.1", "username": "admin",
+            "target": "192.168.58.1", "username": "admin",
             "hash": "aabbccdd", "domain": "CONTOSO"
         });
         assert!(super::xfreerdp(&args).await.is_ok());
@@ -879,7 +879,7 @@ mod tests {
     async fn ssh_with_password_executes() {
         mock::push(mock::success());
         let args = json!({
-            "target": "10.0.0.1", "username": "root", "password": "toor"
+            "target": "192.168.58.1", "username": "root", "password": "toor"
         });
         assert!(super::ssh_with_password(&args).await.is_ok());
     }
@@ -888,7 +888,7 @@ mod tests {
     async fn ssh_with_port_executes() {
         mock::push(mock::success());
         let args = json!({
-            "target": "10.0.0.1", "username": "root",
+            "target": "192.168.58.1", "username": "root",
             "password": "toor", "port": "2222"
         });
         assert!(super::ssh_with_password(&args).await.is_ok());

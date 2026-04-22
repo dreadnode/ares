@@ -140,34 +140,34 @@ mod tests {
 
     #[test]
     fn pth_winexe_requires_username() {
-        let args = json!({"target": "10.0.0.1", "hash": "aabbccdd"});
+        let args = json!({"target": "192.168.58.1", "hash": "aabbccdd"});
         assert!(required_str(&args, "username").is_err());
     }
 
     #[test]
     fn pth_winexe_requires_hash() {
-        let args = json!({"target": "10.0.0.1", "username": "admin"});
+        let args = json!({"target": "192.168.58.1", "username": "admin"});
         assert!(required_str(&args, "hash").is_err());
     }
 
     #[test]
     fn pth_winexe_default_command() {
-        let args = json!({"target": "10.0.0.1", "username": "admin", "hash": "aa"});
+        let args = json!({"target": "192.168.58.1", "username": "admin", "hash": "aa"});
         let command = optional_str(&args, "command").unwrap_or("cmd.exe /c whoami");
         assert_eq!(command, "cmd.exe /c whoami");
     }
 
     #[test]
     fn pth_winexe_target_format() {
-        let target = "10.0.0.1";
-        assert_eq!(format!("//{target}"), "//10.0.0.1");
+        let target = "192.168.58.1";
+        assert_eq!(format!("//{target}"), "//192.168.58.1");
     }
 
     // --- pth_smbclient ---
 
     #[test]
     fn pth_smbclient_default_share() {
-        let args = json!({"target": "10.0.0.1", "username": "admin", "hash": "aa"});
+        let args = json!({"target": "192.168.58.1", "username": "admin", "hash": "aa"});
         let share = optional_str(&args, "share").unwrap_or("C$");
         assert_eq!(share, "C$");
     }
@@ -175,7 +175,7 @@ mod tests {
     #[test]
     fn pth_smbclient_custom_share() {
         let args = json!({
-            "target": "10.0.0.1",
+            "target": "192.168.58.1",
             "username": "admin",
             "hash": "aa",
             "share": "ADMIN$"
@@ -186,23 +186,23 @@ mod tests {
 
     #[test]
     fn pth_smbclient_default_command() {
-        let args = json!({"target": "10.0.0.1", "username": "admin", "hash": "aa"});
+        let args = json!({"target": "192.168.58.1", "username": "admin", "hash": "aa"});
         let command = optional_str(&args, "command").unwrap_or("dir");
         assert_eq!(command, "dir");
     }
 
     #[test]
     fn pth_smbclient_target_share_format() {
-        let target = "10.0.0.1";
+        let target = "192.168.58.1";
         let share = "C$";
-        assert_eq!(format!("//{target}/{share}"), "//10.0.0.1/C$");
+        assert_eq!(format!("//{target}/{share}"), "//192.168.58.1/C$");
     }
 
     // --- pth_rpcclient ---
 
     #[test]
     fn pth_rpcclient_default_command() {
-        let args = json!({"target": "10.0.0.1", "username": "admin", "hash": "aa"});
+        let args = json!({"target": "192.168.58.1", "username": "admin", "hash": "aa"});
         let command = optional_str(&args, "command").unwrap_or("getusername");
         assert_eq!(command, "getusername");
     }
@@ -211,7 +211,7 @@ mod tests {
 
     #[test]
     fn pth_wmic_default_query() {
-        let args = json!({"target": "10.0.0.1", "username": "admin", "hash": "aa"});
+        let args = json!({"target": "192.168.58.1", "username": "admin", "hash": "aa"});
         let query = optional_str(&args, "query").unwrap_or("SELECT * FROM Win32_OperatingSystem");
         assert_eq!(query, "SELECT * FROM Win32_OperatingSystem");
     }
@@ -219,7 +219,7 @@ mod tests {
     #[test]
     fn pth_wmic_custom_query() {
         let args = json!({
-            "target": "10.0.0.1",
+            "target": "192.168.58.1",
             "username": "admin",
             "hash": "aa",
             "query": "SELECT Name FROM Win32_Process"
@@ -237,7 +237,7 @@ mod tests {
     #[test]
     fn pth_cred_string_in_context() {
         let args = json!({
-            "target": "10.0.0.1",
+            "target": "192.168.58.1",
             "username": "admin",
             "hash": "aad3b435:aabbccdd",
             "domain": "CONTOSO"
@@ -257,7 +257,7 @@ mod tests {
     async fn pth_winexe_executes() {
         mock::push(mock::success());
         let args = json!({
-            "target": "10.0.0.1", "username": "admin",
+            "target": "192.168.58.1", "username": "admin",
             "hash": "aabbccdd", "domain": "CONTOSO"
         });
         assert!(super::pth_winexe(&args).await.is_ok());
@@ -267,7 +267,7 @@ mod tests {
     async fn pth_smbclient_executes() {
         mock::push(mock::success());
         let args = json!({
-            "target": "10.0.0.1", "username": "admin",
+            "target": "192.168.58.1", "username": "admin",
             "hash": "aabbccdd"
         });
         assert!(super::pth_smbclient(&args).await.is_ok());
@@ -277,7 +277,7 @@ mod tests {
     async fn pth_rpcclient_executes() {
         mock::push(mock::success());
         let args = json!({
-            "target": "10.0.0.1", "username": "admin",
+            "target": "192.168.58.1", "username": "admin",
             "hash": "aabbccdd"
         });
         assert!(super::pth_rpcclient(&args).await.is_ok());
@@ -287,7 +287,7 @@ mod tests {
     async fn pth_wmic_executes() {
         mock::push(mock::success());
         let args = json!({
-            "target": "10.0.0.1", "username": "admin",
+            "target": "192.168.58.1", "username": "admin",
             "hash": "aabbccdd"
         });
         assert!(super::pth_wmic(&args).await.is_ok());

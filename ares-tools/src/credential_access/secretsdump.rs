@@ -51,7 +51,7 @@ mod tests {
 
     #[test]
     fn secretsdump_requires_username() {
-        let args = json!({"target": "10.0.0.1"});
+        let args = json!({"target": "192.168.58.1"});
         assert!(required_str(&args, "username").is_err());
     }
 
@@ -64,7 +64,7 @@ mod tests {
     #[test]
     fn secretsdump_timeout_default_180_secs() {
         let args = json!({
-            "target": "10.0.0.1",
+            "target": "192.168.58.1",
             "username": "admin"
         });
         let timeout_minutes = optional_i64(&args, "timeout_minutes");
@@ -75,7 +75,7 @@ mod tests {
     #[test]
     fn secretsdump_timeout_custom() {
         let args = json!({
-            "target": "10.0.0.1",
+            "target": "192.168.58.1",
             "username": "admin",
             "timeout_minutes": 5
         });
@@ -94,7 +94,7 @@ mod tests {
     #[test]
     fn secretsdump_kerberos_mode_default_false() {
         let args = json!({
-            "target": "10.0.0.1",
+            "target": "192.168.58.1",
             "username": "admin"
         });
         let use_kerberos = optional_bool(&args, "no_pass").unwrap_or(false);
@@ -104,7 +104,7 @@ mod tests {
     #[test]
     fn secretsdump_kerberos_mode_enabled() {
         let args = json!({
-            "target": "10.0.0.1",
+            "target": "192.168.58.1",
             "username": "admin",
             "no_pass": true,
             "ticket_path": "/tmp/admin.ccache"
@@ -122,9 +122,9 @@ mod tests {
             "admin",
             Some("P@ss"),
             None,
-            "10.0.0.1",
+            "192.168.58.1",
         );
-        assert_eq!(auth_string, "contoso.local/admin:P@ss@10.0.0.1");
+        assert_eq!(auth_string, "contoso.local/admin:P@ss@192.168.58.1");
         assert!(extra_args.is_empty());
     }
 
@@ -135,16 +135,16 @@ mod tests {
             "admin",
             None,
             Some("aabbccdd"),
-            "10.0.0.1",
+            "192.168.58.1",
         );
-        assert_eq!(auth_string, "contoso.local/admin@10.0.0.1");
+        assert_eq!(auth_string, "contoso.local/admin@192.168.58.1");
         assert_eq!(extra_args, vec!["-hashes", ":aabbccdd"]);
     }
 
     #[test]
     fn secretsdump_optional_domain() {
         let args = json!({
-            "target": "10.0.0.1",
+            "target": "192.168.58.1",
             "username": "admin"
         });
         assert!(optional_str(&args, "domain").is_none());
@@ -153,11 +153,11 @@ mod tests {
     #[test]
     fn secretsdump_optional_dc_ip() {
         let args = json!({
-            "target": "10.0.0.1",
+            "target": "192.168.58.1",
             "username": "admin",
-            "dc_ip": "10.0.0.2"
+            "dc_ip": "192.168.58.2"
         });
-        assert_eq!(optional_str(&args, "dc_ip"), Some("10.0.0.2"));
+        assert_eq!(optional_str(&args, "dc_ip"), Some("192.168.58.2"));
     }
 
     // --- mock executor tests ---
@@ -168,7 +168,7 @@ mod tests {
     async fn secretsdump_password_auth_executes() {
         mock::push(mock::success());
         let args = json!({
-            "target": "10.0.0.1", "username": "admin",
+            "target": "192.168.58.1", "username": "admin",
             "password": "P@ss", "domain": "contoso.local"
         });
         assert!(super::secretsdump(&args).await.is_ok());
@@ -178,7 +178,7 @@ mod tests {
     async fn secretsdump_hash_auth_executes() {
         mock::push(mock::success());
         let args = json!({
-            "target": "10.0.0.1", "username": "admin",
+            "target": "192.168.58.1", "username": "admin",
             "hash": "aabbccdd", "domain": "contoso.local"
         });
         assert!(super::secretsdump(&args).await.is_ok());
@@ -188,7 +188,7 @@ mod tests {
     async fn secretsdump_kerberos_auth_executes() {
         mock::push(mock::success());
         let args = json!({
-            "target": "10.0.0.1", "username": "admin",
+            "target": "192.168.58.1", "username": "admin",
             "no_pass": true, "ticket_path": "/tmp/admin.ccache"
         });
         assert!(super::secretsdump(&args).await.is_ok());
@@ -198,8 +198,8 @@ mod tests {
     async fn secretsdump_with_dc_ip_executes() {
         mock::push(mock::success());
         let args = json!({
-            "target": "10.0.0.1", "username": "admin",
-            "password": "P@ss", "dc_ip": "10.0.0.2"
+            "target": "192.168.58.1", "username": "admin",
+            "password": "P@ss", "dc_ip": "192.168.58.2"
         });
         assert!(super::secretsdump(&args).await.is_ok());
     }
@@ -208,7 +208,7 @@ mod tests {
     async fn secretsdump_custom_timeout_executes() {
         mock::push(mock::success());
         let args = json!({
-            "target": "10.0.0.1", "username": "admin",
+            "target": "192.168.58.1", "username": "admin",
             "password": "P@ss", "timeout_minutes": 10
         });
         assert!(super::secretsdump(&args).await.is_ok());

@@ -877,7 +877,7 @@ fn correlate_same_technique_different_ips_matches_by_technique() {
     let blue = vec![make_blue_detection(
         "Cred Alert",
         "T1003",
-        "10.0.0.1", // Completely different IP
+        "192.168.58.1", // Completely different IP
         utc(12, 1),
     )];
 
@@ -894,7 +894,7 @@ fn correlate_prefers_higher_confidence_match() {
     let red = vec![make_red_activity("T1003", "192.168.58.10", utc(12, 0))];
     let blue = vec![
         // Weak match: only time proximity, no technique or IP match
-        make_blue_detection("Unrelated", "T1046", "10.0.0.1", utc(12, 0)),
+        make_blue_detection("Unrelated", "T1046", "192.168.58.1", utc(12, 0)),
         // Strong match: technique + IP + close time
         make_blue_detection("Cred Alert", "T1003", "192.168.58.10", utc(12, 0)),
     ];

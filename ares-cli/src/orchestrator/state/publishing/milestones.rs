@@ -223,14 +223,14 @@ mod tests {
         {
             let mut s = state.inner.write().await;
             s.domain_controllers
-                .insert("contoso.local".to_string(), "10.0.0.1".to_string());
+                .insert("contoso.local".to_string(), "192.168.58.1".to_string());
         }
 
         state.set_golden_ticket(&q, "contoso.local").await.unwrap();
 
         let s = state.inner.read().await;
         let vuln = &s.discovered_vulnerabilities["golden_ticket_contoso.local"];
-        assert_eq!(vuln.target, "10.0.0.1");
+        assert_eq!(vuln.target, "192.168.58.1");
     }
 
     #[tokio::test]

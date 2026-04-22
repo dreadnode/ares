@@ -647,12 +647,12 @@ mod tests {
             },
             "annotations": {},
             "startsAt": "2026-04-08T12:00:00Z",
-            "target_ips": ["192.168.1.10", "192.168.1.20"],
+            "target_ips": ["192.168.58.10", "192.168.58.20"],
             "target_users": ["admin", "svc_sql"]
         });
         let result = build_initial_alert_prompt("inv-008", &alert, None).unwrap();
-        assert!(result.contains("192.168.1.10"));
-        assert!(result.contains("192.168.1.20"));
+        assert!(result.contains("192.168.58.10"));
+        assert!(result.contains("192.168.58.20"));
         assert!(result.contains("admin"));
         assert!(result.contains("svc_sql"));
     }

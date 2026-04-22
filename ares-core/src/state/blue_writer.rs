@@ -487,7 +487,7 @@ mod tests {
     async fn add_evidence_returns_true_for_new() {
         let mut conn = MockRedisConnection::new();
         let w = make_writer();
-        let ev = make_evidence("ip", "10.0.0.1", "nmap");
+        let ev = make_evidence("ip", "192.168.58.1", "nmap");
 
         let added = w.add_evidence(&mut conn, &ev).await.unwrap();
         assert!(added);
@@ -497,7 +497,7 @@ mod tests {
     async fn add_evidence_deduplicates() {
         let mut conn = MockRedisConnection::new();
         let w = make_writer();
-        let ev = make_evidence("ip", "10.0.0.1", "nmap");
+        let ev = make_evidence("ip", "192.168.58.1", "nmap");
 
         let first = w.add_evidence(&mut conn, &ev).await.unwrap();
         let second = w.add_evidence(&mut conn, &ev).await.unwrap();
@@ -623,7 +623,7 @@ mod tests {
     async fn add_lateral_connection_appends() {
         let mut conn = MockRedisConnection::new();
         let w = make_writer();
-        let connection = serde_json::json!({"src": "10.0.0.1", "dst": "10.0.0.2"});
+        let connection = serde_json::json!({"src": "192.168.58.1", "dst": "192.168.58.2"});
 
         w.add_lateral_connection(&mut conn, &connection)
             .await
@@ -635,7 +635,7 @@ mod tests {
             .unwrap();
         assert_eq!(items.len(), 1);
         let parsed: serde_json::Value = serde_json::from_str(&items[0]).unwrap();
-        assert_eq!(parsed["src"], "10.0.0.1");
+        assert_eq!(parsed["src"], "192.168.58.1");
     }
 
     #[tokio::test]
@@ -673,7 +673,7 @@ mod tests {
         let mut conn = MockRedisConnection::new();
         let w = make_writer();
 
-        w.add_recommendation(&mut conn, "Block IP 10.0.0.5")
+        w.add_recommendation(&mut conn, "Block IP 192.168.58.5")
             .await
             .unwrap();
         w.add_recommendation(&mut conn, "Rotate credentials")
@@ -685,7 +685,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(items.len(), 2);
-        assert_eq!(items[0], "Block IP 10.0.0.5");
+        assert_eq!(items[0], "Block IP 192.168.58.5");
     }
 
     #[tokio::test]

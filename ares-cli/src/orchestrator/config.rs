@@ -454,10 +454,10 @@ mod tests {
     #[test]
     fn config_with_listener_ip_env() {
         // JSON payload with strategy and listener IP
-        std::env::set_var("ARES_LISTENER_IP", "10.0.0.50");
+        std::env::set_var("ARES_LISTENER_IP", "192.168.58.50");
         std::env::set_var("ARES_OPERATION_ID", "test-listener");
         let c = OrchestratorConfig::from_env().unwrap();
-        assert_eq!(c.listener_ip, Some("10.0.0.50".to_string()));
+        assert_eq!(c.listener_ip, Some("192.168.58.50".to_string()));
         std::env::remove_var("ARES_LISTENER_IP");
         std::env::remove_var("ARES_OPERATION_ID");
     }

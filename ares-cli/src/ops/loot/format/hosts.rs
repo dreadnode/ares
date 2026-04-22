@@ -263,7 +263,7 @@ mod tests {
 
     #[test]
     fn looks_like_ip_valid_ipv4() {
-        assert!(looks_like_ip("192.168.1.1"));
+        assert!(looks_like_ip("192.168.58.1"));
     }
 
     #[test]
@@ -283,7 +283,7 @@ mod tests {
 
     #[test]
     fn looks_like_ip_hostname() {
-        assert!(!looks_like_ip("server.example.com"));
+        assert!(!looks_like_ip("server.contoso.local"));
     }
 
     #[test]
@@ -295,40 +295,52 @@ mod tests {
 
     #[test]
     fn more_specific_fqdn_more_parts() {
-        assert!(is_more_specific_fqdn("dc.corp.local", "dc.sub.corp.local"));
+        assert!(is_more_specific_fqdn(
+            "dc01.contoso.local",
+            "dc01.sub.contoso.local"
+        ));
     }
 
     #[test]
     fn more_specific_fqdn_same_parts() {
-        assert!(!is_more_specific_fqdn("dc.corp.local", "dc.corp.local"));
+        assert!(!is_more_specific_fqdn(
+            "dc01.contoso.local",
+            "dc01.contoso.local"
+        ));
     }
 
     #[test]
     fn more_specific_fqdn_fewer_parts() {
-        assert!(!is_more_specific_fqdn("dc.sub.corp.local", "dc.corp.local"));
+        assert!(!is_more_specific_fqdn(
+            "dc01.sub.contoso.local",
+            "dc01.contoso.local"
+        ));
     }
 
     #[test]
     fn more_specific_fqdn_different_host() {
         assert!(!is_more_specific_fqdn(
-            "dc.corp.local",
-            "web.sub.corp.local"
+            "dc01.contoso.local",
+            "web01.sub.contoso.local"
         ));
     }
 
     #[test]
     fn more_specific_fqdn_single_label_existing() {
-        assert!(!is_more_specific_fqdn("dc", "dc.corp.local"));
+        assert!(!is_more_specific_fqdn("dc", "dc01.contoso.local"));
     }
 
     #[test]
     fn more_specific_fqdn_single_label_new() {
-        assert!(!is_more_specific_fqdn("dc.corp.local", "dc"));
+        assert!(!is_more_specific_fqdn("dc01.contoso.local", "dc"));
     }
 
     #[test]
     fn more_specific_fqdn_case_insensitive_host() {
-        assert!(is_more_specific_fqdn("DC.corp.local", "dc.sub.corp.local"));
+        assert!(is_more_specific_fqdn(
+            "DC.contoso.local",
+            "dc.sub.contoso.local"
+        ));
     }
 
     // ── resolve_display_hostname ──
@@ -347,69 +359,71 @@ mod tests {
 
     #[test]
     fn resolve_hostname_empty() {
-        let host = make_host("10.0.0.1", "");
+        let host = make_host("192.168.58.1", "");
         let map = HashMap::new();
         assert_eq!(resolve_display_hostname(&host, &map), "");
     }
 
     #[test]
     fn resolve_hostname_aws_filtered() {
-        let host = make_host("10.0.0.1", "ip-10-0-0-1.us-west-2.compute.internal");
+        let host = make_host("192.168.58.1", "ip-192-168-58-1.us-west-2.compute.internal");
         let map = HashMap::new();
         assert_eq!(resolve_display_hostname(&host, &map), "");
     }
 
     #[test]
     fn resolve_hostname_fqdn_passthrough() {
-        let host = make_host("10.0.0.1", "dc.corp.local");
+        let host = make_host("192.168.58.1", "dc01.contoso.local");
         let map = HashMap::new();
-        assert_eq!(resolve_display_hostname(&host, &map), "dc.corp.local");
+        assert_eq!(resolve_display_hostname(&host, &map), "dc01.contoso.local");
     }
 
     #[test]
     fn resolve_hostname_trailing_dot_stripped() {
-        let host = make_host("10.0.0.1", "dc.corp.local.");
+        let host = make_host("192.168.58.1", "dc01.contoso.local.");
         let map = HashMap::new();
-        assert_eq!(resolve_display_hostname(&host, &map), "dc.corp.local");
+        assert_eq!(resolve_display_hostname(&host, &map), "dc01.contoso.local");
     }
 
     #[test]
     fn resolve_hostname_netbios_lookup() {
-        let host = make_host("10.0.0.1", "DC01");
+        let host = make_host("192.168.58.1", "DC01");
         let mut map = HashMap::new();
-        map.insert("DC01".to_string(), "dc01.corp.local".to_string());
-        assert_eq!(resolve_display_hostname(&host, &map), "dc01.corp.local");
+        map.insert("DC01".to_string(), "dc01.contoso.local".to_string());
+        assert_eq!(resolve_display_hostname(&host, &map), "dc01.contoso.local");
     }
 
     #[test]
     fn resolve_hostname_netbios_fallback_fqdn_match() {
-        let host = make_host("10.0.0.1", "dc01");
+        let host = make_host("192.168.58.1", "dc01");
         let mut map = HashMap::new();
-        map.insert("SOMEKEY".to_string(), "DC01.corp.local".to_string());
-        assert_eq!(resolve_display_hostname(&host, &map), "dc01.corp.local");
+        map.insert("SOMEKEY".to_string(), "DC01.contoso.local".to_string());
+        assert_eq!(resolve_display_hostname(&host, &map), "dc01.contoso.local");
     }
 
     #[test]
     fn resolve_hostname_uppercase_to_lowercase() {
-        let host = make_host("10.0.0.1", "DC.CORP.LOCAL");
+        let host = make_host("192.168.58.1", "DC01.CONTOSO.LOCAL");
         let map = HashMap::new();
-        assert_eq!(resolve_display_hostname(&host, &map), "dc.corp.local");
+        assert_eq!(resolve_display_hostname(&host, &map), "dc01.contoso.local");
     }
 
     // ── is_aws_hostname ──
 
     #[test]
     fn aws_hostname_positive() {
-        assert!(is_aws_hostname("ip-10-0-0-1.us-west-2.compute.internal"));
+        assert!(is_aws_hostname(
+            "ip-192-168-58-1.us-west-2.compute.internal"
+        ));
     }
 
     #[test]
     fn aws_hostname_negative() {
-        assert!(!is_aws_hostname("dc01.corp.local"));
+        assert!(!is_aws_hostname("dc01.contoso.local"));
     }
 
     #[test]
     fn aws_hostname_partial_match() {
-        assert!(!is_aws_hostname("ip-10-0-0-1.example.com"));
+        assert!(!is_aws_hostname("ip-192-168-58-1.contoso.local"));
     }
 }

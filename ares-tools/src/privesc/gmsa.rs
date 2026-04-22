@@ -190,7 +190,7 @@ mod tests {
             "domain": "contoso.local",
             "username": "admin",
             "password": "P@ssw0rd!",
-            "listener_ip": "10.0.0.5"
+            "listener_ip": "192.168.58.5"
         });
         assert!(required_str(&args, "coerce_from").is_err());
     }
@@ -213,7 +213,7 @@ mod tests {
             "username": "admin",
             "password": "P@ssw0rd!",
             "coerce_from": "dc01.contoso.local",
-            "listener_ip": "10.0.0.5"
+            "listener_ip": "192.168.58.5"
         });
         let domain = required_str(&args, "domain").unwrap();
         let username = required_str(&args, "username").unwrap();
@@ -267,7 +267,7 @@ mod tests {
             "username": "admin",
             "password": "P@ssw0rd!",
             "coerce_from": "dc01.contoso.local",
-            "listener_ip": "10.0.0.5"
+            "listener_ip": "192.168.58.5"
         });
         assert!(unconstrained_coerce_and_capture(&args).await.is_ok());
     }

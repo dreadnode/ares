@@ -801,14 +801,14 @@ mod tests {
 
     #[test]
     fn gap_reason_no_technique() {
-        let activity = make_red(None, Some("10.0.0.1"), "scan", base_time());
+        let activity = make_red(None, Some("192.168.58.1"), "scan", base_time());
         let reason = RedBlueCorrelator::determine_gap_reason(&activity, &[]);
         assert!(reason.contains("no associated MITRE technique"));
     }
 
     #[test]
     fn gap_reason_no_alert_rules() {
-        let activity = make_red(Some("T1003"), Some("10.0.0.1"), "dump", base_time());
+        let activity = make_red(Some("T1003"), Some("192.168.58.1"), "dump", base_time());
         let reason = RedBlueCorrelator::determine_gap_reason(&activity, &[]);
         assert!(reason.contains("No alert rules configured"));
         assert!(reason.contains("T1003"));
@@ -816,11 +816,11 @@ mod tests {
 
     #[test]
     fn gap_reason_alert_exists_but_no_trigger() {
-        let activity = make_red(Some("T1003"), Some("10.0.0.1"), "dump", base_time());
+        let activity = make_red(Some("T1003"), Some("192.168.58.1"), "dump", base_time());
         let detections = vec![make_blue(
             Some("T1003"),
             "Cred Dump Alert",
-            Some("10.0.0.2"),
+            Some("192.168.58.2"),
             base_time() + Duration::hours(2),
         )];
         let reason = RedBlueCorrelator::determine_gap_reason(&activity, &detections);
@@ -876,10 +876,10 @@ mod tests {
     #[test]
     fn coverage_all_detected() {
         let t = base_time();
-        let activities = vec![make_red(Some("T1003"), Some("10.0.0.1"), "dump", t)];
+        let activities = vec![make_red(Some("T1003"), Some("192.168.58.1"), "dump", t)];
         let matches = vec![CorrelationMatch {
             red_activity: activities[0].clone(),
-            blue_detection: make_blue(Some("T1003"), "Alert", Some("10.0.0.1"), t),
+            blue_detection: make_blue(Some("T1003"), "Alert", Some("192.168.58.1"), t),
             time_delta_seconds: 60.0,
             technique_match: true,
             target_match: true,
@@ -895,7 +895,7 @@ mod tests {
     #[test]
     fn coverage_all_missed() {
         let t = base_time();
-        let activities = vec![make_red(Some("T1003"), Some("10.0.0.1"), "dump", t)];
+        let activities = vec![make_red(Some("T1003"), Some("192.168.58.1"), "dump", t)];
         let gaps = vec![DetectionGap {
             red_activity: activities[0].clone(),
             reason: "No alert".to_string(),
@@ -913,17 +913,17 @@ mod tests {
     fn coverage_mixed() {
         let t = base_time();
         let activities = vec![
-            make_red(Some("T1003"), Some("10.0.0.1"), "dump1", t),
+            make_red(Some("T1003"), Some("192.168.58.1"), "dump1", t),
             make_red(
                 Some("T1003"),
-                Some("10.0.0.2"),
+                Some("192.168.58.2"),
                 "dump2",
                 t + Duration::minutes(1),
             ),
         ];
         let matches = vec![CorrelationMatch {
             red_activity: activities[0].clone(),
-            blue_detection: make_blue(Some("T1003"), "Alert", Some("10.0.0.1"), t),
+            blue_detection: make_blue(Some("T1003"), "Alert", Some("192.168.58.1"), t),
             time_delta_seconds: 30.0,
             technique_match: true,
             target_match: true,
@@ -959,11 +959,11 @@ mod tests {
     #[test]
     fn correlate_exact_match() {
         let t = base_time();
-        let red = vec![make_red(Some("T1003"), Some("10.0.0.1"), "dump", t)];
+        let red = vec![make_red(Some("T1003"), Some("192.168.58.1"), "dump", t)];
         let blue = vec![make_blue(
             Some("T1003"),
             "Cred Alert",
-            Some("10.0.0.1"),
+            Some("192.168.58.1"),
             t + Duration::minutes(2),
         )];
         let correlator = RedBlueCorrelator::new("/tmp/test", None);
@@ -978,11 +978,11 @@ mod tests {
     #[test]
     fn correlate_technique_only_match() {
         let t = base_time();
-        let red = vec![make_red(Some("T1003"), Some("10.0.0.1"), "dump", t)];
+        let red = vec![make_red(Some("T1003"), Some("192.168.58.1"), "dump", t)];
         let blue = vec![make_blue(
             Some("T1003"),
             "Alert",
-            Some("10.0.0.2"),
+            Some("192.168.58.2"),
             t + Duration::minutes(5),
         )];
         let correlator = RedBlueCorrelator::new("/tmp/test", None);
@@ -995,11 +995,11 @@ mod tests {
     #[test]
     fn correlate_no_match_outside_window() {
         let t = base_time();
-        let red = vec![make_red(Some("T1003"), Some("10.0.0.1"), "dump", t)];
+        let red = vec![make_red(Some("T1003"), Some("192.168.58.1"), "dump", t)];
         let blue = vec![make_blue(
             Some("T1003"),
             "Alert",
-            Some("10.0.0.1"),
+            Some("192.168.58.1"),
             t + Duration::hours(2),
         )];
         let correlator = RedBlueCorrelator::new("/tmp/test", None);
@@ -1011,7 +1011,7 @@ mod tests {
     #[test]
     fn correlate_gap_has_recommendation() {
         let t = base_time();
-        let red = vec![make_red(Some("T1046"), Some("10.0.0.1"), "scan", t)];
+        let red = vec![make_red(Some("T1046"), Some("192.168.58.1"), "scan", t)];
         let correlator = RedBlueCorrelator::new("/tmp/test", None);
         let report = correlator.correlate(&red, &[], "op-1");
         assert_eq!(report.gaps.len(), 1);
@@ -1021,18 +1021,18 @@ mod tests {
     #[test]
     fn correlate_false_positives() {
         let t = base_time();
-        let red = vec![make_red(Some("T1003"), Some("10.0.0.1"), "dump", t)];
+        let red = vec![make_red(Some("T1003"), Some("192.168.58.1"), "dump", t)];
         let blue = vec![
             make_blue(
                 Some("T1003"),
                 "Real Alert",
-                Some("10.0.0.1"),
+                Some("192.168.58.1"),
                 t + Duration::minutes(2),
             ),
             make_blue(
                 Some("T1046"),
                 "Unrelated Alert",
-                Some("10.0.0.5"),
+                Some("192.168.58.5"),
                 t + Duration::minutes(10),
             ),
         ];
@@ -1046,10 +1046,10 @@ mod tests {
     fn correlate_detection_rate() {
         let t = base_time();
         let red = vec![
-            make_red(Some("T1003"), Some("10.0.0.1"), "dump", t),
+            make_red(Some("T1003"), Some("192.168.58.1"), "dump", t),
             make_red(
                 Some("T1046"),
-                Some("10.0.0.2"),
+                Some("192.168.58.2"),
                 "scan",
                 t + Duration::minutes(1),
             ),
@@ -1057,7 +1057,7 @@ mod tests {
         let blue = vec![make_blue(
             Some("T1003"),
             "Alert",
-            Some("10.0.0.1"),
+            Some("192.168.58.1"),
             t + Duration::minutes(2),
         )];
         let correlator = RedBlueCorrelator::new("/tmp/test", None);
@@ -1070,11 +1070,11 @@ mod tests {
     #[test]
     fn correlate_mean_time_to_detect() {
         let t = base_time();
-        let red = vec![make_red(Some("T1003"), Some("10.0.0.1"), "dump", t)];
+        let red = vec![make_red(Some("T1003"), Some("192.168.58.1"), "dump", t)];
         let blue = vec![make_blue(
             Some("T1003"),
             "Alert",
-            Some("10.0.0.1"),
+            Some("192.168.58.1"),
             t + Duration::minutes(5),
         )];
         let correlator = RedBlueCorrelator::new("/tmp/test", None);
@@ -1094,11 +1094,11 @@ mod tests {
     #[test]
     fn correlate_custom_time_window() {
         let t = base_time();
-        let red = vec![make_red(Some("T1003"), Some("10.0.0.1"), "dump", t)];
+        let red = vec![make_red(Some("T1003"), Some("192.168.58.1"), "dump", t)];
         let blue = vec![make_blue(
             Some("T1003"),
             "Alert",
-            Some("10.0.0.1"),
+            Some("192.168.58.1"),
             t + Duration::minutes(10),
         )];
         // 5-minute window should miss a 10-minute delta
@@ -1111,16 +1111,16 @@ mod tests {
     fn correlate_multiple_techniques() {
         let t = base_time();
         let red = vec![
-            make_red(Some("T1003"), Some("10.0.0.1"), "dump", t),
+            make_red(Some("T1003"), Some("192.168.58.1"), "dump", t),
             make_red(
                 Some("T1046"),
-                Some("10.0.0.2"),
+                Some("192.168.58.2"),
                 "scan",
                 t + Duration::minutes(1),
             ),
             make_red(
                 Some("T1078.002"),
-                Some("10.0.0.3"),
+                Some("192.168.58.3"),
                 "da",
                 t + Duration::minutes(5),
             ),
@@ -1129,13 +1129,13 @@ mod tests {
             make_blue(
                 Some("T1003"),
                 "Cred Alert",
-                Some("10.0.0.1"),
+                Some("192.168.58.1"),
                 t + Duration::minutes(2),
             ),
             make_blue(
                 Some("T1046"),
                 "Scan Alert",
-                Some("10.0.0.2"),
+                Some("192.168.58.2"),
                 t + Duration::minutes(3),
             ),
         ];

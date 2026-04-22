@@ -292,7 +292,7 @@ mod tests {
     #[tokio::test]
     async fn coercer_executes() {
         mock::push(mock::success());
-        let args = json!({"target": "10.0.0.1", "listener": "10.0.0.5"});
+        let args = json!({"target": "192.168.58.1", "listener": "192.168.58.5"});
         assert!(coercer(&args).await.is_ok());
     }
 
@@ -300,7 +300,7 @@ mod tests {
     async fn coercer_with_creds_executes() {
         mock::push(mock::success());
         let args = json!({
-            "target": "10.0.0.1", "listener": "10.0.0.5",
+            "target": "192.168.58.1", "listener": "192.168.58.5",
             "username": "admin", "password": "P@ss", "domain": "contoso.local"
         });
         assert!(coercer(&args).await.is_ok());
@@ -309,7 +309,7 @@ mod tests {
     #[tokio::test]
     async fn petitpotam_executes() {
         mock::push(mock::success());
-        let args = json!({"target": "10.0.0.1", "listener": "10.0.0.5"});
+        let args = json!({"target": "192.168.58.1", "listener": "192.168.58.5"});
         assert!(petitpotam(&args).await.is_ok());
     }
 
@@ -317,7 +317,7 @@ mod tests {
     async fn petitpotam_with_creds_executes() {
         mock::push(mock::success());
         let args = json!({
-            "target": "10.0.0.1", "listener": "10.0.0.5",
+            "target": "192.168.58.1", "listener": "192.168.58.5",
             "username": "admin", "password": "P@ss", "domain": "contoso.local"
         });
         assert!(petitpotam(&args).await.is_ok());
@@ -326,21 +326,21 @@ mod tests {
     #[tokio::test]
     async fn dfscoerce_executes() {
         mock::push(mock::success());
-        let args = json!({"target": "10.0.0.1", "listener": "10.0.0.5"});
+        let args = json!({"target": "192.168.58.1", "listener": "192.168.58.5"});
         assert!(dfscoerce(&args).await.is_ok());
     }
 
     #[tokio::test]
     async fn ntlmrelayx_to_ldaps_executes() {
         mock::push(mock::success());
-        let args = json!({"dc_ip": "10.0.0.1"});
+        let args = json!({"dc_ip": "192.168.58.1"});
         assert!(ntlmrelayx_to_ldaps(&args).await.is_ok());
     }
 
     #[tokio::test]
     async fn ntlmrelayx_to_ldaps_delegate_access() {
         mock::push(mock::success());
-        let args = json!({"dc_ip": "10.0.0.1", "delegate_access": true});
+        let args = json!({"dc_ip": "192.168.58.1", "delegate_access": true});
         assert!(ntlmrelayx_to_ldaps(&args).await.is_ok());
     }
 
@@ -361,14 +361,14 @@ mod tests {
     #[tokio::test]
     async fn ntlmrelayx_to_smb_executes() {
         mock::push(mock::success());
-        let args = json!({"target_ip": "10.0.0.1"});
+        let args = json!({"target_ip": "192.168.58.1"});
         assert!(ntlmrelayx_to_smb(&args).await.is_ok());
     }
 
     #[tokio::test]
     async fn ntlmrelayx_to_smb_with_socks() {
         mock::push(mock::success());
-        let args = json!({"target_ip": "10.0.0.1", "socks": true, "interactive": true});
+        let args = json!({"target_ip": "192.168.58.1", "socks": true, "interactive": true});
         assert!(ntlmrelayx_to_smb(&args).await.is_ok());
     }
 
@@ -382,7 +382,7 @@ mod tests {
     #[tokio::test]
     async fn ntlmrelayx_multirelay_with_target_ips() {
         mock::push(mock::success());
-        let args = json!({"target_ips": "10.0.0.1,10.0.0.2", "dump_sam": true});
+        let args = json!({"target_ips": "192.168.58.1,192.168.58.2", "dump_sam": true});
         assert!(ntlmrelayx_multirelay(&args).await.is_ok());
     }
 

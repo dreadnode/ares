@@ -526,7 +526,7 @@ mod tests {
 
     #[test]
     fn lsassy_requires_username() {
-        let args = json!({"target": "10.0.0.1"});
+        let args = json!({"target": "192.168.58.1"});
         assert!(required_str(&args, "username").is_err());
     }
 
@@ -539,7 +539,7 @@ mod tests {
     #[test]
     fn lsassy_optional_method() {
         let args = json!({
-            "target": "10.0.0.1",
+            "target": "192.168.58.1",
             "username": "admin",
             "method": "comsvcs"
         });
@@ -548,7 +548,7 @@ mod tests {
 
     #[test]
     fn lsassy_no_method() {
-        let args = json!({"target": "10.0.0.1", "username": "admin"});
+        let args = json!({"target": "192.168.58.1", "username": "admin"});
         assert!(optional_str(&args, "method").is_none());
     }
 
@@ -601,15 +601,15 @@ mod tests {
 
     #[test]
     fn ldap_uri_format() {
-        let target = "10.0.0.1";
+        let target = "192.168.58.1";
         let ldap_uri = format!("ldap://{target}");
-        assert_eq!(ldap_uri, "ldap://10.0.0.1");
+        assert_eq!(ldap_uri, "ldap://192.168.58.1");
     }
 
     #[test]
     fn ldap_search_requires_all_fields() {
         let args = json!({
-            "target": "10.0.0.1",
+            "target": "192.168.58.1",
             "username": "admin",
             "password": "P@ss",
             "domain": "contoso.local"
@@ -657,7 +657,7 @@ mod tests {
     #[test]
     fn gpp_password_finder_all_required() {
         let args = json!({
-            "target": "10.0.0.1",
+            "target": "192.168.58.1",
             "username": "admin",
             "password": "P@ss",
             "domain": "contoso.local"
@@ -691,7 +691,7 @@ mod tests {
     #[test]
     fn password_spray_delay_seconds_parsing() {
         let args = json!({
-            "target": "10.0.0.1",
+            "target": "192.168.58.1",
             "password": "P@ss",
             "domain": "contoso.local",
             "delay_seconds": 5
@@ -702,7 +702,7 @@ mod tests {
     #[test]
     fn password_spray_no_delay() {
         let args = json!({
-            "target": "10.0.0.1",
+            "target": "192.168.58.1",
             "password": "P@ss",
             "domain": "contoso.local"
         });
@@ -717,13 +717,13 @@ mod tests {
 
     #[test]
     fn password_spray_requires_password() {
-        let args = json!({"target": "10.0.0.1", "domain": "contoso.local"});
+        let args = json!({"target": "192.168.58.1", "domain": "contoso.local"});
         assert!(required_str(&args, "password").is_err());
     }
 
     #[test]
     fn password_spray_requires_domain() {
-        let args = json!({"target": "10.0.0.1", "password": "P@ss"});
+        let args = json!({"target": "192.168.58.1", "password": "P@ss"});
         assert!(required_str(&args, "domain").is_err());
     }
 
@@ -736,9 +736,9 @@ mod tests {
             "admin",
             Some("P@ss"),
             None,
-            "10.0.0.1",
+            "192.168.58.1",
         );
-        assert_eq!(auth_string, "contoso.local/admin:P@ss@10.0.0.1");
+        assert_eq!(auth_string, "contoso.local/admin:P@ss@192.168.58.1");
         assert!(extra_args.is_empty());
     }
 
@@ -749,9 +749,9 @@ mod tests {
             "admin",
             None,
             Some("aabbccdd"),
-            "10.0.0.1",
+            "192.168.58.1",
         );
-        assert_eq!(auth_string, "contoso.local/admin@10.0.0.1");
+        assert_eq!(auth_string, "contoso.local/admin@192.168.58.1");
         assert_eq!(extra_args, vec!["-hashes", ":aabbccdd"]);
     }
 
@@ -760,7 +760,7 @@ mod tests {
     #[test]
     fn smbclient_spider_optional_pattern() {
         let args = json!({
-            "target": "10.0.0.1",
+            "target": "192.168.58.1",
             "username": "admin",
             "password": "P@ss",
             "domain": "contoso.local",
@@ -772,7 +772,7 @@ mod tests {
     #[test]
     fn smbclient_spider_optional_depth() {
         let args = json!({
-            "target": "10.0.0.1",
+            "target": "192.168.58.1",
             "username": "admin",
             "password": "P@ss",
             "domain": "contoso.local",
@@ -803,7 +803,7 @@ mod tests {
     #[test]
     fn credman_requires_all_fields() {
         let args = json!({
-            "target": "10.0.0.1",
+            "target": "192.168.58.1",
             "username": "admin",
             "password": "P@ss",
             "domain": "contoso.local"
@@ -836,14 +836,14 @@ mod tests {
 
     #[test]
     fn username_as_password_requires_domain() {
-        let args = json!({"target": "10.0.0.1"});
+        let args = json!({"target": "192.168.58.1"});
         assert!(required_str(&args, "domain").is_err());
     }
 
     #[test]
     fn username_as_password_optional_users_file() {
         let args = json!({
-            "target": "10.0.0.1",
+            "target": "192.168.58.1",
             "domain": "contoso.local",
             "users_file": "/tmp/myusers.txt"
         });
@@ -858,7 +858,7 @@ mod tests {
     async fn lsassy_with_password_executes() {
         mock::push(mock::success());
         let args = json!({
-            "target": "10.0.0.1", "username": "admin", "password": "P@ss"
+            "target": "192.168.58.1", "username": "admin", "password": "P@ss"
         });
         assert!(super::lsassy(&args).await.is_ok());
     }
@@ -867,7 +867,7 @@ mod tests {
     async fn lsassy_with_hash_executes() {
         mock::push(mock::success());
         let args = json!({
-            "target": "10.0.0.1", "username": "admin", "hash": "aabbccdd"
+            "target": "192.168.58.1", "username": "admin", "hash": "aabbccdd"
         });
         assert!(super::lsassy(&args).await.is_ok());
     }
@@ -876,7 +876,7 @@ mod tests {
     async fn lsassy_with_domain_and_method_executes() {
         mock::push(mock::success());
         let args = json!({
-            "target": "10.0.0.1", "username": "admin", "password": "P@ss",
+            "target": "192.168.58.1", "username": "admin", "password": "P@ss",
             "domain": "contoso.local", "method": "comsvcs"
         });
         assert!(super::lsassy(&args).await.is_ok());
@@ -886,7 +886,7 @@ mod tests {
     async fn domain_admin_checker_executes() {
         mock::push(mock::success());
         let args = json!({
-            "targets": "10.0.0.0/24", "username": "admin",
+            "targets": "192.168.58.0/24", "username": "admin",
             "password": "P@ss", "domain": "contoso.local"
         });
         assert!(super::domain_admin_checker(&args).await.is_ok());
@@ -896,7 +896,7 @@ mod tests {
     async fn domain_admin_checker_with_hash_executes() {
         mock::push(mock::success());
         let args = json!({
-            "targets": "10.0.0.1", "username": "admin",
+            "targets": "192.168.58.1", "username": "admin",
             "hash": "aabbccdd", "domain": "contoso.local"
         });
         assert!(super::domain_admin_checker(&args).await.is_ok());
@@ -906,7 +906,7 @@ mod tests {
     async fn gpp_password_finder_executes() {
         mock::push(mock::success());
         let args = json!({
-            "target": "10.0.0.1", "username": "admin",
+            "target": "192.168.58.1", "username": "admin",
             "password": "P@ss", "domain": "contoso.local"
         });
         assert!(super::gpp_password_finder(&args).await.is_ok());
@@ -916,7 +916,7 @@ mod tests {
     async fn sysvol_script_search_executes() {
         mock::push(mock::success());
         let args = json!({
-            "target": "10.0.0.1", "username": "admin",
+            "target": "192.168.58.1", "username": "admin",
             "password": "P@ss", "domain": "contoso.local"
         });
         assert!(super::sysvol_script_search(&args).await.is_ok());
@@ -926,7 +926,7 @@ mod tests {
     async fn laps_dump_executes() {
         mock::push(mock::success());
         let args = json!({
-            "target": "10.0.0.1", "username": "admin",
+            "target": "192.168.58.1", "username": "admin",
             "password": "P@ss", "domain": "contoso.local"
         });
         assert!(super::laps_dump(&args).await.is_ok());
@@ -936,7 +936,7 @@ mod tests {
     async fn ldap_search_descriptions_executes() {
         mock::push(mock::success());
         let args = json!({
-            "target": "10.0.0.1", "username": "admin",
+            "target": "192.168.58.1", "username": "admin",
             "password": "P@ss", "domain": "contoso.local"
         });
         assert!(super::ldap_search_descriptions(&args).await.is_ok());
@@ -946,7 +946,7 @@ mod tests {
     async fn ldap_search_descriptions_with_base_dn_executes() {
         mock::push(mock::success());
         let args = json!({
-            "target": "10.0.0.1", "username": "admin",
+            "target": "192.168.58.1", "username": "admin",
             "password": "P@ss", "domain": "contoso.local",
             "base_dn": "OU=Users,DC=contoso,DC=local"
         });
@@ -957,7 +957,7 @@ mod tests {
     async fn smbclient_spider_executes() {
         mock::push(mock::success());
         let args = json!({
-            "target": "10.0.0.1", "username": "admin",
+            "target": "192.168.58.1", "username": "admin",
             "password": "P@ss", "domain": "contoso.local"
         });
         assert!(super::smbclient_spider(&args).await.is_ok());
@@ -967,7 +967,7 @@ mod tests {
     async fn smbclient_spider_with_pattern_and_depth_executes() {
         mock::push(mock::success());
         let args = json!({
-            "target": "10.0.0.1", "username": "admin",
+            "target": "192.168.58.1", "username": "admin",
             "password": "P@ss", "domain": "contoso.local",
             "pattern": "*.kdbx", "depth": 3
         });
@@ -978,7 +978,7 @@ mod tests {
     async fn ntds_dit_extract_executes() {
         mock::push(mock::success());
         let args = json!({
-            "target": "10.0.0.1", "username": "admin",
+            "target": "192.168.58.1", "username": "admin",
             "password": "P@ss", "domain": "contoso.local"
         });
         assert!(super::ntds_dit_extract(&args).await.is_ok());
@@ -988,7 +988,7 @@ mod tests {
     async fn ntds_dit_extract_with_hash_executes() {
         mock::push(mock::success());
         let args = json!({
-            "target": "10.0.0.1", "username": "admin",
+            "target": "192.168.58.1", "username": "admin",
             "hash": "aabbccdd", "domain": "contoso.local"
         });
         assert!(super::ntds_dit_extract(&args).await.is_ok());
@@ -998,7 +998,7 @@ mod tests {
     async fn password_policy_executes() {
         mock::push(mock::success());
         let args = json!({
-            "target": "10.0.0.1", "username": "admin",
+            "target": "192.168.58.1", "username": "admin",
             "password": "P@ss", "domain": "contoso.local"
         });
         assert!(super::password_policy(&args).await.is_ok());
@@ -1008,7 +1008,7 @@ mod tests {
     async fn password_spray_with_file_executes() {
         mock::push(mock::success());
         let args = json!({
-            "target": "10.0.0.1", "password": "P@ss",
+            "target": "192.168.58.1", "password": "P@ss",
             "domain": "contoso.local", "users_file": "/tmp/users.txt"
         });
         assert!(super::password_spray(&args).await.is_ok());
@@ -1018,7 +1018,7 @@ mod tests {
     async fn username_as_password_with_file_executes() {
         mock::push(mock::success());
         let args = json!({
-            "target": "10.0.0.1", "domain": "contoso.local",
+            "target": "192.168.58.1", "domain": "contoso.local",
             "users_file": "/tmp/users.txt"
         });
         assert!(super::username_as_password(&args).await.is_ok());
@@ -1028,7 +1028,7 @@ mod tests {
     async fn check_credman_entries_executes() {
         mock::push(mock::success());
         let args = json!({
-            "target": "10.0.0.1", "username": "admin",
+            "target": "192.168.58.1", "username": "admin",
             "password": "P@ss", "domain": "contoso.local"
         });
         assert!(super::check_credman_entries(&args).await.is_ok());
@@ -1038,7 +1038,7 @@ mod tests {
     async fn check_autologon_registry_executes() {
         mock::push(mock::success());
         let args = json!({
-            "target": "10.0.0.1", "username": "admin",
+            "target": "192.168.58.1", "username": "admin",
             "password": "P@ss", "domain": "contoso.local"
         });
         assert!(super::check_autologon_registry(&args).await.is_ok());

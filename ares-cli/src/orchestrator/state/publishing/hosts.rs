@@ -379,13 +379,13 @@ mod tests {
         let state = SharedState::new("op-1".to_string());
         let q = mock_queue();
 
-        let host = make_host("10.0.0.5", "srv01.contoso.local", false);
+        let host = make_host("192.168.58.5", "srv01.contoso.local", false);
         let added = state.publish_host(&q, host).await.unwrap();
         assert!(added);
 
         let s = state.inner.read().await;
         assert_eq!(s.hosts.len(), 1);
-        assert_eq!(s.hosts[0].ip, "10.0.0.5");
+        assert_eq!(s.hosts[0].ip, "192.168.58.5");
         assert_eq!(s.hosts[0].hostname, "srv01.contoso.local");
     }
 
@@ -394,7 +394,7 @@ mod tests {
         let state = SharedState::new("op-1".to_string());
         let q = mock_queue();
 
-        let host = make_host("10.0.0.5", "srv01.contoso.local", false);
+        let host = make_host("192.168.58.5", "srv01.contoso.local", false);
         state.publish_host(&q, host).await.unwrap();
 
         let s = state.inner.read().await;
@@ -407,7 +407,7 @@ mod tests {
         let q = mock_queue();
 
         let host = make_host(
-            "10.1.2.150",
+            "192.168.58.150",
             "ip-10-1-2-150.us-west-2.compute.internal",
             false,
         );
@@ -422,11 +422,11 @@ mod tests {
         let state = SharedState::new("op-1".to_string());
         let q = mock_queue();
 
-        let mut host1 = make_host("10.0.0.5", "srv01.contoso.local", false);
+        let mut host1 = make_host("192.168.58.5", "srv01.contoso.local", false);
         host1.services = vec!["445/tcp".to_string()];
         state.publish_host(&q, host1).await.unwrap();
 
-        let mut host2 = make_host("10.0.0.5", "", false);
+        let mut host2 = make_host("192.168.58.5", "", false);
         host2.services = vec!["445/tcp".to_string(), "139/tcp".to_string()];
         state.publish_host(&q, host2).await.unwrap();
 
@@ -442,11 +442,11 @@ mod tests {
         let q = mock_queue();
 
         // First add host without hostname
-        let host1 = make_host("10.0.0.5", "", false);
+        let host1 = make_host("192.168.58.5", "", false);
         state.publish_host(&q, host1).await.unwrap();
 
         // Then add same IP with hostname — should merge
-        let host2 = make_host("10.0.0.5", "srv01.contoso.local", false);
+        let host2 = make_host("192.168.58.5", "srv01.contoso.local", false);
         state.publish_host(&q, host2).await.unwrap();
 
         let s = state.inner.read().await;
@@ -464,10 +464,10 @@ mod tests {
             let mut s = state.inner.write().await;
             s.domains.push("contoso.local".to_string());
         }
-        let host1 = make_host("10.0.0.1", "", false);
+        let host1 = make_host("192.168.58.1", "", false);
         state.publish_host(&q, host1).await.unwrap();
 
-        let host2 = make_host("10.0.0.1", "dc01.contoso.local", true);
+        let host2 = make_host("192.168.58.1", "dc01.contoso.local", true);
         state.publish_host(&q, host2).await.unwrap();
 
         let s = state.inner.read().await;
@@ -481,11 +481,11 @@ mod tests {
         let state = SharedState::new("op-1".to_string());
         let q = mock_queue();
 
-        let host1 = make_host("10.0.0.5", "srv01.contoso.local", false);
+        let host1 = make_host("192.168.58.5", "srv01.contoso.local", false);
         assert!(state.publish_host(&q, host1).await.unwrap());
 
         // Identical host — no new data to merge
-        let host2 = make_host("10.0.0.5", "", false);
+        let host2 = make_host("192.168.58.5", "", false);
         let result = state.publish_host(&q, host2).await.unwrap();
         assert!(!result);
     }
@@ -495,14 +495,14 @@ mod tests {
         let state = SharedState::new("op-1".to_string());
         let q = mock_queue();
 
-        let host = make_host("10.0.0.1", "dc01.contoso.local", true);
+        let host = make_host("192.168.58.1", "dc01.contoso.local", true);
         state.publish_host(&q, host).await.unwrap();
 
         let s = state.inner.read().await;
         assert!(s.hosts[0].is_dc);
         assert_eq!(
             s.domain_controllers.get("contoso.local"),
-            Some(&"10.0.0.1".to_string())
+            Some(&"192.168.58.1".to_string())
         );
     }
 
@@ -511,14 +511,14 @@ mod tests {
         let state = SharedState::new("op-1".to_string());
         let q = mock_queue();
 
-        let host = make_host("10.0.0.1", "dc01.contoso.local", true);
+        let host = make_host("192.168.58.1", "dc01.contoso.local", true);
         state.register_dc(&q, &host).await.unwrap();
 
         let s = state.inner.read().await;
         assert!(s.domains.contains(&"contoso.local".to_string()));
         assert_eq!(
             s.domain_controllers.get("contoso.local"),
-            Some(&"10.0.0.1".to_string())
+            Some(&"192.168.58.1".to_string())
         );
     }
 
@@ -534,13 +534,13 @@ mod tests {
         }
 
         // Host with no FQDN — should fall back to existing domain
-        let host = make_host("10.0.0.1", "", true);
+        let host = make_host("192.168.58.1", "", true);
         state.register_dc(&q, &host).await.unwrap();
 
         let s = state.inner.read().await;
         assert_eq!(
             s.domain_controllers.get("contoso.local"),
-            Some(&"10.0.0.1".to_string())
+            Some(&"192.168.58.1".to_string())
         );
     }
 
@@ -550,7 +550,7 @@ mod tests {
         let q = mock_queue();
 
         // No domain in state, no FQDN on host — should skip
-        let host = make_host("10.0.0.1", "", true);
+        let host = make_host("192.168.58.1", "", true);
         state.register_dc(&q, &host).await.unwrap();
 
         let s = state.inner.read().await;
@@ -562,7 +562,7 @@ mod tests {
         let state = SharedState::new("op-1".to_string());
         let q = mock_queue();
 
-        let host = make_host("10.0.0.5", "srv01.contoso.local.", false);
+        let host = make_host("192.168.58.5", "srv01.contoso.local.", false);
         state.publish_host(&q, host).await.unwrap();
 
         let s = state.inner.read().await;
@@ -574,10 +574,10 @@ mod tests {
         let state = SharedState::new("op-1".to_string());
         let q = mock_queue();
 
-        let host1 = make_host("10.0.0.5", "srv01.contoso.local", false);
+        let host1 = make_host("192.168.58.5", "srv01.contoso.local", false);
         state.publish_host(&q, host1).await.unwrap();
 
-        let mut host2 = make_host("10.0.0.5", "", false);
+        let mut host2 = make_host("192.168.58.5", "", false);
         host2.os = "Windows Server 2019".to_string();
         state.publish_host(&q, host2).await.unwrap();
 

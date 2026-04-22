@@ -145,7 +145,7 @@ mod tests {
     fn empty_gt() -> EvaluationGroundTruth {
         EvaluationGroundTruth {
             operation_id: "op-1".into(),
-            target_ip: "10.0.0.1".into(),
+            target_ip: "192.168.58.1".into(),
             expected_iocs: vec![],
             expected_techniques: vec![],
             expected_timeline: vec![],
@@ -194,19 +194,19 @@ mod tests {
     fn missed_iocs_all_missed() {
         let snap = empty_snap();
         let mut gt = empty_gt();
-        gt.expected_iocs = vec![make_ioc("ip", "10.0.0.1", true)];
+        gt.expected_iocs = vec![make_ioc("ip", "192.168.58.1", true)];
         let missed = get_missed_iocs(&snap, &gt);
         assert_eq!(missed.len(), 1);
-        assert_eq!(missed[0].value, "10.0.0.1");
+        assert_eq!(missed[0].value, "192.168.58.1");
     }
 
     #[test]
     fn missed_iocs_none_missed() {
         let mut snap = empty_snap();
         snap.evidence_values
-            .push(make_evidence("ip", "10.0.0.1", 1));
+            .push(make_evidence("ip", "192.168.58.1", 1));
         let mut gt = empty_gt();
-        gt.expected_iocs = vec![make_ioc("ip", "10.0.0.1", true)];
+        gt.expected_iocs = vec![make_ioc("ip", "192.168.58.1", true)];
         assert!(get_missed_iocs(&snap, &gt).is_empty());
     }
 
@@ -223,9 +223,9 @@ mod tests {
     fn found_iocs_all_found() {
         let mut snap = empty_snap();
         snap.evidence_values
-            .push(make_evidence("ip", "10.0.0.1", 1));
+            .push(make_evidence("ip", "192.168.58.1", 1));
         let mut gt = empty_gt();
-        gt.expected_iocs = vec![make_ioc("ip", "10.0.0.1", true)];
+        gt.expected_iocs = vec![make_ioc("ip", "192.168.58.1", true)];
         let found = get_found_iocs(&snap, &gt);
         assert_eq!(found.len(), 1);
     }
@@ -234,7 +234,7 @@ mod tests {
     fn found_iocs_none_found() {
         let snap = empty_snap();
         let mut gt = empty_gt();
-        gt.expected_iocs = vec![make_ioc("ip", "10.0.0.1", true)];
+        gt.expected_iocs = vec![make_ioc("ip", "192.168.58.1", true)];
         assert!(get_found_iocs(&snap, &gt).is_empty());
     }
 
@@ -242,11 +242,11 @@ mod tests {
     fn found_iocs_partial() {
         let mut snap = empty_snap();
         snap.evidence_values
-            .push(make_evidence("ip", "10.0.0.1", 1));
+            .push(make_evidence("ip", "192.168.58.1", 1));
         let mut gt = empty_gt();
         gt.expected_iocs = vec![
-            make_ioc("ip", "10.0.0.1", true),
-            make_ioc("ip", "10.0.0.2", true),
+            make_ioc("ip", "192.168.58.1", true),
+            make_ioc("ip", "192.168.58.2", true),
         ];
         assert_eq!(get_found_iocs(&snap, &gt).len(), 1);
     }
@@ -310,14 +310,14 @@ mod tests {
         let mut snap = empty_snap();
         snap.stage = Some("synthesis".to_string());
         snap.evidence_values
-            .push(make_evidence("ip", "10.0.0.1", 2));
+            .push(make_evidence("ip", "192.168.58.1", 2));
         snap.identified_techniques.insert("T1003".into());
         snap.highest_pyramid_level = 5;
 
         let mut gt = empty_gt();
         gt.expected_iocs = vec![
-            make_ioc("ip", "10.0.0.1", true),
-            make_ioc("ip", "10.0.0.2", true),
+            make_ioc("ip", "192.168.58.1", true),
+            make_ioc("ip", "192.168.58.2", true),
         ];
         gt.expected_techniques = vec![make_technique("T1003", true)];
 
@@ -338,7 +338,7 @@ mod tests {
         snap.evidence_values.push(make_evidence("ttp", "T1003", 6));
         snap.evidence_values.push(make_evidence("ttp", "T1046", 6));
         snap.evidence_values
-            .push(make_evidence("ip", "10.0.0.1", 2));
+            .push(make_evidence("ip", "192.168.58.1", 2));
         snap.highest_pyramid_level = 6;
 
         let gt = empty_gt();

@@ -494,8 +494,8 @@ mod tests {
 
     #[test]
     fn extract_ip_picks_first() {
-        let line = "10.0.0.1 connected to 10.0.0.2";
-        assert_eq!(extract_ip_from_line(line).as_deref(), Some("10.0.0.1"));
+        let line = "192.168.58.1 connected to 192.168.58.2";
+        assert_eq!(extract_ip_from_line(line).as_deref(), Some("192.168.58.1"));
     }
 
     #[test]

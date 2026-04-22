@@ -419,7 +419,7 @@ mod tests {
         let empty = r.get_evidence(&mut conn).await.unwrap();
         assert!(empty.is_empty());
 
-        let ev1 = make_evidence("ip", "10.0.0.1", "nmap");
+        let ev1 = make_evidence("ip", "192.168.58.1", "nmap");
         let ev2 = make_evidence("domain", "evil.com", "dns");
         w.add_evidence(&mut conn, &ev1).await.unwrap();
         w.add_evidence(&mut conn, &ev2).await.unwrap();
@@ -427,7 +427,7 @@ mod tests {
         let evidence = r.get_evidence(&mut conn).await.unwrap();
         assert_eq!(evidence.len(), 2);
         let values: Vec<&str> = evidence.iter().map(|e| e.value.as_str()).collect();
-        assert!(values.contains(&"10.0.0.1"));
+        assert!(values.contains(&"192.168.58.1"));
         assert!(values.contains(&"evil.com"));
     }
 
@@ -696,7 +696,7 @@ mod tests {
         let alert = serde_json::json!({"alert_id": "a-001", "severity": "critical"});
         w.initialize(&mut conn, &alert).await.unwrap();
 
-        w.add_evidence(&mut conn, &make_evidence("ip", "10.0.0.1", "nmap"))
+        w.add_evidence(&mut conn, &make_evidence("ip", "192.168.58.1", "nmap"))
             .await
             .unwrap();
         w.add_timeline_event(&mut conn, &make_timeline_event("initial scan"))
@@ -712,7 +712,7 @@ mod tests {
         w.mark_query_type(&mut conn, "process_events")
             .await
             .unwrap();
-        w.add_recommendation(&mut conn, "Block IP 10.0.0.1")
+        w.add_recommendation(&mut conn, "Block IP 192.168.58.1")
             .await
             .unwrap();
 
@@ -741,7 +741,7 @@ mod tests {
         assert_eq!(state.stage, "triage");
         assert!(!state.started_at.is_empty());
         assert_eq!(state.evidence.len(), 1);
-        assert_eq!(state.evidence[0].value, "10.0.0.1");
+        assert_eq!(state.evidence[0].value, "192.168.58.1");
         assert_eq!(state.timeline.len(), 1);
         assert_eq!(state.timeline[0].description, "initial scan");
         assert!(state.identified_techniques.contains(&"T1059".to_string()));
@@ -755,7 +755,7 @@ mod tests {
         assert!(state
             .executed_query_types
             .contains(&"process_events".to_string()));
-        assert_eq!(state.recommendations, vec!["Block IP 10.0.0.1"]);
+        assert_eq!(state.recommendations, vec!["Block IP 192.168.58.1"]);
         assert!(state.triage_decision.is_some());
         assert_eq!(state.triage_records.len(), 1);
         assert_eq!(state.pending_tasks.len(), 1);

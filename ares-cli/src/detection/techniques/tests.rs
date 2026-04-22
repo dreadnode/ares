@@ -396,7 +396,7 @@ fn build_t1046_empty_state() {
 fn build_t1046_populated_hosts() {
     let mut state = SharedRedTeamState::new("test-op".to_string());
     state.all_hosts.push(Host {
-        ip: "10.0.0.5".to_string(),
+        ip: "192.168.58.5".to_string(),
         hostname: "srv05".to_string(),
         os: String::new(),
         roles: vec![],
@@ -407,7 +407,7 @@ fn build_t1046_populated_hosts() {
     let start = Utc::now() - chrono::Duration::hours(1);
     let end = Utc::now();
     let det = build_t1046(&state, &start, &end);
-    assert_eq!(det.targets, vec!["10.0.0.5".to_string()]);
+    assert_eq!(det.targets, vec!["192.168.58.5".to_string()]);
 }
 
 // ---------------------------------------------------------------------------

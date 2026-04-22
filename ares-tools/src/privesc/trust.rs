@@ -338,7 +338,7 @@ mod tests {
             "username": "admin",
             "password": "P@ssw0rd!",
             "dc_ip": "192.168.58.10",
-            "record_data": "10.0.0.99"
+            "record_data": "192.168.58.99"
         });
         assert!(required_str(&args, "record_name").is_err());
     }
@@ -363,7 +363,7 @@ mod tests {
             "password": "P@ssw0rd!",
             "dc_ip": "192.168.58.10",
             "record_name": "evil.contoso.local",
-            "record_data": "10.0.0.99"
+            "record_data": "192.168.58.99"
         });
         let action = optional_str(&args, "action").unwrap_or("add");
         assert_eq!(action, "add");
@@ -377,7 +377,7 @@ mod tests {
             "password": "P@ssw0rd!",
             "dc_ip": "192.168.58.10",
             "record_name": "evil.contoso.local",
-            "record_data": "10.0.0.99",
+            "record_data": "192.168.58.99",
             "action": "remove"
         });
         let action = optional_str(&args, "action").unwrap_or("add");
@@ -392,7 +392,7 @@ mod tests {
             "password": "P@ssw0rd!",
             "dc_ip": "192.168.58.10",
             "record_name": "evil.contoso.local",
-            "record_data": "10.0.0.99"
+            "record_data": "192.168.58.99"
         });
         let domain = required_str(&args, "domain").unwrap();
         let username = required_str(&args, "username").unwrap();
@@ -478,7 +478,7 @@ mod tests {
             "password": "P@ssw0rd!",
             "dc_ip": "192.168.58.10",
             "record_name": "evil.contoso.local",
-            "record_data": "10.0.0.99"
+            "record_data": "192.168.58.99"
         });
         assert!(dnstool(&args).await.is_ok());
     }
@@ -492,7 +492,7 @@ mod tests {
             "password": "P@ssw0rd!",
             "dc_ip": "192.168.58.10",
             "record_name": "evil.contoso.local",
-            "record_data": "10.0.0.99",
+            "record_data": "192.168.58.99",
             "action": "remove"
         });
         assert!(dnstool(&args).await.is_ok());

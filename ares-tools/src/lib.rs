@@ -287,7 +287,7 @@ mod tests {
     fn combined_raw_does_not_filter_noise() {
         // combined_raw must NOT strip MOTD/noise — it's for structured parsers.
         // We verify that a known-noise string is preserved verbatim.
-        let motd = "Last login: Mon Apr  7 12:00:00 2025 from 192.168.1.1";
+        let motd = "Last login: Mon Apr  7 12:00:00 2025 from 192.168.58.1";
         let out = ToolOutput {
             stdout: motd.to_string(),
             stderr: String::new(),

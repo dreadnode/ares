@@ -119,7 +119,7 @@ mod tests {
         let q = mock_queue();
 
         state
-            .persist_dedup(&q, "cred_spray", "admin@10.0.0.1")
+            .persist_dedup(&q, "cred_spray", "admin@192.168.58.1")
             .await
             .unwrap();
 
@@ -129,7 +129,7 @@ mod tests {
             redis::AsyncCommands::smembers(&mut conn, &key)
                 .await
                 .unwrap();
-        assert!(members.contains("admin@10.0.0.1"));
+        assert!(members.contains("admin@192.168.58.1"));
     }
 
     #[tokio::test]
@@ -138,7 +138,7 @@ mod tests {
         let q = mock_queue();
 
         state
-            .persist_mssql_dispatched(&q, "10.0.0.5")
+            .persist_mssql_dispatched(&q, "192.168.58.5")
             .await
             .unwrap();
 
@@ -148,6 +148,6 @@ mod tests {
             redis::AsyncCommands::smembers(&mut conn, &key)
                 .await
                 .unwrap();
-        assert!(members.contains("10.0.0.5"));
+        assert!(members.contains("192.168.58.5"));
     }
 }
