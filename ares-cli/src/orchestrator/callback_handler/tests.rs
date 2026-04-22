@@ -545,3 +545,280 @@ async fn test_all_hashes_pagination_large() {
         other => panic!("Expected Continue, got: {:?}", other),
     }
 }
+
+// --- Disabled tool handler tests (dispatch.rs coverage) ---
+
+#[tokio::test]
+async fn test_record_credential_disabled() {
+    let handler = make_handler();
+    let call = ToolCall {
+        id: "dis-1".into(),
+        name: "record_credential".into(),
+        arguments: json!({"username": "admin", "password": "pass", "domain": "contoso.local"}),
+    };
+    let result = handler.handle_callback(&call).await.unwrap().unwrap();
+    match result {
+        CallbackResult::Continue(msg) => {
+            assert!(msg.contains("disabled"));
+            assert!(msg.contains("automatically extracted"));
+        }
+        other => panic!("Expected Continue, got: {:?}", other),
+    }
+}
+
+#[tokio::test]
+async fn test_record_timeline_event_disabled() {
+    let handler = make_handler();
+    let call = ToolCall {
+        id: "dis-2".into(),
+        name: "record_timeline_event".into(),
+        arguments: json!({"event": "some event"}),
+    };
+    let result = handler.handle_callback(&call).await.unwrap().unwrap();
+    match result {
+        CallbackResult::Continue(msg) => {
+            assert!(msg.contains("disabled"));
+            assert!(msg.contains("automatically generated"));
+        }
+        other => panic!("Expected Continue, got: {:?}", other),
+    }
+}
+
+#[tokio::test]
+async fn test_report_cracked_credential_disabled() {
+    let handler = make_handler();
+    let call = ToolCall {
+        id: "dis-3".into(),
+        name: "report_cracked_credential".into(),
+        arguments: json!({"hash": "aad3b:beef", "password": "cracked123"}),
+    };
+    let result = handler.handle_callback(&call).await.unwrap().unwrap();
+    match result {
+        CallbackResult::Continue(msg) => {
+            assert!(msg.contains("disabled"));
+            assert!(msg.contains("automatically extracted"));
+        }
+        other => panic!("Expected Continue, got: {:?}", other),
+    }
+}
+
+#[tokio::test]
+async fn test_list_credentials_delegates_to_get_all() {
+    let handler = make_handler();
+    {
+        let mut s = handler.state.write().await;
+        s.credentials
+            .push(make_cred("admin", "pass", "contoso.local", true));
+        s.credentials
+            .push(make_cred("user1", "pass1", "fabrikam.local", false));
+    }
+
+    let call = ToolCall {
+        id: "lc-1".into(),
+        name: "list_credentials".into(),
+        arguments: json!({}),
+    };
+    let result = handler.handle_callback(&call).await.unwrap().unwrap();
+    match result {
+        CallbackResult::Continue(msg) => {
+            let parsed: serde_json::Value = serde_json::from_str(&msg).unwrap();
+            assert_eq!(parsed["total"], 2);
+            assert!(parsed["credentials"].as_array().is_some());
+        }
+        other => panic!("Expected Continue, got: {:?}", other),
+    }
+}
+
+#[tokio::test]
+async fn test_dispatch_coercion_without_dispatcher() {
+    let handler = make_handler();
+    let call = ToolCall {
+        id: "co-1".into(),
+        name: "dispatch_coercion".into(),
+        arguments: json!({"target_ip": "192.168.58.10", "listener_ip": "192.168.58.100"}),
+    };
+    let result = handler.handle_callback(&call).await.unwrap();
+    assert!(result.is_err());
+}
+
+#[tokio::test]
+async fn test_dispatch_exploit_without_dispatcher() {
+    let handler = make_handler();
+    let call = ToolCall {
+        id: "ex-1".into(),
+        name: "dispatch_privesc_exploit".into(),
+        arguments: json!({"vuln_id": "vuln-999", "priority": 3}),
+    };
+    let result = handler.handle_callback(&call).await.unwrap();
+    assert!(result.is_err());
+}
+
+#[tokio::test]
+async fn test_get_agent_status_without_task_queue() {
+    let handler = make_handler();
+    let call = ToolCall {
+        id: "as-1".into(),
+        name: "get_agent_status".into(),
+        arguments: json!({}),
+    };
+    let result = handler.handle_callback(&call).await.unwrap();
+    // new_for_test has no task_queue, so this should error
+    assert!(result.is_err());
+}
+
+#[tokio::test]
+async fn test_hash_summary_with_mixed_types() {
+    let handler = make_handler();
+    {
+        let mut s = handler.state.write().await;
+        s.hashes.push(make_hash(
+            "admin",
+            "contoso.local",
+            "NTLM",
+            "ntlm_hash",
+            None,
+        ));
+        s.hashes.push(make_hash(
+            "admin",
+            "contoso.local",
+            "aes256",
+            "aes_hash",
+            Some("aes_key_val"),
+        ));
+        let mut cracked = make_hash("user1", "contoso.local", "NTLM", "cracked_hash", None);
+        cracked.cracked_password = Some("password123".to_string());
+        s.hashes.push(cracked);
+    }
+
+    let call = ToolCall {
+        id: "hs-1".into(),
+        name: "get_hash_summary".into(),
+        arguments: json!({}),
+    };
+    let result = handler.handle_callback(&call).await.unwrap().unwrap();
+    match result {
+        CallbackResult::Continue(msg) => {
+            let parsed: serde_json::Value = serde_json::from_str(&msg).unwrap();
+            assert_eq!(parsed["total_hashes"], 3);
+            let by_type = parsed["by_type"].as_array().unwrap();
+            assert_eq!(by_type.len(), 2); // NTLM and aes256
+        }
+        other => panic!("Expected Continue, got: {:?}", other),
+    }
+}
+
+#[tokio::test]
+async fn test_all_credentials_zero_offset_default_limit() {
+    let handler = make_handler();
+    {
+        let mut s = handler.state.write().await;
+        for i in 0..5 {
+            s.credentials.push(make_cred(
+                &format!("user{i}"),
+                "pass",
+                "contoso.local",
+                false,
+            ));
+        }
+    }
+
+    // No limit/offset in args => defaults (limit=30, offset=0)
+    let call = ToolCall {
+        id: "ac-def".into(),
+        name: "get_all_credentials".into(),
+        arguments: json!({}),
+    };
+    let result = handler.handle_callback(&call).await.unwrap().unwrap();
+    match result {
+        CallbackResult::Continue(msg) => {
+            let parsed: serde_json::Value = serde_json::from_str(&msg).unwrap();
+            assert_eq!(parsed["total"], 5);
+            assert_eq!(parsed["offset"], 0);
+            assert_eq!(parsed["limit"], 30);
+            assert_eq!(parsed["credentials"].as_array().unwrap().len(), 5);
+        }
+        other => panic!("Expected Continue, got: {:?}", other),
+    }
+}
+
+#[tokio::test]
+async fn test_all_hashes_default_params() {
+    let handler = make_handler();
+    {
+        let mut s = handler.state.write().await;
+        s.hashes.push(make_hash(
+            "admin",
+            "contoso.local",
+            "NTLM",
+            "hash_val",
+            Some("aes_key"),
+        ));
+    }
+
+    let call = ToolCall {
+        id: "ah-def".into(),
+        name: "get_all_hashes".into(),
+        arguments: json!({}),
+    };
+    let result = handler.handle_callback(&call).await.unwrap().unwrap();
+    match result {
+        CallbackResult::Continue(msg) => {
+            let parsed: serde_json::Value = serde_json::from_str(&msg).unwrap();
+            assert_eq!(parsed["total"], 1);
+            let h = &parsed["hashes"].as_array().unwrap()[0];
+            assert_eq!(h["username"], "admin");
+            assert_eq!(h["has_aes_key"], true);
+        }
+        other => panic!("Expected Continue, got: {:?}", other),
+    }
+}
+
+#[tokio::test]
+async fn test_operation_summary_empty_state() {
+    let handler = make_handler();
+    let call = ToolCall {
+        id: "os-empty".into(),
+        name: "get_operation_summary".into(),
+        arguments: json!({}),
+    };
+    let result = handler.handle_callback(&call).await.unwrap().unwrap();
+    match result {
+        CallbackResult::Continue(msg) => {
+            let parsed: serde_json::Value = serde_json::from_str(&msg).unwrap();
+            assert_eq!(parsed["credentials"]["total"], 0);
+            assert_eq!(parsed["hashes"]["total"], 0);
+            assert_eq!(parsed["has_domain_admin"], false);
+            assert_eq!(parsed["hosts"], 0);
+            assert_eq!(parsed["discovered_vulnerabilities"], 0);
+        }
+        other => panic!("Expected Continue, got: {:?}", other),
+    }
+}
+
+#[tokio::test]
+async fn test_hash_value_empty_domain_filter() {
+    let handler = make_handler();
+    {
+        let mut s = handler.state.write().await;
+        s.hashes
+            .push(make_hash("admin", "contoso.local", "NTLM", "hash_a", None));
+        s.hashes
+            .push(make_hash("admin", "fabrikam.local", "NTLM", "hash_b", None));
+    }
+
+    // Empty domain should match all domains for that user
+    let call = ToolCall {
+        id: "hv-nodom".into(),
+        name: "get_hash_value".into(),
+        arguments: json!({"username": "admin", "domain": ""}),
+    };
+    let result = handler.handle_callback(&call).await.unwrap().unwrap();
+    match result {
+        CallbackResult::Continue(msg) => {
+            let parsed: serde_json::Value = serde_json::from_str(&msg).unwrap();
+            let arr = parsed.as_array().unwrap();
+            assert_eq!(arr.len(), 2);
+        }
+        other => panic!("Expected Continue, got: {:?}", other),
+    }
+}

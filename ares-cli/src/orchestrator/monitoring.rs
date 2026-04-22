@@ -468,4 +468,172 @@ mod tests {
         let agents = r.agents.lock().await;
         assert_eq!(agents.get("a1").unwrap().role, "lateral");
     }
+
+    // --- Additional coverage tests ---
+
+    #[tokio::test]
+    async fn agent_names_empty_initially() {
+        let r = AgentRegistry::new();
+        assert!(r.agent_names().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn update_heartbeat_unknown_agent_ignored() {
+        let r = AgentRegistry::new();
+        // Updating a non-existent agent should not panic or insert
+        r.update_heartbeat("nonexistent", "busy", Some("task-1"), Utc::now())
+            .await;
+        assert!(r.agent_names().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn mark_offline_unknown_agent_ignored() {
+        let r = AgentRegistry::new();
+        // Marking a non-existent agent offline should not panic
+        r.mark_offline("nonexistent").await;
+        assert!(r.agent_names().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn stale_agents_empty_registry() {
+        let r = AgentRegistry::new();
+        assert!(r
+            .stale_agents(std::time::Duration::from_secs(60))
+            .await
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn multiple_agents_stale_detection() {
+        let r = AgentRegistry::new();
+        r.register("agent-1", "recon").await;
+        r.register("agent-2", "lateral").await;
+        r.register("agent-3", "privesc").await;
+
+        let old_ts = Utc::now() - chrono::Duration::seconds(300);
+        r.update_heartbeat("agent-1", "idle", None, old_ts).await;
+        r.update_heartbeat("agent-2", "busy", Some("task-x"), old_ts)
+            .await;
+        // agent-3 keeps fresh heartbeat
+        r.update_heartbeat("agent-3", "idle", None, Utc::now())
+            .await;
+
+        let stale = r.stale_agents(std::time::Duration::from_secs(60)).await;
+        assert_eq!(stale.len(), 2);
+        let stale_names: Vec<&str> = stale.iter().map(|a| a.name.as_str()).collect();
+        assert!(stale_names.contains(&"agent-1"));
+        assert!(stale_names.contains(&"agent-2"));
+    }
+
+    #[tokio::test]
+    async fn agent_state_fields_preserved() {
+        let r = AgentRegistry::new();
+        r.register("a1", "recon").await;
+        let now = Utc::now();
+        r.update_heartbeat("a1", "busy", Some("task-42"), now).await;
+
+        let agents = r.agents.lock().await;
+        let a = agents.get("a1").unwrap();
+        assert_eq!(a.name, "a1");
+        assert_eq!(a.role, "recon");
+        assert_eq!(a.status, "busy");
+        assert_eq!(a.current_task, Some("task-42".to_string()));
+        assert_eq!(a.last_heartbeat, now);
+    }
+
+    #[tokio::test]
+    async fn re_register_preserves_heartbeat() {
+        let r = AgentRegistry::new();
+        r.register("a1", "recon").await;
+        let ts = Utc::now();
+        r.update_heartbeat("a1", "busy", Some("t1"), ts).await;
+
+        // Re-register with new role — heartbeat should still be preserved
+        r.register("a1", "lateral").await;
+        let agents = r.agents.lock().await;
+        let a = agents.get("a1").unwrap();
+        assert_eq!(a.role, "lateral");
+        assert_eq!(a.status, "busy"); // status preserved from update
+    }
+
+    #[test]
+    fn critical_tools_not_empty() {
+        assert!(!CRITICAL_TOOLS.is_empty());
+    }
+
+    #[test]
+    fn critical_tools_have_valid_roles() {
+        let known_roles = ["recon", "credential_access", "privesc", "lateral"];
+        for &(role, tools) in CRITICAL_TOOLS {
+            assert!(
+                known_roles.contains(&role),
+                "Unknown role in CRITICAL_TOOLS: {role}"
+            );
+            assert!(!tools.is_empty(), "No tools listed for role: {role}");
+        }
+    }
+
+    #[test]
+    fn critical_tools_no_duplicates() {
+        for &(role, tools) in CRITICAL_TOOLS {
+            let mut seen = std::collections::HashSet::new();
+            for &tool in tools {
+                assert!(
+                    seen.insert(tool),
+                    "Duplicate tool '{tool}' in role '{role}'"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn critical_tools_secretsdump_in_cred_and_lateral() {
+        // secretsdump is critical for both credential_access and lateral
+        let has_cred = CRITICAL_TOOLS
+            .iter()
+            .find(|&&(r, _)| r == "credential_access")
+            .map(|&(_, tools)| tools.contains(&"impacket-secretsdump"))
+            .unwrap_or(false);
+        let has_lateral = CRITICAL_TOOLS
+            .iter()
+            .find(|&&(r, _)| r == "lateral")
+            .map(|&(_, tools)| tools.contains(&"impacket-secretsdump"))
+            .unwrap_or(false);
+        assert!(has_cred);
+        assert!(has_lateral);
+    }
+
+    #[tokio::test]
+    async fn mark_offline_then_re_heartbeat() {
+        let r = AgentRegistry::new();
+        r.register("a1", "recon").await;
+        let old_ts = Utc::now() - chrono::Duration::seconds(300);
+        r.update_heartbeat("a1", "idle", None, old_ts).await;
+        r.mark_offline("a1").await;
+
+        // Offline agent should not appear as stale
+        assert!(r
+            .stale_agents(std::time::Duration::from_secs(60))
+            .await
+            .is_empty());
+
+        // But if it heartbeats again with a fresh timestamp and new status,
+        // it should be alive again
+        r.update_heartbeat("a1", "idle", None, Utc::now()).await;
+        let agents = r.agents.lock().await;
+        assert_eq!(agents.get("a1").unwrap().status, "idle");
+    }
+
+    #[tokio::test]
+    async fn zero_timeout_makes_all_stale() {
+        let r = AgentRegistry::new();
+        r.register("a1", "recon").await;
+        r.update_heartbeat("a1", "idle", None, Utc::now()).await;
+
+        // With a zero timeout, the cutoff is "now", so any agent whose
+        // heartbeat is at or before now should be stale. Due to timing,
+        // this may or may not catch the just-registered agent, so we
+        // just verify no panic occurs.
+        let _stale = r.stale_agents(std::time::Duration::from_secs(0)).await;
+    }
 }

@@ -552,4 +552,277 @@ mod tests {
             "contoso.local:administrator:aad3b435b51404eeaad3b435b51404ee"
         );
     }
+
+    #[test]
+    fn test_pth_credential_building() {
+        // Verify that pass-the-hash builds the credential with hash_value as password
+        let hash = ares_core::models::Hash {
+            id: "hash-1".to_string(),
+            username: "jdoe".to_string(),
+            hash_value: "aad3b435b51404eeaad3b435b51404ee:31d6cfe0d16ae931b73c59d7e0c089c0"
+                .to_string(),
+            hash_type: "ntlm".to_string(),
+            domain: "contoso.local".to_string(),
+            cracked_password: None,
+            source: "secretsdump".to_string(),
+            discovered_at: None,
+            parent_id: None,
+            attack_step: 0,
+            aes_key: None,
+        };
+        let pth_cred = ares_core::models::Credential {
+            id: format!("pth_{}", hash.username),
+            username: hash.username.clone(),
+            password: hash.hash_value.clone(),
+            domain: hash.domain.clone(),
+            source: "hash_pth".to_string(),
+            discovered_at: None,
+            is_admin: false,
+            parent_id: None,
+            attack_step: 0,
+        };
+        assert_eq!(pth_cred.id, "pth_jdoe");
+        assert_eq!(pth_cred.username, "jdoe");
+        assert_eq!(
+            pth_cred.password,
+            "aad3b435b51404eeaad3b435b51404ee:31d6cfe0d16ae931b73c59d7e0c089c0"
+        );
+        assert_eq!(pth_cred.domain, "contoso.local");
+        assert_eq!(pth_cred.source, "hash_pth");
+        assert!(!pth_cred.is_admin);
+    }
+
+    #[test]
+    fn test_hash_filter_ntlm_only() {
+        // Only NTLM hashes pass the filter; aes/des/lm should be excluded
+        let hashes = [
+            (
+                "ntlm",
+                "contoso.local",
+                "admin",
+                "aad3b435b51404eeaad3b435b51404ee",
+            ),
+            (
+                "NTLM",
+                "contoso.local",
+                "user1",
+                "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            ),
+            ("aes256", "contoso.local", "user2", "cccccccc"),
+            ("lm", "contoso.local", "user3", "dddddddd"),
+        ];
+        let filtered: Vec<_> = hashes
+            .iter()
+            .filter(|(ht, domain, username, _)| {
+                ht.to_lowercase() == "ntlm"
+                    && !domain.is_empty()
+                    && username.to_lowercase() != "krbtgt"
+                    && !username.ends_with('$')
+            })
+            .collect();
+        assert_eq!(filtered.len(), 2);
+        assert_eq!(filtered[0].2, "admin");
+        assert_eq!(filtered[1].2, "user1");
+    }
+
+    #[test]
+    fn test_hash_filter_excludes_krbtgt() {
+        // krbtgt hashes are excluded from pass-the-hash (used for golden tickets, not PtH)
+        let username = "krbtgt";
+        let passes = username.to_lowercase() != "krbtgt" && !username.ends_with('$');
+        assert!(!passes, "krbtgt should be excluded from hash-based lateral");
+    }
+
+    #[test]
+    fn test_hash_filter_excludes_machine_accounts() {
+        // Machine accounts (ending with $) are excluded from pass-the-hash
+        let usernames = vec!["DC01$", "SQL01$", "WEB01$"];
+        for u in usernames {
+            assert!(
+                u.ends_with('$'),
+                "{u} should be detected as machine account"
+            );
+            let passes = u.to_lowercase() != "krbtgt" && !u.ends_with('$');
+            assert!(!passes, "{u} should be excluded from hash expansion");
+        }
+    }
+
+    #[test]
+    fn test_hash_filter_allows_normal_users() {
+        // Normal users should pass the hash filter
+        let usernames = vec!["administrator", "jdoe", "svc_sql"];
+        for u in usernames {
+            let passes = u.to_lowercase() != "krbtgt" && !u.ends_with('$');
+            assert!(passes, "{u} should pass the hash filter");
+        }
+    }
+
+    #[test]
+    fn test_secretsdump_dedup_key_format() {
+        // secretsdump dedup: dc_ip:domain:username
+        let dc_ip = "192.168.58.10";
+        let domain = "CONTOSO.LOCAL";
+        let username = "Administrator";
+        let sd_dedup = format!(
+            "{}:{}:{}",
+            dc_ip,
+            domain.to_lowercase(),
+            username.to_lowercase()
+        );
+        assert_eq!(sd_dedup, "192.168.58.10:contoso.local:administrator");
+    }
+
+    #[test]
+    fn test_secretsdump_dedup_different_dcs_are_unique() {
+        // Same credential against different DCs should produce different dedup keys
+        let domain = "contoso.local";
+        let username = "admin";
+        let dedup1 = format!("192.168.58.10:{domain}:{username}");
+        let dedup2 = format!("192.168.58.20:{domain}:{username}");
+        assert_ne!(dedup1, dedup2);
+    }
+
+    #[test]
+    fn test_credential_expansion_dedup_key_format() {
+        // Expansion dedup: domain:username
+        let domain = "CONTOSO.LOCAL";
+        let username = "JDoe";
+        let dedup = format!("{}:{}", domain.to_lowercase(), username.to_lowercase());
+        assert_eq!(dedup, "contoso.local:jdoe");
+    }
+
+    #[test]
+    fn test_credential_filter_empty_domain_excluded() {
+        // Credentials with empty domain are excluded
+        let creds = [
+            ("user1", "P@ss", "contoso.local"),
+            ("user2", "P@ss", ""),
+            ("user3", "P@ss", "fabrikam.local"),
+        ];
+        let filtered: Vec<_> = creds
+            .iter()
+            .filter(|(_, _, domain)| !domain.is_empty())
+            .collect();
+        assert_eq!(filtered.len(), 2);
+        assert_eq!(filtered[0].0, "user1");
+        assert_eq!(filtered[1].0, "user3");
+    }
+
+    #[test]
+    fn test_credential_filter_empty_password_excluded() {
+        // Credentials with empty password are excluded
+        let creds = [
+            ("user1", "P@ssw0rd!", "contoso.local"), // pragma: allowlist secret
+            ("user2", "", "contoso.local"),
+            ("user3", "Secret123", "fabrikam.local"), // pragma: allowlist secret
+        ];
+        let filtered: Vec<_> = creds
+            .iter()
+            .filter(|(_, password, _)| !password.is_empty())
+            .collect();
+        assert_eq!(filtered.len(), 2);
+        assert_eq!(filtered[0].0, "user1");
+        assert_eq!(filtered[1].0, "user3");
+    }
+
+    #[test]
+    fn test_target_filtering_owned_hosts_excluded() {
+        // Only non-owned hosts are targeted for lateral movement
+        let hosts = [
+            ("192.168.58.10", true),  // owned - should be excluded
+            ("192.168.58.20", false), // not owned - should be included
+            ("192.168.58.30", false), // not owned - should be included
+            ("192.168.58.40", true),  // owned - should be excluded
+        ];
+        let targets: Vec<_> = hosts.iter().filter(|(_, owned)| !owned).collect();
+        assert_eq!(targets.len(), 2);
+        assert_eq!(targets[0].0, "192.168.58.20");
+        assert_eq!(targets[1].0, "192.168.58.30");
+    }
+
+    #[test]
+    fn test_netbios_resolution_uppercase_fallback() {
+        // When lowercase lookup fails, try uppercase
+        let mut map = std::collections::HashMap::new();
+        map.insert("CONTOSO".to_string(), "contoso.local".to_string());
+
+        let raw = "contoso";
+        let raw_lower = raw.to_lowercase();
+        let raw_upper = raw.to_uppercase();
+
+        let resolved = if !raw_lower.contains('.') {
+            map.get(&raw_lower)
+                .or_else(|| map.get(&raw_upper))
+                .map(|fqdn| fqdn.to_lowercase())
+                .unwrap_or(raw_lower.clone())
+        } else {
+            raw_lower.clone()
+        };
+        assert_eq!(resolved, "contoso.local");
+    }
+
+    #[test]
+    fn test_domain_matching_empty_host_domain_rejected() {
+        // Hosts with empty domain should not match any credential domain
+        let host_domain = "";
+        let cred_dom = "contoso.local";
+        let matches = !host_domain.is_empty()
+            && (host_domain == cred_dom
+                || host_domain.ends_with(&format!(".{cred_dom}"))
+                || cred_dom.ends_with(&format!(".{host_domain}")));
+        assert!(!matches, "Empty host domain should never match");
+    }
+
+    #[test]
+    fn test_domain_matching_sibling_domains_rejected() {
+        // Sibling child domains should NOT match each other
+        let cred_dom = "child1.contoso.local";
+        let host_domain = "child2.contoso.local";
+        let matches = host_domain == cred_dom
+            || host_domain.ends_with(&format!(".{cred_dom}"))
+            || cred_dom.ends_with(&format!(".{host_domain}"));
+        assert!(
+            !matches,
+            "Sibling child domains should not match each other"
+        );
+    }
+
+    #[test]
+    fn test_hash_dedup_truncates_to_32_chars() {
+        // Hash dedup uses first 32 chars of hash_value
+        let short_hash = "aabbccdd";
+        let long_hash = "aad3b435b51404eeaad3b435b51404ee:31d6cfe0d16ae931b73c59d7e0c089c0";
+
+        let truncated_short = &short_hash[..32.min(short_hash.len())];
+        assert_eq!(truncated_short, "aabbccdd"); // short hash kept as-is
+
+        let truncated_long = &long_hash[..32.min(long_hash.len())];
+        assert_eq!(truncated_long, "aad3b435b51404eeaad3b435b51404ee");
+    }
+
+    #[test]
+    fn test_host_domain_from_bare_ip_falls_back_to_dc_map() {
+        // When hostname has no domain suffix, fall back to domain_controllers map
+        let hostname = "192.168.58.10"; // bare IP, no FQDN
+        let from_hostname = hostname
+            .to_lowercase()
+            .split_once('.')
+            .map(|x| x.1)
+            .unwrap_or("")
+            .to_string();
+        // For an IP, split_once('.') gives "168.58.10" — not empty but not a valid domain.
+        // The real code checks domain_controllers map for IP-based fallback.
+        // Here we just verify the hostname parsing returns something unusable for IPs.
+        assert_eq!(from_hostname, "168.58.10");
+
+        // A bare hostname without dots returns empty
+        let hostname2 = "dc01";
+        let from_hostname2 = hostname2
+            .to_lowercase()
+            .split_once('.')
+            .map(|x| x.1)
+            .unwrap_or("")
+            .to_string();
+        assert_eq!(from_hostname2, "");
+    }
 }

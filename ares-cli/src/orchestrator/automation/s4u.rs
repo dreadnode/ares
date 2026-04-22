@@ -361,3 +361,213 @@ fn has_permanent_revocation(result: &ares_core::models::TaskResult) -> bool {
 fn has_lockout_error(result: &ares_core::models::TaskResult) -> bool {
     result_matches_patterns(result, LOCKOUT_PATTERNS)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ares_core::models::TaskResult;
+    use chrono::Utc;
+    use serde_json::json;
+
+    fn make_result(result: Option<serde_json::Value>, error: Option<String>) -> TaskResult {
+        TaskResult {
+            task_id: "t-test".to_string(),
+            success: false,
+            result,
+            error,
+            completed_at: Utc::now(),
+        }
+    }
+
+    // ─── Constants ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_s4u_failure_cooldown_is_five_minutes() {
+        assert_eq!(S4U_FAILURE_COOLDOWN, Duration::from_secs(300));
+    }
+
+    #[test]
+    fn test_s4u_max_failures_value() {
+        assert_eq!(S4U_MAX_FAILURES, 6);
+    }
+
+    #[test]
+    fn test_permanent_revocation_patterns_contents() {
+        assert!(PERMANENT_REVOCATION_PATTERNS.contains(&"STATUS_ACCOUNT_DISABLED"));
+        assert!(PERMANENT_REVOCATION_PATTERNS.contains(&"KDC_ERR_KEY_EXPIRED"));
+        assert_eq!(PERMANENT_REVOCATION_PATTERNS.len(), 2);
+    }
+
+    #[test]
+    fn test_lockout_patterns_contents() {
+        assert!(LOCKOUT_PATTERNS.contains(&"KDC_ERR_CLIENT_REVOKED"));
+        assert!(LOCKOUT_PATTERNS.contains(&"STATUS_ACCOUNT_LOCKED_OUT"));
+        assert_eq!(LOCKOUT_PATTERNS.len(), 2);
+    }
+
+    // ─── result_matches_patterns ────────────────────────────────────────────
+
+    #[test]
+    fn test_result_matches_patterns_no_result_returns_false() {
+        let tr = make_result(None, None);
+        assert!(!result_matches_patterns(&tr, &["STATUS_ACCOUNT_DISABLED"]));
+    }
+
+    #[test]
+    fn test_result_matches_patterns_error_field_match() {
+        let tr = make_result(
+            Some(json!({})),
+            Some("Kerberos error: STATUS_ACCOUNT_DISABLED on dc01.contoso.local".to_string()),
+        );
+        assert!(result_matches_patterns(&tr, &["STATUS_ACCOUNT_DISABLED"]));
+    }
+
+    #[test]
+    fn test_result_matches_patterns_tool_outputs_match() {
+        let tr = make_result(
+            Some(json!({
+                "tool_outputs": [
+                    "getST.py completed",
+                    "Error from KDC: KDC_ERR_CLIENT_REVOKED for svc_sql@contoso.local"
+                ]
+            })),
+            None,
+        );
+        assert!(result_matches_patterns(&tr, &["KDC_ERR_CLIENT_REVOKED"]));
+    }
+
+    #[test]
+    fn test_result_matches_patterns_summary_match() {
+        let tr = make_result(
+            Some(json!({
+                "summary": "S4U attack failed: STATUS_ACCOUNT_LOCKED_OUT for svc_sql$@contoso.local"
+            })),
+            None,
+        );
+        assert!(result_matches_patterns(&tr, &["STATUS_ACCOUNT_LOCKED_OUT"]));
+    }
+
+    #[test]
+    fn test_result_matches_patterns_output_key_match() {
+        let tr = make_result(
+            Some(json!({
+                "output": "KDC_ERR_KEY_EXPIRED when requesting TGT for svc_web$@contoso.local"
+            })),
+            None,
+        );
+        assert!(result_matches_patterns(&tr, &["KDC_ERR_KEY_EXPIRED"]));
+    }
+
+    #[test]
+    fn test_result_matches_patterns_tool_output_key_match() {
+        let tr = make_result(
+            Some(json!({
+                "tool_output": "STATUS_ACCOUNT_DISABLED: svc_sql@contoso.local disabled in AD"
+            })),
+            None,
+        );
+        assert!(result_matches_patterns(&tr, &["STATUS_ACCOUNT_DISABLED"]));
+    }
+
+    #[test]
+    fn test_result_matches_patterns_no_match() {
+        let tr = make_result(
+            Some(json!({
+                "summary": "S4U attack succeeded, got ticket for Administrator@contoso.local",
+                "tool_outputs": ["getST.py completed successfully"],
+                "output": "Ticket written to /tmp/admin.ccache"
+            })),
+            Some("timeout after 60s".to_string()),
+        );
+        assert!(!result_matches_patterns(
+            &tr,
+            &["STATUS_ACCOUNT_DISABLED", "KDC_ERR_KEY_EXPIRED"]
+        ));
+    }
+
+    #[test]
+    fn test_result_matches_patterns_tool_outputs_non_string_ignored() {
+        // tool_outputs with non-string elements should not panic
+        let tr = make_result(
+            Some(json!({
+                "tool_outputs": [42, null, true, "KDC_ERR_CLIENT_REVOKED"]
+            })),
+            None,
+        );
+        assert!(result_matches_patterns(&tr, &["KDC_ERR_CLIENT_REVOKED"]));
+    }
+
+    // ─── has_permanent_revocation ───────────────────────────────────────────
+
+    #[test]
+    fn test_has_permanent_revocation_status_account_disabled() {
+        let tr = make_result(
+            Some(json!({
+                "summary": "STATUS_ACCOUNT_DISABLED for svc_sql$@contoso.local"
+            })),
+            None,
+        );
+        assert!(has_permanent_revocation(&tr));
+    }
+
+    #[test]
+    fn test_has_permanent_revocation_kdc_err_key_expired() {
+        let tr = make_result(Some(json!({})), Some("KDC_ERR_KEY_EXPIRED".to_string()));
+        assert!(has_permanent_revocation(&tr));
+    }
+
+    #[test]
+    fn test_has_permanent_revocation_false_for_lockout() {
+        let tr = make_result(
+            Some(json!({
+                "summary": "KDC_ERR_CLIENT_REVOKED for svc_sql@contoso.local"
+            })),
+            None,
+        );
+        assert!(!has_permanent_revocation(&tr));
+    }
+
+    // ─── has_lockout_error ──────────────────────────────────────────────────
+
+    #[test]
+    fn test_has_lockout_error_kdc_err_client_revoked() {
+        let tr = make_result(
+            Some(json!({
+                "output": "KDC_ERR_CLIENT_REVOKED when requesting TGT for svc_sql@contoso.local"
+            })),
+            None,
+        );
+        assert!(has_lockout_error(&tr));
+    }
+
+    #[test]
+    fn test_has_lockout_error_status_account_locked_out() {
+        let tr = make_result(
+            Some(json!({})),
+            Some("SMB error: STATUS_ACCOUNT_LOCKED_OUT on 192.168.58.10".to_string()),
+        );
+        assert!(has_lockout_error(&tr));
+    }
+
+    #[test]
+    fn test_has_lockout_error_false_for_permanent() {
+        let tr = make_result(
+            Some(json!({
+                "summary": "STATUS_ACCOUNT_DISABLED for svc_sql$@contoso.local"
+            })),
+            None,
+        );
+        assert!(!has_lockout_error(&tr));
+    }
+
+    #[test]
+    fn test_has_lockout_error_false_for_success() {
+        let tr = make_result(
+            Some(json!({
+                "summary": "S4U attack succeeded, ticket for Administrator@contoso.local"
+            })),
+            None,
+        );
+        assert!(!has_lockout_error(&tr));
+    }
+}

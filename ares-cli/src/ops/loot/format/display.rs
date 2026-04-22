@@ -703,3 +703,510 @@ fn mitre_technique_name(id: &str) -> &'static str {
         _ => "",
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    // -----------------------------------------------------------------------
+    // Helper: build a minimal SharedRedTeamState for testing
+    // -----------------------------------------------------------------------
+
+    fn empty_state() -> SharedRedTeamState {
+        SharedRedTeamState::new("op-test-001".to_string())
+    }
+
+    fn make_hash(username: &str, domain: &str, hash_type: &str) -> Hash {
+        Hash {
+            id: "h-1".to_string(),
+            username: username.to_string(),
+            hash_value: "aad3b435b51404eeaad3b435b51404ee".to_string(),
+            hash_type: hash_type.to_string(),
+            domain: domain.to_string(),
+            cracked_password: None,
+            source: String::new(),
+            discovered_at: None,
+            parent_id: None,
+            attack_step: 0,
+            aes_key: None,
+        }
+    }
+
+    fn make_credential(username: &str, domain: &str, is_admin: bool) -> Credential {
+        Credential {
+            id: "c-1".to_string(),
+            username: username.to_string(),
+            password: "P@ssw0rd!".to_string(), // pragma: allowlist secret
+            domain: domain.to_string(),
+            source: String::new(),
+            discovered_at: None,
+            is_admin,
+            parent_id: None,
+            attack_step: 0,
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // capitalize
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_capitalize_normal() {
+        assert_eq!(capitalize("hostname"), "Hostname");
+    }
+
+    #[test]
+    fn test_capitalize_already_upper() {
+        assert_eq!(capitalize("Domain"), "Domain");
+    }
+
+    #[test]
+    fn test_capitalize_empty() {
+        assert_eq!(capitalize(""), "");
+    }
+
+    #[test]
+    fn test_capitalize_single_char() {
+        assert_eq!(capitalize("a"), "A");
+    }
+
+    // -----------------------------------------------------------------------
+    // format_vuln_details
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_format_vuln_details_empty() {
+        let details = HashMap::new();
+        assert_eq!(format_vuln_details(&details), "");
+    }
+
+    #[test]
+    fn test_format_vuln_details_priority_keys_order() {
+        let mut details = HashMap::new();
+        details.insert("domain".to_string(), json!("contoso.local"));
+        details.insert("hostname".to_string(), json!("dc01.contoso.local"));
+        details.insert("account_name".to_string(), json!("svc_sql"));
+
+        let result = format_vuln_details(&details);
+        // Priority keys should appear in the order defined: hostname, account_name, domain
+        let hostname_pos = result.find("Hostname:").unwrap();
+        let account_pos = result.find("Account_name:").unwrap();
+        let domain_pos = result.find("Domain:").unwrap();
+        assert!(hostname_pos < account_pos);
+        assert!(account_pos < domain_pos);
+    }
+
+    #[test]
+    fn test_format_vuln_details_skips_null_and_empty() {
+        let mut details = HashMap::new();
+        details.insert("hostname".to_string(), json!("dc01.contoso.local"));
+        details.insert("note".to_string(), json!(null));
+        details.insert("type".to_string(), json!(""));
+
+        let result = format_vuln_details(&details);
+        assert!(result.contains("Hostname: dc01.contoso.local"));
+        assert!(!result.contains("Note:"));
+        assert!(!result.contains("Type:"));
+    }
+
+    #[test]
+    fn test_format_vuln_details_non_string_values() {
+        let mut details = HashMap::new();
+        details.insert("hostname".to_string(), json!(42));
+
+        let result = format_vuln_details(&details);
+        assert!(result.contains("Hostname: 42"));
+    }
+
+    #[test]
+    fn test_format_vuln_details_remaining_keys_sorted() {
+        let mut details = HashMap::new();
+        details.insert("zebra".to_string(), json!("z"));
+        details.insert("alpha".to_string(), json!("a"));
+
+        let result = format_vuln_details(&details);
+        let alpha_pos = result.find("Alpha:").unwrap();
+        let zebra_pos = result.find("Zebra:").unwrap();
+        assert!(alpha_pos < zebra_pos);
+    }
+
+    // -----------------------------------------------------------------------
+    // format_timeline_timestamp
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_format_timeline_timestamp_rfc3339() {
+        let result = format_timeline_timestamp("2026-04-20T14:30:00Z");
+        assert_eq!(result, "2026-04-20 14:30:00");
+    }
+
+    #[test]
+    fn test_format_timeline_timestamp_rfc3339_with_offset() {
+        let result = format_timeline_timestamp("2026-04-20T14:30:00+00:00");
+        assert_eq!(result, "2026-04-20 14:30:00");
+    }
+
+    #[test]
+    fn test_format_timeline_timestamp_naive_with_fractional() {
+        let result = format_timeline_timestamp("2026-04-20T14:30:00.123456");
+        assert_eq!(result, "2026-04-20 14:30:00");
+    }
+
+    #[test]
+    fn test_format_timeline_timestamp_unparseable_short() {
+        let result = format_timeline_timestamp("unknown");
+        assert_eq!(result, "unknown");
+    }
+
+    #[test]
+    fn test_format_timeline_timestamp_unparseable_long() {
+        let long = "this-is-a-very-long-timestamp-value-that-exceeds-23-chars";
+        let result = format_timeline_timestamp(long);
+        assert_eq!(result.len(), 23);
+        assert_eq!(result, &long[..23]);
+    }
+
+    // -----------------------------------------------------------------------
+    // extract_mitre_from_event
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_extract_mitre_from_event_array() {
+        let event = json!({
+            "mitre_techniques": ["T1003", "T1558.001"]
+        });
+        let result = extract_mitre_from_event(&event);
+        assert_eq!(result, "T1003, T1558.001");
+    }
+
+    #[test]
+    fn test_extract_mitre_from_event_string() {
+        let event = json!({
+            "mitre_techniques": "T1003.006"
+        });
+        let result = extract_mitre_from_event(&event);
+        assert_eq!(result, "T1003.006");
+    }
+
+    #[test]
+    fn test_extract_mitre_from_event_missing() {
+        let event = json!({
+            "description": "some event"
+        });
+        let result = extract_mitre_from_event(&event);
+        assert_eq!(result, "");
+    }
+
+    #[test]
+    fn test_extract_mitre_from_event_empty_array() {
+        let event = json!({
+            "mitre_techniques": []
+        });
+        let result = extract_mitre_from_event(&event);
+        assert_eq!(result, "");
+    }
+
+    // -----------------------------------------------------------------------
+    // mitre_technique_name
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_mitre_technique_name_known() {
+        assert_eq!(mitre_technique_name("T1003"), "OS Credential Dumping");
+        assert_eq!(mitre_technique_name("T1558.001"), "Golden Ticket");
+        assert_eq!(mitre_technique_name("T1003.006"), "DCSync");
+        assert_eq!(mitre_technique_name("T1550.002"), "Pass the Hash");
+    }
+
+    #[test]
+    fn test_mitre_technique_name_unknown() {
+        assert_eq!(mitre_technique_name("T9999"), "");
+        assert_eq!(mitre_technique_name(""), "");
+    }
+
+    // -----------------------------------------------------------------------
+    // resolve_domain_fqdn
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_resolve_domain_fqdn_already_fqdn() {
+        let map = HashMap::new();
+        assert_eq!(resolve_domain_fqdn("contoso.local", &map), "contoso.local");
+    }
+
+    #[test]
+    fn test_resolve_domain_fqdn_trailing_dot() {
+        let map = HashMap::new();
+        assert_eq!(resolve_domain_fqdn("contoso.local.", &map), "contoso.local");
+    }
+
+    #[test]
+    fn test_resolve_domain_fqdn_netbios_lower_lookup() {
+        let mut map = HashMap::new();
+        map.insert("contoso".to_string(), "contoso.local".to_string());
+        assert_eq!(resolve_domain_fqdn("contoso", &map), "contoso.local");
+    }
+
+    #[test]
+    fn test_resolve_domain_fqdn_netbios_upper_lookup() {
+        let mut map = HashMap::new();
+        map.insert("CONTOSO".to_string(), "contoso.local".to_string());
+        assert_eq!(resolve_domain_fqdn("CONTOSO", &map), "contoso.local");
+    }
+
+    #[test]
+    fn test_resolve_domain_fqdn_empty() {
+        let map = HashMap::new();
+        assert_eq!(resolve_domain_fqdn("", &map), "");
+    }
+
+    #[test]
+    fn test_resolve_domain_fqdn_unresolvable_netbios() {
+        let map = HashMap::new();
+        // No match in map, returns as lowercase
+        assert_eq!(resolve_domain_fqdn("CONTOSO", &map), "contoso");
+    }
+
+    #[test]
+    fn test_resolve_domain_fqdn_case_normalization() {
+        let map = HashMap::new();
+        assert_eq!(resolve_domain_fqdn("CONTOSO.LOCAL", &map), "contoso.local");
+    }
+
+    // -----------------------------------------------------------------------
+    // build_domain_achievements
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_build_domain_achievements_empty() {
+        let state = empty_state();
+        let achievements = build_domain_achievements(&state, &[], &[]);
+        assert!(achievements.is_empty());
+    }
+
+    #[test]
+    fn test_build_domain_achievements_krbtgt_hash() {
+        let state = empty_state();
+        let hashes = vec![make_hash("krbtgt", "contoso.local", "ntlm")];
+
+        let achievements = build_domain_achievements(&state, &hashes, &[]);
+        let contoso = achievements.get("contoso.local").unwrap();
+        assert!(contoso.has_da);
+        assert!(!contoso.has_golden_ticket);
+        assert_eq!(contoso.krbtgt_hash_types, vec!["ntlm"]);
+    }
+
+    #[test]
+    fn test_build_domain_achievements_krbtgt_multiple_hash_types() {
+        let state = empty_state();
+        let hashes = vec![
+            make_hash("krbtgt", "contoso.local", "ntlm"),
+            make_hash("krbtgt", "contoso.local", "aes256"),
+        ];
+
+        let achievements = build_domain_achievements(&state, &hashes, &[]);
+        let contoso = achievements.get("contoso.local").unwrap();
+        assert!(contoso.has_da);
+        assert_eq!(contoso.krbtgt_hash_types.len(), 2);
+        assert!(contoso.krbtgt_hash_types.contains(&"ntlm".to_string()));
+        assert!(contoso.krbtgt_hash_types.contains(&"aes256".to_string()));
+    }
+
+    #[test]
+    fn test_build_domain_achievements_administrator_hash() {
+        let state = empty_state();
+        let hashes = vec![make_hash("Administrator", "contoso.local", "ntlm")];
+
+        let achievements = build_domain_achievements(&state, &hashes, &[]);
+        let contoso = achievements.get("contoso.local").unwrap();
+        assert!(contoso.has_da);
+        assert!(contoso.admin_users.contains(&"administrator".to_string()));
+    }
+
+    #[test]
+    fn test_build_domain_achievements_admin_credential() {
+        let state = empty_state();
+        let credentials = vec![make_credential("dadmin", "contoso.local", true)];
+
+        let achievements = build_domain_achievements(&state, &[], &credentials);
+        let contoso = achievements.get("contoso.local").unwrap();
+        assert!(!contoso.has_da); // admin cred alone does not set has_da
+        assert!(contoso.admin_users.contains(&"dadmin".to_string()));
+    }
+
+    #[test]
+    fn test_build_domain_achievements_golden_ticket_vuln() {
+        let mut state = empty_state();
+        let mut details = HashMap::new();
+        details.insert("domain".to_string(), json!("contoso.local"));
+        state.discovered_vulnerabilities.insert(
+            "gt-contoso".to_string(),
+            VulnerabilityInfo {
+                vuln_id: "gt-contoso".to_string(),
+                vuln_type: "golden_ticket".to_string(),
+                target: "192.168.58.10".to_string(),
+                discovered_by: "agent-1".to_string(),
+                discovered_at: chrono::Utc::now(),
+                details,
+                recommended_agent: String::new(),
+                priority: 1,
+            },
+        );
+
+        let achievements = build_domain_achievements(&state, &[], &[]);
+        let contoso = achievements.get("contoso.local").unwrap();
+        assert!(contoso.has_golden_ticket);
+    }
+
+    #[test]
+    fn test_build_domain_achievements_multi_domain() {
+        let mut state = empty_state();
+        state
+            .netbios_to_fqdn
+            .insert("fabrikam".to_string(), "fabrikam.local".to_string());
+
+        let hashes = vec![
+            make_hash("krbtgt", "contoso.local", "ntlm"),
+            make_hash("Administrator", "fabrikam.local", "ntlm"),
+        ];
+        let credentials = vec![make_credential("svc_admin", "fabrikam.local", true)];
+
+        let achievements = build_domain_achievements(&state, &hashes, &credentials);
+        assert!(achievements.contains_key("contoso.local"));
+        assert!(achievements.contains_key("fabrikam.local"));
+
+        let contoso = achievements.get("contoso.local").unwrap();
+        assert!(contoso.has_da);
+
+        let fabrikam = achievements.get("fabrikam.local").unwrap();
+        assert!(fabrikam.has_da);
+        assert!(fabrikam.admin_users.contains(&"administrator".to_string()));
+        assert!(fabrikam.admin_users.contains(&"svc_admin".to_string()));
+    }
+
+    #[test]
+    fn test_build_domain_achievements_netbios_resolution() {
+        let mut state = empty_state();
+        state
+            .netbios_to_fqdn
+            .insert("contoso".to_string(), "contoso.local".to_string());
+
+        // Hash domain is NetBIOS, should resolve via the map
+        let hashes = vec![make_hash("krbtgt", "contoso", "ntlm")];
+
+        let achievements = build_domain_achievements(&state, &hashes, &[]);
+        assert!(achievements.contains_key("contoso.local"));
+        let contoso = achievements.get("contoso.local").unwrap();
+        assert!(contoso.has_da);
+    }
+
+    #[test]
+    fn test_build_domain_achievements_empty_domain_skipped() {
+        let state = empty_state();
+        let hashes = vec![make_hash("krbtgt", "", "ntlm")];
+
+        let achievements = build_domain_achievements(&state, &hashes, &[]);
+        assert!(achievements.is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // Domain/forest structure computation (inline in print_loot_human)
+    // -----------------------------------------------------------------------
+
+    /// Extract the domain/forest structure logic into a helper we can test.
+    fn compute_forest_structure(
+        domains_input: &[String],
+    ) -> (Vec<String>, Vec<String>, HashMap<String, String>) {
+        let mut domains: Vec<String> = domains_input
+            .iter()
+            .map(|d| d.trim().trim_end_matches('.').to_lowercase())
+            .filter(|d| !d.is_empty())
+            .collect();
+        domains.sort();
+        domains.dedup();
+
+        let mut forest_roots: Vec<String> = Vec::new();
+        let mut child_domains: HashMap<String, String> = HashMap::new();
+        for domain in &domains {
+            let parts: Vec<&str> = domain.split('.').collect();
+            if parts.len() >= 3 {
+                let parent = parts[1..].join(".");
+                if domains.contains(&parent) {
+                    child_domains.insert(domain.clone(), parent);
+                } else {
+                    forest_roots.push(domain.clone());
+                }
+            } else {
+                forest_roots.push(domain.clone());
+            }
+        }
+        forest_roots.sort();
+        (domains, forest_roots, child_domains)
+    }
+
+    #[test]
+    fn test_forest_structure_single_domain() {
+        let input = vec!["contoso.local".to_string()];
+        let (domains, roots, children) = compute_forest_structure(&input);
+        assert_eq!(domains, vec!["contoso.local"]);
+        assert_eq!(roots, vec!["contoso.local"]);
+        assert!(children.is_empty());
+    }
+
+    #[test]
+    fn test_forest_structure_parent_child() {
+        let input = vec![
+            "contoso.local".to_string(),
+            "child.contoso.local".to_string(),
+        ];
+        let (_domains, roots, children) = compute_forest_structure(&input);
+        assert_eq!(roots, vec!["contoso.local"]);
+        assert_eq!(children.len(), 1);
+        assert_eq!(
+            children.get("child.contoso.local").unwrap(),
+            "contoso.local"
+        );
+    }
+
+    #[test]
+    fn test_forest_structure_two_forests() {
+        let input = vec!["contoso.local".to_string(), "fabrikam.local".to_string()];
+        let (_domains, roots, children) = compute_forest_structure(&input);
+        assert_eq!(roots, vec!["contoso.local", "fabrikam.local"]);
+        assert!(children.is_empty());
+    }
+
+    #[test]
+    fn test_forest_structure_dedup_and_normalization() {
+        let input = vec![
+            "CONTOSO.LOCAL.".to_string(),
+            "contoso.local".to_string(),
+            "  contoso.local  ".to_string(),
+        ];
+        let (domains, roots, _children) = compute_forest_structure(&input);
+        assert_eq!(domains, vec!["contoso.local"]);
+        assert_eq!(roots, vec!["contoso.local"]);
+    }
+
+    #[test]
+    fn test_forest_structure_empty_strings_filtered() {
+        let input = vec![
+            "".to_string(),
+            "  ".to_string(),
+            "contoso.local".to_string(),
+        ];
+        let (domains, roots, _children) = compute_forest_structure(&input);
+        assert_eq!(domains, vec!["contoso.local"]);
+        assert_eq!(roots, vec!["contoso.local"]);
+    }
+
+    #[test]
+    fn test_forest_structure_orphan_subdomain() {
+        // subdomain without its parent in the list: treated as a forest root
+        let input = vec!["sub.contoso.local".to_string()];
+        let (_domains, roots, children) = compute_forest_structure(&input);
+        assert_eq!(roots, vec!["sub.contoso.local"]);
+        assert!(children.is_empty());
+    }
+}

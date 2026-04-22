@@ -332,6 +332,10 @@ pub async fn dacl_edit(args: &Value) -> Result<ToolOutput> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::args::{optional_bool, optional_str, required_str};
+    use serde_json::json;
+
+    // ── domain_to_base_dn ──────────────────────────────────────────────
 
     #[test]
     fn test_domain_to_base_dn_simple() {
@@ -352,10 +356,488 @@ mod tests {
     }
 
     #[test]
+    fn test_domain_to_base_dn_fabrikam() {
+        assert_eq!(domain_to_base_dn("fabrikam.local"), "DC=fabrikam,DC=local");
+    }
+
+    #[test]
+    fn test_domain_to_base_dn_deep_nesting() {
+        assert_eq!(
+            domain_to_base_dn("sub.child.contoso.local"),
+            "DC=sub,DC=child,DC=contoso,DC=local"
+        );
+    }
+
+    #[test]
     fn test_adminsd_holder_dn_format() {
         let domain = "contoso.local";
         let base_dn = domain_to_base_dn(domain);
         let adminsd_dn = format!("CN=AdminSDHolder,CN=System,{base_dn}");
         assert_eq!(adminsd_dn, "CN=AdminSDHolder,CN=System,DC=contoso,DC=local");
+    }
+
+    #[test]
+    fn test_adminsd_holder_dn_fabrikam() {
+        let base_dn = domain_to_base_dn("fabrikam.local");
+        let adminsd_dn = format!("CN=AdminSDHolder,CN=System,{base_dn}");
+        assert_eq!(
+            adminsd_dn,
+            "CN=AdminSDHolder,CN=System,DC=fabrikam,DC=local"
+        );
+    }
+
+    // ── bloodyad_add_group_member arg validation ───────────────────────
+
+    #[test]
+    fn test_bloodyad_add_group_member_missing_domain() {
+        let args = json!({
+            "username": "admin",
+            "password": "P@ssw0rd!",
+            "dc_ip": "192.168.58.10",
+            "group": "Domain Admins",
+            "target_user": "jsmith"
+        });
+        assert!(required_str(&args, "domain").is_err());
+    }
+
+    #[test]
+    fn test_bloodyad_add_group_member_all_args_parse() {
+        let args = json!({
+            "domain": "contoso.local",
+            "username": "admin",
+            "password": "P@ssw0rd!",
+            "dc_ip": "192.168.58.10",
+            "group": "Domain Admins",
+            "target_user": "jsmith"
+        });
+        assert_eq!(required_str(&args, "domain").unwrap(), "contoso.local");
+        assert_eq!(required_str(&args, "username").unwrap(), "admin");
+        assert_eq!(required_str(&args, "password").unwrap(), "P@ssw0rd!");
+        assert_eq!(required_str(&args, "dc_ip").unwrap(), "192.168.58.10");
+        assert_eq!(required_str(&args, "group").unwrap(), "Domain Admins");
+        assert_eq!(required_str(&args, "target_user").unwrap(), "jsmith");
+    }
+
+    // ── bloodyad_set_password arg validation ───────────────────────────
+
+    #[test]
+    fn test_bloodyad_set_password_missing_new_password() {
+        let args = json!({
+            "domain": "contoso.local",
+            "username": "admin",
+            "password": "P@ssw0rd!",
+            "dc_ip": "192.168.58.10",
+            "target_user": "victim"
+        });
+        assert!(required_str(&args, "new_password").is_err());
+    }
+
+    #[test]
+    fn test_bloodyad_set_password_all_args_parse() {
+        let args = json!({
+            "domain": "contoso.local",
+            "username": "admin",
+            "password": "P@ssw0rd!",
+            "dc_ip": "192.168.58.10",
+            "target_user": "victim",
+            "new_password": "NewP@ss123!"
+        });
+        assert_eq!(required_str(&args, "target_user").unwrap(), "victim");
+        assert_eq!(required_str(&args, "new_password").unwrap(), "NewP@ss123!");
+    }
+
+    // ── bloodyad_add_genericall arg validation ─────────────────────────
+
+    #[test]
+    fn test_bloodyad_genericall_missing_target_dn() {
+        let args = json!({
+            "domain": "contoso.local",
+            "username": "admin",
+            "password": "P@ssw0rd!",
+            "dc_ip": "192.168.58.10",
+            "principal": "jsmith"
+        });
+        assert!(required_str(&args, "target_dn").is_err());
+    }
+
+    #[test]
+    fn test_bloodyad_genericall_all_args() {
+        let args = json!({
+            "domain": "contoso.local",
+            "username": "admin",
+            "password": "P@ssw0rd!",
+            "dc_ip": "192.168.58.10",
+            "target_dn": "CN=Users,DC=contoso,DC=local",
+            "principal": "jsmith"
+        });
+        assert_eq!(
+            required_str(&args, "target_dn").unwrap(),
+            "CN=Users,DC=contoso,DC=local"
+        );
+        assert_eq!(required_str(&args, "principal").unwrap(), "jsmith");
+    }
+
+    // ── adminsd_holder_add_ace arg validation ──────────────────────────
+
+    #[test]
+    fn test_adminsd_holder_right_default() {
+        let args = json!({
+            "domain": "contoso.local",
+            "username": "admin",
+            "password": "P@ssw0rd!",
+            "dc_ip": "192.168.58.10",
+            "principal": "jsmith"
+        });
+        let right = optional_str(&args, "right").unwrap_or("FullControl");
+        assert_eq!(right, "FullControl");
+    }
+
+    #[test]
+    fn test_adminsd_holder_custom_right() {
+        let args = json!({
+            "domain": "contoso.local",
+            "username": "admin",
+            "password": "P@ssw0rd!",
+            "dc_ip": "192.168.58.10",
+            "principal": "jsmith",
+            "right": "WriteProperty"
+        });
+        let right = optional_str(&args, "right").unwrap_or("FullControl");
+        assert_eq!(right, "WriteProperty");
+    }
+
+    #[test]
+    fn test_adminsd_holder_dn_construction() {
+        let domain = "contoso.local";
+        let base_dn = domain_to_base_dn(domain);
+        let adminsd_dn = format!("CN=AdminSDHolder,CN=System,{base_dn}");
+        assert!(adminsd_dn.starts_with("CN=AdminSDHolder,CN=System,DC="));
+        assert!(adminsd_dn.ends_with("DC=local"));
+    }
+
+    // ── gmsa_read_password arg validation ──────────────────────────────
+
+    #[test]
+    fn test_gmsa_read_password_missing_account() {
+        let args = json!({
+            "domain": "contoso.local",
+            "username": "admin",
+            "password": "P@ssw0rd!",
+            "dc_ip": "192.168.58.10"
+        });
+        assert!(required_str(&args, "gmsa_account").is_err());
+    }
+
+    #[test]
+    fn test_gmsa_read_password_args() {
+        let args = json!({
+            "domain": "contoso.local",
+            "username": "admin",
+            "password": "P@ssw0rd!",
+            "dc_ip": "192.168.58.10",
+            "gmsa_account": "svc_web$"
+        });
+        assert_eq!(required_str(&args, "gmsa_account").unwrap(), "svc_web$");
+    }
+
+    // ── pywhisker arg validation ───────────────────────────────────────
+
+    #[test]
+    fn test_pywhisker_default_action() {
+        let args = json!({
+            "domain": "contoso.local",
+            "username": "admin",
+            "password": "P@ssw0rd!",
+            "dc_ip": "192.168.58.10",
+            "target_samaccountname": "dc01$"
+        });
+        let action = optional_str(&args, "action").unwrap_or("list");
+        assert_eq!(action, "list");
+    }
+
+    #[test]
+    fn test_pywhisker_custom_action() {
+        let args = json!({
+            "domain": "contoso.local",
+            "username": "admin",
+            "password": "P@ssw0rd!",
+            "dc_ip": "192.168.58.10",
+            "target_samaccountname": "dc01$",
+            "action": "add"
+        });
+        let action = optional_str(&args, "action").unwrap_or("list");
+        assert_eq!(action, "add");
+    }
+
+    #[test]
+    fn test_pywhisker_missing_target_sam() {
+        let args = json!({
+            "domain": "contoso.local",
+            "username": "admin",
+            "password": "P@ssw0rd!",
+            "dc_ip": "192.168.58.10"
+        });
+        assert!(required_str(&args, "target_samaccountname").is_err());
+    }
+
+    // ── targeted_kerberoast arg validation ─────────────────────────────
+
+    #[test]
+    fn test_targeted_kerberoast_missing_target_user() {
+        let args = json!({
+            "domain": "contoso.local",
+            "username": "admin",
+            "password": "P@ssw0rd!",
+            "dc_ip": "192.168.58.10"
+        });
+        assert!(required_str(&args, "target_user").is_err());
+    }
+
+    #[test]
+    fn test_targeted_kerberoast_args() {
+        let args = json!({
+            "domain": "contoso.local",
+            "username": "admin",
+            "password": "P@ssw0rd!",
+            "dc_ip": "192.168.58.10",
+            "target_user": "svc_sql"
+        });
+        assert_eq!(required_str(&args, "target_user").unwrap(), "svc_sql");
+    }
+
+    // ── sharpgpoabuse arg validation ───────────────────────────────────
+
+    #[test]
+    fn test_sharpgpoabuse_default_action() {
+        let args = json!({
+            "gpo_name": "Default Domain Policy",
+            "domain": "contoso.local",
+            "username": "admin",
+            "password": "P@ssw0rd!",
+            "dc_ip": "192.168.58.10"
+        });
+        let action = optional_str(&args, "action").unwrap_or("AddLocalAdmin");
+        assert_eq!(action, "AddLocalAdmin");
+        let action_flag = format!("--{action}");
+        assert_eq!(action_flag, "--AddLocalAdmin");
+    }
+
+    #[test]
+    fn test_sharpgpoabuse_user_to_add_default_fallback() {
+        let args = json!({
+            "gpo_name": "Default Domain Policy",
+            "domain": "contoso.local",
+            "username": "admin",
+            "password": "P@ssw0rd!",
+            "dc_ip": "192.168.58.10"
+        });
+        let username = required_str(&args, "username").unwrap();
+        let user_to_add = optional_str(&args, "user_to_add").unwrap_or(username);
+        assert_eq!(user_to_add, "admin");
+    }
+
+    #[test]
+    fn test_sharpgpoabuse_explicit_user_to_add() {
+        let args = json!({
+            "gpo_name": "Default Domain Policy",
+            "domain": "contoso.local",
+            "username": "admin",
+            "password": "P@ssw0rd!",
+            "dc_ip": "192.168.58.10",
+            "user_to_add": "jsmith"
+        });
+        let username = required_str(&args, "username").unwrap();
+        let user_to_add = optional_str(&args, "user_to_add").unwrap_or(username);
+        assert_eq!(user_to_add, "jsmith");
+    }
+
+    #[test]
+    fn test_sharpgpoabuse_computer_target_optional() {
+        let args = json!({
+            "gpo_name": "Default Domain Policy",
+            "domain": "contoso.local",
+            "username": "admin",
+            "password": "P@ssw0rd!",
+            "dc_ip": "192.168.58.10",
+            "computer_target": "ws01.contoso.local"
+        });
+        assert_eq!(
+            optional_str(&args, "computer_target"),
+            Some("ws01.contoso.local")
+        );
+    }
+
+    #[test]
+    fn test_sharpgpoabuse_computer_target_absent() {
+        let args = json!({
+            "gpo_name": "Default Domain Policy",
+            "domain": "contoso.local",
+            "username": "admin",
+            "password": "P@ssw0rd!",
+            "dc_ip": "192.168.58.10"
+        });
+        assert!(optional_str(&args, "computer_target").is_none());
+    }
+
+    // ── pygpoabuse_immediate_task arg validation ───────────────────────
+
+    #[test]
+    fn test_pygpoabuse_default_taskname() {
+        let args = json!({
+            "domain": "contoso.local",
+            "username": "admin",
+            "password": "P@ssw0rd!",
+            "gpo_id": "{6AC1786C-016F-11D2-945F-00C04fB984F9}",
+            "command": "net user backdoor P@ssw0rd! /add",
+            "dc_ip": "192.168.58.10"
+        });
+        let task_name = optional_str(&args, "task_name").unwrap_or("WindowsUpdate");
+        assert_eq!(task_name, "WindowsUpdate");
+    }
+
+    #[test]
+    fn test_pygpoabuse_default_force() {
+        let args = json!({
+            "domain": "contoso.local",
+            "username": "admin",
+            "password": "P@ssw0rd!",
+            "gpo_id": "{6AC1786C-016F-11D2-945F-00C04fB984F9}",
+            "command": "whoami",
+            "dc_ip": "192.168.58.10"
+        });
+        let force = optional_bool(&args, "force").unwrap_or(true);
+        assert!(force);
+    }
+
+    #[test]
+    fn test_pygpoabuse_force_false() {
+        let args = json!({
+            "domain": "contoso.local",
+            "username": "admin",
+            "password": "P@ssw0rd!",
+            "gpo_id": "{6AC1786C-016F-11D2-945F-00C04fB984F9}",
+            "command": "whoami",
+            "dc_ip": "192.168.58.10",
+            "force": false
+        });
+        let force = optional_bool(&args, "force").unwrap_or(true);
+        assert!(!force);
+    }
+
+    #[test]
+    fn test_pygpoabuse_missing_gpo_id() {
+        let args = json!({
+            "domain": "contoso.local",
+            "username": "admin",
+            "password": "P@ssw0rd!",
+            "command": "whoami",
+            "dc_ip": "192.168.58.10"
+        });
+        assert!(required_str(&args, "gpo_id").is_err());
+    }
+
+    // ── dacl_edit arg validation ───────────────────────────────────────
+
+    #[test]
+    fn test_dacl_edit_default_action() {
+        let args = json!({
+            "domain": "contoso.local",
+            "username": "admin",
+            "password": "P@ssw0rd!",
+            "dc_ip": "192.168.58.10",
+            "principal": "jsmith",
+            "rights": "FullControl",
+            "target_dn": "CN=Users,DC=contoso,DC=local"
+        });
+        let action = optional_str(&args, "action").unwrap_or("write");
+        assert_eq!(action, "write");
+    }
+
+    #[test]
+    fn test_dacl_edit_custom_action() {
+        let args = json!({
+            "domain": "contoso.local",
+            "username": "admin",
+            "password": "P@ssw0rd!",
+            "dc_ip": "192.168.58.10",
+            "principal": "jsmith",
+            "rights": "FullControl",
+            "target_dn": "CN=Users,DC=contoso,DC=local",
+            "action": "restore"
+        });
+        let action = optional_str(&args, "action").unwrap_or("write");
+        assert_eq!(action, "restore");
+    }
+
+    #[test]
+    fn test_dacl_edit_missing_rights() {
+        let args = json!({
+            "domain": "contoso.local",
+            "username": "admin",
+            "password": "P@ssw0rd!",
+            "dc_ip": "192.168.58.10",
+            "principal": "jsmith",
+            "target_dn": "CN=Users,DC=contoso,DC=local"
+        });
+        assert!(required_str(&args, "rights").is_err());
+    }
+
+    #[test]
+    fn test_dacl_edit_missing_principal() {
+        let args = json!({
+            "domain": "contoso.local",
+            "username": "admin",
+            "password": "P@ssw0rd!",
+            "dc_ip": "192.168.58.10",
+            "rights": "FullControl",
+            "target_dn": "CN=Users,DC=contoso,DC=local"
+        });
+        assert!(required_str(&args, "principal").is_err());
+    }
+
+    // ── credential helper integration ──────────────────────────────────
+
+    #[test]
+    fn test_bloodyad_creds_format() {
+        let creds =
+            credentials::bloodyad_creds("contoso.local", "admin", "P@ssw0rd!", "192.168.58.10");
+        assert_eq!(
+            creds,
+            vec![
+                "-d",
+                "contoso.local",
+                "-u",
+                "admin",
+                "-p",
+                "P@ssw0rd!",
+                "--host",
+                "192.168.58.10"
+            ]
+        );
+    }
+
+    #[test]
+    fn test_impacket_target_with_domain_and_password() {
+        let target = credentials::impacket_target(
+            Some("contoso.local"),
+            "admin",
+            Some("P@ssw0rd!"),
+            "contoso.local",
+        );
+        assert_eq!(target, "contoso.local/admin:P@ssw0rd!@contoso.local");
+    }
+
+    #[test]
+    fn test_impacket_target_without_password() {
+        let target =
+            credentials::impacket_target(Some("contoso.local"), "admin", None, "contoso.local");
+        assert_eq!(target, "contoso.local/admin@contoso.local");
+    }
+
+    #[test]
+    fn test_impacket_target_without_domain() {
+        let target =
+            credentials::impacket_target(None, "admin", Some("P@ssw0rd!"), "192.168.58.10");
+        assert_eq!(target, "admin:P@ssw0rd!@192.168.58.10");
     }
 }

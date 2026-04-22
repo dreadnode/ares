@@ -392,4 +392,150 @@ mod tests {
         assert_eq!(t.task_type, t2.task_type);
         assert!((t.enqueue_time - t2.enqueue_time).abs() < f64::EPSILON);
     }
+
+    // --- Additional coverage tests ---
+
+    #[test]
+    fn score_zero_priority() {
+        let t = make_task(0, 1000.0);
+        // priority 0 => score is purely time-based
+        assert_eq!(t.score(), 1000.0 * 1000.0);
+    }
+
+    #[test]
+    fn score_negative_priority() {
+        // Negative priority (if ever used) should produce lower score than positive
+        let neg = make_task(-1, 1000.0);
+        let pos = make_task(1, 1000.0);
+        assert!(neg.score() < pos.score());
+    }
+
+    #[test]
+    fn score_large_time_can_overflow_bucket() {
+        // With very large time differences, time component can overwhelm
+        // the priority bucket (1e9). This is by design -- the ZSET score
+        // guarantees ordering within reasonable time windows (< ~1000s).
+        let p1_late = make_task(1, 999_999_999.0);
+        let p2_early = make_task(2, 0.0);
+        // Time component dominates: 999_999_999 * 1000 >> 1e9 priority gap
+        assert!(p1_late.score() > p2_early.score());
+    }
+
+    #[test]
+    fn score_identical_inputs() {
+        let t1 = make_task(3, 500.0);
+        let t2 = make_task(3, 500.0);
+        assert_eq!(t1.score(), t2.score());
+    }
+
+    #[test]
+    fn deferred_task_fields_populated() {
+        let t = DeferredTask {
+            priority: 2,
+            enqueue_time: 1700000000.0,
+            task_type: "credential_access".into(),
+            target_role: "credential_access".into(),
+            payload: serde_json::json!({"target_ip": "192.168.58.10", "domain": "contoso.local"}),
+            source_agent: "orchestrator".into(),
+        };
+        assert_eq!(t.priority, 2);
+        assert_eq!(t.task_type, "credential_access");
+        assert_eq!(t.target_role, "credential_access");
+        assert_eq!(t.source_agent, "orchestrator");
+        assert_eq!(t.payload["target_ip"].as_str().unwrap(), "192.168.58.10");
+        assert_eq!(t.payload["domain"].as_str().unwrap(), "contoso.local");
+    }
+
+    #[test]
+    fn deferred_task_roundtrip_with_payload() {
+        let t = DeferredTask {
+            priority: 5,
+            enqueue_time: 1700000000.0,
+            task_type: "lateral".into(),
+            target_role: "lateral".into(),
+            payload: serde_json::json!({
+                "target_ip": "192.168.58.30",
+                "technique": "psexec",
+                "credential": {
+                    "username": "admin",
+                    "domain": "contoso.local"
+                }
+            }),
+            source_agent: "orchestrator".into(),
+        };
+        let json = serde_json::to_string(&t).unwrap();
+        let t2: DeferredTask = serde_json::from_str(&json).unwrap();
+        assert_eq!(t2.payload["target_ip"].as_str().unwrap(), "192.168.58.30");
+        assert_eq!(t2.payload["technique"].as_str().unwrap(), "psexec");
+        assert_eq!(
+            t2.payload["credential"]["username"].as_str().unwrap(),
+            "admin"
+        );
+    }
+
+    #[test]
+    fn deferred_task_empty_payload_roundtrip() {
+        let t = make_task(1, 500.0);
+        let json = serde_json::to_string(&t).unwrap();
+        let t2: DeferredTask = serde_json::from_str(&json).unwrap();
+        assert_eq!(t2.payload, serde_json::json!({}));
+    }
+
+    #[test]
+    fn score_formula_matches_spec() {
+        // Verify score = priority * 1e9 + enqueue_time * 1000
+        let t = make_task(3, 1700000000.0);
+        let expected = 3.0 * 1_000_000_000.0 + 1700000000.0 * 1000.0;
+        assert!((t.score() - expected).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn score_ordering_across_many_priorities() {
+        // Verify monotonic ordering: p1 < p2 < p3 < p4 < p5 at same time
+        let time = 1700000000.0;
+        let scores: Vec<f64> = (1..=5).map(|p| make_task(p, time).score()).collect();
+        for i in 0..scores.len() - 1 {
+            assert!(
+                scores[i] < scores[i + 1],
+                "score for p={} should be less than p={}",
+                i + 1,
+                i + 2
+            );
+        }
+    }
+
+    #[test]
+    fn deferred_queue_prefix_constant() {
+        assert_eq!(DEFERRED_QUEUE_PREFIX, "ares:deferred");
+    }
+
+    #[test]
+    fn make_task_defaults() {
+        let t = make_task(1, 100.0);
+        assert_eq!(t.task_type, "recon");
+        assert_eq!(t.target_role, "recon");
+        assert_eq!(t.source_agent, "orchestrator");
+    }
+
+    #[test]
+    fn different_task_types_same_score_when_same_priority_and_time() {
+        let t1 = DeferredTask {
+            priority: 3,
+            enqueue_time: 1000.0,
+            task_type: "recon".into(),
+            target_role: "recon".into(),
+            payload: serde_json::json!({}),
+            source_agent: "orchestrator".into(),
+        };
+        let t2 = DeferredTask {
+            priority: 3,
+            enqueue_time: 1000.0,
+            task_type: "lateral".into(),
+            target_role: "lateral".into(),
+            payload: serde_json::json!({}),
+            source_agent: "orchestrator".into(),
+        };
+        // Score only depends on priority and time, not task type
+        assert_eq!(t1.score(), t2.score());
+    }
 }

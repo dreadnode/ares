@@ -20,6 +20,12 @@ use crate::orchestrator::dispatcher::Dispatcher;
 /// Dedup key prefix for LAPS extraction.
 const DEDUP_LAPS: &str = "laps_extract";
 
+/// Returns `true` if the vulnerability type is a LAPS candidate.
+fn is_laps_candidate(vuln_type: &str) -> bool {
+    let vtype = vuln_type.to_lowercase();
+    vtype == "laps_abuse" || vtype == "laps_reader" || vtype == "laps"
+}
+
 /// Monitors for LAPS-readable hosts and dispatches password extraction.
 /// Interval: 45s. Runs after initial credential discovery to avoid wasting
 /// unauthenticated cycles.
@@ -59,8 +65,7 @@ pub async fn auto_laps_extraction(
 
             // Path 1: Vulnerability-driven LAPS (specific reader identified)
             for vuln in state.discovered_vulnerabilities.values() {
-                let vtype = vuln.vuln_type.to_lowercase();
-                if vtype != "laps_abuse" && vtype != "laps_reader" && vtype != "laps" {
+                if !is_laps_candidate(&vuln.vuln_type) {
                     continue;
                 }
                 if state.exploited_vulnerabilities.contains(&vuln.vuln_id) {
@@ -225,4 +230,81 @@ struct LapsWork {
     target_computer: Option<String>,
     credential: ares_core::models::Credential,
     vuln_id: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ─── is_laps_candidate ──────────────────────────────────────────────────
+
+    #[test]
+    fn test_is_laps_candidate_laps_abuse() {
+        assert!(is_laps_candidate("laps_abuse"));
+    }
+
+    #[test]
+    fn test_is_laps_candidate_laps_reader() {
+        assert!(is_laps_candidate("laps_reader"));
+    }
+
+    #[test]
+    fn test_is_laps_candidate_laps_plain() {
+        assert!(is_laps_candidate("laps"));
+    }
+
+    #[test]
+    fn test_is_laps_candidate_case_insensitive() {
+        assert!(is_laps_candidate("LAPS_ABUSE"));
+        assert!(is_laps_candidate("Laps_Reader"));
+        assert!(is_laps_candidate("LAPS"));
+    }
+
+    #[test]
+    fn test_is_laps_candidate_negative() {
+        assert!(!is_laps_candidate("rbcd"));
+        assert!(!is_laps_candidate("constrained_delegation"));
+        assert!(!is_laps_candidate("esc1"));
+        assert!(!is_laps_candidate("gmsa"));
+        assert!(!is_laps_candidate("laps_something_else"));
+        assert!(!is_laps_candidate(""));
+    }
+
+    // ─── DEDUP_LAPS constant ────────────────────────────────────────────────
+
+    #[test]
+    fn test_dedup_laps_value() {
+        assert_eq!(DEDUP_LAPS, "laps_extract");
+    }
+
+    // ─── dedup key construction ─────────────────────────────────────────────
+
+    #[test]
+    fn test_vuln_dedup_key_format() {
+        let vuln_id = "vuln-laps-dc01";
+        let dedup_key = format!("{DEDUP_LAPS}:vuln:{vuln_id}");
+        assert_eq!(dedup_key, "laps_extract:vuln:vuln-laps-dc01");
+    }
+
+    #[test]
+    fn test_sweep_dedup_key_format() {
+        let domain = "contoso.local";
+        let username = "svc_admin";
+        let dedup_key = format!(
+            "{DEDUP_LAPS}:sweep:{}:{}",
+            domain.to_lowercase(),
+            username.to_lowercase()
+        );
+        assert_eq!(dedup_key, "laps_extract:sweep:contoso.local:svc_admin");
+    }
+
+    #[test]
+    fn test_sweep_dedup_key_normalizes_case() {
+        let dedup_key = format!(
+            "{DEDUP_LAPS}:sweep:{}:{}",
+            "CONTOSO.LOCAL".to_lowercase(),
+            "SVC_Admin".to_lowercase()
+        );
+        assert_eq!(dedup_key, "laps_extract:sweep:contoso.local:svc_admin");
+    }
 }

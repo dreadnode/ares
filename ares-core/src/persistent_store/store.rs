@@ -597,3 +597,138 @@ fn is_ip(value: &str) -> bool {
     }
     parts.iter().all(|p| p.parse::<u8>().is_ok())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ─── sha256_prefix ──────────────────────────────────────────────────────
+
+    #[test]
+    fn sha256_prefix_returns_correct_length() {
+        let result = sha256_prefix("P@ssw0rd!", 16); // pragma: allowlist secret
+        assert_eq!(result.len(), 16);
+    }
+
+    #[test]
+    fn sha256_prefix_deterministic() {
+        let a = sha256_prefix("test_password", 16); // pragma: allowlist secret
+        let b = sha256_prefix("test_password", 16); // pragma: allowlist secret
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn sha256_prefix_different_inputs_differ() {
+        let a = sha256_prefix("password1", 16); // pragma: allowlist secret
+        let b = sha256_prefix("password2", 16); // pragma: allowlist secret
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn sha256_prefix_all_hex_chars() {
+        let result = sha256_prefix("contoso.local\\admin", 64);
+        assert!(result.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn sha256_prefix_len_zero() {
+        let result = sha256_prefix("anything", 0);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn sha256_prefix_len_exceeds_hash() {
+        // SHA-256 produces 64 hex chars; requesting more should clamp
+        let result = sha256_prefix("test", 128);
+        assert_eq!(result.len(), 64);
+    }
+
+    #[test]
+    fn sha256_prefix_empty_input() {
+        let result = sha256_prefix("", 16);
+        assert_eq!(result.len(), 16);
+        // SHA-256 of empty string is well-known
+        assert!(result.starts_with("e3b0c44298fc1c14"));
+    }
+
+    #[test]
+    fn sha256_prefix_various_lengths() {
+        for len in [1, 4, 8, 16, 32, 64] {
+            let result = sha256_prefix("contoso.local", len);
+            assert_eq!(result.len(), len, "Expected length {len}");
+        }
+    }
+
+    // ─── is_ip ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn is_ip_valid_ipv4() {
+        assert!(is_ip("192.168.58.10"));
+        assert!(is_ip("192.168.58.240"));
+        assert!(is_ip("10.0.0.1"));
+        assert!(is_ip("0.0.0.0"));
+        assert!(is_ip("255.255.255.255"));
+    }
+
+    #[test]
+    fn is_ip_empty_string() {
+        assert!(!is_ip(""));
+    }
+
+    #[test]
+    fn is_ip_hostname() {
+        assert!(!is_ip("dc01.contoso.local"));
+        assert!(!is_ip("contoso.local"));
+        assert!(!is_ip("sql01.fabrikam.local"));
+    }
+
+    #[test]
+    fn is_ip_too_few_octets() {
+        assert!(!is_ip("192.168.58"));
+        assert!(!is_ip("192.168"));
+        assert!(!is_ip("192"));
+    }
+
+    #[test]
+    fn is_ip_too_many_octets() {
+        assert!(!is_ip("192.168.58.10.1"));
+    }
+
+    #[test]
+    fn is_ip_octet_out_of_range() {
+        assert!(!is_ip("256.168.58.10"));
+        assert!(!is_ip("192.168.58.999"));
+        assert!(!is_ip("192.168.300.10"));
+    }
+
+    #[test]
+    fn is_ip_non_numeric_octets() {
+        assert!(!is_ip("abc.def.ghi.jkl"));
+        assert!(!is_ip("192.168.58.abc"));
+    }
+
+    #[test]
+    fn is_ip_negative_octets() {
+        assert!(!is_ip("-1.168.58.10"));
+        assert!(!is_ip("192.168.58.-10"));
+    }
+
+    #[test]
+    fn is_ip_with_spaces() {
+        assert!(!is_ip(" 192.168.58.10"));
+        assert!(!is_ip("192.168.58.10 "));
+        assert!(!is_ip("192. 168.58.10"));
+    }
+
+    #[test]
+    fn is_ip_ipv6_rejected() {
+        assert!(!is_ip("::1"));
+        assert!(!is_ip("fe80::1"));
+        assert!(!is_ip("2001:db8::1"));
+    }
+
+    #[test]
+    fn is_ip_cidr_rejected() {
+        assert!(!is_ip("192.168.58.0/24"));
+    }
+}

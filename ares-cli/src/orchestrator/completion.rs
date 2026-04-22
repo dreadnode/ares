@@ -675,4 +675,226 @@ mod tests {
         // fabrikam.local DC is known but not dominated → should appear
         assert_eq!(result, vec!["fabrikam.local"]);
     }
+
+    // --- Additional coverage tests ---
+
+    #[test]
+    fn test_forest_root_of_case_insensitive() {
+        assert_eq!(forest_root_of("CONTOSO.LOCAL"), "contoso.local");
+        assert_eq!(forest_root_of("North.Contoso.Local"), "contoso.local");
+    }
+
+    #[test]
+    fn test_forest_root_of_single_label() {
+        // Single-label domain (unusual but should not panic)
+        assert_eq!(forest_root_of("localhost"), "localhost");
+    }
+
+    #[test]
+    fn test_forest_root_of_empty() {
+        assert_eq!(forest_root_of(""), "");
+    }
+
+    #[test]
+    fn test_undominated_no_target_no_first_domain() {
+        // Both target_domain and first_domain are None
+        let trusted = std::collections::HashMap::new();
+        let dominated = HashSet::new();
+        let dcs = std::collections::HashMap::new();
+        let result = compute_undominated_forests(None, None, &trusted, &dominated, &dcs);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_undominated_empty_target_domain() {
+        // target_domain is Some("") — should be treated as missing
+        let trusted = std::collections::HashMap::new();
+        let dominated = HashSet::new();
+        let dcs = std::collections::HashMap::new();
+        let result = compute_undominated_forests(Some(""), None, &trusted, &dominated, &dcs);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_undominated_only_first_domain() {
+        // target_domain is None but first_domain is set
+        let trusted = std::collections::HashMap::new();
+        let dominated = HashSet::new();
+        let dcs = std::collections::HashMap::new();
+        let result =
+            compute_undominated_forests(None, Some("contoso.local"), &trusted, &dominated, &dcs);
+        assert_eq!(result, vec!["contoso.local"]);
+    }
+
+    #[test]
+    fn test_undominated_external_trust_is_cross_forest() {
+        // "external" trust type should be treated as cross-forest
+        let mut trusted = std::collections::HashMap::new();
+        trusted.insert(
+            "fabrikam.local".to_string(),
+            make_trust("fabrikam.local", "external"),
+        );
+        let dominated = HashSet::new();
+        let dcs = std::collections::HashMap::new();
+        let result = compute_undominated_forests(
+            Some("contoso.local"),
+            Some("contoso.local"),
+            &trusted,
+            &dominated,
+            &dcs,
+        );
+        assert!(result.contains(&"fabrikam.local".to_string()));
+        assert!(result.contains(&"contoso.local".to_string()));
+    }
+
+    #[test]
+    fn test_undominated_unknown_trust_not_cross_forest() {
+        // "unknown" trust type should NOT be treated as cross-forest
+        let mut trusted = std::collections::HashMap::new();
+        trusted.insert(
+            "fabrikam.local".to_string(),
+            make_trust("fabrikam.local", "unknown"),
+        );
+        let mut dominated = HashSet::new();
+        dominated.insert("contoso.local".to_string());
+        let dcs = std::collections::HashMap::new();
+        let result = compute_undominated_forests(
+            Some("contoso.local"),
+            Some("contoso.local"),
+            &trusted,
+            &dominated,
+            &dcs,
+        );
+        // "unknown" is not cross-forest, so fabrikam should NOT appear
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_undominated_multiple_cross_forest_trusts() {
+        let mut trusted = std::collections::HashMap::new();
+        trusted.insert(
+            "fabrikam.local".to_string(),
+            make_trust("fabrikam.local", "forest"),
+        );
+        trusted.insert(
+            "tailspintoys.local".to_string(),
+            make_trust("tailspintoys.local", "forest"),
+        );
+
+        let mut dominated = HashSet::new();
+        dominated.insert("contoso.local".to_string());
+        dominated.insert("fabrikam.local".to_string());
+        // tailspintoys not dominated
+        let dcs = std::collections::HashMap::new();
+        let result = compute_undominated_forests(
+            Some("contoso.local"),
+            Some("contoso.local"),
+            &trusted,
+            &dominated,
+            &dcs,
+        );
+        assert_eq!(result, vec!["tailspintoys.local"]);
+    }
+
+    #[test]
+    fn test_undominated_child_trust_domain_maps_to_parent_forest() {
+        // Cross-forest trust with a child domain like "north.fabrikam.local"
+        // should map to forest root "fabrikam.local"
+        let mut trusted = std::collections::HashMap::new();
+        trusted.insert(
+            "north.fabrikam.local".to_string(),
+            make_trust("north.fabrikam.local", "forest"),
+        );
+
+        let mut dominated = HashSet::new();
+        dominated.insert("contoso.local".to_string());
+        let dcs = std::collections::HashMap::new();
+        let result = compute_undominated_forests(
+            Some("contoso.local"),
+            Some("contoso.local"),
+            &trusted,
+            &dominated,
+            &dcs,
+        );
+        assert_eq!(result, vec!["fabrikam.local"]);
+    }
+
+    #[test]
+    fn test_undominated_empty_dc_key_ignored() {
+        // Empty string DC key should be ignored
+        let trusted = std::collections::HashMap::new();
+        let mut dominated = HashSet::new();
+        dominated.insert("contoso.local".to_string());
+        let mut dcs = std::collections::HashMap::new();
+        dcs.insert("".to_string(), "192.168.58.1".to_string());
+        let result = compute_undominated_forests(
+            Some("contoso.local"),
+            Some("contoso.local"),
+            &trusted,
+            &dominated,
+            &dcs,
+        );
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_undominated_case_insensitive_dominated() {
+        // forest_root_of lowercases, so dominated domains with mixed case should still match
+        let trusted = std::collections::HashMap::new();
+        let mut dominated = HashSet::new();
+        dominated.insert("contoso.local".to_string());
+        let dcs = std::collections::HashMap::new();
+        let result =
+            compute_undominated_forests(Some("CONTOSO.LOCAL"), None, &trusted, &dominated, &dcs);
+        // target "CONTOSO.LOCAL" lowercases to "contoso.local" which is dominated
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_undominated_target_and_first_same_forest() {
+        // target and first_domain in the same forest should only produce one entry
+        let trusted = std::collections::HashMap::new();
+        let dominated = HashSet::new();
+        let dcs = std::collections::HashMap::new();
+        let result = compute_undominated_forests(
+            Some("contoso.local"),
+            Some("north.contoso.local"),
+            &trusted,
+            &dominated,
+            &dcs,
+        );
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0], "contoso.local");
+    }
+
+    #[test]
+    fn test_undominated_target_and_first_different_forests() {
+        let trusted = std::collections::HashMap::new();
+        let dominated = HashSet::new();
+        let dcs = std::collections::HashMap::new();
+        let result = compute_undominated_forests(
+            Some("contoso.local"),
+            Some("fabrikam.local"),
+            &trusted,
+            &dominated,
+            &dcs,
+        );
+        assert_eq!(result.len(), 2);
+        let mut sorted = result.clone();
+        sorted.sort();
+        assert_eq!(sorted, vec!["contoso.local", "fabrikam.local"]);
+    }
+
+    #[test]
+    fn test_make_trust_helper() {
+        let trust = make_trust("fabrikam.local", "forest");
+        assert_eq!(trust.domain, "fabrikam.local");
+        assert_eq!(trust.flat_name, "FABRIKAM");
+        assert_eq!(trust.trust_type, "forest");
+        assert!(trust.is_cross_forest());
+        assert!(!trust.sid_filtering);
+
+        let parent_child = make_trust("north.contoso.local", "parent_child");
+        assert!(!parent_child.is_cross_forest());
+    }
 }

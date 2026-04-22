@@ -602,4 +602,289 @@ mod tests {
         assert_eq!(breakdown[0].input_tokens, 500_000);
         assert_eq!(breakdown[0].output_tokens, 500_000);
     }
+
+    // ─── TokenUsage struct ──────────────────────────────────────────────────
+
+    #[test]
+    fn token_usage_default() {
+        let t = TokenUsage::default();
+        assert_eq!(t.input_tokens, 0);
+        assert_eq!(t.output_tokens, 0);
+        assert_eq!(t.total_tokens, 0);
+        assert!(t.model.is_none());
+    }
+
+    #[test]
+    fn token_usage_serde_roundtrip() {
+        let t = TokenUsage {
+            input_tokens: 100,
+            output_tokens: 50,
+            total_tokens: 150,
+            model: Some("gpt-4.1".to_string()),
+        };
+        let json = serde_json::to_string(&t).unwrap();
+        let deserialized: TokenUsage = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.input_tokens, 100);
+        assert_eq!(deserialized.output_tokens, 50);
+        assert_eq!(deserialized.total_tokens, 150);
+        assert_eq!(deserialized.model, Some("gpt-4.1".to_string()));
+    }
+
+    #[test]
+    fn token_usage_serde_skips_none_model() {
+        let t = TokenUsage {
+            input_tokens: 10,
+            output_tokens: 5,
+            total_tokens: 15,
+            model: None,
+        };
+        let json = serde_json::to_string(&t).unwrap();
+        assert!(!json.contains("model"));
+    }
+
+    #[test]
+    fn token_usage_deserialize_missing_model() {
+        let json = r#"{"input_tokens": 10, "output_tokens": 5, "total_tokens": 15}"#;
+        let t: TokenUsage = serde_json::from_str(json).unwrap();
+        assert!(t.model.is_none());
+    }
+
+    // ─── OperationTokenUsage / ModelTokenUsage defaults ─────────────────────
+
+    #[test]
+    fn operation_token_usage_default() {
+        let o = OperationTokenUsage::default();
+        assert_eq!(o.input_tokens, 0);
+        assert_eq!(o.output_tokens, 0);
+        assert!(o.model.is_empty());
+        assert!(o.models.is_empty());
+    }
+
+    #[test]
+    fn model_token_usage_default() {
+        let m = ModelTokenUsage::default();
+        assert_eq!(m.input_tokens, 0);
+        assert_eq!(m.output_tokens, 0);
+    }
+
+    // ─── lookup_model_cost variations ───────────────────────────────────────
+
+    #[test]
+    fn lookup_model_cost_all_known_models() {
+        // Verify every model in the pricing table can be looked up
+        let known_models = [
+            "gpt-4.1",
+            "gpt-4.1-mini",
+            "gpt-4.1-nano",
+            "gpt-4o",
+            "gpt-4o-mini",
+            "gpt-4-turbo",
+            "gpt-5",
+            "gpt-5.2",
+            "gpt-5-mini",
+            "openai/gpt-4.1",
+            "openai/gpt-4.1-mini",
+            "openai/gpt-4o",
+            "gemini/gemini-2.5-pro",
+            "gemini/gemini-2.5-flash",
+        ];
+        for model in known_models {
+            assert!(
+                lookup_model_cost(model).is_some(),
+                "Expected pricing for {model}"
+            );
+        }
+    }
+
+    #[test]
+    fn lookup_model_cost_fuzzy_substring_match() {
+        // A model name that contains a known name as substring
+        let result = lookup_model_cost("azure/gpt-4o-2024-deployment");
+        assert!(
+            result.is_some(),
+            "Expected fuzzy match for gpt-4o substring"
+        );
+    }
+
+    #[test]
+    fn lookup_model_cost_returns_correct_rates() {
+        // gpt-4.1: $2.00/M input, $8.00/M output
+        let (input, output) = lookup_model_cost("gpt-4.1").unwrap();
+        assert!((input - 2.0).abs() < 0.001);
+        assert!((output - 8.0).abs() < 0.001);
+
+        // gpt-4.1-nano: $0.10/M input, $0.40/M output
+        let (input, output) = lookup_model_cost("gpt-4.1-nano").unwrap();
+        assert!((input - 0.10).abs() < 0.001);
+        assert!((output - 0.40).abs() < 0.001);
+    }
+
+    // ─── model_field edge cases ─────────────────────────────────────────────
+
+    #[test]
+    fn model_field_empty_model_name() {
+        let field = model_field("", "input_tokens");
+        let (model, tt) = parse_model_field(&field).unwrap();
+        assert!(model.is_empty());
+        assert_eq!(tt, "input_tokens");
+    }
+
+    #[test]
+    fn model_field_with_colons_in_name() {
+        // Model names with colons should survive base64 encoding
+        let name = "provider:model:variant";
+        let field = model_field(name, "output_tokens");
+        let (decoded, tt) = parse_model_field(&field).unwrap();
+        assert_eq!(decoded, name);
+        assert_eq!(tt, "output_tokens");
+    }
+
+    #[test]
+    fn parse_model_field_malformed_base64() {
+        // Valid prefix but invalid base64 content
+        let result = parse_model_field("model:!!!invalid!!!:input_tokens");
+        assert!(result.is_none());
+    }
+
+    // ─── estimate_usage_cost with mixed priced/unpriced ─────────────────────
+
+    #[test]
+    fn estimate_usage_cost_mixed_models() {
+        let usage = OperationTokenUsage {
+            input_tokens: 2_000_000,
+            output_tokens: 1_000_000,
+            model: "gpt-4o".to_string(),
+            models: HashMap::from([
+                (
+                    "gpt-4o".to_string(),
+                    ModelTokenUsage {
+                        input_tokens: 1_000_000,
+                        output_tokens: 500_000,
+                    },
+                ),
+                (
+                    "my-custom-model-v1".to_string(),
+                    ModelTokenUsage {
+                        input_tokens: 1_000_000,
+                        output_tokens: 500_000,
+                    },
+                ),
+            ]),
+        };
+        let (total, breakdown, unpriced) = estimate_usage_cost(&usage);
+        assert!(total.is_some());
+        assert_eq!(breakdown.len(), 1); // Only gpt-4o is priced
+        assert_eq!(unpriced.len(), 1);
+        assert_eq!(unpriced[0], "my-custom-model-v1");
+    }
+
+    #[test]
+    fn estimate_usage_cost_breakdown_sorted_by_name() {
+        let usage = OperationTokenUsage {
+            input_tokens: 2_000_000,
+            output_tokens: 1_000_000,
+            model: "gpt-4o".to_string(),
+            models: HashMap::from([
+                (
+                    "gpt-4o".to_string(),
+                    ModelTokenUsage {
+                        input_tokens: 500_000,
+                        output_tokens: 250_000,
+                    },
+                ),
+                (
+                    "gpt-4.1-mini".to_string(),
+                    ModelTokenUsage {
+                        input_tokens: 500_000,
+                        output_tokens: 250_000,
+                    },
+                ),
+            ]),
+        };
+        let (_, breakdown, _) = estimate_usage_cost(&usage);
+        assert_eq!(breakdown.len(), 2);
+        // Sorted alphabetically: gpt-4.1-mini before gpt-4o
+        assert_eq!(breakdown[0].model, "gpt-4.1-mini");
+        assert_eq!(breakdown[1].model, "gpt-4o");
+    }
+
+    // ─── Key format tests ───────────────────────────────────────────────────
+
+    #[test]
+    fn token_usage_key_format_various() {
+        assert_eq!(token_usage_key("op-123"), "ares:op:op-123:token_usage");
+        assert_eq!(token_usage_key(""), "ares:op::token_usage");
+    }
+
+    #[test]
+    fn blue_token_usage_key_format_various() {
+        assert_eq!(
+            blue_token_usage_key("inv-abc"),
+            "ares:blue:inv:inv-abc:token_usage"
+        );
+        assert_eq!(blue_token_usage_key(""), "ares:blue:inv::token_usage");
+    }
+
+    // ─── ModelCostBreakdown serialization ───────────────────────────────────
+
+    #[test]
+    fn model_cost_breakdown_serialize() {
+        let b = ModelCostBreakdown {
+            model: "gpt-4.1".to_string(),
+            input_tokens: 1000,
+            output_tokens: 500,
+            total_tokens: 1500,
+            cost: 0.006,
+        };
+        let json = serde_json::to_value(&b).unwrap();
+        assert_eq!(json["model"], "gpt-4.1");
+        assert_eq!(json["total_tokens"], 1500);
+        assert!((json["cost"].as_f64().unwrap() - 0.006).abs() < 0.0001);
+    }
+
+    // ─── OperationTokenUsage serialization ──────────────────────────────────
+
+    #[test]
+    fn operation_token_usage_serialize() {
+        let usage = OperationTokenUsage {
+            input_tokens: 10000,
+            output_tokens: 5000,
+            model: "gpt-4o".to_string(),
+            models: HashMap::from([(
+                "gpt-4o".to_string(),
+                ModelTokenUsage {
+                    input_tokens: 10000,
+                    output_tokens: 5000,
+                },
+            )]),
+        };
+        let json = serde_json::to_value(&usage).unwrap();
+        assert_eq!(json["input_tokens"], 10000);
+        assert_eq!(json["output_tokens"], 5000);
+        assert_eq!(json["model"], "gpt-4o");
+        assert!(json["models"]["gpt-4o"].is_object());
+    }
+
+    // ─── Zero-cost edge case ────────────────────────────────────────────────
+
+    #[test]
+    fn estimate_usage_cost_zero_tokens_known_model() {
+        let usage = OperationTokenUsage {
+            input_tokens: 0,
+            output_tokens: 0,
+            model: "gpt-4o".to_string(),
+            models: HashMap::from([(
+                "gpt-4o".to_string(),
+                ModelTokenUsage {
+                    input_tokens: 0,
+                    output_tokens: 0,
+                },
+            )]),
+        };
+        let (total, breakdown, unpriced) = estimate_usage_cost(&usage);
+        assert!(total.is_some());
+        assert_eq!(total.unwrap(), 0.0);
+        assert_eq!(breakdown.len(), 1);
+        assert!(unpriced.is_empty());
+    }
 }

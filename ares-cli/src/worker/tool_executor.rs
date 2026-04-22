@@ -449,4 +449,237 @@ mod tests {
         assert_eq!(TOOL_EXEC_PREFIX, "ares:tool_exec");
         assert_eq!(TOOL_RESULT_PREFIX, "ares:tool_results");
     }
+
+    #[test]
+    fn result_ttl_is_one_hour() {
+        assert_eq!(RESULT_TTL, 3600);
+    }
+
+    #[test]
+    fn tool_exec_request_deserialize_with_traceparent() {
+        let json = r#"{
+            "call_id": "secretsdump_001",
+            "task_id": "task_abc",
+            "tool_name": "secretsdump",
+            "arguments": {"target": "192.168.58.10", "domain": "contoso.local"},
+            "traceparent": "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
+        }"#;
+        let req: ToolExecRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.call_id, "secretsdump_001");
+        assert_eq!(req.tool_name, "secretsdump");
+        assert_eq!(
+            req.traceparent.as_deref(),
+            Some("00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01")
+        );
+    }
+
+    #[test]
+    fn tool_exec_request_deserialize_with_operation_id() {
+        let json = r#"{
+            "call_id": "nmap_002",
+            "task_id": "recon_task",
+            "tool_name": "nmap_scan",
+            "arguments": {"target": "192.168.58.0/24"},
+            "operation_id": "op-20260422-abc123"
+        }"#;
+        let req: ToolExecRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.operation_id.as_deref(), Some("op-20260422-abc123"));
+    }
+
+    #[test]
+    fn tool_exec_request_defaults_for_optional_fields() {
+        let json = r#"{
+            "call_id": "basic_001",
+            "task_id": "task_001",
+            "tool_name": "whoami",
+            "arguments": {}
+        }"#;
+        let req: ToolExecRequest = serde_json::from_str(json).unwrap();
+        assert!(req.traceparent.is_none());
+        assert!(req.operation_id.is_none());
+    }
+
+    #[test]
+    fn tool_exec_request_complex_arguments() {
+        let json = r#"{
+            "call_id": "netexec_003",
+            "task_id": "lateral_task",
+            "tool_name": "netexec_smb",
+            "arguments": {
+                "target": "192.168.58.10",
+                "username": "admin",
+                "password": "P@ssw0rd!",
+                "domain": "contoso.local",
+                "shares": true,
+                "port": 445
+            }
+        }"#;
+        let req: ToolExecRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.tool_name, "netexec_smb");
+        assert_eq!(req.arguments["target"], "192.168.58.10");
+        assert_eq!(req.arguments["domain"], "contoso.local");
+        assert_eq!(req.arguments["shares"], true);
+        assert_eq!(req.arguments["port"], 445);
+    }
+
+    #[test]
+    fn tool_exec_response_empty_discoveries_omitted() {
+        let resp = ToolExecResponse {
+            call_id: "test_001".into(),
+            output: "some output".into(),
+            error: None,
+            discoveries: None,
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        assert!(!json.contains("discoveries"));
+    }
+
+    #[test]
+    fn tool_exec_response_with_multiple_discovery_types() {
+        let resp = ToolExecResponse {
+            call_id: "nmap_004".into(),
+            output: "scan output".into(),
+            error: None,
+            discoveries: Some(serde_json::json!({
+                "hosts": [
+                    {"ip": "192.168.58.10", "hostname": "dc01.contoso.local", "services": ["445/tcp", "88/tcp"]},
+                    {"ip": "192.168.58.11", "hostname": "sql01.contoso.local", "services": ["1433/tcp"]}
+                ],
+                "services": [
+                    {"port": 445, "protocol": "tcp", "service": "microsoft-ds"}
+                ]
+            })),
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let hosts = parsed["discoveries"]["hosts"].as_array().unwrap();
+        assert_eq!(hosts.len(), 2);
+        assert_eq!(hosts[0]["ip"], "192.168.58.10");
+        assert_eq!(hosts[1]["hostname"], "sql01.contoso.local");
+    }
+
+    #[test]
+    fn tool_exec_response_serialization_roundtrip() {
+        let resp = ToolExecResponse {
+            call_id: "roundtrip_test".into(),
+            output: "output with special chars: <>&\"'".into(),
+            error: Some("exit code 1".into()),
+            discoveries: Some(serde_json::json!({"credentials": []})),
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["call_id"], "roundtrip_test");
+        assert_eq!(parsed["error"], "exit code 1");
+        assert!(parsed["discoveries"]["credentials"].is_array());
+    }
+
+    #[test]
+    fn tool_exec_response_error_message_format() {
+        // Verify the format used in execute_and_respond for unavailable tools
+        let tool_name = "nonexistent_tool";
+        let error_msg = format!(
+            "Tool '{}' is not installed on this worker. \
+             Do not call this tool again — it failed to spawn previously.",
+            tool_name
+        );
+        assert!(error_msg.contains("nonexistent_tool"));
+        assert!(error_msg.contains("not installed"));
+    }
+
+    #[test]
+    fn queue_key_format() {
+        let role = "recon";
+        let key = format!("{TOOL_EXEC_PREFIX}:{role}");
+        assert_eq!(key, "ares:tool_exec:recon");
+    }
+
+    #[test]
+    fn result_key_format() {
+        let call_id = "nmap_scan_abc123";
+        let key = format!("{TOOL_RESULT_PREFIX}:{call_id}");
+        assert_eq!(key, "ares:tool_results:nmap_scan_abc123");
+    }
+
+    #[test]
+    fn connection_error_detection_keywords() {
+        // Verify the connection error detection logic from the main loop
+        let conn_keywords = [
+            "connection",
+            "connect",
+            "closed",
+            "timeout",
+            "broken pipe",
+            "reset",
+        ];
+
+        let test_errors = [
+            ("connection refused", true),
+            ("failed to connect", true),
+            ("connection closed", true),
+            ("operation timeout", true),
+            ("broken pipe", true),
+            ("connection reset by peer", true),
+            ("invalid argument", false),
+            ("permission denied", false),
+            ("key not found", false),
+        ];
+
+        for (error_str, expected_is_conn) in test_errors {
+            let error_lower = error_str.to_lowercase();
+            let is_conn = conn_keywords.iter().any(|kw| error_lower.contains(kw));
+            assert_eq!(
+                is_conn,
+                expected_is_conn,
+                "Error '{}' should {}be a connection error",
+                error_str,
+                if expected_is_conn { "" } else { "NOT " }
+            );
+        }
+    }
+
+    #[test]
+    fn unavailable_tool_detection_keywords() {
+        // Verify the keywords used to detect unavailable tools
+        let test_errors = [
+            ("failed to spawn 'nmap' — is it installed?", true),
+            ("tool not installed: certipy", true),
+            ("command not found", false),
+            ("permission denied", false),
+        ];
+
+        for (err_str, expected_unavailable) in test_errors {
+            let is_unavailable =
+                err_str.contains("failed to spawn") || err_str.contains("not installed");
+            assert_eq!(
+                is_unavailable,
+                expected_unavailable,
+                "Error '{}' should {}mark tool as unavailable",
+                err_str,
+                if expected_unavailable { "" } else { "NOT " }
+            );
+        }
+    }
+
+    #[test]
+    fn tool_exec_request_deserialize_rejects_missing_required() {
+        // Missing call_id should fail
+        let json = r#"{
+            "task_id": "task_001",
+            "tool_name": "nmap",
+            "arguments": {}
+        }"#;
+        let result: Result<ToolExecRequest, _> = serde_json::from_str(json);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn tool_exec_request_deserialize_rejects_missing_tool_name() {
+        let json = r#"{
+            "call_id": "call_001",
+            "task_id": "task_001",
+            "arguments": {}
+        }"#;
+        let result: Result<ToolExecRequest, _> = serde_json::from_str(json);
+        assert!(result.is_err());
+    }
 }

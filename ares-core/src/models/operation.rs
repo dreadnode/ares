@@ -362,6 +362,503 @@ mod tests {
         assert!(!meta.has_golden_ticket);
         assert!(meta.target_ips.is_empty());
     }
+
+    // ─── parse_meta_bool edge cases ─────────────────────────────────────────
+
+    #[test]
+    fn test_parse_meta_bool_whitespace() {
+        assert!(!parse_meta_bool(" true"));
+        assert!(!parse_meta_bool("true "));
+    }
+
+    #[test]
+    fn test_parse_meta_bool_json_encoded_true() {
+        // Python json.dumps(True) = "true", json.dumps(False) = "false"
+        assert!(parse_meta_bool("true"));
+        assert!(!parse_meta_bool("false"));
+    }
+
+    // ─── parse_meta_string edge cases ───────────────────────────────────────
+
+    #[test]
+    fn test_parse_meta_string_ip_address() {
+        assert_eq!(
+            parse_meta_string(r#""192.168.58.10""#),
+            Some("192.168.58.10".to_string())
+        );
+    }
+
+    #[test]
+    fn test_parse_meta_string_raw_ip() {
+        assert_eq!(
+            parse_meta_string("192.168.58.10"),
+            Some("192.168.58.10".to_string())
+        );
+    }
+
+    #[test]
+    fn test_parse_meta_string_json_number_falls_through() {
+        // A JSON number shouldn't parse as a JSON string
+        assert_eq!(parse_meta_string("42"), Some("42".to_string()));
+    }
+
+    #[test]
+    fn test_parse_meta_string_json_boolean_falls_through() {
+        assert_eq!(parse_meta_string("true"), Some("true".to_string()));
+        assert_eq!(parse_meta_string("false"), Some("false".to_string()));
+    }
+
+    #[test]
+    fn test_parse_meta_string_nested_quotes() {
+        // Double-encoded string (rare but possible)
+        let result = parse_meta_string(r#""contoso.local\\admin""#);
+        assert_eq!(result, Some(r"contoso.local\admin".to_string()));
+    }
+
+    #[test]
+    fn test_parse_meta_string_unicode() {
+        assert_eq!(
+            parse_meta_string(r#""dc01\u002econtoso.local""#),
+            Some("dc01.contoso.local".to_string())
+        );
+    }
+
+    // ─── parse_meta_datetime edge cases ─────────────────────────────────────
+
+    #[test]
+    fn test_parse_meta_datetime_with_offset() {
+        let result = parse_meta_datetime("2025-06-15T08:30:00+05:30");
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn test_parse_meta_datetime_negative_offset() {
+        let result = parse_meta_datetime("2025-06-15T08:30:00-07:00");
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn test_parse_meta_datetime_json_null_string() {
+        assert!(parse_meta_datetime(r#""null""#).is_none());
+    }
+
+    #[test]
+    fn test_parse_meta_datetime_json_empty_string() {
+        assert!(parse_meta_datetime(r#""""#).is_none());
+    }
+
+    #[test]
+    fn test_parse_meta_datetime_partial_date() {
+        assert!(parse_meta_datetime("2025-06-15").is_none());
+    }
+
+    // ─── parse_meta_string_list edge cases ──────────────────────────────────
+
+    #[test]
+    fn test_parse_meta_string_list_json_array_single() {
+        let list = parse_meta_string_list(r#"["192.168.58.10"]"#);
+        assert_eq!(list, vec!["192.168.58.10"]);
+    }
+
+    #[test]
+    fn test_parse_meta_string_list_json_array_empty() {
+        let list = parse_meta_string_list("[]");
+        assert!(list.is_empty());
+    }
+
+    #[test]
+    fn test_parse_meta_string_list_trailing_comma() {
+        let list = parse_meta_string_list("192.168.58.10,192.168.58.20,");
+        assert_eq!(list, vec!["192.168.58.10", "192.168.58.20"]);
+    }
+
+    #[test]
+    fn test_parse_meta_string_list_leading_comma() {
+        let list = parse_meta_string_list(",192.168.58.10");
+        assert_eq!(list, vec!["192.168.58.10"]);
+    }
+
+    #[test]
+    fn test_parse_meta_string_list_all_empty_entries() {
+        let list = parse_meta_string_list(",,,");
+        assert!(list.is_empty());
+    }
+
+    #[test]
+    fn test_parse_meta_string_list_json_array_with_numbers() {
+        // Non-string JSON array elements are filtered out
+        let list = parse_meta_string_list(r#"[1, 2, 3]"#);
+        assert!(list.is_empty());
+    }
+
+    // ─── OperationMeta::from_redis_hash edge cases ──────────────────────────
+
+    #[test]
+    fn test_operation_meta_legacy_bool_values() {
+        let mut data = HashMap::new();
+        data.insert("has_domain_admin".to_string(), "True".to_string());
+        data.insert("has_golden_ticket".to_string(), "1".to_string());
+        let meta = OperationMeta::from_redis_hash(&data);
+        assert!(meta.has_domain_admin);
+        assert!(meta.has_golden_ticket);
+    }
+
+    #[test]
+    fn test_operation_meta_false_bool_values() {
+        let mut data = HashMap::new();
+        data.insert("has_domain_admin".to_string(), "false".to_string());
+        data.insert("has_golden_ticket".to_string(), "0".to_string());
+        let meta = OperationMeta::from_redis_hash(&data);
+        assert!(!meta.has_domain_admin);
+        assert!(!meta.has_golden_ticket);
+    }
+
+    #[test]
+    fn test_operation_meta_target_ips_comma_separated() {
+        let mut data = HashMap::new();
+        data.insert(
+            "target_ips".to_string(),
+            "192.168.58.10,192.168.58.20,192.168.58.30".to_string(),
+        );
+        let meta = OperationMeta::from_redis_hash(&data);
+        assert_eq!(meta.target_ips.len(), 3);
+        assert_eq!(meta.target_ips[0], "192.168.58.10");
+        assert_eq!(meta.target_ips[2], "192.168.58.30");
+    }
+
+    #[test]
+    fn test_operation_meta_target_ips_json_encoded_comma() {
+        let mut data = HashMap::new();
+        data.insert(
+            "target_ips".to_string(),
+            r#""192.168.58.10,192.168.58.20""#.to_string(),
+        );
+        let meta = OperationMeta::from_redis_hash(&data);
+        assert_eq!(meta.target_ips.len(), 2);
+    }
+
+    #[test]
+    fn test_operation_meta_null_domain_admin_path() {
+        let mut data = HashMap::new();
+        data.insert("domain_admin_path".to_string(), "null".to_string());
+        let meta = OperationMeta::from_redis_hash(&data);
+        assert!(meta.domain_admin_path.is_none());
+    }
+
+    #[test]
+    fn test_operation_meta_invalid_datetime() {
+        let mut data = HashMap::new();
+        data.insert("started_at".to_string(), "not-a-date".to_string());
+        let meta = OperationMeta::from_redis_hash(&data);
+        assert!(meta.started_at.is_none());
+    }
+
+    #[test]
+    fn test_operation_meta_extra_unknown_fields_ignored() {
+        let mut data = HashMap::new();
+        data.insert("unknown_field".to_string(), "some_value".to_string());
+        data.insert("has_domain_admin".to_string(), "true".to_string());
+        let meta = OperationMeta::from_redis_hash(&data);
+        assert!(meta.has_domain_admin);
+    }
+
+    #[test]
+    fn test_operation_meta_empty_target_ips() {
+        let mut data = HashMap::new();
+        data.insert("target_ips".to_string(), "".to_string());
+        let meta = OperationMeta::from_redis_hash(&data);
+        assert!(meta.target_ips.is_empty());
+    }
+
+    #[test]
+    fn test_operation_meta_empty_json_array_target_ips() {
+        let mut data = HashMap::new();
+        data.insert("target_ips".to_string(), "[]".to_string());
+        let meta = OperationMeta::from_redis_hash(&data);
+        assert!(meta.target_ips.is_empty());
+    }
+
+    // ─── SharedRedTeamState ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_shared_state_new() {
+        let state = SharedRedTeamState::new("op-test-001".to_string());
+        assert_eq!(state.operation_id, "op-test-001");
+        assert!(state.target.is_none());
+        assert!(state.target_ips.is_empty());
+        assert!(state.completed_at.is_none());
+        assert!(state.all_credentials.is_empty());
+        assert!(state.all_hashes.is_empty());
+        assert!(state.all_hosts.is_empty());
+        assert!(state.all_users.is_empty());
+        assert!(state.all_shares.is_empty());
+        assert!(state.discovered_vulnerabilities.is_empty());
+        assert!(state.exploited_vulnerabilities.is_empty());
+        assert!(!state.has_domain_admin);
+        assert!(!state.has_golden_ticket);
+        assert!(state.domain_admin_path.is_none());
+        assert!(state.domain_controllers.is_empty());
+        assert!(state.netbios_to_fqdn.is_empty());
+        assert!(state.trusted_domains.is_empty());
+        assert!(state.all_timeline_events.is_empty());
+        assert!(state.all_techniques.is_empty());
+    }
+
+    // ─── build_attack_chain ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_build_attack_chain_empty_state() {
+        let state = SharedRedTeamState::new("op-chain-empty".to_string());
+        let chain = state.build_attack_chain("nonexistent-id");
+        assert!(chain.is_empty());
+    }
+
+    #[test]
+    fn test_build_attack_chain_single_credential() {
+        let mut state = SharedRedTeamState::new("op-chain-single".to_string());
+        state.all_credentials.push(Credential {
+            id: "cred-1".to_string(),
+            username: "admin".to_string(),
+            password: "P@ssw0rd!".to_string(), // pragma: allowlist secret
+            domain: "contoso.local".to_string(),
+            source: "kerberoast".to_string(),
+            discovered_at: None,
+            is_admin: false,
+            parent_id: None,
+            attack_step: 1,
+        });
+        let chain = state.build_attack_chain("cred-1");
+        assert_eq!(chain.len(), 1);
+        assert_eq!(chain[0].username, "admin");
+        assert_eq!(chain[0].domain, "contoso.local");
+        assert_eq!(chain[0].source, "kerberoast");
+        assert_eq!(chain[0].item_type, "credential");
+    }
+
+    #[test]
+    fn test_build_attack_chain_multi_step() {
+        let mut state = SharedRedTeamState::new("op-chain-multi".to_string());
+        state.all_credentials.push(Credential {
+            id: "cred-1".to_string(),
+            username: "svc_sql".to_string(),
+            password: "SqlP@ss!".to_string(), // pragma: allowlist secret
+            domain: "contoso.local".to_string(),
+            source: "kerberoast".to_string(),
+            discovered_at: None,
+            is_admin: false,
+            parent_id: None,
+            attack_step: 1,
+        });
+        state.all_hashes.push(Hash {
+            id: "hash-1".to_string(),
+            username: "krbtgt".to_string(),
+            hash_value: "aad3b435b51404eeaad3b435b51404ee".to_string(),
+            hash_type: "ntlm".to_string(),
+            domain: "contoso.local".to_string(),
+            cracked_password: None,
+            source: "secretsdump".to_string(),
+            discovered_at: None,
+            parent_id: Some("cred-1".to_string()),
+            attack_step: 2,
+            aes_key: None,
+        });
+        let chain = state.build_attack_chain("hash-1");
+        assert_eq!(chain.len(), 2);
+        // Forward order: initial access first
+        assert_eq!(chain[0].username, "svc_sql");
+        assert_eq!(chain[0].item_type, "credential");
+        assert_eq!(chain[1].username, "krbtgt");
+        assert_eq!(chain[1].item_type, "hash");
+    }
+
+    #[test]
+    fn test_build_attack_chain_cycle_guard() {
+        let mut state = SharedRedTeamState::new("op-cycle".to_string());
+        // Create a cycle: cred-1 -> cred-2 -> cred-1
+        state.all_credentials.push(Credential {
+            id: "cred-1".to_string(),
+            username: "user1".to_string(),
+            password: "pass1".to_string(), // pragma: allowlist secret
+            domain: "contoso.local".to_string(),
+            source: "".to_string(),
+            discovered_at: None,
+            is_admin: false,
+            parent_id: Some("cred-2".to_string()),
+            attack_step: 1,
+        });
+        state.all_credentials.push(Credential {
+            id: "cred-2".to_string(),
+            username: "user2".to_string(),
+            password: "pass2".to_string(), // pragma: allowlist secret
+            domain: "contoso.local".to_string(),
+            source: "".to_string(),
+            discovered_at: None,
+            is_admin: false,
+            parent_id: Some("cred-1".to_string()),
+            attack_step: 2,
+        });
+        let chain = state.build_attack_chain("cred-1");
+        // Should not infinite loop; should have at most 2 entries
+        assert!(chain.len() <= 2);
+    }
+
+    // ─── build_domain_admin_chain ───────────────────────────────────────────
+
+    #[test]
+    fn test_build_domain_admin_chain_no_krbtgt() {
+        let state = SharedRedTeamState::new("op-no-krbtgt".to_string());
+        let chain = state.build_domain_admin_chain();
+        assert!(chain.is_empty());
+    }
+
+    #[test]
+    fn test_build_domain_admin_chain_with_krbtgt() {
+        let mut state = SharedRedTeamState::new("op-da".to_string());
+        state.all_credentials.push(Credential {
+            id: "cred-init".to_string(),
+            username: "svc_backup".to_string(),
+            password: "Backup123!".to_string(), // pragma: allowlist secret
+            domain: "contoso.local".to_string(),
+            source: "password_spray".to_string(),
+            discovered_at: None,
+            is_admin: false,
+            parent_id: None,
+            attack_step: 1,
+        });
+        state.all_hashes.push(Hash {
+            id: "hash-krbtgt".to_string(),
+            username: "krbtgt".to_string(),
+            hash_value: "aad3b435b51404eeaad3b435b51404ee".to_string(),
+            hash_type: "ntlm".to_string(),
+            domain: "contoso.local".to_string(),
+            cracked_password: None,
+            source: "secretsdump".to_string(),
+            discovered_at: None,
+            parent_id: Some("cred-init".to_string()),
+            attack_step: 2,
+            aes_key: None,
+        });
+        let chain = state.build_domain_admin_chain();
+        assert_eq!(chain.len(), 2);
+        assert_eq!(chain[0].username, "svc_backup");
+        assert_eq!(chain[1].username, "krbtgt");
+    }
+
+    #[test]
+    fn test_build_domain_admin_chain_case_insensitive_krbtgt() {
+        let mut state = SharedRedTeamState::new("op-da-case".to_string());
+        state.all_hashes.push(Hash {
+            id: "hash-krbtgt".to_string(),
+            username: "KRBTGT".to_string(), // uppercase
+            hash_value: "abc123".to_string(),
+            hash_type: "NTLM".to_string(),
+            domain: "contoso.local".to_string(),
+            cracked_password: None,
+            source: "dcsync".to_string(),
+            discovered_at: None,
+            parent_id: None,
+            attack_step: 1,
+            aes_key: None,
+        });
+        let chain = state.build_domain_admin_chain();
+        assert_eq!(chain.len(), 1);
+        assert_eq!(chain[0].username, "KRBTGT");
+    }
+
+    #[test]
+    fn test_build_domain_admin_chain_ignores_non_ntlm_krbtgt() {
+        let mut state = SharedRedTeamState::new("op-da-aes".to_string());
+        state.all_hashes.push(Hash {
+            id: "hash-aes".to_string(),
+            username: "krbtgt".to_string(),
+            hash_value: "abc123".to_string(),
+            hash_type: "aes256".to_string(), // Not NTLM
+            domain: "contoso.local".to_string(),
+            cracked_password: None,
+            source: "dcsync".to_string(),
+            discovered_at: None,
+            parent_id: None,
+            attack_step: 1,
+            aes_key: None,
+        });
+        let chain = state.build_domain_admin_chain();
+        assert!(chain.is_empty());
+    }
+
+    // ─── format_attack_chain ────────────────────────────────────────────────
+
+    #[test]
+    fn test_format_attack_chain_empty() {
+        let result = SharedRedTeamState::format_attack_chain(&[]);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_format_attack_chain_single_credential() {
+        let chain = vec![AttackChainStep {
+            step_number: 1,
+            item_type: "credential".to_string(),
+            username: "admin".to_string(),
+            domain: "contoso.local".to_string(),
+            source: "password_spray".to_string(),
+            hash_type: String::new(),
+            item_id: "cred-1".to_string(),
+        }];
+        let result = SharedRedTeamState::format_attack_chain(&chain);
+        assert!(result.contains("password_spray"));
+        assert!(result.contains(r"contoso.local\admin (password)"));
+    }
+
+    #[test]
+    fn test_format_attack_chain_credential_then_hash() {
+        let chain = vec![
+            AttackChainStep {
+                step_number: 1,
+                item_type: "credential".to_string(),
+                username: "svc_sql".to_string(),
+                domain: "contoso.local".to_string(),
+                source: "kerberoast".to_string(),
+                hash_type: String::new(),
+                item_id: "cred-1".to_string(),
+            },
+            AttackChainStep {
+                step_number: 2,
+                item_type: "hash".to_string(),
+                username: "krbtgt".to_string(),
+                domain: "contoso.local".to_string(),
+                source: "secretsdump".to_string(),
+                hash_type: "ntlm".to_string(),
+                item_id: "hash-1".to_string(),
+            },
+        ];
+        let result = SharedRedTeamState::format_attack_chain(&chain);
+        assert!(result.contains("kerberoast"), "Should contain first source");
+        assert!(
+            result.contains("secretsdump"),
+            "Should contain second source"
+        );
+        assert!(
+            result.contains(r"contoso.local\krbtgt (ntlm hash)"),
+            "Should format hash step"
+        );
+    }
+
+    #[test]
+    fn test_format_attack_chain_no_source() {
+        let chain = vec![AttackChainStep {
+            step_number: 1,
+            item_type: "credential".to_string(),
+            username: "admin".to_string(),
+            domain: "fabrikam.local".to_string(),
+            source: String::new(),
+            hash_type: String::new(),
+            item_id: "cred-1".to_string(),
+        }];
+        let result = SharedRedTeamState::format_attack_chain(&chain);
+        assert!(result.contains(r"fabrikam.local\admin (password)"));
+        // No arrow prefix since source is empty
+        assert!(!result.starts_with(" "));
+    }
 }
 
 /// Read-only view of the shared red team state, loaded from Redis.

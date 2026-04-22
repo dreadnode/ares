@@ -548,4 +548,672 @@ mod tests {
         assert_eq!(val["scores"]["overall"], 0.85);
         assert_eq!(val["status"]["grade"], "B");
     }
+
+    // ─── Default trait ──────────────────────────────────────────────────────
+
+    #[test]
+    fn test_default_creates_valid_result() {
+        let r = EvaluationResult::default();
+        assert!(r.evaluation_id.is_empty());
+        assert!(r.operation_id.is_empty());
+        assert!(r.investigation_id.is_none());
+        assert_eq!(r.overall_score, 0.0);
+        assert_eq!(r.detection_score, 0.0);
+        assert_eq!(r.quality_score, 0.0);
+        assert_eq!(r.completeness_score, 0.0);
+        assert_eq!(r.stage_score, 0.0);
+        assert_eq!(r.ioc_detection_rate, 0.0);
+        assert_eq!(r.technique_coverage, 0.0);
+        assert_eq!(r.pyramid_elevation_score, 0.0);
+        assert_eq!(r.timeline_accuracy, 0.0);
+        assert_eq!(r.evidence_quality_score, 0.0);
+        assert!(r.final_stage.is_none());
+        assert!(r.stages_completed.is_empty());
+        assert!(r.missed_iocs.is_empty());
+        assert!(r.missed_techniques.is_empty());
+        assert!(r.found_iocs.is_empty());
+        assert!(r.found_techniques.is_empty());
+        assert_eq!(r.evidence_count, 0);
+        assert_eq!(r.highest_pyramid_level, 0);
+        assert_eq!(r.ttp_count, 0);
+        assert!(!r.alert_fired);
+        assert!(!r.investigation_started);
+        assert!(!r.investigation_completed);
+        assert!(r.time_to_first_evidence.is_none());
+        assert!(r.time_to_technique_identification.is_none());
+        assert!(r.time_to_ttp_elevation.is_none());
+        assert_eq!(r.total_tokens, 0);
+        assert_eq!(r.prompt_tokens, 0);
+        assert_eq!(r.completion_tokens, 0);
+        assert_eq!(r.estimated_cost_usd, 0.0);
+        assert!(r.model.is_empty());
+        assert_eq!(r.duration_seconds, 0.0);
+        assert!(r.error.is_none());
+    }
+
+    // ─── Serde round-trip ───────────────────────────────────────────────────
+
+    #[test]
+    fn test_serde_roundtrip_default() {
+        let original = EvaluationResult::default();
+        let json = serde_json::to_string(&original).unwrap();
+        let deserialized: EvaluationResult = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.overall_score, original.overall_score);
+        assert_eq!(deserialized.evaluation_id, original.evaluation_id);
+        assert_eq!(deserialized.total_tokens, original.total_tokens);
+        assert_eq!(deserialized.alert_fired, original.alert_fired);
+    }
+
+    #[test]
+    fn test_serde_roundtrip_all_fields_populated() {
+        let original = EvaluationResult {
+            evaluation_id: "eval-full".to_string(),
+            operation_id: "op-full".to_string(),
+            investigation_id: Some("inv-001".to_string()),
+            evaluated_at: Utc::now(),
+            overall_score: 0.92,
+            detection_score: 0.88,
+            quality_score: 0.75,
+            completeness_score: 0.95,
+            stage_score: 0.80,
+            ioc_detection_rate: 0.70,
+            technique_coverage: 0.85,
+            pyramid_elevation_score: 0.90,
+            timeline_accuracy: 0.65,
+            evidence_quality_score: 0.78,
+            final_stage: Some("ttps".to_string()),
+            stages_completed: vec!["hashes".to_string(), "ips".to_string(), "ttps".to_string()],
+            missed_iocs: vec![ExpectedIOC {
+                ioc_type: "ip".to_string(),
+                value: "192.168.58.50".to_string(),
+                pyramid_level: crate::models::PyramidLevel::IpAddresses,
+                mitre_techniques: vec!["T1046".to_string()],
+                required: true,
+                source: "nmap".to_string(),
+            }],
+            missed_techniques: vec![ExpectedTechnique {
+                technique_id: "T1003.001".to_string(),
+                technique_name: "LSASS Memory".to_string(),
+                required: true,
+                parent_id: Some("T1003".to_string()),
+            }],
+            found_iocs: vec![ExpectedIOC {
+                ioc_type: "hostname".to_string(),
+                value: "dc01.contoso.local".to_string(),
+                pyramid_level: crate::models::PyramidLevel::DomainNames,
+                mitre_techniques: vec![],
+                required: true,
+                source: "".to_string(),
+            }],
+            found_techniques: vec![ExpectedTechnique {
+                technique_id: "T1558.003".to_string(),
+                technique_name: "Kerberoasting".to_string(),
+                required: true,
+                parent_id: Some("T1558".to_string()),
+            }],
+            evidence_count: 42,
+            highest_pyramid_level: 5,
+            ttp_count: 7,
+            alert_fired: true,
+            investigation_started: true,
+            investigation_completed: true,
+            time_to_first_evidence: Some(12.5),
+            time_to_technique_identification: Some(45.0),
+            time_to_ttp_elevation: Some(120.0),
+            total_tokens: 50000,
+            prompt_tokens: 30000,
+            completion_tokens: 20000,
+            estimated_cost_usd: 0.15,
+            model: "gpt-4.1".to_string(),
+            duration_seconds: 300.5,
+            error: None,
+        };
+        let json = serde_json::to_string(&original).unwrap();
+        let deserialized: EvaluationResult = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.evaluation_id, "eval-full");
+        assert_eq!(deserialized.operation_id, "op-full");
+        assert_eq!(deserialized.investigation_id, Some("inv-001".to_string()));
+        assert!((deserialized.overall_score - 0.92).abs() < f64::EPSILON);
+        assert!((deserialized.detection_score - 0.88).abs() < f64::EPSILON);
+        assert_eq!(deserialized.stages_completed.len(), 3);
+        assert_eq!(deserialized.missed_iocs.len(), 1);
+        assert_eq!(deserialized.missed_iocs[0].value, "192.168.58.50");
+        assert_eq!(deserialized.found_techniques.len(), 1);
+        assert_eq!(deserialized.evidence_count, 42);
+        assert_eq!(deserialized.highest_pyramid_level, 5);
+        assert!(deserialized.alert_fired);
+        assert!(deserialized.investigation_completed);
+        assert_eq!(deserialized.time_to_first_evidence, Some(12.5));
+        assert_eq!(deserialized.total_tokens, 50000);
+        assert_eq!(deserialized.model, "gpt-4.1");
+    }
+
+    #[test]
+    fn test_serde_missing_optional_fields() {
+        // Minimal JSON with only required fields — optional/defaulted fields omitted
+        let json = r#"{
+            "evaluation_id": "eval-min",
+            "operation_id": "op-min",
+            "evaluated_at": "2026-01-15T10:00:00Z",
+            "overall_score": 0.5,
+            "detection_score": 0.5,
+            "quality_score": 0.5,
+            "completeness_score": 0.5,
+            "stage_score": 0.5,
+            "ioc_detection_rate": 0.5,
+            "technique_coverage": 0.5,
+            "pyramid_elevation_score": 0.5,
+            "timeline_accuracy": 0.5,
+            "evidence_quality_score": 0.5,
+            "evidence_count": 0,
+            "highest_pyramid_level": 0,
+            "ttp_count": 0,
+            "alert_fired": false,
+            "investigation_started": false,
+            "investigation_completed": false
+        }"#;
+        let r: EvaluationResult = serde_json::from_str(json).unwrap();
+        assert_eq!(r.evaluation_id, "eval-min");
+        assert!(r.investigation_id.is_none());
+        assert!(r.final_stage.is_none());
+        assert!(r.stages_completed.is_empty());
+        assert!(r.missed_iocs.is_empty());
+        assert!(r.missed_techniques.is_empty());
+        assert!(r.found_iocs.is_empty());
+        assert!(r.found_techniques.is_empty());
+        assert!(r.time_to_first_evidence.is_none());
+        assert_eq!(r.total_tokens, 0);
+        assert_eq!(r.prompt_tokens, 0);
+        assert_eq!(r.completion_tokens, 0);
+        assert_eq!(r.estimated_cost_usd, 0.0);
+        assert!(r.model.is_empty());
+        assert_eq!(r.duration_seconds, 0.0);
+        assert!(r.error.is_none());
+    }
+
+    // ─── Grade boundary tests ───────────────────────────────────────────────
+
+    #[test]
+    fn test_grade_boundaries() {
+        // Exact boundaries
+        let at_90 = EvaluationResult {
+            overall_score: 0.9,
+            ..Default::default()
+        };
+        assert_eq!(at_90.grade(), "A");
+
+        let just_below_90 = EvaluationResult {
+            overall_score: 0.8999,
+            ..Default::default()
+        };
+        assert_eq!(just_below_90.grade(), "B");
+
+        let at_80 = EvaluationResult {
+            overall_score: 0.8,
+            ..Default::default()
+        };
+        assert_eq!(at_80.grade(), "B");
+
+        let just_below_80 = EvaluationResult {
+            overall_score: 0.7999,
+            ..Default::default()
+        };
+        assert_eq!(just_below_80.grade(), "C");
+
+        let at_70 = EvaluationResult {
+            overall_score: 0.7,
+            ..Default::default()
+        };
+        assert_eq!(at_70.grade(), "C");
+
+        let just_below_70 = EvaluationResult {
+            overall_score: 0.6999,
+            ..Default::default()
+        };
+        assert_eq!(just_below_70.grade(), "D");
+
+        let at_60 = EvaluationResult {
+            overall_score: 0.6,
+            ..Default::default()
+        };
+        assert_eq!(at_60.grade(), "D");
+
+        let just_below_60 = EvaluationResult {
+            overall_score: 0.5999,
+            ..Default::default()
+        };
+        assert_eq!(just_below_60.grade(), "F");
+
+        let zero = EvaluationResult {
+            overall_score: 0.0,
+            ..Default::default()
+        };
+        assert_eq!(zero.grade(), "F");
+
+        let perfect = EvaluationResult {
+            overall_score: 1.0,
+            ..Default::default()
+        };
+        assert_eq!(perfect.grade(), "A");
+    }
+
+    // ─── passed() edge cases ────────────────────────────────────────────────
+
+    #[test]
+    fn test_passed_boundary_exactly_half() {
+        let r = EvaluationResult {
+            overall_score: 0.5,
+            ioc_detection_rate: 0.5,
+            technique_coverage: 0.5,
+            ..Default::default()
+        };
+        assert!(r.passed());
+    }
+
+    #[test]
+    fn test_passed_fails_overall_below_threshold() {
+        let r = EvaluationResult {
+            overall_score: 0.49,
+            ioc_detection_rate: 0.8,
+            technique_coverage: 0.8,
+            ..Default::default()
+        };
+        assert!(!r.passed());
+    }
+
+    #[test]
+    fn test_passed_fails_ioc_below_threshold() {
+        let r = EvaluationResult {
+            overall_score: 0.8,
+            ioc_detection_rate: 0.49,
+            technique_coverage: 0.8,
+            ..Default::default()
+        };
+        assert!(!r.passed());
+    }
+
+    // ─── investigation_status() via to_summary() ────────────────────────────
+
+    #[test]
+    fn test_investigation_status_completed() {
+        let r = EvaluationResult {
+            investigation_started: true,
+            investigation_completed: true,
+            ..Default::default()
+        };
+        let summary = r.to_summary();
+        assert!(summary.contains("Investigation: Completed"));
+    }
+
+    #[test]
+    fn test_investigation_status_started() {
+        let r = EvaluationResult {
+            investigation_started: true,
+            investigation_completed: false,
+            ..Default::default()
+        };
+        let summary = r.to_summary();
+        assert!(summary.contains("Investigation: Started"));
+    }
+
+    #[test]
+    fn test_investigation_status_not_started() {
+        let r = EvaluationResult {
+            investigation_started: false,
+            investigation_completed: false,
+            ..Default::default()
+        };
+        let summary = r.to_summary();
+        assert!(summary.contains("Investigation: Not Started"));
+    }
+
+    // ─── to_value() structure ───────────────────────────────────────────────
+
+    #[test]
+    fn test_to_value_contains_all_sections() {
+        let r = EvaluationResult {
+            evaluation_id: "eval-struct".to_string(),
+            operation_id: "op-struct".to_string(),
+            overall_score: 0.7,
+            alert_fired: true,
+            total_tokens: 1000,
+            prompt_tokens: 600,
+            completion_tokens: 400,
+            estimated_cost_usd: 0.01,
+            ..Default::default()
+        };
+        let val = r.to_value();
+
+        // Check all top-level sections exist
+        assert!(val.get("evaluation_id").is_some());
+        assert!(val.get("operation_id").is_some());
+        assert!(val.get("scores").is_some());
+        assert!(val.get("gaps").is_some());
+        assert!(val.get("stats").is_some());
+        assert!(val.get("status").is_some());
+        assert!(val.get("timing").is_some());
+        assert!(val.get("cost").is_some());
+        assert!(val.get("metadata").is_some());
+
+        // Check nested values
+        assert_eq!(val["status"]["alert_fired"], true);
+        assert_eq!(val["status"]["passed"], false); // 0.7 overall but 0.0 ioc/tech
+        assert_eq!(val["cost"]["total_tokens"], 1000);
+        assert_eq!(val["cost"]["prompt_tokens"], 600);
+        assert_eq!(val["cost"]["completion_tokens"], 400);
+    }
+
+    #[test]
+    fn test_to_value_gaps_counts() {
+        let r = EvaluationResult {
+            found_iocs: vec![
+                ExpectedIOC {
+                    ioc_type: "ip".to_string(),
+                    value: "192.168.58.10".to_string(),
+                    pyramid_level: crate::models::PyramidLevel::IpAddresses,
+                    mitre_techniques: vec![],
+                    required: true,
+                    source: "".to_string(),
+                },
+                ExpectedIOC {
+                    ioc_type: "ip".to_string(),
+                    value: "192.168.58.20".to_string(),
+                    pyramid_level: crate::models::PyramidLevel::IpAddresses,
+                    mitre_techniques: vec![],
+                    required: true,
+                    source: "".to_string(),
+                },
+            ],
+            missed_iocs: vec![ExpectedIOC {
+                ioc_type: "hostname".to_string(),
+                value: "dc01.contoso.local".to_string(),
+                pyramid_level: crate::models::PyramidLevel::DomainNames,
+                mitre_techniques: vec![],
+                required: true,
+                source: "".to_string(),
+            }],
+            ..Default::default()
+        };
+        let val = r.to_value();
+        assert_eq!(val["gaps"]["found_iocs_count"], 2);
+        assert_eq!(val["gaps"]["missed_iocs"].as_array().unwrap().len(), 1);
+    }
+
+    // ─── to_summary() formatting ────────────────────────────────────────────
+
+    #[test]
+    fn test_to_summary_includes_timing_when_present() {
+        let r = EvaluationResult {
+            duration_seconds: 120.0,
+            time_to_first_evidence: Some(5.5),
+            time_to_technique_identification: Some(30.0),
+            time_to_ttp_elevation: Some(60.0),
+            ..Default::default()
+        };
+        let summary = r.to_summary();
+        assert!(summary.contains("Duration: 120.0s"));
+        assert!(summary.contains("Time to First Evidence: 5.5s"));
+        assert!(summary.contains("Time to Technique ID: 30.0s"));
+        assert!(summary.contains("Time to TTP Elevation: 60.0s"));
+    }
+
+    #[test]
+    fn test_to_summary_excludes_timing_when_absent() {
+        let r = EvaluationResult::default();
+        let summary = r.to_summary();
+        assert!(!summary.contains("Timing:"));
+        assert!(!summary.contains("Duration:"));
+    }
+
+    #[test]
+    fn test_to_summary_includes_cost_when_tokens_present() {
+        let r = EvaluationResult {
+            total_tokens: 5000,
+            prompt_tokens: 3000,
+            completion_tokens: 2000,
+            estimated_cost_usd: 0.025,
+            ..Default::default()
+        };
+        let summary = r.to_summary();
+        assert!(summary.contains("Cost:"));
+        assert!(summary.contains("Tokens: 5000"));
+        assert!(summary.contains("Estimated Cost: $0.0250"));
+    }
+
+    #[test]
+    fn test_to_summary_excludes_cost_when_no_tokens() {
+        let r = EvaluationResult::default();
+        let summary = r.to_summary();
+        assert!(!summary.contains("Cost:"));
+    }
+
+    #[test]
+    fn test_to_summary_shows_missed_techniques() {
+        let r = EvaluationResult {
+            missed_techniques: vec![
+                ExpectedTechnique {
+                    technique_id: "T1003".to_string(),
+                    technique_name: "OS Credential Dumping".to_string(),
+                    required: true,
+                    parent_id: None,
+                },
+                ExpectedTechnique {
+                    technique_id: "T1558".to_string(),
+                    technique_name: "Steal or Forge Kerberos Tickets".to_string(),
+                    required: true,
+                    parent_id: None,
+                },
+            ],
+            ..Default::default()
+        };
+        let summary = r.to_summary();
+        assert!(summary.contains("Missed Techniques:"));
+        assert!(summary.contains("T1003: OS Credential Dumping"));
+        assert!(summary.contains("T1558: Steal or Forge Kerberos Tickets"));
+    }
+
+    #[test]
+    fn test_to_summary_truncates_missed_techniques_over_five() {
+        let techniques: Vec<ExpectedTechnique> = (0..8)
+            .map(|i| ExpectedTechnique {
+                technique_id: format!("T100{i}"),
+                technique_name: format!("Technique {i}"),
+                required: true,
+                parent_id: None,
+            })
+            .collect();
+        let r = EvaluationResult {
+            missed_techniques: techniques,
+            ..Default::default()
+        };
+        let summary = r.to_summary();
+        assert!(summary.contains("... and 3 more"));
+    }
+
+    #[test]
+    fn test_to_summary_shows_error() {
+        let r = EvaluationResult {
+            error: Some("LLM rate limited".to_string()),
+            ..Default::default()
+        };
+        let summary = r.to_summary();
+        assert!(summary.contains("Error: LLM rate limited"));
+    }
+
+    // ─── DatasetEvaluationResult edge cases ─────────────────────────────────
+
+    #[test]
+    fn test_dataset_empty_results() {
+        let ds = DatasetEvaluationResult {
+            dataset_name: "empty".to_string(),
+            evaluated_at: Utc::now(),
+            results: vec![],
+        };
+        assert_eq!(ds.count(), 0);
+        assert_eq!(ds.pass_rate(), 0.0);
+        assert_eq!(ds.avg_overall_score(), 0.0);
+        assert_eq!(ds.avg_ioc_detection_rate(), 0.0);
+        assert_eq!(ds.avg_technique_coverage(), 0.0);
+        assert_eq!(ds.alert_fire_rate(), 0.0);
+        assert_eq!(ds.investigation_completion_rate(), 0.0);
+        assert_eq!(ds.total_cost_usd(), 0.0);
+        assert_eq!(ds.total_tokens(), 0);
+        assert_eq!(ds.avg_duration_seconds(), 0.0);
+    }
+
+    #[test]
+    fn test_dataset_all_passing() {
+        let ds = DatasetEvaluationResult {
+            dataset_name: "all-pass".to_string(),
+            evaluated_at: Utc::now(),
+            results: vec![
+                EvaluationResult {
+                    overall_score: 0.9,
+                    ioc_detection_rate: 0.8,
+                    technique_coverage: 0.7,
+                    ..Default::default()
+                },
+                EvaluationResult {
+                    overall_score: 0.85,
+                    ioc_detection_rate: 0.75,
+                    technique_coverage: 0.65,
+                    ..Default::default()
+                },
+            ],
+        };
+        assert!((ds.pass_rate() - 1.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_dataset_all_failing() {
+        let ds = DatasetEvaluationResult {
+            dataset_name: "all-fail".to_string(),
+            evaluated_at: Utc::now(),
+            results: vec![
+                EvaluationResult {
+                    overall_score: 0.3,
+                    ioc_detection_rate: 0.2,
+                    technique_coverage: 0.1,
+                    ..Default::default()
+                },
+                EvaluationResult {
+                    overall_score: 0.1,
+                    ioc_detection_rate: 0.1,
+                    technique_coverage: 0.1,
+                    ..Default::default()
+                },
+            ],
+        };
+        assert_eq!(ds.pass_rate(), 0.0);
+    }
+
+    #[test]
+    fn test_dataset_to_value_structure() {
+        let ds = DatasetEvaluationResult {
+            dataset_name: "test-ds".to_string(),
+            evaluated_at: Utc::now(),
+            results: vec![EvaluationResult {
+                overall_score: 0.8,
+                estimated_cost_usd: 0.05,
+                total_tokens: 10000,
+                duration_seconds: 60.0,
+                ..Default::default()
+            }],
+        };
+        let val = ds.to_value();
+        assert_eq!(val["dataset_name"], "test-ds");
+        assert_eq!(val["summary"]["count"], 1);
+        assert_eq!(val["summary"]["total_tokens"], 10000);
+        assert!(val["results"].as_array().unwrap().len() == 1);
+    }
+
+    #[test]
+    fn test_dataset_to_summary_grade_distribution() {
+        let ds = DatasetEvaluationResult {
+            dataset_name: "grade-dist".to_string(),
+            evaluated_at: Utc::now(),
+            results: vec![
+                EvaluationResult {
+                    overall_score: 0.95,
+                    ..Default::default()
+                },
+                EvaluationResult {
+                    overall_score: 0.85,
+                    ..Default::default()
+                },
+                EvaluationResult {
+                    overall_score: 0.75,
+                    ..Default::default()
+                },
+                EvaluationResult {
+                    overall_score: 0.65,
+                    ..Default::default()
+                },
+                EvaluationResult {
+                    overall_score: 0.40,
+                    ..Default::default()
+                },
+            ],
+        };
+        let summary = ds.to_summary();
+        assert!(summary.contains("Grade Distribution:"));
+        assert!(summary.contains("A:"));
+        assert!(summary.contains("B:"));
+        assert!(summary.contains("C:"));
+        assert!(summary.contains("D:"));
+        assert!(summary.contains("F:"));
+    }
+
+    #[test]
+    fn test_dataset_serde_roundtrip() {
+        let ds = DatasetEvaluationResult {
+            dataset_name: "roundtrip".to_string(),
+            evaluated_at: Utc::now(),
+            results: vec![EvaluationResult {
+                evaluation_id: "e1".to_string(),
+                overall_score: 0.75,
+                ..Default::default()
+            }],
+        };
+        let json = serde_json::to_string(&ds).unwrap();
+        let deserialized: DatasetEvaluationResult = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.dataset_name, "roundtrip");
+        assert_eq!(deserialized.results.len(), 1);
+        assert!((deserialized.results[0].overall_score - 0.75).abs() < f64::EPSILON);
+    }
+
+    // ─── avg() helper ───────────────────────────────────────────────────────
+
+    #[test]
+    fn test_avg_empty() {
+        assert_eq!(avg(&[], |r| r.overall_score), 0.0);
+    }
+
+    #[test]
+    fn test_avg_single() {
+        let results = vec![EvaluationResult {
+            overall_score: 0.8,
+            ..Default::default()
+        }];
+        assert!((avg(&results, |r| r.overall_score) - 0.8).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_avg_multiple() {
+        let results = vec![
+            EvaluationResult {
+                overall_score: 0.6,
+                ..Default::default()
+            },
+            EvaluationResult {
+                overall_score: 0.8,
+                ..Default::default()
+            },
+            EvaluationResult {
+                overall_score: 1.0,
+                ..Default::default()
+            },
+        ];
+        assert!((avg(&results, |r| r.overall_score) - 0.8).abs() < f64::EPSILON);
+    }
 }

@@ -223,3 +223,488 @@ pub async fn raise_child(args: &Value) -> Result<ToolOutput> {
     // raiseChild performs multiple secretsdumps internally — needs extra time
     cmd.timeout_secs(300).execute().await
 }
+
+// ─── Tests ──────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use crate::args::{optional_str, required_str};
+    use crate::credentials;
+    use serde_json::json;
+
+    // ── find_delegation arg validation ──────────────────────────────────
+
+    #[test]
+    fn test_find_delegation_requires_domain() {
+        let args = json!({
+            "username": "admin",
+            "dc_ip": "192.168.58.10",
+            "password": "P@ssw0rd!"
+        });
+        assert!(required_str(&args, "domain").is_err());
+    }
+
+    #[test]
+    fn test_find_delegation_requires_username() {
+        let args = json!({
+            "domain": "contoso.local",
+            "dc_ip": "192.168.58.10",
+            "password": "P@ssw0rd!"
+        });
+        assert!(required_str(&args, "username").is_err());
+    }
+
+    #[test]
+    fn test_find_delegation_requires_dc_ip() {
+        let args = json!({
+            "domain": "contoso.local",
+            "username": "admin",
+            "password": "P@ssw0rd!"
+        });
+        assert!(required_str(&args, "dc_ip").is_err());
+    }
+
+    #[test]
+    fn test_find_delegation_with_password() {
+        let args = json!({
+            "domain": "contoso.local",
+            "username": "admin",
+            "password": "P@ssw0rd!",
+            "dc_ip": "192.168.58.10"
+        });
+        let domain = required_str(&args, "domain").unwrap();
+        let username = required_str(&args, "username").unwrap();
+        let password = optional_str(&args, "password");
+        assert_eq!(domain, "contoso.local");
+        assert_eq!(username, "admin");
+        assert_eq!(password, Some("P@ssw0rd!"));
+    }
+
+    #[test]
+    fn test_find_delegation_with_hash() {
+        let args = json!({
+            "domain": "contoso.local",
+            "username": "admin",
+            "hash": "aad3b435b51404eeaad3b435b51404ee:31d6cfe0d16ae931b73c59d7e0c089c0",
+            "dc_ip": "192.168.58.10"
+        });
+        let hash = optional_str(&args, "hash").unwrap();
+        let hash_args = credentials::hash_args(hash);
+        assert_eq!(hash_args[0], "-hashes");
+        // Hash already has colon, should be passed as-is
+        assert!(hash_args[1].contains(':'));
+    }
+
+    #[test]
+    fn test_find_delegation_requires_password_or_hash() {
+        let args = json!({
+            "domain": "contoso.local",
+            "username": "admin",
+            "dc_ip": "192.168.58.10"
+        });
+        let password = optional_str(&args, "password");
+        let hash = optional_str(&args, "hash");
+        assert!(password.is_none());
+        assert!(hash.is_none());
+    }
+
+    // ── find_delegation integration error ──────────────────────────────
+
+    #[test]
+    fn test_find_delegation_no_auth_errors() {
+        let args = json!({
+            "domain": "contoso.local",
+            "username": "admin",
+            "dc_ip": "192.168.58.10"
+        });
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let result = rt.block_on(super::find_delegation(&args));
+        // Should bail with "requires either password or hash"
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("password or hash"));
+    }
+
+    // ── s4u_attack arg validation ──────────────────────────────────────
+
+    #[test]
+    fn test_s4u_attack_requires_target_spn() {
+        let args = json!({
+            "domain": "contoso.local",
+            "username": "svc_web$",
+            "password": "P@ssw0rd!",
+            "impersonate": "Administrator"
+        });
+        assert!(required_str(&args, "target_spn").is_err());
+    }
+
+    #[test]
+    fn test_s4u_attack_requires_impersonate() {
+        let args = json!({
+            "domain": "contoso.local",
+            "username": "svc_web$",
+            "password": "P@ssw0rd!",
+            "target_spn": "cifs/dc01.contoso.local"
+        });
+        assert!(required_str(&args, "impersonate").is_err());
+    }
+
+    #[test]
+    fn test_s4u_attack_all_args() {
+        let args = json!({
+            "domain": "contoso.local",
+            "username": "svc_web$",
+            "password": "P@ssw0rd!",
+            "target_spn": "cifs/dc01.contoso.local",
+            "impersonate": "Administrator",
+            "dc_ip": "192.168.58.10"
+        });
+        assert_eq!(required_str(&args, "domain").unwrap(), "contoso.local");
+        assert_eq!(
+            required_str(&args, "target_spn").unwrap(),
+            "cifs/dc01.contoso.local"
+        );
+        assert_eq!(required_str(&args, "impersonate").unwrap(), "Administrator");
+        assert_eq!(optional_str(&args, "dc_ip"), Some("192.168.58.10"));
+    }
+
+    #[test]
+    fn test_s4u_attack_no_auth_errors() {
+        let args = json!({
+            "domain": "contoso.local",
+            "username": "svc_web$",
+            "target_spn": "cifs/dc01.contoso.local",
+            "impersonate": "Administrator"
+        });
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let result = rt.block_on(super::s4u_attack(&args));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("password or hash"));
+    }
+
+    // ── generate_golden_ticket arg validation ──────────────────────────
+
+    #[test]
+    fn test_golden_ticket_requires_krbtgt_hash() {
+        let args = json!({
+            "domain_sid": "S-1-5-21-1234567890-987654321-1122334455",
+            "domain": "contoso.local"
+        });
+        assert!(required_str(&args, "krbtgt_hash").is_err());
+    }
+
+    #[test]
+    fn test_golden_ticket_requires_domain_sid() {
+        let args = json!({
+            "krbtgt_hash": "31d6cfe0d16ae931b73c59d7e0c089c0",
+            "domain": "contoso.local"
+        });
+        assert!(required_str(&args, "domain_sid").is_err());
+    }
+
+    #[test]
+    fn test_golden_ticket_default_username() {
+        let args = json!({
+            "krbtgt_hash": "31d6cfe0d16ae931b73c59d7e0c089c0",
+            "domain_sid": "S-1-5-21-1234567890-987654321-1122334455",
+            "domain": "contoso.local"
+        });
+        let username = optional_str(&args, "username").unwrap_or("Administrator");
+        assert_eq!(username, "Administrator");
+    }
+
+    #[test]
+    fn test_golden_ticket_custom_username() {
+        let args = json!({
+            "krbtgt_hash": "31d6cfe0d16ae931b73c59d7e0c089c0",
+            "domain_sid": "S-1-5-21-1234567890-987654321-1122334455",
+            "domain": "contoso.local",
+            "username": "fakeadmin"
+        });
+        let username = optional_str(&args, "username").unwrap_or("Administrator");
+        assert_eq!(username, "fakeadmin");
+    }
+
+    #[test]
+    fn test_golden_ticket_extra_sid_optional() {
+        let args = json!({
+            "krbtgt_hash": "31d6cfe0d16ae931b73c59d7e0c089c0",
+            "domain_sid": "S-1-5-21-1234567890-987654321-1122334455",
+            "domain": "contoso.local",
+            "extra_sid": "S-1-5-21-0000000000-000000000-000000000-519"
+        });
+        assert_eq!(
+            optional_str(&args, "extra_sid"),
+            Some("S-1-5-21-0000000000-000000000-000000000-519")
+        );
+    }
+
+    #[test]
+    fn test_golden_ticket_extra_sid_absent() {
+        let args = json!({
+            "krbtgt_hash": "31d6cfe0d16ae931b73c59d7e0c089c0",
+            "domain_sid": "S-1-5-21-1234567890-987654321-1122334455",
+            "domain": "contoso.local"
+        });
+        assert!(optional_str(&args, "extra_sid").is_none());
+    }
+
+    // ── add_computer arg validation ────────────────────────────────────
+
+    #[test]
+    fn test_add_computer_all_required_args() {
+        let args = json!({
+            "domain": "contoso.local",
+            "username": "jsmith",
+            "password": "P@ssw0rd!",
+            "computer_name": "EVIL$",
+            "computer_password": "CompP@ss123!",
+            "dc_ip": "192.168.58.10"
+        });
+        assert_eq!(required_str(&args, "computer_name").unwrap(), "EVIL$");
+        assert_eq!(
+            required_str(&args, "computer_password").unwrap(),
+            "CompP@ss123!"
+        );
+        // Verify the target string format
+        let domain = required_str(&args, "domain").unwrap();
+        let username = required_str(&args, "username").unwrap();
+        let password = required_str(&args, "password").unwrap();
+        let target = format!("{domain}/{username}:{password}");
+        assert_eq!(target, "contoso.local/jsmith:P@ssw0rd!");
+    }
+
+    #[test]
+    fn test_add_computer_missing_computer_name() {
+        let args = json!({
+            "domain": "contoso.local",
+            "username": "jsmith",
+            "password": "P@ssw0rd!",
+            "computer_password": "CompP@ss123!",
+            "dc_ip": "192.168.58.10"
+        });
+        assert!(required_str(&args, "computer_name").is_err());
+    }
+
+    // ── addspn arg validation ──────────────────────────────────────────
+
+    #[test]
+    fn test_addspn_all_required_args() {
+        let args = json!({
+            "domain": "contoso.local",
+            "username": "admin",
+            "password": "P@ssw0rd!",
+            "dc_ip": "192.168.58.10",
+            "action": "add",
+            "target_account": "svc_sql",
+            "spn": "MSSQLSvc/sql01.contoso.local:1433"
+        });
+        assert_eq!(required_str(&args, "action").unwrap(), "add");
+        assert_eq!(required_str(&args, "target_account").unwrap(), "svc_sql");
+        assert_eq!(
+            required_str(&args, "spn").unwrap(),
+            "MSSQLSvc/sql01.contoso.local:1433"
+        );
+    }
+
+    #[test]
+    fn test_addspn_missing_spn() {
+        let args = json!({
+            "domain": "contoso.local",
+            "username": "admin",
+            "password": "P@ssw0rd!",
+            "dc_ip": "192.168.58.10",
+            "action": "add",
+            "target_account": "svc_sql"
+        });
+        assert!(required_str(&args, "spn").is_err());
+    }
+
+    // ── rbcd_write arg validation ──────────────────────────────────────
+
+    #[test]
+    fn test_rbcd_write_all_args() {
+        let args = json!({
+            "domain": "contoso.local",
+            "username": "admin",
+            "password": "P@ssw0rd!",
+            "target_computer": "dc01$",
+            "attacker_sid": "S-1-5-21-1234567890-987654321-1122334455-1234",
+            "dc_ip": "192.168.58.10"
+        });
+        assert_eq!(required_str(&args, "target_computer").unwrap(), "dc01$");
+        assert_eq!(
+            required_str(&args, "attacker_sid").unwrap(),
+            "S-1-5-21-1234567890-987654321-1122334455-1234"
+        );
+        // Verify target format
+        let domain = required_str(&args, "domain").unwrap();
+        let username = required_str(&args, "username").unwrap();
+        let password = required_str(&args, "password").unwrap();
+        let target = format!("{domain}/{username}:{password}");
+        assert_eq!(target, "contoso.local/admin:P@ssw0rd!");
+    }
+
+    #[test]
+    fn test_rbcd_write_missing_attacker_sid() {
+        let args = json!({
+            "domain": "contoso.local",
+            "username": "admin",
+            "password": "P@ssw0rd!",
+            "target_computer": "dc01$",
+            "dc_ip": "192.168.58.10"
+        });
+        assert!(required_str(&args, "attacker_sid").is_err());
+    }
+
+    // ── krbrelayup arg validation ──────────────────────────────────────
+
+    #[test]
+    fn test_krbrelayup_required_args_only() {
+        let args = json!({
+            "domain": "contoso.local",
+            "dc_ip": "192.168.58.10"
+        });
+        assert_eq!(required_str(&args, "domain").unwrap(), "contoso.local");
+        assert_eq!(required_str(&args, "dc_ip").unwrap(), "192.168.58.10");
+        assert!(optional_str(&args, "method").is_none());
+        assert!(optional_str(&args, "create_user").is_none());
+        assert!(optional_str(&args, "create_password").is_none());
+    }
+
+    #[test]
+    fn test_krbrelayup_with_optional_args() {
+        let args = json!({
+            "domain": "contoso.local",
+            "dc_ip": "192.168.58.10",
+            "method": "rbcd",
+            "create_user": "eviluser",
+            "create_password": "Ev1lP@ss!"
+        });
+        assert_eq!(optional_str(&args, "method"), Some("rbcd"));
+        assert_eq!(optional_str(&args, "create_user"), Some("eviluser"));
+    }
+
+    // ── raise_child arg validation ─────────────────────────────────────
+
+    #[test]
+    fn test_raise_child_requires_child_domain() {
+        let args = json!({
+            "username": "admin",
+            "password": "P@ssw0rd!"
+        });
+        assert!(required_str(&args, "child_domain").is_err());
+    }
+
+    #[test]
+    fn test_raise_child_no_auth_errors() {
+        let args = json!({
+            "child_domain": "child.contoso.local",
+            "username": "admin"
+        });
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let result = rt.block_on(super::raise_child(&args));
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("password' or 'hash'"));
+    }
+
+    #[test]
+    fn test_raise_child_with_password_target_format() {
+        let args = json!({
+            "child_domain": "child.contoso.local",
+            "username": "admin",
+            "password": "P@ssw0rd!"
+        });
+        let child_domain = required_str(&args, "child_domain").unwrap();
+        let username = required_str(&args, "username").unwrap();
+        let password = optional_str(&args, "password").unwrap();
+        let target = format!("{child_domain}/{username}:{password}");
+        assert_eq!(target, "child.contoso.local/admin:P@ssw0rd!");
+    }
+
+    #[test]
+    fn test_raise_child_with_hash_target_format() {
+        let args = json!({
+            "child_domain": "child.contoso.local",
+            "username": "admin",
+            "hash": "31d6cfe0d16ae931b73c59d7e0c089c0"
+        });
+        let child_domain = required_str(&args, "child_domain").unwrap();
+        let username = required_str(&args, "username").unwrap();
+        let hash = optional_str(&args, "hash").unwrap();
+        let target = format!("{child_domain}/{username}");
+        let hash_args = credentials::hash_args(hash);
+        assert_eq!(target, "child.contoso.local/admin");
+        assert_eq!(
+            hash_args,
+            vec!["-hashes", ":31d6cfe0d16ae931b73c59d7e0c089c0"]
+        );
+    }
+
+    #[test]
+    fn test_raise_child_target_domain_optional() {
+        let args = json!({
+            "child_domain": "child.contoso.local",
+            "username": "admin",
+            "password": "P@ssw0rd!",
+            "target_domain": "contoso.local"
+        });
+        assert_eq!(optional_str(&args, "target_domain"), Some("contoso.local"));
+    }
+
+    // ── credential helper tests ────────────────────────────────────────
+
+    #[test]
+    fn test_hash_args_with_nt_only() {
+        let hash_args = credentials::hash_args("31d6cfe0d16ae931b73c59d7e0c089c0");
+        assert_eq!(hash_args[0], "-hashes");
+        assert_eq!(hash_args[1], ":31d6cfe0d16ae931b73c59d7e0c089c0");
+    }
+
+    #[test]
+    fn test_hash_args_with_lm_nt() {
+        let hash_args = credentials::hash_args(
+            "aad3b435b51404eeaad3b435b51404ee:31d6cfe0d16ae931b73c59d7e0c089c0",
+        );
+        assert_eq!(hash_args[0], "-hashes");
+        assert_eq!(
+            hash_args[1],
+            "aad3b435b51404eeaad3b435b51404ee:31d6cfe0d16ae931b73c59d7e0c089c0"
+        );
+    }
+
+    #[test]
+    fn test_impacket_auth_with_hash() {
+        let (target, extra) = credentials::impacket_auth(
+            Some("contoso.local"),
+            "admin",
+            None,
+            Some("31d6cfe0d16ae931b73c59d7e0c089c0"),
+            "192.168.58.10",
+        );
+        assert_eq!(target, "contoso.local/admin@192.168.58.10");
+        assert_eq!(extra, vec!["-hashes", ":31d6cfe0d16ae931b73c59d7e0c089c0"]);
+    }
+
+    #[test]
+    fn test_impacket_auth_with_password() {
+        let (target, extra) = credentials::impacket_auth(
+            Some("contoso.local"),
+            "admin",
+            Some("P@ssw0rd!"),
+            None,
+            "192.168.58.10",
+        );
+        assert_eq!(target, "contoso.local/admin:P@ssw0rd!@192.168.58.10");
+        assert!(extra.is_empty());
+    }
+
+    #[test]
+    fn test_kerberos_env() {
+        let (key, val) = credentials::kerberos_env("/tmp/admin.ccache");
+        assert_eq!(key, "KRB5CCNAME");
+        assert_eq!(val, "/tmp/admin.ccache");
+    }
+}
