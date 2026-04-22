@@ -636,4 +636,600 @@ mod tests {
             assert_eq!(results[2], None);
         });
     }
+
+    // -- string commands -------------------------------------------------------
+
+    #[test]
+    fn setex_stores_value() {
+        use redis::AsyncCommands;
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let mut conn = MockRedisConnection::new();
+            let _: () = redis::cmd("SETEX")
+                .arg("k")
+                .arg(60)
+                .arg("val")
+                .query_async(&mut conn)
+                .await
+                .unwrap();
+            let v: String = conn.get("k").await.unwrap();
+            assert_eq!(v, "val");
+        });
+    }
+
+    #[test]
+    fn setnx_only_sets_if_absent() {
+        use redis::AsyncCommands;
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let mut conn = MockRedisConnection::new();
+            let r1: i64 = redis::cmd("SETNX")
+                .arg("k")
+                .arg("first")
+                .query_async(&mut conn)
+                .await
+                .unwrap();
+            assert_eq!(r1, 1);
+            let r2: i64 = redis::cmd("SETNX")
+                .arg("k")
+                .arg("second")
+                .query_async(&mut conn)
+                .await
+                .unwrap();
+            assert_eq!(r2, 0);
+            let v: String = conn.get("k").await.unwrap();
+            assert_eq!(v, "first");
+        });
+    }
+
+    #[test]
+    fn set_with_nx_flag() {
+        use redis::AsyncCommands;
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let mut conn = MockRedisConnection::new();
+            let _: () = conn.set("k", "original").await.unwrap();
+            // SET with NX should fail when key exists
+            let r: Value = redis::cmd("SET")
+                .arg("k")
+                .arg("new")
+                .arg("NX")
+                .query_async(&mut conn)
+                .await
+                .unwrap();
+            assert_eq!(r, Value::Nil);
+            let v: String = conn.get("k").await.unwrap();
+            assert_eq!(v, "original");
+        });
+    }
+
+    #[test]
+    fn del_removes_keys() {
+        use redis::AsyncCommands;
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let mut conn = MockRedisConnection::new();
+            let _: () = conn.set("a", "1").await.unwrap();
+            let _: () = conn.set("b", "2").await.unwrap();
+            let count: i64 = conn.del(&["a", "b", "nonexistent"]).await.unwrap();
+            assert_eq!(count, 2);
+            let v: Option<String> = conn.get("a").await.unwrap();
+            assert!(v.is_none());
+        });
+    }
+
+    #[test]
+    fn exists_checks_key() {
+        use redis::AsyncCommands;
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let mut conn = MockRedisConnection::new();
+            let e1: bool = conn.exists("missing").await.unwrap();
+            assert!(!e1);
+            let _: () = conn.set("present", "yes").await.unwrap();
+            let e2: bool = conn.exists("present").await.unwrap();
+            assert!(e2);
+        });
+    }
+
+    // -- hash commands ---------------------------------------------------------
+
+    #[test]
+    fn hset_and_hget() {
+        use redis::AsyncCommands;
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let mut conn = MockRedisConnection::new();
+            let _: () = conn.hset("myhash", "field1", "value1").await.unwrap();
+            let v: String = conn.hget("myhash", "field1").await.unwrap();
+            assert_eq!(v, "value1");
+            // Missing field
+            let missing: Option<String> = conn.hget("myhash", "nope").await.unwrap();
+            assert!(missing.is_none());
+            // Missing key
+            let no_key: Option<String> = conn.hget("nohash", "f").await.unwrap();
+            assert!(no_key.is_none());
+        });
+    }
+
+    #[test]
+    fn hgetall_returns_all_fields() {
+        use redis::AsyncCommands;
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let mut conn = MockRedisConnection::new();
+            let _: () = conn.hset("h", "a", "1").await.unwrap();
+            let _: () = conn.hset("h", "b", "2").await.unwrap();
+            let r: Value = redis::cmd("HGETALL")
+                .arg("h")
+                .query_async(&mut conn)
+                .await
+                .unwrap();
+            match r {
+                Value::Array(arr) => assert_eq!(arr.len(), 4), // 2 field-value pairs
+                _ => panic!("Expected array from HGETALL"),
+            }
+            // Empty hash
+            let r2: Value = redis::cmd("HGETALL")
+                .arg("nope")
+                .query_async(&mut conn)
+                .await
+                .unwrap();
+            match r2 {
+                Value::Array(arr) => assert!(arr.is_empty()),
+                _ => panic!("Expected empty array"),
+            }
+        });
+    }
+
+    #[test]
+    fn hsetnx_only_sets_if_field_absent() {
+        use redis::AsyncCommands;
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let mut conn = MockRedisConnection::new();
+            let r1: bool = conn.hset_nx("h", "f", "first").await.unwrap();
+            assert!(r1);
+            let r2: bool = conn.hset_nx("h", "f", "second").await.unwrap();
+            assert!(!r2);
+            let v: String = conn.hget("h", "f").await.unwrap();
+            assert_eq!(v, "first");
+        });
+    }
+
+    #[test]
+    fn hdel_removes_fields() {
+        use redis::AsyncCommands;
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let mut conn = MockRedisConnection::new();
+            let _: () = conn.hset("h", "a", "1").await.unwrap();
+            let _: () = conn.hset("h", "b", "2").await.unwrap();
+            let count: i64 = conn.hdel("h", "a").await.unwrap();
+            assert_eq!(count, 1);
+            let r: Value = redis::cmd("HGETALL")
+                .arg("h")
+                .query_async(&mut conn)
+                .await
+                .unwrap();
+            match r {
+                Value::Array(arr) => assert_eq!(arr.len(), 2), // 1 remaining field-value pair
+                _ => panic!("Expected array"),
+            }
+            // HDEL on missing key
+            let zero: i64 = conn.hdel("nope", "f").await.unwrap();
+            assert_eq!(zero, 0);
+        });
+    }
+
+    #[test]
+    fn hincrby_increments() {
+        use redis::AsyncCommands;
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let mut conn = MockRedisConnection::new();
+            let v1: i64 = conn.hincr("h", "counter", 5).await.unwrap();
+            assert_eq!(v1, 5);
+            let v2: i64 = conn.hincr("h", "counter", 3).await.unwrap();
+            assert_eq!(v2, 8);
+            let v3: i64 = conn.hincr("h", "counter", -2).await.unwrap();
+            assert_eq!(v3, 6);
+        });
+    }
+
+    // -- set commands ----------------------------------------------------------
+
+    #[test]
+    fn sadd_and_smembers() {
+        use redis::AsyncCommands;
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let mut conn = MockRedisConnection::new();
+            let added: i64 = conn.sadd("s", "a").await.unwrap();
+            assert_eq!(added, 1);
+            let dup: i64 = conn.sadd("s", "a").await.unwrap();
+            assert_eq!(dup, 0);
+            let _: () = conn.sadd("s", "b").await.unwrap();
+            let members: HashSet<String> = conn.smembers("s").await.unwrap();
+            assert_eq!(members.len(), 2);
+            assert!(members.contains("a"));
+            assert!(members.contains("b"));
+            // Empty set
+            let empty: HashSet<String> = conn.smembers("nope").await.unwrap();
+            assert!(empty.is_empty());
+        });
+    }
+
+    #[test]
+    fn srem_removes_members() {
+        use redis::AsyncCommands;
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let mut conn = MockRedisConnection::new();
+            let _: () = conn.sadd("s", "a").await.unwrap();
+            let _: () = conn.sadd("s", "b").await.unwrap();
+            let removed: i64 = conn.srem("s", "a").await.unwrap();
+            assert_eq!(removed, 1);
+            let members: HashSet<String> = conn.smembers("s").await.unwrap();
+            assert_eq!(members.len(), 1);
+            // SREM on missing set
+            let zero: i64 = conn.srem("nope", "x").await.unwrap();
+            assert_eq!(zero, 0);
+        });
+    }
+
+    // -- list commands ---------------------------------------------------------
+
+    #[test]
+    fn rpush_and_lrange() {
+        use redis::AsyncCommands;
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let mut conn = MockRedisConnection::new();
+            let _: () = conn.rpush("list", "a").await.unwrap();
+            let _: () = conn.rpush("list", "b").await.unwrap();
+            let _: () = conn.rpush("list", "c").await.unwrap();
+            let all: Vec<String> = conn.lrange("list", 0, -1).await.unwrap();
+            assert_eq!(all, vec!["a", "b", "c"]);
+            let sub: Vec<String> = conn.lrange("list", 1, 2).await.unwrap();
+            assert_eq!(sub, vec!["b", "c"]);
+            // Empty list
+            let empty: Vec<String> = conn.lrange("nope", 0, -1).await.unwrap();
+            assert!(empty.is_empty());
+        });
+    }
+
+    #[test]
+    fn lrange_negative_indices() {
+        use redis::AsyncCommands;
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let mut conn = MockRedisConnection::new();
+            let _: () = conn.rpush("l", "a").await.unwrap();
+            let _: () = conn.rpush("l", "b").await.unwrap();
+            let _: () = conn.rpush("l", "c").await.unwrap();
+            // Last 2 elements
+            let last2: Vec<String> = conn.lrange("l", -2, -1).await.unwrap();
+            assert_eq!(last2, vec!["b", "c"]);
+        });
+    }
+
+    #[test]
+    fn lpop_removes_from_front() {
+        use redis::AsyncCommands;
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let mut conn = MockRedisConnection::new();
+            let _: () = conn.rpush("l", "first").await.unwrap();
+            let _: () = conn.rpush("l", "second").await.unwrap();
+            let v: String = conn.lpop("l", None).await.unwrap();
+            assert_eq!(v, "first");
+            // Pop from empty
+            let empty: Option<String> = conn.lpop("empty", None).await.unwrap();
+            assert!(empty.is_none());
+        });
+    }
+
+    #[test]
+    fn rpop_removes_from_back() {
+        use redis::AsyncCommands;
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let mut conn = MockRedisConnection::new();
+            let _: () = conn.rpush("l", "first").await.unwrap();
+            let _: () = conn.rpush("l", "second").await.unwrap();
+            let v: String = conn.rpop("l", None).await.unwrap();
+            assert_eq!(v, "second");
+            // Pop on empty list
+            let empty: Option<String> = conn.rpop("empty", None).await.unwrap();
+            assert!(empty.is_none());
+        });
+    }
+
+    #[test]
+    fn llen_returns_length() {
+        use redis::AsyncCommands;
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let mut conn = MockRedisConnection::new();
+            let empty_len: i64 = conn.llen("nope").await.unwrap();
+            assert_eq!(empty_len, 0);
+            let _: () = conn.rpush("l", "a").await.unwrap();
+            let _: () = conn.rpush("l", "b").await.unwrap();
+            let len: i64 = conn.llen("l").await.unwrap();
+            assert_eq!(len, 2);
+        });
+    }
+
+    #[test]
+    fn lset_updates_element() {
+        use redis::AsyncCommands;
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let mut conn = MockRedisConnection::new();
+            let _: () = conn.rpush("l", "a").await.unwrap();
+            let _: () = conn.rpush("l", "b").await.unwrap();
+            let _: () = conn.lset("l", 1, "B").await.unwrap();
+            let all: Vec<String> = conn.lrange("l", 0, -1).await.unwrap();
+            assert_eq!(all, vec!["a", "B"]);
+        });
+    }
+
+    #[test]
+    fn lset_negative_index() {
+        use redis::AsyncCommands;
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let mut conn = MockRedisConnection::new();
+            let _: () = conn.rpush("l", "a").await.unwrap();
+            let _: () = conn.rpush("l", "b").await.unwrap();
+            let _: () = conn.lset("l", -1, "Z").await.unwrap();
+            let all: Vec<String> = conn.lrange("l", 0, -1).await.unwrap();
+            assert_eq!(all, vec!["a", "Z"]);
+        });
+    }
+
+    #[test]
+    fn lset_out_of_range_errors() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let mut conn = MockRedisConnection::new();
+            // LSET on missing key
+            let r: RedisResult<()> = redis::cmd("LSET")
+                .arg("nope")
+                .arg(0)
+                .arg("v")
+                .query_async(&mut conn)
+                .await;
+            assert!(r.is_err());
+        });
+    }
+
+    #[test]
+    fn brpop_pops_from_first_non_empty() {
+        use redis::AsyncCommands;
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let mut conn = MockRedisConnection::new();
+            let _: () = conn.rpush("q2", "item").await.unwrap();
+            // BRPOP q1 q2 0 — q1 is empty, should pop from q2
+            let r: Value = redis::cmd("BRPOP")
+                .arg("q1")
+                .arg("q2")
+                .arg(0)
+                .query_async(&mut conn)
+                .await
+                .unwrap();
+            match r {
+                Value::Array(arr) => {
+                    assert_eq!(arr.len(), 2);
+                }
+                _ => panic!("Expected array from BRPOP"),
+            }
+        });
+    }
+
+    #[test]
+    fn brpop_returns_nil_when_all_empty() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let mut conn = MockRedisConnection::new();
+            let r: Value = redis::cmd("BRPOP")
+                .arg("empty1")
+                .arg("empty2")
+                .arg(0)
+                .query_async(&mut conn)
+                .await
+                .unwrap();
+            assert_eq!(r, Value::Nil);
+        });
+    }
+
+    // -- sorted set commands ---------------------------------------------------
+
+    #[test]
+    fn zadd_adds_members() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let mut conn = MockRedisConnection::new();
+            let count: i64 = redis::cmd("ZADD")
+                .arg("zs")
+                .arg(1.0f64)
+                .arg("a")
+                .arg(2.0f64)
+                .arg("b")
+                .query_async(&mut conn)
+                .await
+                .unwrap();
+            assert_eq!(count, 2);
+        });
+    }
+
+    // -- scan ------------------------------------------------------------------
+
+    #[test]
+    fn scan_returns_matching_keys() {
+        use redis::AsyncCommands;
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let mut conn = MockRedisConnection::new();
+            let _: () = conn.set("ares:op:1:meta", "m").await.unwrap();
+            let _: () = conn.set("ares:op:1:creds", "c").await.unwrap();
+            let _: () = conn.set("other:key", "x").await.unwrap();
+            let r: Value = redis::cmd("SCAN")
+                .arg(0)
+                .arg("MATCH")
+                .arg("ares:op:*")
+                .query_async(&mut conn)
+                .await
+                .unwrap();
+            match r {
+                Value::Array(arr) => {
+                    assert_eq!(arr.len(), 2); // cursor + keys array
+                    if let Value::Array(ref keys) = arr[1] {
+                        assert_eq!(keys.len(), 2);
+                    }
+                }
+                _ => panic!("Expected array from SCAN"),
+            }
+        });
+    }
+
+    #[test]
+    fn scan_no_match_returns_all() {
+        use redis::AsyncCommands;
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let mut conn = MockRedisConnection::new();
+            let _: () = conn.set("a", "1").await.unwrap();
+            let _: () = conn.set("b", "2").await.unwrap();
+            let r: Value = redis::cmd("SCAN")
+                .arg(0)
+                .query_async(&mut conn)
+                .await
+                .unwrap();
+            match r {
+                Value::Array(arr) => {
+                    if let Value::Array(ref keys) = arr[1] {
+                        assert_eq!(keys.len(), 2);
+                    }
+                }
+                _ => panic!("Expected array from SCAN"),
+            }
+        });
+    }
+
+    // -- unsupported command ---------------------------------------------------
+
+    #[test]
+    fn unsupported_command_errors() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let mut conn = MockRedisConnection::new();
+            let r: RedisResult<Value> = redis::cmd("FLUSHALL").query_async(&mut conn).await;
+            assert!(r.is_err());
+        });
+    }
+
+    // -- get_db ----------------------------------------------------------------
+
+    #[test]
+    fn get_db_returns_zero() {
+        let conn = MockRedisConnection::new();
+        assert_eq!(conn.get_db(), 0);
+    }
+
+    // -- default ---------------------------------------------------------------
+
+    #[test]
+    fn default_creates_empty() {
+        use redis::AsyncCommands;
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let mut conn = MockRedisConnection::default();
+            let v: Option<String> = conn.get("anything").await.unwrap();
+            assert!(v.is_none());
+        });
+    }
 }
