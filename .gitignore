@@ -42,6 +42,9 @@ __pycache__/
 # Warp Gate
 .warpgate-sources/
 
+# direnv
+.envrc
+
 # Misc
 TODO
 .tool-versions
