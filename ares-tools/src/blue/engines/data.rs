@@ -216,3 +216,139 @@ pub fn make_output(body: &str) -> ToolOutput {
         success: true,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── pyramid_level_name ──────────────────────────────────────────
+
+    #[test]
+    fn pyramid_level_name_known_levels() {
+        assert_eq!(pyramid_level_name("hash_values"), "Hash Values");
+        assert_eq!(pyramid_level_name("ip_addresses"), "IP Addresses");
+        assert_eq!(pyramid_level_name("domain_names"), "Domain Names");
+        assert_eq!(
+            pyramid_level_name("network_host_artifacts"),
+            "Network/Host Artifacts"
+        );
+        assert_eq!(pyramid_level_name("tools"), "Tools");
+        assert_eq!(pyramid_level_name("ttps"), "TTPs");
+    }
+
+    #[test]
+    fn pyramid_level_name_unknown_passthrough() {
+        assert_eq!(pyramid_level_name("something_else"), "something_else");
+    }
+
+    // ── pyramid_level_value ─────────────────────────────────────────
+
+    #[test]
+    fn pyramid_level_value_ordering() {
+        assert_eq!(pyramid_level_value("hash_values"), 1);
+        assert_eq!(pyramid_level_value("ip_addresses"), 2);
+        assert_eq!(pyramid_level_value("domain_names"), 3);
+        assert_eq!(pyramid_level_value("network_host_artifacts"), 4);
+        assert_eq!(pyramid_level_value("tools"), 5);
+        assert_eq!(pyramid_level_value("ttps"), 6);
+    }
+
+    #[test]
+    fn pyramid_level_value_unknown_is_zero() {
+        assert_eq!(pyramid_level_value("unknown"), 0);
+    }
+
+    // ── technique_to_recipe ─────────────────────────────────────────
+
+    #[test]
+    fn technique_to_recipe_known_mappings() {
+        let map = technique_to_recipe();
+        assert_eq!(map.get("T1003.006"), Some(&"dcsync"));
+        assert_eq!(map.get("T1110"), Some(&"password_spray"));
+        assert_eq!(map.get("T1558.003"), Some(&"kerberos_attacks"));
+        assert_eq!(map.get("T1550.002"), Some(&"pass_the_hash"));
+        assert_eq!(map.get("T1135"), Some(&"share_enumeration"));
+        assert_eq!(map.get("T1087.002"), Some(&"ldap_enumeration"));
+        assert_eq!(map.get("T1046"), Some(&"service_enumeration"));
+    }
+
+    #[test]
+    fn technique_to_recipe_unknown_returns_none() {
+        let map = technique_to_recipe();
+        assert!(map.get("T9999").is_none());
+    }
+
+    // ── attack_chains lazy cache ────────────────────────────────────
+
+    #[test]
+    fn attack_chains_loads_and_is_nonempty() {
+        let chains = attack_chains();
+        assert!(!chains.is_empty(), "attack_chains YAML should parse");
+    }
+
+    #[test]
+    fn attack_chains_keys_start_with_t() {
+        let chains = attack_chains();
+        for key in chains.keys() {
+            assert!(key.starts_with('T'), "key should start with T: {key}");
+        }
+    }
+
+    #[test]
+    fn attack_chains_entry_has_name() {
+        let chains = attack_chains();
+        // Pick any entry and verify it has a name
+        if let Some((_, entry)) = chains.iter().next() {
+            assert!(!entry.name.is_empty());
+        }
+    }
+
+    // ── detection_recipes lazy cache ────────────────────────────────
+
+    #[test]
+    fn detection_recipes_loads_and_is_nonempty() {
+        let recipes = detection_recipes();
+        assert!(!recipes.is_empty(), "detection_recipes YAML should parse");
+    }
+
+    #[test]
+    fn detection_recipes_excludes_query_prefixed_keys() {
+        let recipes = detection_recipes();
+        for key in recipes.keys() {
+            assert!(
+                !key.starts_with("query_"),
+                "query_ prefixed keys should be filtered: {key}"
+            );
+        }
+    }
+
+    // ── climb_strategies lazy cache ─────────────────────────────────
+
+    #[test]
+    fn climb_strategies_loads_and_is_nonempty() {
+        let strategies = climb_strategies();
+        assert!(!strategies.is_empty(), "climb_strategies YAML should parse");
+    }
+
+    #[test]
+    fn climb_strategies_entries_have_template() {
+        let strategies = climb_strategies();
+        for (_, entries) in strategies.iter() {
+            for entry in entries {
+                assert!(!entry.template.is_empty());
+                assert!(!entry.target.is_empty());
+            }
+        }
+    }
+
+    // ── make_output ─────────────────────────────────────────────────
+
+    #[test]
+    fn make_output_returns_success() {
+        let out = make_output("test body");
+        assert!(out.success);
+        assert_eq!(out.stdout, "test body");
+        assert!(out.stderr.is_empty());
+        assert_eq!(out.exit_code, Some(0));
+    }
+}

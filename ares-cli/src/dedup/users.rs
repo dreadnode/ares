@@ -99,3 +99,125 @@ pub(crate) fn dedup_users(users: &[User], netbios_to_fqdn: &HashMap<String, Stri
     }
     result
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── resolve_netbios_domain ──────────────────────────────────────
+
+    #[test]
+    fn fqdn_passthrough() {
+        let map = HashMap::new();
+        assert_eq!(
+            resolve_netbios_domain("contoso.local", &map),
+            "contoso.local"
+        );
+    }
+
+    #[test]
+    fn netbios_resolved_to_fqdn() {
+        let mut map = HashMap::new();
+        map.insert("CONTOSO".to_string(), "contoso.local".to_string());
+        assert_eq!(resolve_netbios_domain("CONTOSO", &map), "contoso.local");
+    }
+
+    #[test]
+    fn netbios_case_insensitive() {
+        let mut map = HashMap::new();
+        map.insert("CONTOSO".to_string(), "contoso.local".to_string());
+        assert_eq!(resolve_netbios_domain("contoso", &map), "contoso.local");
+    }
+
+    #[test]
+    fn netbios_unresolved_returns_lowercase() {
+        let map = HashMap::new();
+        assert_eq!(resolve_netbios_domain("UNKNOWN", &map), "unknown");
+    }
+
+    #[test]
+    fn strips_trailing_dot_from_fqdn() {
+        let map = HashMap::new();
+        assert_eq!(
+            resolve_netbios_domain("contoso.local.", &map),
+            "contoso.local"
+        );
+    }
+
+    // ── noise filtering ─────────────────────────────────────────────
+
+    #[test]
+    fn noise_usernames_list_is_nonempty() {
+        assert!(!NOISE_USERNAMES.is_empty());
+        assert!(NOISE_USERNAMES.contains(&"guest"));
+        assert!(NOISE_USERNAMES.contains(&"krbtgt"));
+    }
+
+    #[test]
+    fn noise_prefixes_list_is_nonempty() {
+        assert!(!NOISE_USERNAME_PREFIXES.is_empty());
+        assert!(NOISE_USERNAME_PREFIXES.contains(&"sqlserver"));
+    }
+
+    // ── dedup_users ─────────────────────────────────────────────────
+
+    fn make_user(username: &str, domain: &str, source: &str) -> User {
+        User {
+            username: username.to_string(),
+            domain: domain.to_string(),
+            description: String::new(),
+            is_admin: false,
+            source: source.to_string(),
+        }
+    }
+
+    #[test]
+    fn dedup_filters_noise_usernames() {
+        let users = vec![
+            make_user("guest", "contoso.local", "kerberos_enum"),
+            make_user("krbtgt", "contoso.local", "kerberos_enum"),
+        ];
+        let result = dedup_users(&users, &HashMap::new());
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn dedup_filters_untrusted_sources() {
+        let users = vec![make_user("jsmith", "contoso.local", "output_extraction")];
+        let result = dedup_users(&users, &HashMap::new());
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn dedup_keeps_trusted_sources() {
+        let users = vec![make_user("jsmith", "contoso.local", "kerberos_enum")];
+        let result = dedup_users(&users, &HashMap::new());
+        assert_eq!(result.len(), 1);
+    }
+
+    #[test]
+    fn dedup_removes_duplicate_users() {
+        let users = vec![
+            make_user("jsmith", "contoso.local", "kerberos_enum"),
+            make_user("jsmith", "contoso.local", "kerberos_enum"),
+        ];
+        let result = dedup_users(&users, &HashMap::new());
+        assert_eq!(result.len(), 1);
+    }
+
+    #[test]
+    fn dedup_filters_short_usernames() {
+        let users = vec![make_user("a", "contoso.local", "kerberos_enum")];
+        let result = dedup_users(&users, &HashMap::new());
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn dedup_resolves_netbios_domain() {
+        let mut map = HashMap::new();
+        map.insert("CONTOSO".to_string(), "contoso.local".to_string());
+        let users = vec![make_user("jsmith", "CONTOSO", "kerberos_enum")];
+        let result = dedup_users(&users, &map);
+        assert_eq!(result[0].domain, "contoso.local");
+    }
+}

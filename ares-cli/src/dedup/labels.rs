@@ -100,3 +100,61 @@ pub(crate) fn normalize_source_label(source: &str) -> String {
         .collect::<Vec<_>>()
         .join(" ")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn empty_source_returns_unknown() {
+        assert_eq!(normalize_source_label(""), "Unknown");
+    }
+
+    #[test]
+    fn exact_match_label() {
+        assert_eq!(normalize_source_label("recon"), "Reconnaissance");
+        assert_eq!(normalize_source_label("lateral"), "Lateral Movement");
+        assert_eq!(normalize_source_label("privesc"), "Privilege Escalation");
+        assert_eq!(normalize_source_label("crack"), "Password Cracking");
+    }
+
+    #[test]
+    fn case_insensitive_match() {
+        assert_eq!(normalize_source_label("RECON"), "Reconnaissance");
+        assert_eq!(normalize_source_label("Exploit"), "Exploitation");
+    }
+
+    #[test]
+    fn dedup_colon_prefix() {
+        assert_eq!(normalize_source_label("recon:recon"), "Reconnaissance");
+    }
+
+    #[test]
+    fn task_input_pattern_extracts_type() {
+        assert_eq!(
+            normalize_source_label("task input (recon_abc12345)"),
+            "Reconnaissance"
+        );
+    }
+
+    #[test]
+    fn task_suffix_strips_id() {
+        assert_eq!(
+            normalize_source_label("recon_abc12345678"),
+            "Reconnaissance"
+        );
+    }
+
+    #[test]
+    fn fallback_title_cases() {
+        let result = normalize_source_label("some_custom_source");
+        assert_eq!(result, "Some Custom Source");
+    }
+
+    #[test]
+    fn tool_based_sources() {
+        assert_eq!(normalize_source_label("secretsdump"), "Secretsdump");
+        assert_eq!(normalize_source_label("kerberoast"), "Kerberoasting");
+        assert_eq!(normalize_source_label("bloodhound"), "BloodHound");
+    }
+}

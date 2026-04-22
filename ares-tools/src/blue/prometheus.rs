@@ -209,3 +209,122 @@ fn format_prometheus_response(body: &str) -> String {
         _ => "No results.".to_string(),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    // ── format_prometheus_response ──────────────────────────────────
+
+    #[test]
+    fn format_no_results() {
+        let body = r#"{"status":"success","data":{"resultType":"vector","result":[]}}"#;
+        assert_eq!(format_prometheus_response(body), "No results.");
+    }
+
+    #[test]
+    fn format_invalid_json() {
+        assert_eq!(format_prometheus_response("not json"), "not json");
+    }
+
+    #[test]
+    fn format_missing_data() {
+        let body = r#"{"status":"success"}"#;
+        assert_eq!(format_prometheus_response(body), "No results.");
+    }
+
+    #[test]
+    fn format_instant_query_result() {
+        let body = serde_json::to_string(&json!({
+            "data": {
+                "resultType": "vector",
+                "result": [{
+                    "metric": {"__name__": "up", "instance": "localhost:9090"},
+                    "value": [1234567890, "1"]
+                }]
+            }
+        }))
+        .unwrap();
+        let result = format_prometheus_response(&body);
+        assert!(result.contains("vector"));
+        assert!(result.contains("1 series"));
+        assert!(result.contains("__name__=\"up\""));
+        assert!(result.contains("=> 1"));
+    }
+
+    #[test]
+    fn format_range_query_result() {
+        let body = serde_json::to_string(&json!({
+            "data": {
+                "resultType": "matrix",
+                "result": [{
+                    "metric": {"job": "node"},
+                    "values": [
+                        [1000, "0.5"],
+                        [1060, "0.6"],
+                        [1120, "0.7"]
+                    ]
+                }]
+            }
+        }))
+        .unwrap();
+        let result = format_prometheus_response(&body);
+        assert!(result.contains("matrix"));
+        assert!(result.contains("3 samples"));
+        assert!(result.contains("0.5"));
+    }
+
+    #[test]
+    fn format_range_query_truncates_after_five() {
+        let values: Vec<_> = (0..8)
+            .map(|i| json!([1000 + i * 60, format!("{}", i)]))
+            .collect();
+        let body = serde_json::to_string(&json!({
+            "data": {
+                "resultType": "matrix",
+                "result": [{"metric": {"job": "test"}, "values": values}]
+            }
+        }))
+        .unwrap();
+        let result = format_prometheus_response(&body);
+        assert!(result.contains("8 samples"));
+        assert!(result.contains("... and 3 more"));
+    }
+
+    #[test]
+    fn format_multiple_series() {
+        let body = serde_json::to_string(&json!({
+            "data": {
+                "resultType": "vector",
+                "result": [
+                    {"metric": {"instance": "a"}, "value": [1, "10"]},
+                    {"metric": {"instance": "b"}, "value": [1, "20"]}
+                ]
+            }
+        }))
+        .unwrap();
+        let result = format_prometheus_response(&body);
+        assert!(result.contains("2 series"));
+        assert!(result.contains("instance=\"a\""));
+        assert!(result.contains("instance=\"b\""));
+    }
+
+    // ── make_output / make_error ────────────────────────────────────
+
+    #[test]
+    fn make_output_success() {
+        let out = make_output("test");
+        assert!(out.success);
+        assert_eq!(out.stdout, "test");
+        assert_eq!(out.exit_code, Some(0));
+    }
+
+    #[test]
+    fn make_error_failure() {
+        let out = make_error("fail");
+        assert!(!out.success);
+        assert_eq!(out.stderr, "fail");
+        assert_eq!(out.exit_code, Some(1));
+    }
+}

@@ -106,3 +106,68 @@ pub fn extract_hosts(output: &str) -> Vec<Host> {
 
     hosts
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extract_smb_banner_host() {
+        let output =
+            "SMB  192.168.58.10  445  DC01  [*]  Windows Server 2019 Build 17763 (name:DC01) (domain:contoso.local) (signing:True)";
+        let hosts = extract_hosts(output);
+        assert_eq!(hosts.len(), 1);
+        assert_eq!(hosts[0].ip, "192.168.58.10");
+        assert_eq!(hosts[0].hostname, "dc01.contoso.local");
+        assert!(hosts[0].is_dc);
+        assert!(hosts[0].os.contains("Windows Server 2019"));
+    }
+
+    #[test]
+    fn extract_no_signing_not_dc() {
+        let output =
+            "SMB  192.168.58.20  445  WEB01  [*]  Windows 10 Build 19041 (name:WEB01) (domain:contoso.local) (signing:False)";
+        let hosts = extract_hosts(output);
+        assert_eq!(hosts.len(), 1);
+        assert!(!hosts[0].is_dc);
+    }
+
+    #[test]
+    fn extract_deduplicates_by_ip() {
+        let output = "\
+SMB  192.168.58.10  445  DC01  [*]  Windows Server (name:DC01) (domain:contoso.local) (signing:True)
+SMB  192.168.58.10  445  DC01  [*]  Windows Server (name:DC01) (domain:contoso.local) (signing:True)";
+        let hosts = extract_hosts(output);
+        assert_eq!(hosts.len(), 1);
+    }
+
+    #[test]
+    fn extract_simple_smb_line() {
+        let output = "SMB  192.168.58.30  445  FILESVR  some output here";
+        let hosts = extract_hosts(output);
+        assert_eq!(hosts.len(), 1);
+        assert_eq!(hosts[0].ip, "192.168.58.30");
+        assert_eq!(hosts[0].hostname, "FILESVR");
+    }
+
+    #[test]
+    fn extract_skips_table_headers() {
+        let output = "SMB  192.168.58.10  445  Share  Permissions  Remark";
+        let hosts = extract_hosts(output);
+        assert!(hosts.is_empty());
+    }
+
+    #[test]
+    fn extract_empty_input() {
+        assert!(extract_hosts("").is_empty());
+    }
+
+    #[test]
+    fn extract_multiple_hosts() {
+        let output = "\
+SMB  192.168.58.10  445  DC01  [*]  Windows Server (name:DC01) (domain:contoso.local) (signing:True)
+SMB  192.168.58.20  445  WEB01  [*]  Windows 10 (name:WEB01) (domain:contoso.local) (signing:False)";
+        let hosts = extract_hosts(output);
+        assert_eq!(hosts.len(), 2);
+    }
+}

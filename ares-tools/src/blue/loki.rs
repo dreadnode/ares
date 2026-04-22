@@ -602,3 +602,206 @@ fn format_loki_response(body: &str) -> String {
         )
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    // ── format_loki_response ────────────────────────────────────────
+
+    #[test]
+    fn format_loki_response_no_results() {
+        let body = r#"{"status":"success","data":{"resultType":"streams","result":[]}}"#;
+        assert_eq!(format_loki_response(body), "No results found.");
+    }
+
+    #[test]
+    fn format_loki_response_invalid_json() {
+        let body = "not json";
+        assert_eq!(format_loki_response(body), "not json");
+    }
+
+    #[test]
+    fn format_loki_response_missing_data() {
+        let body = r#"{"status":"success"}"#;
+        assert_eq!(format_loki_response(body), "No results found.");
+    }
+
+    #[test]
+    fn format_loki_response_with_entries() {
+        let body = serde_json::to_string(&json!({
+            "status": "success",
+            "data": {
+                "resultType": "streams",
+                "result": [{
+                    "stream": {"job": "windows", "host": "dc01"},
+                    "values": [
+                        ["1234567890000000000", "Event 4769: Kerberos service ticket requested"],
+                        ["1234567890000000001", "Event 4624: Logon success"]
+                    ]
+                }]
+            }
+        }))
+        .unwrap();
+        let result = format_loki_response(&body);
+        assert!(result.starts_with("Found 2 log entries:"));
+        assert!(result.contains("Event 4769"));
+        assert!(result.contains("Event 4624"));
+        assert!(result.contains("job=windows"));
+    }
+
+    #[test]
+    fn format_loki_response_multiple_streams() {
+        let body = serde_json::to_string(&json!({
+            "data": {
+                "result": [
+                    {"stream": {"host": "dc01"}, "values": [["1", "line1"]]},
+                    {"stream": {"host": "web01"}, "values": [["2", "line2"]]}
+                ]
+            }
+        }))
+        .unwrap();
+        let result = format_loki_response(&body);
+        assert!(result.starts_with("Found 2 log entries:"));
+        assert!(result.contains("host=dc01"));
+        assert!(result.contains("host=web01"));
+    }
+
+    #[test]
+    fn format_loki_response_empty_values() {
+        let body = serde_json::to_string(&json!({
+            "data": {
+                "result": [{"stream": {"job": "test"}, "values": []}]
+            }
+        }))
+        .unwrap();
+        assert_eq!(format_loki_response(&body), "No results found.");
+    }
+
+    // ── is_retryable_status ─────────────────────────────────────────
+
+    #[test]
+    fn retryable_statuses() {
+        use reqwest::StatusCode;
+        assert!(is_retryable_status(StatusCode::REQUEST_TIMEOUT));
+        assert!(is_retryable_status(StatusCode::TOO_MANY_REQUESTS));
+        assert!(is_retryable_status(StatusCode::BAD_GATEWAY));
+        assert!(is_retryable_status(StatusCode::SERVICE_UNAVAILABLE));
+        assert!(is_retryable_status(StatusCode::GATEWAY_TIMEOUT));
+    }
+
+    #[test]
+    fn non_retryable_statuses() {
+        use reqwest::StatusCode;
+        assert!(!is_retryable_status(StatusCode::OK));
+        assert!(!is_retryable_status(StatusCode::BAD_REQUEST));
+        assert!(!is_retryable_status(StatusCode::UNAUTHORIZED));
+        assert!(!is_retryable_status(StatusCode::NOT_FOUND));
+        assert!(!is_retryable_status(StatusCode::INTERNAL_SERVER_ERROR));
+    }
+
+    // ── cache_key ───────────────────────────────────────────────────
+
+    #[test]
+    fn cache_key_deterministic() {
+        let k1 = cache_key(
+            "{job=\"test\"}",
+            "2024-01-01T00:00:00Z",
+            "2024-01-02T00:00:00Z",
+        );
+        let k2 = cache_key(
+            "{job=\"test\"}",
+            "2024-01-01T00:00:00Z",
+            "2024-01-02T00:00:00Z",
+        );
+        assert_eq!(k1, k2);
+    }
+
+    #[test]
+    fn cache_key_varies_by_query() {
+        let k1 = cache_key("{job=\"a\"}", "start", "end");
+        let k2 = cache_key("{job=\"b\"}", "start", "end");
+        assert_ne!(k1, k2);
+    }
+
+    #[test]
+    fn cache_key_varies_by_time() {
+        let k1 = cache_key("query", "start1", "end");
+        let k2 = cache_key("query", "start2", "end");
+        assert_ne!(k1, k2);
+    }
+
+    // ── make_output / make_error ────────────────────────────────────
+
+    #[test]
+    fn make_output_success() {
+        let out = make_output("hello");
+        assert!(out.success);
+        assert_eq!(out.stdout, "hello");
+        assert!(out.stderr.is_empty());
+        assert_eq!(out.exit_code, Some(0));
+    }
+
+    #[test]
+    fn make_error_failure() {
+        let out = make_error("boom");
+        assert!(!out.success);
+        assert!(out.stdout.is_empty());
+        assert_eq!(out.stderr, "boom");
+        assert_eq!(out.exit_code, Some(1));
+    }
+
+    // ── combine_query_patterns ──────────────────────────────────────
+
+    #[test]
+    fn combine_query_patterns_single_pattern() {
+        let args = json!({
+            "base_selector": "{job=\"windows\"}",
+            "patterns": ["4769"]
+        });
+        let result = combine_query_patterns(&args).unwrap();
+        assert!(result.success);
+        assert!(result.stdout.contains("1 patterns"));
+        assert!(result.stdout.contains("{job=\"windows\"}"));
+        assert!(result.stdout.contains("4769"));
+    }
+
+    #[test]
+    fn combine_query_patterns_multiple() {
+        let args = json!({
+            "base_selector": "{job=\"windows\"}",
+            "patterns": ["4769", "4624", "4625"]
+        });
+        let result = combine_query_patterns(&args).unwrap();
+        assert!(result.stdout.contains("3 patterns"));
+    }
+
+    #[test]
+    fn combine_query_patterns_empty_array() {
+        let args = json!({
+            "base_selector": "{job=\"windows\"}",
+            "patterns": []
+        });
+        let result = combine_query_patterns(&args).unwrap();
+        assert!(!result.success);
+    }
+
+    #[test]
+    fn combine_query_patterns_missing_patterns() {
+        let args = json!({"base_selector": "{job=\"windows\"}"});
+        assert!(combine_query_patterns(&args).is_err());
+    }
+
+    #[test]
+    fn combine_query_patterns_escapes_regex() {
+        let args = json!({
+            "base_selector": "{job=\"test\"}",
+            "patterns": ["foo.bar", "baz(qux)"]
+        });
+        let result = combine_query_patterns(&args).unwrap();
+        // Dots and parens should be escaped
+        assert!(result.stdout.contains("foo\\.bar"));
+        assert!(result.stdout.contains("baz\\(qux\\)"));
+    }
+}

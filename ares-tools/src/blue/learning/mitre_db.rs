@@ -561,3 +561,149 @@ pub(super) fn truncate_description(s: &str, max_len: usize) -> String {
         format!("{truncated}...")
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    // ── truncate_description ────────────────────────────────────────
+
+    #[test]
+    fn truncate_short_string_unchanged() {
+        assert_eq!(truncate_description("hello", 10), "hello");
+    }
+
+    #[test]
+    fn truncate_exact_length_unchanged() {
+        assert_eq!(truncate_description("hello", 5), "hello");
+    }
+
+    #[test]
+    fn truncate_long_string_adds_ellipsis() {
+        let result = truncate_description("hello world", 5);
+        assert!(result.ends_with("..."));
+        assert!(result.len() <= 8); // 5 chars + "..."
+    }
+
+    #[test]
+    fn truncate_empty_string() {
+        assert_eq!(truncate_description("", 10), "");
+    }
+
+    // ── lookup_technique ────────────────────────────────────────────
+
+    #[test]
+    fn lookup_known_technique() {
+        let args = json!({"technique_id": "T1003"});
+        let result = lookup_technique(&args).unwrap();
+        assert!(result.success);
+        assert!(result.stdout.contains("T1003"));
+        assert!(result.stdout.contains("OS Credential Dumping"));
+        assert!(result.stdout.contains("Credential Access"));
+    }
+
+    #[test]
+    fn lookup_known_subtechnique() {
+        let args = json!({"technique_id": "T1003.006"});
+        let result = lookup_technique(&args).unwrap();
+        assert!(result.success);
+        assert!(result.stdout.contains("DCSync"));
+    }
+
+    #[test]
+    fn lookup_unknown_subtechnique_falls_back_to_parent() {
+        let args = json!({"technique_id": "T1003.999"});
+        let result = lookup_technique(&args).unwrap();
+        assert!(result.success);
+        assert!(result.stdout.contains("parent technique"));
+        assert!(result.stdout.contains("T1003"));
+    }
+
+    #[test]
+    fn lookup_unknown_technique_returns_error() {
+        let args = json!({"technique_id": "T9999"});
+        let result = lookup_technique(&args).unwrap();
+        assert!(!result.success);
+        assert!(result.stderr.contains("not found"));
+    }
+
+    #[test]
+    fn lookup_missing_arg_errors() {
+        let args = json!({});
+        assert!(lookup_technique(&args).is_err());
+    }
+
+    #[test]
+    fn lookup_normalizes_lowercase_t() {
+        let args = json!({"technique_id": "t1003"});
+        let result = lookup_technique(&args).unwrap();
+        assert!(result.success);
+        assert!(result.stdout.contains("OS Credential Dumping"));
+    }
+
+    // ── suggest_techniques ──────────────────────────────────────────
+
+    #[test]
+    fn suggest_credential_access() {
+        let args = json!({"evidence_type": "credential_access"});
+        let result = suggest_techniques(&args).unwrap();
+        assert!(result.success);
+        assert!(result.stdout.contains("T1003"));
+    }
+
+    #[test]
+    fn suggest_lateral_movement() {
+        let args = json!({"evidence_type": "lateral_movement"});
+        let result = suggest_techniques(&args).unwrap();
+        assert!(result.success);
+        assert!(result.stdout.contains("T1021"));
+    }
+
+    #[test]
+    fn suggest_normalizes_evidence_type() {
+        let args = json!({"evidence_type": "Lateral Movement"});
+        let result = suggest_techniques(&args).unwrap();
+        assert!(result.success);
+    }
+
+    #[test]
+    fn suggest_unknown_type_returns_error() {
+        let args = json!({"evidence_type": "nonexistent_type"});
+        let result = suggest_techniques(&args).unwrap();
+        assert!(!result.success);
+        assert!(result.stderr.contains("Unknown evidence type"));
+    }
+
+    #[test]
+    fn suggest_missing_arg_errors() {
+        let args = json!({});
+        assert!(suggest_techniques(&args).is_err());
+    }
+
+    // ── static data integrity ───────────────────────────────────────
+
+    #[test]
+    fn techniques_db_is_nonempty() {
+        assert!(!TECHNIQUES.is_empty());
+    }
+
+    #[test]
+    fn evidence_map_is_nonempty() {
+        assert!(!EVIDENCE_MAP.is_empty());
+    }
+
+    #[test]
+    fn all_evidence_map_techniques_exist_in_db() {
+        for (_, tech_ids) in EVIDENCE_MAP.iter() {
+            for tid in tech_ids {
+                // Either the technique or its parent should be in the DB
+                let parent = tid.split('.').next().unwrap_or(tid);
+                assert!(
+                    TECHNIQUES.contains_key(tid) || TECHNIQUES.contains_key(parent),
+                    "technique {tid} not found in TECHNIQUES db"
+                );
+            }
+        }
+    }
+}
