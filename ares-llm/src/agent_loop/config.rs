@@ -82,75 +82,29 @@ impl Default for RetryConfig {
 mod tests {
     use super::*;
 
-    // --- AgentLoopConfig defaults ---
-
     #[test]
-    fn agent_loop_config_default_model() {
+    fn agent_loop_config_defaults() {
         let cfg = AgentLoopConfig::default();
         assert_eq!(cfg.model, "claude-sonnet-4-20250514");
-    }
-
-    #[test]
-    fn agent_loop_config_default_max_steps() {
-        let cfg = AgentLoopConfig::default();
         assert_eq!(cfg.max_steps, 75);
-    }
-
-    #[test]
-    fn agent_loop_config_default_max_tokens() {
-        let cfg = AgentLoopConfig::default();
         assert_eq!(cfg.max_tokens, 4096);
-    }
-
-    #[test]
-    fn agent_loop_config_default_temperature_none() {
-        let cfg = AgentLoopConfig::default();
         assert!(cfg.temperature.is_none());
-    }
-
-    #[test]
-    fn agent_loop_config_default_max_tool_calls() {
-        let cfg = AgentLoopConfig::default();
         assert_eq!(cfg.max_tool_calls_per_name, 10);
     }
 
-    // --- ContextConfig defaults ---
-
     #[test]
-    fn context_config_default_max_tokens() {
+    fn context_config_defaults() {
         let cfg = ContextConfig::default();
         assert_eq!(cfg.max_context_tokens, 180_000);
-    }
-
-    #[test]
-    fn context_config_default_max_tool_output() {
-        let cfg = ContextConfig::default();
         assert_eq!(cfg.max_tool_output_chars, 30_000);
-    }
-
-    #[test]
-    fn context_config_default_min_recent() {
-        let cfg = ContextConfig::default();
         assert_eq!(cfg.min_recent_messages, 10);
     }
 
-    // --- RetryConfig defaults ---
-
     #[test]
-    fn retry_config_default_max_retries() {
+    fn retry_config_defaults() {
         let cfg = RetryConfig::default();
         assert_eq!(cfg.max_retries, 5);
-    }
-
-    #[test]
-    fn retry_config_default_base_delay() {
-        let cfg = RetryConfig::default();
         assert_eq!(cfg.base_delay_ms, 1_000);
-    }
-
-    #[test]
-    fn retry_config_default_max_delay() {
-        let cfg = RetryConfig::default();
         assert_eq!(cfg.max_delay_ms, 60_000);
     }
 }

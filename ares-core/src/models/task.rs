@@ -160,7 +160,7 @@ mod tests {
     // ─── AgentRole Display ───────────────────────────────────────────────────
 
     #[test]
-    fn test_agent_role_display() {
+    fn agent_role_display() {
         assert_eq!(AgentRole::Orchestrator.to_string(), "orchestrator");
         assert_eq!(AgentRole::Recon.to_string(), "recon");
         assert_eq!(AgentRole::CredentialAccess.to_string(), "credential_access");
@@ -174,7 +174,7 @@ mod tests {
     // ─── AgentRole serde ─────────────────────────────────────────────────────
 
     #[test]
-    fn test_agent_role_serde_roundtrip() {
+    fn agent_role_serde_roundtrip() {
         let role = AgentRole::CredentialAccess;
         let json = serde_json::to_string(&role).unwrap();
         assert_eq!(json, r#""credential_access""#);
@@ -183,7 +183,7 @@ mod tests {
     }
 
     #[test]
-    fn test_agent_role_deserialize_all() {
+    fn agent_role_deserialize_all() {
         for (s, expected) in [
             (r#""orchestrator""#, AgentRole::Orchestrator),
             (r#""recon""#, AgentRole::Recon),
@@ -202,7 +202,7 @@ mod tests {
     // ─── TaskStatus Display ──────────────────────────────────────────────────
 
     #[test]
-    fn test_task_status_display_all() {
+    fn task_status_display_all() {
         assert_eq!(TaskStatus::Pending.to_string(), "pending");
         assert_eq!(TaskStatus::InProgress.to_string(), "in_progress");
         assert_eq!(TaskStatus::Completed.to_string(), "completed");
@@ -214,7 +214,7 @@ mod tests {
     // ─── TaskStatus serde ────────────────────────────────────────────────────
 
     #[test]
-    fn test_task_status_serde_roundtrip() {
+    fn task_status_serde_roundtrip() {
         let status = TaskStatus::InProgress;
         let json = serde_json::to_string(&status).unwrap();
         assert_eq!(json, r#""in_progress""#);
@@ -225,7 +225,7 @@ mod tests {
     // ─── TaskInfo serde ──────────────────────────────────────────────────────
 
     #[test]
-    fn test_task_info_deserialize_minimal() {
+    fn task_info_deserialize_minimal() {
         let json = json!({
             "task_id": "t-001",
             "task_type": "recon",
@@ -243,7 +243,7 @@ mod tests {
     }
 
     #[test]
-    fn test_task_info_with_status() {
+    fn task_info_with_status() {
         let json = json!({
             "task_id": "t-002",
             "task_type": "crack",
@@ -261,7 +261,7 @@ mod tests {
     }
 
     #[test]
-    fn test_task_info_serialization_skips_none() {
+    fn task_info_serialization_skips_none() {
         let json = json!({
             "task_id": "t-003",
             "task_type": "lateral",
@@ -279,7 +279,7 @@ mod tests {
     // ─── TaskResult serde ────────────────────────────────────────────────────
 
     #[test]
-    fn test_task_result_deserialize() {
+    fn task_result_deserialize() {
         let json = json!({
             "task_id": "t-010",
             "success": true,
@@ -293,7 +293,7 @@ mod tests {
     }
 
     #[test]
-    fn test_task_result_failure() {
+    fn task_result_failure() {
         let json = json!({
             "task_id": "t-011",
             "success": false,
@@ -308,7 +308,7 @@ mod tests {
     // ─── VulnerabilityInfo serde ─────────────────────────────────────────────
 
     #[test]
-    fn test_vulnerability_info_defaults() {
+    fn vulnerability_info_defaults() {
         let json = json!({
             "vuln_id": "esc1_192.168.58.10",
             "vuln_type": "ADCS_ESC1",
@@ -323,7 +323,7 @@ mod tests {
     }
 
     #[test]
-    fn test_vulnerability_info_with_details() {
+    fn vulnerability_info_with_details() {
         let json = json!({
             "vuln_id": "deleg_svc_sql",
             "vuln_type": "constrained_delegation",
@@ -342,7 +342,7 @@ mod tests {
     // ─── AgentInfo serde ─────────────────────────────────────────────────────
 
     #[test]
-    fn test_agent_info_deserialize() {
+    fn agent_info_deserialize() {
         let json = json!({
             "name": "recon-1",
             "pod_name": "ares-recon-abc123",
@@ -357,7 +357,7 @@ mod tests {
     }
 
     #[test]
-    fn test_agent_info_with_capabilities() {
+    fn agent_info_with_capabilities() {
         let json = json!({
             "name": "privesc-1",
             "pod_name": "ares-privesc-def456",
@@ -404,7 +404,7 @@ mod task_status_record_tests {
     use serde_json::json;
 
     #[test]
-    fn test_task_status_record_minimal() {
+    fn task_status_record_minimal() {
         let json = json!({
             "operation_id": "op-001",
             "status": "running"
@@ -422,7 +422,7 @@ mod task_status_record_tests {
     }
 
     #[test]
-    fn test_task_status_record_full() {
+    fn task_status_record_full() {
         let json = json!({
             "operation_id": "op-002",
             "status": "completed",
@@ -447,7 +447,7 @@ mod task_status_record_tests {
     }
 
     #[test]
-    fn test_task_status_record_with_error() {
+    fn task_status_record_with_error() {
         let json = json!({
             "operation_id": "op-003",
             "status": "failed",
@@ -459,7 +459,7 @@ mod task_status_record_tests {
     }
 
     #[test]
-    fn test_task_status_record_roundtrip() {
+    fn task_status_record_roundtrip() {
         let rec = TaskStatusRecord {
             operation_id: "op-rt".to_string(),
             status: "pending".to_string(),

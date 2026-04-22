@@ -82,7 +82,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_extract_shares() {
+    fn extract_shares_basic() {
         let output = "SMB  192.168.58.10  445  DC01  ADMIN$  READ  Remote Admin\nSMB  192.168.58.10  445  DC01  C$  READ,WRITE  Default share\nSMB  192.168.58.10  445  DC01  IPC$  READ  Remote IPC\nSMB  192.168.58.10  445  DC01  NETLOGON  READ  Logon server share\n";
         let shares = extract_shares(output);
         assert_eq!(shares.len(), 4);
@@ -97,7 +97,7 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_shares_skips_banners() {
+    fn extract_shares_skips_banners() {
         let output = "SMB  192.168.58.10  445  DC01  [*]  Windows Server 2019\nSMB  192.168.58.10  445  DC01  SYSVOL  READ  Logon server share\n";
         let shares = extract_shares(output);
         assert_eq!(shares.len(), 1);
@@ -105,7 +105,7 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_shares_empty() {
+    fn extract_shares_empty() {
         assert!(extract_shares("").is_empty());
     }
 

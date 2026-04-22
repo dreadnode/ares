@@ -14,7 +14,7 @@ fn make_alert(fingerprint: &str, host: &str, user: &str, technique: &str) -> Val
 }
 
 #[test]
-fn test_cluster_add_alert_extracts_iocs() {
+fn cluster_add_alert_extracts_iocs() {
     let mut cluster = AlertCluster::new("test-001".to_string());
     let alert = json!({
         "fingerprint": "abc123",
@@ -42,21 +42,19 @@ fn test_cluster_add_alert_extracts_iocs() {
 }
 
 #[test]
-fn test_cluster_similarity_host_match() {
+fn cluster_similarity_host_match() {
     let mut cluster = AlertCluster::new("test-001".to_string());
     cluster.add_alert(&make_alert("a1", "dc01", "admin", "T1003"));
 
-    // Same host → high similarity
     let similar = make_alert("a2", "dc01", "other_user", "T1110");
     assert!(cluster.similarity_score(&similar) >= 0.4);
 
-    // Different host → lower similarity
     let different = make_alert("a3", "web01", "other_user", "T1110");
     assert!(cluster.similarity_score(&different) < 0.3);
 }
 
 #[test]
-fn test_cluster_similarity_user_match() {
+fn cluster_similarity_user_match() {
     let mut cluster = AlertCluster::new("test-001".to_string());
     cluster.add_alert(&make_alert("a1", "dc01", "admin", "T1003"));
 
@@ -66,7 +64,7 @@ fn test_cluster_similarity_user_match() {
 }
 
 #[test]
-fn test_cluster_similarity_technique_match() {
+fn cluster_similarity_technique_match() {
     let mut cluster = AlertCluster::new("test-001".to_string());
     cluster.add_alert(&make_alert("a1", "dc01", "admin", "T1003"));
 
@@ -79,7 +77,7 @@ fn test_cluster_similarity_technique_match() {
 }
 
 #[test]
-fn test_cluster_similarity_operation_id() {
+fn cluster_similarity_operation_id() {
     let mut cluster = AlertCluster::new("test-001".to_string());
     let alert1 = json!({
         "fingerprint": "a1",
@@ -96,7 +94,6 @@ fn test_cluster_similarity_operation_id() {
         "startsAt": "2026-04-08T12:30:00Z",
     });
 
-    // Same operation_id gives small bonus, NOT enough to auto-cluster
     let score = cluster.similarity_score(&alert2);
     assert!(
         score < AlertCorrelator::DEFAULT_THRESHOLD,
@@ -105,7 +102,7 @@ fn test_cluster_similarity_operation_id() {
 }
 
 #[test]
-fn test_correlator_creates_new_cluster() {
+fn correlator_creates_new_cluster() {
     let mut correlator = AlertCorrelator::new();
     let alert = make_alert("a1", "dc01", "admin", "T1003");
     correlator.add_alert(&alert);
@@ -115,10 +112,9 @@ fn test_correlator_creates_new_cluster() {
 }
 
 #[test]
-fn test_correlator_groups_similar_alerts() {
+fn correlator_groups_similar_alerts() {
     let mut correlator = AlertCorrelator::new();
 
-    // Two alerts sharing the same host should cluster
     let a1 = make_alert("a1", "dc01", "admin", "T1003");
     let a2 = make_alert("a2", "dc01", "admin", "T1003.006");
     correlator.add_alert(&a1);
@@ -133,7 +129,7 @@ fn test_correlator_groups_similar_alerts() {
 }
 
 #[test]
-fn test_correlator_separates_dissimilar_alerts() {
+fn correlator_separates_dissimilar_alerts() {
     let mut correlator = AlertCorrelator::new();
 
     let a1 = make_alert("a1", "dc01", "admin", "T1003");
@@ -149,7 +145,7 @@ fn test_correlator_separates_dissimilar_alerts() {
 }
 
 #[test]
-fn test_correlator_get_related_alerts() {
+fn correlator_get_related_alerts() {
     let mut correlator = AlertCorrelator::new();
 
     let a1 = make_alert("a1", "dc01", "admin", "T1003");
@@ -163,7 +159,7 @@ fn test_correlator_get_related_alerts() {
 }
 
 #[test]
-fn test_correlator_cluster_context() {
+fn correlator_cluster_context() {
     let mut correlator = AlertCorrelator::new();
 
     let alert = make_alert("a1", "dc01", "admin", "T1003");
@@ -175,7 +171,7 @@ fn test_correlator_cluster_context() {
 }
 
 #[test]
-fn test_correlator_reset() {
+fn correlator_reset() {
     let mut correlator = AlertCorrelator::new();
     correlator.add_alert(&make_alert("a1", "dc01", "admin", "T1003"));
     assert_eq!(correlator.clusters().len(), 1);
@@ -185,7 +181,7 @@ fn test_correlator_reset() {
 }
 
 #[test]
-fn test_cluster_summary() {
+fn cluster_summary() {
     let mut cluster = AlertCluster::new("test-001".to_string());
     cluster.add_alert(&make_alert("a1", "dc01", "admin", "T1003"));
 
@@ -195,7 +191,7 @@ fn test_cluster_summary() {
 }
 
 #[test]
-fn test_cluster_technique_array_labels() {
+fn cluster_technique_array_labels() {
     let mut cluster = AlertCluster::new("test-001".to_string());
     let alert = json!({
         "fingerprint": "a1",

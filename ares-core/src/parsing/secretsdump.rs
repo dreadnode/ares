@@ -69,7 +69,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_parse_secretsdump_basic() {
+    fn parse_secretsdump_basic() {
         let output = r#"[*] Dumping local SAM hashes (uid:rid:lmhash:nthash)
 Administrator:500:aad3b435b51404eeaad3b435b51404ee:209c6174da490caeb422f3fa5a7ae634:::
 Guest:501:aad3b435b51404eeaad3b435b51404ee:31d6cfe0d16ae931b73c59d7e0c089c0:::
@@ -79,10 +79,8 @@ DC01$:1000:aad3b435b51404eeaad3b435b51404ee:7c4f7e73b23d56a3c48c0c8c1e4b8a6f:::
 "#;
         let hashes = parse_secretsdump(output);
 
-        // Guest should be skipped (empty NT hash)
         assert_eq!(hashes.len(), 4);
 
-        // Administrator
         let admin = &hashes[0];
         assert_eq!(admin.username, "Administrator");
         assert_eq!(admin.domain, "");
@@ -92,7 +90,6 @@ DC01$:1000:aad3b435b51404eeaad3b435b51404ee:7c4f7e73b23d56a3c48c0c8c1e4b8a6f:::
         assert!(!admin.is_machine_account);
         assert_eq!(admin.nt_hash, "209c6174da490caeb422f3fa5a7ae634");
 
-        // krbtgt
         let krbtgt = &hashes[1];
         assert_eq!(krbtgt.username, "krbtgt");
         assert_eq!(krbtgt.domain, "CONTOSO");
@@ -100,7 +97,6 @@ DC01$:1000:aad3b435b51404eeaad3b435b51404ee:7c4f7e73b23d56a3c48c0c8c1e4b8a6f:::
         assert!(krbtgt.is_krbtgt);
         assert!(!krbtgt.is_administrator);
 
-        // svc_sql
         let svc = &hashes[2];
         assert_eq!(svc.username, "svc_sql");
         assert_eq!(svc.domain, "CONTOSO");
@@ -109,20 +105,19 @@ DC01$:1000:aad3b435b51404eeaad3b435b51404ee:7c4f7e73b23d56a3c48c0c8c1e4b8a6f:::
         assert!(!svc.is_administrator);
         assert!(!svc.is_machine_account);
 
-        // Machine account
         let machine = &hashes[3];
         assert_eq!(machine.username, "DC01$");
         assert!(machine.is_machine_account);
     }
 
     #[test]
-    fn test_parse_secretsdump_empty() {
+    fn parse_secretsdump_empty() {
         let hashes = parse_secretsdump("");
         assert!(hashes.is_empty());
     }
 
     #[test]
-    fn test_parse_secretsdump_hash_value_format() {
+    fn parse_secretsdump_hash_value_format() {
         let output =
             "Administrator:500:aad3b435b51404eeaad3b435b51404ee:209c6174da490caeb422f3fa5a7ae634:::\n";
         let hashes = parse_secretsdump(output);
@@ -134,14 +129,14 @@ DC01$:1000:aad3b435b51404eeaad3b435b51404ee:7c4f7e73b23d56a3c48c0c8c1e4b8a6f:::
     }
 
     #[test]
-    fn test_parse_secretsdump_skips_non_matching() {
+    fn parse_secretsdump_skips_non_matching() {
         let output = "[*] Service RemoteRegistry is in stopped state\n[*] Starting service\nAdministrator:500:aad3b435b51404eeaad3b435b51404ee:209c6174da490caeb422f3fa5a7ae634:::\n[*] Cleaning up...\n";
         let hashes = parse_secretsdump(output);
         assert_eq!(hashes.len(), 1);
     }
 
     #[test]
-    fn test_parse_secretsdump_administrator_by_name() {
+    fn parse_secretsdump_administrator_by_name() {
         let output =
             "CONTOSO\\administrator:9999:aad3b435b51404eeaad3b435b51404ee:abcdef1234567890abcdef1234567890:::\n";
         let hashes = parse_secretsdump(output);
@@ -150,7 +145,7 @@ DC01$:1000:aad3b435b51404eeaad3b435b51404ee:7c4f7e73b23d56a3c48c0c8c1e4b8a6f:::
     }
 
     #[test]
-    fn test_secretsdump_case_insensitive_krbtgt() {
+    fn secretsdump_case_insensitive_krbtgt() {
         let output =
             "CONTOSO\\KRBTGT:502:aad3b435b51404eeaad3b435b51404ee:e3c61a68f7b313e24acee19ba61cf4dd:::\n";
         let hashes = parse_secretsdump(output);
@@ -159,7 +154,7 @@ DC01$:1000:aad3b435b51404eeaad3b435b51404ee:7c4f7e73b23d56a3c48c0c8c1e4b8a6f:::
     }
 
     #[test]
-    fn test_secretsdump_no_domain() {
+    fn secretsdump_no_domain() {
         let output =
             "localuser:1001:aad3b435b51404eeaad3b435b51404ee:abcdef0123456789abcdef0123456789:::\n";
         let hashes = parse_secretsdump(output);

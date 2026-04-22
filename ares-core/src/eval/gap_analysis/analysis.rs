@@ -305,11 +305,11 @@ mod tests {
         assert!(report
             .detection_gaps
             .iter()
-            .any(|g| { g.contains("No alert fired") }));
+            .any(|g| g.contains("No alert fired")));
         assert!(report
             .recommendations
             .iter()
-            .any(|rec| { rec.priority == "critical" }));
+            .any(|rec| rec.priority == "critical"));
     }
 
     #[test]
@@ -320,7 +320,7 @@ mod tests {
         assert!(report
             .detection_gaps
             .iter()
-            .any(|g| { g.contains("pyramid level 2/6") }));
+            .any(|g| g.contains("pyramid level 2/6")));
     }
 
     #[test]
@@ -331,7 +331,7 @@ mod tests {
         assert!(report
             .detection_gaps
             .iter()
-            .any(|g| { g.contains("did not complete") }));
+            .any(|g| g.contains("did not complete")));
     }
 
     #[test]
@@ -341,7 +341,6 @@ mod tests {
         r.highest_pyramid_level = 2;
         r.investigation_completed = false;
         let report = analyze_detection_gaps(&r);
-        // critical should come first
         if let Some(first) = report.recommendations.first() {
             assert_eq!(first.priority, "critical");
         }

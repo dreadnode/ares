@@ -2,7 +2,7 @@ use super::*;
 use serde_json::json;
 
 #[test]
-fn test_graph_add_connection() {
+fn graph_add_connection() {
     let mut graph = LateralGraph::new();
     let conn = graph.add_connection("DC01", "WEB01", "smb", None, Some("admin"), None, None);
     assert!(conn.is_some());
@@ -13,7 +13,7 @@ fn test_graph_add_connection() {
 }
 
 #[test]
-fn test_graph_self_connection_rejected() {
+fn graph_self_connection_rejected() {
     let mut graph = LateralGraph::new();
     let conn = graph.add_connection("DC01", "dc01", "smb", None, None, None, None);
     assert!(conn.is_none());
@@ -21,7 +21,7 @@ fn test_graph_self_connection_rejected() {
 }
 
 #[test]
-fn test_graph_mark_investigated() {
+fn graph_mark_investigated() {
     let mut graph = LateralGraph::new();
     graph.add_connection("DC01", "WEB01", "smb", None, None, None, None);
     assert!(graph.pending_hosts.contains("web01"));
@@ -32,7 +32,7 @@ fn test_graph_mark_investigated() {
 }
 
 #[test]
-fn test_graph_get_host_connections() {
+fn graph_get_host_connections() {
     let mut graph = LateralGraph::new();
     graph.add_connection("dc01", "web01", "smb", None, None, None, None);
     graph.add_connection("dc01", "sql01", "wmi", None, None, None, None);
@@ -46,7 +46,7 @@ fn test_graph_get_host_connections() {
 }
 
 #[test]
-fn test_graph_outgoing_incoming() {
+fn graph_outgoing_incoming() {
     let mut graph = LateralGraph::new();
     graph.add_connection("dc01", "web01", "smb", None, None, None, None);
     graph.add_connection("web01", "sql01", "rdp", None, None, None, None);
@@ -57,7 +57,7 @@ fn test_graph_outgoing_incoming() {
 }
 
 #[test]
-fn test_graph_unique_users() {
+fn graph_unique_users() {
     let mut graph = LateralGraph::new();
     graph.add_connection("dc01", "web01", "smb", None, Some("admin"), None, None);
     graph.add_connection("dc01", "sql01", "wmi", None, Some("admin"), None, None);
@@ -70,7 +70,7 @@ fn test_graph_unique_users() {
 }
 
 #[test]
-fn test_graph_summary() {
+fn graph_summary() {
     let mut graph = LateralGraph::new();
     graph.add_connection("dc01", "web01", "smb", None, None, None, None);
     graph.mark_investigated("dc01");
@@ -82,7 +82,7 @@ fn test_graph_summary() {
 }
 
 #[test]
-fn test_looks_like_hostname() {
+fn looks_like_hostname_variants() {
     assert!(looks_like_hostname("dc01.contoso.local"));
     assert!(looks_like_hostname("web.contoso.local"));
     assert!(!looks_like_hostname("192.168.58.10"));
@@ -91,7 +91,7 @@ fn test_looks_like_hostname() {
 }
 
 #[test]
-fn test_analyzer_detect_connection_type() {
+fn analyzer_detect_connection_type() {
     let analyzer = LateralMovementAnalyzer::new(None);
 
     assert_eq!(
@@ -110,7 +110,7 @@ fn test_analyzer_detect_connection_type() {
 }
 
 #[test]
-fn test_analyzer_query_result() {
+fn analyzer_query_result() {
     let mut analyzer = LateralMovementAnalyzer::new(None);
 
     let result = json!({
@@ -126,7 +126,7 @@ fn test_analyzer_query_result() {
 }
 
 #[test]
-fn test_analyzer_attack_path_linear() {
+fn analyzer_attack_path_linear() {
     let mut analyzer = LateralMovementAnalyzer::new(None);
     analyzer
         .graph
@@ -140,13 +140,13 @@ fn test_analyzer_attack_path_linear() {
 }
 
 #[test]
-fn test_analyzer_attack_path_empty() {
+fn analyzer_attack_path_empty() {
     let analyzer = LateralMovementAnalyzer::new(None);
     assert!(analyzer.get_attack_path().is_empty());
 }
 
 #[test]
-fn test_analyzer_pivot_suggestions() {
+fn analyzer_pivot_suggestions() {
     let mut analyzer = LateralMovementAnalyzer::new(None);
     analyzer
         .graph
@@ -158,7 +158,6 @@ fn test_analyzer_pivot_suggestions() {
 
     let suggestions = analyzer.get_pivot_suggestions();
     assert_eq!(suggestions.len(), 2);
-    // All suggestions should have required fields
     for s in &suggestions {
         assert!(s.get("host").is_some());
         assert!(s.get("priority").is_some());

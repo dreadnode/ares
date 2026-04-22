@@ -459,7 +459,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_grade() {
+    fn grade() {
         let r = EvaluationResult {
             overall_score: 0.95,
             ..Default::default()
@@ -488,7 +488,7 @@ mod tests {
     }
 
     #[test]
-    fn test_passed() {
+    fn passed() {
         let mut r = EvaluationResult::default();
         assert!(!r.passed());
 
@@ -502,7 +502,7 @@ mod tests {
     }
 
     #[test]
-    fn test_dataset_aggregation() {
+    fn dataset_aggregation() {
         let ds = DatasetEvaluationResult {
             dataset_name: "test".to_string(),
             evaluated_at: Utc::now(),
@@ -536,7 +536,7 @@ mod tests {
     }
 
     #[test]
-    fn test_result_to_value() {
+    fn result_to_value() {
         let r = EvaluationResult {
             evaluation_id: "eval-1".to_string(),
             operation_id: "op-1".to_string(),

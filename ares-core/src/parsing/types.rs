@@ -117,79 +117,69 @@ pub struct ParsedShare {
 mod tests {
     use super::*;
 
-    // --- DelegationType Display ---
-
     #[test]
-    fn test_delegation_type_display() {
+    fn delegation_type_display() {
         assert_eq!(DelegationType::Unconstrained.to_string(), "Unconstrained");
         assert_eq!(DelegationType::Constrained.to_string(), "Constrained");
         assert_eq!(DelegationType::RBCD.to_string(), "RBCD");
     }
 
-    // --- DelegationType FromStr ---
-
     #[test]
-    fn test_delegation_type_from_str_unconstrained() {
+    fn delegation_type_from_str_unconstrained() {
         let dt: DelegationType = "Unconstrained".parse().unwrap();
         assert_eq!(dt, DelegationType::Unconstrained);
     }
 
     #[test]
-    fn test_delegation_type_from_str_constrained() {
+    fn delegation_type_from_str_constrained() {
         let dt: DelegationType = "Constrained".parse().unwrap();
         assert_eq!(dt, DelegationType::Constrained);
     }
 
     #[test]
-    fn test_delegation_type_from_str_rbcd() {
+    fn delegation_type_from_str_rbcd() {
         let dt: DelegationType = "Resource-Based Constrained Delegation".parse().unwrap();
         assert_eq!(dt, DelegationType::RBCD);
     }
 
     #[test]
-    fn test_delegation_type_from_str_rbcd_short() {
+    fn delegation_type_from_str_rbcd_short() {
         let dt: DelegationType = "RBCD".parse().unwrap();
         assert_eq!(dt, DelegationType::RBCD);
     }
 
     #[test]
-    fn test_delegation_type_from_str_case_insensitive() {
+    fn delegation_type_from_str_case_insensitive() {
         let dt: DelegationType = "UNCONSTRAINED".parse().unwrap();
         assert_eq!(dt, DelegationType::Unconstrained);
     }
 
     #[test]
-    fn test_delegation_type_from_str_unknown() {
-        let result = "something_else".parse::<DelegationType>();
-        assert!(result.is_err());
-        let err = result.unwrap_err();
+    fn delegation_type_from_str_unknown() {
+        let err = "something_else".parse::<DelegationType>().unwrap_err();
         assert_eq!(err.0, "something_else");
     }
 
     #[test]
-    fn test_delegation_type_resource_constrained_is_rbcd() {
-        // "Resource-based constrained" contains both "resource" and "constrained"
-        // but should be RBCD because "resource" is checked first
+    fn delegation_type_resource_constrained_is_rbcd() {
         let dt: DelegationType = "resource-based constrained".parse().unwrap();
         assert_eq!(dt, DelegationType::RBCD);
     }
 
-    // --- KerberosHashType ---
-
     #[test]
-    fn test_kerberos_hash_type_equality() {
+    fn kerberos_hash_type_equality() {
         assert_eq!(KerberosHashType::TGS, KerberosHashType::TGS);
         assert_ne!(KerberosHashType::TGS, KerberosHashType::AsRep);
     }
 
     #[test]
-    fn test_parse_delegation_type_error_display() {
+    fn parse_delegation_type_error_display() {
         let err = ParseDelegationTypeError("bogus".to_string());
         assert_eq!(err.to_string(), "unknown delegation type: bogus");
     }
 
     #[test]
-    fn test_delegation_type_constrained_lowercase() {
+    fn delegation_type_constrained_lowercase() {
         let dt: DelegationType = "constrained delegation".parse().unwrap();
         assert_eq!(dt, DelegationType::Constrained);
     }

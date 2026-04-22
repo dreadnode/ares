@@ -153,31 +153,31 @@ mod tests {
     }
 
     #[test]
-    fn test_detect_dc_by_kerberos_service() {
+    fn detect_dc_by_kerberos_service() {
         let host = make_host("srv01", vec!["88/tcp (kerberos-sec)"], vec![]);
         assert!(host.detect_dc());
     }
 
     #[test]
-    fn test_detect_dc_by_ldap_service() {
+    fn detect_dc_by_ldap_service() {
         let host = make_host("srv01", vec!["389/tcp (ldap)"], vec![]);
         assert!(host.detect_dc());
     }
 
     #[test]
-    fn test_detect_dc_by_hostname_prefix() {
+    fn detect_dc_by_hostname_prefix() {
         let host = make_host("dc01.contoso.local", vec![], vec![]);
         assert!(host.detect_dc());
     }
 
     #[test]
-    fn test_detect_dc_by_role() {
+    fn detect_dc_by_role() {
         let host = make_host("srv01", vec![], vec!["domain controller"]);
         assert!(host.detect_dc());
     }
 
     #[test]
-    fn test_detect_dc_not_dc() {
+    fn detect_dc_not_dc() {
         let host = make_host(
             "srv01.contoso.local",
             vec!["445/tcp (microsoft-ds)"],
@@ -187,31 +187,31 @@ mod tests {
     }
 
     #[test]
-    fn test_detect_dc_empty() {
+    fn detect_dc_empty() {
         let host = make_host("", vec![], vec![]);
         assert!(!host.detect_dc());
     }
 
     #[test]
-    fn test_detect_dc_case_insensitive() {
+    fn detect_dc_case_insensitive() {
         let host = make_host("DC01.CONTOSO.LOCAL", vec![], vec![]);
         assert!(host.detect_dc());
     }
 
     #[test]
-    fn test_detect_dc_by_kerberos_service_name() {
+    fn detect_dc_by_kerberos_service_name() {
         let host = make_host("server", vec!["kerberos"], vec![]);
         assert!(host.detect_dc());
     }
 
     #[test]
-    fn test_detect_dc_by_ldap_service_name() {
+    fn detect_dc_by_ldap_service_name() {
         let host = make_host("server", vec!["ldap"], vec![]);
         assert!(host.detect_dc());
     }
 
     #[test]
-    fn test_trust_info_is_parent_child() {
+    fn trust_info_is_parent_child() {
         let t = TrustInfo {
             domain: "child.corp.local".to_string(),
             flat_name: "CHILD".to_string(),
@@ -224,7 +224,7 @@ mod tests {
     }
 
     #[test]
-    fn test_trust_info_is_cross_forest() {
+    fn trust_info_is_cross_forest() {
         let t = TrustInfo {
             domain: "fabrikam.local".to_string(),
             flat_name: "FABRIKAM".to_string(),
@@ -237,7 +237,7 @@ mod tests {
     }
 
     #[test]
-    fn test_trust_info_external_is_cross_forest() {
+    fn trust_info_external_is_cross_forest() {
         let t = TrustInfo {
             domain: "other.local".to_string(),
             flat_name: "OTHER".to_string(),
@@ -249,7 +249,7 @@ mod tests {
     }
 
     #[test]
-    fn test_trust_info_unknown_type_not_cross_forest() {
+    fn trust_info_unknown_type_not_cross_forest() {
         let t = TrustInfo {
             domain: "x.local".to_string(),
             flat_name: String::new(),
@@ -262,7 +262,7 @@ mod tests {
     }
 
     #[test]
-    fn test_host_serde_roundtrip() {
+    fn host_serde_roundtrip() {
         let host = Host {
             ip: "10.0.0.1".to_string(),
             hostname: "web01".to_string(),
@@ -278,7 +278,7 @@ mod tests {
     }
 
     #[test]
-    fn test_host_serde_defaults() {
+    fn host_serde_defaults() {
         let json = r#"{"ip":"10.0.0.1"}"#;
         let host: Host = serde_json::from_str(json).unwrap();
         assert_eq!(host.ip, "10.0.0.1");
@@ -291,7 +291,7 @@ mod tests {
     }
 
     #[test]
-    fn test_credential_serde_roundtrip() {
+    fn credential_serde_roundtrip() {
         let cred = Credential {
             id: "test-id".to_string(),
             username: "admin".to_string(),
@@ -309,7 +309,7 @@ mod tests {
     }
 
     #[test]
-    fn test_hash_serde_defaults() {
+    fn hash_serde_defaults() {
         let json = r#"{"username":"admin","hash_value":"aad3b435"}"#;
         let hash: Hash = serde_json::from_str(json).unwrap();
         assert_eq!(hash.username, "admin");
@@ -322,7 +322,7 @@ mod tests {
     }
 
     #[test]
-    fn test_hash_serde_with_aes_key() {
+    fn hash_serde_with_aes_key() {
         let hash = Hash {
             id: "h1".to_string(),
             username: "krbtgt".to_string(),
@@ -343,7 +343,7 @@ mod tests {
     }
 
     #[test]
-    fn test_share_serde_roundtrip() {
+    fn share_serde_roundtrip() {
         let share = Share {
             host: "10.0.0.5".to_string(),
             name: "ADMIN$".to_string(),
@@ -356,7 +356,7 @@ mod tests {
     }
 
     #[test]
-    fn test_share_serde_defaults() {
+    fn share_serde_defaults() {
         let json = r#"{"host":"10.0.0.5","name":"C$"}"#;
         let share: Share = serde_json::from_str(json).unwrap();
         assert_eq!(share.host, "10.0.0.5");
@@ -366,7 +366,7 @@ mod tests {
     }
 
     #[test]
-    fn test_user_serde_roundtrip() {
+    fn user_serde_roundtrip() {
         let user = User {
             username: "jdoe".to_string(),
             domain: "CORP".to_string(),
@@ -380,7 +380,7 @@ mod tests {
     }
 
     #[test]
-    fn test_user_serde_defaults() {
+    fn user_serde_defaults() {
         let json = r#"{"username":"guest"}"#;
         let user: User = serde_json::from_str(json).unwrap();
         assert_eq!(user.username, "guest");
@@ -391,7 +391,7 @@ mod tests {
     }
 
     #[test]
-    fn test_target_serde_roundtrip() {
+    fn target_serde_roundtrip() {
         let target = Target {
             ip: "192.168.1.1".to_string(),
             hostname: "dc01".to_string(),
@@ -404,7 +404,7 @@ mod tests {
     }
 
     #[test]
-    fn test_target_serde_skip_empty() {
+    fn target_serde_skip_empty() {
         let target = Target {
             ip: "10.0.0.1".to_string(),
             hostname: String::new(),
@@ -418,7 +418,7 @@ mod tests {
     }
 
     #[test]
-    fn test_trust_info_serde_roundtrip() {
+    fn trust_info_serde_roundtrip() {
         let trust = TrustInfo {
             domain: "child.corp.local".to_string(),
             flat_name: "CHILD".to_string(),
@@ -432,7 +432,7 @@ mod tests {
     }
 
     #[test]
-    fn test_detect_dc_by_multiple_services() {
+    fn detect_dc_by_multiple_services() {
         let host = make_host(
             "srv01",
             vec!["88/tcp (kerberos)", "389/tcp (ldap)", "445/tcp"],
@@ -442,7 +442,7 @@ mod tests {
     }
 
     #[test]
-    fn test_detect_dc_non_dc_services_only() {
+    fn detect_dc_non_dc_services_only() {
         let host = make_host(
             "fileserver",
             vec!["445/tcp (microsoft-ds)", "139/tcp (netbios-ssn)"],
@@ -452,7 +452,7 @@ mod tests {
     }
 
     #[test]
-    fn test_host_skip_empty_fields_in_json() {
+    fn host_skip_empty_fields_in_json() {
         let host = Host {
             ip: "10.0.0.1".to_string(),
             hostname: String::new(),

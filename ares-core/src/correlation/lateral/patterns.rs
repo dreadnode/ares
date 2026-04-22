@@ -76,7 +76,6 @@ mod tests {
 
     #[test]
     fn hostname_re_no_match_bare_word() {
-        // Single word without dot should not match
         assert!(!HOSTNAME_RE.is_match("dc01"));
     }
 

@@ -44,67 +44,40 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_new_uuid_format() {
+    fn new_uuid_format() {
         let uuid = new_uuid();
-        assert_eq!(uuid.len(), 36); // standard UUID format: 8-4-4-4-12
+        assert_eq!(uuid.len(), 36);
         assert_eq!(uuid.chars().filter(|c| *c == '-').count(), 4);
     }
 
     #[test]
-    fn test_new_uuid_unique() {
+    fn new_uuid_unique() {
         let u1 = new_uuid();
         let u2 = new_uuid();
         assert_ne!(u1, u2);
     }
 
     #[test]
-    fn test_new_uuid_is_valid_v4() {
+    fn new_uuid_is_valid_v4() {
         let id = new_uuid();
         let parsed = uuid::Uuid::parse_str(&id).unwrap();
         assert_eq!(parsed.get_version_num(), 4);
     }
 
     #[test]
-    fn test_default_hash_type() {
+    fn defaults() {
         assert_eq!(default_hash_type(), "NTLM");
-    }
-
-    #[test]
-    fn test_default_task_status() {
-        let status = default_task_status();
-        assert_eq!(status.to_string(), "pending");
-    }
-
-    #[test]
-    fn test_default_max_retries() {
+        assert_eq!(default_task_status().to_string(), "pending");
         assert_eq!(default_max_retries(), 3);
-    }
-
-    #[test]
-    fn test_default_priority() {
         assert_eq!(default_priority(), 5);
-    }
-
-    #[test]
-    fn test_default_agent_status() {
         assert_eq!(default_agent_status(), "idle");
     }
 
     #[cfg(feature = "blue")]
     #[test]
-    fn test_default_confidence() {
+    fn blue_defaults() {
         assert!((default_confidence() - 0.5).abs() < f64::EPSILON);
-    }
-
-    #[cfg(feature = "blue")]
-    #[test]
-    fn test_default_timeline_source() {
         assert_eq!(default_timeline_source(), "investigation");
-    }
-
-    #[cfg(feature = "blue")]
-    #[test]
-    fn test_default_blue_task_status() {
         assert_eq!(default_blue_task_status(), "pending");
     }
 }

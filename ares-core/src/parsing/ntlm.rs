@@ -183,7 +183,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_extract_ntlm_domain_prefixed() {
+    fn extract_ntlm_domain_prefixed() {
         let output =
             "CONTOSO\\Administrator:500:aad3b435b51404eeaad3b435b51404ee:209c6174da490caeb422f3fa5a7ae634:::\n";
         let hashes = extract_ntlm_hashes(output);
@@ -194,7 +194,7 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_ntlm_plain() {
+    fn extract_ntlm_plain() {
         let output =
             "Administrator:500:aad3b435b51404eeaad3b435b51404ee:209c6174da490caeb422f3fa5a7ae634:::\n";
         let hashes = extract_ntlm_hashes(output);
@@ -205,7 +205,7 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_ntlm_skips_empty() {
+    fn extract_ntlm_skips_empty() {
         let output =
             "Guest:501:aad3b435b51404eeaad3b435b51404ee:31d6cfe0d16ae931b73c59d7e0c089c0:::\n";
         let hashes = extract_ntlm_hashes(output);
@@ -213,8 +213,7 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_ntlm_line_wrapped() {
-        // NT hash split across two lines
+    fn extract_ntlm_line_wrapped() {
         let output =
             "CONTOSO\\svc_sql:1105:aad3b435b51404eeaad3b435b51404ee:a87f3a337d73085c\n45f9416be5787d86\n";
         let hashes = extract_ntlm_hashes(output);
@@ -224,7 +223,7 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_ntlm_machine_account() {
+    fn extract_ntlm_machine_account() {
         let output =
             "DC01$:1000:aad3b435b51404eeaad3b435b51404ee:7c4f7e73b23d56a3c48c0c8c1e4b8a6f:::\n";
         let hashes = extract_ntlm_hashes(output);
@@ -233,7 +232,7 @@ mod tests {
     }
 
     #[test]
-    fn test_ntlm_multiple_hashes() {
+    fn ntlm_multiple_hashes() {
         let output = "CONTOSO\\Administrator:500:aad3b435b51404eeaad3b435b51404ee:209c6174da490caeb422f3fa5a7ae634:::\nCONTOSO\\krbtgt:502:aad3b435b51404eeaad3b435b51404ee:e3c61a68f7b313e24acee19ba61cf4dd:::\nCONTOSO\\DC01$:1000:aad3b435b51404eeaad3b435b51404ee:7c4f7e73b23d56a3c48c0c8c1e4b8a6f:::\n";
         let hashes = extract_ntlm_hashes(output);
         assert_eq!(hashes.len(), 3);
@@ -243,18 +242,18 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_ntlm_empty_input() {
+    fn extract_ntlm_empty_input() {
         assert!(extract_ntlm_hashes("").is_empty());
     }
 
     #[test]
-    fn test_extract_ntlm_no_match_lines() {
+    fn extract_ntlm_no_match_lines() {
         let output = "[*] Starting dump\n[*] Done\nrandom text\n";
         assert!(extract_ntlm_hashes(output).is_empty());
     }
 
     #[test]
-    fn test_extract_ntlm_hash_value_format() {
+    fn extract_ntlm_hash_value_format() {
         let output =
             "CONTOSO\\svc_sql:1105:aad3b435b51404eeaad3b435b51404ee:a87f3a337d73085c45f9416be5787d86:::\n";
         let hashes = extract_ntlm_hashes(output);
@@ -266,7 +265,7 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_ntlm_krbtgt_by_rid() {
+    fn extract_ntlm_krbtgt_by_rid() {
         let output =
             "CONTOSO\\someuser:502:aad3b435b51404eeaad3b435b51404ee:abcdef0123456789abcdef0123456789:::\n";
         let hashes = extract_ntlm_hashes(output);
@@ -275,7 +274,7 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_ntlm_krbtgt_by_name() {
+    fn extract_ntlm_krbtgt_by_name() {
         let output =
             "CONTOSO\\krbtgt:9999:aad3b435b51404eeaad3b435b51404ee:abcdef0123456789abcdef0123456789:::\n";
         let hashes = extract_ntlm_hashes(output);
@@ -284,7 +283,7 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_ntlm_uppercase_hashes_lowered() {
+    fn extract_ntlm_uppercase_hashes_lowered() {
         let output =
             "CONTOSO\\admin:500:AAD3B435B51404EEAAD3B435B51404EE:ABCDEF0123456789ABCDEF0123456789:::\n";
         let hashes = extract_ntlm_hashes(output);
@@ -294,7 +293,7 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_ntlm_plain_line_wrapped() {
+    fn extract_ntlm_plain_line_wrapped() {
         let output =
             "localuser:1001:aad3b435b51404eeaad3b435b51404ee:a87f3a337d73085c\n45f9416be5787d86\n";
         let hashes = extract_ntlm_hashes(output);

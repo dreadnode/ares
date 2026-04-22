@@ -83,7 +83,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_extract_hosts_banner() {
+    fn extract_hosts_banner() {
         let output = "SMB  192.168.58.10  445  DC01  [*]  Windows Server 2019 Standard (name:DC01) (domain:contoso.local) (signing:True)\nSMB  192.168.58.11  445  SRV01  [*]  Windows Server 2019 Standard (name:SRV01) (domain:contoso.local)\n";
         let hosts = extract_hosts(output);
         assert_eq!(hosts.len(), 2);
@@ -99,7 +99,7 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_hosts_simple() {
+    fn extract_hosts_simple() {
         let output = "SMB  192.168.58.1  445  HOST01  some other data\n";
         let hosts = extract_hosts(output);
         assert_eq!(hosts.len(), 1);
@@ -108,13 +108,13 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_hosts_empty() {
+    fn extract_hosts_empty() {
         assert!(extract_hosts("").is_empty());
         assert!(extract_hosts("no smb output here\n").is_empty());
     }
 
     #[test]
-    fn test_hosts_with_signing_info() {
+    fn hosts_with_signing_info() {
         let output = "SMB  192.168.58.10  445  DC01  [*]  Windows Server 2022 (name:DC01) (domain:contoso.local) (signing:True) (SMBv1:False)\n";
         let hosts = extract_hosts(output);
         assert_eq!(hosts.len(), 1);
@@ -133,7 +133,6 @@ mod tests {
     fn extract_hosts_multiple_same_ip() {
         let output = "SMB  192.168.58.10  445  SRV01  [*]  Windows 10 (name:SRV01) (domain:contoso.local) (signing:True)\nSMB  192.168.58.10  445  SRV01  [*]  Windows 10 (name:SRV01) (domain:contoso.local) (signing:True)\n";
         let hosts = extract_hosts(output);
-        // Function does not deduplicate — both entries returned
         assert_eq!(hosts.len(), 2);
         assert_eq!(hosts[0].ip, "192.168.58.10");
     }
@@ -158,7 +157,6 @@ SMB  192.168.58.12  445  WS01  some other data\n";
         assert_eq!(hosts[0].ip, "192.168.58.10");
         assert_eq!(hosts[1].ip, "192.168.58.11");
         assert_eq!(hosts[2].ip, "192.168.58.12");
-        // Third entry falls back to simple pattern
         assert_eq!(hosts[2].hostname, "WS01");
         assert_eq!(hosts[2].domain, "");
     }

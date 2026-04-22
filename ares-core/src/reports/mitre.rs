@@ -25,7 +25,6 @@ mod tests {
     #[test]
     fn technique_display_known_id() {
         let display = get_technique_display("T1003");
-        // Known technique should have parenthesized name
         assert!(display.starts_with("T1003"));
         assert!(display.contains('('));
     }
@@ -44,7 +43,6 @@ mod tests {
 
     #[test]
     fn mitre_techniques_map_loads() {
-        // Verify the lazy static loads without panic
         let _ = MITRE_TECHNIQUES.len();
     }
 }

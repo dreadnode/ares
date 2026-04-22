@@ -175,8 +175,7 @@ mod tests {
             Some("ev1"),
             Some("T1021"),
         );
-        assert!(conn.is_some());
-        let conn = conn.unwrap();
+        let conn = conn.expect("add_connection should return connection");
         assert_eq!(conn.source_host, "host-a");
         assert_eq!(conn.destination_host, "host-b");
         assert_eq!(conn.connection_type, "smb");

@@ -166,14 +166,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_key_prefix_format() {
+    fn key_prefix_format() {
         assert_eq!(KEY_PREFIX, "ares:op");
         assert_eq!(LOCK_PREFIX, "ares:lock");
         assert_eq!(TASK_STATUS_PREFIX, "ares:task_status");
     }
 
     #[test]
-    fn test_collection_key_suffixes_non_empty() {
+    fn collection_key_suffixes_non_empty() {
         let suffixes = [
             KEY_CREDENTIALS,
             KEY_HASHES,
@@ -215,12 +215,12 @@ mod tests {
     }
 
     #[test]
-    fn test_state_update_channel_prefix() {
+    fn state_update_channel_prefix() {
         assert_eq!(STATE_UPDATE_CHANNEL_PREFIX, "ares:state:updates");
     }
 
     #[test]
-    fn test_key_suffixes_unique() {
+    fn key_suffixes_unique() {
         let suffixes = vec![
             KEY_CREDENTIALS,
             KEY_HASHES,
@@ -259,7 +259,7 @@ mod tests {
 
     #[cfg(feature = "blue")]
     #[test]
-    fn test_blue_key_prefixes() {
+    fn blue_key_prefixes() {
         assert_eq!(BLUE_KEY_PREFIX, "ares:blue:inv");
         assert_eq!(BLUE_LOCK_PREFIX, "ares:blue:lock");
         assert_eq!(BLUE_TASK_QUEUE_PREFIX, "ares:blue:tasks");
@@ -269,7 +269,7 @@ mod tests {
 
     #[cfg(feature = "blue")]
     #[test]
-    fn test_blue_collection_suffixes_non_empty() {
+    fn blue_collection_suffixes_non_empty() {
         let suffixes = [
             BLUE_KEY_EVIDENCE,
             BLUE_KEY_TIMELINE,

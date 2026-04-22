@@ -47,7 +47,7 @@ fn make_blue_detection(
 }
 
 #[test]
-fn test_techniques_match_exact() {
+fn techniques_match_exact() {
     assert!(RedBlueCorrelator::techniques_match(
         Some("T1003"),
         Some("T1003")
@@ -55,7 +55,7 @@ fn test_techniques_match_exact() {
 }
 
 #[test]
-fn test_techniques_match_parent_child() {
+fn techniques_match_parent_child() {
     assert!(RedBlueCorrelator::techniques_match(
         Some("T1003"),
         Some("T1003.006")
@@ -67,7 +67,7 @@ fn test_techniques_match_parent_child() {
 }
 
 #[test]
-fn test_techniques_match_different() {
+fn techniques_match_different() {
     assert!(!RedBlueCorrelator::techniques_match(
         Some("T1003"),
         Some("T1110")
@@ -75,14 +75,14 @@ fn test_techniques_match_different() {
 }
 
 #[test]
-fn test_techniques_match_none() {
+fn techniques_match_none() {
     assert!(!RedBlueCorrelator::techniques_match(None, Some("T1003")));
     assert!(!RedBlueCorrelator::techniques_match(Some("T1003"), None));
     assert!(!RedBlueCorrelator::techniques_match(None, None));
 }
 
 #[test]
-fn test_techniques_match_case_insensitive() {
+fn techniques_match_case_insensitive() {
     assert!(RedBlueCorrelator::techniques_match(
         Some("t1003"),
         Some("T1003")
@@ -90,7 +90,7 @@ fn test_techniques_match_case_insensitive() {
 }
 
 #[test]
-fn test_correlate_perfect_match() {
+fn correlate_perfect_match() {
     let correlator = RedBlueCorrelator::new("/tmp", None);
 
     let red = vec![make_red_activity("T1003", "192.168.58.10", utc(12, 0))];
@@ -111,7 +111,7 @@ fn test_correlate_perfect_match() {
 }
 
 #[test]
-fn test_correlate_technique_only_match() {
+fn correlate_technique_only_match() {
     let correlator = RedBlueCorrelator::new("/tmp", None);
 
     let red = vec![make_red_activity("T1003", "192.168.58.10", utc(12, 0))];
@@ -128,7 +128,7 @@ fn test_correlate_technique_only_match() {
 }
 
 #[test]
-fn test_correlate_gap_detected() {
+fn correlate_gap_detected() {
     let correlator = RedBlueCorrelator::new("/tmp", None);
 
     // Use different IPs so target matching doesn't cause T1046 to match
@@ -151,7 +151,7 @@ fn test_correlate_gap_detected() {
 }
 
 #[test]
-fn test_correlate_false_positive() {
+fn correlate_false_positive() {
     let correlator = RedBlueCorrelator::new("/tmp", None);
 
     let red = vec![make_red_activity("T1003", "192.168.58.10", utc(12, 0))];
@@ -171,7 +171,7 @@ fn test_correlate_false_positive() {
 }
 
 #[test]
-fn test_correlate_outside_time_window() {
+fn correlate_outside_time_window() {
     let correlator = RedBlueCorrelator::new("/tmp", Some(5)); // 5 minute window
 
     let red = vec![make_red_activity("T1003", "192.168.58.10", utc(12, 0))];
@@ -179,7 +179,7 @@ fn test_correlate_outside_time_window() {
         "Credential Dumping Alert",
         "T1003",
         "192.168.58.10",
-        utc(13, 0), // 1 hour later - outside 5 min window
+        utc(13, 0),
     )];
 
     let report = correlator.correlate(&red, &blue, "op-test");
@@ -188,7 +188,7 @@ fn test_correlate_outside_time_window() {
 }
 
 #[test]
-fn test_correlate_empty_inputs() {
+fn correlate_empty_inputs() {
     let correlator = RedBlueCorrelator::new("/tmp", None);
     let report = correlator.correlate(&[], &[], "op-test");
     assert_eq!(report.total_red_activities, 0);
@@ -196,7 +196,7 @@ fn test_correlate_empty_inputs() {
 }
 
 #[test]
-fn test_correlate_technique_coverage() {
+fn correlate_technique_coverage() {
     let correlator = RedBlueCorrelator::new("/tmp", None);
 
     // Use different IPs so T1046 doesn't match via target matching
@@ -226,7 +226,7 @@ fn test_correlate_technique_coverage() {
 }
 
 #[test]
-fn test_correlate_mean_time_to_detect() {
+fn correlate_mean_time_to_detect() {
     let correlator = RedBlueCorrelator::new("/tmp", None);
 
     let red = vec![make_red_activity("T1003", "192.168.58.10", utc(12, 0))];
@@ -234,12 +234,11 @@ fn test_correlate_mean_time_to_detect() {
         "Alert",
         "T1003",
         "192.168.58.10",
-        utc(12, 5), // 5 minutes later
+        utc(12, 5),
     )];
 
     let report = correlator.correlate(&red, &blue, "op-test");
-    assert!(report.mean_time_to_detect.is_some());
-    let mttd = report.mean_time_to_detect.unwrap();
+    let mttd = report.mean_time_to_detect.expect("MTTD should be present");
     assert!(
         (mttd - 300.0).abs() < 1.0,
         "MTTD should be ~300s, got {mttd}"
@@ -247,7 +246,7 @@ fn test_correlate_mean_time_to_detect() {
 }
 
 #[test]
-fn test_generate_report_markdown() {
+fn generate_report_markdown() {
     let correlator = RedBlueCorrelator::new("/tmp", None);
 
     let red = vec![make_red_activity("T1003", "192.168.58.10", utc(12, 0))];
@@ -268,7 +267,7 @@ fn test_generate_report_markdown() {
 }
 
 #[test]
-fn test_report_to_value() {
+fn report_to_value() {
     let correlator = RedBlueCorrelator::new("/tmp", None);
     let report = correlator.correlate(&[], &[], "op-test");
     let val = report.to_value();
@@ -278,11 +277,10 @@ fn test_report_to_value() {
 }
 
 #[test]
-fn test_recommend_detection() {
+fn recommend_detection() {
     let activity = make_red_activity("T1003", "192.168.58.10", utc(12, 0));
     let rec = RedBlueCorrelator::recommend_detection(&activity);
-    assert!(rec.is_some());
-    assert!(rec.unwrap().contains("LSASS"));
+    assert!(rec.expect("should have recommendation").contains("LSASS"));
 
     let unknown = make_red_activity("T9999", "192.168.58.10", utc(12, 0));
     assert!(RedBlueCorrelator::recommend_detection(&unknown).is_none());
