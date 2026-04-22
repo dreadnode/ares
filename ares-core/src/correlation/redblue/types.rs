@@ -185,3 +185,238 @@ impl CorrelationReport {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::TimeZone;
+    use std::collections::HashMap;
+
+    fn make_red_activity(
+        technique_id: Option<&str>,
+        target_ip: Option<&str>,
+        action: &str,
+    ) -> RedTeamActivity {
+        RedTeamActivity {
+            timestamp: Utc.with_ymd_and_hms(2024, 1, 15, 10, 0, 0).unwrap(),
+            technique_id: technique_id.map(String::from),
+            technique_name: None,
+            action: action.to_string(),
+            target_ip: target_ip.map(String::from),
+            target_host: None,
+            credential_used: None,
+            success: true,
+            metadata: HashMap::new(),
+        }
+    }
+
+    fn make_blue_detection(
+        technique_id: Option<&str>,
+        alert_name: &str,
+        target_ip: Option<&str>,
+    ) -> BlueTeamDetection {
+        BlueTeamDetection {
+            timestamp: Utc.with_ymd_and_hms(2024, 1, 15, 10, 2, 0).unwrap(),
+            alert_name: alert_name.to_string(),
+            technique_id: technique_id.map(String::from),
+            severity: "high".to_string(),
+            target_ip: target_ip.map(String::from),
+            target_host: None,
+            investigation_id: None,
+            status: "completed".to_string(),
+            evidence_count: 3,
+            highest_pyramid_level: 4,
+            metadata: HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn red_activity_key_with_all_fields() {
+        let activity = make_red_activity(Some("T1003"), Some("10.0.0.1"), "credential dump");
+        let key = activity.key();
+        assert!(key.contains("T1003"));
+        assert!(key.contains("10.0.0.1"));
+    }
+
+    #[test]
+    fn red_activity_key_none_fields_use_none_string() {
+        let activity = make_red_activity(None, None, "scan");
+        let key = activity.key();
+        assert!(key.contains("none:none"));
+    }
+
+    #[test]
+    fn blue_detection_key_includes_alert_name() {
+        let det = make_blue_detection(Some("T1003"), "Credential Dumping Alert", Some("10.0.0.1"));
+        let key = det.key();
+        assert!(key.contains("T1003"));
+        assert!(key.contains("Credential Dumping Alert"));
+    }
+
+    #[test]
+    fn blue_detection_key_none_technique() {
+        let det = make_blue_detection(None, "Generic Alert", None);
+        let key = det.key();
+        assert!(key.contains("none"));
+        assert!(key.contains("Generic Alert"));
+    }
+
+    #[test]
+    fn match_quality_strong() {
+        let m = CorrelationMatch {
+            red_activity: make_red_activity(Some("T1003"), Some("10.0.0.1"), "dump"),
+            blue_detection: make_blue_detection(Some("T1003"), "Alert", Some("10.0.0.1")),
+            time_delta_seconds: 120.0,
+            technique_match: true,
+            target_match: true,
+            confidence: 0.95,
+        };
+        assert_eq!(m.match_quality(), "STRONG");
+    }
+
+    #[test]
+    fn match_quality_good() {
+        let m = CorrelationMatch {
+            red_activity: make_red_activity(Some("T1003"), Some("10.0.0.1"), "dump"),
+            blue_detection: make_blue_detection(Some("T1003"), "Alert", Some("10.0.0.2")),
+            time_delta_seconds: 400.0,
+            technique_match: true,
+            target_match: false,
+            confidence: 0.7,
+        };
+        assert_eq!(m.match_quality(), "GOOD");
+    }
+
+    #[test]
+    fn match_quality_weak_technique_only() {
+        let m = CorrelationMatch {
+            red_activity: make_red_activity(Some("T1003"), Some("10.0.0.1"), "dump"),
+            blue_detection: make_blue_detection(Some("T1003"), "Alert", Some("10.0.0.2")),
+            time_delta_seconds: 700.0,
+            technique_match: true,
+            target_match: false,
+            confidence: 0.5,
+        };
+        assert_eq!(m.match_quality(), "WEAK");
+    }
+
+    #[test]
+    fn match_quality_weak_target_within_window() {
+        let m = CorrelationMatch {
+            red_activity: make_red_activity(Some("T1003"), Some("10.0.0.1"), "dump"),
+            blue_detection: make_blue_detection(Some("T1003"), "Alert", Some("10.0.0.1")),
+            time_delta_seconds: 200.0,
+            technique_match: false,
+            target_match: true,
+            confidence: 0.4,
+        };
+        assert_eq!(m.match_quality(), "WEAK");
+    }
+
+    #[test]
+    fn match_quality_tenuous() {
+        let m = CorrelationMatch {
+            red_activity: make_red_activity(Some("T1003"), Some("10.0.0.1"), "dump"),
+            blue_detection: make_blue_detection(Some("T1003"), "Alert", Some("10.0.0.2")),
+            time_delta_seconds: 700.0,
+            technique_match: false,
+            target_match: false,
+            confidence: 0.1,
+        };
+        assert_eq!(m.match_quality(), "TENUOUS");
+    }
+
+    #[test]
+    fn match_quality_strong_boundary_just_under_300() {
+        let m = CorrelationMatch {
+            red_activity: make_red_activity(Some("T1003"), Some("10.0.0.1"), "dump"),
+            blue_detection: make_blue_detection(Some("T1003"), "Alert", Some("10.0.0.1")),
+            time_delta_seconds: 299.9,
+            technique_match: true,
+            target_match: true,
+            confidence: 0.9,
+        };
+        assert_eq!(m.match_quality(), "STRONG");
+    }
+
+    #[test]
+    fn match_quality_not_strong_at_300() {
+        let m = CorrelationMatch {
+            red_activity: make_red_activity(Some("T1003"), Some("10.0.0.1"), "dump"),
+            blue_detection: make_blue_detection(Some("T1003"), "Alert", Some("10.0.0.1")),
+            time_delta_seconds: 300.0,
+            technique_match: true,
+            target_match: true,
+            confidence: 0.9,
+        };
+        // At exactly 300, not < 300, so falls to GOOD
+        assert_eq!(m.match_quality(), "GOOD");
+    }
+
+    #[test]
+    fn match_quality_negative_time_delta() {
+        // Negative delta (detection before activity)
+        let m = CorrelationMatch {
+            red_activity: make_red_activity(Some("T1003"), Some("10.0.0.1"), "dump"),
+            blue_detection: make_blue_detection(Some("T1003"), "Alert", Some("10.0.0.1")),
+            time_delta_seconds: -100.0,
+            technique_match: true,
+            target_match: true,
+            confidence: 0.9,
+        };
+        // abs(-100) = 100 < 300, technique + target match
+        assert_eq!(m.match_quality(), "STRONG");
+    }
+
+    #[test]
+    fn correlation_report_to_value_has_expected_keys() {
+        let report = CorrelationReport {
+            analysis_timestamp: Utc.with_ymd_and_hms(2024, 1, 15, 12, 0, 0).unwrap(),
+            red_operation_id: "op-123".to_string(),
+            time_window_start: Utc.with_ymd_and_hms(2024, 1, 15, 8, 0, 0).unwrap(),
+            time_window_end: Utc.with_ymd_and_hms(2024, 1, 15, 16, 0, 0).unwrap(),
+            total_red_activities: 10,
+            total_blue_detections: 8,
+            matched_activities: 6,
+            undetected_activities: 4,
+            false_positive_detections: 2,
+            matches: vec![],
+            gaps: vec![],
+            false_positives: vec![],
+            detection_rate: 0.6,
+            false_positive_rate: 0.25,
+            mean_time_to_detect: Some(45.5),
+            technique_coverage: HashMap::new(),
+        };
+        let val = report.to_value();
+        assert_eq!(val["red_operation_id"], "op-123");
+        assert_eq!(val["summary"]["total_red_activities"], 10);
+        assert_eq!(val["summary"]["matched_activities"], 6);
+        assert_eq!(val["summary"]["detection_rate"], "60.0%");
+        assert_eq!(val["summary"]["mean_time_to_detect"], "45.5s");
+    }
+
+    #[test]
+    fn correlation_report_to_value_no_mttd() {
+        let report = CorrelationReport {
+            analysis_timestamp: Utc::now(),
+            red_operation_id: "op-456".to_string(),
+            time_window_start: Utc::now(),
+            time_window_end: Utc::now(),
+            total_red_activities: 0,
+            total_blue_detections: 0,
+            matched_activities: 0,
+            undetected_activities: 0,
+            false_positive_detections: 0,
+            matches: vec![],
+            gaps: vec![],
+            false_positives: vec![],
+            detection_rate: 0.0,
+            false_positive_rate: 0.0,
+            mean_time_to_detect: None,
+            technique_coverage: HashMap::new(),
+        };
+        let val = report.to_value();
+        assert_eq!(val["summary"]["mean_time_to_detect"], "N/A");
+    }
+}
