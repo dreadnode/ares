@@ -150,3 +150,148 @@ impl LateralGraph {
 pub fn mitre_for_connection(conn_type: &str) -> Option<&'static str> {
     crate::detection::mitre_for_connection_type(conn_type)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn new_graph_is_empty() {
+        let g = LateralGraph::new();
+        assert!(g.connections.is_empty());
+        assert!(g.investigated_hosts.is_empty());
+        assert!(g.pending_hosts.is_empty());
+    }
+
+    #[test]
+    fn add_connection_stores_and_returns() {
+        let mut g = LateralGraph::new();
+        let conn = g.add_connection(
+            "host-a",
+            "host-b",
+            "smb",
+            None,
+            Some("admin"),
+            Some("ev1"),
+            Some("T1021"),
+        );
+        assert!(conn.is_some());
+        let conn = conn.unwrap();
+        assert_eq!(conn.source_host, "host-a");
+        assert_eq!(conn.destination_host, "host-b");
+        assert_eq!(conn.connection_type, "smb");
+        assert_eq!(conn.user.as_deref(), Some("admin"));
+        assert_eq!(conn.evidence_ids, vec!["ev1"]);
+        assert_eq!(conn.mitre_technique.as_deref(), Some("T1021"));
+        assert_eq!(g.connections.len(), 1);
+    }
+
+    #[test]
+    fn add_connection_lowercases_hosts() {
+        let mut g = LateralGraph::new();
+        g.add_connection("HOST-A", "HOST-B", "rdp", None, None, None, None);
+        assert_eq!(g.connections[0].source_host, "host-a");
+        assert_eq!(g.connections[0].destination_host, "host-b");
+    }
+
+    #[test]
+    fn add_connection_self_loop_returns_none() {
+        let mut g = LateralGraph::new();
+        let result = g.add_connection("host-a", "HOST-A", "smb", None, None, None, None);
+        assert!(result.is_none());
+        assert!(g.connections.is_empty());
+    }
+
+    #[test]
+    fn add_connection_marks_destination_pending() {
+        let mut g = LateralGraph::new();
+        g.add_connection("host-a", "host-b", "smb", None, None, None, None);
+        assert!(g.pending_hosts.contains("host-b"));
+    }
+
+    #[test]
+    fn add_connection_skips_pending_if_investigated() {
+        let mut g = LateralGraph::new();
+        g.mark_investigated("host-b");
+        g.add_connection("host-a", "host-b", "smb", None, None, None, None);
+        assert!(!g.pending_hosts.contains("host-b"));
+    }
+
+    #[test]
+    fn mark_investigated_removes_from_pending() {
+        let mut g = LateralGraph::new();
+        g.add_connection("host-a", "host-b", "smb", None, None, None, None);
+        assert!(g.pending_hosts.contains("host-b"));
+        g.mark_investigated("host-b");
+        assert!(!g.pending_hosts.contains("host-b"));
+        assert!(g.investigated_hosts.contains("host-b"));
+    }
+
+    #[test]
+    fn get_uninvestigated_targets_respects_limit() {
+        let mut g = LateralGraph::new();
+        g.add_connection("a", "b", "smb", None, None, None, None);
+        g.add_connection("a", "c", "smb", None, None, None, None);
+        g.add_connection("a", "d", "smb", None, None, None, None);
+        let targets = g.get_uninvestigated_targets(2);
+        assert_eq!(targets.len(), 2);
+    }
+
+    #[test]
+    fn get_host_connections_both_directions() {
+        let mut g = LateralGraph::new();
+        g.add_connection("a", "b", "smb", None, None, None, None);
+        g.add_connection("c", "b", "rdp", None, None, None, None);
+        let conns = g.get_host_connections("b");
+        assert_eq!(conns.len(), 2);
+    }
+
+    #[test]
+    fn get_outgoing_connections_filters() {
+        let mut g = LateralGraph::new();
+        g.add_connection("a", "b", "smb", None, None, None, None);
+        g.add_connection("b", "c", "rdp", None, None, None, None);
+        let out = g.get_outgoing_connections("a");
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].destination_host, "b");
+    }
+
+    #[test]
+    fn get_incoming_connections_filters() {
+        let mut g = LateralGraph::new();
+        g.add_connection("a", "b", "smb", None, None, None, None);
+        g.add_connection("c", "b", "rdp", None, None, None, None);
+        let inc = g.get_incoming_connections("b");
+        assert_eq!(inc.len(), 2);
+    }
+
+    #[test]
+    fn get_unique_users_collects_all() {
+        let mut g = LateralGraph::new();
+        g.add_connection("a", "b", "smb", None, Some("admin"), None, None);
+        g.add_connection("b", "c", "rdp", None, Some("svc_sql"), None, None);
+        g.add_connection("c", "d", "wmi", None, None, None, None);
+        let users = g.get_unique_users();
+        assert_eq!(users.len(), 2);
+        assert!(users.contains("admin"));
+        assert!(users.contains("svc_sql"));
+    }
+
+    #[test]
+    fn to_summary_has_expected_fields() {
+        let mut g = LateralGraph::new();
+        g.add_connection("a", "b", "smb", None, Some("admin"), None, None);
+        g.mark_investigated("a");
+        let summary = g.to_summary();
+        assert_eq!(summary["total_connections"], 1);
+        assert_eq!(summary["hosts_investigated"], 1);
+        assert_eq!(summary["hosts_pending"], 1);
+    }
+
+    #[test]
+    fn add_connection_no_evidence_id() {
+        let mut g = LateralGraph::new();
+        let conn = g.add_connection("a", "b", "smb", None, None, None, None);
+        assert!(conn.unwrap().evidence_ids.is_empty());
+    }
+}

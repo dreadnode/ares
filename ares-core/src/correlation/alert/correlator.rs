@@ -184,3 +184,139 @@ impl AlertCorrelator {
         self.alert_to_cluster.clear();
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn alert(fingerprint: &str, hostname: &str) -> Value {
+        json!({
+            "fingerprint": fingerprint,
+            "labels": {"hostname": hostname}
+        })
+    }
+
+    #[test]
+    fn new_correlator_defaults() {
+        let c = AlertCorrelator::new();
+        assert!((c.cluster_threshold - AlertCorrelator::DEFAULT_THRESHOLD).abs() < f64::EPSILON);
+        assert!(c.clusters().is_empty());
+    }
+
+    #[test]
+    fn with_threshold_sets_value() {
+        let c = AlertCorrelator::with_threshold(0.5);
+        assert!((c.cluster_threshold - 0.5).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn add_alert_creates_cluster() {
+        let mut c = AlertCorrelator::new();
+        let a = alert("fp1", "DC01");
+        let cluster = c.add_alert(&a);
+        assert_eq!(cluster.cluster_id, "cluster-0001");
+        assert_eq!(cluster.alerts.len(), 1);
+        assert_eq!(c.clusters().len(), 1);
+    }
+
+    #[test]
+    fn add_similar_alerts_same_cluster() {
+        let mut c = AlertCorrelator::new();
+        let a1 = alert("fp1", "DC01");
+        let a2 = alert("fp2", "DC01");
+        c.add_alert(&a1);
+        c.add_alert(&a2);
+        // Same hostname => high similarity => same cluster
+        assert_eq!(c.clusters().len(), 1);
+        assert_eq!(c.clusters()[0].alerts.len(), 2);
+    }
+
+    #[test]
+    fn add_dissimilar_alerts_different_clusters() {
+        let mut c = AlertCorrelator::new();
+        let a1 = alert("fp1", "DC01");
+        let a2 = alert("fp2", "UNRELATED");
+        c.add_alert(&a1);
+        c.add_alert(&a2);
+        assert_eq!(c.clusters().len(), 2);
+    }
+
+    #[test]
+    fn get_cluster_for_alert_found() {
+        let mut c = AlertCorrelator::new();
+        let a = alert("fp1", "DC01");
+        c.add_alert(&a);
+        let cluster = c.get_cluster_for_alert(&a);
+        assert!(cluster.is_some());
+        assert_eq!(cluster.unwrap().cluster_id, "cluster-0001");
+    }
+
+    #[test]
+    fn get_cluster_for_alert_not_found() {
+        let c = AlertCorrelator::new();
+        let a = alert("fp-unknown", "DC01");
+        assert!(c.get_cluster_for_alert(&a).is_none());
+    }
+
+    #[test]
+    fn get_cluster_context_no_cluster() {
+        let c = AlertCorrelator::new();
+        let a = alert("fp1", "DC01");
+        let ctx = c.get_cluster_context(&a);
+        assert!(ctx["cluster_id"].is_null());
+    }
+
+    #[test]
+    fn get_cluster_context_with_cluster() {
+        let mut c = AlertCorrelator::new();
+        let a = alert("fp1", "DC01");
+        c.add_alert(&a);
+        let ctx = c.get_cluster_context(&a);
+        assert_eq!(ctx["cluster_id"], "cluster-0001");
+    }
+
+    #[test]
+    fn get_related_alerts_excludes_self() {
+        let mut c = AlertCorrelator::new();
+        let a1 = alert("fp1", "DC01");
+        let a2 = alert("fp2", "DC01");
+        c.add_alert(&a1);
+        c.add_alert(&a2);
+        let related = c.get_related_alerts(&a1);
+        assert_eq!(related.len(), 1);
+        assert_eq!(related[0]["fingerprint"].as_str().unwrap(), "fp2");
+    }
+
+    #[test]
+    fn get_related_alerts_empty_when_no_cluster() {
+        let c = AlertCorrelator::new();
+        let a = alert("fp1", "DC01");
+        assert!(c.get_related_alerts(&a).is_empty());
+    }
+
+    #[test]
+    fn get_all_clusters_summary() {
+        let mut c = AlertCorrelator::new();
+        c.add_alert(&alert("fp1", "DC01"));
+        c.add_alert(&alert("fp2", "UNRELATED"));
+        let summaries = c.get_all_clusters_summary();
+        assert_eq!(summaries.len(), 2);
+    }
+
+    #[test]
+    fn reset_clears_state() {
+        let mut c = AlertCorrelator::new();
+        c.add_alert(&alert("fp1", "DC01"));
+        assert_eq!(c.clusters().len(), 1);
+        c.reset();
+        assert!(c.clusters().is_empty());
+    }
+
+    #[test]
+    fn default_impl_matches_new() {
+        let c = AlertCorrelator::default();
+        assert!((c.cluster_threshold - AlertCorrelator::DEFAULT_THRESHOLD).abs() < f64::EPSILON);
+        assert!(c.clusters().is_empty());
+    }
+}

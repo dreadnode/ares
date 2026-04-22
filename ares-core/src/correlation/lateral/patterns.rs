@@ -64,3 +64,49 @@ impl LateralPatterns {
         "unknown"
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hostname_re_matches_fqdn() {
+        assert!(HOSTNAME_RE.is_match("dc01.contoso.local"));
+    }
+
+    #[test]
+    fn hostname_re_no_match_bare_word() {
+        // Single word without dot should not match
+        assert!(!HOSTNAME_RE.is_match("dc01"));
+    }
+
+    #[test]
+    fn ip_re_matches_ipv4() {
+        assert!(IP_RE.is_match("192.168.1.1"));
+        assert!(IP_RE.is_match("10.0.0.1"));
+    }
+
+    #[test]
+    fn ip_re_no_match_hostname() {
+        assert!(!IP_RE.is_match("dc01.contoso.local"));
+    }
+
+    #[test]
+    fn ip_re_no_match_partial() {
+        assert!(!IP_RE.is_match("192.168.1"));
+    }
+
+    #[test]
+    fn lateral_patterns_default() {
+        let p = LateralPatterns;
+        // Just verify it doesn't panic
+        let _ = p.detect("some text");
+    }
+
+    #[test]
+    fn lateral_patterns_unknown_text() {
+        let p = LateralPatterns::new();
+        let result = p.detect("completely unrelated text");
+        assert_eq!(result, "unknown");
+    }
+}

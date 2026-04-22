@@ -298,3 +298,233 @@ impl AlertCluster {
         summary
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn make_alert(labels: Value, starts_at: Option<&str>) -> Value {
+        let mut alert = json!({ "labels": labels });
+        if let Some(ts) = starts_at {
+            alert["startsAt"] = json!(ts);
+        }
+        alert
+    }
+
+    #[test]
+    fn new_cluster_is_empty() {
+        let c = AlertCluster::new("c1".into());
+        assert_eq!(c.cluster_id, "c1");
+        assert!(c.alerts.is_empty());
+        assert!(c.common_hosts.is_empty());
+        assert!(c.common_users.is_empty());
+        assert!(c.common_ips.is_empty());
+        assert!(c.techniques.is_empty());
+        assert!(c.time_range.is_none());
+        assert!(c.operation_id.is_none());
+    }
+
+    #[test]
+    fn add_alert_extracts_hosts_from_labels() {
+        let mut c = AlertCluster::new("c1".into());
+        let alert = make_alert(json!({"hostname": "DC01", "host": "SRV01"}), None);
+        c.add_alert(&alert);
+        assert!(c.common_hosts.contains("dc01"));
+        assert!(c.common_hosts.contains("srv01"));
+        assert_eq!(c.alerts.len(), 1);
+    }
+
+    #[test]
+    fn add_alert_extracts_instance_host() {
+        let mut c = AlertCluster::new("c1".into());
+        let alert = make_alert(json!({"instance": "webserver:8080"}), None);
+        c.add_alert(&alert);
+        assert!(c.common_hosts.contains("webserver"));
+    }
+
+    #[test]
+    fn add_alert_skips_numeric_instance() {
+        let mut c = AlertCluster::new("c1".into());
+        let alert = make_alert(json!({"instance": "192.168.1.1:8080"}), None);
+        c.add_alert(&alert);
+        assert!(c.common_hosts.is_empty());
+    }
+
+    #[test]
+    fn add_alert_extracts_users() {
+        let mut c = AlertCluster::new("c1".into());
+        let alert = make_alert(json!({"user": "Admin", "TargetUserName": "SvcAcct"}), None);
+        c.add_alert(&alert);
+        assert!(c.common_users.contains("admin"));
+        assert!(c.common_users.contains("svcacct"));
+    }
+
+    #[test]
+    fn add_alert_extracts_users_from_annotations() {
+        let mut c = AlertCluster::new("c1".into());
+        let alert = json!({
+            "labels": {},
+            "annotations": {"username": "JDoe"}
+        });
+        c.add_alert(&alert);
+        assert!(c.common_users.contains("jdoe"));
+    }
+
+    #[test]
+    fn add_alert_extracts_ips() {
+        let mut c = AlertCluster::new("c1".into());
+        let alert = make_alert(json!({"ip": "10.0.0.1", "source_ip": "10.0.0.2"}), None);
+        c.add_alert(&alert);
+        assert!(c.common_ips.contains("10.0.0.1"));
+        assert!(c.common_ips.contains("10.0.0.2"));
+    }
+
+    #[test]
+    fn add_alert_extracts_techniques_string() {
+        let mut c = AlertCluster::new("c1".into());
+        let alert = make_alert(json!({"mitre_technique": "T1021.002"}), None);
+        c.add_alert(&alert);
+        assert!(c.techniques.contains("T1021.002"));
+    }
+
+    #[test]
+    fn add_alert_extracts_techniques_array() {
+        let mut c = AlertCluster::new("c1".into());
+        let alert = make_alert(json!({"technique": ["T1021", "T1059"]}), None);
+        c.add_alert(&alert);
+        assert!(c.techniques.contains("T1021"));
+        assert!(c.techniques.contains("T1059"));
+    }
+
+    #[test]
+    fn add_alert_updates_time_range() {
+        let mut c = AlertCluster::new("c1".into());
+        let a1 = make_alert(json!({}), Some("2025-01-01T10:00:00Z"));
+        let a2 = make_alert(json!({}), Some("2025-01-01T12:00:00Z"));
+        c.add_alert(&a1);
+        c.add_alert(&a2);
+        let (start, end) = c.time_range.unwrap();
+        assert!(start < end);
+    }
+
+    #[test]
+    fn add_alert_extracts_operation_id() {
+        let mut c = AlertCluster::new("c1".into());
+        let alert = json!({
+            "labels": {},
+            "operation_context": {"operation_id": "op-42"}
+        });
+        c.add_alert(&alert);
+        assert_eq!(c.operation_id.as_deref(), Some("op-42"));
+    }
+
+    #[test]
+    fn similarity_score_zero_for_unrelated() {
+        let mut c = AlertCluster::new("c1".into());
+        c.add_alert(&make_alert(json!({"hostname": "DC01"}), None));
+        let alert = make_alert(json!({"hostname": "UNRELATED"}), None);
+        let score = c.similarity_score(&alert);
+        assert!(score < 0.01, "expected ~0, got {score}");
+    }
+
+    #[test]
+    fn similarity_score_host_match() {
+        let mut c = AlertCluster::new("c1".into());
+        c.add_alert(&make_alert(json!({"hostname": "DC01"}), None));
+        let alert = make_alert(json!({"hostname": "DC01"}), None);
+        let score = c.similarity_score(&alert);
+        assert!(score >= 0.4, "expected >=0.4, got {score}");
+    }
+
+    #[test]
+    fn similarity_score_user_match() {
+        let mut c = AlertCluster::new("c1".into());
+        c.add_alert(&make_alert(json!({"user": "admin"}), None));
+        let alert = make_alert(json!({"user": "admin"}), None);
+        let score = c.similarity_score(&alert);
+        assert!(score >= 0.3, "expected >=0.3, got {score}");
+    }
+
+    #[test]
+    fn similarity_score_ip_match() {
+        let mut c = AlertCluster::new("c1".into());
+        c.add_alert(&make_alert(json!({"ip": "10.0.0.1"}), None));
+        let alert = make_alert(json!({"ip": "10.0.0.1"}), None);
+        let score = c.similarity_score(&alert);
+        assert!(score >= 0.2, "expected >=0.2, got {score}");
+    }
+
+    #[test]
+    fn similarity_score_technique_match() {
+        let mut c = AlertCluster::new("c1".into());
+        c.add_alert(&make_alert(json!({"mitre_technique": "T1021"}), None));
+        let alert = make_alert(json!({"mitre_technique": "T1021"}), None);
+        let score = c.similarity_score(&alert);
+        assert!(score >= 0.2, "expected >=0.2, got {score}");
+    }
+
+    #[test]
+    fn similarity_score_capped_at_one() {
+        let mut c = AlertCluster::new("c1".into());
+        let rich = json!({
+            "labels": {
+                "hostname": "DC01",
+                "user": "admin",
+                "ip": "10.0.0.1",
+                "mitre_technique": "T1021"
+            },
+            "startsAt": "2025-01-01T10:00:00Z",
+            "operation_context": {"operation_id": "op-1"}
+        });
+        c.add_alert(&rich);
+        let score = c.similarity_score(&rich);
+        assert!(score <= 1.0, "score must be <=1.0, got {score}");
+    }
+
+    #[test]
+    fn similarity_score_operation_id_bonus() {
+        let mut c = AlertCluster::new("c1".into());
+        let a1 = json!({
+            "labels": {},
+            "operation_context": {"operation_id": "op-1"}
+        });
+        c.add_alert(&a1);
+        let a2 = json!({
+            "labels": {},
+            "operation_context": {"operation_id": "op-1"}
+        });
+        let score = c.similarity_score(&a2);
+        assert!(score >= 0.09, "expected op_id bonus ~0.1, got {score}");
+    }
+
+    #[test]
+    fn to_summary_contains_expected_keys() {
+        let mut c = AlertCluster::new("c1".into());
+        c.add_alert(&make_alert(json!({"hostname": "DC01"}), None));
+        let summary = c.to_summary();
+        assert_eq!(summary["cluster_id"], Value::String("c1".into()));
+        assert_eq!(summary["alert_count"], Value::Number(1.into()));
+        assert!(summary.contains_key("common_hosts"));
+        assert!(summary.contains_key("techniques"));
+        assert!(summary.contains_key("time_range"));
+    }
+
+    #[test]
+    fn similarity_time_proximity_bonus() {
+        let mut c = AlertCluster::new("c1".into());
+        c.add_alert(&make_alert(json!({}), Some("2025-01-01T10:00:00Z")));
+        let near = make_alert(json!({}), Some("2025-01-01T10:30:00Z"));
+        let score = c.similarity_score(&near);
+        assert!(score >= 0.1, "expected time bonus, got {score}");
+    }
+
+    #[test]
+    fn similarity_instance_host_match() {
+        let mut c = AlertCluster::new("c1".into());
+        c.add_alert(&make_alert(json!({"instance": "webserver:9090"}), None));
+        let alert = make_alert(json!({"instance": "webserver:8080"}), None);
+        let score = c.similarity_score(&alert);
+        assert!(score >= 0.3, "expected instance match, got {score}");
+    }
+}
