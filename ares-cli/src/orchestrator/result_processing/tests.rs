@@ -211,8 +211,6 @@ fn da_indicator_empty_payload() {
     assert!(!has_domain_admin_indicator(&json!({})));
 }
 
-// ==================== has_domain_admin_indicator edge cases ====================
-
 #[test]
 fn da_indicator_multiple_hashes_one_krbtgt() {
     assert!(has_domain_admin_indicator(&json!({"hashes": [
@@ -257,8 +255,6 @@ fn da_indicator_hashes_not_array() {
         &json!({"hashes": "not_an_array"})
     ));
 }
-
-// ==================== resolve_parent_id tests ====================
 
 fn make_test_credential(id: &str, username: &str, domain: &str, attack_step: i32) -> Credential {
     Credential {
@@ -558,8 +554,6 @@ fn resolve_parent_prefers_credential_over_hash() {
     assert_eq!(parent_id, Some("c1".to_string()));
     assert_eq!(step, 2);
 }
-
-// ==================== parse_discoveries additional edge cases ====================
 
 #[test]
 fn parse_single_vulnerability() {

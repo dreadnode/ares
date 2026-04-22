@@ -400,8 +400,6 @@ fn make_host(ip: &str, hostname: &str) -> Host {
     }
 }
 
-// ==================== normalize_state_domains edge cases ====================
-
 #[test]
 fn normalize_state_domains_empty_inputs() {
     let users: Vec<User> = vec![];
@@ -696,8 +694,6 @@ fn normalize_state_domains_cred_one_domain_no_matching_corrects_best() {
     assert_eq!(creds[0].domain, "contoso.local");
 }
 
-// ==================== dedup_hashes edge cases ====================
-
 #[test]
 fn dedup_hashes_normalizes_hash_type() {
     let hashes = vec![
@@ -814,8 +810,6 @@ fn dedup_hashes_unknown_hash_type_preserved() {
     assert_eq!(deduped[0].hash_type, "des-cbc-md5");
 }
 
-// ==================== normalize_source_label edge cases ====================
-
 #[test]
 fn normalize_source_label_task_input_pattern() {
     assert_eq!(
@@ -879,8 +873,6 @@ fn normalize_source_label_task_suffix_unknown_type() {
 fn normalize_source_label_mixed_case_prefix_match() {
     assert_eq!(normalize_source_label("Exploit_something"), "Exploitation");
 }
-
-// ==================== dedup_users edge cases ====================
 
 #[test]
 fn dedup_users_filters_noise_usernames() {
@@ -1024,8 +1016,6 @@ fn dedup_users_empty_source_accepted() {
     let deduped = dedup_users(&users, &nb);
     assert_eq!(deduped.len(), 1);
 }
-
-// ==================== dedup_credentials additional edge cases ====================
 
 #[test]
 fn dedup_credentials_strips_trailing_dot_domains() {

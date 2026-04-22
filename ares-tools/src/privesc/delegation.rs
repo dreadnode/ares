@@ -230,8 +230,6 @@ mod tests {
     use crate::credentials;
     use serde_json::json;
 
-    // ── find_delegation arg validation ──────────────────────────────────
-
     #[test]
     fn find_delegation_requires_domain() {
         let args = json!({
@@ -306,8 +304,6 @@ mod tests {
         assert!(hash.is_none());
     }
 
-    // ── find_delegation integration error ──────────────────────────────
-
     #[test]
     fn find_delegation_no_auth_errors() {
         let args = json!({
@@ -321,8 +317,6 @@ mod tests {
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("password or hash"));
     }
-
-    // ── s4u_attack arg validation ──────────────────────────────────────
 
     #[test]
     fn s4u_attack_requires_target_spn() {
@@ -378,8 +372,6 @@ mod tests {
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("password or hash"));
     }
-
-    // ── generate_golden_ticket arg validation ──────────────────────────
 
     #[test]
     fn golden_ticket_requires_krbtgt_hash() {
@@ -446,8 +438,6 @@ mod tests {
         assert!(optional_str(&args, "extra_sid").is_none());
     }
 
-    // ── add_computer arg validation ────────────────────────────────────
-
     #[test]
     fn add_computer_all_required_args() {
         let args = json!({
@@ -483,8 +473,6 @@ mod tests {
         assert!(required_str(&args, "computer_name").is_err());
     }
 
-    // ── addspn arg validation ──────────────────────────────────────────
-
     #[test]
     fn addspn_all_required_args() {
         let args = json!({
@@ -516,8 +504,6 @@ mod tests {
         });
         assert!(required_str(&args, "spn").is_err());
     }
-
-    // ── rbcd_write arg validation ──────────────────────────────────────
 
     #[test]
     fn rbcd_write_all_args() {
@@ -554,8 +540,6 @@ mod tests {
         assert!(required_str(&args, "attacker_sid").is_err());
     }
 
-    // ── krbrelayup arg validation ──────────────────────────────────────
-
     #[test]
     fn krbrelayup_required_args_only() {
         let args = json!({
@@ -581,8 +565,6 @@ mod tests {
         assert_eq!(optional_str(&args, "method"), Some("rbcd"));
         assert_eq!(optional_str(&args, "create_user"), Some("eviluser"));
     }
-
-    // ── raise_child arg validation ─────────────────────────────────────
 
     #[test]
     fn raise_child_requires_child_domain() {
@@ -651,8 +633,6 @@ mod tests {
         });
         assert_eq!(optional_str(&args, "target_domain"), Some("contoso.local"));
     }
-
-    // ── credential helper tests ────────────────────────────────────────
 
     #[test]
     fn hash_args_with_nt_only() {
