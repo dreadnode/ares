@@ -11,7 +11,7 @@ collections:
   - name: ansible.posix
     version: 2.1.0
   - name: community.general
-    version: 12.5.0
+    version: 12.6.0
   - name: grafana.grafana
     version: 6.0.6
   - name: https://github.com/CowDogMoo/ansible-collection-workstation.git
