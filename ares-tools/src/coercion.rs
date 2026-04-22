@@ -261,3 +261,135 @@ pub async fn ntlmrelayx_multirelay(args: &Value) -> Result<ToolOutput> {
 
     cmd.execute().await
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::executor::mock;
+    use serde_json::json;
+
+    #[tokio::test]
+    async fn start_responder_executes() {
+        mock::push(mock::success());
+        let args = json!({});
+        assert!(start_responder(&args).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn start_responder_analyze_mode() {
+        mock::push(mock::success());
+        let args = json!({"interface": "eth1", "analyze_mode": true});
+        assert!(start_responder(&args).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn start_mitm6_executes() {
+        mock::push(mock::success());
+        let args = json!({"domain": "contoso.local"});
+        assert!(start_mitm6(&args).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn coercer_executes() {
+        mock::push(mock::success());
+        let args = json!({"target": "10.0.0.1", "listener": "10.0.0.5"});
+        assert!(coercer(&args).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn coercer_with_creds_executes() {
+        mock::push(mock::success());
+        let args = json!({
+            "target": "10.0.0.1", "listener": "10.0.0.5",
+            "username": "admin", "password": "P@ss", "domain": "contoso.local"
+        });
+        assert!(coercer(&args).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn petitpotam_executes() {
+        mock::push(mock::success());
+        let args = json!({"target": "10.0.0.1", "listener": "10.0.0.5"});
+        assert!(petitpotam(&args).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn petitpotam_with_creds_executes() {
+        mock::push(mock::success());
+        let args = json!({
+            "target": "10.0.0.1", "listener": "10.0.0.5",
+            "username": "admin", "password": "P@ss", "domain": "contoso.local"
+        });
+        assert!(petitpotam(&args).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn dfscoerce_executes() {
+        mock::push(mock::success());
+        let args = json!({"target": "10.0.0.1", "listener": "10.0.0.5"});
+        assert!(dfscoerce(&args).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn ntlmrelayx_to_ldaps_executes() {
+        mock::push(mock::success());
+        let args = json!({"dc_ip": "10.0.0.1"});
+        assert!(ntlmrelayx_to_ldaps(&args).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn ntlmrelayx_to_ldaps_delegate_access() {
+        mock::push(mock::success());
+        let args = json!({"dc_ip": "10.0.0.1", "delegate_access": true});
+        assert!(ntlmrelayx_to_ldaps(&args).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn ntlmrelayx_to_adcs_executes() {
+        mock::push(mock::success());
+        let args = json!({"ca_host": "ca01.contoso.local"});
+        assert!(ntlmrelayx_to_adcs(&args).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn ntlmrelayx_to_adcs_with_template() {
+        mock::push(mock::success());
+        let args = json!({"ca_host": "ca01.contoso.local", "template": "User"});
+        assert!(ntlmrelayx_to_adcs(&args).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn ntlmrelayx_to_smb_executes() {
+        mock::push(mock::success());
+        let args = json!({"target_ip": "10.0.0.1"});
+        assert!(ntlmrelayx_to_smb(&args).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn ntlmrelayx_to_smb_with_socks() {
+        mock::push(mock::success());
+        let args = json!({"target_ip": "10.0.0.1", "socks": true, "interactive": true});
+        assert!(ntlmrelayx_to_smb(&args).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn ntlmrelayx_multirelay_with_targets_file() {
+        mock::push(mock::success());
+        let args = json!({"targets_file": "/tmp/targets.txt"});
+        assert!(ntlmrelayx_multirelay(&args).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn ntlmrelayx_multirelay_with_target_ips() {
+        mock::push(mock::success());
+        let args = json!({"target_ips": "10.0.0.1,10.0.0.2", "dump_sam": true});
+        assert!(ntlmrelayx_multirelay(&args).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn ntlmrelayx_multirelay_no_targets() {
+        mock::push(mock::success());
+        let args = json!({});
+        assert!(ntlmrelayx_multirelay(&args).await.is_ok());
+    }
+}

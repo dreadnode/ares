@@ -884,4 +884,109 @@ mod tests {
         let action_flag = format!("--{action}");
         assert_eq!(action_flag, "--AddComputerTask");
     }
+
+    // --- mock executor tests: exercise full CommandBuilder code paths ---
+
+    use crate::executor::mock;
+
+    #[tokio::test]
+    async fn bloodyad_add_group_member_executes() {
+        mock::push(mock::success());
+        let args = json!({
+            "domain": "contoso.local", "username": "admin", "password": "P@ssw0rd!",
+            "dc_ip": "10.0.0.1", "group": "Domain Admins", "target_user": "jsmith"
+        });
+        assert!(super::bloodyad_add_group_member(&args).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn bloodyad_set_password_executes() {
+        mock::push(mock::success());
+        let args = json!({
+            "domain": "contoso.local", "username": "admin", "password": "P@ssw0rd!",
+            "dc_ip": "10.0.0.1", "target_user": "victim", "new_password": "NewP@ss!"
+        });
+        assert!(super::bloodyad_set_password(&args).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn bloodyad_add_genericall_executes() {
+        mock::push(mock::success());
+        let args = json!({
+            "domain": "contoso.local", "username": "admin", "password": "P@ssw0rd!",
+            "dc_ip": "10.0.0.1", "target_dn": "CN=Users,DC=contoso,DC=local", "principal": "jsmith"
+        });
+        assert!(super::bloodyad_add_genericall(&args).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn adminsd_holder_add_ace_executes() {
+        mock::push(mock::success());
+        let args = json!({
+            "domain": "contoso.local", "username": "admin", "password": "P@ssw0rd!",
+            "dc_ip": "10.0.0.1", "principal": "jsmith"
+        });
+        assert!(super::adminsd_holder_add_ace(&args).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn gmsa_read_password_executes() {
+        mock::push(mock::success());
+        let args = json!({
+            "domain": "contoso.local", "username": "admin", "password": "P@ssw0rd!",
+            "dc_ip": "10.0.0.1", "gmsa_account": "svc_web$"
+        });
+        assert!(super::gmsa_read_password_bloodyad(&args).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn pywhisker_executes() {
+        mock::push(mock::success());
+        let args = json!({
+            "domain": "contoso.local", "username": "admin", "password": "P@ssw0rd!",
+            "dc_ip": "10.0.0.1", "target_samaccountname": "dc01$"
+        });
+        assert!(super::pywhisker(&args).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn targeted_kerberoast_executes() {
+        mock::push(mock::success());
+        let args = json!({
+            "domain": "contoso.local", "username": "admin", "password": "P@ssw0rd!",
+            "dc_ip": "10.0.0.1", "target_user": "svc_sql"
+        });
+        assert!(super::targeted_kerberoast(&args).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn sharpgpoabuse_executes() {
+        mock::push(mock::success());
+        let args = json!({
+            "gpo_name": "Default Domain Policy", "domain": "contoso.local",
+            "username": "admin", "password": "P@ssw0rd!", "dc_ip": "10.0.0.1"
+        });
+        assert!(super::sharpgpoabuse(&args).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn pygpoabuse_immediate_task_executes() {
+        mock::push(mock::success());
+        let args = json!({
+            "domain": "contoso.local", "username": "admin", "password": "P@ssw0rd!",
+            "gpo_id": "{6AC1786C}", "command": "whoami", "dc_ip": "10.0.0.1"
+        });
+        assert!(super::pygpoabuse_immediate_task(&args).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn dacl_edit_executes() {
+        mock::push(mock::success());
+        let args = json!({
+            "domain": "contoso.local", "username": "admin", "password": "P@ssw0rd!",
+            "dc_ip": "10.0.0.1", "principal": "jsmith", "rights": "FullControl",
+            "target_dn": "CN=Users,DC=contoso,DC=local"
+        });
+        assert!(super::dacl_edit(&args).await.is_ok());
+    }
 }

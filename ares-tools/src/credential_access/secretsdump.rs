@@ -159,4 +159,58 @@ mod tests {
         });
         assert_eq!(optional_str(&args, "dc_ip"), Some("10.0.0.2"));
     }
+
+    // --- mock executor tests ---
+
+    use crate::executor::mock;
+
+    #[tokio::test]
+    async fn secretsdump_password_auth_executes() {
+        mock::push(mock::success());
+        let args = json!({
+            "target": "10.0.0.1", "username": "admin",
+            "password": "P@ss", "domain": "contoso.local"
+        });
+        assert!(super::secretsdump(&args).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn secretsdump_hash_auth_executes() {
+        mock::push(mock::success());
+        let args = json!({
+            "target": "10.0.0.1", "username": "admin",
+            "hash": "aabbccdd", "domain": "contoso.local"
+        });
+        assert!(super::secretsdump(&args).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn secretsdump_kerberos_auth_executes() {
+        mock::push(mock::success());
+        let args = json!({
+            "target": "10.0.0.1", "username": "admin",
+            "no_pass": true, "ticket_path": "/tmp/admin.ccache"
+        });
+        assert!(super::secretsdump(&args).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn secretsdump_with_dc_ip_executes() {
+        mock::push(mock::success());
+        let args = json!({
+            "target": "10.0.0.1", "username": "admin",
+            "password": "P@ss", "dc_ip": "10.0.0.2"
+        });
+        assert!(super::secretsdump(&args).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn secretsdump_custom_timeout_executes() {
+        mock::push(mock::success());
+        let args = json!({
+            "target": "10.0.0.1", "username": "admin",
+            "password": "P@ss", "timeout_minutes": 10
+        });
+        assert!(super::secretsdump(&args).await.is_ok());
+    }
 }

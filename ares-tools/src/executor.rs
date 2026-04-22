@@ -80,6 +80,13 @@ impl CommandBuilder {
     }
 
     pub async fn execute(self) -> Result<ToolOutput> {
+        #[cfg(test)]
+        {
+            if let Some(output) = mock::take_next() {
+                return Ok(output);
+            }
+        }
+
         let display_cmd = format!("{} {}", self.program, self.args.join(" "));
         tracing::debug!(cmd = %display_cmd, timeout = ?self.timeout, "executing tool command");
 
@@ -167,6 +174,52 @@ pub async fn run(program: &str, args: &[&str]) -> Result<ToolOutput> {
         .args(args.iter().map(|s| s.to_string()))
         .execute()
         .await
+}
+
+/// Mock executor for testing tool wrapper functions without spawning subprocesses.
+///
+/// In test mode, push `ToolOutput` values onto the thread-local queue.
+/// Each `CommandBuilder::execute()` call pops the next response (or falls through
+/// to real execution if the queue is empty).
+#[cfg(test)]
+pub(crate) mod mock {
+    use super::*;
+    use std::cell::RefCell;
+    use std::collections::VecDeque;
+
+    thread_local! {
+        static RESPONSES: RefCell<VecDeque<ToolOutput>> = const { RefCell::new(VecDeque::new()) };
+    }
+
+    /// Push a single mock response onto the queue.
+    pub fn push(output: ToolOutput) {
+        RESPONSES.with(|r| r.borrow_mut().push_back(output));
+    }
+
+    /// Pop the next response, or `None` to fall through to real execution.
+    pub(super) fn take_next() -> Option<ToolOutput> {
+        RESPONSES.with(|r| r.borrow_mut().pop_front())
+    }
+
+    /// Create a default success output.
+    pub fn success() -> ToolOutput {
+        ToolOutput {
+            stdout: String::new(),
+            stderr: String::new(),
+            exit_code: Some(0),
+            success: true,
+        }
+    }
+
+    /// Create a success output with custom stdout.
+    pub fn success_with_stdout(stdout: impl Into<String>) -> ToolOutput {
+        ToolOutput {
+            stdout: stdout.into(),
+            stderr: String::new(),
+            exit_code: Some(0),
+            success: true,
+        }
+    }
 }
 
 #[cfg(test)]

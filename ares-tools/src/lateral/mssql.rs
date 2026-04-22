@@ -358,4 +358,116 @@ mod tests {
         });
         assert!(required_str(&args, "listener_ip").is_err());
     }
+
+    // --- mock executor tests ---
+
+    use crate::executor::mock;
+
+    #[tokio::test]
+    async fn mssql_command_executes() {
+        mock::push(mock::success());
+        let args = json!({
+            "target": "10.0.0.1", "username": "sa",
+            "password": "P@ss", "command": "SELECT @@version"
+        });
+        assert!(super::mssql_command(&args).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn mssql_command_windows_auth_executes() {
+        mock::push(mock::success());
+        let args = json!({
+            "target": "10.0.0.1", "username": "admin",
+            "password": "P@ss", "domain": "CONTOSO",
+            "windows_auth": true, "command": "SELECT 1"
+        });
+        assert!(super::mssql_command(&args).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn mssql_enable_xp_cmdshell_executes() {
+        mock::push(mock::success());
+        let args = json!({
+            "target": "10.0.0.1", "username": "sa", "password": "P@ss"
+        });
+        assert!(super::mssql_enable_xp_cmdshell(&args).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn mssql_enable_xp_cmdshell_impersonate_executes() {
+        mock::push(mock::success());
+        let args = json!({
+            "target": "10.0.0.1", "username": "sa", "password": "P@ss",
+            "impersonate_user": "dbo"
+        });
+        assert!(super::mssql_enable_xp_cmdshell(&args).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn mssql_enum_impersonation_executes() {
+        mock::push(mock::success());
+        let args = json!({
+            "target": "10.0.0.1", "username": "sa", "password": "P@ss"
+        });
+        assert!(super::mssql_enum_impersonation(&args).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn mssql_impersonate_executes() {
+        mock::push(mock::success());
+        let args = json!({
+            "target": "10.0.0.1", "username": "sa", "password": "P@ss",
+            "impersonate_user": "dbo", "query": "SELECT SYSTEM_USER"
+        });
+        assert!(super::mssql_impersonate(&args).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn mssql_enum_linked_servers_executes() {
+        mock::push(mock::success());
+        let args = json!({
+            "target": "10.0.0.1", "username": "sa", "password": "P@ss"
+        });
+        assert!(super::mssql_enum_linked_servers(&args).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn mssql_exec_linked_executes() {
+        mock::push(mock::success());
+        let args = json!({
+            "target": "10.0.0.1", "username": "sa", "password": "P@ss",
+            "linked_server": "SQL02", "query": "SELECT 1"
+        });
+        assert!(super::mssql_exec_linked(&args).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn mssql_linked_enable_xpcmdshell_executes() {
+        mock::push(mock::success());
+        let args = json!({
+            "target": "10.0.0.1", "username": "sa", "password": "P@ss",
+            "linked_server": "SQL02"
+        });
+        assert!(super::mssql_linked_enable_xpcmdshell(&args).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn mssql_linked_xpcmdshell_executes() {
+        mock::push(mock::success());
+        let args = json!({
+            "target": "10.0.0.1", "username": "sa", "password": "P@ss",
+            "linked_server": "SQL02", "command": "whoami"
+        });
+        assert!(super::mssql_linked_xpcmdshell(&args).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn mssql_ntlm_coerce_executes() {
+        mock::push(mock::success());
+        let args = json!({
+            "target": "10.0.0.1", "username": "sa", "password": "P@ss",
+            "listener_ip": "10.0.0.5"
+        });
+        assert!(super::mssql_ntlm_coerce(&args).await.is_ok());
+    }
 }

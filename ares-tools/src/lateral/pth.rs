@@ -248,4 +248,48 @@ mod tests {
         let cred = pth_cred_string(domain, username, hash);
         assert_eq!(cred, "CONTOSO/admin%aad3b435:aabbccdd");
     }
+
+    // --- mock executor tests ---
+
+    use crate::executor::mock;
+
+    #[tokio::test]
+    async fn pth_winexe_executes() {
+        mock::push(mock::success());
+        let args = json!({
+            "target": "10.0.0.1", "username": "admin",
+            "hash": "aabbccdd", "domain": "CONTOSO"
+        });
+        assert!(super::pth_winexe(&args).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn pth_smbclient_executes() {
+        mock::push(mock::success());
+        let args = json!({
+            "target": "10.0.0.1", "username": "admin",
+            "hash": "aabbccdd"
+        });
+        assert!(super::pth_smbclient(&args).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn pth_rpcclient_executes() {
+        mock::push(mock::success());
+        let args = json!({
+            "target": "10.0.0.1", "username": "admin",
+            "hash": "aabbccdd"
+        });
+        assert!(super::pth_rpcclient(&args).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn pth_wmic_executes() {
+        mock::push(mock::success());
+        let args = json!({
+            "target": "10.0.0.1", "username": "admin",
+            "hash": "aabbccdd"
+        });
+        assert!(super::pth_wmic(&args).await.is_ok());
+    }
 }

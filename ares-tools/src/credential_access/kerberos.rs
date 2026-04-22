@@ -73,7 +73,7 @@ pub async fn asrep_roast(args: &Value) -> Result<ToolOutput> {
 }
 
 /// Common AD usernames for unauthenticated Kerberos enumeration.
-const DEFAULT_AD_USERNAMES: &str = "\
+pub(crate) const DEFAULT_AD_USERNAMES: &str = "\
 Administrator\nadmin\nguest\nkrbtgt\n\
 DefaultAccount\n\
 sql_svc\nsvc_sql\nsqlservice\nsvc_mssql\n\
@@ -307,5 +307,49 @@ mod tests {
             "dc_ip": "10.0.0.1"
         });
         assert!(optional_str(&args, "users_file").is_none());
+    }
+
+    // --- mock executor tests ---
+
+    use crate::executor::mock;
+
+    #[tokio::test]
+    async fn kerberoast_executes() {
+        mock::push(mock::success());
+        let args = json!({
+            "domain": "contoso.local", "username": "admin",
+            "password": "P@ss", "dc_ip": "10.0.0.1"
+        });
+        assert!(super::kerberoast(&args).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn asrep_roast_authenticated_executes() {
+        mock::push(mock::success());
+        let args = json!({
+            "domain": "contoso.local", "dc_ip": "10.0.0.1",
+            "username": "admin", "password": "P@ss"
+        });
+        assert!(super::asrep_roast(&args).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn asrep_roast_with_users_file_executes() {
+        mock::push(mock::success());
+        let args = json!({
+            "domain": "contoso.local", "dc_ip": "10.0.0.1",
+            "users_file": "/tmp/users.txt"
+        });
+        assert!(super::asrep_roast(&args).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn kerberos_user_enum_with_file_executes() {
+        mock::push(mock::success());
+        let args = json!({
+            "domain": "contoso.local", "dc_ip": "10.0.0.1",
+            "users_file": "/tmp/users.txt"
+        });
+        assert!(super::kerberos_user_enum_noauth(&args).await.is_ok());
     }
 }

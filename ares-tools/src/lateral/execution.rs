@@ -744,4 +744,174 @@ mod tests {
         });
         assert!(required_str(&args, "ticket_path").is_err());
     }
+
+    // --- mock executor tests ---
+
+    use crate::executor::mock;
+
+    #[tokio::test]
+    async fn psexec_password_executes() {
+        mock::push(mock::success());
+        let args = json!({
+            "target": "10.0.0.1", "username": "admin",
+            "password": "P@ss", "domain": "CONTOSO"
+        });
+        assert!(super::psexec(&args).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn psexec_hash_executes() {
+        mock::push(mock::success());
+        let args = json!({
+            "target": "10.0.0.1", "username": "admin",
+            "hash": "aabbccdd", "domain": "CONTOSO"
+        });
+        assert!(super::psexec(&args).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn psexec_kerberos_executes() {
+        mock::push(mock::success());
+        let args = json!({
+            "target": "dc01.contoso.local", "username": "admin",
+            "domain": "contoso.local", "ticket_path": "/tmp/admin.ccache"
+        });
+        assert!(super::psexec_kerberos(&args).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn psexec_kerberos_with_dc_ip_executes() {
+        mock::push(mock::success());
+        let args = json!({
+            "target": "dc01.contoso.local", "username": "admin",
+            "domain": "contoso.local", "ticket_path": "/tmp/admin.ccache",
+            "dc_ip": "10.0.0.1", "target_ip": "10.0.0.1"
+        });
+        assert!(super::psexec_kerberos(&args).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn wmiexec_password_executes() {
+        mock::push(mock::success());
+        let args = json!({
+            "target": "10.0.0.1", "username": "admin",
+            "password": "P@ss", "domain": "CONTOSO"
+        });
+        assert!(super::wmiexec(&args).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn wmiexec_kerberos_executes() {
+        mock::push(mock::success());
+        let args = json!({
+            "target": "dc01.contoso.local", "username": "admin",
+            "domain": "contoso.local", "ticket_path": "/tmp/admin.ccache"
+        });
+        assert!(super::wmiexec_kerberos(&args).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn smbexec_password_executes() {
+        mock::push(mock::success());
+        let args = json!({
+            "target": "10.0.0.1", "username": "admin", "password": "P@ss"
+        });
+        assert!(super::smbexec(&args).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn smbexec_kerberos_executes() {
+        mock::push(mock::success());
+        let args = json!({
+            "target": "dc01.contoso.local", "username": "admin",
+            "domain": "contoso.local", "ticket_path": "/tmp/admin.ccache"
+        });
+        assert!(super::smbexec_kerberos(&args).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn evil_winrm_password_executes() {
+        mock::push(mock::success());
+        let args = json!({
+            "target": "10.0.0.1", "username": "admin", "password": "P@ss"
+        });
+        assert!(super::evil_winrm(&args).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn evil_winrm_hash_executes() {
+        mock::push(mock::success());
+        let args = json!({
+            "target": "10.0.0.1", "username": "admin", "hash": "aabbccdd"
+        });
+        assert!(super::evil_winrm(&args).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn evil_winrm_no_creds_executes() {
+        mock::push(mock::success());
+        let args = json!({
+            "target": "10.0.0.1", "username": "admin"
+        });
+        assert!(super::evil_winrm(&args).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn xfreerdp_password_executes() {
+        mock::push(mock::success());
+        let args = json!({
+            "target": "10.0.0.1", "username": "admin", "password": "P@ss"
+        });
+        assert!(super::xfreerdp(&args).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn xfreerdp_hash_executes() {
+        mock::push(mock::success());
+        let args = json!({
+            "target": "10.0.0.1", "username": "admin",
+            "hash": "aabbccdd", "domain": "CONTOSO"
+        });
+        assert!(super::xfreerdp(&args).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn ssh_with_password_executes() {
+        mock::push(mock::success());
+        let args = json!({
+            "target": "10.0.0.1", "username": "root", "password": "toor"
+        });
+        assert!(super::ssh_with_password(&args).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn ssh_with_port_executes() {
+        mock::push(mock::success());
+        let args = json!({
+            "target": "10.0.0.1", "username": "root",
+            "password": "toor", "port": "2222"
+        });
+        assert!(super::ssh_with_password(&args).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn secretsdump_kerberos_executes() {
+        mock::push(mock::success());
+        let args = json!({
+            "target": "dc01.contoso.local", "username": "admin",
+            "domain": "contoso.local", "ticket_path": "/tmp/admin.ccache"
+        });
+        assert!(super::secretsdump_kerberos(&args).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn secretsdump_kerberos_custom_timeout_executes() {
+        mock::push(mock::success());
+        let args = json!({
+            "target": "dc01.contoso.local", "username": "admin",
+            "domain": "contoso.local", "ticket_path": "/tmp/admin.ccache",
+            "timeout_minutes": 10
+        });
+        assert!(super::secretsdump_kerberos(&args).await.is_ok());
+    }
 }

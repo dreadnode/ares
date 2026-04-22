@@ -122,4 +122,27 @@ mod tests {
         });
         assert!(optional_str(&args, "dc_ip").is_none());
     }
+
+    // --- mock executor tests ---
+
+    use crate::executor::mock;
+
+    #[tokio::test]
+    async fn get_tgt_password_executes() {
+        mock::push(mock::success());
+        let args = json!({
+            "domain": "contoso.local", "username": "admin", "password": "P@ss"
+        });
+        assert!(super::get_tgt(&args).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn get_tgt_hash_executes() {
+        mock::push(mock::success());
+        let args = json!({
+            "domain": "contoso.local", "username": "admin",
+            "hash": "aabbccdd", "dc_ip": "10.0.0.1"
+        });
+        assert!(super::get_tgt(&args).await.is_ok());
+    }
 }

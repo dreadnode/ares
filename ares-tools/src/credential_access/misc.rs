@@ -849,4 +849,198 @@ mod tests {
         });
         assert_eq!(optional_str(&args, "users_file"), Some("/tmp/myusers.txt"));
     }
+
+    // --- mock executor tests ---
+
+    use crate::executor::mock;
+
+    #[tokio::test]
+    async fn lsassy_with_password_executes() {
+        mock::push(mock::success());
+        let args = json!({
+            "target": "10.0.0.1", "username": "admin", "password": "P@ss"
+        });
+        assert!(super::lsassy(&args).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn lsassy_with_hash_executes() {
+        mock::push(mock::success());
+        let args = json!({
+            "target": "10.0.0.1", "username": "admin", "hash": "aabbccdd"
+        });
+        assert!(super::lsassy(&args).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn lsassy_with_domain_and_method_executes() {
+        mock::push(mock::success());
+        let args = json!({
+            "target": "10.0.0.1", "username": "admin", "password": "P@ss",
+            "domain": "contoso.local", "method": "comsvcs"
+        });
+        assert!(super::lsassy(&args).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn domain_admin_checker_executes() {
+        mock::push(mock::success());
+        let args = json!({
+            "targets": "10.0.0.0/24", "username": "admin",
+            "password": "P@ss", "domain": "contoso.local"
+        });
+        assert!(super::domain_admin_checker(&args).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn domain_admin_checker_with_hash_executes() {
+        mock::push(mock::success());
+        let args = json!({
+            "targets": "10.0.0.1", "username": "admin",
+            "hash": "aabbccdd", "domain": "contoso.local"
+        });
+        assert!(super::domain_admin_checker(&args).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn gpp_password_finder_executes() {
+        mock::push(mock::success());
+        let args = json!({
+            "target": "10.0.0.1", "username": "admin",
+            "password": "P@ss", "domain": "contoso.local"
+        });
+        assert!(super::gpp_password_finder(&args).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn sysvol_script_search_executes() {
+        mock::push(mock::success());
+        let args = json!({
+            "target": "10.0.0.1", "username": "admin",
+            "password": "P@ss", "domain": "contoso.local"
+        });
+        assert!(super::sysvol_script_search(&args).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn laps_dump_executes() {
+        mock::push(mock::success());
+        let args = json!({
+            "target": "10.0.0.1", "username": "admin",
+            "password": "P@ss", "domain": "contoso.local"
+        });
+        assert!(super::laps_dump(&args).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn ldap_search_descriptions_executes() {
+        mock::push(mock::success());
+        let args = json!({
+            "target": "10.0.0.1", "username": "admin",
+            "password": "P@ss", "domain": "contoso.local"
+        });
+        assert!(super::ldap_search_descriptions(&args).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn ldap_search_descriptions_with_base_dn_executes() {
+        mock::push(mock::success());
+        let args = json!({
+            "target": "10.0.0.1", "username": "admin",
+            "password": "P@ss", "domain": "contoso.local",
+            "base_dn": "OU=Users,DC=contoso,DC=local"
+        });
+        assert!(super::ldap_search_descriptions(&args).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn smbclient_spider_executes() {
+        mock::push(mock::success());
+        let args = json!({
+            "target": "10.0.0.1", "username": "admin",
+            "password": "P@ss", "domain": "contoso.local"
+        });
+        assert!(super::smbclient_spider(&args).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn smbclient_spider_with_pattern_and_depth_executes() {
+        mock::push(mock::success());
+        let args = json!({
+            "target": "10.0.0.1", "username": "admin",
+            "password": "P@ss", "domain": "contoso.local",
+            "pattern": "*.kdbx", "depth": 3
+        });
+        assert!(super::smbclient_spider(&args).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn ntds_dit_extract_executes() {
+        mock::push(mock::success());
+        let args = json!({
+            "target": "10.0.0.1", "username": "admin",
+            "password": "P@ss", "domain": "contoso.local"
+        });
+        assert!(super::ntds_dit_extract(&args).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn ntds_dit_extract_with_hash_executes() {
+        mock::push(mock::success());
+        let args = json!({
+            "target": "10.0.0.1", "username": "admin",
+            "hash": "aabbccdd", "domain": "contoso.local"
+        });
+        assert!(super::ntds_dit_extract(&args).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn password_policy_executes() {
+        mock::push(mock::success());
+        let args = json!({
+            "target": "10.0.0.1", "username": "admin",
+            "password": "P@ss", "domain": "contoso.local"
+        });
+        assert!(super::password_policy(&args).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn password_spray_with_file_executes() {
+        mock::push(mock::success());
+        let args = json!({
+            "target": "10.0.0.1", "password": "P@ss",
+            "domain": "contoso.local", "users_file": "/tmp/users.txt"
+        });
+        assert!(super::password_spray(&args).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn username_as_password_with_file_executes() {
+        mock::push(mock::success());
+        let args = json!({
+            "target": "10.0.0.1", "domain": "contoso.local",
+            "users_file": "/tmp/users.txt"
+        });
+        assert!(super::username_as_password(&args).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn check_credman_entries_executes() {
+        mock::push(mock::success());
+        let args = json!({
+            "target": "10.0.0.1", "username": "admin",
+            "password": "P@ss", "domain": "contoso.local"
+        });
+        assert!(super::check_credman_entries(&args).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn check_autologon_registry_executes() {
+        mock::push(mock::success());
+        let args = json!({
+            "target": "10.0.0.1", "username": "admin",
+            "password": "P@ss", "domain": "contoso.local"
+        });
+        assert!(super::check_autologon_registry(&args).await.is_ok());
+    }
 }

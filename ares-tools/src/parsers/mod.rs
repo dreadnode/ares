@@ -722,6 +722,109 @@ SMB  192.168.58.121  445  DC01  bob         2026-03-25 23:21:09 0  Bob"#;
     }
 
     #[test]
+    fn parse_tool_output_smb_signing_check() {
+        let output = "SMB  192.168.58.10  445  DC01  signing:True";
+        let params = json!({"target": "192.168.58.10"});
+        let disc = parse_tool_output("smb_signing_check", output, &params);
+        // parse_smb_signing returns host entries
+        assert!(disc.get("hosts").is_some() || disc == json!({}));
+    }
+
+    #[test]
+    fn parse_tool_output_smb_sweep() {
+        let output = "SMB  192.168.58.10  445  DC01  [*] Windows Server 2019 (name:DC01) (domain:contoso.local)";
+        let disc = parse_tool_output("smb_sweep", output, &json!({}));
+        let hosts = disc["hosts"].as_array().unwrap();
+        assert_eq!(hosts.len(), 1);
+    }
+
+    #[test]
+    fn parse_tool_output_enumerate_shares() {
+        let output = "SMB  192.168.58.10  445  DC01  Share           Permissions  Remark\n\
+                      SMB  192.168.58.10  445  DC01  -----           -----------  ------\n\
+                      SMB  192.168.58.10  445  DC01  SYSVOL          READ         Logon server share";
+        let disc = parse_tool_output("enumerate_shares", output, &json!({}));
+        let shares = disc["shares"].as_array().unwrap();
+        assert_eq!(shares.len(), 1);
+    }
+
+    #[test]
+    fn parse_tool_output_run_bloodhound_empty() {
+        let disc = parse_tool_output("run_bloodhound", "Collection complete", &json!({}));
+        assert_eq!(disc, json!({}));
+    }
+
+    #[test]
+    fn parse_tool_output_password_spray() {
+        let output = "[+] 192.168.58.10 contoso.local\\svc_sql:Summer2024! (Pwn3d!)";
+        let params = json!({"domain": "contoso.local", "target_ip": "192.168.58.10"});
+        let disc = parse_tool_output("password_spray", output, &params);
+        let creds = disc["credentials"].as_array().unwrap();
+        assert!(!creds.is_empty());
+    }
+
+    #[test]
+    fn parse_tool_output_crack_with_hashcat() {
+        let output =
+            "$krb5tgs$23$*svc_sql$CONTOSO.LOCAL$contoso.local/svc_sql*$abc$def:Summer2024!";
+        let params = json!({"domain": "contoso.local"});
+        let disc = parse_tool_output("crack_with_hashcat", output, &params);
+        let creds = disc["credentials"].as_array().unwrap();
+        assert!(!creds.is_empty());
+    }
+
+    #[test]
+    fn parse_tool_output_crack_with_john() {
+        let output = "svc_sql:Summer2024!::::::::\n1 password hash cracked, 0 left";
+        let params = json!({"domain": "contoso.local"});
+        let disc = parse_tool_output("crack_with_john", output, &params);
+        let creds = disc["credentials"].as_array().unwrap();
+        assert!(!creds.is_empty());
+    }
+
+    #[test]
+    fn parse_tool_output_sysvol_spider() {
+        let disc = parse_tool_output("sysvol_script_search", "no creds found", &json!({}));
+        // No credentials found — should be empty
+        assert!(disc.get("credentials").is_none());
+    }
+
+    #[test]
+    fn parse_tool_output_asrep_roast() {
+        let output = "$krb5asrep$23$brian.davis@CHILD.CONTOSO.LOCAL:aabbccdd";
+        let params = json!({"domain": "child.contoso.local", "dc_ip": "192.168.58.10"});
+        let disc = parse_tool_output("asrep_roast", output, &params);
+        let hashes = disc["hashes"].as_array().unwrap();
+        assert!(!hashes.is_empty());
+    }
+
+    #[test]
+    fn parse_tool_output_lsassy() {
+        // lsassy format: DOMAIN\user  hash_or_password
+        let output = "contoso.local\\Administrator  aad3b435b51404eeaad3b435b51404ee:e19ccf75ee54e06b06a5907af13cef42";
+        let params = json!({"domain": "contoso.local", "target_ip": "192.168.58.10"});
+        let disc = parse_tool_output("lsassy", output, &params);
+        assert!(disc.get("hashes").is_some() || disc.get("credentials").is_some());
+    }
+
+    #[test]
+    fn parse_tool_output_ldap_descriptions() {
+        let output = "SMB  192.168.58.10  445  DC01  svc_test  2026-03-25 23:22:25 0  Service Account (Password : TestPass!)";
+        let params = json!({"domain": "contoso.local", "target_ip": "192.168.58.10"});
+        let disc = parse_tool_output("ldap_search_descriptions", output, &params);
+        let creds = disc["credentials"].as_array().unwrap();
+        assert!(!creds.is_empty());
+    }
+
+    #[test]
+    fn parse_tool_output_secretsdump_kerberos() {
+        let output = "Administrator:500:aad3b435b51404eeaad3b435b51404ee:e19ccf75ee54e06b06a5907af13cef42:::";
+        let params = json!({"domain": "contoso.local"});
+        let disc = parse_tool_output("secretsdump_kerberos", output, &params);
+        assert!(!disc["hashes"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
     fn merge_discoveries_host_more_services_wins() {
         let d1 = json!({"hosts": [{"ip": "10.0.0.1", "services": ["445/tcp"]}]});
         let d2 =

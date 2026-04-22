@@ -114,3 +114,146 @@ pub(crate) async fn create_hash_timeline_event(
         .persist_timeline_event(&dispatcher.queue, &event, &techniques)
         .await;
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // --- credential_techniques ---
+
+    #[test]
+    fn credential_techniques_admin() {
+        let t = credential_techniques("nxc-smb", true);
+        assert!(t.contains(&"T1078".to_string()));
+        assert!(!t.contains(&"T1552".to_string()));
+    }
+
+    #[test]
+    fn credential_techniques_non_admin() {
+        let t = credential_techniques("nxc-smb", false);
+        assert!(t.contains(&"T1552".to_string()));
+        assert!(!t.contains(&"T1078".to_string()));
+    }
+
+    #[test]
+    fn credential_techniques_kerberoast_source() {
+        let t = credential_techniques("kerberoast", false);
+        assert!(t.contains(&"T1558.003".to_string()));
+    }
+
+    #[test]
+    fn credential_techniques_asrep_source() {
+        let t = credential_techniques("asrep", false);
+        assert!(t.contains(&"T1558.004".to_string()));
+    }
+
+    #[test]
+    fn credential_techniques_as_rep_hyphenated() {
+        let t = credential_techniques("as-rep", false);
+        assert!(t.contains(&"T1558.004".to_string()));
+    }
+
+    #[test]
+    fn credential_techniques_cracked_source() {
+        let t = credential_techniques("cracked", true);
+        assert!(t.contains(&"T1110".to_string()));
+    }
+
+    #[test]
+    fn credential_techniques_no_special_source() {
+        let t = credential_techniques("manual", false);
+        assert_eq!(t.len(), 1);
+        assert_eq!(t[0], "T1552");
+    }
+
+    #[test]
+    fn credential_techniques_case_insensitive() {
+        let t = credential_techniques("KERBEROAST", false);
+        assert!(t.contains(&"T1558.003".to_string()));
+    }
+
+    // --- hash_techniques ---
+
+    #[test]
+    fn hash_techniques_base() {
+        let t = hash_techniques("aabbccdd", "ntlm", "manual");
+        assert!(t.contains(&"T1003".to_string()));
+    }
+
+    #[test]
+    fn hash_techniques_krb5tgs_in_value() {
+        let t = hash_techniques("$krb5tgs$23$*user", "unknown", "tool");
+        assert!(t.contains(&"T1558.003".to_string()));
+    }
+
+    #[test]
+    fn hash_techniques_kerberoast_type() {
+        let t = hash_techniques("somehash", "kerberoast", "tool");
+        assert!(t.contains(&"T1558.003".to_string()));
+    }
+
+    #[test]
+    fn hash_techniques_tgs_rep_type() {
+        let t = hash_techniques("somehash", "tgs-rep", "tool");
+        assert!(t.contains(&"T1558.003".to_string()));
+    }
+
+    #[test]
+    fn hash_techniques_kerberoast_source() {
+        let t = hash_techniques("somehash", "unknown", "kerberoast");
+        assert!(t.contains(&"T1558.003".to_string()));
+    }
+
+    #[test]
+    fn hash_techniques_krb5asrep_in_value() {
+        let t = hash_techniques("$krb5asrep$23$user", "unknown", "tool");
+        assert!(t.contains(&"T1558.004".to_string()));
+    }
+
+    #[test]
+    fn hash_techniques_asrep_type() {
+        let t = hash_techniques("somehash", "asrep", "tool");
+        assert!(t.contains(&"T1558.004".to_string()));
+    }
+
+    #[test]
+    fn hash_techniques_asrep_source() {
+        let t = hash_techniques("somehash", "unknown", "as-rep");
+        assert!(t.contains(&"T1558.004".to_string()));
+    }
+
+    #[test]
+    fn hash_techniques_ntlm_secretsdump() {
+        let t = hash_techniques("aabbccdd", "ntlm", "secretsdump");
+        assert!(t.contains(&"T1003.006".to_string()));
+    }
+
+    #[test]
+    fn hash_techniques_ntlm_dcsync() {
+        let t = hash_techniques("aabbccdd", "ntlm", "dcsync");
+        assert!(t.contains(&"T1003.006".to_string()));
+    }
+
+    #[test]
+    fn hash_techniques_ntlm_no_secretsdump() {
+        let t = hash_techniques("aabbccdd", "ntlm", "manual");
+        assert!(!t.contains(&"T1003.006".to_string()));
+    }
+
+    // --- is_critical_hash ---
+
+    #[test]
+    fn critical_hash_krbtgt() {
+        assert!(is_critical_hash("krbtgt"));
+    }
+
+    #[test]
+    fn critical_hash_administrator() {
+        assert!(is_critical_hash("Administrator"));
+    }
+
+    #[test]
+    fn critical_hash_regular_user() {
+        assert!(!is_critical_hash("jsmith"));
+    }
+}

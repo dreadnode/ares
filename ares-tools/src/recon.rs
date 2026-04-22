@@ -606,4 +606,272 @@ mod tests {
     fn domain_to_base_dn_single() {
         assert_eq!(domain_to_base_dn("local"), "DC=local");
     }
+
+    // --- mock executor tests: exercise full CommandBuilder code paths ---
+
+    use crate::executor::mock;
+    use serde_json::json;
+
+    #[tokio::test]
+    async fn nmap_scan_builds_command() {
+        mock::push(mock::success());
+        let args = json!({"target": "10.0.0.1"});
+        let result = nmap_scan(&args).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn nmap_scan_with_ports() {
+        mock::push(mock::success());
+        let args = json!({"target": "10.0.0.1", "ports": "80,443"});
+        let result = nmap_scan(&args).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn nmap_scan_caps_full_port_range() {
+        mock::push(mock::success());
+        let args = json!({"target": "10.0.0.1", "ports": "-"});
+        let result = nmap_scan(&args).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn nmap_scan_with_extra_args() {
+        mock::push(mock::success());
+        let args = json!({"target": "10.0.0.1", "arguments": "-sV --reason"});
+        let result = nmap_scan(&args).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn nmap_scan_phase2_on_discovered_ports() {
+        // Phase 1 returns discovered ports, triggering phase 2
+        mock::push(mock::success_with_stdout(
+            "80/tcp  open  http\n443/tcp open  https\n",
+        ));
+        mock::push(mock::success_with_stdout("Nmap scan report for 10.0.0.1\n"));
+        let args = json!({"target": "10.0.0.1"});
+        let result = nmap_scan(&args).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn smb_sweep_builds_command() {
+        mock::push(mock::success());
+        let args = json!({"targets": "10.0.0.0/24"});
+        let result = smb_sweep(&args).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn smb_sweep_missing_targets() {
+        let args = json!({});
+        assert!(smb_sweep(&args).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn enumerate_users_builds_command() {
+        mock::push(mock::success());
+        mock::push(mock::success());
+        let args = json!({"target": "10.0.0.1", "username": "admin", "password": "P@ss", "domain": "contoso.local"});
+        let result = enumerate_users(&args).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn enumerate_users_null_session() {
+        mock::push(mock::success());
+        mock::push(mock::success());
+        let args = json!({"target": "10.0.0.1", "null_session": true});
+        let result = enumerate_users(&args).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn enumerate_shares_builds_command() {
+        mock::push(mock::success());
+        let args = json!({"target": "10.0.0.1", "username": "admin", "password": "P@ss"});
+        let result = enumerate_shares(&args).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn smb_signing_check_builds_command() {
+        mock::push(mock::success());
+        let args = json!({"target": "10.0.0.1"});
+        let result = smb_signing_check(&args).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn run_bloodhound_builds_command() {
+        mock::push(mock::success());
+        let args = json!({"domain": "contoso.local", "username": "admin", "password": "P@ss", "dc_ip": "10.0.0.1"});
+        let result = run_bloodhound(&args).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn ldap_search_builds_command() {
+        mock::push(mock::success());
+        let args = json!({"target": "10.0.0.1", "domain": "contoso.local"});
+        let result = ldap_search(&args).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn ldap_search_with_auth_and_filter() {
+        mock::push(mock::success());
+        let args = json!({
+            "target": "10.0.0.1",
+            "domain": "contoso.local",
+            "username": "admin",
+            "password": "P@ss",
+            "filter": "(objectClass=user)",
+            "attributes": "cn,sAMAccountName"
+        });
+        let result = ldap_search(&args).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn ldap_search_with_custom_base_dn() {
+        mock::push(mock::success());
+        let args = json!({
+            "target": "10.0.0.1",
+            "domain": "contoso.local",
+            "base_dn": "OU=Users,DC=contoso,DC=local"
+        });
+        let result = ldap_search(&args).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn rpcclient_command_builds_command() {
+        mock::push(mock::success());
+        let args = json!({"target": "10.0.0.1", "command": "enumdomusers"});
+        let result = rpcclient_command(&args).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn rpcclient_null_session() {
+        mock::push(mock::success());
+        let args = json!({"target": "10.0.0.1", "command": "srvinfo", "null_session": true});
+        let result = rpcclient_command(&args).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn rpcclient_with_domain_creds() {
+        mock::push(mock::success());
+        let args = json!({
+            "target": "10.0.0.1",
+            "command": "getusername",
+            "domain": "contoso.local",
+            "username": "admin",
+            "password": "P@ss"
+        });
+        let result = rpcclient_command(&args).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn dig_query_builds_command() {
+        mock::push(mock::success());
+        let args = json!({"query": "contoso.local"});
+        let result = dig_query(&args).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn dig_query_with_server_and_type() {
+        mock::push(mock::success());
+        let args = json!({"query": "contoso.local", "server": "10.0.0.1", "record_type": "SRV"});
+        let result = dig_query(&args).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn enumerate_domain_trusts_ldap() {
+        mock::push(mock::success());
+        let args = json!({
+            "target": "10.0.0.1",
+            "domain": "contoso.local",
+            "username": "admin",
+            "password": "P@ss"
+        });
+        let result = enumerate_domain_trusts(&args).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn enumerate_domain_trusts_pth() {
+        mock::push(mock::success());
+        let args = json!({
+            "target": "10.0.0.1",
+            "domain": "contoso.local",
+            "username": "admin",
+            "hash": "aad3b435:aabbccdd"
+        });
+        let result = enumerate_domain_trusts(&args).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn check_rdp_reachability_builds_command() {
+        mock::push(mock::success());
+        let args = json!({"target": "10.0.0.1"});
+        let result = check_rdp_reachability(&args).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn check_winrm_reachability_builds_command() {
+        mock::push(mock::success());
+        let args = json!({"target": "10.0.0.1"});
+        let result = check_winrm_reachability(&args).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn zerologon_check_builds_command() {
+        mock::push(mock::success());
+        let args = json!({"dc_ip": "10.0.0.1"});
+        let result = zerologon_check(&args).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn adidnsdump_builds_command() {
+        mock::push(mock::success());
+        let args = json!({"domain": "contoso.local", "username": "admin", "password": "P@ss", "dc_ip": "10.0.0.1"});
+        let result = adidnsdump(&args).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn save_users_to_file_builds_command() {
+        mock::push(mock::success());
+        let args = json!({"target": "10.0.0.1", "username": "admin", "password": "P@ss"});
+        let result = save_users_to_file(&args).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn smbclient_kerberos_shares_builds_command() {
+        mock::push(mock::success());
+        let args = json!({"target": "dc01.contoso.local"});
+        let result = smbclient_kerberos_shares(&args).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn smbclient_kerberos_shares_with_target_ip() {
+        mock::push(mock::success());
+        let args = json!({"target": "dc01.contoso.local", "target_ip": "10.0.0.1"});
+        let result = smbclient_kerberos_shares(&args).await;
+        assert!(result.is_ok());
+    }
 }

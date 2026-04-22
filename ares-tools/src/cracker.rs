@@ -362,3 +362,136 @@ pub async fn crack_with_john(args: &Value) -> Result<ToolOutput> {
         success: show_result.success,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::executor::mock;
+    use serde_json::json;
+
+    #[test]
+    fn detect_hashcat_mode_krb5tgs() {
+        assert_eq!(detect_hashcat_mode("$krb5tgs$23$*user"), 13100);
+    }
+
+    #[test]
+    fn detect_hashcat_mode_krb5asrep() {
+        assert_eq!(detect_hashcat_mode("$krb5asrep$23$user"), 18200);
+    }
+
+    #[test]
+    fn detect_hashcat_mode_ntlm() {
+        assert_eq!(detect_hashcat_mode("aad3b435b51404ee"), 1000);
+    }
+
+    #[test]
+    fn capitalize_normal() {
+        assert_eq!(capitalize("hello"), "Hello");
+    }
+
+    #[test]
+    fn capitalize_empty() {
+        assert_eq!(capitalize(""), "");
+    }
+
+    #[test]
+    fn capitalize_single_char() {
+        assert_eq!(capitalize("a"), "A");
+    }
+
+    #[test]
+    fn build_dynamic_wordlist_empty_usernames() {
+        assert!(build_dynamic_wordlist(&[]).is_none());
+    }
+
+    #[test]
+    fn build_dynamic_wordlist_creates_file() {
+        let file = build_dynamic_wordlist(&["admin", "john.smith"]);
+        assert!(file.is_some());
+        let file = file.unwrap();
+        let contents = std::fs::read_to_string(file.path()).unwrap();
+        assert!(contents.contains("admin"));
+        assert!(contents.contains("Admin"));
+        assert!(contents.contains("ADMIN"));
+        assert!(contents.contains("admin123"));
+        assert!(contents.contains("John"));
+        assert!(contents.contains("smith"));
+    }
+
+    #[test]
+    fn default_wordlists_defined() {
+        assert!(!DEFAULT_WORDLISTS.is_empty());
+    }
+
+    #[test]
+    fn default_rules_defined() {
+        assert!(!DEFAULT_RULES.is_empty());
+    }
+
+    #[tokio::test]
+    async fn crack_with_hashcat_executes() {
+        mock::push(mock::success()); // --show at the end
+        let args = json!({
+            "hash_value": "aad3b435b51404eeaad3b435b51404ee",
+            "use_dynamic_wordlist": false
+        });
+        assert!(crack_with_hashcat(&args).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn crack_with_hashcat_with_explicit_wordlist() {
+        mock::push(mock::success()); // wordlist pass
+        mock::push(mock::success()); // --show
+        let args = json!({
+            "hash_value": "$krb5tgs$23$*user",
+            "wordlist_path": "/tmp/wordlist.txt",
+            "use_dynamic_wordlist": false
+        });
+        assert!(crack_with_hashcat(&args).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn crack_with_hashcat_with_dynamic_wordlist() {
+        mock::push(mock::success()); // dynamic wordlist pass
+        mock::push(mock::success()); // --show
+        let args = json!({
+            "hash_value": "aad3b435b51404ee",
+            "use_dynamic_wordlist": true,
+            "known_usernames": ["admin", "john.smith"]
+        });
+        assert!(crack_with_hashcat(&args).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn crack_with_john_executes() {
+        mock::push(mock::success()); // --show
+        let args = json!({
+            "hash_value": "aad3b435b51404ee",
+            "use_dynamic_wordlist": false
+        });
+        assert!(crack_with_john(&args).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn crack_with_john_with_format() {
+        mock::push(mock::success()); // --show
+        let args = json!({
+            "hash_value": "$krb5asrep$23$user",
+            "hash_format": "krb5asrep",
+            "use_dynamic_wordlist": false
+        });
+        assert!(crack_with_john(&args).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn crack_with_john_with_dynamic_wordlist() {
+        mock::push(mock::success()); // dynamic pass
+        mock::push(mock::success()); // --show
+        let args = json!({
+            "hash_value": "aad3b435b51404ee",
+            "use_dynamic_wordlist": true,
+            "known_usernames": ["admin"]
+        });
+        assert!(crack_with_john(&args).await.is_ok());
+    }
+}
