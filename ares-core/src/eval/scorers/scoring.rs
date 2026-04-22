@@ -361,3 +361,402 @@ pub fn score_investigation_overall(
 
     weighted_sum / total_weight
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use approx::assert_abs_diff_eq;
+    use rstest::rstest;
+    use std::collections::HashSet;
+
+    use crate::eval::ground_truth::{
+        EvaluationGroundTruth, ExpectedIOC, ExpectedTechnique, ExpectedTimelineEvent,
+    };
+    use crate::eval::scorers::types::{EvidenceItem, InvestigationSnapshot, TimelineEvent};
+    use crate::models::PyramidLevel;
+
+    // -- helpers --
+
+    fn empty_snap() -> InvestigationSnapshot {
+        InvestigationSnapshot::default()
+    }
+
+    fn empty_gt() -> EvaluationGroundTruth {
+        EvaluationGroundTruth {
+            operation_id: "op-1".into(),
+            target_ip: "10.0.0.1".into(),
+            expected_iocs: vec![],
+            expected_techniques: vec![],
+            expected_timeline: vec![],
+            expected_shares: vec![],
+            expected_vulnerabilities: vec![],
+            min_pyramid_level: 4,
+            target_pyramid_level: 6,
+            min_technique_coverage: 0.6,
+            min_ioc_detection_rate: 0.5,
+        }
+    }
+
+    fn make_ioc(ioc_type: &str, value: &str, required: bool) -> ExpectedIOC {
+        ExpectedIOC {
+            ioc_type: ioc_type.into(),
+            value: value.into(),
+            pyramid_level: PyramidLevel::IpAddresses,
+            mitre_techniques: vec![],
+            required,
+            source: String::new(),
+        }
+    }
+
+    fn make_technique(id: &str, required: bool) -> ExpectedTechnique {
+        ExpectedTechnique {
+            technique_id: id.into(),
+            technique_name: String::new(),
+            required,
+            parent_id: None,
+        }
+    }
+
+    fn make_evidence(
+        etype: &str,
+        value: &str,
+        pyramid: u32,
+        confidence: f64,
+        validated: bool,
+    ) -> EvidenceItem {
+        EvidenceItem {
+            evidence_type: etype.into(),
+            value: value.into(),
+            pyramid_level: pyramid,
+            confidence,
+            validated,
+        }
+    }
+
+    // ---- score_stage_progress ----
+
+    #[rstest]
+    #[case(None, 0.0)]
+    #[case(Some("triage"), 0.25)]
+    #[case(Some("causation"), 0.50)]
+    #[case(Some("lateral"), 0.75)]
+    #[case(Some("synthesis"), 1.0)]
+    #[case(Some("unknown"), 0.0)]
+    fn stage_progress_scores(#[case] stage: Option<&str>, #[case] expected: f64) {
+        let mut snap = empty_snap();
+        snap.stage = stage.map(String::from);
+        assert_abs_diff_eq!(score_stage_progress(&snap), expected, epsilon = 0.001);
+    }
+
+    // ---- score_ioc_detection ----
+
+    #[test]
+    fn ioc_detection_empty_gt_returns_one() {
+        let snap = empty_snap();
+        let gt = empty_gt();
+        assert_abs_diff_eq!(score_ioc_detection(&snap, &gt), 1.0, epsilon = 0.001);
+    }
+
+    #[test]
+    fn ioc_detection_all_found() {
+        let mut snap = empty_snap();
+        snap.evidence_values
+            .push(make_evidence("ip", "10.0.0.1", 1, 0.9, true));
+        snap.evidence_values
+            .push(make_evidence("user", "admin", 2, 0.8, true));
+
+        let mut gt = empty_gt();
+        gt.expected_iocs = vec![
+            make_ioc("ip", "10.0.0.1", true),
+            make_ioc("user", "admin", false),
+        ];
+
+        assert_abs_diff_eq!(score_ioc_detection(&snap, &gt), 1.0, epsilon = 0.001);
+    }
+
+    #[test]
+    fn ioc_detection_none_found() {
+        let snap = empty_snap();
+        let mut gt = empty_gt();
+        gt.expected_iocs = vec![
+            make_ioc("ip", "10.0.0.1", true),
+            make_ioc("user", "admin", false),
+        ];
+
+        assert_abs_diff_eq!(score_ioc_detection(&snap, &gt), 0.0, epsilon = 0.001);
+    }
+
+    #[test]
+    fn ioc_detection_partial_required_only() {
+        let mut snap = empty_snap();
+        snap.evidence_values
+            .push(make_evidence("ip", "10.0.0.1", 1, 0.9, true));
+
+        let mut gt = empty_gt();
+        gt.expected_iocs = vec![
+            make_ioc("ip", "10.0.0.1", true),
+            make_ioc("ip", "192.168.1.1", true),
+        ];
+
+        // 1/2 required = 0.5, no optional => 1.0
+        // 0.5*0.6 + 1.0*0.4 = 0.7
+        assert_abs_diff_eq!(score_ioc_detection(&snap, &gt), 0.7, epsilon = 0.001);
+    }
+
+    // ---- ioc_matches ----
+
+    #[test]
+    fn ioc_matches_exact() {
+        let ioc = make_ioc("ip", "10.0.0.1", true);
+        let found: HashSet<String> = ["10.0.0.1".into()].into_iter().collect();
+        assert!(ioc_matches(&ioc, &found));
+    }
+
+    #[test]
+    fn ioc_matches_case_insensitive() {
+        let ioc = make_ioc("ip", "DC01.CORP.LOCAL", true);
+        let found: HashSet<String> = ["dc01.corp.local".into()].into_iter().collect();
+        assert!(ioc_matches(&ioc, &found));
+    }
+
+    #[test]
+    fn ioc_matches_hostname_partial() {
+        let ioc = make_ioc("hostname", "dc01.corp.local", true);
+        let found: HashSet<String> = ["dc01".into()].into_iter().collect();
+        assert!(ioc_matches(&ioc, &found));
+    }
+
+    #[test]
+    fn ioc_matches_user_backslash() {
+        let ioc = make_ioc("user", "CORP\\admin", true);
+        let found: HashSet<String> = ["admin".into()].into_iter().collect();
+        assert!(ioc_matches(&ioc, &found));
+    }
+
+    #[test]
+    fn ioc_matches_user_at_sign() {
+        let ioc = make_ioc("user", "admin@corp.local", true);
+        let found: HashSet<String> = ["admin".into()].into_iter().collect();
+        assert!(ioc_matches(&ioc, &found));
+    }
+
+    #[test]
+    fn ioc_no_match_unrelated() {
+        let ioc = make_ioc("ip", "10.0.0.1", true);
+        let found: HashSet<String> = ["192.168.1.1".into()].into_iter().collect();
+        assert!(!ioc_matches(&ioc, &found));
+    }
+
+    // ---- build_found_values ----
+
+    #[test]
+    fn build_found_values_includes_evidence_and_queries() {
+        let mut snap = empty_snap();
+        snap.evidence_values
+            .push(make_evidence("ip", "10.0.0.1", 1, 0.9, true));
+        snap.queried_hosts.insert("DC01".into());
+        snap.queried_users.insert("Admin".into());
+
+        let found = build_found_values(&snap);
+        assert!(found.contains("10.0.0.1"));
+        assert!(found.contains("dc01"));
+        assert!(found.contains("admin"));
+    }
+
+    #[test]
+    fn build_found_values_hostname_splits() {
+        let mut snap = empty_snap();
+        snap.evidence_values
+            .push(make_evidence("hostname", "dc01.corp.local", 2, 0.8, true));
+        let found = build_found_values(&snap);
+        assert!(found.contains("dc01.corp.local"));
+        assert!(found.contains("dc01"));
+    }
+
+    // ---- score_technique_coverage ----
+
+    #[test]
+    fn technique_coverage_empty_gt_returns_one() {
+        let snap = empty_snap();
+        let gt = empty_gt();
+        assert_abs_diff_eq!(score_technique_coverage(&snap, &gt), 1.0, epsilon = 0.001);
+    }
+
+    #[test]
+    fn technique_coverage_all_found() {
+        let mut snap = empty_snap();
+        snap.identified_techniques.insert("T1003".into());
+        snap.identified_techniques.insert("T1046".into());
+
+        let mut gt = empty_gt();
+        gt.expected_techniques = vec![
+            make_technique("T1003", true),
+            make_technique("T1046", false),
+        ];
+
+        assert_abs_diff_eq!(score_technique_coverage(&snap, &gt), 1.0, epsilon = 0.001);
+    }
+
+    #[test]
+    fn technique_coverage_none_found() {
+        let snap = empty_snap();
+        let mut gt = empty_gt();
+        gt.expected_techniques = vec![make_technique("T1003", true)];
+        // 0 required found => required_rate=0, no optional => 1.0
+        // 0.0*0.6 + 1.0*0.4 = 0.4
+        assert_abs_diff_eq!(score_technique_coverage(&snap, &gt), 0.4, epsilon = 0.01);
+    }
+
+    // ---- score_pyramid_elevation ----
+
+    #[test]
+    fn pyramid_elevation_empty_evidence() {
+        let snap = empty_snap();
+        assert_abs_diff_eq!(score_pyramid_elevation(&snap), 0.0, epsilon = 0.001);
+    }
+
+    #[test]
+    fn pyramid_elevation_max_level() {
+        let mut snap = empty_snap();
+        snap.highest_pyramid_level = 6;
+        snap.evidence_values
+            .push(make_evidence("ttp", "T1003", 6, 0.9, true));
+        assert_abs_diff_eq!(score_pyramid_elevation(&snap), 1.0, epsilon = 0.001);
+    }
+
+    #[test]
+    fn pyramid_elevation_mixed_levels() {
+        let mut snap = empty_snap();
+        snap.highest_pyramid_level = 5;
+        snap.evidence_values
+            .push(make_evidence("ip", "10.0.0.1", 1, 0.9, true));
+        snap.evidence_values
+            .push(make_evidence("tool", "mimikatz", 5, 0.9, true));
+        // highest_score = 5/6 ≈ 0.833
+        // high_ratio = 1/2 = 0.5
+        // 0.833*0.7 + 0.5*0.3 ≈ 0.733
+        assert_abs_diff_eq!(score_pyramid_elevation(&snap), 0.733, epsilon = 0.01);
+    }
+
+    // ---- score_evidence_quality ----
+
+    #[test]
+    fn evidence_quality_empty() {
+        let snap = empty_snap();
+        assert_abs_diff_eq!(score_evidence_quality(&snap), 0.0, epsilon = 0.001);
+    }
+
+    #[test]
+    fn evidence_quality_perfect() {
+        let mut snap = empty_snap();
+        snap.evidence_values
+            .push(make_evidence("ttp", "T1003", 6, 1.0, true));
+        assert_abs_diff_eq!(score_evidence_quality(&snap), 1.0, epsilon = 0.001);
+    }
+
+    #[test]
+    fn evidence_quality_mixed() {
+        let mut snap = empty_snap();
+        snap.evidence_values
+            .push(make_evidence("ip", "10.0.0.1", 1, 0.8, true));
+        snap.evidence_values
+            .push(make_evidence("ip", "10.0.0.2", 2, 0.6, false));
+        // avg_conf=0.7, validation=0.5, ttp_ratio=0.0
+        // 0.7*0.4 + 0.5*0.3 + 0.0*0.3 = 0.43
+        assert_abs_diff_eq!(score_evidence_quality(&snap), 0.43, epsilon = 0.01);
+    }
+
+    // ---- score_timeline_accuracy ----
+
+    #[test]
+    fn timeline_accuracy_empty_gt_returns_one() {
+        let snap = empty_snap();
+        let gt = empty_gt();
+        assert_abs_diff_eq!(score_timeline_accuracy(&snap, &gt), 1.0, epsilon = 0.001);
+    }
+
+    #[test]
+    fn timeline_accuracy_empty_snap_returns_zero() {
+        let snap = empty_snap();
+        let mut gt = empty_gt();
+        gt.expected_timeline = vec![ExpectedTimelineEvent {
+            description_pattern: "credential dump".into(),
+            mitre_techniques: vec![],
+            timestamp_range: None,
+            required: true,
+        }];
+        assert_abs_diff_eq!(score_timeline_accuracy(&snap, &gt), 0.0, epsilon = 0.001);
+    }
+
+    #[test]
+    fn timeline_accuracy_matching_event() {
+        let mut snap = empty_snap();
+        snap.timeline.push(TimelineEvent {
+            description: "credential dump via secretsdump".into(),
+            mitre_techniques: HashSet::new(),
+        });
+
+        let mut gt = empty_gt();
+        gt.expected_timeline = vec![ExpectedTimelineEvent {
+            description_pattern: "credential dump".into(),
+            mitre_techniques: vec![],
+            timestamp_range: None,
+            required: true,
+        }];
+
+        assert_abs_diff_eq!(score_timeline_accuracy(&snap, &gt), 1.0, epsilon = 0.001);
+    }
+
+    // ---- timeline_event_matches ----
+
+    #[test]
+    fn timeline_event_matches_substring() {
+        let descs = vec!["credential dump via secretsdump".into()];
+        assert!(timeline_event_matches("credential dump", &descs));
+    }
+
+    #[test]
+    fn timeline_event_matches_no_match() {
+        let descs = vec!["port scan completed".into()];
+        assert!(!timeline_event_matches("credential dump", &descs));
+    }
+
+    #[test]
+    fn timeline_event_matches_regex() {
+        let descs = vec!["lateral movement to dc01".into()];
+        assert!(timeline_event_matches("lateral.*dc\\d+", &descs));
+    }
+
+    // ---- technique_matches ----
+
+    #[test]
+    fn technique_matches_exact() {
+        let t = make_technique("T1003", true);
+        let found: HashSet<String> = ["T1003".into()].into_iter().collect();
+        assert!(technique_matches(&t, &found));
+    }
+
+    #[test]
+    fn technique_matches_parent_to_sub() {
+        let t = make_technique("T1003", true);
+        let found: HashSet<String> = ["T1003.001".into()].into_iter().collect();
+        assert!(technique_matches(&t, &found));
+    }
+
+    #[test]
+    fn technique_no_match() {
+        let t = make_technique("T1003", true);
+        let found: HashSet<String> = ["T1046".into()].into_iter().collect();
+        assert!(!technique_matches(&t, &found));
+    }
+
+    // ---- score_investigation_overall ----
+
+    #[test]
+    fn overall_score_empty_is_bounded() {
+        let snap = empty_snap();
+        let gt = empty_gt();
+        let score = score_investigation_overall(&snap, &gt);
+        assert!((0.0..=1.0).contains(&score));
+    }
+}
