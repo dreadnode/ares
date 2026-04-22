@@ -187,3 +187,229 @@ pub(super) fn dedup_hosts(
     result.sort_by(|a, b| a.ip.cmp(&b.ip));
     result
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── clean_os_string ──
+
+    #[test]
+    fn clean_os_removes_parenthetical() {
+        assert_eq!(clean_os_string("Windows 10 (Build 19041)"), "Windows 10");
+    }
+
+    #[test]
+    fn clean_os_removes_multiple_parentheticals() {
+        assert_eq!(clean_os_string("Linux (Ubuntu) (22.04)"), "Linux");
+    }
+
+    #[test]
+    fn clean_os_no_parens_unchanged() {
+        assert_eq!(
+            clean_os_string("Windows Server 2019"),
+            "Windows Server 2019"
+        );
+    }
+
+    #[test]
+    fn clean_os_empty_string() {
+        assert_eq!(clean_os_string(""), "");
+    }
+
+    #[test]
+    fn clean_os_only_parens() {
+        assert_eq!(clean_os_string("(metadata)"), "");
+    }
+
+    #[test]
+    fn clean_os_trims_whitespace() {
+        assert_eq!(clean_os_string("  Windows 10  "), "Windows 10");
+    }
+
+    // ── is_real_service ──
+
+    #[test]
+    fn real_service_tcp() {
+        assert!(is_real_service("80/tcp"));
+    }
+
+    #[test]
+    fn real_service_udp() {
+        assert!(is_real_service("53/udp"));
+    }
+
+    #[test]
+    fn real_service_empty() {
+        assert!(!is_real_service(""));
+    }
+
+    #[test]
+    fn real_service_whitespace_only() {
+        assert!(!is_real_service("   "));
+    }
+
+    #[test]
+    fn real_service_no_protocol() {
+        assert!(!is_real_service("http"));
+    }
+
+    #[test]
+    fn real_service_with_leading_whitespace() {
+        assert!(is_real_service("  443/tcp"));
+    }
+
+    // ── looks_like_ip ──
+
+    #[test]
+    fn looks_like_ip_valid_ipv4() {
+        assert!(looks_like_ip("192.168.1.1"));
+    }
+
+    #[test]
+    fn looks_like_ip_digits_only() {
+        assert!(looks_like_ip("12345"));
+    }
+
+    #[test]
+    fn looks_like_ip_empty() {
+        assert!(!looks_like_ip(""));
+    }
+
+    #[test]
+    fn looks_like_ip_has_letters() {
+        assert!(!looks_like_ip("192.168.1.abc"));
+    }
+
+    #[test]
+    fn looks_like_ip_hostname() {
+        assert!(!looks_like_ip("server.example.com"));
+    }
+
+    #[test]
+    fn looks_like_ip_with_colon() {
+        assert!(!looks_like_ip("::1"));
+    }
+
+    // ── is_more_specific_fqdn ──
+
+    #[test]
+    fn more_specific_fqdn_more_parts() {
+        assert!(is_more_specific_fqdn("dc.corp.local", "dc.sub.corp.local"));
+    }
+
+    #[test]
+    fn more_specific_fqdn_same_parts() {
+        assert!(!is_more_specific_fqdn("dc.corp.local", "dc.corp.local"));
+    }
+
+    #[test]
+    fn more_specific_fqdn_fewer_parts() {
+        assert!(!is_more_specific_fqdn("dc.sub.corp.local", "dc.corp.local"));
+    }
+
+    #[test]
+    fn more_specific_fqdn_different_host() {
+        assert!(!is_more_specific_fqdn(
+            "dc.corp.local",
+            "web.sub.corp.local"
+        ));
+    }
+
+    #[test]
+    fn more_specific_fqdn_single_label_existing() {
+        assert!(!is_more_specific_fqdn("dc", "dc.corp.local"));
+    }
+
+    #[test]
+    fn more_specific_fqdn_single_label_new() {
+        assert!(!is_more_specific_fqdn("dc.corp.local", "dc"));
+    }
+
+    #[test]
+    fn more_specific_fqdn_case_insensitive_host() {
+        assert!(is_more_specific_fqdn("DC.corp.local", "dc.sub.corp.local"));
+    }
+
+    // ── resolve_display_hostname ──
+
+    fn make_host(ip: &str, hostname: &str) -> Host {
+        Host {
+            ip: ip.to_string(),
+            hostname: hostname.to_string(),
+            os: String::new(),
+            roles: Vec::new(),
+            services: Vec::new(),
+            is_dc: false,
+            owned: false,
+        }
+    }
+
+    #[test]
+    fn resolve_hostname_empty() {
+        let host = make_host("10.0.0.1", "");
+        let map = HashMap::new();
+        assert_eq!(resolve_display_hostname(&host, &map), "");
+    }
+
+    #[test]
+    fn resolve_hostname_aws_filtered() {
+        let host = make_host("10.0.0.1", "ip-10-0-0-1.us-west-2.compute.internal");
+        let map = HashMap::new();
+        assert_eq!(resolve_display_hostname(&host, &map), "");
+    }
+
+    #[test]
+    fn resolve_hostname_fqdn_passthrough() {
+        let host = make_host("10.0.0.1", "dc.corp.local");
+        let map = HashMap::new();
+        assert_eq!(resolve_display_hostname(&host, &map), "dc.corp.local");
+    }
+
+    #[test]
+    fn resolve_hostname_trailing_dot_stripped() {
+        let host = make_host("10.0.0.1", "dc.corp.local.");
+        let map = HashMap::new();
+        assert_eq!(resolve_display_hostname(&host, &map), "dc.corp.local");
+    }
+
+    #[test]
+    fn resolve_hostname_netbios_lookup() {
+        let host = make_host("10.0.0.1", "DC01");
+        let mut map = HashMap::new();
+        map.insert("DC01".to_string(), "dc01.corp.local".to_string());
+        assert_eq!(resolve_display_hostname(&host, &map), "dc01.corp.local");
+    }
+
+    #[test]
+    fn resolve_hostname_netbios_fallback_fqdn_match() {
+        let host = make_host("10.0.0.1", "dc01");
+        let mut map = HashMap::new();
+        map.insert("SOMEKEY".to_string(), "DC01.corp.local".to_string());
+        assert_eq!(resolve_display_hostname(&host, &map), "dc01.corp.local");
+    }
+
+    #[test]
+    fn resolve_hostname_uppercase_to_lowercase() {
+        let host = make_host("10.0.0.1", "DC.CORP.LOCAL");
+        let map = HashMap::new();
+        assert_eq!(resolve_display_hostname(&host, &map), "dc.corp.local");
+    }
+
+    // ── is_aws_hostname ──
+
+    #[test]
+    fn aws_hostname_positive() {
+        assert!(is_aws_hostname("ip-10-0-0-1.us-west-2.compute.internal"));
+    }
+
+    #[test]
+    fn aws_hostname_negative() {
+        assert!(!is_aws_hostname("dc01.corp.local"));
+    }
+
+    #[test]
+    fn aws_hostname_partial_match() {
+        assert!(!is_aws_hostname("ip-10-0-0-1.example.com"));
+    }
+}

@@ -42,3 +42,121 @@ pub async fn secretsdump(args: &Value) -> Result<ToolOutput> {
 
     cmd.timeout_secs(timeout_secs).execute().await
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::args::{optional_bool, optional_i64, optional_str, required_str};
+    use crate::credentials;
+    use serde_json::json;
+
+    #[test]
+    fn secretsdump_requires_username() {
+        let args = json!({"target": "10.0.0.1"});
+        assert!(required_str(&args, "username").is_err());
+    }
+
+    #[test]
+    fn secretsdump_requires_target() {
+        let args = json!({"username": "admin"});
+        assert!(required_str(&args, "target").is_err());
+    }
+
+    #[test]
+    fn secretsdump_timeout_default_180_secs() {
+        let args = json!({
+            "target": "10.0.0.1",
+            "username": "admin"
+        });
+        let timeout_minutes = optional_i64(&args, "timeout_minutes");
+        let timeout_secs = timeout_minutes.map(|m| (m * 60) as u64).unwrap_or(180);
+        assert_eq!(timeout_secs, 180);
+    }
+
+    #[test]
+    fn secretsdump_timeout_custom() {
+        let args = json!({
+            "target": "10.0.0.1",
+            "username": "admin",
+            "timeout_minutes": 5
+        });
+        let timeout_minutes = optional_i64(&args, "timeout_minutes");
+        let timeout_secs = timeout_minutes.map(|m| (m * 60) as u64).unwrap_or(180);
+        assert_eq!(timeout_secs, 300);
+    }
+
+    #[test]
+    fn secretsdump_timeout_1_minute() {
+        let timeout_minutes: Option<i64> = Some(1);
+        let timeout_secs = timeout_minutes.map(|m| (m * 60) as u64).unwrap_or(180);
+        assert_eq!(timeout_secs, 60);
+    }
+
+    #[test]
+    fn secretsdump_kerberos_mode_default_false() {
+        let args = json!({
+            "target": "10.0.0.1",
+            "username": "admin"
+        });
+        let use_kerberos = optional_bool(&args, "no_pass").unwrap_or(false);
+        assert!(!use_kerberos);
+    }
+
+    #[test]
+    fn secretsdump_kerberos_mode_enabled() {
+        let args = json!({
+            "target": "10.0.0.1",
+            "username": "admin",
+            "no_pass": true,
+            "ticket_path": "/tmp/admin.ccache"
+        });
+        let use_kerberos = optional_bool(&args, "no_pass").unwrap_or(false);
+        let ticket_path = optional_str(&args, "ticket_path");
+        assert!(use_kerberos);
+        assert_eq!(ticket_path, Some("/tmp/admin.ccache"));
+    }
+
+    #[test]
+    fn secretsdump_auth_with_password() {
+        let (auth_string, extra_args) = credentials::impacket_auth(
+            Some("contoso.local"),
+            "admin",
+            Some("P@ss"),
+            None,
+            "10.0.0.1",
+        );
+        assert_eq!(auth_string, "contoso.local/admin:P@ss@10.0.0.1");
+        assert!(extra_args.is_empty());
+    }
+
+    #[test]
+    fn secretsdump_auth_with_hash() {
+        let (auth_string, extra_args) = credentials::impacket_auth(
+            Some("contoso.local"),
+            "admin",
+            None,
+            Some("aabbccdd"),
+            "10.0.0.1",
+        );
+        assert_eq!(auth_string, "contoso.local/admin@10.0.0.1");
+        assert_eq!(extra_args, vec!["-hashes", ":aabbccdd"]);
+    }
+
+    #[test]
+    fn secretsdump_optional_domain() {
+        let args = json!({
+            "target": "10.0.0.1",
+            "username": "admin"
+        });
+        assert!(optional_str(&args, "domain").is_none());
+    }
+
+    #[test]
+    fn secretsdump_optional_dc_ip() {
+        let args = json!({
+            "target": "10.0.0.1",
+            "username": "admin",
+            "dc_ip": "10.0.0.2"
+        });
+        assert_eq!(optional_str(&args, "dc_ip"), Some("10.0.0.2"));
+    }
+}

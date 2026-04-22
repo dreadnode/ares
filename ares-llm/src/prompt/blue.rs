@@ -344,3 +344,350 @@ pub fn build_initial_alert_prompt(
 
     templates::render_template_with_context(templates::TEMPLATE_BLUE_INITIAL_ALERT_PROMPT, &ctx)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    // -----------------------------------------------------------------------
+    // generate_blue_task_prompt
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn generate_blue_task_prompt_returns_none_for_unknown_type() {
+        let params = json!({});
+        assert!(generate_blue_task_prompt("nonexistent", "t-1", &params, "").is_none());
+    }
+
+    #[test]
+    fn generate_blue_task_prompt_returns_some_for_triage_alert() {
+        let params = json!({"alert_summary": "suspicious login"});
+        assert!(generate_blue_task_prompt("triage_alert", "t-1", &params, "state").is_some());
+    }
+
+    #[test]
+    fn generate_blue_task_prompt_returns_some_for_triage() {
+        let params = json!({"alert_summary": "suspicious login"});
+        assert!(generate_blue_task_prompt("triage", "t-2", &params, "state").is_some());
+    }
+
+    #[test]
+    fn generate_blue_task_prompt_returns_some_for_threat_hunt() {
+        let params = json!({"technique_id": "T1003"});
+        assert!(generate_blue_task_prompt("threat_hunt", "t-3", &params, "state").is_some());
+    }
+
+    #[test]
+    fn generate_blue_task_prompt_returns_some_for_lateral_analysis() {
+        let params = json!({"focus_host": "dc01"});
+        assert!(generate_blue_task_prompt("lateral_analysis", "t-4", &params, "state").is_some());
+    }
+
+    #[test]
+    fn generate_blue_task_prompt_returns_some_for_lateral() {
+        let params = json!({"focus_host": "dc01"});
+        assert!(generate_blue_task_prompt("lateral", "t-5", &params, "state").is_some());
+    }
+
+    #[test]
+    fn generate_blue_task_prompt_returns_some_for_user_investigation() {
+        let params = json!({"username": "admin"});
+        assert!(generate_blue_task_prompt("user_investigation", "t-6", &params, "state").is_some());
+    }
+
+    #[test]
+    fn generate_blue_task_prompt_returns_some_for_host_investigation() {
+        let params = json!({"hostname": "dc01"});
+        assert!(generate_blue_task_prompt("host_investigation", "t-7", &params, "state").is_some());
+    }
+
+    // -----------------------------------------------------------------------
+    // blue_role_template
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn role_template_triage() {
+        assert_eq!(
+            blue_role_template("triage"),
+            templates::TEMPLATE_BLUE_TRIAGE
+        );
+    }
+
+    #[test]
+    fn role_template_threat_hunter() {
+        assert_eq!(
+            blue_role_template("threat_hunter"),
+            templates::TEMPLATE_BLUE_THREAT_HUNTER
+        );
+    }
+
+    #[test]
+    fn role_template_lateral_analyst() {
+        assert_eq!(
+            blue_role_template("lateral_analyst"),
+            templates::TEMPLATE_BLUE_LATERAL_ANALYST
+        );
+    }
+
+    #[test]
+    fn role_template_blue_orchestrator() {
+        assert_eq!(
+            blue_role_template("blue_orchestrator"),
+            templates::TEMPLATE_BLUE_ORCHESTRATOR
+        );
+    }
+
+    #[test]
+    fn role_template_escalation_triage() {
+        assert_eq!(
+            blue_role_template("escalation_triage"),
+            templates::TEMPLATE_BLUE_ESCALATION_TRIAGE
+        );
+    }
+
+    #[test]
+    fn role_template_defaults_to_triage_for_unknown() {
+        assert_eq!(
+            blue_role_template("nonexistent_role"),
+            templates::TEMPLATE_BLUE_TRIAGE
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // build_blue_system_prompt
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn system_prompt_succeeds_for_triage() {
+        let caps = vec!["query_loki".to_string(), "record_evidence".to_string()];
+        let result = build_blue_system_prompt("triage", &caps, None);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn system_prompt_succeeds_for_threat_hunter() {
+        let caps = vec!["query_loki".to_string()];
+        let result = build_blue_system_prompt("threat_hunter", &caps, None);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn system_prompt_succeeds_for_lateral_analyst() {
+        let caps = vec!["query_loki".to_string()];
+        let result = build_blue_system_prompt("lateral_analyst", &caps, None);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn system_prompt_succeeds_for_blue_orchestrator() {
+        let caps = vec!["dispatch_triage".to_string()];
+        let result = build_blue_system_prompt("blue_orchestrator", &caps, None);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn system_prompt_escalation_triage_fails_without_investigation_context() {
+        // The escalation_triage template requires {{ investigation_context }}
+        // which build_blue_system_prompt does not supply. The actual caller
+        // provides it separately, so rendering via this helper is expected to fail.
+        let caps = vec!["query_loki".to_string()];
+        let result = build_blue_system_prompt("escalation_triage", &caps, None);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn system_prompt_includes_capabilities() {
+        let caps = vec![
+            "query_loki".to_string(),
+            "record_evidence".to_string(),
+            "track_host".to_string(),
+        ];
+        let result = build_blue_system_prompt("triage", &caps, None).unwrap();
+        assert!(result.contains("query_loki"));
+        assert!(result.contains("record_evidence"));
+        assert!(result.contains("track_host"));
+    }
+
+    #[test]
+    fn system_prompt_with_deployment() {
+        let caps = vec!["query_loki".to_string()];
+        let result = build_blue_system_prompt("triage", &caps, Some("prod-cluster")).unwrap();
+        // The deployment value should be accessible in the template context,
+        // even if the triage template doesn't explicitly render it.
+        assert!(!result.is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // build_initial_alert_prompt
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn initial_alert_prompt_extracts_alert_name_from_labels() {
+        let alert = json!({
+            "labels": {
+                "alertname": "CredentialDumping",
+                "severity": "critical"
+            },
+            "annotations": {
+                "summary": "Credential dumping detected"
+            },
+            "startsAt": "2026-04-08T12:00:00Z"
+        });
+        let result = build_initial_alert_prompt("inv-001", &alert, None).unwrap();
+        assert!(result.contains("CredentialDumping"));
+        assert!(result.contains("critical"));
+    }
+
+    #[test]
+    fn initial_alert_prompt_handles_missing_labels() {
+        let alert = json!({
+            "startsAt": "2026-04-08T12:00:00Z"
+        });
+        let result = build_initial_alert_prompt("inv-002", &alert, None).unwrap();
+        // Should fall back to defaults
+        assert!(result.contains("Unknown")); // default alert_name
+        assert!(result.contains("inv-002"));
+    }
+
+    #[test]
+    fn initial_alert_prompt_handles_missing_annotations() {
+        let alert = json!({
+            "labels": {
+                "alertname": "TestAlert"
+            }
+        });
+        let result = build_initial_alert_prompt("inv-003", &alert, None).unwrap();
+        assert!(result.contains("TestAlert"));
+        assert!(result.contains("No summary available")); // default summary
+    }
+
+    #[test]
+    fn initial_alert_prompt_includes_operation_id_when_provided() {
+        // operation_id is only rendered when attack_window_start/end are present,
+        // so we need operation_context with those fields.
+        let alert = json!({
+            "labels": {
+                "alertname": "ScanDetected",
+                "severity": "high"
+            },
+            "annotations": {
+                "summary": "Network scan detected"
+            },
+            "startsAt": "2026-04-08T12:00:00Z",
+            "operation_context": {
+                "attack_window_start": "2026-04-08T11:00:00Z",
+                "attack_window_end": "2026-04-08T13:00:00Z"
+            }
+        });
+        let result = build_initial_alert_prompt("inv-004", &alert, Some("op-red-42")).unwrap();
+        assert!(result.contains("op-red-42"));
+    }
+
+    #[test]
+    fn initial_alert_prompt_extracts_operation_id_from_operation_context() {
+        let alert = json!({
+            "labels": {
+                "alertname": "TestAlert",
+                "severity": "medium"
+            },
+            "annotations": {},
+            "startsAt": "2026-04-08T12:00:00Z",
+            "operation_context": {
+                "operation_id": "op-from-context",
+                "attack_window_start": "2026-04-08T11:00:00Z",
+                "attack_window_end": "2026-04-08T13:00:00Z",
+                "techniques_used": ["T1003", "T1046"]
+            }
+        });
+        let result = build_initial_alert_prompt("inv-005", &alert, None).unwrap();
+        assert!(result.contains("op-from-context"));
+        assert!(result.contains("T1003"));
+        assert!(result.contains("T1046"));
+    }
+
+    #[test]
+    fn initial_alert_prompt_includes_deployment_label() {
+        let alert = json!({
+            "labels": {
+                "alertname": "TestAlert",
+                "severity": "low",
+                "deployment": "staging-env"
+            },
+            "annotations": {},
+            "startsAt": "2026-04-08T12:00:00Z"
+        });
+        let result = build_initial_alert_prompt("inv-006", &alert, None).unwrap();
+        assert!(result.contains("staging-env"));
+    }
+
+    #[test]
+    fn initial_alert_prompt_includes_mitre_technique() {
+        let alert = json!({
+            "labels": {
+                "alertname": "DCSync",
+                "severity": "critical",
+                "mitre_technique": "T1003.006"
+            },
+            "annotations": {
+                "summary": "DCSync attack detected"
+            },
+            "startsAt": "2026-04-08T12:00:00Z"
+        });
+        let result = build_initial_alert_prompt("inv-007", &alert, None).unwrap();
+        assert!(result.contains("T1003.006"));
+    }
+
+    #[test]
+    fn initial_alert_prompt_includes_target_ips_and_users() {
+        let alert = json!({
+            "labels": {
+                "alertname": "TestAlert",
+                "severity": "high"
+            },
+            "annotations": {},
+            "startsAt": "2026-04-08T12:00:00Z",
+            "target_ips": ["192.168.1.10", "192.168.1.20"],
+            "target_users": ["admin", "svc_sql"]
+        });
+        let result = build_initial_alert_prompt("inv-008", &alert, None).unwrap();
+        assert!(result.contains("192.168.1.10"));
+        assert!(result.contains("192.168.1.20"));
+        assert!(result.contains("admin"));
+        assert!(result.contains("svc_sql"));
+    }
+
+    #[test]
+    fn initial_alert_prompt_contains_alert_json() {
+        let alert = json!({
+            "labels": {
+                "alertname": "TestAlert",
+                "severity": "low"
+            },
+            "startsAt": "2026-04-08T12:00:00Z"
+        });
+        let result = build_initial_alert_prompt("inv-009", &alert, None).unwrap();
+        // The full alert JSON should be embedded
+        assert!(result.contains("\"alertname\": \"TestAlert\""));
+    }
+
+    #[test]
+    fn initial_alert_prompt_explicit_operation_id_overrides_context() {
+        let alert = json!({
+            "labels": {
+                "alertname": "TestAlert",
+                "severity": "medium"
+            },
+            "annotations": {},
+            "startsAt": "2026-04-08T12:00:00Z",
+            "operation_context": {
+                "operation_id": "op-context-id",
+                "attack_window_start": "2026-04-08T11:00:00Z",
+                "attack_window_end": "2026-04-08T13:00:00Z"
+            }
+        });
+        // Explicit operation_id should take precedence over context
+        let result = build_initial_alert_prompt("inv-010", &alert, Some("op-explicit")).unwrap();
+        assert!(result.contains("op-explicit"));
+    }
+}

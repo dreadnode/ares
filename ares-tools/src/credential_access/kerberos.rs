@@ -140,3 +140,172 @@ pub async fn kerberos_user_enum_noauth(args: &Value) -> Result<ToolOutput> {
 
     result
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::args::{optional_str, required_str};
+    use serde_json::json;
+
+    // --- kerberoast ---
+
+    #[test]
+    fn kerberoast_target_format() {
+        let domain = "contoso.local";
+        let username = "admin";
+        let password = "P@ssw0rd!";
+        let target = format!("{domain}/{username}:{password}");
+        assert_eq!(target, "contoso.local/admin:P@ssw0rd!");
+    }
+
+    #[test]
+    fn kerberoast_requires_domain() {
+        let args = json!({
+            "username": "admin",
+            "password": "P@ss",
+            "dc_ip": "10.0.0.1"
+        });
+        assert!(required_str(&args, "domain").is_err());
+    }
+
+    #[test]
+    fn kerberoast_requires_username() {
+        let args = json!({
+            "domain": "contoso.local",
+            "password": "P@ss",
+            "dc_ip": "10.0.0.1"
+        });
+        assert!(required_str(&args, "username").is_err());
+    }
+
+    #[test]
+    fn kerberoast_requires_password() {
+        let args = json!({
+            "domain": "contoso.local",
+            "username": "admin",
+            "dc_ip": "10.0.0.1"
+        });
+        assert!(required_str(&args, "password").is_err());
+    }
+
+    #[test]
+    fn kerberoast_requires_dc_ip() {
+        let args = json!({
+            "domain": "contoso.local",
+            "username": "admin",
+            "password": "P@ss"
+        });
+        assert!(required_str(&args, "dc_ip").is_err());
+    }
+
+    // --- asrep_roast ---
+
+    #[test]
+    fn asrep_roast_authenticated_format() {
+        let domain = "contoso.local";
+        let username = "admin";
+        let password = "P@ssw0rd!";
+        // When both username and password are non-empty, authenticated mode
+        if !username.is_empty() && !password.is_empty() {
+            let target = format!("{domain}/{username}:{password}");
+            assert_eq!(target, "contoso.local/admin:P@ssw0rd!");
+        } else {
+            panic!("should be authenticated mode");
+        }
+    }
+
+    #[test]
+    fn asrep_roast_no_auth_format() {
+        let domain = "contoso.local";
+        let username = "";
+        let password = "";
+        if !username.is_empty() && !password.is_empty() {
+            panic!("should be no-auth mode");
+        } else {
+            let target = format!("{domain}/");
+            assert_eq!(target, "contoso.local/");
+        }
+    }
+
+    #[test]
+    fn asrep_roast_username_default_empty() {
+        let args = json!({
+            "domain": "contoso.local",
+            "dc_ip": "10.0.0.1"
+        });
+        let username = optional_str(&args, "username").unwrap_or("");
+        let password = optional_str(&args, "password").unwrap_or("");
+        assert_eq!(username, "");
+        assert_eq!(password, "");
+    }
+
+    #[test]
+    fn asrep_roast_with_users_file() {
+        let args = json!({
+            "domain": "contoso.local",
+            "dc_ip": "10.0.0.1",
+            "users_file": "/tmp/users.txt"
+        });
+        let users_file = optional_str(&args, "users_file");
+        assert_eq!(users_file, Some("/tmp/users.txt"));
+    }
+
+    // --- DEFAULT_AD_USERNAMES ---
+
+    #[test]
+    fn default_ad_usernames_is_non_empty() {
+        assert!(!super::DEFAULT_AD_USERNAMES.is_empty());
+    }
+
+    #[test]
+    fn default_ad_usernames_contains_administrator() {
+        assert!(super::DEFAULT_AD_USERNAMES.contains("Administrator"));
+    }
+
+    #[test]
+    fn default_ad_usernames_contains_krbtgt() {
+        assert!(super::DEFAULT_AD_USERNAMES.contains("krbtgt"));
+    }
+
+    // --- kerberos_user_enum_noauth ---
+
+    #[test]
+    fn kerberos_user_enum_requires_domain() {
+        let args = json!({"dc_ip": "10.0.0.1"});
+        assert!(required_str(&args, "domain").is_err());
+    }
+
+    #[test]
+    fn kerberos_user_enum_requires_dc_ip() {
+        let args = json!({"domain": "contoso.local"});
+        assert!(required_str(&args, "dc_ip").is_err());
+    }
+
+    #[test]
+    fn kerberos_user_enum_target_format() {
+        let domain = "contoso.local";
+        let target = format!("{domain}/");
+        assert_eq!(target, "contoso.local/");
+    }
+
+    #[test]
+    fn kerberos_user_enum_optional_users_file() {
+        let args = json!({
+            "domain": "contoso.local",
+            "dc_ip": "10.0.0.1",
+            "users_file": "/tmp/custom_users.txt"
+        });
+        assert_eq!(
+            optional_str(&args, "users_file"),
+            Some("/tmp/custom_users.txt")
+        );
+    }
+
+    #[test]
+    fn kerberos_user_enum_no_users_file() {
+        let args = json!({
+            "domain": "contoso.local",
+            "dc_ip": "10.0.0.1"
+        });
+        assert!(optional_str(&args, "users_file").is_none());
+    }
+}

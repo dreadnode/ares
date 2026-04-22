@@ -430,3 +430,137 @@ pub(crate) fn maybe_exec_ec2() -> Option<i32> {
 
     Some(0)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── shell_join ──
+
+    #[test]
+    fn shell_join_simple_args() {
+        let args = vec!["foo".into(), "bar".into(), "baz".into()];
+        assert_eq!(shell_join(&args), "foo bar baz");
+    }
+
+    #[test]
+    fn shell_join_empty_slice() {
+        let args: Vec<String> = vec![];
+        assert_eq!(shell_join(&args), "");
+    }
+
+    #[test]
+    fn shell_join_empty_string_arg() {
+        let args = vec!["".to_string()];
+        assert_eq!(shell_join(&args), "''");
+    }
+
+    #[test]
+    fn shell_join_arg_with_spaces() {
+        let args = vec!["hello world".to_string()];
+        assert_eq!(shell_join(&args), "'hello world'");
+    }
+
+    #[test]
+    fn shell_join_arg_with_single_quote() {
+        let args = vec!["it's".to_string()];
+        assert_eq!(shell_join(&args), "'it'\\''s'");
+    }
+
+    #[test]
+    fn shell_join_arg_with_special_chars() {
+        let args = vec!["echo $HOME".to_string()];
+        assert_eq!(shell_join(&args), "'echo $HOME'");
+    }
+
+    #[test]
+    fn shell_join_mixed_args() {
+        let args = vec![
+            "config".to_string(),
+            "--name".to_string(),
+            "my value".to_string(),
+        ];
+        assert_eq!(shell_join(&args), "config --name 'my value'");
+    }
+
+    #[test]
+    fn shell_join_arg_with_pipe() {
+        let args = vec!["a|b".to_string()];
+        assert_eq!(shell_join(&args), "'a|b'");
+    }
+
+    // ── json_escape ──
+
+    #[test]
+    fn json_escape_plain() {
+        assert_eq!(json_escape("hello"), "hello");
+    }
+
+    #[test]
+    fn json_escape_empty() {
+        assert_eq!(json_escape(""), "");
+    }
+
+    #[test]
+    fn json_escape_backslash() {
+        assert_eq!(json_escape("a\\b"), "a\\\\b");
+    }
+
+    #[test]
+    fn json_escape_quote() {
+        assert_eq!(json_escape(r#"say "hi""#), r#"say \"hi\""#);
+    }
+
+    #[test]
+    fn json_escape_newline() {
+        assert_eq!(json_escape("line1\nline2"), "line1\\nline2");
+    }
+
+    #[test]
+    fn json_escape_tab() {
+        assert_eq!(json_escape("col1\tcol2"), "col1\\tcol2");
+    }
+
+    #[test]
+    fn json_escape_carriage_return() {
+        assert_eq!(json_escape("a\rb"), "a\\rb");
+    }
+
+    #[test]
+    fn json_escape_combined() {
+        assert_eq!(json_escape("a\\b\n\"c\""), "a\\\\b\\n\\\"c\\\"");
+    }
+
+    // ── detect_deploy ──
+
+    #[test]
+    fn detect_deploy_blue() {
+        let args = vec!["run".into(), "blue".into()];
+        assert_eq!(detect_deploy(&args), "ares-blue-orchestrator");
+    }
+
+    #[test]
+    fn detect_deploy_default() {
+        let args = vec!["run".into(), "start".into()];
+        assert_eq!(detect_deploy(&args), "ares-orchestrator");
+    }
+
+    #[test]
+    fn detect_deploy_empty() {
+        let args: Vec<String> = vec![];
+        assert_eq!(detect_deploy(&args), "ares-orchestrator");
+    }
+
+    #[test]
+    fn detect_deploy_blue_anywhere() {
+        let args = vec!["config".into(), "--env".into(), "blue".into()];
+        assert_eq!(detect_deploy(&args), "ares-blue-orchestrator");
+    }
+
+    #[test]
+    fn detect_deploy_blue_substring_not_matched() {
+        // "blueberry" is not "blue" — exact match required by .any(|a| a == "blue")
+        let args = vec!["blueberry".to_string()];
+        assert_eq!(detect_deploy(&args), "ares-orchestrator");
+    }
+}

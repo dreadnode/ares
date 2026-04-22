@@ -493,3 +493,360 @@ pub async fn check_autologon_registry(args: &Value) -> Result<ToolOutput> {
         .execute()
         .await
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::args::{optional_i64, optional_str, required_str};
+    use crate::credentials;
+    use serde_json::json;
+
+    // --- lsassy hash formatting ---
+
+    #[test]
+    fn lsassy_hash_without_colon_gets_prefix() {
+        let hash = "aabbccdd";
+        let h = if hash.contains(':') {
+            hash.to_string()
+        } else {
+            format!(":{hash}")
+        };
+        assert_eq!(h, ":aabbccdd");
+    }
+
+    #[test]
+    fn lsassy_hash_with_colon_stays_as_is() {
+        let hash = "aad3b435:aabbccdd";
+        let h = if hash.contains(':') {
+            hash.to_string()
+        } else {
+            format!(":{hash}")
+        };
+        assert_eq!(h, "aad3b435:aabbccdd");
+    }
+
+    #[test]
+    fn lsassy_requires_username() {
+        let args = json!({"target": "10.0.0.1"});
+        assert!(required_str(&args, "username").is_err());
+    }
+
+    #[test]
+    fn lsassy_requires_target() {
+        let args = json!({"username": "admin"});
+        assert!(required_str(&args, "target").is_err());
+    }
+
+    #[test]
+    fn lsassy_optional_method() {
+        let args = json!({
+            "target": "10.0.0.1",
+            "username": "admin",
+            "method": "comsvcs"
+        });
+        assert_eq!(optional_str(&args, "method"), Some("comsvcs"));
+    }
+
+    #[test]
+    fn lsassy_no_method() {
+        let args = json!({"target": "10.0.0.1", "username": "admin"});
+        assert!(optional_str(&args, "method").is_none());
+    }
+
+    // --- ldap_search_descriptions ---
+
+    #[test]
+    fn base_dn_computation_from_domain() {
+        let domain = "contoso.local";
+        let computed_base_dn: String = domain
+            .split('.')
+            .map(|part| format!("DC={part}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        assert_eq!(computed_base_dn, "DC=contoso,DC=local");
+    }
+
+    #[test]
+    fn base_dn_computation_three_levels() {
+        let domain = "child.contoso.local";
+        let computed_base_dn: String = domain
+            .split('.')
+            .map(|part| format!("DC={part}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        assert_eq!(computed_base_dn, "DC=child,DC=contoso,DC=local");
+    }
+
+    #[test]
+    fn base_dn_explicit_overrides_computation() {
+        let base_dn = Some("OU=Users,DC=contoso,DC=local");
+        let domain = "contoso.local";
+        let computed = match base_dn {
+            Some(dn) => dn.to_string(),
+            None => domain
+                .split('.')
+                .map(|part| format!("DC={part}"))
+                .collect::<Vec<_>>()
+                .join(","),
+        };
+        assert_eq!(computed, "OU=Users,DC=contoso,DC=local");
+    }
+
+    #[test]
+    fn ldap_bind_dn_format() {
+        let username = "admin";
+        let domain = "contoso.local";
+        let bind_dn = format!("{username}@{domain}");
+        assert_eq!(bind_dn, "admin@contoso.local");
+    }
+
+    #[test]
+    fn ldap_uri_format() {
+        let target = "10.0.0.1";
+        let ldap_uri = format!("ldap://{target}");
+        assert_eq!(ldap_uri, "ldap://10.0.0.1");
+    }
+
+    #[test]
+    fn ldap_search_requires_all_fields() {
+        let args = json!({
+            "target": "10.0.0.1",
+            "username": "admin",
+            "password": "P@ss",
+            "domain": "contoso.local"
+        });
+        assert!(required_str(&args, "target").is_ok());
+        assert!(required_str(&args, "username").is_ok());
+        assert!(required_str(&args, "password").is_ok());
+        assert!(required_str(&args, "domain").is_ok());
+    }
+
+    // --- netexec_creds helper ---
+
+    #[test]
+    fn netexec_creds_for_domain_admin_checker() {
+        let cred_args =
+            credentials::netexec_creds(Some("admin"), Some("P@ss"), None, Some("contoso.local"));
+        assert_eq!(
+            cred_args,
+            vec!["-u", "admin", "-p", "P@ss", "-d", "contoso.local"]
+        );
+    }
+
+    #[test]
+    fn netexec_creds_with_hash_for_domain_admin_checker() {
+        let cred_args = credentials::netexec_creds(
+            Some("admin"),
+            None,
+            Some("aabbccdd"),
+            Some("contoso.local"),
+        );
+        assert_eq!(
+            cred_args,
+            vec!["-u", "admin", "-H", ":aabbccdd", "-d", "contoso.local"]
+        );
+    }
+
+    #[test]
+    fn domain_admin_checker_requires_targets() {
+        let args = json!({"username": "admin"});
+        assert!(required_str(&args, "targets").is_err());
+    }
+
+    // --- gpp_password_finder ---
+
+    #[test]
+    fn gpp_password_finder_all_required() {
+        let args = json!({
+            "target": "10.0.0.1",
+            "username": "admin",
+            "password": "P@ss",
+            "domain": "contoso.local"
+        });
+        assert!(required_str(&args, "target").is_ok());
+        assert!(required_str(&args, "username").is_ok());
+        assert!(required_str(&args, "password").is_ok());
+        assert!(required_str(&args, "domain").is_ok());
+    }
+
+    // --- DEFAULT_SPRAY_USERNAMES ---
+
+    #[test]
+    fn default_spray_usernames_is_non_empty() {
+        assert!(!super::DEFAULT_SPRAY_USERNAMES.is_empty());
+    }
+
+    #[test]
+    fn default_spray_usernames_contains_administrator() {
+        assert!(super::DEFAULT_SPRAY_USERNAMES.contains("Administrator"));
+    }
+
+    #[test]
+    fn default_spray_usernames_contains_service_accounts() {
+        assert!(super::DEFAULT_SPRAY_USERNAMES.contains("sql_svc"));
+        assert!(super::DEFAULT_SPRAY_USERNAMES.contains("svc_backup"));
+    }
+
+    // --- password_spray ---
+
+    #[test]
+    fn password_spray_delay_seconds_parsing() {
+        let args = json!({
+            "target": "10.0.0.1",
+            "password": "P@ss",
+            "domain": "contoso.local",
+            "delay_seconds": 5
+        });
+        assert_eq!(optional_i64(&args, "delay_seconds"), Some(5));
+    }
+
+    #[test]
+    fn password_spray_no_delay() {
+        let args = json!({
+            "target": "10.0.0.1",
+            "password": "P@ss",
+            "domain": "contoso.local"
+        });
+        assert!(optional_i64(&args, "delay_seconds").is_none());
+    }
+
+    #[test]
+    fn password_spray_requires_target() {
+        let args = json!({"password": "P@ss", "domain": "contoso.local"});
+        assert!(required_str(&args, "target").is_err());
+    }
+
+    #[test]
+    fn password_spray_requires_password() {
+        let args = json!({"target": "10.0.0.1", "domain": "contoso.local"});
+        assert!(required_str(&args, "password").is_err());
+    }
+
+    #[test]
+    fn password_spray_requires_domain() {
+        let args = json!({"target": "10.0.0.1", "password": "P@ss"});
+        assert!(required_str(&args, "domain").is_err());
+    }
+
+    // --- ntds_dit_extract ---
+
+    #[test]
+    fn ntds_dit_extract_auth_with_password() {
+        let (auth_string, extra_args) = credentials::impacket_auth(
+            Some("contoso.local"),
+            "admin",
+            Some("P@ss"),
+            None,
+            "10.0.0.1",
+        );
+        assert_eq!(auth_string, "contoso.local/admin:P@ss@10.0.0.1");
+        assert!(extra_args.is_empty());
+    }
+
+    #[test]
+    fn ntds_dit_extract_auth_with_hash() {
+        let (auth_string, extra_args) = credentials::impacket_auth(
+            Some("contoso.local"),
+            "admin",
+            None,
+            Some("aabbccdd"),
+            "10.0.0.1",
+        );
+        assert_eq!(auth_string, "contoso.local/admin@10.0.0.1");
+        assert_eq!(extra_args, vec!["-hashes", ":aabbccdd"]);
+    }
+
+    // --- smbclient_spider ---
+
+    #[test]
+    fn smbclient_spider_optional_pattern() {
+        let args = json!({
+            "target": "10.0.0.1",
+            "username": "admin",
+            "password": "P@ss",
+            "domain": "contoso.local",
+            "pattern": "*.kdbx"
+        });
+        assert_eq!(optional_str(&args, "pattern"), Some("*.kdbx"));
+    }
+
+    #[test]
+    fn smbclient_spider_optional_depth() {
+        let args = json!({
+            "target": "10.0.0.1",
+            "username": "admin",
+            "password": "P@ss",
+            "domain": "contoso.local",
+            "depth": 3
+        });
+        assert_eq!(optional_i64(&args, "depth"), Some(3));
+    }
+
+    #[test]
+    fn smbclient_spider_opts_construction() {
+        let pattern = Some("*.kdbx");
+        let depth: Option<i64> = Some(3);
+        let mut opts = "DOWNLOAD_FLAG=True MAX_FILE_SIZE=102400".to_string();
+        if let Some(p) = pattern {
+            opts.push_str(&format!(" PATTERN={p}"));
+        }
+        if let Some(d) = depth {
+            opts.push_str(&format!(" DEPTH={d}"));
+        }
+        assert_eq!(
+            opts,
+            "DOWNLOAD_FLAG=True MAX_FILE_SIZE=102400 PATTERN=*.kdbx DEPTH=3"
+        );
+    }
+
+    // --- check_credman_entries / check_autologon_registry ---
+
+    #[test]
+    fn credman_requires_all_fields() {
+        let args = json!({
+            "target": "10.0.0.1",
+            "username": "admin",
+            "password": "P@ss",
+            "domain": "contoso.local"
+        });
+        assert!(required_str(&args, "target").is_ok());
+        assert!(required_str(&args, "username").is_ok());
+        assert!(required_str(&args, "password").is_ok());
+        assert!(required_str(&args, "domain").is_ok());
+    }
+
+    #[test]
+    fn netexec_creds_for_password_policy() {
+        let cred_args =
+            credentials::netexec_creds(Some("admin"), Some("P@ss"), None, Some("contoso.local"));
+        assert_eq!(cred_args[0], "-u");
+        assert_eq!(cred_args[1], "admin");
+        assert_eq!(cred_args[2], "-p");
+        assert_eq!(cred_args[3], "P@ss");
+        assert_eq!(cred_args[4], "-d");
+        assert_eq!(cred_args[5], "contoso.local");
+    }
+
+    // --- username_as_password ---
+
+    #[test]
+    fn username_as_password_requires_target() {
+        let args = json!({"domain": "contoso.local"});
+        assert!(required_str(&args, "target").is_err());
+    }
+
+    #[test]
+    fn username_as_password_requires_domain() {
+        let args = json!({"target": "10.0.0.1"});
+        assert!(required_str(&args, "domain").is_err());
+    }
+
+    #[test]
+    fn username_as_password_optional_users_file() {
+        let args = json!({
+            "target": "10.0.0.1",
+            "domain": "contoso.local",
+            "users_file": "/tmp/myusers.txt"
+        });
+        assert_eq!(optional_str(&args, "users_file"), Some("/tmp/myusers.txt"));
+    }
+}

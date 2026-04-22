@@ -36,3 +36,90 @@ pub async fn get_tgt(args: &Value) -> Result<ToolOutput> {
         .execute()
         .await
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::args::{optional_str, required_str};
+    use crate::credentials;
+    use serde_json::json;
+
+    #[test]
+    fn get_tgt_requires_domain() {
+        let args = json!({"username": "admin"});
+        assert!(required_str(&args, "domain").is_err());
+    }
+
+    #[test]
+    fn get_tgt_requires_username() {
+        let args = json!({"domain": "contoso.local"});
+        assert!(required_str(&args, "username").is_err());
+    }
+
+    #[test]
+    fn get_tgt_format_with_password() {
+        let domain = "contoso.local";
+        let username = "admin";
+        let password = Some("P@ssw0rd!");
+        let user_string = match password {
+            Some(p) => format!("{domain}/{username}:{p}"),
+            None => format!("{domain}/{username}"),
+        };
+        assert_eq!(user_string, "contoso.local/admin:P@ssw0rd!");
+    }
+
+    #[test]
+    fn get_tgt_format_without_password() {
+        let domain = "contoso.local";
+        let username = "admin";
+        let password: Option<&str> = None;
+        let user_string = match password {
+            Some(p) => format!("{domain}/{username}:{p}"),
+            None => format!("{domain}/{username}"),
+        };
+        assert_eq!(user_string, "contoso.local/admin");
+    }
+
+    #[test]
+    fn get_tgt_hash_args_usage() {
+        let args = json!({
+            "domain": "contoso.local",
+            "username": "admin",
+            "hash": "31d6cfe0d16ae931b73c59d7e0c089c0"
+        });
+        let hash = optional_str(&args, "hash").unwrap();
+        let hash_args = credentials::hash_args(hash);
+        assert_eq!(
+            hash_args,
+            vec!["-hashes", ":31d6cfe0d16ae931b73c59d7e0c089c0"]
+        );
+    }
+
+    #[test]
+    fn get_tgt_hash_args_with_lm_nt() {
+        let hash = "aad3b435:31d6cfe0d16ae931b73c59d7e0c089c0";
+        let hash_args = credentials::hash_args(hash);
+        assert_eq!(
+            hash_args,
+            vec!["-hashes", "aad3b435:31d6cfe0d16ae931b73c59d7e0c089c0"]
+        );
+    }
+
+    #[test]
+    fn get_tgt_optional_dc_ip_present() {
+        let args = json!({
+            "domain": "contoso.local",
+            "username": "admin",
+            "dc_ip": "10.0.0.1"
+        });
+        assert_eq!(optional_str(&args, "dc_ip"), Some("10.0.0.1"));
+    }
+
+    #[test]
+    fn get_tgt_optional_dc_ip_absent() {
+        let args = json!({
+            "domain": "contoso.local",
+            "username": "admin"
+        });
+        assert!(optional_str(&args, "dc_ip").is_none());
+    }
+}

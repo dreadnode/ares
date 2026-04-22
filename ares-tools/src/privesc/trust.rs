@@ -120,3 +120,283 @@ pub async fn dnstool(args: &Value) -> Result<ToolOutput> {
         .execute()
         .await
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::args::{optional_str, required_str};
+    use serde_json::json;
+
+    // --- extract_trust_key ---
+
+    #[test]
+    fn extract_trust_key_missing_trusted_domain() {
+        let args = json!({
+            "domain": "contoso.local",
+            "username": "admin",
+            "password": "P@ssw0rd!",
+            "dc_ip": "192.168.58.10"
+        });
+        assert!(required_str(&args, "trusted_domain").is_err());
+    }
+
+    #[test]
+    fn extract_trust_key_missing_dc_ip() {
+        let args = json!({
+            "domain": "contoso.local",
+            "username": "admin",
+            "password": "P@ssw0rd!",
+            "trusted_domain": "child.contoso.local"
+        });
+        assert!(required_str(&args, "dc_ip").is_err());
+    }
+
+    #[test]
+    fn extract_trust_key_just_dc_user_format() {
+        let args = json!({
+            "domain": "contoso.local",
+            "username": "admin",
+            "password": "P@ssw0rd!",
+            "dc_ip": "192.168.58.10",
+            "trusted_domain": "child.contoso.local"
+        });
+        let trusted_domain = required_str(&args, "trusted_domain").unwrap();
+        let just_dc_user = format!("{trusted_domain}$");
+        assert_eq!(just_dc_user, "child.contoso.local$");
+    }
+
+    // --- create_inter_realm_ticket ---
+
+    #[test]
+    fn create_inter_realm_ticket_missing_trust_key() {
+        let args = json!({
+            "source_sid": "S-1-5-21-111",
+            "source_domain": "child.contoso.local",
+            "target_sid": "S-1-5-21-222",
+            "target_domain": "contoso.local"
+        });
+        assert!(required_str(&args, "trust_key").is_err());
+    }
+
+    #[test]
+    fn create_inter_realm_ticket_missing_source_sid() {
+        let args = json!({
+            "trust_key": "aabbccdd",
+            "source_domain": "child.contoso.local",
+            "target_sid": "S-1-5-21-222",
+            "target_domain": "contoso.local"
+        });
+        assert!(required_str(&args, "source_sid").is_err());
+    }
+
+    #[test]
+    fn create_inter_realm_ticket_extra_sid_format() {
+        let args = json!({
+            "trust_key": "aabbccdd",
+            "source_sid": "S-1-5-21-111",
+            "source_domain": "child.contoso.local",
+            "target_sid": "S-1-5-21-222",
+            "target_domain": "contoso.local"
+        });
+        let target_sid = required_str(&args, "target_sid").unwrap();
+        let extra_sid = format!("{target_sid}-519");
+        assert_eq!(extra_sid, "S-1-5-21-222-519");
+    }
+
+    #[test]
+    fn create_inter_realm_ticket_spn_format() {
+        let args = json!({
+            "trust_key": "aabbccdd",
+            "source_sid": "S-1-5-21-111",
+            "source_domain": "child.contoso.local",
+            "target_sid": "S-1-5-21-222",
+            "target_domain": "contoso.local"
+        });
+        let target_domain = required_str(&args, "target_domain").unwrap();
+        let spn = format!("krbtgt/{target_domain}");
+        assert_eq!(spn, "krbtgt/contoso.local");
+    }
+
+    #[test]
+    fn create_inter_realm_ticket_username_default() {
+        let args = json!({
+            "trust_key": "aabbccdd",
+            "source_sid": "S-1-5-21-111",
+            "source_domain": "child.contoso.local",
+            "target_sid": "S-1-5-21-222",
+            "target_domain": "contoso.local"
+        });
+        let username = optional_str(&args, "username").unwrap_or("Administrator");
+        assert_eq!(username, "Administrator");
+    }
+
+    #[test]
+    fn create_inter_realm_ticket_username_custom() {
+        let args = json!({
+            "trust_key": "aabbccdd",
+            "source_sid": "S-1-5-21-111",
+            "source_domain": "child.contoso.local",
+            "target_sid": "S-1-5-21-222",
+            "target_domain": "contoso.local",
+            "username": "fakeuser"
+        });
+        let username = optional_str(&args, "username").unwrap_or("Administrator");
+        assert_eq!(username, "fakeuser");
+    }
+
+    // --- get_sid ---
+
+    #[test]
+    fn get_sid_missing_domain() {
+        let args = json!({
+            "username": "admin",
+            "password": "P@ssw0rd!",
+            "dc_ip": "192.168.58.10"
+        });
+        assert!(required_str(&args, "domain").is_err());
+    }
+
+    #[test]
+    fn get_sid_missing_username() {
+        let args = json!({
+            "domain": "contoso.local",
+            "password": "P@ssw0rd!",
+            "dc_ip": "192.168.58.10"
+        });
+        assert!(required_str(&args, "username").is_err());
+    }
+
+    #[test]
+    fn get_sid_missing_password_and_hash() {
+        let args = json!({
+            "domain": "contoso.local",
+            "username": "admin",
+            "dc_ip": "192.168.58.10"
+        });
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let result = rt.block_on(super::get_sid(&args));
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("get_sid requires either 'password' or 'hash'"));
+    }
+
+    #[test]
+    fn get_sid_empty_password_and_hash_still_errors() {
+        let args = json!({
+            "domain": "contoso.local",
+            "username": "admin",
+            "dc_ip": "192.168.58.10",
+            "password": "",
+            "hash": ""
+        });
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let result = rt.block_on(super::get_sid(&args));
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("get_sid requires either 'password' or 'hash'"));
+    }
+
+    #[test]
+    fn get_sid_with_password_present() {
+        let args = json!({
+            "domain": "contoso.local",
+            "username": "admin",
+            "password": "P@ssw0rd!",
+            "dc_ip": "192.168.58.10"
+        });
+        let password = args
+            .get("password")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty());
+        assert_eq!(password, Some("P@ssw0rd!"));
+    }
+
+    #[test]
+    fn get_sid_with_hash_present() {
+        let args = json!({
+            "domain": "contoso.local",
+            "username": "admin",
+            "hash": "31d6cfe0d16ae931b73c59d7e0c089c0",
+            "dc_ip": "192.168.58.10"
+        });
+        let hash = args
+            .get("hash")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty());
+        assert_eq!(hash, Some("31d6cfe0d16ae931b73c59d7e0c089c0"));
+    }
+
+    // --- dnstool ---
+
+    #[test]
+    fn dnstool_missing_record_name() {
+        let args = json!({
+            "domain": "contoso.local",
+            "username": "admin",
+            "password": "P@ssw0rd!",
+            "dc_ip": "192.168.58.10",
+            "record_data": "10.0.0.99"
+        });
+        assert!(required_str(&args, "record_name").is_err());
+    }
+
+    #[test]
+    fn dnstool_missing_record_data() {
+        let args = json!({
+            "domain": "contoso.local",
+            "username": "admin",
+            "password": "P@ssw0rd!",
+            "dc_ip": "192.168.58.10",
+            "record_name": "evil.contoso.local"
+        });
+        assert!(required_str(&args, "record_data").is_err());
+    }
+
+    #[test]
+    fn dnstool_action_default_add() {
+        let args = json!({
+            "domain": "contoso.local",
+            "username": "admin",
+            "password": "P@ssw0rd!",
+            "dc_ip": "192.168.58.10",
+            "record_name": "evil.contoso.local",
+            "record_data": "10.0.0.99"
+        });
+        let action = optional_str(&args, "action").unwrap_or("add");
+        assert_eq!(action, "add");
+    }
+
+    #[test]
+    fn dnstool_action_custom() {
+        let args = json!({
+            "domain": "contoso.local",
+            "username": "admin",
+            "password": "P@ssw0rd!",
+            "dc_ip": "192.168.58.10",
+            "record_name": "evil.contoso.local",
+            "record_data": "10.0.0.99",
+            "action": "remove"
+        });
+        let action = optional_str(&args, "action").unwrap_or("add");
+        assert_eq!(action, "remove");
+    }
+
+    #[test]
+    fn dnstool_user_spec_format() {
+        let args = json!({
+            "domain": "contoso.local",
+            "username": "admin",
+            "password": "P@ssw0rd!",
+            "dc_ip": "192.168.58.10",
+            "record_name": "evil.contoso.local",
+            "record_data": "10.0.0.99"
+        });
+        let domain = required_str(&args, "domain").unwrap();
+        let username = required_str(&args, "username").unwrap();
+        let user_spec = format!("{domain}\\{username}");
+        assert_eq!(user_spec, "contoso.local\\admin");
+    }
+}

@@ -305,3 +305,86 @@ fn replace_model_in_yaml(yaml: &str, role: &str, _old_model: &str, new_model: &s
 
     result
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn replace_model_basic() {
+        let yaml = "  orchestrator:\n    model: \"gpt-4\"\n    max_steps: 10\n";
+        let result = replace_model_in_yaml(yaml, "orchestrator", "gpt-4", "claude-3");
+        assert!(result.contains("model: \"claude-3\""));
+        assert!(!result.contains("gpt-4"));
+    }
+
+    #[test]
+    fn replace_model_preserves_other_roles() {
+        let yaml =
+            "  orchestrator:\n    model: \"gpt-4\"\n    max_steps: 10\n  recon:\n    model: \"gpt-4\"\n    max_steps: 5\n";
+        let result = replace_model_in_yaml(yaml, "orchestrator", "gpt-4", "claude-3");
+        // Only orchestrator should change
+        let lines: Vec<&str> = result.lines().collect();
+        let recon_idx = lines.iter().position(|l| l.contains("recon:")).unwrap();
+        let recon_model = lines[recon_idx + 1];
+        assert!(
+            recon_model.contains("gpt-4"),
+            "recon model should remain gpt-4"
+        );
+    }
+
+    #[test]
+    fn replace_model_role_not_found() {
+        let yaml = "  orchestrator:\n    model: \"gpt-4\"\n    max_steps: 10\n";
+        let result = replace_model_in_yaml(yaml, "nonexistent", "gpt-4", "claude-3");
+        assert_eq!(result, yaml);
+    }
+
+    #[test]
+    fn replace_model_preserves_indentation() {
+        let yaml = "  recon:\n    model: \"gpt-4\"\n    max_steps: 5\n";
+        let result = replace_model_in_yaml(yaml, "recon", "gpt-4", "claude-3");
+        assert!(result.contains("    model: \"claude-3\""));
+    }
+
+    #[test]
+    fn replace_model_no_trailing_newline() {
+        let yaml = "  recon:\n    model: \"gpt-4\"";
+        let result = replace_model_in_yaml(yaml, "recon", "gpt-4", "claude-3");
+        assert!(!result.ends_with('\n'));
+        assert!(result.contains("model: \"claude-3\""));
+    }
+
+    #[test]
+    fn replace_model_with_trailing_newline() {
+        let yaml = "  recon:\n    model: \"gpt-4\"\n";
+        let result = replace_model_in_yaml(yaml, "recon", "gpt-4", "claude-3");
+        assert!(result.ends_with('\n'));
+    }
+
+    #[test]
+    fn replace_model_preserves_surrounding_content() {
+        let yaml =
+            "# comment above\n  lateral:\n    model: \"old-model\"\n    max_steps: 20\n# comment below\n";
+        let result = replace_model_in_yaml(yaml, "lateral", "old-model", "new-model");
+        assert!(result.contains("# comment above"));
+        assert!(result.contains("# comment below"));
+        assert!(result.contains("    max_steps: 20"));
+    }
+
+    #[test]
+    fn replace_model_empty_yaml() {
+        let yaml = "";
+        let result = replace_model_in_yaml(yaml, "orchestrator", "gpt-4", "claude-3");
+        assert_eq!(result, "");
+    }
+
+    #[test]
+    fn replace_model_ignores_old_model_param() {
+        // The function uses _old_model (unused); it replaces whatever model: line
+        // is under the role, regardless of its current value.
+        let yaml = "  recon:\n    model: \"actual-model\"\n    max_steps: 5\n";
+        let result = replace_model_in_yaml(yaml, "recon", "wrong-model", "new-model");
+        assert!(result.contains("model: \"new-model\""));
+    }
+}

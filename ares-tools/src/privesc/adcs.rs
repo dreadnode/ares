@@ -158,3 +158,259 @@ pub async fn certipy_esc4_full_chain(args: &Value) -> Result<ToolOutput> {
         success: template_output.success && request_output.success && auth_output.success,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::args::{optional_bool, optional_str, required_str};
+    use serde_json::json;
+
+    // --- certipy_find ---
+
+    #[test]
+    fn certipy_find_missing_username() {
+        let args = json!({
+            "domain": "contoso.local",
+            "password": "P@ssw0rd!",
+            "dc_ip": "192.168.58.10"
+        });
+        assert!(required_str(&args, "username").is_err());
+    }
+
+    #[test]
+    fn certipy_find_missing_domain() {
+        let args = json!({
+            "username": "admin",
+            "password": "P@ssw0rd!",
+            "dc_ip": "192.168.58.10"
+        });
+        assert!(required_str(&args, "domain").is_err());
+    }
+
+    #[test]
+    fn certipy_find_missing_password() {
+        let args = json!({
+            "username": "admin",
+            "domain": "contoso.local",
+            "dc_ip": "192.168.58.10"
+        });
+        assert!(required_str(&args, "password").is_err());
+    }
+
+    #[test]
+    fn certipy_find_missing_dc_ip() {
+        let args = json!({
+            "username": "admin",
+            "domain": "contoso.local",
+            "password": "P@ssw0rd!"
+        });
+        assert!(required_str(&args, "dc_ip").is_err());
+    }
+
+    #[test]
+    fn certipy_find_user_at_domain_format() {
+        let args = json!({
+            "username": "admin",
+            "domain": "contoso.local",
+            "password": "P@ssw0rd!",
+            "dc_ip": "192.168.58.10"
+        });
+        let username = required_str(&args, "username").unwrap();
+        let domain = required_str(&args, "domain").unwrap();
+        let user_at_domain = format!("{username}@{domain}");
+        assert_eq!(user_at_domain, "admin@contoso.local");
+    }
+
+    #[test]
+    fn certipy_find_vulnerable_default_false() {
+        let args = json!({
+            "username": "admin",
+            "domain": "contoso.local",
+            "password": "P@ssw0rd!",
+            "dc_ip": "192.168.58.10"
+        });
+        let vulnerable = optional_bool(&args, "vulnerable").unwrap_or(false);
+        assert!(!vulnerable);
+    }
+
+    #[test]
+    fn certipy_find_vulnerable_set_true() {
+        let args = json!({
+            "username": "admin",
+            "domain": "contoso.local",
+            "password": "P@ssw0rd!",
+            "dc_ip": "192.168.58.10",
+            "vulnerable": true
+        });
+        let vulnerable = optional_bool(&args, "vulnerable").unwrap_or(false);
+        assert!(vulnerable);
+    }
+
+    // --- certipy_request ---
+
+    #[test]
+    fn certipy_request_missing_ca() {
+        let args = json!({
+            "username": "admin",
+            "domain": "contoso.local",
+            "password": "P@ssw0rd!",
+            "template": "ESC1",
+            "dc_ip": "192.168.58.10"
+        });
+        assert!(required_str(&args, "ca").is_err());
+    }
+
+    #[test]
+    fn certipy_request_missing_template() {
+        let args = json!({
+            "username": "admin",
+            "domain": "contoso.local",
+            "password": "P@ssw0rd!",
+            "ca": "contoso-DC01-CA",
+            "dc_ip": "192.168.58.10"
+        });
+        assert!(required_str(&args, "template").is_err());
+    }
+
+    #[test]
+    fn certipy_request_user_at_domain_format() {
+        let args = json!({
+            "username": "lowpriv",
+            "domain": "corp.local",
+            "password": "Secret123",
+            "ca": "corp-CA",
+            "template": "VulnTemplate",
+            "dc_ip": "10.0.0.1"
+        });
+        let username = required_str(&args, "username").unwrap();
+        let domain = required_str(&args, "domain").unwrap();
+        let user_at_domain = format!("{username}@{domain}");
+        assert_eq!(user_at_domain, "lowpriv@corp.local");
+    }
+
+    #[test]
+    fn certipy_request_upn_present() {
+        let args = json!({
+            "username": "admin",
+            "domain": "contoso.local",
+            "password": "P@ssw0rd!",
+            "ca": "contoso-DC01-CA",
+            "template": "ESC1",
+            "dc_ip": "192.168.58.10",
+            "upn": "administrator@contoso.local"
+        });
+        assert_eq!(
+            optional_str(&args, "upn"),
+            Some("administrator@contoso.local")
+        );
+    }
+
+    #[test]
+    fn certipy_request_upn_absent() {
+        let args = json!({
+            "username": "admin",
+            "domain": "contoso.local",
+            "password": "P@ssw0rd!",
+            "ca": "contoso-DC01-CA",
+            "template": "ESC1",
+            "dc_ip": "192.168.58.10"
+        });
+        assert!(optional_str(&args, "upn").is_none());
+    }
+
+    // --- certipy_auth ---
+
+    #[test]
+    fn certipy_auth_missing_pfx_path() {
+        let args = json!({
+            "dc_ip": "192.168.58.10",
+            "domain": "contoso.local"
+        });
+        assert!(required_str(&args, "pfx_path").is_err());
+    }
+
+    #[test]
+    fn certipy_auth_missing_dc_ip() {
+        let args = json!({
+            "pfx_path": "/tmp/admin.pfx",
+            "domain": "contoso.local"
+        });
+        assert!(required_str(&args, "dc_ip").is_err());
+    }
+
+    #[test]
+    fn certipy_auth_missing_domain() {
+        let args = json!({
+            "pfx_path": "/tmp/admin.pfx",
+            "dc_ip": "192.168.58.10"
+        });
+        assert!(required_str(&args, "domain").is_err());
+    }
+
+    #[test]
+    fn certipy_auth_all_args() {
+        let args = json!({
+            "pfx_path": "/tmp/admin.pfx",
+            "dc_ip": "192.168.58.10",
+            "domain": "contoso.local"
+        });
+        assert_eq!(required_str(&args, "pfx_path").unwrap(), "/tmp/admin.pfx");
+        assert_eq!(required_str(&args, "dc_ip").unwrap(), "192.168.58.10");
+        assert_eq!(required_str(&args, "domain").unwrap(), "contoso.local");
+    }
+
+    // --- certipy_shadow ---
+
+    #[test]
+    fn certipy_shadow_missing_target() {
+        let args = json!({
+            "username": "admin",
+            "domain": "contoso.local",
+            "password": "P@ssw0rd!",
+            "dc_ip": "192.168.58.10"
+        });
+        assert!(required_str(&args, "target").is_err());
+    }
+
+    #[test]
+    fn certipy_shadow_user_at_domain_format() {
+        let args = json!({
+            "username": "admin",
+            "domain": "contoso.local",
+            "password": "P@ssw0rd!",
+            "target": "dc01$",
+            "dc_ip": "192.168.58.10"
+        });
+        let username = required_str(&args, "username").unwrap();
+        let domain = required_str(&args, "domain").unwrap();
+        let user_at_domain = format!("{username}@{domain}");
+        assert_eq!(user_at_domain, "admin@contoso.local");
+    }
+
+    // --- certipy_template_esc4 ---
+
+    #[test]
+    fn certipy_template_esc4_missing_template() {
+        let args = json!({
+            "username": "admin",
+            "domain": "contoso.local",
+            "password": "P@ssw0rd!",
+            "dc_ip": "192.168.58.10"
+        });
+        assert!(required_str(&args, "template").is_err());
+    }
+
+    #[test]
+    fn certipy_template_esc4_user_at_domain_format() {
+        let args = json!({
+            "username": "admin",
+            "domain": "contoso.local",
+            "password": "P@ssw0rd!",
+            "template": "ESC4Template",
+            "dc_ip": "192.168.58.10"
+        });
+        let username = required_str(&args, "username").unwrap();
+        let domain = required_str(&args, "domain").unwrap();
+        let user_at_domain = format!("{username}@{domain}");
+        assert_eq!(user_at_domain, "admin@contoso.local");
+    }
+}

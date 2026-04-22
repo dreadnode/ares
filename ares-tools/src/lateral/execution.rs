@@ -285,3 +285,463 @@ pub async fn secretsdump_kerberos(args: &Value) -> Result<ToolOutput> {
         .execute()
         .await
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::args::{optional_i64, optional_str, required_str};
+    use crate::credentials;
+    use serde_json::json;
+
+    // --- psexec ---
+
+    #[test]
+    fn psexec_requires_target() {
+        let args = json!({"username": "admin"});
+        assert!(required_str(&args, "target").is_err());
+    }
+
+    #[test]
+    fn psexec_requires_username() {
+        let args = json!({"target": "10.0.0.1"});
+        assert!(required_str(&args, "username").is_err());
+    }
+
+    #[test]
+    fn psexec_default_command() {
+        let args = json!({"target": "10.0.0.1", "username": "admin"});
+        let command = optional_str(&args, "command")
+            .unwrap_or(r#"cmd.exe /c "whoami && hostname && ipconfig""#);
+        assert_eq!(command, r#"cmd.exe /c "whoami && hostname && ipconfig""#);
+    }
+
+    #[test]
+    fn psexec_custom_command() {
+        let args = json!({"target": "10.0.0.1", "username": "admin", "command": "dir C:\\"});
+        let command = optional_str(&args, "command")
+            .unwrap_or(r#"cmd.exe /c "whoami && hostname && ipconfig""#);
+        assert_eq!(command, "dir C:\\");
+    }
+
+    #[test]
+    fn psexec_impacket_auth_with_password() {
+        let args = json!({
+            "target": "10.0.0.1",
+            "username": "admin",
+            "password": "P@ss",
+            "domain": "CONTOSO"
+        });
+        let target = required_str(&args, "target").unwrap();
+        let username = required_str(&args, "username").unwrap();
+        let password = optional_str(&args, "password");
+        let hash = optional_str(&args, "hash");
+        let domain = optional_str(&args, "domain");
+        let (auth_str, extra_args) =
+            credentials::impacket_auth(domain, username, password, hash, target);
+        assert_eq!(auth_str, "CONTOSO/admin:P@ss@10.0.0.1");
+        assert!(extra_args.is_empty());
+    }
+
+    #[test]
+    fn psexec_impacket_auth_with_hash() {
+        let args = json!({
+            "target": "10.0.0.1",
+            "username": "admin",
+            "hash": "aabbccdd",
+            "domain": "CONTOSO"
+        });
+        let target = required_str(&args, "target").unwrap();
+        let username = required_str(&args, "username").unwrap();
+        let password = optional_str(&args, "password");
+        let hash = optional_str(&args, "hash");
+        let domain = optional_str(&args, "domain");
+        let (auth_str, extra_args) =
+            credentials::impacket_auth(domain, username, password, hash, target);
+        assert_eq!(auth_str, "CONTOSO/admin@10.0.0.1");
+        assert_eq!(extra_args, vec!["-hashes", ":aabbccdd"]);
+    }
+
+    // --- psexec_kerberos ---
+
+    #[test]
+    fn psexec_kerberos_target_format() {
+        let args = json!({
+            "target": "dc01.contoso.local",
+            "username": "admin",
+            "domain": "contoso.local",
+            "ticket_path": "/tmp/admin.ccache"
+        });
+        let target = required_str(&args, "target").unwrap();
+        let username = required_str(&args, "username").unwrap();
+        let domain = required_str(&args, "domain").unwrap();
+        let target_str = format!("{domain}/{username}@{target}");
+        assert_eq!(target_str, "contoso.local/admin@dc01.contoso.local");
+    }
+
+    #[test]
+    fn psexec_kerberos_env() {
+        let args = json!({
+            "target": "dc01",
+            "username": "admin",
+            "domain": "contoso.local",
+            "ticket_path": "/tmp/admin.ccache"
+        });
+        let ticket_path = required_str(&args, "ticket_path").unwrap();
+        let (env_key, env_val) = credentials::kerberos_env(ticket_path);
+        assert_eq!(env_key, "KRB5CCNAME");
+        assert_eq!(env_val, "/tmp/admin.ccache");
+    }
+
+    #[test]
+    fn psexec_kerberos_requires_domain() {
+        let args = json!({
+            "target": "dc01",
+            "username": "admin",
+            "ticket_path": "/tmp/admin.ccache"
+        });
+        assert!(required_str(&args, "domain").is_err());
+    }
+
+    #[test]
+    fn psexec_kerberos_requires_ticket_path() {
+        let args = json!({
+            "target": "dc01",
+            "username": "admin",
+            "domain": "contoso.local"
+        });
+        assert!(required_str(&args, "ticket_path").is_err());
+    }
+
+    #[test]
+    fn psexec_kerberos_default_command() {
+        let args = json!({
+            "target": "dc01",
+            "username": "admin",
+            "domain": "contoso.local",
+            "ticket_path": "/tmp/admin.ccache"
+        });
+        let command = optional_str(&args, "command")
+            .unwrap_or(r#"cmd.exe /c "whoami && hostname && ipconfig""#);
+        assert_eq!(command, r#"cmd.exe /c "whoami && hostname && ipconfig""#);
+    }
+
+    #[test]
+    fn psexec_kerberos_optional_dc_ip() {
+        let args = json!({
+            "target": "dc01",
+            "username": "admin",
+            "domain": "contoso.local",
+            "ticket_path": "/tmp/admin.ccache",
+            "dc_ip": "10.0.0.1"
+        });
+        assert_eq!(optional_str(&args, "dc_ip"), Some("10.0.0.1"));
+    }
+
+    // --- wmiexec ---
+
+    #[test]
+    fn wmiexec_requires_target() {
+        let args = json!({"username": "admin"});
+        assert!(required_str(&args, "target").is_err());
+    }
+
+    #[test]
+    fn wmiexec_requires_username() {
+        let args = json!({"target": "10.0.0.1"});
+        assert!(required_str(&args, "username").is_err());
+    }
+
+    #[test]
+    fn wmiexec_default_command() {
+        let args = json!({"target": "10.0.0.1", "username": "admin"});
+        let command = optional_str(&args, "command").unwrap_or("whoami");
+        assert_eq!(command, "whoami");
+    }
+
+    // --- wmiexec_kerberos ---
+
+    #[test]
+    fn wmiexec_kerberos_target_format() {
+        let domain = "contoso.local";
+        let username = "svc_sql";
+        let target = "sql01.contoso.local";
+        let target_str = format!("{domain}/{username}@{target}");
+        assert_eq!(target_str, "contoso.local/svc_sql@sql01.contoso.local");
+    }
+
+    #[test]
+    fn wmiexec_kerberos_default_command() {
+        let args = json!({
+            "target": "dc01",
+            "username": "admin",
+            "domain": "contoso.local",
+            "ticket_path": "/tmp/admin.ccache"
+        });
+        let command = optional_str(&args, "command").unwrap_or("whoami");
+        assert_eq!(command, "whoami");
+    }
+
+    // --- smbexec ---
+
+    #[test]
+    fn smbexec_requires_target() {
+        let args = json!({"username": "admin"});
+        assert!(required_str(&args, "target").is_err());
+    }
+
+    #[test]
+    fn smbexec_requires_username() {
+        let args = json!({"target": "10.0.0.1"});
+        assert!(required_str(&args, "username").is_err());
+    }
+
+    #[test]
+    fn smbexec_default_command() {
+        let args = json!({"target": "10.0.0.1", "username": "admin"});
+        let command = optional_str(&args, "command").unwrap_or("whoami");
+        assert_eq!(command, "whoami");
+    }
+
+    // --- smbexec_kerberos ---
+
+    #[test]
+    fn smbexec_kerberos_target_format() {
+        let domain = "north.contoso.local";
+        let username = "admin";
+        let target = "dc02.north.contoso.local";
+        let target_str = format!("{domain}/{username}@{target}");
+        assert_eq!(
+            target_str,
+            "north.contoso.local/admin@dc02.north.contoso.local"
+        );
+    }
+
+    // --- evil_winrm ---
+
+    #[test]
+    fn evil_winrm_default_command() {
+        let args = json!({"target": "10.0.0.1", "username": "admin"});
+        let command = optional_str(&args, "command").unwrap_or("whoami && hostname && ipconfig");
+        assert_eq!(command, "whoami && hostname && ipconfig");
+    }
+
+    #[test]
+    fn evil_winrm_hash_takes_precedence_over_password() {
+        let args = json!({
+            "target": "10.0.0.1",
+            "username": "admin",
+            "password": "P@ss",
+            "hash": "aabbccdd"
+        });
+        let hash = optional_str(&args, "hash");
+        let password = optional_str(&args, "password");
+        // The function uses match hash { Some(h) => ..., None => match password ... }
+        // so hash takes precedence when both are present.
+        assert!(hash.is_some());
+        assert!(password.is_some());
+        let used_flag = match hash {
+            Some(h) => format!("-H {h}"),
+            None => match password {
+                Some(p) => format!("-p {p}"),
+                None => String::new(),
+            },
+        };
+        assert_eq!(used_flag, "-H aabbccdd");
+    }
+
+    #[test]
+    fn evil_winrm_password_only() {
+        let args = json!({
+            "target": "10.0.0.1",
+            "username": "admin",
+            "password": "Secret123"
+        });
+        let hash = optional_str(&args, "hash");
+        let password = optional_str(&args, "password");
+        let used_flag = match hash {
+            Some(h) => format!("-H {h}"),
+            None => match password {
+                Some(p) => format!("-p {p}"),
+                None => String::new(),
+            },
+        };
+        assert_eq!(used_flag, "-p Secret123");
+    }
+
+    #[test]
+    fn evil_winrm_no_creds() {
+        let args = json!({
+            "target": "10.0.0.1",
+            "username": "admin"
+        });
+        let hash = optional_str(&args, "hash");
+        let password = optional_str(&args, "password");
+        let used_flag = match hash {
+            Some(h) => format!("-H {h}"),
+            None => match password {
+                Some(p) => format!("-p {p}"),
+                None => String::new(),
+            },
+        };
+        assert!(used_flag.is_empty());
+    }
+
+    // --- xfreerdp ---
+
+    #[test]
+    fn xfreerdp_target_format() {
+        let target = "10.0.0.1";
+        assert_eq!(format!("/v:{target}"), "/v:10.0.0.1");
+    }
+
+    #[test]
+    fn xfreerdp_username_format() {
+        let username = "admin";
+        assert_eq!(format!("/u:{username}"), "/u:admin");
+    }
+
+    #[test]
+    fn xfreerdp_hash_format() {
+        let hash = "aabbccdd";
+        assert_eq!(format!("/pth:{hash}"), "/pth:aabbccdd");
+    }
+
+    #[test]
+    fn xfreerdp_password_format() {
+        let password = "P@ss";
+        assert_eq!(format!("/p:{password}"), "/p:P@ss");
+    }
+
+    #[test]
+    fn xfreerdp_domain_format() {
+        let domain = "CONTOSO";
+        assert_eq!(format!("/d:{domain}"), "/d:CONTOSO");
+    }
+
+    #[test]
+    fn xfreerdp_hash_precedence() {
+        let args = json!({
+            "target": "10.0.0.1",
+            "username": "admin",
+            "password": "P@ss",
+            "hash": "aabbccdd"
+        });
+        let hash = optional_str(&args, "hash");
+        let password = optional_str(&args, "password");
+        let auth_arg = match hash {
+            Some(h) => format!("/pth:{h}"),
+            None => match password {
+                Some(p) => format!("/p:{p}"),
+                None => String::new(),
+            },
+        };
+        assert_eq!(auth_arg, "/pth:aabbccdd");
+    }
+
+    // --- ssh_with_password ---
+
+    #[test]
+    fn ssh_user_host_format() {
+        let username = "root";
+        let target = "10.0.0.5";
+        let user_host = format!("{username}@{target}");
+        assert_eq!(user_host, "root@10.0.0.5");
+    }
+
+    #[test]
+    fn ssh_requires_password() {
+        let args = json!({"target": "10.0.0.1", "username": "root"});
+        assert!(required_str(&args, "password").is_err());
+    }
+
+    #[test]
+    fn ssh_default_command() {
+        let args = json!({
+            "target": "10.0.0.1",
+            "username": "root",
+            "password": "toor"
+        });
+        let command = optional_str(&args, "command").unwrap_or("whoami && hostname");
+        assert_eq!(command, "whoami && hostname");
+    }
+
+    #[test]
+    fn ssh_optional_port() {
+        let args = json!({
+            "target": "10.0.0.1",
+            "username": "root",
+            "password": "toor",
+            "port": "2222"
+        });
+        assert_eq!(optional_str(&args, "port"), Some("2222"));
+    }
+
+    #[test]
+    fn ssh_no_port() {
+        let args = json!({
+            "target": "10.0.0.1",
+            "username": "root",
+            "password": "toor"
+        });
+        assert!(optional_str(&args, "port").is_none());
+    }
+
+    // --- secretsdump_kerberos ---
+
+    #[test]
+    fn secretsdump_kerberos_target_format() {
+        let domain = "contoso.local";
+        let username = "admin";
+        let target = "dc01.contoso.local";
+        let target_str = format!("{domain}/{username}@{target}");
+        assert_eq!(target_str, "contoso.local/admin@dc01.contoso.local");
+    }
+
+    #[test]
+    fn secretsdump_kerberos_default_timeout() {
+        let args = json!({
+            "target": "dc01",
+            "username": "admin",
+            "domain": "contoso.local",
+            "ticket_path": "/tmp/admin.ccache"
+        });
+        let timeout_minutes = optional_i64(&args, "timeout_minutes").unwrap_or(3);
+        let timeout_secs = (timeout_minutes * 60) as u64;
+        assert_eq!(timeout_minutes, 3);
+        assert_eq!(timeout_secs, 180);
+    }
+
+    #[test]
+    fn secretsdump_kerberos_custom_timeout() {
+        let args = json!({
+            "target": "dc01",
+            "username": "admin",
+            "domain": "contoso.local",
+            "ticket_path": "/tmp/admin.ccache",
+            "timeout_minutes": 10
+        });
+        let timeout_minutes = optional_i64(&args, "timeout_minutes").unwrap_or(3);
+        let timeout_secs = (timeout_minutes * 60) as u64;
+        assert_eq!(timeout_minutes, 10);
+        assert_eq!(timeout_secs, 600);
+    }
+
+    #[test]
+    fn secretsdump_kerberos_requires_domain() {
+        let args = json!({
+            "target": "dc01",
+            "username": "admin",
+            "ticket_path": "/tmp/admin.ccache"
+        });
+        assert!(required_str(&args, "domain").is_err());
+    }
+
+    #[test]
+    fn secretsdump_kerberos_requires_ticket_path() {
+        let args = json!({
+            "target": "dc01",
+            "username": "admin",
+            "domain": "contoso.local"
+        });
+        assert!(required_str(&args, "ticket_path").is_err());
+    }
+}

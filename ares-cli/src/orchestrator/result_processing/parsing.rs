@@ -157,3 +157,255 @@ pub(crate) fn has_domain_admin_indicator(payload: &Value) -> bool {
     }
     false
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    // ── has_domain_admin_indicator ──
+
+    #[test]
+    fn domain_admin_flag_true() {
+        let payload = json!({"has_domain_admin": true});
+        assert!(has_domain_admin_indicator(&payload));
+    }
+
+    #[test]
+    fn domain_admin_flag_false() {
+        let payload = json!({"has_domain_admin": false});
+        assert!(!has_domain_admin_indicator(&payload));
+    }
+
+    #[test]
+    fn domain_admin_flag_missing() {
+        let payload = json!({"some_field": "value"});
+        assert!(!has_domain_admin_indicator(&payload));
+    }
+
+    #[test]
+    fn domain_admin_empty_payload() {
+        let payload = json!({});
+        assert!(!has_domain_admin_indicator(&payload));
+    }
+
+    #[test]
+    fn domain_admin_krbtgt_hash() {
+        let payload = json!({
+            "hashes": [
+                {"username": "krbtgt", "hash_value": "aad3b435..."}
+            ]
+        });
+        assert!(has_domain_admin_indicator(&payload));
+    }
+
+    #[test]
+    fn domain_admin_krbtgt_mixed_case() {
+        let payload = json!({
+            "hashes": [
+                {"username": "KRBTGT", "hash_value": "aad3b435..."}
+            ]
+        });
+        assert!(has_domain_admin_indicator(&payload));
+    }
+
+    #[test]
+    fn domain_admin_non_krbtgt_hashes() {
+        let payload = json!({
+            "hashes": [
+                {"username": "admin", "hash_value": "abc123"}
+            ]
+        });
+        assert!(!has_domain_admin_indicator(&payload));
+    }
+
+    #[test]
+    fn domain_admin_empty_hashes_array() {
+        let payload = json!({"hashes": []});
+        assert!(!has_domain_admin_indicator(&payload));
+    }
+
+    #[test]
+    fn domain_admin_flag_not_bool() {
+        let payload = json!({"has_domain_admin": "true"});
+        assert!(!has_domain_admin_indicator(&payload));
+    }
+
+    #[test]
+    fn domain_admin_flag_and_krbtgt_both() {
+        let payload = json!({
+            "has_domain_admin": true,
+            "hashes": [{"username": "krbtgt", "hash_value": "abc"}]
+        });
+        assert!(has_domain_admin_indicator(&payload));
+    }
+
+    // ── resolve_parent_id ──
+
+    fn make_credential(id: &str, username: &str, domain: &str, step: i32) -> Credential {
+        Credential {
+            id: id.to_string(),
+            username: username.to_string(),
+            password: String::new(),
+            domain: domain.to_string(),
+            source: String::new(),
+            discovered_at: None,
+            is_admin: false,
+            parent_id: None,
+            attack_step: step,
+        }
+    }
+
+    fn make_hash(id: &str, username: &str, domain: &str, step: i32) -> Hash {
+        Hash {
+            id: id.to_string(),
+            username: username.to_string(),
+            hash_value: "deadbeef".to_string(),
+            hash_type: "ntlm".to_string(),
+            domain: domain.to_string(),
+            cracked_password: None,
+            source: String::new(),
+            discovered_at: None,
+            parent_id: None,
+            attack_step: step,
+            aes_key: None,
+        }
+    }
+
+    #[test]
+    fn resolve_parent_no_match() {
+        let (parent, step) = resolve_parent_id(&[], &[], "smb", "admin", "CORP", None, None);
+        assert!(parent.is_none());
+        assert_eq!(step, 0);
+    }
+
+    #[test]
+    fn resolve_parent_cracked_source_matches_hash() {
+        let hashes = vec![make_hash("h1", "admin", "CORP", 2)];
+        let (parent, step) =
+            resolve_parent_id(&[], &hashes, "cracked_ntlm", "admin", "CORP", None, None);
+        assert_eq!(parent.as_deref(), Some("h1"));
+        assert_eq!(step, 3);
+    }
+
+    #[test]
+    fn resolve_parent_cracked_case_insensitive() {
+        let hashes = vec![make_hash("h1", "Admin", "corp", 1)];
+        let (parent, step) =
+            resolve_parent_id(&[], &hashes, "cracked_pw", "admin", "CORP", None, None);
+        assert_eq!(parent.as_deref(), Some("h1"));
+        assert_eq!(step, 2);
+    }
+
+    #[test]
+    fn resolve_parent_cracked_empty_domain_matches() {
+        let hashes = vec![make_hash("h1", "admin", "CORP", 5)];
+        let (parent, step) = resolve_parent_id(&[], &hashes, "cracked_pw", "admin", "", None, None);
+        assert_eq!(parent.as_deref(), Some("h1"));
+        assert_eq!(step, 6);
+    }
+
+    #[test]
+    fn resolve_parent_input_user_maps_to_credential() {
+        let creds = vec![make_credential("c1", "alice", "CORP", 3)];
+        let (parent, step) = resolve_parent_id(
+            &creds,
+            &[],
+            "smb",
+            "bob",
+            "CORP",
+            Some("alice"),
+            Some("CORP"),
+        );
+        assert_eq!(parent.as_deref(), Some("c1"));
+        assert_eq!(step, 4);
+    }
+
+    #[test]
+    fn resolve_parent_input_user_same_as_discovered_skips() {
+        // When input user == discovered user, it's the same identity; no parent link.
+        let creds = vec![make_credential("c1", "admin", "CORP", 2)];
+        let (parent, step) = resolve_parent_id(
+            &creds,
+            &[],
+            "smb",
+            "admin",
+            "CORP",
+            Some("admin"),
+            Some("CORP"),
+        );
+        assert!(parent.is_none());
+        assert_eq!(step, 0);
+    }
+
+    #[test]
+    fn resolve_parent_input_user_falls_back_to_hash() {
+        let hashes = vec![make_hash("h1", "alice", "CORP", 1)];
+        let (parent, step) = resolve_parent_id(
+            &[],
+            &hashes,
+            "smb",
+            "bob",
+            "CORP",
+            Some("alice"),
+            Some("CORP"),
+        );
+        assert_eq!(parent.as_deref(), Some("h1"));
+        assert_eq!(step, 2);
+    }
+
+    #[test]
+    fn resolve_parent_input_user_empty_is_ignored() {
+        let creds = vec![make_credential("c1", "admin", "CORP", 1)];
+        let (parent, step) = resolve_parent_id(&creds, &[], "smb", "bob", "CORP", Some(""), None);
+        assert!(parent.is_none());
+        assert_eq!(step, 0);
+    }
+
+    #[test]
+    fn resolve_parent_cracked_preferred_over_input_user() {
+        let hashes = vec![make_hash("h1", "admin", "CORP", 2)];
+        let creds = vec![make_credential("c1", "alice", "CORP", 1)];
+        let (parent, step) = resolve_parent_id(
+            &creds,
+            &hashes,
+            "cracked_ntlm",
+            "admin",
+            "CORP",
+            Some("alice"),
+            Some("CORP"),
+        );
+        // cracked source matches hash first
+        assert_eq!(parent.as_deref(), Some("h1"));
+        assert_eq!(step, 3);
+    }
+
+    #[test]
+    fn resolve_parent_picks_last_matching_credential() {
+        let creds = vec![
+            make_credential("c1", "alice", "CORP", 1),
+            make_credential("c2", "alice", "CORP", 3),
+        ];
+        let (parent, step) = resolve_parent_id(
+            &creds,
+            &[],
+            "smb",
+            "bob",
+            "CORP",
+            Some("alice"),
+            Some("CORP"),
+        );
+        // .rev() means c2 is found first
+        assert_eq!(parent.as_deref(), Some("c2"));
+        assert_eq!(step, 4);
+    }
+
+    #[test]
+    fn resolve_parent_input_domain_empty_still_matches() {
+        let creds = vec![make_credential("c1", "alice", "CORP", 2)];
+        let (parent, step) =
+            resolve_parent_id(&creds, &[], "smb", "bob", "CORP", Some("alice"), Some(""));
+        assert_eq!(parent.as_deref(), Some("c1"));
+        assert_eq!(step, 3);
+    }
+}

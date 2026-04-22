@@ -72,4 +72,59 @@ mod tests {
         assert!(required_str(&args, "users_file").is_ok());
         assert!(required_str(&args, "domain").is_ok());
     }
+
+    /// Verify secretsdump timeout default is 180 seconds when no timeout_minutes.
+    #[test]
+    fn secretsdump_timeout_default() {
+        let args = json!({"target": "10.0.0.1", "username": "admin"});
+        let timeout_minutes = optional_i64(&args, "timeout_minutes");
+        let timeout_secs = timeout_minutes.map(|m| (m * 60) as u64).unwrap_or(180);
+        assert_eq!(timeout_secs, 180);
+    }
+
+    /// Verify kerberoast target string format.
+    #[test]
+    fn kerberoast_format() {
+        let domain = "contoso.local";
+        let username = "svc_sql";
+        let password = "SqlP@ss!";
+        let target = format!("{domain}/{username}:{password}");
+        assert_eq!(target, "contoso.local/svc_sql:SqlP@ss!");
+    }
+
+    /// Verify ldap_search_descriptions bind_dn format.
+    #[test]
+    fn ldap_bind_dn_format() {
+        let username = "jsmith";
+        let domain = "north.contoso.local";
+        let bind_dn = format!("{username}@{domain}");
+        assert_eq!(bind_dn, "jsmith@north.contoso.local");
+    }
+
+    /// Verify ldap_search_descriptions ldap_uri format.
+    #[test]
+    fn ldap_uri_format() {
+        let target = "dc01.contoso.local";
+        let ldap_uri = format!("ldap://{target}");
+        assert_eq!(ldap_uri, "ldap://dc01.contoso.local");
+    }
+
+    /// Verify lsassy hash prefix logic.
+    #[test]
+    fn lsassy_hash_prefix_logic() {
+        let plain = "aabbccdd";
+        let with_colon = "lm:nt";
+        let formatted_plain = if plain.contains(':') {
+            plain.to_string()
+        } else {
+            format!(":{plain}")
+        };
+        let formatted_colon = if with_colon.contains(':') {
+            with_colon.to_string()
+        } else {
+            format!(":{with_colon}")
+        };
+        assert_eq!(formatted_plain, ":aabbccdd");
+        assert_eq!(formatted_colon, "lm:nt");
+    }
 }

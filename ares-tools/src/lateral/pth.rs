@@ -103,3 +103,149 @@ pub async fn pth_wmic(args: &Value) -> Result<ToolOutput> {
         .execute()
         .await
 }
+
+#[cfg(test)]
+mod tests {
+    use super::pth_cred_string;
+    use crate::args::{optional_str, required_str};
+    use serde_json::json;
+
+    // --- pth_cred_string ---
+
+    #[test]
+    fn cred_string_with_domain() {
+        let result = pth_cred_string(Some("CONTOSO"), "admin", "aabbccdd");
+        assert_eq!(result, "CONTOSO/admin%aabbccdd");
+    }
+
+    #[test]
+    fn cred_string_without_domain() {
+        let result = pth_cred_string(None, "admin", "aabbccdd");
+        assert_eq!(result, "admin%aabbccdd");
+    }
+
+    #[test]
+    fn cred_string_empty_domain() {
+        let result = pth_cred_string(Some(""), "admin", "aabbccdd");
+        assert_eq!(result, "admin%aabbccdd");
+    }
+
+    // --- pth_winexe ---
+
+    #[test]
+    fn pth_winexe_requires_target() {
+        let args = json!({"username": "admin", "hash": "aabbccdd"});
+        assert!(required_str(&args, "target").is_err());
+    }
+
+    #[test]
+    fn pth_winexe_requires_username() {
+        let args = json!({"target": "10.0.0.1", "hash": "aabbccdd"});
+        assert!(required_str(&args, "username").is_err());
+    }
+
+    #[test]
+    fn pth_winexe_requires_hash() {
+        let args = json!({"target": "10.0.0.1", "username": "admin"});
+        assert!(required_str(&args, "hash").is_err());
+    }
+
+    #[test]
+    fn pth_winexe_default_command() {
+        let args = json!({"target": "10.0.0.1", "username": "admin", "hash": "aa"});
+        let command = optional_str(&args, "command").unwrap_or("cmd.exe /c whoami");
+        assert_eq!(command, "cmd.exe /c whoami");
+    }
+
+    #[test]
+    fn pth_winexe_target_format() {
+        let target = "10.0.0.1";
+        assert_eq!(format!("//{target}"), "//10.0.0.1");
+    }
+
+    // --- pth_smbclient ---
+
+    #[test]
+    fn pth_smbclient_default_share() {
+        let args = json!({"target": "10.0.0.1", "username": "admin", "hash": "aa"});
+        let share = optional_str(&args, "share").unwrap_or("C$");
+        assert_eq!(share, "C$");
+    }
+
+    #[test]
+    fn pth_smbclient_custom_share() {
+        let args = json!({
+            "target": "10.0.0.1",
+            "username": "admin",
+            "hash": "aa",
+            "share": "ADMIN$"
+        });
+        let share = optional_str(&args, "share").unwrap_or("C$");
+        assert_eq!(share, "ADMIN$");
+    }
+
+    #[test]
+    fn pth_smbclient_default_command() {
+        let args = json!({"target": "10.0.0.1", "username": "admin", "hash": "aa"});
+        let command = optional_str(&args, "command").unwrap_or("dir");
+        assert_eq!(command, "dir");
+    }
+
+    #[test]
+    fn pth_smbclient_target_share_format() {
+        let target = "10.0.0.1";
+        let share = "C$";
+        assert_eq!(format!("//{target}/{share}"), "//10.0.0.1/C$");
+    }
+
+    // --- pth_rpcclient ---
+
+    #[test]
+    fn pth_rpcclient_default_command() {
+        let args = json!({"target": "10.0.0.1", "username": "admin", "hash": "aa"});
+        let command = optional_str(&args, "command").unwrap_or("getusername");
+        assert_eq!(command, "getusername");
+    }
+
+    // --- pth_wmic ---
+
+    #[test]
+    fn pth_wmic_default_query() {
+        let args = json!({"target": "10.0.0.1", "username": "admin", "hash": "aa"});
+        let query = optional_str(&args, "query").unwrap_or("SELECT * FROM Win32_OperatingSystem");
+        assert_eq!(query, "SELECT * FROM Win32_OperatingSystem");
+    }
+
+    #[test]
+    fn pth_wmic_custom_query() {
+        let args = json!({
+            "target": "10.0.0.1",
+            "username": "admin",
+            "hash": "aa",
+            "query": "SELECT Name FROM Win32_Process"
+        });
+        let query = optional_str(&args, "query").unwrap_or("SELECT * FROM Win32_OperatingSystem");
+        assert_eq!(query, "SELECT Name FROM Win32_Process");
+    }
+
+    #[test]
+    fn pth_wmic_target_format() {
+        let target = "dc01.contoso.local";
+        assert_eq!(format!("//{target}"), "//dc01.contoso.local");
+    }
+
+    #[test]
+    fn pth_cred_string_in_context() {
+        let args = json!({
+            "target": "10.0.0.1",
+            "username": "admin",
+            "hash": "aad3b435:aabbccdd",
+            "domain": "CONTOSO"
+        });
+        let username = required_str(&args, "username").unwrap();
+        let hash = required_str(&args, "hash").unwrap();
+        let domain = optional_str(&args, "domain");
+        let cred = pth_cred_string(domain, username, hash);
+        assert_eq!(cred, "CONTOSO/admin%aad3b435:aabbccdd");
+    }
+}

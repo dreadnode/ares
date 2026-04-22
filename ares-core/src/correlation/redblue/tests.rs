@@ -768,3 +768,159 @@ fn new_custom_time_window() {
     let correlator = RedBlueCorrelator::new("/tmp/reports", Some(60));
     assert_eq!(correlator.time_window.num_minutes(), 60);
 }
+
+// -----------------------------------------------------------------------
+// recommend_detection — exhaustive per-technique checks
+// -----------------------------------------------------------------------
+
+#[test]
+fn recommend_detection_t1046_mentions_scanning() {
+    let activity = make_red_activity("T1046", "192.168.58.10", utc(12, 0));
+    let rec = RedBlueCorrelator::recommend_detection(&activity).unwrap();
+    assert!(rec.to_lowercase().contains("scanning"));
+}
+
+#[test]
+fn recommend_detection_t1110_mentions_authentication() {
+    let activity = make_red_activity("T1110", "192.168.58.10", utc(12, 0));
+    let rec = RedBlueCorrelator::recommend_detection(&activity).unwrap();
+    assert!(rec.to_lowercase().contains("authentication"));
+}
+
+#[test]
+fn recommend_detection_t1003_mentions_lsass() {
+    let activity = make_red_activity("T1003", "192.168.58.10", utc(12, 0));
+    let rec = RedBlueCorrelator::recommend_detection(&activity).unwrap();
+    assert!(rec.contains("LSASS"));
+}
+
+#[test]
+fn recommend_detection_t1078_002_mentions_domain_admin() {
+    let activity = make_red_activity("T1078.002", "192.168.58.10", utc(12, 0));
+    let rec = RedBlueCorrelator::recommend_detection(&activity).unwrap();
+    assert!(rec.to_lowercase().contains("domain admin"));
+}
+
+#[test]
+fn recommend_detection_t1558_001_mentions_krbtgt() {
+    let activity = make_red_activity("T1558.001", "192.168.58.10", utc(12, 0));
+    let rec = RedBlueCorrelator::recommend_detection(&activity).unwrap();
+    assert!(rec.to_lowercase().contains("krbtgt"));
+}
+
+#[test]
+fn recommend_detection_t1021_002_mentions_smb() {
+    let activity = make_red_activity("T1021.002", "192.168.58.10", utc(12, 0));
+    let rec = RedBlueCorrelator::recommend_detection(&activity).unwrap();
+    assert!(rec.to_lowercase().contains("smb"));
+}
+
+#[test]
+fn recommend_detection_unknown_technique_returns_none() {
+    let activity = make_red_activity("T9999", "192.168.58.10", utc(12, 0));
+    assert!(RedBlueCorrelator::recommend_detection(&activity).is_none());
+}
+
+// -----------------------------------------------------------------------
+// determine_gap_reason — additional edge cases
+// -----------------------------------------------------------------------
+
+#[test]
+fn determine_gap_reason_empty_detections_list() {
+    let activity = make_red_activity("T1046", "192.168.58.10", utc(12, 0));
+    let reason = RedBlueCorrelator::determine_gap_reason(&activity, &[]);
+    assert!(reason.contains("No alert rules configured for technique T1046"));
+}
+
+#[test]
+fn determine_gap_reason_technique_matches_via_parent() {
+    // Activity uses subtechnique, detection has parent -- should recognize as matching
+    let activity = make_red_activity("T1078.002", "192.168.58.10", utc(12, 0));
+    let detections = vec![make_blue_detection(
+        "Valid Accounts Alert",
+        "T1078",
+        "192.168.58.20",
+        utc(14, 0),
+    )];
+    let reason = RedBlueCorrelator::determine_gap_reason(&activity, &detections);
+    assert!(reason.contains("Alert exists but did not trigger"));
+}
+
+// -----------------------------------------------------------------------
+// correlate — additional edge cases
+// -----------------------------------------------------------------------
+
+#[test]
+fn correlate_false_positive_rate_zero_when_no_detections_in_window() {
+    let correlator = RedBlueCorrelator::new("/tmp", Some(5));
+
+    // Red activity at 12:00, blue detection way outside the time window
+    let red = vec![make_red_activity("T1003", "192.168.58.10", utc(12, 0))];
+    let blue = vec![make_blue_detection(
+        "Late Alert",
+        "T1046",
+        "192.168.58.20",
+        utc(15, 0), // 3 hours later, well outside window
+    )];
+
+    let report = correlator.correlate(&red, &blue, "op-fpzero");
+    // Detection is outside the time window, so false_positive_rate should be 0.0
+    assert_eq!(report.false_positive_rate, 0.0);
+}
+
+#[test]
+fn correlate_same_technique_different_ips_matches_by_technique() {
+    let correlator = RedBlueCorrelator::new("/tmp", None);
+
+    // Same technique but different IPs -- should still match via technique
+    let red = vec![make_red_activity("T1003", "192.168.58.10", utc(12, 0))];
+    let blue = vec![make_blue_detection(
+        "Cred Alert",
+        "T1003",
+        "10.0.0.1", // Completely different IP
+        utc(12, 1),
+    )];
+
+    let report = correlator.correlate(&red, &blue, "op-diffip");
+    assert_eq!(report.matched_activities, 1);
+    assert!(report.matches[0].technique_match);
+    assert!(!report.matches[0].target_match);
+}
+
+#[test]
+fn correlate_prefers_higher_confidence_match() {
+    let correlator = RedBlueCorrelator::new("/tmp", None);
+
+    let red = vec![make_red_activity("T1003", "192.168.58.10", utc(12, 0))];
+    let blue = vec![
+        // Weak match: only time proximity, no technique or IP match
+        make_blue_detection("Unrelated", "T1046", "10.0.0.1", utc(12, 0)),
+        // Strong match: technique + IP + close time
+        make_blue_detection("Cred Alert", "T1003", "192.168.58.10", utc(12, 0)),
+    ];
+
+    let report = correlator.correlate(&red, &blue, "op-prefer");
+    assert_eq!(report.matched_activities, 1);
+    assert_eq!(report.matches[0].blue_detection.alert_name, "Cred Alert");
+    assert!(report.matches[0].confidence >= 0.8);
+}
+
+#[test]
+fn correlate_gaps_include_recommended_detection() {
+    let correlator = RedBlueCorrelator::new("/tmp", None);
+
+    // T1046 with no matching detections should produce a gap with a recommendation
+    let red = vec![make_red_activity("T1046", "192.168.58.20", utc(12, 0))];
+
+    let report = correlator.correlate(&red, &[], "op-gaprec");
+    assert_eq!(report.gaps.len(), 1);
+    let rec = report.gaps[0].recommended_detection.as_ref().unwrap();
+    assert!(rec.to_lowercase().contains("scanning"));
+}
+
+#[test]
+fn correlate_red_operation_id_propagated() {
+    let correlator = RedBlueCorrelator::new("/tmp", None);
+    let report = correlator.correlate(&[], &[], "my-custom-op-id");
+    assert_eq!(report.red_operation_id, "my-custom-op-id");
+}
