@@ -840,4 +840,48 @@ mod tests {
             credentials::impacket_target(None, "admin", Some("P@ssw0rd!"), "192.168.58.10");
         assert_eq!(target, "admin:P@ssw0rd!@192.168.58.10");
     }
+
+    // ── domain_to_base_dn edge cases ──────────────────────────────────
+
+    #[test]
+    fn domain_to_base_dn_empty_string() {
+        assert_eq!(domain_to_base_dn(""), "DC=");
+    }
+
+    #[test]
+    fn domain_to_base_dn_child_domain() {
+        assert_eq!(
+            domain_to_base_dn("child.contoso.local"),
+            "DC=child,DC=contoso,DC=local"
+        );
+    }
+
+    // ── adminsd_holder_dn with nested domains ─────────────────────────
+
+    #[test]
+    fn adminsd_holder_dn_nested_domain() {
+        let base_dn = domain_to_base_dn("child.contoso.local");
+        let adminsd_dn = format!("CN=AdminSDHolder,CN=System,{base_dn}");
+        assert_eq!(
+            adminsd_dn,
+            "CN=AdminSDHolder,CN=System,DC=child,DC=contoso,DC=local"
+        );
+    }
+
+    // ── sharpgpoabuse action_flag formatting ──────────────────────────
+
+    #[test]
+    fn sharpgpoabuse_custom_action_flag() {
+        let args = json!({
+            "gpo_name": "Default Domain Policy",
+            "domain": "contoso.local",
+            "username": "admin",
+            "password": "P@ssw0rd!",
+            "dc_ip": "192.168.58.10",
+            "action": "AddComputerTask"
+        });
+        let action = optional_str(&args, "action").unwrap_or("AddLocalAdmin");
+        let action_flag = format!("--{action}");
+        assert_eq!(action_flag, "--AddComputerTask");
+    }
 }

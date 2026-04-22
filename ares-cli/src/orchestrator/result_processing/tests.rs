@@ -1,4 +1,8 @@
+use super::admin_checks::{
+    extract_ip_from_line, has_golden_ticket_indicator, parse_pwned_line, resolve_da_path,
+};
 use super::parsing::{has_domain_admin_indicator, parse_discoveries, resolve_parent_id};
+use super::timeline::{credential_techniques, hash_techniques, is_critical_hash};
 use ares_core::models::{Credential, Hash};
 use serde_json::json;
 
@@ -663,4 +667,386 @@ fn parse_shares_with_comment() {
     let parsed = parse_discoveries(&payload);
     assert_eq!(parsed.shares.len(), 1);
     assert_eq!(parsed.shares[0].comment, "Logon server share");
+}
+
+// --- parse_pwned_line tests ---
+
+#[test]
+fn pwned_line_standard_format() {
+    let line = "[+] CONTOSO\\admin:P@ssw0rd! (Pwn3d!)";
+    let result = parse_pwned_line(line);
+    assert_eq!(result, Some(("contoso".to_string(), "admin".to_string())));
+}
+
+#[test]
+fn pwned_line_without_password() {
+    let line = "[+] CONTOSO\\admin (Pwn3d!)";
+    let result = parse_pwned_line(line);
+    assert_eq!(result, Some(("contoso".to_string(), "admin".to_string())));
+}
+
+#[test]
+fn pwned_line_with_ip_prefix() {
+    let line = "SMB 192.168.58.10 [+] CONTOSO\\svc_sql:Summer2024! (Pwn3d!)";
+    let result = parse_pwned_line(line);
+    assert_eq!(result, Some(("contoso".to_string(), "svc_sql".to_string())));
+}
+
+#[test]
+fn pwned_line_no_pwn3d_marker() {
+    let line = "[+] CONTOSO\\admin:P@ssw0rd!";
+    assert_eq!(parse_pwned_line(line), None);
+}
+
+#[test]
+fn pwned_line_no_plus_marker() {
+    let line = "CONTOSO\\admin:P@ssw0rd! (Pwn3d!)";
+    assert_eq!(parse_pwned_line(line), None);
+}
+
+#[test]
+fn pwned_line_empty_string() {
+    assert_eq!(parse_pwned_line(""), None);
+}
+
+#[test]
+fn pwned_line_no_backslash() {
+    let line = "[+] admin:P@ssw0rd! (Pwn3d!)";
+    assert_eq!(parse_pwned_line(line), None);
+}
+
+#[test]
+fn pwned_line_empty_domain() {
+    let line = "[+] \\admin:P@ssw0rd! (Pwn3d!)";
+    assert_eq!(parse_pwned_line(line), None);
+}
+
+#[test]
+fn pwned_line_empty_username() {
+    let line = "[+] CONTOSO\\:P@ssw0rd! (Pwn3d!)";
+    assert_eq!(parse_pwned_line(line), None);
+}
+
+#[test]
+fn pwned_line_domain_lowercased() {
+    let line = "[+] FABRIKAM.LOCAL\\Administrator:Pass1 (Pwn3d!)";
+    let result = parse_pwned_line(line);
+    assert_eq!(
+        result,
+        Some(("fabrikam.local".to_string(), "Administrator".to_string()))
+    );
+}
+
+#[test]
+fn pwned_line_username_with_special_chars() {
+    let line = "[+] CONTOSO\\svc_web$:P@ss! (Pwn3d!)";
+    let result = parse_pwned_line(line);
+    assert_eq!(
+        result,
+        Some(("contoso".to_string(), "svc_web$".to_string()))
+    );
+}
+
+// --- extract_ip_from_line tests ---
+
+#[test]
+fn extract_ip_basic() {
+    let line = "SMB 192.168.58.10 445 DC01 [+] CONTOSO\\admin (Pwn3d!)";
+    assert_eq!(
+        extract_ip_from_line(line),
+        Some("192.168.58.10".to_string())
+    );
+}
+
+#[test]
+fn extract_ip_no_ip_present() {
+    let line = "[+] CONTOSO\\admin:P@ssw0rd! (Pwn3d!)";
+    assert_eq!(extract_ip_from_line(line), None);
+}
+
+#[test]
+fn extract_ip_empty_string() {
+    assert_eq!(extract_ip_from_line(""), None);
+}
+
+#[test]
+fn extract_ip_invalid_octets() {
+    let line = "address 999.999.999.999 is invalid";
+    assert_eq!(extract_ip_from_line(line), None);
+}
+
+#[test]
+fn extract_ip_not_enough_octets() {
+    let line = "host 192.168.58 partial";
+    assert_eq!(extract_ip_from_line(line), None);
+}
+
+#[test]
+fn extract_ip_first_match_returned() {
+    let line = "10.0.0.1 and 192.168.1.1 are both IPs";
+    assert_eq!(extract_ip_from_line(line), Some("10.0.0.1".to_string()));
+}
+
+#[test]
+fn extract_ip_boundary_values() {
+    let line = "host 0.0.0.0 and 255.255.255.255";
+    assert_eq!(extract_ip_from_line(line), Some("0.0.0.0".to_string()));
+}
+
+// --- has_golden_ticket_indicator tests ---
+
+#[test]
+fn golden_ticket_indicator_present() {
+    let text = "Saving ticket in administrator.ccache";
+    assert!(has_golden_ticket_indicator(text));
+}
+
+#[test]
+fn golden_ticket_indicator_missing_saving() {
+    let text = "Wrote ticket to administrator.ccache";
+    assert!(!has_golden_ticket_indicator(text));
+}
+
+#[test]
+fn golden_ticket_indicator_missing_ccache() {
+    let text = "Saving ticket in administrator.kirbi";
+    assert!(!has_golden_ticket_indicator(text));
+}
+
+#[test]
+fn golden_ticket_indicator_empty() {
+    assert!(!has_golden_ticket_indicator(""));
+}
+
+#[test]
+fn golden_ticket_indicator_both_present_not_adjacent() {
+    let text = "Saving ticket in /tmp/krbtgt@CONTOSO.LOCAL.ccache\nDone";
+    assert!(has_golden_ticket_indicator(text));
+}
+
+// --- resolve_da_path tests ---
+
+#[test]
+fn da_path_explicit_flag_with_path() {
+    let payload = json!({
+        "has_domain_admin": true,
+        "domain_admin_path": "secretsdump -> Administrator"
+    });
+    assert_eq!(
+        resolve_da_path(&payload),
+        Some("secretsdump -> Administrator".to_string())
+    );
+}
+
+#[test]
+fn da_path_explicit_flag_without_path() {
+    let payload = json!({"has_domain_admin": true});
+    assert_eq!(resolve_da_path(&payload), None);
+}
+
+#[test]
+fn da_path_no_flag_defaults_to_krbtgt() {
+    let payload = json!({});
+    assert_eq!(
+        resolve_da_path(&payload),
+        Some("secretsdump -> krbtgt hash".to_string())
+    );
+}
+
+#[test]
+fn da_path_false_flag_defaults_to_krbtgt() {
+    let payload = json!({"has_domain_admin": false});
+    assert_eq!(
+        resolve_da_path(&payload),
+        Some("secretsdump -> krbtgt hash".to_string())
+    );
+}
+
+#[test]
+fn da_path_null_flag_defaults_to_krbtgt() {
+    let payload = json!({"has_domain_admin": null});
+    assert_eq!(
+        resolve_da_path(&payload),
+        Some("secretsdump -> krbtgt hash".to_string())
+    );
+}
+
+// --- credential_techniques tests ---
+
+#[test]
+fn credential_techniques_admin_base() {
+    let t = credential_techniques("manual", true);
+    assert_eq!(t, vec!["T1078"]);
+}
+
+#[test]
+fn credential_techniques_non_admin_base() {
+    let t = credential_techniques("manual", false);
+    assert_eq!(t, vec!["T1552"]);
+}
+
+#[test]
+fn credential_techniques_kerberoast() {
+    let t = credential_techniques("kerberoast", false);
+    assert!(t.contains(&"T1558.003".to_string()));
+    assert!(t.contains(&"T1552".to_string()));
+}
+
+#[test]
+fn credential_techniques_asrep() {
+    let t = credential_techniques("asreproast", false);
+    assert!(t.contains(&"T1558.004".to_string()));
+}
+
+#[test]
+fn credential_techniques_as_rep_hyphenated() {
+    let t = credential_techniques("as-rep roast", false);
+    assert!(t.contains(&"T1558.004".to_string()));
+}
+
+#[test]
+fn credential_techniques_cracked() {
+    let t = credential_techniques("cracked:hashcat", false);
+    assert!(t.contains(&"T1110".to_string()));
+}
+
+#[test]
+fn credential_techniques_multiple_sources() {
+    let t = credential_techniques("kerberoast_cracked", false);
+    assert!(t.contains(&"T1552".to_string()));
+    assert!(t.contains(&"T1558.003".to_string()));
+    assert!(t.contains(&"T1110".to_string()));
+}
+
+#[test]
+fn credential_techniques_case_insensitive() {
+    let t = credential_techniques("KERBEROAST", false);
+    assert!(t.contains(&"T1558.003".to_string()));
+}
+
+#[test]
+fn credential_techniques_empty_source() {
+    let t = credential_techniques("", false);
+    assert_eq!(t, vec!["T1552"]);
+}
+
+// --- hash_techniques tests ---
+
+#[test]
+fn hash_techniques_base() {
+    let t = hash_techniques("aabbccdd", "ntlm", "manual");
+    assert_eq!(t, vec!["T1003"]);
+}
+
+#[test]
+fn hash_techniques_kerberoast_by_hash_value() {
+    let t = hash_techniques("$krb5tgs$23$*svc_sql$", "unknown", "manual");
+    assert!(t.contains(&"T1558.003".to_string()));
+}
+
+#[test]
+fn hash_techniques_kerberoast_by_hash_type() {
+    let t = hash_techniques("aabb", "kerberoast", "manual");
+    assert!(t.contains(&"T1558.003".to_string()));
+}
+
+#[test]
+fn hash_techniques_kerberoast_by_source() {
+    let t = hash_techniques("aabb", "unknown", "kerberoast_output");
+    assert!(t.contains(&"T1558.003".to_string()));
+}
+
+#[test]
+fn hash_techniques_asrep_by_hash_value() {
+    let t = hash_techniques("$krb5asrep$23$jdoe@", "unknown", "manual");
+    assert!(t.contains(&"T1558.004".to_string()));
+}
+
+#[test]
+fn hash_techniques_asrep_by_hash_type() {
+    let t = hash_techniques("aabb", "asrep", "manual");
+    assert!(t.contains(&"T1558.004".to_string()));
+}
+
+#[test]
+fn hash_techniques_asrep_by_source() {
+    let t = hash_techniques("aabb", "unknown", "asrep_roast");
+    assert!(t.contains(&"T1558.004".to_string()));
+}
+
+#[test]
+fn hash_techniques_ntlm_secretsdump() {
+    let t = hash_techniques("aabb", "ntlm", "secretsdump");
+    assert!(t.contains(&"T1003.006".to_string()));
+}
+
+#[test]
+fn hash_techniques_ntlm_dcsync() {
+    let t = hash_techniques("aabb", "ntlm", "dcsync");
+    assert!(t.contains(&"T1003.006".to_string()));
+}
+
+#[test]
+fn hash_techniques_ntlm_without_dump_source() {
+    let t = hash_techniques("aabb", "ntlm", "manual");
+    assert!(!t.contains(&"T1003.006".to_string()));
+}
+
+#[test]
+fn hash_techniques_non_ntlm_secretsdump() {
+    // hash_type is not ntlm, so T1003.006 should not appear even with secretsdump source
+    let t = hash_techniques("aabb", "des", "secretsdump");
+    assert!(!t.contains(&"T1003.006".to_string()));
+}
+
+#[test]
+fn hash_techniques_tgs_rep_type() {
+    let t = hash_techniques("aabb", "tgs-rep", "manual");
+    assert!(t.contains(&"T1558.003".to_string()));
+}
+
+#[test]
+fn hash_techniques_krb5asrep_type() {
+    let t = hash_techniques("aabb", "krb5asrep", "manual");
+    assert!(t.contains(&"T1558.004".to_string()));
+}
+
+#[test]
+fn hash_techniques_as_rep_hyphenated_source() {
+    let t = hash_techniques("aabb", "unknown", "as-rep_roast");
+    assert!(t.contains(&"T1558.004".to_string()));
+}
+
+// --- is_critical_hash tests ---
+
+#[test]
+fn critical_hash_krbtgt() {
+    assert!(is_critical_hash("krbtgt"));
+}
+
+#[test]
+fn critical_hash_administrator() {
+    assert!(is_critical_hash("administrator"));
+}
+
+#[test]
+fn critical_hash_case_insensitive() {
+    assert!(is_critical_hash("KRBTGT"));
+    assert!(is_critical_hash("Administrator"));
+}
+
+#[test]
+fn critical_hash_regular_user() {
+    assert!(!is_critical_hash("jdoe"));
+}
+
+#[test]
+fn critical_hash_empty() {
+    assert!(!is_critical_hash(""));
+}
+
+#[test]
+fn critical_hash_partial_match() {
+    assert!(!is_critical_hash("krbtgt_backup"));
+    assert!(!is_critical_hash("admin"));
 }

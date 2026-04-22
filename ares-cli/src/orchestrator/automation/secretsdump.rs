@@ -9,6 +9,36 @@ use tracing::{info, warn};
 use crate::orchestrator::dispatcher::Dispatcher;
 use crate::orchestrator::state::*;
 
+/// Check if a DC domain is a valid secretsdump target for a given credential domain.
+/// Allows same domain, child domain, or parent domain.
+fn is_valid_secretsdump_target(dc_domain: &str, cred_domain: &str) -> bool {
+    let d = dc_domain.to_lowercase();
+    let c = cred_domain.to_lowercase();
+    d == c || d.ends_with(&format!(".{c}")) || c.ends_with(&format!(".{d}"))
+}
+
+/// Check if a child domain is a child of a parent domain for PTH escalation.
+fn is_child_of(child: &str, parent: &str) -> bool {
+    let c = child.to_lowercase();
+    let p = parent.to_lowercase();
+    c != p && c.ends_with(&format!(".{p}"))
+}
+
+/// Build secretsdump dedup key.
+fn secretsdump_dedup_key(ip: &str, domain: &str, username: &str) -> String {
+    format!(
+        "{}:{}:{}",
+        ip,
+        domain.to_lowercase(),
+        username.to_lowercase()
+    )
+}
+
+/// Build PTH secretsdump dedup key.
+fn pth_secretsdump_dedup_key(dc_ip: &str, parent_domain: &str) -> String {
+    format!("{}:{}:pth_admin", dc_ip, parent_domain)
+}
+
 /// Dispatches secretsdump when admin credentials are detected.
 /// Interval: 30s. Matches Python `_auto_local_admin_secretsdump`.
 pub async fn auto_local_admin_secretsdump(
@@ -54,20 +84,9 @@ pub async fn auto_local_admin_secretsdump(
 
             let mut items = Vec::new();
             for cred in &creds {
-                let cred_domain = cred.domain.to_lowercase();
                 for (dc_domain, dc_ip) in state.domain_controllers.iter() {
-                    let d = dc_domain.to_lowercase();
-                    // Same domain, child domain, or parent domain
-                    if d == cred_domain
-                        || d.ends_with(&format!(".{cred_domain}"))
-                        || cred_domain.ends_with(&format!(".{d}"))
-                    {
-                        let dedup = format!(
-                            "{}:{}:{}",
-                            dc_ip,
-                            cred.domain.to_lowercase(),
-                            cred.username.to_lowercase()
-                        );
+                    if is_valid_secretsdump_target(dc_domain, &cred.domain) {
+                        let dedup = secretsdump_dedup_key(dc_ip, &cred.domain, &cred.username);
                         if !state.is_processed(DEDUP_SECRETSDUMP, &dedup) {
                             items.push((dedup, dc_ip.clone(), cred.clone()));
                         }
@@ -117,15 +136,15 @@ pub async fn auto_local_admin_secretsdump(
                 let dom = dominated.to_lowercase();
                 // Find parent domain DCs: domains where the child ends with ".{parent}"
                 for (dc_domain, dc_ip) in state.domain_controllers.iter() {
-                    let parent = dc_domain.to_lowercase();
-                    if parent != dom && dom.ends_with(&format!(".{parent}")) {
+                    if is_child_of(&dom, dc_domain) {
                         // Find Administrator NTLM hash from the dominated child domain
                         if let Some(hash) = state.hashes.iter().find(|h| {
                             h.username.to_lowercase() == "administrator"
                                 && h.hash_type.to_uppercase() == "NTLM"
                                 && h.domain.to_lowercase() == dom
                         }) {
-                            let dedup = format!("{}:{}:pth_admin", dc_ip, parent,);
+                            let parent = dc_domain.to_lowercase();
+                            let dedup = pth_secretsdump_dedup_key(dc_ip, &parent);
                             if !state.is_processed(DEDUP_SECRETSDUMP, &dedup) {
                                 items.push((
                                     dedup,
@@ -177,5 +196,135 @@ pub async fn auto_local_admin_secretsdump(
                 Err(e) => warn!(err = %e, "Failed to dispatch PTH secretsdump"),
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn valid_secretsdump_target_same_domain() {
+        assert!(is_valid_secretsdump_target(
+            "contoso.local",
+            "contoso.local"
+        ));
+    }
+
+    #[test]
+    fn valid_secretsdump_target_case_insensitive() {
+        assert!(is_valid_secretsdump_target(
+            "CONTOSO.LOCAL",
+            "contoso.local"
+        ));
+    }
+
+    #[test]
+    fn valid_secretsdump_target_dc_is_child() {
+        assert!(is_valid_secretsdump_target(
+            "child.contoso.local",
+            "contoso.local"
+        ));
+    }
+
+    #[test]
+    fn valid_secretsdump_target_dc_is_parent() {
+        assert!(is_valid_secretsdump_target(
+            "contoso.local",
+            "child.contoso.local"
+        ));
+    }
+
+    #[test]
+    fn valid_secretsdump_target_unrelated_rejected() {
+        assert!(!is_valid_secretsdump_target(
+            "fabrikam.com",
+            "contoso.local"
+        ));
+    }
+
+    #[test]
+    fn valid_secretsdump_target_empty_strings() {
+        assert!(is_valid_secretsdump_target("", ""));
+    }
+
+    #[test]
+    fn valid_secretsdump_target_one_empty() {
+        assert!(!is_valid_secretsdump_target("contoso.local", ""));
+    }
+
+    #[test]
+    fn is_child_of_basic() {
+        assert!(is_child_of("child.contoso.local", "contoso.local"));
+    }
+
+    #[test]
+    fn is_child_of_case_insensitive() {
+        assert!(is_child_of("CHILD.CONTOSO.LOCAL", "contoso.local"));
+    }
+
+    #[test]
+    fn is_child_of_deeply_nested() {
+        assert!(is_child_of("deep.child.contoso.local", "contoso.local"));
+    }
+
+    #[test]
+    fn is_child_of_same_domain_rejected() {
+        assert!(!is_child_of("contoso.local", "contoso.local"));
+    }
+
+    #[test]
+    fn is_child_of_parent_not_child() {
+        assert!(!is_child_of("contoso.local", "child.contoso.local"));
+    }
+
+    #[test]
+    fn is_child_of_unrelated_rejected() {
+        assert!(!is_child_of("fabrikam.com", "contoso.local"));
+    }
+
+    #[test]
+    fn is_child_of_empty_strings() {
+        assert!(!is_child_of("", ""));
+    }
+
+    #[test]
+    fn secretsdump_dedup_key_basic() {
+        assert_eq!(
+            secretsdump_dedup_key("10.0.0.1", "contoso.local", "Administrator"),
+            "10.0.0.1:contoso.local:administrator"
+        );
+    }
+
+    #[test]
+    fn secretsdump_dedup_key_lowercases() {
+        assert_eq!(
+            secretsdump_dedup_key("10.0.0.1", "CONTOSO.LOCAL", "ADMIN"),
+            "10.0.0.1:contoso.local:admin"
+        );
+    }
+
+    #[test]
+    fn secretsdump_dedup_key_empty_fields() {
+        assert_eq!(secretsdump_dedup_key("", "", ""), "::");
+    }
+
+    #[test]
+    fn pth_secretsdump_dedup_key_basic() {
+        assert_eq!(
+            pth_secretsdump_dedup_key("10.0.0.1", "contoso.local"),
+            "10.0.0.1:contoso.local:pth_admin"
+        );
+    }
+
+    #[test]
+    fn pth_secretsdump_dedup_key_preserves_ip() {
+        let key = pth_secretsdump_dedup_key("192.168.1.100", "domain.local");
+        assert!(key.starts_with("192.168.1.100:"));
+    }
+
+    #[test]
+    fn pth_secretsdump_dedup_key_empty_fields() {
+        assert_eq!(pth_secretsdump_dedup_key("", ""), "::pth_admin");
     }
 }

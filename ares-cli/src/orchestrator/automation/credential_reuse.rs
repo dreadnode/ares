@@ -18,6 +18,40 @@ use crate::orchestrator::dispatcher::Dispatcher;
 /// Dedup key namespace for cross-domain reuse attempts.
 const DEDUP_CROSS_REUSE: &str = "cross_reuse";
 
+/// Check if a username is a high-value reuse candidate.
+fn is_reuse_candidate(username: &str) -> bool {
+    let u = username.to_lowercase();
+    u == "administrator"
+        || u == "localuser"
+        || u.contains("svc")
+        || u.contains("admin")
+        || u.contains("sql")
+        || username == username.to_uppercase() // Machine accounts
+}
+
+/// Check if two domains should be skipped for cross-domain reuse (same or parent/child).
+fn is_same_forest_domain(domain_a: &str, domain_b: &str) -> bool {
+    let a = domain_a.to_lowercase();
+    let b = domain_b.to_lowercase();
+    a == b || a.ends_with(&format!(".{b}")) || b.ends_with(&format!(".{a}"))
+}
+
+/// Build cross-domain reuse dedup key.
+fn cross_reuse_dedup_key(
+    dc_ip: &str,
+    target_domain: &str,
+    username: &str,
+    hash_prefix: &str,
+) -> String {
+    format!(
+        "{}:{}:{}:{}",
+        dc_ip,
+        target_domain,
+        username.to_lowercase(),
+        hash_prefix
+    )
+}
+
 /// Cross-domain credential reuse automation.
 /// Interval: 30s. Tries hashes from dominated domains against other forests' DCs.
 pub async fn auto_credential_reuse(
@@ -63,16 +97,7 @@ pub async fn auto_credential_reuse(
                 .iter()
                 .filter(|h| h.hash_type.to_uppercase() == "NTLM")
                 .filter(|h| !h.hash_value.is_empty())
-                // Focus on accounts likely to be shared across domains
-                .filter(|h| {
-                    let u = h.username.to_lowercase();
-                    u == "administrator"
-                        || u == "localuser"
-                        || u.contains("svc")
-                        || u.contains("admin")
-                        || u.contains("sql")
-                        || h.username == h.username.to_uppercase() // Machine accounts
-                })
+                .filter(|h| is_reuse_candidate(&h.username))
                 .collect();
 
             for hash in &reuse_candidates {
@@ -82,20 +107,13 @@ pub async fn auto_credential_reuse(
                     let target_domain = dc_domain.to_lowercase();
 
                     // Skip same domain and parent/child domains (handled by secretsdump.rs)
-                    if target_domain == hash_domain
-                        || target_domain.ends_with(&format!(".{hash_domain}"))
-                        || hash_domain.ends_with(&format!(".{target_domain}"))
-                    {
+                    if is_same_forest_domain(&target_domain, &hash_domain) {
                         continue;
                     }
 
-                    let dedup = format!(
-                        "{}:{}:{}:{}",
-                        dc_ip,
-                        target_domain,
-                        hash.username.to_lowercase(),
-                        &hash.hash_value[..16.min(hash.hash_value.len())]
-                    );
+                    let hash_prefix = &hash.hash_value[..16.min(hash.hash_value.len())];
+                    let dedup =
+                        cross_reuse_dedup_key(dc_ip, &target_domain, &hash.username, hash_prefix);
                     if !state.is_processed(DEDUP_CROSS_REUSE, &dedup) {
                         items.push((
                             dedup,
@@ -153,5 +171,127 @@ pub async fn auto_credential_reuse(
                 Err(e) => warn!(err = %e, "Failed to dispatch cross-domain reuse"),
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reuse_candidate_administrator() {
+        assert!(is_reuse_candidate("administrator"));
+        assert!(is_reuse_candidate("Administrator"));
+        assert!(is_reuse_candidate("ADMINISTRATOR"));
+    }
+
+    #[test]
+    fn reuse_candidate_localuser() {
+        assert!(is_reuse_candidate("localuser"));
+        assert!(is_reuse_candidate("LocalUser"));
+    }
+
+    #[test]
+    fn reuse_candidate_service_accounts() {
+        assert!(is_reuse_candidate("svc_backup"));
+        assert!(is_reuse_candidate("SVC_SQL"));
+        assert!(is_reuse_candidate("my_svc_account"));
+    }
+
+    #[test]
+    fn reuse_candidate_admin_substring() {
+        assert!(is_reuse_candidate("domainadmin"));
+        assert!(is_reuse_candidate("AdminUser"));
+    }
+
+    #[test]
+    fn reuse_candidate_sql_substring() {
+        assert!(is_reuse_candidate("sqlservice"));
+        assert!(is_reuse_candidate("SQL_Agent"));
+    }
+
+    #[test]
+    fn reuse_candidate_machine_accounts() {
+        // All uppercase indicates machine accounts
+        assert!(is_reuse_candidate("DC01$"));
+        assert!(is_reuse_candidate("WORKSTATION01"));
+    }
+
+    #[test]
+    fn reuse_candidate_regular_user_rejected() {
+        assert!(!is_reuse_candidate("jsmith"));
+        assert!(!is_reuse_candidate("John.Doe"));
+        assert!(!is_reuse_candidate("regularUser"));
+    }
+
+    #[test]
+    fn reuse_candidate_empty_string() {
+        // Empty string: to_uppercase == "" == username, so machine account check fires
+        assert!(is_reuse_candidate(""));
+    }
+
+    #[test]
+    fn same_forest_domain_exact() {
+        assert!(is_same_forest_domain("contoso.local", "contoso.local"));
+    }
+
+    #[test]
+    fn same_forest_domain_case_insensitive() {
+        assert!(is_same_forest_domain("CONTOSO.LOCAL", "contoso.local"));
+    }
+
+    #[test]
+    fn same_forest_domain_child_of() {
+        assert!(is_same_forest_domain(
+            "child.contoso.local",
+            "contoso.local"
+        ));
+    }
+
+    #[test]
+    fn same_forest_domain_parent_of() {
+        assert!(is_same_forest_domain(
+            "contoso.local",
+            "child.contoso.local"
+        ));
+    }
+
+    #[test]
+    fn same_forest_domain_unrelated() {
+        assert!(!is_same_forest_domain("fabrikam.com", "contoso.local"));
+    }
+
+    #[test]
+    fn same_forest_domain_empty() {
+        assert!(is_same_forest_domain("", ""));
+    }
+
+    #[test]
+    fn same_forest_domain_one_empty() {
+        assert!(!is_same_forest_domain("contoso.local", ""));
+    }
+
+    #[test]
+    fn cross_reuse_dedup_key_basic() {
+        assert_eq!(
+            cross_reuse_dedup_key(
+                "10.0.0.1",
+                "fabrikam.com",
+                "Administrator",
+                "aabbccdd11223344"
+            ),
+            "10.0.0.1:fabrikam.com:administrator:aabbccdd11223344"
+        );
+    }
+
+    #[test]
+    fn cross_reuse_dedup_key_lowercases_username() {
+        let key = cross_reuse_dedup_key("10.0.0.1", "fab.com", "ADMIN", "abcd");
+        assert!(key.contains(":admin:"));
+    }
+
+    #[test]
+    fn cross_reuse_dedup_key_empty_fields() {
+        assert_eq!(cross_reuse_dedup_key("", "", "", ""), ":::");
     }
 }

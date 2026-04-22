@@ -10,6 +10,38 @@ use tracing::{info, warn};
 use crate::orchestrator::dispatcher::Dispatcher;
 use crate::orchestrator::state::*;
 
+/// Extract steps from an ACL chain JSON value.
+/// The chain can be a direct array or an object with a "steps" field.
+fn extract_chain_steps(chain: &serde_json::Value) -> Option<&Vec<serde_json::Value>> {
+    chain
+        .as_array()
+        .or_else(|| chain.get("steps").and_then(|v| v.as_array()))
+}
+
+/// Extract source user from an ACL chain step.
+/// Tries "source", "source_user", "from" keys in order.
+fn extract_source_user(step: &serde_json::Value) -> &str {
+    step.get("source")
+        .or_else(|| step.get("source_user"))
+        .or_else(|| step.get("from"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+}
+
+/// Extract source domain from an ACL chain step.
+/// Tries "source_domain", "domain" keys.
+fn extract_source_domain(step: &serde_json::Value) -> &str {
+    step.get("source_domain")
+        .or_else(|| step.get("domain"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+}
+
+/// Build ACL chain step dedup key.
+fn acl_step_dedup_key(chain_idx: usize, step_idx: usize) -> String {
+    format!("chain:{}:step:{}", chain_idx, step_idx)
+}
+
 /// Follows ACL chains from BloodHound results, dispatching each step when
 /// credentials for the source user are available.
 /// Interval: 30s. Each chain is a JSON array of steps; we find the first
@@ -53,20 +85,13 @@ pub async fn auto_acl_chain_follow(
             let mut items = Vec::new();
 
             for (chain_idx, chain) in state.acl_chains.iter().enumerate() {
-                // Each chain is expected to be a JSON array of step objects
-                let steps = match chain.as_array() {
+                let steps = match extract_chain_steps(chain) {
                     Some(s) => s,
-                    None => {
-                        // Or it might be an object with a "steps" field
-                        match chain.get("steps").and_then(|v| v.as_array()) {
-                            Some(s) => s,
-                            None => continue,
-                        }
-                    }
+                    None => continue,
                 };
 
                 for (step_idx, step) in steps.iter().enumerate() {
-                    let dedup_key = format!("chain:{}:step:{}", chain_idx, step_idx);
+                    let dedup_key = acl_step_dedup_key(chain_idx, step_idx);
 
                     // Skip already dispatched steps
                     if state.dispatched_acl_steps.contains(&dedup_key) {
@@ -77,17 +102,8 @@ pub async fn auto_acl_chain_follow(
                     }
 
                     // Get the source user for this step
-                    let source_user = step
-                        .get("source")
-                        .or_else(|| step.get("source_user"))
-                        .or_else(|| step.get("from"))
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("");
-                    let source_domain = step
-                        .get("source_domain")
-                        .or_else(|| step.get("domain"))
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("");
+                    let source_user = extract_source_user(step);
+                    let source_domain = extract_source_domain(step);
 
                     if source_user.is_empty() {
                         continue;
@@ -150,5 +166,134 @@ pub async fn auto_acl_chain_follow(
                 Err(e) => warn!(err = %e, "Failed to dispatch ACL chain step"),
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    // --- extract_chain_steps ---
+
+    #[test]
+    fn extract_chain_steps_from_array() {
+        let chain = json!([{"source": "a"}, {"source": "b"}]);
+        let steps = extract_chain_steps(&chain).unwrap();
+        assert_eq!(steps.len(), 2);
+    }
+
+    #[test]
+    fn extract_chain_steps_from_object_with_steps_field() {
+        let chain = json!({"steps": [{"source": "a"}]});
+        let steps = extract_chain_steps(&chain).unwrap();
+        assert_eq!(steps.len(), 1);
+    }
+
+    #[test]
+    fn extract_chain_steps_empty_array() {
+        let chain = json!([]);
+        let steps = extract_chain_steps(&chain).unwrap();
+        assert!(steps.is_empty());
+    }
+
+    #[test]
+    fn extract_chain_steps_invalid_returns_none() {
+        let chain = json!({"other": "value"});
+        assert!(extract_chain_steps(&chain).is_none());
+    }
+
+    #[test]
+    fn extract_chain_steps_null_returns_none() {
+        let chain = json!(null);
+        assert!(extract_chain_steps(&chain).is_none());
+    }
+
+    #[test]
+    fn extract_chain_steps_string_returns_none() {
+        let chain = json!("not a chain");
+        assert!(extract_chain_steps(&chain).is_none());
+    }
+
+    // --- extract_source_user ---
+
+    #[test]
+    fn extract_source_user_from_source_key() {
+        let step = json!({"source": "admin"});
+        assert_eq!(extract_source_user(&step), "admin");
+    }
+
+    #[test]
+    fn extract_source_user_from_source_user_key() {
+        let step = json!({"source_user": "jdoe"});
+        assert_eq!(extract_source_user(&step), "jdoe");
+    }
+
+    #[test]
+    fn extract_source_user_from_from_key() {
+        let step = json!({"from": "svc_account"});
+        assert_eq!(extract_source_user(&step), "svc_account");
+    }
+
+    #[test]
+    fn extract_source_user_prefers_source_over_from() {
+        let step = json!({"source": "admin", "from": "other"});
+        assert_eq!(extract_source_user(&step), "admin");
+    }
+
+    #[test]
+    fn extract_source_user_missing_returns_empty() {
+        let step = json!({"target": "dc01"});
+        assert_eq!(extract_source_user(&step), "");
+    }
+
+    #[test]
+    fn extract_source_user_non_string_returns_empty() {
+        let step = json!({"source": 42});
+        assert_eq!(extract_source_user(&step), "");
+    }
+
+    // --- extract_source_domain ---
+
+    #[test]
+    fn extract_source_domain_from_source_domain_key() {
+        let step = json!({"source_domain": "contoso.local"});
+        assert_eq!(extract_source_domain(&step), "contoso.local");
+    }
+
+    #[test]
+    fn extract_source_domain_from_domain_key() {
+        let step = json!({"domain": "corp.net"});
+        assert_eq!(extract_source_domain(&step), "corp.net");
+    }
+
+    #[test]
+    fn extract_source_domain_prefers_source_domain() {
+        let step = json!({"source_domain": "contoso.local", "domain": "other.local"});
+        assert_eq!(extract_source_domain(&step), "contoso.local");
+    }
+
+    #[test]
+    fn extract_source_domain_missing_returns_empty() {
+        let step = json!({"source": "admin"});
+        assert_eq!(extract_source_domain(&step), "");
+    }
+
+    #[test]
+    fn extract_source_domain_non_string_returns_empty() {
+        let step = json!({"source_domain": 123});
+        assert_eq!(extract_source_domain(&step), "");
+    }
+
+    // --- acl_step_dedup_key ---
+
+    #[test]
+    fn acl_step_dedup_key_basic() {
+        assert_eq!(acl_step_dedup_key(0, 0), "chain:0:step:0");
+    }
+
+    #[test]
+    fn acl_step_dedup_key_large_indices() {
+        assert_eq!(acl_step_dedup_key(42, 7), "chain:42:step:7");
     }
 }

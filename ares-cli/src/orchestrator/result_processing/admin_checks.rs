@@ -9,6 +9,57 @@ use tracing::{info, warn};
 use super::parsing::has_domain_admin_indicator;
 use crate::orchestrator::dispatcher::Dispatcher;
 
+/// Determine the domain admin path from a payload.
+///
+/// If `has_domain_admin` is explicitly `true`, returns the `domain_admin_path`
+/// string (if present). Otherwise falls back to the secretsdump path.
+pub(crate) fn resolve_da_path(payload: &Value) -> Option<String> {
+    if payload.get("has_domain_admin").and_then(|v| v.as_bool()) == Some(true) {
+        payload
+            .get("domain_admin_path")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+    } else {
+        Some("secretsdump -> krbtgt hash".to_string())
+    }
+}
+
+/// Check if text indicates a golden ticket was saved.
+pub(crate) fn has_golden_ticket_indicator(text: &str) -> bool {
+    text.contains("Saving ticket in") && text.contains(".ccache")
+}
+
+/// Parse a Pwn3d! line to extract (domain, username).
+///
+/// Format: `[+] DOMAIN\username:password (Pwn3d!)` or `[+] DOMAIN\username (Pwn3d!)`
+pub(crate) fn parse_pwned_line(line: &str) -> Option<(String, String)> {
+    if !line.contains("Pwn3d!") || !line.contains("[+]") {
+        return None;
+    }
+    let after_plus = line.split("[+]").nth(1)?.trim();
+    let backslash = after_plus.find('\\')?;
+    let domain_part = after_plus[..backslash].trim();
+    let rest = &after_plus[backslash + 1..];
+    let username = if let Some(colon) = rest.find(':') {
+        &rest[..colon]
+    } else {
+        rest.split_whitespace().next().unwrap_or("")
+    };
+    let username = username.trim();
+    let domain = domain_part.to_lowercase();
+    if username.is_empty() || domain.is_empty() {
+        return None;
+    }
+    Some((domain, username.to_string()))
+}
+
+/// Extract an IP address from a line of text.
+pub(crate) fn extract_ip_from_line(line: &str) -> Option<String> {
+    line.split_whitespace()
+        .find(|w| w.split('.').count() == 4 && w.split('.').all(|o| o.parse::<u8>().is_ok()))
+        .map(|s| s.to_string())
+}
+
 /// Check result for domain admin indicators and update state.
 pub(crate) async fn check_domain_admin_indicators(payload: &Value, dispatcher: &Arc<Dispatcher>) {
     if !has_domain_admin_indicator(payload) {
@@ -18,14 +69,7 @@ pub(crate) async fn check_domain_admin_indicators(payload: &Value, dispatcher: &
         let state = dispatcher.state.read().await;
         state.has_domain_admin
     };
-    let path = if payload.get("has_domain_admin").and_then(|v| v.as_bool()) == Some(true) {
-        payload
-            .get("domain_admin_path")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string())
-    } else {
-        Some("secretsdump -> krbtgt hash".to_string())
-    };
+    let path = resolve_da_path(payload);
     if let Err(e) = dispatcher
         .state
         .set_domain_admin(&dispatcher.queue, path.clone())
@@ -103,7 +147,7 @@ pub(crate) async fn check_golden_ticket_completion(
                 .as_str()
                 .or_else(|| item.get("output").and_then(|v| v.as_str()))
                 .unwrap_or("");
-            if text.contains("Saving ticket in") && text.contains(".ccache") {
+            if has_golden_ticket_indicator(text) {
                 found_ticket = true;
                 break;
             }
@@ -112,7 +156,7 @@ pub(crate) async fn check_golden_ticket_completion(
     if !found_ticket {
         for key in &["tool_output", "output", "summary"] {
             if let Some(text) = payload.get(*key).and_then(|v| v.as_str()) {
-                if text.contains("Saving ticket in") && text.contains(".ccache") {
+                if has_golden_ticket_indicator(text) {
                     found_ticket = true;
                     break;
                 }
@@ -143,96 +187,73 @@ pub(crate) async fn check_golden_ticket_completion(
 
 pub(crate) async fn detect_and_upgrade_admin_credentials(text: &str, dispatcher: &Arc<Dispatcher>) {
     for line in text.lines() {
-        if !line.contains("Pwn3d!") || !line.contains("[+]") {
-            continue;
-        }
-        if let Some(after_plus) = line.split("[+]").nth(1) {
-            let after_plus = after_plus.trim();
-            if let Some(backslash) = after_plus.find('\\') {
-                let domain_part = after_plus[..backslash].trim();
-                let rest = &after_plus[backslash + 1..];
-                let username = if let Some(colon) = rest.find(':') {
-                    &rest[..colon]
-                } else {
-                    rest.split_whitespace().next().unwrap_or("")
-                };
-                let username = username.trim();
-                let domain = domain_part.to_lowercase();
-                if username.is_empty() || domain.is_empty() {
-                    continue;
+        let (domain, username) = match parse_pwned_line(line) {
+            Some(pair) => pair,
+            None => continue,
+        };
+        info!(username = %username, domain = %domain, "Pwn3d! detected -- upgrading credential to admin");
+        let upgraded = {
+            let mut state = dispatcher.state.write().await;
+            let mut found = false;
+            for cred in state.credentials.iter_mut() {
+                if cred.username.to_lowercase() == username.to_lowercase()
+                    && cred.domain.to_lowercase() == domain
+                    && !cred.is_admin
+                {
+                    cred.is_admin = true;
+                    found = true;
                 }
-                info!(username = %username, domain = %domain, "Pwn3d! detected -- upgrading credential to admin");
-                let upgraded = {
-                    let mut state = dispatcher.state.write().await;
-                    let mut found = false;
-                    for cred in state.credentials.iter_mut() {
-                        if cred.username.to_lowercase() == username.to_lowercase()
-                            && cred.domain.to_lowercase() == domain
-                            && !cred.is_admin
-                        {
-                            cred.is_admin = true;
-                            found = true;
-                        }
+            }
+            found
+        };
+        if upgraded {
+            let pwned_ip = extract_ip_from_line(line);
+            info!(
+                username = %username,
+                domain = %domain,
+                pwned_host = ?pwned_ip,
+                "Credential upgraded to admin -- dispatching priority secretsdump"
+            );
+            let work: Vec<(String, ares_core::models::Credential)> = {
+                let state = dispatcher.state.read().await;
+                let dc_ips: Vec<String> = state.domain_controllers.values().cloned().collect();
+                let mut targets: Vec<String> = dc_ips;
+                if let Some(ref ip) = pwned_ip {
+                    if !targets.contains(ip) {
+                        targets.push(ip.clone());
                     }
-                    found
-                };
-                if upgraded {
-                    let pwned_ip = line
-                        .split_whitespace()
-                        .find(|w| {
-                            w.split('.').count() == 4
-                                && w.split('.').all(|o| o.parse::<u8>().is_ok())
-                        })
-                        .map(|s| s.to_string());
-                    info!(
-                        username = %username,
-                        domain = %domain,
-                        pwned_host = ?pwned_ip,
-                        "Credential upgraded to admin -- dispatching priority secretsdump"
-                    );
-                    let work: Vec<(String, ares_core::models::Credential)> = {
-                        let state = dispatcher.state.read().await;
-                        let dc_ips: Vec<String> =
-                            state.domain_controllers.values().cloned().collect();
-                        let mut targets: Vec<String> = dc_ips;
-                        if let Some(ref ip) = pwned_ip {
-                            if !targets.contains(ip) {
-                                targets.push(ip.clone());
-                            }
-                        }
-                        state
-                            .credentials
+                }
+                state
+                    .credentials
+                    .iter()
+                    .filter(|c| {
+                        c.username.to_lowercase() == username.to_lowercase()
+                            && c.domain.to_lowercase() == domain
+                            && c.is_admin
+                    })
+                    .flat_map(|cred| {
+                        targets
                             .iter()
-                            .filter(|c| {
-                                c.username.to_lowercase() == username.to_lowercase()
-                                    && c.domain.to_lowercase() == domain
-                                    && c.is_admin
-                            })
-                            .flat_map(|cred| {
-                                targets
-                                    .iter()
-                                    .map(|ip| (ip.clone(), cred.clone()))
-                                    .collect::<Vec<_>>()
-                            })
-                            .collect()
-                    };
-                    for (target_ip, cred) in work {
-                        if !dispatcher.is_technique_allowed("secretsdump") {
-                            break;
-                        }
-                        match dispatcher.request_secretsdump(&target_ip, &cred, 1).await {
-                            Ok(Some(task_id)) => {
-                                info!(
-                                    task_id = %task_id,
-                                    target = %target_ip,
-                                    username = %username,
-                                    "Admin Pwn3d! secretsdump dispatched (priority 1)"
-                                );
-                            }
-                            Ok(None) => {}
-                            Err(e) => warn!(err = %e, "Failed to dispatch Pwn3d! secretsdump"),
-                        }
+                            .map(|ip| (ip.clone(), cred.clone()))
+                            .collect::<Vec<_>>()
+                    })
+                    .collect()
+            };
+            for (target_ip, cred) in work {
+                if !dispatcher.is_technique_allowed("secretsdump") {
+                    break;
+                }
+                match dispatcher.request_secretsdump(&target_ip, &cred, 1).await {
+                    Ok(Some(task_id)) => {
+                        info!(
+                            task_id = %task_id,
+                            target = %target_ip,
+                            username = %username,
+                            "Admin Pwn3d! secretsdump dispatched (priority 1)"
+                        );
                     }
+                    Ok(None) => {}
+                    Err(e) => warn!(err = %e, "Failed to dispatch Pwn3d! secretsdump"),
                 }
             }
         }

@@ -535,4 +535,325 @@ mod tests {
         assert_eq!(effective.len(), 1);
         assert_eq!(effective[0].query_pattern, "detect_dcsync");
     }
+
+    // ── QueryEffectiveness pure methods ───────────────────────────────
+
+    #[test]
+    fn success_rate_nonzero() {
+        let qe = QueryEffectiveness {
+            query_pattern: "detect_dcsync".to_string(),
+            total_executions: 10,
+            successful_executions: 7,
+            evidence_producing: 3,
+            alert_types: vec!["DCSync".to_string()],
+        };
+        let rate = qe.success_rate();
+        assert!((rate - 0.7).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn success_rate_zero_total() {
+        let qe = QueryEffectiveness {
+            query_pattern: "unused_query".to_string(),
+            total_executions: 0,
+            successful_executions: 0,
+            evidence_producing: 0,
+            alert_types: vec![],
+        };
+        assert_eq!(qe.success_rate(), 0.0);
+    }
+
+    #[test]
+    fn success_rate_all_successful() {
+        let qe = QueryEffectiveness {
+            query_pattern: "always_works".to_string(),
+            total_executions: 5,
+            successful_executions: 5,
+            evidence_producing: 2,
+            alert_types: vec![],
+        };
+        assert!((qe.success_rate() - 1.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn success_rate_none_successful() {
+        let qe = QueryEffectiveness {
+            query_pattern: "never_works".to_string(),
+            total_executions: 4,
+            successful_executions: 0,
+            evidence_producing: 0,
+            alert_types: vec![],
+        };
+        assert_eq!(qe.success_rate(), 0.0);
+    }
+
+    #[test]
+    fn evidence_rate_nonzero() {
+        let qe = QueryEffectiveness {
+            query_pattern: "detect_lateral".to_string(),
+            total_executions: 20,
+            successful_executions: 15,
+            evidence_producing: 8,
+            alert_types: vec!["LateralMovement".to_string()],
+        };
+        let rate = qe.evidence_rate();
+        assert!((rate - 0.4).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn evidence_rate_zero_total() {
+        let qe = QueryEffectiveness {
+            query_pattern: "empty".to_string(),
+            total_executions: 0,
+            successful_executions: 0,
+            evidence_producing: 0,
+            alert_types: vec![],
+        };
+        assert_eq!(qe.evidence_rate(), 0.0);
+    }
+
+    #[test]
+    fn evidence_rate_all_produce_evidence() {
+        let qe = QueryEffectiveness {
+            query_pattern: "goldmine".to_string(),
+            total_executions: 6,
+            successful_executions: 6,
+            evidence_producing: 6,
+            alert_types: vec![],
+        };
+        assert!((qe.evidence_rate() - 1.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn evidence_rate_none_produce_evidence() {
+        let qe = QueryEffectiveness {
+            query_pattern: "dry_well".to_string(),
+            total_executions: 10,
+            successful_executions: 8,
+            evidence_producing: 0,
+            alert_types: vec![],
+        };
+        assert_eq!(qe.evidence_rate(), 0.0);
+    }
+
+    // ── InvestigationStatistics default ───────────────────────────────
+
+    #[test]
+    fn statistics_default_is_zeroed() {
+        let stats = InvestigationStatistics::default();
+        assert_eq!(stats.total_investigations, 0);
+        assert_eq!(stats.completed, 0);
+        assert_eq!(stats.escalated, 0);
+        assert_eq!(stats.failed, 0);
+        assert_eq!(stats.true_positives, 0);
+        assert_eq!(stats.false_positives, 0);
+        assert_eq!(stats.labeled, 0);
+        assert_eq!(stats.avg_duration_seconds, 0.0);
+        assert_eq!(stats.avg_evidence_count, 0.0);
+    }
+
+    #[test]
+    fn empty_store_returns_default_statistics() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("empty_stats.json");
+        let store = InvestigationStore::open(path);
+        let stats = store.get_statistics();
+        assert_eq!(stats.total_investigations, 0);
+        assert_eq!(stats.avg_duration_seconds, 0.0);
+    }
+
+    // ── Store: deduplication on store_investigation ────────────────────
+
+    #[test]
+    fn store_replaces_duplicate_investigation() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("dedup.json");
+        let store = InvestigationStore::open(path);
+
+        let mut inv = make_investigation("inv-1", "Alert A", "high");
+        inv.evidence_count = 3;
+        store.store_investigation(inv);
+
+        let mut updated = make_investigation("inv-1", "Alert A", "high");
+        updated.evidence_count = 10;
+        store.store_investigation(updated);
+
+        let stats = store.get_statistics();
+        assert_eq!(stats.total_investigations, 1);
+    }
+
+    // ── find_similar: fingerprint scoring ─────────────────────────────
+
+    #[test]
+    fn find_similar_by_fingerprint() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("similar_fp.json");
+        let store = InvestigationStore::open(path);
+
+        store.store_investigation(make_investigation("inv-1", "DCSync Alert", "critical"));
+        store.store_investigation(make_investigation("inv-2", "Brute Force", "high"));
+
+        let results =
+            store.find_similar_investigations(None, Some("fp-DCSync Alert"), None, None, 10);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].investigation.investigation_id, "inv-1");
+        assert!(results[0]
+            .matching_factors
+            .contains(&"fingerprint".to_string()));
+    }
+
+    #[test]
+    fn find_similar_by_technique() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("similar_tech.json");
+        let store = InvestigationStore::open(path);
+
+        store.store_investigation(make_investigation("inv-1", "Alert", "high"));
+
+        let results = store.find_similar_investigations(None, None, Some("T1003"), None, 10);
+        assert_eq!(results.len(), 1);
+        assert!(results[0]
+            .matching_factors
+            .contains(&"technique".to_string()));
+    }
+
+    #[test]
+    fn find_similar_by_severity() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("similar_sev.json");
+        let store = InvestigationStore::open(path);
+
+        store.store_investigation(make_investigation("inv-1", "Alert", "critical"));
+        store.store_investigation(make_investigation("inv-2", "Alert", "low"));
+
+        let results = store.find_similar_investigations(None, None, None, Some("critical"), 10);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].investigation.severity, "critical");
+    }
+
+    #[test]
+    fn find_similar_no_matches() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("similar_none.json");
+        let store = InvestigationStore::open(path);
+
+        store.store_investigation(make_investigation("inv-1", "Alert", "high"));
+
+        let results = store.find_similar_investigations(
+            Some("Nonexistent"),
+            Some("fp-nope"),
+            Some("T9999"),
+            Some("unknown"),
+            10,
+        );
+        assert!(results.is_empty());
+    }
+
+    // ── update_query_effectiveness accumulation ───────────────────────
+
+    #[test]
+    fn query_effectiveness_accumulates() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("qe_accum.json");
+        let store = InvestigationStore::open(path);
+
+        store.update_query_effectiveness("q1", true, true, Some("TypeA"));
+        store.update_query_effectiveness("q1", true, false, Some("TypeA"));
+        store.update_query_effectiveness("q1", false, false, Some("TypeB"));
+
+        let data = store.data.lock().unwrap();
+        let qe = data
+            .query_effectiveness
+            .iter()
+            .find(|q| q.query_pattern == "q1")
+            .unwrap();
+        assert_eq!(qe.total_executions, 3);
+        assert_eq!(qe.successful_executions, 2);
+        assert_eq!(qe.evidence_producing, 1);
+        assert_eq!(qe.alert_types.len(), 2);
+        assert!(qe.alert_types.contains(&"TypeA".to_string()));
+        assert!(qe.alert_types.contains(&"TypeB".to_string()));
+    }
+
+    #[test]
+    fn query_effectiveness_no_duplicate_alert_types() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("qe_dedup.json");
+        let store = InvestigationStore::open(path);
+
+        store.update_query_effectiveness("q1", true, true, Some("TypeA"));
+        store.update_query_effectiveness("q1", true, true, Some("TypeA"));
+
+        let data = store.data.lock().unwrap();
+        let qe = data
+            .query_effectiveness
+            .iter()
+            .find(|q| q.query_pattern == "q1")
+            .unwrap();
+        assert_eq!(qe.alert_types.len(), 1);
+    }
+
+    // ── false positive patterns ───────────────────────────────────────
+
+    #[test]
+    fn false_positive_patterns_min_occurrences() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("fp_min.json");
+        let store = InvestigationStore::open(path);
+
+        store.store_investigation(make_investigation("inv-1", "Alert A", "high"));
+        store.label_investigation("inv-1", false, None);
+
+        // min_occurrences=2 but only 1 occurrence
+        let patterns = store.get_false_positive_patterns(2);
+        assert!(patterns.is_empty());
+
+        // min_occurrences=1 should return it
+        let patterns = store.get_false_positive_patterns(1);
+        assert_eq!(patterns.len(), 1);
+    }
+
+    // ── label nonexistent investigation ───────────────────────────────
+
+    #[test]
+    fn label_nonexistent_returns_false() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("label_missing.json");
+        let store = InvestigationStore::open(path);
+        assert!(!store.label_investigation("no-such-id", true, None));
+    }
+
+    // ── get_effective_queries filtering ───────────────────────────────
+
+    #[test]
+    fn effective_queries_filters_by_alert_type() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("eq_filter.json");
+        let store = InvestigationStore::open(path);
+
+        for _ in 0..5 {
+            store.update_query_effectiveness("q1", true, true, Some("DCSync"));
+        }
+        for _ in 0..5 {
+            store.update_query_effectiveness("q2", true, true, Some("BruteForce"));
+        }
+
+        let dconly = store.get_effective_queries(Some("DCSync"), 0.5, 10);
+        assert_eq!(dconly.len(), 1);
+        assert_eq!(dconly[0].query_pattern, "q1");
+    }
+
+    #[test]
+    fn effective_queries_requires_min_executions() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("eq_min.json");
+        let store = InvestigationStore::open(path);
+
+        // Only 2 executions (below the threshold of 3)
+        store.update_query_effectiveness("q1", true, true, None);
+        store.update_query_effectiveness("q1", true, true, None);
+
+        let results = store.get_effective_queries(None, 0.0, 10);
+        assert!(results.is_empty());
+    }
 }

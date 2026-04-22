@@ -19,6 +19,45 @@ use tracing::{debug, info, warn};
 use crate::orchestrator::dispatcher::Dispatcher;
 use crate::orchestrator::state::*;
 
+/// Build a vuln_id for child-to-parent escalation.
+fn child_to_parent_vuln_id(child_domain: &str, parent_domain: &str) -> String {
+    format!(
+        "child_to_parent_{}_{}",
+        child_domain.to_lowercase().replace('.', "_"),
+        parent_domain.to_lowercase().replace('.', "_"),
+    )
+}
+
+/// Build a vuln_id for forest trust escalation.
+fn forest_trust_vuln_id(source_domain: &str, target_domain: &str) -> String {
+    format!(
+        "forest_trust_{}_{}",
+        source_domain.to_lowercase(),
+        target_domain.to_lowercase()
+    )
+}
+
+/// Build a trust account name from a flat name (e.g. "FABRIKAM" -> "FABRIKAM$").
+fn trust_account_name(flat_name: &str) -> String {
+    format!("{}$", flat_name.to_uppercase())
+}
+
+/// Check if a credential domain matches a target domain (exact, child, or parent).
+fn is_domain_related(cred_domain: &str, target_domain: &str) -> bool {
+    let cd = cred_domain.to_lowercase();
+    let td = target_domain.to_lowercase();
+    cd == td || cd.ends_with(&format!(".{td}")) || td.ends_with(&format!(".{cd}"))
+}
+
+/// Build the dedup key for trust enumeration (password or hash retry).
+fn trust_enum_dedup_key(domain: &str, is_hash_retry: bool) -> String {
+    if is_hash_retry {
+        format!("trust_enum_hash:{}", domain.to_lowercase())
+    } else {
+        format!("trust_enum:{}", domain.to_lowercase())
+    }
+}
+
 /// Monitors for trust account hashes and dispatches cross-domain attacks.
 /// Interval: 30s.
 pub async fn auto_trust_follow(dispatcher: Arc<Dispatcher>, mut shutdown: watch::Receiver<bool>) {
@@ -46,17 +85,17 @@ pub async fn auto_trust_follow(dispatcher: Arc<Dispatcher>, mut shutdown: watch:
                     .domain_controllers
                     .iter()
                     .filter(|(domain, _)| {
-                        let key = format!("trust_enum:{}", domain.to_lowercase());
-                        let hash_key = format!("trust_enum_hash:{}", domain.to_lowercase());
+                        let key = trust_enum_dedup_key(domain, false);
+                        let hash_key = trust_enum_dedup_key(domain, true);
                         !state.is_processed(DEDUP_TRUST_FOLLOW, &key)
                             || (!state.is_processed(DEDUP_TRUST_FOLLOW, &hash_key)
                                 && state.dominated_domains.contains(&domain.to_lowercase()))
                     })
                     .map(|(domain, dc_ip)| {
                         // Use hash_key if password-based was already tried
-                        let pw_key = format!("trust_enum:{}", domain.to_lowercase());
+                        let pw_key = trust_enum_dedup_key(domain, false);
                         let key = if state.is_processed(DEDUP_TRUST_FOLLOW, &pw_key) {
-                            format!("trust_enum_hash:{}", domain.to_lowercase())
+                            trust_enum_dedup_key(domain, true)
                         } else {
                             pw_key
                         };
@@ -86,10 +125,7 @@ pub async fn auto_trust_follow(dispatcher: Arc<Dispatcher>, mut shutdown: watch:
                                     if c.password.is_empty() {
                                         return false;
                                     }
-                                    let cd = c.domain.to_lowercase();
-                                    cd == dd
-                                        || cd.ends_with(&format!(".{}", dd))
-                                        || dd.ends_with(&format!(".{}", cd))
+                                    is_domain_related(&c.domain, &domain)
                                 })
                                 .cloned()
                         } else {
@@ -274,11 +310,7 @@ pub async fn auto_trust_follow(dispatcher: Arc<Dispatcher>, mut shutdown: watch:
                     };
 
                     // Publish vulnerability
-                    let vuln_id = format!(
-                        "child_to_parent_{}_{}",
-                        child_domain.to_lowercase().replace('.', "_"),
-                        parent_domain.to_lowercase().replace('.', "_"),
-                    );
+                    let vuln_id = child_to_parent_vuln_id(&child_domain, &parent_domain);
                     {
                         let mut details = std::collections::HashMap::new();
                         details.insert(
@@ -479,7 +511,7 @@ pub async fn auto_trust_follow(dispatcher: Arc<Dispatcher>, mut shutdown: watch:
 
                     let (_, domain, cred_json) = cred_payload.unwrap();
                     // secretsdump -just-dc-user FABRIKAM$ to get trust key
-                    let trust_account = format!("{}$", flat_name.to_uppercase());
+                    let trust_account = trust_account_name(&flat_name);
                     let mut payload = json!({
                         "technique": "secretsdump",
                         "target_ip": dc_ip,
@@ -646,11 +678,7 @@ pub async fn auto_trust_follow(dispatcher: Arc<Dispatcher>, mut shutdown: watch:
         };
 
         for item in work {
-            let vuln_id = format!(
-                "forest_trust_{}_{}",
-                item.source_domain.to_lowercase(),
-                item.target_domain.to_lowercase()
-            );
+            let vuln_id = forest_trust_vuln_id(&item.source_domain, &item.target_domain);
             let trust_target = item
                 .target_dc_ip
                 .clone()
@@ -785,4 +813,149 @@ struct TrustFollowWork {
     source_domain_sid: Option<String>,
     target_domain_sid: Option<String>,
     source_dc_ip: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn child_to_parent_vuln_id_basic() {
+        assert_eq!(
+            child_to_parent_vuln_id("child.contoso.local", "contoso.local"),
+            "child_to_parent_child_contoso_local_contoso_local"
+        );
+    }
+
+    #[test]
+    fn child_to_parent_vuln_id_case_insensitive() {
+        assert_eq!(
+            child_to_parent_vuln_id("CHILD.Contoso.Local", "Contoso.Local"),
+            "child_to_parent_child_contoso_local_contoso_local"
+        );
+    }
+
+    #[test]
+    fn child_to_parent_vuln_id_replaces_dots() {
+        let id = child_to_parent_vuln_id("a.b.c", "d.e");
+        assert!(!id.contains('.'));
+        assert_eq!(id, "child_to_parent_a_b_c_d_e");
+    }
+
+    #[test]
+    fn child_to_parent_vuln_id_empty_strings() {
+        assert_eq!(child_to_parent_vuln_id("", ""), "child_to_parent__");
+    }
+
+    #[test]
+    fn forest_trust_vuln_id_basic() {
+        assert_eq!(
+            forest_trust_vuln_id("contoso.local", "fabrikam.com"),
+            "forest_trust_contoso.local_fabrikam.com"
+        );
+    }
+
+    #[test]
+    fn forest_trust_vuln_id_case_insensitive() {
+        assert_eq!(
+            forest_trust_vuln_id("CONTOSO.LOCAL", "Fabrikam.COM"),
+            "forest_trust_contoso.local_fabrikam.com"
+        );
+    }
+
+    #[test]
+    fn forest_trust_vuln_id_empty_strings() {
+        assert_eq!(forest_trust_vuln_id("", ""), "forest_trust__");
+    }
+
+    #[test]
+    fn trust_account_name_basic() {
+        assert_eq!(trust_account_name("FABRIKAM"), "FABRIKAM$");
+    }
+
+    #[test]
+    fn trust_account_name_lowered_input() {
+        assert_eq!(trust_account_name("fabrikam"), "FABRIKAM$");
+    }
+
+    #[test]
+    fn trust_account_name_mixed_case() {
+        assert_eq!(trust_account_name("Contoso"), "CONTOSO$");
+    }
+
+    #[test]
+    fn trust_account_name_empty() {
+        assert_eq!(trust_account_name(""), "$");
+    }
+
+    #[test]
+    fn is_domain_related_exact_match() {
+        assert!(is_domain_related("contoso.local", "contoso.local"));
+    }
+
+    #[test]
+    fn is_domain_related_case_insensitive() {
+        assert!(is_domain_related("CONTOSO.LOCAL", "contoso.local"));
+    }
+
+    #[test]
+    fn is_domain_related_child_of_target() {
+        assert!(is_domain_related("child.contoso.local", "contoso.local"));
+    }
+
+    #[test]
+    fn is_domain_related_parent_of_target() {
+        assert!(is_domain_related("contoso.local", "child.contoso.local"));
+    }
+
+    #[test]
+    fn is_domain_related_unrelated_domains() {
+        assert!(!is_domain_related("fabrikam.com", "contoso.local"));
+    }
+
+    #[test]
+    fn is_domain_related_partial_suffix_no_match() {
+        // "oso.local" ends with "contoso.local" substring but is not a valid child
+        assert!(!is_domain_related("oso.local", "contoso.local"));
+    }
+
+    #[test]
+    fn is_domain_related_empty_strings() {
+        assert!(is_domain_related("", ""));
+    }
+
+    #[test]
+    fn is_domain_related_one_empty() {
+        assert!(!is_domain_related("contoso.local", ""));
+    }
+
+    #[test]
+    fn trust_enum_dedup_key_password() {
+        assert_eq!(
+            trust_enum_dedup_key("Contoso.Local", false),
+            "trust_enum:contoso.local"
+        );
+    }
+
+    #[test]
+    fn trust_enum_dedup_key_hash_retry() {
+        assert_eq!(
+            trust_enum_dedup_key("Contoso.Local", true),
+            "trust_enum_hash:contoso.local"
+        );
+    }
+
+    #[test]
+    fn trust_enum_dedup_key_case_insensitive() {
+        assert_eq!(
+            trust_enum_dedup_key("CONTOSO.LOCAL", false),
+            trust_enum_dedup_key("contoso.local", false)
+        );
+    }
+
+    #[test]
+    fn trust_enum_dedup_key_empty_domain() {
+        assert_eq!(trust_enum_dedup_key("", false), "trust_enum:");
+        assert_eq!(trust_enum_dedup_key("", true), "trust_enum_hash:");
+    }
 }

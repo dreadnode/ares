@@ -290,4 +290,61 @@ mod tests {
         let ci = CredentialInflight::new(5);
         assert!(ci.can_acquire("never_seen@contoso.local").await);
     }
+
+    #[tokio::test]
+    async fn inflight_acquire_up_to_max() {
+        let ci = CredentialInflight::new(5);
+        for _ in 0..5 {
+            assert!(ci.try_acquire("user@domain").await);
+        }
+        assert!(!ci.try_acquire("user@domain").await);
+    }
+
+    #[tokio::test]
+    async fn inflight_release_then_reacquire_cycle() {
+        let ci = CredentialInflight::new(1);
+        for _ in 0..10 {
+            assert!(ci.try_acquire("cycle@test").await);
+            assert!(!ci.try_acquire("cycle@test").await);
+            ci.release("cycle@test").await;
+        }
+    }
+
+    #[tokio::test]
+    async fn inflight_many_independent_keys() {
+        let ci = CredentialInflight::new(1);
+        for i in 0..100 {
+            let key = format!("user{}@domain", i);
+            assert!(ci.try_acquire(&key).await);
+        }
+        // All at limit
+        for i in 0..100 {
+            let key = format!("user{}@domain", i);
+            assert!(!ci.try_acquire(&key).await);
+        }
+    }
+
+    #[tokio::test]
+    async fn inflight_partial_release() {
+        let ci = CredentialInflight::new(3);
+        assert!(ci.try_acquire("a@b").await); // count=1
+        assert!(ci.try_acquire("a@b").await); // count=2
+        assert!(ci.try_acquire("a@b").await); // count=3
+        assert!(!ci.try_acquire("a@b").await);
+
+        ci.release("a@b").await; // count=2
+        assert!(ci.try_acquire("a@b").await); // count=3 again
+        assert!(!ci.try_acquire("a@b").await);
+
+        ci.release("a@b").await; // count=2
+        ci.release("a@b").await; // count=1
+        assert!(ci.can_acquire("a@b").await);
+    }
+
+    #[tokio::test]
+    async fn inflight_zero_max_always_rejects() {
+        let ci = CredentialInflight::new(0);
+        assert!(!ci.try_acquire("any@key").await);
+        assert!(!ci.can_acquire("any@key").await);
+    }
 }

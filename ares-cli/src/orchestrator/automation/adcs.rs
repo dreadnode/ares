@@ -9,6 +9,14 @@ use tracing::{info, warn};
 use crate::orchestrator::dispatcher::Dispatcher;
 use crate::orchestrator::state::*;
 
+/// Extract domain from an ADCS host's FQDN.
+/// e.g. "braavos.essos.local" -> "essos.local"
+fn extract_domain_from_fqdn(fqdn: &str) -> Option<String> {
+    fqdn.to_lowercase()
+        .split_once('.')
+        .map(|(_, d)| d.to_string())
+}
+
 /// Detects ADCS servers by looking for CertEnroll shares and dispatches certipy_find.
 /// Interval: 30s. Matches Python `_auto_adcs_enumeration`.
 pub async fn auto_adcs_enumeration(
@@ -56,11 +64,7 @@ pub async fn auto_adcs_enumeration(
                         .hosts
                         .iter()
                         .find(|h| h.ip == s.host || h.hostname.to_lowercase() == host_lower)
-                        .and_then(|h| {
-                            // Extract domain from FQDN: braavos.essos.local → essos.local
-                            let fqdn = h.hostname.to_lowercase();
-                            fqdn.split_once('.').map(|(_, d)| d.to_string())
-                        })
+                        .and_then(|h| extract_domain_from_fqdn(&h.hostname))
                         .and_then(|d| {
                             // Verify it's a known domain
                             if state.domains.iter().any(|known| known.to_lowercase() == d) {
@@ -109,5 +113,50 @@ pub async fn auto_adcs_enumeration(
                 Err(e) => warn!(err = %e, "Failed to dispatch ADCS enumeration"),
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extract_domain_from_fqdn_typical() {
+        assert_eq!(
+            extract_domain_from_fqdn("braavos.essos.local"),
+            Some("essos.local".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_domain_from_fqdn_nested() {
+        assert_eq!(
+            extract_domain_from_fqdn("host.child.contoso.local"),
+            Some("child.contoso.local".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_domain_from_fqdn_case_insensitive() {
+        assert_eq!(
+            extract_domain_from_fqdn("DC01.CONTOSO.LOCAL"),
+            Some("contoso.local".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_domain_from_fqdn_bare_hostname() {
+        assert_eq!(extract_domain_from_fqdn("dc01"), None);
+    }
+
+    #[test]
+    fn extract_domain_from_fqdn_empty() {
+        assert_eq!(extract_domain_from_fqdn(""), None);
+    }
+
+    #[test]
+    fn extract_domain_from_fqdn_trailing_dot() {
+        // "host." splits into ("host", "") -> Some("")
+        assert_eq!(extract_domain_from_fqdn("host."), Some("".to_string()));
     }
 }
