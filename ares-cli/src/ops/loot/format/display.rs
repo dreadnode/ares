@@ -709,9 +709,7 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    // -----------------------------------------------------------------------
     // Helper: build a minimal SharedRedTeamState for testing
-    // -----------------------------------------------------------------------
 
     fn empty_state() -> SharedRedTeamState {
         SharedRedTeamState::new("op-test-001".to_string())
@@ -747,9 +745,7 @@ mod tests {
         }
     }
 
-    // -----------------------------------------------------------------------
     // capitalize
-    // -----------------------------------------------------------------------
 
     #[test]
     fn capitalize_normal() {
@@ -771,9 +767,7 @@ mod tests {
         assert_eq!(capitalize("a"), "A");
     }
 
-    // -----------------------------------------------------------------------
     // format_vuln_details
-    // -----------------------------------------------------------------------
 
     #[test]
     fn format_vuln_details_empty() {
@@ -831,9 +825,7 @@ mod tests {
         assert!(alpha_pos < zebra_pos);
     }
 
-    // -----------------------------------------------------------------------
     // format_timeline_timestamp
-    // -----------------------------------------------------------------------
 
     #[test]
     fn format_timeline_timestamp_rfc3339() {
@@ -867,9 +859,7 @@ mod tests {
         assert_eq!(result, &long[..23]);
     }
 
-    // -----------------------------------------------------------------------
     // extract_mitre_from_event
-    // -----------------------------------------------------------------------
 
     #[test]
     fn extract_mitre_from_event_array() {
@@ -907,9 +897,7 @@ mod tests {
         assert_eq!(result, "");
     }
 
-    // -----------------------------------------------------------------------
     // mitre_technique_name
-    // -----------------------------------------------------------------------
 
     #[test]
     fn mitre_technique_name_known() {
@@ -925,9 +913,7 @@ mod tests {
         assert_eq!(mitre_technique_name(""), "");
     }
 
-    // -----------------------------------------------------------------------
     // resolve_domain_fqdn
-    // -----------------------------------------------------------------------
 
     #[test]
     fn resolve_domain_fqdn_already_fqdn() {
@@ -974,9 +960,7 @@ mod tests {
         assert_eq!(resolve_domain_fqdn("CONTOSO.LOCAL", &map), "contoso.local");
     }
 
-    // -----------------------------------------------------------------------
     // build_domain_achievements
-    // -----------------------------------------------------------------------
 
     #[test]
     fn build_domain_achievements_empty() {
@@ -1110,9 +1094,7 @@ mod tests {
         assert!(achievements.is_empty());
     }
 
-    // -----------------------------------------------------------------------
     // Domain/forest structure computation (inline in print_loot_human)
-    // -----------------------------------------------------------------------
 
     /// Extract the domain/forest structure logic into a helper we can test.
     fn compute_forest_structure(

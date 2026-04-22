@@ -236,8 +236,6 @@ struct LapsWork {
 mod tests {
     use super::*;
 
-    // ─── is_laps_candidate ──────────────────────────────────────────────────
-
     #[test]
     fn is_laps_candidate_laps_abuse() {
         assert!(is_laps_candidate("laps_abuse"));
@@ -270,14 +268,10 @@ mod tests {
         assert!(!is_laps_candidate(""));
     }
 
-    // ─── DEDUP_LAPS constant ────────────────────────────────────────────────
-
     #[test]
     fn dedup_laps_value() {
         assert_eq!(DEDUP_LAPS, "laps_extract");
     }
-
-    // ─── dedup key construction ─────────────────────────────────────────────
 
     #[test]
     fn vuln_dedup_key_format() {

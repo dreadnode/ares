@@ -246,8 +246,6 @@ struct GmsaWork {
 mod tests {
     use super::*;
 
-    // ─── is_gmsa_account ────────────────────────────────────────────────────
-
     #[test]
     fn is_gmsa_account_managed_service_description() {
         assert!(is_gmsa_account(
@@ -304,8 +302,6 @@ mod tests {
         assert!(!is_gmsa_account("svc_backup$", ""));
     }
 
-    // ─── is_gmsa_vuln_type ──────────────────────────────────────────────────
-
     #[test]
     fn is_gmsa_vuln_type_gmsa() {
         assert!(is_gmsa_vuln_type("gmsa"));
@@ -337,8 +333,6 @@ mod tests {
         assert!(!is_gmsa_vuln_type("gmsa_something_else"));
         assert!(!is_gmsa_vuln_type(""));
     }
-
-    // ─── dedup key construction ─────────────────────────────────────────────
 
     #[test]
     fn dedup_gmsa_accounts_value() {

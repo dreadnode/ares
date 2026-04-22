@@ -550,8 +550,7 @@ mod tests {
     #[test]
     fn lookup_model_cost_exact_match() {
         let result = lookup_model_cost("gpt-4o");
-        assert!(result.is_some());
-        let (input, output) = result.unwrap();
+        let (input, output) = result.expect("gpt-4o should have known cost");
         assert!((input - 2.50).abs() < 0.001);
         assert!((output - 10.0).abs() < 0.001);
     }
@@ -864,8 +863,7 @@ mod tests {
             )]),
         };
         let (total, breakdown, unpriced) = estimate_usage_cost(&usage);
-        assert!(total.is_some());
-        assert_eq!(total.unwrap(), 0.0);
+        assert_eq!(total.expect("total should be set"), 0.0);
         assert_eq!(breakdown.len(), 1);
         assert!(unpriced.is_empty());
     }
@@ -927,8 +925,7 @@ mod tests {
             )]),
         };
         let (total, breakdown, unpriced) = estimate_usage_cost(&usage);
-        assert!(total.is_some());
-        let cost = total.unwrap();
+        let cost = total.expect("total should be set");
         // gpt-4o: 2.50/M input + 10.0/M output
         // 1M * 2.50/1M + 0.5M * 10.0/1M = 2.50 + 5.0 = 7.50
         assert!((cost - 7.50).abs() < 0.01);
@@ -939,8 +936,7 @@ mod tests {
     #[test]
     fn lookup_model_cost_prefixed_openai() {
         let result = lookup_model_cost("openai/gpt-4o-mini");
-        assert!(result.is_some());
-        let (input, output) = result.unwrap();
+        let (input, output) = result.expect("gpt-4o-mini should have known cost");
         assert!((input - 0.15).abs() < 0.001);
         assert!((output - 0.60).abs() < 0.001);
     }
@@ -948,8 +944,7 @@ mod tests {
     #[test]
     fn lookup_model_cost_claude_opus() {
         let result = lookup_model_cost("claude-opus-4-20250514");
-        assert!(result.is_some());
-        let (input, output) = result.unwrap();
+        let (input, output) = result.expect("claude-opus should have known cost");
         assert!((input - 15.0).abs() < 0.001);
         assert!((output - 75.0).abs() < 0.001);
     }
@@ -957,8 +952,7 @@ mod tests {
     #[test]
     fn lookup_model_cost_haiku() {
         let result = lookup_model_cost("claude-haiku-3-5-20241022");
-        assert!(result.is_some());
-        let (input, output) = result.unwrap();
+        let (input, output) = result.expect("claude-haiku should have known cost");
         assert!((input - 0.80).abs() < 0.001);
         assert!((output - 4.0).abs() < 0.001);
     }

@@ -248,8 +248,10 @@ mod tests {
         let a = alert("fp1", "DC01");
         c.add_alert(&a);
         let cluster = c.get_cluster_for_alert(&a);
-        assert!(cluster.is_some());
-        assert_eq!(cluster.unwrap().cluster_id, "cluster-0001");
+        assert_eq!(
+            cluster.expect("cluster should exist").cluster_id,
+            "cluster-0001"
+        );
     }
 
     #[test]

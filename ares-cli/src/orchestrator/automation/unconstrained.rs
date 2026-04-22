@@ -455,9 +455,7 @@ mod tests {
     use std::time::Duration;
     use tokio::time::Instant;
 
-    // -----------------------------------------------------------------------
     // hostname resolution logic
-    // -----------------------------------------------------------------------
 
     /// Simulate the hostname resolution logic from the main function.
     fn resolve_host_ip(account_name: &str, hosts: &[(String, String)]) -> Option<String> {
@@ -577,9 +575,7 @@ mod tests {
         );
     }
 
-    // -----------------------------------------------------------------------
     // is_machine_account
-    // -----------------------------------------------------------------------
 
     #[test]
     fn is_machine_account() {
@@ -598,9 +594,7 @@ mod tests {
         assert_eq!("WEB-SRV$".trim_end_matches('$').to_lowercase(), "web-srv");
     }
 
-    // -----------------------------------------------------------------------
     // user account handling
-    // -----------------------------------------------------------------------
 
     #[test]
     fn user_account_gets_dc_ip_as_target() {
@@ -609,9 +603,7 @@ mod tests {
         assert!(!is_machine);
     }
 
-    // -----------------------------------------------------------------------
     // dedup key format
-    // -----------------------------------------------------------------------
 
     #[test]
     fn dedup_key_format_user_account() {
@@ -634,9 +626,7 @@ mod tests {
         assert_ne!(key1, key2);
     }
 
-    // -----------------------------------------------------------------------
     // PhaseState
-    // -----------------------------------------------------------------------
 
     #[test]
     fn phase_state_defaults() {
@@ -702,9 +692,7 @@ mod tests {
         assert!(!phase.completed);
     }
 
-    // -----------------------------------------------------------------------
     // Coercion timing logic
-    // -----------------------------------------------------------------------
 
     #[test]
     fn coerce_to_dump_delay_not_elapsed() {
@@ -719,9 +707,7 @@ mod tests {
         assert!(elapsed < COERCE_TO_DUMP_DELAY);
     }
 
-    // -----------------------------------------------------------------------
     // Dump retry timing logic
-    // -----------------------------------------------------------------------
 
     #[test]
     fn dump_retry_eligible_no_last_dump() {
@@ -750,9 +736,7 @@ mod tests {
         assert!(elapsed < DUMP_RETRY_DELAY);
     }
 
-    // -----------------------------------------------------------------------
     // Constants
-    // -----------------------------------------------------------------------
 
     #[test]
     fn max_dump_attempts_constant() {
@@ -769,9 +753,7 @@ mod tests {
         assert_eq!(DUMP_RETRY_DELAY, Duration::from_secs(60));
     }
 
-    // -----------------------------------------------------------------------
     // Action enum
-    // -----------------------------------------------------------------------
 
     #[test]
     fn action_debug_format() {
@@ -780,9 +762,7 @@ mod tests {
         assert_eq!(format!("{:?}", Action::LlmExploit), "LlmExploit");
     }
 
-    // -----------------------------------------------------------------------
     // UnconstrainedWork construction patterns
-    // -----------------------------------------------------------------------
 
     #[test]
     fn unconstrained_work_machine_coerce() {
@@ -866,15 +846,15 @@ mod tests {
 
         assert!(!work.account_name.ends_with('$'));
         assert!(matches!(work.action, Action::LlmExploit));
-        assert!(work._dedup_key.is_some());
-        assert_eq!(work._dedup_key.as_ref().unwrap(), "uc_user:svc_admin");
+        assert_eq!(
+            work._dedup_key.as_ref().expect("dedup key should be set"),
+            "uc_user:svc_admin"
+        );
         // For user accounts, host_ip matches dc_ip
         assert_eq!(work.host_ip, work.dc_ip.as_ref().unwrap().as_str());
     }
 
-    // -----------------------------------------------------------------------
     // Phase state machine transitions
-    // -----------------------------------------------------------------------
 
     #[test]
     fn phase_transition_none_to_coerce() {

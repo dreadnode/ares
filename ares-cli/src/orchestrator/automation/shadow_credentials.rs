@@ -255,9 +255,7 @@ mod tests {
     use super::*;
     use std::collections::HashMap;
 
-    // -----------------------------------------------------------------------
     // is_shadow_cred_candidate
-    // -----------------------------------------------------------------------
 
     #[test]
     fn is_shadow_cred_candidate_positive() {
@@ -305,9 +303,7 @@ mod tests {
         assert!(!is_shadow_cred_candidate(" genericall "));
     }
 
-    // -----------------------------------------------------------------------
     // extract_source_user
-    // -----------------------------------------------------------------------
 
     #[test]
     fn extract_source_user_primary_key() {
@@ -386,9 +382,7 @@ mod tests {
         assert_eq!(extract_source_user(&details), None);
     }
 
-    // -----------------------------------------------------------------------
     // extract_target_user
-    // -----------------------------------------------------------------------
 
     #[test]
     fn extract_target_user_primary_key() {
@@ -465,9 +459,7 @@ mod tests {
         assert_eq!(extract_target_user(&details), None);
     }
 
-    // -----------------------------------------------------------------------
     // dedup key format
-    // -----------------------------------------------------------------------
 
     #[test]
     fn dedup_key_format() {
@@ -489,9 +481,7 @@ mod tests {
         assert!(key.starts_with("shadow_creds:"));
     }
 
-    // -----------------------------------------------------------------------
     // ShadowCredWork construction patterns
-    // -----------------------------------------------------------------------
 
     #[test]
     fn shadow_cred_work_with_credential() {
@@ -550,8 +540,10 @@ mod tests {
         };
 
         assert!(work.credential.is_none());
-        assert!(work.hash.is_some());
-        assert_eq!(work.hash.as_ref().unwrap().hash_type, "NTLM");
+        assert_eq!(
+            work.hash.as_ref().expect("hash should be set").hash_type,
+            "NTLM"
+        );
     }
 
     #[test]
@@ -580,9 +572,7 @@ mod tests {
         assert!(work.dc_ip.is_none());
     }
 
-    // -----------------------------------------------------------------------
     // Integration-like: combined extraction from realistic vuln details
-    // -----------------------------------------------------------------------
 
     #[test]
     fn full_shadow_cred_extraction() {

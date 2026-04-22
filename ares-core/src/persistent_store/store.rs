@@ -602,8 +602,6 @@ fn is_ip(value: &str) -> bool {
 mod tests {
     use super::*;
 
-    // ─── sha256_prefix ──────────────────────────────────────────────────────
-
     #[test]
     fn sha256_prefix_returns_correct_length() {
         let result = sha256_prefix("P@ssw0rd!", 16); // pragma: allowlist secret
@@ -658,8 +656,6 @@ mod tests {
             assert_eq!(result.len(), len, "Expected length {len}");
         }
     }
-
-    // ─── is_ip ──────────────────────────────────────────────────────────────
 
     #[test]
     fn is_ip_valid_ipv4() {

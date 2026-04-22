@@ -393,8 +393,6 @@ mod tests {
         assert!((t.enqueue_time - t2.enqueue_time).abs() < f64::EPSILON);
     }
 
-    // --- Additional coverage tests ---
-
     #[test]
     fn score_zero_priority() {
         let t = make_task(0, 1000.0);

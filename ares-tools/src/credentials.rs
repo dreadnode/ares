@@ -98,8 +98,6 @@ pub fn kerberos_env(ticket_path: &str) -> (String, String) {
 mod tests {
     use super::*;
 
-    // --- impacket_target ---
-
     #[test]
     fn impacket_target_with_domain_and_password() {
         let result = impacket_target(Some("CONTOSO"), "admin", Some("P@ss"), "10.0.0.1");
@@ -130,8 +128,6 @@ mod tests {
         assert_eq!(result, "user@target");
     }
 
-    // --- hash_args ---
-
     #[test]
     fn hash_args_plain_nthash() {
         let args = hash_args("aabbccdd");
@@ -143,8 +139,6 @@ mod tests {
         let args = hash_args("aad3b435:aabbccdd");
         assert_eq!(args, vec!["-hashes", "aad3b435:aabbccdd"]);
     }
-
-    // --- netexec_creds ---
 
     #[test]
     fn netexec_creds_password_auth() {
@@ -185,8 +179,6 @@ mod tests {
         assert!(args.is_empty());
     }
 
-    // --- bloodyad_creds ---
-
     #[test]
     fn bloodyad_creds_builds_correct_args() {
         let args = bloodyad_creds("contoso.local", "admin", "P@ssw0rd", "10.0.0.1");
@@ -204,8 +196,6 @@ mod tests {
             ]
         );
     }
-
-    // --- impacket_auth ---
 
     #[test]
     fn impacket_auth_with_hash() {
@@ -233,8 +223,6 @@ mod tests {
         assert_eq!(target, "user@host");
         assert!(extra.is_empty());
     }
-
-    // --- kerberos_env ---
 
     #[test]
     fn kerberos_env_builds_tuple() {
