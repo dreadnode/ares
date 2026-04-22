@@ -6,8 +6,10 @@ use redis::AsyncCommands;
 use ares_core::models::Host;
 use ares_core::state::{self, RedisStateReader};
 
+use redis::aio::ConnectionLike;
+
 use crate::orchestrator::state::SharedState;
-use crate::orchestrator::task_queue::TaskQueue;
+use crate::orchestrator::task_queue::TaskQueueCore;
 
 use super::is_aws_hostname;
 
@@ -22,7 +24,11 @@ impl SharedState {
     /// When the hostname is a valid AD FQDN (e.g. `dc01.contoso.local`), the
     /// domain suffix is automatically extracted and added to `state.domains`
     /// (matches Python's `add_host()` behavior).
-    pub async fn publish_host(&self, queue: &TaskQueue, host: Host) -> Result<bool> {
+    pub async fn publish_host(
+        &self,
+        queue: &TaskQueueCore<impl ConnectionLike + Clone + Send + Sync + 'static>,
+        host: Host,
+    ) -> Result<bool> {
         // Normalize hostname: strip trailing dots and AWS internal names
         let mut host = host;
         host.hostname = host.hostname.trim_end_matches('.').to_lowercase();
@@ -241,7 +247,11 @@ impl SharedState {
     /// If the hostname is empty or not a valid AD FQDN, we fall back to the first domain
     /// already in state (from the target_domain config). This ensures DCs discovered by
     /// recon are registered even before their FQDN is known.
-    pub(crate) async fn register_dc(&self, queue: &TaskQueue, host: &Host) -> Result<()> {
+    pub(crate) async fn register_dc(
+        &self,
+        queue: &TaskQueueCore<impl ConnectionLike + Clone + Send + Sync + 'static>,
+        host: &Host,
+    ) -> Result<()> {
         // Extract domain from hostname — prefer a real FQDN
         let raw_domain = if !host.hostname.is_empty() {
             host.hostname
@@ -338,5 +348,240 @@ impl SharedState {
         );
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::orchestrator::state::SharedState;
+    use crate::orchestrator::task_queue::TaskQueueCore;
+    use ares_core::state::mock_redis::MockRedisConnection;
+
+    fn mock_queue() -> TaskQueueCore<MockRedisConnection> {
+        TaskQueueCore::from_connection(MockRedisConnection::new())
+    }
+
+    fn make_host(ip: &str, hostname: &str, is_dc: bool) -> Host {
+        Host {
+            ip: ip.to_string(),
+            hostname: hostname.to_string(),
+            os: String::new(),
+            roles: vec![],
+            services: vec![],
+            is_dc,
+            owned: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn publish_host_adds_new_host() {
+        let state = SharedState::new("op-1".to_string());
+        let q = mock_queue();
+
+        let host = make_host("10.0.0.5", "srv01.contoso.local", false);
+        let added = state.publish_host(&q, host).await.unwrap();
+        assert!(added);
+
+        let s = state.inner.read().await;
+        assert_eq!(s.hosts.len(), 1);
+        assert_eq!(s.hosts[0].ip, "10.0.0.5");
+        assert_eq!(s.hosts[0].hostname, "srv01.contoso.local");
+    }
+
+    #[tokio::test]
+    async fn publish_host_extracts_domain_from_fqdn() {
+        let state = SharedState::new("op-1".to_string());
+        let q = mock_queue();
+
+        let host = make_host("10.0.0.5", "srv01.contoso.local", false);
+        state.publish_host(&q, host).await.unwrap();
+
+        let s = state.inner.read().await;
+        assert!(s.domains.contains(&"contoso.local".to_string()));
+    }
+
+    #[tokio::test]
+    async fn publish_host_strips_aws_hostname() {
+        let state = SharedState::new("op-1".to_string());
+        let q = mock_queue();
+
+        let host = make_host(
+            "10.1.2.150",
+            "ip-10-1-2-150.us-west-2.compute.internal",
+            false,
+        );
+        state.publish_host(&q, host).await.unwrap();
+
+        let s = state.inner.read().await;
+        assert_eq!(s.hosts[0].hostname, "");
+    }
+
+    #[tokio::test]
+    async fn publish_host_merges_services() {
+        let state = SharedState::new("op-1".to_string());
+        let q = mock_queue();
+
+        let mut host1 = make_host("10.0.0.5", "srv01.contoso.local", false);
+        host1.services = vec!["445/tcp".to_string()];
+        state.publish_host(&q, host1).await.unwrap();
+
+        let mut host2 = make_host("10.0.0.5", "", false);
+        host2.services = vec!["445/tcp".to_string(), "139/tcp".to_string()];
+        state.publish_host(&q, host2).await.unwrap();
+
+        let s = state.inner.read().await;
+        assert_eq!(s.hosts.len(), 1);
+        assert!(s.hosts[0].services.contains(&"445/tcp".to_string()));
+        assert!(s.hosts[0].services.contains(&"139/tcp".to_string()));
+    }
+
+    #[tokio::test]
+    async fn publish_host_merges_hostname() {
+        let state = SharedState::new("op-1".to_string());
+        let q = mock_queue();
+
+        // First add host without hostname
+        let host1 = make_host("10.0.0.5", "", false);
+        state.publish_host(&q, host1).await.unwrap();
+
+        // Then add same IP with hostname — should merge
+        let host2 = make_host("10.0.0.5", "srv01.contoso.local", false);
+        state.publish_host(&q, host2).await.unwrap();
+
+        let s = state.inner.read().await;
+        assert_eq!(s.hosts.len(), 1);
+        assert_eq!(s.hosts[0].hostname, "srv01.contoso.local");
+    }
+
+    #[tokio::test]
+    async fn publish_host_upgrades_dc_status() {
+        let state = SharedState::new("op-1".to_string());
+        let q = mock_queue();
+
+        // Add as normal host first, then add with DC status
+        {
+            let mut s = state.inner.write().await;
+            s.domains.push("contoso.local".to_string());
+        }
+        let host1 = make_host("10.0.0.1", "", false);
+        state.publish_host(&q, host1).await.unwrap();
+
+        let host2 = make_host("10.0.0.1", "dc01.contoso.local", true);
+        state.publish_host(&q, host2).await.unwrap();
+
+        let s = state.inner.read().await;
+        assert_eq!(s.hosts.len(), 1);
+        assert!(s.hosts[0].is_dc);
+        assert!(s.domain_controllers.contains_key("contoso.local"));
+    }
+
+    #[tokio::test]
+    async fn publish_host_no_change_returns_false() {
+        let state = SharedState::new("op-1".to_string());
+        let q = mock_queue();
+
+        let host1 = make_host("10.0.0.5", "srv01.contoso.local", false);
+        assert!(state.publish_host(&q, host1).await.unwrap());
+
+        // Identical host — no new data to merge
+        let host2 = make_host("10.0.0.5", "", false);
+        let result = state.publish_host(&q, host2).await.unwrap();
+        assert!(!result);
+    }
+
+    #[tokio::test]
+    async fn publish_dc_host_registers_dc() {
+        let state = SharedState::new("op-1".to_string());
+        let q = mock_queue();
+
+        let host = make_host("10.0.0.1", "dc01.contoso.local", true);
+        state.publish_host(&q, host).await.unwrap();
+
+        let s = state.inner.read().await;
+        assert!(s.hosts[0].is_dc);
+        assert_eq!(
+            s.domain_controllers.get("contoso.local"),
+            Some(&"10.0.0.1".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn register_dc_adds_domain() {
+        let state = SharedState::new("op-1".to_string());
+        let q = mock_queue();
+
+        let host = make_host("10.0.0.1", "dc01.contoso.local", true);
+        state.register_dc(&q, &host).await.unwrap();
+
+        let s = state.inner.read().await;
+        assert!(s.domains.contains(&"contoso.local".to_string()));
+        assert_eq!(
+            s.domain_controllers.get("contoso.local"),
+            Some(&"10.0.0.1".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn register_dc_fallback_domain() {
+        let state = SharedState::new("op-1".to_string());
+        let q = mock_queue();
+
+        // Pre-populate a domain so the fallback works
+        {
+            let mut s = state.inner.write().await;
+            s.domains.push("contoso.local".to_string());
+        }
+
+        // Host with no FQDN — should fall back to existing domain
+        let host = make_host("10.0.0.1", "", true);
+        state.register_dc(&q, &host).await.unwrap();
+
+        let s = state.inner.read().await;
+        assert_eq!(
+            s.domain_controllers.get("contoso.local"),
+            Some(&"10.0.0.1".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn register_dc_no_domain_skips() {
+        let state = SharedState::new("op-1".to_string());
+        let q = mock_queue();
+
+        // No domain in state, no FQDN on host — should skip
+        let host = make_host("10.0.0.1", "", true);
+        state.register_dc(&q, &host).await.unwrap();
+
+        let s = state.inner.read().await;
+        assert!(s.domain_controllers.is_empty());
+    }
+
+    #[tokio::test]
+    async fn publish_host_strips_trailing_dot() {
+        let state = SharedState::new("op-1".to_string());
+        let q = mock_queue();
+
+        let host = make_host("10.0.0.5", "srv01.contoso.local.", false);
+        state.publish_host(&q, host).await.unwrap();
+
+        let s = state.inner.read().await;
+        assert_eq!(s.hosts[0].hostname, "srv01.contoso.local");
+    }
+
+    #[tokio::test]
+    async fn publish_host_merges_os() {
+        let state = SharedState::new("op-1".to_string());
+        let q = mock_queue();
+
+        let host1 = make_host("10.0.0.5", "srv01.contoso.local", false);
+        state.publish_host(&q, host1).await.unwrap();
+
+        let mut host2 = make_host("10.0.0.5", "", false);
+        host2.os = "Windows Server 2019".to_string();
+        state.publish_host(&q, host2).await.unwrap();
+
+        let s = state.inner.read().await;
+        assert_eq!(s.hosts[0].os, "Windows Server 2019");
     }
 }

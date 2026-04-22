@@ -8,12 +8,17 @@ use tracing::{debug, info};
 
 use ares_core::state::{self, RedisStateReader};
 
+use redis::aio::ConnectionLike;
+
 use super::{SharedState, ALL_DEDUP_SETS, DEDUP_ACL_STEPS};
-use crate::orchestrator::task_queue::TaskQueue;
+use crate::orchestrator::task_queue::TaskQueueCore;
 
 impl SharedState {
     /// Load state from Redis (called at startup).
-    pub async fn load_from_redis(&self, queue: &TaskQueue) -> Result<()> {
+    pub async fn load_from_redis(
+        &self,
+        queue: &TaskQueueCore<impl ConnectionLike + Clone + Send + Sync + 'static>,
+    ) -> Result<()> {
         let mut conn = queue.connection();
         let operation_id = {
             let state = self.inner.read().await;
@@ -233,8 +238,11 @@ impl SharedState {
         Ok(())
     }
 
-    /// Refresh state from Redis (periodic sync).
-    pub async fn refresh_from_redis(&self, queue: &TaskQueue) -> Result<()> {
+    /// Refresh state from Redis (periodic sync — merges remote data into local state).
+    pub async fn refresh_from_redis(
+        &self,
+        queue: &TaskQueueCore<impl ConnectionLike + Clone + Send + Sync + 'static>,
+    ) -> Result<()> {
         let mut conn = queue.connection();
         let operation_id = {
             let state = self.inner.read().await;
@@ -356,5 +364,192 @@ impl SharedState {
             .collect();
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::orchestrator::state::SharedState;
+    use crate::orchestrator::task_queue::TaskQueueCore;
+    use ares_core::state::mock_redis::MockRedisConnection;
+
+    fn mock_queue() -> TaskQueueCore<MockRedisConnection> {
+        TaskQueueCore::from_connection(MockRedisConnection::new())
+    }
+
+    #[tokio::test]
+    async fn load_from_redis_empty_state() {
+        let state = SharedState::new("op-fresh".to_string());
+        let q = mock_queue();
+
+        // No data in Redis — should succeed and leave state empty
+        state.load_from_redis(&q).await.unwrap();
+
+        let s = state.inner.read().await;
+        assert!(s.credentials.is_empty());
+        assert!(s.hashes.is_empty());
+        assert!(s.hosts.is_empty());
+        assert!(!s.has_domain_admin);
+        assert!(!s.has_golden_ticket);
+    }
+
+    /// Helper to seed the meta key so `exists()` returns true for `load_from_redis`.
+    async fn seed_meta(q: &TaskQueueCore<MockRedisConnection>, op_id: &str) {
+        let reader = RedisStateReader::new(op_id.to_string());
+        let mut conn = q.connection();
+        reader
+            .set_meta_field(&mut conn, "target_ip", &serde_json::json!("10.0.0.1"))
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn load_from_redis_with_seeded_data() {
+        let state = SharedState::new("op-1".to_string());
+        let q = mock_queue();
+
+        // Seed meta so exists() returns true, then publish data
+        seed_meta(&q, "op-1").await;
+
+        let host = ares_core::models::Host {
+            ip: "10.0.0.5".to_string(),
+            hostname: "srv01.contoso.local".to_string(),
+            os: String::new(),
+            roles: vec![],
+            services: vec!["445/tcp".to_string()],
+            is_dc: false,
+            owned: false,
+        };
+        state.publish_host(&q, host).await.unwrap();
+
+        let cred = ares_core::models::Credential {
+            id: "cred-1".to_string(),
+            username: "admin".to_string(),
+            password: "P@ssw0rd".to_string(),
+            domain: "contoso.local".to_string(),
+            source: "test".to_string(),
+            discovered_at: None,
+            is_admin: false,
+            parent_id: None,
+            attack_step: 0,
+        };
+        state.publish_credential(&q, cred).await.unwrap();
+
+        // Now create a fresh state and load from the same Redis
+        let state2 = SharedState::new("op-1".to_string());
+        state2.load_from_redis(&q).await.unwrap();
+
+        let s = state2.inner.read().await;
+        assert_eq!(s.hosts.len(), 1);
+        assert_eq!(s.hosts[0].ip, "10.0.0.5");
+        assert_eq!(s.credentials.len(), 1);
+        assert_eq!(s.credentials[0].username, "admin");
+        assert!(s.domains.contains(&"contoso.local".to_string()));
+    }
+
+    #[tokio::test]
+    async fn load_from_redis_restores_dedup_sets() {
+        let state = SharedState::new("op-1".to_string());
+        let q = mock_queue();
+
+        seed_meta(&q, "op-1").await;
+
+        // Persist a dedup entry
+        state
+            .persist_dedup(&q, "crack_requests", "hash123")
+            .await
+            .unwrap();
+
+        // Load into fresh state
+        let state2 = SharedState::new("op-1".to_string());
+        state2.load_from_redis(&q).await.unwrap();
+
+        let s = state2.inner.read().await;
+        assert!(s.dedup["crack_requests"].contains("hash123"));
+    }
+
+    #[tokio::test]
+    async fn refresh_from_redis_updates_state() {
+        let state = SharedState::new("op-1".to_string());
+        let q = mock_queue();
+
+        // Seed a host via publishing
+        let host = ares_core::models::Host {
+            ip: "10.0.0.5".to_string(),
+            hostname: "srv01.contoso.local".to_string(),
+            os: String::new(),
+            roles: vec![],
+            services: vec![],
+            is_dc: false,
+            owned: false,
+        };
+        state.publish_host(&q, host).await.unwrap();
+
+        // Create a second state that shares the Redis connection but is empty
+        let state2 = SharedState::new("op-1".to_string());
+        assert!(state2.inner.read().await.hosts.is_empty());
+
+        // Refresh should pull data from Redis
+        state2.refresh_from_redis(&q).await.unwrap();
+
+        let s = state2.inner.read().await;
+        assert_eq!(s.hosts.len(), 1);
+        assert_eq!(s.hosts[0].ip, "10.0.0.5");
+    }
+
+    #[tokio::test]
+    async fn load_from_redis_restores_milestones() {
+        let state = SharedState::new("op-1".to_string());
+        let q = mock_queue();
+
+        seed_meta(&q, "op-1").await;
+
+        // Set milestones
+        state.set_golden_ticket(&q, "contoso.local").await.unwrap();
+        state
+            .set_domain_admin(&q, Some("attack chain".to_string()))
+            .await
+            .unwrap();
+
+        // Load into fresh state
+        let state2 = SharedState::new("op-1".to_string());
+        state2.load_from_redis(&q).await.unwrap();
+
+        let s = state2.inner.read().await;
+        assert!(s.has_golden_ticket);
+        assert!(s.has_domain_admin);
+        assert_eq!(s.domain_admin_path.as_deref(), Some("attack chain"));
+    }
+
+    #[tokio::test]
+    async fn load_from_redis_restores_pending_tasks() {
+        let state = SharedState::new("op-1".to_string());
+        let q = mock_queue();
+
+        seed_meta(&q, "op-1").await;
+
+        let task = ares_core::models::TaskInfo {
+            task_id: "task-99".to_string(),
+            task_type: "recon".to_string(),
+            assigned_agent: "scanner".to_string(),
+            status: ares_core::models::TaskStatus::Pending,
+            created_at: chrono::Utc::now(),
+            started_at: None,
+            completed_at: None,
+            last_activity_at: chrono::Utc::now(),
+            params: std::collections::HashMap::new(),
+            result: None,
+            error: None,
+            retry_count: 0,
+            max_retries: 3,
+        };
+        state.track_pending_task(&q, task).await.unwrap();
+
+        let state2 = SharedState::new("op-1".to_string());
+        state2.load_from_redis(&q).await.unwrap();
+
+        let s = state2.inner.read().await;
+        assert!(s.pending_tasks.contains_key("task-99"));
     }
 }

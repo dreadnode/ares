@@ -6,8 +6,10 @@ use redis::AsyncCommands;
 use ares_core::models::{Share, User, VulnerabilityInfo};
 use ares_core::state::{self, RedisStateReader};
 
+use redis::aio::ConnectionLike;
+
 use crate::orchestrator::state::{SharedState, KEY_VULN_QUEUE};
-use crate::orchestrator::task_queue::TaskQueue;
+use crate::orchestrator::task_queue::TaskQueueCore;
 
 impl SharedState {
     /// Add a user to state and Redis (with dedup).
@@ -18,7 +20,11 @@ impl SharedState {
     /// from creating phantom users attributed to the wrong domain — e.g.
     /// a user in `child.contoso.local` appearing as `fabrikam.local\user`
     /// when enumerated via a cross-forest GC query.
-    pub async fn publish_user(&self, queue: &TaskQueue, user: User) -> Result<bool> {
+    pub async fn publish_user(
+        &self,
+        queue: &TaskQueueCore<impl ConnectionLike + Clone + Send + Sync + 'static>,
+        user: User,
+    ) -> Result<bool> {
         // Check for duplicate in memory (exact match or cross-domain trust match)
         {
             let state = self.inner.read().await;
@@ -81,7 +87,7 @@ impl SharedState {
     /// hardcoded priority before insertion into the exploitation ZSET.
     pub async fn publish_vulnerability(
         &self,
-        queue: &TaskQueue,
+        queue: &TaskQueueCore<impl ConnectionLike + Clone + Send + Sync + 'static>,
         vuln: VulnerabilityInfo,
     ) -> Result<bool> {
         self.publish_vulnerability_with_strategy(queue, vuln, None)
@@ -91,7 +97,7 @@ impl SharedState {
     /// Publish a vulnerability with optional strategy-based priority override.
     pub async fn publish_vulnerability_with_strategy(
         &self,
-        queue: &TaskQueue,
+        queue: &TaskQueueCore<impl ConnectionLike + Clone + Send + Sync + 'static>,
         mut vuln: VulnerabilityInfo,
         strategy: Option<&crate::orchestrator::strategy::Strategy>,
     ) -> Result<bool> {
@@ -137,7 +143,11 @@ impl SharedState {
     }
 
     /// Add a share to state and Redis (with dedup).
-    pub async fn publish_share(&self, queue: &TaskQueue, share: Share) -> Result<bool> {
+    pub async fn publish_share(
+        &self,
+        queue: &TaskQueueCore<impl ConnectionLike + Clone + Send + Sync + 'static>,
+        share: Share,
+    ) -> Result<bool> {
         // Check for duplicate in memory
         {
             let state = self.inner.read().await;
@@ -166,7 +176,7 @@ impl SharedState {
     /// Persist a timeline event to Redis and add MITRE techniques.
     pub async fn persist_timeline_event(
         &self,
-        queue: &TaskQueue,
+        queue: &TaskQueueCore<impl ConnectionLike + Clone + Send + Sync + 'static>,
         event: &serde_json::Value,
         mitre_techniques: &[String],
     ) -> Result<()> {
@@ -191,7 +201,7 @@ impl SharedState {
     /// Key: `ares:op:{id}:pending_tasks` — matches Python's state_backend.
     pub async fn track_pending_task(
         &self,
-        queue: &TaskQueue,
+        queue: &TaskQueueCore<impl ConnectionLike + Clone + Send + Sync + 'static>,
         task: ares_core::models::TaskInfo,
     ) -> Result<()> {
         let operation_id = {
@@ -223,7 +233,7 @@ impl SharedState {
     /// Keys: `ares:op:{id}:pending_tasks`, `ares:op:{id}:completed_tasks`
     pub async fn complete_task(
         &self,
-        queue: &TaskQueue,
+        queue: &TaskQueueCore<impl ConnectionLike + Clone + Send + Sync + 'static>,
         task_id: &str,
         result: ares_core::models::TaskResult,
     ) -> Result<()> {
@@ -266,7 +276,7 @@ impl SharedState {
     /// Key: `ares:op:{id}:netbios_map` — matches Python's `HSET` on netbios_map.
     pub async fn publish_netbios(
         &self,
-        queue: &TaskQueue,
+        queue: &TaskQueueCore<impl ConnectionLike + Clone + Send + Sync + 'static>,
         netbios: &str,
         fqdn: &str,
     ) -> Result<()> {
@@ -294,7 +304,7 @@ impl SharedState {
     /// Add a trust relationship to state and Redis.
     pub async fn publish_trust_info(
         &self,
-        queue: &TaskQueue,
+        queue: &TaskQueueCore<impl ConnectionLike + Clone + Send + Sync + 'static>,
         trust: ares_core::models::TrustInfo,
     ) -> Result<bool> {
         let operation_id = {
@@ -323,4 +333,328 @@ fn are_in_same_forest(a: &str, b: &str) -> bool {
         return true;
     }
     a.ends_with(&format!(".{b}")) || b.ends_with(&format!(".{a}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::orchestrator::state::SharedState;
+    use crate::orchestrator::task_queue::TaskQueueCore;
+    use ares_core::models::{TaskInfo, TrustInfo, VulnerabilityInfo};
+    use ares_core::state::mock_redis::MockRedisConnection;
+    use chrono::Utc;
+    use std::collections::HashMap;
+
+    fn mock_queue() -> TaskQueueCore<MockRedisConnection> {
+        TaskQueueCore::from_connection(MockRedisConnection::new())
+    }
+
+    fn make_user(username: &str, domain: &str) -> User {
+        User {
+            username: username.to_string(),
+            domain: domain.to_string(),
+            description: String::new(),
+            is_admin: false,
+            source: "test".to_string(),
+        }
+    }
+
+    fn make_vuln(vuln_id: &str, vuln_type: &str, target: &str) -> VulnerabilityInfo {
+        VulnerabilityInfo {
+            vuln_id: vuln_id.to_string(),
+            vuln_type: vuln_type.to_string(),
+            target: target.to_string(),
+            discovered_by: "test".to_string(),
+            discovered_at: Utc::now(),
+            details: HashMap::new(),
+            recommended_agent: "exploit".to_string(),
+            priority: 50,
+        }
+    }
+
+    fn make_share(host: &str, name: &str) -> Share {
+        Share {
+            host: host.to_string(),
+            name: name.to_string(),
+            permissions: "READ".to_string(),
+            comment: String::new(),
+        }
+    }
+
+    fn make_task_info(task_id: &str, task_type: &str) -> TaskInfo {
+        TaskInfo {
+            task_id: task_id.to_string(),
+            task_type: task_type.to_string(),
+            assigned_agent: "recon".to_string(),
+            status: ares_core::models::TaskStatus::Pending,
+            created_at: Utc::now(),
+            started_at: None,
+            completed_at: None,
+            last_activity_at: Utc::now(),
+            params: HashMap::new(),
+            result: None,
+            error: None,
+            retry_count: 0,
+            max_retries: 3,
+        }
+    }
+
+    fn make_trust(domain: &str) -> TrustInfo {
+        TrustInfo {
+            domain: domain.to_string(),
+            flat_name: String::new(),
+            direction: "bidirectional".to_string(),
+            trust_type: "forest".to_string(),
+            sid_filtering: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn publish_user_adds_to_state() {
+        let state = SharedState::new("op-1".to_string());
+        let q = mock_queue();
+
+        let user = make_user("alice", "contoso.local");
+        let added = state.publish_user(&q, user).await.unwrap();
+        assert!(added);
+
+        let s = state.inner.read().await;
+        assert_eq!(s.users.len(), 1);
+        assert_eq!(s.users[0].username, "alice");
+        assert_eq!(s.users[0].domain, "contoso.local");
+    }
+
+    #[tokio::test]
+    async fn publish_user_dedup_exact() {
+        let state = SharedState::new("op-1".to_string());
+        let q = mock_queue();
+
+        let user1 = make_user("alice", "contoso.local");
+        let user2 = make_user("alice", "contoso.local");
+        assert!(state.publish_user(&q, user1).await.unwrap());
+        assert!(!state.publish_user(&q, user2).await.unwrap());
+
+        let s = state.inner.read().await;
+        assert_eq!(s.users.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn publish_user_dedup_cross_domain_with_trust() {
+        let state = SharedState::new("op-1".to_string());
+        let q = mock_queue();
+
+        // Establish trust between contoso.local and fabrikam.local
+        let trust = make_trust("fabrikam.local");
+        state.publish_trust_info(&q, trust).await.unwrap();
+
+        // Add user in contoso.local
+        let user1 = make_user("alice", "contoso.local");
+        assert!(state.publish_user(&q, user1).await.unwrap());
+
+        // Same username in trusted domain should be deduped
+        let user2 = make_user("alice", "fabrikam.local");
+        assert!(!state.publish_user(&q, user2).await.unwrap());
+
+        let s = state.inner.read().await;
+        assert_eq!(s.users.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn publish_user_different_domains_no_trust() {
+        let state = SharedState::new("op-1".to_string());
+        let q = mock_queue();
+
+        // No trust established — same username in different domains should both be added
+        let user1 = make_user("alice", "contoso.local");
+        let user2 = make_user("alice", "fabrikam.local");
+        assert!(state.publish_user(&q, user1).await.unwrap());
+        assert!(state.publish_user(&q, user2).await.unwrap());
+
+        let s = state.inner.read().await;
+        assert_eq!(s.users.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn publish_vulnerability_adds_to_state() {
+        let state = SharedState::new("op-1".to_string());
+        let q = mock_queue();
+
+        let vuln = make_vuln("VULN-001", "smb_signing", "10.0.0.1");
+        let added = state.publish_vulnerability(&q, vuln).await.unwrap();
+        assert!(added);
+
+        let s = state.inner.read().await;
+        assert!(s.discovered_vulnerabilities.contains_key("VULN-001"));
+        let v = &s.discovered_vulnerabilities["VULN-001"];
+        assert_eq!(v.vuln_type, "smb_signing");
+        assert_eq!(v.target, "10.0.0.1");
+    }
+
+    #[tokio::test]
+    async fn publish_vulnerability_dedup() {
+        let state = SharedState::new("op-1".to_string());
+        let q = mock_queue();
+
+        let vuln1 = make_vuln("VULN-001", "smb_signing", "10.0.0.1");
+        let vuln2 = make_vuln("VULN-001", "smb_signing", "10.0.0.1");
+        assert!(state.publish_vulnerability(&q, vuln1).await.unwrap());
+        assert!(!state.publish_vulnerability(&q, vuln2).await.unwrap());
+
+        let s = state.inner.read().await;
+        assert_eq!(s.discovered_vulnerabilities.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn publish_share_adds_to_state() {
+        let state = SharedState::new("op-1".to_string());
+        let q = mock_queue();
+
+        let share = make_share("10.0.0.1", "ADMIN$");
+        let added = state.publish_share(&q, share).await.unwrap();
+        assert!(added);
+
+        let s = state.inner.read().await;
+        assert_eq!(s.shares.len(), 1);
+        assert_eq!(s.shares[0].host, "10.0.0.1");
+        assert_eq!(s.shares[0].name, "ADMIN$");
+    }
+
+    #[tokio::test]
+    async fn publish_share_dedup() {
+        let state = SharedState::new("op-1".to_string());
+        let q = mock_queue();
+
+        let share1 = make_share("10.0.0.1", "ADMIN$");
+        let share2 = make_share("10.0.0.1", "ADMIN$");
+        assert!(state.publish_share(&q, share1).await.unwrap());
+        assert!(!state.publish_share(&q, share2).await.unwrap());
+
+        let s = state.inner.read().await;
+        assert_eq!(s.shares.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn persist_timeline_event_stores_event() {
+        let state = SharedState::new("op-1".to_string());
+        let q = mock_queue();
+
+        let event = serde_json::json!({
+            "timestamp": "2025-01-01T00:00:00Z",
+            "description": "Discovered open SMB port",
+        });
+        let techniques = vec!["T1049".to_string(), "T1018".to_string()];
+
+        state
+            .persist_timeline_event(&q, &event, &techniques)
+            .await
+            .unwrap();
+
+        // Verify the timeline event was stored in Redis
+        let mut conn = q.connection();
+        let timeline_key = "ares:op:op-1:timeline".to_string();
+        let events: Vec<String> = redis::AsyncCommands::lrange(&mut conn, &timeline_key, 0, -1)
+            .await
+            .unwrap();
+        assert_eq!(events.len(), 1);
+        let stored: serde_json::Value = serde_json::from_str(&events[0]).unwrap();
+        assert_eq!(stored["description"], "Discovered open SMB port");
+
+        // Verify techniques were stored
+        let tech_key = "ares:op:op-1:techniques".to_string();
+        let techs: Vec<String> = redis::AsyncCommands::smembers(&mut conn, &tech_key)
+            .await
+            .unwrap();
+        assert_eq!(techs.len(), 2);
+        assert!(techs.contains(&"T1049".to_string()));
+        assert!(techs.contains(&"T1018".to_string()));
+    }
+
+    #[tokio::test]
+    async fn track_pending_task_and_complete() {
+        let state = SharedState::new("op-1".to_string());
+        let q = mock_queue();
+
+        let task = make_task_info("task-42", "recon");
+        state.track_pending_task(&q, task).await.unwrap();
+
+        // Verify task is in pending
+        {
+            let s = state.inner.read().await;
+            assert!(s.pending_tasks.contains_key("task-42"));
+            assert!(s.completed_tasks.is_empty());
+        }
+
+        // Complete the task
+        let result = ares_core::models::TaskResult {
+            task_id: "task-42".to_string(),
+            success: true,
+            result: Some(serde_json::json!({"output": "NT AUTHORITY\\SYSTEM"})),
+            error: None,
+            completed_at: Utc::now(),
+        };
+        state.complete_task(&q, "task-42", result).await.unwrap();
+
+        // Verify task moved from pending to completed
+        let s = state.inner.read().await;
+        assert!(!s.pending_tasks.contains_key("task-42"));
+        assert!(s.completed_tasks.contains_key("task-42"));
+        assert!(s.completed_tasks["task-42"].success);
+    }
+
+    #[tokio::test]
+    async fn publish_netbios_stores_mapping() {
+        let state = SharedState::new("op-1".to_string());
+        let q = mock_queue();
+
+        state
+            .publish_netbios(&q, "CONTOSO", "contoso.local")
+            .await
+            .unwrap();
+
+        let s = state.inner.read().await;
+        assert_eq!(
+            s.netbios_to_fqdn.get("CONTOSO"),
+            Some(&"contoso.local".to_string())
+        );
+
+        // Also verify it was persisted to Redis
+        let mut conn = q.connection();
+        let key = "ares:op:op-1:netbios_map".to_string();
+        let fqdn: String = redis::AsyncCommands::hget(&mut conn, &key, "CONTOSO")
+            .await
+            .unwrap();
+        assert_eq!(fqdn, "contoso.local");
+    }
+
+    #[tokio::test]
+    async fn publish_trust_info_adds_trust() {
+        let state = SharedState::new("op-1".to_string());
+        let q = mock_queue();
+
+        let trust = make_trust("fabrikam.local");
+        let added = state.publish_trust_info(&q, trust).await.unwrap();
+        assert!(added);
+
+        let s = state.inner.read().await;
+        assert!(s.trusted_domains.contains_key("fabrikam.local"));
+        let t = &s.trusted_domains["fabrikam.local"];
+        assert_eq!(t.trust_type, "forest");
+    }
+
+    #[test]
+    fn same_domain_is_same_forest() {
+        assert!(are_in_same_forest("contoso.local", "contoso.local"));
+    }
+
+    #[test]
+    fn parent_child_is_same_forest() {
+        assert!(are_in_same_forest("child.contoso.local", "contoso.local"));
+        assert!(are_in_same_forest("contoso.local", "child.contoso.local"));
+    }
+
+    #[test]
+    fn unrelated_domains_not_same_forest() {
+        assert!(!are_in_same_forest("contoso.local", "fabrikam.local"));
+        assert!(!are_in_same_forest("child.contoso.local", "fabrikam.local"));
+    }
 }

@@ -16,7 +16,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
-use redis::aio::ConnectionManager;
+use redis::aio::{ConnectionLike, ConnectionManager};
 use redis::AsyncCommands;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
@@ -90,14 +90,22 @@ pub struct HeartbeatData {
 }
 
 // ---------------------------------------------------------------------------
-// TaskQueue — thin async wrapper around a redis ConnectionManager.
+// TaskQueueCore — thin async wrapper around a redis connection.
 // ---------------------------------------------------------------------------
 
 /// Async Redis task queue implementing the Ares queue protocol.
+///
+/// Generic over connection type to support both production (`ConnectionManager`)
+/// and test (`MockRedisConnection`) backends.
 #[derive(Clone)]
-pub struct TaskQueue {
-    conn: ConnectionManager,
+pub struct TaskQueueCore<C> {
+    conn: C,
 }
+
+/// Production task queue backed by a Redis `ConnectionManager`.
+pub type TaskQueue = TaskQueueCore<ConnectionManager>;
+
+// -- ConnectionManager-specific methods ------------------------------------
 
 #[allow(dead_code)]
 impl TaskQueue {
@@ -122,6 +130,16 @@ impl TaskQueue {
             .with_context(|| format!("Failed to connect to Redis at {redis_url}"))?;
         info!(url = %redis_url, "Connected to Redis");
         Ok(Self { conn })
+    }
+}
+
+// -- Generic methods (work with any ConnectionLike backend) ----------------
+
+#[allow(dead_code)]
+impl<C: ConnectionLike + Clone + Send + Sync + 'static> TaskQueueCore<C> {
+    /// Create a queue from any ConnectionLike backend (used in tests).
+    pub fn from_connection(conn: C) -> Self {
+        Self { conn }
     }
 
     // === Key helpers ========================================================
@@ -457,10 +475,10 @@ impl TaskQueue {
         Ok(data)
     }
 
-    /// Get a clone of the underlying connection manager.
+    /// Get a clone of the underlying connection.
     ///
     /// Used by the deferred queue to run ZSET commands directly.
-    pub fn connection(&self) -> ConnectionManager {
+    pub fn connection(&self) -> C {
         self.conn.clone()
     }
 
@@ -484,5 +502,477 @@ impl TaskQueue {
         self.set_task_status(task_id, final_status).await?;
         debug!(task_id = task_id, "Task status updated to {}", final_status);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ares_core::state::mock_redis::MockRedisConnection;
+
+    fn mock_queue() -> TaskQueueCore<MockRedisConnection> {
+        TaskQueueCore::from_connection(MockRedisConnection::new())
+    }
+
+    #[tokio::test]
+    async fn submit_task_normal_priority() {
+        let q = mock_queue();
+        let task_id = q
+            .submit_task(
+                "recon",
+                "scanner",
+                serde_json::json!({"target": "10.0.0.1"}),
+                "orchestrator",
+                5,
+            )
+            .await
+            .unwrap();
+
+        assert!(task_id.starts_with("recon_"));
+        // Task should be in the scanner queue (LPUSH for normal priority)
+        let len = q.queue_length("scanner").await.unwrap();
+        assert_eq!(len, 1);
+        // Status should be set to pending
+        let status_json = q.get_task_status(&task_id).await.unwrap().unwrap();
+        let status: serde_json::Value = serde_json::from_str(&status_json).unwrap();
+        assert_eq!(status["status"], "pending");
+    }
+
+    #[tokio::test]
+    async fn submit_task_urgent_priority() {
+        let q = mock_queue();
+        let task_id = q
+            .submit_task("crack", "cracker", serde_json::json!({}), "orchestrator", 1)
+            .await
+            .unwrap();
+
+        assert!(task_id.starts_with("crack_"));
+        let len = q.queue_length("cracker").await.unwrap();
+        assert_eq!(len, 1);
+    }
+
+    #[tokio::test]
+    async fn urgent_tasks_consumed_first() {
+        let q = mock_queue();
+        // Submit normal first, then urgent
+        q.submit_task(
+            "normal",
+            "worker",
+            serde_json::json!({"order": 1}),
+            "orch",
+            5,
+        )
+        .await
+        .unwrap();
+        q.submit_task(
+            "urgent",
+            "worker",
+            serde_json::json!({"order": 2}),
+            "orch",
+            1,
+        )
+        .await
+        .unwrap();
+
+        // BRPOP consumes from the right — urgent (RPUSH) should come first
+        let mut conn = q.conn.clone();
+        let result: Option<(String, String)> = conn.brpop("ares:tasks:worker", 0.0).await.unwrap();
+        let (_, json) = result.unwrap();
+        let msg: TaskMessage = serde_json::from_str(&json).unwrap();
+        assert!(msg.task_id.starts_with("urgent_"));
+    }
+
+    #[tokio::test]
+    async fn has_pending_result_false_when_empty() {
+        let q = mock_queue();
+        assert!(!q.has_pending_result("task-1").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn send_and_check_result() {
+        let q = mock_queue();
+        let result = TaskResult {
+            task_id: "task-1".to_string(),
+            success: true,
+            result: Some(serde_json::json!({"output": "pwned"})),
+            error: None,
+            completed_at: Some(Utc::now()),
+            worker_pod: None,
+            agent_name: Some("exploit-agent".to_string()),
+        };
+        q.send_result("task-1", &result).await.unwrap();
+
+        assert!(q.has_pending_result("task-1").await.unwrap());
+
+        let checked = q.check_result("task-1").await.unwrap().unwrap();
+        assert!(checked.success);
+        assert_eq!(checked.task_id, "task-1");
+        assert_eq!(checked.agent_name.as_deref(), Some("exploit-agent"));
+
+        // After check_result (RPOP), queue should be empty
+        assert!(!q.has_pending_result("task-1").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn check_result_returns_none_when_empty() {
+        let q = mock_queue();
+        assert!(q.check_result("nonexistent").await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn check_results_batch_mixed() {
+        let q = mock_queue();
+        let r1 = TaskResult {
+            task_id: "t1".to_string(),
+            success: true,
+            result: None,
+            error: None,
+            completed_at: Some(Utc::now()),
+            worker_pod: None,
+            agent_name: None,
+        };
+        q.send_result("t1", &r1).await.unwrap();
+        // t2 has no result
+
+        let batch = q
+            .check_results_batch(&["t1".to_string(), "t2".to_string()])
+            .await
+            .unwrap();
+        assert!(batch["t1"].is_some());
+        assert!(batch["t2"].is_none());
+    }
+
+    #[tokio::test]
+    async fn check_results_batch_empty_input() {
+        let q = mock_queue();
+        let batch = q.check_results_batch(&[]).await.unwrap();
+        assert!(batch.is_empty());
+    }
+
+    #[tokio::test]
+    async fn poll_result_returns_result() {
+        let q = mock_queue();
+        let result = TaskResult {
+            task_id: "task-poll".to_string(),
+            success: false,
+            result: None,
+            error: Some("timeout".to_string()),
+            completed_at: Some(Utc::now()),
+            worker_pod: None,
+            agent_name: None,
+        };
+        q.send_result("task-poll", &result).await.unwrap();
+
+        let polled = q.poll_result("task-poll", 0.0).await.unwrap().unwrap();
+        assert!(!polled.success);
+        assert_eq!(polled.error.as_deref(), Some("timeout"));
+    }
+
+    #[tokio::test]
+    async fn poll_result_returns_none_when_empty() {
+        let q = mock_queue();
+        // BRPOP on empty queue with 0 timeout returns Nil in mock
+        let polled = q.poll_result("missing", 0.0).await.unwrap();
+        assert!(polled.is_none());
+    }
+
+    #[tokio::test]
+    async fn queue_length_empty() {
+        let q = mock_queue();
+        assert_eq!(q.queue_length("scanner").await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn queue_length_after_submit() {
+        let q = mock_queue();
+        q.submit_task("t1", "role", serde_json::json!({}), "src", 5)
+            .await
+            .unwrap();
+        q.submit_task("t2", "role", serde_json::json!({}), "src", 5)
+            .await
+            .unwrap();
+        assert_eq!(q.queue_length("role").await.unwrap(), 2);
+    }
+
+    #[tokio::test]
+    async fn heartbeat_roundtrip() {
+        let q = mock_queue();
+        q.send_heartbeat("agent-1", "idle", None, Duration::from_secs(60))
+            .await
+            .unwrap();
+
+        let hb = q.get_heartbeat("agent-1").await.unwrap().unwrap();
+        assert_eq!(hb.agent, "agent-1");
+        assert_eq!(hb.status, "idle");
+        assert!(hb.current_task.is_none());
+    }
+
+    #[tokio::test]
+    async fn heartbeat_with_task() {
+        let q = mock_queue();
+        q.send_heartbeat("agent-2", "busy", Some("task-99"), Duration::from_secs(30))
+            .await
+            .unwrap();
+
+        let hb = q.get_heartbeat("agent-2").await.unwrap().unwrap();
+        assert_eq!(hb.status, "busy");
+        assert_eq!(hb.current_task.as_deref(), Some("task-99"));
+    }
+
+    #[tokio::test]
+    async fn heartbeat_returns_none_when_missing() {
+        let q = mock_queue();
+        assert!(q.get_heartbeat("ghost").await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn publish_state_update_succeeds() {
+        let q = mock_queue();
+        // PUBLISH returns 0 in mock (no subscribers) — should not error
+        q.publish_state_update("op-1").await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn try_acquire_lock_succeeds() {
+        let q = mock_queue();
+        let acquired = q
+            .try_acquire_lock("op-1", Duration::from_secs(30))
+            .await
+            .unwrap();
+        assert!(acquired);
+    }
+
+    #[tokio::test]
+    async fn try_acquire_lock_fails_if_held() {
+        let q = mock_queue();
+        q.try_acquire_lock("op-1", Duration::from_secs(30))
+            .await
+            .unwrap();
+        // Second acquire should fail (NX)
+        let acquired = q
+            .try_acquire_lock("op-1", Duration::from_secs(30))
+            .await
+            .unwrap();
+        assert!(!acquired);
+    }
+
+    #[tokio::test]
+    async fn extend_lock_succeeds_when_held() {
+        let q = mock_queue();
+        q.try_acquire_lock("op-1", Duration::from_secs(30))
+            .await
+            .unwrap();
+        let ok = q
+            .extend_lock("op-1", Duration::from_secs(60))
+            .await
+            .unwrap();
+        assert!(ok);
+    }
+
+    #[tokio::test]
+    async fn extend_lock_fails_when_missing() {
+        let q = mock_queue();
+        // EXPIRE on nonexistent key in real Redis returns false;
+        // our mock always returns 1, but this tests the code path
+        let _ok = q
+            .extend_lock("no-such-op", Duration::from_secs(60))
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn set_task_status_creates_record() {
+        let q = mock_queue();
+        q.set_task_status("task-1", "pending").await.unwrap();
+
+        let raw = q.get_task_status("task-1").await.unwrap().unwrap();
+        let v: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(v["task_id"], "task-1");
+        assert_eq!(v["status"], "pending");
+        assert!(v.get("updated_at").is_some());
+    }
+
+    #[tokio::test]
+    async fn set_task_status_preserves_fields() {
+        let q = mock_queue();
+        q.set_task_status_full("task-1", "pending", "op-1", "scanner", "recon", None)
+            .await
+            .unwrap();
+        // Now update status — should preserve operation_id, role, etc.
+        q.set_task_status("task-1", "in_progress").await.unwrap();
+
+        let raw = q.get_task_status("task-1").await.unwrap().unwrap();
+        let v: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(v["status"], "in_progress");
+        assert_eq!(v["operation_id"], "op-1");
+        assert_eq!(v["role"], "scanner");
+        assert!(v.get("started_at").is_some());
+    }
+
+    #[tokio::test]
+    async fn set_task_status_completed_adds_ended_at() {
+        let q = mock_queue();
+        q.set_task_status("task-1", "completed").await.unwrap();
+
+        let raw = q.get_task_status("task-1").await.unwrap().unwrap();
+        let v: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(v["status"], "completed");
+        assert!(v.get("ended_at").is_some());
+    }
+
+    #[tokio::test]
+    async fn set_task_status_failed_adds_ended_at() {
+        let q = mock_queue();
+        q.set_task_status("task-1", "failed").await.unwrap();
+
+        let raw = q.get_task_status("task-1").await.unwrap().unwrap();
+        let v: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(v["status"], "failed");
+        assert!(v.get("ended_at").is_some());
+    }
+
+    #[tokio::test]
+    async fn set_task_status_full_with_payload() {
+        let q = mock_queue();
+        let payload = serde_json::json!({"target": "10.0.0.1"});
+        q.set_task_status_full(
+            "task-1",
+            "in_progress",
+            "op-1",
+            "scanner",
+            "recon",
+            Some(&payload),
+        )
+        .await
+        .unwrap();
+
+        let raw = q.get_task_status("task-1").await.unwrap().unwrap();
+        let v: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(v["status"], "in_progress");
+        assert_eq!(v["payload"]["target"], "10.0.0.1");
+        assert!(v.get("started_at").is_some());
+    }
+
+    #[tokio::test]
+    async fn get_task_status_returns_none_when_missing() {
+        let q = mock_queue();
+        assert!(q.get_task_status("nonexistent").await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn send_result_sets_completed_status() {
+        let q = mock_queue();
+        q.set_task_status("task-1", "in_progress").await.unwrap();
+
+        let result = TaskResult {
+            task_id: "task-1".to_string(),
+            success: true,
+            result: None,
+            error: None,
+            completed_at: Some(Utc::now()),
+            worker_pod: None,
+            agent_name: None,
+        };
+        q.send_result("task-1", &result).await.unwrap();
+
+        let raw = q.get_task_status("task-1").await.unwrap().unwrap();
+        let v: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(v["status"], "completed");
+    }
+
+    #[tokio::test]
+    async fn send_result_sets_failed_status() {
+        let q = mock_queue();
+        let result = TaskResult {
+            task_id: "task-1".to_string(),
+            success: false,
+            result: None,
+            error: Some("boom".to_string()),
+            completed_at: Some(Utc::now()),
+            worker_pod: None,
+            agent_name: None,
+        };
+        q.send_result("task-1", &result).await.unwrap();
+
+        let raw = q.get_task_status("task-1").await.unwrap().unwrap();
+        let v: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(v["status"], "failed");
+    }
+
+    #[tokio::test]
+    async fn connection_returns_clone() {
+        let q = mock_queue();
+        let mut conn = q.connection();
+        // Should be usable as AsyncCommands
+        let _: () = redis::AsyncCommands::set(&mut conn, "test-key", "test-val")
+            .await
+            .unwrap();
+        let val: String = redis::AsyncCommands::get(&mut conn, "test-key")
+            .await
+            .unwrap();
+        assert_eq!(val, "test-val");
+    }
+
+    #[tokio::test]
+    async fn task_message_serialization() {
+        let msg = TaskMessage {
+            task_id: "test_abc".to_string(),
+            task_type: "recon".to_string(),
+            source_agent: "orchestrator".to_string(),
+            target_agent: "scanner".to_string(),
+            payload: serde_json::json!({"host": "10.0.0.1"}),
+            priority: 5,
+            created_at: None,
+            callback_queue: Some("ares:results:test_abc".to_string()),
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        let parsed: TaskMessage = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.task_id, "test_abc");
+        assert_eq!(parsed.priority, 5);
+    }
+
+    #[tokio::test]
+    async fn task_result_serialization() {
+        let result = TaskResult {
+            task_id: "t1".to_string(),
+            success: true,
+            result: Some(serde_json::json!({"data": 42})),
+            error: None,
+            completed_at: Some(Utc::now()),
+            worker_pod: Some("pod-1".to_string()),
+            agent_name: Some("agent-1".to_string()),
+        };
+        let json = serde_json::to_string(&result).unwrap();
+        let parsed: TaskResult = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.task_id, "t1");
+        assert!(parsed.success);
+        assert_eq!(parsed.worker_pod.as_deref(), Some("pod-1"));
+    }
+
+    #[tokio::test]
+    async fn task_result_deserialization_defaults() {
+        // Minimal JSON — optional fields should default
+        let json = r#"{"task_id":"t1","success":false,"completed_at":null}"#;
+        let parsed: TaskResult = serde_json::from_str(json).unwrap();
+        assert!(!parsed.success);
+        assert!(parsed.result.is_none());
+        assert!(parsed.error.is_none());
+        assert!(parsed.worker_pod.is_none());
+    }
+
+    #[tokio::test]
+    async fn heartbeat_data_serialization() {
+        let hb = HeartbeatData {
+            agent: "agent-1".to_string(),
+            status: "idle".to_string(),
+            timestamp: "2024-01-01T00:00:00Z".to_string(),
+            current_task: None,
+            pod_name: Some("pod-x".to_string()),
+        };
+        let json = serde_json::to_string(&hb).unwrap();
+        let parsed: HeartbeatData = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.agent, "agent-1");
+        assert!(parsed.current_task.is_none());
+        assert_eq!(parsed.pod_name.as_deref(), Some("pod-x"));
     }
 }

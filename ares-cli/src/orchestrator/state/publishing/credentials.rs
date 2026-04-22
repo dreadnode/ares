@@ -5,8 +5,10 @@ use anyhow::Result;
 use ares_core::models::{Credential, Hash};
 use ares_core::state::{self, RedisStateReader};
 
+use redis::aio::ConnectionLike;
+
 use crate::orchestrator::state::SharedState;
-use crate::orchestrator::task_queue::TaskQueue;
+use crate::orchestrator::task_queue::TaskQueueCore;
 
 use super::sanitize_credential;
 
@@ -17,7 +19,11 @@ impl SharedState {
     /// metadata, normalizes domains, rejects noise). When the credential's domain is
     /// a valid FQDN (contains a dot), it is automatically added to `state.domains`
     /// (matches Python's `add_credential()` behavior).
-    pub async fn publish_credential(&self, queue: &TaskQueue, cred: Credential) -> Result<bool> {
+    pub async fn publish_credential(
+        &self,
+        queue: &TaskQueueCore<impl ConnectionLike + Clone + Send + Sync + 'static>,
+        cred: Credential,
+    ) -> Result<bool> {
         // Sanitize and validate before storage
         let netbios_map = {
             let state = self.inner.read().await;
@@ -72,7 +78,11 @@ impl SharedState {
     /// When a `krbtgt` NTLM hash is stored, `has_domain_admin` is automatically
     /// set — mirroring Python's `add_hash()` behaviour so that `auto_golden_ticket`
     /// triggers without requiring the LLM to emit a structured JSON payload.
-    pub async fn publish_hash(&self, queue: &TaskQueue, hash: Hash) -> Result<bool> {
+    pub async fn publish_hash(
+        &self,
+        queue: &TaskQueueCore<impl ConnectionLike + Clone + Send + Sync + 'static>,
+        hash: Hash,
+    ) -> Result<bool> {
         use ares_core::models::VulnerabilityInfo;
         use std::collections::HashMap;
 
@@ -206,7 +216,7 @@ impl SharedState {
     /// HASH by scanning fields and updating the matching entry.
     pub async fn update_hash_cracked_password(
         &self,
-        queue: &TaskQueue,
+        queue: &TaskQueueCore<impl ConnectionLike + Clone + Send + Sync + 'static>,
         username: &str,
         domain: &str,
         password: &str,
@@ -260,5 +270,189 @@ impl SharedState {
         );
 
         Ok(true)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::orchestrator::state::SharedState;
+    use crate::orchestrator::task_queue::TaskQueueCore;
+    use ares_core::state::mock_redis::MockRedisConnection;
+
+    fn mock_queue() -> TaskQueueCore<MockRedisConnection> {
+        TaskQueueCore::from_connection(MockRedisConnection::new())
+    }
+
+    fn make_cred(username: &str, password: &str, domain: &str) -> Credential {
+        Credential {
+            id: uuid::Uuid::new_v4().to_string(),
+            username: username.to_string(),
+            password: password.to_string(),
+            domain: domain.to_string(),
+            source: "test".to_string(),
+            discovered_at: None,
+            is_admin: false,
+            parent_id: None,
+            attack_step: 0,
+        }
+    }
+
+    fn make_hash(username: &str, domain: &str, hash_type: &str, hash_value: &str) -> Hash {
+        Hash {
+            id: uuid::Uuid::new_v4().to_string(),
+            username: username.to_string(),
+            domain: domain.to_string(),
+            hash_type: hash_type.to_string(),
+            hash_value: hash_value.to_string(),
+            source: "test".to_string(),
+            discovered_at: None,
+            cracked_password: None,
+            parent_id: None,
+            attack_step: 0,
+            aes_key: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn publish_credential_adds_to_state() {
+        let state = SharedState::new("op-1".to_string());
+        let q = mock_queue();
+
+        let cred = make_cred("alice", "P@ssw0rd!", "contoso.local");
+        let added = state.publish_credential(&q, cred).await.unwrap();
+        assert!(added);
+
+        let s = state.inner.read().await;
+        assert_eq!(s.credentials.len(), 1);
+        assert_eq!(s.credentials[0].username, "alice");
+    }
+
+    #[tokio::test]
+    async fn publish_credential_dedup() {
+        let state = SharedState::new("op-1".to_string());
+        let q = mock_queue();
+
+        let cred1 = make_cred("alice", "P@ssw0rd!", "contoso.local");
+        let cred2 = make_cred("alice", "P@ssw0rd!", "contoso.local");
+        assert!(state.publish_credential(&q, cred1).await.unwrap());
+        assert!(!state.publish_credential(&q, cred2).await.unwrap());
+
+        let s = state.inner.read().await;
+        assert_eq!(s.credentials.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn publish_credential_auto_extracts_domain() {
+        let state = SharedState::new("op-1".to_string());
+        let q = mock_queue();
+
+        let cred = make_cred("alice", "P@ssw0rd!", "contoso.local");
+        state.publish_credential(&q, cred).await.unwrap();
+
+        let s = state.inner.read().await;
+        assert!(s.domains.contains(&"contoso.local".to_string()));
+    }
+
+    #[tokio::test]
+    async fn publish_credential_rejects_invalid() {
+        let state = SharedState::new("op-1".to_string());
+        let q = mock_queue();
+
+        // Empty password should be rejected by sanitize_credential
+        let cred = make_cred("alice", "", "contoso.local");
+        let added = state.publish_credential(&q, cred).await.unwrap();
+        assert!(!added);
+
+        let s = state.inner.read().await;
+        assert!(s.credentials.is_empty());
+    }
+
+    #[tokio::test]
+    async fn publish_credential_no_domain_extraction_for_short() {
+        let state = SharedState::new("op-1".to_string());
+        let q = mock_queue();
+
+        // Domain without dots should not be added to domains list
+        let cred = make_cred("alice", "P@ssw0rd!", "CONTOSO");
+        state.publish_credential(&q, cred).await.unwrap();
+
+        let s = state.inner.read().await;
+        // Domain "CONTOSO" has no dot, so it's not auto-extracted
+        assert!(!s.domains.iter().any(|d| d == "contoso"));
+    }
+
+    #[tokio::test]
+    async fn publish_hash_adds_to_state() {
+        let state = SharedState::new("op-1".to_string());
+        let q = mock_queue();
+
+        let hash = make_hash("admin", "contoso.local", "NTLM", "aabbccdd");
+        let added = state.publish_hash(&q, hash).await.unwrap();
+        assert!(added);
+
+        let s = state.inner.read().await;
+        assert_eq!(s.hashes.len(), 1);
+        assert_eq!(s.hashes[0].username, "admin");
+    }
+
+    #[tokio::test]
+    async fn publish_hash_dedup() {
+        let state = SharedState::new("op-1".to_string());
+        let q = mock_queue();
+
+        let hash1 = make_hash("admin", "contoso.local", "NTLM", "aabbccdd");
+        let hash2 = make_hash("admin", "contoso.local", "NTLM", "aabbccdd");
+        assert!(state.publish_hash(&q, hash1).await.unwrap());
+        assert!(!state.publish_hash(&q, hash2).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn publish_krbtgt_hash_sets_domain_admin() {
+        let state = SharedState::new("op-1".to_string());
+        let q = mock_queue();
+
+        // Set up a known domain so domination check passes
+        {
+            let mut s = state.inner.write().await;
+            s.domains.push("contoso.local".to_string());
+        }
+
+        let hash = make_hash("krbtgt", "contoso.local", "NTLM", "aabbccdd11223344");
+        state.publish_hash(&q, hash).await.unwrap();
+
+        let s = state.inner.read().await;
+        assert!(s.has_domain_admin);
+        assert!(s.dominated_domains.contains("contoso.local"));
+    }
+
+    #[tokio::test]
+    async fn update_hash_cracked_password() {
+        let state = SharedState::new("op-1".to_string());
+        let q = mock_queue();
+
+        let hash = make_hash("admin", "contoso.local", "NTLM", "aabbccdd");
+        state.publish_hash(&q, hash).await.unwrap();
+
+        let updated = state
+            .update_hash_cracked_password(&q, "admin", "contoso.local", "CrackedPW!")
+            .await
+            .unwrap();
+        assert!(updated);
+
+        let s = state.inner.read().await;
+        assert_eq!(s.hashes[0].cracked_password.as_deref(), Some("CrackedPW!"));
+    }
+
+    #[tokio::test]
+    async fn update_hash_cracked_password_not_found() {
+        let state = SharedState::new("op-1".to_string());
+        let q = mock_queue();
+
+        let updated = state
+            .update_hash_cracked_password(&q, "nobody", "contoso.local", "pw")
+            .await
+            .unwrap();
+        assert!(!updated);
     }
 }

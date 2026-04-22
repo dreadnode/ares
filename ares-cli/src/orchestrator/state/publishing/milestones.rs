@@ -7,12 +7,18 @@ use anyhow::Result;
 use ares_core::models::VulnerabilityInfo;
 use ares_core::state::RedisStateReader;
 
+use redis::aio::ConnectionLike;
+
 use crate::orchestrator::state::SharedState;
-use crate::orchestrator::task_queue::TaskQueue;
+use crate::orchestrator::task_queue::TaskQueueCore;
 
 impl SharedState {
     /// Set has_golden_ticket flag and persist to Redis.
-    pub async fn set_golden_ticket(&self, queue: &TaskQueue, domain: &str) -> Result<()> {
+    pub async fn set_golden_ticket(
+        &self,
+        queue: &TaskQueueCore<impl ConnectionLike + Clone + Send + Sync + 'static>,
+        domain: &str,
+    ) -> Result<()> {
         {
             let state = self.inner.read().await;
             if state.has_golden_ticket {
@@ -77,7 +83,11 @@ impl SharedState {
     }
 
     /// Set has_domain_admin flag and persist to Redis.
-    pub async fn set_domain_admin(&self, queue: &TaskQueue, path: Option<String>) -> Result<()> {
+    pub async fn set_domain_admin(
+        &self,
+        queue: &TaskQueueCore<impl ConnectionLike + Clone + Send + Sync + 'static>,
+        path: Option<String>,
+    ) -> Result<()> {
         let operation_id = {
             let state = self.inner.read().await;
             state.operation_id.clone()
@@ -152,5 +162,118 @@ impl SharedState {
         tracing::info!(attack_path = %attack_path_str, depth = depth, "🏆 Domain admin achieved");
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::orchestrator::state::SharedState;
+    use crate::orchestrator::task_queue::TaskQueueCore;
+    use ares_core::state::mock_redis::MockRedisConnection;
+
+    fn mock_queue() -> TaskQueueCore<MockRedisConnection> {
+        TaskQueueCore::from_connection(MockRedisConnection::new())
+    }
+
+    #[tokio::test]
+    async fn set_golden_ticket_sets_flag() {
+        let state = SharedState::new("op-1".to_string());
+        let q = mock_queue();
+
+        state.set_golden_ticket(&q, "contoso.local").await.unwrap();
+
+        let s = state.inner.read().await;
+        assert!(s.has_golden_ticket);
+    }
+
+    #[tokio::test]
+    async fn set_golden_ticket_idempotent() {
+        let state = SharedState::new("op-1".to_string());
+        let q = mock_queue();
+
+        state.set_golden_ticket(&q, "contoso.local").await.unwrap();
+        // Second call should be a no-op
+        state.set_golden_ticket(&q, "contoso.local").await.unwrap();
+
+        let s = state.inner.read().await;
+        assert!(s.has_golden_ticket);
+    }
+
+    #[tokio::test]
+    async fn set_golden_ticket_creates_vulnerability() {
+        let state = SharedState::new("op-1".to_string());
+        let q = mock_queue();
+
+        state.set_golden_ticket(&q, "contoso.local").await.unwrap();
+
+        let s = state.inner.read().await;
+        assert!(s
+            .discovered_vulnerabilities
+            .contains_key("golden_ticket_contoso.local"));
+        let vuln = &s.discovered_vulnerabilities["golden_ticket_contoso.local"];
+        assert_eq!(vuln.vuln_type, "golden_ticket");
+    }
+
+    #[tokio::test]
+    async fn set_golden_ticket_uses_dc_ip_as_target() {
+        let state = SharedState::new("op-1".to_string());
+        let q = mock_queue();
+
+        {
+            let mut s = state.inner.write().await;
+            s.domain_controllers
+                .insert("contoso.local".to_string(), "10.0.0.1".to_string());
+        }
+
+        state.set_golden_ticket(&q, "contoso.local").await.unwrap();
+
+        let s = state.inner.read().await;
+        let vuln = &s.discovered_vulnerabilities["golden_ticket_contoso.local"];
+        assert_eq!(vuln.target, "10.0.0.1");
+    }
+
+    #[tokio::test]
+    async fn set_domain_admin_sets_flag() {
+        let state = SharedState::new("op-1".to_string());
+        let q = mock_queue();
+
+        state
+            .set_domain_admin(&q, Some("secretsdump → krbtgt".to_string()))
+            .await
+            .unwrap();
+
+        let s = state.inner.read().await;
+        assert!(s.has_domain_admin);
+        assert_eq!(s.domain_admin_path.as_deref(), Some("secretsdump → krbtgt"));
+    }
+
+    #[tokio::test]
+    async fn set_domain_admin_without_path() {
+        let state = SharedState::new("op-1".to_string());
+        let q = mock_queue();
+
+        state.set_domain_admin(&q, None).await.unwrap();
+
+        let s = state.inner.read().await;
+        assert!(s.has_domain_admin);
+        assert!(s.domain_admin_path.is_none());
+    }
+
+    #[tokio::test]
+    async fn set_domain_admin_persists_meta_to_redis() {
+        let state = SharedState::new("op-1".to_string());
+        let q = mock_queue();
+
+        state
+            .set_domain_admin(&q, Some("exploit chain".to_string()))
+            .await
+            .unwrap();
+
+        // Verify meta fields persisted to Redis
+        let reader = RedisStateReader::new("op-1".to_string());
+        let mut conn = q.connection();
+        let meta = reader.get_meta(&mut conn).await.unwrap();
+        assert!(meta.has_domain_admin);
     }
 }

@@ -41,6 +41,7 @@ approx = "0.5"
 [features]
 default = []
 blue = []
+test-utils = []
 telemetry = [
     "opentelemetry",
     "opentelemetry_sdk",

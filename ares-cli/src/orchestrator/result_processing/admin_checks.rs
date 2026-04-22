@@ -350,3 +350,156 @@ pub(crate) async fn extract_and_cache_domain_sid(payload: &Value, dispatcher: &A
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    // -- resolve_da_path ----------------------------------------------------
+
+    #[test]
+    fn resolve_da_path_explicit_true_with_path() {
+        let payload = json!({
+            "has_domain_admin": true,
+            "domain_admin_path": "spray → secretsdump → krbtgt"
+        });
+        assert_eq!(
+            resolve_da_path(&payload).as_deref(),
+            Some("spray → secretsdump → krbtgt")
+        );
+    }
+
+    #[test]
+    fn resolve_da_path_explicit_true_no_path() {
+        let payload = json!({ "has_domain_admin": true });
+        assert_eq!(resolve_da_path(&payload), None);
+    }
+
+    #[test]
+    fn resolve_da_path_not_explicit_falls_back() {
+        let payload = json!({ "tool_output": "got krbtgt" });
+        assert_eq!(
+            resolve_da_path(&payload).as_deref(),
+            Some("secretsdump -> krbtgt hash")
+        );
+    }
+
+    #[test]
+    fn resolve_da_path_explicit_false_falls_back() {
+        let payload = json!({ "has_domain_admin": false });
+        assert_eq!(
+            resolve_da_path(&payload).as_deref(),
+            Some("secretsdump -> krbtgt hash")
+        );
+    }
+
+    // -- has_golden_ticket_indicator ----------------------------------------
+
+    #[test]
+    fn golden_ticket_indicator_positive() {
+        assert!(has_golden_ticket_indicator(
+            "Saving ticket in administrator.ccache"
+        ));
+    }
+
+    #[test]
+    fn golden_ticket_indicator_missing_ccache() {
+        assert!(!has_golden_ticket_indicator("Saving ticket in /tmp/ticket"));
+    }
+
+    #[test]
+    fn golden_ticket_indicator_missing_saving() {
+        assert!(!has_golden_ticket_indicator("Found file admin.ccache"));
+    }
+
+    #[test]
+    fn golden_ticket_indicator_empty() {
+        assert!(!has_golden_ticket_indicator(""));
+    }
+
+    // -- parse_pwned_line ---------------------------------------------------
+
+    #[test]
+    fn parse_pwned_full_format() {
+        let line = "[+] CONTOSO\\administrator:P@ssw0rd (Pwn3d!)";
+        let (domain, username) = parse_pwned_line(line).unwrap();
+        assert_eq!(domain, "contoso");
+        assert_eq!(username, "administrator");
+    }
+
+    #[test]
+    fn parse_pwned_no_password() {
+        let line = "[+] CONTOSO\\administrator (Pwn3d!)";
+        let (domain, username) = parse_pwned_line(line).unwrap();
+        assert_eq!(domain, "contoso");
+        assert_eq!(username, "administrator");
+    }
+
+    #[test]
+    fn parse_pwned_missing_marker() {
+        assert!(parse_pwned_line("[*] CONTOSO\\admin:pass").is_none());
+    }
+
+    #[test]
+    fn parse_pwned_missing_plus() {
+        assert!(parse_pwned_line("CONTOSO\\admin (Pwn3d!)").is_none());
+    }
+
+    #[test]
+    fn parse_pwned_no_backslash() {
+        assert!(parse_pwned_line("[+] admin (Pwn3d!)").is_none());
+    }
+
+    #[test]
+    fn parse_pwned_domain_lowercased() {
+        let line = "[+] FABRIKAM.LOCAL\\svc_admin:secret (Pwn3d!)";
+        let (domain, _) = parse_pwned_line(line).unwrap();
+        assert_eq!(domain, "fabrikam.local");
+    }
+
+    #[test]
+    fn parse_pwned_whitespace_only_after_backslash() {
+        // After backslash we get " (Pwn3d!)" — first word is "(Pwn3d!)"
+        // which is a garbage username, but the parser returns it
+        let line = "[+] CONTOSO\\ (Pwn3d!)";
+        let result = parse_pwned_line(line);
+        // Parser doesn't reject this — it extracts "(Pwn3d!)" as username
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn parse_pwned_empty_domain() {
+        let line = "[+] \\administrator (Pwn3d!)";
+        assert!(parse_pwned_line(line).is_none());
+    }
+
+    // -- extract_ip_from_line -----------------------------------------------
+
+    #[test]
+    fn extract_ip_basic() {
+        let line = "SMB 192.168.58.10 445 DC01 [+] admin (Pwn3d!)";
+        assert_eq!(extract_ip_from_line(line).as_deref(), Some("192.168.58.10"));
+    }
+
+    #[test]
+    fn extract_ip_none_when_missing() {
+        assert!(extract_ip_from_line("no ip here").is_none());
+    }
+
+    #[test]
+    fn extract_ip_rejects_non_octets() {
+        assert!(extract_ip_from_line("999.999.999.999").is_none());
+    }
+
+    #[test]
+    fn extract_ip_picks_first() {
+        let line = "10.0.0.1 connected to 10.0.0.2";
+        assert_eq!(extract_ip_from_line(line).as_deref(), Some("10.0.0.1"));
+    }
+
+    #[test]
+    fn extract_ip_not_fooled_by_version() {
+        assert!(extract_ip_from_line("version 1.2.3 released").is_none());
+    }
+}

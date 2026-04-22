@@ -660,7 +660,7 @@ impl RedBlueCorrelator {
         super::report::generate_report_markdown(report)
     }
 
-    /// Run correlation analysis on all reports in the directory.
+    /// Run correlation analysis on all reports in the directory (file I/O).
     pub fn run_full_analysis(&self) -> anyhow::Result<Vec<CorrelationReport>> {
         let (red_reports, blue_detections) = self.load_all_reports()?;
         let mut reports = Vec::new();
