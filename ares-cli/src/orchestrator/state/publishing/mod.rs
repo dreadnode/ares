@@ -237,7 +237,10 @@ mod tests {
     #[test]
     fn netbios_domain_prefix_match() {
         let mut map = HashMap::new();
-        map.insert("CORP".to_string(), "dc01.child.contoso.local".to_string());
+        map.insert(
+            "CONTOSO".to_string(),
+            "dc01.child.contoso.local".to_string(),
+        );
         // "child" is not a direct key, but matches the first label after hostname in a value
         let cred = make_cred("alice", "P@ssw0rd!", "child");
         let result = sanitize_credential(cred, &map).unwrap();

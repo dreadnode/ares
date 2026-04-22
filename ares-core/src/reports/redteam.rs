@@ -576,19 +576,19 @@ mod tests {
     #[test]
     fn executive_summary_single_target() {
         let mut state = empty_state();
-        state.target_ips = vec!["10.0.0.1".to_string()];
+        state.target_ips = vec!["192.168.58.1".to_string()];
         let summary = generate_executive_summary(&state, &[], &[]);
-        assert!(summary.contains("**10.0.0.1**"));
+        assert!(summary.contains("**192.168.58.1**"));
     }
 
     #[test]
     fn executive_summary_multiple_targets_truncated() {
         let mut state = empty_state();
         state.target_ips = vec![
-            "10.0.0.1".to_string(),
-            "10.0.0.2".to_string(),
-            "10.0.0.3".to_string(),
-            "10.0.0.4".to_string(),
+            "192.168.58.1".to_string(),
+            "192.168.58.2".to_string(),
+            "192.168.58.3".to_string(),
+            "192.168.58.4".to_string(),
         ];
         let summary = generate_executive_summary(&state, &[], &[]);
         assert!(summary.contains("**4 targets**"));
@@ -608,7 +608,7 @@ mod tests {
     fn executive_summary_discovery_stats() {
         let mut state = empty_state();
         state.all_hosts = vec![Host {
-            ip: "10.0.0.1".to_string(),
+            ip: "192.168.58.1".to_string(),
             hostname: "dc01".to_string(),
             os: String::new(),
             roles: vec![],
@@ -617,7 +617,7 @@ mod tests {
             owned: false,
         }];
         state.all_shares = vec![Share {
-            host: "10.0.0.1".to_string(),
+            host: "192.168.58.1".to_string(),
             name: "SYSVOL".to_string(),
             permissions: "READ".to_string(),
             comment: String::new(),

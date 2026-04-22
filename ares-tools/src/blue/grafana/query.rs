@@ -493,3 +493,270 @@ fn format_dashboard_response(body: &str) -> String {
 fn format_json_pretty(value: &Value) -> String {
     serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    // ── format_alerts_response ────────────────────────────────────
+
+    #[test]
+    fn alerts_empty_array() {
+        assert_eq!(format_alerts_response("[]"), "No alerts found.");
+    }
+
+    #[test]
+    fn alerts_invalid_json_returns_raw() {
+        assert_eq!(format_alerts_response("not json"), "not json");
+    }
+
+    #[test]
+    fn alerts_single_with_labels() {
+        let body = serde_json::to_string(&json!([{
+            "labels": {"alertname": "HighCPU", "severity": "critical"},
+            "status": {"state": "firing"},
+            "annotations": {"summary": "CPU over 90%"},
+            "startsAt": "2024-01-15T10:00:00Z"
+        }]))
+        .unwrap();
+        let out = format_alerts_response(&body);
+        assert!(out.contains("Found 1 alert(s):"));
+        assert!(out.contains("Alert: HighCPU"));
+        assert!(out.contains("State: firing"));
+        assert!(out.contains("Severity: critical"));
+        assert!(out.contains("Summary: CPU over 90%"));
+        assert!(out.contains("Started: 2024-01-15T10:00:00Z"));
+    }
+
+    #[test]
+    fn alerts_title_fallback() {
+        let body =
+            serde_json::to_string(&json!([{"title": "DiskFull", "state": "pending"}])).unwrap();
+        let out = format_alerts_response(&body);
+        assert!(out.contains("Alert: DiskFull"));
+        assert!(out.contains("State: pending"));
+    }
+
+    #[test]
+    fn alerts_ends_at_zero_year_hidden() {
+        let body = serde_json::to_string(&json!([{
+            "labels": {"alertname": "Test"},
+            "endsAt": "0001-01-01T00:00:00Z"
+        }]))
+        .unwrap();
+        let out = format_alerts_response(&body);
+        assert!(!out.contains("Ended:"));
+    }
+
+    #[test]
+    fn alerts_ends_at_real_shown() {
+        let body = serde_json::to_string(&json!([{
+            "labels": {"alertname": "Test"},
+            "endsAt": "2024-01-15T12:00:00Z"
+        }]))
+        .unwrap();
+        let out = format_alerts_response(&body);
+        assert!(out.contains("Ended: 2024-01-15T12:00:00Z"));
+    }
+
+    #[test]
+    fn alerts_data_wrapper() {
+        let body = serde_json::to_string(&json!({
+            "data": {"alerts": [{"labels": {"alertname": "Wrapped"}}]}
+        }))
+        .unwrap();
+        let out = format_alerts_response(&body);
+        assert!(out.contains("Alert: Wrapped"));
+    }
+
+    #[test]
+    fn alerts_non_array_fallback() {
+        let body = serde_json::to_string(&json!({"status": "ok"})).unwrap();
+        let out = format_alerts_response(&body);
+        assert!(out.contains("status"));
+    }
+
+    #[test]
+    fn alerts_multiple() {
+        let body = serde_json::to_string(&json!([
+            {"labels": {"alertname": "A"}},
+            {"labels": {"alertname": "B"}}
+        ]))
+        .unwrap();
+        let out = format_alerts_response(&body);
+        assert!(out.contains("Found 2 alert(s):"));
+        assert!(out.contains("Alert: A"));
+        assert!(out.contains("Alert: B"));
+    }
+
+    // ── format_annotations_response ───────────────────────────────
+
+    #[test]
+    fn annotations_empty_array() {
+        assert_eq!(format_annotations_response("[]"), "No annotations found.");
+    }
+
+    #[test]
+    fn annotations_invalid_json() {
+        assert_eq!(format_annotations_response("bad"), "bad");
+    }
+
+    #[test]
+    fn annotations_single() {
+        let body = serde_json::to_string(&json!([{
+            "id": 42,
+            "text": "Deployment v1.2",
+            "alertName": "Deploy",
+            "tags": ["prod", "release"],
+            "time": 1705312800000i64
+        }]))
+        .unwrap();
+        let out = format_annotations_response(&body);
+        assert!(out.contains("Found 1 annotation(s):"));
+        assert!(out.contains("ID: 42"));
+        assert!(out.contains("Alert: Deploy"));
+        assert!(out.contains("Text: Deployment v1.2"));
+        assert!(out.contains("Tags: prod, release"));
+        assert!(out.contains("Time: 1705312800000"));
+    }
+
+    #[test]
+    fn annotations_long_text_truncated() {
+        let long_text = "x".repeat(300);
+        let body = serde_json::to_string(&json!([{"id": 1, "text": long_text}])).unwrap();
+        let out = format_annotations_response(&body);
+        assert!(out.contains("..."));
+        assert!(!out.contains(&"x".repeat(300)));
+    }
+
+    #[test]
+    fn annotations_non_array_fallback() {
+        let body = serde_json::to_string(&json!({"total": 0})).unwrap();
+        let out = format_annotations_response(&body);
+        assert!(out.contains("total"));
+    }
+
+    // ── format_dashboard_search_response ──────────────────────────
+
+    #[test]
+    fn dashboard_search_empty() {
+        assert_eq!(
+            format_dashboard_search_response("[]"),
+            "No dashboards found."
+        );
+    }
+
+    #[test]
+    fn dashboard_search_invalid_json() {
+        assert_eq!(format_dashboard_search_response("nope"), "nope");
+    }
+
+    #[test]
+    fn dashboard_search_single() {
+        let body = serde_json::to_string(&json!([{
+            "title": "API Latency",
+            "uid": "abc123",
+            "uri": "db/api-latency",
+            "folderTitle": "Production",
+            "tags": ["api", "latency"]
+        }]))
+        .unwrap();
+        let out = format_dashboard_search_response(&body);
+        assert!(out.contains("Found 1 dashboard(s):"));
+        assert!(out.contains("Title: API Latency"));
+        assert!(out.contains("UID: abc123"));
+        assert!(out.contains("URI: db/api-latency"));
+        assert!(out.contains("Folder: Production"));
+        assert!(out.contains("Tags: api, latency"));
+    }
+
+    #[test]
+    fn dashboard_search_minimal() {
+        let body = serde_json::to_string(&json!([{"title": "Simple"}])).unwrap();
+        let out = format_dashboard_search_response(&body);
+        assert!(out.contains("Title: Simple"));
+        assert!(out.contains("UID: -"));
+        assert!(!out.contains("URI:"));
+        assert!(!out.contains("Folder:"));
+    }
+
+    #[test]
+    fn dashboard_search_non_array_fallback() {
+        let body = serde_json::to_string(&json!({"count": 5})).unwrap();
+        let out = format_dashboard_search_response(&body);
+        assert!(out.contains("count"));
+    }
+
+    // ── format_dashboard_response ─────────────────────────────────
+
+    #[test]
+    fn dashboard_full() {
+        let body = serde_json::to_string(&json!({
+            "dashboard": {
+                "title": "System Overview",
+                "uid": "sys-1",
+                "description": "Main system dashboard",
+                "panels": [
+                    {"id": 1, "title": "CPU", "type": "graph"},
+                    {"id": 2, "title": "Memory", "type": "stat"}
+                ]
+            },
+            "meta": {
+                "folderTitle": "Infra",
+                "updated": "2024-01-15T10:00:00Z",
+                "createdBy": "admin"
+            }
+        }))
+        .unwrap();
+        let out = format_dashboard_response(&body);
+        assert!(out.contains("Dashboard: System Overview"));
+        assert!(out.contains("UID: sys-1"));
+        assert!(out.contains("Description: Main system dashboard"));
+        assert!(out.contains("Panels (2):"));
+        assert!(out.contains("[1] CPU (graph)"));
+        assert!(out.contains("[2] Memory (stat)"));
+        assert!(out.contains("Folder: Infra"));
+        assert!(out.contains("Last updated: 2024-01-15T10:00:00Z"));
+        assert!(out.contains("Created by: admin"));
+    }
+
+    #[test]
+    fn dashboard_no_panels() {
+        let body = serde_json::to_string(&json!({
+            "dashboard": {"title": "Empty", "uid": "e1"}
+        }))
+        .unwrap();
+        let out = format_dashboard_response(&body);
+        assert!(out.contains("Dashboard: Empty"));
+        assert!(!out.contains("Panels"));
+    }
+
+    #[test]
+    fn dashboard_empty_json_fallback() {
+        let body = serde_json::to_string(&json!({})).unwrap();
+        let out = format_dashboard_response(&body);
+        // No dashboard or meta keys → falls back to pretty JSON
+        assert!(out.contains("{}") || out.contains("{\n}"));
+    }
+
+    #[test]
+    fn dashboard_invalid_json() {
+        assert_eq!(format_dashboard_response("broken"), "broken");
+    }
+
+    // ── format_json_pretty ────────────────────────────────────────
+
+    #[test]
+    fn json_pretty_object() {
+        let val = json!({"key": "value"});
+        let out = format_json_pretty(&val);
+        assert!(out.contains("\"key\""));
+        assert!(out.contains("\"value\""));
+    }
+
+    #[test]
+    fn json_pretty_null() {
+        assert_eq!(format_json_pretty(&json!(null)), "null");
+    }
+}

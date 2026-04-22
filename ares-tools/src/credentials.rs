@@ -100,8 +100,8 @@ mod tests {
 
     #[test]
     fn impacket_target_with_domain_and_password() {
-        let result = impacket_target(Some("CONTOSO"), "admin", Some("P@ss"), "10.0.0.1");
-        assert_eq!(result, "CONTOSO/admin:P@ss@10.0.0.1");
+        let result = impacket_target(Some("CONTOSO"), "admin", Some("P@ss"), "192.168.58.1");
+        assert_eq!(result, "CONTOSO/admin:P@ss@192.168.58.1");
     }
 
     #[test]
@@ -181,7 +181,7 @@ mod tests {
 
     #[test]
     fn bloodyad_creds_builds_correct_args() {
-        let args = bloodyad_creds("contoso.local", "admin", "P@ssw0rd", "10.0.0.1");
+        let args = bloodyad_creds("contoso.local", "admin", "P@ssw0rd", "192.168.58.1");
         assert_eq!(
             args,
             vec![
@@ -192,7 +192,7 @@ mod tests {
                 "-p",
                 "P@ssw0rd",
                 "--host",
-                "10.0.0.1",
+                "192.168.58.1",
             ]
         );
     }

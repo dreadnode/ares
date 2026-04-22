@@ -81,8 +81,8 @@ mod tests {
 
     #[test]
     fn ip_re_matches_ipv4() {
-        assert!(IP_RE.is_match("192.168.1.1"));
-        assert!(IP_RE.is_match("10.0.0.1"));
+        assert!(IP_RE.is_match("192.168.58.1"));
+        assert!(IP_RE.is_match("192.168.58.1"));
     }
 
     #[test]

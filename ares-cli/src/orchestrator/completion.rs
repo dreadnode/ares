@@ -64,8 +64,8 @@ pub fn compute_undominated_forests(
     }
 
     // Only count a domain as covering a forest root when that domain IS the
-    // forest root.  Dominating a child domain (e.g. north.sevenkingdoms.local)
-    // does NOT mean the forest root (sevenkingdoms.local) is compromised — its
+    // forest root.  Dominating a child domain (e.g. contoso.local)
+    // does NOT mean the forest root (contoso.local) is compromised — its
     // DC has a separate krbtgt.  The child-to-parent escalation (ExtraSid /
     // trust key) must still happen before we declare the forest dominated.
     let dominated_roots: HashSet<String> = dominated_domains

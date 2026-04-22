@@ -19,6 +19,7 @@ redis = { workspace = true }
 tempfile = "3"
 
 [features]
+default = ["blue"]
 blue = ["ares-core/blue"]
 
 [dev-dependencies]

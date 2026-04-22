@@ -195,9 +195,9 @@ mod tests {
     fn make_gt() -> EvaluationGroundTruth {
         EvaluationGroundTruth {
             operation_id: "op-1".to_string(),
-            target_ip: "10.0.0.1".to_string(),
+            target_ip: "192.168.58.1".to_string(),
             expected_iocs: vec![
-                make_ioc("ip", "10.0.0.1", true),
+                make_ioc("ip", "192.168.58.1", true),
                 make_ioc("user", "admin", true),
                 make_ioc("hash", "abc", false),
             ],

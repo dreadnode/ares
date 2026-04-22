@@ -314,4 +314,117 @@ $pass = "P@ssw0rd"
         let creds = parse_spider_credentials("", &json!({}));
         assert!(creds.is_empty());
     }
+
+    // ── split_domain_user ─────────────────────────────────────────
+
+    #[test]
+    fn split_domain_user_with_backslash() {
+        let (domain, user) = split_domain_user("CONTOSO\\admin");
+        assert_eq!(domain, Some("CONTOSO"));
+        assert_eq!(user, "admin");
+    }
+
+    #[test]
+    fn split_domain_user_no_backslash() {
+        let (domain, user) = split_domain_user("admin");
+        assert!(domain.is_none());
+        assert_eq!(user, "admin");
+    }
+
+    #[test]
+    fn split_domain_user_empty() {
+        let (domain, user) = split_domain_user("");
+        assert!(domain.is_none());
+        assert_eq!(user, "");
+    }
+
+    // ── resolve_domain_from_fqdn ──────────────────────────────────
+
+    #[test]
+    fn resolve_fqdn_matching() {
+        assert_eq!(
+            resolve_domain_from_fqdn("CHILD", "child.contoso.local"),
+            Some("child.contoso.local")
+        );
+    }
+
+    #[test]
+    fn resolve_fqdn_case_insensitive() {
+        assert_eq!(
+            resolve_domain_from_fqdn("child", "CHILD.contoso.local"),
+            Some("CHILD.contoso.local")
+        );
+    }
+
+    #[test]
+    fn resolve_fqdn_no_match() {
+        assert_eq!(
+            resolve_domain_from_fqdn("OTHER", "child.contoso.local"),
+            None
+        );
+    }
+
+    #[test]
+    fn resolve_fqdn_empty_inputs() {
+        assert_eq!(resolve_domain_from_fqdn("", "child.contoso.local"), None);
+        assert_eq!(resolve_domain_from_fqdn("CHILD", ""), None);
+    }
+
+    // ── is_plausible_password ─────────────────────────────────────
+
+    #[test]
+    fn plausible_password_valid() {
+        assert!(is_plausible_password("Summer2025!"));
+        assert!(is_plausible_password("ab"));
+    }
+
+    #[test]
+    fn plausible_password_too_short() {
+        assert!(!is_plausible_password("a"));
+        assert!(!is_plausible_password(""));
+    }
+
+    #[test]
+    fn plausible_password_variable_refs() {
+        assert!(!is_plausible_password("$env:SECRET"));
+        assert!(!is_plausible_password("%PASSWORD%"));
+    }
+
+    #[test]
+    fn plausible_password_placeholders() {
+        assert!(!is_plausible_password("changeme"));
+        assert!(!is_plausible_password("PASSWORD"));
+        assert!(!is_plausible_password("xxx"));
+        assert!(!is_plausible_password("TODO"));
+        assert!(!is_plausible_password("null"));
+        assert!(!is_plausible_password("none"));
+        assert!(!is_plausible_password("empty"));
+    }
+
+    // ── first_capture ─────────────────────────────────────────────
+
+    #[test]
+    fn first_capture_finds_group() {
+        let re = regex::Regex::new(r"(foo)|(bar)").unwrap();
+        let cap = re.captures("bar").unwrap();
+        let result = first_capture(&cap, &[1, 2]);
+        assert_eq!(result, Some("bar".to_string()));
+    }
+
+    #[test]
+    fn first_capture_prefers_first() {
+        let re = regex::Regex::new(r"(abc)(def)").unwrap();
+        let cap = re.captures("abcdef").unwrap();
+        let result = first_capture(&cap, &[1, 2]);
+        assert_eq!(result, Some("abc".to_string()));
+    }
+
+    #[test]
+    fn first_capture_no_match() {
+        let re = regex::Regex::new(r"(foo)|(bar)").unwrap();
+        let cap = re.captures("bar").unwrap();
+        // group 1 is None, group 3 doesn't exist
+        let result = first_capture(&cap, &[1, 3]);
+        assert_eq!(result, None);
+    }
 }

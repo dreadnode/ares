@@ -290,4 +290,73 @@ SMB  192.168.58.10  445  DC01  IT_Share        READ,WRITE";
         let shares = parse_netexec_shares("[*] No shares enumerated");
         assert!(shares.is_empty());
     }
+
+    #[test]
+    fn parse_netexec_shares_dedup() {
+        let output = "\
+SMB  192.168.58.10  445  DC01  SYSVOL  READ  Logon server share
+SMB  192.168.58.10  445  DC01  SYSVOL  READ  Logon server share";
+        let shares = parse_netexec_shares(output);
+        assert_eq!(shares.len(), 1);
+    }
+
+    #[test]
+    fn parse_netexec_shares_write_only() {
+        let output = "SMB  192.168.58.10  445  DC01  Data  WRITE  Data share";
+        let shares = parse_netexec_shares(output);
+        assert_eq!(shares.len(), 1);
+        assert_eq!(shares[0]["permissions"], "WRITE");
+    }
+
+    #[test]
+    fn parse_netexec_shares_skips_header_rows() {
+        let output = "\
+SMB  192.168.58.10  445  DC01  Share  READ  header
+SMB  192.168.58.10  445  DC01  ------  READ  separator
+SMB  192.168.58.10  445  DC01  -Perms-  READ  also header";
+        let shares = parse_netexec_shares(output);
+        // "Share" header word should be skipped, dashes skipped
+        assert_eq!(shares.len(), 0);
+    }
+
+    #[test]
+    fn parse_netexec_shares_no_comment() {
+        let output = "SMB  192.168.58.10  445  DC01  TestShare  READ";
+        let shares = parse_netexec_shares(output);
+        assert_eq!(shares.len(), 1);
+        assert_eq!(shares[0]["comment"], "");
+    }
+
+    #[test]
+    fn parse_netexec_users_table_no_domain_banner() {
+        let output = "\
+SMB  192.168.58.10  445  DC01  -Username-  -Last PW Set-  -BadPW- -Description-
+SMB  192.168.58.10  445  DC01  alice.j  2026-03-25 23:21:09  0  Alice";
+        let users = parse_netexec_users(output);
+        assert_eq!(users.len(), 1);
+        // Falls back to hostname (DC01) when no domain: banner
+        assert_eq!(users[0]["domain"], "DC01");
+    }
+
+    #[test]
+    fn parse_netexec_users_skips_bracket_lines_in_table() {
+        let output = "\
+SMB  192.168.58.10  445  DC01  -Username-  -Last PW Set-  -BadPW- -Description-
+SMB  192.168.58.10  445  DC01  [*] Enumerated 5 users
+SMB  192.168.58.10  445  DC01  alice.j  2026-03-25 23:21:09  0  Alice";
+        let users = parse_netexec_users(output);
+        assert_eq!(users.len(), 1);
+        assert_eq!(users[0]["username"], "alice.j");
+    }
+
+    #[test]
+    fn parse_netexec_users_table_no_description() {
+        let output = "\
+SMB  192.168.58.10  445  DC01  [*] (domain:contoso.local) Enumerated
+SMB  192.168.58.10  445  DC01  -Username-  -Last PW Set-  -BadPW- -Description-
+SMB  192.168.58.10  445  DC01  bob  2026-01-01 00:00:00  0";
+        let users = parse_netexec_users(output);
+        assert_eq!(users.len(), 1);
+        assert_eq!(users[0]["username"], "bob");
+    }
 }

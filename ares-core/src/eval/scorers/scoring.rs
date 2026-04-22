@@ -384,7 +384,7 @@ mod tests {
     fn empty_gt() -> EvaluationGroundTruth {
         EvaluationGroundTruth {
             operation_id: "op-1".into(),
-            target_ip: "10.0.0.1".into(),
+            target_ip: "192.168.58.1".into(),
             expected_iocs: vec![],
             expected_techniques: vec![],
             expected_timeline: vec![],
@@ -457,13 +457,13 @@ mod tests {
     fn ioc_detection_all_found() {
         let mut snap = empty_snap();
         snap.evidence_values
-            .push(make_evidence("ip", "10.0.0.1", 1, 0.9, true));
+            .push(make_evidence("ip", "192.168.58.1", 1, 0.9, true));
         snap.evidence_values
             .push(make_evidence("user", "admin", 2, 0.8, true));
 
         let mut gt = empty_gt();
         gt.expected_iocs = vec![
-            make_ioc("ip", "10.0.0.1", true),
+            make_ioc("ip", "192.168.58.1", true),
             make_ioc("user", "admin", false),
         ];
 
@@ -475,7 +475,7 @@ mod tests {
         let snap = empty_snap();
         let mut gt = empty_gt();
         gt.expected_iocs = vec![
-            make_ioc("ip", "10.0.0.1", true),
+            make_ioc("ip", "192.168.58.1", true),
             make_ioc("user", "admin", false),
         ];
 
@@ -486,12 +486,12 @@ mod tests {
     fn ioc_detection_partial_required_only() {
         let mut snap = empty_snap();
         snap.evidence_values
-            .push(make_evidence("ip", "10.0.0.1", 1, 0.9, true));
+            .push(make_evidence("ip", "192.168.58.1", 1, 0.9, true));
 
         let mut gt = empty_gt();
         gt.expected_iocs = vec![
-            make_ioc("ip", "10.0.0.1", true),
-            make_ioc("ip", "192.168.1.1", true),
+            make_ioc("ip", "192.168.58.1", true),
+            make_ioc("ip", "192.168.58.2", true),
         ];
 
         // 1/2 required = 0.5, no optional => 1.0
@@ -501,43 +501,43 @@ mod tests {
 
     #[test]
     fn ioc_matches_exact() {
-        let ioc = make_ioc("ip", "10.0.0.1", true);
-        let found: HashSet<String> = ["10.0.0.1".into()].into_iter().collect();
+        let ioc = make_ioc("ip", "192.168.58.1", true);
+        let found: HashSet<String> = ["192.168.58.1".into()].into_iter().collect();
         assert!(ioc_matches(&ioc, &found));
     }
 
     #[test]
     fn ioc_matches_case_insensitive() {
-        let ioc = make_ioc("ip", "DC01.CORP.LOCAL", true);
-        let found: HashSet<String> = ["dc01.corp.local".into()].into_iter().collect();
+        let ioc = make_ioc("ip", "DC01.CONTOSO.LOCAL", true);
+        let found: HashSet<String> = ["dc01.contoso.local".into()].into_iter().collect();
         assert!(ioc_matches(&ioc, &found));
     }
 
     #[test]
     fn ioc_matches_hostname_partial() {
-        let ioc = make_ioc("hostname", "dc01.corp.local", true);
+        let ioc = make_ioc("hostname", "dc01.contoso.local", true);
         let found: HashSet<String> = ["dc01".into()].into_iter().collect();
         assert!(ioc_matches(&ioc, &found));
     }
 
     #[test]
     fn ioc_matches_user_backslash() {
-        let ioc = make_ioc("user", "CORP\\admin", true);
+        let ioc = make_ioc("user", "CONTOSO\\admin", true);
         let found: HashSet<String> = ["admin".into()].into_iter().collect();
         assert!(ioc_matches(&ioc, &found));
     }
 
     #[test]
     fn ioc_matches_user_at_sign() {
-        let ioc = make_ioc("user", "admin@corp.local", true);
+        let ioc = make_ioc("user", "admin@contoso.local", true);
         let found: HashSet<String> = ["admin".into()].into_iter().collect();
         assert!(ioc_matches(&ioc, &found));
     }
 
     #[test]
     fn ioc_no_match_unrelated() {
-        let ioc = make_ioc("ip", "10.0.0.1", true);
-        let found: HashSet<String> = ["192.168.1.1".into()].into_iter().collect();
+        let ioc = make_ioc("ip", "192.168.58.1", true);
+        let found: HashSet<String> = ["192.168.58.99".into()].into_iter().collect();
         assert!(!ioc_matches(&ioc, &found));
     }
 
@@ -545,12 +545,12 @@ mod tests {
     fn build_found_values_includes_evidence_and_queries() {
         let mut snap = empty_snap();
         snap.evidence_values
-            .push(make_evidence("ip", "10.0.0.1", 1, 0.9, true));
+            .push(make_evidence("ip", "192.168.58.1", 1, 0.9, true));
         snap.queried_hosts.insert("DC01".into());
         snap.queried_users.insert("Admin".into());
 
         let found = build_found_values(&snap);
-        assert!(found.contains("10.0.0.1"));
+        assert!(found.contains("192.168.58.1"));
         assert!(found.contains("dc01"));
         assert!(found.contains("admin"));
     }
@@ -558,10 +558,15 @@ mod tests {
     #[test]
     fn build_found_values_hostname_splits() {
         let mut snap = empty_snap();
-        snap.evidence_values
-            .push(make_evidence("hostname", "dc01.corp.local", 2, 0.8, true));
+        snap.evidence_values.push(make_evidence(
+            "hostname",
+            "dc01.contoso.local",
+            2,
+            0.8,
+            true,
+        ));
         let found = build_found_values(&snap);
-        assert!(found.contains("dc01.corp.local"));
+        assert!(found.contains("dc01.contoso.local"));
         assert!(found.contains("dc01"));
     }
 
@@ -617,7 +622,7 @@ mod tests {
         let mut snap = empty_snap();
         snap.highest_pyramid_level = 5;
         snap.evidence_values
-            .push(make_evidence("ip", "10.0.0.1", 1, 0.9, true));
+            .push(make_evidence("ip", "192.168.58.1", 1, 0.9, true));
         snap.evidence_values
             .push(make_evidence("tool", "mimikatz", 5, 0.9, true));
         // highest_score = 5/6 ≈ 0.833
@@ -644,9 +649,9 @@ mod tests {
     fn evidence_quality_mixed() {
         let mut snap = empty_snap();
         snap.evidence_values
-            .push(make_evidence("ip", "10.0.0.1", 1, 0.8, true));
+            .push(make_evidence("ip", "192.168.58.1", 1, 0.8, true));
         snap.evidence_values
-            .push(make_evidence("ip", "10.0.0.2", 2, 0.6, false));
+            .push(make_evidence("ip", "192.168.58.2", 2, 0.6, false));
         // avg_conf=0.7, validation=0.5, ttp_ratio=0.0
         // 0.7*0.4 + 0.5*0.3 + 0.0*0.3 = 0.43
         assert_abs_diff_eq!(score_evidence_quality(&snap), 0.43, epsilon = 0.01);

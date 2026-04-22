@@ -205,17 +205,18 @@ mod tests {
     #[test]
     fn parse_certipy_with_ca_name() {
         let output = "CA Name                             : ESSOS-CA\n[!] Vulnerabilities\nESC1: enrollee supplies subject";
-        let params = json!({"target": "192.168.58.10", "domain": "essos.local"});
+        let params = json!({"target": "192.168.58.10", "domain": "fabrikam.local"});
         let vulns = parse_certipy_find(output, &params);
         assert_eq!(vulns.len(), 1);
         assert_eq!(vulns[0]["details"]["ca_name"], "ESSOS-CA");
-        assert_eq!(vulns[0]["details"]["domain"], "essos.local");
+        assert_eq!(vulns[0]["details"]["domain"], "fabrikam.local");
     }
 
     #[test]
     fn parse_certipy_inline_pattern() {
         // certipy find -vulnerable output format
-        let output = "  ESC1 : 'ESSOS.LOCAL\\Domain Users' can enroll, enrollee supplies subject";
+        let output =
+            "  ESC1 : 'FABRIKAM.LOCAL\\Domain Users' can enroll, enrollee supplies subject";
         let params = json!({"target": "192.168.58.10"});
         let vulns = parse_certipy_find(output, &params);
         assert_eq!(vulns.len(), 1);

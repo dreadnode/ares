@@ -88,8 +88,8 @@ fn extract_spn_from_parts(parts: &[&str]) -> Option<String> {
         if !part.contains('/') {
             continue;
         }
-        // Skip "w/" and "w/o"
-        if *part == "w/" || *part == "w/o" {
+        // Skip "w/", "w/o", "N/A"
+        if *part == "w/" || *part == "w/o" || part.eq_ignore_ascii_case("n/a") {
             continue;
         }
         // Skip bracket-prefixed tokens like "[*]"
@@ -255,5 +255,65 @@ DC02$   Computer     Unconstrained                        N/A                   
         for v in &vulns {
             assert_eq!(v["discovered_by"], "find_delegation");
         }
+    }
+
+    // ── extract_spn_from_parts ────────────────────────────────────
+
+    #[test]
+    fn spn_basic() {
+        let parts = vec!["Constrained", "CIFS/dc01.contoso.local"];
+        assert_eq!(
+            extract_spn_from_parts(&parts),
+            Some("CIFS/dc01.contoso.local".to_string())
+        );
+    }
+
+    #[test]
+    fn spn_skips_w_slash() {
+        let parts = vec!["Constrained", "w/", "Protocol", "CIFS/dc01"];
+        assert_eq!(
+            extract_spn_from_parts(&parts),
+            Some("CIFS/dc01".to_string())
+        );
+    }
+
+    #[test]
+    fn spn_skips_w_slash_o() {
+        let parts = vec!["Constrained", "w/o", "Protocol", "HTTP/web01"];
+        assert_eq!(
+            extract_spn_from_parts(&parts),
+            Some("HTTP/web01".to_string())
+        );
+    }
+
+    #[test]
+    fn spn_skips_bracket_tokens() {
+        let parts = vec!["[*]", "CIFS/dc01"];
+        assert_eq!(
+            extract_spn_from_parts(&parts),
+            Some("CIFS/dc01".to_string())
+        );
+    }
+
+    #[test]
+    fn spn_no_valid_spn() {
+        let parts = vec!["N/A", "w/", "w/o"];
+        assert_eq!(extract_spn_from_parts(&parts), None);
+    }
+
+    #[test]
+    fn spn_empty() {
+        let parts: Vec<&str> = vec![];
+        assert_eq!(extract_spn_from_parts(&parts), None);
+    }
+
+    #[test]
+    fn spn_numeric_after_slash_skipped() {
+        // "3/4" has a digit after slash, not alphabetic
+        let parts = vec!["3/4", "LDAP/dc01"];
+        assert_eq!(
+            extract_spn_from_parts(&parts),
+            Some("LDAP/dc01".to_string())
+        );
     }
 }

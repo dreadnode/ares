@@ -232,10 +232,10 @@ mod tests {
 
     #[test]
     fn red_activity_key_with_all_fields() {
-        let activity = make_red_activity(Some("T1003"), Some("10.0.0.1"), "credential dump");
+        let activity = make_red_activity(Some("T1003"), Some("192.168.58.1"), "credential dump");
         let key = activity.key();
         assert!(key.contains("T1003"));
-        assert!(key.contains("10.0.0.1"));
+        assert!(key.contains("192.168.58.1"));
     }
 
     #[test]
@@ -247,7 +247,11 @@ mod tests {
 
     #[test]
     fn blue_detection_key_includes_alert_name() {
-        let det = make_blue_detection(Some("T1003"), "Credential Dumping Alert", Some("10.0.0.1"));
+        let det = make_blue_detection(
+            Some("T1003"),
+            "Credential Dumping Alert",
+            Some("192.168.58.1"),
+        );
         let key = det.key();
         assert!(key.contains("T1003"));
         assert!(key.contains("Credential Dumping Alert"));
@@ -264,8 +268,8 @@ mod tests {
     #[test]
     fn match_quality_strong() {
         let m = CorrelationMatch {
-            red_activity: make_red_activity(Some("T1003"), Some("10.0.0.1"), "dump"),
-            blue_detection: make_blue_detection(Some("T1003"), "Alert", Some("10.0.0.1")),
+            red_activity: make_red_activity(Some("T1003"), Some("192.168.58.1"), "dump"),
+            blue_detection: make_blue_detection(Some("T1003"), "Alert", Some("192.168.58.1")),
             time_delta_seconds: 120.0,
             technique_match: true,
             target_match: true,
@@ -277,8 +281,8 @@ mod tests {
     #[test]
     fn match_quality_good() {
         let m = CorrelationMatch {
-            red_activity: make_red_activity(Some("T1003"), Some("10.0.0.1"), "dump"),
-            blue_detection: make_blue_detection(Some("T1003"), "Alert", Some("10.0.0.2")),
+            red_activity: make_red_activity(Some("T1003"), Some("192.168.58.1"), "dump"),
+            blue_detection: make_blue_detection(Some("T1003"), "Alert", Some("192.168.58.2")),
             time_delta_seconds: 400.0,
             technique_match: true,
             target_match: false,
@@ -290,8 +294,8 @@ mod tests {
     #[test]
     fn match_quality_weak_technique_only() {
         let m = CorrelationMatch {
-            red_activity: make_red_activity(Some("T1003"), Some("10.0.0.1"), "dump"),
-            blue_detection: make_blue_detection(Some("T1003"), "Alert", Some("10.0.0.2")),
+            red_activity: make_red_activity(Some("T1003"), Some("192.168.58.1"), "dump"),
+            blue_detection: make_blue_detection(Some("T1003"), "Alert", Some("192.168.58.2")),
             time_delta_seconds: 700.0,
             technique_match: true,
             target_match: false,
@@ -303,8 +307,8 @@ mod tests {
     #[test]
     fn match_quality_weak_target_within_window() {
         let m = CorrelationMatch {
-            red_activity: make_red_activity(Some("T1003"), Some("10.0.0.1"), "dump"),
-            blue_detection: make_blue_detection(Some("T1003"), "Alert", Some("10.0.0.1")),
+            red_activity: make_red_activity(Some("T1003"), Some("192.168.58.1"), "dump"),
+            blue_detection: make_blue_detection(Some("T1003"), "Alert", Some("192.168.58.1")),
             time_delta_seconds: 200.0,
             technique_match: false,
             target_match: true,
@@ -316,8 +320,8 @@ mod tests {
     #[test]
     fn match_quality_tenuous() {
         let m = CorrelationMatch {
-            red_activity: make_red_activity(Some("T1003"), Some("10.0.0.1"), "dump"),
-            blue_detection: make_blue_detection(Some("T1003"), "Alert", Some("10.0.0.2")),
+            red_activity: make_red_activity(Some("T1003"), Some("192.168.58.1"), "dump"),
+            blue_detection: make_blue_detection(Some("T1003"), "Alert", Some("192.168.58.2")),
             time_delta_seconds: 700.0,
             technique_match: false,
             target_match: false,
@@ -329,8 +333,8 @@ mod tests {
     #[test]
     fn match_quality_strong_boundary_just_under_300() {
         let m = CorrelationMatch {
-            red_activity: make_red_activity(Some("T1003"), Some("10.0.0.1"), "dump"),
-            blue_detection: make_blue_detection(Some("T1003"), "Alert", Some("10.0.0.1")),
+            red_activity: make_red_activity(Some("T1003"), Some("192.168.58.1"), "dump"),
+            blue_detection: make_blue_detection(Some("T1003"), "Alert", Some("192.168.58.1")),
             time_delta_seconds: 299.9,
             technique_match: true,
             target_match: true,
@@ -342,8 +346,8 @@ mod tests {
     #[test]
     fn match_quality_not_strong_at_300() {
         let m = CorrelationMatch {
-            red_activity: make_red_activity(Some("T1003"), Some("10.0.0.1"), "dump"),
-            blue_detection: make_blue_detection(Some("T1003"), "Alert", Some("10.0.0.1")),
+            red_activity: make_red_activity(Some("T1003"), Some("192.168.58.1"), "dump"),
+            blue_detection: make_blue_detection(Some("T1003"), "Alert", Some("192.168.58.1")),
             time_delta_seconds: 300.0,
             technique_match: true,
             target_match: true,
@@ -357,8 +361,8 @@ mod tests {
     fn match_quality_negative_time_delta() {
         // Negative delta (detection before activity)
         let m = CorrelationMatch {
-            red_activity: make_red_activity(Some("T1003"), Some("10.0.0.1"), "dump"),
-            blue_detection: make_blue_detection(Some("T1003"), "Alert", Some("10.0.0.1")),
+            red_activity: make_red_activity(Some("T1003"), Some("192.168.58.1"), "dump"),
+            blue_detection: make_blue_detection(Some("T1003"), "Alert", Some("192.168.58.1")),
             time_delta_seconds: -100.0,
             technique_match: true,
             target_match: true,

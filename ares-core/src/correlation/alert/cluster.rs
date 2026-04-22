@@ -346,7 +346,7 @@ mod tests {
     #[test]
     fn add_alert_skips_numeric_instance() {
         let mut c = AlertCluster::new("c1".into());
-        let alert = make_alert(json!({"instance": "192.168.1.1:8080"}), None);
+        let alert = make_alert(json!({"instance": "192.168.58.1:8080"}), None);
         c.add_alert(&alert);
         assert!(c.common_hosts.is_empty());
     }
@@ -374,10 +374,13 @@ mod tests {
     #[test]
     fn add_alert_extracts_ips() {
         let mut c = AlertCluster::new("c1".into());
-        let alert = make_alert(json!({"ip": "10.0.0.1", "source_ip": "10.0.0.2"}), None);
+        let alert = make_alert(
+            json!({"ip": "192.168.58.1", "source_ip": "192.168.58.2"}),
+            None,
+        );
         c.add_alert(&alert);
-        assert!(c.common_ips.contains("10.0.0.1"));
-        assert!(c.common_ips.contains("10.0.0.2"));
+        assert!(c.common_ips.contains("192.168.58.1"));
+        assert!(c.common_ips.contains("192.168.58.2"));
     }
 
     #[test]
@@ -449,8 +452,8 @@ mod tests {
     #[test]
     fn similarity_score_ip_match() {
         let mut c = AlertCluster::new("c1".into());
-        c.add_alert(&make_alert(json!({"ip": "10.0.0.1"}), None));
-        let alert = make_alert(json!({"ip": "10.0.0.1"}), None);
+        c.add_alert(&make_alert(json!({"ip": "192.168.58.1"}), None));
+        let alert = make_alert(json!({"ip": "192.168.58.1"}), None);
         let score = c.similarity_score(&alert);
         assert!(score >= 0.2, "expected >=0.2, got {score}");
     }
@@ -471,7 +474,7 @@ mod tests {
             "labels": {
                 "hostname": "DC01",
                 "user": "admin",
-                "ip": "10.0.0.1",
+                "ip": "192.168.58.1",
                 "mitre_technique": "T1021"
             },
             "startsAt": "2025-01-01T10:00:00Z",

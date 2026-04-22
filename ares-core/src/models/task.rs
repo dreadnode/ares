@@ -416,7 +416,7 @@ mod task_status_record_tests {
             "role": "recon",
             "task_type": "network_scan",
             "error": null,
-            "payload": {"targets": ["192.168.1.0/24"]}
+            "payload": {"targets": ["192.168.58.0/24"]}
         });
         let rec: TaskStatusRecord = serde_json::from_value(json).unwrap();
         assert_eq!(rec.operation_id, "op-002");

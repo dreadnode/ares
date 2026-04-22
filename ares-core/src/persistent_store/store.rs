@@ -661,7 +661,7 @@ mod tests {
     fn is_ip_valid_ipv4() {
         assert!(is_ip("192.168.58.10"));
         assert!(is_ip("192.168.58.240"));
-        assert!(is_ip("10.0.0.1"));
+        assert!(is_ip("192.168.58.1"));
         assert!(is_ip("0.0.0.0"));
         assert!(is_ip("255.255.255.255"));
     }

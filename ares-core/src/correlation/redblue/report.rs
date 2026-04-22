@@ -373,10 +373,14 @@ mod tests {
         report.matches.push(CorrelationMatch {
             red_activity: make_red(
                 Some("T1003"),
-                Some("10.0.0.1"),
+                Some("192.168.58.1"),
                 "credential dump via secretsdump",
             ),
-            blue_detection: make_blue(Some("T1003"), "Credential Dumping Alert", Some("10.0.0.1")),
+            blue_detection: make_blue(
+                Some("T1003"),
+                "Credential Dumping Alert",
+                Some("192.168.58.1"),
+            ),
             time_delta_seconds: 120.0,
             technique_match: true,
             target_match: true,
@@ -392,7 +396,7 @@ mod tests {
     fn report_detection_gaps_section() {
         let mut report = empty_report(0.4);
         report.gaps.push(DetectionGap {
-            red_activity: make_red(Some("T1558"), Some("10.0.0.5"), "kerberoasting attack"),
+            red_activity: make_red(Some("T1558"), Some("192.168.58.5"), "kerberoasting attack"),
             reason: "No detection rule for Kerberoasting".to_string(),
             recommended_detection: Some("Add 4769 monitoring".to_string()),
             mitre_data_sources: vec![],
@@ -408,7 +412,7 @@ mod tests {
         report.false_positives.push(make_blue(
             Some("T1110"),
             "Brute Force Alert",
-            Some("10.0.0.9"),
+            Some("192.168.58.9"),
         ));
         let md = generate_report_markdown(&report);
         assert!(md.contains("## False Positives"));

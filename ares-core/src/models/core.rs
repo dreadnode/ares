@@ -213,7 +213,7 @@ mod tests {
     #[test]
     fn trust_info_is_parent_child() {
         let t = TrustInfo {
-            domain: "child.corp.local".to_string(),
+            domain: "child.contoso.local".to_string(),
             flat_name: "CHILD".to_string(),
             direction: "bidirectional".to_string(),
             trust_type: "parent_child".to_string(),
@@ -264,7 +264,7 @@ mod tests {
     #[test]
     fn host_serde_roundtrip() {
         let host = Host {
-            ip: "10.0.0.1".to_string(),
+            ip: "192.168.58.1".to_string(),
             hostname: "web01".to_string(),
             os: "Windows Server 2019".to_string(),
             roles: vec!["web".to_string()],
@@ -279,9 +279,9 @@ mod tests {
 
     #[test]
     fn host_serde_defaults() {
-        let json = r#"{"ip":"10.0.0.1"}"#;
+        let json = r#"{"ip":"192.168.58.1"}"#;
         let host: Host = serde_json::from_str(json).unwrap();
-        assert_eq!(host.ip, "10.0.0.1");
+        assert_eq!(host.ip, "192.168.58.1");
         assert!(host.hostname.is_empty());
         assert!(host.os.is_empty());
         assert!(host.roles.is_empty());
@@ -296,7 +296,7 @@ mod tests {
             id: "test-id".to_string(),
             username: "admin".to_string(),
             password: "P@ssw0rd".to_string(),
-            domain: "CORP".to_string(),
+            domain: "CONTOSO".to_string(),
             source: "secretsdump".to_string(),
             discovered_at: None,
             is_admin: true,
@@ -328,7 +328,7 @@ mod tests {
             username: "krbtgt".to_string(),
             hash_value: "abc123".to_string(),
             hash_type: "NTLM".to_string(),
-            domain: "CORP".to_string(),
+            domain: "CONTOSO".to_string(),
             cracked_password: None,
             source: "dcsync".to_string(),
             discovered_at: None,
@@ -345,7 +345,7 @@ mod tests {
     #[test]
     fn share_serde_roundtrip() {
         let share = Share {
-            host: "10.0.0.5".to_string(),
+            host: "192.168.58.5".to_string(),
             name: "ADMIN$".to_string(),
             permissions: "READ".to_string(),
             comment: "Remote Admin".to_string(),
@@ -357,9 +357,9 @@ mod tests {
 
     #[test]
     fn share_serde_defaults() {
-        let json = r#"{"host":"10.0.0.5","name":"C$"}"#;
+        let json = r#"{"host":"192.168.58.5","name":"C$"}"#;
         let share: Share = serde_json::from_str(json).unwrap();
-        assert_eq!(share.host, "10.0.0.5");
+        assert_eq!(share.host, "192.168.58.5");
         assert_eq!(share.name, "C$");
         assert!(share.permissions.is_empty());
         assert!(share.comment.is_empty());
@@ -369,7 +369,7 @@ mod tests {
     fn user_serde_roundtrip() {
         let user = User {
             username: "jdoe".to_string(),
-            domain: "CORP".to_string(),
+            domain: "CONTOSO".to_string(),
             description: "John Doe".to_string(),
             is_admin: true,
             source: "ldap".to_string(),
@@ -393,9 +393,9 @@ mod tests {
     #[test]
     fn target_serde_roundtrip() {
         let target = Target {
-            ip: "192.168.1.1".to_string(),
+            ip: "192.168.58.1".to_string(),
             hostname: "dc01".to_string(),
-            domain: "corp.local".to_string(),
+            domain: "contoso.local".to_string(),
             environment: "prod".to_string(),
         };
         let json = serde_json::to_string(&target).unwrap();
@@ -406,7 +406,7 @@ mod tests {
     #[test]
     fn target_serde_skip_empty() {
         let target = Target {
-            ip: "10.0.0.1".to_string(),
+            ip: "192.168.58.1".to_string(),
             hostname: String::new(),
             domain: String::new(),
             environment: String::new(),
@@ -420,7 +420,7 @@ mod tests {
     #[test]
     fn trust_info_serde_roundtrip() {
         let trust = TrustInfo {
-            domain: "child.corp.local".to_string(),
+            domain: "child.contoso.local".to_string(),
             flat_name: "CHILD".to_string(),
             direction: "bidirectional".to_string(),
             trust_type: "parent_child".to_string(),
@@ -454,7 +454,7 @@ mod tests {
     #[test]
     fn host_skip_empty_fields_in_json() {
         let host = Host {
-            ip: "10.0.0.1".to_string(),
+            ip: "192.168.58.1".to_string(),
             hostname: String::new(),
             os: String::new(),
             roles: vec![],

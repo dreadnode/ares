@@ -1403,7 +1403,7 @@ mod tests {
         let r = EvaluationResult {
             missed_iocs: vec![ExpectedIOC {
                 ioc_type: "ip".into(),
-                value: "10.0.0.1".into(),
+                value: "192.168.58.1".into(),
                 required: true,
                 pyramid_level: PyramidLevel::IpAddresses,
                 mitre_techniques: vec![],
@@ -1434,7 +1434,7 @@ mod tests {
         assert_eq!(gaps["found_iocs_count"], 2);
         assert_eq!(gaps["missed_iocs"].as_array().unwrap().len(), 1);
         assert_eq!(gaps["missed_iocs"][0]["type"], "ip");
-        assert_eq!(gaps["missed_iocs"][0]["value"], "10.0.0.1");
+        assert_eq!(gaps["missed_iocs"][0]["value"], "192.168.58.1");
     }
 
     #[test]

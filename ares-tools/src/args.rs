@@ -53,8 +53,8 @@ mod tests {
 
     #[test]
     fn optional_str_present() {
-        let args = json!({"host": "10.0.0.1"});
-        assert_eq!(optional_str(&args, "host"), Some("10.0.0.1"));
+        let args = json!({"host": "192.168.58.1"});
+        assert_eq!(optional_str(&args, "host"), Some("192.168.58.1"));
     }
 
     #[test]

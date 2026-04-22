@@ -48,3 +48,57 @@ pub(crate) fn print_loot(state: &SharedRedTeamState, json_output: bool) {
         display::print_loot_human(state, &credentials, &hashes, &domains);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn duration_zero() {
+        assert_eq!(format_duration(chrono::Duration::zero()), "0s");
+    }
+
+    #[test]
+    fn duration_seconds_only() {
+        assert_eq!(format_duration(chrono::Duration::seconds(45)), "45s");
+    }
+
+    #[test]
+    fn duration_minutes_and_seconds() {
+        assert_eq!(format_duration(chrono::Duration::seconds(125)), "2m 05s");
+    }
+
+    #[test]
+    fn duration_hours_minutes_seconds() {
+        assert_eq!(
+            format_duration(chrono::Duration::seconds(3723)),
+            "1h 02m 03s"
+        );
+    }
+
+    #[test]
+    fn duration_exact_hour() {
+        assert_eq!(
+            format_duration(chrono::Duration::seconds(3600)),
+            "1h 00m 00s"
+        );
+    }
+
+    #[test]
+    fn duration_exact_minute() {
+        assert_eq!(format_duration(chrono::Duration::seconds(60)), "1m 00s");
+    }
+
+    #[test]
+    fn duration_negative() {
+        assert_eq!(format_duration(chrono::Duration::seconds(-10)), "0s");
+    }
+
+    #[test]
+    fn duration_large() {
+        assert_eq!(
+            format_duration(chrono::Duration::seconds(86400 + 3661)),
+            "25h 01m 01s"
+        );
+    }
+}

@@ -217,10 +217,10 @@ mod tests {
 
     #[test]
     fn describe_ioc_gap_required() {
-        let ioc = make_ioc("ip", "10.0.0.1", true);
+        let ioc = make_ioc("ip", "192.168.58.1", true);
         let desc = describe_ioc_gap(&ioc);
         assert!(desc.contains("ip"));
-        assert!(desc.contains("10.0.0.1"));
+        assert!(desc.contains("192.168.58.1"));
         assert!(desc.contains("(required)"));
     }
 
@@ -283,7 +283,7 @@ mod tests {
     #[test]
     fn analyze_missed_iocs_and_techniques() {
         let mut r = base_result();
-        r.missed_iocs = vec![make_ioc("ip", "10.0.0.1", true)];
+        r.missed_iocs = vec![make_ioc("ip", "192.168.58.1", true)];
         r.missed_techniques = vec![make_technique("T1003", "OS Credential Dumping", true)];
         let report = analyze_detection_gaps(&r);
         assert!(report.detection_gaps.len() >= 2);

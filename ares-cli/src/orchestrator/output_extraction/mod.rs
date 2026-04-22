@@ -244,7 +244,7 @@ mod unit_tests {
 
     #[test]
     fn extract_from_output_text_empty() {
-        let result = extract_from_output_text("", "corp.local");
+        let result = extract_from_output_text("", "contoso.local");
         assert!(result.is_empty());
     }
 }

@@ -1,7 +1,7 @@
 //! auto_gpo_abuse -- exploit GPO write access for code execution.
 //!
 //! When a controlled user has write access to a Group Policy Object
-//! (e.g., samwell.tarly has write on a GPO linked to north.sevenkingdoms.local),
+//! (e.g., samwell.tarly has write on a GPO linked to contoso.local),
 //! this automation dispatches `pyGPOAbuse` to inject a scheduled task that
 //! runs as SYSTEM on all hosts where the GPO applies.
 //!

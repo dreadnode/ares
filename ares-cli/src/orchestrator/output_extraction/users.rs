@@ -153,29 +153,29 @@ mod tests {
 
     #[test]
     fn is_valid_extracted_user_accepts_normal() {
-        assert!(is_valid_extracted_user("alice", "corp.local"));
+        assert!(is_valid_extracted_user("alice", "contoso.local"));
     }
 
     #[test]
     fn is_valid_extracted_user_rejects_machine_account() {
-        assert!(!is_valid_extracted_user("DC01$", "corp.local"));
+        assert!(!is_valid_extracted_user("DC01$", "contoso.local"));
     }
 
     #[test]
     fn is_valid_extracted_user_rejects_empty() {
-        assert!(!is_valid_extracted_user("", "corp.local"));
+        assert!(!is_valid_extracted_user("", "contoso.local"));
     }
 
     #[test]
     fn is_valid_extracted_user_rejects_single_char() {
-        assert!(!is_valid_extracted_user("a", "corp.local"));
+        assert!(!is_valid_extracted_user("a", "contoso.local"));
     }
 
     #[test]
     fn is_valid_extracted_user_rejects_noise_names() {
         for name in &["anonymous", "none", "null", "unknown", "local"] {
             assert!(
-                !is_valid_extracted_user(name, "corp.local"),
+                !is_valid_extracted_user(name, "contoso.local"),
                 "should reject: {name}"
             );
         }
@@ -183,7 +183,7 @@ mod tests {
 
     #[test]
     fn is_valid_extracted_user_rejects_underscore_domain() {
-        assert!(!is_valid_extracted_user("alice", "_corp.local"));
+        assert!(!is_valid_extracted_user("alice", "_contoso.local"));
     }
 
     #[test]
@@ -194,26 +194,26 @@ mod tests {
 
     #[test]
     fn extract_users_domain_backslash() {
-        let users = extract_users("CORP\\alice (SidTypeUser)", "corp.local");
+        let users = extract_users("CONTOSO\\alice (SidTypeUser)", "contoso.local");
         assert_eq!(users.len(), 1);
         assert_eq!(users[0].username, "alice");
-        assert_eq!(users[0].domain, "CORP");
+        assert_eq!(users[0].domain, "CONTOSO");
     }
 
     #[test]
     fn extract_users_upn_format() {
-        let users = extract_users("bob@corp.local", "corp.local");
+        let users = extract_users("bob@contoso.local", "contoso.local");
         assert!(users.iter().any(|u| u.username == "bob"));
     }
 
     #[test]
     fn extract_users_skips_machine_accounts() {
-        let users = extract_users("CORP\\DC01$", "corp.local");
+        let users = extract_users("CONTOSO\\DC01$", "contoso.local");
         assert!(users.is_empty());
     }
 
     #[test]
     fn extract_users_empty_output() {
-        assert!(extract_users("", "corp.local").is_empty());
+        assert!(extract_users("", "contoso.local").is_empty());
     }
 }

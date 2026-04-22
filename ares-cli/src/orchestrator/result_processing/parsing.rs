@@ -274,32 +274,32 @@ mod tests {
 
     #[test]
     fn resolve_parent_no_match() {
-        let (parent, step) = resolve_parent_id(&[], &[], "smb", "admin", "CORP", None, None);
+        let (parent, step) = resolve_parent_id(&[], &[], "smb", "admin", "CONTOSO", None, None);
         assert!(parent.is_none());
         assert_eq!(step, 0);
     }
 
     #[test]
     fn resolve_parent_cracked_source_matches_hash() {
-        let hashes = vec![make_hash("h1", "admin", "CORP", 2)];
+        let hashes = vec![make_hash("h1", "admin", "CONTOSO", 2)];
         let (parent, step) =
-            resolve_parent_id(&[], &hashes, "cracked_ntlm", "admin", "CORP", None, None);
+            resolve_parent_id(&[], &hashes, "cracked_ntlm", "admin", "CONTOSO", None, None);
         assert_eq!(parent.as_deref(), Some("h1"));
         assert_eq!(step, 3);
     }
 
     #[test]
     fn resolve_parent_cracked_case_insensitive() {
-        let hashes = vec![make_hash("h1", "Admin", "corp", 1)];
+        let hashes = vec![make_hash("h1", "Admin", "contoso", 1)];
         let (parent, step) =
-            resolve_parent_id(&[], &hashes, "cracked_pw", "admin", "CORP", None, None);
+            resolve_parent_id(&[], &hashes, "cracked_pw", "admin", "CONTOSO", None, None);
         assert_eq!(parent.as_deref(), Some("h1"));
         assert_eq!(step, 2);
     }
 
     #[test]
     fn resolve_parent_cracked_empty_domain_matches() {
-        let hashes = vec![make_hash("h1", "admin", "CORP", 5)];
+        let hashes = vec![make_hash("h1", "admin", "CONTOSO", 5)];
         let (parent, step) = resolve_parent_id(&[], &hashes, "cracked_pw", "admin", "", None, None);
         assert_eq!(parent.as_deref(), Some("h1"));
         assert_eq!(step, 6);
@@ -307,15 +307,15 @@ mod tests {
 
     #[test]
     fn resolve_parent_input_user_maps_to_credential() {
-        let creds = vec![make_credential("c1", "alice", "CORP", 3)];
+        let creds = vec![make_credential("c1", "alice", "CONTOSO", 3)];
         let (parent, step) = resolve_parent_id(
             &creds,
             &[],
             "smb",
             "bob",
-            "CORP",
+            "CONTOSO",
             Some("alice"),
-            Some("CORP"),
+            Some("CONTOSO"),
         );
         assert_eq!(parent.as_deref(), Some("c1"));
         assert_eq!(step, 4);
@@ -324,15 +324,15 @@ mod tests {
     #[test]
     fn resolve_parent_input_user_same_as_discovered_skips() {
         // When input user == discovered user, it's the same identity; no parent link.
-        let creds = vec![make_credential("c1", "admin", "CORP", 2)];
+        let creds = vec![make_credential("c1", "admin", "CONTOSO", 2)];
         let (parent, step) = resolve_parent_id(
             &creds,
             &[],
             "smb",
             "admin",
-            "CORP",
+            "CONTOSO",
             Some("admin"),
-            Some("CORP"),
+            Some("CONTOSO"),
         );
         assert!(parent.is_none());
         assert_eq!(step, 0);
@@ -340,15 +340,15 @@ mod tests {
 
     #[test]
     fn resolve_parent_input_user_falls_back_to_hash() {
-        let hashes = vec![make_hash("h1", "alice", "CORP", 1)];
+        let hashes = vec![make_hash("h1", "alice", "CONTOSO", 1)];
         let (parent, step) = resolve_parent_id(
             &[],
             &hashes,
             "smb",
             "bob",
-            "CORP",
+            "CONTOSO",
             Some("alice"),
-            Some("CORP"),
+            Some("CONTOSO"),
         );
         assert_eq!(parent.as_deref(), Some("h1"));
         assert_eq!(step, 2);
@@ -356,24 +356,25 @@ mod tests {
 
     #[test]
     fn resolve_parent_input_user_empty_is_ignored() {
-        let creds = vec![make_credential("c1", "admin", "CORP", 1)];
-        let (parent, step) = resolve_parent_id(&creds, &[], "smb", "bob", "CORP", Some(""), None);
+        let creds = vec![make_credential("c1", "admin", "CONTOSO", 1)];
+        let (parent, step) =
+            resolve_parent_id(&creds, &[], "smb", "bob", "CONTOSO", Some(""), None);
         assert!(parent.is_none());
         assert_eq!(step, 0);
     }
 
     #[test]
     fn resolve_parent_cracked_preferred_over_input_user() {
-        let hashes = vec![make_hash("h1", "admin", "CORP", 2)];
-        let creds = vec![make_credential("c1", "alice", "CORP", 1)];
+        let hashes = vec![make_hash("h1", "admin", "CONTOSO", 2)];
+        let creds = vec![make_credential("c1", "alice", "CONTOSO", 1)];
         let (parent, step) = resolve_parent_id(
             &creds,
             &hashes,
             "cracked_ntlm",
             "admin",
-            "CORP",
+            "CONTOSO",
             Some("alice"),
-            Some("CORP"),
+            Some("CONTOSO"),
         );
         // cracked source matches hash first
         assert_eq!(parent.as_deref(), Some("h1"));
@@ -383,17 +384,17 @@ mod tests {
     #[test]
     fn resolve_parent_picks_last_matching_credential() {
         let creds = vec![
-            make_credential("c1", "alice", "CORP", 1),
-            make_credential("c2", "alice", "CORP", 3),
+            make_credential("c1", "alice", "CONTOSO", 1),
+            make_credential("c2", "alice", "CONTOSO", 3),
         ];
         let (parent, step) = resolve_parent_id(
             &creds,
             &[],
             "smb",
             "bob",
-            "CORP",
+            "CONTOSO",
             Some("alice"),
-            Some("CORP"),
+            Some("CONTOSO"),
         );
         // .rev() means c2 is found first
         assert_eq!(parent.as_deref(), Some("c2"));
@@ -402,9 +403,16 @@ mod tests {
 
     #[test]
     fn resolve_parent_input_domain_empty_still_matches() {
-        let creds = vec![make_credential("c1", "alice", "CORP", 2)];
-        let (parent, step) =
-            resolve_parent_id(&creds, &[], "smb", "bob", "CORP", Some("alice"), Some(""));
+        let creds = vec![make_credential("c1", "alice", "CONTOSO", 2)];
+        let (parent, step) = resolve_parent_id(
+            &creds,
+            &[],
+            "smb",
+            "bob",
+            "CONTOSO",
+            Some("alice"),
+            Some(""),
+        );
         assert_eq!(parent.as_deref(), Some("c1"));
         assert_eq!(step, 3);
     }

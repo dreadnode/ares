@@ -76,3 +76,55 @@ pub(crate) fn crack_dedup_key(hash: &ares_core::models::Hash) -> String {
         prefix
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ares_core::models::Hash;
+
+    fn make_hash(username: &str, domain: &str, hash_value: &str) -> Hash {
+        Hash {
+            id: "h1".into(),
+            username: username.into(),
+            hash_type: "NTLM".into(),
+            hash_value: hash_value.into(),
+            domain: domain.into(),
+            source: "test".into(),
+            cracked_password: None,
+            discovered_at: None,
+            parent_id: None,
+            attack_step: 0,
+            aes_key: None,
+        }
+    }
+
+    #[test]
+    fn dedup_key_basic() {
+        let h = make_hash("Admin", "CONTOSO.LOCAL", "aad3b435b51404eeaad3b435b51404ee");
+        let key = crack_dedup_key(&h);
+        assert_eq!(key, "contoso.local:admin:aad3b435b51404eeaad3b435b51404ee");
+    }
+
+    #[test]
+    fn dedup_key_short_hash() {
+        let h = make_hash("user", "domain.com", "abc123");
+        let key = crack_dedup_key(&h);
+        assert_eq!(key, "domain.com:user:abc123");
+    }
+
+    #[test]
+    fn dedup_key_long_hash_truncated() {
+        let long_hash = "a".repeat(64);
+        let h = make_hash("svc", "contoso.local", &long_hash);
+        let key = crack_dedup_key(&h);
+        assert!(key.ends_with(&"a".repeat(32)));
+        assert!(!key.ends_with(&"a".repeat(33)));
+    }
+
+    #[test]
+    fn dedup_key_case_insensitive() {
+        let h1 = make_hash("Admin", "CONTOSO.LOCAL", "abc");
+        let h2 = make_hash("admin", "contoso.local", "abc");
+        assert_eq!(crack_dedup_key(&h1), crack_dedup_key(&h2));
+    }
+}
