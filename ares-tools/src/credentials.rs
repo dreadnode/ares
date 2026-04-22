@@ -93,3 +93,153 @@ pub fn impacket_auth(
 pub fn kerberos_env(ticket_path: &str) -> (String, String) {
     ("KRB5CCNAME".to_string(), ticket_path.to_string())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // --- impacket_target ---
+
+    #[test]
+    fn impacket_target_with_domain_and_password() {
+        let result = impacket_target(Some("CONTOSO"), "admin", Some("P@ss"), "10.0.0.1");
+        assert_eq!(result, "CONTOSO/admin:P@ss@10.0.0.1");
+    }
+
+    #[test]
+    fn impacket_target_no_domain() {
+        let result = impacket_target(None, "admin", Some("pass"), "dc01");
+        assert_eq!(result, "admin:pass@dc01");
+    }
+
+    #[test]
+    fn impacket_target_empty_domain() {
+        let result = impacket_target(Some(""), "admin", Some("pass"), "dc01");
+        assert_eq!(result, "admin:pass@dc01");
+    }
+
+    #[test]
+    fn impacket_target_no_password() {
+        let result = impacket_target(Some("CONTOSO"), "admin", None, "dc01");
+        assert_eq!(result, "CONTOSO/admin@dc01");
+    }
+
+    #[test]
+    fn impacket_target_no_domain_no_password() {
+        let result = impacket_target(None, "user", None, "target");
+        assert_eq!(result, "user@target");
+    }
+
+    // --- hash_args ---
+
+    #[test]
+    fn hash_args_plain_nthash() {
+        let args = hash_args("aabbccdd");
+        assert_eq!(args, vec!["-hashes", ":aabbccdd"]);
+    }
+
+    #[test]
+    fn hash_args_lm_nt_pair() {
+        let args = hash_args("aad3b435:aabbccdd");
+        assert_eq!(args, vec!["-hashes", "aad3b435:aabbccdd"]);
+    }
+
+    // --- netexec_creds ---
+
+    #[test]
+    fn netexec_creds_password_auth() {
+        let args = netexec_creds(Some("admin"), Some("P@ss"), None, Some("CONTOSO"));
+        assert_eq!(args, vec!["-u", "admin", "-p", "P@ss", "-d", "CONTOSO"]);
+    }
+
+    #[test]
+    fn netexec_creds_hash_auth() {
+        let args = netexec_creds(
+            Some("admin"),
+            Some("ignored"),
+            Some("aabbccdd"),
+            Some("CONTOSO"),
+        );
+        // Hash takes priority over password
+        assert_eq!(
+            args,
+            vec!["-u", "admin", "-H", ":aabbccdd", "-d", "CONTOSO"]
+        );
+    }
+
+    #[test]
+    fn netexec_creds_hash_with_colon() {
+        let args = netexec_creds(Some("admin"), None, Some("lm:nt"), None);
+        assert_eq!(args, vec!["-u", "admin", "-H", "lm:nt"]);
+    }
+
+    #[test]
+    fn netexec_creds_no_username() {
+        let args = netexec_creds(None, Some("pass"), None, None);
+        assert_eq!(args, vec!["-p", "pass"]);
+    }
+
+    #[test]
+    fn netexec_creds_empty() {
+        let args = netexec_creds(None, None, None, None);
+        assert!(args.is_empty());
+    }
+
+    // --- bloodyad_creds ---
+
+    #[test]
+    fn bloodyad_creds_builds_correct_args() {
+        let args = bloodyad_creds("contoso.local", "admin", "P@ssw0rd", "10.0.0.1");
+        assert_eq!(
+            args,
+            vec![
+                "-d",
+                "contoso.local",
+                "-u",
+                "admin",
+                "-p",
+                "P@ssw0rd",
+                "--host",
+                "10.0.0.1",
+            ]
+        );
+    }
+
+    // --- impacket_auth ---
+
+    #[test]
+    fn impacket_auth_with_hash() {
+        let (target, extra) = impacket_auth(
+            Some("CONTOSO"),
+            "admin",
+            Some("ignored"),
+            Some("aabbccdd"),
+            "dc01",
+        );
+        assert_eq!(target, "CONTOSO/admin@dc01");
+        assert_eq!(extra, vec!["-hashes", ":aabbccdd"]);
+    }
+
+    #[test]
+    fn impacket_auth_with_password() {
+        let (target, extra) = impacket_auth(Some("CONTOSO"), "admin", Some("P@ss"), None, "dc01");
+        assert_eq!(target, "CONTOSO/admin:P@ss@dc01");
+        assert!(extra.is_empty());
+    }
+
+    #[test]
+    fn impacket_auth_no_creds() {
+        let (target, extra) = impacket_auth(None, "user", None, None, "host");
+        assert_eq!(target, "user@host");
+        assert!(extra.is_empty());
+    }
+
+    // --- kerberos_env ---
+
+    #[test]
+    fn kerberos_env_builds_tuple() {
+        let (key, val) = kerberos_env("/tmp/krb5cc_admin");
+        assert_eq!(key, "KRB5CCNAME");
+        assert_eq!(val, "/tmp/krb5cc_admin");
+    }
+}

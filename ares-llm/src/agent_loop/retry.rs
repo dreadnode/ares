@@ -71,3 +71,43 @@ pub(super) fn simple_hash(attempt: u32, task_id: &str) -> u64 {
     h = h.wrapping_mul(0x100000001b3);
     h
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn simple_hash_deterministic() {
+        let h1 = simple_hash(0, "task-123");
+        let h2 = simple_hash(0, "task-123");
+        assert_eq!(h1, h2);
+    }
+
+    #[test]
+    fn simple_hash_different_attempts() {
+        let h0 = simple_hash(0, "task-abc");
+        let h1 = simple_hash(1, "task-abc");
+        assert_ne!(h0, h1);
+    }
+
+    #[test]
+    fn simple_hash_different_task_ids() {
+        let ha = simple_hash(0, "task-a");
+        let hb = simple_hash(0, "task-b");
+        assert_ne!(ha, hb);
+    }
+
+    #[test]
+    fn simple_hash_empty_task_id() {
+        // Should not panic
+        let h = simple_hash(0, "");
+        assert_ne!(h, 0);
+    }
+
+    #[test]
+    fn simple_hash_large_attempt() {
+        // Should not panic or overflow
+        let h = simple_hash(u32::MAX, "task-xyz");
+        assert_ne!(h, 0);
+    }
+}

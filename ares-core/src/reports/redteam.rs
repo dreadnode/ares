@@ -495,3 +495,148 @@ pub(crate) fn generate_executive_summary(
 
     summary_parts.join("")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::{Credential, Host, Share, SharedRedTeamState, User};
+
+    fn empty_state() -> SharedRedTeamState {
+        SharedRedTeamState::new("op-test-1".to_string())
+    }
+
+    fn make_user(name: &str, domain: &str) -> User {
+        User {
+            username: name.to_string(),
+            domain: domain.to_string(),
+            description: String::new(),
+            is_admin: false,
+            source: String::new(),
+        }
+    }
+
+    fn make_cred(name: &str, domain: &str, pass: &str, admin: bool) -> Credential {
+        Credential {
+            id: "id".to_string(),
+            username: name.to_string(),
+            password: pass.to_string(),
+            domain: domain.to_string(),
+            source: String::new(),
+            discovered_at: None,
+            is_admin: admin,
+            parent_id: None,
+            attack_step: 0,
+        }
+    }
+
+    #[test]
+    fn executive_summary_critical_when_domain_admin() {
+        let mut state = empty_state();
+        state.has_domain_admin = true;
+        let users = vec![make_user("admin", "contoso.local")];
+        let creds = vec![make_cred("admin", "contoso.local", "pass", true)];
+        let summary = generate_executive_summary(&state, &users, &creds);
+        assert!(summary.contains("**CRITICAL**"));
+        assert!(summary.contains("op-test-1"));
+    }
+
+    #[test]
+    fn executive_summary_critical_when_golden_ticket() {
+        let mut state = empty_state();
+        state.has_golden_ticket = true;
+        let summary = generate_executive_summary(&state, &[], &[]);
+        assert!(summary.contains("**CRITICAL**"));
+        assert!(summary.contains("Golden ticket"));
+    }
+
+    #[test]
+    fn executive_summary_high_when_admin_creds() {
+        let state = empty_state();
+        let creds = vec![make_cred("admin", "contoso.local", "pass", true)];
+        let summary = generate_executive_summary(&state, &[], &creds);
+        assert!(summary.contains("**HIGH**"));
+    }
+
+    #[test]
+    fn executive_summary_medium_when_creds_no_admin() {
+        let state = empty_state();
+        let creds = vec![make_cred("user1", "contoso.local", "pass", false)];
+        let summary = generate_executive_summary(&state, &[], &creds);
+        assert!(summary.contains("**MEDIUM**"));
+    }
+
+    #[test]
+    fn executive_summary_low_when_no_findings() {
+        let state = empty_state();
+        let summary = generate_executive_summary(&state, &[], &[]);
+        assert!(summary.contains("**LOW**"));
+        assert!(summary.contains("resilience"));
+    }
+
+    #[test]
+    fn executive_summary_single_target() {
+        let mut state = empty_state();
+        state.target_ips = vec!["10.0.0.1".to_string()];
+        let summary = generate_executive_summary(&state, &[], &[]);
+        assert!(summary.contains("**10.0.0.1**"));
+    }
+
+    #[test]
+    fn executive_summary_multiple_targets_truncated() {
+        let mut state = empty_state();
+        state.target_ips = vec![
+            "10.0.0.1".to_string(),
+            "10.0.0.2".to_string(),
+            "10.0.0.3".to_string(),
+            "10.0.0.4".to_string(),
+        ];
+        let summary = generate_executive_summary(&state, &[], &[]);
+        assert!(summary.contains("**4 targets**"));
+        assert!(summary.contains("..."));
+    }
+
+    #[test]
+    fn executive_summary_domain_admin_path() {
+        let mut state = empty_state();
+        state.has_domain_admin = true;
+        state.domain_admin_path = Some("user1 -> admin -> DA".to_string());
+        let summary = generate_executive_summary(&state, &[], &[]);
+        assert!(summary.contains("user1 -> admin -> DA"));
+    }
+
+    #[test]
+    fn executive_summary_discovery_stats() {
+        let mut state = empty_state();
+        state.all_hosts = vec![Host {
+            ip: "10.0.0.1".to_string(),
+            hostname: "dc01".to_string(),
+            os: String::new(),
+            roles: vec![],
+            services: vec![],
+            is_dc: false,
+            owned: false,
+        }];
+        state.all_shares = vec![Share {
+            host: "10.0.0.1".to_string(),
+            name: "SYSVOL".to_string(),
+            permissions: "READ".to_string(),
+            comment: String::new(),
+        }];
+        let users = vec![make_user("u1", "d")];
+        let summary = generate_executive_summary(&state, &users, &[]);
+        assert!(summary.contains("Hosts Discovered: 1"));
+        assert!(summary.contains("User Accounts: 1"));
+        assert!(summary.contains("Network Shares: 1"));
+    }
+
+    #[test]
+    fn report_generator_new_succeeds() {
+        let gen = RedTeamReportGenerator::new();
+        assert!(gen.is_ok());
+    }
+
+    #[test]
+    fn report_generator_default_succeeds() {
+        let _gen = RedTeamReportGenerator::default();
+    }
+}

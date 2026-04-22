@@ -188,3 +188,174 @@ pub(super) fn has_tool_calls(msg: &ChatMessage) -> bool {
     }
     false
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn estimate_tokens_empty() {
+        assert_eq!(estimate_tokens(""), 0);
+    }
+
+    #[test]
+    fn estimate_tokens_short_string() {
+        // 12 bytes -> ceil(12/4) = 3
+        assert_eq!(estimate_tokens("hello world!"), 3);
+    }
+
+    #[test]
+    fn estimate_tokens_exact_multiple() {
+        // 8 bytes -> 8/4 = 2
+        assert_eq!(estimate_tokens("abcdefgh"), 2);
+    }
+
+    #[test]
+    fn estimate_tokens_rounds_up() {
+        // 5 bytes -> ceil(5/4) = 2
+        assert_eq!(estimate_tokens("abcde"), 2);
+    }
+
+    #[test]
+    fn estimate_message_tokens_text_content() {
+        let msg = ChatMessage::text(Role::User, "hello");
+        // 4 (overhead) + ceil(5/4) = 4 + 2 = 6
+        assert_eq!(estimate_message_tokens(&msg), 6);
+    }
+
+    #[test]
+    fn estimate_message_tokens_no_content() {
+        let msg = ChatMessage {
+            role: Role::Assistant,
+            content: None,
+            parts: None,
+        };
+        assert_eq!(estimate_message_tokens(&msg), 4);
+    }
+
+    #[test]
+    fn truncate_tool_output_short_unchanged() {
+        let output = "short output";
+        let result = truncate_tool_output(output, 100);
+        assert_eq!(result, output);
+    }
+
+    #[test]
+    fn truncate_tool_output_zero_max_unchanged() {
+        let output = "any output";
+        let result = truncate_tool_output(output, 0);
+        assert_eq!(result, output);
+    }
+
+    #[test]
+    fn truncate_tool_output_long_truncated() {
+        let output = "a".repeat(1000);
+        let result = truncate_tool_output(&output, 200);
+        assert!(result.len() < 1000);
+        assert!(result.contains("truncated"));
+    }
+
+    #[test]
+    fn truncate_tool_output_preserves_head_and_tail() {
+        let head = "HEAD".repeat(50);
+        let middle = "M".repeat(600);
+        let tail = "TAIL".repeat(50);
+        let output = format!("{head}{middle}{tail}");
+        let result = truncate_tool_output(&output, 300);
+        assert!(result.starts_with("HEAD"));
+        assert!(result.ends_with("TAIL"));
+    }
+
+    #[test]
+    fn is_tool_result_tool_role() {
+        let msg = ChatMessage {
+            role: Role::Tool,
+            content: Some("result".to_string()),
+            parts: None,
+        };
+        assert!(is_tool_result(&msg));
+    }
+
+    #[test]
+    fn is_tool_result_user_no_parts() {
+        let msg = ChatMessage::text(Role::User, "hello");
+        assert!(!is_tool_result(&msg));
+    }
+
+    #[test]
+    fn is_tool_result_user_with_tool_result_part() {
+        let msg = ChatMessage {
+            role: Role::User,
+            content: None,
+            parts: Some(vec![ContentPart::ToolResult {
+                tool_use_id: "id1".to_string(),
+                content: "output".to_string(),
+            }]),
+        };
+        assert!(is_tool_result(&msg));
+    }
+
+    #[test]
+    fn has_tool_calls_assistant_with_tool_use() {
+        let msg = ChatMessage {
+            role: Role::Assistant,
+            content: None,
+            parts: Some(vec![ContentPart::ToolUse {
+                id: "id1".to_string(),
+                name: "tool".to_string(),
+                input: serde_json::json!({}),
+            }]),
+        };
+        assert!(has_tool_calls(&msg));
+    }
+
+    #[test]
+    fn has_tool_calls_user_role_false() {
+        let msg = ChatMessage {
+            role: Role::User,
+            content: None,
+            parts: Some(vec![ContentPart::ToolUse {
+                id: "id1".to_string(),
+                name: "tool".to_string(),
+                input: serde_json::json!({}),
+            }]),
+        };
+        assert!(!has_tool_calls(&msg));
+    }
+
+    #[test]
+    fn has_tool_calls_assistant_no_parts() {
+        let msg = ChatMessage::text(Role::Assistant, "hello");
+        assert!(!has_tool_calls(&msg));
+    }
+
+    #[test]
+    fn trim_conversation_no_limit() {
+        let config = ContextConfig {
+            max_context_tokens: 0,
+            max_tool_output_chars: 30_000,
+            min_recent_messages: 10,
+        };
+        let mut msgs = vec![
+            ChatMessage::text(Role::User, "first"),
+            ChatMessage::text(Role::Assistant, "second"),
+        ];
+        trim_conversation(&mut msgs, "system", &[], &config);
+        assert_eq!(msgs.len(), 2);
+    }
+
+    #[test]
+    fn trim_conversation_under_budget_unchanged() {
+        let config = ContextConfig {
+            max_context_tokens: 100_000,
+            max_tool_output_chars: 30_000,
+            min_recent_messages: 2,
+        };
+        let mut msgs = vec![
+            ChatMessage::text(Role::User, "first"),
+            ChatMessage::text(Role::Assistant, "second"),
+        ];
+        trim_conversation(&mut msgs, "sys", &[], &config);
+        assert_eq!(msgs.len(), 2);
+    }
+}
