@@ -887,4 +887,142 @@ mod tests {
         assert_eq!(breakdown.len(), 1);
         assert!(unpriced.is_empty());
     }
+
+    #[test]
+    fn blue_token_usage_key_with_dashes() {
+        assert_eq!(
+            blue_token_usage_key("inv-123"),
+            "ares:blue:inv:inv-123:token_usage"
+        );
+    }
+
+    #[test]
+    fn estimate_usage_cost_empty_models() {
+        let usage = OperationTokenUsage {
+            input_tokens: 100,
+            output_tokens: 50,
+            model: "gpt-4o".to_string(),
+            models: HashMap::new(),
+        };
+        let (total, breakdown, unpriced) = estimate_usage_cost(&usage);
+        assert!(total.is_none());
+        assert!(breakdown.is_empty());
+        assert!(unpriced.is_empty());
+    }
+
+    #[test]
+    fn estimate_usage_cost_all_unpriced() {
+        let usage = OperationTokenUsage {
+            input_tokens: 1000,
+            output_tokens: 500,
+            model: "unknown".to_string(),
+            models: HashMap::from([(
+                "unknown-model".to_string(),
+                ModelTokenUsage {
+                    input_tokens: 1000,
+                    output_tokens: 500,
+                },
+            )]),
+        };
+        let (total, breakdown, unpriced) = estimate_usage_cost(&usage);
+        assert!(total.is_none());
+        assert!(breakdown.is_empty());
+        assert_eq!(unpriced.len(), 1);
+    }
+
+    #[test]
+    fn estimate_usage_cost_single_priced_model() {
+        let usage = OperationTokenUsage {
+            input_tokens: 1_000_000,
+            output_tokens: 500_000,
+            model: "gpt-4o".to_string(),
+            models: HashMap::from([(
+                "gpt-4o".to_string(),
+                ModelTokenUsage {
+                    input_tokens: 1_000_000,
+                    output_tokens: 500_000,
+                },
+            )]),
+        };
+        let (total, breakdown, unpriced) = estimate_usage_cost(&usage);
+        assert!(total.is_some());
+        let cost = total.unwrap();
+        // gpt-4o: 2.50/M input + 10.0/M output
+        // 1M * 2.50/1M + 0.5M * 10.0/1M = 2.50 + 5.0 = 7.50
+        assert!((cost - 7.50).abs() < 0.01);
+        assert_eq!(breakdown.len(), 1);
+        assert!(unpriced.is_empty());
+    }
+
+    #[test]
+    fn model_field_with_slashes_and_dots() {
+        let field = model_field("openai/gpt-4.1", "output_tokens");
+        let (model, tt) = parse_model_field(&field).unwrap();
+        assert_eq!(model, "openai/gpt-4.1");
+        assert_eq!(tt, "output_tokens");
+    }
+
+    #[test]
+    fn token_usage_default_values() {
+        let usage = TokenUsage::default();
+        assert_eq!(usage.input_tokens, 0);
+        assert_eq!(usage.output_tokens, 0);
+        assert_eq!(usage.total_tokens, 0);
+        assert!(usage.model.is_none());
+    }
+
+    #[test]
+    fn token_usage_serde_roundtrip() {
+        let usage = TokenUsage {
+            input_tokens: 100,
+            output_tokens: 50,
+            total_tokens: 150,
+            model: Some("gpt-4o".to_string()),
+        };
+        let json = serde_json::to_string(&usage).unwrap();
+        let deser: TokenUsage = serde_json::from_str(&json).unwrap();
+        assert_eq!(deser.input_tokens, 100);
+        assert_eq!(deser.output_tokens, 50);
+        assert_eq!(deser.total_tokens, 150);
+        assert_eq!(deser.model, Some("gpt-4o".to_string()));
+    }
+
+    #[test]
+    fn token_usage_serde_skip_none_model() {
+        let usage = TokenUsage {
+            input_tokens: 10,
+            output_tokens: 5,
+            total_tokens: 15,
+            model: None,
+        };
+        let json = serde_json::to_string(&usage).unwrap();
+        assert!(!json.contains("model"));
+    }
+
+    #[test]
+    fn lookup_model_cost_prefixed_openai() {
+        let result = lookup_model_cost("openai/gpt-4o-mini");
+        assert!(result.is_some());
+        let (input, output) = result.unwrap();
+        assert!((input - 0.15).abs() < 0.001);
+        assert!((output - 0.60).abs() < 0.001);
+    }
+
+    #[test]
+    fn lookup_model_cost_claude_opus() {
+        let result = lookup_model_cost("claude-opus-4-20250514");
+        assert!(result.is_some());
+        let (input, output) = result.unwrap();
+        assert!((input - 15.0).abs() < 0.001);
+        assert!((output - 75.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn lookup_model_cost_haiku() {
+        let result = lookup_model_cost("claude-haiku-3-5-20241022");
+        assert!(result.is_some());
+        let (input, output) = result.unwrap();
+        assert!((input - 0.80).abs() < 0.001);
+        assert!((output - 4.0).abs() < 0.001);
+    }
 }

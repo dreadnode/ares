@@ -58,6 +58,13 @@ mod tests {
     }
 
     #[test]
+    fn test_new_uuid_is_valid_v4() {
+        let id = new_uuid();
+        let parsed = uuid::Uuid::parse_str(&id).unwrap();
+        assert_eq!(parsed.get_version_num(), 4);
+    }
+
+    #[test]
     fn test_default_hash_type() {
         assert_eq!(default_hash_type(), "NTLM");
     }

@@ -397,3 +397,88 @@ pub struct TaskStatusRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub payload: Option<serde_json::Value>,
 }
+
+#[cfg(test)]
+mod task_status_record_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn test_task_status_record_minimal() {
+        let json = json!({
+            "operation_id": "op-001",
+            "status": "running"
+        });
+        let rec: TaskStatusRecord = serde_json::from_value(json).unwrap();
+        assert_eq!(rec.operation_id, "op-001");
+        assert_eq!(rec.status, "running");
+        assert!(rec.started_at.is_none());
+        assert!(rec.ended_at.is_none());
+        assert!(rec.pod_name.is_none());
+        assert!(rec.role.is_none());
+        assert!(rec.task_type.is_none());
+        assert!(rec.error.is_none());
+        assert!(rec.payload.is_none());
+    }
+
+    #[test]
+    fn test_task_status_record_full() {
+        let json = json!({
+            "operation_id": "op-002",
+            "status": "completed",
+            "started_at": "2025-01-01T00:00:00Z",
+            "ended_at": "2025-01-01T01:00:00Z",
+            "pod_name": "ares-recon-xyz",
+            "role": "recon",
+            "task_type": "network_scan",
+            "error": null,
+            "payload": {"targets": ["192.168.1.0/24"]}
+        });
+        let rec: TaskStatusRecord = serde_json::from_value(json).unwrap();
+        assert_eq!(rec.operation_id, "op-002");
+        assert_eq!(rec.status, "completed");
+        assert_eq!(rec.started_at.as_deref(), Some("2025-01-01T00:00:00Z"));
+        assert_eq!(rec.ended_at.as_deref(), Some("2025-01-01T01:00:00Z"));
+        assert_eq!(rec.pod_name.as_deref(), Some("ares-recon-xyz"));
+        assert_eq!(rec.role.as_deref(), Some("recon"));
+        assert_eq!(rec.task_type.as_deref(), Some("network_scan"));
+        assert!(rec.error.is_none());
+        assert!(rec.payload.is_some());
+    }
+
+    #[test]
+    fn test_task_status_record_with_error() {
+        let json = json!({
+            "operation_id": "op-003",
+            "status": "failed",
+            "error": "connection timeout"
+        });
+        let rec: TaskStatusRecord = serde_json::from_value(json).unwrap();
+        assert_eq!(rec.status, "failed");
+        assert_eq!(rec.error.as_deref(), Some("connection timeout"));
+    }
+
+    #[test]
+    fn test_task_status_record_roundtrip() {
+        let rec = TaskStatusRecord {
+            operation_id: "op-rt".to_string(),
+            status: "pending".to_string(),
+            started_at: Some("2025-06-01T12:00:00Z".to_string()),
+            ended_at: None,
+            pod_name: Some("pod-1".to_string()),
+            role: Some("lateral".to_string()),
+            task_type: Some("smb_relay".to_string()),
+            error: None,
+            payload: Some(json!({"key": "value"})),
+        };
+        let serialized = serde_json::to_value(&rec).unwrap();
+        let deserialized: TaskStatusRecord = serde_json::from_value(serialized).unwrap();
+        assert_eq!(deserialized.operation_id, "op-rt");
+        assert_eq!(deserialized.status, "pending");
+        assert!(deserialized.ended_at.is_none());
+        assert!(deserialized.error.is_none());
+        let json_str = serde_json::to_string(&rec).unwrap();
+        assert!(!json_str.contains("ended_at"));
+        assert!(!json_str.contains("\"error\""));
+    }
+}

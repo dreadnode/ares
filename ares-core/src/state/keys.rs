@@ -160,3 +160,138 @@ pub const BLUE_OP_PREFIX: &str = "ares:blue:op";
 /// Redis key prefix for investigation status.
 #[cfg(feature = "blue")]
 pub const BLUE_STATUS_PREFIX: &str = "ares:blue:inv";
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_key_prefix_format() {
+        assert_eq!(KEY_PREFIX, "ares:op");
+        assert_eq!(LOCK_PREFIX, "ares:lock");
+        assert_eq!(TASK_STATUS_PREFIX, "ares:task_status");
+    }
+
+    #[test]
+    fn test_collection_key_suffixes_non_empty() {
+        let suffixes = [
+            KEY_CREDENTIALS,
+            KEY_HASHES,
+            KEY_HOSTS,
+            KEY_USERS,
+            KEY_SHARES,
+            KEY_DOMAINS,
+            KEY_VULNS,
+            KEY_EXPLOITED,
+            KEY_META,
+            KEY_DC_MAP,
+            KEY_NETBIOS_MAP,
+            KEY_ARTIFACTS,
+            KEY_TIMELINE,
+            KEY_GOLDEN_TICKETS,
+            KEY_ADMINSD_BACKDOORS,
+            KEY_ACL_CHAINS,
+            KEY_GMSA_ACCOUNTS,
+            KEY_DEDUP_PREFIX,
+            KEY_TECHNIQUES,
+            KEY_MSSQL_ENUM_DISPATCHED,
+            KEY_PENDING_TASKS,
+            KEY_COMPLETED_TASKS,
+            KEY_VULN_TYPE_FAILURES,
+            KEY_DOMAIN_SIDS,
+            KEY_ADMIN_NAMES,
+            KEY_TRUSTED_DOMAINS,
+            KEY_STATUS,
+            KEY_MODEL,
+            KEY_STOP_REQUESTED,
+        ];
+        for suffix in &suffixes {
+            assert!(!suffix.is_empty(), "Key suffix must not be empty");
+            assert!(
+                !suffix.contains(':'),
+                "Suffix '{suffix}' should not contain ':'",
+            );
+        }
+    }
+
+    #[test]
+    fn test_state_update_channel_prefix() {
+        assert_eq!(STATE_UPDATE_CHANNEL_PREFIX, "ares:state:updates");
+    }
+
+    #[test]
+    fn test_key_suffixes_unique() {
+        let suffixes = vec![
+            KEY_CREDENTIALS,
+            KEY_HASHES,
+            KEY_HOSTS,
+            KEY_USERS,
+            KEY_SHARES,
+            KEY_DOMAINS,
+            KEY_VULNS,
+            KEY_EXPLOITED,
+            KEY_META,
+            KEY_DC_MAP,
+            KEY_NETBIOS_MAP,
+            KEY_ARTIFACTS,
+            KEY_TIMELINE,
+            KEY_GOLDEN_TICKETS,
+            KEY_ADMINSD_BACKDOORS,
+            KEY_ACL_CHAINS,
+            KEY_GMSA_ACCOUNTS,
+            KEY_TECHNIQUES,
+            KEY_MSSQL_ENUM_DISPATCHED,
+            KEY_PENDING_TASKS,
+            KEY_COMPLETED_TASKS,
+            KEY_VULN_TYPE_FAILURES,
+            KEY_DOMAIN_SIDS,
+            KEY_ADMIN_NAMES,
+            KEY_TRUSTED_DOMAINS,
+            KEY_STATUS,
+            KEY_MODEL,
+            KEY_STOP_REQUESTED,
+        ];
+        let mut seen = std::collections::HashSet::new();
+        for s in &suffixes {
+            assert!(seen.insert(*s), "Duplicate key suffix: {s}");
+        }
+    }
+
+    #[cfg(feature = "blue")]
+    #[test]
+    fn test_blue_key_prefixes() {
+        assert_eq!(BLUE_KEY_PREFIX, "ares:blue:inv");
+        assert_eq!(BLUE_LOCK_PREFIX, "ares:blue:lock");
+        assert_eq!(BLUE_TASK_QUEUE_PREFIX, "ares:blue:tasks");
+        assert_eq!(BLUE_RESULT_QUEUE_PREFIX, "ares:blue:results");
+        assert_eq!(BLUE_HEARTBEAT_PREFIX, "ares:blue:heartbeat");
+    }
+
+    #[cfg(feature = "blue")]
+    #[test]
+    fn test_blue_collection_suffixes_non_empty() {
+        let suffixes = [
+            BLUE_KEY_EVIDENCE,
+            BLUE_KEY_TIMELINE,
+            BLUE_KEY_TECHNIQUES,
+            BLUE_KEY_TACTICS,
+            BLUE_KEY_HOSTS,
+            BLUE_KEY_USERS,
+            BLUE_KEY_QUERY_TYPES,
+            BLUE_KEY_META,
+            BLUE_KEY_PENDING_TASKS,
+            BLUE_KEY_COMPLETED_TASKS,
+            BLUE_KEY_TECHNIQUE_NAMES,
+            BLUE_KEY_RECOMMENDATIONS,
+            BLUE_KEY_TRIAGE_DECISION,
+            BLUE_KEY_TRIAGE_RECORDS,
+            BLUE_KEY_QUERIES,
+            BLUE_KEY_LATERAL,
+            BLUE_KEY_PIVOT_QUEUE,
+            BLUE_KEY_CHAIN_QUEUE,
+        ];
+        for suffix in &suffixes {
+            assert!(!suffix.is_empty(), "Blue key suffix must not be empty");
+        }
+    }
+}
