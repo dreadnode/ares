@@ -368,7 +368,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_parse_blue_role() {
+    fn parses_blue_role() {
         assert_eq!(parse_blue_role("triage").as_str(), "triage");
         assert_eq!(parse_blue_role("threat_hunter").as_str(), "threat_hunter");
         assert_eq!(

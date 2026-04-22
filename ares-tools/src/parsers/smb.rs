@@ -130,7 +130,7 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn test_parse_smb_signing_disabled() {
+    fn parse_smb_signing_disabled() {
         let output = "SMB signing: disabled";
         let params = json!({"target_ip": "192.168.58.10"});
         let hosts = parse_smb_signing(output, &params);
@@ -141,7 +141,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_smb_signing_enabled() {
+    fn parse_smb_signing_enabled() {
         let output = "SMB signing: required";
         let params = json!({"target": "192.168.58.10"});
         let hosts = parse_smb_signing(output, &params);
@@ -151,7 +151,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_smb_signing_not_required() {
+    fn parse_smb_signing_not_required() {
         let output = "message_signing: not required";
         let params = json!({"target_ip": "192.168.58.20"});
         let hosts = parse_smb_signing(output, &params);
@@ -160,13 +160,13 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_smb_signing_no_target() {
+    fn parse_smb_signing_no_target() {
         let hosts = parse_smb_signing("signing: disabled", &json!({}));
         assert!(hosts.is_empty());
     }
 
     #[test]
-    fn test_parse_netexec_smb_with_fqdn() {
+    fn parse_netexec_smb_with_fqdn() {
         let output = "\
 SMB  192.168.58.10  445  DC01  [*] Windows Server 2019 Build 17763 x64 (name:DC01) (domain:contoso.local) (signing:True)
 SMB  192.168.58.20  445  SRV01  [*] Windows Server 2016 Build 14393 x64 (name:SRV01) (domain:contoso.local) (signing:False)";
@@ -179,7 +179,7 @@ SMB  192.168.58.20  445  SRV01  [*] Windows Server 2016 Build 14393 x64 (name:SR
     }
 
     #[test]
-    fn test_parse_netexec_smb_without_domain() {
+    fn parse_netexec_smb_without_domain() {
         // Fallback: no (name:...) (domain:...) → bare NetBIOS name
         let output = "SMB  192.168.58.10  445  DC01  [*] Windows Server 2019 Build 17763 x64";
         let hosts = parse_netexec_smb(output);
@@ -188,19 +188,19 @@ SMB  192.168.58.20  445  SRV01  [*] Windows Server 2016 Build 14393 x64 (name:SR
     }
 
     #[test]
-    fn test_parse_netexec_smb_empty() {
+    fn parse_netexec_smb_empty() {
         let hosts = parse_netexec_smb("No SMB hosts found");
         assert!(hosts.is_empty());
     }
 
     #[test]
-    fn test_extract_fqdn_from_line() {
+    fn extracts_fqdn_from_line() {
         let line = "SMB  192.168.58.12  445  DC01  [*] Windows 10 / Server 2019 Build 17763 x64 (name:DC01) (domain:contoso.local) (signing:True)";
         assert_eq!(extract_fqdn_from_line(line, "DC01"), "dc01.contoso.local");
     }
 
     #[test]
-    fn test_extract_fqdn_trailing_zero() {
+    fn extract_fqdn_trailing_zero() {
         let line = "SMB  192.168.58.22  445  SRV01  [*] ... (name:SRV01) (domain:child.contoso.local0.) (signing:False)";
         assert_eq!(
             extract_fqdn_from_line(line, "SRV01"),
@@ -209,7 +209,7 @@ SMB  192.168.58.20  445  SRV01  [*] Windows Server 2016 Build 14393 x64 (name:SR
     }
 
     #[test]
-    fn test_extract_fqdn_no_domain() {
+    fn extract_fqdn_no_domain() {
         let line = "SMB  192.168.58.12  445  DC01  [*] Windows Server 2019";
         assert_eq!(extract_fqdn_from_line(line, "DC01"), "DC01");
     }

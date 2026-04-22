@@ -30,7 +30,7 @@ fn sample_state() -> StateSnapshot {
 }
 
 #[test]
-fn test_generate_recon_prompt() {
+fn generate_recon_prompt() {
     let payload = serde_json::json!({
         "target_ip": "192.168.58.0/24",
         "domain": "contoso.local",
@@ -45,7 +45,7 @@ fn test_generate_recon_prompt() {
 }
 
 #[test]
-fn test_generate_crack_prompt() {
+fn generate_crack_prompt() {
     let payload = serde_json::json!({
         "hash_type": "ntlm",
         "hash_value": "aad3b435b51404eeaad3b435b51404ee:31d6cfe0d16ae931b73c59d7e0c089c0",
@@ -59,7 +59,7 @@ fn test_generate_crack_prompt() {
 }
 
 #[test]
-fn test_generate_credential_access_prompt() {
+fn generate_credential_access_prompt() {
     let payload = serde_json::json!({
         "technique": "secretsdump",
         "target_ip": "192.168.58.10",
@@ -77,7 +77,7 @@ fn test_generate_credential_access_prompt() {
 }
 
 #[test]
-fn test_generate_lateral_prompt() {
+fn generate_lateral_prompt() {
     let payload = serde_json::json!({
         "technique": "psexec",
         "target_ip": "192.168.58.20",
@@ -93,7 +93,7 @@ fn test_generate_lateral_prompt() {
 }
 
 #[test]
-fn test_generate_exploit_prompt() {
+fn generate_exploit_prompt() {
     let payload = serde_json::json!({
         "vuln_type": "constrained_delegation",
         "target": "192.168.58.30",
@@ -109,7 +109,7 @@ fn test_generate_exploit_prompt() {
 }
 
 #[test]
-fn test_generate_coercion_prompt() {
+fn generate_coercion_prompt() {
     let payload = serde_json::json!({
         "target_ip": "192.168.58.10",
         "listener_ip": "192.168.58.100",
@@ -122,7 +122,7 @@ fn test_generate_coercion_prompt() {
 }
 
 #[test]
-fn test_generate_privesc_prompt() {
+fn generate_privesc_prompt() {
     let payload = serde_json::json!({
         "technique": "find_delegation",
         "target_ip": "192.168.58.10",
@@ -134,7 +134,7 @@ fn test_generate_privesc_prompt() {
 }
 
 #[test]
-fn test_generate_acl_prompt() {
+fn generate_acl_prompt() {
     let payload = serde_json::json!({
         "chain": [{"source": "user1", "target": "admin", "right": "GenericAll"}]
     });
@@ -144,7 +144,7 @@ fn test_generate_acl_prompt() {
 }
 
 #[test]
-fn test_generate_command_prompt() {
+fn generate_command_prompt() {
     let payload = serde_json::json!({"command": "whoami"});
     let prompt = generate_task_prompt("command", "task-009", &payload, None).unwrap();
     assert!(prompt.contains("whoami"));
@@ -152,7 +152,7 @@ fn test_generate_command_prompt() {
 }
 
 #[test]
-fn test_format_state_context_truncation() {
+fn format_state_context_truncation() {
     let mut state = StateSnapshot::default();
     for i in 0..20 {
         state.credentials.push(Credential {
@@ -172,13 +172,13 @@ fn test_format_state_context_truncation() {
 }
 
 #[test]
-fn test_unknown_task_type_returns_none() {
+fn unknown_task_type_returns_none() {
     let payload = serde_json::json!({});
     assert!(generate_task_prompt("unknown_type", "task-x", &payload, None).is_none());
 }
 
 #[test]
-fn test_state_context_injected_into_template() {
+fn state_context_injected_into_template() {
     let payload = serde_json::json!({
         "technique": "secretsdump",
         "target_ip": "192.168.58.10",
@@ -197,34 +197,34 @@ fn test_state_context_injected_into_template() {
 // -----------------------------------------------------------------------
 
 #[test]
-fn test_pth_compatible_lm_nt() {
+fn pth_compatible_lm_nt() {
     assert!(helpers::is_pass_the_hash_compatible(Some(
         "aad3b435b51404eeaad3b435b51404ee:31d6cfe0d16ae931b73c59d7e0c089c0"
     )));
 }
 
 #[test]
-fn test_pth_compatible_nt_only() {
+fn pth_compatible_nt_only() {
     assert!(helpers::is_pass_the_hash_compatible(Some(
         "31d6cfe0d16ae931b73c59d7e0c089c0"
     )));
 }
 
 #[test]
-fn test_pth_rejects_kerberos_hash() {
+fn pth_rejects_kerberos_hash() {
     assert!(!helpers::is_pass_the_hash_compatible(Some(
         "$krb5tgs$23$*svc_sql$"
     )));
 }
 
 #[test]
-fn test_pth_rejects_empty() {
+fn pth_rejects_empty() {
     assert!(!helpers::is_pass_the_hash_compatible(None));
     assert!(!helpers::is_pass_the_hash_compatible(Some("")));
 }
 
 #[test]
-fn test_pth_rejects_triple_colon() {
+fn pth_rejects_triple_colon() {
     assert!(!helpers::is_pass_the_hash_compatible(Some("aaa:bbb:ccc")));
 }
 
@@ -233,7 +233,7 @@ fn test_pth_rejects_triple_colon() {
 // -----------------------------------------------------------------------
 
 #[test]
-fn test_credaccess_kerberos_ticket_secretsdump() {
+fn credaccess_kerberos_ticket_secretsdump() {
     let payload = serde_json::json!({
         "techniques": ["secretsdump"],
         "target_ips": ["192.168.58.10"],
@@ -252,7 +252,7 @@ fn test_credaccess_kerberos_ticket_secretsdump() {
 }
 
 #[test]
-fn test_credaccess_low_hanging_fruit_with_creds() {
+fn credaccess_low_hanging_fruit_with_creds() {
     let payload = serde_json::json!({
         "domain": "contoso.local",
         "dc_ip": "192.168.58.10",
@@ -269,7 +269,7 @@ fn test_credaccess_low_hanging_fruit_with_creds() {
 }
 
 #[test]
-fn test_credaccess_username_as_password_spray() {
+fn credaccess_username_as_password_spray() {
     let payload = serde_json::json!({
         "domain": "contoso.local",
         "dc_ip": "192.168.58.10",
@@ -283,7 +283,7 @@ fn test_credaccess_username_as_password_spray() {
 }
 
 #[test]
-fn test_credaccess_share_spider() {
+fn credaccess_share_spider() {
     let payload = serde_json::json!({
         "domain": "contoso.local",
         "username": "admin",
@@ -300,7 +300,7 @@ fn test_credaccess_share_spider() {
 }
 
 #[test]
-fn test_credaccess_no_cred_techniques() {
+fn credaccess_no_cred_techniques() {
     let payload = serde_json::json!({
         "domain": "contoso.local",
         "dc_ip": "192.168.58.10",
@@ -314,7 +314,7 @@ fn test_credaccess_no_cred_techniques() {
 }
 
 #[test]
-fn test_credaccess_low_hanging_no_creds() {
+fn credaccess_low_hanging_no_creds() {
     let payload = serde_json::json!({
         "domain": "contoso.local",
         "dc_ip": "192.168.58.10",
@@ -328,7 +328,7 @@ fn test_credaccess_low_hanging_no_creds() {
 }
 
 #[test]
-fn test_credaccess_technique_enforcement_with_creds() {
+fn credaccess_technique_enforcement_with_creds() {
     let payload = serde_json::json!({
         "domain": "contoso.local",
         "dc_ip": "192.168.58.10",
@@ -346,7 +346,7 @@ fn test_credaccess_technique_enforcement_with_creds() {
 }
 
 #[test]
-fn test_credaccess_technique_enforcement_with_hash() {
+fn credaccess_technique_enforcement_with_hash() {
     let payload = serde_json::json!({
         "domain": "contoso.local",
         "dc_ip": "192.168.58.10",
@@ -361,7 +361,7 @@ fn test_credaccess_technique_enforcement_with_hash() {
 }
 
 #[test]
-fn test_credaccess_non_pth_hash_strips_techniques() {
+fn credaccess_non_pth_hash_strips_techniques() {
     let payload = serde_json::json!({
         "domain": "contoso.local",
         "dc_ip": "192.168.58.10",
@@ -375,7 +375,7 @@ fn test_credaccess_non_pth_hash_strips_techniques() {
 }
 
 #[test]
-fn test_credaccess_generic_fallback() {
+fn credaccess_generic_fallback() {
     let payload = serde_json::json!({
         "domain": "contoso.local",
         "username": "admin",
@@ -390,7 +390,7 @@ fn test_credaccess_generic_fallback() {
 }
 
 #[test]
-fn test_credaccess_generic_fallback_non_pth_hash() {
+fn credaccess_generic_fallback_non_pth_hash() {
     let payload = serde_json::json!({
         "domain": "contoso.local",
         "username": "admin",
@@ -408,7 +408,7 @@ fn test_credaccess_generic_fallback_non_pth_hash() {
 // -----------------------------------------------------------------------
 
 #[test]
-fn test_exploit_adcs_enumerate() {
+fn exploit_adcs_enumerate() {
     let payload = serde_json::json!({
         "vuln_type": "adcs_enumerate",
         "target": "192.168.58.15",
@@ -425,7 +425,7 @@ fn test_exploit_adcs_enumerate() {
 }
 
 #[test]
-fn test_exploit_mssql() {
+fn exploit_mssql() {
     let payload = serde_json::json!({
         "vuln_type": "mssql_impersonation",
         "target": "192.168.58.30",
@@ -444,7 +444,7 @@ fn test_exploit_mssql() {
 }
 
 #[test]
-fn test_exploit_constrained_delegation_with_state() {
+fn exploit_constrained_delegation_with_state() {
     let state = StateSnapshot {
         credentials: vec![Credential {
             id: "c1".into(),
@@ -478,7 +478,7 @@ fn test_exploit_constrained_delegation_with_state() {
 }
 
 #[test]
-fn test_exploit_unconstrained_delegation() {
+fn exploit_unconstrained_delegation() {
     let payload = serde_json::json!({
         "vuln_type": "unconstrained_delegation",
         "target": "192.168.58.30",
@@ -494,7 +494,7 @@ fn test_exploit_unconstrained_delegation() {
 }
 
 #[test]
-fn test_exploit_adcs_esc1() {
+fn exploit_adcs_esc1() {
     let payload = serde_json::json!({
         "vuln_type": "adcs_esc1",
         "target": "192.168.58.15",
@@ -511,7 +511,7 @@ fn test_exploit_adcs_esc1() {
 }
 
 #[test]
-fn test_exploit_adcs_esc8() {
+fn exploit_adcs_esc8() {
     let payload = serde_json::json!({
         "vuln_type": "adcs_esc8",
         "target": "192.168.58.15",
@@ -526,7 +526,7 @@ fn test_exploit_adcs_esc8() {
 }
 
 #[test]
-fn test_exploit_trust_key_extraction() {
+fn exploit_trust_key_extraction() {
     let payload = serde_json::json!({
         "vuln_type": "trust_key",
         "target": "192.168.58.10",
@@ -545,7 +545,7 @@ fn test_exploit_trust_key_extraction() {
 }
 
 #[test]
-fn test_exploit_child_to_parent_has_raise_child() {
+fn exploit_child_to_parent_has_raise_child() {
     let payload = serde_json::json!({
         "vuln_type": "child_to_parent",
         "target": "192.168.58.10",
@@ -562,7 +562,7 @@ fn test_exploit_child_to_parent_has_raise_child() {
 }
 
 #[test]
-fn test_exploit_mssql_lateral_enumeration() {
+fn exploit_mssql_lateral_enumeration() {
     let state = StateSnapshot {
         credentials: vec![Credential {
             id: "c1".into(),
@@ -591,7 +591,7 @@ fn test_exploit_mssql_lateral_enumeration() {
 }
 
 #[test]
-fn test_exploit_generic_fallback() {
+fn exploit_generic_fallback() {
     let payload = serde_json::json!({
         "vuln_type": "unknown_vuln",
         "target": "192.168.58.30",

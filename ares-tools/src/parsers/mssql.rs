@@ -156,7 +156,7 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn test_parse_impersonation_found() {
+    fn parse_impersonation_found() {
         let output = r#"Impacket v0.12.0 - Copyright Fortra, LLC
 [*] Encryption required, switching to TLS
 [*] ENVCHANGE(DATABASE): Old Value: master, New Value: master
@@ -174,7 +174,7 @@ class   class_desc   major_id   minor_id   grantee_principal_id   grantor_princi
     }
 
     #[test]
-    fn test_parse_impersonation_none() {
+    fn parse_impersonation_none() {
         let output = r#"Impacket v0.12.0
 SQL> SELECT * FROM sys.server_permissions WHERE type = 'IM';
 class   class_desc   major_id   minor_id   grantee_principal_id   grantor_principal_id   type   permission_name   state   state_desc
@@ -186,7 +186,7 @@ class   class_desc   major_id   minor_id   grantee_principal_id   grantor_princi
     }
 
     #[test]
-    fn test_parse_impersonation_login_failed() {
+    fn parse_impersonation_login_failed() {
         let output = "[-] ERROR(SQL01): Login failed for user 'test'";
         let params = json!({"target": "192.168.58.12", "username": "test"});
         let vulns = parse_mssql_impersonation(output, &params);
@@ -194,7 +194,7 @@ class   class_desc   major_id   minor_id   grantee_principal_id   grantor_princi
     }
 
     #[test]
-    fn test_parse_linked_servers_found() {
+    fn parse_linked_servers_found() {
         let output = r#"Impacket v0.12.0
 SQL> EXEC sp_linkedservers;
 SRV_NAME              SRV_PROVIDERNAME   SRV_PRODUCT   SRV_DATASOURCE
@@ -210,7 +210,7 @@ SRV01           SQLNCLI            SQL Server    SRV01\SQLEXPRESS
     }
 
     #[test]
-    fn test_parse_linked_servers_self_only() {
+    fn parse_linked_servers_self_only() {
         let output = r#"SQL> EXEC sp_linkedservers;
 SRV_NAME   SRV_PROVIDERNAME
 --------   ----------------

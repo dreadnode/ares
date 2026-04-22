@@ -395,7 +395,7 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn test_extract_evidence_types_from_evidence_types_array() {
+    fn extract_evidence_types_from_evidence_types_array() {
         let payload = json!({
             "evidence_types": ["suspicious_ip", "lateral_movement"]
         });
@@ -404,7 +404,7 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_evidence_types_from_evidence_objects() {
+    fn extract_evidence_types_from_evidence_objects() {
         let payload = json!({
             "evidence": [
                 { "type": "Credential_Access", "value": "hash123" },
@@ -416,7 +416,7 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_evidence_types_from_techniques() {
+    fn extract_evidence_types_from_techniques() {
         let payload = json!({
             "techniques_found": ["T1558.003", "T1021.002"]
         });
@@ -425,7 +425,7 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_evidence_types_dedup() {
+    fn extract_evidence_types_dedup() {
         let payload = json!({
             "evidence_types": ["lateral_movement"],
             "techniques_found": ["T1550.002"]
@@ -436,7 +436,7 @@ mod tests {
     }
 
     #[test]
-    fn test_should_escalate_critical_user_in_users_investigated() {
+    fn should_escalate_critical_user_in_users_investigated() {
         let result = BlueTaskResult {
             task_id: "t1".into(),
             investigation_id: "inv1".into(),
@@ -454,7 +454,7 @@ mod tests {
     }
 
     #[test]
-    fn test_should_escalate_critical_user_in_highlights() {
+    fn should_escalate_critical_user_in_highlights() {
         let result = BlueTaskResult {
             task_id: "t2".into(),
             investigation_id: "inv1".into(),
@@ -472,7 +472,7 @@ mod tests {
     }
 
     #[test]
-    fn test_should_escalate_high_severity() {
+    fn should_escalate_high_severity() {
         let result = BlueTaskResult {
             task_id: "t3".into(),
             investigation_id: "inv1".into(),
@@ -491,7 +491,7 @@ mod tests {
     }
 
     #[test]
-    fn test_should_escalate_schema_admins() {
+    fn should_escalate_schema_admins() {
         let result = BlueTaskResult {
             task_id: "t4".into(),
             investigation_id: "inv1".into(),
@@ -509,7 +509,7 @@ mod tests {
     }
 
     #[test]
-    fn test_should_not_escalate_normal_result() {
+    fn should_not_escalate_normal_result() {
         let result = BlueTaskResult {
             task_id: "t5".into(),
             investigation_id: "inv1".into(),
@@ -526,7 +526,7 @@ mod tests {
     }
 
     #[test]
-    fn test_should_not_escalate_failed_result() {
+    fn should_not_escalate_failed_result() {
         let result = BlueTaskResult {
             task_id: "t6".into(),
             investigation_id: "inv1".into(),
@@ -540,7 +540,7 @@ mod tests {
     }
 
     #[test]
-    fn test_should_escalate_findings_mention() {
+    fn should_escalate_findings_mention() {
         let result = BlueTaskResult {
             task_id: "t7".into(),
             investigation_id: "inv1".into(),
@@ -558,7 +558,7 @@ mod tests {
     }
 
     #[test]
-    fn test_chain_map_coverage() {
+    fn chain_map_coverage() {
         // Verify all expected evidence types are present in the map
         let expected = [
             "suspicious_ip",
@@ -578,7 +578,7 @@ mod tests {
     }
 
     #[test]
-    fn test_privilege_escalation_dispatches_two_actions() {
+    fn privilege_escalation_dispatches_two_actions() {
         let actions = EVIDENCE_CHAIN_MAP.get("privilege_escalation").unwrap();
         assert_eq!(actions.len(), 2);
         let task_types: Vec<&str> = actions.iter().map(|a| a.task_type).collect();
@@ -587,7 +587,7 @@ mod tests {
     }
 
     #[test]
-    fn test_critical_users_set() {
+    fn critical_users_set() {
         assert!(CRITICAL_USERS.contains("krbtgt"));
         assert!(CRITICAL_USERS.contains("administrator"));
         assert!(CRITICAL_USERS.contains("domain admins"));

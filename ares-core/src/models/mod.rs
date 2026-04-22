@@ -28,7 +28,7 @@ mod tests {
     use std::collections::HashMap;
 
     #[test]
-    fn test_credential_roundtrip() {
+    fn credential_roundtrip() {
         // Match the exact compact JSON format used by Python state_backend
         let json = r#"{"id":"abc","username":"testuser","password":"P@ssw0rd!","domain":"contoso.local","source":"manual-inject","parent_id":null,"attack_step":0}"#; // pragma: allowlist secret
         let cred: Credential = serde_json::from_str(json).unwrap();
@@ -40,7 +40,7 @@ mod tests {
     }
 
     #[test]
-    fn test_hash_roundtrip() {
+    fn hash_roundtrip() {
         let json = r#"{"id":"def","username":"krbtgt","hash_type":"NTLM","hash_value":"aad3b435b51404ee","domain":"contoso.local","source":"secretsdump","cracked_password":null,"discovered_at":"2025-01-28T12:00:00Z","parent_id":null,"attack_step":0}"#; // pragma: allowlist secret
         let h: Hash = serde_json::from_str(json).unwrap();
         assert_eq!(h.username, "krbtgt");
@@ -49,7 +49,7 @@ mod tests {
     }
 
     #[test]
-    fn test_host_roundtrip() {
+    fn host_roundtrip() {
         let json = r#"{"ip":"192.168.58.10","hostname":"dc01.contoso.local","os":"Windows Server 2019","roles":["Domain Controller"],"services":["88/tcp kerberos","389/tcp ldap"],"is_dc":true}"#;
         let host: Host = serde_json::from_str(json).unwrap();
         assert_eq!(host.ip, "192.168.58.10");
@@ -58,7 +58,7 @@ mod tests {
     }
 
     #[test]
-    fn test_user_roundtrip() {
+    fn user_roundtrip() {
         let json = r#"{"username":"testuser","domain":"contoso.local","source":"netexec_smb"}"#;
         let user: User = serde_json::from_str(json).unwrap();
         assert_eq!(user.username, "testuser");
@@ -66,14 +66,14 @@ mod tests {
     }
 
     #[test]
-    fn test_share_roundtrip() {
+    fn share_roundtrip() {
         let json = r#"{"host":"192.168.58.10","name":"SYSVOL","permissions":"READ","comment":""}"#;
         let share: Share = serde_json::from_str(json).unwrap();
         assert_eq!(share.name, "SYSVOL");
     }
 
     #[test]
-    fn test_vulnerability_roundtrip() {
+    fn vulnerability_roundtrip() {
         let json = r#"{"vuln_id":"esc1_192.168.58.10_svc","vuln_type":"ADCS_ESC1","target":"192.168.58.10","discovered_by":"recon","discovered_at":"2025-01-28T12:00:00Z","details":{"target_ip":"192.168.58.10"},"recommended_agent":"privesc","priority":1}"#;
         let vuln: VulnerabilityInfo = serde_json::from_str(json).unwrap();
         assert_eq!(vuln.vuln_type, "ADCS_ESC1");
@@ -81,7 +81,7 @@ mod tests {
     }
 
     #[test]
-    fn test_operation_meta_from_hash() {
+    fn operation_meta_from_hash() {
         let mut data = HashMap::new();
         data.insert("has_domain_admin".to_string(), "True".to_string());
         data.insert("has_golden_ticket".to_string(), "false".to_string());
@@ -102,7 +102,7 @@ mod tests {
     }
 
     #[test]
-    fn test_operation_meta_json_encoded() {
+    fn operation_meta_json_encoded() {
         // Python stores meta values via json.dumps(), so booleans become "true"/"false",
         // strings become "\"value\"", and arrays become "[\"a\",\"b\"]".
         let mut data = HashMap::new();
@@ -139,7 +139,7 @@ mod tests {
     }
 
     #[test]
-    fn test_meta_null_and_empty() {
+    fn meta_null_and_empty() {
         let mut data = HashMap::new();
         data.insert("target_domain".to_string(), "null".to_string());
         data.insert("target_ip".to_string(), "\"\"".to_string());
@@ -152,7 +152,7 @@ mod tests {
     }
 
     #[test]
-    fn test_task_status_display() {
+    fn task_status_display() {
         assert_eq!(TaskStatus::InProgress.to_string(), "in_progress");
         assert_eq!(TaskStatus::Pending.to_string(), "pending");
     }

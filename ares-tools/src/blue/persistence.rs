@@ -477,7 +477,7 @@ mod tests {
     }
 
     #[test]
-    fn test_store_and_find() {
+    fn store_and_find() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test_investigations.json");
         let store = InvestigationStore::open(path);
@@ -492,7 +492,7 @@ mod tests {
     }
 
     #[test]
-    fn test_statistics() {
+    fn statistics() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test_stats.json");
         let store = InvestigationStore::open(path);
@@ -506,7 +506,7 @@ mod tests {
     }
 
     #[test]
-    fn test_label_investigation() {
+    fn labels_investigation() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test_label.json");
         let store = InvestigationStore::open(path);
@@ -521,7 +521,7 @@ mod tests {
     }
 
     #[test]
-    fn test_query_effectiveness() {
+    fn query_effectiveness() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test_qe.json");
         let store = InvestigationStore::open(path);

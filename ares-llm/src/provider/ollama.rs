@@ -38,13 +38,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_ollama_provider_creation() {
+    fn ollama_provider_creation() {
         let provider = OllamaProvider::new("http://localhost:11434".to_string());
         assert_eq!(provider.name(), "ollama");
     }
 
     #[test]
-    fn test_ollama_url_trailing_slash() {
+    fn ollama_url_trailing_slash() {
         // Should handle trailing slash gracefully
         let _provider = OllamaProvider::new("http://localhost:11434/".to_string());
     }

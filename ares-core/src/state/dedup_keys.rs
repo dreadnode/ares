@@ -119,7 +119,7 @@ mod tests {
     // ─── build_credential_dedup_key ──────────────────────────────────────
 
     #[test]
-    fn test_cred_dedup_key_format() {
+    fn cred_dedup_key_format() {
         let cred = make_cred("admin", "contoso.local", "P@ss1");
         let key = build_credential_dedup_key(&cred);
         assert!(key.starts_with("cred:contoso.local:admin:"));
@@ -130,14 +130,14 @@ mod tests {
     }
 
     #[test]
-    fn test_cred_dedup_key_lowercased() {
+    fn cred_dedup_key_lowercased() {
         let cred = make_cred("Admin", "CONTOSO.LOCAL", "P@ss1");
         let key = build_credential_dedup_key(&cred);
         assert!(key.starts_with("cred:contoso.local:admin:"));
     }
 
     #[test]
-    fn test_cred_dedup_key_different_passwords() {
+    fn cred_dedup_key_different_passwords() {
         let c1 = make_cred("admin", "contoso.local", "P@ss1");
         let c2 = make_cred("admin", "contoso.local", "P@ss2");
         let k1 = build_credential_dedup_key(&c1);
@@ -146,7 +146,7 @@ mod tests {
     }
 
     #[test]
-    fn test_cred_dedup_key_same_password_deterministic() {
+    fn cred_dedup_key_same_password_deterministic() {
         let c1 = make_cred("admin", "contoso.local", "P@ss1");
         let c2 = make_cred("admin", "contoso.local", "P@ss1");
         assert_eq!(
@@ -156,7 +156,7 @@ mod tests {
     }
 
     #[test]
-    fn test_cred_dedup_key_trims_whitespace() {
+    fn cred_dedup_key_trims_whitespace() {
         let cred = make_cred(" admin ", " contoso.local ", "P@ss1");
         let key = build_credential_dedup_key(&cred);
         assert!(key.starts_with("cred:contoso.local:admin:"));
@@ -165,7 +165,7 @@ mod tests {
     // ─── build_hash_dedup_key ────────────────────────────────────────────
 
     #[test]
-    fn test_hash_dedup_key_ntlm() {
+    fn hash_dedup_key_ntlm() {
         let h = make_hash(
             "admin",
             "contoso.local",
@@ -177,7 +177,7 @@ mod tests {
     }
 
     #[test]
-    fn test_hash_dedup_key_asrep_by_type() {
+    fn hash_dedup_key_asrep_by_type() {
         let h = make_hash(
             "jsmith",
             "contoso.local",
@@ -189,7 +189,7 @@ mod tests {
     }
 
     #[test]
-    fn test_hash_dedup_key_asrep_by_value() {
+    fn hash_dedup_key_asrep_by_value() {
         let h = make_hash(
             "jsmith",
             "contoso.local",
@@ -201,7 +201,7 @@ mod tests {
     }
 
     #[test]
-    fn test_hash_dedup_key_kerberoast_with_spn() {
+    fn hash_dedup_key_kerberoast_with_spn() {
         let h = make_hash(
             "svc_sql",
             "contoso.local",
@@ -214,7 +214,7 @@ mod tests {
     }
 
     #[test]
-    fn test_hash_dedup_key_kerberoast_no_spn() {
+    fn hash_dedup_key_kerberoast_no_spn() {
         let h = make_hash(
             "svc_sql",
             "contoso.local",
@@ -226,7 +226,7 @@ mod tests {
     }
 
     #[test]
-    fn test_hash_dedup_key_case_insensitive() {
+    fn hash_dedup_key_case_insensitive() {
         let h1 = make_hash(
             "Admin",
             "CONTOSO.LOCAL",
@@ -245,7 +245,7 @@ mod tests {
     // ─── extract_kerberoast_spn_key ──────────────────────────────────────
 
     #[test]
-    fn test_extract_kerberoast_spn_key_valid() {
+    fn extract_kerberoast_spn_key_valid() {
         let hash = "$krb5tgs$23$*svc_sql$CONTOSO.LOCAL$cifs/dc01.contoso.local*$checksum$encrypted";
         let key = extract_kerberoast_spn_key(hash);
         assert!(key.is_some());
@@ -254,12 +254,12 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_kerberoast_spn_key_not_krb() {
+    fn extract_kerberoast_spn_key_not_krb() {
         assert!(extract_kerberoast_spn_key("not_a_kerberos_hash").is_none());
     }
 
     #[test]
-    fn test_extract_kerberoast_spn_key_too_few_parts() {
+    fn extract_kerberoast_spn_key_too_few_parts() {
         assert!(extract_kerberoast_spn_key("$krb5tgs$").is_none());
     }
 }

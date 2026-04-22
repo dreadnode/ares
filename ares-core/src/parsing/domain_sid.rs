@@ -32,7 +32,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_extract_domain_sid() {
+    fn extracts_domain_sid() {
         let output = "[*] Domain SID is: S-1-5-21-1328384573-4090356449-2552632942\n[*] Done.\n";
         let sid = extract_domain_sid(output);
         assert_eq!(
@@ -42,20 +42,20 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_domain_sid_embedded() {
+    fn extract_domain_sid_embedded() {
         let output = "some prefix S-1-5-21-111-222-333 suffix\n";
         let sid = extract_domain_sid(output);
         assert_eq!(sid, Some("S-1-5-21-111-222-333".to_string()));
     }
 
     #[test]
-    fn test_extract_domain_sid_none() {
+    fn extract_domain_sid_none() {
         assert_eq!(extract_domain_sid("no SID here"), None);
         assert_eq!(extract_domain_sid(""), None);
     }
 
     #[test]
-    fn test_extract_domain_sid_first_match() {
+    fn extract_domain_sid_first_match() {
         let output = "SID1: S-1-5-21-100-200-300\nSID2: S-1-5-21-400-500-600\n";
         let sid = extract_domain_sid(output);
         assert_eq!(sid, Some("S-1-5-21-100-200-300".to_string()));
@@ -64,7 +64,7 @@ mod tests {
     // --- extract_rid500_name ---
 
     #[test]
-    fn test_extract_rid500_name_standard() {
+    fn extract_rid500_name_standard() {
         let output = "[*] Domain SID is: S-1-5-21-1328384573-4090356449-2552632942\n\
                        500: CONTOSO\\Administrator (SidTypeUser)\n\
                        501: CONTOSO\\Guest (SidTypeUser)\n\
@@ -76,7 +76,7 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_rid500_name_renamed() {
+    fn extract_rid500_name_renamed() {
         let output = "[*] Domain SID is: S-1-5-21-111-222-333\n\
                        500: CONTOSO\\DomainAdmin01 (SidTypeUser)\n\
                        501: CONTOSO\\Guest (SidTypeUser)\n";
@@ -87,7 +87,7 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_rid500_name_no_match() {
+    fn extract_rid500_name_no_match() {
         assert_eq!(extract_rid500_name("no RID here"), None);
         assert_eq!(extract_rid500_name(""), None);
         // RID 501, not 500
@@ -98,7 +98,7 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_rid500_name_wrong_sid_type() {
+    fn extract_rid500_name_wrong_sid_type() {
         // SidTypeGroup should not match — only SidTypeUser
         assert_eq!(
             extract_rid500_name("500: DOMAIN\\DomainAdmins (SidTypeGroup)"),

@@ -102,67 +102,67 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_format_duration_seconds_only() {
+    fn format_duration_seconds_only() {
         assert_eq!(format_duration(42), "42s");
         assert_eq!(format_duration(0), "0s");
     }
 
     #[test]
-    fn test_format_duration_minutes() {
+    fn format_duration_minutes() {
         assert_eq!(format_duration(90), "1m 30s");
         assert_eq!(format_duration(60), "1m 0s");
     }
 
     #[test]
-    fn test_format_duration_hours() {
+    fn format_duration_hours() {
         assert_eq!(format_duration(3661), "1h 1m 1s");
         assert_eq!(format_duration(7200), "2h 0m 0s");
     }
 
     #[cfg(feature = "blue")]
     #[test]
-    fn test_parse_datetime_rfc3339() {
+    fn parse_datetime_rfc3339() {
         let dt = parse_datetime("2026-04-08T12:00:00+00:00").unwrap();
         assert_eq!(dt.year(), 2026);
     }
 
     #[cfg(feature = "blue")]
     #[test]
-    fn test_parse_datetime_with_z() {
+    fn parse_datetime_with_z() {
         let dt = parse_datetime("2026-04-08T12:00:00Z").unwrap();
         assert_eq!(dt.month(), 4);
     }
 
     #[cfg(feature = "blue")]
     #[test]
-    fn test_parse_datetime_naive() {
+    fn parse_datetime_naive() {
         let dt = parse_datetime("2026-04-08T12:00:00.000").unwrap();
         assert_eq!(dt.day(), 8);
     }
 
     #[cfg(feature = "blue")]
     #[test]
-    fn test_parse_datetime_invalid() {
+    fn parse_datetime_invalid() {
         assert!(parse_datetime("not-a-date").is_err());
     }
 
     #[test]
-    fn test_truncate_str_short() {
+    fn truncate_str_short() {
         assert_eq!(truncate_str("hello", 10), "hello");
     }
 
     #[test]
-    fn test_truncate_str_exact() {
+    fn truncate_str_exact() {
         assert_eq!(truncate_str("hello", 5), "hello");
     }
 
     #[test]
-    fn test_truncate_str_long() {
+    fn truncate_str_long() {
         assert_eq!(truncate_str("hello world", 5), "hello...");
     }
 
     #[test]
-    fn test_compute_duration_str_completed() {
+    fn compute_duration_str_completed() {
         let start = Utc::now() - chrono::Duration::seconds(120);
         let end = Utc::now();
         let s = compute_duration_str(start, Some(end));
@@ -170,7 +170,7 @@ mod tests {
     }
 
     #[test]
-    fn test_compute_duration_str_running() {
+    fn compute_duration_str_running() {
         let start = Utc::now() - chrono::Duration::seconds(30);
         let s = compute_duration_str(start, None);
         assert!(s.contains("(running)"));

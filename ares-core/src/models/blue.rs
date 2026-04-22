@@ -249,7 +249,7 @@ mod tests {
     // ─── PyramidLevel ────────────────────────────────────────────────────
 
     #[test]
-    fn test_pyramid_level_display() {
+    fn pyramid_level_display() {
         assert_eq!(PyramidLevel::HashValues.to_string(), "hash_values");
         assert_eq!(PyramidLevel::IpAddresses.to_string(), "ip_addresses");
         assert_eq!(PyramidLevel::DomainNames.to_string(), "domain_names");
@@ -262,7 +262,7 @@ mod tests {
     }
 
     #[test]
-    fn test_pyramid_level_values() {
+    fn pyramid_level_values() {
         assert_eq!(PyramidLevel::HashValues as i32, 1);
         assert_eq!(PyramidLevel::Ttps as i32, 6);
     }
@@ -270,7 +270,7 @@ mod tests {
     // ─── InvestigationStage ──────────────────────────────────────────────
 
     #[test]
-    fn test_investigation_stage_display() {
+    fn investigation_stage_display() {
         assert_eq!(InvestigationStage::Triage.to_string(), "triage");
         assert_eq!(InvestigationStage::Causation.to_string(), "causation");
         assert_eq!(InvestigationStage::Lateral.to_string(), "lateral");
@@ -278,7 +278,7 @@ mod tests {
     }
 
     #[test]
-    fn test_investigation_stage_serde() {
+    fn investigation_stage_serde() {
         let stage = InvestigationStage::Causation;
         let json_str = serde_json::to_string(&stage).unwrap();
         assert_eq!(json_str, r#""causation""#);
@@ -289,7 +289,7 @@ mod tests {
     // ─── TriageDecision ──────────────────────────────────────────────────
 
     #[test]
-    fn test_triage_decision_display() {
+    fn triage_decision_display() {
         assert_eq!(TriageDecision::Pending.to_string(), "pending");
         assert_eq!(TriageDecision::Confirmed.to_string(), "confirmed");
         assert_eq!(TriageDecision::Downgraded.to_string(), "downgraded");
@@ -298,7 +298,7 @@ mod tests {
     }
 
     #[test]
-    fn test_triage_decision_serde() {
+    fn triage_decision_serde() {
         let d = TriageDecision::Confirmed;
         let json_str = serde_json::to_string(&d).unwrap();
         assert_eq!(json_str, r#""confirmed""#);
@@ -309,7 +309,7 @@ mod tests {
     // ─── Evidence serde ──────────────────────────────────────────────────
 
     #[test]
-    fn test_evidence_deserialize_minimal() {
+    fn evidence_deserialize_minimal() {
         let j = json!({
             "id": "ev-001",
             "type": "ip",
@@ -326,7 +326,7 @@ mod tests {
     }
 
     #[test]
-    fn test_evidence_type_rename() {
+    fn evidence_type_rename() {
         let j = json!({
             "id": "ev-002",
             "type": "technique",
@@ -346,7 +346,7 @@ mod tests {
     // ─── BlueTaskInfo serde ──────────────────────────────────────────────
 
     #[test]
-    fn test_blue_task_info_defaults() {
+    fn blue_task_info_defaults() {
         let j = json!({
             "task_id": "bt-001",
             "task_type": "query_logs"
@@ -362,7 +362,7 @@ mod tests {
     // ─── SharedBlueTeamState::new ────────────────────────────────────────
 
     #[test]
-    fn test_shared_blue_team_state_new() {
+    fn shared_blue_team_state_new() {
         let state = SharedBlueTeamState::new("inv-001".to_string());
         assert_eq!(state.investigation_id, "inv-001");
         assert_eq!(state.stage, "triage");
@@ -377,7 +377,7 @@ mod tests {
     // ─── TriageRecord serde ──────────────────────────────────────────────
 
     #[test]
-    fn test_triage_record_deserialize() {
+    fn triage_record_deserialize() {
         let j = json!({
             "decision": "confirmed",
             "reasoning": "Multiple IOCs match known attack pattern",

@@ -112,7 +112,7 @@ mod tests {
     // --- extract_kerberoast_spn_key ---
 
     #[test]
-    fn test_extract_spn_key_valid() {
+    fn extract_spn_key_valid() {
         let hash = "$krb5tgs$23$*svc_sql$CONTOSO.LOCAL$MSSQLSvc/db01.contoso.local*$aabb$ccdd";
         let key = extract_kerberoast_spn_key(hash);
         assert!(key.is_some());
@@ -122,19 +122,19 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_spn_key_not_krb5tgs() {
+    fn extract_spn_key_not_krb5tgs() {
         assert_eq!(extract_kerberoast_spn_key("$krb5asrep$23$user"), None);
     }
 
     #[test]
-    fn test_extract_spn_key_too_short() {
+    fn extract_spn_key_too_short() {
         assert_eq!(extract_kerberoast_spn_key("$krb5tgs$"), None);
     }
 
     // --- dedupe_hashes ---
 
     #[test]
-    fn test_dedupe_ntlm_by_hash_value() {
+    fn dedupe_ntlm_by_hash_value() {
         let hashes = vec![
             make_hash(
                 "admin",
@@ -160,7 +160,7 @@ mod tests {
     }
 
     #[test]
-    fn test_dedupe_asrep_by_domain_user() {
+    fn dedupe_asrep_by_domain_user() {
         let hashes = vec![
             make_hash(
                 "svc_web",
@@ -180,7 +180,7 @@ mod tests {
     }
 
     #[test]
-    fn test_dedupe_asrep_different_users() {
+    fn dedupe_asrep_different_users() {
         let hashes = vec![
             make_hash(
                 "svc_web",
@@ -200,7 +200,7 @@ mod tests {
     }
 
     #[test]
-    fn test_dedupe_kerberoast_by_spn() {
+    fn dedupe_kerberoast_by_spn() {
         let hashes = vec![
             make_hash(
                 "svc_sql",
@@ -220,7 +220,7 @@ mod tests {
     }
 
     #[test]
-    fn test_dedupe_mixed_types() {
+    fn dedupe_mixed_types() {
         let hashes = vec![
             make_hash(
                 "admin",
@@ -246,13 +246,13 @@ mod tests {
     }
 
     #[test]
-    fn test_dedupe_empty() {
+    fn dedupe_empty() {
         let deduped = dedupe_hashes(vec![]);
         assert!(deduped.is_empty());
     }
 
     #[test]
-    fn test_dedupe_case_insensitive() {
+    fn dedupe_case_insensitive() {
         let hashes = vec![
             make_hash(
                 "Admin",

@@ -30,19 +30,19 @@ mod tests {
     use chrono::Utc;
 
     #[test]
-    fn test_mitre_lookup() {
+    fn mitre_lookup() {
         assert_eq!(get_technique_display("T1003.006"), "T1003.006 (DCSync)");
         assert_eq!(get_technique_display("T9999"), "T9999");
     }
 
     #[test]
-    fn test_format_vuln_details_empty() {
+    fn format_vuln_details_empty() {
         let details = HashMap::new();
         assert_eq!(format_vuln_details(&details), "-");
     }
 
     #[test]
-    fn test_format_vuln_details_with_values() {
+    fn format_vuln_details_with_values() {
         let mut details = HashMap::new();
         details.insert(
             "account".to_string(),
@@ -58,7 +58,7 @@ mod tests {
     }
 
     #[test]
-    fn test_dedup_credentials() {
+    fn deduplicates_credentials() {
         let creds = vec![
             Credential {
                 id: "1".to_string(),
@@ -88,7 +88,7 @@ mod tests {
     }
 
     #[test]
-    fn test_dedup_hashes() {
+    fn deduplicates_hashes() {
         let hashes = vec![
             Hash {
                 id: "1".to_string(),
@@ -124,7 +124,7 @@ mod tests {
     }
 
     #[test]
-    fn test_redteam_summary_renders() {
+    fn redteam_summary_renders() {
         let gen = RedTeamReportGenerator::new().unwrap();
         let state = SharedRedTeamState {
             operation_id: "test-op-001".to_string(),
@@ -164,7 +164,7 @@ mod tests {
     }
 
     #[test]
-    fn test_redteam_comprehensive_renders() {
+    fn redteam_comprehensive_renders() {
         let gen = RedTeamReportGenerator::new().unwrap();
         let state = SharedRedTeamState {
             operation_id: "test-op-002".to_string(),
@@ -237,7 +237,7 @@ mod tests {
 
     #[cfg(feature = "blue")]
     #[test]
-    fn test_blueteam_report_renders() {
+    fn blueteam_report_renders() {
         let gen = BlueTeamReportGenerator::new().unwrap();
         let input = BlueTeamReportInput {
             operation_id: "blue-test-001".to_string(),
@@ -277,7 +277,7 @@ mod tests {
 
     #[cfg(feature = "blue")]
     #[test]
-    fn test_blueteam_investigation_report_renders() {
+    fn blueteam_investigation_report_renders() {
         use crate::models::{Evidence, SharedBlueTeamState, TimelineEvent};
 
         let gen = BlueTeamReportGenerator::new().unwrap();
@@ -375,7 +375,7 @@ mod tests {
 
     #[cfg(feature = "blue")]
     #[test]
-    fn test_blueteam_generate_from_states() {
+    fn blueteam_generate_from_states() {
         use crate::models::{Evidence, SharedBlueTeamState};
 
         let gen = BlueTeamReportGenerator::new().unwrap();

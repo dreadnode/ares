@@ -72,114 +72,114 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_default_checkpoint_interval() {
+    fn returns_default_checkpoint_interval() {
         assert_eq!(default_checkpoint_interval(), 60);
     }
 
     #[test]
-    fn test_default_max_concurrent() {
+    fn returns_default_max_concurrent() {
         assert_eq!(default_max_concurrent(), 8);
     }
 
     #[test]
-    fn test_default_max_steps() {
+    fn returns_default_max_steps() {
         assert_eq!(default_max_steps(), 100);
     }
 
     #[test]
-    fn test_default_true() {
+    fn returns_default_true() {
         assert!(default_true());
     }
 
     #[test]
-    fn test_default_max_retries() {
+    fn returns_default_max_retries() {
         assert_eq!(default_max_retries(), 3);
     }
 
     #[test]
-    fn test_default_retry_delay() {
+    fn returns_default_retry_delay() {
         assert_eq!(default_retry_delay(), 10);
     }
 
     #[test]
-    fn test_default_lateral_admin_creds() {
+    fn returns_default_lateral_admin_creds() {
         assert_eq!(default_lateral_admin_creds(), 3);
     }
 
     #[test]
-    fn test_default_lateral_owned_hosts() {
+    fn returns_default_lateral_owned_hosts() {
         assert_eq!(default_lateral_owned_hosts(), 5);
     }
 
     #[test]
-    fn test_default_min_slots() {
+    fn returns_default_min_slots() {
         assert_eq!(default_min_slots(), 1);
     }
 
     #[test]
-    fn test_default_max_context_tokens() {
+    fn returns_default_max_context_tokens() {
         assert_eq!(default_max_context_tokens(), 50000);
     }
 
     #[test]
-    fn test_default_min_messages() {
+    fn returns_default_min_messages() {
         assert_eq!(default_min_messages(), 15);
     }
 
     #[test]
-    fn test_default_max_output_chars() {
+    fn returns_default_max_output_chars() {
         assert_eq!(default_max_output_chars(), 3000);
     }
 
     #[test]
-    fn test_default_log_level() {
+    fn returns_default_log_level() {
         assert_eq!(default_log_level(), "INFO");
     }
 
     #[test]
-    fn test_default_log_format() {
+    fn returns_default_log_format() {
         let fmt = default_log_format();
         assert!(fmt.contains("asctime"));
         assert!(fmt.contains("levelname"));
     }
 
     #[test]
-    fn test_default_log_file() {
+    fn returns_default_log_file() {
         assert_eq!(default_log_file(), "/var/log/ares/operation.log");
     }
 
     #[test]
-    fn test_default_max_size_mb() {
+    fn returns_default_max_size_mb() {
         assert_eq!(default_max_size_mb(), 100);
     }
 
     #[test]
-    fn test_default_backup_count() {
+    fn returns_default_backup_count() {
         assert_eq!(default_backup_count(), 5);
     }
 
     #[test]
-    fn test_default_max_concurrent_resources() {
+    fn returns_default_max_concurrent_resources() {
         assert_eq!(default_max_concurrent_resources(), 10);
     }
 
     #[test]
-    fn test_default_max_creds_per_expansion() {
+    fn returns_default_max_creds_per_expansion() {
         assert_eq!(default_max_creds_per_expansion(), 100);
     }
 
     #[test]
-    fn test_default_max_hosts_per_scan() {
+    fn returns_default_max_hosts_per_scan() {
         assert_eq!(default_max_hosts_per_scan(), 50);
     }
 
     #[test]
-    fn test_default_cred_cache_ttl() {
+    fn returns_default_cred_cache_ttl() {
         assert_eq!(default_cred_cache_ttl(), 3600);
     }
 
     #[test]
-    fn test_default_max_rpm() {
+    fn returns_default_max_rpm() {
         assert_eq!(default_max_rpm(), 60);
     }
 }

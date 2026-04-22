@@ -225,7 +225,7 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn test_powershell_variable_assignments() {
+    fn powershell_variable_assignments() {
         let output = r#"
 === Downloaded File Contents ===
 
@@ -249,7 +249,7 @@ $password = "_S3cur3P@ss_"
     }
 
     #[test]
-    fn test_net_use_command() {
+    fn net_use_command() {
         let output = r#"
 --- SYSVOL/scripts/map_drive.bat ---
 net use \\dc02\share /user:CHILD\jeff.morgan _S3cur3P@ss_
@@ -264,7 +264,7 @@ net use \\dc02\share /user:CHILD\jeff.morgan _S3cur3P@ss_
     }
 
     #[test]
-    fn test_powershell_params() {
+    fn powershell_params() {
         let output = r#"
 --- scripts/setup.ps1 ---
 New-SmbMapping -RemotePath "\\dc01\share" -UserName "svc_sql" -Password "SqlP@ss123"
@@ -278,7 +278,7 @@ New-SmbMapping -RemotePath "\\dc01\share" -UserName "svc_sql" -Password "SqlP@ss
     }
 
     #[test]
-    fn test_skips_variable_refs() {
+    fn skips_variable_refs() {
         let output = r#"
 --- scripts/template.ps1 ---
 $user = "admin"
@@ -291,7 +291,7 @@ $pass = $env:SECRET_KEY
     }
 
     #[test]
-    fn test_multiple_files() {
+    fn multiple_files() {
         let output = r#"
 === Downloaded File Contents ===
 
@@ -310,7 +310,7 @@ $pass = "P@ssw0rd"
     }
 
     #[test]
-    fn test_empty_output() {
+    fn empty_output() {
         let creds = parse_spider_credentials("", &json!({}));
         assert!(creds.is_empty());
     }

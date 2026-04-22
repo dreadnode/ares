@@ -172,7 +172,7 @@ mod tests {
     }
 
     #[test]
-    fn test_build_priority_queries_minimal() {
+    fn build_priority_queries_minimal() {
         let state = make_state();
         let start = Utc::now() - chrono::Duration::hours(1);
         let end = Utc::now();
@@ -183,7 +183,7 @@ mod tests {
     }
 
     #[test]
-    fn test_build_priority_queries_with_domain_admin() {
+    fn build_priority_queries_with_domain_admin() {
         let mut state = make_state();
         state.has_domain_admin = true;
         let start = Utc::now() - chrono::Duration::hours(1);
@@ -195,7 +195,7 @@ mod tests {
     }
 
     #[test]
-    fn test_build_priority_queries_with_hashes() {
+    fn build_priority_queries_with_hashes() {
         let mut state = make_state();
         state.all_hashes = vec![Hash {
             id: String::new(),
@@ -217,7 +217,7 @@ mod tests {
     }
 
     #[test]
-    fn test_build_priority_queries_with_lateral_movement() {
+    fn build_priority_queries_with_lateral_movement() {
         let mut state = make_state();
         state.all_hosts = vec![
             Host {
@@ -246,7 +246,7 @@ mod tests {
     }
 
     #[test]
-    fn test_build_priority_queries_kerberos_techniques() {
+    fn build_priority_queries_kerberos_techniques() {
         let state = make_state();
         let start = Utc::now() - chrono::Duration::hours(1);
         let end = Utc::now();
@@ -256,7 +256,7 @@ mod tests {
     }
 
     #[test]
-    fn test_build_priority_queries_credential_accounts() {
+    fn build_priority_queries_credential_accounts() {
         let mut state = make_state();
         state.all_credentials = vec![Credential {
             id: String::new(),
@@ -278,7 +278,7 @@ mod tests {
     }
 
     #[test]
-    fn test_build_priority_queries_sorted_by_priority() {
+    fn build_priority_queries_sorted_by_priority() {
         let mut state = make_state();
         state.has_domain_admin = true;
         state.all_hashes = vec![Hash {

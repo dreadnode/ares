@@ -181,14 +181,14 @@ mod tests {
     }
 
     #[test]
-    fn test_format_state_context_empty() {
+    fn format_state_context_empty() {
         let snap = make_snapshot();
         let ctx = format_state_context(&snap, "recon", None);
         assert!(ctx.is_empty());
     }
 
     #[test]
-    fn test_format_state_context_domains() {
+    fn format_state_context_domains() {
         let mut snap = make_snapshot();
         snap.domains = vec!["contoso.local".to_string()];
         let ctx = format_state_context(&snap, "recon", None);
@@ -197,7 +197,7 @@ mod tests {
     }
 
     #[test]
-    fn test_format_state_context_credentials_shown_for_lateral() {
+    fn format_state_context_credentials_shown_for_lateral() {
         let mut snap = make_snapshot();
         snap.credentials = vec![Credential {
             id: String::new(),
@@ -216,7 +216,7 @@ mod tests {
     }
 
     #[test]
-    fn test_format_state_context_credentials_hidden_for_recon() {
+    fn format_state_context_credentials_hidden_for_recon() {
         let mut snap = make_snapshot();
         snap.credentials = vec![Credential {
             id: String::new(),
@@ -234,7 +234,7 @@ mod tests {
     }
 
     #[test]
-    fn test_format_state_context_truncates_credentials() {
+    fn format_state_context_truncates_credentials() {
         let mut snap = make_snapshot();
         snap.credentials = (0..12)
             .map(|i| Credential {
@@ -254,7 +254,7 @@ mod tests {
     }
 
     #[test]
-    fn test_format_state_context_hosts_split_dc_and_other() {
+    fn format_state_context_hosts_split_dc_and_other() {
         let mut snap = make_snapshot();
         snap.hosts = vec![
             Host {
@@ -285,7 +285,7 @@ mod tests {
     }
 
     #[test]
-    fn test_format_state_context_cracked_hashes() {
+    fn format_state_context_cracked_hashes() {
         let mut snap = make_snapshot();
         snap.hashes = vec![Hash {
             id: String::new(),
@@ -306,7 +306,7 @@ mod tests {
     }
 
     #[test]
-    fn test_format_state_context_uncracked_hashes_not_shown() {
+    fn format_state_context_uncracked_hashes_not_shown() {
         let mut snap = make_snapshot();
         snap.hashes = vec![Hash {
             id: String::new(),

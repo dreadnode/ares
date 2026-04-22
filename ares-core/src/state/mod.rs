@@ -115,7 +115,7 @@ mod tests {
     use crate::models::Credential;
 
     #[test]
-    fn test_build_key() {
+    fn builds_key() {
         assert_eq!(build_key("op-123", "meta"), "ares:op:op-123:meta");
         assert_eq!(
             build_key("op-123", "credentials"),
@@ -124,12 +124,12 @@ mod tests {
     }
 
     #[test]
-    fn test_build_lock_key() {
+    fn builds_lock_key() {
         assert_eq!(build_lock_key("op-123"), "ares:lock:op-123");
     }
 
     #[test]
-    fn test_credential_dedup_key() {
+    fn credential_dedup_key() {
         let cred = Credential {
             id: "test".to_string(),
             username: "TestUser".to_string(),

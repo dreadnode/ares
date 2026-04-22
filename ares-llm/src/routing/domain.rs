@@ -61,44 +61,44 @@ mod tests {
     // --- normalize_domain ---
 
     #[test]
-    fn test_normalize_domain_fqdn_passthrough() {
+    fn normalize_domain_fqdn_passthrough() {
         let map = make_map();
         assert_eq!(normalize_domain("contoso.local", &map), "contoso.local");
     }
 
     #[test]
-    fn test_normalize_domain_fqdn_lowercased() {
+    fn normalize_domain_fqdn_lowercased() {
         let map = make_map();
         assert_eq!(normalize_domain("CONTOSO.LOCAL", &map), "contoso.local");
     }
 
     #[test]
-    fn test_normalize_domain_netbios_lowercase_key() {
+    fn normalize_domain_netbios_lowercase_key() {
         let map = make_map();
         assert_eq!(normalize_domain("contoso", &map), "contoso.local");
     }
 
     #[test]
-    fn test_normalize_domain_netbios_uppercase_key() {
+    fn normalize_domain_netbios_uppercase_key() {
         let map = make_map();
         assert_eq!(normalize_domain("FABRIKAM", &map), "fabrikam.local");
     }
 
     #[test]
-    fn test_normalize_domain_netbios_mixed_case() {
+    fn normalize_domain_netbios_mixed_case() {
         let map = make_map();
         // "Fabrikam" → to_lowercase "fabrikam" not in map, to_uppercase "FABRIKAM" IS in map
         assert_eq!(normalize_domain("Fabrikam", &map), "fabrikam.local");
     }
 
     #[test]
-    fn test_normalize_domain_unknown_netbios() {
+    fn normalize_domain_unknown_netbios() {
         let map = make_map();
         assert_eq!(normalize_domain("UNKNOWN", &map), "unknown");
     }
 
     #[test]
-    fn test_normalize_domain_empty() {
+    fn normalize_domain_empty() {
         let map = make_map();
         assert_eq!(normalize_domain("", &map), "");
     }
@@ -106,7 +106,7 @@ mod tests {
     // --- hostname_matches_domain ---
 
     #[test]
-    fn test_hostname_matches_domain_basic() {
+    fn hostname_matches_domain_basic() {
         assert!(hostname_matches_domain(
             "dc01.contoso.local",
             "contoso.local"
@@ -114,7 +114,7 @@ mod tests {
     }
 
     #[test]
-    fn test_hostname_matches_domain_case_insensitive() {
+    fn hostname_matches_domain_case_insensitive() {
         assert!(hostname_matches_domain(
             "DC01.CONTOSO.LOCAL",
             "contoso.local"
@@ -122,7 +122,7 @@ mod tests {
     }
 
     #[test]
-    fn test_hostname_matches_domain_child_not_parent() {
+    fn hostname_matches_domain_child_not_parent() {
         // dc01.child.contoso.local should match child.contoso.local, NOT contoso.local
         assert!(hostname_matches_domain(
             "dc01.child.contoso.local",
@@ -135,19 +135,19 @@ mod tests {
     }
 
     #[test]
-    fn test_hostname_matches_domain_empty_inputs() {
+    fn hostname_matches_domain_empty_inputs() {
         assert!(!hostname_matches_domain("", "contoso.local"));
         assert!(!hostname_matches_domain("dc01.contoso.local", ""));
         assert!(!hostname_matches_domain("", ""));
     }
 
     #[test]
-    fn test_hostname_matches_domain_no_dots() {
+    fn hostname_matches_domain_no_dots() {
         assert!(!hostname_matches_domain("dc01", "contoso.local"));
     }
 
     #[test]
-    fn test_hostname_is_domain() {
+    fn hostname_is_domain() {
         assert!(hostname_matches_domain("contoso.local", "contoso.local"));
     }
 }

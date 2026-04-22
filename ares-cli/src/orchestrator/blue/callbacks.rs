@@ -514,7 +514,7 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn test_is_callback() {
+    fn checks_callback() {
         let handler = BlueCallbackHandler {
             provider: Arc::new(MockProvider),
             dispatcher: Arc::new(MockDispatcher),
@@ -536,7 +536,7 @@ mod tests {
     }
 
     #[test]
-    fn test_triage_complete_callback() {
+    fn triage_complete_callback() {
         let call = ToolCall {
             id: "c1".into(),
             name: "triage_complete".into(),
@@ -557,7 +557,7 @@ mod tests {
     }
 
     #[test]
-    fn test_escalate_investigation_not_in_lifecycle_callbacks() {
+    fn escalate_investigation_not_in_lifecycle_callbacks() {
         // escalate_investigation is now handled async via dispatch_escalation_triage,
         // not the static handle_lifecycle_callback
         let call = ToolCall {
@@ -572,7 +572,7 @@ mod tests {
     }
 
     #[test]
-    fn test_complete_investigation_callback() {
+    fn complete_investigation_callback() {
         let call = ToolCall {
             id: "c3".into(),
             name: "complete_investigation".into(),
@@ -590,7 +590,7 @@ mod tests {
     }
 
     #[test]
-    fn test_unknown_callback() {
+    fn unknown_callback() {
         let call = ToolCall {
             id: "c4".into(),
             name: "nmap_scan".into(),

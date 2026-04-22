@@ -170,7 +170,7 @@ mod tests {
     // --- enrich_delegation_payload ---
 
     #[test]
-    fn test_enrich_delegation_payload_adds_password() {
+    fn enrich_delegation_payload_adds_password() {
         let creds = vec![make_cred("svc_sql", "contoso.local", "SvcP@ss1")];
         let mut payload = json!({"account_name": "svc_sql$", "domain": "contoso.local"});
         enrich_delegation_payload(&mut payload, "constrained_delegation", &creds, &[]);
@@ -178,7 +178,7 @@ mod tests {
     }
 
     #[test]
-    fn test_enrich_delegation_payload_skips_non_delegation() {
+    fn enrich_delegation_payload_skips_non_delegation() {
         let creds = vec![make_cred("svc_sql", "contoso.local", "SvcP@ss1")];
         let mut payload = json!({"account_name": "svc_sql$"});
         enrich_delegation_payload(&mut payload, "smb_signing", &creds, &[]);
@@ -186,7 +186,7 @@ mod tests {
     }
 
     #[test]
-    fn test_enrich_delegation_payload_doesnt_overwrite_password() {
+    fn enrich_delegation_payload_doesnt_overwrite_password() {
         let creds = vec![make_cred("svc_sql", "contoso.local", "SvcP@ss1")];
         let mut payload = json!({"account_name": "svc_sql$", "password": "existing"});
         enrich_delegation_payload(&mut payload, "constrained_delegation", &creds, &[]);
@@ -194,7 +194,7 @@ mod tests {
     }
 
     #[test]
-    fn test_enrich_delegation_payload_resolves_target_ip_from_spn() {
+    fn enrich_delegation_payload_resolves_target_ip_from_spn() {
         let hosts = vec![make_host("192.168.58.10", "dc01.contoso.local", true)];
         let mut payload = json!({
             "account_name": "svc_sql$",
@@ -205,7 +205,7 @@ mod tests {
     }
 
     #[test]
-    fn test_enrich_delegation_payload_sets_domain_from_cred() {
+    fn enrich_delegation_payload_sets_domain_from_cred() {
         let creds = vec![make_cred("svc_sql", "contoso.local", "SvcP@ss1")];
         let mut payload = json!({"account_name": "svc_sql$"});
         enrich_delegation_payload(&mut payload, "unconstrained_delegation", &creds, &[]);
@@ -215,28 +215,28 @@ mod tests {
     // --- resolve_dc_for_payload ---
 
     #[test]
-    fn test_resolve_dc_skips_if_already_set() {
+    fn resolve_dc_skips_if_already_set() {
         let mut payload = json!({"dc_ip": "192.168.58.10", "domain": "contoso.local"});
         resolve_dc_for_payload(&mut payload, &[], &HashMap::new(), &HashMap::new(), None);
         assert_eq!(payload["dc_ip"], "192.168.58.10");
     }
 
     #[test]
-    fn test_resolve_dc_no_domain_skips() {
+    fn resolve_dc_no_domain_skips() {
         let mut payload = json!({"target": "192.168.58.20"});
         resolve_dc_for_payload(&mut payload, &[], &HashMap::new(), &HashMap::new(), None);
         assert!(payload.get("dc_ip").is_none());
     }
 
     #[test]
-    fn test_resolve_dc_falls_back_to_target_ip() {
+    fn resolve_dc_falls_back_to_target_ip() {
         let mut payload = json!({"domain": "contoso.local", "target_ip": "192.168.58.20"});
         resolve_dc_for_payload(&mut payload, &[], &HashMap::new(), &HashMap::new(), None);
         assert_eq!(payload["dc_ip"], "192.168.58.20");
     }
 
     #[test]
-    fn test_resolve_dc_falls_back_to_operation_target() {
+    fn resolve_dc_falls_back_to_operation_target() {
         let mut payload = json!({"domain": "contoso.local"});
         resolve_dc_for_payload(
             &mut payload,
@@ -249,7 +249,7 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_dc_from_dc_map() {
+    fn resolve_dc_from_dc_map() {
         let mut dc_map = HashMap::new();
         dc_map.insert("contoso.local".to_string(), "192.168.58.10".to_string());
         let mut payload = json!({"domain": "contoso.local"});

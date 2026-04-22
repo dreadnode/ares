@@ -173,7 +173,7 @@ mod tests {
     }
 
     #[test]
-    fn test_build_host_entries_basic() {
+    fn build_host_entries_basic() {
         let hosts = vec![
             make_host("192.168.58.10", "dc01.contoso.local", true),
             make_host("192.168.58.22", "ws01.contoso.local", false),
@@ -190,7 +190,7 @@ mod tests {
     }
 
     #[test]
-    fn test_build_host_entries_dedup() {
+    fn build_host_entries_dedup() {
         let hosts = vec![make_host("192.168.58.10", "dc01.contoso.local", true)];
         let mut already_written = HashSet::new();
         already_written.insert("192.168.58.10".to_string());
@@ -199,7 +199,7 @@ mod tests {
     }
 
     #[test]
-    fn test_build_host_entries_skip_incomplete() {
+    fn build_host_entries_skip_incomplete() {
         let hosts = vec![
             make_host("", "dc01.contoso.local", true),
             make_host("192.168.58.10", "", true),
@@ -209,7 +209,7 @@ mod tests {
     }
 
     #[test]
-    fn test_build_host_entries_short_hostname() {
+    fn build_host_entries_short_hostname() {
         let hosts = vec![make_host("192.168.58.99", "fileserver", false)];
         let entries = build_host_entries(&hosts, &HashSet::new());
         assert_eq!(entries.len(), 1);
@@ -218,7 +218,7 @@ mod tests {
     }
 
     #[test]
-    fn test_build_host_entries_dc_subdomain() {
+    fn build_host_entries_dc_subdomain() {
         let hosts = vec![make_host("192.168.58.15", "dc02.north.contoso.local", true)];
         let entries = build_host_entries(&hosts, &HashSet::new());
         assert_eq!(entries.len(), 1);
@@ -229,7 +229,7 @@ mod tests {
     }
 
     #[test]
-    fn test_build_host_entries_lowercase() {
+    fn build_host_entries_lowercase() {
         let hosts = vec![make_host("192.168.58.10", "DC01.CONTOSO.LOCAL", true)];
         let entries = build_host_entries(&hosts, &HashSet::new());
         assert_eq!(entries.len(), 1);

@@ -132,7 +132,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_default_config() {
+    fn default_config() {
         let config = PersistentStoreConfig::default();
         assert!(config.database_url.is_none());
         assert!(!config.is_enabled());
@@ -142,7 +142,7 @@ mod tests {
     }
 
     #[test]
-    fn test_default_retention() {
+    fn default_retention() {
         let retention = RetentionConfig::default();
         assert_eq!(retention.operations_default_days, 90);
         assert_eq!(retention.operations_with_da_days, 365);
@@ -150,7 +150,7 @@ mod tests {
     }
 
     #[test]
-    fn test_is_enabled() {
+    fn checks_enabled() {
         let mut config = PersistentStoreConfig::default();
         assert!(!config.is_enabled());
 
@@ -159,7 +159,7 @@ mod tests {
     }
 
     #[test]
-    fn test_pool_timeout_duration() {
+    fn pool_timeout_duration() {
         let config = PersistentStoreConfig::default();
         assert_eq!(config.pool_timeout(), Duration::from_secs(30));
     }

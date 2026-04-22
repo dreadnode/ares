@@ -200,7 +200,7 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn test_parse_nmap_single_host_with_services() {
+    fn parse_nmap_single_host_with_services() {
         let output = "\
 Nmap scan report for dc01.contoso.local (192.168.58.10)
 Host is up (0.0010s latency).
@@ -223,7 +223,7 @@ PORT     STATE SERVICE
     }
 
     #[test]
-    fn test_parse_nmap_ip_only_no_hostname() {
+    fn parse_nmap_ip_only_no_hostname() {
         let output = "\
 Nmap scan report for 192.168.58.20
 PORT     STATE SERVICE
@@ -241,7 +241,7 @@ PORT     STATE SERVICE
     }
 
     #[test]
-    fn test_parse_nmap_multiple_hosts() {
+    fn parse_nmap_multiple_hosts() {
         let output = "\
 Nmap scan report for dc01.contoso.local (192.168.58.10)
 PORT    STATE SERVICE
@@ -262,7 +262,7 @@ PORT     STATE SERVICE
     }
 
     #[test]
-    fn test_parse_nmap_os_detection() {
+    fn parse_nmap_os_detection() {
         let output = "\
 Nmap scan report for 192.168.58.10
 PORT    STATE SERVICE
@@ -274,7 +274,7 @@ OS details: Microsoft Windows Server 2019";
     }
 
     #[test]
-    fn test_parse_nmap_empty_output_with_target() {
+    fn parse_nmap_empty_output_with_target() {
         let params = json!({"target": "192.168.58.10"});
         let hosts = parse_nmap_output("Starting Nmap 7.94 ...\nNmap done: 0 hosts up", &params);
         assert_eq!(hosts.len(), 1);
@@ -283,13 +283,13 @@ OS details: Microsoft Windows Server 2019";
     }
 
     #[test]
-    fn test_parse_nmap_empty_output_no_target() {
+    fn parse_nmap_empty_output_no_target() {
         let hosts = parse_nmap_output("", &json!({}));
         assert!(hosts.is_empty());
     }
 
     #[test]
-    fn test_parse_nmap_dc_hostname_detection() {
+    fn parse_nmap_dc_hostname_detection() {
         let output = "Nmap scan report for DC02 (192.168.58.11)\nPORT    STATE SERVICE\n445/tcp open  microsoft-ds";
         let params = json!({"target": "192.168.58.11"});
         let hosts = parse_nmap_output(output, &params);
@@ -297,7 +297,7 @@ OS details: Microsoft Windows Server 2019";
     }
 
     #[test]
-    fn test_parse_nmap_fqdn_from_script_output() {
+    fn parse_nmap_fqdn_from_script_output() {
         let output = "\
 Nmap scan report for 192.168.58.10
 PORT    STATE SERVICE
@@ -316,7 +316,7 @@ PORT    STATE SERVICE
     }
 
     #[test]
-    fn test_parse_nmap_fqdn_does_not_override_existing() {
+    fn parse_nmap_fqdn_does_not_override_existing() {
         // When nmap header already has the FQDN, script output shouldn't override
         let output = "\
 Nmap scan report for dc01.contoso.local (192.168.58.10)
@@ -329,7 +329,7 @@ PORT    STATE SERVICE
     }
 
     #[test]
-    fn test_parse_nmap_fqdn_from_dns_host_name() {
+    fn parse_nmap_fqdn_from_dns_host_name() {
         let output = "\
 Nmap scan report for 192.168.58.11
 PORT    STATE SERVICE
@@ -342,7 +342,7 @@ PORT    STATE SERVICE
     }
 
     #[test]
-    fn test_parse_nmap_aws_internal_hostname_replaced_by_fqdn() {
+    fn parse_nmap_aws_internal_hostname_replaced_by_fqdn() {
         // AWS internal hostnames should be discarded, allowing FQDN extraction
         let output = "\
 Nmap scan report for ip-192-168-58-10.us-west-2.compute.internal (192.168.58.10)
@@ -360,7 +360,7 @@ PORT    STATE SERVICE
     }
 
     #[test]
-    fn test_parse_nmap_fqdn_from_ssl_cert_commonname() {
+    fn parse_nmap_fqdn_from_ssl_cert_commonname() {
         let output = "\
 Nmap scan report for 192.168.58.22
 PORT    STATE SERVICE
@@ -373,7 +373,7 @@ PORT    STATE SERVICE
     }
 
     #[test]
-    fn test_parse_nmap_fqdn_from_ssl_cert_san_dns() {
+    fn parse_nmap_fqdn_from_ssl_cert_san_dns() {
         let output = "\
 Nmap scan report for 192.168.58.23
 PORT     STATE SERVICE
@@ -385,7 +385,7 @@ PORT     STATE SERVICE
     }
 
     #[test]
-    fn test_parse_nmap_version_info_stripped_from_services() {
+    fn parse_nmap_version_info_stripped_from_services() {
         // nmap -sV output includes version/product info after the service name.
         // We should only capture the service name, not the version string.
         let output = "\
@@ -413,14 +413,14 @@ PORT     STATE SERVICE       VERSION
     }
 
     #[test]
-    fn test_flush_nmap_host_empty_ip() {
+    fn flush_nmap_host_empty_ip() {
         let mut hosts = Vec::new();
         flush_nmap_host("", "host", "Windows", &[], &mut hosts);
         assert!(hosts.is_empty());
     }
 
     #[test]
-    fn test_flush_nmap_host_winrm_role() {
+    fn flush_nmap_host_winrm_role() {
         let mut hosts = Vec::new();
         let services = vec!["5985/tcp (wsman)".to_string()];
         flush_nmap_host("192.168.58.30", "", "", &services, &mut hosts);

@@ -49,7 +49,7 @@ fn make_hash(domain: &str, username: &str, hash_type: &str, hash_value: &str) ->
 }
 
 #[test]
-fn test_dedup_users_basic() {
+fn dedup_users_basic() {
     let nb = HashMap::new();
     let users = vec![
         make_user("contoso.local", "admin"),
@@ -61,7 +61,7 @@ fn test_dedup_users_basic() {
 }
 
 #[test]
-fn test_dedup_users_case_insensitive() {
+fn dedup_users_case_insensitive() {
     let nb = HashMap::new();
     let users = vec![
         make_user("CONTOSO.LOCAL", "Admin"),
@@ -72,7 +72,7 @@ fn test_dedup_users_case_insensitive() {
 }
 
 #[test]
-fn test_dedup_users_different_domains() {
+fn dedup_users_different_domains() {
     let nb = HashMap::new();
     let users = vec![
         make_user("contoso.local", "admin"),
@@ -83,7 +83,7 @@ fn test_dedup_users_different_domains() {
 }
 
 #[test]
-fn test_dedup_credentials_basic() {
+fn dedup_credentials_basic() {
     let creds = vec![
         make_cred("contoso.local", "admin", "P@ss1"),
         make_cred("contoso.local", "admin", "P@ss1"), // dup
@@ -94,7 +94,7 @@ fn test_dedup_credentials_basic() {
 }
 
 #[test]
-fn test_dedup_credentials_case_insensitive_username() {
+fn dedup_credentials_case_insensitive_username() {
     let creds = vec![
         make_cred("contoso.local", "Admin", "P@ss1"),
         make_cred("CONTOSO.LOCAL", "admin", "P@ss1"),
@@ -104,7 +104,7 @@ fn test_dedup_credentials_case_insensitive_username() {
 }
 
 #[test]
-fn test_dedup_hashes_basic() {
+fn dedup_hashes_basic() {
     let hashes = vec![
         make_hash("contoso.local", "admin", "ntlm", "aabbccdd"),
         make_hash("contoso.local", "admin", "ntlm", "aabbccdd"), // dup
@@ -115,7 +115,7 @@ fn test_dedup_hashes_basic() {
 }
 
 #[test]
-fn test_dedup_hashes_case_insensitive() {
+fn dedup_hashes_case_insensitive() {
     let hashes = vec![
         make_hash("contoso.local", "Admin", "NTLM", "AABBCCDD"),
         make_hash("CONTOSO.LOCAL", "admin", "ntlm", "aabbccdd"),
@@ -125,12 +125,12 @@ fn test_dedup_hashes_case_insensitive() {
 }
 
 #[test]
-fn test_normalize_source_label_empty() {
+fn normalize_source_label_empty() {
     assert_eq!(normalize_source_label(""), "Unknown");
 }
 
 #[test]
-fn test_normalize_source_label_exact_match() {
+fn normalize_source_label_exact_match() {
     assert_eq!(normalize_source_label("recon"), "Reconnaissance");
     assert_eq!(normalize_source_label("privesc"), "Privilege Escalation");
     assert_eq!(normalize_source_label("bloodhound"), "BloodHound");
@@ -138,18 +138,18 @@ fn test_normalize_source_label_exact_match() {
 }
 
 #[test]
-fn test_normalize_source_label_case_insensitive() {
+fn normalize_source_label_case_insensitive() {
     assert_eq!(normalize_source_label("RECON"), "Reconnaissance");
     assert_eq!(normalize_source_label("BloodHound"), "BloodHound");
 }
 
 #[test]
-fn test_normalize_source_label_dedup_colon() {
+fn normalize_source_label_dedup_colon() {
     assert_eq!(normalize_source_label("recon:recon"), "Reconnaissance");
 }
 
 #[test]
-fn test_normalize_source_label_prefix_match() {
+fn normalize_source_label_prefix_match() {
     assert_eq!(
         normalize_source_label("privesc_enumeration"),
         "Privesc Enumeration"
@@ -161,7 +161,7 @@ fn test_normalize_source_label_prefix_match() {
 }
 
 #[test]
-fn test_normalize_source_label_task_suffix() {
+fn normalize_source_label_task_suffix() {
     assert_eq!(
         normalize_source_label("recon_abc12345678"),
         "Reconnaissance"
@@ -169,7 +169,7 @@ fn test_normalize_source_label_task_suffix() {
 }
 
 #[test]
-fn test_normalize_source_label_fallback() {
+fn normalize_source_label_fallback() {
     assert_eq!(
         normalize_source_label("some_custom_source"),
         "Some Custom Source"
@@ -177,7 +177,7 @@ fn test_normalize_source_label_fallback() {
 }
 
 #[test]
-fn test_normalize_state_domains_corrects_cred_domain() {
+fn normalize_state_domains_corrects_cred_domain() {
     let users = vec![make_user("contoso.local", "admin")];
     let mut creds = vec![make_cred("WRONG.local", "admin", "P@ss1")];
     let mut hashes = vec![];
@@ -193,7 +193,7 @@ fn test_normalize_state_domains_corrects_cred_domain() {
 }
 
 #[test]
-fn test_normalize_state_domains_dedupes_cross_domain_creds() {
+fn normalize_state_domains_dedupes_cross_domain_creds() {
     let users = vec![make_user("contoso.local", "admin")];
     let mut creds = vec![
         make_cred("contoso.local", "admin", "P@ss1"),
@@ -210,7 +210,7 @@ fn test_normalize_state_domains_dedupes_cross_domain_creds() {
 }
 
 #[test]
-fn test_normalize_state_domains_preserves_well_known() {
+fn normalize_state_domains_preserves_well_known() {
     let users = vec![
         make_user("contoso.local", "administrator"),
         make_user("child.contoso.local", "administrator"),
@@ -233,7 +233,7 @@ fn test_normalize_state_domains_preserves_well_known() {
 }
 
 #[test]
-fn test_sanitize_strips_password_prefix() {
+fn sanitize_strips_password_prefix() {
     let mut creds = vec![
         make_cred("contoso.local", "jdoe", "Password: jdoe"),
         make_cred("contoso.local", "admin", "password:secret"),
@@ -250,7 +250,7 @@ fn test_sanitize_strips_password_prefix() {
 }
 
 #[test]
-fn test_sanitize_removes_password_only() {
+fn sanitize_removes_password_only() {
     let mut creds = vec![
         make_cred("contoso.local", "jdoe", "Password"),
         make_cred("contoso.local", "admin", "password"),
@@ -264,7 +264,7 @@ fn test_sanitize_removes_password_only() {
 }
 
 #[test]
-fn test_sanitize_strips_trailing_paren_metadata() {
+fn sanitize_strips_trailing_paren_metadata() {
     let mut creds = vec![
         make_cred("contoso.local", "svc_test", "svc_test (Guest)"),
         make_cred("contoso.local", "admin", "P@ss1 (Pwn3d!)"),
@@ -278,7 +278,7 @@ fn test_sanitize_strips_trailing_paren_metadata() {
 }
 
 #[test]
-fn test_sanitize_normalizes_username_with_at_domain() {
+fn sanitize_normalizes_username_with_at_domain() {
     let mut creds = vec![
         make_cred(
             "fabrikam.local",
@@ -300,7 +300,7 @@ fn test_sanitize_normalizes_username_with_at_domain() {
 }
 
 #[test]
-fn test_sanitize_preserves_clean_credentials() {
+fn sanitize_preserves_clean_credentials() {
     let mut creds = vec![
         make_cred("contoso.local", "admin", "P@ss1"),
         make_cred("contoso.local", "user1", "Secret123!"),
@@ -313,7 +313,7 @@ fn test_sanitize_preserves_clean_credentials() {
 }
 
 #[test]
-fn test_sanitize_removes_empty_password_after_strip() {
+fn sanitize_removes_empty_password_after_strip() {
     let mut creds = vec![
         make_cred("contoso.local", "jdoe", "Password: "),
         make_cred("contoso.local", "admin", ""),
@@ -323,7 +323,7 @@ fn test_sanitize_removes_empty_password_after_strip() {
 }
 
 #[test]
-fn test_sanitize_then_dedup_collapses_variants() {
+fn sanitize_then_dedup_collapses_variants() {
     // jdoe:jdoe is a valid credential; "Password: jdoe" strips to "jdoe" (dup);
     // "Password" is filtered as noise
     let mut creds = vec![
@@ -338,7 +338,7 @@ fn test_sanitize_then_dedup_collapses_variants() {
 }
 
 #[test]
-fn test_sanitize_keeps_password_equals_username() {
+fn sanitize_keeps_password_equals_username() {
     // password == username is valid (e.g. jdoe:jdoe)
     let mut creds = vec![
         make_cred("contoso.local", "admin", "admin"),

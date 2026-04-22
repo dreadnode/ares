@@ -127,39 +127,39 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_infer_target_type_dc() {
+    fn infer_target_type_dc() {
         assert_eq!(infer_target_type("dc01.contoso.local"), "domain_controller");
         assert_eq!(infer_target_type("DC02"), "domain_controller");
     }
 
     #[test]
-    fn test_infer_target_type_sql() {
+    fn infer_target_type_sql() {
         assert_eq!(infer_target_type("sql01.contoso.local"), "sql_server");
         assert_eq!(infer_target_type("mssql.contoso.local"), "sql_server");
         assert_eq!(infer_target_type("db01"), "sql_server");
     }
 
     #[test]
-    fn test_infer_target_type_web() {
+    fn infer_target_type_web() {
         assert_eq!(infer_target_type("web01.contoso.local"), "web_server");
         assert_eq!(infer_target_type("iis01"), "web_server");
     }
 
     #[test]
-    fn test_infer_target_type_workstation() {
+    fn infer_target_type_workstation() {
         assert_eq!(infer_target_type("ws01.contoso.local"), "workstation");
         assert_eq!(infer_target_type("pc01"), "workstation");
         assert_eq!(infer_target_type("desktop-user1"), "workstation");
     }
 
     #[test]
-    fn test_infer_target_type_server_fallback() {
+    fn infer_target_type_server_fallback() {
         assert_eq!(infer_target_type("fileserver01.contoso.local"), "server");
         assert_eq!(infer_target_type("app01"), "server");
     }
 
     #[test]
-    fn test_extract_target_info_ip() {
+    fn extract_target_info_ip() {
         let args = serde_json::json!({"target_ip": "192.168.58.10", "username": "admin"});
         let info = extract_target_info(&args);
         assert_eq!(info.target_ip.as_deref(), Some("192.168.58.10"));
@@ -167,7 +167,7 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_target_info_fqdn() {
+    fn extract_target_info_fqdn() {
         let args = serde_json::json!({"target": "dc01.contoso.local"});
         let info = extract_target_info(&args);
         assert_eq!(info.target_fqdn.as_deref(), Some("dc01.contoso.local"));
@@ -175,7 +175,7 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_target_info_ip_in_target() {
+    fn extract_target_info_ip_in_target() {
         let args = serde_json::json!({"target": "192.168.58.10"});
         let info = extract_target_info(&args);
         assert_eq!(info.target_ip.as_deref(), Some("192.168.58.10"));
@@ -183,7 +183,7 @@ mod tests {
     }
 
     #[test]
-    fn test_infer_from_info_fqdn() {
+    fn infer_from_info_fqdn() {
         let info = ToolTargetInfo {
             target_fqdn: Some("dc01.contoso.local".to_string()),
             target_user: Some("admin".to_string()),
@@ -196,7 +196,7 @@ mod tests {
     }
 
     #[test]
-    fn test_infer_from_info_user_only() {
+    fn infer_from_info_user_only() {
         let info = ToolTargetInfo {
             target_user: Some("svc_backup".to_string()),
             ..Default::default()
@@ -205,7 +205,7 @@ mod tests {
     }
 
     #[test]
-    fn test_infer_from_info_nothing() {
+    fn infer_from_info_nothing() {
         let info = ToolTargetInfo::default();
         assert_eq!(infer_target_type_from_info(&info), None);
     }

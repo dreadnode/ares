@@ -431,7 +431,7 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn test_lookup_known_technique() {
+    fn lookup_known_technique() {
         let args = json!({"technique_id": "T1003"});
         let result = lookup_technique(&args).unwrap();
         assert!(result.success);
@@ -440,7 +440,7 @@ mod tests {
     }
 
     #[test]
-    fn test_lookup_subtechnique() {
+    fn lookup_subtechnique() {
         let args = json!({"technique_id": "T1003.001"});
         let result = lookup_technique(&args).unwrap();
         assert!(result.success);
@@ -448,7 +448,7 @@ mod tests {
     }
 
     #[test]
-    fn test_lookup_unknown_falls_back_to_parent() {
+    fn lookup_unknown_falls_back_to_parent() {
         let args = json!({"technique_id": "T1003.999"});
         let result = lookup_technique(&args).unwrap();
         assert!(result.success);
@@ -457,7 +457,7 @@ mod tests {
     }
 
     #[test]
-    fn test_lookup_completely_unknown() {
+    fn lookup_completely_unknown() {
         let args = json!({"technique_id": "T9999"});
         let result = lookup_technique(&args).unwrap();
         assert!(!result.success);
@@ -465,7 +465,7 @@ mod tests {
     }
 
     #[test]
-    fn test_lookup_case_insensitive() {
+    fn lookup_case_insensitive() {
         let args = json!({"technique_id": "t1003"});
         let result = lookup_technique(&args).unwrap();
         assert!(result.success);
@@ -473,7 +473,7 @@ mod tests {
     }
 
     #[test]
-    fn test_suggest_credential_access() {
+    fn suggest_credential_access() {
         let args = json!({"evidence_type": "credential_access"});
         let result = suggest_techniques(&args).unwrap();
         assert!(result.success);
@@ -482,7 +482,7 @@ mod tests {
     }
 
     #[test]
-    fn test_suggest_lateral_movement() {
+    fn suggest_lateral_movement() {
         let args = json!({"evidence_type": "lateral_movement"});
         let result = suggest_techniques(&args).unwrap();
         assert!(result.success);
@@ -491,7 +491,7 @@ mod tests {
     }
 
     #[test]
-    fn test_suggest_with_hyphens() {
+    fn suggest_with_hyphens() {
         let args = json!({"evidence_type": "lateral-movement"});
         let result = suggest_techniques(&args).unwrap();
         assert!(result.success);
@@ -499,7 +499,7 @@ mod tests {
     }
 
     #[test]
-    fn test_suggest_unknown_type() {
+    fn suggest_unknown_type() {
         let args = json!({"evidence_type": "nonexistent"});
         let result = suggest_techniques(&args).unwrap();
         assert!(!result.success);
@@ -508,7 +508,7 @@ mod tests {
     }
 
     #[test]
-    fn test_missing_required_arg() {
+    fn missing_required_arg() {
         let args = json!({});
         let result = lookup_technique(&args);
         assert!(result.is_err());

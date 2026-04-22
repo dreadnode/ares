@@ -129,43 +129,43 @@ mod tests {
     // --- is_pass_the_hash_compatible ---
 
     #[test]
-    fn test_pth_compat_lm_nt() {
+    fn pth_compat_lm_nt() {
         assert!(is_pass_the_hash_compatible(Some(
             "aad3b435b51404eeaad3b435b51404ee:313b6f423a71d74c0a1b8a2f43b22d4c"
         )));
     }
 
     #[test]
-    fn test_pth_compat_nt_only() {
+    fn pth_compat_nt_only() {
         assert!(is_pass_the_hash_compatible(Some(
             "313b6f423a71d74c0a1b8a2f43b22d4c"
         )));
     }
 
     #[test]
-    fn test_pth_compat_none() {
+    fn pth_compat_none() {
         assert!(!is_pass_the_hash_compatible(None));
     }
 
     #[test]
-    fn test_pth_compat_empty() {
+    fn pth_compat_empty() {
         assert!(!is_pass_the_hash_compatible(Some("")));
     }
 
     #[test]
-    fn test_pth_compat_kerberos_hash() {
+    fn pth_compat_kerberos_hash() {
         assert!(!is_pass_the_hash_compatible(Some(
             "$krb5tgs$23$*svc_sql$contoso.local"
         )));
     }
 
     #[test]
-    fn test_pth_compat_multiple_colons() {
+    fn pth_compat_multiple_colons() {
         assert!(!is_pass_the_hash_compatible(Some("aad3:b435:b514")));
     }
 
     #[test]
-    fn test_pth_compat_lm_empty_nt_valid() {
+    fn pth_compat_lm_empty_nt_valid() {
         // Empty LM part with valid NT
         assert!(is_pass_the_hash_compatible(Some(
             ":313b6f423a71d74c0a1b8a2f43b22d4c"
@@ -175,21 +175,21 @@ mod tests {
     // --- payload_techniques ---
 
     #[test]
-    fn test_payload_techniques_present() {
+    fn payload_techniques_present() {
         let payload = json!({"techniques": ["network_scan", "user_enumeration"]});
         let techs = payload_techniques(&payload);
         assert_eq!(techs, vec!["network_scan", "user_enumeration"]);
     }
 
     #[test]
-    fn test_payload_techniques_missing() {
+    fn payload_techniques_missing() {
         let payload = json!({"target": "192.168.58.10"});
         let techs = payload_techniques(&payload);
         assert!(techs.is_empty());
     }
 
     #[test]
-    fn test_payload_techniques_empty_array() {
+    fn payload_techniques_empty_array() {
         let payload = json!({"techniques": []});
         let techs = payload_techniques(&payload);
         assert!(techs.is_empty());
@@ -198,25 +198,25 @@ mod tests {
     // --- cred_param_str ---
 
     #[test]
-    fn test_cred_param_str_password() {
+    fn cred_param_str_password() {
         let payload = json!({"password": "P@ss1"});
         assert_eq!(cred_param_str(&payload, None), "password='P@ss1'");
     }
 
     #[test]
-    fn test_cred_param_str_nested_password() {
+    fn cred_param_str_nested_password() {
         let payload = json!({"credential": {"username": "admin", "domain": "contoso.local", "password": "Summer2025"}});
         assert_eq!(cred_param_str(&payload, None), "password='Summer2025'");
     }
 
     #[test]
-    fn test_cred_param_str_nested_takes_precedence() {
+    fn cred_param_str_nested_takes_precedence() {
         let payload = json!({"password": "flat", "credential": {"password": "nested"}});
         assert_eq!(cred_param_str(&payload, None), "password='nested'");
     }
 
     #[test]
-    fn test_cred_param_str_hash() {
+    fn cred_param_str_hash() {
         let payload = json!({});
         assert_eq!(
             cred_param_str(&payload, Some("aabbccdd")),
@@ -225,19 +225,19 @@ mod tests {
     }
 
     #[test]
-    fn test_cred_param_str_fallback() {
+    fn cred_param_str_fallback() {
         let payload = json!({});
         assert_eq!(cred_param_str(&payload, None), "password='N/A'");
     }
 
     #[test]
-    fn test_cred_param_str_empty_password_uses_hash() {
+    fn cred_param_str_empty_password_uses_hash() {
         let payload = json!({"password": ""});
         assert_eq!(cred_param_str(&payload, Some("aabb")), "hashes='aabb'");
     }
 
     #[test]
-    fn test_cred_param_str_nested_empty_uses_hash() {
+    fn cred_param_str_nested_empty_uses_hash() {
         let payload = json!({"credential": {"password": ""}});
         assert_eq!(cred_param_str(&payload, Some("aabb")), "hashes='aabb'");
     }
@@ -245,19 +245,19 @@ mod tests {
     // --- cred_display_str ---
 
     #[test]
-    fn test_cred_display_str_password() {
+    fn cred_display_str_password() {
         let payload = json!({"password": "Secret123"});
         assert_eq!(cred_display_str(&payload, None), "Secret123");
     }
 
     #[test]
-    fn test_cred_display_str_nested_password() {
+    fn cred_display_str_nested_password() {
         let payload = json!({"credential": {"password": "Summer2025"}});
         assert_eq!(cred_display_str(&payload, None), "Summer2025");
     }
 
     #[test]
-    fn test_cred_display_str_hash() {
+    fn cred_display_str_hash() {
         let payload = json!({});
         assert_eq!(
             cred_display_str(&payload, Some("aabbccdd")),
@@ -266,7 +266,7 @@ mod tests {
     }
 
     #[test]
-    fn test_cred_display_str_fallback() {
+    fn cred_display_str_fallback() {
         let payload = json!({});
         assert_eq!(cred_display_str(&payload, None), "N/A");
     }
@@ -274,7 +274,7 @@ mod tests {
     // --- insert_credential_context ---
 
     #[test]
-    fn test_insert_credential_context_with_password() {
+    fn insert_credential_context_with_password() {
         let payload = json!({
             "credential": {
                 "username": "admin",
@@ -292,7 +292,7 @@ mod tests {
     }
 
     #[test]
-    fn test_insert_credential_context_with_hash() {
+    fn insert_credential_context_with_hash() {
         let payload = json!({
             "credential": {
                 "username": "admin",
@@ -306,7 +306,7 @@ mod tests {
     }
 
     #[test]
-    fn test_insert_credential_context_no_cred() {
+    fn insert_credential_context_no_cred() {
         let payload = json!({"target": "192.168.58.10"});
         let mut ctx = Context::new();
         insert_credential_context(&mut ctx, &payload);

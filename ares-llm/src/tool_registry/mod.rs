@@ -272,7 +272,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_recon_tools_include_callbacks() {
+    fn recon_tools_include_callbacks() {
         let tools = tools_for_role(AgentRole::Recon);
         let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
         assert!(names.contains(&"nmap_scan"));
@@ -281,7 +281,7 @@ mod tests {
     }
 
     #[test]
-    fn test_callback_tool_detection() {
+    fn callback_tool_detection() {
         assert!(is_callback_tool("task_complete"));
         assert!(is_callback_tool("request_assistance"));
         assert!(is_callback_tool("report_lateral_success"));
@@ -299,7 +299,7 @@ mod tests {
     }
 
     #[test]
-    fn test_tool_schemas_valid_json() {
+    fn tool_schemas_valid_json() {
         for role in [
             AgentRole::Recon,
             AgentRole::CredentialAccess,
@@ -329,7 +329,7 @@ mod tests {
     }
 
     #[test]
-    fn test_tools_for_capabilities() {
+    fn returns_tools_for_capabilities() {
         let caps = vec!["nmap_scan".to_string(), "secretsdump".to_string()];
         let tools = tools_for_capabilities(&caps);
         let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
@@ -341,14 +341,14 @@ mod tests {
     }
 
     #[test]
-    fn test_agent_role_str() {
+    fn agent_role_str() {
         assert_eq!(AgentRole::Recon.as_str(), "recon");
         assert_eq!(AgentRole::Orchestrator.as_str(), "orchestrator");
         assert_eq!(AgentRole::CredentialAccess.as_str(), "credential_access");
     }
 
     #[test]
-    fn test_cracker_has_crack_callbacks() {
+    fn cracker_has_crack_callbacks() {
         let tools = tools_for_role(AgentRole::Cracker);
         let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
         assert!(names.contains(&"crack_with_hashcat"));
@@ -357,7 +357,7 @@ mod tests {
     }
 
     #[test]
-    fn test_lateral_has_lateral_callbacks() {
+    fn lateral_has_lateral_callbacks() {
         let tools = tools_for_role(AgentRole::Lateral);
         let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
         assert!(names.contains(&"psexec"));
@@ -368,7 +368,7 @@ mod tests {
     }
 
     #[test]
-    fn test_orchestrator_has_management_tools() {
+    fn orchestrator_has_management_tools() {
         let tools = tools_for_role(AgentRole::Orchestrator);
         let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
         assert!(names.contains(&"get_pending_tasks"));
@@ -377,7 +377,7 @@ mod tests {
     }
 
     #[test]
-    fn test_all_roles_have_reporting() {
+    fn all_roles_have_reporting() {
         for role in [
             AgentRole::Recon,
             AgentRole::CredentialAccess,
@@ -416,7 +416,7 @@ mod tests {
     }
 
     #[test]
-    fn test_no_duplicate_tool_names_per_role() {
+    fn no_duplicate_tool_names_per_role() {
         for role in [
             AgentRole::Recon,
             AgentRole::CredentialAccess,
@@ -441,7 +441,7 @@ mod tests {
     }
 
     #[test]
-    fn test_credential_access_has_key_tools() {
+    fn credential_access_has_key_tools() {
         let tools = tools_for_role(AgentRole::CredentialAccess);
         let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
         assert!(names.contains(&"secretsdump"));
@@ -458,7 +458,7 @@ mod tests {
     }
 
     #[test]
-    fn test_recon_has_credential_discovery_tools() {
+    fn recon_has_credential_discovery_tools() {
         let tools = tools_for_role(AgentRole::Recon);
         let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
         // Shared credential discovery tools (from netexec_tools)
@@ -477,7 +477,7 @@ mod tests {
     }
 
     #[test]
-    fn test_privesc_has_key_tools() {
+    fn privesc_has_key_tools() {
         let tools = tools_for_role(AgentRole::Privesc);
         let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
         assert!(names.contains(&"certipy_find"));
@@ -493,7 +493,7 @@ mod tests {
     }
 
     #[test]
-    fn test_coercion_has_relay_tools() {
+    fn coercion_has_relay_tools() {
         let tools = tools_for_role(AgentRole::Coercion);
         let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
         assert!(names.contains(&"start_responder"));

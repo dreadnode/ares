@@ -193,7 +193,7 @@ mod tests {
     }
 
     #[test]
-    fn test_generate_playbook_minimal() {
+    fn generate_playbook_minimal() {
         let state = make_state();
         let playbook = generate_detection_playbook(&state, &[]);
         assert_eq!(playbook.operation_id, "test-op-001");
@@ -205,7 +205,7 @@ mod tests {
     }
 
     #[test]
-    fn test_generate_playbook_with_hosts() {
+    fn generate_playbook_with_hosts() {
         let mut state = make_state();
         state.all_hosts = vec![Host {
             ip: "192.168.58.10".to_string(),
@@ -235,7 +235,7 @@ mod tests {
     }
 
     #[test]
-    fn test_generate_playbook_with_credentials() {
+    fn generate_playbook_with_credentials() {
         let mut state = make_state();
         state.all_credentials = vec![Credential {
             id: String::new(),
@@ -259,7 +259,7 @@ mod tests {
     }
 
     #[test]
-    fn test_generate_playbook_with_hashes() {
+    fn generate_playbook_with_hashes() {
         let mut state = make_state();
         state.all_hashes = vec![Hash {
             id: String::new(),
@@ -285,7 +285,7 @@ mod tests {
     }
 
     #[test]
-    fn test_generate_playbook_domain_admin_summary() {
+    fn generate_playbook_domain_admin_summary() {
         let mut state = make_state();
         state.has_domain_admin = true;
         state.domain_admin_path = Some("admin -> DA".to_string());
@@ -299,7 +299,7 @@ mod tests {
     }
 
     #[test]
-    fn test_generate_playbook_technique_detections() {
+    fn generate_playbook_technique_detections() {
         let state = make_state();
         let techniques = vec!["T1003".to_string(), "T1558.003".to_string()];
         let playbook = generate_detection_playbook(&state, &techniques);

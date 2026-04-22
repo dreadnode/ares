@@ -73,7 +73,7 @@ mod tests {
     // --- Hash dedup tests ---
 
     #[test]
-    fn test_dedupe_asrep_by_domain_username() {
+    fn dedupe_asrep_by_domain_username() {
         let hashes = vec![
             make_hash(
                 "edavis",
@@ -107,7 +107,7 @@ mod tests {
     }
 
     #[test]
-    fn test_dedupe_asrep_different_users_kept() {
+    fn dedupe_asrep_different_users_kept() {
         let hashes = vec![
             make_hash(
                 "edavis",
@@ -127,7 +127,7 @@ mod tests {
     }
 
     #[test]
-    fn test_dedupe_kerberoast_by_spn() {
+    fn dedupe_kerberoast_by_spn() {
         let hashes = vec![
             make_hash(
                 "svc_sql",
@@ -147,7 +147,7 @@ mod tests {
     }
 
     #[test]
-    fn test_dedupe_kerberoast_different_spn_kept() {
+    fn dedupe_kerberoast_different_spn_kept() {
         let hashes = vec![
             make_hash(
                 "svc_sql",
@@ -167,7 +167,7 @@ mod tests {
     }
 
     #[test]
-    fn test_dedupe_ntlm_by_exact_value() {
+    fn dedupe_ntlm_by_exact_value() {
         let hashes = vec![
             make_hash(
                 "admin",
@@ -197,7 +197,7 @@ mod tests {
     }
 
     #[test]
-    fn test_dedupe_mixed_types() {
+    fn dedupe_mixed_types() {
         let hashes = vec![
             // 2 AS-REP for same user -> 1
             make_hash(
@@ -231,13 +231,13 @@ mod tests {
     }
 
     #[test]
-    fn test_dedupe_empty() {
+    fn dedupe_empty() {
         let result = dedupe_hashes(vec![]);
         assert!(result.is_empty());
     }
 
     #[test]
-    fn test_dedupe_case_insensitive() {
+    fn dedupe_case_insensitive() {
         let hashes = vec![
             make_hash(
                 "EDavis",
@@ -259,7 +259,7 @@ mod tests {
     // --- Retry limit tests ---
 
     #[test]
-    fn test_retry_limit_not_exceeded() {
+    fn retry_limit_not_exceeded() {
         let task = TaskInfo {
             task_id: "test_1".to_string(),
             task_type: "recon".to_string(),
@@ -283,7 +283,7 @@ mod tests {
     }
 
     #[test]
-    fn test_retry_limit_exceeded() {
+    fn retry_limit_exceeded() {
         let task = TaskInfo {
             task_id: "test_2".to_string(),
             task_type: "recon".to_string(),
@@ -309,7 +309,7 @@ mod tests {
     // --- State normalization tests ---
 
     #[test]
-    fn test_normalize_credential_domains_netbios_to_fqdn() {
+    fn normalize_credential_domains_netbios_to_fqdn() {
         let mut creds = vec![
             Credential {
                 id: "1".to_string(),
@@ -345,7 +345,7 @@ mod tests {
     }
 
     #[test]
-    fn test_normalize_hash_domains() {
+    fn normalizes_hash_domains() {
         let mut hashes = vec![make_hash("admin", "FABRIKAM", "NTLM", "hash123")];
 
         let mut netbios_map = HashMap::new();
@@ -357,7 +357,7 @@ mod tests {
     }
 
     #[test]
-    fn test_normalize_no_changes_when_fqdn() {
+    fn normalize_no_changes_when_fqdn() {
         let mut creds = vec![Credential {
             id: "1".to_string(),
             username: "admin".to_string(),
@@ -376,7 +376,7 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_domain_empty_and_dotted() {
+    fn resolve_domain_empty_and_dotted() {
         let map = HashMap::new();
         assert!(resolve_domain("", &map).is_none(), "Empty domain -> None");
         assert!(
@@ -386,7 +386,7 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_domain_case_insensitive_lookup() {
+    fn resolve_domain_case_insensitive_lookup() {
         let mut map = HashMap::new();
         map.insert("CONTOSO".to_string(), "contoso.local".to_string());
 
@@ -408,14 +408,14 @@ mod tests {
     // --- Kerberoast SPN extraction ---
 
     #[test]
-    fn test_extract_kerberoast_spn_key_valid() {
+    fn extract_kerberoast_spn_key_valid() {
         let hash = "$krb5tgs$23$*svc_sql$CONTOSO.LOCAL$MSSQLSvc/db01.contoso.local*$chk$enc";
         let result = extract_kerberoast_spn_key(hash);
         assert_eq!(result, Some("23:MSSQLSvc/db01.contoso.local".to_string()));
     }
 
     #[test]
-    fn test_extract_kerberoast_spn_key_invalid() {
+    fn extract_kerberoast_spn_key_invalid() {
         assert!(extract_kerberoast_spn_key("not_a_krb_hash").is_none());
         assert!(extract_kerberoast_spn_key("$krb5tgs$").is_none());
         assert!(extract_kerberoast_spn_key("$krb5tgs$23$nope").is_none());
@@ -424,7 +424,7 @@ mod tests {
     // --- Connection error detection ---
 
     #[test]
-    fn test_is_connection_error() {
+    fn connection_error_detection() {
         let conn_err = anyhow::anyhow!("Connection reset by peer");
         assert!(is_connection_error(&conn_err));
 

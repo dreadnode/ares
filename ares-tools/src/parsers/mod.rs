@@ -374,7 +374,7 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn test_parse_nmap_with_services() {
+    fn parse_nmap_with_services() {
         let output = r#"Starting Nmap 7.98 ( https://nmap.org ) at 2026-04-08 11:12 UTC
 Nmap scan report for dc01.contoso.local (192.168.58.210)
 Host is up (0.0010s latency).
@@ -407,7 +407,7 @@ Nmap done: 1 IP address (1 host up) scanned in 4.32 seconds"#;
     }
 
     #[test]
-    fn test_parse_nmap_with_stderr_separator() {
+    fn parse_nmap_with_stderr_separator() {
         // combined() output includes stderr
         let output = "Starting Nmap 7.98 ( https://nmap.org ) at 2026-04-08 11:12 UTC\n\
 Nmap scan report for dc01.contoso.local (192.168.58.210)\n\
@@ -437,7 +437,7 @@ Warning: some warning here";
     }
 
     #[test]
-    fn test_parse_nmap_fallback_no_output() {
+    fn parse_nmap_fallback_no_output() {
         let output = "";
         let params = json!({"target": "192.168.58.210"});
         let hosts = parse_nmap_output(output, &params);
@@ -448,7 +448,7 @@ Warning: some warning here";
     }
 
     #[test]
-    fn test_parse_nmap_multiple_hosts() {
+    fn parse_nmap_multiple_hosts() {
         let output = "Nmap scan report for dc01.contoso.local (192.168.58.210)\n\
 PORT    STATE SERVICE\n\
 88/tcp  open  kerberos-sec\n\
@@ -470,7 +470,7 @@ PORT     STATE SERVICE\n\
     }
 
     #[test]
-    fn test_parse_netexec_users_table_format() {
+    fn parse_netexec_users_table_format() {
         let output = r#"SMB         192.168.58.121  445    DC01       [*] Windows 10 / Server 2019 Build 17763 x64 (name:DC01) (domain:north.contoso.local) (signing:True) (SMBv1:False)
 SMB         192.168.58.121  445    DC01       [+] north.contoso.local\:
 SMB         192.168.58.121  445    DC01       -Username-                    -Last PW Set-       -BadPW- -Description-
@@ -517,7 +517,7 @@ SMB         192.168.58.121  445    DC01       [*] Enumerated 10 local users: CHI
     }
 
     #[test]
-    fn test_parse_netexec_users_rid_brute_format() {
+    fn parse_netexec_users_rid_brute_format() {
         let output = r#"SMB  192.168.58.121  445  DC01  [+] north.contoso.local\:
 SMB  192.168.58.121  445  DC01  CHILD\alice.johnson (SidTypeUser)
 SMB  192.168.58.121  445  DC01  CHILD\bob.smith (SidTypeUser)"#;
@@ -533,7 +533,7 @@ SMB  192.168.58.121  445  DC01  CHILD\bob.smith (SidTypeUser)"#;
     }
 
     #[test]
-    fn test_parse_tool_output_enumerate_users_extracts_creds() {
+    fn parse_tool_output_enumerate_users_extracts_creds() {
         let output = r#"SMB  192.168.58.121  445  DC01  [*] Windows 10 (name:DC01) (domain:contoso.local) (signing:True)
 SMB  192.168.58.121  445  DC01  [+] contoso.local\:
 SMB  192.168.58.121  445  DC01  -Username-  -Last PW Set-  -BadPW- -Description-
@@ -557,7 +557,7 @@ SMB  192.168.58.121  445  DC01  bob         2026-03-25 23:21:09 0  Bob"#;
     // --- looks_like_ip ---
 
     #[test]
-    fn test_looks_like_ip_valid() {
+    fn looks_like_ip_valid() {
         assert!(looks_like_ip("192.168.58.10"));
         assert!(looks_like_ip("192.168.58.10"));
         assert!(looks_like_ip("0.0.0.0"));
@@ -565,7 +565,7 @@ SMB  192.168.58.121  445  DC01  bob         2026-03-25 23:21:09 0  Bob"#;
     }
 
     #[test]
-    fn test_looks_like_ip_invalid() {
+    fn looks_like_ip_invalid() {
         assert!(!looks_like_ip("not-an-ip"));
         assert!(!looks_like_ip("192.168.58"));
         assert!(!looks_like_ip("192.168.58.10.5"));
@@ -577,7 +577,7 @@ SMB  192.168.58.121  445  DC01  bob         2026-03-25 23:21:09 0  Bob"#;
     // --- merge_discoveries ---
 
     #[test]
-    fn test_merge_discoveries_combines_arrays() {
+    fn merge_discoveries_combines_arrays() {
         let d1 = json!({
             "hosts": [{"ip": "192.168.58.10"}],
             "credentials": [{"username": "admin"}],
@@ -593,7 +593,7 @@ SMB  192.168.58.121  445  DC01  bob         2026-03-25 23:21:09 0  Bob"#;
     }
 
     #[test]
-    fn test_merge_discoveries_dedup_hosts_by_ip() {
+    fn merge_discoveries_dedup_hosts_by_ip() {
         let d1 = json!({
             "hosts": [
                 {"ip": "192.168.58.10", "is_dc": false, "services": ["445/tcp"]},
@@ -613,14 +613,14 @@ SMB  192.168.58.121  445  DC01  bob         2026-03-25 23:21:09 0  Bob"#;
     }
 
     #[test]
-    fn test_merge_discoveries_empty_input() {
+    fn merge_discoveries_empty_input() {
         let merged = merge_discoveries(&[]);
         assert!(merged["hosts"].is_null());
         assert!(merged["credentials"].is_null());
     }
 
     #[test]
-    fn test_merge_discoveries_single_input() {
+    fn merge_discoveries_single_input() {
         let d = json!({"vulnerabilities": [{"vuln_id": "v1"}]});
         let merged = merge_discoveries(&[d]);
         assert_eq!(merged["vulnerabilities"].as_array().unwrap().len(), 1);
@@ -629,7 +629,7 @@ SMB  192.168.58.121  445  DC01  bob         2026-03-25 23:21:09 0  Bob"#;
     // --- parse_tool_output routing ---
 
     #[test]
-    fn test_parse_tool_output_secretsdump() {
+    fn parse_tool_output_secretsdump() {
         let output = "Administrator:500:aad3b435b51404eeaad3b435b51404ee:e19ccf75ee54e06b06a5907af13cef42:::";
         let params = json!({"domain": "contoso.local"});
         let disc = parse_tool_output("secretsdump", output, &params);
@@ -637,7 +637,7 @@ SMB  192.168.58.121  445  DC01  bob         2026-03-25 23:21:09 0  Bob"#;
     }
 
     #[test]
-    fn test_parse_tool_output_kerberoast() {
+    fn parse_tool_output_kerberoast() {
         let output = "$krb5tgs$23$*svc_sql$CONTOSO$contoso.local/svc_sql*$abc";
         let params = json!({"domain": "contoso.local"});
         let disc = parse_tool_output("kerberoast", output, &params);
@@ -645,13 +645,13 @@ SMB  192.168.58.121  445  DC01  bob         2026-03-25 23:21:09 0  Bob"#;
     }
 
     #[test]
-    fn test_parse_tool_output_unknown_tool() {
+    fn parse_tool_output_unknown_tool() {
         let disc = parse_tool_output("unknown_tool", "output", &json!({}));
         assert_eq!(disc, json!({}));
     }
 
     #[test]
-    fn test_parse_tool_output_find_delegation() {
+    fn parse_tool_output_find_delegation() {
         let output = "svc_sql$  Computer  Constrained  CIFS/dc01.contoso.local";
         let params = json!({"domain": "contoso.local", "target_ip": "192.168.58.10"});
         let disc = parse_tool_output("find_delegation", output, &params);
@@ -659,7 +659,7 @@ SMB  192.168.58.121  445  DC01  bob         2026-03-25 23:21:09 0  Bob"#;
     }
 
     #[test]
-    fn test_kerberos_user_enum_all_variants() {
+    fn kerberos_user_enum_all_variants() {
         // Test all three output variants from impacket-GetNPUsers
         let output = r#"Impacket v0.12.0 - Copyright Fortra, LLC and its affiliated companies
 
@@ -691,7 +691,7 @@ SMB  192.168.58.121  445  DC01  bob         2026-03-25 23:21:09 0  Bob"#;
     }
 
     #[test]
-    fn test_parse_tool_output_username_as_password_filters() {
+    fn parse_tool_output_username_as_password_filters() {
         // Only creds where password == username should be kept
         let output = "[+] 192.168.1.1 CONTOSO\\alice:alice (Pwn3d!)\n\
                       [+] 192.168.1.1 CONTOSO\\bob:Password1 (Pwn3d!)";
@@ -703,7 +703,7 @@ SMB  192.168.58.121  445  DC01  bob         2026-03-25 23:21:09 0  Bob"#;
     }
 
     #[test]
-    fn test_parse_tool_output_adidnsdump() {
+    fn parse_tool_output_adidnsdump() {
         let output = "dc01  A  192.168.1.10\nweb01  A  192.168.1.20";
         let disc = parse_tool_output("adidnsdump", output, &json!({}));
         let hosts = disc["hosts"].as_array().unwrap();
@@ -711,7 +711,7 @@ SMB  192.168.58.121  445  DC01  bob         2026-03-25 23:21:09 0  Bob"#;
     }
 
     #[test]
-    fn test_merge_discoveries_trusted_domains_dedup() {
+    fn merge_discoveries_trusted_domains_dedup() {
         let d1 =
             json!({"trusted_domains": [{"domain": "child.contoso.local", "type": "ParentChild"}]});
         let d2 =
@@ -722,7 +722,7 @@ SMB  192.168.58.121  445  DC01  bob         2026-03-25 23:21:09 0  Bob"#;
     }
 
     #[test]
-    fn test_merge_discoveries_host_more_services_wins() {
+    fn merge_discoveries_host_more_services_wins() {
         let d1 = json!({"hosts": [{"ip": "10.0.0.1", "services": ["445/tcp"]}]});
         let d2 =
             json!({"hosts": [{"ip": "10.0.0.1", "services": ["80/tcp", "443/tcp", "445/tcp"]}]});

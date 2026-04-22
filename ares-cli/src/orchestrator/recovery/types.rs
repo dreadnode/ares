@@ -71,55 +71,55 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_is_connection_error_connection() {
+    fn is_connection_error_connection() {
         let err = anyhow::anyhow!("Redis connection refused");
         assert!(is_connection_error(&err));
     }
 
     #[test]
-    fn test_is_connection_error_timeout() {
+    fn is_connection_error_timeout() {
         let err = anyhow::anyhow!("Operation timeout after 30s");
         assert!(is_connection_error(&err));
     }
 
     #[test]
-    fn test_is_connection_error_broken_pipe() {
+    fn is_connection_error_broken_pipe() {
         let err = anyhow::anyhow!("Broken pipe while writing");
         assert!(is_connection_error(&err));
     }
 
     #[test]
-    fn test_is_connection_error_reset() {
+    fn is_connection_error_reset() {
         let err = anyhow::anyhow!("Connection reset by peer");
         assert!(is_connection_error(&err));
     }
 
     #[test]
-    fn test_is_connection_error_closed() {
+    fn is_connection_error_closed() {
         let err = anyhow::anyhow!("Socket closed unexpectedly");
         assert!(is_connection_error(&err));
     }
 
     #[test]
-    fn test_is_connection_error_case_insensitive() {
+    fn is_connection_error_case_insensitive() {
         let err = anyhow::anyhow!("TIMEOUT waiting for response");
         assert!(is_connection_error(&err));
     }
 
     #[test]
-    fn test_is_not_connection_error() {
+    fn is_not_connection_error() {
         let err = anyhow::anyhow!("Key not found in Redis");
         assert!(!is_connection_error(&err));
     }
 
     #[test]
-    fn test_is_not_connection_error_parse() {
+    fn is_not_connection_error_parse() {
         let err = anyhow::anyhow!("Failed to parse JSON response");
         assert!(!is_connection_error(&err));
     }
 
     #[test]
-    fn test_constants() {
+    fn constants() {
         assert_eq!(MAX_RETRIES, 3);
         assert_eq!(MAX_CONNECTION_RETRIES, 3);
         assert_eq!(INTERRUPTED_STATUSES.len(), 3);

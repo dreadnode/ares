@@ -528,7 +528,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_extract_verdict() {
+    fn extracts_verdict() {
         assert_eq!(extract_verdict("This is a true positive"), "true_positive");
         assert_eq!(
             extract_verdict("Determined to be a false positive"),
@@ -540,7 +540,7 @@ mod tests {
     }
 
     #[test]
-    fn test_process_outcome_completed() {
+    fn process_outcome_completed() {
         let outcome = AgentLoopOutcome {
             reason: LoopEndReason::TaskComplete {
                 task_id: "inv1".into(),
@@ -562,7 +562,7 @@ mod tests {
     }
 
     #[test]
-    fn test_process_outcome_escalated() {
+    fn process_outcome_escalated() {
         let outcome = AgentLoopOutcome {
             reason: LoopEndReason::RequestAssistance {
                 issue: "Critical: active data exfiltration".into(),

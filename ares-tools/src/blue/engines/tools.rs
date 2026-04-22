@@ -332,7 +332,7 @@ mod tests {
     use crate::blue::engines::pyramid::{assess_pyramid, generate_pyramid_questions, EvidenceItem};
 
     #[test]
-    fn test_attack_chains_load() {
+    fn attack_chains_load() {
         let chains = attack_chains();
         assert!(chains.contains_key("T1003.006"), "DCSync should be present");
         assert!(
@@ -343,7 +343,7 @@ mod tests {
     }
 
     #[test]
-    fn test_detection_recipes_load() {
+    fn detection_recipes_load() {
         let recipes = detection_recipes();
         assert!(
             recipes.contains_key("dcsync"),
@@ -361,7 +361,7 @@ mod tests {
     }
 
     #[test]
-    fn test_climb_strategies_load() {
+    fn climb_strategies_load() {
         let strategies = climb_strategies();
         assert!(
             strategies.contains_key("hash_values"),
@@ -375,7 +375,7 @@ mod tests {
     }
 
     #[test]
-    fn test_generate_mitre_questions() {
+    fn generates_mitre_questions() {
         let mut techniques = HashSet::new();
         techniques.insert("T1003.006".to_string());
 
@@ -395,7 +395,7 @@ mod tests {
     }
 
     #[test]
-    fn test_generate_pyramid_questions() {
+    fn generates_pyramid_questions() {
         let evidence = vec![
             EvidenceItem {
                 value: "192.168.58.10".to_string(),
@@ -419,7 +419,7 @@ mod tests {
     }
 
     #[test]
-    fn test_pyramid_questions_skip_ttps() {
+    fn pyramid_questions_skip_ttps() {
         let evidence = vec![EvidenceItem {
             value: "T1003".to_string(),
             pyramid_level: "ttps".to_string(),
@@ -433,7 +433,7 @@ mod tests {
     }
 
     #[test]
-    fn test_assess_pyramid() {
+    fn assesses_pyramid() {
         let evidence = vec![
             EvidenceItem {
                 value: "192.168.58.10".to_string(),
@@ -464,7 +464,7 @@ mod tests {
     }
 
     #[test]
-    fn test_assess_pyramid_empty() {
+    fn assess_pyramid_empty() {
         let assessment = assess_pyramid(&[]);
         assert_eq!(
             assessment
@@ -476,7 +476,7 @@ mod tests {
     }
 
     #[test]
-    fn test_get_attack_chain_precursors() {
+    fn gets_attack_chain_precursors() {
         let args = serde_json::json!({ "technique_id": "T1003.006" });
         let result = get_attack_chain_precursors(&args).unwrap();
         assert!(result.success);
@@ -485,7 +485,7 @@ mod tests {
     }
 
     #[test]
-    fn test_get_attack_chain_unknown() {
+    fn get_attack_chain_unknown() {
         let args = serde_json::json!({ "technique_id": "T9999" });
         let result = get_attack_chain_precursors(&args).unwrap();
         assert!(result.success);
@@ -493,7 +493,7 @@ mod tests {
     }
 
     #[test]
-    fn test_get_detection_recipe() {
+    fn gets_detection_recipe() {
         let args = serde_json::json!({ "recipe_name": "dcsync" });
         let result = get_detection_recipe(&args).unwrap();
         assert!(result.success);
@@ -501,7 +501,7 @@ mod tests {
     }
 
     #[test]
-    fn test_get_detection_recipe_unknown() {
+    fn get_detection_recipe_unknown() {
         let args = serde_json::json!({ "recipe_name": "nonexistent" });
         let result = get_detection_recipe(&args).unwrap();
         assert!(result.success);
@@ -510,7 +510,7 @@ mod tests {
     }
 
     #[test]
-    fn test_list_detection_recipes() {
+    fn lists_detection_recipes() {
         let args = serde_json::json!({});
         let result = list_detection_recipes(&args).unwrap();
         assert!(result.success);
@@ -518,7 +518,7 @@ mod tests {
     }
 
     #[test]
-    fn test_technique_to_recipe_mapping() {
+    fn technique_to_recipe_mapping() {
         let map = technique_to_recipe();
         assert_eq!(map.get("T1003.006"), Some(&"dcsync"));
         assert_eq!(map.get("T1110.003"), Some(&"password_spray"));

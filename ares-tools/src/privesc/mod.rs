@@ -26,7 +26,7 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn test_certipy_find_requires_username() {
+    fn certipy_find_requires_username() {
         let args = json!({});
         let rt = tokio::runtime::Runtime::new().unwrap();
         let result = rt.block_on(certipy_find(&args));
@@ -35,7 +35,7 @@ mod tests {
     }
 
     #[test]
-    fn test_generate_golden_ticket_requires_hash() {
+    fn generate_golden_ticket_requires_hash() {
         let args = json!({});
         let rt = tokio::runtime::Runtime::new().unwrap();
         let result = rt.block_on(generate_golden_ticket(&args));
@@ -44,7 +44,7 @@ mod tests {
     }
 
     #[test]
-    fn test_petitpotam_requires_listener() {
+    fn petitpotam_requires_listener() {
         let args = json!({});
         let rt = tokio::runtime::Runtime::new().unwrap();
         let result = rt.block_on(petitpotam_unauth(&args));

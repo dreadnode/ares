@@ -6,7 +6,7 @@ use super::types::CallbackResult;
 use crate::provider::{ChatMessage, LlmError, Role, ToolCall};
 
 #[test]
-fn test_handle_task_complete_callback() {
+fn handle_task_complete_callback() {
     let call = ToolCall {
         id: "call_1".into(),
         name: "task_complete".into(),
@@ -26,7 +26,7 @@ fn test_handle_task_complete_callback() {
 }
 
 #[test]
-fn test_handle_request_assistance_callback() {
+fn handle_request_assistance_callback() {
     let call = ToolCall {
         id: "call_2".into(),
         name: "request_assistance".into(),
@@ -46,7 +46,7 @@ fn test_handle_request_assistance_callback() {
 }
 
 #[test]
-fn test_handle_report_finding_callback() {
+fn handle_report_finding_callback() {
     let call = ToolCall {
         id: "call_3".into(),
         name: "report_finding".into(),
@@ -65,7 +65,7 @@ fn test_handle_report_finding_callback() {
 }
 
 #[test]
-fn test_unknown_callback() {
+fn unknown_callback() {
     let call = ToolCall {
         id: "call_x".into(),
         name: "unknown_callback".into(),
@@ -75,7 +75,7 @@ fn test_unknown_callback() {
 }
 
 #[test]
-fn test_agent_loop_config_defaults() {
+fn agent_loop_config_defaults() {
     let config = AgentLoopConfig::default();
     assert_eq!(config.max_steps, 75);
     assert_eq!(config.max_tokens, 4096);
@@ -85,7 +85,7 @@ fn test_agent_loop_config_defaults() {
 }
 
 #[test]
-fn test_retry_config_defaults() {
+fn retry_config_defaults() {
     let config = RetryConfig::default();
     assert_eq!(config.max_retries, 5);
     assert_eq!(config.base_delay_ms, 1_000);
@@ -93,7 +93,7 @@ fn test_retry_config_defaults() {
 }
 
 #[test]
-fn test_llm_error_retryable() {
+fn llm_error_retryable() {
     assert!(LlmError::RateLimited {
         retry_after_ms: Some(1000)
     }
@@ -119,7 +119,7 @@ fn test_llm_error_retryable() {
 }
 
 #[test]
-fn test_llm_error_retry_after() {
+fn llm_error_retry_after() {
     assert_eq!(
         LlmError::RateLimited {
             retry_after_ms: Some(5000)
@@ -138,7 +138,7 @@ fn test_llm_error_retry_after() {
 }
 
 #[test]
-fn test_simple_hash_deterministic() {
+fn simple_hash_deterministic() {
     let h1 = simple_hash(0, "task-001");
     let h2 = simple_hash(0, "task-001");
     assert_eq!(h1, h2);
@@ -153,26 +153,26 @@ fn test_simple_hash_deterministic() {
 // Context management tests
 
 #[test]
-fn test_estimate_tokens() {
+fn estimates_tokens() {
     assert_eq!(estimate_tokens(""), 0); // (0 + 3) / 4 = 0
     assert_eq!(estimate_tokens("hello"), 2); // (5 + 3) / 4 = 2
     assert_eq!(estimate_tokens(&"a".repeat(400)), 100); // (400 + 3) / 4 = 100
 }
 
 #[test]
-fn test_truncate_tool_output_short() {
+fn truncate_tool_output_short() {
     let output = "short output";
     assert_eq!(truncate_tool_output(output, 100), output);
 }
 
 #[test]
-fn test_truncate_tool_output_no_limit() {
+fn truncate_tool_output_no_limit() {
     let output = "a".repeat(100_000);
     assert_eq!(truncate_tool_output(&output, 0), output);
 }
 
 #[test]
-fn test_truncate_tool_output_long() {
+fn truncate_tool_output_long() {
     let output = "a".repeat(50_000);
     let truncated = truncate_tool_output(&output, 1000);
     assert!(truncated.len() < 1200); // Slightly over due to notice
@@ -182,7 +182,7 @@ fn test_truncate_tool_output_long() {
 }
 
 #[test]
-fn test_context_config_defaults() {
+fn context_config_defaults() {
     let config = ContextConfig::default();
     assert_eq!(config.max_context_tokens, 180_000);
     assert_eq!(config.max_tool_output_chars, 30_000);
@@ -190,7 +190,7 @@ fn test_context_config_defaults() {
 }
 
 #[test]
-fn test_trim_conversation_under_limit() {
+fn trim_conversation_under_limit() {
     let mut messages = vec![
         ChatMessage::text(Role::User, "task prompt"),
         ChatMessage::text(Role::Assistant, "I'll scan."),
@@ -207,7 +207,7 @@ fn test_trim_conversation_under_limit() {
 }
 
 #[test]
-fn test_trim_conversation_disabled() {
+fn trim_conversation_disabled() {
     let mut messages = vec![ChatMessage::text(
         Role::User,
         "a".repeat(1_000_000).as_str(),
@@ -222,7 +222,7 @@ fn test_trim_conversation_disabled() {
 }
 
 #[test]
-fn test_trim_conversation_drops_middle() {
+fn trim_conversation_drops_middle() {
     // Create a conversation that exceeds the limit
     let mut messages = Vec::new();
     messages.push(ChatMessage::text(Role::User, "task prompt"));

@@ -105,13 +105,13 @@ mod tests {
     use std::collections::HashMap;
 
     #[tokio::test]
-    async fn test_shared_state_new() {
+    async fn shared_state_new() {
         let state = SharedState::new("op-test".into());
         assert_eq!(state.operation_id().await, "op-test");
     }
 
     #[tokio::test]
-    async fn test_snapshot_empty_state() {
+    async fn snapshot_empty_state() {
         let state = SharedState::new("op-1".into());
         let snap = state.snapshot().await;
         assert!(snap.credentials.is_empty());
@@ -127,7 +127,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_snapshot_reflects_state_mutations() {
+    async fn snapshot_reflects_state_mutations() {
         let state = SharedState::new("op-1".into());
 
         // Mutate state directly
@@ -163,7 +163,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_snapshot_is_independent_copy() {
+    async fn snapshot_is_independent_copy() {
         let state = SharedState::new("op-1".into());
         {
             let mut inner = state.write().await;
@@ -188,7 +188,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_vuln_queue_key() {
+    async fn returns_vuln_queue_key() {
         let state = SharedState::new("op-abc".into());
         let key = state.vuln_queue_key().await;
         assert!(key.contains("op-abc"));
@@ -196,7 +196,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_discovery_key() {
+    async fn returns_discovery_key() {
         let state = SharedState::new("op-xyz".into());
         let key = state.discovery_key().await;
         assert!(key.contains("op-xyz"));
@@ -204,7 +204,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_snapshot_with_vulnerabilities() {
+    async fn snapshot_with_vulnerabilities() {
         let state = SharedState::new("op-1".into());
         {
             let mut inner = state.write().await;

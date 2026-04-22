@@ -200,7 +200,7 @@ mod tests {
     use crate::orchestrator::state::*;
 
     #[test]
-    fn test_state_inner_new_initializes_all_dedup_sets() {
+    fn state_inner_new_initializes_all_dedup_sets() {
         let state = StateInner::new("op-test".into());
         assert_eq!(state.operation_id, "op-test");
         assert!(!state.has_domain_admin);
@@ -216,13 +216,13 @@ mod tests {
     }
 
     #[test]
-    fn test_is_processed_returns_false_for_unknown_set() {
+    fn is_processed_returns_false_for_unknown_set() {
         let state = StateInner::new("op-1".into());
         assert!(!state.is_processed("nonexistent_set", "key1"));
     }
 
     #[test]
-    fn test_mark_processed_and_is_processed() {
+    fn mark_processed_and_is_processed() {
         let mut state = StateInner::new("op-1".into());
         assert!(!state.is_processed(DEDUP_CRACK_REQUESTS, "hash1"));
 
@@ -232,14 +232,14 @@ mod tests {
     }
 
     #[test]
-    fn test_mark_processed_creates_new_set_if_needed() {
+    fn mark_processed_creates_new_set_if_needed() {
         let mut state = StateInner::new("op-1".into());
         state.mark_processed("custom_set", "key1".into());
         assert!(state.is_processed("custom_set", "key1"));
     }
 
     #[test]
-    fn test_mark_processed_idempotent() {
+    fn mark_processed_idempotent() {
         let mut state = StateInner::new("op-1".into());
         state.mark_processed(DEDUP_SECRETSDUMP, "192.168.58.10".into());
         state.mark_processed(DEDUP_SECRETSDUMP, "192.168.58.10".into());
@@ -247,7 +247,7 @@ mod tests {
     }
 
     #[test]
-    fn test_dedup_sets_are_independent() {
+    fn dedup_sets_are_independent() {
         let mut state = StateInner::new("op-1".into());
         state.mark_processed(DEDUP_CRACK_REQUESTS, "hash1".into());
         state.mark_processed(DEDUP_SECRETSDUMP, "192.168.58.10".into());
@@ -259,7 +259,7 @@ mod tests {
     }
 
     #[test]
-    fn test_exploited_vulnerabilities_tracking() {
+    fn exploited_vulnerabilities_tracking() {
         let mut state = StateInner::new("op-1".into());
         assert!(state.exploited_vulnerabilities.is_empty());
 
@@ -271,7 +271,7 @@ mod tests {
     }
 
     #[test]
-    fn test_mssql_enum_dispatched_tracking() {
+    fn mssql_enum_dispatched_tracking() {
         let mut state = StateInner::new("op-1".into());
         assert!(!state.mssql_enum_dispatched.contains("192.168.58.20"));
 
@@ -282,7 +282,7 @@ mod tests {
     }
 
     #[test]
-    fn test_domain_controller_map() {
+    fn domain_controller_map() {
         let mut state = StateInner::new("op-1".into());
         state
             .domain_controllers
@@ -303,7 +303,7 @@ mod tests {
     }
 
     #[test]
-    fn test_all_known_dedup_set_constants() {
+    fn all_known_dedup_set_constants() {
         // Verify constants are accessible and match expected names
         let expected = vec![
             DEDUP_CRACK_REQUESTS,
@@ -342,7 +342,7 @@ mod tests {
     }
 
     #[test]
-    fn test_is_delegation_account() {
+    fn checks_delegation_account() {
         let mut state = StateInner::new("op-1".into());
         assert!(!state.is_delegation_account("john.smith"));
 
@@ -369,7 +369,7 @@ mod tests {
     }
 
     #[test]
-    fn test_credential_quarantine() {
+    fn credential_quarantine() {
         let mut state = StateInner::new("op-1".into());
 
         // Not quarantined initially
@@ -385,14 +385,14 @@ mod tests {
     }
 
     #[test]
-    fn test_all_forests_dominated_no_forests() {
+    fn all_forests_dominated_no_forests() {
         let state = StateInner::new("op-1".into());
         // No domains, no DCs, no trusts → vacuously true
         assert!(state.all_forests_dominated());
     }
 
     #[test]
-    fn test_all_forests_dominated_single_forest() {
+    fn all_forests_dominated_single_forest() {
         let mut state = StateInner::new("op-1".into());
         state
             .domain_controllers
@@ -406,7 +406,7 @@ mod tests {
     }
 
     #[test]
-    fn test_all_forests_dominated_multi_forest() {
+    fn all_forests_dominated_multi_forest() {
         let mut state = StateInner::new("op-1".into());
         state
             .domain_controllers
@@ -431,7 +431,7 @@ mod tests {
     }
 
     #[test]
-    fn test_credential_quarantine_expired() {
+    fn credential_quarantine_expired() {
         let mut state = StateInner::new("op-1".into());
 
         // Insert with an already-expired time

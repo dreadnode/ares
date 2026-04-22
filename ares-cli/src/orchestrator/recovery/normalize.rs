@@ -73,7 +73,7 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_domain_netbios_to_fqdn() {
+    fn resolve_domain_netbios_to_fqdn() {
         let map = make_map();
         assert_eq!(
             resolve_domain("CONTOSO", &map),
@@ -82,7 +82,7 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_domain_case_insensitive() {
+    fn resolve_domain_case_insensitive() {
         let map = make_map();
         assert_eq!(
             resolve_domain("contoso", &map),
@@ -91,25 +91,25 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_domain_already_fqdn() {
+    fn resolve_domain_already_fqdn() {
         let map = make_map();
         assert_eq!(resolve_domain("contoso.local", &map), None);
     }
 
     #[test]
-    fn test_resolve_domain_empty() {
+    fn resolve_domain_empty() {
         let map = make_map();
         assert_eq!(resolve_domain("", &map), None);
     }
 
     #[test]
-    fn test_resolve_domain_unknown_netbios() {
+    fn resolve_domain_unknown_netbios() {
         let map = make_map();
         assert_eq!(resolve_domain("UNKNOWN", &map), None);
     }
 
     #[test]
-    fn test_normalize_credential_domains() {
+    fn normalizes_credential_domains() {
         let map = make_map();
         let mut creds = vec![
             Credential {
@@ -142,7 +142,7 @@ mod tests {
     }
 
     #[test]
-    fn test_normalize_hash_domains() {
+    fn normalizes_hash_domains() {
         let map = make_map();
         let mut hashes = vec![Hash {
             id: String::new(),
@@ -163,7 +163,7 @@ mod tests {
     }
 
     #[test]
-    fn test_normalize_empty_slice() {
+    fn normalize_empty_slice() {
         let map = make_map();
         let mut creds: Vec<Credential> = vec![];
         assert_eq!(normalize_credential_domains(&mut creds, &map), 0);

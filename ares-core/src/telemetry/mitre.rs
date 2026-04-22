@@ -410,7 +410,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_role_tactic_mappings() {
+    fn role_tactic_mappings() {
         assert_eq!(ROLE_TO_TACTIC.get("recon"), Some(&"discovery"));
         assert_eq!(
             ROLE_TO_TACTIC.get("credential_access"),
@@ -420,7 +420,7 @@ mod tests {
     }
 
     #[test]
-    fn test_tool_to_technique() {
+    fn tool_to_technique() {
         assert_eq!(TOOL_TO_TECHNIQUE.get("nmap_scan"), Some(&"T1046"));
         assert_eq!(TOOL_TO_TECHNIQUE.get("secretsdump"), Some(&"T1003.006"));
         assert_eq!(TOOL_TO_TECHNIQUE.get("psexec"), Some(&"T1021.002"));
@@ -441,7 +441,7 @@ mod tests {
     }
 
     #[test]
-    fn test_tool_to_category() {
+    fn tool_to_category() {
         assert_eq!(
             TOOL_TO_CATEGORY.get("nmap_scan"),
             Some(&"NetworkEnumerationTools")
@@ -462,7 +462,7 @@ mod tests {
     }
 
     #[test]
-    fn test_tactic_from_technique() {
+    fn resolves_tactic_from_technique() {
         assert_eq!(tactic_from_technique("T1046"), Some("discovery"));
         assert_eq!(
             tactic_from_technique("T1003.006"),
@@ -475,7 +475,7 @@ mod tests {
     }
 
     #[test]
-    fn test_get_tool_mitre_info() {
+    fn gets_tool_mitre_info() {
         let (tech, tactic) = get_tool_mitre_info("kerberoast");
         assert_eq!(tech, Some("T1558.003"));
         assert_eq!(tactic, Some("credential-access"));
@@ -486,7 +486,7 @@ mod tests {
     }
 
     #[test]
-    fn test_get_tool_category() {
+    fn gets_tool_category() {
         assert_eq!(
             get_tool_category("secretsdump"),
             Some("CredentialHarvestingTools")

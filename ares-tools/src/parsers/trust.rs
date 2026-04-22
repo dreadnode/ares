@@ -136,7 +136,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_parse_cross_forest_trust() {
+    fn parse_cross_forest_trust() {
         let output = r#"dn: CN=fabrikam.local,CN=System,DC=contoso,DC=local
 cn: fabrikam.local
 trustDirection: 3
@@ -154,7 +154,7 @@ flatName: FABRIKAM
     }
 
     #[test]
-    fn test_parse_parent_child_trust() {
+    fn parse_parent_child_trust() {
         let output = r#"dn: CN=north.contoso.local,CN=System,DC=contoso,DC=local
 cn: north.contoso.local
 trustDirection: 3
@@ -170,7 +170,7 @@ flatName: CHILD
     }
 
     #[test]
-    fn test_parse_multiple_trusts() {
+    fn parse_multiple_trusts() {
         let output = r#"dn: CN=fabrikam.local,CN=System,DC=contoso,DC=local
 cn: fabrikam.local
 trustDirection: 3
@@ -192,7 +192,7 @@ flatName: CHILD
     }
 
     #[test]
-    fn test_parse_inbound_trust() {
+    fn parse_inbound_trust() {
         let output =
             "cn: partner.com\ntrustDirection: 1\ntrustType: 3\ntrustAttributes: 0\nflatName: PARTNER\n";
         let trusts = parse_domain_trusts(output);
@@ -202,20 +202,20 @@ flatName: CHILD
     }
 
     #[test]
-    fn test_parse_empty_output() {
+    fn parse_empty_output() {
         let trusts = parse_domain_trusts("");
         assert!(trusts.is_empty());
     }
 
     #[test]
-    fn test_parse_no_trusts_search_result() {
+    fn parse_no_trusts_search_result() {
         let output = "# search result\nsearch: 2\nresult: 0 Success\n";
         let trusts = parse_domain_trusts(output);
         assert!(trusts.is_empty());
     }
 
     #[test]
-    fn test_parse_outbound_trust() {
+    fn parse_outbound_trust() {
         let output = "cn: external.com\ntrustDirection: 2\ntrustType: 3\ntrustAttributes: 0\nflatName: EXTERNAL\n";
         let trusts = parse_domain_trusts(output);
         assert_eq!(trusts.len(), 1);
@@ -225,7 +225,7 @@ flatName: CHILD
     }
 
     #[test]
-    fn test_parse_trust_unknown_direction() {
+    fn parse_trust_unknown_direction() {
         let output = "cn: mystery.local\ntrustDirection: 99\ntrustType: 1\ntrustAttributes: 0\nflatName: MYSTERY\n";
         let trusts = parse_domain_trusts(output);
         assert_eq!(trusts.len(), 1);
@@ -233,7 +233,7 @@ flatName: CHILD
     }
 
     #[test]
-    fn test_parse_trust_tree_root_short_domain() {
+    fn parse_trust_tree_root_short_domain() {
         // trustType=2 with short domain (< 3 labels) → forest
         let output = "cn: fabrikam.com\ntrustDirection: 3\ntrustType: 2\ntrustAttributes: 0\nflatName: FABRIKAM\n";
         let trusts = parse_domain_trusts(output);
@@ -242,7 +242,7 @@ flatName: CHILD
     }
 
     #[test]
-    fn test_parse_trust_tree_root_long_domain() {
+    fn parse_trust_tree_root_long_domain() {
         // trustType=2 with 3+ labels → parent_child
         let output = "cn: child.contoso.local\ntrustDirection: 3\ntrustType: 2\ntrustAttributes: 0\nflatName: CHILD\n";
         let trusts = parse_domain_trusts(output);
@@ -251,7 +251,7 @@ flatName: CHILD
     }
 
     #[test]
-    fn test_parse_trust_domain_lowercased() {
+    fn parse_trust_domain_lowercased() {
         let output = "cn: FABRIKAM.LOCAL\ntrustDirection: 3\ntrustType: 2\ntrustAttributes: 8\nflatName: FABRIKAM\n";
         let trusts = parse_domain_trusts(output);
         assert_eq!(trusts[0]["domain"], "fabrikam.local");

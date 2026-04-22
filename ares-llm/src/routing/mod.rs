@@ -65,21 +65,21 @@ mod tests {
     // --- Domain normalization ---
 
     #[test]
-    fn test_normalize_domain_fqdn() {
+    fn normalize_domain_fqdn() {
         let map = sample_netbios_map();
         assert_eq!(normalize_domain("contoso.local", &map), "contoso.local");
         assert_eq!(normalize_domain("CONTOSO.LOCAL", &map), "contoso.local");
     }
 
     #[test]
-    fn test_normalize_domain_netbios() {
+    fn normalize_domain_netbios() {
         let map = sample_netbios_map();
         assert_eq!(normalize_domain("CONTOSO", &map), "contoso.local");
         assert_eq!(normalize_domain("contoso", &map), "contoso.local");
     }
 
     #[test]
-    fn test_normalize_domain_unknown() {
+    fn normalize_domain_unknown() {
         let map = sample_netbios_map();
         assert_eq!(normalize_domain("UNKNOWN", &map), "unknown");
     }
@@ -87,7 +87,7 @@ mod tests {
     // --- Hostname matching ---
 
     #[test]
-    fn test_hostname_matches_domain() {
+    fn hostname_matches_domain() {
         assert!(domain::hostname_matches_domain(
             "dc01.contoso.local",
             "contoso.local"
@@ -113,7 +113,7 @@ mod tests {
     // --- DC indicator checks ---
 
     #[test]
-    fn test_has_dc_role() {
+    fn has_dc_role() {
         let dc = make_host(
             "192.168.58.1",
             "dc01.contoso.local",
@@ -133,7 +133,7 @@ mod tests {
     }
 
     #[test]
-    fn test_has_dc_services() {
+    fn has_dc_services() {
         let with_kerberos = make_host("192.168.58.1", "dc01", vec![], vec!["88/tcp kerberos"]);
         assert!(dc_discovery::has_dc_services(&with_kerberos));
 
@@ -153,7 +153,7 @@ mod tests {
     // --- Credential lookup ---
 
     #[test]
-    fn test_find_domain_credential() {
+    fn finds_domain_credential() {
         let map = sample_netbios_map();
         let creds = vec![
             make_cred("user1", "contoso.local", ""),
@@ -167,7 +167,7 @@ mod tests {
     // --- Multi-tier DC discovery ---
 
     #[test]
-    fn test_find_dc_ip_tier0_cached() {
+    fn find_dc_ip_tier0_cached() {
         let mut dcs = HashMap::new();
         dcs.insert("contoso.local".to_string(), "192.168.58.10".to_string());
         let result = find_dc_ip("contoso.local", &[], &dcs, &HashMap::new(), None);
@@ -175,7 +175,7 @@ mod tests {
     }
 
     #[test]
-    fn test_find_dc_ip_tier1_role() {
+    fn find_dc_ip_tier1_role() {
         let hosts = vec![make_host(
             "192.168.58.10",
             "dc01.contoso.local",
@@ -196,7 +196,7 @@ mod tests {
     }
 
     #[test]
-    fn test_find_dc_ip_tier2_hostname_pattern() {
+    fn find_dc_ip_tier2_hostname_pattern() {
         let hosts = vec![make_host(
             "192.168.58.10",
             "dc01.contoso.local",
@@ -215,7 +215,7 @@ mod tests {
     }
 
     #[test]
-    fn test_find_dc_ip_tier3_services() {
+    fn find_dc_ip_tier3_services() {
         let hosts = vec![make_host(
             "192.168.58.10",
             "srv01.contoso.local",
@@ -234,7 +234,7 @@ mod tests {
     }
 
     #[test]
-    fn test_find_dc_ip_tier3_5_forest_child() {
+    fn find_dc_ip_tier3_5_forest_child() {
         let mut dcs = HashMap::new();
         dcs.insert("contoso.local".to_string(), "192.168.58.10".to_string());
         let hosts = vec![
@@ -255,7 +255,7 @@ mod tests {
     }
 
     #[test]
-    fn test_find_dc_ip_tier3_5_parent_fallback_not_cached() {
+    fn find_dc_ip_tier3_5_parent_fallback_not_cached() {
         let mut dcs = HashMap::new();
         dcs.insert("contoso.local".to_string(), "192.168.58.10".to_string());
         // No child DC exists
@@ -267,7 +267,7 @@ mod tests {
     }
 
     #[test]
-    fn test_find_dc_ip_tier5_fallback_role() {
+    fn find_dc_ip_tier5_fallback_role() {
         let hosts = vec![make_host(
             "192.168.58.1",
             "dc01.other.local",
@@ -288,7 +288,7 @@ mod tests {
     }
 
     #[test]
-    fn test_find_dc_ip_tier6_last_resort() {
+    fn find_dc_ip_tier6_last_resort() {
         let hosts = vec![make_host(
             "192.168.58.1",
             "unknown-host",
@@ -307,7 +307,7 @@ mod tests {
     }
 
     #[test]
-    fn test_find_dc_ip_none() {
+    fn find_dc_ip_none() {
         let result = find_dc_ip("contoso.local", &[], &HashMap::new(), &HashMap::new(), None);
         assert!(result.is_none());
     }
@@ -315,7 +315,7 @@ mod tests {
     // --- Payload enrichment ---
 
     #[test]
-    fn test_enrich_delegation_payload_credential() {
+    fn enrich_delegation_payload_credential() {
         let creds = vec![make_cred("svc_sql", "contoso.local", "SqlPass1")];
         let mut payload = serde_json::json!({
             "account_name": "svc_sql$",
@@ -327,14 +327,14 @@ mod tests {
     }
 
     #[test]
-    fn test_enrich_delegation_skips_non_delegation() {
+    fn enrich_delegation_skips_non_delegation() {
         let mut payload = serde_json::json!({"account_name": "svc_sql"});
         enrich_delegation_payload(&mut payload, "zerologon", &[], &[]);
         assert!(payload.get("password").is_none());
     }
 
     #[test]
-    fn test_enrich_delegation_resolves_target_ip() {
+    fn enrich_delegation_resolves_target_ip() {
         let hosts = vec![make_host(
             "192.168.58.20",
             "db01.contoso.local",
@@ -349,7 +349,7 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_dc_for_payload() {
+    fn resolves_dc_for_payload() {
         let mut dcs = HashMap::new();
         dcs.insert("contoso.local".to_string(), "192.168.58.10".to_string());
         let mut payload = serde_json::json!({"domain": "contoso.local"});
@@ -358,7 +358,7 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_dc_skips_if_already_set() {
+    fn resolve_dc_skips_if_already_set() {
         let mut payload = serde_json::json!({"domain": "contoso.local", "dc_ip": "192.168.58.1"});
         resolve_dc_for_payload(&mut payload, &[], &HashMap::new(), &HashMap::new(), None);
         assert_eq!(payload["dc_ip"].as_str(), Some("192.168.58.1")); // unchanged
@@ -367,7 +367,7 @@ mod tests {
     // --- Utility ---
 
     #[test]
-    fn test_is_pass_the_hash_compatible() {
+    fn pass_the_hash_compatibility() {
         assert!(is_pass_the_hash_compatible(
             "aad3b435b51404eeaad3b435b51404ee:31d6cfe0d16ae931b73c59d7e0c089c0"
         ));
@@ -380,7 +380,7 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_ticket_path() {
+    fn extracts_ticket_path() {
         let output = "Saving ticket in Administrator.ccache\nDone.";
         assert_eq!(
             extract_ticket_path(output),
@@ -389,7 +389,7 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_host_from_spn() {
+    fn extracts_host_from_spn() {
         assert_eq!(
             extract_host_from_spn("MSSQLSvc/db01.contoso.local"),
             Some("db01.contoso.local".to_string())

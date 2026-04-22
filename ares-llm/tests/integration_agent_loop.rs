@@ -173,7 +173,7 @@ fn tool_use_response(tool_calls: Vec<ToolCall>) -> LlmResponse {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn test_multi_turn_tool_use_then_task_complete() {
+async fn multi_turn_tool_use_then_task_complete() {
     // Turn 1: LLM requests nmap_scan
     let turn1 = tool_use_response(vec![ToolCall {
         id: "call_1".into(),
@@ -238,7 +238,7 @@ async fn test_multi_turn_tool_use_then_task_complete() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn test_max_steps_limit() {
+async fn max_steps_limit() {
     // LLM always returns a tool call, never calls task_complete
     let responses: Vec<LlmResponse> = (0..5)
         .map(|i| {
@@ -293,7 +293,7 @@ async fn test_max_steps_limit() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn test_end_turn_no_tool_calls() {
+async fn end_turn_no_tool_calls() {
     let response = LlmResponse {
         content: "I have analyzed the network and there is nothing more to do.".into(),
         tool_calls: vec![],
@@ -338,7 +338,7 @@ async fn test_end_turn_no_tool_calls() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn test_tool_dispatch_error_fed_back() {
+async fn tool_dispatch_error_fed_back() {
     // Turn 1: LLM requests nmap_scan
     let turn1 = tool_use_response(vec![ToolCall {
         id: "call_1".into(),
@@ -398,7 +398,7 @@ async fn test_tool_dispatch_error_fed_back() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn test_tool_dispatch_hard_error_fed_back() {
+async fn tool_dispatch_hard_error_fed_back() {
     // Turn 1: LLM requests nmap_scan
     let turn1 = tool_use_response(vec![ToolCall {
         id: "call_1".into(),
@@ -454,7 +454,7 @@ async fn test_tool_dispatch_hard_error_fed_back() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn test_request_assistance_callback() {
+async fn request_assistance_callback() {
     let response = tool_use_response(vec![ToolCall {
         id: "call_1".into(),
         name: "request_assistance".into(),
@@ -503,7 +503,7 @@ async fn test_request_assistance_callback() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn test_token_usage_accumulates() {
+async fn token_usage_accumulates() {
     let turn1 = LlmResponse {
         content: String::new(),
         tool_calls: vec![ToolCall {
@@ -572,7 +572,7 @@ async fn test_token_usage_accumulates() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn test_llm_error_returns_error_outcome() {
+async fn llm_error_returns_error_outcome() {
     // Provider with no responses queued -- will return an error
     let provider = MockProvider::new(vec![]);
     let dispatcher = Arc::new(MockDispatcher::new(vec![]));
@@ -646,7 +646,7 @@ impl LlmProvider for RetryMockProvider {
 }
 
 #[tokio::test]
-async fn test_rate_limit_retry_succeeds() {
+async fn rate_limit_retry_succeeds() {
     // First call returns 429, second call returns EndTurn
     let success = LlmResponse {
         content: "Recovered after rate limit.".into(),
@@ -709,7 +709,7 @@ impl LlmProvider for AuthErrorMockProvider {
 }
 
 #[tokio::test]
-async fn test_auth_error_fails_immediately() {
+async fn auth_error_fails_immediately() {
     let provider = AuthErrorMockProvider;
     let dispatcher = Arc::new(MockDispatcher::new(vec![]));
 

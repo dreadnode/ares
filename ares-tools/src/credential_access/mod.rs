@@ -22,7 +22,7 @@ mod tests {
 
     /// Verify that the base_dn builder produces correct LDAP distinguished names.
     #[test]
-    fn test_base_dn_from_domain() {
+    fn base_dn_from_domain() {
         let domain = "contoso.local";
         let dn: String = domain
             .split('.')
@@ -34,7 +34,7 @@ mod tests {
 
     /// Verify that the base_dn builder handles a deeper domain.
     #[test]
-    fn test_base_dn_from_child_domain() {
+    fn base_dn_from_child_domain() {
         let domain = "north.contoso.local";
         let dn: String = domain
             .split('.')
@@ -46,7 +46,7 @@ mod tests {
 
     /// Verify password_spray builds args for jitter correctly (presence only).
     #[test]
-    fn test_password_spray_args_shape() {
+    fn password_spray_args_shape() {
         // We can't fully execute without the binary, but we can verify
         // the required_str / optional helpers parse correctly.
         let args = json!({
@@ -62,7 +62,7 @@ mod tests {
 
     /// Verify username_as_password parses required fields.
     #[test]
-    fn test_username_as_password_args() {
+    fn username_as_password_args() {
         let args = json!({
             "target": "192.168.58.10",
             "users_file": "/tmp/users.txt",

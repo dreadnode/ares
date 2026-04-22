@@ -338,7 +338,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_convert_simple_message() {
+    fn convert_simple_message() {
         let msg = ChatMessage::text(Role::User, "hello");
         let api_msg = convert_message(&msg);
         assert_eq!(api_msg.role, "user");
@@ -349,7 +349,7 @@ mod tests {
     }
 
     #[test]
-    fn test_convert_tool_result_message() {
+    fn convert_tool_result_message() {
         let msg = ChatMessage::tool_result("call_1", "scan complete");
         let api_msg = convert_message(&msg);
         assert_eq!(api_msg.role, "user");
@@ -362,7 +362,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_stop_reasons() {
+    fn parse_stop_reasons() {
         assert_eq!(parse_stop_reason(Some("end_turn")), StopReason::EndTurn);
         assert_eq!(parse_stop_reason(Some("tool_use")), StopReason::ToolUse);
         assert_eq!(parse_stop_reason(Some("max_tokens")), StopReason::MaxTokens);
@@ -374,7 +374,7 @@ mod tests {
     }
 
     #[test]
-    fn test_convert_tools() {
+    fn converts_tools() {
         let tools = vec![super::super::ToolDefinition {
             name: "nmap_scan".into(),
             description: "Run nmap".into(),
@@ -390,7 +390,7 @@ mod tests {
     }
 
     #[test]
-    fn test_deserialize_response() {
+    fn deserialize_response() {
         let json = r#"{
             "content": [
                 {"type": "text", "text": "I'll scan the network."},
@@ -405,7 +405,7 @@ mod tests {
     }
 
     #[test]
-    fn test_serialize_api_request() {
+    fn serialize_api_request() {
         let req = ApiRequest {
             model: "claude-sonnet-4-20250514".to_string(),
             max_tokens: 4096,

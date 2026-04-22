@@ -203,7 +203,7 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn test_parse_hashcat_tgs_cracked() {
+    fn parse_hashcat_tgs_cracked() {
         let output = r#"hashcat (v6.2.6) starting...
 Session....: hashcat
 Status......: Cracked
@@ -221,7 +221,7 @@ $krb5tgs$23$*sarah.connor$CHILD.CONTOSO.LOCAL$child.contoso.local/sarah.connor*$
     }
 
     #[test]
-    fn test_parse_hashcat_asrep_cracked() {
+    fn parse_hashcat_asrep_cracked() {
         let output = r#"--- hashcat --show ---
 $krb5asrep$23$michelle@FABRIKAM.LOCAL:8a7a0b3264590ef6:fr3edom
 "#;
@@ -234,7 +234,7 @@ $krb5asrep$23$michelle@FABRIKAM.LOCAL:8a7a0b3264590ef6:fr3edom
     }
 
     #[test]
-    fn test_parse_hashcat_ntlm_cracked() {
+    fn parse_hashcat_ntlm_cracked() {
         let output = "--- hashcat --show ---\ne19ccf75ee54e06b06a5907af13cef42:Summer2024!\n";
         let params = json!({"domain": "contoso.local", "username": "Administrator"});
         let creds = parse_cracker_output(output, &params);
@@ -244,7 +244,7 @@ $krb5asrep$23$michelle@FABRIKAM.LOCAL:8a7a0b3264590ef6:fr3edom
     }
 
     #[test]
-    fn test_parse_john_show_cracked() {
+    fn parse_john_show_cracked() {
         let output = "Using default input encoding: UTF-8\n\
             Loaded 1 password hash\n\
             sarah.connor:MyPassword1:1234:::\n\
@@ -258,7 +258,7 @@ $krb5asrep$23$michelle@FABRIKAM.LOCAL:8a7a0b3264590ef6:fr3edom
     }
 
     #[test]
-    fn test_no_cracked_output() {
+    fn no_cracked_output() {
         let output = "hashcat (v6.2.6) starting...\nExhausted\n--- hashcat --show ---\n";
         let params = json!({"domain": "contoso.local"});
         let creds = parse_cracker_output(output, &params);
@@ -266,7 +266,7 @@ $krb5asrep$23$michelle@FABRIKAM.LOCAL:8a7a0b3264590ef6:fr3edom
     }
 
     #[test]
-    fn test_john_show_asrep_no_hex_section() {
+    fn john_show_asrep_no_hex_section() {
         // John --show for AS-REP omits the hex hash — just user@REALM:password
         let output = "--- john --show ---\n\
             $krb5asrep$23$brian.davis@CHILD.CONTOSO.LOCAL:letmein2025\n\n\
@@ -282,7 +282,7 @@ $krb5asrep$23$michelle@FABRIKAM.LOCAL:8a7a0b3264590ef6:fr3edom
     }
 
     #[test]
-    fn test_john_show_tgs_unknown_user() {
+    fn john_show_tgs_unknown_user() {
         // John --show for TGS shows ?:password (can't determine username)
         let output = "--- john --show ---\n\
             ?:iknownothing\n\n\
@@ -299,7 +299,7 @@ $krb5asrep$23$michelle@FABRIKAM.LOCAL:8a7a0b3264590ef6:fr3edom
     }
 
     #[test]
-    fn test_john_show_tgs_unknown_user_no_hash_param() {
+    fn john_show_tgs_unknown_user_no_hash_param() {
         // Without hash_value param, ?:password is skipped
         let output = "--- john --show ---\n\
             ?:iknownothing\n\n\

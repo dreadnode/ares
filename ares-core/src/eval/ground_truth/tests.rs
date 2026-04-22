@@ -4,7 +4,7 @@ use super::transform::create_ground_truth_from_red_state;
 use crate::models::PyramidLevel;
 
 #[test]
-fn test_expected_technique_exact_match() {
+fn expected_technique_exact_match() {
     let tech = ExpectedTechnique {
         technique_id: "T1003".to_string(),
         technique_name: "".to_string(),
@@ -16,7 +16,7 @@ fn test_expected_technique_exact_match() {
 }
 
 #[test]
-fn test_expected_technique_parent_child_match() {
+fn expected_technique_parent_child_match() {
     let parent = ExpectedTechnique {
         technique_id: "T1003".to_string(),
         technique_name: "".to_string(),
@@ -37,7 +37,7 @@ fn test_expected_technique_parent_child_match() {
 }
 
 #[test]
-fn test_is_technique_required() {
+fn technique_is_required() {
     assert!(is_technique_required("T1003"));
     assert!(is_technique_required("T1003.006"));
     assert!(is_technique_required("T1558.001"));
@@ -46,7 +46,7 @@ fn test_is_technique_required() {
 }
 
 #[test]
-fn test_get_techniques_for_vuln_type() {
+fn techniques_for_vuln_type() {
     assert_eq!(get_techniques_for_vuln_type("ADCS_ESC1"), vec!["T1649"]);
     assert_eq!(
         get_techniques_for_vuln_type("KERBEROASTING"),
@@ -56,7 +56,7 @@ fn test_get_techniques_for_vuln_type() {
 }
 
 #[test]
-fn test_ground_truth_filters() {
+fn ground_truth_filters() {
     let gt = EvaluationGroundTruth {
         operation_id: "op-1".to_string(),
         target_ip: "192.168.58.10".to_string(),
@@ -108,7 +108,7 @@ fn test_ground_truth_filters() {
 }
 
 #[test]
-fn test_create_ground_truth_from_red_state() {
+fn creates_ground_truth_from_red_state() {
     use crate::models::{Credential, Hash, Host, SharedRedTeamState, Target, User};
 
     let mut state = SharedRedTeamState::new("op-test".to_string());
@@ -202,7 +202,7 @@ fn test_create_ground_truth_from_red_state() {
 }
 
 #[test]
-fn test_create_ground_truth_deduplicates() {
+fn create_ground_truth_deduplicates() {
     use crate::models::{Credential, Host, SharedRedTeamState, User};
 
     let mut state = SharedRedTeamState::new("op-dedup".to_string());

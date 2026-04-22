@@ -242,7 +242,7 @@ mod tests {
     // --- normalize_params ---
 
     #[test]
-    fn test_normalize_params_target_ip_to_target() {
+    fn normalize_params_target_ip_to_target() {
         let params = json!({"target_ip": "192.168.58.10"});
         let norm = normalize_params(&params);
         assert_eq!(norm["target"], "192.168.58.10");
@@ -252,14 +252,14 @@ mod tests {
     }
 
     #[test]
-    fn test_normalize_params_existing_target_not_overwritten() {
+    fn normalize_params_existing_target_not_overwritten() {
         let params = json!({"target": "192.168.58.10", "target_ip": "192.168.58.20"});
         let norm = normalize_params(&params);
         assert_eq!(norm["target"], "192.168.58.10"); // not overwritten
     }
 
     #[test]
-    fn test_normalize_params_credential_flattening() {
+    fn normalize_params_credential_flattening() {
         let params = json!({
             "target_ip": "192.168.58.10",
             "credential": {
@@ -275,7 +275,7 @@ mod tests {
     }
 
     #[test]
-    fn test_normalize_params_existing_fields_not_overwritten_by_cred() {
+    fn normalize_params_existing_fields_not_overwritten_by_cred() {
         let params = json!({
             "domain": "fabrikam.local",
             "credential": {
@@ -291,7 +291,7 @@ mod tests {
     // --- map_technique_to_tool ---
 
     #[test]
-    fn test_map_technique_to_tool_mapped() {
+    fn map_technique_to_tool_mapped() {
         assert_eq!(map_technique_to_tool("network_scan"), "nmap_scan");
         assert_eq!(map_technique_to_tool("user_enumeration"), "enumerate_users");
         assert_eq!(
@@ -313,7 +313,7 @@ mod tests {
     }
 
     #[test]
-    fn test_map_technique_to_tool_passthrough() {
+    fn map_technique_to_tool_passthrough() {
         assert_eq!(map_technique_to_tool("nmap_scan"), "nmap_scan");
         assert_eq!(map_technique_to_tool("secretsdump"), "secretsdump");
         assert_eq!(map_technique_to_tool("kerberoast"), "kerberoast");
@@ -322,7 +322,7 @@ mod tests {
     // --- expand_task ---
 
     #[test]
-    fn test_expand_task_recon_with_techniques() {
+    fn expand_task_recon_with_techniques() {
         let params = json!({"techniques": ["network_scan", "user_enumeration"], "target_ip": "192.168.58.10"});
         let tools = expand_task("recon", &params);
         assert_eq!(tools.len(), 2);
@@ -333,7 +333,7 @@ mod tests {
     }
 
     #[test]
-    fn test_expand_task_credential_access_single_technique() {
+    fn expand_task_credential_access_single_technique() {
         let params = json!({"technique": "secretsdump", "target_ip": "192.168.58.10"});
         let tools = expand_task("credential_access", &params);
         assert_eq!(tools.len(), 1);
@@ -341,7 +341,7 @@ mod tests {
     }
 
     #[test]
-    fn test_expand_task_concrete_tool_returns_empty() {
+    fn expand_task_concrete_tool_returns_empty() {
         let params = json!({"target": "192.168.58.10"});
         let tools = expand_task("nmap_scan", &params);
         assert!(tools.is_empty());
@@ -350,7 +350,7 @@ mod tests {
     // --- expand_crack_task ---
 
     #[test]
-    fn test_expand_crack_task_default_hashcat() {
+    fn expand_crack_task_default_hashcat() {
         let params = json!({"hash_value": "abc123", "hash_type": "ntlm"});
         let tools = expand_crack_task(&params);
         assert_eq!(tools.len(), 1);
@@ -358,7 +358,7 @@ mod tests {
     }
 
     #[test]
-    fn test_expand_crack_task_john() {
+    fn expand_crack_task_john() {
         let params = json!({"hash_value": "abc123", "use_john": true});
         let tools = expand_crack_task(&params);
         assert_eq!(tools[0].0, "crack_with_john");
@@ -367,7 +367,7 @@ mod tests {
     // --- expand_exploit_task ---
 
     #[test]
-    fn test_expand_exploit_delegation() {
+    fn expand_exploit_delegation() {
         let params = json!({"vuln_type": "constrained_delegation", "target_ip": "192.168.58.10"});
         let tools = expand_exploit_task(&params);
         assert_eq!(tools.len(), 1);
@@ -375,7 +375,7 @@ mod tests {
     }
 
     #[test]
-    fn test_expand_exploit_adcs_variants() {
+    fn expand_exploit_adcs_variants() {
         for (vuln_type, expected_tool) in &[
             ("esc1", "certipy_request"),
             ("adcs_esc1", "certipy_request"),
@@ -392,7 +392,7 @@ mod tests {
     }
 
     #[test]
-    fn test_expand_exploit_other_types() {
+    fn expand_exploit_other_types() {
         for (vuln_type, expected) in &[
             ("krbtgt_hash", "generate_golden_ticket"),
             ("rbcd", "rbcd_write"),
@@ -407,7 +407,7 @@ mod tests {
     }
 
     #[test]
-    fn test_expand_exploit_unknown_type_empty() {
+    fn expand_exploit_unknown_type_empty() {
         let params = json!({"vuln_type": "unknown_vuln"});
         let tools = expand_exploit_task(&params);
         assert!(tools.is_empty());

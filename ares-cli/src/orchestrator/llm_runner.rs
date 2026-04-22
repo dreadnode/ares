@@ -317,7 +317,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_role_for_task_type_recon_variants() {
+    fn role_for_task_type_recon_variants() {
         for tt in &[
             "recon",
             "nmap",
@@ -334,7 +334,7 @@ mod tests {
     }
 
     #[test]
-    fn test_role_for_task_type_credential_access_variants() {
+    fn role_for_task_type_credential_access_variants() {
         for tt in &[
             "credential_access",
             "secretsdump",
@@ -352,7 +352,7 @@ mod tests {
     }
 
     #[test]
-    fn test_role_for_task_type_other_roles() {
+    fn role_for_task_type_other_roles() {
         assert_eq!(role_for_task_type("crack"), Some(AgentRole::Cracker));
         assert_eq!(role_for_task_type("lateral"), Some(AgentRole::Lateral));
         assert_eq!(
@@ -369,14 +369,14 @@ mod tests {
     }
 
     #[test]
-    fn test_role_for_task_type_unmapped() {
+    fn role_for_task_type_unmapped() {
         assert_eq!(role_for_task_type("command"), None);
         assert_eq!(role_for_task_type("unknown"), None);
         assert_eq!(role_for_task_type(""), None);
     }
 
     #[test]
-    fn test_build_system_prompt_all_roles() {
+    fn build_system_prompt_all_roles() {
         let snapshot = StateSnapshot::default();
         for role in &[
             AgentRole::Recon,
@@ -396,7 +396,7 @@ mod tests {
     }
 
     #[test]
-    fn test_build_task_prompt_known_types() {
+    fn build_task_prompt_known_types() {
         let snapshot = StateSnapshot::default();
         let payload = serde_json::json!({
             "target_ip": "192.168.58.10",
@@ -410,7 +410,7 @@ mod tests {
     }
 
     #[test]
-    fn test_build_task_prompt_unknown_type_falls_back() {
+    fn build_task_prompt_unknown_type_falls_back() {
         let snapshot = StateSnapshot::default();
         let payload = serde_json::json!({"foo": "bar"});
 

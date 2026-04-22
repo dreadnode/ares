@@ -107,7 +107,7 @@ mod tests {
     }
 
     #[test]
-    fn test_find_domain_credential_with_password() {
+    fn find_domain_credential_with_password() {
         let map = HashMap::new();
         let trusts = HashMap::new();
         let creds = vec![
@@ -120,7 +120,7 @@ mod tests {
     }
 
     #[test]
-    fn test_find_domain_credential_prefers_password() {
+    fn find_domain_credential_prefers_password() {
         let map = HashMap::new();
         let trusts = HashMap::new();
         let creds = vec![
@@ -132,7 +132,7 @@ mod tests {
     }
 
     #[test]
-    fn test_find_domain_credential_falls_back_to_no_password() {
+    fn find_domain_credential_falls_back_to_no_password() {
         let map = HashMap::new();
         let trusts = HashMap::new();
         let creds = vec![make_cred("hash_user", "contoso.local", "")];
@@ -141,7 +141,7 @@ mod tests {
     }
 
     #[test]
-    fn test_find_domain_credential_none_for_wrong_domain() {
+    fn find_domain_credential_none_for_wrong_domain() {
         let map = HashMap::new();
         let trusts = HashMap::new();
         let creds = vec![make_cred("admin", "fabrikam.local", "P@ss1")];
@@ -150,7 +150,7 @@ mod tests {
     }
 
     #[test]
-    fn test_find_domain_credential_netbios_resolution() {
+    fn find_domain_credential_netbios_resolution() {
         let mut map = HashMap::new();
         map.insert("contoso".to_string(), "contoso.local".to_string());
         let trusts = HashMap::new();
@@ -160,7 +160,7 @@ mod tests {
     }
 
     #[test]
-    fn test_find_domain_credential_empty() {
+    fn find_domain_credential_empty() {
         let map = HashMap::new();
         let trusts = HashMap::new();
         let creds: Vec<Credential> = vec![];
@@ -170,7 +170,7 @@ mod tests {
     // --- Trust-scope validation tests ---
 
     #[test]
-    fn test_same_domain_valid() {
+    fn same_domain_valid() {
         let trusts = HashMap::new();
         assert!(is_valid_credential_for_domain(
             "contoso.local",
@@ -180,7 +180,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parent_to_child_valid() {
+    fn parent_to_child_valid() {
         let trusts = HashMap::new();
         assert!(is_valid_credential_for_domain(
             "contoso.local",
@@ -190,7 +190,7 @@ mod tests {
     }
 
     #[test]
-    fn test_child_to_parent_blocked() {
+    fn child_to_parent_blocked() {
         let trusts = HashMap::new();
         assert!(!is_valid_credential_for_domain(
             "north.contoso.local",
@@ -200,7 +200,7 @@ mod tests {
     }
 
     #[test]
-    fn test_cross_forest_blocked() {
+    fn cross_forest_blocked() {
         let mut trusts = HashMap::new();
         trusts.insert(
             "fabrikam.local".to_string(),
@@ -220,7 +220,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parent_cred_for_child_domain() {
+    fn parent_cred_for_child_domain() {
         let trusts = HashMap::new();
         let creds = vec![make_cred("admin", "contoso.local", "P@ss1")];
         let map = HashMap::new();
@@ -230,7 +230,7 @@ mod tests {
     }
 
     #[test]
-    fn test_child_cred_blocked_for_parent_domain() {
+    fn child_cred_blocked_for_parent_domain() {
         let trusts = HashMap::new();
         let creds = vec![make_cred("admin", "north.contoso.local", "P@ss1")];
         let map = HashMap::new();

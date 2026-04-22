@@ -55,7 +55,7 @@ fn make_result_with_gaps() -> EvaluationResult {
 }
 
 #[test]
-fn test_analyze_detection_gaps_basic() {
+fn analyze_detection_gaps_basic() {
     let result = make_result_with_gaps();
     let report = analyze_detection_gaps(&result);
 
@@ -73,7 +73,7 @@ fn test_analyze_detection_gaps_basic() {
 }
 
 #[test]
-fn test_analyze_no_gaps() {
+fn analyze_no_gaps() {
     let result = EvaluationResult {
         evaluation_id: "eval-2".to_string(),
         operation_id: "op-2".to_string(),
@@ -92,7 +92,7 @@ fn test_analyze_no_gaps() {
 }
 
 #[test]
-fn test_ioc_gap_descriptions() {
+fn ioc_gap_descriptions() {
     let ioc = ExpectedIOC {
         ioc_type: "ip".to_string(),
         value: "192.168.58.10".to_string(),
@@ -108,7 +108,7 @@ fn test_ioc_gap_descriptions() {
 }
 
 #[test]
-fn test_technique_gap_descriptions() {
+fn technique_gap_descriptions() {
     let tech = ExpectedTechnique {
         technique_id: "T1003".to_string(),
         technique_name: "Credential Dumping".to_string(),
@@ -122,7 +122,7 @@ fn test_technique_gap_descriptions() {
 }
 
 #[test]
-fn test_recommend_for_known_technique() {
+fn recommend_for_known_technique() {
     let tech = ExpectedTechnique {
         technique_id: "T1003".to_string(),
         technique_name: "Credential Dumping".to_string(),
@@ -136,7 +136,7 @@ fn test_recommend_for_known_technique() {
 }
 
 #[test]
-fn test_recommend_for_subtechnique_falls_back_to_parent() {
+fn recommend_for_subtechnique_falls_back_to_parent() {
     // T1003.001 is not in the map, but T1003 is
     let tech = ExpectedTechnique {
         technique_id: "T1003.001".to_string(),
@@ -150,7 +150,7 @@ fn test_recommend_for_subtechnique_falls_back_to_parent() {
 }
 
 #[test]
-fn test_recommend_for_unknown_technique() {
+fn recommend_for_unknown_technique() {
     let tech = ExpectedTechnique {
         technique_id: "T9999".to_string(),
         technique_name: "Novel Attack".to_string(),
@@ -164,7 +164,7 @@ fn test_recommend_for_unknown_technique() {
 }
 
 #[test]
-fn test_recommend_for_ioc_types() {
+fn recommend_for_ioc_types() {
     let ip_ioc = ExpectedIOC {
         ioc_type: "ip".to_string(),
         value: "192.168.58.10".to_string(),
@@ -207,7 +207,7 @@ fn test_recommend_for_ioc_types() {
 }
 
 #[test]
-fn test_to_markdown() {
+fn to_markdown() {
     let result = make_result_with_gaps();
     let report = analyze_detection_gaps(&result);
     let md = report.to_markdown();
@@ -221,7 +221,7 @@ fn test_to_markdown() {
 }
 
 #[test]
-fn test_recommendations_sorted_by_priority() {
+fn recommendations_sorted_by_priority() {
     let result = make_result_with_gaps();
     let report = analyze_detection_gaps(&result);
 
@@ -247,7 +247,7 @@ fn test_recommendations_sorted_by_priority() {
 }
 
 #[test]
-fn test_summary_generation() {
+fn summary_generation() {
     let result = make_result_with_gaps();
     let gaps = vec!["gap 1".to_string(), "gap 2".to_string()];
     let summary = generate_summary(&result, &gaps);

@@ -131,7 +131,7 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn test_parse_delegation_constrained() {
+    fn parse_delegation_constrained() {
         let output = "\
 AccountName                    AccountType  DelegationType       DelegationRightsTo
 svc_sql$                       Computer     Constrained          CIFS/dc01.contoso.local";
@@ -150,7 +150,7 @@ svc_sql$                       Computer     Constrained          CIFS/dc01.conto
     }
 
     #[test]
-    fn test_parse_delegation_unconstrained() {
+    fn parse_delegation_unconstrained() {
         let output = "DC01$  Computer  Unconstrained  N/A";
         let params = json!({"domain": "contoso.local", "target": "192.168.58.10"});
         let vulns = parse_delegation(output, &params);
@@ -160,7 +160,7 @@ svc_sql$                       Computer     Constrained          CIFS/dc01.conto
     }
 
     #[test]
-    fn test_parse_delegation_mixed() {
+    fn parse_delegation_mixed() {
         let output = "\
 AccountName  AccountType  DelegationType  DelegationRightsTo
 svc_sql$     Computer     Constrained     CIFS/dc01.contoso.local
@@ -173,13 +173,13 @@ DC01$        Computer     Unconstrained   N/A";
     }
 
     #[test]
-    fn test_parse_delegation_no_results() {
+    fn parse_delegation_no_results() {
         let vulns = parse_delegation("[*] No delegation found", &json!({}));
         assert!(vulns.is_empty());
     }
 
     #[test]
-    fn test_extract_delegation_account_with_domain_prefix() {
+    fn extract_delegation_account_with_domain_prefix() {
         assert_eq!(
             extract_delegation_account("CONTOSO/svc_sql$  Computer  Constrained"),
             "svc_sql$"
@@ -187,7 +187,7 @@ DC01$        Computer     Unconstrained   N/A";
     }
 
     #[test]
-    fn test_extract_delegation_account_without_prefix() {
+    fn extract_delegation_account_without_prefix() {
         assert_eq!(
             extract_delegation_account("svc_sql$  Computer  Constrained"),
             "svc_sql$"
@@ -195,14 +195,14 @@ DC01$        Computer     Unconstrained   N/A";
     }
 
     #[test]
-    fn test_extract_delegation_account_empty() {
+    fn extract_delegation_account_empty() {
         assert_eq!(extract_delegation_account(""), "");
     }
 
     /// Test with "SPN Exists" column and multi-word DelegationType
     /// like "Constrained w/ Protocol Transition".
     #[test]
-    fn test_parse_delegation_extended_format() {
+    fn parse_delegation_extended_format() {
         let output = "\
 Impacket v0.13.0.dev0+20251022.125034.d843881f - Copyright Fortra, LLC and its affiliated companies
 

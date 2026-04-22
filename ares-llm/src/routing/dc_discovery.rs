@@ -286,20 +286,20 @@ mod tests {
     // --- has_dc_role ---
 
     #[test]
-    fn test_has_dc_role_explicit_flag() {
+    fn has_dc_role_explicit_flag() {
         let host = make_host("192.168.58.10", "dc01", true, vec![]);
         assert!(has_dc_role(&host));
     }
 
     #[test]
-    fn test_has_dc_role_from_role_string() {
+    fn has_dc_role_from_role_string() {
         let mut host = make_host("192.168.58.10", "srv01", false, vec![]);
         host.roles = vec!["AD DC".to_string()];
         assert!(has_dc_role(&host));
     }
 
     #[test]
-    fn test_has_dc_role_none() {
+    fn has_dc_role_none() {
         let host = make_host("192.168.58.20", "srv01", false, vec![]);
         assert!(!has_dc_role(&host));
     }
@@ -307,19 +307,19 @@ mod tests {
     // --- has_dc_services ---
 
     #[test]
-    fn test_has_dc_services_kerberos_port() {
+    fn has_dc_services_kerberos_port() {
         let host = make_host("192.168.58.10", "srv01", false, vec!["88/tcp (kerberos)"]);
         assert!(has_dc_services(&host));
     }
 
     #[test]
-    fn test_has_dc_services_ldap_port() {
+    fn has_dc_services_ldap_port() {
         let host = make_host("192.168.58.10", "srv01", false, vec!["389/tcp (ldap)"]);
         assert!(has_dc_services(&host));
     }
 
     #[test]
-    fn test_has_dc_services_no_dc_services() {
+    fn has_dc_services_no_dc_services() {
         let host = make_host(
             "192.168.58.20",
             "srv01",
@@ -330,7 +330,7 @@ mod tests {
     }
 
     #[test]
-    fn test_has_dc_services_3389_not_389() {
+    fn has_dc_services_3389_not_389() {
         // 3389 (RDP) should NOT match 389 prefix
         let host = make_host(
             "192.168.58.20",
@@ -344,7 +344,7 @@ mod tests {
     // --- find_dc_ip ---
 
     #[test]
-    fn test_find_dc_ip_tier0_cached() {
+    fn find_dc_ip_tier0_cached() {
         let mut dc_map = HashMap::new();
         dc_map.insert("contoso.local".to_string(), "192.168.58.10".to_string());
         let result = find_dc_ip("contoso.local", &[], &dc_map, &HashMap::new(), None);
@@ -356,7 +356,7 @@ mod tests {
     }
 
     #[test]
-    fn test_find_dc_ip_tier1_role() {
+    fn find_dc_ip_tier1_role() {
         let hosts = vec![make_host(
             "192.168.58.10",
             "dc01.contoso.local",
@@ -377,7 +377,7 @@ mod tests {
     }
 
     #[test]
-    fn test_find_dc_ip_tier2_hostname_pattern() {
+    fn find_dc_ip_tier2_hostname_pattern() {
         let mut host = make_host("192.168.58.10", "dc01.contoso.local", false, vec![]);
         host.roles.clear();
         let result = find_dc_ip(
@@ -392,7 +392,7 @@ mod tests {
     }
 
     #[test]
-    fn test_find_dc_ip_tier3_services() {
+    fn find_dc_ip_tier3_services() {
         let host = make_host(
             "192.168.58.10",
             "srv01.contoso.local",
@@ -411,7 +411,7 @@ mod tests {
     }
 
     #[test]
-    fn test_find_dc_ip_tier5_fallback_role() {
+    fn find_dc_ip_tier5_fallback_role() {
         // DC exists but for a different domain
         let hosts = vec![make_host(
             "192.168.58.10",
@@ -432,19 +432,19 @@ mod tests {
     }
 
     #[test]
-    fn test_find_dc_ip_none() {
+    fn find_dc_ip_none() {
         let result = find_dc_ip("contoso.local", &[], &HashMap::new(), &HashMap::new(), None);
         assert!(result.is_none());
     }
 
     #[test]
-    fn test_find_dc_ip_empty_domain() {
+    fn find_dc_ip_empty_domain() {
         let result = find_dc_ip("", &[], &HashMap::new(), &HashMap::new(), None);
         assert!(result.is_none());
     }
 
     #[test]
-    fn test_find_dc_ip_forest_parent_fallback() {
+    fn find_dc_ip_forest_parent_fallback() {
         let mut dc_map = HashMap::new();
         dc_map.insert("contoso.local".to_string(), "192.168.58.10".to_string());
         // Child domain with no specific DC, but parent DC exists
@@ -458,7 +458,7 @@ mod tests {
     // --- find_dc_ip_cached ---
 
     #[test]
-    fn test_find_dc_ip_cached_hit() {
+    fn find_dc_ip_cached_hit() {
         let mut dc_map = HashMap::new();
         dc_map.insert("contoso.local".to_string(), "192.168.58.10".to_string());
         assert_eq!(
@@ -468,7 +468,7 @@ mod tests {
     }
 
     #[test]
-    fn test_find_dc_ip_cached_miss() {
+    fn find_dc_ip_cached_miss() {
         assert_eq!(
             find_dc_ip_cached("contoso.local", &HashMap::new(), &HashMap::new()),
             None
@@ -478,7 +478,7 @@ mod tests {
     // --- DcTier Display ---
 
     #[test]
-    fn test_dc_tier_display() {
+    fn dc_tier_display() {
         assert_eq!(DcTier::Cached.to_string(), "cached");
         assert_eq!(DcTier::Role.to_string(), "role");
         assert_eq!(DcTier::Forest.to_string(), "forest");

@@ -108,7 +108,7 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn test_task_result_success() {
+    fn task_result_success() {
         let result = TaskResult::success("task-1", json!({"output": "done"}), "pod-1", "recon");
         assert!(result.success);
         assert!(result.error.is_none());
@@ -120,7 +120,7 @@ mod tests {
     }
 
     #[test]
-    fn test_task_result_failure() {
+    fn task_result_failure() {
         let result = TaskResult::failure(
             "task-2",
             "timeout".to_string(),
@@ -134,14 +134,14 @@ mod tests {
     }
 
     #[test]
-    fn test_task_result_failure_no_result() {
+    fn task_result_failure_no_result() {
         let result = TaskResult::failure("task-3", "crash".to_string(), None, "pod-1", "recon");
         assert!(!result.success);
         assert!(result.result.is_none());
     }
 
     #[test]
-    fn test_task_message_deserialize() {
+    fn task_message_deserialize() {
         let json = json!({
             "task_id": "t-1",
             "task_type": "recon",
@@ -159,7 +159,7 @@ mod tests {
     }
 
     #[test]
-    fn test_task_message_default_priority() {
+    fn task_message_default_priority() {
         let json = json!({
             "task_id": "t-1",
             "task_type": "recon",
@@ -172,7 +172,7 @@ mod tests {
     }
 
     #[test]
-    fn test_task_result_serialization_skips_none() {
+    fn task_result_serialization_skips_none() {
         let result = TaskResult::success("t-1", json!({"ok": true}), "pod-1", "recon");
         let serialized = serde_json::to_value(&result).unwrap();
         assert!(serialized.get("error").is_none());

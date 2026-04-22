@@ -5,7 +5,7 @@ use super::names::{get_technique_name, pyramid_level_name};
 use ares_core::models::SharedRedTeamState;
 
 #[test]
-fn test_get_technique_name_known() {
+fn get_technique_name_known() {
     assert_eq!(get_technique_name("T1046"), "Network Service Discovery");
     assert_eq!(get_technique_name("T1003"), "OS Credential Dumping");
     assert_eq!(get_technique_name("T1003.006"), "DCSync");
@@ -17,13 +17,13 @@ fn test_get_technique_name_known() {
 }
 
 #[test]
-fn test_get_technique_name_unknown() {
+fn get_technique_name_unknown() {
     assert_eq!(get_technique_name("T9999"), "");
     assert_eq!(get_technique_name(""), "");
 }
 
 #[test]
-fn test_pyramid_level_name_all_levels() {
+fn pyramid_level_name_all_levels() {
     assert_eq!(pyramid_level_name(1), "Hash Values (L1)");
     assert_eq!(pyramid_level_name(2), "IP Addresses (L2)");
     assert_eq!(pyramid_level_name(3), "Domain Names (L3)");
@@ -33,14 +33,14 @@ fn test_pyramid_level_name_all_levels() {
 }
 
 #[test]
-fn test_pyramid_level_name_unknown() {
+fn pyramid_level_name_unknown() {
     assert_eq!(pyramid_level_name(0), "Unknown");
     assert_eq!(pyramid_level_name(7), "Unknown");
     assert_eq!(pyramid_level_name(255), "Unknown");
 }
 
 #[test]
-fn test_build_technique_detections_known_techniques() {
+fn build_technique_detections_known_techniques() {
     let state = SharedRedTeamState::new("test-op".to_string());
     let start = Utc::now() - chrono::Duration::hours(1);
     let end = Utc::now();
@@ -57,7 +57,7 @@ fn test_build_technique_detections_known_techniques() {
 }
 
 #[test]
-fn test_build_technique_detections_sub_technique() {
+fn build_technique_detections_sub_technique() {
     let state = SharedRedTeamState::new("test-op".to_string());
     let start = Utc::now() - chrono::Duration::hours(1);
     let end = Utc::now();
@@ -68,7 +68,7 @@ fn test_build_technique_detections_sub_technique() {
 }
 
 #[test]
-fn test_build_technique_detections_empty() {
+fn build_technique_detections_empty() {
     let state = SharedRedTeamState::new("test-op".to_string());
     let start = Utc::now();
     let end = Utc::now();
@@ -77,7 +77,7 @@ fn test_build_technique_detections_empty() {
 }
 
 #[test]
-fn test_technique_detection_has_event_ids() {
+fn technique_detection_has_event_ids() {
     let state = SharedRedTeamState::new("test-op".to_string());
     let start = Utc::now() - chrono::Duration::hours(1);
     let end = Utc::now();

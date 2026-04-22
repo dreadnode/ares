@@ -60,7 +60,7 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn test_timeline_event_from_json_full() {
+    fn timeline_event_from_json_full() {
         let event = json!({
             "timestamp": "2026-04-08T12:00:00Z",
             "description": "Credential dumped via secretsdump",
@@ -77,7 +77,7 @@ mod tests {
     }
 
     #[test]
-    fn test_timeline_event_from_json_defaults() {
+    fn timeline_event_from_json_defaults() {
         let event = json!({});
         let ctx = timeline_event_from_json(&event);
         assert_eq!(ctx.timestamp, "-");
@@ -87,7 +87,7 @@ mod tests {
     }
 
     #[test]
-    fn test_timeline_event_long_description_truncated() {
+    fn timeline_event_long_description_truncated() {
         let long_desc = "A".repeat(100);
         let event = json!({"description": long_desc});
         let ctx = timeline_event_from_json(&event);
@@ -97,25 +97,25 @@ mod tests {
     }
 
     #[test]
-    fn test_format_duration_chrono_zero() {
+    fn format_duration_chrono_zero() {
         let d = chrono::Duration::seconds(0);
         assert_eq!(format_duration_chrono(d), "0:00:00");
     }
 
     #[test]
-    fn test_format_duration_chrono_minutes() {
+    fn format_duration_chrono_minutes() {
         let d = chrono::Duration::seconds(150);
         assert_eq!(format_duration_chrono(d), "0:02:30");
     }
 
     #[test]
-    fn test_format_duration_chrono_hours() {
+    fn format_duration_chrono_hours() {
         let d = chrono::Duration::seconds(3661);
         assert_eq!(format_duration_chrono(d), "1:01:01");
     }
 
     #[test]
-    fn test_format_duration_chrono_negative_clamped() {
+    fn format_duration_chrono_negative_clamped() {
         let d = chrono::Duration::seconds(-10);
         assert_eq!(format_duration_chrono(d), "0:00:00");
     }

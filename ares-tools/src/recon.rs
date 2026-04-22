@@ -590,12 +590,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_domain_to_base_dn_simple() {
+    fn domain_to_base_dn_simple() {
         assert_eq!(domain_to_base_dn("contoso.local"), "DC=contoso,DC=local");
     }
 
     #[test]
-    fn test_domain_to_base_dn_nested() {
+    fn domain_to_base_dn_nested() {
         assert_eq!(
             domain_to_base_dn("north.contoso.local"),
             "DC=north,DC=contoso,DC=local"
@@ -603,7 +603,7 @@ mod tests {
     }
 
     #[test]
-    fn test_domain_to_base_dn_single() {
+    fn domain_to_base_dn_single() {
         assert_eq!(domain_to_base_dn("local"), "DC=local");
     }
 }

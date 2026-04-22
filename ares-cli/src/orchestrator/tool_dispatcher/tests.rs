@@ -1,7 +1,7 @@
 use super::*;
 
 #[test]
-fn test_tool_exec_request_serialization() {
+fn tool_exec_request_serialization() {
     let req = ToolExecRequest {
         call_id: "nmap_scan_abc123".into(),
         task_id: "recon_def456".into(),
@@ -18,7 +18,7 @@ fn test_tool_exec_request_serialization() {
 }
 
 #[test]
-fn test_tool_exec_response_deserialization() {
+fn tool_exec_response_deserialization() {
     let json = r#"{"call_id":"nmap_scan_abc","output":"Found 5 hosts","error":null}"#;
     let resp: ToolExecResponse = serde_json::from_str(json).unwrap();
     assert_eq!(resp.output, "Found 5 hosts");
@@ -26,14 +26,14 @@ fn test_tool_exec_response_deserialization() {
 }
 
 #[test]
-fn test_tool_exec_response_with_error() {
+fn tool_exec_response_with_error() {
     let json = r#"{"call_id":"x","output":"","error":"Connection refused"}"#;
     let resp: ToolExecResponse = serde_json::from_str(json).unwrap();
     assert_eq!(resp.error.as_deref(), Some("Connection refused"));
 }
 
 #[test]
-fn test_cross_role_routing_netexec_tools() {
+fn cross_role_routing_netexec_tools() {
     // Netexec tools called from credential_access should route to recon
     assert_eq!(
         resolve_queue_role("credential_access", "password_spray"),
@@ -70,7 +70,7 @@ fn test_cross_role_routing_netexec_tools() {
 }
 
 #[test]
-fn test_cross_role_routing_native_tools_stay() {
+fn cross_role_routing_native_tools_stay() {
     // Tools native to credential_access should stay on credential_access
     assert_eq!(
         resolve_queue_role("credential_access", "secretsdump"),
@@ -87,7 +87,7 @@ fn test_cross_role_routing_native_tools_stay() {
 }
 
 #[test]
-fn test_cross_role_routing_recon_stays_recon() {
+fn cross_role_routing_recon_stays_recon() {
     // When recon itself calls these tools, they stay on recon
     assert_eq!(resolve_queue_role("recon", "password_spray"), "recon");
     assert_eq!(resolve_queue_role("recon", "nmap_scan"), "recon");

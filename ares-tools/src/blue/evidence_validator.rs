@@ -401,7 +401,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_extract_ips() {
+    fn extract_ips() {
         let text = "Source IP: 192.168.58.10, Destination: 192.168.58.10";
         let iocs = extract_iocs_from_text(text);
         assert!(iocs.contains("192.168.58.10"));
@@ -409,7 +409,7 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_hostnames() {
+    fn extract_hostnames() {
         let text = r#"Computer: dc01.contoso.local, accessing share on web01.contoso.local"#;
         let iocs = extract_iocs_from_text(text);
         assert!(iocs.contains("dc01.contoso.local"));
@@ -417,34 +417,34 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_users() {
+    fn extract_users() {
         let text = r#""TargetUserName": "jsmith", "Computer": "DC01""#;
         let iocs = extract_iocs_from_text(text);
         assert!(iocs.contains("jsmith"));
     }
 
     #[test]
-    fn test_extract_hashes() {
+    fn extract_hashes() {
         let text = "Hash: aad3b435b51404eeaad3b435b51404ee";
         let iocs = extract_iocs_from_text(text);
         assert!(iocs.contains("aad3b435b51404eeaad3b435b51404ee"));
     }
 
     #[test]
-    fn test_exclude_file_extensions() {
+    fn exclude_file_extensions() {
         assert!(!is_hostname_like("cmd.exe"));
         assert!(!is_hostname_like("config.json"));
         assert!(is_hostname_like("dc01.contoso.local"));
     }
 
     #[test]
-    fn test_validate_mitre_technique() {
+    fn validate_mitre_technique() {
         let (valid, _) = validate_evidence_value("T1003.006");
         assert!(valid);
     }
 
     #[test]
-    fn test_store_and_validate() {
+    fn store_and_validate() {
         store_query_result("Connected from 192.168.58.50 to dc01.contoso.local");
         let (valid, qid) = validate_evidence_value("192.168.58.50");
         assert!(valid);
@@ -452,14 +452,14 @@ mod tests {
     }
 
     #[test]
-    fn test_adjust_confidence() {
+    fn adjusts_confidence() {
         assert_eq!(adjust_confidence(0.8, true), 0.8);
         assert!((adjust_confidence(0.8, false) - 0.65).abs() < 0.001);
         assert!((adjust_confidence(0.1, false) - 0.1).abs() < 0.001); // floor at 0.1
     }
 
     #[test]
-    fn test_classify_ioc() {
+    fn classifies_ioc() {
         assert_eq!(classify_ioc("192.168.58.10"), Some("ip"));
         assert_eq!(classify_ioc("dc01.contoso.local"), Some("hostname"));
         assert_eq!(

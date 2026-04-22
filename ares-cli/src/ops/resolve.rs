@@ -85,18 +85,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_looks_like_ip_single() {
+    fn looks_like_ip_single() {
         assert!(looks_like_ip("192.168.58.10"));
         assert!(looks_like_ip("192.168.58.10"));
     }
 
     #[test]
-    fn test_looks_like_ip_comma_separated() {
+    fn looks_like_ip_comma_separated() {
         assert!(looks_like_ip("192.168.58.10,192.168.58.11"));
     }
 
     #[test]
-    fn test_looks_like_ip_not_ip() {
+    fn looks_like_ip_not_ip() {
         assert!(!looks_like_ip("dreadgoad"));
         assert!(!looks_like_ip("my-server"));
         assert!(!looks_like_ip(""));

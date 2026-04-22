@@ -212,7 +212,7 @@ security:
     }
 
     #[test]
-    fn test_load_minimal_config() {
+    fn load_minimal_config() {
         let f = write_temp_yaml(MINIMAL_YAML);
         let cfg = AresConfig::load(f.path()).unwrap();
         assert_eq!(cfg.operation.name, "test-op");
@@ -221,7 +221,7 @@ security:
     }
 
     #[test]
-    fn test_model_for_role() {
+    fn resolves_model_for_role() {
         let f = write_temp_yaml(MINIMAL_YAML);
         let cfg = AresConfig::load(f.path()).unwrap();
         assert_eq!(cfg.model_for_role("orchestrator"), Some("gpt-5.2"));
@@ -230,7 +230,7 @@ security:
     }
 
     #[test]
-    fn test_agent_roles() {
+    fn returns_agent_roles() {
         let f = write_temp_yaml(MINIMAL_YAML);
         let cfg = AresConfig::load(f.path()).unwrap();
         let mut roles = cfg.agent_roles();
@@ -239,7 +239,7 @@ security:
     }
 
     #[test]
-    fn test_vulnerability_priority() {
+    fn returns_vulnerability_priority() {
         let f = write_temp_yaml(MINIMAL_YAML);
         let cfg = AresConfig::load(f.path()).unwrap();
         assert_eq!(cfg.vulnerability_priority("adcs_esc1"), 1);
@@ -250,7 +250,7 @@ security:
     }
 
     #[test]
-    fn test_set_model_for_role() {
+    fn sets_model_for_role() {
         let f = write_temp_yaml(MINIMAL_YAML);
         let mut cfg = AresConfig::load(f.path()).unwrap();
         let old = cfg.set_model_for_role("orchestrator", "gpt-4o");
@@ -259,7 +259,7 @@ security:
     }
 
     #[test]
-    fn test_set_model_for_new_role() {
+    fn set_model_for_new_role() {
         let f = write_temp_yaml(MINIMAL_YAML);
         let mut cfg = AresConfig::load(f.path()).unwrap();
         let old = cfg.set_model_for_role("new_role", "gpt-4o-mini");
@@ -268,7 +268,7 @@ security:
     }
 
     #[test]
-    fn test_from_env_with_env_var() {
+    fn from_env_with_env_var() {
         let f = write_temp_yaml(MINIMAL_YAML);
         // Temporarily set env var
         let path_str = f.path().to_string_lossy().to_string();
@@ -279,7 +279,7 @@ security:
     }
 
     #[test]
-    fn test_from_env_missing_file() {
+    fn from_env_missing_file() {
         std::env::set_var("ARES_CONFIG", "/nonexistent/path/config.yaml");
         let result = AresConfig::from_env();
         assert!(result.is_err());
@@ -287,7 +287,7 @@ security:
     }
 
     #[test]
-    fn test_defaults_applied() {
+    fn defaults_applied() {
         let minimal = r#"
 operation:
   name: "test"
@@ -312,7 +312,7 @@ security: {}
     }
 
     #[test]
-    fn test_load_production_config() {
+    fn load_production_config() {
         // Test against the actual production config if it exists at the expected relative path
         let prod_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .parent()
@@ -342,7 +342,7 @@ security: {}
     }
 
     #[test]
-    fn test_stop_criteria_mutually_exclusive() {
+    fn stop_criteria_mutually_exclusive() {
         let yaml = MINIMAL_YAML.replace(
             "namespace: \"test-ns\"",
             "namespace: \"test-ns\"\n  stop_on_domain_admin: true\n  stop_on_golden_ticket: true",
@@ -358,7 +358,7 @@ security: {}
     }
 
     #[test]
-    fn test_stop_on_golden_ticket_alone_valid() {
+    fn stop_on_golden_ticket_alone_valid() {
         let yaml = MINIMAL_YAML.replace(
             "namespace: \"test-ns\"",
             "namespace: \"test-ns\"\n  stop_on_golden_ticket: true",
@@ -370,7 +370,7 @@ security: {}
     }
 
     #[test]
-    fn test_stop_on_domain_admin_alone_valid() {
+    fn stop_on_domain_admin_alone_valid() {
         let yaml = MINIMAL_YAML.replace(
             "namespace: \"test-ns\"",
             "namespace: \"test-ns\"\n  stop_on_domain_admin: true",
@@ -382,7 +382,7 @@ security: {}
     }
 
     #[test]
-    fn test_roundtrip_serialization() {
+    fn roundtrip_serialization() {
         let f = write_temp_yaml(MINIMAL_YAML);
         let cfg = AresConfig::load(f.path()).unwrap();
         let yaml = serde_yaml::to_string(&cfg).unwrap();
@@ -392,7 +392,7 @@ security: {}
     }
 
     #[test]
-    fn test_grafana_optional() {
+    fn grafana_optional() {
         let f = write_temp_yaml(MINIMAL_YAML);
         let cfg = AresConfig::load(f.path()).unwrap();
         assert!(cfg.grafana.is_none());

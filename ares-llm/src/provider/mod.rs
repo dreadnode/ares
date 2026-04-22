@@ -311,20 +311,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_chat_message_text() {
+    fn chat_message_text() {
         let msg = ChatMessage::text(Role::User, "hello");
         assert_eq!(msg.text_content(), Some("hello"));
     }
 
     #[test]
-    fn test_chat_message_tool_result() {
+    fn chat_message_tool_result() {
         let msg = ChatMessage::tool_result("call_1", "output");
         assert_eq!(msg.role, Role::User);
         assert!(msg.parts.is_some());
     }
 
     #[test]
-    fn test_chat_message_assistant_tool_use() {
+    fn chat_message_assistant_tool_use() {
         let calls = vec![ToolCall {
             id: "call_1".into(),
             name: "nmap_scan".into(),
@@ -337,7 +337,7 @@ mod tests {
     }
 
     #[test]
-    fn test_llm_request_builder() {
+    fn llm_request_builder() {
         let req = LlmRequest::new("claude-sonnet-4-20250514");
         assert_eq!(req.model, "claude-sonnet-4-20250514");
         assert_eq!(req.max_tokens, 4096);
@@ -345,14 +345,14 @@ mod tests {
     }
 
     #[test]
-    fn test_stop_reason_equality() {
+    fn stop_reason_equality() {
         assert_eq!(StopReason::EndTurn, StopReason::EndTurn);
         assert_eq!(StopReason::ToolUse, StopReason::ToolUse);
         assert_ne!(StopReason::EndTurn, StopReason::ToolUse);
     }
 
     #[test]
-    fn test_tool_definition_serialize() {
+    fn tool_definition_serialize() {
         let tool = ToolDefinition {
             name: "nmap_scan".into(),
             description: "Run an nmap scan".into(),

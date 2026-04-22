@@ -153,7 +153,7 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn test_parse_secretsdump_ntlm_hashes() {
+    fn parse_secretsdump_ntlm_hashes() {
         let output = "\
 [*] Dumping local SAM hashes (uid:rid:lmhash:nthash)
 Administrator:500:aad3b435b51404eeaad3b435b51404ee:e19ccf75ee54e06b06a5907af13cef42:::
@@ -177,7 +177,7 @@ svc_sql:1001:aad3b435b51404eeaad3b435b51404ee:abcdef1234567890abcdef1234567890::
     }
 
     #[test]
-    fn test_parse_secretsdump_domain_prefix() {
+    fn parse_secretsdump_domain_prefix() {
         let output = "CONTOSO\\Administrator:500:aad3b435b51404eeaad3b435b51404ee:e19ccf75ee54e06b06a5907af13cef42:::";
         let params = json!({"domain": "contoso.local"});
         let (hashes, _) = parse_secretsdump(output, &params);
@@ -188,7 +188,7 @@ svc_sql:1001:aad3b435b51404eeaad3b435b51404ee:abcdef1234567890abcdef1234567890::
     }
 
     #[test]
-    fn test_parse_secretsdump_netbios_resolved_to_fqdn() {
+    fn parse_secretsdump_netbios_resolved_to_fqdn() {
         // NetBIOS prefix should be resolved to FQDN via target_domain
         let output = "\
 FABRIKAM\\alice:1103:aad3b435b51404eeaad3b435b51404ee:abcdef1234567890abcdef1234567890:::
@@ -203,7 +203,7 @@ FABRIKAM\\bob:1104:aad3b435b51404eeaad3b435b51404ee:1234567890abcdef1234567890ab
     }
 
     #[test]
-    fn test_parse_secretsdump_target_domain_preferred() {
+    fn parse_secretsdump_target_domain_preferred() {
         // target_domain should take precedence over domain for attribution
         let output = "FABRIKAM\\svc_sql:1105:aad3b435b51404eeaad3b435b51404ee:abcdef1234567890abcdef1234567890:::";
         let params = json!({"domain": "contoso.local", "target_domain": "fabrikam.local"});
@@ -213,7 +213,7 @@ FABRIKAM\\bob:1104:aad3b435b51404eeaad3b435b51404ee:1234567890abcdef1234567890ab
     }
 
     #[test]
-    fn test_parse_secretsdump_mismatched_netbios_kept() {
+    fn parse_secretsdump_mismatched_netbios_kept() {
         // If NetBIOS doesn't match target_domain's first label, keep it raw
         let output = "CHILD\\jsmith:1001:aad3b435b51404eeaad3b435b51404ee:abcdef1234567890abcdef1234567890:::";
         let params = json!({"target_domain": "fabrikam.local"});
@@ -225,7 +225,7 @@ FABRIKAM\\bob:1104:aad3b435b51404eeaad3b435b51404ee:1234567890abcdef1234567890ab
     }
 
     #[test]
-    fn test_resolve_netbios_to_fqdn() {
+    fn resolves_netbios_to_fqdn() {
         assert_eq!(
             resolve_netbios_to_fqdn("FABRIKAM", "fabrikam.local"),
             "fabrikam.local"
@@ -244,7 +244,7 @@ FABRIKAM\\bob:1104:aad3b435b51404eeaad3b435b51404ee:1234567890abcdef1234567890ab
     }
 
     #[test]
-    fn test_parse_secretsdump_skips_comments_and_brackets() {
+    fn parse_secretsdump_skips_comments_and_brackets() {
         let output = "\
 [*] Service RemoteRegistry is in stopped state
 # This is a comment
@@ -255,14 +255,14 @@ FABRIKAM\\bob:1104:aad3b435b51404eeaad3b435b51404ee:1234567890abcdef1234567890ab
     }
 
     #[test]
-    fn test_parse_secretsdump_empty_output() {
+    fn parse_secretsdump_empty_output() {
         let (hashes, creds) = parse_secretsdump("", &json!({}));
         assert!(hashes.is_empty());
         assert!(creds.is_empty());
     }
 
     #[test]
-    fn test_parse_kerberoast_hashes() {
+    fn parse_kerberoast_hashes() {
         let output = "\
 [*] Getting TGS for SPN accounts
 $krb5tgs$23$*svc_sql$CONTOSO.LOCAL$contoso.local/svc_sql*$abc123def456
@@ -282,13 +282,13 @@ $krb5tgs$23$*svc_http$CONTOSO.LOCAL$contoso.local/svc_http*$789xyz
     }
 
     #[test]
-    fn test_parse_kerberoast_no_hashes() {
+    fn parse_kerberoast_no_hashes() {
         let hashes = parse_kerberoast("[*] No SPN accounts found", &json!({}));
         assert!(hashes.is_empty());
     }
 
     #[test]
-    fn test_parse_asrep_roast() {
+    fn parses_asrep_roast() {
         let output = "\
 $krb5asrep$23$jdoe@CONTOSO.LOCAL:abc123def456
 $krb5asrep$23$svc_backup@CONTOSO.LOCAL:789xyz";
@@ -302,7 +302,7 @@ $krb5asrep$23$svc_backup@CONTOSO.LOCAL:789xyz";
     }
 
     #[test]
-    fn test_parse_asrep_roast_empty() {
+    fn parse_asrep_roast_empty() {
         let hashes = parse_asrep_roast("[-] No AS-REP roastable accounts", &json!({}));
         assert!(hashes.is_empty());
     }

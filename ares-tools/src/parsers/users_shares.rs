@@ -204,7 +204,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_parse_netexec_users_rid_brute() {
+    fn parse_netexec_users_rid_brute() {
         let output = "\
 SMB  192.168.58.10  445  DC01  [*] Enumerating users
 CONTOSO\\Administrator  (SidTypeUser)
@@ -219,7 +219,7 @@ CONTOSO\\svc_sql  (SidTypeUser)";
     }
 
     #[test]
-    fn test_parse_netexec_users_table_format() {
+    fn parse_netexec_users_table_format() {
         let output = "\
 SMB  192.168.58.10  445  DC01  [*] (domain:contoso.local) Enumerated
 SMB  192.168.58.10  445  DC01  -Username-  -Last PW Set-  -BadPW- -Description-
@@ -233,7 +233,7 @@ SMB  192.168.58.10  445  DC01  bob.s    2026-03-20 10:00:00  0  Bob Smith";
     }
 
     #[test]
-    fn test_parse_netexec_users_with_password_leak() {
+    fn parse_netexec_users_with_password_leak() {
         let output = "\
 SMB  192.168.58.10  445  DC01  [*] (domain:contoso.local) Enumerated
 SMB  192.168.58.10  445  DC01  -Username-  -Last PW Set-  -BadPW- -Description-
@@ -250,7 +250,7 @@ SMB  192.168.58.10  445  DC01  svc_test  2026-01-01 00:00:00  0  Service (Passwo
     }
 
     #[test]
-    fn test_parse_netexec_users_dedup() {
+    fn parse_netexec_users_dedup() {
         let output = "\
 CONTOSO\\jdoe  (SidTypeUser)
 CONTOSO\\jdoe  (SidTypeUser)
@@ -260,13 +260,13 @@ CONTOSO\\JDOE  (SidTypeUser)";
     }
 
     #[test]
-    fn test_parse_netexec_users_empty() {
+    fn parse_netexec_users_empty() {
         let users = parse_netexec_users("[*] No users found");
         assert!(users.is_empty());
     }
 
     #[test]
-    fn test_parse_netexec_shares() {
+    fn parses_netexec_shares() {
         let output = "\
 SMB  192.168.58.10  445  DC01  Share           Permissions     Remark
 SMB  192.168.58.10  445  DC01  ------          -----------     ------
@@ -286,7 +286,7 @@ SMB  192.168.58.10  445  DC01  IT_Share        READ,WRITE";
     }
 
     #[test]
-    fn test_parse_netexec_shares_empty() {
+    fn parse_netexec_shares_empty() {
         let shares = parse_netexec_shares("[*] No shares enumerated");
         assert!(shares.is_empty());
     }

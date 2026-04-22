@@ -89,7 +89,7 @@ mod tests {
     }
 
     #[test]
-    fn test_agent_span_builder_basic() {
+    fn agent_span_builder_basic() {
         init_test_subscriber();
         let span = AgentSpanBuilder::new("test_op", "recon", Team::Red)
             .tool("nmap_scan")
@@ -102,7 +102,7 @@ mod tests {
     }
 
     #[test]
-    fn test_trace_tool_call() {
+    fn traces_tool_call() {
         init_test_subscriber();
         let span = trace_tool_call(
             "credential_access",
@@ -120,7 +120,7 @@ mod tests {
     }
 
     #[test]
-    fn test_trace_discovery() {
+    fn traces_discovery() {
         init_test_subscriber();
         let span = trace_discovery(
             "credential",
@@ -136,7 +136,7 @@ mod tests {
     }
 
     #[test]
-    fn test_trace_decision() {
+    fn traces_decision() {
         init_test_subscriber();
         let tools = vec!["nmap_scan".to_string(), "smb_sweep".to_string()];
         let span = trace_decision("recon", Team::Red, "nmap_scan", &tools, Some(0.9), None);
@@ -144,7 +144,7 @@ mod tests {
     }
 
     #[test]
-    fn test_service_graph_spans() {
+    fn service_graph_spans() {
         init_test_subscriber();
         let c = client_span("dispatch", "orchestrator", Team::Red, "ares-recon-agent");
         assert!(!c.is_disabled());
@@ -165,7 +165,7 @@ mod tests {
     }
 
     #[test]
-    fn test_error_span() {
+    fn error_span() {
         init_test_subscriber();
         let span = AgentSpanBuilder::new("tool_call", "lateral", Team::Red)
             .tool("psexec")

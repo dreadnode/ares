@@ -423,7 +423,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_convert_user_message() {
+    fn convert_user_message() {
         let msg = ChatMessage::text(Role::User, "scan the network");
         let api_msg = convert_message(&msg);
         assert_eq!(api_msg.role, "user");
@@ -431,7 +431,7 @@ mod tests {
     }
 
     #[test]
-    fn test_convert_tool_result() {
+    fn convert_tool_result() {
         let msg = ChatMessage::tool_result("call_1", "scan done");
         let api_msg = convert_message(&msg);
         assert_eq!(api_msg.role, "tool");
@@ -439,14 +439,14 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_openai_stop_reasons() {
+    fn parse_openai_stop_reasons() {
         assert_eq!(parse_stop_reason(Some("stop")), StopReason::EndTurn);
         assert_eq!(parse_stop_reason(Some("tool_calls")), StopReason::ToolUse);
         assert_eq!(parse_stop_reason(Some("length")), StopReason::MaxTokens);
     }
 
     #[test]
-    fn test_deserialize_openai_response() {
+    fn deserialize_openai_response() {
         let json = r#"{
             "choices": [{
                 "message": {
@@ -473,7 +473,7 @@ mod tests {
     }
 
     #[test]
-    fn test_convert_openai_tools() {
+    fn convert_openai_tools() {
         let tools = vec![super::super::ToolDefinition {
             name: "nmap_scan".into(),
             description: "Run nmap".into(),
@@ -485,7 +485,7 @@ mod tests {
     }
 
     #[test]
-    fn test_gpt5_uses_max_completion_tokens() {
+    fn gpt5_uses_max_completion_tokens() {
         assert!(uses_max_completion_tokens("gpt-5.2"));
         assert!(uses_max_completion_tokens("openai/gpt-5.2"));
         assert!(!uses_max_completion_tokens("gpt-4o-mini"));

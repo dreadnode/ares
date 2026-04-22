@@ -173,7 +173,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_recovery_config_defaults() {
+    fn recovery_config_defaults() {
         let cfg: RecoveryConfig = serde_json::from_str("{}").unwrap();
         assert!(cfg.enabled);
         assert_eq!(cfg.max_retries, 3);
@@ -183,7 +183,7 @@ mod tests {
     }
 
     #[test]
-    fn test_recovery_config_override() {
+    fn recovery_config_override() {
         let cfg: RecoveryConfig =
             serde_json::from_str(r#"{"enabled": false, "max_retries": 5}"#).unwrap();
         assert!(!cfg.enabled);
@@ -191,7 +191,7 @@ mod tests {
     }
 
     #[test]
-    fn test_phase_detection_config_defaults() {
+    fn phase_detection_config_defaults() {
         let cfg: PhaseDetectionConfig = serde_json::from_str("{}").unwrap();
         assert_eq!(cfg.lateral_movement_admin_creds, 3);
         assert_eq!(cfg.lateral_movement_owned_hosts, 5);
@@ -199,7 +199,7 @@ mod tests {
     }
 
     #[test]
-    fn test_context_management_config_defaults() {
+    fn context_management_config_defaults() {
         let cfg: ContextManagementConfig = serde_json::from_str("{}").unwrap();
         assert_eq!(cfg.max_context_tokens, 50000);
         assert_eq!(cfg.min_messages_to_keep, 15);
@@ -207,7 +207,7 @@ mod tests {
     }
 
     #[test]
-    fn test_logging_config_defaults() {
+    fn logging_config_defaults() {
         let cfg: LoggingConfig = serde_json::from_str("{}").unwrap();
         assert_eq!(cfg.level, "INFO");
         assert_eq!(cfg.max_size_mb, 100);
@@ -215,7 +215,7 @@ mod tests {
     }
 
     #[test]
-    fn test_resource_config_defaults() {
+    fn resource_config_defaults() {
         let cfg: ResourceConfig = serde_json::from_str("{}").unwrap();
         assert_eq!(cfg.max_concurrent_tasks, 10);
         assert_eq!(cfg.max_credentials_per_expansion, 100);
@@ -224,7 +224,7 @@ mod tests {
     }
 
     #[test]
-    fn test_security_config_defaults() {
+    fn security_config_defaults() {
         let cfg: SecurityConfig = serde_json::from_str("{}").unwrap();
         assert!(cfg.verify_ssl);
         assert!(!cfg.encrypted_state);
@@ -232,14 +232,14 @@ mod tests {
     }
 
     #[test]
-    fn test_rate_limiting_config_defaults() {
+    fn rate_limiting_config_defaults() {
         let cfg: RateLimitingConfig = serde_json::from_str("{}").unwrap();
         assert!(cfg.enabled);
         assert_eq!(cfg.max_requests_per_minute, 60);
     }
 
     #[test]
-    fn test_timeout_config_all_zero_defaults() {
+    fn timeout_config_all_zero_defaults() {
         let cfg: TimeoutConfig = serde_json::from_str("{}").unwrap();
         assert_eq!(cfg.agent_heartbeat, 0);
         assert_eq!(cfg.task_timeout, 0);
@@ -247,7 +247,7 @@ mod tests {
     }
 
     #[test]
-    fn test_agent_config_defaults() {
+    fn agent_config_defaults() {
         let cfg: AgentConfig = serde_json::from_str(r#"{"model": "openai/gpt-4.1"}"#).unwrap();
         assert_eq!(cfg.model, "openai/gpt-4.1");
         assert_eq!(cfg.max_steps, 100);

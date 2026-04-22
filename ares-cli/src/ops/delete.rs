@@ -101,7 +101,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_parse_operation_timestamp_valid() {
+    fn parse_operation_timestamp_valid() {
         let ts = parse_operation_timestamp("op-20250128-123456").unwrap();
         assert_eq!(
             ts.format("%Y-%m-%d %H:%M:%S").to_string(),
@@ -110,14 +110,14 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_operation_timestamp_invalid() {
+    fn parse_operation_timestamp_invalid() {
         assert!(parse_operation_timestamp("not-an-op-id").is_none());
         assert!(parse_operation_timestamp("op-bad").is_none());
         assert!(parse_operation_timestamp("").is_none());
     }
 
     #[test]
-    fn test_parse_operation_timestamp_with_suffix() {
+    fn parse_operation_timestamp_with_suffix() {
         // Some IDs may have extra suffix after the timestamp
         let ts = parse_operation_timestamp("op-20260407-091000-abc123").unwrap();
         assert_eq!(

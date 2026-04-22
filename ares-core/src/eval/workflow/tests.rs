@@ -37,7 +37,7 @@ fn sample_state_json() -> &'static str {
 }
 
 #[test]
-fn test_load_red_state_from_file() {
+fn loads_red_state_from_file() {
     let dir = TempDir::new().unwrap();
     let path = write_state_file(dir.path(), "state.json", sample_state_json());
 
@@ -52,7 +52,7 @@ fn test_load_red_state_from_file() {
 }
 
 #[test]
-fn test_evaluate_scenario_from_file() {
+fn evaluate_scenario_from_file() {
     let dir = TempDir::new().unwrap();
     let path = write_state_file(dir.path(), "state.json", sample_state_json());
 
@@ -73,7 +73,7 @@ fn test_evaluate_scenario_from_file() {
 }
 
 #[test]
-fn test_dataset_from_directory() {
+fn dataset_from_directory() {
     let dir = TempDir::new().unwrap();
     write_state_file(dir.path(), "op1.json", sample_state_json());
     write_state_file(
@@ -90,7 +90,7 @@ fn test_dataset_from_directory() {
 }
 
 #[test]
-fn test_evaluate_dataset() {
+fn evaluates_dataset() {
     let dir = TempDir::new().unwrap();
     write_state_file(dir.path(), "op1.json", sample_state_json());
 
@@ -103,7 +103,7 @@ fn test_evaluate_dataset() {
 }
 
 #[test]
-fn test_estimate_cost() {
+fn estimates_cost() {
     let cost = estimate_cost("claude-sonnet-4-20250514", 1_000_000, 500_000);
     // 1M * 3.0/1M + 500K * 15.0/1M = 3.0 + 7.5 = 10.5
     assert!((cost - 10.5).abs() < 0.01);
@@ -114,7 +114,7 @@ fn test_estimate_cost() {
 }
 
 #[test]
-fn test_save_evaluation_result() {
+fn saves_evaluation_result() {
     let dir = TempDir::new().unwrap();
     let result = EvaluationResult {
         evaluation_id: "eval-1".to_string(),

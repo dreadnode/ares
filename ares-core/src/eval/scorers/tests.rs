@@ -102,7 +102,7 @@ fn make_snapshot() -> InvestigationSnapshot {
 }
 
 #[test]
-fn test_stage_progress() {
+fn stage_progress() {
     let mut snap = InvestigationSnapshot::default();
     assert_eq!(score_stage_progress(&snap), 0.0);
 
@@ -114,7 +114,7 @@ fn test_stage_progress() {
 }
 
 #[test]
-fn test_ioc_detection_all_found() {
+fn ioc_detection_all_found() {
     let snap = make_snapshot();
     let mut gt = make_gt();
     // Remove hash IOC since snapshot doesn't have it
@@ -128,7 +128,7 @@ fn test_ioc_detection_all_found() {
 }
 
 #[test]
-fn test_ioc_detection_none_found() {
+fn ioc_detection_none_found() {
     let snap = InvestigationSnapshot::default();
     let gt = make_gt();
     let score = score_ioc_detection(&snap, &gt);
@@ -136,7 +136,7 @@ fn test_ioc_detection_none_found() {
 }
 
 #[test]
-fn test_ioc_user_domain_prefix() {
+fn ioc_user_domain_prefix() {
     let snap = InvestigationSnapshot {
         evidence_values: vec![EvidenceItem {
             evidence_type: "user".to_string(),
@@ -162,7 +162,7 @@ fn test_ioc_user_domain_prefix() {
 }
 
 #[test]
-fn test_technique_coverage_all() {
+fn technique_coverage_all() {
     let snap = make_snapshot();
     let gt = make_gt();
     let score = score_technique_coverage(&snap, &gt);
@@ -173,7 +173,7 @@ fn test_technique_coverage_all() {
 }
 
 #[test]
-fn test_technique_coverage_partial() {
+fn technique_coverage_partial() {
     let mut snap = make_snapshot();
     snap.identified_techniques = HashSet::from(["T1003".to_string()]);
     let gt = make_gt();
@@ -187,7 +187,7 @@ fn test_technique_coverage_partial() {
 }
 
 #[test]
-fn test_pyramid_elevation() {
+fn pyramid_elevation() {
     let snap = make_snapshot();
     let score = score_pyramid_elevation(&snap);
     // highest_level=6/6 * 0.7 = 0.7
@@ -197,7 +197,7 @@ fn test_pyramid_elevation() {
 }
 
 #[test]
-fn test_evidence_quality() {
+fn evidence_quality() {
     let snap = make_snapshot();
     let score = score_evidence_quality(&snap);
     // avg_confidence = (0.9+0.8+0.7)/3 = 0.8 * 0.4 = 0.32
@@ -208,7 +208,7 @@ fn test_evidence_quality() {
 }
 
 #[test]
-fn test_overall_score() {
+fn overall_score() {
     let snap = make_snapshot();
     let gt = make_gt();
     let score = score_investigation_overall(&snap, &gt);
@@ -216,14 +216,14 @@ fn test_overall_score() {
 }
 
 #[test]
-fn test_timeline_event_matches_substring() {
+fn timeline_event_matches_substring() {
     let descriptions = vec!["credential dumping via lsass access".to_string()];
     assert!(timeline_event_matches("lsass access", &descriptions));
     assert!(!timeline_event_matches("rdp brute force", &descriptions));
 }
 
 #[test]
-fn test_timeline_event_matches_keyword() {
+fn timeline_event_matches_keyword() {
     let descriptions = vec!["detected credential dumping using mimikatz tool".to_string()];
     assert!(timeline_event_matches(
         "credential dumping mimikatz",
@@ -232,7 +232,7 @@ fn test_timeline_event_matches_keyword() {
 }
 
 #[test]
-fn test_evaluate_builds_result() {
+fn evaluate_builds_result() {
     let snap = make_snapshot();
     let gt = make_gt();
     let result = evaluate("eval-1", &snap, &gt, true, "claude-opus-4-6", 120.0);
@@ -251,7 +251,7 @@ fn test_evaluate_builds_result() {
 }
 
 #[test]
-fn test_missed_and_found_iocs() {
+fn missed_and_found_iocs() {
     let snap = make_snapshot();
     let gt = make_gt();
     let missed = get_missed_iocs(&snap, &gt);
@@ -264,7 +264,7 @@ fn test_missed_and_found_iocs() {
 }
 
 #[test]
-fn test_missed_and_found_techniques() {
+fn missed_and_found_techniques() {
     let snap = make_snapshot();
     let gt = make_gt();
     let missed = get_missed_techniques(&snap, &gt);

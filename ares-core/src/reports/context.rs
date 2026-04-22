@@ -284,7 +284,7 @@ mod tests {
     use std::collections::HashMap;
 
     #[test]
-    fn test_host_ctx_from_host_with_hostname() {
+    fn host_ctx_from_host_with_hostname() {
         let host = Host {
             ip: "192.168.58.10".to_string(),
             hostname: "dc01.contoso.local".to_string(),
@@ -303,7 +303,7 @@ mod tests {
     }
 
     #[test]
-    fn test_host_ctx_from_host_no_hostname() {
+    fn host_ctx_from_host_no_hostname() {
         let host = Host {
             ip: "192.168.58.20".to_string(),
             hostname: String::new(),
@@ -320,7 +320,7 @@ mod tests {
     }
 
     #[test]
-    fn test_user_ctx_from_user() {
+    fn user_ctx_from_user() {
         let user = User {
             username: "admin".to_string(),
             domain: "contoso.local".to_string(),
@@ -335,7 +335,7 @@ mod tests {
     }
 
     #[test]
-    fn test_user_ctx_non_admin() {
+    fn user_ctx_non_admin() {
         let user = User {
             username: "jdoe".to_string(),
             domain: "contoso.local".to_string(),
@@ -349,7 +349,7 @@ mod tests {
     }
 
     #[test]
-    fn test_cred_ctx_empty_domain() {
+    fn cred_ctx_empty_domain() {
         let cred = Credential {
             id: String::new(),
             username: "admin".to_string(),
@@ -366,7 +366,7 @@ mod tests {
     }
 
     #[test]
-    fn test_hash_ctx_from_hash() {
+    fn hash_ctx_from_hash() {
         let hash = Hash {
             id: String::new(),
             username: "krbtgt".to_string(),
@@ -389,7 +389,7 @@ mod tests {
     }
 
     #[test]
-    fn test_hash_ctx_truncates_long_hash() {
+    fn hash_ctx_truncates_long_hash() {
         let long_hash = "a".repeat(200);
         let hash = Hash {
             id: String::new(),
@@ -413,7 +413,7 @@ mod tests {
     }
 
     #[test]
-    fn test_share_ctx_from_share() {
+    fn share_ctx_from_share() {
         let share = Share {
             host: "192.168.58.10".to_string(),
             name: "SYSVOL".to_string(),
@@ -427,7 +427,7 @@ mod tests {
     }
 
     #[test]
-    fn test_share_ctx_empty_fields() {
+    fn share_ctx_empty_fields() {
         let share = Share {
             host: "192.168.58.10".to_string(),
             name: "C$".to_string(),
@@ -440,7 +440,7 @@ mod tests {
     }
 
     #[test]
-    fn test_build_vuln_ctx_not_exploited() {
+    fn build_vuln_ctx_not_exploited() {
         let vuln = VulnerabilityInfo {
             vuln_id: "smb_signing_192.168.58.10".to_string(),
             vuln_type: "smb_signing_disabled".to_string(),
@@ -460,7 +460,7 @@ mod tests {
     }
 
     #[test]
-    fn test_build_vuln_ctx_details_list() {
+    fn build_vuln_ctx_details_list() {
         let mut details = HashMap::new();
         details.insert("account".to_string(), serde_json::json!("john.smith"));
         details.insert("domain".to_string(), serde_json::json!("contoso.local"));
@@ -482,7 +482,7 @@ mod tests {
     }
 
     #[test]
-    fn test_build_vuln_ctx_exploited() {
+    fn build_vuln_ctx_exploited() {
         let vuln = VulnerabilityInfo {
             vuln_id: "esc1_192.168.58.10".to_string(),
             vuln_type: "adcs_esc1".to_string(),
@@ -503,7 +503,7 @@ mod tests {
     }
 
     #[test]
-    fn test_host_ctx_deduplicates_services() {
+    fn host_ctx_deduplicates_services() {
         let host = Host {
             ip: "192.168.58.10".to_string(),
             hostname: "dc01.contoso.local".to_string(),
@@ -522,7 +522,7 @@ mod tests {
     }
 
     #[test]
-    fn test_host_ctx_filters_pseudo_services() {
+    fn host_ctx_filters_pseudo_services() {
         let host = Host {
             ip: "192.168.58.23".to_string(),
             hostname: String::new(),
@@ -541,7 +541,7 @@ mod tests {
     }
 
     #[test]
-    fn test_cred_ctx_lowercases_domain() {
+    fn cred_ctx_lowercases_domain() {
         let cred = Credential {
             id: String::new(),
             username: "admin".to_string(),
@@ -558,7 +558,7 @@ mod tests {
     }
 
     #[test]
-    fn test_hash_ctx_lowercases_domain() {
+    fn hash_ctx_lowercases_domain() {
         let hash = Hash {
             id: String::new(),
             username: "admin".to_string(),
