@@ -98,7 +98,6 @@ mod tests {
     #[test]
     fn lateral_patterns_default() {
         let p = LateralPatterns;
-        // Just verify it doesn't panic
         let _ = p.detect("some text");
     }
 

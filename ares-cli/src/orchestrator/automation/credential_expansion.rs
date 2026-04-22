@@ -400,7 +400,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_lateral_techniques_order() {
+    fn lateral_techniques_order() {
         // smbexec first (stealthiest), then wmiexec, then psexec
         assert_eq!(LATERAL_TECHNIQUES[0], "smbexec");
         assert_eq!(LATERAL_TECHNIQUES[1], "wmiexec");
@@ -408,12 +408,12 @@ mod tests {
     }
 
     #[test]
-    fn test_lateral_techniques_count() {
+    fn lateral_techniques_count() {
         assert_eq!(LATERAL_TECHNIQUES.len(), 3);
     }
 
     #[test]
-    fn test_lateral_techniques_contains() {
+    fn lateral_techniques_contains() {
         assert!(LATERAL_TECHNIQUES.contains(&"smbexec"));
         assert!(LATERAL_TECHNIQUES.contains(&"wmiexec"));
         assert!(LATERAL_TECHNIQUES.contains(&"psexec"));
@@ -421,7 +421,7 @@ mod tests {
     }
 
     #[test]
-    fn test_netbios_domain_resolution() {
+    fn netbios_domain_resolution() {
         // Simulate the NetBIOS→FQDN resolution logic from the automation loop
         let raw = "NORTH";
         let raw_lower = raw.to_lowercase();
@@ -465,7 +465,7 @@ mod tests {
     }
 
     #[test]
-    fn test_domain_matching_logic() {
+    fn domain_matching_logic() {
         // Simulate the host domain matching from credential expansion
         let cred_dom = "contoso.local";
 
@@ -503,7 +503,7 @@ mod tests {
     }
 
     #[test]
-    fn test_host_domain_from_fqdn() {
+    fn host_domain_from_fqdn() {
         // Simulate extracting domain from FQDN hostname
         let hostname = "dc01.contoso.local";
         let domain = hostname
@@ -536,7 +536,7 @@ mod tests {
     }
 
     #[test]
-    fn test_hash_expansion_dedup_key() {
+    fn hash_expansion_dedup_key() {
         // Test the dedup key format for hash-based expansion
         let domain = "contoso.local";
         let username = "Administrator";
@@ -554,7 +554,7 @@ mod tests {
     }
 
     #[test]
-    fn test_pth_credential_building() {
+    fn pth_credential_building() {
         // Verify that pass-the-hash builds the credential with hash_value as password
         let hash = ares_core::models::Hash {
             id: "hash-1".to_string(),
@@ -593,7 +593,7 @@ mod tests {
     }
 
     #[test]
-    fn test_hash_filter_ntlm_only() {
+    fn hash_filter_ntlm_only() {
         // Only NTLM hashes pass the filter; aes/des/lm should be excluded
         let hashes = [
             (
@@ -626,7 +626,7 @@ mod tests {
     }
 
     #[test]
-    fn test_hash_filter_excludes_krbtgt() {
+    fn hash_filter_excludes_krbtgt() {
         // krbtgt hashes are excluded from pass-the-hash (used for golden tickets, not PtH)
         let username = "krbtgt";
         let passes = username.to_lowercase() != "krbtgt" && !username.ends_with('$');
@@ -634,7 +634,7 @@ mod tests {
     }
 
     #[test]
-    fn test_hash_filter_excludes_machine_accounts() {
+    fn hash_filter_excludes_machine_accounts() {
         // Machine accounts (ending with $) are excluded from pass-the-hash
         let usernames = vec!["DC01$", "SQL01$", "WEB01$"];
         for u in usernames {
@@ -648,7 +648,7 @@ mod tests {
     }
 
     #[test]
-    fn test_hash_filter_allows_normal_users() {
+    fn hash_filter_allows_normal_users() {
         // Normal users should pass the hash filter
         let usernames = vec!["administrator", "jdoe", "svc_sql"];
         for u in usernames {
@@ -658,7 +658,7 @@ mod tests {
     }
 
     #[test]
-    fn test_secretsdump_dedup_key_format() {
+    fn secretsdump_dedup_key_format() {
         // secretsdump dedup: dc_ip:domain:username
         let dc_ip = "192.168.58.10";
         let domain = "CONTOSO.LOCAL";
@@ -673,7 +673,7 @@ mod tests {
     }
 
     #[test]
-    fn test_secretsdump_dedup_different_dcs_are_unique() {
+    fn secretsdump_dedup_different_dcs_are_unique() {
         // Same credential against different DCs should produce different dedup keys
         let domain = "contoso.local";
         let username = "admin";
@@ -683,7 +683,7 @@ mod tests {
     }
 
     #[test]
-    fn test_credential_expansion_dedup_key_format() {
+    fn credential_expansion_dedup_key_format() {
         // Expansion dedup: domain:username
         let domain = "CONTOSO.LOCAL";
         let username = "JDoe";
@@ -692,7 +692,7 @@ mod tests {
     }
 
     #[test]
-    fn test_credential_filter_empty_domain_excluded() {
+    fn credential_filter_empty_domain_excluded() {
         // Credentials with empty domain are excluded
         let creds = [
             ("user1", "P@ss", "contoso.local"),
@@ -709,7 +709,7 @@ mod tests {
     }
 
     #[test]
-    fn test_credential_filter_empty_password_excluded() {
+    fn credential_filter_empty_password_excluded() {
         // Credentials with empty password are excluded
         let creds = [
             ("user1", "P@ssw0rd!", "contoso.local"), // pragma: allowlist secret
@@ -726,7 +726,7 @@ mod tests {
     }
 
     #[test]
-    fn test_target_filtering_owned_hosts_excluded() {
+    fn target_filtering_owned_hosts_excluded() {
         // Only non-owned hosts are targeted for lateral movement
         let hosts = [
             ("192.168.58.10", true),  // owned - should be excluded
@@ -741,7 +741,7 @@ mod tests {
     }
 
     #[test]
-    fn test_netbios_resolution_uppercase_fallback() {
+    fn netbios_resolution_uppercase_fallback() {
         // When lowercase lookup fails, try uppercase
         let mut map = std::collections::HashMap::new();
         map.insert("CONTOSO".to_string(), "contoso.local".to_string());
@@ -762,7 +762,7 @@ mod tests {
     }
 
     #[test]
-    fn test_domain_matching_empty_host_domain_rejected() {
+    fn domain_matching_empty_host_domain_rejected() {
         // Hosts with empty domain should not match any credential domain
         let host_domain = "";
         let cred_dom = "contoso.local";
@@ -774,7 +774,7 @@ mod tests {
     }
 
     #[test]
-    fn test_domain_matching_sibling_domains_rejected() {
+    fn domain_matching_sibling_domains_rejected() {
         // Sibling child domains should NOT match each other
         let cred_dom = "child1.contoso.local";
         let host_domain = "child2.contoso.local";
@@ -788,7 +788,7 @@ mod tests {
     }
 
     #[test]
-    fn test_hash_dedup_truncates_to_32_chars() {
+    fn hash_dedup_truncates_to_32_chars() {
         // Hash dedup uses first 32 chars of hash_value
         let short_hash = "aabbccdd";
         let long_hash = "aad3b435b51404eeaad3b435b51404ee:31d6cfe0d16ae931b73c59d7e0c089c0";
@@ -801,7 +801,7 @@ mod tests {
     }
 
     #[test]
-    fn test_host_domain_from_bare_ip_falls_back_to_dc_map() {
+    fn host_domain_from_bare_ip_falls_back_to_dc_map() {
         // When hostname has no domain suffix, fall back to domain_controllers map
         let hostname = "192.168.58.10"; // bare IP, no FQDN
         let from_hostname = hostname

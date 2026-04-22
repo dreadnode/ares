@@ -249,7 +249,7 @@ mod tests {
     // ─── is_gmsa_account ────────────────────────────────────────────────────
 
     #[test]
-    fn test_is_gmsa_account_managed_service_description() {
+    fn is_gmsa_account_managed_service_description() {
         assert!(is_gmsa_account(
             "svc_web$",
             "Managed Service Account for web servers"
@@ -257,12 +257,12 @@ mod tests {
     }
 
     #[test]
-    fn test_is_gmsa_account_gmsa_in_username() {
+    fn is_gmsa_account_gmsa_in_username() {
         assert!(is_gmsa_account("gmsa_svc$", "some service account"));
     }
 
     #[test]
-    fn test_is_gmsa_account_case_insensitive_description() {
+    fn is_gmsa_account_case_insensitive_description() {
         assert!(is_gmsa_account(
             "svc_sql$",
             "MANAGED SERVICE account for SQL"
@@ -270,12 +270,12 @@ mod tests {
     }
 
     #[test]
-    fn test_is_gmsa_account_case_insensitive_username() {
+    fn is_gmsa_account_case_insensitive_username() {
         assert!(is_gmsa_account("GMSA_SVC$", "regular account"));
     }
 
     #[test]
-    fn test_is_gmsa_account_no_dollar_suffix() {
+    fn is_gmsa_account_no_dollar_suffix() {
         // Must end with $
         assert!(!is_gmsa_account(
             "svc_web",
@@ -284,52 +284,52 @@ mod tests {
     }
 
     #[test]
-    fn test_is_gmsa_account_dollar_but_no_indicators() {
+    fn is_gmsa_account_dollar_but_no_indicators() {
         // Ends with $ but no "managed service" in description and no "gmsa" in name
         assert!(!is_gmsa_account("svc_sql$", "regular computer account"));
     }
 
     #[test]
-    fn test_is_gmsa_account_regular_user() {
+    fn is_gmsa_account_regular_user() {
         assert!(!is_gmsa_account("administrator", "Built-in admin account"));
     }
 
     #[test]
-    fn test_is_gmsa_account_empty_description_with_gmsa_name() {
+    fn is_gmsa_account_empty_description_with_gmsa_name() {
         assert!(is_gmsa_account("gmsa_backup$", ""));
     }
 
     #[test]
-    fn test_is_gmsa_account_empty_description_without_gmsa_name() {
+    fn is_gmsa_account_empty_description_without_gmsa_name() {
         assert!(!is_gmsa_account("svc_backup$", ""));
     }
 
     // ─── is_gmsa_vuln_type ──────────────────────────────────────────────────
 
     #[test]
-    fn test_is_gmsa_vuln_type_gmsa() {
+    fn is_gmsa_vuln_type_gmsa() {
         assert!(is_gmsa_vuln_type("gmsa"));
     }
 
     #[test]
-    fn test_is_gmsa_vuln_type_gmsa_reader() {
+    fn is_gmsa_vuln_type_gmsa_reader() {
         assert!(is_gmsa_vuln_type("gmsa_reader"));
     }
 
     #[test]
-    fn test_is_gmsa_vuln_type_readgmsapassword() {
+    fn is_gmsa_vuln_type_readgmsapassword() {
         assert!(is_gmsa_vuln_type("readgmsapassword"));
     }
 
     #[test]
-    fn test_is_gmsa_vuln_type_case_insensitive() {
+    fn is_gmsa_vuln_type_case_insensitive() {
         assert!(is_gmsa_vuln_type("GMSA"));
         assert!(is_gmsa_vuln_type("GMSA_READER"));
         assert!(is_gmsa_vuln_type("ReadGMSAPassword"));
     }
 
     #[test]
-    fn test_is_gmsa_vuln_type_negative() {
+    fn is_gmsa_vuln_type_negative() {
         assert!(!is_gmsa_vuln_type("rbcd"));
         assert!(!is_gmsa_vuln_type("laps"));
         assert!(!is_gmsa_vuln_type("constrained_delegation"));
@@ -341,12 +341,12 @@ mod tests {
     // ─── dedup key construction ─────────────────────────────────────────────
 
     #[test]
-    fn test_dedup_gmsa_accounts_value() {
+    fn dedup_gmsa_accounts_value() {
         assert_eq!(DEDUP_GMSA_ACCOUNTS, "gmsa_accounts");
     }
 
     #[test]
-    fn test_dedup_key_format() {
+    fn dedup_key_format() {
         let domain = "contoso.local";
         let username = "gmsa_svc$";
         let key = format!("{}:{}", domain.to_lowercase(), username.to_lowercase());
@@ -354,7 +354,7 @@ mod tests {
     }
 
     #[test]
-    fn test_dedup_key_normalizes_case() {
+    fn dedup_key_normalizes_case() {
         let key = format!(
             "{}:{}",
             "FABRIKAM.LOCAL".to_lowercase(),

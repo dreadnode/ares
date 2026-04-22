@@ -417,27 +417,27 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_default_strategy_is_fast() {
+    fn default_strategy_is_fast() {
         let s = Strategy::default();
         assert_eq!(s.preset, StrategyPreset::Fast);
         assert!(!s.continue_after_da);
     }
 
     #[test]
-    fn test_comprehensive_implies_continue_after_da() {
+    fn comprehensive_implies_continue_after_da() {
         let s = Strategy::from_preset(StrategyPreset::Comprehensive);
         assert!(s.continue_after_da);
     }
 
     #[test]
-    fn test_technique_allowed_no_filters() {
+    fn technique_allowed_no_filters() {
         let s = Strategy::default();
         assert!(s.is_technique_allowed("secretsdump"));
         assert!(s.is_technique_allowed("esc1"));
     }
 
     #[test]
-    fn test_technique_excluded() {
+    fn technique_excluded() {
         let mut s = Strategy::default();
         s.exclude_techniques.insert("secretsdump".to_string());
         assert!(!s.is_technique_allowed("secretsdump"));
@@ -446,7 +446,7 @@ mod tests {
     }
 
     #[test]
-    fn test_technique_include_allowlist() {
+    fn technique_include_allowlist() {
         let mut s = Strategy::default();
         s.include_techniques.insert("esc1".to_string());
         s.include_techniques.insert("esc4".to_string());
@@ -456,34 +456,34 @@ mod tests {
     }
 
     #[test]
-    fn test_effective_priority_from_preset() {
+    fn effective_priority_from_preset() {
         let s = Strategy::from_preset(StrategyPreset::Fast);
         assert_eq!(s.effective_priority("dc_secretsdump"), 1);
         assert_eq!(s.effective_priority("esc1"), 5);
     }
 
     #[test]
-    fn test_effective_priority_with_override() {
+    fn effective_priority_with_override() {
         let mut s = Strategy::from_preset(StrategyPreset::Fast);
         s.weights.insert("esc1".to_string(), 1);
         assert_eq!(s.effective_priority("esc1"), 1);
     }
 
     #[test]
-    fn test_effective_priority_unknown_type() {
+    fn effective_priority_unknown_type() {
         let s = Strategy::default();
         assert_eq!(s.effective_priority("unknown_technique"), 5);
     }
 
     #[test]
-    fn test_stealth_deprioritizes_noisy() {
+    fn stealth_deprioritizes_noisy() {
         let s = Strategy::from_preset(StrategyPreset::Stealth);
         assert!(s.effective_priority("password_spray") > s.effective_priority("esc1"));
         assert!(s.effective_priority("secretsdump") > s.effective_priority("acl_abuse"));
     }
 
     #[test]
-    fn test_comprehensive_flat_weights() {
+    fn comprehensive_flat_weights() {
         let s = Strategy::from_preset(StrategyPreset::Comprehensive);
         assert_eq!(s.effective_priority("secretsdump"), 3);
         assert_eq!(s.effective_priority("esc1"), 3);
@@ -491,7 +491,7 @@ mod tests {
     }
 
     #[test]
-    fn test_preset_from_str_loose() {
+    fn preset_from_str_loose() {
         assert_eq!(StrategyPreset::from_str_loose("fast"), StrategyPreset::Fast);
         assert_eq!(
             StrategyPreset::from_str_loose("comprehensive"),
@@ -516,7 +516,7 @@ mod tests {
     }
 
     #[test]
-    fn test_from_json_with_overrides() {
+    fn from_json_with_overrides() {
         let json = serde_json::json!({
             "strategy": "fast",
             "technique_weights": {
@@ -536,7 +536,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_technique_list_json_array() {
+    fn parse_technique_list_json_array() {
         let json = serde_json::json!(["secretsdump", "golden_ticket"]);
         let result = parse_technique_list(Some(&json), "NONEXISTENT_ENV_KEY_12345");
         assert!(result.contains("secretsdump"));
@@ -545,7 +545,7 @@ mod tests {
     }
 
     /// Build a minimal AresConfig for testing YAML strategy resolution.
-    fn test_yaml_config(
+    fn yaml_config(
         strategy: &str,
         continue_after_da: bool,
         exclude: Vec<&str>,
@@ -578,8 +578,8 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_with_yaml_config() {
-        let cfg = test_yaml_config(
+    fn resolve_with_yaml_config() {
+        let cfg = yaml_config(
             "comprehensive",
             true,
             vec!["password_spray"],
@@ -600,8 +600,8 @@ mod tests {
     }
 
     #[test]
-    fn test_json_overrides_yaml() {
-        let cfg = test_yaml_config("stealth", false, vec![], vec![("esc1", 5)], vec![]);
+    fn json_overrides_yaml() {
+        let cfg = yaml_config("stealth", false, vec![], vec![("esc1", 5)], vec![]);
 
         // JSON payload overrides YAML
         let json = serde_json::json!({
@@ -616,14 +616,14 @@ mod tests {
     }
 
     #[test]
-    fn test_is_comprehensive() {
+    fn is_comprehensive() {
         assert!(Strategy::from_preset(StrategyPreset::Comprehensive).is_comprehensive());
         assert!(!Strategy::from_preset(StrategyPreset::Fast).is_comprehensive());
         assert!(!Strategy::from_preset(StrategyPreset::Stealth).is_comprehensive());
     }
 
     #[test]
-    fn test_should_continue_after_da() {
+    fn should_continue_after_da() {
         let fast = Strategy::from_preset(StrategyPreset::Fast);
         assert!(!fast.should_continue_after_da());
 
@@ -635,7 +635,7 @@ mod tests {
     }
 
     #[test]
-    fn test_new_technique_weights_in_presets() {
+    fn new_technique_weights_in_presets() {
         // Verify that new techniques added in this branch are in all presets
         let new_techniques = ["rbcd", "shadow_credentials", "mssql_deep_exploitation"];
         for preset in [
@@ -655,7 +655,7 @@ mod tests {
     }
 
     #[test]
-    fn test_comprehensive_has_equal_weights() {
+    fn comprehensive_has_equal_weights() {
         let s = Strategy::from_preset(StrategyPreset::Comprehensive);
         // All comprehensive weights should be 3
         for (tech, weight) in &s.weights {
@@ -664,7 +664,7 @@ mod tests {
     }
 
     #[test]
-    fn test_stealth_penalizes_noisy_techniques() {
+    fn stealth_penalizes_noisy_techniques() {
         let s = Strategy::from_preset(StrategyPreset::Stealth);
         // Password spray and SMB signing should be most penalized (8)
         assert_eq!(s.effective_priority("password_spray"), 8);
@@ -675,7 +675,7 @@ mod tests {
     }
 
     #[test]
-    fn test_fast_prioritizes_secretsdump() {
+    fn fast_prioritizes_secretsdump() {
         let s = Strategy::from_preset(StrategyPreset::Fast);
         assert_eq!(s.effective_priority("dc_secretsdump"), 1);
         assert_eq!(s.effective_priority("golden_ticket"), 1);
@@ -683,14 +683,14 @@ mod tests {
     }
 
     #[test]
-    fn test_preset_implies_continue_after_da() {
+    fn preset_implies_continue_after_da() {
         assert!(StrategyPreset::Comprehensive.implies_continue_after_da());
         assert!(!StrategyPreset::Fast.implies_continue_after_da());
         assert!(!StrategyPreset::Stealth.implies_continue_after_da());
     }
 
     #[test]
-    fn test_include_and_exclude_interact() {
+    fn include_and_exclude_interact() {
         let mut s = Strategy::default();
         // Include-only list
         s.include_techniques.insert("esc1".to_string());

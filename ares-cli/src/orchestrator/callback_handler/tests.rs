@@ -54,7 +54,7 @@ fn make_handler() -> OrchestratorCallbackHandler {
 }
 
 #[tokio::test]
-async fn test_credential_summary_empty() {
+async fn credential_summary_empty() {
     let handler = make_handler();
     let call = ToolCall {
         id: "c1".into(),
@@ -72,7 +72,7 @@ async fn test_credential_summary_empty() {
 }
 
 #[tokio::test]
-async fn test_credential_summary_with_data() {
+async fn credential_summary_with_data() {
     let handler = make_handler();
     {
         let mut s = handler.state.write().await;
@@ -98,7 +98,7 @@ async fn test_credential_summary_with_data() {
 }
 
 #[tokio::test]
-async fn test_hash_summary_empty() {
+async fn hash_summary_empty() {
     let handler = make_handler();
     let call = ToolCall {
         id: "c3".into(),
@@ -116,7 +116,7 @@ async fn test_hash_summary_empty() {
 }
 
 #[tokio::test]
-async fn test_hash_value_lookup() {
+async fn hash_value_lookup() {
     let handler = make_handler();
     {
         let mut s = handler.state.write().await;
@@ -145,7 +145,7 @@ async fn test_hash_value_lookup() {
 }
 
 #[tokio::test]
-async fn test_hash_value_not_found() {
+async fn hash_value_not_found() {
     let handler = make_handler();
     let call = ToolCall {
         id: "c5".into(),
@@ -160,7 +160,7 @@ async fn test_hash_value_not_found() {
 }
 
 #[tokio::test]
-async fn test_pending_tasks_empty() {
+async fn pending_tasks_empty() {
     let handler = make_handler();
     let call = ToolCall {
         id: "c6".into(),
@@ -178,7 +178,7 @@ async fn test_pending_tasks_empty() {
 }
 
 #[tokio::test]
-async fn test_unknown_tool_returns_none() {
+async fn unknown_tool_returns_none() {
     let handler = make_handler();
     let call = ToolCall {
         id: "c7".into(),
@@ -189,7 +189,7 @@ async fn test_unknown_tool_returns_none() {
 }
 
 #[tokio::test]
-async fn test_dispatch_without_dispatcher() {
+async fn dispatch_without_dispatcher() {
     let handler = make_handler();
     let call = ToolCall {
         id: "c8".into(),
@@ -201,7 +201,7 @@ async fn test_dispatch_without_dispatcher() {
 }
 
 #[tokio::test]
-async fn test_operation_summary() {
+async fn operation_summary() {
     let handler = make_handler();
     {
         let mut s = handler.state.write().await;
@@ -236,7 +236,7 @@ async fn test_operation_summary() {
 }
 
 #[tokio::test]
-async fn test_dispatch_crack_without_dispatcher() {
+async fn dispatch_crack_without_dispatcher() {
     let handler = make_handler();
     let call = ToolCall {
         id: "c11".into(),
@@ -248,7 +248,7 @@ async fn test_dispatch_crack_without_dispatcher() {
 }
 
 #[tokio::test]
-async fn test_all_credentials_pagination() {
+async fn all_credentials_pagination() {
     let handler = make_handler();
     {
         let mut s = handler.state.write().await;
@@ -280,7 +280,7 @@ async fn test_all_credentials_pagination() {
 }
 
 #[tokio::test]
-async fn test_full_summary_with_populated_state() {
+async fn full_summary_with_populated_state() {
     let handler = make_handler();
     {
         let mut s = handler.state.write().await;
@@ -342,7 +342,7 @@ async fn test_full_summary_with_populated_state() {
 }
 
 #[tokio::test]
-async fn test_credential_summary_multi_domain() {
+async fn credential_summary_multi_domain() {
     let handler = make_handler();
     {
         let mut s = handler.state.write().await;
@@ -372,7 +372,7 @@ async fn test_credential_summary_multi_domain() {
 }
 
 #[tokio::test]
-async fn test_hash_value_case_insensitive_lookup() {
+async fn hash_value_case_insensitive_lookup() {
     let handler = make_handler();
     {
         let mut s = handler.state.write().await;
@@ -398,7 +398,7 @@ async fn test_hash_value_case_insensitive_lookup() {
 }
 
 #[tokio::test]
-async fn test_hash_value_filter_by_type() {
+async fn hash_value_filter_by_type() {
     let handler = make_handler();
     {
         let mut s = handler.state.write().await;
@@ -434,7 +434,7 @@ async fn test_hash_value_filter_by_type() {
 }
 
 #[tokio::test]
-async fn test_all_dispatch_tools_fail_without_dispatcher() {
+async fn all_dispatch_tools_fail_without_dispatcher() {
     let handler = make_handler();
     let dispatch_tools = [
         ("dispatch_recon", json!({"target_ip": "192.168.58.10"})),
@@ -473,7 +473,7 @@ async fn test_all_dispatch_tools_fail_without_dispatcher() {
 }
 
 #[tokio::test]
-async fn test_all_callback_tools_recognized() {
+async fn all_callback_tools_recognized() {
     let handler = make_handler();
     let tools = [
         "get_credential_summary",
@@ -515,7 +515,7 @@ async fn test_all_callback_tools_recognized() {
 }
 
 #[tokio::test]
-async fn test_all_hashes_pagination_large() {
+async fn all_hashes_pagination_large() {
     let handler = make_handler();
     {
         let mut s = handler.state.write().await;
@@ -546,10 +546,8 @@ async fn test_all_hashes_pagination_large() {
     }
 }
 
-// --- Disabled tool handler tests (dispatch.rs coverage) ---
-
 #[tokio::test]
-async fn test_record_credential_disabled() {
+async fn record_credential_disabled() {
     let handler = make_handler();
     let call = ToolCall {
         id: "dis-1".into(),
@@ -567,7 +565,7 @@ async fn test_record_credential_disabled() {
 }
 
 #[tokio::test]
-async fn test_record_timeline_event_disabled() {
+async fn record_timeline_event_disabled() {
     let handler = make_handler();
     let call = ToolCall {
         id: "dis-2".into(),
@@ -585,7 +583,7 @@ async fn test_record_timeline_event_disabled() {
 }
 
 #[tokio::test]
-async fn test_report_cracked_credential_disabled() {
+async fn report_cracked_credential_disabled() {
     let handler = make_handler();
     let call = ToolCall {
         id: "dis-3".into(),
@@ -603,7 +601,7 @@ async fn test_report_cracked_credential_disabled() {
 }
 
 #[tokio::test]
-async fn test_list_credentials_delegates_to_get_all() {
+async fn list_credentials_delegates_to_get_all() {
     let handler = make_handler();
     {
         let mut s = handler.state.write().await;
@@ -630,7 +628,7 @@ async fn test_list_credentials_delegates_to_get_all() {
 }
 
 #[tokio::test]
-async fn test_dispatch_coercion_without_dispatcher() {
+async fn dispatch_coercion_without_dispatcher() {
     let handler = make_handler();
     let call = ToolCall {
         id: "co-1".into(),
@@ -642,7 +640,7 @@ async fn test_dispatch_coercion_without_dispatcher() {
 }
 
 #[tokio::test]
-async fn test_dispatch_exploit_without_dispatcher() {
+async fn dispatch_exploit_without_dispatcher() {
     let handler = make_handler();
     let call = ToolCall {
         id: "ex-1".into(),
@@ -654,7 +652,7 @@ async fn test_dispatch_exploit_without_dispatcher() {
 }
 
 #[tokio::test]
-async fn test_get_agent_status_without_task_queue() {
+async fn get_agent_status_without_task_queue() {
     let handler = make_handler();
     let call = ToolCall {
         id: "as-1".into(),
@@ -667,7 +665,7 @@ async fn test_get_agent_status_without_task_queue() {
 }
 
 #[tokio::test]
-async fn test_hash_summary_with_mixed_types() {
+async fn hash_summary_with_mixed_types() {
     let handler = make_handler();
     {
         let mut s = handler.state.write().await;
@@ -708,7 +706,7 @@ async fn test_hash_summary_with_mixed_types() {
 }
 
 #[tokio::test]
-async fn test_all_credentials_zero_offset_default_limit() {
+async fn all_credentials_zero_offset_default_limit() {
     let handler = make_handler();
     {
         let mut s = handler.state.write().await;
@@ -742,7 +740,7 @@ async fn test_all_credentials_zero_offset_default_limit() {
 }
 
 #[tokio::test]
-async fn test_all_hashes_default_params() {
+async fn all_hashes_default_params() {
     let handler = make_handler();
     {
         let mut s = handler.state.write().await;
@@ -774,7 +772,7 @@ async fn test_all_hashes_default_params() {
 }
 
 #[tokio::test]
-async fn test_operation_summary_empty_state() {
+async fn operation_summary_empty_state() {
     let handler = make_handler();
     let call = ToolCall {
         id: "os-empty".into(),
@@ -796,7 +794,7 @@ async fn test_operation_summary_empty_state() {
 }
 
 #[tokio::test]
-async fn test_hash_value_empty_domain_filter() {
+async fn hash_value_empty_domain_filter() {
     let handler = make_handler();
     {
         let mut s = handler.state.write().await;

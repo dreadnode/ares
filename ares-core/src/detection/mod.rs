@@ -192,11 +192,8 @@ mod tests {
         let config = detection_config();
         let first_name = config.templates.keys().next().unwrap();
         let result = find_template(first_name);
-        assert!(
-            result.is_some(),
-            "should find template by name: {first_name}"
-        );
-        let (key, _) = result.unwrap();
+        let (key, _) =
+            result.unwrap_or_else(|| panic!("should find template by name: {first_name}"));
         assert_eq!(key, first_name.as_str());
     }
 
@@ -211,8 +208,8 @@ mod tests {
         for (name, entry) in &config.templates {
             if let Some(alias) = entry.aliases.first() {
                 let result = find_template(alias);
-                assert!(result.is_some(), "should find '{name}' by alias '{alias}'");
-                let (key, _) = result.unwrap();
+                let (key, _) =
+                    result.unwrap_or_else(|| panic!("should find '{name}' by alias '{alias}'"));
                 assert_eq!(key, name.as_str());
                 return;
             }

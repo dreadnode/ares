@@ -273,7 +273,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_is_rbcd_candidate_direct_types() {
+    fn is_rbcd_candidate_direct_types() {
         assert!(is_rbcd_candidate("rbcd", None));
         assert!(is_rbcd_candidate("RBCD", None));
         assert!(is_rbcd_candidate("genericall_computer", None));
@@ -281,14 +281,14 @@ mod tests {
     }
 
     #[test]
-    fn test_is_rbcd_candidate_with_target_type() {
+    fn is_rbcd_candidate_with_target_type() {
         assert!(is_rbcd_candidate("genericall", Some("Computer")));
         assert!(is_rbcd_candidate("genericwrite", Some("DC01$")));
         assert!(is_rbcd_candidate("GenericAll", Some("computer")));
     }
 
     #[test]
-    fn test_is_rbcd_candidate_negative() {
+    fn is_rbcd_candidate_negative() {
         assert!(!is_rbcd_candidate("genericall", None));
         assert!(!is_rbcd_candidate("genericall", Some("User")));
         assert!(!is_rbcd_candidate("genericwrite", Some("Group")));
@@ -297,7 +297,7 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_computer_ip_exact_match() {
+    fn resolve_computer_ip_exact_match() {
         let hosts = vec![
             ("dc01", "192.168.58.10"),
             ("sql01.contoso.local", "192.168.58.20"),
@@ -307,7 +307,7 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_computer_ip_fqdn_match() {
+    fn resolve_computer_ip_fqdn_match() {
         let hosts = vec![
             ("dc01.contoso.local", "192.168.58.10"),
             ("sql01.contoso.local", "192.168.58.20"),
@@ -317,21 +317,21 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_computer_ip_no_match() {
+    fn resolve_computer_ip_no_match() {
         let hosts = vec![("dc01.contoso.local", "192.168.58.10")];
         let result = resolve_computer_ip("dc02$", hosts.into_iter());
         assert!(result.is_none());
     }
 
     #[test]
-    fn test_resolve_computer_ip_no_dollar_suffix() {
+    fn resolve_computer_ip_no_dollar_suffix() {
         let hosts = vec![("web01.contoso.local", "192.168.58.30")];
         let result = resolve_computer_ip("web01", hosts.into_iter());
         assert_eq!(result, Some("192.168.58.30".to_string()));
     }
 
     #[test]
-    fn test_resolve_computer_ip_partial_no_match() {
+    fn resolve_computer_ip_partial_no_match() {
         // "dc01" should not match "dc011.contoso.local"
         let hosts = vec![("dc011.contoso.local", "192.168.58.11")];
         let result = resolve_computer_ip("dc01$", hosts.into_iter());
@@ -339,19 +339,19 @@ mod tests {
     }
 
     #[test]
-    fn test_dedup_key_format() {
+    fn dedup_key_format() {
         let vuln_id = "vuln-123";
         let dedup_key = format!("{DEDUP_RBCD}:{vuln_id}");
         assert_eq!(dedup_key, "rbcd_exploit:vuln-123");
     }
 
     #[test]
-    fn test_dedup_key_constant() {
+    fn dedup_key_constant() {
         assert_eq!(DEDUP_RBCD, "rbcd_exploit");
     }
 
     #[test]
-    fn test_dedup_key_with_uuid_vuln_id() {
+    fn dedup_key_with_uuid_vuln_id() {
         let vuln_id = "550e8400-e29b-41d4-a716-446655440000";
         let dedup_key = format!("{DEDUP_RBCD}:{vuln_id}");
         assert_eq!(
@@ -361,7 +361,7 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_computer_ip_empty_hostname() {
+    fn resolve_computer_ip_empty_hostname() {
         // Hosts with empty hostname should not match anything
         let hosts = vec![("", "192.168.58.10")];
         let result = resolve_computer_ip("dc01$", hosts.into_iter());
@@ -369,7 +369,7 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_computer_ip_empty_target() {
+    fn resolve_computer_ip_empty_target() {
         // Empty target should not match any host
         let hosts = vec![("dc01.contoso.local", "192.168.58.10")];
         let result = resolve_computer_ip("", hosts.into_iter());
@@ -377,7 +377,7 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_computer_ip_dollar_only_target() {
+    fn resolve_computer_ip_dollar_only_target() {
         // A target of just "$" should trim to empty and not match
         let hosts = vec![("dc01.contoso.local", "192.168.58.10")];
         let result = resolve_computer_ip("$", hosts.into_iter());
@@ -385,14 +385,14 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_computer_ip_case_insensitive() {
+    fn resolve_computer_ip_case_insensitive() {
         let hosts = vec![("DC01.CONTOSO.LOCAL", "192.168.58.10")];
         let result = resolve_computer_ip("dc01", hosts.into_iter());
         assert_eq!(result, Some("192.168.58.10".to_string()));
     }
 
     #[test]
-    fn test_resolve_computer_ip_multiple_hosts_first_match() {
+    fn resolve_computer_ip_multiple_hosts_first_match() {
         // When multiple hosts could match, returns the first one
         let hosts = vec![
             ("dc01.contoso.local", "192.168.58.10"),
@@ -403,14 +403,14 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_computer_ip_empty_hosts_list() {
+    fn resolve_computer_ip_empty_hosts_list() {
         let hosts: Vec<(&str, &str)> = vec![];
         let result = resolve_computer_ip("dc01$", hosts.into_iter());
         assert!(result.is_none());
     }
 
     #[test]
-    fn test_resolve_computer_ip_machine_account_with_dollar() {
+    fn resolve_computer_ip_machine_account_with_dollar() {
         // Verify $ is stripped from machine account names
         let hosts = vec![("sql01.contoso.local", "192.168.58.20")];
         let result = resolve_computer_ip("SQL01$", hosts.into_iter());
@@ -418,7 +418,7 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_computer_ip_fqdn_target_no_match() {
+    fn resolve_computer_ip_fqdn_target_no_match() {
         // FQDN target should not match since we only compare short name
         // "dc01.contoso.local" trimmed of $ is "dc01.contoso.local"
         // which does not equal "dc01" and "dc01" does not start with "dc01.contoso.local."
@@ -430,7 +430,7 @@ mod tests {
     }
 
     #[test]
-    fn test_is_rbcd_candidate_all_vuln_type_strings() {
+    fn is_rbcd_candidate_all_vuln_type_strings() {
         // Exhaustive test of all recognized RBCD vuln_type values
         assert!(is_rbcd_candidate("rbcd", None));
         assert!(is_rbcd_candidate("RBCD", None));
@@ -444,7 +444,7 @@ mod tests {
     }
 
     #[test]
-    fn test_is_rbcd_candidate_generic_with_computer_target() {
+    fn is_rbcd_candidate_generic_with_computer_target() {
         // genericall/genericwrite require target_type=Computer to be RBCD candidates
         assert!(is_rbcd_candidate("genericall", Some("Computer")));
         assert!(is_rbcd_candidate("genericall", Some("computer")));
@@ -454,7 +454,7 @@ mod tests {
     }
 
     #[test]
-    fn test_is_rbcd_candidate_generic_with_machine_account_target() {
+    fn is_rbcd_candidate_generic_with_machine_account_target() {
         // Machine accounts ending with $ are treated as computer targets
         assert!(is_rbcd_candidate("genericall", Some("DC01$")));
         assert!(is_rbcd_candidate("genericwrite", Some("SQL01$")));
@@ -462,14 +462,14 @@ mod tests {
     }
 
     #[test]
-    fn test_is_rbcd_candidate_generic_without_target_type_rejected() {
+    fn is_rbcd_candidate_generic_without_target_type_rejected() {
         // genericall/genericwrite without target_type should NOT be RBCD
         assert!(!is_rbcd_candidate("genericall", None));
         assert!(!is_rbcd_candidate("genericwrite", None));
     }
 
     #[test]
-    fn test_is_rbcd_candidate_generic_with_non_computer_target() {
+    fn is_rbcd_candidate_generic_with_non_computer_target() {
         // genericall/genericwrite on non-computer targets
         assert!(!is_rbcd_candidate("genericall", Some("User")));
         assert!(!is_rbcd_candidate("genericall", Some("Group")));
@@ -479,7 +479,7 @@ mod tests {
     }
 
     #[test]
-    fn test_is_rbcd_candidate_unrelated_vuln_types() {
+    fn is_rbcd_candidate_unrelated_vuln_types() {
         // Non-RBCD vuln types should all return false regardless of target_type
         let non_rbcd = vec![
             "esc1",

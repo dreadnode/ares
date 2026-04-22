@@ -203,7 +203,7 @@ mod tests {
     }
 
     #[test]
-    fn test_list_credentials_fallback() {
+    fn list_credentials_fallback() {
         let call = make_call("list_credentials", serde_json::json!({}));
         let result = handle_builtin_callback(&call).unwrap();
         match result {
@@ -216,7 +216,7 @@ mod tests {
     }
 
     #[test]
-    fn test_task_complete_string_result() {
+    fn task_complete_string_result() {
         let call = make_call(
             "task_complete",
             serde_json::json!({"task_id": "t-123", "result": "done"}),
@@ -232,7 +232,7 @@ mod tests {
     }
 
     #[test]
-    fn test_task_complete_json_result() {
+    fn task_complete_json_result() {
         let call = make_call(
             "task_complete",
             serde_json::json!({"task_id": "t-456", "result": {"status": "success"}}),
@@ -248,7 +248,7 @@ mod tests {
     }
 
     #[test]
-    fn test_request_assistance() {
+    fn request_assistance() {
         let call = make_call(
             "request_assistance",
             serde_json::json!({"issue": "stuck", "context": "ldap failed"}),
@@ -264,7 +264,7 @@ mod tests {
     }
 
     #[test]
-    fn test_record_credential_disabled() {
+    fn record_credential_disabled() {
         let call = make_call(
             "record_credential",
             serde_json::json!({
@@ -283,7 +283,7 @@ mod tests {
     }
 
     #[test]
-    fn test_orchestrator_only_tools() {
+    fn orchestrator_only_tools() {
         for tool_name in [
             "get_credential_summary",
             "get_hash_summary",
@@ -302,7 +302,7 @@ mod tests {
     }
 
     #[test]
-    fn test_unknown_callback() {
+    fn unknown_callback() {
         let call = make_call("nonexistent_tool", serde_json::json!({}));
         let result = handle_builtin_callback(&call);
         assert!(result.is_err());

@@ -224,8 +224,6 @@ pub async fn raise_child(args: &Value) -> Result<ToolOutput> {
     cmd.timeout_secs(300).execute().await
 }
 
-// ─── Tests ──────────────────────────────────────────────────────────────────
-
 #[cfg(test)]
 mod tests {
     use crate::args::{optional_str, required_str};
@@ -235,7 +233,7 @@ mod tests {
     // ── find_delegation arg validation ──────────────────────────────────
 
     #[test]
-    fn test_find_delegation_requires_domain() {
+    fn find_delegation_requires_domain() {
         let args = json!({
             "username": "admin",
             "dc_ip": "192.168.58.10",
@@ -245,7 +243,7 @@ mod tests {
     }
 
     #[test]
-    fn test_find_delegation_requires_username() {
+    fn find_delegation_requires_username() {
         let args = json!({
             "domain": "contoso.local",
             "dc_ip": "192.168.58.10",
@@ -255,7 +253,7 @@ mod tests {
     }
 
     #[test]
-    fn test_find_delegation_requires_dc_ip() {
+    fn find_delegation_requires_dc_ip() {
         let args = json!({
             "domain": "contoso.local",
             "username": "admin",
@@ -265,7 +263,7 @@ mod tests {
     }
 
     #[test]
-    fn test_find_delegation_with_password() {
+    fn find_delegation_with_password() {
         let args = json!({
             "domain": "contoso.local",
             "username": "admin",
@@ -281,7 +279,7 @@ mod tests {
     }
 
     #[test]
-    fn test_find_delegation_with_hash() {
+    fn find_delegation_with_hash() {
         let args = json!({
             "domain": "contoso.local",
             "username": "admin",
@@ -296,7 +294,7 @@ mod tests {
     }
 
     #[test]
-    fn test_find_delegation_requires_password_or_hash() {
+    fn find_delegation_requires_password_or_hash() {
         let args = json!({
             "domain": "contoso.local",
             "username": "admin",
@@ -311,7 +309,7 @@ mod tests {
     // ── find_delegation integration error ──────────────────────────────
 
     #[test]
-    fn test_find_delegation_no_auth_errors() {
+    fn find_delegation_no_auth_errors() {
         let args = json!({
             "domain": "contoso.local",
             "username": "admin",
@@ -327,7 +325,7 @@ mod tests {
     // ── s4u_attack arg validation ──────────────────────────────────────
 
     #[test]
-    fn test_s4u_attack_requires_target_spn() {
+    fn s4u_attack_requires_target_spn() {
         let args = json!({
             "domain": "contoso.local",
             "username": "svc_web$",
@@ -338,7 +336,7 @@ mod tests {
     }
 
     #[test]
-    fn test_s4u_attack_requires_impersonate() {
+    fn s4u_attack_requires_impersonate() {
         let args = json!({
             "domain": "contoso.local",
             "username": "svc_web$",
@@ -349,7 +347,7 @@ mod tests {
     }
 
     #[test]
-    fn test_s4u_attack_all_args() {
+    fn s4u_attack_all_args() {
         let args = json!({
             "domain": "contoso.local",
             "username": "svc_web$",
@@ -368,7 +366,7 @@ mod tests {
     }
 
     #[test]
-    fn test_s4u_attack_no_auth_errors() {
+    fn s4u_attack_no_auth_errors() {
         let args = json!({
             "domain": "contoso.local",
             "username": "svc_web$",
@@ -384,7 +382,7 @@ mod tests {
     // ── generate_golden_ticket arg validation ──────────────────────────
 
     #[test]
-    fn test_golden_ticket_requires_krbtgt_hash() {
+    fn golden_ticket_requires_krbtgt_hash() {
         let args = json!({
             "domain_sid": "S-1-5-21-1234567890-987654321-1122334455",
             "domain": "contoso.local"
@@ -393,7 +391,7 @@ mod tests {
     }
 
     #[test]
-    fn test_golden_ticket_requires_domain_sid() {
+    fn golden_ticket_requires_domain_sid() {
         let args = json!({
             "krbtgt_hash": "31d6cfe0d16ae931b73c59d7e0c089c0",
             "domain": "contoso.local"
@@ -402,7 +400,7 @@ mod tests {
     }
 
     #[test]
-    fn test_golden_ticket_default_username() {
+    fn golden_ticket_default_username() {
         let args = json!({
             "krbtgt_hash": "31d6cfe0d16ae931b73c59d7e0c089c0",
             "domain_sid": "S-1-5-21-1234567890-987654321-1122334455",
@@ -413,7 +411,7 @@ mod tests {
     }
 
     #[test]
-    fn test_golden_ticket_custom_username() {
+    fn golden_ticket_custom_username() {
         let args = json!({
             "krbtgt_hash": "31d6cfe0d16ae931b73c59d7e0c089c0",
             "domain_sid": "S-1-5-21-1234567890-987654321-1122334455",
@@ -425,7 +423,7 @@ mod tests {
     }
 
     #[test]
-    fn test_golden_ticket_extra_sid_optional() {
+    fn golden_ticket_extra_sid_optional() {
         let args = json!({
             "krbtgt_hash": "31d6cfe0d16ae931b73c59d7e0c089c0",
             "domain_sid": "S-1-5-21-1234567890-987654321-1122334455",
@@ -439,7 +437,7 @@ mod tests {
     }
 
     #[test]
-    fn test_golden_ticket_extra_sid_absent() {
+    fn golden_ticket_extra_sid_absent() {
         let args = json!({
             "krbtgt_hash": "31d6cfe0d16ae931b73c59d7e0c089c0",
             "domain_sid": "S-1-5-21-1234567890-987654321-1122334455",
@@ -451,7 +449,7 @@ mod tests {
     // ── add_computer arg validation ────────────────────────────────────
 
     #[test]
-    fn test_add_computer_all_required_args() {
+    fn add_computer_all_required_args() {
         let args = json!({
             "domain": "contoso.local",
             "username": "jsmith",
@@ -474,7 +472,7 @@ mod tests {
     }
 
     #[test]
-    fn test_add_computer_missing_computer_name() {
+    fn add_computer_missing_computer_name() {
         let args = json!({
             "domain": "contoso.local",
             "username": "jsmith",
@@ -488,7 +486,7 @@ mod tests {
     // ── addspn arg validation ──────────────────────────────────────────
 
     #[test]
-    fn test_addspn_all_required_args() {
+    fn addspn_all_required_args() {
         let args = json!({
             "domain": "contoso.local",
             "username": "admin",
@@ -507,7 +505,7 @@ mod tests {
     }
 
     #[test]
-    fn test_addspn_missing_spn() {
+    fn addspn_missing_spn() {
         let args = json!({
             "domain": "contoso.local",
             "username": "admin",
@@ -522,7 +520,7 @@ mod tests {
     // ── rbcd_write arg validation ──────────────────────────────────────
 
     #[test]
-    fn test_rbcd_write_all_args() {
+    fn rbcd_write_all_args() {
         let args = json!({
             "domain": "contoso.local",
             "username": "admin",
@@ -545,7 +543,7 @@ mod tests {
     }
 
     #[test]
-    fn test_rbcd_write_missing_attacker_sid() {
+    fn rbcd_write_missing_attacker_sid() {
         let args = json!({
             "domain": "contoso.local",
             "username": "admin",
@@ -559,7 +557,7 @@ mod tests {
     // ── krbrelayup arg validation ──────────────────────────────────────
 
     #[test]
-    fn test_krbrelayup_required_args_only() {
+    fn krbrelayup_required_args_only() {
         let args = json!({
             "domain": "contoso.local",
             "dc_ip": "192.168.58.10"
@@ -572,7 +570,7 @@ mod tests {
     }
 
     #[test]
-    fn test_krbrelayup_with_optional_args() {
+    fn krbrelayup_with_optional_args() {
         let args = json!({
             "domain": "contoso.local",
             "dc_ip": "192.168.58.10",
@@ -587,7 +585,7 @@ mod tests {
     // ── raise_child arg validation ─────────────────────────────────────
 
     #[test]
-    fn test_raise_child_requires_child_domain() {
+    fn raise_child_requires_child_domain() {
         let args = json!({
             "username": "admin",
             "password": "P@ssw0rd!"
@@ -596,7 +594,7 @@ mod tests {
     }
 
     #[test]
-    fn test_raise_child_no_auth_errors() {
+    fn raise_child_no_auth_errors() {
         let args = json!({
             "child_domain": "child.contoso.local",
             "username": "admin"
@@ -611,7 +609,7 @@ mod tests {
     }
 
     #[test]
-    fn test_raise_child_with_password_target_format() {
+    fn raise_child_with_password_target_format() {
         let args = json!({
             "child_domain": "child.contoso.local",
             "username": "admin",
@@ -625,7 +623,7 @@ mod tests {
     }
 
     #[test]
-    fn test_raise_child_with_hash_target_format() {
+    fn raise_child_with_hash_target_format() {
         let args = json!({
             "child_domain": "child.contoso.local",
             "username": "admin",
@@ -644,7 +642,7 @@ mod tests {
     }
 
     #[test]
-    fn test_raise_child_target_domain_optional() {
+    fn raise_child_target_domain_optional() {
         let args = json!({
             "child_domain": "child.contoso.local",
             "username": "admin",
@@ -657,14 +655,14 @@ mod tests {
     // ── credential helper tests ────────────────────────────────────────
 
     #[test]
-    fn test_hash_args_with_nt_only() {
+    fn hash_args_with_nt_only() {
         let hash_args = credentials::hash_args("31d6cfe0d16ae931b73c59d7e0c089c0");
         assert_eq!(hash_args[0], "-hashes");
         assert_eq!(hash_args[1], ":31d6cfe0d16ae931b73c59d7e0c089c0");
     }
 
     #[test]
-    fn test_hash_args_with_lm_nt() {
+    fn hash_args_with_lm_nt() {
         let hash_args = credentials::hash_args(
             "aad3b435b51404eeaad3b435b51404ee:31d6cfe0d16ae931b73c59d7e0c089c0",
         );
@@ -676,7 +674,7 @@ mod tests {
     }
 
     #[test]
-    fn test_impacket_auth_with_hash() {
+    fn impacket_auth_with_hash() {
         let (target, extra) = credentials::impacket_auth(
             Some("contoso.local"),
             "admin",
@@ -689,7 +687,7 @@ mod tests {
     }
 
     #[test]
-    fn test_impacket_auth_with_password() {
+    fn impacket_auth_with_password() {
         let (target, extra) = credentials::impacket_auth(
             Some("contoso.local"),
             "admin",
@@ -702,7 +700,7 @@ mod tests {
     }
 
     #[test]
-    fn test_kerberos_env() {
+    fn kerberos_env() {
         let (key, val) = credentials::kerberos_env("/tmp/admin.ccache");
         assert_eq!(key, "KRB5CCNAME");
         assert_eq!(val, "/tmp/admin.ccache");

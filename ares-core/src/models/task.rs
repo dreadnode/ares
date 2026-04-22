@@ -157,8 +157,6 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    // ─── AgentRole Display ───────────────────────────────────────────────────
-
     #[test]
     fn agent_role_display() {
         assert_eq!(AgentRole::Orchestrator.to_string(), "orchestrator");
@@ -170,8 +168,6 @@ mod tests {
         assert_eq!(AgentRole::Lateral.to_string(), "lateral");
         assert_eq!(AgentRole::Coercion.to_string(), "coercion");
     }
-
-    // ─── AgentRole serde ─────────────────────────────────────────────────────
 
     #[test]
     fn agent_role_serde_roundtrip() {
@@ -199,8 +195,6 @@ mod tests {
         }
     }
 
-    // ─── TaskStatus Display ──────────────────────────────────────────────────
-
     #[test]
     fn task_status_display_all() {
         assert_eq!(TaskStatus::Pending.to_string(), "pending");
@@ -211,8 +205,6 @@ mod tests {
         assert_eq!(TaskStatus::Retrying.to_string(), "retrying");
     }
 
-    // ─── TaskStatus serde ────────────────────────────────────────────────────
-
     #[test]
     fn task_status_serde_roundtrip() {
         let status = TaskStatus::InProgress;
@@ -221,8 +213,6 @@ mod tests {
         let back: TaskStatus = serde_json::from_str(&json).unwrap();
         assert_eq!(back, TaskStatus::InProgress);
     }
-
-    // ─── TaskInfo serde ──────────────────────────────────────────────────────
 
     #[test]
     fn task_info_deserialize_minimal() {
@@ -276,8 +266,6 @@ mod tests {
         assert!(serialized.get("error").is_none());
     }
 
-    // ─── TaskResult serde ────────────────────────────────────────────────────
-
     #[test]
     fn task_result_deserialize() {
         let json = json!({
@@ -304,8 +292,6 @@ mod tests {
         assert_eq!(result.error.as_deref(), Some("connection refused"));
         assert!(result.result.is_none());
     }
-
-    // ─── VulnerabilityInfo serde ─────────────────────────────────────────────
 
     #[test]
     fn vulnerability_info_defaults() {
@@ -338,8 +324,6 @@ mod tests {
         assert_eq!(vuln.recommended_agent, "privesc");
         assert_eq!(vuln.details.len(), 2);
     }
-
-    // ─── AgentInfo serde ─────────────────────────────────────────────────────
 
     #[test]
     fn agent_info_deserialize() {

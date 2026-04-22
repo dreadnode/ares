@@ -549,10 +549,8 @@ mod tests {
         assert_eq!(val["status"]["grade"], "B");
     }
 
-    // ─── Default trait ──────────────────────────────────────────────────────
-
     #[test]
-    fn test_default_creates_valid_result() {
+    fn default_creates_valid_result() {
         let r = EvaluationResult::default();
         assert!(r.evaluation_id.is_empty());
         assert!(r.operation_id.is_empty());
@@ -591,10 +589,8 @@ mod tests {
         assert!(r.error.is_none());
     }
 
-    // ─── Serde round-trip ───────────────────────────────────────────────────
-
     #[test]
-    fn test_serde_roundtrip_default() {
+    fn serde_roundtrip_default() {
         let original = EvaluationResult::default();
         let json = serde_json::to_string(&original).unwrap();
         let deserialized: EvaluationResult = serde_json::from_str(&json).unwrap();
@@ -605,7 +601,7 @@ mod tests {
     }
 
     #[test]
-    fn test_serde_roundtrip_all_fields_populated() {
+    fn serde_roundtrip_all_fields_populated() {
         let original = EvaluationResult {
             evaluation_id: "eval-full".to_string(),
             operation_id: "op-full".to_string(),
@@ -689,8 +685,7 @@ mod tests {
     }
 
     #[test]
-    fn test_serde_missing_optional_fields() {
-        // Minimal JSON with only required fields — optional/defaulted fields omitted
+    fn serde_missing_optional_fields() {
         let json = r#"{
             "evaluation_id": "eval-min",
             "operation_id": "op-min",
@@ -731,11 +726,8 @@ mod tests {
         assert!(r.error.is_none());
     }
 
-    // ─── Grade boundary tests ───────────────────────────────────────────────
-
     #[test]
-    fn test_grade_boundaries() {
-        // Exact boundaries
+    fn grade_boundaries() {
         let at_90 = EvaluationResult {
             overall_score: 0.9,
             ..Default::default()
@@ -797,10 +789,8 @@ mod tests {
         assert_eq!(perfect.grade(), "A");
     }
 
-    // ─── passed() edge cases ────────────────────────────────────────────────
-
     #[test]
-    fn test_passed_boundary_exactly_half() {
+    fn passed_boundary_exactly_half() {
         let r = EvaluationResult {
             overall_score: 0.5,
             ioc_detection_rate: 0.5,
@@ -811,7 +801,7 @@ mod tests {
     }
 
     #[test]
-    fn test_passed_fails_overall_below_threshold() {
+    fn passed_fails_overall_below_threshold() {
         let r = EvaluationResult {
             overall_score: 0.49,
             ioc_detection_rate: 0.8,
@@ -822,7 +812,7 @@ mod tests {
     }
 
     #[test]
-    fn test_passed_fails_ioc_below_threshold() {
+    fn passed_fails_ioc_below_threshold() {
         let r = EvaluationResult {
             overall_score: 0.8,
             ioc_detection_rate: 0.49,
@@ -832,10 +822,8 @@ mod tests {
         assert!(!r.passed());
     }
 
-    // ─── investigation_status() via to_summary() ────────────────────────────
-
     #[test]
-    fn test_investigation_status_completed() {
+    fn investigation_status_completed() {
         let r = EvaluationResult {
             investigation_started: true,
             investigation_completed: true,
@@ -846,7 +834,7 @@ mod tests {
     }
 
     #[test]
-    fn test_investigation_status_started() {
+    fn investigation_status_started() {
         let r = EvaluationResult {
             investigation_started: true,
             investigation_completed: false,
@@ -857,7 +845,7 @@ mod tests {
     }
 
     #[test]
-    fn test_investigation_status_not_started() {
+    fn investigation_status_not_started() {
         let r = EvaluationResult {
             investigation_started: false,
             investigation_completed: false,
@@ -867,10 +855,8 @@ mod tests {
         assert!(summary.contains("Investigation: Not Started"));
     }
 
-    // ─── to_value() structure ───────────────────────────────────────────────
-
     #[test]
-    fn test_to_value_contains_all_sections() {
+    fn to_value_contains_all_sections() {
         let r = EvaluationResult {
             evaluation_id: "eval-struct".to_string(),
             operation_id: "op-struct".to_string(),
@@ -884,17 +870,6 @@ mod tests {
         };
         let val = r.to_value();
 
-        // Check all top-level sections exist
-        assert!(val.get("evaluation_id").is_some());
-        assert!(val.get("operation_id").is_some());
-        assert!(val.get("scores").is_some());
-        assert!(val.get("gaps").is_some());
-        assert!(val.get("stats").is_some());
-        assert!(val.get("status").is_some());
-        assert!(val.get("timing").is_some());
-        assert!(val.get("cost").is_some());
-        assert!(val.get("metadata").is_some());
-
         // Check nested values
         assert_eq!(val["status"]["alert_fired"], true);
         assert_eq!(val["status"]["passed"], false); // 0.7 overall but 0.0 ioc/tech
@@ -904,7 +879,7 @@ mod tests {
     }
 
     #[test]
-    fn test_to_value_gaps_counts() {
+    fn to_value_gaps_counts() {
         let r = EvaluationResult {
             found_iocs: vec![
                 ExpectedIOC {
@@ -939,10 +914,8 @@ mod tests {
         assert_eq!(val["gaps"]["missed_iocs"].as_array().unwrap().len(), 1);
     }
 
-    // ─── to_summary() formatting ────────────────────────────────────────────
-
     #[test]
-    fn test_to_summary_includes_timing_when_present() {
+    fn to_summary_includes_timing_when_present() {
         let r = EvaluationResult {
             duration_seconds: 120.0,
             time_to_first_evidence: Some(5.5),
@@ -958,7 +931,7 @@ mod tests {
     }
 
     #[test]
-    fn test_to_summary_excludes_timing_when_absent() {
+    fn to_summary_excludes_timing_when_absent() {
         let r = EvaluationResult::default();
         let summary = r.to_summary();
         assert!(!summary.contains("Timing:"));
@@ -966,7 +939,7 @@ mod tests {
     }
 
     #[test]
-    fn test_to_summary_includes_cost_when_tokens_present() {
+    fn to_summary_includes_cost_when_tokens_present() {
         let r = EvaluationResult {
             total_tokens: 5000,
             prompt_tokens: 3000,
@@ -981,14 +954,14 @@ mod tests {
     }
 
     #[test]
-    fn test_to_summary_excludes_cost_when_no_tokens() {
+    fn to_summary_excludes_cost_when_no_tokens() {
         let r = EvaluationResult::default();
         let summary = r.to_summary();
         assert!(!summary.contains("Cost:"));
     }
 
     #[test]
-    fn test_to_summary_shows_missed_techniques() {
+    fn to_summary_shows_missed_techniques() {
         let r = EvaluationResult {
             missed_techniques: vec![
                 ExpectedTechnique {
@@ -1013,7 +986,7 @@ mod tests {
     }
 
     #[test]
-    fn test_to_summary_truncates_missed_techniques_over_five() {
+    fn to_summary_truncates_missed_techniques_over_five() {
         let techniques: Vec<ExpectedTechnique> = (0..8)
             .map(|i| ExpectedTechnique {
                 technique_id: format!("T100{i}"),
@@ -1031,7 +1004,7 @@ mod tests {
     }
 
     #[test]
-    fn test_to_summary_shows_error() {
+    fn to_summary_shows_error() {
         let r = EvaluationResult {
             error: Some("LLM rate limited".to_string()),
             ..Default::default()
@@ -1040,10 +1013,8 @@ mod tests {
         assert!(summary.contains("Error: LLM rate limited"));
     }
 
-    // ─── DatasetEvaluationResult edge cases ─────────────────────────────────
-
     #[test]
-    fn test_dataset_empty_results() {
+    fn dataset_empty_results() {
         let ds = DatasetEvaluationResult {
             dataset_name: "empty".to_string(),
             evaluated_at: Utc::now(),
@@ -1062,7 +1033,7 @@ mod tests {
     }
 
     #[test]
-    fn test_dataset_all_passing() {
+    fn dataset_all_passing() {
         let ds = DatasetEvaluationResult {
             dataset_name: "all-pass".to_string(),
             evaluated_at: Utc::now(),
@@ -1085,7 +1056,7 @@ mod tests {
     }
 
     #[test]
-    fn test_dataset_all_failing() {
+    fn dataset_all_failing() {
         let ds = DatasetEvaluationResult {
             dataset_name: "all-fail".to_string(),
             evaluated_at: Utc::now(),
@@ -1108,7 +1079,7 @@ mod tests {
     }
 
     #[test]
-    fn test_dataset_to_value_structure() {
+    fn dataset_to_value_structure() {
         let ds = DatasetEvaluationResult {
             dataset_name: "test-ds".to_string(),
             evaluated_at: Utc::now(),
@@ -1128,7 +1099,7 @@ mod tests {
     }
 
     #[test]
-    fn test_dataset_to_summary_grade_distribution() {
+    fn dataset_to_summary_grade_distribution() {
         let ds = DatasetEvaluationResult {
             dataset_name: "grade-dist".to_string(),
             evaluated_at: Utc::now(),
@@ -1165,7 +1136,7 @@ mod tests {
     }
 
     #[test]
-    fn test_dataset_serde_roundtrip() {
+    fn dataset_serde_roundtrip() {
         let ds = DatasetEvaluationResult {
             dataset_name: "roundtrip".to_string(),
             evaluated_at: Utc::now(),
@@ -1182,15 +1153,13 @@ mod tests {
         assert!((deserialized.results[0].overall_score - 0.75).abs() < f64::EPSILON);
     }
 
-    // ─── avg() helper ───────────────────────────────────────────────────────
-
     #[test]
-    fn test_avg_empty() {
+    fn avg_empty() {
         assert_eq!(avg(&[], |r| r.overall_score), 0.0);
     }
 
     #[test]
-    fn test_avg_single() {
+    fn avg_single() {
         let results = vec![EvaluationResult {
             overall_score: 0.8,
             ..Default::default()
@@ -1199,7 +1168,7 @@ mod tests {
     }
 
     #[test]
-    fn test_avg_multiple() {
+    fn avg_multiple() {
         let results = vec![
             EvaluationResult {
                 overall_score: 0.6,

@@ -660,15 +660,6 @@ impl RedBlueCorrelator {
         super::report::generate_report_markdown(report)
     }
 
-    #[cfg(test)]
-    pub(crate) fn calculate_technique_coverage_pub(
-        activities: &[RedTeamActivity],
-        matches: &[CorrelationMatch],
-        gaps: &[DetectionGap],
-    ) -> HashMap<String, TechniqueCoverage> {
-        Self::calculate_technique_coverage(activities, matches, gaps)
-    }
-
     /// Run correlation analysis on all reports in the directory.
     pub fn run_full_analysis(&self) -> anyhow::Result<Vec<CorrelationReport>> {
         let (red_reports, blue_detections) = self.load_all_reports()?;

@@ -433,8 +433,6 @@ mod tests {
         }
     }
 
-    // ---- score_stage_progress ----
-
     #[rstest]
     #[case(None, 0.0)]
     #[case(Some("triage"), 0.25)]
@@ -447,8 +445,6 @@ mod tests {
         snap.stage = stage.map(String::from);
         assert_abs_diff_eq!(score_stage_progress(&snap), expected, epsilon = 0.001);
     }
-
-    // ---- score_ioc_detection ----
 
     #[test]
     fn ioc_detection_empty_gt_returns_one() {
@@ -503,8 +499,6 @@ mod tests {
         assert_abs_diff_eq!(score_ioc_detection(&snap, &gt), 0.7, epsilon = 0.001);
     }
 
-    // ---- ioc_matches ----
-
     #[test]
     fn ioc_matches_exact() {
         let ioc = make_ioc("ip", "10.0.0.1", true);
@@ -547,8 +541,6 @@ mod tests {
         assert!(!ioc_matches(&ioc, &found));
     }
 
-    // ---- build_found_values ----
-
     #[test]
     fn build_found_values_includes_evidence_and_queries() {
         let mut snap = empty_snap();
@@ -572,8 +564,6 @@ mod tests {
         assert!(found.contains("dc01.corp.local"));
         assert!(found.contains("dc01"));
     }
-
-    // ---- score_technique_coverage ----
 
     #[test]
     fn technique_coverage_empty_gt_returns_one() {
@@ -607,8 +597,6 @@ mod tests {
         assert_abs_diff_eq!(score_technique_coverage(&snap, &gt), 0.4, epsilon = 0.01);
     }
 
-    // ---- score_pyramid_elevation ----
-
     #[test]
     fn pyramid_elevation_empty_evidence() {
         let snap = empty_snap();
@@ -638,8 +626,6 @@ mod tests {
         assert_abs_diff_eq!(score_pyramid_elevation(&snap), 0.733, epsilon = 0.01);
     }
 
-    // ---- score_evidence_quality ----
-
     #[test]
     fn evidence_quality_empty() {
         let snap = empty_snap();
@@ -665,8 +651,6 @@ mod tests {
         // 0.7*0.4 + 0.5*0.3 + 0.0*0.3 = 0.43
         assert_abs_diff_eq!(score_evidence_quality(&snap), 0.43, epsilon = 0.01);
     }
-
-    // ---- score_timeline_accuracy ----
 
     #[test]
     fn timeline_accuracy_empty_gt_returns_one() {
@@ -707,8 +691,6 @@ mod tests {
         assert_abs_diff_eq!(score_timeline_accuracy(&snap, &gt), 1.0, epsilon = 0.001);
     }
 
-    // ---- timeline_event_matches ----
-
     #[test]
     fn timeline_event_matches_substring() {
         let descs = vec!["credential dump via secretsdump".into()];
@@ -726,8 +708,6 @@ mod tests {
         let descs = vec!["lateral movement to dc01".into()];
         assert!(timeline_event_matches("lateral.*dc\\d+", &descs));
     }
-
-    // ---- technique_matches ----
 
     #[test]
     fn technique_matches_exact() {
@@ -749,8 +729,6 @@ mod tests {
         let found: HashSet<String> = ["T1046".into()].into_iter().collect();
         assert!(!technique_matches(&t, &found));
     }
-
-    // ---- score_investigation_overall ----
 
     #[test]
     fn overall_score_empty_is_bounded() {

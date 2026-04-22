@@ -260,7 +260,7 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
-    fn test_is_shadow_cred_candidate_positive() {
+    fn is_shadow_cred_candidate_positive() {
         assert!(is_shadow_cred_candidate("genericall"));
         assert!(is_shadow_cred_candidate("GenericAll"));
         assert!(is_shadow_cred_candidate("genericwrite"));
@@ -273,7 +273,7 @@ mod tests {
     }
 
     #[test]
-    fn test_is_shadow_cred_candidate_negative() {
+    fn is_shadow_cred_candidate_negative() {
         assert!(!is_shadow_cred_candidate("rbcd"));
         assert!(!is_shadow_cred_candidate("esc1"));
         assert!(!is_shadow_cred_candidate("mssql_access"));
@@ -283,14 +283,14 @@ mod tests {
     }
 
     #[test]
-    fn test_is_shadow_cred_candidate_case_insensitive() {
+    fn is_shadow_cred_candidate_case_insensitive() {
         assert!(is_shadow_cred_candidate("GENERICALL"));
         assert!(is_shadow_cred_candidate("WriteDacl"));
         assert!(is_shadow_cred_candidate("ACL_GENERICWRITE"));
     }
 
     #[test]
-    fn test_is_shadow_cred_candidate_partial_match_rejected() {
+    fn is_shadow_cred_candidate_partial_match_rejected() {
         // Substrings or superstrings should not match
         assert!(!is_shadow_cred_candidate("acl_genericall_extra"));
         assert!(!is_shadow_cred_candidate("not_genericall"));
@@ -299,7 +299,7 @@ mod tests {
     }
 
     #[test]
-    fn test_is_shadow_cred_candidate_whitespace_rejected() {
+    fn is_shadow_cred_candidate_whitespace_rejected() {
         assert!(!is_shadow_cred_candidate(" genericall"));
         assert!(!is_shadow_cred_candidate("genericall "));
         assert!(!is_shadow_cred_candidate(" genericall "));
@@ -310,7 +310,7 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
-    fn test_extract_source_user_primary_key() {
+    fn extract_source_user_primary_key() {
         let mut details = HashMap::new();
         details.insert(
             "source".to_string(),
@@ -320,7 +320,7 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_source_user_fallback_source_user() {
+    fn extract_source_user_fallback_source_user() {
         let mut details = HashMap::new();
         details.insert(
             "source_user".to_string(),
@@ -333,7 +333,7 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_source_user_fallback_attacker() {
+    fn extract_source_user_fallback_attacker() {
         let mut details = HashMap::new();
         details.insert(
             "attacker".to_string(),
@@ -343,7 +343,7 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_source_user_priority_order() {
+    fn extract_source_user_priority_order() {
         let mut details = HashMap::new();
         details.insert(
             "source".to_string(),
@@ -361,20 +361,20 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_source_user_empty_details() {
+    fn extract_source_user_empty_details() {
         let details = HashMap::new();
         assert_eq!(extract_source_user(&details), None);
     }
 
     #[test]
-    fn test_extract_source_user_non_string_value() {
+    fn extract_source_user_non_string_value() {
         let mut details = HashMap::new();
         details.insert("source".to_string(), serde_json::Value::Number(123.into()));
         assert_eq!(extract_source_user(&details), None);
     }
 
     #[test]
-    fn test_extract_source_user_null_does_not_fall_through() {
+    fn extract_source_user_null_does_not_fall_through() {
         // When "source" key exists but is Null, get() returns Some(&Null),
         // so or_else() does NOT try "attacker". The as_str() on Null returns None.
         let mut details = HashMap::new();
@@ -391,7 +391,7 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
-    fn test_extract_target_user_primary_key() {
+    fn extract_target_user_primary_key() {
         let mut details = HashMap::new();
         details.insert(
             "target".to_string(),
@@ -401,7 +401,7 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_target_user_fallback_target_user() {
+    fn extract_target_user_fallback_target_user() {
         let mut details = HashMap::new();
         details.insert(
             "target_user".to_string(),
@@ -411,7 +411,7 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_target_user_fallback_victim() {
+    fn extract_target_user_fallback_victim() {
         let mut details = HashMap::new();
         details.insert(
             "victim".to_string(),
@@ -421,7 +421,7 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_target_user_fallback_account_name() {
+    fn extract_target_user_fallback_account_name() {
         let mut details = HashMap::new();
         details.insert(
             "account_name".to_string(),
@@ -431,7 +431,7 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_target_user_priority_order() {
+    fn extract_target_user_priority_order() {
         let mut details = HashMap::new();
         details.insert(
             "target".to_string(),
@@ -453,13 +453,13 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_target_user_empty_details() {
+    fn extract_target_user_empty_details() {
         let details = HashMap::new();
         assert_eq!(extract_target_user(&details), None);
     }
 
     #[test]
-    fn test_extract_target_user_non_string_value() {
+    fn extract_target_user_non_string_value() {
         let mut details = HashMap::new();
         details.insert("target".to_string(), serde_json::Value::Bool(false));
         assert_eq!(extract_target_user(&details), None);
@@ -470,21 +470,21 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
-    fn test_dedup_key_format() {
+    fn dedup_key_format() {
         let vuln_id = "vuln-456";
         let dedup_key = format!("{DEDUP_SHADOW_CREDS}:{vuln_id}");
         assert_eq!(dedup_key, "shadow_creds:vuln-456");
     }
 
     #[test]
-    fn test_dedup_key_unique_per_vuln() {
+    fn dedup_key_unique_per_vuln() {
         let key1 = format!("{DEDUP_SHADOW_CREDS}:vuln-001");
         let key2 = format!("{DEDUP_SHADOW_CREDS}:vuln-002");
         assert_ne!(key1, key2);
     }
 
     #[test]
-    fn test_dedup_key_contains_prefix() {
+    fn dedup_key_contains_prefix() {
         let key = format!("{DEDUP_SHADOW_CREDS}:vuln-123");
         assert!(key.starts_with("shadow_creds:"));
     }
@@ -494,7 +494,7 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
-    fn test_shadow_cred_work_with_credential() {
+    fn shadow_cred_work_with_credential() {
         let work = ShadowCredWork {
             vuln_id: "vuln-sc-001".to_string(),
             dedup_key: format!("{DEDUP_SHADOW_CREDS}:vuln-sc-001"),
@@ -524,7 +524,7 @@ mod tests {
     }
 
     #[test]
-    fn test_shadow_cred_work_with_hash_fallback() {
+    fn shadow_cred_work_with_hash_fallback() {
         let work = ShadowCredWork {
             vuln_id: "vuln-sc-002".to_string(),
             dedup_key: format!("{DEDUP_SHADOW_CREDS}:vuln-sc-002"),
@@ -555,7 +555,7 @@ mod tests {
     }
 
     #[test]
-    fn test_shadow_cred_work_no_dc_ip() {
+    fn shadow_cred_work_no_dc_ip() {
         let work = ShadowCredWork {
             vuln_id: "vuln-sc-003".to_string(),
             dedup_key: format!("{DEDUP_SHADOW_CREDS}:vuln-sc-003"),
@@ -585,7 +585,7 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
-    fn test_full_shadow_cred_extraction() {
+    fn full_shadow_cred_extraction() {
         let mut details = HashMap::new();
         details.insert(
             "source".to_string(),
@@ -606,7 +606,7 @@ mod tests {
     }
 
     #[test]
-    fn test_extraction_with_alternate_keys() {
+    fn extraction_with_alternate_keys() {
         let mut details = HashMap::new();
         details.insert(
             "attacker".to_string(),
@@ -626,7 +626,7 @@ mod tests {
     }
 
     #[test]
-    fn test_extraction_missing_source_returns_none() {
+    fn extraction_missing_source_returns_none() {
         let mut details = HashMap::new();
         // Only target present, no source
         details.insert(
@@ -639,7 +639,7 @@ mod tests {
     }
 
     #[test]
-    fn test_extraction_missing_target_returns_none() {
+    fn extraction_missing_target_returns_none() {
         let mut details = HashMap::new();
         // Only source present, no target
         details.insert(

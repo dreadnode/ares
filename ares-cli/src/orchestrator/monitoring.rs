@@ -469,8 +469,6 @@ mod tests {
         assert_eq!(agents.get("a1").unwrap().role, "lateral");
     }
 
-    // --- Additional coverage tests ---
-
     #[tokio::test]
     async fn agent_names_empty_initially() {
         let r = AgentRegistry::new();

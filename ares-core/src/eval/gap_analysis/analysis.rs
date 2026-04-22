@@ -215,8 +215,6 @@ mod tests {
         }
     }
 
-    // ---- describe_ioc_gap ----
-
     #[test]
     fn describe_ioc_gap_required() {
         let ioc = make_ioc("ip", "10.0.0.1", true);
@@ -234,8 +232,6 @@ mod tests {
         assert!(!desc.contains("(required)"));
     }
 
-    // ---- describe_technique_gap ----
-
     #[test]
     fn describe_technique_gap_with_name() {
         let t = make_technique("T1003", "OS Credential Dumping", true);
@@ -252,8 +248,6 @@ mod tests {
         assert!(desc.contains("T1046"));
         assert!(!desc.contains("(required)"));
     }
-
-    // ---- generate_summary ----
 
     #[test]
     fn summary_good_grade_with_alert() {
@@ -276,8 +270,6 @@ mod tests {
         assert!(summary.contains("No alert was triggered"));
         assert!(summary.contains("2 detection gaps"));
     }
-
-    // ---- analyze_detection_gaps ----
 
     #[test]
     fn analyze_no_gaps_clean_result() {
@@ -341,8 +333,10 @@ mod tests {
         r.highest_pyramid_level = 2;
         r.investigation_completed = false;
         let report = analyze_detection_gaps(&r);
-        if let Some(first) = report.recommendations.first() {
-            assert_eq!(first.priority, "critical");
-        }
+        let first = report
+            .recommendations
+            .first()
+            .expect("should have recommendations");
+        assert_eq!(first.priority, "critical");
     }
 }

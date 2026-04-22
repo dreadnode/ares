@@ -132,7 +132,7 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn test_parse_certipy_esc1() {
+    fn parse_certipy_esc1() {
         let output = "[!] Vulnerabilities\nESC1: Template allows enrollment with low-priv";
         let params = json!({"target": "192.168.58.10", "domain": "contoso.local"});
         let vulns = parse_certipy_find(output, &params);
@@ -143,7 +143,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_certipy_multiple_esc_types() {
+    fn parse_certipy_multiple_esc_types() {
         let output =
             "[!] Vulnerabilities\nESC1: ...\nESC4: Template is misconfigured\nESC8: Web enrollment";
         let params = json!({"target_ip": "192.168.58.10"});
@@ -159,7 +159,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_certipy_no_vulnerabilities_keyword() {
+    fn parse_certipy_no_vulnerabilities_keyword() {
         // Without [!] Vulnerabilities header, only "ESCn :" pattern matches
         let output = "ESC1 : Template allows enrollment";
         let vulns = parse_certipy_find(output, &json!({"target": "192.168.58.10"}));
@@ -167,20 +167,20 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_certipy_no_esc_types() {
+    fn parse_certipy_no_esc_types() {
         let output = "[!] Vulnerabilities\nNo vulnerable templates found";
         let vulns = parse_certipy_find(output, &json!({"target": "192.168.58.10"}));
         assert!(vulns.is_empty());
     }
 
     #[test]
-    fn test_parse_certipy_empty_output() {
+    fn parse_certipy_empty_output() {
         let vulns = parse_certipy_find("", &json!({}));
         assert!(vulns.is_empty());
     }
 
     #[test]
-    fn test_parse_certipy_vuln_id_format() {
+    fn parse_certipy_vuln_id_format() {
         let output = "[!] Vulnerabilities\nESC4: misconfigured template";
         let params = json!({"target": "192.168.58.20"});
         let vulns = parse_certipy_find(output, &params);
@@ -188,7 +188,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_certipy_extended_esc_types() {
+    fn parse_certipy_extended_esc_types() {
         let output = "[!] Vulnerabilities\nESC1: ...\nESC6: EDITF flag\nESC9: UPN spoof\nESC13: issuance policy";
         let params = json!({"target_ip": "192.168.58.10"});
         let vulns = parse_certipy_find(output, &params);
@@ -203,7 +203,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_certipy_with_ca_name() {
+    fn parse_certipy_with_ca_name() {
         let output = "CA Name                             : ESSOS-CA\n[!] Vulnerabilities\nESC1: enrollee supplies subject";
         let params = json!({"target": "192.168.58.10", "domain": "essos.local"});
         let vulns = parse_certipy_find(output, &params);
@@ -213,7 +213,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_certipy_inline_pattern() {
+    fn parse_certipy_inline_pattern() {
         // certipy find -vulnerable output format
         let output = "  ESC1 : 'ESSOS.LOCAL\\Domain Users' can enroll, enrollee supplies subject";
         let params = json!({"target": "192.168.58.10"});
@@ -223,13 +223,13 @@ mod tests {
     }
 
     #[test]
-    fn test_esc_priority_ordering() {
+    fn esc_priority_ordering() {
         assert!(esc_priority("esc1") < esc_priority("esc4"));
         assert!(esc_priority("esc4") < esc_priority("esc5"));
     }
 
     #[test]
-    fn test_esc_priority_all_values() {
+    fn esc_priority_all_values() {
         assert_eq!(esc_priority("esc1"), 1);
         assert_eq!(esc_priority("esc6"), 1);
         assert_eq!(esc_priority("esc4"), 2);
@@ -246,31 +246,31 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_ca_name_standard() {
+    fn extract_ca_name_standard() {
         let output =
             "CA Name                             : CONTOSO-CA\nDNS Name  : ca01.contoso.local";
         assert_eq!(extract_ca_name(output), Some("CONTOSO-CA".to_string()));
     }
 
     #[test]
-    fn test_extract_ca_name_no_spaces() {
+    fn extract_ca_name_no_spaces() {
         let output = "CA Name:MYCA\nother line";
         assert_eq!(extract_ca_name(output), Some("MYCA".to_string()));
     }
 
     #[test]
-    fn test_extract_ca_name_missing() {
+    fn extract_ca_name_missing() {
         assert_eq!(extract_ca_name("No CA info here"), None);
         assert_eq!(extract_ca_name(""), None);
     }
 
     #[test]
-    fn test_extract_ca_name_empty_value() {
+    fn extract_ca_name_empty_value() {
         assert_eq!(extract_ca_name("CA Name : "), None);
     }
 
     #[test]
-    fn test_extract_template_for_esc() {
+    fn extract_template_for_esc_basic() {
         let output = "Template Name                       : VulnTemplate\n    Permissions\n      ESC1 : 'DOMAIN\\Users' can enroll";
         assert_eq!(
             extract_template_for_esc(output, "esc1"),
@@ -279,13 +279,13 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_template_for_esc_not_found() {
+    fn extract_template_for_esc_not_found() {
         let output = "ESC1 : 'DOMAIN\\Users' can enroll";
         assert_eq!(extract_template_for_esc(output, "esc1"), None);
     }
 
     #[test]
-    fn test_extract_template_for_esc_multiple_templates() {
+    fn extract_template_for_esc_multiple_templates() {
         let output = "Template Name : Template1\n    ESC4 : misconfigured\nTemplate Name : Template2\n    ESC1 : enrollable";
         // ESC4 should get Template1
         assert_eq!(
@@ -300,7 +300,7 @@ mod tests {
     }
 
     #[test]
-    fn test_esc_types_constant() {
+    fn esc_types_constant() {
         assert_eq!(ESC_TYPES.len(), 14);
         assert!(ESC_TYPES.contains(&"esc1"));
         assert!(ESC_TYPES.contains(&"esc8"));
@@ -311,7 +311,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_certipy_with_template_name() {
+    fn parse_certipy_with_template_name() {
         let output = "Template Name                       : ESC1-Vuln\n    [!] Vulnerabilities\n    ESC1 : 'CONTOSO\\Users' can enroll";
         let params = json!({"target": "192.168.58.10", "domain": "contoso.local"});
         let vulns = parse_certipy_find(output, &params);
@@ -320,7 +320,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_certipy_vulnerability_inline_keyword() {
+    fn parse_certipy_vulnerability_inline_keyword() {
         // "vulnerab" keyword present alongside ESC type but no [!] Vulnerabilities header
         let output = "Certificate template is vulnerable to ESC1 attack";
         let params = json!({"target": "192.168.58.10"});
@@ -329,7 +329,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_certipy_colon_format() {
+    fn parse_certipy_colon_format() {
         // "ESC8:" format without spaces
         let output = "ESC8:web enrollment enabled";
         let params = json!({"target": "192.168.58.10"});

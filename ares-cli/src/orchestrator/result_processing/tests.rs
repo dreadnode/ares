@@ -3,7 +3,7 @@ use ares_core::models::{Credential, Hash};
 use serde_json::json;
 
 #[test]
-fn test_parse_credentials_array() {
+fn parse_credentials_array() {
     let payload = json!({
         "credentials": [
             {"id": "c1", "username": "admin", "password": "P@ss1",
@@ -19,7 +19,7 @@ fn test_parse_credentials_array() {
 }
 
 #[test]
-fn test_parse_single_credential() {
+fn parse_single_credential() {
     let payload = json!({
         "credential": {
             "id": "c1", "username": "admin", "password": "P@ss1",
@@ -32,7 +32,7 @@ fn test_parse_single_credential() {
 }
 
 #[test]
-fn test_parse_cracked_password() {
+fn parse_cracked_password() {
     let payload =
         json!({"cracked_password": "Summer2024!", "username": "jdoe", "domain": "contoso.local"});
     let parsed = parse_discoveries(&payload);
@@ -43,14 +43,14 @@ fn test_parse_cracked_password() {
 }
 
 #[test]
-fn test_parse_cracked_password_without_username_ignored() {
+fn parse_cracked_password_without_username_ignored() {
     let payload = json!({"cracked_password": "Summer2024!"});
     let parsed = parse_discoveries(&payload);
     assert!(parsed.credentials.is_empty());
 }
 
 #[test]
-fn test_parse_hashes() {
+fn parse_hashes() {
     let payload = json!({
         "hashes": [{"id": "h1", "username": "Administrator", "hash_value": "aad3b435:abcdef123456",
                     "hash_type": "NTLM", "domain": "contoso.local", "source": "secretsdump",
@@ -63,7 +63,7 @@ fn test_parse_hashes() {
 }
 
 #[test]
-fn test_parse_hosts() {
+fn parse_hosts() {
     let payload = json!({
         "hosts": [{"ip": "192.168.58.10", "hostname": "dc01.contoso.local",
                    "os": "Windows Server 2019", "is_dc": true, "open_ports": [88, 389, 445]}]
@@ -75,7 +75,7 @@ fn test_parse_hosts() {
 }
 
 #[test]
-fn test_parse_users_with_trusted_source() {
+fn parse_users_with_trusted_source() {
     let payload = json!({
         "discovered_users": [{"username": "jdoe", "domain": "contoso.local",
                               "source": "kerberos_enum", "is_admin": false}]
@@ -86,7 +86,7 @@ fn test_parse_users_with_trusted_source() {
 }
 
 #[test]
-fn test_parse_users_rejects_untrusted_source() {
+fn parse_users_rejects_untrusted_source() {
     let payload = json!({
         "discovered_users": [
             {"username": "fake_admin", "domain": "contoso.local", "is_admin": false},
@@ -99,7 +99,7 @@ fn test_parse_users_rejects_untrusted_source() {
 }
 
 #[test]
-fn test_parse_vulnerabilities() {
+fn parse_vulnerabilities() {
     let payload = json!({
         "vulnerabilities": [{"vuln_id": "vuln-001", "vuln_type": "constrained_delegation",
                              "target": "192.168.58.20", "discovered_by": "recon",
@@ -115,7 +115,7 @@ fn test_parse_vulnerabilities() {
 }
 
 #[test]
-fn test_parse_shares() {
+fn parse_shares() {
     let payload = json!({
         "shares": [
             {"host": "192.168.58.10", "name": "SYSVOL", "permissions": "READ", "comment": "Logon server share"},
@@ -129,7 +129,7 @@ fn test_parse_shares() {
 }
 
 #[test]
-fn test_parse_empty_payload() {
+fn parse_empty_payload() {
     let payload = json!({});
     let parsed = parse_discoveries(&payload);
     assert!(parsed.credentials.is_empty());
@@ -141,7 +141,7 @@ fn test_parse_empty_payload() {
 }
 
 #[test]
-fn test_parse_malformed_entries_skipped() {
+fn parse_malformed_entries_skipped() {
     let payload = json!({
         "credentials": [
             {"username": "valid", "id": "c1", "password": "x", "domain": "d",
@@ -156,7 +156,7 @@ fn test_parse_malformed_entries_skipped() {
 }
 
 #[test]
-fn test_parse_mixed_payload() {
+fn parse_mixed_payload() {
     let payload = json!({
         "credentials": [{"id": "c1", "username": "admin", "password": "P@ss",
                          "domain": "contoso.local", "source": "test", "is_admin": true, "attack_step": 0}],
@@ -172,49 +172,49 @@ fn test_parse_mixed_payload() {
 }
 
 #[test]
-fn test_da_indicator_explicit_flag() {
+fn da_indicator_explicit_flag() {
     assert!(has_domain_admin_indicator(
         &json!({"has_domain_admin": true})
     ));
 }
 
 #[test]
-fn test_da_indicator_false_flag() {
+fn da_indicator_false_flag() {
     assert!(!has_domain_admin_indicator(
         &json!({"has_domain_admin": false})
     ));
 }
 
 #[test]
-fn test_da_indicator_krbtgt_hash() {
+fn da_indicator_krbtgt_hash() {
     assert!(has_domain_admin_indicator(
         &json!({"hashes": [{"username": "krbtgt", "hash_value": "abc"}]})
     ));
 }
 
 #[test]
-fn test_da_indicator_krbtgt_case_insensitive() {
+fn da_indicator_krbtgt_case_insensitive() {
     assert!(has_domain_admin_indicator(
         &json!({"hashes": [{"username": "KRBTGT", "hash_value": "abc"}]})
     ));
 }
 
 #[test]
-fn test_da_indicator_non_krbtgt_hash() {
+fn da_indicator_non_krbtgt_hash() {
     assert!(!has_domain_admin_indicator(
         &json!({"hashes": [{"username": "Administrator", "hash_value": "abc"}]})
     ));
 }
 
 #[test]
-fn test_da_indicator_empty_payload() {
+fn da_indicator_empty_payload() {
     assert!(!has_domain_admin_indicator(&json!({})));
 }
 
 // ==================== has_domain_admin_indicator edge cases ====================
 
 #[test]
-fn test_da_indicator_multiple_hashes_one_krbtgt() {
+fn da_indicator_multiple_hashes_one_krbtgt() {
     assert!(has_domain_admin_indicator(&json!({"hashes": [
         {"username": "Administrator", "hash_value": "abc"},
         {"username": "krbtgt", "hash_value": "def"},
@@ -223,12 +223,12 @@ fn test_da_indicator_multiple_hashes_one_krbtgt() {
 }
 
 #[test]
-fn test_da_indicator_empty_hashes_array() {
+fn da_indicator_empty_hashes_array() {
     assert!(!has_domain_admin_indicator(&json!({"hashes": []})));
 }
 
 #[test]
-fn test_da_indicator_non_bool_value() {
+fn da_indicator_non_bool_value() {
     // has_domain_admin is a string "true" instead of bool true -- should NOT trigger
     assert!(!has_domain_admin_indicator(
         &json!({"has_domain_admin": "true"})
@@ -236,14 +236,14 @@ fn test_da_indicator_non_bool_value() {
 }
 
 #[test]
-fn test_da_indicator_null_value() {
+fn da_indicator_null_value() {
     assert!(!has_domain_admin_indicator(
         &json!({"has_domain_admin": null})
     ));
 }
 
 #[test]
-fn test_da_indicator_hashes_missing_username() {
+fn da_indicator_hashes_missing_username() {
     // Hash entry without a username field should not cause a panic
     assert!(!has_domain_admin_indicator(
         &json!({"hashes": [{"hash_value": "abc"}]})
@@ -251,7 +251,7 @@ fn test_da_indicator_hashes_missing_username() {
 }
 
 #[test]
-fn test_da_indicator_hashes_not_array() {
+fn da_indicator_hashes_not_array() {
     // hashes is not an array -- should be safely ignored
     assert!(!has_domain_admin_indicator(
         &json!({"hashes": "not_an_array"})
@@ -291,7 +291,7 @@ fn make_test_hash(id: &str, username: &str, domain: &str, attack_step: i32) -> H
 }
 
 #[test]
-fn test_resolve_parent_cracked_source_finds_hash() {
+fn resolve_parent_cracked_source_finds_hash() {
     let creds: Vec<Credential> = vec![];
     let hashes = vec![make_test_hash("h1", "jdoe", "contoso.local", 1)];
 
@@ -310,7 +310,7 @@ fn test_resolve_parent_cracked_source_finds_hash() {
 }
 
 #[test]
-fn test_resolve_parent_cracked_source_case_insensitive() {
+fn resolve_parent_cracked_source_case_insensitive() {
     let creds: Vec<Credential> = vec![];
     let hashes = vec![make_test_hash("h1", "JDoe", "CONTOSO.LOCAL", 0)];
 
@@ -329,7 +329,7 @@ fn test_resolve_parent_cracked_source_case_insensitive() {
 }
 
 #[test]
-fn test_resolve_parent_cracked_source_empty_domain_matches() {
+fn resolve_parent_cracked_source_empty_domain_matches() {
     let creds: Vec<Credential> = vec![];
     let hashes = vec![make_test_hash("h1", "jdoe", "contoso.local", 2)];
 
@@ -341,7 +341,7 @@ fn test_resolve_parent_cracked_source_empty_domain_matches() {
 }
 
 #[test]
-fn test_resolve_parent_cracked_source_no_matching_hash() {
+fn resolve_parent_cracked_source_no_matching_hash() {
     let creds: Vec<Credential> = vec![];
     let hashes = vec![make_test_hash("h1", "other_user", "contoso.local", 0)];
 
@@ -360,7 +360,7 @@ fn test_resolve_parent_cracked_source_no_matching_hash() {
 }
 
 #[test]
-fn test_resolve_parent_cracked_picks_last_matching_hash() {
+fn resolve_parent_cracked_picks_last_matching_hash() {
     let creds: Vec<Credential> = vec![];
     let hashes = vec![
         make_test_hash("h1", "jdoe", "contoso.local", 0),
@@ -382,7 +382,7 @@ fn test_resolve_parent_cracked_picks_last_matching_hash() {
 }
 
 #[test]
-fn test_resolve_parent_input_username_differs_finds_credential() {
+fn resolve_parent_input_username_differs_finds_credential() {
     let creds = vec![make_test_credential("c1", "svc_sql", "contoso.local", 0)];
     let hashes: Vec<Hash> = vec![];
 
@@ -402,7 +402,7 @@ fn test_resolve_parent_input_username_differs_finds_credential() {
 }
 
 #[test]
-fn test_resolve_parent_input_username_differs_finds_hash_when_no_cred() {
+fn resolve_parent_input_username_differs_finds_hash_when_no_cred() {
     let creds: Vec<Credential> = vec![];
     let hashes = vec![make_test_hash("h1", "svc_sql", "contoso.local", 1)];
 
@@ -422,7 +422,7 @@ fn test_resolve_parent_input_username_differs_finds_hash_when_no_cred() {
 }
 
 #[test]
-fn test_resolve_parent_input_username_same_as_discovered_returns_none() {
+fn resolve_parent_input_username_same_as_discovered_returns_none() {
     let creds = vec![make_test_credential("c1", "jdoe", "contoso.local", 0)];
     let hashes: Vec<Hash> = vec![];
 
@@ -442,7 +442,7 @@ fn test_resolve_parent_input_username_same_as_discovered_returns_none() {
 }
 
 #[test]
-fn test_resolve_parent_no_parent_returns_none_zero() {
+fn resolve_parent_no_parent_returns_none_zero() {
     let creds: Vec<Credential> = vec![];
     let hashes: Vec<Hash> = vec![];
 
@@ -461,7 +461,7 @@ fn test_resolve_parent_no_parent_returns_none_zero() {
 }
 
 #[test]
-fn test_resolve_parent_empty_input_username_skipped() {
+fn resolve_parent_empty_input_username_skipped() {
     let creds = vec![make_test_credential("c1", "", "contoso.local", 0)];
     let hashes: Vec<Hash> = vec![];
 
@@ -481,7 +481,7 @@ fn test_resolve_parent_empty_input_username_skipped() {
 }
 
 #[test]
-fn test_resolve_parent_input_username_case_insensitive() {
+fn resolve_parent_input_username_case_insensitive() {
     let creds = vec![make_test_credential("c1", "SVC_SQL", "contoso.local", 0)];
     let hashes: Vec<Hash> = vec![];
 
@@ -500,7 +500,7 @@ fn test_resolve_parent_input_username_case_insensitive() {
 }
 
 #[test]
-fn test_resolve_parent_input_domain_empty_still_matches() {
+fn resolve_parent_input_domain_empty_still_matches() {
     let creds = vec![make_test_credential("c1", "svc_sql", "contoso.local", 0)];
     let hashes: Vec<Hash> = vec![];
 
@@ -520,7 +520,7 @@ fn test_resolve_parent_input_domain_empty_still_matches() {
 }
 
 #[test]
-fn test_resolve_parent_non_cracked_source_with_input_username() {
+fn resolve_parent_non_cracked_source_with_input_username() {
     let creds = vec![make_test_credential("c1", "svc_web", "fabrikam.local", 2)];
     let hashes: Vec<Hash> = vec![];
 
@@ -539,7 +539,7 @@ fn test_resolve_parent_non_cracked_source_with_input_username() {
 }
 
 #[test]
-fn test_resolve_parent_prefers_credential_over_hash() {
+fn resolve_parent_prefers_credential_over_hash() {
     // When both a credential and hash match, credential should be found first
     let creds = vec![make_test_credential("c1", "svc_sql", "contoso.local", 1)];
     let hashes = vec![make_test_hash("h1", "svc_sql", "contoso.local", 0)];
@@ -562,7 +562,7 @@ fn test_resolve_parent_prefers_credential_over_hash() {
 // ==================== parse_discoveries additional edge cases ====================
 
 #[test]
-fn test_parse_single_vulnerability() {
+fn parse_single_vulnerability() {
     // Test the singular "vulnerability" key (fallback when "vulnerabilities" is empty)
     let payload = json!({
         "vulnerability": {
@@ -584,7 +584,7 @@ fn test_parse_single_vulnerability() {
 }
 
 #[test]
-fn test_parse_singular_vulnerability_not_used_when_array_present() {
+fn parse_singular_vulnerability_not_used_when_array_present() {
     // When "vulnerabilities" array is present, "vulnerability" singular should be ignored
     let payload = json!({
         "vulnerabilities": [{
@@ -612,7 +612,7 @@ fn test_parse_singular_vulnerability_not_used_when_array_present() {
 }
 
 #[test]
-fn test_parse_users_with_netexec_source() {
+fn parse_users_with_netexec_source() {
     let payload = json!({
         "discovered_users": [
             {"username": "jdoe", "domain": "contoso.local", "source": "netexec_user_enum", "is_admin": false}
@@ -623,7 +623,7 @@ fn test_parse_users_with_netexec_source() {
 }
 
 #[test]
-fn test_parse_cracked_password_with_domain() {
+fn parse_cracked_password_with_domain() {
     let payload = json!({
         "cracked_password": "Winter2025!",
         "username": "svc_sql",
@@ -636,7 +636,7 @@ fn test_parse_cracked_password_with_domain() {
 }
 
 #[test]
-fn test_parse_cracked_password_without_domain_defaults_empty() {
+fn parse_cracked_password_without_domain_defaults_empty() {
     let payload = json!({
         "cracked_password": "Winter2025!",
         "username": "svc_sql"
@@ -647,7 +647,7 @@ fn test_parse_cracked_password_without_domain_defaults_empty() {
 }
 
 #[test]
-fn test_parse_hashes_malformed_skipped() {
+fn parse_hashes_malformed_skipped() {
     let payload = json!({
         "hashes": [
             {"id": "h1", "username": "admin", "hash_value": "aabb", "hash_type": "NTLM",
@@ -660,7 +660,7 @@ fn test_parse_hashes_malformed_skipped() {
 }
 
 #[test]
-fn test_parse_shares_with_comment() {
+fn parse_shares_with_comment() {
     let payload = json!({
         "shares": [
             {"host": "192.168.58.10", "name": "NETLOGON", "permissions": "READ", "comment": "Logon server share"}

@@ -286,12 +286,8 @@ fn recommend_detection() {
     assert!(RedBlueCorrelator::recommend_detection(&unknown).is_none());
 }
 
-// ────────────────────────────────────────────────────────────────────────────
-// Additional coverage tests
-// ────────────────────────────────────────────────────────────────────────────
-
 #[test]
-fn test_recommend_detection_all_known_techniques() {
+fn recommend_detection_all_known_techniques() {
     let known_techniques = [
         ("T1046", "scanning"),
         ("T1110", "authentication"),
@@ -302,8 +298,9 @@ fn test_recommend_detection_all_known_techniques() {
     for (technique, expected_keyword) in known_techniques {
         let activity = make_red_activity(technique, "192.168.58.10", utc(12, 0));
         let rec = RedBlueCorrelator::recommend_detection(&activity);
-        assert!(rec.is_some(), "Expected recommendation for {technique}");
-        let rec_text = rec.unwrap().to_lowercase();
+        let rec_text = rec
+            .unwrap_or_else(|| panic!("Expected recommendation for {technique}"))
+            .to_lowercase();
         assert!(
             rec_text.contains(&expected_keyword.to_lowercase()),
             "Recommendation for {technique} should mention '{expected_keyword}', got: {rec_text}"
@@ -312,7 +309,7 @@ fn test_recommend_detection_all_known_techniques() {
 }
 
 #[test]
-fn test_recommend_detection_no_technique_id() {
+fn recommend_detection_no_technique_id() {
     let mut activity = make_red_activity("T1003", "192.168.58.10", utc(12, 0));
     activity.technique_id = None;
     let rec = RedBlueCorrelator::recommend_detection(&activity);
@@ -320,7 +317,7 @@ fn test_recommend_detection_no_technique_id() {
 }
 
 #[test]
-fn test_determine_gap_reason_no_technique() {
+fn determine_gap_reason_no_technique() {
     let mut activity = make_red_activity("T1003", "192.168.58.10", utc(12, 0));
     activity.technique_id = None;
     let reason = RedBlueCorrelator::determine_gap_reason(&activity, &[]);
@@ -328,7 +325,7 @@ fn test_determine_gap_reason_no_technique() {
 }
 
 #[test]
-fn test_determine_gap_reason_no_matching_alert() {
+fn determine_gap_reason_no_matching_alert() {
     let activity = make_red_activity("T1003", "192.168.58.10", utc(12, 0));
     let detections = vec![make_blue_detection(
         "Network Scan",
@@ -341,7 +338,7 @@ fn test_determine_gap_reason_no_matching_alert() {
 }
 
 #[test]
-fn test_determine_gap_reason_alert_exists_but_no_trigger() {
+fn determine_gap_reason_alert_exists_but_no_trigger() {
     let activity = make_red_activity("T1003", "192.168.58.10", utc(12, 0));
     let detections = vec![make_blue_detection(
         "Credential Dumping",
@@ -354,7 +351,7 @@ fn test_determine_gap_reason_alert_exists_but_no_trigger() {
 }
 
 #[test]
-fn test_determine_gap_reason_hierarchical_technique_match() {
+fn determine_gap_reason_hierarchical_technique_match() {
     // T1003 alert should match T1003.006 activity
     let activity = make_red_activity("T1003.006", "192.168.58.10", utc(12, 0));
     let detections = vec![make_blue_detection(
@@ -369,7 +366,7 @@ fn test_determine_gap_reason_hierarchical_technique_match() {
 }
 
 #[test]
-fn test_techniques_match_subtechnique_siblings() {
+fn techniques_match_subtechnique_siblings() {
     // T1003.001 and T1003.006 share parent T1003 so they should match
     assert!(RedBlueCorrelator::techniques_match(
         Some("T1003.001"),
@@ -378,7 +375,7 @@ fn test_techniques_match_subtechnique_siblings() {
 }
 
 #[test]
-fn test_techniques_match_mixed_case() {
+fn techniques_match_mixed_case() {
     assert!(RedBlueCorrelator::techniques_match(
         Some("t1558.001"),
         Some("T1558.003")
@@ -386,7 +383,7 @@ fn test_techniques_match_mixed_case() {
 }
 
 #[test]
-fn test_red_team_activity_key() {
+fn red_team_activity_key() {
     let activity = make_red_activity("T1003", "192.168.58.10", utc(12, 0));
     let key = activity.key();
     assert!(key.contains("T1003"));
@@ -394,7 +391,7 @@ fn test_red_team_activity_key() {
 }
 
 #[test]
-fn test_red_team_activity_key_no_technique_no_ip() {
+fn red_team_activity_key_no_technique_no_ip() {
     let mut activity = make_red_activity("T1003", "192.168.58.10", utc(12, 0));
     activity.technique_id = None;
     activity.target_ip = None;
@@ -403,7 +400,7 @@ fn test_red_team_activity_key_no_technique_no_ip() {
 }
 
 #[test]
-fn test_blue_team_detection_key() {
+fn blue_team_detection_key() {
     let detection = make_blue_detection(
         "Credential Dumping Alert",
         "T1003",
@@ -416,7 +413,7 @@ fn test_blue_team_detection_key() {
 }
 
 #[test]
-fn test_blue_team_detection_key_no_technique() {
+fn blue_team_detection_key_no_technique() {
     let mut detection = make_blue_detection("Unknown Alert", "T1003", "192.168.58.10", utc(12, 2));
     detection.technique_id = None;
     let key = detection.key();
@@ -425,8 +422,7 @@ fn test_blue_team_detection_key_no_technique() {
 }
 
 #[test]
-fn test_match_quality_strong() {
-    // technique_match + target_match + small time delta
+fn match_quality_strong() {
     let m = super::types::CorrelationMatch {
         red_activity: make_red_activity("T1003", "192.168.58.10", utc(12, 0)),
         blue_detection: make_blue_detection("Alert", "T1003", "192.168.58.10", utc(12, 2)),
@@ -439,8 +435,7 @@ fn test_match_quality_strong() {
 }
 
 #[test]
-fn test_match_quality_good() {
-    // technique_match, no target_match, moderate time delta
+fn match_quality_good() {
     let m = super::types::CorrelationMatch {
         red_activity: make_red_activity("T1003", "192.168.58.10", utc(12, 0)),
         blue_detection: make_blue_detection("Alert", "T1003", "192.168.58.20", utc(12, 8)),
@@ -453,7 +448,7 @@ fn test_match_quality_good() {
 }
 
 #[test]
-fn test_match_quality_weak_technique_only() {
+fn match_quality_weak_technique_only() {
     let m = super::types::CorrelationMatch {
         red_activity: make_red_activity("T1003", "192.168.58.10", utc(12, 0)),
         blue_detection: make_blue_detection("Alert", "T1003", "192.168.58.20", utc(12, 15)),
@@ -466,7 +461,7 @@ fn test_match_quality_weak_technique_only() {
 }
 
 #[test]
-fn test_match_quality_weak_target_close() {
+fn match_quality_weak_target_close() {
     let m = super::types::CorrelationMatch {
         red_activity: make_red_activity("T1003", "192.168.58.10", utc(12, 0)),
         blue_detection: make_blue_detection("Alert", "T1046", "192.168.58.10", utc(12, 3)),
@@ -479,7 +474,7 @@ fn test_match_quality_weak_target_close() {
 }
 
 #[test]
-fn test_match_quality_tenuous() {
+fn match_quality_tenuous() {
     let m = super::types::CorrelationMatch {
         red_activity: make_red_activity("T1003", "192.168.58.10", utc(12, 0)),
         blue_detection: make_blue_detection("Alert", "T1046", "192.168.58.20", utc(12, 10)),
@@ -492,7 +487,7 @@ fn test_match_quality_tenuous() {
 }
 
 #[test]
-fn test_correlate_multiple_red_activities_matched() {
+fn correlate_multiple_red_activities_matched() {
     let correlator = RedBlueCorrelator::new("/tmp", None);
 
     let red = vec![
@@ -515,7 +510,7 @@ fn test_correlate_multiple_red_activities_matched() {
 }
 
 #[test]
-fn test_correlate_hierarchical_technique_matching() {
+fn correlate_hierarchical_technique_matching() {
     let correlator = RedBlueCorrelator::new("/tmp", None);
 
     // Red uses subtechnique T1003.006, blue detects parent T1003
@@ -533,7 +528,7 @@ fn test_correlate_hierarchical_technique_matching() {
 }
 
 #[test]
-fn test_correlate_no_red_activities() {
+fn correlate_no_red_activities() {
     let correlator = RedBlueCorrelator::new("/tmp", None);
 
     let blue = vec![make_blue_detection(
@@ -551,7 +546,7 @@ fn test_correlate_no_red_activities() {
 }
 
 #[test]
-fn test_correlate_no_blue_detections() {
+fn correlate_no_blue_detections() {
     let correlator = RedBlueCorrelator::new("/tmp", None);
 
     let red = vec![
@@ -568,7 +563,7 @@ fn test_correlate_no_blue_detections() {
 }
 
 #[test]
-fn test_correlate_confidence_threshold() {
+fn correlate_confidence_threshold() {
     // Matches below 0.3 confidence should not be included
     let correlator = RedBlueCorrelator::new("/tmp", Some(30));
 
@@ -588,7 +583,7 @@ fn test_correlate_confidence_threshold() {
 }
 
 #[test]
-fn test_correlate_detection_rate_partial() {
+fn correlate_detection_rate_partial() {
     let correlator = RedBlueCorrelator::new("/tmp", None);
 
     let red = vec![
@@ -609,7 +604,7 @@ fn test_correlate_detection_rate_partial() {
 }
 
 #[test]
-fn test_correlate_mean_time_to_detect_none_when_no_matches() {
+fn correlate_mean_time_to_detect_none_when_no_matches() {
     let correlator = RedBlueCorrelator::new("/tmp", None);
 
     let red = vec![make_red_activity("T1003", "192.168.58.10", utc(12, 0))];
@@ -618,7 +613,7 @@ fn test_correlate_mean_time_to_detect_none_when_no_matches() {
 }
 
 #[test]
-fn test_correlate_technique_coverage_multiple_techniques() {
+fn correlate_technique_coverage_multiple_techniques() {
     let correlator = RedBlueCorrelator::new("/tmp", None);
 
     let red = vec![
@@ -645,7 +640,7 @@ fn test_correlate_technique_coverage_multiple_techniques() {
 }
 
 #[test]
-fn test_correlate_false_positive_rate() {
+fn correlate_false_positive_rate() {
     let correlator = RedBlueCorrelator::new("/tmp", None);
 
     let red = vec![make_red_activity("T1003", "192.168.58.10", utc(12, 0))];
@@ -662,7 +657,7 @@ fn test_correlate_false_positive_rate() {
 }
 
 #[test]
-fn test_report_to_value_full_structure() {
+fn report_to_value_full_structure() {
     let correlator = RedBlueCorrelator::new("/tmp", None);
 
     let red = vec![
@@ -703,7 +698,7 @@ fn test_report_to_value_full_structure() {
 }
 
 #[test]
-fn test_correlate_best_match_selection() {
+fn correlate_best_match_selection() {
     // When multiple detections could match, engine should pick best confidence
     let correlator = RedBlueCorrelator::new("/tmp", None);
 
@@ -723,7 +718,7 @@ fn test_correlate_best_match_selection() {
 }
 
 #[test]
-fn test_correlate_time_window_custom() {
+fn correlate_time_window_custom() {
     // Custom time window of 2 minutes
     let correlator = RedBlueCorrelator::new("/tmp", Some(2));
 
@@ -741,7 +736,7 @@ fn test_correlate_time_window_custom() {
 }
 
 #[test]
-fn test_correlate_detection_before_activity() {
+fn correlate_detection_before_activity() {
     // Blue detection 2 minutes BEFORE red activity (should still match within window)
     let correlator = RedBlueCorrelator::new("/tmp", None);
 
@@ -760,7 +755,7 @@ fn test_correlate_detection_before_activity() {
 }
 
 #[test]
-fn test_new_default_time_window() {
+fn new_default_time_window() {
     let correlator = RedBlueCorrelator::new("/tmp/reports", None);
     assert_eq!(
         correlator.time_window.num_minutes(),
@@ -769,7 +764,7 @@ fn test_new_default_time_window() {
 }
 
 #[test]
-fn test_new_custom_time_window() {
+fn new_custom_time_window() {
     let correlator = RedBlueCorrelator::new("/tmp/reports", Some(60));
     assert_eq!(correlator.time_window.num_minutes(), 60);
 }

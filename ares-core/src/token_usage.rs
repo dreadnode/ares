@@ -409,7 +409,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_model_field_roundtrip() {
+    fn model_field_roundtrip() {
         let field = model_field("openai/gpt-4.1-mini", "input_tokens");
         assert!(field.starts_with("model:"));
         assert!(field.ends_with(":input_tokens"));
@@ -420,7 +420,7 @@ mod tests {
     }
 
     #[test]
-    fn test_model_field_with_slashes_and_dots() {
+    fn model_field_with_slashes_and_dots() {
         // Ensure models with special chars survive encoding
         let names = [
             "anthropic/claude-sonnet-4-20250514",
@@ -436,14 +436,14 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_non_model_fields() {
+    fn parse_non_model_fields() {
         assert!(parse_model_field("input_tokens").is_none());
         assert!(parse_model_field("output_tokens").is_none());
         assert!(parse_model_field("model").is_none());
     }
 
     #[test]
-    fn test_estimate_usage_cost_single_model() {
+    fn estimate_usage_cost_single_model() {
         let usage = OperationTokenUsage {
             input_tokens: 1_000_000,
             output_tokens: 500_000,
@@ -468,7 +468,7 @@ mod tests {
     }
 
     #[test]
-    fn test_estimate_usage_cost_multi_model() {
+    fn estimate_usage_cost_multi_model() {
         let usage = OperationTokenUsage {
             input_tokens: 2_000_000,
             output_tokens: 1_000_000,
@@ -502,7 +502,7 @@ mod tests {
     }
 
     #[test]
-    fn test_estimate_usage_cost_unknown_model() {
+    fn estimate_usage_cost_unknown_model() {
         let usage = OperationTokenUsage {
             input_tokens: 100,
             output_tokens: 50,
@@ -523,7 +523,7 @@ mod tests {
     }
 
     #[test]
-    fn test_estimate_usage_cost_empty() {
+    fn estimate_usage_cost_empty() {
         let usage = OperationTokenUsage::default();
         let (total, breakdown, unpriced) = estimate_usage_cost(&usage);
         assert!(total.is_none());
@@ -532,9 +532,9 @@ mod tests {
     }
 
     #[test]
-    fn test_token_usage_key() {
+    fn token_usage_key_basic() {
         assert_eq!(
-            token_usage_key("op-abc-123"),
+            super::token_usage_key("op-abc-123"),
             "ares:op:op-abc-123:token_usage"
         );
     }
@@ -603,8 +603,6 @@ mod tests {
         assert_eq!(breakdown[0].output_tokens, 500_000);
     }
 
-    // ─── TokenUsage struct ──────────────────────────────────────────────────
-
     #[test]
     fn token_usage_default() {
         let t = TokenUsage::default();
@@ -649,8 +647,6 @@ mod tests {
         assert!(t.model.is_none());
     }
 
-    // ─── OperationTokenUsage / ModelTokenUsage defaults ─────────────────────
-
     #[test]
     fn operation_token_usage_default() {
         let o = OperationTokenUsage::default();
@@ -666,8 +662,6 @@ mod tests {
         assert_eq!(m.input_tokens, 0);
         assert_eq!(m.output_tokens, 0);
     }
-
-    // ─── lookup_model_cost variations ───────────────────────────────────────
 
     #[test]
     fn lookup_model_cost_all_known_models() {
@@ -719,8 +713,6 @@ mod tests {
         assert!((output - 0.40).abs() < 0.001);
     }
 
-    // ─── model_field edge cases ─────────────────────────────────────────────
-
     #[test]
     fn model_field_empty_model_name() {
         let field = model_field("", "input_tokens");
@@ -745,8 +737,6 @@ mod tests {
         let result = parse_model_field("model:!!!invalid!!!:input_tokens");
         assert!(result.is_none());
     }
-
-    // ─── estimate_usage_cost with mixed priced/unpriced ─────────────────────
 
     #[test]
     fn estimate_usage_cost_mixed_models() {
@@ -808,8 +798,6 @@ mod tests {
         assert_eq!(breakdown[1].model, "gpt-4o");
     }
 
-    // ─── Key format tests ───────────────────────────────────────────────────
-
     #[test]
     fn token_usage_key_format_various() {
         assert_eq!(token_usage_key("op-123"), "ares:op:op-123:token_usage");
@@ -825,8 +813,6 @@ mod tests {
         assert_eq!(blue_token_usage_key(""), "ares:blue:inv::token_usage");
     }
 
-    // ─── ModelCostBreakdown serialization ───────────────────────────────────
-
     #[test]
     fn model_cost_breakdown_serialize() {
         let b = ModelCostBreakdown {
@@ -841,8 +827,6 @@ mod tests {
         assert_eq!(json["total_tokens"], 1500);
         assert!((json["cost"].as_f64().unwrap() - 0.006).abs() < 0.0001);
     }
-
-    // ─── OperationTokenUsage serialization ──────────────────────────────────
 
     #[test]
     fn operation_token_usage_serialize() {
@@ -864,8 +848,6 @@ mod tests {
         assert_eq!(json["model"], "gpt-4o");
         assert!(json["models"]["gpt-4o"].is_object());
     }
-
-    // ─── Zero-cost edge case ────────────────────────────────────────────────
 
     #[test]
     fn estimate_usage_cost_zero_tokens_known_model() {
@@ -952,51 +934,6 @@ mod tests {
         assert!((cost - 7.50).abs() < 0.01);
         assert_eq!(breakdown.len(), 1);
         assert!(unpriced.is_empty());
-    }
-
-    #[test]
-    fn model_field_with_slashes_and_dots() {
-        let field = model_field("openai/gpt-4.1", "output_tokens");
-        let (model, tt) = parse_model_field(&field).unwrap();
-        assert_eq!(model, "openai/gpt-4.1");
-        assert_eq!(tt, "output_tokens");
-    }
-
-    #[test]
-    fn token_usage_default_values() {
-        let usage = TokenUsage::default();
-        assert_eq!(usage.input_tokens, 0);
-        assert_eq!(usage.output_tokens, 0);
-        assert_eq!(usage.total_tokens, 0);
-        assert!(usage.model.is_none());
-    }
-
-    #[test]
-    fn token_usage_serde_roundtrip() {
-        let usage = TokenUsage {
-            input_tokens: 100,
-            output_tokens: 50,
-            total_tokens: 150,
-            model: Some("gpt-4o".to_string()),
-        };
-        let json = serde_json::to_string(&usage).unwrap();
-        let deser: TokenUsage = serde_json::from_str(&json).unwrap();
-        assert_eq!(deser.input_tokens, 100);
-        assert_eq!(deser.output_tokens, 50);
-        assert_eq!(deser.total_tokens, 150);
-        assert_eq!(deser.model, Some("gpt-4o".to_string()));
-    }
-
-    #[test]
-    fn token_usage_serde_skip_none_model() {
-        let usage = TokenUsage {
-            input_tokens: 10,
-            output_tokens: 5,
-            total_tokens: 15,
-            model: None,
-        };
-        let json = serde_json::to_string(&usage).unwrap();
-        assert!(!json.contains("model"));
     }
 
     #[test]

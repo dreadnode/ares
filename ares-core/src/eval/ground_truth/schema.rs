@@ -215,8 +215,6 @@ mod tests {
         }
     }
 
-    // -- ExpectedTechnique::matches --
-
     #[test]
     fn matches_exact_technique_id() {
         let t = make_technique("T1003", true);
@@ -246,8 +244,6 @@ mod tests {
         let t = make_technique("T1003.001", true);
         assert!(!t.matches("T1003.002"));
     }
-
-    // -- EvaluationGroundTruth filter methods --
 
     #[test]
     fn required_iocs_filters_correctly() {

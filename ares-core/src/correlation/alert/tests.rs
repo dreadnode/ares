@@ -177,7 +177,7 @@ fn correlator_reset() {
     assert_eq!(correlator.clusters().len(), 1);
 
     correlator.reset();
-    assert_eq!(correlator.clusters().len(), 0);
+    assert!(correlator.clusters().is_empty());
 }
 
 #[test]

@@ -463,7 +463,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_render_recon_template() {
+    fn render_recon_template() {
         let capabilities = vec![
             "nmap_scan".to_string(),
             "enumerate_users".to_string(),
@@ -478,14 +478,14 @@ mod tests {
     }
 
     #[test]
-    fn test_render_recon_empty_capabilities() {
+    fn render_recon_empty_capabilities() {
         let result = render_agent_instructions(TEMPLATE_RECON, &[], false, &[]).unwrap();
         assert!(result.contains("RECON Worker Agent"));
         assert!(result.contains("## Available Tools"));
     }
 
     #[test]
-    fn test_render_credential_access_template() {
+    fn render_credential_access_template() {
         let capabilities = vec!["secretsdump".to_string(), "kerberoast".to_string()];
         let result =
             render_agent_instructions(TEMPLATE_CREDENTIAL_ACCESS, &capabilities, false, &[])
@@ -496,7 +496,7 @@ mod tests {
     }
 
     #[test]
-    fn test_render_cracker_template() {
+    fn render_cracker_template() {
         let capabilities = vec!["crack_with_hashcat".to_string()];
         let result =
             render_agent_instructions(TEMPLATE_CRACKER, &capabilities, false, &[]).unwrap();
@@ -505,7 +505,7 @@ mod tests {
     }
 
     #[test]
-    fn test_render_acl_template() {
+    fn render_acl_template() {
         let capabilities = vec!["pywhisker".to_string(), "dacl_edit".to_string()];
         let result = render_agent_instructions(TEMPLATE_ACL, &capabilities, false, &[]).unwrap();
         assert!(result.contains("ACL Exploitation Agent"));
@@ -513,7 +513,7 @@ mod tests {
     }
 
     #[test]
-    fn test_render_privesc_template() {
+    fn render_privesc_template() {
         let capabilities = vec!["certipy_find".to_string(), "s4u_attack".to_string()];
         let result =
             render_agent_instructions(TEMPLATE_PRIVESC, &capabilities, false, &[]).unwrap();
@@ -522,7 +522,7 @@ mod tests {
     }
 
     #[test]
-    fn test_render_lateral_template() {
+    fn render_lateral_template() {
         let capabilities = vec!["psexec".to_string(), "evil_winrm".to_string()];
         let result =
             render_agent_instructions(TEMPLATE_LATERAL, &capabilities, false, &[]).unwrap();
@@ -531,7 +531,7 @@ mod tests {
     }
 
     #[test]
-    fn test_render_coercion_template() {
+    fn render_coercion_template() {
         let capabilities = vec!["petitpotam".to_string(), "start_responder".to_string()];
         let result =
             render_agent_instructions(TEMPLATE_COERCION, &capabilities, false, &[]).unwrap();
@@ -540,7 +540,7 @@ mod tests {
     }
 
     #[test]
-    fn test_render_orchestrator_template() {
+    fn render_orchestrator_template() {
         let capabilities = vec!["dispatch_recon".to_string()];
         let result =
             render_agent_instructions(TEMPLATE_ORCHESTRATOR, &capabilities, false, &[]).unwrap();
@@ -548,7 +548,7 @@ mod tests {
     }
 
     #[test]
-    fn test_render_system_instructions_with_capabilities() {
+    fn render_system_instructions_with_capabilities() {
         let mut caps: HashMap<String, Vec<String>> = HashMap::new();
         caps.insert("recon".to_string(), vec!["nmap_scan".to_string()]);
         caps.insert(
@@ -567,7 +567,7 @@ mod tests {
     }
 
     #[test]
-    fn test_render_system_instructions_without_capabilities() {
+    fn render_system_instructions_without_capabilities() {
         let result = render_system_instructions(None, None).unwrap();
         // Falls back to hardcoded defaults
         assert!(result.contains("nmap, netexec, rpcclient"));
@@ -577,7 +577,7 @@ mod tests {
     }
 
     #[test]
-    fn test_render_system_instructions_with_priorities() {
+    fn render_system_instructions_with_priorities() {
         let priorities = vec![
             ("dc_secretsdump".to_string(), 1),
             ("golden_ticket".to_string(), 1),
@@ -602,7 +602,7 @@ mod tests {
     }
 
     #[test]
-    fn test_render_initial_task() {
+    fn render_initial_task() {
         let mut vars = HashMap::new();
         vars.insert(
             "target_ip".to_string(),
@@ -614,7 +614,7 @@ mod tests {
     }
 
     #[test]
-    fn test_render_cracker_task() {
+    fn render_cracker_task() {
         let mut vars = HashMap::new();
         vars.insert(
             "hash_value".to_string(),
@@ -627,7 +627,7 @@ mod tests {
     }
 
     #[test]
-    fn test_render_golden_ticket_task() {
+    fn render_golden_ticket_task() {
         let mut vars = HashMap::new();
         vars.insert("krbtgt_hash".to_string(), "aad3b435:5703ad15".to_string());
         vars.insert("user_name".to_string(), "admin".to_string());
@@ -647,7 +647,7 @@ mod tests {
     }
 
     #[test]
-    fn test_render_share_pilfer_task() {
+    fn render_share_pilfer_task() {
         let mut vars = HashMap::new();
         vars.insert("target".to_string(), "192.168.58.10".to_string());
         vars.insert("share_name".to_string(), "SYSVOL".to_string());
@@ -659,7 +659,7 @@ mod tests {
     }
 
     #[test]
-    fn test_render_static_templates() {
+    fn render_static_templates() {
         // Templates with no variables should render cleanly
         let empty: HashMap<String, String> = HashMap::new();
         let result = render_task_template(TEMPLATE_CRACKER_INSTRUCTIONS, &empty).unwrap();
@@ -673,7 +673,7 @@ mod tests {
     }
 
     #[test]
-    fn test_invalid_template_name() {
+    fn invalid_template_name() {
         let result = render_agent_instructions("nonexistent", &[], false, &[]);
         assert!(result.is_err());
     }

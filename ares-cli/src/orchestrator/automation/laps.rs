@@ -239,29 +239,29 @@ mod tests {
     // ─── is_laps_candidate ──────────────────────────────────────────────────
 
     #[test]
-    fn test_is_laps_candidate_laps_abuse() {
+    fn is_laps_candidate_laps_abuse() {
         assert!(is_laps_candidate("laps_abuse"));
     }
 
     #[test]
-    fn test_is_laps_candidate_laps_reader() {
+    fn is_laps_candidate_laps_reader() {
         assert!(is_laps_candidate("laps_reader"));
     }
 
     #[test]
-    fn test_is_laps_candidate_laps_plain() {
+    fn is_laps_candidate_laps_plain() {
         assert!(is_laps_candidate("laps"));
     }
 
     #[test]
-    fn test_is_laps_candidate_case_insensitive() {
+    fn is_laps_candidate_case_insensitive() {
         assert!(is_laps_candidate("LAPS_ABUSE"));
         assert!(is_laps_candidate("Laps_Reader"));
         assert!(is_laps_candidate("LAPS"));
     }
 
     #[test]
-    fn test_is_laps_candidate_negative() {
+    fn is_laps_candidate_negative() {
         assert!(!is_laps_candidate("rbcd"));
         assert!(!is_laps_candidate("constrained_delegation"));
         assert!(!is_laps_candidate("esc1"));
@@ -273,21 +273,21 @@ mod tests {
     // ─── DEDUP_LAPS constant ────────────────────────────────────────────────
 
     #[test]
-    fn test_dedup_laps_value() {
+    fn dedup_laps_value() {
         assert_eq!(DEDUP_LAPS, "laps_extract");
     }
 
     // ─── dedup key construction ─────────────────────────────────────────────
 
     #[test]
-    fn test_vuln_dedup_key_format() {
+    fn vuln_dedup_key_format() {
         let vuln_id = "vuln-laps-dc01";
         let dedup_key = format!("{DEDUP_LAPS}:vuln:{vuln_id}");
         assert_eq!(dedup_key, "laps_extract:vuln:vuln-laps-dc01");
     }
 
     #[test]
-    fn test_sweep_dedup_key_format() {
+    fn sweep_dedup_key_format() {
         let domain = "contoso.local";
         let username = "svc_admin";
         let dedup_key = format!(
@@ -299,7 +299,7 @@ mod tests {
     }
 
     #[test]
-    fn test_sweep_dedup_key_normalizes_case() {
+    fn sweep_dedup_key_normalizes_case() {
         let dedup_key = format!(
             "{DEDUP_LAPS}:sweep:{}:{}",
             "CONTOSO.LOCAL".to_lowercase(),

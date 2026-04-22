@@ -338,12 +338,12 @@ mod tests {
     // ── domain_to_base_dn ──────────────────────────────────────────────
 
     #[test]
-    fn test_domain_to_base_dn_simple() {
+    fn domain_to_base_dn_simple() {
         assert_eq!(domain_to_base_dn("contoso.local"), "DC=contoso,DC=local");
     }
 
     #[test]
-    fn test_domain_to_base_dn_nested() {
+    fn domain_to_base_dn_nested() {
         assert_eq!(
             domain_to_base_dn("north.contoso.local"),
             "DC=north,DC=contoso,DC=local"
@@ -351,17 +351,17 @@ mod tests {
     }
 
     #[test]
-    fn test_domain_to_base_dn_single() {
+    fn domain_to_base_dn_single() {
         assert_eq!(domain_to_base_dn("local"), "DC=local");
     }
 
     #[test]
-    fn test_domain_to_base_dn_fabrikam() {
+    fn domain_to_base_dn_fabrikam() {
         assert_eq!(domain_to_base_dn("fabrikam.local"), "DC=fabrikam,DC=local");
     }
 
     #[test]
-    fn test_domain_to_base_dn_deep_nesting() {
+    fn domain_to_base_dn_deep_nesting() {
         assert_eq!(
             domain_to_base_dn("sub.child.contoso.local"),
             "DC=sub,DC=child,DC=contoso,DC=local"
@@ -369,7 +369,7 @@ mod tests {
     }
 
     #[test]
-    fn test_adminsd_holder_dn_format() {
+    fn adminsd_holder_dn_format() {
         let domain = "contoso.local";
         let base_dn = domain_to_base_dn(domain);
         let adminsd_dn = format!("CN=AdminSDHolder,CN=System,{base_dn}");
@@ -377,7 +377,7 @@ mod tests {
     }
 
     #[test]
-    fn test_adminsd_holder_dn_fabrikam() {
+    fn adminsd_holder_dn_fabrikam() {
         let base_dn = domain_to_base_dn("fabrikam.local");
         let adminsd_dn = format!("CN=AdminSDHolder,CN=System,{base_dn}");
         assert_eq!(
@@ -389,7 +389,7 @@ mod tests {
     // ── bloodyad_add_group_member arg validation ───────────────────────
 
     #[test]
-    fn test_bloodyad_add_group_member_missing_domain() {
+    fn bloodyad_add_group_member_missing_domain() {
         let args = json!({
             "username": "admin",
             "password": "P@ssw0rd!",
@@ -401,7 +401,7 @@ mod tests {
     }
 
     #[test]
-    fn test_bloodyad_add_group_member_all_args_parse() {
+    fn bloodyad_add_group_member_all_args_parse() {
         let args = json!({
             "domain": "contoso.local",
             "username": "admin",
@@ -421,7 +421,7 @@ mod tests {
     // ── bloodyad_set_password arg validation ───────────────────────────
 
     #[test]
-    fn test_bloodyad_set_password_missing_new_password() {
+    fn bloodyad_set_password_missing_new_password() {
         let args = json!({
             "domain": "contoso.local",
             "username": "admin",
@@ -433,7 +433,7 @@ mod tests {
     }
 
     #[test]
-    fn test_bloodyad_set_password_all_args_parse() {
+    fn bloodyad_set_password_all_args_parse() {
         let args = json!({
             "domain": "contoso.local",
             "username": "admin",
@@ -449,7 +449,7 @@ mod tests {
     // ── bloodyad_add_genericall arg validation ─────────────────────────
 
     #[test]
-    fn test_bloodyad_genericall_missing_target_dn() {
+    fn bloodyad_genericall_missing_target_dn() {
         let args = json!({
             "domain": "contoso.local",
             "username": "admin",
@@ -461,7 +461,7 @@ mod tests {
     }
 
     #[test]
-    fn test_bloodyad_genericall_all_args() {
+    fn bloodyad_genericall_all_args() {
         let args = json!({
             "domain": "contoso.local",
             "username": "admin",
@@ -480,7 +480,7 @@ mod tests {
     // ── adminsd_holder_add_ace arg validation ──────────────────────────
 
     #[test]
-    fn test_adminsd_holder_right_default() {
+    fn adminsd_holder_right_default() {
         let args = json!({
             "domain": "contoso.local",
             "username": "admin",
@@ -493,7 +493,7 @@ mod tests {
     }
 
     #[test]
-    fn test_adminsd_holder_custom_right() {
+    fn adminsd_holder_custom_right() {
         let args = json!({
             "domain": "contoso.local",
             "username": "admin",
@@ -507,7 +507,7 @@ mod tests {
     }
 
     #[test]
-    fn test_adminsd_holder_dn_construction() {
+    fn adminsd_holder_dn_construction() {
         let domain = "contoso.local";
         let base_dn = domain_to_base_dn(domain);
         let adminsd_dn = format!("CN=AdminSDHolder,CN=System,{base_dn}");
@@ -518,7 +518,7 @@ mod tests {
     // ── gmsa_read_password arg validation ──────────────────────────────
 
     #[test]
-    fn test_gmsa_read_password_missing_account() {
+    fn gmsa_read_password_missing_account() {
         let args = json!({
             "domain": "contoso.local",
             "username": "admin",
@@ -529,7 +529,7 @@ mod tests {
     }
 
     #[test]
-    fn test_gmsa_read_password_args() {
+    fn gmsa_read_password_args() {
         let args = json!({
             "domain": "contoso.local",
             "username": "admin",
@@ -543,7 +543,7 @@ mod tests {
     // ── pywhisker arg validation ───────────────────────────────────────
 
     #[test]
-    fn test_pywhisker_default_action() {
+    fn pywhisker_default_action() {
         let args = json!({
             "domain": "contoso.local",
             "username": "admin",
@@ -556,7 +556,7 @@ mod tests {
     }
 
     #[test]
-    fn test_pywhisker_custom_action() {
+    fn pywhisker_custom_action() {
         let args = json!({
             "domain": "contoso.local",
             "username": "admin",
@@ -570,7 +570,7 @@ mod tests {
     }
 
     #[test]
-    fn test_pywhisker_missing_target_sam() {
+    fn pywhisker_missing_target_sam() {
         let args = json!({
             "domain": "contoso.local",
             "username": "admin",
@@ -583,7 +583,7 @@ mod tests {
     // ── targeted_kerberoast arg validation ─────────────────────────────
 
     #[test]
-    fn test_targeted_kerberoast_missing_target_user() {
+    fn targeted_kerberoast_missing_target_user() {
         let args = json!({
             "domain": "contoso.local",
             "username": "admin",
@@ -594,7 +594,7 @@ mod tests {
     }
 
     #[test]
-    fn test_targeted_kerberoast_args() {
+    fn targeted_kerberoast_args() {
         let args = json!({
             "domain": "contoso.local",
             "username": "admin",
@@ -608,7 +608,7 @@ mod tests {
     // ── sharpgpoabuse arg validation ───────────────────────────────────
 
     #[test]
-    fn test_sharpgpoabuse_default_action() {
+    fn sharpgpoabuse_default_action() {
         let args = json!({
             "gpo_name": "Default Domain Policy",
             "domain": "contoso.local",
@@ -623,7 +623,7 @@ mod tests {
     }
 
     #[test]
-    fn test_sharpgpoabuse_user_to_add_default_fallback() {
+    fn sharpgpoabuse_user_to_add_default_fallback() {
         let args = json!({
             "gpo_name": "Default Domain Policy",
             "domain": "contoso.local",
@@ -637,7 +637,7 @@ mod tests {
     }
 
     #[test]
-    fn test_sharpgpoabuse_explicit_user_to_add() {
+    fn sharpgpoabuse_explicit_user_to_add() {
         let args = json!({
             "gpo_name": "Default Domain Policy",
             "domain": "contoso.local",
@@ -652,7 +652,7 @@ mod tests {
     }
 
     #[test]
-    fn test_sharpgpoabuse_computer_target_optional() {
+    fn sharpgpoabuse_computer_target_optional() {
         let args = json!({
             "gpo_name": "Default Domain Policy",
             "domain": "contoso.local",
@@ -668,7 +668,7 @@ mod tests {
     }
 
     #[test]
-    fn test_sharpgpoabuse_computer_target_absent() {
+    fn sharpgpoabuse_computer_target_absent() {
         let args = json!({
             "gpo_name": "Default Domain Policy",
             "domain": "contoso.local",
@@ -682,7 +682,7 @@ mod tests {
     // ── pygpoabuse_immediate_task arg validation ───────────────────────
 
     #[test]
-    fn test_pygpoabuse_default_taskname() {
+    fn pygpoabuse_default_taskname() {
         let args = json!({
             "domain": "contoso.local",
             "username": "admin",
@@ -696,7 +696,7 @@ mod tests {
     }
 
     #[test]
-    fn test_pygpoabuse_default_force() {
+    fn pygpoabuse_default_force() {
         let args = json!({
             "domain": "contoso.local",
             "username": "admin",
@@ -710,7 +710,7 @@ mod tests {
     }
 
     #[test]
-    fn test_pygpoabuse_force_false() {
+    fn pygpoabuse_force_false() {
         let args = json!({
             "domain": "contoso.local",
             "username": "admin",
@@ -725,7 +725,7 @@ mod tests {
     }
 
     #[test]
-    fn test_pygpoabuse_missing_gpo_id() {
+    fn pygpoabuse_missing_gpo_id() {
         let args = json!({
             "domain": "contoso.local",
             "username": "admin",
@@ -739,7 +739,7 @@ mod tests {
     // ── dacl_edit arg validation ───────────────────────────────────────
 
     #[test]
-    fn test_dacl_edit_default_action() {
+    fn dacl_edit_default_action() {
         let args = json!({
             "domain": "contoso.local",
             "username": "admin",
@@ -754,7 +754,7 @@ mod tests {
     }
 
     #[test]
-    fn test_dacl_edit_custom_action() {
+    fn dacl_edit_custom_action() {
         let args = json!({
             "domain": "contoso.local",
             "username": "admin",
@@ -770,7 +770,7 @@ mod tests {
     }
 
     #[test]
-    fn test_dacl_edit_missing_rights() {
+    fn dacl_edit_missing_rights() {
         let args = json!({
             "domain": "contoso.local",
             "username": "admin",
@@ -783,7 +783,7 @@ mod tests {
     }
 
     #[test]
-    fn test_dacl_edit_missing_principal() {
+    fn dacl_edit_missing_principal() {
         let args = json!({
             "domain": "contoso.local",
             "username": "admin",
@@ -798,7 +798,7 @@ mod tests {
     // ── credential helper integration ──────────────────────────────────
 
     #[test]
-    fn test_bloodyad_creds_format() {
+    fn bloodyad_creds_format() {
         let creds =
             credentials::bloodyad_creds("contoso.local", "admin", "P@ssw0rd!", "192.168.58.10");
         assert_eq!(
@@ -817,7 +817,7 @@ mod tests {
     }
 
     #[test]
-    fn test_impacket_target_with_domain_and_password() {
+    fn impacket_target_with_domain_and_password() {
         let target = credentials::impacket_target(
             Some("contoso.local"),
             "admin",
@@ -828,14 +828,14 @@ mod tests {
     }
 
     #[test]
-    fn test_impacket_target_without_password() {
+    fn impacket_target_without_password() {
         let target =
             credentials::impacket_target(Some("contoso.local"), "admin", None, "contoso.local");
         assert_eq!(target, "contoso.local/admin@contoso.local");
     }
 
     #[test]
-    fn test_impacket_target_without_domain() {
+    fn impacket_target_without_domain() {
         let target =
             credentials::impacket_target(None, "admin", Some("P@ssw0rd!"), "192.168.58.10");
         assert_eq!(target, "admin:P@ssw0rd!@192.168.58.10");

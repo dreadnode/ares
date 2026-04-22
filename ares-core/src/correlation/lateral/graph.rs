@@ -291,6 +291,9 @@ mod tests {
     fn add_connection_no_evidence_id() {
         let mut g = LateralGraph::new();
         let conn = g.add_connection("a", "b", "smb", None, None, None, None);
-        assert!(conn.unwrap().evidence_ids.is_empty());
+        assert!(conn
+            .expect("add_connection should return connection")
+            .evidence_ids
+            .is_empty());
     }
 }

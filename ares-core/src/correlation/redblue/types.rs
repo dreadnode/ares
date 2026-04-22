@@ -364,7 +364,6 @@ mod tests {
             target_match: true,
             confidence: 0.9,
         };
-        // abs(-100) = 100 < 300, technique + target match
         assert_eq!(m.match_quality(), "STRONG");
     }
 

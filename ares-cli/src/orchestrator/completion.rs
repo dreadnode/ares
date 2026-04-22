@@ -499,17 +499,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_forest_root_of_simple() {
+    fn forest_root_of_simple() {
         assert_eq!(forest_root_of("contoso.local"), "contoso.local");
     }
 
     #[test]
-    fn test_forest_root_of_child() {
+    fn forest_root_of_child() {
         assert_eq!(forest_root_of("north.contoso.local"), "contoso.local");
     }
 
     #[test]
-    fn test_forest_root_of_deep_child() {
+    fn forest_root_of_deep_child() {
         assert_eq!(forest_root_of("sub.north.contoso.local"), "contoso.local");
     }
 
@@ -524,7 +524,7 @@ mod tests {
     }
 
     #[test]
-    fn test_undominated_single_domain_no_trusts() {
+    fn undominated_single_domain_no_trusts() {
         let trusted = std::collections::HashMap::new();
         let dcs = std::collections::HashMap::new();
         let mut dominated = HashSet::new();
@@ -551,7 +551,7 @@ mod tests {
     }
 
     #[test]
-    fn test_undominated_cross_forest_trust() {
+    fn undominated_cross_forest_trust() {
         let mut trusted = std::collections::HashMap::new();
         trusted.insert(
             "fabrikam.local".to_string(),
@@ -573,7 +573,7 @@ mod tests {
     }
 
     #[test]
-    fn test_undominated_all_forests_dominated() {
+    fn undominated_all_forests_dominated() {
         let mut trusted = std::collections::HashMap::new();
         trusted.insert(
             "fabrikam.local".to_string(),
@@ -595,7 +595,7 @@ mod tests {
     }
 
     #[test]
-    fn test_undominated_child_domain_not_separate_forest() {
+    fn undominated_child_domain_not_separate_forest() {
         // parent_child trust should NOT add a separate required forest
         let mut trusted = std::collections::HashMap::new();
         trusted.insert(
@@ -618,7 +618,7 @@ mod tests {
     }
 
     #[test]
-    fn test_undominated_child_domain_does_not_cover_forest() {
+    fn undominated_child_domain_does_not_cover_forest() {
         // Dominating a child domain does NOT cover the forest root — the
         // forest root DC has its own krbtgt and must be secretsdumped via
         // trust escalation (ExtraSid / trust key).
@@ -638,7 +638,7 @@ mod tests {
     }
 
     #[test]
-    fn test_undominated_forest_root_dominated_directly() {
+    fn undominated_forest_root_dominated_directly() {
         // Dominating the forest root itself should satisfy the requirement
         let trusted = std::collections::HashMap::new();
         let mut dominated = HashSet::new();
@@ -655,7 +655,7 @@ mod tests {
     }
 
     #[test]
-    fn test_undominated_dc_discovered_before_trust_enum() {
+    fn undominated_dc_discovered_before_trust_enum() {
         // fabrikam.local DC discovered via recon but trust not yet enumerated.
         // The DC should be included in required_forests to prevent premature
         // completion.
@@ -676,27 +676,25 @@ mod tests {
         assert_eq!(result, vec!["fabrikam.local"]);
     }
 
-    // --- Additional coverage tests ---
-
     #[test]
-    fn test_forest_root_of_case_insensitive() {
+    fn forest_root_of_case_insensitive() {
         assert_eq!(forest_root_of("CONTOSO.LOCAL"), "contoso.local");
         assert_eq!(forest_root_of("North.Contoso.Local"), "contoso.local");
     }
 
     #[test]
-    fn test_forest_root_of_single_label() {
+    fn forest_root_of_single_label() {
         // Single-label domain (unusual but should not panic)
         assert_eq!(forest_root_of("localhost"), "localhost");
     }
 
     #[test]
-    fn test_forest_root_of_empty() {
+    fn forest_root_of_empty() {
         assert_eq!(forest_root_of(""), "");
     }
 
     #[test]
-    fn test_undominated_no_target_no_first_domain() {
+    fn undominated_no_target_no_first_domain() {
         // Both target_domain and first_domain are None
         let trusted = std::collections::HashMap::new();
         let dominated = HashSet::new();
@@ -706,7 +704,7 @@ mod tests {
     }
 
     #[test]
-    fn test_undominated_empty_target_domain() {
+    fn undominated_empty_target_domain() {
         // target_domain is Some("") — should be treated as missing
         let trusted = std::collections::HashMap::new();
         let dominated = HashSet::new();
@@ -716,7 +714,7 @@ mod tests {
     }
 
     #[test]
-    fn test_undominated_only_first_domain() {
+    fn undominated_only_first_domain() {
         // target_domain is None but first_domain is set
         let trusted = std::collections::HashMap::new();
         let dominated = HashSet::new();
@@ -727,7 +725,7 @@ mod tests {
     }
 
     #[test]
-    fn test_undominated_external_trust_is_cross_forest() {
+    fn undominated_external_trust_is_cross_forest() {
         // "external" trust type should be treated as cross-forest
         let mut trusted = std::collections::HashMap::new();
         trusted.insert(
@@ -748,7 +746,7 @@ mod tests {
     }
 
     #[test]
-    fn test_undominated_unknown_trust_not_cross_forest() {
+    fn undominated_unknown_trust_not_cross_forest() {
         // "unknown" trust type should NOT be treated as cross-forest
         let mut trusted = std::collections::HashMap::new();
         trusted.insert(
@@ -770,7 +768,7 @@ mod tests {
     }
 
     #[test]
-    fn test_undominated_multiple_cross_forest_trusts() {
+    fn undominated_multiple_cross_forest_trusts() {
         let mut trusted = std::collections::HashMap::new();
         trusted.insert(
             "fabrikam.local".to_string(),
@@ -797,7 +795,7 @@ mod tests {
     }
 
     #[test]
-    fn test_undominated_child_trust_domain_maps_to_parent_forest() {
+    fn undominated_child_trust_domain_maps_to_parent_forest() {
         // Cross-forest trust with a child domain like "north.fabrikam.local"
         // should map to forest root "fabrikam.local"
         let mut trusted = std::collections::HashMap::new();
@@ -820,7 +818,7 @@ mod tests {
     }
 
     #[test]
-    fn test_undominated_empty_dc_key_ignored() {
+    fn undominated_empty_dc_key_ignored() {
         // Empty string DC key should be ignored
         let trusted = std::collections::HashMap::new();
         let mut dominated = HashSet::new();
@@ -838,7 +836,7 @@ mod tests {
     }
 
     #[test]
-    fn test_undominated_case_insensitive_dominated() {
+    fn undominated_case_insensitive_dominated() {
         // forest_root_of lowercases, so dominated domains with mixed case should still match
         let trusted = std::collections::HashMap::new();
         let mut dominated = HashSet::new();
@@ -851,7 +849,7 @@ mod tests {
     }
 
     #[test]
-    fn test_undominated_target_and_first_same_forest() {
+    fn undominated_target_and_first_same_forest() {
         // target and first_domain in the same forest should only produce one entry
         let trusted = std::collections::HashMap::new();
         let dominated = HashSet::new();
@@ -868,7 +866,7 @@ mod tests {
     }
 
     #[test]
-    fn test_undominated_target_and_first_different_forests() {
+    fn undominated_target_and_first_different_forests() {
         let trusted = std::collections::HashMap::new();
         let dominated = HashSet::new();
         let dcs = std::collections::HashMap::new();
@@ -886,7 +884,7 @@ mod tests {
     }
 
     #[test]
-    fn test_make_trust_helper() {
+    fn make_trust_helper() {
         let trust = make_trust("fabrikam.local", "forest");
         assert_eq!(trust.domain, "fabrikam.local");
         assert_eq!(trust.flat_name, "FABRIKAM");

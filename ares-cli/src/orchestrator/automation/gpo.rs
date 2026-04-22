@@ -229,7 +229,7 @@ mod tests {
     use std::collections::HashMap;
 
     #[test]
-    fn test_is_gpo_candidate() {
+    fn is_gpo_candidate_basic() {
         assert!(is_gpo_candidate("gpo_abuse"));
         assert!(is_gpo_candidate("GPO_ABUSE"));
         assert!(is_gpo_candidate("gpo_write"));
@@ -241,7 +241,7 @@ mod tests {
     }
 
     #[test]
-    fn test_is_gpo_candidate_all_explicit_types() {
+    fn is_gpo_candidate_all_explicit_types() {
         // Verify every explicitly listed GPO vuln type
         let gpo_types = vec![
             "gpo_abuse",
@@ -265,7 +265,7 @@ mod tests {
     }
 
     #[test]
-    fn test_is_gpo_candidate_wildcard_prefix() {
+    fn is_gpo_candidate_wildcard_prefix() {
         // Anything starting with gpo_ should match via starts_with
         assert!(is_gpo_candidate("gpo_custom_edge"));
         assert!(is_gpo_candidate("GPO_something_new"));
@@ -273,7 +273,7 @@ mod tests {
     }
 
     #[test]
-    fn test_is_gpo_candidate_non_gpo_types() {
+    fn is_gpo_candidate_non_gpo_types() {
         // Exhaustive negative cases
         let non_gpo = vec![
             "rbcd",
@@ -299,14 +299,14 @@ mod tests {
     }
 
     #[test]
-    fn test_dedup_key_format() {
+    fn dedup_key_format() {
         let vuln_id = "vuln-gpo-001";
         let dedup_key = format!("{DEDUP_GPO_ABUSE}:{vuln_id}");
         assert_eq!(dedup_key, "gpo_abuse:vuln-gpo-001");
     }
 
     #[test]
-    fn test_dedup_key_constant() {
+    fn dedup_key_constant() {
         assert_eq!(DEDUP_GPO_ABUSE, "gpo_abuse");
     }
 
@@ -340,21 +340,21 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_source_user_from_source_key() {
+    fn extract_source_user_from_source_key() {
         let mut details = HashMap::new();
         details.insert("source".to_string(), json!("jdoe"));
         assert_eq!(extract_gpo_source_user(&details), Some("jdoe".to_string()));
     }
 
     #[test]
-    fn test_extract_source_user_from_source_user_key() {
+    fn extract_source_user_from_source_user_key() {
         let mut details = HashMap::new();
         details.insert("source_user".to_string(), json!("admin"));
         assert_eq!(extract_gpo_source_user(&details), Some("admin".to_string()));
     }
 
     #[test]
-    fn test_extract_source_user_from_account_name_key() {
+    fn extract_source_user_from_account_name_key() {
         let mut details = HashMap::new();
         details.insert("account_name".to_string(), json!("svc_gpo"));
         assert_eq!(
@@ -364,7 +364,7 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_source_user_prefers_source_over_account_name() {
+    fn extract_source_user_prefers_source_over_account_name() {
         // "source" takes priority over "account_name"
         let mut details = HashMap::new();
         details.insert("source".to_string(), json!("primary_user"));
@@ -376,7 +376,7 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_source_user_prefers_source_over_source_user() {
+    fn extract_source_user_prefers_source_over_source_user() {
         // "source" takes priority over "source_user"
         let mut details = HashMap::new();
         details.insert("source".to_string(), json!("first"));
@@ -385,20 +385,20 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_source_user_none_when_empty() {
+    fn extract_source_user_none_when_empty() {
         let details = HashMap::new();
         assert_eq!(extract_gpo_source_user(&details), None);
     }
 
     #[test]
-    fn test_extract_source_user_none_when_non_string() {
+    fn extract_source_user_none_when_non_string() {
         let mut details = HashMap::new();
         details.insert("source".to_string(), json!(42));
         assert_eq!(extract_gpo_source_user(&details), None);
     }
 
     #[test]
-    fn test_extract_gpo_id_from_gpo_id_key() {
+    fn extract_gpo_id_from_gpo_id_key() {
         let mut details = HashMap::new();
         details.insert(
             "gpo_id".to_string(),
@@ -411,7 +411,7 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_gpo_id_from_gpo_guid_key() {
+    fn extract_gpo_id_from_gpo_guid_key() {
         let mut details = HashMap::new();
         details.insert(
             "gpo_guid".to_string(),
@@ -424,7 +424,7 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_gpo_id_from_object_id_key() {
+    fn extract_gpo_id_from_object_id_key() {
         let mut details = HashMap::new();
         details.insert("object_id".to_string(), json!("S-1-5-21-abc-123"));
         assert_eq!(
@@ -434,7 +434,7 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_gpo_id_prefers_gpo_id_over_gpo_guid() {
+    fn extract_gpo_id_prefers_gpo_id_over_gpo_guid() {
         let mut details = HashMap::new();
         details.insert("gpo_id".to_string(), json!("primary-gpo"));
         details.insert("gpo_guid".to_string(), json!("fallback-guid"));
@@ -442,13 +442,13 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_gpo_id_none_when_empty() {
+    fn extract_gpo_id_none_when_empty() {
         let details = HashMap::new();
         assert_eq!(extract_gpo_id(&details), None);
     }
 
     #[test]
-    fn test_extract_gpo_name_from_gpo_name_key() {
+    fn extract_gpo_name_from_gpo_name_key() {
         let mut details = HashMap::new();
         details.insert("gpo_name".to_string(), json!("Default Domain Policy"));
         assert_eq!(
@@ -458,7 +458,7 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_gpo_name_from_display_name_key() {
+    fn extract_gpo_name_from_display_name_key() {
         let mut details = HashMap::new();
         details.insert(
             "gpo_display_name".to_string(),
@@ -471,7 +471,7 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_gpo_name_prefers_gpo_name_over_display_name() {
+    fn extract_gpo_name_prefers_gpo_name_over_display_name() {
         let mut details = HashMap::new();
         details.insert("gpo_name".to_string(), json!("Primary Name"));
         details.insert("gpo_display_name".to_string(), json!("Display Name"));
@@ -479,20 +479,20 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_gpo_name_none_when_empty() {
+    fn extract_gpo_name_none_when_empty() {
         let details = HashMap::new();
         assert_eq!(extract_gpo_name(&details), None);
     }
 
     #[test]
-    fn test_extract_gpo_name_none_when_non_string() {
+    fn extract_gpo_name_none_when_non_string() {
         let mut details = HashMap::new();
         details.insert("gpo_name".to_string(), json!(true));
         assert_eq!(extract_gpo_name(&details), None);
     }
 
     #[test]
-    fn test_domain_extraction_from_details() {
+    fn domain_extraction_from_details() {
         // Simulate the domain extraction logic from auto_gpo_abuse
         let mut details = HashMap::new();
         details.insert("domain".to_string(), json!("contoso.local"));
@@ -505,7 +505,7 @@ mod tests {
     }
 
     #[test]
-    fn test_domain_extraction_missing_defaults_empty() {
+    fn domain_extraction_missing_defaults_empty() {
         let details: HashMap<String, Value> = HashMap::new();
         let domain = details
             .get("domain")

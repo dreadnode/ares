@@ -168,7 +168,6 @@ mod tests {
 
     #[test]
     fn kerberos_hash_type_equality() {
-        assert_eq!(KerberosHashType::TGS, KerberosHashType::TGS);
         assert_ne!(KerberosHashType::TGS, KerberosHashType::AsRep);
     }
 

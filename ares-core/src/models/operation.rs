@@ -149,17 +149,15 @@ fn parse_meta_string_list(raw: &str) -> Vec<String> {
 mod tests {
     use super::*;
 
-    // ─── parse_meta_bool ─────────────────────────────────────────────────────
-
     #[test]
-    fn test_parse_meta_bool_true_variants() {
+    fn parse_meta_bool_true_variants() {
         assert!(parse_meta_bool("true"));
         assert!(parse_meta_bool("True"));
         assert!(parse_meta_bool("1"));
     }
 
     #[test]
-    fn test_parse_meta_bool_false_variants() {
+    fn parse_meta_bool_false_variants() {
         assert!(!parse_meta_bool("false"));
         assert!(!parse_meta_bool("False"));
         assert!(!parse_meta_bool("0"));
@@ -168,10 +166,8 @@ mod tests {
         assert!(!parse_meta_bool("random"));
     }
 
-    // ─── parse_meta_string ───────────────────────────────────────────────────
-
     #[test]
-    fn test_parse_meta_string_json_quoted() {
+    fn parse_meta_string_json_quoted() {
         assert_eq!(
             parse_meta_string(r#""contoso.local""#),
             Some("contoso.local".to_string())
@@ -179,7 +175,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_meta_string_raw() {
+    fn parse_meta_string_raw() {
         assert_eq!(
             parse_meta_string("contoso.local"),
             Some("contoso.local".to_string())
@@ -187,93 +183,89 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_meta_string_null() {
+    fn parse_meta_string_null() {
         assert_eq!(parse_meta_string("null"), None);
     }
 
     #[test]
-    fn test_parse_meta_string_empty() {
+    fn parse_meta_string_empty() {
         assert_eq!(parse_meta_string(""), None);
     }
 
     #[test]
-    fn test_parse_meta_string_json_empty() {
+    fn parse_meta_string_json_empty() {
         assert_eq!(parse_meta_string(r#""""#), None);
     }
 
     #[test]
-    fn test_parse_meta_string_with_spaces() {
+    fn parse_meta_string_with_spaces() {
         assert_eq!(
             parse_meta_string(r#""admin -> DA via secretsdump""#),
             Some("admin -> DA via secretsdump".to_string())
         );
     }
 
-    // ─── parse_meta_datetime ─────────────────────────────────────────────────
-
     #[test]
-    fn test_parse_meta_datetime_rfc3339() {
+    fn parse_meta_datetime_rfc3339() {
         assert!(parse_meta_datetime("2025-01-28T12:00:00+00:00").is_some());
     }
 
     #[test]
-    fn test_parse_meta_datetime_json_quoted() {
+    fn parse_meta_datetime_json_quoted() {
         assert!(parse_meta_datetime(r#""2025-01-28T12:00:00+00:00""#).is_some());
     }
 
     #[test]
-    fn test_parse_meta_datetime_null() {
+    fn parse_meta_datetime_null() {
         assert!(parse_meta_datetime("null").is_none());
     }
 
     #[test]
-    fn test_parse_meta_datetime_empty() {
+    fn parse_meta_datetime_empty() {
         assert!(parse_meta_datetime("").is_none());
     }
 
     #[test]
-    fn test_parse_meta_datetime_invalid() {
+    fn parse_meta_datetime_invalid() {
         assert!(parse_meta_datetime("not-a-date").is_none());
     }
 
     #[test]
-    fn test_parse_meta_datetime_utc_z() {
+    fn parse_meta_datetime_utc_z() {
         assert!(parse_meta_datetime("2025-01-28T12:00:00Z").is_some());
     }
 
-    // ─── parse_meta_string_list ──────────────────────────────────────────────
-
     #[test]
-    fn test_parse_meta_string_list_json_array() {
+    fn parse_meta_string_list_json_array() {
         let list = parse_meta_string_list(r#"["192.168.58.10","192.168.58.20"]"#);
         assert_eq!(list, vec!["192.168.58.10", "192.168.58.20"]);
     }
 
     #[test]
-    fn test_parse_meta_string_list_comma_separated() {
+    fn parse_meta_string_list_comma_separated() {
         let list = parse_meta_string_list("192.168.58.10,192.168.58.20");
         assert_eq!(list, vec!["192.168.58.10", "192.168.58.20"]);
     }
 
     #[test]
-    fn test_parse_meta_string_list_json_encoded_comma() {
+    fn parse_meta_string_list_json_encoded_comma() {
         let list = parse_meta_string_list(r#""192.168.58.10,192.168.58.20""#);
         assert_eq!(list, vec!["192.168.58.10", "192.168.58.20"]);
     }
 
     #[test]
-    fn test_parse_meta_string_list_single() {
+    fn parse_meta_string_list_single() {
         let list = parse_meta_string_list("192.168.58.10");
         assert_eq!(list, vec!["192.168.58.10"]);
     }
 
     #[test]
-    fn test_parse_meta_string_list_empty() {
+    fn parse_meta_string_list_empty() {
         assert!(parse_meta_string_list("").is_empty());
     }
 
     #[test]
-    fn test_parse_meta_string_list_with_spaces() {
+    fn parse_meta_string_list_with_spaces() {
         let list = parse_meta_string_list("192.168.58.10, 192.168.58.20 , 192.168.58.30");
         assert_eq!(
             list,
@@ -282,15 +274,13 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_meta_string_list_filters_empty() {
+    fn parse_meta_string_list_filters_empty() {
         let list = parse_meta_string_list(r#"["192.168.58.10","","192.168.58.20"]"#);
         assert_eq!(list, vec!["192.168.58.10", "192.168.58.20"]);
     }
 
-    // ─── OperationMeta::from_redis_hash ──────────────────────────────────────
-
     #[test]
-    fn test_operation_meta_empty_hash() {
+    fn operation_meta_empty_hash() {
         let data = HashMap::new();
         let meta = OperationMeta::from_redis_hash(&data);
         assert!(!meta.has_domain_admin);
@@ -304,7 +294,7 @@ mod tests {
     }
 
     #[test]
-    fn test_operation_meta_full() {
+    fn operation_meta_full() {
         let mut data = HashMap::new();
         data.insert("has_domain_admin".to_string(), "true".to_string());
         data.insert("has_golden_ticket".to_string(), "true".to_string());
@@ -345,7 +335,7 @@ mod tests {
     }
 
     #[test]
-    fn test_operation_meta_completed_at_bare() {
+    fn operation_meta_completed_at_bare() {
         let mut data = HashMap::new();
         data.insert(
             "completed_at".to_string(),
@@ -356,32 +346,28 @@ mod tests {
     }
 
     #[test]
-    fn test_operation_meta_default_derives() {
+    fn operation_meta_default_derives() {
         let meta = OperationMeta::default();
         assert!(!meta.has_domain_admin);
         assert!(!meta.has_golden_ticket);
         assert!(meta.target_ips.is_empty());
     }
 
-    // ─── parse_meta_bool edge cases ─────────────────────────────────────────
-
     #[test]
-    fn test_parse_meta_bool_whitespace() {
+    fn parse_meta_bool_whitespace() {
         assert!(!parse_meta_bool(" true"));
         assert!(!parse_meta_bool("true "));
     }
 
     #[test]
-    fn test_parse_meta_bool_json_encoded_true() {
+    fn parse_meta_bool_json_encoded_true() {
         // Python json.dumps(True) = "true", json.dumps(False) = "false"
         assert!(parse_meta_bool("true"));
         assert!(!parse_meta_bool("false"));
     }
 
-    // ─── parse_meta_string edge cases ───────────────────────────────────────
-
     #[test]
-    fn test_parse_meta_string_ip_address() {
+    fn parse_meta_string_ip_address() {
         assert_eq!(
             parse_meta_string(r#""192.168.58.10""#),
             Some("192.168.58.10".to_string())
@@ -389,7 +375,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_meta_string_raw_ip() {
+    fn parse_meta_string_raw_ip() {
         assert_eq!(
             parse_meta_string("192.168.58.10"),
             Some("192.168.58.10".to_string())
@@ -397,104 +383,98 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_meta_string_json_number_falls_through() {
+    fn parse_meta_string_json_number_falls_through() {
         // A JSON number shouldn't parse as a JSON string
         assert_eq!(parse_meta_string("42"), Some("42".to_string()));
     }
 
     #[test]
-    fn test_parse_meta_string_json_boolean_falls_through() {
+    fn parse_meta_string_json_boolean_falls_through() {
         assert_eq!(parse_meta_string("true"), Some("true".to_string()));
         assert_eq!(parse_meta_string("false"), Some("false".to_string()));
     }
 
     #[test]
-    fn test_parse_meta_string_nested_quotes() {
+    fn parse_meta_string_nested_quotes() {
         // Double-encoded string (rare but possible)
         let result = parse_meta_string(r#""contoso.local\\admin""#);
         assert_eq!(result, Some(r"contoso.local\admin".to_string()));
     }
 
     #[test]
-    fn test_parse_meta_string_unicode() {
+    fn parse_meta_string_unicode() {
         assert_eq!(
             parse_meta_string(r#""dc01\u002econtoso.local""#),
             Some("dc01.contoso.local".to_string())
         );
     }
 
-    // ─── parse_meta_datetime edge cases ─────────────────────────────────────
-
     #[test]
-    fn test_parse_meta_datetime_with_offset() {
+    fn parse_meta_datetime_with_offset() {
         let result = parse_meta_datetime("2025-06-15T08:30:00+05:30");
         assert!(result.is_some());
     }
 
     #[test]
-    fn test_parse_meta_datetime_negative_offset() {
+    fn parse_meta_datetime_negative_offset() {
         let result = parse_meta_datetime("2025-06-15T08:30:00-07:00");
         assert!(result.is_some());
     }
 
     #[test]
-    fn test_parse_meta_datetime_json_null_string() {
+    fn parse_meta_datetime_json_null_string() {
         assert!(parse_meta_datetime(r#""null""#).is_none());
     }
 
     #[test]
-    fn test_parse_meta_datetime_json_empty_string() {
+    fn parse_meta_datetime_json_empty_string() {
         assert!(parse_meta_datetime(r#""""#).is_none());
     }
 
     #[test]
-    fn test_parse_meta_datetime_partial_date() {
+    fn parse_meta_datetime_partial_date() {
         assert!(parse_meta_datetime("2025-06-15").is_none());
     }
 
-    // ─── parse_meta_string_list edge cases ──────────────────────────────────
-
     #[test]
-    fn test_parse_meta_string_list_json_array_single() {
+    fn parse_meta_string_list_json_array_single() {
         let list = parse_meta_string_list(r#"["192.168.58.10"]"#);
         assert_eq!(list, vec!["192.168.58.10"]);
     }
 
     #[test]
-    fn test_parse_meta_string_list_json_array_empty() {
+    fn parse_meta_string_list_json_array_empty() {
         let list = parse_meta_string_list("[]");
         assert!(list.is_empty());
     }
 
     #[test]
-    fn test_parse_meta_string_list_trailing_comma() {
+    fn parse_meta_string_list_trailing_comma() {
         let list = parse_meta_string_list("192.168.58.10,192.168.58.20,");
         assert_eq!(list, vec!["192.168.58.10", "192.168.58.20"]);
     }
 
     #[test]
-    fn test_parse_meta_string_list_leading_comma() {
+    fn parse_meta_string_list_leading_comma() {
         let list = parse_meta_string_list(",192.168.58.10");
         assert_eq!(list, vec!["192.168.58.10"]);
     }
 
     #[test]
-    fn test_parse_meta_string_list_all_empty_entries() {
+    fn parse_meta_string_list_all_empty_entries() {
         let list = parse_meta_string_list(",,,");
         assert!(list.is_empty());
     }
 
     #[test]
-    fn test_parse_meta_string_list_json_array_with_numbers() {
+    fn parse_meta_string_list_json_array_with_numbers() {
         // Non-string JSON array elements are filtered out
         let list = parse_meta_string_list(r#"[1, 2, 3]"#);
         assert!(list.is_empty());
     }
 
-    // ─── OperationMeta::from_redis_hash edge cases ──────────────────────────
-
     #[test]
-    fn test_operation_meta_legacy_bool_values() {
+    fn operation_meta_legacy_bool_values() {
         let mut data = HashMap::new();
         data.insert("has_domain_admin".to_string(), "True".to_string());
         data.insert("has_golden_ticket".to_string(), "1".to_string());
@@ -504,7 +484,7 @@ mod tests {
     }
 
     #[test]
-    fn test_operation_meta_false_bool_values() {
+    fn operation_meta_false_bool_values() {
         let mut data = HashMap::new();
         data.insert("has_domain_admin".to_string(), "false".to_string());
         data.insert("has_golden_ticket".to_string(), "0".to_string());
@@ -514,7 +494,7 @@ mod tests {
     }
 
     #[test]
-    fn test_operation_meta_target_ips_comma_separated() {
+    fn operation_meta_target_ips_comma_separated() {
         let mut data = HashMap::new();
         data.insert(
             "target_ips".to_string(),
@@ -527,7 +507,7 @@ mod tests {
     }
 
     #[test]
-    fn test_operation_meta_target_ips_json_encoded_comma() {
+    fn operation_meta_target_ips_json_encoded_comma() {
         let mut data = HashMap::new();
         data.insert(
             "target_ips".to_string(),
@@ -538,7 +518,7 @@ mod tests {
     }
 
     #[test]
-    fn test_operation_meta_null_domain_admin_path() {
+    fn operation_meta_null_domain_admin_path() {
         let mut data = HashMap::new();
         data.insert("domain_admin_path".to_string(), "null".to_string());
         let meta = OperationMeta::from_redis_hash(&data);
@@ -546,7 +526,7 @@ mod tests {
     }
 
     #[test]
-    fn test_operation_meta_invalid_datetime() {
+    fn operation_meta_invalid_datetime() {
         let mut data = HashMap::new();
         data.insert("started_at".to_string(), "not-a-date".to_string());
         let meta = OperationMeta::from_redis_hash(&data);
@@ -554,7 +534,7 @@ mod tests {
     }
 
     #[test]
-    fn test_operation_meta_extra_unknown_fields_ignored() {
+    fn operation_meta_extra_unknown_fields_ignored() {
         let mut data = HashMap::new();
         data.insert("unknown_field".to_string(), "some_value".to_string());
         data.insert("has_domain_admin".to_string(), "true".to_string());
@@ -563,7 +543,7 @@ mod tests {
     }
 
     #[test]
-    fn test_operation_meta_empty_target_ips() {
+    fn operation_meta_empty_target_ips() {
         let mut data = HashMap::new();
         data.insert("target_ips".to_string(), "".to_string());
         let meta = OperationMeta::from_redis_hash(&data);
@@ -571,17 +551,15 @@ mod tests {
     }
 
     #[test]
-    fn test_operation_meta_empty_json_array_target_ips() {
+    fn operation_meta_empty_json_array_target_ips() {
         let mut data = HashMap::new();
         data.insert("target_ips".to_string(), "[]".to_string());
         let meta = OperationMeta::from_redis_hash(&data);
         assert!(meta.target_ips.is_empty());
     }
 
-    // ─── SharedRedTeamState ─────────────────────────────────────────────────
-
     #[test]
-    fn test_shared_state_new() {
+    fn shared_state_new() {
         let state = SharedRedTeamState::new("op-test-001".to_string());
         assert_eq!(state.operation_id, "op-test-001");
         assert!(state.target.is_none());
@@ -604,17 +582,15 @@ mod tests {
         assert!(state.all_techniques.is_empty());
     }
 
-    // ─── build_attack_chain ─────────────────────────────────────────────────
-
     #[test]
-    fn test_build_attack_chain_empty_state() {
+    fn build_attack_chain_empty_state() {
         let state = SharedRedTeamState::new("op-chain-empty".to_string());
         let chain = state.build_attack_chain("nonexistent-id");
         assert!(chain.is_empty());
     }
 
     #[test]
-    fn test_build_attack_chain_single_credential() {
+    fn build_attack_chain_single_credential() {
         let mut state = SharedRedTeamState::new("op-chain-single".to_string());
         state.all_credentials.push(Credential {
             id: "cred-1".to_string(),
@@ -636,7 +612,7 @@ mod tests {
     }
 
     #[test]
-    fn test_build_attack_chain_multi_step() {
+    fn build_attack_chain_multi_step() {
         let mut state = SharedRedTeamState::new("op-chain-multi".to_string());
         state.all_credentials.push(Credential {
             id: "cred-1".to_string(),
@@ -672,7 +648,7 @@ mod tests {
     }
 
     #[test]
-    fn test_build_attack_chain_cycle_guard() {
+    fn build_attack_chain_cycle_guard() {
         let mut state = SharedRedTeamState::new("op-cycle".to_string());
         // Create a cycle: cred-1 -> cred-2 -> cred-1
         state.all_credentials.push(Credential {
@@ -702,17 +678,15 @@ mod tests {
         assert!(chain.len() <= 2);
     }
 
-    // ─── build_domain_admin_chain ───────────────────────────────────────────
-
     #[test]
-    fn test_build_domain_admin_chain_no_krbtgt() {
+    fn build_domain_admin_chain_no_krbtgt() {
         let state = SharedRedTeamState::new("op-no-krbtgt".to_string());
         let chain = state.build_domain_admin_chain();
         assert!(chain.is_empty());
     }
 
     #[test]
-    fn test_build_domain_admin_chain_with_krbtgt() {
+    fn build_domain_admin_chain_with_krbtgt() {
         let mut state = SharedRedTeamState::new("op-da".to_string());
         state.all_credentials.push(Credential {
             id: "cred-init".to_string(),
@@ -745,7 +719,7 @@ mod tests {
     }
 
     #[test]
-    fn test_build_domain_admin_chain_case_insensitive_krbtgt() {
+    fn build_domain_admin_chain_case_insensitive_krbtgt() {
         let mut state = SharedRedTeamState::new("op-da-case".to_string());
         state.all_hashes.push(Hash {
             id: "hash-krbtgt".to_string(),
@@ -766,7 +740,7 @@ mod tests {
     }
 
     #[test]
-    fn test_build_domain_admin_chain_ignores_non_ntlm_krbtgt() {
+    fn build_domain_admin_chain_ignores_non_ntlm_krbtgt() {
         let mut state = SharedRedTeamState::new("op-da-aes".to_string());
         state.all_hashes.push(Hash {
             id: "hash-aes".to_string(),
@@ -785,16 +759,14 @@ mod tests {
         assert!(chain.is_empty());
     }
 
-    // ─── format_attack_chain ────────────────────────────────────────────────
-
     #[test]
-    fn test_format_attack_chain_empty() {
+    fn format_attack_chain_empty() {
         let result = SharedRedTeamState::format_attack_chain(&[]);
         assert!(result.is_empty());
     }
 
     #[test]
-    fn test_format_attack_chain_single_credential() {
+    fn format_attack_chain_single_credential() {
         let chain = vec![AttackChainStep {
             step_number: 1,
             item_type: "credential".to_string(),
@@ -810,7 +782,7 @@ mod tests {
     }
 
     #[test]
-    fn test_format_attack_chain_credential_then_hash() {
+    fn format_attack_chain_credential_then_hash() {
         let chain = vec![
             AttackChainStep {
                 step_number: 1,
@@ -844,7 +816,7 @@ mod tests {
     }
 
     #[test]
-    fn test_format_attack_chain_no_source() {
+    fn format_attack_chain_no_source() {
         let chain = vec![AttackChainStep {
             step_number: 1,
             item_type: "credential".to_string(),
