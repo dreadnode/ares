@@ -146,14 +146,16 @@ pub(crate) fn generate_credential_access_prompt(
         return result;
     }
 
-    // Branch 5: Technique enforcement WITHOUT credentials
-    if let Some(result) = no_cred::try_generate(task_id, &params, state) {
-        return result;
-    }
-
-    // Branch 6: Low-hanging fruit WITHOUT credentials
+    // Branch 5: Low-hanging fruit WITHOUT credentials
+    // Must come before no_cred so spray tasks get the full common-password
+    // list instead of the single-password no_cred template.
     if has_low_hanging && !params.has_password && !params.has_hash {
         return low_hanging::generate_without_creds(task_id, &params, state);
+    }
+
+    // Branch 6: Technique enforcement WITHOUT credentials
+    if let Some(result) = no_cred::try_generate(task_id, &params, state) {
+        return result;
     }
 
     // Branch 7: Technique enforcement WITH credentials

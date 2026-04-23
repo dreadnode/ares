@@ -43,8 +43,12 @@ pub(super) fn try_generate(
         (
             "password_spray",
             format!(
-                "password_spray(target='{dc_ip}', domain='{domain}', \
-                 password='Password1') - try common passwords"
+                "password_spray - YOU MUST CALL ONCE PER PASSWORD:\n\
+                 \x20  password_spray(target='{dc_ip}', domain='{domain}', password='Password1')\n\
+                 \x20  password_spray(target='{dc_ip}', domain='{domain}', password='Welcome1')\n\
+                 \x20  password_spray(target='{dc_ip}', domain='{domain}', password='Summer2024')\n\
+                 \x20  password_spray(target='{dc_ip}', domain='{domain}', password='Company123')\n\
+                 \x20  password_spray(target='{dc_ip}', domain='{domain}', password='Passw0rd!')"
             ),
         ),
         (

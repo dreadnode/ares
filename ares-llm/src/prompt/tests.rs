@@ -322,7 +322,7 @@ fn credaccess_low_hanging_no_creds() {
         "reason": "low_hanging_fruit initial"
     });
     let prompt = generate_task_prompt("credential_access", "t-6", &payload, None).unwrap();
-    assert!(prompt.contains("MANDATORY TECHNIQUE EXECUTION (NO CREDENTIALS)"));
+    assert!(prompt.contains("LOW HANGING FRUIT credential discovery (NO CREDENTIALS)"));
     assert!(prompt.contains("username_as_password"));
     assert!(prompt.contains("password_spray"));
 }
