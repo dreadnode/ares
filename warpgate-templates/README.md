@@ -1,27 +1,27 @@
-# Dreadnode Warpgate Templates
+# Ares Warpgate Templates
 
-**Production-ready templates for building security tools and infrastructure using Warpgate.**
+**Production-ready templates for building Ares red/blue team agent images and AMIs with Warpgate.**
 
-[![Pre-Commit](https://github.com/dreadnode/warpgate-templates/actions/workflows/pre-commit.yaml/badge.svg)](https://github.com/dreadnode/warpgate-templates/actions/workflows/pre-commit.yaml)
-[![Validate Templates](https://github.com/dreadnode/warpgate-templates/actions/workflows/validate-templates.yaml/badge.svg)](https://github.com/dreadnode/warpgate-templates/actions/workflows/validate-templates.yaml)
-[![Build and Push](https://github.com/dreadnode/warpgate-templates/actions/workflows/build-and-push-templates.yaml/badge.svg)](https://github.com/dreadnode/warpgate-templates/actions/workflows/build-and-push-templates.yaml)
+[![Validate Templates](https://github.com/dreadnode/ares/actions/workflows/validate-templates.yaml/badge.svg)](https://github.com/dreadnode/ares/actions/workflows/validate-templates.yaml)
+[![Test Template Builds](https://github.com/dreadnode/ares/actions/workflows/test-template-builds.yaml/badge.svg)](https://github.com/dreadnode/ares/actions/workflows/test-template-builds.yaml)
+[![Build and Push](https://github.com/dreadnode/ares/actions/workflows/build-and-push-templates.yaml/badge.svg)](https://github.com/dreadnode/ares/actions/workflows/build-and-push-templates.yaml)
 
 ---
 
 ## Overview
 
-Dreadnode's template collection for [Warp Gate](https://github.com/cowdogmoo/warpgate) - a robust, automatable engine for building multi-architecture containers and golden images.
+This directory contains [Warpgate](https://github.com/cowdogmoo/warpgate) templates for building the container images and AMIs that make up the Ares multi-agent system.
 
-This repository provides production-ready templates for various security tools and frameworks, including:
+Each template provisions a specific role: orchestrators, workers, the CLI, the golden Kali AMI, and the specialized red/blue team agents that ship with Ares.
 
-- **Ares framework** - Specialized security assessment agents for Active Directory penetration testing, network enumeration, and credential cracking
-- **Ares blue team** - Defensive security agents for incident triage, threat hunting, and lateral movement analysis
-- **GPU-accelerated cracking** - CUDA/OpenCL hashcat images with NVIDIA GPU support
-- **Ray cluster** - Base images and job runners for distributed computing with Ray (.NET and ADS experiments)
-- **Crucible challenges** - FastAPI-based challenge images for CTF platforms with optional PyTorch support
-- **GOAD infrastructure** - Pre-baked Windows Server AMIs for Game of Active Directory lab deployments
+- **Red team agents** - Recon, ACL exploitation, coercion, credential access, password cracking, lateral movement, and privilege escalation
+- **Blue team agents** - Triage, threat hunting, and lateral movement analysis
+- **Coordination** - Orchestrator and worker images
+- **CLI** - Pure Rust `ares` binary in a minimal container
+- **GPU cracking** - CUDA-accelerated hashcat base and agent
+- **Golden AMI** - Kali AMI with the full Ares toolchain pre-installed
 
-Templates support multi-architecture builds (amd64/arm64) where applicable and are designed for container-native and cloud deployments.
+Container templates produce multi-arch images (`linux/amd64` and `linux/arm64`) unless they depend on CUDA, in which case they are `amd64` only.
 
 ## Quick Start
 
@@ -29,204 +29,161 @@ Templates support multi-architecture builds (amd64/arm64) where applicable and a
 # Install warpgate
 go install github.com/CowDogMoo/warpgate/cmd/warpgate@latest
 
-# Build an Ares agent
+# Build the base image
 warpgate build templates/ares-base/warpgate.yaml --arch amd64
 
-# Build and push to registry
+# Build and push a specialized agent
 warpgate build templates/ares-recon-agent/warpgate.yaml \
-  --arch amd64 \
+  --arch amd64,arm64 \
   --registry ghcr.io/dreadnode \
   --push
 ```
 
+A `GITHUB_TOKEN` environment variable is required for any template that clones the Ares repository (everything except `ares-base` and `ares-cracker-base-gpu`).
+
 ## Available Templates
 
-### Ares Agent Templates
+### Core
 
 | Template | Description | Base Image | Platforms |
 | -------- | ----------- | ---------- | --------- |
-| [ares-base](./templates/ares-base) | Base Ares framework with Python and core dependencies | kalilinux/kali-rolling | Container (amd64, arm64) |
-| [ares-orchestrator](./templates/ares-orchestrator) | Redis-based multi-agent coordinator (`ares orchestrator`) | python:3.13.7-slim | Container (amd64, arm64) |
-| [ares-worker](./templates/ares-worker) | Task polling agent for orchestration (`ares worker`) | ares-base | Container (amd64, arm64) |
-| [ares-acl-agent](./templates/ares-acl-agent) | Active Directory ACL exploitation agent | ares-base | Container (amd64, arm64) |
-| [ares-coercion-agent](./templates/ares-coercion-agent) | NTLM relay and authentication coercion tools | ares-base | Container (amd64, arm64) |
-| [ares-cracker-agent](./templates/ares-cracker-agent) | Password cracking agent with hashcat and john | ares-base | Container (amd64, arm64) |
-| [ares-credential-access-agent](./templates/ares-credential-access-agent) | Kerberos attacks and credential dumping tools | ares-base | Container (amd64, arm64) |
-| [ares-lateral-movement-agent](./templates/ares-lateral-movement-agent) | Post-exploitation lateral movement tools | ares-base | Container (amd64, arm64) |
-| [ares-privesc-agent](./templates/ares-privesc-agent) | Privilege escalation tools | ares-base | Container (amd64, arm64) |
-| [ares-recon-agent](./templates/ares-recon-agent) | Network reconnaissance and AD enumeration tools | ares-base | Container (amd64, arm64) |
+| [ares-base](./templates/ares-base) | Kali-based image with Python 3.13, Rust, Ansible, and core dependencies | `kalilinux/kali-rolling` | `linux/amd64`, `linux/arm64` |
+| [ares-cli](./templates/ares-cli) | Minimal image containing the pure Rust `ares` CLI binary | `debian:trixie-slim` | `linux/amd64`, `linux/arm64` |
+| [ares-orchestrator](./templates/ares-orchestrator) | Ares orchestrator (`ares orchestrator`) with embedded Python for LLM agent steps | `debian:trixie-slim` | `linux/amd64`, `linux/arm64` |
+| [ares-worker](./templates/ares-worker) | Ares worker (`ares worker`) with embedded Python for LLM agent steps | `debian:trixie-slim` | `linux/amd64`, `linux/arm64` |
+| [ares-golden-image](./templates/ares-golden-image) | Kali AMI pre-loaded with all Ares red team tools and Alloy telemetry | Kali Linux AMI | AMI (`us-west-1`, `x86_64`) |
 
-### Ares Blue Team Templates
+### Red Team Agents
 
 | Template | Description | Base Image | Platforms |
 | -------- | ----------- | ---------- | --------- |
-| [ares-blue-agent](./templates/ares-blue-agent) | Defensive security operations agent | ares-base | Container (amd64, arm64) |
-| [ares-blue-triage-agent](./templates/ares-blue-triage-agent) | Initial incident assessment and alerting | ares-base | Container (amd64, arm64) |
-| [ares-blue-threat-hunter-agent](./templates/ares-blue-threat-hunter-agent) | Proactive threat detection and investigation | ares-base | Container (amd64, arm64) |
-| [ares-blue-lateral-analyst-agent](./templates/ares-blue-lateral-analyst-agent) | Lateral movement detection and analysis | ares-base | Container (amd64, arm64) |
+| [ares-recon-agent](./templates/ares-recon-agent) | Network reconnaissance and AD enumeration | `debian:trixie-slim` | `linux/amd64`, `linux/arm64` |
+| [ares-acl-agent](./templates/ares-acl-agent) | Active Directory ACL exploitation | `debian:trixie-slim` | `linux/amd64`, `linux/arm64` |
+| [ares-coercion-agent](./templates/ares-coercion-agent) | NTLM relay and authentication coercion | `debian:trixie-slim` | `linux/amd64`, `linux/arm64` |
+| [ares-credential-access-agent](./templates/ares-credential-access-agent) | Kerberos attacks and credential dumping | `debian:trixie-slim` | `linux/amd64`, `linux/arm64` |
+| [ares-cracker-agent](./templates/ares-cracker-agent) | Password cracking with hashcat and john (CPU-only) | `debian:trixie-slim` | `linux/amd64`, `linux/arm64` |
+| [ares-lateral-movement-agent](./templates/ares-lateral-movement-agent) | Post-exploitation lateral movement | `debian:trixie-slim` | `linux/amd64`, `linux/arm64` |
+| [ares-privesc-agent](./templates/ares-privesc-agent) | Windows and Linux privilege escalation | `debian:trixie-slim` | `linux/amd64`, `linux/arm64` |
 
-### GPU-Accelerated Cracking Templates
-
-| Template | Description | Base Image | Platforms |
-| -------- | ----------- | ---------- | --------- |
-| [ares-cracker-base-gpu](./templates/ares-cracker-base-gpu) | Base image with CUDA/OpenCL GPU-accelerated hashcat | nvidia/cuda:12.6.0-runtime-ubuntu24.04 | Container (amd64) |
-| [ares-cracker-agent-gpu](./templates/ares-cracker-agent-gpu) | Ares cracking agent with GPU-accelerated hashcat | ares-cracker-base-gpu | Container (amd64) |
-
-### Ray Cluster Templates
+### Blue Team Agents
 
 | Template | Description | Base Image | Platforms |
 | -------- | ----------- | ---------- | --------- |
-| [ray-dotnet](./templates/ray-dotnet) | Ray cluster base image with .NET SDK support | Dockerfile | Container (amd64, arm64) |
-| [ray-dotnet-job](./templates/ray-dotnet-job) | Ray .NET job runner with source code baked in | ray-dotnet | Container (amd64, arm64) |
-| [ray-ads](./templates/ray-ads) | Ray cluster base image for ADS experiments | Dockerfile | Container (amd64, arm64) |
-| [ray-ads-job](./templates/ray-ads-job) | Ray ADS job runner with source code baked in | ray-ads | Container (amd64, arm64) |
+| [ares-blue-agent](./templates/ares-blue-agent) | General defensive security operations agent | `debian:trixie-slim` | `linux/amd64`, `linux/arm64` |
+| [ares-blue-triage-agent](./templates/ares-blue-triage-agent) | Initial incident assessment and alerting | `debian:trixie-slim` | `linux/amd64`, `linux/arm64` |
+| [ares-blue-threat-hunter-agent](./templates/ares-blue-threat-hunter-agent) | Proactive threat detection and investigation | `debian:trixie-slim` | `linux/amd64`, `linux/arm64` |
+| [ares-blue-lateral-analyst-agent](./templates/ares-blue-lateral-analyst-agent) | Lateral movement detection and analysis | `debian:trixie-slim` | `linux/amd64`, `linux/arm64` |
 
-### Crucible Challenge Templates
+### GPU-Accelerated Cracking
 
 | Template | Description | Base Image | Platforms |
 | -------- | ----------- | ---------- | --------- |
-| [crucible-challenge-core](./templates/crucible-challenge-core) | FastAPI challenge base with Gunicorn and uv | python:3.11-slim | Container (amd64, arm64) |
-| [crucible-challenge-torch](./templates/crucible-challenge-torch) | Challenge image with PyTorch (CPU) | python:3.11-slim | Container (amd64, arm64) |
-| [crucible-challenge-torch-gpu](./templates/crucible-challenge-torch-gpu) | Challenge image with PyTorch (CUDA GPU) | python:3.11-slim | Container (amd64) |
+| [ares-cracker-base-gpu](./templates/ares-cracker-base-gpu) | Pre-compiled CUDA/OpenCL hashcat base image | `nvidia/cuda:12.6.0-runtime-ubuntu24.04` | `linux/amd64` |
+| [ares-cracker-agent-gpu](./templates/ares-cracker-agent-gpu) | Ares cracking agent with CUDA-accelerated hashcat | `ares-cracker-base-gpu` | `linux/amd64` |
 
-### GOAD Infrastructure Templates
-
-| Template | Description | Base Image | Platform |
-| -------- | ----------- | ---------- | -------- |
-| [goad-dc-base](./templates/goad-dc-base) | Windows Server 2019 with AD DS role pre-installed | Windows Server 2019 | AMI (us-west-1) |
-| [goad-dc-base-2016](./templates/goad-dc-base-2016) | Windows Server 2016 with AD DS role pre-installed | Windows Server 2016 | AMI (us-west-1) |
-| [goad-mssql-base](./templates/goad-mssql-base) | Windows Server 2019 with MSSQL Express 2019 | Windows Server 2019 | AMI (us-west-1) |
-| [goad-mssql-base-2016](./templates/goad-mssql-base-2016) | Windows Server 2016 with MSSQL Express 2019 | Windows Server 2016 | AMI (us-west-1) |
-| [goad-member-base](./templates/goad-member-base) | Windows Server 2019 with IIS pre-installed | Windows Server 2019 | AMI (us-west-1) |
-| [goad-member-base-2016](./templates/goad-member-base-2016) | Windows Server 2016 with IIS pre-installed | Windows Server 2016 | AMI (us-west-1) |
-
-### Template Comparison
-
-| Feature | Base | Recon | Coercion | Cracker | Credential | ACL | Lateral | Privesc |
-| ------- | ---- | ----- | -------- | ------- | ---------- | --- | ------- | ------- |
-| **Python 3.13.7** | Y | Y | Y | Y | Y | Y | Y | Y |
-| **Ares Framework** | Y | Y | Y | Y | Y | Y | Y | Y |
-| **uv Package Manager** | Y | Y | Y | Y | Y | Y | Y | Y |
-| **Network Tools (nmap, etc)** | | Y | | | | | | |
-| **Impacket** | | Y | | | Y | | Y | |
-| **NetExec** | | Y | | | | | | |
-| **BloodHound Python** | | Y | | | | | | |
-| **Responder** | | | Y | | | | | |
-| **mitm6** | | | Y | | | | | |
-| **Coercer** | | | Y | | | | | |
-| **Hashcat** | | | | Y | | | | |
-| **John the Ripper** | | | | Y | | | | |
-| **Kerberos Tools** | | | | | Y | | | |
-| **bloodyAD** | | | | | | Y | | |
-| **evil-winrm** | | | | | | | Y | |
-| **lsassy** | | | | | | | Y | |
-
-## Features
-
-### Template Capabilities
-
-- **Multi-Architecture**: Native builds for amd64 and arm64
-- **Modular Design**: Choose the right agent for your needs
-- **Optimized**: Aggressive cleanup for minimal image sizes
-- **Python 3.13.7**: Latest Python runtime with modern tooling
-- **uv Package Manager**: Fast dependency management
-- **Security Focused**: Pre-configured AD assessment tools
-- **Container-Native**: Designed for orchestrated deployments
-
-## Usage Guide
+## Usage
 
 ### Prerequisites
 
-- [Warp Gate](https://github.com/cowdogmoo/warpgate) CLI tool (`>= 3.0.0`)
+- [Warpgate](https://github.com/cowdogmoo/warpgate) CLI (`>= 1.0.0`)
 - Docker or Podman for container builds
+- AWS credentials for AMI builds (`ares-golden-image` only)
+- `GITHUB_TOKEN` for templates that clone the Ares repository
 
-### Building Templates
-
-#### Build Base Agent
+### Building
 
 ```bash
 # Single architecture
 warpgate build templates/ares-base/warpgate.yaml --arch amd64
 
 # Multi-architecture
-warpgate build templates/ares-base/warpgate.yaml --arch amd64,arm64
-```
+warpgate build templates/ares-recon-agent/warpgate.yaml --arch amd64,arm64
 
-#### Build Specialized Agents
-
-```bash
-# Cracker agent for password recovery
+# Build and push to a registry
 warpgate build templates/ares-cracker-agent/warpgate.yaml \
-  --arch amd64 \
-  --registry ghcr.io/dreadnode \
-  --push
-
-# Recon agent for network reconnaissance
-warpgate build templates/ares-recon-agent/warpgate.yaml \
-  --arch amd64 \
+  --arch amd64,arm64 \
   --registry ghcr.io/dreadnode \
   --push
 ```
 
-### Using Built Images
+### Validating
 
 ```bash
-# Run base agent
-docker run -it ghcr.io/dreadnode/ares-base:latest bash
+warpgate validate templates/ares-recon-agent/warpgate.yaml
+```
 
-# Run cracking workload
-docker run -it ghcr.io/dreadnode/ares-cracker-agent:latest \
-  hashcat -m 1000 -a 0 hashes.txt /usr/share/wordlists/rockyou.txt
+### Running Built Images
 
-# Run reconnaissance scan
+```bash
+# CLI
+docker run --rm ghcr.io/dreadnode/ares-cli:latest --help
+
+# Orchestrator (entrypoint: ares orchestrator)
+docker run -it ghcr.io/dreadnode/ares-orchestrator:latest
+
+# Worker (entrypoint: ares worker)
+docker run -it ghcr.io/dreadnode/ares-worker:latest
+
+# Recon agent
 docker run -it ghcr.io/dreadnode/ares-recon-agent:latest \
   netexec smb 192.168.1.0/24 -u user -p password
 
-# Orchestrate multiple agents for comprehensive assessment
-docker run -d ghcr.io/dreadnode/ares-recon-agent:latest netexec smb 192.168.1.0/24
-docker run -d ghcr.io/dreadnode/ares-cracker-agent:latest hashcat -m 1000 hashes.txt
+# CPU cracking
+docker run -it ghcr.io/dreadnode/ares-cracker-agent:latest \
+  hashcat -m 1000 -a 0 hashes.txt /usr/share/wordlists/rockyou.txt
+
+# GPU cracking (requires NVIDIA Container Toolkit)
+docker run --rm --gpus all ghcr.io/dreadnode/ares-cracker-agent-gpu:latest \
+  hashcat -m 1000 -a 0 hashes.txt rockyou.txt
 ```
 
-## Template Structure
+## Template Layout
 
 Each template directory contains:
 
 ```text
 template-name/
-├── warpgate.yaml          # Main template configuration
-└── README.md              # Template-specific documentation
+├── warpgate.yaml   # Warpgate template configuration
+└── README.md       # Template-specific documentation
 ```
 
-### Template Configuration Format
-
-Templates use YAML format with the following structure:
+The `warpgate.yaml` files follow this general shape:
 
 ```yaml
 metadata:
   name: template-name
   version: 1.0.0
-  description: Description of what this template provides
+  description: What this template provides
   author: Dreadnode <info@dreadnode.io>
   license: MIT
-  tags:
-    - ares
-    - security
+  tags: [ares, ...]
   requires:
-    warpgate: ">=3.0.0"
+    warpgate: ">=1.0.0"
 
 name: template-name
 version: latest
 
 base:
-  image: ubuntu:22.04
+  image: debian:trixie-slim@sha256:...
   pull: true
-  privileged: true
+
+sources:
+  - name: ares
+    git:
+      repository: https://github.com/dreadnode/ares.git
+      ref: main
+      auth:
+        token: ${GITHUB_TOKEN}
 
 provisioners:
+  - type: file
+    source: ${sources.ares}
+    destination: /tmp/ares-build
   - type: shell
     inline:
-      - apt-get update
-      - apt-get install -y package-name
+      - cargo build --release --bin ares
+  - type: ansible
+    playbook_path: ${PROVISION_REPO_PATH}/playbooks/ares/recon.yml
 
 targets:
   - type: container
@@ -235,131 +192,43 @@ targets:
       - linux/arm64
 ```
 
-## Ares Framework
+Most agent templates use a three-stage provisioning pipeline: build the Rust `ares` binary from source, install Python and Ansible tooling, then run the role-specific Ansible playbook from `nimbus_range` to install the toolchain.
 
-The Ares framework provides a modular approach to building security assessment capabilities:
-
-### Core Principles
-
-1. **Modularity**: Choose components based on your needs
-2. **Extensibility**: Easy to extend with custom agents
-3. **Orchestration**: Designed for distributed deployments
-4. **Python-First**: Built on modern Python 3.13.7
-5. **Container-Native**: Optimized for container environments
-
-### Use Cases
-
-- **Active Directory Assessments**: Comprehensive AD penetration testing with Ares agents
-- **Network Enumeration**: Service discovery and reconnaissance
-- **Password Recovery**: Credential cracking and analysis
-- **Security Research**: Building custom security tools
-- **Red Team Operations**: Offensive security tooling
-- **Blue Team Operations**: Defensive security with incident triage, threat hunting, and lateral movement analysis
-- **GPU-Accelerated Cracking**: CUDA-powered password recovery with NVIDIA GPU support
-- **Distributed Computing**: Ray cluster jobs for .NET and ADS experiments
-- **CTF Challenges**: Build and deploy Crucible challenges with FastAPI and optional ML capabilities
-- **Lab Environments**: Deploy GOAD infrastructure with pre-baked Windows Server AMIs
-
-## Contributing
-
-We welcome contributions! Please see [CONTRIBUTING.md](./CONTRIBUTING.md) for guidelines on:
-
-- Creating new templates
-- Improving existing templates
-- Reporting issues
-- Submitting pull requests
-
-### Template Validation
-
-Before submitting a template, validate it:
-
-```bash
-warpgate validate templates/your-template/warpgate.yaml
-```
-
-## Repository Structure
+## Directory Structure
 
 ```text
 warpgate-templates/
-├── templates/                         # All template definitions
-│   ├── ares-base/                     # Ares framework base image
-│   ├── ares-orchestrator/             # Multi-agent coordinator
-│   ├── ares-worker/                   # Task polling agent
-│   ├── ares-acl-agent/                # AD ACL exploitation
-│   ├── ares-blue-agent/               # Blue team defensive agent
-│   ├── ares-blue-lateral-analyst-agent/ # Lateral movement analysis
-│   ├── ares-blue-threat-hunter-agent/ # Proactive threat hunting
-│   ├── ares-blue-triage-agent/        # Incident triage
-│   ├── ares-coercion-agent/           # NTLM relay tools
-│   ├── ares-cracker-agent/            # Password cracking (CPU)
-│   ├── ares-cracker-agent-gpu/        # Password cracking (GPU)
-│   ├── ares-cracker-base-gpu/         # GPU hashcat base image
-│   ├── ares-credential-access-agent/  # Kerberos attacks
-│   ├── ares-lateral-movement-agent/   # Post-exploitation
-│   ├── ares-privesc-agent/            # Privilege escalation
-│   ├── ares-recon-agent/              # Network reconnaissance
-│   ├── crucible-challenge-core/       # FastAPI challenge base
-│   ├── crucible-challenge-torch/      # Challenge with PyTorch CPU
-│   ├── crucible-challenge-torch-gpu/  # Challenge with PyTorch GPU
-│   ├── goad-dc-base/                  # GOAD DC (Server 2019)
-│   ├── goad-dc-base-2016/             # GOAD DC (Server 2016)
-│   ├── goad-mssql-base/               # GOAD MSSQL (Server 2019)
-│   ├── goad-mssql-base-2016/          # GOAD MSSQL (Server 2016)
-│   ├── goad-member-base/              # GOAD Member (Server 2019)
-│   ├── goad-member-base-2016/         # GOAD Member (Server 2016)
-│   ├── ray-ads/                       # Ray ADS base image
-│   ├── ray-ads-job/                   # Ray ADS job runner
-│   ├── ray-dotnet/                    # Ray .NET base image
-│   └── ray-dotnet-job/                # Ray .NET job runner
-├── .github/
-│   └── workflows/                     # CI/CD for template validation
-├── README.md                          # This file
-├── CONTRIBUTING.md                    # Contribution guidelines
-├── LICENSE                            # Repository license
-└── .warpgate-version                  # Warpgate compatibility info
+├── templates/
+│   ├── ares-base/                          # Kali base image with Python + Rust toolchain
+│   ├── ares-cli/                           # Minimal image with the Rust ares CLI
+│   ├── ares-orchestrator/                  # Multi-agent coordinator
+│   ├── ares-worker/                        # Task polling worker
+│   ├── ares-golden-image/                  # Kali AMI with all red team tools
+│   ├── ares-recon-agent/                   # Network and AD reconnaissance
+│   ├── ares-acl-agent/                     # AD ACL exploitation
+│   ├── ares-coercion-agent/                # NTLM relay / coercion
+│   ├── ares-credential-access-agent/       # Kerberos and credential dumping
+│   ├── ares-cracker-agent/                 # CPU password cracking
+│   ├── ares-cracker-agent-gpu/             # GPU password cracking
+│   ├── ares-cracker-base-gpu/              # CUDA hashcat base image
+│   ├── ares-lateral-movement-agent/        # Post-exploitation lateral movement
+│   ├── ares-privesc-agent/                 # Privilege escalation
+│   ├── ares-blue-agent/                    # Blue team defensive base
+│   ├── ares-blue-triage-agent/             # Incident triage
+│   ├── ares-blue-threat-hunter-agent/      # Threat hunting
+│   └── ares-blue-lateral-analyst-agent/    # Lateral movement analysis
+├── .hooks/                                 # Pre-commit hooks
+├── .pre-commit-config.yaml
+├── .gitignore
+└── README.md
 ```
-
-## License
-
-This repository is licensed under the MIT License - see [LICENSE](./LICENSE) file for details.
 
 ## Documentation
 
-### Core Documentation
-
-- **[Warpgate Installation](https://github.com/cowdogmoo/warpgate/blob/main/docs/installation.md)** - Install the Warpgate CLI
-- **[Usage Guide](https://github.com/cowdogmoo/warpgate/blob/main/docs/usage-guide.md)** - Common workflows and examples
-- **[Template Reference](https://github.com/cowdogmoo/warpgate/blob/main/docs/template-reference.md)** - Complete YAML syntax reference
-
-### Template Development
-
-- **[Contributing Guide](./CONTRIBUTING.md)** - How to create and submit templates
-
-## Support
-
-Need help or want to contribute?
-
-- **Issues**: [Report bugs or request features](https://github.com/dreadnode/warpgate-templates/issues)
-- **Discussions**: [Ask questions and share ideas](https://github.com/dreadnode/warpgate-templates/discussions)
-- **Warpgate Project**: [Main Warpgate Repository](https://github.com/cowdogmoo/warpgate)
-
-## Built With
-
-This project leverages industry-standard tools:
-
-- **[Warpgate](https://github.com/cowdogmoo/warpgate)** - Template build engine
-- **[Docker](https://www.docker.com/)** - Container runtime
-- **[BuildKit](https://github.com/moby/buildkit)** - Advanced image builds
-- **[GitHub Actions](https://github.com/features/actions)** - CI/CD automation
-- **[Python 3.13.7](https://www.python.org/)** - Modern Python runtime
-- **[uv](https://github.com/astral-sh/uv)** - Fast Python package manager
-
-## Related Projects
-
-- **[Warpgate](https://github.com/cowdogmoo/warpgate)** - Core build engine and CLI
-- **[Dreadnode Platform](https://dreadnode.io)** - Enterprise security platform
-- **[Ares Framework](https://github.com/dreadnode/ares)** - Modular security agents
+- **[Warpgate](https://github.com/cowdogmoo/warpgate)** - Build engine and CLI
+- **[Ares](https://github.com/dreadnode/ares)** - The Ares red/blue team framework
+- **[Issues](https://github.com/dreadnode/ares/issues)** - Bug reports and feature requests
 
 ---
 
-**Maintained by [Dreadnode](https://dreadnode.io)** | **License: [MIT](./LICENSE)**
+**Maintained by [Dreadnode](https://dreadnode.io)**
