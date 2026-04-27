@@ -39,7 +39,7 @@ pub fn definitions() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: "password_spray".into(),
-            description: "Spray a single password across all domain users. Tests one password against many accounts. Use password_policy first to check lockout thresholds. Uses a built-in username wordlist if no users_file is provided.".into(),
+            description: "Spray a single password across all domain users. Tests one password against many accounts. REQUIRES lockout policy: call password_policy FIRST and pass `lockout_threshold` (and `attempts_used_per_account` if any sprays already ran this observation window). The tool will refuse to run otherwise — set `acknowledge_no_policy=true` only when policy retrieval is impossible, knowing accounts may lock out. Uses a built-in username wordlist if no users_file is provided.".into(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -61,7 +61,19 @@ pub fn definitions() -> Vec<ToolDefinition> {
                     },
                     "delay_seconds": {
                         "type": "integer",
-                        "description": "Optional delay between attempts to avoid lockout"
+                        "description": "Optional jitter (seconds) between attempts. Defaults to 1s if omitted."
+                    },
+                    "lockout_threshold": {
+                        "type": "integer",
+                        "description": "AD account lockout threshold from password_policy (e.g. 5). 0 means no lockout. The tool refuses to spray unless this or acknowledge_no_policy is set."
+                    },
+                    "attempts_used_per_account": {
+                        "type": "integer",
+                        "description": "Failed-attempts already accumulated per account in the current observation window across prior sprays/auth in this op. Defaults to 0. The tool keeps a 1-attempt safety buffer below the threshold."
+                    },
+                    "acknowledge_no_policy": {
+                        "type": "boolean",
+                        "description": "Override that allows spraying without lockout_threshold. Use only when password_policy cannot be retrieved; lockouts are likely."
                     }
                 },
                 "required": ["target", "password", "domain"]

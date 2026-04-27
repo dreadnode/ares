@@ -186,8 +186,10 @@ IF you discover share access (READ/WRITE):
    - Write users to /tmp/users.txt first, then run tool
 
 3. **password_spray** - Test common passwords against all users
-   - Try: 'Password1', 'Welcome1', 'Company123', season+year (e.g., 'Winter2024')
-   - Check lockout policy first (usually 5 attempts)
+   - Standard: 'Password1', 'Welcome1', 'Passw0rd!', season+year (e.g., 'Winter2025')
+   - REQUIRED: call password_policy first, then pass `lockout_threshold` and
+     increment `attempts_used_per_account` by 1 between sprays. The tool refuses
+     without policy unless `acknowledge_no_policy=true`.
 
 4. **password_policy** - Capture complexity, min length, lockout thresholds
 

@@ -5,10 +5,20 @@
 use anyhow::Result;
 use serde_json::Value;
 
-use crate::args::{optional_i64, optional_str, required_str};
+use crate::args::{optional_bool, optional_i64, optional_str, required_str};
 use crate::credentials;
 use crate::executor::CommandBuilder;
 use crate::ToolOutput;
+
+/// Minimum jitter (seconds) between spray attempts when caller does not
+/// supply `delay_seconds`. Keeps at least a small gap between authentication
+/// attempts so logon spikes do not all land in the same observation window.
+const SPRAY_DEFAULT_JITTER_SECS: i64 = 1;
+
+/// Safety buffer subtracted from `lockout_threshold` when computing the
+/// allowed attempts-per-account budget. Keeps spraying one attempt below the
+/// lockout line in case any account already has stale failed attempts.
+const SPRAY_LOCKOUT_BUFFER: i64 = 1;
 
 /// Dump LSASS credentials remotely via `lsassy`.
 pub async fn lsassy(args: &Value) -> Result<ToolOutput> {
@@ -356,12 +366,26 @@ pub async fn password_policy(args: &Value) -> Result<ToolOutput> {
 }
 
 /// Spray a single password across a user list via `netexec smb`.
+///
+/// Refuses to run unless the caller has supplied a `lockout_threshold` (from
+/// `password_policy`) or explicitly set `acknowledge_no_policy=true`. This
+/// prevents an over-eager agent from chaining multiple sprays and locking
+/// every targeted account before discovering the policy.
 pub async fn password_spray(args: &Value) -> Result<ToolOutput> {
     let target = required_str(args, "target")?;
     let users_file = optional_str(args, "users_file");
     let password = required_str(args, "password")?;
     let domain = required_str(args, "domain")?;
     let delay_seconds = optional_i64(args, "delay_seconds");
+    let lockout_threshold = optional_i64(args, "lockout_threshold");
+    let attempts_used = optional_i64(args, "attempts_used_per_account").unwrap_or(0);
+    let acknowledge_no_policy = optional_bool(args, "acknowledge_no_policy").unwrap_or(false);
+
+    if let Some(refusal) =
+        check_spray_budget(lockout_threshold, attempts_used, acknowledge_no_policy)
+    {
+        return Ok(refusal);
+    }
 
     // Use provided file or generate a default wordlist
     let tmp_file;
@@ -375,13 +399,17 @@ pub async fn password_spray(args: &Value) -> Result<ToolOutput> {
 
     let cred_args = credentials::netexec_creds(None, Some(password), None, Some(domain));
 
+    let jitter = delay_seconds
+        .unwrap_or(SPRAY_DEFAULT_JITTER_SECS)
+        .to_string();
+
     let result = CommandBuilder::new("netexec")
         .arg("smb")
         .arg(target)
         .flag("-u", &wordlist_path)
         .args(cred_args)
         .arg("--continue-on-success")
-        .flag_opt("--jitter", delay_seconds.map(|d| d.to_string()))
+        .flag("--jitter", &jitter)
         .timeout_secs(300)
         .execute()
         .await;
@@ -392,6 +420,51 @@ pub async fn password_spray(args: &Value) -> Result<ToolOutput> {
     }
 
     result
+}
+
+/// Enforce the lockout-aware preconditions for `password_spray`. Returns
+/// `Some(refusal_output)` when the call must be blocked, `None` when the
+/// caller is clear to spray.
+fn check_spray_budget(
+    lockout_threshold: Option<i64>,
+    attempts_used: i64,
+    acknowledge_no_policy: bool,
+) -> Option<ToolOutput> {
+    match lockout_threshold {
+        Some(t) => {
+            // A threshold of 0 in AD means "no lockout" — spray freely.
+            if t <= 0 {
+                return None;
+            }
+            let budget = t - attempts_used - SPRAY_LOCKOUT_BUFFER;
+            if budget < 1 {
+                return Some(spray_refusal(format!(
+                    "Refusing password_spray: lockout budget exhausted (threshold={t}, \
+                     attempts_used_per_account={attempts_used}, safety_buffer={SPRAY_LOCKOUT_BUFFER}, \
+                     remaining={budget}). Wait for the AD observation window to reset, \
+                     reset attempts_used_per_account to 0, then resume."
+                )));
+            }
+            None
+        }
+        None if acknowledge_no_policy => None,
+        None => Some(spray_refusal(
+            "Refusing password_spray: no lockout policy provided. Run password_policy \
+             first and pass lockout_threshold (and attempts_used_per_account if accounts \
+             already have failed logons this window). To override when policy retrieval \
+             is impossible, set acknowledge_no_policy=true — but expect lockouts."
+                .to_string(),
+        )),
+    }
+}
+
+fn spray_refusal(message: String) -> ToolOutput {
+    ToolOutput {
+        stdout: message,
+        stderr: String::new(),
+        exit_code: None,
+        success: false,
+    }
 }
 
 /// Common AD usernames for fallback when no users_file is provided.
@@ -987,9 +1060,94 @@ mod tests {
         mock::push(mock::success());
         let args = json!({
             "target": "192.168.58.1", "password": "P@ss",
-            "domain": "contoso.local", "users_file": "/tmp/users.txt"
+            "domain": "contoso.local", "users_file": "/tmp/users.txt",
+            "lockout_threshold": 5
         });
-        assert!(super::password_spray(&args).await.is_ok());
+        let out = super::password_spray(&args).await.unwrap();
+        assert!(out.success, "expected executor to run with valid budget");
+    }
+
+    #[tokio::test]
+    async fn password_spray_refuses_without_policy() {
+        // No mock pushed — if the gate fails to short-circuit, executor errors
+        // (and the test would fail with a different assertion).
+        let args = json!({
+            "target": "192.168.58.1", "password": "P@ss",
+            "domain": "contoso.local"
+        });
+        let out = super::password_spray(&args).await.unwrap();
+        assert!(!out.success, "spray must refuse without policy");
+        assert!(
+            out.stdout.contains("no lockout policy"),
+            "expected refusal message, got: {}",
+            out.stdout
+        );
+    }
+
+    #[tokio::test]
+    async fn password_spray_refuses_when_budget_exhausted() {
+        let args = json!({
+            "target": "192.168.58.1", "password": "P@ss",
+            "domain": "contoso.local",
+            "lockout_threshold": 5,
+            "attempts_used_per_account": 4
+        });
+        let out = super::password_spray(&args).await.unwrap();
+        assert!(!out.success, "spray must refuse when budget gone");
+        assert!(
+            out.stdout.contains("budget exhausted"),
+            "expected budget message, got: {}",
+            out.stdout
+        );
+    }
+
+    #[tokio::test]
+    async fn password_spray_acknowledge_no_policy_overrides() {
+        mock::push(mock::success());
+        let args = json!({
+            "target": "192.168.58.1", "password": "P@ss",
+            "domain": "contoso.local",
+            "acknowledge_no_policy": true
+        });
+        let out = super::password_spray(&args).await.unwrap();
+        assert!(out.success, "acknowledge_no_policy must allow spray to run");
+    }
+
+    #[tokio::test]
+    async fn password_spray_threshold_zero_means_no_lockout() {
+        mock::push(mock::success());
+        let args = json!({
+            "target": "192.168.58.1", "password": "P@ss",
+            "domain": "contoso.local",
+            "lockout_threshold": 0,
+            "attempts_used_per_account": 100
+        });
+        let out = super::password_spray(&args).await.unwrap();
+        assert!(out.success, "threshold=0 means no lockout policy in AD");
+    }
+
+    #[test]
+    fn check_spray_budget_blocks_without_policy() {
+        let refusal = super::check_spray_budget(None, 0, false);
+        assert!(refusal.is_some());
+    }
+
+    #[test]
+    fn check_spray_budget_allows_with_ack() {
+        assert!(super::check_spray_budget(None, 0, true).is_none());
+    }
+
+    #[test]
+    fn check_spray_budget_keeps_safety_buffer() {
+        // threshold=5, used=3 -> budget = 5-3-1 = 1 (allowed)
+        assert!(super::check_spray_budget(Some(5), 3, false).is_none());
+        // threshold=5, used=4 -> budget = 0 (refused)
+        assert!(super::check_spray_budget(Some(5), 4, false).is_some());
+    }
+
+    #[test]
+    fn check_spray_budget_threshold_zero_passes() {
+        assert!(super::check_spray_budget(Some(0), 100, false).is_none());
     }
 
     #[tokio::test]

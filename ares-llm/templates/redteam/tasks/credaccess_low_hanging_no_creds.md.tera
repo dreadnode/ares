@@ -8,15 +8,30 @@ Task ID: {{ task_id }}
    Tests if users have username=password (e.g., testuser:testuser)
    Zero lockout risk, one attempt per user
 
-2. password_spray - YOU MUST CALL THIS ONCE FOR EACH PASSWORD:
-   password_spray(target=DC_IP, domain=DOMAIN, password='Password1')
-   password_spray(target=DC_IP, domain=DOMAIN, password='Welcome1')
-   password_spray(target=DC_IP, domain=DOMAIN, password='Summer2024')
-   password_spray(target=DC_IP, domain=DOMAIN, password='Company123')
-   password_spray(target=DC_IP, domain=DOMAIN, password='Passw0rd!')
-   **Call spray for EACH password above - common weak passwords**
+2. password_policy(target=DC_IP, domain=DOMAIN) - REQUIRED BEFORE SPRAY
+   Read the lockout threshold (e.g. "Account Lockout Threshold: 5"). You must
+   pass it as `lockout_threshold` to every password_spray call below. If the
+   policy says 0 / "Never", lockout is disabled — pass 0.
 
-3. password_policy(target=DC_IP, domain=DOMAIN) - Check lockout before spraying
+3. password_spray - one call per password. The tool keeps a 1-attempt safety
+   buffer below `lockout_threshold` and refuses to run when the budget is gone.
+   **Increment `attempts_used_per_account` by 1 after each spray** so successive
+   sprays stop before locking accounts:
+
+   password_spray(target=DC_IP, domain=DOMAIN, password='Password1',
+                  lockout_threshold=THRESHOLD, attempts_used_per_account=0)
+   password_spray(target=DC_IP, domain=DOMAIN, password='Welcome1',
+                  lockout_threshold=THRESHOLD, attempts_used_per_account=1)
+   password_spray(target=DC_IP, domain=DOMAIN, password='Passw0rd!',
+                  lockout_threshold=THRESHOLD, attempts_used_per_account=2)
+   password_spray(target=DC_IP, domain=DOMAIN, password='Winter2025',
+                  lockout_threshold=THRESHOLD, attempts_used_per_account=3)
+   password_spray(target=DC_IP, domain=DOMAIN, password='Spring2026',
+                  lockout_threshold=THRESHOLD, attempts_used_per_account=4)
+
+   If a spray returns a "lockout budget exhausted" refusal, STOP — do not retry
+   until the AD observation window resets. Only set `acknowledge_no_policy=true`
+   if password_policy itself failed and the engagement allows lockouts.
 
 These are the FIRST techniques to run when you have no credentials.
 Report any credentials found immediately.

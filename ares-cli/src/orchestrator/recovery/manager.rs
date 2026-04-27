@@ -13,7 +13,6 @@ use crate::orchestrator::task_queue::TaskQueue;
 
 use super::dedup::dedupe_hashes;
 use super::normalize::{normalize_credential_domains, normalize_hash_domains};
-use super::requeue::requeue_task;
 use super::types::{
     is_connection_error, RecoveredState, INTERRUPTED_STATUSES, MAX_CONNECTION_RETRIES, MAX_RETRIES,
 };
@@ -174,6 +173,7 @@ impl OperationRecoveryManager {
 
         let mut requeued_task_ids = Vec::new();
         let mut failed_task_ids = Vec::new();
+        let mut tasks_to_redispatch = Vec::new();
 
         for (task_id, task) in &mut pending_tasks {
             if !INTERRUPTED_STATUSES.contains(&task.status) {
@@ -198,24 +198,26 @@ impl OperationRecoveryManager {
                     task.error = Some("Requeued after pod restart (task was pending)".to_string());
                 }
 
-                match requeue_task(queue, task_id, task).await {
-                    Ok(()) => {
-                        requeued_task_ids.push(task_id.clone());
-                        info!(
-                            task_id = %task_id,
-                            retry_count = task.retry_count,
-                            max_retries = max_retries,
-                            "Task requeued for recovery"
-                        );
-                    }
-                    Err(e) => {
-                        warn!(
-                            task_id = %task_id,
-                            err = %e,
-                            "Failed to requeue task"
-                        );
-                    }
-                }
+                let payload = task
+                    .params
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect::<serde_json::Map<String, serde_json::Value>>();
+
+                tasks_to_redispatch.push(super::types::RecoveryTask {
+                    task_type: task.task_type.clone(),
+                    target_role: task.assigned_agent.clone(),
+                    payload: serde_json::Value::Object(payload),
+                    retry_count: task.retry_count,
+                });
+
+                requeued_task_ids.push(task_id.clone());
+                info!(
+                    task_id = %task_id,
+                    retry_count = task.retry_count,
+                    max_retries = max_retries,
+                    "Task collected for re-dispatch via LLM submission"
+                );
             } else {
                 // Exceeded max retries
                 task.status = TaskStatus::Failed;
@@ -249,6 +251,7 @@ impl OperationRecoveryManager {
 
         Ok(RecoveredState {
             state: loaded_state,
+            tasks_to_redispatch,
             requeued_task_ids,
             failed_task_ids,
         })

@@ -496,8 +496,38 @@ async fn run_inner() -> Result<()> {
                     info!(
                         requeued = recovered.requeued_task_ids.len(),
                         failed = recovered.failed_task_ids.len(),
-                        "Recovery: re-enqueued interrupted tasks"
+                        "Recovery: re-dispatching interrupted tasks via LLM submission"
                     );
+                }
+                for task in recovered.tasks_to_redispatch {
+                    match dispatcher
+                        .do_submit(&task.task_type, &task.target_role, task.payload, 1)
+                        .await
+                    {
+                        Ok(Some(tid)) => {
+                            info!(
+                                task_id = %tid,
+                                task_type = %task.task_type,
+                                role = %task.target_role,
+                                retry = task.retry_count,
+                                "Recovery: re-dispatched task via LLM runner"
+                            );
+                        }
+                        Ok(None) => {
+                            warn!(
+                                task_type = %task.task_type,
+                                role = %task.target_role,
+                                "Recovery: task deferred or dropped during re-dispatch"
+                            );
+                        }
+                        Err(e) => {
+                            warn!(
+                                task_type = %task.task_type,
+                                err = %e,
+                                "Recovery: failed to re-dispatch task"
+                            );
+                        }
+                    }
                 }
             }
             Err(e) => {

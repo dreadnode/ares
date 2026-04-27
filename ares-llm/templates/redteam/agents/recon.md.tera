@@ -28,6 +28,9 @@ Your role is to execute network scanning, enumeration, and discovery tasks dispa
    - Enumerate domain users via LDAP, RPC, SMB
    - Identify service accounts, admin accounts, group memberships
    - Find accounts with interesting properties (SPN, no pre-auth, etc.)
+   - **CRITICAL: Check user description fields** -- passwords are often stored
+     in the LDAP description attribute. Use `ldap_search_descriptions` or
+     `netexec smb --users` to dump descriptions for all users on ALL domains
 
 3. **Share Enumeration**
    - Enumerate SMB shares on discovered hosts

@@ -44,11 +44,11 @@ pub(super) fn try_generate(
             "password_spray",
             format!(
                 "password_spray - YOU MUST CALL ONCE PER PASSWORD:\n\
-                 \x20  password_spray(target='{dc_ip}', domain='{domain}', password='Password1')\n\
-                 \x20  password_spray(target='{dc_ip}', domain='{domain}', password='Welcome1')\n\
-                 \x20  password_spray(target='{dc_ip}', domain='{domain}', password='Summer2024')\n\
-                 \x20  password_spray(target='{dc_ip}', domain='{domain}', password='Company123')\n\
-                 \x20  password_spray(target='{dc_ip}', domain='{domain}', password='Passw0rd!')"
+                 \x20  Standard: password_spray(target='{dc_ip}', domain='{domain}', password='Password1')\n\
+                 \x20  Standard: password_spray(target='{dc_ip}', domain='{domain}', password='Welcome1')\n\
+                 \x20  Standard: password_spray(target='{dc_ip}', domain='{domain}', password='Passw0rd!')\n\
+                 \x20  Season: password_spray(target='{dc_ip}', domain='{domain}', password='Winter2025')\n\
+                 \x20  Season: password_spray(target='{dc_ip}', domain='{domain}', password='Spring2026')"
             ),
         ),
         (

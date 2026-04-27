@@ -252,13 +252,15 @@ impl SharedState {
         queue: &TaskQueueCore<impl ConnectionLike + Clone + Send + Sync + 'static>,
         host: &Host,
     ) -> Result<()> {
-        // Extract domain from hostname — prefer a real FQDN
+        // Require at least 3 dot-separated parts (e.g. dc03.contoso.local)
+        // so 2-part hostnames like "HOSTNAME.local" don't yield "local" as the domain.
         let raw_domain = if !host.hostname.is_empty() {
-            host.hostname
-                .split('.')
-                .skip(1)
-                .collect::<Vec<_>>()
-                .join(".")
+            let parts: Vec<&str> = host.hostname.split('.').collect();
+            if parts.len() >= 3 {
+                parts[1..].join(".")
+            } else {
+                String::new()
+            }
         } else {
             String::new()
         };
@@ -555,6 +557,72 @@ mod tests {
 
         let s = state.inner.read().await;
         assert!(s.domain_controllers.is_empty());
+    }
+
+    #[tokio::test]
+    async fn register_dc_two_part_hostname_uses_fallback() {
+        // Hostname with only 2 parts (e.g. "DC01.local") must NOT register
+        // "local" as the domain. With a fallback domain already in state,
+        // register_dc should use the fallback instead.
+        let state = SharedState::new("op-1".to_string());
+        let q = mock_queue();
+        {
+            let mut s = state.inner.write().await;
+            s.domains.push("contoso.local".to_string());
+        }
+
+        let host = make_host("192.168.58.1", "DC01.local", true);
+        state.register_dc(&q, &host).await.unwrap();
+
+        let s = state.inner.read().await;
+        // Must NOT have registered just "local" as a domain
+        assert!(
+            !s.domain_controllers.contains_key("local"),
+            "two-part hostname leaked 'local' as a domain"
+        );
+        assert_eq!(
+            s.domain_controllers.get("contoso.local"),
+            Some(&"192.168.58.1".to_string()),
+            "expected fallback to existing domain"
+        );
+    }
+
+    #[tokio::test]
+    async fn register_dc_two_part_hostname_no_fallback_skips() {
+        // 2-part hostname AND no fallback domain → skip entirely instead of
+        // registering a TLD as the AD domain.
+        let state = SharedState::new("op-1".to_string());
+        let q = mock_queue();
+
+        let host = make_host("192.168.58.1", "DC01.local", true);
+        state.register_dc(&q, &host).await.unwrap();
+
+        let s = state.inner.read().await;
+        assert!(
+            s.domain_controllers.is_empty(),
+            "2-part hostname with no fallback must skip DC registration"
+        );
+        assert!(
+            !s.domains.iter().any(|d| d == "local"),
+            "2-part hostname leaked 'local' into domains"
+        );
+    }
+
+    #[tokio::test]
+    async fn register_dc_three_part_hostname_extracts_full_domain() {
+        // Sanity check the >=3 parts branch with a deeper FQDN to make sure
+        // the parts[1..].join(".") slice is right (not just the last label).
+        let state = SharedState::new("op-1".to_string());
+        let q = mock_queue();
+
+        let host = make_host("192.168.58.1", "dc.eu.contoso.local", true);
+        state.register_dc(&q, &host).await.unwrap();
+
+        let s = state.inner.read().await;
+        assert_eq!(
+            s.domain_controllers.get("eu.contoso.local"),
+            Some(&"192.168.58.1".to_string())
+        );
     }
 
     #[tokio::test]

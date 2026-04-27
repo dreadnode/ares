@@ -17,7 +17,6 @@
 mod dedup;
 mod manager;
 mod normalize;
-mod requeue;
 mod types;
 
 pub use manager::OperationRecoveryManager;
