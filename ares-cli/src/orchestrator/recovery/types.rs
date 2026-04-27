@@ -115,4 +115,25 @@ mod tests {
         assert_eq!(MAX_CONNECTION_RETRIES, 3);
         assert_eq!(INTERRUPTED_STATUSES.len(), 3);
     }
+
+    #[test]
+    fn recovery_task_carries_payload_for_redispatch() {
+        // The orchestrator uses these fields directly when re-submitting via
+        // do_submit() — guard the field names and types from accidental drift.
+        let task = RecoveryTask {
+            task_type: "credential_access".to_string(),
+            target_role: "credential_access".to_string(),
+            payload: serde_json::json!({"target": "192.168.58.1"}),
+            retry_count: 2,
+        };
+        assert_eq!(task.task_type, "credential_access");
+        assert_eq!(task.target_role, "credential_access");
+        assert_eq!(task.payload["target"], "192.168.58.1");
+        assert_eq!(task.retry_count, 2);
+
+        let cloned = task.clone();
+        assert_eq!(cloned.task_type, task.task_type);
+        let dbg = format!("{task:?}");
+        assert!(dbg.contains("credential_access"));
+    }
 }
