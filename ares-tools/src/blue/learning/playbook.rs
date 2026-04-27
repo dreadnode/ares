@@ -364,7 +364,7 @@ pub async fn get_detection_queries_for_technique(args: &Value) -> anyhow::Result
 /// Credentials are stored as a HASH (dedup_key → JSON), hosts as a LIST,
 /// loot as a LIST, and metadata as a HASH.
 async fn load_op_collections(
-    conn: &mut (impl redis::AsyncCommands + Send),
+    conn: &mut impl redis::AsyncCommands,
     op_id: &str,
 ) -> (
     Vec<String>,
