@@ -33,8 +33,7 @@ pub fn is_connection_error(err: &anyhow::Error) -> bool {
 }
 
 /// A task that needs to be re-dispatched through the normal LLM submission
-/// flow after recovery. Replaces the old `requeue_task` approach which
-/// pushed to `ares:tasks:{role}` queues that nothing consumes.
+/// flow after recovery.
 #[derive(Debug, Clone)]
 pub struct RecoveryTask {
     pub task_type: String,
@@ -118,8 +117,6 @@ mod tests {
 
     #[test]
     fn recovery_task_carries_payload_for_redispatch() {
-        // The orchestrator uses these fields directly when re-submitting via
-        // do_submit() — guard the field names and types from accidental drift.
         let task = RecoveryTask {
             task_type: "credential_access".to_string(),
             target_role: "credential_access".to_string(),

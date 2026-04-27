@@ -198,9 +198,6 @@ impl OperationRecoveryManager {
                     task.error = Some("Requeued after pod restart (task was pending)".to_string());
                 }
 
-                // Collect task for re-dispatch through the normal LLM
-                // submission flow instead of pushing to ares:tasks:{role}
-                // queues that nothing consumes (bug #3 in PROBLEMS.md).
                 let payload = task
                     .params
                     .iter()

@@ -252,10 +252,8 @@ impl SharedState {
         queue: &TaskQueueCore<impl ConnectionLike + Clone + Send + Sync + 'static>,
         host: &Host,
     ) -> Result<()> {
-        // Extract domain from hostname -- prefer a real FQDN.
         // Require at least 3 dot-separated parts (e.g. dc03.contoso.local)
-        // so that 2-part hostnames like "HOSTNAME.local" don't produce
-        // just "local" as the domain (bug #5 in PROBLEMS.md).
+        // so 2-part hostnames like "HOSTNAME.local" don't yield "local" as the domain.
         let raw_domain = if !host.hostname.is_empty() {
             let parts: Vec<&str> = host.hostname.split('.').collect();
             if parts.len() >= 3 {
@@ -564,8 +562,8 @@ mod tests {
     #[tokio::test]
     async fn register_dc_two_part_hostname_uses_fallback() {
         // Hostname with only 2 parts (e.g. "DC01.local") must NOT register
-        // "local" as the domain — that was bug #5. With a fallback domain
-        // already in state, register_dc should use the fallback instead.
+        // "local" as the domain. With a fallback domain already in state,
+        // register_dc should use the fallback instead.
         let state = SharedState::new("op-1".to_string());
         let q = mock_queue();
         {

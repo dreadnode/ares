@@ -499,8 +499,6 @@ async fn run_inner() -> Result<()> {
                         "Recovery: re-dispatching interrupted tasks via LLM submission"
                     );
                 }
-                // Re-dispatch recovered tasks through the normal submission
-                // flow instead of pushing to dead ares:tasks:{role} queues.
                 for task in recovered.tasks_to_redispatch {
                     match dispatcher
                         .do_submit(&task.task_type, &task.target_role, task.payload, 1)
