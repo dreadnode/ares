@@ -6,6 +6,7 @@ on:
       - main
     paths:
       - 'warpgate-templates/**'
+      - 'ansible/**'
       - '.github/workflows/build-and-push-templates.yaml'
   workflow_dispatch:
     inputs:
