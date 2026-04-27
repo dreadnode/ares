@@ -6,6 +6,7 @@ lateral_movement_tools_kali_packages:
   - ruby
   - freerdp3-x11  # xfreerdp for RDP pass-the-hash (freerdp3 on Kali rolling)
   - smbclient
+  - samba-common-bin  # provides rpcclient for SMB/RPC lateral ops
   - sshpass  # SSH with password
   - proxychains4  # TCP connection proxying for pivoting
 
@@ -24,6 +25,7 @@ lateral_movement_tools_ubuntu_packages:
   - clang  # Required for building native gem extensions
   - freerdp3-x11  # xfreerdp for RDP pass-the-hash
   - smbclient
+  - samba-common-bin  # provides rpcclient for SMB/RPC lateral ops
   - sshpass  # SSH with password
   - proxychains4  # TCP connection proxying for pivoting
 
