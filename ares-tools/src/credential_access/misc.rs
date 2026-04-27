@@ -381,7 +381,9 @@ pub async fn password_spray(args: &Value) -> Result<ToolOutput> {
     let attempts_used = optional_i64(args, "attempts_used_per_account").unwrap_or(0);
     let acknowledge_no_policy = optional_bool(args, "acknowledge_no_policy").unwrap_or(false);
 
-    if let Some(refusal) = check_spray_budget(lockout_threshold, attempts_used, acknowledge_no_policy) {
+    if let Some(refusal) =
+        check_spray_budget(lockout_threshold, attempts_used, acknowledge_no_policy)
+    {
         return Ok(refusal);
     }
 
@@ -397,7 +399,9 @@ pub async fn password_spray(args: &Value) -> Result<ToolOutput> {
 
     let cred_args = credentials::netexec_creds(None, Some(password), None, Some(domain));
 
-    let jitter = delay_seconds.unwrap_or(SPRAY_DEFAULT_JITTER_SECS).to_string();
+    let jitter = delay_seconds
+        .unwrap_or(SPRAY_DEFAULT_JITTER_SECS)
+        .to_string();
 
     let result = CommandBuilder::new("netexec")
         .arg("smb")
@@ -1106,10 +1110,7 @@ mod tests {
             "acknowledge_no_policy": true
         });
         let out = super::password_spray(&args).await.unwrap();
-        assert!(
-            out.success,
-            "acknowledge_no_policy must allow spray to run"
-        );
+        assert!(out.success, "acknowledge_no_policy must allow spray to run");
     }
 
     #[tokio::test]
