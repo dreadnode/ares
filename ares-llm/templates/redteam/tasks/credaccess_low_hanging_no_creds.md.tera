@@ -9,12 +9,23 @@ Task ID: {{ task_id }}
    Zero lockout risk, one attempt per user
 
 2. password_spray - YOU MUST CALL THIS ONCE FOR EACH PASSWORD:
+   **Standard weak passwords:**
    password_spray(target=DC_IP, domain=DOMAIN, password='Password1')
    password_spray(target=DC_IP, domain=DOMAIN, password='Welcome1')
-   password_spray(target=DC_IP, domain=DOMAIN, password='Summer2024')
-   password_spray(target=DC_IP, domain=DOMAIN, password='Company123')
    password_spray(target=DC_IP, domain=DOMAIN, password='Passw0rd!')
-   **Call spray for EACH password above - common weak passwords**
+
+   **CRITICAL: Contextual/thematic passwords based on environment:**
+   Look at the domain name, hostnames, and user names for theme clues.
+   For example, if the domain is medieval/fantasy-themed (e.g. kingdoms, thrones):
+   try passwords matching the theme (character names, house words, catchphrases).
+   If corporate-themed: try company name variations, building names, city names.
+   Always derive 3-5 contextual passwords from whatever theme you observe
+   in the domain/hostname/username data and spray those too.
+
+   **Season+year patterns:**
+   password_spray(target=DC_IP, domain=DOMAIN, password='Winter2025')
+   password_spray(target=DC_IP, domain=DOMAIN, password='Spring2026')
+   **Call spray for EACH password above**
 
 3. password_policy(target=DC_IP, domain=DOMAIN) - Check lockout before spraying
 

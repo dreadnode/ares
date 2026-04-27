@@ -88,20 +88,39 @@ impl ares_llm::ToolDispatcher for RedisToolDispatcher {
                 "Dispatching tool call to worker"
             );
 
-            // Push request to worker queue
+            // Push request to worker queue (shared multiplexed connection is fine for LPUSH)
             let mut conn = self.queue.connection();
             conn.lpush::<_, _, ()>(&queue_key, &payload)
                 .await
                 .context("Failed to push tool exec request to Redis")?;
 
-            // Wait for result with timeout
+            // Wait for result with timeout.
+            // Use a dedicated connection for BRPOP so concurrent agent loops
+            // don't serialize on the shared multiplexed connection. Each BRPOP
+            // blocks its TCP connection until the result arrives or the timeout
+            // expires; sharing one connection caused all 8 agent loops to
+            // wait in sequence (bug #1 in PROBLEMS.md).
             let timeout_secs = self.tool_timeout.as_secs().max(1) as f64;
-            let brpop_result: Option<(String, String)> = redis::cmd("BRPOP")
-                .arg(&result_key)
-                .arg(timeout_secs)
-                .query_async(&mut conn)
-                .await
-                .context("BRPOP failed for tool result")?;
+            let brpop_result: Option<(String, String)> = match self.queue.dedicated_connection().await {
+                Ok(mut dedicated) => {
+                    redis::cmd("BRPOP")
+                        .arg(&result_key)
+                        .arg(timeout_secs)
+                        .query_async(&mut dedicated)
+                        .await
+                        .context("BRPOP failed for tool result")?
+                }
+                Err(e) => {
+                    // Fall back to shared connection if dedicated fails
+                    warn!(err = %e, "Failed to open dedicated BRPOP connection, falling back to shared");
+                    redis::cmd("BRPOP")
+                        .arg(&result_key)
+                        .arg(timeout_secs)
+                        .query_async(&mut conn)
+                        .await
+                        .context("BRPOP failed for tool result")?
+                }
+            };
 
             match brpop_result {
                 Some((_key, value)) => {

@@ -32,13 +32,26 @@ pub fn is_connection_error(err: &anyhow::Error) -> bool {
     CONNECTION_ERROR_KEYWORDS.iter().any(|kw| msg.contains(kw))
 }
 
+/// A task that needs to be re-dispatched through the normal LLM submission
+/// flow after recovery. Replaces the old `requeue_task` approach which
+/// pushed to `ares:tasks:{role}` queues that nothing consumes.
+#[derive(Debug, Clone)]
+pub struct RecoveryTask {
+    pub task_type: String,
+    pub target_role: String,
+    pub payload: serde_json::Value,
+    pub retry_count: i32,
+}
+
 /// Result of a recovery operation.
 #[derive(Debug)]
 pub struct RecoveredState {
     /// The full shared state loaded from Redis.
     #[allow(dead_code)]
     pub state: SharedRedTeamState,
-    /// Task IDs that were re-enqueued for retry.
+    /// Tasks that need re-dispatch through the normal submission flow.
+    pub tasks_to_redispatch: Vec<RecoveryTask>,
+    /// Task IDs that were prepared for re-dispatch.
     pub requeued_task_ids: Vec<String>,
     /// Task IDs that exceeded max retries and were marked failed.
     pub failed_task_ids: Vec<String>,

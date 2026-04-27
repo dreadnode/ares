@@ -14,6 +14,12 @@ use crate::orchestrator::task_queue::{
 ///
 /// Uses RPUSH so retried tasks are consumed before new ones (workers BRPOP
 /// from the right).
+///
+/// NOTE: This function is no longer called. Recovery now collects tasks into
+/// `RecoveredState.tasks_to_redispatch` and the orchestrator re-submits them
+/// through the normal `dispatcher.do_submit()` flow. Kept for potential
+/// future use.
+#[allow(dead_code)]
 pub async fn requeue_task(queue: &TaskQueue, task_id: &str, task: &TaskInfo) -> Result<()> {
     let mut payload = task
         .params

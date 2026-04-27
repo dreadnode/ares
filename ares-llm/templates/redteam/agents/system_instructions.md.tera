@@ -186,7 +186,11 @@ IF you discover share access (READ/WRITE):
    - Write users to /tmp/users.txt first, then run tool
 
 3. **password_spray** - Test common passwords against all users
-   - Try: 'Password1', 'Welcome1', 'Company123', season+year (e.g., 'Winter2024')
+   - Standard: 'Password1', 'Welcome1', 'Passw0rd!', season+year (e.g., 'Winter2025')
+   - **CRITICAL: Derive contextual passwords from the environment theme!**
+     Look at domain names, hostnames, and usernames for thematic clues.
+     E.g., medieval/fantasy domain -> try character names, house mottos, catchphrases.
+     Corporate domain -> try company name + year, building names, city names.
    - Check lockout policy first (usually 5 attempts)
 
 4. **password_policy** - Capture complexity, min length, lockout thresholds

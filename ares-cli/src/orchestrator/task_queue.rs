@@ -88,6 +88,10 @@ pub struct HeartbeatData {
 #[derive(Clone)]
 pub struct TaskQueueCore<C> {
     conn: C,
+    /// Redis URL retained so we can open dedicated connections for blocking
+    /// commands (BRPOP) that would otherwise serialize on the shared
+    /// multiplexed connection.
+    redis_url: Option<String>,
 }
 
 /// Production task queue backed by a Redis `ConnectionManager`.
@@ -111,7 +115,27 @@ impl TaskQueue {
             .await
             .with_context(|| format!("Failed to connect to Redis at {redis_url}"))?;
         info!(url = %redis_url, "Connected to Redis");
-        Ok(Self { conn })
+        Ok(Self {
+            conn,
+            redis_url: Some(redis_url.to_string()),
+        })
+    }
+
+    /// Create a dedicated (non-shared) multiplexed connection for blocking
+    /// commands like BRPOP. Each call opens a fresh TCP connection so
+    /// concurrent BRPOP calls from different agent loops do not serialize.
+    pub async fn dedicated_connection(&self) -> Result<redis::aio::MultiplexedConnection> {
+        let url = self
+            .redis_url
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("No redis_url stored (test backend?)"))?;
+        let client =
+            redis::Client::open(url).with_context(|| format!("Invalid Redis URL: {url}"))?;
+        let conn = client
+            .get_multiplexed_async_connection()
+            .await
+            .with_context(|| "Failed to open dedicated Redis connection for BRPOP")?;
+        Ok(conn)
     }
 }
 
@@ -121,7 +145,10 @@ impl TaskQueue {
 impl<C: ConnectionLike + Clone + Send + Sync + 'static> TaskQueueCore<C> {
     /// Create a queue from any ConnectionLike backend (used in tests).
     pub fn from_connection(conn: C) -> Self {
-        Self { conn }
+        Self {
+            conn,
+            redis_url: None,
+        }
     }
 
     // === Key helpers ========================================================

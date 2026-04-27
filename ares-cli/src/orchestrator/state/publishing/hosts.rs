@@ -252,13 +252,17 @@ impl SharedState {
         queue: &TaskQueueCore<impl ConnectionLike + Clone + Send + Sync + 'static>,
         host: &Host,
     ) -> Result<()> {
-        // Extract domain from hostname — prefer a real FQDN
+        // Extract domain from hostname -- prefer a real FQDN.
+        // Require at least 3 dot-separated parts (e.g. dc03.essos.local)
+        // so that 2-part hostnames like "MEEREEN.local" don't produce
+        // just "local" as the domain (bug #5 in PROBLEMS.md).
         let raw_domain = if !host.hostname.is_empty() {
-            host.hostname
-                .split('.')
-                .skip(1)
-                .collect::<Vec<_>>()
-                .join(".")
+            let parts: Vec<&str> = host.hostname.split('.').collect();
+            if parts.len() >= 3 {
+                parts[1..].join(".")
+            } else {
+                String::new()
+            }
         } else {
             String::new()
         };

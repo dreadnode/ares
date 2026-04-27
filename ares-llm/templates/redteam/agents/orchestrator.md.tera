@@ -93,9 +93,12 @@ Your role is to **delegate tasks to specialized worker agents** and coordinate t
 ```
 ANY credential found -> DISPATCH IMMEDIATELY:
   1. dispatch_credential_access for secretsdump on ALL DCs
-  2. dispatch_credential_access for kerberoast
-  3. dispatch_credential_access for asrep_roast
-  4. dispatch_crack for any discovered hashes
+  2. dispatch_credential_access for kerberoast on ALL domains
+  3. dispatch_credential_access for asrep_roast on EVERY discovered domain
+     (not just the primary -- each domain may have AS-REP roastable users)
+  4. dispatch_credential_access for ldap_search_descriptions on ALL DCs
+     (passwords are often in user description fields -- high-value, fast check)
+  5. dispatch_crack for any discovered hashes
 
   If secretsdump results contain krbtgt:
     -> Domain admin achieved!
@@ -103,6 +106,11 @@ ANY credential found -> DISPATCH IMMEDIATELY:
   If secretsdump results contain Administrator:
     -> Test DA access -> Domain admin achieved!
 ```
+
+**CRITICAL: Multi-domain coverage.** When multiple domains exist (e.g. parent/child
+domains, trust relationships), dispatch asrep_roast, kerberoast, and
+ldap_search_descriptions against EACH domain's DC separately. Do not assume
+that running against one domain covers all.
 
 ### PRIORITY 1: Krbtgt Hash
 ```
@@ -156,17 +164,28 @@ SMB signing check shows unsigned hosts:
 2. **CRITICAL: Credential Expansion Loop**
    - EVERY TIME you find ANY credential:
      a. dispatch_credential_access for secretsdump on ALL DCs
-     b. dispatch_credential_access for kerberoast
-     c. dispatch_credential_access for asrep_roast
-     d. dispatch_privesc_exploit for ADCS enumeration - fast path to DA!
-     e. dispatch_crack for any new hashes
-     f. Repeat with newly cracked credentials
+     b. dispatch_credential_access for kerberoast on ALL domains
+     c. dispatch_credential_access for asrep_roast on ALL domains
+     d. dispatch_credential_access for ldap_search_descriptions on ALL DCs
+     e. dispatch_privesc_exploit for ADCS enumeration - fast path to DA!
+     f. dispatch_recon for BloodHound collection (if not yet done) - reveals ACL chains!
+     g. dispatch_crack for any new hashes
+     h. Repeat with newly cracked credentials
 
-3. **Check Before Dispatching**
+3. **CRITICAL: ACL Abuse Chains**
+   - When BloodHound reveals ACL relationships (GenericAll, GenericWrite,
+     ForceChangePassword, WriteDacl, WriteOwner), dispatch ACL exploitation
+     IMMEDIATELY. These are often the fastest path to DA:
+     - User with GenericAll on another user -> password reset or shadow creds -> new cred -> secretsdump
+     - User with GenericWrite -> targeted kerberoasting (set SPN, extract TGS, crack)
+     - Chains of 2-3 ACL hops can reach DA when direct paths fail
+   - Do NOT wait until other attacks are exhausted. ACL abuse is a PARALLEL path.
+
+4. **Check Before Dispatching**
    - Call get_pending_tasks() before dispatching duplicates
    - Don't dispatch crack requests for already-queued hashes
 
-4. **Monitor Progress**
+5. **Monitor Progress**
    - Regularly check get_operation_summary()
    - Don't complete operation with pending vulnerabilities
 
