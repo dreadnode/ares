@@ -17,7 +17,7 @@ pub fn parse_certipy_find(output: &str, params: &Value) -> Vec<Value> {
 
     let domain = params.get("domain").and_then(|v| v.as_str()).unwrap_or("");
 
-    // Extract CA name from output if present (e.g. "CA Name: ESSOS-CA")
+    // Extract CA name from output if present (e.g. "CA Name: CONTOSO-CA")
     let ca_name = extract_ca_name(output);
 
     let mut vulns = Vec::new();
@@ -204,11 +204,11 @@ mod tests {
 
     #[test]
     fn parse_certipy_with_ca_name() {
-        let output = "CA Name                             : ESSOS-CA\n[!] Vulnerabilities\nESC1: enrollee supplies subject";
+        let output = "CA Name                             : CONTOSO-CA\n[!] Vulnerabilities\nESC1: enrollee supplies subject";
         let params = json!({"target": "192.168.58.10", "domain": "fabrikam.local"});
         let vulns = parse_certipy_find(output, &params);
         assert_eq!(vulns.len(), 1);
-        assert_eq!(vulns[0]["details"]["ca_name"], "ESSOS-CA");
+        assert_eq!(vulns[0]["details"]["ca_name"], "CONTOSO-CA");
         assert_eq!(vulns[0]["details"]["domain"], "fabrikam.local");
     }
 

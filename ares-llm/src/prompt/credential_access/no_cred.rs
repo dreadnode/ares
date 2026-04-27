@@ -48,11 +48,7 @@ pub(super) fn try_generate(
                  \x20  Standard: password_spray(target='{dc_ip}', domain='{domain}', password='Welcome1')\n\
                  \x20  Standard: password_spray(target='{dc_ip}', domain='{domain}', password='Passw0rd!')\n\
                  \x20  Season: password_spray(target='{dc_ip}', domain='{domain}', password='Winter2025')\n\
-                 \x20  Season: password_spray(target='{dc_ip}', domain='{domain}', password='Spring2026')\n\
-                 \x20  CRITICAL: Also derive 3-5 CONTEXTUAL passwords from the domain/hostname theme.\n\
-                 \x20  Look at domain name '{domain}', hostnames, and user names for clues.\n\
-                 \x20  E.g., medieval theme -> try character names, house words, catchphrases.\n\
-                 \x20  Spray each contextual password too."
+                 \x20  Season: password_spray(target='{dc_ip}', domain='{domain}', password='Spring2026')"
             ),
         ),
         (

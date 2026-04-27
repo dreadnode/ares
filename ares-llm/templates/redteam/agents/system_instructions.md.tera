@@ -187,11 +187,9 @@ IF you discover share access (READ/WRITE):
 
 3. **password_spray** - Test common passwords against all users
    - Standard: 'Password1', 'Welcome1', 'Passw0rd!', season+year (e.g., 'Winter2025')
-   - **CRITICAL: Derive contextual passwords from the environment theme!**
-     Look at domain names, hostnames, and usernames for thematic clues.
-     E.g., medieval/fantasy domain -> try character names, house mottos, catchphrases.
-     Corporate domain -> try company name + year, building names, city names.
-   - Check lockout policy first (usually 5 attempts)
+   - REQUIRED: call password_policy first, then pass `lockout_threshold` and
+     increment `attempts_used_per_account` by 1 between sprays. The tool refuses
+     without policy unless `acknowledge_no_policy=true`.
 
 4. **password_policy** - Capture complexity, min length, lockout thresholds
 

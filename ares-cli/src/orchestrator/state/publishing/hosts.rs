@@ -253,8 +253,8 @@ impl SharedState {
         host: &Host,
     ) -> Result<()> {
         // Extract domain from hostname -- prefer a real FQDN.
-        // Require at least 3 dot-separated parts (e.g. dc03.essos.local)
-        // so that 2-part hostnames like "MEEREEN.local" don't produce
+        // Require at least 3 dot-separated parts (e.g. dc03.contoso.local)
+        // so that 2-part hostnames like "HOSTNAME.local" don't produce
         // just "local" as the domain (bug #5 in PROBLEMS.md).
         let raw_domain = if !host.hostname.is_empty() {
             let parts: Vec<&str> = host.hostname.split('.').collect();

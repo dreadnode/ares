@@ -111,8 +111,8 @@ pub async fn auto_unconstrained_exploitation(
                     }
 
                     // Machine accounts: resolve hostname → IP for coerce+dump chain.
-                    // User accounts (sansa.stark): dispatch LLM exploit task since we
-                    // can't determine which host to coerce from just the account name.
+                    // User accounts: dispatch LLM exploit task since we can't determine
+                    // which host to coerce from just the account name.
                     let is_machine = account_name.ends_with('$');
 
                     // Find a DC in the same domain — this is what we coerce FROM.

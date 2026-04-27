@@ -1,7 +1,7 @@
 //! auto_rbcd_exploitation -- exploit GenericAll/GenericWrite on computer objects via RBCD.
 //!
 //! When a controlled user has GenericAll or GenericWrite on a computer object
-//! (e.g., stannis → kingslanding$), this automation dispatches the full RBCD
+//! (e.g., user → DC$), this automation dispatches the full RBCD
 //! chain: addcomputer → rbcd_write → S4U → secretsdump.
 //!
 //! This is separate from s4u.rs which handles pre-existing delegation vulns.
