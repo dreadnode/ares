@@ -26,8 +26,9 @@ Install and configure lateral movement and credential extraction tools for Ares 
 | `lateral_movement_tools_kali_packages.1` | str | <code>ruby</code> | No description |
 | `lateral_movement_tools_kali_packages.2` | str | <code>freerdp3-x11</code> | No description |
 | `lateral_movement_tools_kali_packages.3` | str | <code>smbclient</code> | No description |
-| `lateral_movement_tools_kali_packages.4` | str | <code>sshpass</code> | No description |
-| `lateral_movement_tools_kali_packages.5` | str | <code>proxychains4</code> | No description |
+| `lateral_movement_tools_kali_packages.4` | str | <code>samba-common-bin</code> | No description |
+| `lateral_movement_tools_kali_packages.5` | str | <code>sshpass</code> | No description |
+| `lateral_movement_tools_kali_packages.6` | str | <code>proxychains4</code> | No description |
 | `lateral_movement_tools_ubuntu_packages` | list | <code>&#91;&#93;</code> | No description |
 | `lateral_movement_tools_ubuntu_packages.0` | str | <code>git</code> | No description |
 | `lateral_movement_tools_ubuntu_packages.1` | str | <code>python3</code> | No description |
@@ -42,8 +43,9 @@ Install and configure lateral movement and credential extraction tools for Ares 
 | `lateral_movement_tools_ubuntu_packages.10` | str | <code>clang</code> | No description |
 | `lateral_movement_tools_ubuntu_packages.11` | str | <code>freerdp3-x11</code> | No description |
 | `lateral_movement_tools_ubuntu_packages.12` | str | <code>smbclient</code> | No description |
-| `lateral_movement_tools_ubuntu_packages.13` | str | <code>sshpass</code> | No description |
-| `lateral_movement_tools_ubuntu_packages.14` | str | <code>proxychains4</code> | No description |
+| `lateral_movement_tools_ubuntu_packages.13` | str | <code>samba-common-bin</code> | No description |
+| `lateral_movement_tools_ubuntu_packages.14` | str | <code>sshpass</code> | No description |
+| `lateral_movement_tools_ubuntu_packages.15` | str | <code>proxychains4</code> | No description |
 | `lateral_movement_tools_install_evil_winrm` | bool | <code>True</code> | No description |
 | `lateral_movement_tools_evil_winrm_gem` | str | <code>evil-winrm</code> | No description |
 | `lateral_movement_tools_install_xfreerdp` | bool | <code>True</code> | No description |
