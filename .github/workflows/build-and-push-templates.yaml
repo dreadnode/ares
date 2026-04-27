@@ -11,7 +11,7 @@ on:
   workflow_dispatch:
     inputs:
       template_filter:
-        description: 'Comma-separated template name prefixes to build (e.g. "ares" or "ares,ray"). Empty builds all.'
+        description: 'Comma-separated template name prefixes to build (e.g. "ares-blue" or "ares-cracker,ares-recon"). Empty builds all.'
         required: false
         default: ''
         type: string
