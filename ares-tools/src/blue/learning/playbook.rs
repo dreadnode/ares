@@ -78,32 +78,7 @@ pub async fn get_attack_playbook(args: &Value) -> anyhow::Result<ToolOutput> {
         });
     }
 
-    // Get credentials (compromised accounts) — stored as HASH (dedup_key -> JSON)
-    let creds_key = format!("ares:op:{op_id}:credentials");
-    let creds_map: std::collections::HashMap<String, String> =
-        redis::AsyncCommands::hgetall(&mut conn, &creds_key)
-            .await
-            .unwrap_or_default();
-    let creds: Vec<String> = creds_map.into_values().collect();
-
-    // Get discovered hosts — stored as LIST (JSON per entry)
-    let hosts_key = format!("ares:op:{op_id}:hosts");
-    let hosts_list: Vec<String> = redis::AsyncCommands::lrange(&mut conn, &hosts_key, 0, -1)
-        .await
-        .unwrap_or_default();
-    let hosts: std::collections::HashSet<String> = hosts_list.into_iter().collect();
-
-    // Get loot/techniques
-    let loot_key = format!("ares:op:{op_id}:loot");
-    let loot: Vec<String> = redis::AsyncCommands::lrange(&mut conn, &loot_key, 0, -1)
-        .await
-        .unwrap_or_default();
-
-    // Get operation metadata
-    let meta: std::collections::HashMap<String, String> =
-        redis::AsyncCommands::hgetall(&mut conn, &meta_key)
-            .await
-            .unwrap_or_default();
+    let (creds, hosts, loot, meta) = load_op_collections(&mut conn, &op_id).await;
 
     // Build playbook
     let mut lines = Vec::new();
@@ -384,6 +359,48 @@ pub async fn get_detection_queries_for_technique(args: &Value) -> anyhow::Result
     })
 }
 
+/// Load credentials, hosts, loot, and metadata for an operation from Redis.
+///
+/// Credentials are stored as a HASH (dedup_key → JSON), hosts as a LIST,
+/// loot as a LIST, and metadata as a HASH.
+async fn load_op_collections(
+    conn: &mut (impl redis::AsyncCommands + Send),
+    op_id: &str,
+) -> (
+    Vec<String>,
+    std::collections::HashSet<String>,
+    Vec<String>,
+    HashMap<String, String>,
+) {
+    // Credentials — stored as HASH (dedup_key -> JSON)
+    let creds_key = format!("ares:op:{op_id}:credentials");
+    let creds_map: HashMap<String, String> = redis::AsyncCommands::hgetall(conn, &creds_key)
+        .await
+        .unwrap_or_default();
+    let creds: Vec<String> = creds_map.into_values().collect();
+
+    // Hosts — stored as LIST (JSON per entry)
+    let hosts_key = format!("ares:op:{op_id}:hosts");
+    let hosts_list: Vec<String> = redis::AsyncCommands::lrange(conn, &hosts_key, 0, -1)
+        .await
+        .unwrap_or_default();
+    let hosts: std::collections::HashSet<String> = hosts_list.into_iter().collect();
+
+    // Loot/techniques
+    let loot_key = format!("ares:op:{op_id}:loot");
+    let loot: Vec<String> = redis::AsyncCommands::lrange(conn, &loot_key, 0, -1)
+        .await
+        .unwrap_or_default();
+
+    // Operation metadata
+    let meta_key = format!("ares:op:{op_id}:meta");
+    let meta: HashMap<String, String> = redis::AsyncCommands::hgetall(conn, &meta_key)
+        .await
+        .unwrap_or_default();
+
+    (creds, hosts, loot, meta)
+}
+
 /// Find the latest operation ID in Redis by scanning `ares:op:*:meta` keys.
 async fn find_latest_operation(conn: &mut redis::aio::MultiplexedConnection) -> Option<String> {
     let mut cursor: u64 = 0;
@@ -510,5 +527,93 @@ mod tests {
         let args = json!({});
         let result = lookup_technique(&args);
         assert!(result.is_err());
+    }
+
+    // -- load_op_collections tests (mock Redis) --
+
+    use super::load_op_collections;
+    use ares_core::state::mock_redis::MockRedisConnection;
+    use redis::AsyncCommands;
+
+    #[tokio::test]
+    async fn load_op_collections_empty() {
+        let mut conn = MockRedisConnection::new();
+        let (creds, hosts, loot, meta) = load_op_collections(&mut conn, "op-test").await;
+        assert!(creds.is_empty());
+        assert!(hosts.is_empty());
+        assert!(loot.is_empty());
+        assert!(meta.is_empty());
+    }
+
+    #[tokio::test]
+    async fn load_op_collections_reads_credentials_as_hash() {
+        let mut conn = MockRedisConnection::new();
+        let key = "ares:op:op-test:credentials";
+        let cred_json = json!({
+            "username": "admin",
+            "password": "P@ssw0rd!",  // pragma: allowlist secret
+            "domain": "contoso.local"
+        })
+        .to_string();
+        conn.hset::<_, _, _, ()>(key, "cred:contoso.local:admin:abc123", &cred_json)
+            .await
+            .unwrap();
+
+        let (creds, _, _, _) = load_op_collections(&mut conn, "op-test").await;
+        assert_eq!(creds.len(), 1);
+        assert!(creds[0].contains("admin"));
+    }
+
+    #[tokio::test]
+    async fn load_op_collections_reads_hosts_as_list() {
+        let mut conn = MockRedisConnection::new();
+        let key = "ares:op:op-test:hosts";
+        let host_json = json!({
+            "ip": "192.168.58.10",
+            "hostname": "dc01.contoso.local"
+        })
+        .to_string();
+        conn.rpush::<_, _, ()>(key, &host_json).await.unwrap();
+
+        let (_, hosts, _, _) = load_op_collections(&mut conn, "op-test").await;
+        assert_eq!(hosts.len(), 1);
+        assert!(hosts.iter().next().unwrap().contains("192.168.58.10"));
+    }
+
+    #[tokio::test]
+    async fn load_op_collections_reads_meta_as_hash() {
+        let mut conn = MockRedisConnection::new();
+        let key = "ares:op:op-test:meta";
+        conn.hset::<_, _, _, ()>(key, "target_domain", "contoso.local")
+            .await
+            .unwrap();
+        conn.hset::<_, _, _, ()>(key, "started_at", "2025-01-28T12:00:00Z")
+            .await
+            .unwrap();
+
+        let (_, _, _, meta) = load_op_collections(&mut conn, "op-test").await;
+        assert_eq!(meta.get("target_domain").unwrap(), "contoso.local");
+        assert_eq!(meta.get("started_at").unwrap(), "2025-01-28T12:00:00Z");
+    }
+
+    #[tokio::test]
+    async fn load_op_collections_multiple_credentials_deduped_by_hash_field() {
+        let mut conn = MockRedisConnection::new();
+        let key = "ares:op:op-test:credentials";
+        let cred1 = json!({"username": "alice", "domain": "contoso.local"}).to_string();
+        let cred2 = json!({"username": "bob", "domain": "contoso.local"}).to_string();
+        conn.hset::<_, _, _, ()>(key, "cred:contoso.local:alice:aaa", &cred1)
+            .await
+            .unwrap();
+        conn.hset::<_, _, _, ()>(key, "cred:contoso.local:bob:bbb", &cred2)
+            .await
+            .unwrap();
+        // Duplicate field — should overwrite, not duplicate
+        conn.hset::<_, _, _, ()>(key, "cred:contoso.local:alice:aaa", &cred1)
+            .await
+            .unwrap();
+
+        let (creds, _, _, _) = load_op_collections(&mut conn, "op-test").await;
+        assert_eq!(creds.len(), 2);
     }
 }

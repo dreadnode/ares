@@ -25,3 +25,4 @@ blue = ["ares-core/blue"]
 [dev-dependencies]
 rstest = "0.26"
 approx = "0.5"
+ares-core = { path = "../ares-core", features = ["test-utils", "blue"] }
