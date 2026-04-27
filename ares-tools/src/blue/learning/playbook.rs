@@ -78,18 +78,20 @@ pub async fn get_attack_playbook(args: &Value) -> anyhow::Result<ToolOutput> {
         });
     }
 
-    // Get credentials (compromised accounts)
+    // Get credentials (compromised accounts) — stored as HASH (dedup_key -> JSON)
     let creds_key = format!("ares:op:{op_id}:credentials");
-    let creds: Vec<String> = redis::AsyncCommands::lrange(&mut conn, &creds_key, 0, -1)
-        .await
-        .unwrap_or_default();
-
-    // Get discovered hosts
-    let hosts_key = format!("ares:op:{op_id}:hosts");
-    let hosts: std::collections::HashSet<String> =
-        redis::AsyncCommands::smembers(&mut conn, &hosts_key)
+    let creds_map: std::collections::HashMap<String, String> =
+        redis::AsyncCommands::hgetall(&mut conn, &creds_key)
             .await
             .unwrap_or_default();
+    let creds: Vec<String> = creds_map.into_values().collect();
+
+    // Get discovered hosts — stored as LIST (JSON per entry)
+    let hosts_key = format!("ares:op:{op_id}:hosts");
+    let hosts_list: Vec<String> = redis::AsyncCommands::lrange(&mut conn, &hosts_key, 0, -1)
+        .await
+        .unwrap_or_default();
+    let hosts: std::collections::HashSet<String> = hosts_list.into_iter().collect();
 
     // Get loot/techniques
     let loot_key = format!("ares:op:{op_id}:loot");

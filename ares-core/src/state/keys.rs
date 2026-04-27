@@ -10,21 +10,21 @@ pub const LOCK_PREFIX: &str = "ares:lock";
 pub const TASK_STATUS_PREFIX: &str = "ares:task_status";
 
 // Collection key suffixes (appended to `ares:op:{op_id}:`)
-/// Redis SET key suffix for discovered credentials.
+/// Redis HASH key suffix for discovered credentials (dedup_key → JSON).
 pub const KEY_CREDENTIALS: &str = "credentials";
-/// Redis SET key suffix for discovered password hashes.
+/// Redis HASH key suffix for discovered password hashes (dedup_key → JSON).
 pub const KEY_HASHES: &str = "hashes";
-/// Redis SET key suffix for discovered hosts.
+/// Redis LIST key suffix for discovered hosts (JSON per entry).
 pub const KEY_HOSTS: &str = "hosts";
-/// Redis SET key suffix for discovered user accounts.
+/// Redis LIST key suffix for discovered user accounts (JSON per entry).
 pub const KEY_USERS: &str = "users";
-/// Redis SET key suffix for discovered SMB shares.
+/// Redis HASH key suffix for discovered SMB shares (dedup_key → JSON).
 pub const KEY_SHARES: &str = "shares";
 /// Redis SET key suffix for discovered domain names.
 pub const KEY_DOMAINS: &str = "domains";
-/// Redis SET key suffix for discovered vulnerabilities.
+/// Redis HASH key suffix for discovered vulnerabilities (vuln_id → JSON).
 pub const KEY_VULNS: &str = "vulns";
-/// Redis SET key suffix for exploited targets.
+/// Redis SET key suffix for exploited vulnerability IDs.
 pub const KEY_EXPLOITED: &str = "exploited";
 /// Redis HASH key suffix for operation metadata.
 pub const KEY_META: &str = "meta";
