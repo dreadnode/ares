@@ -125,13 +125,18 @@ roles:
         binaries: [sshpass]
         fn_names: [ssh_with_password]
       - category: SMB
-        binaries: [smbclient]
+        binaries: [smbclient, rpcclient]
         fn_names: []
       - category: Pivoting
         binaries: [proxychains4]
         fn_names: []
+      # Pass-the-Hash (pth-toolkit) is unavailable on Debian trixie — the
+      # `passing-the-hash` apt package is gone and building from source
+      # needs a patched samba. fn_names are kept so the registry still
+      # exposes them, but binaries are omitted so tool_check doesn't flag
+      # them as expected-but-missing on every worker startup.
       - category: Pass-the-Hash
-        binaries: [pth-winexe, pth-smbclient, pth-rpcclient, pth-net, pth-wmic]
+        binaries: []
         fn_names: [pth_winexe, pth_smbclient, pth_rpcclient, pth_wmic]
       - category: Impacket
         binaries: [impacket-psexec, impacket-wmiexec, impacket-smbexec, impacket-secretsdump]

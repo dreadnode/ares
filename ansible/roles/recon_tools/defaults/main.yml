@@ -7,6 +7,7 @@ recon_tools_kali_packages:
   - dnsutils
   - whois
   - samba-common-bin
+  - smbclient  # required by enum4linux/enum4linux-ng for share enumeration
 
 # Network reconnaissance tool packages (Ubuntu-compatible, no netexec in apt)
 recon_tools_ubuntu_packages:
@@ -16,6 +17,7 @@ recon_tools_ubuntu_packages:
   - dnsutils
   - whois
   - samba-common-bin  # includes rpcclient
+  - smbclient  # required by enum4linux/enum4linux-ng for share enumeration
 
 # enum4linux-ng configuration (installed via apt on Kali, pipx elsewhere)
 recon_tools_install_enum4linuxng: true

@@ -232,7 +232,8 @@ mod tests {
             "xfreerdp",
             "sshpass",
             "proxychains4",
-            "pth-winexe",
+            "smbclient",
+            "rpcclient",
         ] {
             assert!(
                 tools.contains(expected),
