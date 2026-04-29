@@ -200,6 +200,7 @@ fn trim_conversation_under_limit() {
         max_context_tokens: 1_000_000,
         max_tool_output_chars: 0,
         min_recent_messages: 10,
+        ..ContextConfig::default()
     };
     let original_len = messages.len();
     trim_conversation(&mut messages, "system", &[], &config);
@@ -216,6 +217,7 @@ fn trim_conversation_disabled() {
         max_context_tokens: 0, // Disabled
         max_tool_output_chars: 0,
         min_recent_messages: 10,
+        ..ContextConfig::default()
     };
     trim_conversation(&mut messages, "system", &[], &config);
     assert_eq!(messages.len(), 1);
@@ -241,6 +243,8 @@ fn trim_conversation_drops_middle() {
         max_context_tokens: 100, // Very low limit to force trimming
         max_tool_output_chars: 0,
         min_recent_messages: 4,
+        compaction_threshold_ratio: 1.0, // exercise the reactive ceiling path
+        compaction_check_every: 1,
     };
 
     trim_conversation(&mut messages, "system", &[], &config);
@@ -249,9 +253,9 @@ fn trim_conversation_drops_middle() {
     assert_eq!(messages.len(), 6);
     // First message preserved
     assert_eq!(messages[0].text_content().unwrap(), "task prompt");
-    // Summary marker inserted
+    // Compaction marker inserted (replaces older "Context trimmed" wording)
     assert!(messages[1]
         .text_content()
         .unwrap()
-        .contains("Context trimmed"));
+        .contains("Context compacted"));
 }

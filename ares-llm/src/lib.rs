@@ -10,6 +10,7 @@ pub use provider::{
 };
 
 pub use agent_loop::{
-    run_agent_loop, AgentLoopConfig, AgentLoopOutcome, CallbackHandler, CallbackResult,
-    ContextConfig, HostnameMap, LoopEndReason, RetryConfig, ToolDispatcher, ToolExecResult,
+    replay_messages, run_agent_loop, AgentLoopConfig, AgentLoopOutcome, BudgetConfig,
+    CallbackHandler, CallbackResult, ContextConfig, HostnameMap, LoopEndReason, RetryConfig,
+    SessionLog, SessionLogConfig, ToolDispatcher, ToolExecResult,
 };

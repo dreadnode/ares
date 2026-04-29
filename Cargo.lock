@@ -174,6 +174,7 @@ dependencies = [
  "reqwest 0.13.3",
  "serde",
  "serde_json",
+ "tempfile",
  "tera",
  "thiserror 2.0.18",
  "tokio",

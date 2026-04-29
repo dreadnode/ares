@@ -212,6 +212,10 @@ pub struct LlmRequest {
     pub tools: Vec<ToolDefinition>,
     pub max_tokens: u32,
     pub temperature: Option<f32>,
+    /// Hint to providers that support prompt caching (Anthropic) to attach
+    /// a cache breakpoint to the stable prefix (system + tools). Other
+    /// providers ignore this flag.
+    pub enable_prompt_cache: bool,
 }
 
 impl LlmRequest {
@@ -223,6 +227,7 @@ impl LlmRequest {
             tools: Vec::new(),
             max_tokens: 4096,
             temperature: None,
+            enable_prompt_cache: false,
         }
     }
 }

@@ -96,6 +96,10 @@ pub enum LoopEndReason {
     EndTurn { content: String },
     /// LLM hit max_tokens.
     MaxTokens,
+    /// Cumulative token budget exceeded — circuit breaker tripped before
+    /// dispatching the next LLM call. Carries the human-readable reason
+    /// (e.g. "input token budget exhausted (12000 >= 10000)").
+    BudgetExceeded { reason: String },
     /// Error during execution.
     Error(String),
 }

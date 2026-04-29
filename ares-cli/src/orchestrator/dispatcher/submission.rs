@@ -399,6 +399,28 @@ impl Dispatcher {
                                 agent_name: Some(tt.clone()),
                             }
                         }
+                        LoopEndReason::BudgetExceeded { reason } => {
+                            let mut result_json = json!({
+                                "steps": outcome.steps,
+                                "tool_calls": outcome.tool_calls_dispatched,
+                            });
+                            if let Some(disc) = merged_discoveries {
+                                result_json["discoveries"] = disc;
+                            }
+                            if !tool_outputs_json.is_empty() {
+                                result_json["tool_outputs"] =
+                                    Value::Array(tool_outputs_json.clone());
+                            }
+                            TaskResult {
+                                task_id: tid.clone(),
+                                success: false,
+                                result: Some(result_json),
+                                error: Some(format!("Budget exceeded: {reason}")),
+                                completed_at: Some(Utc::now()),
+                                worker_pod: Some("rust-llm-runner".into()),
+                                agent_name: Some(tt.clone()),
+                            }
+                        }
                         LoopEndReason::Error(err) => TaskResult {
                             task_id: tid.clone(),
                             success: false,

@@ -45,11 +45,10 @@ impl LlmTaskRunner {
         temperature: Option<f32>,
         technique_priorities: Vec<(String, i32)>,
     ) -> Self {
-        let config = AgentLoopConfig {
-            model: model_name,
-            temperature,
-            ..AgentLoopConfig::default()
-        };
+        // Layer env-var overrides (ARES_AGENT_*, ARES_CONTEXT_*, ARES_BUDGET_*,
+        // ARES_SESSION_LOG_*) on top of compiled defaults so operators can
+        // tune the loop without a code change.
+        let config = AgentLoopConfig::from_env(model_name, temperature);
         Self {
             provider,
             dispatcher,
@@ -285,6 +284,13 @@ fn log_outcome(task_id: &str, outcome: &AgentLoopOutcome) {
                 task_id = task_id,
                 steps = outcome.steps,
                 "LLM agent hit max tokens"
+            );
+        }
+        LoopEndReason::BudgetExceeded { reason } => {
+            warn!(
+                task_id = task_id,
+                steps = outcome.steps,
+                "LLM agent budget circuit breaker tripped: {reason}"
             );
         }
         LoopEndReason::Error(err) => {

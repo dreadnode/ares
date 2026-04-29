@@ -282,6 +282,12 @@ async fn execute_blue_task(
             "Hit max tokens".into(),
             agent_name,
         ),
+        LoopEndReason::BudgetExceeded { reason } => BlueTaskResult::failure(
+            &task.task_id,
+            &task.investigation_id,
+            format!("Budget exceeded: {reason}"),
+            agent_name,
+        ),
         LoopEndReason::Error(err) => {
             error!(task_id = %task.task_id, err = %err, "Blue task error");
             BlueTaskResult::failure(

@@ -92,8 +92,10 @@ fn default_config(max_steps: u32) -> AgentLoopConfig {
             max_context_tokens: 0,    // No limit in tests by default
             max_tool_output_chars: 0, // No truncation in tests
             min_recent_messages: 10,
+            ..ares_llm::agent_loop::ContextConfig::default()
         },
         max_tool_calls_per_name: 10,
+        ..AgentLoopConfig::default()
     }
 }
 

@@ -425,6 +425,9 @@ fn process_outcome(outcome: &AgentLoopOutcome, investigation_id: &str) -> Invest
         LoopEndReason::MaxTokens => InvestigationOutcome::Failed {
             error: format!("Investigation {investigation_id} hit max tokens"),
         },
+        LoopEndReason::BudgetExceeded { reason } => InvestigationOutcome::Failed {
+            error: format!("Investigation {investigation_id} budget exceeded: {reason}"),
+        },
         LoopEndReason::Error(err) => InvestigationOutcome::Failed { error: err.clone() },
     }
 }
