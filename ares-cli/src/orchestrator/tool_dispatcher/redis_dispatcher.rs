@@ -49,6 +49,33 @@ impl RedisToolDispatcher {
     }
 }
 
+/// Synthetic ToolExecResult returned when the NATS request itself fails
+/// (broker disconnect, no responders, etc.). Free function so the wording
+/// is testable and stays in lock-step with the agent-facing error message.
+pub(super) fn dispatch_error_result(
+    tool_name: &str,
+    err: impl std::fmt::Display,
+) -> ToolExecResult {
+    ToolExecResult {
+        output: String::new(),
+        error: Some(format!("Tool '{tool_name}' dispatch error: {err}")),
+        discoveries: None,
+    }
+}
+
+/// Synthetic ToolExecResult returned when the request times out waiting for
+/// a worker to reply.
+pub(super) fn dispatch_timeout_result(tool_name: &str, timeout: Duration) -> ToolExecResult {
+    ToolExecResult {
+        output: String::new(),
+        error: Some(format!(
+            "Tool '{tool_name}' timed out after {}s",
+            timeout.as_secs()
+        )),
+        discoveries: None,
+    }
+}
+
 #[async_trait::async_trait]
 impl ares_llm::ToolDispatcher for RedisToolDispatcher {
     async fn dispatch_tool(
@@ -118,11 +145,7 @@ impl ares_llm::ToolDispatcher for RedisToolDispatcher {
                         err = %e,
                         "NATS request failed"
                     );
-                    return Ok(ToolExecResult {
-                        output: String::new(),
-                        error: Some(format!("Tool '{}' dispatch error: {e}", call.name)),
-                        discoveries: None,
-                    });
+                    return Ok(dispatch_error_result(&call.name, e));
                 }
                 Err(_) => {
                     warn!(
@@ -131,15 +154,7 @@ impl ares_llm::ToolDispatcher for RedisToolDispatcher {
                         timeout_secs = timeout.as_secs(),
                         "Tool execution timed out"
                     );
-                    return Ok(ToolExecResult {
-                        output: String::new(),
-                        error: Some(format!(
-                            "Tool '{}' timed out after {}s",
-                            call.name,
-                            timeout.as_secs()
-                        )),
-                        discoveries: None,
-                    });
+                    return Ok(dispatch_timeout_result(&call.name, timeout));
                 }
             };
 

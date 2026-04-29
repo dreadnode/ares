@@ -94,18 +94,7 @@ pub async fn run_task_loop(
                 retry_delay = Duration::from_secs(1);
             }
             Err(e) => {
-                let error_str = e.to_string().to_lowercase();
-                let is_conn_error = [
-                    "connection",
-                    "connect",
-                    "closed",
-                    "timeout",
-                    "broken pipe",
-                    "reset",
-                    "no responders",
-                ]
-                .iter()
-                .any(|kw| error_str.contains(kw));
+                let is_conn_error = is_transient_broker_error(&e.to_string());
 
                 if is_conn_error {
                     warn!(
@@ -135,6 +124,23 @@ pub async fn run_task_loop(
 /// Re-export TTL constant for the result handler.
 pub(crate) const fn task_status_ttl() -> i64 {
     TASK_STATUS_TTL
+}
+
+/// Classify a broker-side error as a transient connectivity/timeout failure
+/// (worth retrying with backoff) versus a logic error (worth surfacing fast).
+fn is_transient_broker_error(err: &str) -> bool {
+    let lower = err.to_lowercase();
+    [
+        "connection",
+        "connect",
+        "closed",
+        "timeout",
+        "broken pipe",
+        "reset",
+        "no responders",
+    ]
+    .iter()
+    .any(|kw| lower.contains(kw))
 }
 
 /// Ensure a durable pull consumer exists for the given (role, urgency).
@@ -274,5 +280,93 @@ mod tests {
         let r = TaskResult::success("t1", serde_json::json!("ok"), "pod", "agent");
         let json = serde_json::to_string(&r).unwrap();
         assert!(!json.contains("\"error\""));
+    }
+
+    #[test]
+    fn is_transient_broker_error_recognizes_connection_terms() {
+        for kw in [
+            "connection refused",
+            "Connection reset by peer",
+            "broken pipe",
+            "request timeout",
+            "stream closed unexpectedly",
+            "no responders available",
+            "Failed to connect to NATS",
+        ] {
+            assert!(
+                is_transient_broker_error(kw),
+                "expected {kw:?} to be classified as transient"
+            );
+        }
+    }
+
+    #[test]
+    fn is_transient_broker_error_rejects_logic_errors() {
+        for kw in [
+            "deserialize TaskMessage: missing field",
+            "JetStream consumer not found",
+            "stream ARES_TASKS does not exist",
+            "permission denied: not authorized",
+            "ack returned NACK",
+        ] {
+            // None of these contain the transient keywords.
+            assert!(
+                !is_transient_broker_error(kw),
+                "expected {kw:?} to be classified as non-transient"
+            );
+        }
+    }
+
+    #[test]
+    fn is_transient_broker_error_is_case_insensitive() {
+        assert!(is_transient_broker_error("BROKEN PIPE"));
+        assert!(is_transient_broker_error("Timeout while waiting"));
+        assert!(is_transient_broker_error("No Responders"));
+    }
+
+    #[test]
+    fn task_status_ttl_is_24_hours() {
+        assert_eq!(task_status_ttl(), 60 * 60 * 24);
+    }
+
+    #[test]
+    fn task_message_with_explicit_priority_overrides_default() {
+        let json = r#"{
+            "task_id": "t1",
+            "task_type": "recon",
+            "source_agent": "orch",
+            "target_agent": "recon-0",
+            "payload": {},
+            "priority": 1
+        }"#;
+        let msg: TaskMessage = serde_json::from_str(json).unwrap();
+        assert_eq!(msg.priority, 1);
+    }
+
+    #[test]
+    fn task_result_success_carries_completed_at() {
+        let r = TaskResult::success(
+            "t1",
+            serde_json::json!({"output": "done"}),
+            "pod-0",
+            "ares-recon",
+        );
+        let parsed_at = chrono::DateTime::parse_from_rfc3339(r.completed_at.as_deref().unwrap());
+        assert!(parsed_at.is_ok());
+    }
+
+    #[test]
+    fn task_result_failure_with_partial_output() {
+        let partial = serde_json::json!({"partial_output": "ran 3/5 steps"});
+        let r = TaskResult::failure(
+            "t1",
+            "agent crashed".into(),
+            Some(partial.clone()),
+            "pod-0",
+            "ares-recon",
+        );
+        assert!(!r.success);
+        assert_eq!(r.error.as_deref(), Some("agent crashed"));
+        assert_eq!(r.result, Some(partial));
     }
 }

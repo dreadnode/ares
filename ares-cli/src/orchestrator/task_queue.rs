@@ -718,4 +718,193 @@ mod tests {
             .unwrap_err();
         assert!(err.to_string().contains("NATS"));
     }
+
+    #[tokio::test]
+    async fn has_pending_result_always_false() {
+        // Documented "always returns false" semantic kept for API compat with
+        // the old Redis implementation.
+        let q = mock_queue();
+        for tid in ["t1", "t2", "anything"] {
+            assert!(!q.has_pending_result(tid).await.unwrap());
+        }
+    }
+
+    #[tokio::test]
+    async fn check_result_errors_without_nats() {
+        let q = mock_queue();
+        let err = q.check_result("t1").await.unwrap_err();
+        assert!(err.to_string().contains("NATS"));
+    }
+
+    #[tokio::test]
+    async fn check_results_batch_empty_returns_empty_map() {
+        let q = mock_queue();
+        let map = q.check_results_batch(&[]).await.unwrap();
+        assert!(map.is_empty());
+    }
+
+    #[tokio::test]
+    async fn check_results_batch_swallows_per_task_errors() {
+        // Without NATS, each per-task fetch errors. The batch method logs
+        // and treats those as None rather than propagating.
+        let q = mock_queue();
+        let ids = vec!["t1".to_string(), "t2".to_string(), "t3".to_string()];
+        let map = q.check_results_batch(&ids).await.unwrap();
+        assert_eq!(map.len(), 3);
+        for id in &ids {
+            assert!(map.contains_key(id));
+            assert!(map.get(id).unwrap().is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn send_result_errors_without_nats() {
+        let q = mock_queue();
+        let r = TaskResult {
+            task_id: "t1".into(),
+            success: true,
+            result: None,
+            error: None,
+            completed_at: Some(Utc::now()),
+            worker_pod: None,
+            agent_name: None,
+        };
+        let err = q.send_result("t1", &r).await.unwrap_err();
+        assert!(err.to_string().contains("NATS"));
+    }
+
+    #[tokio::test]
+    async fn publish_state_update_errors_without_nats() {
+        let q = mock_queue();
+        let err = q.publish_state_update("op-1").await.unwrap_err();
+        assert!(err.to_string().contains("NATS"));
+    }
+
+    #[tokio::test]
+    async fn nats_broker_is_none_for_mock_queue() {
+        let q = mock_queue();
+        assert!(q.nats_broker().is_none());
+    }
+
+    #[tokio::test]
+    async fn connection_returns_independent_clone() {
+        // The connection() accessor should hand back a clone the caller can
+        // hold without invalidating the queue's own conn.
+        let q = mock_queue();
+        let mut c = q.connection();
+        let _: () = c.set_ex::<_, _, ()>("x", "y", 30).await.unwrap();
+        // queue still works after caller used the cloned conn
+        q.set_task_status("after", "pending").await.unwrap();
+        let raw = q.get_task_status("after").await.unwrap().unwrap();
+        let v: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(v["status"], "pending");
+    }
+
+    #[tokio::test]
+    async fn set_task_status_pending_does_not_set_started_or_ended() {
+        let q = mock_queue();
+        q.set_task_status("t1", "pending").await.unwrap();
+        let raw = q.get_task_status("t1").await.unwrap().unwrap();
+        let v: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(v["status"], "pending");
+        assert!(v.get("started_at").is_none());
+        assert!(v.get("ended_at").is_none());
+    }
+
+    #[tokio::test]
+    async fn set_task_status_in_progress_does_not_overwrite_started_at() {
+        let q = mock_queue();
+        // First in_progress sets started_at
+        q.set_task_status("t1", "in_progress").await.unwrap();
+        let raw1 = q.get_task_status("t1").await.unwrap().unwrap();
+        let v1: serde_json::Value = serde_json::from_str(&raw1).unwrap();
+        let started_first = v1["started_at"].as_str().unwrap().to_string();
+
+        // sleep briefly so timestamps would differ
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        // Second in_progress preserves the original started_at
+        q.set_task_status("t1", "in_progress").await.unwrap();
+        let raw2 = q.get_task_status("t1").await.unwrap().unwrap();
+        let v2: serde_json::Value = serde_json::from_str(&raw2).unwrap();
+        assert_eq!(v2["started_at"].as_str().unwrap(), started_first);
+        assert_ne!(v1["updated_at"], v2["updated_at"]);
+    }
+
+    #[tokio::test]
+    async fn set_task_status_full_without_payload_omits_payload_field() {
+        let q = mock_queue();
+        q.set_task_status_full("t1", "pending", "op-1", "scanner", "recon", None)
+            .await
+            .unwrap();
+        let raw = q.get_task_status("t1").await.unwrap().unwrap();
+        let v: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert!(v.get("payload").is_none());
+        assert!(v.get("started_at").is_none()); // pending != in_progress
+    }
+
+    #[tokio::test]
+    async fn extend_lock_against_mock_redis_succeeds() {
+        // Mock EXPIRE always reports success; this test pins the call shape
+        // (i64 TTL conversion, Result<bool> return type).
+        let q = mock_queue();
+        let ok = q
+            .extend_lock("op-1", Duration::from_secs(60))
+            .await
+            .unwrap();
+        assert!(ok);
+    }
+
+    #[tokio::test]
+    async fn try_acquire_lock_uses_separate_keys_per_operation() {
+        let q = mock_queue();
+        assert!(q
+            .try_acquire_lock("op-a", Duration::from_secs(30))
+            .await
+            .unwrap());
+        // Different op id is independent of op-a
+        assert!(q
+            .try_acquire_lock("op-b", Duration::from_secs(30))
+            .await
+            .unwrap());
+    }
+
+    #[test]
+    fn task_message_default_priority_in_constants() {
+        assert_eq!(default_priority(), 5);
+    }
+
+    #[test]
+    fn task_message_serialize_includes_callback_queue() {
+        let msg = TaskMessage {
+            task_id: "t".into(),
+            task_type: "recon".into(),
+            source_agent: "orch".into(),
+            target_agent: "scanner".into(),
+            payload: serde_json::json!({}),
+            priority: 5,
+            created_at: None,
+            callback_queue: Some("ares.tasks.results.t".to_string()),
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains("ares.tasks.results.t"));
+    }
+
+    #[test]
+    fn task_result_serializes_none_fields_as_null() {
+        let r = TaskResult {
+            task_id: "t".into(),
+            success: true,
+            result: None,
+            error: None,
+            completed_at: None,
+            worker_pod: None,
+            agent_name: None,
+        };
+        let v: serde_json::Value = serde_json::to_value(&r).unwrap();
+        assert!(v["result"].is_null());
+        assert!(v["error"].is_null());
+        assert!(v["worker_pod"].is_null());
+        assert!(v["agent_name"].is_null());
+    }
 }

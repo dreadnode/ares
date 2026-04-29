@@ -157,6 +157,37 @@ pub async fn run_tool_exec_loop(
     }
 }
 
+/// Build the error response sent when a tool was previously found to be
+/// unavailable on this worker (binary missing). Surfaced as a free function
+/// so the wording stays in lock-step with tests.
+fn unavailable_tool_response(tool_name: &str, call_id: &str) -> ToolExecResponse {
+    ToolExecResponse {
+        call_id: call_id.to_string(),
+        output: String::new(),
+        error: Some(format!(
+            "Tool '{tool_name}' is not installed on this worker. \
+             Do not call this tool again — it failed to spawn previously."
+        )),
+        discoveries: None,
+    }
+}
+
+/// Tool execution failures that indicate the binary is not present should
+/// be marked unavailable so we don't keep retrying it.
+fn is_tool_unavailable_error(err_str: &str) -> bool {
+    err_str.contains("failed to spawn") || err_str.contains("not installed")
+}
+
+/// Convert a parsed-discoveries value into `Some(_)` only when it carries
+/// at least one entry — avoids serialising an empty `discoveries: {}` blob.
+fn discoveries_or_none(parsed: serde_json::Value) -> Option<serde_json::Value> {
+    if parsed.as_object().is_none_or(|o| o.is_empty()) {
+        None
+    } else {
+        Some(parsed)
+    }
+}
+
 /// Execute a tool call and reply on the NATS inbox.
 async fn execute_and_respond(
     client: async_nats::Client,
@@ -170,16 +201,7 @@ async fn execute_and_respond(
             call_id = %request.call_id,
             "Skipping unavailable tool (previously failed to spawn)"
         );
-        let response = ToolExecResponse {
-            call_id: request.call_id.clone(),
-            output: String::new(),
-            error: Some(format!(
-                "Tool '{}' is not installed on this worker. \
-                 Do not call this tool again — it failed to spawn previously.",
-                request.tool_name
-            )),
-            discoveries: None,
-        };
+        let response = unavailable_tool_response(&request.tool_name, &request.call_id);
         send_reply(&client, reply_to.as_ref(), &response).await;
         return;
     }
@@ -204,16 +226,11 @@ async fn execute_and_respond(
                 Some(format!("tool exited with code {:?}", output.exit_code))
             };
 
-            let discoveries = ares_tools::parsers::parse_tool_output(
+            let discoveries = discoveries_or_none(ares_tools::parsers::parse_tool_output(
                 &request.tool_name,
                 &raw,
                 &request.arguments,
-            );
-            let discoveries = if discoveries.as_object().is_none_or(|o| o.is_empty()) {
-                None
-            } else {
-                Some(discoveries)
-            };
+            ));
 
             if let Some(ref disc) = discoveries {
                 if let Some(obj) = disc.as_object() {
@@ -245,7 +262,7 @@ async fn execute_and_respond(
         }
         Err(e) => {
             let err_str = e.to_string();
-            if err_str.contains("failed to spawn") || err_str.contains("not installed") {
+            if is_tool_unavailable_error(&err_str) {
                 warn!(
                     tool = %request.tool_name,
                     "Tool binary not found — marking as unavailable for this session"
@@ -542,5 +559,76 @@ mod tests {
         }"#;
         let result: Result<ToolExecRequest, _> = serde_json::from_str(json);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn unavailable_tool_response_contains_tool_name() {
+        let resp = unavailable_tool_response("certipy", "call_42");
+        assert_eq!(resp.call_id, "call_42");
+        assert_eq!(resp.output, "");
+        assert!(resp.discoveries.is_none());
+        let err = resp.error.as_deref().unwrap();
+        assert!(err.contains("certipy"));
+        assert!(err.contains("not installed"));
+        assert!(err.contains("Do not call this tool again"));
+    }
+
+    #[test]
+    fn unavailable_tool_response_round_trips_via_json() {
+        let resp = unavailable_tool_response("hashcat", "abc");
+        let json = serde_json::to_string(&resp).unwrap();
+        // discoveries omitted when None
+        assert!(!json.contains("discoveries"));
+        assert!(json.contains("hashcat"));
+    }
+
+    #[test]
+    fn is_tool_unavailable_error_classifies_spawn_failures() {
+        assert!(is_tool_unavailable_error(
+            "failed to spawn 'nmap' — is it installed?"
+        ));
+        assert!(is_tool_unavailable_error("tool not installed: certipy"));
+        assert!(is_tool_unavailable_error(
+            "failed to spawn process: No such file"
+        ));
+    }
+
+    #[test]
+    fn is_tool_unavailable_error_rejects_unrelated_errors() {
+        assert!(!is_tool_unavailable_error("connection refused"));
+        assert!(!is_tool_unavailable_error("permission denied"));
+        assert!(!is_tool_unavailable_error("invalid arguments"));
+        assert!(!is_tool_unavailable_error("command not found")); // different wording
+    }
+
+    #[test]
+    fn discoveries_or_none_drops_empty_object() {
+        let v = serde_json::json!({});
+        assert!(discoveries_or_none(v).is_none());
+    }
+
+    #[test]
+    fn discoveries_or_none_drops_non_object() {
+        // Arrays / strings / numbers should all be treated as "no discoveries"
+        assert!(discoveries_or_none(serde_json::json!(null)).is_none());
+        assert!(discoveries_or_none(serde_json::json!([])).is_none());
+        assert!(discoveries_or_none(serde_json::json!("hi")).is_none());
+        assert!(discoveries_or_none(serde_json::json!(42)).is_none());
+    }
+
+    #[test]
+    fn discoveries_or_none_keeps_non_empty_object() {
+        let v = serde_json::json!({"hosts": [{"ip": "10.0.0.1"}]});
+        let kept = discoveries_or_none(v.clone());
+        assert!(kept.is_some());
+        assert_eq!(kept.unwrap(), v);
+    }
+
+    #[test]
+    fn discoveries_or_none_keeps_empty_array_inside_object() {
+        // Object with even an empty array is still non-empty at the top level
+        let v = serde_json::json!({"credentials": []});
+        let kept = discoveries_or_none(v.clone());
+        assert_eq!(kept, Some(v));
     }
 }

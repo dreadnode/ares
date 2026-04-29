@@ -366,4 +366,132 @@ mod tests {
         let spec = StreamSpec::discoveries();
         assert_eq!(spec.subjects, vec!["ares.discoveries.>"]);
     }
+
+    #[test]
+    fn urgent_task_subject_format() {
+        assert_eq!(urgent_task_subject("recon"), "ares.tasks.urgent.recon");
+        assert_eq!(urgent_task_subject("lateral"), "ares.tasks.urgent.lateral");
+    }
+
+    #[test]
+    fn task_result_subject_format() {
+        assert_eq!(
+            task_result_subject("recon_abc123"),
+            "ares.tasks.results.recon_abc123"
+        );
+    }
+
+    #[test]
+    fn blue_task_result_subject_format() {
+        assert_eq!(
+            blue_task_result_subject("btask_abc"),
+            "ares.blue.tasks.results.btask_abc"
+        );
+    }
+
+    #[test]
+    fn subject_prefixes_are_unique() {
+        // Sanity check that the subject namespaces don't overlap, which would
+        // cause cross-stream collisions.
+        let prefixes = [
+            TASK_SUBJECT_PREFIX,
+            TOOL_EXEC_SUBJECT_PREFIX,
+            BLUE_TASK_SUBJECT_PREFIX,
+            DEFERRED_SUBJECT_PREFIX,
+            STATE_UPDATE_SUBJECT_PREFIX,
+            DISCOVERY_SUBJECT_PREFIX,
+        ];
+        for (i, p1) in prefixes.iter().enumerate() {
+            for p2 in &prefixes[i + 1..] {
+                assert!(
+                    !p1.starts_with(p2) && !p2.starts_with(p1),
+                    "subject prefixes {p1} and {p2} overlap"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn tasks_stream_uses_work_queue_retention_and_file_storage() {
+        let spec = StreamSpec::tasks();
+        let cfg = spec.to_config();
+        assert_eq!(cfg.name, "ARES_TASKS");
+        assert!(matches!(cfg.retention, RetentionPolicy::WorkQueue));
+        assert!(matches!(cfg.storage, StorageType::File));
+        // 24h retention
+        assert_eq!(cfg.max_age, Duration::from_secs(60 * 60 * 24));
+    }
+
+    #[test]
+    fn blue_tasks_stream_to_config_carries_subjects() {
+        let cfg = StreamSpec::blue_tasks().to_config();
+        assert_eq!(cfg.name, "ARES_BLUE_TASKS");
+        assert!(cfg.subjects.iter().any(|s| s == BLUE_INVESTIGATION_SUBJECT));
+        assert!(cfg.subjects.iter().any(|s| s == "ares.blue.tasks.>"));
+        assert!(matches!(cfg.retention, RetentionPolicy::WorkQueue));
+    }
+
+    #[test]
+    fn deferred_stream_max_age_is_six_hours() {
+        let spec = StreamSpec::deferred();
+        assert_eq!(spec.max_age, Duration::from_secs(60 * 60 * 6));
+        assert!(matches!(spec.storage, StorageType::File));
+    }
+
+    #[test]
+    fn discoveries_stream_max_age_is_twelve_hours() {
+        let spec = StreamSpec::discoveries();
+        assert_eq!(spec.max_age, Duration::from_secs(60 * 60 * 12));
+        assert!(matches!(spec.storage, StorageType::File));
+    }
+
+    #[test]
+    fn url_from_env_falls_back_to_default_when_unset() {
+        // We can't safely toggle process-wide env vars in parallel tests, so
+        // this only asserts that the function returns a non-empty URL string.
+        let url = NatsBroker::url_from_env();
+        assert!(!url.is_empty());
+        // Default contains nats:// scheme
+        if std::env::var("ARES_NATS_URL").is_err() && std::env::var("NATS_URL").is_err() {
+            assert_eq!(url, DEFAULT_NATS_URL);
+            assert!(url.starts_with("nats://"));
+        }
+    }
+
+    #[test]
+    fn task_subject_distinguishes_urgent_from_normal() {
+        let normal = task_subject("recon");
+        let urgent = urgent_task_subject("recon");
+        assert_ne!(normal, urgent);
+        // Both must start with the task prefix
+        assert!(normal.starts_with(TASK_SUBJECT_PREFIX));
+        assert!(urgent.starts_with(TASK_SUBJECT_PREFIX));
+    }
+
+    #[test]
+    fn deferred_subject_includes_both_op_and_type() {
+        let s = deferred_subject("op-20260429-abc", "lateral");
+        assert!(s.contains("op-20260429-abc"));
+        assert!(s.contains("lateral"));
+        assert!(s.starts_with(DEFERRED_SUBJECT_PREFIX));
+    }
+
+    #[test]
+    fn stream_names_are_uppercase_and_distinct() {
+        let names = [
+            TASKS_STREAM,
+            BLUE_TASKS_STREAM,
+            DEFERRED_STREAM,
+            DISCOVERIES_STREAM,
+        ];
+        for n in &names {
+            assert_eq!(*n, n.to_uppercase(), "stream name {n} must be uppercase");
+        }
+        // All distinct
+        for (i, a) in names.iter().enumerate() {
+            for b in &names[i + 1..] {
+                assert_ne!(a, b);
+            }
+        }
+    }
 }

@@ -499,3 +499,60 @@ async fn push_realtime_discoveries_no_op_when_no_known_keys() {
     let exists: bool = conn.exists(&key).await.unwrap();
     assert!(!exists, "should not have created discovery list");
 }
+
+#[test]
+fn dispatch_error_result_includes_tool_name_and_underlying_error() {
+    use redis_dispatcher::dispatch_error_result;
+    let r = dispatch_error_result("nmap_scan", "no responders available");
+    assert_eq!(r.output, "");
+    assert!(r.discoveries.is_none());
+    let err = r.error.as_deref().unwrap();
+    assert!(err.contains("nmap_scan"), "missing tool name in {err}");
+    assert!(err.contains("dispatch error"));
+    assert!(err.contains("no responders available"));
+}
+
+#[test]
+fn dispatch_error_result_handles_anyhow_errors() {
+    use redis_dispatcher::dispatch_error_result;
+    let upstream = anyhow::anyhow!("upstream broken pipe");
+    let r = dispatch_error_result("certipy", upstream);
+    assert!(r.error.unwrap().contains("upstream broken pipe"));
+}
+
+#[test]
+fn dispatch_timeout_result_renders_seconds() {
+    use redis_dispatcher::dispatch_timeout_result;
+    let r = dispatch_timeout_result("hashcat", std::time::Duration::from_secs(1500));
+    assert_eq!(r.output, "");
+    assert!(r.discoveries.is_none());
+    let err = r.error.as_deref().unwrap();
+    assert!(err.contains("hashcat"));
+    assert!(err.contains("1500s"));
+    assert!(err.contains("timed out"));
+}
+
+#[test]
+fn dispatch_timeout_result_zero_seconds_still_well_formed() {
+    use redis_dispatcher::dispatch_timeout_result;
+    let r = dispatch_timeout_result("nmap", std::time::Duration::from_secs(0));
+    assert!(r.error.unwrap().contains("0s"));
+}
+
+#[test]
+fn default_tool_timeout_is_25_minutes() {
+    // 1500s = 25min — must exceed worst-case hashcat queue + run time.
+    assert_eq!(DEFAULT_TOOL_TIMEOUT_SECS, 25 * 60);
+}
+
+#[test]
+fn dispatch_error_and_timeout_results_share_shape() {
+    // Both helpers must produce the same shape so the agent loop can treat
+    // them uniformly: empty output, no discoveries, non-empty error.
+    use redis_dispatcher::{dispatch_error_result, dispatch_timeout_result};
+    let e = dispatch_error_result("t", "oops");
+    let t = dispatch_timeout_result("t", std::time::Duration::from_secs(60));
+    assert_eq!(e.output, t.output);
+    assert!(e.discoveries.is_none() && t.discoveries.is_none());
+    assert!(e.error.is_some() && t.error.is_some());
+}
