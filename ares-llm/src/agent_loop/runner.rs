@@ -100,7 +100,9 @@ pub async fn run_agent_loop(
         .and_then(|v| {
             // ARES_OPERATION_ID may be a plain ID or a JSON envelope; try
             // to extract `operation_id` if it parses as JSON, else use raw.
-            if let Ok(serde_json::Value::Object(map)) = serde_json::from_str::<serde_json::Value>(&v) {
+            if let Ok(serde_json::Value::Object(map)) =
+                serde_json::from_str::<serde_json::Value>(&v)
+            {
                 map.get("operation_id")
                     .and_then(|x| x.as_str())
                     .map(|s| s.to_string())
@@ -176,8 +178,13 @@ pub async fn run_agent_loop(
 
         // Proactive compaction (rolling): fires at the configured utilization
         // ratio (default 60%) on the cadence tick, with a hard ceiling fallback.
-        let decision =
-            maybe_compact(&mut messages, system_prompt, &active_tools, &config.context, steps);
+        let decision = maybe_compact(
+            &mut messages,
+            system_prompt,
+            &active_tools,
+            &config.context,
+            steps,
+        );
         match decision {
             CompactionDecision::Proactive | CompactionDecision::Reactive => {
                 if session_log.enabled() {
@@ -528,10 +535,8 @@ pub async fn run_agent_loop(
                                 result,
                             }) => {
                                 info!(task_id = %tid, steps = steps, "Task completed");
-                                let tr = ChatMessage::tool_result(
-                                    &call_id,
-                                    "Task marked as complete.",
-                                );
+                                let tr =
+                                    ChatMessage::tool_result(&call_id, "Task marked as complete.");
                                 if session_log.enabled() {
                                     session_log.record_message(steps, &tr);
                                 }
@@ -605,10 +610,7 @@ pub async fn run_agent_loop(
                             result,
                         }) => {
                             info!(task_id = %tid, steps = steps, "Task completed");
-                            let tr = ChatMessage::tool_result(
-                                &call.id,
-                                "Task marked as complete.",
-                            );
+                            let tr = ChatMessage::tool_result(&call.id, "Task marked as complete.");
                             if session_log.enabled() {
                                 session_log.record_message(steps, &tr);
                             }
@@ -646,10 +648,8 @@ pub async fn run_agent_loop(
                             messages.push(tr);
                         }
                         Err(e) => {
-                            let tr = ChatMessage::tool_result(
-                                &call.id,
-                                format!("Callback error: {e}"),
-                            );
+                            let tr =
+                                ChatMessage::tool_result(&call.id, format!("Callback error: {e}"));
                             if session_log.enabled() {
                                 session_log.record_message(steps, &tr);
                             }
@@ -720,8 +720,7 @@ pub async fn run_agent_loop(
                         messages.push(tr);
                     }
                     Err(e) => {
-                        let tr =
-                            ChatMessage::tool_result(&call.id, format!("Callback error: {e}"));
+                        let tr = ChatMessage::tool_result(&call.id, format!("Callback error: {e}"));
                         if session_log.enabled() {
                             session_log.record_message(steps, &tr);
                         }
@@ -769,9 +768,7 @@ fn describe_reason(reason: &LoopEndReason) -> (&'static str, serde_json::Value) 
             serde_json::json!({"issue": issue, "context": context}),
         ),
         LoopEndReason::MaxSteps => ("MaxSteps", serde_json::Value::Null),
-        LoopEndReason::EndTurn { content } => {
-            ("EndTurn", serde_json::json!({"content": content}))
-        }
+        LoopEndReason::EndTurn { content } => ("EndTurn", serde_json::json!({"content": content})),
         LoopEndReason::MaxTokens => ("MaxTokens", serde_json::Value::Null),
         LoopEndReason::BudgetExceeded { reason } => {
             ("BudgetExceeded", serde_json::json!({"reason": reason}))

@@ -157,7 +157,13 @@ pub(super) fn trim_conversation(
     // step=cadence ensures the cadence branch fires; the threshold logic
     // inside still gates on `total > max_context_tokens`-style conditions
     // when the threshold is at the wall (1.0).
-    let _ = maybe_compact(messages, system, tools, config, config.compaction_check_every);
+    let _ = maybe_compact(
+        messages,
+        system,
+        tools,
+        config,
+        config.compaction_check_every,
+    );
 }
 
 /// Perform the actual compaction. Returns `Some(())` when a trim happened.

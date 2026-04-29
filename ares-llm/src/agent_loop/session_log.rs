@@ -217,7 +217,10 @@ impl SessionLog {
 fn has_tool_result(msg: &ChatMessage) -> bool {
     msg.parts
         .as_ref()
-        .map(|p| p.iter().any(|p| matches!(p, ContentPart::ToolResult { .. })))
+        .map(|p| {
+            p.iter()
+                .any(|p| matches!(p, ContentPart::ToolResult { .. }))
+        })
         .unwrap_or(false)
 }
 
@@ -254,7 +257,7 @@ pub fn replay_messages(path: &Path) -> std::io::Result<Vec<ChatMessage>> {
         let value: serde_json::Value = match serde_json::from_str(&line) {
             Ok(v) => v,
             Err(e) => {
-                warn!(error = %e, "skipping unparseable session log line");
+                warn!(error = %e, "skipping unparsable session log line");
                 continue;
             }
         };

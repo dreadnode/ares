@@ -106,7 +106,7 @@ pub struct ContextConfig {
 impl Default for ContextConfig {
     fn default() -> Self {
         Self {
-            max_context_tokens: 180_000,   // Conservative for 200k models
+            max_context_tokens: 180_000,     // Conservative for 200k models
             compaction_threshold_ratio: 0.6, // Compact proactively at 60%
             compaction_check_every: 5,
             max_tool_output_chars: 30_000, // ~7,500 tokens per tool output
