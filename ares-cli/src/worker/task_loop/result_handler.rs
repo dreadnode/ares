@@ -37,15 +37,7 @@ pub async fn process_task(
         conn,
         &task.task_id,
         "running",
-        &serde_json::json!({
-            "operation_id": config.operation_id,
-            "role": config.worker_role,
-            "agent_name": config.agent_name,
-            "pod_name": config.pod_name,
-            "task_type": task.task_type,
-            "payload": task.payload,
-            "started_at": started_at,
-        }),
+        &build_running_status_extra(config, &task.task_type, &task.payload, &started_at),
     )
     .await
     {
@@ -111,14 +103,7 @@ pub async fn process_task(
         conn,
         &task.task_id,
         final_status,
-        &serde_json::json!({
-            "operation_id": config.operation_id,
-            "role": config.worker_role,
-            "agent_name": config.agent_name,
-            "pod_name": config.pod_name,
-            "task_type": task.task_type,
-            "ended_at": Utc::now().to_rfc3339(),
-        }),
+        &build_final_status_extra(config, &task.task_type, &Utc::now().to_rfc3339()),
     )
     .await
     {
@@ -129,6 +114,43 @@ pub async fn process_task(
         "completed" => info!(task_id = %task.task_id, "Task completed"),
         _ => warn!(task_id = %task.task_id, "Task failed"),
     }
+}
+
+/// Build the `extra_fields` payload written alongside the `running` status
+/// when a task starts executing. Pulled out so callers don't have to keep
+/// the field set in lock-step with the consumer side.
+pub(super) fn build_running_status_extra(
+    config: &WorkerConfig,
+    task_type: &str,
+    payload: &serde_json::Value,
+    started_at: &str,
+) -> serde_json::Value {
+    serde_json::json!({
+        "operation_id": config.operation_id,
+        "role": config.worker_role,
+        "agent_name": config.agent_name,
+        "pod_name": config.pod_name,
+        "task_type": task_type,
+        "payload": payload,
+        "started_at": started_at,
+    })
+}
+
+/// Build the `extra_fields` payload written when a task transitions to its
+/// final status (`completed` / `failed`).
+pub(super) fn build_final_status_extra(
+    config: &WorkerConfig,
+    task_type: &str,
+    ended_at: &str,
+) -> serde_json::Value {
+    serde_json::json!({
+        "operation_id": config.operation_id,
+        "role": config.worker_role,
+        "agent_name": config.agent_name,
+        "pod_name": config.pod_name,
+        "task_type": task_type,
+        "ended_at": ended_at,
+    })
 }
 
 /// Build the final `TaskResult` and lifecycle status string from a single
@@ -387,6 +409,86 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(&raw.unwrap()).unwrap();
         assert_eq!(v["status"], "completed");
         assert_eq!(v["task_type"], "recon");
+    }
+
+    fn worker_config_for_test() -> WorkerConfig {
+        WorkerConfig {
+            redis_url: "redis://localhost".into(),
+            nats_url: "nats://localhost".into(),
+            worker_role: "recon".into(),
+            agent_name: "ares-recon-0".into(),
+            pod_name: "pod-0".into(),
+            operation_id: Some("op-2026".into()),
+            mode: crate::worker::config::WorkerMode::Task,
+            poll_timeout: std::time::Duration::from_secs(1),
+            task_timeout: std::time::Duration::from_secs(60),
+            heartbeat_interval: std::time::Duration::from_secs(15),
+            heartbeat_ttl: std::time::Duration::from_secs(60),
+        }
+    }
+
+    #[test]
+    fn build_running_status_extra_includes_all_metadata() {
+        let cfg = worker_config_for_test();
+        let payload = serde_json::json!({"target": "10.0.0.1"});
+        let extra = build_running_status_extra(&cfg, "recon", &payload, "2026-04-29T20:00:00Z");
+        assert_eq!(extra["operation_id"], "op-2026");
+        assert_eq!(extra["role"], "recon");
+        assert_eq!(extra["agent_name"], "ares-recon-0");
+        assert_eq!(extra["pod_name"], "pod-0");
+        assert_eq!(extra["task_type"], "recon");
+        assert_eq!(extra["payload"]["target"], "10.0.0.1");
+        assert_eq!(extra["started_at"], "2026-04-29T20:00:00Z");
+        assert!(extra.get("ended_at").is_none());
+    }
+
+    #[test]
+    fn build_running_status_extra_handles_missing_operation_id() {
+        let mut cfg = worker_config_for_test();
+        cfg.operation_id = None;
+        let extra = build_running_status_extra(
+            &cfg,
+            "lateral",
+            &serde_json::json!({}),
+            "2026-04-29T20:00:00Z",
+        );
+        assert!(extra["operation_id"].is_null());
+        assert_eq!(extra["task_type"], "lateral");
+    }
+
+    #[test]
+    fn build_final_status_extra_omits_payload_and_started_at() {
+        let cfg = worker_config_for_test();
+        let extra = build_final_status_extra(&cfg, "recon", "2026-04-29T20:05:00Z");
+        assert_eq!(extra["operation_id"], "op-2026");
+        assert_eq!(extra["role"], "recon");
+        assert_eq!(extra["agent_name"], "ares-recon-0");
+        assert_eq!(extra["pod_name"], "pod-0");
+        assert_eq!(extra["task_type"], "recon");
+        assert_eq!(extra["ended_at"], "2026-04-29T20:05:00Z");
+        assert!(extra.get("payload").is_none());
+        assert!(extra.get("started_at").is_none());
+    }
+
+    #[test]
+    fn running_and_final_extra_share_metadata_keys() {
+        let cfg = worker_config_for_test();
+        let r = build_running_status_extra(
+            &cfg,
+            "recon",
+            &serde_json::json!({}),
+            "2026-04-29T20:00:00Z",
+        );
+        let f = build_final_status_extra(&cfg, "recon", "2026-04-29T20:05:00Z");
+        for k in [
+            "operation_id",
+            "role",
+            "agent_name",
+            "pod_name",
+            "task_type",
+        ] {
+            assert_eq!(r[k], f[k], "key {k} should match between running and final");
+        }
     }
 
     #[tokio::test]

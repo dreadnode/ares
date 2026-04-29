@@ -115,7 +115,7 @@ pub async fn run_tool_exec_loop(
 
         let _ = status_tx.send(WorkerStatus {
             status: "busy".to_string(),
-            current_task: Some(format!("{}:{}", request.tool_name, request.call_id)),
+            current_task: Some(busy_current_task(&request.tool_name, &request.call_id)),
         });
 
         let ti = extract_target_info(&request.arguments);
@@ -191,6 +191,29 @@ fn discoveries_or_none(parsed: serde_json::Value) -> Option<serde_json::Value> {
 /// Render the error string for a tool that exited with a non-zero status.
 fn tool_exit_error(exit_code: Option<i32>) -> String {
     format!("tool exited with code {exit_code:?}")
+}
+
+/// Build the `WorkerStatus.current_task` string used while a tool call is in
+/// flight. Pulled out so the field shape stays in lock-step with consumers
+/// that key off `tool_name:call_id`.
+fn busy_current_task(tool_name: &str, call_id: &str) -> String {
+    format!("{tool_name}:{call_id}")
+}
+
+/// Iterate a `discoveries` value and return `(disc_type, count)` for each
+/// non-empty array. Used by the executor to emit one `trace_discovery` span
+/// per non-empty discovery type. Pulled out as a free function so the
+/// counting logic can be unit-tested without spinning up a tracer.
+fn count_discovery_entries(discoveries: &serde_json::Value) -> Vec<(String, usize)> {
+    let Some(obj) = discoveries.as_object() else {
+        return Vec::new();
+    };
+    obj.iter()
+        .filter_map(|(disc_type, items)| {
+            let count = items.as_array().map(|a| a.len()).unwrap_or(0);
+            (count > 0).then(|| (disc_type.clone(), count))
+        })
+        .collect()
 }
 
 /// Build the success-path [`ToolExecResponse`] (output + discoveries + error
@@ -269,23 +292,18 @@ async fn execute_and_respond(
             ));
 
             if let Some(ref disc) = discoveries {
-                if let Some(obj) = disc.as_object() {
-                    for (disc_type, items) in obj {
-                        let count = items.as_array().map(|a| a.len()).unwrap_or(0);
-                        if count > 0 {
-                            let span = trace_discovery(
-                                disc_type,
-                                &request.tool_name,
-                                di.target_user.as_deref(),
-                                None,
-                                di.target_ip.as_deref(),
-                                di.target_fqdn.as_deref(),
-                                dt,
-                                request.operation_id.as_deref(),
-                            );
-                            let _guard = span.enter();
-                        }
-                    }
+                for (disc_type, _count) in count_discovery_entries(disc) {
+                    let span = trace_discovery(
+                        &disc_type,
+                        &request.tool_name,
+                        di.target_user.as_deref(),
+                        None,
+                        di.target_ip.as_deref(),
+                        di.target_fqdn.as_deref(),
+                        dt,
+                        request.operation_id.as_deref(),
+                    );
+                    let _guard = span.enter();
                 }
             }
 
@@ -727,6 +745,67 @@ mod tests {
         let json = serde_json::to_string(&resp).unwrap();
         assert!(!json.contains("discoveries"));
         assert!(json.contains("bad"));
+    }
+
+    #[test]
+    fn busy_current_task_uses_colon_delimiter() {
+        assert_eq!(
+            busy_current_task("nmap_scan", "nmap_scan_abc123"),
+            "nmap_scan:nmap_scan_abc123"
+        );
+    }
+
+    #[test]
+    fn busy_current_task_handles_empty_call_id() {
+        // We never expect an empty call_id, but the format should be defensive
+        assert_eq!(busy_current_task("whoami", ""), "whoami:");
+    }
+
+    #[test]
+    fn count_discovery_entries_returns_per_type_counts() {
+        let discoveries = serde_json::json!({
+            "hosts": [{"ip": "10.0.0.1"}, {"ip": "10.0.0.2"}],
+            "credentials": [{"username": "alice"}],
+        });
+        let mut entries = count_discovery_entries(&discoveries);
+        entries.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(
+            entries,
+            vec![("credentials".to_string(), 1), ("hosts".to_string(), 2)],
+        );
+    }
+
+    #[test]
+    fn count_discovery_entries_skips_empty_arrays() {
+        let discoveries = serde_json::json!({
+            "hosts": [],
+            "credentials": [{"username": "alice"}],
+        });
+        let entries = count_discovery_entries(&discoveries);
+        assert_eq!(entries, vec![("credentials".to_string(), 1)]);
+    }
+
+    #[test]
+    fn count_discovery_entries_skips_non_array_fields() {
+        let discoveries = serde_json::json!({
+            "hosts": "not-an-array",
+            "credentials": [{"username": "alice"}],
+        });
+        let entries = count_discovery_entries(&discoveries);
+        assert_eq!(entries, vec![("credentials".to_string(), 1)]);
+    }
+
+    #[test]
+    fn count_discovery_entries_returns_empty_for_non_object() {
+        assert!(count_discovery_entries(&serde_json::json!([])).is_empty());
+        assert!(count_discovery_entries(&serde_json::json!("hi")).is_empty());
+        assert!(count_discovery_entries(&serde_json::json!(42)).is_empty());
+        assert!(count_discovery_entries(&serde_json::json!(null)).is_empty());
+    }
+
+    #[test]
+    fn count_discovery_entries_returns_empty_for_empty_object() {
+        assert!(count_discovery_entries(&serde_json::json!({})).is_empty());
     }
 
     #[test]
