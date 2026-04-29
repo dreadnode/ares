@@ -398,4 +398,139 @@ mod tests {
         let cfg = SessionLogConfig::default();
         assert!(!cfg.enabled());
     }
+
+    #[test]
+    fn parse_env_u32_uses_default_when_unset() {
+        std::env::remove_var("ARES_TEST_PARSE_U32_UNSET");
+        assert_eq!(parse_env_u32("ARES_TEST_PARSE_U32_UNSET", 42), 42);
+    }
+
+    #[test]
+    fn parse_env_u32_parses_and_falls_back() {
+        std::env::set_var("ARES_TEST_PARSE_U32_VALID", "  123 ");
+        assert_eq!(parse_env_u32("ARES_TEST_PARSE_U32_VALID", 0), 123);
+        std::env::remove_var("ARES_TEST_PARSE_U32_VALID");
+
+        std::env::set_var("ARES_TEST_PARSE_U32_BAD", "not-a-number");
+        assert_eq!(parse_env_u32("ARES_TEST_PARSE_U32_BAD", 7), 7);
+        std::env::remove_var("ARES_TEST_PARSE_U32_BAD");
+    }
+
+    #[test]
+    fn parse_env_usize_parses_and_falls_back() {
+        std::env::set_var("ARES_TEST_PARSE_USIZE_VALID", "999");
+        assert_eq!(parse_env_usize("ARES_TEST_PARSE_USIZE_VALID", 0), 999);
+        std::env::remove_var("ARES_TEST_PARSE_USIZE_VALID");
+
+        std::env::set_var("ARES_TEST_PARSE_USIZE_BAD", "xx");
+        assert_eq!(parse_env_usize("ARES_TEST_PARSE_USIZE_BAD", 5), 5);
+        std::env::remove_var("ARES_TEST_PARSE_USIZE_BAD");
+    }
+
+    #[test]
+    fn parse_env_f32_parses_and_falls_back() {
+        std::env::set_var("ARES_TEST_PARSE_F32_VALID", "0.75");
+        let v = parse_env_f32("ARES_TEST_PARSE_F32_VALID", 1.0);
+        assert!((v - 0.75).abs() < 1e-6);
+        std::env::remove_var("ARES_TEST_PARSE_F32_VALID");
+
+        std::env::set_var("ARES_TEST_PARSE_F32_BAD", "abc");
+        let v = parse_env_f32("ARES_TEST_PARSE_F32_BAD", 0.5);
+        assert!((v - 0.5).abs() < 1e-6);
+        std::env::remove_var("ARES_TEST_PARSE_F32_BAD");
+    }
+
+    #[test]
+    fn parse_env_bool_recognizes_truthy_falsy() {
+        for v in &["1", "true", "yes", "on", "TRUE", "Yes"] {
+            std::env::set_var("ARES_TEST_PARSE_BOOL", v);
+            assert!(parse_env_bool("ARES_TEST_PARSE_BOOL", false), "case {v}");
+        }
+        for v in &["0", "false", "no", "off", ""] {
+            std::env::set_var("ARES_TEST_PARSE_BOOL", v);
+            assert!(!parse_env_bool("ARES_TEST_PARSE_BOOL", true), "case {v:?}");
+        }
+        std::env::set_var("ARES_TEST_PARSE_BOOL", "junk");
+        assert!(parse_env_bool("ARES_TEST_PARSE_BOOL", true));
+        assert!(!parse_env_bool("ARES_TEST_PARSE_BOOL", false));
+        std::env::remove_var("ARES_TEST_PARSE_BOOL");
+
+        std::env::remove_var("ARES_TEST_PARSE_BOOL_UNSET");
+        assert!(parse_env_bool("ARES_TEST_PARSE_BOOL_UNSET", true));
+    }
+
+    #[test]
+    fn budget_config_from_env_reads_all_keys() {
+        std::env::set_var("ARES_BUDGET_MAX_INPUT_TOKENS", "11");
+        std::env::set_var("ARES_BUDGET_MAX_OUTPUT_TOKENS", "22");
+        std::env::set_var("ARES_BUDGET_MAX_TOTAL_TOKENS", "33");
+        let cfg = BudgetConfig::from_env();
+        assert_eq!(cfg.max_input_tokens, 11);
+        assert_eq!(cfg.max_output_tokens, 22);
+        assert_eq!(cfg.max_total_tokens, 33);
+        std::env::remove_var("ARES_BUDGET_MAX_INPUT_TOKENS");
+        std::env::remove_var("ARES_BUDGET_MAX_OUTPUT_TOKENS");
+        std::env::remove_var("ARES_BUDGET_MAX_TOTAL_TOKENS");
+    }
+
+    #[test]
+    fn context_config_from_env_clamps_threshold() {
+        std::env::set_var("ARES_CONTEXT_MAX_TOKENS", "12345");
+        std::env::set_var("ARES_CONTEXT_COMPACTION_THRESHOLD", "5.0"); // clamp to 1.0
+        std::env::set_var("ARES_CONTEXT_COMPACTION_CHECK_EVERY", "0"); // bumped to 1
+        std::env::set_var("ARES_CONTEXT_MAX_TOOL_OUTPUT_CHARS", "9999");
+        std::env::set_var("ARES_CONTEXT_MIN_RECENT_MESSAGES", "8");
+        let cfg = ContextConfig::from_env();
+        assert_eq!(cfg.max_context_tokens, 12345);
+        assert!((cfg.compaction_threshold_ratio - 1.0).abs() < 1e-6);
+        assert_eq!(cfg.compaction_check_every, 1);
+        assert_eq!(cfg.max_tool_output_chars, 9999);
+        assert_eq!(cfg.min_recent_messages, 8);
+        std::env::remove_var("ARES_CONTEXT_MAX_TOKENS");
+        std::env::remove_var("ARES_CONTEXT_COMPACTION_THRESHOLD");
+        std::env::remove_var("ARES_CONTEXT_COMPACTION_CHECK_EVERY");
+        std::env::remove_var("ARES_CONTEXT_MAX_TOOL_OUTPUT_CHARS");
+        std::env::remove_var("ARES_CONTEXT_MIN_RECENT_MESSAGES");
+    }
+
+    #[test]
+    fn session_log_config_from_env_explicit_dir() {
+        std::env::set_var("ARES_SESSION_LOG_DIR", "/tmp/ares-test-sessions");
+        std::env::remove_var("ARES_SESSION_LOG_ENABLED");
+        let cfg = SessionLogConfig::from_env();
+        assert!(cfg.enabled());
+        assert_eq!(
+            cfg.dir.as_deref(),
+            Some(std::path::Path::new("/tmp/ares-test-sessions"))
+        );
+        std::env::remove_var("ARES_SESSION_LOG_DIR");
+    }
+
+    #[test]
+    fn session_log_config_from_env_empty_dir_disabled() {
+        std::env::remove_var("ARES_SESSION_LOG_ENABLED");
+        std::env::set_var("ARES_SESSION_LOG_DIR", "   ");
+        let cfg = SessionLogConfig::from_env();
+        assert!(!cfg.enabled());
+        std::env::remove_var("ARES_SESSION_LOG_DIR");
+    }
+
+    #[test]
+    fn agent_loop_config_from_env_layers_overrides() {
+        std::env::set_var("ARES_AGENT_MAX_STEPS", "13");
+        std::env::set_var("ARES_AGENT_MAX_TOKENS", "8192");
+        std::env::set_var("ARES_AGENT_MAX_TOOL_CALLS_PER_NAME", "3");
+        std::env::set_var("ARES_AGENT_ENABLE_PROMPT_CACHE", "false");
+        let cfg = AgentLoopConfig::from_env("test-model".into(), Some(0.25));
+        assert_eq!(cfg.model, "test-model");
+        assert_eq!(cfg.temperature, Some(0.25));
+        assert_eq!(cfg.max_steps, 13);
+        assert_eq!(cfg.max_tokens, 8192);
+        assert_eq!(cfg.max_tool_calls_per_name, 3);
+        assert!(!cfg.enable_prompt_cache);
+        std::env::remove_var("ARES_AGENT_MAX_STEPS");
+        std::env::remove_var("ARES_AGENT_MAX_TOKENS");
+        std::env::remove_var("ARES_AGENT_MAX_TOOL_CALLS_PER_NAME");
+        std::env::remove_var("ARES_AGENT_ENABLE_PROMPT_CACHE");
+    }
 }

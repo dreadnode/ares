@@ -776,3 +776,74 @@ fn describe_reason(reason: &LoopEndReason) -> (&'static str, serde_json::Value) 
         LoopEndReason::Error(err) => ("Error", serde_json::json!({"err": err})),
     }
 }
+
+#[cfg(test)]
+mod runner_tests {
+    use super::*;
+
+    #[test]
+    fn describe_reason_task_complete() {
+        let r = LoopEndReason::TaskComplete {
+            task_id: "t-1".into(),
+            result: "done".into(),
+        };
+        let (kind, payload) = describe_reason(&r);
+        assert_eq!(kind, "TaskComplete");
+        assert_eq!(payload["task_id"], "t-1");
+        assert_eq!(payload["result"], "done");
+    }
+
+    #[test]
+    fn describe_reason_request_assistance() {
+        let r = LoopEndReason::RequestAssistance {
+            issue: "stuck".into(),
+            context: "tried 3 things".into(),
+        };
+        let (kind, payload) = describe_reason(&r);
+        assert_eq!(kind, "RequestAssistance");
+        assert_eq!(payload["issue"], "stuck");
+        assert_eq!(payload["context"], "tried 3 things");
+    }
+
+    #[test]
+    fn describe_reason_max_steps_and_max_tokens() {
+        let (k, p) = describe_reason(&LoopEndReason::MaxSteps);
+        assert_eq!(k, "MaxSteps");
+        assert!(p.is_null());
+
+        let (k, p) = describe_reason(&LoopEndReason::MaxTokens);
+        assert_eq!(k, "MaxTokens");
+        assert!(p.is_null());
+    }
+
+    #[test]
+    fn describe_reason_end_turn_carries_content() {
+        let r = LoopEndReason::EndTurn {
+            content: "all done".into(),
+        };
+        let (k, p) = describe_reason(&r);
+        assert_eq!(k, "EndTurn");
+        assert_eq!(p["content"], "all done");
+    }
+
+    #[test]
+    fn describe_reason_budget_exceeded_carries_reason() {
+        let r = LoopEndReason::BudgetExceeded {
+            reason: "input token budget exhausted (12000 >= 10000)".into(),
+        };
+        let (k, p) = describe_reason(&r);
+        assert_eq!(k, "BudgetExceeded");
+        assert!(p["reason"]
+            .as_str()
+            .unwrap()
+            .contains("input token budget exhausted"));
+    }
+
+    #[test]
+    fn describe_reason_error_carries_message() {
+        let r = LoopEndReason::Error("network timeout".into());
+        let (k, p) = describe_reason(&r);
+        assert_eq!(k, "Error");
+        assert_eq!(p["err"], "network timeout");
+    }
+}

@@ -338,4 +338,81 @@ mod tests {
         assert_eq!(replayed[1].role, Role::Assistant);
         assert_eq!(replayed[2].role, Role::User);
     }
+
+    #[test]
+    fn record_compaction_writes_event() {
+        let dir = tempdir().unwrap();
+        let cfg = SessionLogConfig {
+            dir: Some(dir.path().to_path_buf()),
+        };
+        let log = SessionLog::open(&cfg, "op-c", "t-c", "recon", "model");
+        log.record_compaction(7, "proactive", 60_000, 30_000);
+
+        let raw = std::fs::read_to_string(log.path()).unwrap();
+        let v: serde_json::Value = serde_json::from_str(raw.trim()).unwrap();
+        assert_eq!(v["kind"], "compaction");
+        assert_eq!(v["step"], 7);
+        assert_eq!(v["data"]["kind"], "proactive");
+        assert_eq!(v["data"]["tokens_before"], 60_000);
+        assert_eq!(v["data"]["tokens_after"], 30_000);
+    }
+
+    #[test]
+    fn replay_skips_non_message_kinds() {
+        let dir = tempdir().unwrap();
+        let cfg = SessionLogConfig {
+            dir: Some(dir.path().to_path_buf()),
+        };
+        let log = SessionLog::open(&cfg, "op-r", "t-r", "recon", "m");
+        log.record_start("sys", "task", &[]);
+        log.record_message(1, &ChatMessage::text(Role::User, "hello"));
+        log.record_usage(
+            1,
+            &TokenUsage {
+                input_tokens: 1,
+                output_tokens: 2,
+                ..Default::default()
+            },
+        );
+        log.record_compaction(2, "reactive", 100, 50);
+        log.record_outcome(2, "EndTurn", serde_json::json!({}));
+
+        let replayed = replay_messages(log.path()).unwrap();
+        // Only the single user message is a replayable kind.
+        assert_eq!(replayed.len(), 1);
+        assert_eq!(replayed[0].role, Role::User);
+    }
+
+    #[test]
+    fn replay_skips_unparsable_lines() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("session.jsonl");
+        // Mix valid + invalid lines + a record with unknown kind.
+        let mut f = std::fs::File::create(&path).unwrap();
+        use std::io::Write;
+        writeln!(f, "{{not json}}").unwrap();
+        writeln!(f).unwrap();
+        writeln!(
+            f,
+            r#"{{"ts":"t","op_id":"o","task_id":"t","role":"r","step":0,"model":"m","kind":"unknown","data":{{}}}}"#
+        )
+        .unwrap();
+        // A real user message
+        let msg = ChatMessage::text(Role::User, "real");
+        let entry = serde_json::json!({
+            "ts":"t","op_id":"o","task_id":"t","role":"r","step":1,"model":"m",
+            "kind":"user","data": serde_json::to_value(&msg).unwrap()
+        });
+        writeln!(f, "{entry}").unwrap();
+        drop(f);
+
+        let replayed = replay_messages(&path).unwrap();
+        assert_eq!(replayed.len(), 1);
+    }
+
+    #[test]
+    fn sanitize_collapses_empty_to_underscore() {
+        assert_eq!(sanitize(""), "_");
+        assert_eq!(sanitize("//"), "__");
+    }
 }
