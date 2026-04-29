@@ -129,6 +129,55 @@ impl TaskQueue {
     }
 }
 
+/// Build the [`TaskMessage`] that `submit_task` publishes to JetStream.
+///
+/// Pulled out so the wire shape (priority → subject mapping, callback queue
+/// generation, default field values) can be unit-tested without a broker.
+#[allow(dead_code)]
+pub(crate) fn build_task_message(
+    task_id: &str,
+    task_type: &str,
+    target_role: &str,
+    payload: serde_json::Value,
+    source_agent: &str,
+    priority: i32,
+) -> TaskMessage {
+    TaskMessage {
+        task_id: task_id.to_string(),
+        task_type: task_type.to_string(),
+        source_agent: source_agent.to_string(),
+        target_agent: target_role.to_string(),
+        payload,
+        priority,
+        created_at: Some(Utc::now()),
+        callback_queue: Some(nats::task_result_subject(task_id)),
+    }
+}
+
+/// Choose the work subject for a task based on its priority.
+///
+/// Priority ≤ 2 publishes to the urgent subject so workers that bind two
+/// consumers can prefer urgent work; everything else goes to the normal
+/// subject.
+#[allow(dead_code)]
+pub(crate) fn task_subject_for_priority(target_role: &str, priority: i32) -> String {
+    if priority <= 2 {
+        nats::urgent_task_subject(target_role)
+    } else {
+        nats::task_subject(target_role)
+    }
+}
+
+/// Lifecycle status string written to Redis after a result is published.
+#[allow(dead_code)]
+pub(crate) const fn final_status_for(success: bool) -> &'static str {
+    if success {
+        "completed"
+    } else {
+        "failed"
+    }
+}
+
 // The generic impl exposes both the production NATS path and a Redis-only
 // path used by unit tests with a mock connection. Some methods are only
 // exercised in the test build; allow that on the impl as a whole.
@@ -174,22 +223,16 @@ impl<C: ConnectionLike + Clone + Send + Sync + 'static> TaskQueueCore<C> {
     ) -> Result<String> {
         let task_id = format!("{}_{}", task_type, &Uuid::new_v4().to_string()[..12]);
 
-        let msg = TaskMessage {
-            task_id: task_id.clone(),
-            task_type: task_type.to_string(),
-            source_agent: source_agent.to_string(),
-            target_agent: target_role.to_string(),
+        let msg = build_task_message(
+            &task_id,
+            task_type,
+            target_role,
             payload,
+            source_agent,
             priority,
-            created_at: Some(Utc::now()),
-            callback_queue: Some(nats::task_result_subject(&task_id)),
-        };
+        );
 
-        let subject = if priority <= 2 {
-            nats::urgent_task_subject(target_role)
-        } else {
-            nats::task_subject(target_role)
-        };
+        let subject = task_subject_for_priority(target_role, priority);
         let bytes = Bytes::from(serde_json::to_vec(&msg).context("serialize TaskMessage")?);
 
         let ack = self
@@ -310,11 +353,7 @@ impl<C: ConnectionLike + Clone + Send + Sync + 'static> TaskQueueCore<C> {
         ack.await
             .with_context(|| format!("Awaiting ack for {subject}"))?;
 
-        let final_status = if result.success {
-            "completed"
-        } else {
-            "failed"
-        };
+        let final_status = final_status_for(result.success);
         debug!(
             task_id,
             status = final_status,
@@ -888,6 +927,91 @@ mod tests {
         };
         let json = serde_json::to_string(&msg).unwrap();
         assert!(json.contains("ares.tasks.results.t"));
+    }
+
+    #[test]
+    fn task_subject_for_priority_routes_urgent_below_threshold() {
+        // Priority ≤ 2 ⇒ urgent subject, otherwise the normal subject
+        assert_eq!(
+            task_subject_for_priority("scanner", 1),
+            "ares.tasks.urgent.scanner"
+        );
+        assert_eq!(
+            task_subject_for_priority("scanner", 2),
+            "ares.tasks.urgent.scanner"
+        );
+        assert_eq!(
+            task_subject_for_priority("scanner", 3),
+            "ares.tasks.scanner"
+        );
+        assert_eq!(
+            task_subject_for_priority("scanner", 5),
+            "ares.tasks.scanner"
+        );
+        assert_eq!(
+            task_subject_for_priority("scanner", 10),
+            "ares.tasks.scanner"
+        );
+    }
+
+    #[test]
+    fn final_status_for_maps_success_flag() {
+        assert_eq!(final_status_for(true), "completed");
+        assert_eq!(final_status_for(false), "failed");
+    }
+
+    #[test]
+    fn build_task_message_populates_callback_queue_with_result_subject() {
+        let msg = build_task_message(
+            "recon_abcdef123456",
+            "recon",
+            "scanner",
+            serde_json::json!({"target": "10.0.0.1"}),
+            "orchestrator",
+            5,
+        );
+        assert_eq!(msg.task_id, "recon_abcdef123456");
+        assert_eq!(msg.task_type, "recon");
+        assert_eq!(msg.source_agent, "orchestrator");
+        assert_eq!(msg.target_agent, "scanner");
+        assert_eq!(msg.priority, 5);
+        assert_eq!(
+            msg.callback_queue.as_deref(),
+            Some("ares.tasks.results.recon_abcdef123456"),
+        );
+        assert!(msg.created_at.is_some());
+        assert_eq!(msg.payload["target"], "10.0.0.1");
+    }
+
+    #[test]
+    fn build_task_message_preserves_priority_zero() {
+        // Priority 0 is allowed (super urgent); make sure we don't clamp.
+        let msg = build_task_message(
+            "t",
+            "exploit",
+            "exploiter",
+            serde_json::json!({}),
+            "orch",
+            0,
+        );
+        assert_eq!(msg.priority, 0);
+    }
+
+    #[test]
+    fn build_task_message_serializes_round_trip_with_callback() {
+        let msg = build_task_message(
+            "lateral_xyz",
+            "lateral_movement",
+            "lateral",
+            serde_json::json!({"host": "dc01"}),
+            "orch",
+            2,
+        );
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains("ares.tasks.results.lateral_xyz"));
+        let parsed: TaskMessage = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.priority, 2);
+        assert_eq!(parsed.task_type, "lateral_movement");
     }
 
     #[test]

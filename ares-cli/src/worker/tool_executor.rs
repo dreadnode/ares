@@ -188,6 +188,45 @@ fn discoveries_or_none(parsed: serde_json::Value) -> Option<serde_json::Value> {
     }
 }
 
+/// Render the error string for a tool that exited with a non-zero status.
+fn tool_exit_error(exit_code: Option<i32>) -> String {
+    format!("tool exited with code {exit_code:?}")
+}
+
+/// Build the success-path [`ToolExecResponse`] (output + discoveries + error
+/// derived from the process exit status). Pulled out so the response shape
+/// can be unit-tested without spawning a tool subprocess.
+fn build_success_response(
+    call_id: &str,
+    success: bool,
+    exit_code: Option<i32>,
+    combined: String,
+    discoveries: Option<serde_json::Value>,
+) -> ToolExecResponse {
+    let error = if success {
+        None
+    } else {
+        Some(tool_exit_error(exit_code))
+    };
+    ToolExecResponse {
+        call_id: call_id.to_string(),
+        output: combined,
+        error,
+        discoveries,
+    }
+}
+
+/// Build the error-path [`ToolExecResponse`] (dispatch failed before the
+/// tool produced any output).
+fn build_error_response(call_id: &str, err_str: String) -> ToolExecResponse {
+    ToolExecResponse {
+        call_id: call_id.to_string(),
+        output: String::new(),
+        error: Some(err_str),
+        discoveries: None,
+    }
+}
+
 /// Execute a tool call and reply on the NATS inbox.
 async fn execute_and_respond(
     client: async_nats::Client,
@@ -220,11 +259,8 @@ async fn execute_and_respond(
         Ok(output) => {
             let raw = output.combined_raw();
             let combined = output.combined();
-            let error = if output.success {
-                None
-            } else {
-                Some(format!("tool exited with code {:?}", output.exit_code))
-            };
+            let success = output.success;
+            let exit_code = output.exit_code;
 
             let discoveries = discoveries_or_none(ares_tools::parsers::parse_tool_output(
                 &request.tool_name,
@@ -253,12 +289,7 @@ async fn execute_and_respond(
                 }
             }
 
-            ToolExecResponse {
-                call_id: request.call_id.clone(),
-                output: combined,
-                error,
-                discoveries,
-            }
+            build_success_response(&request.call_id, success, exit_code, combined, discoveries)
         }
         Err(e) => {
             let err_str = e.to_string();
@@ -275,12 +306,7 @@ async fn execute_and_respond(
                 err = %e,
                 "Tool execution failed"
             );
-            ToolExecResponse {
-                call_id: request.call_id.clone(),
-                output: String::new(),
-                error: Some(err_str),
-                discoveries: None,
-            }
+            build_error_response(&request.call_id, err_str)
         }
     };
 
@@ -630,5 +656,86 @@ mod tests {
         let v = serde_json::json!({"credentials": []});
         let kept = discoveries_or_none(v.clone());
         assert_eq!(kept, Some(v));
+    }
+
+    #[test]
+    fn tool_exit_error_renders_exit_code() {
+        assert_eq!(tool_exit_error(Some(0)), "tool exited with code Some(0)");
+        assert_eq!(tool_exit_error(Some(1)), "tool exited with code Some(1)");
+        assert_eq!(tool_exit_error(None), "tool exited with code None");
+    }
+
+    #[test]
+    fn build_success_response_success_omits_error() {
+        let resp = build_success_response("call-1", true, Some(0), "ok\n".into(), None);
+        assert_eq!(resp.call_id, "call-1");
+        assert_eq!(resp.output, "ok\n");
+        assert!(resp.error.is_none());
+        assert!(resp.discoveries.is_none());
+    }
+
+    #[test]
+    fn build_success_response_failure_records_exit_code() {
+        let resp = build_success_response("call-2", false, Some(2), "err\n".into(), None);
+        assert!(!resp.error.as_deref().unwrap().is_empty());
+        assert!(resp.error.as_deref().unwrap().contains("Some(2)"));
+        assert_eq!(resp.output, "err\n");
+    }
+
+    #[test]
+    fn build_success_response_failure_with_no_exit_code() {
+        // Tool was killed without an exit code (signal, etc.)
+        let resp = build_success_response("call-3", false, None, String::new(), None);
+        let err = resp.error.as_deref().unwrap();
+        assert!(err.contains("None"));
+    }
+
+    #[test]
+    fn build_success_response_carries_discoveries_when_present() {
+        let disc = serde_json::json!({"hosts": [{"ip": "10.0.0.1"}]});
+        let resp = build_success_response(
+            "call-4",
+            true,
+            Some(0),
+            "scan output".into(),
+            Some(disc.clone()),
+        );
+        assert_eq!(resp.discoveries.as_ref().unwrap()["hosts"], disc["hosts"]);
+        assert!(resp.error.is_none());
+    }
+
+    #[test]
+    fn build_success_response_serializes_with_omitted_discoveries_when_none() {
+        let resp = build_success_response("call-5", true, Some(0), "ok".into(), None);
+        let json = serde_json::to_string(&resp).unwrap();
+        // discoveries field skipped when None
+        assert!(!json.contains("discoveries"));
+    }
+
+    #[test]
+    fn build_error_response_zeroes_output_and_no_discoveries() {
+        let resp = build_error_response("call-6", "spawn failure".into());
+        assert_eq!(resp.call_id, "call-6");
+        assert!(resp.output.is_empty());
+        assert!(resp.discoveries.is_none());
+        assert_eq!(resp.error.as_deref(), Some("spawn failure"));
+    }
+
+    #[test]
+    fn build_error_response_serializes_without_discoveries_field() {
+        let resp = build_error_response("call-7", "bad".into());
+        let json = serde_json::to_string(&resp).unwrap();
+        assert!(!json.contains("discoveries"));
+        assert!(json.contains("bad"));
+    }
+
+    #[test]
+    fn build_success_and_error_responses_share_call_id_field() {
+        let s = build_success_response("xyz", true, Some(0), "ok".into(), None);
+        let e = build_error_response("xyz", "bad".into());
+        let sj: serde_json::Value = serde_json::to_value(&s).unwrap();
+        let ej: serde_json::Value = serde_json::to_value(&e).unwrap();
+        assert_eq!(sj["call_id"], "xyz");
+        assert_eq!(ej["call_id"], "xyz");
     }
 }

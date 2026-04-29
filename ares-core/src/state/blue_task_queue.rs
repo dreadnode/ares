@@ -133,6 +133,35 @@ impl BlueTaskQueue {
     }
 }
 
+/// Serialize a [`BlueTaskMessage`] into the `(subject, payload)` pair that
+/// [`BlueTaskQueueCore::submit_task`] hands to JetStream. Pulled out as a
+/// free function so the wire shape can be unit-tested without a broker.
+pub(crate) fn prepare_blue_task_publish(task: &BlueTaskMessage) -> Result<(String, Bytes)> {
+    let subject = nats::blue_task_subject(&task.role);
+    let bytes = Bytes::from(serde_json::to_vec(task).context("serialize BlueTaskMessage")?);
+    Ok((subject, bytes))
+}
+
+/// Serialize a [`BlueTaskResult`] into the `(subject, payload)` pair that
+/// [`BlueTaskQueueCore::send_result`] hands to JetStream.
+pub(crate) fn prepare_blue_result_publish(result: &BlueTaskResult) -> Result<(String, Bytes)> {
+    let subject = nats::blue_task_result_subject(&result.task_id);
+    let bytes = Bytes::from(serde_json::to_vec(result).context("serialize BlueTaskResult")?);
+    Ok((subject, bytes))
+}
+
+/// Parse a JetStream message payload into a [`BlueTaskMessage`].
+pub(crate) fn parse_blue_task_payload(payload: &[u8], subject: &str) -> Result<BlueTaskMessage> {
+    serde_json::from_slice(payload)
+        .with_context(|| format!("Bad BlueTaskMessage JSON on {subject}"))
+}
+
+/// Parse a JetStream message payload into a [`BlueTaskResult`].
+pub(crate) fn parse_blue_result_payload(payload: &[u8], task_id: &str) -> Result<BlueTaskResult> {
+    serde_json::from_slice(payload)
+        .with_context(|| format!("Bad BlueTaskResult JSON for {task_id}"))
+}
+
 impl<C: ConnectionLike + Clone + Send + Sync + 'static> BlueTaskQueueCore<C> {
     /// Construct from a Redis backend only — used by unit tests that don't
     /// exercise queue methods. Queue methods will return an error.
@@ -150,8 +179,7 @@ impl<C: ConnectionLike + Clone + Send + Sync + 'static> BlueTaskQueueCore<C> {
 
     /// Submit a task to the global role queue.
     pub async fn submit_task(&mut self, task: &BlueTaskMessage) -> anyhow::Result<()> {
-        let subject = nats::blue_task_subject(&task.role);
-        let bytes = Bytes::from(serde_json::to_vec(task).context("serialize BlueTaskMessage")?);
+        let (subject, bytes) = prepare_blue_task_publish(task)?;
 
         debug!(
             task_id = %task.task_id,
@@ -200,8 +228,7 @@ impl<C: ConnectionLike + Clone + Send + Sync + 'static> BlueTaskQueueCore<C> {
 
         match fetch.next().await {
             Some(Ok(m)) => {
-                let task: BlueTaskMessage = serde_json::from_slice(&m.payload)
-                    .with_context(|| format!("Bad BlueTaskMessage JSON on {subject}"))?;
+                let task = parse_blue_task_payload(&m.payload, &subject)?;
                 m.ack().await.map_err(|e| anyhow::anyhow!("ack: {e}")).ok();
                 Ok(Some(task))
             }
@@ -212,8 +239,7 @@ impl<C: ConnectionLike + Clone + Send + Sync + 'static> BlueTaskQueueCore<C> {
 
     /// Send a task result to its dedicated result subject.
     pub async fn send_result(&mut self, result: &BlueTaskResult) -> anyhow::Result<()> {
-        let subject = nats::blue_task_result_subject(&result.task_id);
-        let bytes = Bytes::from(serde_json::to_vec(result).context("serialize BlueTaskResult")?);
+        let (subject, bytes) = prepare_blue_result_publish(result)?;
 
         let ack = self
             .nats()?
@@ -274,8 +300,7 @@ impl<C: ConnectionLike + Clone + Send + Sync + 'static> BlueTaskQueueCore<C> {
 
         match fetch.next().await {
             Some(Ok(m)) => {
-                let parsed: BlueTaskResult = serde_json::from_slice(&m.payload)
-                    .with_context(|| format!("Bad BlueTaskResult JSON for {task_id}"))?;
+                let parsed = parse_blue_result_payload(&m.payload, task_id)?;
                 m.ack().await.map_err(|e| anyhow::anyhow!("ack: {e}")).ok();
                 Ok(Some(parsed))
             }
@@ -712,5 +737,95 @@ mod tests {
         let mut q = mock_queue();
         let err = q.queue_length("triage").await.unwrap_err();
         assert!(err.to_string().contains("NATS"));
+    }
+
+    fn sample_task() -> BlueTaskMessage {
+        BlueTaskMessage {
+            task_id: "btask-1".into(),
+            investigation_id: "inv-1".into(),
+            task_type: "log_search".into(),
+            role: "triage".into(),
+            params: serde_json::json!({"q": "alertname=Foo"}),
+            created_at: "2026-04-29T20:00:00Z".into(),
+        }
+    }
+
+    #[test]
+    fn prepare_blue_task_publish_uses_role_subject_and_full_message() {
+        let task = sample_task();
+        let (subject, bytes) = prepare_blue_task_publish(&task).unwrap();
+        assert_eq!(subject, "ares.blue.tasks.triage");
+        let parsed: BlueTaskMessage = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(parsed.task_id, "btask-1");
+        assert_eq!(parsed.investigation_id, "inv-1");
+        assert_eq!(parsed.role, "triage");
+        assert_eq!(parsed.params["q"], "alertname=Foo");
+    }
+
+    #[test]
+    fn prepare_blue_task_publish_subject_changes_with_role() {
+        let mut t = sample_task();
+        t.role = "log_analyst".into();
+        let (subject, _) = prepare_blue_task_publish(&t).unwrap();
+        assert_eq!(subject, "ares.blue.tasks.log_analyst");
+    }
+
+    #[test]
+    fn prepare_blue_result_publish_uses_task_result_subject() {
+        let r = BlueTaskResult::success(
+            "btask-9",
+            "inv-1",
+            serde_json::json!({"hits": 3}),
+            "agent-x",
+        );
+        let (subject, bytes) = prepare_blue_result_publish(&r).unwrap();
+        assert_eq!(subject, "ares.blue.tasks.results.btask-9");
+        let parsed: BlueTaskResult = serde_json::from_slice(&bytes).unwrap();
+        assert!(parsed.success);
+        assert_eq!(parsed.task_id, "btask-9");
+        assert_eq!(parsed.result.unwrap()["hits"], 3);
+    }
+
+    #[test]
+    fn prepare_blue_result_publish_uses_distinct_subject_per_task_id() {
+        let a = BlueTaskResult::failure("a", "inv-1", "err".into(), "agent");
+        let b = BlueTaskResult::failure("b", "inv-1", "err".into(), "agent");
+        let (sa, _) = prepare_blue_result_publish(&a).unwrap();
+        let (sb, _) = prepare_blue_result_publish(&b).unwrap();
+        assert_ne!(sa, sb);
+        assert!(sa.ends_with(".a"));
+        assert!(sb.ends_with(".b"));
+    }
+
+    #[test]
+    fn parse_blue_task_payload_round_trips_a_published_message() {
+        let task = sample_task();
+        let (subject, bytes) = prepare_blue_task_publish(&task).unwrap();
+        let parsed = parse_blue_task_payload(&bytes, &subject).unwrap();
+        assert_eq!(parsed.task_id, task.task_id);
+        assert_eq!(parsed.role, task.role);
+    }
+
+    #[test]
+    fn parse_blue_task_payload_surfaces_subject_in_context_on_error() {
+        let err = parse_blue_task_payload(b"not json", "ares.blue.tasks.triage").unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("ares.blue.tasks.triage"), "got {msg}");
+    }
+
+    #[test]
+    fn parse_blue_result_payload_round_trips_a_published_result() {
+        let r = BlueTaskResult::success("btask-1", "inv-1", serde_json::json!({"x": 1}), "agent");
+        let (_, bytes) = prepare_blue_result_publish(&r).unwrap();
+        let parsed = parse_blue_result_payload(&bytes, "btask-1").unwrap();
+        assert!(parsed.success);
+        assert_eq!(parsed.task_id, "btask-1");
+    }
+
+    #[test]
+    fn parse_blue_result_payload_surfaces_task_id_in_context_on_error() {
+        let err = parse_blue_result_payload(b"garbage", "btask-7").unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("btask-7"), "got {msg}");
     }
 }

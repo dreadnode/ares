@@ -56,67 +56,13 @@ pub async fn process_task(
 
     let usage_for_tracking = agent_result.as_ref().ok().and_then(|ar| ar.usage.clone());
 
-    let (task_result, final_status) = match agent_result {
-        Ok(ar) => {
-            if let Some(ref err) = ar.error {
-                let result_payload = serde_json::json!({
-                    "output": ar.output,
-                    "task_type": task.task_type,
-                });
-                (
-                    TaskResult::failure(
-                        &task.task_id,
-                        err.clone(),
-                        Some(result_payload),
-                        &config.pod_name,
-                        &config.agent_name,
-                    ),
-                    "failed",
-                )
-            } else {
-                let mut result_payload = serde_json::json!({
-                    "output": ar.output,
-                    "task_type": task.task_type,
-                });
-                if let Some(ref usage) = ar.usage {
-                    result_payload["usage"] = serde_json::to_value(usage).unwrap_or_default();
-                }
-                if let Some(ref disc) = ar.discoveries {
-                    if let Some(obj) = disc.as_object() {
-                        for (k, v) in obj {
-                            result_payload[k] = v.clone();
-                        }
-                    }
-                }
-                (
-                    TaskResult::success(
-                        &task.task_id,
-                        result_payload,
-                        &config.pod_name,
-                        &config.agent_name,
-                    ),
-                    "completed",
-                )
-            }
-        }
-        Err(e) => {
-            let error_msg = format!("{e}");
-            error!(
-                task_id = %task.task_id,
-                "Agent task failed: {error_msg}"
-            );
-            (
-                TaskResult::failure(
-                    &task.task_id,
-                    error_msg,
-                    None,
-                    &config.pod_name,
-                    &config.agent_name,
-                ),
-                "failed",
-            )
-        }
-    };
+    let (task_result, final_status) = build_task_result_for_agent_outcome(
+        &task.task_id,
+        &config.pod_name,
+        &config.agent_name,
+        &task.task_type,
+        agent_result,
+    );
 
     if let Some(ref usage) = usage_for_tracking {
         if usage.total_tokens > 0 {
@@ -185,6 +131,60 @@ pub async fn process_task(
     }
 }
 
+/// Build the final `TaskResult` and lifecycle status string from a single
+/// agent execution. Pulled out as a free function so the branching logic
+/// (success / agent-reported error / dispatch error) can be unit tested
+/// without a NATS broker.
+pub(super) fn build_task_result_for_agent_outcome(
+    task_id: &str,
+    pod_name: &str,
+    agent_name: &str,
+    task_type: &str,
+    agent_outcome: anyhow::Result<super::types::AgentResult>,
+) -> (TaskResult, &'static str) {
+    match agent_outcome {
+        Ok(ar) => {
+            if let Some(ref err) = ar.error {
+                let payload = serde_json::json!({
+                    "output": ar.output,
+                    "task_type": task_type,
+                });
+                (
+                    TaskResult::failure(task_id, err.clone(), Some(payload), pod_name, agent_name),
+                    "failed",
+                )
+            } else {
+                let mut payload = serde_json::json!({
+                    "output": ar.output,
+                    "task_type": task_type,
+                });
+                if let Some(ref usage) = ar.usage {
+                    payload["usage"] = serde_json::to_value(usage).unwrap_or_default();
+                }
+                if let Some(ref disc) = ar.discoveries {
+                    if let Some(obj) = disc.as_object() {
+                        for (k, v) in obj {
+                            payload[k] = v.clone();
+                        }
+                    }
+                }
+                (
+                    TaskResult::success(task_id, payload, pod_name, agent_name),
+                    "completed",
+                )
+            }
+        }
+        Err(e) => {
+            let msg = format!("{e}");
+            error!(task_id = %task_id, "Agent task failed: {msg}");
+            (
+                TaskResult::failure(task_id, msg, None, pod_name, agent_name),
+                "failed",
+            )
+        }
+    }
+}
+
 /// Set task status in Redis with TTL.
 async fn set_task_status<C>(
     conn: &mut C,
@@ -216,7 +216,139 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::worker::task_loop::types::{AgentResult, TokenUsage};
     use ares_core::state::mock_redis::MockRedisConnection;
+
+    fn agent_ok(output: &str) -> AgentResult {
+        AgentResult {
+            output: output.to_string(),
+            error: None,
+            usage: None,
+            discoveries: None,
+        }
+    }
+
+    #[test]
+    fn build_task_result_success_marks_completed_and_carries_payload() {
+        let ar = agent_ok("nmap output");
+        let (tr, status) =
+            build_task_result_for_agent_outcome("t1", "pod-0", "ares-recon", "recon", Ok(ar));
+        assert_eq!(status, "completed");
+        assert!(tr.success);
+        assert!(tr.error.is_none());
+        let payload = tr.result.expect("result payload present");
+        assert_eq!(payload["output"], "nmap output");
+        assert_eq!(payload["task_type"], "recon");
+        assert!(payload.get("usage").is_none());
+    }
+
+    #[test]
+    fn build_task_result_success_includes_usage_when_present() {
+        let ar = AgentResult {
+            output: "out".into(),
+            error: None,
+            usage: Some(TokenUsage {
+                input_tokens: 12,
+                output_tokens: 34,
+                total_tokens: 46,
+                model: Some("openai/gpt-4.1-mini".into()),
+            }),
+            discoveries: None,
+        };
+        let (tr, status) =
+            build_task_result_for_agent_outcome("t1", "pod-0", "ares-recon", "recon", Ok(ar));
+        assert_eq!(status, "completed");
+        let payload = tr.result.unwrap();
+        assert_eq!(payload["usage"]["input_tokens"], 12);
+        assert_eq!(payload["usage"]["total_tokens"], 46);
+        assert_eq!(payload["usage"]["model"], "openai/gpt-4.1-mini");
+    }
+
+    #[test]
+    fn build_task_result_success_merges_discoveries_into_payload() {
+        let discoveries = serde_json::json!({
+            "hosts": [{"ip": "10.0.0.1"}],
+            "credentials": [{"username": "alice"}],
+        });
+        let ar = AgentResult {
+            output: "scan".into(),
+            error: None,
+            usage: None,
+            discoveries: Some(discoveries.clone()),
+        };
+        let (tr, status) =
+            build_task_result_for_agent_outcome("t1", "pod-0", "ares-recon", "recon", Ok(ar));
+        assert_eq!(status, "completed");
+        let payload = tr.result.unwrap();
+        assert_eq!(payload["hosts"], discoveries["hosts"]);
+        assert_eq!(payload["credentials"], discoveries["credentials"]);
+        assert_eq!(payload["task_type"], "recon");
+    }
+
+    #[test]
+    fn build_task_result_success_ignores_non_object_discoveries() {
+        let ar = AgentResult {
+            output: "scan".into(),
+            error: None,
+            usage: None,
+            discoveries: Some(serde_json::json!([1, 2, 3])),
+        };
+        let (tr, status) =
+            build_task_result_for_agent_outcome("t1", "pod-0", "ares-recon", "recon", Ok(ar));
+        assert_eq!(status, "completed");
+        let payload = tr.result.unwrap();
+        // Top-level keys remain just output + task_type
+        assert!(payload.get("0").is_none());
+        assert_eq!(payload["task_type"], "recon");
+    }
+
+    #[test]
+    fn build_task_result_agent_reported_error_marks_failed_and_keeps_partial_output() {
+        let ar = AgentResult {
+            output: "ran 3 of 5 steps".into(),
+            error: Some("one or more tools had errors".into()),
+            usage: None,
+            discoveries: None,
+        };
+        let (tr, status) =
+            build_task_result_for_agent_outcome("t1", "pod-0", "ares-recon", "recon", Ok(ar));
+        assert_eq!(status, "failed");
+        assert!(!tr.success);
+        assert_eq!(tr.error.as_deref(), Some("one or more tools had errors"));
+        let payload = tr.result.expect("partial output preserved");
+        assert_eq!(payload["output"], "ran 3 of 5 steps");
+        assert_eq!(payload["task_type"], "recon");
+    }
+
+    #[test]
+    fn build_task_result_dispatch_error_marks_failed_with_no_partial_payload() {
+        let err: anyhow::Result<AgentResult> = Err(anyhow::anyhow!("tool spawn failed"));
+        let (tr, status) =
+            build_task_result_for_agent_outcome("t1", "pod-0", "ares-recon", "recon", err);
+        assert_eq!(status, "failed");
+        assert!(!tr.success);
+        assert_eq!(tr.error.as_deref(), Some("tool spawn failed"));
+        // No partial output preserved on dispatch failure
+        assert!(tr.result.is_none());
+        assert_eq!(tr.worker_pod.as_deref(), Some("pod-0"));
+        assert_eq!(tr.agent_name.as_deref(), Some("ares-recon"));
+    }
+
+    #[test]
+    fn build_task_result_passes_through_pod_and_agent_metadata() {
+        let ar = agent_ok("hi");
+        let (tr, _) = build_task_result_for_agent_outcome(
+            "task-42",
+            "pod-xyz",
+            "ares-credential-access",
+            "credential_access",
+            Ok(ar),
+        );
+        assert_eq!(tr.task_id, "task-42");
+        assert_eq!(tr.worker_pod.as_deref(), Some("pod-xyz"));
+        assert_eq!(tr.agent_name.as_deref(), Some("ares-credential-access"));
+        assert!(tr.completed_at.is_some());
+    }
 
     #[tokio::test]
     async fn set_task_status_writes_status_and_timestamps() {

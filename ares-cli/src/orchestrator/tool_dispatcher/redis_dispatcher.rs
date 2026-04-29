@@ -76,6 +76,41 @@ pub(super) fn dispatch_timeout_result(tool_name: &str, timeout: Duration) -> Too
     }
 }
 
+/// Per-call request id for correlating worker replies with outstanding calls.
+pub(super) fn build_call_id(tool_name: &str) -> String {
+    format!("{tool_name}_{}", uuid::Uuid::new_v4().simple())
+}
+
+/// Build the wire request that `dispatch_tool` sends to the worker. Pulled
+/// out so the request shape can be unit-tested without a NATS broker.
+pub(super) fn build_tool_exec_request(
+    call_id: String,
+    task_id: &str,
+    tool_name: &str,
+    arguments: serde_json::Value,
+    traceparent: Option<String>,
+    operation_id: Option<String>,
+) -> ToolExecRequest {
+    ToolExecRequest {
+        call_id,
+        task_id: task_id.to_string(),
+        tool_name: tool_name.to_string(),
+        arguments,
+        traceparent,
+        operation_id,
+    }
+}
+
+/// Convert a deserialized worker reply into the [`ToolExecResult`] returned
+/// to the LLM agent loop.
+pub(super) fn tool_exec_result_from_response(response: ToolExecResponse) -> ToolExecResult {
+    ToolExecResult {
+        output: response.output,
+        error: response.error,
+        discoveries: response.discoveries,
+    }
+}
+
 #[async_trait::async_trait]
 impl ares_llm::ToolDispatcher for RedisToolDispatcher {
     async fn dispatch_tool(
@@ -98,19 +133,19 @@ impl ares_llm::ToolDispatcher for RedisToolDispatcher {
                 self.auth_throttle.acquire(&cred_key).await;
             }
 
-            let call_id = format!("{}_{}", call.name, uuid::Uuid::new_v4().simple());
+            let call_id = build_call_id(&call.name);
 
             // Inject trace context for cross-service span linking
             let traceparent = inject_traceparent(&tracing::Span::current());
 
-            let request = ToolExecRequest {
-                call_id: call_id.clone(),
-                task_id: task_id.to_string(),
-                tool_name: call.name.clone(),
-                arguments: call.arguments.clone(),
+            let request = build_tool_exec_request(
+                call_id.clone(),
+                task_id,
+                &call.name,
+                call.arguments.clone(),
                 traceparent,
-                operation_id: Some(self.operation_id.clone()),
-            };
+                Some(self.operation_id.clone()),
+            );
 
             let subject = nats::tool_exec_subject(effective_role);
             let payload =
@@ -182,11 +217,7 @@ impl ares_llm::ToolDispatcher for RedisToolDispatcher {
                 .await;
             }
 
-            Ok(ToolExecResult {
-                output: response.output,
-                error: response.error,
-                discoveries: response.discoveries,
-            })
+            Ok(tool_exec_result_from_response(response))
         }
         .instrument(span)
         .await

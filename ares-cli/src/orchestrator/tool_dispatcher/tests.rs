@@ -556,3 +556,82 @@ fn dispatch_error_and_timeout_results_share_shape() {
     assert!(e.discoveries.is_none() && t.discoveries.is_none());
     assert!(e.error.is_some() && t.error.is_some());
 }
+
+#[test]
+fn build_call_id_includes_tool_name_prefix() {
+    use redis_dispatcher::build_call_id;
+    let id = build_call_id("nmap_scan");
+    assert!(id.starts_with("nmap_scan_"), "got {id}");
+    // simple uuid is 32 hex chars after the prefix + underscore
+    let suffix = id.strip_prefix("nmap_scan_").unwrap();
+    assert_eq!(suffix.len(), 32);
+    assert!(suffix.chars().all(|c| c.is_ascii_hexdigit()));
+}
+
+#[test]
+fn build_call_id_is_unique_per_invocation() {
+    use redis_dispatcher::build_call_id;
+    let a = build_call_id("hashcat");
+    let b = build_call_id("hashcat");
+    assert_ne!(a, b);
+}
+
+#[test]
+fn build_tool_exec_request_carries_all_inputs() {
+    use redis_dispatcher::build_tool_exec_request;
+    let req = build_tool_exec_request(
+        "nmap_scan_abc".into(),
+        "task-1",
+        "nmap_scan",
+        serde_json::json!({"target": "10.0.0.1"}),
+        Some("00-trace-span-01".into()),
+        Some("op-2026".into()),
+    );
+    assert_eq!(req.call_id, "nmap_scan_abc");
+    assert_eq!(req.task_id, "task-1");
+    assert_eq!(req.tool_name, "nmap_scan");
+    assert_eq!(req.arguments["target"], "10.0.0.1");
+    assert_eq!(req.traceparent.as_deref(), Some("00-trace-span-01"));
+    assert_eq!(req.operation_id.as_deref(), Some("op-2026"));
+}
+
+#[test]
+fn build_tool_exec_request_with_no_traceparent_or_operation() {
+    use redis_dispatcher::build_tool_exec_request;
+    let req = build_tool_exec_request("c".into(), "t", "whoami", serde_json::json!({}), None, None);
+    assert!(req.traceparent.is_none());
+    assert!(req.operation_id.is_none());
+    let json = serde_json::to_string(&req).unwrap();
+    // Optional fields skip when None
+    assert!(!json.contains("traceparent"));
+    assert!(!json.contains("operation_id"));
+}
+
+#[test]
+fn tool_exec_result_from_response_passes_through_all_fields() {
+    use redis_dispatcher::tool_exec_result_from_response;
+    let resp = ToolExecResponse {
+        call_id: "c".into(),
+        output: "out".into(),
+        error: None,
+        discoveries: Some(serde_json::json!({"hosts": [{"ip": "10.0.0.1"}]})),
+    };
+    let r = tool_exec_result_from_response(resp);
+    assert_eq!(r.output, "out");
+    assert!(r.error.is_none());
+    assert_eq!(r.discoveries.unwrap()["hosts"][0]["ip"], "10.0.0.1");
+}
+
+#[test]
+fn tool_exec_result_from_response_preserves_error_string() {
+    use redis_dispatcher::tool_exec_result_from_response;
+    let resp = ToolExecResponse {
+        call_id: "c".into(),
+        output: String::new(),
+        error: Some("connection refused".into()),
+        discoveries: None,
+    };
+    let r = tool_exec_result_from_response(resp);
+    assert_eq!(r.error.as_deref(), Some("connection refused"));
+    assert!(r.discoveries.is_none());
+}
