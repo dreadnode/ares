@@ -164,6 +164,7 @@ async fn main() -> Result<()> {
         retry: RetryConfig::default(),
         context: ContextConfig::default(),
         max_tool_calls_per_name: 10,
+        ..AgentLoopConfig::default()
     };
 
     let outcome = run_agent_loop(

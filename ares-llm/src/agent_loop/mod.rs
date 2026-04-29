@@ -15,12 +15,14 @@ mod config;
 mod context;
 mod retry;
 mod runner;
+mod session_log;
 
 #[cfg(test)]
 mod tests;
 
-pub use config::{AgentLoopConfig, ContextConfig, RetryConfig};
+pub use config::{AgentLoopConfig, BudgetConfig, ContextConfig, RetryConfig, SessionLogConfig};
 pub use runner::{run_agent_loop, HostnameMap};
+pub use session_log::{replay_messages, SessionLog};
 pub use types::{
     AgentLoopOutcome, CallbackHandler, CallbackResult, LoopEndReason, ToolDispatcher,
     ToolExecResult,

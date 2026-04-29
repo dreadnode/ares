@@ -37,8 +37,12 @@ struct ApiRequest {
     model: String,
     max_tokens: u32,
     messages: Vec<ApiMessage>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    system: Option<String>,
+    /// `system` is sent as an array of typed blocks when caching is enabled
+    /// (so we can attach `cache_control` to the trailing block) and as a
+    /// plain string otherwise. We always emit blocks for consistency — the
+    /// API accepts both forms but blocks are required for cache breakpoints.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    system: Vec<ApiSystemBlock>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     tools: Vec<ApiTool>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -77,10 +81,35 @@ enum ApiContentBlock {
 }
 
 #[derive(Serialize)]
+struct ApiSystemBlock {
+    #[serde(rename = "type")]
+    block_type: &'static str,
+    text: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cache_control: Option<ApiCacheControl>,
+}
+
+#[derive(Serialize)]
 struct ApiTool {
     name: String,
     description: String,
     input_schema: serde_json::Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cache_control: Option<ApiCacheControl>,
+}
+
+#[derive(Serialize, Clone, Copy)]
+struct ApiCacheControl {
+    #[serde(rename = "type")]
+    cc_type: &'static str,
+}
+
+impl ApiCacheControl {
+    const fn ephemeral() -> Self {
+        Self {
+            cc_type: "ephemeral",
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -162,13 +191,45 @@ fn convert_message(msg: &ChatMessage) -> ApiMessage {
     }
 }
 
-fn convert_tools(tools: &[super::ToolDefinition]) -> Vec<ApiTool> {
+/// Build the system blocks for the request, attaching a single ephemeral
+/// cache breakpoint to the final block when caching is enabled. The system
+/// prompt is the longest stable prefix in our agent loops, so this is the
+/// highest-leverage cache hit.
+fn build_system_blocks(system: Option<&str>, cache: bool) -> Vec<ApiSystemBlock> {
+    let Some(text) = system else {
+        return Vec::new();
+    };
+    if text.is_empty() {
+        return Vec::new();
+    }
+    vec![ApiSystemBlock {
+        block_type: "text",
+        text: text.to_string(),
+        cache_control: cache.then(ApiCacheControl::ephemeral),
+    }]
+}
+
+/// Convert tool definitions, attaching a cache breakpoint to the *last*
+/// tool when caching is enabled. A breakpoint at the tail of the tools
+/// array caches the entire stable prefix (system + tools); subsequent
+/// requests with the same definitions read from cache.
+fn convert_tools(tools: &[super::ToolDefinition], cache: bool) -> Vec<ApiTool> {
+    let last_idx = tools.len().checked_sub(1);
     tools
         .iter()
-        .map(|t| ApiTool {
-            name: t.name.clone(),
-            description: t.description.clone(),
-            input_schema: t.input_schema.clone(),
+        .enumerate()
+        .map(|(i, t)| {
+            let cc = if cache && Some(i) == last_idx {
+                Some(ApiCacheControl::ephemeral())
+            } else {
+                None
+            };
+            ApiTool {
+                name: t.name.clone(),
+                description: t.description.clone(),
+                input_schema: t.input_schema.clone(),
+                cache_control: cc,
+            }
         })
         .collect()
 }
@@ -197,8 +258,8 @@ impl LlmProvider for AnthropicProvider {
             model: request.model.clone(),
             max_tokens: request.max_tokens,
             messages,
-            system: request.system.clone(),
-            tools: convert_tools(&request.tools),
+            system: build_system_blocks(request.system.as_deref(), request.enable_prompt_cache),
+            tools: convert_tools(&request.tools, request.enable_prompt_cache),
             temperature: request.temperature,
         };
 
@@ -206,6 +267,7 @@ impl LlmProvider for AnthropicProvider {
             model = %request.model,
             msg_count = request.messages.len(),
             tool_count = request.tools.len(),
+            cache = request.enable_prompt_cache,
             "Anthropic API request"
         );
 
@@ -286,6 +348,8 @@ impl LlmProvider for AnthropicProvider {
         debug!(
             input_tokens = usage.input_tokens,
             output_tokens = usage.output_tokens,
+            cache_creation = usage.cache_creation_input_tokens,
+            cache_read = usage.cache_read_input_tokens,
             tool_calls = tool_calls.len(),
             stop = ?stop_reason,
             "Anthropic API response"
@@ -354,7 +418,7 @@ mod tests {
     }
 
     #[test]
-    fn converts_tools() {
+    fn converts_tools_no_cache() {
         let tools = vec![super::super::ToolDefinition {
             name: "nmap_scan".into(),
             description: "Run nmap".into(),
@@ -364,9 +428,55 @@ mod tests {
                 "required": ["target"]
             }),
         }];
-        let api_tools = convert_tools(&tools);
+        let api_tools = convert_tools(&tools, false);
         assert_eq!(api_tools.len(), 1);
         assert_eq!(api_tools[0].name, "nmap_scan");
+        // No cache_control when caching disabled.
+        let json = serde_json::to_value(&api_tools[0]).unwrap();
+        assert!(json.get("cache_control").is_none());
+    }
+
+    #[test]
+    fn converts_tools_cache_breakpoint_on_last() {
+        let tools = vec![
+            super::super::ToolDefinition {
+                name: "tool_a".into(),
+                description: "first".into(),
+                input_schema: serde_json::json!({}),
+            },
+            super::super::ToolDefinition {
+                name: "tool_b".into(),
+                description: "second".into(),
+                input_schema: serde_json::json!({}),
+            },
+        ];
+        let api_tools = convert_tools(&tools, true);
+        let first = serde_json::to_value(&api_tools[0]).unwrap();
+        let last = serde_json::to_value(&api_tools[1]).unwrap();
+        assert!(first.get("cache_control").is_none());
+        assert_eq!(last["cache_control"]["type"], "ephemeral");
+    }
+
+    #[test]
+    fn build_system_blocks_with_cache() {
+        let blocks = build_system_blocks(Some("you are a recon agent"), true);
+        assert_eq!(blocks.len(), 1);
+        let json = serde_json::to_value(&blocks[0]).unwrap();
+        assert_eq!(json["type"], "text");
+        assert_eq!(json["cache_control"]["type"], "ephemeral");
+    }
+
+    #[test]
+    fn build_system_blocks_without_cache() {
+        let blocks = build_system_blocks(Some("hello"), false);
+        let json = serde_json::to_value(&blocks[0]).unwrap();
+        assert!(json.get("cache_control").is_none());
+    }
+
+    #[test]
+    fn build_system_blocks_empty() {
+        assert!(build_system_blocks(None, true).is_empty());
+        assert!(build_system_blocks(Some(""), true).is_empty());
     }
 
     #[test]
@@ -385,7 +495,7 @@ mod tests {
     }
 
     #[test]
-    fn serialize_api_request() {
+    fn serialize_api_request_with_cache() {
         let req = ApiRequest {
             model: "claude-sonnet-4-20250514".to_string(),
             max_tokens: 4096,
@@ -393,13 +503,29 @@ mod tests {
                 role: "user".to_string(),
                 content: ApiContent::Text("hello".to_string()),
             }],
-            system: Some("You are a recon agent.".to_string()),
+            system: build_system_blocks(Some("You are a recon agent."), true),
             tools: vec![],
             temperature: None,
         };
         let json = serde_json::to_value(&req).unwrap();
         assert_eq!(json["model"], "claude-sonnet-4-20250514");
-        assert_eq!(json["system"], "You are a recon agent.");
-        assert!(json.get("tools").is_none()); // empty vec skipped
+        assert!(json["system"].is_array());
+        assert_eq!(json["system"][0]["text"], "You are a recon agent.");
+        assert_eq!(json["system"][0]["cache_control"]["type"], "ephemeral");
+        assert!(json.get("tools").is_none());
+    }
+
+    #[test]
+    fn serialize_api_request_no_cache_no_breakpoints() {
+        let req = ApiRequest {
+            model: "claude-sonnet-4-20250514".to_string(),
+            max_tokens: 4096,
+            messages: vec![],
+            system: build_system_blocks(Some("hi"), false),
+            tools: vec![],
+            temperature: None,
+        };
+        let json = serde_json::to_value(&req).unwrap();
+        assert!(json["system"][0].get("cache_control").is_none());
     }
 }

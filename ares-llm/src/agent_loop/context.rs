@@ -1,4 +1,4 @@
-use tracing::debug;
+use tracing::{debug, info};
 
 use crate::provider::{ChatMessage, ContentPart, Role};
 
@@ -82,40 +82,112 @@ pub(super) fn truncate_tool_output(output: &str, max_chars: usize) -> String {
     )
 }
 
-/// Trim the conversation to fit within the token budget.
+/// Why `maybe_compact` decided to (or not to) trim.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum CompactionDecision {
+    /// Nothing to do; under the proactive threshold (or disabled).
+    Skipped,
+    /// Compacted because the proactive threshold (e.g. 60%) was crossed.
+    Proactive,
+    /// Compacted because the hard ceiling was hit; this is the last-resort path.
+    Reactive,
+}
+
+/// Decide whether to compact and, if so, perform the trim.
 ///
-/// Strategy: keep the first message (task prompt) and the last N messages
-/// (most recent context). Drop messages in the middle, replacing them with
-/// a summary marker.
-///
-/// Tool-call groups (an assistant message with tool_calls followed by its
-/// tool-result messages) are treated as atomic units — we never split them,
-/// since OpenAI rejects orphaned tool_call_ids with a 400 "invalid JSON" error.
+/// Strategy:
+/// 1. Cheap path: if `step % compaction_check_every != 0` AND we are below
+///    the hard ceiling, skip token estimation entirely.
+/// 2. Otherwise estimate the context. If we cross the proactive threshold
+///    (e.g. 60% utilization) we compact early — better than waiting until
+///    the wall and risking a truncated tool-call/result pair.
+/// 3. The hard ceiling check still runs every step regardless of cadence;
+///    a runaway tool output should never escape the trim.
+pub(super) fn maybe_compact(
+    messages: &mut Vec<ChatMessage>,
+    system: &str,
+    tools: &[crate::ToolDefinition],
+    config: &ContextConfig,
+    step: u32,
+) -> CompactionDecision {
+    if config.max_context_tokens == 0 {
+        return CompactionDecision::Skipped;
+    }
+
+    let trigger = config.compaction_trigger_tokens();
+    let on_cadence = step.is_multiple_of(config.compaction_check_every);
+
+    // Cheap fast path: skip estimation entirely when neither the cadence
+    // tick nor the wall would do anything.
+    if !on_cadence && messages.len() < config.min_recent_messages * 4 {
+        return CompactionDecision::Skipped;
+    }
+
+    let total = estimate_context_tokens(system, messages, tools);
+    let over_ceiling = total > config.max_context_tokens;
+    let over_threshold = trigger > 0 && total >= trigger;
+
+    if !(over_ceiling || (on_cadence && over_threshold)) {
+        return CompactionDecision::Skipped;
+    }
+
+    let decision = if over_ceiling {
+        CompactionDecision::Reactive
+    } else {
+        CompactionDecision::Proactive
+    };
+
+    if compact_messages(messages, total, system, tools, config, decision).is_some() {
+        decision
+    } else {
+        CompactionDecision::Skipped
+    }
+}
+
+/// Trim the conversation. Public wrapper retained for the existing tests
+/// and any external callers; equivalent to `maybe_compact` at step 0,
+/// which forces the cadence tick.
+#[allow(dead_code)]
 pub(super) fn trim_conversation(
     messages: &mut Vec<ChatMessage>,
     system: &str,
     tools: &[crate::ToolDefinition],
     config: &ContextConfig,
 ) {
-    if config.max_context_tokens == 0 {
-        return;
-    }
+    // step=cadence ensures the cadence branch fires; the threshold logic
+    // inside still gates on `total > max_context_tokens`-style conditions
+    // when the threshold is at the wall (1.0).
+    let _ = maybe_compact(
+        messages,
+        system,
+        tools,
+        config,
+        config.compaction_check_every,
+    );
+}
 
-    let total = estimate_context_tokens(system, messages, tools);
-    if total <= config.max_context_tokens {
-        return;
-    }
-
+/// Perform the actual compaction. Returns `Some(())` when a trim happened.
+///
+/// Tool-call groups (an assistant message with tool_calls followed by its
+/// tool-result messages) are treated as atomic units — we never split them,
+/// since OpenAI rejects orphaned tool_call_ids with a 400 "invalid JSON" error.
+fn compact_messages(
+    messages: &mut Vec<ChatMessage>,
+    total_before: u32,
+    system: &str,
+    tools: &[crate::ToolDefinition],
+    config: &ContextConfig,
+    decision: CompactionDecision,
+) -> Option<()> {
     let min_keep = config.min_recent_messages;
     if messages.len() <= min_keep + 1 {
-        // Not enough messages to trim
-        return;
+        return None;
     }
 
     // Keep first message + last min_keep messages, drop the middle
     let mut drop_end = messages.len().saturating_sub(min_keep);
     if drop_end <= 1 {
-        return;
+        return None;
     }
 
     // Adjust drop_end so we don't sever tool-call / tool-result pairs.
@@ -125,9 +197,8 @@ pub(super) fn trim_conversation(
         drop_end -= 1;
     }
 
-    // If after adjustment there's nothing left to drop, bail out.
     if drop_end <= 1 {
-        return;
+        return None;
     }
 
     // If the last dropped message (at drop_end - 1) is an assistant message
@@ -140,27 +211,133 @@ pub(super) fn trim_conversation(
     }
 
     if drop_end <= 1 || drop_end >= messages.len() {
-        return;
+        return None;
     }
 
+    // Score the about-to-be-dropped slice and surface a short semantic recap
+    // alongside the count, so the LLM still has a pointer to what it just
+    // worked on. This is the lightweight "semantic scoring" version: we
+    // pick the highest-signal text fragments rather than a separate
+    // summarization LLM call.
+    let recap = semantic_recap(&messages[1..drop_end]);
     let dropped = drop_end - 1;
-    let summary = format!(
-        "[Context trimmed: {dropped} earlier messages removed to stay within token budget. \
-         The conversation continues from the most recent exchanges.]"
-    );
+    let kind = match decision {
+        CompactionDecision::Proactive => "proactive",
+        CompactionDecision::Reactive => "reactive",
+        CompactionDecision::Skipped => "skipped",
+    };
+    let summary = if recap.is_empty() {
+        format!(
+            "[Context compacted ({kind}): {dropped} earlier messages removed to stay within token \
+             budget. The conversation continues from the most recent exchanges.]"
+        )
+    } else {
+        format!(
+            "[Context compacted ({kind}): {dropped} earlier messages removed to stay within token \
+             budget. Salient highlights:\n{recap}\nThe conversation continues from the most recent \
+             exchanges.]"
+        )
+    };
 
-    // Replace middle section with summary
     messages.splice(
         1..drop_end,
         std::iter::once(ChatMessage::text(Role::User, &summary)),
     );
 
-    debug!(
-        dropped = dropped,
-        remaining = messages.len(),
-        estimated_tokens = estimate_context_tokens(system, messages, tools),
-        "Trimmed conversation context"
-    );
+    let total_after = estimate_context_tokens(system, messages, tools);
+    let log_msg = "Compacted conversation context";
+    match decision {
+        CompactionDecision::Proactive => {
+            info!(
+                kind = "proactive",
+                dropped = dropped,
+                remaining = messages.len(),
+                tokens_before = total_before,
+                tokens_after = total_after,
+                log_msg
+            );
+        }
+        CompactionDecision::Reactive | CompactionDecision::Skipped => {
+            debug!(
+                kind = kind,
+                dropped = dropped,
+                remaining = messages.len(),
+                tokens_before = total_before,
+                tokens_after = total_after,
+                log_msg
+            );
+        }
+    }
+
+    Some(())
+}
+
+/// Pick a few high-signal lines from a slice of messages. Heuristic: prefer
+/// the first line of any tool-result (often the most informative summary
+/// line of a scan/dump) and the first sentence of any assistant text. Cap
+/// the recap to avoid re-introducing context bloat.
+fn semantic_recap(slice: &[ChatMessage]) -> String {
+    const MAX_LINES: usize = 6;
+    const MAX_LINE_CHARS: usize = 160;
+    let mut out: Vec<String> = Vec::with_capacity(MAX_LINES);
+
+    for msg in slice {
+        if out.len() >= MAX_LINES {
+            break;
+        }
+        if let Some(parts) = &msg.parts {
+            for part in parts {
+                if out.len() >= MAX_LINES {
+                    break;
+                }
+                match part {
+                    ContentPart::ToolResult { content, .. } => {
+                        if let Some(line) = first_signal_line(content) {
+                            out.push(format!("- tool: {}", clip(&line, MAX_LINE_CHARS)));
+                        }
+                    }
+                    ContentPart::Text { text } => {
+                        if let Some(line) = first_signal_line(text) {
+                            out.push(format!("- llm: {}", clip(&line, MAX_LINE_CHARS)));
+                        }
+                    }
+                    ContentPart::ToolUse { name, .. } => {
+                        out.push(format!("- call: {name}"));
+                    }
+                }
+            }
+        } else if let Some(content) = &msg.content {
+            if let Some(line) = first_signal_line(content) {
+                let role = match msg.role {
+                    Role::User => "user",
+                    Role::Assistant => "llm",
+                    _ => "msg",
+                };
+                out.push(format!("- {role}: {}", clip(&line, MAX_LINE_CHARS)));
+            }
+        }
+    }
+
+    out.join("\n")
+}
+
+fn first_signal_line(text: &str) -> Option<String> {
+    text.lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty() && !l.starts_with('#') && !l.starts_with("```"))
+        .map(|s| s.to_string())
+}
+
+fn clip(s: &str, max_chars: usize) -> String {
+    if s.chars().count() <= max_chars {
+        return s.to_string();
+    }
+    let cut = s
+        .char_indices()
+        .nth(max_chars)
+        .map(|(i, _)| i)
+        .unwrap_or(s.len());
+    format!("{}…", &s[..cut])
 }
 
 /// Check if a message is a tool result (role=Tool or User with ToolResult parts).
@@ -333,6 +510,8 @@ mod tests {
     fn trim_conversation_no_limit() {
         let config = ContextConfig {
             max_context_tokens: 0,
+            compaction_threshold_ratio: 0.6,
+            compaction_check_every: 1,
             max_tool_output_chars: 30_000,
             min_recent_messages: 10,
         };
@@ -348,6 +527,8 @@ mod tests {
     fn trim_conversation_under_budget_unchanged() {
         let config = ContextConfig {
             max_context_tokens: 100_000,
+            compaction_threshold_ratio: 0.6,
+            compaction_check_every: 1,
             max_tool_output_chars: 30_000,
             min_recent_messages: 2,
         };
@@ -357,5 +538,83 @@ mod tests {
         ];
         trim_conversation(&mut msgs, "sys", &[], &config);
         assert_eq!(msgs.len(), 2);
+    }
+
+    #[test]
+    fn maybe_compact_proactive_at_60_percent() {
+        let config = ContextConfig {
+            max_context_tokens: 1000,
+            compaction_threshold_ratio: 0.6,
+            compaction_check_every: 1,
+            max_tool_output_chars: 0,
+            min_recent_messages: 2,
+        };
+        let mut messages: Vec<ChatMessage> = Vec::new();
+        messages.push(ChatMessage::text(Role::User, "task prompt"));
+        // Each message ~ 250 chars -> ~ 62 tokens. Add enough to cross 600 tokens.
+        for i in 0..15 {
+            messages.push(ChatMessage::text(
+                Role::Assistant,
+                format!("step {i} {}", "x".repeat(240)),
+            ));
+        }
+        let decision = maybe_compact(&mut messages, "sys", &[], &config, 1);
+        assert_eq!(decision, CompactionDecision::Proactive);
+        assert!(messages.len() < 16);
+        assert!(messages[1]
+            .text_content()
+            .unwrap()
+            .contains("Context compacted"));
+    }
+
+    #[test]
+    fn maybe_compact_reactive_when_over_ceiling() {
+        let config = ContextConfig {
+            max_context_tokens: 200,
+            compaction_threshold_ratio: 1.0, // disable proactive
+            compaction_check_every: 100,     // off-cadence
+            max_tool_output_chars: 0,
+            min_recent_messages: 2,
+        };
+        let mut messages: Vec<ChatMessage> = Vec::new();
+        messages.push(ChatMessage::text(Role::User, "task"));
+        for i in 0..10 {
+            messages.push(ChatMessage::text(
+                Role::Assistant,
+                format!("step {i} {}", "x".repeat(200)),
+            ));
+        }
+        // Off-cadence step=1, but the hard ceiling must still trip.
+        let decision = maybe_compact(&mut messages, "sys", &[], &config, 1);
+        assert_eq!(decision, CompactionDecision::Reactive);
+    }
+
+    #[test]
+    fn maybe_compact_skips_when_under_threshold() {
+        let config = ContextConfig {
+            max_context_tokens: 1_000_000,
+            compaction_threshold_ratio: 0.6,
+            compaction_check_every: 1,
+            max_tool_output_chars: 0,
+            min_recent_messages: 4,
+        };
+        let mut messages = vec![
+            ChatMessage::text(Role::User, "first"),
+            ChatMessage::text(Role::Assistant, "second"),
+        ];
+        let decision = maybe_compact(&mut messages, "sys", &[], &config, 1);
+        assert_eq!(decision, CompactionDecision::Skipped);
+        assert_eq!(messages.len(), 2);
+    }
+
+    #[test]
+    fn semantic_recap_picks_first_signal_lines() {
+        let messages = vec![
+            ChatMessage::text(Role::Assistant, "I'll start by scanning.\nDetails follow."),
+            ChatMessage::tool_result("c1", "Host 192.168.58.10 is up.\n22/tcp open ssh"),
+        ];
+        let recap = semantic_recap(&messages);
+        assert!(recap.contains("scanning"));
+        assert!(recap.contains("192.168.58.10"));
     }
 }

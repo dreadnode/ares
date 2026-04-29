@@ -145,6 +145,9 @@ impl BlueCallbackHandler {
                 format!("Sub-agent hit max steps ({} steps)", outcome.steps)
             }
             ares_llm::LoopEndReason::MaxTokens => "Sub-agent hit max tokens".to_string(),
+            ares_llm::LoopEndReason::BudgetExceeded { reason } => {
+                format!("Sub-agent budget exceeded: {reason}")
+            }
             ares_llm::LoopEndReason::Error(e) => format!("Sub-agent error: {e}"),
         };
 
