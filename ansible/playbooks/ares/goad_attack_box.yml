@@ -88,6 +88,30 @@
     privesc_tools_install_runascs: true
     privesc_tools_install_powerupsql: true
 
+  pre_tasks:
+    # Disable Transparent Huge Pages. Default Kali setting (`always`) caused
+    # khugepaged to lock up under heavy fork/exec from impacket/nxc workloads,
+    # producing RCU stalls and unrecoverable instance freezes that took SSM
+    # down with them. Bake the kernel cmdline into the AMI and turn it off
+    # for the rest of this run so the build itself isn't at risk.
+    - name: Disable THP via kernel cmdline (persists across reboot)
+      ansible.builtin.lineinfile:
+        path: /etc/default/grub
+        regexp: '^GRUB_CMDLINE_LINUX_DEFAULT='
+        line: 'GRUB_CMDLINE_LINUX_DEFAULT="quiet transparent_hugepage=never"'
+      notify: Update grub
+
+    - name: Disable THP at runtime so the bake itself is safe
+      ansible.builtin.shell: |
+        echo never > /sys/kernel/mm/transparent_hugepage/enabled
+        echo never > /sys/kernel/mm/transparent_hugepage/defrag
+      changed_when: false
+
+  handlers:
+    - name: Update grub
+      ansible.builtin.command: update-grub
+      changed_when: true
+
   roles:
     # AWS infrastructure agents
     - role: dreadnode.nimbus_range.aws_ssm_agent
