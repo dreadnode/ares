@@ -2,6 +2,7 @@
 
 use bytes::Bytes;
 use chrono::Utc;
+use redis::aio::ConnectionLike;
 use redis::AsyncCommands;
 use tracing::{debug, error, info, warn};
 
@@ -185,12 +186,15 @@ pub async fn process_task(
 }
 
 /// Set task status in Redis with TTL.
-async fn set_task_status(
-    conn: &mut redis::aio::ConnectionManager,
+async fn set_task_status<C>(
+    conn: &mut C,
     task_id: &str,
     status: &str,
     extra_fields: &serde_json::Value,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<()>
+where
+    C: ConnectionLike + Send + Sync,
+{
     let key = format!("{TASK_STATUS_PREFIX}:{task_id}");
     let mut data = extra_fields.clone();
     if let Some(obj) = data.as_object_mut() {
@@ -207,4 +211,64 @@ async fn set_task_status(
     conn.set_ex::<_, _, ()>(&key, &json_str, task_status_ttl() as u64)
         .await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ares_core::state::mock_redis::MockRedisConnection;
+
+    #[tokio::test]
+    async fn set_task_status_writes_status_and_timestamps() {
+        let mut conn = MockRedisConnection::new();
+        let extra = serde_json::json!({
+            "operation_id": "op-1",
+            "role": "recon",
+            "agent_name": "agent-0",
+        });
+        set_task_status(&mut conn, "task-123", "running", &extra)
+            .await
+            .unwrap();
+
+        let raw: Option<String> = conn.get("ares:task_status:task-123").await.unwrap();
+        let raw = raw.expect("status written");
+        let v: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(v["status"], "running");
+        assert_eq!(v["operation_id"], "op-1");
+        assert_eq!(v["role"], "recon");
+        assert!(v["updated_at"].is_string());
+    }
+
+    #[tokio::test]
+    async fn set_task_status_overwrites_status_field_in_extra() {
+        let mut conn = MockRedisConnection::new();
+        // If extra has a "status" key, set_task_status overrides it
+        let extra = serde_json::json!({
+            "status": "pending",
+            "task_type": "recon",
+        });
+        set_task_status(&mut conn, "t-1", "completed", &extra)
+            .await
+            .unwrap();
+
+        let raw: Option<String> = conn.get("ares:task_status:t-1").await.unwrap();
+        let v: serde_json::Value = serde_json::from_str(&raw.unwrap()).unwrap();
+        assert_eq!(v["status"], "completed");
+        assert_eq!(v["task_type"], "recon");
+    }
+
+    #[tokio::test]
+    async fn set_task_status_handles_non_object_extra() {
+        let mut conn = MockRedisConnection::new();
+        // If extra isn't an object, status/updated_at can't be merged but
+        // we should not panic — the value is serialized as-is.
+        let extra = serde_json::json!("not-an-object");
+        set_task_status(&mut conn, "t-2", "running", &extra)
+            .await
+            .unwrap();
+
+        let raw: Option<String> = conn.get("ares:task_status:t-2").await.unwrap();
+        // Stored as the raw string, no merge happened
+        assert_eq!(raw.as_deref(), Some("\"not-an-object\""));
+    }
 }

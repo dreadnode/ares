@@ -19,7 +19,7 @@ use anyhow::{Context, Result};
 use bytes::Bytes;
 use chrono::Utc;
 use futures::StreamExt;
-use redis::aio::ConnectionManagerConfig;
+use redis::aio::{ConnectionLike, ConnectionManager, ConnectionManagerConfig};
 use redis::AsyncCommands;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
@@ -86,10 +86,16 @@ impl BlueTaskResult {
 }
 
 /// Blue team task queue — NATS for queues, Redis for state.
-pub struct BlueTaskQueue {
-    conn: redis::aio::ConnectionManager,
+///
+/// Generic over the Redis backend so unit tests can use a mock; `nats` is
+/// `None` in tests that don't exercise queue methods.
+pub struct BlueTaskQueueCore<C> {
+    conn: C,
     nats: Option<NatsBroker>,
 }
+
+/// Production blue team task queue.
+pub type BlueTaskQueue = BlueTaskQueueCore<ConnectionManager>;
 
 impl BlueTaskQueue {
     /// Connect to Redis only (state methods work, queue methods will error).
@@ -111,19 +117,27 @@ impl BlueTaskQueue {
         Ok(q)
     }
 
-    pub fn from_conn(conn: redis::aio::ConnectionManager) -> Self {
+    pub fn from_conn(conn: ConnectionManager) -> Self {
         Self { conn, nats: None }
     }
 
-    pub fn from_parts(conn: redis::aio::ConnectionManager, nats: NatsBroker) -> Self {
+    pub fn from_parts(conn: ConnectionManager, nats: NatsBroker) -> Self {
         Self {
             conn,
             nats: Some(nats),
         }
     }
 
-    pub fn conn_mut(&mut self) -> &mut redis::aio::ConnectionManager {
+    pub fn conn_mut(&mut self) -> &mut ConnectionManager {
         &mut self.conn
+    }
+}
+
+impl<C: ConnectionLike + Clone + Send + Sync + 'static> BlueTaskQueueCore<C> {
+    /// Construct from a Redis backend only — used by unit tests that don't
+    /// exercise queue methods. Queue methods will return an error.
+    pub fn from_connection(conn: C) -> Self {
+        Self { conn, nats: None }
     }
 
     fn nats(&self) -> Result<&NatsBroker> {
@@ -458,6 +472,11 @@ impl BlueTaskQueue {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::state::mock_redis::MockRedisConnection;
+
+    fn mock_queue() -> BlueTaskQueueCore<MockRedisConnection> {
+        BlueTaskQueueCore::from_connection(MockRedisConnection::new())
+    }
 
     #[test]
     fn success_sets_success_true_and_stores_result() {
@@ -496,5 +515,202 @@ mod tests {
         assert!(!failure.completed_at.is_empty());
         assert!(chrono::DateTime::parse_from_rfc3339(&success.completed_at).is_ok());
         assert!(chrono::DateTime::parse_from_rfc3339(&failure.completed_at).is_ok());
+    }
+
+    #[test]
+    fn blue_task_message_serialization_roundtrip() {
+        let msg = BlueTaskMessage {
+            task_id: "btask-1".into(),
+            investigation_id: "inv-1".into(),
+            task_type: "log_search".into(),
+            role: "triage".into(),
+            params: serde_json::json!({"query": "alertname=Foo"}),
+            created_at: "2026-04-29T20:00:00Z".into(),
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        let parsed: BlueTaskMessage = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.task_id, "btask-1");
+        assert_eq!(parsed.investigation_id, "inv-1");
+        assert_eq!(parsed.role, "triage");
+        assert_eq!(parsed.params["query"], "alertname=Foo");
+    }
+
+    #[test]
+    fn blue_task_result_skips_none_fields_in_serialization() {
+        let r = BlueTaskResult::success("t", "i", serde_json::json!({"ok": true}), "a");
+        let json = serde_json::to_string(&r).unwrap();
+        // error is None and has skip_serializing_if
+        assert!(!json.contains("\"error\""));
+    }
+
+    #[test]
+    fn blue_task_result_failure_omits_result_field() {
+        let r = BlueTaskResult::failure("t", "i", "boom".into(), "a");
+        let json = serde_json::to_string(&r).unwrap();
+        assert!(!json.contains("\"result\""));
+        assert!(json.contains("\"error\""));
+    }
+
+    #[tokio::test]
+    async fn send_heartbeat_roundtrip() {
+        let mut q = mock_queue();
+        q.send_heartbeat("blue-agent-1", "idle", None, "triage", None)
+            .await
+            .unwrap();
+
+        let hb = q
+            .get_heartbeat("blue-agent-1")
+            .await
+            .unwrap()
+            .expect("heartbeat present");
+        assert_eq!(hb["status"], "idle");
+        assert_eq!(hb["role"], "triage");
+        assert!(hb["current_task"].is_null());
+        assert!(hb["timestamp"].is_string());
+    }
+
+    #[tokio::test]
+    async fn send_heartbeat_with_current_task_and_investigation() {
+        let mut q = mock_queue();
+        q.send_heartbeat(
+            "blue-agent-2",
+            "busy",
+            Some("btask-9"),
+            "log_analyst",
+            Some("inv-42"),
+        )
+        .await
+        .unwrap();
+
+        let hb = q.get_heartbeat("blue-agent-2").await.unwrap().unwrap();
+        assert_eq!(hb["status"], "busy");
+        assert_eq!(hb["current_task"], "btask-9");
+        assert_eq!(hb["investigation_id"], "inv-42");
+    }
+
+    #[tokio::test]
+    async fn get_heartbeat_returns_none_when_missing() {
+        let mut q = mock_queue();
+        assert!(q.get_heartbeat("ghost").await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn register_investigation_then_discover() {
+        let mut q = mock_queue();
+        let alert = serde_json::json!({"alertname": "SuspiciousLogon"});
+        q.register_investigation("inv-100", &alert, "openai/gpt-4.1-mini")
+            .await
+            .unwrap();
+
+        let active = q.discover_active_investigation().await.unwrap();
+        assert_eq!(active.as_deref(), Some("inv-100"));
+    }
+
+    #[tokio::test]
+    async fn discover_active_investigation_returns_none_when_empty() {
+        let mut q = mock_queue();
+        assert!(q.discover_active_investigation().await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn get_investigation_alert_returns_registered_alert() {
+        let mut q = mock_queue();
+        let alert = serde_json::json!({
+            "alertname": "FailedLogons",
+            "severity": "high",
+        });
+        q.register_investigation("inv-200", &alert, "openai/gpt-4.1-mini")
+            .await
+            .unwrap();
+
+        let stored = q.get_investigation_alert("inv-200").await.unwrap().unwrap();
+        assert_eq!(stored["alertname"], "FailedLogons");
+        assert_eq!(stored["severity"], "high");
+    }
+
+    #[tokio::test]
+    async fn get_investigation_alert_returns_none_for_unknown_id() {
+        let mut q = mock_queue();
+        assert!(q
+            .get_investigation_alert("nonexistent")
+            .await
+            .unwrap()
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn get_investigation_model_returns_registered_model() {
+        let mut q = mock_queue();
+        q.register_investigation(
+            "inv-300",
+            &serde_json::json!({}),
+            "anthropic/claude-sonnet-4-5",
+        )
+        .await
+        .unwrap();
+
+        let model = q.get_investigation_model("inv-300").await.unwrap();
+        assert_eq!(model.as_deref(), Some("anthropic/claude-sonnet-4-5"));
+    }
+
+    #[tokio::test]
+    async fn get_investigation_model_returns_none_for_unknown_id() {
+        let mut q = mock_queue();
+        assert!(q
+            .get_investigation_model("nonexistent")
+            .await
+            .unwrap()
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn submit_task_errors_when_no_nats_configured() {
+        let mut q = mock_queue();
+        let task = BlueTaskMessage {
+            task_id: "t".into(),
+            investigation_id: "i".into(),
+            task_type: "log_search".into(),
+            role: "triage".into(),
+            params: serde_json::json!({}),
+            created_at: "2026-04-29T00:00:00Z".into(),
+        };
+        let err = q.submit_task(&task).await.unwrap_err();
+        assert!(err.to_string().contains("NATS"));
+    }
+
+    #[tokio::test]
+    async fn poll_global_task_errors_when_no_nats_configured() {
+        let mut q = mock_queue();
+        let err = q.poll_global_task("triage", 1.0).await.unwrap_err();
+        assert!(err.to_string().contains("NATS"));
+    }
+
+    #[tokio::test]
+    async fn send_result_errors_when_no_nats_configured() {
+        let mut q = mock_queue();
+        let r = BlueTaskResult::success("t", "i", serde_json::Value::Null, "a");
+        let err = q.send_result(&r).await.unwrap_err();
+        assert!(err.to_string().contains("NATS"));
+    }
+
+    #[tokio::test]
+    async fn check_result_errors_when_no_nats_configured() {
+        let mut q = mock_queue();
+        let err = q.check_result("t").await.unwrap_err();
+        assert!(err.to_string().contains("NATS"));
+    }
+
+    #[tokio::test]
+    async fn pop_investigation_request_errors_when_no_nats_configured() {
+        let mut q = mock_queue();
+        let err = q.pop_investigation_request(1.0).await.unwrap_err();
+        assert!(err.to_string().contains("NATS"));
+    }
+
+    #[tokio::test]
+    async fn queue_length_errors_when_no_nats_configured() {
+        let mut q = mock_queue();
+        let err = q.queue_length("triage").await.unwrap_err();
+        assert!(err.to_string().contains("NATS"));
     }
 }

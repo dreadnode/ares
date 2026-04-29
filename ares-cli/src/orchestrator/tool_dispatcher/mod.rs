@@ -10,12 +10,13 @@
 //! Also provides [`LocalToolDispatcher`] for in-process execution without
 //! going through NATS, useful for testing or single-binary deployments.
 
+use redis::aio::ConnectionLike;
 use redis::AsyncCommands;
 use serde::{Deserialize, Serialize};
 use tracing::debug;
 
 use crate::orchestrator::state::DISCOVERY_KEY_PREFIX;
-use crate::orchestrator::task_queue::TaskQueue;
+use crate::orchestrator::task_queue::TaskQueueCore;
 
 mod auth_throttle;
 mod local;
@@ -144,13 +145,15 @@ pub(super) fn resolve_queue_role<'a>(role: &'a str, tool_name: &str) -> &'a str 
 ///
 /// `tool_args` carries the tool call's input arguments — used to extract
 /// the authenticating credential (username/domain) for lineage tracking.
-pub(super) async fn push_realtime_discoveries(
-    queue: &TaskQueue,
+pub(super) async fn push_realtime_discoveries<C>(
+    queue: &TaskQueueCore<C>,
     operation_id: &str,
     discoveries: &serde_json::Value,
     tool_name: &str,
     tool_args: &serde_json::Value,
-) {
+) where
+    C: ConnectionLike + Clone + Send + Sync + 'static,
+{
     let discovery_key = format!("{DISCOVERY_KEY_PREFIX}:{operation_id}");
     let mut conn = queue.connection();
 
