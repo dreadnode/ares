@@ -16,6 +16,7 @@ pub mod detection;
 #[cfg(feature = "blue")]
 pub mod eval;
 pub mod models;
+pub mod nats;
 pub mod parsing;
 pub mod persistent_store;
 pub mod reports;

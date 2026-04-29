@@ -5,6 +5,14 @@ echo "=== Redis ==="
 redis-cli ping 2>/dev/null && redis-cli info server 2>/dev/null | grep -E "redis_version|uptime_in_seconds|connected_clients" || echo "Redis not running"
 echo ""
 
+echo "=== NATS ==="
+if curl -fsS http://127.0.0.1:8222/varz 2>/dev/null | grep -E '"version"|"now"|"connections"' | head -3; then
+	curl -fsS http://127.0.0.1:8222/jsz 2>/dev/null | grep -E '"streams"|"messages"|"bytes"' | head -3 || true
+else
+	echo "NATS not running"
+fi
+echo ""
+
 echo "=== Workers ==="
 for role in recon credential_access cracker acl privesc lateral coercion; do
 	st=$(systemctl is-active ares@${role} 2>/dev/null || echo dead)

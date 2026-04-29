@@ -34,7 +34,7 @@ The investigation orchestrator manages the full investigation lifecycle:
 - Chains follow-up investigations based on discovered evidence types
 - Enforces hard timeout watchdog (1 min/step + 2 min buffer)
 - Generates partial reports on timeout
-- Handles investigation state persistence via Redis
+- Handles investigation state persistence via Redis (task queues run on NATS JetStream)
 
 #### Blue Worker Task Loop
 

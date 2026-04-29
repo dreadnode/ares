@@ -36,6 +36,7 @@ pub struct BlueOrchestrator {
     model_name: String,
     dispatcher: Arc<dyn ToolDispatcher>,
     redis_url: String,
+    nats_url: String,
 }
 
 impl BlueOrchestrator {
@@ -44,12 +45,14 @@ impl BlueOrchestrator {
         model_name: String,
         dispatcher: Arc<dyn ToolDispatcher>,
         redis_url: String,
+        nats_url: String,
     ) -> Self {
         Self {
             provider: Arc::from(provider),
             model_name,
             dispatcher,
             redis_url,
+            nats_url,
         }
     }
 
@@ -169,9 +172,9 @@ impl BlueOrchestrator {
         // Clean up stale investigations from previous runs
         self.cleanup_stale_investigations().await;
 
-        let mut task_queue = BlueTaskQueue::connect(&self.redis_url)
+        let mut task_queue = BlueTaskQueue::connect_with_nats(&self.redis_url, &self.nats_url)
             .await
-            .context("Failed to connect blue task queue to Redis")?;
+            .context("Failed to connect blue task queue (Redis + NATS)")?;
 
         let mut retry_delay = Duration::from_secs(1);
         let max_retry_delay = Duration::from_secs(30);
@@ -362,10 +365,12 @@ impl BlueOrchestrator {
 
                         // Reconnect the task queue — the previous ConnectionManager
                         // can be stuck after Redis restarts or prolonged outages.
-                        match BlueTaskQueue::connect(&self.redis_url).await {
+                        match BlueTaskQueue::connect_with_nats(&self.redis_url, &self.nats_url)
+                            .await
+                        {
                             Ok(new_queue) => {
                                 task_queue = new_queue;
-                                info!("Blue orchestrator: reconnected to Redis");
+                                info!("Blue orchestrator: reconnected to Redis + NATS");
                             }
                             Err(reconnect_err) => {
                                 warn!("Blue orchestrator: reconnect failed: {reconnect_err}");
@@ -392,10 +397,12 @@ pub fn spawn_blue_orchestrator(
     model_name: String,
     dispatcher: Arc<dyn ToolDispatcher>,
     redis_url: String,
+    nats_url: String,
     shutdown_rx: watch::Receiver<bool>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        let orchestrator = BlueOrchestrator::new(provider, model_name, dispatcher, redis_url);
+        let orchestrator =
+            BlueOrchestrator::new(provider, model_name, dispatcher, redis_url, nats_url);
         if let Err(e) = orchestrator.run(shutdown_rx).await {
             error!("Blue orchestrator exited with error: {e}");
         }

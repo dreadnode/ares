@@ -262,6 +262,7 @@ mod tests {
     fn make_throttler(max_tasks: usize) -> (Throttler, ActiveTaskTracker) {
         let config = Arc::new(crate::orchestrator::config::OrchestratorConfig {
             redis_url: "redis://localhost".into(),
+            nats_url: "nats://localhost:4222".into(),
             operation_id: "test-op".into(),
             max_concurrent_tasks: max_tasks,
             heartbeat_interval: std::time::Duration::from_secs(30),

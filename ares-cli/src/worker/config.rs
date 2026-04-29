@@ -33,6 +33,9 @@ pub struct WorkerConfig {
     /// Redis connection URL (ARES_REDIS_URL).
     pub redis_url: String,
 
+    /// NATS connection URL (ARES_NATS_URL).
+    pub nats_url: String,
+
     /// Worker role matching `AgentRole` values: credential_access, cracker, lateral, acl, privesc, coercion.
     pub worker_role: String,
 
@@ -97,6 +100,8 @@ impl WorkerConfig {
                 anyhow::anyhow!("Redis URL required: set ARES_REDIS_URL, REDIS_URL, or REDIS_HOST")
             })?;
 
+        let nats_url = ares_core::nats::NatsBroker::url_from_env();
+
         let worker_role = env::var("ARES_WORKER_ROLE")
             .or_else(|_| env::var("ARES_ROLE"))
             .map_err(|_| anyhow::anyhow!("ARES_WORKER_ROLE (or ARES_ROLE) is required"))?;
@@ -146,6 +151,7 @@ impl WorkerConfig {
 
         Ok(Self {
             redis_url,
+            nats_url,
             worker_role,
             pod_name,
             agent_name,

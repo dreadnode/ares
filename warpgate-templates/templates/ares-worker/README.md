@@ -1,9 +1,10 @@
 # Ares Worker Warp Gate Template
 
 This template builds **Ares Worker** images using Warp Gate. It supports
-building **Docker images** (for `amd64` and `arm64`). The worker agent polls
-Redis for tasks and orchestrates tool execution across the Ares framework,
-using a compiled Rust binary with embedded Python for LLM agent steps.
+building **Docker images** (for `amd64` and `arm64`). The worker agent pulls
+tasks from NATS JetStream, reads/writes shared state in Redis, and orchestrates
+tool execution across the Ares framework, using a compiled Rust binary with
+embedded Python for LLM agent steps.
 
 ---
 
@@ -81,9 +82,10 @@ After building the image, you can test it locally:
 **Run the worker container interactively:**
 
 ```bash
-# Run with Redis connection for testing
+# Run with Redis + NATS connections for testing
 docker run -it --rm \
   -e REDIS_URL="redis://localhost:6379" \
+  -e NATS_URL="nats://localhost:4222" \
   -e ANTHROPIC_API_KEY="your-api-key" \
   ares-worker:latest
 ```
@@ -94,16 +96,20 @@ docker run -it --rm \
 # Check the Rust binary is available
 docker run --rm ares-worker:latest ares worker --version```
 
-**Test with local Redis:**
+**Test with local Redis and NATS:**
 
 ```bash
 # Start Redis in Docker
 docker run -d --name redis -p 6379:6379 redis:7-alpine
 
-# Run the worker connected to local Redis
+# Start NATS with JetStream enabled
+docker run -d --name nats -p 4222:4222 nats:2.10-alpine -js
+
+# Run the worker connected to local services
 docker run -it --rm \
   --network host \
   -e REDIS_URL="redis://localhost:6379" \
+  -e NATS_URL="nats://localhost:4222" \
   -e ANTHROPIC_API_KEY="your-api-key" \
   ares-worker:latest
 ```
@@ -145,7 +151,8 @@ warpgate validate ares-worker
 - **Directory Structure:**
   - `/root/` - Default working directory
   - `/usr/local/bin/ares` - Compiled Ares binary  - Python packages installed system-wide
-- The worker requires Redis and an Anthropic API key to function.
+- The worker requires Redis (state), NATS JetStream (broker), and an
+  Anthropic API key to function.
 
 ---
 

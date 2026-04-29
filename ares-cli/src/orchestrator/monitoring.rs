@@ -116,7 +116,7 @@ pub fn spawn_lock_keeper(
         // Create a dedicated Redis connection for the lock keeper so that
         // EXPIRE commands are not queued behind heavy BRPOP/LPUSH traffic
         // on the shared connection manager.
-        let dedicated_queue = match TaskQueue::connect(&config.redis_url).await {
+        let dedicated_queue = match TaskQueue::connect(&config.redis_url, &config.nats_url).await {
             Ok(q) => {
                 info!("Lock keeper using dedicated Redis connection");
                 q

@@ -25,7 +25,7 @@ installed.
 │  - Operation completion decision                                        │
 │  - Does NOT execute exploitation tools directly                         │
 └──────────────────────────────┬─────────────────────────────────────────┘
-                               │ Redis pub/sub + task queues
+                               │ NATS JetStream tasks + Redis state
        ┌───────────────────────┼─────────────┬─────────────┬─────────────┬─────────────┐
        ▼             ▼         ▼             ▼             ▼             ▼             ▼
 ┌───────────┐ ┌───────────┐ ┌───────────┐ ┌───────────┐ ┌───────────┐ ┌───────────┐ ┌───────────┐
@@ -60,11 +60,15 @@ Each worker agent has:
 - No knowledge of other workers' activities (except via shared state)
 - Responsibility to report results back to the orchestrator
 
-### 3. Shared State via Redis
+### 3. Shared State via Redis, Tasks via NATS
 
-All agents share state through Redis:
+Ares splits transport from state:
 
-- Discovered credentials are automatically broadcast
+- **NATS JetStream** carries task dispatch and tool RPC between orchestrator
+  and workers (durable work queues, pull consumers, explicit acks)
+- **Redis** holds durable shared state: credentials, hashes, hosts,
+  vulnerabilities, locks, heartbeats, and operation metadata
+- Discovered credentials are automatically broadcast via Redis state updates
 - Hashes are tracked for cracking status
 - Hosts and vulnerabilities are cataloged
 - Task status is visible to all agents
@@ -446,7 +450,7 @@ coverage.
 
 Regardless of mode, conditions are checked in this order:
 
-1. External stop signal (CLI `stop` command or Redis flag)
+1. External stop signal (CLI `stop` command or Redis stop flag)
 2. Max runtime exceeded (`timeouts.operation_timeout`)
 3. Mode-specific DA/GT/forest check (described above)
 
@@ -532,6 +536,22 @@ INFO | Operation phase transition: enumeration → privilege_escalation
 
 ## State Management
 
+### Broker vs. State Split
+
+Ares uses two backends with distinct roles:
+
+- **NATS JetStream** — broker/transport for queues and RPC. Carries task
+  dispatch (`ares.red.tasks.{role}`, `ares.blue.tasks.{role}`), tool result
+  streams (`ares.{red,blue}.tasks.results.{task_id}`), and investigation
+  requests. Work-queue retention auto-deletes acked messages.
+- **Redis** — durable, queryable state. Holds operation state, credentials,
+  hosts, hashes, vulnerabilities, heartbeats, locks, task status, and the
+  per-orchestrator deferred priority queue.
+
+Workers connect to both. The orchestrator owns one shared `NatsBroker` and
+threads it through dispatcher, completion checks, and the embedded blue
+auto-submit task.
+
 ### Pattern: Write-Through Cache
 
 Redis is the **durable store**. In-memory dicts are **write-through caches**.
@@ -573,8 +593,8 @@ SharedRedTeamState:
 
 When any agent discovers a credential:
 
-1. Credential is added to shared state
-2. Redis pub/sub broadcasts to all agents
+1. Credential is added to shared state (Redis)
+2. Other agents observe it on their next state read
 3. All agents can use the credential immediately
 
 ## Task Flow Example
@@ -703,7 +723,8 @@ kubectl -n attack-simulation exec -it ares-recon-agent-0 -- \
 - `ares-cli/src/orchestrator/state/` - Operation state management
 - `ares-cli/src/orchestrator/config.rs` - Orchestrator configuration
 - `ares-cli/src/worker/` - Worker agent task loop, tool execution
-- `ares-core/src/` - Shared models, state, Redis schema, telemetry
+- `ares-core/src/` - Shared models, state, Redis/NATS schemas, telemetry
+- `ares-core/src/nats/` - NATS JetStream broker, stream/subject taxonomy
 
 **CLI**:
 

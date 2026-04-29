@@ -7,6 +7,9 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["full"] }
 redis = { version = "1.0", features = ["tokio-comp", "connection-manager"] }
+async-nats = "0.47"
+futures = "0.3"
+bytes = "1"
 chrono = { version = "0.4", features = ["serde"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }

@@ -17,6 +17,7 @@ use std::time::Duration;
 use anyhow::Result;
 use tracing::{debug, error, info, warn};
 
+use ares_core::nats::NatsBroker;
 use ares_core::state::blue_task_queue::{BlueTaskMessage, BlueTaskQueue, BlueTaskResult};
 use ares_llm::tool_registry::blue::{self, BlueAgentRole};
 use ares_llm::{run_agent_loop, AgentLoopConfig, LlmProvider, LoopEndReason, ToolDispatcher};
@@ -25,9 +26,11 @@ use crate::worker::config::WorkerConfig;
 use crate::worker::heartbeat::WorkerStatus;
 
 /// Run the blue team task consumption loop until shutdown.
+#[allow(clippy::too_many_arguments)]
 pub async fn run_blue_task_loop(
     config: &WorkerConfig,
     conn: redis::aio::ConnectionManager,
+    nats: NatsBroker,
     provider: Box<dyn LlmProvider>,
     dispatcher: Arc<dyn ToolDispatcher>,
     model_name: String,
@@ -43,7 +46,7 @@ pub async fn run_blue_task_loop(
         "Starting blue team task loop"
     );
 
-    let mut task_queue = BlueTaskQueue::from_conn(conn);
+    let mut task_queue = BlueTaskQueue::from_parts(conn, nats);
 
     let mut retry_delay = Duration::from_secs(1);
     let max_retry_delay = Duration::from_secs(60);

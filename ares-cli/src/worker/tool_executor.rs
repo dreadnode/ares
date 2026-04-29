@@ -1,43 +1,35 @@
 //! Thin tool executor loop for LLM-driven orchestration.
 //!
 //! When the Rust orchestrator drives agent loops via `ARES_LLM_MODEL`, it
-//! dispatches individual tool calls to `ares:tool_exec:{role}` and waits
-//! for results on `ares:tool_results:{call_id}`.
-//!
-//! This module implements the worker-side consumer:
+//! issues a NATS request to `ares.tools.exec.{role}`. Workers subscribe as
+//! a queue group so each request goes to exactly one worker, and reply on
+//! the auto-generated reply inbox.
 //!
 //! ```text
 //! loop {
-//!     1. BRPOP from ares:tool_exec:{role}
+//!     1. Receive NATS request on ares.tools.exec.{role} (queue group)
 //!     2. Deserialize ToolExecRequest
 //!     3. Execute tool via ares_tools::dispatch()
 //!     4. Serialize ToolExecResponse
-//!     5. LPUSH to ares:tool_results:{call_id}
+//!     5. Reply on msg.reply inbox
 //! }
 //! ```
 //!
 
 use std::sync::Arc;
-use std::time::Duration;
 
-use redis::AsyncCommands;
+use bytes::Bytes;
+use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, error, info, warn, Instrument};
 
+use ares_core::nats::{self, NatsBroker};
 use ares_core::telemetry::propagation::set_span_parent;
 use ares_core::telemetry::spans::{trace_discovery, AgentSpanBuilder, SpanKind, Team};
 use ares_core::telemetry::target::{extract_target_info, infer_target_type_from_info};
 
 use crate::worker::config::WorkerConfig;
 use crate::worker::heartbeat::WorkerStatus;
-
-// ─── Redis key prefixes (must match orchestrator's tool_dispatcher.rs) ───────
-
-const TOOL_EXEC_PREFIX: &str = "ares:tool_exec";
-const TOOL_RESULT_PREFIX: &str = "ares:tool_results";
-
-/// TTL for result keys (1 hour) — matches orchestrator's RESULT_TTL_SECS.
-const RESULT_TTL: i64 = 3600;
 
 // ─── Wire types (match orchestrator's tool_dispatcher.rs exactly) ────────────
 
@@ -71,165 +63,107 @@ struct ToolExecResponse {
 
 /// Run the tool execution loop until shutdown is signalled.
 ///
-/// Consumes individual tool call requests from `ares:tool_exec:{role}` and
-/// dispatches them directly to `ares_tools::dispatch()`. Results are pushed
-/// back to the per-call mailbox `ares:tool_results:{call_id}`.
+/// Subscribes to `ares.tools.exec.{role}` as a queue group so each request
+/// goes to exactly one worker. Replies on the request's reply inbox.
 pub async fn run_tool_exec_loop(
     config: &WorkerConfig,
-    conn: redis::aio::ConnectionManager,
+    _conn: redis::aio::ConnectionManager,
+    nats: NatsBroker,
     status_tx: tokio::sync::watch::Sender<WorkerStatus>,
     shutdown: Arc<tokio::sync::Notify>,
 ) -> anyhow::Result<()> {
-    let queue_key = format!("{TOOL_EXEC_PREFIX}:{}", config.worker_role);
+    let subject = nats::tool_exec_subject(&config.worker_role);
+    let queue_group = format!("ares-tools-{}", config.worker_role);
+
+    let client = nats.client().clone();
+    let mut sub = client
+        .queue_subscribe(subject.clone(), queue_group.clone())
+        .await?;
     info!(
-        queue = %queue_key,
+        subject = %subject,
+        queue_group = %queue_group,
         agent = %config.agent_name,
-        "Starting tool executor loop"
+        "Starting tool executor loop (NATS queue subscribe)"
     );
 
-    let mut conn = conn;
-
-    // Track tools that failed with "not installed" so we can short-circuit
-    // future calls immediately without attempting to spawn the binary.
     let mut unavailable_tools: std::collections::HashSet<String> = std::collections::HashSet::new();
 
-    // Exponential backoff state for connection errors
-    let mut retry_delay = Duration::from_secs(1);
-    let max_retry_delay = Duration::from_secs(60);
-
     loop {
-        // Check for shutdown via select with zero-timeout
-        let poll_result = tokio::select! {
-            result = poll_tool_request(&mut conn, &queue_key, config.poll_timeout) => result,
+        let next = tokio::select! {
+            m = sub.next() => m,
             _ = shutdown.notified() => {
                 info!("Tool executor: shutdown signalled, finishing");
                 return Ok(());
             }
         };
 
-        match poll_result {
-            Ok(Some(request)) => {
-                retry_delay = Duration::from_secs(1);
-
-                // Update heartbeat to busy
-                let _ = status_tx.send(WorkerStatus {
-                    status: "busy".to_string(),
-                    current_task: Some(format!("{}:{}", request.tool_name, request.call_id)),
-                });
-
-                let ti = extract_target_info(&request.arguments);
-                let tt = infer_target_type_from_info(&ti);
-                let mut span_builder =
-                    AgentSpanBuilder::new("tool_exec", &config.worker_role, Team::Red)
-                        .tool(&request.tool_name)
-                        .kind(SpanKind::Consumer);
-                if let Some(ref ip) = ti.target_ip {
-                    span_builder = span_builder.target_ip(ip);
-                }
-                if let Some(ref fqdn) = ti.target_fqdn {
-                    span_builder = span_builder.target_fqdn(fqdn);
-                }
-                if let Some(ref user) = ti.target_user {
-                    span_builder = span_builder.target_user(user);
-                }
-                if let Some(target_type) = tt {
-                    span_builder = span_builder.target_type(target_type);
-                }
-                if let Some(ref op) = request.operation_id {
-                    span_builder = span_builder.operation_id(op);
-                }
-                let exec_span = span_builder.build();
-                if let Some(ref tp) = request.traceparent {
-                    set_span_parent(&exec_span, tp);
-                }
-                execute_and_respond(&mut conn, &request, &mut unavailable_tools)
-                    .instrument(exec_span)
-                    .await;
-
-                // Back to idle
-                let _ = status_tx.send(WorkerStatus {
-                    status: "idle".to_string(),
-                    current_task: None,
-                });
+        let msg = match next {
+            Some(m) => m,
+            None => {
+                warn!("Tool executor: subscription closed, exiting");
+                return Ok(());
             }
-            Ok(None) => {
-                // BRPOP timeout, no request — just loop
-                retry_delay = Duration::from_secs(1);
-            }
+        };
+
+        let request: ToolExecRequest = match serde_json::from_slice(&msg.payload) {
+            Ok(r) => r,
             Err(e) => {
-                let error_str = e.to_string().to_lowercase();
-                let is_conn_error = [
-                    "connection",
-                    "connect",
-                    "closed",
-                    "timeout",
-                    "broken pipe",
-                    "reset",
-                ]
-                .iter()
-                .any(|kw| error_str.contains(kw));
-
-                if is_conn_error {
-                    // ConnectionManager auto-reconnects; just back off before retrying
-                    warn!(
-                        delay_secs = retry_delay.as_secs(),
-                        "Tool executor: connection error, retrying: {e}"
-                    );
-                    tokio::select! {
-                        _ = tokio::time::sleep(retry_delay) => {}
-                        _ = shutdown.notified() => return Ok(()),
-                    }
-                    retry_delay = (retry_delay * 2).min(max_retry_delay);
-                } else {
-                    error!("Tool executor: non-connection error: {e}");
-                    tokio::select! {
-                        _ = tokio::time::sleep(Duration::from_secs(5)) => {}
-                        _ = shutdown.notified() => return Ok(()),
-                    }
-                    retry_delay = Duration::from_secs(1);
-                }
+                warn!(err = %e, "Bad ToolExecRequest payload, skipping");
+                continue;
             }
+        };
+
+        let _ = status_tx.send(WorkerStatus {
+            status: "busy".to_string(),
+            current_task: Some(format!("{}:{}", request.tool_name, request.call_id)),
+        });
+
+        let ti = extract_target_info(&request.arguments);
+        let tt = infer_target_type_from_info(&ti);
+        let mut span_builder = AgentSpanBuilder::new("tool_exec", &config.worker_role, Team::Red)
+            .tool(&request.tool_name)
+            .kind(SpanKind::Consumer);
+        if let Some(ref ip) = ti.target_ip {
+            span_builder = span_builder.target_ip(ip);
         }
+        if let Some(ref fqdn) = ti.target_fqdn {
+            span_builder = span_builder.target_fqdn(fqdn);
+        }
+        if let Some(ref user) = ti.target_user {
+            span_builder = span_builder.target_user(user);
+        }
+        if let Some(target_type) = tt {
+            span_builder = span_builder.target_type(target_type);
+        }
+        if let Some(ref op) = request.operation_id {
+            span_builder = span_builder.operation_id(op);
+        }
+        let exec_span = span_builder.build();
+        if let Some(ref tp) = request.traceparent {
+            set_span_parent(&exec_span, tp);
+        }
+
+        let reply_to = msg.reply.clone();
+        let client_for_reply = client.clone();
+
+        execute_and_respond(client_for_reply, reply_to, &request, &mut unavailable_tools)
+            .instrument(exec_span)
+            .await;
+
+        let _ = status_tx.send(WorkerStatus {
+            status: "idle".to_string(),
+            current_task: None,
+        });
     }
 }
 
-/// BRPOP a single tool execution request from the queue.
-async fn poll_tool_request(
-    conn: &mut redis::aio::ConnectionManager,
-    queue_key: &str,
-    timeout: Duration,
-) -> anyhow::Result<Option<ToolExecRequest>> {
-    let result: Option<(String, String)> = redis::cmd("BRPOP")
-        .arg(queue_key)
-        .arg(timeout.as_secs() as i64)
-        .query_async(conn)
-        .await?;
-
-    match result {
-        Some((_key, data)) => {
-            let request: ToolExecRequest = serde_json::from_str(&data)?;
-            debug!(
-                tool = %request.tool_name,
-                call_id = %request.call_id,
-                task_id = %request.task_id,
-                "Received tool exec request"
-            );
-            Ok(Some(request))
-        }
-        None => Ok(None),
-    }
-}
-
-/// Execute a tool call and push the result to Redis.
-///
-/// If the tool has previously failed with "not installed", short-circuits
-/// immediately without attempting to spawn the binary.
+/// Execute a tool call and reply on the NATS inbox.
 async fn execute_and_respond(
-    conn: &mut redis::aio::ConnectionManager,
+    client: async_nats::Client,
+    reply_to: Option<async_nats::Subject>,
     request: &ToolExecRequest,
     unavailable_tools: &mut std::collections::HashSet<String>,
 ) {
-    // Short-circuit if this tool is known to be unavailable
     if unavailable_tools.contains(&request.tool_name) {
         debug!(
             tool = %request.tool_name,
@@ -246,10 +180,7 @@ async fn execute_and_respond(
             )),
             discoveries: None,
         };
-        let result_key = format!("{TOOL_RESULT_PREFIX}:{}", request.call_id);
-        if let Ok(json) = serde_json::to_string(&response) {
-            let _ = push_result(conn, &result_key, &json).await;
-        }
+        send_reply(&client, reply_to.as_ref(), &response).await;
         return;
     }
 
@@ -265,9 +196,7 @@ async fn execute_and_respond(
 
     let response = match ares_tools::dispatch(&request.tool_name, &request.arguments).await {
         Ok(output) => {
-            // Raw output for structured parsers (need unfiltered data)
             let raw = output.combined_raw();
-            // Filtered output for LLM (strips MOTD, noise, etc.)
             let combined = output.combined();
             let error = if output.success {
                 None
@@ -275,7 +204,6 @@ async fn execute_and_respond(
                 Some(format!("tool exited with code {:?}", output.exit_code))
             };
 
-            // Parse structured discoveries from raw (unfiltered) tool output
             let discoveries = ares_tools::parsers::parse_tool_output(
                 &request.tool_name,
                 &raw,
@@ -287,7 +215,6 @@ async fn execute_and_respond(
                 Some(discoveries)
             };
 
-            // Emit discovery spans for observability
             if let Some(ref disc) = discoveries {
                 if let Some(obj) = disc.as_object() {
                     for (disc_type, items) in obj {
@@ -318,7 +245,6 @@ async fn execute_and_respond(
         }
         Err(e) => {
             let err_str = e.to_string();
-            // Track tools that fail because the binary is missing
             if err_str.contains("failed to spawn") || err_str.contains("not installed") {
                 warn!(
                     tool = %request.tool_name,
@@ -341,43 +267,34 @@ async fn execute_and_respond(
         }
     };
 
-    let has_error = response.error.is_some();
-    let result_key = format!("{TOOL_RESULT_PREFIX}:{}", request.call_id);
+    debug!(
+        tool = %request.tool_name,
+        call_id = %request.call_id,
+        has_error = response.error.is_some(),
+        "Tool result ready"
+    );
+    send_reply(&client, reply_to.as_ref(), &response).await;
+}
 
-    match serde_json::to_string(&response) {
-        Ok(json) => {
-            if let Err(e) = push_result(conn, &result_key, &json).await {
-                error!(
-                    call_id = %request.call_id,
-                    "Failed to push tool result: {e}"
-                );
-            } else {
-                debug!(
-                    tool = %request.tool_name,
-                    call_id = %request.call_id,
-                    has_error = has_error,
-                    "Tool result pushed"
-                );
+async fn send_reply(
+    client: &async_nats::Client,
+    reply_to: Option<&async_nats::Subject>,
+    response: &ToolExecResponse,
+) {
+    let Some(reply) = reply_to else {
+        warn!(call_id = %response.call_id, "No reply subject — orchestrator will time out");
+        return;
+    };
+    match serde_json::to_vec(response) {
+        Ok(bytes) => {
+            if let Err(e) = client.publish(reply.clone(), Bytes::from(bytes)).await {
+                error!(call_id = %response.call_id, "Failed to publish reply: {e}");
             }
         }
         Err(e) => {
-            error!(
-                call_id = %request.call_id,
-                "Failed to serialize tool result: {e}"
-            );
+            error!(call_id = %response.call_id, "Failed to serialize reply: {e}");
         }
     }
-}
-
-/// LPUSH result and set TTL.
-async fn push_result(
-    conn: &mut redis::aio::ConnectionManager,
-    result_key: &str,
-    result_json: &str,
-) -> anyhow::Result<()> {
-    conn.lpush::<_, _, ()>(result_key, result_json).await?;
-    conn.expire::<_, ()>(result_key, RESULT_TTL).await?;
-    Ok(())
 }
 
 // ─── Tests ──────────────────────────────────────────────────────────────────
@@ -441,18 +358,6 @@ mod tests {
         let json = serde_json::to_string(&resp).unwrap();
         assert!(json.contains("discoveries"));
         assert!(json.contains("192.168.58.10"));
-    }
-
-    #[test]
-    fn redis_key_prefixes_match_orchestrator() {
-        // These must match crate::orchestrator::tool_dispatcher
-        assert_eq!(TOOL_EXEC_PREFIX, "ares:tool_exec");
-        assert_eq!(TOOL_RESULT_PREFIX, "ares:tool_results");
-    }
-
-    #[test]
-    fn result_ttl_is_one_hour() {
-        assert_eq!(RESULT_TTL, 3600);
     }
 
     #[test]
@@ -587,54 +492,10 @@ mod tests {
     }
 
     #[test]
-    fn queue_key_format() {
+    fn nats_subject_format() {
         let role = "recon";
-        let key = format!("{TOOL_EXEC_PREFIX}:{role}");
-        assert_eq!(key, "ares:tool_exec:recon");
-    }
-
-    #[test]
-    fn result_key_format() {
-        let call_id = "nmap_scan_abc123";
-        let key = format!("{TOOL_RESULT_PREFIX}:{call_id}");
-        assert_eq!(key, "ares:tool_results:nmap_scan_abc123");
-    }
-
-    #[test]
-    fn connection_error_detection_keywords() {
-        // Verify the connection error detection logic from the main loop
-        let conn_keywords = [
-            "connection",
-            "connect",
-            "closed",
-            "timeout",
-            "broken pipe",
-            "reset",
-        ];
-
-        let test_errors = [
-            ("connection refused", true),
-            ("failed to connect", true),
-            ("connection closed", true),
-            ("operation timeout", true),
-            ("broken pipe", true),
-            ("connection reset by peer", true),
-            ("invalid argument", false),
-            ("permission denied", false),
-            ("key not found", false),
-        ];
-
-        for (error_str, expected_is_conn) in test_errors {
-            let error_lower = error_str.to_lowercase();
-            let is_conn = conn_keywords.iter().any(|kw| error_lower.contains(kw));
-            assert_eq!(
-                is_conn,
-                expected_is_conn,
-                "Error '{}' should {}be a connection error",
-                error_str,
-                if expected_is_conn { "" } else { "NOT " }
-            );
-        }
+        let subj = nats::tool_exec_subject(role);
+        assert_eq!(subj, "ares.tools.exec.recon");
     }
 
     #[test]

@@ -105,9 +105,9 @@ async fn run_inner() -> Result<()> {
         "Configuration loaded"
     );
 
-    let queue = TaskQueue::connect(&config.redis_url)
+    let queue = TaskQueue::connect(&config.redis_url, &config.nats_url)
         .await
-        .context("Failed to connect to Redis")?;
+        .context("Failed to connect to Redis/NATS")?;
 
     let acquired = queue
         .try_acquire_lock(&config.operation_id, config.lock_ttl)
@@ -471,6 +471,7 @@ async fn run_inner() -> Result<()> {
                 blue_model,
                 blue_disp,
                 config.redis_url.clone(),
+                config.nats_url.clone(),
                 shutdown_rx.clone(),
             ),
             blue::spawn_blue_auto_submit(
@@ -488,7 +489,10 @@ async fn run_inner() -> Result<()> {
     let blue_handle: Option<(tokio::task::JoinHandle<()>, tokio::task::JoinHandle<()>)> = None;
 
     {
-        let recovery_mgr = recovery::OperationRecoveryManager::new(config.redis_url.clone());
+        let recovery_mgr = recovery::OperationRecoveryManager::new(
+            config.redis_url.clone(),
+            config.nats_url.clone(),
+        );
         match recovery_mgr.recover(&config.operation_id).await {
             Ok(recovered) => {
                 if !recovered.requeued_task_ids.is_empty() || !recovered.failed_task_ids.is_empty()
@@ -719,6 +723,7 @@ async fn run_blue_only() -> Result<()> {
     let redis_url = std::env::var("ARES_REDIS_URL")
         .or_else(|_| std::env::var("REDIS_URL"))
         .unwrap_or_else(|_| "redis://127.0.0.1:6379/0".to_string());
+    let nats_url = ares_core::nats::NatsBroker::url_from_env();
 
     // Load YAML config for observability URLs
     if let Ok(cfg) = ares_core::config::AresConfig::from_env() {
@@ -743,9 +748,9 @@ async fn run_blue_only() -> Result<()> {
         ares_llm::create_provider(&model_spec).context("Failed to create LLM provider")?;
 
     // Blue uses a simple Redis-based tool dispatcher (no operation-scoped auth throttle)
-    let queue = self::task_queue::TaskQueue::connect(&redis_url)
+    let queue = self::task_queue::TaskQueue::connect(&redis_url, &nats_url)
         .await
-        .context("Failed to connect to Redis")?;
+        .context("Failed to connect to Redis/NATS")?;
     let auth_throttle = tool_dispatcher::AuthThrottle::new(3, std::time::Duration::from_secs(30));
     let blue_disp: Arc<dyn ares_llm::ToolDispatcher> =
         Arc::new(tool_dispatcher::RedisToolDispatcher::new(
@@ -758,8 +763,14 @@ async fn run_blue_only() -> Result<()> {
 
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
-    let blue_handle =
-        blue::spawn_blue_orchestrator(provider, model_name, blue_disp, redis_url, shutdown_rx);
+    let blue_handle = blue::spawn_blue_orchestrator(
+        provider,
+        model_name,
+        blue_disp,
+        redis_url,
+        nats_url,
+        shutdown_rx,
+    );
 
     // Wait for shutdown signal
     signal::ctrl_c().await?;

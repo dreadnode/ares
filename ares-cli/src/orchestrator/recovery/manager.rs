@@ -20,12 +20,16 @@ use super::types::{
 /// Manages recovery of operation state from Redis after a restart.
 pub struct OperationRecoveryManager {
     redis_url: String,
+    nats_url: String,
 }
 
 impl OperationRecoveryManager {
     /// Create a new recovery manager.
-    pub fn new(redis_url: String) -> Self {
-        Self { redis_url }
+    pub fn new(redis_url: String, nats_url: String) -> Self {
+        Self {
+            redis_url,
+            nats_url,
+        }
     }
 
     /// Attempt to recover an operation's state from Redis.
@@ -43,7 +47,7 @@ impl OperationRecoveryManager {
         let mut last_err: Option<anyhow::Error> = None;
 
         for attempt in 1..=MAX_CONNECTION_RETRIES {
-            let queue = match TaskQueue::connect(&self.redis_url).await {
+            let queue = match TaskQueue::connect(&self.redis_url, &self.nats_url).await {
                 Ok(q) => q,
                 Err(e) => {
                     if attempt < MAX_CONNECTION_RETRIES {

@@ -58,6 +58,7 @@ After building the image, you can test it locally:
 # Run the agent container interactively
 docker run -it --rm \
   -e REDIS_URL="redis://localhost:6379" \
+  -e NATS_URL="nats://localhost:4222" \
   -e ANTHROPIC_API_KEY="your-api-key" \
   ares-blue-agent:latest
 

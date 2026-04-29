@@ -10,7 +10,8 @@ Local (this machine)              Remote (K8s or EC2)
 ares --k8s / --ec2        →      ares orchestrator (LLM coordination loop)
   or `task` commands              ares worker x7 (recon, credential_access,
                                     cracker, acl, privesc, lateral, coercion)
-                                  Redis (state store + message broker)
+                                  NATS JetStream (task/RPC broker)
+                                  Redis (durable state store)
 ```
 
 The orchestrator and workers are autonomous LLM agents. You do not control them directly. Submit operations, monitor state, inject data when stuck, and debug failures.
@@ -34,6 +35,7 @@ The orchestrator and workers are autonomous LLM agents. You do not control them 
 --secrets-from 1password   # Fetch API keys/secrets from 1Password CLI (op)
 --env-file <path>          # Load environment variables from a specific file
 --redis-url <url>          # Override the default Redis connection
+# NATS connection comes from $NATS_URL (e.g. nats://nats:4222)
 ```
 
 ## Development Workflow

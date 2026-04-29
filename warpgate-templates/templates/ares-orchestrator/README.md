@@ -2,8 +2,9 @@
 
 This template builds **Ares Orchestrator** images using Warp Gate. The
 orchestrator coordinates multi-agent red team operations, dispatching tasks to
-specialized worker agents via Redis, using a compiled Rust binary with embedded
-Python for LLM agent steps.
+specialized worker agents via NATS JetStream (broker) with Redis as the durable
+state store, using a compiled Rust binary with embedded Python for LLM agent
+steps.
 
 ---
 
@@ -82,9 +83,10 @@ After building the image, you can test it locally:
 **Run the orchestrator container interactively:**
 
 ```bash
-# Run with Redis and API key for testing
+# Run with Redis, NATS, and API key for testing
 docker run -it --rm \
   -e REDIS_URL="redis://localhost:6379" \
+  -e NATS_URL="nats://localhost:4222" \
   -e ANTHROPIC_API_KEY="your-api-key" \
   --entrypoint /bin/bash \
   ares-orchestrator:latest
@@ -99,16 +101,20 @@ docker run --rm --entrypoint ares ares-orchestrator:latest orchestrator --versio
 docker run --rm --entrypoint bash ares-orchestrator:latest -c "curl --version && jq --version"
 ```
 
-**Test with local Redis:**
+**Test with local Redis and NATS:**
 
 ```bash
 # Start Redis in Docker
 docker run -d --name redis -p 6379:6379 redis:7-alpine
 
-# Run the orchestrator connected to local Redis
+# Start NATS with JetStream enabled
+docker run -d --name nats -p 4222:4222 nats:2.10-alpine -js
+
+# Run the orchestrator connected to local Redis and NATS
 docker run -it --rm \
   --network host \
   -e REDIS_URL="redis://localhost:6379" \
+  -e NATS_URL="nats://localhost:4222" \
   -e ANTHROPIC_API_KEY="your-api-key" \
   -e ARES_NAMESPACE="default" \
   ares-orchestrator:latest
@@ -146,7 +152,8 @@ ares orchestrator multi-agent contoso.local "192.168.58.10,192.168.58.11"```
 
 The pod has the following environment variables pre-configured:
 
-- `REDIS_URL`: Redis connection string with authentication
+- `REDIS_URL`: Redis connection string with authentication (durable state store)
+- `NATS_URL`: NATS server URL (task + RPC broker, e.g. `nats://nats:4222`)
 - `ANTHROPIC_API_KEY`: API key for Claude models
 - `ARES_NAMESPACE`: Kubernetes namespace for agent discovery
 
@@ -171,7 +178,8 @@ The pod has the following environment variables pre-configured:
 - **Directory Structure:**
   - `/root/` - Default working directory
   - `/usr/local/bin/ares` - Compiled Ares binary  - Python packages installed system-wide
-- The orchestrator requires Redis, an Anthropic API key, and access to worker agents to function.
+- The orchestrator requires Redis (state), NATS JetStream (broker), an
+  Anthropic API key, and access to worker agents to function.
 
 ---
 

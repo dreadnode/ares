@@ -1,0 +1,11 @@
+---
+- name: Restart nats
+  ansible.builtin.systemd:
+    name: nats-server
+    state: restarted
+  become: true
+
+- name: Reload systemd
+  ansible.builtin.systemd:
+    daemon_reload: true
+  become: true

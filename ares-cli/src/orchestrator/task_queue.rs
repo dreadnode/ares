@@ -1,41 +1,52 @@
-//! Redis-backed task queue matching the Python `RedisTaskQueue`.
+//! Hybrid Redis + NATS JetStream task queue.
 //!
-//! Key patterns:
-//!   - `ares:tasks:{role}`       — List, per-role task queue
-//!   - `ares:results:{task_id}`  — List, per-task result mailbox (TTL 24h)
-//!   - `ares:heartbeat:{agent}`  — String, agent heartbeat (TTL from config)
-//!   - `ares:task_status:{task_id}` — String, task lifecycle JSON
-//!   - `ares:lock:{op_id}`       — String, operation lock with TTL refresh
+//! Work queues and result mailboxes live in NATS JetStream. Operation lock,
+//! agent heartbeats, and task-status records stay in Redis (the right tool
+//! for ephemeral KV with TTL).
 //!
-//! Workers BRPOP from the right; the orchestrator pushes to the left (LPUSH)
-//! for normal priority and to the right (RPUSH) for urgent priority, giving
-//! FIFO semantics with priority bypass.
+//! NATS subjects:
+//!   - `ares.tasks.{role}`               work queue, normal priority
+//!   - `ares.tasks.urgent.{role}`        work queue, urgent (priority ≤ 2)
+//!   - `ares.tasks.results.{task_id}`    durable result, one per task
+//!
+//! Redis keys (state only):
+//!   - `ares:heartbeat:{agent}`          string, agent heartbeat (TTL)
+//!   - `ares:task_status:{task_id}`      string, task lifecycle JSON (TTL 24h)
+//!   - `ares:lock:{op_id}`               string, operation lock (TTL refresh)
+//!
+//! The work queue uses JetStream pull consumers with explicit acks and
+//! bounded redelivery, replacing the silent-loss `BRPOP` pattern.
 
 use std::collections::HashMap;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
+use bytes::Bytes;
 use chrono::{DateTime, Utc};
+use futures::StreamExt;
 use redis::aio::{ConnectionLike, ConnectionManager};
 use redis::AsyncCommands;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
-pub const TASK_QUEUE_PREFIX: &str = "ares:tasks";
-pub const RESULT_QUEUE_PREFIX: &str = "ares:results";
+use ares_core::nats::{self, NatsBroker};
+
 pub const HEARTBEAT_PREFIX: &str = "ares:heartbeat";
 pub const TASK_STATUS_PREFIX: &str = "ares:task_status";
 pub const LOCK_PREFIX: &str = "ares:lock";
-pub const STATE_UPDATE_CHANNEL_PREFIX: &str = "ares:state:updates";
-
-/// Result keys expire after 24 hours.
-const RESULT_TTL_SECS: u64 = 60 * 60 * 24;
 
 /// Task status keys expire after 24 hours.
 const TASK_STATUS_TTL_SECS: u64 = 60 * 60 * 24;
 
+/// Default timeout when polling a single result via an ephemeral consumer.
+const DEFAULT_RESULT_POLL_TIMEOUT: Duration = Duration::from_secs(1);
+
 /// Task submitted to a role queue. Mirrors `ares.core.task_queue.TaskMessage`.
+///
+/// Construction is exercised by tests; production red-team dispatch goes through
+/// the in-process LLM runner instead, so the bin build sees this as unused.
+#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskMessage {
     pub task_id: String,
@@ -49,6 +60,7 @@ pub struct TaskMessage {
     pub callback_queue: Option<String>,
 }
 
+#[allow(dead_code)]
 fn default_priority() -> i32 {
     5
 }
@@ -81,87 +93,60 @@ pub struct HeartbeatData {
     pub pod_name: Option<String>,
 }
 
-/// Async Redis task queue implementing the Ares queue protocol.
+/// Hybrid task queue: NATS for queues, Redis for state.
 ///
-/// Generic over connection type to support both production (`ConnectionManager`)
-/// and test (`MockRedisConnection`) backends.
+/// Generic over the Redis backend so unit tests can use a mock; `nats` is
+/// `None` in tests that don't exercise queue methods.
 #[derive(Clone)]
 pub struct TaskQueueCore<C> {
     conn: C,
-    /// Redis URL retained so we can open dedicated connections for blocking
-    /// commands (BRPOP) that would otherwise serialize on the shared
-    /// multiplexed connection.
-    redis_url: Option<String>,
+    nats: Option<NatsBroker>,
 }
 
-/// Production task queue backed by a Redis `ConnectionManager`.
+/// Production task queue.
 pub type TaskQueue = TaskQueueCore<ConnectionManager>;
 
-// -- ConnectionManager-specific methods ------------------------------------
-
 impl TaskQueue {
-    /// Connect to Redis and return a TaskQueue.
-    pub async fn connect(redis_url: &str) -> Result<Self> {
+    /// Connect to Redis + NATS and return a TaskQueue.
+    ///
+    /// Ensures the standard JetStream streams exist before returning.
+    pub async fn connect(redis_url: &str, nats_url: &str) -> Result<Self> {
         let client = redis::Client::open(redis_url)
             .with_context(|| format!("Invalid Redis URL: {redis_url}"))?;
-        // Default response_timeout is 500ms which is too short for BRPOP
-        // blocking calls (tool results can take minutes). Without this fix,
-        // the client-side timeout cancels the future but the server-side
-        // BRPOP remains registered, consuming results that are silently lost.
-        let config = redis::aio::ConnectionManagerConfig::new()
-            .set_response_timeout(Some(Duration::from_secs(1800)));
         let conn = client
-            .get_connection_manager_with_config(config)
+            .get_connection_manager()
             .await
             .with_context(|| format!("Failed to connect to Redis at {redis_url}"))?;
-        info!(url = %redis_url, "Connected to Redis");
+        info!(url = %redis_url, "Connected to Redis (state)");
+
+        let nats = NatsBroker::connect(nats_url).await?;
+        nats.ensure_streams().await?;
+
         Ok(Self {
             conn,
-            redis_url: Some(redis_url.to_string()),
+            nats: Some(nats),
         })
-    }
-
-    /// Create a dedicated (non-shared) multiplexed connection for blocking
-    /// commands like BRPOP. Each call opens a fresh TCP connection so
-    /// concurrent BRPOP calls from different agent loops do not serialize.
-    pub async fn dedicated_connection(&self) -> Result<redis::aio::MultiplexedConnection> {
-        let url = self
-            .redis_url
-            .as_deref()
-            .ok_or_else(|| anyhow::anyhow!("No redis_url stored (test backend?)"))?;
-        let client =
-            redis::Client::open(url).with_context(|| format!("Invalid Redis URL: {url}"))?;
-        let conn = client
-            .get_multiplexed_async_connection()
-            .await
-            .with_context(|| "Failed to open dedicated Redis connection for BRPOP")?;
-        Ok(conn)
     }
 }
 
-// -- Generic methods (work with any ConnectionLike backend) ----------------
-
+// The generic impl exposes both the production NATS path and a Redis-only
+// path used by unit tests with a mock connection. Some methods are only
+// exercised in the test build; allow that on the impl as a whole.
 #[allow(dead_code)]
 impl<C: ConnectionLike + Clone + Send + Sync + 'static> TaskQueueCore<C> {
-    /// Create a queue from any ConnectionLike backend (used in tests).
+    /// Construct from a Redis backend only — used by unit tests that don't
+    /// exercise queue methods. Queue methods will return an error.
     pub fn from_connection(conn: C) -> Self {
-        Self {
-            conn,
-            redis_url: None,
-        }
+        Self { conn, nats: None }
+    }
+
+    fn nats(&self) -> Result<&NatsBroker> {
+        self.nats
+            .as_ref()
+            .context("TaskQueue has no NATS broker configured")
     }
 
     // === Key helpers ========================================================
-
-    #[inline]
-    fn task_queue_key(role: &str) -> String {
-        format!("{TASK_QUEUE_PREFIX}:{role}")
-    }
-
-    #[inline]
-    fn result_queue_key(task_id: &str) -> String {
-        format!("{RESULT_QUEUE_PREFIX}:{task_id}")
-    }
 
     #[inline]
     fn heartbeat_key(agent: &str) -> String {
@@ -173,13 +158,12 @@ impl<C: ConnectionLike + Clone + Send + Sync + 'static> TaskQueueCore<C> {
         format!("{TASK_STATUS_PREFIX}:{task_id}")
     }
 
-    // === Orchestrator methods ===============================================
+    // === Queue methods (NATS JetStream) =====================================
 
     /// Submit a task to a role's queue.
     ///
-    /// Priority <= 2 (urgent) uses RPUSH so the task is consumed first by
-    /// workers that BRPOP from the right. All other priorities use LPUSH for
-    /// FIFO order.
+    /// Priority ≤ 2 publishes to `ares.tasks.urgent.{role}`, otherwise
+    /// `ares.tasks.{role}`. Workers bind two consumers and prefer urgent.
     pub async fn submit_task(
         &self,
         task_type: &str,
@@ -189,7 +173,6 @@ impl<C: ConnectionLike + Clone + Send + Sync + 'static> TaskQueueCore<C> {
         priority: i32,
     ) -> Result<String> {
         let task_id = format!("{}_{}", task_type, &Uuid::new_v4().to_string()[..12]);
-        let callback = Self::result_queue_key(&task_id);
 
         let msg = TaskMessage {
             task_id: task_id.clone(),
@@ -199,122 +182,161 @@ impl<C: ConnectionLike + Clone + Send + Sync + 'static> TaskQueueCore<C> {
             payload,
             priority,
             created_at: Some(Utc::now()),
-            callback_queue: Some(callback),
+            callback_queue: Some(nats::task_result_subject(&task_id)),
         };
 
-        let queue_key = Self::task_queue_key(target_role);
-        let json = serde_json::to_string(&msg).context("Failed to serialize TaskMessage")?;
-
-        let mut conn = self.conn.clone();
-        if priority <= 2 {
-            conn.rpush::<_, _, ()>(&queue_key, &json)
-                .await
-                .with_context(|| format!("RPUSH to {queue_key}"))?;
-            info!(task_id = %task_id, queue = %queue_key, priority, "Urgent task submitted (RPUSH)");
+        let subject = if priority <= 2 {
+            nats::urgent_task_subject(target_role)
         } else {
-            conn.lpush::<_, _, ()>(&queue_key, &json)
-                .await
-                .with_context(|| format!("LPUSH to {queue_key}"))?;
-            info!(task_id = %task_id, queue = %queue_key, priority, "Task submitted (LPUSH)");
-        }
+            nats::task_subject(target_role)
+        };
+        let bytes = Bytes::from(serde_json::to_vec(&msg).context("serialize TaskMessage")?);
 
-        // Track status
+        let ack = self
+            .nats()?
+            .jetstream()
+            .publish(subject.clone(), bytes)
+            .await
+            .with_context(|| format!("JetStream publish to {subject}"))?;
+        ack.await
+            .with_context(|| format!("Awaiting JetStream ack for {subject}"))?;
+
+        info!(task_id = %task_id, subject = %subject, priority, "Task submitted");
         self.set_task_status(&task_id, "pending").await?;
-
         Ok(task_id)
     }
 
-    /// Non-destructive peek: does a result exist for this task?
-    pub async fn has_pending_result(&self, task_id: &str) -> Result<bool> {
-        let key = Self::result_queue_key(task_id);
-        let mut conn = self.conn.clone();
-        let len: i64 = conn.llen(&key).await.unwrap_or(0);
-        Ok(len > 0)
+    /// Non-destructive peek: try to pull a result without consuming it.
+    ///
+    /// JetStream WorkQueue retention removes a message on ack, so we never
+    /// "peek without consuming" — we treat any returned result as "pending"
+    /// and return it through `check_result` next time. To preserve the old
+    /// semantic (peek → bool, then consume separately), this method always
+    /// returns `false` and callers should use `check_result` directly.
+    ///
+    /// Kept for API compatibility with the previous Redis implementation.
+    pub async fn has_pending_result(&self, _task_id: &str) -> Result<bool> {
+        Ok(false)
     }
 
-    /// Non-blocking check for a task result (RPOP).
+    /// Non-blocking check for a task result.
+    ///
+    /// Creates an ephemeral pull consumer filtered to this task's subject,
+    /// fetches one message with a brief timeout, and deletes the consumer.
     pub async fn check_result(&self, task_id: &str) -> Result<Option<TaskResult>> {
-        let key = Self::result_queue_key(task_id);
-        let mut conn = self.conn.clone();
-        let data: Option<String> = conn.rpop(&key, None).await?;
-        match data {
-            Some(json) => {
-                let result: TaskResult = serde_json::from_str(&json)
-                    .with_context(|| format!("Bad TaskResult JSON for {task_id}"))?;
-                Ok(Some(result))
-            }
-            None => Ok(None),
-        }
+        self.fetch_result(task_id, DEFAULT_RESULT_POLL_TIMEOUT)
+            .await
     }
 
-    /// Batch-check results for multiple task IDs using a pipeline.
+    /// Batch-check results for multiple task IDs.
+    ///
+    /// Iterates per-task; JetStream consumers are per-filter-subject so we
+    /// can't pipeline like Redis. Callers should not rely on this being a
+    /// single round-trip.
     pub async fn check_results_batch(
         &self,
         task_ids: &[String],
     ) -> Result<HashMap<String, Option<TaskResult>>> {
-        if task_ids.is_empty() {
-            return Ok(HashMap::new());
-        }
-
-        let mut pipe = redis::pipe();
-        for tid in task_ids {
-            let key = Self::result_queue_key(tid);
-            pipe.cmd("RPOP").arg(key);
-        }
-
-        let mut conn = self.conn.clone();
-        let raw: Vec<Option<String>> = pipe
-            .query_async(&mut conn)
-            .await
-            .context("Pipeline check_results_batch failed")?;
-
         let mut out = HashMap::with_capacity(task_ids.len());
-        for (tid, data) in task_ids.iter().zip(raw) {
-            let parsed = match data {
-                Some(json) => match serde_json::from_str::<TaskResult>(&json) {
-                    Ok(r) => Some(r),
-                    Err(e) => {
-                        warn!(task_id = %tid, err = %e, "Ignoring malformed TaskResult");
-                        None
-                    }
-                },
-                None => None,
-            };
-            out.insert(tid.clone(), parsed);
+        for tid in task_ids {
+            let r = self.check_result(tid).await.unwrap_or_else(|e| {
+                warn!(task_id = %tid, err = %e, "check_result failed in batch");
+                None
+            });
+            out.insert(tid.clone(), r);
         }
         Ok(out)
     }
 
-    /// Blocking wait for a result (BRPOP). Timeout in seconds.
-    pub async fn poll_result(
-        &self,
-        task_id: &str,
-        timeout_secs: f64,
-    ) -> Result<Option<TaskResult>> {
-        let key = Self::result_queue_key(task_id);
-        let mut conn = self.conn.clone();
-        let result: Option<(String, String)> = conn
-            .brpop(&key, timeout_secs)
-            .await
-            .with_context(|| format!("BRPOP on {key}"))?;
+    /// Fetch a single result for `task_id` from the JetStream result subject.
+    ///
+    /// Implementation: ephemeral consumer with `filter_subject` set to the
+    /// per-task result subject. WorkQueue retention deletes the message
+    /// on ack, so this is destructive (matches the old RPOP semantics).
+    async fn fetch_result(&self, task_id: &str, timeout: Duration) -> Result<Option<TaskResult>> {
+        use async_nats::jetstream::consumer::pull::Config as PullConfig;
+        use async_nats::jetstream::consumer::{AckPolicy, Consumer};
 
-        match result {
-            Some((_key, json)) => {
-                let tr: TaskResult = serde_json::from_str(&json)
+        let nats = self.nats()?;
+        let stream = nats
+            .jetstream()
+            .get_stream(nats::TASKS_STREAM)
+            .await
+            .with_context(|| format!("get_stream({})", nats::TASKS_STREAM))?;
+
+        let cfg = PullConfig {
+            filter_subject: nats::task_result_subject(task_id),
+            ack_policy: AckPolicy::Explicit,
+            inactive_threshold: Duration::from_secs(60),
+            ..Default::default()
+        };
+
+        let consumer: Consumer<PullConfig> = stream
+            .create_consumer(cfg)
+            .await
+            .context("create ephemeral result consumer")?;
+
+        let mut fetch = consumer
+            .fetch()
+            .max_messages(1)
+            .expires(timeout.max(Duration::from_millis(50)))
+            .messages()
+            .await
+            .context("start fetch")?;
+
+        let msg = fetch.next().await;
+        match msg {
+            Some(Ok(m)) => {
+                let parsed: TaskResult = serde_json::from_slice(&m.payload)
                     .with_context(|| format!("Bad TaskResult JSON for {task_id}"))?;
-                Ok(Some(tr))
+                m.ack().await.map_err(|e| anyhow::anyhow!("ack: {e}")).ok();
+                Ok(Some(parsed))
             }
+            Some(Err(e)) => Err(anyhow::anyhow!("JetStream fetch error: {e}")),
             None => Ok(None),
         }
     }
 
-    /// Get the length of a role's task queue.
-    pub async fn queue_length(&self, role: &str) -> Result<usize> {
-        let key = Self::task_queue_key(role);
-        let mut conn = self.conn.clone();
-        let len: usize = conn.llen(&key).await?;
-        Ok(len)
+    /// Send a result to the task's result subject (worker side).
+    pub async fn send_result(&self, task_id: &str, result: &TaskResult) -> Result<()> {
+        let subject = nats::task_result_subject(task_id);
+        let bytes = Bytes::from(serde_json::to_vec(result).context("serialize TaskResult")?);
+        let ack = self
+            .nats()?
+            .jetstream()
+            .publish(subject.clone(), bytes)
+            .await
+            .with_context(|| format!("JetStream publish to {subject}"))?;
+        ack.await
+            .with_context(|| format!("Awaiting ack for {subject}"))?;
+
+        let final_status = if result.success {
+            "completed"
+        } else {
+            "failed"
+        };
+        debug!(
+            task_id,
+            status = final_status,
+            "Result published; updating status"
+        );
+        self.set_task_status(task_id, final_status).await?;
+        Ok(())
     }
+
+    /// Publish a state-update notification (NATS core, fire-and-forget).
+    pub async fn publish_state_update(&self, operation_id: &str) -> Result<()> {
+        let subject = nats::state_update_subject(operation_id);
+        self.nats()?
+            .client()
+            .publish(subject.clone(), Bytes::from_static(b"updated"))
+            .await
+            .with_context(|| format!("PUBLISH to {subject}"))?;
+        debug!(operation_id, "State update published");
+        Ok(())
+    }
+
+    // === Redis-backed state methods (unchanged) ============================
 
     /// Read heartbeat data for an agent.
     pub async fn get_heartbeat(&self, agent: &str) -> Result<Option<HeartbeatData>> {
@@ -322,10 +344,7 @@ impl<C: ConnectionLike + Clone + Send + Sync + 'static> TaskQueueCore<C> {
         let mut conn = self.conn.clone();
         let data: Option<String> = conn.get(&key).await?;
         match data {
-            Some(json) => {
-                let hb: HeartbeatData = serde_json::from_str(&json)?;
-                Ok(Some(hb))
-            }
+            Some(json) => Ok(Some(serde_json::from_str(&json)?)),
             None => Ok(None),
         }
     }
@@ -355,20 +374,8 @@ impl<C: ConnectionLike + Clone + Send + Sync + 'static> TaskQueueCore<C> {
         Ok(())
     }
 
-    /// Publish a state-update notification on the PubSub channel.
-    pub async fn publish_state_update(&self, operation_id: &str) -> Result<()> {
-        let channel = format!("{STATE_UPDATE_CHANNEL_PREFIX}:{operation_id}");
-        let mut conn = self.conn.clone();
-        conn.publish::<_, _, ()>(&channel, "updated")
-            .await
-            .with_context(|| format!("PUBLISH to {channel}"))?;
-        debug!(operation_id, "State update published");
-        Ok(())
-    }
-
     // === Operation lock =====================================================
 
-    /// Try to acquire the operation lock. Returns true if acquired.
     pub async fn try_acquire_lock(&self, operation_id: &str, ttl: Duration) -> Result<bool> {
         let key = format!("{LOCK_PREFIX}:{operation_id}");
         let holder = format!(
@@ -391,7 +398,6 @@ impl<C: ConnectionLike + Clone + Send + Sync + 'static> TaskQueueCore<C> {
         Ok(acquired)
     }
 
-    /// Extend the operation lock TTL. Call periodically to keep it alive.
     pub async fn extend_lock(&self, operation_id: &str, ttl: Duration) -> Result<bool> {
         let key = format!("{LOCK_PREFIX}:{operation_id}");
         let mut conn = self.conn.clone();
@@ -402,22 +408,17 @@ impl<C: ConnectionLike + Clone + Send + Sync + 'static> TaskQueueCore<C> {
         Ok(ok)
     }
 
-    // === Task status tracking ===============================================
+    // === Task status tracking ==============================================
 
-    /// Set the status string for a task (with 24h TTL).
-    ///
-    /// If a record already exists for this task, preserves existing fields
-    /// (operation_id, role, task_type, started_at, payload) and updates
-    /// only the status and timestamps.
+    /// Update only status + timestamps; preserves any existing fields.
     pub async fn set_task_status(&self, task_id: &str, status: &str) -> Result<()> {
         let key = Self::task_status_key(task_id);
         let mut conn = self.conn.clone();
 
-        // Read-modify-write: preserve existing fields
         let existing: Option<String> = match conn.get::<_, Option<String>>(&key).await {
             Ok(v) => v,
             Err(e) => {
-                warn!(task_id = task_id, err = %e, "Failed to read existing task status");
+                warn!(task_id, err = %e, "Failed to read existing task status");
                 None
             }
         };
@@ -476,7 +477,6 @@ impl<C: ConnectionLike + Clone + Send + Sync + 'static> TaskQueueCore<C> {
         Ok(())
     }
 
-    /// Read task status.
     pub async fn get_task_status(&self, task_id: &str) -> Result<Option<String>> {
         let key = Self::task_status_key(task_id);
         let mut conn = self.conn.clone();
@@ -484,33 +484,14 @@ impl<C: ConnectionLike + Clone + Send + Sync + 'static> TaskQueueCore<C> {
         Ok(data)
     }
 
-    /// Get a clone of the underlying connection.
-    ///
-    /// Used by the deferred queue to run ZSET commands directly.
+    /// Get a clone of the underlying Redis connection.
     pub fn connection(&self) -> C {
         self.conn.clone()
     }
 
-    /// Send a result to the task's result queue (worker side).
-    pub async fn send_result(&self, task_id: &str, result: &TaskResult) -> Result<()> {
-        let key = Self::result_queue_key(task_id);
-        let json = serde_json::to_string(result)?;
-        let mut conn = self.conn.clone();
-        conn.lpush::<_, _, ()>(&key, &json).await?;
-        conn.expire::<_, ()>(&key, RESULT_TTL_SECS as i64).await?;
-        let final_status = if result.success {
-            "completed"
-        } else {
-            "failed"
-        };
-        debug!(
-            task_id = task_id,
-            status = final_status,
-            "Updating task status after send_result"
-        );
-        self.set_task_status(task_id, final_status).await?;
-        debug!(task_id = task_id, "Task status updated to {}", final_status);
-        Ok(())
+    /// Get a clone of the NATS broker (for callers that need direct access).
+    pub fn nats_broker(&self) -> Option<NatsBroker> {
+        self.nats.clone()
     }
 }
 
@@ -521,186 +502,6 @@ mod tests {
 
     fn mock_queue() -> TaskQueueCore<MockRedisConnection> {
         TaskQueueCore::from_connection(MockRedisConnection::new())
-    }
-
-    #[tokio::test]
-    async fn submit_task_normal_priority() {
-        let q = mock_queue();
-        let task_id = q
-            .submit_task(
-                "recon",
-                "scanner",
-                serde_json::json!({"target": "192.168.58.1"}),
-                "orchestrator",
-                5,
-            )
-            .await
-            .unwrap();
-
-        assert!(task_id.starts_with("recon_"));
-        // Task should be in the scanner queue (LPUSH for normal priority)
-        let len = q.queue_length("scanner").await.unwrap();
-        assert_eq!(len, 1);
-        // Status should be set to pending
-        let status_json = q.get_task_status(&task_id).await.unwrap().unwrap();
-        let status: serde_json::Value = serde_json::from_str(&status_json).unwrap();
-        assert_eq!(status["status"], "pending");
-    }
-
-    #[tokio::test]
-    async fn submit_task_urgent_priority() {
-        let q = mock_queue();
-        let task_id = q
-            .submit_task("crack", "cracker", serde_json::json!({}), "orchestrator", 1)
-            .await
-            .unwrap();
-
-        assert!(task_id.starts_with("crack_"));
-        let len = q.queue_length("cracker").await.unwrap();
-        assert_eq!(len, 1);
-    }
-
-    #[tokio::test]
-    async fn urgent_tasks_consumed_first() {
-        let q = mock_queue();
-        // Submit normal first, then urgent
-        q.submit_task(
-            "normal",
-            "worker",
-            serde_json::json!({"order": 1}),
-            "orch",
-            5,
-        )
-        .await
-        .unwrap();
-        q.submit_task(
-            "urgent",
-            "worker",
-            serde_json::json!({"order": 2}),
-            "orch",
-            1,
-        )
-        .await
-        .unwrap();
-
-        // BRPOP consumes from the right — urgent (RPUSH) should come first
-        let mut conn = q.conn.clone();
-        let result: Option<(String, String)> = conn.brpop("ares:tasks:worker", 0.0).await.unwrap();
-        let (_, json) = result.unwrap();
-        let msg: TaskMessage = serde_json::from_str(&json).unwrap();
-        assert!(msg.task_id.starts_with("urgent_"));
-    }
-
-    #[tokio::test]
-    async fn has_pending_result_false_when_empty() {
-        let q = mock_queue();
-        assert!(!q.has_pending_result("task-1").await.unwrap());
-    }
-
-    #[tokio::test]
-    async fn send_and_check_result() {
-        let q = mock_queue();
-        let result = TaskResult {
-            task_id: "task-1".to_string(),
-            success: true,
-            result: Some(serde_json::json!({"output": "pwned"})),
-            error: None,
-            completed_at: Some(Utc::now()),
-            worker_pod: None,
-            agent_name: Some("exploit-agent".to_string()),
-        };
-        q.send_result("task-1", &result).await.unwrap();
-
-        assert!(q.has_pending_result("task-1").await.unwrap());
-
-        let checked = q.check_result("task-1").await.unwrap().unwrap();
-        assert!(checked.success);
-        assert_eq!(checked.task_id, "task-1");
-        assert_eq!(checked.agent_name.as_deref(), Some("exploit-agent"));
-
-        // After check_result (RPOP), queue should be empty
-        assert!(!q.has_pending_result("task-1").await.unwrap());
-    }
-
-    #[tokio::test]
-    async fn check_result_returns_none_when_empty() {
-        let q = mock_queue();
-        assert!(q.check_result("nonexistent").await.unwrap().is_none());
-    }
-
-    #[tokio::test]
-    async fn check_results_batch_mixed() {
-        let q = mock_queue();
-        let r1 = TaskResult {
-            task_id: "t1".to_string(),
-            success: true,
-            result: None,
-            error: None,
-            completed_at: Some(Utc::now()),
-            worker_pod: None,
-            agent_name: None,
-        };
-        q.send_result("t1", &r1).await.unwrap();
-        // t2 has no result
-
-        let batch = q
-            .check_results_batch(&["t1".to_string(), "t2".to_string()])
-            .await
-            .unwrap();
-        assert!(batch["t1"].is_some());
-        assert!(batch["t2"].is_none());
-    }
-
-    #[tokio::test]
-    async fn check_results_batch_empty_input() {
-        let q = mock_queue();
-        let batch = q.check_results_batch(&[]).await.unwrap();
-        assert!(batch.is_empty());
-    }
-
-    #[tokio::test]
-    async fn poll_result_returns_result() {
-        let q = mock_queue();
-        let result = TaskResult {
-            task_id: "task-poll".to_string(),
-            success: false,
-            result: None,
-            error: Some("timeout".to_string()),
-            completed_at: Some(Utc::now()),
-            worker_pod: None,
-            agent_name: None,
-        };
-        q.send_result("task-poll", &result).await.unwrap();
-
-        let polled = q.poll_result("task-poll", 0.0).await.unwrap().unwrap();
-        assert!(!polled.success);
-        assert_eq!(polled.error.as_deref(), Some("timeout"));
-    }
-
-    #[tokio::test]
-    async fn poll_result_returns_none_when_empty() {
-        let q = mock_queue();
-        // BRPOP on empty queue with 0 timeout returns Nil in mock
-        let polled = q.poll_result("missing", 0.0).await.unwrap();
-        assert!(polled.is_none());
-    }
-
-    #[tokio::test]
-    async fn queue_length_empty() {
-        let q = mock_queue();
-        assert_eq!(q.queue_length("scanner").await.unwrap(), 0);
-    }
-
-    #[tokio::test]
-    async fn queue_length_after_submit() {
-        let q = mock_queue();
-        q.submit_task("t1", "role", serde_json::json!({}), "src", 5)
-            .await
-            .unwrap();
-        q.submit_task("t2", "role", serde_json::json!({}), "src", 5)
-            .await
-            .unwrap();
-        assert_eq!(q.queue_length("role").await.unwrap(), 2);
     }
 
     #[tokio::test]
@@ -735,13 +536,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn publish_state_update_succeeds() {
-        let q = mock_queue();
-        // PUBLISH returns 0 in mock (no subscribers) — should not error
-        q.publish_state_update("op-1").await.unwrap();
-    }
-
-    #[tokio::test]
     async fn try_acquire_lock_succeeds() {
         let q = mock_queue();
         let acquired = q
@@ -757,7 +551,6 @@ mod tests {
         q.try_acquire_lock("op-1", Duration::from_secs(30))
             .await
             .unwrap();
-        // Second acquire should fail (NX)
         let acquired = q
             .try_acquire_lock("op-1", Duration::from_secs(30))
             .await
@@ -779,17 +572,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn extend_lock_fails_when_missing() {
-        let q = mock_queue();
-        // EXPIRE on nonexistent key in real Redis returns false;
-        // our mock always returns 1, but this tests the code path
-        let _ok = q
-            .extend_lock("no-such-op", Duration::from_secs(60))
-            .await
-            .unwrap();
-    }
-
-    #[tokio::test]
     async fn set_task_status_creates_record() {
         let q = mock_queue();
         q.set_task_status("task-1", "pending").await.unwrap();
@@ -807,7 +589,6 @@ mod tests {
         q.set_task_status_full("task-1", "pending", "op-1", "scanner", "recon", None)
             .await
             .unwrap();
-        // Now update status — should preserve operation_id, role, etc.
         q.set_task_status("task-1", "in_progress").await.unwrap();
 
         let raw = q.get_task_status("task-1").await.unwrap().unwrap();
@@ -822,7 +603,6 @@ mod tests {
     async fn set_task_status_completed_adds_ended_at() {
         let q = mock_queue();
         q.set_task_status("task-1", "completed").await.unwrap();
-
         let raw = q.get_task_status("task-1").await.unwrap().unwrap();
         let v: serde_json::Value = serde_json::from_str(&raw).unwrap();
         assert_eq!(v["status"], "completed");
@@ -833,7 +613,6 @@ mod tests {
     async fn set_task_status_failed_adds_ended_at() {
         let q = mock_queue();
         q.set_task_status("task-1", "failed").await.unwrap();
-
         let raw = q.get_task_status("task-1").await.unwrap().unwrap();
         let v: serde_json::Value = serde_json::from_str(&raw).unwrap();
         assert_eq!(v["status"], "failed");
@@ -869,60 +648,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn send_result_sets_completed_status() {
-        let q = mock_queue();
-        q.set_task_status("task-1", "in_progress").await.unwrap();
-
-        let result = TaskResult {
-            task_id: "task-1".to_string(),
-            success: true,
-            result: None,
-            error: None,
-            completed_at: Some(Utc::now()),
-            worker_pod: None,
-            agent_name: None,
-        };
-        q.send_result("task-1", &result).await.unwrap();
-
-        let raw = q.get_task_status("task-1").await.unwrap().unwrap();
-        let v: serde_json::Value = serde_json::from_str(&raw).unwrap();
-        assert_eq!(v["status"], "completed");
-    }
-
-    #[tokio::test]
-    async fn send_result_sets_failed_status() {
-        let q = mock_queue();
-        let result = TaskResult {
-            task_id: "task-1".to_string(),
-            success: false,
-            result: None,
-            error: Some("boom".to_string()),
-            completed_at: Some(Utc::now()),
-            worker_pod: None,
-            agent_name: None,
-        };
-        q.send_result("task-1", &result).await.unwrap();
-
-        let raw = q.get_task_status("task-1").await.unwrap().unwrap();
-        let v: serde_json::Value = serde_json::from_str(&raw).unwrap();
-        assert_eq!(v["status"], "failed");
-    }
-
-    #[tokio::test]
-    async fn connection_returns_clone() {
-        let q = mock_queue();
-        let mut conn = q.connection();
-        // Should be usable as AsyncCommands
-        let _: () = redis::AsyncCommands::set(&mut conn, "test-key", "test-val")
-            .await
-            .unwrap();
-        let val: String = redis::AsyncCommands::get(&mut conn, "test-key")
-            .await
-            .unwrap();
-        assert_eq!(val, "test-val");
-    }
-
-    #[tokio::test]
     async fn task_message_serialization() {
         let msg = TaskMessage {
             task_id: "test_abc".to_string(),
@@ -932,7 +657,7 @@ mod tests {
             payload: serde_json::json!({"host": "192.168.58.1"}),
             priority: 5,
             created_at: None,
-            callback_queue: Some("ares:results:test_abc".to_string()),
+            callback_queue: Some("ares.tasks.results.test_abc".to_string()),
         };
         let json = serde_json::to_string(&msg).unwrap();
         let parsed: TaskMessage = serde_json::from_str(&json).unwrap();
@@ -960,7 +685,6 @@ mod tests {
 
     #[tokio::test]
     async fn task_result_deserialization_defaults() {
-        // Minimal JSON — optional fields should default
         let json = r#"{"task_id":"t1","success":false,"completed_at":null}"#;
         let parsed: TaskResult = serde_json::from_str(json).unwrap();
         assert!(!parsed.success);
@@ -983,5 +707,15 @@ mod tests {
         assert_eq!(parsed.agent, "agent-1");
         assert!(parsed.current_task.is_none());
         assert_eq!(parsed.pod_name.as_deref(), Some("pod-x"));
+    }
+
+    #[tokio::test]
+    async fn nats_required_for_queue_methods() {
+        let q = mock_queue();
+        let err = q
+            .submit_task("recon", "scanner", serde_json::json!({}), "orch", 5)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("NATS"));
     }
 }

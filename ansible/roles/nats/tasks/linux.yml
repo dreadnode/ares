@@ -1,0 +1,116 @@
+---
+- name: Map kernel arch to NATS release arch
+  ansible.builtin.set_fact:
+    nats_release_arch: >-
+      {{ {
+        'x86_64': 'amd64',
+        'aarch64': 'arm64',
+        'armv7l': 'arm7',
+      }[ansible_architecture] }}
+
+- name: Create NATS group
+  ansible.builtin.group:
+    name: "{{ nats_group }}"
+    system: true
+    state: present
+  become: true
+
+- name: Create NATS user
+  ansible.builtin.user:
+    name: "{{ nats_user }}"
+    group: "{{ nats_group }}"
+    system: true
+    shell: /usr/sbin/nologin
+    home: "{{ nats_jetstream_store_dir }}"
+    create_home: false
+    state: present
+  become: true
+
+- name: Create NATS directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: "{{ nats_user }}"
+    group: "{{ nats_group }}"
+    mode: '0750'
+  loop:
+    - "{{ nats_jetstream_store_dir }}"
+    - "{{ nats_log_dir }}"
+    - /etc/nats
+  become: true
+
+- name: Check installed NATS version
+  ansible.builtin.command:
+    cmd: "{{ nats_install_dir }}/nats-server --version"
+  register: nats_installed_version
+  changed_when: false
+  failed_when: false
+
+- name: Download NATS server release
+  ansible.builtin.unarchive:
+    src: "https://github.com/nats-io/nats-server/releases/download/v{{ nats_version }}/nats-server-v{{ nats_version }}-linux-{{ nats_release_arch }}.tar.gz"
+    dest: /tmp
+    remote_src: true
+    creates: "/tmp/nats-server-v{{ nats_version }}-linux-{{ nats_release_arch }}/nats-server"
+  when: nats_version not in (nats_installed_version.stdout | default(''))
+  become: true
+
+- name: Install NATS server binary
+  ansible.builtin.copy:
+    src: "/tmp/nats-server-v{{ nats_version }}-linux-{{ nats_release_arch }}/nats-server"
+    dest: "{{ nats_install_dir }}/nats-server"
+    mode: '0755'
+    remote_src: true
+  when: nats_version not in (nats_installed_version.stdout | default(''))
+  become: true
+  notify: Restart nats
+
+- name: Clean up NATS release tarball directory
+  ansible.builtin.file:
+    path: "/tmp/nats-server-v{{ nats_version }}-linux-{{ nats_release_arch }}"
+    state: absent
+  when: nats_version not in (nats_installed_version.stdout | default(''))
+  become: true
+
+- name: Render NATS server config
+  ansible.builtin.template:
+    src: nats-server.conf.j2
+    dest: /etc/nats/nats-server.conf
+    owner: "{{ nats_user }}"
+    group: "{{ nats_group }}"
+    mode: '0640'
+  become: true
+  notify: Restart nats
+
+- name: Install NATS systemd unit
+  ansible.builtin.template:
+    src: nats-server.service.j2
+    dest: /etc/systemd/system/nats-server.service
+    mode: '0644'
+  become: true
+  notify:
+    - Reload systemd
+    - Restart nats
+
+- name: Enable and start NATS
+  ansible.builtin.systemd:
+    name: nats-server
+    enabled: true
+    state: started
+    daemon_reload: true
+  become: true
+
+- name: Verify NATS is responding
+  ansible.builtin.uri:
+    url: "http://{{ nats_bind_address }}:{{ nats_http_port }}/varz"
+    return_content: true
+  register: nats_varz
+  retries: 5
+  delay: 2
+  until: nats_varz.status == 200
+  when: nats_verify_install
+
+- name: Display NATS verification
+  ansible.builtin.debug:
+    msg: "NATS server: {{ (nats_varz.json | default({})).version | default('unknown') }} (jetstream={{ nats_jetstream_enabled }})"
+  when: nats_verify_install

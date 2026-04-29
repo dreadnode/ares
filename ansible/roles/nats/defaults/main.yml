@@ -1,0 +1,25 @@
+---
+# NATS server release pinned for reproducibility
+nats_version: "2.10.22"
+nats_install_dir: "/usr/local/bin"
+nats_user: "nats"
+nats_group: "nats"
+
+# Listen address & port
+nats_bind_address: "127.0.0.1"
+nats_port: 4222
+nats_http_port: 8222
+
+# JetStream (durable streams) — required by Ares
+nats_jetstream_enabled: true
+nats_jetstream_store_dir: "/var/lib/nats/jetstream"
+nats_jetstream_max_memory: "512M"
+nats_jetstream_max_file: "4G"
+
+# Logging
+nats_log_dir: "/var/log/nats"
+nats_log_file: "/var/log/nats/nats-server.log"
+nats_debug: false
+
+# Verification
+nats_verify_install: false

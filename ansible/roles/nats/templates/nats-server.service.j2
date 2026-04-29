@@ -1,0 +1,20 @@
+# {{ ansible_managed }}
+[Unit]
+Description=NATS Server (Ares broker)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User={{ nats_user }}
+Group={{ nats_group }}
+ExecStart={{ nats_install_dir }}/nats-server -c /etc/nats/nats-server.conf
+ExecReload=/bin/kill -HUP $MAINPID
+LimitNOFILE=65536
+Restart=on-failure
+RestartSec=5
+StandardOutput=append:{{ nats_log_dir }}/nats-server.stdout.log
+StandardError=append:{{ nats_log_dir }}/nats-server.stderr.log
+
+[Install]
+WantedBy=multi-user.target

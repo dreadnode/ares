@@ -3,6 +3,8 @@ use chrono::Utc;
 use redis::AsyncCommands;
 use tracing::info;
 
+use ares_core::nats::NatsBroker;
+use ares_core::state::blue_task_queue::BlueTaskQueue;
 use ares_core::state::RedisStateReader;
 
 use crate::ops::submit::{collect_env_vars, resolve_model, BLUE_ENV_VAR_NAMES};
@@ -72,11 +74,14 @@ pub(crate) async fn blue_submit(
         let _: () = conn.expire(&env_vars_key, 3600).await?;
     }
 
-    // Push investigation request to queue
-    let request_json = serde_json::to_string(&request)?;
-    let _: () = conn
-        .rpush("ares:blue:investigations", &request_json)
-        .await?;
+    // Push investigation request to NATS investigation queue
+    let nats = NatsBroker::connect_from_env()
+        .await
+        .context("Connect to NATS for blue investigation submission")?;
+    nats.ensure_streams().await?;
+    BlueTaskQueue::submit_investigation_request(&nats, &request)
+        .await
+        .context("Failed to publish investigation request to NATS")?;
 
     info!("Investigation submitted: {inv_id}");
     println!("Investigation submitted: {inv_id}");
@@ -219,14 +224,17 @@ pub(crate) async fn blue_from_operation(
         let _: () = conn.expire(&env_vars_key, 3600).await?;
     }
 
-    let request_json = serde_json::to_string(&request)?;
-    let _: () = conn
-        .rpush("ares:blue:investigations", &request_json)
-        .await?;
-
     let op_inv_key = format!("ares:blue:op:{op_id}:investigations");
     let _: () = conn.sadd(&op_inv_key, &inv_id).await?;
     let _: () = conn.expire(&op_inv_key, 7 * 24 * 3600).await?; // 7 day TTL
+
+    let nats = NatsBroker::connect_from_env()
+        .await
+        .context("Connect to NATS for blue investigation submission")?;
+    nats.ensure_streams().await?;
+    BlueTaskQueue::submit_investigation_request(&nats, &request)
+        .await
+        .context("Failed to publish investigation request to NATS")?;
 
     info!("Investigation submitted: {inv_id}");
     println!("Investigation submitted: {inv_id} (from operation {op_id})");

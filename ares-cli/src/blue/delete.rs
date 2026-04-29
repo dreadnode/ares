@@ -126,11 +126,23 @@ pub(crate) async fn blue_cleanup(
         let inv_keys = scan_redis_keys(&mut conn, "ares:blue:inv:*").await?;
         let op_keys = scan_redis_keys(&mut conn, "ares:blue:op:*").await?;
         let active_exists: bool = conn.exists("ares:blue:active_investigations").await?;
-        let queue_len: i64 = conn.llen("ares:blue:investigations").await?;
+
+        // Inspect NATS investigation stream depth (best-effort).
+        let queue_len: i64 = match ares_core::nats::NatsBroker::connect_from_env().await {
+            Ok(nats) => match nats
+                .jetstream()
+                .get_stream(ares_core::nats::BLUE_TASKS_STREAM)
+                .await
+            {
+                Ok(stream) => stream.cached_info().state.messages as i64,
+                Err(_) => 0,
+            },
+            Err(_) => 0,
+        };
 
         println!("Found {} investigation keys", inv_keys.len());
         println!("Found {} operation tracking keys", op_keys.len());
-        println!("Queue length: {queue_len}");
+        println!("NATS blue queue depth: {queue_len}");
 
         if dry_run {
             println!("(dry run - no changes made)");
@@ -160,9 +172,17 @@ pub(crate) async fn blue_cleanup(
             let count: usize = conn.del("ares:blue:active_investigations").await?;
             deleted += count;
         }
+        // Drain queued investigation requests from the NATS stream
         if queue_len > 0 {
-            let _: usize = conn.del("ares:blue:investigations").await?;
-            deleted += 1;
+            if let Ok(nats) = ares_core::nats::NatsBroker::connect_from_env().await {
+                if let Ok(stream) = nats
+                    .jetstream()
+                    .get_stream(ares_core::nats::BLUE_TASKS_STREAM)
+                    .await
+                {
+                    let _ = stream.purge().await;
+                }
+            }
         }
 
         println!("Deleted {deleted} keys");

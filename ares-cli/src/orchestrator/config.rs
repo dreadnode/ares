@@ -16,6 +16,9 @@ pub struct OrchestratorConfig {
     /// Redis connection URL (supports `redis://` and `redis+sentinel://`).
     pub redis_url: String,
 
+    /// NATS connection URL for the work-queue/result broker.
+    pub nats_url: String,
+
     /// Operation ID this orchestrator instance manages.
     pub operation_id: String,
 
@@ -91,6 +94,8 @@ impl OrchestratorConfig {
         let redis_url = env::var("ARES_REDIS_URL")
             .or_else(|_| env::var("REDIS_URL"))
             .unwrap_or_else(|_| "redis://127.0.0.1:6379/0".to_string());
+
+        let nats_url = ares_core::nats::NatsBroker::url_from_env();
 
         let raw_op = env::var("ARES_OPERATION_ID")
             .map_err(|_| anyhow::anyhow!("ARES_OPERATION_ID is required"))?;
@@ -196,6 +201,7 @@ impl OrchestratorConfig {
 
         Ok(Self {
             redis_url,
+            nats_url,
             operation_id,
             max_concurrent_tasks,
             heartbeat_interval: Duration::from_secs(heartbeat_interval_secs),
@@ -297,6 +303,7 @@ mod tests {
     pub(crate) fn make_config(max_tasks: usize) -> OrchestratorConfig {
         OrchestratorConfig {
             redis_url: "redis://localhost".into(),
+            nats_url: "nats://localhost:4222".into(),
             operation_id: "test-op".into(),
             max_concurrent_tasks: max_tasks,
             heartbeat_interval: Duration::from_secs(30),

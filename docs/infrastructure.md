@@ -57,7 +57,7 @@ ansible/                            Ansible collection (dreadnode.nimbus_range v
 
 warpgate-templates/                 Container image build templates
   ares-base/                        Base: Kali + Ansible base role + security tools
-  ares-orchestrator/                Orchestrator: unified Ares binary + Redis client
+  ares-orchestrator/                Orchestrator: unified Ares binary + Redis & NATS clients
   ares-worker/                      Generic worker (inherits ares-base)
   ares-{recon,credential-access,cracker,acl,privesc,lateral-movement,coercion}-agent/
   ares-cracker-{agent-gpu,base-gpu}/
@@ -231,6 +231,7 @@ kubectl run ares-orchestrator \
   --image=ghcr.io/dreadnode/ares-python-orchestrator:latest \
   -it --rm \
   --env="REDIS_URL=redis://redis:6379" \
+  --env="NATS_URL=nats://nats:4222" \
   --env="ANTHROPIC_API_KEY=$ANTHROPIC_API_KEY" \
   -- ares orchestrator
 
@@ -247,19 +248,26 @@ services:
     image: redis:7-alpine
     ports: ["6379:6379"]
 
+  nats:
+    image: nats:2.10-alpine
+    command: ["-js"]   # enable JetStream
+    ports: ["4222:4222"]
+
   orchestrator:
     image: ghcr.io/dreadnode/ares-orchestrator:latest
     command: ["ares", "orchestrator"]
     environment:
       REDIS_URL: redis://redis:6379
+      NATS_URL: nats://nats:4222
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
-    depends_on: [redis]
+    depends_on: [redis, nats]
 
   recon-worker:
     image: ghcr.io/dreadnode/ares-recon-agent:latest
     command: ["ares", "worker"]
     environment:
       REDIS_URL: redis://redis:6379
+      NATS_URL: nats://nats:4222
       ARES_WORKER_ROLE: recon
-    depends_on: [redis]
+    depends_on: [redis, nats]
 ```

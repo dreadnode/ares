@@ -1,14 +1,14 @@
-//! Redis-backed tool dispatcher for the LLM agent loop.
+//! NATS-backed tool dispatcher for the LLM agent loop.
 //!
-//! Implements `ares_llm::ToolDispatcher` by pushing individual tool calls
-//! to a Redis queue (`ares:tool_exec:{role}`) and waiting for results
-//! on a per-call mailbox (`ares:tool_results:{call_id}`).
+//! Implements `ares_llm::ToolDispatcher` by issuing a NATS request to
+//! `ares.tools.exec.{role}` and awaiting the worker reply on the
+//! auto-generated reply inbox.
 //!
-//! Rust workers run a tool executor that BRPOPs from `tool_exec`,
-//! invokes the tool via `ares_tools::dispatch`, and LPUSHes the result.
+//! Rust workers subscribe to `ares.tools.exec.{role}` as a queue group,
+//! invoke the tool via `ares_tools::dispatch`, and reply on the inbox.
 //!
 //! Also provides [`LocalToolDispatcher`] for in-process execution without
-//! going through Redis, useful for testing or single-binary deployments.
+//! going through NATS, useful for testing or single-binary deployments.
 
 use redis::AsyncCommands;
 use serde::{Deserialize, Serialize};
@@ -52,15 +52,6 @@ pub struct ToolExecResponse {
     #[serde(default)]
     pub discoveries: Option<serde_json::Value>,
 }
-
-/// Prefix for tool execution request queues.
-pub(super) const TOOL_EXEC_PREFIX: &str = "ares:tool_exec";
-
-/// Prefix for per-call result mailboxes.
-pub(super) const TOOL_RESULT_PREFIX: &str = "ares:tool_results";
-
-/// TTL for result keys (1 hour).
-pub(super) const RESULT_TTL_SECS: u64 = 3600;
 
 /// Default timeout waiting for a tool result (25 minutes).
 /// Must exceed queue wait time + longest tool runtime (hashcat can queue

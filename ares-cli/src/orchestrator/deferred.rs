@@ -7,6 +7,12 @@
 //!
 //! Score formula: `(priority * 1_000_000_000) + (unix_millis)`
 //! Lower score = higher priority = processed first.
+//!
+//! Stays on Redis (not NATS): this is operation-scoped throttling state owned
+//! by a single orchestrator, not a broker/transport concern. Priority ordering
+//! via ZSET score is non-trivial to model in JetStream and offers no benefit
+//! here since the queue is in-process. Redis remains for state; NATS handles
+//! cross-process queues.
 
 use anyhow::{Context, Result};
 use chrono::Utc;

@@ -275,11 +275,17 @@ pub async fn wait_for_completion(
                         .query_async(&mut conn)
                         .await
                         .unwrap_or(0);
-                    let queued: i64 = redis::cmd("LLEN")
-                        .arg("ares:blue:investigations")
-                        .query_async(&mut conn)
-                        .await
-                        .unwrap_or(0);
+                    let queued: i64 = match dispatcher.queue.nats_broker() {
+                        Some(nats) => match nats
+                            .jetstream()
+                            .get_stream(ares_core::nats::BLUE_TASKS_STREAM)
+                            .await
+                        {
+                            Ok(stream) => stream.cached_info().state.messages as i64,
+                            Err(_) => 0,
+                        },
+                        None => 0,
+                    };
 
                     if active == 0 && queued == 0 {
                         info!("All blue investigations finished");
@@ -463,9 +469,9 @@ async fn auto_submit_blue_investigation(
         let _: () = conn.expire(&env_vars_key, 3600).await?;
     }
 
-    // Pre-register as active BEFORE pushing to queue to avoid TOCTOU race:
+    // Pre-register as active BEFORE publishing to avoid TOCTOU race:
     // without this, the completion wait loop can observe both queued==0 and
-    // active==0 in the window between the blue orchestrator's BRPOP (drains
+    // active==0 in the window between the blue orchestrator's pull (drains
     // the queue) and its register_investigation (SADDs to active set).
     let _: () = conn
         .sadd(ares_core::state::BLUE_ACTIVE_INVESTIGATIONS, &inv_id)
@@ -474,16 +480,18 @@ async fn auto_submit_blue_investigation(
         .expire(ares_core::state::BLUE_ACTIVE_INVESTIGATIONS, 86400)
         .await?;
 
-    // Push investigation request to queue
-    let request_json = serde_json::to_string(&request)?;
-    let _: () = conn
-        .rpush("ares:blue:investigations", &request_json)
-        .await?;
-
     // Track investigation against operation
     let op_inv_key = format!("ares:blue:op:{op_id}:investigations");
     let _: () = conn.sadd(&op_inv_key, &inv_id).await?;
     let _: () = conn.expire(&op_inv_key, 7 * 24 * 3600).await?;
+
+    // Publish investigation request to NATS
+    let nats = dispatcher
+        .queue
+        .nats_broker()
+        .ok_or_else(|| anyhow::anyhow!("Dispatcher TaskQueue has no NATS broker"))?;
+    ares_core::state::blue_task_queue::BlueTaskQueue::submit_investigation_request(&nats, &request)
+        .await?;
 
     info!(
         investigation_id = inv_id,

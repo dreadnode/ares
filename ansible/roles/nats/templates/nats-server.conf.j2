@@ -1,0 +1,25 @@
+# {{ ansible_managed }}
+# NATS server configuration for Ares (task + RPC broker)
+
+host: "{{ nats_bind_address }}"
+port: {{ nats_port }}
+
+http: "{{ nats_bind_address }}:{{ nats_http_port }}"
+
+server_name: "ares-nats"
+
+{% if nats_debug %}
+debug: true
+trace: false
+{% endif %}
+
+log_file: "{{ nats_log_file }}"
+logtime: true
+
+{% if nats_jetstream_enabled %}
+jetstream {
+  store_dir: "{{ nats_jetstream_store_dir }}"
+  max_memory_store: {{ nats_jetstream_max_memory | regex_replace('([0-9]+)([KMGT])$', '\\1\\2B') }}
+  max_file_store: {{ nats_jetstream_max_file | regex_replace('([0-9]+)([KMGT])$', '\\1\\2B') }}
+}
+{% endif %}

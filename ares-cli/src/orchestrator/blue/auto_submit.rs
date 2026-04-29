@@ -231,16 +231,17 @@ async fn submit_investigation(
         let _: () = conn.expire(&env_key, 3600).await?;
     }
 
-    // Push to investigation queue
-    let request_json = serde_json::to_string(&request)?;
-    let _: () = conn
-        .rpush("ares:blue:investigations", &request_json)
-        .await?;
-
-    // Track investigation against operation
+    // Track investigation against operation (Redis state)
     let op_inv_key = format!("ares:blue:op:{op_id}:investigations");
     let _: () = conn.sadd(&op_inv_key, &inv_id).await?;
     let _: () = conn.expire(&op_inv_key, 7 * 24 * 3600).await?;
+
+    // Publish investigation request to NATS (reuse the orchestrator's broker)
+    let nats = queue
+        .nats_broker()
+        .ok_or_else(|| anyhow::anyhow!("Orchestrator TaskQueue has no NATS broker"))?;
+    ares_core::state::blue_task_queue::BlueTaskQueue::submit_investigation_request(&nats, &request)
+        .await?;
 
     Ok(inv_id)
 }

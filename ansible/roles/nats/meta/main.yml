@@ -1,0 +1,24 @@
+---
+galaxy_info:
+  author: Dreadnode
+  namespace: dreadnode
+  description: NATS JetStream server for Ares task and RPC broker
+  company: dreadnode
+  license: MIT
+  role_name: nats
+  min_ansible_version: "2.18.4"
+  platforms:
+    - name: Ubuntu
+      versions:
+        - all
+    - name: Debian
+      versions:
+        - all
+    - name: Kali
+      versions:
+        - all
+  galaxy_tags:
+    - ares
+    - nats
+    - jetstream
+    - broker

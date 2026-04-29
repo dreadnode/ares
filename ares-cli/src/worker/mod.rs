@@ -50,17 +50,18 @@ pub async fn run() -> anyhow::Result<()> {
         "Ares worker starting"
     );
 
-    // Single shared Redis connection — cloned cheaply to all subsystems
-    // Default response_timeout is 500ms which is too short for BRPOP
-    // blocking calls (5s+). Without this, the client-side timeout cancels
-    // the future but the server-side BRPOP remains, consuming queue items
-    // that get silently dropped.
+    // Single shared Redis connection (state only — heartbeats, task status,
+    // token usage, hosts sync). Queue traffic moved to NATS JetStream.
     let redis_client = redis::Client::open(config.redis_url.as_str())?;
     let cm_config = redis::aio::ConnectionManagerConfig::new()
         .set_response_timeout(Some(std::time::Duration::from_secs(30)));
     let conn = redis_client
         .get_connection_manager_with_config(cm_config)
         .await?;
+
+    // Single shared NATS connection — multiplexes work-queue pulls, result
+    // publishes, and tool-exec request/reply over one TCP connection.
+    let nats = ares_core::nats::NatsBroker::connect(&config.nats_url).await?;
 
     // Shared shutdown signal
     let shutdown = Arc::new(tokio::sync::Notify::new());
@@ -103,10 +104,17 @@ pub async fn run() -> anyhow::Result<()> {
     // Run the appropriate loop based on worker mode
     let result = match config.mode {
         config::WorkerMode::Task => {
-            task_loop::run_task_loop(&config, conn, status_tx, shutdown_signal).await
+            task_loop::run_task_loop(&config, conn, nats.clone(), status_tx, shutdown_signal).await
         }
         config::WorkerMode::ToolExec => {
-            tool_executor::run_tool_exec_loop(&config, conn, status_tx, shutdown_signal).await
+            tool_executor::run_tool_exec_loop(
+                &config,
+                conn,
+                nats.clone(),
+                status_tx,
+                shutdown_signal,
+            )
+            .await
         }
         #[cfg(feature = "blue")]
         config::WorkerMode::BlueTask => {
@@ -125,6 +133,7 @@ pub async fn run() -> anyhow::Result<()> {
             blue_task_loop::run_blue_task_loop(
                 &config,
                 conn,
+                nats.clone(),
                 provider,
                 dispatcher,
                 model_name,

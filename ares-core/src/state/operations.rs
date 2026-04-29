@@ -8,25 +8,42 @@ use redis::AsyncCommands;
 use super::keys::*;
 use super::{build_key, build_lock_key};
 
-/// Publish a state update notification via Redis PUBLISH.
+/// Publish a state update notification via NATS.
 ///
-/// Channel: `ares:state:updates:{operation_id}`
+/// Subject: `ares.state.updates.{operation_id}` (core publish, fire-and-forget).
 /// Message: `{"type":"state_update","operation_id":"...","ts":"..."}`
 ///
-/// Returns the number of subscribers that received the message.
+/// Returns 0 on success (no per-subscriber count; NATS core publish is async).
+/// Connects to NATS using `ARES_NATS_URL` / `NATS_URL` if `nats` is None.
 pub async fn publish_state_update(
-    conn: &mut impl AsyncCommands,
+    _conn: &mut impl AsyncCommands,
     operation_id: &str,
 ) -> Result<i64, redis::RedisError> {
-    let channel = format!("{STATE_UPDATE_CHANNEL_PREFIX}:{operation_id}");
+    use bytes::Bytes;
     let message = serde_json::json!({
         "type": "state_update",
         "operation_id": operation_id,
         "ts": chrono::Utc::now().to_rfc3339(),
     });
-    let msg_str = serde_json::to_string(&message).unwrap_or_default();
-    let count: i64 = conn.publish(&channel, &msg_str).await?;
-    Ok(count)
+    let msg_bytes = Bytes::from(serde_json::to_vec(&message).unwrap_or_default());
+    let subject = format!(
+        "{}.{operation_id}",
+        crate::nats::STATE_UPDATE_SUBJECT_PREFIX
+    );
+
+    // Best-effort one-shot publish. Errors here are not fatal — state writes
+    // already succeeded and the subscriber-count signal isn't load-bearing.
+    match crate::nats::NatsBroker::connect_from_env().await {
+        Ok(broker) => {
+            if let Err(e) = broker.client().publish(subject, msg_bytes).await {
+                tracing::debug!(operation_id, "NATS publish_state_update failed: {e}");
+            }
+        }
+        Err(e) => {
+            tracing::debug!(operation_id, "NATS unavailable for state update: {e}");
+        }
+    }
+    Ok(0)
 }
 
 /// Set the operation status JSON string.

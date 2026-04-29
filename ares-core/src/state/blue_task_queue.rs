@@ -1,15 +1,30 @@
-//! Blue team task queue for distributed investigation workers.
+//! Blue team task queue.
 //!
-//! Matches the Python `BlueTaskQueue` key patterns for task submission,
-//! result polling, heartbeat, and investigation registration.
+//! Hybrid Redis + NATS JetStream. Queues live on JetStream; heartbeats and
+//! investigation registration stay on Redis.
+//!
+//! NATS subjects:
+//!   - `ares.blue.tasks.{role}`              global per-role work queue
+//!   - `ares.blue.tasks.results.{task_id}`   durable per-task result subject
+//!   - `ares.blue.investigations`            investigation request queue
+//!
+//! Redis keys (state only):
+//!   - `ares:blue:heartbeat:{agent}`         agent heartbeat (TTL 60s)
+//!   - `ares:blue:active_investigations`     SET of active investigation IDs
+//!   - `ares:blue:inv:{id}:queue_meta`       investigation metadata (HASH)
 
 use std::time::Duration;
 
+use anyhow::{Context, Result};
+use bytes::Bytes;
 use chrono::Utc;
+use futures::StreamExt;
 use redis::aio::ConnectionManagerConfig;
 use redis::AsyncCommands;
 use serde::{Deserialize, Serialize};
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
+
+use crate::nats::{self, NatsBroker};
 
 use super::keys::*;
 
@@ -70,41 +85,59 @@ impl BlueTaskResult {
     }
 }
 
-/// Blue team task queue backed by Redis.
-///
-/// Queue naming:
-///   ares:blue:tasks:global:{role}          Global queue per role
-///   ares:blue:results:{task_id}            Result queue (TTL)
-///   ares:blue:heartbeat:{agent}            Agent heartbeat (TTL 60s)
-///   ares:blue:active_investigations        Active investigation IDs (SET, TTL 24h)
-///   ares:blue:inv:{id}:queue_meta          Investigation queue metadata (HASH, TTL 24h)
+/// Blue team task queue — NATS for queues, Redis for state.
 pub struct BlueTaskQueue {
     conn: redis::aio::ConnectionManager,
+    nats: Option<NatsBroker>,
 }
 
 impl BlueTaskQueue {
+    /// Connect to Redis only (state methods work, queue methods will error).
+    /// Used by callers that only need heartbeat/investigation registration.
     pub async fn connect(redis_url: &str) -> anyhow::Result<Self> {
         let client = redis::Client::open(redis_url)?;
-        // Default response_timeout is 500ms which is too short for BRPOP
-        // blocking calls. Set to 30s to accommodate blocking operations.
         let config =
             ConnectionManagerConfig::new().set_response_timeout(Some(Duration::from_secs(30)));
         let conn = client.get_connection_manager_with_config(config).await?;
-        Ok(Self { conn })
+        Ok(Self { conn, nats: None })
+    }
+
+    /// Connect to both Redis (state) and NATS (queues).
+    pub async fn connect_with_nats(redis_url: &str, nats_url: &str) -> anyhow::Result<Self> {
+        let mut q = Self::connect(redis_url).await?;
+        let nats = NatsBroker::connect(nats_url).await?;
+        nats.ensure_streams().await?;
+        q.nats = Some(nats);
+        Ok(q)
     }
 
     pub fn from_conn(conn: redis::aio::ConnectionManager) -> Self {
-        Self { conn }
+        Self { conn, nats: None }
+    }
+
+    pub fn from_parts(conn: redis::aio::ConnectionManager, nats: NatsBroker) -> Self {
+        Self {
+            conn,
+            nats: Some(nats),
+        }
     }
 
     pub fn conn_mut(&mut self) -> &mut redis::aio::ConnectionManager {
         &mut self.conn
     }
 
+    fn nats(&self) -> Result<&NatsBroker> {
+        self.nats
+            .as_ref()
+            .context("BlueTaskQueue has no NATS broker configured")
+    }
+
+    // === Queue methods (NATS JetStream) =====================================
+
     /// Submit a task to the global role queue.
     pub async fn submit_task(&mut self, task: &BlueTaskMessage) -> anyhow::Result<()> {
-        let queue_key = format!("{BLUE_TASK_QUEUE_PREFIX}:global:{}", task.role);
-        let data = serde_json::to_string(task)?;
+        let subject = nats::blue_task_subject(&task.role);
+        let bytes = Bytes::from(serde_json::to_vec(task).context("serialize BlueTaskMessage")?);
 
         debug!(
             task_id = %task.task_id,
@@ -113,40 +146,69 @@ impl BlueTaskQueue {
             "submitting blue team task"
         );
 
-        let _: () = self.conn.lpush(&queue_key, &data).await?;
-        let _: () = self.conn.expire(&queue_key, 86400).await?;
+        let ack = self
+            .nats()?
+            .jetstream()
+            .publish(subject.clone(), bytes)
+            .await
+            .with_context(|| format!("JetStream publish to {subject}"))?;
+        ack.await
+            .with_context(|| format!("Awaiting JetStream ack for {subject}"))?;
         Ok(())
     }
 
-    /// Poll for a task from the global role queue (blocking).
+    /// Poll for a task from the global role queue (blocking up to `timeout_secs`).
     pub async fn poll_global_task(
         &mut self,
         role: &str,
         timeout_secs: f64,
     ) -> anyhow::Result<Option<BlueTaskMessage>> {
-        let queue_key = format!("{BLUE_TASK_QUEUE_PREFIX}:global:{role}");
-        let result: Option<(String, String)> = redis::cmd("BRPOP")
-            .arg(&queue_key)
-            .arg(timeout_secs)
-            .query_async(&mut self.conn)
+        let nats = self.nats()?;
+        let subject = nats::blue_task_subject(role);
+        let consumer_name = format!("blue-tasks-{role}");
+        nats.ensure_pull_consumer(nats::BLUE_TASKS_STREAM, &consumer_name, &subject)
             .await?;
 
-        match result {
-            Some((_key, data)) => {
-                let task: BlueTaskMessage = serde_json::from_str(&data)?;
+        let stream = nats.jetstream().get_stream(nats::BLUE_TASKS_STREAM).await?;
+        let consumer = stream
+            .get_consumer::<async_nats::jetstream::consumer::pull::Config>(&consumer_name)
+            .await
+            .map_err(|e| anyhow::anyhow!("get_consumer({consumer_name}): {e}"))?;
+
+        let timeout = Duration::from_secs_f64(timeout_secs.max(0.05));
+        let mut fetch = consumer
+            .fetch()
+            .max_messages(1)
+            .expires(timeout)
+            .messages()
+            .await
+            .context("start fetch")?;
+
+        match fetch.next().await {
+            Some(Ok(m)) => {
+                let task: BlueTaskMessage = serde_json::from_slice(&m.payload)
+                    .with_context(|| format!("Bad BlueTaskMessage JSON on {subject}"))?;
+                m.ack().await.map_err(|e| anyhow::anyhow!("ack: {e}")).ok();
                 Ok(Some(task))
             }
+            Some(Err(e)) => Err(anyhow::anyhow!("JetStream fetch error: {e}")),
             None => Ok(None),
         }
     }
 
-    /// Send a task result.
+    /// Send a task result to its dedicated result subject.
     pub async fn send_result(&mut self, result: &BlueTaskResult) -> anyhow::Result<()> {
-        let result_key = format!("{BLUE_RESULT_QUEUE_PREFIX}:{}", result.task_id);
-        let data = serde_json::to_string(result)?;
+        let subject = nats::blue_task_result_subject(&result.task_id);
+        let bytes = Bytes::from(serde_json::to_vec(result).context("serialize BlueTaskResult")?);
 
-        let _: () = self.conn.lpush(&result_key, &data).await?;
-        let _: () = self.conn.expire(&result_key, 3600).await?; // 1h TTL
+        let ack = self
+            .nats()?
+            .jetstream()
+            .publish(subject.clone(), bytes)
+            .await
+            .with_context(|| format!("JetStream publish to {subject}"))?;
+        ack.await
+            .with_context(|| format!("Awaiting ack for {subject}"))?;
         Ok(())
     }
 
@@ -156,35 +218,138 @@ impl BlueTaskQueue {
         task_id: &str,
         timeout_secs: f64,
     ) -> anyhow::Result<Option<BlueTaskResult>> {
-        let result_key = format!("{BLUE_RESULT_QUEUE_PREFIX}:{task_id}");
-        let result: Option<(String, String)> = redis::cmd("BRPOP")
-            .arg(&result_key)
-            .arg(timeout_secs)
-            .query_async(&mut self.conn)
-            .await?;
-
-        match result {
-            Some((_key, data)) => {
-                let task_result: BlueTaskResult = serde_json::from_str(&data)?;
-                Ok(Some(task_result))
-            }
-            None => Ok(None),
-        }
+        self.fetch_result(task_id, Duration::from_secs_f64(timeout_secs.max(0.0)))
+            .await
     }
 
     /// Check for a result without blocking.
     pub async fn check_result(&mut self, task_id: &str) -> anyhow::Result<Option<BlueTaskResult>> {
-        let result_key = format!("{BLUE_RESULT_QUEUE_PREFIX}:{task_id}");
-        let result: Option<String> = self.conn.rpop(&result_key, None).await?;
+        self.fetch_result(task_id, Duration::from_millis(100)).await
+    }
 
-        match result {
-            Some(data) => {
-                let task_result: BlueTaskResult = serde_json::from_str(&data)?;
-                Ok(Some(task_result))
+    async fn fetch_result(
+        &mut self,
+        task_id: &str,
+        timeout: Duration,
+    ) -> anyhow::Result<Option<BlueTaskResult>> {
+        use async_nats::jetstream::consumer::pull::Config as PullConfig;
+        use async_nats::jetstream::consumer::AckPolicy;
+
+        let nats = self.nats()?;
+        let stream = nats.jetstream().get_stream(nats::BLUE_TASKS_STREAM).await?;
+
+        let cfg = PullConfig {
+            filter_subject: nats::blue_task_result_subject(task_id),
+            ack_policy: AckPolicy::Explicit,
+            inactive_threshold: Duration::from_secs(60),
+            ..Default::default()
+        };
+
+        let consumer = stream
+            .create_consumer(cfg)
+            .await
+            .context("create ephemeral blue result consumer")?;
+
+        let mut fetch = consumer
+            .fetch()
+            .max_messages(1)
+            .expires(timeout.max(Duration::from_millis(50)))
+            .messages()
+            .await
+            .context("start fetch")?;
+
+        match fetch.next().await {
+            Some(Ok(m)) => {
+                let parsed: BlueTaskResult = serde_json::from_slice(&m.payload)
+                    .with_context(|| format!("Bad BlueTaskResult JSON for {task_id}"))?;
+                m.ack().await.map_err(|e| anyhow::anyhow!("ack: {e}")).ok();
+                Ok(Some(parsed))
             }
+            Some(Err(e)) => Err(anyhow::anyhow!("JetStream fetch error: {e}")),
             None => Ok(None),
         }
     }
+
+    /// Pop an investigation request from the queue.
+    pub async fn pop_investigation_request(
+        &mut self,
+        timeout_secs: f64,
+    ) -> anyhow::Result<Option<serde_json::Value>> {
+        let nats = self.nats()?;
+        let consumer_name = "blue-investigations";
+        nats.ensure_pull_consumer(
+            nats::BLUE_TASKS_STREAM,
+            consumer_name,
+            nats::BLUE_INVESTIGATION_SUBJECT,
+        )
+        .await?;
+
+        let stream = nats.jetstream().get_stream(nats::BLUE_TASKS_STREAM).await?;
+        let consumer = stream
+            .get_consumer::<async_nats::jetstream::consumer::pull::Config>(consumer_name)
+            .await
+            .map_err(|e| anyhow::anyhow!("get_consumer({consumer_name}): {e}"))?;
+
+        let timeout = Duration::from_secs_f64(timeout_secs.max(0.05));
+        let mut fetch = consumer
+            .fetch()
+            .max_messages(1)
+            .expires(timeout)
+            .messages()
+            .await
+            .context("start fetch")?;
+
+        match fetch.next().await {
+            Some(Ok(m)) => {
+                match serde_json::from_slice::<serde_json::Value>(&m.payload) {
+                    Ok(val) => {
+                        m.ack().await.map_err(|e| anyhow::anyhow!("ack: {e}")).ok();
+                        Ok(Some(val))
+                    }
+                    Err(e) => {
+                        warn!("Failed to parse investigation request: {e}");
+                        // Ack and skip the malformed message
+                        m.ack().await.map_err(|e| anyhow::anyhow!("ack: {e}")).ok();
+                        Ok(None)
+                    }
+                }
+            }
+            Some(Err(e)) => Err(anyhow::anyhow!("JetStream fetch error: {e}")),
+            None => Ok(None),
+        }
+    }
+
+    /// Submit an investigation request via the supplied NATS broker. No Redis
+    /// connection required — used by CLI submission paths (`ares blue submit`,
+    /// `ares blue from-operation`, auto-submit) which only need to publish.
+    pub async fn submit_investigation_request(
+        broker: &NatsBroker,
+        request: &serde_json::Value,
+    ) -> anyhow::Result<()> {
+        let bytes = Bytes::from(serde_json::to_vec(request).context("serialize request")?);
+        let ack = broker
+            .jetstream()
+            .publish(nats::BLUE_INVESTIGATION_SUBJECT, bytes)
+            .await
+            .with_context(|| {
+                format!("JetStream publish to {}", nats::BLUE_INVESTIGATION_SUBJECT)
+            })?;
+        ack.await.context("ack investigation request")?;
+        Ok(())
+    }
+
+    /// Get the global role queue length (best-effort; returns total stream depth).
+    pub async fn queue_length(&mut self, _role: &str) -> anyhow::Result<usize> {
+        let stream = self
+            .nats()?
+            .jetstream()
+            .get_stream(nats::BLUE_TASKS_STREAM)
+            .await?;
+        let info = stream.cached_info();
+        Ok(info.state.messages as usize)
+    }
+
+    // === Redis-backed state methods ========================================
 
     /// Send a heartbeat for a blue team agent.
     pub async fn send_heartbeat(
@@ -234,14 +399,12 @@ impl BlueTaskQueue {
         alert: &serde_json::Value,
         model: &str,
     ) -> anyhow::Result<()> {
-        // Add to active set
         let _: () = self
             .conn
             .sadd(BLUE_ACTIVE_INVESTIGATIONS, investigation_id)
             .await?;
         let _: () = self.conn.expire(BLUE_ACTIVE_INVESTIGATIONS, 86400).await?;
 
-        // Store investigation metadata
         let meta_key = format!("{BLUE_KEY_PREFIX}:{investigation_id}:queue_meta");
         let _: () = self
             .conn
@@ -257,6 +420,8 @@ impl BlueTaskQueue {
             .hset(&meta_key, "registered_at", Utc::now().to_rfc3339())
             .await?;
         let _: () = self.conn.expire(&meta_key, 86400).await?;
+
+        info!(investigation_id, "Investigation registered as active");
         Ok(())
     }
 
@@ -287,36 +452,6 @@ impl BlueTaskQueue {
         let meta_key = format!("{BLUE_KEY_PREFIX}:{investigation_id}:queue_meta");
         let model: Option<String> = self.conn.hget(&meta_key, "model").await?;
         Ok(model)
-    }
-
-    /// Pop an investigation request from the queue.
-    pub async fn pop_investigation_request(
-        &mut self,
-        timeout_secs: f64,
-    ) -> anyhow::Result<Option<serde_json::Value>> {
-        let result: Option<(String, String)> = redis::cmd("BRPOP")
-            .arg(BLUE_INVESTIGATION_QUEUE)
-            .arg(timeout_secs)
-            .query_async(&mut self.conn)
-            .await?;
-
-        match result {
-            Some((_key, data)) => match serde_json::from_str(&data) {
-                Ok(val) => Ok(Some(val)),
-                Err(e) => {
-                    warn!("Failed to parse investigation request: {e}");
-                    Ok(None)
-                }
-            },
-            None => Ok(None),
-        }
-    }
-
-    /// Get the global role queue length.
-    pub async fn queue_length(&mut self, role: &str) -> anyhow::Result<usize> {
-        let queue_key = format!("{BLUE_TASK_QUEUE_PREFIX}:global:{role}");
-        let len: usize = self.conn.llen(&queue_key).await?;
-        Ok(len)
     }
 }
 
@@ -357,7 +492,6 @@ mod tests {
         let success = BlueTaskResult::success("t", "i", serde_json::Value::Null, "a");
         let failure = BlueTaskResult::failure("t", "i", "err".to_string(), "a");
 
-        // Both should have a non-empty RFC 3339 timestamp.
         assert!(!success.completed_at.is_empty());
         assert!(!failure.completed_at.is_empty());
         assert!(chrono::DateTime::parse_from_rfc3339(&success.completed_at).is_ok());

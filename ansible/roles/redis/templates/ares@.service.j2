@@ -1,12 +1,13 @@
 [Unit]
 Description=Ares Worker (%i)
-After=redis.service
-Wants=redis.service
+After=redis.service nats-server.service
+Wants=redis.service nats-server.service
 
 [Service]
 Type=simple
 ExecStart={{ redis_ares_worker_binary }} worker
 Environment=ARES_REDIS_URL=redis://{{ redis_bind_address }}:{{ redis_port }}
+Environment=NATS_URL=nats://{{ redis_bind_address }}:4222
 Environment=ARES_WORKER_ROLE=%i
 Environment=ARES_WORKER_MODE=tool_exec
 Environment=RUST_LOG=info

@@ -552,6 +552,7 @@ tasks:
         PARAMS_FILE=$(mktemp)
         trap "rm -f $PARAMS_FILE" EXIT
         START_CMD="systemctl start redis-server 2>/dev/null || systemctl start redis; sleep 1; redis-cli ping; "
+        START_CMD+="systemctl start nats-server; sleep 1; curl -fsS http://127.0.0.1:8222/varz >/dev/null && echo 'NATS OK' || echo 'NATS NOT RUNNING'; "
         START_CMD+="systemctl start $WORKER_UNITS; sleep 2; echo Worker status:; "
         START_CMD+='for role in recon credential_access cracker acl privesc lateral coercion; do '
         START_CMD+='st=$(systemctl is-active ares@${role} 2>/dev/null || echo dead); '
@@ -1036,6 +1037,7 @@ tasks:
           fi
         fi
         ENV_FILE_CMD="$ENV_FILE_CMD; echo 'ARES_DEPLOYMENT={{.EC2_DEPLOYMENT}}' >> /etc/ares/env"
+        ENV_FILE_CMD="$ENV_FILE_CMD; echo 'NATS_URL=nats://127.0.0.1:4222' >> /etc/ares/env"
         # OTEL: send traces to Alloy OTLP gateway → Tempo via HTTP/protobuf
         ENV_FILE_CMD="$ENV_FILE_CMD; echo 'OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=${OTEL_TRACES_ENDPOINT}' >> /etc/ares/env"
         ENV_FILE_CMD="$ENV_FILE_CMD; echo 'OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf' >> /etc/ares/env"
@@ -1054,6 +1056,7 @@ tasks:
         export GRAFANA_URL='${GRAFANA_URL_VAL}'
         export GRAFANA_SERVICE_ACCOUNT_TOKEN='${GRAFANA_TOKEN_VAL}'
         export ARES_REDIS_URL=redis://127.0.0.1:6379
+        export NATS_URL=nats://127.0.0.1:4222
         {{- if .LLM_MODEL}}
         export ARES_LLM_MODEL='{{.LLM_MODEL}}'
         {{- end}}

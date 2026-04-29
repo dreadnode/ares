@@ -2,6 +2,7 @@
 # Launch ares orchestrator with environment variables
 # Placeholders are substituted by the calling task via envsubst/sed
 export ARES_REDIS_URL=redis://127.0.0.1:6379
+export NATS_URL=nats://127.0.0.1:4222
 export RUST_LOG=info
 export ARES_OPERATION_ID='__ARES_PAYLOAD__'
 export OPENAI_API_KEY='__OPENAI_API_KEY__'

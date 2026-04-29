@@ -134,10 +134,15 @@
       vars:
         privesc_tools_verify_install: true
 
-    # Redis server for Ares worker message broker
+    # Redis server for Ares durable state store
     - role: dreadnode.nimbus_range.redis
       vars:
         redis_verify_install: true
+
+    # NATS JetStream server for Ares task + RPC broker
+    - role: dreadnode.nimbus_range.nats
+      vars:
+        nats_verify_install: true
 
     # Grafana Alloy for log shipping to Loki
     - name: Install and configure Grafana Alloy
