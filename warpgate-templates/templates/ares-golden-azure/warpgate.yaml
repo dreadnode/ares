@@ -1,0 +1,58 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/cowdogmoo/warpgate/main/schema/warpgate-template.json
+metadata:
+  name: ares-golden-azure
+  version: 0.1.0
+  description: Azure variant of the Ares golden image. Proves the Azure VM Image Builder + Compute Gallery pipeline end-to-end.
+  author: Dreadnode <info@dreadnode.io>
+  license: MIT
+  tags:
+    - ares
+    - golden-image
+    - azure
+    - smoke-test
+  requires:
+    warpgate: '>=1.0.0'
+
+name: ares-golden-azure
+version: latest
+
+base:
+  image: Canonical/0001-com-ubuntu-server-jammy/22_04-lts-gen2:latest
+
+provisioners:
+  - type: shell
+    inline:
+      - apt-get update
+      - DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ca-certificates curl jq python3 python3-pip python3-venv pipx
+      - pipx ensurepath
+      - echo "ares-golden-azure base packages installed at $(date -u)" | tee /etc/ares-build-stamp
+
+  - type: ansible
+    playbook_path: ./playbooks/smoke.yml
+
+  - type: shell
+    inline:
+      - echo "ares-golden-azure provisioning complete" | tee -a /etc/ares-build-stamp
+      - apt-get clean
+      - rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
+
+targets:
+  - type: azure
+    subscription_id: 70a9c8a4-6bc6-4a48-ae24-27996cea8c02
+    resource_group: warpgate-test-rg
+    location: eastus
+    gallery: warpgateTestGallery
+    gallery_image_definition: ares-golden-azure
+    vm_size: Standard_D4s_v3
+    os_type: Linux
+    identity_id: /subscriptions/70a9c8a4-6bc6-4a48-ae24-27996cea8c02/resourcegroups/warpgate-test-rg/providers/Microsoft.ManagedIdentity/userAssignedIdentities/warpgate-aib-uami
+    source_image:
+      marketplace:
+        publisher: Canonical
+        offer: 0001-com-ubuntu-server-jammy
+        sku: 22_04-lts-gen2
+        version: latest
+    image_tags:
+      Project: ares
+      ManagedBy: warpgate
+      Variant: azure-smoke-test
