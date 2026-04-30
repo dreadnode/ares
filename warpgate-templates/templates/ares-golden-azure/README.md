@@ -25,7 +25,7 @@ Provisioned manually (one-time):
   with Contributor on `warpgate-test-rg`
 - Quota for `Standard_NC4as_T4_v3` in `centralus` (T4 GPU family)
 - Kali Marketplace terms accepted on the subscription:
-  `az vm image terms accept --publisher kali-linux --offer kali --plan kali-last`
+  `az vm image terms accept --publisher kali-linux --offer kali --plan kali-2026-1`
 
 ## Build
 

@@ -102,7 +102,7 @@ targets:
       marketplace:
         publisher: kali-linux
         offer: kali
-        sku: kali-last
+        sku: kali-2026-1
         version: latest
     image_tags:
       Project: ares
