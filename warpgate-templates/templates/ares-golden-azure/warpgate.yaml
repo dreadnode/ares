@@ -95,7 +95,9 @@ targets:
     gallery: warpgateTestGallery
     gallery_image_definition: ares-golden-azure
     identity_id: /subscriptions/70a9c8a4-6bc6-4a48-ae24-27996cea8c02/resourcegroups/warpgate-test-rg/providers/Microsoft.ManagedIdentity/userAssignedIdentities/warpgate-aib-uami
-    vm_size: Standard_NC4as_T4_v3
+    vm_size: Standard_D4s_v3
+    # For GPU:
+    # vm_size: Standard_NC4as_T4_v3
     source_image:
       marketplace:
         publisher: kali-linux
