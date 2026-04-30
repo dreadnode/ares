@@ -104,6 +104,10 @@ targets:
         offer: kali
         sku: kali-2026-1
         version: latest
+        plan:
+          name: kali-2026-1
+          product: kali
+          publisher: kali-linux
     image_tags:
       Project: ares
       Role: RedTeamAttackBox
