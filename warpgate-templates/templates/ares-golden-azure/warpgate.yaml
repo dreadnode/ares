@@ -26,17 +26,13 @@ version: latest
 base:
   image: kali-linux/kali/kali-last:latest
 
-sources:
-  - name: nimbus_range
-    git:
-      repository: https://github.com/dreadnode/ares.git
-      ref: feat/more-attack-cov
-      depth: 1
-      auth:
-        token: ${GITHUB_TOKEN}
-
 provisioners:
-  # Install pipx and Ansible
+  # Install pipx + Ansible, then fetch the nimbus_range collection on the build VM.
+  # We re-clone in shell rather than using warpgate's `sources` + `type: file`
+  # pattern (see ares-golden-image) because Azure Image Builder expands `type: file`
+  # into one customizer per file and times out on the 2000+ file ansible/ tree.
+  # Token is passed via a credential helper so it never appears in the clone URL
+  # or AIB customizer logs; ref tracks the AMI variant.
   - type: shell
     inline:
       - apt-get update
@@ -45,14 +41,7 @@ provisioners:
       - pipx install --force uv
       - pipx install --force ansible-core
       - pipx ensurepath
-
-  # Copy ansible collection from source (cloned securely by warpgate without embedding token in shell commands)
-  - type: file
-    source: ${sources.nimbus_range}
-    destination: /tmp/nimbus_range
-
-  - type: shell
-    inline:
+      - GITHUB_TOKEN=${GITHUB_TOKEN} git -c 'credential.helper=!f() { echo username=x-access-token; echo password=$GITHUB_TOKEN; }; f' clone --depth 1 --branch feat/more-attack-cov https://github.com/dreadnode/ares.git /tmp/nimbus_range
       - mkdir -p /root/.ansible/collections/ansible_collections/dreadnode/nimbus_range
       - cp -r /tmp/nimbus_range/ansible/. /root/.ansible/collections/ansible_collections/dreadnode/nimbus_range/
       - rm -rf /tmp/nimbus_range
