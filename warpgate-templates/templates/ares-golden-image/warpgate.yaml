@@ -36,7 +36,8 @@ base:
 sources:
   - name: nimbus_range
     git:
-      repository: https://github.com/dreadnode/ansible-collection-nimbus_range.git
+      repository: https://github.com/dreadnode/ares.git
+      ref: feat/more-attack-cov
       depth: 1
       auth:
         token: ${GITHUB_TOKEN}
@@ -60,7 +61,7 @@ provisioners:
   - type: shell
     inline:
       - mkdir -p /root/.ansible/collections/ansible_collections/dreadnode/nimbus_range
-      - cp -r /tmp/nimbus_range/* /root/.ansible/collections/ansible_collections/dreadnode/nimbus_range/
+      - cp -r /tmp/nimbus_range/ansible/. /root/.ansible/collections/ansible_collections/dreadnode/nimbus_range/
       - rm -rf /tmp/nimbus_range
 
   # Install NVIDIA drivers for GPU-accelerated hashcat on g4dn (T4 GPU)
