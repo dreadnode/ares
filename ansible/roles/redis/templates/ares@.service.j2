@@ -15,5 +15,13 @@ RestartSec=5
 StandardOutput=append:{{ redis_ares_log_dir }}/%i.log
 StandardError=append:{{ redis_ares_log_dir }}/%i.log
 
+# Contain child processes (netexec, hashcat, nmap, etc.) within this cgroup.
+# Without these limits, runaway tool processes can OOM the entire system and
+# take down the SSM agent (see: Apr 2026 incident).
+Delegate=yes
+MemoryHigh={{ redis_ares_worker_memory_high }}
+MemoryMax={{ redis_ares_worker_memory_max }}
+TasksMax={{ redis_ares_worker_tasks_max }}
+
 [Install]
 WantedBy=multi-user.target

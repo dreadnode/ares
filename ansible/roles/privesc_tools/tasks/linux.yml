@@ -297,6 +297,14 @@
     creates: "{{ privesc_tools_nopac_install_dir }}/venv"
   when: privesc_tools_install_nopac
 
+- name: Install setuptools in noPac venv (provides pkg_resources)
+  ansible.builtin.pip:
+    # setuptools 81 dropped pkg_resources; impacket 0.9.24 still imports it.
+    name: "setuptools<81"
+    virtualenv: "{{ privesc_tools_nopac_install_dir }}/venv"
+  become: true
+  when: privesc_tools_install_nopac
+
 - name: Install noPac dependencies in venv
   ansible.builtin.pip:
     requirements: "{{ privesc_tools_nopac_install_dir }}/requirements.txt"

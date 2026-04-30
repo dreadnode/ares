@@ -68,6 +68,28 @@
     - aws_ssm_agent_snap_check.rc != 0
     - aws_ssm_agent_dpkg_check.rc != 0
 
+- name: Create SSM agent systemd override directory
+  ansible.builtin.file:
+    path: /etc/systemd/system/amazon-ssm-agent.service.d
+    state: directory
+    mode: '0755'
+  become: true
+  when:
+    - aws_ssm_agent_snap_check.rc != 0
+    - aws_ssm_agent_oom_protect | default(true)
+
+- name: Deploy SSM agent OOM protection override
+  ansible.builtin.template:
+    src: ssm-oom-protect.conf.j2
+    dest: /etc/systemd/system/amazon-ssm-agent.service.d/oom-protect.conf
+    mode: '0644'
+  become: true
+  when:
+    - aws_ssm_agent_snap_check.rc != 0
+    - aws_ssm_agent_oom_protect | default(true)
+  notify:
+    - Restart ssm_agent (Linux)
+
 - name: Reload systemd
   ansible.builtin.systemd:
     daemon_reload: true

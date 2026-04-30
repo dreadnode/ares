@@ -194,6 +194,7 @@ Install and configure privilege escalation tools for Ares agents
 - **Clone SCMUACBypass from GitHub** (ansible.builtin.git) - Conditional
 - **Clone noPac from GitHub** (ansible.builtin.git) - Conditional
 - **Create virtual environment for noPac** (ansible.builtin.command) - Conditional
+- **Install setuptools in noPac venv (provides pkg_resources)** (ansible.builtin.pip) - Conditional
 - **Install noPac dependencies in venv** (ansible.builtin.pip) - Conditional
 - **Create wrapper script for noPac** (ansible.builtin.copy) - Conditional
 - **Clone PrintNightmare from GitHub** (ansible.builtin.git) - Conditional

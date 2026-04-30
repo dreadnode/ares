@@ -1,0 +1,7 @@
+# Protect SSM agent from the OOM killer.
+# Ares workers spawn many tool subprocesses (netexec, hashcat, nmap) that can
+# exhaust memory. Without this override, the OOM killer targets the SSM agent's
+# cgroup and kills it, making the instance unreachable.
+[Service]
+OOMScoreAdjust=-900
+MemoryMax={{ aws_ssm_agent_memory_max }}

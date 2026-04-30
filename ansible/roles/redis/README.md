@@ -24,6 +24,9 @@ Redis server for Ares worker message broker
 | `redis_ares_worker_binary` | str | <code>/usr/local/bin/ares</code> | No description |
 | `redis_ares_log_dir` | str | <code>/var/log/ares</code> | No description |
 | `redis_ares_config_dir` | str | <code>/etc/ares</code> | No description |
+| `redis_ares_worker_memory_high` | str | <code>2G</code> | No description |
+| `redis_ares_worker_memory_max` | str | <code>3G</code> | No description |
+| `redis_ares_worker_tasks_max` | int | <code>256</code> | No description |
 | `redis_verify_install` | bool | <code>False</code> | No description |
 
 ## Tasks
