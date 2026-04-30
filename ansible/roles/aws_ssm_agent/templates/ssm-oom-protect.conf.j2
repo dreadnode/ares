@@ -1,7 +1,8 @@
-# Protect SSM agent from the OOM killer.
-# Ares workers spawn many tool subprocesses (netexec, hashcat, nmap) that can
-# exhaust memory. Without this override, the OOM killer targets the SSM agent's
-# cgroup and kills it, making the instance unreachable.
+# OOMScoreAdjust: survive system-wide OOM when Ares workers exhaust memory.
+# Children (RunCommand, Session Manager) inherit this — fine here since heavy
+# subprocesses run under a separate unit.
+# MemoryMax: cgroup self-cap (containment for SSM leaks). Cgroup-local OOM
+# ignores OOMScoreAdjust, so the two are independent protections.
 [Service]
 OOMScoreAdjust=-900
 MemoryMax={{ aws_ssm_agent_memory_max }}
