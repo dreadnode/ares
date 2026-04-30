@@ -1,15 +1,22 @@
 # yaml-language-server: $schema=https://raw.githubusercontent.com/cowdogmoo/warpgate/main/schema/warpgate-template.json
 metadata:
   name: ares-golden-azure
-  version: 0.1.0
-  description: Azure variant of the Ares golden image. Proves the Azure VM Image Builder + Compute Gallery pipeline end-to-end.
+  version: 1.0.0
+  description: Azure variant of the Ares golden image with all red team tools - recon, credential access, privesc, cracking, lateral movement, ACL abuse, and coercion
   author: Dreadnode <info@dreadnode.io>
   license: MIT
   tags:
     - ares
     - golden-image
     - azure
-    - smoke-test
+    - red-team
+    - reconnaissance
+    - credential-access
+    - privilege-escalation
+    - password-cracking
+    - lateral-movement
+    - acl
+    - coercion
   requires:
     warpgate: '>=1.0.0'
 
@@ -17,26 +24,68 @@ name: ares-golden-azure
 version: latest
 
 base:
-  image: Canonical/0001-com-ubuntu-server-jammy/22_04-lts-gen2:latest
+  image: kali-linux/kali/kali-last:latest
+
+sources:
+  - name: nimbus_range
+    git:
+      repository: https://github.com/dreadnode/ares.git
+      ref: feat/more-attack-cov
+      depth: 1
+      auth:
+        token: ${GITHUB_TOKEN}
 
 provisioners:
+  # Install pipx and Ansible
   - type: shell
     inline:
-      - cloud-init status --wait || true
-      - rm -rf /var/lib/apt/lists/*
       - apt-get update
-      - DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ca-certificates curl jq python3 python3-pip python3-venv pipx
+      - apt-get install -y --no-install-recommends ca-certificates git procps sudo python3-apt python3-pip python3-venv pipx
+      - 'sed -i ''s|^PATH="|PATH="/root/.local/bin:/root/.cargo/bin:|'' /etc/environment || echo ''PATH="/root/.local/bin:/root/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"'' > /etc/environment'
+      - pipx install --force uv
+      - pipx install --force ansible-core
       - pipx ensurepath
-      - echo "ares-golden-azure base packages installed at $(date -u)" | tee /etc/ares-build-stamp
 
-  - type: ansible
-    playbook_path: ./playbooks/smoke.yml
+  # Copy ansible collection from source (cloned securely by warpgate without embedding token in shell commands)
+  - type: file
+    source: ${sources.nimbus_range}
+    destination: /tmp/nimbus_range
 
   - type: shell
     inline:
-      - echo "ares-golden-azure provisioning complete" | tee -a /etc/ares-build-stamp
+      - mkdir -p /root/.ansible/collections/ansible_collections/dreadnode/nimbus_range
+      - cp -r /tmp/nimbus_range/ansible/. /root/.ansible/collections/ansible_collections/dreadnode/nimbus_range/
+      - rm -rf /tmp/nimbus_range
+
+  # Install NVIDIA drivers for GPU-accelerated hashcat on NCas T4 v3 (T4 GPU)
+  - type: shell
+    inline:
+      - apt-get update
+      - apt-get install -y --no-install-recommends nvidia-driver firmware-misc-nonfree
+      - nvidia-smi || echo "nvidia-smi not available during image build (expected if no GPU attached)"
+
+  # Attack Box - all red team tools + Alloy telemetry
+  # NOTE: Using shell instead of ansible provisioner because the playbook
+  # exceeds Azure VM Image Builder's customizer length limit when inlined.
+  - type: shell
+    inline:
+      - PATH=/root/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin ansible-galaxy collection install -r /root/.ansible/collections/ansible_collections/dreadnode/nimbus_range/requirements.yml --force
+      - HOME=/root ANSIBLE_REMOTE_TMP=/tmp/ansible-tmp-$USER PATH=/root/.local/bin:/root/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin ansible-playbook /root/.ansible/collections/ansible_collections/dreadnode/nimbus_range/playbooks/ares/goad_attack_box.yml -i localhost, -c local -e ansible_shell_executable=/bin/bash -e ansible_python_interpreter=/usr/bin/python3 -e cracking_tools_gpu_support=true -e cracking_tools_hashcat_from_source=true -e cracking_tools_nvidia_opencl_icd=true
+
+  # NVIDIA GPU drivers + CUDA toolkit for hashcat GPU acceleration.
+  # Kernel headers + dkms are required so the nvidia module builds for the
+  # running kernel. The image then works on GPU instances (e.g. NCas T4 v3)
+  # without manual driver setup.
+  - type: shell
+    inline:
+      - DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends linux-headers-$(uname -r) dkms nvidia-driver nvidia-cuda-toolkit
+
+  # Cleanup
+  - type: shell
+    inline:
       - apt-get clean
       - rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
+      - echo "Ares golden azure build completed successfully"
 
 targets:
   - type: azure
@@ -46,14 +95,15 @@ targets:
     gallery: warpgateTestGallery
     gallery_image_definition: ares-golden-azure
     identity_id: /subscriptions/70a9c8a4-6bc6-4a48-ae24-27996cea8c02/resourcegroups/warpgate-test-rg/providers/Microsoft.ManagedIdentity/userAssignedIdentities/warpgate-aib-uami
-    vm_size: Standard_L2aos_v4
+    vm_size: Standard_NC4as_T4_v3
     source_image:
       marketplace:
-        publisher: Canonical
-        offer: 0001-com-ubuntu-server-jammy
-        sku: 22_04-lts-gen2
+        publisher: kali-linux
+        offer: kali
+        sku: kali-last
         version: latest
     image_tags:
       Project: ares
+      Role: RedTeamAttackBox
       ManagedBy: warpgate
-      Variant: azure-smoke-test
+      Tools: recon,credential-access,privesc,cracker,lateral-movement,acl-abuse,coercion
