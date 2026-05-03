@@ -20,13 +20,15 @@ const DEDUP_CROSS_REUSE: &str = "cross_reuse";
 
 /// Check if a username is a high-value reuse candidate.
 fn is_reuse_candidate(username: &str) -> bool {
+    if username.ends_with('$') {
+        return false;
+    }
     let u = username.to_lowercase();
     u == "administrator"
         || u == "localuser"
         || u.contains("svc")
         || u.contains("admin")
         || u.contains("sql")
-        || username == username.to_uppercase() // Machine accounts
 }
 
 /// Check if two domains should be skipped for cross-domain reuse (same or parent/child).
@@ -211,10 +213,10 @@ mod tests {
     }
 
     #[test]
-    fn reuse_candidate_machine_accounts() {
-        // All uppercase indicates machine accounts
-        assert!(is_reuse_candidate("DC01$"));
-        assert!(is_reuse_candidate("WORKSTATION01"));
+    fn reuse_candidate_machine_accounts_rejected() {
+        assert!(!is_reuse_candidate("DC01$"));
+        assert!(!is_reuse_candidate("WS01$"));
+        assert!(!is_reuse_candidate("SQL01$"));
     }
 
     #[test]
@@ -222,12 +224,12 @@ mod tests {
         assert!(!is_reuse_candidate("jsmith"));
         assert!(!is_reuse_candidate("John.Doe"));
         assert!(!is_reuse_candidate("regularUser"));
+        assert!(!is_reuse_candidate("WORKSTATION01"));
     }
 
     #[test]
     fn reuse_candidate_empty_string() {
-        // Empty string: to_uppercase == "" == username, so machine account check fires
-        assert!(is_reuse_candidate(""));
+        assert!(!is_reuse_candidate(""));
     }
 
     #[test]

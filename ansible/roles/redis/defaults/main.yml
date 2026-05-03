@@ -11,5 +11,13 @@ redis_ares_worker_binary: "/usr/local/bin/ares"
 redis_ares_log_dir: "/var/log/ares"
 redis_ares_config_dir: "/etc/ares"
 
+# Worker cgroup resource limits (per-role instance).
+# Workers spawn tool subprocesses (netexec, hashcat, nmap) that inherit the
+# service cgroup. Without limits these can exhaust system memory and OOM-kill
+# unrelated services like the SSM agent.
+redis_ares_worker_memory_high: "2G"
+redis_ares_worker_memory_max: "3G"
+redis_ares_worker_tasks_max: 256
+
 # Verification
 redis_verify_install: false

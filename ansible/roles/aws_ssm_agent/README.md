@@ -18,6 +18,8 @@ Install and configure AWS SSM Agent
 | -------- | ---- | ------- | ----------- |
 | `aws_ssm_agent_temp_dir` | str | <code>/tmp/ssm_install</code> | No description |
 | `aws_ssm_agent_aws_region` | str | <code>us-east-1</code> | No description |
+| `aws_ssm_agent_oom_protect` | bool | <code>True</code> | No description |
+| `aws_ssm_agent_memory_max` | str | <code>512M</code> | No description |
 
 ### Role Variables (main.yml)
 
@@ -42,6 +44,8 @@ Install and configure AWS SSM Agent
 - **Create temporary directory for SSM installation** (ansible.builtin.file) - Conditional
 - **Download SSM agent** (ansible.builtin.get_url) - Conditional
 - **Install SSM agent (Debian/Ubuntu)** (ansible.builtin.apt) - Conditional
+- **Create SSM agent systemd override directory** (ansible.builtin.file) - Conditional
+- **Deploy SSM agent OOM protection override** (ansible.builtin.template) - Conditional
 - **Reload systemd** (ansible.builtin.systemd) - Conditional
 - **Enable and start SSM agent** (ansible.builtin.systemd) - Conditional
 - **Refresh snap SSM agent** (ansible.builtin.command) - Conditional
