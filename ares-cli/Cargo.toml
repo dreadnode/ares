@@ -40,4 +40,5 @@ serde_yaml = "0.9"
 [dev-dependencies]
 tokio = { workspace = true }
 rstest = "0.26"
+tempfile = "3"
 ares-core = { path = "../ares-core", features = ["test-utils", "blue", "telemetry"] }
