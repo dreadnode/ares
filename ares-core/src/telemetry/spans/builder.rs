@@ -29,6 +29,7 @@ pub struct AgentSpanBuilder {
     target_type: Option<String>,
     credential_domain: Option<String>,
     operation_id: Option<String>,
+    task_id: Option<String>,
     span_kind: SpanKind,
     target_service: Option<String>,
     is_error: bool,
@@ -46,6 +47,7 @@ impl AgentSpanBuilder {
             target_type: None,
             credential_domain: None,
             operation_id: None,
+            task_id: None,
             span_kind: SpanKind::Internal,
             target_service: None,
             is_error: false,
@@ -100,6 +102,14 @@ impl AgentSpanBuilder {
 
     pub fn operation_id(mut self, id: impl Into<String>) -> Self {
         self.operation_id = Some(id.into());
+        self
+    }
+
+    /// Per-task identifier within an operation. Distinct from `operation_id`:
+    /// `op.id` correlates every span belonging to one red-team operation,
+    /// `task.id` correlates every span belonging to one agent loop run.
+    pub fn task_id(mut self, id: impl Into<String>) -> Self {
+        self.task_id = Some(id.into());
         self
     }
 
@@ -213,7 +223,12 @@ impl AgentSpanBuilder {
             // Service graph
             "peer.service" = self.target_service.as_deref().unwrap_or(""),
             // Correlation
+            // `attack_operation_id` is retained for dashboards already
+            // querying that field; `op.id` / `task.id` are the OTel-style
+            // names new code and dashboards should prefer.
             attack_operation_id = self.operation_id.as_deref().unwrap_or(""),
+            "op.id" = self.operation_id.as_deref().unwrap_or(""),
+            "task.id" = self.task_id.as_deref().unwrap_or(""),
             // Error
             error.message = self.error_message.as_deref().unwrap_or(""),
         )

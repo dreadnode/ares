@@ -156,8 +156,14 @@ impl SharedState {
         let op_id = state.operation_id.clone();
         drop(state);
 
-        let span =
-            ares_core::telemetry::spans::trace_domain_admin(&attack_path_str, depth, Some(&op_id));
+        // Domain-admin is an operation-level milestone (not scoped to a single
+        // task), so we leave `task.id` empty and only correlate by `op.id`.
+        let span = ares_core::telemetry::spans::trace_domain_admin(
+            &attack_path_str,
+            depth,
+            Some(&op_id),
+            None,
+        );
         let _guard = span.enter();
         tracing::info!(attack_path = %attack_path_str, depth = depth, "🏆 Domain admin achieved");
 

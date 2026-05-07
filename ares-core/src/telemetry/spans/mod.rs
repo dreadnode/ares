@@ -113,6 +113,7 @@ mod tests {
             Some("admin"),
             Some("domain_controller"),
             Some("op-001"),
+            Some("task-aaa"),
             false,
             None,
         );
@@ -131,6 +132,7 @@ mod tests {
             Some("dc01.contoso.local"),
             Some("domain_controller"),
             Some("op-001"),
+            Some("task-aaa"),
         );
         assert!(!span.is_disabled());
     }
@@ -139,7 +141,15 @@ mod tests {
     fn traces_decision() {
         init_test_subscriber();
         let tools = vec!["nmap_scan".to_string(), "smb_sweep".to_string()];
-        let span = trace_decision("recon", Team::Red, "nmap_scan", &tools, Some(0.9), None);
+        let span = trace_decision(
+            "recon",
+            Team::Red,
+            "nmap_scan",
+            &tools,
+            Some(0.9),
+            Some("op-001"),
+            Some("task-aaa"),
+        );
         assert!(!span.is_disabled());
     }
 
