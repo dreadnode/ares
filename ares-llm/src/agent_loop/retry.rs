@@ -1,4 +1,6 @@
-use tracing::warn;
+use std::time::Instant;
+
+use tracing::{field::Empty, info_span, warn, Instrument};
 
 use crate::provider::{LlmError, LlmProvider, LlmRequest, LlmResponse};
 
@@ -18,7 +20,51 @@ pub(super) async fn call_with_retry(
     let mut last_err: Option<LlmError> = None;
 
     for attempt in 0..=config.max_retries {
-        match provider.chat(request).await {
+        // One span per attempt: durations and token counts have to be on the
+        // attempt that produced them, otherwise rate-limit retries inflate
+        // the wall-clock attributed to the successful call.
+        let span = info_span!(
+            "llm.call",
+            "llm.model" = %request.model,
+            "llm.attempt" = attempt,
+            "llm.input_tokens" = Empty,
+            "llm.output_tokens" = Empty,
+            "llm.cache_read_tokens" = Empty,
+            "llm.cache_creation_tokens" = Empty,
+            "llm.tool_count" = request.tools.len(),
+            "llm.message_count" = request.messages.len(),
+            "llm.duration_ms" = Empty,
+            "llm.stop_reason" = Empty,
+            "llm.error" = Empty,
+            "task.id" = task_id,
+        );
+        let start = Instant::now();
+        let result = provider.chat(request).instrument(span.clone()).await;
+        let duration_ms = start.elapsed().as_millis() as u64;
+        span.record("llm.duration_ms", duration_ms);
+        match &result {
+            Ok(response) => {
+                span.record("llm.input_tokens", response.usage.input_tokens);
+                span.record("llm.output_tokens", response.usage.output_tokens);
+                span.record(
+                    "llm.cache_read_tokens",
+                    response.usage.cache_read_input_tokens,
+                );
+                span.record(
+                    "llm.cache_creation_tokens",
+                    response.usage.cache_creation_input_tokens,
+                );
+                span.record(
+                    "llm.stop_reason",
+                    format!("{:?}", response.stop_reason).as_str(),
+                );
+            }
+            Err(e) => {
+                span.record("llm.error", format!("{e}").as_str());
+            }
+        }
+
+        match result {
             Ok(response) => return Ok(response),
             Err(e) => {
                 if !e.is_retryable() || attempt == config.max_retries {
