@@ -78,7 +78,7 @@ jobs:
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       - name: Cache Warpgate binary
-        uses: actions/cache@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
         id: warpgate-cache
         with:
           path: ~/.local/bin/warpgate
@@ -542,7 +542,7 @@ jobs:
           docker system prune -af || true
 
       - name: Cache Warpgate binary
-        uses: actions/cache@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
         id: warpgate-cache
         with:
           path: ~/.local/bin/warpgate
@@ -716,7 +716,7 @@ jobs:
           BUILDX_NO_DEFAULT_ATTESTATIONS: 1
 
       - name: Upload digest
-        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: base-digests-${{ matrix.name }}-tag-${{ matrix.architecture.arch }}
           path: ${{ github.workspace }}/digest-${{ matrix.name }}-${{ matrix.architecture.arch }}.txt
@@ -756,7 +756,7 @@ jobs:
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       - name: Cache Warpgate binary
-        uses: actions/cache@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
         id: warpgate-cache
         with:
           path: ~/.local/bin/warpgate
@@ -1033,7 +1033,7 @@ jobs:
           docker system prune -af || true
 
       - name: Cache Warpgate binary
-        uses: actions/cache@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
         id: warpgate-cache
         with:
           path: ~/.local/bin/warpgate
@@ -1207,7 +1207,7 @@ jobs:
           BUILDX_NO_DEFAULT_ATTESTATIONS: 1
 
       - name: Upload digest
-        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: dependent-digests-${{ matrix.name }}-tag-${{ matrix.architecture.arch }}
           path: ${{ github.workspace }}/digest-${{ matrix.name }}-${{ matrix.architecture.arch }}.txt
@@ -1251,7 +1251,7 @@ jobs:
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       - name: Cache Warpgate binary
-        uses: actions/cache@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
         id: warpgate-cache
         with:
           path: ~/.local/bin/warpgate
@@ -1501,7 +1501,7 @@ jobs:
           docker system prune -af || true
 
       - name: Cache Warpgate binary
-        uses: actions/cache@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
         id: warpgate-cache
         with:
           path: ~/.local/bin/warpgate
@@ -1607,7 +1607,7 @@ jobs:
           BUILDX_NO_DEFAULT_ATTESTATIONS: 1
 
       - name: Upload digest
-        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: gpu-base-digests-${{ matrix.name }}-tag-${{ matrix.architecture.arch }}
           path: ${{ github.workspace }}/digest-${{ matrix.name }}-${{ matrix.architecture.arch }}.txt
@@ -1637,7 +1637,7 @@ jobs:
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       - name: Cache Warpgate binary
-        uses: actions/cache@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
         id: warpgate-cache
         with:
           path: ~/.local/bin/warpgate
@@ -1836,7 +1836,7 @@ jobs:
           docker system prune -af || true
 
       - name: Cache Warpgate binary
-        uses: actions/cache@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
         id: warpgate-cache
         with:
           path: ~/.local/bin/warpgate
@@ -1942,7 +1942,7 @@ jobs:
           BUILDX_NO_DEFAULT_ATTESTATIONS: 1
 
       - name: Upload digest
-        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: gpu-dependent-digests-${{ matrix.name }}-tag-${{ matrix.architecture.arch }}
           path: ${{ github.workspace }}/digest-${{ matrix.name }}-${{ matrix.architecture.arch }}.txt
@@ -1976,7 +1976,7 @@ jobs:
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       - name: Cache Warpgate binary
-        uses: actions/cache@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
         id: warpgate-cache
         with:
           path: ~/.local/bin/warpgate
