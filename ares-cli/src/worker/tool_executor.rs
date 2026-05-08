@@ -302,6 +302,7 @@ async fn execute_and_respond(
                                 di.target_fqdn.as_deref(),
                                 dt,
                                 request.operation_id.as_deref(),
+                                Some(request.task_id.as_str()),
                             );
                             let _guard = span.enter();
                         }
