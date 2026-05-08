@@ -103,6 +103,17 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - name: Validate templates with warpgate (syntax-only)
+        # warpgate validate resolves ${VAR} references before checking required
+        # fields, so placeholders are needed for env-driven values (Azure target
+        # IDs, GITHUB_TOKEN). Real values are supplied at build time.
+        env:
+          GITHUB_TOKEN: placeholder
+          AZURE_SUBSCRIPTION_ID: 00000000-0000-0000-0000-000000000000
+          AZURE_LOCATION: centralus
+          AZURE_RESOURCE_GROUP: placeholder-rg
+          AZURE_GALLERY_NAME: placeholder-gallery
+          AZURE_IDENTITY_ID: /subscriptions/00000000-0000-0000-0000-000000000000/resourcegroups/placeholder-rg/providers/Microsoft.ManagedIdentity/userAssignedIdentities/placeholder-uami
+          AZURE_VM_SIZE: Standard_D4s_v3
         run: |
           failed=0
           while IFS= read -r template; do
