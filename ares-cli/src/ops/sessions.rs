@@ -62,7 +62,10 @@ fn list_operation_ids(root: &Path) -> Result<()> {
 fn list_task_ids(root: &Path, op_id: &str) -> Result<()> {
     let dir = root.join(op_id);
     if !dir.exists() {
-        return Err(anyhow!("no session logs for operation {op_id} at {}", dir.display()));
+        return Err(anyhow!(
+            "no session logs for operation {op_id} at {}",
+            dir.display()
+        ));
     }
     let mut entries: Vec<(String, u64)> = std::fs::read_dir(&dir)
         .with_context(|| format!("reading {}", dir.display()))?
@@ -105,8 +108,8 @@ fn sessions_show(op_id: &str, task_id: &str, pretty: bool) -> Result<()> {
                 let ts = v.get("ts").and_then(|t| t.as_str()).unwrap_or("?");
                 println!("[{ts}] step={step} kind={kind}");
                 if let Some(data) = v.get("data") {
-                    let pretty_data = serde_json::to_string_pretty(data)
-                        .unwrap_or_else(|_| data.to_string());
+                    let pretty_data =
+                        serde_json::to_string_pretty(data).unwrap_or_else(|_| data.to_string());
                     for ln in pretty_data.lines() {
                         println!("    {ln}");
                     }
@@ -167,8 +170,8 @@ fn print_message(index: usize, msg: &ChatMessage) {
                     content,
                 } => println!("<tool_result id={tool_use_id}>\n{content}"),
                 ContentPart::ToolUse { id, name, input } => {
-                    let pretty = serde_json::to_string_pretty(input)
-                        .unwrap_or_else(|_| input.to_string());
+                    let pretty =
+                        serde_json::to_string_pretty(input).unwrap_or_else(|_| input.to_string());
                     println!("<tool_use id={id} name={name}>\n{pretty}");
                 }
             }

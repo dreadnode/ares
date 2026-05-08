@@ -222,6 +222,7 @@ impl SessionLogConfig {
     /// Construct from env vars:
     /// - `ARES_SESSION_LOG_DIR` (explicit path; takes precedence)
     /// - `ARES_SESSION_LOG_ENABLED=0` opts out (default is enabled)
+    ///
     /// When enabled with no explicit dir, defaults to `~/.ares/sessions`.
     pub fn from_env() -> Self {
         if let Ok(dir) = std::env::var("ARES_SESSION_LOG_DIR") {
