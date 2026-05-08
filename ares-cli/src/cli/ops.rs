@@ -1,6 +1,37 @@
 use clap::Subcommand;
 
 #[derive(Subcommand)]
+pub(crate) enum SessionsCommands {
+    /// List operation IDs (and optionally task IDs) that have session logs
+    List {
+        /// Operation ID; when set, lists task IDs under that operation
+        operation_id: Option<String>,
+    },
+
+    /// Print a session log file (raw JSONL or pretty-printed)
+    Show {
+        /// Operation ID
+        operation_id: String,
+        /// Task ID
+        task_id: String,
+        /// Pretty-print each event instead of raw JSONL
+        #[arg(long)]
+        pretty: bool,
+    },
+
+    /// Replay the conversation messages from a session log
+    Replay {
+        /// Operation ID
+        operation_id: String,
+        /// Task ID
+        task_id: String,
+        /// Output as JSON array instead of human-readable transcript
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand)]
 pub(crate) enum OpsCommands {
     /// List all operations
     List {
@@ -250,6 +281,12 @@ pub(crate) enum OpsCommands {
         /// Max age in hours
         #[arg(long, default_value = "24")]
         max_age_hours: u64,
+    },
+
+    /// Inspect or replay JSONL session logs from the agent loop
+    Sessions {
+        #[command(subcommand)]
+        cmd: SessionsCommands,
     },
 
     /// Persist token usage from Redis to PostgreSQL for an operation

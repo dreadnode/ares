@@ -9,7 +9,7 @@ pub(crate) mod blue;
 
 pub(crate) use config::ConfigCommands;
 pub(crate) use history::HistoryCommands;
-pub(crate) use ops::OpsCommands;
+pub(crate) use ops::{OpsCommands, SessionsCommands};
 
 #[cfg(feature = "blue")]
 pub(crate) use blue::BlueCommands;
