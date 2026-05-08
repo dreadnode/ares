@@ -18,6 +18,7 @@
 //! bounded redelivery, replacing the silent-loss `BRPOP` pattern.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -27,6 +28,7 @@ use futures::StreamExt;
 use redis::aio::{ConnectionLike, ConnectionManager};
 use redis::AsyncCommands;
 use serde::{Deserialize, Serialize};
+use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
@@ -38,9 +40,6 @@ pub const LOCK_PREFIX: &str = "ares:lock";
 
 /// Task status keys expire after 24 hours.
 const TASK_STATUS_TTL_SECS: u64 = 60 * 60 * 24;
-
-/// Default timeout when polling a single result via an ephemeral consumer.
-const DEFAULT_RESULT_POLL_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// Task submitted to a role queue. Mirrors `ares.core.task_queue.TaskMessage`.
 ///
@@ -101,10 +100,101 @@ pub struct HeartbeatData {
 pub struct TaskQueueCore<C> {
     conn: C,
     nats: Option<NatsBroker>,
+    result_demux: Option<Arc<ResultDemux>>,
 }
 
 /// Production task queue.
 pub type TaskQueue = TaskQueueCore<ConnectionManager>;
+
+/// Single long-lived JetStream consumer that drains every `ares.tasks.results.*`
+/// subject and stashes parsed results in a per-`task_id` cache.
+///
+/// Replaces the old per-poll ephemeral-consumer pattern, which collided with
+/// the WorkQueue retention policy on `ARES_TASKS` (one consumer per filter
+/// subject, max) and produced steady-state `create ephemeral result consumer`
+/// failures while the orchestrator polled.
+struct ResultDemux {
+    cache: Arc<Mutex<HashMap<String, TaskResult>>>,
+}
+
+impl ResultDemux {
+    /// Create the consumer and spawn the drain loop. Lives for the lifetime
+    /// of the process; the spawned task only exits if the JetStream message
+    /// stream ends (which only happens on shutdown / connection loss).
+    async fn start(nats: &NatsBroker) -> Result<Arc<Self>> {
+        use async_nats::jetstream::consumer::pull::Config as PullConfig;
+        use async_nats::jetstream::consumer::{AckPolicy, Consumer};
+
+        let stream = nats
+            .jetstream()
+            .get_stream(nats::TASKS_STREAM)
+            .await
+            .with_context(|| format!("get_stream({})", nats::TASKS_STREAM))?;
+
+        let filter = format!("{}.>", nats::TASK_RESULT_SUBJECT_PREFIX);
+        let cfg = PullConfig {
+            filter_subject: filter.clone(),
+            ack_policy: AckPolicy::Explicit,
+            ..Default::default()
+        };
+        let consumer: Consumer<PullConfig> = stream
+            .create_consumer(cfg)
+            .await
+            .context("create result-demux consumer")?;
+
+        let cache: Arc<Mutex<HashMap<String, TaskResult>>> = Arc::default();
+        let cache_bg = cache.clone();
+        let prefix = format!("{}.", nats::TASK_RESULT_SUBJECT_PREFIX);
+
+        tokio::spawn(async move {
+            let mut messages = match consumer.messages().await {
+                Ok(m) => m,
+                Err(e) => {
+                    warn!(error = %e, "result-demux: consumer.messages() failed");
+                    return;
+                }
+            };
+            while let Some(item) = messages.next().await {
+                let msg = match item {
+                    Ok(m) => m,
+                    Err(e) => {
+                        warn!(error = %e, "result-demux: stream error");
+                        continue;
+                    }
+                };
+                let task_id = msg
+                    .subject
+                    .as_str()
+                    .strip_prefix(&prefix)
+                    .unwrap_or("")
+                    .to_string();
+                if task_id.is_empty() {
+                    warn!(subject = %msg.subject, "result-demux: subject without task_id; dropping");
+                    let _ = msg.ack().await;
+                    continue;
+                }
+                match serde_json::from_slice::<TaskResult>(&msg.payload) {
+                    Ok(parsed) => {
+                        cache_bg.lock().await.insert(task_id, parsed);
+                        let _ = msg.ack().await;
+                    }
+                    Err(e) => {
+                        warn!(error = %e, subject = %msg.subject, "result-demux: bad TaskResult JSON; dropping");
+                        let _ = msg.ack().await;
+                    }
+                }
+            }
+            warn!("result-demux: message stream ended");
+        });
+
+        info!(filter = %filter, "result-demux started");
+        Ok(Arc::new(Self { cache }))
+    }
+
+    async fn take(&self, task_id: &str) -> Option<TaskResult> {
+        self.cache.lock().await.remove(task_id)
+    }
+}
 
 impl TaskQueue {
     /// Connect to Redis + NATS and return a TaskQueue.
@@ -122,9 +212,12 @@ impl TaskQueue {
         let nats = NatsBroker::connect(nats_url).await?;
         nats.ensure_streams().await?;
 
+        let result_demux = ResultDemux::start(&nats).await?;
+
         Ok(Self {
             conn,
             nats: Some(nats),
+            result_demux: Some(result_demux),
         })
     }
 }
@@ -186,7 +279,11 @@ impl<C: ConnectionLike + Clone + Send + Sync + 'static> TaskQueueCore<C> {
     /// Construct from a Redis backend only — used by unit tests that don't
     /// exercise queue methods. Queue methods will return an error.
     pub fn from_connection(conn: C) -> Self {
-        Self { conn, nats: None }
+        Self {
+            conn,
+            nats: None,
+            result_demux: None,
+        }
     }
 
     fn nats(&self) -> Result<&NatsBroker> {
@@ -264,11 +361,15 @@ impl<C: ConnectionLike + Clone + Send + Sync + 'static> TaskQueueCore<C> {
 
     /// Non-blocking check for a task result.
     ///
-    /// Creates an ephemeral pull consumer filtered to this task's subject,
-    /// fetches one message with a brief timeout, and deletes the consumer.
+    /// Reads from the in-process result cache populated by [`ResultDemux`]'s
+    /// background drain loop. If the result has arrived since the last check,
+    /// it is returned (and removed from the cache); otherwise `None`.
     pub async fn check_result(&self, task_id: &str) -> Result<Option<TaskResult>> {
-        self.fetch_result(task_id, DEFAULT_RESULT_POLL_TIMEOUT)
-            .await
+        let demux = self
+            .result_demux
+            .as_ref()
+            .context("result demux not initialized (TaskQueue built without NATS)")?;
+        Ok(demux.take(task_id).await)
     }
 
     /// Batch-check results for multiple task IDs.
@@ -289,55 +390,6 @@ impl<C: ConnectionLike + Clone + Send + Sync + 'static> TaskQueueCore<C> {
             out.insert(tid.clone(), r);
         }
         Ok(out)
-    }
-
-    /// Fetch a single result for `task_id` from the JetStream result subject.
-    ///
-    /// Implementation: ephemeral consumer with `filter_subject` set to the
-    /// per-task result subject. WorkQueue retention deletes the message
-    /// on ack, so this is destructive (matches the old RPOP semantics).
-    async fn fetch_result(&self, task_id: &str, timeout: Duration) -> Result<Option<TaskResult>> {
-        use async_nats::jetstream::consumer::pull::Config as PullConfig;
-        use async_nats::jetstream::consumer::{AckPolicy, Consumer};
-
-        let nats = self.nats()?;
-        let stream = nats
-            .jetstream()
-            .get_stream(nats::TASKS_STREAM)
-            .await
-            .with_context(|| format!("get_stream({})", nats::TASKS_STREAM))?;
-
-        let cfg = PullConfig {
-            filter_subject: nats::task_result_subject(task_id),
-            ack_policy: AckPolicy::Explicit,
-            inactive_threshold: Duration::from_secs(60),
-            ..Default::default()
-        };
-
-        let consumer: Consumer<PullConfig> = stream
-            .create_consumer(cfg)
-            .await
-            .context("create ephemeral result consumer")?;
-
-        let mut fetch = consumer
-            .fetch()
-            .max_messages(1)
-            .expires(timeout.max(Duration::from_millis(50)))
-            .messages()
-            .await
-            .context("start fetch")?;
-
-        let msg = fetch.next().await;
-        match msg {
-            Some(Ok(m)) => {
-                let parsed: TaskResult = serde_json::from_slice(&m.payload)
-                    .with_context(|| format!("Bad TaskResult JSON for {task_id}"))?;
-                m.ack().await.map_err(|e| anyhow::anyhow!("ack: {e}")).ok();
-                Ok(Some(parsed))
-            }
-            Some(Err(e)) => Err(anyhow::anyhow!("JetStream fetch error: {e}")),
-            None => Ok(None),
-        }
     }
 
     /// Send a result to the task's result subject (worker side).
