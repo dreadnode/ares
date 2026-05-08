@@ -34,13 +34,9 @@ base:
     most_recent: true
 
 sources:
-  - name: ares
-    git:
-      repository: https://github.com/dreadnode/ares.git
-      ref: main
-      depth: 1
-      auth:
-        token: ${GITHUB_TOKEN}
+  - name: ansible
+    local:
+      path: ../../../ansible
 
 provisioners:
   # Install pipx and Ansible
@@ -53,16 +49,10 @@ provisioners:
       - pipx install --force ansible-core
       - pipx ensurepath
 
-  # Copy ansible collection from this repo (the ansible/ subtree IS the dreadnode.nimbus_range collection)
+  # Copy the in-repo ansible/ subtree (the dreadnode.nimbus_range collection) into the build
   - type: file
-    source: ${sources.ares}
-    destination: /tmp/ares-repo
-
-  - type: shell
-    inline:
-      - mkdir -p /root/.ansible/collections/ansible_collections/dreadnode/nimbus_range
-      - cp -r /tmp/ares-repo/ansible/. /root/.ansible/collections/ansible_collections/dreadnode/nimbus_range/
-      - rm -rf /tmp/ares-repo
+    source: ${sources.ansible}
+    destination: /root/.ansible/collections/ansible_collections/dreadnode/nimbus_range
 
   # Install NVIDIA drivers for GPU-accelerated hashcat on g4dn (T4 GPU)
   - type: shell
