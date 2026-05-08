@@ -1,12 +1,17 @@
 use std::sync::Arc;
 
 use tokio::sync::watch;
-use tracing::info;
+use tracing::{info, info_span, Instrument};
 
 use crate::orchestrator::automation;
 use crate::orchestrator::dispatcher::Dispatcher;
 
 /// Spawn all automation background tasks. Returns their JoinHandles.
+///
+/// Each task runs inside its own `automation.task` root span so that all spans
+/// it emits (e.g. `automation.dispatch`) are correlated by `automation.kind` in
+/// Tempo. Without this, `tokio::spawn` would orphan the spawned futures from
+/// any parent context.
 pub(crate) fn spawn_automation_tasks(
     dispatcher: Arc<Dispatcher>,
     shutdown_rx: watch::Receiver<bool>,
@@ -17,9 +22,13 @@ pub(crate) fn spawn_automation_tasks(
         ($name:ident) => {{
             let d = dispatcher.clone();
             let s = shutdown_rx.clone();
-            handles.push(tokio::spawn(async move {
-                automation::$name(d, s).await;
-            }));
+            let span = info_span!("automation.task", "automation.kind" = stringify!($name),);
+            handles.push(tokio::spawn(
+                async move {
+                    automation::$name(d, s).await;
+                }
+                .instrument(span),
+            ));
         }};
     }
 
