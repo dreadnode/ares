@@ -24,7 +24,7 @@ concurrency:
 env:
   DEBIAN_FRONTEND: noninteractive
   PYTHON_VERSION: "3.13.7"
-  WARPGATE_VERSION: "v4.6.0"
+  WARPGATE_VERSION: "v4.7.0"
 
 jobs:
   detect-changes:
@@ -100,9 +100,10 @@ jobs:
               continue
             fi
 
-            # Skip AMI templates - they require AWS credentials and cannot be tested in CI
-            if grep -qE '^\s+- type: ami' "${template_dir}/warpgate.yaml"; then
-              echo "Skipping $template_name: AMI target type cannot be tested in CI"
+            # Skip templates without a container target (AMI-only, Azure-only, etc.)
+            # — this workflow tests container builds in CI.
+            if ! grep -q "type: container" "${template_dir}/warpgate.yaml"; then
+              echo "Skipping $template_name: no container target (only container builds are tested in CI)"
               continue
             fi
 

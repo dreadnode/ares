@@ -30,7 +30,7 @@ env:
   PYTHON_VERSION: 3.13.7
   TASK_VERSION: 3.45.5
   TASK_X_REMOTE_TASKFILES: 1
-  WARPGATE_VERSION: "v4.6.0"
+  WARPGATE_VERSION: "v4.7.0"
 
 jobs:
   discover-templates:
@@ -192,15 +192,16 @@ jobs:
           DEPENDENCY_MAP="{}"
           PLATFORMS_MAP="{}"
           ANSIBLE_MAP="{}"
-          AMI_TEMPLATES=()
+          NON_CONTAINER_TEMPLATES=()
           for template_dir in "$GITHUB_WORKSPACE"/warpgate-templates/templates/*/; do
             if [ -f "${template_dir}warpgate.yaml" ]; then
               template_name=$(basename "$template_dir")
 
-              # Skip AMI-only templates - they cannot be built as containers
-              if grep -q "type: ami" "${template_dir}warpgate.yaml" && ! grep -q "type: container" "${template_dir}warpgate.yaml"; then
-                echo "  $template_name: SKIPPED (AMI-only template)"
-                AMI_TEMPLATES+=("$template_name")
+              # Skip templates without a container target (e.g. AMI-only, Azure-only)
+              # — this workflow builds and pushes container images.
+              if ! grep -q "type: container" "${template_dir}warpgate.yaml"; then
+                echo "  $template_name: SKIPPED (no container target)"
+                NON_CONTAINER_TEMPLATES+=("$template_name")
                 continue
               fi
 
@@ -282,13 +283,13 @@ jobs:
             ]
           }')
 
-          # Remove AMI-only templates from matrix (they have no dependency/platform maps)
-          if [ ${#AMI_TEMPLATES[@]} -gt 0 ]; then
-            AMI_JSON=$(printf '%s\n' "${AMI_TEMPLATES[@]}" | jq -R . | jq -s .)
-            FULL_MATRIX=$(echo "$FULL_MATRIX" | jq --argjson ami "$AMI_JSON" '{
-              include: [.include[] | select(.name as $n | $ami | index($n) | not)]
+          # Remove non-container templates from matrix (they have no dependency/platform maps)
+          if [ ${#NON_CONTAINER_TEMPLATES[@]} -gt 0 ]; then
+            EXCLUDE_JSON=$(printf '%s\n' "${NON_CONTAINER_TEMPLATES[@]}" | jq -R . | jq -s .)
+            FULL_MATRIX=$(echo "$FULL_MATRIX" | jq --argjson exclude "$EXCLUDE_JSON" '{
+              include: [.include[] | select(.name as $n | $exclude | index($n) | not)]
             }')
-            echo "Excluded AMI-only templates from container build matrix: ${AMI_TEMPLATES[*]}"
+            echo "Excluded non-container templates from container build matrix: ${NON_CONTAINER_TEMPLATES[*]}"
           fi
 
           # Apply template filter if provided via workflow_dispatch
