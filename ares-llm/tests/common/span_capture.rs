@@ -38,7 +38,8 @@ struct FieldVisitor {
 
 impl Visit for FieldVisitor {
     fn record_debug(&mut self, field: &Field, value: &dyn fmt::Debug) {
-        self.out.insert(field.name().to_string(), format!("{:?}", value));
+        self.out
+            .insert(field.name().to_string(), format!("{:?}", value));
     }
 
     fn record_str(&mut self, field: &Field, value: &str) {

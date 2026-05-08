@@ -22,10 +22,7 @@ pub(crate) fn spawn_automation_tasks(
         ($name:ident) => {{
             let d = dispatcher.clone();
             let s = shutdown_rx.clone();
-            let span = info_span!(
-                "automation.task",
-                "automation.kind" = stringify!($name),
-            );
+            let span = info_span!("automation.task", "automation.kind" = stringify!($name),);
             handles.push(tokio::spawn(
                 async move {
                     automation::$name(d, s).await;
