@@ -1,0 +1,100 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/cowdogmoo/warpgate/main/schema/warpgate-template.json
+metadata:
+  name: ares-golden-azure
+  version: 1.0.0
+  description: Azure variant of the Ares golden image with all red team tools - recon, credential access, privesc, cracking, lateral movement, ACL abuse, and coercion
+  author: Dreadnode <info@dreadnode.io>
+  license: MIT
+  tags:
+    - ares
+    - golden-image
+    - azure
+    - red-team
+    - reconnaissance
+    - credential-access
+    - privilege-escalation
+    - password-cracking
+    - lateral-movement
+    - acl
+    - coercion
+  requires:
+    warpgate: '>=1.0.0'
+
+name: ares-golden-azure
+version: latest
+
+base:
+  image: kalilinux/kali-rolling@sha256:dddc31e0f4bc57b4b91e9027762544506bf91c7cdd7ff52104daaa4449b4c726
+
+provisioners:
+  # Install pipx + Ansible, then fetch the nimbus_range collection on the build VM.
+  # We re-clone in shell rather than using warpgate's `sources` + `type: file`
+  # pattern (see ares-golden-image) because Azure Image Builder expands `type: file`
+  # into one customizer per file and times out on the 2000+ file ansible/ tree.
+  # Token is passed via a credential helper so it never appears in the clone URL
+  # or AIB customizer logs; ref tracks the AMI variant.
+  - type: shell
+    inline:
+      - apt-get update
+      - apt-get install -y --no-install-recommends ca-certificates git procps sudo python3-apt python3-pip python3-venv pipx
+      - 'sed -i ''s|^PATH="|PATH="/root/.local/bin:/root/.cargo/bin:|'' /etc/environment || echo ''PATH="/root/.local/bin:/root/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"'' > /etc/environment'
+      - pipx install --force uv
+      - pipx install --force ansible-core
+      - pipx ensurepath
+      - GITHUB_TOKEN=${GITHUB_TOKEN} git -c 'credential.helper=!f() { echo username=x-access-token; echo password=$GITHUB_TOKEN; }; f' clone --depth 1 --branch feat/more-attack-cov https://github.com/dreadnode/ares.git /tmp/nimbus_range
+      - mkdir -p /root/.ansible/collections/ansible_collections/dreadnode/nimbus_range
+      - cp -r /tmp/nimbus_range/ansible/. /root/.ansible/collections/ansible_collections/dreadnode/nimbus_range/
+      - rm -rf /tmp/nimbus_range
+
+  # Attack Box - all red team tools + Alloy telemetry
+  # NOTE: Using shell instead of ansible provisioner because the playbook
+  # exceeds Azure VM Image Builder's customizer length limit when inlined.
+  - type: shell
+    inline:
+      - PATH=/root/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin ansible-galaxy collection install -r /root/.ansible/collections/ansible_collections/dreadnode/nimbus_range/requirements.yml --force
+      - HOME=/root ANSIBLE_REMOTE_TMP=/tmp/ansible-tmp-$USER PATH=/root/.local/bin:/root/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin ansible-playbook /root/.ansible/collections/ansible_collections/dreadnode/nimbus_range/playbooks/ares/goad_attack_box.yml -i localhost, -c local -e ansible_shell_executable=/bin/bash -e ansible_python_interpreter=/usr/bin/python3 -e cracking_tools_gpu_support=true -e cracking_tools_hashcat_from_source=true -e cracking_tools_nvidia_opencl_icd=true
+
+  # NVIDIA GPU drivers + CUDA toolkit for hashcat GPU acceleration on NCas T4 v3.
+  # Kernel headers + dkms are required so the nvidia module builds for the
+  # running kernel. The image then works on GPU instances without manual driver
+  # setup. nvidia-smi may not be available during image build if no GPU is attached.
+  - type: shell
+    inline:
+      - apt-get update
+      - DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends linux-headers-$(uname -r) dkms nvidia-driver nvidia-cuda-toolkit firmware-misc-nonfree
+      - nvidia-smi || echo "nvidia-smi not available during image build (expected if no GPU attached)"
+
+  # Cleanup
+  - type: shell
+    inline:
+      - apt-get clean
+      - rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
+      - echo "Ares golden azure build completed successfully"
+
+targets:
+  - type: azure
+    os_type: Linux
+    subscription_id: ${AZURE_SUBSCRIPTION_ID}
+    location: ${AZURE_LOCATION}
+    resource_group: ${AZURE_RESOURCE_GROUP}
+    gallery: ${AZURE_GALLERY_NAME}
+    gallery_image_definition: ares-golden-azure
+    identity_id: ${AZURE_IDENTITY_ID}
+    vm_size: ${AZURE_VM_SIZE}
+    # For GPU: set AZURE_VM_SIZE=Standard_NC4as_T4_v3
+    # For CPU-only test builds: set AZURE_VM_SIZE=Standard_D4s_v3
+    source_image:
+      marketplace:
+        publisher: kali-linux
+        offer: kali
+        sku: kali-2026-1
+        version: latest
+        plan:
+          name: kali-2026-1
+          product: kali
+          publisher: kali-linux
+    image_tags:
+      Project: ares
+      Role: RedTeamAttackBox
+      ManagedBy: warpgate
+      Tools: recon,credential-access,privesc,cracker,lateral-movement,acl-abuse,coercion

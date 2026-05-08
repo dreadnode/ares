@@ -12,6 +12,7 @@ mod queue;
 mod report;
 pub(crate) mod resolve;
 mod runtime;
+mod sessions;
 mod status;
 mod stop;
 pub(crate) mod submit;
@@ -185,6 +186,7 @@ pub(crate) async fn run_ops(cmd: OpsCommands, redis_url: Option<String>) -> Resu
         OpsCommands::Cleanup { max_age_hours } => {
             delete::ops_cleanup(redis_url, max_age_hours).await
         }
+        OpsCommands::Sessions { cmd } => sessions::run_sessions(cmd).await,
         #[cfg(feature = "blue")]
         OpsCommands::Correlate {
             reports_dir,

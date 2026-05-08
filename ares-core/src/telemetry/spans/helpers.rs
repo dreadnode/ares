@@ -18,6 +18,7 @@ pub fn trace_tool_call(
     target_user: Option<&str>,
     target_type: Option<&str>,
     operation_id: Option<&str>,
+    task_id: Option<&str>,
     is_error: bool,
     error_message: Option<&str>,
 ) -> tracing::Span {
@@ -37,6 +38,9 @@ pub fn trace_tool_call(
     }
     if let Some(op) = operation_id {
         builder = builder.operation_id(op);
+    }
+    if let Some(t) = task_id {
+        builder = builder.task_id(t);
     }
     if is_error {
         builder = builder.error(error_message.unwrap_or("unknown error"));
@@ -58,6 +62,7 @@ pub fn trace_discovery(
     target_fqdn: Option<&str>,
     target_type: Option<&str>,
     operation_id: Option<&str>,
+    task_id: Option<&str>,
 ) -> tracing::Span {
     tracing::info_span!(
         "ares.discovery",
@@ -73,12 +78,15 @@ pub fn trace_discovery(
         "destination.address" = target_fqdn.or(target_ip).unwrap_or(""),
         "destination.ip" = target_ip.unwrap_or(""),
         attack_operation_id = operation_id.unwrap_or(""),
+        "op.id" = operation_id.unwrap_or(""),
+        "task.id" = task_id.unwrap_or(""),
     )
 }
 
 /// Create a decision span recording agent tool selection.
 ///
 /// Equivalent to Python's `trace_decision()`.
+#[allow(clippy::too_many_arguments)]
 pub fn trace_decision(
     role: &str,
     team: Team,
@@ -86,6 +94,7 @@ pub fn trace_decision(
     tools_considered: &[String],
     confidence: Option<f64>,
     operation_id: Option<&str>,
+    task_id: Option<&str>,
 ) -> tracing::Span {
     let (technique_id, _) = mitre::get_tool_mitre_info(tool_chosen);
     let category = mitre::get_tool_category(tool_chosen);
@@ -109,6 +118,8 @@ pub fn trace_decision(
         "mitre.technique.id" = technique_id.unwrap_or(""),
         attack_tool_category = category.unwrap_or(""),
         attack_operation_id = operation_id.unwrap_or(""),
+        "op.id" = operation_id.unwrap_or(""),
+        "task.id" = task_id.unwrap_or(""),
     )
 }
 
@@ -120,6 +131,7 @@ pub fn trace_domain_admin(
     attack_path: &str,
     attack_depth: usize,
     operation_id: Option<&str>,
+    task_id: Option<&str>,
 ) -> tracing::Span {
     tracing::info_span!(
         "ares.discovery",
@@ -133,6 +145,8 @@ pub fn trace_domain_admin(
         "mitre.technique.id" = "T1003.006",
         "mitre.tactic" = "credential-access",
         attack_operation_id = operation_id.unwrap_or(""),
+        "op.id" = operation_id.unwrap_or(""),
+        "task.id" = task_id.unwrap_or(""),
     )
 }
 

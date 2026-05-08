@@ -33,6 +33,9 @@ base:
     most_recent: true
 
 sources:
+  # Use the in-repo ansible/ tree directly so builds match the working copy
+  # (no GITHUB_TOKEN, no branch ref drift). Path is relative to this template's
+  # directory; requires warpgate >= v4.7.0 (local source type).
   - name: ansible
     local:
       path: ../../../ansible
@@ -48,7 +51,6 @@ provisioners:
       - pipx install --force ansible-core
       - pipx ensurepath
 
-  # Copy the in-repo ansible/ subtree (the dreadnode.nimbus_range collection) into the build
   - type: file
     source: ${sources.ansible}
     destination: /root/.ansible/collections/ansible_collections/dreadnode/nimbus_range

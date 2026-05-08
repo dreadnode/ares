@@ -221,7 +221,9 @@ pub struct SessionLogConfig {
 impl SessionLogConfig {
     /// Construct from env vars:
     /// - `ARES_SESSION_LOG_DIR` (explicit path; takes precedence)
-    /// - `ARES_SESSION_LOG_ENABLED=1` enables a default `~/.ares/sessions` path
+    /// - `ARES_SESSION_LOG_ENABLED=0` opts out (default is enabled)
+    ///
+    /// When enabled with no explicit dir, defaults to `~/.ares/sessions`.
     pub fn from_env() -> Self {
         if let Ok(dir) = std::env::var("ARES_SESSION_LOG_DIR") {
             if !dir.trim().is_empty() {
@@ -230,7 +232,7 @@ impl SessionLogConfig {
                 };
             }
         }
-        if parse_env_bool("ARES_SESSION_LOG_ENABLED", false) {
+        if parse_env_bool("ARES_SESSION_LOG_ENABLED", true) {
             if let Some(home) = std::env::var_os("HOME") {
                 let mut p = PathBuf::from(home);
                 p.push(".ares");
@@ -239,6 +241,23 @@ impl SessionLogConfig {
             }
         }
         Self { dir: None }
+    }
+
+    /// Default session-log root used when `ARES_SESSION_LOG_DIR` is unset.
+    /// Mirrors the path resolution in `from_env` so external callers (e.g.
+    /// the `ares ops sessions` CLI) can find logs without re-implementing
+    /// the lookup. Returns `None` when `HOME` is unset.
+    pub fn default_root() -> Option<PathBuf> {
+        if let Ok(dir) = std::env::var("ARES_SESSION_LOG_DIR") {
+            if !dir.trim().is_empty() {
+                return Some(PathBuf::from(dir));
+            }
+        }
+        let home = std::env::var_os("HOME")?;
+        let mut p = PathBuf::from(home);
+        p.push(".ares");
+        p.push("sessions");
+        Some(p)
     }
 
     pub fn enabled(&self) -> bool {
@@ -302,6 +321,11 @@ fn parse_env_bool(key: &str, default: bool) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    /// Serializes tests that mutate ARES_SESSION_LOG_* / HOME to keep
+    /// `cargo test`'s parallel scheduler from observing partial states.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn agent_loop_config_defaults() {
@@ -493,8 +517,16 @@ mod tests {
         std::env::remove_var("ARES_CONTEXT_MIN_RECENT_MESSAGES");
     }
 
+    // Consolidated to avoid cross-test races on the shared ARES_SESSION_LOG_*
+    // environment variables — running each behavior in its own #[test] would
+    // let `cargo test`'s parallel scheduler observe one test's mutations
+    // mid-flight in another.
     #[test]
-    fn session_log_config_from_env_explicit_dir() {
+    fn session_log_config_from_env_behaviors() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let saved_home = std::env::var_os("HOME");
+
+        // 1. Explicit ARES_SESSION_LOG_DIR wins regardless of ENABLED.
         std::env::set_var("ARES_SESSION_LOG_DIR", "/tmp/ares-test-sessions");
         std::env::remove_var("ARES_SESSION_LOG_ENABLED");
         let cfg = SessionLogConfig::from_env();
@@ -503,16 +535,34 @@ mod tests {
             cfg.dir.as_deref(),
             Some(std::path::Path::new("/tmp/ares-test-sessions"))
         );
-        std::env::remove_var("ARES_SESSION_LOG_DIR");
-    }
 
-    #[test]
-    fn session_log_config_from_env_empty_dir_disabled() {
-        std::env::remove_var("ARES_SESSION_LOG_ENABLED");
+        // 2. Explicit opt-out (ENABLED=0) with whitespace dir → disabled.
+        std::env::set_var("ARES_SESSION_LOG_ENABLED", "0");
         std::env::set_var("ARES_SESSION_LOG_DIR", "   ");
         let cfg = SessionLogConfig::from_env();
         assert!(!cfg.enabled());
+
+        // 3. Default-on: no env vars set, HOME → `~/.ares/sessions`.
+        std::env::remove_var("ARES_SESSION_LOG_ENABLED");
         std::env::remove_var("ARES_SESSION_LOG_DIR");
+        std::env::set_var("HOME", "/tmp/ares-test-home");
+        let cfg = SessionLogConfig::from_env();
+        assert!(cfg.enabled(), "session log should default to on");
+        assert_eq!(
+            cfg.dir.as_deref(),
+            Some(std::path::Path::new("/tmp/ares-test-home/.ares/sessions"))
+        );
+
+        // 4. default_root mirrors from_env's path resolution.
+        assert_eq!(
+            SessionLogConfig::default_root().as_deref(),
+            Some(std::path::Path::new("/tmp/ares-test-home/.ares/sessions"))
+        );
+
+        match saved_home {
+            Some(v) => std::env::set_var("HOME", v),
+            None => std::env::remove_var("HOME"),
+        }
     }
 
     #[test]

@@ -95,7 +95,39 @@ pub async fn run_agent_loop(
     callback_handler: Option<Arc<dyn CallbackHandler>>,
     hostname_map: Option<HostnameMap>,
 ) -> AgentLoopOutcome {
-    let op_id = std::env::var("ARES_OPERATION_ID")
+    let op_id = resolve_operation_id_from_env();
+
+    // Single parent span for the entire agent task. Every tool call, decision,
+    // and LLM round-trip nested below inherits `op.id`/`task.id` so Tempo
+    // queries can scope by operation or by individual task without relying on
+    // each child span re-emitting the IDs.
+    let span = tracing::info_span!(
+        "agent.loop",
+        "op.id" = %op_id,
+        "task.id" = task_id,
+        "agent.role" = role,
+        "agent.model" = %config.model,
+    );
+
+    run_agent_loop_inner(
+        provider,
+        dispatcher,
+        config,
+        system_prompt,
+        task_prompt,
+        role,
+        &op_id,
+        task_id,
+        tools,
+        callback_handler,
+        hostname_map,
+    )
+    .instrument(span)
+    .await
+}
+
+fn resolve_operation_id_from_env() -> String {
+    std::env::var("ARES_OPERATION_ID")
         .ok()
         .and_then(|v| {
             // ARES_OPERATION_ID may be a plain ID or a JSON envelope; try
@@ -110,9 +142,24 @@ pub async fn run_agent_loop(
                 Some(v)
             }
         })
-        .unwrap_or_else(|| "unknown".to_string());
+        .unwrap_or_else(|| "unknown".to_string())
+}
 
-    let session_log = SessionLog::open(&config.session_log, &op_id, task_id, role, &config.model);
+#[allow(clippy::too_many_arguments)]
+async fn run_agent_loop_inner(
+    provider: &dyn LlmProvider,
+    dispatcher: Arc<dyn ToolDispatcher>,
+    config: &AgentLoopConfig,
+    system_prompt: &str,
+    task_prompt: &str,
+    role: &str,
+    op_id: &str,
+    task_id: &str,
+    tools: &[crate::ToolDefinition],
+    callback_handler: Option<Arc<dyn CallbackHandler>>,
+    hostname_map: Option<HostnameMap>,
+) -> AgentLoopOutcome {
+    let session_log = SessionLog::open(&config.session_log, op_id, task_id, role, &config.model);
     if session_log.enabled() {
         let tool_names: Vec<String> = tools.iter().map(|t| t.name.clone()).collect();
         session_log.record_start(system_prompt, task_prompt, &tool_names);
@@ -307,8 +354,15 @@ pub async fn run_agent_loop(
         {
             let available: Vec<String> = active_tools.iter().map(|t| t.name.clone()).collect();
             for tc in &response.tool_calls {
-                let span =
-                    trace_decision(role, Team::Red, &tc.name, &available, None, Some(task_id));
+                let span = trace_decision(
+                    role,
+                    Team::Red,
+                    &tc.name,
+                    &available,
+                    None,
+                    Some(op_id),
+                    Some(task_id),
+                );
                 let _guard = span.enter();
             }
         }
@@ -360,6 +414,7 @@ pub async fn run_agent_loop(
                     ti.target_fqdn.as_deref(),
                     ti.target_user.as_deref(),
                     tt,
+                    Some(op_id),
                     Some(task_id),
                     false,
                     None,
@@ -501,6 +556,7 @@ pub async fn run_agent_loop(
                         let c = (*call).clone();
                         let r = role.to_string();
                         let tid = task_id.to_string();
+                        let oid = op_id.to_string();
                         join_set.spawn(async move {
                             let cb_span = trace_tool_call(
                                 &r,
@@ -510,6 +566,7 @@ pub async fn run_agent_loop(
                                 None,
                                 None,
                                 None,
+                                Some(&oid),
                                 Some(&tid),
                                 false,
                                 None,
@@ -597,6 +654,7 @@ pub async fn run_agent_loop(
                         None,
                         None,
                         None,
+                        Some(op_id),
                         Some(task_id),
                         false,
                         None,
@@ -669,6 +727,7 @@ pub async fn run_agent_loop(
                     None,
                     None,
                     None,
+                    Some(op_id),
                     Some(task_id),
                     false,
                     None,

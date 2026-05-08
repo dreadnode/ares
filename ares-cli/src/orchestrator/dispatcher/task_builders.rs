@@ -2,7 +2,7 @@
 
 use anyhow::Result;
 use serde_json::json;
-use tracing::{debug, info};
+use tracing::{debug, info, instrument};
 
 use crate::orchestrator::state::DEDUP_SCANNED_TARGETS;
 
@@ -10,6 +10,11 @@ use super::Dispatcher;
 
 impl Dispatcher {
     /// Submit a crack task for a hash.
+    #[instrument(
+        name = "automation.request_crack",
+        skip(self, hash),
+        fields(username = %hash.username, domain = %hash.domain, hash_type = %hash.hash_type),
+    )]
     pub async fn request_crack(&self, hash: &ares_core::models::Hash) -> Result<Option<String>> {
         let payload = json!({
             "hash_type": hash.hash_type,
@@ -27,6 +32,11 @@ impl Dispatcher {
     /// 1. Skip entirely if domain admin has been achieved
     /// 2. Skip nmap tasks if all targets are already in `scanned_targets`
     /// 3. Auto-dispatch nmap prerequisite before enumeration if targets not scanned
+    #[instrument(
+        name = "automation.request_recon",
+        skip(self, credential),
+        fields(target_ip = %target_ip, domain = %domain, technique_count = techniques.len()),
+    )]
     pub async fn request_recon(
         &self,
         target_ip: &str,
@@ -126,6 +136,11 @@ impl Dispatcher {
     ///
     /// Mirrors Python's fast credential discovery dispatch: sends multiple high-success-rate
     /// techniques in a single task so the LLM agent executes them sequentially.
+    #[instrument(
+        name = "automation.request_low_hanging_fruit",
+        skip(self, credential),
+        fields(target_ip = %target_ip, domain = %domain, priority = priority, username = %credential.username),
+    )]
     pub async fn request_low_hanging_fruit(
         &self,
         target_ip: &str,
@@ -154,6 +169,11 @@ impl Dispatcher {
     }
 
     /// Submit a credential access task (kerberoast, asrep, secretsdump, etc.).
+    #[instrument(
+        name = "automation.request_credential_access",
+        skip(self, credential),
+        fields(technique = %technique, target_ip = %target_ip, domain = %domain, priority = priority, username = %credential.username),
+    )]
     pub async fn request_credential_access(
         &self,
         technique: &str,
@@ -177,6 +197,11 @@ impl Dispatcher {
     }
 
     /// Submit a secretsdump task.
+    #[instrument(
+        name = "automation.request_secretsdump",
+        skip(self, credential),
+        fields(target_ip = %target_ip, priority = priority, username = %credential.username, domain = %credential.domain),
+    )]
     pub async fn request_secretsdump(
         &self,
         target_ip: &str,
@@ -197,6 +222,11 @@ impl Dispatcher {
     }
 
     /// Submit a secretsdump task using NTLM hash (pass-the-hash).
+    #[instrument(
+        name = "automation.request_secretsdump_hash",
+        skip(self, hash_value),
+        fields(target_ip = %target_ip, username = %username, domain = %domain, priority = priority),
+    )]
     pub async fn request_secretsdump_hash(
         &self,
         target_ip: &str,
@@ -219,6 +249,11 @@ impl Dispatcher {
     }
 
     /// Submit a lateral movement task.
+    #[instrument(
+        name = "automation.request_lateral",
+        skip(self, credential),
+        fields(target_ip = %target_ip, technique = %technique, username = %credential.username, domain = %credential.domain),
+    )]
     pub async fn request_lateral(
         &self,
         target_ip: &str,
@@ -242,6 +277,16 @@ impl Dispatcher {
     ///
     /// Looks up the best available credential or hash for the vuln's target/domain
     /// and attaches it to the payload so the agent doesn't have to discover auth independently.
+    #[instrument(
+        name = "automation.request_exploit",
+        skip(self, vuln),
+        fields(
+            vuln_id = %vuln.vuln_id,
+            vuln_type = %vuln.vuln_type,
+            target = %vuln.target,
+            priority = priority,
+        ),
+    )]
     pub async fn request_exploit(
         &self,
         vuln: &ares_core::models::VulnerabilityInfo,
@@ -354,6 +399,11 @@ impl Dispatcher {
     }
 
     /// Submit a BloodHound collection task.
+    #[instrument(
+        name = "automation.request_bloodhound",
+        skip(self, credential),
+        fields(domain = %domain, dc_ip = %dc_ip, username = %credential.username),
+    )]
     pub async fn request_bloodhound(
         &self,
         domain: &str,
@@ -374,6 +424,11 @@ impl Dispatcher {
     }
 
     /// Submit a share enumeration task against a host using credentials.
+    #[instrument(
+        name = "automation.request_share_enumeration",
+        skip(self, credential),
+        fields(host_ip = %host_ip, username = %credential.username, domain = %credential.domain),
+    )]
     pub async fn request_share_enumeration(
         &self,
         host_ip: &str,
@@ -392,6 +447,11 @@ impl Dispatcher {
     }
 
     /// Submit a share spider task.
+    #[instrument(
+        name = "automation.request_share_spider",
+        skip(self, credential),
+        fields(host_ip = %host_ip, share_name = %share_name, username = %credential.username),
+    )]
     pub async fn request_share_spider(
         &self,
         host_ip: &str,
@@ -413,6 +473,11 @@ impl Dispatcher {
     }
 
     /// Submit a coercion task.
+    #[instrument(
+        name = "automation.request_coercion",
+        skip(self),
+        fields(target_ip = %target_ip, listener_ip = %listener_ip, technique_count = techniques.len()),
+    )]
     pub async fn request_coercion(
         &self,
         target_ip: &str,
@@ -429,6 +494,11 @@ impl Dispatcher {
     }
 
     /// Submit a CERTIPY find task for ADCS enumeration.
+    #[instrument(
+        name = "automation.request_certipy_find",
+        skip(self, credential),
+        fields(target_ip = %target_ip, domain = %domain, username = %credential.username),
+    )]
     pub async fn request_certipy_find(
         &self,
         target_ip: &str,
