@@ -21,7 +21,7 @@ on:
   workflow_dispatch:
 
 env:
-  WARPGATE_VERSION: "v4.6.0"
+  WARPGATE_VERSION: "v4.7.0"
   PYTHON_VERSION: "3.13.7"
   TASK_VERSION: "3.45.5"
   TASK_X_REMOTE_TASKFILES: 1
@@ -161,11 +161,14 @@ jobs:
           fi
 
       - name: Validate YAML syntax
+        # Reuse the project-wide yamllint config (.hooks/linters/yamllint.yaml)
+        # so this step matches what pre-commit runs locally — keeps shell-heavy
+        # provisioner inlines from drowning the log in line-length warnings.
         run: |
           pip install yamllint
           find warpgate-templates -name '*.yaml' -o -name '*.yml' | while read -r file; do
             echo "Checking YAML syntax: $file"
-            yamllint -d "{extends: relaxed, rules: {line-length: {max: 120}}}" "$file"
+            yamllint -c .hooks/linters/yamllint.yaml "$file"
           done
 
       - name: Validate against JSON schema
