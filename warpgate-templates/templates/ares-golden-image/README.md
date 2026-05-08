@@ -9,9 +9,8 @@ movement, ACL abuse, and coercion -- plus Alloy telemetry.
 
 ## Requirements
 
-- [Warp Gate](https://github.com/cowdogmoo/warpgate) installed and configured
+- [Warp Gate](https://github.com/cowdogmoo/warpgate) >= v4.7.0
 - AWS credentials configured (for building AMIs)
-- `GITHUB_TOKEN` environment variable set (for cloning private repositories)
 - Required Packer plugins (installed automatically via `warpgate init`):
   - `amazon`
 
@@ -31,8 +30,8 @@ The template configuration is managed in `warpgate.yaml`. Key settings include:
 
 ## Building the AMI
 
-This builds an **Ares Golden Image** AMI in `us-west-1` on a `t3.large`
-instance with a 100 GB volume.
+This builds an **Ares Golden Image** AMI in `us-west-1` on a `g4dn.xlarge`
+instance with a 100 GB volume (GPU-capable for hashcat acceleration).
 
 **Initialize the template:**
 

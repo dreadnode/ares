@@ -18,7 +18,7 @@ metadata:
     - acl
     - coercion
   requires:
-    warpgate: '>=1.0.0'
+    warpgate: '>=4.7.0'
 
 name: ares-golden-image
 version: latest
