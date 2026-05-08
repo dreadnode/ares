@@ -33,7 +33,7 @@ base:
     most_recent: true
 
 sources:
-  - name: nimbus_range
+  - name: ares
     git:
       repository: https://github.com/dreadnode/ares.git
       ref: feat/more-attack-cov
@@ -52,9 +52,11 @@ provisioners:
       - pipx install --force ansible-core
       - pipx ensurepath
 
-  # Copy ansible collection from source (cloned securely by warpgate without embedding token in shell commands)
+  # Copy ansible collection from source (cloned securely by warpgate without embedding token in shell commands).
+  # The destination keeps the `nimbus_range` name because the ansible collection is published as
+  # `dreadnode.nimbus_range`; subsequent steps install it under that namespace.
   - type: file
-    source: ${sources.nimbus_range}
+    source: ${sources.ares}
     destination: /tmp/nimbus_range
 
   - type: shell

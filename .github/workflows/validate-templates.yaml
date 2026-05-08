@@ -169,8 +169,10 @@ jobs:
           from pathlib import Path
           from jsonschema import Draft7Validator
 
-          # Download the schema
-          schema_url = "https://raw.githubusercontent.com/cowdogmoo/warpgate/v4.4.0/schema/warpgate-template.json"
+          # Download the schema (version pinned to the warpgate binary version
+          # from the workflow env so schema and validator stay in lockstep)
+          warpgate_version = "${{ env.WARPGATE_VERSION }}"
+          schema_url = f"https://raw.githubusercontent.com/cowdogmoo/warpgate/{warpgate_version}/schema/warpgate-template.json"
           print(f"Downloading schema from: {schema_url}")
 
           try:

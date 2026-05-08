@@ -24,7 +24,7 @@ name: ares-golden-azure
 version: latest
 
 base:
-  image: kali-linux/kali/kali-last:latest
+  image: kalilinux/kali-rolling@sha256:dddc31e0f4bc57b4b91e9027762544506bf91c7cdd7ff52104daaa4449b4c726
 
 provisioners:
   # Install pipx + Ansible, then fetch the nimbus_range collection on the build VM.
@@ -46,13 +46,6 @@ provisioners:
       - cp -r /tmp/nimbus_range/ansible/. /root/.ansible/collections/ansible_collections/dreadnode/nimbus_range/
       - rm -rf /tmp/nimbus_range
 
-  # Install NVIDIA drivers for GPU-accelerated hashcat on NCas T4 v3 (T4 GPU)
-  - type: shell
-    inline:
-      - apt-get update
-      - apt-get install -y --no-install-recommends nvidia-driver firmware-misc-nonfree
-      - nvidia-smi || echo "nvidia-smi not available during image build (expected if no GPU attached)"
-
   # Attack Box - all red team tools + Alloy telemetry
   # NOTE: Using shell instead of ansible provisioner because the playbook
   # exceeds Azure VM Image Builder's customizer length limit when inlined.
@@ -61,13 +54,15 @@ provisioners:
       - PATH=/root/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin ansible-galaxy collection install -r /root/.ansible/collections/ansible_collections/dreadnode/nimbus_range/requirements.yml --force
       - HOME=/root ANSIBLE_REMOTE_TMP=/tmp/ansible-tmp-$USER PATH=/root/.local/bin:/root/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin ansible-playbook /root/.ansible/collections/ansible_collections/dreadnode/nimbus_range/playbooks/ares/goad_attack_box.yml -i localhost, -c local -e ansible_shell_executable=/bin/bash -e ansible_python_interpreter=/usr/bin/python3 -e cracking_tools_gpu_support=true -e cracking_tools_hashcat_from_source=true -e cracking_tools_nvidia_opencl_icd=true
 
-  # NVIDIA GPU drivers + CUDA toolkit for hashcat GPU acceleration.
+  # NVIDIA GPU drivers + CUDA toolkit for hashcat GPU acceleration on NCas T4 v3.
   # Kernel headers + dkms are required so the nvidia module builds for the
-  # running kernel. The image then works on GPU instances (e.g. NCas T4 v3)
-  # without manual driver setup.
+  # running kernel. The image then works on GPU instances without manual driver
+  # setup. nvidia-smi may not be available during image build if no GPU is attached.
   - type: shell
     inline:
-      - DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends linux-headers-$(uname -r) dkms nvidia-driver nvidia-cuda-toolkit
+      - apt-get update
+      - DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends linux-headers-$(uname -r) dkms nvidia-driver nvidia-cuda-toolkit firmware-misc-nonfree
+      - nvidia-smi || echo "nvidia-smi not available during image build (expected if no GPU attached)"
 
   # Cleanup
   - type: shell
@@ -78,15 +73,16 @@ provisioners:
 
 targets:
   - type: azure
-    subscription_id: 70a9c8a4-6bc6-4a48-ae24-27996cea8c02
-    location: centralus
-    resource_group: WARPGATE-TEST-RG
-    gallery: warpgateTestGallery
+    os_type: Linux
+    subscription_id: ${AZURE_SUBSCRIPTION_ID}
+    location: ${AZURE_LOCATION}
+    resource_group: ${AZURE_RESOURCE_GROUP}
+    gallery: ${AZURE_GALLERY_NAME}
     gallery_image_definition: ares-golden-azure
-    identity_id: /subscriptions/70a9c8a4-6bc6-4a48-ae24-27996cea8c02/resourcegroups/warpgate-test-rg/providers/Microsoft.ManagedIdentity/userAssignedIdentities/warpgate-aib-uami
-    vm_size: Standard_D4s_v3
-    # For GPU:
-    # vm_size: Standard_NC4as_T4_v3
+    identity_id: ${AZURE_IDENTITY_ID}
+    vm_size: ${AZURE_VM_SIZE}
+    # For GPU: set AZURE_VM_SIZE=Standard_NC4as_T4_v3
+    # For CPU-only test builds: set AZURE_VM_SIZE=Standard_D4s_v3
     source_image:
       marketplace:
         publisher: kali-linux
