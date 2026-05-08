@@ -112,6 +112,15 @@ RestartSec=5
 StandardOutput=append:/var/log/ares/%i.log
 StandardError=append:/var/log/ares/%i.log
 
+# Contain child processes (netexec, hashcat, nmap, etc.) within this cgroup.
+# Without these limits, runaway tool processes can OOM the entire system and
+# take down the SSM agent.
+Delegate=yes
+Slice=system-ares.slice
+MemoryHigh=1500M
+MemoryMax=2G
+TasksMax=256
+
 [Install]
 WantedBy=multi-user.target
 UNIT_EOF
