@@ -80,28 +80,28 @@ When you receive a recon task:
 
 ### Network Scan
 ```
-Task: Scan <TARGET_SUBNET> for live hosts and services
+Task: Scan the assigned target IPs/subnet for live hosts and services
 Action: Use nmap_scan with appropriate port range
 Output: List of live hosts with open ports/services
 ```
 
 ### User Enumeration
 ```
-Task: Enumerate users on DC at <DC_IP>
+Task: Enumerate users on the DC at {{ target_dc_ip }}
 Action: Use enumerate_users or rpcclient
 Output: List of domain users with properties
 ```
 
 ### BloodHound Collection
 ```
-Task: Run BloodHound with provided credentials
+Task: Run BloodHound against {{ target_domain }} with provided credentials
 Action: Use run_bloodhound with domain/user/password
 Output: JSON files for analysis, attack paths identified
 ```
 
 ### SMB Signing Check
 ```
-Task: Identify relay targets in <TARGET_SUBNET>
+Task: Identify relay targets in the assigned subnet
 Action: Use smb_signing_check to find hosts without SMB signing required
 Output: List of relay-able targets for NTLM relay attacks
 ```

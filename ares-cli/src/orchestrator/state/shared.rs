@@ -34,6 +34,40 @@ impl SharedState {
             &s.domain_controllers,
         );
 
+        let target_domain = s
+            .target
+            .as_ref()
+            .map(|t| t.domain.clone())
+            .filter(|d| !d.is_empty())
+            .or_else(|| s.domains.first().cloned())
+            .unwrap_or_default();
+        // Prefer the DC IP for the primary target_domain; fall back to the
+        // configured Target's IP (which is the seed IP from operation config).
+        let target_dc_ip = s
+            .domain_controllers
+            .get(&target_domain)
+            .cloned()
+            .or_else(|| s.target.as_ref().map(|t| t.ip.clone()))
+            .unwrap_or_default();
+        // Prefer the configured Target's hostname (already an FQDN); else find
+        // the first discovered DC host whose hostname matches target_domain.
+        let target_dc_fqdn = s
+            .target
+            .as_ref()
+            .map(|t| t.hostname.clone())
+            .filter(|h| !h.is_empty() && h.contains('.'))
+            .or_else(|| {
+                s.hosts
+                    .iter()
+                    .find(|h| {
+                        h.is_dc
+                            && !h.hostname.is_empty()
+                            && h.hostname.to_lowercase().ends_with(&target_domain)
+                    })
+                    .map(|h| h.hostname.to_lowercase())
+            })
+            .unwrap_or_else(|| target_domain.clone());
+
         ares_llm::prompt::StateSnapshot {
             credentials: s.credentials.clone(),
             hashes: s.hashes.clone(),
@@ -62,6 +96,10 @@ impl SharedState {
                         .map(|s| s.to_lowercase())
                 })
                 .collect(),
+            target_domain,
+            target_dc_ip,
+            target_dc_fqdn,
+            listener_ip: std::env::var("ARES_LISTENER_IP").unwrap_or_default(),
         }
     }
 

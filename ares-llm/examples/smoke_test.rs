@@ -17,9 +17,9 @@ use ares_llm::prompt::generate_task_prompt;
 use ares_llm::prompt::templates::{render_agent_instructions, TEMPLATE_RECON};
 use ares_llm::tool_registry::{tools_for_role, AgentRole};
 use ares_llm::{
-    run_agent_loop, AgentLoopConfig, CallbackHandler, ContextConfig, LlmError, LlmProvider,
-    LlmRequest, LlmResponse, RetryConfig, StopReason, TokenUsage, ToolCall, ToolDefinition,
-    ToolDispatcher, ToolExecResult,
+    run_agent_loop, AgentLoopConfig, CallbackHandler, LlmError, LlmProvider, LlmRequest,
+    LlmResponse, LoopEndReason, StopReason, TokenUsage, ToolCall, ToolDefinition, ToolDispatcher,
+    ToolExecResult,
 };
 
 struct MockProvider {
@@ -130,7 +130,16 @@ async fn main() -> Result<()> {
         "enumerate_users".to_string(),
         "run_bloodhound".to_string(),
     ];
-    let system_prompt = render_agent_instructions(TEMPLATE_RECON, &capabilities, false, &[])?;
+    let system_prompt = render_agent_instructions(
+        TEMPLATE_RECON,
+        &capabilities,
+        false,
+        &[],
+        "contoso.local",
+        "192.168.58.10",
+        "dc01.contoso.local",
+        "192.168.58.50",
+    )?;
     assert!(!system_prompt.is_empty());
     println!(
         "[OK] System prompt rendered ({} chars)",
@@ -159,14 +168,10 @@ async fn main() -> Result<()> {
     let config = AgentLoopConfig {
         model: "mock".into(),
         max_steps: 10,
-        max_tokens: 4096,
-        temperature: None,
-        retry: RetryConfig::default(),
-        context: ContextConfig::default(),
-        max_tool_calls_per_name: 10,
         ..AgentLoopConfig::default()
     };
 
+    let callbacks: Option<Arc<dyn CallbackHandler>> = None;
     let outcome = run_agent_loop(
         &provider,
         dispatcher,
@@ -176,7 +181,7 @@ async fn main() -> Result<()> {
         "recon",
         "t-smoke-1",
         &tools,
-        None::<Arc<dyn CallbackHandler>>,
+        callbacks,
         None,
     )
     .await;
@@ -191,18 +196,12 @@ async fn main() -> Result<()> {
     );
     println!("  Discoveries: {} batch(es)", outcome.discoveries.len());
 
-    // Verify the loop ended with task_complete
-    match &outcome.reason {
-        ares_llm::LoopEndReason::TaskComplete { task_id, result } => {
-            assert_eq!(task_id, "t-smoke-1");
-            assert!(result.contains("Port scan complete"));
-            println!("\n[OK] Agent loop completed task '{task_id}'");
-        }
-        other => {
-            eprintln!("\n[FAIL] Expected TaskComplete, got: {other:?}");
-            std::process::exit(1);
-        }
-    }
+    let LoopEndReason::TaskComplete { task_id, result } = &outcome.reason else {
+        panic!("expected TaskComplete, got: {:?}", outcome.reason);
+    };
+    assert_eq!(task_id, "t-smoke-1");
+    assert!(result.contains("Port scan complete"));
+    println!("\n[OK] Agent loop completed task '{task_id}'");
 
     assert_eq!(outcome.steps, 2);
     assert_eq!(outcome.tool_calls_dispatched, 1); // nmap_scan only; task_complete is callback

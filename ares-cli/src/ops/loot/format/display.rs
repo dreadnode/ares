@@ -531,6 +531,35 @@ fn resolve_domain_fqdn(domain: &str, netbios_to_fqdn: &HashMap<String, String>) 
     lower
 }
 
+/// Defensive filter for domains that originated from a Windows workgroup or
+/// auto-generated computer name rather than a real Kerberos realm.
+///
+/// Upstream parsers (`smb.rs`, `output_extraction::users`) drop these at
+/// ingest, but old loot already in state may still carry them. Without this
+/// filter, a stray `krbtgt@win-xxx.59hv.local` row would flip the pseudo-domain
+/// to "compromised" in the achievements rollup.
+///
+/// Heuristic operates on a single domain string (no `(name:...)` context here):
+/// matches literal `WORKGROUP`/`MSHOME`, and the Windows default computer-name
+/// prefix `WIN-` followed by 11 alphanumerics as the first label.
+fn looks_like_workgroup_pseudo_domain(domain: &str) -> bool {
+    let domain = domain.trim().trim_end_matches('.');
+    if domain.is_empty() {
+        return false;
+    }
+    if domain.eq_ignore_ascii_case("WORKGROUP") || domain.eq_ignore_ascii_case("MSHOME") {
+        return true;
+    }
+    let first_label = domain.split('.').next().unwrap_or("");
+    if first_label.len() == 15 && first_label[..4].eq_ignore_ascii_case("WIN-") {
+        let suffix = &first_label[4..];
+        if suffix.bytes().all(|b| b.is_ascii_alphanumeric()) {
+            return true;
+        }
+    }
+    false
+}
+
 /// Per-domain achievement status.
 #[derive(Default)]
 pub(super) struct DomainAchievement {
@@ -552,7 +581,7 @@ pub(super) fn build_domain_achievements(
     for h in hashes {
         if h.username.eq_ignore_ascii_case("krbtgt") {
             let domain = resolve_domain_fqdn(&h.domain, &state.netbios_to_fqdn);
-            if domain.is_empty() {
+            if domain.is_empty() || looks_like_workgroup_pseudo_domain(&domain) {
                 continue;
             }
             let entry = achievements.entry(domain).or_default();
@@ -569,7 +598,7 @@ pub(super) fn build_domain_achievements(
             if let Some(domain_val) = vuln.details.get("domain") {
                 let raw = domain_val.as_str().unwrap_or("");
                 let domain = resolve_domain_fqdn(raw, &state.netbios_to_fqdn);
-                if !domain.is_empty() {
+                if !domain.is_empty() && !looks_like_workgroup_pseudo_domain(&domain) {
                     achievements.entry(domain).or_default().has_golden_ticket = true;
                 }
             }
@@ -580,7 +609,7 @@ pub(super) fn build_domain_achievements(
     for c in credentials {
         if c.is_admin {
             let domain = resolve_domain_fqdn(&c.domain, &state.netbios_to_fqdn);
-            if domain.is_empty() {
+            if domain.is_empty() || looks_like_workgroup_pseudo_domain(&domain) {
                 continue;
             }
             let entry = achievements.entry(domain).or_default();
@@ -595,7 +624,7 @@ pub(super) fn build_domain_achievements(
     for h in hashes {
         if h.username.eq_ignore_ascii_case("administrator") {
             let domain = resolve_domain_fqdn(&h.domain, &state.netbios_to_fqdn);
-            if domain.is_empty() {
+            if domain.is_empty() || looks_like_workgroup_pseudo_domain(&domain) {
                 continue;
             }
             let entry = achievements.entry(domain).or_default();
@@ -1084,6 +1113,53 @@ mod tests {
 
         let achievements = build_domain_achievements(&state, &hashes, &[]);
         assert!(achievements.is_empty());
+    }
+
+    #[test]
+    fn build_domain_achievements_skips_workgroup_pseudo_domain() {
+        // Old loot row from before the upstream parsers learned to drop
+        // workgroup pseudo-domains: an attacker-box krbtgt entry tagged with
+        // the auto-generated WIN-XXX...59hv.local string. The achievements
+        // rollup must NOT promote it to a "compromised domain" (DA).
+        let state = empty_state();
+        let hashes = vec![
+            make_hash("krbtgt", "win-mvbxbx7jbs6.59hv.local", "ntlm"),
+            make_hash("Administrator", "WORKGROUP", "ntlm"),
+            // Real domain alongside the polluted ones must still come through.
+            make_hash("krbtgt", "contoso.local", "ntlm"),
+        ];
+        let credentials = vec![make_credential("admin", "win-abcdefghijk.local", true)];
+
+        let achievements = build_domain_achievements(&state, &hashes, &credentials);
+        assert!(!achievements.contains_key("win-mvbxbx7jbs6.59hv.local"));
+        assert!(!achievements.contains_key("workgroup"));
+        assert!(!achievements.contains_key("win-abcdefghijk.local"));
+        assert!(achievements.get("contoso.local").unwrap().has_da);
+    }
+
+    #[test]
+    fn looks_like_workgroup_pseudo_domain_detects_win_prefix() {
+        assert!(looks_like_workgroup_pseudo_domain(
+            "win-mvbxbx7jbs6.59hv.local"
+        ));
+        assert!(looks_like_workgroup_pseudo_domain("WIN-ABCDEFGHIJK.local"));
+        assert!(looks_like_workgroup_pseudo_domain("WORKGROUP"));
+        assert!(looks_like_workgroup_pseudo_domain("mshome"));
+    }
+
+    #[test]
+    fn looks_like_workgroup_pseudo_domain_passes_real_domain() {
+        assert!(!looks_like_workgroup_pseudo_domain("contoso.local"));
+        assert!(!looks_like_workgroup_pseudo_domain("child.contoso.local"));
+        assert!(!looks_like_workgroup_pseudo_domain("fabrikam.local"));
+        assert!(!looks_like_workgroup_pseudo_domain(""));
+        // Wrong length / suffix shape — don't over-trigger
+        assert!(!looks_like_workgroup_pseudo_domain("win-short.local"));
+        assert!(!looks_like_workgroup_pseudo_domain(
+            "win-toolongsuffix9.local"
+        ));
+        // First label has WIN- prefix but has non-alphanumeric in the suffix
+        assert!(!looks_like_workgroup_pseudo_domain("win-abc!defghij.local"));
     }
 
     // Domain/forest structure computation (inline in print_loot_human)

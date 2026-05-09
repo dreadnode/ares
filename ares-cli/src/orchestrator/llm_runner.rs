@@ -31,6 +31,10 @@ pub struct LlmTaskRunner {
     /// Sorted technique priorities from strategy (technique, weight).
     /// Passed to the system prompt template to render a dynamic priority table.
     technique_priorities: Vec<(String, i32)>,
+    /// Orchestrator listener IP — injected into agent prompt templates so
+    /// example tool calls (e.g. coercion `listener=...`) show the real IP
+    /// instead of a literal that the LLM may copy verbatim.
+    listener_ip: String,
     /// Deferred callback handler — set after construction to break the
     /// `LlmTaskRunner → Dispatcher → LlmTaskRunner` circular dependency.
     callback_handler: OnceLock<Arc<dyn CallbackHandler>>,
@@ -44,6 +48,7 @@ impl LlmTaskRunner {
         state: SharedState,
         temperature: Option<f32>,
         technique_priorities: Vec<(String, i32)>,
+        listener_ip: String,
     ) -> Self {
         // Layer env-var overrides (ARES_AGENT_*, ARES_CONTEXT_*, ARES_BUDGET_*,
         // ARES_SESSION_LOG_*) on top of compiled defaults so operators can
@@ -55,6 +60,7 @@ impl LlmTaskRunner {
             state,
             config,
             technique_priorities,
+            listener_ip,
             callback_handler: OnceLock::new(),
         }
     }
@@ -91,7 +97,12 @@ impl LlmTaskRunner {
         let snapshot = self.state.snapshot().await;
 
         // 2. Build system prompt from agent template
-        let system_prompt = build_system_prompt(role, &snapshot, &self.technique_priorities)?;
+        let system_prompt = build_system_prompt(
+            role,
+            &snapshot,
+            &self.technique_priorities,
+            &self.listener_ip,
+        )?;
 
         // 3. Build task prompt from Tera template + payload
         let task_prompt = build_task_prompt(task_type, task_id, payload, &snapshot)?;
@@ -162,6 +173,7 @@ fn build_system_prompt(
     role: AgentRole,
     snapshot: &StateSnapshot,
     technique_priorities: &[(String, i32)],
+    listener_ip: &str,
 ) -> Result<String> {
     // Get capabilities from the tool definitions for this role
     let tools = tool_registry::tools_for_role(role);
@@ -188,7 +200,14 @@ fn build_system_prompt(
     } else {
         Some(technique_priorities)
     };
-    let system_instructions = templates::render_system_instructions(None, priorities)?;
+    let system_instructions = templates::render_system_instructions(
+        None,
+        priorities,
+        &snapshot.target_domain,
+        &snapshot.target_dc_ip,
+        &snapshot.target_dc_fqdn,
+        listener_ip,
+    )?;
 
     // Render agent-specific instructions
     let agent_instructions = templates::render_agent_instructions(
@@ -196,6 +215,10 @@ fn build_system_prompt(
         &capabilities,
         !snapshot.undominated_forests.is_empty(),
         &snapshot.undominated_forests,
+        &snapshot.target_domain,
+        &snapshot.target_dc_ip,
+        &snapshot.target_dc_fqdn,
+        listener_ip,
     )?;
 
     Ok(format!("{system_instructions}\n\n{agent_instructions}"))
@@ -379,7 +402,7 @@ mod tests {
             AgentRole::Coercion,
             AgentRole::Orchestrator,
         ] {
-            let result = build_system_prompt(*role, &snapshot, &[]);
+            let result = build_system_prompt(*role, &snapshot, &[], "192.168.58.50");
             assert!(result.is_ok(), "Failed for role: {:?}", role);
             let prompt = result.unwrap();
             assert!(!prompt.is_empty(), "Empty prompt for role: {:?}", role);

@@ -342,6 +342,7 @@ async fn run_inner() -> Result<()> {
         shared_state.clone(),
         config.strategy.llm_temperature,
         technique_priorities,
+        config.listener_ip.clone().unwrap_or_default(),
     ));
     info!(
         model = %model_name,

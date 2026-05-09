@@ -180,6 +180,10 @@ pub fn build_blue_system_prompt(
         capabilities,
         false,
         &[],
+        "",
+        "",
+        "",
+        "",
         &extras,
     )
 }

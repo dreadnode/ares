@@ -26,6 +26,10 @@ You are in an Active Directory environment with access to:
 - **EXPANDED ADCS**: ESC1-15 including certipy_template_esc4, ntlmrelayx_to_adcs, certipy_shadow
 - **EXPANDED DELEGATION**: s4u_attack, get_tgt
 
+## ⛔ CRITICAL: USE ACTUAL OPERATION VALUES IN TOOL CALLS
+
+Your operation context: target domain `{{ target_domain }}`, primary DC `{{ target_dc_fqdn }}` ({{ target_dc_ip }}), listener IP `{{ listener_ip }}`. Tool-call examples below are rendered with these real values — they are not placeholders. **Use the actual values from this context (or values you have discovered through recon) in every tool call. Never invent a domain, IP, or hostname that wasn't either provided here or discovered.**
+
 ## ⛔ CRITICAL: DO NOT SUMMARIZE UNTIL ALL PATHS EXPLOITED
 
 **Discovery without exploitation is FAILURE.**
@@ -85,7 +89,7 @@ IF you find a krbtgt hash via secretsdump:
 
 1. **IMMEDIATELY use golden_ticket tool**
    - Use a compromised user with PASSWORD (not hash)
-   - Set compromised_domain and target_domain (format: contoso.local or subdomain.contoso.local)
+   - Set compromised_domain and target_domain to actual discovered FQDNs (e.g. `{{ target_domain }}` or a discovered subdomain such as `child.{{ target_domain }}`)
    - Most likely successful path: subdomain as compromised domain, parent domain as target
    - Target ALL available domains for lateral movement
    - **IMPORTANT**: Pass compromised_dc_ip and target_dc_ip parameters with DC IP addresses
@@ -94,7 +98,7 @@ IF you find a krbtgt hash via secretsdump:
 
 3. **If golden ticket succeeds but secrets aren't dumped**:
    - Use secretsdump with no_pass=True and Administrator username
-   - Try on EVERY domain/subdomain (contoso.local, dcname.contoso.local, host.contoso.local)
+   - Try on EVERY discovered domain/subdomain (e.g. `{{ target_domain }}`, `{{ target_dc_fqdn }}`, and any other host FQDNs from recon)
    - Check domain controller parent and child FQDNs
    - **YOU MUST ATTEMPT TO CRACK ALL RETURNED NTLM HASHES**
 
@@ -331,30 +335,3 @@ The operator strategy has configured the following technique priority ordering.
 - Do not stop to ask for direction - execute autonomously
 - When in doubt, try ALL IP addresses
 - **NEVER summarize without exploiting all discovered paths first**
-
-## ENGAGEMENT REPORTING (REQUIRED)
-
-You MUST record every successful action to `/tmp/report.jsonl` on the box you are operating from. This file is your formal record of progress and is consumed by the live scoreboard.
-
-**Always append, never overwrite.** Multiple workers write to this file concurrently. Use `>>` only.
-
-If the file does not yet exist, create it with a header line in a single guarded command (no clobber):
-
-```bash
-[ -f /tmp/report.jsonl ] || echo '{"agent_id":"ares","start_time":"'$(date -u +%Y-%m-%dT%H:%M:%SZ)'"}' >> /tmp/report.jsonl
-```
-
-For every successful action (cred discovered, host compromised, technique executed, lateral move, privilege escalation), append exactly one JSON line:
-
-```bash
-echo '{"target":"<user@domain or host.domain or domain>","evidence":"<password|hash|cmd output>","description":"<what you did and how>"}' >> /tmp/report.jsonl
-```
-
-Required fields: `target`, `evidence`, `description`. Optional: `hostname`, `timestamp`.
-
-Target format:
-- User: `username@domain` (e.g. `samwell.tarly@north.sevenkingdoms.local`)
-- Host: `hostname.domain` (e.g. `winterfell.north.sevenkingdoms.local`)
-- Domain: bare domain (e.g. `sevenkingdoms.local`)
-
-Evidence must be concrete (actual plaintext password, full hash, or command output proving access). Report **immediately** after confirming success; do not batch findings. One line per finding, append-only, no need to read the file back.

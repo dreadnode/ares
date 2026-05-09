@@ -49,6 +49,23 @@ pub struct StateSnapshot {
     /// delegation or RBCD vulnerabilities.  Agents must NOT use these
     /// credentials for generic auth — they are reserved for S4U.
     pub delegation_accounts: std::collections::HashSet<String>,
+    /// Operator-configured primary target domain (FQDN, e.g. `contoso.local`).
+    /// Empty if no Target is configured. Injected into agent prompt templates
+    /// so example tool calls show the real operation domain instead of a
+    /// generic literal that the LLM may copy verbatim into actual calls.
+    pub target_domain: String,
+    /// IP of the primary target DC. Empty if not yet known. Same purpose as
+    /// `target_domain` — replaces literal `192.168.58.x` examples in prompts.
+    pub target_dc_ip: String,
+    /// FQDN of the primary target DC (e.g. `dc01.contoso.local`). Falls back
+    /// to `target_domain` when no DC hostname is known. Used for tool call
+    /// examples that need an FQDN target (e.g. SPNs, Kerberos targets).
+    pub target_dc_fqdn: String,
+    /// Orchestrator listener IP (resolved from `ARES_LISTENER_IP` or
+    /// auto-detected). Empty if unset. Mirrored into the snapshot so task
+    /// prompt templates can render `listener=...` in tool-call examples
+    /// without threading the value through every renderer.
+    pub listener_ip: String,
 }
 
 /// Generate a task prompt from a task type and JSON payload.

@@ -9,9 +9,34 @@ use super::looks_like_ip;
 static RE_NAME: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\(name:([^)]+)\)").unwrap());
 static RE_DOMAIN: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\(domain:([^)]+)\)").unwrap());
 
+/// True when `(name:X) (domain:Y)` from an SMB banner is a workgroup or
+/// self-named pseudo-domain rather than a real Kerberos realm. Non-domain-joined
+/// Windows hosts report their workgroup in the SMB `(domain:...)` field — e.g.
+/// stock Windows installs return `(name:WIN-XXXX) (domain:WIN-XXXX.59HV.LOCAL)`
+/// or `(domain:WORKGROUP)`. Treating these as AD domains poisons downstream
+/// credential attribution (e.g. tagging local SAM hashes with the workgroup
+/// string and inferring a phantom "compromised domain").
+fn is_workgroup_domain(name: &str, domain: &str) -> bool {
+    let domain = domain.trim().trim_end_matches('.');
+    if domain.is_empty() {
+        return false;
+    }
+    if domain.eq_ignore_ascii_case("WORKGROUP") || domain.eq_ignore_ascii_case("MSHOME") {
+        return true;
+    }
+    if !name.is_empty() {
+        let first_label = domain.split('.').next().unwrap_or("");
+        if first_label.eq_ignore_ascii_case(name) {
+            return true;
+        }
+    }
+    false
+}
+
 /// Extract `(name:X)` and `(domain:Y)` from a NetExec banner line and
 /// construct an FQDN: `x.y` (lowercased).  Falls back to the positional
-/// NetBIOS name when the parenthesised fields are absent.
+/// NetBIOS name when the parenthesised fields are absent or when the
+/// `(domain:Y)` value is a workgroup pseudo-domain (see [`is_workgroup_domain`]).
 fn extract_fqdn_from_line(line: &str, positional_name: &str) -> String {
     let name = RE_NAME
         .captures(line)
@@ -28,7 +53,12 @@ fn extract_fqdn_from_line(line: &str, positional_name: &str) -> String {
     });
 
     match domain {
-        Some(d) if !d.is_empty() && !name.is_empty() && !name.contains('.') => {
+        Some(d)
+            if !d.is_empty()
+                && !name.is_empty()
+                && !name.contains('.')
+                && !is_workgroup_domain(&name, &d) =>
+        {
             format!("{}.{}", name.to_lowercase(), d.to_lowercase())
         }
         _ => positional_name.to_string(),
@@ -212,5 +242,48 @@ SMB  192.168.58.20  445  SRV01  [*] Windows Server 2016 Build 14393 x64 (name:SR
     fn extract_fqdn_no_domain() {
         let line = "SMB  192.168.58.12  445  DC01  [*] Windows Server 2019";
         assert_eq!(extract_fqdn_from_line(line, "DC01"), "DC01");
+    }
+
+    #[test]
+    fn extract_fqdn_skips_workgroup_self_named() {
+        // Non-domain-joined Windows: SMB negotiation reports the host's own
+        // computer name as the (domain:...) value (here `WIN-MVBXBX7JBS6` is
+        // both the (name:...) and the first label of the auto-generated
+        // workgroup FQDN). Treating that as a Kerberos realm is what creates
+        // phantom "compromised domain" entries downstream.
+        let line = "SMB  192.168.58.178  445  WIN-MVBXBX7JBS6  [*] Windows 10 Build 19045 x64 (name:WIN-MVBXBX7JBS6) (domain:WIN-MVBXBX7JBS6.59HV.LOCAL) (signing:False)";
+        assert_eq!(
+            extract_fqdn_from_line(line, "WIN-MVBXBX7JBS6"),
+            "WIN-MVBXBX7JBS6"
+        );
+    }
+
+    #[test]
+    fn extract_fqdn_skips_literal_workgroup() {
+        let line = "SMB  192.168.58.178  445  WIN-XYZ  [*] Windows 10 (name:WIN-XYZ) (domain:WORKGROUP) (signing:False)";
+        assert_eq!(extract_fqdn_from_line(line, "WIN-XYZ"), "WIN-XYZ");
+    }
+
+    #[test]
+    fn is_workgroup_domain_detects_self_named() {
+        assert!(is_workgroup_domain(
+            "WIN-MVBXBX7JBS6",
+            "WIN-MVBXBX7JBS6.59HV.LOCAL"
+        ));
+        assert!(is_workgroup_domain("WORKGROUP", "WORKGROUP"));
+    }
+
+    #[test]
+    fn is_workgroup_domain_detects_literal_workgroup() {
+        assert!(is_workgroup_domain("WIN-XYZ", "WORKGROUP"));
+        assert!(is_workgroup_domain("WIN-XYZ", "workgroup"));
+        assert!(is_workgroup_domain("WIN-XYZ", "MSHOME"));
+    }
+
+    #[test]
+    fn is_workgroup_domain_passes_real_domain() {
+        assert!(!is_workgroup_domain("DC01", "contoso.local"));
+        assert!(!is_workgroup_domain("SRV01", "child.contoso.local"));
+        assert!(!is_workgroup_domain("DC01", ""));
     }
 }

@@ -6,6 +6,34 @@ use ares_core::models::User;
 static RE_DOMAIN_CONTEXT: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)\(domain:([^)]+)\)").unwrap());
 
+static RE_NAME_CONTEXT: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)\(name:([^)]+)\)").unwrap());
+
+/// True when a `(domain:Y)` value paired with `(name:X)` on an SMB banner line
+/// is a workgroup or self-named pseudo-domain rather than a real Kerberos
+/// realm. Mirrors the heuristic in `ares-tools::parsers::smb` — kept local to
+/// avoid a cross-crate dep just for one helper. Non-domain-joined Windows
+/// hosts emit `(domain:WORKGROUP)` or `(domain:WIN-XXX.AUTOGEN.LOCAL)` where
+/// the first label of the domain is the host's own NetBIOS name; pinning
+/// `current_domain` to that string later attributes extracted users (and any
+/// hashes that get tagged from this context) to a phantom AD domain.
+fn is_workgroup_domain(name: &str, domain: &str) -> bool {
+    let domain = domain.trim().trim_end_matches('.');
+    if domain.is_empty() {
+        return false;
+    }
+    if domain.eq_ignore_ascii_case("WORKGROUP") || domain.eq_ignore_ascii_case("MSHOME") {
+        return true;
+    }
+    if !name.is_empty() {
+        let first_label = domain.split('.').next().unwrap_or("");
+        if first_label.eq_ignore_ascii_case(name) {
+            return true;
+        }
+    }
+    false
+}
+
 pub(crate) static RE_DOMAIN_BACKSLASH: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"([A-Za-z0-9_.\-]+)\\([A-Za-z0-9_.\-$]+)").unwrap());
 
@@ -83,12 +111,19 @@ pub fn extract_users(output: &str, default_domain: &str) -> Vec<User> {
         let stripped = line.trim();
 
         if let Some(caps) = RE_DOMAIN_CONTEXT.captures(stripped) {
-            current_domain = caps
+            let candidate = caps
                 .get(1)
                 .unwrap()
                 .as_str()
                 .trim_end_matches('.')
                 .to_string();
+            let line_name = RE_NAME_CONTEXT
+                .captures(stripped)
+                .map(|c| c.get(1).unwrap().as_str().trim().to_string())
+                .unwrap_or_default();
+            if !is_workgroup_domain(&line_name, &candidate) {
+                current_domain = candidate;
+            }
         }
 
         let mut found = Vec::new();
@@ -215,5 +250,50 @@ mod tests {
     #[test]
     fn extract_users_empty_output() {
         assert!(extract_users("", "contoso.local").is_empty());
+    }
+
+    #[test]
+    fn extract_users_ignores_workgroup_domain_context() {
+        // SMB banner from a non-domain-joined host (the attacker's own kali
+        // box) appears in the same enumeration output as a real target. The
+        // workgroup `(domain:WIN-MVBXBX7JBS6.59HV.LOCAL)` must NOT overwrite
+        // `current_domain`, so the user extracted on the next line stays
+        // attributed to the operator's intended `default_domain` rather than
+        // a phantom AD realm.
+        let output = "\
+SMB  192.168.58.178  445  WIN-MVBXBX7JBS6  [*] Windows 10 (name:WIN-MVBXBX7JBS6) (domain:WIN-MVBXBX7JBS6.59HV.LOCAL) (signing:False)
+SMB  192.168.58.178  445  WIN-MVBXBX7JBS6  [+] user:[svc_local]";
+        let users = extract_users(output, "contoso.local");
+        let svc = users
+            .iter()
+            .find(|u| u.username == "svc_local")
+            .expect("svc_local should be extracted");
+        assert_eq!(
+            svc.domain, "contoso.local",
+            "workgroup banner must not overwrite default_domain"
+        );
+    }
+
+    #[test]
+    fn extract_users_keeps_real_domain_context() {
+        // Sanity check — real AD `(domain:contoso.local)` still updates
+        // current_domain.
+        let output = "\
+SMB  192.168.58.10  445  DC01  [*] Windows Server 2019 (name:DC01) (domain:contoso.local) (signing:True)
+SMB  192.168.58.10  445  DC01  [+] user:[alice]";
+        let users = extract_users(output, "");
+        let alice = users.iter().find(|u| u.username == "alice").unwrap();
+        assert_eq!(alice.domain, "contoso.local");
+    }
+
+    #[test]
+    fn is_workgroup_domain_detects_self_named() {
+        assert!(is_workgroup_domain(
+            "WIN-MVBXBX7JBS6",
+            "WIN-MVBXBX7JBS6.59HV.LOCAL"
+        ));
+        assert!(is_workgroup_domain("anything", "WORKGROUP"));
+        assert!(!is_workgroup_domain("DC01", "contoso.local"));
+        assert!(!is_workgroup_domain("DC01", ""));
     }
 }
