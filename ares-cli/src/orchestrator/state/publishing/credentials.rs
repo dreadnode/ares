@@ -25,11 +25,20 @@ impl SharedState {
         cred: Credential,
     ) -> Result<bool> {
         // Sanitize and validate before storage
-        let netbios_map = {
+        let (netbios_map, known_domains) = {
             let state = self.inner.read().await;
-            state.netbios_to_fqdn.clone()
+            // Known domains = explicit state.domains plus any DC domain keys.
+            // We use this to snap typo'd FQDNs to their canonical form.
+            let mut known: Vec<String> = state.domains.iter().map(|d| d.to_lowercase()).collect();
+            for dc_domain in state.domain_controllers.keys() {
+                let lower = dc_domain.to_lowercase();
+                if !known.contains(&lower) {
+                    known.push(lower);
+                }
+            }
+            (state.netbios_to_fqdn.clone(), known)
         };
-        let cred = match sanitize_credential(cred, &netbios_map) {
+        let cred = match sanitize_credential(cred, &netbios_map, &known_domains) {
             Some(c) => c,
             None => return Ok(false),
         };
@@ -155,12 +164,10 @@ impl SharedState {
                     );
                 }
 
-                // Resolve DC target IP for vulnerability entry
-                let dc_target = state
-                    .domain_controllers
-                    .get(&krbtgt_domain)
-                    .cloned()
-                    .unwrap_or_else(|| krbtgt_domain.clone());
+                // Resolve DC target IP for vulnerability entry. Only synthesize a
+                // vuln when the krbtgt domain resolved to a known DC — otherwise we
+                // emit a `dc_secretsdump on ` finding with empty target/domain.
+                let dc_target = state.domain_controllers.get(&krbtgt_domain).cloned();
 
                 // Auto-set domain admin when first krbtgt NTLM hash arrives (matches Python)
                 if !state.has_domain_admin {
@@ -179,31 +186,38 @@ impl SharedState {
 
                 // Synthesize a dc_secretsdump vulnerability so the discovered
                 // vulnerabilities list reflects the DA achievement path.
-                let vuln_id = format!("dc_secretsdump_{}", krbtgt_domain);
-                let mut details = HashMap::new();
-                details.insert(
-                    "domain".into(),
-                    serde_json::Value::String(krbtgt_domain.clone()),
-                );
-                details.insert(
-                    "note".into(),
-                    serde_json::Value::String(
-                        "Domain controller compromised via secretsdump — krbtgt NTLM hash extracted"
-                            .to_string(),
-                    ),
-                );
-                let vuln = VulnerabilityInfo {
-                    vuln_id: vuln_id.clone(),
-                    vuln_type: "dc_secretsdump".to_string(),
-                    target: dc_target,
-                    discovered_by: "credential_access".to_string(),
-                    discovered_at: chrono::Utc::now(),
-                    details,
-                    recommended_agent: String::new(),
-                    priority: 1,
-                };
-                let _ = self.publish_vulnerability(queue, vuln).await;
-                let _ = self.mark_exploited(queue, &vuln_id).await;
+                if let Some(dc_target) = dc_target {
+                    let vuln_id = format!("dc_secretsdump_{}", krbtgt_domain);
+                    let mut details = HashMap::new();
+                    details.insert(
+                        "domain".into(),
+                        serde_json::Value::String(krbtgt_domain.clone()),
+                    );
+                    details.insert(
+                        "note".into(),
+                        serde_json::Value::String(
+                            "Domain controller compromised via secretsdump — krbtgt NTLM hash extracted"
+                                .to_string(),
+                        ),
+                    );
+                    let vuln = VulnerabilityInfo {
+                        vuln_id: vuln_id.clone(),
+                        vuln_type: "dc_secretsdump".to_string(),
+                        target: dc_target,
+                        discovered_by: "credential_access".to_string(),
+                        discovered_at: chrono::Utc::now(),
+                        details,
+                        recommended_agent: String::new(),
+                        priority: 1,
+                    };
+                    let _ = self.publish_vulnerability(queue, vuln).await;
+                    let _ = self.mark_exploited(queue, &vuln_id).await;
+                } else {
+                    tracing::warn!(
+                        domain = %krbtgt_domain,
+                        "krbtgt hash without resolvable DC target — skipping dc_secretsdump vuln synthesis"
+                    );
+                }
             }
         }
         Ok(added)
@@ -424,6 +438,27 @@ mod tests {
         let s = state.inner.read().await;
         assert!(s.has_domain_admin);
         assert!(s.dominated_domains.contains("contoso.local"));
+    }
+
+    #[tokio::test]
+    async fn publish_krbtgt_hash_without_resolvable_domain_skips_vuln() {
+        // Regression: a krbtgt hash with no domain prefix and no siblings to
+        // resolve from used to synthesize a `dc_secretsdump` vuln with empty
+        // target/domain — surfacing as `dc_secretsdump on ` in the report.
+        let state = SharedState::new("op-1".to_string());
+        let q = mock_queue();
+
+        let hash = make_hash("krbtgt", "", "NTLM", "aabbccdd11223344");
+        state.publish_hash(&q, hash).await.unwrap();
+
+        let s = state.inner.read().await;
+        assert!(
+            !s.discovered_vulnerabilities
+                .values()
+                .any(|v| v.vuln_type == "dc_secretsdump"),
+            "should not synthesize dc_secretsdump vuln when domain is unresolvable"
+        );
+        assert!(s.dominated_domains.is_empty());
     }
 
     #[tokio::test]

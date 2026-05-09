@@ -106,7 +106,7 @@ pub fn parse_spider_credentials(output: &str, params: &Value) -> Vec<Value> {
                 .unwrap_or(domain);
             let username = &cap[2];
             let password = &cap[3];
-            if is_plausible_password(password) {
+            if is_plausible_username(username) && is_plausible_password(password) {
                 creds.push(json!({
                     "username": username,
                     "password": password,
@@ -120,6 +120,7 @@ pub fn parse_spider_credentials(output: &str, params: &Value) -> Vec<Value> {
         let usernames: Vec<String> = RE_USERNAME
             .captures_iter(content)
             .filter_map(|cap| first_capture(&cap, &[1, 2, 3]))
+            .filter(|u| is_plausible_username(u))
             .collect();
 
         let passwords: Vec<String> = RE_PASSWORD
@@ -140,6 +141,12 @@ pub fn parse_spider_credentials(output: &str, params: &Value) -> Vec<Value> {
                     continue;
                 };
                 let (user_domain, username) = split_domain_user(raw_user);
+                // Re-validate post-split: a raw capture like `DOMAIN\$User.UserName`
+                // passes the pre-split filter (doesn't start with `$`) but yields a
+                // bogus `$User.UserName` username after the prefix is stripped.
+                if !is_plausible_username(username) {
+                    continue;
+                }
                 let cred_domain = match user_domain {
                     Some(d) => resolve_domain_from_fqdn(d, domain).unwrap_or(d),
                     None => domain,
@@ -157,6 +164,7 @@ pub fn parse_spider_credentials(output: &str, params: &Value) -> Vec<Value> {
         let ps_users: Vec<String> = RE_PS_PARAM_USER
             .captures_iter(content)
             .filter_map(|cap| first_capture(&cap, &[1, 2, 3]))
+            .filter(|u| is_plausible_username(u))
             .collect();
 
         let ps_passes: Vec<String> = RE_PS_PARAM_PASS
@@ -175,6 +183,9 @@ pub fn parse_spider_credentials(output: &str, params: &Value) -> Vec<Value> {
                     continue;
                 };
                 let (user_domain, username) = split_domain_user(raw_user);
+                if !is_plausible_username(username) {
+                    continue;
+                }
                 let cred_domain = match user_domain {
                     Some(d) => resolve_domain_from_fqdn(d, domain).unwrap_or(d),
                     None => domain,
@@ -210,12 +221,40 @@ fn is_plausible_password(s: &str) -> bool {
     if s.starts_with('$') || s.starts_with('%') {
         return false;
     }
+    // Skip PowerShell cmdlet tokens like `New-Object`, `Get-Credential`,
+    // `ConvertTo-SecureString` — common when a script's RHS expression starts
+    // with a cmdlet rather than a literal value.
+    if RE_PS_CMDLET.is_match(s) {
+        return false;
+    }
     // Skip common placeholders
     let lower = s.to_lowercase();
     !matches!(
         lower.as_str(),
         "changeme" | "password" | "pass" | "xxx" | "todo" | "null" | "none" | "empty"
     )
+}
+
+/// PowerShell cmdlet token: `Verb-Noun` (capitalized words separated by `-`),
+/// e.g. `New-Object`, `Get-Credential`, `ConvertTo-SecureString`.
+static RE_PS_CMDLET: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^[A-Z][A-Za-z]+-[A-Z][A-Za-z]+$").unwrap());
+
+fn is_plausible_username(s: &str) -> bool {
+    if s.is_empty() {
+        return false;
+    }
+    // Skip variable references — `$var`, `$user.username`, `%var%`.
+    // (Real AD usernames like `alice.jones` contain `.` but never start
+    // with `$` or `%`.)
+    if s.starts_with('$') || s.starts_with('%') {
+        return false;
+    }
+    // Skip PowerShell cmdlet tokens — same shape as the password check.
+    if RE_PS_CMDLET.is_match(s) {
+        return false;
+    }
+    true
 }
 
 #[cfg(test)]
@@ -232,8 +271,8 @@ mod tests {
 # fake script in netlogon with creds
 $task = '/c TODO'
 $taskName = "fake task"
-$user = "CHILD\jeff.morgan"
-$password = "_S3cur3P@ss_"
+$user = "CHILD\alice.jones"
+$password = "P@ssw0rd!"
 
 # passwords in sysvol still ...
 "#;
@@ -241,8 +280,8 @@ $password = "_S3cur3P@ss_"
         let creds = parse_spider_credentials(output, &params);
 
         assert_eq!(creds.len(), 1);
-        assert_eq!(creds[0]["username"], "jeff.morgan");
-        assert_eq!(creds[0]["password"], "_S3cur3P@ss_");
+        assert_eq!(creds[0]["username"], "alice.jones");
+        assert_eq!(creds[0]["password"], "P@ssw0rd!");
         // NetBIOS "CHILD" resolved to FQDN since first label matches param domain
         assert_eq!(creds[0]["domain"], "child.contoso.local");
     }
@@ -251,14 +290,14 @@ $password = "_S3cur3P@ss_"
     fn net_use_command() {
         let output = r#"
 --- SYSVOL/scripts/map_drive.bat ---
-net use \\dc02\share /user:CHILD\jeff.morgan _S3cur3P@ss_
+net use \\dc02\share /user:CHILD\alice.jones P@ssw0rd!
 "#;
         let params = json!({"domain": "child.contoso.local"});
         let creds = parse_spider_credentials(output, &params);
 
         assert_eq!(creds.len(), 1);
-        assert_eq!(creds[0]["username"], "jeff.morgan");
-        assert_eq!(creds[0]["password"], "_S3cur3P@ss_");
+        assert_eq!(creds[0]["username"], "alice.jones");
+        assert_eq!(creds[0]["password"], "P@ssw0rd!");
         assert_eq!(creds[0]["domain"], "child.contoso.local");
     }
 
@@ -425,5 +464,79 @@ $pass = "P@ssw0rd"
         // group 1 is None, group 3 doesn't exist
         let result = first_capture(&cap, &[1, 3]);
         assert_eq!(result, None);
+    }
+
+    #[test]
+    fn rejects_powershell_variable_username_and_cmdlet_password() {
+        // Regression: a SYSVOL script that builds a PSCredential reused the
+        // `username` / `pass` variable names against PowerShell tokens, and
+        // the parser produced a bogus `$user.username:New-Object` credential.
+        let output = r#"
+=== Downloaded File Contents ===
+
+--- NETLOGON/login.ps1 ---
+$user = Get-CurrentUser
+$username = $user.username
+$pass = New-Object Security.PSCredential
+"#;
+        let creds = parse_spider_credentials(output, &json!({"domain": "contoso.local"}));
+        assert!(
+            creds.is_empty(),
+            "should reject variable-ref usernames and cmdlet passwords, got: {:?}",
+            creds
+        );
+    }
+
+    #[test]
+    fn rejects_dollar_var_username_after_domain_prefix_strip() {
+        // Regression: the raw capture `ESSOS\$User.UserName` passes
+        // `is_plausible_username` (doesn't start with `$`), but after
+        // `split_domain_user` strips the `ESSOS\` prefix the username becomes
+        // `$User.UserName` — a PowerShell variable expression, not a real
+        // account. Verify the post-split validation rejects it.
+        let output = r#"
+=== Downloaded File Contents ===
+
+--- NETLOGON/login.ps1 ---
+$user = "ESSOS\$User.UserName"
+$password = "RealPassword!"
+"#;
+        let creds = parse_spider_credentials(output, &json!({"domain": "essos.local"}));
+        assert!(
+            creds.is_empty(),
+            "should reject `$User.UserName` username after stripping `ESSOS\\` prefix, got: {:?}",
+            creds
+        );
+    }
+
+    #[test]
+    fn rejects_cmdlet_username_in_net_use() {
+        // Regression: net use pattern lacked `is_plausible_username` validation,
+        // so a literal cmdlet token in the user field could leak through.
+        let output = r#"
+--- SYSVOL/scripts/setup.bat ---
+net use \\dc01\share /user:CONTOSO\Get-Credential P@ssw0rd!
+"#;
+        let creds = parse_spider_credentials(output, &json!({"domain": "contoso.local"}));
+        assert!(
+            creds.is_empty(),
+            "should reject cmdlet-shaped username in net use, got: {:?}",
+            creds
+        );
+    }
+
+    #[test]
+    fn still_extracts_real_dotted_username_with_quoted_password() {
+        // Make sure the new filters don't reject `firstname.lastname` style
+        // accounts when paired with a real password literal.
+        let output = r#"
+--- NETLOGON/script.ps1 ---
+$username = "alice.jones"
+$password = "P@ssw0rd!"
+"#;
+        let creds = parse_spider_credentials(output, &json!({"domain": "contoso.local"}));
+        assert_eq!(creds.len(), 1);
+        assert_eq!(creds[0]["username"], "alice.jones");
+        assert_eq!(creds[0]["password"], "P@ssw0rd!");
     }
 }

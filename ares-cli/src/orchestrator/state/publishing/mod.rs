@@ -22,9 +22,17 @@ pub(super) static TRAILING_PAREN_RE: LazyLock<Regex> =
 /// Mirrors Python's `add_credential()` — strips noise from password values,
 /// normalizes `user@domain@domain` usernames, resolves NetBIOS domains to FQDN,
 /// and rejects invalid entries. Returns `None` if the credential should be dropped.
+///
+/// `known_domains` is the set of FQDNs already trusted by the operation
+/// (state.domains plus state.domain_controllers keys). When supplied, an
+/// FQDN domain on the incoming credential whose first label matches a
+/// known FQDN is normalized to that known FQDN — this catches LLM-supplied
+/// typos like `north.sevenkingdomdom.local` getting amplified by
+/// NetBIOS-to-FQDN expansion in upstream parsers.
 pub(super) fn sanitize_credential(
     mut cred: ares_core::models::Credential,
     netbios_to_fqdn: &std::collections::HashMap<String, String>,
+    known_domains: &[String],
 ) -> Option<ares_core::models::Credential> {
     use crate::orchestrator::output_extraction::strip_ansi;
 
@@ -102,6 +110,34 @@ pub(super) fn sanitize_credential(
         }
     }
 
+    // Normalize an FQDN domain against known domains by first-label match.
+    // Defends against the upstream spider parser amplifying an LLM-supplied
+    // typo when expanding a NetBIOS prefix (e.g. file says `NORTH\user`,
+    // the LLM passed `domain="north.sevenkingdomdom.local"`, and the parser
+    // emitted that typo; here we snap to the known canonical FQDN).
+    if cred.domain.contains('.') && !known_domains.is_empty() {
+        let cred_domain_lower = cred.domain.to_lowercase();
+        let already_known = known_domains
+            .iter()
+            .any(|d| d.eq_ignore_ascii_case(&cred_domain_lower));
+        if !already_known {
+            if let Some(first_label) = cred_domain_lower.split('.').next() {
+                if let Some(canonical) = known_domains.iter().find(|d| {
+                    d.split('.')
+                        .next()
+                        .is_some_and(|fl| fl.eq_ignore_ascii_case(first_label))
+                }) {
+                    tracing::warn!(
+                        original = %cred.domain,
+                        canonical = %canonical,
+                        "Normalizing credential domain to known FQDN (likely LLM tool-arg typo)"
+                    );
+                    cred.domain = canonical.clone();
+                }
+            }
+        }
+    }
+
     // Validate after sanitization
     if !crate::orchestrator::output_extraction::is_valid_credential(&cred.username, &cred.password)
     {
@@ -140,7 +176,7 @@ mod tests {
     #[test]
     fn valid_credential_passes_through() {
         let cred = make_cred("alice", "P@ssw0rd!", "contoso.local");
-        let result = sanitize_credential(cred, &HashMap::new()).unwrap();
+        let result = sanitize_credential(cred, &HashMap::new(), &[]).unwrap();
         assert_eq!(result.username, "alice");
         assert_eq!(result.password, "P@ssw0rd!");
         assert_eq!(result.domain, "contoso.local");
@@ -153,7 +189,7 @@ mod tests {
             "\x1b[31mP@ssw0rd!\x1b[0m",
             "\x1b[34mcontoso.local\x1b[0m",
         );
-        let result = sanitize_credential(cred, &HashMap::new()).unwrap();
+        let result = sanitize_credential(cred, &HashMap::new(), &[]).unwrap();
         assert_eq!(result.username, "alice");
         assert_eq!(result.password, "P@ssw0rd!");
         assert_eq!(result.domain, "contoso.local");
@@ -162,7 +198,7 @@ mod tests {
     #[test]
     fn whitespace_trimmed() {
         let cred = make_cred("  alice  ", "  P@ssw0rd!  ", "  contoso.local  ");
-        let result = sanitize_credential(cred, &HashMap::new()).unwrap();
+        let result = sanitize_credential(cred, &HashMap::new(), &[]).unwrap();
         assert_eq!(result.username, "alice");
         assert_eq!(result.password, "P@ssw0rd!");
         assert_eq!(result.domain, "contoso.local");
@@ -171,42 +207,42 @@ mod tests {
     #[test]
     fn password_prefix_with_space_stripped() {
         let cred = make_cred("alice", "Password: Secret123", "contoso.local");
-        let result = sanitize_credential(cred, &HashMap::new()).unwrap();
+        let result = sanitize_credential(cred, &HashMap::new(), &[]).unwrap();
         assert_eq!(result.password, "Secret123");
     }
 
     #[test]
     fn password_prefix_without_space_stripped() {
         let cred = make_cred("alice", "Password:Secret123", "contoso.local");
-        let result = sanitize_credential(cred, &HashMap::new()).unwrap();
+        let result = sanitize_credential(cred, &HashMap::new(), &[]).unwrap();
         assert_eq!(result.password, "Secret123");
     }
 
     #[test]
     fn trailing_parenthetical_stripped() {
         let cred = make_cred("alice", "P@ssw0rd! (Guest)", "contoso.local");
-        let result = sanitize_credential(cred, &HashMap::new()).unwrap();
+        let result = sanitize_credential(cred, &HashMap::new(), &[]).unwrap();
         assert_eq!(result.password, "P@ssw0rd!");
     }
 
     #[test]
     fn trailing_ascii_ellipsis_stripped() {
         let cred = make_cred("alice", "P@ssw0rd!......", "contoso.local");
-        let result = sanitize_credential(cred, &HashMap::new()).unwrap();
+        let result = sanitize_credential(cred, &HashMap::new(), &[]).unwrap();
         assert_eq!(result.password, "P@ssw0rd!");
     }
 
     #[test]
     fn trailing_unicode_ellipsis_stripped() {
         let cred = make_cred("alice", "P@ssw0rd!\u{2026}", "contoso.local");
-        let result = sanitize_credential(cred, &HashMap::new()).unwrap();
+        let result = sanitize_credential(cred, &HashMap::new(), &[]).unwrap();
         assert_eq!(result.password, "P@ssw0rd!");
     }
 
     #[test]
     fn username_at_domain_normalized() {
         let cred = make_cred("sam.wilson@child.contoso.local", "P@ssw0rd!", "");
-        let result = sanitize_credential(cred, &HashMap::new()).unwrap();
+        let result = sanitize_credential(cred, &HashMap::new(), &[]).unwrap();
         assert_eq!(result.username, "sam.wilson");
         assert_eq!(result.domain, "child.contoso.local");
     }
@@ -218,7 +254,7 @@ mod tests {
             "P@ssw0rd!",
             "",
         );
-        let result = sanitize_credential(cred, &HashMap::new()).unwrap();
+        let result = sanitize_credential(cred, &HashMap::new(), &[]).unwrap();
         assert_eq!(result.username, "sam.wilson");
         assert_eq!(result.domain, "child.contoso.local");
     }
@@ -228,7 +264,7 @@ mod tests {
         let mut map = HashMap::new();
         map.insert("CHILD".to_string(), "dc01.child.contoso.local".to_string());
         let cred = make_cred("alice", "P@ssw0rd!", "CHILD");
-        let result = sanitize_credential(cred, &map).unwrap();
+        let result = sanitize_credential(cred, &map, &[]).unwrap();
         assert_eq!(result.domain, "child.contoso.local");
     }
 
@@ -241,32 +277,64 @@ mod tests {
         );
         // "child" is not a direct key, but matches the first label after hostname in a value
         let cred = make_cred("alice", "P@ssw0rd!", "child");
-        let result = sanitize_credential(cred, &map).unwrap();
+        let result = sanitize_credential(cred, &map, &[]).unwrap();
         assert_eq!(result.domain, "child.contoso.local");
     }
 
     #[test]
     fn returns_none_for_empty_username() {
         let cred = make_cred("", "P@ssw0rd!", "contoso.local");
-        assert!(sanitize_credential(cred, &HashMap::new()).is_none());
+        assert!(sanitize_credential(cred, &HashMap::new(), &[]).is_none());
     }
 
     #[test]
     fn returns_none_for_empty_password() {
         let cred = make_cred("alice", "", "contoso.local");
-        assert!(sanitize_credential(cred, &HashMap::new()).is_none());
+        assert!(sanitize_credential(cred, &HashMap::new(), &[]).is_none());
     }
 
     #[test]
     fn returns_none_for_password_with_path_separator() {
         let cred = make_cred("alice", "/etc/passwd", "contoso.local");
-        assert!(sanitize_credential(cred, &HashMap::new()).is_none());
+        assert!(sanitize_credential(cred, &HashMap::new(), &[]).is_none());
     }
 
     #[test]
     fn returns_none_for_short_password() {
         let cred = make_cred("alice", "ab", "contoso.local");
-        assert!(sanitize_credential(cred, &HashMap::new()).is_none());
+        assert!(sanitize_credential(cred, &HashMap::new(), &[]).is_none());
+    }
+
+    #[test]
+    fn typo_fqdn_normalized_to_known_domain() {
+        // Regression: spider parser expanded `NORTH\jeor.mormont` using an
+        // LLM-supplied typo'd `domain` param, producing a credential with
+        // domain `north.sevenkingdomdom.local`. Snap to the known canonical.
+        let cred = make_cred("jeor.mormont", "_L0ngCl@w_", "north.sevenkingdomdom.local");
+        let known = vec![
+            "sevenkingdoms.local".to_string(),
+            "north.sevenkingdoms.local".to_string(),
+        ];
+        let result = sanitize_credential(cred, &HashMap::new(), &known).unwrap();
+        assert_eq!(result.domain, "north.sevenkingdoms.local");
+    }
+
+    #[test]
+    fn unknown_fqdn_with_no_first_label_match_kept_as_is() {
+        // A genuine new domain — not a typo of anything known — should pass
+        // through untouched so the auto-extract path can pick it up.
+        let cred = make_cred("alice", "P@ssw0rd!", "fabrikam.local");
+        let known = vec!["contoso.local".to_string()];
+        let result = sanitize_credential(cred, &HashMap::new(), &known).unwrap();
+        assert_eq!(result.domain, "fabrikam.local");
+    }
+
+    #[test]
+    fn known_fqdn_passes_through_unchanged() {
+        let cred = make_cred("alice", "P@ssw0rd!", "contoso.local");
+        let known = vec!["contoso.local".to_string()];
+        let result = sanitize_credential(cred, &HashMap::new(), &known).unwrap();
+        assert_eq!(result.domain, "contoso.local");
     }
 
     #[test]
