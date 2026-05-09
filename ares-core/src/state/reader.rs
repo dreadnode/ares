@@ -337,9 +337,9 @@ impl RedisStateReader {
     /// Uses the same dedup key format as Python's `_build_hash_dedup_key()`.
     ///
     /// For NTLM rows, also collapses qualified vs unqualified domain duplicates
-    /// across distinct dedup keys: `WINTERFELL$` (empty domain) and
-    /// `north.sevenkingdoms.local\WINTERFELL$` (qualified) hash to different
-    /// fields but represent the same secret. Pre-scan existing fields and:
+    /// across distinct dedup keys: `DC01$` (empty domain) and
+    /// `contoso.local\DC01$` (qualified) hash to different fields but
+    /// represent the same secret. Pre-scan existing fields and:
     ///
     ///   - skip the insert if incoming has empty domain and a populated-domain
     ///     entry already exists (qualified wins);
@@ -819,12 +819,12 @@ mod tests {
         let mut conn = MockRedisConnection::new();
         let reader = make_reader();
         let qualified = make_hash(
-            "WINTERFELL$",
-            "north.sevenkingdoms.local",
+            "DC01$",
+            "contoso.local",
             "aad3b435b51404eeaad3b435b51404ee:a3f11b5a18f97db9a3d4f16aed85a1b6",
         );
         let unqualified = make_hash(
-            "WINTERFELL$",
+            "DC01$",
             "",
             "aad3b435b51404eeaad3b435b51404ee:a3f11b5a18f97db9a3d4f16aed85a1b6",
         );
@@ -833,7 +833,7 @@ mod tests {
 
         let hashes = reader.get_hashes(&mut conn).await.unwrap();
         assert_eq!(hashes.len(), 1);
-        assert_eq!(hashes[0].domain, "north.sevenkingdoms.local");
+        assert_eq!(hashes[0].domain, "contoso.local");
     }
 
     #[tokio::test]
@@ -844,13 +844,13 @@ mod tests {
         let mut conn = MockRedisConnection::new();
         let reader = make_reader();
         let unqualified = make_hash(
-            "WINTERFELL$",
+            "DC01$",
             "",
             "aad3b435b51404eeaad3b435b51404ee:a3f11b5a18f97db9a3d4f16aed85a1b6",
         );
         let qualified = make_hash(
-            "WINTERFELL$",
-            "north.sevenkingdoms.local",
+            "DC01$",
+            "contoso.local",
             "aad3b435b51404eeaad3b435b51404ee:a3f11b5a18f97db9a3d4f16aed85a1b6",
         );
         assert!(reader.add_hash(&mut conn, &unqualified).await.unwrap());
@@ -858,7 +858,7 @@ mod tests {
 
         let hashes = reader.get_hashes(&mut conn).await.unwrap();
         assert_eq!(hashes.len(), 1);
-        assert_eq!(hashes[0].domain, "north.sevenkingdoms.local");
+        assert_eq!(hashes[0].domain, "contoso.local");
     }
 
     #[tokio::test]
@@ -871,12 +871,12 @@ mod tests {
         let reader = make_reader();
         let h1 = make_hash(
             "Administrator",
-            "essos.local",
+            "fabrikam.local",
             "aad3b435b51404eeaad3b435b51404ee:2e993405ab82e4454afc9c9bb0939a25",
         );
         let h2 = make_hash(
             "Administrator",
-            "sevenkingdoms.local",
+            "contoso.local",
             "aad3b435b51404eeaad3b435b51404ee:2e993405ab82e4454afc9c9bb0939a25",
         );
         assert!(reader.add_hash(&mut conn, &h1).await.unwrap());

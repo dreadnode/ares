@@ -65,9 +65,9 @@ pub fn build_hash_dedup_key(hash: &Hash) -> String {
 /// contain `:` after lowercase/trim, so a right-anchored split is unambiguous.
 ///
 /// Used by the hash store to collapse qualified vs unqualified domain
-/// duplicates at insert time — e.g. `WINTERFELL$` (empty domain) and
-/// `north.sevenkingdoms.local\WINTERFELL$` (qualified) both reach the store
-/// as separate fields, but represent the same secret.
+/// duplicates at insert time — e.g. `DC01$` (empty domain) and
+/// `contoso.local\DC01$` (qualified) both reach the store as separate
+/// fields, but represent the same secret.
 pub fn parse_ntlm_dedup_key(field: &str) -> Option<(&str, &str, &str)> {
     let rest = field.strip_prefix("ntlm:")?;
     let mut iter = rest.rsplitn(3, ':');
@@ -290,15 +290,15 @@ mod tests {
     #[test]
     fn parse_ntlm_dedup_key_qualified() {
         let h = make_hash(
-            "WINTERFELL$",
-            "north.sevenkingdoms.local",
+            "DC01$",
+            "contoso.local",
             "NTLM",
             "aad3b435b51404eeaad3b435b51404ee:a3f11b5a18f97db9",
         );
         let key = build_hash_dedup_key(&h);
         let (domain, user, hash_prefix) = parse_ntlm_dedup_key(&key).unwrap();
-        assert_eq!(domain, "north.sevenkingdoms.local");
-        assert_eq!(user, "winterfell$");
+        assert_eq!(domain, "contoso.local");
+        assert_eq!(user, "dc01$");
         assert_eq!(hash_prefix, "aad3b435b51404eeaad3b435b51404ee");
     }
 

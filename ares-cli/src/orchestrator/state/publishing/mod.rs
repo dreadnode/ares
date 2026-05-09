@@ -27,7 +27,7 @@ pub(super) static TRAILING_PAREN_RE: LazyLock<Regex> =
 /// (state.domains plus state.domain_controllers keys). When supplied, an
 /// FQDN domain on the incoming credential whose first label matches a
 /// known FQDN is normalized to that known FQDN — this catches LLM-supplied
-/// typos like `north.sevenkingdomdom.local` getting amplified by
+/// typos like `child.contososo.local` getting amplified by
 /// NetBIOS-to-FQDN expansion in upstream parsers.
 pub(super) fn sanitize_credential(
     mut cred: ares_core::models::Credential,
@@ -112,8 +112,8 @@ pub(super) fn sanitize_credential(
 
     // Normalize an FQDN domain against known domains by first-label match.
     // Defends against the upstream spider parser amplifying an LLM-supplied
-    // typo when expanding a NetBIOS prefix (e.g. file says `NORTH\user`,
-    // the LLM passed `domain="north.sevenkingdomdom.local"`, and the parser
+    // typo when expanding a NetBIOS prefix (e.g. file says `CHILD\user`,
+    // the LLM passed `domain="child.contososo.local"`, and the parser
     // emitted that typo; here we snap to the known canonical FQDN).
     if cred.domain.contains('.') && !known_domains.is_empty() {
         let cred_domain_lower = cred.domain.to_lowercase();
@@ -307,16 +307,16 @@ mod tests {
 
     #[test]
     fn typo_fqdn_normalized_to_known_domain() {
-        // Regression: spider parser expanded `NORTH\jeor.mormont` using an
+        // Regression: spider parser expanded `CHILD\alice.jones` using an
         // LLM-supplied typo'd `domain` param, producing a credential with
-        // domain `north.sevenkingdomdom.local`. Snap to the known canonical.
-        let cred = make_cred("jeor.mormont", "_L0ngCl@w_", "north.sevenkingdomdom.local");
+        // domain `child.contososo.local`. Snap to the known canonical.
+        let cred = make_cred("alice.jones", "P@ssw0rd!", "child.contososo.local");
         let known = vec![
-            "sevenkingdoms.local".to_string(),
-            "north.sevenkingdoms.local".to_string(),
+            "contoso.local".to_string(),
+            "child.contoso.local".to_string(),
         ];
         let result = sanitize_credential(cred, &HashMap::new(), &known).unwrap();
-        assert_eq!(result.domain, "north.sevenkingdoms.local");
+        assert_eq!(result.domain, "child.contoso.local");
     }
 
     #[test]

@@ -489,22 +489,22 @@ $pass = New-Object Security.PSCredential
 
     #[test]
     fn rejects_dollar_var_username_after_domain_prefix_strip() {
-        // Regression: the raw capture `ESSOS\$User.UserName` passes
+        // Regression: the raw capture `FABRIKAM\$User.UserName` passes
         // `is_plausible_username` (doesn't start with `$`), but after
-        // `split_domain_user` strips the `ESSOS\` prefix the username becomes
+        // `split_domain_user` strips the `FABRIKAM\` prefix the username becomes
         // `$User.UserName` — a PowerShell variable expression, not a real
         // account. Verify the post-split validation rejects it.
         let output = r#"
 === Downloaded File Contents ===
 
 --- NETLOGON/login.ps1 ---
-$user = "ESSOS\$User.UserName"
-$password = "RealPassword!"
+$user = "FABRIKAM\$User.UserName"
+$password = "P@ssw0rd!"
 "#;
-        let creds = parse_spider_credentials(output, &json!({"domain": "essos.local"}));
+        let creds = parse_spider_credentials(output, &json!({"domain": "fabrikam.local"}));
         assert!(
             creds.is_empty(),
-            "should reject `$User.UserName` username after stripping `ESSOS\\` prefix, got: {:?}",
+            "should reject `$User.UserName` username after stripping `FABRIKAM\\` prefix, got: {:?}",
             creds
         );
     }
