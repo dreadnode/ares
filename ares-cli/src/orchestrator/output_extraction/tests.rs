@@ -16,11 +16,25 @@ fn extract_ntlm_with_domain() {
 
 #[test]
 fn extract_ntlm_without_domain() {
+    // Administrator (RID 500) is a well-known local SAM account; an unprefixed
+    // dump row must not inherit the AD `default_domain`. Tagging it would
+    // create a phantom AD record that collides cross-domain in seeded labs.
     let output =
         "Administrator:500:aad3b435b51404eeaad3b435b51404ee:e19ccf75ee54e06b06a5907af13cef42:::";
     let hashes = extract_hashes(output, "contoso.local");
     assert_eq!(hashes.len(), 1);
     assert_eq!(hashes[0].username, "Administrator");
+    assert_eq!(hashes[0].domain, "");
+}
+
+#[test]
+fn extract_ntlm_without_domain_custom_user_inherits_default() {
+    // RID 1000+ unprefixed users (e.g. `-just-dc-ntlm` output) are AD
+    // accounts and SHOULD inherit default_domain.
+    let output = "alice:1103:aad3b435b51404eeaad3b435b51404ee:209c6174da490caeb422f3fa5a7ae634:::";
+    let hashes = extract_hashes(output, "contoso.local");
+    assert_eq!(hashes.len(), 1);
+    assert_eq!(hashes[0].username, "alice");
     assert_eq!(hashes[0].domain, "contoso.local");
 }
 

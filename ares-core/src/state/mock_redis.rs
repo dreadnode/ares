@@ -72,6 +72,7 @@ impl MockRedisConnection {
             "HGETALL" => cmd_hgetall(data, &args),
             "HSETNX" => cmd_hsetnx(data, &args),
             "HDEL" => cmd_hdel(data, &args),
+            "HKEYS" => cmd_hkeys(data, &args),
             "HINCRBY" => cmd_hincrby(data, &args),
             "SADD" => cmd_sadd(data, &args),
             "SMEMBERS" => cmd_smembers(data, &args),
@@ -265,6 +266,14 @@ fn cmd_hsetnx(data: &mut Data, args: &[Vec<u8>]) -> RedisResult<Value> {
         Ok(Value::Int(1))
     } else {
         Ok(Value::Int(0))
+    }
+}
+
+fn cmd_hkeys(data: &Data, args: &[Vec<u8>]) -> RedisResult<Value> {
+    let k = key(args, 1);
+    match data.get(&k) {
+        Some(Stored::Hash(h)) => Ok(Value::Array(h.keys().map(|f| bulk(f)).collect())),
+        _ => Ok(Value::Array(vec![])),
     }
 }
 

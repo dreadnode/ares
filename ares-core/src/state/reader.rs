@@ -10,7 +10,7 @@ use crate::models::{
     VulnerabilityInfo,
 };
 
-use super::dedup_keys::{build_credential_dedup_key, build_hash_dedup_key};
+use super::dedup_keys::{build_credential_dedup_key, build_hash_dedup_key, parse_ntlm_dedup_key};
 use super::keys::*;
 use super::try_deserialize;
 
@@ -335,6 +335,19 @@ impl RedisStateReader {
     /// Add a hash to Redis HASH with deduplication.
     ///
     /// Uses the same dedup key format as Python's `_build_hash_dedup_key()`.
+    ///
+    /// For NTLM rows, also collapses qualified vs unqualified domain duplicates
+    /// across distinct dedup keys: `WINTERFELL$` (empty domain) and
+    /// `north.sevenkingdoms.local\WINTERFELL$` (qualified) hash to different
+    /// fields but represent the same secret. Pre-scan existing fields and:
+    ///
+    ///   - skip the insert if incoming has empty domain and a populated-domain
+    ///     entry already exists (qualified wins);
+    ///   - delete any empty-domain shadow when inserting a populated-domain
+    ///     entry.
+    ///
+    /// Cross-domain qualified entries (e.g. same hash on two different AD
+    /// domains, as can happen in lab environments) are preserved.
     pub async fn add_hash(
         &self,
         conn: &mut impl AsyncCommands,
@@ -343,6 +356,28 @@ impl RedisStateReader {
         let key = self.key(KEY_HASHES);
         let dedup_field = build_hash_dedup_key(hash);
         let data = serde_json::to_string(hash).unwrap_or_default();
+
+        if let Some((incoming_domain, incoming_user, incoming_hash)) =
+            parse_ntlm_dedup_key(&dedup_field)
+        {
+            let existing_fields: Vec<String> = conn.hkeys(&key).await?;
+            for field in &existing_fields {
+                let Some((existing_domain, existing_user, existing_hash)) =
+                    parse_ntlm_dedup_key(field)
+                else {
+                    continue;
+                };
+                if existing_user != incoming_user || existing_hash != incoming_hash {
+                    continue;
+                }
+                if incoming_domain.is_empty() && !existing_domain.is_empty() {
+                    return Ok(false);
+                }
+                if !incoming_domain.is_empty() && existing_domain.is_empty() {
+                    let _: i64 = conn.hdel(&key, field).await?;
+                }
+            }
+        }
 
         let added: bool = conn.hset_nx(&key, &dedup_field, &data).await?;
         if added {
@@ -774,6 +809,81 @@ mod tests {
 
         let hashes = reader.get_hashes(&mut conn).await.unwrap();
         assert_eq!(hashes.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn add_hash_skips_empty_domain_when_qualified_exists() {
+        // Insert a qualified entry first, then attempt an empty-domain insert
+        // for the same (user, hash). The empty-domain version is a degraded
+        // shadow of the qualified one and must be rejected.
+        let mut conn = MockRedisConnection::new();
+        let reader = make_reader();
+        let qualified = make_hash(
+            "WINTERFELL$",
+            "north.sevenkingdoms.local",
+            "aad3b435b51404eeaad3b435b51404ee:a3f11b5a18f97db9a3d4f16aed85a1b6",
+        );
+        let unqualified = make_hash(
+            "WINTERFELL$",
+            "",
+            "aad3b435b51404eeaad3b435b51404ee:a3f11b5a18f97db9a3d4f16aed85a1b6",
+        );
+        assert!(reader.add_hash(&mut conn, &qualified).await.unwrap());
+        assert!(!reader.add_hash(&mut conn, &unqualified).await.unwrap());
+
+        let hashes = reader.get_hashes(&mut conn).await.unwrap();
+        assert_eq!(hashes.len(), 1);
+        assert_eq!(hashes[0].domain, "north.sevenkingdoms.local");
+    }
+
+    #[tokio::test]
+    async fn add_hash_replaces_empty_domain_with_qualified() {
+        // Inverse: an empty-domain row was inserted first (e.g. unprefixed
+        // line in a secretsdump batch). When the qualified version arrives
+        // later, the shadow should be replaced — qualified wins.
+        let mut conn = MockRedisConnection::new();
+        let reader = make_reader();
+        let unqualified = make_hash(
+            "WINTERFELL$",
+            "",
+            "aad3b435b51404eeaad3b435b51404ee:a3f11b5a18f97db9a3d4f16aed85a1b6",
+        );
+        let qualified = make_hash(
+            "WINTERFELL$",
+            "north.sevenkingdoms.local",
+            "aad3b435b51404eeaad3b435b51404ee:a3f11b5a18f97db9a3d4f16aed85a1b6",
+        );
+        assert!(reader.add_hash(&mut conn, &unqualified).await.unwrap());
+        assert!(reader.add_hash(&mut conn, &qualified).await.unwrap());
+
+        let hashes = reader.get_hashes(&mut conn).await.unwrap();
+        assert_eq!(hashes.len(), 1);
+        assert_eq!(hashes[0].domain, "north.sevenkingdoms.local");
+    }
+
+    #[tokio::test]
+    async fn add_hash_keeps_distinct_qualified_domains() {
+        // Two qualified entries with the same (user, hash) but different
+        // domains represent the same secret usable across realms (a real
+        // pattern in trusted/seeded labs). Both records must be preserved
+        // so cross-domain attribution survives.
+        let mut conn = MockRedisConnection::new();
+        let reader = make_reader();
+        let h1 = make_hash(
+            "Administrator",
+            "essos.local",
+            "aad3b435b51404eeaad3b435b51404ee:2e993405ab82e4454afc9c9bb0939a25",
+        );
+        let h2 = make_hash(
+            "Administrator",
+            "sevenkingdoms.local",
+            "aad3b435b51404eeaad3b435b51404ee:2e993405ab82e4454afc9c9bb0939a25",
+        );
+        assert!(reader.add_hash(&mut conn, &h1).await.unwrap());
+        assert!(reader.add_hash(&mut conn, &h2).await.unwrap());
+
+        let hashes = reader.get_hashes(&mut conn).await.unwrap();
+        assert_eq!(hashes.len(), 2);
     }
 
     // -- get_hosts / add_host ------------------------------------------------

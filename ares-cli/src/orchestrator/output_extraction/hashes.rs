@@ -135,21 +135,29 @@ pub fn extract_hashes(output: &str, default_domain: &str) -> Vec<Hash> {
         // NTLM without domain prefix
         if let Some(caps) = RE_NTLM_PLAIN.captures(line) {
             let username = caps.get(1).unwrap().as_str();
+            let rid = caps.get(2).unwrap().as_str();
             let lm = caps.get(3).unwrap().as_str();
             let nt = caps.get(4).unwrap().as_str();
             let hash_value = format!("{lm}:{nt}");
-            let key = format!(
-                "ntlm:{}@{}",
-                username.to_lowercase(),
-                default_domain.to_lowercase()
-            );
+            // Well-known local SAM accounts (Administrator/500, Guest/501,
+            // DefaultAccount/503, WDAGUtilityAccount/504) and LSA pseudo-rows
+            // ($MACHINE.ACC, NL$KM, _SC_*) are machine-local — don't tag them
+            // with the AD `default_domain` or they masquerade as domain
+            // accounts and collide cross-domain. krbtgt (RID 502) is excluded
+            // because it's always an AD account.
+            let domain = if is_well_known_local_sam(username, rid) {
+                String::new()
+            } else {
+                default_domain.to_string()
+            };
+            let key = format!("ntlm:{}@{}", username.to_lowercase(), domain.to_lowercase());
             if seen.insert(key) {
                 hashes.push(Hash {
                     id: uuid::Uuid::new_v4().to_string(),
                     username: username.to_string(),
                     hash_value,
                     hash_type: "ntlm".to_string(),
-                    domain: default_domain.to_string(),
+                    domain,
                     cracked_password: None,
                     source: "output_extraction".to_string(),
                     discovered_at: Some(chrono::Utc::now()),
@@ -162,6 +170,22 @@ pub fn extract_hashes(output: &str, default_domain: &str) -> Vec<Hash> {
     }
 
     hashes
+}
+
+/// Mirror of `parsers::secrets::is_local_sam_account` for the regex fallback.
+/// We don't track section context here (the fallback runs over arbitrary tool
+/// output, not just secretsdump), so attribution is purely name/RID-based.
+fn is_well_known_local_sam(username: &str, rid: &str) -> bool {
+    if matches!(rid, "500" | "501" | "503" | "504") {
+        let name = username.to_ascii_lowercase();
+        if matches!(
+            name.as_str(),
+            "administrator" | "guest" | "defaultaccount" | "wdagutilityaccount"
+        ) {
+            return true;
+        }
+    }
+    username.starts_with('$') || username.starts_with("_SC_") || username.starts_with("NL$")
 }
 
 /// Hashcat cracked TGS: $krb5tgs$23$*user$DOMAIN$spn*$hash:plaintext
@@ -313,12 +337,32 @@ mod tests {
 
     #[test]
     fn extract_hashes_ntlm_plain() {
-        let output = "Administrator:500:aad3b435b51404eeaad3b435b51404ee:31d6cfe0d16ae931b73c59d7e0c089c0:::";
+        // Custom user (RID >= 1000) without a domain prefix should inherit
+        // the operation's default_domain — these are AD accounts dumped from
+        // NTDS via `-just-dc-ntlm`.
+        let output = "alice:1103:aad3b435b51404eeaad3b435b51404ee:209c6174da490caeb422f3fa5a7ae634:::";
         let hashes = extract_hashes(output, "CONTOSO");
         assert_eq!(hashes.len(), 1);
-        assert_eq!(hashes[0].username, "Administrator");
+        assert_eq!(hashes[0].username, "alice");
         assert_eq!(hashes[0].hash_type, "ntlm");
         assert_eq!(hashes[0].domain, "CONTOSO");
+    }
+
+    #[test]
+    fn extract_hashes_ntlm_local_sam_unattributed() {
+        // Well-known local SAM accounts (Administrator/500, Guest/501,
+        // DefaultAccount/503, WDAGUtilityAccount/504) must NOT inherit the
+        // AD default_domain — they're machine-local and tagging them with the
+        // AD domain causes phantom duplicates across DCs in seeded labs.
+        let output = "\
+Administrator:500:aad3b435b51404eeaad3b435b51404ee:e19ccf75ee54e06b06a5907af13cef42:::
+DefaultAccount:503:aad3b435b51404eeaad3b435b51404ee:abcdef1234567890abcdef1234567890:::
+WDAGUtilityAccount:504:aad3b435b51404eeaad3b435b51404ee:1234567890abcdef1234567890abcdef:::";
+        let hashes = extract_hashes(output, "CONTOSO");
+        assert_eq!(hashes.len(), 3);
+        for h in &hashes {
+            assert_eq!(h.domain, "");
+        }
     }
 
     #[test]
@@ -351,7 +395,7 @@ mod tests {
 
     #[test]
     fn extract_hashes_dedup_same_user_domain() {
-        let line = "Administrator:500:aad3b435b51404eeaad3b435b51404ee:31d6cfe0d16ae931b73c59d7e0c089c0:::";
+        let line = "alice:1103:aad3b435b51404eeaad3b435b51404ee:209c6174da490caeb422f3fa5a7ae634:::";
         let output = format!("{line}\n{line}");
         let hashes = extract_hashes(&output, "CONTOSO");
         assert_eq!(hashes.len(), 1);
