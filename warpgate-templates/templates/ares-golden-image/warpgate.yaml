@@ -51,6 +51,9 @@ provisioners:
       - pipx install --force ansible-core
       - pipx ensurepath
 
+  # Copy the in-repo ansible/ subtree (the dreadnode.nimbus_range collection) into the build.
+  # The destination keeps the `nimbus_range` name because the collection is published as
+  # `dreadnode.nimbus_range`; subsequent steps install it under that namespace.
   - type: file
     source: ${sources.ansible}
     destination: /root/.ansible/collections/ansible_collections/dreadnode/nimbus_range
