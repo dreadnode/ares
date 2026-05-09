@@ -340,7 +340,8 @@ mod tests {
         // Custom user (RID >= 1000) without a domain prefix should inherit
         // the operation's default_domain — these are AD accounts dumped from
         // NTDS via `-just-dc-ntlm`.
-        let output = "alice:1103:aad3b435b51404eeaad3b435b51404ee:209c6174da490caeb422f3fa5a7ae634:::";
+        let output =
+            "alice:1103:aad3b435b51404eeaad3b435b51404ee:209c6174da490caeb422f3fa5a7ae634:::";
         let hashes = extract_hashes(output, "CONTOSO");
         assert_eq!(hashes.len(), 1);
         assert_eq!(hashes[0].username, "alice");
@@ -395,7 +396,8 @@ WDAGUtilityAccount:504:aad3b435b51404eeaad3b435b51404ee:1234567890abcdef12345678
 
     #[test]
     fn extract_hashes_dedup_same_user_domain() {
-        let line = "alice:1103:aad3b435b51404eeaad3b435b51404ee:209c6174da490caeb422f3fa5a7ae634:::";
+        let line =
+            "alice:1103:aad3b435b51404eeaad3b435b51404ee:209c6174da490caeb422f3fa5a7ae634:::";
         let output = format!("{line}\n{line}");
         let hashes = extract_hashes(&output, "CONTOSO");
         assert_eq!(hashes.len(), 1);
