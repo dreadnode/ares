@@ -2,6 +2,29 @@
 
 use serde_json::{json, Value};
 
+/// Collapse adjacent duplicate labels in an FQDN (`host.host.suffix` →
+/// `host.suffix`). Self-named-workgroup hosts (typical of stock Windows
+/// installs that aren't domain-joined) report their reverse-DNS as
+/// `name.name.workgroup`, which then propagates into recon output and host
+/// records as a malformed FQDN. Real AD names don't repeat the leading label,
+/// so collapsing is safe in practice.
+fn dedup_adjacent_labels(fqdn: &str) -> String {
+    let labels: Vec<&str> = fqdn.split('.').collect();
+    if labels.len() < 3 {
+        return fqdn.to_string();
+    }
+    let mut out: Vec<&str> = Vec::with_capacity(labels.len());
+    for label in labels {
+        if let Some(prev) = out.last() {
+            if prev.eq_ignore_ascii_case(label) {
+                continue;
+            }
+        }
+        out.push(label);
+    }
+    out.join(".")
+}
+
 pub fn parse_nmap_output(output: &str, params: &Value) -> Vec<Value> {
     let target_ip = params
         .get("target")
@@ -32,7 +55,7 @@ pub fn parse_nmap_output(output: &str, params: &Value) -> Vec<Value> {
 
             let rest = line.trim_start_matches("Nmap scan report for").trim();
             if let Some(paren_start) = rest.find('(') {
-                hostname = rest[..paren_start].trim().to_string();
+                hostname = dedup_adjacent_labels(rest[..paren_start].trim());
                 current_ip = rest[paren_start + 1..]
                     .trim_end_matches(')')
                     .trim()
@@ -88,7 +111,7 @@ pub fn parse_nmap_output(output: &str, params: &Value) -> Vec<Value> {
                 if let Some(rest) = trimmed.strip_prefix(prefix) {
                     let fqdn = rest.trim().to_lowercase();
                     if fqdn.contains('.') && !fqdn.contains(' ') {
-                        hostname = fqdn;
+                        hostname = dedup_adjacent_labels(&fqdn);
                         break;
                     }
                 }
@@ -105,7 +128,7 @@ pub fn parse_nmap_output(output: &str, params: &Value) -> Vec<Value> {
                         .trim()
                         .to_lowercase();
                     if cn.contains('.') && !cn.contains(' ') {
-                        hostname = cn;
+                        hostname = dedup_adjacent_labels(&cn);
                     }
                 }
             }
@@ -121,7 +144,7 @@ pub fn parse_nmap_output(output: &str, params: &Value) -> Vec<Value> {
                         .trim()
                         .to_lowercase();
                     if dns.contains('.') && !dns.contains(' ') {
-                        hostname = dns;
+                        hostname = dedup_adjacent_labels(&dns);
                     }
                 }
             }
@@ -427,5 +450,39 @@ PORT     STATE SERVICE       VERSION
         let roles = hosts[0]["roles"].as_array().unwrap();
         let role_strs: Vec<&str> = roles.iter().filter_map(|v| v.as_str()).collect();
         assert!(role_strs.contains(&"winrm"));
+    }
+
+    #[test]
+    fn dedup_adjacent_labels_collapses_doubled_first_label() {
+        // Self-named-workgroup hosts (stock Windows installs not domain-joined)
+        // report reverse-DNS as `host.host.workgroup`. Collapse the doubled
+        // label so the recorded FQDN is `host.workgroup`.
+        assert_eq!(
+            dedup_adjacent_labels("dc01.dc01.contoso.local"),
+            "dc01.contoso.local"
+        );
+        assert_eq!(
+            dedup_adjacent_labels("dc01.contoso.local"),
+            "dc01.contoso.local"
+        );
+        assert_eq!(dedup_adjacent_labels("contoso.local"), "contoso.local");
+        // Case-insensitive match — preserves the case of the first occurrence
+        assert_eq!(
+            dedup_adjacent_labels("DC01.dc01.contoso.local"),
+            "DC01.contoso.local"
+        );
+    }
+
+    #[test]
+    fn parse_nmap_dedupes_doubled_reverse_dns() {
+        // Reverse-DNS for a Win2003-style self-named workgroup host comes back
+        // as `host.host.workgroup`. The recorded hostname must be collapsed.
+        let output = "\
+Nmap scan report for dc01.dc01.contoso.local (192.168.58.10)
+445/tcp open microsoft-ds";
+        let params = json!({"target": "192.168.58.10"});
+        let hosts = parse_nmap_output(output, &params);
+        assert_eq!(hosts.len(), 1);
+        assert_eq!(hosts[0]["hostname"], "dc01.contoso.local");
     }
 }

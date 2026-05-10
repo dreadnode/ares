@@ -33,16 +33,20 @@ pub fn parse_secretsdump(output: &str, params: &Value) -> (Vec<Value>, Vec<Value
     for line in output.lines() {
         let line = line.trim();
 
-        // Section markers — secretsdump emits these as informational lines
+        // Section markers — secretsdump and nxc emit these informational lines
         // before each block. Recognize them so we can tell SAM rows from NTDS
-        // rows when the row itself has no `DOMAIN\` prefix.
+        // rows when the row itself has no `DOMAIN\` prefix. Match liberally:
+        // impacket says "Dumping local SAM", nxc says "Dumping SAM hashes",
+        // both should land us in LocalSam.
         if line.starts_with('[') {
-            if line.contains("Dumping local SAM") {
+            let lower = line.to_ascii_lowercase();
+            if lower.contains("dumping local sam") || lower.contains("dumping sam") {
                 section = DumpSection::LocalSam;
-            } else if line.contains("Dumping Domain Credentials")
-                || line.contains("Dumping cached domain")
-                || line.contains("NTDS")
-                || line.contains("Searching for pekList")
+            } else if lower.contains("dumping domain credentials")
+                || lower.contains("dumping cached domain")
+                || lower.contains("ntds")
+                || lower.contains("searching for peklist")
+                || lower.contains("reading and decrypting hashes from")
             {
                 section = DumpSection::Domain;
             }
@@ -56,7 +60,17 @@ pub fn parse_secretsdump(output: &str, params: &Value) -> (Vec<Value>, Vec<Value
             if parts.len() >= 4 {
                 let raw_user = parts[0];
                 let rid = parts.get(1).copied().unwrap_or("");
-                let (user_domain, username) = if raw_user.contains('\\') {
+                let (user_domain, username) = if section == DumpSection::LocalSam {
+                    // In the local SAM section, any `\` prefix is the host's
+                    // own computer name (or workgroup), never an AD realm.
+                    // Strip it and leave the domain empty — otherwise a
+                    // standalone host whose computer name happens to share its
+                    // first label with `target_domain` (e.g. WIN-XXXX with a
+                    // self-named WIN-XXXX.WGRP.LOCAL workgroup) gets attributed
+                    // to that workgroup as if it were an AD domain.
+                    let user = raw_user.split_once('\\').map_or(raw_user, |(_, u)| u);
+                    (String::new(), user.to_string())
+                } else if raw_user.contains('\\') {
                     let split: Vec<&str> = raw_user.splitn(2, '\\').collect();
                     let netbios = split[0];
                     // Resolve NetBIOS domain prefix to FQDN using target_domain.
@@ -97,29 +111,39 @@ pub fn parse_secretsdump(output: &str, params: &Value) -> (Vec<Value>, Vec<Value
 
 /// Decide whether an unprefixed dump row is a local SAM account.
 ///
-/// Two signals: (1) the dump section we're currently parsing and (2) the
-/// well-known RID/name pairs that are always machine-local
+/// Three signals, in order: (1) the dump section we're currently parsing,
+/// (2) the well-known RID/name pairs that are always machine-local
 /// (Administrator/500, Guest/501, DefaultAccount/503, WDAGUtilityAccount/504,
-/// plus secretsdump's pseudo-rows like `$MACHINE.ACC` and `_SC_*` service
-/// secrets emitted in the LSA section). Note that `krbtgt` is NOT in this
-/// list: krbtgt is always an AD account, never local.
+/// plus secretsdump's LSA pseudo-rows like `$MACHINE.ACC` and `_SC_*`), and
+/// (3) the safe default for `Unknown` section: treat as local SAM unless the
+/// user is `krbtgt` (always AD). NTDS dumps reliably emit pekList/NTDS markers
+/// before the rows, so an unmarked dump is almost certainly a SAM dump from
+/// `secretsdump @host` or `nxc smb --sam`. Defaulting unmarked custom RIDs to
+/// `target_domain` (the prior behavior) silently mis-attributes local-only
+/// users like `ansible`/`devops`/etc. to the operator's AD scope.
 fn is_local_sam_account(raw_user: &str, rid: &str, section: DumpSection) -> bool {
     if section == DumpSection::LocalSam {
         return true;
     }
+    let name = raw_user.to_ascii_lowercase();
     // RID-based: 500/501/503/504 are well-known built-ins. Don't include 502
     // (krbtgt) — it's a domain account that happens to share a fixed RID.
-    if matches!(rid, "500" | "501" | "503" | "504") {
-        let name = raw_user.to_ascii_lowercase();
-        if matches!(
+    if matches!(rid, "500" | "501" | "503" | "504")
+        && matches!(
             name.as_str(),
             "administrator" | "guest" | "defaultaccount" | "wdagutilityaccount"
-        ) {
-            return true;
-        }
+        )
+    {
+        return true;
     }
     // LSA pseudo-rows from `[*] Dumping LSA Secrets` — `$MACHINE.ACC`, etc.
     if raw_user.starts_with('$') || raw_user.starts_with("_SC_") || raw_user.starts_with("NL$") {
+        return true;
+    }
+    // Safe default for unmarked dumps: treat as local SAM. krbtgt and machine
+    // accounts (`ENDS_WITH$`) are never local — let those fall through to the
+    // target_domain branch.
+    if section == DumpSection::Unknown && name != "krbtgt" && !raw_user.ends_with('$') {
         return true;
     }
     false
@@ -270,23 +294,83 @@ WIN-XYZ$:1001:aad3b435b51404eeaad3b435b51404ee:1234567890abcdef1234567890abcdef:
     }
 
     #[test]
-    fn parse_secretsdump_well_known_sam_in_unknown_section() {
-        // No section marker before the rows — fall back to the well-known
-        // RID/name signal. Administrator/500 and DefaultAccount/503 are
-        // always local; svc_custom/1001 stays attributed to target_domain.
+    fn parse_secretsdump_unknown_section_defaults_to_local_sam() {
+        // No section marker before the rows — safe default is local SAM
+        // attribution (empty domain). NTDS dumps reliably emit pekList/NTDS
+        // markers; an unmarked dump is almost always a SAM dump from
+        // `secretsdump @host` or `nxc smb --sam`. Custom RIDs like 1001 must
+        // not silently inherit `target_domain` — that's how Ansible-provisioned
+        // local users (e.g. on standalone hosts) leak into AD scope.
         let output = "\
 Administrator:500:aad3b435b51404eeaad3b435b51404ee:e19ccf75ee54e06b06a5907af13cef42:::
 DefaultAccount:503:aad3b435b51404eeaad3b435b51404ee:abcdef1234567890abcdef1234567890:::
-svc_custom:1001:aad3b435b51404eeaad3b435b51404ee:1234567890abcdef1234567890abcdef:::";
+ansible:1001:aad3b435b51404eeaad3b435b51404ee:1234567890abcdef1234567890abcdef:::";
         let params = json!({"target_domain": "contoso.local"});
         let (hashes, _) = parse_secretsdump(output, &params);
         assert_eq!(hashes.len(), 3);
+        for h in &hashes {
+            assert_eq!(
+                h["domain"], "",
+                "{} should not inherit target_domain",
+                h["username"]
+            );
+        }
+    }
+
+    #[test]
+    fn parse_secretsdump_nxc_style_sam_marker() {
+        // nxc/netexec emits `[*] Dumping SAM hashes` (no "local") before rows.
+        // The parser must recognize this variant and still treat the section
+        // as LocalSam — otherwise unmarked custom users fall through to
+        // target_domain attribution.
+        let output = "\
+[*] Dumping SAM hashes
+Administrator:500:aad3b435b51404eeaad3b435b51404ee:e19ccf75ee54e06b06a5907af13cef42:::
+ansible:1001:aad3b435b51404eeaad3b435b51404ee:abcdef1234567890abcdef1234567890:::";
+        let params = json!({"target_domain": "contoso.local"});
+        let (hashes, _) = parse_secretsdump(output, &params);
+        assert_eq!(hashes.len(), 2);
         assert_eq!(hashes[0]["username"], "Administrator");
         assert_eq!(hashes[0]["domain"], "");
-        assert_eq!(hashes[1]["username"], "DefaultAccount");
+        assert_eq!(hashes[1]["username"], "ansible");
         assert_eq!(hashes[1]["domain"], "");
-        assert_eq!(hashes[2]["username"], "svc_custom");
-        assert_eq!(hashes[2]["domain"], "contoso.local");
+    }
+
+    #[test]
+    fn parse_secretsdump_local_sam_strips_computer_name_prefix() {
+        // Standalone host with self-named workgroup dumps rows like
+        // `WIN-ABCDEFGHIJK\ansible:1001:...`. The prefix is the host's own
+        // computer name, NOT an AD NetBIOS realm — even when the operator's
+        // `target_domain` happens to be `win-abcdefghijk.wgrp.local` (which
+        // would otherwise pass the first-label match in
+        // `resolve_netbios_to_fqdn`). In LocalSam section, the prefix is
+        // always stripped and the domain is left empty.
+        let output = "\
+[*] Dumping local SAM hashes (uid:rid:lmhash:nthash)
+WIN-ABCDEFGHIJK\\Administrator:500:aad3b435b51404eeaad3b435b51404ee:e19ccf75ee54e06b06a5907af13cef42:::
+WIN-ABCDEFGHIJK\\ansible:1001:aad3b435b51404eeaad3b435b51404ee:abcdef1234567890abcdef1234567890:::";
+        let params = json!({"target_domain": "win-abcdefghijk.wgrp.local"});
+        let (hashes, _) = parse_secretsdump(output, &params);
+        assert_eq!(hashes.len(), 2);
+        for h in &hashes {
+            assert_eq!(h["domain"], "");
+        }
+        assert_eq!(hashes[0]["username"], "Administrator");
+        assert_eq!(hashes[1]["username"], "ansible");
+    }
+
+    #[test]
+    fn parse_secretsdump_machine_account_unmarked_keeps_target_domain() {
+        // Machine accounts (ending in `$`) are AD-only, never local SAM.
+        // Even with no section marker, they must inherit target_domain so a
+        // partial NTDS dump doesn't lose its computer-account hashes.
+        let output =
+            "WIN-XYZ$:1001:aad3b435b51404eeaad3b435b51404ee:1234567890abcdef1234567890abcdef:::";
+        let params = json!({"target_domain": "contoso.local"});
+        let (hashes, _) = parse_secretsdump(output, &params);
+        assert_eq!(hashes.len(), 1);
+        assert_eq!(hashes[0]["username"], "WIN-XYZ$");
+        assert_eq!(hashes[0]["domain"], "contoso.local");
     }
 
     #[test]

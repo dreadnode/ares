@@ -105,6 +105,19 @@ async fn run_inner() -> Result<()> {
         "Configuration loaded"
     );
 
+    // Install the operation scope so `ares_tools::dispatch` rejects single-IP
+    // tool invocations against hosts the operator never authorized. Empty
+    // target_ips → unrestricted (legacy/test launches that didn't pass IPs).
+    ares_tools::scope::init_scope(ares_tools::scope::OperationScope::new(
+        config.target_ips.clone(),
+    ));
+    if !config.target_ips.is_empty() {
+        info!(
+            target_ips = %config.target_ips.join(","),
+            "Installed operation scope — out-of-scope single-IP tool calls will be rejected"
+        );
+    }
+
     let queue = TaskQueue::connect(&config.redis_url, &config.nats_url)
         .await
         .context("Failed to connect to Redis/NATS")?;

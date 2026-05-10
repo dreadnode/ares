@@ -18,6 +18,7 @@ pub mod lateral;
 pub mod parsers;
 pub mod privesc;
 pub mod recon;
+pub mod scope;
 
 use anyhow::Result;
 use serde_json::Value;
@@ -63,8 +64,12 @@ impl ToolOutput {
 
 /// Dispatch a tool call by name, executing the corresponding CLI command.
 ///
-/// Returns the tool output or an error if the tool is unknown or execution fails.
+/// Returns the tool output or an error if the tool is unknown or execution
+/// fails. Calls whose `target` / `target_ip` is a literal IP outside the
+/// configured operation scope are rejected before any subprocess runs (see
+/// [`scope::validate_in_scope`]).
 pub async fn dispatch(tool_name: &str, arguments: &Value) -> Result<ToolOutput> {
+    scope::validate_in_scope(tool_name, arguments)?;
     match tool_name {
         // ── Reconnaissance ──────────────────────────────────────────
         "nmap_scan" => recon::nmap_scan(arguments).await,
