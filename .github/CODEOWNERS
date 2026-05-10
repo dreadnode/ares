@@ -1,5 +1,8 @@
 # https://docs.github.com/en/github/creating-cloning-and-archiving-repositories/about-code-owners
 * @l50
 
-# Changes to this workflow MUST be reviewed carefully.
+# Workflow and CI configuration changes (.github/**) require maintainer
+# review, since these files run with repo secrets (incl. the renovate
+# bot's GitHub App private key). Already covered by the wildcard above;
+# this comment documents the reason so future edits don't loosen it.
 .github/workflows/meta-labeler.yaml @l50
