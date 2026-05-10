@@ -319,39 +319,62 @@ static TEMPLATES: LazyLock<Tera> = LazyLock::new(|| {
     tera
 });
 
+/// Operation context fields injected into agent and system prompt templates so
+/// example tool calls show real operation values instead of generic literals
+/// the LLM might copy verbatim.
+#[derive(Debug, Clone, Copy)]
+pub struct OperationContext<'a> {
+    /// Primary target FQDN (e.g. `contoso.local`)
+    pub target_domain: &'a str,
+    /// Primary target DC IP
+    pub target_dc_ip: &'a str,
+    /// Primary target DC FQDN
+    pub target_dc_fqdn: &'a str,
+    /// Listener IP for callback-style tools
+    pub listener_ip: &'a str,
+}
+
+impl OperationContext<'_> {
+    /// All-empty context, for templates that don't reference operation values.
+    pub const EMPTY: Self = Self {
+        target_domain: "",
+        target_dc_ip: "",
+        target_dc_fqdn: "",
+        listener_ip: "",
+    };
+
+    fn insert_into(&self, ctx: &mut Context) {
+        ctx.insert("target_domain", self.target_domain);
+        ctx.insert("target_dc_ip", self.target_dc_ip);
+        ctx.insert("target_dc_fqdn", self.target_dc_fqdn);
+        ctx.insert("listener_ip", self.listener_ip);
+    }
+}
+
 /// Render an agent instruction template with the given context variables.
 ///
 /// Used for role-based system prompts (recon, credential_access, cracker, etc.)
-/// that have a `{% for tool in capabilities %}` loop. `target_domain` and
-/// `target_dc_ip` are injected so example tool calls show the real operation
-/// values instead of generic literals.
+/// that have a `{% for tool in capabilities %}` loop.
 ///
 /// # Arguments
 /// * `template_name` - Template identifier (e.g. `TEMPLATE_RECON`)
 /// * `capabilities` - List of tool names available to this agent role
 /// * `multi_forest_mode` - Whether multi-forest operation is active
 /// * `undominated_forests` - Forest names not yet dominated (for orchestrator)
-/// * `target_domain` - Primary target FQDN (e.g. `north.sevenkingdoms.local`)
-/// * `target_dc_ip` - Primary target DC IP
+/// * `op` - Operation context injected into example tool calls
 pub fn render_agent_instructions(
     template_name: &str,
     capabilities: &[String],
     multi_forest_mode: bool,
     undominated_forests: &[String],
-    target_domain: &str,
-    target_dc_ip: &str,
-    target_dc_fqdn: &str,
-    listener_ip: &str,
+    op: OperationContext<'_>,
 ) -> Result<String> {
     render_agent_instructions_with_extras(
         template_name,
         capabilities,
         multi_forest_mode,
         undominated_forests,
-        target_domain,
-        target_dc_ip,
-        target_dc_fqdn,
-        listener_ip,
+        op,
         &[],
     )
 }
@@ -363,20 +386,14 @@ pub fn render_agent_instructions_with_extras(
     capabilities: &[String],
     multi_forest_mode: bool,
     undominated_forests: &[String],
-    target_domain: &str,
-    target_dc_ip: &str,
-    target_dc_fqdn: &str,
-    listener_ip: &str,
+    op: OperationContext<'_>,
     extras: &[(&str, &str)],
 ) -> Result<String> {
     let mut ctx = Context::new();
     ctx.insert("capabilities", capabilities);
     ctx.insert("multi_forest_mode", &multi_forest_mode);
     ctx.insert("undominated_forests", undominated_forests);
-    ctx.insert("target_domain", target_domain);
-    ctx.insert("target_dc_ip", target_dc_ip);
-    ctx.insert("target_dc_fqdn", target_dc_fqdn);
-    ctx.insert("listener_ip", listener_ip);
+    op.insert_into(&mut ctx);
     for (k, v) in extras {
         ctx.insert(*k, v);
     }
@@ -391,16 +408,11 @@ pub fn render_agent_instructions_with_extras(
 /// - `all_capabilities`: map of role → tool list. Falls back to hardcoded defaults if None.
 /// - `technique_priorities`: sorted list of (technique, weight) pairs for the priority table.
 ///   If provided, renders a dynamic "ATTACK FALLBACK CHAINS" section.
-/// - `target_domain` / `target_dc_ip`: operation context injected into example
-///   tool calls so the LLM sees real values instead of generic literals it
-///   might copy verbatim.
+/// - `op`: operation context injected into example tool calls.
 pub fn render_system_instructions(
     all_capabilities: Option<&HashMap<String, Vec<String>>>,
     technique_priorities: Option<&[(String, i32)]>,
-    target_domain: &str,
-    target_dc_ip: &str,
-    target_dc_fqdn: &str,
-    listener_ip: &str,
+    op: OperationContext<'_>,
 ) -> Result<String> {
     let mut ctx = Context::new();
     if let Some(caps) = all_capabilities {
@@ -409,10 +421,7 @@ pub fn render_system_instructions(
     if let Some(priorities) = technique_priorities {
         ctx.insert("technique_priorities", priorities);
     }
-    ctx.insert("target_domain", target_domain);
-    ctx.insert("target_dc_ip", target_dc_ip);
-    ctx.insert("target_dc_fqdn", target_dc_fqdn);
-    ctx.insert("listener_ip", listener_ip);
+    op.insert_into(&mut ctx);
 
     TEMPLATES
         .render(TEMPLATE_SYSTEM_INSTRUCTIONS, &ctx)
@@ -449,6 +458,13 @@ pub fn render_task_template(
 mod tests {
     use super::*;
 
+    const TEST_OP: OperationContext<'static> = OperationContext {
+        target_domain: "contoso.local",
+        target_dc_ip: "192.168.58.10",
+        target_dc_fqdn: "dc01.contoso.local",
+        listener_ip: "192.168.58.50",
+    };
+
     #[test]
     fn render_recon_template() {
         let capabilities = vec![
@@ -456,7 +472,8 @@ mod tests {
             "enumerate_users".to_string(),
             "run_bloodhound".to_string(),
         ];
-        let result = render_agent_instructions(TEMPLATE_RECON, &capabilities, false, &[], "contoso.local", "192.168.58.10", "dc01.contoso.local", "192.168.58.50").unwrap();
+        let result =
+            render_agent_instructions(TEMPLATE_RECON, &capabilities, false, &[], TEST_OP).unwrap();
 
         assert!(result.contains("RECON Worker Agent"));
         assert!(result.contains("- nmap_scan"));
@@ -466,17 +483,7 @@ mod tests {
 
     #[test]
     fn render_recon_empty_capabilities() {
-        let result = render_agent_instructions(
-            TEMPLATE_RECON,
-            &[],
-            false,
-            &[],
-            "contoso.local",
-            "192.168.58.10",
-            "dc01.contoso.local",
-            "192.168.58.50",
-        )
-        .unwrap();
+        let result = render_agent_instructions(TEMPLATE_RECON, &[], false, &[], TEST_OP).unwrap();
         assert!(result.contains("RECON Worker Agent"));
         assert!(result.contains("## Available Tools"));
     }
@@ -484,18 +491,14 @@ mod tests {
     #[test]
     fn render_credential_access_template() {
         let capabilities = vec!["secretsdump".to_string(), "kerberoast".to_string()];
-        let result =
-            render_agent_instructions(
-                TEMPLATE_CREDENTIAL_ACCESS,
-                &capabilities,
-                false,
-                &[],
-                "contoso.local",
-                "192.168.58.10",
-                "dc01.contoso.local",
-                "192.168.58.50",
-            )
-            .unwrap();
+        let result = render_agent_instructions(
+            TEMPLATE_CREDENTIAL_ACCESS,
+            &capabilities,
+            false,
+            &[],
+            TEST_OP,
+        )
+        .unwrap();
         assert!(result.contains("Credential Access Agent"));
         assert!(result.contains("- secretsdump"));
         assert!(result.contains("- kerberoast"));
@@ -505,7 +508,8 @@ mod tests {
     fn render_cracker_template() {
         let capabilities = vec!["crack_with_hashcat".to_string()];
         let result =
-            render_agent_instructions(TEMPLATE_CRACKER, &capabilities, false, &[], "contoso.local", "192.168.58.10", "dc01.contoso.local", "192.168.58.50").unwrap();
+            render_agent_instructions(TEMPLATE_CRACKER, &capabilities, false, &[], TEST_OP)
+                .unwrap();
         assert!(result.contains("Hash Cracker Agent"));
         assert!(result.contains("- crack_with_hashcat"));
     }
@@ -513,7 +517,8 @@ mod tests {
     #[test]
     fn render_acl_template() {
         let capabilities = vec!["pywhisker".to_string(), "dacl_edit".to_string()];
-        let result = render_agent_instructions(TEMPLATE_ACL, &capabilities, false, &[], "contoso.local", "192.168.58.10", "dc01.contoso.local", "192.168.58.50").unwrap();
+        let result =
+            render_agent_instructions(TEMPLATE_ACL, &capabilities, false, &[], TEST_OP).unwrap();
         assert!(result.contains("ACL Exploitation Agent"));
         assert!(result.contains("- pywhisker"));
     }
@@ -522,7 +527,8 @@ mod tests {
     fn render_privesc_template() {
         let capabilities = vec!["certipy_find".to_string(), "s4u_attack".to_string()];
         let result =
-            render_agent_instructions(TEMPLATE_PRIVESC, &capabilities, false, &[], "contoso.local", "192.168.58.10", "dc01.contoso.local", "192.168.58.50").unwrap();
+            render_agent_instructions(TEMPLATE_PRIVESC, &capabilities, false, &[], TEST_OP)
+                .unwrap();
         assert!(result.contains("Privilege Escalation Agent"));
         assert!(result.contains("- certipy_find"));
     }
@@ -531,7 +537,8 @@ mod tests {
     fn render_lateral_template() {
         let capabilities = vec!["psexec".to_string(), "evil_winrm".to_string()];
         let result =
-            render_agent_instructions(TEMPLATE_LATERAL, &capabilities, false, &[], "contoso.local", "192.168.58.10", "dc01.contoso.local", "192.168.58.50").unwrap();
+            render_agent_instructions(TEMPLATE_LATERAL, &capabilities, false, &[], TEST_OP)
+                .unwrap();
         assert!(result.contains("Lateral Movement Agent"));
         assert!(result.contains("- psexec"));
     }
@@ -540,7 +547,8 @@ mod tests {
     fn render_coercion_template() {
         let capabilities = vec!["petitpotam".to_string(), "start_responder".to_string()];
         let result =
-            render_agent_instructions(TEMPLATE_COERCION, &capabilities, false, &[], "contoso.local", "192.168.58.10", "dc01.contoso.local", "192.168.58.50").unwrap();
+            render_agent_instructions(TEMPLATE_COERCION, &capabilities, false, &[], TEST_OP)
+                .unwrap();
         assert!(result.contains("Coercion Agent"));
         assert!(result.contains("- petitpotam"));
     }
@@ -549,7 +557,8 @@ mod tests {
     fn render_orchestrator_template() {
         let capabilities = vec!["dispatch_recon".to_string()];
         let result =
-            render_agent_instructions(TEMPLATE_ORCHESTRATOR, &capabilities, false, &[], "contoso.local", "192.168.58.10", "dc01.contoso.local", "192.168.58.50").unwrap();
+            render_agent_instructions(TEMPLATE_ORCHESTRATOR, &capabilities, false, &[], TEST_OP)
+                .unwrap();
         assert!(result.contains("Red Team Orchestrator"));
     }
 
@@ -567,30 +576,14 @@ mod tests {
         caps.insert("privesc".to_string(), vec!["certipy".to_string()]);
         caps.insert("lateral".to_string(), vec!["psexec".to_string()]);
 
-        let result = render_system_instructions(
-            Some(&caps),
-            None,
-            "contoso.local",
-            "192.168.58.10",
-            "dc01.contoso.local",
-            "192.168.58.50",
-        )
-        .unwrap();
+        let result = render_system_instructions(Some(&caps), None, TEST_OP).unwrap();
         assert!(result.contains("RECON"));
         assert!(result.contains("nmap_scan"));
     }
 
     #[test]
     fn render_system_instructions_without_capabilities() {
-        let result = render_system_instructions(
-            None,
-            None,
-            "contoso.local",
-            "192.168.58.10",
-            "dc01.contoso.local",
-            "192.168.58.50",
-        )
-        .unwrap();
+        let result = render_system_instructions(None, None, TEST_OP).unwrap();
         // Falls back to hardcoded defaults
         assert!(result.contains("nmap, netexec, rpcclient"));
         // Hardcoded fallback table
@@ -607,15 +600,7 @@ mod tests {
             ("esc1".to_string(), 5),
             ("acl_abuse".to_string(), 6),
         ];
-        let result = render_system_instructions(
-            None,
-            Some(&priorities),
-            "contoso.local",
-            "192.168.58.10",
-            "dc01.contoso.local",
-            "192.168.58.50",
-        )
-        .unwrap();
+        let result = render_system_instructions(None, Some(&priorities), TEST_OP).unwrap();
         // Dynamic table rendered
         assert!(
             result.contains("operator strategy"),
@@ -704,16 +689,7 @@ mod tests {
 
     #[test]
     fn invalid_template_name() {
-        let result = render_agent_instructions(
-            "nonexistent",
-            &[],
-            false,
-            &[],
-            "contoso.local",
-            "192.168.58.10",
-            "dc01.contoso.local",
-            "192.168.58.50",
-        );
+        let result = render_agent_instructions("nonexistent", &[], false, &[], TEST_OP);
         assert!(result.is_err());
     }
 }

@@ -200,14 +200,13 @@ fn build_system_prompt(
     } else {
         Some(technique_priorities)
     };
-    let system_instructions = templates::render_system_instructions(
-        None,
-        priorities,
-        &snapshot.target_domain,
-        &snapshot.target_dc_ip,
-        &snapshot.target_dc_fqdn,
+    let op = templates::OperationContext {
+        target_domain: &snapshot.target_domain,
+        target_dc_ip: &snapshot.target_dc_ip,
+        target_dc_fqdn: &snapshot.target_dc_fqdn,
         listener_ip,
-    )?;
+    };
+    let system_instructions = templates::render_system_instructions(None, priorities, op)?;
 
     // Render agent-specific instructions
     let agent_instructions = templates::render_agent_instructions(
@@ -215,10 +214,7 @@ fn build_system_prompt(
         &capabilities,
         !snapshot.undominated_forests.is_empty(),
         &snapshot.undominated_forests,
-        &snapshot.target_domain,
-        &snapshot.target_dc_ip,
-        &snapshot.target_dc_fqdn,
-        listener_ip,
+        op,
     )?;
 
     Ok(format!("{system_instructions}\n\n{agent_instructions}"))

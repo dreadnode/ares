@@ -14,7 +14,7 @@ use anyhow::Result;
 use serde_json::json;
 
 use ares_llm::prompt::generate_task_prompt;
-use ares_llm::prompt::templates::{render_agent_instructions, TEMPLATE_RECON};
+use ares_llm::prompt::templates::{render_agent_instructions, OperationContext, TEMPLATE_RECON};
 use ares_llm::tool_registry::{tools_for_role, AgentRole};
 use ares_llm::{
     run_agent_loop, AgentLoopConfig, CallbackHandler, LlmError, LlmProvider, LlmRequest,
@@ -135,10 +135,12 @@ async fn main() -> Result<()> {
         &capabilities,
         false,
         &[],
-        "contoso.local",
-        "192.168.58.10",
-        "dc01.contoso.local",
-        "192.168.58.50",
+        OperationContext {
+            target_domain: "contoso.local",
+            target_dc_ip: "192.168.58.10",
+            target_dc_fqdn: "dc01.contoso.local",
+            listener_ip: "192.168.58.50",
+        },
     )?;
     assert!(!system_prompt.is_empty());
     println!(

@@ -180,10 +180,7 @@ pub fn build_blue_system_prompt(
         capabilities,
         false,
         &[],
-        "",
-        "",
-        "",
-        "",
+        templates::OperationContext::EMPTY,
         &extras,
     )
 }
