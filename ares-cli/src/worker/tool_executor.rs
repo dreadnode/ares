@@ -76,14 +76,13 @@ pub async fn run_tool_exec_loop(
     // single-IP tool calls get rejected before any subprocess runs. The worker
     // doesn't otherwise parse target_ips out of the env JSON; this is the
     // only path that needs them.
-    let scope = ares_tools::scope::OperationScope::from_env();
+    let scope = ares_tools::scope::install_from_env();
     if !scope.is_unrestricted() {
         info!(
             target_ips = %scope.target_ips().join(","),
             "Worker installed operation scope — out-of-scope single-IP tool calls will be rejected"
         );
     }
-    ares_tools::scope::init_scope(scope);
 
     let subject = nats::tool_exec_subject(&config.worker_role);
     let queue_group = format!("ares-tools-{}", config.worker_role);

@@ -108,9 +108,8 @@ async fn run_inner() -> Result<()> {
     // Install the operation scope so `ares_tools::dispatch` rejects single-IP
     // tool invocations against hosts the operator never authorized. Empty
     // target_ips → unrestricted (legacy/test launches that didn't pass IPs).
-    ares_tools::scope::init_scope(ares_tools::scope::OperationScope::new(
-        config.target_ips.clone(),
-    ));
+    let scope = ares_tools::scope::OperationScope::new(config.target_ips.clone());
+    ares_tools::scope::init_scope(scope);
     if !config.target_ips.is_empty() {
         info!(
             target_ips = %config.target_ips.join(","),
