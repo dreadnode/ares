@@ -4,6 +4,7 @@ use ares_core::models::SharedRedTeamState;
 
 use super::display::build_domain_achievements;
 use super::hosts::dedup_hosts;
+use super::report_filter::{is_reportable_credential, is_reportable_hash};
 use crate::dedup::{dedup_credentials, dedup_hashes, dedup_users};
 
 pub(super) fn print_loot_json(
@@ -13,6 +14,7 @@ pub(super) fn print_loot_json(
     domains: &[String],
 ) {
     let unique_users = dedup_users(&state.all_users, &state.netbios_to_fqdn);
+    // dedup first (achievements need the full set), then filter for reporting.
     let unique_creds = dedup_credentials(credentials);
     let unique_hashes = dedup_hashes(hashes);
     let merged_hosts = dedup_hosts(
@@ -21,8 +23,22 @@ pub(super) fn print_loot_json(
         &state.domain_controllers,
     );
 
-    // Build per-domain compromise status
+    // Build per-domain compromise status from the full deduped set — krbtgt
+    // hashes and admin entries credit DA/Golden-Ticket achievements even
+    // though they're filtered from the report's credentials/hashes lists.
     let achievements = build_domain_achievements(state, &unique_hashes, &unique_creds);
+
+    // Drop noise (machine accounts, krbtgt, local-SAM built-ins,
+    // already-cracked hash blobs) before serializing the cred/hash lists
+    // consumed by external scoreboards.
+    let report_creds: Vec<&ares_core::models::Credential> = unique_creds
+        .iter()
+        .filter(|c| is_reportable_credential(c))
+        .collect();
+    let report_hashes: Vec<&ares_core::models::Hash> = unique_hashes
+        .iter()
+        .filter(|h| is_reportable_hash(h))
+        .collect();
 
     // Build forest structure
     let mut all_domains: Vec<String> = domains
@@ -135,13 +151,13 @@ pub(super) fn print_loot_json(
             "is_admin": u.is_admin,
             "source": u.source,
         })).collect::<Vec<_>>(),
-        "credentials": unique_creds.iter().map(|c| serde_json::json!({
+        "credentials": report_creds.iter().map(|c| serde_json::json!({
             "username": c.username,
             "password": c.password,
             "domain": c.domain,
             "is_admin": c.is_admin,
         })).collect::<Vec<_>>(),
-        "hashes": unique_hashes.iter().map(|h| serde_json::json!({
+        "hashes": report_hashes.iter().map(|h| serde_json::json!({
             "username": h.username,
             "domain": h.domain,
             "hash_type": h.hash_type,

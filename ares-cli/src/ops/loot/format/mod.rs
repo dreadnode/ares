@@ -1,6 +1,7 @@
 mod display;
 mod hosts;
 mod json;
+mod report_filter;
 
 use ares_core::models::SharedRedTeamState;
 
