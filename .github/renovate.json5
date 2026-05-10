@@ -79,6 +79,16 @@
       ],
       groupName: 'opentelemetry',
     },
+    {
+      description: 'Cap opentelemetry-rust monorepo crates below 0.32 until tracing-opentelemetry ships a release that depends on opentelemetry 0.32. Without this, renovate creates a partial group PR (opentelemetry 0.32 + tracing-opentelemetry 0.32.1, which still pins opentelemetry 0.31) that fails to compile due to two opentelemetry versions in the dep graph. Remove this cap once https://crates.io/crates/tracing-opentelemetry publishes a version supporting opentelemetry 0.32.',
+      matchPackageNames: [
+        'opentelemetry',
+        'opentelemetry_sdk',
+        'opentelemetry-otlp',
+        'opentelemetry-semantic-conventions',
+      ],
+      allowedVersions: '<0.32',
+    },
   ],
   customManagers: [
     {
