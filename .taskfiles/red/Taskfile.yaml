@@ -921,7 +921,17 @@ tasks:
           echo "$OUTPUT" | tee -a "{{.LOGFILE}}"
 
           if [ "$STATUS" != "Success" ]; then
-            echo "ERROR: Failed to start orchestrator"
+            DETAILS=$(aws ssm get-command-invocation \
+              --profile "{{.EC2_PROFILE}}" \
+              --region "{{.EC2_REGION}}" \
+              --command-id "$CMD_ID" \
+              --instance-id "$INSTANCE_ID" \
+              --query "StatusDetails" --output text 2>/dev/null)
+            echo "ERROR: Failed to start orchestrator (status: $STATUS, details: $DETAILS)"
+            if [ "$DETAILS" = "Undeliverable" ]; then
+              echo "ERROR: SSM could not deliver the command to $INSTANCE_ID (PingStatus likely ConnectionLost)."
+              echo "ERROR: Recovery: reboot the instance ('aws ec2 reboot-instances --instance-ids $INSTANCE_ID')."
+            fi
             aws ssm get-command-invocation \
               --profile "{{.EC2_PROFILE}}" \
               --region "{{.EC2_REGION}}" \

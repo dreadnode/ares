@@ -198,7 +198,17 @@ tasks:
           echo "$OUTPUT" | tail -20
 
           if [ "$STATUS" != "Success" ]; then
-            echo -e "{{.ERROR}} Remote build failed (status: $STATUS)"
+            DETAILS=$(aws ssm get-command-invocation \
+              --profile "{{.EC2_PROFILE}}" \
+              --region "{{.EC2_REGION}}" \
+              --command-id "$CMD_ID" \
+              --instance-id "$INSTANCE_ID" \
+              --query "StatusDetails" --output text 2>/dev/null)
+            echo -e "{{.ERROR}} Remote build failed (status: $STATUS, details: $DETAILS)"
+            if [ "$DETAILS" = "Undeliverable" ]; then
+              echo -e "{{.ERROR}} SSM could not deliver the command to $INSTANCE_ID (PingStatus likely ConnectionLost)."
+              echo -e "{{.ERROR}} Recovery: reboot the instance ('aws ec2 reboot-instances --instance-ids $INSTANCE_ID')."
+            fi
             aws ssm get-command-invocation \
               --profile "{{.EC2_PROFILE}}" \
               --region "{{.EC2_REGION}}" \
@@ -352,7 +362,22 @@ tasks:
           --query "StandardOutputContent" --output text
 
         if [ "$STATUS" != "Success" ]; then
-          echo -e "{{.ERROR}} Deploy failed (status: $STATUS)"
+          # StatusDetails distinguishes script failure (script returned non-zero) from
+          # delivery failure (Undeliverable = SSM agent on instance is offline / instance
+          # in ConnectionLost). For Undeliverable, stdout/stderr are both empty, so
+          # without this the operator sees only "status: Failed" and two blank lines.
+          DETAILS=$(aws ssm get-command-invocation \
+            --profile "{{.EC2_PROFILE}}" \
+            --region "{{.EC2_REGION}}" \
+            --command-id "$CMD_ID" \
+            --instance-id "$INSTANCE_ID" \
+            --query "StatusDetails" --output text 2>/dev/null)
+          echo -e "{{.ERROR}} Deploy failed (status: $STATUS, details: $DETAILS)"
+          if [ "$DETAILS" = "Undeliverable" ]; then
+            echo -e "{{.ERROR}} SSM could not deliver the command to $INSTANCE_ID."
+            echo -e "{{.ERROR}} Check 'aws ssm describe-instance-information' — PingStatus is likely ConnectionLost."
+            echo -e "{{.ERROR}} Recovery: reboot the instance ('aws ec2 reboot-instances --instance-ids $INSTANCE_ID')."
+          fi
           aws ssm get-command-invocation \
             --profile "{{.EC2_PROFILE}}" \
             --region "{{.EC2_REGION}}" \
@@ -435,7 +460,17 @@ tasks:
           --query "StandardOutputContent" --output text
 
         if [ "$STATUS" != "Success" ]; then
-          echo -e "{{.ERROR}} Config deploy failed (status: $STATUS)"
+          DETAILS=$(aws ssm get-command-invocation \
+            --profile "{{.EC2_PROFILE}}" \
+            --region "{{.EC2_REGION}}" \
+            --command-id "$CMD_ID" \
+            --instance-id "$INSTANCE_ID" \
+            --query "StatusDetails" --output text 2>/dev/null)
+          echo -e "{{.ERROR}} Config deploy failed (status: $STATUS, details: $DETAILS)"
+          if [ "$DETAILS" = "Undeliverable" ]; then
+            echo -e "{{.ERROR}} SSM could not deliver the command to $INSTANCE_ID (PingStatus likely ConnectionLost)."
+            echo -e "{{.ERROR}} Recovery: reboot the instance ('aws ec2 reboot-instances --instance-ids $INSTANCE_ID')."
+          fi
           aws ssm get-command-invocation \
             --profile "{{.EC2_PROFILE}}" \
             --region "{{.EC2_REGION}}" \
@@ -508,7 +543,17 @@ tasks:
           --query "StandardOutputContent" --output text
 
         if [ "$STATUS" != "Success" ]; then
-          echo -e "{{.ERROR}} Setup failed (status: $STATUS)"
+          DETAILS=$(aws ssm get-command-invocation \
+            --profile "{{.EC2_PROFILE}}" \
+            --region "{{.EC2_REGION}}" \
+            --command-id "$CMD_ID" \
+            --instance-id "$INSTANCE_ID" \
+            --query "StatusDetails" --output text 2>/dev/null)
+          echo -e "{{.ERROR}} Setup failed (status: $STATUS, details: $DETAILS)"
+          if [ "$DETAILS" = "Undeliverable" ]; then
+            echo -e "{{.ERROR}} SSM could not deliver the command to $INSTANCE_ID (PingStatus likely ConnectionLost)."
+            echo -e "{{.ERROR}} Recovery: reboot the instance ('aws ec2 reboot-instances --instance-ids $INSTANCE_ID')."
+          fi
           aws ssm get-command-invocation \
             --profile "{{.EC2_PROFILE}}" \
             --region "{{.EC2_REGION}}" \
@@ -590,7 +635,17 @@ tasks:
         if [ "$STATUS" = "Success" ]; then
           echo -e "{{.SUCCESS}} All services started"
         else
-          echo -e "{{.ERROR}} Start failed (status: $STATUS)"
+          DETAILS=$(aws ssm get-command-invocation \
+            --profile "{{.EC2_PROFILE}}" \
+            --region "{{.EC2_REGION}}" \
+            --command-id "$CMD_ID" \
+            --instance-id "$INSTANCE_ID" \
+            --query "StatusDetails" --output text 2>/dev/null)
+          echo -e "{{.ERROR}} Start failed (status: $STATUS, details: $DETAILS)"
+          if [ "$DETAILS" = "Undeliverable" ]; then
+            echo -e "{{.ERROR}} SSM could not deliver the command to $INSTANCE_ID (PingStatus likely ConnectionLost)."
+            echo -e "{{.ERROR}} Recovery: reboot the instance ('aws ec2 reboot-instances --instance-ids $INSTANCE_ID')."
+          fi
           aws ssm get-command-invocation \
             --profile "{{.EC2_PROFILE}}" \
             --region "{{.EC2_REGION}}" \
@@ -902,7 +957,17 @@ tasks:
           --query "StandardOutputContent" --output text)
 
         if [ "$STATUS" != "Success" ]; then
-          echo -e "{{.ERROR}} Report generation failed"
+          DETAILS=$(aws ssm get-command-invocation \
+            --profile "{{.EC2_PROFILE}}" \
+            --region "{{.EC2_REGION}}" \
+            --command-id "$CMD_ID" \
+            --instance-id "$INSTANCE_ID" \
+            --query "StatusDetails" --output text 2>/dev/null)
+          echo -e "{{.ERROR}} Report generation failed (status: $STATUS, details: $DETAILS)" >&2
+          if [ "$DETAILS" = "Undeliverable" ]; then
+            echo -e "{{.ERROR}} SSM could not deliver the command to $INSTANCE_ID (PingStatus likely ConnectionLost)." >&2
+            echo -e "{{.ERROR}} Recovery: reboot the instance ('aws ec2 reboot-instances --instance-ids $INSTANCE_ID')." >&2
+          fi
           aws ssm get-command-invocation \
             --profile "{{.EC2_PROFILE}}" \
             --region "{{.EC2_REGION}}" \
@@ -1114,7 +1179,17 @@ tasks:
           --query "StandardOutputContent" --output text
 
         if [ "$STATUS" != "Success" ]; then
-          echo -e "{{.ERROR}} Launch failed"
+          DETAILS=$(aws ssm get-command-invocation \
+            --profile "{{.EC2_PROFILE}}" \
+            --region "{{.EC2_REGION}}" \
+            --command-id "$CMD_ID" \
+            --instance-id "$INSTANCE_ID" \
+            --query "StatusDetails" --output text 2>/dev/null)
+          echo -e "{{.ERROR}} Launch failed (status: $STATUS, details: $DETAILS)" >&2
+          if [ "$DETAILS" = "Undeliverable" ]; then
+            echo -e "{{.ERROR}} SSM could not deliver the command to $INSTANCE_ID (PingStatus likely ConnectionLost)." >&2
+            echo -e "{{.ERROR}} Recovery: reboot the instance ('aws ec2 reboot-instances --instance-ids $INSTANCE_ID')." >&2
+          fi
           aws ssm get-command-invocation \
             --profile "{{.EC2_PROFILE}}" \
             --region "{{.EC2_REGION}}" \
@@ -1245,7 +1320,17 @@ tasks:
         if [ "$STATUS" = "Success" ]; then
           echo -e "{{.SUCCESS}} Tools installed on $INSTANCE_ID"
         else
-          echo -e "{{.ERROR}} Tool installation failed (status: $STATUS)"
+          DETAILS=$(aws ssm get-command-invocation \
+            --profile "{{.EC2_PROFILE}}" \
+            --region "{{.EC2_REGION}}" \
+            --command-id "$CMD_ID" \
+            --instance-id "$INSTANCE_ID" \
+            --query "StatusDetails" --output text 2>/dev/null)
+          echo -e "{{.ERROR}} Tool installation failed (status: $STATUS, details: $DETAILS)"
+          if [ "$DETAILS" = "Undeliverable" ]; then
+            echo -e "{{.ERROR}} SSM could not deliver the command to $INSTANCE_ID (PingStatus likely ConnectionLost)."
+            echo -e "{{.ERROR}} Recovery: reboot the instance ('aws ec2 reboot-instances --instance-ids $INSTANCE_ID')."
+          fi
           aws ssm get-command-invocation \
             --profile "{{.EC2_PROFILE}}" \
             --region "{{.EC2_REGION}}" \
@@ -1314,6 +1399,17 @@ tasks:
           --query "StandardOutputContent" --output text
 
         if [ "$STATUS" != "Success" ]; then
+          DETAILS=$(aws ssm get-command-invocation \
+            --profile "{{.EC2_PROFILE}}" \
+            --region "{{.EC2_REGION}}" \
+            --command-id "$CMD_ID" \
+            --instance-id "$INSTANCE_ID" \
+            --query "StatusDetails" --output text 2>/dev/null)
+          echo -e "{{.ERROR}} exec failed (status: $STATUS, details: $DETAILS)" >&2
+          if [ "$DETAILS" = "Undeliverable" ]; then
+            echo -e "{{.ERROR}} SSM could not deliver the command to $INSTANCE_ID (PingStatus likely ConnectionLost)." >&2
+            echo -e "{{.ERROR}} Recovery: reboot the instance ('aws ec2 reboot-instances --instance-ids $INSTANCE_ID')." >&2
+          fi
           aws ssm get-command-invocation \
             --profile "{{.EC2_PROFILE}}" \
             --region "{{.EC2_REGION}}" \
