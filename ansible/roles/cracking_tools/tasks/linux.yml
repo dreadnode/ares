@@ -24,6 +24,132 @@
     mode: '0755'
   become: true
 
+# Kali rolling ships kernel 6.19.x, which the Kali archive's NVIDIA driver
+# (550.163.01) cannot compile against — DKMS exits 2. NVIDIA's official
+# CUDA Debian repo carries 575+ which supports modern kernels and offers
+# `nvidia-open-kernel-dkms` (open-source kernel module) for Turing+ GPUs.
+# We add this repo first so the apt install below resolves to fresh
+# packages instead of the stale Kali ones.
+- name: Add NVIDIA CUDA apt repository (Kali ships 550.x which fails on kernel 6.19+)
+  ansible.builtin.shell: |
+    set -euxo pipefail
+    cd /tmp
+    curl -fsSLo cuda-keyring.deb \
+      https://developer.download.nvidia.com/compute/cuda/repos/debian13/x86_64/cuda-keyring_1.1-1_all.deb
+    apt-get install -y ./cuda-keyring.deb
+    apt-get update -q
+    rm -f cuda-keyring.deb
+  args:
+    creates: /usr/share/keyrings/cuda-archive-keyring.gpg
+    executable: /bin/bash
+  become: true
+  when:
+    - cracking_tools_install_nvidia_driver | bool
+    - ansible_facts['os_family'] == 'Debian'
+
+# Install kernel headers + dkms FIRST in their own apt transaction, so they
+# are fully configured before NVIDIA's dpkg postinst runs `dkms autoinstall`.
+# When mixed in a single apt-get call, dpkg may configure
+# `nvidia-kernel-open-dkms` before `linux-headers-cloud-amd64` finishes
+# setting up, and DKMS exits 2 because the headers aren't yet in place.
+- name: Install kernel headers and DKMS prerequisites
+  ansible.builtin.apt:
+    name:
+      - linux-headers-cloud-amd64
+      - dkms
+      - build-essential
+      - firmware-misc-nonfree
+    state: present
+    install_recommends: true
+  become: true
+  when:
+    - cracking_tools_install_nvidia_driver | bool
+    - ansible_facts['os_family'] == 'Debian'
+
+# Driven through shell+tee instead of ansible.builtin.apt: the apt module
+# captures dpkg stderr but truncates large stdout (DKMS kernel-module build
+# errors land deep in apt-get's output, well after the cutoff). With tee we
+# can show the real error on failure.
+- name: Install NVIDIA driver and OpenCL runtime (with full log)
+  ansible.builtin.shell:
+    cmd: |
+      set -o pipefail
+      DEBIAN_FRONTEND=noninteractive apt-get install -y \
+        -o Dpkg::Options::=--force-confdef \
+        -o Dpkg::Options::=--force-confold \
+        -o APT::Install-Recommends=yes \
+        {{ cracking_tools_nvidia_driver_packages | map('quote') | join(' ') }} \
+        2>&1 | tee /tmp/ares-nvidia-install.log
+    executable: /bin/bash
+  become: true
+  register: cracking_tools_nvidia_install_result
+  changed_when: false
+  failed_when: false
+  when:
+    - cracking_tools_install_nvidia_driver | bool
+    - ansible_facts['os_family'] == 'Debian'
+
+- name: Show NVIDIA install log tail on failure
+  ansible.builtin.command: tail -200 /tmp/ares-nvidia-install.log
+  become: true
+  register: cracking_tools_nvidia_install_tail
+  changed_when: false
+  when:
+    - cracking_tools_install_nvidia_driver | bool
+    - cracking_tools_nvidia_install_result.rc | default(0) != 0
+
+- name: Print NVIDIA install tail
+  ansible.builtin.debug:
+    var: cracking_tools_nvidia_install_tail.stdout_lines
+  when:
+    - cracking_tools_install_nvidia_driver | bool
+    - cracking_tools_nvidia_install_result.rc | default(0) != 0
+
+- name: Dump DKMS make.log on failure
+  ansible.builtin.shell: |
+    set -o pipefail
+    set +e
+    for f in /var/lib/dkms/nvidia/*/build/make.log; do
+      echo "==== $f ===="
+      tail -150 "$f" 2>&1 || true
+    done
+    echo "==== build env ===="
+    which gcc cc make 2>&1 || true
+    gcc --version 2>&1 || true
+    dpkg -l build-essential gcc make 2>&1 | tail -10 || true
+  args:
+    executable: /bin/bash
+  register: cracking_tools_dkms_make_log
+  changed_when: false
+  failed_when: false
+  when:
+    - cracking_tools_install_nvidia_driver | bool
+    - cracking_tools_nvidia_install_result.rc | default(0) != 0
+
+- name: Print DKMS make.log
+  ansible.builtin.debug:
+    var: cracking_tools_dkms_make_log.stdout_lines
+  when:
+    - cracking_tools_install_nvidia_driver | bool
+    - cracking_tools_nvidia_install_result.rc | default(0) != 0
+
+- name: Fail if NVIDIA install failed
+  ansible.builtin.fail:
+    msg: "NVIDIA driver install failed (rc={{ cracking_tools_nvidia_install_result.rc }}); see tail above"
+  when:
+    - cracking_tools_install_nvidia_driver | bool
+    - cracking_tools_nvidia_install_result.rc | default(0) != 0
+
+- name: Install NVIDIA CUDA toolkit
+  ansible.builtin.apt:
+    name: "{{ cracking_tools_nvidia_cuda_toolkit_packages }}"
+    state: present
+    install_recommends: true
+  become: true
+  when:
+    - cracking_tools_install_cuda_toolkit | bool
+    - ansible_facts['os_family'] == 'Debian'
+
 - name: Install GPU support packages
   ansible.builtin.apt:
     name: "{{ cracking_tools_opencl_packages }}"
@@ -50,6 +176,33 @@
   when:
     - cracking_tools_gpu_support | bool
     - cracking_tools_nvidia_opencl_icd | default(false) | bool
+
+# nvidia-smi/clinfo will return non-zero on a CPU-only AMI builder (no GPU
+# attached) — that's expected. The check is purely informational so a logged
+# failure on the first GPU boot is easy to spot.
+- name: Verify NVIDIA driver (non-fatal — no GPU on builder hosts)
+  ansible.builtin.command: nvidia-smi
+  register: cracking_tools_nvidia_smi
+  changed_when: false
+  failed_when: false
+  when: cracking_tools_install_nvidia_driver | bool
+
+- name: Verify OpenCL platform discovery (non-fatal)
+  ansible.builtin.command: clinfo -l
+  register: cracking_tools_clinfo
+  changed_when: false
+  failed_when: false
+  when:
+    - cracking_tools_gpu_support | bool
+    - cracking_tools_install_nvidia_driver | bool
+
+- name: Show GPU/OpenCL detection summary
+  ansible.builtin.debug:
+    msg:
+      - "nvidia-smi rc={{ cracking_tools_nvidia_smi.rc | default('skipped') }}"
+      - "clinfo rc={{ cracking_tools_clinfo.rc | default('skipped') }}"
+      - "{{ cracking_tools_clinfo.stdout | default('clinfo not run') }}"
+  when: cracking_tools_install_nvidia_driver | bool
 
 - name: Ensure libgcc runtime is present for hashcat
   when:

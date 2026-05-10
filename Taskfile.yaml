@@ -26,6 +26,7 @@ includes:
       LOG_DIR: '{{.LOG_DIR}}'
       REPORT_DIR: '{{.REPORT_DIR}}'
       GRAFANA_URL: '{{.GRAFANA_URL}}'
+      LOKI_URL: '{{.LOKI_URL}}'
       DREADNODE_SERVER_URL: '{{.DREADNODE_SERVER_URL}}'
       DREADNODE_ORGANIZATION: '{{.DREADNODE_ORGANIZATION}}'
       DREADNODE_WORKSPACE: '{{.DREADNODE_WORKSPACE}}'
@@ -51,6 +52,7 @@ includes:
       ARES_CONFIG: '{{.ARES_CONFIG}}'
       OTEL_TRACES_ENDPOINT: '{{.OTEL_TRACES_ENDPOINT}}'
       ALLOY_LOKI_ENDPOINT: '{{.ALLOY_LOKI_ENDPOINT}}'
+      LOKI_URL: '{{.LOKI_URL}}'
   blue:
     taskfile: .taskfiles/blue/Taskfile.yaml
     optional: true
@@ -76,6 +78,7 @@ vars:
   # MODEL: '{{.MODEL | default "claude-sonnet-4-5-20250929"}}'
   MODEL: '{{.MODEL | default "gpt-5.2"}}'
   GRAFANA_URL: '{{.GRAFANA_URL}}'
+  LOKI_URL: '{{.LOKI_URL | default "https://loki.dev.plundr.ai"}}'
   POLL_INTERVAL: '{{.POLL_INTERVAL | default "30"}}'
   MAX_STEPS_BLUE: '{{.MAX_STEPS_BLUE | default "50"}}'
   MAX_STEPS_BLUE_ONCE: '{{.MAX_STEPS_BLUE_ONCE | default "15"}}'  # ~15 min max for once mode

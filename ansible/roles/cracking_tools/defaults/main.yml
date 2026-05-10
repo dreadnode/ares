@@ -50,4 +50,35 @@ cracking_tools_opencl_packages:
 # Set to true when using nvidia/cuda base image to register NVIDIA OpenCL ICD
 cracking_tools_nvidia_opencl_icd: false
 
+# Install the NVIDIA kernel-mode driver + OpenCL runtime on the host. Required
+# on bare-metal/AMI builds (g4dn etc.) where the Kali base image ships without
+# any NVIDIA bits — without this hashcat reports "OpenCL platform not found".
+# Leave false for container builds: the nvidia/cuda runtime base image
+# already provides libnvidia-opencl/libcuda, and the kernel module comes
+# from the host via nvidia-container-toolkit.
+cracking_tools_install_nvidia_driver: false
+# Install the full CUDA toolkit so hashcat can use the CUDA backend (faster
+# than OpenCL on T4/A10/etc.). Pulls ~3GB; only enable on AMI builds.
+cracking_tools_install_cuda_toolkit: false
+# Recommends are intentionally enabled — DKMS, libcuda1, and the kernel
+# module build chain come in via Recommends on Debian/Kali.
+# Kali AMIs ship `+kali-cloud-amd64` kernel — needs the `cloud` headers
+# meta-package. We pull driver + open-source kernel module from NVIDIA's
+# CUDA Debian repo (added in tasks/linux.yml) because Kali's archive
+# nvidia-driver (550.163.01) does not build against kernel 6.19+.
+# `nvidia-kernel-open-dkms` is required for Turing+ (T4 included) on
+# modern kernels; legacy `nvidia-kernel-dkms` is a dead-end here. Pair it
+# with `nvidia-driver-cuda` (CUDA-only userspace) — the `cuda-drivers`
+# meta and full `nvidia-driver` both pull `nvidia-kernel-dkms` (closed
+# kernel module), which Conflicts with the open variant.
+cracking_tools_nvidia_driver_packages:
+  - linux-headers-cloud-amd64
+  - dkms
+  - firmware-misc-nonfree
+  - nvidia-kernel-open-dkms
+  - nvidia-driver-cuda
+  - nvidia-opencl-icd
+cracking_tools_nvidia_cuda_toolkit_packages:
+  - nvidia-cuda-toolkit
+
 cracking_tools_update_cache: true

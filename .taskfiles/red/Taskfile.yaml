@@ -19,12 +19,13 @@ tasks:
   # ===========================================================================
 
   multi:
-    desc: "Run multi-agent red team operation (usage: task red:multi [TARGET=dreadgoad] [DOMAIN=contoso.local] [TARGET_ENV=staging])"
+    desc: "Run multi-agent red team operation (usage: task red:multi [TARGET=dreadgoad] [DOMAIN=contoso.local] [TARGET_ENV=staging] [IPS=10.1.10.10,10.1.10.11])"
     silent: true
     vars:
       OPERATION_ID: '{{.OPERATION_ID | default ""}}'
       RESUME: '{{.RESUME | default "false"}}'
       TARGET_ENV: '{{.TARGET_ENV | default "staging"}}'
+      IPS: '{{.IPS | default ""}}'
       OPERATION_ID_COMPUTED:
         sh: |
           if [ -n "{{.OPERATION_ID}}" ]; then
@@ -71,6 +72,14 @@ tasks:
             MODEL_OVERRIDE_ENV="ARES_MODEL_OVERRIDE={{.MODEL}}"
           fi
 
+          # When IPS is supplied, target IPs directly and skip EC2 Name-tag resolution
+          # (the orchestrator pod has no `aws` CLI). Otherwise default to AWS lookup.
+          if [ -n "{{.IPS}}" ]; then
+            TARGET_FLAGS="--ips {{.IPS}}"
+          else
+            TARGET_FLAGS="--resolve-targets --aws-profile {{.TARGET_PROFILE}} --aws-region {{.TARGET_REGION}}"
+          fi
+
           # CLI auto-loads .env if present, or use --secrets-from 1password
           kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-orchestrator -- \
             env $MODEL_OVERRIDE_ENV \
@@ -82,9 +91,7 @@ tasks:
             GRAFANA_URL="{{.GRAFANA_URL}}" \
             ares --redis-url "{{.REDIS_URL}}" ops submit \
             "{{.TARGET}}" "{{.DOMAIN}}" \
-            --resolve-targets \
-            --aws-profile "{{.TARGET_PROFILE}}" \
-            --aws-region "{{.TARGET_REGION}}" \
+            $TARGET_FLAGS \
             --pin-active \
             --operation-id "{{.OPERATION_ID_COMPUTED}}" \
             --model "{{.MODEL}}" \
@@ -738,6 +745,7 @@ tasks:
       BLUE_ENABLED: '{{.BLUE_ENABLED | default "0"}}'
       BLUE_LLM_MODEL: '{{.BLUE_LLM_MODEL | default ""}}'
       EC2_DEPLOYMENT: '{{.EC2_DEPLOYMENT | default "alpha-operator-range"}}'
+      STRATEGY: '{{.STRATEGY | default "comprehensive"}}'
       RESOLVED_TARGETS:
         sh: |
           TARGET="{{.TARGET}}"
@@ -867,7 +875,7 @@ tasks:
           # Build JSON payload for ARES_OPERATION_ID
           TARGET_IPS_JSON=$(echo "{{.RESOLVED_TARGETS}}" | tr ',' '\n' | sed 's/^/"/;s/$/"/' | paste -sd, - | sed 's/^/[/;s/$/]/')
 
-          ORCH_PAYLOAD="{\"operation_id\":\"{{.OPERATION_ID_COMPUTED}}\",\"target_domain\":\"{{.DOMAIN}}\",\"target_ips\":${TARGET_IPS_JSON},\"model\":\"{{.MODEL}}\"}"
+          ORCH_PAYLOAD="{\"operation_id\":\"{{.OPERATION_ID_COMPUTED}}\",\"target_domain\":\"{{.DOMAIN}}\",\"target_ips\":${TARGET_IPS_JSON},\"model\":\"{{.MODEL}}\",\"strategy\":\"{{.STRATEGY}}\"}"
 
           # Build orchestrator launch script from template
           ORCH_SCRIPT=$(mktemp)
@@ -882,6 +890,7 @@ tasks:
               -e "s|__DREADNODE_PROJECT__|{{.DREADNODE_PROJECT}}|" \
               -e "s|__GRAFANA_TOKEN__|${GRAFANA_SERVICE_ACCOUNT_TOKEN:-}|" \
               -e "s|__GRAFANA_URL__|{{.GRAFANA_URL}}|" \
+              -e "s|__LOKI_URL__|{{.LOKI_URL}}|" \
               -e "s|__ARES_LLM_MODEL__|{{.MODEL}}|" \
               -e "s|__ARES_BLUE_ENABLED__|{{.BLUE_ENABLED}}|" \
               -e "s|__ARES_BLUE_LLM_MODEL__|{{.BLUE_LLM_MODEL}}|" \

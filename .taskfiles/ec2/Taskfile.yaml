@@ -36,9 +36,6 @@ vars:
   ARES_REMOTE_BIN: '/usr/local/bin'
   ARES_REMOTE_CONFIG: '/etc/ares/config.yaml'
   ARES_LOG_DIR: '/var/log/ares'
-  # Build config
-  RUST_TARGET: '{{.RUST_TARGET | default "x86_64-unknown-linux-gnu"}}'
-  BIN_DIR: 'target/{{.RUST_TARGET}}/{{.BUILD_PROFILE | default "dev-deploy"}}'
   # Build tool: auto (cross on macOS due to aws-lc-sys, zigbuild on Linux), cross, zigbuild, cargo, remote
   # remote: builds natively on EC2 (fastest for iteration, no cross-compilation)
   BUILD_TOOL: '{{.BUILD_TOOL | default "auto"}}'
@@ -88,6 +85,7 @@ tasks:
     desc: "Cross-compile Rust binaries and deploy to EC2 via S3 staging (usage: task ec2:deploy [EC2_NAME=ares-tools])"
     silent: true
     vars:
+      RUST_TARGET: '{{.RUST_TARGET | default "x86_64-unknown-linux-gnu"}}'
       MAX_OPEN_FILES: '{{.MAX_OPEN_FILES | default "65536"}}'
       CARGO_BUILD_JOBS: '{{.CARGO_BUILD_JOBS | default "0"}}'
       S3_DEPLOY_PREFIX: 'ares-deploy'
@@ -161,21 +159,32 @@ tasks:
               "aws s3 cp s3://" + $bucket + "/" + $prefix + "/ares-src.tar.gz /tmp/ares-src.tar.gz",
               "tar -xzf /tmp/ares-src.tar.gz -C " + $build_dir,
               "cd " + $build_dir + " && cargo build --profile dev-deploy -p ares-cli 2>&1",
-              "cp " + $build_dir + "/target/dev-deploy/ares /usr/local/bin/ares && chmod +x /usr/local/bin/ares",
+              "SRC=" + $build_dir + "/target/dev-deploy/ares",
+              "if [ ! -f \"$SRC\" ]; then echo ERROR: build artifact missing at $SRC; exit 1; fi",
+              "BUILD_RAW=$(sha256sum \"$SRC\"); BUILD_SHA=${BUILD_RAW%% *}",
+              "echo Build SHA: $BUILD_SHA",
+              "install -m 755 \"$SRC\" /usr/local/bin/ares",
+              "DEPLOY_RAW=$(sha256sum /usr/local/bin/ares); DEPLOY_SHA=${DEPLOY_RAW%% *}",
+              "echo Deploy SHA: $DEPLOY_SHA",
+              "if [ \"$BUILD_SHA\" != \"$DEPLOY_SHA\" ]; then echo ERROR: deployed sha differs from build artifact build=$BUILD_SHA deploy=$DEPLOY_SHA; exit 1; fi",
               "echo Deployed: && ls -lh /usr/local/bin/ares"
             ]}' > "$PARAMS_FILE"
 
+          # Clean cargo builds on a t3.medium can run 15-25 min — pre-EC2-reboot
+          # cache may be wiped, and incremental builds still need to relink.
+          # Allow 30 min total for both the SSM command itself and the local
+          # polling loop so we don't bail mid-build with a "InProgress" report.
           CMD_ID=$(aws ssm send-command \
             --profile "{{.EC2_PROFILE}}" \
             --region "{{.EC2_REGION}}" \
             --instance-ids "$INSTANCE_ID" \
             --document-name "AWS-RunShellScript" \
             --parameters "file://$PARAMS_FILE" \
-            --timeout-seconds 600 \
+            --timeout-seconds 1800 \
             --query "Command.CommandId" --output text)
 
-          # Poll for completion (up to 10 minutes)
-          for i in $(seq 1 300); do
+          # Poll for completion (up to 30 minutes)
+          for i in $(seq 1 900); do
             STATUS=$(aws ssm get-command-invocation \
               --profile "{{.EC2_PROFILE}}" \
               --region "{{.EC2_REGION}}" \
@@ -224,11 +233,14 @@ tasks:
 
         echo -e "{{.INFO}} Cross-compiling for {{.RUST_TARGET}} (profile: $PROFILE, jobs: {{.CARGO_BUILD_JOBS}})..."
 
-        # zig 0.15+ cannot handle RLIM_INFINITY — it needs a concrete fd limit.
-        CURRENT_FD_LIMIT=$(ulimit -n 2>/dev/null || echo "256")
-        if [ "$CURRENT_FD_LIMIT" = "unlimited" ] || [ "$CURRENT_FD_LIMIT" -lt "{{.MAX_OPEN_FILES}}" ] 2>/dev/null; then
-          ulimit -n {{.MAX_OPEN_FILES}} 2>/dev/null || ulimit -n 10240 2>/dev/null || ulimit -n 4096 2>/dev/null || true
-        fi
+        # Zig 0.15+ rejects RLIM_INFINITY on the *hard* fd limit (returns
+        # ProcessFdQuotaExceeded mid-link). On macOS, default zsh/bash sessions
+        # have soft=1048576 but hard=RLIM_INFINITY (`getrlimit` returns INT64_MAX),
+        # so even a high soft limit isn't enough — Zig sees the unlimited hard
+        # limit and bails. `ulimit -n N` sets both soft and hard to N, which is
+        # exactly what we want. Always pin to a concrete value, regardless of
+        # the current setting.
+        ulimit -n {{.MAX_OPEN_FILES}} 2>/dev/null || ulimit -n 10240 2>/dev/null || ulimit -n 4096 2>/dev/null || true
 
         JOBS="{{.CARGO_BUILD_JOBS}}"
         if [ "$JOBS" = "0" ]; then
@@ -291,11 +303,25 @@ tasks:
         fi
         ls -lh "$BIN_PATH"
 
+        # Pin sha256 of what we're about to ship so the SSM deploy step can
+        # verify the binary that lands on /usr/local/bin/ares matches exactly.
+        # Without this, the cp can silently fail to overwrite (ETXTBSY, immutable
+        # attribute, symlink redirection, prior deploy race) and the task still
+        # reports success.
+        if command -v sha256sum >/dev/null 2>&1; then
+          BUILD_SHA=$(sha256sum "$BIN_PATH" | awk '{print $1}')
+        else
+          BUILD_SHA=$(shasum -a 256 "$BIN_PATH" | awk '{print $1}')
+        fi
+        echo -e "{{.INFO}} Build SHA: $BUILD_SHA"
+        mkdir -p target/.deploy
+        echo "$BUILD_SHA" > target/.deploy/ares.sha256
+
         echo -e "{{.INFO}} Uploading binary to s3://{{.BCP_BUCKET}}/{{.S3_DEPLOY_PREFIX}}/..."
         aws s3 cp "$BIN_PATH" "s3://{{.BCP_BUCKET}}/{{.S3_DEPLOY_PREFIX}}/ares" \
           --profile "{{.EC2_PROFILE}}" --region "{{.EC2_REGION}}"
 
-        echo -e "{{.SUCCESS}} Binary staged in S3"
+        echo -e "{{.SUCCESS}} Binary staged in S3 (sha=$BUILD_SHA)"
 
       # Pull from S3 on EC2 via SSM + verify (skip for remote builds)
       - |
@@ -316,11 +342,30 @@ tasks:
 
         echo -e "{{.INFO}} Pulling binaries from S3 to $INSTANCE_ID..."
 
+        EXPECTED_SHA=""
+        if [ -f target/.deploy/ares.sha256 ]; then
+          EXPECTED_SHA=$(cat target/.deploy/ares.sha256)
+        fi
+
         PARAMS_FILE=$(mktemp)
         trap "rm -f $PARAMS_FILE" EXIT
-        jq -n --arg bucket "{{.BCP_BUCKET}}" --arg prefix "{{.S3_DEPLOY_PREFIX}}" \
-          '{"commands": ["set -e; aws s3 cp s3://" + $bucket + "/" + $prefix + "/ares /usr/local/bin/ares; chmod +x /usr/local/bin/ares; echo Deployed:; ls -lh /usr/local/bin/ares"]}' \
-          > "$PARAMS_FILE"
+        jq -n \
+          --arg bucket "{{.BCP_BUCKET}}" \
+          --arg prefix "{{.S3_DEPLOY_PREFIX}}" \
+          --arg expected_sha "$EXPECTED_SHA" \
+          '{"commands": [
+            "set -ex",
+            "aws s3 cp s3://" + $bucket + "/" + $prefix + "/ares /tmp/ares.staged",
+            "STAGED_RAW=$(sha256sum /tmp/ares.staged); STAGED_SHA=${STAGED_RAW%% *}",
+            "echo Staged SHA: $STAGED_SHA",
+            "if [ -n \"" + $expected_sha + "\" ] && [ \"$STAGED_SHA\" != \"" + $expected_sha + "\" ]; then echo ERROR: S3 staged binary sha mismatch expected=" + $expected_sha + " staged=$STAGED_SHA; exit 1; fi",
+            "install -m 755 /tmp/ares.staged /usr/local/bin/ares",
+            "DEPLOY_RAW=$(sha256sum /usr/local/bin/ares); DEPLOY_SHA=${DEPLOY_RAW%% *}",
+            "echo Deploy SHA: $DEPLOY_SHA",
+            "if [ \"$STAGED_SHA\" != \"$DEPLOY_SHA\" ]; then echo ERROR: deployed sha differs from staged staged=$STAGED_SHA deploy=$DEPLOY_SHA; exit 1; fi",
+            "rm -f /tmp/ares.staged",
+            "echo Deployed: && ls -lh /usr/local/bin/ares"
+          ]}' > "$PARAMS_FILE"
 
         CMD_ID=$(aws ssm send-command \
           --profile "{{.EC2_PROFILE}}" \
@@ -967,6 +1012,7 @@ tasks:
       SECRETS_ID: '{{.SECRETS_ID | default "ares/api-keys"}}'
       LLM_MODEL: '{{.LLM_MODEL | default ""}}'
       FLUSH_REDIS: '{{.FLUSH_REDIS | default "true"}}'
+      OPERATION_ID: '{{.OPERATION_ID | default ""}}'
     cmds:
       - |
         INSTANCE_ID=$(aws ec2 describe-instances \
@@ -982,7 +1028,11 @@ tasks:
           exit 1
         fi
 
-        OP_ID="op-$(date -u +%Y%m%d-%H%M%S)"
+        if [ -n "{{.OPERATION_ID}}" ]; then
+          OP_ID="{{.OPERATION_ID}}"
+        else
+          OP_ID="op-$(date -u +%Y%m%d-%H%M%S)"
+        fi
         echo -e "{{.INFO}} Operation ID: $OP_ID"
 
         # Build target IPs JSON array
@@ -1019,6 +1069,10 @@ tasks:
         ANTHROPIC_KEY=$(echo "$SECRETS" | jq -r .ANTHROPIC_API_KEY)
         GRAFANA_URL_VAL=$(echo "$SECRETS" | jq -r '.GRAFANA_URL // empty')
         GRAFANA_TOKEN_VAL=$(echo "$SECRETS" | jq -r '.GRAFANA_SERVICE_ACCOUNT_TOKEN // empty')
+        LOKI_URL_VAL=$(echo "$SECRETS" | jq -r '.LOKI_URL // empty')
+        if [ -z "$LOKI_URL_VAL" ]; then
+          LOKI_URL_VAL="{{.LOKI_URL}}"
+        fi
         DREADNODE_API_KEY=$(echo "$SECRETS" | jq -r '.DREADNODE_API_KEY // empty')
         OTEL_TRACES_ENDPOINT="{{.OTEL_TRACES_ENDPOINT}}"
 
@@ -1035,6 +1089,9 @@ tasks:
           if [ -n "$GRAFANA_TOKEN_VAL" ]; then
             ENV_FILE_CMD="$ENV_FILE_CMD; echo 'GRAFANA_SERVICE_ACCOUNT_TOKEN=${GRAFANA_TOKEN_VAL}' >> /etc/ares/env"
           fi
+        fi
+        if [ -n "$LOKI_URL_VAL" ]; then
+          ENV_FILE_CMD="$ENV_FILE_CMD; echo 'LOKI_URL=${LOKI_URL_VAL}' >> /etc/ares/env"
         fi
         ENV_FILE_CMD="$ENV_FILE_CMD; echo 'ARES_DEPLOYMENT={{.EC2_DEPLOYMENT}}' >> /etc/ares/env"
         ENV_FILE_CMD="$ENV_FILE_CMD; echo 'NATS_URL=nats://127.0.0.1:4222' >> /etc/ares/env"
@@ -1055,6 +1112,7 @@ tasks:
         export ANTHROPIC_API_KEY='${ANTHROPIC_KEY}'
         export GRAFANA_URL='${GRAFANA_URL_VAL}'
         export GRAFANA_SERVICE_ACCOUNT_TOKEN='${GRAFANA_TOKEN_VAL}'
+        export LOKI_URL='${LOKI_URL_VAL}'
         export ARES_REDIS_URL=redis://127.0.0.1:6379
         export NATS_URL=nats://127.0.0.1:4222
         {{- if .LLM_MODEL}}

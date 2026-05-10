@@ -142,16 +142,50 @@
   become: true
   changed_when: false
 
-- name: Install Ares Python dependencies
-  ansible.builtin.pip:
-    name: "{{ base_pip_packages }}"
-    state: present
-    executable: "{{ base_pip_executable }}"
-    extra_args: >-
-      {{ '--break-system-packages' if base_pip_break_required else '' }}
-      {{ '--ignore-installed' if ansible_facts['os_family'] == 'Debian' else '' }}
+# Run pip directly via shell so we can tee stdout+stderr to a log file. The
+# ansible.builtin.pip module captures output into a single `msg` field that
+# is too large for CloudWatch's per-event size limit on this dep tree
+# (rigging pulls 100+ transitives), so failures show up as a truncated stdout
+# with no stderr or rc visible. The tee'd log lets the next task surface the
+# real error.
+#
+# `--ignore-installed` is required: Kali ships several Python deps via apt
+# (python3-requests, python3-cryptography, python3-urllib3, python3-yaml).
+# apt-installed packages have no pip RECORD file, so pip's normal upgrade
+# path fails with `uninstall-no-record-file` ("The package was installed
+# by debian"). `--ignore-installed` skips uninstall and overwrites in place.
+- name: Install Ares Python dependencies (with full log)
+  ansible.builtin.shell:
+    cmd: |
+      set -o pipefail
+      {{ base_pip_executable }} install \
+        {{ '--break-system-packages' if base_pip_break_required else '' }} \
+        --ignore-installed \
+        --no-color \
+        {{ base_pip_packages | map('quote') | join(' ') }} \
+        2>&1 | tee /tmp/ares-pip-install.log
+    executable: /bin/bash
   become: true
+  register: base_pip_install_result
   changed_when: false
+  failed_when: false
+
+- name: Show pip install log tail on failure
+  ansible.builtin.command: tail -120 /tmp/ares-pip-install.log
+  become: true
+  register: base_pip_install_tail
+  changed_when: false
+  when: base_pip_install_result.rc != 0
+
+- name: Print pip install tail
+  ansible.builtin.debug:
+    var: base_pip_install_tail.stdout_lines
+  when: base_pip_install_result.rc != 0
+
+- name: Fail if pip install failed
+  ansible.builtin.fail:
+    msg: "pip install failed (rc={{ base_pip_install_result.rc }}); see tail above"
+  when: base_pip_install_result.rc != 0
 
 - name: Create Ares workspace directory
   ansible.builtin.file:

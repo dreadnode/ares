@@ -28,11 +28,14 @@ base_rust_install_script: "https://sh.rustup.rs"
 base_install_pipx: true
 
 # Ares Python dependencies (installed via pip)
+# Do NOT add `asyncio` here — Python 3.4+ ships asyncio in the stdlib. The
+# PyPI `asyncio` package is a 2015-era stub that ships an `asyncio.py` into
+# site-packages, shadowing the stdlib module and breaking any import of
+# asyncio (including the rest of this pip install run on Python 3.13).
 base_pip_packages:
   - python-dotenv
   - "rigging>=3.0"
   - pydantic
-  - asyncio
   - "aiohttp>=3.13.4"
   - "cryptography>=44.0.1"
   - "requests>=2.33.0"

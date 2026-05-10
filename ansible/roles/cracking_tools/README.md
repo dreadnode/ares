@@ -53,6 +53,17 @@ Install and configure password cracking tools for Ares agents
 | `cracking_tools_opencl_packages.1` | str | <code>opencl-headers</code> | No description |
 | `cracking_tools_opencl_packages.2` | str | <code>clinfo</code> | No description |
 | `cracking_tools_nvidia_opencl_icd` | bool | <code>False</code> | No description |
+| `cracking_tools_install_nvidia_driver` | bool | <code>False</code> | No description |
+| `cracking_tools_install_cuda_toolkit` | bool | <code>False</code> | No description |
+| `cracking_tools_nvidia_driver_packages` | list | <code>&#91;&#93;</code> | No description |
+| `cracking_tools_nvidia_driver_packages.0` | str | <code>linux-headers-cloud-amd64</code> | No description |
+| `cracking_tools_nvidia_driver_packages.1` | str | <code>dkms</code> | No description |
+| `cracking_tools_nvidia_driver_packages.2` | str | <code>firmware-misc-nonfree</code> | No description |
+| `cracking_tools_nvidia_driver_packages.3` | str | <code>nvidia-kernel-open-dkms</code> | No description |
+| `cracking_tools_nvidia_driver_packages.4` | str | <code>nvidia-driver-cuda</code> | No description |
+| `cracking_tools_nvidia_driver_packages.5` | str | <code>nvidia-opencl-icd</code> | No description |
+| `cracking_tools_nvidia_cuda_toolkit_packages` | list | <code>&#91;&#93;</code> | No description |
+| `cracking_tools_nvidia_cuda_toolkit_packages.0` | str | <code>nvidia-cuda-toolkit</code> | No description |
 | `cracking_tools_update_cache` | bool | <code>True</code> | No description |
 
 ## Tasks
@@ -94,9 +105,21 @@ Install and configure password cracking tools for Ares agents
 - **Set DEBIAN_FRONTEND to noninteractive** (ansible.builtin.lineinfile) - Conditional
 - **Update apt cache** (ansible.builtin.apt) - Conditional
 - **Create wordlist directory** (ansible.builtin.file)
+- **Add NVIDIA CUDA apt repository (Kali ships 550.x which fails on kernel 6.19+)** (ansible.builtin.shell) - Conditional
+- **Install kernel headers and DKMS prerequisites** (ansible.builtin.apt) - Conditional
+- **Install NVIDIA driver and OpenCL runtime (with full log)** (ansible.builtin.shell) - Conditional
+- **Show NVIDIA install log tail on failure** (ansible.builtin.command) - Conditional
+- **Print NVIDIA install tail** (ansible.builtin.debug) - Conditional
+- **Dump DKMS make.log on failure** (ansible.builtin.shell) - Conditional
+- **Print DKMS make.log** (ansible.builtin.debug) - Conditional
+- **Fail if NVIDIA install failed** (ansible.builtin.fail) - Conditional
+- **Install NVIDIA CUDA toolkit** (ansible.builtin.apt) - Conditional
 - **Install GPU support packages** (ansible.builtin.apt) - Conditional
 - **Create OpenCL vendors directory** (ansible.builtin.file) - Conditional
 - **Register NVIDIA OpenCL ICD** (ansible.builtin.copy) - Conditional
+- **Verify NVIDIA driver (non-fatal — no GPU on builder hosts)** (ansible.builtin.command) - Conditional
+- **Verify OpenCL platform discovery (non-fatal)** (ansible.builtin.command) - Conditional
+- **Show GPU/OpenCL detection summary** (ansible.builtin.debug) - Conditional
 - **Ensure libgcc runtime is present for hashcat** (block) - Conditional
 - **Install primary libgcc package** (ansible.builtin.apt)
 - **Ensure libgcc static archive is present for hashcat** (block) - Conditional

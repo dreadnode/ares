@@ -32,7 +32,7 @@
     alloy_deployment_name: "goad-attack-box"
     alloy_server_id: ""
     alloy_instance_id: ""
-    alloy_loki_endpoint: "{{ alloy_loki_endpoint }}"
+    alloy_loki_endpoint: "{{ lookup('env', 'ALLOY_LOKI_ENDPOINT') | default('http://localhost:3100/loki/api/v1/push', true) }}"
     alloy_version: "1.10.1"
 
     # Python version
@@ -45,6 +45,12 @@
     cracking_tools_gpu_support: true
     cracking_tools_hashcat_from_source: true
     cracking_tools_nvidia_opencl_icd: true
+    # Bake the kernel-mode NVIDIA driver + CUDA into the image. Without these,
+    # hashcat on g4dn (T4) reports "OpenCL platform not found" and falls back
+    # to john-on-CPU, which is too slow to feed credential cracks back into
+    # the orchestrator within an op's budget.
+    cracking_tools_install_nvidia_driver: true
+    cracking_tools_install_cuda_toolkit: true
     cracking_tools_wordlists:
       - rockyou
       - seclists_passwords
@@ -113,9 +119,14 @@
       changed_when: true
 
   roles:
-    # AWS infrastructure agents
+    # AWS infrastructure agents — skipped on non-AWS clouds because they
+    # require the EC2 instance metadata service (cloudwatch-agent's
+    # `fetch-config -m ec2` hits 169.254.169.254 and aborts the build
+    # on Azure).
     - role: dreadnode.nimbus_range.aws_ssm_agent
+      when: cloud_provider | default('aws') == 'aws'
     - role: dreadnode.nimbus_range.aws_cloudwatch_agent
+      when: cloud_provider | default('aws') == 'aws'
 
     # Base Ares requirements
     - role: dreadnode.nimbus_range.base

@@ -868,7 +868,15 @@ tasks:
     desc: "Cross-compile Rust binaries for Linux (K8s pods)"
     silent: true
     vars:
-      RUST_TARGET: '{{.RUST_TARGET | default "x86_64-unknown-linux-gnu"}}'
+      DETECTED_ARCH:
+        sh: |
+          arch=$(kubectl get nodes -n {{.K8S_NAMESPACE}} -o jsonpath='{.items[0].status.nodeInfo.architecture}' 2>/dev/null || true)
+          case "$arch" in
+            arm64) echo "aarch64-unknown-linux-gnu" ;;
+            amd64) echo "x86_64-unknown-linux-gnu" ;;
+            *)     echo "x86_64-unknown-linux-gnu" ;;
+          esac
+      RUST_TARGET: '{{.RUST_TARGET | default .DETECTED_ARCH}}'
       MAX_OPEN_FILES: '{{.MAX_OPEN_FILES | default "8192"}}'
       CARGO_BUILD_JOBS: '{{.CARGO_BUILD_JOBS | default "4"}}'
     cmds:
@@ -922,7 +930,15 @@ tasks:
     desc: "Check if local Rust binaries match remote pods (usage: task remote:check [TEAM=red|blue|all])"
     silent: true
     vars:
-      RUST_TARGET: '{{.RUST_TARGET | default "x86_64-unknown-linux-gnu"}}'
+      DETECTED_ARCH:
+        sh: |
+          arch=$(kubectl get nodes -n {{.K8S_NAMESPACE}} -o jsonpath='{.items[0].status.nodeInfo.architecture}' 2>/dev/null || true)
+          case "$arch" in
+            arm64) echo "aarch64-unknown-linux-gnu" ;;
+            amd64) echo "x86_64-unknown-linux-gnu" ;;
+            *)     echo "x86_64-unknown-linux-gnu" ;;
+          esac
+      RUST_TARGET: '{{.RUST_TARGET | default .DETECTED_ARCH}}'
       BIN_DIR: 'target/{{.RUST_TARGET}}/release'
       REMOTE_BIN_DIR: '/usr/local/bin'
     cmds:
@@ -1050,7 +1066,15 @@ tasks:
     desc: "Deploy Rust binaries to K8s pods (usage: task remote:rust:deploy [TEAM=red|blue|all])"
     silent: true
     vars:
-      RUST_TARGET: '{{.RUST_TARGET | default "x86_64-unknown-linux-gnu"}}'
+      DETECTED_ARCH:
+        sh: |
+          arch=$(kubectl get nodes -n {{.K8S_NAMESPACE}} -o jsonpath='{.items[0].status.nodeInfo.architecture}' 2>/dev/null || true)
+          case "$arch" in
+            arm64) echo "aarch64-unknown-linux-gnu" ;;
+            amd64) echo "x86_64-unknown-linux-gnu" ;;
+            *)     echo "x86_64-unknown-linux-gnu" ;;
+          esac
+      RUST_TARGET: '{{.RUST_TARGET | default .DETECTED_ARCH}}'
       BIN_DIR: 'target/{{.RUST_TARGET}}/release'
       REMOTE_BIN_DIR: '/usr/local/bin'
     preconditions:

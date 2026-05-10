@@ -1,6 +1,11 @@
 #!/bin/bash
-# Launch ares orchestrator with environment variables
-# Placeholders are substituted by the calling task via envsubst/sed
+# Launch ares orchestrator in its own systemd transient unit so it (and any
+# tool subprocesses it spawns) gets its own cgroup, separate from
+# amazon-ssm-agent.service. Otherwise everything launched by SSM
+# RunShellScript inherits SSM's cgroup and competes with it for memory —
+# resulting in CONSTRAINT_MEMCG OOM-kills regardless of OOMScoreAdjust.
+set -euo pipefail
+
 export ARES_REDIS_URL=redis://127.0.0.1:6379
 export NATS_URL=nats://127.0.0.1:4222
 export RUST_LOG=info
@@ -14,6 +19,7 @@ export DREADNODE_WORKSPACE='__DREADNODE_WORKSPACE__'
 export DREADNODE_PROJECT='__DREADNODE_PROJECT__'
 export GRAFANA_SERVICE_ACCOUNT_TOKEN='__GRAFANA_TOKEN__'
 export GRAFANA_URL='__GRAFANA_URL__'
+export LOKI_URL='__LOKI_URL__'
 _llm_model='__ARES_LLM_MODEL__'
 if [ -n "$_llm_model" ] && [ "$_llm_model" = "${_llm_model#__}" ]; then
   export ARES_LLM_MODEL="$_llm_model"
@@ -26,13 +32,57 @@ if [ -n "$_blue_model" ] && [ "$_blue_model" = "${_blue_model#__}" ]; then
 fi
 export ARES_DEPLOYMENT='__ARES_DEPLOYMENT__'
 export ARES_CONFIG=/etc/ares/config.yaml
+export ARES_MAX_CONCURRENT_TASKS=8
 _otel_endpoint='__OTEL_TRACES_ENDPOINT__'
 if [ -n "$_otel_endpoint" ] && [ "$_otel_endpoint" = "${_otel_endpoint#__}" ]; then
   export OTEL_EXPORTER_OTLP_TRACES_ENDPOINT="$_otel_endpoint"
   export OTEL_EXPORTER_OTLP_PROTOCOL='http/protobuf'
   export OTEL_RESOURCE_ATTRIBUTES='deployment.environment=staging,attack.team=red'
 fi
+
+mkdir -p /var/log/ares
+
+# Stop any prior orchestrator (transient unit or stray nohup process).
+systemctl stop ares-orchestrator.service 2>/dev/null || true
+systemctl reset-failed ares-orchestrator.service 2>/dev/null || true
 pkill -f 'ares orchestrator' 2>/dev/null || true
 sleep 1
-nohup /usr/local/bin/ares orchestrator >/var/log/ares/orchestrator.log 2>&1 &
-echo "Orchestrator started (PID: $!)"
+
+# Spawn as a transient systemd service in system-ares.slice. --setenv=NAME
+# (no value) inherits from current environment, preserving quoting that
+# would otherwise be mangled by EnvironmentFile parsing of JSON payloads.
+exec systemd-run \
+  --unit=ares-orchestrator.service \
+  --slice=system-ares.slice \
+  --description="Ares Orchestrator (transient)" \
+  --collect \
+  --setenv=ARES_REDIS_URL \
+  --setenv=RUST_LOG \
+  --setenv=ARES_OPERATION_ID \
+  --setenv=OPENAI_API_KEY \
+  --setenv=ANTHROPIC_API_KEY \
+  --setenv=DREADNODE_API_KEY \
+  --setenv=DREADNODE_SERVER_URL \
+  --setenv=DREADNODE_ORGANIZATION \
+  --setenv=DREADNODE_WORKSPACE \
+  --setenv=DREADNODE_PROJECT \
+  --setenv=GRAFANA_SERVICE_ACCOUNT_TOKEN \
+  --setenv=GRAFANA_URL \
+  --setenv=LOKI_URL \
+  --setenv=ARES_LLM_MODEL \
+  --setenv=ARES_TOOL_DISPATCH \
+  --setenv=ARES_BLUE_ENABLED \
+  --setenv=ARES_BLUE_LLM_MODEL \
+  --setenv=ARES_DEPLOYMENT \
+  --setenv=ARES_CONFIG \
+  --setenv=ARES_MAX_CONCURRENT_TASKS \
+  --setenv=OTEL_EXPORTER_OTLP_TRACES_ENDPOINT \
+  --setenv=OTEL_EXPORTER_OTLP_PROTOCOL \
+  --setenv=OTEL_RESOURCE_ATTRIBUTES \
+  --property=StandardOutput=append:/var/log/ares/orchestrator.log \
+  --property=StandardError=append:/var/log/ares/orchestrator.log \
+  --property=OOMScoreAdjust=-500 \
+  --property=TasksMax=4096 \
+  --property=MemoryHigh=8G \
+  --property=MemoryMax=10G \
+  /usr/local/bin/ares orchestrator

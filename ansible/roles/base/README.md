@@ -34,10 +34,9 @@ Base requirements for Ares AI agents
 | `base_pip_packages.0` | str | <code>python-dotenv</code> | No description |
 | `base_pip_packages.1` | str | <code>rigging>=3.0</code> | No description |
 | `base_pip_packages.2` | str | <code>pydantic</code> | No description |
-| `base_pip_packages.3` | str | <code>asyncio</code> | No description |
-| `base_pip_packages.4` | str | <code>aiohttp>=3.13.4</code> | No description |
-| `base_pip_packages.5` | str | <code>cryptography>=44.0.1</code> | No description |
-| `base_pip_packages.6` | str | <code>requests>=2.33.0</code> | No description |
+| `base_pip_packages.3` | str | <code>aiohttp>=3.13.4</code> | No description |
+| `base_pip_packages.4` | str | <code>cryptography>=44.0.1</code> | No description |
+| `base_pip_packages.5` | str | <code>requests>=2.33.0</code> | No description |
 | `base_pip_externally_managed` | bool | <code>False</code> | No description |
 | `base_pip_break_required` | bool | <code>False</code> | No description |
 | `base_system_packages` | list | <code>&#91;&#93;</code> | No description |
@@ -140,7 +139,10 @@ Base requirements for Ares AI agents
 - **Fail when break-system-packages is required but disabled** (ansible.builtin.fail) - Conditional
 - **Fail when break-system-packages is required but unsupported by pip** (ansible.builtin.fail) - Conditional
 - **Upgrade pip to latest (CVE fixes)** (ansible.builtin.command)
-- **Install Ares Python dependencies** (ansible.builtin.pip)
+- **Install Ares Python dependencies (with full log)** (ansible.builtin.shell)
+- **Show pip install log tail on failure** (ansible.builtin.command) - Conditional
+- **Print pip install tail** (ansible.builtin.debug) - Conditional
+- **Fail if pip install failed** (ansible.builtin.fail) - Conditional
 - **Create Ares workspace directory** (ansible.builtin.file) - Conditional
 
 ### main.yml

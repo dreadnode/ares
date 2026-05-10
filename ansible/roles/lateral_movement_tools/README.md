@@ -118,7 +118,7 @@ Install and configure lateral movement and credential extraction tools for Ares 
 - **Create symlink for ffitarget.h in standard include path** (ansible.builtin.file) - Conditional
 - **Install rubyzip gem for evil-winrm dependency** (community.general.gem) - Conditional
 - **Install evil-winrm gem (Ubuntu only, Kali uses apt)** (community.general.gem) - Conditional
-- **Update vulnerable ruby gem dependencies (net-imap, resolv, rexml, uri, zlib)** (ansible.builtin.command) - Conditional
+- **Update vulnerable ruby gem dependencies (Ubuntu only - Kali patches via apt)** (ansible.builtin.command) - Conditional
 - **Install pth-toolkit (Kali only - may not be available in all repos)** (ansible.builtin.apt) - Conditional
 - **Warn if pth-toolkit installation failed** (ansible.builtin.debug) - Conditional
 - **Install Impacket from source for lateral movement tools** (ansible.builtin.include_tasks) - Conditional
