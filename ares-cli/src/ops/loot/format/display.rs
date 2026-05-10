@@ -79,14 +79,32 @@ pub(super) fn print_loot_human(
 
     if state.has_domain_admin || state.has_golden_ticket {
         let mut lines = Vec::new();
+        let total_domains = domains.len();
         if state.has_domain_admin {
-            lines.push("\u{2605} DOMAIN ADMIN ACHIEVED".to_string());
+            let da_count = achievements.values().filter(|a| a.has_da).count();
+            if total_domains > 0 {
+                lines.push(format!(
+                    "\u{2605} DOMAIN ADMIN ACHIEVED ({da_count}/{total_domains} domains)"
+                ));
+            } else {
+                lines.push("\u{2605} DOMAIN ADMIN ACHIEVED".to_string());
+            }
             if let Some(path) = &state.domain_admin_path {
                 lines.push(format!("  path: {path}"));
             }
         }
         if state.has_golden_ticket {
-            lines.push("\u{2605} GOLDEN TICKET OBTAINED".to_string());
+            let gt_count = achievements
+                .values()
+                .filter(|a| a.has_golden_ticket)
+                .count();
+            if total_domains > 0 {
+                lines.push(format!(
+                    "\u{2605} GOLDEN TICKET OBTAINED ({gt_count}/{total_domains} domains)"
+                ));
+            } else {
+                lines.push("\u{2605} GOLDEN TICKET OBTAINED".to_string());
+            }
         }
         let inner_width = lines.iter().map(|l| l.len()).max().unwrap_or(0) + 2;
         println!("\u{250c}{}\u{2510}", "\u{2500}".repeat(inner_width));

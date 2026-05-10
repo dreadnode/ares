@@ -172,7 +172,10 @@ mod tests {
     #[test]
     fn drops_system_service_accounts() {
         assert!(!is_reportable_credential(&cred("ssm-user", "")));
-        assert!(!is_reportable_credential(&cred("ansible", "fabrikam.local")));
+        assert!(!is_reportable_credential(&cred(
+            "ansible",
+            "fabrikam.local"
+        )));
     }
 
     #[test]

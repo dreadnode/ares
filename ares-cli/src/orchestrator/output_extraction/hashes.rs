@@ -61,8 +61,7 @@ pub fn extract_hashes(output: &str, default_domain: &str) -> Vec<Hash> {
     // intended realm and dreadgoad falsely promotes it to "compromised".
     // Take the most-common prefix; if none, fall back to default_domain.
     let inferred_domain: Option<String> = {
-        let mut counts: std::collections::HashMap<String, u32> =
-            std::collections::HashMap::new();
+        let mut counts: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
         for line in &unwrapped {
             if let Some(caps) = RE_NTLM_DOMAIN.captures(line) {
                 let dom = caps.get(1).unwrap().as_str().trim().to_string();
