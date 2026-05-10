@@ -68,6 +68,17 @@
       automerge: true,
       automergeType: 'pr',
     },
+    {
+      description: 'Group opentelemetry-rust monorepo with tracing-opentelemetry so version bumps land together (tracing-opentelemetry pins a specific opentelemetry minor version, so they must update atomically)',
+      matchPackageNames: [
+        'opentelemetry',
+        'opentelemetry_sdk',
+        'opentelemetry-otlp',
+        'opentelemetry-semantic-conventions',
+        'tracing-opentelemetry',
+      ],
+      groupName: 'opentelemetry',
+    },
   ],
   customManagers: [
     {
