@@ -663,7 +663,7 @@ mod tests {
 
     #[test]
     fn discoveries_or_none_keeps_non_empty_object() {
-        let v = serde_json::json!({"hosts": [{"ip": "10.0.0.1"}]});
+        let v = serde_json::json!({"hosts": [{"ip": "192.168.58.10"}]});
         let kept = discoveries_or_none(v.clone());
         assert!(kept.is_some());
         assert_eq!(kept.unwrap(), v);
@@ -711,7 +711,7 @@ mod tests {
 
     #[test]
     fn build_success_response_carries_discoveries_when_present() {
-        let disc = serde_json::json!({"hosts": [{"ip": "10.0.0.1"}]});
+        let disc = serde_json::json!({"hosts": [{"ip": "192.168.58.10"}]});
         let resp = build_success_response(
             "call-4",
             true,
@@ -765,7 +765,7 @@ mod tests {
     #[test]
     fn count_discovery_entries_returns_per_type_counts() {
         let discoveries = serde_json::json!({
-            "hosts": [{"ip": "10.0.0.1"}, {"ip": "10.0.0.2"}],
+            "hosts": [{"ip": "192.168.58.10"}, {"ip": "192.168.58.11"}],
             "credentials": [{"username": "alice"}],
         });
         let mut entries = count_discovery_entries(&discoveries);

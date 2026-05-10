@@ -256,13 +256,13 @@ mod tests {
     fn extract_users_ignores_workgroup_domain_context() {
         // SMB banner from a non-domain-joined host (the attacker's own kali
         // box) appears in the same enumeration output as a real target. The
-        // workgroup `(domain:WIN-MVBXBX7JBS6.59HV.LOCAL)` must NOT overwrite
+        // workgroup `(domain:WIN-ABCDEFGHIJK.WGRP.LOCAL)` must NOT overwrite
         // `current_domain`, so the user extracted on the next line stays
         // attributed to the operator's intended `default_domain` rather than
         // a phantom AD realm.
         let output = "\
-SMB  192.168.58.178  445  WIN-MVBXBX7JBS6  [*] Windows 10 (name:WIN-MVBXBX7JBS6) (domain:WIN-MVBXBX7JBS6.59HV.LOCAL) (signing:False)
-SMB  192.168.58.178  445  WIN-MVBXBX7JBS6  [+] user:[svc_local]";
+SMB  192.168.58.178  445  WIN-ABCDEFGHIJK  [*] Windows 10 (name:WIN-ABCDEFGHIJK) (domain:WIN-ABCDEFGHIJK.WGRP.LOCAL) (signing:False)
+SMB  192.168.58.178  445  WIN-ABCDEFGHIJK  [+] user:[svc_local]";
         let users = extract_users(output, "contoso.local");
         let svc = users
             .iter()
@@ -289,8 +289,8 @@ SMB  192.168.58.10  445  DC01  [+] user:[alice]";
     #[test]
     fn is_workgroup_domain_detects_self_named() {
         assert!(is_workgroup_domain(
-            "WIN-MVBXBX7JBS6",
-            "WIN-MVBXBX7JBS6.59HV.LOCAL"
+            "WIN-ABCDEFGHIJK",
+            "WIN-ABCDEFGHIJK.WGRP.LOCAL"
         ));
         assert!(is_workgroup_domain("anything", "WORKGROUP"));
         assert!(!is_workgroup_domain("DC01", "contoso.local"));

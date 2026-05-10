@@ -12,7 +12,7 @@ static RE_DOMAIN: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\(domain:([^)]
 /// True when `(name:X) (domain:Y)` from an SMB banner is a workgroup or
 /// self-named pseudo-domain rather than a real Kerberos realm. Non-domain-joined
 /// Windows hosts report their workgroup in the SMB `(domain:...)` field — e.g.
-/// stock Windows installs return `(name:WIN-XXXX) (domain:WIN-XXXX.59HV.LOCAL)`
+/// stock Windows installs return `(name:WIN-XXXX) (domain:WIN-XXXX.WGRP.LOCAL)`
 /// or `(domain:WORKGROUP)`. Treating these as AD domains poisons downstream
 /// credential attribution (e.g. tagging local SAM hashes with the workgroup
 /// string and inferring a phantom "compromised domain").
@@ -247,14 +247,14 @@ SMB  192.168.58.20  445  SRV01  [*] Windows Server 2016 Build 14393 x64 (name:SR
     #[test]
     fn extract_fqdn_skips_workgroup_self_named() {
         // Non-domain-joined Windows: SMB negotiation reports the host's own
-        // computer name as the (domain:...) value (here `WIN-MVBXBX7JBS6` is
+        // computer name as the (domain:...) value (here `WIN-ABCDEFGHIJK` is
         // both the (name:...) and the first label of the auto-generated
         // workgroup FQDN). Treating that as a Kerberos realm is what creates
         // phantom "compromised domain" entries downstream.
-        let line = "SMB  192.168.58.178  445  WIN-MVBXBX7JBS6  [*] Windows 10 Build 19045 x64 (name:WIN-MVBXBX7JBS6) (domain:WIN-MVBXBX7JBS6.59HV.LOCAL) (signing:False)";
+        let line = "SMB  192.168.58.178  445  WIN-ABCDEFGHIJK  [*] Windows 10 Build 19045 x64 (name:WIN-ABCDEFGHIJK) (domain:WIN-ABCDEFGHIJK.WGRP.LOCAL) (signing:False)";
         assert_eq!(
-            extract_fqdn_from_line(line, "WIN-MVBXBX7JBS6"),
-            "WIN-MVBXBX7JBS6"
+            extract_fqdn_from_line(line, "WIN-ABCDEFGHIJK"),
+            "WIN-ABCDEFGHIJK"
         );
     }
 
@@ -267,8 +267,8 @@ SMB  192.168.58.20  445  SRV01  [*] Windows Server 2016 Build 14393 x64 (name:SR
     #[test]
     fn is_workgroup_domain_detects_self_named() {
         assert!(is_workgroup_domain(
-            "WIN-MVBXBX7JBS6",
-            "WIN-MVBXBX7JBS6.59HV.LOCAL"
+            "WIN-ABCDEFGHIJK",
+            "WIN-ABCDEFGHIJK.WGRP.LOCAL"
         ));
         assert!(is_workgroup_domain("WORKGROUP", "WORKGROUP"));
     }

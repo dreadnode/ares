@@ -139,8 +139,8 @@ mod tests {
         // Even with a domain attached — secretsdump tags machine accounts to
         // their host's FQDN, which is how the cross-domain duplicate appears.
         assert!(!is_reportable_hash(&hash(
-            "WINTERFELL$",
-            "north.sevenkingdoms.local",
+            "DC02$",
+            "child.contoso.local",
             None
         )));
     }
@@ -172,7 +172,7 @@ mod tests {
     #[test]
     fn drops_system_service_accounts() {
         assert!(!is_reportable_credential(&cred("ssm-user", "")));
-        assert!(!is_reportable_credential(&cred("ansible", "essos.local")));
+        assert!(!is_reportable_credential(&cred("ansible", "fabrikam.local")));
     }
 
     #[test]
@@ -182,10 +182,10 @@ mod tests {
         // twice in the loot report.
         assert!(!is_reportable_hash(&hash(
             "sql_svc",
-            "essos.local",
+            "fabrikam.local",
             Some("CrackedPW!")
         )));
-        assert!(is_reportable_hash(&hash("sql_svc", "essos.local", None)));
+        assert!(is_reportable_hash(&hash("sql_svc", "fabrikam.local", None)));
     }
 
     #[test]

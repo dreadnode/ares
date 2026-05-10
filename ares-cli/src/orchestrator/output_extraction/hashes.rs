@@ -51,6 +51,29 @@ pub fn extract_hashes(output: &str, default_domain: &str) -> Vec<Hash> {
         i += 1;
     }
 
+    // Pre-scan: infer the dump's actual realm from `DOMAIN\user:rid:lm:nt:::`
+    // rows in the same output. The task's `default_domain` is *intent* (what
+    // the orchestrator aimed at); domain-prefixed rows are *evidence* of what
+    // was really dumped. Trusting `default_domain` over the prefixed evidence
+    // creates phantom krbtgt entries whenever a credential_access task
+    // dispatched at e.g. fabrikam.local actually re-dumped a different realm's
+    // NTDS — every unprefixed `krbtgt:502:...:::` then gets attributed to the
+    // intended realm and dreadgoad falsely promotes it to "compromised".
+    // Take the most-common prefix; if none, fall back to default_domain.
+    let inferred_domain: Option<String> = {
+        let mut counts: std::collections::HashMap<String, u32> =
+            std::collections::HashMap::new();
+        for line in &unwrapped {
+            if let Some(caps) = RE_NTLM_DOMAIN.captures(line) {
+                let dom = caps.get(1).unwrap().as_str().trim().to_string();
+                if !dom.is_empty() {
+                    *counts.entry(dom).or_insert(0) += 1;
+                }
+            }
+        }
+        counts.into_iter().max_by_key(|(_, c)| *c).map(|(d, _)| d)
+    };
+
     for line in &unwrapped {
         // Priority: TGS → AS-REP → NTLM (first match wins)
 
@@ -145,8 +168,14 @@ pub fn extract_hashes(output: &str, default_domain: &str) -> Vec<Hash> {
             // with the AD `default_domain` or they masquerade as domain
             // accounts and collide cross-domain. krbtgt (RID 502) is excluded
             // because it's always an AD account.
+            //
+            // Domain attribution preference: dump-evidence (`inferred_domain`
+            // from any DOMAIN-prefixed rows in the same output) outranks
+            // task-intent (`default_domain`). See pre-scan above.
             let domain = if is_well_known_local_sam(username, rid) {
                 String::new()
+            } else if let Some(ref inferred) = inferred_domain {
+                inferred.clone()
             } else {
                 default_domain.to_string()
             };
@@ -421,5 +450,67 @@ WDAGUtilityAccount:504:aad3b435b51404eeaad3b435b51404ee:1234567890abcdef12345678
     #[test]
     fn extract_cracked_passwords_empty() {
         assert!(extract_cracked_passwords("", "CONTOSO").is_empty());
+    }
+
+    #[test]
+    fn unprefixed_krbtgt_inherits_dump_realm_not_default_domain() {
+        // Real-world bug: a credential_access task dispatched against
+        // `fabrikam.local` actually re-dumped a different DC's NTDS. The dump
+        // output has unprefixed `krbtgt:502:...` alongside
+        // `CHILD.CONTOSO.LOCAL\alice:...:::` rows.
+        // Pre-fix: krbtgt got tagged with `fabrikam.local` (task intent),
+        // creating a phantom krbtgt entry that flipped dreadgoad's "domain
+        // owned" for fabrikam. Post-fix: the prefixed rows in the same output
+        // are evidence the dump came from `CHILD.CONTOSO.LOCAL`, so the
+        // unprefixed krbtgt inherits THAT realm.
+        let output = "\
+[*] Dumping the NTDS, this could take a while
+Administrator:500:aad3b435b51404eeaad3b435b51404ee:2e993405ab82e4454afc9c9bb0939a25:::
+Guest:501:aad3b435b51404eeaad3b435b51404ee:31d6cfe0d16ae931b73c59d7e0c089c0:::
+krbtgt:502:aad3b435b51404eeaad3b435b51404ee:8c6d94541dbc90f085e86828428d2cbf:::
+CHILD.CONTOSO.LOCAL\\alice:1119:aad3b435b51404eeaad3b435b51404ee:4f622f4cd4284a887228940e2ff4e709:::
+CHILD.CONTOSO.LOCAL\\bob:1106:aad3b435b51404eeaad3b435b51404ee:d977b98c6c9282c5c478be1d97b237b8:::";
+        let hashes = extract_hashes(output, "fabrikam.local");
+        let krbtgt = hashes
+            .iter()
+            .find(|h| h.username == "krbtgt")
+            .expect("krbtgt should be extracted");
+        assert_eq!(
+            krbtgt.domain, "CHILD.CONTOSO.LOCAL",
+            "krbtgt must inherit the realm proven by the prefixed rows, NOT the task's default_domain"
+        );
+        assert_ne!(
+            krbtgt.domain, "fabrikam.local",
+            "krbtgt must NOT be tagged with the task's intent domain when the dump is from another realm"
+        );
+    }
+
+    #[test]
+    fn unprefixed_krbtgt_uses_default_domain_when_no_prefixed_rows() {
+        // Sanity: when there are NO domain-prefixed rows, fall back to
+        // default_domain (existing behavior — covers older impacket dumps,
+        // `-just-dc-user krbtgt`, etc.).
+        let output = "\
+Administrator:500:aad3b435b51404eeaad3b435b51404ee:e19ccf75ee54e06b06a5907af13cef42:::
+krbtgt:502:aad3b435b51404eeaad3b435b51404ee:8c6d94541dbc90f085e86828428d2cbf:::";
+        let hashes = extract_hashes(output, "contoso.local");
+        let krbtgt = hashes.iter().find(|h| h.username == "krbtgt").unwrap();
+        assert_eq!(krbtgt.domain, "contoso.local");
+    }
+
+    #[test]
+    fn inferred_domain_picks_most_common_prefix() {
+        // When multiple distinct prefixes appear, prefer the most common —
+        // that's the realm being dumped; the others are likely trust account
+        // references or stale rows from other contexts.
+        let output = "\
+CHILD.CONTOSO.LOCAL\\alice:1119:aad3b435b51404eeaad3b435b51404ee:4f622f4cd4284a887228940e2ff4e709:::
+CHILD.CONTOSO.LOCAL\\bob:1106:aad3b435b51404eeaad3b435b51404ee:d977b98c6c9282c5c478be1d97b237b8:::
+CHILD.CONTOSO.LOCAL\\carol:1107:aad3b435b51404eeaad3b435b51404ee:cba36eccfd9d949c73bc73715364aff5:::
+CONTOSO\\Administrator:500:aad3b435b51404eeaad3b435b51404ee:abcdef0011223344556677889900aabb:::
+krbtgt:502:aad3b435b51404eeaad3b435b51404ee:8c6d94541dbc90f085e86828428d2cbf:::";
+        let hashes = extract_hashes(output, "fabrikam.local");
+        let krbtgt = hashes.iter().find(|h| h.username == "krbtgt").unwrap();
+        assert_eq!(krbtgt.domain, "CHILD.CONTOSO.LOCAL");
     }
 }

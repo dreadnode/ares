@@ -536,7 +536,7 @@ fn resolve_domain_fqdn(domain: &str, netbios_to_fqdn: &HashMap<String, String>) 
 ///
 /// Upstream parsers (`smb.rs`, `output_extraction::users`) drop these at
 /// ingest, but old loot already in state may still carry them. Without this
-/// filter, a stray `krbtgt@win-xxx.59hv.local` row would flip the pseudo-domain
+/// filter, a stray `krbtgt@win-xxx.wgrp.local` row would flip the pseudo-domain
 /// to "compromised" in the achievements rollup.
 ///
 /// Heuristic operates on a single domain string (no `(name:...)` context here):
@@ -1119,11 +1119,11 @@ mod tests {
     fn build_domain_achievements_skips_workgroup_pseudo_domain() {
         // Old loot row from before the upstream parsers learned to drop
         // workgroup pseudo-domains: an attacker-box krbtgt entry tagged with
-        // the auto-generated WIN-XXX...59hv.local string. The achievements
+        // the auto-generated WIN-XXX...wgrp.local string. The achievements
         // rollup must NOT promote it to a "compromised domain" (DA).
         let state = empty_state();
         let hashes = vec![
-            make_hash("krbtgt", "win-mvbxbx7jbs6.59hv.local", "ntlm"),
+            make_hash("krbtgt", "win-abcdefghijk.wgrp.local", "ntlm"),
             make_hash("Administrator", "WORKGROUP", "ntlm"),
             // Real domain alongside the polluted ones must still come through.
             make_hash("krbtgt", "contoso.local", "ntlm"),
@@ -1131,7 +1131,7 @@ mod tests {
         let credentials = vec![make_credential("admin", "win-abcdefghijk.local", true)];
 
         let achievements = build_domain_achievements(&state, &hashes, &credentials);
-        assert!(!achievements.contains_key("win-mvbxbx7jbs6.59hv.local"));
+        assert!(!achievements.contains_key("win-abcdefghijk.wgrp.local"));
         assert!(!achievements.contains_key("workgroup"));
         assert!(!achievements.contains_key("win-abcdefghijk.local"));
         assert!(achievements.get("contoso.local").unwrap().has_da);
@@ -1140,7 +1140,7 @@ mod tests {
     #[test]
     fn looks_like_workgroup_pseudo_domain_detects_win_prefix() {
         assert!(looks_like_workgroup_pseudo_domain(
-            "win-mvbxbx7jbs6.59hv.local"
+            "win-abcdefghijk.wgrp.local"
         ));
         assert!(looks_like_workgroup_pseudo_domain("WIN-ABCDEFGHIJK.local"));
         assert!(looks_like_workgroup_pseudo_domain("WORKGROUP"));

@@ -72,8 +72,9 @@ operation:
 #### `fast` (default)
 
 Shortest path to Domain Admin. Prioritises secretsdump and trust escalation.
-This is what produces the deterministic samwell -> jeor -> robb -> secretsdump
--> trust key -> MSSQL -> Golden Ticket chain in DreadGOAD.
+This is what produces the deterministic kerberoast → secretsdump → trust key →
+MSSQL → Golden Ticket chain. (For the concrete chain shape against the GOAD
+lab, see `docs/goad-checklist.md`.)
 
 | Technique | Weight | Effect |
 |-----------|--------|--------|
@@ -319,7 +320,7 @@ These can also be passed in the JSON operation payload:
 {
   "operation_id": "op-20260421",
   "target_domain": "contoso.local",
-  "target_ips": ["10.0.0.1"],
+  "target_ips": ["192.168.58.10"],
   "strategy": "comprehensive",
   "technique_weights": {"esc1": 1, "secretsdump": 8},
   "exclude_techniques": ["password_spray"],

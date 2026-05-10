@@ -289,7 +289,7 @@ mod tests {
     #[test]
     fn build_task_result_success_merges_discoveries_into_payload() {
         let discoveries = serde_json::json!({
-            "hosts": [{"ip": "10.0.0.1"}],
+            "hosts": [{"ip": "192.168.58.10"}],
             "credentials": [{"username": "alice"}],
         });
         let ar = AgentResult {
@@ -430,14 +430,14 @@ mod tests {
     #[test]
     fn build_running_status_extra_includes_all_metadata() {
         let cfg = worker_config_for_test();
-        let payload = serde_json::json!({"target": "10.0.0.1"});
+        let payload = serde_json::json!({"target": "192.168.58.10"});
         let extra = build_running_status_extra(&cfg, "recon", &payload, "2026-04-29T20:00:00Z");
         assert_eq!(extra["operation_id"], "op-2026");
         assert_eq!(extra["role"], "recon");
         assert_eq!(extra["agent_name"], "ares-recon-0");
         assert_eq!(extra["pod_name"], "pod-0");
         assert_eq!(extra["task_type"], "recon");
-        assert_eq!(extra["payload"]["target"], "10.0.0.1");
+        assert_eq!(extra["payload"]["target"], "192.168.58.10");
         assert_eq!(extra["started_at"], "2026-04-29T20:00:00Z");
         assert!(extra.get("ended_at").is_none());
     }

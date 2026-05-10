@@ -140,7 +140,7 @@ fn extract_credential_key_uses_unknown_when_domain_missing() {
     let call = ares_llm::ToolCall {
         id: "1".into(),
         name: "secretsdump".into(),
-        arguments: serde_json::json!({"username": "admin", "target": "10.0.0.1"}),
+        arguments: serde_json::json!({"username": "admin", "target": "192.168.58.10"}),
     };
     let key = extract_credential_key(&call).expect("key extracted");
     assert_eq!(key, "admin@unknown");
@@ -276,12 +276,12 @@ fn tool_exec_response_with_discoveries_field() {
         "call_id":"c",
         "output":"out",
         "error":null,
-        "discoveries":{"hosts":[{"ip":"10.0.0.1"}]}
+        "discoveries":{"hosts":[{"ip":"192.168.58.10"}]}
     }"#;
     let resp: ToolExecResponse = serde_json::from_str(json).unwrap();
     assert!(resp.discoveries.is_some());
     let disc = resp.discoveries.unwrap();
-    assert_eq!(disc["hosts"][0]["ip"], "10.0.0.1");
+    assert_eq!(disc["hosts"][0]["ip"], "192.168.58.10");
 }
 
 #[test]
@@ -385,7 +385,7 @@ async fn push_realtime_discoveries_pushes_credentials_with_input_context() {
 async fn push_realtime_discoveries_handles_multiple_types() {
     let q = mock_queue();
     let discoveries = serde_json::json!({
-        "hosts": [{"ip": "10.0.0.1"}],
+        "hosts": [{"ip": "192.168.58.10"}],
         "credentials": [{"username": "u"}],
         "hashes": [{"hash": "aad3..."}],
         "vulnerabilities": [{"id": "CVE-1"}],
@@ -450,9 +450,9 @@ async fn push_realtime_discoveries_skips_non_array_fields() {
 async fn push_realtime_discoveries_no_input_context_when_args_lack_username() {
     let q = mock_queue();
     let discoveries = serde_json::json!({
-        "hosts": [{"ip": "10.0.0.1"}]
+        "hosts": [{"ip": "192.168.58.10"}]
     });
-    let args = serde_json::json!({"target": "10.0.0.0/24"});
+    let args = serde_json::json!({"target": "192.168.58.0/24"});
 
     push_realtime_discoveries(&q, "op-5", &discoveries, "nmap_scan", &args).await;
 
@@ -469,7 +469,7 @@ async fn push_realtime_discoveries_no_input_context_when_args_lack_username() {
 async fn push_realtime_discoveries_uses_user_alias_when_username_missing() {
     let q = mock_queue();
     let discoveries = serde_json::json!({
-        "hosts": [{"ip": "10.0.0.1"}]
+        "hosts": [{"ip": "192.168.58.10"}]
     });
     // Some tools call it "user" instead of "username"
     let args = serde_json::json!({"user": "fallback_user", "domain": "d"});
@@ -583,14 +583,14 @@ fn build_tool_exec_request_carries_all_inputs() {
         "nmap_scan_abc".into(),
         "task-1",
         "nmap_scan",
-        serde_json::json!({"target": "10.0.0.1"}),
+        serde_json::json!({"target": "192.168.58.10"}),
         Some("00-trace-span-01".into()),
         Some("op-2026".into()),
     );
     assert_eq!(req.call_id, "nmap_scan_abc");
     assert_eq!(req.task_id, "task-1");
     assert_eq!(req.tool_name, "nmap_scan");
-    assert_eq!(req.arguments["target"], "10.0.0.1");
+    assert_eq!(req.arguments["target"], "192.168.58.10");
     assert_eq!(req.traceparent.as_deref(), Some("00-trace-span-01"));
     assert_eq!(req.operation_id.as_deref(), Some("op-2026"));
 }
@@ -614,12 +614,12 @@ fn tool_exec_result_from_response_passes_through_all_fields() {
         call_id: "c".into(),
         output: "out".into(),
         error: None,
-        discoveries: Some(serde_json::json!({"hosts": [{"ip": "10.0.0.1"}]})),
+        discoveries: Some(serde_json::json!({"hosts": [{"ip": "192.168.58.10"}]})),
     };
     let r = tool_exec_result_from_response(resp);
     assert_eq!(r.output, "out");
     assert!(r.error.is_none());
-    assert_eq!(r.discoveries.unwrap()["hosts"][0]["ip"], "10.0.0.1");
+    assert_eq!(r.discoveries.unwrap()["hosts"][0]["ip"], "192.168.58.10");
 }
 
 #[test]

@@ -1018,7 +1018,7 @@ mod tests {
             "recon_abcdef123456",
             "recon",
             "scanner",
-            serde_json::json!({"target": "10.0.0.1"}),
+            serde_json::json!({"target": "192.168.58.10"}),
             "orchestrator",
             5,
         );
@@ -1032,7 +1032,7 @@ mod tests {
             Some("ares.tasks.results.recon_abcdef123456"),
         );
         assert!(msg.created_at.is_some());
-        assert_eq!(msg.payload["target"], "10.0.0.1");
+        assert_eq!(msg.payload["target"], "192.168.58.10");
     }
 
     #[test]

