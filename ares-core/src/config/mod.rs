@@ -267,22 +267,21 @@ security:
         assert_eq!(cfg.model_for_role("new_role"), Some("gpt-4o-mini"));
     }
 
+    // Both ARES_CONFIG cases live in one test — splitting them races on the
+    // shared process-wide env var when cargo runs tests in parallel.
     #[test]
-    fn from_env_with_env_var() {
+    fn from_env_respects_ares_config() {
         let f = write_temp_yaml(MINIMAL_YAML);
-        // Temporarily set env var
         let path_str = f.path().to_string_lossy().to_string();
+
         std::env::set_var("ARES_CONFIG", &path_str);
         let cfg = AresConfig::from_env().unwrap();
         assert_eq!(cfg.operation.name, "test-op");
-        std::env::remove_var("ARES_CONFIG");
-    }
 
-    #[test]
-    fn from_env_missing_file() {
         std::env::set_var("ARES_CONFIG", "/nonexistent/path/config.yaml");
         let result = AresConfig::from_env();
         assert!(result.is_err());
+
         std::env::remove_var("ARES_CONFIG");
     }
 
