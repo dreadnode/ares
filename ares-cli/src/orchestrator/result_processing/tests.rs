@@ -1230,3 +1230,61 @@ fn extract_locked_users_rejects_llm_narrative_tokens() {
     let locked = extract_locked_usernames_from_result(&Some(payload));
     assert!(locked.is_empty(), "got false positives: {locked:?}");
 }
+
+#[test]
+fn is_ticket_grant_vuln_recognizes_delegation_prefixes() {
+    use super::is_ticket_grant_vuln;
+    assert!(is_ticket_grant_vuln("constrained_delegation_alice"));
+    assert!(is_ticket_grant_vuln("UNCONSTRAINED_DELEGATION_WEB01$"));
+    assert!(is_ticket_grant_vuln("rbcd_dc01_target"));
+    assert!(is_ticket_grant_vuln("s4u_admin_at_contoso"));
+}
+
+#[test]
+fn is_ticket_grant_vuln_rejects_non_ticket_primitives() {
+    use super::is_ticket_grant_vuln;
+    assert!(!is_ticket_grant_vuln("kerberoast_svc_sql"));
+    assert!(!is_ticket_grant_vuln("adcs_esc1_192.168.58.50"));
+    assert!(!is_ticket_grant_vuln("mssql_impersonation_192.168.58.51"));
+    assert!(!is_ticket_grant_vuln(""));
+}
+
+#[test]
+fn ccache_evidence_detects_saving_ticket_line() {
+    use super::result_has_ccache_evidence;
+    let payload = json!({
+        "output": "[*] Impersonating Administrator\n\
+                   [*] Requesting S4U2self\n\
+                   [*] Requesting S4U2Proxy\n\
+                   [*] Saving ticket in Administrator@cifs_dc01@CONTOSO.LOCAL.ccache"
+    });
+    assert!(result_has_ccache_evidence(&Some(payload)));
+}
+
+#[test]
+fn ccache_evidence_detects_in_tool_outputs_array() {
+    use super::result_has_ccache_evidence;
+    let payload = json!({
+        "tool_outputs": [
+            {"output": "[*] Saving ticket in alice@CIFS.ccache"}
+        ]
+    });
+    assert!(result_has_ccache_evidence(&Some(payload)));
+}
+
+#[test]
+fn ccache_evidence_rejects_bare_mention() {
+    use super::result_has_ccache_evidence;
+    // LLM commentary that mentions a ticket path but doesn't prove a save.
+    let payload = json!({
+        "summary": "S4U2Proxy returned an error before saving the .ccache"
+    });
+    assert!(!result_has_ccache_evidence(&Some(payload)));
+}
+
+#[test]
+fn ccache_evidence_empty_payload() {
+    use super::result_has_ccache_evidence;
+    assert!(!result_has_ccache_evidence(&None));
+    assert!(!result_has_ccache_evidence(&Some(json!({}))));
+}
