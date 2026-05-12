@@ -1393,3 +1393,76 @@ fn seimpersonate_signal_case_insensitive() {
     });
     assert!(result_has_seimpersonate_signal(&Some(payload)));
 }
+
+#[test]
+fn ntlmv1_signal_detects_explicit_verdict() {
+    use super::result_has_ntlmv1_signal;
+    let payload = json!({
+        "output": "[+] NTLMv1 is allowed (LmCompatibilityLevel registry value indicates vulnerable config)"
+    });
+    assert!(result_has_ntlmv1_signal(&Some(payload)));
+}
+
+#[test]
+fn ntlmv1_signal_detects_lmcompat_le_2() {
+    use super::result_has_ntlmv1_signal;
+    for value in [0, 1, 2] {
+        let payload = json!({
+            "output": format!("LmCompatibilityLevel: {value}")
+        });
+        assert!(
+            result_has_ntlmv1_signal(&Some(payload)),
+            "should match LmCompatibilityLevel={value}"
+        );
+    }
+}
+
+#[test]
+fn ntlmv1_signal_rejects_lmcompat_ge_3() {
+    use super::result_has_ntlmv1_signal;
+    for value in [3, 4, 5] {
+        let payload = json!({
+            "output": format!("LmCompatibilityLevel: {value}")
+        });
+        assert!(
+            !result_has_ntlmv1_signal(&Some(payload)),
+            "should NOT match LmCompatibilityLevel={value}"
+        );
+    }
+}
+
+#[test]
+fn ntlmv1_signal_recognizes_reg_dword_format() {
+    use super::result_has_ntlmv1_signal;
+    let payload = json!({
+        "output": "LmCompatibilityLevel    REG_DWORD    0x2"
+    });
+    assert!(result_has_ntlmv1_signal(&Some(payload)));
+}
+
+#[test]
+fn ntlmv1_signal_rejects_bare_mention() {
+    use super::result_has_ntlmv1_signal;
+    let payload = json!({
+        "summary": "Plan: check whether the DC permits NTLMv1 downgrade by reading LmCompatibilityLevel"
+    });
+    assert!(!result_has_ntlmv1_signal(&Some(payload)));
+}
+
+#[test]
+fn ntlmv1_signal_empty_payload() {
+    use super::result_has_ntlmv1_signal;
+    assert!(!result_has_ntlmv1_signal(&None));
+    assert!(!result_has_ntlmv1_signal(&Some(json!({}))));
+}
+
+#[test]
+fn ntlmv1_signal_detects_in_tool_outputs_array() {
+    use super::result_has_ntlmv1_signal;
+    let payload = json!({
+        "tool_outputs": [
+            {"output": "Registry probe returned LmCompatibilityLevel: 1"}
+        ]
+    });
+    assert!(result_has_ntlmv1_signal(&Some(payload)));
+}
