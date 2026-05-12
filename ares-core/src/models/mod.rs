@@ -6,6 +6,7 @@
 #[cfg(feature = "blue")]
 mod blue;
 mod core;
+mod op_state_event;
 mod operation;
 mod task;
 mod util;
@@ -16,6 +17,7 @@ pub use blue::{
     TriageDecision, TriageRecord,
 };
 pub use core::{Credential, Hash, Host, Share, Target, TrustInfo, User};
+pub use op_state_event::{OpStateEvent, OpStateEventPayload};
 pub use operation::{AttackChainStep, OperationMeta, SharedRedTeamState};
 pub use task::{
     AgentInfo, AgentRole, TaskInfo, TaskResult, TaskStatus, TaskStatusRecord, VulnerabilityInfo,
