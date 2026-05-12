@@ -116,6 +116,30 @@ fn vuln_type_is_preauth(vtype: &str) -> bool {
     )
 }
 
+/// Vuln types whose exploitation primitive lives in the `acl` worker's
+/// toolset (bloodyAD, pywhisker, dacl_edit). Used to route `request_exploit`
+/// to the right worker when the emitting parser left `recommended_agent`
+/// empty — the historical default of `privesc` left the LLM agent without
+/// any ACL-modifying tool and the chain bailed with "missing bloodyAD".
+///
+/// Matches on substrings so we cover both the bare form (e.g.
+/// `allextendedrights`) and the prefixed form emitted by acl_discovery
+/// (`acl_allextendedrights_<sid>_<target>`).
+fn is_acl_style_vuln_type(vtype: &str) -> bool {
+    let v = vtype.to_ascii_lowercase();
+    v.contains("genericall")
+        || v.contains("genericwrite")
+        || v.contains("writedacl")
+        || v.contains("writeowner")
+        || v.contains("writeproperty")
+        || v.contains("allextendedrights")
+        || v.contains("forcechangepassword")
+        || v.contains("self_membership")
+        || v.contains("write_membership")
+        || v.contains("addmember")
+        || v.contains("addself")
+}
+
 impl Dispatcher {
     /// Submit a crack task for a hash.
     #[instrument(
@@ -561,12 +585,23 @@ impl Dispatcher {
             }
         }
 
-        let role = if vuln.recommended_agent.is_empty() {
-            "privesc"
+        // Per-vuln role override. Explicit `recommended_agent` wins. When the
+        // emitting parser left it empty, infer the worker that actually has
+        // the right tools: ACL primitives (genericall/writedacl/writeproperty/
+        // allextendedrights/etc.) route to the `acl` worker which exposes
+        // `bloodyad_add_group_member`, `bloodyad_set_password`,
+        // `bloodyad_add_genericall`, `pywhisker`, and `dacl_edit`. The
+        // legacy default of `privesc` left the agent with certipy/mssql/
+        // delegation tools only, so AllExtendedRights-on-group primitives
+        // dispatched as `exploit_*` would bail with "missing bloodyAD".
+        let role: String = if !vuln.recommended_agent.is_empty() {
+            vuln.recommended_agent.clone()
+        } else if is_acl_style_vuln_type(&vuln.vuln_type) {
+            "acl".to_string()
         } else {
-            &vuln.recommended_agent
+            "privesc".to_string()
         };
-        self.throttled_submit("exploit", role, payload, priority)
+        self.throttled_submit("exploit", &role, payload, priority)
             .await
     }
 
@@ -898,5 +933,33 @@ mod tests {
         let auth = select_exploit_auth(&state, None, "fabrikam.local");
 
         assert_eq!(auth.credential.as_ref().unwrap().username, "alice");
+    }
+
+    #[test]
+    fn is_acl_style_vuln_type_matches_bare_and_prefixed() {
+        // Bare forms emitted by some parsers.
+        assert!(is_acl_style_vuln_type("genericall"));
+        assert!(is_acl_style_vuln_type("GenericAll"));
+        assert!(is_acl_style_vuln_type("writedacl"));
+        assert!(is_acl_style_vuln_type("allextendedrights"));
+        assert!(is_acl_style_vuln_type("forcechangepassword"));
+        assert!(is_acl_style_vuln_type("writeowner"));
+        assert!(is_acl_style_vuln_type("writeproperty"));
+        // Prefixed forms emitted by acl_discovery / bloodhound bridging.
+        assert!(is_acl_style_vuln_type(
+            "acl_allextendedrights_s-1-5-21-1-2-3-519_administrators"
+        ));
+        assert!(is_acl_style_vuln_type("acl_writeproperty_member_admins"));
+        assert!(is_acl_style_vuln_type("acl_genericall_dc01$"));
+    }
+
+    #[test]
+    fn is_acl_style_vuln_type_rejects_non_acl() {
+        assert!(!is_acl_style_vuln_type("mssql_access"));
+        assert!(!is_acl_style_vuln_type("dcsync"));
+        assert!(!is_acl_style_vuln_type("adcs_esc1"));
+        assert!(!is_acl_style_vuln_type("constrained_delegation"));
+        assert!(!is_acl_style_vuln_type("kerberoast"));
+        assert!(!is_acl_style_vuln_type(""));
     }
 }
