@@ -61,8 +61,8 @@ pub(super) async fn check_domain_arg(
 
     let mut known: Vec<String> = domains
         .into_iter()
-        .chain(dc_keys.into_iter())
-        .chain(trusted.into_iter())
+        .chain(dc_keys)
+        .chain(trusted)
         .map(|d| d.to_lowercase())
         .collect();
     known.sort();
