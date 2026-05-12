@@ -95,6 +95,62 @@ fn collect_sid_history_work(state: &StateInner) -> Vec<SidHistoryWork> {
     items
 }
 
+/// Build the `ldap_search` payload for a single SID-history work item.
+/// Splits out so the cross-domain `bind_domain` branch can be unit tested
+/// without spinning a Dispatcher.
+fn build_sid_history_payload(item: &SidHistoryWork) -> serde_json::Value {
+    let mut args = json!({
+        "target": item.dc_ip,
+        "domain": item.domain,
+        "username": item.credential.username,
+        "password": item.credential.password,
+        "filter": "(sIDHistory=*)",
+        "attributes": "sAMAccountName,sIDHistory",
+    });
+    // Cross-domain bind: ldapsearch needs the credential's realm to
+    // construct the right bind DN even when querying a different
+    // domain's partition.
+    if item.credential.domain.to_lowercase() != item.domain.to_lowercase() {
+        args["bind_domain"] = json!(item.credential.domain);
+    }
+    args
+}
+
+/// Build the `sid_history_abuse` `VulnerabilityInfo` for a discovered principal.
+/// Splits out so the (vuln_id format, vuln_type, target, details) shape can be
+/// asserted without running the async dispatch loop. `priority = 3` and
+/// `discovered_by = "sid_history_enum"` are fixed.
+fn build_sid_history_vuln(principal: &str, domain: &str) -> ares_core::models::VulnerabilityInfo {
+    let vuln_id = format!("sid_history_{}", principal.to_lowercase());
+    let mut details = std::collections::HashMap::new();
+    details.insert(
+        "domain".into(),
+        serde_json::Value::String(domain.to_string()),
+    );
+    details.insert(
+        "account_name".into(),
+        serde_json::Value::String(principal.to_string()),
+    );
+    details.insert(
+        "note".into(),
+        serde_json::Value::String(
+            "Foreign-domain SID present in sIDHistory — \
+             usable as --extra-sid in ticketer / Golden Ticket forge."
+                .into(),
+        ),
+    );
+    ares_core::models::VulnerabilityInfo {
+        vuln_id,
+        vuln_type: "sid_history_abuse".to_string(),
+        target: domain.to_string(),
+        discovered_by: "sid_history_enum".to_string(),
+        discovered_at: chrono::Utc::now(),
+        details,
+        recommended_agent: String::new(),
+        priority: 3,
+    }
+}
+
 /// Periodic SID-history discovery. Dispatches `ldap_search` deterministically
 /// via the tool dispatcher (no LLM round-trip) since the query, filter, and
 /// expected output shape are all fixed.
@@ -124,20 +180,7 @@ pub async fn auto_sid_history_enum(
         };
 
         for item in work {
-            let mut args = json!({
-                "target": item.dc_ip,
-                "domain": item.domain,
-                "username": item.credential.username,
-                "password": item.credential.password,
-                "filter": "(sIDHistory=*)",
-                "attributes": "sAMAccountName,sIDHistory",
-            });
-            // Cross-domain bind: ldapsearch needs the credential's realm to
-            // construct the right bind DN even when querying a different
-            // domain's partition.
-            if item.credential.domain.to_lowercase() != item.domain.to_lowercase() {
-                args["bind_domain"] = json!(item.credential.domain);
-            }
+            let args = build_sid_history_payload(&item);
 
             let call = ToolCall {
                 id: format!("sid_history_{}", uuid::Uuid::new_v4().simple()),
@@ -212,34 +255,8 @@ pub async fn auto_sid_history_enum(
                             return;
                         }
                         for principal in principals {
-                            let vuln_id = format!("sid_history_{}", principal.to_lowercase());
-                            let mut details = std::collections::HashMap::new();
-                            details.insert(
-                                "domain".into(),
-                                serde_json::Value::String(domain_bg.clone()),
-                            );
-                            details.insert(
-                                "account_name".into(),
-                                serde_json::Value::String(principal.clone()),
-                            );
-                            details.insert(
-                                "note".into(),
-                                serde_json::Value::String(
-                                    "Foreign-domain SID present in sIDHistory — \
-                                     usable as --extra-sid in ticketer / Golden Ticket forge."
-                                        .into(),
-                                ),
-                            );
-                            let vuln = ares_core::models::VulnerabilityInfo {
-                                vuln_id: vuln_id.clone(),
-                                vuln_type: "sid_history_abuse".to_string(),
-                                target: domain_bg.clone(),
-                                discovered_by: "sid_history_enum".to_string(),
-                                discovered_at: chrono::Utc::now(),
-                                details,
-                                recommended_agent: String::new(),
-                                priority: 3,
-                            };
+                            let vuln = build_sid_history_vuln(&principal, &domain_bg);
+                            let vuln_id = vuln.vuln_id.clone();
                             let _ = dispatcher_bg
                                 .state
                                 .publish_vulnerability(&dispatcher_bg.queue, vuln)
@@ -525,6 +542,163 @@ sIDHistory: S-1-5-21-9-9-9-1000
         assert_eq!(
             super::strip_attribute_prefix("dn: CN=Alice", "sAMAccountName"),
             None
+        );
+    }
+
+    // collect_sid_history_work — same-forest fallback path
+
+    #[test]
+    fn collect_same_forest_cross_domain_cred_falls_back() {
+        // child.contoso.local DC discovered with no matching cred; a credential
+        // for contoso.local (parent in same forest) should match via the
+        // `forest_root_of` fallback. `forest_root_of` requires both domains
+        // to be present in state.domains or state.domain_controllers, so we
+        // register both.
+        let mut state = StateInner::new("test-op".into());
+        state.domains.push("contoso.local".into());
+        state
+            .domain_controllers
+            .insert("child.contoso.local".into(), "192.168.58.20".into());
+        state
+            .domain_controllers
+            .insert("contoso.local".into(), "192.168.58.10".into());
+        state
+            .credentials
+            .push(cred("alice", "P@ssw0rd!", "contoso.local")); // pragma: allowlist secret
+        let work = collect_sid_history_work(&state);
+        // Both DCs are eligible — contoso.local matches the same-domain
+        // branch, child.contoso.local hits the same-forest fallback.
+        assert_eq!(work.len(), 2);
+        let child = work
+            .iter()
+            .find(|w| w.domain == "child.contoso.local")
+            .expect("child.contoso.local missing — fallback didn't fire");
+        assert_eq!(child.dc_ip, "192.168.58.20");
+        assert_eq!(child.credential.domain, "contoso.local");
+    }
+
+    #[test]
+    fn collect_quarantined_principal_skipped() {
+        let mut state = StateInner::new("test-op".into());
+        state
+            .domain_controllers
+            .insert("contoso.local".into(), "192.168.58.10".into());
+        state
+            .credentials
+            .push(cred("alice", "P@ssw0rd!", "contoso.local")); // pragma: allowlist secret
+        state.quarantine_principal("alice", "contoso.local");
+        assert!(collect_sid_history_work(&state).is_empty());
+    }
+
+    #[test]
+    fn collect_skips_credentials_without_password() {
+        let mut state = StateInner::new("test-op".into());
+        state
+            .domain_controllers
+            .insert("contoso.local".into(), "192.168.58.10".into());
+        // empty password — must be skipped.
+        state.credentials.push(cred("alice", "", "contoso.local"));
+        assert!(collect_sid_history_work(&state).is_empty());
+    }
+
+    // build_sid_history_payload
+
+    fn work_item(cred_domain: &str, target_domain: &str) -> SidHistoryWork {
+        SidHistoryWork {
+            dedup_key: format!("sid_history:{target_domain}"),
+            domain: target_domain.into(),
+            dc_ip: "192.168.58.10".into(),
+            credential: cred("alice", "P@ssw0rd!", cred_domain),
+        }
+    }
+
+    #[test]
+    fn payload_includes_required_fields() {
+        let payload = build_sid_history_payload(&work_item("contoso.local", "contoso.local"));
+        assert_eq!(payload["target"], "192.168.58.10");
+        assert_eq!(payload["domain"], "contoso.local");
+        assert_eq!(payload["username"], "alice");
+        assert_eq!(payload["password"], "P@ssw0rd!");
+        assert_eq!(payload["filter"], "(sIDHistory=*)");
+        assert_eq!(payload["attributes"], "sAMAccountName,sIDHistory");
+    }
+
+    #[test]
+    fn payload_omits_bind_domain_for_same_domain_cred() {
+        // Target == credential domain → no `bind_domain` key needed.
+        let payload = build_sid_history_payload(&work_item("contoso.local", "contoso.local"));
+        assert!(payload.get("bind_domain").is_none());
+    }
+
+    #[test]
+    fn payload_sets_bind_domain_for_cross_domain_cred() {
+        // Credential lives in parent, query targets child — ldapsearch needs
+        // `bind_domain` to construct the right bind DN.
+        let payload = build_sid_history_payload(&work_item("contoso.local", "child.contoso.local"));
+        assert_eq!(payload["bind_domain"], "contoso.local");
+    }
+
+    #[test]
+    fn payload_bind_domain_check_is_case_insensitive() {
+        // Mixed case on either side must be normalized before comparison —
+        // otherwise we'd emit a spurious bind_domain for `Contoso.local`/
+        // `contoso.local`.
+        let item = SidHistoryWork {
+            dedup_key: "sid_history:contoso.local".into(),
+            domain: "Contoso.LOCAL".into(),
+            dc_ip: "192.168.58.10".into(),
+            credential: cred("alice", "P@ssw0rd!", "CONTOSO.local"),
+        };
+        let payload = build_sid_history_payload(&item);
+        assert!(payload.get("bind_domain").is_none());
+    }
+
+    // build_sid_history_vuln
+
+    #[test]
+    fn vuln_carries_required_scoreboard_tokens() {
+        let v = build_sid_history_vuln("migrated.user", "contoso.local");
+        assert_eq!(v.vuln_id, "sid_history_migrated.user");
+        assert_eq!(v.vuln_type, "sid_history_abuse");
+        assert_eq!(v.target, "contoso.local");
+        assert_eq!(v.discovered_by, "sid_history_enum");
+        assert_eq!(v.priority, 3);
+        assert!(v.recommended_agent.is_empty());
+    }
+
+    #[test]
+    fn vuln_lowercases_vuln_id_principal() {
+        // Different casings of the same principal must collapse to one
+        // vuln_id so the scoreboard counts the primitive once.
+        let v1 = build_sid_history_vuln("Migrated.USER", "contoso.local");
+        let v2 = build_sid_history_vuln("migrated.user", "contoso.local");
+        assert_eq!(v1.vuln_id, v2.vuln_id);
+    }
+
+    #[test]
+    fn vuln_details_populated() {
+        let v = build_sid_history_vuln("alice", "contoso.local");
+        assert_eq!(
+            v.details.get("domain").and_then(|x| x.as_str()),
+            Some("contoso.local")
+        );
+        assert_eq!(
+            v.details.get("account_name").and_then(|x| x.as_str()),
+            Some("alice")
+        );
+        let note = v.details.get("note").and_then(|x| x.as_str()).unwrap();
+        assert!(note.contains("sIDHistory"));
+        assert!(note.contains("extra-sid") || note.contains("--extra-sid"));
+    }
+
+    #[test]
+    fn vuln_account_name_preserves_original_case() {
+        // vuln_id is lowercased for dedup, but account_name in details keeps
+        // the original casing — useful when the LLM later reads the entry.
+        let v = build_sid_history_vuln("Migrated.USER", "contoso.local");
+        assert_eq!(
+            v.details.get("account_name").and_then(|x| x.as_str()),
+            Some("Migrated.USER")
         );
     }
 }
