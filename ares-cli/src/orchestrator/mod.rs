@@ -131,7 +131,20 @@ async fn run_inner() -> Result<()> {
         );
     }
 
-    let shared_state = SharedState::new(config.operation_id.clone());
+    let mut shared_state = SharedState::new(config.operation_id.clone());
+
+    // Phase 2 dual-write: install a Nats-backed op-state recorder when NATS is
+    // available. Redis remains authoritative until Phase 4; emit failures are
+    // logged (see `emit_op_state`) but never abort the op.
+    if let Some(broker) = queue.nats_broker() {
+        shared_state.set_recorder(std::sync::Arc::new(
+            ares_core::op_state_log::OpStateRecorder::nats(std::sync::Arc::new(broker)),
+        ));
+        info!("Op-state event log enabled (JetStream ARES_OPSTATE)");
+    } else {
+        info!("Op-state event log disabled — no NATS broker on TaskQueue");
+    }
+
     shared_state
         .load_from_redis(&queue)
         .await

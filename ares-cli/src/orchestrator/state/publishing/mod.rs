@@ -6,8 +6,28 @@ mod entities;
 mod hosts;
 mod milestones;
 
+use ares_core::models::{OpStateEvent, OpStateEventPayload};
+use ares_core::op_state_log::OpStateRecorder;
 use regex::Regex;
 use std::sync::LazyLock;
+
+/// Emit a single op-state event through the recorder. No-op when the recorder
+/// is disabled; otherwise builds an [`OpStateEvent`] and forwards to the
+/// recorder. Publish failures are logged at WARN — Phase 2 keeps Redis
+/// authoritative so a transient broker outage must not abort the call.
+pub(super) async fn emit_op_state(
+    recorder: &OpStateRecorder,
+    op_id: &str,
+    payload: OpStateEventPayload,
+) {
+    if !recorder.is_active() {
+        return;
+    }
+    let event = OpStateEvent::new(op_id, payload);
+    if let Err(e) = recorder.record(event).await {
+        tracing::warn!(err = %e, "op-state event publish failed");
+    }
+}
 
 /// Regex matching `Password` (case-insensitive) followed by optional `:` and space.
 pub(super) static PASSWORD_PREFIX_RE: LazyLock<Regex> =

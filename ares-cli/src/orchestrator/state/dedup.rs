@@ -3,10 +3,12 @@
 use anyhow::Result;
 use redis::AsyncCommands;
 
+use ares_core::models::OpStateEventPayload;
 use ares_core::state;
 
 use redis::aio::ConnectionLike;
 
+use super::publishing::emit_op_state;
 use super::SharedState;
 use crate::orchestrator::task_queue::TaskQueueCore;
 
@@ -30,6 +32,18 @@ impl SharedState {
         let mut conn = queue.connection();
         let _: () = conn.sadd(&key, vuln_id).await?;
         let _: () = conn.expire(&key, 86400).await?;
+
+        // Phase 2 dual-write: append vuln.exploited event.
+        emit_op_state(
+            self.recorder(),
+            &operation_id,
+            OpStateEventPayload::VulnExploited {
+                vuln_id: vuln_id.to_string(),
+                exploited_by: String::new(),
+                result: None,
+            },
+        )
+        .await;
 
         let mut state = self.inner.write().await;
         state.exploited_vulnerabilities.insert(vuln_id.to_string());
@@ -149,5 +163,24 @@ mod tests {
                 .await
                 .unwrap();
         assert!(members.contains("192.168.58.5"));
+    }
+
+    #[tokio::test]
+    async fn mark_exploited_emits_event_with_capturing_recorder() {
+        use ares_core::models::OpStateEventPayload;
+        let recorder = std::sync::Arc::new(ares_core::op_state_log::OpStateRecorder::capturing());
+        let state = SharedState::with_recorder("op-ex".to_string(), recorder.clone());
+        let q = mock_queue();
+
+        state.mark_exploited(&q, "VULN-007").await.unwrap();
+
+        let evs = recorder.captured().await;
+        assert_eq!(evs.len(), 1);
+        match &evs[0].payload {
+            OpStateEventPayload::VulnExploited { vuln_id, .. } => {
+                assert_eq!(vuln_id, "VULN-007");
+            }
+            other => panic!("expected VulnExploited, got {other:?}"),
+        }
     }
 }

@@ -3,11 +3,12 @@
 use anyhow::Result;
 use redis::AsyncCommands;
 
-use ares_core::models::{Share, User, VulnerabilityInfo};
+use ares_core::models::{OpStateEventPayload, Share, User, VulnerabilityInfo};
 use ares_core::state::{self, RedisStateReader};
 
 use redis::aio::ConnectionLike;
 
+use super::emit_op_state;
 use crate::orchestrator::state::{SharedState, KEY_VULN_QUEUE};
 use crate::orchestrator::task_queue::TaskQueueCore;
 
@@ -71,10 +72,16 @@ impl SharedState {
             let state = self.inner.read().await;
             state.operation_id.clone()
         };
-        let reader = RedisStateReader::new(operation_id);
+        let reader = RedisStateReader::new(operation_id.clone());
         let mut conn = queue.connection();
         let added = reader.add_user(&mut conn, &user).await?;
         if added {
+            emit_op_state(
+                self.recorder(),
+                &operation_id,
+                OpStateEventPayload::UserDiscovered { user: user.clone() },
+            )
+            .await;
             let mut state = self.inner.write().await;
             state.users.push(user);
         }
@@ -123,6 +130,13 @@ impl SharedState {
         let mut conn = queue.connection();
         let added = reader.add_vulnerability(&mut conn, &vuln).await?;
         if added {
+            emit_op_state(
+                self.recorder(),
+                &operation_id,
+                OpStateEventPayload::VulnDiscovered { vuln: vuln.clone() },
+            )
+            .await;
+
             // Also add to vuln queue ZSET for exploitation workflow
             let vuln_queue_key =
                 format!("{}:{}:{}", state::KEY_PREFIX, operation_id, KEY_VULN_QUEUE);
@@ -184,7 +198,7 @@ impl SharedState {
             let state = self.inner.read().await;
             state.operation_id.clone()
         };
-        let reader = RedisStateReader::new(operation_id);
+        let reader = RedisStateReader::new(operation_id.clone());
         let mut conn = queue.connection();
 
         reader.add_timeline_event(&mut conn, event).await?;
@@ -192,6 +206,15 @@ impl SharedState {
         for technique in mitre_techniques {
             let _ = reader.add_technique(&mut conn, technique).await;
         }
+
+        emit_op_state(
+            self.recorder(),
+            &operation_id,
+            OpStateEventPayload::TimelineEvent {
+                event: event.clone(),
+            },
+        )
+        .await;
 
         Ok(())
     }
@@ -656,5 +679,82 @@ mod tests {
     fn unrelated_domains_not_same_forest() {
         assert!(!are_in_same_forest("contoso.local", "fabrikam.local"));
         assert!(!are_in_same_forest("child.contoso.local", "fabrikam.local"));
+    }
+
+    #[tokio::test]
+    async fn publish_user_emits_event_with_capturing_recorder() {
+        let recorder = std::sync::Arc::new(ares_core::op_state_log::OpStateRecorder::capturing());
+        let state = SharedState::with_recorder("op-u".to_string(), recorder.clone());
+        let q = mock_queue();
+        assert!(state
+            .publish_user(&q, make_user("alice", "contoso.local"))
+            .await
+            .unwrap());
+
+        let evs = recorder.captured().await;
+        assert_eq!(evs.len(), 1);
+        match &evs[0].payload {
+            OpStateEventPayload::UserDiscovered { user } => {
+                assert_eq!(user.username, "alice");
+                assert_eq!(user.domain, "contoso.local");
+            }
+            other => panic!("expected UserDiscovered, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn publish_user_dedup_does_not_emit_event() {
+        let recorder = std::sync::Arc::new(ares_core::op_state_log::OpStateRecorder::capturing());
+        let state = SharedState::with_recorder("op-u-dup".to_string(), recorder.clone());
+        let q = mock_queue();
+        assert!(state
+            .publish_user(&q, make_user("alice", "contoso.local"))
+            .await
+            .unwrap());
+        assert!(!state
+            .publish_user(&q, make_user("alice", "contoso.local"))
+            .await
+            .unwrap());
+        assert_eq!(recorder.captured().await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn publish_vulnerability_emits_event_with_capturing_recorder() {
+        let recorder = std::sync::Arc::new(ares_core::op_state_log::OpStateRecorder::capturing());
+        let state = SharedState::with_recorder("op-v".to_string(), recorder.clone());
+        let q = mock_queue();
+        let vuln = make_vuln("VULN-001", "esc1", "192.168.58.10");
+        assert!(state.publish_vulnerability(&q, vuln).await.unwrap());
+
+        let evs = recorder.captured().await;
+        assert_eq!(evs.len(), 1);
+        match &evs[0].payload {
+            OpStateEventPayload::VulnDiscovered { vuln } => {
+                assert_eq!(vuln.vuln_id, "VULN-001");
+                assert_eq!(vuln.vuln_type, "esc1");
+            }
+            other => panic!("expected VulnDiscovered, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn persist_timeline_event_emits_event_with_capturing_recorder() {
+        let recorder = std::sync::Arc::new(ares_core::op_state_log::OpStateRecorder::capturing());
+        let state = SharedState::with_recorder("op-t".to_string(), recorder.clone());
+        let q = mock_queue();
+        let ev = serde_json::json!({"description": "smb 445 open"});
+        state
+            .persist_timeline_event(&q, &ev, &["T1135".to_string()])
+            .await
+            .unwrap();
+
+        let evs = recorder.captured().await;
+        assert_eq!(evs.len(), 1);
+        match &evs[0].payload {
+            OpStateEventPayload::TimelineEvent { event } => {
+                assert_eq!(event["description"], "smb 445 open");
+            }
+            other => panic!("expected TimelineEvent, got {other:?}"),
+        }
     }
 }

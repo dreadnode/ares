@@ -2,7 +2,7 @@
 
 use anyhow::Result;
 
-use ares_core::models::{Credential, Hash};
+use ares_core::models::{Credential, Hash, OpStateEventPayload};
 use ares_core::state::{self, RedisStateReader};
 
 use redis::aio::ConnectionLike;
@@ -10,7 +10,7 @@ use redis::aio::ConnectionLike;
 use crate::orchestrator::state::SharedState;
 use crate::orchestrator::task_queue::TaskQueueCore;
 
-use super::sanitize_credential;
+use super::{emit_op_state, sanitize_credential};
 
 impl SharedState {
     /// Add a credential to state and Redis (with dedup).
@@ -51,6 +51,17 @@ impl SharedState {
         let mut conn = queue.connection();
         let added = reader.add_credential(&mut conn, &cred).await?;
         if added {
+            // Phase 2 dual-write: append to the op-state log after Redis confirms
+            // the credential is new (Redis is the dedup oracle).
+            emit_op_state(
+                self.recorder(),
+                &operation_id,
+                OpStateEventPayload::CredentialCaptured {
+                    credential: cred.clone(),
+                },
+            )
+            .await;
+
             // Auto-extract domain from credential (matches Python add_credential)
             let cred_domain = cred.domain.to_lowercase();
             if cred_domain.contains('.') {
@@ -99,10 +110,18 @@ impl SharedState {
             let state = self.inner.read().await;
             state.operation_id.clone()
         };
-        let reader = RedisStateReader::new(operation_id);
+        let reader = RedisStateReader::new(operation_id.clone());
         let mut conn = queue.connection();
         let added = reader.add_hash(&mut conn, &hash).await?;
         if added {
+            // Phase 2 dual-write: emit before consuming `hash` into state.
+            emit_op_state(
+                self.recorder(),
+                &operation_id,
+                OpStateEventPayload::HashCaptured { hash: hash.clone() },
+            )
+            .await;
+
             let is_krbtgt = hash.username.to_lowercase() == "krbtgt"
                 && hash.hash_type.to_lowercase().contains("ntlm");
             let hash_domain = hash.domain.clone();
@@ -292,10 +311,18 @@ mod tests {
     use super::*;
     use crate::orchestrator::state::SharedState;
     use crate::orchestrator::task_queue::TaskQueueCore;
+    use ares_core::op_state_log::OpStateRecorder;
     use ares_core::state::mock_redis::MockRedisConnection;
+    use std::sync::Arc;
 
     fn mock_queue() -> TaskQueueCore<MockRedisConnection> {
         TaskQueueCore::from_connection(MockRedisConnection::new())
+    }
+
+    fn capturing_state(op_id: &str) -> (SharedState, Arc<OpStateRecorder>) {
+        let recorder = Arc::new(OpStateRecorder::capturing());
+        let state = SharedState::with_recorder(op_id.to_string(), recorder.clone());
+        (state, recorder)
     }
 
     fn make_cred(username: &str, password: &str, domain: &str) -> Credential {
@@ -489,5 +516,82 @@ mod tests {
             .await
             .unwrap();
         assert!(!updated);
+    }
+
+    #[tokio::test]
+    async fn publish_credential_emits_event_with_capturing_recorder() {
+        let (state, recorder) = capturing_state("op-emit");
+        let q = mock_queue();
+        let cred = make_cred("alice", "P@ssw0rd!", "contoso.local");
+        assert!(state.publish_credential(&q, cred).await.unwrap());
+
+        let evs = recorder.captured().await;
+        assert_eq!(evs.len(), 1, "exactly one event should be emitted");
+        assert_eq!(evs[0].op_id, "op-emit");
+        match &evs[0].payload {
+            OpStateEventPayload::CredentialCaptured { credential } => {
+                assert_eq!(credential.username, "alice");
+                assert_eq!(credential.domain, "contoso.local");
+            }
+            other => panic!("expected CredentialCaptured, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn publish_credential_dedup_does_not_emit_duplicate_event() {
+        let (state, recorder) = capturing_state("op-dedup");
+        let q = mock_queue();
+        let cred1 = make_cred("alice", "P@ssw0rd!", "contoso.local");
+        let cred2 = make_cred("alice", "P@ssw0rd!", "contoso.local");
+        assert!(state.publish_credential(&q, cred1).await.unwrap());
+        assert!(!state.publish_credential(&q, cred2).await.unwrap());
+
+        let evs = recorder.captured().await;
+        assert_eq!(evs.len(), 1, "dedup'd insert must not emit a second event");
+    }
+
+    #[tokio::test]
+    async fn publish_credential_rejected_input_does_not_emit() {
+        // Invalid credential (empty password) is dropped by sanitize_credential
+        // before any Redis write — must not emit an event either.
+        let (state, recorder) = capturing_state("op-reject");
+        let q = mock_queue();
+        let cred = make_cred("alice", "", "contoso.local");
+        assert!(!state.publish_credential(&q, cred).await.unwrap());
+        assert!(recorder.captured().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn publish_hash_emits_event_with_capturing_recorder() {
+        let (state, recorder) = capturing_state("op-h");
+        let q = mock_queue();
+        let hash = make_hash("admin", "contoso.local", "NTLM", "aabbccdd");
+        assert!(state.publish_hash(&q, hash).await.unwrap());
+
+        let evs = recorder.captured().await;
+        // krbtgt path emits multiple events (hash + vuln + exploited). Plain
+        // admin hash only emits hash.captured.
+        assert_eq!(evs.len(), 1);
+        match &evs[0].payload {
+            OpStateEventPayload::HashCaptured { hash } => {
+                assert_eq!(hash.username, "admin");
+                assert_eq!(hash.hash_type, "NTLM");
+            }
+            other => panic!("expected HashCaptured, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn disabled_recorder_emits_nothing() {
+        // SharedState::new() defaults to OpStateRecorder::Disabled.
+        let state = SharedState::new("op-noop".to_string());
+        let q = mock_queue();
+        state
+            .publish_credential(&q, make_cred("alice", "P@ssw0rd!", "contoso.local"))
+            .await
+            .unwrap();
+        // No recorder handle to inspect — the assertion here is "no panic and
+        // no async hang on the no-op record path". Combined with the active
+        // tests above, this exercises both branches of `is_active`.
     }
 }

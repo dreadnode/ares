@@ -3,20 +3,50 @@
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
+use ares_core::op_state_log::OpStateRecorder;
+
 use super::inner::StateInner;
 
 /// Thread-safe shared state with read/write access.
 #[derive(Clone)]
 pub struct SharedState {
     pub(super) inner: Arc<RwLock<StateInner>>,
+    /// Sink for op-state events (Phase 2 dual-write). Defaults to
+    /// [`OpStateRecorder::Disabled`] so existing call sites stay no-op until
+    /// the orchestrator installs a Nats-backed recorder.
+    pub(crate) recorder: Arc<OpStateRecorder>,
 }
 
 impl SharedState {
-    /// Create a new empty state.
+    /// Create a new empty state. Recorder defaults to [`OpStateRecorder::Disabled`].
     pub fn new(operation_id: String) -> Self {
         Self {
             inner: Arc::new(RwLock::new(StateInner::new(operation_id))),
+            recorder: Arc::new(OpStateRecorder::Disabled),
         }
+    }
+
+    /// Create a new empty state with a specific event recorder installed.
+    /// Production wires `OpStateRecorder::Nats(broker)`; tests use
+    /// `OpStateRecorder::capturing()` to assert what was emitted.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn with_recorder(operation_id: String, recorder: Arc<OpStateRecorder>) -> Self {
+        Self {
+            inner: Arc::new(RwLock::new(StateInner::new(operation_id))),
+            recorder,
+        }
+    }
+
+    /// Replace the recorder on an existing state — useful when SharedState is
+    /// built before the orchestrator has a NatsBroker handle ready.
+    pub fn set_recorder(&mut self, recorder: Arc<OpStateRecorder>) {
+        self.recorder = recorder;
+    }
+
+    /// Access the installed recorder. Internal — publishing methods call this
+    /// to emit events after a successful Redis write.
+    pub(crate) fn recorder(&self) -> &OpStateRecorder {
+        &self.recorder
     }
 
     /// Create a cheap snapshot of state for prompt generation.
