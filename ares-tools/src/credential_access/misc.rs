@@ -210,10 +210,15 @@ pub async fn sysvol_script_search(args: &Value) -> Result<ToolOutput> {
 pub async fn laps_dump(args: &Value) -> Result<ToolOutput> {
     let target = required_str(args, "target")?;
     let username = required_str(args, "username")?;
-    let password = required_str(args, "password")?;
     let domain = required_str(args, "domain")?;
+    let password = optional_str(args, "password");
+    let nt_hash = optional_str(args, "nt_hash");
 
-    let cred_args = credentials::netexec_creds(Some(username), Some(password), None, Some(domain));
+    if password.is_none() && nt_hash.is_none() {
+        anyhow::bail!("laps_dump requires either 'password' or 'nt_hash'");
+    }
+
+    let cred_args = credentials::netexec_creds(Some(username), password, nt_hash, Some(domain));
 
     CommandBuilder::new("netexec")
         .arg("ldap")
@@ -950,6 +955,26 @@ mod tests {
         assert!(required_str(&args, "username").is_ok());
         assert!(required_str(&args, "password").is_ok());
         assert!(required_str(&args, "domain").is_ok());
+    }
+
+    // --- laps_dump auth-arg validation gate ---
+
+    #[tokio::test]
+    async fn laps_dump_rejects_missing_password_and_nt_hash() {
+        // Validation runs before netexec spawn — neither password nor
+        // nt_hash supplied means we bail with a clear error message rather
+        // than letting netexec fail anonymously.
+        let args = json!({
+            "target": "192.168.58.10",
+            "username": "alice",
+            "domain": "contoso.local",
+        });
+        let err = super::laps_dump(&args).await.unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("requires either 'password' or 'nt_hash'"),
+            "unexpected error: {err}"
+        );
     }
 
     // --- DEFAULT_SPRAY_USERNAMES ---

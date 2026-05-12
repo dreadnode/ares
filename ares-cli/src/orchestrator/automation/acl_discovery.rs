@@ -48,13 +48,12 @@ fn collect_acl_discovery_work(state: &StateInner) -> Vec<AclDiscoveryWork> {
     let mut items = Vec::new();
 
     for (domain, dc_ip) in &state.all_domains_with_dcs() {
-        // Skip dominated domains — once we own a domain there is nothing left
-        // for ACL escalation to discover there. Cross-trust ACL paths against
-        // un-owned domains still fire (they iterate other entries in
-        // all_domains_with_dcs).
-        if state.dominated_domains.contains(domain) {
-            continue;
-        }
+        // ACL discovery is read-only LDAP enumeration; safe (and required)
+        // to run on dominated domains so writeable-ACE primitives surface
+        // and feed the acl_abuse / rbcd / shadow_credentials / gpo_abuse
+        // chains for scoreboard tokenization. Destructive exploitation is
+        // still gated separately in `auto_dacl_abuse`.
+        //
         // Use separate dedup keys for cred vs hash attempts so a failed
         // password-based attempt (e.g., mislabeled credential domain)
         // doesn't permanently block the hash-based path.

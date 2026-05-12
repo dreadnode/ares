@@ -131,8 +131,10 @@ pub fn definitions() -> Vec<ToolDefinition> {
             name: "certipy_shadow".into(),
             description: "Exploit Shadow Credentials by adding a Key Credential to a target \
                 account's msDS-KeyCredentialLink attribute via Certipy, then authenticating \
-                with the resulting certificate. Provide either `password` or `hashes` for \
-                authentication."
+                with the resulting certificate. You MUST provide exactly one of `password` \
+                OR `hashes` — never pass an empty string for the unused field; omit it \
+                entirely. If the orchestrator handed you a plaintext password, pass \
+                `password` and DO NOT include `hashes` at all."
                 .into(),
             input_schema: json!({
                 "type": "object",
@@ -147,11 +149,11 @@ pub fn definitions() -> Vec<ToolDefinition> {
                     },
                     "password": {
                         "type": "string",
-                        "description": "Password for authentication. Optional if `hashes` is provided."
+                        "description": "Plaintext password for the source account. Use this when the orchestrator provides a `password` field — do NOT also pass `hashes`."
                     },
                     "hashes": {
                         "type": "string",
-                        "description": "NTLM hash for pass-the-hash (format: 'lmhash:nthash' or just ':nthash'). Use instead of password."
+                        "description": "NTLM hash for pass-the-hash (format: 'lmhash:nthash' or ':nthash'). Use ONLY when the orchestrator provides a `hash` / `nt_hash` field and NO password. Omit this field entirely — do not pass an empty string — when using `password`."
                     },
                     "dc_ip": {
                         "type": "string",

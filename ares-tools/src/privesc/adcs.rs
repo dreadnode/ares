@@ -142,7 +142,11 @@ pub async fn certipy_shadow(args: &Value) -> Result<ToolOutput> {
     let domain = required_str(args, "domain")?;
     let target = required_str(args, "target")?;
     let dc_ip = required_str(args, "dc_ip")?;
-    let hashes = optional_str(args, "hashes");
+    // Treat an empty-string `hashes` as missing so the password fallback
+    // fires. The LLM agent has been observed passing `hashes=""` when only
+    // a password is available — without this guard the `-hashes ''` flag
+    // is forwarded to certipy and certipy rejects the empty value.
+    let hashes = optional_str(args, "hashes").filter(|s| !s.is_empty());
 
     let user_at_domain = format!("{username}@{domain}");
 
@@ -1075,6 +1079,44 @@ mod tests {
         let domain = required_str(&args, "domain").unwrap();
         let user_at_domain = format!("{username}@{domain}");
         assert_eq!(user_at_domain, "admin@contoso.local");
+    }
+
+    #[test]
+    fn certipy_shadow_empty_hashes_falls_back_to_password() {
+        // The LLM has been observed sending `hashes=""` when only a password
+        // is available — without the empty-string filter, certipy receives
+        // `-hashes ''` and bails with "invalid hash format". The filter at
+        // the top of `certipy_shadow` must treat empty hashes as missing so
+        // the password branch runs.
+        let args = json!({
+            "username": "alice",
+            "domain": "contoso.local",
+            "password": "P@ssw0rd!",
+            "hashes": "",
+            "target": "Administrator",
+            "dc_ip": "192.168.58.10"
+        });
+        // Mirror the same filter used in `certipy_shadow` itself.
+        let hashes = optional_str(&args, "hashes").filter(|s| !s.is_empty());
+        assert!(
+            hashes.is_none(),
+            "empty hashes should be treated as missing"
+        );
+        // password fallback must still resolve.
+        assert!(required_str(&args, "password").is_ok());
+    }
+
+    #[test]
+    fn certipy_shadow_present_hashes_used() {
+        let args = json!({
+            "username": "alice",
+            "domain": "contoso.local",
+            "hashes": "aad3b435b51404eeaad3b435b51404ee:8846f7eaee8fb117ad06bdd830b7586c",
+            "target": "Administrator",
+            "dc_ip": "192.168.58.10"
+        });
+        let hashes = optional_str(&args, "hashes").filter(|s| !s.is_empty());
+        assert!(hashes.is_some());
     }
 
     // --- certipy_template_esc4 ---

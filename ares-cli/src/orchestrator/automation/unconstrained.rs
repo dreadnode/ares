@@ -12,7 +12,7 @@
 //! User accounts with unconstrained delegation (e.g. `sarah.connor`) are left to
 //! the LLM-driven exploit path since we can't determine the target host.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -33,6 +33,50 @@ const MAX_DUMP_ATTEMPTS: u32 = 3;
 
 /// Delay between successive dump retries for the same vuln.
 const DUMP_RETRY_DELAY: Duration = Duration::from_secs(60);
+
+/// True when an unconstrained-delegation machine host coincides with the
+/// DC we'd coerce *from* — the coerce-and-capture chain requires the DC
+/// to authenticate to a *different* unconstrained host whose LSASS we
+/// then dump for the captured TGT. When they're the same machine both
+/// PetitPotam (self-loop returns rpc_s_access_denied) and PrinterBug
+/// (ERROR_INVALID_HANDLE) fail, and even a successful self-coerce would
+/// require local admin on the DC — at which point dc_secretsdump is the
+/// canonical exploitation path. Emits a debug log explaining why the
+/// chain was skipped so the operator can distinguish "subsumed by
+/// dc_secretsdump" (we already own the domain) from "deferring (no
+/// self-coerce path)" (we don't).
+///
+/// User accounts (no trailing `$`) never trigger this skip — for them we
+/// route to the LLM exploit path regardless.
+fn skip_self_coerce_loop(
+    vuln_id: &str,
+    is_machine: bool,
+    dc_ip: Option<&str>,
+    host_ip: &str,
+    domain_lc: &str,
+    dominated_domains: &HashSet<String>,
+) -> bool {
+    if !is_machine {
+        return false;
+    }
+    if dc_ip.is_none_or(|ip| ip != host_ip) {
+        return false;
+    }
+    if dominated_domains.contains(domain_lc) {
+        debug!(
+            vuln_id = %vuln_id,
+            host = %host_ip,
+            "Unconstrained delegation host == DC — subsumed by dc_secretsdump"
+        );
+    } else {
+        debug!(
+            vuln_id = %vuln_id,
+            host = %host_ip,
+            "Unconstrained delegation host == DC — deferring (no self-coerce path)"
+        );
+    }
+    true
+}
 
 // Phase tracking (in-memory only — intentionally not persisted so restarts
 // re-trigger the chain, since cached TGTs expire quickly).
@@ -139,6 +183,17 @@ pub async fn auto_unconstrained_exploitation(
                         // where the user is logged in, or use S4U).
                         dc_ip.as_ref().cloned()?
                     };
+
+                    if skip_self_coerce_loop(
+                        &vuln.vuln_id,
+                        is_machine,
+                        dc_ip.as_deref(),
+                        &host_ip,
+                        &domain.to_lowercase(),
+                        &state.dominated_domains,
+                    ) {
+                        return None;
+                    }
 
                     // Find any non-quarantined credential with a password for this domain.
                     let credential = state
@@ -941,5 +996,108 @@ mod tests {
         assert!(phase.completed);
         assert!(phase.coercion_dispatched_at.is_none());
         assert_eq!(phase.dump_attempts, 0);
+    }
+
+    // skip_self_coerce_loop
+
+    #[test]
+    fn skip_self_coerce_loop_user_account_never_skips() {
+        let dominated = HashSet::new();
+        // is_machine = false → always returns false regardless of IP overlap.
+        assert!(!skip_self_coerce_loop(
+            "vuln-1",
+            false,
+            Some("192.168.58.10"),
+            "192.168.58.10",
+            "contoso.local",
+            &dominated,
+        ));
+    }
+
+    #[test]
+    fn skip_self_coerce_loop_no_dc_ip_no_skip() {
+        let dominated = HashSet::new();
+        assert!(!skip_self_coerce_loop(
+            "vuln-1",
+            true,
+            None,
+            "192.168.58.10",
+            "contoso.local",
+            &dominated,
+        ));
+    }
+
+    #[test]
+    fn skip_self_coerce_loop_distinct_dc_no_skip() {
+        let dominated = HashSet::new();
+        // DC and unconstrained host are different machines — the chain is
+        // viable, so we don't skip.
+        assert!(!skip_self_coerce_loop(
+            "vuln-1",
+            true,
+            Some("192.168.58.10"),
+            "192.168.58.20",
+            "contoso.local",
+            &dominated,
+        ));
+    }
+
+    #[test]
+    fn skip_self_coerce_loop_dc_equals_host_skips_when_dominated() {
+        let mut dominated = HashSet::new();
+        dominated.insert("contoso.local".to_string());
+        // host == DC AND domain already dominated → skip (subsumed by
+        // dc_secretsdump).
+        assert!(skip_self_coerce_loop(
+            "vuln-1",
+            true,
+            Some("192.168.58.10"),
+            "192.168.58.10",
+            "contoso.local",
+            &dominated,
+        ));
+    }
+
+    #[test]
+    fn skip_self_coerce_loop_dc_equals_host_skips_when_not_dominated() {
+        let dominated = HashSet::new();
+        // host == DC and domain NOT dominated → still skip, but the debug
+        // log explains it's a defer (no self-coerce path) rather than a
+        // subsumption.
+        assert!(skip_self_coerce_loop(
+            "vuln-1",
+            true,
+            Some("192.168.58.10"),
+            "192.168.58.10",
+            "contoso.local",
+            &dominated,
+        ));
+    }
+
+    #[test]
+    fn skip_self_coerce_loop_dominance_check_is_case_sensitive_on_input() {
+        // Caller is responsible for lowercasing the domain before passing it
+        // in — the helper compares with the dominated_domains set as-is.
+        let mut dominated = HashSet::new();
+        dominated.insert("contoso.local".to_string());
+        // Lowercase input matches → skip path.
+        assert!(skip_self_coerce_loop(
+            "vuln-1",
+            true,
+            Some("192.168.58.10"),
+            "192.168.58.10",
+            "contoso.local",
+            &dominated,
+        ));
+        // Uppercase input does NOT match — but skip still fires because
+        // host == DC; only the log branch differs.
+        assert!(skip_self_coerce_loop(
+            "vuln-1",
+            true,
+            Some("192.168.58.10"),
+            "192.168.58.10",
+            "CONTOSO.LOCAL",
+            &dominated,
+        ));
     }
 }
