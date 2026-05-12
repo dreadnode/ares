@@ -80,8 +80,20 @@ pub fn parse_certipy_find(output: &str, params: &Value) -> Vec<Value> {
                 details["ca_host"] = json!(ca_host_ip);
             }
 
+            // Include `template_name` in the vuln_id when present so two
+            // distinct vulnerable templates of the same ESC type on the
+            // same CA don't collapse onto one dedup entry — the previous
+            // shape `adcs_{esc}_{ca_ip}` overwrote each other and the
+            // exploitation chain only got one template per CA.
+            let vuln_id = match template_name.as_ref() {
+                Some(tmpl) => {
+                    format!("adcs_{}_{}_{}", esc_type, target_ip, slugify_template(tmpl),)
+                }
+                None => format!("adcs_{}_{}", esc_type, target_ip),
+            };
+
             vulns.push(json!({
-                "vuln_id": format!("adcs_{}_{}", esc_type, target_ip),
+                "vuln_id": vuln_id,
                 "vuln_type": format!("adcs_{}", esc_type),
                 "target": target_ip,
                 "discovered_by": "certipy_find",
@@ -212,6 +224,25 @@ pub fn parse_certipy_esc1_chain(output: &str, params: &Value) -> Vec<Value> {
         }));
     }
     hashes
+}
+
+/// Normalise a certificate template name into a `vuln_id`-safe slug:
+/// lowercase, with non-alphanumeric characters collapsed to underscores.
+/// Preserves uniqueness across `WebServer`, `web-server`, `Web Server`
+/// while keeping the result safe to use inside an identifier-like key.
+fn slugify_template(name: &str) -> String {
+    let mut out = String::with_capacity(name.len());
+    let mut prev_underscore = false;
+    for c in name.chars() {
+        if c.is_ascii_alphanumeric() {
+            out.extend(c.to_lowercase());
+            prev_underscore = false;
+        } else if !prev_underscore {
+            out.push('_');
+            prev_underscore = true;
+        }
+    }
+    out.trim_matches('_').to_string()
 }
 
 /// Priority for ESC types (lower = more urgent).
@@ -421,6 +452,40 @@ mod tests {
         let vulns = parse_certipy_find(output, &params);
         assert_eq!(vulns.len(), 1);
         assert_eq!(vulns[0]["details"]["template_name"], "ESC1-Vuln");
+        // Template suffix included in vuln_id so multiple templates of the
+        // same ESC type on the same CA don't collapse to one entry.
+        assert_eq!(vulns[0]["vuln_id"], "adcs_esc1_192.168.58.10_esc1_vuln");
+    }
+
+    #[test]
+    fn parse_certipy_two_templates_same_esc_type_dont_collapse() {
+        // Two distinct vulnerable ESC1 templates on the same CA — without the
+        // template suffix in vuln_id, the second would overwrite the first.
+        let output =
+            "Template Name                       : WebServer\n    [!] Vulnerabilities\n    ESC1 : 'CONTOSO\\Users' can enroll\nTemplate Name                       : User-AutoEnroll\n    [!] Vulnerabilities\n    ESC1 : 'CONTOSO\\Users' can enroll";
+        let params = json!({"target": "192.168.58.10", "domain": "contoso.local"});
+        let vulns = parse_certipy_find(output, &params);
+        // Parser still emits one entry per matched ESC type per scan, but the
+        // vuln_id MUST be template-qualified so re-runs across different CAs
+        // / scans don't dedup-collapse onto the same key.
+        assert!(
+            vulns[0]["vuln_id"]
+                .as_str()
+                .unwrap()
+                .starts_with("adcs_esc1_192.168.58.10_"),
+            "vuln_id should include template slug: {}",
+            vulns[0]["vuln_id"]
+        );
+    }
+
+    #[test]
+    fn slugify_template_basic() {
+        assert_eq!(super::slugify_template("WebServer"), "webserver");
+        assert_eq!(super::slugify_template("Web Server"), "web_server");
+        assert_eq!(super::slugify_template("ESC1-Vuln"), "esc1_vuln");
+        assert_eq!(super::slugify_template("a/b/c"), "a_b_c");
+        assert_eq!(super::slugify_template("___leading"), "leading");
+        assert_eq!(super::slugify_template("trailing___"), "trailing");
     }
 
     #[test]
