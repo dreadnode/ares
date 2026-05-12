@@ -1288,3 +1288,108 @@ fn ccache_evidence_empty_payload() {
     assert!(!result_has_ccache_evidence(&None));
     assert!(!result_has_ccache_evidence(&Some(json!({}))));
 }
+
+#[test]
+fn is_gmsa_principal_matches_trailing_dollar_with_gmsa_name() {
+    use super::is_gmsa_principal;
+    assert!(is_gmsa_principal("gmsaDragon$"));
+    assert!(is_gmsa_principal("GMSA_WEB$"));
+    assert!(is_gmsa_principal("svc_gmsa$"));
+}
+
+#[test]
+fn is_gmsa_principal_rejects_machine_account_without_gmsa_substring() {
+    use super::is_gmsa_principal;
+    // Plain machine accounts end with $ but are not gMSA.
+    assert!(!is_gmsa_principal("DC01$"));
+    assert!(!is_gmsa_principal("WEB01$"));
+}
+
+#[test]
+fn is_gmsa_principal_rejects_user_without_trailing_dollar() {
+    use super::is_gmsa_principal;
+    // A user named "gmsa_admin" (no trailing $) is a regular user, not gMSA.
+    assert!(!is_gmsa_principal("gmsa_admin"));
+    assert!(!is_gmsa_principal(""));
+    assert!(!is_gmsa_principal("$"));
+}
+
+#[test]
+fn gmsa_exploit_token_strips_dollar_and_lowercases() {
+    use super::gmsa_exploit_token;
+    assert_eq!(gmsa_exploit_token("gmsaDragon$"), "gmsa_gmsadragon");
+    assert_eq!(gmsa_exploit_token("GMSA_WEB$"), "gmsa_gmsa_web");
+    assert_eq!(gmsa_exploit_token("svc_gmsa$"), "gmsa_svc_gmsa");
+}
+
+#[test]
+fn gmsa_exploit_token_converges_with_enumeration_format() {
+    // Enumeration path emits `gmsa_{name}` lowercased; secretsdump-surfaced
+    // path must produce the same key so the exploited-set entry deduplicates
+    // across paths and the scoreboard counts the primitive once.
+    use super::gmsa_exploit_token;
+    assert_eq!(gmsa_exploit_token("gmsaDragon$"), "gmsa_gmsadragon");
+}
+
+#[test]
+fn seimpersonate_signal_detects_enabled_in_whoami_priv_output() {
+    use super::result_has_seimpersonate_signal;
+    // Real-world `whoami /priv` row format from a service account context.
+    let payload = json!({
+        "output": "PRIVILEGES INFORMATION\n\
+                   ----------------------\n\
+                   Privilege Name                Description                                 State\n\
+                   ============================= =========================================== ========\n\
+                   SeAssignPrimaryTokenPrivilege Replace a process level token               Disabled\n\
+                   SeImpersonatePrivilege        Impersonate a client after authentication   Enabled\n\
+                   SeIncreaseQuotaPrivilege      Adjust memory quotas for a process          Disabled"
+    });
+    assert!(result_has_seimpersonate_signal(&Some(payload)));
+}
+
+#[test]
+fn seimpersonate_signal_ignores_disabled_priv() {
+    use super::result_has_seimpersonate_signal;
+    let payload = json!({
+        "output": "SeImpersonatePrivilege  Impersonate a client after authentication  Disabled"
+    });
+    assert!(!result_has_seimpersonate_signal(&Some(payload)));
+}
+
+#[test]
+fn seimpersonate_signal_ignores_bare_mention_without_state() {
+    use super::result_has_seimpersonate_signal;
+    // LLM commentary that names the privilege but doesn't prove it's held.
+    let payload = json!({
+        "summary": "Plan: check for SeImpersonatePrivilege if we get xp_cmdshell working"
+    });
+    assert!(!result_has_seimpersonate_signal(&Some(payload)));
+}
+
+#[test]
+fn seimpersonate_signal_detects_in_tool_outputs_array() {
+    use super::result_has_seimpersonate_signal;
+    let payload = json!({
+        "tool_outputs": [
+            {"output": "whoami output:\nSeImpersonatePrivilege Impersonate a client Enabled"}
+        ]
+    });
+    assert!(result_has_seimpersonate_signal(&Some(payload)));
+}
+
+#[test]
+fn seimpersonate_signal_empty_payload() {
+    use super::result_has_seimpersonate_signal;
+    assert!(!result_has_seimpersonate_signal(&None));
+    assert!(!result_has_seimpersonate_signal(&Some(json!({}))));
+}
+
+#[test]
+fn seimpersonate_signal_case_insensitive() {
+    use super::result_has_seimpersonate_signal;
+    // Some shells/agents may upper- or lower-case the row.
+    let payload = json!({
+        "output": "seimpersonateprivilege   description text   ENABLED"
+    });
+    assert!(result_has_seimpersonate_signal(&Some(payload)));
+}

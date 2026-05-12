@@ -4,6 +4,7 @@ on:
   pull_request:
     branches:
       - main
+      - feat/more-attack-cov
     types:
       - opened
       - edited
