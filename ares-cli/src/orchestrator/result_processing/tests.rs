@@ -1232,6 +1232,48 @@ fn extract_locked_users_rejects_llm_narrative_tokens() {
 }
 
 #[test]
+fn is_gmsa_principal_matches_trailing_dollar_with_gmsa_name() {
+    use super::is_gmsa_principal;
+    assert!(is_gmsa_principal("gmsaDragon$"));
+    assert!(is_gmsa_principal("GMSA_WEB$"));
+    assert!(is_gmsa_principal("svc_gmsa$"));
+}
+
+#[test]
+fn is_gmsa_principal_rejects_machine_account_without_gmsa_substring() {
+    use super::is_gmsa_principal;
+    // Plain machine accounts end with $ but are not gMSA.
+    assert!(!is_gmsa_principal("DC01$"));
+    assert!(!is_gmsa_principal("WEB01$"));
+}
+
+#[test]
+fn is_gmsa_principal_rejects_user_without_trailing_dollar() {
+    use super::is_gmsa_principal;
+    // A user named "gmsa_admin" (no trailing $) is a regular user, not gMSA.
+    assert!(!is_gmsa_principal("gmsa_admin"));
+    assert!(!is_gmsa_principal(""));
+    assert!(!is_gmsa_principal("$"));
+}
+
+#[test]
+fn gmsa_exploit_token_strips_dollar_and_lowercases() {
+    use super::gmsa_exploit_token;
+    assert_eq!(gmsa_exploit_token("gmsaDragon$"), "gmsa_gmsadragon");
+    assert_eq!(gmsa_exploit_token("GMSA_WEB$"), "gmsa_gmsa_web");
+    assert_eq!(gmsa_exploit_token("svc_gmsa$"), "gmsa_svc_gmsa");
+}
+
+#[test]
+fn gmsa_exploit_token_converges_with_enumeration_format() {
+    // Enumeration path emits `gmsa_{name}` lowercased; secretsdump-surfaced
+    // path must produce the same key so the exploited-set entry deduplicates
+    // across paths and the scoreboard counts the primitive once.
+    use super::gmsa_exploit_token;
+    assert_eq!(gmsa_exploit_token("gmsaDragon$"), "gmsa_gmsadragon");
+}
+
+#[test]
 fn seimpersonate_signal_detects_enabled_in_whoami_priv_output() {
     use super::result_has_seimpersonate_signal;
     // Real-world `whoami /priv` row format from a service account context.

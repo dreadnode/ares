@@ -40,9 +40,81 @@ fn forest_trust_vuln_id(source_domain: &str, target_domain: &str) -> String {
     )
 }
 
+/// Maps a `source → target` trust escalation to its scoreboard tokens:
+/// the `vuln_id`, the `vuln_type` enum used by the exploit gate, and the
+/// human-readable note prefix written into the vulnerability details.
+///
+/// Intra-forest (child↔parent) and inter-forest are distinct MITRE
+/// primitives — both ride the inter-realm-TGT + secretsdump mechanic
+/// internally, but downstream scoreboard tokenization, suppression rules
+/// (SID filtering), and exploitation gates branch on this distinction.
+fn classify_trust_escalation(
+    source_domain: &str,
+    target_domain: &str,
+) -> (String, &'static str, &'static str) {
+    if is_inter_forest(source_domain, target_domain) {
+        (
+            forest_trust_vuln_id(source_domain, target_domain),
+            "forest_trust_escalation",
+            "Forest trust escalation",
+        )
+    } else {
+        (
+            child_to_parent_vuln_id(source_domain, target_domain),
+            "child_to_parent",
+            "Child-to-parent escalation",
+        )
+    }
+}
+
 /// Build a trust account name from a flat name (e.g. "FABRIKAM" -> "FABRIKAM$").
 fn trust_account_name(flat_name: &str) -> String {
     format!("{}$", flat_name.to_uppercase())
+}
+
+/// Assemble the `VulnerabilityInfo` for a single trust-escalation work item.
+///
+/// Splits out so the (vuln_id, vuln_type, note prefix) tuple emitted by
+/// [`classify_trust_escalation`] plus the trust_account, source, target, and
+/// target_dc_ip fields can be unit-tested without running the async dispatch
+/// loop. Always returns a vuln with `priority = 1` and
+/// `discovered_by = "trust_automation"`.
+fn build_trust_escalation_vuln(
+    source_domain: &str,
+    target_domain: &str,
+    trust_account: &str,
+    target_dc_ip: &str,
+) -> ares_core::models::VulnerabilityInfo {
+    let (vuln_id, vuln_type, note_kind) = classify_trust_escalation(source_domain, target_domain);
+    let mut details = std::collections::HashMap::new();
+    details.insert(
+        "source_domain".into(),
+        serde_json::Value::String(source_domain.to_string()),
+    );
+    details.insert(
+        "target_domain".into(),
+        serde_json::Value::String(target_domain.to_string()),
+    );
+    details.insert(
+        "trust_account".into(),
+        serde_json::Value::String(trust_account.to_string()),
+    );
+    details.insert(
+        "note".into(),
+        serde_json::Value::String(format!(
+            "{note_kind} via {trust_account} trust key — inter-realm ticket + secretsdump"
+        )),
+    );
+    ares_core::models::VulnerabilityInfo {
+        vuln_id,
+        vuln_type: vuln_type.to_string(),
+        target: target_dc_ip.to_string(),
+        discovered_by: "trust_automation".to_string(),
+        discovered_at: chrono::Utc::now(),
+        details,
+        recommended_agent: String::new(),
+        priority: 1,
+    }
 }
 
 /// Returns true when source and target are in different forests
@@ -1423,8 +1495,6 @@ pub async fn auto_trust_follow(dispatcher: Arc<Dispatcher>, mut shutdown: watch:
         };
 
         for item in work {
-            let vuln_id = forest_trust_vuln_id(&item.source_domain, &item.target_domain);
-
             // Defer dispatch when the target DC IP is unknown: impacket needs
             // a routable -target-ip for both create_inter_realm_ticket and the
             // forge-and-present secretsdump fallback. Passing the bare domain
@@ -1442,38 +1512,14 @@ pub async fn auto_trust_follow(dispatcher: Arc<Dispatcher>, mut shutdown: watch:
                     continue;
                 }
             };
-            let trust_target = target_dc_ip.clone();
+            let vuln = build_trust_escalation_vuln(
+                &item.source_domain,
+                &item.target_domain,
+                &item.hash.username,
+                &target_dc_ip,
+            );
+            let vuln_id = vuln.vuln_id.clone();
             {
-                let mut details = std::collections::HashMap::new();
-                details.insert(
-                    "source_domain".into(),
-                    serde_json::Value::String(item.source_domain.clone()),
-                );
-                details.insert(
-                    "target_domain".into(),
-                    serde_json::Value::String(item.target_domain.clone()),
-                );
-                details.insert(
-                    "trust_account".into(),
-                    serde_json::Value::String(item.hash.username.clone()),
-                );
-                details.insert(
-                    "note".into(),
-                    serde_json::Value::String(format!(
-                        "Forest trust escalation via {} trust key — inter-realm ticket + secretsdump",
-                        item.hash.username
-                    )),
-                );
-                let vuln = ares_core::models::VulnerabilityInfo {
-                    vuln_id: vuln_id.clone(),
-                    vuln_type: "forest_trust_escalation".to_string(),
-                    target: trust_target,
-                    discovered_by: "trust_automation".to_string(),
-                    discovered_at: chrono::Utc::now(),
-                    details,
-                    recommended_agent: String::new(),
-                    priority: 1,
-                };
                 let _ = dispatcher
                     .state
                     .publish_vulnerability(&dispatcher.queue, vuln)
@@ -1879,7 +1925,6 @@ pub async fn auto_trust_follow(dispatcher: Arc<Dispatcher>, mut shutdown: watch:
                 }
             }
             let _ = ticket_path; // ccache path is internal to the tool
-            let _ = trust_target;
 
             let call = ToolCall {
                 id: format!("forge_inter_realm_{}", uuid::Uuid::new_v4().simple()),
@@ -2819,5 +2864,114 @@ mod tests {
         });
         let got = resolve_target_fqdn_from_signals(&s, "FABRIKAM", "contoso.local");
         assert!(got.is_none());
+    }
+
+    // classify_trust_escalation
+
+    #[test]
+    fn classify_trust_escalation_intra_forest_child_to_parent() {
+        let (vuln_id, vuln_type, note_kind) =
+            classify_trust_escalation("child.contoso.local", "contoso.local");
+        assert_eq!(vuln_id, "child_to_parent_child_contoso_local_contoso_local");
+        assert_eq!(vuln_type, "child_to_parent");
+        assert_eq!(note_kind, "Child-to-parent escalation");
+    }
+
+    #[test]
+    fn classify_trust_escalation_intra_forest_parent_to_child() {
+        let (vuln_id, vuln_type, note_kind) =
+            classify_trust_escalation("contoso.local", "child.contoso.local");
+        assert_eq!(vuln_id, "child_to_parent_contoso_local_child_contoso_local");
+        assert_eq!(vuln_type, "child_to_parent");
+        assert_eq!(note_kind, "Child-to-parent escalation");
+    }
+
+    #[test]
+    fn classify_trust_escalation_inter_forest() {
+        let (vuln_id, vuln_type, note_kind) =
+            classify_trust_escalation("contoso.local", "fabrikam.local");
+        assert_eq!(vuln_id, "forest_trust_contoso.local_fabrikam.local");
+        assert_eq!(vuln_type, "forest_trust_escalation");
+        assert_eq!(note_kind, "Forest trust escalation");
+    }
+
+    // build_trust_escalation_vuln
+
+    #[test]
+    fn trust_vuln_intra_forest_uses_child_to_parent_tokens() {
+        let v = build_trust_escalation_vuln(
+            "child.contoso.local",
+            "contoso.local",
+            "CHILD$",
+            "192.168.58.20",
+        );
+        assert_eq!(v.vuln_type, "child_to_parent");
+        assert_eq!(
+            v.vuln_id,
+            "child_to_parent_child_contoso_local_contoso_local"
+        );
+        assert_eq!(v.target, "192.168.58.20");
+        assert_eq!(v.priority, 1);
+        assert_eq!(v.discovered_by, "trust_automation");
+        let note = v.details.get("note").and_then(|x| x.as_str()).unwrap();
+        assert!(note.starts_with("Child-to-parent escalation via CHILD$ trust key"));
+        assert_eq!(
+            v.details.get("source_domain").and_then(|x| x.as_str()),
+            Some("child.contoso.local")
+        );
+        assert_eq!(
+            v.details.get("target_domain").and_then(|x| x.as_str()),
+            Some("contoso.local")
+        );
+        assert_eq!(
+            v.details.get("trust_account").and_then(|x| x.as_str()),
+            Some("CHILD$")
+        );
+    }
+
+    #[test]
+    fn trust_vuln_inter_forest_uses_forest_trust_tokens() {
+        let v = build_trust_escalation_vuln(
+            "contoso.local",
+            "fabrikam.local",
+            "FABRIKAM$",
+            "192.168.58.40",
+        );
+        assert_eq!(v.vuln_type, "forest_trust_escalation");
+        assert_eq!(v.vuln_id, "forest_trust_contoso.local_fabrikam.local");
+        assert_eq!(v.target, "192.168.58.40");
+        let note = v.details.get("note").and_then(|x| x.as_str()).unwrap();
+        assert!(note.starts_with("Forest trust escalation via FABRIKAM$ trust key"));
+    }
+
+    #[test]
+    fn trust_vuln_carries_source_target_and_trust_account_in_details() {
+        let v = build_trust_escalation_vuln(
+            "contoso.local",
+            "fabrikam.local",
+            "FABRIKAM$",
+            "192.168.58.40",
+        );
+        // Required scoreboard fields populated.
+        assert!(v.details.contains_key("source_domain"));
+        assert!(v.details.contains_key("target_domain"));
+        assert!(v.details.contains_key("trust_account"));
+        assert!(v.details.contains_key("note"));
+    }
+
+    #[test]
+    fn classify_trust_escalation_same_domain_treated_as_intra() {
+        // is_inter_forest returns false for s == t, so the helper falls through
+        // to the intra-forest branch. The auto loop suppresses self-trust later;
+        // here we just pin the classification.
+        let (_, vuln_type, _) = classify_trust_escalation("contoso.local", "contoso.local");
+        assert_eq!(vuln_type, "child_to_parent");
+    }
+
+    #[test]
+    fn classify_trust_escalation_case_insensitive() {
+        let (vuln_id_a, _, _) = classify_trust_escalation("CHILD.Contoso.Local", "Contoso.Local");
+        let (vuln_id_b, _, _) = classify_trust_escalation("child.contoso.local", "contoso.local");
+        assert_eq!(vuln_id_a, vuln_id_b);
     }
 }
