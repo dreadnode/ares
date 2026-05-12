@@ -11,6 +11,7 @@ mod dedup;
 mod inner;
 mod persistence;
 mod publishing;
+mod replay;
 mod shared;
 
 // Re-export everything that was publicly visible from the old single file.

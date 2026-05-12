@@ -185,10 +185,33 @@ async fn run_inner() -> Result<()> {
         }
     };
 
-    shared_state
-        .load_from_redis(&queue)
-        .await
-        .context("Failed to load state from Redis")?;
+    // Phase 4 (opt-in): replay state from the JetStream event log instead of
+    // loading from Redis. Falls through to Redis on failure or when the env
+    // var is unset, so the default startup path is unchanged.
+    let replay_enabled = std::env::var("ARES_USE_EVENT_LOG_REPLAY").as_deref() == Ok("1");
+    let replayed = match (replay_enabled, nats_broker.as_ref()) {
+        (true, Some(broker)) => match shared_state.load_from_event_log(broker).await {
+            Ok(n) => {
+                info!(events = n, "Loaded state from JetStream event log replay");
+                true
+            }
+            Err(e) => {
+                warn!(err = %e, "Event log replay failed; falling back to Redis");
+                false
+            }
+        },
+        (true, None) => {
+            warn!("ARES_USE_EVENT_LOG_REPLAY=1 but no NATS broker; falling back to Redis");
+            false
+        }
+        (false, _) => false,
+    };
+    if !replayed {
+        shared_state
+            .load_from_redis(&queue)
+            .await
+            .context("Failed to load state from Redis")?;
+    }
 
     {
         let mut state = shared_state.write().await;
