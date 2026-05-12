@@ -61,26 +61,69 @@ pub(crate) fn dedup_key_hash(host: &str, hash: &ares_core::models::Hash) -> Stri
     )
 }
 
+/// Returns true when `host` advertises an LDAP service (port 389 or 636,
+/// or a service line containing `ldap`). LDAP availability is the
+/// authoritative signal that a host is a DC (or CA-co-located DC) and is
+/// a valid certipy_find target even when share enumeration hasn't surfaced
+/// a `CertEnroll` entry yet.
+fn host_has_ldap(host: &ares_core::models::Host) -> bool {
+    host.services.iter().any(|s| {
+        let l = s.to_lowercase();
+        l.starts_with("389/") || l.starts_with("636/") || l.contains("ldap")
+    })
+}
+
 /// Collect ADCS enumeration work items from current state.
 ///
 /// Pure logic extracted from `auto_adcs_enumeration` so it can be unit-tested
 /// without needing a `Dispatcher` or async runtime.
+///
+/// Candidate hosts come from two sources:
+///   1. Confirmed CA hosts — any host with a `CertEnroll` share. These are
+///      certainly running ADCS web enrollment.
+///   2. LDAP-open hosts — any DC-like host where `auto_share_enumeration`
+///      didn't (yet) surface `CertEnroll`. Cross-forest SMB auth often fails
+///      with access-denied and silently disables ADCS enumeration. Falling
+///      back to LDAP-only hosts lets certipy_find probe the CA via LDAP
+///      directly even when SMB share-listing failed.
 fn collect_adcs_work(state: &StateInner) -> Vec<AdcsWork> {
     if state.credentials.is_empty() && state.hashes.is_empty() {
         return Vec::new();
     }
 
-    state
+    // Source 1: hosts with confirmed CertEnroll share.
+    let cert_share_hosts: Vec<String> = state
         .shares
         .iter()
         .filter(|s| s.name.to_lowercase() == "certenroll")
-        .filter_map(|s| {
-            let host_lower = s.host.to_lowercase();
+        .map(|s| s.host.clone())
+        .collect();
+
+    // Source 2: LDAP-open hosts not already covered by a CertEnroll share.
+    // These are tried with the same credential/hash selection logic; if the
+    // host doesn't actually run ADCS, certipy_find will return nothing and
+    // the dedup key marks it as processed (no further attempts).
+    let cert_share_set: std::collections::HashSet<String> =
+        cert_share_hosts.iter().cloned().collect();
+    let ldap_fallback_hosts: Vec<String> = state
+        .hosts
+        .iter()
+        .filter(|h| host_has_ldap(h) && !cert_share_set.contains(&h.ip))
+        .map(|h| h.ip.clone())
+        .collect();
+
+    let mut candidate_hosts = cert_share_hosts;
+    candidate_hosts.extend(ldap_fallback_hosts);
+
+    candidate_hosts
+        .into_iter()
+        .filter_map(|host_ip| {
+            let host_lower = host_ip.to_lowercase();
 
             let domain = state
                 .hosts
                 .iter()
-                .find(|h| h.ip == s.host || h.hostname.to_lowercase() == host_lower)
+                .find(|h| h.ip == host_ip || h.hostname.to_lowercase() == host_lower)
                 .and_then(|h| extract_domain_from_fqdn(&h.hostname))
                 .and_then(|d| {
                     if state.domains.iter().any(|known| known.to_lowercase() == d) {
@@ -151,7 +194,7 @@ fn collect_adcs_work(state: &StateInner) -> Vec<AdcsWork> {
                 }));
                 candidates
                     .into_iter()
-                    .find(|c| !state.is_processed(DEDUP_ADCS_SERVERS, &dedup_key_cred(&s.host, c)))
+                    .find(|c| !state.is_processed(DEDUP_ADCS_SERVERS, &dedup_key_cred(&host_ip, c)))
                     .cloned()
             };
 
@@ -203,7 +246,7 @@ fn collect_adcs_work(state: &StateInner) -> Vec<AdcsWork> {
                 );
                 candidates
                     .into_iter()
-                    .find(|h| !state.is_processed(DEDUP_ADCS_SERVERS, &dedup_key_hash(&s.host, h)))
+                    .find(|h| !state.is_processed(DEDUP_ADCS_SERVERS, &dedup_key_hash(&host_ip, h)))
                     .cloned()
             } else {
                 None
@@ -214,8 +257,8 @@ fn collect_adcs_work(state: &StateInner) -> Vec<AdcsWork> {
             }
 
             let dedup_key = match (&cred, &hash_pick) {
-                (Some(c), _) => dedup_key_cred(&s.host, c),
-                (None, Some(h)) => dedup_key_hash(&s.host, h),
+                (Some(c), _) => dedup_key_cred(&host_ip, c),
+                (None, Some(h)) => dedup_key_hash(&host_ip, h),
                 (None, None) => return None,
             };
 
@@ -239,7 +282,7 @@ fn collect_adcs_work(state: &StateInner) -> Vec<AdcsWork> {
             });
 
             Some(AdcsWork {
-                host_ip: s.host.clone(),
+                host_ip: host_ip.clone(),
                 dedup_key,
                 dc_ip,
                 domain,
@@ -522,6 +565,77 @@ mod tests {
         assert_eq!(work[0].host_ip, "192.168.58.50");
         assert_eq!(work[0].domain, "contoso.local");
         assert_eq!(work[0].credential.username, "admin");
+    }
+
+    #[test]
+    fn collect_ldap_open_host_produces_work_even_without_certenroll_share() {
+        // LDAP-fallback path: a DC with port 389 open but no CertEnroll share
+        // discovered (e.g., share enum failed cross-forest). The chain should
+        // still emit a certipy_find work item against it.
+        let mut state = StateInner::new("test-op".into());
+        let mut dc = make_host("192.168.58.20", "dc02.fabrikam.local", true);
+        dc.services.push("389/tcp ldap".into());
+        state.hosts.push(dc);
+        state.domains.push("fabrikam.local".into());
+        state
+            .credentials
+            .push(make_credential("alice", "P@ssw0rd!", "fabrikam.local")); // pragma: allowlist secret
+        let work = collect_adcs_work(&state);
+        assert_eq!(work.len(), 1, "ldap-open host should yield ADCS work");
+        assert_eq!(work[0].host_ip, "192.168.58.20");
+        assert_eq!(work[0].domain, "fabrikam.local");
+    }
+
+    #[test]
+    fn collect_skips_ldap_host_already_covered_by_certenroll_share() {
+        // When the same host has BOTH a CertEnroll share AND LDAP open, we
+        // should emit exactly one work item (no double-dispatch).
+        let mut state = StateInner::new("test-op".into());
+        state.shares.push(make_share("192.168.58.50", "CertEnroll"));
+        let mut ca = make_host("192.168.58.50", "ca01.contoso.local", false);
+        ca.services.push("389/tcp ldap".into());
+        state.hosts.push(ca);
+        state.domains.push("contoso.local".into());
+        state
+            .credentials
+            .push(make_credential("admin", "P@ssw0rd!", "contoso.local")); // pragma: allowlist secret
+        let work = collect_adcs_work(&state);
+        assert_eq!(work.len(), 1, "ldap-fallback must not duplicate share path");
+    }
+
+    #[test]
+    fn collect_skips_host_without_ldap_or_certenroll() {
+        // A plain SMB-only file server has no LDAP and no CertEnroll share —
+        // not a candidate for ADCS enumeration.
+        let mut state = StateInner::new("test-op".into());
+        let mut fs = make_host("192.168.58.40", "fs01.contoso.local", false);
+        fs.services.push("445/tcp microsoft-ds".into());
+        state.hosts.push(fs);
+        state.domains.push("contoso.local".into());
+        state
+            .credentials
+            .push(make_credential("admin", "P@ssw0rd!", "contoso.local")); // pragma: allowlist secret
+        let work = collect_adcs_work(&state);
+        assert!(
+            work.is_empty(),
+            "non-LDAP host should not be an ADCS candidate"
+        );
+    }
+
+    #[test]
+    fn host_has_ldap_detects_port_and_service() {
+        let mut h = make_host("192.168.58.10", "dc01.contoso.local", true);
+        assert!(!host_has_ldap(&h));
+        h.services.push("389/tcp ldap".into());
+        assert!(host_has_ldap(&h));
+
+        let mut h2 = make_host("192.168.58.11", "dc02.contoso.local", true);
+        h2.services.push("636/tcp ssl/ldap".into());
+        assert!(host_has_ldap(&h2));
+
+        let mut h3 = make_host("192.168.58.12", "ws01.contoso.local", false);
+        h3.services.push("445/tcp microsoft-ds".into());
+        assert!(!host_has_ldap(&h3));
     }
 
     #[test]
