@@ -380,6 +380,12 @@ struct RunOptions {
     /// invocations across worker processes; unit tests set `false` so they
     /// can run in parallel without fighting over the loopback sentinel port.
     acquire_host_lock: bool,
+    /// How long to wait for port 445 to become free after
+    /// `cleanup_stale_listeners` before bailing with `RELAY_BIND_BUSY`. A
+    /// TIME_WAIT socket from a prior bind typically clears in ~30s on
+    /// Linux; an unmanaged smbd / samba-vfs holder never clears, so we
+    /// surface the situation rather than letting ntlmrelayx crash.
+    bind_check: Duration,
 }
 
 impl RunOptions {
@@ -394,7 +400,45 @@ impl RunOptions {
             relay_kill_timeout: Duration::from_secs(5),
             keep_workdir_on_capture: true,
             acquire_host_lock: true,
+            bind_check: Duration::from_secs(10),
         }
+    }
+}
+
+/// Wait for the given TCP port to become free on `0.0.0.0`. Polls every
+/// 250ms via a connect probe to `127.0.0.1:<port>`; a connection refused
+/// means nothing is listening. Returns `Ok(())` as soon as the port is
+/// free, `Err(reason)` if `timeout` elapses while it's still held.
+async fn wait_for_port_free(port: u16, timeout: Duration) -> std::result::Result<(), String> {
+    use tokio::net::TcpStream;
+    let deadline = std::time::Instant::now() + timeout;
+    let addr = format!("127.0.0.1:{port}");
+    let mut last_reason;
+    loop {
+        let probe =
+            tokio::time::timeout(Duration::from_millis(200), TcpStream::connect(&addr)).await;
+        match probe {
+            // Connection refused → no listener → port is free.
+            Ok(Err(e)) if e.kind() == std::io::ErrorKind::ConnectionRefused => {
+                return Ok(());
+            }
+            // Connected → something is listening on the port.
+            Ok(Ok(_)) => {
+                last_reason = format!("listener still bound on 127.0.0.1:{port}");
+            }
+            // Probe timeout — usually firewalled; treat as held for safety.
+            Err(_) => {
+                last_reason = format!("connect probe to 127.0.0.1:{port} timed out");
+            }
+            // Other connect error — surface verbatim.
+            Ok(Err(e)) => {
+                last_reason = format!("probe error: {e}");
+            }
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(last_reason);
+        }
+        sleep(Duration::from_millis(250)).await;
     }
 }
 
@@ -683,6 +727,34 @@ async fn run_relay_and_coerce<P: CoerceProcs>(
     let coerce_log = workdir.join("coerce.log");
 
     procs.cleanup_stale_listeners(&workdir).await;
+
+    // Port 445 must be free before ntlmrelayx binds, or the spawn dies
+    // immediately with `OSError [Errno 98] Address already in use`. The
+    // pkill in `cleanup_stale_listeners` handles ntlmrelayx/Responder
+    // processes we started, but a non-impacket holder (system `smbd`,
+    // socket lingering in TIME_WAIT) survives. Poll the port and either
+    // wait it out or bail with a clear actionable error — both outcomes
+    // are better than feeding the LLM a generic bind-failed log.
+    //
+    // `bind_check == 0` disables the probe entirely (used by unit tests
+    // whose mock procs don't actually spawn ntlmrelayx).
+    if !opts.bind_check.is_zero() {
+        if let Err(busy) = wait_for_port_free(445, opts.bind_check).await {
+            return Ok(ToolOutput {
+                stdout: format!(
+                    "RELAY_BIND_BUSY\nport 445 still occupied after pkill + {ms}ms wait. \
+                     Either another SMB listener (smbd, samba-vfs, an unmanaged \
+                     ntlmrelayx) is holding it, or a TIME_WAIT socket from a prior \
+                     bind is lingering. Check with `ss -tlnp '( sport = :445 )'` on \
+                     the worker host. Last error: {busy}",
+                    ms = opts.bind_check.as_millis()
+                ),
+                stderr: String::new(),
+                exit_code: Some(0),
+                success: false,
+            });
+        }
+    }
 
     let target_url = format!("http://{}/certsrv/certfnsh.asp", cfg.ca_host);
     let mut relay = procs
@@ -1521,6 +1593,10 @@ mod tests {
             // Tests run in parallel and would otherwise fight over the
             // single host-wide loopback sentinel port.
             acquire_host_lock: false,
+            // Effectively skip the port-445 free check in tests — the mock
+            // CoerceProcs doesn't actually bind anywhere, and a non-zero
+            // wait_for_port_free probe would still slow the suite.
+            bind_check: Duration::from_millis(0),
         }
     }
 
@@ -1845,5 +1921,25 @@ MIIBlahSecondCert==\n\
         mock::push(mock::success());
         let args = json!({});
         assert!(ntlmrelayx_multirelay(&args).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn wait_for_port_free_returns_ok_when_port_unused() {
+        // High-numbered ephemeral port that nothing is listening on. The probe
+        // should connect-refused immediately and return Ok.
+        let port = 41446; // adjacent to RELAY_LOCK_PORT but unused
+        let r = super::wait_for_port_free(port, std::time::Duration::from_millis(500)).await;
+        assert!(r.is_ok(), "expected free port, got: {r:?}");
+    }
+
+    #[tokio::test]
+    async fn wait_for_port_free_returns_err_when_port_held() {
+        use tokio::net::TcpListener;
+        // Bind a listener so the probe sees it as held.
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let r = super::wait_for_port_free(port, std::time::Duration::from_millis(200)).await;
+        assert!(r.is_err(), "expected held port, got: {r:?}");
+        // Listener is dropped at end of scope, releasing the port.
     }
 }
