@@ -215,9 +215,19 @@ pub async fn process_completed_task(
             // evidence (discoveries from real tool stdout) corroborates the
             // exploit. The text heuristic catches obvious lies; the parser
             // check catches silent fabrication.
+            // Default evidence gate (parser-extracted discoveries). For
+            // ticket-only exploit chains (constrained/unconstrained
+            // delegation, RBCD) `getST` writes a `.ccache` to disk and
+            // emits a "Saving ticket in …" line — neither produces a
+            // credential/hash/host the regex parsers can attach to
+            // `discoveries`. Treat the ticket save as the success signal
+            // for those vuln types so the scoreboard credits the
+            // primitive on getST exit-0.
+            let has_ticket_evidence =
+                is_ticket_grant_vuln(&vuln_id) && result_has_ccache_evidence(&result.result);
             let actually_succeeded = result.success
                 && !result_text_indicates_failure(&result.result)
-                && result_has_parser_evidence(&result.result);
+                && (result_has_parser_evidence(&result.result) || has_ticket_evidence);
 
             if actually_succeeded {
                 info!(vuln_id = %vuln_id, task_id = %task_id, "Marking vulnerability as exploited");
@@ -554,6 +564,55 @@ fn parse_lockout_principal(line: &str) -> Option<(String, Option<String>)> {
 /// "Parser-extracted" means populated by ares-tools parsers running on real
 /// tool stdout — never LLM-fabricated. Used to ground state writes (e.g.
 /// `mark_exploited`) against actual evidence.
+/// True when `vuln_id` belongs to a primitive whose success is a saved
+/// Kerberos ticket rather than a structured discovery. `getST` /
+/// `impacket-ticketer` for these flows emit a "Saving ticket in
+/// `<principal>.ccache`" line and return exit-0 — no credential/hash/host
+/// the regex parsers can attach to `discoveries`. Used alongside
+/// `result_has_ccache_evidence` so the scoreboard credits the primitive
+/// on a clean getST run.
+fn is_ticket_grant_vuln(vuln_id: &str) -> bool {
+    let v = vuln_id.to_lowercase();
+    v.starts_with("constrained_delegation_")
+        || v.starts_with("unconstrained_delegation_")
+        || v.starts_with("rbcd_")
+        || v.starts_with("s4u_")
+}
+
+/// True when the result's raw tool output indicates a Kerberos ticket was
+/// successfully saved to disk. Recognises impacket's canonical line
+/// (`Saving ticket in <principal>.ccache`) and bare `.ccache` filenames in
+/// output blobs. Conservative — requires either the explicit "Saving
+/// ticket" preamble or a `.ccache` token to avoid crediting tasks that
+/// merely *reference* a ticket path in commentary.
+fn result_has_ccache_evidence(result: &Option<Value>) -> bool {
+    let Some(payload) = result.as_ref() else {
+        return false;
+    };
+    let mut texts: Vec<String> = Vec::new();
+    for key in &["tool_output", "output", "summary"] {
+        if let Some(s) = payload.get(*key).and_then(|v| v.as_str()) {
+            texts.push(s.to_string());
+        }
+    }
+    if let Some(arr) = payload.get("tool_outputs").and_then(|v| v.as_array()) {
+        for item in arr {
+            if let Some(s) = item.as_str() {
+                texts.push(s.to_string());
+            } else if let Some(s) = item.get("output").and_then(|v| v.as_str()) {
+                texts.push(s.to_string());
+            }
+        }
+    }
+    for text in texts {
+        let lower = text.to_lowercase();
+        if lower.contains("saving ticket in") && lower.contains(".ccache") {
+            return true;
+        }
+    }
+    false
+}
+
 fn result_has_parser_evidence(result: &Option<Value>) -> bool {
     let Some(payload) = result.as_ref() else {
         return false;
