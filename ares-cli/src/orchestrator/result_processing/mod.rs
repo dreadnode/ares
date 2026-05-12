@@ -384,10 +384,220 @@ pub async fn process_completed_task(
         }
     }
 
+    // NTLM Relay tokenization. The auto_ntlm_relay chain dispatches relay
+    // attacks (SMB→LDAP for shadow creds / RBCD, or SMB→ADCS for ESC8) as
+    // coercion-type tasks. When a relay succeeds the parser surfaces real
+    // credentials/hashes/tickets in `discoveries`, but no `ntlm_relay_*`
+    // token ever lands in `:exploited` because (a) the task_id starts with
+    // `coercion_`, not `exploit_`, and (b) the payload has no `vuln_id`.
+    // Recognise the relay technique here and emit a synthetic token so the
+    // scoreboard credits the primitive.
+    let task_technique = task_technique_from_pending(dispatcher, task_id).await;
+    if let Some(ref tech) = task_technique {
+        if (tech == "ntlm_relay_ldap" || tech == "ntlm_relay_adcs")
+            && result.success
+            && result_has_credential_evidence(&result.result)
+        {
+            let relay_target = task_relay_target_from_pending(dispatcher, task_id).await;
+            let target_label = relay_target
+                .clone()
+                .or_else(|| task_target_ip.clone())
+                .unwrap_or_else(|| "unknown".to_string());
+            let vuln_id = format!("ntlm_relay_{}", target_label.replace(['.', ':'], "_"));
+            let mut details = std::collections::HashMap::new();
+            details.insert("relay_target".into(), Value::String(target_label.clone()));
+            details.insert("relay_type".into(), Value::String(tech.clone()));
+            details.insert(
+                "note".into(),
+                Value::String(
+                    "NTLM relay succeeded — credentials/hashes captured from \
+                     coerced authentication. Scoreboard primitive credited."
+                        .into(),
+                ),
+            );
+            let vuln = ares_core::models::VulnerabilityInfo {
+                vuln_id: vuln_id.clone(),
+                vuln_type: "ntlm_relay".to_string(),
+                target: target_label.clone(),
+                discovered_by: "result_processing".to_string(),
+                discovered_at: chrono::Utc::now(),
+                details,
+                recommended_agent: "coercion".to_string(),
+                priority: 1,
+            };
+            let _ = dispatcher
+                .state
+                .publish_vulnerability(&dispatcher.queue, vuln)
+                .await;
+            if let Err(e) = dispatcher
+                .state
+                .mark_exploited(&dispatcher.queue, &vuln_id)
+                .await
+            {
+                warn!(err = %e, vuln_id = %vuln_id, "Failed to mark ntlm_relay exploited");
+            } else {
+                info!(
+                    vuln_id = %vuln_id,
+                    relay_target = %target_label,
+                    relay_type = %tech,
+                    task_id = %task_id,
+                    "NTLM relay succeeded — exploit token emitted"
+                );
+            }
+        }
+
+        // NTLMv1 downgrade tokenization. The `ntlmv1_downgrade_check` task is
+        // a read-only LDAP/registry probe — when its output confirms the DC
+        // permits NTLMv1 (LmCompatibilityLevel ≤ 2 / "NTLMv1 allowed"),
+        // discovery IS the achievement (the lab is misconfigured and the
+        // hash is trivially crackable). Tokenize on positive observation.
+        if tech == "ntlmv1_downgrade_check"
+            && result.success
+            && result_has_ntlmv1_signal(&result.result)
+        {
+            let dc_label = task_target_ip
+                .clone()
+                .unwrap_or_else(|| "unknown".to_string());
+            let vuln_id = format!("ntlmv1_{}", dc_label.replace(['.', ':'], "_"));
+            let mut details = std::collections::HashMap::new();
+            details.insert("target_ip".into(), Value::String(dc_label.clone()));
+            if let Some(ref td) = task_domain {
+                details.insert("domain".into(), Value::String(td.clone()));
+            }
+            details.insert(
+                "note".into(),
+                Value::String(
+                    "DC permits NTLMv1 authentication — captured challenge \
+                     responses are crackable offline."
+                        .into(),
+                ),
+            );
+            let vuln = ares_core::models::VulnerabilityInfo {
+                vuln_id: vuln_id.clone(),
+                vuln_type: "ntlmv1_downgrade".to_string(),
+                target: dc_label.clone(),
+                discovered_by: "result_processing".to_string(),
+                discovered_at: chrono::Utc::now(),
+                details,
+                recommended_agent: "credential_access".to_string(),
+                priority: 3,
+            };
+            let _ = dispatcher
+                .state
+                .publish_vulnerability(&dispatcher.queue, vuln)
+                .await;
+            if let Err(e) = dispatcher
+                .state
+                .mark_exploited(&dispatcher.queue, &vuln_id)
+                .await
+            {
+                warn!(err = %e, vuln_id = %vuln_id, "Failed to mark ntlmv1 exploited");
+            } else {
+                info!(
+                    vuln_id = %vuln_id,
+                    dc = %dc_label,
+                    task_id = %task_id,
+                    "NTLMv1 downgrade confirmed — exploit token emitted"
+                );
+            }
+        }
+    }
+
     dispatcher.credential_access_notify.notify_waiters();
     dispatcher.delegation_notify.notify_waiters();
 
     let _ = dispatcher.notify_state_update().await;
+}
+
+/// Look up the `technique` field on a pending task's params. The orchestrator
+/// removes the task from `pending_tasks` once `complete_task` finishes, so
+/// callers must read this before that happens — but in `process_completed_task`
+/// we deliberately call this after the state.complete_task block, when the
+/// task is gone; therefore the helper falls back to the task's result payload,
+/// which automation modules also stamp with `technique` for downstream
+/// recognition.
+async fn task_technique_from_pending(
+    dispatcher: &Arc<Dispatcher>,
+    task_id: &str,
+) -> Option<String> {
+    let state = dispatcher.state.read().await;
+    state
+        .pending_tasks
+        .get(task_id)
+        .and_then(|t| t.params.get("technique"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+}
+
+/// Look up the `relay_target` field on a pending task's params. Returns
+/// `None` when the task isn't a relay task or when the field is missing.
+async fn task_relay_target_from_pending(
+    dispatcher: &Arc<Dispatcher>,
+    task_id: &str,
+) -> Option<String> {
+    let state = dispatcher.state.read().await;
+    state
+        .pending_tasks
+        .get(task_id)
+        .and_then(|t| t.params.get("relay_target"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+}
+
+/// True when any text payload on the result indicates the DC permits NTLMv1
+/// authentication. Recognises both the explicit "NTLMv1 allowed" / "NTLM
+/// downgrade" prose forms and the canonical `LmCompatibilityLevel: <0..2>`
+/// registry probe output.
+fn result_has_ntlmv1_signal(result: &Option<Value>) -> bool {
+    let Some(payload) = result.as_ref() else {
+        return false;
+    };
+    let mut texts: Vec<String> = Vec::new();
+    for key in &["tool_output", "output", "summary"] {
+        if let Some(s) = payload.get(*key).and_then(|v| v.as_str()) {
+            texts.push(s.to_string());
+        }
+    }
+    if let Some(arr) = payload.get("tool_outputs").and_then(|v| v.as_array()) {
+        for item in arr {
+            if let Some(s) = item.as_str() {
+                texts.push(s.to_string());
+            } else if let Some(s) = item.get("output").and_then(|v| v.as_str()) {
+                texts.push(s.to_string());
+            }
+        }
+    }
+    for text in texts {
+        let lower = text.to_lowercase();
+        // Explicit positive verdict lines. Kept narrow on purpose — the
+        // loose "ntlm downgrade" form would false-positive on agent plans
+        // and recon commentary that merely names the technique.
+        if lower.contains("ntlmv1 allowed")
+            || lower.contains("ntlmv1 is allowed")
+            || lower.contains("ntlmv1_allowed")
+            || lower.contains("lmcompatibilitylevel is vulnerable")
+            || lower.contains("ntlmv1 downgrade confirmed")
+        {
+            return true;
+        }
+        // Registry probe: LmCompatibilityLevel <= 2 permits NTLMv1. Only
+        // consider digits that appear AFTER the key on the same line —
+        // otherwise commentary like "check whether NTLMv1 (LmCompatibilityLevel)
+        // is set" would false-positive on the `1` in "NTLMv1".
+        for line in text.lines() {
+            let ll = line.to_lowercase();
+            let Some(idx) = ll.find("lmcompatibilitylevel") else {
+                continue;
+            };
+            let tail = &line[idx + "lmcompatibilitylevel".len()..];
+            if let Some(digit) = tail.chars().find(|c| c.is_ascii_digit()) {
+                if matches!(digit, '0' | '1' | '2') {
+                    return true;
+                }
+            }
+        }
+    }
+    false
 }
 
 /// Resolve a host label for a `seimpersonate_<label>` vuln_id. Prefers the
