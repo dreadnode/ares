@@ -213,43 +213,23 @@ fn collect_dacl_work(state: &StateInner) -> Vec<DaclWork> {
 
             let dispatch_domain = cred.domain.to_lowercase();
 
-            // Gate 1: domain already dominated via DCSync (krbtgt captured).
-            // The ACL chain is redundant — all user hashes were dumped, and
-            // running destructive ACL ops now risks overwriting plaintexts
-            // we've already surfaced.
             if state.dominated_domains.contains(&dispatch_domain) {
-                debug!(
-                    vuln_id = %vuln.vuln_id,
-                    domain = %cred.domain,
-                    "DACL abuse skipped: domain already dominated"
-                );
+                debug!(vuln_id = %vuln.vuln_id, domain = %cred.domain, "DACL abuse skipped: domain dominated");
                 continue;
             }
 
-            // Gate 2: a credential-capture primitive (secretsdump / DCSync)
-            // is in flight for this domain. Defer the ACL chain so we don't
-            // race a destructive ForceChangePassword against a DCSync that
-            // is about to surface the target's existing hash. Not marking
-            // dedup here keeps the work item eligible for the next tick;
-            // once DCSync completes the domain enters `dominated_domains`
-            // and Gate 1 fires, otherwise the in-flight TTL eventually
-            // expires and the chain proceeds as fallback.
+            // Defer (don't mark dedup) so the next tick re-evaluates once
+            // DCSync either finishes (domain becomes dominated above) or its
+            // in-flight TTL expires and the chain runs as fallback.
             if state.credential_capture_in_flight_for(&dispatch_domain) {
-                debug!(
-                    vuln_id = %vuln.vuln_id,
-                    domain = %cred.domain,
-                    "DACL abuse deferred: credential capture in flight for domain"
-                );
+                debug!(vuln_id = %vuln.vuln_id, domain = %cred.domain, "DACL abuse deferred: credential capture in flight");
                 continue;
             }
 
-            // Gate 3: destructive ACL primitives (ForceChangePassword /
-            // GenericAll, which the LLM template implements via
-            // `bloodyad_set_password`) overwrite the target's plaintext.
-            // Skip them when we already have material for the target —
-            // we can pass-the-hash or reuse the existing credential
-            // without destroying evidence the scoreboard back-verifies
-            // against the original lab-provisioned password.
+            // ForceChangePassword / GenericAll overwrite the target's
+            // plaintext via `bloodyad_set_password`. Skip when we already
+            // have material so the scoreboard's back-verification against
+            // the original lab-provisioned password still holds.
             let is_destructive_acl =
                 vtype.contains("forcechangepassword") || vtype.contains("genericall");
             if is_destructive_acl && !target_user.is_empty() {
@@ -263,12 +243,7 @@ fn collect_dacl_work(state: &StateInner) -> Vec<DaclWork> {
                         && h.domain.to_lowercase() == dispatch_domain
                 });
                 if already_have_material {
-                    debug!(
-                        vuln_id = %vuln.vuln_id,
-                        target = %target_user,
-                        domain = %cred.domain,
-                        "Destructive ACL skipped: already have material for target"
-                    );
+                    debug!(vuln_id = %vuln.vuln_id, target = %target_user, "Destructive ACL skipped: target material already in state");
                     continue;
                 }
             }
@@ -1244,10 +1219,6 @@ mod tests {
 
     #[tokio::test]
     async fn collect_skips_when_domain_already_dominated() {
-        // Gate 1: once krbtgt is captured, the ACL chain is redundant — every
-        // user hash is already available via DCSync. Running destructive ACL
-        // ops at this point can only destroy plaintexts that the scoreboard
-        // back-verifies against.
         let shared = SharedState::new("test".into());
         {
             let mut state = shared.write().await;
@@ -1272,10 +1243,6 @@ mod tests {
 
     #[tokio::test]
     async fn collect_defers_when_credential_capture_in_flight() {
-        // Gate 2: secretsdump has been dispatched against the target domain
-        // but krbtgt has not yet arrived. Defer the ACL chain so we don't
-        // race a destructive ForceChangePassword against the DCSync that is
-        // about to surface the target user's existing NTLM hash.
         let shared = SharedState::new("test".into());
         {
             let mut state = shared.write().await;
@@ -1300,10 +1267,6 @@ mod tests {
 
     #[tokio::test]
     async fn collect_skips_destructive_when_target_hash_already_present() {
-        // Gate 3: we already have the target's NTLM hash (e.g. from a prior
-        // DCSync) — running ForceChangePassword now would replace it with an
-        // LLM-chosen value and destroy the evidence chain that links the hash
-        // back to the lab-provisioned plaintext.
         let shared = SharedState::new("test".into());
         {
             let mut state = shared.write().await;
@@ -1328,9 +1291,6 @@ mod tests {
 
     #[tokio::test]
     async fn collect_skips_destructive_when_target_credential_already_present() {
-        // Gate 3 plaintext variant: a credential record for the target user
-        // is already published. FCP would overwrite the AD password, so the
-        // published plaintext stops matching the live account.
         let shared = SharedState::new("test".into());
         {
             let mut state = shared.write().await;
@@ -1357,10 +1317,6 @@ mod tests {
 
     #[tokio::test]
     async fn collect_allows_non_destructive_acl_when_target_material_present() {
-        // Non-destructive ACL primitives (GenericWrite for targeted Kerberoast,
-        // WriteDacl for ACL pivoting, AddMember for group escalation) do not
-        // overwrite the target's password. They must still dispatch even when
-        // the target has existing material — they serve a different purpose.
         let shared = SharedState::new("test".into());
         {
             let mut state = shared.write().await;

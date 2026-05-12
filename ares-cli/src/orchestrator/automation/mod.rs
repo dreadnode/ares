@@ -142,13 +142,28 @@ pub use winrm_lateral::auto_winrm_lateral;
 pub use zerologon::auto_zerologon;
 
 pub(crate) fn crack_dedup_key(hash: &ares_core::models::Hash) -> String {
-    let prefix = &hash.hash_value[..32.min(hash.hash_value.len())];
+    // secretsdump stores NTLM as `{LM}:{NT}` (32:32 hex). Naively slicing the
+    // first 32 chars yields the constant blank-LM `aad3b435...` for every
+    // user, collapsing all NTLM dedup keys for one user into one entry. Take
+    // the NT half when the value looks like LM:NT; otherwise the value is
+    // already a bare hash ($krb5tgs$, $krb5asrep$, raw NT) — use as-is.
+    let nt_only = extract_nt_from_lm_nt(&hash.hash_value).unwrap_or(&hash.hash_value);
+    let prefix = &nt_only[..32.min(nt_only.len())];
     format!(
         "{}:{}:{}",
         hash.domain.to_lowercase(),
         hash.username.to_lowercase(),
         prefix
     )
+}
+
+fn extract_nt_from_lm_nt(value: &str) -> Option<&str> {
+    let (lhs, rhs) = value.split_once(':')?;
+    if lhs.len() == 32 && rhs.len() >= 32 && lhs.bytes().all(|b| b.is_ascii_hexdigit()) {
+        Some(rhs)
+    } else {
+        None
+    }
 }
 
 #[cfg(test)]
@@ -204,5 +219,49 @@ mod tests {
         let h1 = make_hash("Admin", "CONTOSO.LOCAL", "abc");
         let h2 = make_hash("admin", "contoso.local", "abc");
         assert_eq!(crack_dedup_key(&h1), crack_dedup_key(&h2));
+    }
+
+    #[test]
+    fn dedup_key_lm_nt_disambiguates_by_nt_half() {
+        // Real secretsdump output: blank-LM constant + per-user NT half.
+        // Two different users (or the same user with different password
+        // histories) must yield different dedup keys — the old `[..32]`
+        // slice took the LM half and collapsed all NTLM entries.
+        let blank_lm = "aad3b435b51404eeaad3b435b51404ee";
+        let h_a = make_hash(
+            "alice",
+            "contoso.local",
+            &format!("{blank_lm}:69db491a2f64ffda7d554d0ce74cb7e4"),
+        );
+        let h_b = make_hash(
+            "alice",
+            "contoso.local",
+            &format!("{blank_lm}:146013294a78698bb114bcb375ab6d67"),
+        );
+        assert_ne!(crack_dedup_key(&h_a), crack_dedup_key(&h_b));
+        // And the key now ends in the NT half, not the LM half.
+        assert!(crack_dedup_key(&h_a).ends_with("69db491a2f64ffda7d554d0ce74cb7e4"));
+        assert!(crack_dedup_key(&h_b).ends_with("146013294a78698bb114bcb375ab6d67"));
+    }
+
+    #[test]
+    fn dedup_key_kerberoast_value_passthrough() {
+        // $krb5tgs$ / $krb5asrep$ contain no `^[0-9a-f]{32}:` prefix, so
+        // the LM:NT split must not match and the value should be used as-is.
+        let krb = "$krb5tgs$23$*svc_sql$contoso.local$cifs/web*$abcd$ef0123456789deadbeef";
+        let h = make_hash("svc_sql", "contoso.local", krb);
+        let key = crack_dedup_key(&h);
+        assert!(key.starts_with("contoso.local:svc_sql:"));
+        // Falls back to the existing 32-char-prefix behavior.
+        assert!(key.ends_with(&krb[..32]));
+    }
+
+    #[test]
+    fn dedup_key_short_lm_nt_does_not_misfire() {
+        // A hash value `xxxx:yyyy` where the lhs isn't a 32-char hex string
+        // must NOT be treated as LM:NT — fall back to the raw value.
+        let h = make_hash("user", "contoso.local", "foo:bar");
+        let key = crack_dedup_key(&h);
+        assert_eq!(key, "contoso.local:user:foo:bar");
     }
 }

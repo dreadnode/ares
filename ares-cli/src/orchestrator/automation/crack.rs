@@ -37,11 +37,37 @@ fn crack_priority(hash_type: &str) -> u8 {
 /// runtime per hash, which is the same overhead as restarting the op.
 pub(crate) const MAX_CRACK_ATTEMPTS: u32 = 3;
 
+/// Number of consecutive roastable (kerberoast/AS-REP) dispatches after
+/// which the next eligible NTLM hash takes a turn. Without this, a steady
+/// inflow of roastables — produced as each new domain/host gets owned —
+/// permanently starves NTLM hashes from secretsdump, leaving DCSync output
+/// uncracked and downstream scoreboard credit unclaimed.
+const NTLM_TURN_AFTER_ROASTABLE_STREAK: u32 = 2;
+
+/// Pick the next hash to dispatch given a priority-sorted work list and the
+/// current roastable streak. Pure function — exercised directly by the unit
+/// tests so the fairness invariant doesn't drift back into starvation.
+fn select_next_crack(
+    work: &[(String, ares_core::models::Hash)],
+    roastable_streak: u32,
+) -> Option<&(String, ares_core::models::Hash)> {
+    if roastable_streak >= NTLM_TURN_AFTER_ROASTABLE_STREAK {
+        if let Some(ntlm) = work.iter().find(|(_, h)| crack_priority(&h.hash_type) > 0) {
+            return Some(ntlm);
+        }
+    }
+    work.first()
+}
+
 /// Scans for uncracked hashes and submits crack tasks.
 /// Interval: 15s. Matches Python `_auto_crack_dispatch`.
 pub async fn auto_crack_dispatch(dispatcher: Arc<Dispatcher>, mut shutdown: watch::Receiver<bool>) {
     let mut interval = tokio::time::interval(Duration::from_secs(15));
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
+    // Tracks consecutive roastable dispatches so NTLM hashes from
+    // secretsdump aren't starved by a continuous roastable inflow.
+    let mut roastable_streak: u32 = 0;
 
     loop {
         tokio::select! {
@@ -85,7 +111,13 @@ pub async fn auto_crack_dispatch(dispatcher: Arc<Dispatcher>, mut shutdown: watc
 
         // Only dispatch one crack task per tick to avoid hashcat PID conflicts.
         // Remaining hashes will be picked up on subsequent ticks.
-        if let Some((dedup_key, hash)) = work.into_iter().next() {
+        let next = select_next_crack(&work, roastable_streak).cloned();
+        if let Some((dedup_key, hash)) = next {
+            if crack_priority(&hash.hash_type) == 0 {
+                roastable_streak = roastable_streak.saturating_add(1);
+            } else {
+                roastable_streak = 0;
+            }
             match dispatcher.request_crack(&hash).await {
                 Ok(Some(task_id)) => {
                     debug!(task_id = %task_id, hash_type = %hash.hash_type, "Crack task dispatched");
@@ -129,8 +161,34 @@ pub async fn auto_crack_dispatch(dispatcher: Arc<Dispatcher>, mut shutdown: watc
 
 #[cfg(test)]
 mod tests {
-    use super::{crack_priority, MAX_CRACK_ATTEMPTS};
+    use super::{
+        crack_priority, select_next_crack, MAX_CRACK_ATTEMPTS, NTLM_TURN_AFTER_ROASTABLE_STREAK,
+    };
     use crate::orchestrator::state::{StateInner, DEDUP_CRACK_REQUESTS};
+    use ares_core::models::Hash;
+
+    fn mk(hash_type: &str) -> (String, Hash) {
+        (
+            format!("dedup-{hash_type}"),
+            Hash {
+                id: format!("h-{hash_type}"),
+                username: "u".into(),
+                hash_type: hash_type.into(),
+                hash_value: "x".into(),
+                domain: "contoso.local".into(),
+                source: "test".into(),
+                cracked_password: None,
+                discovered_at: None,
+                parent_id: None,
+                attack_step: 0,
+                aes_key: None,
+                is_previous: false,
+                source_host: None,
+                is_trust_key: false,
+                trust_pair_label: None,
+            },
+        )
+    }
 
     #[test]
     fn roastable_hashes_outrank_ntlm() {
@@ -212,6 +270,69 @@ mod tests {
         assert!(
             state.is_processed(DEDUP_CRACK_REQUESTS, key),
             "dedup must be written once attempts reach MAX_CRACK_ATTEMPTS"
+        );
+    }
+
+    #[test]
+    fn select_returns_none_when_empty() {
+        assert!(select_next_crack(&[], 0).is_none());
+        assert!(select_next_crack(&[], 100).is_none());
+    }
+
+    #[test]
+    fn select_prefers_roastable_below_streak_threshold() {
+        let work = vec![mk("kerberoast"), mk("ntlm")];
+        let chosen = select_next_crack(&work, 0).unwrap();
+        assert_eq!(chosen.1.hash_type, "kerberoast");
+    }
+
+    #[test]
+    fn select_forces_ntlm_turn_at_streak_threshold() {
+        let work = vec![mk("kerberoast"), mk("kerberoast"), mk("ntlm")];
+        let chosen = select_next_crack(&work, NTLM_TURN_AFTER_ROASTABLE_STREAK).unwrap();
+        assert_eq!(chosen.1.hash_type, "ntlm");
+    }
+
+    #[test]
+    fn select_falls_back_to_roastable_when_no_ntlm_at_threshold() {
+        let work = vec![mk("kerberoast"), mk("asrep")];
+        let chosen = select_next_crack(&work, NTLM_TURN_AFTER_ROASTABLE_STREAK + 5).unwrap();
+        assert_eq!(chosen.1.hash_type, "kerberoast");
+    }
+
+    #[test]
+    fn select_picks_ntlm_when_only_ntlm_present() {
+        let work = vec![mk("ntlm"), mk("ntlm")];
+        let chosen = select_next_crack(&work, 0).unwrap();
+        assert_eq!(chosen.1.hash_type, "ntlm");
+    }
+
+    #[test]
+    fn ntlm_eventually_serviced_under_continuous_roastable_inflow() {
+        // Steady roastable inflow must not starve NTLM. Walk 100 ticks
+        // and verify NTLM dispatches at least once per (threshold+1).
+        let work = vec![mk("kerberoast"), mk("ntlm")];
+        let mut streak: u32 = 0;
+        let mut ntlm_dispatches = 0u32;
+        let mut roastable_dispatches = 0u32;
+        for _ in 0..100 {
+            let chosen = select_next_crack(&work, streak).unwrap();
+            if crack_priority(&chosen.1.hash_type) == 0 {
+                streak = streak.saturating_add(1);
+                roastable_dispatches += 1;
+            } else {
+                streak = 0;
+                ntlm_dispatches += 1;
+            }
+        }
+        let expected_floor = 100 / (NTLM_TURN_AFTER_ROASTABLE_STREAK + 1);
+        assert!(
+            ntlm_dispatches >= expected_floor,
+            "NTLM starved: {ntlm_dispatches} dispatches in 100 ticks (floor {expected_floor})"
+        );
+        assert!(
+            roastable_dispatches > 0,
+            "roastable bucket should still be served"
         );
     }
 
