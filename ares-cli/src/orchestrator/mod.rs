@@ -29,7 +29,7 @@ mod recovery;
 mod result_processing;
 mod results;
 mod routing;
-mod state;
+pub(crate) mod state;
 pub(crate) mod strategy;
 mod task_queue;
 mod throttling;

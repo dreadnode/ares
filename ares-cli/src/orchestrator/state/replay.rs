@@ -16,18 +16,174 @@
 //! - Replay is opt-in via `ARES_USE_EVENT_LOG_REPLAY=1`. The default startup
 //!   path still loads from Redis.
 
+use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
 use async_nats::jetstream::consumer::{pull::Config as PullConfig, AckPolicy, DeliverPolicy};
+use chrono::{DateTime, Utc};
 use futures::StreamExt;
+use serde::Serialize;
 use tracing::{info, warn};
 
-use ares_core::models::{OpStateEvent, OpStateEventPayload};
+use ares_core::models::{
+    Credential, Hash, Host, OpStateEvent, OpStateEventPayload, User, VulnerabilityInfo,
+};
 use ares_core::nats::{op_state_filter_for_op, NatsBroker, OP_STATE_STREAM};
 
 use super::inner::StateInner;
 use super::SharedState;
+
+/// Lightweight, serialisable snapshot of operation state reconstructed from
+/// the event log. Used by `ares ops replay` and other Phase 5 tooling.
+///
+/// Holds only the entity collections that the event log carries today
+/// (no derived state — see Phase 4 limitations).
+#[derive(Debug, Default, Serialize)]
+pub struct ReplaySnapshot {
+    pub operation_id: String,
+    pub events_applied: usize,
+    pub credentials: Vec<Credential>,
+    pub hashes: Vec<Hash>,
+    pub hosts: Vec<Host>,
+    pub users: Vec<User>,
+    pub discovered_vulnerabilities: HashMap<String, VulnerabilityInfo>,
+    pub exploited_vulnerabilities: HashSet<String>,
+}
+
+impl ReplaySnapshot {
+    pub fn new(operation_id: impl Into<String>) -> Self {
+        Self {
+            operation_id: operation_id.into(),
+            ..Default::default()
+        }
+    }
+
+    /// Apply a single event to this snapshot. Mirrors
+    /// [`apply_event_to_state`] but writes to the lightweight struct instead
+    /// of the full [`StateInner`].
+    pub fn apply(&mut self, event: &OpStateEvent) {
+        match &event.payload {
+            OpStateEventPayload::CredentialCaptured { credential } => {
+                self.credentials.push(credential.clone());
+            }
+            OpStateEventPayload::HashCaptured { hash } => {
+                self.hashes.push(hash.clone());
+            }
+            OpStateEventPayload::HostDiscovered { host } => {
+                self.hosts.push(host.clone());
+            }
+            OpStateEventPayload::HostOwned { ip, .. } => {
+                if let Some(existing) = self.hosts.iter_mut().find(|h| h.ip == *ip) {
+                    existing.owned = true;
+                }
+            }
+            OpStateEventPayload::UserDiscovered { user } => {
+                self.users.push(user.clone());
+            }
+            OpStateEventPayload::VulnDiscovered { vuln } => {
+                self.discovered_vulnerabilities
+                    .insert(vuln.vuln_id.clone(), vuln.clone());
+            }
+            OpStateEventPayload::VulnExploited { vuln_id, .. } => {
+                self.exploited_vulnerabilities.insert(vuln_id.clone());
+            }
+            OpStateEventPayload::TimelineEvent { .. } => {}
+        }
+        self.events_applied += 1;
+    }
+}
+
+/// Cutoff for replay-to-snapshot. `None` means "no cutoff".
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ReplayCutoff {
+    /// Stop replay once an event's `recorded_at` exceeds this timestamp.
+    pub until: Option<DateTime<Utc>>,
+    /// Stop replay once this many events have been applied.
+    pub until_count: Option<usize>,
+}
+
+impl ReplayCutoff {
+    fn should_stop_before(&self, event: &OpStateEvent, applied: usize) -> bool {
+        if let Some(until) = self.until {
+            if event.recorded_at > until {
+                return true;
+            }
+        }
+        if let Some(max) = self.until_count {
+            if applied >= max {
+                return true;
+            }
+        }
+        false
+    }
+}
+
+/// Replay events for a single operation from JetStream into a fresh
+/// [`ReplaySnapshot`], honoring the cutoff. Used by `ares ops replay`.
+///
+/// Uses an ephemeral consumer with `DeliverPolicy::All`. Returns when the
+/// stream idles past [`REPLAY_IDLE_TIMEOUT`] or the cutoff fires.
+pub async fn replay_op_to_snapshot(
+    nats: &NatsBroker,
+    op_id: &str,
+    cutoff: ReplayCutoff,
+) -> Result<ReplaySnapshot> {
+    let filter = op_state_filter_for_op(op_id);
+    let stream = nats
+        .jetstream()
+        .get_stream(OP_STATE_STREAM)
+        .await
+        .with_context(|| format!("get_stream({OP_STATE_STREAM})"))?;
+
+    let cfg = PullConfig {
+        filter_subject: filter.clone(),
+        ack_policy: AckPolicy::None,
+        deliver_policy: DeliverPolicy::All,
+        ..Default::default()
+    };
+    let consumer = stream
+        .create_consumer(cfg)
+        .await
+        .with_context(|| format!("create ephemeral replay consumer for {filter}"))?;
+
+    let mut messages = consumer
+        .messages()
+        .await
+        .context("ephemeral consumer.messages()")?;
+
+    let mut snapshot = ReplaySnapshot::new(op_id.to_string());
+    loop {
+        let next = tokio::time::timeout(REPLAY_IDLE_TIMEOUT, messages.next()).await;
+        let item = match next {
+            Err(_) => break,
+            Ok(None) => break,
+            Ok(Some(item)) => item,
+        };
+        let msg = match item {
+            Ok(m) => m,
+            Err(e) => {
+                warn!(error = %e, "replay: stream error; aborting");
+                break;
+            }
+        };
+        let event: OpStateEvent = match serde_json::from_slice(&msg.payload) {
+            Ok(ev) => ev,
+            Err(e) => {
+                warn!(error = %e, subject = %msg.subject, "replay: undecodable event; skipping");
+                continue;
+            }
+        };
+        if event.op_id != op_id {
+            continue;
+        }
+        if cutoff.should_stop_before(&event, snapshot.events_applied) {
+            break;
+        }
+        snapshot.apply(&event);
+    }
+    Ok(snapshot)
+}
 
 /// How long to wait for the consumer to deliver the next message before
 /// declaring the replay caught up. The stream is replayed from start to the
@@ -385,6 +541,108 @@ mod tests {
                 .unwrap()
                 .owned
         );
+    }
+
+    #[test]
+    fn snapshot_apply_dispatches_per_variant() {
+        let mut s = ReplaySnapshot::new("op-snap");
+        s.apply(&OpStateEvent::new(
+            "op-snap",
+            OpStateEventPayload::CredentialCaptured {
+                credential: cred("alice", "contoso.local"),
+            },
+        ));
+        s.apply(&OpStateEvent::new(
+            "op-snap",
+            OpStateEventPayload::HostDiscovered {
+                host: host("192.168.58.10", "dc01.contoso.local"),
+            },
+        ));
+        s.apply(&OpStateEvent::new(
+            "op-snap",
+            OpStateEventPayload::HostOwned {
+                ip: "192.168.58.10".into(),
+                hostname: String::new(),
+                owned_by: String::new(),
+            },
+        ));
+        s.apply(&OpStateEvent::new(
+            "op-snap",
+            OpStateEventPayload::VulnDiscovered {
+                vuln: vuln("V-1", "esc1"),
+            },
+        ));
+        s.apply(&OpStateEvent::new(
+            "op-snap",
+            OpStateEventPayload::VulnExploited {
+                vuln_id: "V-1".into(),
+                exploited_by: String::new(),
+                result: None,
+            },
+        ));
+        assert_eq!(s.events_applied, 5);
+        assert_eq!(s.credentials.len(), 1);
+        assert_eq!(s.hosts.len(), 1);
+        assert!(s.hosts[0].owned);
+        assert_eq!(s.discovered_vulnerabilities.len(), 1);
+        assert!(s.exploited_vulnerabilities.contains("V-1"));
+    }
+
+    #[test]
+    fn cutoff_until_stops_on_time() {
+        use chrono::TimeZone;
+        let cutoff = ReplayCutoff {
+            until: Some(Utc.with_ymd_and_hms(2026, 5, 12, 12, 0, 0).unwrap()),
+            until_count: None,
+        };
+        let early = OpStateEvent {
+            event_id: "a".into(),
+            op_id: "op".into(),
+            recorded_at: Utc.with_ymd_and_hms(2026, 5, 12, 11, 0, 0).unwrap(),
+            payload: OpStateEventPayload::TimelineEvent {
+                event: serde_json::json!({}),
+            },
+        };
+        let late = OpStateEvent {
+            event_id: "b".into(),
+            op_id: "op".into(),
+            recorded_at: Utc.with_ymd_and_hms(2026, 5, 12, 13, 0, 0).unwrap(),
+            payload: OpStateEventPayload::TimelineEvent {
+                event: serde_json::json!({}),
+            },
+        };
+        assert!(!cutoff.should_stop_before(&early, 0));
+        assert!(cutoff.should_stop_before(&late, 0));
+    }
+
+    #[test]
+    fn cutoff_until_count_stops_on_count() {
+        let cutoff = ReplayCutoff {
+            until: None,
+            until_count: Some(2),
+        };
+        let ev = OpStateEvent::new(
+            "op",
+            OpStateEventPayload::TimelineEvent {
+                event: serde_json::json!({}),
+            },
+        );
+        assert!(!cutoff.should_stop_before(&ev, 0));
+        assert!(!cutoff.should_stop_before(&ev, 1));
+        assert!(cutoff.should_stop_before(&ev, 2));
+    }
+
+    #[test]
+    fn cutoff_default_never_stops() {
+        let cutoff = ReplayCutoff::default();
+        let ev = OpStateEvent::new(
+            "op",
+            OpStateEventPayload::TimelineEvent {
+                event: serde_json::json!({}),
+            },
+        );
+        assert!(!cutoff.should_stop_before(&ev, 0));
+        assert!(!cutoff.should_stop_before(&ev, 1_000_000));
     }
 
     #[test]

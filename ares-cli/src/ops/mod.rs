@@ -9,6 +9,7 @@ mod kill;
 mod list;
 mod loot;
 mod queue;
+mod replay;
 mod report;
 pub(crate) mod resolve;
 mod runtime;
@@ -160,6 +161,12 @@ pub(crate) async fn run_ops(cmd: OpsCommands, redis_url: Option<String>) -> Resu
             operation_id,
             latest,
         } => backfill::ops_offload_cost(redis_url, operation_id, latest).await,
+        OpsCommands::Replay {
+            operation_id,
+            until,
+            until_count,
+            json,
+        } => replay::ops_replay(operation_id, until, until_count, json).await,
         OpsCommands::Report {
             operation_id,
             latest,

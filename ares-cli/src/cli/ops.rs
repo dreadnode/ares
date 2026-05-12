@@ -289,6 +289,21 @@ pub(crate) enum OpsCommands {
         cmd: SessionsCommands,
     },
 
+    /// Replay the operation state event log into a point-in-time snapshot
+    Replay {
+        /// Operation ID to replay
+        operation_id: String,
+        /// Stop applying events whose `recorded_at` exceeds this ISO-8601 timestamp
+        #[arg(long)]
+        until: Option<String>,
+        /// Stop after this many events have been applied
+        #[arg(long)]
+        until_count: Option<usize>,
+        /// Emit the snapshot as JSON instead of a human-readable summary
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Persist token usage from Redis to PostgreSQL for an operation
     OffloadCost {
         /// Operation ID
