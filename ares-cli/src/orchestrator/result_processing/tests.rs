@@ -1230,3 +1230,66 @@ fn extract_locked_users_rejects_llm_narrative_tokens() {
     let locked = extract_locked_usernames_from_result(&Some(payload));
     assert!(locked.is_empty(), "got false positives: {locked:?}");
 }
+
+#[test]
+fn seimpersonate_signal_detects_enabled_in_whoami_priv_output() {
+    use super::result_has_seimpersonate_signal;
+    // Real-world `whoami /priv` row format from a service account context.
+    let payload = json!({
+        "output": "PRIVILEGES INFORMATION\n\
+                   ----------------------\n\
+                   Privilege Name                Description                                 State\n\
+                   ============================= =========================================== ========\n\
+                   SeAssignPrimaryTokenPrivilege Replace a process level token               Disabled\n\
+                   SeImpersonatePrivilege        Impersonate a client after authentication   Enabled\n\
+                   SeIncreaseQuotaPrivilege      Adjust memory quotas for a process          Disabled"
+    });
+    assert!(result_has_seimpersonate_signal(&Some(payload)));
+}
+
+#[test]
+fn seimpersonate_signal_ignores_disabled_priv() {
+    use super::result_has_seimpersonate_signal;
+    let payload = json!({
+        "output": "SeImpersonatePrivilege  Impersonate a client after authentication  Disabled"
+    });
+    assert!(!result_has_seimpersonate_signal(&Some(payload)));
+}
+
+#[test]
+fn seimpersonate_signal_ignores_bare_mention_without_state() {
+    use super::result_has_seimpersonate_signal;
+    // LLM commentary that names the privilege but doesn't prove it's held.
+    let payload = json!({
+        "summary": "Plan: check for SeImpersonatePrivilege if we get xp_cmdshell working"
+    });
+    assert!(!result_has_seimpersonate_signal(&Some(payload)));
+}
+
+#[test]
+fn seimpersonate_signal_detects_in_tool_outputs_array() {
+    use super::result_has_seimpersonate_signal;
+    let payload = json!({
+        "tool_outputs": [
+            {"output": "whoami output:\nSeImpersonatePrivilege Impersonate a client Enabled"}
+        ]
+    });
+    assert!(result_has_seimpersonate_signal(&Some(payload)));
+}
+
+#[test]
+fn seimpersonate_signal_empty_payload() {
+    use super::result_has_seimpersonate_signal;
+    assert!(!result_has_seimpersonate_signal(&None));
+    assert!(!result_has_seimpersonate_signal(&Some(json!({}))));
+}
+
+#[test]
+fn seimpersonate_signal_case_insensitive() {
+    use super::result_has_seimpersonate_signal;
+    // Some shells/agents may upper- or lower-case the row.
+    let payload = json!({
+        "output": "seimpersonateprivilege   description text   ENABLED"
+    });
+    assert!(result_has_seimpersonate_signal(&Some(payload)));
+}

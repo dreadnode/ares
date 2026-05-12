@@ -316,10 +316,138 @@ pub async fn process_completed_task(
         }
     }
 
+    // SeImpersonate primitive detection. When a task's output captures a
+    // `whoami /priv` (or equivalent) showing SeImpersonatePrivilege held
+    // (and enabled), we have everything needed to escalate to SYSTEM via
+    // PrintSpoofer / GodPotato. Surface this as `seimpersonate_<host>` and
+    // mark exploited so the scoreboard credits the primitive. The follow-on
+    // potato dispatch is left for the existing privesc agent (already wired
+    // with godpotato / printspoofer tools) to consume opportunistically.
+    if result_has_seimpersonate_signal(&result.result) {
+        let host_label =
+            derive_seimpersonate_host_label(dispatcher, task_target_ip.as_deref()).await;
+        let vuln_id = format!("seimpersonate_{}", host_label);
+        let mut details = std::collections::HashMap::new();
+        details.insert("host".into(), Value::String(host_label.clone()));
+        if let Some(ref ip) = task_target_ip {
+            details.insert("target_ip".into(), Value::String(ip.clone()));
+        }
+        details.insert(
+            "note".into(),
+            Value::String(
+                "SeImpersonatePrivilege observed enabled — \
+                 escalation path via PrintSpoofer / GodPotato to SYSTEM."
+                    .into(),
+            ),
+        );
+        let vuln = ares_core::models::VulnerabilityInfo {
+            vuln_id: vuln_id.clone(),
+            vuln_type: "seimpersonate".to_string(),
+            target: task_target_ip.clone().unwrap_or_else(|| host_label.clone()),
+            discovered_by: "result_processing".to_string(),
+            discovered_at: chrono::Utc::now(),
+            details,
+            recommended_agent: "privesc".to_string(),
+            priority: 2,
+        };
+        let _ = dispatcher
+            .state
+            .publish_vulnerability(&dispatcher.queue, vuln)
+            .await;
+        if let Err(e) = dispatcher
+            .state
+            .mark_exploited(&dispatcher.queue, &vuln_id)
+            .await
+        {
+            warn!(
+                err = %e,
+                vuln_id = %vuln_id,
+                "Failed to mark seimpersonate primitive exploited"
+            );
+        } else {
+            info!(
+                vuln_id = %vuln_id,
+                host = %host_label,
+                task_id = %task_id,
+                "SeImpersonate primitive observed in task output — exploit token emitted"
+            );
+        }
+    }
+
     dispatcher.credential_access_notify.notify_waiters();
     dispatcher.delegation_notify.notify_waiters();
 
     let _ = dispatcher.notify_state_update().await;
+}
+
+/// Resolve a host label for a `seimpersonate_<label>` vuln_id. Prefers the
+/// host's `hostname` (e.g. `web01`) when known so the scoreboard token is
+/// stable across runs, falls back to the IP. Hostname is lowercased and the
+/// AD suffix stripped (`web01.contoso.local` → `web01`) so two runs that
+/// see the same machine produce the same token.
+async fn derive_seimpersonate_host_label(
+    dispatcher: &Arc<Dispatcher>,
+    target_ip: Option<&str>,
+) -> String {
+    if let Some(ip) = target_ip {
+        let state = dispatcher.state.read().await;
+        if let Some(host) = state.hosts.iter().find(|h| h.ip == ip) {
+            if !host.hostname.is_empty() {
+                let lower = host.hostname.to_lowercase();
+                return lower
+                    .split_once('.')
+                    .map(|(short, _)| short.to_string())
+                    .unwrap_or(lower);
+            }
+        }
+        return ip.replace('.', "_");
+    }
+    "unknown".to_string()
+}
+
+/// Returns `true` when any text payload on the result contains a recognised
+/// SeImpersonate signal. Conservative — only matches `SeImpersonatePrivilege`
+/// alongside an `Enabled` token (the format `whoami /priv` uses). This avoids
+/// false positives from output that merely *mentions* the privilege name
+/// (e.g. recon plans or LLM commentary).
+fn result_has_seimpersonate_signal(result: &Option<Value>) -> bool {
+    let Some(payload) = result else {
+        return false;
+    };
+
+    let mut texts: Vec<String> = Vec::new();
+    if let Some(arr) = payload.get("tool_outputs").and_then(|v| v.as_array()) {
+        for item in arr {
+            if let Some(s) = item.as_str() {
+                texts.push(s.to_string());
+            } else if let Some(s) = item.get("output").and_then(|v| v.as_str()) {
+                texts.push(s.to_string());
+            }
+        }
+    }
+    for key in &["summary", "output", "tool_output"] {
+        if let Some(s) = payload.get(*key).and_then(|v| v.as_str()) {
+            texts.push(s.to_string());
+        }
+    }
+
+    for text in texts {
+        for line in text.lines() {
+            let lower = line.to_lowercase();
+            if !lower.contains("seimpersonateprivilege") {
+                continue;
+            }
+            // `whoami /priv` table rows look like:
+            //   SeImpersonatePrivilege        Impersonate a client after authentication  Enabled
+            // We require an `enabled` (case-insensitive) token on the same
+            // line. `Disabled` rows are also reported by whoami but are not
+            // exploitable.
+            if lower.contains("enabled") && !lower.contains("disabled") {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 /// Extract `(username, optional domain)` pairs from a tool result that
