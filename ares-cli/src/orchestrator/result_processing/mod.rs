@@ -20,12 +20,15 @@ pub use discovery_polling::discovery_poller;
 use std::sync::Arc;
 
 use anyhow::Result;
+use redis::aio::ConnectionLike;
 use serde_json::Value;
 use tracing::{debug, info, warn};
 
 use crate::orchestrator::dispatcher::Dispatcher;
 use crate::orchestrator::output_extraction;
 use crate::orchestrator::results::CompletedTask;
+use crate::orchestrator::state::SharedState;
+use crate::orchestrator::task_queue::TaskQueueCore;
 use crate::orchestrator::throttling::Throttler;
 
 use self::admin_checks::{
@@ -771,6 +774,42 @@ fn gmsa_exploit_token(username: &str) -> String {
     format!("gmsa_{}", username.trim_end_matches('$').to_lowercase())
 }
 
+/// gMSA managed-password recovery side-effect: when secretsdump returns a
+/// Group Managed Service Account hash (account ends with `$` and name
+/// contains "gmsa"), credit the gMSA primitive even though we never went
+/// through `auto_gmsa_extraction`. Without this, gMSA hashes captured
+/// incidentally via DCSync never emit a `gmsa_*` token to the exploited
+/// set and the scoreboard understates progress.
+///
+/// No-op for non-gMSA usernames. Errors from `mark_exploited` are logged
+/// but not propagated — credit emission is best-effort and shouldn't
+/// fail the surrounding hash-publish flow.
+async fn emit_gmsa_exploit_token_if_gmsa<C>(
+    state: &SharedState,
+    queue: &TaskQueueCore<C>,
+    username: &str,
+) where
+    C: ConnectionLike + Clone + Send + Sync + 'static,
+{
+    if !is_gmsa_principal(username) {
+        return;
+    }
+    let vuln_id = gmsa_exploit_token(username);
+    if let Err(e) = state.mark_exploited(queue, &vuln_id).await {
+        warn!(
+            err = %e,
+            vuln_id = %vuln_id,
+            "Failed to mark gMSA hash as exploited"
+        );
+    } else {
+        info!(
+            vuln_id = %vuln_id,
+            account = %username,
+            "gMSA hash captured via secretsdump — emitted exploit token"
+        );
+    }
+}
+
 fn parse_lockout_principal(line: &str) -> Option<(String, Option<String>)> {
     let marker_pos = LOCKOUT_PATTERNS.iter().filter_map(|p| line.find(p)).min()?;
     let prefix = &line[..marker_pos];
@@ -1408,32 +1447,8 @@ async fn extract_discoveries(
                 )
                 .await;
 
-                // gMSA managed-password recovery side-effect: when secretsdump
-                // returns a Group Managed Service Account hash (account ends
-                // with `$` and name contains "gmsa"), credit the gMSA primitive
-                // even though we never went through `auto_gmsa_extraction`.
-                // Without this, gMSA hashes captured incidentally via DCSync
-                // never emit a `gmsa_*` token to the exploited set.
-                if is_gmsa_principal(&username) {
-                    let vuln_id = gmsa_exploit_token(&username);
-                    if let Err(e) = dispatcher
-                        .state
-                        .mark_exploited(&dispatcher.queue, &vuln_id)
-                        .await
-                    {
-                        warn!(
-                            err = %e,
-                            vuln_id = %vuln_id,
-                            "Failed to mark gMSA hash as exploited"
-                        );
-                    } else {
-                        info!(
-                            vuln_id = %vuln_id,
-                            account = %username,
-                            "gMSA hash captured via secretsdump — emitted exploit token"
-                        );
-                    }
-                }
+                emit_gmsa_exploit_token_if_gmsa(&dispatcher.state, &dispatcher.queue, &username)
+                    .await;
             }
             Ok(false) => {}
             Err(e) => warn!(err = %e, "Failed to publish hash"),
