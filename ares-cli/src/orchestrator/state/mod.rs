@@ -106,6 +106,11 @@ pub const DEDUP_MSSQL_IMPERSONATION: &str = "mssql_impersonation_auto";
 /// resolvable for the principal, wrong-realm pairing).
 pub const DEDUP_ASSIST_ABANDONED: &str = "assist_abandoned";
 
+/// Dedup for `auto_sid_history_enum` — one LDAP `(sIDHistory=*)` probe per
+/// (domain, DC) pair. The probe is a read-only LDAP query and the result
+/// immediately marks `sid_history_<user>` exploited, so re-firing is wasteful.
+pub const DEDUP_SID_HISTORY: &str = "sid_history_enum";
+
 /// Vuln queue ZSET key suffix.
 pub const KEY_VULN_QUEUE: &str = "vuln_queue";
 
@@ -176,6 +181,7 @@ const ALL_DEDUP_SETS: &[&str] = &[
     DEDUP_MSSQL_LINK_PIVOT,
     DEDUP_MSSQL_IMPERSONATION,
     DEDUP_ASSIST_ABANDONED,
+    DEDUP_SID_HISTORY,
 ];
 
 #[cfg(test)]
