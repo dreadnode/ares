@@ -767,6 +767,7 @@ mod tests {
             direction: "bidirectional".to_string(),
             trust_type: trust_type.to_string(),
             sid_filtering: false,
+            security_identifier: None,
         }
     }
 

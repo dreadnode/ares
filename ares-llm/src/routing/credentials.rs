@@ -218,6 +218,7 @@ mod tests {
                 direction: "bidirectional".to_string(),
                 trust_type: "forest".to_string(),
                 sid_filtering: true,
+                security_identifier: None,
             },
         );
         assert!(is_valid_credential_for_domain(
