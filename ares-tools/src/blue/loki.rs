@@ -322,19 +322,62 @@ pub async fn query_logs(args: &Value) -> Result<ToolOutput> {
 }
 
 /// Query logs around a specific timestamp.
+/// Compute `(start, end)` for a fixed-width window centred on `timestamp`.
+///
+/// `timestamp` is parsed as RFC 3339 first, then the looser
+/// `%Y-%m-%dT%H:%M:%S%.fZ` form. On parse failure the centre falls back to
+/// "now" so the caller still gets a sensible window. Pure — no IO, no
+/// dispatcher.
+pub(crate) fn time_window_around(
+    timestamp: &str,
+    window_minutes: i64,
+) -> (chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>) {
+    let ts: chrono::DateTime<chrono::Utc> = chrono::DateTime::parse_from_rfc3339(timestamp)
+        .or_else(|_| chrono::DateTime::parse_from_str(timestamp, "%Y-%m-%dT%H:%M:%S%.fZ"))
+        .map(|d| d.with_timezone(&chrono::Utc))
+        .unwrap_or_else(|_| chrono::Utc::now());
+    let start = ts - chrono::Duration::minutes(window_minutes);
+    let end = ts + chrono::Duration::minutes(window_minutes);
+    (start, end)
+}
+
+/// Compute a sliding `(start, end)` for "last `hours_back` hours from now".
+pub(crate) fn time_window_recent(
+    hours_back: i64,
+) -> (chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>) {
+    let now = chrono::Utc::now();
+    let start = now - chrono::Duration::hours(hours_back);
+    (start, now)
+}
+
+/// Combine N regex patterns into a single LogQL `|~ "(?i)(p1|p2|...)"` filter
+/// glued onto `base_selector`. Each pattern is escaped before joining so
+/// pattern-internal `|`/`(`/`.` characters can't break out of the alternation.
+///
+/// Returns `Err(msg)` when `patterns` is empty (caller surfaces as a tool
+/// error). Pure — used by `combine_query_patterns`.
+pub(crate) fn build_combined_logql_query(
+    base_selector: &str,
+    patterns: &[&str],
+) -> std::result::Result<String, &'static str> {
+    if patterns.is_empty() {
+        return Err("patterns array must not be empty");
+    }
+    let combined = patterns
+        .iter()
+        .map(|p| regex::escape(p))
+        .collect::<Vec<_>>()
+        .join("|");
+    Ok(format!("{base_selector} |~ \"(?i)({combined})\""))
+}
+
 pub async fn query_logs_around_timestamp(args: &Value) -> Result<ToolOutput> {
     let logql = required_str(args, "logql")?;
     let timestamp = required_str(args, "timestamp")?;
     let window_minutes = optional_i64(args, "window_minutes").unwrap_or(15);
     let limit = optional_i64(args, "limit").unwrap_or(50);
 
-    // Parse timestamp and compute window
-    let ts = chrono::DateTime::parse_from_rfc3339(timestamp)
-        .or_else(|_| chrono::DateTime::parse_from_str(timestamp, "%Y-%m-%dT%H:%M:%S%.fZ"))
-        .unwrap_or_else(|_| chrono::Utc::now().into());
-
-    let start = ts - chrono::Duration::minutes(window_minutes);
-    let end = ts + chrono::Duration::minutes(window_minutes);
+    let (start, end) = time_window_around(timestamp, window_minutes);
 
     let modified_args = serde_json::json!({
         "logql": logql,
@@ -497,13 +540,12 @@ pub async fn query_logs_recent(args: &Value) -> Result<ToolOutput> {
     let hours_back = optional_i64(args, "hours_back").unwrap_or(1);
     let limit = optional_i64(args, "limit").unwrap_or(100);
 
-    let now = chrono::Utc::now();
-    let start = now - chrono::Duration::hours(hours_back);
+    let (start, end) = time_window_recent(hours_back);
 
     let modified_args = serde_json::json!({
         "logql": logql,
         "start_time": start.to_rfc3339(),
-        "end_time": now.to_rfc3339(),
+        "end_time": end.to_rfc3339(),
         "limit": limit,
     });
 
@@ -521,24 +563,19 @@ pub fn combine_query_patterns(args: &Value) -> Result<ToolOutput> {
         .and_then(|v| v.as_array())
         .ok_or_else(|| anyhow::anyhow!("missing required argument: patterns"))?;
 
-    if patterns.is_empty() {
-        return Ok(make_error("patterns array must not be empty"));
-    }
-
     let pattern_strs: Vec<&str> = patterns.iter().filter_map(|v| v.as_str()).collect();
-
     if pattern_strs.is_empty() {
-        return Ok(make_error("patterns array must contain strings"));
+        return Ok(make_error(if patterns.is_empty() {
+            "patterns array must not be empty"
+        } else {
+            "patterns array must contain strings"
+        }));
     }
 
-    // Escape special regex chars in patterns and join with |
-    let combined = pattern_strs
-        .iter()
-        .map(|p| regex::escape(p))
-        .collect::<Vec<_>>()
-        .join("|");
-
-    let query = format!("{base_selector} |~ \"(?i)({combined})\"");
+    let query = match build_combined_logql_query(base_selector, &pattern_strs) {
+        Ok(q) => q,
+        Err(msg) => return Ok(make_error(msg)),
+    };
 
     Ok(make_output(&format!(
         "Combined query ({} patterns):\n{query}",
@@ -798,5 +835,73 @@ mod tests {
         // Dots and parens should be escaped
         assert!(result.stdout.contains("foo\\.bar"));
         assert!(result.stdout.contains("baz\\(qux\\)"));
+    }
+
+    // ── tests for new pure helpers ────────────────────────────────────
+
+    #[test]
+    fn time_window_around_rfc3339_centred_window() {
+        let (s, e) = time_window_around("2026-01-15T12:00:00Z", 15);
+        // 15 minutes either side → s = 11:45, e = 12:15.
+        assert_eq!(s.to_rfc3339(), "2026-01-15T11:45:00+00:00");
+        assert_eq!(e.to_rfc3339(), "2026-01-15T12:15:00+00:00");
+    }
+
+    #[test]
+    fn time_window_around_zero_window_collapses_to_point() {
+        let (s, e) = time_window_around("2026-01-15T12:00:00Z", 0);
+        assert_eq!(s, e);
+    }
+
+    #[test]
+    fn time_window_around_accepts_fractional_seconds_form() {
+        // Secondary parse format: %Y-%m-%dT%H:%M:%S%.fZ
+        let (s, e) = time_window_around("2026-01-15T12:00:00.123Z", 30);
+        // Both timestamps must be in the same minute-30 spread around 12:00:00.123.
+        let span = e - s;
+        assert_eq!(span, chrono::Duration::minutes(60));
+    }
+
+    #[test]
+    fn time_window_around_garbage_falls_back_to_now() {
+        // Unparsable input falls back to "now" — we just check the window
+        // has the requested width.
+        let (s, e) = time_window_around("not a timestamp", 5);
+        let span = e - s;
+        assert_eq!(span, chrono::Duration::minutes(10));
+    }
+
+    #[test]
+    fn time_window_recent_returns_now_plus_back() {
+        let (s, e) = time_window_recent(2);
+        let span = e - s;
+        assert_eq!(span, chrono::Duration::hours(2));
+    }
+
+    #[test]
+    fn build_combined_logql_query_basic() {
+        let q = build_combined_logql_query("{job=\"app\"}", &["alpha", "beta"]).unwrap();
+        assert_eq!(q, r#"{job="app"} |~ "(?i)(alpha|beta)""#);
+    }
+
+    #[test]
+    fn build_combined_logql_query_escapes_regex_metachars() {
+        let q = build_combined_logql_query("{}", &["foo.bar", "(x|y)"]).unwrap();
+        assert!(q.contains("foo\\.bar"));
+        assert!(q.contains("\\(x\\|y\\)"));
+    }
+
+    #[test]
+    fn build_combined_logql_query_empty_patterns_returns_err() {
+        let err = build_combined_logql_query("{}", &[]).unwrap_err();
+        assert!(err.contains("not be empty"));
+    }
+
+    #[test]
+    fn build_combined_logql_query_preserves_alternation_grouping() {
+        // Each pattern goes in its own alternation slot; verify the
+        // outermost `(?i)(...)` wrapper.
+        let q = build_combined_logql_query("{j=\"\"}", &["one", "two", "three"]).unwrap();
+        assert!(q.ends_with(r#"(?i)(one|two|three)""#));
     }
 }
