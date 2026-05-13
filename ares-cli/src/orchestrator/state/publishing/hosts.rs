@@ -3,7 +3,7 @@
 use anyhow::Result;
 use redis::AsyncCommands;
 
-use ares_core::models::{DomainEvidence, Host};
+use ares_core::models::{DomainEvidence, Host, OpStateEventPayload};
 use ares_core::state::{self, RedisStateReader};
 
 use redis::aio::ConnectionLike;
@@ -11,7 +11,7 @@ use redis::aio::ConnectionLike;
 use crate::orchestrator::state::SharedState;
 use crate::orchestrator::task_queue::TaskQueueCore;
 
-use super::{looks_like_real_domain, strip_netexec_artifact};
+use super::{emit_op_state, looks_like_real_domain, strip_netexec_artifact};
 
 impl SharedState {
     /// Add a host to state and Redis.
@@ -269,9 +269,18 @@ impl SharedState {
             let state = self.inner.read().await;
             state.operation_id.clone()
         };
-        let reader = RedisStateReader::new(operation_id);
+        let reader = RedisStateReader::new(operation_id.clone());
         let mut conn = queue.connection();
         reader.add_host(&mut conn, &host).await?;
+
+        // Phase 2 dual-write: emit host.discovered for net-new hosts only.
+        // Merges return earlier; HostUpdated is intentionally not yet a variant.
+        emit_op_state(
+            self.recorder(),
+            &operation_id,
+            OpStateEventPayload::HostDiscovered { host: host.clone() },
+        )
+        .await;
 
         // Update DC map and domain list if this is a domain controller
         if host.is_dc || host.detect_dc() {
@@ -1063,5 +1072,55 @@ mod tests {
             "no malformed entry should reach state.hosts, got: {:?}",
             s.hosts
         );
+    }
+
+    #[tokio::test]
+    async fn publish_host_emits_event_for_net_new_host() {
+        let recorder = std::sync::Arc::new(ares_core::op_state_log::OpStateRecorder::capturing());
+        let state = SharedState::with_recorder("op-host".to_string(), recorder.clone());
+        let q = mock_queue();
+
+        let host = make_host("192.168.58.7", "ws01.contoso.local", false);
+        state.publish_host(&q, host).await.unwrap();
+
+        let evs = recorder.captured().await;
+        assert!(evs.iter().any(|e| matches!(
+            &e.payload,
+            OpStateEventPayload::HostDiscovered { host } if host.ip == "192.168.58.7"
+        )));
+    }
+
+    #[tokio::test]
+    async fn publish_host_merge_does_not_emit_host_discovered() {
+        // A merge into an existing host returns early before the new-host path,
+        // so HostDiscovered must not fire a second time.
+        let recorder = std::sync::Arc::new(ares_core::op_state_log::OpStateRecorder::capturing());
+        let state = SharedState::with_recorder("op-merge".to_string(), recorder.clone());
+        let q = mock_queue();
+
+        state
+            .publish_host(&q, make_host("192.168.58.8", "", false))
+            .await
+            .unwrap();
+        let after_first = recorder.captured().await.len();
+
+        // Second publish with richer data should merge, not emit.
+        let mut host2 = make_host("192.168.58.8", "srv02.contoso.local", false);
+        host2.services.push("445/tcp microsoft-ds".to_string());
+        state.publish_host(&q, host2).await.unwrap();
+        let after_merge = recorder.captured().await.len();
+
+        let host_events_added = recorder
+            .captured()
+            .await
+            .iter()
+            .filter(|e| matches!(e.payload, OpStateEventPayload::HostDiscovered { .. }))
+            .count();
+        assert_eq!(
+            host_events_added, 1,
+            "merge must not re-emit HostDiscovered"
+        );
+        // The non-host events (e.g. netbios publish doesn't emit) shouldn't grow either.
+        assert_eq!(after_first, after_merge);
     }
 }

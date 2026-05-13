@@ -12,6 +12,7 @@ pub mod domain_probe;
 mod inner;
 mod persistence;
 mod publishing;
+pub(crate) mod replay;
 mod shared;
 
 // Re-export everything that was publicly visible from the old single file.

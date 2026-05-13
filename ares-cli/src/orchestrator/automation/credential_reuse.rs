@@ -204,7 +204,14 @@ pub async fn auto_credential_reuse(
 
             let priority = dispatcher.effective_priority("credential_reuse");
             match dispatcher
-                .request_secretsdump_hash(&dc_ip, &username, &source_domain, &hash_value, priority)
+                .request_secretsdump_hash(
+                    &dc_ip,
+                    &username,
+                    &source_domain,
+                    &hash_value,
+                    priority,
+                    None,
+                )
                 .await
             {
                 Ok(Some(task_id)) => {

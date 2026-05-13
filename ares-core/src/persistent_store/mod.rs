@@ -18,10 +18,12 @@
 //! - Retention policy enforcement
 
 mod config;
+mod projector;
 mod queries;
 mod store;
 
 pub use config::{PersistentStoreConfig, RetentionConfig};
+pub use projector::{OpStateProjector, PROJECTOR_CONSUMER_NAME};
 pub use queries::{
     CostRow, CredentialRow, HashRow, HistoricalQueryService, MitreCoverage, OperationRow,
     OperationSummary,

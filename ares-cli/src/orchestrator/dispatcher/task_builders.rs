@@ -354,6 +354,14 @@ impl Dispatcher {
     }
 
     /// Submit a secretsdump task using NTLM hash (pass-the-hash).
+    ///
+    /// When `just_dc_user` is `Some`, the task is narrowed to a single-account
+    /// DCSync (e.g. `Some("krbtgt")` for golden-ticket preparation). The flag
+    /// is plumbed into the payload so the prompt template can surface it as an
+    /// explicit argument in the example signature — without that, the LLM
+    /// agent omits `-just-dc-user` and impacket falls back to a full dump
+    /// (which is what we already have for the parent realm) or trips DRSUAPI
+    /// hardening.
     #[instrument(
         name = "automation.request_secretsdump_hash",
         skip(self, hash_value),
@@ -366,8 +374,9 @@ impl Dispatcher {
         domain: &str,
         hash_value: &str,
         priority: i32,
+        just_dc_user: Option<&str>,
     ) -> Result<Option<String>> {
-        let payload = json!({
+        let mut payload = json!({
             "technique": "secretsdump",
             "target_ip": target_ip,
             "credential": {
@@ -376,6 +385,9 @@ impl Dispatcher {
             },
             "hash_value": hash_value,
         });
+        if let Some(target_user) = just_dc_user {
+            payload["just_dc_user"] = json!(target_user);
+        }
         self.throttled_submit("credential_access", "credential_access", payload, priority)
             .await
     }

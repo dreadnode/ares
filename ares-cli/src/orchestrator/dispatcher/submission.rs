@@ -338,8 +338,17 @@ impl Dispatcher {
             task_params.insert("credential_key".to_string(), serde_json::json!(key));
         }
         // Propagate task metadata so process_completed_task can access them
-        // (mark_host_owned needs target_ip, domain attribution needs domain).
-        for key in &["target_ip", "domain"] {
+        // (mark_host_owned needs target_ip, domain attribution needs domain,
+        // the Impacket failure classifier needs technique/hash_value/
+        // just_dc_user/credential to rebuild a corrected re-dispatch).
+        for key in &[
+            "target_ip",
+            "domain",
+            "technique",
+            "hash_value",
+            "just_dc_user",
+            "credential",
+        ] {
             if let Some(val) = payload.get(*key) {
                 task_params.insert(key.to_string(), val.clone());
             }

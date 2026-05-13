@@ -42,6 +42,7 @@ pub(crate) fn spawn_automation_tasks(
     spawn_auto!(auto_delegation_enumeration);
     spawn_auto!(auto_coercion);
     spawn_auto!(auto_local_admin_secretsdump);
+    spawn_auto!(auto_krbtgt_extraction);
     spawn_auto!(auto_credential_access);
     spawn_auto!(auto_credential_expansion);
     spawn_auto!(auto_golden_ticket);

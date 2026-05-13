@@ -9,6 +9,7 @@
 
 pub mod admin_checks;
 pub mod discovery_polling;
+pub mod impacket_recovery;
 pub mod parsing;
 #[cfg(test)]
 mod tests;
@@ -56,7 +57,10 @@ pub async fn process_completed_task(
     let result = &completed.result;
 
     // Extract task-level metadata from pending_tasks before complete_task removes it.
-    let (cred_key, task_domain, task_target_ip, task_username) = {
+    // The full params snapshot is captured so the Impacket failure classifier
+    // (called on the failure path below) can rebuild a corrected re-dispatch
+    // without re-reading the already-cleared pending_tasks entry.
+    let (cred_key, task_domain, task_target_ip, task_username, task_params_snapshot) = {
         let state = dispatcher.state.read().await;
         let task = state.pending_tasks.get(task_id.as_str());
         let ck = task
@@ -75,7 +79,8 @@ pub async fn process_completed_task(
             .and_then(|t| t.params.get("username"))
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
-        (ck, td, tip, tu)
+        let params = task.map(|t| t.params.clone()).unwrap_or_default();
+        (ck, td, tip, tu, params)
     };
 
     // Pre-compute the "DOMAIN\\username" label for share authentication
@@ -115,6 +120,22 @@ pub async fn process_completed_task(
         if err_msg.to_lowercase().contains("rate limit") || err_msg.to_lowercase().contains("429") {
             throttler.record_rate_limit_error().await;
         }
+
+        // Impacket failure classifier: re-dispatch credential_access tasks
+        // that failed because of one of the known Impacket constraints
+        // (CLAUDE.md). Gated on credential-is-known-good so genuinely bad
+        // passwords don't trigger retries. One-shot per (target, cred, class).
+        if task_id.starts_with("credential_access_") {
+            impacket_recovery::attempt_recovery(
+                dispatcher,
+                task_id,
+                &task_params_snapshot,
+                &result.result,
+                result.error.as_deref(),
+            )
+            .await;
+        }
+
         // Don't return early — failed tasks (MaxSteps, Error) may still carry
         // parser-extracted discoveries from tool calls that ran before failure.
         // All discoveries now come from regex parsers, not LLM hallucination.
