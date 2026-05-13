@@ -323,6 +323,60 @@ pub fn parse_tool_output(tool_name: &str, output: &str, params: &Value) -> Value
                 discoveries["password_policies"] = json!([details]);
             }
         }
+        "zerologon_check" => {
+            // netexec --zerologon emits per-line results. On vulnerable DCs:
+            //   SMB     <ip>  445   <host>  VULNERABLE
+            //   SMB     <ip>  445   <host>  [+] <host> is vulnerable to Zerologon ...
+            // On patched DCs:
+            //   SMB     <ip>  445   <host>  Not vulnerable
+            //   SMB     <ip>  445   <host>  [-] <host> is not vulnerable
+            //
+            // Without this parser the netexec output flowed straight to the
+            // LLM and the `zerologon` technique never got into state. The
+            // exploit (set_empty_pw + secretsdump krbtgt + restore-pw) is
+            // destructive enough that ares leaves it to a deliberate operator
+            // round, but the *discovery* belongs in `discovered_vulnerabilities`
+            // so the scoreboard token / strategy-priority knobs / deep-exploit
+            // routing can act on it.
+            let dc_ip = params
+                .get("dc_ip")
+                .or_else(|| params.get("target_ip"))
+                .or_else(|| params.get("target"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if !dc_ip.is_empty() && is_zerologon_vulnerable(output) {
+                let domain = params.get("domain").and_then(|v| v.as_str()).unwrap_or("");
+                let hostname = params
+                    .get("hostname")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let target_ip_safe = dc_ip.replace('.', "_");
+                let mut details = serde_json::Map::new();
+                details.insert("target_ip".into(), json!(dc_ip));
+                details.insert("cve".into(), json!("CVE-2020-1472"));
+                details.insert(
+                    "description".into(),
+                    json!(format!(
+                        "Domain controller {dc_ip} is vulnerable to ZeroLogon (CVE-2020-1472)"
+                    )),
+                );
+                if !domain.is_empty() {
+                    details.insert("domain".into(), json!(domain));
+                }
+                if !hostname.is_empty() {
+                    details.insert("hostname".into(), json!(hostname));
+                }
+                discoveries["vulnerabilities"] = json!([{
+                    "vuln_id": format!("zerologon_{target_ip_safe}"),
+                    "vuln_type": "zerologon",
+                    "target": dc_ip,
+                    "discovered_by": "zerologon_check",
+                    "priority": 4,
+                    "recommended_agent": "privesc",
+                    "details": details,
+                }]);
+            }
+        }
         "evil_winrm" => {
             // Detect successful WinRM connection from evil-winrm output.
             // A successful connection typically shows "Evil-WinRM shell" or
@@ -532,6 +586,41 @@ pub fn merge_discoveries(all: &[Value]) -> Value {
 
 fn looks_like_ip(s: &str) -> bool {
     looks_like_ip_pub(s)
+}
+
+/// Detect a positive ZeroLogon (CVE-2020-1472) verdict in `zerologon_check`
+/// tool output. The tool is `netexec smb <dc> -M zerologon`; success markers
+/// vary by netexec version but always include the literal `VULNERABLE` token
+/// or an explicit "vulnerable to Zerologon" phrase. Patched DCs emit the
+/// negative `Not vulnerable` / "not vulnerable" markers, which we must
+/// exclude — netexec prints both lines on success-and-then-restore runs, so
+/// we treat the *absence* of a negative marker as required.
+///
+/// Decision matrix:
+///   - "VULNERABLE" present AND no "not vulnerable" line   → true
+///   - "is vulnerable to zerologon" present AND no negative → true
+///   - everything else (no marker, or any negative marker)  → false
+pub(crate) fn is_zerologon_vulnerable(output: &str) -> bool {
+    let lower = output.to_ascii_lowercase();
+    // Negative markers win. Some netexec builds emit a banner line first
+    // then a per-target verdict; if any line says the DC is not vulnerable
+    // or the check skipped, we don't credit it.
+    if lower.contains("not vulnerable")
+        || lower.contains("is patched")
+        || lower.contains("target appears patched")
+    {
+        return false;
+    }
+    // Positive markers: the literal token (netexec's column-formatted row)
+    // OR the descriptive phrase. The phrase form is what older nxc builds
+    // and the CME ancestor emitted, so we accept both.
+    let positive_token = output
+        .lines()
+        .any(|l| l.contains(" VULNERABLE") || l.trim() == "VULNERABLE");
+    let positive_phrase = lower.contains("vulnerable to zerologon")
+        || lower.contains("zerologon: vulnerable")
+        || lower.contains("[+] domain is vulnerable");
+    positive_token || positive_phrase
 }
 
 /// Check if a string looks like an IPv4 address (public for recon module).
@@ -1089,5 +1178,138 @@ contoso.local/Administrator:500:aad3b435b51404eeaad3b435b51404ee:222222222222222
         let hosts = merged["hosts"].as_array().unwrap();
         assert_eq!(hosts.len(), 1);
         assert_eq!(hosts[0]["services"].as_array().unwrap().len(), 3);
+    }
+
+    // ── is_zerologon_vulnerable ────────────────────────────────────────
+
+    #[test]
+    fn zerologon_vulnerable_token_only() {
+        // Classic netexec column-formatted positive row.
+        let out = "SMB         192.168.58.210  445    DC01             VULNERABLE";
+        assert!(is_zerologon_vulnerable(out));
+    }
+
+    #[test]
+    fn zerologon_vulnerable_descriptive_phrase() {
+        // Older nxc / cme builds emit the descriptive phrase form.
+        let out =
+            "SMB         192.168.58.210  445    DC01             [+] DC01 is vulnerable to Zerologon - CVE-2020-1472";
+        assert!(is_zerologon_vulnerable(out));
+    }
+
+    #[test]
+    fn zerologon_vulnerable_phrase_case_insensitive() {
+        let out = "SMB  10  445  DC  ZEROLOGON: VULNERABLE";
+        assert!(is_zerologon_vulnerable(out));
+    }
+
+    #[test]
+    fn zerologon_not_vulnerable_negative_marker_wins() {
+        // The negative marker must override the descriptive line even when
+        // the word "VULNERABLE" appears in a banner / module header.
+        let out = "[*] Loading module zerologon (checks for VULNERABLE state)\n\
+            SMB         192.168.58.210  445    DC01             Not vulnerable";
+        assert!(!is_zerologon_vulnerable(out));
+    }
+
+    #[test]
+    fn zerologon_not_vulnerable_explicit_phrase() {
+        let out = "SMB         192.168.58.210  445    DC01             [-] DC01 is not vulnerable";
+        assert!(!is_zerologon_vulnerable(out));
+    }
+
+    #[test]
+    fn zerologon_patched_phrase() {
+        let out =
+            "SMB         192.168.58.210  445    DC01             Target appears patched (CVE-2020-1472)";
+        assert!(!is_zerologon_vulnerable(out));
+    }
+
+    #[test]
+    fn zerologon_no_evidence_in_empty_output() {
+        assert!(!is_zerologon_vulnerable(""));
+        assert!(!is_zerologon_vulnerable(
+            "SMB  10  445  DC  Authenticating..."
+        ));
+    }
+
+    #[test]
+    fn zerologon_does_not_match_substring_vulnerable_inside_word() {
+        // The token form looks for `\sVULNERABLE` (lead-space, exact). A
+        // line containing "NOTVULNERABLE" or "INVULNERABLE" without a space
+        // boundary must not match. (Bare-line " VULNERABLE" is still ok.)
+        let out = "SMB         192.168.58.210  445    DC01             INVULNERABLE_TO_THIS_CHECK";
+        assert!(!is_zerologon_vulnerable(out));
+    }
+
+    // ── parse_tool_output("zerologon_check", ...) integration ──────────
+
+    #[test]
+    fn parse_tool_output_zerologon_emits_vuln_on_positive() {
+        let output = "SMB         192.168.58.210  445    DC01             VULNERABLE\n\
+             SMB         192.168.58.210  445    DC01             Next step: see CVE-2020-1472";
+        let params = json!({
+            "dc_ip": "192.168.58.210",
+            "domain": "contoso.local",
+            "hostname": "dc01"
+        });
+        let discoveries = parse_tool_output("zerologon_check", output, &params);
+        let vulns = discoveries["vulnerabilities"]
+            .as_array()
+            .expect("vulns array");
+        assert_eq!(vulns.len(), 1);
+        assert_eq!(vulns[0]["vuln_type"], "zerologon");
+        assert_eq!(vulns[0]["target"], "192.168.58.210");
+        assert_eq!(vulns[0]["vuln_id"], "zerologon_192_168_58_210");
+        assert_eq!(vulns[0]["details"]["cve"], "CVE-2020-1472");
+        assert_eq!(vulns[0]["details"]["domain"], "contoso.local");
+        assert_eq!(vulns[0]["details"]["hostname"], "dc01");
+    }
+
+    #[test]
+    fn parse_tool_output_zerologon_silent_on_patched_dc() {
+        let output = "SMB  192.168.58.210  445  DC01  Not vulnerable";
+        let params = json!({"dc_ip": "192.168.58.210"});
+        let discoveries = parse_tool_output("zerologon_check", output, &params);
+        // No vulns array means the orchestrator won't add a phantom
+        // zerologon entry to state for a patched DC.
+        assert!(discoveries.get("vulnerabilities").is_none());
+    }
+
+    #[test]
+    fn parse_tool_output_zerologon_falls_back_to_target_ip_param() {
+        // Older dispatchers send `target_ip` rather than `dc_ip`. The parser
+        // must accept either so we don't drop the discovery on a payload
+        // shape that the LLM-routed automation in zerologon.rs already uses.
+        let output = "SMB  192.168.58.210  445  DC01  VULNERABLE";
+        let params = json!({"target_ip": "192.168.58.210"});
+        let discoveries = parse_tool_output("zerologon_check", output, &params);
+        let vulns = discoveries["vulnerabilities"].as_array().expect("vulns");
+        assert_eq!(vulns[0]["target"], "192.168.58.210");
+    }
+
+    #[test]
+    fn parse_tool_output_zerologon_skipped_when_dc_ip_missing() {
+        // Without an IP we'd produce a vuln_id of `zerologon_` which would
+        // collide across DCs. Skip rather than emit a malformed entry.
+        let output = "SMB  192.168.58.210  445  DC01  VULNERABLE";
+        let params = json!({});
+        let discoveries = parse_tool_output("zerologon_check", output, &params);
+        assert!(discoveries.get("vulnerabilities").is_none());
+    }
+
+    #[test]
+    fn parse_tool_output_zerologon_vuln_id_is_idempotent_on_same_dc() {
+        // Two parser runs on the same DC must produce the same vuln_id so
+        // the orchestrator's dedup machinery can recognise them as the same
+        // discovery (and not double-count toward state.discovered_vulnerabilities).
+        let out = "SMB  192.168.58.210  445  DC01  VULNERABLE";
+        let params = json!({"dc_ip": "192.168.58.210"});
+        let a = parse_tool_output("zerologon_check", out, &params);
+        let b = parse_tool_output("zerologon_check", out, &params);
+        assert_eq!(
+            a["vulnerabilities"][0]["vuln_id"],
+            b["vulnerabilities"][0]["vuln_id"]
+        );
     }
 }
