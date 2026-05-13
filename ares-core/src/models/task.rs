@@ -115,7 +115,7 @@ pub struct TaskResult {
 ///
 /// Matches Python: `class VulnerabilityInfo` dataclass
 /// Redis serialization: `{"vuln_id","vuln_type","target","discovered_by","discovered_at","details","recommended_agent","priority"}`
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct VulnerabilityInfo {
     pub vuln_id: String,
     pub vuln_type: String,

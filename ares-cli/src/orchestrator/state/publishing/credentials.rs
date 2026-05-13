@@ -2,7 +2,7 @@
 
 use anyhow::Result;
 
-use ares_core::models::{Credential, Hash};
+use ares_core::models::{Credential, Hash, OpStateEventPayload};
 use ares_core::state::{self, RedisStateReader};
 
 use redis::aio::ConnectionLike;
@@ -10,7 +10,7 @@ use redis::aio::ConnectionLike;
 use crate::orchestrator::state::SharedState;
 use crate::orchestrator::task_queue::TaskQueueCore;
 
-use super::{credential_source_trust, sanitize_credential, strip_netexec_artifact};
+use super::{credential_source_trust, emit_op_state, sanitize_credential, strip_netexec_artifact};
 
 impl SharedState {
     /// Add a credential to state and Redis (with dedup).
@@ -81,10 +81,21 @@ impl SharedState {
             let state = self.inner.read().await;
             state.operation_id.clone()
         };
-        let reader = RedisStateReader::new(operation_id);
+        let reader = RedisStateReader::new(operation_id.clone());
         let mut conn = queue.connection();
         let added = reader.add_credential(&mut conn, &cred).await?;
         if added {
+            // Phase 2 dual-write: append to the op-state log after Redis confirms
+            // the credential is new (Redis is the dedup oracle).
+            emit_op_state(
+                self.recorder(),
+                &operation_id,
+                OpStateEventPayload::CredentialCaptured {
+                    credential: cred.clone(),
+                },
+            )
+            .await;
+
             // Warn (don't promote) when the credential's domain is unknown — this
             // is how we surface LLM hallucinations without letting them mutate
             // canonical state. Use NetExec-artifact-stripped form for the check.
@@ -137,7 +148,7 @@ impl SharedState {
             state.operation_id.clone()
         };
         let operation_id_for_redis = operation_id.clone();
-        let reader = RedisStateReader::new(operation_id);
+        let reader = RedisStateReader::new(operation_id.clone());
         let mut conn = queue.connection();
         let added = reader.add_hash(&mut conn, &hash).await?;
         if !added {
@@ -166,6 +177,14 @@ impl SharedState {
             }
             return Ok(false);
         }
+        // Phase 2 dual-write: emit before consuming `hash` into state.
+        emit_op_state(
+            self.recorder(),
+            &operation_id,
+            OpStateEventPayload::HashCaptured { hash: hash.clone() },
+        )
+        .await;
+
         // Capture identity fields before `hash` is moved into state.hashes —
         // they drive the implicit-user backfill below.
         let backfill_username = hash.username.clone();
@@ -426,10 +445,18 @@ mod tests {
     use super::*;
     use crate::orchestrator::state::SharedState;
     use crate::orchestrator::task_queue::TaskQueueCore;
+    use ares_core::op_state_log::OpStateRecorder;
     use ares_core::state::mock_redis::MockRedisConnection;
+    use std::sync::Arc;
 
     fn mock_queue() -> TaskQueueCore<MockRedisConnection> {
         TaskQueueCore::from_connection(MockRedisConnection::new())
+    }
+
+    fn capturing_state(op_id: &str) -> (SharedState, Arc<OpStateRecorder>) {
+        let recorder = Arc::new(OpStateRecorder::capturing());
+        let state = SharedState::with_recorder(op_id.to_string(), recorder.clone());
+        (state, recorder)
     }
 
     fn make_cred(username: &str, password: &str, domain: &str) -> Credential {
@@ -840,5 +867,87 @@ mod tests {
             .await
             .unwrap();
         assert!(!updated);
+    }
+
+    #[tokio::test]
+    async fn publish_credential_emits_event_with_capturing_recorder() {
+        let (state, recorder) = capturing_state("op-emit");
+        let q = mock_queue();
+        let cred = make_cred("alice", "P@ssw0rd!", "contoso.local");
+        assert!(state.publish_credential(&q, cred).await.unwrap());
+
+        let evs = recorder.captured().await;
+        assert_eq!(evs.len(), 1, "exactly one event should be emitted");
+        assert_eq!(evs[0].op_id, "op-emit");
+        match &evs[0].payload {
+            OpStateEventPayload::CredentialCaptured { credential } => {
+                assert_eq!(credential.username, "alice");
+                assert_eq!(credential.domain, "contoso.local");
+            }
+            other => panic!("expected CredentialCaptured, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn publish_credential_dedup_does_not_emit_duplicate_event() {
+        let (state, recorder) = capturing_state("op-dedup");
+        let q = mock_queue();
+        let cred1 = make_cred("alice", "P@ssw0rd!", "contoso.local");
+        let cred2 = make_cred("alice", "P@ssw0rd!", "contoso.local");
+        assert!(state.publish_credential(&q, cred1).await.unwrap());
+        assert!(!state.publish_credential(&q, cred2).await.unwrap());
+
+        let evs = recorder.captured().await;
+        assert_eq!(evs.len(), 1, "dedup'd insert must not emit a second event");
+    }
+
+    #[tokio::test]
+    async fn publish_credential_rejected_input_does_not_emit() {
+        // Invalid credential (empty password) is dropped by sanitize_credential
+        // before any Redis write — must not emit an event either.
+        let (state, recorder) = capturing_state("op-reject");
+        let q = mock_queue();
+        let cred = make_cred("alice", "", "contoso.local");
+        assert!(!state.publish_credential(&q, cred).await.unwrap());
+        assert!(recorder.captured().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn publish_hash_emits_event_with_capturing_recorder() {
+        let (state, recorder) = capturing_state("op-h");
+        let q = mock_queue();
+        let hash = make_hash("admin", "contoso.local", "NTLM", "aabbccdd");
+        assert!(state.publish_hash(&q, hash).await.unwrap());
+
+        let evs = recorder.captured().await;
+        // Plain admin hash emits hash.captured plus a UserDiscovered event from
+        // the implicit-user backfill (publish_user is called for non-machine
+        // accounts so the report's user count reflects identities surfaced via
+        // secretsdump). krbtgt would emit additional vuln/exploited events.
+        let hash_event = evs
+            .iter()
+            .find(|e| matches!(e.payload, OpStateEventPayload::HashCaptured { .. }))
+            .expect("must emit HashCaptured");
+        match &hash_event.payload {
+            OpStateEventPayload::HashCaptured { hash } => {
+                assert_eq!(hash.username, "admin");
+                assert_eq!(hash.hash_type, "NTLM");
+            }
+            other => panic!("expected HashCaptured, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn disabled_recorder_emits_nothing() {
+        // SharedState::new() defaults to OpStateRecorder::Disabled.
+        let state = SharedState::new("op-noop".to_string());
+        let q = mock_queue();
+        state
+            .publish_credential(&q, make_cred("alice", "P@ssw0rd!", "contoso.local"))
+            .await
+            .unwrap();
+        // No recorder handle to inspect — the assertion here is "no panic and
+        // no async hang on the no-op record path". Combined with the active
+        // tests above, this exercises both branches of `is_active`.
     }
 }

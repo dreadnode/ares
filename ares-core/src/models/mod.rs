@@ -6,6 +6,7 @@
 #[cfg(feature = "blue")]
 mod blue;
 mod core;
+mod op_state_event;
 mod operation;
 mod task;
 mod util;
@@ -19,6 +20,7 @@ pub use core::{
     is_always_disabled_account, CandidateDomain, Credential, DomainEvidence, Hash, Host,
     KerberosTicket, Share, Target, TrustInfo, User,
 };
+pub use op_state_event::{OpStateEvent, OpStateEventPayload};
 pub use operation::{AttackChainStep, OperationMeta, SharedRedTeamState};
 pub use task::{
     AgentInfo, AgentRole, TaskInfo, TaskResult, TaskStatus, TaskStatusRecord, VulnerabilityInfo,

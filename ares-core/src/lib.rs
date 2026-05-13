@@ -17,6 +17,7 @@ pub mod detection;
 pub mod eval;
 pub mod models;
 pub mod nats;
+pub mod op_state_log;
 pub mod parsing;
 pub mod persistent_store;
 pub mod reports;

@@ -29,7 +29,7 @@ pub(crate) mod recovery;
 mod result_processing;
 mod results;
 mod routing;
-mod state;
+pub(crate) mod state;
 pub(crate) mod strategy;
 mod task_queue;
 mod throttling;
@@ -40,7 +40,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use tokio::signal;
 use tokio::sync::watch;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 use self::automation_spawner::spawn_automation_tasks;
 use self::bootstrap::{bootstrap_meta, dispatch_initial_recon};
@@ -131,12 +131,89 @@ async fn run_inner() -> Result<()> {
         );
     }
 
-    let shared_state = SharedState::new(config.operation_id.clone());
+    let mut shared_state = SharedState::new(config.operation_id.clone());
+
+    // Phase 2 dual-write: install a Nats-backed op-state recorder when NATS is
+    // available. Redis remains authoritative until Phase 4; emit failures are
+    // logged (see `emit_op_state`) but never abort the op.
+    let nats_broker = queue.nats_broker();
+    if let Some(broker) = nats_broker.clone() {
+        shared_state.set_recorder(std::sync::Arc::new(
+            ares_core::op_state_log::OpStateRecorder::nats(std::sync::Arc::new(broker)),
+        ));
+        info!("Op-state event log enabled (JetStream ARES_OPSTATE)");
+    } else {
+        info!("Op-state event log disabled — no NATS broker on TaskQueue");
+    }
+
+    // Phase 3: spawn the Postgres projector consumer when both NATS and a
+    // database URL are available. The projector tails ARES_OPSTATE and
+    // upserts each event into PG, replacing the manual `ares ops offload`
+    // path with an always-current archive.
+    let _projector_handle: Option<tokio::task::JoinHandle<()>> = match (
+        nats_broker.clone(),
+        std::env::var("ARES_DATABASE_URL").ok(),
+    ) {
+        (Some(broker), Some(database_url)) => {
+            match ares_core::persistent_store::PersistentStore::connect(&database_url).await {
+                Ok(store) => {
+                    if let Err(e) = store.migrate().await {
+                        warn!(err = %e, "Postgres projector: schema migration failed; continuing without projection");
+                        None
+                    } else {
+                        let projector =
+                            ares_core::persistent_store::OpStateProjector::new(store, broker);
+                        match projector.spawn().await {
+                            Ok(h) => Some(h),
+                            Err(e) => {
+                                warn!(err = %e, "Failed to spawn Postgres projector — events will accumulate in JetStream without PG sync");
+                                None
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    warn!(err = %e, "Postgres projector: PG connect failed; continuing without projection");
+                    None
+                }
+            }
+        }
+        (None, _) => None,
+        (Some(_), None) => {
+            debug!("ARES_DATABASE_URL not set — Postgres projector disabled");
+            None
+        }
+    };
+
     shared_state.initialize_self_ips().await;
-    shared_state
-        .load_from_redis(&queue)
-        .await
-        .context("Failed to load state from Redis")?;
+
+    // Phase 4 (opt-in): replay state from the JetStream event log instead of
+    // loading from Redis. Falls through to Redis on failure or when the env
+    // var is unset, so the default startup path is unchanged.
+    let replay_enabled = std::env::var("ARES_USE_EVENT_LOG_REPLAY").as_deref() == Ok("1");
+    let replayed = match (replay_enabled, nats_broker.as_ref()) {
+        (true, Some(broker)) => match shared_state.load_from_event_log(broker).await {
+            Ok(n) => {
+                info!(events = n, "Loaded state from JetStream event log replay");
+                true
+            }
+            Err(e) => {
+                warn!(err = %e, "Event log replay failed; falling back to Redis");
+                false
+            }
+        },
+        (true, None) => {
+            warn!("ARES_USE_EVENT_LOG_REPLAY=1 but no NATS broker; falling back to Redis");
+            false
+        }
+        (false, _) => false,
+    };
+    if !replayed {
+        shared_state
+            .load_from_redis(&queue)
+            .await
+            .context("Failed to load state from Redis")?;
+    }
 
     {
         let mut state = shared_state.write().await;
