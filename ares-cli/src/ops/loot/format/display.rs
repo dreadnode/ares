@@ -308,6 +308,11 @@ pub(super) fn print_loot_human(
         &state.exploited_vulnerabilities,
     );
 
+    print_token_coverage(
+        &state.discovered_vulnerabilities,
+        &state.exploited_vulnerabilities,
+    );
+
     print_attack_path(&state.all_timeline_events);
     print_mitre_techniques(&state.all_techniques, &state.all_timeline_events);
 }
@@ -512,6 +517,170 @@ fn print_vulnerabilities(
         print_vuln_table(&findings, exploited);
     }
     println!();
+}
+
+/// Render a scoreboard-aligned token coverage table:
+///
+///   Category               Discovered  Exploited  Status
+///   ------------------------------------------------------
+///   acl_abuse                       12          3  PARTIAL
+///   adcs_esc1                        2          2  ✓
+///   constrained_delegation           2          0  ✗
+///   ...
+///
+/// The category is the dreadgoad scoreboard token prefix (anything before
+/// the first `_<details>` segment). Mirrors `aresExploitedToTechniqueIDs`
+/// in `DreadGOAD/cli/internal/scoreboard/transport_ares.go` so what the
+/// operator sees here matches what the scoreboard will credit on the next
+/// dredgoad pull — the diff between "Discovered" and "Exploited" is the
+/// concrete regression backlog.
+fn print_token_coverage(
+    discovered: &HashMap<String, VulnerabilityInfo>,
+    exploited: &HashSet<String>,
+) {
+    if discovered.is_empty() && exploited.is_empty() {
+        return;
+    }
+
+    let mut discovered_by_cat: std::collections::BTreeMap<String, usize> =
+        std::collections::BTreeMap::new();
+    let mut exploited_by_cat: std::collections::BTreeMap<String, usize> =
+        std::collections::BTreeMap::new();
+
+    for id in discovered.keys() {
+        let cat = token_category(id);
+        *discovered_by_cat.entry(cat).or_default() += 1;
+    }
+    for id in exploited {
+        let cat = token_category(id);
+        *exploited_by_cat.entry(cat).or_default() += 1;
+    }
+
+    // Union of categories so a category that only appears in :exploited
+    // (e.g. golden_ticket-<domain> emitted by milestones) still renders.
+    let mut categories: Vec<&String> = discovered_by_cat.keys().collect();
+    for k in exploited_by_cat.keys() {
+        if !categories.contains(&k) {
+            categories.push(k);
+        }
+    }
+    categories.sort();
+
+    println!(
+        "Token Coverage ({} categories observed, scoreboard alignment):",
+        categories.len()
+    );
+    println!(
+        "  {:<30} {:>10} {:>10}  Status",
+        "Category", "Discovered", "Exploited"
+    );
+    println!("  {}", "-".repeat(70));
+    for cat in &categories {
+        let d = discovered_by_cat.get(*cat).copied().unwrap_or(0);
+        let e = exploited_by_cat.get(*cat).copied().unwrap_or(0);
+        let status = if d == 0 && e > 0 {
+            // Implicit token (e.g. milestone-emitted) — counts as full.
+            "\u{2713}"
+        } else if e == 0 {
+            "\u{2717}"
+        } else if e >= d {
+            "\u{2713}"
+        } else {
+            "PARTIAL"
+        };
+        println!("  {:<30} {:>10} {:>10}  {}", cat, d, e, status);
+    }
+    println!();
+}
+
+/// Extract the scoreboard category from a vuln_id. The category is the
+/// longest known prefix that matches a dreadgoad token matcher — for
+/// `acl_writeproperty_alice_admins` the category is `acl_abuse`; for
+/// `golden_ticket-contoso.local` it's `golden_ticket`; for
+/// `adcs_esc1_192.168.58.50_template` it's `adcs_esc1`.
+///
+/// Kept in sync with `aresExploitedToTechniqueIDs` in
+/// `DreadGOAD/cli/internal/scoreboard/transport_ares.go`.
+fn token_category(vuln_id: &str) -> String {
+    let lower = vuln_id.to_lowercase();
+    // ADCS ESC variants are the only category where the trailing digits
+    // are part of the category name (esc1, esc10_case1, esc15, ...). Long
+    // forms must be matched before short ones so `adcs_esc10_case1` does
+    // not collapse to `adcs_esc1`.
+    const ADCS: &[&str] = &[
+        "adcs_esc10_case1",
+        "adcs_esc10_case2",
+        "adcs_esc11",
+        "adcs_esc13",
+        "adcs_esc15",
+        "adcs_esc1",
+        "adcs_esc2",
+        "adcs_esc3",
+        "adcs_esc4",
+        "adcs_esc6",
+        "adcs_esc7",
+        "adcs_esc8",
+        "adcs_esc9",
+    ];
+    for esc in ADCS {
+        if lower.starts_with(&format!("{esc}_")) || lower == *esc {
+            return (*esc).to_string();
+        }
+    }
+    // Special-case ACL primitives — many vuln_id forms (acl_writeproperty,
+    // acl_genericall, acl_allextendedrights, etc.) collapse to a single
+    // `acl_abuse` scoreboard objective.
+    if lower.starts_with("acl_") {
+        return "acl_abuse".into();
+    }
+    // Golden ticket uses `golden_ticket_<domain>` form.
+    if lower.starts_with("golden_ticket_") {
+        return "golden_ticket".into();
+    }
+    // Remaining categories — first prefix-segment match wins. Order
+    // longest-first to handle nested prefixes (e.g. `mssql_linked_server_`
+    // before bare `mssql_`).
+    const CATEGORIES: &[&str] = &[
+        "mssql_linked_server",
+        "mssql_impersonation",
+        "constrained_delegation",
+        "unconstrained_delegation",
+        "shadow_credentials",
+        "ntlm_relay",
+        "child_to_parent",
+        "forest_trust",
+        "sid_history",
+        "asrep_roast",
+        "seimpersonate",
+        "kerberoast",
+        "ntlmv1",
+        "gpo_abuse",
+        "gpo",
+        "mssql",
+        "llmnr",
+        "gmsa",
+        "laps",
+        "rbcd",
+    ];
+    for c in CATEGORIES {
+        if lower.starts_with(&format!("{c}_")) || lower == *c {
+            // Normalise alias prefixes to their canonical scoreboard
+            // category — `gpo_writeproperty` → `gpo_abuse`, `mssql_*` →
+            // `mssql_exploit`.
+            return match *c {
+                "gpo" => "gpo_abuse".into(),
+                "mssql_impersonation" | "mssql" => "mssql_exploit".into(),
+                "ntlmv1" => "ntlmv1_downgrade".into(),
+                "llmnr" => "llmnr_nbtns_poisoning".into(),
+                "sid_history" => "sid_history_abuse".into(),
+                "seimpersonate" => "seimpersonate".into(),
+                "gmsa" => "gmsa_password_read".into(),
+                "laps" => "laps_password_read".into(),
+                other => other.to_string(),
+            };
+        }
+    }
+    "other".into()
 }
 
 /// Render a single vulnerability table body (header + rows).
@@ -1468,5 +1637,140 @@ mod tests {
         let (_domains, roots, children) = compute_forest_structure(&input);
         assert_eq!(roots, vec!["sub.contoso.local"]);
         assert!(children.is_empty());
+    }
+
+    // --- token_category coverage ------------------------------------------
+
+    #[test]
+    fn token_category_adcs_long_form_does_not_collapse_to_esc1() {
+        // Real vuln_id forms always include `_<details>` after the ESC code.
+        // The matcher uses `starts_with("{esc}_")` so `adcs_esc1` does NOT
+        // steal `adcs_esc10_*` / `adcs_esc11_*` / `adcs_esc15_*`.
+        assert_eq!(
+            super::token_category("adcs_esc10_case1_192.168.58.50"),
+            "adcs_esc10_case1"
+        );
+        assert_eq!(
+            super::token_category("adcs_esc10_case2_192.168.58.50"),
+            "adcs_esc10_case2"
+        );
+        assert_eq!(
+            super::token_category("adcs_esc11_192.168.58.50"),
+            "adcs_esc11"
+        );
+        assert_eq!(
+            super::token_category("adcs_esc13_192.168.58.50"),
+            "adcs_esc13"
+        );
+        assert_eq!(
+            super::token_category("adcs_esc15_192.168.58.50"),
+            "adcs_esc15"
+        );
+        assert_eq!(
+            super::token_category("adcs_esc1_192.168.58.50"),
+            "adcs_esc1"
+        );
+    }
+
+    #[test]
+    fn token_category_acl_collapses_to_acl_abuse() {
+        assert_eq!(
+            super::token_category("acl_writeproperty_alice_admins"),
+            "acl_abuse"
+        );
+        assert_eq!(
+            super::token_category("acl_genericall_bob_administrator"),
+            "acl_abuse"
+        );
+        assert_eq!(
+            super::token_category("acl_allextendedrights_carol_domain_admins"),
+            "acl_abuse"
+        );
+        assert_eq!(super::token_category("acl_writedacl_dave_eve"), "acl_abuse");
+    }
+
+    #[test]
+    fn token_category_mssql_normalises_to_canonical() {
+        assert_eq!(
+            super::token_category("mssql_linked_server_192.168.58.51_sql"),
+            "mssql_linked_server"
+        );
+        assert_eq!(
+            super::token_category("mssql_impersonation_192.168.58.51"),
+            "mssql_exploit"
+        );
+        assert_eq!(super::token_category("mssql_10_1_2_51"), "mssql_exploit");
+    }
+
+    #[test]
+    fn token_category_delegation_and_trust() {
+        assert_eq!(
+            super::token_category("constrained_delegation_alice"),
+            "constrained_delegation"
+        );
+        assert_eq!(
+            super::token_category("unconstrained_delegation_web01$"),
+            "unconstrained_delegation"
+        );
+        assert_eq!(super::token_category("rbcd_dc01_web01"), "rbcd");
+        assert_eq!(
+            super::token_category("child_to_parent_child_contoso_local_contoso_local"),
+            "child_to_parent"
+        );
+        assert_eq!(
+            super::token_category("forest_trust_contoso_local_fabrikam_local"),
+            "forest_trust"
+        );
+    }
+
+    #[test]
+    fn token_category_golden_ticket_keeps_domain_in_id() {
+        assert_eq!(
+            super::token_category("golden_ticket_contoso.local"),
+            "golden_ticket"
+        );
+        assert_eq!(
+            super::token_category("golden_ticket_child.contoso.local"),
+            "golden_ticket"
+        );
+    }
+
+    #[test]
+    fn token_category_aliases_collapse() {
+        assert_eq!(super::token_category("ntlmv1_dc01"), "ntlmv1_downgrade");
+        assert_eq!(
+            super::token_category("llmnr_attacker_box"),
+            "llmnr_nbtns_poisoning"
+        );
+        assert_eq!(
+            super::token_category("sid_history_alice"),
+            "sid_history_abuse"
+        );
+        assert_eq!(super::token_category("gmsa_svc_web"), "gmsa_password_read");
+        assert_eq!(super::token_category("laps_dc01"), "laps_password_read");
+        assert_eq!(
+            super::token_category("gpo_writeproperty_alice_31b2"),
+            "gpo_abuse"
+        );
+        assert_eq!(
+            super::token_category("seimpersonate_web01"),
+            "seimpersonate"
+        );
+    }
+
+    #[test]
+    fn token_category_roast_tokens() {
+        assert_eq!(super::token_category("kerberoast_sql_svc"), "kerberoast");
+        assert_eq!(
+            super::token_category("asrep_roast_contoso.local"),
+            "asrep_roast"
+        );
+    }
+
+    #[test]
+    fn token_category_unknown_falls_through_to_other() {
+        assert_eq!(super::token_category("zerologon_dc01"), "other");
+        assert_eq!(super::token_category("nopac_192.168.58.10"), "other");
+        assert_eq!(super::token_category(""), "other");
     }
 }
