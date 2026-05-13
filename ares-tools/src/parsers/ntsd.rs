@@ -344,9 +344,17 @@ pub fn parse_acl_enumeration(output: &str, params: &Value) -> Vec<Value> {
     // First pass: collect all objects with their sAMAccountName and objectSid
     struct LdapObject {
         sam_account_name: String,
-        object_class: String, // user, group, computer
+        object_class: String, // user, group, computer, grouppolicycontainer
         ntsd_base64: String,
         object_sid: String,
+        /// `cn` attribute — for GPO containers this is the `{GUID}` form
+        /// (`{31B2F340-016D-11D2-945F-00C04FB984F9}`); for other objects
+        /// it's the same as sAMAccountName minus the leading prefix.
+        cn: String,
+        /// `displayName` attribute — for GPO containers, the friendly
+        /// name ("Default Domain Policy"). Used in the vuln description
+        /// alongside the GUID cn.
+        display_name: String,
     }
 
     let mut objects: Vec<LdapObject> = Vec::new();
@@ -355,21 +363,31 @@ pub fn parse_acl_enumeration(output: &str, params: &Value) -> Vec<Value> {
         object_class: String::new(),
         ntsd_base64: String::new(),
         object_sid: String::new(),
+        cn: String::new(),
+        display_name: String::new(),
     };
     let mut in_ntsd = false;
     let mut ntsd_buf = String::new();
 
+    // An "identifiable" object is one we can flush at a record boundary: it
+    // has at least one identifier we can use as the target name. Users /
+    // groups / computers populate `sAMAccountName`; GPO containers carry
+    // their identity in `cn` instead.
+    fn has_identity(o: &LdapObject) -> bool {
+        !o.sam_account_name.is_empty() || !o.cn.is_empty()
+    }
+
     for line in output.lines() {
         let line = line.trim_end();
 
-        if line.starts_with("dn: ") || (line.is_empty() && !current.sam_account_name.is_empty()) {
+        if line.starts_with("dn: ") || (line.is_empty() && has_identity(&current)) {
             // Flush current
             if in_ntsd {
                 current.ntsd_base64 = ntsd_buf.clone();
                 in_ntsd = false;
                 ntsd_buf.clear();
             }
-            if !current.sam_account_name.is_empty() {
+            if has_identity(&current) {
                 objects.push(current);
             }
             current = LdapObject {
@@ -377,6 +395,8 @@ pub fn parse_acl_enumeration(output: &str, params: &Value) -> Vec<Value> {
                 object_class: String::new(),
                 ntsd_base64: String::new(),
                 object_sid: String::new(),
+                cn: String::new(),
+                display_name: String::new(),
             };
             continue;
         }
@@ -397,10 +417,15 @@ pub fn parse_acl_enumeration(output: &str, params: &Value) -> Vec<Value> {
             current.sam_account_name = val.trim().to_string();
         } else if let Some(val) = line.strip_prefix("objectClass: ") {
             let val = val.trim().to_lowercase();
-            // Keep the most specific class
-            if val == "user" || val == "computer" || val == "group" {
+            // Keep the most specific class.
+            if val == "user" || val == "computer" || val == "group" || val == "grouppolicycontainer"
+            {
                 current.object_class = val;
             }
+        } else if let Some(val) = line.strip_prefix("cn: ") {
+            current.cn = val.trim().to_string();
+        } else if let Some(val) = line.strip_prefix("displayName: ") {
+            current.display_name = val.trim().to_string();
         } else if let Some(val) = line.strip_prefix("objectSid:: ") {
             // Base64-encoded SID
             if let Ok(bytes) = base64_decode(val.trim()) {
@@ -423,7 +448,7 @@ pub fn parse_acl_enumeration(output: &str, params: &Value) -> Vec<Value> {
     if in_ntsd {
         current.ntsd_base64 = ntsd_buf;
     }
-    if !current.sam_account_name.is_empty() {
+    if has_identity(&current) {
         objects.push(current);
     }
 
@@ -477,8 +502,20 @@ pub fn parse_acl_enumeration(output: &str, params: &Value) -> Vec<Value> {
                 continue;
             }
 
-            // Skip if source == target (self-permissions)
-            if source_name.eq_ignore_ascii_case(&obj.sam_account_name) {
+            // For GPO containers, the identifier is the `cn` (GUID); for
+            // every other object type it's the sAMAccountName. Self-perm
+            // dedup compares against whichever identifier we'll emit.
+            let is_gpo = obj.object_class == "grouppolicycontainer";
+            let target_name = if is_gpo && !obj.cn.is_empty() {
+                obj.cn.as_str()
+            } else {
+                obj.sam_account_name.as_str()
+            };
+
+            if target_name.is_empty() {
+                continue;
+            }
+            if source_name.eq_ignore_ascii_case(target_name) {
                 continue;
             }
 
@@ -486,37 +523,96 @@ pub fn parse_acl_enumeration(output: &str, params: &Value) -> Vec<Value> {
                 "user" => "User",
                 "group" => "Group",
                 "computer" => "Computer",
+                "grouppolicycontainer" => "GPO",
                 _ => "Unknown",
             };
 
-            let vuln_id = format!(
-                "acl_{}_{}_{}",
-                vuln_type,
-                source_name.to_lowercase().replace(' ', "_"),
-                obj.sam_account_name.to_lowercase().replace('$', "")
-            );
+            // GPO targets get a dedicated `gpo_<right>` vuln_type so the
+            // auto_gpo_abuse chain picks them up. Other ACL targets keep
+            // the legacy `acl_<right>` prefix consumed by auto_dacl_abuse.
+            let emitted_vuln_type = if is_gpo {
+                format!("gpo_{vuln_type}")
+            } else {
+                (*vuln_type).to_string()
+            };
+
+            // Sanitise the identifier for the vuln_id key: lowercase and
+            // collapse spaces/curly-braces/hyphens to underscores so the
+            // `{GUID}` form of a GPO cn doesn't introduce shell-special
+            // characters into a downstream redis SET member.
+            let slug = target_name
+                .to_lowercase()
+                .chars()
+                .map(|c| match c {
+                    'a'..='z' | '0'..='9' | '.' => c,
+                    _ => '_',
+                })
+                .collect::<String>();
+
+            let vuln_id = if is_gpo {
+                format!(
+                    "gpo_{}_{}_{}",
+                    vuln_type,
+                    source_name.to_lowercase().replace(' ', "_"),
+                    slug,
+                )
+            } else {
+                format!(
+                    "acl_{}_{}_{}",
+                    vuln_type,
+                    source_name.to_lowercase().replace(' ', "_"),
+                    obj.sam_account_name.to_lowercase().replace('$', "")
+                )
+            };
+
+            let description = if is_gpo {
+                format!(
+                    "{} has {} on GPO {} ({})",
+                    source_name,
+                    vuln_type,
+                    target_name,
+                    if obj.display_name.is_empty() {
+                        "no displayName"
+                    } else {
+                        obj.display_name.as_str()
+                    },
+                )
+            } else {
+                format!(
+                    "{} has {} on {} ({})",
+                    source_name, vuln_type, obj.sam_account_name, target_type
+                )
+            };
+
+            let mut details_map = serde_json::Map::new();
+            details_map.insert("trustee_sid".into(), json!(trustee_sid));
+            details_map.insert("source".into(), json!(source_name));
+            details_map.insert("target".into(), json!(target_name));
+            details_map.insert("target_type".into(), json!(target_type));
+            details_map.insert("domain".into(), json!(domain));
+            details_map.insert("source_domain".into(), json!(domain));
+            details_map.insert("description".into(), json!(description));
+            // Extra context for GPO targets so auto_gpo_abuse's payload
+            // builder can populate gpo_id / gpo_name / gpo_display_name
+            // without an extra LDAP round-trip.
+            if is_gpo {
+                details_map.insert("gpo_id".into(), json!(obj.cn));
+                if !obj.display_name.is_empty() {
+                    details_map.insert("gpo_display_name".into(), json!(obj.display_name));
+                    details_map.insert("gpo_name".into(), json!(obj.display_name));
+                }
+            }
 
             vulns.push(json!({
                 "vuln_id": vuln_id,
-                "vuln_type": vuln_type,
+                "vuln_type": emitted_vuln_type,
                 "source": source_name,
-                "target": obj.sam_account_name,
+                "target": target_name,
                 "target_type": target_type,
                 "target_ip": target_ip,
                 "domain": domain,
                 "source_domain": domain,
-                "details": {
-                    "trustee_sid": trustee_sid,
-                    "source": source_name,
-                    "target": obj.sam_account_name,
-                    "target_type": target_type,
-                    "domain": domain,
-                    "source_domain": domain,
-                    "description": format!(
-                        "{} has {} on {} ({})",
-                        source_name, vuln_type, obj.sam_account_name, target_type
-                    ),
-                },
+                "details": Value::Object(details_map),
             }));
         }
     }
@@ -725,6 +821,27 @@ mod tests {
     #[test]
     fn parse_acl_enumeration_empty() {
         let vulns = parse_acl_enumeration("", &serde_json::json!({"domain": "contoso.local"}));
+        assert!(vulns.is_empty());
+    }
+
+    #[test]
+    fn parse_acl_enumeration_collects_gpo_object_without_panic() {
+        // GPO containers have no `sAMAccountName`; the parser must still
+        // flush them at the record boundary using `cn` as identity.
+        // Without nTSecurityDescriptor no ACEs land — the test verifies
+        // the parser walks the record cleanly (no panic, no spurious
+        // output) and that the `gpo_` vuln_type prefix takes effect when
+        // the SD path eventually produces an ACE.
+        let output = "\
+dn: CN={31B2F340-016D-11D2-945F-00C04FB984F9},CN=Policies,CN=System,DC=contoso,DC=local
+objectClass: top
+objectClass: container
+objectClass: groupPolicyContainer
+cn: {31B2F340-016D-11D2-945F-00C04FB984F9}
+displayName: Default Domain Policy
+";
+        let vulns = parse_acl_enumeration(output, &serde_json::json!({"domain": "contoso.local"}));
+        // No nTSecurityDescriptor → no ACEs → no vulns. Important: no panic.
         assert!(vulns.is_empty());
     }
 
