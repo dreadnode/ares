@@ -126,6 +126,7 @@ pub use rdp_lateral::auto_rdp_lateral;
 pub use refresh::state_refresh;
 pub use s4u::auto_s4u_exploitation;
 pub use searchconnector_coercion::auto_searchconnector_coercion;
+pub use secretsdump::auto_krbtgt_extraction;
 pub use secretsdump::auto_local_admin_secretsdump;
 pub use shadow_credentials::auto_shadow_credentials;
 pub use share_coercion::auto_share_coercion;

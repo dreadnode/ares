@@ -35,6 +35,30 @@ pub(super) fn try_generate_with_creds(
     let username = p.username;
     let cred_capability = cred_capability_label(payload, p.hash_value);
 
+    // When the orchestrator dispatched this task with a `just_dc_user` hint
+    // (e.g. krbtgt extraction from `auto_krbtgt_extraction`), surface it as
+    // an explicit argument in the secretsdump signature so the LLM agent
+    // forwards it to the tool. Without this, the agent emits a full DCSync
+    // which hits DRSUAPI hardening or returns redundantly large output, and
+    // any cross-realm syntax slip becomes a STATUS_LOGON_FAILURE that bails
+    // the task back to enumeration loops.
+    let just_dc_user = payload
+        .get("just_dc_user")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty());
+    let secretsdump_sig = if let Some(target_user) = just_dc_user {
+        format!(
+            "secretsdump(target='{dc_ip}', username='{username}', domain='{domain}', \
+             just_dc_user='{target_user}') - DCSync just the {target_user} hash; \
+             do NOT omit just_dc_user — a full dump will be rejected or duplicated"
+        )
+    } else {
+        format!(
+            "secretsdump(target='{dc_ip}', username='{username}', domain='{domain}') \
+             - dump hashes (requires admin)"
+        )
+    };
+
     // Example signatures show only LLM-callable fields; the worker injects
     // password/hash/aes/ticket from state at dispatch time.
     let technique_map: HashMap<&str, String> = [
@@ -66,13 +90,7 @@ pub(super) fn try_generate_with_creds(
                  - service account hashes (uses correct DC for the domain)"
             ),
         ),
-        (
-            "secretsdump",
-            format!(
-                "secretsdump(target='{dc_ip}', username='{username}', domain='{domain}') \
-                 - dump hashes (requires admin)"
-            ),
-        ),
+        ("secretsdump", secretsdump_sig),
         (
             "lsassy",
             format!(
