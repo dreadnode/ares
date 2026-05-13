@@ -714,7 +714,34 @@ impl Dispatcher {
 pub(crate) fn assist_pattern_key(task_type: &str, payload: &serde_json::Value) -> Option<String> {
     let obj = payload.as_object()?;
     let pick = |k: &str| -> &str { obj.get(k).and_then(|v| v.as_str()).unwrap_or("") };
-    let username = pick("username");
+
+    // Username lookup priority:
+    //   1. Top-level `username` — set by enum/recon/spray tasks dispatched
+    //      via the various recon/exploit submit helpers.
+    //   2. `credential.username` — exploit payloads built by
+    //      `request_exploit` (task_builders.rs ~line 578) nest the auth
+    //      identity under `credential` instead of promoting it. Without
+    //      this fallback the assist-abandoned dedup silently bypassed every
+    //      LLM-routed exploit dispatch — observed in a live op as a
+    //      delegation exploit retried 6× in 26 minutes after attempt 1
+    //      ended with RequestAssistance, burning ~30k input tokens per
+    //      retry on a guaranteed-repeat doomed task.
+    //   3. `hash_username` — pass-the-hash exploit payloads carry the
+    //      principal here when no plaintext credential is in state.
+    let credential_username = obj
+        .get("credential")
+        .and_then(|v| v.as_object())
+        .and_then(|c| c.get("username"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let username = if !pick("username").is_empty() {
+        pick("username")
+    } else if !credential_username.is_empty() {
+        credential_username
+    } else {
+        pick("hash_username")
+    };
+
     if username.is_empty() {
         return None;
     }
@@ -726,7 +753,21 @@ pub(crate) fn assist_pattern_key(task_type: &str, payload: &serde_json::Value) -
             pick("dc_ip").to_string()
         }
     };
-    let domain = pick("domain");
+    // Domain lookup mirrors username: fall back to the credential's domain
+    // when the top-level `domain` is absent. Without this, two exploits
+    // against the same target with creds from different forests would
+    // collide into the same pattern key.
+    let credential_domain = obj
+        .get("credential")
+        .and_then(|v| v.as_object())
+        .and_then(|c| c.get("domain"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let domain = if !pick("domain").is_empty() {
+        pick("domain")
+    } else {
+        credential_domain
+    };
     Some(format!(
         "{task_type}|{target}|{u}|{d}",
         u = username.to_lowercase(),
@@ -776,6 +817,94 @@ mod assist_key_tests {
         assert!(
             assist_pattern_key("credential_access", &p).is_none(),
             "explicit empty username must never be abandoned"
+        );
+    }
+
+    #[test]
+    fn pattern_key_reads_username_from_nested_credential_for_exploits() {
+        // Exploit payloads built by `request_exploit` nest the auth
+        // identity under `credential` instead of top-level. Without this
+        // fallback, the assist-abandoned dedup silently bypasses every
+        // exploit dispatch and a RequestAssistance failure ends up
+        // re-running ~5× through MAX_EXPLOIT_FAILURES.
+        let p = json!({
+            "vuln_id": "constrained_delegation_alice",
+            "vuln_type": "constrained_delegation",
+            "target_ip": "192.168.58.10",
+            "credential": {
+                "username": "alice",
+                "password": "P@ssw0rd!",
+                "domain": "contoso.local",
+            }
+        });
+        let k = assist_pattern_key("exploit", &p).expect("exploit payload should yield a key");
+        assert_eq!(k, "exploit|192.168.58.10|alice|contoso.local");
+    }
+
+    #[test]
+    fn pattern_key_prefers_top_level_username_over_credential() {
+        // If both are set (defense-in-depth), top-level wins so existing
+        // call sites that explicitly promoted username keep their
+        // pre-existing pattern keys intact.
+        let p = json!({
+            "username": "outer",
+            "target_ip": "192.168.58.10",
+            "domain": "contoso.local",
+            "credential": {"username": "inner", "domain": "other.local"}
+        });
+        let k = assist_pattern_key("exploit", &p).unwrap();
+        assert!(k.contains("|outer|"), "got {k}");
+        // domain also prefers top-level when present.
+        assert!(k.ends_with("|contoso.local"), "got {k}");
+    }
+
+    #[test]
+    fn pattern_key_uses_hash_username_when_no_credential() {
+        // Pass-the-hash payloads from request_exploit may carry only
+        // `hash_username` when no plaintext cred exists in state.
+        let p = json!({
+            "vuln_id": "constrained_delegation_bob",
+            "hash_username": "bob",
+            "target_ip": "192.168.58.10",
+            "domain": "contoso.local",
+            "hash": "aad3b435b51404eeaad3b435b51404ee:31d6cfe0d16ae931b73c59d7e0c089c0",
+        });
+        let k = assist_pattern_key("exploit", &p).expect("hash payload should yield a key");
+        assert_eq!(k, "exploit|192.168.58.10|bob|contoso.local");
+    }
+
+    #[test]
+    fn pattern_key_falls_back_to_credential_domain() {
+        // Cross-forest exploits omit top-level `domain` but the credential
+        // carries the auth realm; the key must include it so two different
+        // forests aren't collapsed into the same pattern.
+        let p = json!({
+            "vuln_id": "rbcd_alice",
+            "target_ip": "192.168.58.20",
+            "credential": {"username": "alice", "domain": "fabrikam.local"}
+        });
+        let k = assist_pattern_key("exploit", &p).unwrap();
+        assert_eq!(k, "exploit|192.168.58.20|alice|fabrikam.local");
+    }
+
+    #[test]
+    fn pattern_key_credential_lowercased_consistently() {
+        // Credential-sourced username/domain must hit the same lowercase
+        // treatment as top-level so the same logical identity hashes to
+        // the same key regardless of payload shape.
+        let p_top = json!({
+            "username": "Alice",
+            "domain": "Contoso.LOCAL",
+            "target_ip": "192.168.58.10",
+        });
+        let p_nested = json!({
+            "target_ip": "192.168.58.10",
+            "credential": {"username": "Alice", "domain": "Contoso.LOCAL"}
+        });
+        assert_eq!(
+            assist_pattern_key("exploit", &p_top),
+            assist_pattern_key("exploit", &p_nested),
+            "top-level and nested forms of the same identity must share a key"
         );
     }
 }
