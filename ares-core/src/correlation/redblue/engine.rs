@@ -609,7 +609,7 @@ impl RedBlueCorrelator {
     }
 
     /// Calculate detection coverage per technique.
-    fn calculate_technique_coverage(
+    pub(super) fn calculate_technique_coverage(
         activities: &[RedTeamActivity],
         matches: &[CorrelationMatch],
         gaps: &[DetectionGap],

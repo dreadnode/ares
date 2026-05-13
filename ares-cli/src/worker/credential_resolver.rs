@@ -2091,4 +2091,166 @@ mod tests {
             "same-realm NTLM hash present — secretsdump must NOT be flipped into Kerberos mode"
         );
     }
+
+    // ── is_placeholder_str ──────────────────────────────────────────────
+
+    #[test]
+    fn placeholder_str_empty_and_whitespace() {
+        assert!(is_placeholder_str(""));
+        assert!(is_placeholder_str("   "));
+        assert!(is_placeholder_str("\t\n"));
+    }
+
+    #[test]
+    fn placeholder_str_bracketed_forms() {
+        assert!(is_placeholder_str("[HASH]"));
+        assert!(is_placeholder_str("<password>"));
+        assert!(is_placeholder_str("[TGT]"));
+        assert!(is_placeholder_str("<parent_admin_hash>"));
+    }
+
+    #[test]
+    fn placeholder_str_bare_words() {
+        for w in &[
+            "n/a",
+            "N/A",
+            "null",
+            "NONE",
+            "Unknown",
+            "tbd",
+            "TODO",
+            "password",
+            "hash",
+            "ntlm",
+            "tgt",
+            "placeholder",
+        ] {
+            assert!(is_placeholder_str(w), "{w} should be a placeholder");
+        }
+    }
+
+    #[test]
+    fn placeholder_str_real_values_pass_through() {
+        assert!(!is_placeholder_str("P@ssw0rd!"));
+        assert!(!is_placeholder_str("aad3b435b51404eeaad3b435b51404ee"));
+        assert!(!is_placeholder_str("Administrator"));
+    }
+
+    // ── is_placeholder_value ────────────────────────────────────────────
+
+    #[test]
+    fn placeholder_value_null_is_placeholder() {
+        assert!(is_placeholder_value(&Value::Null));
+    }
+
+    #[test]
+    fn placeholder_value_string_delegates_to_is_placeholder_str() {
+        assert!(is_placeholder_value(&Value::String("[HASH]".into())));
+        assert!(!is_placeholder_value(&Value::String("P@ssw0rd!".into())));
+    }
+
+    #[test]
+    fn placeholder_value_non_string_non_null_is_not_placeholder() {
+        assert!(!is_placeholder_value(&serde_json::json!(42)));
+        assert!(!is_placeholder_value(&serde_json::json!(true)));
+        assert!(!is_placeholder_value(&serde_json::json!([])));
+        assert!(!is_placeholder_value(&serde_json::json!({})));
+    }
+
+    // ── looks_like_ip ───────────────────────────────────────────────────
+
+    #[test]
+    fn looks_like_ip_v4_dotted_quad() {
+        assert!(looks_like_ip("192.168.58.10"));
+        assert!(looks_like_ip("0.0.0.0"));
+        assert!(looks_like_ip("255.255.255.255"));
+    }
+
+    #[test]
+    fn looks_like_ip_trims_whitespace() {
+        assert!(looks_like_ip("  192.168.58.10  "));
+    }
+
+    #[test]
+    fn looks_like_ip_rejects_octet_overflow() {
+        assert!(!looks_like_ip("192.168.58.256"));
+        assert!(!looks_like_ip("999.0.0.1"));
+    }
+
+    #[test]
+    fn looks_like_ip_rejects_wrong_octet_count() {
+        assert!(!looks_like_ip("192.168.58"));
+        assert!(!looks_like_ip("192.168.58.10.20"));
+    }
+
+    #[test]
+    fn looks_like_ip_rejects_hostnames() {
+        assert!(!looks_like_ip("dc01.contoso.local"));
+        assert!(!looks_like_ip(""));
+    }
+
+    // ── is_common_per_domain_account ────────────────────────────────────
+
+    #[test]
+    fn common_per_domain_account_recognises_built_in_names() {
+        assert!(is_common_per_domain_account("administrator"));
+        assert!(is_common_per_domain_account("guest"));
+        assert!(is_common_per_domain_account("krbtgt"));
+    }
+
+    #[test]
+    fn common_per_domain_account_only_matches_lowercase_form() {
+        // The caller is responsible for lowercasing — uppercase input
+        // returns false to make that contract explicit.
+        assert!(!is_common_per_domain_account("Administrator"));
+        assert!(!is_common_per_domain_account("KRBTGT"));
+    }
+
+    #[test]
+    fn common_per_domain_account_other_users_are_not_common() {
+        assert!(!is_common_per_domain_account("alice"));
+        assert!(!is_common_per_domain_account("svc_sql"));
+        assert!(!is_common_per_domain_account(""));
+    }
+
+    // ── is_authenticating_hash_type ─────────────────────────────────────
+
+    #[test]
+    fn auth_hash_type_ntlm_is_authenticating() {
+        assert!(is_authenticating_hash_type("NTLM"));
+        assert!(is_authenticating_hash_type("ntlm"));
+        assert!(is_authenticating_hash_type("AES256"));
+        assert!(is_authenticating_hash_type("aes256"));
+    }
+
+    #[test]
+    fn auth_hash_type_roast_variants_are_not_authenticating() {
+        // Roast hashes are *crackable* hashes — not directly usable for
+        // authentication. Treating them as auth material would dispatch
+        // tools with a hash they can't bind with.
+        for ht in &[
+            "kerberoast",
+            "Kerberoast",
+            "asreproast",
+            "asrep",
+            "tgs",
+            "krb5tgs",
+            "KRB5ASREP",
+        ] {
+            assert!(
+                !is_authenticating_hash_type(ht),
+                "{ht} should not be authenticating"
+            );
+        }
+    }
+
+    #[test]
+    fn auth_hash_type_unknown_types_default_to_authenticating() {
+        // Anything not on the roast-variant list is treated as auth-capable.
+        // Conservative: tool dispatch surfaces the auth error if the hash
+        // doesn't actually work, vs silently refusing to inject.
+        assert!(is_authenticating_hash_type("aes128"));
+        assert!(is_authenticating_hash_type("lm"));
+        assert!(is_authenticating_hash_type(""));
+    }
 }

@@ -1616,3 +1616,328 @@ fn roast_token_lowercases_account_and_domain() {
         Some("asrep_roast_contoso.local".to_string())
     );
 }
+
+// ── result_has_ntlmv1_signal ──────────────────────────────────────────
+
+#[test]
+fn ntlmv1_signal_none_payload_is_false() {
+    use super::result_has_ntlmv1_signal;
+    assert!(!result_has_ntlmv1_signal(&None));
+}
+
+#[test]
+fn ntlmv1_signal_recognises_explicit_positives() {
+    use super::result_has_ntlmv1_signal;
+    let positives = [
+        "NTLMv1 allowed",
+        "NTLMv1 is allowed",
+        "ntlmv1_allowed",
+        "LmCompatibilityLevel is vulnerable",
+        "NTLMv1 downgrade confirmed",
+    ];
+    for line in &positives {
+        let p = json!({"summary": line});
+        assert!(
+            result_has_ntlmv1_signal(&Some(p)),
+            "{line} should be a positive signal",
+        );
+    }
+}
+
+#[test]
+fn ntlmv1_signal_recognises_lmcompatibilitylevel_low_value() {
+    use super::result_has_ntlmv1_signal;
+    for n in &['0', '1', '2'] {
+        let line = format!("Found LmCompatibilityLevel = {n}");
+        let p = json!({"tool_output": line});
+        assert!(
+            result_has_ntlmv1_signal(&Some(p)),
+            "LmCompatibilityLevel = {n} should be a positive",
+        );
+    }
+}
+
+#[test]
+fn ntlmv1_signal_rejects_lmcompatibilitylevel_safe_values() {
+    use super::result_has_ntlmv1_signal;
+    let p = json!({"tool_output": "LmCompatibilityLevel = 5"});
+    assert!(!result_has_ntlmv1_signal(&Some(p)));
+    let p = json!({"tool_output": "LmCompatibilityLevel = 3"});
+    assert!(!result_has_ntlmv1_signal(&Some(p)));
+}
+
+#[test]
+fn ntlmv1_signal_does_not_match_commentary() {
+    use super::result_has_ntlmv1_signal;
+    // The narrow regex must NOT match prose that merely mentions NTLMv1.
+    let p = json!({"summary": "checking whether NTLMv1 is in use"});
+    assert!(!result_has_ntlmv1_signal(&Some(p)));
+    let p = json!({"summary": "NTLMv1 (LmCompatibilityLevel) is set"});
+    assert!(!result_has_ntlmv1_signal(&Some(p)));
+}
+
+#[test]
+fn ntlmv1_signal_walks_tool_outputs_array() {
+    use super::result_has_ntlmv1_signal;
+    let p = json!({
+        "tool_outputs": [
+            "no signal here",
+            "NTLMv1 allowed: yes",
+        ]
+    });
+    assert!(result_has_ntlmv1_signal(&Some(p)));
+}
+
+// ── result_has_seimpersonate_signal ────────────────────────────────────
+
+#[test]
+fn seimpersonate_signal_recognises_enabled_row() {
+    use super::result_has_seimpersonate_signal;
+    let p = json!({
+        "summary": "SeImpersonatePrivilege  Impersonate a client after authentication  Enabled"
+    });
+    assert!(result_has_seimpersonate_signal(&Some(p)));
+}
+
+#[test]
+fn seimpersonate_signal_rejects_disabled_row() {
+    use super::result_has_seimpersonate_signal;
+    let p = json!({
+        "summary": "SeImpersonatePrivilege  Impersonate a client after authentication  Disabled"
+    });
+    assert!(!result_has_seimpersonate_signal(&Some(p)));
+}
+
+#[test]
+fn seimpersonate_signal_rejects_mention_without_state() {
+    use super::result_has_seimpersonate_signal;
+    let p = json!({"summary": "plan: check for SeImpersonatePrivilege next"});
+    assert!(!result_has_seimpersonate_signal(&Some(p)));
+}
+
+#[test]
+fn seimpersonate_signal_walks_tool_outputs_object_form() {
+    use super::result_has_seimpersonate_signal;
+    let p = json!({
+        "tool_outputs": [
+            {"name": "whoami", "output": "SeImpersonatePrivilege ... Enabled"}
+        ]
+    });
+    assert!(result_has_seimpersonate_signal(&Some(p)));
+}
+
+#[test]
+fn seimpersonate_signal_none_payload_false() {
+    use super::result_has_seimpersonate_signal;
+    assert!(!result_has_seimpersonate_signal(&None));
+}
+
+// ── result_has_ccache_evidence ─────────────────────────────────────────
+
+#[test]
+fn ccache_evidence_recognises_canonical_saving_line() {
+    use super::result_has_ccache_evidence;
+    let p = json!({"summary": "Saving ticket in admin.ccache"});
+    assert!(result_has_ccache_evidence(&Some(p)));
+}
+
+#[test]
+fn ccache_evidence_walks_tool_outputs() {
+    use super::result_has_ccache_evidence;
+    let p = json!({
+        "tool_outputs": [
+            {"output": "Saving ticket in /tmp/svc.ccache"},
+        ]
+    });
+    assert!(result_has_ccache_evidence(&Some(p)));
+}
+
+#[test]
+fn ccache_evidence_requires_both_phrases() {
+    use super::result_has_ccache_evidence;
+    let p = json!({"summary": "Saving ticket in memory"});
+    assert!(!result_has_ccache_evidence(&Some(p)));
+    let p = json!({"summary": "found a .ccache file"});
+    assert!(!result_has_ccache_evidence(&Some(p)));
+}
+
+#[test]
+fn ccache_evidence_none_payload_false() {
+    use super::result_has_ccache_evidence;
+    assert!(!result_has_ccache_evidence(&None));
+}
+
+// ── result_text_indicates_failure ──────────────────────────────────────
+
+#[test]
+fn text_failure_recognises_summary_failure_prefixes() {
+    use super::result_text_indicates_failure;
+    let p = json!({"summary": "failed: account is locked out"});
+    assert!(result_text_indicates_failure(&Some(p)));
+    let p = json!({"summary": "FAILED ESC1 against template VulnTmpl"});
+    assert!(result_text_indicates_failure(&Some(p)));
+}
+
+#[test]
+fn text_failure_recognises_missing_parameter_errors() {
+    use super::result_text_indicates_failure;
+    let p = json!({"summary": "missing required ca_name field"});
+    assert!(result_text_indicates_failure(&Some(p)));
+    let p = json!({"summary": "missing CA"});
+    assert!(result_text_indicates_failure(&Some(p)));
+}
+
+#[test]
+fn text_failure_recognises_kerberos_errors() {
+    use super::result_text_indicates_failure;
+    let p = json!({"summary": "STATUS_ACCOUNT_LOCKED for alice"});
+    assert!(result_text_indicates_failure(&Some(p)));
+    let p = json!({"summary": "rpc_s_access_denied at DRSUAPI"});
+    assert!(result_text_indicates_failure(&Some(p)));
+    let p = json!({"summary": "invalidCredentials returned by DC"});
+    assert!(result_text_indicates_failure(&Some(p)));
+}
+
+#[test]
+fn text_failure_rejects_success_messages() {
+    use super::result_text_indicates_failure;
+    let p = json!({"summary": "credential captured: P@ssw0rd!"});
+    assert!(!result_text_indicates_failure(&Some(p)));
+    let p = json!({"summary": "ticket forged successfully"});
+    assert!(!result_text_indicates_failure(&Some(p)));
+}
+
+#[test]
+fn text_failure_falls_back_to_full_json_when_summary_missing() {
+    use super::result_text_indicates_failure;
+    // No summary field — fn serialises the whole value and looks for
+    // failure markers within.
+    let p = json!({"reason": "ept_s_not_registered on target"});
+    assert!(result_text_indicates_failure(&Some(p)));
+}
+
+#[test]
+fn text_failure_none_payload_false() {
+    use super::result_text_indicates_failure;
+    assert!(!result_text_indicates_failure(&None));
+}
+
+// ── parse_lockout_principal ─────────────────────────────────────────────
+
+#[test]
+fn parse_lockout_principal_canonical_netexec_line() {
+    use super::parse_lockout_principal;
+    let line = "[-] CONTOSO\\alice:Pw1! STATUS_ACCOUNT_LOCKED_OUT";
+    let (user, dom) = parse_lockout_principal(line).unwrap();
+    assert_eq!(user, "alice");
+    assert_eq!(dom.as_deref(), Some("CONTOSO"));
+}
+
+#[test]
+fn parse_lockout_principal_kdc_err_client_revoked_form() {
+    use super::parse_lockout_principal;
+    let line = "[*] CONTOSO\\bob:Welcome1 KDC_ERR_CLIENT_REVOKED";
+    let (user, dom) = parse_lockout_principal(line).unwrap();
+    assert_eq!(user, "bob");
+    assert_eq!(dom.as_deref(), Some("CONTOSO"));
+}
+
+#[test]
+fn parse_lockout_principal_rejects_bare_user_form() {
+    use super::parse_lockout_principal;
+    // `bob:pass` without `DOMAIN\` — must NOT be parsed (the contract is
+    // that lockout extraction only fires for canonical DOMAIN\user tokens).
+    let line = "[-] bob:Welcome1 STATUS_ACCOUNT_LOCKED_OUT";
+    assert!(parse_lockout_principal(line).is_none());
+}
+
+#[test]
+fn parse_lockout_principal_no_lockout_marker_returns_none() {
+    use super::parse_lockout_principal;
+    let line = "[+] CONTOSO\\alice:Pw1! Pwn3d!";
+    assert!(parse_lockout_principal(line).is_none());
+}
+
+#[test]
+fn parse_lockout_principal_empty_user_or_domain_rejected() {
+    use super::parse_lockout_principal;
+    // Domain-less or user-less prefixes return None.
+    let line = "[-] \\alice:pw STATUS_ACCOUNT_LOCKED_OUT";
+    assert!(parse_lockout_principal(line).is_none());
+    let line = "[-] CONTOSO\\:pw STATUS_ACCOUNT_LOCKED_OUT";
+    assert!(parse_lockout_principal(line).is_none());
+}
+
+// ── extract_locked_usernames_from_result ────────────────────────────────
+
+#[test]
+fn locked_usernames_walks_tool_outputs_strings() {
+    use super::extract_locked_usernames_from_result;
+    let p = json!({
+        "tool_outputs": [
+            "[-] CONTOSO\\alice:Pw STATUS_ACCOUNT_LOCKED_OUT",
+            "[-] CONTOSO\\bob:Pw KDC_ERR_CLIENT_REVOKED",
+        ]
+    });
+    let mut out = extract_locked_usernames_from_result(&Some(p));
+    out.sort();
+    assert_eq!(
+        out,
+        vec![
+            ("alice".to_string(), Some("contoso".to_string())),
+            ("bob".to_string(), Some("contoso".to_string())),
+        ]
+    );
+}
+
+#[test]
+fn locked_usernames_skips_built_in_disabled_principals() {
+    use super::extract_locked_usernames_from_result;
+    let p = json!({
+        "tool_outputs": [
+            "[-] CONTOSO\\guest:Pw STATUS_ACCOUNT_LOCKED_OUT",
+            "[-] CONTOSO\\krbtgt:Pw STATUS_ACCOUNT_LOCKED_OUT",
+            "[-] CONTOSO\\alice:Pw STATUS_ACCOUNT_LOCKED_OUT",
+        ]
+    });
+    let out = extract_locked_usernames_from_result(&Some(p));
+    assert_eq!(out.len(), 1);
+    assert_eq!(out[0].0, "alice");
+}
+
+#[test]
+fn locked_usernames_dedupes_repeated_lines() {
+    use super::extract_locked_usernames_from_result;
+    let p = json!({
+        "tool_outputs": [
+            "[-] CONTOSO\\alice:Pw STATUS_ACCOUNT_LOCKED_OUT",
+            "[-] CONTOSO\\alice:Pw STATUS_ACCOUNT_LOCKED_OUT",
+        ]
+    });
+    let out = extract_locked_usernames_from_result(&Some(p));
+    assert_eq!(out.len(), 1);
+}
+
+#[test]
+fn locked_usernames_lowercases_user_and_domain() {
+    use super::extract_locked_usernames_from_result;
+    let p = json!({"summary": "[-] CONTOSO\\Alice:pw STATUS_ACCOUNT_LOCKED_OUT"});
+    let out = extract_locked_usernames_from_result(&Some(p));
+    assert_eq!(
+        out,
+        vec![("alice".to_string(), Some("contoso".to_string()))]
+    );
+}
+
+#[test]
+fn locked_usernames_none_payload_empty() {
+    use super::extract_locked_usernames_from_result;
+    assert!(extract_locked_usernames_from_result(&None).is_empty());
+}
+
+#[test]
+fn locked_usernames_no_lockout_lines_empty() {
+    use super::extract_locked_usernames_from_result;
+    let p = json!({"summary": "[+] CONTOSO\\alice:Pw Pwn3d!"});
+    assert!(extract_locked_usernames_from_result(&Some(p)).is_empty());
+}
