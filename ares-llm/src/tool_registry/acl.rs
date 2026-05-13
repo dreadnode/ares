@@ -109,6 +109,54 @@ pub(super) fn tool_definitions() -> Vec<ToolDefinition> {
             }),
         },
         ToolDefinition {
+            name: "bloodyad_set_object_attr".into(),
+            description: "Set a single LDAP attribute on an AD object via \
+                `bloodyAD set object`. Primary use cases: ESC9 (set \
+                `userPrincipalName` to `administrator@<domain>` on a user we \
+                have GenericAll on, then request cert with the spoofed UPN, \
+                then restore the original UPN); ESC10 Case 2 (clear \
+                `userPrincipalName` so the implicit cert-mapping rule binds \
+                to administrator); RBCD (write \
+                `msDS-AllowedToActOnBehalfOfOtherIdentity` on a victim \
+                computer); any other primitive where the LLM needs to write \
+                ONE attribute without granting itself a DACL right first."
+                .into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "target": {
+                        "type": "string",
+                        "description": "SAMAccountName or DN of the AD object whose attribute we're modifying."
+                    },
+                    "attribute": {
+                        "type": "string",
+                        "description": "LDAP attribute name (e.g. `userPrincipalName`, `userAccountControl`, `servicePrincipalName`, `msDS-AllowedToActOnBehalfOfOtherIdentity`)."
+                    },
+                    "value": {
+                        "type": "string",
+                        "description": "New value to write. For text attributes, the literal string. For binary attributes (e.g. security descriptors), the hex-encoded bytes bloodyAD expects via its `-v` flag."
+                    },
+                    "domain": {
+                        "type": "string",
+                        "description": "Target domain FQDN"
+                    },
+                    "username": {
+                        "type": "string",
+                        "description": "Username for authentication (must have WriteProperty on the target attribute)."
+                    },
+                    "password": {
+                        "type": "string",
+                        "description": "Password for authentication"
+                    },
+                    "dc_ip": {
+                        "type": "string",
+                        "description": "Domain controller IP address"
+                    }
+                },
+                "required": ["target", "attribute", "value", "domain", "username", "password", "dc_ip"]
+            }),
+        },
+        ToolDefinition {
             name: "adminsd_holder_add_ace".into(),
             description: "Add an ACE via AdminSDHolder to gain persistent privileged access. The SDProp process propagates AdminSDHolder's DACL to all protected groups (Domain Admins, Enterprise Admins, etc.) every 60 minutes, providing a stealthy persistence mechanism.".into(),
             input_schema: json!({
