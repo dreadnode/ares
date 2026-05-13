@@ -22,6 +22,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use ares_core::models::{Credential, VulnerabilityInfo};
 use serde_json::json;
 use tokio::sync::watch;
 use tracing::{debug, info, warn};
@@ -89,6 +90,40 @@ pub(crate) fn parse_pygpoabuse_output(output: &str) -> GpoAbuseOutcome {
     GpoAbuseOutcome::NoEvidence
 }
 
+/// Classify a `pygpoabuse_immediate_task` dispatch result. Splits the two
+/// signals the worker returns — a non-empty `error` field (non-zero exit /
+/// internal failure) versus structured stdout — into a single outcome the
+/// caller routes on. The asymmetry: if the worker flagged an error but the
+/// stdout otherwise parses as `Success`, we downgrade to `NoEvidence` rather
+/// than crediting — partial-success states (e.g. versionNumber bumped before
+/// the scheduled-task write failed) are unsafe to mark exploited.
+pub(crate) fn classify_exec_outcome(output: &str, had_tool_error: bool) -> GpoAbuseOutcome {
+    if had_tool_error {
+        return match parse_pygpoabuse_output(output) {
+            GpoAbuseOutcome::Success => GpoAbuseOutcome::NoEvidence,
+            other => other,
+        };
+    }
+    parse_pygpoabuse_output(output)
+}
+
+/// Format the human-readable failure summary that lands in the
+/// "GPO abuse: no success markers..." warn log. Worker-reported errors
+/// surface first; dispatch errors (Redis BRPOP timeout, queue full, etc.)
+/// take precedence over stdout. The fallback string is reused when both
+/// signals are absent so the log line is never empty.
+pub(crate) fn format_failure_summary(
+    dispatch_error: Option<&str>,
+    tool_error: Option<&str>,
+) -> String {
+    if let Some(e) = dispatch_error {
+        return format!("dispatch error: {e}");
+    }
+    tool_error
+        .map(str::to_string)
+        .unwrap_or_else(|| "no success markers in pygpoabuse output".into())
+}
+
 /// Build the `pygpoabuse_immediate_task` argument JSON. Pure — caller passes
 /// pre-validated values and gets back the shape the tool expects. The
 /// `command` defaults to a benign `whoami` probe written to a unique task
@@ -112,6 +147,96 @@ pub(crate) fn build_pygpoabuse_args(
         "command": "cmd /c whoami",
         "task_name": format!("ARES_GPO_Probe_{}", task_name_suffix),
         "force": true,
+    })
+}
+
+/// Build a [`GpoWork`] for a single vulnerability if every dispatch
+/// precondition is met. Pure helper extracted from the `auto_gpo_abuse`
+/// filter so the per-vuln short-circuit logic (wrong type, already
+/// exploited / processed, no source-user, no matching credential) is
+/// directly testable. The `dc_ip_for_domain` closure abstracts the
+/// `state.domain_controllers` lookup so callers can stub it in tests.
+///
+/// `gpo_id` and `dc_ip` are intentionally returned as `Option` here even
+/// though `dispatch_gpo_abuse_deterministic` requires both: the second
+/// stage's debug logs distinguish "no gpo_id captured" from "no DC IP
+/// resolved", so we keep the discrimination through the work item.
+pub(crate) fn try_build_gpo_work(
+    vuln: &VulnerabilityInfo,
+    credentials: &[Credential],
+    is_exploited: bool,
+    is_processed: bool,
+    dc_ip_for_domain: impl FnOnce(&str) -> Option<String>,
+) -> Option<GpoWork> {
+    if !is_gpo_candidate(&vuln.vuln_type) {
+        return None;
+    }
+    if is_exploited {
+        return None;
+    }
+    let dedup_key = format!("{DEDUP_GPO_ABUSE}:{}", vuln.vuln_id);
+    if is_processed {
+        return None;
+    }
+
+    let source_user = vuln
+        .details
+        .get("source")
+        .or_else(|| vuln.details.get("source_user"))
+        .or_else(|| vuln.details.get("account_name"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())?;
+
+    let gpo_id = vuln
+        .details
+        .get("gpo_id")
+        .or_else(|| vuln.details.get("gpo_guid"))
+        .or_else(|| vuln.details.get("object_id"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
+    let gpo_name = vuln
+        .details
+        .get("gpo_name")
+        .or_else(|| vuln.details.get("gpo_display_name"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
+    let domain = vuln
+        .details
+        .get("domain")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    let credential = credentials
+        .iter()
+        .find(|c| {
+            c.username.to_lowercase() == source_user.to_lowercase()
+                && (domain.is_empty() || c.domain.to_lowercase() == domain.to_lowercase())
+        })
+        .cloned();
+
+    if credential.is_none() {
+        debug!(
+            vuln_id = %vuln.vuln_id,
+            source = %source_user,
+            "GPO abuse skipped: no credential for source user"
+        );
+        return None;
+    }
+
+    let dc_ip = dc_ip_for_domain(&domain.to_lowercase());
+
+    Some(GpoWork {
+        vuln_id: vuln.vuln_id.clone(),
+        dedup_key,
+        source_user,
+        gpo_id,
+        gpo_name,
+        domain,
+        dc_ip,
+        credential,
     })
 }
 
@@ -151,84 +276,16 @@ pub async fn auto_gpo_abuse(dispatcher: Arc<Dispatcher>, mut shutdown: watch::Re
                 .discovered_vulnerabilities
                 .values()
                 .filter_map(|vuln| {
-                    if !is_gpo_candidate(&vuln.vuln_type) {
-                        return None;
-                    }
-
-                    if state.exploited_vulnerabilities.contains(&vuln.vuln_id) {
-                        return None;
-                    }
-
-                    let dedup_key = format!("{DEDUP_GPO_ABUSE}:{}", vuln.vuln_id);
-                    if state.is_processed(DEDUP_GPO_ABUSE, &dedup_key) {
-                        return None;
-                    }
-
-                    let source_user = vuln
-                        .details
-                        .get("source")
-                        .or_else(|| vuln.details.get("source_user"))
-                        .or_else(|| vuln.details.get("account_name"))
-                        .and_then(|v| v.as_str())
-                        .map(|s| s.to_string())?;
-
-                    let gpo_id = vuln
-                        .details
-                        .get("gpo_id")
-                        .or_else(|| vuln.details.get("gpo_guid"))
-                        .or_else(|| vuln.details.get("object_id"))
-                        .and_then(|v| v.as_str())
-                        .map(|s| s.to_string());
-
-                    let gpo_name = vuln
-                        .details
-                        .get("gpo_name")
-                        .or_else(|| vuln.details.get("gpo_display_name"))
-                        .and_then(|v| v.as_str())
-                        .map(|s| s.to_string());
-
-                    let domain = vuln
-                        .details
-                        .get("domain")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("")
-                        .to_string();
-
-                    // Find credential for the source user
-                    let credential = state
-                        .credentials
-                        .iter()
-                        .find(|c| {
-                            c.username.to_lowercase() == source_user.to_lowercase()
-                                && (domain.is_empty()
-                                    || c.domain.to_lowercase() == domain.to_lowercase())
-                        })
-                        .cloned();
-
-                    if credential.is_none() {
-                        debug!(
-                            vuln_id = %vuln.vuln_id,
-                            source = %source_user,
-                            "GPO abuse skipped: no credential for source user"
-                        );
-                        return None;
-                    }
-
-                    let dc_ip = state
-                        .domain_controllers
-                        .get(&domain.to_lowercase())
-                        .cloned();
-
-                    Some(GpoWork {
-                        vuln_id: vuln.vuln_id.clone(),
-                        dedup_key,
-                        source_user,
-                        gpo_id,
-                        gpo_name,
-                        domain,
-                        dc_ip,
-                        credential,
-                    })
+                    try_build_gpo_work(
+                        vuln,
+                        &state.credentials,
+                        state.exploited_vulnerabilities.contains(&vuln.vuln_id),
+                        state.is_processed(
+                            DEDUP_GPO_ABUSE,
+                            &format!("{DEDUP_GPO_ABUSE}:{}", vuln.vuln_id),
+                        ),
+                        |dom| state.domain_controllers.get(dom).cloned(),
+                    )
                 })
                 .collect()
         };
@@ -341,21 +398,7 @@ async fn dispatch_gpo_abuse_deterministic(dispatcher: &Arc<Dispatcher>, item: Gp
             .await;
 
         let outcome = match &result {
-            Ok(exec) => {
-                if exec.error.is_some() {
-                    // Tool reported a non-zero exit. Treat as no-evidence so
-                    // we retry up to the cap, unless the stdout matches a
-                    // known terminal failure pattern.
-                    let parsed = parse_pygpoabuse_output(&exec.output);
-                    if matches!(parsed, GpoAbuseOutcome::Success) {
-                        GpoAbuseOutcome::NoEvidence
-                    } else {
-                        parsed
-                    }
-                } else {
-                    parse_pygpoabuse_output(&exec.output)
-                }
-            }
+            Ok(exec) => classify_exec_outcome(&exec.output, exec.error.is_some()),
             Err(_) => GpoAbuseOutcome::NoEvidence,
         };
 
@@ -400,13 +443,9 @@ async fn dispatch_gpo_abuse_deterministic(dispatcher: &Arc<Dispatcher>, item: Gp
                     .record_exploit_failure(&vuln_id_bg)
                     .await;
                 let abandoned = dispatcher_bg.state.is_exploit_abandoned(&vuln_id_bg).await;
-                let summary = match &result {
-                    Ok(exec) => exec
-                        .error
-                        .clone()
-                        .unwrap_or_else(|| "no success markers in pygpoabuse output".into()),
-                    Err(e) => format!("dispatch error: {e}"),
-                };
+                let dispatch_err = result.as_ref().err().map(|e| e.to_string());
+                let tool_err = result.as_ref().ok().and_then(|exec| exec.error.clone());
+                let summary = format_failure_summary(dispatch_err.as_deref(), tool_err.as_deref());
                 if abandoned {
                     warn!(
                         vuln_id = %vuln_id_bg,
@@ -435,15 +474,15 @@ async fn dispatch_gpo_abuse_deterministic(dispatcher: &Arc<Dispatcher>, item: Gp
     });
 }
 
-struct GpoWork {
-    vuln_id: String,
-    dedup_key: String,
-    source_user: String,
-    gpo_id: Option<String>,
-    gpo_name: Option<String>,
-    domain: String,
-    dc_ip: Option<String>,
-    credential: Option<ares_core::models::Credential>,
+pub(crate) struct GpoWork {
+    pub(crate) vuln_id: String,
+    pub(crate) dedup_key: String,
+    pub(crate) source_user: String,
+    pub(crate) gpo_id: Option<String>,
+    pub(crate) gpo_name: Option<String>,
+    pub(crate) domain: String,
+    pub(crate) dc_ip: Option<String>,
+    pub(crate) credential: Option<Credential>,
 }
 
 /// Returns `true` if a vulnerability type represents a GPO abuse candidate.
@@ -893,5 +932,208 @@ mod tests {
         assert_ne!(a["task_name"], b["task_name"]);
         assert!(a["task_name"].as_str().unwrap().ends_with("alpha111"));
         assert!(b["task_name"].as_str().unwrap().ends_with("beta2222"));
+    }
+
+    // ── classify_exec_outcome ─────────────────────────────────────────
+
+    #[test]
+    fn classify_exec_outcome_clean_success_passes_through() {
+        let outcome = classify_exec_outcome("[+] ScheduledTask created!\n", false);
+        assert_eq!(outcome, GpoAbuseOutcome::Success);
+    }
+
+    #[test]
+    fn classify_exec_outcome_tool_error_downgrades_success_to_noevidence() {
+        // The dangerous case: stdout looks like success (versionNumber bump
+        // landed) but the worker reported a non-zero exit. We must NOT mark
+        // exploited — partial-state runs are unsafe to credit.
+        let outcome = classify_exec_outcome("[+] versionNumber updated\n", true);
+        assert_eq!(outcome, GpoAbuseOutcome::NoEvidence);
+    }
+
+    #[test]
+    fn classify_exec_outcome_tool_error_preserves_known_failure() {
+        // Worker error + auth-failure stdout: keep the auth verdict so the
+        // caller burns a failure-counter slot instead of retrying blindly.
+        let outcome = classify_exec_outcome("[-] Invalid credentials provided\n", true);
+        assert_eq!(outcome, GpoAbuseOutcome::KnownFailure("auth"));
+    }
+
+    #[test]
+    fn classify_exec_outcome_tool_error_with_no_evidence_stays_no_evidence() {
+        let outcome = classify_exec_outcome("Connecting...\n", true);
+        assert_eq!(outcome, GpoAbuseOutcome::NoEvidence);
+    }
+
+    // ── format_failure_summary ────────────────────────────────────────
+
+    #[test]
+    fn format_failure_summary_dispatch_error_wins() {
+        // Redis BRPOP timeout / queue full → dispatch error takes precedence
+        // over any tool-side error message.
+        let s = format_failure_summary(Some("redis brpop timeout"), Some("tool stderr"));
+        assert_eq!(s, "dispatch error: redis brpop timeout");
+    }
+
+    #[test]
+    fn format_failure_summary_tool_error_when_no_dispatch_error() {
+        let s = format_failure_summary(None, Some("missing field 'command'"));
+        assert_eq!(s, "missing field 'command'");
+    }
+
+    #[test]
+    fn format_failure_summary_fallback_when_both_absent() {
+        let s = format_failure_summary(None, None);
+        assert_eq!(s, "no success markers in pygpoabuse output");
+    }
+
+    // ── try_build_gpo_work ────────────────────────────────────────────
+
+    fn vuln_with(details: serde_json::Value) -> VulnerabilityInfo {
+        VulnerabilityInfo {
+            vuln_id: "vuln-gpo-001".into(),
+            vuln_type: "gpo_abuse".into(),
+            target: "contoso.local".into(),
+            discovered_by: "bloodhound_collect".into(),
+            discovered_at: chrono::Utc::now(),
+            details: serde_json::from_value(details).unwrap(),
+            recommended_agent: String::new(),
+            priority: 1,
+        }
+    }
+
+    fn alice_cred() -> Credential {
+        Credential {
+            id: "cred-1".into(),
+            username: "alice".into(),
+            password: "P@ssw0rd!".into(),
+            domain: "contoso.local".into(),
+            source: "test".into(),
+            discovered_at: None,
+            is_admin: false,
+            parent_id: None,
+            attack_step: 0,
+        }
+    }
+
+    #[test]
+    fn try_build_gpo_work_happy_path() {
+        let vuln = vuln_with(json!({
+            "source": "alice",
+            "gpo_id": "{6AC1786C-016F-11D2-945F-00C04fB984F9}",
+            "gpo_name": "Default Domain Policy",
+            "domain": "contoso.local",
+        }));
+        let creds = vec![alice_cred()];
+
+        let work = try_build_gpo_work(&vuln, &creds, false, false, |dom| {
+            assert_eq!(dom, "contoso.local");
+            Some("192.168.58.10".into())
+        })
+        .expect("happy path must build work");
+
+        assert_eq!(work.vuln_id, "vuln-gpo-001");
+        assert_eq!(work.dedup_key, "gpo_abuse:vuln-gpo-001");
+        assert_eq!(work.source_user, "alice");
+        assert_eq!(
+            work.gpo_id.as_deref(),
+            Some("{6AC1786C-016F-11D2-945F-00C04fB984F9}")
+        );
+        assert_eq!(work.gpo_name.as_deref(), Some("Default Domain Policy"));
+        assert_eq!(work.domain, "contoso.local");
+        assert_eq!(work.dc_ip.as_deref(), Some("192.168.58.10"));
+        assert!(work.credential.is_some());
+    }
+
+    #[test]
+    fn try_build_gpo_work_skips_non_gpo_vuln() {
+        let mut vuln = vuln_with(json!({"source": "alice", "domain": "contoso.local"}));
+        vuln.vuln_type = "esc1".into();
+        assert!(try_build_gpo_work(&vuln, &[alice_cred()], false, false, |_| None).is_none());
+    }
+
+    #[test]
+    fn try_build_gpo_work_skips_already_exploited() {
+        let vuln = vuln_with(json!({"source": "alice", "domain": "contoso.local"}));
+        assert!(try_build_gpo_work(&vuln, &[alice_cred()], true, false, |_| None).is_none());
+    }
+
+    #[test]
+    fn try_build_gpo_work_skips_already_processed() {
+        let vuln = vuln_with(json!({"source": "alice", "domain": "contoso.local"}));
+        assert!(try_build_gpo_work(&vuln, &[alice_cred()], false, true, |_| None).is_none());
+    }
+
+    #[test]
+    fn try_build_gpo_work_skips_when_source_missing() {
+        let vuln = vuln_with(json!({"gpo_id": "x", "domain": "contoso.local"}));
+        assert!(try_build_gpo_work(&vuln, &[alice_cred()], false, false, |_| None).is_none());
+    }
+
+    #[test]
+    fn try_build_gpo_work_skips_when_no_credential_for_source() {
+        let vuln = vuln_with(json!({"source": "bob", "domain": "contoso.local"}));
+        // No matching credential — alice doesn't match "bob".
+        assert!(try_build_gpo_work(&vuln, &[alice_cred()], false, false, |_| None).is_none());
+    }
+
+    #[test]
+    fn try_build_gpo_work_credential_match_is_case_insensitive() {
+        let vuln = vuln_with(json!({"source": "ALICE", "domain": "CONTOSO.LOCAL"}));
+        let work = try_build_gpo_work(&vuln, &[alice_cred()], false, false, |_| {
+            Some("192.168.58.10".into())
+        });
+        assert!(work.is_some(), "credential match must ignore case");
+    }
+
+    #[test]
+    fn try_build_gpo_work_credential_match_when_vuln_domain_empty() {
+        // Empty domain on the vuln → match purely on username.
+        let vuln = vuln_with(json!({"source": "alice"}));
+        let work = try_build_gpo_work(&vuln, &[alice_cred()], false, false, |_| None);
+        assert!(
+            work.is_some(),
+            "empty vuln domain should still match credential by username"
+        );
+    }
+
+    #[test]
+    fn try_build_gpo_work_dc_ip_lookup_returns_none_propagates() {
+        let vuln = vuln_with(json!({"source": "alice", "domain": "contoso.local"}));
+        let work = try_build_gpo_work(&vuln, &[alice_cred()], false, false, |_| None)
+            .expect("missing DC IP must still produce work — second-stage handles it");
+        assert!(work.dc_ip.is_none());
+    }
+
+    #[test]
+    fn try_build_gpo_work_gpo_id_fallback_chain() {
+        // Primary key
+        let v1 =
+            vuln_with(json!({"source": "alice", "domain": "contoso.local", "gpo_id": "primary"}));
+        let w1 = try_build_gpo_work(&v1, &[alice_cred()], false, false, |_| None).unwrap();
+        assert_eq!(w1.gpo_id.as_deref(), Some("primary"));
+
+        // Fallback to gpo_guid
+        let v2 =
+            vuln_with(json!({"source": "alice", "domain": "contoso.local", "gpo_guid": "guid"}));
+        let w2 = try_build_gpo_work(&v2, &[alice_cred()], false, false, |_| None).unwrap();
+        assert_eq!(w2.gpo_id.as_deref(), Some("guid"));
+
+        // Fallback to object_id
+        let v3 =
+            vuln_with(json!({"source": "alice", "domain": "contoso.local", "object_id": "obj"}));
+        let w3 = try_build_gpo_work(&v3, &[alice_cred()], false, false, |_| None).unwrap();
+        assert_eq!(w3.gpo_id.as_deref(), Some("obj"));
+    }
+
+    #[test]
+    fn try_build_gpo_work_gpo_name_fallback_to_display_name() {
+        let v = vuln_with(json!({
+            "source": "alice",
+            "domain": "contoso.local",
+            "gpo_display_name": "Workstation Lockdown",
+        }));
+        let w = try_build_gpo_work(&v, &[alice_cred()], false, false, |_| None).unwrap();
+        assert_eq!(w.gpo_name.as_deref(), Some("Workstation Lockdown"));
     }
 }
