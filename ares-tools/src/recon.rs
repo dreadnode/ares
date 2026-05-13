@@ -643,12 +643,19 @@ pub async fn ldap_acl_enumeration(args: &Value) -> Result<ToolOutput> {
             .timeout_secs(300)
             .flag("-b", &base_dn)
             .args(["-E", "1.2.840.113556.1.4.801=::MAMCAQQ="])
-            .arg("(|(objectCategory=person)(objectCategory=group)(objectCategory=computer))")
+            .arg("(|(objectCategory=person)(objectCategory=group)(objectCategory=computer)(objectCategory=groupPolicyContainer))")
             .args([
                 "sAMAccountName",
                 "objectClass",
                 "objectSid",
                 "nTSecurityDescriptor",
+                // GPO containers carry their identity in `cn` (the
+                // `{GUID}` directory name) and `displayName` (the friendly
+                // name like "Default Domain Policy") — neither has a
+                // sAMAccountName. The parser uses `cn` to construct the
+                // gpo_<right>_<GUID> vuln_id.
+                "cn",
+                "displayName",
             ])
             .execute()
             .await;
@@ -669,8 +676,8 @@ conn = ldap_mod.LDAPConnection('ldap://{target}', '{base_dn}', '{target}')
 conn.login('{u}', '', '{domain}', lmhash='', nthash='{nt_hash}')
 sc = ldap_mod.SimplePagedResultsControl(size=1000)
 resp = conn.search(
-    searchFilter='(|(objectCategory=person)(objectCategory=group)(objectCategory=computer))',
-    attributes=['sAMAccountName','objectClass','objectSid','nTSecurityDescriptor'],
+    searchFilter='(|(objectCategory=person)(objectCategory=group)(objectCategory=computer)(objectCategory=groupPolicyContainer))',
+    attributes=['sAMAccountName','objectClass','objectSid','nTSecurityDescriptor','cn','displayName'],
     searchControls=[sc],
     sizeLimit=0,
 )
@@ -727,12 +734,14 @@ for item in resp:
         // Request DACL only via SD_FLAGS control (0x04 = DACL)
         // BER: SEQUENCE { INTEGER 4 } = 30 03 02 01 04 → base64 MAMCAQQ=
         .args(["-E", "1.2.840.113556.1.4.801=::MAMCAQQ="])
-        .arg("(|(objectCategory=person)(objectCategory=group)(objectCategory=computer))")
+        .arg("(|(objectCategory=person)(objectCategory=group)(objectCategory=computer)(objectCategory=groupPolicyContainer))")
         .args([
             "sAMAccountName",
             "objectClass",
             "objectSid",
             "nTSecurityDescriptor",
+            "cn",
+            "displayName",
         ]);
 
     cmd.execute().await
