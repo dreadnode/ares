@@ -344,6 +344,168 @@ fn resolve_target_fqdn_from_signals(
         .find(|fqdn| label_matches(fqdn))
 }
 
+/// Build the candidate child set for child-to-parent escalation.
+///
+/// The set is the union of:
+/// - lowercased `state.dominated_domains` (krbtgt observed there)
+/// - lowercased domains of every `Administrator` NTLM hash in `state.hashes`
+///   with non-empty hash value AND non-empty domain (so GOAD-style local-SAM
+///   admin reuse can trigger the escalation before krbtgt is dumped)
+///
+/// Returns an empty set when neither source has any entries.
+pub(crate) fn collect_candidate_children(state: &StateInner) -> HashSet<String> {
+    let mut out: HashSet<String> = state
+        .dominated_domains
+        .iter()
+        .map(|d| d.to_lowercase())
+        .collect();
+    for h in state.hashes.iter() {
+        if h.username.eq_ignore_ascii_case("administrator")
+            && h.hash_type.eq_ignore_ascii_case("NTLM")
+            && !h.hash_value.is_empty()
+            && !h.domain.is_empty()
+        {
+            out.insert(h.domain.to_lowercase());
+        }
+    }
+    out
+}
+
+/// A single child→parent work item: `(dedup_key, child_domain, parent_domain, child_dc_ip)`.
+pub(crate) type ChildToParentWorkItem = (String, String, String, String);
+
+/// Build child-to-parent escalation work via the intra-forest FQDN derivation
+/// path (Path A). For each candidate child FQDN with 3+ labels, the parent is
+/// `labels[1..].join(".")`. Skips parents already dominated, children whose DC
+/// IP isn't resolvable, and dedup keys already processed.
+pub(crate) fn build_child_to_parent_work_path_a(
+    state: &StateInner,
+    candidates: &HashSet<String>,
+) -> Vec<ChildToParentWorkItem> {
+    let mut out = Vec::new();
+    for child_domain in candidates.iter() {
+        let cd_lower = child_domain.to_lowercase();
+        let labels: Vec<&str> = cd_lower.split('.').collect();
+        if labels.len() < 3 {
+            continue;
+        }
+        let parent_domain = labels[1..].join(".");
+        if parent_domain.is_empty() || !parent_domain.contains('.') {
+            continue;
+        }
+        if state.dominated_domains.contains(&parent_domain) {
+            continue;
+        }
+        if state.resolve_dc_ip(&parent_domain).is_none() {
+            continue;
+        }
+        let key = format!("raise_child:{cd_lower}");
+        if state.is_processed(DEDUP_TRUST_FOLLOW, &key) {
+            continue;
+        }
+        let child_dc_ip = match state.domain_controllers.get(&cd_lower) {
+            Some(ip) => ip.clone(),
+            None => continue,
+        };
+        out.push((key, child_domain.clone(), parent_domain, child_dc_ip));
+    }
+    out
+}
+
+/// Build child-to-parent escalation work via the explicit-trust path (Path B).
+/// Walks every `parent_child` trust in `state.trusted_domains`, matches a
+/// candidate child whose lowercased FQDN ends with `.{parent_lc}`, and emits
+/// a work item if the dedup key is not already in `existing_keys` or marked
+/// processed. The `existing_keys` set lets the caller pass the keys already
+/// emitted from Path A so they're not duplicated.
+pub(crate) fn build_child_to_parent_work_path_b(
+    state: &StateInner,
+    candidates: &HashSet<String>,
+    existing_keys: &HashSet<String>,
+) -> Vec<ChildToParentWorkItem> {
+    let mut out = Vec::new();
+    if state.trusted_domains.is_empty() {
+        return out;
+    }
+    for trust in state.trusted_domains.values() {
+        if !trust.is_parent_child() {
+            continue;
+        }
+        let parent_domain = trust.domain.clone();
+        let parent_lc = parent_domain.to_lowercase();
+        if state.dominated_domains.contains(&parent_lc) {
+            continue;
+        }
+        let child_domain = match candidates
+            .iter()
+            .find(|d| d.to_lowercase().ends_with(&format!(".{parent_lc}")))
+        {
+            Some(d) => d.clone(),
+            None => continue,
+        };
+        let key = format!("raise_child:{}", child_domain.to_lowercase());
+        if state.is_processed(DEDUP_TRUST_FOLLOW, &key) {
+            continue;
+        }
+        if existing_keys.contains(&key) {
+            continue;
+        }
+        let child_dc_ip = match state.domain_controllers.get(&child_domain.to_lowercase()) {
+            Some(ip) => ip.clone(),
+            None => continue,
+        };
+        out.push((key, child_domain, parent_domain, child_dc_ip));
+    }
+    out
+}
+
+/// Find the admin credential to drive a child→parent escalation against
+/// `child_domain`. Returns a `(payload_object, auth_method_tag)` pair where
+/// the JSON object holds either `{username, password}` or
+/// `{username, admin_hash}` per the auth method.
+///
+/// Preference: same-domain admin password credential first, then same-domain
+/// Administrator NTLM hash. Returns `(None, "none")` when neither is present.
+pub(crate) fn find_child_to_parent_admin_cred(
+    state: &StateInner,
+    child_domain: &str,
+) -> (Option<serde_json::Value>, &'static str) {
+    let cd = child_domain.to_lowercase();
+    let pw_cred = state
+        .credentials
+        .iter()
+        .find(|c| c.is_admin && !c.password.is_empty() && c.domain.to_lowercase() == cd)
+        .cloned();
+    if let Some(cred) = pw_cred {
+        return (
+            Some(json!({
+                "username": cred.username,
+                "password": cred.password,
+            })),
+            "password",
+        );
+    }
+    let admin_hash = state
+        .hashes
+        .iter()
+        .find(|h| {
+            h.username.to_lowercase() == "administrator"
+                && h.domain.to_lowercase() == cd
+                && h.hash_type.to_uppercase() == "NTLM"
+        })
+        .cloned();
+    if let Some(h) = admin_hash {
+        return (
+            Some(json!({
+                "username": "Administrator",
+                "admin_hash": h.hash_value,
+            })),
+            "hash",
+        );
+    }
+    (None, "none")
+}
+
 /// Monitors for trust account hashes and dispatches cross-domain attacks.
 /// Interval: 30s.
 pub async fn auto_trust_follow(dispatcher: Arc<Dispatcher>, mut shutdown: watch::Receiver<bool>) {
@@ -628,149 +790,21 @@ pub async fn auto_trust_follow(dispatcher: Arc<Dispatcher>, mut shutdown: watch:
         // happens (LLM refusal, network, throttle starvation).
         {
             let state = dispatcher.state.read().await;
-            // Build the candidate child set as the union of dominated domains
-            // (krbtgt observed) and domains where we have a non-empty
-            // Administrator NTLM hash. The latter covers the common case where
-            // GOAD-style password reuse gives us a working DA hash via local
-            // SAM dumps before we ever DCSync krbtgt — without it the trust
-            // automation deadlocks waiting for krbtgt.
-            let mut candidate_children: HashSet<String> = state
-                .dominated_domains
-                .iter()
-                .map(|d| d.to_lowercase())
-                .collect();
-            for h in state.hashes.iter() {
-                if h.username.eq_ignore_ascii_case("administrator")
-                    && h.hash_type.eq_ignore_ascii_case("NTLM")
-                    && !h.hash_value.is_empty()
-                    && !h.domain.is_empty()
-                {
-                    candidate_children.insert(h.domain.to_lowercase());
-                }
-            }
+            let candidate_children = collect_candidate_children(&state);
             if !candidate_children.is_empty() {
-                let mut child_work: Vec<(String, String, String, String)> = Vec::new();
-
-                // Path A: derived intra-forest. For each candidate child (FQDN
-                // with 3+ labels), the parent is `labels[1..].join(".")`.
-                for child_domain in candidate_children.iter() {
-                    let cd_lower = child_domain.to_lowercase();
-                    let labels: Vec<&str> = cd_lower.split('.').collect();
-                    if labels.len() < 3 {
-                        continue;
-                    }
-                    let parent_domain = labels[1..].join(".");
-                    if parent_domain.is_empty() || !parent_domain.contains('.') {
-                        continue;
-                    }
-                    if state.dominated_domains.contains(&parent_domain) {
-                        continue;
-                    }
-                    // Require parent DC IP resolvable (via domain_controllers
-                    // or hosts table) so secretsdump has a target IP.
-                    let parent_dc_ip = match state.resolve_dc_ip(&parent_domain) {
-                        Some(ip) => ip,
-                        None => continue,
-                    };
-                    let key = format!("raise_child:{}", cd_lower);
-                    if state.is_processed(DEDUP_TRUST_FOLLOW, &key) {
-                        continue;
-                    }
-                    let child_dc_ip = match state.domain_controllers.get(&cd_lower) {
-                        Some(ip) => ip.clone(),
-                        None => continue,
-                    };
-                    let _ = parent_dc_ip; // resolved later under fresh read lock
-                    child_work.push((key, child_domain.clone(), parent_domain, child_dc_ip));
-                }
-
-                // Path B: explicit parent_child trusts from LDAP enumeration.
-                // Skip duplicates of Path A (same dedup key).
-                if !state.trusted_domains.is_empty() {
-                    for trust in state.trusted_domains.values() {
-                        if !trust.is_parent_child() {
-                            continue;
-                        }
-                        let parent_domain = trust.domain.clone();
-                        if state
-                            .dominated_domains
-                            .contains(&parent_domain.to_lowercase())
-                        {
-                            continue;
-                        }
-                        let child_domain = match candidate_children.iter().find(|d| {
-                            d.to_lowercase()
-                                .ends_with(&format!(".{}", parent_domain.to_lowercase()))
-                        }) {
-                            Some(d) => d.clone(),
-                            None => continue,
-                        };
-                        let key = format!("raise_child:{}", child_domain.to_lowercase());
-                        if state.is_processed(DEDUP_TRUST_FOLLOW, &key) {
-                            continue;
-                        }
-                        if child_work.iter().any(|(k, _, _, _)| k == &key) {
-                            continue;
-                        }
-                        let child_dc_ip =
-                            match state.domain_controllers.get(&child_domain.to_lowercase()) {
-                                Some(ip) => ip.clone(),
-                                None => continue,
-                            };
-                        child_work.push((key, child_domain, parent_domain, child_dc_ip));
-                    }
-                }
+                let mut child_work = build_child_to_parent_work_path_a(&state, &candidate_children);
+                let existing_keys: HashSet<String> =
+                    child_work.iter().map(|(k, _, _, _)| k.clone()).collect();
+                let path_b =
+                    build_child_to_parent_work_path_b(&state, &candidate_children, &existing_keys);
+                child_work.extend(path_b);
 
                 drop(state);
 
                 for (key, child_domain, parent_domain, dc_ip) in child_work {
-                    // Find admin credential for the child domain:
-                    // prefer password, fall back to NTLM hash.
-                    let (cred_payload, auth_method): (Option<serde_json::Value>, &str) = {
+                    let (cred_payload, auth_method) = {
                         let s = dispatcher.state.read().await;
-                        let cd = child_domain.to_lowercase();
-
-                        let pw_cred = s
-                            .credentials
-                            .iter()
-                            .find(|c| {
-                                c.is_admin
-                                    && !c.password.is_empty()
-                                    && c.domain.to_lowercase() == cd
-                            })
-                            .cloned();
-
-                        if let Some(cred) = pw_cred {
-                            (
-                                Some(json!({
-                                    "username": cred.username,
-                                    "password": cred.password,
-                                })),
-                                "password",
-                            )
-                        } else {
-                            let admin_hash = s
-                                .hashes
-                                .iter()
-                                .find(|h| {
-                                    h.username.to_lowercase() == "administrator"
-                                        && h.domain.to_lowercase() == cd
-                                        && h.hash_type.to_uppercase() == "NTLM"
-                                })
-                                .cloned();
-
-                            if let Some(h) = admin_hash {
-                                (
-                                    Some(json!({
-                                        "username": "Administrator",
-                                        "admin_hash": h.hash_value,
-                                    })),
-                                    "hash",
-                                )
-                            } else {
-                                (None, "none")
-                            }
-                        }
+                        find_child_to_parent_admin_cred(&s, &child_domain)
                     };
 
                     let cred = match cred_payload {
@@ -2973,5 +3007,318 @@ mod tests {
         let (vuln_id_a, _, _) = classify_trust_escalation("CHILD.Contoso.Local", "Contoso.Local");
         let (vuln_id_b, _, _) = classify_trust_escalation("child.contoso.local", "contoso.local");
         assert_eq!(vuln_id_a, vuln_id_b);
+    }
+
+    // ── helpers for new child-to-parent work tests ───────────────────────
+
+    fn make_admin_hash(domain: &str, value: &str) -> ares_core::models::Hash {
+        ares_core::models::Hash {
+            id: format!("h-admin-{domain}"),
+            username: "Administrator".into(),
+            hash_value: value.into(),
+            hash_type: "NTLM".into(),
+            domain: domain.into(),
+            cracked_password: None,
+            source: String::new(),
+            discovered_at: None,
+            parent_id: None,
+            attack_step: 0,
+            aes_key: None,
+            is_previous: false,
+            source_host: None,
+            is_trust_key: false,
+            trust_pair_label: None,
+        }
+    }
+
+    fn make_admin_cred(password: &str, domain: &str) -> ares_core::models::Credential {
+        ares_core::models::Credential {
+            id: format!("c-admin-{domain}"),
+            username: "Administrator".into(),
+            password: password.into(),
+            domain: domain.into(),
+            source: String::new(),
+            discovered_at: None,
+            is_admin: true,
+            parent_id: None,
+            attack_step: 0,
+        }
+    }
+
+    // --- collect_candidate_children ------------------------------------
+
+    #[test]
+    fn collect_candidates_includes_dominated_domains() {
+        let mut s = StateInner::new("op".into());
+        s.dominated_domains.insert("child.contoso.local".into());
+        s.dominated_domains.insert("Other.Domain".into());
+        let v = collect_candidate_children(&s);
+        assert!(v.contains("child.contoso.local"));
+        // Returned set must be lowercased.
+        assert!(v.contains("other.domain"));
+    }
+
+    #[test]
+    fn collect_candidates_includes_admin_hash_domains() {
+        let mut s = StateInner::new("op".into());
+        s.hashes.push(make_admin_hash(
+            "contoso.local",
+            "deadbeef".repeat(4).as_str(),
+        ));
+        let v = collect_candidate_children(&s);
+        assert!(v.contains("contoso.local"));
+    }
+
+    #[test]
+    fn collect_candidates_skips_empty_hash_value() {
+        let mut s = StateInner::new("op".into());
+        let mut h = make_admin_hash("contoso.local", "deadbeef");
+        h.hash_value = String::new();
+        s.hashes.push(h);
+        assert!(collect_candidate_children(&s).is_empty());
+    }
+
+    #[test]
+    fn collect_candidates_skips_empty_domain() {
+        let mut s = StateInner::new("op".into());
+        let mut h = make_admin_hash("", "deadbeef");
+        h.domain = String::new();
+        s.hashes.push(h);
+        assert!(collect_candidate_children(&s).is_empty());
+    }
+
+    #[test]
+    fn collect_candidates_skips_non_admin_users() {
+        let mut s = StateInner::new("op".into());
+        let mut h = make_admin_hash("contoso.local", "deadbeef");
+        h.username = "alice".into();
+        s.hashes.push(h);
+        assert!(collect_candidate_children(&s).is_empty());
+    }
+
+    #[test]
+    fn collect_candidates_skips_non_ntlm_hashes() {
+        let mut s = StateInner::new("op".into());
+        let mut h = make_admin_hash("contoso.local", "deadbeef");
+        h.hash_type = "AES256".into();
+        s.hashes.push(h);
+        assert!(collect_candidate_children(&s).is_empty());
+    }
+
+    #[test]
+    fn collect_candidates_returns_empty_when_no_signals() {
+        let s = StateInner::new("op".into());
+        assert!(collect_candidate_children(&s).is_empty());
+    }
+
+    // --- build_child_to_parent_work_path_a ----------------------------
+
+    #[test]
+    fn path_a_emits_work_for_valid_child() {
+        let mut s = StateInner::new("op".into());
+        s.domain_controllers
+            .insert("contoso.local".into(), "192.168.58.10".into());
+        s.domain_controllers
+            .insert("child.contoso.local".into(), "192.168.58.11".into());
+        let candidates: HashSet<String> = ["child.contoso.local".to_string()].into_iter().collect();
+        let work = build_child_to_parent_work_path_a(&s, &candidates);
+        assert_eq!(work.len(), 1);
+        assert_eq!(work[0].0, "raise_child:child.contoso.local");
+        assert_eq!(work[0].1, "child.contoso.local");
+        assert_eq!(work[0].2, "contoso.local");
+        assert_eq!(work[0].3, "192.168.58.11");
+    }
+
+    #[test]
+    fn path_a_skips_short_fqdn() {
+        let s = StateInner::new("op".into());
+        // Only 2 labels — no parent extractable.
+        let candidates: HashSet<String> = ["contoso.local".to_string()].into_iter().collect();
+        assert!(build_child_to_parent_work_path_a(&s, &candidates).is_empty());
+    }
+
+    #[test]
+    fn path_a_skips_already_dominated_parent() {
+        let mut s = StateInner::new("op".into());
+        s.domain_controllers
+            .insert("contoso.local".into(), "192.168.58.10".into());
+        s.domain_controllers
+            .insert("child.contoso.local".into(), "192.168.58.11".into());
+        s.dominated_domains.insert("contoso.local".into());
+        let candidates: HashSet<String> = ["child.contoso.local".to_string()].into_iter().collect();
+        assert!(build_child_to_parent_work_path_a(&s, &candidates).is_empty());
+    }
+
+    #[test]
+    fn path_a_skips_parent_with_no_dc_ip() {
+        let mut s = StateInner::new("op".into());
+        // child has DC IP, parent does not → skip.
+        s.domain_controllers
+            .insert("child.contoso.local".into(), "192.168.58.11".into());
+        let candidates: HashSet<String> = ["child.contoso.local".to_string()].into_iter().collect();
+        assert!(build_child_to_parent_work_path_a(&s, &candidates).is_empty());
+    }
+
+    #[test]
+    fn path_a_skips_child_with_no_dc_ip() {
+        let mut s = StateInner::new("op".into());
+        // parent has DC IP, child does not → skip.
+        s.domain_controllers
+            .insert("contoso.local".into(), "192.168.58.10".into());
+        let candidates: HashSet<String> = ["child.contoso.local".to_string()].into_iter().collect();
+        assert!(build_child_to_parent_work_path_a(&s, &candidates).is_empty());
+    }
+
+    #[test]
+    fn path_a_skips_already_processed_dedup() {
+        let mut s = StateInner::new("op".into());
+        s.domain_controllers
+            .insert("contoso.local".into(), "192.168.58.10".into());
+        s.domain_controllers
+            .insert("child.contoso.local".into(), "192.168.58.11".into());
+        s.mark_processed(DEDUP_TRUST_FOLLOW, "raise_child:child.contoso.local".into());
+        let candidates: HashSet<String> = ["child.contoso.local".to_string()].into_iter().collect();
+        assert!(build_child_to_parent_work_path_a(&s, &candidates).is_empty());
+    }
+
+    // --- build_child_to_parent_work_path_b ----------------------------
+
+    #[test]
+    fn path_b_emits_when_explicit_trust_matches_candidate() {
+        let mut s = StateInner::new("op".into());
+        s.domain_controllers
+            .insert("contoso.local".into(), "192.168.58.10".into());
+        s.domain_controllers
+            .insert("child.contoso.local".into(), "192.168.58.11".into());
+        // Explicit parent_child trust.
+        s.trusted_domains.insert(
+            "contoso.local".into(),
+            ares_core::models::TrustInfo {
+                domain: "contoso.local".into(),
+                flat_name: "CONTOSO".into(),
+                direction: "bidirectional".into(),
+                trust_type: "parent_child".into(),
+                sid_filtering: false,
+            },
+        );
+        let candidates: HashSet<String> = ["child.contoso.local".to_string()].into_iter().collect();
+        let work = build_child_to_parent_work_path_b(&s, &candidates, &HashSet::new());
+        assert_eq!(work.len(), 1);
+        assert_eq!(work[0].1, "child.contoso.local");
+        assert_eq!(work[0].2, "contoso.local");
+    }
+
+    #[test]
+    fn path_b_skips_when_key_already_in_existing() {
+        let mut s = StateInner::new("op".into());
+        s.domain_controllers
+            .insert("contoso.local".into(), "192.168.58.10".into());
+        s.domain_controllers
+            .insert("child.contoso.local".into(), "192.168.58.11".into());
+        s.trusted_domains.insert(
+            "contoso.local".into(),
+            ares_core::models::TrustInfo {
+                domain: "contoso.local".into(),
+                flat_name: "CONTOSO".into(),
+                direction: "bidirectional".into(),
+                trust_type: "parent_child".into(),
+                sid_filtering: false,
+            },
+        );
+        let candidates: HashSet<String> = ["child.contoso.local".to_string()].into_iter().collect();
+        let existing: HashSet<String> = ["raise_child:child.contoso.local".to_string()]
+            .into_iter()
+            .collect();
+        assert!(build_child_to_parent_work_path_b(&s, &candidates, &existing).is_empty());
+    }
+
+    #[test]
+    fn path_b_skips_non_parent_child_trusts() {
+        let mut s = StateInner::new("op".into());
+        s.domain_controllers
+            .insert("contoso.local".into(), "192.168.58.10".into());
+        s.trusted_domains.insert(
+            "contoso.local".into(),
+            ares_core::models::TrustInfo {
+                domain: "contoso.local".into(),
+                flat_name: "CONTOSO".into(),
+                direction: "bidirectional".into(),
+                trust_type: "forest".into(),
+                sid_filtering: false,
+            },
+        );
+        let candidates: HashSet<String> = ["child.contoso.local".to_string()].into_iter().collect();
+        assert!(build_child_to_parent_work_path_b(&s, &candidates, &HashSet::new()).is_empty());
+    }
+
+    #[test]
+    fn path_b_returns_empty_when_no_trusts() {
+        let s = StateInner::new("op".into());
+        let candidates: HashSet<String> = ["child.contoso.local".to_string()].into_iter().collect();
+        assert!(build_child_to_parent_work_path_b(&s, &candidates, &HashSet::new()).is_empty());
+    }
+
+    // --- find_child_to_parent_admin_cred ------------------------------
+
+    #[test]
+    fn find_admin_cred_prefers_password() {
+        let mut s = StateInner::new("op".into());
+        s.credentials
+            .push(make_admin_cred("P@ss!", "child.contoso.local"));
+        s.hashes
+            .push(make_admin_hash("child.contoso.local", "deadbeef"));
+        let (payload, method) = find_child_to_parent_admin_cred(&s, "child.contoso.local");
+        assert_eq!(method, "password");
+        assert_eq!(payload.unwrap()["password"], "P@ss!");
+    }
+
+    #[test]
+    fn find_admin_cred_falls_back_to_hash() {
+        let mut s = StateInner::new("op".into());
+        s.hashes
+            .push(make_admin_hash("child.contoso.local", "deadbeef"));
+        let (payload, method) = find_child_to_parent_admin_cred(&s, "child.contoso.local");
+        assert_eq!(method, "hash");
+        let p = payload.unwrap();
+        assert_eq!(p["username"], "Administrator");
+        assert_eq!(p["admin_hash"], "deadbeef");
+    }
+
+    #[test]
+    fn find_admin_cred_skips_non_admin_credential() {
+        let mut s = StateInner::new("op".into());
+        let mut c = make_admin_cred("P@ss!", "child.contoso.local");
+        c.is_admin = false;
+        s.credentials.push(c);
+        let (payload, method) = find_child_to_parent_admin_cred(&s, "child.contoso.local");
+        assert!(payload.is_none());
+        assert_eq!(method, "none");
+    }
+
+    #[test]
+    fn find_admin_cred_skips_empty_password() {
+        let mut s = StateInner::new("op".into());
+        let c = make_admin_cred("", "child.contoso.local");
+        s.credentials.push(c);
+        let (payload, _) = find_child_to_parent_admin_cred(&s, "child.contoso.local");
+        assert!(payload.is_none());
+    }
+
+    #[test]
+    fn find_admin_cred_filters_by_domain() {
+        let mut s = StateInner::new("op".into());
+        s.credentials
+            .push(make_admin_cred("P@ss!", "fabrikam.local"));
+        let (payload, method) = find_child_to_parent_admin_cred(&s, "child.contoso.local");
+        assert!(payload.is_none());
+        assert_eq!(method, "none");
+    }
+
+    #[test]
+    fn find_admin_cred_returns_none_when_both_empty() {
+        let s = StateInner::new("op".into());
+        let (payload, method) = find_child_to_parent_admin_cred(&s, "child.contoso.local");
+        assert!(payload.is_none());
+        assert_eq!(method, "none");
     }
 }

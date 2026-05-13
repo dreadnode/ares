@@ -17,7 +17,7 @@ use std::time::Duration;
 use chrono::Utc;
 use redis::AsyncCommands;
 use tokio::sync::watch;
-use tracing::{debug, info, warn};
+use tracing::{info, warn};
 
 use crate::orchestrator::dispatcher::Dispatcher;
 use crate::orchestrator::state::SharedState;
@@ -142,6 +142,86 @@ fn forest_root_of(domain: &str) -> String {
 ///
 /// When neither flag is set (default), the operation continues until all
 /// trusted forests are dominated or max runtime is exceeded.
+/// Snapshot of completion-relevant state the decision helper consumes.
+#[derive(Debug, Clone)]
+pub(crate) struct CompletionSnapshot {
+    pub has_domain_admin: bool,
+    pub has_golden_ticket: bool,
+    pub completed: bool,
+    pub undominated_forests_empty: bool,
+    /// `Some(elapsed_since_dominance)` when the `all_forests_dominated_at`
+    /// timestamp has been recorded; `None` before it's been set.
+    pub all_dominated_for: Option<Duration>,
+}
+
+/// Outcome of a single completion check.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum CompletionDecision {
+    /// Stop now — the reason string is forwarded to the operator log.
+    Stop(&'static str),
+    /// Don't stop, but record this tick as "all forests dominated" so the
+    /// grace-period timer can start counting down. The caller writes
+    /// `state.all_forests_dominated_at = Some(Instant::now())`.
+    BeginGracePeriod,
+    /// Keep waiting; no state mutation needed.
+    Continue,
+}
+
+/// Decide whether the completion loop should stop, begin the post-DA grace
+/// period, or continue waiting. Pure — no Redis, no tokio sleeps.
+///
+/// Decision priority (matches the inline logic this replaces):
+/// 1. `completed` flag set externally → Stop("operation marked completed")
+/// 2. `elapsed >= max_runtime` → Stop("max runtime exceeded")
+/// 3. `has_domain_admin && stop_on_da` → Stop on DA
+/// 4. `has_domain_admin && stop_on_gt`:
+///     - `has_golden_ticket` → Stop on GT
+///     - otherwise → Continue (still waiting for GT)
+/// 5. `has_domain_admin` (default mode):
+///     - undominated forests remain → Continue
+///     - all dominated, grace timer set, `elapsed_since >= grace_period` → Stop
+///     - all dominated, grace timer set, still inside grace → Continue
+///     - all dominated, grace timer unset → BeginGracePeriod
+/// 6. otherwise → Continue
+pub(crate) fn evaluate_completion(
+    snapshot: &CompletionSnapshot,
+    elapsed: Duration,
+    max_runtime: Duration,
+    stop_on_da: bool,
+    stop_on_gt: bool,
+    grace_period: Duration,
+) -> CompletionDecision {
+    if snapshot.completed {
+        return CompletionDecision::Stop("operation marked completed");
+    }
+    if elapsed >= max_runtime {
+        return CompletionDecision::Stop("max runtime exceeded");
+    }
+    if !snapshot.has_domain_admin {
+        return CompletionDecision::Continue;
+    }
+    if stop_on_da {
+        return CompletionDecision::Stop("domain admin achieved (stop_on_domain_admin)");
+    }
+    if stop_on_gt {
+        return if snapshot.has_golden_ticket {
+            CompletionDecision::Stop("golden ticket forged (stop_on_golden_ticket)")
+        } else {
+            CompletionDecision::Continue
+        };
+    }
+    if !snapshot.undominated_forests_empty {
+        return CompletionDecision::Continue;
+    }
+    match snapshot.all_dominated_for {
+        Some(since) if since >= grace_period => {
+            CompletionDecision::Stop("all forests dominated (post-exploitation complete)")
+        }
+        Some(_) => CompletionDecision::Continue,
+        None => CompletionDecision::BeginGracePeriod,
+    }
+}
+
 pub async fn wait_for_completion(
     state: &SharedState,
     dispatcher: &Arc<Dispatcher>,
@@ -178,90 +258,55 @@ pub async fn wait_for_completion(
         }
 
         let elapsed = start.elapsed();
-        let (has_da, has_gt, completed) = {
+        let (has_da, has_gt, completed, all_dominated_for) = {
             let inner = state.read().await;
             (
                 inner.has_domain_admin,
                 inner.has_golden_ticket,
                 inner.completed,
+                inner.all_forests_dominated_at.map(|t| t.elapsed()),
             )
         };
 
-        // Check completion conditions.
-        //
-        // Priority order matches Python's _wait_for_completion():
-        // 1. External completed flag (e.g. CLI stop signal)
-        // 2. Max runtime exceeded
-        // 3. stop_on_domain_admin: stop immediately on DA
-        // 4. stop_on_golden_ticket: stop when DA + golden ticket achieved
-        // 5. Default: stop when all trusted forests are dominated
-        let reason = if completed {
-            Some("operation marked completed")
-        } else if elapsed >= max_runtime {
-            Some("max runtime exceeded")
-        } else if has_da {
-            if stop_on_da {
-                // Config says stop immediately on DA — skip forest check
-                Some("domain admin achieved (stop_on_domain_admin)")
-            } else if stop_on_gt {
-                // stop_on_golden_ticket: stop as soon as a golden ticket is
-                // forged on ANY domain.  The user explicitly opted into early
-                // exit — requiring all forests to be dominated would make this
-                // flag equivalent to the default mode and prevent exit when
-                // the target domain is compromised but other discovered
-                // forests (e.g. via trust enumeration) are not.
-                if has_gt {
-                    Some("golden ticket forged (stop_on_golden_ticket)")
-                } else {
-                    None // Continue — waiting for golden ticket
-                }
-            } else {
-                // Default: continue until all forests are dominated,
-                // then allow a post-exploitation grace period for group/ACL/ADCS
-                // enumeration to complete.
-                let remaining = undominated_forests(state).await;
-                if remaining.is_empty() {
-                    // Grace period: continue for 180s after all forests dominated
-                    // to allow post-exploitation automation (group enum, ACL
-                    // discovery, ADCS enumeration) to fire and complete.
-                    // 180s needed because: automations check on 20-60s intervals,
-                    // domain hashes may arrive late, and LLM tasks need time to
-                    // complete LDAP queries.
-                    let inner = state.read().await;
-                    let all_dominated_at = inner.all_forests_dominated_at;
-                    drop(inner);
-                    if let Some(dominated_at) = all_dominated_at {
-                        let grace = Duration::from_secs(180);
-                        let since = dominated_at.elapsed();
-                        if since >= grace {
-                            Some("all forests dominated (post-exploitation complete)")
-                        } else {
-                            debug!(
-                                remaining_secs = (grace - since).as_secs(),
-                                "All forests dominated — post-exploitation grace period"
-                            );
-                            None // Still in grace period
-                        }
-                    } else {
-                        // First time we see all forests dominated — record the timestamp
-                        let mut inner = state.write().await;
-                        inner.all_forests_dominated_at = Some(tokio::time::Instant::now());
-                        drop(inner);
-                        info!(
-                            "All forests dominated — starting 180s post-exploitation grace period"
-                        );
-                        None
-                    }
-                } else {
-                    debug!(
-                        undominated = ?remaining,
-                        "DA achieved but forests remain undominated"
-                    );
-                    None // Continue — other forests still need krbtgt
-                }
-            }
+        // The grace-period check needs to know whether ALL forests are dominated.
+        // That helper takes the SharedState (it reads inner under a fresh lock)
+        // and is async, so it can't live inside the pure decision helper.
+        let undominated_forests_empty = if has_da && !stop_on_da && !stop_on_gt {
+            undominated_forests(state).await.is_empty()
         } else {
-            None
+            false
+        };
+
+        let snapshot = CompletionSnapshot {
+            has_domain_admin: has_da,
+            has_golden_ticket: has_gt,
+            completed,
+            undominated_forests_empty,
+            all_dominated_for,
+        };
+        let grace_period = Duration::from_secs(180);
+        let decision = evaluate_completion(
+            &snapshot,
+            elapsed,
+            max_runtime,
+            stop_on_da,
+            stop_on_gt,
+            grace_period,
+        );
+
+        let reason = match decision {
+            CompletionDecision::Stop(r) => Some(r),
+            CompletionDecision::BeginGracePeriod => {
+                let mut inner = state.write().await;
+                inner.all_forests_dominated_at = Some(tokio::time::Instant::now());
+                drop(inner);
+                info!(
+                    "All forests dominated — starting {}s post-exploitation grace period",
+                    grace_period.as_secs()
+                );
+                None
+            }
+            CompletionDecision::Continue => None,
         };
 
         if let Some(reason) = reason {
@@ -996,5 +1041,175 @@ mod tests {
 
         let parent_child = make_trust("north.contoso.local", "parent_child");
         assert!(!parent_child.is_cross_forest());
+    }
+
+    // ── tests for evaluate_completion ─────────────────────────────────
+
+    fn empty_snapshot() -> CompletionSnapshot {
+        CompletionSnapshot {
+            has_domain_admin: false,
+            has_golden_ticket: false,
+            completed: false,
+            undominated_forests_empty: false,
+            all_dominated_for: None,
+        }
+    }
+
+    fn ten_min() -> Duration {
+        Duration::from_secs(600)
+    }
+    fn three_min() -> Duration {
+        Duration::from_secs(180)
+    }
+
+    #[test]
+    fn completion_completed_flag_wins() {
+        let mut snap = empty_snapshot();
+        snap.completed = true;
+        assert_eq!(
+            evaluate_completion(&snap, Duration::ZERO, ten_min(), false, false, three_min()),
+            CompletionDecision::Stop("operation marked completed")
+        );
+    }
+
+    #[test]
+    fn completion_max_runtime_exceeded() {
+        let snap = empty_snapshot();
+        assert_eq!(
+            evaluate_completion(
+                &snap,
+                Duration::from_secs(601),
+                ten_min(),
+                false,
+                false,
+                three_min()
+            ),
+            CompletionDecision::Stop("max runtime exceeded")
+        );
+    }
+
+    #[test]
+    fn completion_no_da_continues() {
+        let snap = empty_snapshot();
+        assert_eq!(
+            evaluate_completion(&snap, Duration::ZERO, ten_min(), false, false, three_min()),
+            CompletionDecision::Continue
+        );
+    }
+
+    #[test]
+    fn completion_stop_on_da_short_circuits_grace() {
+        let mut snap = empty_snapshot();
+        snap.has_domain_admin = true;
+        assert_eq!(
+            evaluate_completion(&snap, Duration::ZERO, ten_min(), true, false, three_min()),
+            CompletionDecision::Stop("domain admin achieved (stop_on_domain_admin)")
+        );
+    }
+
+    #[test]
+    fn completion_stop_on_gt_waits_until_ticket_forged() {
+        let mut snap = empty_snapshot();
+        snap.has_domain_admin = true;
+        assert_eq!(
+            evaluate_completion(&snap, Duration::ZERO, ten_min(), false, true, three_min()),
+            CompletionDecision::Continue
+        );
+        snap.has_golden_ticket = true;
+        assert_eq!(
+            evaluate_completion(&snap, Duration::ZERO, ten_min(), false, true, three_min()),
+            CompletionDecision::Stop("golden ticket forged (stop_on_golden_ticket)")
+        );
+    }
+
+    #[test]
+    fn completion_default_mode_waits_for_all_forests() {
+        let mut snap = empty_snapshot();
+        snap.has_domain_admin = true;
+        snap.undominated_forests_empty = false;
+        assert_eq!(
+            evaluate_completion(&snap, Duration::ZERO, ten_min(), false, false, three_min()),
+            CompletionDecision::Continue
+        );
+    }
+
+    #[test]
+    fn completion_all_forests_dominated_begins_grace_period() {
+        let mut snap = empty_snapshot();
+        snap.has_domain_admin = true;
+        snap.undominated_forests_empty = true;
+        // Grace timer not set yet → BeginGracePeriod.
+        assert_eq!(
+            evaluate_completion(&snap, Duration::ZERO, ten_min(), false, false, three_min()),
+            CompletionDecision::BeginGracePeriod
+        );
+    }
+
+    #[test]
+    fn completion_grace_period_still_running_continues() {
+        let mut snap = empty_snapshot();
+        snap.has_domain_admin = true;
+        snap.undominated_forests_empty = true;
+        snap.all_dominated_for = Some(Duration::from_secs(60));
+        // 60s elapsed, grace is 180s → still continuing.
+        assert_eq!(
+            evaluate_completion(&snap, Duration::ZERO, ten_min(), false, false, three_min()),
+            CompletionDecision::Continue
+        );
+    }
+
+    #[test]
+    fn completion_grace_period_complete_stops() {
+        let mut snap = empty_snapshot();
+        snap.has_domain_admin = true;
+        snap.undominated_forests_empty = true;
+        snap.all_dominated_for = Some(Duration::from_secs(181));
+        assert_eq!(
+            evaluate_completion(&snap, Duration::ZERO, ten_min(), false, false, three_min()),
+            CompletionDecision::Stop("all forests dominated (post-exploitation complete)")
+        );
+    }
+
+    #[test]
+    fn completion_stop_on_da_beats_completed_priority() {
+        // `completed` runs first; even with stop_on_da configured, the
+        // external completed flag wins because it's priority 1.
+        let mut snap = empty_snapshot();
+        snap.has_domain_admin = true;
+        snap.completed = true;
+        assert_eq!(
+            evaluate_completion(&snap, Duration::ZERO, ten_min(), true, false, three_min()),
+            CompletionDecision::Stop("operation marked completed")
+        );
+    }
+
+    #[test]
+    fn completion_max_runtime_beats_da_grace() {
+        let mut snap = empty_snapshot();
+        snap.has_domain_admin = true;
+        snap.undominated_forests_empty = true;
+        assert_eq!(
+            evaluate_completion(
+                &snap,
+                Duration::from_secs(601),
+                ten_min(),
+                false,
+                false,
+                three_min(),
+            ),
+            CompletionDecision::Stop("max runtime exceeded")
+        );
+    }
+
+    #[test]
+    fn completion_grace_period_boundary_exact_match_stops() {
+        let mut snap = empty_snapshot();
+        snap.has_domain_admin = true;
+        snap.undominated_forests_empty = true;
+        snap.all_dominated_for = Some(three_min());
+        assert_eq!(
+            evaluate_completion(&snap, Duration::ZERO, ten_min(), false, false, three_min()),
+            CompletionDecision::Stop("all forests dominated (post-exploitation complete)")
+        );
     }
 }

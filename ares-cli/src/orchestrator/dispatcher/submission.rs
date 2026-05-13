@@ -333,26 +333,7 @@ impl Dispatcher {
 
         // Persist pending task to Redis HASH for recovery
         let now = Utc::now();
-        let mut task_params: HashMap<String, serde_json::Value> = HashMap::new();
-        if let Some(ref key) = cred_key {
-            task_params.insert("credential_key".to_string(), serde_json::json!(key));
-        }
-        // Propagate task metadata so process_completed_task can access them
-        // (mark_host_owned needs target_ip, domain attribution needs domain,
-        // the Impacket failure classifier needs technique/hash_value/
-        // just_dc_user/credential to rebuild a corrected re-dispatch).
-        for key in &[
-            "target_ip",
-            "domain",
-            "technique",
-            "hash_value",
-            "just_dc_user",
-            "credential",
-        ] {
-            if let Some(val) = payload.get(*key) {
-                task_params.insert(key.to_string(), val.clone());
-            }
-        }
+        let task_params = task_params_from_payload(&payload, cred_key.as_deref());
         let task_info = ares_core::models::TaskInfo {
             task_id: task_id.clone(),
             task_type: task_type.to_string(),
@@ -428,51 +409,17 @@ impl Dispatcher {
 
                     match &outcome.reason {
                         LoopEndReason::TaskComplete { result, .. } => {
-                            // The result may be a JSON string (serialized object from
-                            // the LLM) or plain text. If it parses as JSON, merge its
-                            // fields into the result payload so extract_discoveries()
-                            // can find any LLM-reported hosts/credentials.
-                            let mut result_json =
-                                if let Ok(parsed) = serde_json::from_str::<Value>(result) {
-                                    if parsed.is_object() {
-                                        let mut obj = parsed;
-                                        obj["steps"] = json!(outcome.steps);
-                                        obj["tool_calls"] = json!(outcome.tool_calls_dispatched);
-                                        obj
-                                    } else {
-                                        json!({
-                                            "summary": result,
-                                            "steps": outcome.steps,
-                                            "tool_calls": outcome.tool_calls_dispatched,
-                                        })
-                                    }
-                                } else {
-                                    json!({
-                                        "summary": result,
-                                        "steps": outcome.steps,
-                                        "tool_calls": outcome.tool_calls_dispatched,
-                                    })
-                                };
-                            // Overwrite "discoveries" with parser-extracted data only.
-                            // The LLM's task_complete result is untrusted prose —
-                            // any discovery-like keys it contains are ignored.
-                            // Only ares-tools parsers (run on real tool stdout)
-                            // produce authoritative discoveries. LLM-fabricated
-                            // findings live on a separate `llm_findings` field.
-                            if let Some(obj) = result_json.as_object_mut() {
-                                obj.remove("discoveries");
-                                obj.remove("llm_findings");
-                            }
-                            if let Some(disc) = merged_discoveries {
-                                result_json["discoveries"] = disc;
-                            }
-                            if let Some(findings) = llm_findings_json.clone() {
-                                result_json["llm_findings"] = findings;
-                            }
-                            if !tool_outputs_json.is_empty() {
-                                result_json["tool_outputs"] =
-                                    Value::Array(tool_outputs_json.clone());
-                            }
+                            let parsed = parse_task_complete_result(
+                                result,
+                                outcome.steps,
+                                outcome.tool_calls_dispatched,
+                            );
+                            let result_json = merge_result_extras(
+                                parsed,
+                                merged_discoveries,
+                                llm_findings_json.clone(),
+                                tool_outputs_json.clone(),
+                            );
                             TaskResult {
                                 task_id: tid.clone(),
                                 success: true,
@@ -484,20 +431,15 @@ impl Dispatcher {
                             }
                         }
                         LoopEndReason::RequestAssistance { issue, context } => {
-                            let mut result_json = json!({
-                                "steps": outcome.steps,
-                                "tool_calls": outcome.tool_calls_dispatched,
-                            });
-                            if let Some(disc) = merged_discoveries {
-                                result_json["discoveries"] = disc;
-                            }
-                            if let Some(findings) = llm_findings_json.clone() {
-                                result_json["llm_findings"] = findings;
-                            }
-                            if !tool_outputs_json.is_empty() {
-                                result_json["tool_outputs"] =
-                                    Value::Array(tool_outputs_json.clone());
-                            }
+                            let result_json = merge_result_extras(
+                                json!({
+                                    "steps": outcome.steps,
+                                    "tool_calls": outcome.tool_calls_dispatched,
+                                }),
+                                merged_discoveries,
+                                llm_findings_json.clone(),
+                                tool_outputs_json.clone(),
+                            );
                             // Record this pattern as abandoned so future
                             // dispatches of (task_type, target, user, domain)
                             // get refused at throttled_submit. One failure is
@@ -535,20 +477,15 @@ impl Dispatcher {
                             }
                         }
                         LoopEndReason::MaxSteps => {
-                            let mut result_json = json!({
-                                "steps": outcome.steps,
-                                "tool_calls": outcome.tool_calls_dispatched,
-                            });
-                            if let Some(disc) = merged_discoveries {
-                                result_json["discoveries"] = disc;
-                            }
-                            if let Some(findings) = llm_findings_json.clone() {
-                                result_json["llm_findings"] = findings;
-                            }
-                            if !tool_outputs_json.is_empty() {
-                                result_json["tool_outputs"] =
-                                    Value::Array(tool_outputs_json.clone());
-                            }
+                            let result_json = merge_result_extras(
+                                json!({
+                                    "steps": outcome.steps,
+                                    "tool_calls": outcome.tool_calls_dispatched,
+                                }),
+                                merged_discoveries,
+                                llm_findings_json.clone(),
+                                tool_outputs_json.clone(),
+                            );
                             TaskResult {
                                 task_id: tid.clone(),
                                 success: false,
@@ -560,17 +497,12 @@ impl Dispatcher {
                             }
                         }
                         LoopEndReason::EndTurn { content } => {
-                            let mut result_json = json!({"summary": content});
-                            if let Some(disc) = merged_discoveries {
-                                result_json["discoveries"] = disc;
-                            }
-                            if let Some(findings) = llm_findings_json.clone() {
-                                result_json["llm_findings"] = findings;
-                            }
-                            if !tool_outputs_json.is_empty() {
-                                result_json["tool_outputs"] =
-                                    Value::Array(tool_outputs_json.clone());
-                            }
+                            let result_json = merge_result_extras(
+                                json!({"summary": content}),
+                                merged_discoveries,
+                                llm_findings_json.clone(),
+                                tool_outputs_json.clone(),
+                            );
                             // Bare end-of-turn means the LLM stopped without
                             // calling task_complete or request_assistance — it
                             // is a stall, not a success. Treating it as success
@@ -591,20 +523,15 @@ impl Dispatcher {
                             }
                         }
                         LoopEndReason::MaxTokens => {
-                            let mut result_json = json!({
-                                "steps": outcome.steps,
-                                "tool_calls": outcome.tool_calls_dispatched,
-                            });
-                            if let Some(disc) = merged_discoveries {
-                                result_json["discoveries"] = disc;
-                            }
-                            if let Some(findings) = llm_findings_json.clone() {
-                                result_json["llm_findings"] = findings;
-                            }
-                            if !tool_outputs_json.is_empty() {
-                                result_json["tool_outputs"] =
-                                    Value::Array(tool_outputs_json.clone());
-                            }
+                            let result_json = merge_result_extras(
+                                json!({
+                                    "steps": outcome.steps,
+                                    "tool_calls": outcome.tool_calls_dispatched,
+                                }),
+                                merged_discoveries,
+                                llm_findings_json.clone(),
+                                tool_outputs_json.clone(),
+                            );
                             TaskResult {
                                 task_id: tid.clone(),
                                 success: false,
@@ -616,17 +543,15 @@ impl Dispatcher {
                             }
                         }
                         LoopEndReason::BudgetExceeded { reason } => {
-                            let mut result_json = json!({
-                                "steps": outcome.steps,
-                                "tool_calls": outcome.tool_calls_dispatched,
-                            });
-                            if let Some(disc) = merged_discoveries {
-                                result_json["discoveries"] = disc;
-                            }
-                            if !tool_outputs_json.is_empty() {
-                                result_json["tool_outputs"] =
-                                    Value::Array(tool_outputs_json.clone());
-                            }
+                            let result_json = merge_result_extras(
+                                json!({
+                                    "steps": outcome.steps,
+                                    "tool_calls": outcome.tool_calls_dispatched,
+                                }),
+                                merged_discoveries,
+                                None,
+                                tool_outputs_json.clone(),
+                            );
                             TaskResult {
                                 task_id: tid.clone(),
                                 success: false,
@@ -661,11 +586,7 @@ impl Dispatcher {
 
             // Inject vuln_id into result so process_completed_task can mark_exploited.
             if let Some(ref vid) = vuln_id_for_result {
-                if let Some(ref mut res) = result.result {
-                    if let Some(obj) = res.as_object_mut() {
-                        obj.insert("vuln_id".to_string(), json!(vid));
-                    }
-                }
+                inject_vuln_id_into_result(&mut result, vid);
             }
 
             // The CredentialInflight slot is released by whichever caller
@@ -687,6 +608,97 @@ impl Dispatcher {
 
         Ok(SubmissionOutcome::Submitted(task_id))
     }
+}
+
+/// Extract the subset of payload fields we want to thread into the pending-task
+/// record so result processing has the metadata it needs without re-reading
+/// the original payload.
+///
+/// Used by `submit_to_llm` when persisting the `TaskInfo` to Redis.
+pub(crate) fn task_params_from_payload(
+    payload: &Value,
+    cred_key: Option<&str>,
+) -> HashMap<String, Value> {
+    let mut task_params: HashMap<String, Value> = HashMap::new();
+    if let Some(key) = cred_key {
+        task_params.insert("credential_key".to_string(), json!(key));
+    }
+    for key in &[
+        "target_ip",
+        "domain",
+        "technique",
+        "hash_value",
+        "just_dc_user",
+        "credential",
+    ] {
+        if let Some(val) = payload.get(*key) {
+            task_params.insert(key.to_string(), val.clone());
+        }
+    }
+    task_params
+}
+
+/// Inject a `vuln_id` field into a `TaskResult`'s `result` payload so
+/// `process_completed_task` can mark the parent vuln exploited on success.
+///
+/// No-op when `result.result` is `None` or the inner value isn't an object.
+pub(crate) fn inject_vuln_id_into_result(result: &mut TaskResult, vuln_id: &str) {
+    if let Some(ref mut res) = result.result {
+        if let Some(obj) = res.as_object_mut() {
+            obj.insert("vuln_id".to_string(), json!(vuln_id));
+        }
+    }
+}
+
+/// Parse the `task_complete` `result` string into a JSON object. If the string
+/// is JSON-decodable AND parses to an object, that object is returned; the
+/// `steps` and `tool_calls` fields are then injected. Otherwise the string
+/// becomes the `summary` field of a fresh object alongside the same
+/// `steps`/`tool_calls` numbers.
+///
+/// Extracted from the inline match-arm so the fallback path (LLM returned
+/// raw text) and the structured path (LLM returned a JSON object) can both
+/// be tested without spinning up an agent loop.
+pub(crate) fn parse_task_complete_result(result: &str, steps: u32, tool_calls: u32) -> Value {
+    if let Ok(parsed) = serde_json::from_str::<Value>(result) {
+        if parsed.is_object() {
+            let mut obj = parsed;
+            obj["steps"] = json!(steps);
+            obj["tool_calls"] = json!(tool_calls);
+            return obj;
+        }
+    }
+    json!({
+        "summary": result,
+        "steps": steps,
+        "tool_calls": tool_calls,
+    })
+}
+
+/// Merge discoveries, LLM-fabricated findings, and raw tool outputs into a
+/// result-payload object. Pure JSON manipulation — drops any caller-supplied
+/// `discoveries`/`llm_findings` keys first (LLM-controlled prose must never
+/// shadow parser output) and only emits each section when non-empty.
+pub(crate) fn merge_result_extras(
+    mut result_json: Value,
+    merged_discoveries: Option<Value>,
+    llm_findings: Option<Value>,
+    tool_outputs: Vec<Value>,
+) -> Value {
+    if let Some(obj) = result_json.as_object_mut() {
+        obj.remove("discoveries");
+        obj.remove("llm_findings");
+    }
+    if let Some(disc) = merged_discoveries {
+        result_json["discoveries"] = disc;
+    }
+    if let Some(findings) = llm_findings {
+        result_json["llm_findings"] = findings;
+    }
+    if !tool_outputs.is_empty() {
+        result_json["tool_outputs"] = Value::Array(tool_outputs);
+    }
+    result_json
 }
 
 /// Canonical key identifying a task pattern for the assist-abandon dedup
@@ -777,5 +789,193 @@ mod assist_key_tests {
             assist_pattern_key("credential_access", &p).is_none(),
             "explicit empty username must never be abandoned"
         );
+    }
+}
+
+#[cfg(test)]
+mod helper_tests {
+    use super::*;
+    use serde_json::json;
+
+    // --- task_params_from_payload ---------------------------------------
+
+    #[test]
+    fn task_params_includes_credential_key_when_provided() {
+        let payload = json!({"target_ip": "192.168.58.10"});
+        let p = task_params_from_payload(&payload, Some("cred:alice@contoso.local"));
+        assert_eq!(p["credential_key"], "cred:alice@contoso.local");
+    }
+
+    #[test]
+    fn task_params_omits_credential_key_when_none() {
+        let payload = json!({"target_ip": "192.168.58.10"});
+        let p = task_params_from_payload(&payload, None);
+        assert!(!p.contains_key("credential_key"));
+    }
+
+    #[test]
+    fn task_params_threads_recognised_metadata_keys() {
+        let payload = json!({
+            "target_ip": "192.168.58.10",
+            "domain": "contoso.local",
+            "technique": "asrep_roast",
+            "hash_value": "deadbeef",
+            "just_dc_user": "alice",
+            "credential": {"username": "alice", "password": "P@ss"},
+            "extra_field": "ignored",
+        });
+        let p = task_params_from_payload(&payload, None);
+        assert_eq!(p["target_ip"], "192.168.58.10");
+        assert_eq!(p["domain"], "contoso.local");
+        assert_eq!(p["technique"], "asrep_roast");
+        assert_eq!(p["hash_value"], "deadbeef");
+        assert_eq!(p["just_dc_user"], "alice");
+        assert_eq!(p["credential"]["username"], "alice");
+        assert!(!p.contains_key("extra_field"));
+    }
+
+    #[test]
+    fn task_params_missing_fields_omitted() {
+        let payload = json!({});
+        let p = task_params_from_payload(&payload, None);
+        assert!(p.is_empty());
+    }
+
+    // --- inject_vuln_id_into_result --------------------------------------
+
+    fn make_result(result: Option<serde_json::Value>) -> TaskResult {
+        TaskResult {
+            task_id: "t-test".into(),
+            success: true,
+            result,
+            error: None,
+            completed_at: Some(chrono::Utc::now()),
+            worker_pod: Some("test".into()),
+            agent_name: Some("test".into()),
+        }
+    }
+
+    #[test]
+    fn inject_vuln_id_adds_field_to_existing_object() {
+        let mut tr = make_result(Some(json!({"summary": "ok"})));
+        inject_vuln_id_into_result(&mut tr, "vuln-1");
+        assert_eq!(tr.result.unwrap()["vuln_id"], "vuln-1");
+    }
+
+    #[test]
+    fn inject_vuln_id_no_op_when_result_none() {
+        let mut tr = make_result(None);
+        inject_vuln_id_into_result(&mut tr, "vuln-1");
+        assert!(tr.result.is_none());
+    }
+
+    #[test]
+    fn inject_vuln_id_no_op_when_result_not_object() {
+        let mut tr = make_result(Some(json!("just a string")));
+        inject_vuln_id_into_result(&mut tr, "vuln-1");
+        // Stayed a string; injection silently no-ops.
+        assert_eq!(tr.result.unwrap(), json!("just a string"));
+    }
+
+    // --- parse_task_complete_result --------------------------------------
+
+    #[test]
+    fn parse_complete_result_uses_object_form_when_json() {
+        let r =
+            parse_task_complete_result(r#"{"summary":"ok","credentials":[{"u":"alice"}]}"#, 5, 10);
+        assert_eq!(r["summary"], "ok");
+        assert_eq!(r["credentials"][0]["u"], "alice");
+        assert_eq!(r["steps"], 5);
+        assert_eq!(r["tool_calls"], 10);
+    }
+
+    #[test]
+    fn parse_complete_result_falls_back_for_plain_text() {
+        let r = parse_task_complete_result("just a string", 3, 1);
+        assert_eq!(r["summary"], "just a string");
+        assert_eq!(r["steps"], 3);
+        assert_eq!(r["tool_calls"], 1);
+    }
+
+    #[test]
+    fn parse_complete_result_falls_back_for_json_non_object() {
+        // JSON array → falls back to summary path (not an object).
+        let r = parse_task_complete_result("[1,2,3]", 2, 2);
+        assert_eq!(r["summary"], "[1,2,3]");
+        assert_eq!(r["steps"], 2);
+    }
+
+    #[test]
+    fn parse_complete_result_object_overwrites_steps_and_tool_calls() {
+        // LLM-supplied steps/tool_calls fields get overwritten by the
+        // dispatcher-tracked counts.
+        let r =
+            parse_task_complete_result(r#"{"summary":"ok","steps":999,"tool_calls":999}"#, 5, 10);
+        assert_eq!(r["steps"], 5);
+        assert_eq!(r["tool_calls"], 10);
+    }
+
+    // --- merge_result_extras ---------------------------------------------
+
+    #[test]
+    fn merge_extras_strips_llm_supplied_keys_first() {
+        let base = json!({
+            "summary": "ok",
+            "discoveries": {"credentials": [{"forged_by_llm": "true"}]},
+            "llm_findings": [{"forged_by_llm": "true"}],
+        });
+        let m = merge_result_extras(
+            base,
+            Some(json!({"credentials": [{"username": "alice"}]})),
+            None,
+            Vec::new(),
+        );
+        // LLM-supplied `discoveries` overwritten by the parser-derived value.
+        assert_eq!(m["discoveries"]["credentials"][0]["username"], "alice");
+        assert_eq!(
+            m["discoveries"]["credentials"][0].get("forged_by_llm"),
+            None
+        );
+        // LLM-supplied `llm_findings` stripped entirely (caller passed None).
+        assert!(m.get("llm_findings").is_none());
+    }
+
+    #[test]
+    fn merge_extras_keeps_caller_supplied_findings() {
+        let base = json!({"summary": "ok"});
+        let m = merge_result_extras(base, None, Some(json!([{"finding": "x"}])), Vec::new());
+        assert_eq!(m["llm_findings"][0]["finding"], "x");
+    }
+
+    #[test]
+    fn merge_extras_emits_tool_outputs_only_when_present() {
+        let base = json!({"summary": "ok"});
+        let m = merge_result_extras(base.clone(), None, None, Vec::new());
+        assert!(m.get("tool_outputs").is_none());
+
+        let m = merge_result_extras(
+            base,
+            None,
+            None,
+            vec![json!({"name": "tool", "output": "x"})],
+        );
+        assert!(m["tool_outputs"].is_array());
+        assert_eq!(m["tool_outputs"][0]["output"], "x");
+    }
+
+    #[test]
+    fn merge_extras_omits_discoveries_when_none() {
+        let base = json!({"summary": "ok"});
+        let m = merge_result_extras(base, None, None, Vec::new());
+        assert!(m.get("discoveries").is_none());
+    }
+
+    #[test]
+    fn merge_extras_preserves_other_existing_fields() {
+        let base = json!({"summary": "ok", "steps": 5, "tool_calls": 12});
+        let m = merge_result_extras(base, None, None, Vec::new());
+        assert_eq!(m["summary"], "ok");
+        assert_eq!(m["steps"], 5);
+        assert_eq!(m["tool_calls"], 12);
     }
 }
