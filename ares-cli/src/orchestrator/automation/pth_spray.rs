@@ -47,15 +47,7 @@ pub async fn auto_pth_spray(dispatcher: Arc<Dispatcher>, mut shutdown: watch::Re
 
         // Limit to 5 per cycle to avoid overwhelming the throttler
         for item in work.into_iter().take(5) {
-            let payload = json!({
-                "technique": "pass_the_hash",
-                "target_ip": item.target_ip,
-                "hostname": item.hostname,
-                "username": item.username,
-                "ntlm_hash": item.ntlm_hash,
-                "domain": item.domain,
-                "protocol": "smb",
-            });
+            let payload = build_pth_payload(&item);
 
             let priority = dispatcher.effective_priority("pth_spray");
             match dispatcher
@@ -88,6 +80,19 @@ pub async fn auto_pth_spray(dispatcher: Arc<Dispatcher>, mut shutdown: watch::Re
             }
         }
     }
+}
+
+/// Build the JSON payload for a single PTH spray dispatch.
+pub(crate) fn build_pth_payload(item: &PthWork) -> serde_json::Value {
+    json!({
+        "technique": "pass_the_hash",
+        "target_ip": item.target_ip,
+        "hostname": item.hostname,
+        "username": item.username,
+        "ntlm_hash": item.ntlm_hash,
+        "domain": item.domain,
+        "protocol": "smb",
+    })
 }
 
 /// Collects PTH spray work items from state. Returns `None` when there are no
@@ -161,13 +166,13 @@ fn collect_pth_work(state: &StateInner) -> Option<Vec<PthWork>> {
     Some(items)
 }
 
-struct PthWork {
-    dedup_key: String,
-    target_ip: String,
-    hostname: String,
-    username: String,
-    ntlm_hash: String,
-    domain: String,
+pub(crate) struct PthWork {
+    pub dedup_key: String,
+    pub target_ip: String,
+    pub hostname: String,
+    pub username: String,
+    pub ntlm_hash: String,
+    pub domain: String,
 }
 
 #[cfg(test)]
@@ -796,5 +801,27 @@ mod tests {
             .push(make_smb_host("192.168.58.10", "srv01.contoso.local", false));
         let work = collect_pth_work(&state).unwrap();
         assert_eq!(work.len(), 1);
+    }
+
+    // ── build_pth_payload ─────────────────────────────────────────────
+
+    #[test]
+    fn build_pth_payload_emits_expected_fields() {
+        let item = PthWork {
+            dedup_key: "pth:contoso.local:alice:192.168.58.20".into(),
+            target_ip: "192.168.58.20".into(),
+            hostname: "sql01.contoso.local".into(),
+            username: "alice".into(),
+            ntlm_hash: "aad3b435b51404eeaad3b435b51404ee".into(),
+            domain: "contoso.local".into(),
+        };
+        let p = build_pth_payload(&item);
+        assert_eq!(p["technique"], "pass_the_hash");
+        assert_eq!(p["target_ip"], "192.168.58.20");
+        assert_eq!(p["hostname"], "sql01.contoso.local");
+        assert_eq!(p["username"], "alice");
+        assert_eq!(p["ntlm_hash"], "aad3b435b51404eeaad3b435b51404ee");
+        assert_eq!(p["domain"], "contoso.local");
+        assert_eq!(p["protocol"], "smb");
     }
 }
