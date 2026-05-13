@@ -80,54 +80,22 @@ pub async fn get_attack_playbook(args: &Value) -> anyhow::Result<ToolOutput> {
 
     let (creds, hosts, loot, meta) = load_op_collections(&mut conn, &op_id).await;
 
-    // Build playbook
-    let mut lines = Vec::new();
-    lines.push(format!(
-        "=== Detection Playbook for Operation {op_id} ===\n"
-    ));
+    let body = build_playbook_text(&op_id, &creds, &hosts, &loot, &meta);
 
-    if let Some(started) = meta.get("started_at") {
-        lines.push(format!("Operation started: {started}"));
-    }
-    if let Some(domain) = meta.get("domain") {
-        lines.push(format!("Target domain: {domain}"));
-    }
+    Ok(ToolOutput {
+        stdout: body,
+        stderr: String::new(),
+        exit_code: Some(0),
+        success: true,
+    })
+}
 
-    // Extract usernames and IPs from credentials for targeted queries
-    let mut target_users = Vec::new();
-    let mut target_ips = Vec::new();
-    for cred in &creds {
-        if let Ok(cred_json) = serde_json::from_str::<Value>(cred) {
-            if let Some(user) = cred_json.get("username").and_then(|u| u.as_str()) {
-                if !target_users.contains(&user.to_string()) {
-                    target_users.push(user.to_string());
-                }
-            }
-            if let Some(ip) = cred_json.get("ip").and_then(|i| i.as_str()) {
-                if !target_ips.contains(&ip.to_string()) {
-                    target_ips.push(ip.to_string());
-                }
-            }
-        }
-    }
-
-    // Extract techniques from loot
-    let mut techniques_used = Vec::new();
-    for item in &loot {
-        if let Ok(loot_json) = serde_json::from_str::<Value>(item) {
-            if let Some(technique) = loot_json.get("technique").and_then(|t| t.as_str()) {
-                if !techniques_used.contains(&technique.to_string()) {
-                    techniques_used.push(technique.to_string());
-                }
-            }
-        }
-    }
-
-    // Priority queries based on what the red team actually did
-    lines.push("\n--- Priority Detection Queries ---".to_string());
-
-    let mut query_count = 0;
-    let technique_queries: Vec<(&str, &str, &str)> = vec![
+/// MITRE technique → (`run_detection_query` template name, description) pairs
+/// used by the playbook builder. Order matters: the first five entries are
+/// the recommended baseline that always appear, even when the operation
+/// loot doesn't tag the technique.
+fn playbook_technique_queries() -> Vec<(&'static str, &'static str, &'static str)> {
+    vec![
         ("T1003.006", "detect_dcsync", "DCSync replication attack"),
         ("T1003", "detect_secretsdump", "Credential dumping"),
         ("T1558.003", "detect_kerberoasting", "Kerberoasting"),
@@ -141,11 +109,87 @@ pub async fn get_attack_playbook(args: &Value) -> anyhow::Result<ToolOutput> {
             "detect_adcs_exploitation",
             "ADCS certificate abuse",
         ),
-    ];
+    ]
+}
 
+/// Extract distinct usernames and IPs from a list of credential JSON strings.
+/// Returns `(usernames, ips)` in first-seen order with deduplication.
+/// Malformed JSON entries are silently skipped.
+pub(crate) fn extract_users_and_ips_from_creds(creds: &[String]) -> (Vec<String>, Vec<String>) {
+    let mut users = Vec::new();
+    let mut ips = Vec::new();
+    for cred in creds {
+        let Ok(cred_json) = serde_json::from_str::<Value>(cred) else {
+            continue;
+        };
+        if let Some(user) = cred_json.get("username").and_then(|u| u.as_str()) {
+            if !users.contains(&user.to_string()) {
+                users.push(user.to_string());
+            }
+        }
+        if let Some(ip) = cred_json.get("ip").and_then(|i| i.as_str()) {
+            if !ips.contains(&ip.to_string()) {
+                ips.push(ip.to_string());
+            }
+        }
+    }
+    (users, ips)
+}
+
+/// Extract distinct MITRE technique IDs from a list of loot JSON strings.
+/// Malformed JSON entries are silently skipped.
+pub(crate) fn extract_techniques_from_loot(loot: &[String]) -> Vec<String> {
+    let mut techniques = Vec::new();
+    for item in loot {
+        let Ok(loot_json) = serde_json::from_str::<Value>(item) else {
+            continue;
+        };
+        if let Some(technique) = loot_json.get("technique").and_then(|t| t.as_str()) {
+            if !techniques.contains(&technique.to_string()) {
+                techniques.push(technique.to_string());
+            }
+        }
+    }
+    techniques
+}
+
+/// Build the human-readable detection playbook text from already-loaded
+/// red-team operation state. Pure — no Redis, no IO.
+///
+/// `creds`, `loot` are raw JSON strings as returned by Redis (HGETALL /
+/// LRANGE); `hosts` is a deduped string set of hostnames; `meta` is the
+/// operation's metadata hash.
+pub(crate) fn build_playbook_text(
+    op_id: &str,
+    creds: &[String],
+    hosts: &std::collections::HashSet<String>,
+    loot: &[String],
+    meta: &HashMap<String, String>,
+) -> String {
+    let mut lines = Vec::new();
+    lines.push(format!(
+        "=== Detection Playbook for Operation {op_id} ===\n"
+    ));
+
+    if let Some(started) = meta.get("started_at") {
+        lines.push(format!("Operation started: {started}"));
+    }
+    if let Some(domain) = meta.get("domain") {
+        lines.push(format!("Target domain: {domain}"));
+    }
+
+    let (target_users, target_ips) = extract_users_and_ips_from_creds(creds);
+    let techniques_used = extract_techniques_from_loot(loot);
+
+    // Priority queries based on what the red team actually did
+    lines.push("\n--- Priority Detection Queries ---".to_string());
+
+    let mut query_count = 0;
+    let technique_queries = playbook_technique_queries();
     for (tech_id, query_name, description) in &technique_queries {
-        if techniques_used.iter().any(|t| t.starts_with(tech_id)) || query_count < 5 {
-            let priority = if techniques_used.iter().any(|t| t.starts_with(tech_id)) {
+        let confirmed = techniques_used.iter().any(|t| t.starts_with(tech_id));
+        if confirmed || query_count < 5 {
+            let priority = if confirmed {
                 "HIGH (confirmed red team technique)"
             } else {
                 "MEDIUM (recommended baseline)"
@@ -157,7 +201,6 @@ pub async fn get_attack_playbook(args: &Value) -> anyhow::Result<ToolOutput> {
         }
     }
 
-    // IOC targets
     if !target_users.is_empty() {
         lines.push(format!(
             "\n--- Compromised Accounts ({}) ---",
@@ -194,35 +237,31 @@ pub async fn get_attack_playbook(args: &Value) -> anyhow::Result<ToolOutput> {
         }
     }
 
-    Ok(ToolOutput {
-        stdout: lines.join("\n"),
-        stderr: String::new(),
-        exit_code: Some(0),
-        success: true,
-    })
+    lines.join("\n")
 }
 
-/// Get detection queries specific to a MITRE technique, optionally informed
-/// by red team operation state.
-///
-/// Parameters:
-/// - `technique_id` (required)
-/// - `operation_id` (optional)
-/// - `redis_url` (optional)
-pub async fn get_detection_queries_for_technique(args: &Value) -> anyhow::Result<ToolOutput> {
-    let technique_id = crate::args::required_str(args, "technique_id")?;
-
-    // Normalize
-    let normalized = if technique_id.starts_with('t') || technique_id.starts_with('T') {
+/// Normalize a MITRE technique ID to the standard `T####[.###]` form (just
+/// uppercases the leading `t` if present). Used by the detection-template
+/// lookup path; non-alpha input passes through unchanged.
+pub(crate) fn normalize_technique_id(technique_id: &str) -> String {
+    if technique_id.starts_with('t') || technique_id.starts_with('T') {
         let mut s = technique_id.to_string();
         s.replace_range(0..1, "T");
         s
     } else {
         technique_id.to_string()
-    };
+    }
+}
 
-    // Static technique → detection template mapping
-    let technique_to_queries: HashMap<&str, Vec<(&str, &str)>> = {
+/// Build the static MITRE → detection-template lookup table the playbook
+/// uses for `get_detection_queries_for_technique`. Pulled out so the
+/// lookup logic (exact match → parent-technique fallback) can be unit
+/// tested without round-tripping through the full async tool fn.
+pub(crate) fn detection_templates_for_technique(
+    technique_id: &str,
+) -> Vec<(&'static str, &'static str)> {
+    let normalized = normalize_technique_id(technique_id);
+    let table: HashMap<&'static str, Vec<(&'static str, &'static str)>> = {
         let mut m = HashMap::new();
         m.insert(
             "T1003",
@@ -307,28 +346,40 @@ pub async fn get_detection_queries_for_technique(args: &Value) -> anyhow::Result
         m
     };
 
-    // Try exact match, then parent technique
-    let queries = technique_to_queries.get(normalized.as_str()).or_else(|| {
-        normalized
-            .split('.')
-            .next()
-            .and_then(|parent| technique_to_queries.get(parent))
-    });
+    if let Some(v) = table.get(normalized.as_str()) {
+        return v.clone();
+    }
+    // Parent fallback.
+    if let Some(parent) = normalized.split('.').next() {
+        if let Some(v) = table.get(parent) {
+            return v.clone();
+        }
+    }
+    Vec::new()
+}
+
+/// Get detection queries specific to a MITRE technique, optionally informed
+/// by red team operation state.
+///
+/// Parameters:
+/// - `technique_id` (required)
+/// - `operation_id` (optional)
+/// - `redis_url` (optional)
+pub async fn get_detection_queries_for_technique(args: &Value) -> anyhow::Result<ToolOutput> {
+    let technique_id = crate::args::required_str(args, "technique_id")?;
+    let normalized = normalize_technique_id(technique_id);
+    let queries = detection_templates_for_technique(&normalized);
 
     let mut lines = vec![format!("Detection queries for {normalized}:\n")];
-
-    match queries {
-        Some(query_list) => {
-            for (name, desc) in query_list {
-                lines.push(format!("  run_detection_query(\"{name}\") — {desc}"));
-            }
-        }
-        None => {
-            lines.push("  No specific detection templates for this technique.".to_string());
-            lines.push(
-                "  Try using suggest_techniques or list_detection_templates to find relevant queries."
-                    .to_string(),
-            );
+    if queries.is_empty() {
+        lines.push("  No specific detection templates for this technique.".to_string());
+        lines.push(
+            "  Try using suggest_techniques or list_detection_templates to find relevant queries."
+                .to_string(),
+        );
+    } else {
+        for (name, desc) in &queries {
+            lines.push(format!("  run_detection_query(\"{name}\") — {desc}"));
         }
     }
 
@@ -615,5 +666,255 @@ mod tests {
 
         let (creds, _, _, _) = load_op_collections(&mut conn, "op-test").await;
         assert_eq!(creds.len(), 2);
+    }
+
+    // ── tests for build_playbook_text + extracted helpers ───────────────
+
+    use super::{
+        build_playbook_text, detection_templates_for_technique, extract_techniques_from_loot,
+        extract_users_and_ips_from_creds, normalize_technique_id,
+    };
+    use std::collections::{HashMap, HashSet};
+
+    fn cred_json(user: &str, ip: &str) -> String {
+        json!({ "username": user, "ip": ip }).to_string()
+    }
+
+    // --- extract_users_and_ips_from_creds --------------------------------
+
+    #[test]
+    fn extract_users_ips_basic() {
+        let creds = vec![
+            cred_json("alice", "192.168.58.10"),
+            cred_json("bob", "192.168.58.20"),
+        ];
+        let (users, ips) = extract_users_and_ips_from_creds(&creds);
+        assert_eq!(users, vec!["alice", "bob"]);
+        assert_eq!(ips, vec!["192.168.58.10", "192.168.58.20"]);
+    }
+
+    #[test]
+    fn extract_users_ips_dedupes_in_order() {
+        let creds = vec![
+            cred_json("alice", "192.168.58.10"),
+            cred_json("alice", "192.168.58.10"),
+            cred_json("alice", "192.168.58.20"),
+        ];
+        let (users, ips) = extract_users_and_ips_from_creds(&creds);
+        assert_eq!(users, vec!["alice"]);
+        assert_eq!(ips, vec!["192.168.58.10", "192.168.58.20"]);
+    }
+
+    #[test]
+    fn extract_users_ips_skips_malformed_json() {
+        let creds = vec![
+            "not valid json".to_string(),
+            cred_json("alice", "192.168.58.10"),
+        ];
+        let (users, ips) = extract_users_and_ips_from_creds(&creds);
+        assert_eq!(users, vec!["alice"]);
+        assert_eq!(ips, vec!["192.168.58.10"]);
+    }
+
+    #[test]
+    fn extract_users_ips_handles_missing_fields() {
+        let creds = vec![
+            json!({"password": "P@ss"}).to_string(),
+            json!({"username": "alice"}).to_string(),
+            json!({"ip": "192.168.58.10"}).to_string(),
+        ];
+        let (users, ips) = extract_users_and_ips_from_creds(&creds);
+        assert_eq!(users, vec!["alice"]);
+        assert_eq!(ips, vec!["192.168.58.10"]);
+    }
+
+    // --- extract_techniques_from_loot ------------------------------------
+
+    #[test]
+    fn extract_techniques_dedupes_and_preserves_order() {
+        let loot = vec![
+            json!({"technique": "T1003"}).to_string(),
+            json!({"technique": "T1558.003"}).to_string(),
+            json!({"technique": "T1003"}).to_string(),
+        ];
+        assert_eq!(
+            extract_techniques_from_loot(&loot),
+            vec!["T1003", "T1558.003"]
+        );
+    }
+
+    #[test]
+    fn extract_techniques_skips_malformed_and_missing() {
+        let loot = vec![
+            "{not json".to_string(),
+            json!({"summary": "no technique field"}).to_string(),
+            json!({"technique": "T1110"}).to_string(),
+        ];
+        assert_eq!(extract_techniques_from_loot(&loot), vec!["T1110"]);
+    }
+
+    // --- normalize_technique_id ------------------------------------------
+
+    #[test]
+    fn normalize_lowercases_leading_t() {
+        assert_eq!(normalize_technique_id("t1003"), "T1003");
+        assert_eq!(normalize_technique_id("T1003"), "T1003");
+        assert_eq!(normalize_technique_id("t1558.003"), "T1558.003");
+    }
+
+    #[test]
+    fn normalize_passes_through_unknown_prefix() {
+        // Non-`t` input is returned unchanged.
+        assert_eq!(normalize_technique_id("1003"), "1003");
+        assert_eq!(normalize_technique_id(""), "");
+    }
+
+    // --- detection_templates_for_technique -------------------------------
+
+    #[test]
+    fn detection_templates_exact_match() {
+        let v = detection_templates_for_technique("T1558.003");
+        assert!(v.iter().any(|(n, _)| *n == "detect_kerberoasting"));
+    }
+
+    #[test]
+    fn detection_templates_normalizes_lowercase_t() {
+        let v = detection_templates_for_technique("t1558.003");
+        assert!(v.iter().any(|(n, _)| *n == "detect_kerberoasting"));
+    }
+
+    #[test]
+    fn detection_templates_parent_fallback() {
+        // T1003.999 doesn't exist — fall back to T1003.
+        let v = detection_templates_for_technique("T1003.999");
+        assert!(v.iter().any(|(n, _)| *n == "detect_secretsdump"));
+    }
+
+    #[test]
+    fn detection_templates_unknown_returns_empty() {
+        assert!(detection_templates_for_technique("T9999").is_empty());
+    }
+
+    #[test]
+    fn detection_templates_subtechnique_takes_precedence_over_parent() {
+        // T1003.006 has its own entry — should not fall back to T1003.
+        let v = detection_templates_for_technique("T1003.006");
+        assert!(v.iter().any(|(n, _)| *n == "detect_dcsync_replication"));
+        // T1003 has detect_lsa_secrets_access; T1003.006 does not.
+        assert!(!v.iter().any(|(n, _)| *n == "detect_lsa_secrets_access"));
+    }
+
+    // --- build_playbook_text ---------------------------------------------
+
+    fn empty_state() -> (
+        Vec<String>,
+        HashSet<String>,
+        Vec<String>,
+        HashMap<String, String>,
+    ) {
+        (Vec::new(), HashSet::new(), Vec::new(), HashMap::new())
+    }
+
+    #[test]
+    fn playbook_text_header_includes_op_id() {
+        let (c, h, l, m) = empty_state();
+        let text = build_playbook_text("op-abc", &c, &h, &l, &m);
+        assert!(text.contains("=== Detection Playbook for Operation op-abc ==="));
+    }
+
+    #[test]
+    fn playbook_text_emits_baseline_queries_when_no_loot() {
+        let (c, h, l, m) = empty_state();
+        let text = build_playbook_text("op-abc", &c, &h, &l, &m);
+        // First five technique_queries become MEDIUM baseline regardless.
+        let medium_count = text.matches("MEDIUM (recommended baseline)").count();
+        assert_eq!(medium_count, 5);
+        assert!(text.contains("detect_dcsync"));
+        assert!(text.contains("detect_secretsdump"));
+    }
+
+    #[test]
+    fn playbook_text_promotes_confirmed_techniques_to_high() {
+        let (mut c, h, mut l, m) = empty_state();
+        // ADCS exploitation is the 9th in the list; without confirmation
+        // it stays out of the baseline-5 cut.
+        l.push(json!({"technique": "T1649.001"}).to_string());
+        c.push(cred_json("alice", "192.168.58.10"));
+        let text = build_playbook_text("op-abc", &c, &h, &l, &m);
+        assert!(text.contains("[HIGH (confirmed red team technique)] detect_adcs_exploitation"));
+    }
+
+    #[test]
+    fn playbook_text_emits_meta_lines_when_present() {
+        let (c, h, l, mut m) = empty_state();
+        m.insert("started_at".into(), "2025-01-28T12:00:00Z".into());
+        m.insert("domain".into(), "contoso.local".into());
+        let text = build_playbook_text("op-abc", &c, &h, &l, &m);
+        assert!(text.contains("Operation started: 2025-01-28T12:00:00Z"));
+        assert!(text.contains("Target domain: contoso.local"));
+    }
+
+    #[test]
+    fn playbook_text_lists_compromised_accounts_when_creds_present() {
+        let (mut c, h, l, m) = empty_state();
+        c.push(cred_json("alice", "192.168.58.10"));
+        c.push(cred_json("bob", "192.168.58.20"));
+        let text = build_playbook_text("op-abc", &c, &h, &l, &m);
+        assert!(text.contains("--- Compromised Accounts (2) ---"));
+        assert!(text.contains("  alice"));
+        assert!(text.contains("  bob"));
+        assert!(text.contains("--- Target IPs (2) ---"));
+    }
+
+    #[test]
+    fn playbook_text_caps_users_at_twenty() {
+        let (mut c, h, l, m) = empty_state();
+        for i in 0..25 {
+            c.push(cred_json(
+                &format!("user{i:02}"),
+                &format!("192.168.58.{}", i + 1),
+            ));
+        }
+        let text = build_playbook_text("op-abc", &c, &h, &l, &m);
+        // Header should show 25, but the rendered list takes only 20.
+        assert!(text.contains("--- Compromised Accounts (25) ---"));
+        let user_lines = text.lines().filter(|l| l.starts_with("  user")).count();
+        assert_eq!(user_lines, 20);
+    }
+
+    #[test]
+    fn playbook_text_lists_hosts_sorted() {
+        let (c, mut h, l, m) = empty_state();
+        h.insert("web01.contoso.local".into());
+        h.insert("dc01.contoso.local".into());
+        h.insert("sql01.contoso.local".into());
+        let text = build_playbook_text("op-abc", &c, &h, &l, &m);
+        let host_section_pos = text.find("--- Discovered Hosts (3)").unwrap();
+        let section = &text[host_section_pos..];
+        let dc_pos = section.find("dc01").unwrap();
+        let sql_pos = section.find("sql01").unwrap();
+        let web_pos = section.find("web01").unwrap();
+        assert!(dc_pos < sql_pos && sql_pos < web_pos);
+    }
+
+    #[test]
+    fn playbook_text_lists_techniques_when_loot_has_them() {
+        let (c, h, mut l, m) = empty_state();
+        l.push(json!({"technique": "T1003"}).to_string());
+        l.push(json!({"technique": "T1558.003"}).to_string());
+        let text = build_playbook_text("op-abc", &c, &h, &l, &m);
+        assert!(text.contains("--- Techniques Used (2) ---"));
+        assert!(text.contains("  T1003"));
+        assert!(text.contains("  T1558.003"));
+    }
+
+    #[test]
+    fn playbook_text_omits_empty_sections() {
+        let (c, h, l, m) = empty_state();
+        let text = build_playbook_text("op-abc", &c, &h, &l, &m);
+        assert!(!text.contains("--- Compromised Accounts"));
+        assert!(!text.contains("--- Target IPs"));
+        assert!(!text.contains("--- Discovered Hosts"));
+        assert!(!text.contains("--- Techniques Used"));
     }
 }

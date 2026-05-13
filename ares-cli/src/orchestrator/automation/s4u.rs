@@ -11,12 +11,13 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use serde_json::json;
+use serde_json::{json, Value};
 use tokio::sync::watch;
 use tokio::time::Instant;
 use tracing::{debug, info, warn};
 
 use crate::orchestrator::dispatcher::Dispatcher;
+use crate::orchestrator::state::StateInner;
 
 /// Cooldown after a failed S4U attempt before retrying the same vuln.
 /// Set to 5 minutes to wait for AD account lockout to expire.
@@ -134,151 +135,12 @@ pub async fn auto_s4u_exploitation(
                 continue;
             }
 
-            state
-                .discovered_vulnerabilities
-                .values()
-                .filter_map(|vuln| {
-                    let vtype = vuln.vuln_type.to_lowercase();
-                    if vtype != "constrained_delegation" && vtype != "rbcd" {
-                        return None;
-                    }
-
-                    // Already exploited?
-                    if state.exploited_vulnerabilities.contains(&vuln.vuln_id) {
-                        return None;
-                    }
-
-                    // Check dispatch cooldown — skip if recently dispatched and failed
-                    if let Some((last_time, failures)) = dispatch_tracker.get(&vuln.vuln_id) {
-                        if *failures >= S4U_MAX_FAILURES {
-                            debug!(
-                                vuln_id = %vuln.vuln_id,
-                                failures = *failures,
-                                "S4U skipped: max failures reached"
-                            );
-                            return None;
-                        }
-                        if last_time.elapsed() < S4U_FAILURE_COOLDOWN {
-                            return None; // Still in cooldown
-                        }
-                    }
-
-                    // Extract the delegating account name from details
-                    let account_name = vuln
-                        .details
-                        .get("account_name")
-                        .and_then(|v| v.as_str())
-                        .or_else(|| vuln.details.get("AccountName").and_then(|v| v.as_str()))
-                        .map(|s| s.to_string());
-
-                    let target_spn = vuln
-                        .details
-                        .get("delegation_target")
-                        .and_then(|v| v.as_str())
-                        .or_else(|| {
-                            vuln.details
-                                .get("AllowedToDelegate")
-                                .and_then(|v| v.as_str())
-                        })
-                        .map(|s| s.to_string());
-
-                    // Find a credential or hash for the delegating account
-                    let credential = account_name.as_ref().and_then(|acct| {
-                        state
-                            .credentials
-                            .iter()
-                            .find(|c| c.username.to_lowercase() == acct.to_lowercase())
-                            .cloned()
-                    });
-
-                    let hash = account_name.as_ref().and_then(|acct| {
-                        state
-                            .hashes
-                            .iter()
-                            .find(|h| {
-                                h.username.to_lowercase() == acct.to_lowercase()
-                                    && h.hash_type.to_uppercase() == "NTLM"
-                            })
-                            .cloned()
-                    });
-
-                    // Need at least a credential or hash to perform S4U
-                    if credential.is_none() && hash.is_none() {
-                        debug!(
-                            vuln_id = %vuln.vuln_id,
-                            vuln_type = %vuln.vuln_type,
-                            account = ?account_name,
-                            "S4U skipped: no credential or hash for delegating account"
-                        );
-                        return None;
-                    }
-
-                    // Resolve domain and DC IP
-                    let domain = credential
-                        .as_ref()
-                        .map(|c| c.domain.clone())
-                        .or_else(|| hash.as_ref().map(|h| h.domain.clone()))
-                        .unwrap_or_default();
-
-                    let dc_ip = state
-                        .domain_controllers
-                        .get(&domain.to_lowercase())
-                        .cloned();
-
-                    Some(S4uWork {
-                        vuln: vuln.clone(),
-                        credential,
-                        hash,
-                        target_spn,
-                        domain,
-                        dc_ip,
-                    })
-                })
-                .collect()
+            select_s4u_work_items(&state, &dispatch_tracker, Instant::now())
         };
 
         for item in work {
-            let mut payload = json!({
-                "technique": "s4u_attack",
-                "vuln_type": item.vuln.vuln_type,
-                "target": item.vuln.target,
-                "domain": item.domain,
-                "impersonate": "Administrator",
-            });
-
-            if let Some(ref spn) = item.target_spn {
-                payload["target_spn"] = json!(spn);
-            }
-            if let Some(ref dc) = item.dc_ip {
-                payload["target_ip"] = json!(dc);
-            }
-
-            // Attach credential or hash — provide both flat fields (for prompt
-            // builders) and nested credential object (for structured extraction).
-            if let Some(ref cred) = item.credential {
-                payload["username"] = json!(cred.username);
-                payload["password"] = json!(cred.password);
-                payload["account_name"] = json!(cred.username);
-                payload["credential"] = json!({
-                    "username": cred.username,
-                    "password": cred.password,
-                    "domain": cred.domain,
-                });
-            } else if let Some(ref hash) = item.hash {
-                payload["hash"] = json!(hash.hash_value);
-                payload["username"] = json!(hash.username);
-                payload["auth_method"] = json!("hash");
-                payload["note"] = json!(
-                    "Use --hashes with the NTLM hash for authentication. Do NOT pass an empty password or impacket will prompt interactively and crash."
-                );
-                if let Some(ref aes) = hash.aes_key {
-                    payload["aes_key"] = json!(aes);
-                }
-            }
-
             let vuln_id = item.vuln.vuln_id.clone();
-            // Attach vuln_id so result processing can mark_exploited on success
-            payload["vuln_id"] = json!(&vuln_id);
+            let payload = build_s4u_payload(&item);
 
             // Priority 10 = highest — S4U must run before other agents use the
             // credential and potentially lock out the account.
@@ -314,13 +176,162 @@ pub async fn auto_s4u_exploitation(
     }
 }
 
-struct S4uWork {
-    vuln: ares_core::models::VulnerabilityInfo,
-    credential: Option<ares_core::models::Credential>,
-    hash: Option<ares_core::models::Hash>,
-    target_spn: Option<String>,
-    domain: String,
-    dc_ip: Option<String>,
+pub(crate) struct S4uWork {
+    pub vuln: ares_core::models::VulnerabilityInfo,
+    pub credential: Option<ares_core::models::Credential>,
+    pub hash: Option<ares_core::models::Hash>,
+    pub target_spn: Option<String>,
+    pub domain: String,
+    pub dc_ip: Option<String>,
+}
+
+/// Build the work queue of S4U attacks to dispatch this tick.
+///
+/// Iterates `state.discovered_vulnerabilities`, keeping only
+/// constrained-delegation / RBCD vulns that are not already exploited,
+/// not in dispatch cooldown, and have a credential or NTLM hash for the
+/// delegating account. The result is consumed by the dispatch loop in
+/// [`auto_s4u_exploitation`].
+///
+/// Extracted from the inline closure for unit testing — the filter has
+/// many overlapping gates (vuln type, exploited set, failure tracker,
+/// cooldown, account name extraction, credential matching) and asserting
+/// each one against a synthetic state is dramatically simpler than
+/// stubbing the entire Dispatcher.
+pub(crate) fn select_s4u_work_items(
+    state: &StateInner,
+    dispatch_tracker: &HashMap<String, (Instant, u32)>,
+    now: Instant,
+) -> Vec<S4uWork> {
+    state
+        .discovered_vulnerabilities
+        .values()
+        .filter_map(|vuln| {
+            let vtype = vuln.vuln_type.to_lowercase();
+            if vtype != "constrained_delegation" && vtype != "rbcd" {
+                return None;
+            }
+
+            if state.exploited_vulnerabilities.contains(&vuln.vuln_id) {
+                return None;
+            }
+
+            if let Some((last_time, failures)) = dispatch_tracker.get(&vuln.vuln_id) {
+                if *failures >= S4U_MAX_FAILURES {
+                    return None;
+                }
+                if now.duration_since(*last_time) < S4U_FAILURE_COOLDOWN {
+                    return None;
+                }
+            }
+
+            let account_name = vuln
+                .details
+                .get("account_name")
+                .and_then(|v| v.as_str())
+                .or_else(|| vuln.details.get("AccountName").and_then(|v| v.as_str()))
+                .map(|s| s.to_string());
+
+            let target_spn = vuln
+                .details
+                .get("delegation_target")
+                .and_then(|v| v.as_str())
+                .or_else(|| {
+                    vuln.details
+                        .get("AllowedToDelegate")
+                        .and_then(|v| v.as_str())
+                })
+                .map(|s| s.to_string());
+
+            let credential = account_name.as_ref().and_then(|acct| {
+                state
+                    .credentials
+                    .iter()
+                    .find(|c| c.username.to_lowercase() == acct.to_lowercase())
+                    .cloned()
+            });
+
+            let hash = account_name.as_ref().and_then(|acct| {
+                state
+                    .hashes
+                    .iter()
+                    .find(|h| {
+                        h.username.to_lowercase() == acct.to_lowercase()
+                            && h.hash_type.to_uppercase() == "NTLM"
+                    })
+                    .cloned()
+            });
+
+            if credential.is_none() && hash.is_none() {
+                return None;
+            }
+
+            let domain = credential
+                .as_ref()
+                .map(|c| c.domain.clone())
+                .or_else(|| hash.as_ref().map(|h| h.domain.clone()))
+                .unwrap_or_default();
+
+            let dc_ip = state
+                .domain_controllers
+                .get(&domain.to_lowercase())
+                .cloned();
+
+            Some(S4uWork {
+                vuln: vuln.clone(),
+                credential,
+                hash,
+                target_spn,
+                domain,
+                dc_ip,
+            })
+        })
+        .collect()
+}
+
+/// Build the JSON payload submitted to the `exploit` queue for a single
+/// S4U attack. Pure — no dispatcher, no IO. Always emits flat fields and
+/// — when a credential is attached — a nested `credential` object so
+/// downstream structured extraction picks it up.
+pub(crate) fn build_s4u_payload(item: &S4uWork) -> Value {
+    let mut payload = json!({
+        "technique": "s4u_attack",
+        "vuln_type": item.vuln.vuln_type,
+        "target": item.vuln.target,
+        "domain": item.domain,
+        "impersonate": "Administrator",
+    });
+
+    if let Some(ref spn) = item.target_spn {
+        payload["target_spn"] = json!(spn);
+    }
+    if let Some(ref dc) = item.dc_ip {
+        payload["target_ip"] = json!(dc);
+    }
+
+    if let Some(ref cred) = item.credential {
+        payload["username"] = json!(cred.username);
+        payload["password"] = json!(cred.password);
+        payload["account_name"] = json!(cred.username);
+        payload["credential"] = json!({
+            "username": cred.username,
+            "password": cred.password,
+            "domain": cred.domain,
+        });
+    } else if let Some(ref hash) = item.hash {
+        payload["hash"] = json!(hash.hash_value);
+        payload["username"] = json!(hash.username);
+        payload["auth_method"] = json!("hash");
+        payload["note"] = json!(
+            "Use --hashes with the NTLM hash for authentication. Do NOT pass an empty password or impacket will prompt interactively and crash."
+        );
+        if let Some(ref aes) = hash.aes_key {
+            payload["aes_key"] = json!(aes);
+        }
+    }
+
+    payload["vuln_id"] = json!(item.vuln.vuln_id);
+    payload
 }
 
 /// Check whether a task result matches any of the given error patterns.
@@ -598,5 +609,360 @@ mod tests {
             completed_at: Utc::now(),
         };
         assert!(!should_reset_failure_count(&tr));
+    }
+
+    // -- helpers for select_s4u_work_items / build_s4u_payload tests --
+
+    fn make_delegation_vuln(
+        vuln_id: &str,
+        vuln_type: &str,
+        account_name: Option<&str>,
+        target_spn: Option<&str>,
+    ) -> ares_core::models::VulnerabilityInfo {
+        let mut details = std::collections::HashMap::new();
+        if let Some(a) = account_name {
+            details.insert("account_name".into(), json!(a));
+        }
+        if let Some(s) = target_spn {
+            details.insert("delegation_target".into(), json!(s));
+        }
+        ares_core::models::VulnerabilityInfo {
+            vuln_id: vuln_id.to_string(),
+            vuln_type: vuln_type.to_string(),
+            target: "192.168.58.50".to_string(),
+            discovered_by: "test".to_string(),
+            discovered_at: Utc::now(),
+            details,
+            recommended_agent: String::new(),
+            priority: 1,
+        }
+    }
+
+    fn make_cred(user: &str, password: &str, domain: &str) -> ares_core::models::Credential {
+        ares_core::models::Credential {
+            id: format!("c-{user}"),
+            username: user.to_string(),
+            password: password.to_string(),
+            domain: domain.to_string(),
+            source: String::new(),
+            discovered_at: None,
+            is_admin: false,
+            parent_id: None,
+            attack_step: 0,
+        }
+    }
+
+    fn make_hash(user: &str, value: &str, domain: &str) -> ares_core::models::Hash {
+        ares_core::models::Hash {
+            id: format!("h-{user}"),
+            username: user.to_string(),
+            hash_value: value.to_string(),
+            hash_type: "NTLM".to_string(),
+            domain: domain.to_string(),
+            cracked_password: None,
+            source: String::new(),
+            discovered_at: None,
+            parent_id: None,
+            attack_step: 0,
+            aes_key: None,
+            is_previous: false,
+            source_host: None,
+            is_trust_key: false,
+            trust_pair_label: None,
+        }
+    }
+
+    // --- select_s4u_work_items -------------------------------------------
+
+    #[test]
+    fn select_skips_non_delegation_vuln_types() {
+        let mut s = StateInner::new("op-test".into());
+        let v = make_delegation_vuln(
+            "v-kerberoast",
+            "kerberoastable_account",
+            Some("svc_sql"),
+            None,
+        );
+        s.discovered_vulnerabilities.insert(v.vuln_id.clone(), v);
+        s.credentials
+            .push(make_cred("svc_sql", "Pw!", "contoso.local"));
+        let work = select_s4u_work_items(&s, &HashMap::new(), Instant::now());
+        assert!(work.is_empty());
+    }
+
+    #[test]
+    fn select_skips_already_exploited_vuln() {
+        let mut s = StateInner::new("op-test".into());
+        let v = make_delegation_vuln(
+            "v-constdeleg-svc_sql",
+            "constrained_delegation",
+            Some("svc_sql"),
+            None,
+        );
+        s.discovered_vulnerabilities.insert(v.vuln_id.clone(), v);
+        s.exploited_vulnerabilities
+            .insert("v-constdeleg-svc_sql".into());
+        s.credentials
+            .push(make_cred("svc_sql", "Pw!", "contoso.local"));
+        assert!(select_s4u_work_items(&s, &HashMap::new(), Instant::now()).is_empty());
+    }
+
+    #[test]
+    fn select_skips_vuln_at_max_failures() {
+        let mut s = StateInner::new("op-test".into());
+        let v = make_delegation_vuln(
+            "v-rbcd-svc_web",
+            "rbcd",
+            Some("svc_web"),
+            Some("CIFS/host.contoso.local"),
+        );
+        s.discovered_vulnerabilities.insert(v.vuln_id.clone(), v);
+        s.credentials
+            .push(make_cred("svc_web", "Pw!", "contoso.local"));
+        let mut tracker = HashMap::new();
+        tracker.insert("v-rbcd-svc_web".into(), (Instant::now(), S4U_MAX_FAILURES));
+        assert!(select_s4u_work_items(&s, &tracker, Instant::now()).is_empty());
+    }
+
+    #[test]
+    fn select_respects_cooldown_window() {
+        let mut s = StateInner::new("op-test".into());
+        let v = make_delegation_vuln("v-rbcd-svc_web", "rbcd", Some("svc_web"), None);
+        s.discovered_vulnerabilities.insert(v.vuln_id.clone(), v);
+        s.credentials
+            .push(make_cred("svc_web", "Pw!", "contoso.local"));
+        let now = Instant::now();
+        let mut tracker = HashMap::new();
+        // Failure 5s ago — well within the 5-minute cooldown.
+        tracker.insert("v-rbcd-svc_web".into(), (now - Duration::from_secs(5), 2));
+        assert!(select_s4u_work_items(&s, &tracker, now).is_empty());
+    }
+
+    #[test]
+    fn select_allows_after_cooldown_expires() {
+        let mut s = StateInner::new("op-test".into());
+        let v = make_delegation_vuln("v-rbcd-svc_web", "rbcd", Some("svc_web"), None);
+        s.discovered_vulnerabilities.insert(v.vuln_id.clone(), v);
+        s.credentials
+            .push(make_cred("svc_web", "Pw!", "contoso.local"));
+        let now = Instant::now();
+        let mut tracker = HashMap::new();
+        tracker.insert(
+            "v-rbcd-svc_web".into(),
+            (now - (S4U_FAILURE_COOLDOWN + Duration::from_secs(1)), 2),
+        );
+        let work = select_s4u_work_items(&s, &tracker, now);
+        assert_eq!(work.len(), 1);
+        assert_eq!(work[0].vuln.vuln_id, "v-rbcd-svc_web");
+    }
+
+    #[test]
+    fn select_skips_when_no_credential_or_hash_available() {
+        let mut s = StateInner::new("op-test".into());
+        let v = make_delegation_vuln(
+            "v-constdeleg-svc_sql",
+            "constrained_delegation",
+            Some("svc_sql"),
+            None,
+        );
+        s.discovered_vulnerabilities.insert(v.vuln_id.clone(), v);
+        // No matching credential or hash.
+        assert!(select_s4u_work_items(&s, &HashMap::new(), Instant::now()).is_empty());
+    }
+
+    #[test]
+    fn select_uses_capitalized_account_name_fallback() {
+        let mut s = StateInner::new("op-test".into());
+        let mut details = std::collections::HashMap::new();
+        details.insert("AccountName".into(), json!("svc_sql"));
+        details.insert("AllowedToDelegate".into(), json!("CIFS/host.contoso.local"));
+        let v = ares_core::models::VulnerabilityInfo {
+            vuln_id: "v-cap".into(),
+            vuln_type: "constrained_delegation".into(),
+            target: "192.168.58.50".into(),
+            discovered_by: "test".into(),
+            discovered_at: Utc::now(),
+            details,
+            recommended_agent: String::new(),
+            priority: 1,
+        };
+        s.discovered_vulnerabilities.insert(v.vuln_id.clone(), v);
+        s.credentials
+            .push(make_cred("svc_sql", "Pw!", "contoso.local"));
+        let work = select_s4u_work_items(&s, &HashMap::new(), Instant::now());
+        assert_eq!(work.len(), 1);
+        assert_eq!(
+            work[0].target_spn.as_deref(),
+            Some("CIFS/host.contoso.local")
+        );
+    }
+
+    #[test]
+    fn select_picks_credential_case_insensitively() {
+        let mut s = StateInner::new("op-test".into());
+        let v = make_delegation_vuln("v-rbcd-SvcSql", "rbcd", Some("SvcSql"), None);
+        s.discovered_vulnerabilities.insert(v.vuln_id.clone(), v);
+        s.credentials
+            .push(make_cred("svcsql", "Pw!", "contoso.local"));
+        let work = select_s4u_work_items(&s, &HashMap::new(), Instant::now());
+        assert_eq!(work.len(), 1);
+        assert_eq!(work[0].credential.as_ref().unwrap().username, "svcsql");
+    }
+
+    #[test]
+    fn select_falls_back_to_ntlm_hash_when_no_password_cred() {
+        let mut s = StateInner::new("op-test".into());
+        let v = make_delegation_vuln("v-rbcd-svc", "rbcd", Some("svc"), None);
+        s.discovered_vulnerabilities.insert(v.vuln_id.clone(), v);
+        s.hashes.push(make_hash("svc", "deadbeef", "contoso.local"));
+        let work = select_s4u_work_items(&s, &HashMap::new(), Instant::now());
+        assert_eq!(work.len(), 1);
+        assert!(work[0].credential.is_none());
+        assert!(work[0].hash.is_some());
+        assert_eq!(work[0].domain, "contoso.local");
+    }
+
+    #[test]
+    fn select_skips_non_ntlm_hashes() {
+        let mut s = StateInner::new("op-test".into());
+        let v = make_delegation_vuln("v-rbcd-svc", "rbcd", Some("svc"), None);
+        s.discovered_vulnerabilities.insert(v.vuln_id.clone(), v);
+        let mut h = make_hash("svc", "deadbeef", "contoso.local");
+        h.hash_type = "AES256".into();
+        s.hashes.push(h);
+        assert!(select_s4u_work_items(&s, &HashMap::new(), Instant::now()).is_empty());
+    }
+
+    #[test]
+    fn select_populates_dc_ip_from_domain_controllers() {
+        let mut s = StateInner::new("op-test".into());
+        let v = make_delegation_vuln("v-rbcd-svc", "rbcd", Some("svc"), None);
+        s.discovered_vulnerabilities.insert(v.vuln_id.clone(), v);
+        s.credentials.push(make_cred("svc", "Pw!", "contoso.local"));
+        s.domain_controllers
+            .insert("contoso.local".into(), "192.168.58.10".into());
+        let work = select_s4u_work_items(&s, &HashMap::new(), Instant::now());
+        assert_eq!(work[0].dc_ip.as_deref(), Some("192.168.58.10"));
+    }
+
+    #[test]
+    fn select_skips_vuln_without_account_name() {
+        let mut s = StateInner::new("op-test".into());
+        let v = make_delegation_vuln(
+            "v-rbcd-no-acct",
+            "rbcd",
+            None,
+            Some("CIFS/host.contoso.local"),
+        );
+        s.discovered_vulnerabilities.insert(v.vuln_id.clone(), v);
+        // No account_name → can't match a credential → skipped.
+        assert!(select_s4u_work_items(&s, &HashMap::new(), Instant::now()).is_empty());
+    }
+
+    #[test]
+    fn select_accepts_constrained_delegation_and_rbcd_only() {
+        let mut s = StateInner::new("op-test".into());
+        let cd = make_delegation_vuln("v-cd", "Constrained_Delegation", Some("svc1"), None);
+        let rbcd = make_delegation_vuln("v-rb", "RBCD", Some("svc2"), None);
+        s.discovered_vulnerabilities.insert(cd.vuln_id.clone(), cd);
+        s.discovered_vulnerabilities
+            .insert(rbcd.vuln_id.clone(), rbcd);
+        s.credentials
+            .push(make_cred("svc1", "Pw1", "contoso.local"));
+        s.credentials
+            .push(make_cred("svc2", "Pw2", "contoso.local"));
+        let work = select_s4u_work_items(&s, &HashMap::new(), Instant::now());
+        assert_eq!(work.len(), 2);
+    }
+
+    // --- build_s4u_payload -----------------------------------------------
+
+    fn work_with_credential() -> S4uWork {
+        let vuln = make_delegation_vuln(
+            "v-cd",
+            "constrained_delegation",
+            Some("svc_sql"),
+            Some("CIFS/dc01.contoso.local"),
+        );
+        S4uWork {
+            vuln,
+            credential: Some(make_cred("svc_sql", "P@ssw0rd!", "contoso.local")),
+            hash: None,
+            target_spn: Some("CIFS/dc01.contoso.local".to_string()),
+            domain: "contoso.local".into(),
+            dc_ip: Some("192.168.58.10".into()),
+        }
+    }
+
+    #[test]
+    fn build_payload_emits_credential_fields() {
+        let p = build_s4u_payload(&work_with_credential());
+        assert_eq!(p["technique"], "s4u_attack");
+        assert_eq!(p["vuln_type"], "constrained_delegation");
+        assert_eq!(p["target"], "192.168.58.50");
+        assert_eq!(p["domain"], "contoso.local");
+        assert_eq!(p["impersonate"], "Administrator");
+        assert_eq!(p["target_spn"], "CIFS/dc01.contoso.local");
+        assert_eq!(p["target_ip"], "192.168.58.10");
+        assert_eq!(p["username"], "svc_sql");
+        assert_eq!(p["password"], "P@ssw0rd!");
+        assert_eq!(p["account_name"], "svc_sql");
+        assert_eq!(p["credential"]["username"], "svc_sql");
+        assert_eq!(p["credential"]["domain"], "contoso.local");
+        assert_eq!(p["vuln_id"], "v-cd");
+        assert!(p.get("hash").is_none());
+        assert!(p.get("auth_method").is_none());
+    }
+
+    #[test]
+    fn build_payload_emits_hash_fields_when_no_credential() {
+        let mut w = work_with_credential();
+        w.credential = None;
+        w.hash = Some(make_hash("svc_sql", "deadbeef", "contoso.local"));
+        let p = build_s4u_payload(&w);
+        assert_eq!(p["username"], "svc_sql");
+        assert_eq!(p["hash"], "deadbeef");
+        assert_eq!(p["auth_method"], "hash");
+        assert!(p["note"].as_str().unwrap().contains("--hashes"));
+        assert!(p.get("password").is_none());
+        assert!(p.get("credential").is_none());
+    }
+
+    #[test]
+    fn build_payload_includes_aes_key_from_hash() {
+        let mut w = work_with_credential();
+        w.credential = None;
+        let mut h = make_hash("svc_sql", "deadbeef", "contoso.local");
+        h.aes_key = Some("a".repeat(64));
+        w.hash = Some(h);
+        let p = build_s4u_payload(&w);
+        assert_eq!(p["aes_key"], "a".repeat(64));
+    }
+
+    #[test]
+    fn build_payload_omits_target_spn_when_unknown() {
+        let mut w = work_with_credential();
+        w.target_spn = None;
+        let p = build_s4u_payload(&w);
+        assert!(p.get("target_spn").is_none());
+    }
+
+    #[test]
+    fn build_payload_omits_target_ip_when_no_dc_ip() {
+        let mut w = work_with_credential();
+        w.dc_ip = None;
+        let p = build_s4u_payload(&w);
+        assert!(p.get("target_ip").is_none());
+    }
+
+    #[test]
+    fn build_payload_prefers_credential_over_hash() {
+        let mut w = work_with_credential();
+        // Both present — credential branch must win and hash field must not appear.
+        w.hash = Some(make_hash("svc_sql", "deadbeef", "contoso.local"));
+        let p = build_s4u_payload(&w);
+        assert_eq!(p["password"], "P@ssw0rd!");
+        assert!(p.get("hash").is_none());
+        assert!(p.get("auth_method").is_none());
     }
 }

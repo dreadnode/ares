@@ -16,13 +16,13 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
-use serde_json::json;
+use serde_json::{json, Value};
 use tokio::sync::watch;
 use tokio::time::Instant;
 use tracing::{debug, info, warn};
 
 use crate::orchestrator::dispatcher::Dispatcher;
-use crate::orchestrator::state::DEDUP_COERCED_DCS;
+use crate::orchestrator::state::{StateInner, DEDUP_COERCED_DCS};
 
 /// Delay after coercion before dispatching the first TGT dump, giving the
 /// coerced authentication time to complete and the TGT to land in LSASS.
@@ -81,11 +81,239 @@ fn skip_self_coerce_loop(
 // Phase tracking (in-memory only — intentionally not persisted so restarts
 // re-trigger the chain, since cached TGTs expire quickly).
 #[derive(Debug)]
-struct PhaseState {
-    coercion_dispatched_at: Option<Instant>,
-    dump_attempts: u32,
-    last_dump_at: Option<Instant>,
-    completed: bool,
+pub(crate) struct PhaseState {
+    pub coercion_dispatched_at: Option<Instant>,
+    pub dump_attempts: u32,
+    pub last_dump_at: Option<Instant>,
+    pub completed: bool,
+}
+
+/// Look up the IP of the unconstrained-delegation machine account by
+/// matching its trailing-`$` prefix against `state.hosts`. Returns `None`
+/// when no host has a matching short hostname or FQDN.
+///
+/// Extracted so the prefix-vs-FQDN match (and the "must not match a
+/// longer-name host" guard — e.g. `DC01$` must not match `dc011`) can
+/// be tested directly.
+pub(crate) fn find_host_ip_for_machine_account(
+    state: &StateInner,
+    account_name: &str,
+) -> Option<String> {
+    let prefix = account_name.trim_end_matches('$').to_lowercase();
+    state.hosts.iter().find_map(|h| {
+        let h_lower = h.hostname.to_lowercase();
+        if h_lower == prefix || h_lower.starts_with(&format!("{prefix}.")) {
+            Some(h.ip.clone())
+        } else {
+            None
+        }
+    })
+}
+
+/// Select unconstrained-delegation work items to dispatch this tick.
+///
+/// Mirrors the inline filter previously buried in `auto_unconstrained_exploitation`.
+/// Extracted so the phase-state state machine (no phase → Coerce or Dump,
+/// post-coercion delay → Dump, post-dump retry cap & cooldown) can be
+/// unit-tested without a Dispatcher.
+pub(crate) fn select_unconstrained_work_items(
+    state: &StateInner,
+    phases: &HashMap<String, PhaseState>,
+    now: Instant,
+) -> Vec<UnconstrainedWork> {
+    state
+        .discovered_vulnerabilities
+        .values()
+        .filter_map(|vuln| {
+            if vuln.vuln_type.to_lowercase() != "unconstrained_delegation" {
+                return None;
+            }
+            if state.exploited_vulnerabilities.contains(&vuln.vuln_id) {
+                return None;
+            }
+
+            let account_name = vuln
+                .details
+                .get("account_name")
+                .and_then(|v| v.as_str())?
+                .to_string();
+
+            let domain = vuln
+                .details
+                .get("domain")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+
+            if phases.get(&vuln.vuln_id).is_some_and(|p| p.completed) {
+                return None;
+            }
+
+            let is_machine = account_name.ends_with('$');
+
+            let dc_ip = state
+                .domain_controllers
+                .get(&domain.to_lowercase())
+                .cloned();
+
+            let host_ip = if is_machine {
+                find_host_ip_for_machine_account(state, &account_name)?
+            } else {
+                dc_ip.as_ref().cloned()?
+            };
+
+            if skip_self_coerce_loop(
+                &vuln.vuln_id,
+                is_machine,
+                dc_ip.as_deref(),
+                &host_ip,
+                &domain.to_lowercase(),
+                &state.dominated_domains,
+            ) {
+                return None;
+            }
+
+            let credential = state
+                .credentials
+                .iter()
+                .find(|c| {
+                    !c.password.is_empty()
+                        && c.domain.to_lowercase() == domain.to_lowercase()
+                        && !state.is_principal_quarantined(&c.username, &c.domain)
+                })
+                .cloned();
+
+            credential.as_ref()?;
+
+            if !is_machine {
+                let dedup_key = format!("uc_user:{}", account_name.to_lowercase());
+                return Some(UnconstrainedWork {
+                    vuln_id: vuln.vuln_id.clone(),
+                    account_name,
+                    domain,
+                    host_ip,
+                    dc_ip,
+                    credential,
+                    action: Action::LlmExploit,
+                    _dedup_key: Some(dedup_key),
+                });
+            }
+
+            let phase = phases.get(&vuln.vuln_id);
+            let already_coerced = dc_ip
+                .as_ref()
+                .is_some_and(|ip| state.is_processed(DEDUP_COERCED_DCS, ip));
+
+            let action = match phase {
+                None if already_coerced => Action::Dump,
+                None if dc_ip.is_some() => Action::Coerce,
+                None => return None,
+
+                Some(p)
+                    if p.coercion_dispatched_at.is_some()
+                        && p.dump_attempts == 0
+                        && now.duration_since(p.coercion_dispatched_at.unwrap())
+                            >= COERCE_TO_DUMP_DELAY =>
+                {
+                    Action::Dump
+                }
+
+                Some(p)
+                    if p.dump_attempts > 0
+                        && p.dump_attempts < MAX_DUMP_ATTEMPTS
+                        && p.last_dump_at
+                            .is_none_or(|t| now.duration_since(t) >= DUMP_RETRY_DELAY) =>
+                {
+                    Action::Dump
+                }
+
+                _ => return None,
+            };
+
+            Some(UnconstrainedWork {
+                vuln_id: vuln.vuln_id.clone(),
+                account_name,
+                domain,
+                host_ip,
+                dc_ip,
+                credential,
+                action,
+                _dedup_key: None,
+            })
+        })
+        .collect()
+}
+
+/// Build the coerce-DC-to-host payload for the `coercion` queue. Pure JSON
+/// construction. Caller must ensure `item.credential` and `item.dc_ip` are
+/// `Some(_)` — both are panic-free for `None` (returns `Value::Null`).
+pub(crate) fn build_unconstrained_coerce_payload(item: &UnconstrainedWork) -> Value {
+    let dc_ip = match item.dc_ip.as_ref() {
+        Some(ip) => ip,
+        None => return Value::Null,
+    };
+    let cred = match item.credential.as_ref() {
+        Some(c) => c,
+        None => return Value::Null,
+    };
+    json!({
+        "target_ip": dc_ip,
+        "listener_ip": item.host_ip,
+        "techniques": ["petitpotam", "printerbug"],
+        "credential": {
+            "username": cred.username,
+            "password": cred.password,
+            "domain": cred.domain,
+        },
+        "reason": "unconstrained_delegation_coercion",
+    })
+}
+
+/// Build the LSASS-dump payload for the `exploit` queue. Pure JSON
+/// construction; `Value::Null` when no credential is attached.
+pub(crate) fn build_unconstrained_dump_payload(item: &UnconstrainedWork) -> Value {
+    let cred = match item.credential.as_ref() {
+        Some(c) => c,
+        None => return Value::Null,
+    };
+    json!({
+        "technique": "unconstrained_tgt_dump",
+        "vuln_type": "unconstrained_delegation",
+        "vuln_id": item.vuln_id,
+        "target": item.host_ip,
+        "target_ip": item.host_ip,
+        "domain": item.domain,
+        "account_name": item.account_name,
+        "credential": {
+            "username": cred.username,
+            "password": cred.password,
+            "domain": cred.domain,
+        },
+    })
+}
+
+/// Build the user-account LLM-exploit payload (for non-machine principals).
+/// Pure JSON construction; `Value::Null` when no credential is attached.
+pub(crate) fn build_unconstrained_llm_exploit_payload(item: &UnconstrainedWork) -> Value {
+    let cred = match item.credential.as_ref() {
+        Some(c) => c,
+        None => return Value::Null,
+    };
+    json!({
+        "technique": "unconstrained_delegation_exploit",
+        "vuln_type": "unconstrained_delegation",
+        "vuln_id": item.vuln_id,
+        "target": item.host_ip,
+        "target_ip": item.host_ip,
+        "domain": item.domain,
+        "account_name": item.account_name,
+        "is_user_account": true,
+        "credential": {
+            "username": cred.username,
+            "password": cred.password,
+            "domain": cred.domain,
+        },
+    })
 }
 
 /// Monitors for unconstrained delegation vulns and orchestrates coerce → dump.
@@ -125,196 +353,17 @@ pub async fn auto_unconstrained_exploitation(
                 continue;
             }
 
-            state
-                .discovered_vulnerabilities
-                .values()
-                .filter_map(|vuln| {
-                    if vuln.vuln_type.to_lowercase() != "unconstrained_delegation" {
-                        return None;
-                    }
-                    if state.exploited_vulnerabilities.contains(&vuln.vuln_id) {
-                        return None;
-                    }
-
-                    let account_name = vuln
-                        .details
-                        .get("account_name")
-                        .and_then(|v| v.as_str())?
-                        .to_string();
-
-                    let domain = vuln
-                        .details
-                        .get("domain")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("")
-                        .to_string();
-
-                    // Skip completed vulns
-                    if phases.get(&vuln.vuln_id).is_some_and(|p| p.completed) {
-                        return None;
-                    }
-
-                    // Machine accounts: resolve hostname → IP for coerce+dump chain.
-                    // User accounts: dispatch LLM exploit task since we can't determine
-                    // which host to coerce from just the account name.
-                    let is_machine = account_name.ends_with('$');
-
-                    // Find a DC in the same domain — this is what we coerce FROM.
-                    let dc_ip = state
-                        .domain_controllers
-                        .get(&domain.to_lowercase())
-                        .cloned();
-
-                    let host_ip = if is_machine {
-                        let hostname_prefix = account_name.trim_end_matches('$').to_lowercase();
-                        state.hosts.iter().find_map(|h| {
-                            let h_lower = h.hostname.to_lowercase();
-                            if h_lower == hostname_prefix
-                                || h_lower.starts_with(&format!("{hostname_prefix}."))
-                            {
-                                Some(h.ip.clone())
-                            } else {
-                                None
-                            }
-                        })?
-                    } else {
-                        // For user accounts, use the DC IP as the target — the LLM
-                        // exploit agent will determine the right approach (e.g. find
-                        // where the user is logged in, or use S4U).
-                        dc_ip.as_ref().cloned()?
-                    };
-
-                    if skip_self_coerce_loop(
-                        &vuln.vuln_id,
-                        is_machine,
-                        dc_ip.as_deref(),
-                        &host_ip,
-                        &domain.to_lowercase(),
-                        &state.dominated_domains,
-                    ) {
-                        return None;
-                    }
-
-                    // Find any non-quarantined credential with a password for this domain.
-                    let credential = state
-                        .credentials
-                        .iter()
-                        .find(|c| {
-                            !c.password.is_empty()
-                                && c.domain.to_lowercase() == domain.to_lowercase()
-                                && !state.is_principal_quarantined(&c.username, &c.domain)
-                        })
-                        .cloned();
-
-                    if credential.is_none() {
-                        debug!(
-                            vuln_id = %vuln.vuln_id,
-                            "Unconstrained: no credential available yet"
-                        );
-                        return None;
-                    }
-
-                    // User accounts go straight to LLM exploit (one-shot, no coerce+dump).
-                    if !is_machine {
-                        let dedup_key = format!("uc_user:{}", account_name.to_lowercase());
-                        if phases.get(&vuln.vuln_id).is_some_and(|p| p.completed) {
-                            return None;
-                        }
-                        return Some(UnconstrainedWork {
-                            vuln_id: vuln.vuln_id.clone(),
-                            account_name,
-                            domain,
-                            host_ip,
-                            dc_ip,
-                            credential,
-                            action: Action::LlmExploit,
-                            _dedup_key: Some(dedup_key),
-                        });
-                    }
-
-                    // Determine action based on current phase (machine accounts only).
-                    let phase = phases.get(&vuln.vuln_id);
-
-                    // If auto_coercion already coerced this DC, skip straight to dump.
-                    let already_coerced = dc_ip
-                        .as_ref()
-                        .is_some_and(|ip| state.is_processed(DEDUP_COERCED_DCS, ip));
-
-                    let action = match phase {
-                        // No phase yet — dispatch coercion (or skip if already coerced).
-                        None if already_coerced => Action::Dump,
-                        None if dc_ip.is_some() => Action::Coerce,
-                        None => {
-                            debug!(
-                                vuln_id = %vuln.vuln_id,
-                                "Unconstrained: no DC found for coercion"
-                            );
-                            return None;
-                        }
-
-                        // Coercion dispatched, waiting for delay before dump.
-                        Some(p)
-                            if p.coercion_dispatched_at.is_some()
-                                && p.dump_attempts == 0
-                                && p.coercion_dispatched_at.unwrap().elapsed()
-                                    >= COERCE_TO_DUMP_DELAY =>
-                        {
-                            Action::Dump
-                        }
-
-                        // Dump retry — previous attempt didn't yield TGTs.
-                        Some(p)
-                            if p.dump_attempts > 0
-                                && p.dump_attempts < MAX_DUMP_ATTEMPTS
-                                && p.last_dump_at
-                                    .is_none_or(|t| t.elapsed() >= DUMP_RETRY_DELAY) =>
-                        {
-                            Action::Dump
-                        }
-
-                        _ => return None,
-                    };
-
-                    Some(UnconstrainedWork {
-                        vuln_id: vuln.vuln_id.clone(),
-                        account_name,
-                        domain,
-                        host_ip,
-                        dc_ip,
-                        credential,
-                        action,
-                        _dedup_key: None,
-                    })
-                })
-                .collect()
+            select_unconstrained_work_items(&state, &phases, Instant::now())
         };
 
         for item in work {
             match item.action {
                 Action::Coerce => {
-                    let dc_ip = match &item.dc_ip {
-                        Some(ip) => ip.clone(),
-                        None => continue,
-                    };
-
-                    let cred = match &item.credential {
-                        Some(c) => c,
-                        None => continue,
-                    };
-
-                    // Coerce DC → unconstrained host. The DC's TGT is cached
-                    // in the unconstrained host's LSASS.
-                    let payload = json!({
-                        "target_ip": dc_ip,
-                        "listener_ip": item.host_ip,
-                        "techniques": ["petitpotam", "printerbug"],
-                        "credential": {
-                            "username": cred.username,
-                            "password": cred.password,
-                            "domain": cred.domain,
-                        },
-                        "reason": "unconstrained_delegation_coercion",
-                    });
+                    if item.dc_ip.is_none() || item.credential.is_none() {
+                        continue;
+                    }
+                    let dc_ip = item.dc_ip.as_ref().unwrap().clone();
+                    let payload = build_unconstrained_coerce_payload(&item);
 
                     let priority = dispatcher.effective_priority("unconstrained_delegation");
                     match dispatcher
@@ -354,25 +403,10 @@ pub async fn auto_unconstrained_exploitation(
                 }
 
                 Action::Dump => {
-                    let cred = match &item.credential {
-                        Some(c) => c,
-                        None => continue,
-                    };
-
-                    let payload = json!({
-                        "technique": "unconstrained_tgt_dump",
-                        "vuln_type": "unconstrained_delegation",
-                        "vuln_id": item.vuln_id,
-                        "target": item.host_ip,
-                        "target_ip": item.host_ip,
-                        "domain": item.domain,
-                        "account_name": item.account_name,
-                        "credential": {
-                            "username": cred.username,
-                            "password": cred.password,
-                            "domain": cred.domain,
-                        },
-                    });
+                    if item.credential.is_none() {
+                        continue;
+                    }
+                    let payload = build_unconstrained_dump_payload(&item);
 
                     let priority = dispatcher.effective_priority("unconstrained_delegation");
                     match dispatcher
@@ -419,29 +453,10 @@ pub async fn auto_unconstrained_exploitation(
                 }
 
                 Action::LlmExploit => {
-                    // User-account unconstrained delegation — dispatch to LLM
-                    // exploit agent which can determine the right approach
-                    // (find where user is logged in, monitor for TGTs, etc.)
-                    let cred = match &item.credential {
-                        Some(c) => c,
-                        None => continue,
-                    };
-
-                    let payload = json!({
-                        "technique": "unconstrained_delegation_exploit",
-                        "vuln_type": "unconstrained_delegation",
-                        "vuln_id": item.vuln_id,
-                        "target": item.host_ip,
-                        "target_ip": item.host_ip,
-                        "domain": item.domain,
-                        "account_name": item.account_name,
-                        "is_user_account": true,
-                        "credential": {
-                            "username": cred.username,
-                            "password": cred.password,
-                            "domain": cred.domain,
-                        },
-                    });
+                    if item.credential.is_none() {
+                        continue;
+                    }
+                    let payload = build_unconstrained_llm_exploit_payload(&item);
 
                     let priority = dispatcher.effective_priority("unconstrained_delegation");
                     match dispatcher
@@ -482,23 +497,23 @@ pub async fn auto_unconstrained_exploitation(
     }
 }
 
-#[derive(Debug)]
-enum Action {
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Action {
     Coerce,
     Dump,
     /// Dispatch to LLM exploit agent (for user accounts).
     LlmExploit,
 }
 
-struct UnconstrainedWork {
-    vuln_id: String,
-    account_name: String,
-    domain: String,
-    host_ip: String,
-    dc_ip: Option<String>,
-    credential: Option<ares_core::models::Credential>,
-    action: Action,
-    _dedup_key: Option<String>,
+pub(crate) struct UnconstrainedWork {
+    pub vuln_id: String,
+    pub account_name: String,
+    pub domain: String,
+    pub host_ip: String,
+    pub dc_ip: Option<String>,
+    pub credential: Option<ares_core::models::Credential>,
+    pub action: Action,
+    pub _dedup_key: Option<String>,
 }
 
 #[cfg(test)]
@@ -1099,5 +1114,426 @@ mod tests {
             "CONTOSO.LOCAL",
             &dominated,
         ));
+    }
+
+    // ── helpers for select_unconstrained_work_items / payload builder tests ──
+
+    fn make_cred(user: &str, password: &str, domain: &str) -> ares_core::models::Credential {
+        ares_core::models::Credential {
+            id: format!("c-{user}"),
+            username: user.to_string(),
+            password: password.to_string(),
+            domain: domain.to_string(),
+            source: String::new(),
+            discovered_at: None,
+            is_admin: false,
+            parent_id: None,
+            attack_step: 0,
+        }
+    }
+
+    fn make_host(hostname: &str, ip: &str) -> ares_core::models::Host {
+        ares_core::models::Host {
+            ip: ip.to_string(),
+            hostname: hostname.to_string(),
+            os: String::new(),
+            roles: Vec::new(),
+            services: Vec::new(),
+            is_dc: false,
+            owned: false,
+        }
+    }
+
+    fn make_uc_vuln(
+        vuln_id: &str,
+        account_name: &str,
+        domain: &str,
+    ) -> ares_core::models::VulnerabilityInfo {
+        let mut details = std::collections::HashMap::new();
+        details.insert("account_name".into(), json!(account_name));
+        details.insert("domain".into(), json!(domain));
+        ares_core::models::VulnerabilityInfo {
+            vuln_id: vuln_id.to_string(),
+            vuln_type: "unconstrained_delegation".into(),
+            target: "".into(),
+            discovered_by: "test".into(),
+            discovered_at: chrono::Utc::now(),
+            details,
+            recommended_agent: String::new(),
+            priority: 1,
+        }
+    }
+
+    // --- find_host_ip_for_machine_account ------------------------------
+
+    #[test]
+    fn find_host_ip_short_hostname_match() {
+        let mut s = StateInner::new("op-test".into());
+        s.hosts.push(make_host("dc01", "192.168.58.10"));
+        assert_eq!(
+            find_host_ip_for_machine_account(&s, "DC01$").as_deref(),
+            Some("192.168.58.10")
+        );
+    }
+
+    #[test]
+    fn find_host_ip_fqdn_match() {
+        let mut s = StateInner::new("op-test".into());
+        s.hosts
+            .push(make_host("dc02.child.contoso.local", "192.168.58.11"));
+        assert_eq!(
+            find_host_ip_for_machine_account(&s, "DC02$").as_deref(),
+            Some("192.168.58.11")
+        );
+    }
+
+    #[test]
+    fn find_host_ip_returns_none_when_no_match() {
+        let mut s = StateInner::new("op-test".into());
+        s.hosts
+            .push(make_host("sql01.contoso.local", "192.168.58.20"));
+        assert!(find_host_ip_for_machine_account(&s, "DC01$").is_none());
+    }
+
+    #[test]
+    fn find_host_ip_does_not_match_longer_hostname_prefix() {
+        // "DC01$" must not greedily match "dc011".
+        let mut s = StateInner::new("op-test".into());
+        s.hosts
+            .push(make_host("dc011.contoso.local", "192.168.58.11"));
+        assert!(find_host_ip_for_machine_account(&s, "DC01$").is_none());
+    }
+
+    // --- select_unconstrained_work_items -------------------------------
+
+    #[test]
+    fn select_uc_skips_other_vuln_types() {
+        let mut s = StateInner::new("op-test".into());
+        let mut v = make_uc_vuln("v1", "DC02$", "contoso.local");
+        v.vuln_type = "constrained_delegation".into();
+        s.discovered_vulnerabilities.insert(v.vuln_id.clone(), v);
+        s.hosts.push(make_host("dc02", "192.168.58.11"));
+        s.credentials
+            .push(make_cred("alice", "Pw!", "contoso.local"));
+        assert!(select_unconstrained_work_items(&s, &HashMap::new(), Instant::now()).is_empty());
+    }
+
+    #[test]
+    fn select_uc_skips_exploited() {
+        let mut s = StateInner::new("op-test".into());
+        let v = make_uc_vuln("v1", "DC02$", "contoso.local");
+        s.discovered_vulnerabilities.insert(v.vuln_id.clone(), v);
+        s.exploited_vulnerabilities.insert("v1".into());
+        s.hosts.push(make_host("dc02", "192.168.58.11"));
+        s.credentials
+            .push(make_cred("alice", "Pw!", "contoso.local"));
+        s.domain_controllers
+            .insert("contoso.local".into(), "192.168.58.10".into());
+        assert!(select_unconstrained_work_items(&s, &HashMap::new(), Instant::now()).is_empty());
+    }
+
+    #[test]
+    fn select_uc_skips_completed_phase() {
+        let mut s = StateInner::new("op-test".into());
+        let v = make_uc_vuln("v1", "DC02$", "contoso.local");
+        s.discovered_vulnerabilities.insert(v.vuln_id.clone(), v);
+        s.hosts.push(make_host("dc02", "192.168.58.11"));
+        s.credentials
+            .push(make_cred("alice", "Pw!", "contoso.local"));
+        s.domain_controllers
+            .insert("contoso.local".into(), "192.168.58.10".into());
+        let mut phases = HashMap::new();
+        phases.insert(
+            "v1".into(),
+            PhaseState {
+                coercion_dispatched_at: Some(Instant::now()),
+                dump_attempts: 0,
+                last_dump_at: None,
+                completed: true,
+            },
+        );
+        assert!(select_unconstrained_work_items(&s, &phases, Instant::now()).is_empty());
+    }
+
+    #[test]
+    fn select_uc_machine_no_phase_picks_coerce() {
+        let mut s = StateInner::new("op-test".into());
+        let v = make_uc_vuln("v1", "DC02$", "contoso.local");
+        s.discovered_vulnerabilities.insert(v.vuln_id.clone(), v);
+        s.hosts.push(make_host("dc02", "192.168.58.11"));
+        s.credentials
+            .push(make_cred("alice", "Pw!", "contoso.local"));
+        s.domain_controllers
+            .insert("contoso.local".into(), "192.168.58.10".into());
+        let work = select_unconstrained_work_items(&s, &HashMap::new(), Instant::now());
+        assert_eq!(work.len(), 1);
+        assert_eq!(work[0].action, Action::Coerce);
+        assert_eq!(work[0].host_ip, "192.168.58.11");
+        assert_eq!(work[0].dc_ip.as_deref(), Some("192.168.58.10"));
+    }
+
+    #[test]
+    fn select_uc_machine_no_phase_when_already_coerced_picks_dump() {
+        let mut s = StateInner::new("op-test".into());
+        let v = make_uc_vuln("v1", "DC02$", "contoso.local");
+        s.discovered_vulnerabilities.insert(v.vuln_id.clone(), v);
+        s.hosts.push(make_host("dc02", "192.168.58.11"));
+        s.credentials
+            .push(make_cred("alice", "Pw!", "contoso.local"));
+        s.domain_controllers
+            .insert("contoso.local".into(), "192.168.58.10".into());
+        s.mark_processed(DEDUP_COERCED_DCS, "192.168.58.10".into());
+        let work = select_unconstrained_work_items(&s, &HashMap::new(), Instant::now());
+        assert_eq!(work[0].action, Action::Dump);
+    }
+
+    #[test]
+    fn select_uc_machine_without_dc_returns_nothing() {
+        let mut s = StateInner::new("op-test".into());
+        let v = make_uc_vuln("v1", "DC02$", "contoso.local");
+        s.discovered_vulnerabilities.insert(v.vuln_id.clone(), v);
+        s.hosts.push(make_host("dc02", "192.168.58.11"));
+        s.credentials
+            .push(make_cred("alice", "Pw!", "contoso.local"));
+        // No domain_controllers entry → can't coerce.
+        assert!(select_unconstrained_work_items(&s, &HashMap::new(), Instant::now()).is_empty());
+    }
+
+    #[test]
+    fn select_uc_machine_post_coerce_waits_for_delay() {
+        let mut s = StateInner::new("op-test".into());
+        let v = make_uc_vuln("v1", "DC02$", "contoso.local");
+        s.discovered_vulnerabilities.insert(v.vuln_id.clone(), v);
+        s.hosts.push(make_host("dc02", "192.168.58.11"));
+        s.credentials
+            .push(make_cred("alice", "Pw!", "contoso.local"));
+        s.domain_controllers
+            .insert("contoso.local".into(), "192.168.58.10".into());
+        let now = Instant::now();
+        let mut phases = HashMap::new();
+        phases.insert(
+            "v1".into(),
+            PhaseState {
+                coercion_dispatched_at: Some(now - Duration::from_secs(1)),
+                dump_attempts: 0,
+                last_dump_at: None,
+                completed: false,
+            },
+        );
+        // Within COERCE_TO_DUMP_DELAY (15s) → no work emitted.
+        assert!(select_unconstrained_work_items(&s, &phases, now).is_empty());
+    }
+
+    #[test]
+    fn select_uc_machine_post_coerce_dispatches_after_delay() {
+        let mut s = StateInner::new("op-test".into());
+        let v = make_uc_vuln("v1", "DC02$", "contoso.local");
+        s.discovered_vulnerabilities.insert(v.vuln_id.clone(), v);
+        s.hosts.push(make_host("dc02", "192.168.58.11"));
+        s.credentials
+            .push(make_cred("alice", "Pw!", "contoso.local"));
+        s.domain_controllers
+            .insert("contoso.local".into(), "192.168.58.10".into());
+        let now = Instant::now();
+        let mut phases = HashMap::new();
+        phases.insert(
+            "v1".into(),
+            PhaseState {
+                coercion_dispatched_at: Some(now - (COERCE_TO_DUMP_DELAY + Duration::from_secs(1))),
+                dump_attempts: 0,
+                last_dump_at: None,
+                completed: false,
+            },
+        );
+        let work = select_unconstrained_work_items(&s, &phases, now);
+        assert_eq!(work.len(), 1);
+        assert_eq!(work[0].action, Action::Dump);
+    }
+
+    #[test]
+    fn select_uc_machine_dump_retry_within_window_skipped() {
+        let mut s = StateInner::new("op-test".into());
+        let v = make_uc_vuln("v1", "DC02$", "contoso.local");
+        s.discovered_vulnerabilities.insert(v.vuln_id.clone(), v);
+        s.hosts.push(make_host("dc02", "192.168.58.11"));
+        s.credentials
+            .push(make_cred("alice", "Pw!", "contoso.local"));
+        s.domain_controllers
+            .insert("contoso.local".into(), "192.168.58.10".into());
+        let now = Instant::now();
+        let mut phases = HashMap::new();
+        phases.insert(
+            "v1".into(),
+            PhaseState {
+                coercion_dispatched_at: Some(now - Duration::from_secs(120)),
+                dump_attempts: 1,
+                last_dump_at: Some(now - Duration::from_secs(5)),
+                completed: false,
+            },
+        );
+        // last_dump_at is too recent (5s ago < 60s retry delay).
+        assert!(select_unconstrained_work_items(&s, &phases, now).is_empty());
+    }
+
+    #[test]
+    fn select_uc_machine_dump_retry_after_max_attempts_skipped() {
+        let mut s = StateInner::new("op-test".into());
+        let v = make_uc_vuln("v1", "DC02$", "contoso.local");
+        s.discovered_vulnerabilities.insert(v.vuln_id.clone(), v);
+        s.hosts.push(make_host("dc02", "192.168.58.11"));
+        s.credentials
+            .push(make_cred("alice", "Pw!", "contoso.local"));
+        s.domain_controllers
+            .insert("contoso.local".into(), "192.168.58.10".into());
+        let now = Instant::now();
+        let mut phases = HashMap::new();
+        phases.insert(
+            "v1".into(),
+            PhaseState {
+                coercion_dispatched_at: Some(now - Duration::from_secs(600)),
+                dump_attempts: MAX_DUMP_ATTEMPTS,
+                last_dump_at: Some(now - Duration::from_secs(120)),
+                completed: false,
+            },
+        );
+        assert!(select_unconstrained_work_items(&s, &phases, now).is_empty());
+    }
+
+    #[test]
+    fn select_uc_user_account_uses_dc_ip_and_llm_action() {
+        let mut s = StateInner::new("op-test".into());
+        let v = make_uc_vuln("v1", "alice.smith", "contoso.local");
+        s.discovered_vulnerabilities.insert(v.vuln_id.clone(), v);
+        s.credentials
+            .push(make_cred("alice", "Pw!", "contoso.local"));
+        s.domain_controllers
+            .insert("contoso.local".into(), "192.168.58.10".into());
+        let work = select_unconstrained_work_items(&s, &HashMap::new(), Instant::now());
+        assert_eq!(work.len(), 1);
+        assert_eq!(work[0].action, Action::LlmExploit);
+        assert_eq!(work[0].host_ip, "192.168.58.10");
+        assert_eq!(work[0]._dedup_key.as_deref(), Some("uc_user:alice.smith"));
+    }
+
+    #[test]
+    fn select_uc_skips_self_coerce_loop() {
+        let mut s = StateInner::new("op-test".into());
+        let v = make_uc_vuln("v1", "DC01$", "contoso.local");
+        s.discovered_vulnerabilities.insert(v.vuln_id.clone(), v);
+        s.hosts.push(make_host("dc01", "192.168.58.10"));
+        s.credentials
+            .push(make_cred("alice", "Pw!", "contoso.local"));
+        s.domain_controllers
+            .insert("contoso.local".into(), "192.168.58.10".into());
+        // DC IP == host IP (DC01 is the unconstrained host AND the DC) → skip.
+        assert!(select_unconstrained_work_items(&s, &HashMap::new(), Instant::now()).is_empty());
+    }
+
+    #[test]
+    fn select_uc_skips_when_no_credential_for_domain() {
+        let mut s = StateInner::new("op-test".into());
+        let v = make_uc_vuln("v1", "DC02$", "contoso.local");
+        s.discovered_vulnerabilities.insert(v.vuln_id.clone(), v);
+        s.hosts.push(make_host("dc02", "192.168.58.11"));
+        s.domain_controllers
+            .insert("contoso.local".into(), "192.168.58.10".into());
+        // No credential for contoso.local → skip.
+        assert!(select_unconstrained_work_items(&s, &HashMap::new(), Instant::now()).is_empty());
+    }
+
+    #[test]
+    fn select_uc_skips_quarantined_credential() {
+        let mut s = StateInner::new("op-test".into());
+        let v = make_uc_vuln("v1", "DC02$", "contoso.local");
+        s.discovered_vulnerabilities.insert(v.vuln_id.clone(), v);
+        s.hosts.push(make_host("dc02", "192.168.58.11"));
+        s.credentials
+            .push(make_cred("alice", "Pw!", "contoso.local"));
+        s.domain_controllers
+            .insert("contoso.local".into(), "192.168.58.10".into());
+        s.quarantine_principal("alice", "contoso.local");
+        assert!(select_unconstrained_work_items(&s, &HashMap::new(), Instant::now()).is_empty());
+    }
+
+    // --- payload builders ---------------------------------------------
+
+    fn coerce_work() -> UnconstrainedWork {
+        UnconstrainedWork {
+            vuln_id: "v1".into(),
+            account_name: "DC02$".into(),
+            domain: "contoso.local".into(),
+            host_ip: "192.168.58.11".into(),
+            dc_ip: Some("192.168.58.10".into()),
+            credential: Some(make_cred("alice", "Pw!", "contoso.local")),
+            action: Action::Coerce,
+            _dedup_key: None,
+        }
+    }
+
+    #[test]
+    fn coerce_payload_fields() {
+        let p = build_unconstrained_coerce_payload(&coerce_work());
+        assert_eq!(p["target_ip"], "192.168.58.10");
+        assert_eq!(p["listener_ip"], "192.168.58.11");
+        assert_eq!(p["techniques"][0], "petitpotam");
+        assert_eq!(p["techniques"][1], "printerbug");
+        assert_eq!(p["credential"]["username"], "alice");
+        assert_eq!(p["reason"], "unconstrained_delegation_coercion");
+    }
+
+    #[test]
+    fn coerce_payload_null_when_no_dc_ip() {
+        let mut w = coerce_work();
+        w.dc_ip = None;
+        assert!(build_unconstrained_coerce_payload(&w).is_null());
+    }
+
+    #[test]
+    fn coerce_payload_null_when_no_credential() {
+        let mut w = coerce_work();
+        w.credential = None;
+        assert!(build_unconstrained_coerce_payload(&w).is_null());
+    }
+
+    #[test]
+    fn dump_payload_fields() {
+        let mut w = coerce_work();
+        w.action = Action::Dump;
+        let p = build_unconstrained_dump_payload(&w);
+        assert_eq!(p["technique"], "unconstrained_tgt_dump");
+        assert_eq!(p["vuln_type"], "unconstrained_delegation");
+        assert_eq!(p["vuln_id"], "v1");
+        assert_eq!(p["target"], "192.168.58.11");
+        assert_eq!(p["target_ip"], "192.168.58.11");
+        assert_eq!(p["domain"], "contoso.local");
+        assert_eq!(p["account_name"], "DC02$");
+        assert_eq!(p["credential"]["username"], "alice");
+    }
+
+    #[test]
+    fn dump_payload_null_when_no_credential() {
+        let mut w = coerce_work();
+        w.credential = None;
+        assert!(build_unconstrained_dump_payload(&w).is_null());
+    }
+
+    #[test]
+    fn llm_exploit_payload_fields() {
+        let mut w = coerce_work();
+        w.account_name = "alice.smith".into();
+        w.action = Action::LlmExploit;
+        let p = build_unconstrained_llm_exploit_payload(&w);
+        assert_eq!(p["technique"], "unconstrained_delegation_exploit");
+        assert_eq!(p["vuln_type"], "unconstrained_delegation");
+        assert_eq!(p["account_name"], "alice.smith");
+        assert_eq!(p["is_user_account"], true);
+        assert_eq!(p["credential"]["domain"], "contoso.local");
+    }
+
+    #[test]
+    fn llm_exploit_payload_null_when_no_credential() {
+        let mut w = coerce_work();
+        w.credential = None;
+        assert!(build_unconstrained_llm_exploit_payload(&w).is_null());
     }
 }
