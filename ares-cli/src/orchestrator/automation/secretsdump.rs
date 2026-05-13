@@ -62,6 +62,79 @@ fn select_administrator_hash(state: &StateInner, domain: &str) -> Option<String>
 
 /// True when we already have a krbtgt hash for the domain (so the GT step is
 /// unblocked and we don't need to re-run DCSync against the DC).
+/// A secretsdump work item: `(dedup_key, dc_ip, credential)`.
+pub(crate) type SecretsdumpWorkItem = (String, String, ares_core::models::Credential);
+
+/// A PTH secretsdump work item:
+/// `(dedup_key, parent_dc_ip, child_domain, admin_ntlm_hash, parent_domain)`.
+pub(crate) type PthSecretsdumpWorkItem = (String, String, String, String, String);
+
+/// Select credential-based secretsdump work items for this tick.
+///
+/// Walks `state.credentials × state.all_domains_with_dcs()` and keeps only
+/// cred/DC pairs where the DC's domain is the same forest as the cred (per
+/// `is_valid_secretsdump_target`) and the dedup key is unprocessed. Skips
+/// quarantined principals and non-admin delegation accounts.
+pub(crate) fn select_local_admin_secretsdump_work(state: &StateInner) -> Vec<SecretsdumpWorkItem> {
+    let mut items = Vec::new();
+    for cred in state
+        .credentials
+        .iter()
+        .filter(|c| !c.domain.is_empty() && !c.password.is_empty())
+        .filter(|c| c.is_admin || !state.is_delegation_account(&c.username))
+        .filter(|c| !state.is_principal_quarantined(&c.username, &c.domain))
+    {
+        for (dc_domain, dc_ip) in state.all_domains_with_dcs().iter() {
+            if !is_valid_secretsdump_target(dc_domain, &cred.domain) {
+                continue;
+            }
+            let dedup = secretsdump_dedup_key(dc_ip, &cred.domain, &cred.username);
+            if !state.is_processed(DEDUP_SECRETSDUMP, &dedup) {
+                items.push((dedup, dc_ip.clone(), cred.clone()));
+            }
+        }
+    }
+    items
+}
+
+/// Select pass-the-hash secretsdump work items targeting parent-domain DCs
+/// from dominated-child Administrator NTLM hashes.
+///
+/// For each `dominated_domains` entry, walks `all_domains_with_dcs()` looking
+/// for the lowercased child's parent (`dom.ends_with(".{parent}")`); when one
+/// is found AND state has an Administrator NTLM hash for the child, emits a
+/// PTH work item against the parent DC. Skips already-processed dedup keys.
+pub(crate) fn select_pth_secretsdump_work(state: &StateInner) -> Vec<PthSecretsdumpWorkItem> {
+    let mut items = Vec::new();
+    for dominated in &state.dominated_domains {
+        let dom = dominated.to_lowercase();
+        for (dc_domain, dc_ip) in state.all_domains_with_dcs().iter() {
+            if !is_child_of(&dom, dc_domain) {
+                continue;
+            }
+            let Some(hash) = state.hashes.iter().find(|h| {
+                h.username.to_lowercase() == "administrator"
+                    && h.hash_type.to_uppercase() == "NTLM"
+                    && h.domain.to_lowercase() == dom
+            }) else {
+                continue;
+            };
+            let parent = dc_domain.to_lowercase();
+            let dedup = pth_secretsdump_dedup_key(dc_ip, &parent);
+            if !state.is_processed(DEDUP_SECRETSDUMP, &dedup) {
+                items.push((
+                    dedup,
+                    dc_ip.clone(),
+                    hash.domain.clone(),
+                    hash.hash_value.clone(),
+                    parent,
+                ));
+            }
+        }
+    }
+    items
+}
+
 fn has_krbtgt_hash(state: &StateInner, domain: &str) -> bool {
     let dom = domain.to_lowercase();
     state.hashes.iter().any(|h| {
@@ -94,38 +167,9 @@ pub async fn auto_local_admin_secretsdump(
             continue;
         }
 
-        // Collect credentials with passwords + target DCs.
-        // Do NOT gate on is_admin — the credential may have admin rights we
-        // haven't confirmed yet. Secretsdump will fail fast if it lacks
-        // privileges, but when it succeeds it's the fastest path to krbtgt.
-        // IMPORTANT: only target DCs in the credential's domain (or child
-        // domains). Cross-domain secretsdump attempts generate failed auths
-        // that trigger AD account lockout.
-        let work: Vec<(String, String, ares_core::models::Credential)> = {
+        let work: Vec<SecretsdumpWorkItem> = {
             let state = dispatcher.state.read().await;
-            let creds: Vec<_> = state
-                .credentials
-                .iter()
-                .filter(|c| !c.domain.is_empty() && !c.password.is_empty())
-                // Skip delegation accounts — secretsdump will always fail
-                // (non-admin) and wastes auth budget reserved for S4U.
-                .filter(|c| c.is_admin || !state.is_delegation_account(&c.username))
-                .filter(|c| !state.is_principal_quarantined(&c.username, &c.domain))
-                .cloned()
-                .collect();
-
-            let mut items = Vec::new();
-            for cred in &creds {
-                for (dc_domain, dc_ip) in state.all_domains_with_dcs().iter() {
-                    if is_valid_secretsdump_target(dc_domain, &cred.domain) {
-                        let dedup = secretsdump_dedup_key(dc_ip, &cred.domain, &cred.username);
-                        if !state.is_processed(DEDUP_SECRETSDUMP, &dedup) {
-                            items.push((dedup, dc_ip.clone(), cred.clone()));
-                        }
-                    }
-                }
-            }
-            items
+            select_local_admin_secretsdump_work(&state)
         };
 
         for (dedup_key, dc_ip, cred) in work.into_iter().take(3) {
@@ -161,36 +205,9 @@ pub async fn auto_local_admin_secretsdump(
             continue;
         }
 
-        let hash_work: Vec<(String, String, String, String, String)> = {
+        let hash_work: Vec<PthSecretsdumpWorkItem> = {
             let state = dispatcher.state.read().await;
-            let mut items = Vec::new();
-            for dominated in &state.dominated_domains {
-                let dom = dominated.to_lowercase();
-                // Find parent domain DCs: domains where the child ends with ".{parent}"
-                for (dc_domain, dc_ip) in state.all_domains_with_dcs().iter() {
-                    if is_child_of(&dom, dc_domain) {
-                        // Find Administrator NTLM hash from the dominated child domain
-                        if let Some(hash) = state.hashes.iter().find(|h| {
-                            h.username.to_lowercase() == "administrator"
-                                && h.hash_type.to_uppercase() == "NTLM"
-                                && h.domain.to_lowercase() == dom
-                        }) {
-                            let parent = dc_domain.to_lowercase();
-                            let dedup = pth_secretsdump_dedup_key(dc_ip, &parent);
-                            if !state.is_processed(DEDUP_SECRETSDUMP, &dedup) {
-                                items.push((
-                                    dedup,
-                                    dc_ip.clone(),
-                                    hash.domain.clone(),
-                                    hash.hash_value.clone(),
-                                    parent,
-                                ));
-                            }
-                        }
-                    }
-                }
-            }
-            items
+            select_pth_secretsdump_work(&state)
         };
 
         for (dedup_key, dc_ip, hash_domain, hash_value, parent_domain) in
@@ -448,5 +465,229 @@ mod tests {
     #[test]
     fn pth_secretsdump_dedup_key_empty_fields() {
         assert_eq!(pth_secretsdump_dedup_key("", ""), "::pth_admin");
+    }
+
+    // ── tests for select_local_admin_secretsdump_work / select_pth_secretsdump_work ──
+
+    fn make_cred(user: &str, password: &str, domain: &str) -> ares_core::models::Credential {
+        ares_core::models::Credential {
+            id: format!("c-{user}-{domain}"),
+            username: user.to_string(),
+            password: password.to_string(),
+            domain: domain.to_string(),
+            source: String::new(),
+            discovered_at: None,
+            is_admin: false,
+            parent_id: None,
+            attack_step: 0,
+        }
+    }
+
+    fn make_admin_ntlm_hash(domain: &str, value: &str) -> ares_core::models::Hash {
+        ares_core::models::Hash {
+            id: format!("h-admin-{domain}"),
+            username: "Administrator".into(),
+            hash_value: value.into(),
+            hash_type: "NTLM".into(),
+            domain: domain.into(),
+            cracked_password: None,
+            source: String::new(),
+            discovered_at: None,
+            parent_id: None,
+            attack_step: 0,
+            aes_key: None,
+            is_previous: false,
+            source_host: None,
+            is_trust_key: false,
+            trust_pair_label: None,
+        }
+    }
+
+    // --- select_local_admin_secretsdump_work ----------------------------
+
+    #[test]
+    fn select_local_admin_skips_empty_password() {
+        let mut s = StateInner::new("op".into());
+        s.credentials.push(make_cred("alice", "", "contoso.local"));
+        s.domain_controllers
+            .insert("contoso.local".into(), "192.168.58.10".into());
+        assert!(select_local_admin_secretsdump_work(&s).is_empty());
+    }
+
+    #[test]
+    fn select_local_admin_skips_empty_domain() {
+        let mut s = StateInner::new("op".into());
+        s.credentials.push(make_cred("alice", "Pw", ""));
+        s.domain_controllers
+            .insert("contoso.local".into(), "192.168.58.10".into());
+        assert!(select_local_admin_secretsdump_work(&s).is_empty());
+    }
+
+    #[test]
+    fn select_local_admin_pairs_cred_with_same_domain_dc() {
+        let mut s = StateInner::new("op".into());
+        s.credentials
+            .push(make_cred("alice", "Pw", "contoso.local"));
+        s.domain_controllers
+            .insert("contoso.local".into(), "192.168.58.10".into());
+        let work = select_local_admin_secretsdump_work(&s);
+        assert_eq!(work.len(), 1);
+        assert_eq!(work[0].1, "192.168.58.10");
+        assert_eq!(work[0].2.username, "alice");
+    }
+
+    #[test]
+    fn select_local_admin_pairs_parent_cred_with_child_dc() {
+        // Parent-domain credentials are valid against child DCs
+        // (`is_valid_secretsdump_target` rules child as same-forest).
+        let mut s = StateInner::new("op".into());
+        s.credentials
+            .push(make_cred("alice", "Pw", "contoso.local"));
+        s.domain_controllers
+            .insert("child.contoso.local".into(), "192.168.58.11".into());
+        let work = select_local_admin_secretsdump_work(&s);
+        assert_eq!(work.len(), 1);
+        assert_eq!(work[0].1, "192.168.58.11");
+    }
+
+    #[test]
+    fn select_local_admin_skips_cross_forest_dc() {
+        let mut s = StateInner::new("op".into());
+        s.credentials
+            .push(make_cred("alice", "Pw", "contoso.local"));
+        s.domain_controllers
+            .insert("fabrikam.local".into(), "192.168.58.40".into());
+        assert!(select_local_admin_secretsdump_work(&s).is_empty());
+    }
+
+    #[test]
+    fn select_local_admin_skips_quarantined_principal() {
+        let mut s = StateInner::new("op".into());
+        s.credentials
+            .push(make_cred("alice", "Pw", "contoso.local"));
+        s.domain_controllers
+            .insert("contoso.local".into(), "192.168.58.10".into());
+        s.quarantine_principal("alice", "contoso.local");
+        assert!(select_local_admin_secretsdump_work(&s).is_empty());
+    }
+
+    #[test]
+    fn select_local_admin_skips_already_processed() {
+        let mut s = StateInner::new("op".into());
+        s.credentials
+            .push(make_cred("alice", "Pw", "contoso.local"));
+        s.domain_controllers
+            .insert("contoso.local".into(), "192.168.58.10".into());
+        s.mark_processed(
+            DEDUP_SECRETSDUMP,
+            secretsdump_dedup_key("192.168.58.10", "contoso.local", "alice"),
+        );
+        assert!(select_local_admin_secretsdump_work(&s).is_empty());
+    }
+
+    #[test]
+    fn select_local_admin_emits_one_item_per_cred_dc_pair() {
+        let mut s = StateInner::new("op".into());
+        s.credentials
+            .push(make_cred("alice", "Pw1", "contoso.local"));
+        s.credentials.push(make_cred("bob", "Pw2", "contoso.local"));
+        s.domain_controllers
+            .insert("contoso.local".into(), "192.168.58.10".into());
+        s.domain_controllers
+            .insert("child.contoso.local".into(), "192.168.58.11".into());
+        let work = select_local_admin_secretsdump_work(&s);
+        // 2 creds × 2 DCs = 4 items.
+        assert_eq!(work.len(), 4);
+    }
+
+    // --- select_pth_secretsdump_work ------------------------------------
+
+    #[test]
+    fn select_pth_returns_empty_when_no_dominated_child() {
+        let mut s = StateInner::new("op".into());
+        s.hashes
+            .push(make_admin_ntlm_hash("child.contoso.local", "deadbeef"));
+        s.domain_controllers
+            .insert("contoso.local".into(), "192.168.58.10".into());
+        // No dominated_domains entry → no PTH work.
+        assert!(select_pth_secretsdump_work(&s).is_empty());
+    }
+
+    #[test]
+    fn select_pth_emits_when_child_dominated_and_admin_hash_present() {
+        let mut s = StateInner::new("op".into());
+        s.dominated_domains.insert("child.contoso.local".into());
+        s.hashes
+            .push(make_admin_ntlm_hash("child.contoso.local", "deadbeef"));
+        s.domain_controllers
+            .insert("contoso.local".into(), "192.168.58.10".into());
+        let work = select_pth_secretsdump_work(&s);
+        assert_eq!(work.len(), 1);
+        // (dedup_key, parent_dc_ip, child_domain, ntlm_hash, parent_domain_lc)
+        assert_eq!(work[0].1, "192.168.58.10");
+        assert_eq!(work[0].2, "child.contoso.local");
+        assert_eq!(work[0].3, "deadbeef");
+        assert_eq!(work[0].4, "contoso.local");
+    }
+
+    #[test]
+    fn select_pth_skips_when_no_matching_admin_hash() {
+        let mut s = StateInner::new("op".into());
+        s.dominated_domains.insert("child.contoso.local".into());
+        s.domain_controllers
+            .insert("contoso.local".into(), "192.168.58.10".into());
+        // No admin hash for child.contoso.local → skip.
+        assert!(select_pth_secretsdump_work(&s).is_empty());
+    }
+
+    #[test]
+    fn select_pth_skips_non_ntlm_hash() {
+        let mut s = StateInner::new("op".into());
+        s.dominated_domains.insert("child.contoso.local".into());
+        let mut h = make_admin_ntlm_hash("child.contoso.local", "deadbeef");
+        h.hash_type = "AES256".into();
+        s.hashes.push(h);
+        s.domain_controllers
+            .insert("contoso.local".into(), "192.168.58.10".into());
+        assert!(select_pth_secretsdump_work(&s).is_empty());
+    }
+
+    #[test]
+    fn select_pth_skips_non_administrator_username() {
+        let mut s = StateInner::new("op".into());
+        s.dominated_domains.insert("child.contoso.local".into());
+        let mut h = make_admin_ntlm_hash("child.contoso.local", "deadbeef");
+        h.username = "alice".into();
+        s.hashes.push(h);
+        s.domain_controllers
+            .insert("contoso.local".into(), "192.168.58.10".into());
+        assert!(select_pth_secretsdump_work(&s).is_empty());
+    }
+
+    #[test]
+    fn select_pth_skips_already_processed() {
+        let mut s = StateInner::new("op".into());
+        s.dominated_domains.insert("child.contoso.local".into());
+        s.hashes
+            .push(make_admin_ntlm_hash("child.contoso.local", "deadbeef"));
+        s.domain_controllers
+            .insert("contoso.local".into(), "192.168.58.10".into());
+        s.mark_processed(
+            DEDUP_SECRETSDUMP,
+            pth_secretsdump_dedup_key("192.168.58.10", "contoso.local"),
+        );
+        assert!(select_pth_secretsdump_work(&s).is_empty());
+    }
+
+    #[test]
+    fn select_pth_skips_when_dc_is_not_parent_of_dominated_child() {
+        // dominated = grandchild; DC list has unrelated forest → no work.
+        let mut s = StateInner::new("op".into());
+        s.dominated_domains.insert("child.contoso.local".into());
+        s.hashes
+            .push(make_admin_ntlm_hash("child.contoso.local", "deadbeef"));
+        s.domain_controllers
+            .insert("fabrikam.local".into(), "192.168.58.40".into());
+        assert!(select_pth_secretsdump_work(&s).is_empty());
     }
 }
