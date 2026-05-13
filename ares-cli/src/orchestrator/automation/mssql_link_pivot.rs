@@ -337,6 +337,28 @@ async fn handle_probe_outcome(dispatcher: &Dispatcher, item: &PivotWork, outcome
                 state.mssql_link_pivot_attempts.remove(&item.dedup_key);
             }
 
+            // Credit the scoreboard primitive. The deterministic probe
+            // dispatches via `dispatch_tool` (task_id `mssql_link_pivot_*`),
+            // bypassing the `exploit_*` gate in result_processing — so the
+            // standard mark_exploited path never fires for this vuln_id
+            // even when the chain confirmed an end-to-end remote SELECT.
+            // Without this explicit call, `mssql_linked_server_<ip>_<server>`
+            // scoreboard tokens are emitted only by the LLM-routed
+            // mssql_exploitation path; the deterministic confirmation
+            // here goes uncredited.
+            if let Err(e) = dispatcher
+                .state
+                .mark_exploited(&dispatcher.queue, &item.vuln_id)
+                .await
+            {
+                warn!(
+                    err = %e,
+                    vuln_id = %item.vuln_id,
+                    "Failed to mark mssql_linked_server exploited \
+                     (probe confirmed but token not emitted)"
+                );
+            }
+
             // When the link hop runs as sysadmin on the remote SQL Server, the
             // resulting principal can xp_cmdshell, which is local-admin-
             // equivalent on the host running the SQL Server. Mark that host
