@@ -1331,6 +1331,54 @@ fn gmsa_exploit_token_converges_with_enumeration_format() {
     assert_eq!(gmsa_exploit_token("gmsaDragon$"), "gmsa_gmsadragon");
 }
 
+mod emit_gmsa_exploit_token {
+    use super::super::emit_gmsa_exploit_token_if_gmsa;
+    use crate::orchestrator::state::SharedState;
+    use crate::orchestrator::task_queue::TaskQueueCore;
+    use ares_core::state::mock_redis::MockRedisConnection;
+
+    fn mock_queue() -> TaskQueueCore<MockRedisConnection> {
+        TaskQueueCore::from_connection(MockRedisConnection::new())
+    }
+
+    #[tokio::test]
+    async fn marks_exploited_for_gmsa_principal() {
+        let state = SharedState::new("op-1".to_string());
+        let q = mock_queue();
+        emit_gmsa_exploit_token_if_gmsa(&state, &q, "gmsaDragon$").await;
+        let s = state.read().await;
+        assert!(s.exploited_vulnerabilities.contains("gmsa_gmsadragon"));
+    }
+
+    #[tokio::test]
+    async fn no_op_for_plain_machine_account() {
+        // DC01$ ends with `$` but is not a gMSA — no token should be emitted.
+        let state = SharedState::new("op-1".to_string());
+        let q = mock_queue();
+        emit_gmsa_exploit_token_if_gmsa(&state, &q, "DC01$").await;
+        let s = state.read().await;
+        assert!(s.exploited_vulnerabilities.is_empty());
+    }
+
+    #[tokio::test]
+    async fn no_op_for_regular_user() {
+        let state = SharedState::new("op-1".to_string());
+        let q = mock_queue();
+        emit_gmsa_exploit_token_if_gmsa(&state, &q, "alice").await;
+        let s = state.read().await;
+        assert!(s.exploited_vulnerabilities.is_empty());
+    }
+
+    #[tokio::test]
+    async fn token_normalized_lowercase_for_mixed_case_input() {
+        let state = SharedState::new("op-1".to_string());
+        let q = mock_queue();
+        emit_gmsa_exploit_token_if_gmsa(&state, &q, "GMSA_WEB$").await;
+        let s = state.read().await;
+        assert!(s.exploited_vulnerabilities.contains("gmsa_gmsa_web"));
+    }
+}
+
 #[test]
 fn seimpersonate_signal_detects_enabled_in_whoami_priv_output() {
     use super::result_has_seimpersonate_signal;
