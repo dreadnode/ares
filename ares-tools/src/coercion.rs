@@ -242,6 +242,11 @@ struct RelayCoerceConfig {
     coerce_domain: String,
     coerce_secret: Option<CoerceSecret>,
     template: String,
+    /// Override the ntlmrelayx relay target URL. `None` keeps the default
+    /// ESC8 path (`http://<ca_host>/certsrv/certfnsh.asp`). Callers pass
+    /// `Some("rpc://<ca_host>")` for ESC11 (RPC ICPR enrollment) — same
+    /// listener+coerce machinery, different target endpoint.
+    relay_target_url: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -315,6 +320,27 @@ fn parse_relay_coerce_args(args: &Value) -> Result<RelayCoerceConfig> {
         None
     };
 
+    // Optional ESC11 / arbitrary-target override. The string must be a
+    // recognised relay target form (`http://...`, `https://...`, or
+    // `rpc://...`); freeform user input that looks like a hostname would
+    // mean ntlmrelayx silently defaults to LDAP which is rarely what the
+    // caller intended.
+    let relay_target_url = optional_str(args, "relay_target_url").filter(|s| !s.is_empty());
+    if let Some(u) = relay_target_url {
+        let scheme_ok =
+            u.starts_with("http://") || u.starts_with("https://") || u.starts_with("rpc://");
+        if !scheme_ok {
+            anyhow::bail!(
+                "relay_target_url must start with http://, https://, or rpc:// (got `{u}`)"
+            );
+        }
+        if u.contains('\n') || u.contains('\'') {
+            anyhow::bail!(
+                "relay_target_url contains forbidden character (newline or single-quote)"
+            );
+        }
+    }
+
     Ok(RelayCoerceConfig {
         ca_host: ca_host.to_string(),
         coerce_target: coerce_target.to_string(),
@@ -323,6 +349,7 @@ fn parse_relay_coerce_args(args: &Value) -> Result<RelayCoerceConfig> {
         coerce_domain: coerce_domain.to_string(),
         coerce_secret,
         template: template.to_string(),
+        relay_target_url: relay_target_url.map(String::from),
     })
 }
 
@@ -756,7 +783,13 @@ async fn run_relay_and_coerce<P: CoerceProcs>(
         }
     }
 
-    let target_url = format!("http://{}/certsrv/certfnsh.asp", cfg.ca_host);
+    // Default ESC8 target (http web enrollment), overridable for ESC11
+    // (rpc://<ca_host>) or arbitrary relay testing. Owned `String` so the
+    // override path doesn't have to clone on the hot path.
+    let target_url = match cfg.relay_target_url.as_deref() {
+        Some(u) => u.to_string(),
+        None => format!("http://{}/certsrv/certfnsh.asp", cfg.ca_host),
+    };
     let mut relay = procs
         .spawn_relay(&target_url, &cfg.template, &relay_log, &workdir)
         .await?;
@@ -1363,6 +1396,66 @@ mod tests {
         let cfg = super::parse_relay_coerce_args(&args).expect("unauth args should parse");
         assert!(cfg.coerce_user.is_none());
         assert!(cfg.coerce_secret.is_none());
+        assert!(cfg.relay_target_url.is_none());
+    }
+
+    #[test]
+    fn parse_relay_coerce_args_accepts_rpc_relay_target() {
+        let args = json!({
+            "ca_host": "192.168.58.10",
+            "coerce_target": "192.168.58.20",
+            "attacker_ip": "192.168.58.100",
+            "relay_target_url": "rpc://192.168.58.10"
+        });
+        let cfg = super::parse_relay_coerce_args(&args).expect("rpc target should parse");
+        assert_eq!(cfg.relay_target_url.as_deref(), Some("rpc://192.168.58.10"));
+    }
+
+    #[test]
+    fn parse_relay_coerce_args_rejects_unknown_scheme() {
+        let args = json!({
+            "ca_host": "192.168.58.10",
+            "coerce_target": "192.168.58.20",
+            "attacker_ip": "192.168.58.100",
+            "relay_target_url": "ldap://192.168.58.10"
+        });
+        let err = super::parse_relay_coerce_args(&args)
+            .expect_err("non-http/rpc scheme should be rejected");
+        assert!(
+            err.to_string().contains("relay_target_url must start with"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn parse_relay_coerce_args_rejects_shell_metacharacters_in_relay_target() {
+        let args = json!({
+            "ca_host": "192.168.58.10",
+            "coerce_target": "192.168.58.20",
+            "attacker_ip": "192.168.58.100",
+            "relay_target_url": "http://192.168.58.10/x'`whoami`"
+        });
+        let err =
+            super::parse_relay_coerce_args(&args).expect_err("single-quote should be rejected");
+        assert!(
+            err.to_string().contains("forbidden character"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn parse_relay_coerce_args_empty_relay_target_url_falls_back_to_default() {
+        let args = json!({
+            "ca_host": "192.168.58.10",
+            "coerce_target": "192.168.58.20",
+            "attacker_ip": "192.168.58.100",
+            "relay_target_url": ""
+        });
+        let cfg = super::parse_relay_coerce_args(&args).expect("empty override should parse");
+        assert!(
+            cfg.relay_target_url.is_none(),
+            "empty string must be treated as None so default ESC8 URL applies"
+        );
     }
 
     // ── Phase-progression coverage via FakeCoerceProcs ─────────────────────
@@ -1609,6 +1702,7 @@ mod tests {
             coerce_domain: String::new(),
             coerce_secret: None,
             template: "DomainController".into(),
+            relay_target_url: None,
         }
     }
 
@@ -1623,6 +1717,7 @@ mod tests {
                 "b8d76e56e9dac90539aff05e3ccb1755".into(),
             )),
             template: "DomainController".into(),
+            relay_target_url: None,
         }
     }
 
