@@ -317,6 +317,32 @@ fn resolve_linked_server_host_ip(state: &StateInner, linked_server: &str) -> Opt
         .map(|h| h.ip.clone())
 }
 
+/// Credit the scoreboard primitive for a confirmed link pivot. The
+/// deterministic probe dispatches via `dispatch_tool` (task_id
+/// `mssql_link_pivot_*`), bypassing the `exploit_*` gate in
+/// result_processing — so the standard mark_exploited path never fires
+/// for this vuln_id even when the chain confirmed an end-to-end remote
+/// SELECT. Without this explicit call,
+/// `mssql_linked_server_<ip>_<server>` scoreboard tokens are emitted
+/// only by the LLM-routed mssql_exploitation path; the deterministic
+/// confirmation here goes uncredited.
+async fn credit_pivot_exploited(
+    state: &SharedState,
+    queue: &crate::orchestrator::task_queue::TaskQueueCore<
+        impl redis::aio::ConnectionLike + Clone + Send + Sync + 'static,
+    >,
+    vuln_id: &str,
+) {
+    if let Err(e) = state.mark_exploited(queue, vuln_id).await {
+        warn!(
+            err = %e,
+            vuln_id = %vuln_id,
+            "Failed to mark mssql_linked_server exploited \
+             (probe confirmed but token not emitted)"
+        );
+    }
+}
+
 async fn handle_probe_outcome(dispatcher: &Dispatcher, item: &PivotWork, outcome: ProbeOutcome) {
     match outcome {
         ProbeOutcome::Confirmed(output) => {
@@ -336,6 +362,8 @@ async fn handle_probe_outcome(dispatcher: &Dispatcher, item: &PivotWork, outcome
                 let mut state = dispatcher.state.write().await;
                 state.mssql_link_pivot_attempts.remove(&item.dedup_key);
             }
+
+            credit_pivot_exploited(&dispatcher.state, &dispatcher.queue, &item.vuln_id).await;
 
             // When the link hop runs as sysadmin on the remote SQL Server, the
             // resulting principal can xp_cmdshell, which is local-admin-
@@ -715,6 +743,34 @@ mod tests {
             &state,
             "192.168.58.51"
         ));
+    }
+
+    #[tokio::test]
+    async fn credit_pivot_exploited_marks_vuln_and_records_event() {
+        // Confirmed probe outcome must mark the linked-server vuln
+        // exploited so dreadgoad's scoreboard credits the primitive even
+        // though the probe dispatched via `dispatch_tool` (which bypasses
+        // the normal `exploit_*` gate in result_processing).
+        use crate::orchestrator::task_queue::TaskQueueCore;
+        use ares_core::models::OpStateEventPayload;
+        use ares_core::state::mock_redis::MockRedisConnection;
+
+        let recorder = std::sync::Arc::new(ares_core::op_state_log::OpStateRecorder::capturing());
+        let state = SharedState::with_recorder("op-pivot".to_string(), recorder.clone());
+        let queue = TaskQueueCore::from_connection(MockRedisConnection::new());
+
+        let vuln_id = "mssql_linked_server_192.168.58.51_SQL01";
+        credit_pivot_exploited(&state, &queue, vuln_id).await;
+
+        let inner = state.read().await;
+        assert!(inner.exploited_vulnerabilities.contains(vuln_id));
+        drop(inner);
+
+        let evs = recorder.captured().await;
+        assert!(evs.iter().any(|e| matches!(
+            &e.payload,
+            OpStateEventPayload::VulnExploited { vuln_id: v, .. } if v == vuln_id
+        )));
     }
 
     #[test]
