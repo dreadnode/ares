@@ -62,6 +62,19 @@ pub async fn auto_shadow_credentials(
                         return None;
                     }
 
+                    // Shadow credentials only applies to User and Computer
+                    // objects (the only AD object classes with
+                    // msDS-KeyCredentialLink). When the parser surfaces
+                    // target_type as Group, GPO, or anything else, the
+                    // certipy_shadow attempt is guaranteed to fail at
+                    // runtime — skip dispatch to save the LLM round-trip.
+                    if let Some(tt) = vuln.details.get("target_type").and_then(|v| v.as_str()) {
+                        let tt = tt.to_lowercase();
+                        if !matches!(tt.as_str(), "user" | "computer" | "unknown") {
+                            return None;
+                        }
+                    }
+
                     if state.exploited_vulnerabilities.contains(&vuln.vuln_id) {
                         return None;
                     }
@@ -220,7 +233,24 @@ struct ShadowCredWork {
 }
 
 /// Returns `true` if the given vulnerability type is a candidate for shadow
-/// credentials exploitation (ACL-based write access on another principal).
+/// credentials exploitation (ACL-based write access on a user/computer that
+/// can be abused to add a msDS-KeyCredentialLink and obtain that target's
+/// NT hash via certipy auth).
+///
+/// Includes the obvious primitives (GenericAll, GenericWrite, WriteDacl,
+/// WriteOwner) plus three that the lab's BloodHound exposed but the
+/// original matcher missed:
+/// - `allextendedrights`: subsumes User-Force-Change-Password and most
+///   extended rights — equivalent to GenericAll for shadow-creds purposes.
+/// - `writeproperty`: a property write that explicitly covers
+///   msDS-KeyCredentialLink (BloodHound's targetedwrite analogue).
+/// - `forcechangepassword`: while normally used to reset the password,
+///   the same WriteProperty extended right also lets us write
+///   msDS-KeyCredentialLink, so certipy_shadow works without destroying
+///   the lab's seeded password.
+///
+/// All forms accept both the bare and `acl_`-prefixed shapes emitted by
+/// ldap_acl_enumeration's parser.
 pub(crate) fn is_shadow_cred_candidate(vuln_type: &str) -> bool {
     matches!(
         vuln_type.to_lowercase().as_str(),
@@ -229,9 +259,16 @@ pub(crate) fn is_shadow_cred_candidate(vuln_type: &str) -> bool {
             | "writedacl"
             | "writeowner"
             | "shadow_credentials"
+            | "allextendedrights"
+            | "writeproperty"
+            | "forcechangepassword"
             | "acl_genericall"
             | "acl_genericwrite"
             | "acl_writedacl"
+            | "acl_writeowner"
+            | "acl_allextendedrights"
+            | "acl_writeproperty"
+            | "acl_forcechangepassword"
     )
 }
 
@@ -253,6 +290,23 @@ mod tests {
         assert!(is_shadow_cred_candidate("acl_genericall"));
         assert!(is_shadow_cred_candidate("acl_genericwrite"));
         assert!(is_shadow_cred_candidate("acl_writedacl"));
+    }
+
+    #[test]
+    fn is_shadow_cred_candidate_accepts_allextendedrights_and_writeproperty() {
+        // BloodHound surfaces these on user-targeted ACLs (e.g. a low-priv
+        // account with AllExtendedRights on Administrator). Previously
+        // rejected; now accepted so certipy_shadow fires on the direct DA
+        // path.
+        assert!(is_shadow_cred_candidate("allextendedrights"));
+        assert!(is_shadow_cred_candidate("AllExtendedRights"));
+        assert!(is_shadow_cred_candidate("writeproperty"));
+        assert!(is_shadow_cred_candidate("forcechangepassword"));
+        // ACL-prefixed forms emitted by ldap_acl_enumeration parser.
+        assert!(is_shadow_cred_candidate("acl_allextendedrights"));
+        assert!(is_shadow_cred_candidate("acl_writeproperty"));
+        assert!(is_shadow_cred_candidate("acl_forcechangepassword"));
+        assert!(is_shadow_cred_candidate("acl_writeowner"));
     }
 
     #[test]
