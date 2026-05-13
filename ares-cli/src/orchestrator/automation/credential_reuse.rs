@@ -14,6 +14,7 @@ use tokio::sync::watch;
 use tracing::{debug, info, warn};
 
 use crate::orchestrator::dispatcher::Dispatcher;
+use crate::orchestrator::state::StateInner;
 
 /// Dedup key namespace for cross-domain reuse attempts.
 const DEDUP_CROSS_REUSE: &str = "cross_reuse";
@@ -63,6 +64,106 @@ fn cross_reuse_dedup_key(
 
 /// Cross-domain credential reuse automation.
 /// Interval: 30s. Tries hashes from dominated domains against other forests' DCs.
+/// `(dedup_key, dc_ip, username, source_domain, hash_value)` — one
+/// cross-forest hash-reuse work item.
+pub(crate) type CrossReuseHashWork = (String, String, String, String, String);
+
+/// `(dedup_key, dc_ip, username, target_domain, password)` — one
+/// cross-forest password-reuse work item.
+pub(crate) type CrossReuseCredWork = (String, String, String, String, String);
+
+/// Sanitize a password to its 16-char prefix-as-dedup-key form. Non-alphanumeric
+/// characters are replaced with `_` so the resulting string is safe to embed
+/// in a Redis key.
+pub(crate) fn cred_password_prefix(password: &str) -> String {
+    password
+        .chars()
+        .take(16)
+        .collect::<String>()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+        .collect()
+}
+
+/// Select cross-forest NTLM-hash reuse work items.
+///
+/// For each NTLM hash from a `reuse_candidate` principal, pairs it with
+/// every DC in a DIFFERENT forest than the hash's source domain. Skips
+/// already-processed dedup keys.
+pub(crate) fn select_hash_reuse_work(state: &StateInner) -> Vec<CrossReuseHashWork> {
+    let mut items = Vec::new();
+    let reuse_hashes: Vec<_> = state
+        .hashes
+        .iter()
+        .filter(|h| h.hash_type.to_uppercase() == "NTLM")
+        .filter(|h| !h.hash_value.is_empty())
+        .filter(|h| is_reuse_candidate(&h.username))
+        .collect();
+    for hash in &reuse_hashes {
+        let hash_domain = hash.domain.to_lowercase();
+        for (dc_domain, dc_ip) in &state.all_domains_with_dcs() {
+            let target_domain = dc_domain.to_lowercase();
+            if is_same_forest_domain(&target_domain, &hash_domain) {
+                continue;
+            }
+            let hash_prefix = &hash.hash_value[..16.min(hash.hash_value.len())];
+            let dedup = cross_reuse_dedup_key(dc_ip, &target_domain, &hash.username, hash_prefix);
+            if !state.is_processed(DEDUP_CROSS_REUSE, &dedup) {
+                items.push((
+                    dedup,
+                    dc_ip.clone(),
+                    hash.username.clone(),
+                    hash.domain.clone(),
+                    hash.hash_value.clone(),
+                ));
+            }
+        }
+    }
+    items
+}
+
+/// Select cross-forest cleartext-password reuse work items.
+///
+/// For each non-empty credential from a `reuse_candidate` principal, pairs
+/// it with every DC in a DIFFERENT forest than the credential's source
+/// domain. The `target_domain` is rebound to the target forest so the auth
+/// string used downstream is the actual reuse test.
+pub(crate) fn select_cred_reuse_work(state: &StateInner) -> Vec<CrossReuseCredWork> {
+    let mut items = Vec::new();
+    let reuse_creds: Vec<_> = state
+        .credentials
+        .iter()
+        .filter(|c| !c.password.is_empty())
+        .filter(|c| is_reuse_candidate(&c.username))
+        .collect();
+    for cred in &reuse_creds {
+        let cred_domain = cred.domain.to_lowercase();
+        for (dc_domain, dc_ip) in &state.all_domains_with_dcs() {
+            let target_domain = dc_domain.to_lowercase();
+            if is_same_forest_domain(&target_domain, &cred_domain) {
+                continue;
+            }
+            let pw_prefix_full = cred_password_prefix(&cred.password);
+            let dedup = cross_reuse_dedup_key(
+                dc_ip,
+                &target_domain,
+                &cred.username,
+                &format!("pw:{pw_prefix_full}"),
+            );
+            if !state.is_processed(DEDUP_CROSS_REUSE, &dedup) {
+                items.push((
+                    dedup,
+                    dc_ip.clone(),
+                    cred.username.clone(),
+                    target_domain,
+                    cred.password.clone(),
+                ));
+            }
+        }
+    }
+    items
+}
+
 pub async fn auto_credential_reuse(
     dispatcher: Arc<Dispatcher>,
     mut shutdown: watch::Receiver<bool>,
@@ -87,107 +188,16 @@ pub async fn auto_credential_reuse(
             continue;
         }
 
-        // Collect cross-domain reuse candidates:
-        // For each NTLM hash extracted from a dominated domain, try it against
-        // DCs in domains that are NOT in the same forest as the source domain.
-        // Also collect cleartext-password candidates from `state.credentials` —
-        // service accounts (e.g. `sql_svc`) routinely share passwords across
-        // forests in lab/legacy AD deployments, so cracked-Kerberoast plaintexts
-        // are a high-yield cross-forest pivot.
-        let hash_work: Vec<(String, String, String, String, String)>;
-        let cred_work: Vec<(String, String, String, String, String)>;
-        {
+        let (hash_work, cred_work) = {
             let state = dispatcher.state.read().await;
-
-            // Need at least 2 known DCs (implies multiple domains)
             if state.all_domains_with_dcs().len() < 2 {
                 continue;
             }
-
-            let mut h_items = Vec::new();
-            let mut c_items = Vec::new();
-
-            let reuse_hashes: Vec<_> = state
-                .hashes
-                .iter()
-                .filter(|h| h.hash_type.to_uppercase() == "NTLM")
-                .filter(|h| !h.hash_value.is_empty())
-                .filter(|h| is_reuse_candidate(&h.username))
-                .collect();
-
-            for hash in &reuse_hashes {
-                let hash_domain = hash.domain.to_lowercase();
-                for (dc_domain, dc_ip) in &state.all_domains_with_dcs() {
-                    let target_domain = dc_domain.to_lowercase();
-                    if is_same_forest_domain(&target_domain, &hash_domain) {
-                        continue;
-                    }
-                    let hash_prefix = &hash.hash_value[..16.min(hash.hash_value.len())];
-                    let dedup =
-                        cross_reuse_dedup_key(dc_ip, &target_domain, &hash.username, hash_prefix);
-                    if !state.is_processed(DEDUP_CROSS_REUSE, &dedup) {
-                        h_items.push((
-                            dedup,
-                            dc_ip.clone(),
-                            hash.username.clone(),
-                            hash.domain.clone(),
-                            hash.hash_value.clone(),
-                        ));
-                    }
-                }
-            }
-
-            // Cleartext-password reuse candidates. Try the same password but
-            // rebind the auth domain to the target forest's domain — this is
-            // the actual reuse test (account exists with same password on the
-            // other side). request_secretsdump's "credential.domain" is what
-            // ends up in the impacket auth string, so rewriting it here is
-            // what makes the cross-forest test meaningful.
-            let reuse_creds: Vec<_> = state
-                .credentials
-                .iter()
-                .filter(|c| !c.password.is_empty())
-                .filter(|c| is_reuse_candidate(&c.username))
-                .collect();
-
-            for cred in &reuse_creds {
-                let cred_domain = cred.domain.to_lowercase();
-                for (dc_domain, dc_ip) in &state.all_domains_with_dcs() {
-                    let target_domain = dc_domain.to_lowercase();
-                    if is_same_forest_domain(&target_domain, &cred_domain) {
-                        continue;
-                    }
-                    // Use first 16 chars of password as the dedup hash-prefix
-                    // analog so the key shape matches hash-side entries.
-                    let pw_prefix_full: String = cred
-                        .password
-                        .chars()
-                        .take(16)
-                        .collect::<String>()
-                        .chars()
-                        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
-                        .collect();
-                    let dedup = cross_reuse_dedup_key(
-                        dc_ip,
-                        &target_domain,
-                        &cred.username,
-                        &format!("pw:{pw_prefix_full}"),
-                    );
-                    if !state.is_processed(DEDUP_CROSS_REUSE, &dedup) {
-                        c_items.push((
-                            dedup,
-                            dc_ip.clone(),
-                            cred.username.clone(),
-                            target_domain,
-                            cred.password.clone(),
-                        ));
-                    }
-                }
-            }
-
-            hash_work = h_items;
-            cred_work = c_items;
-        }
+            (
+                select_hash_reuse_work(&state),
+                select_cred_reuse_work(&state),
+            )
+        };
 
         if hash_work.is_empty() && cred_work.is_empty() {
             continue;
@@ -410,5 +420,200 @@ mod tests {
     #[test]
     fn cross_reuse_dedup_key_empty_fields() {
         assert_eq!(cross_reuse_dedup_key("", "", "", ""), ":::");
+    }
+
+    // ── cred_password_prefix ────────────────────────────────────────────
+
+    #[test]
+    fn cred_password_prefix_takes_first_16_chars() {
+        assert_eq!(
+            cred_password_prefix("abcdefghijklmnopqrstuvwxyz"),
+            "abcdefghijklmnop"
+        );
+    }
+
+    #[test]
+    fn cred_password_prefix_sanitises_non_alphanumeric() {
+        assert_eq!(cred_password_prefix("P@ssw0rd!#$%"), "P_ssw0rd____");
+    }
+
+    #[test]
+    fn cred_password_prefix_short_password_passes_through() {
+        assert_eq!(cred_password_prefix("Pw1"), "Pw1");
+    }
+
+    #[test]
+    fn cred_password_prefix_empty_returns_empty() {
+        assert_eq!(cred_password_prefix(""), "");
+    }
+
+    // ── select_hash_reuse_work ──────────────────────────────────────────
+
+    fn make_cred(user: &str, password: &str, domain: &str) -> ares_core::models::Credential {
+        ares_core::models::Credential {
+            id: format!("c-{user}-{domain}"),
+            username: user.to_string(),
+            password: password.to_string(),
+            domain: domain.to_string(),
+            source: String::new(),
+            discovered_at: None,
+            is_admin: false,
+            parent_id: None,
+            attack_step: 0,
+        }
+    }
+
+    fn make_hash(user: &str, value: &str, domain: &str) -> ares_core::models::Hash {
+        ares_core::models::Hash {
+            id: format!("h-{user}-{domain}"),
+            username: user.to_string(),
+            hash_value: value.to_string(),
+            hash_type: "NTLM".to_string(),
+            domain: domain.to_string(),
+            cracked_password: None,
+            source: String::new(),
+            discovered_at: None,
+            parent_id: None,
+            attack_step: 0,
+            aes_key: None,
+            is_previous: false,
+            source_host: None,
+            is_trust_key: false,
+            trust_pair_label: None,
+        }
+    }
+
+    #[test]
+    fn hash_reuse_empty_state() {
+        let s = StateInner::new("op".into());
+        assert!(select_hash_reuse_work(&s).is_empty());
+    }
+
+    #[test]
+    fn hash_reuse_emits_when_cross_forest_dc_present() {
+        let mut s = StateInner::new("op".into());
+        // is_reuse_candidate requires admin/svc/sql/administrator/localuser
+        // — pick "Administrator" so the candidate filter passes.
+        s.hashes.push(make_hash(
+            "Administrator",
+            "aad3b435b51404eeaad3b435b51404ee",
+            "contoso.local",
+        ));
+        s.domain_controllers
+            .insert("fabrikam.local".into(), "192.168.58.40".into());
+        let work = select_hash_reuse_work(&s);
+        assert_eq!(work.len(), 1);
+        assert_eq!(work[0].1, "192.168.58.40");
+        assert_eq!(work[0].2, "Administrator");
+        assert_eq!(work[0].3, "contoso.local");
+    }
+
+    #[test]
+    fn hash_reuse_skips_same_forest_dc() {
+        let mut s = StateInner::new("op".into());
+        s.hashes.push(make_hash(
+            "alice",
+            "aad3b435b51404eeaad3b435b51404ee",
+            "contoso.local",
+        ));
+        // Same-forest DC → no reuse work (same forest already has the cred).
+        s.domain_controllers
+            .insert("contoso.local".into(), "192.168.58.10".into());
+        assert!(select_hash_reuse_work(&s).is_empty());
+    }
+
+    #[test]
+    fn hash_reuse_skips_non_ntlm_hashes() {
+        let mut s = StateInner::new("op".into());
+        let mut h = make_hash("Administrator", "deadbeef", "contoso.local");
+        h.hash_type = "AES256".into();
+        s.hashes.push(h);
+        s.domain_controllers
+            .insert("fabrikam.local".into(), "192.168.58.40".into());
+        assert!(select_hash_reuse_work(&s).is_empty());
+    }
+
+    #[test]
+    fn hash_reuse_skips_already_processed() {
+        let mut s = StateInner::new("op".into());
+        s.hashes.push(make_hash(
+            "Administrator",
+            "aad3b435b51404eeaad3b435b51404ee",
+            "contoso.local",
+        ));
+        s.domain_controllers
+            .insert("fabrikam.local".into(), "192.168.58.40".into());
+        let key = cross_reuse_dedup_key(
+            "192.168.58.40",
+            "fabrikam.local",
+            "Administrator",
+            &"aad3b435b51404eeaad3b435b51404ee"[..16],
+        );
+        s.mark_processed(DEDUP_CROSS_REUSE, key);
+        assert!(select_hash_reuse_work(&s).is_empty());
+    }
+
+    #[test]
+    fn hash_reuse_skips_non_candidate_username() {
+        let mut s = StateInner::new("op".into());
+        // "alice" doesn't match the candidate regex (admin/svc/sql/etc).
+        s.hashes
+            .push(make_hash("alice", "deadbeef", "contoso.local"));
+        s.domain_controllers
+            .insert("fabrikam.local".into(), "192.168.58.40".into());
+        assert!(select_hash_reuse_work(&s).is_empty());
+    }
+
+    #[test]
+    fn hash_reuse_skips_machine_account_username() {
+        let mut s = StateInner::new("op".into());
+        // Trailing-$ machine accounts are not reuse candidates.
+        s.hashes
+            .push(make_hash("SQL01$", "deadbeef", "contoso.local"));
+        s.domain_controllers
+            .insert("fabrikam.local".into(), "192.168.58.40".into());
+        assert!(select_hash_reuse_work(&s).is_empty());
+    }
+
+    // ── select_cred_reuse_work ──────────────────────────────────────────
+
+    #[test]
+    fn cred_reuse_empty_state() {
+        let s = StateInner::new("op".into());
+        assert!(select_cred_reuse_work(&s).is_empty());
+    }
+
+    #[test]
+    fn cred_reuse_emits_when_cross_forest_dc_present() {
+        let mut s = StateInner::new("op".into());
+        s.credentials
+            .push(make_cred("svc_sql", "Pw", "contoso.local"));
+        s.domain_controllers
+            .insert("fabrikam.local".into(), "192.168.58.40".into());
+        let work = select_cred_reuse_work(&s);
+        assert_eq!(work.len(), 1);
+        assert_eq!(work[0].2, "svc_sql");
+        assert_eq!(work[0].3, "fabrikam.local");
+        assert_eq!(work[0].4, "Pw");
+    }
+
+    #[test]
+    fn cred_reuse_skips_empty_password() {
+        let mut s = StateInner::new("op".into());
+        s.credentials
+            .push(make_cred("svc_sql", "", "contoso.local"));
+        s.domain_controllers
+            .insert("fabrikam.local".into(), "192.168.58.40".into());
+        assert!(select_cred_reuse_work(&s).is_empty());
+    }
+
+    #[test]
+    fn cred_reuse_skips_same_forest_dc() {
+        let mut s = StateInner::new("op".into());
+        s.credentials
+            .push(make_cred("svc_sql", "Pw", "contoso.local"));
+        s.domain_controllers
+            .insert("contoso.local".into(), "192.168.58.10".into());
+        assert!(select_cred_reuse_work(&s).is_empty());
     }
 }
