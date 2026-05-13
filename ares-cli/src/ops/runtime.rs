@@ -48,19 +48,14 @@ pub(crate) async fn ops_runtime(
 
     let creds = state.all_credentials.len();
     let hashes = state.all_hashes.len();
-    let hosts = state.all_hosts.len();
     let vulns = state.discovered_vulnerabilities.len();
     let exploited = state.exploited_vulnerabilities.len();
 
-    println!("Credentials: {creds}  Hashes: {hashes}  Hosts: {hosts}");
+    println!("Credentials: {creds}  Hashes: {hashes}");
     println!("Vulns: {vulns} discovered, {exploited} exploited");
+    println!();
 
-    if state.has_domain_admin {
-        println!("\n*** DOMAIN ADMIN ACHIEVED ***");
-    }
-    if state.has_golden_ticket {
-        println!("*** GOLDEN TICKET OBTAINED ***");
-    }
+    super::loot::print_runtime_summary(&state);
 
     // Token usage & estimated cost (from Redis counters set by workers)
     match ares_core::token_usage::get_token_usage(&mut conn, &op_id).await {

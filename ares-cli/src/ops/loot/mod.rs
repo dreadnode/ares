@@ -9,7 +9,7 @@ use ares_core::state::RedisStateReader;
 
 use crate::redis_conn::{connect_redis, resolve_operation_id};
 
-pub(crate) use self::format::print_loot;
+pub(crate) use self::format::{print_loot, print_runtime_summary};
 pub(crate) use self::snapshot::{loot_snapshot, print_diff, LootSnapshot};
 
 pub(crate) async fn ops_loot(

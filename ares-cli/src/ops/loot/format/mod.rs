@@ -50,6 +50,29 @@ pub(crate) fn print_loot(state: &SharedRedTeamState, json_output: bool) {
     }
 }
 
+/// Compact runtime view: DA/GT banner + per-domain breakdown + host/DC count.
+/// Shares the normalization pipeline with `print_loot` so the two views agree.
+pub(crate) fn print_runtime_summary(state: &SharedRedTeamState) {
+    let mut credentials = state.all_credentials.clone();
+    let mut hashes = state.all_hashes.clone();
+    let mut domains: Vec<String> = state.all_domains.clone();
+
+    sanitize_credentials(&mut credentials);
+
+    let target_domain = state.target.as_ref().map(|t| t.domain.as_str());
+
+    normalize_state_domains(
+        &state.all_users,
+        &mut credentials,
+        &mut hashes,
+        &mut domains,
+        &state.all_hosts,
+        target_domain,
+    );
+
+    display::print_runtime_summary(state, &credentials, &hashes, &domains);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
