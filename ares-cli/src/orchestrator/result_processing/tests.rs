@@ -1545,3 +1545,74 @@ fn error_indicates_stall_rejects_real_failures() {
     assert!(!error_indicates_stall(Some("")));
     assert!(!error_indicates_stall(None));
 }
+
+#[test]
+fn roast_token_recognises_kerberoast_hash() {
+    use super::roast_exploit_token;
+    assert_eq!(
+        roast_exploit_token(
+            "$krb5tgs$23$*sql_svc$CONTOSO.LOCAL$cifs/dc01...",
+            "sql_svc",
+            "contoso.local",
+        ),
+        Some("kerberoast_sql_svc".to_string())
+    );
+}
+
+#[test]
+fn roast_token_recognises_asrep_hash() {
+    use super::roast_exploit_token;
+    assert_eq!(
+        roast_exploit_token(
+            "$krb5asrep$23$alice@CONTOSO.LOCAL:abc...",
+            "alice",
+            "contoso.local",
+        ),
+        Some("asrep_roast_contoso.local".to_string())
+    );
+}
+
+#[test]
+fn roast_token_falls_back_to_username_when_domain_empty() {
+    use super::roast_exploit_token;
+    assert_eq!(
+        roast_exploit_token("$krb5asrep$23$alice@DOMAIN:abc...", "alice", "",),
+        Some("asrep_roast_alice".to_string())
+    );
+}
+
+#[test]
+fn roast_token_ignores_non_roast_hashes() {
+    use super::roast_exploit_token;
+    // NTLM hash from secretsdump — not a roast, no token.
+    assert_eq!(
+        roast_exploit_token(
+            "aad3b435b51404eeaad3b435b51404ee:8846f7eaee8fb117ad06bdd830b7586c",
+            "administrator",
+            "contoso.local",
+        ),
+        None
+    );
+    // Empty hash value
+    assert_eq!(roast_exploit_token("", "user", "dom"), None);
+}
+
+#[test]
+fn roast_token_returns_none_when_both_user_and_domain_empty() {
+    use super::roast_exploit_token;
+    assert_eq!(roast_exploit_token("$krb5asrep$23$...", "", ""), None);
+    assert_eq!(roast_exploit_token("$krb5tgs$23$...", "", "dom"), None);
+}
+
+#[test]
+fn roast_token_lowercases_account_and_domain() {
+    use super::roast_exploit_token;
+    assert_eq!(
+        roast_exploit_token("$krb5tgs$23$*", "SQL_SVC", "CONTOSO.LOCAL"),
+        Some("kerberoast_sql_svc".to_string())
+    );
+    assert_eq!(
+        roast_exploit_token("$krb5asrep$23$", "Alice", "Contoso.Local"),
+        Some("asrep_roast_contoso.local".to_string())
+    );
+}

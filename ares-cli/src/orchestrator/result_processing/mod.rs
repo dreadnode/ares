@@ -1003,6 +1003,38 @@ async fn resolve_domain_from_ip(dispatcher: &Arc<Dispatcher>, target_ip: Option<
     state.domains.first().cloned().unwrap_or_default()
 }
 
+/// `kerberoast_{username}` or `asrep_roast_{domain}` token when the
+/// captured hash carries the canonical impacket / hashcat prefix
+/// (`$krb5tgs$`, `$krb5asrep$`). Returns `None` for other hash types so
+/// the caller emits exactly one token per captured roast hash. Token
+/// values match dreadgoad's `transport_ares.aresExploitedToTechniqueIDs`
+/// prefix matchers — anything starting with `kerberoast_` / `asrep_roast_`
+/// credits the corresponding scoreboard primitive.
+fn roast_exploit_token(hash_value: &str, username: &str, domain: &str) -> Option<String> {
+    let user_lc = username.trim().to_lowercase();
+    let dom_lc = domain.trim().to_lowercase();
+    if hash_value.starts_with("$krb5tgs$") {
+        // Kerberoast: token-per-account so multiple SPN hashes don't
+        // collapse on a single entry.
+        if user_lc.is_empty() {
+            return None;
+        }
+        Some(format!("kerberoast_{user_lc}"))
+    } else if hash_value.starts_with("$krb5asrep$") {
+        // AS-REP roast: dreadgoad's objective is per-domain (any
+        // preauth-disabled account demonstrates the primitive); token-
+        // per-domain lets the inferred-hint path and the explicit-capture
+        // path converge on the same entry.
+        let key = if !dom_lc.is_empty() { dom_lc } else { user_lc };
+        if key.is_empty() {
+            return None;
+        }
+        Some(format!("asrep_roast_{key}"))
+    } else {
+        None
+    }
+}
+
 /// S4U auto-chain: detect .ccache ticket in task output and dispatch secretsdump.
 ///
 /// Mirrors Python's `_auto_chain_s4u_lateral_movement` — when a task produces a
@@ -1449,6 +1481,35 @@ async fn extract_discoveries(
 
                 emit_gmsa_exploit_token_if_gmsa(&dispatcher.state, &dispatcher.queue, &username)
                     .await;
+
+                // AS-REP / Kerberoast primitive credit on hash capture.
+                // dreadgoad's scoreboard otherwise infers `asrep_roast` /
+                // `kerberoast` from the cracked-credential hint, which only
+                // fires AFTER the hash crack succeeds. The crack may fail
+                // (insufficient wordlist coverage, AES instead of RC4) yet
+                // the capture itself already proves the primitive. Emit the
+                // token at capture time so credit is independent of crack
+                // outcome.
+                if let Some(token) = roast_exploit_token(&hash_value, &username, &domain) {
+                    if let Err(e) = dispatcher
+                        .state
+                        .mark_exploited(&dispatcher.queue, &token)
+                        .await
+                    {
+                        warn!(
+                            err = %e,
+                            vuln_id = %token,
+                            "Failed to mark roast hash as exploited"
+                        );
+                    } else {
+                        info!(
+                            vuln_id = %token,
+                            account = %username,
+                            domain = %domain,
+                            "Kerberos roast hash captured — emitted exploit token"
+                        );
+                    }
+                }
             }
             Ok(false) => {}
             Err(e) => warn!(err = %e, "Failed to publish hash"),
