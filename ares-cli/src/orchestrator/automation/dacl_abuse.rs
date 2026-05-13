@@ -45,20 +45,7 @@ pub async fn auto_dacl_abuse(dispatcher: Arc<Dispatcher>, mut shutdown: watch::R
         };
 
         for item in work {
-            let payload = json!({
-                "technique": "dacl_abuse",
-                "acl_type": item.vuln_type,
-                "vuln_id": item.vuln_id,
-                "source_user": item.source_user,
-                "target_user": item.target_user,
-                "target_ip": item.dc_ip,
-                "domain": item.domain,
-                "credential": {
-                    "username": item.credential.username,
-                    "password": item.credential.password,
-                    "domain": item.credential.domain,
-                },
-            });
+            let payload = build_dacl_payload(&item);
 
             let priority = dispatcher.effective_priority("dacl_abuse");
             // Mark dedup on Submitted OR Deferred to prevent the 30s tick from
@@ -107,11 +94,32 @@ pub async fn auto_dacl_abuse(dispatcher: Arc<Dispatcher>, mut shutdown: watch::R
     }
 }
 
+/// Build the JSON payload for a DACL-abuse dispatch. Pure construction.
+///
+/// Used by `auto_dacl_abuse` and exposed `pub(crate)` so the payload shape
+/// can be unit-tested without standing up a Dispatcher.
+pub(crate) fn build_dacl_payload(item: &DaclWork) -> serde_json::Value {
+    json!({
+        "technique": "dacl_abuse",
+        "acl_type": item.vuln_type,
+        "vuln_id": item.vuln_id,
+        "source_user": item.source_user,
+        "target_user": item.target_user,
+        "target_ip": item.dc_ip,
+        "domain": item.domain,
+        "credential": {
+            "username": item.credential.username,
+            "password": item.credential.password,
+            "domain": item.credential.domain,
+        },
+    })
+}
+
 /// Collect DACL abuse work items from state without holding async locks.
 ///
 /// Extracted for testability: scans `discovered_vulnerabilities` for ACL-type
 /// vulns that have a matching credential and haven't been processed yet.
-fn collect_dacl_work(state: &StateInner) -> Vec<DaclWork> {
+pub(crate) fn collect_dacl_work(state: &StateInner) -> Vec<DaclWork> {
     if state.credentials.is_empty() {
         return Vec::new();
     }
@@ -281,15 +289,15 @@ fn collect_dacl_work(state: &StateInner) -> Vec<DaclWork> {
     items
 }
 
-struct DaclWork {
-    dedup_key: String,
-    vuln_id: String,
-    vuln_type: String,
-    source_user: String,
-    target_user: String,
-    domain: String,
-    dc_ip: String,
-    credential: ares_core::models::Credential,
+pub(crate) struct DaclWork {
+    pub dedup_key: String,
+    pub vuln_id: String,
+    pub vuln_type: String,
+    pub source_user: String,
+    pub target_user: String,
+    pub domain: String,
+    pub dc_ip: String,
+    pub credential: ares_core::models::Credential,
 }
 
 /// RIDs of well-known privileged groups whose membership is owned by privileged
@@ -1368,5 +1376,59 @@ mod tests {
         let work = collect_dacl_work(&state);
         assert_eq!(work.len(), 1);
         assert_eq!(work[0].target_user, "fallback_target");
+    }
+
+    // ── build_dacl_payload ─────────────────────────────────────────────
+
+    fn make_cred(user: &str, password: &str, domain: &str) -> ares_core::models::Credential {
+        ares_core::models::Credential {
+            id: format!("c-{user}-{domain}"),
+            username: user.to_string(),
+            password: password.to_string(),
+            domain: domain.to_string(),
+            source: String::new(),
+            discovered_at: None,
+            is_admin: false,
+            parent_id: None,
+            attack_step: 0,
+        }
+    }
+
+    fn baseline_dacl_work() -> DaclWork {
+        DaclWork {
+            dedup_key: "dacl:v1".into(),
+            vuln_id: "v1".into(),
+            vuln_type: "genericall".into(),
+            source_user: "alice".into(),
+            target_user: "victim".into(),
+            domain: "contoso.local".into(),
+            dc_ip: "192.168.58.10".into(),
+            credential: make_cred("alice", "P@ssw0rd!", "contoso.local"),
+        }
+    }
+
+    #[test]
+    fn build_dacl_payload_emits_expected_fields() {
+        let p = build_dacl_payload(&baseline_dacl_work());
+        assert_eq!(p["technique"], "dacl_abuse");
+        assert_eq!(p["acl_type"], "genericall");
+        assert_eq!(p["vuln_id"], "v1");
+        assert_eq!(p["source_user"], "alice");
+        assert_eq!(p["target_user"], "victim");
+        assert_eq!(p["target_ip"], "192.168.58.10");
+        assert_eq!(p["domain"], "contoso.local");
+        assert_eq!(p["credential"]["username"], "alice");
+        assert_eq!(p["credential"]["password"], "P@ssw0rd!");
+        assert_eq!(p["credential"]["domain"], "contoso.local");
+    }
+
+    #[test]
+    fn build_dacl_payload_propagates_acl_type_verbatim() {
+        let mut w = baseline_dacl_work();
+        w.vuln_type = "writeproperty".into();
+        assert_eq!(build_dacl_payload(&w)["acl_type"], "writeproperty");
+
+        w.vuln_type = "forcechangepassword".into();
+        assert_eq!(build_dacl_payload(&w)["acl_type"], "forcechangepassword");
     }
 }
