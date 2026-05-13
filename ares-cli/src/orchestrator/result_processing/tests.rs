@@ -1466,3 +1466,34 @@ fn ntlmv1_signal_detects_in_tool_outputs_array() {
     });
     assert!(result_has_ntlmv1_signal(&Some(payload)));
 }
+
+#[test]
+fn error_indicates_stall_recognises_canonical_strings() {
+    use super::error_indicates_stall;
+    assert!(error_indicates_stall(Some(
+        "Agent ended turn without task_complete or request_assistance"
+    )));
+    assert!(error_indicates_stall(Some("Agent hit max steps")));
+    assert!(error_indicates_stall(Some("Agent hit max tokens")));
+    assert!(error_indicates_stall(Some(
+        "Budget exceeded: input_tokens=1000000"
+    )));
+    // Case-insensitive
+    assert!(error_indicates_stall(Some(
+        "AGENT ENDED TURN WITHOUT TASK_COMPLETE"
+    )));
+}
+
+#[test]
+fn error_indicates_stall_rejects_real_failures() {
+    use super::error_indicates_stall;
+    // Substantive failures must not be treated as stalls — the underlying
+    // primitive really did fail and the vuln must stay unexplodited.
+    assert!(!error_indicates_stall(Some("rpc_s_access_denied")));
+    assert!(!error_indicates_stall(Some(
+        "KDC_ERR_PREAUTH_FAILED — credential rejected"
+    )));
+    assert!(!error_indicates_stall(Some("LDAP bind failed: 0x52e")));
+    assert!(!error_indicates_stall(Some("")));
+    assert!(!error_indicates_stall(None));
+}
