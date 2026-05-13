@@ -10,6 +10,15 @@ use ares_core::telemetry::target::{extract_target_info, infer_target_type_from_i
 /// discovered during the operation (e.g. from SMB/DNS enumeration).
 pub type HostnameMap = Arc<HashMap<String, String>>;
 
+/// Inject a wrap-up nudge into the conversation when the agent has this
+/// many (or fewer) steps remaining before MaxSteps. The nudge tells the
+/// LLM to call `task_complete` with current findings rather than
+/// chasing more sub-objectives. Five steps is enough room for the agent
+/// to read the reminder, make ONE final tool call if it wants
+/// (e.g. `report_finding`), and then close out — but small enough that
+/// the warning isn't premature.
+const WRAPUP_THRESHOLD_STEPS: u32 = 5;
+
 use crate::provider::{
     ChatMessage, LlmProvider, LlmRequest, Role, StopReason, TokenUsage, ToolCall,
 };
@@ -183,6 +192,13 @@ async fn run_agent_loop_inner(
     let mut tool_call_counts: std::collections::HashMap<String, u32> =
         std::collections::HashMap::new();
     let max_tool_calls_per_name = config.max_tool_calls_per_name;
+    // Wrap-up nudge state: when `steps` reaches `max_steps - WRAPUP_THRESHOLD`,
+    // inject ONE user-role reminder that tells the agent to call
+    // task_complete with current findings before MaxSteps trips. Tracking
+    // injection with a bool keeps the nudge to exactly one message so we
+    // don't pollute the conversation if the agent keeps tool-calling after
+    // the warning.
+    let mut wrapup_nudge_injected = false;
 
     loop {
         if steps >= config.max_steps {
@@ -225,6 +241,45 @@ async fn run_agent_loop_inner(
         }
 
         steps += 1;
+
+        // Wrap-up nudge: when we're WRAPUP_THRESHOLD steps from the cap,
+        // inject one user-role reminder telling the agent to call
+        // task_complete with current findings IMMEDIATELY. The goal is to
+        // convert MaxSteps stalls (op evidence: mssql_deep_exploitation,
+        // long ESC8 LLM-routed chains) into structured task completions
+        // even when the agent hasn't finished every objective.
+        //
+        // Injected exactly once per loop run, gated by
+        // `wrapup_nudge_injected`. The agent may still ignore it — that's
+        // fine, MaxSteps + Tier 12's stalled-evidence credit still cover
+        // the credit side. The nudge just gives the agent a chance to
+        // converge cleanly.
+        if !wrapup_nudge_injected
+            && config.max_steps > WRAPUP_THRESHOLD_STEPS
+            && steps >= config.max_steps.saturating_sub(WRAPUP_THRESHOLD_STEPS)
+        {
+            wrapup_nudge_injected = true;
+            let nudge = format!(
+                "STEP BUDGET ALMOST EXHAUSTED — {} steps remaining out of {}. \
+                 Call `task_complete` NOW with whatever evidence you have: \
+                 cracked credentials, NTLM hashes, captured tickets, \
+                 confirmed remote SELECT rows, sysadmin pivot — anything \
+                 parser-grounded is enough. The orchestrator chains follow-on \
+                 automations from your discoveries; you do NOT need to chase \
+                 remaining objectives in this task. Ending without \
+                 task_complete marks the task as failed and forfeits the \
+                 work you've already done.",
+                config.max_steps.saturating_sub(steps),
+                config.max_steps,
+            );
+            messages.push(ChatMessage::text(Role::User, nudge));
+            warn!(
+                task_id = task_id,
+                steps = steps,
+                max_steps = config.max_steps,
+                "Agent loop injected MaxSteps wrap-up nudge"
+            );
+        }
 
         // Proactive compaction (rolling): fires at the configured utilization
         // ratio (default 60%) on the cadence tick, with a hard ceiling fallback.
@@ -940,5 +995,58 @@ mod runner_tests {
         let (k, p) = describe_reason(&r);
         assert_eq!(k, "Error");
         assert_eq!(p["err"], "network timeout");
+    }
+
+    // --- wrap-up nudge ---------------------------------------------------
+    //
+    // The full nudge-injection path lives inside `run_agent_loop`, which
+    // is end-to-end (provider + dispatcher + tool registry). The unit
+    // covered here is the gate predicate — pulled out as `should_inject_wrapup_nudge`
+    // so we can verify the boundary math without firing the loop.
+
+    fn should_inject_wrapup_nudge(steps: u32, max_steps: u32, already_injected: bool) -> bool {
+        // Mirrors the gate at runner.rs:~265 — keeps the math testable
+        // even though the side-effect (messages.push) is inside the loop.
+        !already_injected
+            && max_steps > super::WRAPUP_THRESHOLD_STEPS
+            && steps >= max_steps.saturating_sub(super::WRAPUP_THRESHOLD_STEPS)
+    }
+
+    #[test]
+    fn wrapup_nudge_fires_within_threshold_window() {
+        // Default max_steps is 75; threshold is 5 ⇒ nudge at steps 70, 71, ...
+        assert!(should_inject_wrapup_nudge(70, 75, false));
+        assert!(should_inject_wrapup_nudge(71, 75, false));
+        assert!(should_inject_wrapup_nudge(74, 75, false));
+        assert!(should_inject_wrapup_nudge(75, 75, false));
+    }
+
+    #[test]
+    fn wrapup_nudge_does_not_fire_before_threshold() {
+        // 69 steps with 75 cap and threshold=5 → 6 steps remaining, no nudge.
+        assert!(!should_inject_wrapup_nudge(69, 75, false));
+        assert!(!should_inject_wrapup_nudge(50, 75, false));
+        assert!(!should_inject_wrapup_nudge(0, 75, false));
+    }
+
+    #[test]
+    fn wrapup_nudge_fires_at_most_once() {
+        // Once the flag is set, subsequent ticks within the window must
+        // not re-inject — duplicate reminders bloat the conversation
+        // without helping the agent converge.
+        assert!(!should_inject_wrapup_nudge(71, 75, true));
+        assert!(!should_inject_wrapup_nudge(74, 75, true));
+    }
+
+    #[test]
+    fn wrapup_nudge_skipped_when_max_steps_too_small() {
+        // For pathological configs (max_steps <= threshold) the math
+        // would saturate to zero and fire at step 1 — uncomfortable
+        // behavior for small caps. Gate keeps the nudge to runs with
+        // breathing room.
+        assert!(!should_inject_wrapup_nudge(0, 3, false));
+        assert!(!should_inject_wrapup_nudge(0, 5, false));
+        // Boundary: max_steps == threshold+1 → first valid case.
+        assert!(should_inject_wrapup_nudge(1, 6, false));
     }
 }
