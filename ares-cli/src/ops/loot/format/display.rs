@@ -26,56 +26,23 @@ pub(super) fn print_loot_human(
         println!("Running:   {elapsed}");
     }
 
-    let mut domains: Vec<String> = domains_input
-        .iter()
-        .map(|d| d.trim().trim_end_matches('.').to_lowercase())
-        .filter(|d| !d.is_empty())
-        .collect();
-    domains.sort();
-    domains.dedup();
-
-    let mut forest_roots: Vec<String> = Vec::new();
-    let mut child_domains: HashMap<String, String> = HashMap::new();
-    for domain in &domains {
-        let parts: Vec<&str> = domain.split('.').collect();
-        if parts.len() >= 3 {
-            let parent = parts[1..].join(".");
-            if domains.contains(&parent) {
-                child_domains.insert(domain.clone(), parent);
-            } else {
-                forest_roots.push(domain.clone());
-            }
-        } else {
-            forest_roots.push(domain.clone());
-        }
-    }
-    forest_roots.sort();
+    let topology = compute_forest_topology(domains_input);
+    let domains: Vec<String> = {
+        let mut all: Vec<String> = topology.forest_roots.clone();
+        all.extend(topology.child_domains.keys().cloned());
+        all.sort();
+        all.dedup();
+        all
+    };
+    let forest_roots = &topology.forest_roots;
+    let child_domains = &topology.child_domains;
 
     let achievements = build_domain_achievements(state, hashes, credentials);
     let compromised_count = achievements
         .values()
         .filter(|a| a.has_da || a.has_golden_ticket)
         .count();
-    let compromised_forests: Vec<_> = forest_roots
-        .iter()
-        .filter(|root| {
-            let root_hit = achievements
-                .get(*root)
-                .map(|a| a.has_da || a.has_golden_ticket)
-                .unwrap_or(false);
-            let child_hit = child_domains
-                .iter()
-                .filter(|(_, parent)| *parent == *root)
-                .any(|(child, _)| {
-                    achievements
-                        .get(child)
-                        .map(|a| a.has_da || a.has_golden_ticket)
-                        .unwrap_or(false)
-                });
-            root_hit || child_hit
-        })
-        .cloned()
-        .collect();
+    let compromised_forests_count = count_compromised_forests(&topology, &achievements);
 
     if state.has_domain_admin || state.has_golden_ticket {
         let mut lines = Vec::new();
@@ -126,11 +93,11 @@ pub(super) fn print_loot_human(
             "Domains ({}/{} compromised, {}/{} forests):",
             compromised_count,
             domains.len(),
-            compromised_forests.len(),
+            compromised_forests_count,
             forest_roots.len()
         );
         let mut displayed = HashSet::new();
-        for root in &forest_roots {
+        for root in forest_roots {
             print_domain_line(root, "(forest root)", "  ", &achievements);
             displayed.insert(root.clone());
             let mut children: Vec<_> = child_domains
@@ -326,56 +293,23 @@ pub(super) fn print_runtime_summary(
     hashes: &[Hash],
     domains_input: &[String],
 ) {
-    let mut domains: Vec<String> = domains_input
-        .iter()
-        .map(|d| d.trim().trim_end_matches('.').to_lowercase())
-        .filter(|d| !d.is_empty())
-        .collect();
-    domains.sort();
-    domains.dedup();
-
-    let mut forest_roots: Vec<String> = Vec::new();
-    let mut child_domains: HashMap<String, String> = HashMap::new();
-    for domain in &domains {
-        let parts: Vec<&str> = domain.split('.').collect();
-        if parts.len() >= 3 {
-            let parent = parts[1..].join(".");
-            if domains.contains(&parent) {
-                child_domains.insert(domain.clone(), parent);
-            } else {
-                forest_roots.push(domain.clone());
-            }
-        } else {
-            forest_roots.push(domain.clone());
-        }
-    }
-    forest_roots.sort();
+    let topology = compute_forest_topology(domains_input);
+    let domains: Vec<String> = {
+        let mut all: Vec<String> = topology.forest_roots.clone();
+        all.extend(topology.child_domains.keys().cloned());
+        all.sort();
+        all.dedup();
+        all
+    };
+    let forest_roots = &topology.forest_roots;
+    let child_domains = &topology.child_domains;
 
     let achievements = build_domain_achievements(state, hashes, credentials);
     let compromised_count = achievements
         .values()
         .filter(|a| a.has_da || a.has_golden_ticket)
         .count();
-    let compromised_forests: Vec<_> = forest_roots
-        .iter()
-        .filter(|root| {
-            let root_hit = achievements
-                .get(*root)
-                .map(|a| a.has_da || a.has_golden_ticket)
-                .unwrap_or(false);
-            let child_hit = child_domains
-                .iter()
-                .filter(|(_, parent)| *parent == *root)
-                .any(|(child, _)| {
-                    achievements
-                        .get(child)
-                        .map(|a| a.has_da || a.has_golden_ticket)
-                        .unwrap_or(false)
-                });
-            root_hit || child_hit
-        })
-        .cloned()
-        .collect();
+    let compromised_forests_count = count_compromised_forests(&topology, &achievements);
 
     if state.has_domain_admin || state.has_golden_ticket {
         let mut lines = Vec::new();
@@ -424,11 +358,11 @@ pub(super) fn print_runtime_summary(
             "Domains ({}/{} compromised, {}/{} forests):",
             compromised_count,
             domains.len(),
-            compromised_forests.len(),
+            compromised_forests_count,
             forest_roots.len()
         );
         let mut displayed = HashSet::new();
-        for root in &forest_roots {
+        for root in forest_roots {
             print_domain_line(root, "(forest root)", "  ", &achievements);
             displayed.insert(root.clone());
             let mut children: Vec<_> = child_domains
@@ -534,14 +468,110 @@ fn print_vulnerabilities(
 /// operator sees here matches what the scoreboard will credit on the next
 /// dredgoad pull — the diff between "Discovered" and "Exploited" is the
 /// concrete regression backlog.
-fn print_token_coverage(
+/// Forest-root and child-domain partitioning of a sorted/deduped domain list.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(super) struct ForestTopology {
+    /// Sorted list of domain names that are NOT children of any other entry.
+    pub forest_roots: Vec<String>,
+    /// Map from child FQDN → its parent FQDN. Only populated when the parent
+    /// is itself in the input list (`a.b.c.local` is a child of `b.c.local`
+    /// only when `b.c.local` was also discovered).
+    pub child_domains: HashMap<String, String>,
+}
+
+/// Partition a domain list into forest roots and (child → parent) edges.
+///
+/// Inputs are normalised first: each entry is trimmed, has trailing `.`
+/// stripped, lowercased, deduped, and sorted. A domain with 3+ labels whose
+/// `labels[1..]` parent appears in the input list is recorded as a child;
+/// everything else is a forest root.
+///
+/// The forest root list is returned sorted ascending. Idempotent — calling
+/// twice on the same input produces the same output.
+pub(super) fn compute_forest_topology(domains_input: &[String]) -> ForestTopology {
+    let mut domains: Vec<String> = domains_input
+        .iter()
+        .map(|d| d.trim().trim_end_matches('.').to_lowercase())
+        .filter(|d| !d.is_empty())
+        .collect();
+    domains.sort();
+    domains.dedup();
+
+    let mut forest_roots: Vec<String> = Vec::new();
+    let mut child_domains: HashMap<String, String> = HashMap::new();
+    for domain in &domains {
+        let parts: Vec<&str> = domain.split('.').collect();
+        if parts.len() >= 3 {
+            let parent = parts[1..].join(".");
+            if domains.contains(&parent) {
+                child_domains.insert(domain.clone(), parent);
+            } else {
+                forest_roots.push(domain.clone());
+            }
+        } else {
+            forest_roots.push(domain.clone());
+        }
+    }
+    forest_roots.sort();
+    ForestTopology {
+        forest_roots,
+        child_domains,
+    }
+}
+
+/// Count compromised forests — a forest is compromised when its root or ANY
+/// of its children has DA OR a golden ticket. Used for the
+/// `(N/M forests)` figure in the loot human-readable header.
+pub(super) fn count_compromised_forests(
+    topology: &ForestTopology,
+    achievements: &HashMap<String, DomainAchievement>,
+) -> usize {
+    topology
+        .forest_roots
+        .iter()
+        .filter(|root| {
+            let root_hit = achievements
+                .get(*root)
+                .map(|a| a.has_da || a.has_golden_ticket)
+                .unwrap_or(false);
+            let child_hit = topology
+                .child_domains
+                .iter()
+                .filter(|(_, parent)| *parent == *root)
+                .any(|(child, _)| {
+                    achievements
+                        .get(child)
+                        .map(|a| a.has_da || a.has_golden_ticket)
+                        .unwrap_or(false)
+                });
+            root_hit || child_hit
+        })
+        .count()
+}
+
+/// One row of the token-coverage scoreboard.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) struct TokenCoverageRow {
+    pub category: String,
+    pub discovered: usize,
+    pub exploited: usize,
+    pub status: &'static str,
+}
+
+/// Compute the rows of the token-coverage scoreboard from discovered + exploited
+/// vuln IDs. Pure — no IO.
+///
+/// Each row carries the `(category, discovered_count, exploited_count, status)`
+/// tuple. `status` is `"\u{2713}"` when fully exploited, `"PARTIAL"` when some
+/// of the discovered vulns landed but not all, and `"\u{2717}"` when nothing
+/// landed yet. Categories that only appear under `:exploited` (e.g. milestone-
+/// emitted golden ticket entries) render with `discovered=0, exploited>0` and
+/// status `"\u{2713}"` — implicit-token semantics. Categories are sorted
+/// alphabetically.
+pub(super) fn compute_token_coverage_rows(
     discovered: &HashMap<String, VulnerabilityInfo>,
     exploited: &HashSet<String>,
-) {
-    if discovered.is_empty() && exploited.is_empty() {
-        return;
-    }
-
+) -> Vec<TokenCoverageRow> {
     let mut discovered_by_cat: std::collections::BTreeMap<String, usize> =
         std::collections::BTreeMap::new();
     let mut exploited_by_cat: std::collections::BTreeMap<String, usize> =
@@ -556,8 +586,6 @@ fn print_token_coverage(
         *exploited_by_cat.entry(cat).or_default() += 1;
     }
 
-    // Union of categories so a category that only appears in :exploited
-    // (e.g. golden_ticket-<domain> emitted by milestones) still renders.
     let mut categories: Vec<&String> = discovered_by_cat.keys().collect();
     for k in exploited_by_cat.keys() {
         if !categories.contains(&k) {
@@ -566,29 +594,54 @@ fn print_token_coverage(
     }
     categories.sort();
 
+    categories
+        .into_iter()
+        .map(|cat| {
+            let d = discovered_by_cat.get(cat).copied().unwrap_or(0);
+            let e = exploited_by_cat.get(cat).copied().unwrap_or(0);
+            let status = if d == 0 && e > 0 {
+                "\u{2713}"
+            } else if e == 0 {
+                "\u{2717}"
+            } else if e >= d {
+                "\u{2713}"
+            } else {
+                "PARTIAL"
+            };
+            TokenCoverageRow {
+                category: cat.clone(),
+                discovered: d,
+                exploited: e,
+                status,
+            }
+        })
+        .collect()
+}
+
+fn print_token_coverage(
+    discovered: &HashMap<String, VulnerabilityInfo>,
+    exploited: &HashSet<String>,
+) {
+    if discovered.is_empty() && exploited.is_empty() {
+        return;
+    }
+
+    let rows = compute_token_coverage_rows(discovered, exploited);
+
     println!(
         "Token Coverage ({} categories observed, scoreboard alignment):",
-        categories.len()
+        rows.len()
     );
     println!(
         "  {:<30} {:>10} {:>10}  Status",
         "Category", "Discovered", "Exploited"
     );
     println!("  {}", "-".repeat(70));
-    for cat in &categories {
-        let d = discovered_by_cat.get(*cat).copied().unwrap_or(0);
-        let e = exploited_by_cat.get(*cat).copied().unwrap_or(0);
-        let status = if d == 0 && e > 0 {
-            // Implicit token (e.g. milestone-emitted) — counts as full.
-            "\u{2713}"
-        } else if e == 0 {
-            "\u{2717}"
-        } else if e >= d {
-            "\u{2713}"
-        } else {
-            "PARTIAL"
-        };
-        println!("  {:<30} {:>10} {:>10}  {}", cat, d, e, status);
+    for row in &rows {
+        println!(
+            "  {:<30} {:>10} {:>10}  {}",
+            row.category, row.discovered, row.exploited, row.status
+        );
     }
     println!();
 }
@@ -1776,5 +1829,247 @@ mod tests {
         assert_eq!(super::token_category("zerologon_dc01"), "other");
         assert_eq!(super::token_category("nopac_192.168.58.10"), "other");
         assert_eq!(super::token_category(""), "other");
+    }
+
+    // ── compute_forest_topology ─────────────────────────────────────────
+
+    #[test]
+    fn topology_empty_input() {
+        let t = super::compute_forest_topology(&[]);
+        assert!(t.forest_roots.is_empty());
+        assert!(t.child_domains.is_empty());
+    }
+
+    #[test]
+    fn topology_lowercases_trims_and_dedupes() {
+        let input: Vec<String> = vec![
+            "Contoso.Local".into(),
+            "  contoso.local  ".into(),
+            "contoso.local.".into(),
+            "".into(),
+        ];
+        let t = super::compute_forest_topology(&input);
+        assert_eq!(t.forest_roots, vec!["contoso.local"]);
+        assert!(t.child_domains.is_empty());
+    }
+
+    #[test]
+    fn topology_two_level_is_forest_root() {
+        let input: Vec<String> = vec!["contoso.local".into()];
+        let t = super::compute_forest_topology(&input);
+        assert_eq!(t.forest_roots, vec!["contoso.local"]);
+    }
+
+    #[test]
+    fn topology_child_recognised_when_parent_in_set() {
+        let input: Vec<String> = vec!["child.contoso.local".into(), "contoso.local".into()];
+        let t = super::compute_forest_topology(&input);
+        assert_eq!(t.forest_roots, vec!["contoso.local"]);
+        assert_eq!(
+            t.child_domains
+                .get("child.contoso.local")
+                .map(String::as_str),
+            Some("contoso.local"),
+        );
+    }
+
+    #[test]
+    fn topology_child_promoted_to_root_when_parent_missing() {
+        // 3 labels but no matching parent → treated as forest root.
+        let input: Vec<String> = vec!["orphan.child.local".into()];
+        let t = super::compute_forest_topology(&input);
+        assert_eq!(t.forest_roots, vec!["orphan.child.local"]);
+        assert!(t.child_domains.is_empty());
+    }
+
+    #[test]
+    fn topology_multiple_forests_each_root() {
+        let input: Vec<String> = vec![
+            "contoso.local".into(),
+            "fabrikam.local".into(),
+            "child.contoso.local".into(),
+        ];
+        let t = super::compute_forest_topology(&input);
+        let mut roots = t.forest_roots;
+        roots.sort();
+        assert_eq!(roots, vec!["contoso.local", "fabrikam.local"]);
+        assert_eq!(t.child_domains.len(), 1);
+    }
+
+    #[test]
+    fn topology_idempotent_against_repeated_input() {
+        let input: Vec<String> = vec![
+            "Contoso.Local".into(),
+            "child.contoso.local.".into(),
+            "child.contoso.local".into(),
+            "child.contoso.local".into(),
+        ];
+        let t1 = super::compute_forest_topology(&input);
+        let t2 = super::compute_forest_topology(&input);
+        assert_eq!(t1, t2);
+    }
+
+    // ── count_compromised_forests ───────────────────────────────────────
+
+    fn ach(has_da: bool, has_gt: bool) -> super::DomainAchievement {
+        super::DomainAchievement {
+            has_da,
+            has_golden_ticket: has_gt,
+            krbtgt_hash_types: Vec::new(),
+            admin_users: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn count_forests_zero_when_no_achievements() {
+        let topology = super::compute_forest_topology(&["contoso.local".into()]);
+        assert_eq!(
+            super::count_compromised_forests(&topology, &HashMap::new()),
+            0
+        );
+    }
+
+    #[test]
+    fn count_forests_counts_root_da() {
+        let topology = super::compute_forest_topology(&["contoso.local".into()]);
+        let mut a = HashMap::new();
+        a.insert("contoso.local".to_string(), ach(true, false));
+        assert_eq!(super::count_compromised_forests(&topology, &a), 1);
+    }
+
+    #[test]
+    fn count_forests_counts_root_golden_ticket_only() {
+        let topology = super::compute_forest_topology(&["contoso.local".into()]);
+        let mut a = HashMap::new();
+        a.insert("contoso.local".to_string(), ach(false, true));
+        assert_eq!(super::count_compromised_forests(&topology, &a), 1);
+    }
+
+    #[test]
+    fn count_forests_credits_root_when_child_compromised() {
+        let topology =
+            super::compute_forest_topology(&["contoso.local".into(), "child.contoso.local".into()]);
+        let mut a = HashMap::new();
+        a.insert("child.contoso.local".to_string(), ach(true, false));
+        // Root itself wasn't compromised but its child was → forest is.
+        assert_eq!(super::count_compromised_forests(&topology, &a), 1);
+    }
+
+    #[test]
+    fn count_forests_multiple_forests() {
+        let topology =
+            super::compute_forest_topology(&["contoso.local".into(), "fabrikam.local".into()]);
+        let mut a = HashMap::new();
+        a.insert("contoso.local".to_string(), ach(true, false));
+        // Fabrikam not compromised → count = 1.
+        assert_eq!(super::count_compromised_forests(&topology, &a), 1);
+        a.insert("fabrikam.local".to_string(), ach(false, true));
+        assert_eq!(super::count_compromised_forests(&topology, &a), 2);
+    }
+
+    #[test]
+    fn count_forests_ignores_neither_da_nor_gt() {
+        let topology = super::compute_forest_topology(&["contoso.local".into()]);
+        let mut a = HashMap::new();
+        a.insert("contoso.local".to_string(), ach(false, false));
+        assert_eq!(super::count_compromised_forests(&topology, &a), 0);
+    }
+
+    // ── compute_token_coverage_rows ─────────────────────────────────────
+
+    fn discovered_vuln(vuln_id: &str) -> (String, ares_core::models::VulnerabilityInfo) {
+        (
+            vuln_id.to_string(),
+            ares_core::models::VulnerabilityInfo {
+                vuln_id: vuln_id.into(),
+                vuln_type: "test".into(),
+                target: "".into(),
+                discovered_by: "test".into(),
+                discovered_at: chrono::Utc::now(),
+                details: HashMap::new(),
+                recommended_agent: String::new(),
+                priority: 1,
+            },
+        )
+    }
+
+    fn discovered_map(ids: &[&str]) -> HashMap<String, ares_core::models::VulnerabilityInfo> {
+        ids.iter().map(|i| discovered_vuln(i)).collect()
+    }
+
+    #[test]
+    fn coverage_rows_empty_when_both_empty() {
+        let rows = super::compute_token_coverage_rows(&HashMap::new(), &HashSet::new());
+        assert!(rows.is_empty());
+    }
+
+    #[test]
+    fn coverage_rows_x_mark_when_discovered_but_none_exploited() {
+        let rows = super::compute_token_coverage_rows(
+            &discovered_map(&["kerberoast_svc_sql"]),
+            &HashSet::new(),
+        );
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].category, "kerberoast");
+        assert_eq!(rows[0].discovered, 1);
+        assert_eq!(rows[0].exploited, 0);
+        assert_eq!(rows[0].status, "\u{2717}");
+    }
+
+    #[test]
+    fn coverage_rows_check_mark_when_all_exploited() {
+        let discovered = discovered_map(&["kerberoast_svc_sql"]);
+        let exploited: HashSet<String> = ["kerberoast_svc_sql".to_string()].into_iter().collect();
+        let rows = super::compute_token_coverage_rows(&discovered, &exploited);
+        assert_eq!(rows[0].status, "\u{2713}");
+        assert_eq!(rows[0].exploited, 1);
+    }
+
+    #[test]
+    fn coverage_rows_partial_when_some_exploited() {
+        let discovered = discovered_map(&["kerberoast_a", "kerberoast_b"]);
+        let exploited: HashSet<String> = ["kerberoast_a".to_string()].into_iter().collect();
+        let rows = super::compute_token_coverage_rows(&discovered, &exploited);
+        assert_eq!(rows[0].category, "kerberoast");
+        assert_eq!(rows[0].discovered, 2);
+        assert_eq!(rows[0].exploited, 1);
+        assert_eq!(rows[0].status, "PARTIAL");
+    }
+
+    #[test]
+    fn coverage_rows_implicit_token_when_only_exploited_set_has_entry() {
+        // Milestone-emitted golden_ticket appears only in exploited.
+        let exploited: HashSet<String> = ["golden_ticket_contoso.local".to_string()]
+            .into_iter()
+            .collect();
+        let rows = super::compute_token_coverage_rows(&HashMap::new(), &exploited);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].category, "golden_ticket");
+        assert_eq!(rows[0].discovered, 0);
+        assert_eq!(rows[0].exploited, 1);
+        assert_eq!(rows[0].status, "\u{2713}");
+    }
+
+    #[test]
+    fn coverage_rows_sorted_alphabetically() {
+        let discovered = discovered_map(&["kerberoast_a", "asrep_roast_b", "adcs_esc1_c"]);
+        let rows = super::compute_token_coverage_rows(&discovered, &HashSet::new());
+        let cats: Vec<&str> = rows.iter().map(|r| r.category.as_str()).collect();
+        assert_eq!(cats, vec!["adcs_esc1", "asrep_roast", "kerberoast"]);
+    }
+
+    #[test]
+    fn coverage_rows_excess_exploited_still_check_mark() {
+        // exploited >= discovered → check mark, not partial. Mirrors the
+        // implicit-token semantics for tokens credited via milestone after
+        // discovery dropped them.
+        let discovered = discovered_map(&["kerberoast_a"]);
+        let exploited: HashSet<String> = ["kerberoast_a".to_string(), "kerberoast_b".to_string()]
+            .into_iter()
+            .collect();
+        let rows = super::compute_token_coverage_rows(&discovered, &exploited);
+        assert_eq!(rows[0].status, "\u{2713}");
+        assert_eq!(rows[0].discovered, 1);
+        assert_eq!(rows[0].exploited, 2);
     }
 }

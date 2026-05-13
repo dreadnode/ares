@@ -130,6 +130,81 @@ pub(crate) fn extract_ip_from_line(line: &str) -> Option<String> {
         .map(|s| s.to_string())
 }
 
+/// Aggregate every string `tool_output` / `output` / `tool_outputs[i]` field
+/// in `payload` into a `Vec<String>`. `tool_outputs` accepts both bare-string
+/// entries and objects with an `output` field.
+///
+/// Drives the SID extraction path so the same caller produces the same input
+/// regardless of which output convention the tool used. Pure — no Redis, no
+/// dispatcher.
+pub(crate) fn collect_payload_text_parts(payload: &Value) -> Vec<String> {
+    let mut parts: Vec<String> = Vec::new();
+    for key in &["tool_output", "output"] {
+        if let Some(s) = payload.get(*key).and_then(|v| v.as_str()) {
+            parts.push(s.to_string());
+        }
+    }
+    if let Some(arr) = payload.get("tool_outputs").and_then(|v| v.as_array()) {
+        for item in arr {
+            if let Some(s) = item.as_str() {
+                parts.push(s.to_string());
+            } else if let Some(s) = item.get("output").and_then(|v| v.as_str()) {
+                parts.push(s.to_string());
+            }
+        }
+    }
+    parts
+}
+
+/// Scan a `payload`'s text fields for a "golden ticket saved" marker.
+///
+/// Walks `tool_outputs` (string OR `{output: string}` form), then
+/// `tool_output` / `output` / `summary`, then the explicit
+/// `has_golden_ticket: true` flag. Mirrors the gate inside
+/// `check_golden_ticket_completion` so the detection rule can be tested
+/// against a synthetic payload without a Dispatcher.
+pub(crate) fn payload_contains_golden_ticket_marker(payload: &Value) -> bool {
+    if let Some(arr) = payload.get("tool_outputs").and_then(|v| v.as_array()) {
+        for item in arr {
+            let text = item
+                .as_str()
+                .or_else(|| item.get("output").and_then(|v| v.as_str()))
+                .unwrap_or("");
+            if has_golden_ticket_indicator(text) {
+                return true;
+            }
+        }
+    }
+    for key in &["tool_output", "output", "summary"] {
+        if let Some(text) = payload.get(*key).and_then(|v| v.as_str()) {
+            if has_golden_ticket_indicator(text) {
+                return true;
+            }
+        }
+    }
+    payload.get("has_golden_ticket").and_then(|v| v.as_bool()) == Some(true)
+}
+
+/// Extract a domain SID and (optional) flat name from already-collected text.
+///
+/// Returns `Some((sid, Some(flat)))` when the SID came from `rpcclient
+/// lsaquery` output (which always carries the flat name).
+/// Returns `Some((sid, None))` when the SID came from
+/// `impacket-lookupsid`'s `Domain SID is: …` header (flat name lives in the
+/// RID lines, callers extract it separately).
+/// Returns `None` when neither path matches.
+pub(crate) fn parse_sid_from_combined_text(combined: &str) -> Option<(String, Option<String>)> {
+    let lookupsid_sid = ares_core::parsing::LOOKUPSID_HEADER_RE
+        .captures(combined)
+        .and_then(|c| c.get(1).map(|m| m.as_str().to_string()));
+    let lsaquery_pair = ares_core::parsing::extract_lsaquery_domain_sid(combined);
+    match (lookupsid_sid, lsaquery_pair) {
+        (Some(s), _) => Some((s, None)),
+        (None, Some((flat, s))) => Some((s, Some(flat))),
+        (None, None) => None,
+    }
+}
+
 /// Check result for domain admin indicators and update state.
 pub(crate) async fn check_domain_admin_indicators(payload: &Value, dispatcher: &Arc<Dispatcher>) {
     if !has_domain_admin_indicator(payload) {
@@ -212,36 +287,10 @@ pub(crate) async fn check_golden_ticket_completion(
     // Per-domain dedup happens after we resolve `domain` below — a forge
     // for one domain must not block recording another (multi-domain ops
     // routinely capture krbtgt for parent + child or both forests).
-    let mut found_ticket = false;
-    let mut domain = String::new();
-    if let Some(arr) = payload.get("tool_outputs").and_then(|v| v.as_array()) {
-        for item in arr {
-            let text = item
-                .as_str()
-                .or_else(|| item.get("output").and_then(|v| v.as_str()))
-                .unwrap_or("");
-            if has_golden_ticket_indicator(text) {
-                found_ticket = true;
-                break;
-            }
-        }
-    }
-    if !found_ticket {
-        for key in &["tool_output", "output", "summary"] {
-            if let Some(text) = payload.get(*key).and_then(|v| v.as_str()) {
-                if has_golden_ticket_indicator(text) {
-                    found_ticket = true;
-                    break;
-                }
-            }
-        }
-    }
-    if !found_ticket && payload.get("has_golden_ticket").and_then(|v| v.as_bool()) == Some(true) {
-        found_ticket = true;
-    }
-    if !found_ticket {
+    if !payload_contains_golden_ticket_marker(payload) {
         return;
     }
+    let mut domain = String::new();
     if let Some(d) = payload.get("domain").and_then(|v| v.as_str()) {
         domain = d.to_string();
     }
@@ -397,21 +446,7 @@ pub(crate) async fn detect_and_upgrade_admin_credentials(text: &str, dispatcher:
 }
 
 pub(crate) async fn extract_and_cache_domain_sid(payload: &Value, dispatcher: &Arc<Dispatcher>) {
-    let mut text_parts: Vec<&str> = Vec::new();
-    for key in &["tool_output", "output"] {
-        if let Some(s) = payload.get(*key).and_then(|v| v.as_str()) {
-            text_parts.push(s);
-        }
-    }
-    if let Some(arr) = payload.get("tool_outputs").and_then(|v| v.as_array()) {
-        for item in arr {
-            if let Some(s) = item.as_str() {
-                text_parts.push(s);
-            } else if let Some(s) = item.get("output").and_then(|v| v.as_str()) {
-                text_parts.push(s);
-            }
-        }
-    }
+    let text_parts = collect_payload_text_parts(payload);
     if text_parts.is_empty() {
         return;
     }
@@ -434,14 +469,9 @@ pub(crate) async fn extract_and_cache_domain_sid(payload: &Value, dispatcher: &A
     // lsaquery but failed to cache it (only lookupsid was wired up), so the
     // subsequent forge_inter_realm_and_dump fired with has_target_sid=false
     // and produced no krbtgt extraction.
-    let lookupsid_sid = ares_core::parsing::LOOKUPSID_HEADER_RE
-        .captures(&combined)
-        .and_then(|c| c.get(1).map(|m| m.as_str().to_string()));
-    let lsaquery_pair = ares_core::parsing::extract_lsaquery_domain_sid(&combined);
-    let (sid, lsaquery_flat) = match (lookupsid_sid, lsaquery_pair) {
-        (Some(s), _) => (s, None),
-        (None, Some((flat, s))) => (s, Some(flat)),
-        (None, None) => return,
+    let (sid, lsaquery_flat) = match parse_sid_from_combined_text(&combined) {
+        Some(p) => p,
+        None => return,
     };
 
     // Resolve the FQDN this SID belongs to. Anchor preference order:
@@ -762,5 +792,172 @@ mod tests {
     #[test]
     fn extract_ip_not_fooled_by_version() {
         assert!(extract_ip_from_line("version 1.2.3 released").is_none());
+    }
+
+    // ── collect_payload_text_parts ─────────────────────────────────────
+
+    #[test]
+    fn collect_text_parts_gathers_string_fields() {
+        let p = json!({
+            "tool_output": "alpha",
+            "output": "beta",
+            "summary": "ignored",
+        });
+        assert_eq!(collect_payload_text_parts(&p), vec!["alpha", "beta"]);
+    }
+
+    #[test]
+    fn collect_text_parts_walks_tool_outputs_array_strings() {
+        let p = json!({
+            "tool_outputs": ["first", "second"],
+        });
+        assert_eq!(collect_payload_text_parts(&p), vec!["first", "second"]);
+    }
+
+    #[test]
+    fn collect_text_parts_walks_tool_outputs_array_objects() {
+        let p = json!({
+            "tool_outputs": [
+                {"name": "tool1", "output": "first"},
+                {"name": "tool2", "output": "second"},
+            ],
+        });
+        assert_eq!(collect_payload_text_parts(&p), vec!["first", "second"]);
+    }
+
+    #[test]
+    fn collect_text_parts_mixes_string_and_object_entries() {
+        let p = json!({
+            "tool_output": "scalar",
+            "tool_outputs": [
+                "bare-string",
+                {"output": "from-object"},
+            ],
+        });
+        assert_eq!(
+            collect_payload_text_parts(&p),
+            vec!["scalar", "bare-string", "from-object"]
+        );
+    }
+
+    #[test]
+    fn collect_text_parts_skips_non_string_entries() {
+        let p = json!({
+            "tool_outputs": [42, true, null, "kept"],
+        });
+        assert_eq!(collect_payload_text_parts(&p), vec!["kept"]);
+    }
+
+    #[test]
+    fn collect_text_parts_empty_for_empty_payload() {
+        assert!(collect_payload_text_parts(&json!({})).is_empty());
+    }
+
+    // ── payload_contains_golden_ticket_marker ──────────────────────────
+
+    #[test]
+    fn gt_marker_in_tool_outputs_string_form() {
+        let p = json!({
+            "tool_outputs": ["Saving ticket in admin.ccache"],
+        });
+        assert!(payload_contains_golden_ticket_marker(&p));
+    }
+
+    #[test]
+    fn gt_marker_in_tool_outputs_object_form() {
+        let p = json!({
+            "tool_outputs": [
+                {"output": "Saving ticket in admin.ccache for Administrator"},
+            ],
+        });
+        assert!(payload_contains_golden_ticket_marker(&p));
+    }
+
+    #[test]
+    fn gt_marker_in_summary() {
+        let p = json!({
+            "summary": "Saving ticket in admin.ccache; krbtgt forged",
+        });
+        assert!(payload_contains_golden_ticket_marker(&p));
+    }
+
+    #[test]
+    fn gt_marker_in_tool_output_field() {
+        let p = json!({
+            "tool_output": "Saving ticket in foo.ccache",
+        });
+        assert!(payload_contains_golden_ticket_marker(&p));
+    }
+
+    #[test]
+    fn gt_marker_via_explicit_flag() {
+        let p = json!({
+            "has_golden_ticket": true,
+        });
+        assert!(payload_contains_golden_ticket_marker(&p));
+    }
+
+    #[test]
+    fn gt_marker_explicit_flag_false_does_not_trigger() {
+        let p = json!({
+            "has_golden_ticket": false,
+        });
+        assert!(!payload_contains_golden_ticket_marker(&p));
+    }
+
+    #[test]
+    fn gt_marker_requires_both_saving_and_ccache() {
+        // "Saving ticket in" without ".ccache" → not a match.
+        let p = json!({"summary": "Saving ticket in memory"});
+        assert!(!payload_contains_golden_ticket_marker(&p));
+        // ".ccache" without "Saving ticket in" → not a match.
+        let p = json!({"summary": "Found a .ccache file at /tmp/x.ccache"});
+        assert!(!payload_contains_golden_ticket_marker(&p));
+    }
+
+    #[test]
+    fn gt_marker_returns_false_for_unrelated_payload() {
+        let p = json!({"summary": "nothing here"});
+        assert!(!payload_contains_golden_ticket_marker(&p));
+    }
+
+    // ── parse_sid_from_combined_text ───────────────────────────────────
+
+    #[test]
+    fn parse_sid_recognises_lookupsid_header() {
+        let text = "Brute forcing SIDs at 192.168.58.10
+[*] StringBinding ncacn_np:192.168.58.10[\\PIPE\\lsarpc]
+[*] Domain SID is: S-1-5-21-1111-2222-3333";
+        let (sid, flat) = parse_sid_from_combined_text(text).unwrap();
+        assert_eq!(sid, "S-1-5-21-1111-2222-3333");
+        assert!(flat.is_none());
+    }
+
+    #[test]
+    fn parse_sid_recognises_lsaquery_pair() {
+        // lsaquery output carries both Domain Name and Domain Sid.
+        let text = "\
+Domain Name: FABRIKAM
+Domain Sid: S-1-5-21-9999-8888-7777";
+        let (sid, flat) = parse_sid_from_combined_text(text).unwrap();
+        assert_eq!(sid, "S-1-5-21-9999-8888-7777");
+        assert_eq!(flat.as_deref(), Some("FABRIKAM"));
+    }
+
+    #[test]
+    fn parse_sid_returns_none_for_unrelated_text() {
+        assert!(parse_sid_from_combined_text("nothing here").is_none());
+    }
+
+    #[test]
+    fn parse_sid_prefers_lookupsid_header_over_lsaquery() {
+        // Both formats present — lookupsid wins (the first branch in the match).
+        let text = "\
+[*] Domain SID is: S-1-5-21-1111-2222-3333
+Domain Name: FABRIKAM
+Domain Sid: S-1-5-21-9999-8888-7777";
+        let (sid, flat) = parse_sid_from_combined_text(text).unwrap();
+        assert_eq!(sid, "S-1-5-21-1111-2222-3333");
+        assert!(flat.is_none());
     }
 }
