@@ -601,7 +601,11 @@ fn print_token_coverage(
 ///
 /// Kept in sync with `aresExploitedToTechniqueIDs` in
 /// `DreadGOAD/cli/internal/scoreboard/transport_ares.go`.
-fn token_category(vuln_id: &str) -> String {
+///
+/// Visible to sibling `json.rs` so the JSON output reuses the exact same
+/// classification — divergence between text and JSON views would silently
+/// confuse downstream blue-team dashboards.
+pub(super) fn token_category(vuln_id: &str) -> String {
     let lower = vuln_id.to_lowercase();
     // ADCS ESC variants are the only category where the trailing digits
     // are part of the category name (esc1, esc10_case1, esc15, ...). Long

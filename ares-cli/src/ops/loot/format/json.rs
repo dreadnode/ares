@@ -178,6 +178,10 @@ pub(super) fn print_loot_json(
             "details": v.details,
             "discovered_by": v.discovered_by,
         })).collect::<Vec<_>>(),
+        "token_coverage": build_token_coverage_json(
+            &state.discovered_vulnerabilities,
+            &state.exploited_vulnerabilities,
+        ),
         "timeline": state.all_timeline_events,
         "techniques": state.all_techniques,
     });
@@ -186,4 +190,159 @@ pub(super) fn print_loot_json(
         "{}",
         serde_json::to_string_pretty(&output).unwrap_or_default()
     );
+}
+
+/// Build a JSON object summarising scoreboard-token coverage:
+///
+/// ```json
+/// {
+///   "acl_abuse":        { "discovered": 12, "exploited": 3, "status": "partial" },
+///   "adcs_esc1":        { "discovered": 2,  "exploited": 2, "status": "ok" },
+///   "constrained_delegation": { "discovered": 2, "exploited": 0, "status": "missing" },
+///   ...
+/// }
+/// ```
+///
+/// Used by downstream consumers (blue submit, dashboards, the dreadgoad
+/// scoreboard verifier) so they don't have to re-derive category mapping
+/// from raw `vuln_id` strings. Category logic mirrors
+/// `super::display::token_category` — keep them in lock-step so the
+/// text/JSON views match.
+fn build_token_coverage_json(
+    discovered: &HashMap<String, ares_core::models::VulnerabilityInfo>,
+    exploited: &std::collections::HashSet<String>,
+) -> serde_json::Value {
+    let mut discovered_by_cat: std::collections::BTreeMap<String, usize> =
+        std::collections::BTreeMap::new();
+    let mut exploited_by_cat: std::collections::BTreeMap<String, usize> =
+        std::collections::BTreeMap::new();
+    for id in discovered.keys() {
+        let cat = super::display::token_category(id);
+        *discovered_by_cat.entry(cat).or_default() += 1;
+    }
+    for id in exploited {
+        let cat = super::display::token_category(id);
+        *exploited_by_cat.entry(cat).or_default() += 1;
+    }
+    let mut categories: Vec<&String> = discovered_by_cat.keys().collect();
+    for k in exploited_by_cat.keys() {
+        if !categories.contains(&k) {
+            categories.push(k);
+        }
+    }
+    categories.sort();
+
+    let mut out = serde_json::Map::new();
+    for cat in categories {
+        let d = discovered_by_cat.get(cat).copied().unwrap_or(0);
+        let e = exploited_by_cat.get(cat).copied().unwrap_or(0);
+        // Status mirrors the text view exactly so the operator's eye and
+        // the dashboard's diff land on the same string.
+        let status = if d == 0 && e > 0 {
+            "ok"
+        } else if e == 0 {
+            "missing"
+        } else if e >= d {
+            "ok"
+        } else {
+            "partial"
+        };
+        out.insert(
+            cat.clone(),
+            serde_json::json!({
+                "discovered": d,
+                "exploited": e,
+                "status": status,
+            }),
+        );
+    }
+    serde_json::Value::Object(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ares_core::models::VulnerabilityInfo;
+    use std::collections::HashSet;
+
+    fn vuln(vuln_type: &str, vuln_id: &str) -> VulnerabilityInfo {
+        VulnerabilityInfo {
+            vuln_id: vuln_id.to_string(),
+            vuln_type: vuln_type.to_string(),
+            target: String::new(),
+            discovered_by: "test".into(),
+            discovered_at: chrono::Utc::now(),
+            details: std::collections::HashMap::new(),
+            recommended_agent: String::new(),
+            priority: 1,
+        }
+    }
+
+    #[test]
+    fn token_coverage_groups_per_category_and_marks_status() {
+        let mut discovered: HashMap<String, VulnerabilityInfo> = HashMap::new();
+        // 2 ACL primitives discovered, 0 exploited → missing
+        discovered.insert(
+            "acl_writeproperty_alice_bob".into(),
+            vuln("writeproperty", "acl_writeproperty_alice_bob"),
+        );
+        discovered.insert(
+            "acl_genericall_alice_bob".into(),
+            vuln("genericall", "acl_genericall_alice_bob"),
+        );
+        // 1 ESC1 discovered + exploited → ok
+        discovered.insert(
+            "adcs_esc1_192.168.58.50_template".into(),
+            vuln("adcs_esc1", "adcs_esc1_192.168.58.50_template"),
+        );
+        // 2 mssql_linked_server discovered, 1 exploited → partial
+        discovered.insert(
+            "mssql_linked_server_192.168.58.51_a".into(),
+            vuln("mssql_linked_server", "mssql_linked_server_192.168.58.51_a"),
+        );
+        discovered.insert(
+            "mssql_linked_server_192.168.58.51_b".into(),
+            vuln("mssql_linked_server", "mssql_linked_server_192.168.58.51_b"),
+        );
+
+        let mut exploited: HashSet<String> = HashSet::new();
+        exploited.insert("adcs_esc1_192.168.58.50_template".into());
+        exploited.insert("mssql_linked_server_192.168.58.51_a".into());
+        // Implicit golden_ticket — emitted by milestones, no matching
+        // discovered_vulnerabilities entry. Must still appear.
+        exploited.insert("golden_ticket_contoso.local".into());
+
+        let cov = build_token_coverage_json(&discovered, &exploited);
+        let obj = cov.as_object().expect("object");
+
+        // ACL: 2 discovered, 0 exploited → missing
+        let acl = obj.get("acl_abuse").expect("acl_abuse present");
+        assert_eq!(acl.get("discovered").and_then(|v| v.as_u64()), Some(2));
+        assert_eq!(acl.get("exploited").and_then(|v| v.as_u64()), Some(0));
+        assert_eq!(acl.get("status").and_then(|v| v.as_str()), Some("missing"));
+
+        // ESC1: 1/1 → ok
+        let esc1 = obj.get("adcs_esc1").expect("adcs_esc1 present");
+        assert_eq!(esc1.get("status").and_then(|v| v.as_str()), Some("ok"));
+
+        // MSSQL Linked Server: 1/2 → partial
+        let mls = obj
+            .get("mssql_linked_server")
+            .expect("mssql_linked_server present");
+        assert_eq!(mls.get("status").and_then(|v| v.as_str()), Some("partial"));
+
+        // Golden Ticket: discovered=0, exploited=1 → ok (implicit milestone token)
+        let gt = obj.get("golden_ticket").expect("golden_ticket present");
+        assert_eq!(gt.get("discovered").and_then(|v| v.as_u64()), Some(0));
+        assert_eq!(gt.get("exploited").and_then(|v| v.as_u64()), Some(1));
+        assert_eq!(gt.get("status").and_then(|v| v.as_str()), Some("ok"));
+    }
+
+    #[test]
+    fn token_coverage_empty_state_returns_empty_object() {
+        let discovered: HashMap<String, VulnerabilityInfo> = HashMap::new();
+        let exploited: HashSet<String> = HashSet::new();
+        let cov = build_token_coverage_json(&discovered, &exploited);
+        assert_eq!(cov, serde_json::json!({}));
+    }
 }
