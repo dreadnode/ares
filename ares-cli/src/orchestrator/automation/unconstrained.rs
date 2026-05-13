@@ -156,23 +156,37 @@ pub(crate) fn select_unconstrained_work_items(
                 .get(&domain.to_lowercase())
                 .cloned();
 
-            let host_ip = if is_machine {
-                find_host_ip_for_machine_account(state, &account_name)?
+            // Machine-account host resolution: ideally we match the SAM
+            // account to a host in state.hosts so the deterministic coerce
+            // → lsassy-dump chain has a target. When the host wasn't
+            // scanned (LDAP enumeration finds the computer account but
+            // nmap missed the IP — observed in a live op for a machine
+            // with unconstrained delegation), the resolved_host_ip stays
+            // None and we route to the LLM-exploit fallback below instead
+            // of silently dropping the vuln. The LLM gets the account name
+            // + domain and can dig out the IP via adidnsdump / dig /
+            // authenticated ldap search, then run the exploit.
+            let resolved_host_ip = if is_machine {
+                find_host_ip_for_machine_account(state, &account_name)
+            } else {
+                None
+            };
+            let machine_host_unknown = is_machine && resolved_host_ip.is_none();
+
+            // For the LlmExploit fallback paths (user accounts AND
+            // unknown-host machines), use dc_ip as the stand-in target so
+            // the payload builder has something non-empty to ship. Drop
+            // the work if dc_ip is also missing (orchestrator hasn't
+            // promoted any DC for this domain yet).
+            let host_ip = if is_machine && !machine_host_unknown {
+                resolved_host_ip.expect("checked machine_host_unknown == false")
             } else {
                 dc_ip.as_ref().cloned()?
             };
 
-            if skip_self_coerce_loop(
-                &vuln.vuln_id,
-                is_machine,
-                dc_ip.as_deref(),
-                &host_ip,
-                &domain.to_lowercase(),
-                &state.dominated_domains,
-            ) {
-                return None;
-            }
-
+            // Credentials gate applies to both deterministic and
+            // LLM-fallback paths — without a working cred for the
+            // account's domain neither variant can authenticate.
             let credential = state
                 .credentials
                 .iter()
@@ -185,6 +199,9 @@ pub(crate) fn select_unconstrained_work_items(
 
             credential.as_ref()?;
 
+            // User accounts: always LLM-routed (the user's TGT lives on
+            // their workstation, not on the DC; the LLM has to find a
+            // host where the user is logged in and pull their TGT).
             if !is_machine {
                 let dedup_key = format!("uc_user:{}", account_name.to_lowercase());
                 return Some(UnconstrainedWork {
@@ -197,6 +214,42 @@ pub(crate) fn select_unconstrained_work_items(
                     action: Action::LlmExploit,
                     _dedup_key: Some(dedup_key),
                 });
+            }
+
+            // Machine account with no known host IP: route to LLM exploit
+            // with a distinct dedup key so it doesn't collide with user
+            // LlmExploit work and doesn't compete with the resolved-host
+            // coerce-dump phases. The skip_self_coerce_loop check below is
+            // intentionally bypassed — that guard only applies to the
+            // deterministic coerce path against a machine whose host IS in
+            // state.hosts and happens to coincide with the DC. The
+            // LLM-fallback path treats dc_ip as a starting hint, not as
+            // the coerce-loopback target.
+            if machine_host_unknown {
+                let dedup_key = format!("uc_machine_unknown:{}", account_name.to_lowercase());
+                return Some(UnconstrainedWork {
+                    vuln_id: vuln.vuln_id.clone(),
+                    account_name,
+                    domain,
+                    host_ip,
+                    dc_ip,
+                    credential,
+                    action: Action::LlmExploit,
+                    _dedup_key: Some(dedup_key),
+                });
+            }
+
+            // Resolved-host machine: gated by the self-coerce loop check
+            // (don't coerce a host back to itself when host == dc_ip).
+            if skip_self_coerce_loop(
+                &vuln.vuln_id,
+                is_machine,
+                dc_ip.as_deref(),
+                &host_ip,
+                &domain.to_lowercase(),
+                &state.dominated_domains,
+            ) {
+                return None;
             }
 
             let phase = phases.get(&vuln.vuln_id);
@@ -1297,6 +1350,54 @@ mod tests {
             .push(make_cred("alice", "Pw!", "contoso.local"));
         // No domain_controllers entry → can't coerce.
         assert!(select_unconstrained_work_items(&s, &HashMap::new(), Instant::now()).is_empty());
+    }
+
+    #[test]
+    fn select_uc_machine_unknown_host_falls_back_to_llm_exploit() {
+        // Repro of the silent-drop pattern observed in a live op: the
+        // vuln names a machine account (ws01$) that exists in LDAP but
+        // whose IP isn't in state.hosts. Pre-fix: work item dropped on
+        // the floor by the `?` operator and the high-priority delegation
+        // primitive sat unexploited for the whole op. Post-fix: routes to
+        // Action::LlmExploit with a distinct `uc_machine_unknown:` dedup
+        // key so the LLM can resolve the IP and run the exploit.
+        let mut s = StateInner::new("op-test".into());
+        let v = make_uc_vuln("v1", "WS01$", "contoso.local");
+        s.discovered_vulnerabilities.insert(v.vuln_id.clone(), v);
+        // No host entry for ws01 — find_host_ip_for_machine_account returns None.
+        s.credentials
+            .push(make_cred("alice", "Pw!", "contoso.local"));
+        s.domain_controllers
+            .insert("contoso.local".into(), "192.168.58.10".into());
+        let work = select_unconstrained_work_items(&s, &HashMap::new(), Instant::now());
+        assert_eq!(work.len(), 1, "machine-account vuln must NOT be dropped");
+        assert_eq!(work[0].action, Action::LlmExploit);
+        // Stand-in host_ip = dc_ip so downstream payload builders have
+        // a non-empty target.
+        assert_eq!(work[0].host_ip, "192.168.58.10");
+        assert_eq!(work[0].dc_ip.as_deref(), Some("192.168.58.10"));
+        assert_eq!(work[0].account_name, "WS01$");
+    }
+
+    #[test]
+    fn select_uc_machine_known_host_still_uses_resolved_ip() {
+        // Defensive: when the host IS in state.hosts, the resolved IP must
+        // win — we don't want the fallback to clobber a real host_ip.
+        let mut s = StateInner::new("op-test".into());
+        let v = make_uc_vuln("v1", "WS01$", "contoso.local");
+        s.discovered_vulnerabilities.insert(v.vuln_id.clone(), v);
+        s.hosts.push(make_host("ws01", "192.168.58.55"));
+        s.credentials
+            .push(make_cred("alice", "Pw!", "contoso.local"));
+        s.domain_controllers
+            .insert("contoso.local".into(), "192.168.58.10".into());
+        let work = select_unconstrained_work_items(&s, &HashMap::new(), Instant::now());
+        assert_eq!(work[0].host_ip, "192.168.58.55", "must keep resolved IP");
+        assert_eq!(
+            work[0].action,
+            Action::Coerce,
+            "resolved-host machine still gets the deterministic coerce chain"
+        );
     }
 
     #[test]
