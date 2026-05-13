@@ -225,9 +225,25 @@ pub async fn process_completed_task(
             // primitive on getST exit-0.
             let has_ticket_evidence =
                 is_ticket_grant_vuln(&vuln_id) && result_has_ccache_evidence(&result.result);
-            let actually_succeeded = result.success
+            // Stall-tolerance: when the LLM ends its turn without calling
+            // task_complete (LoopEndReason::MaxSteps or budget exhaustion),
+            // submission.rs stamps `success=false` with an error string
+            // identifying the stall. The exploit may still have landed —
+            // certipy_shadow, secretsdump, getST routinely produce parser-
+            // grounded credentials/hashes/tickets before the LLM stalls on
+            // the wrap-up call. Without this carve-out, every stalled
+            // exploit appears as "failed" even when the primitive worked.
+            // The carve-out is narrow: only stalls (recognised by the
+            // canonical error strings) bypass the `success` check, and the
+            // parser-evidence gate still has to pass.
+            let stalled_with_evidence = !result.success
+                && error_indicates_stall(result.error.as_deref())
                 && !result_text_indicates_failure(&result.result)
                 && (result_has_parser_evidence(&result.result) || has_ticket_evidence);
+            let actually_succeeded = (result.success
+                && !result_text_indicates_failure(&result.result)
+                && (result_has_parser_evidence(&result.result) || has_ticket_evidence))
+                || stalled_with_evidence;
 
             if actually_succeeded {
                 info!(vuln_id = %vuln_id, task_id = %task_id, "Marking vulnerability as exploited");
@@ -821,6 +837,25 @@ fn result_has_ccache_evidence(result: &Option<Value>) -> bool {
         }
     }
     false
+}
+
+/// Returns `true` when the task's error string is one of the agent-loop
+/// stall conditions (LoopEndReason::MaxSteps, MaxTokens, BudgetExceeded,
+/// or "ended turn without task_complete"). These conditions indicate the
+/// LLM ran out of budget mid-task — they're not failures of the primitive
+/// itself. Used to relax the `success` gate in mark_exploited so an
+/// exploit that produced parser evidence before the agent stalled still
+/// gets scoreboard credit.
+fn error_indicates_stall(err: Option<&str>) -> bool {
+    let Some(e) = err else {
+        return false;
+    };
+    let lower = e.to_lowercase();
+    lower.contains("ended turn without task_complete")
+        || lower.contains("agent hit max steps")
+        || lower.contains("max steps")
+        || lower.contains("agent hit max tokens")
+        || lower.contains("budget exceeded")
 }
 
 fn result_has_parser_evidence(result: &Option<Value>) -> bool {
