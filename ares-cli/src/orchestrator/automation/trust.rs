@@ -3203,6 +3203,7 @@ mod tests {
                 direction: "bidirectional".into(),
                 trust_type: "parent_child".into(),
                 sid_filtering: false,
+                security_identifier: None,
             },
         );
         let candidates: HashSet<String> = ["child.contoso.local".to_string()].into_iter().collect();
@@ -3227,6 +3228,7 @@ mod tests {
                 direction: "bidirectional".into(),
                 trust_type: "parent_child".into(),
                 sid_filtering: false,
+                security_identifier: None,
             },
         );
         let candidates: HashSet<String> = ["child.contoso.local".to_string()].into_iter().collect();
@@ -3249,6 +3251,7 @@ mod tests {
                 direction: "bidirectional".into(),
                 trust_type: "forest".into(),
                 sid_filtering: false,
+                security_identifier: None,
             },
         );
         let candidates: HashSet<String> = ["child.contoso.local".to_string()].into_iter().collect();
