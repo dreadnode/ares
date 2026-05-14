@@ -2676,6 +2676,7 @@ mod tests {
             direction: "bidirectional".into(),
             trust_type: "forest".into(),
             sid_filtering: true,
+            security_identifier: None,
         };
         let s = state_with_trust("fabrikam.local", trust);
         assert!(is_filtered_inter_forest_trust(
@@ -2693,6 +2694,7 @@ mod tests {
             direction: "bidirectional".into(),
             trust_type: "forest".into(),
             sid_filtering: false,
+            security_identifier: None,
         };
         let s = state_with_trust("fabrikam.local", trust);
         assert!(!is_filtered_inter_forest_trust(
@@ -2730,6 +2732,7 @@ mod tests {
             direction: "bidirectional".into(),
             trust_type: "parent_child".into(),
             sid_filtering: false,
+            security_identifier: None,
         };
         let s = state_with_trust("contoso.local", parent_trust);
         // Target fabrikam.local has no metadata — try the forge.
@@ -2750,6 +2753,7 @@ mod tests {
             direction: "bidirectional".into(),
             trust_type: "forest".into(),
             sid_filtering: true,
+            security_identifier: None,
         };
         let s = state_with_trust("fabrikam.local", target_trust);
         assert!(is_filtered_inter_forest_trust(

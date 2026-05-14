@@ -378,9 +378,25 @@ impl SharedState {
         let added = reader.add_trusted_domain(&mut conn, &trust).await?;
         if added {
             let domain_key = trust.domain.to_lowercase();
+            // Capture the SID *before* moving `trust` into the map. Upserting
+            // domain_sids from trust-enum data is the load-bearing step that
+            // lets `auto_trust_follow` pass its parent-SID gate on hardened
+            // 2019+ parent DCs where the post-hoc SAMR / null-session lsaquery
+            // fallbacks (in `golden_ticket::resolve_domain_sid`) are blocked.
+            let trust_sid = trust.security_identifier.clone();
             {
                 let mut state = self.inner.write().await;
                 state.trusted_domains.insert(domain_key.clone(), trust);
+                if let Some(ref sid) = trust_sid {
+                    state.domain_sids.insert(domain_key.clone(), sid.clone());
+                }
+            }
+            if let Some(sid) = trust_sid {
+                // Persist to redis so a replayed/reloaded operation inherits
+                // the SID — mirrors the persistence path used after a SAMR
+                // lookup succeeds in resolve_domain_sid.
+                let mut conn2 = queue.connection();
+                let _ = reader.set_domain_sid(&mut conn2, &domain_key, &sid).await;
             }
             // Also promote the foreign domain into state.domains so the
             // per-domain automations pick it up.
@@ -542,6 +558,7 @@ mod tests {
             direction: "bidirectional".to_string(),
             trust_type: "forest".to_string(),
             sid_filtering: false,
+            security_identifier: None,
         }
     }
 
@@ -816,6 +833,48 @@ mod tests {
         assert!(s.trusted_domains.contains_key("fabrikam.local"));
         let t = &s.trusted_domains["fabrikam.local"];
         assert_eq!(t.trust_type, "forest");
+    }
+
+    #[tokio::test]
+    async fn publish_trust_info_upserts_domain_sid_when_carried() {
+        // When the trust enum captured securityIdentifier, publish_trust_info
+        // must mirror it into state.domain_sids so `auto_trust_follow` passes
+        // its parent-SID gate without needing the SAMR/lsaquery fallbacks.
+        // This is the load-bearing wiring for the child→parent forge path.
+        let state = SharedState::new("op-sid".to_string());
+        let q = mock_queue();
+
+        let mut trust = make_trust("contoso.local");
+        trust.security_identifier = Some("S-1-5-21-1111111111-2222222222-3333333333".into());
+        let added = state.publish_trust_info(&q, trust).await.unwrap();
+        assert!(added);
+
+        let s = state.inner.read().await;
+        assert_eq!(
+            s.domain_sids.get("contoso.local").map(String::as_str),
+            Some("S-1-5-21-1111111111-2222222222-3333333333"),
+            "domain_sids must be populated from the trust's security_identifier"
+        );
+    }
+
+    #[tokio::test]
+    async fn publish_trust_info_no_sid_leaves_domain_sids_empty() {
+        // Legacy trust enum runs (no securityIdentifier) must not corrupt
+        // domain_sids — we leave the slot for `golden_ticket::resolve_domain_sid`
+        // to fill via SAMR/lsaquery.
+        let state = SharedState::new("op-nosid".to_string());
+        let q = mock_queue();
+
+        let trust = make_trust("fabrikam.local");
+        assert!(trust.security_identifier.is_none());
+        let added = state.publish_trust_info(&q, trust).await.unwrap();
+        assert!(added);
+
+        let s = state.inner.read().await;
+        assert!(
+            !s.domain_sids.contains_key("fabrikam.local"),
+            "missing SID must NOT insert a domain_sids entry"
+        );
     }
 
     #[test]

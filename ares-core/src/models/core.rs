@@ -255,6 +255,7 @@ mod tests {
             direction: "bidirectional".to_string(),
             trust_type: "parent_child".to_string(),
             sid_filtering: false,
+            security_identifier: None,
         };
         assert!(t.is_parent_child());
         assert!(!t.is_cross_forest());
@@ -268,6 +269,7 @@ mod tests {
             direction: "outbound".to_string(),
             trust_type: "forest".to_string(),
             sid_filtering: true,
+            security_identifier: None,
         };
         assert!(t.is_cross_forest());
         assert!(!t.is_parent_child());
@@ -281,6 +283,7 @@ mod tests {
             direction: "inbound".to_string(),
             trust_type: "external".to_string(),
             sid_filtering: false,
+            security_identifier: None,
         };
         assert!(t.is_cross_forest());
     }
@@ -293,6 +296,7 @@ mod tests {
             direction: String::new(),
             trust_type: "unknown".to_string(),
             sid_filtering: false,
+            security_identifier: None,
         };
         assert!(!t.is_cross_forest());
         assert!(!t.is_parent_child());
@@ -467,6 +471,7 @@ mod tests {
             direction: "bidirectional".to_string(),
             trust_type: "parent_child".to_string(),
             sid_filtering: true,
+            security_identifier: None,
         };
         let json = serde_json::to_string(&trust).unwrap();
         let deser: TrustInfo = serde_json::from_str(&json).unwrap();
@@ -532,6 +537,16 @@ pub struct TrustInfo {
     /// Whether SID filtering is active (blocks RID < 1000 across forest trusts).
     #[serde(default)]
     pub sid_filtering: bool,
+    /// Domain SID of the trusted partner, in canonical S-1-5-21-X-Y-Z form
+    /// when the LDAP `securityIdentifier` attribute was captured by
+    /// `enumerate_domain_trusts`. Carrying this on the trust object lets the
+    /// orchestrator pre-populate `state.domain_sids` for the partner without
+    /// a separate authenticated SAMR lookup against the foreign DC — that
+    /// lookup is the gate that previously blocked child→parent forge dispatch
+    /// on hardened (2019+) parent DCs where cross-realm NTLM is rejected and
+    /// null-session lsaquery is disabled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub security_identifier: Option<String>,
 }
 
 impl TrustInfo {

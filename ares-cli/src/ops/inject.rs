@@ -327,6 +327,7 @@ pub(crate) async fn ops_inject_trust(
         direction,
         trust_type: trust_type.clone(),
         sid_filtering,
+        security_identifier: None,
     };
 
     let added = reader.add_trusted_domain(&mut conn, &trust).await?;
