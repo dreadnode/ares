@@ -1941,3 +1941,79 @@ fn locked_usernames_no_lockout_lines_empty() {
     let p = json!({"summary": "[+] CONTOSO\\alice:Pw Pwn3d!"});
     assert!(extract_locked_usernames_from_result(&Some(p)).is_empty());
 }
+
+mod reconcile_extracted_credential_domain {
+    use super::super::reconcile_extracted_credential_domain;
+    use ares_core::models::User;
+
+    fn user(username: &str, domain: &str) -> User {
+        User {
+            username: username.to_string(),
+            domain: domain.to_string(),
+            description: String::new(),
+            is_admin: false,
+            source: "kerberos_enum".to_string(),
+        }
+    }
+
+    #[test]
+    fn corrects_when_username_unique_in_other_domain() {
+        let users = vec![user("alice", "child.contoso.local")];
+        let got = reconcile_extracted_credential_domain(&users, "alice", "contoso.local");
+        assert_eq!(got, Some("child.contoso.local".to_string()));
+    }
+
+    #[test]
+    fn case_insensitive_username_match() {
+        let users = vec![user("Alice", "child.contoso.local")];
+        let got = reconcile_extracted_credential_domain(&users, "ALICE", "contoso.local");
+        assert_eq!(got, Some("child.contoso.local".to_string()));
+    }
+
+    #[test]
+    fn no_correction_when_extracted_matches_known_domain() {
+        let users = vec![user("alice", "child.contoso.local")];
+        let got = reconcile_extracted_credential_domain(&users, "alice", "CHILD.contoso.local");
+        assert_eq!(got, None);
+    }
+
+    #[test]
+    fn no_correction_when_user_unknown() {
+        let users = vec![user("bob", "contoso.local")];
+        let got = reconcile_extracted_credential_domain(&users, "alice", "contoso.local");
+        assert_eq!(got, None);
+    }
+
+    #[test]
+    fn no_correction_when_user_ambiguous_across_domains() {
+        // Same username in two domains (e.g. Administrator in parent + child) —
+        // can't disambiguate, so the extractor's guess stands.
+        let users = vec![
+            user("administrator", "contoso.local"),
+            user("administrator", "child.contoso.local"),
+        ];
+        let got = reconcile_extracted_credential_domain(&users, "administrator", "contoso.local");
+        assert_eq!(got, None);
+    }
+
+    #[test]
+    fn ignores_state_users_with_empty_domain() {
+        // An anomalous user row with no domain is not a usable signal.
+        let users = vec![user("alice", "")];
+        let got = reconcile_extracted_credential_domain(&users, "alice", "contoso.local");
+        assert_eq!(got, None);
+    }
+
+    #[test]
+    fn duplicate_domains_collapse_to_one_match() {
+        // Two state.users rows for the same principal (e.g. discovered via two
+        // different enumeration tools) should still be treated as a unique
+        // domain assignment.
+        let users = vec![
+            user("alice", "child.contoso.local"),
+            user("alice", "CHILD.contoso.local"),
+        ];
+        let got = reconcile_extracted_credential_domain(&users, "alice", "contoso.local");
+        assert_eq!(got, Some("child.contoso.local".to_string()));
+    }
+}

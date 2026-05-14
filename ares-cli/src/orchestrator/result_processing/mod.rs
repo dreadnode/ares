@@ -1024,6 +1024,52 @@ async fn resolve_domain_from_ip(dispatcher: &Arc<Dispatcher>, target_ip: Option<
     state.domains.first().cloned().unwrap_or_default()
 }
 
+/// Prefer the directory-attested domain for a text-extracted credential.
+///
+/// `extract_plaintext_passwords` (and the cracked-password / hash extractors)
+/// stamp every credential with `default_domain` — the *task target's* domain,
+/// resolved from the target IP via the `domain_controllers` map — whenever the
+/// captured line doesn't carry an explicit `DOMAIN\user` or `user@domain`
+/// prefix. That's wrong for foreign-realm principals that surface in the
+/// stdout of a tool run against a different DC: e.g. an LDAP search hitting
+/// the parent DC returns child-domain users in description/sysvol blobs and
+/// they get stored under the parent realm, after which every downstream auth
+/// attempt fails with `STATUS_LOGON_FAILURE` against any DC.
+///
+/// `state.users` is populated by trusted enumeration parsers
+/// (`kerberos_enum`, `ldap_group_enumeration`, `ldap_enumeration`, …) where
+/// the realm is whatever the directory itself returned — directory-attested
+/// rather than IP-inferred. When the extracted username matches exactly one
+/// such entry with a non-empty domain that differs from the IP-resolved
+/// fallback, prefer the state.users domain.
+///
+/// Returns `None` when:
+/// - no matching user exists in state (nothing to correct against);
+/// - the username is associated with multiple domains in state (can't
+///   disambiguate — keep the extractor's guess);
+/// - the only known domain already matches the extracted one (no-op).
+pub(crate) fn reconcile_extracted_credential_domain(
+    users: &[ares_core::models::User],
+    username: &str,
+    extracted_domain: &str,
+) -> Option<String> {
+    let user_lc = username.to_lowercase();
+    let mut domains: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for u in users {
+        if u.username.to_lowercase() == user_lc && !u.domain.is_empty() {
+            domains.insert(u.domain.to_lowercase());
+        }
+    }
+    if domains.len() != 1 {
+        return None;
+    }
+    let only = domains.into_iter().next().unwrap();
+    if only.eq_ignore_ascii_case(extracted_domain) {
+        return None;
+    }
+    Some(only)
+}
+
 /// `kerberoast_{username}` or `asrep_roast_{domain}` token when the
 /// captured hash carries the canonical impacket / hashcat prefix
 /// (`$krb5tgs$`, `$krb5asrep$`). Returns `None` for other hash types so
@@ -1266,7 +1312,21 @@ async fn extract_from_raw_text(
 
     let mut new_count = 0usize;
 
-    for cred in extracted.credentials {
+    for mut cred in extracted.credentials {
+        let corrected = {
+            let state = dispatcher.state.read().await;
+            reconcile_extracted_credential_domain(&state.users, &cred.username, &cred.domain)
+        };
+        if let Some(corrected) = corrected {
+            warn!(
+                username = %cred.username,
+                extracted_domain = %cred.domain,
+                corrected_domain = %corrected,
+                source = %cred.source,
+                "Reassigning text-extracted credential to directory-attested domain from state.users",
+            );
+            cred.domain = corrected;
+        }
         let is_cracked = cred.source.starts_with("cracked:");
         let source = cred.source.clone();
         let username = cred.username.clone();
