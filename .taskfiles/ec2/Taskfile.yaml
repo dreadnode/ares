@@ -8,7 +8,7 @@
 #
 # Usage:
 #   task ec2:setup EC2_NAME=ares-tools       # One-time: install Redis, create systemd units
-#   task ec2:deploy EC2_NAME=ares-tools      # Build + push Rust binaries via bcp
+#   task ec2:deploy EC2_NAME=ares-tools      # Build + push Rust binaries via S3 + SSM
 #   task ec2:start EC2_NAME=ares-tools       # Start Redis + workers
 #   task ec2:status EC2_NAME=ares-tools      # Show process status
 #   task ec2:redis:forward EC2_NAME=ares-tools  # Port-forward Redis for local CLI
@@ -26,12 +26,8 @@ vars:
   EC2_NAME: '{{.EC2_NAME | default "kali-ares"}}'
   EC2_PROFILE: '{{.EC2_PROFILE | default "lab"}}'
   EC2_REGION: '{{.EC2_REGION | default "us-west-1"}}'
-  # S3 bucket for file staging (auto-detect from bcp config)
-  BCP_BUCKET:
-    sh: |
-      if [ -f ~/.bcp/config.yaml ]; then
-        grep -E '^\s*bucket:' ~/.bcp/config.yaml 2>/dev/null | head -1 | awk '{print $2}' | tr -d '"' | tr -d "'" || true
-      fi
+  # S3 bucket for file staging (required; pass S3_BUCKET=your-bucket or set as env var)
+  S3_BUCKET: '{{.S3_BUCKET | default ""}}'
   # Remote paths on EC2
   ARES_REMOTE_BIN: '/usr/local/bin'
   ARES_REMOTE_CONFIG: '/etc/ares/config.yaml'
@@ -92,8 +88,8 @@ tasks:
     preconditions:
       - sh: aws sts get-caller-identity --profile "{{.EC2_PROFILE}}" --region "{{.EC2_REGION}}" >/dev/null 2>&1
         msg: "Not logged into AWS (profile: {{.EC2_PROFILE}}). Run: aws sso login --profile {{.EC2_PROFILE}}"
-      - sh: test -n "{{.BCP_BUCKET}}"
-        msg: "BCP_BUCKET not set. Either create ~/.bcp/config.yaml with 'bucket: your-bucket' or pass BCP_BUCKET=your-bucket"
+      - sh: test -n "{{.S3_BUCKET}}"
+        msg: "S3_BUCKET not set. Pass S3_BUCKET=your-bucket or export it as an env var."
     cmds:
       # Build binaries (local cross-compile or remote native build)
       - |
@@ -142,7 +138,7 @@ tasks:
 
           # Upload source to S3
           echo -e "{{.INFO}} Uploading source to S3..."
-          aws s3 cp "$SRC_TAR" "s3://{{.BCP_BUCKET}}/{{.S3_DEPLOY_PREFIX}}/ares-src.tar.gz" \
+          aws s3 cp "$SRC_TAR" "s3://{{.S3_BUCKET}}/{{.S3_DEPLOY_PREFIX}}/ares-src.tar.gz" \
             --profile "{{.EC2_PROFILE}}" --region "{{.EC2_REGION}}"
 
           # Build on EC2 via SSM
@@ -150,7 +146,7 @@ tasks:
           PARAMS_FILE=$(mktemp)
           trap "rm -f $SRC_TAR $PARAMS_FILE" EXIT
           jq -n \
-            --arg bucket "{{.BCP_BUCKET}}" \
+            --arg bucket "{{.S3_BUCKET}}" \
             --arg prefix "{{.S3_DEPLOY_PREFIX}}" \
             --arg build_dir "{{.REMOTE_BUILD_DIR}}" \
             '{"commands": [
@@ -328,8 +324,8 @@ tasks:
         mkdir -p target/.deploy
         echo "$BUILD_SHA" > target/.deploy/ares.sha256
 
-        echo -e "{{.INFO}} Uploading binary to s3://{{.BCP_BUCKET}}/{{.S3_DEPLOY_PREFIX}}/..."
-        aws s3 cp "$BIN_PATH" "s3://{{.BCP_BUCKET}}/{{.S3_DEPLOY_PREFIX}}/ares" \
+        echo -e "{{.INFO}} Uploading binary to s3://{{.S3_BUCKET}}/{{.S3_DEPLOY_PREFIX}}/..."
+        aws s3 cp "$BIN_PATH" "s3://{{.S3_BUCKET}}/{{.S3_DEPLOY_PREFIX}}/ares" \
           --profile "{{.EC2_PROFILE}}" --region "{{.EC2_REGION}}"
 
         echo -e "{{.SUCCESS}} Binary staged in S3 (sha=$BUILD_SHA)"
@@ -361,7 +357,7 @@ tasks:
         PARAMS_FILE=$(mktemp)
         trap "rm -f $PARAMS_FILE" EXIT
         jq -n \
-          --arg bucket "{{.BCP_BUCKET}}" \
+          --arg bucket "{{.S3_BUCKET}}" \
           --arg prefix "{{.S3_DEPLOY_PREFIX}}" \
           --arg expected_sha "$EXPECTED_SHA" \
           '{"commands": [
@@ -449,8 +445,8 @@ tasks:
     preconditions:
       - sh: test -f "{{.ARES_CONFIG}}"
         msg: "Config file not found: {{.ARES_CONFIG}}"
-      - sh: test -n "{{.BCP_BUCKET}}"
-        msg: "BCP_BUCKET not set"
+      - sh: test -n "{{.S3_BUCKET}}"
+        msg: "S3_BUCKET not set. Pass S3_BUCKET=your-bucket or export it as an env var."
     cmds:
       - |
         INSTANCE_ID=$(aws ec2 describe-instances \
@@ -467,13 +463,13 @@ tasks:
         fi
 
         echo -e "{{.INFO}} Uploading config to S3..."
-        aws s3 cp "{{.ARES_CONFIG}}" "s3://{{.BCP_BUCKET}}/{{.S3_DEPLOY_PREFIX}}/config.yaml" \
+        aws s3 cp "{{.ARES_CONFIG}}" "s3://{{.S3_BUCKET}}/{{.S3_DEPLOY_PREFIX}}/config.yaml" \
           --profile "{{.EC2_PROFILE}}" --region "{{.EC2_REGION}}"
 
         echo -e "{{.INFO}} Pulling config to $INSTANCE_ID..."
         PARAMS_FILE=$(mktemp)
         trap "rm -f $PARAMS_FILE" EXIT
-        jq -n --arg bucket "{{.BCP_BUCKET}}" --arg prefix "{{.S3_DEPLOY_PREFIX}}" \
+        jq -n --arg bucket "{{.S3_BUCKET}}" --arg prefix "{{.S3_DEPLOY_PREFIX}}" \
           '{"commands": ["mkdir -p /etc/ares && aws s3 cp s3://" + $bucket + "/" + $prefix + "/config.yaml /etc/ares/config.yaml && echo Config deployed: && cat /etc/ares/config.yaml | head -5"]}' \
           > "$PARAMS_FILE"
 
