@@ -56,8 +56,16 @@ pub async fn auto_certipy_auth(dispatcher: Arc<Dispatcher>, mut shutdown: watch:
             }
 
             let priority = dispatcher.effective_priority("certipy_auth");
+            // Route to `privesc` — `certipy_auth` is registered in the
+            // privesc toolset (alongside the rest of the ADCS chain). The
+            // `credential_access` role does NOT carry certipy_auth, so the
+            // old routing produced an immediate "tool not available in
+            // this agent's toolset" assist-abandon every dispatch, wasting
+            // ~30k input tokens per attempt while leaking the captured
+            // .pfx. The task_type stays `credential_access` because the
+            // semantic goal is to surface an NT hash.
             match dispatcher
-                .throttled_submit("credential_access", "credential_access", payload, priority)
+                .throttled_submit("credential_access", "privesc", payload, priority)
                 .await
             {
                 Ok(Some(task_id)) => {
