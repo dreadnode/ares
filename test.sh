@@ -10,8 +10,7 @@ ulimit -n 65536 || ulimit -n 10240 || true
 EC2_NAME="${EC2_NAME:-kali-ares}"
 TARGET="${TARGET:-dreadgoad}"
 BLUE_ENABLED="${BLUE_ENABLED:-1}"
-S3_BUCKET=dread-infra-alpha-operator-range-staging-us-west-1
-
+export S3_BUCKET=dread-infra-alpha-operator-range-staging-us-west-1
 
 echo "=== Stopping workers + any running operation ==="
 task ec2:stop EC2_NAME="${EC2_NAME}" 2>/dev/null || true

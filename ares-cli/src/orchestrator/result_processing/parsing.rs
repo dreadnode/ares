@@ -152,7 +152,7 @@ pub(crate) fn parse_discoveries(payload: &Value) -> ParsedDiscoveries {
 pub(crate) fn has_domain_admin_indicator(payload: &Value) -> bool {
     // Only trust tool-output-backed evidence: a krbtgt hash in the payload.
     // Agent self-reporting via `has_domain_admin: true` is not accepted —
-    // LLMs hallucinate domain admin routinely and it derails post-DA automation.
+    // LLMs hallucinate domain admin routinely and it breaks post-DA automation.
     if let Some(hashes) = payload.get("hashes").and_then(|v| v.as_array()) {
         for hash_val in hashes {
             if let Some(username) = hash_val.get("username").and_then(|v| v.as_str()) {
