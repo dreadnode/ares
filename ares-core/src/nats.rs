@@ -42,8 +42,6 @@ use crate::models::OpStateEvent;
 /// Default NATS URL used when neither `ARES_NATS_URL` nor an explicit URL is provided.
 pub const DEFAULT_NATS_URL: &str = "nats://127.0.0.1:4222";
 
-// === Subject taxonomy =====================================================
-
 /// Red team task work queue. `ares.tasks.{role}` (e.g. `ares.tasks.recon`).
 pub const TASK_SUBJECT_PREFIX: &str = "ares.tasks";
 /// Tool dispatch RPC. `ares.tools.exec.{role}`.
@@ -69,8 +67,6 @@ pub const URGENT_TASK_SUBJECT_PREFIX: &str = "ares.tasks.urgent";
 /// Blue task result subject. `ares.blue.tasks.results.{task_id}`.
 pub const BLUE_TASK_RESULT_SUBJECT_PREFIX: &str = "ares.blue.tasks.results";
 
-// === Stream names =========================================================
-
 /// JetStream stream containing all red-team task subjects.
 pub const TASKS_STREAM: &str = "ARES_TASKS";
 /// JetStream stream containing all blue-team task subjects.
@@ -82,8 +78,6 @@ pub const DISCOVERIES_STREAM: &str = "ARES_DISCOVERIES";
 /// JetStream stream containing the durable operation state event log.
 /// Pattern B: this is the source of truth, Redis is a derived cache.
 pub const OP_STATE_STREAM: &str = "ARES_OPSTATE";
-
-// === Subject builders =====================================================
 
 #[inline]
 pub fn task_subject(role: &str) -> String {
@@ -143,8 +137,6 @@ pub fn op_state_subject(operation_id: &str, suffix: &str) -> String {
 pub fn op_state_filter_for_op(operation_id: &str) -> String {
     format!("{OP_STATE_SUBJECT_PREFIX}.{operation_id}.>")
 }
-
-// === Connection ===========================================================
 
 /// Shared NATS broker handle.
 ///

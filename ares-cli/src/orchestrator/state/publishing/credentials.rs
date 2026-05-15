@@ -27,7 +27,6 @@ impl SharedState {
         queue: &TaskQueueCore<impl ConnectionLike + Clone + Send + Sync + 'static>,
         cred: Credential,
     ) -> Result<bool> {
-        // Sanitize and validate before storage
         let (netbios_map, known_domains) = {
             let state = self.inner.read().await;
             // Known domains = explicit state.domains plus any DC domain keys.
@@ -177,7 +176,6 @@ impl SharedState {
             }
             return Ok(false);
         }
-        // Emit before consuming `hash` into state.
         emit_op_state(
             self.recorder(),
             &operation_id,
