@@ -244,7 +244,7 @@ mod tests {
         // eligible for retry — this was the bug. Confirm that the dedup
         // marker is NOT written before the cap.
         let mut state = StateInner::new("op-test".into());
-        let key = "north.contoso.local:svc_sql:abcdef0123456789abcdef0123456789";
+        let key = "child.contoso.local:svc_sql:abcdef0123456789abcdef0123456789";
         for _ in 0..(MAX_CRACK_ATTEMPTS - 1) {
             simulate_attempt(&mut state, key);
         }

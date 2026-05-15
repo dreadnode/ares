@@ -28,7 +28,7 @@ pub fn is_valid_credential_for_domain(
     }
 
     // Parent → child: target has more FQDN parts and ends with cred domain
-    // e.g. cred=contoso.local, target=north.contoso.local
+    // e.g. cred=contoso.local, target=child.contoso.local
     if target_lower.ends_with(&format!(".{cred_lower}")) {
         return true;
     }
@@ -36,7 +36,7 @@ pub fn is_valid_credential_for_domain(
     // Child → parent: valid — NTLM/Kerberos authentication traverses the
     // parent-child trust bidirectionally. The target DC forwards the auth
     // request to the child domain DC via the trust's secure channel.
-    // e.g. cred=north.contoso.local, target=contoso.local
+    // e.g. cred=child.contoso.local, target=contoso.local
     if cred_lower.ends_with(&format!(".{target_lower}")) {
         return true;
     }
@@ -192,7 +192,7 @@ mod tests {
         let trusts = HashMap::new();
         assert!(is_valid_credential_for_domain(
             "contoso.local",
-            "north.contoso.local",
+            "child.contoso.local",
             &trusts
         ));
     }
@@ -201,7 +201,7 @@ mod tests {
     fn child_to_parent_valid() {
         let trusts = HashMap::new();
         assert!(is_valid_credential_for_domain(
-            "north.contoso.local",
+            "child.contoso.local",
             "contoso.local",
             &trusts
         ));
@@ -244,7 +244,7 @@ mod tests {
         let trusts = HashMap::new();
         let creds = vec![make_cred("admin", "contoso.local", "P@ss1")];
         let map = HashMap::new();
-        let found = find_domain_credential("north.contoso.local", &creds, &map, &trusts);
+        let found = find_domain_credential("child.contoso.local", &creds, &map, &trusts);
         assert!(found.is_some());
         assert_eq!(found.unwrap().domain, "contoso.local");
     }
@@ -252,10 +252,10 @@ mod tests {
     #[test]
     fn child_cred_valid_for_parent_domain() {
         let trusts = HashMap::new();
-        let creds = vec![make_cred("admin", "north.contoso.local", "P@ss1")];
+        let creds = vec![make_cred("admin", "child.contoso.local", "P@ss1")];
         let map = HashMap::new();
         let found = find_domain_credential("contoso.local", &creds, &map, &trusts);
         assert!(found.is_some());
-        assert_eq!(found.unwrap().domain, "north.contoso.local");
+        assert_eq!(found.unwrap().domain, "child.contoso.local");
     }
 }

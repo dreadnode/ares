@@ -35,7 +35,8 @@ fn mssql_from_args(args: &Value) -> Result<CommandBuilder> {
     let username = required_str(args, "username")?;
     let password = optional_str(args, "password");
     let domain = optional_str(args, "domain");
-    let windows_auth = optional_bool(args, "windows_auth").unwrap_or(false);
+    let windows_auth = optional_bool(args, "windows_auth")
+        .unwrap_or_else(|| domain.is_some_and(|d| !d.is_empty()));
 
     Ok(mssql_base(domain, username, password, target, windows_auth))
 }
@@ -214,10 +215,25 @@ mod tests {
     }
 
     #[test]
-    fn mssql_windows_auth_default_false() {
+    fn mssql_windows_auth_default_false_without_domain() {
         let args = json!({"target": "192.168.58.1", "username": "sa"});
-        let windows_auth = optional_bool(&args, "windows_auth").unwrap_or(false);
+        let domain = optional_str(&args, "domain");
+        let windows_auth = optional_bool(&args, "windows_auth")
+            .unwrap_or_else(|| domain.is_some_and(|d| !d.is_empty()));
         assert!(!windows_auth);
+    }
+
+    #[test]
+    fn mssql_windows_auth_default_true_with_domain() {
+        let args = json!({
+            "target": "192.168.58.1",
+            "username": "svc_sql",
+            "domain": "contoso.local"
+        });
+        let domain = optional_str(&args, "domain");
+        let windows_auth = optional_bool(&args, "windows_auth")
+            .unwrap_or_else(|| domain.is_some_and(|d| !d.is_empty()));
+        assert!(windows_auth);
     }
 
     #[test]

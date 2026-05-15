@@ -51,7 +51,7 @@ pub fn definitions() -> Vec<ToolDefinition> {
                 "properties": {
                     "child_domain": {
                         "type": "string",
-                        "description": "Child domain FQDN (e.g. north.contoso.local)"
+                        "description": "Child domain FQDN (e.g. child.contoso.local)"
                     },
                     "username": {
                         "type": "string",

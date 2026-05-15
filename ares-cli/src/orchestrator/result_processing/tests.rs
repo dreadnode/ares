@@ -1709,6 +1709,13 @@ fn ntlmv1_signal_walks_tool_outputs_array() {
     assert!(result_has_ntlmv1_signal(&Some(p)));
 }
 
+#[test]
+fn ntlmv1_signal_policy_ignores_scalar_output_when_disabled() {
+    use super::result_has_ntlmv1_signal_with_policy;
+    let p = json!({"output": "LmCompatibilityLevel = 1"});
+    assert!(!result_has_ntlmv1_signal_with_policy(&Some(p), false));
+}
+
 // ── result_has_seimpersonate_signal ────────────────────────────────────
 
 #[test]
@@ -1757,6 +1764,18 @@ fn seimpersonate_signal_none_payload_false() {
     assert!(!result_has_seimpersonate_signal(&None));
 }
 
+#[test]
+fn seimpersonate_signal_policy_ignores_scalar_output_when_disabled() {
+    use super::result_has_seimpersonate_signal_with_policy;
+    let p = json!({
+        "output": "SeImpersonatePrivilege  Impersonate a client after authentication  Enabled"
+    });
+    assert!(!result_has_seimpersonate_signal_with_policy(
+        &Some(p),
+        false
+    ));
+}
+
 // ── result_has_ccache_evidence ─────────────────────────────────────────
 
 #[test]
@@ -1790,6 +1809,13 @@ fn ccache_evidence_requires_both_phrases() {
 fn ccache_evidence_none_payload_false() {
     use super::result_has_ccache_evidence;
     assert!(!result_has_ccache_evidence(&None));
+}
+
+#[test]
+fn ccache_evidence_policy_ignores_scalar_output_when_disabled() {
+    use super::result_has_ccache_evidence_with_policy;
+    let p = json!({"output": "Saving ticket in admin.ccache"});
+    assert!(!result_has_ccache_evidence_with_policy(&Some(p), false));
 }
 
 // ── result_text_indicates_failure ──────────────────────────────────────
@@ -1958,6 +1984,13 @@ fn locked_usernames_lowercases_user_and_domain() {
 fn locked_usernames_none_payload_empty() {
     use super::extract_locked_usernames_from_result;
     assert!(extract_locked_usernames_from_result(&None).is_empty());
+}
+
+#[test]
+fn locked_usernames_policy_ignores_scalar_output_when_disabled() {
+    use super::extract_locked_usernames_from_result_with_policy;
+    let p = json!({"output": "[-] CONTOSO\\alice:Pw STATUS_ACCOUNT_LOCKED_OUT"});
+    assert!(extract_locked_usernames_from_result_with_policy(&Some(p), false).is_empty());
 }
 
 #[test]

@@ -204,11 +204,11 @@ fn extract_users_smb_timestamp() {
 #[test]
 fn extract_users_domain_context_propagation() {
     let output = "\
-[*] Windows (name:DC01) (domain:north.contoso.local)\n\
+[*] Windows (name:DC01) (domain:child.contoso.local)\n\
 user:[alice] rid:[0x1f4]";
     let users = extract_users(output, "contoso.local");
     let alice = users.iter().find(|u| u.username == "alice").unwrap();
-    assert_eq!(alice.domain, "north.contoso.local");
+    assert_eq!(alice.domain, "child.contoso.local");
 }
 
 #[test]

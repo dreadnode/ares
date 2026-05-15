@@ -82,7 +82,7 @@ pub fn extract_rid500_name(output: &str) -> Option<String> {
 /// Returns `None` if either the SID or the flat name is missing — the caller
 /// must then resolve the FQDN itself rather than guessing from task context.
 ///
-/// Why this matters: a task targeting `north.contoso.local` can produce output
+/// Why this matters: a task targeting `child.contoso.local` can produce output
 /// referencing `S-1-5-21-…` for the trusted forest's domain (e.g. via lookupsid
 /// over a foreign trust). Anchoring to the flat name lets the caller map the
 /// SID to the correct FQDN via `netbios_to_fqdn` instead of misattributing it

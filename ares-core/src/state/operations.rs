@@ -87,6 +87,12 @@ pub async fn finalize_operation(
         .await?;
     conn.hset::<_, _, _, ()>(&meta_key, "completed_at", &completed_at_json)
         .await?;
+    conn.hset::<_, _, _, ()>(
+        &meta_key,
+        "red_blocked_on_blue",
+        serde_json::to_string(&false).unwrap_or_default(),
+    )
+    .await?;
     conn.expire::<_, ()>(&meta_key, 86400).await?;
 
     // 2. Write status key

@@ -98,7 +98,8 @@ pub struct TaskInfo {
 
 /// Result of a completed task.
 ///
-/// Matches Python: `class TaskResult` dataclass
+/// Matches Python's completed-task payload shape with optional worker-side
+/// provenance used by Rust orchestrator automations.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskResult {
     pub task_id: String,
@@ -107,6 +108,8 @@ pub struct TaskResult {
     pub result: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worker_pod: Option<String>,
     #[serde(default = "chrono::Utc::now")]
     pub completed_at: DateTime<Utc>,
 }

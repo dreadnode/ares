@@ -16,6 +16,36 @@ use tracing::{debug, info, warn};
 use crate::orchestrator::dispatcher::Dispatcher;
 use crate::orchestrator::state::*;
 
+fn same_forest_domain(a: &str, b: &str) -> bool {
+    let a = a.to_lowercase();
+    let b = b.to_lowercase();
+    !a.is_empty()
+        && !b.is_empty()
+        && (a == b || a.ends_with(&format!(".{b}")) || b.ends_with(&format!(".{a}")))
+}
+
+fn credential_for_domain(
+    state: &StateInner,
+    domain: &str,
+) -> Option<ares_core::models::Credential> {
+    state
+        .credentials
+        .iter()
+        .find(|c| {
+            !c.password.is_empty()
+                && !state.is_principal_quarantined(&c.username, &c.domain)
+                && c.domain.eq_ignore_ascii_case(domain)
+        })
+        .or_else(|| {
+            state.credentials.iter().find(|c| {
+                !c.password.is_empty()
+                    && !state.is_principal_quarantined(&c.username, &c.domain)
+                    && same_forest_domain(&c.domain, domain)
+            })
+        })
+        .cloned()
+}
+
 fn collect_password_policy_work(state: &StateInner) -> Vec<PasswordPolicyWork> {
     if state.credentials.is_empty() {
         return Vec::new();
@@ -29,12 +59,7 @@ fn collect_password_policy_work(state: &StateInner) -> Vec<PasswordPolicyWork> {
             continue;
         }
 
-        let cred = match state
-            .credentials
-            .iter()
-            .find(|c| c.domain.to_lowercase() == domain.to_lowercase())
-            .or_else(|| state.credentials.first())
-        {
+        let cred = match credential_for_domain(state, domain) {
             Some(c) => c.clone(),
             None => continue,
         };
@@ -349,7 +374,7 @@ mod tests {
     }
 
     #[test]
-    fn collect_falls_back_to_first_credential() {
+    fn collect_skips_unrelated_cross_forest_credential() {
         let mut state = StateInner::new("test-op".into());
         state
             .domain_controllers
@@ -359,9 +384,24 @@ mod tests {
             .credentials
             .push(make_credential("fabuser", "Fab!Pass1", "fabrikam.local")); // pragma: allowlist secret
         let work = collect_password_policy_work(&state);
+        assert!(work.is_empty());
+    }
+
+    #[test]
+    fn collect_allows_child_domain_credential() {
+        let mut state = StateInner::new("test-op".into());
+        state
+            .domain_controllers
+            .insert("contoso.local".into(), "192.168.58.10".into());
+        state.credentials.push(make_credential(
+            "childuser",
+            "Child!Pass1",
+            "child.contoso.local",
+        )); // pragma: allowlist secret
+        let work = collect_password_policy_work(&state);
         assert_eq!(work.len(), 1);
-        assert_eq!(work[0].credential.username, "fabuser");
-        assert_eq!(work[0].credential.domain, "fabrikam.local");
+        assert_eq!(work[0].credential.username, "childuser");
+        assert_eq!(work[0].credential.domain, "child.contoso.local");
     }
 
     #[test]

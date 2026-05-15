@@ -12,6 +12,19 @@ use crate::orchestrator::task_queue::TaskQueueCore;
 
 use super::{credential_source_trust, emit_op_state, sanitize_credential, strip_netexec_artifact};
 
+fn is_hex32(value: &str) -> bool {
+    value.len() == 32 && value.chars().all(|c| c.is_ascii_hexdigit())
+}
+
+fn is_valid_ntlm_hash_value(value: &str) -> bool {
+    let parts: Vec<&str> = value.split(':').collect();
+    match parts.as_slice() {
+        [nt] => is_hex32(nt),
+        [lm, nt] => is_hex32(lm) && is_hex32(nt),
+        _ => false,
+    }
+}
+
 impl SharedState {
     /// Add a credential to state and Redis (with dedup).
     ///
@@ -142,18 +155,18 @@ impl SharedState {
         // Mirrors the credential-side fix in `sanitize_credential`.
         hash.domain = hash.domain.to_lowercase();
 
-        // Reject malformed NTLM hashes before they enter state. NTLM relay
-        // artifacts sometimes produce 33-char values (relay timestamp suffix
-        // or partial capture); sprayhound/secretsdump both hard-fail on
-        // non-32-char hex, so storing them only causes agent confusion.
+        // Reject malformed NTLM hashes before they enter state. Accept both a
+        // bare NT half and standard secretsdump LM:NT pairs; tools can consume
+        // either, but relay artifacts with partial/extra bytes only cause
+        // downstream auth confusion.
         if hash.hash_type.to_lowercase() == "ntlm" {
             let v = &hash.hash_value;
-            if v.len() != 32 || !v.chars().all(|c| c.is_ascii_hexdigit()) {
+            if !is_valid_ntlm_hash_value(v) {
                 tracing::warn!(
                     username = %hash.username,
                     domain = %hash.domain,
                     hash_len = v.len(),
-                    "Dropping malformed NTLM hash (expected 32 hex chars)"
+                    "Dropping malformed NTLM hash (expected 32 hex chars or LM:NT)"
                 );
                 return Ok(false);
             }
@@ -767,6 +780,21 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn publish_hash_accepts_secretsdump_lm_nt_pair() {
+        let state = SharedState::new("op-1".to_string());
+        let q = mock_queue();
+
+        let lm_nt = format!("aad3b435b51404eeaad3b435b51404ee:{NTLM_HASH_A}");
+        let hash = make_hash("admin", "contoso.local", "NTLM", &lm_nt);
+        let added = state.publish_hash(&q, hash).await.unwrap();
+        assert!(added);
+
+        let s = state.inner.read().await;
+        assert_eq!(s.hashes.len(), 1);
+        assert_eq!(s.hashes[0].hash_value, lm_nt);
+    }
+
+    #[tokio::test]
     async fn publish_hash_dedup() {
         let state = SharedState::new("op-1".to_string());
         let q = mock_queue();
@@ -811,6 +839,26 @@ mod tests {
         let s = state.inner.read().await;
         assert!(s.has_domain_admin);
         assert!(s.dominated_domains.contains("contoso.local"));
+    }
+
+    #[tokio::test]
+    async fn publish_krbtgt_lm_nt_hash_sets_domain_admin() {
+        let state = SharedState::new("op-1".to_string());
+        let q = mock_queue();
+
+        {
+            let mut s = state.inner.write().await;
+            s.domains.push("contoso.local".to_string());
+        }
+
+        let lm_nt = format!("aad3b435b51404eeaad3b435b51404ee:{NTLM_HASH_A}");
+        let hash = make_hash("krbtgt", "contoso.local", "NTLM", &lm_nt);
+        state.publish_hash(&q, hash).await.unwrap();
+
+        let s = state.inner.read().await;
+        assert!(s.has_domain_admin);
+        assert!(s.dominated_domains.contains("contoso.local"));
+        assert_eq!(s.hashes[0].hash_value, lm_nt);
     }
 
     #[tokio::test]

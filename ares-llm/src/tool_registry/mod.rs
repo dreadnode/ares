@@ -62,7 +62,7 @@ impl AgentRole {
     }
 }
 
-/// Names of callback tools that the agent loop handles directly.
+/// Names of supported callback tools that the agent loop handles directly.
 ///
 /// Includes orchestrator query and dispatch tools — these are handled by a
 /// custom `CallbackHandler` (if provided) rather than being dispatched to workers.
@@ -70,10 +70,6 @@ pub const CALLBACK_TOOLS: &[&str] = &[
     // Universal callbacks
     "task_complete",
     "request_assistance",
-    // Re-added as structured fallback when the LLM cracker summarizes the
-    // result instead of piping raw `hashcat --show` stdout. Validator on
-    // the handler side rejects hash-shaped / truncated values.
-    "report_cracked_credential",
     "report_crack_failed",
     "report_finding",
     "report_lateral_success",
@@ -102,9 +98,18 @@ pub const CALLBACK_TOOLS: &[&str] = &[
     "dispatch_crack",
 ];
 
+/// Removed callback names that are still trapped in-process so a hallucinated
+/// call receives a deterministic "tool removed" response instead of being
+/// dispatched to a worker.
+const REMOVED_CALLBACK_TOOLS: &[&str] = &[
+    "record_credential",
+    "record_timeline_event",
+    "report_cracked_credential",
+];
+
 /// Check if a tool name is a callback (handled in Rust, not dispatched).
 pub fn is_callback_tool(name: &str) -> bool {
-    CALLBACK_TOOLS.contains(&name)
+    CALLBACK_TOOLS.contains(&name) || REMOVED_CALLBACK_TOOLS.contains(&name)
 }
 
 /// JSON schema property keys that contain secret material.
@@ -383,8 +388,12 @@ mod tests {
         // Reporting tools are callbacks (not dispatched to workers)
         assert!(is_callback_tool("record_compromised_host"));
         assert!(!is_callback_tool("record_weakness"));
-        assert!(!is_callback_tool("record_timeline_event"));
+        assert!(is_callback_tool("record_timeline_event"));
+        assert!(is_callback_tool("record_credential"));
         assert!(is_callback_tool("report_cracked_credential"));
+        assert!(!CALLBACK_TOOLS.contains(&"record_timeline_event"));
+        assert!(!CALLBACK_TOOLS.contains(&"record_credential"));
+        assert!(!CALLBACK_TOOLS.contains(&"report_cracked_credential"));
         assert!(!is_callback_tool("list_weaknesses"));
         assert!(is_callback_tool("list_credentials"));
         assert!(!is_callback_tool("nmap_scan"));
@@ -531,10 +540,8 @@ mod tests {
         let tools = tools_for_role(AgentRole::Cracker);
         let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
         assert!(names.contains(&"crack_with_hashcat"));
-        // Structured fallback for the cracker LLM agent when it doesn't pipe
-        // raw `hashcat --show` stdout — see cracker.rs for full rationale.
-        assert!(names.contains(&"report_cracked_credential"));
         assert!(names.contains(&"report_crack_failed"));
+        assert!(!names.contains(&"report_cracked_credential"));
     }
 
     #[test]

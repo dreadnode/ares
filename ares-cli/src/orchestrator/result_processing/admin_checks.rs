@@ -127,18 +127,28 @@ pub(crate) fn extract_ip_from_line(line: &str) -> Option<String> {
 /// Drives the SID extraction path so the same caller produces the same input
 /// regardless of which output convention the tool used. Pure — no Redis, no
 /// dispatcher.
+#[cfg(test)]
 pub(crate) fn collect_payload_text_parts(payload: &Value) -> Vec<String> {
+    collect_payload_text_parts_with_policy(payload, true)
+}
+
+fn collect_payload_text_parts_with_policy(
+    payload: &Value,
+    include_legacy_scalar_outputs: bool,
+) -> Vec<String> {
     let mut parts: Vec<String> = Vec::new();
-    for key in &["tool_output", "output"] {
-        if let Some(s) = payload.get(*key).and_then(|v| v.as_str()) {
-            parts.push(s.to_string());
-        }
-    }
     if let Some(arr) = payload.get("tool_outputs").and_then(|v| v.as_array()) {
         for item in arr {
             if let Some(s) = item.as_str() {
                 parts.push(s.to_string());
             } else if let Some(s) = item.get("output").and_then(|v| v.as_str()) {
+                parts.push(s.to_string());
+            }
+        }
+    }
+    if include_legacy_scalar_outputs {
+        for key in &["tool_output", "output"] {
+            if let Some(s) = payload.get(*key).and_then(|v| v.as_str()) {
                 parts.push(s.to_string());
             }
         }
@@ -151,26 +161,18 @@ pub(crate) fn collect_payload_text_parts(payload: &Value) -> Vec<String> {
 /// Walks `tool_outputs` (string OR `{output: string}` form), then
 /// legacy worker `tool_output` / `output`. Agent-completion `summary` and
 /// `has_golden_ticket: true` are intentionally ignored.
+#[cfg(test)]
 pub(crate) fn payload_contains_golden_ticket_marker(payload: &Value) -> bool {
-    if let Some(arr) = payload.get("tool_outputs").and_then(|v| v.as_array()) {
-        for item in arr {
-            let text = item
-                .as_str()
-                .or_else(|| item.get("output").and_then(|v| v.as_str()))
-                .unwrap_or("");
-            if has_golden_ticket_indicator(text) {
-                return true;
-            }
-        }
-    }
-    for key in &["tool_output", "output"] {
-        if let Some(text) = payload.get(*key).and_then(|v| v.as_str()) {
-            if has_golden_ticket_indicator(text) {
-                return true;
-            }
-        }
-    }
-    false
+    payload_contains_golden_ticket_marker_with_policy(payload, true)
+}
+
+fn payload_contains_golden_ticket_marker_with_policy(
+    payload: &Value,
+    include_legacy_scalar_outputs: bool,
+) -> bool {
+    collect_payload_text_parts_with_policy(payload, include_legacy_scalar_outputs)
+        .into_iter()
+        .any(|text| has_golden_ticket_indicator(&text))
 }
 
 /// Extract a domain SID and (optional) flat name from already-collected text.
@@ -268,6 +270,7 @@ pub(crate) async fn check_golden_ticket_completion(
     payload: &Value,
     task_id: &str,
     task_domain: Option<&str>,
+    include_legacy_scalar_outputs: bool,
     dispatcher: &Arc<Dispatcher>,
 ) {
     if !task_id.contains("exploit") && !task_id.contains("golden") {
@@ -276,7 +279,7 @@ pub(crate) async fn check_golden_ticket_completion(
     // Per-domain dedup happens after we resolve `domain` below — a forge
     // for one domain must not block recording another (multi-domain ops
     // routinely capture krbtgt for parent + child or both forests).
-    if !payload_contains_golden_ticket_marker(payload) {
+    if !payload_contains_golden_ticket_marker_with_policy(payload, include_legacy_scalar_outputs) {
         return;
     }
     let mut domain = String::new();
@@ -436,8 +439,13 @@ pub(crate) async fn detect_and_upgrade_admin_credentials(text: &str, dispatcher:
     }
 }
 
-pub(crate) async fn extract_and_cache_domain_sid(payload: &Value, dispatcher: &Arc<Dispatcher>) {
-    let text_parts = collect_payload_text_parts(payload);
+pub(crate) async fn extract_and_cache_domain_sid(
+    payload: &Value,
+    task_domain: Option<&str>,
+    include_legacy_scalar_outputs: bool,
+    dispatcher: &Arc<Dispatcher>,
+) {
+    let text_parts = collect_payload_text_parts_with_policy(payload, include_legacy_scalar_outputs);
     if text_parts.is_empty() {
         return;
     }
@@ -469,12 +477,12 @@ pub(crate) async fn extract_and_cache_domain_sid(payload: &Value, dispatcher: &A
     // 1. Flat name parsed from the output — authoritative when present. For
     //    impacket-lookupsid we get it from the RID lines (e.g. `500: FABRIKAM\…`);
     //    for rpcclient lsaquery we get it from `Domain Name: FABRIKAM`.
-    // 2. Payload's `domain` field — used only when output has no flat name AND
-    //    the field is a valid FQDN. The payload's domain is the *task* target,
-    //    not necessarily the domain that produced the SID; trusting it blindly
-    //    misattributed fabrikam.local's SID to child.contoso.local in
-    //    op-20260429-112418.
-    // 3. State's primary domain — last resort, only when nothing else applies.
+    // 2. Trusted task domain captured from pending-task params before
+    //    `complete_task` removed the entry. This is the orchestrator's own
+    //    target realm, not an LLM-authored payload field.
+    // 3. Legacy payload `domain` field — only for non-rust-llm-runner paths
+    //    where the result payload itself is still the tool transport.
+    // 4. State's primary domain — last resort, only when nothing else applies.
     let parsed_flat = lsaquery_flat.or_else(|| {
         ares_core::parsing::extract_domain_sid_and_flat_name(&combined).map(|(flat, _)| flat)
     });
@@ -493,12 +501,22 @@ pub(crate) async fn extract_and_cache_domain_sid(payload: &Value, dispatcher: &A
                 None
             })
         } else {
-            // No flat name in output. Fall back to payload domain or primary.
-            payload
-                .get("domain")
-                .and_then(|v| v.as_str())
+            // No flat name in output. Fall back to trusted task domain,
+            // then legacy payload domain (if allowed), then primary.
+            task_domain
                 .map(|d| d.to_lowercase())
                 .filter(|d| is_valid_domain_fqdn(d))
+                .or_else(|| {
+                    include_legacy_scalar_outputs
+                        .then(|| {
+                            payload
+                                .get("domain")
+                                .and_then(|v| v.as_str())
+                                .map(|d| d.to_lowercase())
+                                .filter(|d| is_valid_domain_fqdn(d))
+                        })
+                        .flatten()
+                })
                 .or_else(|| state.domains.first().map(|d| d.to_lowercase()))
         }
     };
@@ -832,7 +850,23 @@ mod tests {
         });
         assert_eq!(
             collect_payload_text_parts(&p),
-            vec!["scalar", "bare-string", "from-object"]
+            vec!["bare-string", "from-object", "scalar"]
+        );
+    }
+
+    #[test]
+    fn collect_text_parts_policy_can_ignore_scalar_fields() {
+        let p = json!({
+            "tool_output": "scalar",
+            "output": "also-scalar",
+            "tool_outputs": [
+                "bare-string",
+                {"output": "from-object"},
+            ],
+        });
+        assert_eq!(
+            collect_payload_text_parts_with_policy(&p, false),
+            vec!["bare-string", "from-object"]
         );
     }
 
@@ -883,6 +917,16 @@ mod tests {
             "tool_output": "Saving ticket in foo.ccache",
         });
         assert!(payload_contains_golden_ticket_marker(&p));
+    }
+
+    #[test]
+    fn gt_marker_policy_ignores_scalar_fields_when_disabled() {
+        let p = json!({
+            "tool_output": "Saving ticket in foo.ccache",
+        });
+        assert!(!payload_contains_golden_ticket_marker_with_policy(
+            &p, false
+        ));
     }
 
     #[test]

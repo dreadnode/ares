@@ -219,12 +219,12 @@ mod tests {
 
     #[test]
     fn build_host_entries_dc_subdomain() {
-        let hosts = vec![make_host("192.168.58.15", "dc02.north.contoso.local", true)];
+        let hosts = vec![make_host("192.168.58.15", "dc02.child.contoso.local", true)];
         let entries = build_host_entries(&hosts, &HashSet::new());
         assert_eq!(entries.len(), 1);
         assert_eq!(
             entries[0],
-            "192.168.58.15  dc02.north.contoso.local dc02 north.contoso.local"
+            "192.168.58.15  dc02.child.contoso.local dc02 child.contoso.local"
         );
     }
 

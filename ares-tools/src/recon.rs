@@ -784,8 +784,8 @@ mod tests {
     #[test]
     fn domain_to_base_dn_nested() {
         assert_eq!(
-            domain_to_base_dn("north.contoso.local"),
-            "DC=north,DC=contoso,DC=local"
+            domain_to_base_dn("child.contoso.local"),
+            "DC=child,DC=contoso,DC=local"
         );
     }
 

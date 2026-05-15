@@ -101,6 +101,7 @@ struct PivotWork {
     linked_server: String,
     cred_username: String,
     cred_domain: String,
+    impersonate_user: Option<String>,
 }
 
 /// Has any `mssql_impersonation` vuln on the same `target` been marked
@@ -134,11 +135,13 @@ async fn collect_pivot_work(dispatcher: &Dispatcher) -> Vec<PivotWork> {
         // `auto_mssql_impersonation` just landed EXECUTE AS LOGIN, which
         // proves source-side access AND grants the rights typically needed
         // for openquery hops — see plan-loot-gaps.md §1E).
-        .filter(|v| {
-            state.exploited_vulnerabilities.contains(&v.vuln_id)
-                || same_target_impersonation_exploited(&state, &v.target)
-        })
         .filter_map(|vuln| {
+            let has_link_access = state.exploited_vulnerabilities.contains(&vuln.vuln_id);
+            let has_impersonation = same_target_impersonation_exploited(&state, &vuln.target);
+            if !has_link_access && !has_impersonation {
+                return None;
+            }
+
             let linked_server = vuln
                 .details
                 .get("linked_server")
@@ -185,6 +188,7 @@ async fn collect_pivot_work(dispatcher: &Dispatcher) -> Vec<PivotWork> {
                 linked_server,
                 cred_username: cred.username,
                 cred_domain: cred.domain,
+                impersonate_user: has_impersonation.then(|| "sa".to_string()),
             })
         })
         .collect()
@@ -601,6 +605,10 @@ fn build_probe_args(item: &PivotWork) -> Value {
     });
     if !item.cred_domain.is_empty() {
         tool_args["domain"] = json!(item.cred_domain);
+        tool_args["windows_auth"] = json!(true);
+    }
+    if let Some(ref impersonate_user) = item.impersonate_user {
+        tool_args["impersonate_user"] = json!(impersonate_user);
     }
     tool_args
 }
@@ -617,6 +625,7 @@ mod tests {
             linked_server: "SQL".into(),
             cred_username: "svc_sql".into(),
             cred_domain: "contoso.local".into(),
+            impersonate_user: None,
         }
     }
 
@@ -626,6 +635,7 @@ mod tests {
         assert_eq!(args["target"], "192.168.58.51");
         assert_eq!(args["username"], "svc_sql");
         assert_eq!(args["domain"], "contoso.local");
+        assert_eq!(args["windows_auth"], true);
         assert_eq!(args["linked_server"], "SQL");
         assert_eq!(args["query"].as_str().unwrap(), PROBE_QUERY);
         // Plaintext secrets MUST NOT be in the probe args — the local
@@ -640,6 +650,15 @@ mod tests {
         item.cred_domain = String::new();
         let args = build_probe_args(&item);
         assert!(args.get("domain").is_none());
+        assert!(args.get("windows_auth").is_none());
+    }
+
+    #[test]
+    fn probe_args_wrap_link_hop_when_impersonation_confirmed() {
+        let mut item = sample_work();
+        item.impersonate_user = Some("sa".into());
+        let args = build_probe_args(&item);
+        assert_eq!(args["impersonate_user"], "sa");
     }
 
     #[test]

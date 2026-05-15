@@ -588,7 +588,7 @@ mod tests {
         // Child-domain cred should work for parent-domain via trust
         state
             .credentials
-            .push(make_credential("admin", "P@ssw0rd!", "north.contoso.local")); // pragma: allowlist secret
+            .push(make_credential("admin", "P@ssw0rd!", "child.contoso.local")); // pragma: allowlist secret
         let work = collect_group_enum_work(&state);
         assert_eq!(
             work.len(),
@@ -596,7 +596,7 @@ mod tests {
             "child-domain cred should fall back for parent"
         );
         assert_eq!(work[0].dedup_key, "group_enum:contoso.local:trust");
-        assert_eq!(work[0].credential.domain, "north.contoso.local");
+        assert_eq!(work[0].credential.domain, "child.contoso.local");
     }
 
     #[tokio::test]

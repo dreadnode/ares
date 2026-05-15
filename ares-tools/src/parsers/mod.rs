@@ -732,8 +732,8 @@ PORT     STATE SERVICE\n\
 
     #[test]
     fn parse_netexec_users_table_format() {
-        let output = r#"SMB         192.168.58.121  445    DC01       [*] Windows 10 / Server 2019 Build 17763 x64 (name:DC01) (domain:north.contoso.local) (signing:True) (SMBv1:False)
-SMB         192.168.58.121  445    DC01       [+] north.contoso.local\:
+        let output = r#"SMB         192.168.58.121  445    DC01       [*] Windows 10 / Server 2019 Build 17763 x64 (name:DC01) (domain:child.contoso.local) (signing:True) (SMBv1:False)
+SMB         192.168.58.121  445    DC01       [+] child.contoso.local\:
 SMB         192.168.58.121  445    DC01       -Username-                    -Last PW Set-       -BadPW- -Description-
 SMB         192.168.58.121  445    DC01       alice.johnson                 2026-03-25 23:21:09 0       Alice Johnson
 SMB         192.168.58.121  445    DC01       bob.smith                     2026-03-25 23:21:09 0       Bob Smith
@@ -757,7 +757,7 @@ SMB         192.168.58.121  445    DC01       [*] Enumerated 10 local users: CHI
         );
 
         // Check domain was extracted from banner
-        assert_eq!(user_entries[0]["domain"], "north.contoso.local");
+        assert_eq!(user_entries[0]["domain"], "child.contoso.local");
         assert_eq!(user_entries[0]["username"], "alice.johnson");
 
         // Check password leak extraction
@@ -779,7 +779,7 @@ SMB         192.168.58.121  445    DC01       [*] Enumerated 10 local users: CHI
 
     #[test]
     fn parse_netexec_users_rid_brute_format() {
-        let output = r#"SMB  192.168.58.121  445  DC01  [+] north.contoso.local\:
+        let output = r#"SMB  192.168.58.121  445  DC01  [+] child.contoso.local\:
 SMB  192.168.58.121  445  DC01  CHILD\alice.johnson (SidTypeUser)
 SMB  192.168.58.121  445  DC01  CHILD\bob.smith (SidTypeUser)"#;
 

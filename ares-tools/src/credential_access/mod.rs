@@ -31,13 +31,13 @@ mod tests {
     /// Verify that the base_dn builder handles a deeper domain.
     #[test]
     fn base_dn_from_child_domain() {
-        let domain = "north.contoso.local";
+        let domain = "child.contoso.local";
         let dn: String = domain
             .split('.')
             .map(|p| format!("DC={p}"))
             .collect::<Vec<_>>()
             .join(",");
-        assert_eq!(dn, "DC=north,DC=contoso,DC=local");
+        assert_eq!(dn, "DC=child,DC=contoso,DC=local");
     }
 
     /// Verify password_spray builds args for jitter correctly (presence only).
@@ -92,9 +92,9 @@ mod tests {
     #[test]
     fn ldap_bind_dn_format() {
         let username = "jsmith";
-        let domain = "north.contoso.local";
+        let domain = "child.contoso.local";
         let bind_dn = format!("{username}@{domain}");
-        assert_eq!(bind_dn, "jsmith@north.contoso.local");
+        assert_eq!(bind_dn, "jsmith@child.contoso.local");
     }
 
     /// Verify ldap_search_descriptions ldap_uri format.

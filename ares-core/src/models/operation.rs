@@ -16,6 +16,9 @@ pub struct OperationMeta {
     pub domain_admin_path: Option<String>,
     pub started_at: Option<DateTime<Utc>>,
     pub completed_at: Option<DateTime<Utc>>,
+    pub red_completed_at: Option<DateTime<Utc>>,
+    pub red_completion_reason: Option<String>,
+    pub red_blocked_on_blue: bool,
     pub target_ip: Option<String>,
     pub target_domain: Option<String>,
     pub target_ips: Vec<String>,
@@ -40,6 +43,11 @@ impl OperationMeta {
             .and_then(|s| parse_meta_datetime(s))
             .map(|dt| dt.with_timezone(&Utc));
 
+        let red_completed_at = data
+            .get("red_completed_at")
+            .and_then(|s| parse_meta_datetime(s))
+            .map(|dt| dt.with_timezone(&Utc));
+
         let target_ips = data
             .get("target_ips")
             .map(|s| parse_meta_string_list(s))
@@ -59,6 +67,14 @@ impl OperationMeta {
                 .and_then(|s| parse_meta_string(s)),
             started_at,
             completed_at,
+            red_completed_at,
+            red_completion_reason: data
+                .get("red_completion_reason")
+                .and_then(|s| parse_meta_string(s)),
+            red_blocked_on_blue: data
+                .get("red_blocked_on_blue")
+                .map(|v| parse_meta_bool(v))
+                .unwrap_or(false),
             target_ip: data.get("target_ip").and_then(|s| parse_meta_string(s)),
             target_domain: data.get("target_domain").and_then(|s| parse_meta_string(s)),
             target_ips,
@@ -346,10 +362,36 @@ mod tests {
     }
 
     #[test]
+    fn operation_meta_red_completion_fields() {
+        let mut data = HashMap::new();
+        data.insert(
+            "red_completed_at".to_string(),
+            r#""2026-05-15T22:04:43+00:00""#.to_string(),
+        );
+        data.insert(
+            "red_completion_reason".to_string(),
+            r#""all forests dominated (post-exploitation complete)""#.to_string(),
+        );
+        data.insert("red_blocked_on_blue".to_string(), "true".to_string());
+
+        let meta = OperationMeta::from_redis_hash(&data);
+
+        assert!(meta.red_completed_at.is_some());
+        assert_eq!(
+            meta.red_completion_reason.as_deref(),
+            Some("all forests dominated (post-exploitation complete)")
+        );
+        assert!(meta.red_blocked_on_blue);
+    }
+
+    #[test]
     fn operation_meta_default_derives() {
         let meta = OperationMeta::default();
         assert!(!meta.has_domain_admin);
         assert!(!meta.has_golden_ticket);
+        assert!(meta.red_completed_at.is_none());
+        assert!(meta.red_completion_reason.is_none());
+        assert!(!meta.red_blocked_on_blue);
         assert!(meta.target_ips.is_empty());
     }
 
@@ -860,6 +902,9 @@ pub struct SharedRedTeamState {
     pub target_ips: Vec<String>,
     pub started_at: DateTime<Utc>,
     pub completed_at: Option<DateTime<Utc>>,
+    pub red_completed_at: Option<DateTime<Utc>>,
+    pub red_completion_reason: Option<String>,
+    pub red_blocked_on_blue: bool,
 
     // Global discoveries
     pub all_domains: Vec<String>,
@@ -913,6 +958,9 @@ impl SharedRedTeamState {
             target_ips: Vec::new(),
             started_at: Utc::now(),
             completed_at: None,
+            red_completed_at: None,
+            red_completion_reason: None,
+            red_blocked_on_blue: false,
             all_domains: Vec::new(),
             all_credentials: Vec::new(),
             all_hashes: Vec::new(),

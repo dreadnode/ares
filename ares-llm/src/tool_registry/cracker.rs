@@ -96,81 +96,30 @@ pub(super) fn tool_definitions() -> Vec<ToolDefinition> {
 }
 
 pub(super) fn callback_definitions() -> Vec<ToolDefinition> {
-    vec![
-        // Re-added as a structured fallback. The preferred path is still
-        // auto-extraction from raw hashcat/john stdout in `output_extraction.rs`
-        // — that's lossless and doesn't trust LLM-generated values. But the
-        // cracker LLM agent has been observed reporting its result as natural-
-        // language text ("password = fr3edom") without piping the raw
-        // `--show` line into `tool_outputs`, leaving the extraction regex with
-        // nothing to match. When that happens, the cracked plaintext is lost.
-        // This callback gives the LLM an unambiguous structured channel so the
-        // cleartext lands in `state.credentials` even when the raw stdout path
-        // misses. The handler validates `password` through `is_valid_credential`
-        // (rejecting hash-shaped strings, truncation ellipsis, etc.), so the
-        // LLM can't pollute credentials with fabricated values.
-        ToolDefinition {
-            name: "report_cracked_credential".into(),
-            description: "Report a successfully cracked credential from hashcat or john output. \
-                Use this ONLY after a cracker tool has emitted the actual cleartext password — \
-                pass the exact plaintext from `hashcat --show` / `john --show` output. The system \
-                will store the resulting credential and annotate the corresponding hash. \
-                Do NOT use this for hashes you haven't actually cracked, or for guessed/inferred \
-                passwords — the validator rejects anything that looks like a hash or a truncated \
-                display string."
-                .into(),
-            input_schema: json!({
-                "type": "object",
-                "properties": {
-                    "username": {
-                        "type": "string",
-                        "description": "Username the cracked plaintext belongs to (no domain prefix)."
-                    },
-                    "domain": {
-                        "type": "string",
-                        "description": "FQDN of the domain the user belongs to (e.g. 'contoso.local')."
-                    },
-                    "password": {
-                        "type": "string",
-                        "description": "Cleartext password as printed by the cracker. Must NOT contain '...' (LLM truncation) or look like a hash."
-                    },
-                    "hash_type": {
-                        "type": "string",
-                        "description": "Hash type that was cracked (e.g. 'asrep', 'kerberoast', 'ntlm')."
-                    },
-                    "task_id": {
-                        "type": "string",
-                        "description": "The cracking task ID this credential was produced from."
-                    }
-                },
-                "required": ["username", "domain", "password"]
-            }),
-        },
-        ToolDefinition {
-            name: "report_crack_failed".into(),
-            description: "Report that a cracking attempt failed and no password was recovered. \
+    vec![ToolDefinition {
+        name: "report_crack_failed".into(),
+        description: "Report that a cracking attempt failed and no password was recovered. \
                 This allows the orchestrator to update task status and potentially retry with \
                 different parameters or a larger wordlist."
-                .into(),
-            input_schema: json!({
-                "type": "object",
-                "properties": {
-                    "task_id": {
-                        "type": "string",
-                        "description": "The task ID associated with this cracking job"
-                    },
-                    "hash_value": {
-                        "type": "string",
-                        "description": "The hash value that could not be cracked"
-                    },
-                    "reason": {
-                        "type": "string",
-                        "description": "Reason the cracking failed (e.g. exhausted wordlist, timeout, unsupported format). Defaults to 'exhausted wordlist'.",
-                        "default": "exhausted wordlist"
-                    }
+            .into(),
+        input_schema: json!({
+            "type": "object",
+            "properties": {
+                "task_id": {
+                    "type": "string",
+                    "description": "The task ID associated with this cracking job"
                 },
-                "required": ["task_id", "hash_value"]
-            }),
-        },
-    ]
+                "hash_value": {
+                    "type": "string",
+                    "description": "The hash value that could not be cracked"
+                },
+                "reason": {
+                    "type": "string",
+                    "description": "Reason the cracking failed (e.g. exhausted wordlist, timeout, unsupported format). Defaults to 'exhausted wordlist'.",
+                    "default": "exhausted wordlist"
+                }
+            },
+            "required": ["task_id", "hash_value"]
+        }),
+    }]
 }

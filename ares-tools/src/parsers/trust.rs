@@ -248,8 +248,8 @@ flatName: FABRIKAM
 
     #[test]
     fn parse_parent_child_trust() {
-        let output = r#"dn: CN=north.contoso.local,CN=System,DC=contoso,DC=local
-cn: north.contoso.local
+        let output = r#"dn: CN=child.contoso.local,CN=System,DC=contoso,DC=local
+cn: child.contoso.local
 trustDirection: 3
 trustType: 1
 trustAttributes: 0
@@ -257,7 +257,7 @@ flatName: CHILD
 "#;
         let trusts = parse_domain_trusts(output);
         assert_eq!(trusts.len(), 1);
-        assert_eq!(trusts[0]["domain"], "north.contoso.local");
+        assert_eq!(trusts[0]["domain"], "child.contoso.local");
         assert_eq!(trusts[0]["trust_type"], "parent_child");
         assert!(!trusts[0]["sid_filtering"].as_bool().unwrap());
     }
@@ -271,8 +271,8 @@ trustType: 2
 trustAttributes: 8
 flatName: FABRIKAM
 
-dn: CN=north.contoso.local,CN=System,DC=contoso,DC=local
-cn: north.contoso.local
+dn: CN=child.contoso.local,CN=System,DC=contoso,DC=local
+cn: child.contoso.local
 trustDirection: 3
 trustType: 1
 trustAttributes: 0

@@ -14,16 +14,8 @@ pub(super) fn print_loot_human(
 ) {
     println!("Operation: {}", state.operation_id);
 
-    let started = state.started_at.format("%Y-%m-%d %H:%M:%S UTC");
-    if let Some(completed) = state.completed_at {
-        let ended = completed.format("%Y-%m-%d %H:%M:%S UTC");
-        let elapsed = format_duration(completed - state.started_at);
-        println!("Started:   {started}");
-        println!("Completed: {ended} ({elapsed})");
-    } else {
-        let elapsed = format_duration(chrono::Utc::now() - state.started_at);
-        println!("Started:   {started}");
-        println!("Running:   {elapsed}");
+    for line in operation_timing_lines(state, chrono::Utc::now()) {
+        println!("{line}");
     }
 
     let topology = compute_forest_topology(domains_input);
@@ -282,6 +274,34 @@ pub(super) fn print_loot_human(
 
     print_attack_path(&state.all_timeline_events);
     print_mitre_techniques(&state.all_techniques, &state.all_timeline_events);
+}
+
+fn operation_timing_lines(
+    state: &SharedRedTeamState,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Vec<String> {
+    let started = state.started_at.format("%Y-%m-%d %H:%M:%S UTC");
+    let mut lines = vec![format!("Started:   {started}")];
+
+    if let Some(completed) = state.completed_at {
+        let ended = completed.format("%Y-%m-%d %H:%M:%S UTC");
+        let elapsed = format_duration(completed - state.started_at);
+        lines.push(format!("Completed: {ended} ({elapsed})"));
+    } else if let Some(red_completed) = state.red_completed_at {
+        let ended = red_completed.format("%Y-%m-%d %H:%M:%S UTC");
+        let elapsed = format_duration(red_completed - state.started_at);
+        lines.push(format!("Completed: {ended} ({elapsed})"));
+        if state.red_blocked_on_blue {
+            lines.push("Finalizing: waiting on blue investigations".to_string());
+        } else if let Some(reason) = &state.red_completion_reason {
+            lines.push(format!("Finalizing: {reason}"));
+        }
+    } else {
+        let elapsed = format_duration(now - state.started_at);
+        lines.push(format!("Running:   {elapsed}"));
+    }
+
+    lines
 }
 
 /// Compact summary used by `ops runtime`: DA/GT banner with per-domain
@@ -1200,6 +1220,30 @@ mod tests {
             parent_id: None,
             attack_step: 0,
         }
+    }
+
+    #[test]
+    fn operation_timing_red_complete_waiting_on_blue_prints_completed() {
+        let mut state = empty_state();
+        state.started_at = chrono::DateTime::parse_from_rfc3339("2026-05-15T20:53:56Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        state.red_completed_at = Some(
+            chrono::DateTime::parse_from_rfc3339("2026-05-15T22:04:43Z")
+                .unwrap()
+                .with_timezone(&chrono::Utc),
+        );
+        state.red_blocked_on_blue = true;
+
+        let now = chrono::DateTime::parse_from_rfc3339("2026-05-15T22:10:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let lines = operation_timing_lines(&state, now);
+
+        assert_eq!(lines[0], "Started:   2026-05-15 20:53:56 UTC");
+        assert_eq!(lines[1], "Completed: 2026-05-15 22:04:43 UTC (1h 10m 47s)");
+        assert_eq!(lines[2], "Finalizing: waiting on blue investigations");
+        assert!(!lines.iter().any(|line| line.starts_with("Running:")));
     }
 
     // capitalize

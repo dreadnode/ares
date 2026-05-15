@@ -114,7 +114,7 @@ async fn redis_pending_red_tasks(dispatcher: &Arc<Dispatcher>) -> Result<usize, 
 
 /// Extract forest root from a domain FQDN.
 ///
-/// For `north.contoso.local` → `contoso.local`
+/// For `child.contoso.local` → `contoso.local`
 /// For `contoso.local` → `contoso.local`
 fn forest_root_of(domain: &str) -> String {
     let lower = domain.to_lowercase();
@@ -318,11 +318,16 @@ pub async fn wait_for_completion(
                 "Completion condition met"
             );
 
+            let blue_enabled = std::env::var("ARES_BLUE_ENABLED").as_deref() == Ok("1");
+            if let Err(e) = mark_red_completion_for_loot(dispatcher, reason, blue_enabled).await {
+                warn!(err = %e, "Failed to persist red completion metadata");
+            }
+
             // When blue team is enabled, auto-submit an investigation from the
             // operation state if none have been submitted yet, then wait for all
             // investigations to drain before signalling stop.
             // Cap at 45 minutes to avoid hanging forever if an investigation is stuck.
-            if std::env::var("ARES_BLUE_ENABLED").as_deref() == Ok("1") {
+            if blue_enabled {
                 info!("Blue team enabled — waiting for investigations to finish before shutdown");
                 let mut conn = dispatcher.queue.connection();
 
@@ -481,6 +486,37 @@ pub async fn wait_for_completion(
             }
         }
     }
+}
+
+async fn mark_red_completion_for_loot(
+    dispatcher: &Arc<Dispatcher>,
+    reason: &str,
+    blocked_on_blue: bool,
+) -> Result<(), redis::RedisError> {
+    let key =
+        ares_core::state::build_key(&dispatcher.config.operation_id, ares_core::state::KEY_META);
+    let completed_at = Utc::now().to_rfc3339();
+    let mut conn = dispatcher.queue.connection();
+    redis::pipe()
+        .hset(
+            &key,
+            "red_completed_at",
+            serde_json::to_string(&completed_at).unwrap_or_default(),
+        )
+        .hset(
+            &key,
+            "red_completion_reason",
+            serde_json::to_string(reason).unwrap_or_default(),
+        )
+        .hset(
+            &key,
+            "red_blocked_on_blue",
+            serde_json::to_string(&blocked_on_blue).unwrap_or_default(),
+        )
+        .expire(&key, 86400)
+        .query_async::<()>(&mut conn)
+        .await?;
+    Ok(())
 }
 
 /// Auto-submit a blue team investigation from the current red team operation state.
@@ -652,12 +688,12 @@ mod tests {
 
     #[test]
     fn forest_root_of_child() {
-        assert_eq!(forest_root_of("north.contoso.local"), "contoso.local");
+        assert_eq!(forest_root_of("child.contoso.local"), "contoso.local");
     }
 
     #[test]
     fn forest_root_of_deep_child() {
-        assert_eq!(forest_root_of("sub.north.contoso.local"), "contoso.local");
+        assert_eq!(forest_root_of("sub.child.contoso.local"), "contoso.local");
     }
 
     fn make_trust(domain: &str, trust_type: &str) -> ares_core::models::TrustInfo {
@@ -747,8 +783,8 @@ mod tests {
         // parent_child trust should NOT add a separate required forest
         let mut trusted = std::collections::HashMap::new();
         trusted.insert(
-            "north.contoso.local".to_string(),
-            make_trust("north.contoso.local", "parent_child"),
+            "child.contoso.local".to_string(),
+            make_trust("child.contoso.local", "parent_child"),
         );
 
         let mut dominated = HashSet::new();
@@ -761,7 +797,7 @@ mod tests {
             &dominated,
             &dcs,
         );
-        // parent_child is NOT cross-forest, so north.contoso.local is not required
+        // parent_child is NOT cross-forest, so child.contoso.local is not required
         assert!(result.is_empty());
     }
 
@@ -772,7 +808,7 @@ mod tests {
         // trust escalation (ExtraSid / trust key).
         let trusted = std::collections::HashMap::new();
         let mut dominated = HashSet::new();
-        dominated.insert("north.contoso.local".to_string());
+        dominated.insert("child.contoso.local".to_string());
         let dcs = std::collections::HashMap::new();
         let result = compute_undominated_forests(
             Some("contoso.local"),
@@ -1004,7 +1040,7 @@ mod tests {
         let dcs = std::collections::HashMap::new();
         let result = compute_undominated_forests(
             Some("contoso.local"),
-            Some("north.contoso.local"),
+            Some("child.contoso.local"),
             &trusted,
             &dominated,
             &dcs,
@@ -1040,7 +1076,7 @@ mod tests {
         assert!(trust.is_cross_forest());
         assert!(!trust.sid_filtering);
 
-        let parent_child = make_trust("north.contoso.local", "parent_child");
+        let parent_child = make_trust("child.contoso.local", "parent_child");
         assert!(!parent_child.is_cross_forest());
     }
 

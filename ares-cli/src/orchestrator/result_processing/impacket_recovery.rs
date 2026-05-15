@@ -57,11 +57,20 @@ impl ImpacketFailureClass {
 /// Returns `None` when no recognised Impacket failure pattern is present —
 /// genuinely bad credentials (with the same status code) fall through here and
 /// are filtered out by `credential_is_known_good`, not the classifier.
+#[cfg(test)]
 pub fn classify_impacket_failure(
     result: &Option<Value>,
     error: Option<&str>,
 ) -> Option<ImpacketFailureClass> {
-    let text = collect_failure_text(result, error);
+    classify_impacket_failure_with_policy(result, error, true)
+}
+
+fn classify_impacket_failure_with_policy(
+    result: &Option<Value>,
+    error: Option<&str>,
+    include_legacy_scalar_outputs: bool,
+) -> Option<ImpacketFailureClass> {
+    let text = collect_failure_text_with_policy(result, error, include_legacy_scalar_outputs);
     if text.is_empty() {
         return None;
     }
@@ -101,7 +110,16 @@ pub fn classify_impacket_failure(
 /// `result_has_seimpersonate_signal` so we only see tool stdout, not LLM
 /// commentary (LLM summaries can include status codes copied from a *prior*
 /// tool call and would false-positive the classifier).
+#[cfg(test)]
 fn collect_failure_text(result: &Option<Value>, error: Option<&str>) -> String {
+    collect_failure_text_with_policy(result, error, true)
+}
+
+fn collect_failure_text_with_policy(
+    result: &Option<Value>,
+    error: Option<&str>,
+    include_legacy_scalar_outputs: bool,
+) -> String {
     let mut parts: Vec<String> = Vec::new();
     if let Some(err) = error {
         parts.push(err.to_string());
@@ -109,16 +127,18 @@ fn collect_failure_text(result: &Option<Value>, error: Option<&str>) -> String {
     let Some(payload) = result else {
         return parts.join("\n");
     };
-    for key in &["tool_output", "output", "summary"] {
-        if let Some(s) = payload.get(*key).and_then(|v| v.as_str()) {
-            parts.push(s.to_string());
-        }
-    }
     if let Some(arr) = payload.get("tool_outputs").and_then(|v| v.as_array()) {
         for item in arr {
             if let Some(s) = item.as_str() {
                 parts.push(s.to_string());
             } else if let Some(s) = item.get("output").and_then(|v| v.as_str()) {
+                parts.push(s.to_string());
+            }
+        }
+    }
+    if include_legacy_scalar_outputs {
+        for key in &["tool_output", "output"] {
+            if let Some(s) = payload.get(*key).and_then(|v| v.as_str()) {
                 parts.push(s.to_string());
             }
         }
@@ -195,6 +215,7 @@ pub async fn attempt_recovery(
     task_params: &HashMap<String, Value>,
     result: &Option<Value>,
     error: Option<&str>,
+    include_legacy_scalar_outputs: bool,
 ) -> bool {
     // Cheap exit: we only recover credential_access secretsdump tasks today.
     // Extending to lateral-movement / kerberoast lives behind the same gate.
@@ -206,7 +227,9 @@ pub async fn attempt_recovery(
         return false;
     }
 
-    let Some(class) = classify_impacket_failure(result, error) else {
+    let Some(class) =
+        classify_impacket_failure_with_policy(result, error, include_legacy_scalar_outputs)
+    else {
         return false;
     };
 
@@ -477,6 +500,22 @@ mod tests {
         let text = collect_failure_text(&result, Some("task error"));
         assert!(text.contains("task error"));
         assert!(text.contains("stdout text"));
+        assert!(text.contains("first"));
+        assert!(text.contains("second"));
+    }
+
+    #[test]
+    fn collect_failure_text_policy_ignores_scalar_output_when_disabled() {
+        let result = Some(json!({
+            "tool_output": "stdout text",
+            "tool_outputs": [
+                "first",
+                {"output": "second"}
+            ]
+        }));
+        let text = collect_failure_text_with_policy(&result, Some("task error"), false);
+        assert!(text.contains("task error"));
+        assert!(!text.contains("stdout text"));
         assert!(text.contains("first"));
         assert!(text.contains("second"));
     }

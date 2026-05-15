@@ -784,6 +784,7 @@ mod tests {
             success: true,
             result: Some(serde_json::json!({"output": "NT AUTHORITY\\SYSTEM"})),
             error: None,
+            worker_pod: None,
             completed_at: Utc::now(),
         };
         state.complete_task(&q, "task-42", result).await.unwrap();

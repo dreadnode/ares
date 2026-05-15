@@ -543,13 +543,13 @@ mod tests {
 
     #[test]
     fn smbexec_kerberos_target_format() {
-        let domain = "north.contoso.local";
+        let domain = "child.contoso.local";
         let username = "admin";
-        let target = "dc02.north.contoso.local";
+        let target = "dc02.child.contoso.local";
         let target_str = format!("{domain}/{username}@{target}");
         assert_eq!(
             target_str,
-            "north.contoso.local/admin@dc02.north.contoso.local"
+            "child.contoso.local/admin@dc02.child.contoso.local"
         );
     }
 

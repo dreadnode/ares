@@ -84,8 +84,6 @@ impl CallbackHandler for OrchestratorCallbackHandler {
             "dispatch_privesc_exploit" => Some(self.dispatch_exploit(call).await),
             "dispatch_coercion" => Some(self.dispatch_coercion(call).await),
             "dispatch_crack" => Some(self.dispatch_crack(call).await),
-            // Cracker result — persist cracked credential and update hash
-            "report_cracked_credential" => Some(self.report_cracked_credential(call).await),
             // Not ours — let built-in handler take over
             _ => None,
         }
