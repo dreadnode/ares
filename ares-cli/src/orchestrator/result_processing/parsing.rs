@@ -150,9 +150,9 @@ pub(crate) fn parse_discoveries(payload: &Value) -> ParsedDiscoveries {
 
 /// Check if a payload contains domain admin indicators. Pure function.
 pub(crate) fn has_domain_admin_indicator(payload: &Value) -> bool {
-    if payload.get("has_domain_admin").and_then(|v| v.as_bool()) == Some(true) {
-        return true;
-    }
+    // Only trust tool-output-backed evidence: a krbtgt hash in the payload.
+    // Agent self-reporting via `has_domain_admin: true` is not accepted —
+    // LLMs hallucinate domain admin routinely and it breaks post-DA automation.
     if let Some(hashes) = payload.get("hashes").and_then(|v| v.as_array()) {
         for hash_val in hashes {
             if let Some(username) = hash_val.get("username").and_then(|v| v.as_str()) {
@@ -173,9 +173,10 @@ mod tests {
     // ── has_domain_admin_indicator ──
 
     #[test]
-    fn domain_admin_flag_true() {
+    fn domain_admin_flag_true_ignored() {
+        // Agent self-reporting is not accepted — must have a krbtgt hash.
         let payload = json!({"has_domain_admin": true});
-        assert!(has_domain_admin_indicator(&payload));
+        assert!(!has_domain_admin_indicator(&payload));
     }
 
     #[test]

@@ -251,8 +251,9 @@ fn parse_mixed_payload() {
 }
 
 #[test]
-fn da_indicator_explicit_flag() {
-    assert!(has_domain_admin_indicator(
+fn da_indicator_explicit_flag_ignored() {
+    // Agent self-report is not accepted without a krbtgt hash.
+    assert!(!has_domain_admin_indicator(
         &json!({"has_domain_admin": true})
     ));
 }
@@ -906,21 +907,25 @@ fn golden_ticket_indicator_both_present_not_adjacent() {
 // --- resolve_da_path tests ---
 
 #[test]
-fn da_path_explicit_flag_with_path() {
+fn da_path_always_krbtgt() {
+    // Agent-provided path fields are ignored.
     let payload = json!({
         "has_domain_admin": true,
         "domain_admin_path": "secretsdump -> Administrator"
     });
     assert_eq!(
         resolve_da_path(&payload),
-        Some("secretsdump -> Administrator".to_string())
+        Some("secretsdump -> krbtgt hash".to_string())
     );
 }
 
 #[test]
-fn da_path_explicit_flag_without_path() {
+fn da_path_no_fields_defaults_to_krbtgt() {
     let payload = json!({"has_domain_admin": true});
-    assert_eq!(resolve_da_path(&payload), None);
+    assert_eq!(
+        resolve_da_path(&payload),
+        Some("secretsdump -> krbtgt hash".to_string())
+    );
 }
 
 #[test]

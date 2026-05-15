@@ -142,6 +142,23 @@ impl SharedState {
         // Mirrors the credential-side fix in `sanitize_credential`.
         hash.domain = hash.domain.to_lowercase();
 
+        // Reject malformed NTLM hashes before they enter state. NTLM relay
+        // artifacts sometimes produce 33-char values (relay timestamp suffix
+        // or partial capture); sprayhound/secretsdump both hard-fail on
+        // non-32-char hex, so storing them only causes agent confusion.
+        if hash.hash_type.to_lowercase() == "ntlm" {
+            let v = &hash.hash_value;
+            if v.len() != 32 || !v.chars().all(|c| c.is_ascii_hexdigit()) {
+                tracing::warn!(
+                    username = %hash.username,
+                    domain = %hash.domain,
+                    hash_len = v.len(),
+                    "Dropping malformed NTLM hash (expected 32 hex chars)"
+                );
+                return Ok(false);
+            }
+        }
+
         let operation_id = {
             let state = self.inner.read().await;
             state.operation_id.clone()
@@ -471,6 +488,8 @@ mod tests {
         }
     }
 
+    const NTLM_HASH_A: &str = "aad3b435b51404eeaad3b435b51404ee"; // pragma: allowlist secret
+
     fn make_hash(username: &str, domain: &str, hash_type: &str, hash_value: &str) -> Hash {
         Hash {
             id: uuid::Uuid::new_v4().to_string(),
@@ -738,7 +757,7 @@ mod tests {
         let state = SharedState::new("op-1".to_string());
         let q = mock_queue();
 
-        let hash = make_hash("admin", "contoso.local", "NTLM", "aabbccdd");
+        let hash = make_hash("admin", "contoso.local", "NTLM", NTLM_HASH_A);
         let added = state.publish_hash(&q, hash).await.unwrap();
         assert!(added);
 
@@ -752,8 +771,8 @@ mod tests {
         let state = SharedState::new("op-1".to_string());
         let q = mock_queue();
 
-        let hash1 = make_hash("admin", "contoso.local", "NTLM", "aabbccdd");
-        let hash2 = make_hash("admin", "contoso.local", "NTLM", "aabbccdd");
+        let hash1 = make_hash("admin", "contoso.local", "NTLM", NTLM_HASH_A);
+        let hash2 = make_hash("admin", "contoso.local", "NTLM", NTLM_HASH_A);
         assert!(state.publish_hash(&q, hash1).await.unwrap());
         assert!(!state.publish_hash(&q, hash2).await.unwrap());
     }
@@ -765,8 +784,8 @@ mod tests {
         let state = SharedState::new("op-1".to_string());
         let q = mock_queue();
 
-        let upper = make_hash("admin", "CONTOSO.LOCAL", "NTLM", "aabbccdd");
-        let lower = make_hash("admin", "contoso.local", "NTLM", "aabbccdd");
+        let upper = make_hash("admin", "CONTOSO.LOCAL", "NTLM", NTLM_HASH_A);
+        let lower = make_hash("admin", "contoso.local", "NTLM", NTLM_HASH_A);
         assert!(state.publish_hash(&q, upper).await.unwrap());
         assert!(!state.publish_hash(&q, lower).await.unwrap());
 
@@ -786,7 +805,7 @@ mod tests {
             s.domains.push("contoso.local".to_string());
         }
 
-        let hash = make_hash("krbtgt", "contoso.local", "NTLM", "aabbccdd11223344");
+        let hash = make_hash("krbtgt", "contoso.local", "NTLM", NTLM_HASH_A);
         state.publish_hash(&q, hash).await.unwrap();
 
         let s = state.inner.read().await;
@@ -805,7 +824,7 @@ mod tests {
             s.domains.push("contoso.local".to_string());
         }
 
-        let hash = make_hash("krbtgt", "contoso.local", "NTLM", "aabbccdd11223344");
+        let hash = make_hash("krbtgt", "contoso.local", "NTLM", NTLM_HASH_A);
         state.publish_hash(&q, hash).await.unwrap();
 
         let mut conn = q.connection();
@@ -824,7 +843,7 @@ mod tests {
         let state = SharedState::new("op-1".to_string());
         let q = mock_queue();
 
-        let hash = make_hash("krbtgt", "", "NTLM", "aabbccdd11223344");
+        let hash = make_hash("krbtgt", "", "NTLM", NTLM_HASH_A);
         state.publish_hash(&q, hash).await.unwrap();
 
         let s = state.inner.read().await;
@@ -842,7 +861,7 @@ mod tests {
         let state = SharedState::new("op-1".to_string());
         let q = mock_queue();
 
-        let hash = make_hash("admin", "contoso.local", "NTLM", "aabbccdd");
+        let hash = make_hash("admin", "contoso.local", "NTLM", NTLM_HASH_A);
         state.publish_hash(&q, hash).await.unwrap();
 
         let updated = state
@@ -914,7 +933,7 @@ mod tests {
     async fn publish_hash_emits_event_with_capturing_recorder() {
         let (state, recorder) = capturing_state("op-h");
         let q = mock_queue();
-        let hash = make_hash("admin", "contoso.local", "NTLM", "aabbccdd");
+        let hash = make_hash("admin", "contoso.local", "NTLM", NTLM_HASH_A);
         assert!(state.publish_hash(&q, hash).await.unwrap());
 
         let evs = recorder.captured().await;
@@ -933,6 +952,49 @@ mod tests {
             }
             other => panic!("expected HashCaptured, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn publish_hash_rejects_malformed_ntlm() {
+        let state = SharedState::new("op-1".to_string());
+        let q = mock_queue();
+
+        // 33 chars — relay artifact
+        let bad = make_hash(
+            "robb.stark",
+            "north.sevenkingdoms.local",
+            "NTLM",
+            "aad3b435b51404eeaad3b435b51404ee0",
+        ); // pragma: allowlist secret
+        assert!(!state.publish_hash(&q, bad).await.unwrap());
+
+        // 8 chars — truncated capture
+        let short = make_hash(
+            "robb.stark",
+            "north.sevenkingdoms.local",
+            "NTLM",
+            "aabbccdd",
+        );
+        assert!(!state.publish_hash(&q, short).await.unwrap());
+
+        let s = state.inner.read().await;
+        assert!(s.hashes.is_empty(), "malformed hashes must not enter state");
+    }
+
+    #[tokio::test]
+    async fn publish_hash_accepts_non_ntlm_any_length() {
+        // AES256 keys are 64 hex chars; we must not reject them.
+        let state = SharedState::new("op-1".to_string());
+        let q = mock_queue();
+        let aes = make_hash(
+            "krbtgt",
+            "contoso.local",
+            "AES256",
+            "aabbccdd11223344aabbccdd11223344aabbccdd11223344aabbccdd11223344",
+        );
+        assert!(state.publish_hash(&q, aes).await.unwrap());
+        let s = state.inner.read().await;
+        assert_eq!(s.hashes.len(), 1);
     }
 
     #[tokio::test]
