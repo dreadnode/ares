@@ -7,6 +7,24 @@ use crate::args::{optional_bool, optional_str, required_str};
 use crate::executor::CommandBuilder;
 use crate::ToolOutput;
 
+/// Concatenate the stdout/stderr of a chained tool invocation under `=== <label> ===`
+/// headers so an operator can tell which sub-step produced which output. Pure
+/// formatting — kept separate from the chain drivers (which shell out to certipy
+/// and are not unit-testable without subprocess mocks).
+fn render_chain_output(steps: &[(&str, &ToolOutput)]) -> (String, String) {
+    let stdout = steps
+        .iter()
+        .map(|(label, out)| format!("=== {label} ===\n{}", out.stdout))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let stderr = steps
+        .iter()
+        .map(|(label, out)| format!("=== {label} ===\n{}", out.stderr))
+        .collect::<Vec<_>>()
+        .join("\n");
+    (stdout, stderr)
+}
+
 /// Enumerate ADCS certificate templates and CAs using Certipy.
 ///
 /// Required args: `username`, `domain`, `dc_ip`
@@ -580,18 +598,11 @@ pub async fn certipy_esc4_full_chain(args: &Value) -> Result<ToolOutput> {
     }
     let auth_output = certipy_auth(&auth_args).await?;
 
-    let combined_stdout = format!(
-        "=== Template Modification ===\n{}\n\
-         === Certificate Request ===\n{}\n\
-         === Authentication ===\n{}",
-        template_output.stdout, request_output.stdout, auth_output.stdout
-    );
-    let combined_stderr = format!(
-        "=== Template Modification ===\n{}\n\
-         === Certificate Request ===\n{}\n\
-         === Authentication ===\n{}",
-        template_output.stderr, request_output.stderr, auth_output.stderr
-    );
+    let (combined_stdout, combined_stderr) = render_chain_output(&[
+        ("Template Modification", &template_output),
+        ("Certificate Request", &request_output),
+        ("Authentication", &auth_output),
+    ]);
 
     // The chain succeeds only if the final auth step succeeded.
     Ok(ToolOutput {
@@ -700,16 +711,15 @@ pub async fn certipy_esc3_full_chain(args: &Value) -> Result<ToolOutput> {
         .execute()
         .await?;
     if !request_output.success {
+        let agent_label = format!("Agent enrollment ({agent_template})");
+        let on_behalf_label = format!("On-behalf-of {on_behalf_target} via {on_behalf_template}");
+        let (stdout, stderr) = render_chain_output(&[
+            (&agent_label, &agent_output),
+            (&on_behalf_label, &request_output),
+        ]);
         return Ok(ToolOutput {
-            stdout: format!(
-                "=== Agent enrollment ({agent_template}) ===\n{}\n\
-                 === On-behalf-of {on_behalf_target} via {on_behalf_template} ===\n{}",
-                agent_output.stdout, request_output.stdout
-            ),
-            stderr: format!(
-                "=== Agent enrollment stderr ===\n{}\n=== On-behalf-of stderr ===\n{}",
-                agent_output.stderr, request_output.stderr
-            ),
+            stdout,
+            stderr,
             exit_code: request_output.exit_code,
             success: false,
         });
@@ -739,16 +749,13 @@ pub async fn certipy_esc3_full_chain(args: &Value) -> Result<ToolOutput> {
         .execute()
         .await?;
 
-    let combined_stdout = format!(
-        "=== Agent enrollment ({agent_template}) ===\n{}\n\
-         === On-behalf-of {on_behalf_target} via {on_behalf_template} ===\n{}\n\
-         === certipy auth ===\n{}",
-        agent_output.stdout, request_output.stdout, auth_output.stdout
-    );
-    let combined_stderr = format!(
-        "=== Agent enrollment stderr ===\n{}\n=== On-behalf-of stderr ===\n{}\n=== certipy auth stderr ===\n{}",
-        agent_output.stderr, request_output.stderr, auth_output.stderr
-    );
+    let agent_label = format!("Agent enrollment ({agent_template})");
+    let on_behalf_label = format!("On-behalf-of {on_behalf_target} via {on_behalf_template}");
+    let (combined_stdout, combined_stderr) = render_chain_output(&[
+        (&agent_label, &agent_output),
+        (&on_behalf_label, &request_output),
+        ("certipy auth", &auth_output),
+    ]);
     Ok(ToolOutput {
         stdout: combined_stdout,
         stderr: combined_stderr,
@@ -828,15 +835,10 @@ pub async fn certipy_esc1_full_chain(args: &Value) -> Result<ToolOutput> {
         .execute()
         .await?;
 
-    let combined_stdout = format!(
-        "=== certipy req (ESC1, upn={upn}, sid={sid}) ===\n{}\n\
-         === certipy auth ({pfx_name}) ===\n{}",
-        request_output.stdout, auth_output.stdout
-    );
-    let combined_stderr = format!(
-        "=== certipy req stderr ===\n{}\n=== certipy auth stderr ===\n{}",
-        request_output.stderr, auth_output.stderr
-    );
+    let req_label = format!("certipy req (ESC1, upn={upn}, sid={sid})");
+    let auth_label = format!("certipy auth ({pfx_name})");
+    let (combined_stdout, combined_stderr) =
+        render_chain_output(&[(&req_label, &request_output), (&auth_label, &auth_output)]);
     Ok(ToolOutput {
         stdout: combined_stdout,
         stderr: combined_stderr,
@@ -1327,5 +1329,67 @@ mod tests {
             "ca": "contoso-CA", "pfx_path": "/tmp/admin.pfx"
         });
         assert!(super::certipy_esc4_full_chain(&args).await.is_ok());
+    }
+
+    // --- render_chain_output ---
+
+    fn mk_output(stdout: &str, stderr: &str) -> crate::ToolOutput {
+        crate::ToolOutput {
+            stdout: stdout.into(),
+            stderr: stderr.into(),
+            exit_code: Some(0),
+            success: true,
+        }
+    }
+
+    #[test]
+    fn render_chain_output_concatenates_steps_under_labeled_headers() {
+        let a = mk_output("alpha-out", "alpha-err");
+        let b = mk_output("bravo-out", "bravo-err");
+        let (stdout, stderr) = super::render_chain_output(&[("Alpha", &a), ("Bravo", &b)]);
+        assert_eq!(stdout, "=== Alpha ===\nalpha-out\n=== Bravo ===\nbravo-out");
+        assert_eq!(stderr, "=== Alpha ===\nalpha-err\n=== Bravo ===\nbravo-err");
+    }
+
+    #[test]
+    fn render_chain_output_empty_steps_yields_empty_strings() {
+        let (stdout, stderr) = super::render_chain_output(&[]);
+        assert!(stdout.is_empty());
+        assert!(stderr.is_empty());
+    }
+
+    #[test]
+    fn render_chain_output_single_step_omits_join_separator() {
+        let only = mk_output("solo-out", "solo-err");
+        let (stdout, stderr) = super::render_chain_output(&[("Only", &only)]);
+        assert_eq!(stdout, "=== Only ===\nsolo-out");
+        assert_eq!(stderr, "=== Only ===\nsolo-err");
+    }
+
+    #[test]
+    fn render_chain_output_preserves_step_order() {
+        let first = mk_output("1", "");
+        let second = mk_output("2", "");
+        let third = mk_output("3", "");
+        let (stdout, _) = super::render_chain_output(&[
+            ("first", &first),
+            ("second", &second),
+            ("third", &third),
+        ]);
+        let first_idx = stdout.find("first").unwrap();
+        let second_idx = stdout.find("second").unwrap();
+        let third_idx = stdout.find("third").unwrap();
+        assert!(first_idx < second_idx);
+        assert!(second_idx < third_idx);
+    }
+
+    #[test]
+    fn render_chain_output_handles_empty_stdout_or_stderr_fields() {
+        let out_only = mk_output("data", "");
+        let err_only = mk_output("", "boom");
+        let (stdout, stderr) =
+            super::render_chain_output(&[("Out", &out_only), ("Err", &err_only)]);
+        assert_eq!(stdout, "=== Out ===\ndata\n=== Err ===\n");
+        assert_eq!(stderr, "=== Out ===\n\n=== Err ===\nboom");
     }
 }
