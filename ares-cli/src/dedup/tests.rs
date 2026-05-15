@@ -665,6 +665,32 @@ fn normalize_state_domains_drops_host_fqdn_masquerading_as_domain() {
 }
 
 #[test]
+fn normalize_state_domains_domain_kept_when_hostname_matches_but_subdomain_host_exists() {
+    // A DC whose hostname field equals the domain name (e.g. the DC for
+    // child.contoso.local is stored as hostname="child.contoso.local") must NOT be
+    // excluded when another host confirms it is a real domain
+    // (dc01.child.contoso.local → suffix = child.contoso.local).
+    let users = vec![make_user("contoso.local", "admin")];
+    let mut creds = vec![];
+    let mut hashes = vec![];
+    let mut domains = vec![
+        "contoso.local".to_string(),
+        "child.contoso.local".to_string(),
+    ];
+    let hosts = vec![
+        make_host("192.168.58.150", "child.contoso.local"),
+        make_host("192.168.58.51", "dc01.child.contoso.local"),
+    ];
+
+    normalize_state_domains(&users, &mut creds, &mut hashes, &mut domains, &hosts, None);
+
+    assert!(
+        domains.contains(&"child.contoso.local".to_string()),
+        "child domain should survive: dc01.child.* confirms it is a real domain"
+    );
+}
+
+#[test]
 fn normalize_state_domains_domain_kept_from_target_domain() {
     // target_domain should cause that domain to be retained even without hosts/users.
     let users: Vec<User> = vec![];
@@ -684,6 +710,39 @@ fn normalize_state_domains_domain_kept_from_target_domain() {
 
     assert_eq!(domains.len(), 1);
     assert_eq!(domains[0], "fabrikam.local");
+}
+
+#[test]
+fn normalize_state_domains_child_domain_kept_when_parent_valid() {
+    // A child domain (3+ labels) should survive the filter when its
+    // suffix parent is already in valid_domains, even if no users/hosts
+    // have been enumerated in the child domain yet.
+    let users = vec![make_user("contoso.local", "admin")];
+    let mut creds = vec![];
+    let mut hashes = vec![];
+    let mut domains = vec![
+        "contoso.local".to_string(),
+        "child.contoso.local".to_string(),
+        "orphan.other".to_string(),
+    ];
+    let hosts: Vec<Host> = vec![];
+
+    normalize_state_domains(
+        &users,
+        &mut creds,
+        &mut hashes,
+        &mut domains,
+        &hosts,
+        Some("contoso.local"),
+    );
+
+    assert!(domains.contains(&"contoso.local".to_string()));
+    assert!(
+        domains.contains(&"child.contoso.local".to_string()),
+        "child domain should survive when parent is valid"
+    );
+    // orphan.other has no parent in valid_domains — dropped
+    assert!(!domains.contains(&"orphan.other".to_string()));
 }
 
 #[test]

@@ -679,8 +679,8 @@ pub(crate) fn parse_task_complete_result(result: &str, steps: u32, tool_calls: u
 
 /// Merge discoveries, LLM-fabricated findings, and raw tool outputs into a
 /// result-payload object. Pure JSON manipulation — drops any caller-supplied
-/// `discoveries`/`llm_findings` keys first (LLM-controlled prose must never
-/// shadow parser output) and only emits each section when non-empty.
+/// evidence keys first (LLM-controlled prose must never shadow parser/tool
+/// output) and only emits each section when non-empty.
 pub(crate) fn merge_result_extras(
     mut result_json: Value,
     merged_discoveries: Option<Value>,
@@ -688,8 +688,23 @@ pub(crate) fn merge_result_extras(
     tool_outputs: Vec<Value>,
 ) -> Value {
     if let Some(obj) = result_json.as_object_mut() {
-        obj.remove("discoveries");
-        obj.remove("llm_findings");
+        for key in [
+            "discoveries",
+            "llm_findings",
+            "tool_outputs",
+            "tool_output",
+            "output",
+            "has_domain_admin",
+            "domain_admin_path",
+            "has_golden_ticket",
+            "vuln_id",
+            "domain",
+            "target",
+            "target_ip",
+            "target_spn",
+        ] {
+            obj.remove(key);
+        }
     }
     if let Some(disc) = merged_discoveries {
         result_json["discoveries"] = disc;
@@ -1054,6 +1069,15 @@ mod helper_tests {
             "summary": "ok",
             "discoveries": {"credentials": [{"forged_by_llm": "true"}]},
             "llm_findings": [{"forged_by_llm": "true"}],
+            "tool_outputs": [{"output": "Saving ticket in fake.ccache"}],
+            "tool_output": "Domain Sid: S-1-5-21-1-2-3",
+            "output": "SeImpersonatePrivilege Enabled",
+            "has_domain_admin": true,
+            "domain_admin_path": "agent-made path",
+            "has_golden_ticket": true,
+            "vuln_id": "agent_supplied_vuln",
+            "domain": "agent.local",
+            "target_ip": "192.0.2.10",
         });
         let m = merge_result_extras(
             base,
@@ -1069,6 +1093,19 @@ mod helper_tests {
         );
         // LLM-supplied `llm_findings` stripped entirely (caller passed None).
         assert!(m.get("llm_findings").is_none());
+        for key in [
+            "tool_outputs",
+            "tool_output",
+            "output",
+            "has_domain_admin",
+            "domain_admin_path",
+            "has_golden_ticket",
+            "vuln_id",
+            "domain",
+            "target_ip",
+        ] {
+            assert!(m.get(key).is_none(), "{key} should be stripped");
+        }
     }
 
     #[test]

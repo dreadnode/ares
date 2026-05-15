@@ -900,6 +900,7 @@ tasks:
         # zigbuild's Zig ar wrapper on Darwin), prefer zigbuild on Linux,
         # fall back to raw cargo
         if [ "$(uname)" = "Darwin" ] && command -v cross >/dev/null 2>&1; then
+          export AWS_LC_SYS_CMAKE_BUILDER=1
           cross build --release --target {{.RUST_TARGET}}
         elif command -v cargo-zigbuild >/dev/null 2>&1; then
           cargo zigbuild --release --target {{.RUST_TARGET}}

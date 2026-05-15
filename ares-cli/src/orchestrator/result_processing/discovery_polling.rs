@@ -185,28 +185,128 @@ async fn poll_discoveries(dispatcher: &Dispatcher) -> Result<()> {
 
 /// Check if a task result contains lockout error indicators.
 pub(crate) fn has_lockout_in_result(result: &crate::orchestrator::task_queue::TaskResult) -> bool {
-    if let Some(ref err) = result.error {
-        if LOCKOUT_PATTERNS.iter().any(|p| err.contains(p)) {
-            return true;
+    let from_rust_llm_runner = result.worker_pod.as_deref() == Some("rust-llm-runner");
+    if !from_rust_llm_runner {
+        if let Some(ref err) = result.error {
+            if LOCKOUT_PATTERNS.iter().any(|p| err.contains(p)) {
+                return true;
+            }
         }
     }
     if let Some(ref payload) = result.result {
         if let Some(outputs) = payload.get("tool_outputs").and_then(|v| v.as_array()) {
             for output in outputs {
-                if let Some(text) = output.as_str() {
+                let text = output
+                    .as_str()
+                    .or_else(|| output.get("output").and_then(|v| v.as_str()));
+                if text.is_some_and(|t| LOCKOUT_PATTERNS.iter().any(|p| t.contains(p))) {
+                    return true;
+                }
+            }
+        }
+        if !from_rust_llm_runner {
+            for key in &["output", "tool_output"] {
+                if let Some(text) = payload.get(*key).and_then(|v| v.as_str()) {
                     if LOCKOUT_PATTERNS.iter().any(|p| text.contains(p)) {
                         return true;
                     }
                 }
             }
         }
-        for key in &["summary", "output", "tool_output"] {
-            if let Some(text) = payload.get(*key).and_then(|v| v.as_str()) {
-                if LOCKOUT_PATTERNS.iter().any(|p| text.contains(p)) {
-                    return true;
-                }
-            }
-        }
     }
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::{json, Value};
+
+    use super::has_lockout_in_result;
+    use crate::orchestrator::task_queue::TaskResult;
+
+    fn task_result(
+        result: Option<Value>,
+        error: Option<&str>,
+        worker_pod: Option<&str>,
+    ) -> TaskResult {
+        TaskResult {
+            task_id: "task-1".to_string(),
+            success: false,
+            result,
+            error: error.map(str::to_string),
+            completed_at: None,
+            worker_pod: worker_pod.map(str::to_string),
+            agent_name: None,
+        }
+    }
+
+    #[test]
+    fn lockout_ignores_rust_llm_runner_error_text() {
+        let result = task_result(
+            None,
+            Some("Assistance needed: observed STATUS_ACCOUNT_LOCKED_OUT"),
+            Some("rust-llm-runner"),
+        );
+
+        assert!(!has_lockout_in_result(&result));
+    }
+
+    #[test]
+    fn lockout_detects_non_llm_worker_error_text() {
+        let result = task_result(
+            None,
+            Some("netexec failed with STATUS_ACCOUNT_LOCKED_OUT"),
+            Some("legacy-worker"),
+        );
+
+        assert!(has_lockout_in_result(&result));
+    }
+
+    #[test]
+    fn lockout_ignores_summary_text() {
+        let result = task_result(
+            Some(json!({"summary": "STATUS_ACCOUNT_LOCKED_OUT for alice"})),
+            None,
+            Some("rust-llm-runner"),
+        );
+
+        assert!(!has_lockout_in_result(&result));
+    }
+
+    #[test]
+    fn lockout_ignores_rust_llm_runner_scalar_output_text() {
+        let result = task_result(
+            Some(json!({"output": "STATUS_ACCOUNT_LOCKED_OUT for alice"})),
+            None,
+            Some("rust-llm-runner"),
+        );
+
+        assert!(!has_lockout_in_result(&result));
+    }
+
+    #[test]
+    fn lockout_detects_non_llm_worker_scalar_output_text() {
+        let result = task_result(
+            Some(json!({"output": "STATUS_ACCOUNT_LOCKED_OUT for alice"})),
+            None,
+            Some("legacy-worker"),
+        );
+
+        assert!(has_lockout_in_result(&result));
+    }
+
+    #[test]
+    fn lockout_detects_tool_output_text_for_rust_llm_runner() {
+        let result = task_result(
+            Some(json!({
+                "tool_outputs": [
+                    {"output": "[-] CONTOSO\\alice:pw STATUS_ACCOUNT_LOCKED_OUT"}
+                ]
+            })),
+            None,
+            Some("rust-llm-runner"),
+        );
+
+        assert!(has_lockout_in_result(&result));
+    }
 }

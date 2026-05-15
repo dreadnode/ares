@@ -220,7 +220,13 @@ pub async fn process_completed_task(
 
     if result.success {
         if let Some(ref payload) = result.result {
-            check_golden_ticket_completion(payload, &completed.task_id, dispatcher).await;
+            check_golden_ticket_completion(
+                payload,
+                &completed.task_id,
+                task_domain.as_deref(),
+                dispatcher,
+            )
+            .await;
         }
     }
 
@@ -593,7 +599,7 @@ fn result_has_ntlmv1_signal(result: &Option<Value>) -> bool {
         return false;
     };
     let mut texts: Vec<String> = Vec::new();
-    for key in &["tool_output", "output", "summary"] {
+    for key in &["tool_output", "output"] {
         if let Some(s) = payload.get(*key).and_then(|v| v.as_str()) {
             texts.push(s.to_string());
         }
@@ -665,11 +671,10 @@ async fn derive_seimpersonate_host_label(
     "unknown".to_string()
 }
 
-/// Returns `true` when any text payload on the result contains a recognised
+/// Returns `true` when trusted tool-output payloads contain a recognised
 /// SeImpersonate signal. Conservative — only matches `SeImpersonatePrivilege`
 /// alongside an `Enabled` token (the format `whoami /priv` uses). This avoids
-/// false positives from output that merely *mentions* the privilege name
-/// (e.g. recon plans or LLM commentary).
+/// false positives from output that merely *mentions* the privilege name.
 fn result_has_seimpersonate_signal(result: &Option<Value>) -> bool {
     let Some(payload) = result else {
         return false;
@@ -685,7 +690,7 @@ fn result_has_seimpersonate_signal(result: &Option<Value>) -> bool {
             }
         }
     }
-    for key in &["summary", "output", "tool_output"] {
+    for key in &["output", "tool_output"] {
         if let Some(s) = payload.get(*key).and_then(|v| v.as_str()) {
             texts.push(s.to_string());
         }
@@ -711,8 +716,8 @@ fn result_has_seimpersonate_signal(result: &Option<Value>) -> bool {
 }
 
 /// Extract `(username, optional domain)` pairs from a tool result that
-/// reported a per-user lockout. Looks at `tool_outputs`, `output`,
-/// `tool_output`, and `summary` fields for netexec-style lines such as:
+/// reported a per-user lockout. Looks at trusted `tool_outputs`, `output`,
+/// and `tool_output` fields for netexec-style lines such as:
 ///
 ///   `[-] DOMAIN\\username:password STATUS_ACCOUNT_LOCKED_OUT`
 ///   `[-] username:password KDC_ERR_CLIENT_REVOKED`
@@ -738,7 +743,7 @@ pub(crate) fn extract_locked_usernames_from_result(
             }
         }
     }
-    for key in &["summary", "output", "tool_output"] {
+    for key in &["output", "tool_output"] {
         if let Some(s) = payload.get(*key).and_then(|v| v.as_str()) {
             texts.push(s.to_string());
         }
@@ -876,7 +881,7 @@ fn result_has_ccache_evidence(result: &Option<Value>) -> bool {
         return false;
     };
     let mut texts: Vec<String> = Vec::new();
-    for key in &["tool_output", "output", "summary"] {
+    for key in &["tool_output", "output"] {
         if let Some(s) = payload.get(*key).and_then(|v| v.as_str()) {
             texts.push(s.to_string());
         }

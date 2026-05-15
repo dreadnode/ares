@@ -156,13 +156,11 @@ pub(crate) fn collect_payload_text_parts(payload: &Value) -> Vec<String> {
     parts
 }
 
-/// Scan a `payload`'s text fields for a "golden ticket saved" marker.
+/// Scan trusted tool-output text fields for a "golden ticket saved" marker.
 ///
 /// Walks `tool_outputs` (string OR `{output: string}` form), then
-/// `tool_output` / `output` / `summary`, then the explicit
-/// `has_golden_ticket: true` flag. Mirrors the gate inside
-/// `check_golden_ticket_completion` so the detection rule can be tested
-/// against a synthetic payload without a Dispatcher.
+/// legacy worker `tool_output` / `output`. Agent-completion `summary` and
+/// `has_golden_ticket: true` are intentionally ignored.
 pub(crate) fn payload_contains_golden_ticket_marker(payload: &Value) -> bool {
     if let Some(arr) = payload.get("tool_outputs").and_then(|v| v.as_array()) {
         for item in arr {
@@ -175,14 +173,14 @@ pub(crate) fn payload_contains_golden_ticket_marker(payload: &Value) -> bool {
             }
         }
     }
-    for key in &["tool_output", "output", "summary"] {
+    for key in &["tool_output", "output"] {
         if let Some(text) = payload.get(*key).and_then(|v| v.as_str()) {
             if has_golden_ticket_indicator(text) {
                 return true;
             }
         }
     }
-    payload.get("has_golden_ticket").and_then(|v| v.as_bool()) == Some(true)
+    false
 }
 
 /// Extract a domain SID and (optional) flat name from already-collected text.
@@ -279,6 +277,7 @@ pub(crate) async fn check_domain_admin_indicators(payload: &Value, dispatcher: &
 pub(crate) async fn check_golden_ticket_completion(
     payload: &Value,
     task_id: &str,
+    task_domain: Option<&str>,
     dispatcher: &Arc<Dispatcher>,
 ) {
     if !task_id.contains("exploit") && !task_id.contains("golden") {
@@ -291,7 +290,9 @@ pub(crate) async fn check_golden_ticket_completion(
         return;
     }
     let mut domain = String::new();
-    if let Some(d) = payload.get("domain").and_then(|v| v.as_str()) {
+    if let Some(d) = task_domain.filter(|d| !d.is_empty()) {
+        domain = d.to_string();
+    } else if let Some(d) = payload.get("domain").and_then(|v| v.as_str()) {
         domain = d.to_string();
     }
     // Require a krbtgt hash to actually exist for the chosen domain before
@@ -875,11 +876,11 @@ mod tests {
     }
 
     #[test]
-    fn gt_marker_in_summary() {
+    fn gt_marker_ignores_summary() {
         let p = json!({
             "summary": "Saving ticket in admin.ccache; krbtgt forged",
         });
-        assert!(payload_contains_golden_ticket_marker(&p));
+        assert!(!payload_contains_golden_ticket_marker(&p));
     }
 
     #[test]
@@ -891,11 +892,11 @@ mod tests {
     }
 
     #[test]
-    fn gt_marker_via_explicit_flag() {
+    fn gt_marker_ignores_explicit_flag() {
         let p = json!({
             "has_golden_ticket": true,
         });
-        assert!(payload_contains_golden_ticket_marker(&p));
+        assert!(!payload_contains_golden_ticket_marker(&p));
     }
 
     #[test]

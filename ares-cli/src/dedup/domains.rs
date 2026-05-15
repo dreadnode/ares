@@ -206,9 +206,43 @@ pub(crate) fn normalize_state_domains(
             }
         }
 
+        // Also keep child domains whose suffix parent is already valid.
+        // e.g. north.sevenkingdoms.local survives when sevenkingdoms.local is valid,
+        // even before any north users/hosts have been enumerated.
+        let child_domains: Vec<String> = domains
+            .iter()
+            .filter_map(|d| {
+                let lower = d.trim().to_lowercase();
+                let parts: Vec<&str> = lower.split('.').collect();
+                if parts.len() > 2 {
+                    let parent = parts[1..].join(".");
+                    if valid_domains.contains(&parent) {
+                        return Some(lower);
+                    }
+                }
+                None
+            })
+            .collect();
+        valid_domains.extend(child_domains);
+
+        // A string that appears as the suffix (parts[1..]) of any host FQDN is a real
+        // domain, even if it also happens to appear as a host's own hostname field
+        // (e.g. a DC recorded as hostname="north.sevenkingdoms.local" while
+        // castelblack.north.sevenkingdoms.local is another host in the same op).
+        let confirmed_domains: HashSet<String> = hosts
+            .iter()
+            .filter(|h| !h.hostname.is_empty() && h.hostname.contains('.'))
+            .map(|h| {
+                let lower = h.hostname.to_lowercase();
+                let parts: Vec<&str> = lower.split('.').collect();
+                parts[1..].join(".")
+            })
+            .collect();
+
         domains.retain(|d| {
             let lower = d.to_lowercase();
-            valid_domains.contains(&lower) && !host_fqdns.contains(&lower)
+            valid_domains.contains(&lower)
+                && (!host_fqdns.contains(&lower) || confirmed_domains.contains(&lower))
         });
     }
 }
