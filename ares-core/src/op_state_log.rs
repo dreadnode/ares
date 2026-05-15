@@ -7,9 +7,9 @@
 //! up a NATS server. Components that have not been wired into the event log
 //! yet hold [`OpStateRecorder::Disabled`] and the recorder becomes a no-op.
 //!
-//! Phase 2 of the JetStream-as-source-of-truth rollout: publish failures are
+//! publish failures are
 //! logged at the call site but never abort the operation, because Redis is
-//! still authoritative until the Phase 4 cutover.
+//! still authoritative until the cutover.
 
 use std::sync::Arc;
 
@@ -41,7 +41,7 @@ impl OpStateRecorder {
         Self::Disabled
     }
 
-    /// Construct a Nats-backed recorder. Phase-2 dual-write entry point.
+    /// Construct a Nats-backed recorder.
     pub fn nats(broker: Arc<NatsBroker>) -> Self {
         Self::Nats(broker)
     }

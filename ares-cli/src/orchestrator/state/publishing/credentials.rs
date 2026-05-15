@@ -85,7 +85,7 @@ impl SharedState {
         let mut conn = queue.connection();
         let added = reader.add_credential(&mut conn, &cred).await?;
         if added {
-            // Phase 2 dual-write: append to the op-state log after Redis confirms
+            // Append to the op-state log after Redis confirms
             // the credential is new (Redis is the dedup oracle).
             emit_op_state(
                 self.recorder(),
@@ -177,7 +177,7 @@ impl SharedState {
             }
             return Ok(false);
         }
-        // Phase 2 dual-write: emit before consuming `hash` into state.
+        // Emit before consuming `hash` into state.
         emit_op_state(
             self.recorder(),
             &operation_id,

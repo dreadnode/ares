@@ -273,7 +273,7 @@ impl SharedState {
         let mut conn = queue.connection();
         reader.add_host(&mut conn, &host).await?;
 
-        // Phase 2 dual-write: emit host.discovered for net-new hosts only.
+        // Emit host.discovered for net-new hosts only.
         // Merges return earlier; HostUpdated is intentionally not yet a variant.
         emit_op_state(
             self.recorder(),

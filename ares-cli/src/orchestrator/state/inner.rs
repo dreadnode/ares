@@ -15,6 +15,22 @@ const QUARANTINE_DURATION_SECS: i64 = 300;
 
 const CAPTURE_IN_FLIGHT_TTL_SECS: i64 = 180;
 
+/// How long an LLM-marked "assist-abandoned" task pattern stays
+/// dispatch-blocked before the orchestrator allows a single re-try.
+///
+/// The previous behavior (an entry in the generic dedup set with no TTL)
+/// turned every `RequestAssistance` into a permanent op-wide drop. That is
+/// the right call when the agent's complaint is structural — wrong
+/// toolset, missing primitive — but it also fires when the complaint is
+/// "no credentials in state yet": minutes later a parallel cred-harvest
+/// can land the missing material and the pattern is still locked out.
+///
+/// 10 minutes is enough that a doomed pattern won't burn a re-dispatch
+/// every 30s tick, and short enough that legitimately fixable patterns
+/// get a second look within one LLM-budget worth of latency. Per-op,
+/// in-memory only — operator-restart starts everyone fresh, by design.
+pub(crate) const ASSIST_ABANDONED_TTL_SECS: i64 = 600;
+
 #[derive(Debug)]
 pub struct StateInner {
     pub operation_id: String,
@@ -63,6 +79,15 @@ pub struct StateInner {
     // no explicit clear hook; once the dump succeeds the domain enters
     // `dominated_domains`, and the TTL is the safety valve for silent fails.
     pub credential_capture_in_flight: HashMap<String, DateTime<Utc>>,
+
+    /// Patterns the LLM ended a task on with `RequestAssistance`, with the
+    /// timestamp the abandonment was recorded. Read by
+    /// `throttled_submit_outcome` to drop re-dispatches of doomed patterns
+    /// until `ASSIST_ABANDONED_TTL_SECS` elapses, at which point a single
+    /// re-try is allowed in case state has shifted (new cred, new vuln).
+    /// In-memory only — see the const comment for why this isn't
+    /// persisted.
+    pub assist_abandoned_at: HashMap<String, DateTime<Utc>>,
 
     // Flags
     pub has_domain_admin: bool,
@@ -171,6 +196,7 @@ impl StateInner {
             trusted_domains: HashMap::new(),
             dominated_domains: HashSet::new(),
             credential_capture_in_flight: HashMap::new(),
+            assist_abandoned_at: HashMap::new(),
             has_domain_admin: false,
             has_golden_ticket: false,
             domain_admin_path: None,
@@ -584,6 +610,38 @@ impl StateInner {
         }
     }
 
+    /// Record an LLM-marked "assist-abandoned" pattern at `now`.
+    /// Time is injectable so the TTL behavior is unit-testable without
+    /// real-time clocks.
+    pub fn mark_assist_abandoned_at(&mut self, key: String, now: DateTime<Utc>) {
+        self.assist_abandoned_at.insert(key, now);
+    }
+
+    /// Convenience wrapper around `mark_assist_abandoned_at` that uses
+    /// the current UTC time. Call sites in production code use this.
+    pub fn mark_assist_abandoned(&mut self, key: String) {
+        self.mark_assist_abandoned_at(key, Utc::now());
+    }
+
+    /// Return true when `key` is currently within the assist-abandoned
+    /// window (i.e. `now - abandoned_at < ASSIST_ABANDONED_TTL_SECS`).
+    /// An expired entry returns false without being cleaned up — the
+    /// bounded per-op pattern space makes lazy GC fine; the next
+    /// `mark_assist_abandoned` for the same key overwrites the stale
+    /// entry.
+    pub fn is_assist_abandoned_at(&self, key: &str, now: DateTime<Utc>) -> bool {
+        let Some(at) = self.assist_abandoned_at.get(key) else {
+            return false;
+        };
+        now.signed_duration_since(*at).num_seconds() < ASSIST_ABANDONED_TTL_SECS
+    }
+
+    /// Convenience wrapper around `is_assist_abandoned_at` for production
+    /// call sites.
+    pub fn is_assist_abandoned(&self, key: &str) -> bool {
+        self.is_assist_abandoned_at(key, Utc::now())
+    }
+
     /// Remove every key in `set_name` that starts with `prefix`. Returns the
     /// removed keys so the caller can also drop them from the persisted store.
     /// Used by trust automation to wake cross-forest fallback automations
@@ -709,6 +767,60 @@ mod tests {
         let mut state = StateInner::new("op-1".into());
         let removed = state.unmark_processed_by_prefix("does_not_exist", "x:");
         assert!(removed.is_empty());
+    }
+
+    // --- assist-abandoned TTL ----------------------------------------
+
+    #[test]
+    fn assist_abandoned_starts_false() {
+        let state = StateInner::new("op-1".into());
+        assert!(!state.is_assist_abandoned("any:key"));
+    }
+
+    #[test]
+    fn assist_abandoned_marked_now_is_blocked() {
+        let mut state = StateInner::new("op-1".into());
+        state.mark_assist_abandoned("credential_access|192.168.58.10|alice|contoso.local".into());
+        assert!(state.is_assist_abandoned("credential_access|192.168.58.10|alice|contoso.local"));
+    }
+
+    #[test]
+    fn assist_abandoned_expires_after_ttl() {
+        let mut state = StateInner::new("op-1".into());
+        let key = "credential_access|192.168.58.10|alice|contoso.local".to_string();
+        let old = Utc::now() - chrono::Duration::seconds(ASSIST_ABANDONED_TTL_SECS + 1);
+        state.mark_assist_abandoned_at(key.clone(), old);
+        // Within window: still blocked relative to `old + 1s`.
+        assert!(state.is_assist_abandoned_at(&key, old + chrono::Duration::seconds(1)));
+        // Past the TTL: re-dispatch allowed.
+        assert!(!state.is_assist_abandoned_at(
+            &key,
+            old + chrono::Duration::seconds(ASSIST_ABANDONED_TTL_SECS + 2),
+        ));
+        // And the production helper, which uses `Utc::now()`, also reports false
+        // because `old` was placed past the TTL.
+        assert!(!state.is_assist_abandoned(&key));
+    }
+
+    #[test]
+    fn assist_abandoned_remark_extends_window() {
+        // A repeat RequestAssistance after the TTL elapses should re-arm
+        // the block (orchestrator marks again on every failure).
+        let mut state = StateInner::new("op-1".into());
+        let key = "k".to_string();
+        let old = Utc::now() - chrono::Duration::seconds(ASSIST_ABANDONED_TTL_SECS + 100);
+        state.mark_assist_abandoned_at(key.clone(), old);
+        assert!(!state.is_assist_abandoned(&key));
+        state.mark_assist_abandoned(key.clone());
+        assert!(state.is_assist_abandoned(&key));
+    }
+
+    #[test]
+    fn assist_abandoned_keys_independent() {
+        let mut state = StateInner::new("op-1".into());
+        state.mark_assist_abandoned("pattern_a".into());
+        assert!(state.is_assist_abandoned("pattern_a"));
+        assert!(!state.is_assist_abandoned("pattern_b"));
     }
 
     #[test]
@@ -868,7 +980,6 @@ mod tests {
             DEDUP_MSSQL_RETRY,
             DEDUP_MSSQL_LINK_PIVOT,
             DEDUP_MSSQL_IMPERSONATION,
-            DEDUP_ASSIST_ABANDONED,
             DEDUP_SID_HISTORY,
         ];
         assert_eq!(expected.len(), ALL_DEDUP_SETS.len());

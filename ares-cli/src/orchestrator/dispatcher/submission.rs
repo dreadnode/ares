@@ -69,25 +69,30 @@ impl Dispatcher {
         priority: i32,
         span: tracing::Span,
     ) -> Result<SubmissionOutcome> {
-        // Hard rate cap: if this (task_type, target, principal) pattern
-        // already ended with `RequestAssistance` once this op, refuse to
-        // redispatch. The pattern is doomed — usually a missing tool
-        // primitive, a wrong-realm cred pairing, or a stale automation
-        // entry — and each re-attempt burns ~30k input tokens loading the
-        // LLM context only for the agent to bail with the same complaint.
-        // Re-enabling requires the operator to manually clear the dedup
-        // (or starts a new op with a wiped Redis).
+        // Rate cap: if this (task_type, target, principal) pattern ended
+        // with `RequestAssistance` inside the assist-abandoned TTL, refuse
+        // to redispatch. The pattern is usually doomed — missing tool
+        // primitive, wrong-realm cred pairing, stale automation entry —
+        // and each re-attempt burns ~30k input tokens loading the LLM
+        // context only for the agent to bail with the same complaint.
+        //
+        // After `ASSIST_ABANDONED_TTL_SECS` (10 min by default) elapses,
+        // one re-dispatch is allowed: parallel cred-harvest may have
+        // landed the missing material since the abandonment, and the
+        // earlier no-TTL behavior locked out patterns that became viable.
+        // If the re-dispatch hits the same failure, the new
+        // `mark_assist_abandoned` extends the window.
         let assist_key = assist_pattern_key(task_type, &payload);
         if let Some(ref key) = assist_key {
             let state = self.state.read().await;
-            if state.is_processed(crate::orchestrator::state::DEDUP_ASSIST_ABANDONED, key) {
+            if state.is_assist_abandoned(key) {
                 drop(state);
                 span.record("automation.decision", "drop_assist_abandoned");
                 debug!(
                     task_type,
                     target_role,
                     pattern = %key,
-                    "Refusing dispatch — task pattern previously ended with RequestAssistance",
+                    "Refusing dispatch — task pattern within assist-abandoned TTL",
                 );
                 return Ok(SubmissionOutcome::Dropped);
             }
@@ -441,27 +446,24 @@ impl Dispatcher {
                                 tool_outputs_json.clone(),
                             );
                             // Record this pattern as abandoned so future
-                            // dispatches of (task_type, target, user, domain)
-                            // get refused at throttled_submit. One failure is
-                            // enough — re-running an LLM round on a doomed
-                            // task costs ~30k input tokens for a guaranteed
-                            // repeat of the same "Assistance requested".
+                            // dispatches of (task_type, target, user,
+                            // domain) get refused at throttled_submit
+                            // for the next ASSIST_ABANDONED_TTL_SECS. One
+                            // failure is enough — re-running an LLM round
+                            // on a doomed task costs ~30k input tokens for
+                            // a guaranteed repeat of the same complaint.
+                            // The TTL gives the pattern one re-look later
+                            // in case state has shifted (cred materialized,
+                            // vuln became reachable).
                             if let Some(ref key) = assist_key_for_spawn {
-                                state_for_assist.write().await.mark_processed(
-                                    crate::orchestrator::state::DEDUP_ASSIST_ABANDONED,
-                                    key.clone(),
-                                );
-                                let _ = state_for_assist
-                                    .persist_dedup(
-                                        &queue,
-                                        crate::orchestrator::state::DEDUP_ASSIST_ABANDONED,
-                                        key,
-                                    )
-                                    .await;
+                                state_for_assist
+                                    .write()
+                                    .await
+                                    .mark_assist_abandoned(key.clone());
                                 warn!(
                                     task_id = %tid,
                                     pattern = %key,
-                                    "Marked task pattern as assist-abandoned — future dispatches will be dropped",
+                                    "Marked task pattern as assist-abandoned — future dispatches dropped until TTL expires",
                                 );
                             }
                             TaskResult {

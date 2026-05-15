@@ -133,7 +133,7 @@ async fn run_inner() -> Result<()> {
 
     let mut shared_state = SharedState::new(config.operation_id.clone());
 
-    // Phase 2 dual-write: install a Nats-backed op-state recorder when NATS is
+    // install a Nats-backed op-state recorder when NATS is
     // available. Redis remains authoritative until Phase 4; emit failures are
     // logged (see `emit_op_state`) but never abort the op.
     let nats_broker = queue.nats_broker();
@@ -146,7 +146,7 @@ async fn run_inner() -> Result<()> {
         info!("Op-state event log disabled — no NATS broker on TaskQueue");
     }
 
-    // Phase 3: spawn the Postgres projector consumer when both NATS and a
+    // spawn the Postgres projector consumer when both NATS and a
     // database URL are available. The projector tails ARES_OPSTATE and
     // upserts each event into PG, replacing the manual `ares ops offload`
     // path with an always-current archive.
@@ -187,7 +187,7 @@ async fn run_inner() -> Result<()> {
 
     shared_state.initialize_self_ips().await;
 
-    // Phase 4 (opt-in): replay state from the JetStream event log instead of
+    // replay state from the JetStream event log instead of
     // loading from Redis. Falls through to Redis on failure or when the env
     // var is unset, so the default startup path is unchanged.
     let replay_enabled = std::env::var("ARES_USE_EVENT_LOG_REPLAY").as_deref() == Ok("1");

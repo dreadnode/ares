@@ -98,14 +98,10 @@ pub const DEDUP_MSSQL_LINK_PIVOT: &str = "mssql_link_pivot";
 /// so the next tick re-attempts up to MAX_IMPERSONATION_ATTEMPTS.
 pub const DEDUP_MSSQL_IMPERSONATION: &str = "mssql_impersonation_auto";
 
-/// Task patterns that ended with `RequestAssistance` are recorded here and
-/// refused on re-dispatch. Each entry is a canonical key of
-/// `(task_type, target_ip, username, domain)` — enough to identify a
-/// repeating doomed dispatch without false-positiving unrelated work
-/// against the same target. Caps token burn from automations that keep
-/// firing the same impossible task (e.g. missing tool primitive, no auth
-/// resolvable for the principal, wrong-realm pairing).
-pub const DEDUP_ASSIST_ABANDONED: &str = "assist_abandoned";
+// Assist-abandoned tracking moved off the generic dedup set into a
+// timestamped HashMap on `StateInner` (`assist_abandoned_at`) so the
+// abandonment can expire. See `ASSIST_ABANDONED_TTL_SECS` in
+// `state/inner.rs` for the TTL and the rationale.
 
 /// Dedup for `auto_sid_history_enum` — one LDAP `(sIDHistory=*)` probe per
 /// (domain, DC) pair. The probe is a read-only LDAP query and the result
@@ -181,7 +177,6 @@ const ALL_DEDUP_SETS: &[&str] = &[
     DEDUP_MSSQL_RETRY,
     DEDUP_MSSQL_LINK_PIVOT,
     DEDUP_MSSQL_IMPERSONATION,
-    DEDUP_ASSIST_ABANDONED,
     DEDUP_SID_HISTORY,
 ];
 
