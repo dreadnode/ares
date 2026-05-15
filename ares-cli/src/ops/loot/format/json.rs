@@ -4,7 +4,7 @@ use ares_core::models::SharedRedTeamState;
 
 use super::display::build_domain_achievements;
 use super::hosts::dedup_hosts;
-use super::report_filter::{is_reportable_credential, is_reportable_hash};
+use super::report_filter::{is_reportable_credential, is_reportable_hash, report_hash_value};
 use crate::dedup::{dedup_credentials, dedup_hashes, dedup_users};
 
 pub(super) fn print_loot_json(
@@ -161,7 +161,7 @@ pub(super) fn print_loot_json(
             "username": h.username,
             "domain": h.domain,
             "hash_type": h.hash_type,
-            "hash_value": h.hash_value,
+            "hash_value": report_hash_value(&h.hash_type, &h.hash_value),
             "source": h.source,
         })).collect::<Vec<_>>(),
         "shares": state.all_shares.iter().map(|s| serde_json::json!({

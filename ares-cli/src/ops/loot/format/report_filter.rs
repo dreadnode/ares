@@ -12,10 +12,6 @@
 
 use ares_core::models::{Credential, Hash};
 
-/// Built-in / system accounts that aren't credit-worthy AD-user findings.
-///
-/// `krbtgt` is included because it's consumed internally by Golden Ticket
-/// detection rather than tracked as a cred objective.
 const NOISE_USERNAMES: &[&str] = &[
     "krbtgt",
     "guest",
@@ -64,6 +60,29 @@ pub(super) fn is_reportable_credential(c: &Credential) -> bool {
         return false;
     }
     true
+}
+
+/// Normalize an NTLM `hash_value` to the bare 32-char NT hex for report
+/// output. Secretsdump and other extractors store NTLM hashes as the full
+/// `LM:NT` pair (e.g. `aad3b435...:8c6d9454...`); external scoreboards parse
+/// the report with a strict 32-hex regex and reject the colon form. Internal
+/// callers (golden-ticket forging, impacket recovery) still see the original
+/// `LM:NT` value from state — this only rewrites the serialized output.
+pub(super) fn report_hash_value(hash_type: &str, hash_value: &str) -> String {
+    if !hash_type.eq_ignore_ascii_case("ntlm") {
+        return hash_value.to_string();
+    }
+    match hash_value.split_once(':') {
+        Some((lm, nt))
+            if lm.len() == 32
+                && nt.len() == 32
+                && lm.bytes().all(|b| b.is_ascii_hexdigit())
+                && nt.bytes().all(|b| b.is_ascii_hexdigit()) =>
+        {
+            nt.to_string()
+        }
+        _ => hash_value.to_string(),
+    }
 }
 
 /// True if a hash should be surfaced in the loot JSON output.
@@ -199,5 +218,36 @@ mod tests {
     fn drops_empty_username() {
         assert!(!is_reportable_credential(&cred("", "contoso.local")));
         assert!(!is_reportable_hash(&hash("", "contoso.local", None)));
+    }
+
+    #[test]
+    fn report_hash_value_strips_lm_from_ntlm_pair() {
+        let nt = "8c6d94541dbc90f085e86828428d2cbf";
+        let lm_nt = format!("aad3b435b51404eeaad3b435b51404ee:{nt}");
+        assert_eq!(report_hash_value("NTLM", &lm_nt), nt);
+        assert_eq!(report_hash_value("ntlm", &lm_nt), nt);
+    }
+
+    #[test]
+    fn report_hash_value_leaves_bare_nt_alone() {
+        let nt = "8c6d94541dbc90f085e86828428d2cbf";
+        assert_eq!(report_hash_value("NTLM", nt), nt);
+    }
+
+    #[test]
+    fn report_hash_value_leaves_kerberos_blobs_alone() {
+        // Kerberoast TGS blob: contains colons but isn't an LM:NT pair.
+        let tgs = "$krb5tgs$23$*sql_svc$fabrikam.local$cifs/sql01*$abc:def";
+        assert_eq!(report_hash_value("kerberoast", tgs), tgs);
+        // AS-REP blob.
+        let asrep = "$krb5asrep$23$alice@contoso.local:abcd1234";
+        assert_eq!(report_hash_value("asrep", asrep), asrep);
+    }
+
+    #[test]
+    fn report_hash_value_leaves_non_ntlm_alone() {
+        // AES key looks like hex but isn't NTLM — must not be touched.
+        let aes = "aad3b435b51404eeaad3b435b51404ee:8c6d94541dbc90f085e86828428d2cbf";
+        assert_eq!(report_hash_value("aes256", aes), aes);
     }
 }
