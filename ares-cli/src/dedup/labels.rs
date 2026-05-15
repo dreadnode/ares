@@ -48,7 +48,6 @@ pub(crate) fn normalize_source_label(source: &str) -> String {
 
     let mut source = source.to_string();
 
-    // Deduplicate "recon:recon" -> "recon"
     if source.contains(':') {
         let parts: Vec<&str> = source.split(':').collect();
         if parts.len() >= 2 && parts[0] == parts[1] {
@@ -56,7 +55,6 @@ pub(crate) fn normalize_source_label(source: &str) -> String {
         }
     }
 
-    // Extract task type from "task input (recon_abc123)" patterns
     let lower = source.to_lowercase();
     if lower.contains("task input") {
         if let Some(caps) = TASK_INPUT_RE.captures(&source) {
@@ -66,19 +64,16 @@ pub(crate) fn normalize_source_label(source: &str) -> String {
 
     let lower = source.to_lowercase();
 
-    // Exact match
     if let Some(label) = LABEL_MAP.get(lower.as_str()) {
         return label.to_string();
     }
 
-    // Prefix match
     for (key, label) in LABEL_MAP.iter() {
         if lower.starts_with(key) {
             return label.to_string();
         }
     }
 
-    // Task ID suffix match (e.g., "recon_abc12345" -> "recon")
     if let Some(caps) = TASK_SUFFIX_RE.captures(&lower) {
         let task_type = &caps[1];
         if let Some(label) = LABEL_MAP.get(task_type) {
@@ -86,7 +81,6 @@ pub(crate) fn normalize_source_label(source: &str) -> String {
         }
     }
 
-    // Fallback: replace underscores and title-case
     source
         .replace('_', " ")
         .split_whitespace()

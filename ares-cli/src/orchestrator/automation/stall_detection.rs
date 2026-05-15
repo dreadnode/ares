@@ -328,8 +328,6 @@ mod tests {
         }
     }
 
-    // --- dedup-key shape ---------------------------------------------
-
     #[test]
     fn stall_spray_dedup_key_includes_recovery_attempt() {
         assert_eq!(
@@ -353,8 +351,6 @@ mod tests {
             "stall_lhf:contoso.local:administrator:1"
         );
     }
-
-    // --- domains_with_pending_delegation ----------------------------
 
     #[test]
     fn pending_delegation_empty_state() {
@@ -416,8 +412,6 @@ mod tests {
         assert!(domains_with_pending_delegation(&s).contains("contoso.local"));
     }
 
-    // --- resolve_stall_dc_ip --------------------------------------------
-
     #[test]
     fn resolve_stall_dc_ip_exact_match() {
         let mut s = StateInner::new("op".into());
@@ -447,8 +441,6 @@ mod tests {
             .insert("fabrikam.local".into(), "192.168.58.40".into());
         assert!(resolve_stall_dc_ip(&s, "contoso.local").is_none());
     }
-
-    // --- select_stall_spray_work ---------------------------------------
 
     #[test]
     fn select_stall_spray_empty_state() {
@@ -492,8 +484,6 @@ mod tests {
         // Different recovery_attempt → re-emitted (fresh round).
         assert_eq!(select_stall_spray_work(&s, 1).len(), 1);
     }
-
-    // --- select_stall_lhf_work -----------------------------------------
 
     #[test]
     fn select_stall_lhf_empty_state() {
