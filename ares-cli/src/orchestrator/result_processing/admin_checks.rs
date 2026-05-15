@@ -80,18 +80,8 @@ fn is_valid_domain_fqdn(s: &str) -> bool {
 }
 
 /// Determine the domain admin path from a payload.
-///
-/// If `has_domain_admin` is explicitly `true`, returns the `domain_admin_path`
-/// string (if present). Otherwise falls back to the secretsdump path.
-pub(crate) fn resolve_da_path(payload: &Value) -> Option<String> {
-    if payload.get("has_domain_admin").and_then(|v| v.as_bool()) == Some(true) {
-        payload
-            .get("domain_admin_path")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string())
-    } else {
-        Some("secretsdump -> krbtgt hash".to_string())
-    }
+pub(crate) fn resolve_da_path(_payload: &Value) -> Option<String> {
+    Some("secretsdump -> krbtgt hash".to_string())
 }
 
 /// Check if text indicates a golden ticket was saved.
@@ -651,21 +641,25 @@ mod tests {
     // -- resolve_da_path ----------------------------------------------------
 
     #[test]
-    fn resolve_da_path_explicit_true_with_path() {
+    fn resolve_da_path_always_secretsdump() {
+        // Agent-provided path fields are ignored; path is always fixed.
         let payload = json!({
             "has_domain_admin": true,
             "domain_admin_path": "spray → secretsdump → krbtgt"
         });
         assert_eq!(
             resolve_da_path(&payload).as_deref(),
-            Some("spray → secretsdump → krbtgt")
+            Some("secretsdump -> krbtgt hash")
         );
     }
 
     #[test]
-    fn resolve_da_path_explicit_true_no_path() {
+    fn resolve_da_path_no_fields() {
         let payload = json!({ "has_domain_admin": true });
-        assert_eq!(resolve_da_path(&payload), None);
+        assert_eq!(
+            resolve_da_path(&payload).as_deref(),
+            Some("secretsdump -> krbtgt hash")
+        );
     }
 
     #[test]

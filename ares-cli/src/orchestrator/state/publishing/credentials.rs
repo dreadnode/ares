@@ -491,7 +491,6 @@ mod tests {
     }
 
     const NTLM_HASH_A: &str = "aad3b435b51404eeaad3b435b51404ee"; // pragma: allowlist secret
-    const NTLM_HASH_B: &str = "31d6cfe0d16ae931b73c59d7e0c089c0"; // pragma: allowlist secret
 
     fn make_hash(username: &str, domain: &str, hash_type: &str, hash_value: &str) -> Hash {
         Hash {
@@ -963,11 +962,21 @@ mod tests {
         let q = mock_queue();
 
         // 33 chars — relay artifact
-        let bad = make_hash("robb.stark", "north.sevenkingdoms.local", "NTLM", "aad3b435b51404eeaad3b435b51404ee0"); // pragma: allowlist secret
+        let bad = make_hash(
+            "robb.stark",
+            "north.sevenkingdoms.local",
+            "NTLM",
+            "aad3b435b51404eeaad3b435b51404ee0",
+        ); // pragma: allowlist secret
         assert!(!state.publish_hash(&q, bad).await.unwrap());
 
         // 8 chars — truncated capture
-        let short = make_hash("robb.stark", "north.sevenkingdoms.local", "NTLM", "aabbccdd");
+        let short = make_hash(
+            "robb.stark",
+            "north.sevenkingdoms.local",
+            "NTLM",
+            "aabbccdd",
+        );
         assert!(!state.publish_hash(&q, short).await.unwrap());
 
         let s = state.inner.read().await;
@@ -979,7 +988,12 @@ mod tests {
         // AES256 keys are 64 hex chars; we must not reject them.
         let state = SharedState::new("op-1".to_string());
         let q = mock_queue();
-        let aes = make_hash("krbtgt", "contoso.local", "AES256", "aabbccdd11223344aabbccdd11223344aabbccdd11223344aabbccdd11223344");
+        let aes = make_hash(
+            "krbtgt",
+            "contoso.local",
+            "AES256",
+            "aabbccdd11223344aabbccdd11223344aabbccdd11223344aabbccdd11223344",
+        );
         assert!(state.publish_hash(&q, aes).await.unwrap());
         let s = state.inner.read().await;
         assert_eq!(s.hashes.len(), 1);

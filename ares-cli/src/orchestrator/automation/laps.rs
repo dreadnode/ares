@@ -441,8 +441,7 @@ mod tests {
     #[test]
     fn laps_hash_sweep_emits_work_item_for_valid_ntlm_hash() {
         let mut s = state_with_dc("contoso.local", "192.168.58.10");
-        s.hashes
-            .push(ntlm_hash("alice", "contoso.local", HASH_A));
+        s.hashes.push(ntlm_hash("alice", "contoso.local", HASH_A));
 
         let work = collect_laps_hash_sweep_work(&s);
         assert_eq!(work.len(), 1);
@@ -565,8 +564,7 @@ mod tests {
         // dedup key go through `.to_lowercase()` — the work item is still
         // emitted.
         let mut s = state_with_dc("contoso.local", "192.168.58.10");
-        s.hashes
-            .push(ntlm_hash("Alice", "CONTOSO.LOCAL", HASH_A));
+        s.hashes.push(ntlm_hash("Alice", "CONTOSO.LOCAL", HASH_A));
         let work = collect_laps_hash_sweep_work(&s);
         assert_eq!(work.len(), 1);
         assert_eq!(work[0].dedup_key, "laps_extract:sweep:contoso.local:alice");
@@ -575,8 +573,7 @@ mod tests {
     #[test]
     fn laps_hash_sweep_emits_one_item_per_eligible_hash() {
         let mut s = state_with_dc("contoso.local", "192.168.58.10");
-        s.hashes
-            .push(ntlm_hash("alice", "contoso.local", HASH_A));
+        s.hashes.push(ntlm_hash("alice", "contoso.local", HASH_A));
         s.hashes.push(ntlm_hash("bob", "contoso.local", HASH_B));
         let work = collect_laps_hash_sweep_work(&s);
         assert_eq!(work.len(), 2);
