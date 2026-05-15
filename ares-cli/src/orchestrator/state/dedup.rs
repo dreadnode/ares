@@ -59,7 +59,6 @@ impl SharedState {
         }
         let _: () = conn.expire(&key, 86400).await?;
 
-        // Phase 2 dual-write: append vuln.exploited event.
         emit_op_state(
             self.recorder(),
             &operation_id,

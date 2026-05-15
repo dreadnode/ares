@@ -17,8 +17,7 @@ use std::sync::LazyLock;
 
 /// Emit a single op-state event through the recorder. No-op when the recorder
 /// is disabled; otherwise builds an [`OpStateEvent`] and forwards to the
-/// recorder. Publish failures are logged at WARN — Phase 2 keeps Redis
-/// authoritative so a transient broker outage must not abort the call.
+/// recorder. Publish failures are logged at WARN
 pub(super) async fn emit_op_state(
     recorder: &OpStateRecorder,
     op_id: &str,

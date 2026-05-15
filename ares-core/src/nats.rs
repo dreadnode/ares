@@ -229,8 +229,7 @@ impl NatsBroker {
     ///   concurrency; a mismatch surfaces as [`OpStatePublishError::Conflict`].
     ///
     /// Awaits the JetStream ack. Callers in hot agent paths should treat a
-    /// transient failure as non-fatal and log — Phase 2 dual-write keeps Redis
-    /// authoritative until Phase 4 cutover.
+    /// transient failure as non-fatal and log
     pub async fn publish_op_state_event(
         &self,
         event: &OpStateEvent,

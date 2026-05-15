@@ -1,5 +1,5 @@
 //! `ares ops replay` — rebuild a point-in-time state snapshot from the
-//! JetStream `ARES_OPSTATE` event log. Phase 5 forensics tooling.
+//! JetStream `ARES_OPSTATE` event log.
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};

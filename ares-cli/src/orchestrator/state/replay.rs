@@ -1,12 +1,12 @@
 //! Replay operation state from the JetStream `ARES_OPSTATE` event log.
 //!
-//! Phase 4 cutover primitive. The pure
+//! The pure
 //! [`apply_event_to_state`] function knows how to mutate [`StateInner`] for
 //! every [`OpStateEventPayload`] variant. The async
 //! [`SharedState::load_from_event_log`] driver reads the stream up to the
 //! current sequence and applies events in order.
 //!
-//! Scope limitations (see Phase 4 design doc):
+//! Scope limitations:
 //! - The current event types cover entities only (credentials, hashes,
 //!   hosts, users, vulns, timeline). They do NOT carry derived state like
 //!   `has_domain_admin`, `dominated_domains`, `domain_controllers`, or the
@@ -35,7 +35,7 @@ use super::inner::StateInner;
 use super::SharedState;
 
 /// Lightweight, serialisable snapshot of operation state reconstructed from
-/// the event log. Used by `ares ops replay` and other Phase 5 tooling.
+/// the event log. Used by `ares ops replay`
 ///
 /// Holds only the entity collections that the event log carries today
 /// (no derived state — see Phase 4 limitations).
@@ -243,7 +243,7 @@ impl SharedState {
     /// no new messages arrive within [`REPLAY_IDLE_TIMEOUT`] — the stream is
     /// considered drained.
     ///
-    /// Phase 4 entry point. Opt-in: orchestrator checks
+    /// Opt-in: orchestrator checks
     /// `ARES_USE_EVENT_LOG_REPLAY=1` before calling.
     pub async fn load_from_event_log(&self, nats: &NatsBroker) -> Result<usize> {
         let op_id = self.operation_id().await;
