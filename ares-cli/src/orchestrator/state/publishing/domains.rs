@@ -373,12 +373,7 @@ mod tests {
             s.domains.push("contoso.local".into());
         }
         let outcome = state
-            .publish_candidate_domain(
-                &q,
-                "evil.local",
-                DomainEvidence::HostnameInference,
-                None,
-            )
+            .publish_candidate_domain(&q, "evil.local", DomainEvidence::HostnameInference, None)
             .await
             .unwrap();
         assert_eq!(outcome, DomainPublishOutcome::Held);
