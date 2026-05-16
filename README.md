@@ -434,6 +434,35 @@ task remote:check
 task remote:status
 ```
 
+#### EC2 Clean Test Cycle
+
+Full reset on an EC2 instance: stop workers and any running op, deploy
+fresh binaries, wipe Redis, restart workers, then launch a new operation.
+EC2 equivalent of the K8s `task -y red:multi:sync:align && task -y red:multi`
+shortcut.
+
+`ec2:deploy` requires `S3_BUCKET` (binary staging bucket) — export it or
+pass on each invocation.
+
+```bash
+export S3_BUCKET=your-deploy-bucket
+
+EC2_NAME=kali-ares
+TARGET=dreadgoad
+BLUE_ENABLED=1
+
+task ec2:stop       EC2_NAME=$EC2_NAME                                 # stop workers
+task ec2:stop-op    EC2_NAME=$EC2_NAME LATEST=true                     # stop running op
+task -y ec2:deploy  EC2_NAME=$EC2_NAME                                 # cross-compile + ship binary
+task ec2:exec       EC2_NAME=$EC2_NAME CMD="redis-cli FLUSHALL"        # wipe Redis
+task ec2:start      EC2_NAME=$EC2_NAME                                 # start workers
+task -y red:ec2:multi TARGET=$TARGET EC2_NAME=$EC2_NAME BLUE_ENABLED=$BLUE_ENABLED
+```
+
+If the host shell raises `nofile` above ~65k (some tuned shells go to
+1048576), the zig 0.16 linker invoked by cross-compilation will fail.
+Clamp before running `ec2:deploy`: `ulimit -n 65536`.
+
 ## Configuration
 
 ### Config File

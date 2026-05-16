@@ -53,9 +53,19 @@ task remote:rust:deploy:quick
 task remote:check
 task remote:rust:deploy:config
 
-# Deploy to EC2
+# Deploy to EC2 (requires S3_BUCKET env var for binary staging)
 task ec2:deploy
 task ec2:deploy:config
+
+# EC2 full clean test cycle (mirrors K8s `red:multi:sync:align && red:multi`):
+#   ulimit -n 65536                                                    # zig linker chokes on huge fd limits
+#   export S3_BUCKET=your-deploy-bucket
+task ec2:stop       EC2_NAME=kali-ares
+task ec2:stop-op    EC2_NAME=kali-ares LATEST=true
+task -y ec2:deploy  EC2_NAME=kali-ares
+task ec2:exec       EC2_NAME=kali-ares CMD="redis-cli FLUSHALL"
+task ec2:start      EC2_NAME=kali-ares
+task -y red:ec2:multi TARGET=dreadgoad EC2_NAME=kali-ares BLUE_ENABLED=1
 ```
 
 After code changes, always deploy before testing remote behavior. Use `task remote:check` to verify sync.
