@@ -713,6 +713,26 @@ fn normalize_state_domains_domain_kept_from_target_domain() {
 }
 
 #[test]
+fn normalize_state_domains_target_domain_survives_matching_host_fqdn() {
+    let users: Vec<User> = vec![];
+    let mut creds = vec![];
+    let mut hashes = vec![];
+    let mut domains = vec!["contoso.local".to_string()];
+    let hosts = vec![make_host("192.168.58.220", "contoso.local")];
+
+    normalize_state_domains(
+        &users,
+        &mut creds,
+        &mut hashes,
+        &mut domains,
+        &hosts,
+        Some("contoso.local"),
+    );
+
+    assert_eq!(domains, vec!["contoso.local".to_string()]);
+}
+
+#[test]
 fn normalize_state_domains_child_domain_kept_when_parent_valid() {
     // A child domain (3+ labels) should survive the filter when its
     // suffix parent is already in valid_domains, even if no users/hosts
@@ -743,6 +763,29 @@ fn normalize_state_domains_child_domain_kept_when_parent_valid() {
     );
     // orphan.other has no parent in valid_domains — dropped
     assert!(!domains.contains(&"orphan.other".to_string()));
+}
+
+#[test]
+fn normalize_state_domains_parent_domain_kept_when_child_is_valid() {
+    let users: Vec<User> = vec![];
+    let mut creds = vec![];
+    let mut hashes = vec![];
+    let mut domains = vec![
+        "contoso.local".to_string(),
+        "child.contoso.local".to_string(),
+    ];
+    let hosts = vec![
+        make_host("192.168.58.220", "contoso.local"),
+        make_host("192.168.58.150", "dc01.child.contoso.local"),
+    ];
+
+    normalize_state_domains(&users, &mut creds, &mut hashes, &mut domains, &hosts, None);
+
+    assert!(
+        domains.contains(&"contoso.local".to_string()),
+        "forest root should survive when a valid child domain implies it"
+    );
+    assert!(domains.contains(&"child.contoso.local".to_string()));
 }
 
 #[test]

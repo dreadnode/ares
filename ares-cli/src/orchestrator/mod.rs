@@ -532,7 +532,7 @@ async fn run_inner() -> Result<()> {
     let cost_handle = spawn_cost_summary(queue.clone(), config.clone(), shutdown_rx.clone());
 
     // Candidate-domain probe worker — verifies hostname-inferred domains
-    // (e.g. `corp.example.com` derived from `host.corp.example.com`) via
+    // (e.g. `child.contoso.local` derived from `host.child.contoso.local`) via
     // `_ldap._tcp.dc._msdcs.<fqdn>` SRV lookups before promoting them.
     let probe_ctx = state::domain_probe::DomainProbeContext {
         state: shared_state.clone(),

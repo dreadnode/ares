@@ -187,7 +187,7 @@ pub async fn auto_cross_forest_enum(
                     "DoesNotRequirePreAuth, or interesting SPNs.\n\n",
                     "IMPORTANT: For each user found, include them in the discovered_users ",
                     "array with EXACTLY this JSON format:\n",
-                    "  {\"username\": \"samaccountname\", \"domain\": \"domain.local\", ",
+                    "  {\"username\": \"samaccountname\", \"domain\": \"contoso.local\", ",
                     "\"source\": \"ldap_enumeration\", \"memberOf\": [\"Group1\", \"Group2\"]}\n",
                     "Also report users with DoesNotRequirePreAuth as vulnerabilities with ",
                     "vuln_type='asrep_roastable', and users with SPNs as vuln_type='kerberoastable'."
@@ -250,7 +250,7 @@ pub async fn auto_cross_forest_enum(
                     "and managed-by. This is critical for mapping cross-domain attack paths.\n\n",
                     "IMPORTANT: For each user found in any group, include them in the ",
                     "discovered_users array with EXACTLY this JSON format:\n",
-                    "  {\"username\": \"samaccountname\", \"domain\": \"domain.local\", ",
+                    "  {\"username\": \"samaccountname\", \"domain\": \"contoso.local\", ",
                     "\"source\": \"ldap_group_enumeration\", \"memberOf\": [\"Group1\", \"Group2\"]}"
                 ),
             });

@@ -638,14 +638,14 @@ mod tests {
         state
             .publish_candidate_domain(
                 &q,
-                "transient.example.com",
+                "transient.contoso.local",
                 ares_core::models::DomainEvidence::HostnameInference,
                 Some("192.168.58.50".to_string()),
             )
             .await
             .unwrap();
         state
-            .mark_candidate_probed(&q, "transient.example.com")
+            .mark_candidate_probed(&q, "transient.contoso.local")
             .await
             .unwrap();
 
@@ -653,7 +653,7 @@ mod tests {
         state2.load_from_redis(&q).await.unwrap();
 
         let s = state2.inner.read().await;
-        let candidate = s.candidate_domains.get("transient.example.com").unwrap();
+        let candidate = s.candidate_domains.get("transient.contoso.local").unwrap();
         assert!(candidate.probed);
         assert_eq!(candidate.source_host_ip.as_deref(), Some("192.168.58.50"));
     }

@@ -198,13 +198,13 @@ mod tests {
         state
             .publish_candidate_domain(
                 &q,
-                "fake.example.com",
+                "fake.contoso.local",
                 DomainEvidence::HostnameInference,
                 None,
             )
             .await
             .unwrap();
-        let prober = StubProber::new(vec![("fake.example.com", ProbeOutcome::Rejected("nx"))]);
+        let prober = StubProber::new(vec![("fake.contoso.local", ProbeOutcome::Rejected("nx"))]);
         drain_with_mock(&state, &q, &prober).await;
         let s = state.inner.read().await;
         assert!(s.domains.is_empty());
@@ -218,7 +218,7 @@ mod tests {
         state
             .publish_candidate_domain(
                 &q,
-                "transient.example.com",
+                "transient.contoso.local",
                 DomainEvidence::HostnameInference,
                 None,
             )
@@ -228,7 +228,7 @@ mod tests {
         drain_with_mock(&state, &q, &prober).await;
         let s = state.inner.read().await;
         assert!(s.domains.is_empty());
-        let cand = s.candidate_domains.get("transient.example.com").unwrap();
+        let cand = s.candidate_domains.get("transient.contoso.local").unwrap();
         assert!(cand.probed);
     }
 
@@ -239,7 +239,7 @@ mod tests {
         state
             .publish_candidate_domain(
                 &q,
-                "transient.example.com",
+                "transient.contoso.local",
                 DomainEvidence::HostnameInference,
                 None,
             )

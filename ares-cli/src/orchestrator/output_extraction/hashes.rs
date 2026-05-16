@@ -31,7 +31,7 @@ static RE_NTLM_CONTINUATION: LazyLock<Regex> =
 
 // AES256 trust/account key from secretsdump:
 //   DOMAIN\\user:aes256-cts-hmac-sha1-96:<hex>
-//   domain.local/user:aes256-cts-hmac-sha1-96:<hex>
+//   contoso.local/user:aes256-cts-hmac-sha1-96:<hex>
 //   user:aes256-cts-hmac-sha1-96:<hex>
 static RE_AES256_KEY: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?:[^\\/\s:]+[\\/])?([^:\s\\/]+):aes256-cts-hmac-sha1-96:([a-fA-F0-9]+)").unwrap()
@@ -253,7 +253,13 @@ pub fn extract_hashes(output: &str, default_domain: &str) -> Vec<Hash> {
             // Domain attribution preference: dump-evidence (`inferred_domain`
             // from any DOMAIN-prefixed rows in the same output) outranks
             // task-intent (`default_domain`). See pre-scan above.
-            let domain = if is_well_known_local_sam(username, rid) {
+            let has_domain_dump_evidence = inferred_domain.is_some()
+                || (!detected_ambiguous
+                    && !default_netbios.is_empty()
+                    && detected_netbios
+                        .as_deref()
+                        .is_some_and(|nb| nb == default_netbios));
+            let domain = if is_well_known_local_sam(username, rid, has_domain_dump_evidence) {
                 String::new()
             } else if let Some(ref inferred) = inferred_domain {
                 inferred.clone()
@@ -288,18 +294,28 @@ pub fn extract_hashes(output: &str, default_domain: &str) -> Vec<Hash> {
 
 /// Mirror of `parsers::secrets::is_local_sam_account` for the regex fallback.
 /// We don't track section context here (the fallback runs over arbitrary tool
-/// output, not just secretsdump), so attribution is purely name/RID-based.
-fn is_well_known_local_sam(username: &str, rid: &str) -> bool {
+/// output, not just secretsdump), so we combine name/RID heuristics with
+/// same-output evidence that the dump is really NTDS/domain material.
+fn is_well_known_local_sam(username: &str, rid: &str, has_domain_dump_evidence: bool) -> bool {
+    if username.starts_with('$') || username.starts_with("_SC_") || username.starts_with("NL$") {
+        return true;
+    }
     if matches!(rid, "500" | "501" | "503" | "504") {
         let name = username.to_ascii_lowercase();
         if matches!(
             name.as_str(),
             "administrator" | "guest" | "defaultaccount" | "wdagutilityaccount"
         ) {
+            // If the same output also proves we're parsing an NTDS/domain dump
+            // (prefixed AD rows or a matching $MACHINE.ACC marker), these
+            // unprefixed built-ins are domain principals, not local SAM rows.
+            if has_domain_dump_evidence {
+                return false;
+            }
             return true;
         }
     }
-    username.starts_with('$') || username.starts_with("_SC_") || username.starts_with("NL$")
+    false
 }
 
 /// Hashcat cracked TGS: $krb5tgs$23$*user$DOMAIN$spn*$hash:plaintext
@@ -570,7 +586,14 @@ CHILD\\DC01$:aes256-cts-hmac-sha1-96:5839387800000000000000000000000000000000000
 krbtgt:502:aad3b435b51404eeaad3b435b51404ee:8c6d94541dbc90f085e86828428d2cbf:::";
         let hashes = extract_hashes(output, "child.contoso.local");
         assert!(hashes.iter().any(|h| h.username == "krbtgt"));
-        assert!(hashes.iter().any(|h| h.username == "Administrator"));
+        let admin = hashes
+            .iter()
+            .find(|h| h.username == "Administrator")
+            .expect("Administrator should be extracted");
+        assert_eq!(
+            admin.domain, "child.contoso.local",
+            "Administrator should inherit the target domain when the dump evidence matches it"
+        );
     }
 
     #[test]
@@ -638,6 +661,10 @@ CHILD.CONTOSO.LOCAL\\bob:1106:aad3b435b51404eeaad3b435b51404ee:d977b98c6c9282c5c
             .iter()
             .find(|h| h.username == "krbtgt")
             .expect("krbtgt should be extracted");
+        let admin = hashes
+            .iter()
+            .find(|h| h.username == "Administrator")
+            .expect("Administrator should be extracted");
         assert_eq!(
             krbtgt.domain, "CHILD.CONTOSO.LOCAL",
             "krbtgt must inherit the realm proven by the prefixed rows, NOT the task's default_domain"
@@ -645,6 +672,10 @@ CHILD.CONTOSO.LOCAL\\bob:1106:aad3b435b51404eeaad3b435b51404ee:d977b98c6c9282c5c
         assert_ne!(
             krbtgt.domain, "fabrikam.local",
             "krbtgt must NOT be tagged with the task's intent domain when the dump is from another realm"
+        );
+        assert_eq!(
+            admin.domain, "CHILD.CONTOSO.LOCAL",
+            "Administrator should inherit the same proven dump realm as krbtgt"
         );
     }
 

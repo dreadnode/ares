@@ -105,7 +105,7 @@ pub fn parse_tool_output(tool_name: &str, output: &str, params: &Value) -> Value
         }
         "raise_child" => {
             // raiseChild.py performs the parent-domain NTDS dump in standard
-            // secretsdump format (lines like "domain.local/user:RID:LM:NT:::"
+            // secretsdump format (lines like "contoso.local/user:RID:LM:NT:::"
             // or "DOMAIN\\user:RID:..."). Derive parent FQDN from child_domain
             // and pass as target_domain so bare-username lines and NetBIOS
             // prefixes get attributed to the parent forest root.

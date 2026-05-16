@@ -1470,16 +1470,16 @@ mod tests {
     fn select_hash_work_resolves_netbios_domain_for_dispatch() {
         let mut s = StateInner::new("op".into());
         s.netbios_to_fqdn
-            .insert("north".into(), "north.sevenkingdoms.local".into());
+            .insert("child".into(), "child.contoso.local".into());
         s.hosts.push(make_host(
-            "winterfell.north.sevenkingdoms.local",
+            "dc01.child.contoso.local",
             "192.168.58.10",
         ));
-        s.hashes.push(make_ntlm_hash("alice", "aaaaaaaa", "NORTH"));
+        s.hashes.push(make_ntlm_hash("alice", "aaaaaaaa", "CHILD"));
 
         let work = select_hash_expansion_work(&s, 10);
         assert_eq!(work.len(), 1);
-        assert_eq!(work[0].resolved_domain, "north.sevenkingdoms.local");
+        assert_eq!(work[0].resolved_domain, "child.contoso.local");
         assert_eq!(work[0].targets, vec!["192.168.58.10"]);
     }
 

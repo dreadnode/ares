@@ -219,7 +219,7 @@ pub async fn auto_group_enumeration(
                     "If a password IS provided, use ldap_search with filter (objectCategory=group) ",
                     "to enumerate groups, members, and Foreign Security Principals.\n\n",
                     "CROSS-DOMAIN AUTH: If the credential domain differs from the target domain ",
-                    "(e.g. credential from child.domain.local querying parent domain.local), ",
+                    "(e.g. credential from child.contoso.local querying parent contoso.local), ",
                     "you MUST pass bind_domain=<credential_domain> to ldap_search. ",
                     "Check the 'bind_domain' field in the task payload — if present, always pass it ",
                     "to ldap_search so the LDAP bind uses user@bind_domain while querying the target domain.\n\n",
@@ -236,7 +236,7 @@ pub async fn auto_group_enumeration(
                     "and any custom groups with adminCount=1.\n\n",
                     "Report cross-domain memberships as vuln_type='foreign_group_membership'.\n\n",
                     "IMPORTANT: For each user found, include in discovered_users array:\n",
-                    "  {\"username\": \"samaccountname\", \"domain\": \"domain.local\", ",
+                    "  {\"username\": \"samaccountname\", \"domain\": \"contoso.local\", ",
                     "\"source\": \"ldap_group_enumeration\", \"memberOf\": [\"Group1\", \"Group2\"]}"
                 ),
             });

@@ -133,7 +133,7 @@ pub async fn auto_foreign_group_enum(
                     "domain=target_domain, source_domain=foreign_domain.\n\n",
                     "IMPORTANT: For each user discovered during FSP enumeration, include them in the ",
                     "discovered_users array with EXACTLY this JSON format:\n",
-                    "  {\"username\": \"samaccountname\", \"domain\": \"domain.local\", ",
+                    "  {\"username\": \"samaccountname\", \"domain\": \"contoso.local\", ",
                     "\"source\": \"foreign_group_enumeration\", \"memberOf\": [\"Group1\"]}\n",
                     "Include ALL users found — both foreign principals and local group members."
                 ),

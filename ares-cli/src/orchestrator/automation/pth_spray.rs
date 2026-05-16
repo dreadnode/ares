@@ -634,11 +634,11 @@ mod tests {
         state.hashes.push(make_ntlm_hash(
             "admin",
             "aad3b435b51404eeaad3b435b51404ee", // pragma: allowlist secret
-            "sevenkingdoms.local",
+            "contoso.local",
         ));
         state
             .hosts
-            .push(make_smb_host("10.1.2.254", "braavos.essos.local", false));
+            .push(make_smb_host("192.168.58.254", "dc01.fabrikam.local", false));
 
         let work = collect_pth_work(&state).unwrap();
         assert!(work.is_empty());
@@ -648,18 +648,18 @@ mod tests {
     fn collect_filters_machine_and_krbtgt_hashes() {
         let mut state = StateInner::new("test".into());
         state.hashes.push(make_ntlm_hash(
-            "WINTERFELL$",
+            "DC01$",
             "aad3b435b51404eeaad3b435b51404ee", // pragma: allowlist secret
-            "north.sevenkingdoms.local",
+            "child.contoso.local",
         ));
         state.hashes.push(make_ntlm_hash(
             "krbtgt",
             "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", // pragma: allowlist secret
-            "north.sevenkingdoms.local",
+            "child.contoso.local",
         ));
         state.hosts.push(make_smb_host(
             "192.168.58.11",
-            "srv01.north.sevenkingdoms.local",
+            "srv01.child.contoso.local",
             false,
         ));
 

@@ -58,7 +58,7 @@ pub fn parse_secretsdump(output: &str, params: &Value) -> (Vec<Value>, Vec<Value
     // Win2016+ DCs reject RC4-only inter-realm tickets (KDC_ERR_TGT_REVOKED), so
     // we attach the AES256 key to the matching NTLM hash entry below.
     // Format: "DOMAIN\\user:aes256-cts-hmac-sha1-96:<hex>" or
-    //         "domain.local/user:aes256-cts-hmac-sha1-96:<hex>"
+    //         "contoso.local/user:aes256-cts-hmac-sha1-96:<hex>"
     let mut aes_keys: std::collections::HashMap<String, String> = std::collections::HashMap::new();
     for raw_line in output.lines() {
         let line = strip_nxc_framing(raw_line).trim();
@@ -207,6 +207,19 @@ fn is_local_sam_account(raw_user: &str, rid: &str, section: DumpSection) -> bool
         return true;
     }
     let name = raw_user.to_ascii_lowercase();
+    // LSA pseudo-rows from `[*] Dumping LSA Secrets` are always machine-local,
+    // even if a prior NTDS marker left us in `DumpSection::Domain`.
+    if raw_user.starts_with('$') || raw_user.starts_with("_SC_") || raw_user.starts_with("NL$") {
+        return true;
+    }
+    // In an explicit NTDS/domain section, unprefixed rows are AD accounts.
+    // This is the load-bearing distinction for `Administrator:500` from
+    // `-just-dc-ntlm` / `nxc smb --ntds` output: treating RID 500 as "always
+    // local SAM" drops the realm and breaks child->parent trust escalation,
+    // which requires a same-domain Administrator hash.
+    if section == DumpSection::Domain {
+        return false;
+    }
     // RID-based: 500/501/503/504 are well-known built-ins. Don't include 502
     // (krbtgt) — it's a domain account that happens to share a fixed RID.
     if matches!(rid, "500" | "501" | "503" | "504")
@@ -215,10 +228,6 @@ fn is_local_sam_account(raw_user: &str, rid: &str, section: DumpSection) -> bool
             "administrator" | "guest" | "defaultaccount" | "wdagutilityaccount"
         )
     {
-        return true;
-    }
-    // LSA pseudo-rows from `[*] Dumping LSA Secrets` — `$MACHINE.ACC`, etc.
-    if raw_user.starts_with('$') || raw_user.starts_with("_SC_") || raw_user.starts_with("NL$") {
         return true;
     }
     // Safe default for unmarked dumps: treat as local SAM. krbtgt and machine
@@ -418,16 +427,19 @@ svc_sql:1001:aad3b435b51404eeaad3b435b51404ee:abcdef1234567890abcdef1234567890::
 [*] Searching for pekList, be patient
 [*] PEK # 0 found and decrypted: abcdef
 [*] Reading and decrypting hashes from /tmp/ntds.dit
+Administrator:500:aad3b435b51404eeaad3b435b51404ee:22222222222222222222222222222222:::
 alice:1103:aad3b435b51404eeaad3b435b51404ee:abcdef1234567890abcdef1234567890:::
 WIN-XYZ$:1001:aad3b435b51404eeaad3b435b51404ee:1234567890abcdef1234567890abcdef:::
 [*] Kerberos keys grabbed";
         let params = json!({"target_domain": "contoso.local"});
         let (hashes, _) = parse_secretsdump(output, &params);
-        assert_eq!(hashes.len(), 2);
-        assert_eq!(hashes[0]["username"], "alice");
+        assert_eq!(hashes.len(), 3);
+        assert_eq!(hashes[0]["username"], "Administrator");
         assert_eq!(hashes[0]["domain"], "contoso.local");
-        assert_eq!(hashes[1]["username"], "WIN-XYZ$");
+        assert_eq!(hashes[1]["username"], "alice");
         assert_eq!(hashes[1]["domain"], "contoso.local");
+        assert_eq!(hashes[2]["username"], "WIN-XYZ$");
+        assert_eq!(hashes[2]["domain"], "contoso.local");
     }
 
     #[test]

@@ -260,7 +260,7 @@ pub async fn auto_acl_discovery(dispatcher: Arc<Dispatcher>, mut shutdown: watch
                     "  source_domain: the domain of the source principal\n",
                     "Focus on ACEs where the source is a user we have credentials for.\n\n",
                     "IMPORTANT: Include ALL users discovered in the discovered_users array:\n",
-                    "  {\"username\": \"samaccountname\", \"domain\": \"domain.local\", ",
+                    "  {\"username\": \"samaccountname\", \"domain\": \"contoso.local\", ",
                     "\"source\": \"acl_discovery\"}"
                 ),
             });

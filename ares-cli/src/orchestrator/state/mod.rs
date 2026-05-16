@@ -61,7 +61,6 @@ pub const DEDUP_DFS_COERCION: &str = "dfs_coercion";
 pub const DEDUP_PETITPOTAM_UNAUTH: &str = "petitpotam_unauth";
 pub const DEDUP_WINRM_LATERAL: &str = "winrm_lateral";
 pub const DEDUP_GROUP_ENUMERATION: &str = "group_enumeration";
-pub const DEDUP_LOCALUSER_SPRAY: &str = "localuser_spray";
 pub const DEDUP_KRBRELAYUP: &str = "krbrelayup";
 pub const DEDUP_SEARCHCONNECTOR: &str = "searchconnector";
 pub const DEDUP_LSASSY_DUMP: &str = "lsassy_dump";
@@ -156,7 +155,6 @@ const ALL_DEDUP_SETS: &[&str] = &[
     DEDUP_PETITPOTAM_UNAUTH,
     DEDUP_WINRM_LATERAL,
     DEDUP_GROUP_ENUMERATION,
-    DEDUP_LOCALUSER_SPRAY,
     DEDUP_KRBRELAYUP,
     DEDUP_SEARCHCONNECTOR,
     DEDUP_LSASSY_DUMP,
@@ -211,7 +209,6 @@ mod tests {
             DEDUP_PETITPOTAM_UNAUTH,
             DEDUP_WINRM_LATERAL,
             DEDUP_GROUP_ENUMERATION,
-            DEDUP_LOCALUSER_SPRAY,
             DEDUP_KRBRELAYUP,
             DEDUP_SEARCHCONNECTOR,
             DEDUP_LSASSY_DUMP,

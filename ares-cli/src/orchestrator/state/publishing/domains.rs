@@ -295,7 +295,7 @@ mod tests {
         let outcome = state
             .publish_candidate_domain(
                 &q,
-                "unknown.example.com",
+                "unknown.contoso.local",
                 DomainEvidence::HostnameInference,
                 Some("192.168.58.5".into()),
             )
@@ -304,7 +304,7 @@ mod tests {
         assert_eq!(outcome, DomainPublishOutcome::Held);
         let s = state.inner.read().await;
         assert!(s.domains.is_empty());
-        assert!(s.candidate_domains.contains_key("unknown.example.com"));
+        assert!(s.candidate_domains.contains_key("unknown.contoso.local"));
     }
 
     #[tokio::test]
@@ -472,14 +472,14 @@ mod tests {
         state
             .publish_candidate_domain(
                 &q,
-                "transient.example.com",
+                "transient.contoso.local",
                 DomainEvidence::HostnameInference,
                 None,
             )
             .await
             .unwrap();
         state
-            .mark_candidate_probed(&q, "transient.example.com")
+            .mark_candidate_probed(&q, "transient.contoso.local")
             .await
             .unwrap();
         {
@@ -490,13 +490,13 @@ mod tests {
             let mut s = state.inner.write().await;
             let cand = s
                 .candidate_domains
-                .get_mut("transient.example.com")
+                .get_mut("transient.contoso.local")
                 .unwrap();
             cand.last_probed_at =
                 Some(Utc::now() - Duration::seconds(CANDIDATE_PROBE_RETRY_SECS + 1));
         }
         let pending = state.pending_candidate_domains().await;
         assert_eq!(pending.len(), 1);
-        assert_eq!(pending[0].fqdn, "transient.example.com");
+        assert_eq!(pending[0].fqdn, "transient.contoso.local");
     }
 }

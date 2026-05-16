@@ -270,6 +270,9 @@ Comprehensive checklist for GOAD lab provisioning, user/group creation, vulnerab
 - [ ] ESC6 - EDITF_ATTRIBUTESUBJECTALTNAME2 flag on ESSOS-CA
 - [ ] ESC7 - ManageCA abuse via viserys.targaryen
 - [ ] ESC8 - NTLM relay to Web Enrollment (HTTP `/certsrv` on braavos + kingslanding)
+- [ ] ESC8 (essos, primary) - relay to `http://braavos.essos.local/certsrv/certfnsh.asp`; coerce `meereen.essos.local` (PetitPotam / Coercer) into `ntlmrelayx --adcs --template DomainController`; obtain `MEEREEN$` PFX -> `certipy auth` -> DCSync `essos.local`
+- [ ] ESC8 (sevenkingdoms, optional) - relay to `http://kingslanding/certsrv/certfnsh.asp`; coerce `winterfell` / `castelblack` -> `KINGSLANDING$` cert -> DA `sevenkingdoms.local`
+- [ ] ESC8 caveats - Web Enrollment is enabled on both CAs; `DomainController` is published (no ESC4 prep needed); relay target is HTTP so SMB signing is irrelevant; the path is pure HTTP and does not depend on forest trust abuse
 - [ ] ESC9 - UPN spoofing (missandei via GenericAll on khal.drogo)
 - [ ] ESC10 - Weak certificate mapping, Case 1 (StrongCertificateBindingEnforcement=0)
 - [ ] ESC10 - Weak certificate mapping, Case 2 (CertificateMappingMethods=0x04)

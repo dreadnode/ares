@@ -983,7 +983,6 @@ mod tests {
             DEDUP_PETITPOTAM_UNAUTH,
             DEDUP_WINRM_LATERAL,
             DEDUP_GROUP_ENUMERATION,
-            DEDUP_LOCALUSER_SPRAY,
             DEDUP_KRBRELAYUP,
             DEDUP_SEARCHCONNECTOR,
             DEDUP_LSASSY_DUMP,
@@ -1109,14 +1108,14 @@ mod tests {
         let mut state = StateInner::new("op-1".into());
         state
             .netbios_to_fqdn
-            .insert("north".into(), "north.sevenkingdoms.local".into());
+            .insert("child".into(), "child.contoso.local".into());
         state
             .dominated_domains
-            .insert("north.sevenkingdoms.local".into());
+            .insert("child.contoso.local".into());
 
-        assert!(state.is_domain_dominated("north.sevenkingdoms.local"));
-        assert!(state.is_domain_dominated("NORTH"));
-        assert!(!state.is_domain_dominated("sevenkingdoms.local"));
+        assert!(state.is_domain_dominated("child.contoso.local"));
+        assert!(state.is_domain_dominated("CHILD"));
+        assert!(!state.is_domain_dominated("contoso.local"));
         assert!(!state.is_domain_dominated(""));
     }
 

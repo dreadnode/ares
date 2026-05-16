@@ -180,6 +180,7 @@ pub(crate) fn normalize_state_domains(
     {
         let mut valid_domains: HashSet<String> = HashSet::new();
         let mut host_fqdns: HashSet<String> = HashSet::new();
+        let target_domain_lower = target_domain.map(|d| d.to_lowercase());
         if let Some(td) = target_domain {
             valid_domains.insert(td.to_lowercase());
         }
@@ -207,8 +208,8 @@ pub(crate) fn normalize_state_domains(
         }
 
         // Also keep child domains whose suffix parent is already valid.
-        // e.g. north.sevenkingdoms.local survives when sevenkingdoms.local is valid,
-        // even before any north users/hosts have been enumerated.
+        // e.g. child.contoso.local survives when contoso.local is valid,
+        // even before any child users/hosts have been enumerated.
         let child_domains: Vec<String> = domains
             .iter()
             .filter_map(|d| {
@@ -225,10 +226,37 @@ pub(crate) fn normalize_state_domains(
             .collect();
         valid_domains.extend(child_domains);
 
+        // Symmetric rule for forest roots: if a child domain is already valid
+        // (from target config, users, or corroborated host evidence), keep its
+        // suffix-parent too when that parent is present in the raw domain set.
+        // This avoids dropping roots like `contoso.local` when a DC was
+        // recorded with hostname exactly `contoso.local`.
+        let implied_parent_domains: HashSet<String> = domains
+            .iter()
+            .filter_map(|d| {
+                let lower = d.trim().to_lowercase();
+                if !valid_domains.contains(&lower) {
+                    return None;
+                }
+                let parts: Vec<&str> = lower.split('.').collect();
+                if parts.len() > 2 {
+                    let parent = parts[1..].join(".");
+                    if domains
+                        .iter()
+                        .any(|candidate| candidate.eq_ignore_ascii_case(&parent))
+                    {
+                        return Some(parent);
+                    }
+                }
+                None
+            })
+            .collect();
+        valid_domains.extend(implied_parent_domains.iter().cloned());
+
         // A string that appears as the suffix (parts[1..]) of any host FQDN is a real
         // domain, even if it also happens to appear as a host's own hostname field
-        // (e.g. a DC recorded as hostname="north.sevenkingdoms.local" while
-        // castelblack.north.sevenkingdoms.local is another host in the same op).
+        // (e.g. a DC recorded as hostname="child.contoso.local" while
+        // dc01.child.contoso.local is another host in the same op).
         let confirmed_domains: HashSet<String> = hosts
             .iter()
             .filter(|h| !h.hostname.is_empty() && h.hostname.contains('.'))
@@ -242,7 +270,10 @@ pub(crate) fn normalize_state_domains(
         domains.retain(|d| {
             let lower = d.to_lowercase();
             valid_domains.contains(&lower)
-                && (!host_fqdns.contains(&lower) || confirmed_domains.contains(&lower))
+                && (!host_fqdns.contains(&lower)
+                    || confirmed_domains.contains(&lower)
+                    || target_domain_lower.as_deref() == Some(lower.as_str())
+                    || implied_parent_domains.contains(&lower))
         });
     }
 }
