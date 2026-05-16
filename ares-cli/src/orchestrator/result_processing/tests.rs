@@ -2075,3 +2075,68 @@ mod reconcile_extracted_credential_domain {
         assert_eq!(got, Some("child.contoso.local".to_string()));
     }
 }
+
+mod reconcile_low_trust_credential_domain {
+    use super::super::reconcile_low_trust_credential_domain;
+    use ares_core::models::{Credential, User};
+
+    fn user(username: &str, domain: &str) -> User {
+        User {
+            username: username.to_string(),
+            domain: domain.to_string(),
+            description: String::new(),
+            is_admin: false,
+            source: "kerberos_enum".to_string(),
+        }
+    }
+
+    fn cred(username: &str, domain: &str, source: &str) -> Credential {
+        Credential {
+            id: "c1".to_string(),
+            username: username.to_string(),
+            password: "_L0ngCl@w_".to_string(),
+            domain: domain.to_string(),
+            source: source.to_string(),
+            discovered_at: None,
+            is_admin: false,
+            parent_id: None,
+            attack_step: 0,
+        }
+    }
+
+    #[test]
+    fn corrects_low_trust_sysvol_realm() {
+        let users = vec![user("alice", "child.contoso.local")];
+        let mut cred = cred("alice", "contoso.local", "sysvol_script");
+
+        let got = reconcile_low_trust_credential_domain(&mut cred, &users);
+
+        assert_eq!(got, Some("child.contoso.local".to_string()));
+        assert_eq!(cred.domain, "child.contoso.local");
+    }
+
+    #[test]
+    fn leaves_high_trust_source_unchanged() {
+        let users = vec![user("alice", "child.contoso.local")];
+        let mut cred = cred("alice", "contoso.local", "secretsdump");
+
+        let got = reconcile_low_trust_credential_domain(&mut cred, &users);
+
+        assert_eq!(got, None);
+        assert_eq!(cred.domain, "contoso.local");
+    }
+
+    #[test]
+    fn leaves_ambiguous_low_trust_realm_unchanged() {
+        let users = vec![
+            user("administrator", "child.contoso.local"),
+            user("administrator", "contoso.local"),
+        ];
+        let mut cred = cred("administrator", "contoso.local", "sysvol_script");
+
+        let got = reconcile_low_trust_credential_domain(&mut cred, &users);
+
+        assert_eq!(got, None);
+        assert_eq!(cred.domain, "contoso.local");
+    }
+}
