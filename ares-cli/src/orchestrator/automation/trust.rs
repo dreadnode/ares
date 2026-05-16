@@ -1130,12 +1130,24 @@ pub async fn auto_trust_follow(dispatcher: Arc<Dispatcher>, mut shutdown: watch:
                     let parent_domain_bg = parent_domain.clone();
                     let child_domain_bg = child_domain.clone();
                     let vuln_id_bg = vuln_id.clone();
+                    let key_bg = key.clone();
                     tokio::spawn(async move {
                         let result = dispatcher_bg
                             .llm_runner
                             .tool_dispatcher()
                             .dispatch_tool("privesc", &task_id, &call)
                             .await;
+                        let clear_dedup = || async {
+                            dispatcher_bg
+                                .state
+                                .write()
+                                .await
+                                .unmark_processed(DEDUP_TRUST_FOLLOW, &key_bg);
+                            let _ = dispatcher_bg
+                                .state
+                                .unpersist_dedup(&dispatcher_bg.queue, DEDUP_TRUST_FOLLOW, &key_bg)
+                                .await;
+                        };
                         match result {
                             Ok(exec_result) => {
                                 if let Some(err) = exec_result.error.as_ref() {
@@ -1153,8 +1165,9 @@ pub async fn auto_trust_follow(dispatcher: Arc<Dispatcher>, mut shutdown: watch:
                                         child_domain = %child_domain_bg,
                                         parent_domain = %parent_domain_bg,
                                         output_tail = %tail,
-                                        "raise_child returned error"
+                                        "raise_child returned error — clearing dedup for retry"
                                     );
+                                    clear_dedup().await;
                                     return;
                                 }
                                 // Verify parent compromise — only mark exploited
@@ -1245,8 +1258,9 @@ pub async fn auto_trust_follow(dispatcher: Arc<Dispatcher>, mut shutdown: watch:
                                     err = %e,
                                     child_domain = %child_domain_bg,
                                     parent_domain = %parent_domain_bg,
-                                    "raise_child dispatch errored"
+                                    "raise_child dispatch errored — clearing dedup for retry"
                                 );
+                                clear_dedup().await;
                             }
                         }
                     });

@@ -241,7 +241,28 @@ pub async fn raise_child(args: &Value) -> Result<ToolOutput> {
     }
 
     // raiseChild performs multiple secretsdumps internally — needs extra time
-    cmd.timeout_secs(300).execute().await
+    let mut output = cmd.timeout_secs(300).execute().await?;
+    if output.success {
+        if let Some(failure_line) = detect_raise_child_failure(&output.combined_raw()) {
+            output.success = false;
+            if !output.stderr.is_empty() && !output.stderr.ends_with('\n') {
+                output.stderr.push('\n');
+            }
+            output.stderr.push_str(&format!(
+                "raiseChild reported failure despite zero exit status: {failure_line}"
+            ));
+        }
+    }
+    Ok(output)
+}
+
+fn detect_raise_child_failure(output: &str) -> Option<&str> {
+    output.lines().find(|line| {
+        let trimmed = line.trim();
+        trimmed.contains("SessionError:")
+            || trimmed.contains("KDC_ERR_")
+            || trimmed.contains("Traceback (most recent call last):")
+    })
 }
 
 #[cfg(test)]
@@ -873,5 +894,43 @@ mod tests {
             "target_domain": "contoso.local"
         });
         assert!(raise_child(&args).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn raise_child_detects_sessionerror_on_zero_exit() {
+        mock::push(crate::ToolOutput {
+            stdout: "Impacket v0.13.0\n[-] Kerberos SessionError: KDC_ERR_TGT_REVOKED(TGT has been revoked)\n"
+                .to_string(),
+            stderr: String::new(),
+            exit_code: Some(0),
+            success: true,
+        });
+        let args = json!({
+            "child_domain": "child.contoso.local",
+            "username": "Administrator",
+            "hash": "31d6cfe0d16ae931b73c59d7e0c089c0"
+        });
+        let output = raise_child(&args).await.unwrap();
+        assert!(!output.success);
+        assert_eq!(output.exit_code, Some(0));
+        assert!(output.stderr.contains("KDC_ERR_TGT_REVOKED"));
+    }
+
+    #[tokio::test]
+    async fn raise_child_keeps_success_without_failure_markers() {
+        mock::push(crate::ToolOutput {
+            stdout: "Impacket v0.13.0\n[*] Success path\n".to_string(),
+            stderr: String::new(),
+            exit_code: Some(0),
+            success: true,
+        });
+        let args = json!({
+            "child_domain": "child.contoso.local",
+            "username": "Administrator",
+            "hash": "31d6cfe0d16ae931b73c59d7e0c089c0"
+        });
+        let output = raise_child(&args).await.unwrap();
+        assert!(output.success);
+        assert!(output.stderr.is_empty());
     }
 }
