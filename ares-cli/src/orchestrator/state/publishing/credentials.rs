@@ -1017,12 +1017,7 @@ mod tests {
         assert!(!state.publish_hash(&q, bad).await.unwrap());
 
         // 8 chars — truncated capture
-        let short = make_hash(
-            "jdoe",
-            "child.contoso.local",
-            "NTLM",
-            "aabbccdd",
-        );
+        let short = make_hash("jdoe", "child.contoso.local", "NTLM", "aabbccdd");
         assert!(!state.publish_hash(&q, short).await.unwrap());
 
         let s = state.inner.read().await;

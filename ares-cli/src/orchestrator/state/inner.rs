@@ -1109,9 +1109,7 @@ mod tests {
         state
             .netbios_to_fqdn
             .insert("child".into(), "child.contoso.local".into());
-        state
-            .dominated_domains
-            .insert("child.contoso.local".into());
+        state.dominated_domains.insert("child.contoso.local".into());
 
         assert!(state.is_domain_dominated("child.contoso.local"));
         assert!(state.is_domain_dominated("CHILD"));

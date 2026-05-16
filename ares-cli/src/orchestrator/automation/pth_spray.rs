@@ -636,9 +636,11 @@ mod tests {
             "aad3b435b51404eeaad3b435b51404ee", // pragma: allowlist secret
             "contoso.local",
         ));
-        state
-            .hosts
-            .push(make_smb_host("192.168.58.254", "dc01.fabrikam.local", false));
+        state.hosts.push(make_smb_host(
+            "192.168.58.254",
+            "dc01.fabrikam.local",
+            false,
+        ));
 
         let work = collect_pth_work(&state).unwrap();
         assert!(work.is_empty());

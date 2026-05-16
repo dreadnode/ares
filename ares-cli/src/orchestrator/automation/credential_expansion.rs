@@ -1471,10 +1471,8 @@ mod tests {
         let mut s = StateInner::new("op".into());
         s.netbios_to_fqdn
             .insert("child".into(), "child.contoso.local".into());
-        s.hosts.push(make_host(
-            "dc01.child.contoso.local",
-            "192.168.58.10",
-        ));
+        s.hosts
+            .push(make_host("dc01.child.contoso.local", "192.168.58.10"));
         s.hashes.push(make_ntlm_hash("alice", "aaaaaaaa", "CHILD"));
 
         let work = select_hash_expansion_work(&s, 10);
