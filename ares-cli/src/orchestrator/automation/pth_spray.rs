@@ -15,6 +15,9 @@ use serde_json::json;
 use tokio::sync::watch;
 use tracing::{debug, info, warn};
 
+use super::credential_expansion::{
+    domain_is_same_or_relative, resolve_cred_domain, resolve_host_domain,
+};
 use crate::orchestrator::dispatcher::Dispatcher;
 use crate::orchestrator::state::*;
 
@@ -106,6 +109,8 @@ fn collect_pth_work(state: &StateInner) -> Option<Vec<PthWork>> {
             h.hash_type.to_lowercase().contains("ntlm")
                 && !h.hash_value.is_empty()
                 && h.hash_value.len() == 32
+                && h.username.to_lowercase() != "krbtgt"
+                && !h.username.ends_with('$')
         })
         .collect();
 
@@ -129,9 +134,26 @@ fn collect_pth_work(state: &StateInner) -> Option<Vec<PthWork>> {
         if !has_smb {
             continue;
         }
+        let host_domain = resolve_host_domain(state, host);
+        if !host_domain.is_empty() && state.is_domain_dominated(&host_domain) {
+            continue;
+        }
 
         // Try each unique NTLM hash against this host
         for hash in &ntlm_hashes {
+            let hash_domain = resolve_cred_domain(state, &hash.domain);
+            let domain = if !hash_domain.is_empty() {
+                hash_domain.clone()
+            } else {
+                host_domain.clone()
+            };
+            if domain.is_empty() {
+                continue;
+            }
+            if !hash_domain.is_empty() && !domain_is_same_or_relative(&host_domain, &hash_domain) {
+                continue;
+            }
+
             let dedup_key = format!(
                 "pth:{}:{}:{}",
                 host.ip,
@@ -141,16 +163,6 @@ fn collect_pth_work(state: &StateInner) -> Option<Vec<PthWork>> {
             if state.is_processed(DEDUP_PTH_SPRAY, &dedup_key) {
                 continue;
             }
-
-            // Infer domain from hash or host
-            let domain = if !hash.domain.is_empty() {
-                hash.domain.clone()
-            } else {
-                host.hostname
-                    .find('.')
-                    .map(|i| host.hostname[i + 1..].to_string())
-                    .unwrap_or_default()
-            };
 
             items.push(PthWork {
                 dedup_key,
@@ -589,8 +601,7 @@ mod tests {
             false,
         ));
         let work = collect_pth_work(&state).unwrap();
-        assert_eq!(work.len(), 1);
-        assert_eq!(work[0].domain, "");
+        assert!(work.is_empty());
     }
 
     #[test]
@@ -615,6 +626,61 @@ mod tests {
         let work = collect_pth_work(&state).unwrap();
         // 2 hashes x 2 hosts = 4 work items
         assert_eq!(work.len(), 4);
+    }
+
+    #[test]
+    fn collect_skips_cross_forest_hash_host_pairs() {
+        let mut state = StateInner::new("test".into());
+        state.hashes.push(make_ntlm_hash(
+            "admin",
+            "aad3b435b51404eeaad3b435b51404ee", // pragma: allowlist secret
+            "sevenkingdoms.local",
+        ));
+        state
+            .hosts
+            .push(make_smb_host("10.1.2.254", "braavos.essos.local", false));
+
+        let work = collect_pth_work(&state).unwrap();
+        assert!(work.is_empty());
+    }
+
+    #[test]
+    fn collect_filters_machine_and_krbtgt_hashes() {
+        let mut state = StateInner::new("test".into());
+        state.hashes.push(make_ntlm_hash(
+            "WINTERFELL$",
+            "aad3b435b51404eeaad3b435b51404ee", // pragma: allowlist secret
+            "north.sevenkingdoms.local",
+        ));
+        state.hashes.push(make_ntlm_hash(
+            "krbtgt",
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", // pragma: allowlist secret
+            "north.sevenkingdoms.local",
+        ));
+        state.hosts.push(make_smb_host(
+            "192.168.58.11",
+            "srv01.north.sevenkingdoms.local",
+            false,
+        ));
+
+        assert!(collect_pth_work(&state).is_none());
+    }
+
+    #[test]
+    fn collect_skips_dominated_target_domain() {
+        let mut state = StateInner::new("test".into());
+        state.hashes.push(make_ntlm_hash(
+            "admin",
+            "aad3b435b51404eeaad3b435b51404ee", // pragma: allowlist secret
+            "contoso.local",
+        ));
+        state
+            .hosts
+            .push(make_smb_host("192.168.58.10", "srv01.contoso.local", false));
+        state.dominated_domains.insert("contoso.local".into());
+
+        let work = collect_pth_work(&state).unwrap();
+        assert!(work.is_empty());
     }
 
     #[test]
@@ -759,7 +825,7 @@ mod tests {
     }
 
     #[test]
-    fn collect_hash_domain_preferred_over_hostname_domain() {
+    fn collect_hash_domain_must_match_hostname_domain() {
         let mut state = StateInner::new("test".into());
         state.hashes.push(make_ntlm_hash(
             "admin",
@@ -772,8 +838,7 @@ mod tests {
             false,
         ));
         let work = collect_pth_work(&state).unwrap();
-        // Hash domain takes priority over hostname domain
-        assert_eq!(work[0].domain, "contoso.local");
+        assert!(work.is_empty());
     }
 
     #[test]

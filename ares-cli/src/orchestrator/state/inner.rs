@@ -579,6 +579,30 @@ impl StateInner {
         d
     }
 
+    /// Return true when this exact domain is already dominated.
+    ///
+    /// This intentionally avoids forest-root inference: a child-domain krbtgt
+    /// should not suppress work in an undominated parent domain. NetBIOS names
+    /// are resolved through `netbios_to_fqdn` when available.
+    pub fn is_domain_dominated(&self, domain: &str) -> bool {
+        let raw = domain.to_lowercase();
+        if raw.is_empty() {
+            return false;
+        }
+        let normalized = if raw.contains('.') {
+            raw
+        } else {
+            self.netbios_to_fqdn
+                .get(&raw)
+                .or_else(|| self.netbios_to_fqdn.get(&domain.to_uppercase()))
+                .map(|fqdn| fqdn.to_lowercase())
+                .unwrap_or(raw)
+        };
+        self.dominated_domains
+            .iter()
+            .any(|d| d.eq_ignore_ascii_case(&normalized))
+    }
+
     /// Check if a dedup key exists in the named set.
     pub fn is_processed(&self, set_name: &str, key: &str) -> bool {
         self.dedup
@@ -1078,6 +1102,22 @@ mod tests {
         // Dominate fabrikam too
         state.dominated_domains.insert("fabrikam.local".into());
         assert!(state.all_forests_dominated());
+    }
+
+    #[test]
+    fn is_domain_dominated_exact_and_netbios_only() {
+        let mut state = StateInner::new("op-1".into());
+        state
+            .netbios_to_fqdn
+            .insert("north".into(), "north.sevenkingdoms.local".into());
+        state
+            .dominated_domains
+            .insert("north.sevenkingdoms.local".into());
+
+        assert!(state.is_domain_dominated("north.sevenkingdoms.local"));
+        assert!(state.is_domain_dominated("NORTH"));
+        assert!(!state.is_domain_dominated("sevenkingdoms.local"));
+        assert!(!state.is_domain_dominated(""));
     }
 
     #[test]

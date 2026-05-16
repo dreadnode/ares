@@ -57,6 +57,10 @@ fn collect_gpp_sysvol_work(state: &StateInner) -> Vec<GppSysvolWork> {
     let mut items = Vec::new();
 
     for (domain, dc_ip) in &state.all_domains_with_dcs() {
+        if state.is_domain_dominated(domain) {
+            continue;
+        }
+
         let dedup_key = format!("gpp:{}", domain.to_lowercase());
         if state.is_processed(DEDUP_GPP_SYSVOL, &dedup_key) {
             continue;
@@ -294,6 +298,19 @@ mod tests {
             .insert("contoso.local".into(), "192.168.58.10".into());
         state.credentials.push(make_cred("admin", "contoso.local"));
         state.mark_processed(DEDUP_GPP_SYSVOL, "gpp:contoso.local".into());
+        let work = collect_gpp_sysvol_work(&state);
+        assert!(work.is_empty());
+    }
+
+    #[test]
+    fn collect_skips_dominated_domain() {
+        let mut state = StateInner::new("test".into());
+        state
+            .domain_controllers
+            .insert("contoso.local".into(), "192.168.58.10".into());
+        state.credentials.push(make_cred("admin", "contoso.local"));
+        state.dominated_domains.insert("contoso.local".into());
+
         let work = collect_gpp_sysvol_work(&state);
         assert!(work.is_empty());
     }

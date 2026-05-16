@@ -19,11 +19,15 @@ tasks:
   # ===========================================================================
 
   multi:
-    desc: "Run multi-agent red team operation (usage: task red:multi [TARGET=dreadgoad] [DOMAIN=contoso.local] [TARGET_ENV=staging] [IPS=10.1.10.10,10.1.10.11])"
+    desc: "Run multi-agent red team operation (usage: task red:multi [TARGET=dreadgoad] [DOMAIN=contoso.local] [TARGET_ENV=staging] [IPS=10.1.10.10,10.1.10.11] [FOLLOW=true])"
     silent: true
     vars:
       OPERATION_ID: '{{.OPERATION_ID | default ""}}'
       RESUME: '{{.RESUME | default "false"}}'
+      FOLLOW: '{{.FOLLOW | default "true"}}'
+      POLL_INTERVAL: '{{.POLL_INTERVAL | default "30"}}'
+      MAX_WAIT: '{{.MAX_WAIT | default "7200"}}'
+      OUTPUT_DIR: '{{.OUTPUT_DIR | default "./reports"}}'
       TARGET_ENV: '{{.TARGET_ENV | default "staging"}}'
       IPS: '{{.IPS | default ""}}'
       OPERATION_ID_COMPUTED:
@@ -101,90 +105,55 @@ tasks:
             2>&1 | tee -a "{{.LOGFILE}}"
         silent: false
 
-      # Follow logs filtered to this operation only (auto-exits on completion)
       - cmd: |
+          if [ "{{.FOLLOW}}" != "true" ]; then
+            echo ""
+            echo "Operation {{.OPERATION_ID_COMPUTED}} submitted without local wait."
+            echo "Auto-fetch later with: task red:multi:watch OPERATION_ID={{.OPERATION_ID_COMPUTED}} ONCE=true OUTPUT_DIR={{.OUTPUT_DIR}}"
+            exit 0
+          fi
+
           echo ""
-          echo "Following orchestrator logs (auto-exits on completion, Ctrl+C to stop early)..."
+          echo "Watching operation status (poll={{.POLL_INTERVAL}}s, max_wait={{.MAX_WAIT}}s)"
           echo "Operation ID: {{.OPERATION_ID_COMPUTED}}"
+          echo "Report will be fetched to {{.OUTPUT_DIR}}/red/ when the op reaches a terminal state"
           echo ""
 
-          sleep 2
-
-          DONE_MARKER="/tmp/ares_done_$$"
-          rm -f "$DONE_MARKER"
-
-          while IFS= read -r line; do
-            echo "$line" | tee -a "{{.LOGFILE}}"
-            if echo "$line" | grep -q "completed successfully"; then
-              echo ""
-              echo "Operation completed - fetching report..."
-              touch "$DONE_MARKER"
-              pkill -f "kubectl logs -f.*{{.K8S_NAMESPACE}}.*ares-orchestrator" 2>/dev/null || true
-              break
+          START=$(date +%s)
+          while true; do
+            ELAPSED=$(( $(date +%s) - START ))
+            if [ $ELAPSED -gt {{.MAX_WAIT}} ]; then
+              echo "ERROR: Max wait ({{.MAX_WAIT}}s) exceeded; report was not auto-fetched"
+              echo "Fetch manually: task red:multi:report OPERATION_ID={{.OPERATION_ID_COMPUTED}} OUTPUT_DIR={{.OUTPUT_DIR}}"
+              exit 1
             fi
-          done < <(timeout 1800 stdbuf -oL kubectl logs -f --since=10s -n {{.K8S_NAMESPACE}} deploy/ares-orchestrator 2>&1 | \
-            stdbuf -oL grep --line-buffered "{{.OPERATION_ID_COMPUTED}}" || true)
 
-          pkill -f "kubectl logs -f.*{{.K8S_NAMESPACE}}.*ares-orchestrator" 2>/dev/null || true
+            STATUS_OUT=$({{.ARES_CLI}} --k8s {{.K8S_NAMESPACE}} ops status "{{.OPERATION_ID_COMPUTED}}" 2>&1 || true)
+            STATUS=$(echo "$STATUS_OUT" | grep -E '^Status: ' | head -1 | awk '{print $2}')
 
-          if [ ! -f "$DONE_MARKER" ]; then
-            echo ""
-            echo "Operation {{.OPERATION_ID_COMPUTED}} is queued/running but not yet complete."
-            echo "Monitor: task red:multi:loot LATEST=true WATCH=5"
-            echo "Report:  task red:multi:report OPERATION_ID={{.OPERATION_ID_COMPUTED}}"
-            touch "/tmp/ares_skip_report_$$"
-          fi
-          rm -f "$DONE_MARKER"
-        silent: false
+            if [ -z "$STATUS" ]; then
+              echo "[${ELAPSED}s] no status yet (waiting for op to register)" | tee -a "{{.LOGFILE}}"
+            else
+              echo "[${ELAPSED}s] status=$STATUS" | tee -a "{{.LOGFILE}}"
+              case "$STATUS" in
+                completed|stopped)
+                  echo ""
+                  echo "Operation reached terminal state: $STATUS"
+                  echo "Fetching report..."
+                  task red:multi:report OPERATION_ID={{.OPERATION_ID_COMPUTED}} OUTPUT_DIR={{.OUTPUT_DIR}}
+                  exit 0
+                  ;;
+                failed|cancelled)
+                  echo "Operation reached terminal state: $STATUS; fetching best-effort report"
+                  task red:multi:report OPERATION_ID={{.OPERATION_ID_COMPUTED}} OUTPUT_DIR={{.OUTPUT_DIR}} || true
+                  exit 1
+                  ;;
+              esac
+            fi
 
-      # Auto-fetch report from Redis when operation completes
-      - cmd: |
-          SKIP_MARKER="/tmp/ares_skip_report_$$"
-          if [ -f "$SKIP_MARKER" ]; then
-            rm -f "$SKIP_MARKER"
-            exit 0
-          fi
-
-          mkdir -p ./reports
-          echo "Fetching report from Redis..."
-
-          lsof -ti:16379 | xargs kill 2>/dev/null || true
-          sleep 1
-          kubectl port-forward -n {{.K8S_NAMESPACE}} svc/redis 16379:6379 2>/dev/null &
-          PF_PID=$!
-
-          i=0
-          while [ $i -lt 15 ]; do
-            if nc -z localhost 16379 2>/dev/null; then break; fi
-            sleep 1; i=$((i + 1))
+            sleep {{.POLL_INTERVAL}}
           done
-
-          if ! nc -z localhost 16379 2>/dev/null; then
-            echo "ERROR: kubectl port-forward failed"
-            echo "Fetch manually: task red:multi:report OPERATION_ID={{.OPERATION_ID_COMPUTED}}"
-            kill $PF_PID 2>/dev/null || true
-            exit 0
-          fi
-          trap "kill $PF_PID 2>/dev/null || true" EXIT
-
-          REDIS_PASS=$(kubectl get secret redis-secret -n {{.K8S_NAMESPACE}} -o jsonpath='{.data.password}' 2>/dev/null | base64 -d || echo "")
-          if [ -n "$REDIS_PASS" ]; then
-            export ARES_REDIS_URL="redis://:${REDIS_PASS}@localhost:16379"
-          else
-            export ARES_REDIS_URL="redis://localhost:16379"
-          fi
-
-          if {{.ARES_CLI}} ops report "{{.OPERATION_ID_COMPUTED}}" --output-dir ./reports 2>&1; then
-            echo ""
-            echo "Report saved: ./reports/red/{{.OPERATION_ID_COMPUTED}}.md"
-          else
-            echo ""
-            echo "ERROR: Report fetch failed"
-            echo "Fetch manually: task red:multi:report OPERATION_ID={{.OPERATION_ID_COMPUTED}}"
-          fi
-          kill $PF_PID 2>/dev/null || true
         silent: false
-        ignore_error: true
 
   # ===========================================================================
   # K8s CLI wrappers — run ares on the orchestrator pod
@@ -332,61 +301,81 @@ tasks:
         fi
 
   multi:watch:
-    desc: "Watch for completed operations and auto-fetch reports (usage: task red:multi:watch [POLL_INTERVAL=30] [ONCE=true])"
+    desc: "Poll red operation status and auto-fetch reports (usage: task red:multi:watch [OPERATION_ID=op-xxx] [LATEST=true] [POLL_INTERVAL=30] [ONCE=true])"
     silent: true
     vars:
+      OPERATION_ID: '{{.OPERATION_ID | default ""}}'
+      LATEST: '{{.LATEST | default "true"}}'
       POLL_INTERVAL: '{{.POLL_INTERVAL | default "30"}}'
+      MAX_WAIT: '{{.MAX_WAIT | default "7200"}}'
       OUTPUT_DIR: '{{.OUTPUT_DIR | default "./reports"}}'
       ONCE: '{{.ONCE | default "false"}}'
-      REDIS_PASSWORD:
-        sh: kubectl get secret redis-secret -n {{.K8S_NAMESPACE}} -o jsonpath='{.data.password}' 2>/dev/null | base64 -d || echo ""
+    preconditions:
+      - sh: test -n "{{.OPERATION_ID}}" || test "{{.LATEST}}" = "true"
+        msg: "Either OPERATION_ID or LATEST=true is required"
     cmds:
       - cmd: mkdir -p "{{.OUTPUT_DIR}}"
         silent: true
       - |
-        # Start port-forward in background (use 16379 locally to avoid conflicts with local Redis)
-        # Kill any stale port-forward first
-        lsof -ti:16379 | xargs kill 2>/dev/null || true
-        sleep 1
-
-        kubectl port-forward -n {{.K8S_NAMESPACE}} svc/redis 16379:6379 2>/dev/null &
-        PF_PID=$!
-
-        cleanup() {
-          kill $PF_PID 2>/dev/null || true
-          exit 0
-        }
-        trap cleanup INT TERM EXIT
-
-        # Wait for port to be connectable (up to 15 seconds)
-        i=0
-        while [ $i -lt 15 ]; do
-          if nc -z localhost 16379 2>/dev/null; then
-            break
-          fi
-          sleep 1
-          i=$((i + 1))
-        done
-
-        if ! nc -z localhost 16379 2>/dev/null; then
-          echo "ERROR: kubectl port-forward failed (port not connectable after 15s)"
-          exit 1
-        fi
-
-        # Build Redis URL with password if available
-        if [ -n "{{.REDIS_PASSWORD}}" ]; then
-          export ARES_REDIS_URL="redis://:{{.REDIS_PASSWORD}}@localhost:16379"
+        OP_ARG=""
+        LATEST_FLAG=""
+        if [ -n "{{.OPERATION_ID}}" ]; then
+          OP_ARG="{{.OPERATION_ID}}"
         else
-          export ARES_REDIS_URL="redis://localhost:16379"
+          LATEST_FLAG="--latest"
         fi
 
-        ONCE_FLAG=""
-        if [ "{{.ONCE}}" = "true" ]; then
-          ONCE_FLAG="--once"
-        fi
+        START=$(date +%s)
+        FETCHED_OPS=""
+        echo "Watching red operation status (poll={{.POLL_INTERVAL}}s, max_wait={{.MAX_WAIT}}s)"
+        echo "Reports will be fetched to {{.OUTPUT_DIR}}/red/"
 
-        # Run watch locally - fetches reports from Redis to local ./reports
-        {{.ARES_CLI}} ops watch --poll-interval {{.POLL_INTERVAL}} --output-dir "{{.OUTPUT_DIR}}" $ONCE_FLAG
+        while true; do
+          ELAPSED=$(( $(date +%s) - START ))
+          if [ $ELAPSED -gt {{.MAX_WAIT}} ]; then
+            echo "ERROR: Max wait ({{.MAX_WAIT}}s) exceeded"
+            exit 1
+          fi
+
+          STATUS_OUT=$({{.ARES_CLI}} --k8s {{.K8S_NAMESPACE}} ops status $OP_ARG $LATEST_FLAG 2>&1 || true)
+          STATUS=$(echo "$STATUS_OUT" | grep -E '^Status: ' | head -1 | awk '{print $2}')
+          RESOLVED_OP=$(echo "$STATUS_OUT" | grep -E '^Operation: ' | head -1 | awk '{print $2}')
+
+          if [ -z "$STATUS" ]; then
+            echo "[${ELAPSED}s] no status yet (waiting for op to register)"
+          else
+            echo "[${ELAPSED}s] op=${RESOLVED_OP:-?} status=$STATUS"
+            case "$STATUS" in
+              completed|stopped)
+                if [ -z "$RESOLVED_OP" ]; then
+                  echo "ERROR: Could not resolve operation ID; cannot fetch report"
+                  exit 1
+                fi
+
+                if echo " $FETCHED_OPS " | grep -q " $RESOLVED_OP "; then
+                  echo "Report already fetched for $RESOLVED_OP"
+                else
+                  echo "Fetching report for $RESOLVED_OP..."
+                  task red:multi:report OPERATION_ID="$RESOLVED_OP" OUTPUT_DIR="{{.OUTPUT_DIR}}"
+                  FETCHED_OPS="$FETCHED_OPS $RESOLVED_OP"
+                fi
+
+                if [ "{{.ONCE}}" = "true" ]; then
+                  exit 0
+                fi
+                ;;
+              failed|cancelled)
+                if [ -n "$RESOLVED_OP" ]; then
+                  echo "Operation reached terminal state: $STATUS; fetching best-effort report"
+                  task red:multi:report OPERATION_ID="$RESOLVED_OP" OUTPUT_DIR="{{.OUTPUT_DIR}}" || true
+                fi
+                exit 1
+                ;;
+            esac
+          fi
+
+          sleep {{.POLL_INTERVAL}}
+        done
 
   multi:list:
     desc: "List multi-agent operations and their state"

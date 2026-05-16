@@ -401,7 +401,7 @@ pub(crate) enum OpsCommands {
         /// Poll interval in seconds for --follow mode
         #[arg(long, default_value = "5")]
         follow_interval: u64,
-        /// Auto-fetch report when operation completes (requires --follow)
+        /// Auto-fetch report when operation completes; implied by --follow
         #[arg(long)]
         auto_report: bool,
         /// Output directory for auto-report

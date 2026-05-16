@@ -254,10 +254,11 @@ pub(crate) async fn run_ops(cmd: OpsCommands, redis_url: Option<String>) -> Resu
                 pin_active,
             )
             .await?;
-            if follow {
+            let should_wait_for_report = follow || auto_report;
+            if should_wait_for_report {
                 submit::follow_operation(redis_url.clone(), &op_id, follow_interval).await?;
             }
-            if auto_report {
+            if should_wait_for_report {
                 report::ops_report(redis_url, Some(op_id), false, false, report_dir).await?;
             }
             Ok(())

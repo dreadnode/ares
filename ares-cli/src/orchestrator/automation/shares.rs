@@ -9,6 +9,32 @@ use tracing::{debug, warn};
 use crate::orchestrator::dispatcher::Dispatcher;
 use crate::orchestrator::state::*;
 
+fn resolve_share_host_domain(state: &StateInner, share_host: &str) -> String {
+    if let Some(host) = state
+        .hosts
+        .iter()
+        .find(|h| h.ip == share_host || h.hostname.eq_ignore_ascii_case(share_host))
+    {
+        if let Some((_, domain)) = host.hostname.to_lowercase().split_once('.') {
+            return domain.to_string();
+        }
+    }
+
+    if let Some((domain, _)) = state
+        .domain_controllers
+        .iter()
+        .find(|(_, ip)| ip.as_str() == share_host)
+    {
+        return domain.to_lowercase();
+    }
+
+    share_host
+        .to_lowercase()
+        .split_once('.')
+        .map(|(_, domain)| domain.to_string())
+        .unwrap_or_default()
+}
+
 /// Select share-spider work items.
 ///
 /// Picks the first non-delegation, non-quarantined credential (or any cred
@@ -43,6 +69,10 @@ pub(crate) fn select_share_spider_work(
         .filter(|s| {
             let perms = s.permissions.to_uppercase();
             perms.contains("READ") && !s.name.to_uppercase().ends_with('$')
+        })
+        .filter(|s| {
+            let domain = resolve_share_host_domain(state, &s.host);
+            domain.is_empty() || !state.is_domain_dominated(&domain)
         })
         .filter_map(|s| {
             let dedup = format!("{}:{}:{}:{}", s.host, s.name, cred.username, cred.domain);
@@ -128,6 +158,18 @@ mod tests {
         }
     }
 
+    fn make_host(hostname: &str, ip: &str) -> ares_core::models::Host {
+        ares_core::models::Host {
+            ip: ip.to_string(),
+            hostname: hostname.to_string(),
+            os: String::new(),
+            roles: Vec::new(),
+            services: Vec::new(),
+            is_dc: false,
+            owned: false,
+        }
+    }
+
     #[test]
     fn select_share_spider_empty_without_credentials() {
         let mut s = StateInner::new("op".into());
@@ -181,6 +223,19 @@ mod tests {
             DEDUP_SPIDERED_SHARES,
             "dc01:Shared:alice:contoso.local".into(),
         );
+        assert!(select_share_spider_work(&s, 3).is_empty());
+    }
+
+    #[test]
+    fn select_share_spider_skips_dominated_share_domain() {
+        let mut s = StateInner::new("op".into());
+        s.credentials
+            .push(make_cred("alice", "Pw", "contoso.local"));
+        s.hosts
+            .push(make_host("dc01.contoso.local", "192.168.58.10"));
+        s.shares.push(make_share("192.168.58.10", "Shared", "READ"));
+        s.dominated_domains.insert("contoso.local".into());
+
         assert!(select_share_spider_work(&s, 3).is_empty());
     }
 

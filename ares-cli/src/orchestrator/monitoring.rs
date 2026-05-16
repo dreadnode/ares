@@ -15,6 +15,7 @@ use tracing::{debug, info, warn};
 use crate::orchestrator::config::OrchestratorConfig;
 use crate::orchestrator::dispatcher::CredentialInflight;
 use crate::orchestrator::routing::ActiveTaskTracker;
+use crate::orchestrator::state::SharedState;
 use crate::orchestrator::task_queue::TaskQueue;
 
 /// Live state for a registered agent.
@@ -195,6 +196,7 @@ pub fn spawn_heartbeat_monitor(
     registry: AgentRegistry,
     tracker: ActiveTaskTracker,
     credential_inflight: CredentialInflight,
+    state: SharedState,
     config: Arc<OrchestratorConfig>,
     mut shutdown: watch::Receiver<bool>,
 ) -> tokio::task::JoinHandle<()> {
@@ -230,7 +232,7 @@ pub fn spawn_heartbeat_monitor(
 
             // Clean up stale tasks (salvage any pending results first)
             if let Err(e) =
-                cleanup_stale_tasks(&tracker, &queue, &credential_inflight, &config).await
+                cleanup_stale_tasks(&tracker, &queue, &credential_inflight, &state, &config).await
             {
                 warn!(err = %e, "Stale task cleanup failed");
             }
@@ -287,6 +289,7 @@ async fn cleanup_stale_tasks(
     tracker: &ActiveTaskTracker,
     queue: &TaskQueue,
     credential_inflight: &CredentialInflight,
+    state: &SharedState,
     config: &OrchestratorConfig,
 ) -> Result<()> {
     let llm_count = tracker.llm_task_count().await;
@@ -331,6 +334,33 @@ async fn cleanup_stale_tasks(
             if let Some(ref key) = removed.credential_key {
                 credential_inflight.release(key).await;
             }
+        }
+
+        let age_secs = task.submitted_at.elapsed().as_secs();
+        let reason = format!("stale task evicted after {age_secs}s without a result");
+
+        if let Err(e) = queue.set_task_status(&task.task_id, "failed").await {
+            warn!(
+                task_id = %task.task_id,
+                err = %e,
+                "Failed to mark stale task status as failed"
+            );
+        }
+
+        let result = ares_core::models::TaskResult {
+            task_id: task.task_id.clone(),
+            success: false,
+            result: None,
+            error: Some(reason),
+            worker_pod: None,
+            completed_at: Utc::now(),
+        };
+        if let Err(e) = state.complete_task(queue, &task.task_id, result).await {
+            warn!(
+                task_id = %task.task_id,
+                err = %e,
+                "Failed to move stale task from pending to completed"
+            );
         }
     }
 

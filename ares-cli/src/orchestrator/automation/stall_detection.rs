@@ -94,6 +94,7 @@ pub(crate) fn select_stall_spray_work(
     state
         .domain_controllers
         .iter()
+        .filter(|(domain, _)| !state.is_domain_dominated(domain))
         .filter(|(domain, _)| !delegation_domains.contains(&domain.to_lowercase()))
         .filter(|(domain, _)| {
             let key = stall_spray_dedup_key(domain, recovery_attempts);
@@ -115,6 +116,9 @@ pub(crate) fn select_stall_lhf_work(
         .filter(|c| !c.domain.is_empty() && !c.password.is_empty())
         .filter_map(|cred| {
             let cred_domain = cred.domain.to_lowercase();
+            if state.is_domain_dominated(&cred_domain) {
+                return None;
+            }
             let key = stall_lhf_dedup_key(&cred_domain, &cred.username, recovery_attempts);
             if state.is_processed(DEDUP_EXPANSION_CREDS, &key) {
                 return None;
@@ -486,6 +490,16 @@ mod tests {
     }
 
     #[test]
+    fn select_stall_spray_skips_dominated_domain() {
+        let mut s = StateInner::new("op".into());
+        s.domain_controllers
+            .insert("contoso.local".into(), "192.168.58.10".into());
+        s.dominated_domains.insert("contoso.local".into());
+
+        assert!(select_stall_spray_work(&s, 0).is_empty());
+    }
+
+    #[test]
     fn select_stall_lhf_empty_state() {
         let s = StateInner::new("op".into());
         assert!(select_stall_lhf_work(&s, 0, 2).is_empty());
@@ -511,6 +525,18 @@ mod tests {
         s.credentials.push(make_cred("bob", "Pw", ""));
         s.domain_controllers
             .insert("contoso.local".into(), "192.168.58.10".into());
+        assert!(select_stall_lhf_work(&s, 0, 5).is_empty());
+    }
+
+    #[test]
+    fn select_stall_lhf_skips_dominated_domain() {
+        let mut s = StateInner::new("op".into());
+        s.credentials
+            .push(make_cred("alice", "Pw", "contoso.local"));
+        s.domain_controllers
+            .insert("contoso.local".into(), "192.168.58.10".into());
+        s.dominated_domains.insert("contoso.local".into());
+
         assert!(select_stall_lhf_work(&s, 0, 5).is_empty());
     }
 

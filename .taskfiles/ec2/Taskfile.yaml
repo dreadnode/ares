@@ -954,100 +954,144 @@ tasks:
           exit 1
         fi
 
-        # Step 1: Generate report on EC2 and get the operation ID + report content
-        REPORT_CMD="set -e; RUST_LOG=error ares ops report"
-        {{if ne .OPERATION_ID ""}}REPORT_CMD="$REPORT_CMD {{.OPERATION_ID}}"{{end}}
-        {{if eq .LATEST "true"}}REPORT_CMD="$REPORT_CMD --latest"{{end}}
-        {{if eq .REGENERATE "true"}}REPORT_CMD="$REPORT_CMD --regenerate"{{end}}
-        REPORT_CMD="$REPORT_CMD --output-dir /tmp/reports 2>&1"
-        # After generation, output the report file content with a marker
-        REPORT_CMD="$REPORT_CMD; echo '===REPORT_FILES==='; find /tmp/reports/red -name '*.md' -type f 2>/dev/null | while read f; do echo \"FILE:red/\$(basename \$f)\"; cat \"\$f\"; done"
+        run_ssm_cmd() {
+          CMD_PAYLOAD="$1"
+          TIMEOUT="${2:-120}"
+          PARAMS_FILE=$(mktemp)
+          jq -n --arg cmd "$CMD_PAYLOAD" '{"commands": [$cmd]}' > "$PARAMS_FILE"
 
-        PARAMS_FILE=$(mktemp)
-        trap "rm -f $PARAMS_FILE" EXIT
-        jq -n --arg cmd "$REPORT_CMD" '{"commands": [$cmd]}' > "$PARAMS_FILE"
+          CMD_ID=$(aws ssm send-command \
+            --profile "{{.EC2_PROFILE}}" \
+            --region "{{.EC2_REGION}}" \
+            --instance-ids "$INSTANCE_ID" \
+            --document-name "AWS-RunShellScript" \
+            --parameters "file://$PARAMS_FILE" \
+            --timeout-seconds "$TIMEOUT" \
+            --query "Command.CommandId" --output text)
+
+          rm -f "$PARAMS_FILE"
+
+          STATUS=""
+          for i in $(seq 1 "$TIMEOUT"); do
+            STATUS=$(aws ssm get-command-invocation \
+              --profile "{{.EC2_PROFILE}}" \
+              --region "{{.EC2_REGION}}" \
+              --command-id "$CMD_ID" \
+              --instance-id "$INSTANCE_ID" \
+              --query "Status" --output text 2>/dev/null) || true
+            case "$STATUS" in
+              Success|Failed|Cancelled|TimedOut) break ;;
+            esac
+            sleep 1
+          done
+
+          OUTPUT=$(aws ssm get-command-invocation \
+            --profile "{{.EC2_PROFILE}}" \
+            --region "{{.EC2_REGION}}" \
+            --command-id "$CMD_ID" \
+            --instance-id "$INSTANCE_ID" \
+            --query "StandardOutputContent" --output text)
+
+          if [ "$STATUS" != "Success" ]; then
+            DETAILS=$(aws ssm get-command-invocation \
+              --profile "{{.EC2_PROFILE}}" \
+              --region "{{.EC2_REGION}}" \
+              --command-id "$CMD_ID" \
+              --instance-id "$INSTANCE_ID" \
+              --query "StatusDetails" --output text 2>/dev/null)
+            echo -e "{{.ERROR}} SSM command failed (status: $STATUS, details: $DETAILS)" >&2
+            if [ "$DETAILS" = "Undeliverable" ]; then
+              echo -e "{{.ERROR}} SSM could not deliver the command to $INSTANCE_ID (PingStatus likely ConnectionLost)." >&2
+              echo -e "{{.ERROR}} Recovery: reboot the instance ('aws ec2 reboot-instances --instance-ids $INSTANCE_ID')." >&2
+            fi
+            if [ -n "$OUTPUT" ]; then
+              echo "$OUTPUT" >&2
+            fi
+            aws ssm get-command-invocation \
+              --profile "{{.EC2_PROFILE}}" \
+              --region "{{.EC2_REGION}}" \
+              --command-id "$CMD_ID" \
+              --instance-id "$INSTANCE_ID" \
+              --query "StandardErrorContent" --output text >&2
+            return 1
+          fi
+
+          printf '%s' "$OUTPUT"
+        }
+
+        REPORT_ARGS=""
+        {{if ne .OPERATION_ID ""}}REPORT_ARGS="$REPORT_ARGS {{.OPERATION_ID}}"{{end}}
+        {{if eq .LATEST "true"}}REPORT_ARGS="$REPORT_ARGS --latest"{{end}}
+        {{if eq .REGENERATE "true"}}REPORT_ARGS="$REPORT_ARGS --regenerate"{{end}}
+        REPORT_CMD="set +e"
+        REPORT_CMD="$REPORT_CMD; OUTPUT=\$(RUST_LOG=error ares ops report${REPORT_ARGS} --output-dir /tmp/reports 2>&1)"
+        REPORT_CMD="$REPORT_CMD; RC=\$?; set -e; echo \"\$OUTPUT\"; if [ \$RC -ne 0 ]; then exit \$RC; fi"
+        REPORT_CMD="$REPORT_CMD; REPORT_PATH=\$(printf '%s\n' \"\$OUTPUT\" | sed -n 's/^Report saved to \([^ ]*\.md\).*/\1/p' | tail -1)"
+        REPORT_CMD="$REPORT_CMD; echo '===REPORT_META==='"
+        REPORT_CMD="$REPORT_CMD; if [ -z \"\$REPORT_PATH\" ]; then echo 'ERROR: could not parse report path from ares output' >&2; exit 1; fi"
+        REPORT_CMD="$REPORT_CMD; if [ ! -f \"\$REPORT_PATH\" ]; then echo \"ERROR: report file not found: \$REPORT_PATH\" >&2; exit 1; fi"
+        REPORT_CMD="$REPORT_CMD; echo \"FILE:red/\$(basename \"\$REPORT_PATH\")\""
+        REPORT_CMD="$REPORT_CMD; echo \"PATH:\$REPORT_PATH\""
+        REPORT_CMD="$REPORT_CMD; echo \"BYTES:\$(wc -c < \"\$REPORT_PATH\" | tr -d ' ')\""
+        REPORT_CMD="$REPORT_CMD; echo \"SHA256:\$(sha256sum \"\$REPORT_PATH\" | awk '{print \$1}')\""
 
         echo -e "{{.INFO}} Generating report on EC2..."
 
-        CMD_ID=$(aws ssm send-command \
-          --profile "{{.EC2_PROFILE}}" \
-          --region "{{.EC2_REGION}}" \
-          --instance-ids "$INSTANCE_ID" \
-          --document-name "AWS-RunShellScript" \
-          --parameters "file://$PARAMS_FILE" \
-          --timeout-seconds 120 \
-          --query "Command.CommandId" --output text)
+        OUTPUT=$(run_ssm_cmd "$REPORT_CMD" 120)
+        BEFORE_MARKER=$(echo "$OUTPUT" | sed '/===REPORT_META===/,$d')
+        META=$(echo "$OUTPUT" | sed -n '/===REPORT_META===/,$p' | tail -n +2)
 
-        for i in $(seq 1 120); do
-          STATUS=$(aws ssm get-command-invocation \
-            --profile "{{.EC2_PROFILE}}" \
-            --region "{{.EC2_REGION}}" \
-            --command-id "$CMD_ID" \
-            --instance-id "$INSTANCE_ID" \
-            --query "Status" --output text 2>/dev/null) || true
-          case "$STATUS" in
-            Success|Failed|Cancelled|TimedOut) break ;;
-          esac
-          sleep 1
-        done
+        echo "$BEFORE_MARKER"
 
-        OUTPUT=$(aws ssm get-command-invocation \
-          --profile "{{.EC2_PROFILE}}" \
-          --region "{{.EC2_REGION}}" \
-          --command-id "$CMD_ID" \
-          --instance-id "$INSTANCE_ID" \
-          --query "StandardOutputContent" --output text)
+        FILENAME=$(echo "$META" | sed -n 's/^FILE://p' | head -1)
+        REMOTE_PATH=$(echo "$META" | sed -n 's/^PATH://p' | head -1)
+        REMOTE_BYTES=$(echo "$META" | sed -n 's/^BYTES://p' | head -1)
+        REMOTE_SHA=$(echo "$META" | sed -n 's/^SHA256://p' | head -1)
 
-        if [ "$STATUS" != "Success" ]; then
-          DETAILS=$(aws ssm get-command-invocation \
-            --profile "{{.EC2_PROFILE}}" \
-            --region "{{.EC2_REGION}}" \
-            --command-id "$CMD_ID" \
-            --instance-id "$INSTANCE_ID" \
-            --query "StatusDetails" --output text 2>/dev/null)
-          echo -e "{{.ERROR}} Report generation failed (status: $STATUS, details: $DETAILS)" >&2
-          if [ "$DETAILS" = "Undeliverable" ]; then
-            echo -e "{{.ERROR}} SSM could not deliver the command to $INSTANCE_ID (PingStatus likely ConnectionLost)." >&2
-            echo -e "{{.ERROR}} Recovery: reboot the instance ('aws ec2 reboot-instances --instance-ids $INSTANCE_ID')." >&2
-          fi
-          aws ssm get-command-invocation \
-            --profile "{{.EC2_PROFILE}}" \
-            --region "{{.EC2_REGION}}" \
-            --command-id "$CMD_ID" \
-            --instance-id "$INSTANCE_ID" \
-            --query "StandardErrorContent" --output text >&2
+        if [ -z "$FILENAME" ] || [ -z "$REMOTE_PATH" ] || [ -z "$REMOTE_BYTES" ] || [ -z "$REMOTE_SHA" ]; then
+          echo -e "{{.ERROR}} Could not parse report metadata from EC2 output" >&2
           exit 1
         fi
 
-        # Step 2: Extract report content and save locally
         mkdir -p "{{.OUTPUT_DIR}}/red"
+        OUTFILE="{{.OUTPUT_DIR}}/$FILENAME"
+        TMP_OUT="${OUTFILE}.tmp.$$"
+        : > "$TMP_OUT"
+        trap "rm -f '$TMP_OUT'" EXIT
 
-        # Parse the output — everything after ===REPORT_FILES=== contains FILE:name + content
-        BEFORE_MARKER=$(echo "$OUTPUT" | sed '/===REPORT_FILES===/,$d')
-        AFTER_MARKER=$(echo "$OUTPUT" | sed -n '/===REPORT_FILES===/,$p' | tail -n +2)
+        CHUNK_SIZE=12000
+        CHUNKS=$(( (REMOTE_BYTES + CHUNK_SIZE - 1) / CHUNK_SIZE ))
+        echo -e "{{.INFO}} Fetching $REMOTE_BYTES bytes from EC2 in $CHUNKS chunks..."
 
-        # Show the CLI output (report generation messages)
-        echo "$BEFORE_MARKER"
-
-        # Extract filename and content, save to local files
-        FILENAME=""
-        OUTFILE=""
-        while IFS= read -r line; do
-          if [[ "$line" == FILE:* ]]; then
-            if [ -n "$FILENAME" ] && [ -f "$OUTFILE" ]; then
-              echo -e "{{.SUCCESS}} Report saved: $OUTFILE"
-            fi
-            FILENAME="${line#FILE:}"
-            OUTFILE="{{.OUTPUT_DIR}}/$FILENAME"
-            : > "$OUTFILE"
-          elif [ -n "$OUTFILE" ]; then
-            echo "$line" >> "$OUTFILE"
+        CHUNK=0
+        while [ $CHUNK -lt $CHUNKS ]; do
+          CHUNK_CMD="dd if=\"$REMOTE_PATH\" bs=$CHUNK_SIZE skip=$CHUNK count=1 status=none | base64 | tr -d '\n'"
+          CHUNK_B64=$(run_ssm_cmd "$CHUNK_CMD" 30)
+          if ! printf '%s' "$CHUNK_B64" | base64 -d >> "$TMP_OUT"; then
+            echo -e "{{.ERROR}} Failed to decode report chunk $((CHUNK + 1))/$CHUNKS" >&2
+            exit 1
           fi
-        done <<< "$AFTER_MARKER"
+          CHUNK=$((CHUNK + 1))
+        done
 
-        if [ -n "$FILENAME" ] && [ -f "$OUTFILE" ]; then
-          echo -e "{{.SUCCESS}} Report saved: $OUTFILE"
+        LOCAL_BYTES=$(wc -c < "$TMP_OUT" | tr -d ' ')
+        if [ "$LOCAL_BYTES" != "$REMOTE_BYTES" ]; then
+          echo -e "{{.ERROR}} Report size mismatch: remote=$REMOTE_BYTES local=$LOCAL_BYTES" >&2
+          exit 1
         fi
+
+        if command -v sha256sum >/dev/null 2>&1; then
+          LOCAL_SHA=$(sha256sum "$TMP_OUT" | awk '{print $1}')
+        else
+          LOCAL_SHA=$(shasum -a 256 "$TMP_OUT" | awk '{print $1}')
+        fi
+        if [ "$LOCAL_SHA" != "$REMOTE_SHA" ]; then
+          echo -e "{{.ERROR}} Report checksum mismatch: remote=$REMOTE_SHA local=$LOCAL_SHA" >&2
+          exit 1
+        fi
+
+        mv "$TMP_OUT" "$OUTFILE"
+        echo -e "{{.SUCCESS}} Report saved: $OUTFILE"
 
   ops:
     desc: "List all operations on EC2 (usage: task ec2:ops [EC2_NAME=ares-tools] [LATEST=true])"
@@ -1146,7 +1190,7 @@ tasks:
       LLM_MODEL: '{{.LLM_MODEL | default ""}}'
       FLUSH_REDIS: '{{.FLUSH_REDIS | default "true"}}'
       OPERATION_ID: '{{.OPERATION_ID | default ""}}'
-      WAIT: '{{.WAIT | default "false"}}'
+      WAIT: '{{.WAIT | default "true"}}'
       POLL_INTERVAL: '{{.POLL_INTERVAL | default "30"}}'
       MAX_WAIT: '{{.MAX_WAIT | default "7200"}}'
       OUTPUT_DIR: '{{.OUTPUT_DIR | default "./reports"}}'

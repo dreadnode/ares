@@ -132,6 +132,9 @@ pub(crate) fn select_credential_expansion_work(
                 return None;
             }
             let cred_domain = resolve_cred_domain(state, &cred.domain);
+            if state.is_domain_dominated(&cred_domain) {
+                return None;
+            }
             let targets = find_lateral_targets_for_cred_domain(state, &cred_domain);
             if targets.is_empty() {
                 return None;
@@ -185,7 +188,8 @@ pub(crate) fn build_pth_credential(
 /// Snapshot the next batch of hash-expansion work items.
 ///
 /// Filters `state.hashes` for non-`krbtgt`, non-machine NTLM hashes, with
-/// at least one non-owned target host, capping at `max_items`.
+/// at least one same-forest non-owned target host or DC, capping at
+/// `max_items`.
 pub(crate) fn select_hash_expansion_work(
     state: &StateInner,
     max_items: usize,
@@ -204,19 +208,21 @@ pub(crate) fn select_hash_expansion_work(
             if state.is_processed(DEDUP_HASH_LATERAL, &dedup) {
                 return None;
             }
-            let targets: Vec<String> = state
-                .hosts
-                .iter()
-                .filter(|h| !h.owned)
-                .map(|h| h.ip.clone())
-                .collect();
-            if targets.is_empty() {
+            let hash_domain = resolve_cred_domain(state, &hash.domain);
+            if state.is_domain_dominated(&hash_domain) {
+                return None;
+            }
+            let targets = find_lateral_targets_for_cred_domain(state, &hash_domain);
+            let dc_ips = find_pth_dc_ips_for_hash(state, &hash_domain);
+            if targets.is_empty() && dc_ips.is_empty() {
                 return None;
             }
             Some(HashExpansionWork {
                 dedup_key: dedup,
                 hash: hash.clone(),
+                resolved_domain: hash_domain,
                 targets,
+                dc_ips,
             })
         })
         .take(max_items)
@@ -370,16 +376,18 @@ pub async fn auto_credential_expansion(
         };
 
         for item in hash_work {
-            let mut dc_sd_dispatched = false;
+            let mut any_dispatched = false;
 
             // Build a credential-like object for pass-the-hash
-            let pth_cred = build_pth_credential(&item.hash);
+            let mut pth_cred = build_pth_credential(&item.hash);
+            pth_cred.domain = item.resolved_domain.clone();
 
             for target_ip in item.targets.iter().take(3) {
                 if let Ok(Some(task_id)) = dispatcher
                     .request_lateral(target_ip, &pth_cred, "pth_smbclient")
                     .await
                 {
+                    any_dispatched = true;
                     debug!(
                         task_id = %task_id,
                         target = %target_ip,
@@ -400,19 +408,14 @@ pub async fn auto_credential_expansion(
             // path was missing the gate, dispatching foreign-forest creds
             // against unrelated DCs.
             {
-                let dc_ips: Vec<String> = {
-                    let state = dispatcher.state.read().await;
-                    find_pth_dc_ips_for_hash(&state, &item.hash.domain)
-                };
-
                 if !dispatcher.is_technique_allowed("secretsdump") {
                     // Strategy excludes secretsdump — skip hash-based expansion too.
                 } else {
-                    for dc_ip in dc_ips {
+                    for dc_ip in &item.dc_ips {
                         let sd_dedup = format!(
                             "{}:{}:{}",
                             dc_ip,
-                            item.hash.domain.to_lowercase(),
+                            &item.resolved_domain,
                             item.hash.username.to_lowercase()
                         );
                         let already = {
@@ -422,10 +425,10 @@ pub async fn auto_credential_expansion(
                         if !already {
                             let priority = dispatcher.effective_priority("secretsdump");
                             if let Ok(Some(task_id)) = dispatcher
-                                .request_secretsdump(&dc_ip, &pth_cred, priority)
+                                .request_secretsdump(dc_ip, &pth_cred, priority)
                                 .await
                             {
-                                dc_sd_dispatched = true;
+                                any_dispatched = true;
                                 debug!(
                                     task_id = %task_id,
                                     dc = %dc_ip,
@@ -447,9 +450,10 @@ pub async fn auto_credential_expansion(
                 } // end else (secretsdump allowed for hash expansion)
             }
 
-            // Only mark as fully processed once DC secretsdump has been dispatched.
-            // PTH lateral alone is not sufficient — the critical path is hash→DC→krbtgt.
-            if dc_sd_dispatched {
+            // Mark once at least one viable same-forest task was dispatched.
+            // Per-DC secretsdump dedup remains separate, so a deferred dump can
+            // still be attempted by other paths without re-spraying the hash.
+            if any_dispatched {
                 dispatcher
                     .state
                     .write()
@@ -588,7 +592,9 @@ pub(crate) struct ExpansionWork {
 pub(crate) struct HashExpansionWork {
     pub dedup_key: String,
     pub hash: ares_core::models::Hash,
+    pub resolved_domain: String,
     pub targets: Vec<String>,
+    pub dc_ips: Vec<String>,
 }
 
 #[cfg(test)]
@@ -1456,7 +1462,62 @@ mod tests {
         let work = select_hash_expansion_work(&s, 10);
         assert_eq!(work.len(), 1);
         assert_eq!(work[0].hash.username, "alice");
+        assert_eq!(work[0].resolved_domain, "contoso.local");
         assert_eq!(work[0].targets, vec!["192.168.58.10"]);
+    }
+
+    #[test]
+    fn select_hash_work_resolves_netbios_domain_for_dispatch() {
+        let mut s = StateInner::new("op".into());
+        s.netbios_to_fqdn
+            .insert("north".into(), "north.sevenkingdoms.local".into());
+        s.hosts.push(make_host(
+            "winterfell.north.sevenkingdoms.local",
+            "192.168.58.10",
+        ));
+        s.hashes.push(make_ntlm_hash("alice", "aaaaaaaa", "NORTH"));
+
+        let work = select_hash_expansion_work(&s, 10);
+        assert_eq!(work.len(), 1);
+        assert_eq!(work[0].resolved_domain, "north.sevenkingdoms.local");
+        assert_eq!(work[0].targets, vec!["192.168.58.10"]);
+    }
+
+    #[test]
+    fn select_hash_work_skips_cross_forest_targets() {
+        let mut s = StateInner::new("op".into());
+        s.hosts
+            .push(make_host("srv01.fabrikam.local", "192.168.58.40"));
+        s.hashes
+            .push(make_ntlm_hash("alice", "aaaaaaaa", "contoso.local"));
+
+        assert!(select_hash_expansion_work(&s, 10).is_empty());
+    }
+
+    #[test]
+    fn select_hash_work_allows_same_domain_dc_without_host_target() {
+        let mut s = StateInner::new("op".into());
+        s.domain_controllers
+            .insert("contoso.local".into(), "192.168.58.10".into());
+        s.hashes
+            .push(make_ntlm_hash("alice", "aaaaaaaa", "contoso.local"));
+
+        let work = select_hash_expansion_work(&s, 10);
+        assert_eq!(work.len(), 1);
+        assert!(work[0].targets.is_empty());
+        assert_eq!(work[0].dc_ips, vec!["192.168.58.10"]);
+    }
+
+    #[test]
+    fn select_hash_work_skips_dominated_domain() {
+        let mut s = StateInner::new("op".into());
+        s.hosts
+            .push(make_host("dc01.contoso.local", "192.168.58.10"));
+        s.hashes
+            .push(make_ntlm_hash("alice", "aaaaaaaa", "contoso.local"));
+        s.dominated_domains.insert("contoso.local".into());
+
+        assert!(select_hash_expansion_work(&s, 10).is_empty());
     }
 
     #[test]

@@ -288,6 +288,9 @@ pub(crate) fn select_low_hanging_work(
         .filter(|c| !state.is_principal_quarantined(&c.username, &c.domain))
         .filter_map(|cred| {
             let cred_domain = cred.domain.to_lowercase();
+            if state.is_domain_dominated(&cred_domain) {
+                return None;
+            }
             let dedup = low_hanging_dedup_key(&cred_domain, &cred.username);
             if state.is_processed(DEDUP_LOW_HANGING, &dedup) {
                 return None;
@@ -1312,6 +1315,18 @@ mod tests {
         let work = select_low_hanging_work(&s, 10);
         assert_eq!(work.len(), 1);
         assert_eq!(work[0].1, "192.168.58.99");
+    }
+
+    #[test]
+    fn select_low_hanging_skips_dominated_domain() {
+        let mut s = StateInner::new("op".into());
+        s.credentials
+            .push(make_cred("alice", "Pw!", "contoso.local"));
+        s.domain_controllers
+            .insert("contoso.local".into(), "192.168.58.10".into());
+        s.dominated_domains.insert("contoso.local".into());
+
+        assert!(select_low_hanging_work(&s, 10).is_empty());
     }
 
     // --- select_credential_secretsdump_work ----------------------------

@@ -508,6 +508,7 @@ async fn run_inner() -> Result<()> {
         registry.clone(),
         tracker.clone(),
         dispatcher.credential_inflight.clone(),
+        shared_state.clone(),
         config.clone(),
         shutdown_rx.clone(),
     );
