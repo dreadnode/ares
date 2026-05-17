@@ -12,6 +12,7 @@ use tracing::{debug, info, warn};
 use ares_core::models::{Credential, Hash, Host, Share, TrustInfo, User, VulnerabilityInfo};
 
 use super::parsing::resolve_parent_id;
+use super::reconcile_low_trust_credential_domain;
 use super::LOCKOUT_PATTERNS;
 use crate::orchestrator::dispatcher::Dispatcher;
 
@@ -65,8 +66,20 @@ async fn poll_discoveries(dispatcher: &Dispatcher) -> Result<()> {
         match disc_type {
             "credential" => match serde_json::from_value::<Credential>(data.clone()) {
                 Ok(mut cred) => {
+                    let state = dispatcher.state.read().await;
+                    let extracted_domain = cred.domain.clone();
+                    if let Some(corrected) =
+                        reconcile_low_trust_credential_domain(&mut cred, &state.users)
+                    {
+                        warn!(
+                            username = %cred.username,
+                            extracted_domain = %extracted_domain,
+                            corrected_domain = %corrected,
+                            source = %cred.source,
+                            "Reassigning real-time credential discovery to directory-attested domain from state.users",
+                        );
+                    }
                     if cred.parent_id.is_none() {
-                        let state = dispatcher.state.read().await;
                         let (pid, step) = resolve_parent_id(
                             &state.credentials,
                             &state.hashes,
@@ -78,8 +91,8 @@ async fn poll_discoveries(dispatcher: &Dispatcher) -> Result<()> {
                         );
                         cred.parent_id = pid;
                         cred.attack_step = step;
-                        drop(state);
                     }
+                    drop(state);
                     let user_domain = format!("{}@{}", cred.username, cred.domain);
                     match dispatcher
                         .state

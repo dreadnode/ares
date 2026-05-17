@@ -1101,6 +1101,30 @@ pub(crate) fn reconcile_extracted_credential_domain(
     Some(only)
 }
 
+fn is_low_trust_realm_inferred_credential_source(source: &str) -> bool {
+    matches!(
+        source,
+        "description_field"
+            | "autologon_registry"
+            | "sysvol_script"
+            | "user_description_leak"
+            | "netexec_password"
+            | "ldap_description"
+    )
+}
+
+pub(crate) fn reconcile_low_trust_credential_domain(
+    cred: &mut ares_core::models::Credential,
+    users: &[ares_core::models::User],
+) -> Option<String> {
+    if !is_low_trust_realm_inferred_credential_source(&cred.source) {
+        return None;
+    }
+    let corrected = reconcile_extracted_credential_domain(users, &cred.username, &cred.domain)?;
+    cred.domain = corrected.clone();
+    Some(corrected)
+}
+
 /// `kerberoast_{username}` or `asrep_roast_{domain}` token when the
 /// captured hash carries the canonical impacket / hashcat prefix
 /// (`$krb5tgs$`, `$krb5asrep$`). Returns `None` for other hash types so
@@ -1481,7 +1505,20 @@ async fn extract_discoveries(
     // Read lock is released before any publish calls (which take write locks).
     {
         let state = dispatcher.state.read().await;
+        let mut user_hints = state.users.clone();
+        user_hints.extend(parsed.users.iter().cloned());
+
         for cred in &mut parsed.credentials {
+            let extracted_domain = cred.domain.clone();
+            if let Some(corrected) = reconcile_low_trust_credential_domain(cred, &user_hints) {
+                warn!(
+                    username = %cred.username,
+                    extracted_domain = %extracted_domain,
+                    corrected_domain = %corrected,
+                    source = %cred.source,
+                    "Reassigning parser-extracted credential to directory-attested domain from state.users",
+                );
+            }
             if cred.parent_id.is_none() {
                 let (pid, step) = resolve_parent_id(
                     &state.credentials,
