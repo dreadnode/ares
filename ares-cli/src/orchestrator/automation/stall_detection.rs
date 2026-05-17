@@ -332,12 +332,8 @@ pub async fn auto_stall_detection(
             };
 
             for (domain, dc_ip) in cold_start_work {
-                let payload = super::credential_access::build_asrep_payload(
-                    &domain,
-                    &dc_ip,
-                    &[],
-                    &[],
-                );
+                let payload =
+                    super::credential_access::build_asrep_payload(&domain, &dc_ip, &[], &[]);
 
                 match dispatcher
                     .throttled_submit("credential_access", "credential_access", payload, 7)
