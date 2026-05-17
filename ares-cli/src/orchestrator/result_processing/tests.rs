@@ -1670,7 +1670,7 @@ fn ntlmv1_signal_recognises_lmcompatibilitylevel_low_value() {
     use super::result_has_ntlmv1_signal;
     for n in &['0', '1', '2'] {
         let line = format!("Found LmCompatibilityLevel = {n}");
-        let p = json!({"tool_output": line});
+        let p = json!({"tool_outputs": [line]});
         assert!(
             result_has_ntlmv1_signal(&Some(p)),
             "LmCompatibilityLevel = {n} should be a positive",
@@ -1681,9 +1681,9 @@ fn ntlmv1_signal_recognises_lmcompatibilitylevel_low_value() {
 #[test]
 fn ntlmv1_signal_rejects_lmcompatibilitylevel_safe_values() {
     use super::result_has_ntlmv1_signal;
-    let p = json!({"tool_output": "LmCompatibilityLevel = 5"});
+    let p = json!({"tool_outputs": ["LmCompatibilityLevel = 5"]});
     assert!(!result_has_ntlmv1_signal(&Some(p)));
-    let p = json!({"tool_output": "LmCompatibilityLevel = 3"});
+    let p = json!({"tool_outputs": ["LmCompatibilityLevel = 3"]});
     assert!(!result_has_ntlmv1_signal(&Some(p)));
 }
 
@@ -1710,10 +1710,10 @@ fn ntlmv1_signal_walks_tool_outputs_array() {
 }
 
 #[test]
-fn ntlmv1_signal_policy_ignores_scalar_output_when_disabled() {
-    use super::result_has_ntlmv1_signal_with_policy;
+fn ntlmv1_signal_ignores_scalar_output_field() {
+    use super::result_has_ntlmv1_signal;
     let p = json!({"output": "LmCompatibilityLevel = 1"});
-    assert!(!result_has_ntlmv1_signal_with_policy(&Some(p), false));
+    assert!(!result_has_ntlmv1_signal(&Some(p)));
 }
 
 // ── result_has_seimpersonate_signal ────────────────────────────────────
@@ -1765,15 +1765,12 @@ fn seimpersonate_signal_none_payload_false() {
 }
 
 #[test]
-fn seimpersonate_signal_policy_ignores_scalar_output_when_disabled() {
-    use super::result_has_seimpersonate_signal_with_policy;
+fn seimpersonate_signal_ignores_scalar_output_field() {
+    use super::result_has_seimpersonate_signal;
     let p = json!({
         "output": "SeImpersonatePrivilege  Impersonate a client after authentication  Enabled"
     });
-    assert!(!result_has_seimpersonate_signal_with_policy(
-        &Some(p),
-        false
-    ));
+    assert!(!result_has_seimpersonate_signal(&Some(p)));
 }
 
 // ── result_has_ccache_evidence ─────────────────────────────────────────
@@ -1812,10 +1809,10 @@ fn ccache_evidence_none_payload_false() {
 }
 
 #[test]
-fn ccache_evidence_policy_ignores_scalar_output_when_disabled() {
-    use super::result_has_ccache_evidence_with_policy;
+fn ccache_evidence_ignores_scalar_output_field() {
+    use super::result_has_ccache_evidence;
     let p = json!({"output": "Saving ticket in admin.ccache"});
-    assert!(!result_has_ccache_evidence_with_policy(&Some(p), false));
+    assert!(!result_has_ccache_evidence(&Some(p)));
 }
 
 // ── result_text_indicates_failure ──────────────────────────────────────
@@ -1987,10 +1984,10 @@ fn locked_usernames_none_payload_empty() {
 }
 
 #[test]
-fn locked_usernames_policy_ignores_scalar_output_when_disabled() {
-    use super::extract_locked_usernames_from_result_with_policy;
+fn locked_usernames_ignores_scalar_output_field() {
+    use super::extract_locked_usernames_from_result;
     let p = json!({"output": "[-] CONTOSO\\alice:Pw STATUS_ACCOUNT_LOCKED_OUT"});
-    assert!(extract_locked_usernames_from_result_with_policy(&Some(p), false).is_empty());
+    assert!(extract_locked_usernames_from_result(&Some(p)).is_empty());
 }
 
 #[test]

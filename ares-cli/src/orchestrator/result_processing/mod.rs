@@ -47,10 +47,6 @@ use self::timeline::{
 pub(crate) const LOCKOUT_PATTERNS: &[&str] =
     &["KDC_ERR_CLIENT_REVOKED", "STATUS_ACCOUNT_LOCKED_OUT"];
 
-fn legacy_scalar_outputs_allowed(worker_pod: Option<&str>) -> bool {
-    worker_pod != Some("rust-llm-runner")
-}
-
 /// Process a completed task result: extract discoveries and update state.
 pub async fn process_completed_task(
     completed: &CompletedTask,
@@ -59,7 +55,6 @@ pub async fn process_completed_task(
 ) {
     let task_id = &completed.task_id;
     let result = &completed.result;
-    let include_legacy_scalar_outputs = legacy_scalar_outputs_allowed(result.worker_pod.as_deref());
 
     // Extract task-level metadata from pending_tasks before complete_task removes it.
     // The full params snapshot is captured so the Impacket failure classifier
@@ -138,7 +133,6 @@ pub async fn process_completed_task(
                 &task_params_snapshot,
                 &result.result,
                 result.error.as_deref(),
-                include_legacy_scalar_outputs,
             )
             .await;
         }
@@ -214,13 +208,7 @@ pub async fn process_completed_task(
     // Domain SID extraction: scan raw text for S-1-5-21-... patterns (from secretsdump).
     // Caches the SID for golden ticket generation without needing lookupsid.
     if let Some(ref payload) = result.result {
-        extract_and_cache_domain_sid(
-            payload,
-            task_domain.as_deref(),
-            include_legacy_scalar_outputs,
-            dispatcher,
-        )
-        .await;
+        extract_and_cache_domain_sid(payload, task_domain.as_deref(), dispatcher).await;
     }
 
     // S4U auto-chain: detect .ccache in output and dispatch secretsdump with ticket.
@@ -235,7 +223,6 @@ pub async fn process_completed_task(
             &task_params_snapshot,
             task_domain.as_deref(),
             task_target_ip.as_deref(),
-            include_legacy_scalar_outputs,
         )
         .await;
     }
@@ -246,7 +233,6 @@ pub async fn process_completed_task(
                 payload,
                 &completed.task_id,
                 task_domain.as_deref(),
-                include_legacy_scalar_outputs,
                 dispatcher,
             )
             .await;
@@ -276,11 +262,8 @@ pub async fn process_completed_task(
             // `discoveries`. Treat the ticket save as the success signal
             // for those vuln types so the scoreboard credits the
             // primitive on getST exit-0.
-            let has_ticket_evidence = is_ticket_grant_vuln(&vuln_id)
-                && result_has_ccache_evidence_with_policy(
-                    &result.result,
-                    include_legacy_scalar_outputs,
-                );
+            let has_ticket_evidence =
+                is_ticket_grant_vuln(&vuln_id) && result_has_ccache_evidence(&result.result);
             // Stall-tolerance: when the LLM ends its turn without calling
             // task_complete (LoopEndReason::MaxSteps or budget exhaustion),
             // submission.rs stamps `success=false` with an error string
@@ -375,10 +358,7 @@ pub async fn process_completed_task(
     // task — when a specific user trips STATUS_ACCOUNT_LOCKED_OUT we
     // remember that principal so future enum tasks can skip it.
     if has_lockout_in_result(result) {
-        let locked = extract_locked_usernames_from_result_with_policy(
-            &result.result,
-            include_legacy_scalar_outputs,
-        );
+        let locked = extract_locked_usernames_from_result(&result.result);
         if !locked.is_empty() {
             let resolved_domain = if let Some(ref td) = task_domain {
                 td.clone()
@@ -408,7 +388,7 @@ pub async fn process_completed_task(
     // mark exploited so the scoreboard credits the primitive. The follow-on
     // potato dispatch is left for the existing privesc agent (already wired
     // with godpotato / printspoofer tools) to consume opportunistically.
-    if result_has_seimpersonate_signal_with_policy(&result.result, include_legacy_scalar_outputs) {
+    if result_has_seimpersonate_signal(&result.result) {
         let host_label =
             derive_seimpersonate_host_label(dispatcher, task_target_ip.as_deref()).await;
         let vuln_id = format!("seimpersonate_{}", host_label);
@@ -528,7 +508,7 @@ pub async fn process_completed_task(
         // hash is trivially crackable). Tokenize on positive observation.
         if tech == "ntlmv1_downgrade_check"
             && result.success
-            && result_has_ntlmv1_signal_with_policy(&result.result, include_legacy_scalar_outputs)
+            && result_has_ntlmv1_signal(&result.result)
         {
             let dc_label = task_target_ip
                 .clone()
@@ -623,7 +603,7 @@ async fn task_relay_target_from_pending(
 /// authentication. Recognises both the explicit "NTLMv1 allowed" / "NTLM
 /// downgrade" prose forms and the canonical `LmCompatibilityLevel: <0..2>`
 /// registry probe output.
-fn collect_result_text_parts(payload: &Value, include_legacy_scalar_outputs: bool) -> Vec<String> {
+fn collect_result_text_parts(payload: &Value) -> Vec<String> {
     let mut texts: Vec<String> = Vec::new();
     if let Some(arr) = payload.get("tool_outputs").and_then(|v| v.as_array()) {
         for item in arr {
@@ -634,29 +614,14 @@ fn collect_result_text_parts(payload: &Value, include_legacy_scalar_outputs: boo
             }
         }
     }
-    if include_legacy_scalar_outputs {
-        for key in &["tool_output", "output"] {
-            if let Some(s) = payload.get(*key).and_then(|v| v.as_str()) {
-                texts.push(s.to_string());
-            }
-        }
-    }
     texts
 }
 
-#[cfg(test)]
 fn result_has_ntlmv1_signal(result: &Option<Value>) -> bool {
-    result_has_ntlmv1_signal_with_policy(result, true)
-}
-
-fn result_has_ntlmv1_signal_with_policy(
-    result: &Option<Value>,
-    include_legacy_scalar_outputs: bool,
-) -> bool {
     let Some(payload) = result.as_ref() else {
         return false;
     };
-    let texts = collect_result_text_parts(payload, include_legacy_scalar_outputs);
+    let texts = collect_result_text_parts(payload);
     for text in texts {
         let lower = text.to_lowercase();
         // Explicit positive verdict lines. Kept narrow on purpose — the
@@ -719,20 +684,12 @@ async fn derive_seimpersonate_host_label(
 /// SeImpersonate signal. Conservative — only matches `SeImpersonatePrivilege`
 /// alongside an `Enabled` token (the format `whoami /priv` uses). This avoids
 /// false positives from output that merely *mentions* the privilege name.
-#[cfg(test)]
 fn result_has_seimpersonate_signal(result: &Option<Value>) -> bool {
-    result_has_seimpersonate_signal_with_policy(result, true)
-}
-
-fn result_has_seimpersonate_signal_with_policy(
-    result: &Option<Value>,
-    include_legacy_scalar_outputs: bool,
-) -> bool {
     let Some(payload) = result else {
         return false;
     };
 
-    let texts = collect_result_text_parts(payload, include_legacy_scalar_outputs);
+    let texts = collect_result_text_parts(payload);
 
     for text in texts {
         for line in text.lines() {
@@ -763,23 +720,15 @@ fn result_has_seimpersonate_signal_with_policy(
 /// Returns lower-cased usernames; the domain (if present in the prefix) is
 /// also lowercased. Used by `process_completed_task` to populate
 /// `quarantined_principals` for enumeration tasks that lack a `cred_key`.
-#[cfg(test)]
 pub(crate) fn extract_locked_usernames_from_result(
     result: &Option<Value>,
-) -> Vec<(String, Option<String>)> {
-    extract_locked_usernames_from_result_with_policy(result, true)
-}
-
-fn extract_locked_usernames_from_result_with_policy(
-    result: &Option<Value>,
-    include_legacy_scalar_outputs: bool,
 ) -> Vec<(String, Option<String>)> {
     let mut out: Vec<(String, Option<String>)> = Vec::new();
     let Some(payload) = result else {
         return out;
     };
 
-    let texts = collect_result_text_parts(payload, include_legacy_scalar_outputs);
+    let texts = collect_result_text_parts(payload);
 
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     for text in texts {
@@ -908,19 +857,11 @@ fn is_ticket_grant_vuln(vuln_id: &str) -> bool {
 /// output blobs. Conservative — requires either the explicit "Saving
 /// ticket" preamble or a `.ccache` token to avoid crediting tasks that
 /// merely *reference* a ticket path in commentary.
-#[cfg(test)]
 fn result_has_ccache_evidence(result: &Option<Value>) -> bool {
-    result_has_ccache_evidence_with_policy(result, true)
-}
-
-fn result_has_ccache_evidence_with_policy(
-    result: &Option<Value>,
-    include_legacy_scalar_outputs: bool,
-) -> bool {
     let Some(payload) = result.as_ref() else {
         return false;
     };
-    let texts = collect_result_text_parts(payload, include_legacy_scalar_outputs);
+    let texts = collect_result_text_parts(payload);
     for text in texts {
         let lower = text.to_lowercase();
         if lower.contains("saving ticket in") && lower.contains(".ccache") {
@@ -1164,14 +1105,11 @@ async fn auto_chain_s4u_secretsdump(
     task_params: &std::collections::HashMap<String, Value>,
     task_domain: Option<&str>,
     task_target_ip: Option<&str>,
-    include_legacy_scalar_outputs: bool,
 ) {
-    // Collect ONLY tool-emitted text. For rust-llm-runner tasks, top-level
-    // scalar `output` is LLM narrative and must not trigger follow-on work.
-    let combined = collect_result_text_parts(payload, include_legacy_scalar_outputs).join("\n");
+    let combined = collect_result_text_parts(payload).join("\n");
     let ticket_path = match ares_llm::routing::extract_ticket_path(&combined) {
         Some(p) => p,
-        None => return, // No .ccache found
+        None => return,
     };
 
     info!(
@@ -1180,19 +1118,8 @@ async fn auto_chain_s4u_secretsdump(
         "Detected .ccache ticket — chaining secretsdump"
     );
 
-    // Helper: prefer the trusted task snapshot captured before complete_task
-    // removed the pending-task entry. Only legacy workers may fall back to
-    // payload fields; rust-llm-runner payload scalars are model-authored.
-    let get_param = |key: &str| -> Option<&str> {
-        task_params.get(key).and_then(|v| v.as_str()).or_else(|| {
-            include_legacy_scalar_outputs
-                .then(|| payload.get(key).and_then(|v| v.as_str()))
-                .flatten()
-        })
-    };
+    let get_param = |key: &str| -> Option<&str> { task_params.get(key).and_then(|v| v.as_str()) };
 
-    // Try to extract target from the trusted task params first, then ccache
-    // filename. Payload fallback is legacy-only via `get_param`.
     let target_ip = get_param("target_spn")
         .and_then(ares_llm::routing::extract_host_from_spn)
         .or_else(|| get_param("target_ip").map(|s| s.to_string()))

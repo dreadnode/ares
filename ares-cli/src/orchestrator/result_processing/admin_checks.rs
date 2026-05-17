@@ -246,7 +246,6 @@ pub(crate) async fn check_golden_ticket_completion(
     payload: &Value,
     task_id: &str,
     task_domain: Option<&str>,
-    include_legacy_scalar_outputs: bool,
     dispatcher: &Arc<Dispatcher>,
 ) {
     if !task_id.contains("exploit") && !task_id.contains("golden") {
@@ -255,7 +254,7 @@ pub(crate) async fn check_golden_ticket_completion(
     // Per-domain dedup happens after we resolve `domain` below — a forge
     // for one domain must not block recording another (multi-domain ops
     // routinely capture krbtgt for parent + child or both forests).
-    if !payload_contains_golden_ticket_marker_with_policy(payload, include_legacy_scalar_outputs) {
+    if !payload_contains_golden_ticket_marker(payload) {
         return;
     }
     let mut domain = String::new();
@@ -418,10 +417,9 @@ pub(crate) async fn detect_and_upgrade_admin_credentials(text: &str, dispatcher:
 pub(crate) async fn extract_and_cache_domain_sid(
     payload: &Value,
     task_domain: Option<&str>,
-    include_legacy_scalar_outputs: bool,
     dispatcher: &Arc<Dispatcher>,
 ) {
-    let text_parts = collect_payload_text_parts_with_policy(payload, include_legacy_scalar_outputs);
+    let text_parts = collect_payload_text_parts(payload);
     if text_parts.is_empty() {
         return;
     }
@@ -452,9 +450,7 @@ pub(crate) async fn extract_and_cache_domain_sid(
     // 2. Trusted task domain captured from pending-task params before
     //    `complete_task` removed the entry. This is the orchestrator's own
     //    target realm, not an LLM-authored payload field.
-    // 3. Legacy payload `domain` field — only for non-rust-llm-runner paths
-    //    where the result payload itself is still the tool transport.
-    // 4. State's primary domain — last resort, only when nothing else applies.
+    // 3. State's primary domain — last resort, only when nothing else applies.
     let parsed_flat = lsaquery_flat.or_else(|| {
         ares_core::parsing::extract_domain_sid_and_flat_name(&combined).map(|(flat, _)| flat)
     });
@@ -473,22 +469,9 @@ pub(crate) async fn extract_and_cache_domain_sid(
                 None
             })
         } else {
-            // No flat name in output. Fall back to trusted task domain,
-            // then legacy payload domain (if allowed), then primary.
             task_domain
                 .map(|d| d.to_lowercase())
                 .filter(|d| is_valid_domain_fqdn(d))
-                .or_else(|| {
-                    include_legacy_scalar_outputs
-                        .then(|| {
-                            payload
-                                .get("domain")
-                                .and_then(|v| v.as_str())
-                                .map(|d| d.to_lowercase())
-                                .filter(|d| is_valid_domain_fqdn(d))
-                        })
-                        .flatten()
-                })
                 .or_else(|| state.domains.first().map(|d| d.to_lowercase()))
         }
     };
@@ -783,13 +766,13 @@ mod tests {
     // ── collect_payload_text_parts ─────────────────────────────────────
 
     #[test]
-    fn collect_text_parts_gathers_string_fields() {
+    fn collect_text_parts_ignores_top_level_scalar_fields() {
         let p = json!({
             "tool_output": "alpha",
             "output": "beta",
             "summary": "ignored",
         });
-        assert_eq!(collect_payload_text_parts(&p), vec!["alpha", "beta"]);
+        assert!(collect_payload_text_parts(&p).is_empty());
     }
 
     #[test]
@@ -822,12 +805,12 @@ mod tests {
         });
         assert_eq!(
             collect_payload_text_parts(&p),
-            vec!["bare-string", "from-object", "scalar"]
+            vec!["bare-string", "from-object"]
         );
     }
 
     #[test]
-    fn collect_text_parts_policy_can_ignore_scalar_fields() {
+    fn collect_text_parts_ignores_scalar_fields() {
         let p = json!({
             "tool_output": "scalar",
             "output": "also-scalar",
@@ -837,7 +820,7 @@ mod tests {
             ],
         });
         assert_eq!(
-            collect_payload_text_parts_with_policy(&p, false),
+            collect_payload_text_parts(&p),
             vec!["bare-string", "from-object"]
         );
     }
@@ -884,21 +867,11 @@ mod tests {
     }
 
     #[test]
-    fn gt_marker_in_tool_output_field() {
+    fn gt_marker_ignores_scalar_tool_output_field() {
         let p = json!({
             "tool_output": "Saving ticket in foo.ccache",
         });
-        assert!(payload_contains_golden_ticket_marker(&p));
-    }
-
-    #[test]
-    fn gt_marker_policy_ignores_scalar_fields_when_disabled() {
-        let p = json!({
-            "tool_output": "Saving ticket in foo.ccache",
-        });
-        assert!(!payload_contains_golden_ticket_marker_with_policy(
-            &p, false
-        ));
+        assert!(!payload_contains_golden_ticket_marker(&p));
     }
 
     #[test]
