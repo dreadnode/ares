@@ -197,7 +197,7 @@ pub fn extract_plaintext_passwords(
         }
 
         // Track current domain context (for dedup key and credential domain).
-        // Only domain is tracked — username tracking was removed to prevent
+        // Only domain is tracked — tracking username here would cause
         // stale-context misattribution (LDAP doesn't guarantee attribute order).
         // Guard against machine hostnames (e.g. WIN-xxx from Kali's own SMB banner)
         // overriding the task's default domain.

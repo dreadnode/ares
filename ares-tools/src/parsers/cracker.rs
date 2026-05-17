@@ -205,12 +205,9 @@ fn is_valid_password(password: &str) -> bool {
         return false;
     }
     // Reject ellipsis-truncated displays. Hashcat / john never emit `...` in
-    // their --show output; the only way a candidate "plaintext" contains `...`
-    // is if something upstream truncated a hash for human display and the
-    // regex then captured that truncation as if it were the cracked password.
-    // This was observed concretely: a Hash record's `cracked_password` got
-    // populated with `ef961e2fd18a412...6bf150` (a 15+...+6 abbreviation of
-    // the actual AS-REP hash) instead of the real cleartext `fr3edom`.
+    // their --show output; a candidate "plaintext" containing `...` means
+    // something upstream truncated a hash for human display and the regex
+    // captured that truncation as if it were the cracked password.
     if p.contains("...") {
         return false;
     }

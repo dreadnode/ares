@@ -458,16 +458,12 @@ pub(crate) async fn extract_and_cache_domain_sid(
     // foreign-security-principal SIDs that *look* like domain SIDs but are
     // actually `<sid>-<rid>` entries from a different forest. Caching a
     // regex-truncated FSP SID against the task's payload domain misforges
-    // every downstream golden / inter-realm ticket — caused op-20260429-164553
-    // to forge a TGT for contoso.local with a bogus ExtraSid that the
-    // parent KDC rejected with rpc_s_access_denied.
+    // every downstream golden / inter-realm ticket.
     //
     // lsaquery is the primary unauth path for cross-forest target SID discovery
     // — it routinely succeeds against null sessions where impacket-lookupsid
-    // gets STATUS_ACCESS_DENIED. op-20260429-181500 discovered fabrikam's SID via
-    // lsaquery but failed to cache it (only lookupsid was wired up), so the
-    // subsequent forge_inter_realm_and_dump fired with has_target_sid=false
-    // and produced no krbtgt extraction.
+    // gets STATUS_ACCESS_DENIED, so both parsers must be wired or the forge
+    // fires with has_target_sid=false.
     let (sid, lsaquery_flat) = match parse_sid_from_combined_text(&combined) {
         Some(p) => p,
         None => return,
@@ -491,8 +487,8 @@ pub(crate) async fn extract_and_cache_domain_sid(
         if let Some(flat) = parsed_flat.as_deref() {
             resolve_flat_to_fqdn(flat, &state).or_else(|| {
                 // Flat name parsed but unmapped — refuse to cache. Caching
-                // against the payload's domain here is exactly the bug we
-                // are trying to avoid.
+                // against the payload's domain would re-introduce the
+                // wrong-domain SID poisoning this whole function guards against.
                 warn!(
                     flat_name = %flat,
                     sid = %sid,

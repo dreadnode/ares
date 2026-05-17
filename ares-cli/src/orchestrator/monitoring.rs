@@ -281,10 +281,6 @@ async fn run_heartbeat_sweep(
 }
 
 /// Remove tasks that have been active longer than the configured stale timeout.
-///
-/// Before removing, checks Redis for unclaimed results and logs a warning so
-/// we know the result consumer missed them. (The real-time discovery push in
-/// `RedisToolDispatcher` ensures discoveries still reach state.)
 async fn cleanup_stale_tasks(
     tracker: &ActiveTaskTracker,
     queue: &TaskQueue,
@@ -304,27 +300,12 @@ async fn cleanup_stale_tasks(
 
     let stale = tracker.stale_tasks(effective_timeout).await;
     for task in &stale {
-        // Check if there's an unclaimed result sitting in Redis
-        let has_unclaimed = queue
-            .has_pending_result(&task.task_id)
-            .await
-            .unwrap_or(false);
-
-        if has_unclaimed {
-            warn!(
-                task_id = %task.task_id,
-                role = %task.role,
-                age_secs = task.submitted_at.elapsed().as_secs(),
-                "Removing stale task with UNCLAIMED result in Redis (result consumer missed it)"
-            );
-        } else {
-            warn!(
-                task_id = %task.task_id,
-                role = %task.role,
-                age_secs = task.submitted_at.elapsed().as_secs(),
-                "Removing stale task"
-            );
-        }
+        warn!(
+            task_id = %task.task_id,
+            role = %task.role,
+            age_secs = task.submitted_at.elapsed().as_secs(),
+            "Removing stale task"
+        );
         // Release the per-credential inflight slot if the stale task held
         // one. Without this the slot leaks: the spawned LLM future may
         // still be running long after the task was declared stale, and

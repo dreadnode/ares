@@ -711,10 +711,10 @@ SMB         192.168.58.10   445    DC01             [LSASSY] CONTOSO\\Administra
 
     #[test]
     fn lsassy_rejects_garbage_domain_from_naive_first_backslash() {
-        // The pre-fix bug: nxc prefix has no backslash, but `contoso.local\Administrator:HASH`
-        // sits in the line. Naive first-backslash parsing wrongly stuffed the
-        // entire prefix ("SMB ... DC01 [+] contoso.local") into `domain`.
-        // The fix must extract a clean domain ("contoso.local") instead.
+        // The nxc prefix has no backslash, but `contoso.local\Administrator:HASH`
+        // sits in the line. Naive first-backslash parsing would stuff the
+        // entire prefix ("SMB ... DC01 [+] contoso.local") into `domain` —
+        // must extract a clean domain ("contoso.local") instead.
         let output = "\
 SMB         192.168.58.10   445    DC01             [+] contoso.local\\Administrator:31d6cfe0d16ae931b73c59d7e0c089c0";
         let params = json!({"domain": "contoso.local"});

@@ -58,8 +58,7 @@ impl TextExtractions {
 /// to gate noisy regexes on the invoking tool's arguments.
 ///
 /// `arguments` is best-effort: when None (e.g. legacy bare-string tool_outputs
-/// payloads), extractors fall back to the untyped behavior they had before this
-/// struct was introduced.
+/// payloads), extractors fall back to untyped behavior.
 pub struct ToolOutputCtx<'a> {
     pub arguments: Option<&'a serde_json::Value>,
     pub output: &'a str,

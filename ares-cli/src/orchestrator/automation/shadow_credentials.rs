@@ -290,9 +290,8 @@ mod tests {
     #[test]
     fn is_shadow_cred_candidate_accepts_allextendedrights_and_writeproperty() {
         // BloodHound surfaces these on user-targeted ACLs (e.g. a low-priv
-        // account with AllExtendedRights on Administrator). Previously
-        // rejected; now accepted so certipy_shadow fires on the direct DA
-        // path.
+        // account with AllExtendedRights on Administrator) — accepting them
+        // lets certipy_shadow fire on the direct DA path.
         assert!(is_shadow_cred_candidate("allextendedrights"));
         assert!(is_shadow_cred_candidate("AllExtendedRights"));
         assert!(is_shadow_cred_candidate("writeproperty"));

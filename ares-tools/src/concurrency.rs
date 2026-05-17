@@ -3,8 +3,8 @@
 //! `netexec spider_plus` (used by `smbclient_spider` and `sysvol_script_search`)
 //! enumerates SMB share trees recursively and holds the file metadata in RAM
 //! across the walk. Each invocation costs ~100–150 MB resident; without a cap,
-//! 60+ concurrent dispatches blew the EC2 cgroup to 6–9 GB and OOM-killed the
-//! orchestrator (op-20260502-013857, see `bug_orch_oom_spider_plus.md`).
+//! 60+ concurrent dispatches blow the EC2 cgroup to 6–9 GB and OOM-kill the
+//! orchestrator.
 //!
 //! This module provides a process-wide async semaphore for those tools.
 //! Both the worker `tool_executor` path and the orchestrator's

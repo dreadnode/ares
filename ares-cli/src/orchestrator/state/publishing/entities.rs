@@ -860,9 +860,8 @@ mod tests {
 
     #[tokio::test]
     async fn publish_trust_info_no_sid_leaves_domain_sids_empty() {
-        // Legacy trust enum runs (no securityIdentifier) must not corrupt
-        // domain_sids — we leave the slot for `golden_ticket::resolve_domain_sid`
-        // to fill via SAMR/lsaquery.
+        // Trust enum runs without securityIdentifier must not corrupt
+        // domain_sids — `golden_ticket::resolve_domain_sid` fills it via SAMR/lsaquery.
         let state = SharedState::new("op-nosid".to_string());
         let q = mock_queue();
 

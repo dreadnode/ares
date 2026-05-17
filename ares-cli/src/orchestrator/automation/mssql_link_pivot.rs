@@ -131,10 +131,9 @@ async fn collect_pivot_work(dispatcher: &Dispatcher) -> Vec<PivotWork> {
         // probe can succeed — no point firing if we never authenticated
         // to the source MSSQL. Accept EITHER the linked_server vuln itself
         // being exploited (LLM round confirmed access) OR a same-target
-        // `mssql_impersonation` being exploited (PR 3:
-        // `auto_mssql_impersonation` just landed EXECUTE AS LOGIN, which
-        // proves source-side access AND grants the rights typically needed
-        // for openquery hops — see plan-loot-gaps.md §1E).
+        // `mssql_impersonation` being exploited (EXECUTE AS LOGIN proves
+        // source-side access AND grants the rights typically needed for
+        // openquery hops).
         .filter_map(|vuln| {
             let has_link_access = state.exploited_vulnerabilities.contains(&vuln.vuln_id);
             let has_impersonation = same_target_impersonation_exploited(&state, &vuln.target);
@@ -807,13 +806,12 @@ mod tests {
 
     #[test]
     fn same_target_impersonation_exploited_unlocks_pivot_gate() {
-        // PR 3 plan §1E: once `auto_mssql_impersonation` confirms
-        // EXECUTE AS LOGIN landed and marks the impersonation vuln
-        // exploited, the linked-server pivot's gate must accept the
-        // SAME-target linked_server vuln even if that vuln hasn't been
-        // independently exploited yet. This is what closes the
-        // source-MSSQL→remote-MSSQL hop without waiting for the LLM to
-        // re-discover the linked-server primitive.
+        // Once `auto_mssql_impersonation` confirms EXECUTE AS LOGIN landed
+        // and marks the impersonation vuln exploited, the linked-server
+        // pivot's gate must accept the SAME-target linked_server vuln even
+        // if that vuln hasn't been independently exploited yet — this is
+        // what closes the source-MSSQL→remote-MSSQL hop without waiting for
+        // the LLM to re-discover the linked-server primitive.
         use ares_core::models::VulnerabilityInfo;
         use std::collections::HashMap;
 

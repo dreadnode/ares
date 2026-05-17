@@ -404,9 +404,6 @@ pub async fn auto_credential_expansion(
             // (exact match or child-of). Cross-forest PTH secretsdump fails
             // at DRSUAPI with `rpc_s_access_denied` and burns a
             // CredentialInflight slot plus ~30k LLM tokens per failed attempt.
-            // The password-cred path above already filters this way; the hash
-            // path was missing the gate, dispatching foreign-forest creds
-            // against unrelated DCs.
             {
                 if !dispatcher.is_technique_allowed("secretsdump") {
                     // Strategy excludes secretsdump — skip hash-based expansion too.

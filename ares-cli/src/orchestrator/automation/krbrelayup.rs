@@ -340,12 +340,9 @@ mod tests {
     #[test]
     fn collect_bare_hostname_skips_when_no_domain_match() {
         // Bare hostname yields domain="" (no FQDN dot to split on); the
-        // credential filter then can't pair any cred with the host.
-        // Previously the dispatcher fell back to credentials.first() and
-        // dispatched a wrong-domain task that always failed at LDAP bind.
-        // Now the host is skipped — an FQDN-resolving recon pass must
-        // populate `host.hostname` with a domain suffix before dispatch
-        // becomes eligible.
+        // credential filter can't pair any cred with the host, so dispatch
+        // must be skipped until an FQDN-resolving recon pass populates
+        // `host.hostname` with a domain suffix.
         let mut state = StateInner::new("test-op".into());
         state.hosts.push(make_host("192.168.58.30", "ws01", false));
         state

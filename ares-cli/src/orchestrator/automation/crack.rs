@@ -81,9 +81,8 @@ pub async fn auto_crack_dispatch(dispatcher: Arc<Dispatcher>, mut shutdown: watc
         // Collect unprocessed hashes, then sort by crack priority so the
         // single hashcat slot serves roastable hashes first. Without this,
         // a backlog of NTLM machine-account hashes from secretsdump (already
-        // PtH-usable) starves the lone kerberoast/asrep hash that would
-        // unlock a service-account password — exactly the failure mode that
-        // left a kerberoasted sql_svc untouched for hours in op-20260510.
+        // PtH-usable) would starve the lone kerberoast/asrep hash that
+        // unlocks a service-account password.
         let mut work: Vec<(String, ares_core::models::Hash)> = {
             let state = dispatcher.state.read().await;
             state
@@ -126,8 +125,7 @@ pub async fn auto_crack_dispatch(dispatcher: Arc<Dispatcher>, mut shutdown: watc
                     // and post-restart ticks skip this hash permanently.
                     // Before the cap, do NOT write the dedup — that lets a
                     // failed crack (cracked_password still None when the
-                    // task finishes) be retried on the next tick, which is
-                    // the bug this PR fixes.
+                    // task finishes) be retried on the next tick.
                     let attempts = {
                         let mut state = dispatcher.state.write().await;
                         let entry = state.crack_attempts.entry(dedup_key.clone()).or_insert(0);
@@ -241,8 +239,8 @@ mod tests {
     #[test]
     fn crack_retry_below_cap_does_not_write_dedup() {
         // A hash whose crack failed once (e.g. wordlist miss) must remain
-        // eligible for retry — this was the bug. Confirm that the dedup
-        // marker is NOT written before the cap.
+        // eligible for retry: the dedup marker must NOT be written before
+        // the attempt cap.
         let mut state = StateInner::new("op-test".into());
         let key = "child.contoso.local:svc_sql:abcdef0123456789abcdef0123456789";
         for _ in 0..(MAX_CRACK_ATTEMPTS - 1) {

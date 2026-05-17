@@ -640,15 +640,12 @@ FABRIKAM\\CONTOSO$:aes256-cts-hmac-sha1-96:4444444444444444444444444444444444444
 
     #[test]
     fn unprefixed_krbtgt_inherits_dump_realm_not_default_domain() {
-        // Real-world bug: a credential_access task dispatched against
-        // `fabrikam.local` actually re-dumped a different DC's NTDS. The dump
-        // output has unprefixed `krbtgt:502:...` alongside
-        // `CHILD.CONTOSO.LOCAL\alice:...:::` rows.
-        // Pre-fix: krbtgt got tagged with `fabrikam.local` (task intent),
-        // creating a phantom krbtgt entry that flipped dreadgoad's "domain
-        // owned" for fabrikam. Post-fix: the prefixed rows in the same output
-        // are evidence the dump came from `CHILD.CONTOSO.LOCAL`, so the
-        // unprefixed krbtgt inherits THAT realm.
+        // A credential_access task dispatched against `fabrikam.local` may
+        // actually re-dump a different DC's NTDS. When the output has
+        // unprefixed `krbtgt:502:...` alongside `CHILD.CONTOSO.LOCAL\alice:...`
+        // rows, the prefixed rows are evidence the dump came from
+        // `CHILD.CONTOSO.LOCAL`, so the unprefixed krbtgt inherits THAT realm
+        // instead of the task-intent domain.
         let output = "\
 [*] Dumping the NTDS, this could take a while
 Administrator:500:aad3b435b51404eeaad3b435b51404ee:2e993405ab82e4454afc9c9bb0939a25:::

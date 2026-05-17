@@ -40,10 +40,9 @@ pub async fn asrep_roast(args: &Value) -> Result<ToolOutput> {
     // Accept an inline username array via `known_users`. The orchestrator's
     // auto_credential_access automation discovers users via LDAP-via-ticket
     // and ACL enum, then injects them here so we don't have to re-enumerate
-    // (which fails on hardened/SID-filtered DCs anyway). Without this read
-    // the orchestrator's known_users was silently dropped and asrep_roast
-    // fell back to the generic seclists wordlist, missing lab-specific
-    // accounts like the ones we just enumerated.
+    // (which fails on hardened/SID-filtered DCs anyway). Dropping this read
+    // would force asrep_roast to fall back to the generic seclists wordlist
+    // and miss lab-specific enumerated accounts.
     let known_users: Vec<String> = args
         .get("known_users")
         .and_then(|v| v.as_array())

@@ -542,9 +542,9 @@ pub struct TrustInfo {
     /// `enumerate_domain_trusts`. Carrying this on the trust object lets the
     /// orchestrator pre-populate `state.domain_sids` for the partner without
     /// a separate authenticated SAMR lookup against the foreign DC — that
-    /// lookup is the gate that previously blocked child→parent forge dispatch
-    /// on hardened (2019+) parent DCs where cross-realm NTLM is rejected and
-    /// null-session lsaquery is disabled.
+    /// lookup gates child→parent forge dispatch on hardened (2019+) parent
+    /// DCs where cross-realm NTLM is rejected and null-session lsaquery is
+    /// disabled.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub security_identifier: Option<String>,
 }

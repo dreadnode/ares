@@ -194,11 +194,10 @@ const REPLAY_IDLE_TIMEOUT: Duration = Duration::from_secs(2);
 ///
 /// Pure function — no I/O. Used by both the live replay loop and by
 /// replay-based tests. Idempotent in the sense that re-applying the same
-/// event (same `event_id`) is safe: collections may grow with duplicates
-/// since deduplication previously lived in Redis HSET-NX and is not yet
-/// reproduced in-memory. Callers that need exact reconstruction should drop
-/// duplicate event_ids before invoking — JetStream's `Nats-Msg-Id` dedup
-/// usually makes this a non-issue.
+/// event (same `event_id`) is safe, but collections may grow with duplicates
+/// because in-memory dedup is not implemented. Callers that need exact
+/// reconstruction should drop duplicate event_ids before invoking —
+/// JetStream's `Nats-Msg-Id` dedup usually makes this a non-issue.
 pub fn apply_event_to_state(state: &mut StateInner, event: &OpStateEvent) {
     match &event.payload {
         OpStateEventPayload::CredentialCaptured { credential } => {

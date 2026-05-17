@@ -202,8 +202,8 @@ async fn wake_cross_forest_fallbacks(dispatcher: &Dispatcher, target_domain: &st
     // keyed on the CA host (IP or hostname) — not the target domain. So for
     // each known host that belongs to `target_domain`, add a `{host}:` prefix.
     // This lets a freshly-acquired cross-forest credential re-attempt
-    // certipy_find against a fabrikam CA that was previously locked by a wrong
-    // initial cred.
+    // certipy_find against a CA whose dedup entry is locked under a
+    // wrong-domain credential.
     {
         let s = dispatcher.state.read().await;
         let suffix = format!(".{target_l}");
@@ -1416,7 +1416,7 @@ pub async fn auto_trust_follow(dispatcher: Arc<Dispatcher>, mut shutdown: watch:
         // Follow trust keys (inter-realm ticket + foreign secretsdump)
         //
         // The deterministic forge uses only the trust key + SIDs (already on
-        // each TrustFollowWork item); admin creds are no longer needed here.
+        // each TrustFollowWork item) — no admin cred required.
         let work: Vec<TrustFollowWork> = {
             let state = dispatcher.state.read().await;
 
@@ -1962,11 +1962,9 @@ pub async fn auto_trust_follow(dispatcher: Arc<Dispatcher>, mut shutdown: watch:
                 tool_args["aes_key"] = json!(aes);
             }
             // For child→parent trusts (intra-forest), inject parent's
-            // Enterprise Admins SID (RID 519). Cross-forest extension was
-            // attempted (commit reverted) — manual SSM testing in GOAD-staging
-            // showed every foreign SID (incl. RID > 1000) gets stripped at the
-            // receiving DC. Keep emission scoped to intra-forest until a
-            // working cross-forest primitive is validated end-to-end.
+            // Enterprise Admins SID (RID 519). Scope is intra-forest only:
+            // cross-forest receiving DCs strip every foreign SID
+            // (including RID > 1000) via SID filtering.
             if is_child_to_parent {
                 if let Some(ref tsid) = target_domain_sid {
                     tool_args["extra_sid"] = json!(format!("{tsid}-519"));
@@ -2160,12 +2158,11 @@ pub async fn auto_trust_follow(dispatcher: Arc<Dispatcher>, mut shutdown: watch:
                             // returned 0 hashes) leaves the foreign forest
                             // attackable via Kerberos LDAP bind. Dispatch
                             // create_inter_realm_ticket so downstream tools
-                            // (bloodyad -k, etc.) get a usable ccache. Without
-                            // this, wake_cross_forest_fallbacks below is a
-                            // no-op when no same-realm credential bound the
-                            // ACL/foreign-group/cross-forest enums to the
-                            // target — the case that left fabrikam.local
-                            // permanently un-attackable in op-20260502-013857.
+                            // (bloodyad -k, etc.) get a usable ccache.
+                            // Without this, wake_cross_forest_fallbacks below
+                            // is a no-op when no same-realm credential binds
+                            // the ACL/foreign-group/cross-forest enums to the
+                            // target.
                             {
                                 let dispatcher_fb = dispatcher_bg.clone();
                                 let source_domain_fb = source_domain_bg.clone();
@@ -2727,7 +2724,7 @@ async fn dispatch_create_inter_realm_ticket(
             // misconfigured (SID filtering disabled) or the source Administrator
             // has been granted replication rights, DCSync succeeds. The attempt
             // costs ~5-10 s on failure and saves the entire MSSQL-pivot wait
-            // (historically ~60 min) on success.
+            // on success.
             dispatch_post_ticket_secretsdump(dispatcher, source_domain, target_domain).await;
 
             dispatch_post_ticket_acl_enumeration(dispatcher, source_domain, target_domain).await;
@@ -2957,13 +2954,10 @@ mod tests {
 
     #[test]
     fn filtered_inter_forest_ignores_unrelated_source_metadata() {
-        // Repro of op-20260429-111016 bug: child discovered its parent trust
-        // and stored TrustInfo{ domain="contoso.local", parent_child,
-        // sid_filtering=false }. Querying the unrelated cross-forest path
-        // contoso.local → fabrikam.local must NOT be answered with that
-        // parent_child entry (which would wrongly classify the cross-forest
-        // path as intra-forest). With no metadata for the actual target we
-        // now try the forge rather than silently suppressing it.
+        // A child-realm parent_child TrustInfo on the source must NOT answer
+        // an unrelated cross-forest path: that would misclassify it as
+        // intra-forest. With no metadata for the actual target we try the
+        // forge rather than silently suppressing it.
         let parent_trust = ares_core::models::TrustInfo {
             domain: "contoso.local".into(),
             flat_name: "CONTOSO".into(),

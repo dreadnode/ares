@@ -108,11 +108,6 @@ pub type TaskQueue = TaskQueueCore<ConnectionManager>;
 
 /// Single long-lived JetStream consumer that drains every `ares.tasks.results.*`
 /// subject and stashes parsed results in a per-`task_id` cache.
-///
-/// Replaces the old per-poll ephemeral-consumer pattern, which collided with
-/// the WorkQueue retention policy on `ARES_TASKS` (one consumer per filter
-/// subject, max) and produced steady-state `create ephemeral result consumer`
-/// failures while the orchestrator polled.
 struct ResultDemux {
     cache: Arc<Mutex<HashMap<String, TaskResult>>>,
 }
@@ -344,19 +339,6 @@ impl<C: ConnectionLike + Clone + Send + Sync + 'static> TaskQueueCore<C> {
         info!(task_id = %task_id, subject = %subject, priority, "Task submitted");
         self.set_task_status(&task_id, "pending").await?;
         Ok(task_id)
-    }
-
-    /// Non-destructive peek: try to pull a result without consuming it.
-    ///
-    /// JetStream WorkQueue retention removes a message on ack, so we never
-    /// "peek without consuming" — we treat any returned result as "pending"
-    /// and return it through `check_result` next time. To preserve the old
-    /// semantic (peek → bool, then consume separately), this method always
-    /// returns `false` and callers should use `check_result` directly.
-    ///
-    /// Kept for API compatibility with the previous Redis implementation.
-    pub async fn has_pending_result(&self, _task_id: &str) -> Result<bool> {
-        Ok(false)
     }
 
     /// Non-blocking check for a task result.
@@ -808,16 +790,6 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.to_string().contains("NATS"));
-    }
-
-    #[tokio::test]
-    async fn has_pending_result_always_false() {
-        // Documented "always returns false" semantic kept for API compat with
-        // the old Redis implementation.
-        let q = mock_queue();
-        for tid in ["t1", "t2", "anything"] {
-            assert!(!q.has_pending_result(tid).await.unwrap());
-        }
     }
 
     #[tokio::test]

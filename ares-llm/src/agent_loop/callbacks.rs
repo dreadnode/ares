@@ -29,8 +29,6 @@ pub(super) fn handle_builtin_callback(call: &ToolCall) -> Result<CallbackResult>
             Ok(CallbackResult::RequestAssistance { issue, context })
         }
         "report_cracked_credential" => {
-            // This tool was removed. Cracked passwords are auto-extracted from
-            // hashcat/john stdout. Tell the LLM to just call task_complete.
             warn!("report_cracked_credential called but removed — passwords are auto-extracted from tool output");
             Ok(CallbackResult::Continue(
                 "This tool no longer exists. Cracked passwords are automatically extracted from \

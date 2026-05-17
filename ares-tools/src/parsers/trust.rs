@@ -58,10 +58,9 @@ pub fn parse_domain_trusts(output: &str) -> Vec<Value> {
         // explicitly quarantined. Inferring filtering from FOREST_TRANSITIVE
         // alone (or from classified_type) is a false-positive that
         // permanently suppresses `forge_inter_realm_and_dump` against any
-        // misconfigured cross-forest trust — losing the entire foreign forest
-        // (the op-20260502-185055 fabrikam regression). The forge's
-        // dedup-on-empty-output path already handles the false-negative case
-        // (~30s doomed DCSync, then dedup locks and fallbacks fire).
+        // misconfigured cross-forest trust. The forge's dedup-on-empty-output
+        // path already handles the false-negative case (~30s doomed DCSync,
+        // then dedup locks and fallbacks fire).
         let sid_filtering = trust_attributes & TRUST_ATTR_QUARANTINED_DOMAIN != 0;
 
         let mut obj = serde_json::Map::new();

@@ -1597,10 +1597,8 @@ mod tests {
 
     #[test]
     fn build_domain_achievements_skips_workgroup_pseudo_domain() {
-        // Old loot row from before the upstream parsers learned to drop
-        // workgroup pseudo-domains: an attacker-box krbtgt entry tagged with
-        // the auto-generated WIN-XXX...wgrp.local string. The achievements
-        // rollup must NOT promote it to a "compromised domain" (DA).
+        // Workgroup pseudo-domain (auto-generated WIN-XXX...wgrp.local) on a
+        // krbtgt entry must NOT be promoted to a "compromised domain" (DA).
         let state = empty_state();
         let hashes = vec![
             make_hash("krbtgt", "win-abcdefghijk.wgrp.local", "ntlm"),

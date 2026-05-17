@@ -653,7 +653,6 @@ mod tests {
         assert!(names.contains(&"ldap_search_descriptions"));
         assert!(names.contains(&"username_as_password"));
         assert!(names.contains(&"password_spray"));
-        // Previously missing tools now included via netexec_tools
         assert!(names.contains(&"password_policy"));
         assert!(names.contains(&"laps_dump"));
         assert!(names.contains(&"gpp_password_finder"));

@@ -43,8 +43,6 @@ pub(crate) fn format_number(n: u64) -> String {
 }
 
 /// Scan Redis keys matching a pattern using cursor iteration.
-///
-/// Replaces `KEYS` commands which block Redis on large datasets.
 #[cfg(feature = "blue")]
 pub(crate) async fn scan_redis_keys(
     conn: &mut redis::aio::MultiplexedConnection,

@@ -103,9 +103,7 @@ fn end_turn_response(content: &str) -> LlmResponse {
 
 #[tokio::test]
 async fn agent_loop_span_carries_op_id_and_task_id_separately() {
-    // CRITICAL regression: pre-fix, task_id was passed where op.id belonged.
-    // This test guards the contract that agent.loop carries both fields and
-    // they are distinct.
+    // agent.loop must carry op.id and task_id as separate, distinct fields.
     let (_g, capture) = install_capture();
 
     std::env::set_var("ARES_OPERATION_ID", "op-test-span-1");

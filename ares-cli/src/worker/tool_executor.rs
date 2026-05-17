@@ -169,9 +169,9 @@ pub async fn run_tool_exec_loop(
     }
 }
 
-/// Build the error response sent when a tool was previously found to be
-/// unavailable on this worker (binary missing). Surfaced as a free function
-/// so the wording stays in lock-step with tests.
+/// Build the error response for a tool marked unavailable on this worker
+/// (binary missing). Surfaced as a free function so the wording stays in
+/// lock-step with tests.
 fn unavailable_tool_response(tool_name: &str, call_id: &str) -> ToolExecResponse {
     ToolExecResponse {
         call_id: call_id.to_string(),

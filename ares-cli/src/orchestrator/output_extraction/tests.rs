@@ -240,22 +240,12 @@ fn extract_password_rejects_paths() {
     assert!(creds.is_empty());
 }
 
-/// Regression: stale current_user must never be used for password attribution.
-/// Previously, CHILD\john.smith on an earlier line would set current_user, and a
-/// later "Password: Summer2025" (belonging to sam.wilson) would be falsely
-/// attributed to john.smith.
-///
-/// Fix: password lines without a same-line username are skipped entirely.
-/// Per-tool parsers handle structured extraction (LDIF, nxc table format).
 #[test]
 fn stale_context_does_not_leak_across_passwords() {
-    // Simulate secretsdump output followed by LDAP description output
     let output = "\
 CHILD\\john.smith:1103:aad3b435b51404eeaad3b435b51404ee:abc123def456abc123def456abc123de:::\n\
 Password: Summer2025";
     let creds = extract_plaintext_passwords(output, "contoso.local");
-    // The password line has no same-line username, so it must be skipped.
-    // Per-tool parsers handle the structured extraction correctly.
     assert!(
         creds.is_empty(),
         "bare Password: line must not produce credentials"

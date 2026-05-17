@@ -102,8 +102,8 @@ fn select_exploit_auth(
 ///
 /// These run pre-auth (against the network stack of the DC, or via NTLM relay)
 /// and would be incorrectly deferred by the credential gate. Kept narrow on
-/// purpose — adding to this list bypasses the gate and reintroduces the
-/// wrong-realm dispatch failure mode if the vuln actually does need auth.
+/// purpose — adding a vuln that actually requires auth bypasses the gate and
+/// produces wrong-realm dispatch failures.
 fn vuln_type_is_preauth(vtype: &str) -> bool {
     matches!(
         vtype.to_ascii_lowercase().as_str(),
@@ -808,8 +808,6 @@ mod tests {
 
         let auth = select_exploit_auth(&state, None, "");
 
-        // Legacy behavior preserved: when caller doesn't specify a domain,
-        // any non-delegation credential is acceptable.
         assert_eq!(auth.credential.as_ref().unwrap().username, "alice");
     }
 
@@ -855,7 +853,7 @@ mod tests {
 
     #[test]
     fn matches_domain_false_when_neither_matches() {
-        // The bug fix: a cred existed but for the wrong realm, so the exploit
+        // A cred for the wrong realm must NOT satisfy the gate: the exploit
         // should be deferred, not dispatched with a wrong-realm cred attached.
         let auth = ExploitAuth {
             credential: Some(make_cred("alice", "contoso.local")),
@@ -870,7 +868,7 @@ mod tests {
             credential: Some(make_cred("alice", "contoso.local")),
             hash: None,
         };
-        // Empty target = no domain constraint = legacy behavior.
+        // Empty target = no domain constraint, any auth matches.
         assert!(auth.matches_domain(""));
     }
 

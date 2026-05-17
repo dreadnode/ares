@@ -152,7 +152,7 @@ impl SharedState {
         // mixed-case (`CONTOSO.LOCAL` from secretsdump, `contoso.local` from
         // sibling parsers) splits the same identity into two state entries and
         // slips past dedup keys built with `format!("{domain}\\{user}")`.
-        // Mirrors the credential-side fix in `sanitize_credential`.
+        // Mirrors the same normalization in `sanitize_credential`.
         hash.domain = hash.domain.to_lowercase();
 
         // Reject malformed NTLM hashes before they enter state. Accept both a
@@ -658,8 +658,7 @@ mod tests {
     async fn publish_credential_high_trust_not_rejected_after_low_trust() {
         // Symmetric guard: when the wrong-realm record arrives FIRST from a
         // low-trust source, a later HIGH-trust correct-realm record must NOT
-        // be rejected — the original gate's blanket rejection on any conflict
-        // was the bug Task #21 was filed against.
+        // be rejected by a blanket conflict rule.
         let state = SharedState::new("op-1".to_string());
         let q = mock_queue();
 
@@ -885,9 +884,9 @@ mod tests {
 
     #[tokio::test]
     async fn publish_krbtgt_hash_without_resolvable_domain_skips_vuln() {
-        // Regression: a krbtgt hash with no domain prefix and no siblings to
-        // resolve from used to synthesize a `dc_secretsdump` vuln with empty
-        // target/domain — surfacing as `dc_secretsdump on ` in the report.
+        // A krbtgt hash with no domain prefix and no siblings to resolve
+        // from must not synthesize a `dc_secretsdump` vuln (would surface
+        // as `dc_secretsdump on ` with empty target/domain in the report).
         let state = SharedState::new("op-1".to_string());
         let q = mock_queue();
 

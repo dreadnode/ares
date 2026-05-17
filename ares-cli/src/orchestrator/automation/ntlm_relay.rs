@@ -219,9 +219,8 @@ fn collect_relay_work(
         // forest (needed for authenticated PetitPotam). When no match
         // exists, leave `credential: None` so the relay primitive uses
         // PetitPotam unauth — the only viable path against a foreign-forest
-        // DC for which we hold no cred. Pre-fix: state.credentials.first()
-        // grabbed an unrelated cred and the source-side bind in
-        // ntlmrelayx failed silently.
+        // DC for which we hold no cred. Falling back to an unrelated cred
+        // would silently fail the source-side bind in ntlmrelayx.
         let cred = pick_credential_for_forest(state, coercion_source.as_deref());
 
         items.push(RelayWork {

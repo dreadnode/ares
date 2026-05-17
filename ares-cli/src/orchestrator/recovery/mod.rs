@@ -21,8 +21,7 @@ mod types;
 
 pub use manager::OperationRecoveryManager;
 
-// Items that were module-private in the original single file; re-exported
-// here only for intra-crate use and tests.
+// Re-exported for intra-crate use and tests.
 #[allow(unused_imports)]
 pub(crate) use dedup::dedupe_hashes;
 #[allow(unused_imports)]
