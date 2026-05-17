@@ -15,7 +15,8 @@ use ares_core::state::blue_task_queue::{BlueTaskQueue, BlueTaskResult};
 use ares_core::state::{BlueStateReader, BlueStateWriter, RedisStateReader};
 use ares_llm::tool_registry::blue::BlueAgentRole;
 use ares_llm::{
-    run_agent_loop, AgentLoopConfig, AgentLoopOutcome, LlmProvider, LoopEndReason, ToolDispatcher,
+    run_agent_loop, AgentLoopConfig, AgentLoopOutcome, LlmProvider, LoopEndReason,
+    RunAgentLoopParams, ToolDispatcher,
 };
 
 use super::callbacks::BlueCallbackHandler;
@@ -164,18 +165,18 @@ pub async fn run_investigation(
     ));
 
     // Run the orchestrator agent loop
-    let outcome = run_agent_loop(
-        provider.as_ref(),
+    let outcome = run_agent_loop(RunAgentLoopParams {
+        provider: provider.as_ref(),
         dispatcher,
-        &config,
-        &system_prompt,
-        &task_prompt,
-        role.as_str(),
-        &investigation.investigation_id,
-        &tools,
-        Some(callback_handler),
-        None,
-    )
+        config: &config,
+        system_prompt: &system_prompt,
+        task_prompt: &task_prompt,
+        role: role.as_str(),
+        task_id: &investigation.investigation_id,
+        tools: &tools,
+        callback_handler: Some(callback_handler),
+        hostname_map: None,
+    })
     .await;
 
     let investigation_outcome = process_outcome(&outcome, &investigation.investigation_id);

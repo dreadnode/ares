@@ -19,6 +19,18 @@ pub struct HostConnection {
     pub mitre_technique: Option<String>,
 }
 
+/// Parameters for [`LateralGraph::add_connection`].
+#[derive(Debug, Clone)]
+pub struct AddConnectionParams<'a> {
+    pub source: &'a str,
+    pub destination: &'a str,
+    pub conn_type: &'a str,
+    pub timestamp: Option<DateTime<Utc>>,
+    pub user: Option<&'a str>,
+    pub evidence_id: Option<&'a str>,
+    pub mitre_technique: Option<&'a str>,
+}
+
 /// Graph of host connections for lateral movement analysis.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct LateralGraph {
@@ -33,17 +45,16 @@ impl LateralGraph {
     }
 
     /// Add a connection to the graph. Returns `None` for self-connections.
-    #[allow(clippy::too_many_arguments)]
-    pub fn add_connection(
-        &mut self,
-        source: &str,
-        destination: &str,
-        conn_type: &str,
-        timestamp: Option<DateTime<Utc>>,
-        user: Option<&str>,
-        evidence_id: Option<&str>,
-        mitre_technique: Option<&str>,
-    ) -> Option<&HostConnection> {
+    pub fn add_connection(&mut self, params: AddConnectionParams<'_>) -> Option<&HostConnection> {
+        let AddConnectionParams {
+            source,
+            destination,
+            conn_type,
+            timestamp,
+            user,
+            evidence_id,
+            mitre_technique,
+        } = params;
         let source = source.to_lowercase();
         let destination = destination.to_lowercase();
 
@@ -166,15 +177,15 @@ mod tests {
     #[test]
     fn add_connection_stores_and_returns() {
         let mut g = LateralGraph::new();
-        let conn = g.add_connection(
-            "host-a",
-            "host-b",
-            "smb",
-            None,
-            Some("admin"),
-            Some("ev1"),
-            Some("T1021"),
-        );
+        let conn = g.add_connection(AddConnectionParams {
+            source: "host-a",
+            destination: "host-b",
+            conn_type: "smb",
+            timestamp: None,
+            user: Some("admin"),
+            evidence_id: Some("ev1"),
+            mitre_technique: Some("T1021"),
+        });
         let conn = conn.expect("add_connection should return connection");
         assert_eq!(conn.source_host, "host-a");
         assert_eq!(conn.destination_host, "host-b");
@@ -185,10 +196,26 @@ mod tests {
         assert_eq!(g.connections.len(), 1);
     }
 
+    fn basic<'a>(
+        source: &'a str,
+        destination: &'a str,
+        conn_type: &'a str,
+    ) -> AddConnectionParams<'a> {
+        AddConnectionParams {
+            source,
+            destination,
+            conn_type,
+            timestamp: None,
+            user: None,
+            evidence_id: None,
+            mitre_technique: None,
+        }
+    }
+
     #[test]
     fn add_connection_lowercases_hosts() {
         let mut g = LateralGraph::new();
-        g.add_connection("HOST-A", "HOST-B", "rdp", None, None, None, None);
+        g.add_connection(basic("HOST-A", "HOST-B", "rdp"));
         assert_eq!(g.connections[0].source_host, "host-a");
         assert_eq!(g.connections[0].destination_host, "host-b");
     }
@@ -196,7 +223,7 @@ mod tests {
     #[test]
     fn add_connection_self_loop_returns_none() {
         let mut g = LateralGraph::new();
-        let result = g.add_connection("host-a", "HOST-A", "smb", None, None, None, None);
+        let result = g.add_connection(basic("host-a", "HOST-A", "smb"));
         assert!(result.is_none());
         assert!(g.connections.is_empty());
     }
@@ -204,7 +231,7 @@ mod tests {
     #[test]
     fn add_connection_marks_destination_pending() {
         let mut g = LateralGraph::new();
-        g.add_connection("host-a", "host-b", "smb", None, None, None, None);
+        g.add_connection(basic("host-a", "host-b", "smb"));
         assert!(g.pending_hosts.contains("host-b"));
     }
 
@@ -212,14 +239,14 @@ mod tests {
     fn add_connection_skips_pending_if_investigated() {
         let mut g = LateralGraph::new();
         g.mark_investigated("host-b");
-        g.add_connection("host-a", "host-b", "smb", None, None, None, None);
+        g.add_connection(basic("host-a", "host-b", "smb"));
         assert!(!g.pending_hosts.contains("host-b"));
     }
 
     #[test]
     fn mark_investigated_removes_from_pending() {
         let mut g = LateralGraph::new();
-        g.add_connection("host-a", "host-b", "smb", None, None, None, None);
+        g.add_connection(basic("host-a", "host-b", "smb"));
         assert!(g.pending_hosts.contains("host-b"));
         g.mark_investigated("host-b");
         assert!(!g.pending_hosts.contains("host-b"));
@@ -229,9 +256,9 @@ mod tests {
     #[test]
     fn get_uninvestigated_targets_respects_limit() {
         let mut g = LateralGraph::new();
-        g.add_connection("a", "b", "smb", None, None, None, None);
-        g.add_connection("a", "c", "smb", None, None, None, None);
-        g.add_connection("a", "d", "smb", None, None, None, None);
+        g.add_connection(basic("a", "b", "smb"));
+        g.add_connection(basic("a", "c", "smb"));
+        g.add_connection(basic("a", "d", "smb"));
         let targets = g.get_uninvestigated_targets(2);
         assert_eq!(targets.len(), 2);
     }
@@ -239,8 +266,8 @@ mod tests {
     #[test]
     fn get_host_connections_both_directions() {
         let mut g = LateralGraph::new();
-        g.add_connection("a", "b", "smb", None, None, None, None);
-        g.add_connection("c", "b", "rdp", None, None, None, None);
+        g.add_connection(basic("a", "b", "smb"));
+        g.add_connection(basic("c", "b", "rdp"));
         let conns = g.get_host_connections("b");
         assert_eq!(conns.len(), 2);
     }
@@ -248,8 +275,8 @@ mod tests {
     #[test]
     fn get_outgoing_connections_filters() {
         let mut g = LateralGraph::new();
-        g.add_connection("a", "b", "smb", None, None, None, None);
-        g.add_connection("b", "c", "rdp", None, None, None, None);
+        g.add_connection(basic("a", "b", "smb"));
+        g.add_connection(basic("b", "c", "rdp"));
         let out = g.get_outgoing_connections("a");
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].destination_host, "b");
@@ -258,8 +285,8 @@ mod tests {
     #[test]
     fn get_incoming_connections_filters() {
         let mut g = LateralGraph::new();
-        g.add_connection("a", "b", "smb", None, None, None, None);
-        g.add_connection("c", "b", "rdp", None, None, None, None);
+        g.add_connection(basic("a", "b", "smb"));
+        g.add_connection(basic("c", "b", "rdp"));
         let inc = g.get_incoming_connections("b");
         assert_eq!(inc.len(), 2);
     }
@@ -267,9 +294,15 @@ mod tests {
     #[test]
     fn get_unique_users_collects_all() {
         let mut g = LateralGraph::new();
-        g.add_connection("a", "b", "smb", None, Some("admin"), None, None);
-        g.add_connection("b", "c", "rdp", None, Some("svc_sql"), None, None);
-        g.add_connection("c", "d", "wmi", None, None, None, None);
+        g.add_connection(AddConnectionParams {
+            user: Some("admin"),
+            ..basic("a", "b", "smb")
+        });
+        g.add_connection(AddConnectionParams {
+            user: Some("svc_sql"),
+            ..basic("b", "c", "rdp")
+        });
+        g.add_connection(basic("c", "d", "wmi"));
         let users = g.get_unique_users();
         assert_eq!(users.len(), 2);
         assert!(users.contains("admin"));
@@ -279,7 +312,10 @@ mod tests {
     #[test]
     fn to_summary_has_expected_fields() {
         let mut g = LateralGraph::new();
-        g.add_connection("a", "b", "smb", None, Some("admin"), None, None);
+        g.add_connection(AddConnectionParams {
+            user: Some("admin"),
+            ..basic("a", "b", "smb")
+        });
         g.mark_investigated("a");
         let summary = g.to_summary();
         assert_eq!(summary["total_connections"], 1);
@@ -290,7 +326,7 @@ mod tests {
     #[test]
     fn add_connection_no_evidence_id() {
         let mut g = LateralGraph::new();
-        let conn = g.add_connection("a", "b", "smb", None, None, None, None);
+        let conn = g.add_connection(basic("a", "b", "smb"));
         assert!(conn
             .expect("add_connection should return connection")
             .evidence_ids

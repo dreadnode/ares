@@ -10,18 +10,31 @@ use ares_core::state::RedisStateReader;
 use crate::ops::submit::{collect_env_vars, resolve_model, BLUE_ENV_VAR_NAMES};
 use crate::redis_conn::{connect_redis, resolve_operation_id};
 
-#[allow(clippy::too_many_arguments)]
-pub(crate) async fn blue_submit(
-    redis_url: Option<String>,
-    alert_json: String,
-    investigation_id: Option<String>,
-    model: Option<String>,
-    max_steps: u32,
-    multi_agent: bool,
-    auto_route: bool,
-    grafana_url: Option<String>,
-    grafana_api_key: Option<String>,
-) -> Result<()> {
+pub(crate) struct BlueSubmitParams {
+    pub redis_url: Option<String>,
+    pub alert_json: String,
+    pub investigation_id: Option<String>,
+    pub model: Option<String>,
+    pub max_steps: u32,
+    pub multi_agent: bool,
+    pub auto_route: bool,
+    pub grafana_url: Option<String>,
+    pub grafana_api_key: Option<String>,
+}
+
+pub(crate) async fn blue_submit(p: BlueSubmitParams) -> Result<()> {
+    let BlueSubmitParams {
+        redis_url,
+        alert_json,
+        investigation_id,
+        model,
+        max_steps,
+        multi_agent,
+        auto_route,
+        grafana_url,
+        grafana_api_key,
+    } = p;
+
     let alert: serde_json::Value = if std::path::Path::new(&alert_json).is_file() {
         let content = std::fs::read_to_string(&alert_json)
             .with_context(|| format!("Failed to read alert file: {alert_json}"))?;
@@ -90,16 +103,27 @@ pub(crate) async fn blue_submit(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
-pub(crate) async fn blue_from_operation(
-    redis_url: Option<String>,
-    operation_id: Option<String>,
-    latest: bool,
-    model: Option<String>,
-    max_steps: u32,
-    grafana_url: Option<String>,
-    grafana_api_key: Option<String>,
-) -> Result<()> {
+pub(crate) struct BlueFromOperationParams {
+    pub redis_url: Option<String>,
+    pub operation_id: Option<String>,
+    pub latest: bool,
+    pub model: Option<String>,
+    pub max_steps: u32,
+    pub grafana_url: Option<String>,
+    pub grafana_api_key: Option<String>,
+}
+
+pub(crate) async fn blue_from_operation(p: BlueFromOperationParams) -> Result<()> {
+    let BlueFromOperationParams {
+        redis_url,
+        operation_id,
+        latest,
+        model,
+        max_steps,
+        grafana_url,
+        grafana_api_key,
+    } = p;
+
     let mut conn = connect_redis(redis_url.clone()).await?;
     let op_id = resolve_operation_id(&mut conn, operation_id, latest).await?;
 

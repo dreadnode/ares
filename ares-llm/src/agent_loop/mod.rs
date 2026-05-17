@@ -21,7 +21,7 @@ mod session_log;
 mod tests;
 
 pub use config::{AgentLoopConfig, BudgetConfig, ContextConfig, RetryConfig, SessionLogConfig};
-pub use runner::{run_agent_loop, HostnameMap};
+pub use runner::{run_agent_loop, HostnameMap, RunAgentLoopParams};
 pub use session_log::{replay_messages, SessionLog};
 pub use types::{
     AgentLoopOutcome, CallbackHandler, CallbackResult, LoopEndReason, ToolDispatcher,

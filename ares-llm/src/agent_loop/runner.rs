@@ -3,7 +3,9 @@ use std::sync::Arc;
 
 use tracing::{debug, info, warn, Instrument};
 
-use ares_core::telemetry::spans::{trace_decision, trace_tool_call, Team};
+use ares_core::telemetry::spans::{
+    trace_decision, trace_tool_call, Team, TraceDecisionParams, TraceToolCallParams,
+};
 use ares_core::telemetry::target::{extract_target_info, infer_target_type_from_info};
 
 /// Optional IP→FQDN map for enriching span `destination.address` with hostnames
@@ -81,6 +83,19 @@ async fn dispatch_one(
     }
 }
 
+pub struct RunAgentLoopParams<'a> {
+    pub provider: &'a dyn LlmProvider,
+    pub dispatcher: Arc<dyn ToolDispatcher>,
+    pub config: &'a AgentLoopConfig,
+    pub system_prompt: &'a str,
+    pub task_prompt: &'a str,
+    pub role: &'a str,
+    pub task_id: &'a str,
+    pub tools: &'a [crate::ToolDefinition],
+    pub callback_handler: Option<Arc<dyn CallbackHandler>>,
+    pub hostname_map: Option<HostnameMap>,
+}
+
 /// Execute the multi-step LLM agent loop.
 ///
 /// This is the core function that drives a task from start to completion:
@@ -91,19 +106,7 @@ async fn dispatch_one(
 ///
 /// `callback_handler` — optional custom handler for role-specific callback
 /// tools (e.g. orchestrator state queries). Pass `None` for worker tasks.
-#[allow(clippy::too_many_arguments)]
-pub async fn run_agent_loop(
-    provider: &dyn LlmProvider,
-    dispatcher: Arc<dyn ToolDispatcher>,
-    config: &AgentLoopConfig,
-    system_prompt: &str,
-    task_prompt: &str,
-    role: &str,
-    task_id: &str,
-    tools: &[crate::ToolDefinition],
-    callback_handler: Option<Arc<dyn CallbackHandler>>,
-    hostname_map: Option<HostnameMap>,
-) -> AgentLoopOutcome {
+pub async fn run_agent_loop(p: RunAgentLoopParams<'_>) -> AgentLoopOutcome {
     let op_id = resolve_operation_id_from_env();
 
     // Single parent span for the entire agent task. Every tool call, decision,
@@ -113,26 +116,26 @@ pub async fn run_agent_loop(
     let span = tracing::info_span!(
         "agent.loop",
         "op.id" = %op_id,
-        "task.id" = task_id,
-        "agent.role" = role,
-        "agent.model" = %config.model,
+        "task.id" = p.task_id,
+        "agent.role" = p.role,
+        "agent.model" = %p.config.model,
     );
 
-    run_agent_loop_inner(
-        provider,
-        dispatcher,
-        config,
-        system_prompt,
-        task_prompt,
-        role,
-        &op_id,
-        task_id,
-        tools,
-        callback_handler,
-        hostname_map,
-    )
-    .instrument(span)
-    .await
+    let inner_params = RunAgentLoopInnerParams {
+        provider: p.provider,
+        dispatcher: p.dispatcher,
+        config: p.config,
+        system_prompt: p.system_prompt,
+        task_prompt: p.task_prompt,
+        role: p.role,
+        op_id: &op_id,
+        task_id: p.task_id,
+        tools: p.tools,
+        callback_handler: p.callback_handler,
+        hostname_map: p.hostname_map,
+    };
+
+    run_agent_loop_inner(inner_params).instrument(span).await
 }
 
 fn resolve_operation_id_from_env() -> String {
@@ -154,20 +157,34 @@ fn resolve_operation_id_from_env() -> String {
         .unwrap_or_else(|| "unknown".to_string())
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn run_agent_loop_inner(
-    provider: &dyn LlmProvider,
+struct RunAgentLoopInnerParams<'a> {
+    provider: &'a dyn LlmProvider,
     dispatcher: Arc<dyn ToolDispatcher>,
-    config: &AgentLoopConfig,
-    system_prompt: &str,
-    task_prompt: &str,
-    role: &str,
-    op_id: &str,
-    task_id: &str,
-    tools: &[crate::ToolDefinition],
+    config: &'a AgentLoopConfig,
+    system_prompt: &'a str,
+    task_prompt: &'a str,
+    role: &'a str,
+    op_id: &'a str,
+    task_id: &'a str,
+    tools: &'a [crate::ToolDefinition],
     callback_handler: Option<Arc<dyn CallbackHandler>>,
     hostname_map: Option<HostnameMap>,
-) -> AgentLoopOutcome {
+}
+
+async fn run_agent_loop_inner(p: RunAgentLoopInnerParams<'_>) -> AgentLoopOutcome {
+    let RunAgentLoopInnerParams {
+        provider,
+        dispatcher,
+        config,
+        system_prompt,
+        task_prompt,
+        role,
+        op_id,
+        task_id,
+        tools,
+        callback_handler,
+        hostname_map,
+    } = p;
     let session_log = SessionLog::open(&config.session_log, op_id, task_id, role, &config.model);
     if session_log.enabled() {
         let tool_names: Vec<String> = tools.iter().map(|t| t.name.clone()).collect();
@@ -203,16 +220,16 @@ async fn run_agent_loop_inner(
     loop {
         if steps >= config.max_steps {
             warn!(task_id = task_id, steps = steps, "Agent loop hit max steps");
-            return finish(
-                &session_log,
+            return finish(FinishArgs {
+                session_log: &session_log,
                 steps,
-                LoopEndReason::MaxSteps,
+                reason: LoopEndReason::MaxSteps,
                 total_usage,
                 tool_calls_dispatched,
-                all_discoveries,
-                all_llm_findings,
-                all_tool_outputs,
-            );
+                discoveries: all_discoveries,
+                llm_findings: all_llm_findings,
+                tool_outputs: all_tool_outputs,
+            });
         }
 
         // Token budget circuit breaker: gate every iteration on cumulative usage.
@@ -228,16 +245,16 @@ async fn run_agent_loop_inner(
                 output_tokens = total_usage.output_tokens,
                 "Agent loop tripped budget breaker: {reason}"
             );
-            return finish(
-                &session_log,
+            return finish(FinishArgs {
+                session_log: &session_log,
                 steps,
-                LoopEndReason::BudgetExceeded { reason },
+                reason: LoopEndReason::BudgetExceeded { reason },
                 total_usage,
                 tool_calls_dispatched,
-                all_discoveries,
-                all_llm_findings,
-                all_tool_outputs,
-            );
+                discoveries: all_discoveries,
+                llm_findings: all_llm_findings,
+                tool_outputs: all_tool_outputs,
+            });
         }
 
         steps += 1;
@@ -325,16 +342,16 @@ async fn run_agent_loop_inner(
             Ok(r) => r,
             Err(e) => {
                 warn!(err = %e, task_id = task_id, "LLM call failed after retries");
-                return finish(
-                    &session_log,
+                return finish(FinishArgs {
+                    session_log: &session_log,
                     steps,
-                    LoopEndReason::Error(e.to_string()),
+                    reason: LoopEndReason::Error(e.to_string()),
                     total_usage,
                     tool_calls_dispatched,
-                    all_discoveries,
-                    all_llm_findings,
-                    all_tool_outputs,
-                );
+                    discoveries: all_discoveries,
+                    llm_findings: all_llm_findings,
+                    tool_outputs: all_tool_outputs,
+                });
             }
         };
 
@@ -360,30 +377,30 @@ async fn run_agent_loop_inner(
                 if session_log.enabled() {
                     session_log.record_message(steps, &assistant_msg);
                 }
-                return finish(
-                    &session_log,
+                return finish(FinishArgs {
+                    session_log: &session_log,
                     steps,
-                    LoopEndReason::EndTurn {
+                    reason: LoopEndReason::EndTurn {
                         content: response.content,
                     },
                     total_usage,
                     tool_calls_dispatched,
-                    all_discoveries,
-                    all_llm_findings,
-                    all_tool_outputs,
-                );
+                    discoveries: all_discoveries,
+                    llm_findings: all_llm_findings,
+                    tool_outputs: all_tool_outputs,
+                });
             }
             StopReason::MaxTokens if response.tool_calls.is_empty() => {
-                return finish(
-                    &session_log,
+                return finish(FinishArgs {
+                    session_log: &session_log,
                     steps,
-                    LoopEndReason::MaxTokens,
+                    reason: LoopEndReason::MaxTokens,
                     total_usage,
                     tool_calls_dispatched,
-                    all_discoveries,
-                    all_llm_findings,
-                    all_tool_outputs,
-                );
+                    discoveries: all_discoveries,
+                    llm_findings: all_llm_findings,
+                    tool_outputs: all_tool_outputs,
+                });
             }
             _ => {}
         }
@@ -415,15 +432,15 @@ async fn run_agent_loop_inner(
         {
             let available: Vec<String> = active_tools.iter().map(|t| t.name.clone()).collect();
             for tc in &response.tool_calls {
-                let span = trace_decision(
+                let span = trace_decision(TraceDecisionParams {
                     role,
-                    Team::Red,
-                    &tc.name,
-                    &available,
-                    None,
-                    Some(op_id),
-                    Some(task_id),
-                );
+                    team: Team::Red,
+                    tool_chosen: &tc.name,
+                    tools_considered: &available,
+                    confidence: None,
+                    operation_id: Some(op_id),
+                    task_id: Some(task_id),
+                });
                 let _guard = span.enter();
             }
         }
@@ -467,19 +484,19 @@ async fn run_agent_loop_inner(
                     }
                 }
                 let tt = infer_target_type_from_info(&ti);
-                let span = trace_tool_call(
+                let span = trace_tool_call(TraceToolCallParams {
                     role,
-                    Team::Red,
-                    &call.name,
-                    ti.target_ip.as_deref(),
-                    ti.target_fqdn.as_deref(),
-                    ti.target_user.as_deref(),
-                    tt,
-                    Some(op_id),
-                    Some(task_id),
-                    false,
-                    None,
-                );
+                    team: Team::Red,
+                    tool_name: &call.name,
+                    target_ip: ti.target_ip.as_deref(),
+                    target_fqdn: ti.target_fqdn.as_deref(),
+                    target_user: ti.target_user.as_deref(),
+                    target_type: tt,
+                    operation_id: Some(op_id),
+                    task_id: Some(task_id),
+                    is_error: false,
+                    error_message: None,
+                });
                 join_set.spawn(dispatch_one(disp, r, tid, c).instrument(span));
             }
 
@@ -628,19 +645,19 @@ async fn run_agent_loop_inner(
                         let tid = task_id.to_string();
                         let oid = op_id.to_string();
                         join_set.spawn(async move {
-                            let cb_span = trace_tool_call(
-                                &r,
-                                Team::Red,
-                                &c.name,
-                                None,
-                                None,
-                                None,
-                                None,
-                                Some(&oid),
-                                Some(&tid),
-                                false,
-                                None,
-                            );
+                            let cb_span = trace_tool_call(TraceToolCallParams {
+                                role: &r,
+                                team: Team::Red,
+                                tool_name: &c.name,
+                                target_ip: None,
+                                target_fqdn: None,
+                                target_user: None,
+                                target_type: None,
+                                operation_id: Some(&oid),
+                                task_id: Some(&tid),
+                                is_error: false,
+                                error_message: None,
+                            });
                             let result = handle_callback(&c, Some(h.as_ref()))
                                 .instrument(cb_span)
                                 .await;
@@ -668,32 +685,32 @@ async fn run_agent_loop_inner(
                                     session_log.record_message(steps, &tr);
                                 }
                                 messages.push(tr);
-                                return finish(
-                                    &session_log,
+                                return finish(FinishArgs {
+                                    session_log: &session_log,
                                     steps,
-                                    LoopEndReason::TaskComplete {
+                                    reason: LoopEndReason::TaskComplete {
                                         task_id: tid,
                                         result,
                                     },
                                     total_usage,
                                     tool_calls_dispatched,
-                                    all_discoveries,
-                                    all_llm_findings,
-                                    all_tool_outputs,
-                                );
+                                    discoveries: all_discoveries,
+                                    llm_findings: all_llm_findings,
+                                    tool_outputs: all_tool_outputs,
+                                });
                             }
                             Ok(CallbackResult::RequestAssistance { issue, context }) => {
                                 info!(issue = %issue, "Assistance requested");
-                                return finish(
-                                    &session_log,
+                                return finish(FinishArgs {
+                                    session_log: &session_log,
                                     steps,
-                                    LoopEndReason::RequestAssistance { issue, context },
+                                    reason: LoopEndReason::RequestAssistance { issue, context },
                                     total_usage,
                                     tool_calls_dispatched,
-                                    all_discoveries,
-                                    all_llm_findings,
-                                    all_tool_outputs,
-                                );
+                                    discoveries: all_discoveries,
+                                    llm_findings: all_llm_findings,
+                                    tool_outputs: all_tool_outputs,
+                                });
                             }
                             Ok(CallbackResult::Continue(msg)) => {
                                 let tr = ChatMessage::tool_result(&call_id, &msg);
@@ -722,19 +739,19 @@ async fn run_agent_loop_inner(
             } else {
                 // Single dispatch or no dispatches: run sequentially
                 for call in &dispatch_calls {
-                    let cb_span = trace_tool_call(
+                    let cb_span = trace_tool_call(TraceToolCallParams {
                         role,
-                        Team::Red,
-                        &call.name,
-                        None,
-                        None,
-                        None,
-                        None,
-                        Some(op_id),
-                        Some(task_id),
-                        false,
-                        None,
-                    );
+                        team: Team::Red,
+                        tool_name: &call.name,
+                        target_ip: None,
+                        target_fqdn: None,
+                        target_user: None,
+                        target_type: None,
+                        operation_id: Some(op_id),
+                        task_id: Some(task_id),
+                        is_error: false,
+                        error_message: None,
+                    });
                     match handle_callback(call, callback_handler.as_deref())
                         .instrument(cb_span)
                         .await
@@ -749,32 +766,32 @@ async fn run_agent_loop_inner(
                                 session_log.record_message(steps, &tr);
                             }
                             messages.push(tr);
-                            return finish(
-                                &session_log,
+                            return finish(FinishArgs {
+                                session_log: &session_log,
                                 steps,
-                                LoopEndReason::TaskComplete {
+                                reason: LoopEndReason::TaskComplete {
                                     task_id: tid,
                                     result,
                                 },
                                 total_usage,
                                 tool_calls_dispatched,
-                                all_discoveries,
-                                all_llm_findings,
-                                all_tool_outputs,
-                            );
+                                discoveries: all_discoveries,
+                                llm_findings: all_llm_findings,
+                                tool_outputs: all_tool_outputs,
+                            });
                         }
                         Ok(CallbackResult::RequestAssistance { issue, context }) => {
                             info!(issue = %issue, "Assistance requested");
-                            return finish(
-                                &session_log,
+                            return finish(FinishArgs {
+                                session_log: &session_log,
                                 steps,
-                                LoopEndReason::RequestAssistance { issue, context },
+                                reason: LoopEndReason::RequestAssistance { issue, context },
                                 total_usage,
                                 tool_calls_dispatched,
-                                all_discoveries,
-                                all_llm_findings,
-                                all_tool_outputs,
-                            );
+                                discoveries: all_discoveries,
+                                llm_findings: all_llm_findings,
+                                tool_outputs: all_tool_outputs,
+                            });
                         }
                         Ok(CallbackResult::Continue(msg)) => {
                             let tr = ChatMessage::tool_result(&call.id, &msg);
@@ -801,19 +818,19 @@ async fn run_agent_loop_inner(
 
             // Handle sequential callbacks (lifecycle tools that may short-circuit)
             for call in &sequential_calls {
-                let cb_span = trace_tool_call(
+                let cb_span = trace_tool_call(TraceToolCallParams {
                     role,
-                    Team::Red,
-                    &call.name,
-                    None,
-                    None,
-                    None,
-                    None,
-                    Some(op_id),
-                    Some(task_id),
-                    false,
-                    None,
-                );
+                    team: Team::Red,
+                    tool_name: &call.name,
+                    target_ip: None,
+                    target_fqdn: None,
+                    target_user: None,
+                    target_type: None,
+                    operation_id: Some(op_id),
+                    task_id: Some(task_id),
+                    is_error: false,
+                    error_message: None,
+                });
                 match handle_callback(call, callback_handler.as_deref())
                     .instrument(cb_span)
                     .await
@@ -828,32 +845,32 @@ async fn run_agent_loop_inner(
                             session_log.record_message(steps, &tr);
                         }
                         messages.push(tr);
-                        return finish(
-                            &session_log,
+                        return finish(FinishArgs {
+                            session_log: &session_log,
                             steps,
-                            LoopEndReason::TaskComplete {
+                            reason: LoopEndReason::TaskComplete {
                                 task_id: tid,
                                 result,
                             },
                             total_usage,
                             tool_calls_dispatched,
-                            all_discoveries,
-                            all_llm_findings,
-                            all_tool_outputs,
-                        );
+                            discoveries: all_discoveries,
+                            llm_findings: all_llm_findings,
+                            tool_outputs: all_tool_outputs,
+                        });
                     }
                     Ok(CallbackResult::RequestAssistance { issue, context }) => {
                         info!(issue = %issue, "Assistance requested");
-                        return finish(
-                            &session_log,
+                        return finish(FinishArgs {
+                            session_log: &session_log,
                             steps,
-                            LoopEndReason::RequestAssistance { issue, context },
+                            reason: LoopEndReason::RequestAssistance { issue, context },
                             total_usage,
                             tool_calls_dispatched,
-                            all_discoveries,
-                            all_llm_findings,
-                            all_tool_outputs,
-                        );
+                            discoveries: all_discoveries,
+                            llm_findings: all_llm_findings,
+                            tool_outputs: all_tool_outputs,
+                        });
                     }
                     Ok(CallbackResult::Continue(msg)) => {
                         let tr = ChatMessage::tool_result(&call.id, &msg);
@@ -879,11 +896,8 @@ async fn run_agent_loop_inner(
     }
 }
 
-/// Centralized exit path: writes the terminal `outcome` record to the
-/// session log and assembles the `AgentLoopOutcome`.
-#[allow(clippy::too_many_arguments)]
-fn finish(
-    session_log: &SessionLog,
+struct FinishArgs<'a> {
+    session_log: &'a SessionLog,
     steps: u32,
     reason: LoopEndReason,
     total_usage: TokenUsage,
@@ -891,7 +905,21 @@ fn finish(
     discoveries: Vec<serde_json::Value>,
     llm_findings: Vec<serde_json::Value>,
     tool_outputs: Vec<crate::ToolOutput>,
-) -> AgentLoopOutcome {
+}
+
+/// Centralized exit path: writes the terminal `outcome` record to the
+/// session log and assembles the `AgentLoopOutcome`.
+fn finish(args: FinishArgs<'_>) -> AgentLoopOutcome {
+    let FinishArgs {
+        session_log,
+        steps,
+        reason,
+        total_usage,
+        tool_calls_dispatched,
+        discoveries,
+        llm_findings,
+        tool_outputs,
+    } = args;
     if session_log.enabled() {
         let (label, detail) = describe_reason(&reason);
         session_log.record_outcome(steps, label, detail);

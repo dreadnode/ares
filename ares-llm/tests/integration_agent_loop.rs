@@ -8,7 +8,8 @@ use serde_json::json;
 
 use ares_llm::{
     run_agent_loop, AgentLoopConfig, LlmError, LlmProvider, LlmRequest, LlmResponse, LoopEndReason,
-    StopReason, TokenUsage, ToolCall, ToolDefinition, ToolDispatcher, ToolExecResult,
+    RunAgentLoopParams, StopReason, TokenUsage, ToolCall, ToolDefinition, ToolDispatcher,
+    ToolExecResult,
 };
 
 /// A mock LLM provider that returns pre-queued responses in order.
@@ -186,18 +187,18 @@ async fn multi_turn_tool_use_then_task_complete() {
     })]));
 
     let config = default_config(10);
-    let outcome = run_agent_loop(
-        &provider,
-        dispatcher.clone(),
-        &config,
-        "You are a recon agent.",
-        "Scan the 192.168.58.0/24 subnet.",
-        "recon",
-        "task-recon-001",
-        &test_tools(),
-        None,
-        None,
-    )
+    let outcome = run_agent_loop(RunAgentLoopParams {
+        provider: &provider,
+        dispatcher: dispatcher.clone(),
+        config: &config,
+        system_prompt: "You are a recon agent.",
+        task_prompt: "Scan the 192.168.58.0/24 subnet.",
+        role: "recon",
+        task_id: "task-recon-001",
+        tools: &test_tools(),
+        callback_handler: None,
+        hostname_map: None,
+    })
     .await;
 
     // Assert task completed
@@ -246,18 +247,18 @@ async fn max_steps_limit() {
     let dispatcher = Arc::new(MockDispatcher::new(dispatcher_results));
 
     let config = default_config(3);
-    let outcome = run_agent_loop(
-        &provider,
+    let outcome = run_agent_loop(RunAgentLoopParams {
+        provider: &provider,
         dispatcher,
-        &config,
-        "You are a recon agent.",
-        "Keep scanning.",
-        "recon",
-        "task-recon-002",
-        &test_tools(),
-        None,
-        None,
-    )
+        config: &config,
+        system_prompt: "You are a recon agent.",
+        task_prompt: "Keep scanning.",
+        role: "recon",
+        task_id: "task-recon-002",
+        tools: &test_tools(),
+        callback_handler: None,
+        hostname_map: None,
+    })
     .await;
 
     match &outcome.reason {
@@ -283,18 +284,18 @@ async fn end_turn_no_tool_calls() {
     let dispatcher = Arc::new(MockDispatcher::new(vec![]));
 
     let config = default_config(10);
-    let outcome = run_agent_loop(
-        &provider,
-        dispatcher.clone(),
-        &config,
-        "You are a recon agent.",
-        "Analyze the network.",
-        "recon",
-        "task-recon-003",
-        &test_tools(),
-        None,
-        None,
-    )
+    let outcome = run_agent_loop(RunAgentLoopParams {
+        provider: &provider,
+        dispatcher: dispatcher.clone(),
+        config: &config,
+        system_prompt: "You are a recon agent.",
+        task_prompt: "Analyze the network.",
+        role: "recon",
+        task_id: "task-recon-003",
+        tools: &test_tools(),
+        callback_handler: None,
+        hostname_map: None,
+    })
     .await;
 
     match &outcome.reason {
@@ -340,18 +341,18 @@ async fn tool_dispatch_error_fed_back() {
     })]));
 
     let config = default_config(10);
-    let outcome = run_agent_loop(
-        &provider,
+    let outcome = run_agent_loop(RunAgentLoopParams {
+        provider: &provider,
         dispatcher,
-        &config,
-        "You are a recon agent.",
-        "Scan 192.168.58.10.",
-        "recon",
-        "task-recon-004",
-        &test_tools(),
-        None,
-        None,
-    )
+        config: &config,
+        system_prompt: "You are a recon agent.",
+        task_prompt: "Scan 192.168.58.10.",
+        role: "recon",
+        task_id: "task-recon-004",
+        tools: &test_tools(),
+        callback_handler: None,
+        hostname_map: None,
+    })
     .await;
 
     match &outcome.reason {
@@ -394,18 +395,18 @@ async fn tool_dispatch_hard_error_fed_back() {
     ))]));
 
     let config = default_config(10);
-    let outcome = run_agent_loop(
-        &provider,
+    let outcome = run_agent_loop(RunAgentLoopParams {
+        provider: &provider,
         dispatcher,
-        &config,
-        "You are a recon agent.",
-        "Scan 192.168.58.10.",
-        "recon",
-        "task-recon-004b",
-        &test_tools(),
-        None,
-        None,
-    )
+        config: &config,
+        system_prompt: "You are a recon agent.",
+        task_prompt: "Scan 192.168.58.10.",
+        role: "recon",
+        task_id: "task-recon-004b",
+        tools: &test_tools(),
+        callback_handler: None,
+        hostname_map: None,
+    })
     .await;
 
     match &outcome.reason {
@@ -434,18 +435,18 @@ async fn request_assistance_callback() {
     let dispatcher = Arc::new(MockDispatcher::new(vec![]));
 
     let config = default_config(10);
-    let outcome = run_agent_loop(
-        &provider,
-        dispatcher.clone(),
-        &config,
-        "You are a recon agent.",
-        "Scan target.",
-        "recon",
-        "task-recon-005",
-        &test_tools(),
-        None,
-        None,
-    )
+    let outcome = run_agent_loop(RunAgentLoopParams {
+        provider: &provider,
+        dispatcher: dispatcher.clone(),
+        config: &config,
+        system_prompt: "You are a recon agent.",
+        task_prompt: "Scan target.",
+        role: "recon",
+        task_id: "task-recon-005",
+        tools: &test_tools(),
+        callback_handler: None,
+        hostname_map: None,
+    })
     .await;
 
     match &outcome.reason {
@@ -509,18 +510,18 @@ async fn token_usage_accumulates() {
     })]));
 
     let config = default_config(10);
-    let outcome = run_agent_loop(
-        &provider,
+    let outcome = run_agent_loop(RunAgentLoopParams {
+        provider: &provider,
         dispatcher,
-        &config,
-        "System prompt.",
-        "Task prompt.",
-        "recon",
-        "task-recon-006",
-        &test_tools(),
-        None,
-        None,
-    )
+        config: &config,
+        system_prompt: "System prompt.",
+        task_prompt: "Task prompt.",
+        role: "recon",
+        task_id: "task-recon-006",
+        tools: &test_tools(),
+        callback_handler: None,
+        hostname_map: None,
+    })
     .await;
 
     assert_eq!(outcome.total_usage.input_tokens, 300);
@@ -536,18 +537,18 @@ async fn llm_error_returns_error_outcome() {
     let dispatcher = Arc::new(MockDispatcher::new(vec![]));
 
     let config = default_config(10);
-    let outcome = run_agent_loop(
-        &provider,
+    let outcome = run_agent_loop(RunAgentLoopParams {
+        provider: &provider,
         dispatcher,
-        &config,
-        "System prompt.",
-        "Task prompt.",
-        "recon",
-        "task-recon-007",
-        &test_tools(),
-        None,
-        None,
-    )
+        config: &config,
+        system_prompt: "System prompt.",
+        task_prompt: "Task prompt.",
+        role: "recon",
+        task_id: "task-recon-007",
+        tools: &test_tools(),
+        callback_handler: None,
+        hostname_map: None,
+    })
     .await;
 
     match &outcome.reason {
@@ -619,18 +620,18 @@ async fn rate_limit_retry_succeeds() {
         max_delay_ms: 50,
     };
 
-    let outcome = run_agent_loop(
-        &provider,
+    let outcome = run_agent_loop(RunAgentLoopParams {
+        provider: &provider,
         dispatcher,
-        &config,
-        "System prompt.",
-        "Task prompt.",
-        "recon",
-        "task-recon-008",
-        &test_tools(),
-        None,
-        None,
-    )
+        config: &config,
+        system_prompt: "System prompt.",
+        task_prompt: "Task prompt.",
+        role: "recon",
+        task_id: "task-recon-008",
+        tools: &test_tools(),
+        callback_handler: None,
+        hostname_map: None,
+    })
     .await;
 
     match &outcome.reason {
@@ -670,18 +671,18 @@ async fn auth_error_fails_immediately() {
         max_delay_ms: 50,
     };
 
-    let outcome = run_agent_loop(
-        &provider,
+    let outcome = run_agent_loop(RunAgentLoopParams {
+        provider: &provider,
         dispatcher,
-        &config,
-        "System prompt.",
-        "Task prompt.",
-        "recon",
-        "task-recon-009",
-        &test_tools(),
-        None,
-        None,
-    )
+        config: &config,
+        system_prompt: "System prompt.",
+        task_prompt: "Task prompt.",
+        role: "recon",
+        task_id: "task-recon-009",
+        tools: &test_tools(),
+        callback_handler: None,
+        hostname_map: None,
+    })
     .await;
 
     match &outcome.reason {

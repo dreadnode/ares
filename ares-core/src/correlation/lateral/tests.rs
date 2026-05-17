@@ -1,10 +1,26 @@
+use super::graph::AddConnectionParams;
 use super::*;
 use serde_json::json;
+
+fn basic_conn<'a>(source: &'a str, destination: &'a str, conn_type: &'a str) -> AddConnectionParams<'a> {
+    AddConnectionParams {
+        source,
+        destination,
+        conn_type,
+        timestamp: None,
+        user: None,
+        evidence_id: None,
+        mitre_technique: None,
+    }
+}
 
 #[test]
 fn graph_add_connection() {
     let mut graph = LateralGraph::new();
-    let conn = graph.add_connection("DC01", "WEB01", "smb", None, Some("admin"), None, None);
+    let conn = graph.add_connection(AddConnectionParams {
+        user: Some("admin"),
+        ..basic_conn("DC01", "WEB01", "smb")
+    });
     assert!(conn.is_some());
     assert_eq!(graph.connections.len(), 1);
     assert_eq!(graph.connections[0].source_host, "dc01");
@@ -15,7 +31,7 @@ fn graph_add_connection() {
 #[test]
 fn graph_self_connection_rejected() {
     let mut graph = LateralGraph::new();
-    let conn = graph.add_connection("DC01", "dc01", "smb", None, None, None, None);
+    let conn = graph.add_connection(basic_conn("DC01", "dc01", "smb"));
     assert!(conn.is_none());
     assert_eq!(graph.connections.len(), 0);
 }
@@ -23,7 +39,7 @@ fn graph_self_connection_rejected() {
 #[test]
 fn graph_mark_investigated() {
     let mut graph = LateralGraph::new();
-    graph.add_connection("DC01", "WEB01", "smb", None, None, None, None);
+    graph.add_connection(basic_conn("DC01", "WEB01", "smb"));
     assert!(graph.pending_hosts.contains("web01"));
 
     graph.mark_investigated("WEB01");
@@ -34,9 +50,9 @@ fn graph_mark_investigated() {
 #[test]
 fn graph_get_host_connections() {
     let mut graph = LateralGraph::new();
-    graph.add_connection("dc01", "web01", "smb", None, None, None, None);
-    graph.add_connection("dc01", "sql01", "wmi", None, None, None, None);
-    graph.add_connection("web01", "sql01", "rdp", None, None, None, None);
+    graph.add_connection(basic_conn("dc01", "web01", "smb"));
+    graph.add_connection(basic_conn("dc01", "sql01", "wmi"));
+    graph.add_connection(basic_conn("web01", "sql01", "rdp"));
 
     let dc01_conns = graph.get_host_connections("DC01");
     assert_eq!(dc01_conns.len(), 2);
@@ -48,8 +64,8 @@ fn graph_get_host_connections() {
 #[test]
 fn graph_outgoing_incoming() {
     let mut graph = LateralGraph::new();
-    graph.add_connection("dc01", "web01", "smb", None, None, None, None);
-    graph.add_connection("web01", "sql01", "rdp", None, None, None, None);
+    graph.add_connection(basic_conn("dc01", "web01", "smb"));
+    graph.add_connection(basic_conn("web01", "sql01", "rdp"));
 
     assert_eq!(graph.get_outgoing_connections("dc01").len(), 1);
     assert_eq!(graph.get_incoming_connections("web01").len(), 1);
@@ -59,9 +75,18 @@ fn graph_outgoing_incoming() {
 #[test]
 fn graph_unique_users() {
     let mut graph = LateralGraph::new();
-    graph.add_connection("dc01", "web01", "smb", None, Some("admin"), None, None);
-    graph.add_connection("dc01", "sql01", "wmi", None, Some("admin"), None, None);
-    graph.add_connection("web01", "sql01", "rdp", None, Some("svc_sql"), None, None);
+    graph.add_connection(AddConnectionParams {
+        user: Some("admin"),
+        ..basic_conn("dc01", "web01", "smb")
+    });
+    graph.add_connection(AddConnectionParams {
+        user: Some("admin"),
+        ..basic_conn("dc01", "sql01", "wmi")
+    });
+    graph.add_connection(AddConnectionParams {
+        user: Some("svc_sql"),
+        ..basic_conn("web01", "sql01", "rdp")
+    });
 
     let users = graph.get_unique_users();
     assert_eq!(users.len(), 2);
@@ -72,7 +97,7 @@ fn graph_unique_users() {
 #[test]
 fn graph_summary() {
     let mut graph = LateralGraph::new();
-    graph.add_connection("dc01", "web01", "smb", None, None, None, None);
+    graph.add_connection(basic_conn("dc01", "web01", "smb"));
     graph.mark_investigated("dc01");
 
     let summary = graph.to_summary();
@@ -130,10 +155,10 @@ fn analyzer_attack_path_linear() {
     let mut analyzer = LateralMovementAnalyzer::new(None);
     analyzer
         .graph
-        .add_connection("dc01", "web01", "smb", None, None, None, None);
+        .add_connection(basic_conn("dc01", "web01", "smb"));
     analyzer
         .graph
-        .add_connection("web01", "sql01", "rdp", None, None, None, None);
+        .add_connection(basic_conn("web01", "sql01", "rdp"));
 
     let path = analyzer.get_attack_path();
     assert_eq!(path, vec!["dc01", "web01", "sql01"]);
@@ -150,10 +175,10 @@ fn analyzer_pivot_suggestions() {
     let mut analyzer = LateralMovementAnalyzer::new(None);
     analyzer
         .graph
-        .add_connection("dc01", "web01", "smb", None, None, None, None);
+        .add_connection(basic_conn("dc01", "web01", "smb"));
     analyzer
         .graph
-        .add_connection("dc01", "sql01", "wmi", None, None, None, None);
+        .add_connection(basic_conn("dc01", "sql01", "wmi"));
     analyzer.graph.mark_investigated("dc01");
 
     let suggestions = analyzer.get_pivot_suggestions();

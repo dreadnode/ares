@@ -4,7 +4,7 @@ use std::collections::HashSet;
 
 use serde_json::Value;
 
-use super::graph::{mitre_for_connection, HostConnection, LateralGraph};
+use super::graph::{mitre_for_connection, AddConnectionParams, HostConnection, LateralGraph};
 use super::patterns::{LateralPatterns, HOSTNAME_RE, IP_RE};
 
 /// Analyzes query results for lateral movement patterns.
@@ -60,15 +60,15 @@ impl LateralMovementAnalyzer {
             let source = source.to_lowercase();
             for dest in &hosts {
                 if *dest != source {
-                    self.graph.add_connection(
-                        &source,
-                        dest,
+                    self.graph.add_connection(AddConnectionParams {
+                        source: &source,
+                        destination: dest,
                         conn_type,
-                        None,
-                        None,
-                        None,
-                        mitre_for_connection(conn_type),
-                    );
+                        timestamp: None,
+                        user: None,
+                        evidence_id: None,
+                        mitre_technique: mitre_for_connection(conn_type),
+                    });
                 }
             }
         }

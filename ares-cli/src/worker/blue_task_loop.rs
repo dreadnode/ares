@@ -20,23 +20,37 @@ use tracing::{debug, error, info, warn};
 use ares_core::nats::NatsBroker;
 use ares_core::state::blue_task_queue::{BlueTaskMessage, BlueTaskQueue, BlueTaskResult};
 use ares_llm::tool_registry::blue::{self, BlueAgentRole};
-use ares_llm::{run_agent_loop, AgentLoopConfig, LlmProvider, LoopEndReason, ToolDispatcher};
+use ares_llm::{
+    run_agent_loop, AgentLoopConfig, LlmProvider, LoopEndReason, RunAgentLoopParams, ToolDispatcher,
+};
 
 use crate::worker::config::WorkerConfig;
 use crate::worker::heartbeat::WorkerStatus;
 
+pub struct BlueTaskLoopDeps<'a> {
+    pub config: &'a WorkerConfig,
+    pub conn: redis::aio::ConnectionManager,
+    pub nats: NatsBroker,
+    pub provider: Box<dyn LlmProvider>,
+    pub dispatcher: Arc<dyn ToolDispatcher>,
+    pub model_name: String,
+    pub status_tx: tokio::sync::watch::Sender<WorkerStatus>,
+    pub shutdown: Arc<tokio::sync::Notify>,
+}
+
 /// Run the blue team task consumption loop until shutdown.
-#[allow(clippy::too_many_arguments)]
-pub async fn run_blue_task_loop(
-    config: &WorkerConfig,
-    conn: redis::aio::ConnectionManager,
-    nats: NatsBroker,
-    provider: Box<dyn LlmProvider>,
-    dispatcher: Arc<dyn ToolDispatcher>,
-    model_name: String,
-    status_tx: tokio::sync::watch::Sender<WorkerStatus>,
-    shutdown: Arc<tokio::sync::Notify>,
-) -> Result<()> {
+pub async fn run_blue_task_loop(deps: BlueTaskLoopDeps<'_>) -> Result<()> {
+    let BlueTaskLoopDeps {
+        config,
+        conn,
+        nats,
+        provider,
+        dispatcher,
+        model_name,
+        status_tx,
+        shutdown,
+    } = deps;
+
     let role = parse_blue_role(&config.worker_role);
     let role_str = role.as_str();
 
@@ -221,18 +235,18 @@ async fn execute_blue_task(
     };
 
     // Run the agent loop
-    let outcome = run_agent_loop(
+    let outcome = run_agent_loop(RunAgentLoopParams {
         provider,
         dispatcher,
-        &config,
-        &system_prompt,
-        &task_prompt,
-        role.as_str(),
-        &task.task_id,
-        &tools,
-        None, // No custom callback handler for worker tasks
-        None, // No hostname map for blue team workers
-    )
+        config: &config,
+        system_prompt: &system_prompt,
+        task_prompt: &task_prompt,
+        role: role.as_str(),
+        task_id: &task.task_id,
+        tools: &tools,
+        callback_handler: None,
+        hostname_map: None,
+    })
     .await;
 
     // Convert outcome to BlueTaskResult

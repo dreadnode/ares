@@ -12,8 +12,9 @@ use std::sync::{Arc, Mutex};
 use anyhow::Result;
 
 use ares_llm::{
-    run_agent_loop, AgentLoopConfig, LlmError, LlmProvider, LlmRequest, LlmResponse, StopReason,
-    TokenUsage, ToolCall, ToolDefinition, ToolDispatcher, ToolExecResult,
+    run_agent_loop, AgentLoopConfig, LlmError, LlmProvider, LlmRequest, LlmResponse,
+    RunAgentLoopParams, StopReason, TokenUsage, ToolCall, ToolDefinition, ToolDispatcher,
+    ToolExecResult,
 };
 
 use common::span_capture::install_capture;
@@ -111,18 +112,18 @@ async fn agent_loop_span_carries_op_id_and_task_id_separately() {
     let provider = MockProvider::new(vec![end_turn_response("done.")]);
     let dispatcher = Arc::new(NoopDispatcher);
     let config = default_config();
-    let _ = run_agent_loop(
-        &provider,
+    let _ = run_agent_loop(RunAgentLoopParams {
+        provider: &provider,
         dispatcher,
-        &config,
-        "system",
-        "task",
-        "recon",
-        "task-span-1",
-        &Vec::<ToolDefinition>::new(),
-        None,
-        None,
-    )
+        config: &config,
+        system_prompt: "system",
+        task_prompt: "task",
+        role: "recon",
+        task_id: "task-span-1",
+        tools: &Vec::<ToolDefinition>::new(),
+        callback_handler: None,
+        hostname_map: None,
+    })
     .await;
 
     std::env::remove_var("ARES_OPERATION_ID");
@@ -145,18 +146,18 @@ async fn llm_call_span_records_tokens_duration_and_stop_reason() {
     let provider = MockProvider::new(vec![end_turn_response("hello")]);
     let dispatcher = Arc::new(NoopDispatcher);
     let config = default_config();
-    let _ = run_agent_loop(
-        &provider,
+    let _ = run_agent_loop(RunAgentLoopParams {
+        provider: &provider,
         dispatcher,
-        &config,
-        "system",
-        "task",
-        "recon",
-        "task-llm-span",
-        &Vec::<ToolDefinition>::new(),
-        None,
-        None,
-    )
+        config: &config,
+        system_prompt: "system",
+        task_prompt: "task",
+        role: "recon",
+        task_id: "task-llm-span",
+        tools: &Vec::<ToolDefinition>::new(),
+        callback_handler: None,
+        hostname_map: None,
+    })
     .await;
 
     let calls = capture.find_all("llm.call");
@@ -201,18 +202,18 @@ async fn llm_call_span_records_error_on_failure() {
     let provider = AlwaysAuthErrorProvider;
     let dispatcher = Arc::new(NoopDispatcher);
     let config = default_config();
-    let _ = run_agent_loop(
-        &provider,
+    let _ = run_agent_loop(RunAgentLoopParams {
+        provider: &provider,
         dispatcher,
-        &config,
-        "system",
-        "task",
-        "recon",
-        "task-err",
-        &Vec::<ToolDefinition>::new(),
-        None,
-        None,
-    )
+        config: &config,
+        system_prompt: "system",
+        task_prompt: "task",
+        role: "recon",
+        task_id: "task-err",
+        tools: &Vec::<ToolDefinition>::new(),
+        callback_handler: None,
+        hostname_map: None,
+    })
     .await;
 
     let call = capture
@@ -273,18 +274,18 @@ async fn llm_call_span_per_retry_attempt() {
         max_delay_ms: 10,
     };
 
-    let _ = run_agent_loop(
-        &provider,
+    let _ = run_agent_loop(RunAgentLoopParams {
+        provider: &provider,
         dispatcher,
-        &config,
-        "system",
-        "task",
-        "recon",
-        "task-retry",
-        &Vec::<ToolDefinition>::new(),
-        None,
-        None,
-    )
+        config: &config,
+        system_prompt: "system",
+        task_prompt: "task",
+        role: "recon",
+        task_id: "task-retry",
+        tools: &Vec::<ToolDefinition>::new(),
+        callback_handler: None,
+        hostname_map: None,
+    })
     .await;
 
     let calls = capture.find_all("llm.call");

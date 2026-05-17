@@ -75,22 +75,39 @@ pub(crate) fn resolve_model(model: &Option<String>) -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
-#[allow(clippy::too_many_arguments)]
-pub(crate) async fn ops_submit(
-    redis_url: Option<String>,
-    target: String,
-    domain: String,
-    ips: Vec<String>,
-    operation_id: Option<String>,
-    username: Option<String>,
-    password: Option<String>,
-    ntlm_hash: Option<String>,
-    resume: bool,
-    model: Option<String>,
-    max_steps: u32,
-    env: Option<String>,
-    pin_active: bool,
-) -> Result<String> {
+pub(crate) struct OpsSubmitParams {
+    pub redis_url: Option<String>,
+    pub target: String,
+    pub domain: String,
+    pub ips: Vec<String>,
+    pub operation_id: Option<String>,
+    pub username: Option<String>,
+    pub password: Option<String>,
+    pub ntlm_hash: Option<String>,
+    pub resume: bool,
+    pub model: Option<String>,
+    pub max_steps: u32,
+    pub env: Option<String>,
+    pub pin_active: bool,
+}
+
+pub(crate) async fn ops_submit(p: OpsSubmitParams) -> Result<String> {
+    let OpsSubmitParams {
+        redis_url,
+        target,
+        domain,
+        ips,
+        operation_id,
+        username,
+        password,
+        ntlm_hash,
+        resume,
+        model,
+        max_steps,
+        env,
+        pin_active,
+    } = p;
+
     if ips.is_empty() {
         anyhow::bail!(
             "No target IPs specified. Use --ips or --resolve-targets to provide target IPs."

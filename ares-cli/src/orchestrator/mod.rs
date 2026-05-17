@@ -477,16 +477,16 @@ async fn run_inner() -> Result<()> {
         "LLM runner initialized — Rust drives all agent loops"
     );
 
-    let dispatcher = Arc::new(Dispatcher::new(
-        queue.clone(),
-        tracker.clone(),
-        throttler.clone(),
-        deferred.clone(),
-        shared_state.clone(),
-        config.clone(),
-        ares_config.clone(),
-        llm_runner.clone(),
-    ));
+    let dispatcher = Arc::new(Dispatcher::new(dispatcher::DispatcherDeps {
+        queue: queue.clone(),
+        tracker: tracker.clone(),
+        throttler: throttler.clone(),
+        deferred: deferred.clone(),
+        state: shared_state.clone(),
+        config: config.clone(),
+        ares_config: ares_config.clone(),
+        llm_runner: llm_runner.clone(),
+    }));
 
     // Deferred initialization: the handler needs the dispatcher, which contains
     // the llm_runner, creating a circular dependency. OnceLock breaks the cycle.

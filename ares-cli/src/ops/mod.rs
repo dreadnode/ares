@@ -79,7 +79,7 @@ pub(crate) async fn run_ops(cmd: OpsCommands, redis_url: Option<String>) -> Resu
             domain,
             details,
         } => {
-            inject::ops_inject_vulnerability(
+            inject::ops_inject_vulnerability(inject::OpsInjectVulnerabilityParams {
                 redis_url,
                 operation_id,
                 vuln_type,
@@ -88,8 +88,8 @@ pub(crate) async fn run_ops(cmd: OpsCommands, redis_url: Option<String>) -> Resu
                 target_spn,
                 account_name,
                 domain,
-                details,
-            )
+                details_json: details,
+            })
             .await
         }
         OpsCommands::InjectHost {
@@ -118,7 +118,7 @@ pub(crate) async fn run_ops(cmd: OpsCommands, redis_url: Option<String>) -> Resu
             source,
             aes_key,
         } => {
-            inject::ops_inject_hash(
+            inject::ops_inject_hash(inject::OpsInjectHashParams {
                 redis_url,
                 operation_id,
                 username,
@@ -127,7 +127,7 @@ pub(crate) async fn run_ops(cmd: OpsCommands, redis_url: Option<String>) -> Resu
                 hash_type,
                 source,
                 aes_key,
-            )
+            })
             .await
         }
         OpsCommands::InjectDomainSid {
@@ -238,8 +238,8 @@ pub(crate) async fn run_ops(cmd: OpsCommands, redis_url: Option<String>) -> Resu
                     ips = target.split(',').map(|s| s.trim().to_string()).collect();
                 }
             }
-            let op_id = submit::ops_submit(
-                redis_url.clone(),
+            let op_id = submit::ops_submit(submit::OpsSubmitParams {
+                redis_url: redis_url.clone(),
                 target,
                 domain,
                 ips,
@@ -252,7 +252,7 @@ pub(crate) async fn run_ops(cmd: OpsCommands, redis_url: Option<String>) -> Resu
                 max_steps,
                 env,
                 pin_active,
-            )
+            })
             .await?;
             let should_wait_for_report = follow || auto_report;
             if should_wait_for_report {

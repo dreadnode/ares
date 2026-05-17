@@ -18,8 +18,8 @@ use ares_llm::prompt::templates::{render_agent_instructions, OperationContext, T
 use ares_llm::tool_registry::{tools_for_role, AgentRole};
 use ares_llm::{
     run_agent_loop, AgentLoopConfig, CallbackHandler, LlmError, LlmProvider, LlmRequest,
-    LlmResponse, LoopEndReason, StopReason, TokenUsage, ToolCall, ToolDefinition, ToolDispatcher,
-    ToolExecResult,
+    LlmResponse, LoopEndReason, RunAgentLoopParams, StopReason, TokenUsage, ToolCall,
+    ToolDefinition, ToolDispatcher, ToolExecResult,
 };
 
 struct MockProvider {
@@ -174,18 +174,18 @@ async fn main() -> Result<()> {
     };
 
     let callbacks: Option<Arc<dyn CallbackHandler>> = None;
-    let outcome = run_agent_loop(
-        &provider,
+    let outcome = run_agent_loop(RunAgentLoopParams {
+        provider: &provider,
         dispatcher,
-        &config,
-        &system_prompt,
-        &task_prompt,
-        "recon",
-        "t-smoke-1",
-        &tools,
-        callbacks,
-        None,
-    )
+        config: &config,
+        system_prompt: &system_prompt,
+        task_prompt: &task_prompt,
+        role: "recon",
+        task_id: "t-smoke-1",
+        tools: &tools,
+        callback_handler: callbacks,
+        hostname_map: None,
+    })
     .await;
 
     println!("\n--- Agent Loop Outcome ---");

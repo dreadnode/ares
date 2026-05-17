@@ -17,15 +17,15 @@ pub(crate) async fn blue_watch(
         let now = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S");
         println!("[{now}] Submitting blue investigation from latest operation...");
 
-        match super::submit::blue_from_operation(
-            redis_url.clone(),
-            None,
-            true, // --latest
-            model.clone(),
+        match super::submit::blue_from_operation(super::submit::BlueFromOperationParams {
+            redis_url: redis_url.clone(),
+            operation_id: None,
+            latest: true,
+            model: model.clone(),
             max_steps,
-            grafana_url.clone(),
-            grafana_api_key.clone(),
-        )
+            grafana_url: grafana_url.clone(),
+            grafana_api_key: grafana_api_key.clone(),
+        })
         .await
         {
             Ok(()) => info!("Investigation submitted successfully"),

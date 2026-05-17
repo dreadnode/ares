@@ -41,50 +41,47 @@ pub struct HeartbeatHandle {
     _handle: JoinHandle<()>,
 }
 
+#[derive(Clone)]
+pub struct HeartbeatConfig {
+    pub agent_name: String,
+    pub pod_name: String,
+    pub role: String,
+    pub operation_id: Option<String>,
+    pub interval: Duration,
+    pub ttl: Duration,
+}
+
 /// Spawn the background heartbeat loop.
 ///
 /// Returns a `HeartbeatHandle` (drop it or abort to stop) and a `watch::Sender`
 /// the task loop uses to update current status.
-#[allow(clippy::too_many_arguments)]
 pub fn spawn_heartbeat(
     conn: redis::aio::ConnectionManager,
-    agent_name: String,
-    pod_name: String,
-    role: String,
-    operation_id: Option<String>,
-    interval: Duration,
-    ttl: Duration,
+    cfg: HeartbeatConfig,
     shutdown: Arc<tokio::sync::Notify>,
 ) -> (HeartbeatHandle, watch::Sender<WorkerStatus>) {
     let (status_tx, status_rx) = watch::channel(WorkerStatus::default());
 
-    let handle = tokio::spawn(heartbeat_loop(
-        conn,
+    let handle = tokio::spawn(heartbeat_loop(conn, cfg, status_rx, shutdown));
+
+    (HeartbeatHandle { _handle: handle }, status_tx)
+}
+
+async fn heartbeat_loop(
+    mut conn: redis::aio::ConnectionManager,
+    cfg: HeartbeatConfig,
+    status_rx: watch::Receiver<WorkerStatus>,
+    shutdown: Arc<tokio::sync::Notify>,
+) {
+    let HeartbeatConfig {
         agent_name,
         pod_name,
         role,
         operation_id,
         interval,
         ttl,
-        status_rx,
-        shutdown,
-    ));
+    } = cfg;
 
-    (HeartbeatHandle { _handle: handle }, status_tx)
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn heartbeat_loop(
-    mut conn: redis::aio::ConnectionManager,
-    agent_name: String,
-    pod_name: String,
-    role: String,
-    operation_id: Option<String>,
-    interval: Duration,
-    ttl: Duration,
-    status_rx: watch::Receiver<WorkerStatus>,
-    shutdown: Arc<tokio::sync::Notify>,
-) {
     let heartbeat_key = format!("{HEARTBEAT_PREFIX}:{agent_name}");
     let ttl_secs = ttl.as_secs() as i64;
 

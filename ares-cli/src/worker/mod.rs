@@ -71,12 +71,14 @@ pub async fn run() -> anyhow::Result<()> {
     // Spawn background heartbeat
     let (_heartbeat_handle, status_tx) = heartbeat::spawn_heartbeat(
         conn.clone(),
-        config.agent_name.clone(),
-        config.pod_name.clone(),
-        config.worker_role.clone(),
-        config.operation_id.clone(),
-        config.heartbeat_interval,
-        config.heartbeat_ttl,
+        heartbeat::HeartbeatConfig {
+            agent_name: config.agent_name.clone(),
+            pod_name: config.pod_name.clone(),
+            role: config.worker_role.clone(),
+            operation_id: config.operation_id.clone(),
+            interval: config.heartbeat_interval,
+            ttl: config.heartbeat_ttl,
+        },
         Arc::clone(&shutdown),
     );
 
@@ -131,16 +133,16 @@ pub async fn run() -> anyhow::Result<()> {
             };
             let dispatcher = std::sync::Arc::new(blue_task_loop::BlueLocalToolDispatcher::new());
             info!(model = %model_name, "Blue team worker using LLM");
-            blue_task_loop::run_blue_task_loop(
-                &config,
+            blue_task_loop::run_blue_task_loop(blue_task_loop::BlueTaskLoopDeps {
+                config: &config,
                 conn,
-                nats.clone(),
+                nats: nats.clone(),
                 provider,
                 dispatcher,
                 model_name,
                 status_tx,
-                shutdown_signal,
-            )
+                shutdown: shutdown_signal,
+            })
             .await
         }
     };

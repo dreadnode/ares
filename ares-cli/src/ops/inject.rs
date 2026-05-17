@@ -54,18 +54,31 @@ pub(crate) async fn ops_inject_credential(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
-pub(crate) async fn ops_inject_vulnerability(
-    redis_url: Option<String>,
-    operation_id: String,
-    vuln_type: String,
-    target_ip: String,
-    target_hostname: String,
-    target_spn: String,
-    account_name: String,
-    domain: String,
-    details_json: String,
-) -> Result<()> {
+pub(crate) struct OpsInjectVulnerabilityParams {
+    pub redis_url: Option<String>,
+    pub operation_id: String,
+    pub vuln_type: String,
+    pub target_ip: String,
+    pub target_hostname: String,
+    pub target_spn: String,
+    pub account_name: String,
+    pub domain: String,
+    pub details_json: String,
+}
+
+pub(crate) async fn ops_inject_vulnerability(p: OpsInjectVulnerabilityParams) -> Result<()> {
+    let OpsInjectVulnerabilityParams {
+        redis_url,
+        operation_id,
+        vuln_type,
+        target_ip,
+        target_hostname,
+        target_spn,
+        account_name,
+        domain,
+        details_json,
+    } = p;
+
     let mut conn = connect_redis(redis_url).await?;
     let reader = RedisStateReader::new(operation_id.clone());
 
@@ -209,17 +222,29 @@ pub(crate) async fn ops_inject_host(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
-pub(crate) async fn ops_inject_hash(
-    redis_url: Option<String>,
-    operation_id: String,
-    username: String,
-    hash_value: String,
-    domain: String,
-    hash_type: String,
-    source: String,
-    aes_key: Option<String>,
-) -> Result<()> {
+pub(crate) struct OpsInjectHashParams {
+    pub redis_url: Option<String>,
+    pub operation_id: String,
+    pub username: String,
+    pub hash_value: String,
+    pub domain: String,
+    pub hash_type: String,
+    pub source: String,
+    pub aes_key: Option<String>,
+}
+
+pub(crate) async fn ops_inject_hash(p: OpsInjectHashParams) -> Result<()> {
+    let OpsInjectHashParams {
+        redis_url,
+        operation_id,
+        username,
+        hash_value,
+        domain,
+        hash_type,
+        source,
+        aes_key,
+    } = p;
+
     let mut conn = connect_redis(redis_url).await?;
     let reader = RedisStateReader::new(operation_id.clone());
 

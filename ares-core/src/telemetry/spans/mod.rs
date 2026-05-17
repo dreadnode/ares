@@ -17,7 +17,8 @@ mod helpers;
 pub use builder::AgentSpanBuilder;
 pub use helpers::{
     client_span, consumer_span, extract_target_from_args, producer_span, server_span,
-    trace_decision, trace_discovery, trace_domain_admin, trace_tool_call,
+    trace_decision, trace_discovery, trace_domain_admin, trace_tool_call, TraceDecisionParams,
+    TraceDiscoveryParams, TraceToolCallParams,
 };
 
 /// Team affiliation for span attributes.
@@ -104,36 +105,36 @@ mod tests {
     #[test]
     fn traces_tool_call() {
         init_test_subscriber();
-        let span = trace_tool_call(
-            "credential_access",
-            Team::Red,
-            "secretsdump",
-            Some("192.168.58.10"),
-            Some("dc01.contoso.local"),
-            Some("admin"),
-            Some("domain_controller"),
-            Some("op-001"),
-            Some("task-aaa"),
-            false,
-            None,
-        );
+        let span = trace_tool_call(TraceToolCallParams {
+            role: "credential_access",
+            team: Team::Red,
+            tool_name: "secretsdump",
+            target_ip: Some("192.168.58.10"),
+            target_fqdn: Some("dc01.contoso.local"),
+            target_user: Some("admin"),
+            target_type: Some("domain_controller"),
+            operation_id: Some("op-001"),
+            task_id: Some("task-aaa"),
+            is_error: false,
+            error_message: None,
+        });
         assert!(!span.is_disabled());
     }
 
     #[test]
     fn traces_discovery() {
         init_test_subscriber();
-        let span = trace_discovery(
-            "credential",
-            "recon",
-            Some("admin"),
-            Some("contoso.local"),
-            Some("192.168.58.10"),
-            Some("dc01.contoso.local"),
-            Some("domain_controller"),
-            Some("op-001"),
-            Some("task-aaa"),
-        );
+        let span = trace_discovery(TraceDiscoveryParams {
+            discovery_type: "credential",
+            source_agent: "recon",
+            target_user: Some("admin"),
+            target_domain: Some("contoso.local"),
+            target_ip: Some("192.168.58.10"),
+            target_fqdn: Some("dc01.contoso.local"),
+            target_type: Some("domain_controller"),
+            operation_id: Some("op-001"),
+            task_id: Some("task-aaa"),
+        });
         assert!(!span.is_disabled());
     }
 
@@ -141,15 +142,15 @@ mod tests {
     fn traces_decision() {
         init_test_subscriber();
         let tools = vec!["nmap_scan".to_string(), "smb_sweep".to_string()];
-        let span = trace_decision(
-            "recon",
-            Team::Red,
-            "nmap_scan",
-            &tools,
-            Some(0.9),
-            Some("op-001"),
-            Some("task-aaa"),
-        );
+        let span = trace_decision(TraceDecisionParams {
+            role: "recon",
+            team: Team::Red,
+            tool_chosen: "nmap_scan",
+            tools_considered: &tools,
+            confidence: Some(0.9),
+            operation_id: Some("op-001"),
+            task_id: Some("task-aaa"),
+        });
         assert!(!span.is_disabled());
     }
 

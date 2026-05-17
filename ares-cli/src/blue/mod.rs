@@ -91,17 +91,17 @@ pub(crate) async fn run_blue(cmd: BlueCommands, redis_url: Option<String>) -> Re
             grafana_url,
             grafana_api_key,
         } => {
-            submit::blue_submit(
+            submit::blue_submit(submit::BlueSubmitParams {
                 redis_url,
                 alert_json,
                 investigation_id,
                 model,
                 max_steps,
                 multi_agent,
-                !no_auto_route,
+                auto_route: !no_auto_route,
                 grafana_url,
                 grafana_api_key,
-            )
+            })
             .await
         }
         BlueCommands::Watch {
@@ -129,7 +129,7 @@ pub(crate) async fn run_blue(cmd: BlueCommands, redis_url: Option<String>) -> Re
             grafana_url,
             grafana_api_key,
         } => {
-            submit::blue_from_operation(
+            submit::blue_from_operation(submit::BlueFromOperationParams {
                 redis_url,
                 operation_id,
                 latest,
@@ -137,7 +137,7 @@ pub(crate) async fn run_blue(cmd: BlueCommands, redis_url: Option<String>) -> Re
                 max_steps,
                 grafana_url,
                 grafana_api_key,
-            )
+            })
             .await
         }
     }

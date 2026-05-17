@@ -131,17 +131,17 @@ impl Dispatcher {
         self.config.strategy.effective_priority(vuln_type)
     }
 
-    #[allow(clippy::too_many_arguments)]
-    pub fn new(
-        queue: TaskQueue,
-        tracker: ActiveTaskTracker,
-        throttler: Arc<Throttler>,
-        deferred: Arc<DeferredQueue>,
-        state: SharedState,
-        config: Arc<OrchestratorConfig>,
-        ares_config: Option<Arc<ares_core::config::AresConfig>>,
-        llm_runner: Arc<LlmTaskRunner>,
-    ) -> Self {
+    pub fn new(deps: DispatcherDeps) -> Self {
+        let DispatcherDeps {
+            queue,
+            tracker,
+            throttler,
+            deferred,
+            state,
+            config,
+            ares_config,
+            llm_runner,
+        } = deps;
         Self {
             queue,
             tracker,
@@ -157,6 +157,17 @@ impl Dispatcher {
             credential_inflight: CredentialInflight::new(3),
         }
     }
+}
+
+pub struct DispatcherDeps {
+    pub queue: TaskQueue,
+    pub tracker: ActiveTaskTracker,
+    pub throttler: Arc<Throttler>,
+    pub deferred: Arc<DeferredQueue>,
+    pub state: SharedState,
+    pub config: Arc<OrchestratorConfig>,
+    pub ares_config: Option<Arc<ares_core::config::AresConfig>>,
+    pub llm_runner: Arc<LlmTaskRunner>,
 }
 
 #[cfg(test)]

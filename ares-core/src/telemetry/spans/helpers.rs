@@ -5,100 +5,104 @@ use crate::telemetry::mitre;
 use super::builder::AgentSpanBuilder;
 use super::{SpanKind, Team};
 
+pub struct TraceToolCallParams<'a> {
+    pub role: &'a str,
+    pub team: Team,
+    pub tool_name: &'a str,
+    pub target_ip: Option<&'a str>,
+    pub target_fqdn: Option<&'a str>,
+    pub target_user: Option<&'a str>,
+    pub target_type: Option<&'a str>,
+    pub operation_id: Option<&'a str>,
+    pub task_id: Option<&'a str>,
+    pub is_error: bool,
+    pub error_message: Option<&'a str>,
+}
+
 /// Create a tool call span (point-in-time recording).
 ///
 /// Equivalent to Python's `trace_tool_call()`.
-#[allow(clippy::too_many_arguments)]
-pub fn trace_tool_call(
-    role: &str,
-    team: Team,
-    tool_name: &str,
-    target_ip: Option<&str>,
-    target_fqdn: Option<&str>,
-    target_user: Option<&str>,
-    target_type: Option<&str>,
-    operation_id: Option<&str>,
-    task_id: Option<&str>,
-    is_error: bool,
-    error_message: Option<&str>,
-) -> tracing::Span {
-    let mut builder = AgentSpanBuilder::new("tool_call", role, team).tool(tool_name);
+pub fn trace_tool_call(p: TraceToolCallParams<'_>) -> tracing::Span {
+    let mut builder = AgentSpanBuilder::new("tool_call", p.role, p.team).tool(p.tool_name);
 
-    if let Some(ip) = target_ip {
+    if let Some(ip) = p.target_ip {
         builder = builder.target_ip(ip);
     }
-    if let Some(fqdn) = target_fqdn {
+    if let Some(fqdn) = p.target_fqdn {
         builder = builder.target_fqdn(fqdn);
     }
-    if let Some(user) = target_user {
+    if let Some(user) = p.target_user {
         builder = builder.target_user(user);
     }
-    if let Some(tt) = target_type {
+    if let Some(tt) = p.target_type {
         builder = builder.target_type(tt);
     }
-    if let Some(op) = operation_id {
+    if let Some(op) = p.operation_id {
         builder = builder.operation_id(op);
     }
-    if let Some(t) = task_id {
+    if let Some(t) = p.task_id {
         builder = builder.task_id(t);
     }
-    if is_error {
-        builder = builder.error(error_message.unwrap_or("unknown error"));
+    if p.is_error {
+        builder = builder.error(p.error_message.unwrap_or("unknown error"));
     }
 
     builder.build()
 }
 
+pub struct TraceDiscoveryParams<'a> {
+    pub discovery_type: &'a str,
+    pub source_agent: &'a str,
+    pub target_user: Option<&'a str>,
+    pub target_domain: Option<&'a str>,
+    pub target_ip: Option<&'a str>,
+    pub target_fqdn: Option<&'a str>,
+    pub target_type: Option<&'a str>,
+    pub operation_id: Option<&'a str>,
+    pub task_id: Option<&'a str>,
+}
+
 /// Create a discovery event span.
 ///
 /// Equivalent to Python's `trace_discovery()`.
-#[allow(clippy::too_many_arguments)]
-pub fn trace_discovery(
-    discovery_type: &str,
-    source_agent: &str,
-    target_user: Option<&str>,
-    target_domain: Option<&str>,
-    target_ip: Option<&str>,
-    target_fqdn: Option<&str>,
-    target_type: Option<&str>,
-    operation_id: Option<&str>,
-    task_id: Option<&str>,
-) -> tracing::Span {
+pub fn trace_discovery(p: TraceDiscoveryParams<'_>) -> tracing::Span {
     tracing::info_span!(
         "ares.discovery",
-        otel.name = format!("discovery.{discovery_type}"),
+        otel.name = format!("discovery.{}", p.discovery_type),
         "service.namespace" = "ares",
         attack_team = "red",
         attack_phase = "discovery",
-        "discovery.type" = discovery_type,
-        "discovery.source_agent" = source_agent,
-        "user.name" = target_user.unwrap_or(""),
-        attack_target_type = target_type.unwrap_or(""),
-        attack_target_domain = target_domain.unwrap_or(""),
-        "destination.address" = target_fqdn.or(target_ip).unwrap_or(""),
-        "destination.ip" = target_ip.unwrap_or(""),
-        attack_operation_id = operation_id.unwrap_or(""),
-        "op.id" = operation_id.unwrap_or(""),
-        "task.id" = task_id.unwrap_or(""),
+        "discovery.type" = p.discovery_type,
+        "discovery.source_agent" = p.source_agent,
+        "user.name" = p.target_user.unwrap_or(""),
+        attack_target_type = p.target_type.unwrap_or(""),
+        attack_target_domain = p.target_domain.unwrap_or(""),
+        "destination.address" = p.target_fqdn.or(p.target_ip).unwrap_or(""),
+        "destination.ip" = p.target_ip.unwrap_or(""),
+        attack_operation_id = p.operation_id.unwrap_or(""),
+        "op.id" = p.operation_id.unwrap_or(""),
+        "task.id" = p.task_id.unwrap_or(""),
     )
+}
+
+pub struct TraceDecisionParams<'a> {
+    pub role: &'a str,
+    pub team: Team,
+    pub tool_chosen: &'a str,
+    pub tools_considered: &'a [String],
+    pub confidence: Option<f64>,
+    pub operation_id: Option<&'a str>,
+    pub task_id: Option<&'a str>,
 }
 
 /// Create a decision span recording agent tool selection.
 ///
 /// Equivalent to Python's `trace_decision()`.
-#[allow(clippy::too_many_arguments)]
-pub fn trace_decision(
-    role: &str,
-    team: Team,
-    tool_chosen: &str,
-    tools_considered: &[String],
-    confidence: Option<f64>,
-    operation_id: Option<&str>,
-    task_id: Option<&str>,
-) -> tracing::Span {
-    let (technique_id, _) = mitre::get_tool_mitre_info(tool_chosen);
-    let category = mitre::get_tool_category(tool_chosen);
-    let considered_str = tools_considered
+pub fn trace_decision(p: TraceDecisionParams<'_>) -> tracing::Span {
+    let (technique_id, _) = mitre::get_tool_mitre_info(p.tool_chosen);
+    let category = mitre::get_tool_category(p.tool_chosen);
+    let considered_str = p
+        .tools_considered
         .iter()
         .take(5)
         .cloned()
@@ -107,19 +111,19 @@ pub fn trace_decision(
 
     tracing::info_span!(
         "ares.decision",
-        otel.name = format!("decision.{role}"),
-        attack_team = team.as_str(),
-        "agent.role" = role,
+        otel.name = format!("decision.{}", p.role),
+        attack_team = p.team.as_str(),
+        "agent.role" = p.role,
         "decision.type" = "tool_selection",
-        "decision.tool_chosen" = tool_chosen,
+        "decision.tool_chosen" = p.tool_chosen,
         "decision.tools_considered" = %considered_str,
-        "decision.tools_considered_count" = tools_considered.len(),
-        "decision.confidence" = confidence.unwrap_or(0.0),
+        "decision.tools_considered_count" = p.tools_considered.len(),
+        "decision.confidence" = p.confidence.unwrap_or(0.0),
         "mitre.technique.id" = technique_id.unwrap_or(""),
         attack_tool_category = category.unwrap_or(""),
-        attack_operation_id = operation_id.unwrap_or(""),
-        "op.id" = operation_id.unwrap_or(""),
-        "task.id" = task_id.unwrap_or(""),
+        attack_operation_id = p.operation_id.unwrap_or(""),
+        "op.id" = p.operation_id.unwrap_or(""),
+        "task.id" = p.task_id.unwrap_or(""),
     )
 }
 

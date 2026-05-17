@@ -16,8 +16,8 @@ use tracing::{info, warn};
 use ares_llm::agent_loop::CallbackResult;
 use ares_llm::tool_registry::blue::{self, BlueAgentRole};
 use ares_llm::{
-    run_agent_loop, AgentLoopConfig, CallbackHandler, LlmProvider, TokenUsage, ToolCall,
-    ToolDispatcher,
+    run_agent_loop, AgentLoopConfig, CallbackHandler, LlmProvider, RunAgentLoopParams, TokenUsage,
+    ToolCall, ToolDispatcher,
 };
 
 use super::sub_agent::{BlueToolDispatcher, SubAgentCallbackHandler};
@@ -120,18 +120,18 @@ impl BlueCallbackHandler {
             redis_url: self.redis_url.clone(),
         });
 
-        let outcome = run_agent_loop(
-            self.provider.as_ref(),
-            blue_dispatcher,
-            &config,
-            &system_prompt,
+        let outcome = run_agent_loop(RunAgentLoopParams {
+            provider: self.provider.as_ref(),
+            dispatcher: blue_dispatcher,
+            config: &config,
+            system_prompt: &system_prompt,
             task_prompt,
-            role.as_str(),
-            &self.investigation_id,
-            &tools,
-            Some(sub_agent_cb),
-            None,
-        )
+            role: role.as_str(),
+            task_id: &self.investigation_id,
+            tools: &tools,
+            callback_handler: Some(sub_agent_cb),
+            hostname_map: None,
+        })
         .await;
 
         // Extract result text from the outcome

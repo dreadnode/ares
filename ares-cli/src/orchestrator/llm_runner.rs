@@ -14,7 +14,7 @@ use ares_llm::prompt::StateSnapshot;
 use ares_llm::tool_registry::{self, AgentRole};
 use ares_llm::{
     run_agent_loop, AgentLoopConfig, AgentLoopOutcome, CallbackHandler, HostnameMap, LlmProvider,
-    LoopEndReason, ToolDispatcher,
+    LoopEndReason, RunAgentLoopParams, ToolDispatcher,
 };
 
 use crate::orchestrator::state::SharedState;
@@ -148,18 +148,18 @@ impl LlmTaskRunner {
         };
 
         // 6. Run the agent loop
-        let outcome = run_agent_loop(
-            self.provider.as_ref(),
-            Arc::clone(&self.dispatcher),
-            &self.config,
-            &system_prompt,
-            &task_prompt,
-            role_str,
+        let outcome = run_agent_loop(RunAgentLoopParams {
+            provider: self.provider.as_ref(),
+            dispatcher: Arc::clone(&self.dispatcher),
+            config: &self.config,
+            system_prompt: &system_prompt,
+            task_prompt: &task_prompt,
+            role: role_str,
             task_id,
-            &tools,
-            self.callback_handler.get().cloned(),
+            tools: &tools,
+            callback_handler: self.callback_handler.get().cloned(),
             hostname_map,
-        )
+        })
         .await;
 
         log_outcome(task_id, &outcome);
