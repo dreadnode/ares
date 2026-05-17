@@ -335,43 +335,22 @@ pub(crate) fn build_s4u_payload(item: &S4uWork) -> Value {
 }
 
 /// Check whether a task result matches any of the given error patterns.
+///
+/// Scans only structured `tool_outputs`. The top-level `error` field carries
+/// LLM loop-control/status strings, and scalar `output`/`tool_output` fields
+/// are model-authored narrative — neither must drive retry control.
 fn result_matches_patterns(result: &ares_core::models::TaskResult, patterns: &[&str]) -> bool {
-    let from_rust_llm_runner = result.worker_pod.as_deref() == Some("rust-llm-runner");
     let payload = match &result.result {
         Some(v) => v,
         None => return false,
     };
 
-    // Legacy/non-LLM workers report tool failures via the top-level error
-    // field. rust-llm-runner uses this for loop-control/status strings.
-    if !from_rust_llm_runner {
-        if let Some(err) = &result.error {
-            if patterns.iter().any(|p| err.contains(p)) {
-                return true;
-            }
-        }
-    }
-
-    // Check raw tool outputs (array of strings or {output: ...} objects).
     if let Some(outputs) = payload.get("tool_outputs").and_then(|v| v.as_array()) {
         for output in outputs {
             if let Some(text) = output
                 .as_str()
                 .or_else(|| output.get("output").and_then(|v| v.as_str()))
             {
-                if patterns.iter().any(|p| text.contains(p)) {
-                    return true;
-                }
-            }
-        }
-    }
-
-    // Legacy workers transport real tool stdout via scalar payload fields.
-    // rust-llm-runner scalars are model-authored narrative and must not drive
-    // retry control.
-    if !from_rust_llm_runner {
-        for key in &["output", "tool_output"] {
-            if let Some(text) = payload.get(*key).and_then(|v| v.as_str()) {
                 if patterns.iter().any(|p| text.contains(p)) {
                     return true;
                 }
@@ -404,23 +383,15 @@ mod tests {
     use chrono::Utc;
     use serde_json::json;
 
-    fn make_result_with_worker_pod(
-        result: Option<serde_json::Value>,
-        error: Option<String>,
-        worker_pod: Option<&str>,
-    ) -> TaskResult {
+    fn make_result(result: Option<serde_json::Value>, error: Option<String>) -> TaskResult {
         TaskResult {
             task_id: "t-test".to_string(),
             success: false,
             result,
             error,
-            worker_pod: worker_pod.map(str::to_string),
+            worker_pod: Some("rust-llm-runner".to_string()),
             completed_at: Utc::now(),
         }
-    }
-
-    fn make_result(result: Option<serde_json::Value>, error: Option<String>) -> TaskResult {
-        make_result_with_worker_pod(result, error, None)
     }
 
     #[test]
@@ -454,12 +425,12 @@ mod tests {
     }
 
     #[test]
-    fn result_matches_patterns_error_field_match() {
+    fn result_matches_patterns_ignores_error_field() {
         let tr = make_result(
             Some(json!({})),
             Some("Kerberos error: STATUS_ACCOUNT_DISABLED on dc01.contoso.local".to_string()),
         );
-        assert!(result_matches_patterns(&tr, &["STATUS_ACCOUNT_DISABLED"]));
+        assert!(!result_matches_patterns(&tr, &["STATUS_ACCOUNT_DISABLED"]));
     }
 
     #[test]
@@ -504,25 +475,25 @@ mod tests {
     }
 
     #[test]
-    fn result_matches_patterns_output_key_match() {
+    fn result_matches_patterns_ignores_scalar_output_key() {
         let tr = make_result(
             Some(json!({
                 "output": "KDC_ERR_KEY_EXPIRED when requesting TGT for svc_web$@contoso.local"
             })),
             None,
         );
-        assert!(result_matches_patterns(&tr, &["KDC_ERR_KEY_EXPIRED"]));
+        assert!(!result_matches_patterns(&tr, &["KDC_ERR_KEY_EXPIRED"]));
     }
 
     #[test]
-    fn result_matches_patterns_tool_output_key_match() {
+    fn result_matches_patterns_ignores_scalar_tool_output_key() {
         let tr = make_result(
             Some(json!({
                 "tool_output": "STATUS_ACCOUNT_DISABLED: svc_sql@contoso.local disabled in AD"
             })),
             None,
         );
-        assert!(result_matches_patterns(&tr, &["STATUS_ACCOUNT_DISABLED"]));
+        assert!(!result_matches_patterns(&tr, &["STATUS_ACCOUNT_DISABLED"]));
     }
 
     #[test]
@@ -554,42 +525,6 @@ mod tests {
     }
 
     #[test]
-    fn result_matches_patterns_ignores_rust_runner_error_text() {
-        let tr = make_result_with_worker_pod(
-            Some(json!({})),
-            Some("Assistance needed: STATUS_ACCOUNT_DISABLED".to_string()),
-            Some("rust-llm-runner"),
-        );
-        assert!(!result_matches_patterns(&tr, &["STATUS_ACCOUNT_DISABLED"]));
-    }
-
-    #[test]
-    fn result_matches_patterns_ignores_rust_runner_scalar_output_text() {
-        let tr = make_result_with_worker_pod(
-            Some(json!({
-                "output": "KDC_ERR_KEY_EXPIRED when requesting TGT for svc_web$@contoso.local"
-            })),
-            None,
-            Some("rust-llm-runner"),
-        );
-        assert!(!result_matches_patterns(&tr, &["KDC_ERR_KEY_EXPIRED"]));
-    }
-
-    #[test]
-    fn result_matches_patterns_detects_rust_runner_tool_outputs_object_text() {
-        let tr = make_result_with_worker_pod(
-            Some(json!({
-                "tool_outputs": [
-                    {"output": "Error from KDC: KDC_ERR_CLIENT_REVOKED for svc_sql@contoso.local"}
-                ]
-            })),
-            None,
-            Some("rust-llm-runner"),
-        );
-        assert!(result_matches_patterns(&tr, &["KDC_ERR_CLIENT_REVOKED"]));
-    }
-
-    #[test]
     fn has_permanent_revocation_status_account_disabled() {
         let tr = make_result(
             Some(json!({
@@ -604,7 +539,14 @@ mod tests {
 
     #[test]
     fn has_permanent_revocation_kdc_err_key_expired() {
-        let tr = make_result(Some(json!({})), Some("KDC_ERR_KEY_EXPIRED".to_string()));
+        let tr = make_result(
+            Some(json!({
+                "tool_outputs": [
+                    {"output": "KDC_ERR_KEY_EXPIRED requesting TGT for svc_web$@contoso.local"}
+                ]
+            })),
+            None,
+        );
         assert!(has_permanent_revocation(&tr));
     }
 
@@ -623,7 +565,9 @@ mod tests {
     fn has_lockout_error_kdc_err_client_revoked() {
         let tr = make_result(
             Some(json!({
-                "output": "KDC_ERR_CLIENT_REVOKED when requesting TGT for svc_sql@contoso.local"
+                "tool_outputs": [
+                    {"output": "KDC_ERR_CLIENT_REVOKED requesting TGT for svc_sql@contoso.local"}
+                ]
             })),
             None,
         );
@@ -633,8 +577,12 @@ mod tests {
     #[test]
     fn has_lockout_error_status_account_locked_out() {
         let tr = make_result(
-            Some(json!({})),
-            Some("SMB error: STATUS_ACCOUNT_LOCKED_OUT on 192.168.58.10".to_string()),
+            Some(json!({
+                "tool_outputs": [
+                    {"output": "SMB error: STATUS_ACCOUNT_LOCKED_OUT on 192.168.58.10"}
+                ]
+            })),
+            None,
         );
         assert!(has_lockout_error(&tr));
     }
