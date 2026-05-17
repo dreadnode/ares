@@ -6,7 +6,7 @@
 //! AD domain?" probe.
 //!
 //! Resolver behavior:
-//! - We construct a `TokioAsyncResolver` from the system resolv.conf so we
+//! - We construct a `TokioResolver` from the system resolv.conf so we
 //!   pick up whatever recursive resolver the operator has configured (often
 //!   the same DNS server an attacker would query during real-world recon).
 //! - NXDOMAIN / NoRecordsFound → `Rejected` (the suffix is definitely not AD).
@@ -14,15 +14,16 @@
 //! - I/O / timeout / refused → `Indeterminate` (we'll retry next tick).
 
 use async_trait::async_trait;
-use hickory_resolver::config::{ResolverConfig, ResolverOpts};
-use hickory_resolver::error::ResolveErrorKind;
-use hickory_resolver::TokioAsyncResolver;
+use hickory_resolver::config::ResolverConfig;
+use hickory_resolver::net::runtime::TokioRuntimeProvider;
+use hickory_resolver::net::{DnsError, NetError};
+use hickory_resolver::TokioResolver;
 
 use super::{DomainProber, ProbeOutcome};
 
-/// Real DNS prober. Wraps a hickory `TokioAsyncResolver`.
+/// Real DNS prober. Wraps a hickory `TokioResolver`.
 pub struct DnsSrvProber {
-    resolver: TokioAsyncResolver,
+    resolver: TokioResolver,
 }
 
 impl DnsSrvProber {
@@ -31,13 +32,17 @@ impl DnsSrvProber {
     /// — we still need *something* to query in container environments where
     /// /etc/resolv.conf may be missing.
     pub fn from_system() -> Self {
-        let resolver = match TokioAsyncResolver::tokio_from_system_conf() {
-            Ok(r) => r,
-            Err(e) => {
+        let resolver = TokioResolver::builder_tokio()
+            .and_then(|b| b.build())
+            .unwrap_or_else(|e| {
                 tracing::warn!(err = %e, "DNS SRV prober: system resolver unreadable, falling back to defaults");
-                TokioAsyncResolver::tokio(ResolverConfig::default(), ResolverOpts::default())
-            }
-        };
+                TokioResolver::builder_with_config(
+                    ResolverConfig::default(),
+                    TokioRuntimeProvider::default(),
+                )
+                .build()
+                .expect("default ResolverConfig should always build")
+            });
         Self { resolver }
     }
 }
@@ -48,14 +53,14 @@ impl DomainProber for DnsSrvProber {
         let query = format!("_ldap._tcp.dc._msdcs.{}.", fqdn.trim_end_matches('.'));
         match self.resolver.srv_lookup(&query).await {
             Ok(answer) => {
-                if answer.iter().next().is_some() {
+                if !answer.answers().is_empty() {
                     ProbeOutcome::Confirmed
                 } else {
                     ProbeOutcome::Rejected("no SRV records")
                 }
             }
-            Err(e) => match e.kind() {
-                ResolveErrorKind::NoRecordsFound { .. } => {
+            Err(e) => match &e {
+                NetError::Dns(DnsError::NoRecordsFound(_)) => {
                     ProbeOutcome::Rejected("NXDOMAIN / no _ldap._tcp.dc._msdcs SRV")
                 }
                 _ => {
