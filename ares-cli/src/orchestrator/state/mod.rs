@@ -106,6 +106,7 @@ pub const DEDUP_MSSQL_IMPERSONATION: &str = "mssql_impersonation_auto";
 /// (domain, DC) pair. The probe is a read-only LDAP query and the result
 /// immediately marks `sid_history_<user>` exploited, so re-firing is wasteful.
 pub const DEDUP_SID_HISTORY: &str = "sid_history_enum";
+pub const DEDUP_STALL_COLD_START: &str = "stall_cold_start";
 
 /// Vuln queue ZSET key suffix.
 pub const KEY_VULN_QUEUE: &str = "vuln_queue";
@@ -176,6 +177,7 @@ const ALL_DEDUP_SETS: &[&str] = &[
     DEDUP_MSSQL_LINK_PIVOT,
     DEDUP_MSSQL_IMPERSONATION,
     DEDUP_SID_HISTORY,
+    DEDUP_STALL_COLD_START,
 ];
 
 #[cfg(test)]

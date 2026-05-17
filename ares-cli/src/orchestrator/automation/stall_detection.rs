@@ -130,6 +130,36 @@ pub(crate) fn select_stall_lhf_work(
         .collect()
 }
 
+/// Build the stall-recovery cold-start dedup key.
+pub(crate) fn stall_cold_start_dedup_key(domain: &str, recovery_attempts: u32) -> String {
+    format!(
+        "stall_cold_start:{}:{recovery_attempts}",
+        domain.to_lowercase()
+    )
+}
+
+/// Select stall-recovery cold-start work items: unauth user enumeration
+/// against each known DC whose domain isn't already dominated AND whose
+/// round-specific dedup key is unprocessed. Used when the op has zero
+/// users AND zero credentials but DCs are known — initial bootstrap
+/// (petitpotam unauth, anonymous SAMR, etc.) produced nothing, so we
+/// fall back to seclists + kerbrute via AS-REP roast cold-start.
+pub(crate) fn select_stall_cold_start_work(
+    state: &StateInner,
+    recovery_attempts: u32,
+) -> Vec<(String, String)> {
+    state
+        .domain_controllers
+        .iter()
+        .filter(|(domain, _)| !state.is_domain_dominated(domain))
+        .filter(|(domain, _)| {
+            let key = stall_cold_start_dedup_key(domain, recovery_attempts);
+            !state.is_processed(DEDUP_STALL_COLD_START, &key)
+        })
+        .map(|(domain, dc_ip)| (domain.clone(), dc_ip.clone()))
+        .collect()
+}
+
 /// How long without new discoveries before we consider the op stalled.
 const STALL_THRESHOLD: Duration = Duration::from_secs(180); // 3 minutes
 
@@ -212,16 +242,10 @@ pub async fn auto_stall_detection(
             continue;
         }
 
-        info!(
-            stall_duration_secs = last_change.elapsed().as_secs(),
-            cred_count,
-            hash_count,
-            recovery_attempt = recovery_attempts + 1,
-            "Operation stall detected — triggering fallback actions"
-        );
-
         last_recovery = Instant::now();
         recovery_attempts += 1;
+
+        let mut dispatched = 0usize;
 
         // Skip domains with pending delegation vulns — sprays lock delegation
         // accounts and prevent S4U exploitation from succeeding.
@@ -247,6 +271,7 @@ pub async fn auto_stall_detection(
                 {
                     Ok(Some(task_id)) => {
                         info!(task_id = %task_id, domain = %domain, "Stall recovery: password spray dispatched");
+                        dispatched += 1;
                         let key = stall_spray_dedup_key(&domain, recovery_attempts);
                         dispatcher
                             .state
@@ -277,6 +302,7 @@ pub async fn auto_stall_detection(
                 {
                     Ok(Some(task_id)) => {
                         info!(task_id = %task_id, domain = %domain, "Stall recovery: low-hanging fruit dispatched");
+                        dispatched += 1;
                         dispatcher
                             .state
                             .write()
@@ -291,6 +317,72 @@ pub async fn auto_stall_detection(
                     Err(e) => warn!(err = %e, "Stall recovery: low-hanging fruit failed"),
                 }
             }
+        }
+
+        // Cold-start recovery: zero users AND zero creds but DCs known.
+        // Initial bootstrap (petitpotam unauth, anonymous SAMR, etc.)
+        // returned nothing — the spray and LHF branches above are both
+        // gated on prior discoveries, so without this third branch the
+        // op idles forever. Fall back to AS-REP roast cold-start (seclists
+        // wordlists + kerbrute), gated on `asrep_roast` strategy allow.
+        if !has_users && !has_creds && has_dcs && dispatcher.is_technique_allowed("asrep_roast") {
+            let cold_start_work: Vec<(String, String)> = {
+                let state = dispatcher.state.read().await;
+                select_stall_cold_start_work(&state, recovery_attempts)
+            };
+
+            for (domain, dc_ip) in cold_start_work {
+                let payload = super::credential_access::build_asrep_payload(
+                    &domain,
+                    &dc_ip,
+                    &[],
+                    &[],
+                );
+
+                match dispatcher
+                    .throttled_submit("credential_access", "credential_access", payload, 7)
+                    .await
+                {
+                    Ok(Some(task_id)) => {
+                        info!(task_id = %task_id, domain = %domain, "Stall recovery: cold-start user enumeration dispatched");
+                        dispatched += 1;
+                        let key = stall_cold_start_dedup_key(&domain, recovery_attempts);
+                        dispatcher
+                            .state
+                            .write()
+                            .await
+                            .mark_processed(DEDUP_STALL_COLD_START, key.clone());
+                        let _ = dispatcher
+                            .state
+                            .persist_dedup(&dispatcher.queue, DEDUP_STALL_COLD_START, &key)
+                            .await;
+                    }
+                    Ok(None) => {}
+                    Err(e) => warn!(err = %e, "Stall recovery: cold-start failed"),
+                }
+            }
+        }
+
+        if dispatched > 0 {
+            info!(
+                stall_duration_secs = last_change.elapsed().as_secs(),
+                cred_count,
+                hash_count,
+                recovery_attempt = recovery_attempts,
+                dispatched,
+                "Operation stall detected — fallback actions dispatched"
+            );
+        } else {
+            warn!(
+                stall_duration_secs = last_change.elapsed().as_secs(),
+                cred_count,
+                hash_count,
+                recovery_attempt = recovery_attempts,
+                has_users,
+                has_creds,
+                has_dcs,
+                "Operation stall detected — no fallback branch dispatched this round"
+            );
         }
     }
 }
@@ -538,6 +630,87 @@ mod tests {
         s.dominated_domains.insert("contoso.local".into());
 
         assert!(select_stall_lhf_work(&s, 0, 5).is_empty());
+    }
+
+    #[test]
+    fn stall_cold_start_dedup_key_includes_recovery_attempt() {
+        assert_eq!(
+            stall_cold_start_dedup_key("contoso.local", 4),
+            "stall_cold_start:contoso.local:4"
+        );
+    }
+
+    #[test]
+    fn stall_cold_start_dedup_key_lowercases_domain() {
+        assert_eq!(
+            stall_cold_start_dedup_key("Contoso.Local", 0),
+            "stall_cold_start:contoso.local:0"
+        );
+    }
+
+    #[test]
+    fn select_stall_cold_start_empty_state() {
+        let s = StateInner::new("op".into());
+        assert!(select_stall_cold_start_work(&s, 0).is_empty());
+    }
+
+    #[test]
+    fn select_stall_cold_start_emits_known_dc() {
+        let mut s = StateInner::new("op".into());
+        s.domain_controllers
+            .insert("contoso.local".into(), "192.168.58.10".into());
+        let work = select_stall_cold_start_work(&s, 1);
+        assert_eq!(
+            work,
+            vec![("contoso.local".to_string(), "192.168.58.10".to_string())]
+        );
+    }
+
+    #[test]
+    fn select_stall_cold_start_skips_dominated_domain() {
+        let mut s = StateInner::new("op".into());
+        s.domain_controllers
+            .insert("contoso.local".into(), "192.168.58.10".into());
+        s.dominated_domains.insert("contoso.local".into());
+        assert!(select_stall_cold_start_work(&s, 0).is_empty());
+    }
+
+    #[test]
+    fn select_stall_cold_start_dedup_re_arms_per_attempt() {
+        let mut s = StateInner::new("op".into());
+        s.domain_controllers
+            .insert("contoso.local".into(), "192.168.58.10".into());
+        s.mark_processed(
+            DEDUP_STALL_COLD_START,
+            stall_cold_start_dedup_key("contoso.local", 0),
+        );
+        // Same recovery_attempt → skipped.
+        assert!(select_stall_cold_start_work(&s, 0).is_empty());
+        // Different recovery_attempt → re-emitted.
+        assert_eq!(select_stall_cold_start_work(&s, 1).len(), 1);
+    }
+
+    #[test]
+    fn select_stall_cold_start_ignores_delegation_vulns() {
+        // Cold-start runs when has_users=false AND has_creds=false, so the
+        // spray's delegation-skip gate doesn't apply — we still need to
+        // enumerate users on a DC even if it has a pending delegation vuln.
+        let mut s = StateInner::new("op".into());
+        s.domain_controllers
+            .insert("contoso.local".into(), "192.168.58.10".into());
+        let v = make_vuln_with_domain("v1", "constrained_delegation", "contoso.local");
+        s.discovered_vulnerabilities.insert(v.vuln_id.clone(), v);
+        assert_eq!(select_stall_cold_start_work(&s, 0).len(), 1);
+    }
+
+    #[test]
+    fn select_stall_cold_start_emits_one_per_dc() {
+        let mut s = StateInner::new("op".into());
+        s.domain_controllers
+            .insert("contoso.local".into(), "192.168.58.10".into());
+        s.domain_controllers
+            .insert("fabrikam.local".into(), "192.168.58.40".into());
+        assert_eq!(select_stall_cold_start_work(&s, 0).len(), 2);
     }
 
     #[test]
