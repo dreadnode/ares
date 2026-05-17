@@ -4,15 +4,17 @@
 //! period (default: 5 minutes), this automation triggers fallback actions:
 //!
 //!   1. Re-attempt password spray with discovered users
-//!   2. Start responder + NTLM relay if not already running
-//!   3. Re-run LDAP description search with all known creds
+//!   2. Re-run low-hanging-fruit discovery with all known creds
+//!   3. Cold-start AS-REP enumeration when both users and creds are empty
 //!
 //! This prevents the operation from idling when all easy wins are exhausted.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use serde_json::json;
+use anyhow::Result;
+use async_trait::async_trait;
+use serde_json::{json, Value};
 use tokio::sync::watch;
 use tracing::{info, warn};
 
@@ -160,11 +162,331 @@ pub(crate) fn select_stall_cold_start_work(
         .collect()
 }
 
+/// Build the password-spray payload for stall recovery.
+pub(crate) fn build_spray_payload(domain: &str, dc_ip: &str) -> Value {
+    json!({
+        "technique": "password_spray",
+        "target_ip": dc_ip,
+        "domain": domain,
+        "use_common_passwords": true,
+        "acknowledge_no_policy": true,
+    })
+}
+
+/// Build the cold-start AS-REP enumeration payload (delegates to
+/// `credential_access::build_asrep_payload` with empty known/excluded users
+/// to emit the seclists+kerbrute instructions).
+pub(crate) fn build_cold_start_payload(domain: &str, dc_ip: &str) -> Value {
+    super::credential_access::build_asrep_payload(domain, dc_ip, &[], &[])
+}
+
+/// What kind of recovery action a `RecoveryAction` represents.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ActionKind {
+    /// Password spray against a discovered userlist.
+    Spray,
+    /// Low-hanging-fruit (LAPS, gMSA) against a known credential.
+    LowHanging,
+    /// Cold-start unauth AS-REP enumeration against a DC.
+    ColdStart,
+}
+
+/// A single recovery action produced by `plan_stall_recovery`. The dispatch
+/// loop consumes these and routes each to the appropriate dispatcher call.
+#[derive(Debug, Clone)]
+pub(crate) struct RecoveryAction {
+    pub kind: ActionKind,
+    pub domain: String,
+    pub dc_ip: String,
+    pub dedup_key: String,
+    pub dedup_set: &'static str,
+    /// Only set for `ActionKind::LowHanging` — the credential to use.
+    pub cred: Option<ares_core::models::Credential>,
+}
+
+/// Inputs to `plan_stall_recovery` describing what corpus the op has so far
+/// and which fallback techniques are currently permissible.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct StallContext {
+    pub has_users: bool,
+    pub has_creds: bool,
+    pub has_dcs: bool,
+    pub allow_password_spray: bool,
+    pub allow_asrep_roast: bool,
+    pub lhf_max: usize,
+}
+
+/// Build the prioritized list of stall-recovery actions for this tick.
+///
+/// Pure function: no I/O, no Dispatcher. Inspects state + gates and returns
+/// the actions the dispatch loop should attempt.
+///
+/// Order: spray → low-hanging-fruit → cold-start. Cold-start only fires
+/// when both `has_users` and `has_creds` are false (otherwise the other
+/// two branches own the recovery).
+pub(crate) fn plan_stall_recovery(
+    state: &StateInner,
+    recovery_attempts: u32,
+    ctx: &StallContext,
+) -> Vec<RecoveryAction> {
+    let mut plan = Vec::new();
+
+    if ctx.has_users && ctx.has_dcs && ctx.allow_password_spray {
+        for (domain, dc_ip) in select_stall_spray_work(state, recovery_attempts) {
+            let dedup_key = stall_spray_dedup_key(&domain, recovery_attempts);
+            plan.push(RecoveryAction {
+                kind: ActionKind::Spray,
+                domain,
+                dc_ip,
+                dedup_key,
+                dedup_set: DEDUP_PASSWORD_SPRAY,
+                cred: None,
+            });
+        }
+    }
+
+    if ctx.has_creds && ctx.has_dcs {
+        for (key, dc_ip, domain, cred) in
+            select_stall_lhf_work(state, recovery_attempts, ctx.lhf_max)
+        {
+            plan.push(RecoveryAction {
+                kind: ActionKind::LowHanging,
+                domain,
+                dc_ip,
+                dedup_key: key,
+                dedup_set: DEDUP_EXPANSION_CREDS,
+                cred: Some(cred),
+            });
+        }
+    }
+
+    if !ctx.has_users && !ctx.has_creds && ctx.has_dcs && ctx.allow_asrep_roast {
+        for (domain, dc_ip) in select_stall_cold_start_work(state, recovery_attempts) {
+            let dedup_key = stall_cold_start_dedup_key(&domain, recovery_attempts);
+            plan.push(RecoveryAction {
+                kind: ActionKind::ColdStart,
+                domain,
+                dc_ip,
+                dedup_key,
+                dedup_set: DEDUP_STALL_COLD_START,
+                cred: None,
+            });
+        }
+    }
+
+    plan
+}
+
 /// How long without new discoveries before we consider the op stalled.
 const STALL_THRESHOLD: Duration = Duration::from_secs(180); // 3 minutes
 
 /// Minimum interval between stall recovery actions.
 const RECOVERY_COOLDOWN: Duration = Duration::from_secs(120); // 2 minutes
+
+/// Cap on the number of recovery rounds per op (don't spam indefinitely).
+const MAX_RECOVERY_ATTEMPTS: u32 = 10;
+
+/// Mutable bookkeeping for the stall detector. Tracks observed progress
+/// counters and timing gates outside the Dispatcher so the gate logic can
+/// be unit-tested without async I/O or a real clock.
+#[derive(Debug)]
+pub(crate) struct StallTracker {
+    last_cred_count: usize,
+    last_hash_count: usize,
+    last_change: Instant,
+    last_recovery: Instant,
+    recovery_attempts: u32,
+}
+
+impl StallTracker {
+    pub(crate) fn new() -> Self {
+        let now = Instant::now();
+        Self {
+            last_cred_count: 0,
+            last_hash_count: 0,
+            last_change: now,
+            last_recovery: now.checked_sub(RECOVERY_COOLDOWN).unwrap_or(now),
+            recovery_attempts: 0,
+        }
+    }
+
+    /// Returns true when progress (more creds or hashes) was observed since
+    /// the previous tick — caller should `continue`. Updates internal state.
+    pub(crate) fn observe_progress(&mut self, cred_count: usize, hash_count: usize) -> bool {
+        if cred_count > self.last_cred_count || hash_count > self.last_hash_count {
+            self.last_cred_count = cred_count;
+            self.last_hash_count = hash_count;
+            self.last_change = Instant::now();
+            self.recovery_attempts = 0;
+            true
+        } else {
+            false
+        }
+    }
+
+    pub(crate) fn is_stalled(&self) -> bool {
+        self.last_change.elapsed() >= STALL_THRESHOLD
+    }
+
+    pub(crate) fn cooldown_elapsed(&self) -> bool {
+        self.last_recovery.elapsed() >= RECOVERY_COOLDOWN
+    }
+
+    pub(crate) fn attempts_exhausted(&self) -> bool {
+        self.recovery_attempts >= MAX_RECOVERY_ATTEMPTS
+    }
+
+    /// Record a new recovery attempt: bumps the counter, resets the cooldown,
+    /// and returns the new attempt number (1-indexed).
+    pub(crate) fn note_recovery_attempt(&mut self) -> u32 {
+        self.last_recovery = Instant::now();
+        self.recovery_attempts += 1;
+        self.recovery_attempts
+    }
+
+    pub(crate) fn stall_duration_secs(&self) -> u64 {
+        self.last_change.elapsed().as_secs()
+    }
+
+    /// Test-only: rewind `last_change` to make `is_stalled()` true.
+    #[cfg(test)]
+    pub(crate) fn rewind_last_change(&mut self, by: Duration) {
+        self.last_change = self
+            .last_change
+            .checked_sub(by)
+            .expect("rewind out of range");
+    }
+
+    /// Test-only: rewind `last_recovery` to make `cooldown_elapsed()` true.
+    #[cfg(test)]
+    pub(crate) fn rewind_last_recovery(&mut self, by: Duration) {
+        self.last_recovery = self
+            .last_recovery
+            .checked_sub(by)
+            .expect("rewind out of range");
+    }
+
+    #[cfg(test)]
+    pub(crate) fn force_attempts(&mut self, n: u32) {
+        self.recovery_attempts = n;
+    }
+}
+
+/// Adapter trait abstracting the dispatcher operations required by the
+/// stall-recovery dispatch loop. Production wires this through
+/// `DispatcherStallAdapter`; tests pin a hand-rolled fake to drive every
+/// branch without a real Dispatcher.
+#[async_trait]
+pub(crate) trait StallRecoveryAdapter: Send + Sync {
+    async fn submit_spray(&self, domain: &str, dc_ip: &str) -> Result<Option<String>>;
+    async fn submit_lhf(
+        &self,
+        dc_ip: &str,
+        domain: &str,
+        cred: &ares_core::models::Credential,
+    ) -> Result<Option<String>>;
+    async fn submit_cold_start(&self, domain: &str, dc_ip: &str) -> Result<Option<String>>;
+    async fn mark_dedup(&self, set: &'static str, key: String);
+}
+
+/// Execute a planned set of recovery actions, returning the count that
+/// produced a task dispatch. Errors and `Ok(None)` outcomes are logged but
+/// otherwise ignored; only successful submissions update the dedup ledger.
+pub(crate) async fn execute_recovery_actions<A: StallRecoveryAdapter + ?Sized>(
+    adapter: &A,
+    plan: Vec<RecoveryAction>,
+) -> usize {
+    let mut dispatched = 0usize;
+
+    for action in plan {
+        let (result, label) = match action.kind {
+            ActionKind::Spray => (
+                adapter.submit_spray(&action.domain, &action.dc_ip).await,
+                "password spray",
+            ),
+            ActionKind::LowHanging => {
+                let cred = action
+                    .cred
+                    .as_ref()
+                    .expect("LowHanging action must carry a credential");
+                (
+                    adapter
+                        .submit_lhf(&action.dc_ip, &action.domain, cred)
+                        .await,
+                    "low-hanging fruit",
+                )
+            }
+            ActionKind::ColdStart => (
+                adapter
+                    .submit_cold_start(&action.domain, &action.dc_ip)
+                    .await,
+                "cold-start user enumeration",
+            ),
+        };
+
+        match result {
+            Ok(Some(task_id)) => {
+                info!(
+                    task_id = %task_id,
+                    domain = %action.domain,
+                    branch = %label,
+                    "Stall recovery dispatched"
+                );
+                dispatched += 1;
+                adapter.mark_dedup(action.dedup_set, action.dedup_key).await;
+            }
+            Ok(None) => {}
+            Err(e) => warn!(err = %e, branch = %label, "Stall recovery dispatch failed"),
+        }
+    }
+
+    dispatched
+}
+
+/// Production adapter wiring `auto_stall_detection` to a live `Dispatcher`.
+/// Each method is a thin delegate — the testable orchestration lives in
+/// `plan_stall_recovery` and `execute_recovery_actions`.
+struct DispatcherStallAdapter<'a> {
+    dispatcher: &'a Arc<Dispatcher>,
+}
+
+#[async_trait]
+impl<'a> StallRecoveryAdapter for DispatcherStallAdapter<'a> {
+    async fn submit_spray(&self, domain: &str, dc_ip: &str) -> Result<Option<String>> {
+        let payload = build_spray_payload(domain, dc_ip);
+        self.dispatcher
+            .throttled_submit("credential_access", "credential_access", payload, 7)
+            .await
+    }
+    async fn submit_lhf(
+        &self,
+        dc_ip: &str,
+        domain: &str,
+        cred: &ares_core::models::Credential,
+    ) -> Result<Option<String>> {
+        self.dispatcher
+            .request_low_hanging_fruit(dc_ip, domain, cred, 6)
+            .await
+    }
+    async fn submit_cold_start(&self, domain: &str, dc_ip: &str) -> Result<Option<String>> {
+        let payload = build_cold_start_payload(domain, dc_ip);
+        self.dispatcher
+            .throttled_submit("credential_access", "credential_access", payload, 7)
+            .await
+    }
+    async fn mark_dedup(&self, set: &'static str, key: String) {
+        self.dispatcher
+            .state
+            .write()
+            .await
+            .mark_processed(set, key.clone());
+        let _ = self
+            .dispatcher
+            .state
+            .persist_dedup(&self.dispatcher.queue, set, &key)
+            .await;
+    }
+}
 
 /// Monitors for discovery stalls and triggers fallback actions.
 /// Interval: 60s.
@@ -176,11 +498,10 @@ pub async fn auto_stall_detection(
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
     let start = Instant::now();
-    let mut last_cred_count = 0usize;
-    let mut last_hash_count = 0usize;
-    let mut last_change = Instant::now();
-    let mut last_recovery = Instant::now() - RECOVERY_COOLDOWN; // allow immediate first recovery
-    let mut recovery_attempts = 0u32;
+    let mut tracker = StallTracker::new();
+    let adapter = DispatcherStallAdapter {
+        dispatcher: &dispatcher,
+    };
 
     loop {
         tokio::select! {
@@ -191,12 +512,11 @@ pub async fn auto_stall_detection(
             break;
         }
 
-        // Don't check stall in the first 3 minutes (let initial recon complete)
         if start.elapsed() < Duration::from_secs(180) {
             continue;
         }
 
-        let (cred_count, hash_count, has_da, has_creds, has_users, has_dcs) = {
+        let (cred_count, hash_count, has_da, has_creds, has_users, has_dcs, all_dominated) = {
             let state = dispatcher.state.read().await;
             (
                 state.credentials.len(),
@@ -205,175 +525,59 @@ pub async fn auto_stall_detection(
                 !state.credentials.is_empty(),
                 !state.users.is_empty(),
                 !state.domain_controllers.is_empty(),
+                state.all_forests_dominated(),
             )
         };
 
-        // Skip only when ALL forests are dominated — stall recovery must
-        // keep firing if undominated forests remain after initial DA.
-        // In comprehensive mode, never skip — keep discovering.
-        if has_da && !dispatcher.config.strategy.should_continue_after_da() {
+        if has_da && !dispatcher.config.strategy.should_continue_after_da() && all_dominated {
+            continue;
+        }
+
+        if tracker.observe_progress(cred_count, hash_count) {
+            continue;
+        }
+        if !tracker.is_stalled() {
+            continue;
+        }
+        if !tracker.cooldown_elapsed() {
+            continue;
+        }
+        if tracker.attempts_exhausted() {
+            continue;
+        }
+
+        let attempt = tracker.note_recovery_attempt();
+
+        let plan = {
             let state = dispatcher.state.read().await;
-            if state.all_forests_dominated() {
-                continue;
-            }
-        }
-
-        // Check if there has been progress
-        if cred_count > last_cred_count || hash_count > last_hash_count {
-            last_cred_count = cred_count;
-            last_hash_count = hash_count;
-            last_change = Instant::now();
-            recovery_attempts = 0; // Reset on progress
-            continue;
-        }
-
-        // Not stalled yet
-        if last_change.elapsed() < STALL_THRESHOLD {
-            continue;
-        }
-
-        // Cooldown between recovery actions
-        if last_recovery.elapsed() < RECOVERY_COOLDOWN {
-            continue;
-        }
-
-        // Cap recovery attempts (don't spam indefinitely)
-        if recovery_attempts >= 10 {
-            continue;
-        }
-
-        last_recovery = Instant::now();
-        recovery_attempts += 1;
-
-        let mut dispatched = 0usize;
-
-        // Skip domains with pending delegation vulns — sprays lock delegation
-        // accounts and prevent S4U exploitation from succeeding.
-        // Also respect strategy gate — don't spray when excluded.
-        if has_users && has_dcs && dispatcher.is_technique_allowed("password_spray") {
-            let spray_work: Vec<(String, String)> = {
-                let state = dispatcher.state.read().await;
-                select_stall_spray_work(&state, recovery_attempts)
+            let ctx = StallContext {
+                has_users,
+                has_creds,
+                has_dcs,
+                allow_password_spray: dispatcher.is_technique_allowed("password_spray"),
+                allow_asrep_roast: dispatcher.is_technique_allowed("asrep_roast"),
+                lhf_max: 2,
             };
+            plan_stall_recovery(&state, attempt, &ctx)
+        };
 
-            for (domain, dc_ip) in spray_work {
-                let payload = json!({
-                    "technique": "password_spray",
-                    "target_ip": dc_ip,
-                    "domain": domain,
-                    "use_common_passwords": true,
-                    "acknowledge_no_policy": true,
-                });
-
-                match dispatcher
-                    .throttled_submit("credential_access", "credential_access", payload, 7)
-                    .await
-                {
-                    Ok(Some(task_id)) => {
-                        info!(task_id = %task_id, domain = %domain, "Stall recovery: password spray dispatched");
-                        dispatched += 1;
-                        let key = stall_spray_dedup_key(&domain, recovery_attempts);
-                        dispatcher
-                            .state
-                            .write()
-                            .await
-                            .mark_processed(DEDUP_PASSWORD_SPRAY, key.clone());
-                        let _ = dispatcher
-                            .state
-                            .persist_dedup(&dispatcher.queue, DEDUP_PASSWORD_SPRAY, &key)
-                            .await;
-                    }
-                    Ok(None) => {}
-                    Err(e) => warn!(err = %e, "Stall recovery: spray failed"),
-                }
-            }
-        }
-
-        if has_creds && has_dcs {
-            let lhf_work: Vec<(String, String, String, ares_core::models::Credential)> = {
-                let state = dispatcher.state.read().await;
-                select_stall_lhf_work(&state, recovery_attempts, 2)
-            };
-
-            for (key, dc_ip, domain, cred) in lhf_work {
-                match dispatcher
-                    .request_low_hanging_fruit(&dc_ip, &domain, &cred, 6)
-                    .await
-                {
-                    Ok(Some(task_id)) => {
-                        info!(task_id = %task_id, domain = %domain, "Stall recovery: low-hanging fruit dispatched");
-                        dispatched += 1;
-                        dispatcher
-                            .state
-                            .write()
-                            .await
-                            .mark_processed(DEDUP_EXPANSION_CREDS, key.clone());
-                        let _ = dispatcher
-                            .state
-                            .persist_dedup(&dispatcher.queue, DEDUP_EXPANSION_CREDS, &key)
-                            .await;
-                    }
-                    Ok(None) => {}
-                    Err(e) => warn!(err = %e, "Stall recovery: low-hanging fruit failed"),
-                }
-            }
-        }
-
-        // Cold-start recovery: zero users AND zero creds but DCs known.
-        // Initial bootstrap (petitpotam unauth, anonymous SAMR, etc.)
-        // returned nothing — the spray and LHF branches above are both
-        // gated on prior discoveries, so without this third branch the
-        // op idles forever. Fall back to AS-REP roast cold-start (seclists
-        // wordlists + kerbrute), gated on `asrep_roast` strategy allow.
-        if !has_users && !has_creds && has_dcs && dispatcher.is_technique_allowed("asrep_roast") {
-            let cold_start_work: Vec<(String, String)> = {
-                let state = dispatcher.state.read().await;
-                select_stall_cold_start_work(&state, recovery_attempts)
-            };
-
-            for (domain, dc_ip) in cold_start_work {
-                let payload =
-                    super::credential_access::build_asrep_payload(&domain, &dc_ip, &[], &[]);
-
-                match dispatcher
-                    .throttled_submit("credential_access", "credential_access", payload, 7)
-                    .await
-                {
-                    Ok(Some(task_id)) => {
-                        info!(task_id = %task_id, domain = %domain, "Stall recovery: cold-start user enumeration dispatched");
-                        dispatched += 1;
-                        let key = stall_cold_start_dedup_key(&domain, recovery_attempts);
-                        dispatcher
-                            .state
-                            .write()
-                            .await
-                            .mark_processed(DEDUP_STALL_COLD_START, key.clone());
-                        let _ = dispatcher
-                            .state
-                            .persist_dedup(&dispatcher.queue, DEDUP_STALL_COLD_START, &key)
-                            .await;
-                    }
-                    Ok(None) => {}
-                    Err(e) => warn!(err = %e, "Stall recovery: cold-start failed"),
-                }
-            }
-        }
+        let dispatched = execute_recovery_actions(&adapter, plan).await;
 
         if dispatched > 0 {
             info!(
-                stall_duration_secs = last_change.elapsed().as_secs(),
+                stall_duration_secs = tracker.stall_duration_secs(),
                 cred_count,
                 hash_count,
-                recovery_attempt = recovery_attempts,
+                recovery_attempt = attempt,
                 dispatched,
                 "Operation stall detected — fallback actions dispatched"
             );
         } else {
             warn!(
-                stall_duration_secs = last_change.elapsed().as_secs(),
+                stall_duration_secs = tracker.stall_duration_secs(),
                 cred_count,
                 hash_count,
-                recovery_attempt = recovery_attempts,
+                recovery_attempt = attempt,
                 has_users,
                 has_creds,
                 has_dcs,
@@ -386,6 +590,7 @@ pub async fn auto_stall_detection(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
 
     fn make_cred(user: &str, password: &str, domain: &str) -> ares_core::models::Credential {
         ares_core::models::Credential {
@@ -571,9 +776,7 @@ mod tests {
             DEDUP_PASSWORD_SPRAY,
             stall_spray_dedup_key("contoso.local", 0),
         );
-        // Same recovery_attempt → skipped.
         assert!(select_stall_spray_work(&s, 0).is_empty());
-        // Different recovery_attempt → re-emitted (fresh round).
         assert_eq!(select_stall_spray_work(&s, 1).len(), 1);
     }
 
@@ -629,6 +832,31 @@ mod tests {
     }
 
     #[test]
+    fn select_stall_lhf_caps_at_max_items() {
+        let mut s = StateInner::new("op".into());
+        s.domain_controllers
+            .insert("contoso.local".into(), "192.168.58.10".into());
+        for u in &["alice", "bob", "carol", "dave"] {
+            s.credentials.push(make_cred(u, "Pw", "contoso.local"));
+        }
+        assert_eq!(select_stall_lhf_work(&s, 0, 2).len(), 2);
+        assert_eq!(select_stall_lhf_work(&s, 0, 10).len(), 4);
+    }
+
+    #[test]
+    fn select_stall_lhf_skips_already_processed_for_this_round() {
+        let mut s = StateInner::new("op".into());
+        s.credentials
+            .push(make_cred("alice", "Pw", "contoso.local"));
+        s.domain_controllers
+            .insert("contoso.local".into(), "192.168.58.10".into());
+        let key = stall_lhf_dedup_key("contoso.local", "alice", 0);
+        s.mark_processed(DEDUP_EXPANSION_CREDS, key);
+        assert!(select_stall_lhf_work(&s, 0, 5).is_empty());
+        assert_eq!(select_stall_lhf_work(&s, 1, 5).len(), 1);
+    }
+
+    #[test]
     fn stall_cold_start_dedup_key_includes_recovery_attempt() {
         assert_eq!(
             stall_cold_start_dedup_key("contoso.local", 4),
@@ -680,17 +908,12 @@ mod tests {
             DEDUP_STALL_COLD_START,
             stall_cold_start_dedup_key("contoso.local", 0),
         );
-        // Same recovery_attempt → skipped.
         assert!(select_stall_cold_start_work(&s, 0).is_empty());
-        // Different recovery_attempt → re-emitted.
         assert_eq!(select_stall_cold_start_work(&s, 1).len(), 1);
     }
 
     #[test]
     fn select_stall_cold_start_ignores_delegation_vulns() {
-        // Cold-start runs when has_users=false AND has_creds=false, so the
-        // spray's delegation-skip gate doesn't apply — we still need to
-        // enumerate users on a DC even if it has a pending delegation vuln.
         let mut s = StateInner::new("op".into());
         s.domain_controllers
             .insert("contoso.local".into(), "192.168.58.10".into());
@@ -710,14 +933,442 @@ mod tests {
     }
 
     #[test]
-    fn select_stall_lhf_caps_at_max_items() {
+    fn build_spray_payload_shape() {
+        let p = build_spray_payload("contoso.local", "192.168.58.10");
+        assert_eq!(p["technique"], "password_spray");
+        assert_eq!(p["target_ip"], "192.168.58.10");
+        assert_eq!(p["domain"], "contoso.local");
+        assert_eq!(p["use_common_passwords"], true);
+        assert_eq!(p["acknowledge_no_policy"], true);
+    }
+
+    #[test]
+    fn build_cold_start_payload_emits_cold_start_instructions() {
+        let p = build_cold_start_payload("contoso.local", "192.168.58.10");
+        let techniques = p["techniques"].as_array().expect("techniques array");
+        let tech_names: Vec<&str> = techniques.iter().filter_map(|v| v.as_str()).collect();
+        assert!(tech_names.contains(&"asrep_roast"));
+        assert!(tech_names.contains(&"kerberos_user_enum_noauth"));
+        assert_eq!(p["target_ip"], "192.168.58.10");
+        assert_eq!(p["domain"], "contoso.local");
+        let instructions = p["instructions"].as_str().expect("instructions");
+        assert!(instructions.contains("seclists"));
+        assert!(instructions.contains("kerbrute"));
+    }
+
+    fn ctx(
+        has_users: bool,
+        has_creds: bool,
+        has_dcs: bool,
+        allow_password_spray: bool,
+        allow_asrep_roast: bool,
+        lhf_max: usize,
+    ) -> StallContext {
+        StallContext {
+            has_users,
+            has_creds,
+            has_dcs,
+            allow_password_spray,
+            allow_asrep_roast,
+            lhf_max,
+        }
+    }
+
+    #[test]
+    fn plan_stall_recovery_empty_state_no_actions() {
+        let s = StateInner::new("op".into());
+        let plan = plan_stall_recovery(&s, 1, &ctx(false, false, false, true, true, 2));
+        assert!(plan.is_empty());
+    }
+
+    #[test]
+    fn plan_stall_recovery_emits_spray_when_users_present() {
         let mut s = StateInner::new("op".into());
         s.domain_controllers
             .insert("contoso.local".into(), "192.168.58.10".into());
-        for u in &["alice", "bob", "carol", "dave"] {
+        let plan = plan_stall_recovery(&s, 1, &ctx(true, false, true, true, false, 2));
+        assert_eq!(plan.len(), 1);
+        assert_eq!(plan[0].kind, ActionKind::Spray);
+        assert_eq!(plan[0].domain, "contoso.local");
+        assert_eq!(plan[0].dedup_set, DEDUP_PASSWORD_SPRAY);
+        assert_eq!(plan[0].dedup_key, "stall_spray:contoso.local:1");
+    }
+
+    #[test]
+    fn plan_stall_recovery_emits_lhf_when_creds_present() {
+        let mut s = StateInner::new("op".into());
+        s.credentials
+            .push(make_cred("alice", "Pw", "contoso.local"));
+        s.domain_controllers
+            .insert("contoso.local".into(), "192.168.58.10".into());
+        let plan = plan_stall_recovery(&s, 1, &ctx(false, true, true, false, false, 2));
+        assert_eq!(plan.len(), 1);
+        assert_eq!(plan[0].kind, ActionKind::LowHanging);
+        assert_eq!(plan[0].dedup_set, DEDUP_EXPANSION_CREDS);
+        assert!(plan[0].cred.is_some());
+    }
+
+    #[test]
+    fn plan_stall_recovery_emits_cold_start_when_empty() {
+        let mut s = StateInner::new("op".into());
+        s.domain_controllers
+            .insert("contoso.local".into(), "192.168.58.10".into());
+        let plan = plan_stall_recovery(&s, 2, &ctx(false, false, true, false, true, 2));
+        assert_eq!(plan.len(), 1);
+        assert_eq!(plan[0].kind, ActionKind::ColdStart);
+        assert_eq!(plan[0].dedup_set, DEDUP_STALL_COLD_START);
+        assert_eq!(plan[0].dedup_key, "stall_cold_start:contoso.local:2");
+    }
+
+    #[test]
+    fn plan_stall_recovery_cold_start_suppressed_when_users_or_creds_present() {
+        let mut s = StateInner::new("op".into());
+        s.domain_controllers
+            .insert("contoso.local".into(), "192.168.58.10".into());
+
+        let plan = plan_stall_recovery(&s, 1, &ctx(true, false, true, false, true, 2));
+        assert!(plan.iter().all(|a| a.kind != ActionKind::ColdStart));
+
+        let plan = plan_stall_recovery(&s, 1, &ctx(false, true, true, false, true, 2));
+        assert!(plan.iter().all(|a| a.kind != ActionKind::ColdStart));
+    }
+
+    #[test]
+    fn plan_stall_recovery_spray_gated_by_technique_flag() {
+        let mut s = StateInner::new("op".into());
+        s.domain_controllers
+            .insert("contoso.local".into(), "192.168.58.10".into());
+        let plan = plan_stall_recovery(&s, 1, &ctx(true, false, true, false, true, 2));
+        assert!(plan.iter().all(|a| a.kind != ActionKind::Spray));
+    }
+
+    #[test]
+    fn plan_stall_recovery_cold_start_gated_by_technique_flag() {
+        let mut s = StateInner::new("op".into());
+        s.domain_controllers
+            .insert("contoso.local".into(), "192.168.58.10".into());
+        let plan = plan_stall_recovery(&s, 1, &ctx(false, false, true, true, false, 2));
+        assert!(plan.is_empty());
+    }
+
+    #[test]
+    fn plan_stall_recovery_requires_dcs() {
+        let mut s = StateInner::new("op".into());
+        s.credentials
+            .push(make_cred("alice", "Pw", "contoso.local"));
+        let plan = plan_stall_recovery(&s, 1, &ctx(true, true, false, true, true, 2));
+        assert!(plan.is_empty());
+    }
+
+    #[test]
+    fn plan_stall_recovery_lhf_respects_cap() {
+        let mut s = StateInner::new("op".into());
+        s.domain_controllers
+            .insert("contoso.local".into(), "192.168.58.10".into());
+        for u in &["alice", "bob", "carol"] {
             s.credentials.push(make_cred(u, "Pw", "contoso.local"));
         }
-        assert_eq!(select_stall_lhf_work(&s, 0, 2).len(), 2);
-        assert_eq!(select_stall_lhf_work(&s, 0, 10).len(), 4);
+        let plan = plan_stall_recovery(&s, 1, &ctx(false, true, true, false, false, 2));
+        assert_eq!(plan.len(), 2);
+        assert!(plan.iter().all(|a| a.kind == ActionKind::LowHanging));
+    }
+
+    #[test]
+    fn stall_tracker_observe_progress_marks_change() {
+        let mut t = StallTracker::new();
+        assert!(t.observe_progress(1, 0));
+        assert!(!t.observe_progress(1, 0));
+        assert!(t.observe_progress(1, 1));
+    }
+
+    #[test]
+    fn stall_tracker_observe_progress_resets_attempts() {
+        let mut t = StallTracker::new();
+        t.force_attempts(3);
+        t.observe_progress(1, 0);
+        assert!(!t.attempts_exhausted());
+        t.force_attempts(MAX_RECOVERY_ATTEMPTS);
+        assert!(t.attempts_exhausted());
+        t.observe_progress(2, 0);
+        assert!(!t.attempts_exhausted());
+    }
+
+    #[test]
+    fn stall_tracker_is_stalled_after_threshold() {
+        let mut t = StallTracker::new();
+        assert!(!t.is_stalled());
+        t.rewind_last_change(STALL_THRESHOLD + Duration::from_secs(1));
+        assert!(t.is_stalled());
+    }
+
+    #[test]
+    fn stall_tracker_cooldown_elapsed_on_construction() {
+        let t = StallTracker::new();
+        assert!(t.cooldown_elapsed());
+    }
+
+    #[test]
+    fn stall_tracker_cooldown_not_elapsed_after_recovery() {
+        let mut t = StallTracker::new();
+        t.note_recovery_attempt();
+        assert!(!t.cooldown_elapsed());
+        t.rewind_last_recovery(RECOVERY_COOLDOWN + Duration::from_secs(1));
+        assert!(t.cooldown_elapsed());
+    }
+
+    #[test]
+    fn stall_tracker_note_recovery_increments() {
+        let mut t = StallTracker::new();
+        assert_eq!(t.note_recovery_attempt(), 1);
+        assert_eq!(t.note_recovery_attempt(), 2);
+        assert_eq!(t.note_recovery_attempt(), 3);
+    }
+
+    #[test]
+    fn stall_tracker_attempts_exhausted_at_cap() {
+        let mut t = StallTracker::new();
+        for _ in 0..MAX_RECOVERY_ATTEMPTS {
+            t.note_recovery_attempt();
+        }
+        assert!(t.attempts_exhausted());
+    }
+
+    #[test]
+    fn stall_tracker_stall_duration_secs_increases() {
+        let mut t = StallTracker::new();
+        assert_eq!(t.stall_duration_secs(), 0);
+        t.rewind_last_change(Duration::from_secs(42));
+        assert!(t.stall_duration_secs() >= 42);
+    }
+
+    /// Hand-rolled fake adapter for testing `execute_recovery_actions`.
+    /// Records every call and returns scripted outcomes per action kind.
+    struct FakeAdapter {
+        spray_outcome: Mutex<Result<Option<String>, String>>,
+        lhf_outcome: Mutex<Result<Option<String>, String>>,
+        cold_start_outcome: Mutex<Result<Option<String>, String>>,
+        spray_calls: Mutex<Vec<(String, String)>>,
+        lhf_calls: Mutex<Vec<(String, String, String)>>,
+        cold_start_calls: Mutex<Vec<(String, String)>>,
+        dedup_marks: Mutex<Vec<(&'static str, String)>>,
+    }
+
+    impl FakeAdapter {
+        fn new() -> Self {
+            Self {
+                spray_outcome: Mutex::new(Ok(Some("spray-task".into()))),
+                lhf_outcome: Mutex::new(Ok(Some("lhf-task".into()))),
+                cold_start_outcome: Mutex::new(Ok(Some("cs-task".into()))),
+                spray_calls: Mutex::new(Vec::new()),
+                lhf_calls: Mutex::new(Vec::new()),
+                cold_start_calls: Mutex::new(Vec::new()),
+                dedup_marks: Mutex::new(Vec::new()),
+            }
+        }
+        fn set_spray(&self, r: Result<Option<String>, String>) {
+            *self.spray_outcome.lock().unwrap() = r;
+        }
+        fn set_lhf(&self, r: Result<Option<String>, String>) {
+            *self.lhf_outcome.lock().unwrap() = r;
+        }
+        fn set_cold_start(&self, r: Result<Option<String>, String>) {
+            *self.cold_start_outcome.lock().unwrap() = r;
+        }
+    }
+
+    #[async_trait]
+    impl StallRecoveryAdapter for FakeAdapter {
+        async fn submit_spray(&self, domain: &str, dc_ip: &str) -> Result<Option<String>> {
+            self.spray_calls
+                .lock()
+                .unwrap()
+                .push((domain.to_string(), dc_ip.to_string()));
+            match self.spray_outcome.lock().unwrap().clone() {
+                Ok(v) => Ok(v),
+                Err(e) => Err(anyhow::anyhow!(e)),
+            }
+        }
+        async fn submit_lhf(
+            &self,
+            dc_ip: &str,
+            domain: &str,
+            cred: &ares_core::models::Credential,
+        ) -> Result<Option<String>> {
+            self.lhf_calls.lock().unwrap().push((
+                dc_ip.to_string(),
+                domain.to_string(),
+                cred.username.clone(),
+            ));
+            match self.lhf_outcome.lock().unwrap().clone() {
+                Ok(v) => Ok(v),
+                Err(e) => Err(anyhow::anyhow!(e)),
+            }
+        }
+        async fn submit_cold_start(&self, domain: &str, dc_ip: &str) -> Result<Option<String>> {
+            self.cold_start_calls
+                .lock()
+                .unwrap()
+                .push((domain.to_string(), dc_ip.to_string()));
+            match self.cold_start_outcome.lock().unwrap().clone() {
+                Ok(v) => Ok(v),
+                Err(e) => Err(anyhow::anyhow!(e)),
+            }
+        }
+        async fn mark_dedup(&self, set: &'static str, key: String) {
+            self.dedup_marks.lock().unwrap().push((set, key));
+        }
+    }
+
+    fn spray_action(domain: &str, dc_ip: &str, attempt: u32) -> RecoveryAction {
+        RecoveryAction {
+            kind: ActionKind::Spray,
+            domain: domain.to_string(),
+            dc_ip: dc_ip.to_string(),
+            dedup_key: stall_spray_dedup_key(domain, attempt),
+            dedup_set: DEDUP_PASSWORD_SPRAY,
+            cred: None,
+        }
+    }
+
+    fn lhf_action(domain: &str, dc_ip: &str, user: &str, attempt: u32) -> RecoveryAction {
+        RecoveryAction {
+            kind: ActionKind::LowHanging,
+            domain: domain.to_string(),
+            dc_ip: dc_ip.to_string(),
+            dedup_key: stall_lhf_dedup_key(domain, user, attempt),
+            dedup_set: DEDUP_EXPANSION_CREDS,
+            cred: Some(make_cred(user, "Pw", domain)),
+        }
+    }
+
+    fn cold_start_action(domain: &str, dc_ip: &str, attempt: u32) -> RecoveryAction {
+        RecoveryAction {
+            kind: ActionKind::ColdStart,
+            domain: domain.to_string(),
+            dc_ip: dc_ip.to_string(),
+            dedup_key: stall_cold_start_dedup_key(domain, attempt),
+            dedup_set: DEDUP_STALL_COLD_START,
+            cred: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn execute_recovery_actions_empty_plan_zero_dispatched() {
+        let fake = FakeAdapter::new();
+        let n = execute_recovery_actions(&fake, vec![]).await;
+        assert_eq!(n, 0);
+        assert!(fake.dedup_marks.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn execute_recovery_actions_dispatches_spray_and_marks_dedup() {
+        let fake = FakeAdapter::new();
+        let plan = vec![spray_action("contoso.local", "192.168.58.10", 1)];
+        let n = execute_recovery_actions(&fake, plan).await;
+        assert_eq!(n, 1);
+        let calls = fake.spray_calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, "contoso.local");
+        let marks = fake.dedup_marks.lock().unwrap();
+        assert_eq!(marks.len(), 1);
+        assert_eq!(marks[0].0, DEDUP_PASSWORD_SPRAY);
+        assert_eq!(marks[0].1, "stall_spray:contoso.local:1");
+    }
+
+    #[tokio::test]
+    async fn execute_recovery_actions_dispatches_lhf_and_passes_cred() {
+        let fake = FakeAdapter::new();
+        let plan = vec![lhf_action("contoso.local", "192.168.58.10", "alice", 1)];
+        let n = execute_recovery_actions(&fake, plan).await;
+        assert_eq!(n, 1);
+        let calls = fake.lhf_calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, "192.168.58.10");
+        assert_eq!(calls[0].1, "contoso.local");
+        assert_eq!(calls[0].2, "alice");
+        let marks = fake.dedup_marks.lock().unwrap();
+        assert_eq!(marks[0].0, DEDUP_EXPANSION_CREDS);
+    }
+
+    #[tokio::test]
+    async fn execute_recovery_actions_dispatches_cold_start_and_marks_dedup() {
+        let fake = FakeAdapter::new();
+        let plan = vec![cold_start_action("fabrikam.local", "192.168.58.40", 3)];
+        let n = execute_recovery_actions(&fake, plan).await;
+        assert_eq!(n, 1);
+        let calls = fake.cold_start_calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, "fabrikam.local");
+        let marks = fake.dedup_marks.lock().unwrap();
+        assert_eq!(marks[0].0, DEDUP_STALL_COLD_START);
+        assert_eq!(marks[0].1, "stall_cold_start:fabrikam.local:3");
+    }
+
+    #[tokio::test]
+    async fn execute_recovery_actions_skips_dedup_on_ok_none() {
+        let fake = FakeAdapter::new();
+        fake.set_spray(Ok(None));
+        let plan = vec![spray_action("contoso.local", "192.168.58.10", 1)];
+        let n = execute_recovery_actions(&fake, plan).await;
+        assert_eq!(n, 0);
+        assert_eq!(fake.spray_calls.lock().unwrap().len(), 1);
+        assert!(fake.dedup_marks.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn execute_recovery_actions_skips_dedup_on_error() {
+        let fake = FakeAdapter::new();
+        fake.set_lhf(Err("dispatch boom".into()));
+        let plan = vec![lhf_action("contoso.local", "192.168.58.10", "alice", 1)];
+        let n = execute_recovery_actions(&fake, plan).await;
+        assert_eq!(n, 0);
+        assert!(fake.dedup_marks.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn execute_recovery_actions_dispatches_mixed_plan() {
+        let fake = FakeAdapter::new();
+        let plan = vec![
+            spray_action("contoso.local", "192.168.58.10", 1),
+            lhf_action("contoso.local", "192.168.58.10", "alice", 1),
+            cold_start_action("fabrikam.local", "192.168.58.40", 1),
+        ];
+        let n = execute_recovery_actions(&fake, plan).await;
+        assert_eq!(n, 3);
+        assert_eq!(fake.spray_calls.lock().unwrap().len(), 1);
+        assert_eq!(fake.lhf_calls.lock().unwrap().len(), 1);
+        assert_eq!(fake.cold_start_calls.lock().unwrap().len(), 1);
+        assert_eq!(fake.dedup_marks.lock().unwrap().len(), 3);
+    }
+
+    #[tokio::test]
+    async fn execute_recovery_actions_partial_success_counts_only_dispatched() {
+        let fake = FakeAdapter::new();
+        fake.set_spray(Ok(None));
+        fake.set_cold_start(Err("boom".into()));
+        let plan = vec![
+            spray_action("contoso.local", "192.168.58.10", 1),
+            lhf_action("contoso.local", "192.168.58.10", "alice", 1),
+            cold_start_action("fabrikam.local", "192.168.58.40", 1),
+        ];
+        let n = execute_recovery_actions(&fake, plan).await;
+        assert_eq!(n, 1);
+        let marks = fake.dedup_marks.lock().unwrap();
+        assert_eq!(marks.len(), 1);
+        assert_eq!(marks[0].0, DEDUP_EXPANSION_CREDS);
+    }
+
+    #[tokio::test]
+    async fn execute_recovery_actions_each_action_marks_its_own_dedup_set() {
+        let fake = FakeAdapter::new();
+        let plan = vec![
+            spray_action("contoso.local", "192.168.58.10", 7),
+            cold_start_action("fabrikam.local", "192.168.58.40", 7),
+        ];
+        execute_recovery_actions(&fake, plan).await;
+        let marks = fake.dedup_marks.lock().unwrap();
+        let sets: Vec<&str> = marks.iter().map(|(s, _)| *s).collect();
+        assert!(sets.contains(&DEDUP_PASSWORD_SPRAY));
+        assert!(sets.contains(&DEDUP_STALL_COLD_START));
     }
 }
