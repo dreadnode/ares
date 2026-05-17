@@ -127,15 +127,7 @@ pub(crate) fn extract_ip_from_line(line: &str) -> Option<String> {
 /// Drives the SID extraction path so the same caller produces the same input
 /// regardless of which output convention the tool used. Pure — no Redis, no
 /// dispatcher.
-#[cfg(test)]
 pub(crate) fn collect_payload_text_parts(payload: &Value) -> Vec<String> {
-    collect_payload_text_parts_with_policy(payload, true)
-}
-
-fn collect_payload_text_parts_with_policy(
-    payload: &Value,
-    include_legacy_scalar_outputs: bool,
-) -> Vec<String> {
     let mut parts: Vec<String> = Vec::new();
     if let Some(arr) = payload.get("tool_outputs").and_then(|v| v.as_array()) {
         for item in arr {
@@ -146,31 +138,15 @@ fn collect_payload_text_parts_with_policy(
             }
         }
     }
-    if include_legacy_scalar_outputs {
-        for key in &["tool_output", "output"] {
-            if let Some(s) = payload.get(*key).and_then(|v| v.as_str()) {
-                parts.push(s.to_string());
-            }
-        }
-    }
     parts
 }
 
 /// Scan trusted tool-output text fields for a "golden ticket saved" marker.
 ///
-/// Walks `tool_outputs` (string OR `{output: string}` form), then
-/// legacy worker `tool_output` / `output`. Agent-completion `summary` and
-/// `has_golden_ticket: true` are intentionally ignored.
-#[cfg(test)]
+/// Walks `tool_outputs` (string OR `{output: string}` form). Agent-completion
+/// `summary` and `has_golden_ticket: true` are intentionally ignored.
 pub(crate) fn payload_contains_golden_ticket_marker(payload: &Value) -> bool {
-    payload_contains_golden_ticket_marker_with_policy(payload, true)
-}
-
-fn payload_contains_golden_ticket_marker_with_policy(
-    payload: &Value,
-    include_legacy_scalar_outputs: bool,
-) -> bool {
-    collect_payload_text_parts_with_policy(payload, include_legacy_scalar_outputs)
+    collect_payload_text_parts(payload)
         .into_iter()
         .any(|text| has_golden_ticket_indicator(&text))
 }
