@@ -30,3 +30,6 @@ async-trait = "0.1"
 tempfile = "3"
 tracing-test = "0.2"
 tracing-subscriber = { workspace = true }
+
+[lints]
+workspace = true

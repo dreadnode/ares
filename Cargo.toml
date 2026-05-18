@@ -2,6 +2,12 @@
 resolver = "2"
 members = ["ares-core", "ares-cli", "ares-llm", "ares-tools"]
 
+[workspace.lints.clippy]
+# Functions with many parameters must use a parameter struct (see the
+# `*Params` / `*Config` types throughout the workspace). Suppressing this
+# with `#[allow(...)]` defeats the whole point — fix the signature instead.
+too_many_arguments = "deny"
+
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
