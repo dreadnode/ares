@@ -205,8 +205,6 @@ pub(crate) async fn discover_dc_domains(
 }
 
 /// Write initial operation metadata to Redis so workers can discover the operation.
-///
-/// Mirrors the Python `_initialize_state_and_persist()` in `_orchestrator.py`.
 pub(crate) async fn bootstrap_meta(queue: &TaskQueue, config: &OrchestratorConfig) -> Result<()> {
     use chrono::Utc;
 
@@ -254,7 +252,6 @@ pub(crate) async fn bootstrap_meta(queue: &TaskQueue, config: &OrchestratorConfi
     // Set active operation pointer for worker discovery
     let _: () = conn.set("ares:op:active", &config.operation_id).await?;
 
-    // Write operation status key (matches Python's status tracking)
     ares_core::state::set_operation_status(&mut conn, &config.operation_id, "running").await?;
 
     // Store the LLM model name for worker discovery and recovery

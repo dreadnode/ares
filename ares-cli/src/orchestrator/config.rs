@@ -1,8 +1,4 @@
 //! Configuration loaded from environment variables.
-//!
-//! Mirrors the Python `ares.core.config` module. Every knob exposed to the
-//! Python orchestrator is also configurable here so the Rust binary is a
-//! drop-in replacement.
 
 use std::env;
 use std::time::Duration;

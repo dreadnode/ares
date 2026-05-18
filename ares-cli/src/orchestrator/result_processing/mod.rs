@@ -211,10 +211,8 @@ pub async fn process_completed_task(
         extract_and_cache_domain_sid(payload, task_domain.as_deref(), dispatcher).await;
     }
 
-    // S4U auto-chain: detect .ccache in output and dispatch secretsdump with ticket.
-    // Mirrors Python's _auto_chain_s4u_lateral_movement — when a task produces a
-    // Kerberos ticket (.ccache), chain a secretsdump using that ticket for
-    // immediate credential extraction.
+    // S4U auto-chain: when a task produces a Kerberos ticket (.ccache), chain a
+    // secretsdump using that ticket for immediate credential extraction.
     if let Some(ref payload) = result.result {
         auto_chain_s4u_secretsdump(
             payload,
@@ -1212,9 +1210,8 @@ async fn auto_chain_s4u_secretsdump(
 /// Extract discoveries from raw text fields in the result payload.
 ///
 /// Collects text from raw tool output fields ("tool_output", "output", "tool_outputs")
-/// and runs regex-based extraction on the combined text. This mirrors Python's
-/// `_process_output_text()` — a safety net that catches discoveries the per-tool
-/// parsers or LLM-reported structured data may have missed.
+/// and runs regex-based extraction on the combined text. Safety net that catches
+/// discoveries the per-tool parsers or LLM-reported structured data may have missed.
 async fn extract_from_raw_text(
     payload: &Value,
     dispatcher: &Arc<Dispatcher>,

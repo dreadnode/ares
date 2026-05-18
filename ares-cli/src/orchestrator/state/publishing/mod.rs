@@ -69,9 +69,9 @@ pub(super) static TRAILING_PAREN_RE: LazyLock<Regex> =
 
 /// Sanitize and validate a credential before storage.
 ///
-/// Mirrors Python's `add_credential()` — strips noise from password values,
-/// normalizes `user@domain@domain` usernames, resolves NetBIOS domains to FQDN,
-/// and rejects invalid entries. Returns `None` if the credential should be dropped.
+/// Strips noise from password values, normalizes `user@domain@domain` usernames,
+/// resolves NetBIOS domains to FQDN, and rejects invalid entries. Returns `None`
+/// if the credential should be dropped.
 ///
 /// `known_domains` is the set of FQDNs already trusted by the operation
 /// (state.domains plus state.domain_controllers keys). When supplied, an
@@ -106,7 +106,7 @@ pub(super) fn sanitize_credential(
         cred.password = TRAILING_PAREN_RE.replace(&cred.password, "").to_string();
     }
 
-    // Strip ellipsis truncation artifacts (matches Python add_credential)
+    // Strip ellipsis truncation artifacts from CLI output.
     while cred.password.ends_with("...") {
         cred.password = cred.password[..cred.password.len() - 3].trim().to_string();
     }

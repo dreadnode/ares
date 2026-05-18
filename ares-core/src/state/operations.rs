@@ -48,7 +48,7 @@ pub async fn publish_state_update(
 
 /// Set the operation status JSON string.
 ///
-/// Key: `ares:op:{id}:status` — matches Python's operation status tracking.
+/// Key: `ares:op:{id}:status`.
 pub async fn set_operation_status(
     conn: &mut impl AsyncCommands,
     operation_id: &str,

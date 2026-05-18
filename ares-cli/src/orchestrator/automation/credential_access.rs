@@ -667,8 +667,8 @@ pub async fn auto_credential_access(
             }
         }
 
-        // Mirrors Python's fast credential discovery — dispatches high-success-rate
-        // techniques that find hardcoded/stored passwords in Active Directory.
+        // Fast credential discovery — dispatch high-success-rate techniques that
+        // find hardcoded/stored passwords in Active Directory.
         let low_hanging_work: Vec<LowHangingWorkItem> = {
             let state = dispatcher.state.read().await;
             let max = if dispatcher.config.strategy.is_comprehensive() {

@@ -228,7 +228,7 @@ pub fn parse_tool_output(tool_name: &str, output: &str, params: &Value) -> Value
         }
         "username_as_password" => {
             let creds = parse_spray_success(output, params);
-            // Only keep creds where password == username (matches Python guard)
+            // Only keep creds where password == username.
             let filtered: Vec<Value> = creds
                 .into_iter()
                 .filter(|c| {
@@ -768,7 +768,7 @@ SMB         192.168.58.121  445    DC01       [*] Enumerated 10 local users: CHI
         assert_eq!(creds[0]["username"], "dave.miller");
         assert_eq!(creds[0]["password"], "Summer2026!");
 
-        // Guest should be included (matches Python behavior)
+        // Guest should be included.
         assert!(user_entries.iter().any(|u| u["username"] == "Guest"));
 
         // All users should have netexec_user_enum source

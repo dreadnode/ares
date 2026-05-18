@@ -1,7 +1,6 @@
 //! Task routing — decides which agent queue receives a task.
 //!
-//! Mirrors the Python `ares.core.dispatcher.routing.RoutingMixin` logic:
-//! route by role, respect per-role concurrency limits, track active tasks.
+//! Routes by role, respects per-role concurrency limits, tracks active tasks.
 
 use std::collections::HashMap;
 use std::sync::Arc;

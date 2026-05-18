@@ -59,12 +59,10 @@ pub struct WorkerConfig {
     /// Default: 15 seconds.
     pub heartbeat_interval: Duration,
 
-    /// Heartbeat TTL in Redis. Must be > heartbeat_interval.
-    /// Default: 60 seconds (matches Python's HEARTBEAT_TTL).
+    /// Heartbeat TTL in Redis. Must be > heartbeat_interval. Default: 60s.
     pub heartbeat_ttl: Duration,
 
-    /// BLPOP timeout for polling the task queue.
-    /// Default: 5 seconds (matches Python's poll_task default).
+    /// BLPOP timeout for polling the task queue. Default: 5s.
     pub poll_timeout: Duration,
 }
 

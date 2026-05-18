@@ -331,9 +331,9 @@ async fn run_inner() -> Result<()> {
                 }
             }
 
-            // Seed placeholder hosts for ALL target IPs (matches Python startup).
-            // This ensures all IPs appear in the host list even before recon runs,
-            // and detect_dc() on service results can trigger domain extraction.
+            // Seed placeholder hosts for ALL target IPs so they appear in the
+            // host list before recon runs and detect_dc() on service results
+            // can trigger domain extraction.
             {
                 let host_key = format!(
                     "{}:{}:{}",

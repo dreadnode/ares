@@ -307,7 +307,7 @@ fn extract_evidence_types(payload: &Value) -> Vec<String> {
         }
     }
 
-    // MITRE technique mapping (mirrors Python _process_result_chains)
+    // MITRE technique mapping
     if let Some(arr) = payload.get("techniques_found").and_then(|v| v.as_array()) {
         for tech in arr {
             if let Some(tech_str) = tech.as_str() {

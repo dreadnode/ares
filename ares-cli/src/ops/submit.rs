@@ -177,7 +177,6 @@ pub(crate) async fn ops_submit(p: OpsSubmitParams) -> Result<String> {
 
     let now = Utc::now();
 
-    // Build operation request (matches Python orchestrator_client.py format)
     let request = serde_json::json!({
         "operation_id": op_id,
         "target_domain": domain,
@@ -208,7 +207,6 @@ pub(crate) async fn ops_submit(p: OpsSubmitParams) -> Result<String> {
         let _: () = conn.expire(&env_vars_key, 3600).await?; // 1 hour TTL
     }
 
-    // Push operation request to queue (matches Python: RPUSH to ares:operations)
     let request_json = serde_json::to_string(&request)?;
     let _: () = conn.rpush("ares:operations", &request_json).await?;
 

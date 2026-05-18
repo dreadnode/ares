@@ -2,8 +2,7 @@
 //!
 //! Strips MOTD banners, box-drawing garbage, "command not found" noise,
 //! empty section headers, and excessive blank lines before the LLM sees
-//! tool output. Mirrors the Python orchestrator's `_filter_motd_garbage`
-//! and related helpers.
+//! tool output.
 
 use regex::Regex;
 use std::sync::LazyLock;

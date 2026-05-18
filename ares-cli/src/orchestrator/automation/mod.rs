@@ -8,9 +8,6 @@
 //!   2. Take a read lock, collect new work items
 //!   3. Release lock, submit tasks via the dispatcher
 //!   4. Mark items as processed (write lock + Redis persist)
-//!
-//! This mirrors the Python `_orchestrator.py` background tasks but eliminates
-//! all threading hacks since tokio tasks are truly concurrent.
 
 mod acl;
 mod acl_discovery;

@@ -86,11 +86,8 @@ pub fn compute_undominated_forests(
 /// Check if all trusted forests have been dominated.
 ///
 /// Returns a list of forest root domains that still need krbtgt hashes.
-/// An empty list means all forests are dominated.
-///
-/// This mirrors Python's `all_forests_dominated()` which checks that
-/// krbtgt hashes are obtained from every trusted forest, not just the
-/// initial target domain.
+/// An empty list means all forests are dominated. Domination requires krbtgt
+/// hashes from every trusted forest, not just the initial target domain.
 pub async fn undominated_forests(state: &SharedState) -> Vec<String> {
     let inner = state.read().await;
     compute_undominated_forests(

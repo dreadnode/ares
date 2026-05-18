@@ -7,7 +7,7 @@ use crate::args::{optional_bool, optional_i64, optional_str, required_str};
 use crate::executor::CommandBuilder;
 use crate::ToolOutput;
 
-/// Default wordlists tried in order (matches Python DEFAULT_WORDLISTS).
+/// Default wordlists tried in order.
 const DEFAULT_WORDLISTS: &[&str] = &[
     "/usr/share/wordlists/rockyou.txt",
     "/usr/share/wordlists/seclists/Passwords/Common-Credentials/Pwdb_top-10000000.txt",
@@ -38,7 +38,7 @@ fn detect_hashcat_mode(hash_value: &str) -> i64 {
     }
 }
 
-/// Build a dynamic wordlist from known usernames (matches Python _build_user_wordlist).
+/// Build a dynamic wordlist from known usernames.
 ///
 /// Generates username-derived password candidates: lowercase, capitalized, uppercased,
 /// with common suffixes ("", "1", "123", "!", "2024", "2025", "2026").

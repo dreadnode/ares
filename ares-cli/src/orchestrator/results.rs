@@ -2,8 +2,6 @@
 //!
 //! A dedicated tokio task that polls Redis for completed task results and
 //! feeds them back to the main orchestration loop via an mpsc channel.
-//! Mirrors the Python `MonitoringMixin._result_consumer` but uses async
-//! Rust instead of a dedicated thread.
 
 use std::sync::Arc;
 use std::time::Duration;

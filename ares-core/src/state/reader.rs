@@ -597,8 +597,8 @@ impl RedisStateReader {
 
     /// Increment a vulnerability type failure counter.
     ///
-    /// Key: `ares:op:{id}:vuln_type_failures` HASH — matches Python's `HINCRBY`
-    /// for tracking per-vulnerability-type failure counts.
+    /// Key: `ares:op:{id}:vuln_type_failures` HASH — `HINCRBY` per vulnerability
+    /// type for tracking failure counts.
     pub async fn increment_vuln_type_failure(
         &self,
         conn: &mut impl AsyncCommands,

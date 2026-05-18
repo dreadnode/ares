@@ -23,8 +23,7 @@ impl SharedState {
     /// FQDN can take precedence later.
     ///
     /// When the hostname is a valid AD FQDN (e.g. `dc01.contoso.local`), the
-    /// domain suffix is automatically extracted and added to `state.domains`
-    /// (matches Python's `add_host()` behavior).
+    /// domain suffix is automatically extracted and added to `state.domains`.
     pub async fn publish_host(
         &self,
         queue: &TaskQueueCore<impl ConnectionLike + Clone + Send + Sync + 'static>,
@@ -80,7 +79,7 @@ impl SharedState {
             }
         }
 
-        // Auto-extract domain from FQDN hostname (matches Python add_host).
+        // Auto-extract domain from FQDN hostname.
         // e.g. "dc02.child.contoso.local" → "child.contoso.local". Routed
         // through the candidate-domain pipeline: a hostname split alone is
         // weak evidence and won't reach `state.domains` unless a stronger

@@ -35,7 +35,7 @@ use ares_core::nats::{self, NatsBroker};
 use crate::worker::config::WorkerConfig;
 use crate::worker::heartbeat::WorkerStatus;
 
-/// TTL for task status keys — 24 hours, matches Python.
+/// TTL for task status keys — 24 hours.
 const TASK_STATUS_TTL: i64 = 60 * 60 * 24;
 
 // ─── Task loop ───────────────────────────────────────────────────────────────

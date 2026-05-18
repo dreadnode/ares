@@ -1,6 +1,5 @@
 //! Heartbeat monitoring and stale-task cleanup.
 //!
-//! Mirrors the Python `ares.core.dispatcher.monitoring.MonitoringMixin`:
 //! - Periodic heartbeat sweep to detect dead agents
 //! - Stale task cleanup to prevent throttle deadlock
 //! - Operation lock TTL refresh

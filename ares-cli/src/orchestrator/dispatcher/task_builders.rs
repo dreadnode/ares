@@ -266,8 +266,8 @@ impl Dispatcher {
 
     /// Submit a low-hanging fruit credential discovery task (SYSVOL, GPP, LDAP, LAPS).
     ///
-    /// Mirrors Python's fast credential discovery dispatch: sends multiple high-success-rate
-    /// techniques in a single task so the LLM agent executes them sequentially.
+    /// Sends multiple high-success-rate techniques in a single task so the LLM
+    /// agent executes them sequentially.
     #[instrument(
         name = "automation.request_low_hanging_fruit",
         skip(self, credential),

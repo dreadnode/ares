@@ -290,7 +290,7 @@ impl SharedState {
                 // emit a `dc_secretsdump on ` finding with empty target/domain.
                 let dc_target = state.domain_controllers.get(&krbtgt_domain).cloned();
 
-                // Auto-set domain admin when first krbtgt NTLM hash arrives (matches Python)
+                // Auto-set domain admin when the first krbtgt NTLM hash arrives.
                 if !state.has_domain_admin {
                     let da_domain = krbtgt_domain.clone();
                     drop(state);

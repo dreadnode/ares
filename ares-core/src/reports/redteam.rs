@@ -408,7 +408,7 @@ impl Default for RedTeamReportGenerator {
 }
 
 // ============================================================================
-// Executive summary generation (matches Python _generate_executive_summary)
+// Executive summary generation
 // ============================================================================
 
 pub(crate) fn generate_executive_summary(

@@ -1,7 +1,7 @@
 //! Target extraction and classification for span attributes.
 //!
-//! Mirrors Python's `tracing.py` logic for extracting target info from tool
-//! call arguments and inferring target type from hostnames.
+//! Extracts target info from tool call arguments and infers target type from
+//! hostnames.
 
 /// Extracted target information from tool call arguments.
 #[derive(Debug, Default)]

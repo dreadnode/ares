@@ -251,7 +251,7 @@ impl SharedState {
 
     /// Record a pending task in memory and persist to Redis HASH.
     ///
-    /// Key: `ares:op:{id}:pending_tasks` — matches Python's state_backend.
+    /// Key: `ares:op:{id}:pending_tasks`.
     pub async fn track_pending_task(
         &self,
         queue: &TaskQueueCore<impl ConnectionLike + Clone + Send + Sync + 'static>,
@@ -326,7 +326,7 @@ impl SharedState {
 
     /// Persist a NetBIOS to FQDN mapping to Redis HASH.
     ///
-    /// Key: `ares:op:{id}:netbios_map` — matches Python's `HSET` on netbios_map.
+    /// Key: `ares:op:{id}:netbios_map` HASH.
     pub async fn publish_netbios(
         &self,
         queue: &TaskQueueCore<impl ConnectionLike + Clone + Send + Sync + 'static>,

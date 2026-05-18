@@ -27,7 +27,7 @@ use crate::orchestrator::dispatcher::Dispatcher;
 use crate::orchestrator::task_queue::TaskQueue;
 use crate::orchestrator::throttling::{ThrottleDecision, Throttler};
 
-/// Redis key prefix for deferred queues (matches Python `DEFERRED_QUEUE_PREFIX`).
+/// Redis key prefix for deferred queues.
 pub const DEFERRED_QUEUE_PREFIX: &str = "ares:deferred";
 
 /// Atomic enqueue: per-type cap → global cap → ZADD → INCR counter.
