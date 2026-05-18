@@ -12,8 +12,7 @@ use super::BlueTeamReportGenerator;
 impl BlueTeamReportGenerator {
     /// Generate a comprehensive blue team report from one or more `SharedBlueTeamState` objects.
     ///
-    /// This is the Rust equivalent of `BlueTeamReportGenerator.generate()` in Python,
-    /// converting investigation states into the report input format automatically.
+    /// Investigation states are converted into the report input format automatically.
     pub fn generate_from_states(
         &self,
         operation_id: &str,

@@ -1,8 +1,7 @@
 //! Scoring functions for blue team evaluation.
 //!
 //! Each scorer evaluates investigation state against ground truth and returns
-//! a float score between 0.0 and 1.0. Replaces the Dreadnode `@dn.scorer`
-//! decorated Python functions with plain Rust functions.
+//! a float score between 0.0 and 1.0.
 
 mod evaluate;
 mod scoring;

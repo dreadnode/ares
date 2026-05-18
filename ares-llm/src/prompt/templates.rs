@@ -139,7 +139,7 @@ pub const TEMPLATE_GOLDEN_TICKET_TASK: &str = "redteam/agents/golden_ticket_task
 pub const TEMPLATE_SHARE_PILFER_INSTRUCTIONS: &str = "redteam/agents/share_pilfer_instructions";
 pub const TEMPLATE_SHARE_PILFER_TASK: &str = "redteam/agents/share_pilfer_task";
 
-// Per-task-type prompt templates (ported from prompts.py)
+// Per-task-type prompt templates
 pub const TASK_RECON: &str = "redteam/tasks/recon";
 pub const TASK_CRACK: &str = "redteam/tasks/crack";
 pub const TASK_LATERAL: &str = "redteam/tasks/lateral";

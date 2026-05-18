@@ -435,7 +435,7 @@ pub(crate) fn build_common_spray_payload(
 }
 
 /// Complex credential access automation: kerberoast, AS-REP roast, password spray.
-/// Interval: 15s + Notify wake. Matches Python `_auto_credential_access`.
+/// Interval: 15s + Notify wake.
 pub async fn auto_credential_access(
     dispatcher: Arc<Dispatcher>,
     mut shutdown: watch::Receiver<bool>,

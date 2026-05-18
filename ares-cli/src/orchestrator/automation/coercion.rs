@@ -33,7 +33,7 @@ pub(crate) fn select_coercion_work(state: &StateInner, listener_ip: &str) -> Vec
 }
 
 /// Triggers coercion attacks when ADCS ESC8 servers or unconstrained delegation hosts exist.
-/// Interval: 30s. Matches Python `_auto_coercion`.
+/// Interval: 30s.
 pub async fn auto_coercion(dispatcher: Arc<Dispatcher>, mut shutdown: watch::Receiver<bool>) {
     let mut interval = tokio::time::interval(Duration::from_secs(30));
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);

@@ -4,8 +4,7 @@
 //! loading it from Redis and re-enqueueing any interrupted tasks (those with
 //! status PENDING, IN_PROGRESS, or RETRYING).
 //!
-//! Ported from `ares.core.recovery` (Python). Key additions over the initial
-//! skeleton:
+//! Key behaviors:
 //!
 //! - **Hash deduplication** (`dedupe_hashes`) -- AS-REP by (domain,username),
 //!   Kerberoast by (domain,username,spn_key), NTLM by exact hash value.

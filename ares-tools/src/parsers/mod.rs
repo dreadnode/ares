@@ -1,8 +1,7 @@
 //! Output parsers for tool results.
 //!
 //! Extract structured discovery data (hosts, open ports, credentials, etc.)
-//! from raw CLI tool output. This replaces the LLM-based interpretation that
-//! the Python workers used.
+//! from raw CLI tool output without relying on LLM interpretation.
 
 mod certipy;
 mod cracker;

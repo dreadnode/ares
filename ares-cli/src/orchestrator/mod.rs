@@ -838,7 +838,6 @@ async fn run_inner() -> Result<()> {
     }
 
     // Write completion metadata, status key, clear lock and active pointer.
-    // Matches Python's operation completion sequence.
     {
         let mut conn = queue.connection();
         let has_da = shared_state.read().await.has_domain_admin;

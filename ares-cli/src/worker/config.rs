@@ -1,7 +1,4 @@
 //! Worker configuration from environment variables.
-//!
-//! Maps to the Python config module's `get_redis_url()`, `get_agent_task_timeout()`,
-//! and worker-specific env vars used in `_worker.py`.
 
 use std::env;
 use std::time::Duration;
@@ -10,8 +7,8 @@ use std::time::Duration;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WorkerMode {
     /// Full task execution: consume from `ares:tasks:{role}`, expand composite
-    /// tasks, run tools, push results. This is the default mode used when
-    /// Python workers or standalone Rust workers handle entire tasks.
+    /// tasks, run tools, push results. Default mode for standalone workers
+    /// that handle entire tasks.
     Task,
 
     /// Thin tool executor: consume individual tool calls from

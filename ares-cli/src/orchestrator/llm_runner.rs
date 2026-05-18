@@ -1,8 +1,7 @@
 //! LLM task runner — drives tasks through the Rust agent loop.
 //!
-//! Replaces the Python dreadnode Agent for LLM-driven tasks.
-//! The runner builds prompts, calls the LLM, dispatches tool calls to
-//! Python workers via Redis, and handles callbacks in Rust.
+//! Builds prompts, calls the LLM, dispatches tool calls to workers via Redis,
+//! and handles callbacks in Rust.
 
 use std::sync::{Arc, OnceLock};
 
@@ -81,9 +80,8 @@ impl LlmTaskRunner {
 
     /// Execute a task through the LLM agent loop.
     ///
-    /// This is the main entry point called by the orchestrator when
-    /// a task should be driven by the LLM rather than pushed to a
-    /// Python worker's full agent loop.
+    /// Main entry point when a task should be driven by the LLM directly
+    /// rather than pushed through a worker's full agent loop.
     pub async fn execute_task(
         &self,
         task_type: &str,

@@ -160,7 +160,7 @@ impl Dispatcher {
 
     /// Submit a recon task.
     ///
-    /// Guards (mirroring Python's `request_recon` in `routing.py`):
+    /// Guards:
     /// 1. Skip entirely if domain admin has been achieved
     /// 2. Skip nmap tasks if all targets are already in `scanned_targets`
     /// 3. Auto-dispatch nmap prerequisite before enumeration if targets not scanned

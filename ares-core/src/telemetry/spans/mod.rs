@@ -1,8 +1,7 @@
 //! Span attribute builders for Ares agent telemetry.
 //!
 //! These helpers produce `tracing::Span` instances with structured attributes
-//! matching the Python `tracing.py` conventions so both languages emit
-//! identical span schemas to Tempo/Grafana.
+//! that emit the canonical span schema to Tempo/Grafana.
 //!
 //! # Usage
 //!

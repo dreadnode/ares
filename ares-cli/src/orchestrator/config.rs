@@ -120,8 +120,8 @@ impl OrchestratorConfig {
                 })
                 .unwrap_or_default();
             // Extract initial credential from JSON payload.
-            // Python sends a nested object: {"initial_credential": {"username": ..., "password": ..., "domain": ...}}
-            // Also support flat fields for backwards compatibility: {"initial_username": ..., "initial_password": ...}
+            // Preferred shape: nested {"initial_credential": {"username", "password", "domain"}}.
+            // Also support flat fields for backwards compatibility: {"initial_username", "initial_password"}.
             let cred = if let Some(ic) = v.get("initial_credential").and_then(|v| v.as_object()) {
                 match (
                     ic.get("username").and_then(|v| v.as_str()),
@@ -361,7 +361,7 @@ mod tests {
         assert_eq!(c.target_domain, "contoso.local");
         assert_eq!(c.target_ips, vec!["192.168.58.1", "192.168.58.2"]);
 
-        // JSON payload with nested initial_credential (Python format)
+        // JSON payload with nested initial_credential
         let payload = r#"{"operation_id":"op-cred","target_domain":"contoso.local","target_ips":[],"initial_credential":{"username":"admin","password":"Pass123","domain":"contoso.local"}}"#;
         std::env::set_var("ARES_OPERATION_ID", payload);
         let c = OrchestratorConfig::from_env().unwrap();

@@ -1,9 +1,7 @@
 //! Evidence auto-chaining for blue team investigations.
 //!
 //! When a task result contains evidence of certain types, this module
-//! automatically spawns follow-up investigation tasks. This mirrors
-//! the Python `EVIDENCE_CHAIN_MAP` / `_process_result_chains` logic
-//! in `result_processing.py`.
+//! automatically spawns follow-up investigation tasks.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::LazyLock;

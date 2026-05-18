@@ -138,8 +138,8 @@ impl SharedState {
     /// Add a hash to state and Redis (with dedup).
     ///
     /// When a `krbtgt` NTLM hash is stored, `has_domain_admin` is automatically
-    /// set — mirroring Python's `add_hash()` behaviour so that `auto_golden_ticket`
-    /// triggers without requiring the LLM to emit a structured JSON payload.
+    /// set so that `auto_golden_ticket` triggers without requiring the LLM to
+    /// emit a structured JSON payload.
     pub async fn publish_hash(
         &self,
         queue: &TaskQueueCore<impl ConnectionLike + Clone + Send + Sync + 'static>,

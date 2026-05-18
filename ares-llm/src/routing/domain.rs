@@ -15,7 +15,7 @@ pub fn normalize_domain(domain: &str, netbios_to_fqdn: &HashMap<String, String>)
     if let Some(fqdn) = netbios_to_fqdn.get(&lower) {
         return fqdn.to_lowercase();
     }
-    // Also try uppercase key (Python dict was case-insensitive)
+    // Try uppercase key for case-insensitive lookup
     if let Some(fqdn) = netbios_to_fqdn.get(&domain.to_uppercase()) {
         return fqdn.to_lowercase();
     }

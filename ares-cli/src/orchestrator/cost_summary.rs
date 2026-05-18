@@ -1,7 +1,7 @@
 //! Periodic token usage and cost summary.
 //!
 //! Spawns a background task that logs aggregate token usage and estimated cost
-//! every 120 seconds, matching Python's `_periodic_token_usage_summary()`.
+//! every 120 seconds.
 
 use std::sync::Arc;
 use std::time::Duration;

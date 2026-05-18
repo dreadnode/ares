@@ -15,9 +15,6 @@ use super::BlueTeamReportGenerator;
 
 impl BlueTeamReportGenerator {
     /// Generate a single investigation report from `SharedBlueTeamState`.
-    ///
-    /// This is the Rust equivalent of `MarkdownReportGenerator._build_report()` in Python,
-    /// producing a detailed per-investigation report.
     pub fn generate_investigation(
         &self,
         state: &SharedBlueTeamState,

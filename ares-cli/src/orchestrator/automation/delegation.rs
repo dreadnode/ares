@@ -78,7 +78,7 @@ pub(crate) fn select_delegation_work(
 }
 
 /// Dispatches delegation enumeration for new credentials.
-/// Interval: 30s. Matches Python `_auto_delegation_enumeration`.
+/// Interval: 30s.
 pub async fn auto_delegation_enumeration(
     dispatcher: Arc<Dispatcher>,
     mut shutdown: watch::Receiver<bool>,

@@ -66,7 +66,6 @@ pub fn extract_target_info(arguments: &serde_json::Value) -> ToolTargetInfo {
 
 /// Infer target type from a hostname or FQDN.
 ///
-/// Matches Python's `infer_target_type()`:
 /// - `dc*` prefix -> `"domain_controller"`
 /// - `sql*`, `db*`, `mssql*`, `database*` prefix -> `"sql_server"`
 /// - `web*`, `www*`, `iis*`, `apache*`, `nginx*` prefix -> `"web_server"`

@@ -142,7 +142,7 @@ impl AgentSpanBuilder {
 
     /// Build the `tracing::Span` with all configured attributes.
     ///
-    /// The span name follows the Python convention:
+    /// Span name:
     /// - Tool calls: `tool.{tool_name}`
     /// - General: the `name` passed to the builder
     pub fn build(&self) -> tracing::Span {

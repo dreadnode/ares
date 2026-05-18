@@ -1,8 +1,8 @@
 //! Investigation state mutation tools for blue team LLM agents.
 //!
 //! These tools run in-process (not dispatched to workers) and write
-//! directly to Redis, following the same key patterns as the Python
-//! `BlueStateBackend` and the Rust `BlueStateWriter`.
+//! directly to Redis, following the same key patterns as
+//! `BlueStateWriter`.
 
 pub mod analysis;
 pub mod read;

@@ -87,7 +87,7 @@ pub(crate) fn select_share_spider_work(
 }
 
 /// Spiders readable shares for credentials using available creds.
-/// Interval: 30s. Matches Python `_auto_share_spider`.
+/// Interval: 30s.
 pub async fn auto_share_spider(dispatcher: Arc<Dispatcher>, mut shutdown: watch::Receiver<bool>) {
     let mut interval = tokio::time::interval(Duration::from_secs(30));
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);

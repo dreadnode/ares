@@ -87,7 +87,6 @@ fn capitalize(s: &str) -> String {
 ///
 /// Tries multiple wordlists in order (rockyou, seclists). When `use_dynamic_wordlist`
 /// is true (default), also prepends a username-derived candidate list.
-/// Matches Python cracking cascade behavior.
 pub async fn crack_with_hashcat(args: &Value) -> Result<ToolOutput> {
     let hash_value = required_str(args, "hash_value")?;
     let explicit_wordlist = optional_str(args, "wordlist_path");
@@ -262,8 +261,8 @@ pub async fn crack_with_hashcat(args: &Value) -> Result<ToolOutput> {
 
 /// Crack a hash using John the Ripper with a wordlist attack.
 ///
-/// Tries multiple wordlists in order (matching Python cascade).
-/// After john finishes, runs `john --show` to retrieve cracked results.
+/// Tries multiple wordlists in order. After john finishes, runs
+/// `john --show` to retrieve cracked results.
 pub async fn crack_with_john(args: &Value) -> Result<ToolOutput> {
     let hash_value = required_str(args, "hash_value")?;
     let hash_format = optional_str(args, "hash_format");

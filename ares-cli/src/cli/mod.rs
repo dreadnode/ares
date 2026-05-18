@@ -86,7 +86,7 @@ pub(crate) enum Commands {
         #[arg(hide = true)]
         _role: Option<String>,
 
-        /// Accept and ignore legacy Python-style --worker-args.* flags
+        /// Accept and ignore legacy `--worker-args.*` flags
         #[arg(long = "worker-args.redis-url", hide = true)]
         _legacy_redis_url: Option<String>,
     },

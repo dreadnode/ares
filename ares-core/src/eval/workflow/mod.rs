@@ -1,8 +1,7 @@
 //! Evaluation workflow for offline blue team evaluation.
 //!
 //! Provides scenario/dataset loading and offline evaluation from saved
-//! red team state files. Replaces the Python `EvaluationRunner` for
-//! non-live evaluation use cases.
+//! red team state files for non-live evaluation use cases.
 
 mod costs;
 mod dataset;

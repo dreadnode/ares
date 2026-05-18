@@ -1,6 +1,5 @@
 //! Task prompt generation for LLM agent steps.
 //!
-//! Ports the prompt building logic from `src/ares/core/worker/prompts.py`.
 //! Each task type gets a specific prompt rendered from a Tera template.
 //! Variable extraction from JSON payloads happens in Rust; prompt wording
 //! and structure lives in `.tera` template files.

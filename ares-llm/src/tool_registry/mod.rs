@@ -2,7 +2,7 @@
 //!
 //! Provides JSON Schema definitions for tools available to each agent role.
 //! Callback tools (task_complete, request_assistance) are handled directly
-//! in Rust without dispatching to Python workers.
+//! without dispatching to workers.
 
 mod acl;
 #[cfg(feature = "blue")]

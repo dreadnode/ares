@@ -20,8 +20,6 @@ pub struct TraceToolCallParams<'a> {
 }
 
 /// Create a tool call span (point-in-time recording).
-///
-/// Equivalent to Python's `trace_tool_call()`.
 pub fn trace_tool_call(p: TraceToolCallParams<'_>) -> tracing::Span {
     let mut builder = AgentSpanBuilder::new("tool_call", p.role, p.team).tool(p.tool_name);
 
@@ -63,8 +61,6 @@ pub struct TraceDiscoveryParams<'a> {
 }
 
 /// Create a discovery event span.
-///
-/// Equivalent to Python's `trace_discovery()`.
 pub fn trace_discovery(p: TraceDiscoveryParams<'_>) -> tracing::Span {
     tracing::info_span!(
         "ares.discovery",
@@ -96,8 +92,6 @@ pub struct TraceDecisionParams<'a> {
 }
 
 /// Create a decision span recording agent tool selection.
-///
-/// Equivalent to Python's `trace_decision()`.
 pub fn trace_decision(p: TraceDecisionParams<'_>) -> tracing::Span {
     let (technique_id, _) = mitre::get_tool_mitre_info(p.tool_chosen);
     let category = mitre::get_tool_category(p.tool_chosen);
@@ -189,8 +183,6 @@ pub fn extract_target_from_args(
 }
 
 /// Create a CLIENT span for outgoing service-to-service calls.
-///
-/// Equivalent to Python's `client_span()`.
 pub fn client_span(name: &str, role: &str, team: Team, target_service: &str) -> tracing::Span {
     AgentSpanBuilder::new(name, role, team)
         .kind(SpanKind::Client)
@@ -199,8 +191,6 @@ pub fn client_span(name: &str, role: &str, team: Team, target_service: &str) -> 
 }
 
 /// Create a SERVER span for incoming requests.
-///
-/// Equivalent to Python's `server_span()`.
 pub fn server_span(name: &str, role: &str, team: Team) -> tracing::Span {
     AgentSpanBuilder::new(name, role, team)
         .kind(SpanKind::Server)
@@ -208,8 +198,6 @@ pub fn server_span(name: &str, role: &str, team: Team) -> tracing::Span {
 }
 
 /// Create a PRODUCER span for async message publishing.
-///
-/// Equivalent to Python's `producer_span()`.
 pub fn producer_span(name: &str, role: &str, team: Team, target_service: &str) -> tracing::Span {
     AgentSpanBuilder::new(name, role, team)
         .kind(SpanKind::Producer)
@@ -218,8 +206,6 @@ pub fn producer_span(name: &str, role: &str, team: Team, target_service: &str) -
 }
 
 /// Create a CONSUMER span for async message consumption.
-///
-/// Equivalent to Python's `consumer_span()`.
 pub fn consumer_span(name: &str, role: &str, team: Team) -> tracing::Span {
     AgentSpanBuilder::new(name, role, team)
         .kind(SpanKind::Consumer)

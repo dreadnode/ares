@@ -25,7 +25,7 @@ pub struct ToolOutput {
     pub output: String,
 }
 
-/// Trait for dispatching tool calls to external executors (Python workers).
+/// Trait for dispatching tool calls to external executors.
 ///
 /// Implementers handle the Redis queue mechanics (LPUSH to tool_exec queue,
 /// BRPOP for result).

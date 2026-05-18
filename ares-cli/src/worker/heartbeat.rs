@@ -1,10 +1,10 @@
 //! Background heartbeat task.
 //!
 //! Spawns a tokio task that periodically writes to `ares:heartbeat:{agent_name}`
-//! with a TTL, matching the Python `_threaded_heartbeat_loop` in `_worker.py`.
+//! with a TTL.
 //!
-//! The heartbeat runs independently of the GIL-bound task loop, ensuring the
-//! orchestrator always knows the worker is alive even during long Python calls.
+//! The heartbeat runs independently of the task loop so the orchestrator can
+//! always tell when the worker is alive, even during long-running tool calls.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -15,7 +15,6 @@ use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tracing::{debug, warn};
 
-/// Heartbeat key prefix — matches `RedisTaskQueue.HEARTBEAT_PREFIX` in Python.
 const HEARTBEAT_PREFIX: &str = "ares:heartbeat";
 
 /// Current worker status, shared between the task loop and heartbeat task.
@@ -132,7 +131,7 @@ async fn heartbeat_loop(
     }
 }
 
-/// Build the heartbeat JSON payload matching Python's `send_heartbeat`.
+/// Build the heartbeat JSON payload.
 fn build_heartbeat_json(
     status: &str,
     current_task: Option<&str>,

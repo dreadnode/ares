@@ -10,7 +10,7 @@ use tracing::{info, warn};
 use crate::orchestrator::dispatcher::Dispatcher;
 
 /// Scans hosts for MSSQL services (port 1433) and queues exploitation vulns.
-/// Interval: 30s. Matches Python `_auto_mssql_detection`.
+/// Interval: 30s.
 pub async fn auto_mssql_detection(
     dispatcher: Arc<Dispatcher>,
     mut shutdown: watch::Receiver<bool>,

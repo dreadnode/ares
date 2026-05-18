@@ -5,7 +5,7 @@
 //! Configuration priority:
 //! 1. `LOKI_URL` + `LOKI_AUTH_TOKEN` — direct Loki endpoint
 //! 2. `GRAFANA_URL` + `GRAFANA_SERVICE_ACCOUNT_TOKEN` — Grafana datasource proxy
-//!    (auto-resolves Loki datasource ID, matching the Python approach)
+//!    (auto-resolves Loki datasource ID)
 //! 3. `http://localhost:3100` fallback
 
 use anyhow::{Context, Result};

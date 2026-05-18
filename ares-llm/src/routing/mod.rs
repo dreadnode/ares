@@ -1,6 +1,5 @@
 //! Routing enrichment -- DC discovery, credential matching, domain normalization.
 //!
-//! Ports pure logic from `src/ares/core/dispatcher/routing.py`.
 //! Provides domain normalization, credential lookup, multi-tier DC discovery,
 //! and payload enrichment for delegation exploits.
 

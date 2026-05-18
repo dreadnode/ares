@@ -37,9 +37,9 @@ impl SharedState {
         if host.hostname.contains('.') && !looks_like_real_domain(&host.hostname) {
             host.hostname = String::new();
         }
-        // Some upstream parsers (esp. Python tool output stringifying `None`)
-        // emit literal placeholder strings as the hostname. These are never a
-        // real machine name — clear them so the display falls back to IP-only
+        // Some upstream parsers emit literal placeholder strings as the
+        // hostname (e.g., `"None"` stringified). These are never a real
+        // machine name — clear them so the display falls back to IP-only
         // instead of `none / <ip>`.
         if matches!(
             host.hostname.as_str(),
@@ -987,7 +987,7 @@ mod tests {
 
     #[tokio::test]
     async fn publish_host_drops_placeholder_hostnames() {
-        // Upstream Python tool output stringifies `None` into the hostname
+        // Upstream tool output sometimes stringifies `None` into the hostname
         // field. Without clearing them the display shows e.g. `none / <ip>`.
         let state = SharedState::new("op-1".to_string());
         let q = mock_queue();

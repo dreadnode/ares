@@ -62,7 +62,6 @@ pub(crate) async fn blue_submit(p: BlueSubmitParams) -> Result<()> {
 
     let now = Utc::now();
 
-    // Format must match Python blue_orchestrator_client.py
     let request = serde_json::json!({
         "investigation_id": inv_id,
         "alert": alert,

@@ -182,7 +182,7 @@ pub(crate) fn resolve_admin_username(state: &StateInner, domain: &str) -> String
 }
 
 /// Monitors for krbtgt hash and triggers golden ticket forging.
-/// Interval: 30s. Matches Python `_auto_golden_ticket`.
+/// Interval: 30s.
 ///
 /// Multi-domain: a single op routinely captures krbtgt for >1 domain (child
 /// then parent via ExtraSid; both forests via inter-realm forge). Each

@@ -168,7 +168,7 @@ pub fn pyramid_level_value(level: &str) -> u32 {
     }
 }
 
-/// Technique-to-recipe mapping (hardcoded like Python).
+/// Technique-to-recipe mapping.
 pub fn technique_to_recipe() -> &'static HashMap<&'static str, &'static str> {
     static MAP: OnceLock<HashMap<&str, &str>> = OnceLock::new();
     MAP.get_or_init(|| {

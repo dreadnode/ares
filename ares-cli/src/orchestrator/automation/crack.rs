@@ -60,7 +60,7 @@ fn select_next_crack(
 }
 
 /// Scans for uncracked hashes and submits crack tasks.
-/// Interval: 15s. Matches Python `_auto_crack_dispatch`.
+/// Interval: 15s.
 pub async fn auto_crack_dispatch(dispatcher: Arc<Dispatcher>, mut shutdown: watch::Receiver<bool>) {
     let mut interval = tokio::time::interval(Duration::from_secs(15));
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);

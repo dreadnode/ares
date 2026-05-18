@@ -248,7 +248,7 @@ async fn dispatch_krbtgt_extraction_direct(
 }
 
 /// Dispatches secretsdump when admin credentials are detected.
-/// Interval: 30s. Matches Python `_auto_local_admin_secretsdump`.
+/// Interval: 30s.
 pub async fn auto_local_admin_secretsdump(
     dispatcher: Arc<Dispatcher>,
     mut shutdown: watch::Receiver<bool>,

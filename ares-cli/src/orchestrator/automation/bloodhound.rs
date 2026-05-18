@@ -44,7 +44,7 @@ pub(crate) fn select_bloodhound_work(
 }
 
 /// Dispatches BloodHound collection for each discovered domain.
-/// Interval: 30s. Matches Python `_auto_bloodhound`.
+/// Interval: 30s.
 ///
 /// Selects the best credential per domain (same-domain preferred, with
 /// trust-scope enforcement) instead of using a single global credential.

@@ -50,7 +50,7 @@ pub(crate) fn has_dc_services(host: &Host) -> bool {
 
 /// Full multi-tier DC IP discovery.
 ///
-/// Implements 7 priority tiers matching the Python `_find_domain_controller_ip()`:
+/// 7 priority tiers:
 ///
 /// 0. Cached `domain_controllers` map
 /// 1. Hosts with explicit DC roles matching domain

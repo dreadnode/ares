@@ -338,7 +338,7 @@ fn collect_adcs_work(state: &StateInner) -> Vec<AdcsWork> {
 }
 
 /// Detects ADCS servers by looking for CertEnroll shares and dispatches certipy_find.
-/// Interval: 30s. Matches Python `_auto_adcs_enumeration`.
+/// Interval: 30s.
 pub async fn auto_adcs_enumeration(
     dispatcher: Arc<Dispatcher>,
     mut shutdown: watch::Receiver<bool>,

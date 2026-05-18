@@ -29,9 +29,9 @@ pub struct TokenUsage {
     pub model: Option<String>,
 }
 
-// ─── Wire types (match Python's Pydantic models exactly) ─────────────────────
+// ─── Wire types ──────────────────────────────────────────────────────────────
 
-/// Task message from the queue. Matches `TaskMessage` in `task_queue.py`.
+/// Task message from the queue.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskMessage {
     pub task_id: String,
