@@ -173,30 +173,28 @@ fn collect_adcs_work(state: &StateInner) -> Vec<AdcsWork> {
             // correct cred against the same CA host.
             let domain_lower = domain.to_lowercase();
             let target_forest = state.forest_root_of(&domain_lower);
-            let cred = {
-                let mut candidates: Vec<&ares_core::models::Credential> = state
-                    .credentials
-                    .iter()
-                    .filter(|c| {
-                        !c.password.is_empty()
-                            && c.domain.to_lowercase() == domain_lower
-                            && !state.is_delegation_account(&c.username)
-                            && !state.is_principal_quarantined(&c.username, &c.domain)
-                    })
-                    .collect();
-                candidates.extend(state.credentials.iter().filter(|c| {
+            // Same-domain creds first, same-forest cross-domain creds second,
+            // and stop at the first unprocessed dedup key. Chained iterators —
+            // no intermediate Vec — to satisfy clippy::needless_collect.
+            let cred = state
+                .credentials
+                .iter()
+                .filter(|c| {
+                    !c.password.is_empty()
+                        && c.domain.to_lowercase() == domain_lower
+                        && !state.is_delegation_account(&c.username)
+                        && !state.is_principal_quarantined(&c.username, &c.domain)
+                })
+                .chain(state.credentials.iter().filter(|c| {
                     let cd = c.domain.to_lowercase();
                     !c.password.is_empty()
                         && cd != domain_lower
                         && state.forest_root_of(&cd) == target_forest
                         && !state.is_delegation_account(&c.username)
                         && !state.is_principal_quarantined(&c.username, &c.domain)
-                }));
-                candidates
-                    .into_iter()
-                    .find(|c| !state.is_processed(DEDUP_ADCS_SERVERS, &dedup_key_cred(&host_ip, c)))
-                    .cloned()
-            };
+                }))
+                .find(|c| !state.is_processed(DEDUP_ADCS_SERVERS, &dedup_key_cred(&host_ip, c)))
+                .cloned();
 
             // Look for NTLM hash (PTH) only if cred path is exhausted (no
             // unprocessed cred candidate exists). Same identity-aware dedup.
