@@ -1320,7 +1320,9 @@ contoso.local/Administrator:500:aad3b435b51404eeaad3b435b51404ee:222222222222222
                       Account lockout duration: 30\n";
         let params = json!({"domain": "contoso.local", "target": "192.168.58.10"});
         let disc = parse_tool_output("password_policy", output, &params);
-        let policies = disc["password_policies"].as_array().expect("password_policies array");
+        let policies = disc["password_policies"]
+            .as_array()
+            .expect("password_policies array");
         assert_eq!(policies.len(), 1);
         assert_eq!(policies[0]["domain"], "contoso.local");
         assert_eq!(policies[0]["target_ip"], "192.168.58.10");
@@ -1349,7 +1351,9 @@ contoso.local/Administrator:500:aad3b435b51404eeaad3b435b51404ee:222222222222222
         let output = "Account Lockout Threshold: 0\n";
         let params = json!({"domain": "contoso.local"});
         let disc = parse_tool_output("password_policy", output, &params);
-        let policies = disc["password_policies"].as_array().expect("password_policies");
+        let policies = disc["password_policies"]
+            .as_array()
+            .expect("password_policies");
         assert_eq!(policies[0]["lockout_threshold"], "0");
         assert!(policies[0].get("min_password_length").is_none());
     }
@@ -1530,7 +1534,9 @@ contoso.local/Administrator:500:aad3b435b51404eeaad3b435b51404ee:222222222222222
         let d1 = json!({"discovered_users": [{"username": "alice", "domain": "contoso.local"}]});
         let d2 = json!({"discovered_users": [{"username": "bob", "domain": "contoso.local"}]});
         let merged = merge_discoveries(&[d1, d2]);
-        let users = merged["discovered_users"].as_array().expect("discovered_users");
+        let users = merged["discovered_users"]
+            .as_array()
+            .expect("discovered_users");
         assert_eq!(users.len(), 2);
     }
 
@@ -1548,7 +1554,9 @@ contoso.local/Administrator:500:aad3b435b51404eeaad3b435b51404ee:222222222222222
         let d1 = json!({"trusted_domains": [{"domain": "fabrikam.local", "trust_type": "forest"}]});
         let d2 = json!({"trusted_domains": [{"domain": "child.contoso.local", "trust_type": "parent_child"}]});
         let merged = merge_discoveries(&[d1, d2]);
-        let td = merged["trusted_domains"].as_array().expect("trusted_domains");
+        let td = merged["trusted_domains"]
+            .as_array()
+            .expect("trusted_domains");
         assert_eq!(td.len(), 2);
     }
 

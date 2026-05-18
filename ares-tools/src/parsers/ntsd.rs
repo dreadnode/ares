@@ -1164,7 +1164,10 @@ nTSecurityDescriptor:: {SD_GENERIC_ALL_B64}
         assert_eq!(v["target_type"], "User");
         assert_eq!(v["domain"], "contoso.local");
         assert_eq!(v["target_ip"], "192.168.58.10");
-        assert!(v["vuln_id"].as_str().unwrap().starts_with("acl_genericall_"));
+        assert!(v["vuln_id"]
+            .as_str()
+            .unwrap()
+            .starts_with("acl_genericall_"));
     }
 
     #[test]
@@ -1180,10 +1183,7 @@ objectSid: S-1-5-21-1-2-1001
 nTSecurityDescriptor:: {SD_GENERIC_ALL_B64}
 "
         );
-        let vulns = parse_acl_enumeration(
-            &output,
-            &serde_json::json!({"domain": "contoso.local"}),
-        );
+        let vulns = parse_acl_enumeration(&output, &serde_json::json!({"domain": "contoso.local"}));
         assert!(
             vulns.is_empty(),
             "Self-permission should be filtered, got: {vulns:?}"
@@ -1203,7 +1203,7 @@ nTSecurityDescriptor:: {SD_GENERIC_ALL_B64}
 
         // ACE header + mask
         let mut ace = vec![0x00u8, 0x00]; // type=0, flags=0
-        // SID for SYSTEM (S-1-5-18): 12 bytes
+                                          // SID for SYSTEM (S-1-5-18): 12 bytes
         let system_sid = [
             0x01u8, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05, // rev+count+authority
             0x12, 0x00, 0x00, 0x00, // sub_auth=18
@@ -1232,10 +1232,7 @@ objectClass: user
 nTSecurityDescriptor:: {b64}
 "
         );
-        let vulns = parse_acl_enumeration(
-            &output,
-            &serde_json::json!({"domain": "contoso.local"}),
-        );
+        let vulns = parse_acl_enumeration(&output, &serde_json::json!({"domain": "contoso.local"}));
         assert!(
             vulns.is_empty(),
             "SYSTEM trustee must be filtered, got: {vulns:?}"
@@ -1279,10 +1276,8 @@ objectClass: user
 objectSid: S-1-5-21-1-2-1001
 "
         );
-        let vulns = parse_acl_enumeration(
-            &output2,
-            &serde_json::json!({"domain": "contoso.local"}),
-        );
+        let vulns =
+            parse_acl_enumeration(&output2, &serde_json::json!({"domain": "contoso.local"}));
         // The trustee SID (1001 = alice) is found in the SID map — alice is
         // the trustee, ws01 is the target.
         if !vulns.is_empty() {
@@ -1309,10 +1304,7 @@ objectSid: S-1-5-21-1-2-2001
 nTSecurityDescriptor:: {SD_GENERIC_ALL_B64}
 "
         );
-        let vulns = parse_acl_enumeration(
-            &output,
-            &serde_json::json!({"domain": "contoso.local"}),
-        );
+        let vulns = parse_acl_enumeration(&output, &serde_json::json!({"domain": "contoso.local"}));
         // Trustee SID 1001 is not in the map (only 512 and 2001 are).
         // So the SID itself becomes the source name. The trustee is not a
         // well-known system SID so a vuln should appear.
@@ -1335,11 +1327,8 @@ nTSecurityDescriptor:: {SD_GENERIC_ALL_B64}
 
         let mask: u32 = 0x00040000 | 0x00080000; // WRITE_DACL | WRITE_OWNER
         let sid_bytes = [
-            0x01u8, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05,
-            0x15, 0x00, 0x00, 0x00,
-            0x01, 0x00, 0x00, 0x00,
-            0x02, 0x00, 0x00, 0x00,
-            0xE9, 0x03, 0x00, 0x00,
+            0x01u8, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05, 0x15, 0x00, 0x00, 0x00, 0x01, 0x00,
+            0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0xE9, 0x03, 0x00, 0x00,
         ];
         let ace_size = (4u16 + 4 + sid_bytes.len() as u16).to_le_bytes();
         let mut ace = vec![0x00u8, 0x00];
@@ -1366,14 +1355,17 @@ objectClass: user
 nTSecurityDescriptor:: {b64}
 "
         );
-        let vulns = parse_acl_enumeration(
-            &output,
-            &serde_json::json!({"domain": "contoso.local"}),
-        );
+        let vulns = parse_acl_enumeration(&output, &serde_json::json!({"domain": "contoso.local"}));
         // Should produce separate entries for writedacl and writeowner.
-        assert!(vulns.len() >= 2, "Expected writedacl + writeowner, got: {vulns:?}");
-        let types: Vec<_> = vulns.iter().map(|v| v["vuln_type"].as_str().unwrap_or("")).collect();
+        assert!(
+            vulns.len() >= 2,
+            "Expected writedacl + writeowner, got: {vulns:?}"
+        );
+        let types: Vec<_> = vulns
+            .iter()
+            .map(|v| v["vuln_type"].as_str().unwrap_or(""))
+            .collect();
         assert!(types.contains(&"writedacl"));
         assert!(types.contains(&"writeowner"));
-}
+    }
 }
