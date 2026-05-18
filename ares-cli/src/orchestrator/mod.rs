@@ -399,6 +399,9 @@ async fn run_inner() -> Result<()> {
     let registry = AgentRegistry::new();
     let throttler = Arc::new(Throttler::new(config.clone(), tracker.clone()));
     let deferred = Arc::new(DeferredQueue::new(queue.clone(), config.clone()));
+    if let Err(e) = deferred.reconcile_total().await {
+        warn!(err = %e, "Deferred queue counter reconcile failed at startup");
+    }
 
     // Priority: ARES_LLM_MODEL env var > config YAML agents.orchestrator.model
     let model_spec = std::env::var("ARES_LLM_MODEL").ok().or_else(|| {

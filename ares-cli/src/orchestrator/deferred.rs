@@ -18,7 +18,7 @@ use anyhow::{Context, Result};
 use chrono::Utc;
 use redis::AsyncCommands;
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 use tokio::sync::watch;
 use tracing::{debug, info, warn};
 
@@ -29,6 +29,42 @@ use crate::orchestrator::throttling::{ThrottleDecision, Throttler};
 
 /// Redis key prefix for deferred queues (matches Python `DEFERRED_QUEUE_PREFIX`).
 pub const DEFERRED_QUEUE_PREFIX: &str = "ares:deferred";
+
+/// Atomic enqueue: per-type cap → global cap → ZADD → INCR counter.
+///
+/// KEYS[1] = per-type ZSET   KEYS[2] = total counter
+/// ARGV[1] = score   ARGV[2] = member JSON   ARGV[3] = max_per_type   ARGV[4] = max_total
+///
+/// Returns: `1` accepted, `0` per-type full, `-1` global full, `-2` member already present.
+static ENQUEUE_SCRIPT: LazyLock<redis::Script> = LazyLock::new(|| {
+    redis::Script::new(
+        r"
+        if redis.call('ZCARD', KEYS[1]) >= tonumber(ARGV[3]) then return 0 end
+        if tonumber(redis.call('GET', KEYS[2]) or '0') >= tonumber(ARGV[4]) then return -1 end
+        local added = redis.call('ZADD', KEYS[1], ARGV[1], ARGV[2])
+        if added == 0 then return -2 end
+        redis.call('INCR', KEYS[2])
+        return 1
+        ",
+    )
+});
+
+/// Atomic ZREM + counter DECR.
+///
+/// KEYS[1] = per-type ZSET   KEYS[2] = total counter   ARGV[1] = member
+/// Returns the number of elements removed (0 or 1). Counter never goes negative.
+static REMOVE_SCRIPT: LazyLock<redis::Script> = LazyLock::new(|| {
+    redis::Script::new(
+        r"
+        local removed = redis.call('ZREM', KEYS[1], ARGV[1])
+        if removed > 0 then
+            local cur = tonumber(redis.call('GET', KEYS[2]) or '0')
+            if cur > 0 then redis.call('DECR', KEYS[2]) end
+        end
+        return removed
+        ",
+    )
+});
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeferredTask {
@@ -66,58 +102,74 @@ impl DeferredQueue {
         )
     }
 
+    /// Redis key for the global cardinality counter. Mutations to the ZSETs
+    /// are paired with INCR/DECR via Lua so this stays consistent.
+    fn total_key(&self) -> String {
+        format!(
+            "{}:{}:__total",
+            DEFERRED_QUEUE_PREFIX, self.config.operation_id
+        )
+    }
+
     /// Enqueue a task for later dispatch.
     ///
-    /// Returns `true` if the task was accepted, `false` if the queue is full.
+    /// Returns `true` if the task was accepted, `false` if either the per-type
+    /// or operation-wide cap is full.
     pub async fn enqueue(&self, task: &DeferredTask) -> Result<bool> {
         let key = self.zset_key(&task.task_type);
-
-        // Check per-type limit
-        let mut conn = self.queue_conn();
-        let current_len: usize = conn.zcard(&key).await.unwrap_or(0);
-        if current_len >= self.config.max_deferred_per_type {
-            debug!(
-                task_type = %task.task_type,
-                len = current_len,
-                max = self.config.max_deferred_per_type,
-                "Deferred queue full for type"
-            );
-            return Ok(false);
-        }
-
-        // Check global total across all task types so a single misbehaving
-        // type can't push us past the operation-wide cap.
-        let pattern = format!("{}:{}:*", DEFERRED_QUEUE_PREFIX, self.config.operation_id);
-        let keys: Vec<String> = scan_keys_async(&mut conn, &pattern).await;
-        let mut total: usize = 0;
-        for k in &keys {
-            total = total.saturating_add(conn.zcard::<_, usize>(k).await.unwrap_or(0));
-        }
-        if total >= self.config.max_deferred_total {
-            debug!(
-                task_type = %task.task_type,
-                total,
-                max = self.config.max_deferred_total,
-                "Deferred queue full globally"
-            );
-            return Ok(false);
-        }
-
+        let total_key = self.total_key();
         let json = serde_json::to_string(task).context("Failed to serialize DeferredTask")?;
         let score = task.score();
+        let mut conn = self.queue_conn();
 
-        conn.zadd::<_, _, _, ()>(&key, &json, score)
+        let result: i64 = ENQUEUE_SCRIPT
+            .key(&key)
+            .key(&total_key)
+            .arg(score)
+            .arg(&json)
+            .arg(self.config.max_deferred_per_type)
+            .arg(self.config.max_deferred_total)
+            .invoke_async(&mut conn)
             .await
-            .with_context(|| format!("ZADD to {key}"))?;
+            .with_context(|| format!("Deferred enqueue script on {key}"))?;
 
-        info!(
-            task_type = %task.task_type,
-            role = %task.target_role,
-            priority = task.priority,
-            score,
-            "Task deferred"
-        );
-        Ok(true)
+        match result {
+            1 => {
+                info!(
+                    task_type = %task.task_type,
+                    role = %task.target_role,
+                    priority = task.priority,
+                    score,
+                    "Task deferred"
+                );
+                Ok(true)
+            }
+            0 => {
+                debug!(
+                    task_type = %task.task_type,
+                    max = self.config.max_deferred_per_type,
+                    "Deferred queue full for type"
+                );
+                Ok(false)
+            }
+            -1 => {
+                debug!(
+                    task_type = %task.task_type,
+                    max = self.config.max_deferred_total,
+                    "Deferred queue full globally"
+                );
+                Ok(false)
+            }
+            -2 => {
+                // ZADD returned 0 — member already present. Treat as accepted
+                // (idempotent re-enqueue from the drain loop's retry paths).
+                Ok(true)
+            }
+            other => {
+                warn!(result = other, "Unexpected enqueue script result");
+                Ok(false)
+            }
+        }
     }
 
     /// Pop the highest-priority (lowest-score) task from any type ZSET.
@@ -126,6 +178,7 @@ impl DeferredQueue {
     /// globally lowest score.
     pub async fn pop_best(&self) -> Result<Option<DeferredTask>> {
         let pattern = format!("{}:{}:*", DEFERRED_QUEUE_PREFIX, self.config.operation_id);
+        let total_key = self.total_key();
         let mut conn = self.queue_conn();
 
         // SCAN for matching keys (avoids blocking Redis with KEYS)
@@ -139,6 +192,9 @@ impl DeferredQueue {
         let mut best: Option<(String, String, f64)> = None; // (key, member, score)
 
         for key in &keys {
+            if key == &total_key {
+                continue;
+            }
             // Peek at the lowest-score member
             let members: Vec<(String, f64)> = redis::cmd("ZRANGEBYSCORE")
                 .arg(key)
@@ -162,8 +218,14 @@ impl DeferredQueue {
 
         match best {
             Some((key, member, _score)) => {
-                // Atomically remove it
-                let removed: usize = conn.zrem(&key, &member).await.unwrap_or(0);
+                let total_key = self.total_key();
+                let removed: i64 = REMOVE_SCRIPT
+                    .key(&key)
+                    .key(&total_key)
+                    .arg(&member)
+                    .invoke_async(&mut conn)
+                    .await
+                    .unwrap_or(0);
                 if removed == 0 {
                     // Someone else grabbed it (unlikely in single-orchestrator mode)
                     return Ok(None);
@@ -181,13 +243,16 @@ impl DeferredQueue {
         let pattern = format!("{}:{}:*", DEFERRED_QUEUE_PREFIX, self.config.operation_id);
         let mut conn = self.queue_conn();
         let keys: Vec<String> = scan_keys_async(&mut conn, &pattern).await;
+        let total_key = self.total_key();
 
         let max_age = self.config.deferred_task_max_age;
         let cutoff = Utc::now().timestamp() as f64 - max_age.as_secs_f64();
         let mut total_evicted = 0_usize;
 
         for key in &keys {
-            // All members, check enqueue_time
+            if key == &total_key {
+                continue;
+            }
             let members: Vec<(String, f64)> = redis::cmd("ZRANGEBYSCORE")
                 .arg(key)
                 .arg("-inf")
@@ -200,13 +265,21 @@ impl DeferredQueue {
             for (member, _score) in members {
                 if let Ok(task) = serde_json::from_str::<DeferredTask>(&member) {
                     if task.enqueue_time < cutoff {
-                        let _: usize = conn.zrem(key, &member).await.unwrap_or(0);
-                        total_evicted += 1;
-                        debug!(
-                            task_type = %task.task_type,
-                            age_secs = Utc::now().timestamp() as f64 - task.enqueue_time,
-                            "Evicted stale deferred task"
-                        );
+                        let removed: i64 = REMOVE_SCRIPT
+                            .key(key)
+                            .key(&total_key)
+                            .arg(&member)
+                            .invoke_async(&mut conn)
+                            .await
+                            .unwrap_or(0);
+                        if removed > 0 {
+                            total_evicted += 1;
+                            debug!(
+                                task_type = %task.task_type,
+                                age_secs = Utc::now().timestamp() as f64 - task.enqueue_time,
+                                "Evicted stale deferred task"
+                            );
+                        }
                     }
                 }
             }
@@ -218,21 +291,34 @@ impl DeferredQueue {
         Ok(total_evicted)
     }
 
-    /// Total number of deferred tasks across all type ZSETs.
+    /// Total number of deferred tasks across all type ZSETs. O(1) — reads the
+    /// counter maintained atomically by the enqueue/remove scripts.
     pub async fn total_count(&self) -> usize {
+        let mut conn = self.queue_conn();
+        let raw: Option<i64> = conn.get(self.total_key()).await.unwrap_or(None);
+        raw.unwrap_or(0).max(0) as usize
+    }
+
+    /// Recompute the global counter from the underlying ZSETs and overwrite
+    /// it. Use at startup or after recovering from an inconsistent state to
+    /// repair any drift between the counter and the actual queues.
+    pub async fn reconcile_total(&self) -> Result<usize> {
         let pattern = format!("{}:{}:*", DEFERRED_QUEUE_PREFIX, self.config.operation_id);
+        let total_key = self.total_key();
         let mut conn = self.queue_conn();
         let keys: Vec<String> = scan_keys_async(&mut conn, &pattern).await;
-        let mut total = 0_usize;
+        let mut total: usize = 0;
         for key in &keys {
-            let count: usize = redis::cmd("ZCARD")
-                .arg(key)
-                .query_async(&mut conn)
-                .await
-                .unwrap_or(0);
-            total += count;
+            if key == &total_key {
+                continue;
+            }
+            total = total.saturating_add(conn.zcard::<_, usize>(key).await.unwrap_or(0));
         }
-        total
+        let _: () = conn
+            .set(&total_key, total)
+            .await
+            .with_context(|| format!("SET {total_key}"))?;
+        Ok(total)
     }
 
     fn queue_conn(&self) -> redis::aio::ConnectionManager {
