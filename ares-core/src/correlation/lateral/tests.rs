@@ -2,7 +2,11 @@ use super::graph::AddConnectionParams;
 use super::*;
 use serde_json::json;
 
-fn basic_conn<'a>(source: &'a str, destination: &'a str, conn_type: &'a str) -> AddConnectionParams<'a> {
+fn basic_conn<'a>(
+    source: &'a str,
+    destination: &'a str,
+    conn_type: &'a str,
+) -> AddConnectionParams<'a> {
     AddConnectionParams {
         source,
         destination,
