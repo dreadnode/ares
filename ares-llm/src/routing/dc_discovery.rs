@@ -466,4 +466,138 @@ mod tests {
         assert_eq!(DcTier::Forest.to_string(), "forest");
         assert_eq!(DcTier::LastResort.to_string(), "last_resort");
     }
+
+    // ── Additional tier coverage ────────────────────────────────────
+
+    #[test]
+    fn find_dc_ip_target_tier_via_ip_match() {
+        // Tier "Target": when target_ip matches a host that has DC role/services
+        // and hostname matches domain.
+        let hosts = vec![make_host(
+            "192.168.58.10",
+            "dc01.contoso.local",
+            true,
+            vec![],
+        )];
+        let result = find_dc_ip(
+            "contoso.local",
+            &hosts,
+            &HashMap::new(),
+            &HashMap::new(),
+            Some("192.168.58.10"),
+        );
+        let d = result.expect("should find DC via target tier");
+        assert_eq!(d.ip, "192.168.58.10");
+        assert_eq!(d.tier, DcTier::Target);
+        assert!(d.should_cache);
+    }
+
+    #[test]
+    fn find_dc_ip_target_tier_wrong_ip_falls_through() {
+        // target_ip does not match any host IP -> falls through to Tier 1
+        let hosts = vec![make_host(
+            "192.168.58.10",
+            "dc01.contoso.local",
+            true,
+            vec![],
+        )];
+        let result = find_dc_ip(
+            "contoso.local",
+            &hosts,
+            &HashMap::new(),
+            &HashMap::new(),
+            Some("192.168.58.99"),
+        );
+        let d = result.expect("should still find DC via role tier");
+        assert_eq!(d.tier, DcTier::Role);
+    }
+
+    #[test]
+    fn find_dc_ip_forest_tier_prefers_child_dc_over_parent() {
+        // Tier 3.5 / Forest: searching for child.contoso.local when a DC in
+        // the same forest (dc-child.contoso.local) exists but the parent DC
+        // for contoso.local is 192.168.58.10. Should pick the forest DC
+        // that is NOT the parent.
+        let mut dc_map = HashMap::new();
+        dc_map.insert("contoso.local".to_string(), "192.168.58.10".to_string());
+
+        let hosts = vec![
+            // DC for the parent forest root
+            make_host("192.168.58.10", "dc01.contoso.local", true, vec![]),
+            // DC in the same forest but a different subdomain
+            make_host("192.168.58.11", "dc-child.contoso.local", true, vec![]),
+        ];
+
+        let result = find_dc_ip(
+            "child.contoso.local",
+            &hosts,
+            &dc_map,
+            &HashMap::new(),
+            None,
+        );
+        let d = result.expect("should find forest DC");
+        // Must pick the non-parent DC
+        assert_eq!(d.ip, "192.168.58.11");
+        assert_eq!(d.tier, DcTier::Forest);
+        assert!(d.should_cache);
+    }
+
+    #[test]
+    fn find_dc_ip_last_resort_tier() {
+        // Tier 6: no domain match anywhere, but some host has DC services.
+        let host = make_host(
+            "192.168.58.50",
+            "unknown-host",
+            false,
+            vec!["88/tcp (kerberos)"],
+        );
+        // Domain doesn't match hostname, so Tiers 1-3.5 all miss.
+        // Tier 5 (FallbackRole) also misses since is_dc=false and roles=[].
+        // Tier 6 (LastResort) catches it via DC services.
+        let result = find_dc_ip(
+            "contoso.local",
+            &[host],
+            &HashMap::new(),
+            &HashMap::new(),
+            None,
+        );
+        let d = result.expect("should find via last resort");
+        assert_eq!(d.tier, DcTier::LastResort);
+        assert!(!d.should_cache);
+    }
+
+    #[test]
+    fn dc_tier_display_all_variants() {
+        // Cover all DcTier::Display arms so the formatter lines are executed.
+        let cases = [
+            (DcTier::Cached, "cached"),
+            (DcTier::Target, "target"),
+            (DcTier::Role, "role"),
+            (DcTier::HostnamePattern, "hostname_pattern"),
+            (DcTier::Services, "services"),
+            (DcTier::Forest, "forest"),
+            (DcTier::ForestParentFallback, "forest_parent_fallback"),
+            (DcTier::DnsSrv, "dns_srv"),
+            (DcTier::LdapRootDse, "ldap_rootdse"),
+            (DcTier::FallbackRole, "fallback_role"),
+            (DcTier::LastResort, "last_resort"),
+        ];
+        for (tier, expected) in cases {
+            assert_eq!(tier.to_string(), expected, "mismatch for {tier:?}");
+        }
+    }
+
+    #[test]
+    fn has_dc_services_by_service_name_keyword() {
+        // The second check in has_dc_services: service name containing a
+        // DC keyword (not just port prefix).
+        let host = make_host(
+            "192.168.58.10",
+            "srv01",
+            false,
+            vec!["1024/tcp (kerberos-related-svc)"],
+        );
+        // The "kerberos" substring triggers the DC_SERVICE_NAMES.contains path.
+        assert!(has_dc_services(&host));
+    }
 }

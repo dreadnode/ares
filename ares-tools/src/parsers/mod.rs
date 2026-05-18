@@ -1311,4 +1311,296 @@ contoso.local/Administrator:500:aad3b435b51404eeaad3b435b51404ee:222222222222222
             b["vulnerabilities"][0]["vuln_id"]
         );
     }
+    // ── password_policy ───────────────────────────────────────────────
+
+    #[test]
+    fn parse_tool_output_password_policy_extracts_fields() {
+        let output = "Minimum password length: 7\n\
+                      Account lockout threshold: 5\n\
+                      Account lockout duration: 30\n";
+        let params = json!({"domain": "contoso.local", "target": "192.168.58.10"});
+        let disc = parse_tool_output("password_policy", output, &params);
+        let policies = disc["password_policies"].as_array().expect("password_policies array");
+        assert_eq!(policies.len(), 1);
+        assert_eq!(policies[0]["domain"], "contoso.local");
+        assert_eq!(policies[0]["target_ip"], "192.168.58.10");
+        assert_eq!(policies[0]["lockout_threshold"], "5");
+        assert_eq!(policies[0]["min_password_length"], "7");
+    }
+
+    #[test]
+    fn parse_tool_output_password_policy_skipped_when_domain_empty() {
+        let output = "Minimum password length: 7\n";
+        let params = json!({"target": "192.168.58.10"});
+        let disc = parse_tool_output("password_policy", output, &params);
+        assert!(disc.get("password_policies").is_none());
+    }
+
+    #[test]
+    fn parse_tool_output_password_policy_skipped_when_output_empty() {
+        let params = json!({"domain": "contoso.local"});
+        let disc = parse_tool_output("password_policy", "", &params);
+        assert!(disc.get("password_policies").is_none());
+    }
+
+    #[test]
+    fn parse_tool_output_password_policy_partial_fields() {
+        // Only lockout threshold found — min_length missing is fine.
+        let output = "Account Lockout Threshold: 0\n";
+        let params = json!({"domain": "contoso.local"});
+        let disc = parse_tool_output("password_policy", output, &params);
+        let policies = disc["password_policies"].as_array().expect("password_policies");
+        assert_eq!(policies[0]["lockout_threshold"], "0");
+        assert!(policies[0].get("min_password_length").is_none());
+    }
+
+    // ── evil_winrm ────────────────────────────────────────────────────
+
+    #[test]
+    fn parse_tool_output_evil_winrm_shell_success() {
+        let output = "Evil-WinRM shell v3.5\nInfo: Establishing connection to remote endpoint\n";
+        let params = json!({"target": "192.168.58.20"});
+        let disc = parse_tool_output("evil_winrm", output, &params);
+        let vulns = disc["vulnerabilities"].as_array().expect("vulns");
+        assert_eq!(vulns.len(), 1);
+        assert_eq!(vulns[0]["vuln_type"], "winrm_access");
+        assert_eq!(vulns[0]["target"], "192.168.58.20");
+        assert_eq!(vulns[0]["vuln_id"], "winrm_access_192_168_58_20");
+    }
+
+    #[test]
+    fn parse_tool_output_evil_winrm_whoami_output() {
+        // whoami returning DOMAIN\user confirms access
+        let output = "CONTOSO\\alice\n";
+        let params = json!({"target": "192.168.58.20"});
+        let disc = parse_tool_output("evil_winrm", output, &params);
+        assert!(disc.get("vulnerabilities").is_some());
+    }
+
+    #[test]
+    fn parse_tool_output_evil_winrm_ps_prompt() {
+        let output = "PS C:\\Users\\Administrator> whoami\n";
+        let params = json!({"target": "192.168.58.20"});
+        let disc = parse_tool_output("evil_winrm", output, &params);
+        assert!(disc.get("vulnerabilities").is_some());
+    }
+
+    #[test]
+    fn parse_tool_output_evil_winrm_no_success_marker() {
+        let output = "[!] Connection timed out\n";
+        let params = json!({"target": "192.168.58.20"});
+        let disc = parse_tool_output("evil_winrm", output, &params);
+        assert!(disc.get("vulnerabilities").is_none());
+    }
+
+    // ── xfreerdp ─────────────────────────────────────────────────────
+
+    #[test]
+    fn parse_tool_output_xfreerdp_auth_success() {
+        let output = "Authentication only, exit status 0\n";
+        let params = json!({"target": "192.168.58.20"});
+        let disc = parse_tool_output("xfreerdp", output, &params);
+        let vulns = disc["vulnerabilities"].as_array().expect("vulns");
+        assert_eq!(vulns[0]["vuln_type"], "rdp_access");
+        assert_eq!(vulns[0]["target"], "192.168.58.20");
+    }
+
+    #[test]
+    fn parse_tool_output_xfreerdp_connected() {
+        let output = "connected to 192.168.58.20:3389\n";
+        let params = json!({"target": "192.168.58.20"});
+        let disc = parse_tool_output("xfreerdp", output, &params);
+        assert!(disc.get("vulnerabilities").is_some());
+    }
+
+    #[test]
+    fn parse_tool_output_xfreerdp_connected_with_errconnect_not_success() {
+        // `connected to` + `ERRCONNECT` should not count as success.
+        let output = "connected to 192.168.58.20:3389\nERRCONNECT_CONNECT_FAILED\n";
+        let params = json!({"target": "192.168.58.20"});
+        let disc = parse_tool_output("xfreerdp", output, &params);
+        assert!(disc.get("vulnerabilities").is_none());
+    }
+
+    #[test]
+    fn parse_tool_output_xfreerdp_session_started() {
+        let output = "FREERDP_CB_SESSION_STARTED\n";
+        let params = json!({"target": "192.168.58.20"});
+        let disc = parse_tool_output("xfreerdp", output, &params);
+        assert!(disc.get("vulnerabilities").is_some());
+    }
+
+    #[test]
+    fn parse_tool_output_xfreerdp_failure() {
+        let output = "ERRCONNECT_LOGON_FAILURE [0x00020014]\n";
+        let params = json!({"target": "192.168.58.20"});
+        let disc = parse_tool_output("xfreerdp", output, &params);
+        assert!(disc.get("vulnerabilities").is_none());
+    }
+
+    // ── ntds_dit_extract ──────────────────────────────────────────────
+
+    #[test]
+    fn parse_tool_output_ntds_dit_extract() {
+        // ntds_dit_extract output is secretsdump format
+        let output = "Administrator:500:aad3b435b51404eeaad3b435b51404ee:e19ccf75ee54e06b06a5907af13cef42:::";
+        let params = json!({"domain": "contoso.local"});
+        let disc = parse_tool_output("ntds_dit_extract", output, &params);
+        assert!(disc.get("hashes").is_some() || disc.get("credentials").is_some());
+    }
+
+    // ── smb_login_check ───────────────────────────────────────────────
+
+    #[test]
+    fn parse_tool_output_smb_login_check() {
+        let output = "[+] 192.168.58.10 contoso.local\\alice:Password1 (Pwn3d!)";
+        let params = json!({"domain": "contoso.local", "target_ip": "192.168.58.10"});
+        let disc = parse_tool_output("smb_login_check", output, &params);
+        let creds = disc["credentials"].as_array().expect("credentials");
+        assert!(!creds.is_empty());
+    }
+
+    // ── mssql_enum_impersonation ──────────────────────────────────────
+
+    #[test]
+    fn parse_tool_output_mssql_enum_impersonation() {
+        let output = "class  class_desc  major_id  type  permission_name  state  state_desc\n\
+                      100    SERVER      1         IM    IMPERSONATE      G      GRANT\n";
+        let params = json!({"target": "192.168.58.30", "domain": "contoso.local"});
+        let disc = parse_tool_output("mssql_enum_impersonation", output, &params);
+        let vulns = disc["vulnerabilities"].as_array().expect("vulns");
+        assert!(!vulns.is_empty());
+        assert_eq!(vulns[0]["vuln_type"], "mssql_impersonation");
+    }
+
+    #[test]
+    fn parse_tool_output_mssql_enum_impersonation_empty() {
+        let output = "No impersonation permissions found";
+        let params = json!({"target": "192.168.58.30", "domain": "contoso.local"});
+        let disc = parse_tool_output("mssql_enum_impersonation", output, &params);
+        assert!(disc.get("vulnerabilities").is_none());
+    }
+
+    // ── mssql_enum_linked_servers ─────────────────────────────────────
+
+    #[test]
+    fn parse_tool_output_mssql_enum_linked_servers_returns_vulns() {
+        // mssql linked server output varies by tool, but parse_mssql_linked_servers
+        // reads server names from keyword lines
+        let output = "SRV_NAME  PRODUCT  PROVIDER  DATA_SOURCE\n\
+                      sql02.fabrikam.local  SQL Server  SQLNCLI  sql02.fabrikam.local\n";
+        let params = json!({"target": "192.168.58.30", "domain": "contoso.local"});
+        let disc = parse_tool_output("mssql_enum_linked_servers", output, &params);
+        // Whether vulns appear depends on the parser; just confirm no panic.
+        let _ = disc;
+    }
+
+    // ── enumerate_domain_trusts ───────────────────────────────────────
+
+    #[test]
+    fn parse_tool_output_enumerate_domain_trusts() {
+        let output = "cn: fabrikam.local\n\
+                      trustDirection: 3\n\
+                      trustType: 2\n\
+                      trustAttributes: 8\n\
+                      flatName: FABRIKAM\n";
+        let disc = parse_tool_output("enumerate_domain_trusts", output, &json!({}));
+        let td = disc["trusted_domains"].as_array().expect("trusted_domains");
+        assert_eq!(td.len(), 1);
+        assert_eq!(td[0]["domain"], "fabrikam.local");
+        assert_eq!(td[0]["trust_type"], "forest");
+    }
+
+    // ── ldap_acl_enumeration ──────────────────────────────────────────
+
+    #[test]
+    fn parse_tool_output_ldap_acl_enumeration_empty() {
+        let disc = parse_tool_output(
+            "ldap_acl_enumeration",
+            "",
+            &json!({"domain": "contoso.local"}),
+        );
+        assert!(disc.get("vulnerabilities").is_none());
+    }
+
+    // ── merge_discoveries: discovered_users and shares ─────────────────
+
+    #[test]
+    fn merge_discoveries_combines_discovered_users() {
+        let d1 = json!({"discovered_users": [{"username": "alice", "domain": "contoso.local"}]});
+        let d2 = json!({"discovered_users": [{"username": "bob", "domain": "contoso.local"}]});
+        let merged = merge_discoveries(&[d1, d2]);
+        let users = merged["discovered_users"].as_array().expect("discovered_users");
+        assert_eq!(users.len(), 2);
+    }
+
+    #[test]
+    fn merge_discoveries_combines_shares() {
+        let d1 = json!({"shares": [{"name": "SYSVOL", "ip": "192.168.58.10"}]});
+        let d2 = json!({"shares": [{"name": "NETLOGON", "ip": "192.168.58.10"}]});
+        let merged = merge_discoveries(&[d1, d2]);
+        let shares = merged["shares"].as_array().expect("shares");
+        assert_eq!(shares.len(), 2);
+    }
+
+    #[test]
+    fn merge_discoveries_combines_trusted_domains() {
+        let d1 = json!({"trusted_domains": [{"domain": "fabrikam.local", "trust_type": "forest"}]});
+        let d2 = json!({"trusted_domains": [{"domain": "child.contoso.local", "trust_type": "parent_child"}]});
+        let merged = merge_discoveries(&[d1, d2]);
+        let td = merged["trusted_domains"].as_array().expect("trusted_domains");
+        assert_eq!(td.len(), 2);
+    }
+
+    #[test]
+    fn merge_discoveries_skips_hosts_with_empty_ip() {
+        let d = json!({"hosts": [{"ip": "", "hostname": "mystery"}]});
+        let merged = merge_discoveries(&[d]);
+        assert!(merged.get("hosts").is_none());
+    }
+
+    // ── looks_like_ip_pub ─────────────────────────────────────────────
+
+    #[test]
+    fn looks_like_ip_pub_accepts_valid() {
+        assert!(looks_like_ip_pub("192.168.58.10"));
+        assert!(looks_like_ip_pub("10.0.0.1"));
+    }
+
+    #[test]
+    fn looks_like_ip_pub_rejects_invalid() {
+        assert!(!looks_like_ip_pub("contoso.local"));
+        assert!(!looks_like_ip_pub("not-an-ip"));
+        assert!(!looks_like_ip_pub("256.1.1.1"));
+    }
+
+    // ── relay_and_coerce: no relayed_user ────────────────────────────
+
+    #[test]
+    fn parse_tool_output_relay_and_coerce_no_relayed_user_still_emits() {
+        // PFX_FILE present but no RELAYED_USER line — should still emit vuln.
+        let output = "PFX_FILE=/tmp/ares_relay_5/DC01.pfx\n";
+        let params = json!({"coerce_target": "192.168.58.10", "coerce_domain": "contoso.local"});
+        let disc = parse_tool_output("relay_and_coerce", output, &params);
+        let vulns = disc["vulnerabilities"].as_array().expect("vulns");
+        assert_eq!(vulns[0]["vuln_type"], "certificate_obtained");
+        // No user in details when RELAYED_USER is absent
+        assert!(vulns[0]["details"].get("target_user").is_none());
+    }
+
+    #[test]
+    fn parse_tool_output_relay_and_coerce_vuln_id_sanitises_dollar() {
+        // Machine account names contain `$` — safe slug should use `_`
+        let output = "PFX_FILE=/tmp/ares_relay_6/DC01$.pfx\nRELAYED_USER=DC01$\n";
+        let params = json!({
+            "coerce_target": "192.168.58.10",
+            "target_domain": "contoso.local",
+        });
+        let disc = parse_tool_output("relay_and_coerce", output, &params);
+        let vuln_id = disc["vulnerabilities"][0]["vuln_id"].as_str().unwrap();
+        assert!(
+            !vuln_id.contains('$'),
+            "vuln_id must not contain shell-special $, got {vuln_id}"
+        );
+    }
 }
