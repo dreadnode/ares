@@ -417,21 +417,18 @@ pub async fn certipy_esc7_full_chain(args: &Value) -> Result<ToolOutput> {
         });
     outputs.push(("Request SubCA", step2));
 
-    let req_id = match request_id {
-        Some(id) => id,
-        None => {
-            let combined = outputs
-                .iter()
-                .map(|(name, o)| format!("=== {name} ===\n{}\n{}", o.stdout, o.stderr))
-                .collect::<Vec<_>>()
-                .join("\n");
-            return Ok(ToolOutput {
-                stdout: combined,
-                stderr: "ERROR: Could not parse request ID from certipy output".into(),
-                exit_code: Some(1),
-                success: false,
-            });
-        }
+    let Some(req_id) = request_id else {
+        let combined = outputs
+            .iter()
+            .map(|(name, o)| format!("=== {name} ===\n{}\n{}", o.stdout, o.stderr))
+            .collect::<Vec<_>>()
+            .join("\n");
+        return Ok(ToolOutput {
+            stdout: combined,
+            stderr: "ERROR: Could not parse request ID from certipy output".into(),
+            exit_code: Some(1),
+            success: false,
+        });
     };
 
     let mut step3_cmd = CommandBuilder::new("certipy")

@@ -179,16 +179,13 @@ pub fn get_attack_chain_precursors(args: &Value) -> anyhow::Result<ToolOutput> {
     let technique_id = required_str(args, "technique_id")?;
 
     let chains = attack_chains();
-    let chain = match chains.get(technique_id) {
-        Some(c) => c,
-        None => {
-            let available: Vec<&str> = chains.keys().map(|k| k.as_str()).collect();
-            return Ok(make_output(&format!(
-                "No attack chain data for technique {}.\nAvailable techniques: {}",
-                technique_id,
-                available.join(", ")
-            )));
-        }
+    let Some(chain) = chains.get(technique_id) else {
+        let available: Vec<&str> = chains.keys().map(|k| k.as_str()).collect();
+        return Ok(make_output(&format!(
+            "No attack chain data for technique {}.\nAvailable techniques: {}",
+            technique_id,
+            available.join(", ")
+        )));
     };
 
     let output = serde_json::json!({
@@ -230,16 +227,13 @@ pub fn get_detection_recipe(args: &Value) -> anyhow::Result<ToolOutput> {
     let recipe_name = required_str(args, "recipe_name")?;
 
     let recipes = detection_recipes();
-    let recipe = match recipes.get(recipe_name) {
-        Some(r) => r,
-        None => {
-            let available: Vec<&str> = recipes.keys().map(|k| k.as_str()).collect();
-            return Ok(make_output(&format!(
-                "No detection recipe '{}'.\nAvailable recipes: {}",
-                recipe_name,
-                available.join(", ")
-            )));
-        }
+    let Some(recipe) = recipes.get(recipe_name) else {
+        let available: Vec<&str> = recipes.keys().map(|k| k.as_str()).collect();
+        return Ok(make_output(&format!(
+            "No detection recipe '{}'.\nAvailable recipes: {}",
+            recipe_name,
+            available.join(", ")
+        )));
     };
 
     // Extract fields with coalescing (mitre_technique or mitre_techniques)

@@ -80,7 +80,7 @@ impl BlueTeamReportGenerator {
                                     ev.get("confidence").and_then(|v| v.as_f64()).unwrap_or(0.0);
 
                                 BlueTeamEvidenceItem {
-                                    id_short: id_short.to_string(),
+                                    id_short,
                                     ev_type: ev
                                         .get("type")
                                         .and_then(|v| v.as_str())

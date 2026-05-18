@@ -1059,7 +1059,7 @@ mod tests {
             &dcs,
         );
         assert_eq!(result.len(), 2);
-        let mut sorted = result.clone();
+        let mut sorted = result;
         sorted.sort();
         assert_eq!(sorted, vec!["contoso.local", "fabrikam.local"]);
     }

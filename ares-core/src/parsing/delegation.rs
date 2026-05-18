@@ -50,9 +50,8 @@ pub fn extract_delegations(output: &str) -> Vec<DelegationEntry> {
             continue;
         }
 
-        let _col_indices = match col_indices {
-            Some(ci) => ci,
-            None => continue,
+        let Some(_col_indices) = col_indices else {
+            continue;
         };
 
         // For the table format, the columns may have multi-word values

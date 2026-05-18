@@ -634,7 +634,7 @@ mod tests {
                 .map(|fqdn| fqdn.to_lowercase())
                 .unwrap_or(raw_lower.clone())
         } else {
-            raw_lower.clone()
+            raw_lower
         };
         assert_eq!(resolved, "child.contoso.local");
 
@@ -646,7 +646,7 @@ mod tests {
                 .map(|fqdn| fqdn.to_lowercase())
                 .unwrap_or(fqdn_lower.clone())
         } else {
-            fqdn_lower.clone()
+            fqdn_lower
         };
         assert_eq!(resolved2, "contoso.local");
 
@@ -658,7 +658,7 @@ mod tests {
                 .map(|fqdn| fqdn.to_lowercase())
                 .unwrap_or(unknown_lower.clone())
         } else {
-            unknown_lower.clone()
+            unknown_lower
         };
         assert_eq!(resolved3, "unknown");
     }
@@ -777,7 +777,7 @@ mod tests {
             id: format!("pth_{}", hash.username),
             username: hash.username.clone(),
             password: hash.hash_value.clone(),
-            domain: hash.domain.clone(),
+            domain: hash.domain,
             source: "hash_pth".to_string(),
             discovered_at: None,
             is_admin: false,
@@ -959,7 +959,7 @@ mod tests {
                 .map(|fqdn| fqdn.to_lowercase())
                 .unwrap_or(raw_lower.clone())
         } else {
-            raw_lower.clone()
+            raw_lower
         };
         assert_eq!(resolved, "contoso.local");
     }

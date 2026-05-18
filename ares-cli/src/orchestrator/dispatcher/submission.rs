@@ -229,16 +229,13 @@ impl Dispatcher {
         let role = ares_llm::tool_registry::AgentRole::parse(target_role)
             .or_else(|| crate::orchestrator::llm_runner::role_for_task_type(task_type));
 
-        let role = match role {
-            Some(r) => r,
-            None => {
-                warn!(
-                    task_type = task_type,
-                    target_role = target_role,
-                    "No LLM role mapping for task type or target role, dropping"
-                );
-                return Ok(SubmissionOutcome::Dropped);
-            }
+        let Some(role) = role else {
+            warn!(
+                task_type = task_type,
+                target_role = target_role,
+                "No LLM role mapping for task type or target role, dropping"
+            );
+            return Ok(SubmissionOutcome::Dropped);
         };
 
         self.submit_to_llm(

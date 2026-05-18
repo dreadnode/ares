@@ -184,9 +184,8 @@ impl SharedState {
         let fqdn_lower = fqdn.to_lowercase();
         let (op_id, candidate_json) = {
             let mut state = self.inner.write().await;
-            let candidate = match state.candidate_domains.get_mut(&fqdn_lower) {
-                Some(c) => c,
-                None => return Ok(()),
+            let Some(candidate) = state.candidate_domains.get_mut(&fqdn_lower) else {
+                return Ok(());
             };
             candidate.probed = true;
             candidate.last_probed_at = Some(Utc::now());

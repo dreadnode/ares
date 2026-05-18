@@ -426,7 +426,7 @@ impl BlueCallbackHandler {
                 let result = format!("Investigation complete. {summary}");
                 Some(CallbackResult::TaskComplete {
                     task_id: "investigation".into(),
-                    result: result.to_string(),
+                    result,
                 })
             }
             // escalate_investigation is handled async in dispatch_escalation_triage

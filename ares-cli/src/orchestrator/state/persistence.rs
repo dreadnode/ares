@@ -34,12 +34,9 @@ impl SharedState {
             .await
             .context("Failed to load state from Redis")?;
 
-        let loaded = match loaded {
-            Some(s) => s,
-            None => {
-                info!(operation_id = %operation_id, "No existing state in Redis — starting fresh");
-                return Ok(());
-            }
+        let Some(loaded) = loaded else {
+            info!(operation_id = %operation_id, "No existing state in Redis — starting fresh");
+            return Ok(());
         };
 
         // Trust workflow dedups (`trust_follow:*` and `trust_extract:*` live in

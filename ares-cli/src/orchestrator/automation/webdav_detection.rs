@@ -69,9 +69,8 @@ fn collect_webdav_work(state: &StateInner) -> Vec<WebDavWork> {
             .or_else(|| state.credentials.first())
             .cloned();
 
-        let cred = match cred {
-            Some(c) => c,
-            None => continue,
+        let Some(cred) = cred else {
+            continue;
         };
 
         items.push(WebDavWork {
@@ -388,17 +387,11 @@ mod tests {
         let domain = "contoso.local".to_string();
         let target_ip = "192.168.58.22".to_string();
         let mut d = std::collections::HashMap::new();
-        d.insert(
-            "hostname".to_string(),
-            serde_json::Value::String(hostname.clone()),
-        );
-        d.insert(
-            "domain".to_string(),
-            serde_json::Value::String(domain.clone()),
-        );
+        d.insert("hostname".to_string(), serde_json::Value::String(hostname));
+        d.insert("domain".to_string(), serde_json::Value::String(domain));
         d.insert(
             "target_ip".to_string(),
-            serde_json::Value::String(target_ip.clone()),
+            serde_json::Value::String(target_ip),
         );
         assert_eq!(d.len(), 3);
         assert_eq!(d["hostname"], serde_json::json!("web01.contoso.local"));

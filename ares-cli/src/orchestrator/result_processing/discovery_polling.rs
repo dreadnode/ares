@@ -57,9 +57,8 @@ async fn poll_discoveries(dispatcher: &Dispatcher) -> Result<()> {
             .get("type")
             .and_then(|v| v.as_str())
             .unwrap_or("unknown");
-        let data = match discovery.get("data") {
-            Some(d) => d,
-            None => continue,
+        let Some(data) = discovery.get("data") else {
+            continue;
         };
         let input_username = discovery.get("input_username").and_then(|v| v.as_str());
         let input_domain = discovery.get("input_domain").and_then(|v| v.as_str());

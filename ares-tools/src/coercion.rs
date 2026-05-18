@@ -169,9 +169,8 @@ pub async fn ntlmrelayx_to_ldaps(args: &Value) -> Result<ToolOutput> {
     let dc_ip = required_str(args, "dc_ip")?;
     let delegate_access = optional_bool(args, "delegate_access").unwrap_or(false);
 
-    let _lock = match try_acquire_relay_lock() {
-        Some(l) => l,
-        None => return Ok(relay_busy_output("ntlmrelayx_to_ldaps")),
+    let Some(_lock) = try_acquire_relay_lock() else {
+        return Ok(relay_busy_output("ntlmrelayx_to_ldaps"));
     };
 
     let target_url = format!("ldaps://{dc_ip}");
@@ -192,9 +191,8 @@ pub async fn ntlmrelayx_to_adcs(args: &Value) -> Result<ToolOutput> {
     let ca_host = required_str(args, "ca_host")?;
     let template = optional_str(args, "template");
 
-    let _lock = match try_acquire_relay_lock() {
-        Some(l) => l,
-        None => return Ok(relay_busy_output("ntlmrelayx_to_adcs")),
+    let Some(_lock) = try_acquire_relay_lock() else {
+        return Ok(relay_busy_output("ntlmrelayx_to_adcs"));
     };
 
     let target_url = format!("http://{ca_host}/certsrv/certfnsh.asp");
@@ -217,9 +215,8 @@ pub async fn ntlmrelayx_to_smb(args: &Value) -> Result<ToolOutput> {
     let socks = optional_bool(args, "socks").unwrap_or(false);
     let interactive = optional_bool(args, "interactive").unwrap_or(false);
 
-    let _lock = match try_acquire_relay_lock() {
-        Some(l) => l,
-        None => return Ok(relay_busy_output("ntlmrelayx_to_smb")),
+    let Some(_lock) = try_acquire_relay_lock() else {
+        return Ok(relay_busy_output("ntlmrelayx_to_smb"));
     };
 
     CommandBuilder::new("impacket-ntlmrelayx")

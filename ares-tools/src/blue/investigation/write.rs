@@ -178,26 +178,17 @@ pub async fn add_evidence_batch(args: &Value) -> Result<ToolOutput> {
     let mut validation_errors = Vec::new();
 
     for (i, item) in items.iter().enumerate() {
-        let evidence_type = match item.get("evidence_type").and_then(|v| v.as_str()) {
-            Some(s) => s,
-            None => {
-                validation_errors.push(format!("item[{i}]: missing evidence_type"));
-                continue;
-            }
+        let Some(evidence_type) = item.get("evidence_type").and_then(|v| v.as_str()) else {
+            validation_errors.push(format!("item[{i}]: missing evidence_type"));
+            continue;
         };
-        let value = match item.get("value").and_then(|v| v.as_str()) {
-            Some(s) => s,
-            None => {
-                validation_errors.push(format!("item[{i}]: missing value"));
-                continue;
-            }
+        let Some(value) = item.get("value").and_then(|v| v.as_str()) else {
+            validation_errors.push(format!("item[{i}]: missing value"));
+            continue;
         };
-        let source = match item.get("source").and_then(|v| v.as_str()) {
-            Some(s) => s,
-            None => {
-                validation_errors.push(format!("item[{i}]: missing source"));
-                continue;
-            }
+        let Some(source) = item.get("source").and_then(|v| v.as_str()) else {
+            validation_errors.push(format!("item[{i}]: missing source"));
+            continue;
         };
 
         let vr = validation::validate_evidence(evidence_type, value, source);

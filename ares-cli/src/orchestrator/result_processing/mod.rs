@@ -1105,9 +1105,8 @@ async fn auto_chain_s4u_secretsdump(
     task_target_ip: Option<&str>,
 ) {
     let combined = collect_result_text_parts(payload).join("\n");
-    let ticket_path = match ares_llm::routing::extract_ticket_path(&combined) {
-        Some(p) => p,
-        None => return,
+    let Some(ticket_path) = ares_llm::routing::extract_ticket_path(&combined) else {
+        return;
     };
 
     info!(
@@ -1142,12 +1141,9 @@ async fn auto_chain_s4u_secretsdump(
         })
         .or_else(|| task_target_ip.map(|s| s.to_string()));
 
-    let target_ip = match target_ip {
-        Some(ip) => ip,
-        None => {
-            warn!(task_id = %task_id, "S4U auto-chain: .ccache found but no target could be determined");
-            return;
-        }
+    let Some(target_ip) = target_ip else {
+        warn!(task_id = %task_id, "S4U auto-chain: .ccache found but no target could be determined");
+        return;
     };
 
     // Resolve target IP if it's a hostname

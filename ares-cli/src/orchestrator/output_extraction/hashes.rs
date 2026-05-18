@@ -554,12 +554,10 @@ krbtgt:aes256-cts-hmac-sha1-96:86eebe21a5af32061e42ef050c447d4467648e54884a92d91
         let hashes = extract_hashes(output, "fabrikam.local");
         // Plain NTLM lines must be suppressed — no hashes should carry the
         // mismatched fabrikam.local label.
-        let labeled_fabrikam: Vec<_> = hashes
-            .iter()
-            .filter(|h| h.domain.eq_ignore_ascii_case("fabrikam.local"))
-            .collect();
         assert!(
-            labeled_fabrikam.is_empty(),
+            !hashes
+                .iter()
+                .any(|h| h.domain.eq_ignore_ascii_case("fabrikam.local")),
             "no hashes should be labeled fabrikam.local when dump is from CHILD"
         );
         // The phantom mislabel was specifically of krbtgt and Administrator —

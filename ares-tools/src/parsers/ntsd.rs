@@ -462,9 +462,8 @@ pub fn parse_acl_enumeration(output: &str, params: &Value) -> Vec<Value> {
             continue;
         }
 
-        let sd_bytes = match base64_decode(&obj.ntsd_base64) {
-            Ok(b) => b,
-            Err(_) => continue,
+        let Ok(sd_bytes) = base64_decode(&obj.ntsd_base64) else {
+            continue;
         };
 
         let aces = parse_security_descriptor(&sd_bytes);

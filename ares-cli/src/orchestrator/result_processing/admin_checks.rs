@@ -330,9 +330,8 @@ pub(crate) async fn check_golden_ticket_completion(
 
 pub(crate) async fn detect_and_upgrade_admin_credentials(text: &str, dispatcher: &Arc<Dispatcher>) {
     for line in text.lines() {
-        let (domain, username) = match parse_pwned_line(line) {
-            Some(pair) => pair,
-            None => continue,
+        let Some((domain, username)) = parse_pwned_line(line) else {
+            continue;
         };
         info!(username = %username, domain = %domain, "Pwn3d! detected -- upgrading credential to admin");
         let upgraded = {
@@ -438,9 +437,8 @@ pub(crate) async fn extract_and_cache_domain_sid(
     // — it routinely succeeds against null sessions where impacket-lookupsid
     // gets STATUS_ACCESS_DENIED, so both parsers must be wired or the forge
     // fires with has_target_sid=false.
-    let (sid, lsaquery_flat) = match parse_sid_from_combined_text(&combined) {
-        Some(p) => p,
-        None => return,
+    let Some((sid, lsaquery_flat)) = parse_sid_from_combined_text(&combined) else {
+        return;
     };
 
     // Resolve the FQDN this SID belongs to. Anchor preference order:
@@ -475,9 +473,8 @@ pub(crate) async fn extract_and_cache_domain_sid(
                 .or_else(|| state.domains.first().map(|d| d.to_lowercase()))
         }
     };
-    let domain = match domain {
-        Some(d) => d,
-        None => return,
+    let Some(domain) = domain else {
+        return;
     };
     let already_cached = {
         let state = dispatcher.state.read().await;

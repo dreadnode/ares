@@ -268,8 +268,10 @@ PORT     STATE SERVICE
         assert_eq!(hosts[0]["hostname"], "");
         assert!(!hosts[0]["is_dc"].as_bool().unwrap());
         let roles = hosts[0]["roles"].as_array().unwrap();
-        let role_strs: Vec<&str> = roles.iter().filter_map(|v| v.as_str()).collect();
-        assert!(role_strs.contains(&"mssql"));
+        assert!(roles
+            .iter()
+            .filter_map(|v| v.as_str())
+            .any(|x| x == "mssql"));
     }
 
     #[test]
@@ -457,8 +459,10 @@ PORT     STATE SERVICE       VERSION
         let services = vec!["5985/tcp (wsman)".to_string()];
         flush_nmap_host("192.168.58.30", "", "", &services, &mut hosts);
         let roles = hosts[0]["roles"].as_array().unwrap();
-        let role_strs: Vec<&str> = roles.iter().filter_map(|v| v.as_str()).collect();
-        assert!(role_strs.contains(&"winrm"));
+        assert!(roles
+            .iter()
+            .filter_map(|v| v.as_str())
+            .any(|x| x == "winrm"));
     }
 
     #[test]

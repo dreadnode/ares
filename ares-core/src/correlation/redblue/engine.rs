@@ -211,7 +211,7 @@ impl RedBlueCorrelator {
                 technique_id: Some("T1558.001".to_string()),
                 technique_name: Some("Golden Ticket".to_string()),
                 action: "Generated Golden Ticket for persistence".to_string(),
-                target_ip: target_ip.clone(),
+                target_ip,
                 target_host: None,
                 credential_used: None,
                 success: true,

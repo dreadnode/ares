@@ -327,7 +327,7 @@ fn collect_adcs_work(state: &StateInner) -> Vec<AdcsWork> {
             };
 
             Some(AdcsWork {
-                host_ip: host_ip.clone(),
+                host_ip,
                 dedup_key,
                 dc_ip,
                 domain,

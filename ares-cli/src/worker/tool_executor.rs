@@ -111,12 +111,9 @@ pub async fn run_tool_exec_loop(
             }
         };
 
-        let msg = match next {
-            Some(m) => m,
-            None => {
-                warn!("Tool executor: subscription closed, exiting");
-                return Ok(());
-            }
+        let Some(msg) = next else {
+            warn!("Tool executor: subscription closed, exiting");
+            return Ok(());
         };
 
         let request: ToolExecRequest = match serde_json::from_slice(&msg.payload) {

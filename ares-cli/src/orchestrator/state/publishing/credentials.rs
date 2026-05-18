@@ -53,9 +53,8 @@ impl SharedState {
             }
             (state.netbios_to_fqdn.clone(), known)
         };
-        let cred = match sanitize_credential(cred, &netbios_map, &known_domains) {
-            Some(c) => c,
-            None => return Ok(false),
+        let Some(cred) = sanitize_credential(cred, &netbios_map, &known_domains) else {
+            return Ok(false);
         };
 
         // Reject phantom domain misattribution. Forest-wide LDAP/GC searches,

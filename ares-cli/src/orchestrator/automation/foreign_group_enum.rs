@@ -37,9 +37,8 @@ fn collect_foreign_group_work(state: &StateInner) -> Vec<ForeignGroupWork> {
             continue;
         }
 
-        let dc_ip = match state.resolve_dc_ip(domain) {
-            Some(ip) => ip,
-            None => continue,
+        let Some(dc_ip) = state.resolve_dc_ip(domain) else {
+            continue;
         };
 
         // Find a credential for this domain
@@ -59,9 +58,8 @@ fn collect_foreign_group_work(state: &StateInner) -> Vec<ForeignGroupWork> {
             })
             .cloned();
 
-        let cred = match cred {
-            Some(c) => c,
-            None => continue,
+        let Some(cred) = cred else {
+            continue;
         };
 
         items.push(ForeignGroupWork {

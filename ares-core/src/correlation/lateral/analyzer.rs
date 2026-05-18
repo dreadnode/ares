@@ -301,10 +301,9 @@ mod tests {
         analyzer.analyze_query_result(&data, Some("ws01.contoso.local"));
         let suggestions = analyzer.get_pivot_suggestions();
         // dc01 is uninvestigated target
-        let hosts: Vec<&str> = suggestions
+        assert!(suggestions
             .iter()
             .filter_map(|s| s["host"].as_str())
-            .collect();
-        assert!(hosts.contains(&"dc01.contoso.local"));
+            .any(|h| h == "dc01.contoso.local"));
     }
 }

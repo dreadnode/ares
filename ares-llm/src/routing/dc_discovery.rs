@@ -210,7 +210,7 @@ pub fn find_dc_ip_cached(
 }
 
 /// Result of DC discovery with metadata about which tier found it.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DcDiscovery {
     pub ip: String,
     pub tier: DcTier,

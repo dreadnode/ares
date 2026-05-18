@@ -142,9 +142,8 @@ fn collect_rdp_work(state: &crate::orchestrator::state::StateInner) -> Vec<RdpWo
             })
             .cloned();
 
-        let cred = match cred {
-            Some(c) => c,
-            None => continue,
+        let Some(cred) = cred else {
+            continue;
         };
 
         items.push(RdpWork {

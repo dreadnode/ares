@@ -226,12 +226,12 @@ mod tests {
             .collect();
         assert_eq!(ip_targets.len(), 1);
         assert_eq!(ip_targets[0].value, "192.168.58.10");
-        let hostname_targets: Vec<_> = playbook
+        let hostname_count = playbook
             .detection_targets
             .iter()
             .filter(|t| t.ioc_type == "hostname")
-            .collect();
-        assert_eq!(hostname_targets.len(), 1);
+            .count();
+        assert_eq!(hostname_count, 1);
     }
 
     #[test]

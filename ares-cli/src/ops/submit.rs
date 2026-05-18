@@ -249,9 +249,8 @@ pub(crate) async fn follow_operation(
         }
 
         // Read current state
-        let meta = match reader.get_meta(&mut conn).await {
-            Ok(m) => m,
-            Err(_) => continue, // operation not yet initialized
+        let Ok(meta) = reader.get_meta(&mut conn).await else {
+            continue; // operation not yet initialized
         };
 
         let creds = reader

@@ -352,15 +352,12 @@ fn pick_credential_for_forest(
             .map(|(d, _)| d.clone()),
         None => None,
     };
-    let coerce_domain = match coerce_domain {
-        Some(d) => d,
-        None => {
-            return state
-                .credentials
-                .iter()
-                .find(|c| !c.password.is_empty())
-                .cloned()
-        }
+    let Some(coerce_domain) = coerce_domain else {
+        return state
+            .credentials
+            .iter()
+            .find(|c| !c.password.is_empty())
+            .cloned();
     };
     state
         .credentials
@@ -552,7 +549,7 @@ mod tests {
             relay_target: "192.168.58.22".into(),
             coercion_source: Some("192.168.58.10".into()),
             listener: "192.168.58.100".into(),
-            credential: Some(cred.clone()),
+            credential: Some(cred),
         };
         assert_eq!(work.relay_target, "192.168.58.22");
         assert_eq!(work.listener, "192.168.58.100");

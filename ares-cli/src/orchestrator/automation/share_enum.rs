@@ -76,9 +76,8 @@ pub(crate) fn select_share_enumeration_work(
         .or_else(|| state.credentials.first())
         .cloned();
 
-    let fallback = match fallback {
-        Some(c) => c,
-        None => return Vec::new(),
+    let Some(fallback) = fallback else {
+        return Vec::new();
     };
 
     let mut hostname_by_ip: HashMap<String, String> = HashMap::new();

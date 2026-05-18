@@ -121,8 +121,8 @@ pub(super) fn print_loot_human(
         &state.netbios_to_fqdn,
         &state.domain_controllers,
     );
-    let dcs: Vec<_> = merged_hosts.iter().filter(|h| h.is_dc).collect();
-    println!("Hosts ({}, {} DCs):", merged_hosts.len(), dcs.len());
+    let dc_count = merged_hosts.iter().filter(|h| h.is_dc).count();
+    println!("Hosts ({}, {} DCs):", merged_hosts.len(), dc_count);
     for host in &merged_hosts {
         let mut parts = Vec::new();
         if !host.hostname.is_empty() {

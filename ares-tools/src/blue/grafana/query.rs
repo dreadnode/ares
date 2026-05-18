@@ -31,9 +31,8 @@ pub async fn get_alerts(args: &Value) -> Result<ToolOutput> {
             req = req.query(&[("active", s)]);
         }
 
-        let resp = match req.send().await {
-            Ok(r) => r,
-            Err(_) => continue,
+        let Ok(resp) = req.send().await else {
+            continue;
         };
 
         let status = resp.status();
@@ -306,9 +305,8 @@ fn format_annotations_response(body: &str) -> String {
         Err(_) => return body.to_string(),
     };
 
-    let annotations = match json.as_array() {
-        Some(a) => a,
-        None => return format_json_pretty(&json),
+    let Some(annotations) = json.as_array() else {
+        return format_json_pretty(&json);
     };
 
     if annotations.is_empty() {
@@ -370,9 +368,8 @@ fn format_dashboard_search_response(body: &str) -> String {
         Err(_) => return body.to_string(),
     };
 
-    let dashboards = match json.as_array() {
-        Some(a) => a,
-        None => return format_json_pretty(&json),
+    let Some(dashboards) = json.as_array() else {
+        return format_json_pretty(&json);
     };
 
     if dashboards.is_empty() {

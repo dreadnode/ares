@@ -135,9 +135,8 @@ pub async fn process_task_result(
     investigation_id: &str,
     dispatched_chains: &mut HashSet<String>,
 ) -> Result<Vec<String>> {
-    let payload = match (&result.success, &result.result) {
-        (true, Some(val)) => val,
-        _ => return Ok(Vec::new()),
+    let (true, Some(payload)) = (&result.success, &result.result) else {
+        return Ok(Vec::new());
     };
 
     let mut new_task_ids = Vec::new();

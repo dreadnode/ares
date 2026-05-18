@@ -583,6 +583,13 @@ fn describe_outcome(o: &ProbeOutcome) -> String {
 }
 
 fn tail_lines(s: &str, n: usize) -> String {
+    // Take last n lines in original order. `Lines` is DoubleEndedIterator but
+    // not ExactSizeIterator, so `.take(n).rev()` won't compile — collect the
+    // reversed tail, then reverse it back.
+    #[expect(
+        clippy::needless_collect,
+        reason = "Lines: !ExactSizeIterator so .take(n).rev() doesn't typecheck"
+    )]
     let lines: Vec<&str> = s.lines().rev().take(n).collect();
     let mut out: Vec<&str> = lines.into_iter().rev().collect();
     if out.is_empty() {
@@ -833,7 +840,7 @@ mod tests {
         state
             .discovered_vulnerabilities
             .insert(imp.vuln_id.clone(), imp.clone());
-        state.exploited_vulnerabilities.insert(imp.vuln_id.clone());
+        state.exploited_vulnerabilities.insert(imp.vuln_id);
 
         assert!(same_target_impersonation_exploited(&state, "192.168.58.51"));
         // Different target — pivot gate must NOT open.

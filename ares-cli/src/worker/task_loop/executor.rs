@@ -121,7 +121,7 @@ fn expand_technique_task(params: &serde_json::Value) -> Vec<(String, serde_json:
     // Handle singular "technique" field
     if let Some(technique) = params.get("technique").and_then(|v| v.as_str()) {
         let tool_name = map_technique_to_tool(technique);
-        tools.push((tool_name, normalized.clone()));
+        tools.push((tool_name, normalized));
         return tools;
     }
 

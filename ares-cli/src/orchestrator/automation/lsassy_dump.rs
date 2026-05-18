@@ -77,9 +77,8 @@ fn collect_lsassy_work(state: &StateInner) -> Vec<LsassyWork> {
             })
             .cloned();
 
-        let cred = match cred {
-            Some(c) => c,
-            None => continue,
+        let Some(cred) = cred else {
+            continue;
         };
 
         items.push(LsassyWork {

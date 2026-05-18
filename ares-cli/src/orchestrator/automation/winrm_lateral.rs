@@ -63,9 +63,8 @@ fn collect_winrm_lateral_work(state: &StateInner) -> Vec<WinRmWork> {
             .or_else(|| state.credentials.first())
             .cloned();
 
-        let cred = match cred {
-            Some(c) => c,
-            None => continue,
+        let Some(cred) = cred else {
+            continue;
         };
 
         items.push(WinRmWork {

@@ -373,9 +373,8 @@ async fn read_spider_downloads(target: &str) -> String {
     ];
 
     while let Some(dir) = dirs_to_walk.pop() {
-        let mut dir_entries = match tokio::fs::read_dir(&dir).await {
-            Ok(e) => e,
-            Err(_) => continue,
+        let Ok(mut dir_entries) = tokio::fs::read_dir(&dir).await else {
+            continue;
         };
         while let Ok(Some(entry)) = dir_entries.next_entry().await {
             let path = entry.path();

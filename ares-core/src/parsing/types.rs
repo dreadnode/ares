@@ -4,7 +4,7 @@ use std::fmt;
 use std::str::FromStr;
 
 /// A parsed NTLM hash entry from secretsdump or similar tool output.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParsedHash {
     pub username: String,
     pub domain: String,
@@ -31,7 +31,7 @@ pub enum KerberosHashType {
 }
 
 /// A parsed Kerberos hash entry.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KerberosHash {
     pub username: String,
     pub domain: String,
@@ -40,7 +40,7 @@ pub struct KerberosHash {
 }
 
 /// A parsed host from netexec/crackmapexec SMB output.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParsedHost {
     pub ip: String,
     pub hostname: String,
@@ -96,7 +96,7 @@ impl FromStr for DelegationType {
 }
 
 /// A parsed delegation entry from impacket-findDelegation output.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DelegationEntry {
     pub account: String,
     pub account_type: String,
@@ -105,7 +105,7 @@ pub struct DelegationEntry {
 }
 
 /// A parsed SMB share.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParsedShare {
     pub host: String,
     pub name: String,

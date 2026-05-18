@@ -109,6 +109,10 @@ pub struct TaskResult {
 /// Information about a discovered vulnerability.
 ///
 /// Redis serialization: `{"vuln_id","vuln_type","target","discovered_by","discovered_at","details","recommended_agent","priority"}`
+#[expect(
+    clippy::derive_partial_eq_without_eq,
+    reason = "details: HashMap<String, serde_json::Value> — serde_json::Value contains f64 Number, so Eq cannot be derived"
+)]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct VulnerabilityInfo {
     pub vuln_id: String,

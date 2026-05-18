@@ -85,9 +85,8 @@ pub async fn auto_acl_chain_follow(
             let mut items = Vec::new();
 
             for (chain_idx, chain) in state.acl_chains.iter().enumerate() {
-                let steps = match extract_chain_steps(chain) {
-                    Some(s) => s,
-                    None => continue,
+                let Some(steps) = extract_chain_steps(chain) else {
+                    continue;
                 };
 
                 for (step_idx, step) in steps.iter().enumerate() {

@@ -7,6 +7,19 @@ members = ["ares-core", "ares-cli", "ares-llm", "ares-tools"]
 # `*Params` / `*Config` types throughout the workspace). Suppressing this
 # with `#[allow(...)]` defeats the whole point — fix the signature instead.
 too_many_arguments = "deny"
+# Prefer `let ... else { ... }` over `let x = match opt { Some(x) => x, None => ... };`
+# — same semantics, fewer lines, no rightward drift.
+manual_let_else = "deny"
+# `.iter().filter(..).collect::<Vec<_>>().len()` / `.is_empty()` / `.contains(..)` —
+# allocate-then-consume when the iterator already answers the question.
+needless_collect = "deny"
+# `.clone()` on a value whose last use immediately follows — the move would suffice.
+redundant_clone = "deny"
+# Types that derive `PartialEq` should derive `Eq` too when their fields permit.
+# When they don't (e.g. an `f64` or `serde_json::Value` field), suppress with
+# `#[expect(clippy::derive_partial_eq_without_eq, reason = "...")]` on the type
+# explaining which field blocks it.
+derive_partial_eq_without_eq = "deny"
 
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }

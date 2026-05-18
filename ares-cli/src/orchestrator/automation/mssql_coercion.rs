@@ -140,9 +140,8 @@ fn collect_mssql_coercion_work(
             .or_else(|| state.credentials.first())
             .cloned();
 
-        let cred = match cred {
-            Some(c) => c,
-            None => continue,
+        let Some(cred) = cred else {
+            continue;
         };
 
         items.push(MssqlCoercionWork {

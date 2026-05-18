@@ -210,8 +210,7 @@ fn classify_trust_type(trust_type: u32, trust_attributes: u32, cn: &str) -> Stri
     match trust_type {
         TRUST_TYPE_PARENT_CHILD => "parent_child".to_string(),
         TRUST_TYPE_TREE_ROOT => {
-            let parts: Vec<&str> = cn.split('.').collect();
-            if parts.len() >= 3 {
+            if cn.split('.').count() >= 3 {
                 "parent_child".to_string()
             } else {
                 "forest".to_string()

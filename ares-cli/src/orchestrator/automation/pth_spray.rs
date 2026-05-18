@@ -409,9 +409,7 @@ mod tests {
 
     #[test]
     fn take_5_limiting() {
-        let items: Vec<i32> = (0..20).collect();
-        let taken: Vec<_> = items.into_iter().take(5).collect();
-        assert_eq!(taken.len(), 5);
+        assert_eq!((0..20).take(5).count(), 5);
     }
 
     // --- collect_pth_work tests ---

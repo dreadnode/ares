@@ -64,17 +64,14 @@ pub(crate) async fn query_dc_domain(ip: &str) -> Option<String> {
     ];
 
     let addr = format!("{ip}:389");
-    let mut stream = match tokio::time::timeout(
+    let Ok(Ok(mut stream)) = tokio::time::timeout(
         std::time::Duration::from_millis(1000),
         tokio::net::TcpStream::connect(&addr),
     )
     .await
-    {
-        Ok(Ok(s)) => s,
-        _ => {
-            warn!(ip = %ip, "LDAP rootDSE: connection failed");
-            return None;
-        }
+    else {
+        warn!(ip = %ip, "LDAP rootDSE: connection failed");
+        return None;
     };
 
     if stream.write_all(ldap_request).await.is_err() {

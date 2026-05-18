@@ -43,9 +43,8 @@ fn collect_spooler_work(state: &StateInner) -> Vec<SpoolerWork> {
             .or_else(|| state.credentials.first())
             .cloned();
 
-        let cred = match cred {
-            Some(c) => c,
-            None => continue,
+        let Some(cred) = cred else {
+            continue;
         };
 
         items.push(SpoolerWork {

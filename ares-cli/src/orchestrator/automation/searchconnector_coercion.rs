@@ -56,9 +56,8 @@ fn collect_searchconnector_work(state: &StateInner, listener: &str) -> Vec<Searc
             .or_else(|| state.credentials.first())
             .cloned();
 
-        let cred = match cred {
-            Some(c) => c,
-            None => continue,
+        let Some(cred) = cred else {
+            continue;
         };
 
         items.push(SearchConnectorWork {

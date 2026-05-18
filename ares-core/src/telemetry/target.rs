@@ -24,9 +24,8 @@ pub struct ToolTargetInfo {
 pub fn extract_target_info(arguments: &serde_json::Value) -> ToolTargetInfo {
     let mut info = ToolTargetInfo::default();
 
-    let obj = match arguments.as_object() {
-        Some(o) => o,
-        None => return info,
+    let Some(obj) = arguments.as_object() else {
+        return info;
     };
 
     // Extract IP — sanitize multi-token values first

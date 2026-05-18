@@ -467,12 +467,12 @@ mod tests {
             authenticated_as: None,
         });
         let gt = create_ground_truth_from_red_state(&state, &[]);
-        let ip_iocs: Vec<_> = gt
+        let ip_count = gt
             .expected_iocs
             .iter()
             .filter(|i| i.value == "192.168.58.1")
-            .collect();
-        assert_eq!(ip_iocs.len(), 1);
+            .count();
+        assert_eq!(ip_count, 1);
     }
 
     #[test]

@@ -144,13 +144,12 @@ pub(crate) fn select_gmsa_work(state: &StateInner) -> Vec<GmsaWork> {
             Some(c) => c.clone(),
             None => continue,
         };
-        let dc_ip = match state
+        let Some(dc_ip) = state
             .domain_controllers
             .get(&user.domain.to_lowercase())
             .cloned()
-        {
-            Some(ip) => ip,
-            None => continue,
+        else {
+            continue;
         };
         gmsa_accounts.push(GmsaWork {
             dedup_key: key,
@@ -216,13 +215,12 @@ pub(crate) fn select_gmsa_work(state: &StateInner) -> Vec<GmsaWork> {
             None => continue,
         };
 
-        let dc_ip = match state
+        let Some(dc_ip) = state
             .domain_controllers
             .get(&domain.to_lowercase())
             .cloned()
-        {
-            Some(ip) => ip,
-            None => continue,
+        else {
+            continue;
         };
 
         gmsa_accounts.push(GmsaWork {

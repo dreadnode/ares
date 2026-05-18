@@ -100,12 +100,11 @@ impl BlueOrchestrator {
             let status_key = format!("ares:blue:inv:{inv_id}:status");
             let status_json: Option<String> = conn.get(&status_key).await.unwrap_or(None);
 
-            let status_obj = match status_json
+            let Some(status_obj) = status_json
                 .as_deref()
                 .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
-            {
-                Some(v) => v,
-                None => continue,
+            else {
+                continue;
             };
 
             let status = status_obj

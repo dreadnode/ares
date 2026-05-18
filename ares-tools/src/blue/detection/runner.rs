@@ -18,18 +18,15 @@ pub async fn run_detection_query(args: &Value) -> Result<ToolOutput> {
     // Clamp to max 2h — larger windows timeout through Grafana proxy (~90s per query)
     let hours_back = optional_i64(args, "hours_back").unwrap_or(1).min(2);
 
-    let tmpl = match build_detection_template(query_name, target_host) {
-        Some(t) => t,
-        None => {
-            return Ok(ToolOutput {
-                stdout: String::new(),
-                stderr: format!(
-                    "Unknown detection template: '{query_name}'. Use list_detection_templates to see available templates."
-                ),
-                exit_code: Some(1),
-                success: false,
-            });
-        }
+    let Some(tmpl) = build_detection_template(query_name, target_host) else {
+        return Ok(ToolOutput {
+            stdout: String::new(),
+            stderr: format!(
+                "Unknown detection template: '{query_name}'. Use list_detection_templates to see available templates."
+            ),
+            exit_code: Some(1),
+            success: false,
+        });
     };
 
     let now = chrono::Utc::now();

@@ -105,9 +105,8 @@ fn collect_cross_forest_work(state: &StateInner) -> Vec<CrossForestWork> {
             })
             .cloned();
 
-        let cred = match best_cred {
-            Some(c) => c,
-            None => continue,
+        let Some(cred) = best_cred else {
+            continue;
         };
 
         let dedup_key = cross_forest_dedup_key(&domain_lower, &cred.username, &cred.domain);

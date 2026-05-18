@@ -807,16 +807,13 @@ pub async fn auto_trust_follow(dispatcher: Arc<Dispatcher>, mut shutdown: watch:
                         find_child_to_parent_admin_cred(&s, &child_domain)
                     };
 
-                    let cred = match cred_payload {
-                        Some(c) => c,
-                        None => {
-                            debug!(
-                                child_domain = %child_domain,
-                                parent_domain = %parent_domain,
-                                "No admin cred/hash for child domain — deferring child-to-parent"
-                            );
-                            continue;
-                        }
+                    let Some(cred) = cred_payload else {
+                        debug!(
+                            child_domain = %child_domain,
+                            parent_domain = %parent_domain,
+                            "No admin cred/hash for child domain — deferring child-to-parent"
+                        );
+                        continue;
                     };
 
                     // Publish vulnerability
@@ -1548,17 +1545,14 @@ pub async fn auto_trust_follow(dispatcher: Arc<Dispatcher>, mut shutdown: watch:
             // forge-and-present secretsdump fallback. Passing the bare domain
             // string fails fast and burns the dedup key. Re-tick in 30s and
             // let host scans / trust enum populate the DC entry first.
-            let target_dc_ip = match item.target_dc_ip.clone() {
-                Some(ip) => ip,
-                None => {
-                    debug!(
-                        source = %item.source_domain,
-                        target = %item.target_domain,
-                        trust_account = %item.hash.username,
-                        "Deferring forest trust escalation — target DC IP unresolved"
-                    );
-                    continue;
-                }
+            let Some(target_dc_ip) = item.target_dc_ip.clone() else {
+                debug!(
+                    source = %item.source_domain,
+                    target = %item.target_domain,
+                    trust_account = %item.hash.username,
+                    "Deferring forest trust escalation — target DC IP unresolved"
+                );
+                continue;
             };
             let vuln = build_trust_escalation_vuln(
                 &item.source_domain,

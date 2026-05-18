@@ -340,9 +340,8 @@ pub(crate) fn build_s4u_payload(item: &S4uWork) -> Value {
 /// LLM loop-control/status strings, and scalar `output`/`tool_output` fields
 /// are model-authored narrative — neither must drive retry control.
 fn result_matches_patterns(result: &ares_core::models::TaskResult, patterns: &[&str]) -> bool {
-    let payload = match &result.result {
-        Some(v) => v,
-        None => return false,
+    let Some(payload) = &result.result else {
+        return false;
     };
 
     if let Some(outputs) = payload.get("tool_outputs").and_then(|v| v.as_array()) {

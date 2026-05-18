@@ -300,13 +300,11 @@ pub(crate) fn select_unconstrained_work_items(
 /// construction. Caller must ensure `item.credential` and `item.dc_ip` are
 /// `Some(_)` — both are panic-free for `None` (returns `Value::Null`).
 pub(crate) fn build_unconstrained_coerce_payload(item: &UnconstrainedWork) -> Value {
-    let dc_ip = match item.dc_ip.as_ref() {
-        Some(ip) => ip,
-        None => return Value::Null,
+    let Some(dc_ip) = item.dc_ip.as_ref() else {
+        return Value::Null;
     };
-    let cred = match item.credential.as_ref() {
-        Some(c) => c,
-        None => return Value::Null,
+    let Some(cred) = item.credential.as_ref() else {
+        return Value::Null;
     };
     json!({
         "target_ip": dc_ip,
@@ -324,9 +322,8 @@ pub(crate) fn build_unconstrained_coerce_payload(item: &UnconstrainedWork) -> Va
 /// Build the LSASS-dump payload for the `exploit` queue. Pure JSON
 /// construction; `Value::Null` when no credential is attached.
 pub(crate) fn build_unconstrained_dump_payload(item: &UnconstrainedWork) -> Value {
-    let cred = match item.credential.as_ref() {
-        Some(c) => c,
-        None => return Value::Null,
+    let Some(cred) = item.credential.as_ref() else {
+        return Value::Null;
     };
     json!({
         "technique": "unconstrained_tgt_dump",
@@ -347,9 +344,8 @@ pub(crate) fn build_unconstrained_dump_payload(item: &UnconstrainedWork) -> Valu
 /// Build the user-account LLM-exploit payload (for non-machine principals).
 /// Pure JSON construction; `Value::Null` when no credential is attached.
 pub(crate) fn build_unconstrained_llm_exploit_payload(item: &UnconstrainedWork) -> Value {
-    let cred = match item.credential.as_ref() {
-        Some(c) => c,
-        None => return Value::Null,
+    let Some(cred) = item.credential.as_ref() else {
+        return Value::Null;
     };
     json!({
         "technique": "unconstrained_delegation_exploit",

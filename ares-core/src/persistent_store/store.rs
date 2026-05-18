@@ -452,12 +452,9 @@ impl PersistentStore {
             return Ok(true);
         }
 
-        let op_uuid = match self.get_operation_uuid(operation_id).await? {
-            Some(id) => id,
-            None => {
-                debug!(operation_id, "Operation not found in persistent store");
-                return Ok(false);
-            }
+        let Some(op_uuid) = self.get_operation_uuid(operation_id).await? else {
+            debug!(operation_id, "Operation not found in persistent store");
+            return Ok(false);
         };
 
         let mut tx = self.pool.begin().await?;
@@ -474,12 +471,9 @@ impl PersistentStore {
             return Ok(true);
         }
 
-        let op_uuid = match self.get_operation_uuid(operation_id).await? {
-            Some(id) => id,
-            None => {
-                debug!(operation_id, "Operation not found in persistent store");
-                return Ok(false);
-            }
+        let Some(op_uuid) = self.get_operation_uuid(operation_id).await? else {
+            debug!(operation_id, "Operation not found in persistent store");
+            return Ok(false);
         };
 
         let mut tx = self.pool.begin().await?;

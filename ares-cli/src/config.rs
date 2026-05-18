@@ -219,7 +219,7 @@ fn config_set_model(
 
     if all {
         // Replace model for all agents
-        let mut new_contents = contents.clone();
+        let mut new_contents = contents;
         for (role_name, agent) in &cfg.agents {
             new_contents = replace_model_in_yaml(&new_contents, role_name, &agent.model, &model);
         }

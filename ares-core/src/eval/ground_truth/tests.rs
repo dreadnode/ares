@@ -240,12 +240,12 @@ fn create_ground_truth_deduplicates() {
 
     let gt = create_ground_truth_from_red_state(&state, &[]);
     // "admin" should appear only once due to dedup
-    let admin_iocs: Vec<_> = gt
+    let admin_count = gt
         .expected_iocs
         .iter()
         .filter(|i| i.value == "admin")
-        .collect();
-    assert_eq!(admin_iocs.len(), 1, "admin IOC should be deduplicated");
+        .count();
+    assert_eq!(admin_count, 1, "admin IOC should be deduplicated");
 }
 
 #[test]

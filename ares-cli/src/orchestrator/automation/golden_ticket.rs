@@ -269,12 +269,9 @@ async fn try_forge_golden_ticket(dispatcher: &Arc<Dispatcher>, domain: &str) {
         }
     }
 
-    let domain_sid = match inputs.domain_sid.clone() {
-        Some(sid) => sid,
-        None => {
-            warn!(domain = %domain, "Cannot resolve domain SID — skipping golden ticket");
-            return;
-        }
+    let Some(domain_sid) = inputs.domain_sid.clone() else {
+        warn!(domain = %domain, "Cannot resolve domain SID — skipping golden ticket");
+        return;
     };
 
     let admin_username = {
