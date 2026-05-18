@@ -8,7 +8,6 @@ use super::util::{default_blue_task_status, default_confidence, default_timeline
 /// Levels of the Pyramid of Pain.
 ///
 /// Higher levels are harder for adversaries to change.
-/// Matches Python: `class PyramidLevel(IntEnum)`
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub enum PyramidLevel {
     HashValues = 1,
@@ -33,8 +32,6 @@ impl std::fmt::Display for PyramidLevel {
 }
 
 /// Stages of the investigation workflow.
-///
-/// Matches Python: `class InvestigationStage(Enum)`
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum InvestigationStage {
@@ -56,8 +53,6 @@ impl std::fmt::Display for InvestigationStage {
 }
 
 /// Triage decisions for escalated investigations.
-///
-/// Matches Python: `class TriageDecision(Enum)`
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum TriageDecision {
@@ -82,7 +77,6 @@ impl std::fmt::Display for TriageDecision {
 
 /// A piece of evidence discovered during investigation.
 ///
-/// Matches Python: `class Evidence(Model)`
 /// Redis serialization: stored as JSON in evidence HASH.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Evidence {
@@ -115,7 +109,6 @@ pub struct Evidence {
 
 /// An event in the investigation timeline.
 ///
-/// Matches Python: `class TimelineEvent(Model)`
 /// Redis serialization: stored as JSON in timeline LIST.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TimelineEvent {
@@ -140,7 +133,6 @@ pub struct TimelineEvent {
 
 /// Information about a dispatched blue team task.
 ///
-/// Matches Python: `class BlueTaskInfo` dataclass
 /// Redis serialization: stored as JSON in tasks:pending / tasks:completed HASH.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BlueTaskInfo {
@@ -162,7 +154,6 @@ pub struct BlueTaskInfo {
 
 /// Record of a triage decision for audit trail.
 ///
-/// Matches Python: `class TriageRecord` dataclass
 /// Redis serialization: stored as JSON in triage:records LIST.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TriageRecord {
@@ -187,8 +178,7 @@ pub struct TriageRecord {
 
 /// Read-only view of the shared blue team state, loaded from Redis.
 ///
-/// Matches Python: `class SharedBlueTeamState` dataclass
-/// This provides the CLI with investigation state for display and reporting.
+/// Provides the CLI with investigation state for display and reporting.
 #[derive(Debug, Clone)]
 pub struct SharedBlueTeamState {
     pub investigation_id: String,

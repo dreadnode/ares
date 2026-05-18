@@ -6,8 +6,6 @@ use serde::{Deserialize, Serialize};
 use super::util::{default_hash_type, new_uuid};
 
 /// Primary target information.
-///
-/// Matches Python: `class Target(Model)`
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Target {
     pub ip: String,
@@ -21,7 +19,6 @@ pub struct Target {
 
 /// Discovered host information.
 ///
-/// Matches Python: `class Host(Model)`
 /// Redis serialization: `{"ip","hostname","os","roles","services","is_dc"}`
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Host {
@@ -68,7 +65,6 @@ impl Host {
 
 /// Discovered user account.
 ///
-/// Matches Python: `class User(Model)`
 /// Redis serialization: `{"username","domain","source"}`
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct User {
@@ -96,7 +92,6 @@ pub fn is_always_disabled_account(username: &str) -> bool {
 
 /// Discovered credential.
 ///
-/// Matches Python: `class Credential(Model)`
 /// Redis serialization: `{"id","username","password","domain","source","parent_id","attack_step"}`
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Credential {
@@ -120,7 +115,6 @@ pub struct Credential {
 
 /// Discovered password hash.
 ///
-/// Matches Python: `class Hash(Model)`
 /// Redis serialization: `{"id","username","hash_type","hash_value","domain","source","cracked_password","discovered_at","parent_id","attack_step"}`
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Hash {
@@ -648,7 +642,6 @@ impl CandidateDomain {
 
 /// Discovered SMB share.
 ///
-/// Matches Python: `class Share(Model)`
 /// Redis serialization: `{"host","name","permissions","comment"}`
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Share {

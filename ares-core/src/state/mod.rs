@@ -1,7 +1,6 @@
 //! Redis-native state backend for reading SharedRedTeamState.
 //!
-//! This module provides Redis-native storage access for SharedRedTeamState collections,
-//! matching the Python `RedisStateBackend` key patterns exactly.
+//! Redis-native storage access for SharedRedTeamState collections.
 //!
 //! Redis key structure:
 //!     ares:op:{op_id}:credentials       HASH (dedup_key -> JSON)

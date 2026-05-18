@@ -67,7 +67,7 @@ pub async fn set_operation_status(
 
 /// Finalize an operation in Redis — write completion metadata, clean up pointers.
 ///
-/// Matches Python's operation completion sequence:
+/// Sequence:
 /// 1. Set `completed=true` and `completed_at` in meta HASH
 /// 2. Write status key
 /// 3. Delete operation lock
@@ -180,8 +180,6 @@ pub async fn list_running_operations(
 }
 
 /// Resolve the latest operation ID, preferring running operations.
-///
-/// Matches the Python `_resolve_latest_operation()` logic.
 pub async fn resolve_latest_operation(
     conn: &mut impl AsyncCommands,
 ) -> Result<Option<String>, redis::RedisError> {
@@ -201,7 +199,7 @@ pub async fn resolve_latest_operation(
         let started_at = data
             .get("started_at")
             .and_then(|s| {
-                // Try JSON-decoding first (Python/Rust stores as json.dumps(value))
+                // Try JSON-decoding first — meta values are stored as json.dumps(value).
                 if let Ok(serde_json::Value::String(inner)) =
                     serde_json::from_str::<serde_json::Value>(s)
                 {

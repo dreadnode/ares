@@ -5,7 +5,7 @@
 //!
 //! # Modules
 //!
-//! - [`models`] — Data model structs matching the Python models exactly.
+//! - [`models`] — Data model structs.
 //! - [`state`] — Redis state backend with key patterns and read/write operations.
 
 pub mod config;

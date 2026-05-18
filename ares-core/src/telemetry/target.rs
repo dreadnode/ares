@@ -13,7 +13,6 @@ pub struct ToolTargetInfo {
 
 /// Extract target IP, FQDN, and username from tool call arguments JSON.
 ///
-/// Matches Python's extraction logic in `red_agents.py`:
 /// - IP: `target_ip`, `target`, `host`, `ip` (if it looks like an IP)
 /// - FQDN: `target_fqdn`, `target`, `host`, `hostname` (if it looks like an FQDN)
 /// - User: `username`, `user`, `target_user`

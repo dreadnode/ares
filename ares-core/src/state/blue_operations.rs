@@ -94,7 +94,7 @@ pub async fn resolve_latest_investigation(
         let started_at = data
             .get("started_at")
             .and_then(|s| {
-                // Try JSON-decoding first (Python/Rust stores as json.dumps(value))
+                // Try JSON-decoding first — meta values are stored as json.dumps(value).
                 if let Ok(serde_json::Value::String(inner)) =
                     serde_json::from_str::<serde_json::Value>(s)
                 {

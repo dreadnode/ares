@@ -15,9 +15,6 @@ use super::keys::*;
 use super::try_deserialize;
 
 /// Read-only Redis state backend for CLI operations.
-///
-/// This provides methods to read operation state from Redis, matching
-/// the Python `RedisStateBackend` serialization format exactly.
 pub struct RedisStateReader {
     operation_id: String,
 }
@@ -249,7 +246,7 @@ impl RedisStateReader {
 
     /// Add a credential to Redis HASH.
     ///
-    /// Uses the same dedup key format as Python: `cred:{domain}:{username}:{password_md5_16}`
+    /// Dedup key format: `cred:{domain}:{username}:{password_md5_16}`.
     pub async fn add_credential(
         &self,
         conn: &mut impl AsyncCommands,
@@ -337,7 +334,7 @@ impl RedisStateReader {
 
     /// Add a hash to Redis HASH with deduplication.
     ///
-    /// Uses the same dedup key format as Python's `_build_hash_dedup_key()`.
+    /// Dedup key built via `super::dedup_keys::hash_dedup_key`.
     ///
     /// For NTLM rows, also collapses qualified vs unqualified domain duplicates
     /// across distinct dedup keys: `DC01$` (empty domain) and
@@ -409,7 +406,7 @@ impl RedisStateReader {
 
     /// Set a meta field in the operation's meta HASH.
     ///
-    /// Values are JSON-encoded to match Python's `json.dumps(value)`.
+    /// Values are JSON-encoded.
     pub async fn set_meta_field(
         &self,
         conn: &mut impl AsyncCommands,

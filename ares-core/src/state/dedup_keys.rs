@@ -2,8 +2,7 @@
 
 use crate::models::{Credential, Hash};
 
-/// Build credential dedup key matching Python format:
-/// `cred:{domain}:{username}:{md5(password)[:16]}`
+/// Build credential dedup key: `cred:{domain}:{username}:{md5(password)[:16]}`.
 pub fn build_credential_dedup_key(cred: &Credential) -> String {
     use md5::{Digest, Md5};
 

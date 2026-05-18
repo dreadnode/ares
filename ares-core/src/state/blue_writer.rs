@@ -1,7 +1,4 @@
-//! Blue team Redis state writer.
-//!
-//! Provides write operations for investigation state, matching the Python
-//! `BlueStateBackend` key patterns and serialization format exactly.
+//! Blue team Redis state writer — write operations for investigation state.
 
 use redis::AsyncCommands;
 
@@ -10,9 +7,6 @@ use crate::models::{BlueTaskInfo, Evidence, TimelineEvent, TriageRecord};
 use super::keys::*;
 
 /// Read-write Redis state backend for blue team investigations.
-///
-/// This provides methods to write investigation state to Redis, matching
-/// the Python `BlueStateBackend` write operations exactly.
 pub struct BlueStateWriter {
     investigation_id: String,
 }
@@ -282,7 +276,7 @@ impl BlueStateWriter {
 
     /// Set a meta field in `ares:blue:inv:{id}:meta` HASH.
     ///
-    /// Values are JSON-encoded to match Python's `json.dumps(value)`.
+    /// Values are JSON-encoded.
     pub async fn set_meta(
         &self,
         conn: &mut impl AsyncCommands,

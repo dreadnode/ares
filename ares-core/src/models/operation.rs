@@ -27,7 +27,7 @@ pub struct OperationMeta {
 impl OperationMeta {
     /// Parse from a Redis HGETALL result (HashMap<String, String>).
     ///
-    /// Meta values are stored by Python as `json.dumps(value)`, so:
+    /// Meta values are stored as `json.dumps(value)`:
     /// - Booleans are stored as `"true"` or `"false"` (JSON-encoded)
     /// - Strings are stored as `"\"some string\""` (double-quoted JSON)
     /// - Arrays may be stored as `"[\"ip1\",\"ip2\"]"` (JSON array)
@@ -84,15 +84,14 @@ impl OperationMeta {
 
 /// Parse a meta boolean value.
 ///
-/// Python stores booleans via `json.dumps(True)` = `"true"`, `json.dumps(False)` = `"false"`.
-/// Also handles legacy `"True"`/`"False"` and `"1"`/`"0"`.
+/// Accepts JSON-encoded `"true"`/`"false"` as well as legacy `"True"`/`"False"`/`"1"`/`"0"`.
 pub(crate) fn parse_meta_bool(raw: &str) -> bool {
     matches!(raw, "true" | "True" | "1")
 }
 
 /// Parse a meta string value.
 ///
-/// Python stores strings via `json.dumps("value")` = `"\"value\""` (JSON-encoded string).
+/// Strings are stored as `json.dumps("value")` = `"\"value\""` (JSON-encoded).
 /// Returns `None` for empty/null values.
 pub(crate) fn parse_meta_string(raw: &str) -> Option<String> {
     // Try JSON-decoding first (handles `"\"quoted string\""`)
@@ -111,8 +110,8 @@ pub(crate) fn parse_meta_string(raw: &str) -> Option<String> {
 
 /// Parse a meta datetime value.
 ///
-/// Python stores datetimes via `json.dumps(value, default=str)`, which produces
-/// either a JSON-encoded string `"\"2025-01-28T12:00:00+00:00\""` or a bare string.
+/// Datetimes are stored as a JSON-encoded string `"\"2025-01-28T12:00:00+00:00\""`
+/// or a bare string (legacy).
 pub(crate) fn parse_meta_datetime(raw: &str) -> Option<chrono::DateTime<chrono::FixedOffset>> {
     // Try JSON-decoding first to strip outer quotes
     let s = if let Ok(serde_json::Value::String(inner)) =
@@ -132,10 +131,10 @@ pub(crate) fn parse_meta_datetime(raw: &str) -> Option<chrono::DateTime<chrono::
 
 /// Parse a meta value that should be a list of strings.
 ///
-/// Python may store this as:
-/// - A JSON array: `'["ip1","ip2"]'` (from `json.dumps(["ip1","ip2"])`)
-/// - A comma-separated string: `'"ip1,ip2"'` (from `json.dumps("ip1,ip2")`)
-/// - A plain comma-separated string: `"ip1,ip2"` (legacy)
+/// Accepted formats:
+/// - JSON array: `'["ip1","ip2"]'`
+/// - JSON-encoded comma-separated string: `'"ip1,ip2"'`
+/// - Plain comma-separated string: `"ip1,ip2"` (legacy)
 fn parse_meta_string_list(raw: &str) -> Vec<String> {
     // Try parsing as JSON array first
     if let Ok(serde_json::Value::Array(arr)) = serde_json::from_str::<serde_json::Value>(raw) {
@@ -403,7 +402,7 @@ mod tests {
 
     #[test]
     fn parse_meta_bool_json_encoded_true() {
-        // Python json.dumps(True) = "true", json.dumps(False) = "false"
+        // JSON-encoded booleans: "true"/"false" (lowercase).
         assert!(parse_meta_bool("true"));
         assert!(!parse_meta_bool("false"));
     }
@@ -893,8 +892,7 @@ mod tests {
 
 /// Read-only view of the shared red team state, loaded from Redis.
 ///
-/// This matches the Python `SharedRedTeamState` dataclass but only includes
-/// fields needed by the CLI (loot, status, runtime, etc.).
+/// Includes only fields needed by the CLI (loot, status, runtime, etc.).
 #[derive(Debug, Clone)]
 pub struct SharedRedTeamState {
     pub operation_id: String,

@@ -9,8 +9,6 @@ use super::util::{
 };
 
 /// Specialized roles for multi-agent red team operations.
-///
-/// Matches Python: `class AgentRole(Enum)`
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentRole {
@@ -40,8 +38,6 @@ impl std::fmt::Display for AgentRole {
 }
 
 /// Status of a dispatched task.
-///
-/// Matches Python: `class TaskStatus(Enum)`
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum TaskStatus {
@@ -67,8 +63,6 @@ impl std::fmt::Display for TaskStatus {
 }
 
 /// Information about a dispatched task.
-///
-/// Matches Python: `class TaskInfo` dataclass
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskInfo {
     pub task_id: String,
@@ -96,10 +90,8 @@ pub struct TaskInfo {
     pub max_retries: i32,
 }
 
-/// Result of a completed task.
-///
-/// Matches Python's completed-task payload shape with optional worker-side
-/// provenance used by Rust orchestrator automations.
+/// Result of a completed task. Includes optional worker-side provenance used
+/// by orchestrator automations.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskResult {
     pub task_id: String,
@@ -116,7 +108,6 @@ pub struct TaskResult {
 
 /// Information about a discovered vulnerability.
 ///
-/// Matches Python: `class VulnerabilityInfo` dataclass
 /// Redis serialization: `{"vuln_id","vuln_type","target","discovered_by","discovered_at","details","recommended_agent","priority"}`
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct VulnerabilityInfo {
@@ -136,8 +127,6 @@ pub struct VulnerabilityInfo {
 }
 
 /// Metadata about a registered agent.
-///
-/// Matches Python: `class AgentInfo` dataclass
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentInfo {
     pub name: String,

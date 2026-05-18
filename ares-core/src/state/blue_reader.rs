@@ -10,9 +10,6 @@ use super::keys::*;
 use super::try_deserialize;
 
 /// Read-only Redis state backend for blue team investigations.
-///
-/// This provides methods to read investigation state from Redis, matching
-/// the Python `BlueStateBackend` key patterns exactly.
 pub struct BlueStateReader {
     investigation_id: String,
 }
@@ -207,7 +204,7 @@ impl BlueStateReader {
 
     /// Load meta fields from `ares:blue:inv:{id}:meta` HASH.
     ///
-    /// Meta fields are stored as JSON-encoded values (via Python's `json.dumps()`).
+    /// Meta fields are stored as JSON-encoded values.
     pub async fn get_meta(
         &self,
         conn: &mut impl AsyncCommands,

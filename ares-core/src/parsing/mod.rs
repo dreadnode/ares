@@ -1,8 +1,7 @@
 //! Regex-based output parsing for security tool outputs.
 //!
-//! This module replaces the Python `result_processing.py` parsing functions,
-//! providing parsers for secretsdump, Kerberos hashes, NTLM hashes, host
-//! discovery, delegation enumeration, domain SIDs, and share enumeration.
+//! Parsers for secretsdump, Kerberos hashes, NTLM hashes, host discovery,
+//! delegation enumeration, domain SIDs, and share enumeration.
 
 mod delegation;
 mod domain_sid;

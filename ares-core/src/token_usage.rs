@@ -1,8 +1,6 @@
 //! LLM token usage tracking and cost estimation.
 //!
-//! Provides Redis-backed atomic token counters that match the Python
-//! `RedisTaskQueue.increment_token_usage()` / `get_token_usage()` protocol
-//! exactly, ensuring interoperability between Rust and Python workers.
+//! Redis-backed atomic token counters.
 //!
 //! ## Redis key format
 //!
@@ -17,7 +15,7 @@
 //! | `model:{base64(name)}:output_tokens` | Per-model output tokens |
 //!
 //! Model names are URL-safe base64-encoded to avoid `:` / `/` collisions in
-//! Redis HASH field names, matching Python's `_token_usage_model_field()`.
+//! Redis HASH field names.
 
 use std::collections::HashMap;
 
@@ -267,7 +265,7 @@ pub async fn get_blue_token_usage(
     }))
 }
 
-/// Encode a per-model HASH field name matching Python's `_token_usage_model_field`.
+/// Encode a per-model HASH field name.
 ///
 /// Format: `model:{url_safe_base64(model_name)}:{token_type}`
 fn model_field(model: &str, token_type: &str) -> String {
@@ -293,7 +291,6 @@ fn parse_model_field(field: &str) -> Option<(String, String)> {
 /// Atomically increment token usage counters for an operation.
 ///
 /// Uses Redis HINCRBY for lock-free, crash-safe accumulation across workers.
-/// Matches Python's `RedisTaskQueue.increment_token_usage()`.
 pub async fn increment_token_usage(
     conn: &mut impl AsyncCommands,
     operation_id: &str,
@@ -343,10 +340,7 @@ pub async fn increment_token_usage(
     Ok(())
 }
 
-/// Read aggregated token usage for an operation.
-///
-/// Returns `None` if the key does not exist.
-/// Matches Python's `RedisTaskQueue.get_token_usage()`.
+/// Read aggregated token usage for an operation. Returns `None` if absent.
 pub async fn get_token_usage(
     conn: &mut impl AsyncCommands,
     operation_id: &str,

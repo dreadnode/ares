@@ -1,7 +1,4 @@
 //! Data models for the Ares red team orchestration system.
-//!
-//! These structs match the Python models exactly in field names and JSON serialization
-//! format, ensuring interoperability with the existing Python orchestrator and workers.
 
 #[cfg(feature = "blue")]
 mod blue;
@@ -34,7 +31,7 @@ mod tests {
 
     #[test]
     fn credential_roundtrip() {
-        // Match the exact compact JSON format used by Python state_backend
+        // Match the exact compact JSON format used by the state backend.
         let json = r#"{"id":"abc","username":"testuser","password":"P@ssw0rd!","domain":"contoso.local","source":"manual-inject","parent_id":null,"attack_step":0}"#; // pragma: allowlist secret
         let cred: Credential = serde_json::from_str(json).unwrap();
         assert_eq!(cred.username, "testuser");
@@ -108,8 +105,8 @@ mod tests {
 
     #[test]
     fn operation_meta_json_encoded() {
-        // Python stores meta values via json.dumps(), so booleans become "true"/"false",
-        // strings become "\"value\"", and arrays become "[\"a\",\"b\"]".
+        // Meta values are stored via json.dumps()-style encoding: booleans become
+        // "true"/"false", strings become "\"value\"", arrays become "[\"a\",\"b\"]".
         let mut data = HashMap::new();
         data.insert("has_domain_admin".to_string(), "true".to_string());
         data.insert("has_golden_ticket".to_string(), "false".to_string());
