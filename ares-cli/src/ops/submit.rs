@@ -216,84 +216,6 @@ pub(crate) async fn ops_submit(p: OpsSubmitParams) -> Result<String> {
     Ok(op_id)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Env-var tests are bundled into a single `#[test]` function so they run
-    /// serially within the binary — the test runner parallelises across `#[test]`
-    /// boundaries, and `collect_env_vars`/`resolve_model` both read process-wide
-    /// state. Mirrors the pattern in `orchestrator/config.rs`.
-    #[test]
-    fn env_var_helpers() {
-        // Use throwaway names that no other test or runtime path reads, so the
-        // serial assertion holds regardless of what else is in flight.
-        const NAME_A: &str = "ARES_TEST_SUBMIT_COLLECT_A_9c1a";
-        const NAME_B: &str = "ARES_TEST_SUBMIT_COLLECT_B_9c1a";
-        const NAME_C: &str = "ARES_TEST_SUBMIT_COLLECT_C_9c1a";
-
-        // --- collect_env_vars ---
-        std::env::remove_var(NAME_A);
-        std::env::remove_var(NAME_B);
-        std::env::remove_var(NAME_C);
-
-        // All unset → empty map.
-        let got = collect_env_vars(&[NAME_A, NAME_B, NAME_C]);
-        assert!(got.is_empty(), "expected empty, got {got:?}");
-
-        // Set + empty → only set+nonempty entries appear.
-        std::env::set_var(NAME_A, "alpha");
-        std::env::set_var(NAME_B, "");
-        let got = collect_env_vars(&[NAME_A, NAME_B, NAME_C]);
-        assert_eq!(got.len(), 1);
-        assert_eq!(got.get(NAME_A).map(String::as_str), Some("alpha"));
-
-        std::env::remove_var(NAME_A);
-        std::env::remove_var(NAME_B);
-
-        // --- resolve_model ---
-        const ORCH: &str = "ARES_ORCHESTRATOR_MODEL";
-        const LEGACY: &str = "ARES_MODEL";
-        // Snapshot + clear so we don't trample a developer-set var.
-        let prev_orch = std::env::var(ORCH).ok();
-        let prev_legacy = std::env::var(LEGACY).ok();
-        std::env::remove_var(ORCH);
-        std::env::remove_var(LEGACY);
-
-        // No flag, no env → None.
-        assert_eq!(resolve_model(&None), None);
-        // Empty flag, no env → None (empty strings are filtered out).
-        assert_eq!(resolve_model(&Some(String::new())), None);
-        // Explicit flag wins over everything.
-        std::env::set_var(ORCH, "gpt-orch");
-        std::env::set_var(LEGACY, "gpt-legacy");
-        assert_eq!(
-            resolve_model(&Some("gpt-explicit".to_string())),
-            Some("gpt-explicit".to_string())
-        );
-        // No flag → ARES_ORCHESTRATOR_MODEL beats ARES_MODEL.
-        assert_eq!(resolve_model(&None), Some("gpt-orch".to_string()));
-        // Only legacy set.
-        std::env::remove_var(ORCH);
-        assert_eq!(resolve_model(&None), Some("gpt-legacy".to_string()));
-        // Empty env vars are still treated as set by `std::env::var`, but the
-        // trailing filter strips them out.
-        std::env::set_var(LEGACY, "");
-        assert_eq!(resolve_model(&None), None);
-
-        // Restore.
-        std::env::remove_var(ORCH);
-        std::env::remove_var(LEGACY);
-        if let Some(v) = prev_orch {
-            std::env::set_var(ORCH, v);
-        }
-        if let Some(v) = prev_legacy {
-            std::env::set_var(LEGACY, v);
-        }
-    }
-}
-
-/// Follow an operation's progress by polling Redis until it completes.
 pub(crate) async fn follow_operation(
     redis_url: Option<String>,
     op_id: &str,
@@ -384,4 +306,81 @@ pub(crate) async fn follow_operation(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Env-var tests are bundled into a single `#[test]` function so they run
+    /// serially within the binary — the test runner parallelises across `#[test]`
+    /// boundaries, and `collect_env_vars`/`resolve_model` both read process-wide
+    /// state. Mirrors the pattern in `orchestrator/config.rs`.
+    #[test]
+    fn env_var_helpers() {
+        // Use throwaway names that no other test or runtime path reads, so the
+        // serial assertion holds regardless of what else is in flight.
+        const NAME_A: &str = "ARES_TEST_SUBMIT_COLLECT_A_9c1a";
+        const NAME_B: &str = "ARES_TEST_SUBMIT_COLLECT_B_9c1a";
+        const NAME_C: &str = "ARES_TEST_SUBMIT_COLLECT_C_9c1a";
+
+        // --- collect_env_vars ---
+        std::env::remove_var(NAME_A);
+        std::env::remove_var(NAME_B);
+        std::env::remove_var(NAME_C);
+
+        // All unset → empty map.
+        let got = collect_env_vars(&[NAME_A, NAME_B, NAME_C]);
+        assert!(got.is_empty(), "expected empty, got {got:?}");
+
+        // Set + empty → only set+nonempty entries appear.
+        std::env::set_var(NAME_A, "alpha");
+        std::env::set_var(NAME_B, "");
+        let got = collect_env_vars(&[NAME_A, NAME_B, NAME_C]);
+        assert_eq!(got.len(), 1);
+        assert_eq!(got.get(NAME_A).map(String::as_str), Some("alpha"));
+
+        std::env::remove_var(NAME_A);
+        std::env::remove_var(NAME_B);
+
+        // --- resolve_model ---
+        const ORCH: &str = "ARES_ORCHESTRATOR_MODEL";
+        const LEGACY: &str = "ARES_MODEL";
+        // Snapshot + clear so we don't trample a developer-set var.
+        let prev_orch = std::env::var(ORCH).ok();
+        let prev_legacy = std::env::var(LEGACY).ok();
+        std::env::remove_var(ORCH);
+        std::env::remove_var(LEGACY);
+
+        // No flag, no env → None.
+        assert_eq!(resolve_model(&None), None);
+        // Empty flag, no env → None (empty strings are filtered out).
+        assert_eq!(resolve_model(&Some(String::new())), None);
+        // Explicit flag wins over everything.
+        std::env::set_var(ORCH, "gpt-orch");
+        std::env::set_var(LEGACY, "gpt-legacy");
+        assert_eq!(
+            resolve_model(&Some("gpt-explicit".to_string())),
+            Some("gpt-explicit".to_string())
+        );
+        // No flag → ARES_ORCHESTRATOR_MODEL beats ARES_MODEL.
+        assert_eq!(resolve_model(&None), Some("gpt-orch".to_string()));
+        // Only legacy set.
+        std::env::remove_var(ORCH);
+        assert_eq!(resolve_model(&None), Some("gpt-legacy".to_string()));
+        // Empty env vars are still treated as set by `std::env::var`, but the
+        // trailing filter strips them out.
+        std::env::set_var(LEGACY, "");
+        assert_eq!(resolve_model(&None), None);
+
+        // Restore.
+        std::env::remove_var(ORCH);
+        std::env::remove_var(LEGACY);
+        if let Some(v) = prev_orch {
+            std::env::set_var(ORCH, v);
+        }
+        if let Some(v) = prev_legacy {
+            std::env::set_var(LEGACY, v);
+        }
+    }
 }

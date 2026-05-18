@@ -229,7 +229,7 @@ mod tests {
     #[test]
     fn extract_target_from_host_key() {
         let args = json!({"host": "dc01.contoso.local"});
-        let (target, user, domain) = extract_target_from_args(&args);
+        let (target, _, _) = extract_target_from_args(&args);
         assert_eq!(target.as_deref(), Some("dc01.contoso.local"));
     }
 
