@@ -19,12 +19,28 @@ use ares_core::models::{Credential, Host, Share, SharedRedTeamState};
 fn get_technique_name_known() {
     assert_eq!(get_technique_name("T1046"), "Network Service Discovery");
     assert_eq!(get_technique_name("T1003"), "OS Credential Dumping");
+    assert_eq!(get_technique_name("T1003.001"), "LSASS Memory");
     assert_eq!(get_technique_name("T1003.006"), "DCSync");
+    assert_eq!(get_technique_name("T1078"), "Valid Accounts");
+    assert_eq!(get_technique_name("T1078.002"), "Domain Accounts");
+    assert_eq!(get_technique_name("T1110"), "Brute Force");
+    assert_eq!(
+        get_technique_name("T1558"),
+        "Steal or Forge Kerberos Tickets"
+    );
+    assert_eq!(get_technique_name("T1558.001"), "Golden Ticket");
     assert_eq!(get_technique_name("T1558.003"), "Kerberoasting");
     assert_eq!(get_technique_name("T1558.004"), "AS-REP Roasting");
+    assert_eq!(get_technique_name("T1021"), "Remote Services");
     assert_eq!(get_technique_name("T1021.002"), "SMB/Windows Admin Shares");
     assert_eq!(get_technique_name("T1649"), "ADCS Certificate Theft");
+    assert_eq!(
+        get_technique_name("T1550"),
+        "Use Alternate Authentication Material"
+    );
     assert_eq!(get_technique_name("T1550.002"), "Pass the Hash");
+    assert_eq!(get_technique_name("T1484"), "Domain Policy Modification");
+    assert_eq!(get_technique_name("T1087"), "Account Discovery");
 }
 
 #[test]
@@ -676,4 +692,74 @@ fn detection_query_time_window_is_set() {
     // RFC-3339 strings should contain the hour component
     assert!(tw.start.as_ref().unwrap().contains('T'));
     assert!(tw.end.as_ref().unwrap().contains('T'));
+}
+
+#[test]
+fn build_technique_detections_sub_technique_parent_t1046() {
+    // T1046.999 → parent T1046 → build_t1046
+    let state = SharedRedTeamState::new("test-op".to_string());
+    let start = Utc::now() - chrono::Duration::hours(1);
+    let end = Utc::now();
+    let detections = build_technique_detections(&state, &["T1046.999".to_string()], &start, &end);
+    let det = &detections["T1046.999"];
+    assert!(!det.detection_queries.is_empty());
+}
+
+#[test]
+fn build_technique_detections_sub_technique_parent_t1078() {
+    // T1078.999 → parent T1078 → build_t1078
+    let state = SharedRedTeamState::new("test-op".to_string());
+    let start = Utc::now() - chrono::Duration::hours(1);
+    let end = Utc::now();
+    let detections = build_technique_detections(&state, &["T1078.999".to_string()], &start, &end);
+    let det = &detections["T1078.999"];
+    assert!(!det.detection_queries.is_empty());
+}
+
+#[test]
+fn build_technique_detections_sub_technique_parent_t1558() {
+    // T1558.999 → parent T1558 → build_t1558
+    let state = SharedRedTeamState::new("test-op".to_string());
+    let start = Utc::now() - chrono::Duration::hours(1);
+    let end = Utc::now();
+    let detections = build_technique_detections(&state, &["T1558.999".to_string()], &start, &end);
+    let det = &detections["T1558.999"];
+    assert!(!det.detection_queries.is_empty());
+}
+
+#[test]
+fn build_technique_detections_sub_technique_parent_t1021() {
+    // T1021.999 → parent T1021 → build_t1021
+    let state = SharedRedTeamState::new("test-op".to_string());
+    let start = Utc::now() - chrono::Duration::hours(1);
+    let end = Utc::now();
+    let detections = build_technique_detections(&state, &["T1021.999".to_string()], &start, &end);
+    let det = &detections["T1021.999"];
+    assert!(!det.detection_queries.is_empty());
+}
+
+#[test]
+fn build_technique_detections_sub_technique_parent_t1550() {
+    // T1550.999 → parent T1550 → build_t1550
+    let state = SharedRedTeamState::new("test-op".to_string());
+    let start = Utc::now() - chrono::Duration::hours(1);
+    let end = Utc::now();
+    let detections = build_technique_detections(&state, &["T1550.999".to_string()], &start, &end);
+    let det = &detections["T1550.999"];
+    assert!(!det.detection_queries.is_empty());
+}
+
+#[test]
+fn build_technique_detections_unknown_with_known_name() {
+    // A technique that has a known name (not empty) in get_technique_name
+    // The T9999 was used in unknown_technique_fallback; use a known one that still
+    // hits the fallback branch (T1484 is in the names table but not the match arms)
+    let state = SharedRedTeamState::new("test-op".to_string());
+    let start = Utc::now() - chrono::Duration::hours(1);
+    let end = Utc::now();
+    let detections = build_technique_detections(&state, &["T1484".to_string()], &start, &end);
+    let det = &detections["T1484"];
+    // T1484 hits the final fallback; name comes from get_technique_name
+    assert_eq!(det.technique_id, "T1484");
+    assert_eq!(det.technique_name, "Domain Policy Modification");
 }

@@ -972,4 +972,21 @@ mod tests {
         assert!(!is_acl_style_vuln_type("kerberoast"));
         assert!(!is_acl_style_vuln_type(""));
     }
+
+    #[test]
+    fn is_acl_style_vuln_type_matches_membership_variants() {
+        assert!(is_acl_style_vuln_type("self_membership"));
+        assert!(is_acl_style_vuln_type("write_membership"));
+        assert!(is_acl_style_vuln_type("addmember"));
+        assert!(is_acl_style_vuln_type("addself"));
+        assert!(is_acl_style_vuln_type("AddMember"));
+        assert!(is_acl_style_vuln_type("acl_addmember_administrators"));
+    }
+
+    #[test]
+    fn is_acl_style_vuln_type_genericwrite_variant() {
+        assert!(is_acl_style_vuln_type("genericwrite"));
+        assert!(is_acl_style_vuln_type("GenericWrite"));
+        assert!(is_acl_style_vuln_type("acl_genericwrite_dc01"));
+    }
 }

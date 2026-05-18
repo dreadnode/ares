@@ -593,3 +593,124 @@ mod tests {
         assert!(!CRITICAL_USERS.contains("normaluser"));
     }
 }
+
+#[cfg(test)]
+mod additional_tests {
+    use super::*;
+    use serde_json::json;
+
+    // --- extract_evidence_types MITRE technique paths ---
+
+    #[test]
+    fn technique_t1003_maps_to_credential_access() {
+        // T1003.* — OS Credential Dumping
+        let payload = json!({ "techniques_found": ["T1003.001"] });
+        let types = extract_evidence_types(&payload);
+        assert!(
+            types.contains(&"credential_access".to_string()),
+            "T1003 should map to credential_access"
+        );
+    }
+
+    #[test]
+    fn technique_t1053_maps_to_persistence_mechanism() {
+        // T1053 — Scheduled Task/Job
+        let payload = json!({ "techniques_found": ["T1053.005"] });
+        let types = extract_evidence_types(&payload);
+        assert!(
+            types.contains(&"persistence_mechanism".to_string()),
+            "T1053 should map to persistence_mechanism"
+        );
+    }
+
+    #[test]
+    fn technique_t1547_maps_to_persistence_mechanism() {
+        // T1547 — Boot or Logon Autostart Execution
+        let payload = json!({ "techniques_found": ["T1547.001"] });
+        let types = extract_evidence_types(&payload);
+        assert!(
+            types.contains(&"persistence_mechanism".to_string()),
+            "T1547 should map to persistence_mechanism"
+        );
+    }
+
+    #[test]
+    fn technique_t1071_maps_to_c2_communication() {
+        // T1071 — Application Layer Protocol (C2)
+        let payload = json!({ "techniques_found": ["T1071.001"] });
+        let types = extract_evidence_types(&payload);
+        assert!(
+            types.contains(&"c2_communication".to_string()),
+            "T1071 should map to c2_communication"
+        );
+    }
+
+    #[test]
+    fn technique_t1105_maps_to_c2_communication() {
+        // T1105 — Ingress Tool Transfer (C2-adjacent)
+        let payload = json!({ "techniques_found": ["T1105"] });
+        let types = extract_evidence_types(&payload);
+        assert!(
+            types.contains(&"c2_communication".to_string()),
+            "T1105 should map to c2_communication"
+        );
+    }
+
+    #[test]
+    fn technique_t1068_maps_to_privilege_escalation() {
+        // T1068 — Exploitation for Privilege Escalation
+        let payload = json!({ "techniques_found": ["T1068"] });
+        let types = extract_evidence_types(&payload);
+        assert!(
+            types.contains(&"privilege_escalation".to_string()),
+            "T1068 should map to privilege_escalation"
+        );
+    }
+
+    #[test]
+    fn technique_t1134_maps_to_privilege_escalation() {
+        // T1134 — Access Token Manipulation
+        let payload = json!({ "techniques_found": ["T1134.001"] });
+        let types = extract_evidence_types(&payload);
+        assert!(
+            types.contains(&"privilege_escalation".to_string()),
+            "T1134 should map to privilege_escalation"
+        );
+    }
+
+    #[test]
+    fn technique_unknown_produces_no_types() {
+        // An unknown technique ID should not produce any evidence type.
+        let payload = json!({ "techniques_found": ["T9999"] });
+        let types = extract_evidence_types(&payload);
+        assert!(
+            types.is_empty(),
+            "Unknown technique should not produce evidence types, got {types:?}"
+        );
+    }
+
+    #[test]
+    fn empty_techniques_found_array_produces_no_types() {
+        let payload = json!({ "techniques_found": [] });
+        let types = extract_evidence_types(&payload);
+        assert!(types.is_empty());
+    }
+
+    #[test]
+    fn missing_all_evidence_fields_produces_no_types() {
+        let payload = json!({ "summary": "nothing here" });
+        let types = extract_evidence_types(&payload);
+        assert!(types.is_empty());
+    }
+
+    #[test]
+    fn evidence_object_without_type_field_is_skipped() {
+        let payload = json!({
+            "evidence": [
+                { "value": "192.168.58.10" },
+            ]
+        });
+        let types = extract_evidence_types(&payload);
+        assert!(types.is_empty());
+    }
+}

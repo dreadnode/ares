@@ -698,4 +698,58 @@ mod tests {
             None => std::env::remove_var("HOME"),
         }
     }
+    #[test]
+    fn extract_verdict_malicious_maps_to_true_positive() {
+        // "malicious" is a distinct path from "true positive" / "confirmed threat"
+        // in `extract_verdict`; verify it reaches the correct branch.
+        assert_eq!(extract_verdict("Activity is malicious"), "true_positive");
+        assert_eq!(
+            extract_verdict("The host is exhibiting malicious behaviour"),
+            "true_positive"
+        );
+    }
+
+    #[test]
+    fn extract_verdict_case_insensitive_true_positive() {
+        assert_eq!(
+            extract_verdict("Conclusion: TRUE POSITIVE indicator found"),
+            "true_positive"
+        );
+    }
+
+    #[test]
+    fn extract_verdict_confirmed_threat_maps_to_true_positive() {
+        // Ensure the "confirmed threat" path works independently of "malicious".
+        assert_eq!(
+            extract_verdict("This is a Confirmed Threat based on evidence"),
+            "true_positive"
+        );
+    }
+
+    #[test]
+    fn extract_verdict_empty_string_is_inconclusive() {
+        assert_eq!(extract_verdict(""), "inconclusive");
+    }
+
+    #[test]
+    fn process_outcome_end_turn_malicious_is_true_positive() {
+        let outcome = AgentLoopOutcome {
+            reason: LoopEndReason::EndTurn {
+                content: "The activity is malicious — host is compromised.".into(),
+            },
+            total_usage: Default::default(),
+            steps: 8,
+            tool_calls_dispatched: 3,
+            discoveries: Vec::new(),
+            llm_findings: Vec::new(),
+            tool_outputs: Vec::new(),
+        };
+        match process_outcome(&outcome, "inv-m") {
+            InvestigationOutcome::Completed { verdict, steps } => {
+                assert_eq!(verdict, "true_positive");
+                assert_eq!(steps, 8);
+            }
+            other => panic!("Expected Completed, got {other:?}"),
+        }
+    }
 }

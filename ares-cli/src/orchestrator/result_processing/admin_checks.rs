@@ -760,6 +760,58 @@ mod tests {
         assert!(extract_ip_from_line("version 1.2.3 released").is_none());
     }
 
+    // ── is_valid_domain_fqdn ──────────────────────────────────────────
+
+    #[test]
+    fn valid_fqdn_accepts_standard_domain() {
+        assert!(is_valid_domain_fqdn("contoso.local"));
+        assert!(is_valid_domain_fqdn("fabrikam.local"));
+        assert!(is_valid_domain_fqdn("child.contoso.local"));
+    }
+
+    #[test]
+    fn valid_fqdn_rejects_empty_string() {
+        assert!(!is_valid_domain_fqdn(""));
+    }
+
+    #[test]
+    fn valid_fqdn_rejects_no_dot() {
+        // A flat name (e.g. "CONTOSO") has no dot — not a valid FQDN.
+        assert!(!is_valid_domain_fqdn("CONTOSO"));
+        assert!(!is_valid_domain_fqdn("localonly"));
+    }
+
+    #[test]
+    fn valid_fqdn_rejects_strings_with_spaces() {
+        assert!(!is_valid_domain_fqdn("contoso .local"));
+        assert!(!is_valid_domain_fqdn("192.168.58.30 - dc01"));
+    }
+
+    #[test]
+    fn valid_fqdn_rejects_strings_with_colons_or_slashes() {
+        assert!(!is_valid_domain_fqdn("http://contoso.local"));
+        assert!(!is_valid_domain_fqdn("contoso:local"));
+    }
+
+    #[test]
+    fn valid_fqdn_rejects_ip_like_strings() {
+        // First label is all digits → looks like an IP, not a domain.
+        assert!(!is_valid_domain_fqdn("192.168.58.10"));
+        assert!(!is_valid_domain_fqdn("10.0.0.1"));
+    }
+
+    #[test]
+    fn valid_fqdn_rejects_leading_dot() {
+        // First label is empty → ".contoso.local" is malformed.
+        assert!(!is_valid_domain_fqdn(".contoso.local"));
+    }
+
+    #[test]
+    fn valid_fqdn_accepts_domain_with_hyphens_and_underscores() {
+        assert!(is_valid_domain_fqdn("my-domain.local"));
+        assert!(is_valid_domain_fqdn("_kerberos.contoso.local"));
+    }
+
     // ── collect_payload_text_parts ─────────────────────────────────────
 
     #[test]

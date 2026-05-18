@@ -2137,3 +2137,113 @@ mod reconcile_low_trust_credential_domain {
         assert_eq!(cred.domain, "contoso.local");
     }
 }
+
+// ── collect_result_text_parts ─────────────────────────────────────────────
+//
+// `collect_result_text_parts` pulls trusted tool stdout out of the
+// `tool_outputs` array, ignoring top-level `output` / `summary` prose fields
+// that may contain LLM-generated text.
+
+#[test]
+fn collect_result_text_parts_from_string_array() {
+    use super::collect_result_text_parts;
+    let payload = serde_json::json!({
+        "tool_outputs": ["first line", "second line"],
+    });
+    let parts = collect_result_text_parts(&payload);
+    assert_eq!(parts, vec!["first line", "second line"]);
+}
+
+#[test]
+fn collect_result_text_parts_from_object_array() {
+    use super::collect_result_text_parts;
+    let payload = serde_json::json!({
+        "tool_outputs": [
+            {"name": "nmap", "output": "PORT 445/tcp open"},
+            {"name": "smb", "output": "Shares: C$, IPC$"},
+        ],
+    });
+    let parts = collect_result_text_parts(&payload);
+    assert_eq!(parts, vec!["PORT 445/tcp open", "Shares: C$, IPC$"]);
+}
+
+#[test]
+fn collect_result_text_parts_ignores_top_level_scalar_fields() {
+    use super::collect_result_text_parts;
+    // The top-level `output` and `summary` fields are LLM prose — they
+    // must NOT be ingested by regex extractors.
+    let payload = serde_json::json!({
+        "output": "Summary: found credentials",
+        "summary": "Task complete",
+        "tool_outputs": ["DC01$ aabbccddeeff00112233445566778899:aabbccddeeff00112233445566778899"],
+    });
+    let parts = collect_result_text_parts(&payload);
+    // Only the tool_outputs entry should appear.
+    assert_eq!(parts.len(), 1);
+    assert!(parts[0].contains("DC01$"));
+}
+
+#[test]
+fn collect_result_text_parts_empty_when_no_tool_outputs() {
+    use super::collect_result_text_parts;
+    let payload = serde_json::json!({ "summary": "no tool outputs here" });
+    assert!(collect_result_text_parts(&payload).is_empty());
+}
+
+#[test]
+fn collect_result_text_parts_empty_array_produces_nothing() {
+    use super::collect_result_text_parts;
+    let payload = serde_json::json!({ "tool_outputs": [] });
+    assert!(collect_result_text_parts(&payload).is_empty());
+}
+
+#[test]
+fn collect_result_text_parts_skips_non_string_and_non_object_entries() {
+    use super::collect_result_text_parts;
+    let payload = serde_json::json!({
+        "tool_outputs": [42, true, null, "kept"],
+    });
+    let parts = collect_result_text_parts(&payload);
+    assert_eq!(parts, vec!["kept"]);
+}
+
+// ── is_low_trust_realm_inferred_credential_source ──────────────────────────
+
+#[test]
+fn low_trust_sources_are_recognised() {
+    use super::is_low_trust_realm_inferred_credential_source;
+    let low_trust = [
+        "description_field",
+        "autologon_registry",
+        "sysvol_script",
+        "user_description_leak",
+        "netexec_password",
+        "ldap_description",
+    ];
+    for src in &low_trust {
+        assert!(
+            is_low_trust_realm_inferred_credential_source(src),
+            "{src} should be low-trust"
+        );
+    }
+}
+
+#[test]
+fn high_trust_sources_are_not_recognised() {
+    use super::is_low_trust_realm_inferred_credential_source;
+    let high_trust = [
+        "secretsdump",
+        "kerberoast",
+        "asrep_roast",
+        "lsassy",
+        "certipy_auth",
+        "impacket",
+        "",
+    ];
+    for src in &high_trust {
+        assert!(
+            !is_low_trust_realm_inferred_credential_source(src),
+            "{src} should not be low-trust"
+        );
+    }
+}
