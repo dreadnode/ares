@@ -141,20 +141,19 @@ pub async fn run_agent_loop(p: RunAgentLoopParams<'_>) -> AgentLoopOutcome {
 fn resolve_operation_id_from_env() -> String {
     std::env::var("ARES_OPERATION_ID")
         .ok()
-        .and_then(|v| {
-            // ARES_OPERATION_ID may be a plain ID or a JSON envelope; try
-            // to extract `operation_id` if it parses as JSON, else use raw.
-            if let Ok(serde_json::Value::Object(map)) =
-                serde_json::from_str::<serde_json::Value>(&v)
-            {
-                map.get("operation_id")
-                    .and_then(|x| x.as_str())
-                    .map(|s| s.to_string())
-            } else {
-                Some(v)
-            }
-        })
+        .map(|v| parse_operation_id_envelope(&v))
         .unwrap_or_else(|| "unknown".to_string())
+}
+
+/// Pull the operation id out of an `ARES_OPERATION_ID` value, which may be a
+/// plain string or a JSON envelope with `{ "operation_id": "..." }`.
+fn parse_operation_id_envelope(raw: &str) -> String {
+    if let Ok(serde_json::Value::Object(map)) = serde_json::from_str::<serde_json::Value>(raw) {
+        if let Some(id) = map.get("operation_id").and_then(|x| x.as_str()) {
+            return id.to_string();
+        }
+    }
+    raw.to_string()
 }
 
 struct RunAgentLoopInnerParams<'a> {
@@ -1064,6 +1063,40 @@ mod runner_tests {
         // without helping the agent converge.
         assert!(!should_inject_wrapup_nudge(71, 75, true));
         assert!(!should_inject_wrapup_nudge(74, 75, true));
+    }
+
+    #[test]
+    fn parse_operation_id_envelope_plain_string() {
+        assert_eq!(parse_operation_id_envelope("op-12345"), "op-12345");
+    }
+
+    #[test]
+    fn parse_operation_id_envelope_json_with_operation_id() {
+        let raw = r#"{"operation_id":"op-json-99","other":"ignored"}"#;
+        assert_eq!(parse_operation_id_envelope(raw), "op-json-99");
+    }
+
+    #[test]
+    fn parse_operation_id_envelope_json_missing_field_returns_raw() {
+        // Valid JSON object without `operation_id` falls back to the raw string
+        // so callers can still trace it back to the original env value.
+        let raw = r#"{"target_domain":"contoso.local"}"#;
+        assert_eq!(parse_operation_id_envelope(raw), raw);
+    }
+
+    #[test]
+    fn parse_operation_id_envelope_malformed_json_returns_raw() {
+        assert_eq!(parse_operation_id_envelope("{not json"), "{not json");
+    }
+
+    #[test]
+    fn parse_operation_id_envelope_json_non_object_returns_raw() {
+        // JSON arrays / scalars are not envelopes — treat as opaque.
+        assert_eq!(parse_operation_id_envelope("[1,2,3]"), "[1,2,3]");
+        assert_eq!(
+            parse_operation_id_envelope("\"op-quoted\""),
+            "\"op-quoted\""
+        );
     }
 
     #[test]

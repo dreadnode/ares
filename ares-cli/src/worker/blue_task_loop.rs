@@ -249,26 +249,50 @@ async fn execute_blue_task(
     })
     .await;
 
-    // Convert outcome to BlueTaskResult
+    // The outcome → BlueTaskResult conversion needs to log warn/error/info
+    // for the operator-visible failure modes; the structural mapping itself
+    // is pure and lives in `result_from_outcome` so each variant is covered
+    // by unit tests without standing up an agent loop.
     match &outcome.reason {
-        LoopEndReason::TaskComplete { result, .. } => {
-            info!(
-                task_id = %task.task_id,
-                steps = outcome.steps,
-                tool_calls = outcome.tool_calls_dispatched,
-                "Blue task completed"
-            );
-            BlueTaskResult::success(
-                &task.task_id,
-                &task.investigation_id,
-                serde_json::json!({
-                    "summary": result,
-                    "steps": outcome.steps,
-                    "tool_calls": outcome.tool_calls_dispatched,
-                }),
-                agent_name,
-            )
+        LoopEndReason::TaskComplete { .. } => info!(
+            task_id = %task.task_id,
+            steps = outcome.steps,
+            tool_calls = outcome.tool_calls_dispatched,
+            "Blue task completed"
+        ),
+        LoopEndReason::MaxSteps => {
+            warn!(task_id = %task.task_id, steps = outcome.steps, "Blue task hit max steps");
         }
+        LoopEndReason::Error(err) => {
+            error!(task_id = %task.task_id, err = %err, "Blue task error");
+        }
+        _ => {}
+    }
+
+    result_from_outcome(task, &outcome, agent_name)
+}
+
+/// Project a finished `AgentLoopOutcome` into the `BlueTaskResult` that goes
+/// back on the result queue.
+///
+/// Pure side-effect-free mapping. Operator-visible logging lives in the
+/// caller (`execute_blue_task`) so this function stays unit-testable.
+fn result_from_outcome(
+    task: &BlueTaskMessage,
+    outcome: &ares_llm::AgentLoopOutcome,
+    agent_name: &str,
+) -> BlueTaskResult {
+    match &outcome.reason {
+        LoopEndReason::TaskComplete { result, .. } => BlueTaskResult::success(
+            &task.task_id,
+            &task.investigation_id,
+            serde_json::json!({
+                "summary": result,
+                "steps": outcome.steps,
+                "tool_calls": outcome.tool_calls_dispatched,
+            }),
+            agent_name,
+        ),
         LoopEndReason::EndTurn { content } => BlueTaskResult::success(
             &task.task_id,
             &task.investigation_id,
@@ -284,15 +308,12 @@ async fn execute_blue_task(
             format!("Assistance needed: {issue} (context: {context})"),
             agent_name,
         ),
-        LoopEndReason::MaxSteps => {
-            warn!(task_id = %task.task_id, steps = outcome.steps, "Blue task hit max steps");
-            BlueTaskResult::failure(
-                &task.task_id,
-                &task.investigation_id,
-                format!("Hit max steps ({})", outcome.steps),
-                agent_name,
-            )
-        }
+        LoopEndReason::MaxSteps => BlueTaskResult::failure(
+            &task.task_id,
+            &task.investigation_id,
+            format!("Hit max steps ({})", outcome.steps),
+            agent_name,
+        ),
         LoopEndReason::MaxTokens => BlueTaskResult::failure(
             &task.task_id,
             &task.investigation_id,
@@ -305,15 +326,12 @@ async fn execute_blue_task(
             format!("Budget exceeded: {reason}"),
             agent_name,
         ),
-        LoopEndReason::Error(err) => {
-            error!(task_id = %task.task_id, err = %err, "Blue task error");
-            BlueTaskResult::failure(
-                &task.task_id,
-                &task.investigation_id,
-                err.clone(),
-                agent_name,
-            )
-        }
+        LoopEndReason::Error(err) => BlueTaskResult::failure(
+            &task.task_id,
+            &task.investigation_id,
+            err.clone(),
+            agent_name,
+        ),
     }
 }
 
@@ -389,6 +407,7 @@ impl ToolDispatcher for BlueLocalToolDispatcher {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ares_llm::AgentLoopOutcome;
 
     #[test]
     fn parses_blue_role() {
@@ -408,5 +427,125 @@ mod tests {
         );
         // Unknown defaults to triage
         assert_eq!(parse_blue_role("unknown").as_str(), "triage");
+    }
+
+    fn task() -> BlueTaskMessage {
+        BlueTaskMessage {
+            task_id: "task-7".into(),
+            investigation_id: "inv-7".into(),
+            task_type: "hunt".into(),
+            role: "threat_hunter".into(),
+            params: serde_json::json!({}),
+            created_at: "1970-01-01T00:00:00Z".into(),
+        }
+    }
+
+    fn outcome(reason: LoopEndReason, steps: u32, tool_calls: u32) -> AgentLoopOutcome {
+        AgentLoopOutcome {
+            reason,
+            total_usage: Default::default(),
+            steps,
+            tool_calls_dispatched: tool_calls,
+            discoveries: Vec::new(),
+            llm_findings: Vec::new(),
+            tool_outputs: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn task_complete_maps_to_success_with_summary_and_counters() {
+        let out = outcome(
+            LoopEndReason::TaskComplete {
+                task_id: "task-7".into(),
+                result: "Found 3 IOCs".into(),
+            },
+            12,
+            4,
+        );
+        let r = result_from_outcome(&task(), &out, "agent-alpha");
+        assert!(r.success);
+        assert_eq!(r.task_id, "task-7");
+        assert_eq!(r.investigation_id, "inv-7");
+        assert_eq!(r.worker_agent.as_deref(), Some("agent-alpha"));
+        let body = r.result.expect("result payload");
+        assert_eq!(body["summary"], "Found 3 IOCs");
+        assert_eq!(body["steps"], 12);
+        assert_eq!(body["tool_calls"], 4);
+    }
+
+    #[test]
+    fn end_turn_maps_to_success_with_content_and_steps_only() {
+        let out = outcome(
+            LoopEndReason::EndTurn {
+                content: "Nothing to add.".into(),
+            },
+            5,
+            2,
+        );
+        let r = result_from_outcome(&task(), &out, "agent-x");
+        assert!(r.success);
+        let body = r.result.expect("result payload");
+        assert_eq!(body["summary"], "Nothing to add.");
+        assert_eq!(body["steps"], 5);
+        // EndTurn intentionally omits tool_calls to mirror the prior shape.
+        assert!(body.get("tool_calls").is_none());
+    }
+
+    #[test]
+    fn request_assistance_maps_to_failure_with_combined_message() {
+        let out = outcome(
+            LoopEndReason::RequestAssistance {
+                issue: "missing creds".into(),
+                context: "tried svc1, svc2".into(),
+            },
+            3,
+            0,
+        );
+        let r = result_from_outcome(&task(), &out, "agent-x");
+        assert!(!r.success);
+        let err = r.error.expect("error");
+        assert!(err.contains("missing creds"));
+        assert!(err.contains("tried svc1, svc2"));
+        assert!(r.result.is_none());
+    }
+
+    #[test]
+    fn max_steps_maps_to_failure_with_step_count() {
+        let out = outcome(LoopEndReason::MaxSteps, 50, 10);
+        let r = result_from_outcome(&task(), &out, "agent-x");
+        assert!(!r.success);
+        assert_eq!(r.error.as_deref(), Some("Hit max steps (50)"));
+    }
+
+    #[test]
+    fn max_tokens_maps_to_failure_with_fixed_message() {
+        let out = outcome(LoopEndReason::MaxTokens, 8, 1);
+        let r = result_from_outcome(&task(), &out, "agent-x");
+        assert!(!r.success);
+        assert_eq!(r.error.as_deref(), Some("Hit max tokens"));
+    }
+
+    #[test]
+    fn budget_exceeded_maps_to_failure_with_reason_text() {
+        let out = outcome(
+            LoopEndReason::BudgetExceeded {
+                reason: "input token budget exhausted (12000 >= 10000)".into(),
+            },
+            6,
+            0,
+        );
+        let r = result_from_outcome(&task(), &out, "agent-x");
+        assert!(!r.success);
+        let err = r.error.expect("error");
+        assert!(err.starts_with("Budget exceeded:"));
+        assert!(err.contains("12000 >= 10000"));
+    }
+
+    #[test]
+    fn error_variant_maps_to_failure_with_raw_message() {
+        let out = outcome(LoopEndReason::Error("loki 502".into()), 0, 0);
+        let r = result_from_outcome(&task(), &out, "agent-x");
+        assert!(!r.success);
+        assert_eq!(r.error.as_deref(), Some("loki 502"));
     }
 }

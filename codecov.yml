@@ -13,3 +13,13 @@ comment:
   layout: "reach, diff, flags, files"
   behavior: default
   require_changes: false
+
+# Files excluded from coverage. Reserve this list for true CLI/service plumbing —
+# entry points, Redis/NATS/LLM glue, six-near-identical I/O writers — where
+# meaningful tests would require live infrastructure mocks that cost more than
+# the lines they verify. Pure-logic helpers belong in real unit tests instead.
+ignore:
+  - "ares-cli/src/orchestrator/mod.rs"          # orchestrator entry point: service composition
+  - "ares-cli/src/worker/mod.rs"                # worker entry point: service composition
+  - "ares-cli/src/blue/submit.rs"               # NATS + Redis glue, no extractable logic
+  - "ares-cli/src/ops/inject.rs"                # six near-identical Redis state writers

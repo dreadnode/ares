@@ -576,4 +576,126 @@ mod tests {
             other => panic!("Expected Escalated, got {other:?}"),
         }
     }
+
+    fn outcome_with(reason: LoopEndReason, steps: u32) -> AgentLoopOutcome {
+        AgentLoopOutcome {
+            reason,
+            total_usage: Default::default(),
+            steps,
+            tool_calls_dispatched: 0,
+            discoveries: Vec::new(),
+            llm_findings: Vec::new(),
+            tool_outputs: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn process_outcome_escalated_non_critical_is_high() {
+        let outcome = outcome_with(
+            LoopEndReason::RequestAssistance {
+                issue: "Suspicious 4625 cluster, need access to host logs".into(),
+                context: "".into(),
+            },
+            4,
+        );
+        match process_outcome(&outcome, "inv-x") {
+            InvestigationOutcome::Escalated { severity, .. } => assert_eq!(severity, "high"),
+            other => panic!("expected Escalated/high, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn process_outcome_end_turn_uses_verdict_extraction() {
+        let outcome = outcome_with(
+            LoopEndReason::EndTurn {
+                content: "Activity is benign — no follow-up required.".into(),
+            },
+            12,
+        );
+        match process_outcome(&outcome, "inv-x") {
+            InvestigationOutcome::Completed { verdict, steps } => {
+                assert_eq!(verdict, "benign");
+                assert_eq!(steps, 12);
+            }
+            other => panic!("expected Completed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn process_outcome_max_steps_max_tokens_and_budget_are_failures() {
+        let cases = [
+            (LoopEndReason::MaxSteps, "hit max steps"),
+            (LoopEndReason::MaxTokens, "hit max tokens"),
+            (
+                LoopEndReason::BudgetExceeded {
+                    reason: "input token budget exhausted".into(),
+                },
+                "budget exceeded",
+            ),
+        ];
+        for (reason, needle) in cases {
+            let out = outcome_with(reason, 7);
+            match process_outcome(&out, "inv-bx") {
+                InvestigationOutcome::Failed { error } => {
+                    let lower = error.to_lowercase();
+                    assert!(
+                        lower.contains(needle),
+                        "{lower:?} did not contain {needle:?}"
+                    );
+                    assert!(lower.contains("inv-bx"));
+                }
+                other => panic!("expected Failed for {needle}, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn process_outcome_error_carries_message_through() {
+        let outcome = outcome_with(LoopEndReason::Error("redis closed".into()), 0);
+        match process_outcome(&outcome, "inv-x") {
+            InvestigationOutcome::Failed { error } => assert_eq!(error, "redis closed"),
+            other => panic!("expected Failed, got {other:?}"),
+        }
+    }
+
+    /// Bundled to serialise mutations to `ARES_REPORT_DIR`/`HOME` against
+    /// the rest of the binary's tests.
+    #[test]
+    fn resolves_report_dir_with_priority() {
+        const ENV_KEY: &str = "ARES_REPORT_DIR";
+        let prev_env = std::env::var(ENV_KEY).ok();
+        let prev_home = std::env::var("HOME").ok();
+        std::env::remove_var(ENV_KEY);
+
+        // Explicit wins.
+        assert_eq!(
+            resolve_report_dir(Some("/tmp/explicit")),
+            std::path::PathBuf::from("/tmp/explicit")
+        );
+
+        // Env var beats HOME fallback.
+        std::env::set_var(ENV_KEY, "/tmp/from-env");
+        assert_eq!(
+            resolve_report_dir(None),
+            std::path::PathBuf::from("/tmp/from-env")
+        );
+
+        // HOME fallback when nothing else is set.
+        std::env::remove_var(ENV_KEY);
+        std::env::set_var("HOME", "/home/probe");
+        assert_eq!(
+            resolve_report_dir(None),
+            std::path::PathBuf::from("/home/probe/.ares/reports")
+        );
+
+        // Restore.
+        match prev_env {
+            Some(v) => std::env::set_var(ENV_KEY, v),
+            None => std::env::remove_var(ENV_KEY),
+        }
+        match prev_home {
+            Some(v) => std::env::set_var("HOME", v),
+            None => std::env::remove_var("HOME"),
+        }
+    }
 }
