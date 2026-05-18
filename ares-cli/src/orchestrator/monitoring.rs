@@ -22,7 +22,7 @@ use crate::orchestrator::task_queue::TaskQueue;
 #[derive(Debug, Clone)]
 pub struct AgentState {
     pub name: String,
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub role: String,
     pub status: String,
     pub last_heartbeat: DateTime<Utc>,

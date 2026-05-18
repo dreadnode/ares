@@ -1,6 +1,6 @@
 //! Types and constants for operation recovery.
 
-use ares_core::models::{SharedRedTeamState, TaskStatus};
+use ares_core::models::TaskStatus;
 
 /// Maximum number of retries before a task is considered permanently failed.
 pub const MAX_RETRIES: i32 = 3;
@@ -45,9 +45,6 @@ pub struct RecoveryTask {
 /// Result of a recovery operation.
 #[derive(Debug)]
 pub struct RecoveredState {
-    /// The full shared state loaded from Redis.
-    #[allow(dead_code)]
-    pub state: SharedRedTeamState,
     /// Tasks that need re-dispatch through the normal submission flow.
     pub tasks_to_redispatch: Vec<RecoveryTask>,
     /// Task IDs that were prepared for re-dispatch.

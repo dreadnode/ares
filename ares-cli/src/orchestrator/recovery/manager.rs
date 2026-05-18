@@ -253,8 +253,13 @@ impl OperationRecoveryManager {
             "Recovery complete"
         );
 
+        // `loaded_state` is the recovered shared state. Only the requeue
+        // counts and the redispatch payload list are surfaced to the caller;
+        // the underlying state object is held while the recovery completes
+        // and dropped here once redispatch is enqueued.
+        drop(loaded_state);
+
         Ok(RecoveredState {
-            state: loaded_state,
             tasks_to_redispatch,
             requeued_task_ids,
             failed_task_ids,

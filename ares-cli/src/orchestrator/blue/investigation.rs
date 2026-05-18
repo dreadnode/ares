@@ -237,19 +237,20 @@ pub async fn run_investigation(
 
     // Update investigation status
     let final_status = match &investigation_outcome {
-        InvestigationOutcome::Completed { verdict, .. } => {
+        InvestigationOutcome::Completed { verdict, steps } => {
             info!(
                 investigation_id = %investigation.investigation_id,
                 verdict = %verdict,
-                steps = outcome.steps,
+                steps,
                 "Investigation completed"
             );
             "completed"
         }
-        InvestigationOutcome::Escalated { reason, .. } => {
+        InvestigationOutcome::Escalated { reason, severity } => {
             warn!(
                 investigation_id = %investigation.investigation_id,
                 reason = %reason,
+                severity = %severity,
                 "Investigation escalated"
             );
             "escalated"
@@ -384,19 +385,9 @@ pub(super) async fn generate_report(
 /// Outcome of a completed investigation.
 #[derive(Debug)]
 pub enum InvestigationOutcome {
-    Completed {
-        verdict: String,
-        #[allow(dead_code)]
-        steps: u32,
-    },
-    Escalated {
-        reason: String,
-        #[allow(dead_code)]
-        severity: String,
-    },
-    Failed {
-        error: String,
-    },
+    Completed { verdict: String, steps: u32 },
+    Escalated { reason: String, severity: String },
+    Failed { error: String },
 }
 
 fn process_outcome(outcome: &AgentLoopOutcome, investigation_id: &str) -> InvestigationOutcome {

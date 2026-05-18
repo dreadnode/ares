@@ -85,6 +85,24 @@ impl DeferredQueue {
             return Ok(false);
         }
 
+        // Check global total across all task types so a single misbehaving
+        // type can't push us past the operation-wide cap.
+        let pattern = format!("{}:{}:*", DEFERRED_QUEUE_PREFIX, self.config.operation_id);
+        let keys: Vec<String> = scan_keys_async(&mut conn, &pattern).await;
+        let mut total: usize = 0;
+        for k in &keys {
+            total = total.saturating_add(conn.zcard::<_, usize>(k).await.unwrap_or(0));
+        }
+        if total >= self.config.max_deferred_total {
+            debug!(
+                task_type = %task.task_type,
+                total,
+                max = self.config.max_deferred_total,
+                "Deferred queue full globally"
+            );
+            return Ok(false);
+        }
+
         let json = serde_json::to_string(task).context("Failed to serialize DeferredTask")?;
         let score = task.score();
 

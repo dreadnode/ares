@@ -6,8 +6,6 @@
 use anyhow::Result;
 use serde_json::Value;
 
-#[allow(unused_imports)]
-use crate::args::optional_i64;
 use crate::args::{optional_bool, optional_str, required_str};
 use crate::credentials;
 use crate::executor::CommandBuilder;

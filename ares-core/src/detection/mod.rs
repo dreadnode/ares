@@ -14,7 +14,6 @@ use serde::Deserialize;
 #[derive(Debug, Deserialize)]
 pub struct DetectionConfig {
     /// Event ID descriptions — agent context, not used by query builder.
-    #[allow(dead_code)]
     pub event_id_reference: BTreeMap<String, String>,
     pub activity_scopes: BTreeMap<String, Vec<String>>,
     /// Regex patterns for classifying lateral movement connection types.

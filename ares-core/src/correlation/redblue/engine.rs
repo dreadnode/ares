@@ -12,6 +12,10 @@ use super::types::{
     TechniqueCoverage,
 };
 
+/// Combined red and blue team reports loaded from disk: red activities grouped
+/// by operation ID alongside a flat list of blue detections.
+pub type LoadedReports = (Vec<(String, Vec<RedTeamActivity>)>, Vec<BlueTeamDetection>);
+
 /// Correlates red team activities with blue team detections.
 ///
 /// This engine:
@@ -330,10 +334,7 @@ impl RedBlueCorrelator {
     /// `blue/investigations/{inv_id}.md`), the intermediate layout
     /// (`{op_id}/red_report.md`, `{op_id}/blue_investigation_*.md`), and the
     /// legacy flat layout (`redteam-*.md`, `investigation_*.md`).
-    #[allow(clippy::type_complexity)]
-    pub fn load_all_reports(
-        &self,
-    ) -> anyhow::Result<(Vec<(String, Vec<RedTeamActivity>)>, Vec<BlueTeamDetection>)> {
+    pub fn load_all_reports(&self) -> anyhow::Result<LoadedReports> {
         let mut red_team_reports = Vec::new();
         let mut blue_team_detections = Vec::new();
 

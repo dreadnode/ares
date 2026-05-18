@@ -43,9 +43,6 @@ const GUID_FORCE_CHANGE_PASSWORD: &str = "00299570-246d-11d0-a768-00aa006e0529";
 const GUID_SELF_MEMBERSHIP: &str = "bf9679c0-0de6-11d0-a285-00aa003049e2";
 /// Write-Member (write to member attribute on group)
 const GUID_WRITE_MEMBER: &str = "bf9679a8-0de6-11d0-a285-00aa003049e2";
-/// All Extended Rights
-#[allow(dead_code)]
-const GUID_ALL_EXTENDED_RIGHTS: &str = "00000000-0000-0000-0000-000000000000";
 
 // ── Binary parsing helpers ─────────────────────────────────────────────────
 

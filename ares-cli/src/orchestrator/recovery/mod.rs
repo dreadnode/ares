@@ -21,10 +21,9 @@ mod types;
 
 pub use manager::OperationRecoveryManager;
 
-// Re-exported for intra-crate use and tests.
-#[allow(unused_imports)]
-pub(crate) use dedup::dedupe_hashes;
-#[allow(unused_imports)]
+// Normalization helpers consumed by `worker::credential_resolver` for
+// realm-strict lookups; re-exported here so the worker doesn't reach into
+// the private submodule layout.
 pub(crate) use normalize::{normalize_credential_domains, normalize_hash_domains, resolve_domain};
 
 #[cfg(test)]
@@ -33,7 +32,7 @@ mod tests {
 
     use ares_core::models::{Credential, Hash, TaskInfo, TaskStatus};
 
-    use super::dedup::extract_kerberoast_spn_key;
+    use super::dedup::{dedupe_hashes, extract_kerberoast_spn_key};
     use super::types::is_connection_error;
     use super::*;
 

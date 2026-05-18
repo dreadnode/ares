@@ -7,10 +7,12 @@
 //! 2. **Global LLM concurrency** — soft cap + 1.5x hard cap before deferring.
 //! 3. **Dispatch delay** — minimum interval between consecutive submissions.
 
+#[cfg(test)]
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 
+#[cfg(test)]
 use tokio::sync::Semaphore;
 use tracing::{debug, info, warn};
 
@@ -67,7 +69,7 @@ pub struct Throttler {
     config: Arc<OrchestratorConfig>,
     tracker: ActiveTaskTracker,
     /// Per-role semaphores (lazily populated, used in tests).
-    #[allow(dead_code)]
+    #[cfg(test)]
     role_semaphores: tokio::sync::Mutex<HashMap<String, Arc<Semaphore>>>,
     /// Timestamp of the last successful dispatch.
     last_dispatch: tokio::sync::Mutex<Instant>,
@@ -82,6 +84,7 @@ impl Throttler {
         Self {
             config,
             tracker,
+            #[cfg(test)]
             role_semaphores: tokio::sync::Mutex::new(HashMap::new()),
             last_dispatch: tokio::sync::Mutex::new(Instant::now()),
             rate_limit_errors: tokio::sync::Mutex::new(0),

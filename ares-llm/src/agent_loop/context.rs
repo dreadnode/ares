@@ -144,10 +144,9 @@ pub(super) fn maybe_compact(
     }
 }
 
-/// Trim the conversation. Public wrapper retained for the existing tests
-/// and any external callers; equivalent to `maybe_compact` at step 0,
-/// which forces the cadence tick.
-#[allow(dead_code)]
+/// Trim the conversation. Test-only wrapper around `maybe_compact` that
+/// forces the cadence tick (by passing `step = compaction_check_every`).
+#[cfg(test)]
 pub(super) fn trim_conversation(
     messages: &mut Vec<ChatMessage>,
     system: &str,

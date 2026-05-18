@@ -37,27 +37,4 @@ impl SharedState {
         }
         Ok(())
     }
-
-    /// Find a Kerberos ticket for a specific (source_domain, target_domain, username) triple.
-    #[allow(dead_code)]
-    pub async fn find_kerberos_ticket(
-        &self,
-        source_domain: &str,
-        target_domain: &str,
-        username: &str,
-    ) -> Option<KerberosTicket> {
-        let state = self.inner.read().await;
-        let src_l = source_domain.to_lowercase();
-        let tgt_l = target_domain.to_lowercase();
-        let user_l = username.to_lowercase();
-        state
-            .kerberos_tickets
-            .iter()
-            .find(|t| {
-                t.source_domain.to_lowercase() == src_l
-                    && t.target_domain.to_lowercase() == tgt_l
-                    && t.username.to_lowercase() == user_l
-            })
-            .cloned()
-    }
 }
