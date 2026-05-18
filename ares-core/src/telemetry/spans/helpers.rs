@@ -211,3 +211,144 @@ pub fn consumer_span(name: &str, role: &str, team: Team) -> tracing::Span {
         .kind(SpanKind::Consumer)
         .build()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn extract_target_from_target_key() {
+        let args = json!({"target": "192.168.58.10"});
+        let (target, user, domain) = extract_target_from_args(&args);
+        assert_eq!(target.as_deref(), Some("192.168.58.10"));
+        assert!(user.is_none());
+        assert!(domain.is_none());
+    }
+
+    #[test]
+    fn extract_target_from_host_key() {
+        let args = json!({"host": "dc01.contoso.local"});
+        let (target, user, domain) = extract_target_from_args(&args);
+        assert_eq!(target.as_deref(), Some("dc01.contoso.local"));
+    }
+
+    #[test]
+    fn extract_target_from_dc_ip_key() {
+        let args = json!({"dc_ip": "192.168.58.100"});
+        let (target, _, _) = extract_target_from_args(&args);
+        assert_eq!(target.as_deref(), Some("192.168.58.100"));
+    }
+
+    #[test]
+    fn extract_target_from_dc_key() {
+        let args = json!({"dc": "192.168.58.101"});
+        let (target, _, _) = extract_target_from_args(&args);
+        assert_eq!(target.as_deref(), Some("192.168.58.101"));
+    }
+
+    #[test]
+    fn extract_target_from_ip_key() {
+        let args = json!({"ip": "192.168.58.50"});
+        let (target, _, _) = extract_target_from_args(&args);
+        assert_eq!(target.as_deref(), Some("192.168.58.50"));
+    }
+
+    #[test]
+    fn target_key_takes_priority_over_host() {
+        let args = json!({"target": "192.168.58.10", "host": "ws01.contoso.local"});
+        let (target, _, _) = extract_target_from_args(&args);
+        assert_eq!(target.as_deref(), Some("192.168.58.10"));
+    }
+
+    #[test]
+    fn empty_target_string_yields_none() {
+        let args = json!({"target": ""});
+        let (target, _, _) = extract_target_from_args(&args);
+        assert!(target.is_none());
+    }
+
+    #[test]
+    fn extract_user_from_username_key() {
+        let args = json!({"username": "administrator"});
+        let (_, user, _) = extract_target_from_args(&args);
+        assert_eq!(user.as_deref(), Some("administrator"));
+    }
+
+    #[test]
+    fn extract_user_from_user_key() {
+        let args = json!({"user": "svc_account"});
+        let (_, user, _) = extract_target_from_args(&args);
+        assert_eq!(user.as_deref(), Some("svc_account"));
+    }
+
+    #[test]
+    fn username_key_takes_priority_over_user() {
+        let args = json!({"username": "admin", "user": "other"});
+        let (_, user, _) = extract_target_from_args(&args);
+        assert_eq!(user.as_deref(), Some("admin"));
+    }
+
+    #[test]
+    fn empty_user_string_yields_none() {
+        let args = json!({"username": ""});
+        let (_, user, _) = extract_target_from_args(&args);
+        assert!(user.is_none());
+    }
+
+    #[test]
+    fn extract_domain() {
+        let args = json!({"domain": "contoso.local"});
+        let (_, _, domain) = extract_target_from_args(&args);
+        assert_eq!(domain.as_deref(), Some("contoso.local"));
+    }
+
+    #[test]
+    fn empty_domain_string_yields_none() {
+        let args = json!({"domain": ""});
+        let (_, _, domain) = extract_target_from_args(&args);
+        assert!(domain.is_none());
+    }
+
+    #[test]
+    fn all_fields_extracted_together() {
+        let args = json!({
+            "target": "192.168.58.240",
+            "username": "administrator",
+            "domain": "contoso.local"
+        });
+        let (target, user, domain) = extract_target_from_args(&args);
+        assert_eq!(target.as_deref(), Some("192.168.58.240"));
+        assert_eq!(user.as_deref(), Some("administrator"));
+        assert_eq!(domain.as_deref(), Some("contoso.local"));
+    }
+
+    #[test]
+    fn missing_all_keys_returns_three_nones() {
+        let args = json!({"logql": "some query", "limit": 100});
+        let (target, user, domain) = extract_target_from_args(&args);
+        assert!(target.is_none());
+        assert!(user.is_none());
+        assert!(domain.is_none());
+    }
+
+    #[test]
+    fn non_string_target_value_yields_none() {
+        let args = json!({"target": 12345});
+        let (target, _, _) = extract_target_from_args(&args);
+        assert!(target.is_none());
+    }
+
+    #[test]
+    fn secondary_domain_fabrikam() {
+        let args = json!({
+            "dc_ip": "192.168.58.200",
+            "username": "svc_sql",
+            "domain": "fabrikam.local"
+        });
+        let (target, user, domain) = extract_target_from_args(&args);
+        assert_eq!(target.as_deref(), Some("192.168.58.200"));
+        assert_eq!(user.as_deref(), Some("svc_sql"));
+        assert_eq!(domain.as_deref(), Some("fabrikam.local"));
+    }
+}

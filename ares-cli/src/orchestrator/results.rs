@@ -183,3 +183,78 @@ fn is_connection_error(e: &anyhow::Error) -> bool {
     .iter()
     .any(|kw| msg.contains(kw))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn conn_err(msg: &str) -> anyhow::Error {
+        anyhow::anyhow!("{}", msg)
+    }
+
+    #[test]
+    fn connection_keyword_matches() {
+        assert!(is_connection_error(&conn_err("connection refused")));
+    }
+
+    #[test]
+    fn connect_keyword_matches() {
+        assert!(is_connection_error(&conn_err("failed to connect to host")));
+    }
+
+    #[test]
+    fn closed_keyword_matches() {
+        assert!(is_connection_error(&conn_err("stream closed unexpectedly")));
+    }
+
+    #[test]
+    fn timeout_keyword_matches() {
+        assert!(is_connection_error(&conn_err(
+            "timeout waiting for response"
+        )));
+    }
+
+    #[test]
+    fn broken_pipe_keyword_matches() {
+        assert!(is_connection_error(&conn_err("broken pipe")));
+    }
+
+    #[test]
+    fn reset_keyword_matches() {
+        assert!(is_connection_error(&conn_err("connection reset by peer")));
+    }
+
+    #[test]
+    fn refused_keyword_matches() {
+        assert!(is_connection_error(&conn_err("connection refused")));
+    }
+
+    #[test]
+    fn sentinel_keyword_matches() {
+        assert!(is_connection_error(&conn_err(
+            "sentinel failover in progress"
+        )));
+    }
+
+    #[test]
+    fn unrelated_error_does_not_match() {
+        assert!(!is_connection_error(&conn_err("permission denied")));
+    }
+
+    #[test]
+    fn empty_error_does_not_match() {
+        assert!(!is_connection_error(&conn_err("")));
+    }
+
+    #[test]
+    fn case_insensitive_match() {
+        assert!(is_connection_error(&conn_err("CONNECTION RESET")));
+        assert!(is_connection_error(&conn_err("TIMEOUT")));
+        assert!(is_connection_error(&conn_err("Broken Pipe")));
+    }
+
+    #[test]
+    fn parse_error_does_not_match() {
+        assert!(!is_connection_error(&conn_err("failed to parse JSON")));
+    }
+}
