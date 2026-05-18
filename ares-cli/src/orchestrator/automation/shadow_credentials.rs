@@ -233,16 +233,18 @@ fn extract_target_user(
 /// NT hash via certipy auth).
 ///
 /// Includes the obvious primitives (GenericAll, GenericWrite, WriteDacl,
-/// WriteOwner) plus three that the lab's BloodHound exposed but the
+/// WriteOwner) plus two that the lab's BloodHound exposed but the
 /// original matcher missed:
-/// - `allextendedrights`: subsumes User-Force-Change-Password and most
-///   extended rights — equivalent to GenericAll for shadow-creds purposes.
-/// - `writeproperty`: a property write that explicitly covers
-///   msDS-KeyCredentialLink (BloodHound's targetedwrite analogue).
-/// - `forcechangepassword`: while normally used to reset the password,
-///   the same WriteProperty extended right also lets us write
-///   msDS-KeyCredentialLink, so certipy_shadow works without destroying
-///   the lab's seeded password.
+/// - `allextendedrights`: subsumes every extended right on the target,
+///   including the property-write needed for msDS-KeyCredentialLink —
+///   equivalent to GenericAll for shadow-creds purposes.
+/// - `writeproperty`: a property write that covers msDS-KeyCredentialLink
+///   (BloodHound's targetedwrite analogue).
+///
+/// `forcechangepassword` is deliberately excluded: the User-Force-Change-
+/// Password extended right grants password reset only, not the property
+/// write required for msDS-KeyCredentialLink. Those vulns are routed to
+/// `auto_dacl_abuse` → `bloodyad_set_password` instead.
 ///
 /// All forms accept both the bare and `acl_`-prefixed shapes emitted by
 /// ldap_acl_enumeration's parser.
@@ -256,14 +258,12 @@ pub(crate) fn is_shadow_cred_candidate(vuln_type: &str) -> bool {
             | "shadow_credentials"
             | "allextendedrights"
             | "writeproperty"
-            | "forcechangepassword"
             | "acl_genericall"
             | "acl_genericwrite"
             | "acl_writedacl"
             | "acl_writeowner"
             | "acl_allextendedrights"
             | "acl_writeproperty"
-            | "acl_forcechangepassword"
     )
 }
 
@@ -295,11 +295,9 @@ mod tests {
         assert!(is_shadow_cred_candidate("allextendedrights"));
         assert!(is_shadow_cred_candidate("AllExtendedRights"));
         assert!(is_shadow_cred_candidate("writeproperty"));
-        assert!(is_shadow_cred_candidate("forcechangepassword"));
         // ACL-prefixed forms emitted by ldap_acl_enumeration parser.
         assert!(is_shadow_cred_candidate("acl_allextendedrights"));
         assert!(is_shadow_cred_candidate("acl_writeproperty"));
-        assert!(is_shadow_cred_candidate("acl_forcechangepassword"));
         assert!(is_shadow_cred_candidate("acl_writeowner"));
     }
 
@@ -311,6 +309,12 @@ mod tests {
         assert!(!is_shadow_cred_candidate("unconstrained_delegation"));
         assert!(!is_shadow_cred_candidate("genericall_computer"));
         assert!(!is_shadow_cred_candidate(""));
+        // ForceChangePassword only grants password reset, not
+        // msDS-KeyCredentialLink writes. Routed to auto_dacl_abuse →
+        // bloodyad_set_password instead of certipy_shadow.
+        assert!(!is_shadow_cred_candidate("forcechangepassword"));
+        assert!(!is_shadow_cred_candidate("ForceChangePassword"));
+        assert!(!is_shadow_cred_candidate("acl_forcechangepassword"));
     }
 
     #[test]
