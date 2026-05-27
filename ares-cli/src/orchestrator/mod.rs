@@ -907,11 +907,10 @@ async fn run_inner() -> Result<()> {
 }
 
 /// Issue a minimal LLM chat request to verify the API key + model + org
-/// permissions are good before queueing any tasks. We send a 1-token "ping"
-/// so the call is cheap; the response content is discarded. A non-retryable
-/// error (auth, org-restricted model, bad model name) aborts startup; a
-/// retryable error (network, 5xx, rate limit) is treated as a transient
-/// upstream blip and only warns.
+/// permissions are good before queueing any tasks. The response content is
+/// discarded. A non-retryable error (auth, org-restricted model, bad model
+/// name) aborts startup; a retryable error (network, 5xx, rate limit) is
+/// treated as a transient upstream blip and only warns.
 async fn preflight_llm_provider(
     provider: &dyn ares_llm::LlmProvider,
     model_name: &str,
@@ -926,7 +925,14 @@ async fn preflight_llm_provider(
     }
 
     let mut req = LlmRequest::new(model_name);
-    req.max_tokens = 1;
+    // OpenAI reasoning models (gpt-5*, o1*, o3*, etc.) count internal
+    // reasoning tokens against the completion budget. A budget of 1 isn't
+    // enough to even emit reasoning, and the API returns a 400 "Could not
+    // finish the message because max_tokens or model output limit was
+    // reached" before we ever see a token of output — failing the preflight
+    // for a perfectly-valid model. 64 leaves headroom for reasoning while
+    // keeping the call cost negligible.
+    req.max_tokens = 64;
     req.messages.push(ChatMessage::text(Role::User, "ping"));
 
     match provider.chat(&req).await {
