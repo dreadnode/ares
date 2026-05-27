@@ -5,7 +5,7 @@ collections:
   - name: ansible.windows
     version: 3.5.0
   - name: community.windows
-    version: 3.1.0
+    version: 3.2.0
   - name: community.docker
     version: 5.2.0
   - name: ansible.posix
