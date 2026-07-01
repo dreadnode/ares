@@ -123,7 +123,7 @@ dependencies = [
  "futures",
  "hickory-resolver",
  "local-ip-address",
- "rand 0.8.6",
+ "rand 0.10.1",
  "redis",
  "regex",
  "rstest",
