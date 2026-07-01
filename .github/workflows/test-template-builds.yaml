@@ -25,7 +25,7 @@ concurrency:
 env:
   DEBIAN_FRONTEND: noninteractive
   PYTHON_VERSION: "3.13.7"
-  WARPGATE_VERSION: "v4.9.0"
+  WARPGATE_VERSION: "v4.9.1"
 
 jobs:
   detect-changes:
