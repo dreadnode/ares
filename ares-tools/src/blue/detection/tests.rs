@@ -32,10 +32,12 @@ fn event_filter_empty() {
 }
 
 #[test]
-fn pattern_filter_uses_contains_for_few_literals() {
-    // 2 simple literals: chain |= filters (faster than regex)
+fn pattern_filter_ors_multiple_literals() {
+    // 2+ literals in one stage are OR alternatives → regex alternation, NOT
+    // chained |= (which ANDs them: a line would have to contain BOTH, so the
+    // stage matches nothing).
     let filter = build_pattern_filter(&["nmap", "masscan"]);
-    assert_eq!(filter, r#" |= "nmap" |= "masscan""#);
+    assert_eq!(filter, r#" |~ "(?i)(nmap|masscan)""#);
 }
 
 #[test]
@@ -225,6 +227,97 @@ fn s4u_template_has_exclude_patterns() {
         tmpl.logql.contains("TransmittedServices"),
         "S4U template should filter on TransmittedServices field"
     );
+}
+
+#[test]
+fn multi_literal_stages_or_not_and() {
+    // Regression: OR alternatives within one stage must compile to a single
+    // `(?i)(a|b)` regex, never a chain of `|=` (which ANDs them so the stage
+    // matches lines containing every term at once — i.e. nothing). This
+    // previously blackholed RBCD delegation (attribute casings) and
+    // remote-registry (service state) detections.
+    let rbcd = build_detection_template("detect_delegation_abuse", None)
+        .unwrap()
+        .logql;
+    assert!(
+        rbcd.contains("(?i)(") && rbcd.contains("|rbcd)"),
+        "RBCD attribute casings must OR into one regex, got: {rbcd}"
+    );
+    assert!(
+        !rbcd.contains(r#"|= "rbcd""#),
+        "RBCD must not chain |= for OR alternatives, got: {rbcd}"
+    );
+
+    let regsvc = build_detection_template("detect_remote_registry_start", None)
+        .unwrap()
+        .logql;
+    assert!(
+        regsvc.contains("(?i)(running|started|start)"),
+        "remote-registry service states must OR, got: {regsvc}"
+    );
+}
+
+#[test]
+fn golden_ticket_keys_on_ticket_encryption_type() {
+    // Golden-ticket stage 1 must match the ACTUAL TicketEncryptionType field, not a
+    // bare '0x17'/'rc4'. Live Loki showed bare 'rc4' hits ~90% of 4769 (RC4 in the
+    // capability-enumeration fields) and bare '0x17' hits AES tickets via
+    // SessionKeyEncryptionType — both flood golden with false positives.
+    let golden = build_detection_template("detect_golden_ticket", None)
+        .unwrap()
+        .logql;
+    assert!(
+        golden.contains("TicketEncryptionType"),
+        "golden must key on the TicketEncryptionType field, got: {golden}"
+    );
+    assert!(
+        !golden.contains(r#""(?i)(0x17|rc4)""#),
+        "golden must not match bare 0x17/rc4 (capability-field false positives), got: {golden}"
+    );
+}
+
+#[test]
+fn kerberoasting_keys_on_ticket_encryption_type() {
+    // Same failure as golden, on the rule that actually fires. The old patterns
+    // let `encryption.*type` span the field NAME (ServiceSupportedEncryptionTypes)
+    // into a capability value, so `.*rc4` matched almost everything: live Loki over
+    // 24h gave 690/870 4769 events matched where only 28 were real RC4 tickets.
+    let roast = build_detection_template("detect_kerberoasting", None)
+        .unwrap()
+        .logql;
+    assert!(
+        roast.contains("TicketEncryptionType"),
+        "kerberoast must key on the TicketEncryptionType field, got: {roast}"
+    );
+    assert!(
+        !roast.contains("encryption.*type"),
+        "kerberoast must not use a name-spanning encryption.*type pattern, got: {roast}"
+    );
+    // ServiceName is a SAM account name, never an SPN — this stage matched 0 live.
+    assert!(
+        !roast.contains("servicename"),
+        "kerberoast must not filter on SPN-shaped ServiceName (matches nothing), got: {roast}"
+    );
+}
+
+#[test]
+fn asrep_roasting_keys_on_preauthtype_zero() {
+    // Third instance of the same span bug. `preauthtype.*0` reaches any later zero
+    // on the line, so PreAuthType 2/15/16/17 all matched; live Loki over 24h gave
+    // 411/590 4768 events where only 12 were real no-pre-auth TGTs.
+    let asrep = build_detection_template("detect_asrep_roasting", None)
+        .unwrap()
+        .logql;
+    assert!(
+        asrep.contains("PreAuthType..u003e0.u003c"),
+        "asrep must match PreAuthType=0 with the closing tag anchored, got: {asrep}"
+    );
+    for bad in ["preauthtype.*0", "encryption.*type", "ticket.*options"] {
+        assert!(
+            !asrep.contains(bad),
+            "asrep must not use over-broad pattern {bad}, got: {asrep}"
+        );
+    }
 }
 
 #[test]

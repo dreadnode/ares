@@ -64,28 +64,20 @@ fn is_regex_pattern(pattern: &str) -> bool {
     })
 }
 
-/// Build an optimized filter for tool/attack patterns.
+/// Build a filter matching ANY of `patterns` (OR) on a single log line.
 ///
-/// Uses `|=` (case-sensitive contains) for single literal patterns since Loki
-/// evaluates contains ~10x faster than regex. Falls back to `|~` (regex) when
-/// patterns contain metacharacters or when multiple patterns need alternation.
+/// A pattern list within one stage is disjunctive. LogQL has no OR-of-`|=`
+/// (chained `|=` is conjunctive — the line must contain ALL terms), so the only
+/// way to OR multiple terms is regex alternation. Only a single literal takes
+/// the fast `|=` contains path (Loki evaluates it ~10x faster than regex);
+/// everything else uses `|~ "(?i)(…)"`. The `(?i)` also frees templates from
+/// guessing log casing (e.g. `0x17` vs `RC4`).
 pub(super) fn build_pattern_filter(patterns: &[&str]) -> String {
-    if patterns.is_empty() {
-        return String::new();
+    match patterns {
+        [] => String::new(),
+        [p] if !is_regex_pattern(p) => format!(r#" |= "{}""#, p),
+        _ => format!(r#" |~ "(?i)({})""#, patterns.join("|")),
     }
-    // Single literal pattern: use fast contains match
-    if patterns.len() == 1 && !is_regex_pattern(patterns[0]) {
-        return format!(r#" |= "{}""#, patterns[0]);
-    }
-    // 2-3 simple literals: chain |= filters (faster than regex alternation)
-    if patterns.len() <= 3 && patterns.iter().all(|p| !is_regex_pattern(p)) {
-        return patterns
-            .iter()
-            .map(|p| format!(r#" |= "{}""#, p))
-            .collect::<String>();
-    }
-    // Multiple or regex patterns: use case-insensitive regex alternation
-    format!(r#" |~ "(?i)({})""#, patterns.join("|"))
 }
 
 // ─── Re-exports ──────────────────────────────────────────────────────────────

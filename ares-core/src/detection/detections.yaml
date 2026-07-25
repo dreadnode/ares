@@ -384,10 +384,20 @@ templates:
     severity: high
     red_team_tool: kerberoast
     event_ids: ["4769"]
-    patterns:
-      - 'encryption.*type.*(0x17|rc4)'
-      - 'ticket.*encryption.*(0x17|rc4)'
-      - 'servicename.*(mssql|http|ldap|cifs)'
+    # Keyed on the TicketEncryptionType field, same as the golden ticket rule.
+    # The three previous patterns were all broken, verified live vs Loki over a
+    # 24h window (870 total 4769):
+    #   - 'encryption.*type.*(0x17|rc4)'          → 690 matches. `encryption.*type`
+    #     spans the *field name* (ServiceSupportedEncryptionTypes) and `.*rc4` then
+    #     reaches a capability value — RC4 is listed in ServiceAvailableKeys /
+    #     DCAvailableKeys / ClientAdvertizedEncryptionTypes on nearly every event.
+    #   - 'ticket.*encryption.*(0x17|rc4)'        → 690 matches, same span failure.
+    #   - 'servicename.*(mssql|http|ldap|cifs)'   → 0 matches. ServiceName is a SAM
+    #     account name (e.g. svc_sql), never an SPN — the same blackhole that killed
+    #     the S4U rule and that currently zeroes the golden ticket rule.
+    # Net: 690 fired where 28 were real RC4 tickets (4% precision, 662 FPs/day).
+    filter_stages:
+      - ['TicketEncryptionType..u003e0x17']
 
   detect_asrep_roasting:
     description: "AS-REP Roasting Detection (TGT without pre-auth)"
@@ -396,11 +406,22 @@ templates:
     severity: high
     red_team_tool: asrep_roast
     event_ids: ["4768"]
-    patterns:
-      - 'preauthtype.*0'
-      - 'pre.?auth.*type.*0'
-      - 'encryption.*type.*(0x17|rc4)'
-      - 'ticket.*options.*0x4'
+    # AS-REP roasting is PreAuthType=0 (TGT issued with no pre-auth) — match that
+    # field exactly. All four previous patterns were OR'd into one stage and every
+    # one of them over-matched; verified live vs Loki over 24h (590 total 4768):
+    #   - 'preauthtype.*0' / 'pre.?auth.*type.*0' — `.*0` reaches any later 0 on the
+    #     line, so PreAuthType 2/15/16/17 all matched (TicketOptions, SIDs and
+    #     Status 0x0 all carry zeroes).
+    #   - 'encryption.*type.*(0x17|rc4)' — same field-name span as the kerberoast
+    #     rule above; RC4 is listed in AccountAvailableKeys / DCAvailableKeys on
+    #     nearly every 4768.
+    #   - 'ticket.*options.*0x4' — TicketOptions is 0x40810010 on ordinary TGTs.
+    # Net: 411 of 590 fired (70%) where 12 were real no-pre-auth TGTs.
+    # The trailing '.' before u003c matches the single JSON escape between the
+    # value and the closing tag (Name='PreAuthType'>0</Data) — anchoring
+    # the close is what keeps PreAuthType 10/16/17 from matching on the leading 0.
+    filter_stages:
+      - ['PreAuthType..u003e0.u003c']
 
   detect_asrep_roasting_bulk:
     description: "Bulk AS-REP Roasting Spray Detection"
@@ -620,13 +641,27 @@ templates:
     # Golden Tickets are forged offline — no 4768 (TGT request) is emitted, so the
     # old tool-string patterns ('golden ticket', 'ticketer') never appear in
     # Windows Security logs and never fired. USING the ticket, however, still emits
-    # a 4769 service-ticket request. In an AES-enforced domain an RC4 (0x17) TGS for
-    # a Domain Controller service (cifs//ldap//host//krbtgt) is a strong Golden /
-    # encryption-downgrade signal. Ported from Grafana `ad_golden_ticket_detection`.
-    # The stronger absence variant (4769 to a DC SPN with NO preceding 4768) needs
-    # cross-event correlation this single-line engine can't express — Grafana-only.
+    # a 4769 service-ticket request. An RC4 (0x17) service ticket in an AES domain is
+    # the encryption-downgrade signal. Ported from Grafana `ad_golden_ticket_detection`.
+    #
+    # Stage 1 keys on the ACTUAL ticket encryption type, not a bare '0x17'/'rc4'.
+    # Verified live vs Loki: bare 'rc4' matches ~90% of all 4769 (RC4 sits in the
+    # capability-enumeration fields ServiceSupportedEncryptionTypes /
+    # ClientAdvertizedEncryptionTypes on nearly every event), and bare '0x17' still
+    # matches AES tickets because SessionKeyEncryptionType is 0x17 almost always. Only
+    # the TicketEncryptionType field distinguishes a real RC4 ticket. The '..' matches
+    # the JSON-escaped `'>` between the field name and value (Loki stores XML > as
+    # > — same escaping trick as the DCSync exclude).
+    #
+    # Stage 2 (DC service class) currently zeroes recall: in the real 4769 log shape
+    # ServiceName is a SAM name (e.g. SQL01$, svc_sql), never a cifs//ldap//host/ SPN,
+    # so this stage blackholes every real RC4 ticket — the same failure that killed the
+    # S4U rule. Kept because dropping it makes this fire on ALL RC4 downgrades, which is
+    # kerberoasting (T1558.003), not uniquely golden — a single-line 4769 rule genuinely
+    # can't separate the two. True golden detection (4769 to a DC SPN with NO preceding
+    # 4768) needs cross-event correlation only the Grafana rule expresses.
     filter_stages:
-      - ['0x17', 'rc4']
+      - ['TicketEncryptionType..u003e0x17']
       - ['cifs/', 'ldap/', 'host/', 'krbtgt']
 
   # ─── Execution (TA0002) ────────────────────────────────────────────────────
