@@ -683,7 +683,7 @@ mod tests {
 
     #[test]
     fn all_evidence_map_techniques_exist_in_db() {
-        for (_, tech_ids) in EVIDENCE_MAP.iter() {
+        for tech_ids in EVIDENCE_MAP.values() {
             for tid in tech_ids {
                 // Either the technique or its parent should be in the DB
                 let parent = tid.split('.').next().unwrap_or(tid);

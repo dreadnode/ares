@@ -313,7 +313,7 @@ mod tests {
     #[test]
     fn climb_strategies_entries_have_template() {
         let strategies = climb_strategies();
-        for (_, entries) in strategies.iter() {
+        for entries in strategies.values() {
             for entry in entries {
                 assert!(!entry.template.is_empty());
                 assert!(!entry.target.is_empty());

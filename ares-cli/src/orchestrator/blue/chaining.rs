@@ -353,7 +353,7 @@ async fn dispatch_chain_task(
         "chain_{}_{}_{}_{}",
         action.task_type,
         evidence_type,
-        &investigation_id.chars().take(8).collect::<String>(),
+        investigation_id.chars().take(8).collect::<String>(),
         &uuid::Uuid::new_v4().simple().to_string()[..8]
     );
 
