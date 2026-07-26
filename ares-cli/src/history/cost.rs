@@ -1,6 +1,6 @@
 use anyhow::Result;
-use sqlx::AssertSqlSafe;
 use chrono::Utc;
+use sqlx::AssertSqlSafe;
 
 use super::connect_postgres;
 use super::types::CostRow;
