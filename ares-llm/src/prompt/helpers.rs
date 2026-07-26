@@ -241,12 +241,20 @@ mod tests {
         });
         let mut ctx = Context::new();
         insert_credential_context(&mut ctx, &payload);
-        let json = ctx.into_json();
-        assert_eq!(json["credential_username"], "admin");
-        assert_eq!(json["credential_domain"], "contoso.local");
-        assert_eq!(json["credential_auth_type"], "password");
+        assert_eq!(
+            ctx.get("credential_username").and_then(|v| v.as_str()),
+            Some("admin")
+        );
+        assert_eq!(
+            ctx.get("credential_domain").and_then(|v| v.as_str()),
+            Some("contoso.local")
+        );
+        assert_eq!(
+            ctx.get("credential_auth_type").and_then(|v| v.as_str()),
+            Some("password")
+        );
         assert!(
-            json.get("credential_password").is_none(),
+            ctx.get("credential_password").is_none(),
             "credential_password must never be exposed to templates"
         );
     }
@@ -261,9 +269,11 @@ mod tests {
         });
         let mut ctx = Context::new();
         insert_credential_context(&mut ctx, &payload);
-        let json = ctx.into_json();
-        assert_eq!(json["credential_auth_type"], "hash/ticket");
-        assert!(json.get("credential_password").is_none());
+        assert_eq!(
+            ctx.get("credential_auth_type").and_then(|v| v.as_str()),
+            Some("hash/ticket")
+        );
+        assert!(ctx.get("credential_password").is_none());
     }
 
     #[test]
@@ -271,8 +281,7 @@ mod tests {
         let payload = json!({"target": "192.168.58.10"});
         let mut ctx = Context::new();
         insert_credential_context(&mut ctx, &payload);
-        let json = ctx.into_json();
-        assert!(json.get("credential_username").is_none());
-        assert!(json.get("credential_password").is_none());
+        assert!(ctx.get("credential_username").is_none());
+        assert!(ctx.get("credential_password").is_none());
     }
 }
