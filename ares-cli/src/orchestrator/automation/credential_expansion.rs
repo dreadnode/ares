@@ -412,7 +412,7 @@ pub async fn auto_credential_expansion(
                         let sd_dedup = format!(
                             "{}:{}:{}",
                             dc_ip,
-                            &item.resolved_domain,
+                            item.resolved_domain,
                             item.hash.username.to_lowercase()
                         );
                         let already = {
