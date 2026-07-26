@@ -399,6 +399,136 @@ pub async fn query_logs(args: &Value) -> Result<ToolOutput> {
     )))
 }
 
+/// A single series from a metric query: its grouping labels and its sample.
+pub type MetricSeries = (std::collections::BTreeMap<String, String>, u64);
+
+/// Run a LogQL **metric** query as an instant query, returning every series'
+/// label set paired with its sample.
+///
+/// [`query_logs`] cannot answer this shape of question: `format_loki_response`
+/// renders `streams` results and drops the `metric` label set, so an
+/// aggregation like `sum by (user) (count_over_time(…))` comes back as bare
+/// numbers with the grouping key — the thing being asked for — discarded.
+///
+/// An instant query also sidesteps the line `limit`: it yields one sample per
+/// series however many events back it, so a whole-window account set costs a
+/// few dozen rows instead of thousands of multi-KB log lines that would
+/// truncate at 100 and silently under-report.
+///
+/// The whole label set is returned rather than one chosen key because
+/// correlating Windows events usually needs a compound identity — an account
+/// name alone is ambiguous across domains in a multi-domain forest.
+///
+/// Transport and HTTP failures return `Err` rather than an empty vector, so
+/// callers can tell "the query broke" from "there genuinely are no series".
+/// That distinction matters wherever an empty result would otherwise read as a
+/// finding.
+pub async fn query_metric_series(logql: &str, at: Option<&str>) -> Result<Vec<MetricSeries>> {
+    let config = loki_config().await;
+    let client = http_client();
+    let url = format!("{}/loki/api/v1/query", config.base_url);
+
+    let mut params = vec![("query", logql.to_string())];
+    match at {
+        // Cap a caller-supplied instant at the replay clock so the agent can't
+        // sample its own future; a no-op outside the unfolding replay modes.
+        Some(t) => params.push(("time", clamp_end_to_replay(t))),
+        // Pin an omitted instant to the replay clock so "now" resolves to
+        // attack-time rather than the server's wall clock.
+        None => {
+            if super::replay_clock::is_replay() {
+                params.push(("time", super::replay_clock::replay_now().to_rfc3339()));
+            }
+        }
+    }
+
+    let mut last_err: Option<String> = None;
+    for attempt in 0..MAX_RETRIES {
+        if attempt > 0 {
+            tokio::time::sleep(RETRY_BASE_DELAY * 2u32.pow(attempt - 1)).await;
+        }
+
+        let resp = match build_get(client, &url, &config).query(&params).send().await {
+            Ok(r) => r,
+            // Only genuine transport failures are worth retrying; a builder or
+            // decode error re-fails identically.
+            Err(e) if e.is_connect() || e.is_timeout() => {
+                let chain = err_chain(&e);
+                warn!(attempt, error = %chain, "Loki metric request error (retryable)");
+                last_err = Some(format!("Loki request failed: {chain}"));
+                continue;
+            }
+            Err(e) => anyhow::bail!("Loki request failed: {}", err_chain(&e)),
+        };
+
+        let status = resp.status();
+        let body = match resp.text().await {
+            Ok(b) => b,
+            Err(e) => {
+                let chain = err_chain(&e);
+                last_err = Some(format!("Loki response body read failed: {chain}"));
+                continue;
+            }
+        };
+
+        if status.is_success() {
+            return parse_metric_series(&body);
+        }
+        if is_retryable_status(status) {
+            warn!(attempt, %status, "Loki metric transient error (retryable)");
+            last_err = Some(format!("Loki returned {status}: {body}"));
+            continue;
+        }
+        anyhow::bail!("Loki returned {status}: {body}");
+    }
+
+    Err(anyhow::anyhow!(
+        "Loki metric query failed after {MAX_RETRIES} attempts: {}",
+        last_err.unwrap_or_else(|| "unknown error".to_string())
+    ))
+}
+
+/// Pull `(labels, sample)` pairs out of a Loki instant-query body.
+///
+/// A body that parses but carries no `data.result` array is an empty result,
+/// not an error — Loki answers that way for a query that matched nothing.
+/// Series with no labels at all are dropped: they carry no identity, so
+/// nothing can be concluded from them.
+fn parse_metric_series(body: &str) -> Result<Vec<MetricSeries>> {
+    let json: Value = serde_json::from_str(body).context("Loki returned a non-JSON body")?;
+    let Some(results) = json
+        .get("data")
+        .and_then(|d| d.get("result"))
+        .and_then(|r| r.as_array())
+    else {
+        return Ok(Vec::new());
+    };
+
+    Ok(results
+        .iter()
+        .filter_map(|series| {
+            let labels: std::collections::BTreeMap<String, String> = series
+                .get("metric")?
+                .as_object()?
+                .iter()
+                .filter_map(|(k, v)| Some((k.clone(), v.as_str()?.to_string())))
+                .collect();
+            if labels.is_empty() {
+                return None;
+            }
+            // Instant-query samples are `[timestamp, "value"]`, value stringified.
+            let sample = series
+                .get("value")
+                .and_then(|v| v.as_array())
+                .and_then(|pair| pair.get(1))
+                .and_then(|v| v.as_str())
+                .and_then(|v| v.parse::<f64>().ok())
+                .unwrap_or(0.0);
+            Some((labels, sample.max(0.0) as u64))
+        })
+        .collect())
+}
+
 /// Query logs around a specific timestamp.
 /// Compute `(start, end)` for a fixed-width window centred on `timestamp`.
 ///
@@ -721,6 +851,70 @@ fn format_loki_response(body: &str) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    fn vector_body(series: Value) -> String {
+        serde_json::to_string(&json!({
+            "status": "success",
+            "data": {"resultType": "vector", "result": series}
+        }))
+        .unwrap()
+    }
+
+    fn labels_of(s: &MetricSeries) -> Vec<(&str, &str)> {
+        s.0.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect()
+    }
+
+    #[test]
+    fn parse_metric_series_keeps_every_grouping_label() {
+        // The compound key matters: an account name alone is ambiguous across
+        // domains, so all grouping labels must survive parsing.
+        let body = vector_body(json!([
+            {"metric": {"account": "alice", "domain": "north"}, "value": [1234567890, "7"]},
+        ]));
+        let parsed = parse_metric_series(&body).unwrap();
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(
+            labels_of(&parsed[0]),
+            vec![("account", "alice"), ("domain", "north")]
+        );
+        assert_eq!(parsed[0].1, 7);
+    }
+
+    #[test]
+    fn parse_metric_series_drops_unlabelled_series() {
+        // Lines the LogQL parser didn't match aggregate into a series with no
+        // labels; they carry no identity, so nothing can be concluded.
+        let body = vector_body(json!([
+            {"metric": {}, "value": [1234567890, "9"]},
+            {"metric": {"account": "carol"}, "value": [1234567890, "1"]},
+        ]));
+        let parsed = parse_metric_series(&body).unwrap();
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(labels_of(&parsed[0]), vec![("account", "carol")]);
+    }
+
+    #[test]
+    fn parse_metric_series_empty_result_is_not_an_error() {
+        assert!(parse_metric_series(&vector_body(json!([])))
+            .unwrap()
+            .is_empty());
+        assert!(parse_metric_series(r#"{"status":"success"}"#)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn parse_metric_series_rejects_non_json() {
+        // Must be an error, not an empty set: a proxy error page read as "no
+        // series" would let a caller draw a conclusion from a broken query.
+        assert!(parse_metric_series("<html>502 Bad Gateway</html>").is_err());
+    }
+
+    #[test]
+    fn parse_metric_series_tolerates_missing_sample() {
+        let body = vector_body(json!([{"metric": {"account": "dave"}}]));
+        assert_eq!(parse_metric_series(&body).unwrap()[0].1, 0);
+    }
 
     #[test]
     fn format_loki_response_no_results() {

@@ -192,8 +192,11 @@ const ESCALATION_HUNTS: &[(&str, BlueAgentRole, &str)] = &[
     (
         "threat_hunt",
         BlueAgentRole::ThreatHunter,
-        "golden ticket / DCSync for critical-user activity: run detect_golden_ticket + \
-         detect_dcsync; 4769 krbtgt from non-DC IPs, 4662 replication by a user account",
+        "DCSync for critical-user activity: run detect_dcsync + detect_dcsync_replication; \
+         4662 replication by a user account. Golden ticket (T1558.001) is already decided by \
+         the baseline sweep's 4769-without-4768 correlation — do not re-derive it from \
+         single-event fields such as a krbtgt ServiceName or a non-DC source IP, which match \
+         ordinary Kerberos traffic",
     ),
     (
         "threat_hunt",

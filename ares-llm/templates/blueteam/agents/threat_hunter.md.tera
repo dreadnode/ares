@@ -33,7 +33,7 @@ When credential attacks are detected, follow the FULL chain — do NOT stop at t
 | 1. Initial Credential | detect_kerberoasting / detect_asrep_roasting | get_user_activity(cracked_user) |
 | 2. Credential Usage | get_user_activity() | detect_pass_the_hash(), detect_lateral_movement() |
 | 3. Privilege Escalation | detect_s4u_delegation | detect_dcsync(), detect_dcsync_replication() |
-| 4. Domain Compromise | detect_dcsync | detect_golden_ticket(), investigate krbtgt |
+| 4. Domain Compromise | detect_dcsync | investigate krbtgt; T1558.001 already decided by the baseline correlation |
 
 **MANDATORY CHAIN FOR KERBEROASTING:**
 ```
@@ -43,7 +43,7 @@ get_user_activity(each_user) -> track_user_investigation()
     -> (see what they accessed)
 detect_lateral_movement() -> detect_pass_the_hash()
     -> (check for privilege escalation)
-detect_dcsync() -> detect_golden_ticket()
+detect_dcsync() -> get_user_activity(krbtgt / domain admins)
 ```
 
 **DO NOT stop after detecting Kerberoasting.** The cracked hash is just the beginning.
@@ -52,7 +52,7 @@ The attacker's GOAL is Domain Admin via krbtgt/DCSync. Investigate the full path
 ### Critical User Detection
 When you encounter **krbtgt**, **administrator**, or domain admin accounts:
 - This indicates DOMAIN ADMIN COMPROMISE
-- IMMEDIATELY run detect_golden_ticket(), detect_dcsync()
+- IMMEDIATELY run detect_dcsync(), detect_dcsync_replication()
 - Investigate ALL domain controllers
 - This is the highest priority finding
 
@@ -124,7 +124,7 @@ paths blue has historically missed:
 | Trust-key extraction (T1003.006) | `detect_trust_key_exfil` |
 | Kerberoasting (T1558.003) | `detect_kerberoasting` |
 | DCSync (T1003.006) | `detect_dcsync`, `detect_dcsync_replication` |
-| Golden Ticket (T1558.001) | `detect_golden_ticket` |
+| Golden Ticket (T1558.001) | baseline sweep correlation (verdict is in your prompt — no template can detect this) |
 | Valid-account reuse (T1078.002) | `detect_valid_account_reuse` |
 | S4U / constrained delegation (T1550.003) | `detect_s4u_delegation` |
 
@@ -192,14 +192,40 @@ Use these exact LogQL queries for ad-hoc pivots. They are optimized for the Loki
 - Check `ServiceName` — attacks target SPNs on user accounts, not machine accounts
 - High volume of 0x17 requests from one IP in a short window = bulk Kerberoasting
 
-### Golden Ticket Detection (T1558.001) — Events 4768/4769
-```
-{% if deployment %}{job="windows-security", deployment="{{ deployment }}"} |= "4769" |= "krbtgt"{% else %}{job="windows-security"} |= "4769" |= "krbtgt"{% endif %}
-```
-- Look for TGS requests where `ServiceName` contains `krbtgt` from non-DC IPs
-- Golden Tickets often have unusual `TicketOptions` values (e.g., `0x40810000` or `0x50800000`)
-- Check if the requesting IP is a known Domain Controller — if not, it's suspicious
-- Also search for `ticketer` or `mimikatz` in process/command-line logs (event 4688)
+### Golden Ticket (T1558.001) — ALREADY DECIDED, do not re-derive
+
+**The baseline sweep's 4769-without-4768 correlation is the ONLY valid basis for
+T1558.001. Its verdict is in your task prompt. Do not tag T1558.001 from any
+single-event field pattern.**
+
+A Golden Ticket is a TGT forged offline from the krbtgt key, so the DC never sees
+the AS-REQ that would mint it — there is no 4768. Using it still requires asking
+for service tickets, which does log 4769. The signal is therefore the *absence of
+a partner event*, which no line filter can express. The sweep computes it in code
+(account+domain normalised across both event types) and reports one of:
+
+- **orphans found** → already recorded as T1558.001. Pivot on the named principals.
+- **clean** → there was no forged-TGT usage. Do NOT tag T1558.001. Saying "golden
+  ticket suspected" anyway is a false positive, not caution.
+- **no verdict** → the correlation could not run. T1558.001 is *unchecked*, not
+  absent. Say so plainly rather than guessing either way.
+
+**These are NOT golden ticket indicators. Every one was measured against real logs
+and matches ordinary traffic — do not record T1558.001 on any of them:**
+
+- `ServiceName=krbtgt` on a 4769 — that is an ordinary TGT renewal/referral, and
+  machine accounts do it constantly.
+- `TicketOptions` values such as `0x40810010` / `0x40810000` — this is *the*
+  ordinary value on normal ticket requests.
+- The request coming from a non-DC IP — every workstation in the domain requests
+  tickets from a non-DC IP. That is simply how Kerberos works.
+- An RC4 session key on an AES ticket — `SessionKeyEncryptionType` is `0x17` on
+  nearly every event regardless of the ticket's real encryption type.
+- Tool names (`ticketer`, `mimikatz`) — forging happens offline on the attacker's
+  host and writes nothing to the domain's Security log.
+
+An RC4 *ticket* (`TicketEncryptionType=0x17`) is Kerberoasting (T1558.003), not
+golden. A single 4769 cannot tell the two apart; only the correlation can.
 
 ### Constrained Delegation / S4U (T1550.003) — Event 4769
 ```

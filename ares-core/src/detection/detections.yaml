@@ -658,8 +658,15 @@ templates:
     # so this stage blackholes every real RC4 ticket — the same failure that killed the
     # S4U rule. Kept because dropping it makes this fire on ALL RC4 downgrades, which is
     # kerberoasting (T1558.003), not uniquely golden — a single-line 4769 rule genuinely
-    # can't separate the two. True golden detection (4769 to a DC SPN with NO preceding
-    # 4768) needs cross-event correlation only the Grafana rule expresses.
+    # can't separate the two.
+    #
+    # This template therefore cannot fire, by construction, and is kept only so the
+    # catalog still carries the T1558.001 mapping and the LLM prompts that name it keep
+    # resolving. The actual detection is the cross-event correlation it can't express —
+    # 4769 with NO preceding 4768 — implemented in code in the blue orchestrator's
+    # baseline sweep (`ares-cli/src/orchestrator/blue/sweep.rs`), which is what records
+    # T1558.001. Do not try to "fix" this rule with another filter stage; absence of a
+    # partner event is not expressible as a line filter.
     filter_stages:
       - ['TicketEncryptionType..u003e0x17']
       - ['cifs/', 'ldap/', 'host/', 'krbtgt']

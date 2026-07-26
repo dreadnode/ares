@@ -704,4 +704,36 @@ mod tests {
         let result = render_agent_instructions("nonexistent", &[], false, &[], TEST_OP);
         assert!(result.is_err());
     }
+
+    #[test]
+    fn blue_prompts_do_not_teach_golden_ticket_false_positives() {
+        // A live investigation (op-20260725-165847) tagged T1558.001 off
+        // `ServiceName=krbtgt` + `TicketOptions=0x40810010` + a non-DC source
+        // IP. It learned all three from these prompts, which recommended a
+        // `4769 |= "krbtgt"` query and called ordinary TicketOptions values
+        // "unusual". Every one of those matches ordinary Kerberos traffic:
+        // krbtgt as a 4769 ServiceName is a TGT renewal, 0x40810010 is the
+        // normal value, and every workstation requests tickets from a non-DC
+        // IP. Golden ticket is decided by the sweep's 4769-without-4768
+        // correlation; nothing here may re-teach a single-event shortcut.
+        for (name, body) in [
+            ("threat_hunter", BLUE_THREAT_HUNTER_TEMPLATE),
+            ("triage", BLUE_TRIAGE_TEMPLATE),
+        ] {
+            assert!(
+                !body.contains(r#"|= "4769" |= "krbtgt""#),
+                "{name} must not recommend a 4769/krbtgt query as a golden ticket detector"
+            );
+            assert!(
+                !body.contains("unusual `TicketOptions`"),
+                "{name} must not describe ordinary TicketOptions values as unusual"
+            );
+        }
+        // The hunter must state that the correlation owns the verdict.
+        assert!(
+            BLUE_THREAT_HUNTER_TEMPLATE.contains("4769-without-4768")
+                || BLUE_THREAT_HUNTER_TEMPLATE.contains("no preceding 4768"),
+            "threat hunter must point at the correlation as the basis for T1558.001"
+        );
+    }
 }

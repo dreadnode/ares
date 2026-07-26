@@ -97,13 +97,17 @@ retyping LogQL. For a fast, broad triage sweep:
 
 ```
 run_parallel_detections(query_names=[
-  "detect_dcsync", "detect_kerberoasting", "detect_golden_ticket",
+  "detect_dcsync", "detect_kerberoasting", "detect_s4u_delegation",
   "detect_asrep_roasting", "detect_esc1_attack", "detect_cross_realm_tgs"
 ])
 ```
 
 `detect_asrep_roasting` encodes the correct pre-auth-disabled pattern (`PreAuthType=0`)
-— do NOT triage AS-REP with the Kerberoast `0x17` pattern. When a compromised
+— do NOT triage AS-REP with the Kerberoast `0x17` pattern. Golden Ticket
+(T1558.001) is deliberately absent from this batch: it needs cross-event
+correlation (4769 with no preceding 4768) that a line filter cannot express, so
+the baseline sweep decides it in code and reports the verdict in your prompt.
+`detect_golden_ticket` cannot fire by construction — running it wastes a query. When a compromised
 credential path is suspected, add `detect_esc1_attack` / `detect_adcs_exploitation`
 and `detect_sid_history_extrasid` to the batch.
 
@@ -115,7 +119,7 @@ If you prefer raw LogQL, batch these high-priority checks with `execute_parallel
   "queries": [
     {"logql": "{job=\"windows-security\", deployment=\"{{ deployment }}\"} |= \"4662\" |= \"1131f6aa\" !~ \"SubjectUserName'.u003e[A-Z0-9_-]+[$]\"", "description": "DCSync ATTACK (excludes machine accounts)"},
     {"logql": "{job=\"windows-security\", deployment=\"{{ deployment }}\"} |= \"4769\" |= \"0x17\"", "description": "Kerberoasting (RC4 TGS)"},
-    {"logql": "{job=\"windows-security\", deployment=\"{{ deployment }}\"} |= \"4769\" |= \"krbtgt\"", "description": "Golden Ticket (krbtgt TGS)"},
+    {"logql": "{job=\"windows-security\", deployment=\"{{ deployment }}\"} |= \"4769\" |= \"TransmittedServices\"", "description": "S4U / constrained delegation abuse"},
     {"logql": "{job=\"windows-security\", deployment=\"{{ deployment }}\"} |~ \"5140|5145\" |~ \"ADMIN\\\\$|C\\\\$\"", "description": "Admin share access"}
   ],
   "start_time": "<alert_time - 15min>",

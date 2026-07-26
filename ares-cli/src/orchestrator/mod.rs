@@ -968,9 +968,7 @@ async fn run_inner() -> Result<()> {
     info!("Shutting down background tasks...");
     let _ = shutdown_tx.send(true);
 
-    // Blue investigations need time to finalize: score_against_ground_truth,
-    // set_status("completed"), release_lock, generate_report. 10s was too short.
-    let shutdown_timeout = std::time::Duration::from_secs(120);
+    let shutdown_timeout = shutdown_grace(blue_enabled);
     tokio::select! {
         _ = async {
             let _ = tokio::join!(
@@ -1201,6 +1199,41 @@ fn read_role_model(yaml: Option<&serde_yaml::Value>, role: &str) -> Option<Strin
     Some(spec)
 }
 
+/// Grace period for background tasks to finish once shutdown is signalled.
+///
+/// Red's background tasks (heartbeat, cost tracking, probes) settle in
+/// seconds, and 120s was ample for them. A blue investigation is a different
+/// class of work entirely — a detection sweep plus a full LLM loop plus
+/// scoring and report generation — and measures around 7-8 minutes. Under the
+/// flat 120s budget any investigation still in flight when red finished was
+/// killed outright.
+///
+/// That is not theoretical. On op-20260726-003632 an investigation started at
+/// 00:51:17, the drain timed out at 00:54:58, and it died mid-sweep with zero
+/// evidence recorded — leaving its status stuck at `in_progress` forever. It
+/// was also the only investigation whose window covered the golden-ticket
+/// phase of the attack, so the miss was a detection miss, not just a tidiness
+/// problem. Red ops now finish in ~15 minutes rather than an hour, so
+/// late-submitted investigations hit this constantly.
+///
+/// Override with `ARES_SHUTDOWN_TIMEOUT_SECS` when an operation needs longer.
+fn shutdown_grace(blue_enabled: bool) -> std::time::Duration {
+    const RED_ONLY_SECS: u64 = 120;
+    const BLUE_DRAIN_SECS: u64 = 600;
+
+    let default = if blue_enabled {
+        BLUE_DRAIN_SECS
+    } else {
+        RED_ONLY_SECS
+    };
+    let secs = std::env::var("ARES_SHUTDOWN_TIMEOUT_SECS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .filter(|s| *s >= 1)
+        .unwrap_or(default);
+    std::time::Duration::from_secs(secs)
+}
+
 /// Run in blue-only mode: just the investigation poller, no red team.
 ///
 /// Requires only `ARES_REDIS_URL` and an LLM model. No operation ID needed.
@@ -1321,7 +1354,9 @@ async fn run_blue_only() -> Result<()> {
     info!("Shutdown signal received");
     let _ = shutdown_tx.send(true);
 
-    let shutdown_timeout = std::time::Duration::from_secs(120);
+    // Blue-only mode is nothing but investigations, so it always needs the
+    // blue-sized drain.
+    let shutdown_timeout = shutdown_grace(true);
     tokio::select! {
         _ = blue_handle => {
             info!("Blue orchestrator stopped");
@@ -1333,4 +1368,43 @@ async fn run_blue_only() -> Result<()> {
 
     info!("ares-orchestrator (blue-only) stopped");
     Ok(())
+}
+
+#[cfg(test)]
+mod shutdown_grace_tests {
+    use super::shutdown_grace;
+
+    #[test]
+    fn shutdown_grace_scales_to_blue_and_honors_override() {
+        // Single test on purpose: these cases all mutate the same env var, and
+        // as separate #[test] fns they race under the default parallel runner.
+        std::env::remove_var("ARES_SHUTDOWN_TIMEOUT_SECS");
+
+        // A blue investigation is a sweep + full LLM loop + scoring + report,
+        // measured at ~7.5 minutes. The old flat 120s killed any investigation
+        // still in flight when red finished (op-20260726-003632), losing the
+        // one whose window covered the golden-ticket phase.
+        let blue = shutdown_grace(true);
+        let red = shutdown_grace(false);
+        assert!(
+            blue.as_secs() >= 480,
+            "blue drain must outlast a ~7.5min investigation, got {}s",
+            blue.as_secs()
+        );
+        assert!(blue > red, "blue needs a longer drain than red-only");
+        assert_eq!(red.as_secs(), 120, "red-only keeps the short budget");
+
+        std::env::set_var("ARES_SHUTDOWN_TIMEOUT_SECS", "45");
+        assert_eq!(shutdown_grace(true).as_secs(), 45);
+        assert_eq!(shutdown_grace(false).as_secs(), 45);
+
+        // Garbage and zero fall back to the default rather than disabling the
+        // drain outright — a 0s grace would reintroduce the original bug.
+        std::env::set_var("ARES_SHUTDOWN_TIMEOUT_SECS", "0");
+        assert_eq!(shutdown_grace(false).as_secs(), 120);
+        std::env::set_var("ARES_SHUTDOWN_TIMEOUT_SECS", "not-a-number");
+        assert_eq!(shutdown_grace(false).as_secs(), 120);
+
+        std::env::remove_var("ARES_SHUTDOWN_TIMEOUT_SECS");
+    }
 }

@@ -100,7 +100,10 @@ fn playbook_technique_queries() -> Vec<(&'static str, &'static str, &'static str
         ("T1003", "detect_secretsdump", "Credential dumping"),
         ("T1558.003", "detect_kerberoasting", "Kerberoasting"),
         ("T1558.004", "detect_asrep_roasting", "AS-REP Roasting"),
-        ("T1558.001", "detect_golden_ticket", "Golden ticket usage"),
+        // No T1558.001 entry: golden ticket needs cross-event correlation (4769
+        // with no preceding 4768) that no single template can express, so the
+        // baseline sweep decides it in code. Recommending `detect_golden_ticket`
+        // here sent the agent to a rule that cannot fire.
         ("T1550.002", "detect_pass_the_hash", "Pass-the-Hash"),
         ("T1021", "detect_lateral_movement", "Lateral movement"),
         ("T1110", "detect_brute_force", "Brute force / spray"),
@@ -295,10 +298,7 @@ pub(crate) fn detection_templates_for_technique(
                 ("detect_asrep_roasting_bulk", "Bulk AS-REP Roasting"),
             ],
         );
-        m.insert(
-            "T1558.001",
-            vec![("detect_golden_ticket", "Golden ticket anomalous TGT")],
-        );
+        // T1558.001 intentionally absent — see `playbook_technique_queries`.
         m.insert(
             "T1550.002",
             vec![("detect_pass_the_hash", "Pass-the-Hash NTLM authentication")],

@@ -26,7 +26,7 @@
 //! Toggle with `ARES_BLUE_DETERMINISTIC_SWEEP=0` to fall back to the pure
 //! LLM-driven hunt.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -51,6 +51,264 @@ const DEFAULT_SWEEP_TIMEOUT_SECS: u64 = 360;
 /// this to 2 (larger windows time out through the Grafana proxy).
 const SWEEP_HOURS_BACK: i64 = 2;
 
+// ─── Golden ticket correlation ──────────────────────────────────────────────
+//
+// A Golden Ticket is a TGT forged offline from the krbtgt key, so the DC never
+// sees the AS-REQ that would normally mint it — there is no 4768. Using the
+// ticket still requires asking the DC for service tickets, which does log 4769.
+// The signal is therefore the *absence* of a partner event, and no single-line
+// filter can express absence: every field-level attempt (RC4 downgrade, DC
+// service class) either matches ordinary Kerberoasting or matches nothing at
+// all. That is why `detect_golden_ticket` in the template catalog cannot fire
+// honestly and why this lives here, in code, instead.
+
+/// Windows event ID for a Kerberos service-ticket request (TGS-REQ).
+const EVENT_SERVICE_TICKET: &str = "4769";
+
+/// Windows event ID for a Kerberos TGT request (AS-REQ).
+const EVENT_TGT_REQUEST: &str = "4768";
+
+const GOLDEN_TICKET_MITRE_ID: &str = "T1558.001";
+
+/// Source name recorded for correlation hits. Deliberately distinct from the
+/// `detect_golden_ticket` template so evidence points at the rule that actually
+/// concluded something.
+const GOLDEN_TICKET_SOURCE: &str = "golden_ticket_correlation";
+
+/// Loki labels the account identity is aggregated into.
+const ACCOUNT_LABEL: &str = "ares_account";
+const DOMAIN_LABEL: &str = "ares_domain";
+
+/// LogQL `regexp` parsers lifting `TargetUserName` / `TargetDomainName` out of
+/// the event XML.
+///
+/// Loki stores the Windows XML JSON-escaped, so the `>` closing the field name
+/// is the six literal characters `>`: `\\u003e` matches the backslash and
+/// `[^\\]*` then runs up to the next escape, which opens `</Data>`. Same
+/// escaping trick the DCSync and AS-REP templates use.
+const ACCOUNT_REGEXP: &str = r#"TargetUserName'\\u003e(?P<ares_account>[^\\]*)"#;
+const DOMAIN_REGEXP: &str = r#"TargetDomainName'\\u003e(?P<ares_domain>[^\\]*)"#;
+
+/// Hours of TGT history forming the "this account got a ticket legitimately"
+/// baseline.
+///
+/// Deliberately wider than the candidate window. A TGT is good for ~10h, so an
+/// account that authenticated before the candidate window opened keeps
+/// requesting service tickets with no 4768 inside it — window-boundary
+/// artifacts that are indistinguishable from a forged ticket if both sides are
+/// measured over the same span. Measured against live logs: symmetric 8h/8h
+/// windows left 5 orphans out of 26 accounts, while candidates over 2h against
+/// this 8h baseline left none.
+const DEFAULT_GOLDEN_BASELINE_HOURS: i64 = 8;
+
+/// Cap on principals enumerated in the timeline and the prompt. The count
+/// reported is always the true one; only the enumeration is bounded.
+const MAX_REPORTED_ORPHANS: usize = 20;
+
+/// An account that requested service tickets without ever requesting a TGT.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct OrphanAccount {
+    /// `account@domain`, both normalised.
+    pub account: String,
+    pub service_ticket_count: u64,
+}
+
+/// A completed 4769-without-4768 comparison.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct GoldenTicketCorrelation {
+    /// Distinct accounts that requested a service ticket in the candidate window.
+    pub candidates: usize,
+    /// Distinct accounts with a TGT request across the wider baseline window.
+    pub baseline: usize,
+    /// Candidates with no TGT request anywhere in the baseline window.
+    pub orphans: Vec<OrphanAccount>,
+}
+
+/// What the correlation was able to conclude.
+#[derive(Debug, Clone)]
+pub(crate) enum GoldenTicketOutcome {
+    Correlated(GoldenTicketCorrelation),
+    /// Ran but drew no conclusion — reported rather than silently treated as
+    /// "clean", because "we could not tell" and "nothing was there" carry very
+    /// different follow-up obligations for the analyst.
+    Inconclusive(String),
+}
+
+/// Why a comparison could not conclude.
+#[derive(Debug, PartialEq, Eq)]
+enum CorrelationGap {
+    /// No service-ticket activity at all — nothing to correlate against.
+    NoCandidates,
+    /// No TGT activity anywhere in the baseline window. A live domain always
+    /// mints TGTs, so this means the baseline query broke or the log shape
+    /// changed. Failing closed matters here: an empty baseline makes *every*
+    /// account look orphaned and would report the whole domain as forged.
+    NoBaseline,
+}
+
+/// Normalise a `TargetUserName` so the two event types can be compared.
+///
+/// The events disagree on format: 4768 logs the bare SAM name (`alice`) while
+/// 4769 logs it UPN-style with the realm appended (`alice@CONTOSO.LOCAL`), and
+/// casing is not stable between them. Diffing the raw field would put every
+/// account on both sides at once and flag an entire domain as forged —
+/// confirmed against live logs, where no 4768 name carried an `@` suffix and
+/// the 4769 names were a mix of both forms.
+fn normalize_account(raw: &str) -> Option<String> {
+    let base = raw.trim().split('@').next().unwrap_or_default().trim();
+    (!base.is_empty()).then(|| base.to_ascii_lowercase())
+}
+
+/// Normalise a `TargetDomainName` to its first DNS label.
+///
+/// These disagree too: 4768 logs the NetBIOS short name (`CONTOSO`) while 4769
+/// logs the FQDN (`CONTOSO.LOCAL`, and for a child domain
+/// `CHILD.CONTOSO.LOCAL`). Taking the first label reconciles them, since the
+/// NetBIOS name is conventionally the leftmost DNS label.
+fn normalize_domain(raw: &str) -> Option<String> {
+    let base = raw.trim().split('.').next().unwrap_or_default().trim();
+    (!base.is_empty()).then(|| base.to_ascii_lowercase())
+}
+
+/// Build the compound identity a Kerberos principal is correlated on.
+///
+/// Account name alone is NOT a sufficient key. `Administrator` (the account
+/// `ticketer` forges by default) exists in every domain of a forest, so keying
+/// on the bare name lets a legitimate `Administrator` logon in one domain mask
+/// a forged ticket for `Administrator` in another — a false negative in the
+/// single most likely golden-ticket scenario. Verified live: this forest logs
+/// `Administrator` TGTs from multiple distinct domains.
+///
+/// Returns `None` when either half is missing, so the pair is dropped rather
+/// than compared on a partial key: an identity that can't be matched against
+/// the baseline would otherwise surface as a bogus orphan.
+fn principal_key(labels: &BTreeMap<String, String>) -> Option<String> {
+    let account = normalize_account(labels.get(ACCOUNT_LABEL)?)?;
+    let domain = normalize_domain(labels.get(DOMAIN_LABEL)?)?;
+    Some(format!("{account}@{domain}"))
+}
+
+/// Fold raw series into normalised per-principal totals.
+fn principal_totals(series: &[ares_tools::blue::loki::MetricSeries]) -> BTreeMap<String, u64> {
+    let mut totals = BTreeMap::new();
+    for (labels, count) in series {
+        if let Some(key) = principal_key(labels) {
+            *totals.entry(key).or_insert(0) += count;
+        }
+    }
+    totals
+}
+
+/// Diff service-ticket principals against TGT principals.
+fn correlate(
+    service_tickets: &[ares_tools::blue::loki::MetricSeries],
+    tgt_requests: &[ares_tools::blue::loki::MetricSeries],
+) -> Result<GoldenTicketCorrelation, CorrelationGap> {
+    let candidates = principal_totals(service_tickets);
+    let baseline = principal_totals(tgt_requests);
+
+    if candidates.is_empty() {
+        return Err(CorrelationGap::NoCandidates);
+    }
+    if baseline.is_empty() {
+        return Err(CorrelationGap::NoBaseline);
+    }
+
+    let mut orphans: Vec<OrphanAccount> = candidates
+        .iter()
+        .filter(|(account, _)| !baseline.contains_key(account.as_str()))
+        .map(|(account, count)| OrphanAccount {
+            account: account.clone(),
+            service_ticket_count: *count,
+        })
+        .collect();
+    // Loudest first — the account with the most service tickets is the one that
+    // actually did something with the forged TGT.
+    orphans.sort_by(|a, b| {
+        b.service_ticket_count
+            .cmp(&a.service_ticket_count)
+            .then_with(|| a.account.cmp(&b.account))
+    });
+
+    Ok(GoldenTicketCorrelation {
+        candidates: candidates.len(),
+        baseline: baseline.len(),
+        orphans,
+    })
+}
+
+/// Build the aggregation that returns one series per account for `event_id`.
+///
+/// The event filter matches the `event_id` JSON field rather than the bare
+/// number the template catalog uses. A bare `|= "4768"` also matches any line
+/// whose record ID, SID or ticket hash happens to contain those digits: live,
+/// it pulled 3607 lines over 8h against 203 for the field-anchored form, and
+/// the extra lines were mostly 4769s. Folding those into the TGT baseline would
+/// mark a forged account as legitimately authenticated — a false negative in
+/// exactly the case this rule exists to catch.
+fn account_aggregation_query(event_id: &str, hours: i64) -> String {
+    let selector = ares_tools::blue::detection::build_selector(
+        ares_tools::blue::detection::WIN_SECURITY,
+        None,
+    );
+    format!(
+        r#"sum by ({ACCOUNT_LABEL}, {DOMAIN_LABEL}) (count_over_time({selector} |= `"event_id":{event_id}` | regexp `{ACCOUNT_REGEXP}` | regexp `{DOMAIN_REGEXP}` [{hours}h]))"#
+    )
+}
+
+/// Run the correlation: which accounts used service tickets without ever
+/// having been issued a TGT?
+///
+/// Both queries must succeed. A partial answer is worse than none — a failed
+/// baseline query is indistinguishable from a domain where nobody
+/// authenticated, and would turn every active account into a reported forgery.
+async fn run_golden_ticket_correlation(
+    candidate_hours: i64,
+    baseline_hours: i64,
+) -> Result<GoldenTicketCorrelation, String> {
+    let candidate_query = account_aggregation_query(EVENT_SERVICE_TICKET, candidate_hours);
+    let baseline_query = account_aggregation_query(EVENT_TGT_REQUEST, baseline_hours);
+    let (service_tickets, tgt_requests) = tokio::join!(
+        ares_tools::blue::loki::query_metric_series(&candidate_query, None),
+        ares_tools::blue::loki::query_metric_series(&baseline_query, None),
+    );
+
+    let service_tickets = service_tickets
+        .map_err(|e| format!("service-ticket ({EVENT_SERVICE_TICKET}) query failed: {e}"))?;
+    let tgt_requests =
+        tgt_requests.map_err(|e| format!("TGT ({EVENT_TGT_REQUEST}) query failed: {e}"))?;
+
+    correlate(&service_tickets, &tgt_requests).map_err(|gap| match gap {
+        CorrelationGap::NoCandidates => format!(
+            "no {EVENT_SERVICE_TICKET} activity in the last {candidate_hours}h — nothing to correlate"
+        ),
+        CorrelationGap::NoBaseline => format!(
+            "no {EVENT_TGT_REQUEST} activity in the last {baseline_hours}h; a live domain always \
+             issues TGTs, so the baseline is untrustworthy and no verdict is drawn"
+        ),
+    })
+}
+
+impl GoldenTicketCorrelation {
+    /// Represent orphaned accounts as a fired detection so they flow through
+    /// the same recording and prompt path as every template hit.
+    fn as_fired(&self) -> Option<FiredDetection> {
+        (!self.orphans.is_empty()).then(|| FiredDetection {
+            template: GOLDEN_TICKET_SOURCE.to_string(),
+            mitre_id: GOLDEN_TICKET_MITRE_ID.to_string(),
+            description: "Golden Ticket Detection (service tickets with no preceding TGT request)"
+                .to_string(),
+            tactic: "persistence".to_string(),
+            severity: "critical".to_string(),
+            event_count: self
+                .orphans
+                .iter()
+                .map(|o| o.service_ticket_count as usize)
+                .sum(),
+        })
+    }
+}
+
 /// A detection template that returned matching events during the sweep.
 #[derive(Debug, Clone)]
 pub(crate) struct FiredDetection {
@@ -73,6 +331,8 @@ pub(crate) struct SweepOutcome {
     /// Templates the time cap prevented from running (empty on a clean finish).
     pub not_run: Vec<String>,
     pub timed_out: bool,
+    /// Golden-ticket correlation result; `None` when it was disabled.
+    pub golden_ticket: Option<GoldenTicketOutcome>,
 }
 
 impl SweepOutcome {
@@ -123,6 +383,8 @@ impl SweepOutcome {
             ));
         }
 
+        s.push_str(&self.golden_ticket_summary());
+
         if self.timed_out && !self.not_run.is_empty() {
             s.push_str(&format!(
                 "The sweep hit its time cap before running these templates — run them yourself \
@@ -146,6 +408,66 @@ impl SweepOutcome {
              Dispatch narrow, technique-scoped hunts, or go straight to the verdict when the \
              picture is already clear.",
         );
+        s
+    }
+
+    /// Report the golden-ticket correlation, including when it concluded
+    /// nothing. `detect_golden_ticket` in the template catalog structurally
+    /// cannot fire, so silence here would read as "checked, clean" when the
+    /// truth may be "never checked".
+    fn golden_ticket_summary(&self) -> String {
+        let Some(outcome) = &self.golden_ticket else {
+            return String::new();
+        };
+        let mut s = String::from("Golden ticket correlation (4769 with no preceding 4768): ");
+        match outcome {
+            GoldenTicketOutcome::Inconclusive(reason) => {
+                s.push_str(&format!(
+                    "NO VERDICT — {reason}. Treat {GOLDEN_TICKET_MITRE_ID} as unchecked, not as \
+                     absent.\n\n"
+                ));
+            }
+            GoldenTicketOutcome::Correlated(c) if c.orphans.is_empty() => {
+                s.push_str(&format!(
+                    "CLEAN — all {} account(s) that requested a service ticket also requested a \
+                     TGT (baseline: {} account(s)). There was no forged-TGT usage.\n\
+                     This correlation is the authoritative answer for \
+                     {GOLDEN_TICKET_MITRE_ID}; it is the only signal that can distinguish a forged \
+                     TGT from ordinary Kerberos traffic. Do NOT record \
+                     {GOLDEN_TICKET_MITRE_ID} on top of it. In particular, none of these are \
+                     golden-ticket indicators — each matches ordinary traffic: a 4769 whose \
+                     ServiceName is krbtgt (that is a TGT renewal), a TicketOptions value like \
+                     0x40810010 (that is the ordinary value), a request from a non-DC IP (every \
+                     workstation does that), or an RC4 session key (present on nearly every \
+                     event). An RC4 *ticket* is Kerberoasting (T1558.003), not golden.\n\n",
+                    c.candidates, c.baseline
+                ));
+            }
+            GoldenTicketOutcome::Correlated(c) => {
+                s.push_str(&format!(
+                    "{} of {} account(s) used service tickets with NO TGT request in the baseline \
+                     window — the signature of a forged TGT. Already recorded as \
+                     {GOLDEN_TICKET_MITRE_ID}:\n",
+                    c.orphans.len(),
+                    c.candidates
+                ));
+                for o in c.orphans.iter().take(MAX_REPORTED_ORPHANS) {
+                    s.push_str(&format!(
+                        "- {} ({} service ticket(s))\n",
+                        o.account, o.service_ticket_count
+                    ));
+                }
+                if c.orphans.len() > MAX_REPORTED_ORPHANS {
+                    s.push_str(&format!(
+                        "- …and {} more (listing capped at {MAX_REPORTED_ORPHANS})\n",
+                        c.orphans.len() - MAX_REPORTED_ORPHANS
+                    ));
+                }
+                s.push_str(
+                    "Pivot on these accounts: what they authenticated to and what they touched.\n\n",
+                );
+            }
+        }
         s
     }
 }
@@ -181,6 +503,15 @@ pub(crate) async fn run_detection_sweep(investigation_id: &str) -> SweepOutcome 
         "Starting deterministic baseline detection sweep"
     );
 
+    // Start the golden-ticket correlation alongside the catalog so its two Loki
+    // round-trips overlap the template sweep instead of extending it.
+    let mut golden_task = golden_ticket_enabled().then(|| {
+        tokio::spawn(run_golden_ticket_correlation(
+            SWEEP_HOURS_BACK,
+            golden_baseline_hours(),
+        ))
+    });
+
     let sem = Arc::new(Semaphore::new(sweep_concurrency()));
     let mut set: tokio::task::JoinSet<(String, Option<FiredDetection>)> =
         tokio::task::JoinSet::new();
@@ -213,7 +544,8 @@ pub(crate) async fn run_detection_sweep(investigation_id: &str) -> SweepOutcome 
     let mut completed: BTreeSet<String> = BTreeSet::new();
     let mut timed_out = false;
 
-    let deadline = tokio::time::sleep(Duration::from_secs(sweep_timeout_secs()));
+    let deadline_at = tokio::time::Instant::now() + Duration::from_secs(sweep_timeout_secs());
+    let deadline = tokio::time::sleep_until(deadline_at);
     tokio::pin!(deadline);
     loop {
         tokio::select! {
@@ -238,6 +570,44 @@ pub(crate) async fn run_detection_sweep(investigation_id: &str) -> SweepOutcome 
         }
     }
 
+    // Collect the correlation against whatever is left of the same deadline. It
+    // shares the cap rather than getting its own, so a hung Loki can't push the
+    // sweep past the budget the investigation runner allows it.
+    let golden_ticket = match golden_task.as_mut() {
+        None => None,
+        Some(handle) => Some(
+            match tokio::time::timeout_at(deadline_at, &mut *handle).await {
+                Ok(Ok(Ok(c))) => GoldenTicketOutcome::Correlated(c),
+                Ok(Ok(Err(reason))) => GoldenTicketOutcome::Inconclusive(reason),
+                Ok(Err(e)) => {
+                    GoldenTicketOutcome::Inconclusive(format!("correlation task failed: {e}"))
+                }
+                Err(_) => {
+                    // Dropping a JoinHandle only detaches the task; abort so the
+                    // in-flight Loki queries actually stop.
+                    handle.abort();
+                    timed_out = true;
+                    GoldenTicketOutcome::Inconclusive(
+                        "hit the sweep time cap before both Kerberos queries returned".to_string(),
+                    )
+                }
+            },
+        ),
+    };
+
+    if let Some(GoldenTicketOutcome::Correlated(c)) = &golden_ticket {
+        if let Some(f) = c.as_fired() {
+            warn!(
+                investigation_id,
+                orphan_accounts = c.orphans.len(),
+                candidates = c.candidates,
+                baseline = c.baseline,
+                "Golden ticket correlation found service tickets with no preceding TGT request"
+            );
+            fired.push(f);
+        }
+    }
+
     fired.sort_by(|a, b| a.template.cmp(&b.template));
 
     // Record every hit into blue state (sequential, cheap: a few Redis writes
@@ -245,6 +615,12 @@ pub(crate) async fn run_detection_sweep(investigation_id: &str) -> SweepOutcome 
     // later recording is harmless.
     for f in &fired {
         record_fired(investigation_id, f).await;
+    }
+
+    // The technique record above says "a golden ticket was used"; these say
+    // which accounts, which is what the analyst actually pivots on.
+    if let Some(GoldenTicketOutcome::Correlated(c)) = &golden_ticket {
+        record_orphan_accounts(investigation_id, &c.orphans).await;
     }
 
     let no_match: Vec<String> = completed
@@ -260,6 +636,7 @@ pub(crate) async fn run_detection_sweep(investigation_id: &str) -> SweepOutcome 
         no_match = no_match.len(),
         not_run = not_run.len(),
         timed_out,
+        golden_ticket = %golden_ticket_log_value(&golden_ticket),
         "Baseline detection sweep complete"
     );
 
@@ -269,7 +646,168 @@ pub(crate) async fn run_detection_sweep(investigation_id: &str) -> SweepOutcome 
         no_match,
         not_run,
         timed_out,
+        golden_ticket,
     }
+}
+
+/// Re-run the golden-ticket correlation as the investigation closes.
+///
+/// The baseline sweep runs BEFORE the LLM loop, so its window closes the moment
+/// the investigation opens — typically minutes before the attack it is
+/// investigating has finished. Domain compromise is the LAST phase of an
+/// intrusion, so the forged-TGT usage this rule exists to catch routinely lands
+/// after the sweep has already answered "clean".
+///
+/// That is not hypothetical. On op-20260726-003632 the sweep queried at
+/// 00:38:47 and returned clean; the orphaned principal's service-ticket request
+/// was logged at 00:39:14 — 27 seconds later. Red went on to obtain golden
+/// tickets in all three domains and blue never looked again, so a correct rule
+/// with a correct verdict still produced a missed detection.
+///
+/// Re-running only this correlation is cheap (two aggregation queries) and is
+/// the only way T1558.001 can be found at all, since no template can express
+/// an absent partner event. Records are deduped by the underlying tools, so an
+/// overlap with the opening sweep is harmless.
+pub(crate) async fn recheck_golden_tickets(investigation_id: &str) -> Option<GoldenTicketOutcome> {
+    if !sweep_enabled() || !golden_ticket_enabled() {
+        return None;
+    }
+
+    let outcome =
+        match run_golden_ticket_correlation(SWEEP_HOURS_BACK, golden_baseline_hours()).await {
+            Ok(c) => GoldenTicketOutcome::Correlated(c),
+            Err(reason) => GoldenTicketOutcome::Inconclusive(reason),
+        };
+
+    info!(
+        investigation_id,
+        golden_ticket = %golden_ticket_log_value(&Some(outcome.clone())),
+        "Golden ticket correlation re-checked at investigation close"
+    );
+
+    if let GoldenTicketOutcome::Correlated(c) = &outcome {
+        if let Some(f) = c.as_fired() {
+            warn!(
+                investigation_id,
+                orphan_accounts = c.orphans.len(),
+                candidates = c.candidates,
+                baseline = c.baseline,
+                "Golden ticket correlation found forged-TGT usage on the closing re-check \
+                 (the opening sweep ran before this activity was logged)"
+            );
+            record_fired(investigation_id, &f).await;
+            record_orphan_accounts(investigation_id, &c.orphans).await;
+        }
+    }
+
+    Some(outcome)
+}
+
+/// Render the correlation's verdict for the sweep's completion log.
+///
+/// Every outcome has to be distinguishable from the log alone. Previously only
+/// a hit was logged (via `warn!`), which made "ran, found nothing" and "never
+/// produced an answer" look identical — silence. That is the one ambiguity this
+/// rule cannot afford, since a clean verdict is treated downstream as
+/// authoritative that no forged TGT was used.
+fn golden_ticket_log_value(outcome: &Option<GoldenTicketOutcome>) -> String {
+    match outcome {
+        None => "disabled".to_string(),
+        Some(GoldenTicketOutcome::Inconclusive(reason)) => format!("no_verdict ({reason})"),
+        Some(GoldenTicketOutcome::Correlated(c)) if c.orphans.is_empty() => {
+            format!(
+                "clean ({} candidates vs {} baseline)",
+                c.candidates, c.baseline
+            )
+        }
+        Some(GoldenTicketOutcome::Correlated(c)) => format!(
+            "{} orphan(s) of {} candidates",
+            c.orphans.len(),
+            c.candidates
+        ),
+    }
+}
+
+/// Dispatch a blue-state write and log whatever went wrong.
+///
+/// `dispatch_blue` reports a *rejected* write as `Ok(ToolOutput { success:
+/// false })`; only transport-level problems come back as `Err`. Matching on
+/// `Err` alone therefore swallows exactly the failures worth knowing about —
+/// a validation or grounding refusal looks identical to success.
+async fn record_state(context: &str, tool: &str, args: &serde_json::Value) {
+    match ares_tools::blue::dispatch_blue(tool, args).await {
+        Ok(o) if !o.success => {
+            warn!(context, tool, reason = %o.stderr, "Blue state write rejected");
+        }
+        Err(e) => warn!(context, tool, error = %e, "Blue state write failed"),
+        Ok(_) => {}
+    }
+}
+
+/// Name the orphaned principals in the investigation timeline.
+///
+/// These go in the timeline rather than `add_evidence` on purpose. Evidence
+/// values are gated by a grounding check that requires the value to appear
+/// verbatim in a stored query result, and `account@domain` is a *derived*
+/// identity — normalised from two fields across two different event types, so
+/// it appears nowhere in any raw log line. Pushing it through `add_evidence`
+/// would be silently rejected, and satisfying the check by injecting a
+/// synthetic query result would hollow out a safeguard that exists to stop
+/// fabricated IOCs. The technique-level record in [`record_fired`] already
+/// carries T1558.001 (its value is the MITRE ID, which auto-grounds); this
+/// adds the names an analyst needs to pivot on.
+///
+/// The enumeration is capped, and the cap is logged rather than applied
+/// silently — a truncated list that looks complete would understate the blast
+/// radius of a domain-wide forgery.
+async fn record_orphan_accounts(investigation_id: &str, orphans: &[OrphanAccount]) {
+    if orphans.is_empty() {
+        return;
+    }
+    if orphans.len() > MAX_REPORTED_ORPHANS {
+        warn!(
+            investigation_id,
+            total = orphans.len(),
+            recorded = MAX_REPORTED_ORPHANS,
+            "Golden ticket orphan list truncated; not every principal was named in the timeline"
+        );
+    }
+
+    let named: Vec<String> = orphans
+        .iter()
+        .take(MAX_REPORTED_ORPHANS)
+        .map(|o| {
+            format!(
+                "{} ({} service ticket(s))",
+                o.account, o.service_ticket_count
+            )
+        })
+        .collect();
+    let suffix = if orphans.len() > named.len() {
+        format!(" …and {} more", orphans.len() - named.len())
+    } else {
+        String::new()
+    };
+
+    record_state(
+        GOLDEN_TICKET_SOURCE,
+        "record_timeline_event",
+        &json!({
+            "investigation_id": investigation_id,
+            "description": format!(
+                "Forged-TGT usage: {} principal(s) requested Kerberos service tickets with no \
+                 TGT request in the baseline window — {}{}",
+                orphans.len(),
+                named.join(", "),
+                suffix
+            ),
+            "timestamp": chrono::Utc::now().to_rfc3339(),
+            "mitre_techniques": [GOLDEN_TICKET_MITRE_ID],
+            "source": format!("detection_sweep:{GOLDEN_TICKET_SOURCE}"),
+            "confidence": 0.9,
+        }),
+    )
+    .await;
 }
 
 /// Record a fired detection as blue-team state: a MITRE technique (for coverage
@@ -320,14 +858,7 @@ async fn record_fired(investigation_id: &str, f: &FiredDetection) {
     ];
 
     for (tool, args) in calls {
-        if let Err(e) = ares_tools::blue::dispatch_blue(tool, &args).await {
-            warn!(
-                template = %f.template,
-                tool,
-                error = %e,
-                "Failed to record swept detection"
-            );
-        }
+        record_state(&f.template, tool, &args).await;
     }
 }
 
@@ -386,6 +917,31 @@ pub(crate) fn sweep_enabled() -> bool {
         ),
         Err(_) => true,
     }
+}
+
+/// Whether the golden-ticket correlation should run. Defaults on; set
+/// `ARES_BLUE_GOLDEN_TICKET_CORRELATION=0` to disable.
+fn golden_ticket_enabled() -> bool {
+    match std::env::var("ARES_BLUE_GOLDEN_TICKET_CORRELATION") {
+        Ok(v) => !matches!(
+            v.trim().to_ascii_lowercase().as_str(),
+            "0" | "false" | "no" | "off"
+        ),
+        Err(_) => true,
+    }
+}
+
+/// Baseline width for the correlation, overridable via
+/// `ARES_BLUE_GOLDEN_BASELINE_HOURS`. Clamped to at least the candidate window;
+/// a baseline narrower than the candidates would manufacture orphans out of
+/// window-boundary artifacts rather than find forged tickets.
+fn golden_baseline_hours() -> i64 {
+    std::env::var("ARES_BLUE_GOLDEN_BASELINE_HOURS")
+        .ok()
+        .and_then(|v| v.trim().parse::<i64>().ok())
+        .filter(|h| *h >= 1)
+        .unwrap_or(DEFAULT_GOLDEN_BASELINE_HOURS)
+        .max(SWEEP_HOURS_BACK)
 }
 
 /// Concurrency for the sweep, overridable via `ARES_BLUE_SWEEP_CONCURRENCY`.
@@ -528,6 +1084,7 @@ mod tests {
             no_match: vec!["detect_golden_ticket".into()],
             not_run: vec![],
             timed_out: false,
+            golden_ticket: None,
         };
         let s = outcome.prompt_summary();
         assert!(s.contains("T1003.006"));
@@ -546,11 +1103,400 @@ mod tests {
             no_match: vec![],
             not_run: vec!["detect_esc1_attack".into()],
             timed_out: true,
+            golden_ticket: None,
         };
         let s = outcome.prompt_summary();
         assert!(s.contains("FIRED: none"));
         assert!(s.contains("time cap"));
         assert!(s.contains("detect_esc1_attack"));
+    }
+
+    // ─── Golden ticket correlation ──────────────────────────────────────────
+
+    /// Build metric series from `(account, domain, count)` triples.
+    fn series(rows: &[(&str, &str, u64)]) -> Vec<ares_tools::blue::loki::MetricSeries> {
+        rows.iter()
+            .map(|(account, domain, count)| {
+                let mut labels = BTreeMap::new();
+                labels.insert(ACCOUNT_LABEL.to_string(), account.to_string());
+                labels.insert(DOMAIN_LABEL.to_string(), domain.to_string());
+                (labels, *count)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn normalize_account_strips_realm_and_case() {
+        assert_eq!(
+            normalize_account("alice@CONTOSO.LOCAL").as_deref(),
+            Some("alice")
+        );
+        assert_eq!(normalize_account("Alice").as_deref(), Some("alice"));
+        assert_eq!(normalize_account("  bob  ").as_deref(), Some("bob"));
+        assert_eq!(
+            normalize_account("WS01$@CONTOSO.LOCAL").as_deref(),
+            Some("ws01$")
+        );
+    }
+
+    #[test]
+    fn normalize_account_rejects_unusable_values() {
+        assert_eq!(normalize_account(""), None);
+        assert_eq!(normalize_account("   "), None);
+        // A bare realm with no account part identifies nobody.
+        assert_eq!(normalize_account("@CONTOSO.LOCAL"), None);
+    }
+
+    #[test]
+    fn normalize_domain_reconciles_netbios_and_fqdn() {
+        // 4768 logs `CONTOSO`, 4769 logs `CONTOSO.LOCAL`.
+        assert_eq!(normalize_domain("CONTOSO").as_deref(), Some("contoso"));
+        assert_eq!(
+            normalize_domain("CONTOSO.LOCAL").as_deref(),
+            Some("contoso")
+        );
+        assert_eq!(
+            normalize_domain("CHILD.CONTOSO.LOCAL").as_deref(),
+            Some("child")
+        );
+        assert_eq!(normalize_domain(""), None);
+    }
+
+    #[test]
+    fn principal_totals_merges_both_field_formats() {
+        // 4769 logs `alice@REALM` + FQDN domain, 4768 logs `alice` + NetBIOS.
+        // If these don't fold together every account lands on both sides at once.
+        let totals = principal_totals(&series(&[
+            ("alice@CONTOSO.LOCAL", "CONTOSO.LOCAL", 3),
+            ("alice", "CONTOSO", 2),
+            ("ALICE@CONTOSO.LOCAL", "contoso.local", 1),
+        ]));
+        assert_eq!(totals.get("alice@contoso"), Some(&6));
+        assert_eq!(totals.len(), 1);
+    }
+
+    #[test]
+    fn principal_key_requires_both_halves() {
+        // A half-identity can't be matched against the baseline, so it must be
+        // dropped rather than surface as a bogus orphan.
+        let mut only_account = BTreeMap::new();
+        only_account.insert(ACCOUNT_LABEL.to_string(), "alice".to_string());
+        assert_eq!(principal_key(&only_account), None);
+
+        let mut only_domain = BTreeMap::new();
+        only_domain.insert(DOMAIN_LABEL.to_string(), "CONTOSO".to_string());
+        assert_eq!(principal_key(&only_domain), None);
+    }
+
+    #[test]
+    fn correlate_flags_account_with_no_tgt_request() {
+        // bob used service tickets but never asked for a TGT — a forged one was
+        // supplied out of band. alice did both and is ordinary.
+        let result = correlate(
+            &series(&[
+                ("alice@CONTOSO.LOCAL", "CONTOSO.LOCAL", 4),
+                ("bob@CONTOSO.LOCAL", "CONTOSO.LOCAL", 9),
+            ]),
+            &series(&[("alice", "CONTOSO", 2), ("carol", "CONTOSO", 1)]),
+        )
+        .expect("both sides populated");
+
+        assert_eq!(result.candidates, 2);
+        assert_eq!(result.baseline, 2);
+        assert_eq!(
+            result.orphans,
+            vec![OrphanAccount {
+                account: "bob@contoso".to_string(),
+                service_ticket_count: 9,
+            }]
+        );
+    }
+
+    #[test]
+    fn correlate_does_not_flag_account_present_in_both_formats() {
+        // The regression that would make this rule useless: comparing the raw
+        // fields flags the entire domain, because 4769 appends the realm and
+        // uses the FQDN while 4768 does neither.
+        let result = correlate(
+            &series(&[
+                ("alice@CONTOSO.LOCAL", "CONTOSO.LOCAL", 5),
+                ("svc_sql@CONTOSO.LOCAL", "CONTOSO.LOCAL", 2),
+            ]),
+            &series(&[("alice", "CONTOSO", 1), ("svc_sql", "CONTOSO", 1)]),
+        )
+        .expect("both sides populated");
+        assert!(
+            result.orphans.is_empty(),
+            "realm-suffixed names must match their bare counterparts, got {:?}",
+            result.orphans
+        );
+    }
+
+    #[test]
+    fn correlate_does_not_let_one_domain_mask_another() {
+        // The false negative this compound key exists to prevent: `admin` is
+        // forged in fabrikam, while a legitimate `admin` authenticates in
+        // contoso. Keying on the bare account name would hide the forgery.
+        let result = correlate(
+            &series(&[("admin@FABRIKAM.LOCAL", "FABRIKAM.LOCAL", 12)]),
+            &series(&[("admin", "CONTOSO", 30)]),
+        )
+        .expect("both sides populated");
+        assert_eq!(
+            result.orphans,
+            vec![OrphanAccount {
+                account: "admin@fabrikam".to_string(),
+                service_ticket_count: 12,
+            }],
+            "a same-named account in a different domain must not mask the forgery"
+        );
+    }
+
+    #[test]
+    fn correlate_fails_closed_on_empty_baseline() {
+        // A live domain always issues TGTs, so an empty baseline means the
+        // query broke. Reporting orphans here would flag every active account.
+        assert_eq!(
+            correlate(&series(&[("alice@CONTOSO.LOCAL", "CONTOSO.LOCAL", 3)]), &[]),
+            Err(CorrelationGap::NoBaseline)
+        );
+    }
+
+    #[test]
+    fn correlate_reports_no_candidates_when_no_service_tickets() {
+        assert_eq!(
+            correlate(&[], &series(&[("alice", "CONTOSO", 1)])),
+            Err(CorrelationGap::NoCandidates)
+        );
+    }
+
+    #[test]
+    fn correlate_orders_orphans_by_service_ticket_volume() {
+        let result = correlate(
+            &series(&[
+                ("carol", "CONTOSO", 2),
+                ("bob", "CONTOSO", 11),
+                ("admin", "CONTOSO", 7),
+            ]),
+            &series(&[("alice", "CONTOSO", 1)]),
+        )
+        .expect("both sides populated");
+        let names: Vec<&str> = result.orphans.iter().map(|o| o.account.as_str()).collect();
+        assert_eq!(names, vec!["bob@contoso", "admin@contoso", "carol@contoso"]);
+    }
+
+    #[test]
+    fn aggregation_query_anchors_event_id_to_its_json_field() {
+        let q = account_aggregation_query(EVENT_TGT_REQUEST, 8);
+        // A bare `|= "4768"` also matches record IDs and ticket hashes that
+        // merely contain those digits — live, 3607 lines vs 203 — and the
+        // surplus is mostly 4769s, which would mask forged accounts.
+        assert!(
+            q.contains(r#"|= `"event_id":4768`"#),
+            "event filter must be anchored to the event_id field, got: {q}"
+        );
+        assert!(
+            q.contains(&format!("sum by ({ACCOUNT_LABEL}, {DOMAIN_LABEL})")),
+            "must aggregate per account AND domain — account alone is ambiguous \
+             across a forest, got: {q}"
+        );
+        assert!(
+            q.contains("[8h]"),
+            "must apply the requested window, got: {q}"
+        );
+        assert!(
+            q.contains(r#"TargetUserName'\\u003e"#),
+            "must match the JSON-escaped XML field, got: {q}"
+        );
+        assert!(
+            q.contains(r#"TargetDomainName'\\u003e"#),
+            "must extract the domain too, got: {q}"
+        );
+    }
+
+    #[test]
+    fn correlation_fires_only_with_orphans() {
+        let clean = GoldenTicketCorrelation {
+            candidates: 3,
+            baseline: 3,
+            orphans: vec![],
+        };
+        assert!(clean.as_fired().is_none());
+
+        let hit = GoldenTicketCorrelation {
+            candidates: 3,
+            baseline: 2,
+            orphans: vec![
+                OrphanAccount {
+                    account: "bob".into(),
+                    service_ticket_count: 9,
+                },
+                OrphanAccount {
+                    account: "admin".into(),
+                    service_ticket_count: 4,
+                },
+            ],
+        };
+        let fired = hit.as_fired().expect("orphans must fire");
+        assert_eq!(fired.mitre_id, GOLDEN_TICKET_MITRE_ID);
+        assert_eq!(fired.event_count, 13);
+        assert_eq!(fired.severity, "critical");
+    }
+
+    #[test]
+    fn summary_distinguishes_clean_from_unchecked() {
+        let clean = SweepOutcome {
+            golden_ticket: Some(GoldenTicketOutcome::Correlated(GoldenTicketCorrelation {
+                candidates: 4,
+                baseline: 19,
+                orphans: vec![],
+            })),
+            ..Default::default()
+        };
+        let s = clean.golden_ticket_summary();
+        assert!(s.contains("CLEAN"), "{s}");
+        assert!(!s.contains("NO VERDICT"), "{s}");
+
+        let broken = SweepOutcome {
+            golden_ticket: Some(GoldenTicketOutcome::Inconclusive("query failed".into())),
+            ..Default::default()
+        };
+        let s = broken.golden_ticket_summary();
+        // A failed correlation must never read as an all-clear.
+        assert!(s.contains("NO VERDICT"), "{s}");
+        assert!(s.contains("unchecked"), "{s}");
+        assert!(!s.contains("CLEAN"), "{s}");
+    }
+
+    #[test]
+    fn clean_verdict_forbids_retagging_from_field_heuristics() {
+        // A live investigation tagged T1558.001 off `ServiceName=krbtgt`,
+        // `TicketOptions=0x40810010` and an RC4 session key from a non-DC IP —
+        // every one of which matches ordinary Kerberos traffic. The clean
+        // verdict has to say so, or the LLM re-derives the same false positive
+        // on top of a correlation that already answered the question.
+        let clean = SweepOutcome {
+            golden_ticket: Some(GoldenTicketOutcome::Correlated(GoldenTicketCorrelation {
+                candidates: 4,
+                baseline: 19,
+                orphans: vec![],
+            })),
+            ..Default::default()
+        };
+        let s = clean.golden_ticket_summary();
+        assert!(
+            s.contains("authoritative"),
+            "clean verdict must claim authority over {GOLDEN_TICKET_MITRE_ID}: {s}"
+        );
+        assert!(
+            s.contains("Do NOT record"),
+            "clean verdict must forbid re-tagging: {s}"
+        );
+        for non_signal in ["krbtgt", "0x40810010", "non-DC IP", "RC4 session key"] {
+            assert!(
+                s.contains(non_signal),
+                "clean verdict must name the non-signal '{non_signal}': {s}"
+            );
+        }
+    }
+
+    #[test]
+    fn summary_names_orphans_and_declares_truncation() {
+        let orphans: Vec<OrphanAccount> = (0..MAX_REPORTED_ORPHANS + 5)
+            .map(|i| OrphanAccount {
+                account: format!("svc_{i:02}"),
+                service_ticket_count: 1,
+            })
+            .collect();
+        let outcome = SweepOutcome {
+            golden_ticket: Some(GoldenTicketOutcome::Correlated(GoldenTicketCorrelation {
+                candidates: 40,
+                baseline: 12,
+                orphans,
+            })),
+            ..Default::default()
+        };
+        let s = outcome.golden_ticket_summary();
+        assert!(s.contains("svc_00"), "{s}");
+        assert!(s.contains(GOLDEN_TICKET_MITRE_ID), "{s}");
+        // The cap is stated, not applied silently.
+        assert!(s.contains("5 more"), "{s}");
+        assert!(!s.contains("svc_24"), "listing must stop at the cap: {s}");
+    }
+
+    #[tokio::test]
+    async fn recheck_is_disabled_by_the_same_toggles_as_the_sweep() {
+        // The close-of-investigation re-check must respect both switches, or
+        // disabling the sweep would still fire two Loki queries per
+        // investigation.
+        std::env::set_var("ARES_BLUE_DETERMINISTIC_SWEEP", "0");
+        assert!(recheck_golden_tickets("inv-test").await.is_none());
+        std::env::remove_var("ARES_BLUE_DETERMINISTIC_SWEEP");
+
+        std::env::set_var("ARES_BLUE_GOLDEN_TICKET_CORRELATION", "0");
+        assert!(recheck_golden_tickets("inv-test").await.is_none());
+        std::env::remove_var("ARES_BLUE_GOLDEN_TICKET_CORRELATION");
+    }
+
+    #[test]
+    fn every_correlation_outcome_is_distinguishable_in_the_log() {
+        // "ran and found nothing" must never look like "never produced an
+        // answer". A clean verdict is treated as authoritative downstream, so
+        // the log has to say which one actually happened.
+        assert_eq!(golden_ticket_log_value(&None), "disabled");
+
+        let clean = golden_ticket_log_value(&Some(GoldenTicketOutcome::Correlated(
+            GoldenTicketCorrelation {
+                candidates: 4,
+                baseline: 19,
+                orphans: vec![],
+            },
+        )));
+        assert!(clean.starts_with("clean"), "{clean}");
+        assert!(clean.contains('4') && clean.contains("19"), "{clean}");
+
+        let hit = golden_ticket_log_value(&Some(GoldenTicketOutcome::Correlated(
+            GoldenTicketCorrelation {
+                candidates: 5,
+                baseline: 19,
+                orphans: vec![OrphanAccount {
+                    account: "admin@contoso".into(),
+                    service_ticket_count: 3,
+                }],
+            },
+        )));
+        assert!(hit.contains("1 orphan"), "{hit}");
+
+        let broken = golden_ticket_log_value(&Some(GoldenTicketOutcome::Inconclusive(
+            "baseline query failed".into(),
+        )));
+        assert!(broken.starts_with("no_verdict"), "{broken}");
+        assert!(broken.contains("baseline query failed"), "{broken}");
+
+        // All four must be mutually distinct.
+        let all = [clean, hit, broken, "disabled".to_string()];
+        for (i, a) in all.iter().enumerate() {
+            for b in all.iter().skip(i + 1) {
+                assert_ne!(a, b, "log values must be distinguishable");
+            }
+        }
+    }
+
+    #[test]
+    fn golden_summary_absent_when_correlation_disabled() {
+        assert!(SweepOutcome::default().golden_ticket_summary().is_empty());
+    }
+
+    #[test]
+    fn baseline_window_never_narrower_than_candidate_window() {
+        // A baseline narrower than the candidate window manufactures orphans
+        // out of boundary artifacts instead of finding forged tickets.
+        std::env::set_var("ARES_BLUE_GOLDEN_BASELINE_HOURS", "1");
+        assert!(golden_baseline_hours() >= SWEEP_HOURS_BACK);
+        std::env::set_var("ARES_BLUE_GOLDEN_BASELINE_HOURS", "12");
+        assert_eq!(golden_baseline_hours(), 12);
+        std::env::remove_var("ARES_BLUE_GOLDEN_BASELINE_HOURS");
+        assert_eq!(golden_baseline_hours(), DEFAULT_GOLDEN_BASELINE_HOURS);
     }
 
     #[test]

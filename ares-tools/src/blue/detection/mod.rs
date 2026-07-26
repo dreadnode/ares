@@ -19,7 +19,7 @@ mod tests;
 
 // ─── Label constants ────────────────────────────────────────────────────────
 
-pub(super) const WIN_SECURITY: &str = r#"job="windows-security""#;
+pub const WIN_SECURITY: &str = r#"job="windows-security""#;
 pub(super) const WIN_SYSTEM: &str = r#"job="windows-system""#;
 
 // ─── Query builder helpers ──────────────────────────────────────────────────
@@ -30,7 +30,11 @@ pub(super) const WIN_SYSTEM: &str = r#"job="windows-system""#;
 /// to narrow stream selection, optionally adds computer regex match.
 /// The `computer` label contains the FQDN (e.g. `dc01.contoso.local`),
 /// so regex match (`=~`) is used to allow partial hostname or IP matches.
-pub(super) fn build_selector(base: &str, hostname: Option<&str>) -> String {
+///
+/// Public because correlation queries built outside the template catalog (see
+/// the blue orchestrator's baseline sweep) must scope to the same deployment;
+/// a query missing the `deployment` label silently spans other ranges' logs.
+pub fn build_selector(base: &str, hostname: Option<&str>) -> String {
     let deployment = std::env::var("ARES_DEPLOYMENT").ok();
     let mut labels = base.to_string();
     if let Some(dep) = &deployment {
