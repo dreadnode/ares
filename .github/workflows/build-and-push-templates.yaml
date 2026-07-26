@@ -13,10 +13,11 @@ on:
       - 'ares-cli/**'
       - 'ares-core/**'
       - 'ares-llm/**'
-      - 'ares-rust/**'
       - 'ares-tools/**'
       - 'Cargo.toml'
       - 'Cargo.lock'
+  schedule:
+    - cron: '0 9 * * 1'
   workflow_dispatch:
     inputs:
       template_filter:
@@ -2228,4 +2229,39 @@ jobs:
             echo "All builds were skipped (likely a PR)"
           else
             echo "All image builds and manifest merges completed successfully"
+          fi
+
+  report-failure:
+    name: Report Build Failure
+    runs-on: ubuntu-24.04
+    needs: [build-summary]
+    if: failure() && github.event_name != 'pull_request'
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - name: Open or update the failure issue
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          TITLE: "CI: template builds failing on main"
+        run: |
+          existing=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open \
+            --search "\"$TITLE\" in:title" --json number --jq '.[0].number // empty')
+
+          if [ -n "$existing" ]; then
+            echo "Updating existing issue #$existing"
+            gh issue comment "$existing" --repo "$GITHUB_REPOSITORY" \
+              --body "Still failing on \`${GITHUB_SHA:0:7}\` (${GITHUB_EVENT_NAME}): $RUN_URL"
+          else
+            echo "Opening new issue"
+            gh issue create --repo "$GITHUB_REPOSITORY" --title "$TITLE" \
+              --body "$(printf '%s\n' \
+                "\`Build and Push Templates\` failed on \`main\`." \
+                "" \
+                "Run: $RUN_URL" \
+                "Commit: \`${GITHUB_SHA:0:7}\`" \
+                "Trigger: \`${GITHUB_EVENT_NAME}\`" \
+                "" \
+                "This issue is updated on each subsequent failure. Close it once the build is green.")"
           fi

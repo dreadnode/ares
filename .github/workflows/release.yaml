@@ -76,12 +76,17 @@ jobs:
 
           for bin in "${BINS[@]}"; do
             ARCHIVE="${bin}-${TAG}-${{ matrix.target }}"
-            mkdir -p "${ARCHIVE}"
-            cp "target/${{ matrix.target }}/release/${bin}" "${ARCHIVE}/" 2>/dev/null || true
-            if [ -f "${ARCHIVE}/${bin}" ]; then
-              tar czf "${ARCHIVE}.tar.gz" "${ARCHIVE}"
-              sha256sum "${ARCHIVE}.tar.gz" > "${ARCHIVE}.tar.gz.sha256" || shasum -a 256 "${ARCHIVE}.tar.gz" > "${ARCHIVE}.tar.gz.sha256"
+            SRC="target/${{ matrix.target }}/release/${bin}"
+
+            if [ ! -f "${SRC}" ]; then
+              echo "::error::expected release binary not found: ${SRC}"
+              exit 1
             fi
+
+            mkdir -p "${ARCHIVE}"
+            cp "${SRC}" "${ARCHIVE}/"
+            tar czf "${ARCHIVE}.tar.gz" "${ARCHIVE}"
+            sha256sum "${ARCHIVE}.tar.gz" > "${ARCHIVE}.tar.gz.sha256" || shasum -a 256 "${ARCHIVE}.tar.gz" > "${ARCHIVE}.tar.gz.sha256"
             rm -rf "${ARCHIVE}"
           done
 

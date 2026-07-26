@@ -12,6 +12,7 @@ on:
       - reopened
     paths:
       - 'warpgate-templates/**'
+      - 'ansible/**'
       - '.github/workflows/test-template-builds.yaml'
 
 permissions:
@@ -47,13 +48,49 @@ jobs:
         id: detect
         run: |
           # Get list of changed files in templates/
-          CHANGED_FILES=$(git diff --name-only origin/${{ github.base_ref }}...HEAD -- warpgate-templates/)
+          CHANGED_FILES=$(git diff --name-only origin/${{ github.base_ref }}...HEAD -- warpgate-templates/templates/)
 
           echo "Changed files:"
           echo "$CHANGED_FILES"
 
           # Extract unique template names from changed paths
-          CHANGED_TEMPLATES=$(echo "$CHANGED_FILES" | grep -oP 'warpgate-templates/\K[^/]+' | sort -u)
+          CHANGED_TEMPLATES=$(echo "$CHANGED_FILES" | grep -oP 'warpgate-templates/templates/\K[^/]+' | sort -u)
+
+          CHANGED_ANSIBLE=$(git diff --name-only origin/${{ github.base_ref }}...HEAD -- ansible/)
+
+          if [ -n "$CHANGED_ANSIBLE" ]; then
+            echo ""
+            echo "Changed ansible files:"
+            echo "$CHANGED_ANSIBLE"
+
+            SHARED_ANSIBLE_CHANGE=false
+            if echo "$CHANGED_ANSIBLE" | grep -qvE '^ansible/playbooks/ares/[^/]+\.yml$'; then
+              SHARED_ANSIBLE_CHANGE=true
+            fi
+
+            echo ""
+            echo "Templates pulled in by ansible changes (shared=$SHARED_ANSIBLE_CHANGE):"
+            for template_yaml in warpgate-templates/templates/*/warpgate.yaml; do
+              [ -f "$template_yaml" ] || continue
+              grep -q "type: ansible" "$template_yaml" || continue
+
+              ansible_template=$(basename "$(dirname "$template_yaml")")
+
+              if [ "$SHARED_ANSIBLE_CHANGE" = "true" ]; then
+                echo "  $ansible_template: shared ansible change"
+                CHANGED_TEMPLATES=$(printf '%s\n%s' "$CHANGED_TEMPLATES" "$ansible_template")
+                continue
+              fi
+
+              playbook=$(grep -m1 "playbook_path:" "$template_yaml" | sed 's|.*/||')
+              if echo "$CHANGED_ANSIBLE" | grep -q "playbooks/ares/${playbook}$"; then
+                echo "  $ansible_template: runs changed playbook $playbook"
+                CHANGED_TEMPLATES=$(printf '%s\n%s' "$CHANGED_TEMPLATES" "$ansible_template")
+              fi
+            done
+          fi
+
+          CHANGED_TEMPLATES=$(echo "$CHANGED_TEMPLATES" | grep -v '^$' | sort -u)
 
           echo ""
           echo "Changed templates:"
@@ -82,7 +119,7 @@ jobs:
           CHANGED_BASE_LIST="[]"
 
           for template_name in $CHANGED_TEMPLATES; do
-            template_dir="warpgate-templates/$template_name"
+            template_dir="warpgate-templates/templates/$template_name"
 
             if [ ! -f "${template_dir}/warpgate.yaml" ]; then
               echo "Warning: $template_name has no warpgate.yaml, skipping"
@@ -370,13 +407,10 @@ jobs:
 
           echo "Building ${{ matrix.name }} for amd64..."
 
-          # Build and push to registry with test tag
-          # We push to make the image available, then pull locally for artifact creation
           warpgate build warpgate.yaml \
             --arch amd64 \
             --registry ghcr.io/${{ matrix.namespace }} \
             --tag test-${{ github.run_id }} \
-            --push \
             --verbose
 
           echo "Build successful for ${{ matrix.name }}"
@@ -385,16 +419,9 @@ jobs:
 
       - name: Free up disk space after build
         run: |
-          # Remove buildx cache and unused images to make room for docker save
           docker buildx prune -af || true
-          docker system prune -af || true
+          docker system prune -f || true
           df -h /
-
-      - name: Pull image for local use
-        run: |
-          IMAGE_NAME="ghcr.io/${{ matrix.namespace }}/${{ matrix.name }}:test-${{ github.run_id }}"
-          echo "Pulling $IMAGE_NAME..."
-          docker pull "$IMAGE_NAME"
 
       - name: Save image for dependent templates
         run: |
