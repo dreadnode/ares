@@ -94,7 +94,7 @@ pub fn evaluate_scenario(scenario: &EvaluationScenario) -> Result<ScenarioEvalua
     // Build a minimal snapshot (no investigation data — scores reflect baseline)
     let snap = scorers::InvestigationSnapshot::default();
 
-    let eval_id = format!("eval-{}", &state.operation_id);
+    let eval_id = format!("eval-{}", state.operation_id);
     let result = scorers::evaluate(&eval_id, &snap, &ground_truth, false, "", 0.0);
 
     let gap_analysis = analyze_detection_gaps(&result);
