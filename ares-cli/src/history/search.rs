@@ -1,4 +1,5 @@
 use anyhow::Result;
+use sqlx::AssertSqlSafe;
 
 use super::connect_postgres;
 use super::types::{CredentialSearchRow, HashSearchRow};
@@ -40,7 +41,7 @@ pub(crate) async fn history_search_creds(
     bind_idx += 1;
     query.push_str(&format!(" ORDER BY c.created_at DESC LIMIT ${bind_idx}"));
 
-    let mut q = sqlx::query_as::<_, CredentialSearchRow>(&query);
+    let mut q = sqlx::query_as::<_, CredentialSearchRow>(AssertSqlSafe(query));
 
     if let Some(ref d) = domain {
         q = q.bind(d);
@@ -139,7 +140,7 @@ pub(crate) async fn history_search_hashes(
     bind_idx += 1;
     query.push_str(&format!(" ORDER BY h.created_at DESC LIMIT ${bind_idx}"));
 
-    let mut q = sqlx::query_as::<_, HashSearchRow>(&query);
+    let mut q = sqlx::query_as::<_, HashSearchRow>(AssertSqlSafe(query));
 
     if let Some(ref d) = domain {
         q = q.bind(d);
