@@ -17,7 +17,7 @@
 //! `emit_path_records == false` every helper here is inert and the orchestrator
 //! reproduces its previous deterministic behaviour exactly.
 
-use rand::Rng;
+use rand::{Rng, RngExt};
 use redis::aio::ConnectionManager;
 use redis::AsyncCommands;
 use serde::{Deserialize, Serialize};
@@ -100,7 +100,7 @@ pub fn softmax_select_index<R: Rng + ?Sized>(
         return argmin(priorities);
     }
 
-    let mut r = rng.gen::<f32>() * total;
+    let mut r = rng.random::<f32>() * total;
     for (i, w) in weights.iter().enumerate() {
         r -= w;
         if r <= 0.0 {

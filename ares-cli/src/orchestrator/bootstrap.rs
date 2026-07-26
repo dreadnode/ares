@@ -289,7 +289,7 @@ pub(crate) async fn dispatch_initial_recon(
     let mut entry_ips: Vec<&String> = config.target_ips.iter().collect();
     if dispatcher.config.strategy.randomize_entry_foothold {
         use rand::seq::SliceRandom;
-        entry_ips.shuffle(&mut rand::thread_rng());
+        entry_ips.shuffle(&mut rand::rng());
     }
 
     // Network scan + SMB sweep + SMB signing check per target IP.
