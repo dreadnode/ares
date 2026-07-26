@@ -4,5 +4,5 @@ docker==7.2.0
 docsible==0.8.0
 molecule==26.6.0
 molecule-docker==2.1.0
-molecule-plugins[docker]==25.8.12
+molecule-plugins[docker]==26.7.15
 pre-commit==4.6.0
