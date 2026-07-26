@@ -228,7 +228,7 @@ impl DeferredQueue {
                 .iter()
                 .map(|(_, _, t)| t.priority as f32)
                 .collect();
-            let mut rng = rand::thread_rng();
+            let mut rng = rand::rng();
             diversity::softmax_select_index(&priorities, temperature, &mut rng).unwrap_or(0)
         } else {
             // Exact argmin by score (previous behaviour; first minimum wins).
