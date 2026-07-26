@@ -43,11 +43,11 @@ tera = "1"
 hickory-resolver = { version = "0.26", default-features = false, features = ["tokio", "system-config"] }
 
 # OpenTelemetry
-opentelemetry = "0.31"
-opentelemetry_sdk = { version = "0.31", features = ["trace"] }
-opentelemetry-otlp = { version = "0.31", features = ["grpc-tonic", "http-proto", "reqwest-rustls", "trace"] }
-tracing-opentelemetry = "0.32"
-opentelemetry-semantic-conventions = "0.31"
+opentelemetry = "0.32"
+opentelemetry_sdk = { version = "0.32", features = ["trace"] }
+opentelemetry-otlp = { version = "0.32", features = ["grpc-tonic", "http-proto", "reqwest-rustls", "trace"] }
+tracing-opentelemetry = "0.33"
+opentelemetry-semantic-conventions = "0.32"
 
 # Fast deploy profile: optimized for compile speed, acceptable runtime perf.
 # Use `task ec2:deploy BUILD_PROFILE=release` for production-grade optimization.
