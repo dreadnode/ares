@@ -29,7 +29,7 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 clap = { workspace = true }
 anyhow = { workspace = true }
-base64 = "0.22"
+base64 = "0.23"
 uuid = { workspace = true }
 sqlx = { workspace = true }
 regex = { workspace = true }

@@ -20,7 +20,7 @@ anyhow = { workspace = true }
 serde_yaml = { workspace = true }
 regex = { workspace = true }
 md-5 = "0.11"
-base64 = "0.22"
+base64 = "0.23"
 tera = { workspace = true }
 sqlx = { workspace = true }
 sha2 = "0.11"
