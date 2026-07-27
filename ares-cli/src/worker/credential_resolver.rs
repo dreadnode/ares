@@ -952,7 +952,8 @@ pub(crate) fn supports_kerberos_auth_mode(tool_name: &str) -> bool {
 ///
 /// This list must be kept in lock-step with the tool impls under
 /// `ares-tools/src/`:
-///   - `acl::bloodyad_*` (acl.rs)
+///   - `acl::bloodyad_*`, `acl::adminsd_holder_add_ace`,
+///     `acl::gmsa_read_password_bloodyad`, `acl::dacl_edit` (acl.rs)
 ///   - `recon::ldap_search`, `recon::ldap_acl_enumeration`,
 ///     `recon::enumerate_domain_trusts` (recon.rs)
 ///   - `credential_access::secretsdump` (credential_access/secretsdump.rs)
@@ -979,6 +980,11 @@ pub(crate) fn tool_consumes_ticket_path(tool_name: &str) -> bool {
             | "bloodyad_set_password"
             | "bloodyad_add_group_member"
             | "bloodyad_add_genericall"
+            | "bloodyad_get_object"
+            | "bloodyad_set_object_attr"
+            | "adminsd_holder_add_ace"
+            | "gmsa_read_password_bloodyad"
+            | "dacl_edit"
             | "smbclient_kerberos_shares"
             | "certipy_find"
             | "certipy_request"
@@ -1736,6 +1742,11 @@ mod tests {
             "bloodyad_set_password",
             "bloodyad_add_group_member",
             "bloodyad_add_genericall",
+            "bloodyad_get_object",
+            "bloodyad_set_object_attr",
+            "adminsd_holder_add_ace",
+            "gmsa_read_password_bloodyad",
+            "dacl_edit",
             "smbclient_kerberos_shares",
         ] {
             assert!(
