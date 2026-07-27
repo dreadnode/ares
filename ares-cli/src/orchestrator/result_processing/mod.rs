@@ -433,6 +433,11 @@ pub async fn process_completed_task(
                 // WriteProperty on that attribute — retrying won't grant
                 // it. Skip straight to abandoned instead of burning
                 // MAX_EXPLOIT_FAILURES worth of dispatches.
+                //
+                // Unless the edge itself carries WRITE_DAC. GenericAll is full
+                // control, so the source can write an explicit ACE granting the
+                // property write and try again — abandoning forecloses a path
+                // that is still open. Those stay live for auto_dacl_abuse.
                 let vuln_type_snapshot = task_params_snapshot
                     .get("vuln_type")
                     .and_then(|v| v.as_str())
@@ -441,13 +446,22 @@ pub async fn process_completed_task(
                     && result_indicates_keycredlink_access_denied(&result.result, err_msg)
                     && !dispatcher.state.is_exploit_abandoned(&vuln_id).await
                 {
-                    warn!(
-                        vuln_id = %vuln_id,
-                        task_id = %task_id,
-                        vuln_type = %vuln_type_snapshot,
-                        "Shadow-cred INSUFF_ACCESS_RIGHTS on msDS-KeyCredentialLink — abandoning vuln (source lacks WriteProperty on that attribute)"
-                    );
-                    dispatcher.state.mark_exploit_abandoned(&vuln_id).await;
+                    if grants_dacl_write(vuln_type_snapshot) {
+                        warn!(
+                            vuln_id = %vuln_id,
+                            task_id = %task_id,
+                            vuln_type = %vuln_type_snapshot,
+                            "Shadow-cred INSUFF_ACCESS_RIGHTS on msDS-KeyCredentialLink — keeping vuln live; the edge carries WRITE_DAC so auto_dacl_abuse can grant the property write via dacl_edit"
+                        );
+                    } else {
+                        warn!(
+                            vuln_id = %vuln_id,
+                            task_id = %task_id,
+                            vuln_type = %vuln_type_snapshot,
+                            "Shadow-cred INSUFF_ACCESS_RIGHTS on msDS-KeyCredentialLink — abandoning vuln (source lacks WriteProperty on that attribute and cannot grant it)"
+                        );
+                        dispatcher.state.mark_exploit_abandoned(&vuln_id).await;
+                    }
                 }
             }
         }
@@ -1153,12 +1167,38 @@ fn is_shadow_cred_vuln_type(vuln_type: &str) -> bool {
     )
 }
 
+/// True when the ACL right includes `WRITE_DAC` — i.e. the source can rewrite
+/// the target's DACL and grant itself a right it does not currently hold.
+///
+/// This is what separates a recoverable `INSUFF_ACCESS_RIGHTS` from a terminal
+/// one. `GenericAll` is full control and therefore carries `WRITE_DAC`, so a
+/// denied `msDS-KeyCredentialLink` write can be retried after `dacl_edit`
+/// writes an explicit ACE. `GenericWrite` and `WriteProperty` grant property
+/// writes only — a source denied on that attribute has no way to widen its own
+/// access, so abandoning is correct there.
+///
+/// `writedacl` / `writeowner` are listed for completeness; since #283 they are
+/// routed to `auto_dacl_abuse` before a shadow-cred dispatch is ever made, so
+/// they should not reach this path.
+fn grants_dacl_write(vuln_type: &str) -> bool {
+    matches!(
+        vuln_type.to_lowercase().as_str(),
+        "genericall"
+            | "acl_genericall"
+            | "writedacl"
+            | "acl_writedacl"
+            | "writeowner"
+            | "acl_writeowner"
+    )
+}
+
 /// True when the tool output or error string carries a
 /// `INSUFF_ACCESS_RIGHTS`-shaped failure specifically for the
 /// `msDS-KeyCredentialLink` attribute (LDAP code 0x2098 / 50). This is the
 /// deterministic signal that the source principal doesn't hold WriteProperty
-/// on that attribute — no amount of retry will grant it, so the shadow-cred
-/// pre-flight bumps the vuln straight to abandoned.
+/// on that attribute. Re-running the same dispatch cannot change that, so the
+/// shadow-cred pre-flight bumps the vuln straight to abandoned — but only when
+/// the edge cannot widen its own access; see [`grants_dacl_write`].
 ///
 /// Recognises the impacket/ldap3/certipy/pywhisker/bloodyad wordings:
 ///   - `INSUFF_ACCESS_RIGHTS` combined with `msDS-KeyCredentialLink` /

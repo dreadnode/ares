@@ -2485,7 +2485,9 @@ fn lockout_on_spn_account_propagates_to_spray_exclusion() {
 
 // ── shadow-cred pre-flight helpers ─────────────────────────────────────
 
-use super::{is_shadow_cred_vuln_type, result_indicates_keycredlink_access_denied};
+use super::{
+    grants_dacl_write, is_shadow_cred_vuln_type, result_indicates_keycredlink_access_denied,
+};
 
 #[test]
 fn shadow_cred_vuln_type_matches_dispatch_shapes() {
@@ -2522,6 +2524,28 @@ fn shadow_cred_vuln_type_rejects_non_acl_shapes() {
     ] {
         assert!(!is_shadow_cred_vuln_type(t), "should NOT match: {t}");
     }
+}
+
+#[test]
+fn grants_dacl_write_only_for_rights_carrying_write_dac() {
+    // GenericAll is full control, so a source denied on
+    // msDS-KeyCredentialLink can still write itself an explicit ACE via
+    // dacl_edit and retry — abandoning it forecloses a live path.
+    assert!(grants_dacl_write("genericall"));
+    assert!(grants_dacl_write("GenericAll"));
+    assert!(grants_dacl_write("acl_genericall"));
+    assert!(grants_dacl_write("writedacl"));
+    assert!(grants_dacl_write("writeowner"));
+
+    // GenericWrite and WriteProperty grant property writes only. A source
+    // denied on the attribute cannot widen its own access, so the denial is
+    // genuinely terminal and abandoning is correct.
+    assert!(!grants_dacl_write("genericwrite"));
+    assert!(!grants_dacl_write("acl_genericwrite"));
+    assert!(!grants_dacl_write("writeproperty"));
+    assert!(!grants_dacl_write("acl_writeproperty"));
+    assert!(!grants_dacl_write("shadow_credentials"));
+    assert!(!grants_dacl_write(""));
 }
 
 #[test]
