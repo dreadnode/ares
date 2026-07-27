@@ -1156,11 +1156,11 @@ pub async fn auto_trust_follow(dispatcher: Arc<Dispatcher>, mut shutdown: watch:
             // Suppress the ExtraSid forge when the trust has SID filtering
             // active. ticketer adds Enterprise Admins (RID 519) via
             // `--extra-sid` to satisfy DCSync — but a SID-filtered forest
-            // trust strips RID<1000 SIDs from the cross-realm PAC, and the
+            // trust strips the injected SID from the cross-realm PAC, and the
             // target KDC returns rpc_s_access_denied. Burn the dedup so this
-            // doomed dispatch can't loop, mark the vuln exploited as a
-            // strategic choice, and wake the cross-forest fallback paths
-            // (ACL/MSSQL/FSP) to take over.
+            // doomed dispatch can't loop, then wake the cross-forest fallback
+            // paths (ACL/MSSQL/FSP) to take over. The vuln is left unexploited
+            // — only a target krbtgt capture proves compromise.
             {
                 let state = dispatcher.state.read().await;
                 if is_filtered_inter_forest_trust(&state, &item.source_domain, &item.target_domain)
@@ -1738,11 +1738,11 @@ pub async fn auto_trust_follow(dispatcher: Arc<Dispatcher>, mut shutdown: watch:
                             // (SID filtering, denied permissions, or wrong
                             // forest) that won't change on the next 30s tick.
                             // Keep dedup MARKED so we don't relitigate the
-                            // doomed forge in a tight loop, mark the trust
-                            // vuln exploited so the operation moves on, and
-                            // wake the cross-forest fallback paths
-                            // (ACL/MSSQL/FSP) which can still compromise the
-                            // target forest without ExtraSid.
+                            // doomed forge in a tight loop, leave the trust
+                            // vuln UNexploited (only a target krbtgt capture
+                            // proves compromise), and wake the cross-forest
+                            // fallback paths (ACL/MSSQL/FSP) which can still
+                            // compromise the target forest without ExtraSid.
                             //
                             // Surface tool stdout tail + a hash-count summary so
                             // post-mortem can distinguish silent nxc failure

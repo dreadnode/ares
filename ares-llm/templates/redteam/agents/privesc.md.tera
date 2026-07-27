@@ -330,32 +330,42 @@ source/target domain SIDs, and the trusted forest FQDN already populated by
 `auto_trust_follow` — you don't read those out of prior tool output yourself.
 Trigger the path by ensuring the prerequisite data lands in state:
 
-- **Child-to-Parent escalation** runs when a child-domain krbtgt hash and
-  child-DA credentials are present. The orchestrator dispatches
-  `forge_inter_realm_and_dump` automatically with
-  `extra_sid=<parent_sid>-519` (Enterprise Admins) injected so DCSync on
-  the parent DC succeeds.
-- **Cross-Forest Trust Key Extraction** runs when DA in `{{ target_domain }}`
-  exists and `enumerate_domain_trusts` reports a forest trust. The chain is
-  `extract_trust_key` → `create_inter_realm_ticket` → `secretsdump_kerberos`.
-  The `secretsdump_kerberos` step is auto-chained from the `.ccache` produced
-  by the inter-realm ticket forge (via `auto_chain_s4u_secretsdump`).
+- **Child-to-Parent escalation (intra-forest) is the trust escalation that
+  works.** It runs when a child-domain krbtgt hash and child-DA credentials
+  are present. The orchestrator dispatches `forge_inter_realm_and_dump`
+  automatically with `extra_sid=<parent_sid>-519` (Enterprise Admins)
+  injected. SID filtering is not applied within a forest, so the parent DC
+  honors the claim and DCSync succeeds.
+- **Cross-forest trust keys do not escalate.** SID filtering on the foreign
+  forest's DCs strips the injected claim out of the cross-realm PAC — the
+  ticket authenticates, the privileged SID is dropped, and DCSync returns
+  `rpc_s_access_denied`. Manual validation covered RID 519, custom group RIDs
+  above 1000, and a direct user RID; every variant was stripped. Do not spend
+  the operation retrying the forge with different SIDs.
 
-  **You do NOT need a plaintext credential in the target realm to run this
-  chain.** The trust key alone (the target realm's machine account NTLM,
-  captured from `secretsdump` on the source DC as `<SRC_REALM>\<TARGET>$`) is
-  sufficient. If the automation hasn't already fired, invoke it manually:
-  `create_inter_realm_ticket` with `trust_key=<hex>`, `source_domain`,
-  `target_domain`, `source_sid`, and (if you have it) `aes_key`, then
-  `secretsdump_kerberos` against the target-realm DC IP. Waiting to crack a
-  target-realm user password before pivoting burns hours — the trust-key
-  path is direct and deterministic.
+  The chain (`extract_trust_key` → `create_inter_realm_ticket`, with
+  `secretsdump_kerberos` auto-chained off the produced `.ccache` via
+  `auto_chain_s4u_secretsdump`) still runs, and the resulting ticket is worth
+  keeping — it binds over Kerberos LDAP (`bloodyad -k`, enumeration, ACL
+  reads) against the foreign forest. It just will not DCSync.
 
-**Important:** SID filtering blocks RID<1000 across forest trusts. If inter-realm
-ticket path fails, look for organic paths: MSSQL links, ACL chains, or foreign
-security principals within the target forest. Note: silver ticket forging is
-done via impacket's ticketer.py if needed; golden ticket is preferred for
-persistence once a krbtgt hash is in hand.
+**To take a foreign forest, acquire a credential native to it, then escalate
+natively inside it:**
+
+- **ADCS — ESC13 first.** Enroll a template whose issuance policy carries an
+  OID group link; the PKINIT TGT comes back holding the linked group's
+  membership, which is enough for DCSync. Nothing is passed via `-upn`/`-sid`,
+  so CA policy and KB5014754 never come into play. ESC1, ESC4, and ESC8
+  against the foreign CA are the next options.
+- **MSSQL linked servers** from a host you already own into the foreign forest
+  — the link executes as its configured login, frequently privileged there.
+- **AS-REP roastable accounts** in the foreign forest — no pre-auth means a
+  crackable hash with no credential at all.
+- **Foreign security principals and ACL chains** — principals from
+  `{{ target_domain }}` that already hold rights in the foreign forest.
+
+Note: silver ticket forging is done via impacket's ticketer.py if needed;
+golden ticket is preferred for persistence once a krbtgt hash is in hand.
 
 ## Local Privilege Escalation
 

@@ -145,13 +145,16 @@ fn escalation_target_forest_dominated(
         .unwrap_or(false)
 }
 
-/// A cross-forest escalation is "written off" only once the fallback automation
-/// has flagged it: SID filtering blocks the ExtraSid DCSync path AND the
-/// ACL/MSSQL/enum fallbacks have been exhausted, at which point it stamps
-/// `details["written_off"] = true`. Until that flag is set the op stays alive
-/// so a retry burst or the operator escape hatch can still land the forge.
-/// This is the escape valve that keeps a genuinely-dead trust from pinning the
-/// op open to max_runtime forever.
+/// A cross-forest escalation is "written off" when `details["written_off"]` is
+/// `true`.
+///
+/// Nothing in the orchestrator writes that flag today — the trust automation
+/// leaves a SID-filtered forge unexploited and un-flagged, so this predicate is
+/// false for every escalation a live op produces. The only writer is the test
+/// helper below. The escape valve that actually retires a dead trust is
+/// [`escalation_target_forest_dominated`]: the op stops waiting once the target
+/// forest falls by another path (native ADCS ESC13, a direct DCSync). Absent
+/// that, a cross-forest escalation pins the op open to `max_runtime`.
 fn is_trust_escalation_written_off(vuln: &ares_core::models::VulnerabilityInfo) -> bool {
     vuln.details
         .get("written_off")

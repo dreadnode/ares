@@ -80,7 +80,7 @@ lab, see `docs/goad-checklist.md`.)
 |-----------|--------|--------|
 | dc_secretsdump | 1 | Fires immediately when DA hash is available |
 | golden_ticket | 1 | Forged as soon as krbtgt is extracted |
-| forest_trust_escalation | 1 | Cross-forest via trust key |
+| forest_trust_escalation | 1 | Inter-realm TGT forge — lands DA child→parent; cross-forest is SID-filtered |
 | child_to_parent | 1 | ExtraSid escalation |
 | secretsdump | 2 | Hash dump on any host with admin creds |
 | credential_reuse | 3 | Cross-domain hash reuse |
@@ -175,7 +175,7 @@ keys:
 | `secretsdump` | Hash dump on member servers |
 | `dc_secretsdump` | Hash dump on domain controllers |
 | `golden_ticket` | Kerberos golden ticket forgery |
-| `forest_trust_escalation` | Cross-forest trust key exploitation |
+| `forest_trust_escalation` | Trust key forge — escalates child→parent; cross-forest DCSync is SID-filtered |
 | `child_to_parent` | ExtraSid child-to-parent escalation |
 | `credential_reuse` | Cross-domain hash reuse |
 | `mssql_access` | MSSQL service exploitation |

@@ -54,6 +54,14 @@ operation:
   #   asrep_roast, esc1, esc4, esc8, mssql_access, mssql_linked_server,
   #   constrained_delegation, unconstrained_delegation, rbcd, acl_abuse,
   #   credential_reuse, forest_trust_escalation
+  #
+  # Note on forest_trust_escalation: it forges an inter-realm TGT from a trust
+  # key. That lands Enterprise Admins on a child->parent (intra-forest) hop.
+  # Across a forest trust the receiving DC's SID filtering strips the injected
+  # claim and DCSync fails with rpc_s_access_denied, so it does NOT take a
+  # second forest — that requires a credential native to the far forest driving
+  # a native escalation (ADCS ESC13/ESC1/ESC4/ESC8, MSSQL linked servers,
+  # AS-REP roasting, foreign security principals).
   exclude_techniques: []
 
   # If non-empty, ONLY these techniques are allowed (allowlist mode).

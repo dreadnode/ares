@@ -421,14 +421,21 @@ recommended default.
 **Important**: dominating a child domain does **not** count as dominating the
 forest root. For example, obtaining `krbtgt` from `child.contoso.local` (child
 DC) does **not** satisfy the `contoso.local` forest requirement. The forest
-root DC must be separately compromised, typically via trust escalation
-(ExtraSid attack using the trust key from the child domain's `secretsdump`
-output).
+root DC must be separately compromised, typically via child-to-parent trust
+escalation (ExtraSid attack using the trust key from the child domain's
+`secretsdump` output). This works because SID filtering is not applied within
+a forest.
 
 The required forest roots are derived from:
 
 - The target domain
-- Cross-forest trust relationships (trust type `forest` or `external`)
+- Cross-forest trust relationships (trust type `forest` or `external`).
+  A second forest is **not** reached by forging with its trust key — SID
+  filtering on the foreign DCs strips the injected claim regardless of RID and
+  DCSync returns `rpc_s_access_denied`. It falls to a credential native to
+  that forest driving a native escalation: ADCS (ESC13 above all, then
+  ESC1/ESC4/ESC8), an MSSQL linked-server pivot, AS-REP roasting, or a foreign
+  security principal that already holds rights there.
 - Domain controllers discovered during recon
 
 ### Mode 2: Stop on Domain Admin

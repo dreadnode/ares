@@ -597,9 +597,34 @@ fn exploit_trust_key_extraction() {
     let prompt = generate_task_prompt("exploit", "t-30", &payload, None).unwrap();
     assert!(prompt.contains("TRUST KEY EXTRACTION"));
     assert!(prompt.contains("extract_trust_key"));
-    assert!(prompt.contains("create_inter_realm_ticket"));
     assert!(prompt.contains("fabrikam.local"));
-    assert!(prompt.contains("secretsdump_kerberos"));
+}
+
+/// The inter-forest branch must not steer the model at the trust-key forge:
+/// SID filtering on the receiving DC strips the injected claim regardless of
+/// RID, so no forge variant escalates. It has to route to a credential native
+/// to the target forest driving a native escalation.
+#[test]
+fn exploit_cross_forest_steers_to_native_escalation_not_forge() {
+    let payload = serde_json::json!({
+        "vuln_type": "trust_key",
+        "target": "192.168.58.10",
+        "domain": "contoso.local",
+        "trusted_domain": "fabrikam.local",
+        "username": "Administrator",
+        "password": "P@ss1",
+        "dc_ip": "192.168.58.10"
+    });
+    let prompt = generate_task_prompt("exploit", "t-30b", &payload, None).unwrap();
+    assert!(prompt.contains("THE TRUST KEY DOES NOT ESCALATE HERE"));
+    assert!(prompt.contains("Take fabrikam.local from inside fabrikam.local"));
+    assert!(prompt.contains("ESC13"));
+    assert!(prompt.contains("AS-REP roastable accounts"));
+    assert!(prompt.contains("MSSQL linked servers"));
+    assert!(prompt.contains("Foreign security principals"));
+    assert!(!prompt.contains("forge_inter_realm_and_dump"));
+    assert!(!prompt.contains("impacket-ticketer"));
+    assert!(!prompt.contains("always try"));
 }
 
 #[test]
@@ -617,7 +642,10 @@ fn exploit_child_to_parent_describes_automatic_forge() {
     assert!(prompt.contains("TRUST KEY EXTRACTION"));
     assert!(prompt.contains("forge_inter_realm_and_dump"));
     assert!(prompt.contains("Enterprise Admins"));
+    assert!(prompt.contains("SID filtering is not applied inside a forest"));
+    assert!(prompt.contains("impacket-ticketer"));
     assert!(!prompt.contains("raise_child"));
+    assert!(!prompt.contains("THE TRUST KEY DOES NOT ESCALATE HERE"));
 }
 
 #[test]
