@@ -70,10 +70,129 @@ fn acl_step_key(chain: &serde_json::Value, chain_idx: usize, step_idx: usize) ->
     }
 }
 
-/// Follows ACL chains from BloodHound results, dispatching each step when
-/// credentials for the source user are available.
+/// Resolve the principal that authenticates for `source_user`.
+///
+/// A password-bearing credential wins; otherwise any NTLM hash we hold for the
+/// principal stands in. The payload's credential block is identity-only — the
+/// prompt renders `username`/`domain` and forbids the agent from passing
+/// secrets, because the worker injects whichever material state holds by
+/// `(username, domain)` immediately before the tool runs. So a hash-only
+/// foothold dispatches exactly like a password one, where before it produced
+/// no dispatch at all.
+fn resolve_step_principal(
+    state: &StateInner,
+    source_user: &str,
+    source_domain: &str,
+) -> Option<ares_core::models::Credential> {
+    let user_l = source_user.to_lowercase();
+    let domain_l = source_domain.to_lowercase();
+    let domain_matches = |d: &str| domain_l.is_empty() || d.to_lowercase() == domain_l;
+
+    if let Some(cred) = state
+        .credentials
+        .iter()
+        .find(|c| c.username.to_lowercase() == user_l && domain_matches(&c.domain))
+    {
+        return Some(cred.clone());
+    }
+
+    state
+        .hashes
+        .iter()
+        .find(|h| {
+            h.username.to_lowercase() == user_l
+                && domain_matches(&h.domain)
+                && acl_graph::is_usable_hash(h)
+        })
+        .map(|h| ares_core::models::Credential {
+            id: format!("acl-step-{}", h.id),
+            username: h.username.clone(),
+            password: String::new(),
+            domain: h.domain.clone(),
+            source: h.source.clone(),
+            discovered_at: None,
+            is_admin: false,
+            parent_id: None,
+            attack_step: h.attack_step,
+        })
+}
+
+/// One ACL chain step ready to dispatch.
+pub(crate) struct AclStepWork {
+    pub dedup_key: String,
+    pub vuln_id: String,
+    pub step: serde_json::Value,
+    pub credential: ares_core::models::Credential,
+}
+
+/// Collect the chain steps dispatchable this tick.
+///
+/// At most one step per chain: the first that is neither already dispatched
+/// nor already exploited. A later step only becomes eligible once its
+/// predecessor is marked, which is exactly the sequencing an ACL chain needs —
+/// step 1 authenticates as the principal step 0 takes over, so it cannot run
+/// until step 0 has run and published that principal's material.
+///
+/// Extracted from the driver loop so that sequencing is testable without a
+/// Dispatcher.
+pub(crate) fn collect_acl_chain_work(state: &StateInner) -> Vec<AclStepWork> {
+    let mut items = Vec::new();
+
+    for (chain_idx, chain) in state.acl_chains.iter().enumerate() {
+        let Some(steps) = extract_chain_steps(chain) else {
+            continue;
+        };
+
+        for (step_idx, step) in steps.iter().enumerate() {
+            let dedup_key = acl_step_key(chain, chain_idx, step_idx);
+
+            // Skip already dispatched steps
+            if state.dispatched_acl_steps.contains(&dedup_key) {
+                continue;
+            }
+            if state.is_processed(DEDUP_ACL_STEPS, &dedup_key) {
+                continue;
+            }
+
+            let vuln_id = extract_step_vuln_id(step).to_string();
+            if !vuln_id.is_empty()
+                && (state.exploited_vulnerabilities.contains(&vuln_id)
+                    || state.is_processed(DEDUP_DACL_ABUSE, &format!("dacl:{vuln_id}")))
+            {
+                continue;
+            }
+
+            // Get the source user for this step
+            let source_user = extract_source_user(step);
+            let source_domain = extract_source_domain(step);
+
+            if source_user.is_empty() {
+                continue;
+            }
+
+            if let Some(credential) = resolve_step_principal(state, source_user, source_domain) {
+                items.push(AclStepWork {
+                    dedup_key,
+                    vuln_id,
+                    step: step.clone(),
+                    credential,
+                });
+            }
+
+            // Only dispatch the first undispatched step per chain
+            break;
+        }
+    }
+
+    items.truncate(MAX_ACL_DISPATCH_PER_TICK);
+    items
+}
+
+/// Follows ACL chains from BloodHound results, dispatching each step when we
+/// hold auth material for the source principal.
 /// Interval: 30s. Each chain is a JSON array of steps; we find the first
-/// undispatched step whose source user has known credentials and dispatch it.
+/// undispatched step whose source principal we can authenticate as — password
+/// or NTLM hash — and dispatch it.
 pub async fn auto_acl_chain_follow(
     dispatcher: Arc<Dispatcher>,
     mut shutdown: watch::Receiver<bool>,
@@ -108,74 +227,24 @@ pub async fn auto_acl_chain_follow(
             debug!(chains = count, "ACL graph refreshed");
         }
 
-        let work: Vec<(
-            String,
-            String,
-            serde_json::Value,
-            ares_core::models::Credential,
-        )> = {
+        let work: Vec<AclStepWork> = {
             let state = dispatcher.state.read().await;
 
             if state.acl_chains.is_empty() {
                 continue;
             }
 
-            let mut items = Vec::new();
-
-            for (chain_idx, chain) in state.acl_chains.iter().enumerate() {
-                let Some(steps) = extract_chain_steps(chain) else {
-                    continue;
-                };
-
-                for (step_idx, step) in steps.iter().enumerate() {
-                    let dedup_key = acl_step_key(chain, chain_idx, step_idx);
-
-                    // Skip already dispatched steps
-                    if state.dispatched_acl_steps.contains(&dedup_key) {
-                        continue;
-                    }
-                    if state.is_processed(DEDUP_ACL_STEPS, &dedup_key) {
-                        continue;
-                    }
-
-                    let vuln_id = extract_step_vuln_id(step).to_string();
-                    if !vuln_id.is_empty()
-                        && (state.exploited_vulnerabilities.contains(&vuln_id)
-                            || state.is_processed(DEDUP_DACL_ABUSE, &format!("dacl:{vuln_id}")))
-                    {
-                        continue;
-                    }
-
-                    // Get the source user for this step
-                    let source_user = extract_source_user(step);
-                    let source_domain = extract_source_domain(step);
-
-                    if source_user.is_empty() {
-                        continue;
-                    }
-
-                    // Find credential for the source user
-                    let cred = state.credentials.iter().find(|c| {
-                        c.username.to_lowercase() == source_user.to_lowercase()
-                            && (source_domain.is_empty()
-                                || c.domain.to_lowercase() == source_domain.to_lowercase())
-                    });
-
-                    if let Some(cred) = cred {
-                        items.push((dedup_key, vuln_id, step.clone(), cred.clone()));
-                    }
-
-                    // Only dispatch the first undispatched step per chain
-                    break;
-                }
-            }
-
-            items.truncate(MAX_ACL_DISPATCH_PER_TICK);
-            items
+            collect_acl_chain_work(&state)
         };
 
         // Dispatch each collected step
-        for (dedup_key, vuln_id, step, cred) in work {
+        for AclStepWork {
+            dedup_key,
+            vuln_id,
+            step,
+            credential: cred,
+        } in work
+        {
             let payload = json!({
                 "technique": "acl_chain_step",
                 "vuln_id": vuln_id,
@@ -411,5 +480,189 @@ mod tests {
     #[test]
     fn extract_step_vuln_id_missing_returns_empty() {
         assert_eq!(extract_step_vuln_id(&json!({"source": "alice"})), "");
+    }
+
+    // --- collect_acl_chain_work ---
+
+    fn cred(username: &str, password: &str, domain: &str) -> ares_core::models::Credential {
+        ares_core::models::Credential {
+            id: format!("cred-{username}"),
+            username: username.into(),
+            password: password.into(),
+            domain: domain.into(),
+            source: "test".into(),
+            discovered_at: None,
+            is_admin: false,
+            parent_id: None,
+            attack_step: 0,
+        }
+    }
+
+    fn hash(username: &str, domain: &str, hash_type: &str) -> ares_core::models::Hash {
+        ares_core::models::Hash {
+            id: format!("hash-{username}"),
+            username: username.into(),
+            hash_value: "aad3b435b51404eeaad3b435b51404ee:31d6cfe0d16ae931b73c59d7e0c089c0".into(),
+            hash_type: hash_type.into(),
+            domain: domain.into(),
+            cracked_password: None,
+            source: "secretsdump".into(),
+            discovered_at: None,
+            parent_id: None,
+            attack_step: 0,
+            aes_key: None,
+            is_previous: false,
+            source_host: None,
+            is_trust_key: false,
+            trust_pair_label: None,
+        }
+    }
+
+    fn two_step_chain() -> serde_json::Value {
+        json!({
+            "chain_id": "deadbeef",
+            "steps": [
+                {
+                    "vuln_id": "acl_genericall_alice_bob",
+                    "acl_type": "genericall",
+                    "source": "alice",
+                    "source_domain": "contoso.local",
+                    "target": "bob",
+                    "target_ip": "192.168.58.10",
+                    "domain": "contoso.local",
+                },
+                {
+                    "vuln_id": "acl_addmember_bob_da",
+                    "acl_type": "addmember",
+                    "source": "bob",
+                    "source_domain": "contoso.local",
+                    "target": "Domain Admins",
+                    "target_ip": "192.168.58.10",
+                    "domain": "contoso.local",
+                },
+            ],
+        })
+    }
+
+    fn state_with_chain() -> StateInner {
+        let mut state = StateInner::new("op".into());
+        state.acl_chains = vec![two_step_chain()];
+        state
+    }
+
+    #[test]
+    fn collect_dispatches_a_hash_only_source() {
+        let mut state = state_with_chain();
+        state.hashes.push(hash("alice", "contoso.local", "ntlm"));
+        let work = collect_acl_chain_work(&state);
+        assert_eq!(work.len(), 1);
+        assert_eq!(work[0].vuln_id, "acl_genericall_alice_bob");
+        assert_eq!(work[0].credential.username, "alice");
+        assert_eq!(work[0].credential.domain, "contoso.local");
+        assert!(work[0].credential.password.is_empty());
+    }
+
+    #[test]
+    fn collect_prefers_a_password_over_a_hash() {
+        let mut state = state_with_chain();
+        state.hashes.push(hash("alice", "contoso.local", "ntlm"));
+        state
+            .credentials
+            .push(cred("alice", "P@ssw0rd!", "contoso.local"));
+        let work = collect_acl_chain_work(&state);
+        assert_eq!(work.len(), 1);
+        assert_eq!(work[0].credential.password, "P@ssw0rd!");
+    }
+
+    #[test]
+    fn collect_skips_a_source_with_no_material() {
+        let mut state = state_with_chain();
+        state
+            .credentials
+            .push(cred("carol", "P@ssw0rd!", "contoso.local"));
+        assert!(collect_acl_chain_work(&state).is_empty());
+    }
+
+    #[test]
+    fn collect_skips_a_source_we_only_hold_roastable_ciphertext_for() {
+        let mut state = state_with_chain();
+        state
+            .hashes
+            .push(hash("alice", "contoso.local", "kerberoast"));
+        assert!(collect_acl_chain_work(&state).is_empty());
+    }
+
+    #[test]
+    fn collect_skips_a_hash_from_another_realm() {
+        let mut state = state_with_chain();
+        state.hashes.push(hash("alice", "fabrikam.local", "ntlm"));
+        assert!(collect_acl_chain_work(&state).is_empty());
+    }
+
+    #[test]
+    fn chain_advances_one_step_per_tick() {
+        let mut state = state_with_chain();
+        state
+            .credentials
+            .push(cred("alice", "P@ssw0rd!", "contoso.local"));
+
+        let first = collect_acl_chain_work(&state);
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].dedup_key, "chain:deadbeef:step:0");
+
+        assert_eq!(
+            collect_acl_chain_work(&state)[0].dedup_key,
+            "chain:deadbeef:step:0"
+        );
+
+        state
+            .dispatched_acl_steps
+            .insert(first[0].dedup_key.clone());
+
+        assert!(collect_acl_chain_work(&state).is_empty());
+
+        state
+            .credentials
+            .push(cred("bob", "P@ssw0rd!", "contoso.local"));
+
+        let second = collect_acl_chain_work(&state);
+        assert_eq!(second.len(), 1);
+        assert_eq!(second[0].dedup_key, "chain:deadbeef:step:1");
+        assert_eq!(second[0].vuln_id, "acl_addmember_bob_da");
+        assert_eq!(second[0].credential.username, "bob");
+    }
+
+    #[test]
+    fn collect_takes_at_most_one_step_from_each_chain() {
+        let mut state = StateInner::new("op".into());
+        state.acl_chains = vec![two_step_chain(), two_step_chain()];
+        state
+            .credentials
+            .push(cred("alice", "P@ssw0rd!", "contoso.local"));
+        state
+            .credentials
+            .push(cred("bob", "P@ssw0rd!", "contoso.local"));
+        let work = collect_acl_chain_work(&state);
+        assert_eq!(work.len(), 2);
+        assert!(work.iter().all(|w| w.dedup_key.ends_with(":step:0")));
+    }
+
+    #[test]
+    fn collect_skips_a_step_whose_edge_is_already_exploited() {
+        let mut state = state_with_chain();
+        state
+            .credentials
+            .push(cred("alice", "P@ssw0rd!", "contoso.local"));
+        state
+            .exploited_vulnerabilities
+            .insert("acl_genericall_alice_bob".into());
+        assert!(collect_acl_chain_work(&state).is_empty());
+
+        state
+            .credentials
+            .push(cred("bob", "P@ssw0rd!", "contoso.local"));
+        let work = collect_acl_chain_work(&state);
+        assert_eq!(work.len(), 1);
+        assert_eq!(work[0].dedup_key, "chain:deadbeef:step:1");
     }
 }

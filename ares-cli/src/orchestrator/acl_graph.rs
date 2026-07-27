@@ -17,6 +17,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use serde_json::{json, Value};
 
 use super::state::StateInner;
+use crate::worker::credential_resolver::is_authenticating_hash_type;
 
 /// Maximum path length explored when scoring an edge. Beyond four hops a
 /// "path to DA" is not a plan, and each extra hop multiplies the chance that
@@ -230,14 +231,43 @@ fn distances_to_terminal(edges: &[AclEdge], state: &StateInner) -> HashMap<Strin
     dist
 }
 
-/// Principals we hold a usable credential for, lowercased.
+/// True when `hash` is material an ACL tool can authenticate with.
+///
+/// Kerberoast / AS-REP ciphertext carries a non-empty `hash_value` but is
+/// offline-crack material, not a login: `bloodyad_base` would be handed a
+/// `$krb5tgs$` blob as `-p LM:NT`. The credential resolver already draws this
+/// line with [`is_authenticating_hash_type`]; reuse it so the graph's notion of
+/// "usable" matches what the worker will actually inject.
+pub(crate) fn is_usable_hash(hash: &ares_core::models::Hash) -> bool {
+    !hash.hash_value.is_empty() && is_authenticating_hash_type(&hash.hash_type)
+}
+
+/// Principals we hold usable auth material for, lowercased.
+///
+/// Any one of the three forms the ACL tools accept (precedence `ticket_path` >
+/// `hash` > `password`, see [`crate::worker::credential_resolver`]) makes a
+/// principal a viable chain start — the worker injects whichever it holds by
+/// `(username, domain)` at dispatch time. Counting only password-bearing
+/// credentials stranded every hash-only foothold, which is the shape a
+/// shadow-credential takeover or an NTDS dump leaves behind: chains are only
+/// ever walked from this set, so those principals started nothing.
 fn owned_principals(state: &StateInner) -> HashSet<String> {
-    state
+    let passwords = state
         .credentials
         .iter()
         .filter(|c| !c.password.is_empty())
-        .map(|c| c.username.to_lowercase())
-        .collect()
+        .map(|c| c.username.to_lowercase());
+    let hashes = state
+        .hashes
+        .iter()
+        .filter(|h| is_usable_hash(h))
+        .map(|h| h.username.to_lowercase());
+    let tickets = state
+        .kerberos_tickets
+        .iter()
+        .filter(|t| !t.ticket_path.is_empty())
+        .map(|t| t.username.to_lowercase());
+    passwords.chain(hashes).chain(tickets).collect()
 }
 
 fn chain_id(steps: &[Value]) -> String {
@@ -504,6 +534,26 @@ mod tests {
         }
     }
 
+    fn hash_for(username: &str, domain: &str, hash_type: &str) -> ares_core::models::Hash {
+        ares_core::models::Hash {
+            id: format!("hash-{username}"),
+            username: username.into(),
+            hash_value: "aad3b435b51404eeaad3b435b51404ee:31d6cfe0d16ae931b73c59d7e0c089c0".into(),
+            hash_type: hash_type.into(),
+            domain: domain.into(),
+            cracked_password: None,
+            source: "secretsdump".into(),
+            discovered_at: None,
+            parent_id: None,
+            attack_step: 0,
+            aes_key: None,
+            is_previous: false,
+            source_host: None,
+            is_trust_key: false,
+            trust_pair_label: None,
+        }
+    }
+
     fn state_with(vulns: Vec<VulnerabilityInfo>, creds: Vec<Credential>) -> StateInner {
         let mut s = StateInner::new("op".into());
         s.domain_controllers
@@ -571,6 +621,71 @@ mod tests {
         assert_eq!(steps[1]["source"], "bob");
         assert_eq!(steps[1]["target"], "Domain Admins");
         assert_eq!(steps[0]["target_ip"], "192.168.58.10");
+    }
+
+    #[test]
+    fn an_ntlm_hash_alone_owns_its_principal() {
+        let mut s = state_with(
+            vec![edge_vuln_typed(
+                "acl_genericall_alice_da",
+                "genericall",
+                "alice",
+                "Domain Admins",
+                "Group",
+                &[],
+            )],
+            Vec::new(),
+        );
+        s.hashes.push(hash_for("alice", "contoso.local", "ntlm"));
+        let a = analyze(&s);
+        assert_eq!(a.chains.len(), 1);
+        assert_eq!(a.chains[0]["steps"][0]["source"], "alice");
+    }
+
+    #[test]
+    fn roastable_ciphertext_does_not_own_its_principal() {
+        let mut s = state_with(
+            vec![edge_vuln_typed(
+                "acl_genericall_alice_da",
+                "genericall",
+                "alice",
+                "Domain Admins",
+                "Group",
+                &[],
+            )],
+            Vec::new(),
+        );
+        s.hashes
+            .push(hash_for("alice", "contoso.local", "kerberoast"));
+        s.hashes.push(hash_for("alice", "contoso.local", "AS-REP"));
+        let a = analyze(&s);
+        assert_eq!(a.rank_of("acl_genericall_alice_da"), 1);
+        assert!(a.chains.is_empty());
+    }
+
+    #[test]
+    fn a_kerberos_ticket_owns_its_principal() {
+        let mut s = state_with(
+            vec![edge_vuln_typed(
+                "acl_genericall_alice_da",
+                "genericall",
+                "alice",
+                "Domain Admins",
+                "Group",
+                &[],
+            )],
+            Vec::new(),
+        );
+        s.kerberos_tickets.push(ares_core::models::KerberosTicket {
+            source_domain: "contoso.local".into(),
+            target_domain: "fabrikam.local".into(),
+            username: "alice".into(),
+            ticket_path: "/tmp/ares-tickets/alice.ccache".into(),
+            forged_at: None,
+        });
+        let a = analyze(&s);
+        assert_eq!(a.chains.len(), 1);
+        assert_eq!(a.chains[0]["steps"][0]["source"], "alice");
     }
 
     #[test]
