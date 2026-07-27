@@ -546,7 +546,6 @@ impl CoerceProcs for RealCoerceProcs {
                 .arg("-f")
                 .arg(pat)
                 .current_dir(workdir)
-                .stdin_null()
                 .timeout_secs(10)
                 .execute()
                 .await;
@@ -619,7 +618,6 @@ impl CoerceProcs for RealCoerceProcs {
         let result = CommandBuilder::new(bin)
             .args(args.iter().map(|a| (*a).to_string()))
             .current_dir(cwd)
-            .stdin_null()
             .timeout_secs(timeout_secs)
             .execute()
             .await;
@@ -628,11 +626,16 @@ impl CoerceProcs for RealCoerceProcs {
             Err(e) if crate::executor::spawn_error_kind(&e).is_some() => {
                 append_error(coerce_log, header, &format!("spawn failed: {e}")).await
             }
-            Err(_) => {
+            // Not necessarily a timeout: `execute()` folds the timeout in with
+            // join errors, stdin-write failures, and non-spawn execution
+            // errors. Report the error itself — the executor's timeout variant
+            // already says "command timed out after ..." — so the coerce log
+            // keeps distinguishing a real timeout from a silent tool failure.
+            Err(e) => {
                 append_error(
                     coerce_log,
                     header,
-                    &format!("timed out after {timeout_secs}s"),
+                    &format!("failed within {timeout_secs}s budget: {e}"),
                 )
                 .await
             }

@@ -117,7 +117,6 @@ pub struct CommandBuilder {
     env_vars: Vec<(String, String)>,
     timeout: Duration,
     stdin_data: Option<String>,
-    stdin_null: bool,
     cwd: Option<std::path::PathBuf>,
     visible_indices: HashSet<usize>,
 }
@@ -130,7 +129,6 @@ impl CommandBuilder {
             env_vars: Vec::new(),
             timeout: DEFAULT_TIMEOUT,
             stdin_data: None,
-            stdin_null: false,
             cwd: None,
             visible_indices: HashSet::new(),
         }
@@ -197,19 +195,13 @@ impl CommandBuilder {
         self.timeout(Duration::from_secs(secs))
     }
 
+    /// Write `data` to the child's stdin.
+    ///
+    /// Without this, the child's stdin is `/dev/null`. Tools that prompt then
+    /// read EOF and exit instead of blocking until the timeout expires — a
+    /// worker has no interactive input to give them.
     pub fn stdin(mut self, data: impl Into<String>) -> Self {
         self.stdin_data = Some(data.into());
-        self
-    }
-
-    /// Attach `/dev/null` to the child's stdin instead of inheriting the
-    /// worker's.
-    ///
-    /// An inherited stdin lets a tool that prompts block until the timeout
-    /// expires rather than seeing EOF and exiting. Ignored when [`Self::stdin`]
-    /// has supplied data to write.
-    pub fn stdin_null(mut self) -> Self {
-        self.stdin_null = true;
         self
     }
 
@@ -352,7 +344,7 @@ impl CommandBuilder {
 
         if self.stdin_data.is_some() {
             cmd.stdin(std::process::Stdio::piped());
-        } else if self.stdin_null {
+        } else {
             cmd.stdin(std::process::Stdio::null());
         }
         cmd.stdout(std::process::Stdio::piped());
@@ -667,12 +659,11 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn stdin_null_gives_the_child_eof_instead_of_blocking() {
+    async fn stdin_defaults_to_null_so_a_reader_gets_eof_instead_of_blocking() {
         use std::time::Instant;
 
         let start = Instant::now();
         let out = CommandBuilder::new("cat")
-            .stdin_null()
             .timeout(Duration::from_secs(10))
             .execute()
             .await
@@ -688,14 +679,13 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn stdin_data_still_reaches_the_child_when_null_is_also_set() {
+    async fn supplied_stdin_data_still_reaches_the_child() {
         let out = CommandBuilder::new("cat")
-            .stdin_null()
             .stdin("hello from stdin\n")
             .timeout(Duration::from_secs(10))
             .execute()
             .await
-            .expect("supplied stdin data must win over the null request");
+            .expect("supplied stdin data must still be piped to the child");
 
         assert_eq!(out.stdout, "hello from stdin\n");
     }
