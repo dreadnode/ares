@@ -14,6 +14,16 @@ use super::ALL_DEDUP_SETS;
 /// AD lockout observation windows. Longer values block the critical path.
 const QUARANTINE_DURATION_SECS: i64 = 300;
 
+/// Fallback observation window for the spray-attempt accumulator when the
+/// caller has not supplied the domain's real `lockoutObservationWindow`.
+///
+/// Deliberately longer than the 5-minute AD/GOAD default: the two failure
+/// modes are not symmetric. Remembering attempts for too long only costs
+/// spray throughput, while forgetting them too early locks the account and
+/// costs the whole domain. Override per-op with `ARES_SPRAY_WINDOW_SECS`,
+/// or pass `lockout_observation_window_mins` from `password_policy`.
+const SPRAY_WINDOW_DEFAULT_SECS: i64 = 1800;
+
 const CAPTURE_IN_FLIGHT_TTL_SECS: i64 = 180;
 
 /// Maximum number of entries kept in `state.hashes`. ESC8 relay + coerce
@@ -133,6 +143,20 @@ pub struct StateInner {
     // credential/hash lists, and the spray-injection path that builds
     // excluded_users.
     pub quarantined_principals: HashMap<String, DateTime<Utc>>,
+
+    // Per-domain spray budget accumulator: `domain` → (attempts already
+    // spent against each account, window expiry).
+    //
+    // Keyed by domain rather than principal because a spray tries the same
+    // password list against every account in the userlist, so the attempts
+    // burned *per account* are uniform across the domain.
+    //
+    // This exists because `attempts_used_per_account` is a tool argument:
+    // left to the LLM it is re-reported as 0 on every call, so N sprays in
+    // one observation window each stay under the per-call cap and still
+    // sum past the lockout threshold. Quarantine is the reactive half
+    // (stop hitting an account already locked); this is the proactive half.
+    pub spray_attempts: HashMap<String, (i64, DateTime<Utc>)>,
 
     // Per-trust counter: how many times the cross-forest forge dispatch
     // has been deferred waiting for the AES256 trust key to upsert.
@@ -296,6 +320,7 @@ impl StateInner {
             pending_tasks: HashMap::new(),
             completed_tasks: HashMap::new(),
             quarantined_principals: HashMap::new(),
+            spray_attempts: HashMap::new(),
             forge_aes_defers: HashMap::new(),
             forge_ntlm_fallback_attempts: HashMap::new(),
             forge_in_flight: HashMap::new(),
@@ -376,6 +401,46 @@ impl StateInner {
     /// signal. See [`is_principal_quarantined`] for which signals feed in.
     pub fn quarantine_principal(&mut self, username: &str, domain: &str) {
         self.quarantine_principal_for(username, domain, QUARANTINE_DURATION_SECS);
+    }
+
+    /// Attempts already spent against each account in `domain` during the
+    /// current observation window. Returns 0 once the window has lapsed, at
+    /// which point AD has reset `badPwdCount` and the budget is whole again.
+    pub fn spray_attempts_used(&self, domain: &str) -> i64 {
+        self.spray_attempts
+            .get(&domain.to_lowercase())
+            .filter(|(_, expiry)| Utc::now() < *expiry)
+            .map(|(used, _)| *used)
+            .unwrap_or(0)
+    }
+
+    /// Debit `attempts` from `domain`'s lockout budget for `window_secs`.
+    ///
+    /// Accumulates within a live window and restarts the count once the
+    /// previous window lapsed. The expiry is refreshed on every debit
+    /// because AD's observation window runs from the most recent bad
+    /// password, not from the first one in the burst.
+    pub fn record_spray_attempts(&mut self, domain: &str, attempts: i64, window_secs: i64) {
+        if attempts <= 0 {
+            return;
+        }
+        let key = domain.to_lowercase();
+        let now = Utc::now();
+        let carried = self
+            .spray_attempts
+            .get(&key)
+            .filter(|(_, expiry)| now < *expiry)
+            .map(|(used, _)| *used)
+            .unwrap_or(0);
+        let window = if window_secs > 0 {
+            window_secs
+        } else {
+            SPRAY_WINDOW_DEFAULT_SECS
+        };
+        self.spray_attempts.insert(
+            key,
+            (carried + attempts, now + chrono::Duration::seconds(window)),
+        );
     }
 
     /// Quarantine a principal for `duration_secs`. Caller chooses the window:
@@ -1300,6 +1365,83 @@ mod tests {
         assert!(!state.is_principal_quarantined("testuser2", "contoso.local"));
         // Same user, different domain not affected
         assert!(!state.is_principal_quarantined("testuser1", "fabrikam.local"));
+    }
+
+    #[test]
+    fn spray_attempts_accumulate_within_the_window() {
+        let mut state = StateInner::new("op-1".into());
+        assert_eq!(state.spray_attempts_used("essos.local"), 0);
+
+        state.record_spray_attempts("essos.local", 3, 300);
+        assert_eq!(state.spray_attempts_used("essos.local"), 3);
+
+        state.record_spray_attempts("essos.local", 2, 300);
+        assert_eq!(
+            state.spray_attempts_used("essos.local"),
+            5,
+            "a second spray in the same window must add to the tally, not replace it"
+        );
+    }
+
+    #[test]
+    fn spray_attempts_are_scoped_per_domain_and_case_insensitive() {
+        let mut state = StateInner::new("op-1".into());
+        state.record_spray_attempts("ESSOS.local", 4, 300);
+        assert_eq!(state.spray_attempts_used("essos.LOCAL"), 4);
+        assert_eq!(state.spray_attempts_used("north.sevenkingdoms.local"), 0);
+    }
+
+    #[test]
+    fn spray_attempts_lapse_with_the_observation_window() {
+        let mut state = StateInner::new("op-1".into());
+        // A window that has already closed — AD has reset badPwdCount, so the
+        // budget is whole again.
+        state.spray_attempts.insert(
+            "essos.local".into(),
+            (4, Utc::now() - chrono::Duration::seconds(1)),
+        );
+        assert_eq!(state.spray_attempts_used("essos.local"), 0);
+
+        // ...and a fresh debit starts the count over rather than carrying the
+        // lapsed 4 forward.
+        state.record_spray_attempts("essos.local", 2, 300);
+        assert_eq!(state.spray_attempts_used("essos.local"), 2);
+    }
+
+    #[test]
+    fn spray_attempts_ignores_a_zero_cost_call() {
+        let mut state = StateInner::new("op-1".into());
+        state.record_spray_attempts("essos.local", 0, 300);
+        assert!(state.spray_attempts.is_empty());
+    }
+
+    #[test]
+    fn repeated_sprays_never_exceed_the_lockout_threshold() {
+        // The essos regression, end to end. Policy is threshold 5 / 5-min
+        // observation window. Before the tally existed, every call re-reported
+        // attempts_used_per_account=0, so each one spent its full per-call cap
+        // and the second spray locked every account in the domain.
+        let mut state = StateInner::new("op-1".into());
+        let args = serde_json::json!({
+            "domain": "essos.local",
+            "lockout_threshold": 5,
+            "use_common_passwords": true,
+        });
+
+        let mut spent = 0i64;
+        for _ in 0..5 {
+            let used = state.spray_attempts_used("essos.local");
+            let cost = ares_tools::credential_access::spray_attempt_cost(&args, used) as i64;
+            state.record_spray_attempts("essos.local", cost, 300);
+            spent += cost;
+        }
+
+        assert_eq!(
+            spent, 4,
+            "five sprays in one window must spend the budget once (threshold 5 \
+             minus the 1-attempt safety buffer), then refuse"
+        );
+        assert!(spent < 5, "must stay under the lockout threshold");
     }
 
     #[test]

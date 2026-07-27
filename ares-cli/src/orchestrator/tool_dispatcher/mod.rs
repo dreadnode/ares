@@ -175,6 +175,90 @@ pub(super) async fn inject_excluded_users(
     }
 }
 
+/// Observation window to hold spray attempts against, in seconds.
+///
+/// Prefers the domain's real `lockoutObservationWindow` when `password_policy`
+/// supplied it, because that is the only value AD actually resets on.
+fn spray_window_secs(arguments: &serde_json::Value) -> i64 {
+    if let Some(mins) = arguments
+        .get("lockout_observation_window_mins")
+        .and_then(|v| v.as_i64())
+        .filter(|m| *m > 0)
+    {
+        return mins * 60;
+    }
+    super::config::parse_env("ARES_SPRAY_WINDOW_SECS", 1800)
+}
+
+/// Enforce the per-domain lockout budget across spray calls.
+///
+/// `password_spray` caps the passwords it tries per call, but the cap is
+/// computed from `attempts_used_per_account` — an argument the LLM supplies
+/// and, in practice, re-reports as 0 on every call. Several capped sprays in
+/// one observation window then sum past the lockout threshold, which is what
+/// locked the range out. This overrides that argument with the server-side
+/// tally and debits the tally by what the call is about to spend.
+///
+/// Mutates `arguments` in place; no-op for tools outside `SPRAY_TOOLS`, when
+/// `state` is unset, or when no domain arg is present.
+pub(super) async fn inject_spray_attempts(
+    state: &Option<SharedState>,
+    tool_name: &str,
+    arguments: &mut serde_json::Value,
+) {
+    if !SPRAY_TOOLS.contains(&tool_name) {
+        return;
+    }
+    let Some(state) = state else { return };
+    let Some(domain) = arguments
+        .get("domain")
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+    else {
+        return;
+    };
+
+    let tallied = state.read().await.spray_attempts_used(&domain);
+
+    let cost = if tool_name == "password_spray" {
+        // Keep the LLM's figure when it is the larger one: it may know about
+        // attempts this tally never saw (a prior operation, a manual spray).
+        let claimed = arguments
+            .get("attempts_used_per_account")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0);
+        let effective = tallied.max(claimed);
+        if let Some(obj) = arguments.as_object_mut() {
+            obj.insert(
+                "attempts_used_per_account".to_string(),
+                serde_json::Value::from(effective),
+            );
+        }
+        ares_tools::credential_access::spray_attempt_cost(arguments, effective) as i64
+    } else {
+        // `username_as_password` takes no budget arguments and always tries
+        // exactly one password per account, but that attempt still counts
+        // against the same threshold, so the tally has to see it.
+        1
+    };
+
+    if cost > 0 {
+        let window = spray_window_secs(arguments);
+        state
+            .write()
+            .await
+            .record_spray_attempts(&domain, cost, window);
+        debug!(
+            tool = %tool_name,
+            domain = %domain,
+            tallied,
+            cost,
+            window_secs = window,
+            "Debited per-domain spray lockout budget"
+        );
+    }
+}
+
 /// Extract a credential key from tool call arguments for rate limiting.
 /// Returns `Some("user@domain")` if the tool authenticates with credentials.
 pub(super) fn extract_credential_key(call: &ares_llm::ToolCall) -> Option<String> {

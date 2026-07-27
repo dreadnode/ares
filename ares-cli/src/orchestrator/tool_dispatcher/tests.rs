@@ -191,15 +191,41 @@ fn extract_credential_key_returns_none_when_username_missing() {
 fn extract_credential_key_lowercases_username_and_domain() {
     let call = ares_llm::ToolCall {
         id: "1".into(),
-        name: "password_spray".into(),
+        name: "secretsdump".into(),
         arguments: serde_json::json!({
             "username": "Administrator",
             "domain": "CONTOSO.LOCAL",
-            "passwords": ["P@ss"]
+            "target": "192.168.58.10"
         }),
     };
     let key = extract_credential_key(&call).expect("key extracted");
     assert_eq!(key, "administrator@contoso.local");
+}
+
+/// `password_spray` is listed in `AUTH_BEARING_TOOLS`, but its schema is
+/// `{target, domain, users_file, password, use_common_passwords}` — there is
+/// no `username`, so the throttle can never key it and never fires.
+///
+/// This previously read as throttled because the test fed it an invented
+/// `{username, domain, passwords}` shape the tool does not accept. Spray
+/// lockout is bounded by the per-account password cap in ares-tools instead;
+/// if that ever moves back here, this test is the tripwire.
+#[test]
+fn extract_credential_key_is_none_for_a_real_password_spray_call() {
+    let call = ares_llm::ToolCall {
+        id: "1".into(),
+        name: "password_spray".into(),
+        arguments: serde_json::json!({
+            "target": "192.168.58.10",
+            "domain": "contoso.local",
+            "users_file": "/tmp/users.txt",
+            "use_common_passwords": true
+        }),
+    };
+    assert!(
+        extract_credential_key(&call).is_none(),
+        "spray has no username arg — the throttle cannot key it"
+    );
 }
 
 #[test]

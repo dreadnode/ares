@@ -66,6 +66,15 @@ const SPRAY_DEFAULT_JITTER_SECS: i64 = 1;
 /// lockout line in case any account already has stale failed attempts.
 const SPRAY_LOCKOUT_BUFFER: i64 = 1;
 
+/// Passwords per account allowed when the caller waived the policy check with
+/// `acknowledge_no_policy=true`.
+///
+/// The waiver used to mean "unbounded", so a single call still sprayed the
+/// whole `DEFAULT_SPRAY_PASSWORDS` list — enough to blow past a 5-attempt
+/// threshold three times over. Not knowing the policy is a reason to spray
+/// *less*, not without limit.
+const NO_POLICY_SPRAY_CAP: usize = 2;
+
 /// Dump LSASS credentials remotely via `lsassy`.
 pub async fn lsassy(args: &Value) -> Result<ToolOutput> {
     let domain = optional_str(args, "domain");
@@ -498,11 +507,11 @@ pub async fn password_spray(args: &Value) -> Result<ToolOutput> {
     let attempts_used = optional_i64(args, "attempts_used_per_account").unwrap_or(0);
     let acknowledge_no_policy = optional_bool(args, "acknowledge_no_policy").unwrap_or(false);
 
-    if let Some(refusal) =
-        check_spray_budget(lockout_threshold, attempts_used, acknowledge_no_policy)
-    {
-        return Ok(refusal);
-    }
+    let password_cap =
+        match check_spray_budget(lockout_threshold, attempts_used, acknowledge_no_policy) {
+            SprayBudget::Refuse(refusal) => return Ok(*refusal),
+            SprayBudget::Allow(cap) => cap,
+        };
 
     // Use provided file or generate a default wordlist. When the caller
     // supplies a users_file, strip AD built-in always-disabled accounts so
@@ -524,7 +533,10 @@ pub async fn password_spray(args: &Value) -> Result<ToolOutput> {
         (Some(p), _) => p.to_string(),
         (None, true) => {
             tmp_password_file = format!("/tmp/spray_pwlist_{}.txt", std::process::id());
-            std::fs::write(&tmp_password_file, DEFAULT_SPRAY_PASSWORDS)?;
+            std::fs::write(
+                &tmp_password_file,
+                cap_password_list(DEFAULT_SPRAY_PASSWORDS, password_cap),
+            )?;
             tmp_password_file
         }
         (None, false) => anyhow::bail!(
@@ -562,36 +574,102 @@ pub async fn password_spray(args: &Value) -> Result<ToolOutput> {
 /// Enforce the lockout-aware preconditions for `password_spray`. Returns
 /// `Some(refusal_output)` when the call must be blocked, `None` when the
 /// caller is clear to spray.
+/// Outcome of the pre-spray lockout-budget check.
+///
+/// `Allow` carries the number of passwords the call may try *per account*.
+/// Returning a bare "yes" here is what locked the range out: the budget was
+/// computed correctly, then discarded, and the spray proceeded with the full
+/// `DEFAULT_SPRAY_PASSWORDS` list regardless. The budget is a cap, not a gate.
+enum SprayBudget {
+    Refuse(Box<ToolOutput>),
+    /// `None` means genuinely unlimited — AD reported no lockout policy.
+    Allow(Option<usize>),
+}
+
 fn check_spray_budget(
     lockout_threshold: Option<i64>,
     attempts_used: i64,
     acknowledge_no_policy: bool,
-) -> Option<ToolOutput> {
+) -> SprayBudget {
     match lockout_threshold {
         Some(t) => {
             // A threshold of 0 in AD means "no lockout" — spray freely.
             if t <= 0 {
-                return None;
+                return SprayBudget::Allow(None);
             }
             let budget = t - attempts_used - SPRAY_LOCKOUT_BUFFER;
             if budget < 1 {
-                return Some(spray_refusal(format!(
+                return SprayBudget::Refuse(Box::new(spray_refusal(format!(
                     "Refusing password_spray: lockout budget exhausted (threshold={t}, \
                      attempts_used_per_account={attempts_used}, safety_buffer={SPRAY_LOCKOUT_BUFFER}, \
                      remaining={budget}). Wait for the AD observation window to reset, \
                      reset attempts_used_per_account to 0, then resume."
-                )));
+                ))));
             }
-            None
+            SprayBudget::Allow(Some(budget as usize))
         }
-        None if acknowledge_no_policy => None,
-        None => Some(spray_refusal(
+        None if acknowledge_no_policy => SprayBudget::Allow(Some(NO_POLICY_SPRAY_CAP)),
+        None => SprayBudget::Refuse(Box::new(spray_refusal(
             "Refusing password_spray: no lockout policy provided. Run password_policy \
              first and pass lockout_threshold (and attempts_used_per_account if accounts \
              already have failed logons this window). To override when policy retrieval \
              is impossible, set acknowledge_no_policy=true — but expect lockouts."
                 .to_string(),
-        )),
+        ))),
+    }
+}
+
+/// Trim `list` to the first `cap` non-empty entries, or return it unchanged
+/// when there is no cap.
+fn cap_password_list(list: &str, cap: Option<usize>) -> String {
+    let Some(cap) = cap else {
+        return list.to_string();
+    };
+    let mut out: String = list
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .take(cap)
+        .map(|l| format!("{l}\n"))
+        .collect();
+    if out.is_empty() {
+        out.push('\n');
+    }
+    out
+}
+
+/// How many passwords a `password_spray` call with `args` will try *per
+/// account*, assuming `attempts_used` have already been spent against those
+/// accounts this observation window. `0` means the call will be refused or
+/// will bail before authenticating, so it costs no lockout budget.
+///
+/// The orchestrator debits its per-domain accumulator by this value before
+/// dispatch. It lives here, next to the logic it mirrors, so the estimate
+/// cannot drift from what [`password_spray`] actually spends — the whole
+/// failure mode this guards against is a budget that gets computed in one
+/// place and ignored in another.
+pub fn spray_attempt_cost(args: &Value, attempts_used: i64) -> usize {
+    let cap = match check_spray_budget(
+        optional_i64(args, "lockout_threshold"),
+        attempts_used,
+        optional_bool(args, "acknowledge_no_policy").unwrap_or(false),
+    ) {
+        SprayBudget::Refuse(_) => return 0,
+        SprayBudget::Allow(cap) => cap,
+    };
+
+    // Mirrors the `password_arg` match in `password_spray`.
+    match (
+        optional_str(args, "password"),
+        optional_bool(args, "use_common_passwords").unwrap_or(false),
+    ) {
+        // An explicit single password is one authentication per account.
+        (Some(_), _) => 1,
+        (None, true) => cap_password_list(DEFAULT_SPRAY_PASSWORDS, cap)
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .count(),
+        // Neither supplied — the tool bails before touching the network.
+        (None, false) => 0,
     }
 }
 
@@ -1466,28 +1544,154 @@ mod tests {
         assert!(out.success, "threshold=0 means no lockout policy in AD");
     }
 
-    #[test]
-    fn check_spray_budget_blocks_without_policy() {
-        let refusal = super::check_spray_budget(None, 0, false);
-        assert!(refusal.is_some());
+    fn budget_cap(
+        threshold: Option<i64>,
+        used: i64,
+        ack: bool,
+    ) -> Result<Option<usize>, &'static str> {
+        match super::check_spray_budget(threshold, used, ack) {
+            super::SprayBudget::Allow(cap) => Ok(cap),
+            super::SprayBudget::Refuse(_) => Err("refused"),
+        }
     }
 
     #[test]
-    fn check_spray_budget_allows_with_ack() {
-        assert!(super::check_spray_budget(None, 0, true).is_none());
+    fn check_spray_budget_blocks_without_policy() {
+        assert!(budget_cap(None, 0, false).is_err());
+    }
+
+    #[test]
+    fn check_spray_budget_allows_with_ack_but_caps_it() {
+        // The waiver used to mean "unbounded" — that is what let one call
+        // spray the whole default list and lock the account.
+        assert_eq!(
+            budget_cap(None, 0, true),
+            Ok(Some(super::NO_POLICY_SPRAY_CAP))
+        );
     }
 
     #[test]
     fn check_spray_budget_keeps_safety_buffer() {
-        // threshold=5, used=3 -> budget = 5-3-1 = 1 (allowed)
-        assert!(super::check_spray_budget(Some(5), 3, false).is_none());
+        // threshold=5, used=3 -> budget = 5-3-1 = 1 (allowed, cap 1)
+        assert_eq!(budget_cap(Some(5), 3, false), Ok(Some(1)));
         // threshold=5, used=4 -> budget = 0 (refused)
-        assert!(super::check_spray_budget(Some(5), 4, false).is_some());
+        assert!(budget_cap(Some(5), 4, false).is_err());
     }
 
     #[test]
-    fn check_spray_budget_threshold_zero_passes() {
-        assert!(super::check_spray_budget(Some(0), 100, false).is_none());
+    fn check_spray_budget_threshold_zero_is_the_only_unlimited_path() {
+        assert_eq!(budget_cap(Some(0), 100, false), Ok(None));
+    }
+
+    #[test]
+    fn check_spray_budget_cap_tracks_remaining_attempts() {
+        // The range policy that locked us out: threshold 5, nothing used yet.
+        assert_eq!(budget_cap(Some(5), 0, false), Ok(Some(4)));
+    }
+
+    #[test]
+    fn cap_password_list_truncates_to_the_budget() {
+        let got = super::cap_password_list(super::DEFAULT_SPRAY_PASSWORDS, Some(4));
+        assert_eq!(got.lines().count(), 4, "got: {got:?}");
+        assert!(got.starts_with("Password123!\n"));
+    }
+
+    #[test]
+    fn cap_password_list_is_a_noop_without_a_cap() {
+        let full = super::DEFAULT_SPRAY_PASSWORDS;
+        assert_eq!(super::cap_password_list(full, None), full);
+    }
+
+    #[test]
+    fn spray_attempt_cost_matches_the_capped_list_length() {
+        let args = serde_json::json!({
+            "lockout_threshold": 5,
+            "use_common_passwords": true,
+        });
+        // threshold 5 - used 0 - buffer 1 = 4
+        assert_eq!(super::spray_attempt_cost(&args, 0), 4);
+        assert_eq!(super::spray_attempt_cost(&args, 2), 2);
+    }
+
+    #[test]
+    fn spray_attempt_cost_is_zero_when_the_call_will_be_refused() {
+        let args = serde_json::json!({
+            "lockout_threshold": 5,
+            "use_common_passwords": true,
+        });
+        // budget = 5 - 4 - 1 = 0 -> refused, so it spends nothing.
+        assert_eq!(super::spray_attempt_cost(&args, 4), 0);
+
+        let no_policy = serde_json::json!({ "use_common_passwords": true });
+        assert_eq!(super::spray_attempt_cost(&no_policy, 0), 0);
+    }
+
+    #[test]
+    fn spray_attempt_cost_counts_an_explicit_password_as_one() {
+        let args = serde_json::json!({
+            "lockout_threshold": 5,
+            "password": "Password123!",
+        });
+        assert_eq!(
+            super::spray_attempt_cost(&args, 0),
+            1,
+            "an explicit password is a single authentication per account"
+        );
+    }
+
+    #[test]
+    fn spray_attempt_cost_is_zero_when_the_tool_would_bail() {
+        // Neither `password` nor `use_common_passwords` — password_spray
+        // bails before touching the network, so it costs no budget.
+        let args = serde_json::json!({ "lockout_threshold": 5 });
+        assert_eq!(super::spray_attempt_cost(&args, 0), 0);
+    }
+
+    #[test]
+    fn spray_attempt_cost_is_unbounded_only_when_ad_reports_no_lockout() {
+        let args = serde_json::json!({
+            "lockout_threshold": 0,
+            "use_common_passwords": true,
+        });
+        let full = super::DEFAULT_SPRAY_PASSWORDS
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .count();
+        assert_eq!(super::spray_attempt_cost(&args, 0), full);
+    }
+
+    #[test]
+    fn spray_attempt_cost_respects_the_no_policy_waiver_cap() {
+        let args = serde_json::json!({
+            "use_common_passwords": true,
+            "acknowledge_no_policy": true,
+        });
+        assert_eq!(
+            super::spray_attempt_cost(&args, 0),
+            super::NO_POLICY_SPRAY_CAP
+        );
+    }
+
+    #[test]
+    fn cap_password_list_never_exceeds_a_five_attempt_policy() {
+        // Regression: the default list is ~3x a 5-attempt lockout threshold,
+        // so an uncapped call locked the account inside a single spray.
+        let full_count = super::DEFAULT_SPRAY_PASSWORDS
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .count();
+        assert!(
+            full_count > 5,
+            "default list must be big enough for this to matter: {full_count}"
+        );
+        let capped = super::cap_password_list(super::DEFAULT_SPRAY_PASSWORDS, Some(4));
+        assert!(capped.lines().count() <= 4);
+    }
+
+    #[test]
+    fn cap_password_list_handles_a_cap_larger_than_the_list() {
+        let got = super::cap_password_list("a\nb\n", Some(99));
+        assert_eq!(got, "a\nb\n");
     }
 
     // --- sanitize_spray_userlist ---

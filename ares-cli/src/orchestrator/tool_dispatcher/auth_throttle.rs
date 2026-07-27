@@ -12,8 +12,15 @@ use tracing::debug;
 /// Before dispatching, callers must call `acquire()` which sleeps if the
 /// credential has been used too many times within the observation window.
 ///
-/// Default policy: max 3 auth attempts per credential per 60-second window.
-/// This stays well under the typical AD lockout threshold (5 in 5 min).
+/// Configured by the orchestrator; see `ARES_AUTH_THROTTLE_MAX_ATTEMPTS` and
+/// `ARES_AUTH_THROTTLE_WINDOW_SECS`.
+///
+/// This throttle only covers tools that name a single authenticating
+/// principal, because [`super::extract_credential_key`] keys on the
+/// `username` argument. `password_spray` has no `username` — it takes a
+/// `users_file` — so it is **not** throttled here despite appearing in
+/// `AUTH_BEARING_TOOLS`. Spray lockout is bounded at the tool instead, by
+/// the per-account password cap in `ares_tools::credential_access`.
 #[derive(Clone)]
 pub struct AuthThrottle {
     pub(super) inner: Arc<Mutex<AuthThrottleInner>>,

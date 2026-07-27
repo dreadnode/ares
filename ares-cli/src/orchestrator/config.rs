@@ -339,7 +339,7 @@ fn detect_local_ip(target: Option<&str>) -> Option<String> {
 }
 
 /// Parse an environment variable into a numeric type, falling back to `default`.
-fn parse_env<T: std::str::FromStr>(key: &str, default: T) -> T {
+pub(super) fn parse_env<T: std::str::FromStr>(key: &str, default: T) -> T {
     env::var(key)
         .ok()
         .and_then(|v| v.parse().ok())

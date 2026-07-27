@@ -526,11 +526,22 @@ async fn run_inner() -> Result<()> {
         .map(|rp| rp.config.model.clone())
         .unwrap_or_default();
 
-    // Credential auth throttle — prevents AD account lockout by rate-limiting
-    // auth-bearing tool calls per credential. Max 3 attempts per 30s window.
-    // AD lockout: 3 bad attempts / 30 min. With multiple concurrent agents,
-    // even correct passwords can fail if the account is already locked.
-    let auth_throttle = tool_dispatcher::AuthThrottle::new(3, std::time::Duration::from_secs(30));
+    // Credential auth throttle — rate-limits auth-bearing tool calls per
+    // credential so concurrent agents don't drive one account into lockout.
+    //
+    // The window is env-tunable because the safe value is a property of the
+    // target domain (`lockoutObservationWindow`), not something to hardcode.
+    // The previous default paired 3 attempts with 30 *seconds* while its
+    // comment claimed "3 bad attempts / 30 min" and the module doc claimed
+    // 60 seconds — three different numbers, none enforced as documented.
+    // Defaults stay at the long-standing 3/30s so this change is a
+    // documentation and tunability fix, not a silent throughput cut; raise
+    // ARES_AUTH_THROTTLE_WINDOW_SECS toward the domain's real observation
+    // window when spraying a lockout-enabled domain.
+    let auth_throttle = tool_dispatcher::AuthThrottle::new(
+        config::parse_env("ARES_AUTH_THROTTLE_MAX_ATTEMPTS", 3),
+        std::time::Duration::from_secs(config::parse_env("ARES_AUTH_THROTTLE_WINDOW_SECS", 30)),
+    );
 
     // Choose tool dispatch strategy:
     // ARES_TOOL_DISPATCH=local → in-process via ares_tools::dispatch()

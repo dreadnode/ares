@@ -23,8 +23,8 @@ use crate::orchestrator::task_queue::TaskQueue;
 
 use super::domain_validator::{check_cross_realm_auth, check_domain_arg};
 use super::{
-    extract_credential_key, inject_excluded_users, push_realtime_discoveries, AuthThrottle,
-    ToolExecRequest, ToolExecResponse,
+    extract_credential_key, inject_excluded_users, inject_spray_attempts,
+    push_realtime_discoveries, AuthThrottle, ToolExecRequest, ToolExecResponse,
 };
 
 /// Dispatches tool calls to workers via NATS request/reply.
@@ -190,6 +190,11 @@ impl ares_llm::ToolDispatcher for RedisToolDispatcher {
             // on to pass this consistently across many spray invocations.
             let mut arguments = call.arguments.clone();
             inject_excluded_users(&self.state, &call.name, &mut arguments).await;
+            // Per-domain lockout budget: overrides the LLM's
+            // `attempts_used_per_account` with the server-side tally so
+            // repeated sprays in one observation window cannot each start
+            // from zero and sum past the lockout threshold.
+            inject_spray_attempts(&self.state, &call.name, &mut arguments).await;
 
             let call_id = build_call_id(&call.name);
 

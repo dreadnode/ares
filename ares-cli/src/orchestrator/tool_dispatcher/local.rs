@@ -13,7 +13,8 @@ use crate::worker::credential_resolver::resolve_credentials;
 
 use super::domain_validator::{check_cross_realm_auth, check_domain_arg};
 use super::{
-    extract_credential_key, inject_excluded_users, push_realtime_discoveries, AuthThrottle,
+    extract_credential_key, inject_excluded_users, inject_spray_attempts,
+    push_realtime_discoveries, AuthThrottle,
 };
 
 /// Dispatches tool calls directly via `ares_tools::dispatch` without Redis.
@@ -114,6 +115,13 @@ impl ares_llm::ToolDispatcher for LocalToolDispatcher {
                 inject_excluded_users(&self.state, &call.name, &mut resolved_arguments).await;
             }
         }
+
+        // Spray lockout budget. Deliberately after the credential-resolution
+        // match rather than beside `inject_excluded_users`: the error arm
+        // rebuilds `resolved_arguments` from scratch, so injecting earlier
+        // would either be discarded or debit the tally twice. Here it runs
+        // exactly once, against the arguments actually dispatched.
+        inject_spray_attempts(&self.state, &call.name, &mut resolved_arguments).await;
 
         match ares_tools::dispatch(&effective_tool_name, &resolved_arguments).await {
             Ok(output) => {
