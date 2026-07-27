@@ -141,7 +141,7 @@ IF BloodHound or delegation tools find opportunities:
 | GenericAll on user | certipy_shadow OR pywhisker | NTLM hash |
 | GenericWrite on user | targeted_kerberoast | TGS hash to crack |
 | GenericWrite on user | certipy_shadow | NTLM hash |
-| ForceChangePassword | bloodyad_set_password (LDAP) → fall back to samr_change_password (SAMR/RPC) if LDAP `unicodePwd` modify is rejected | New password |
+| ForceChangePassword | bloodyad_set_password (LDAP); if the DC rejects the `unicodePwd` modify, use certipy_shadow / pywhisker instead | New password, or NT hash via shadow credentials |
 | GenericAll on computer | certipy_shadow OR RBCD | Admin access |
 | WriteDacl | dacl_edit (grant yourself GenericAll) | Escalate permissions |
 | WriteOwner | Take ownership → modify DACL | Escalate permissions |

@@ -74,9 +74,11 @@ auth — call `domain_admin_checker` to confirm DA reach (when relevant).
 **Password-reset fallback:** if `bloodyad_set_password` fails with
 `unicodePwd modify rejected`, `LDAP server is unwilling to perform`,
 `confidentiality required`, or any LDAP signing / channel-binding /
-LDAPS-required error, retry with `samr_change_password` against the same
-target. It performs the same ForceChangePassword primitive over SAMR/RPC
-instead of LDAP and is not subject to the DC's LDAP password-modify policy.
+LDAPS-required error, stop retrying the password write — the DC refuses
+password modification on that channel. Use `certipy_shadow` or `pywhisker`
+against the same target instead: both take the account over via
+`msDS-KeyCredentialLink` using the write access you already hold, and
+neither is subject to the password-modify policy.
 
 ### Reporting
 

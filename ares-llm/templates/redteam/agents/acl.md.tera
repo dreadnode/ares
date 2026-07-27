@@ -75,11 +75,15 @@ bloodyad_set_password(target="user", new_password="NewPass123!")
 
 If `bloodyad_set_password` fails with `unicodePwd modify rejected`, `LDAP
 server is unwilling to perform`, `confidentiality required`, or any LDAP
-signing / channel-binding / LDAPS-required error, retry over SAMR/RPC:
+signing / channel-binding / LDAPS-required error, do not retry the password
+write — the DC is refusing password modification on that channel. Take the
+account over without writing a password instead:
 ```
-samr_change_password(target_user="user", new_password="NewPass123!")
-→ Same ForceChangePassword primitive, different wire protocol
+certipy_shadow(account="user")  → NT hash via msDS-KeyCredentialLink
+pywhisker(target="user", action="add")  → PFX for PKINIT
 ```
+Both need the same write access you already hold and are unaffected by the
+DC's password-modify policy.
 
 ### AddMember (on groups)
 ```
@@ -162,7 +166,6 @@ Report to orchestrator via request_assistance:
 | pywhisker | Shadow credentials attack |
 | targeted_kerberoast | Set SPN and kerberoast |
 | bloodyad_set_password | Reset user password via LDAP (ForceChangePassword ACL) |
-| samr_change_password | Reset user password via SAMR/RPC — fallback when LDAP `unicodePwd` modify is rejected |
 | dacl_edit | Modify DACL permissions |
 | bloodyad_add_genericall | Grant GenericAll permission |
 | bloodyad_add_group_member | Add to groups |

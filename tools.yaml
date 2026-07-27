@@ -65,8 +65,8 @@ roles:
     provisioned_by: ansible/playbooks/ares/acl_abuse.yml
     tools:
       - category: ACL abuse
-        binaries: [bloodyAD, pywhisker, changepasswd.py]
-        fn_names: [bloodyad_add_group_member, bloodyad_set_password, samr_change_password, bloodyad_add_genericall, adminsd_holder_add_ace, gmsa_read_password_bloodyad, pywhisker]
+        binaries: [bloodyAD, pywhisker]
+        fn_names: [bloodyad_add_group_member, bloodyad_set_password, bloodyad_add_genericall, adminsd_holder_add_ace, gmsa_read_password_bloodyad, pywhisker]
       - category: Kerberoasting
         binaries: [targetedKerberoast]
         fn_names: [targeted_kerberoast]
