@@ -7,6 +7,7 @@
 //! Also polls the `ares:discoveries:{op_id}` LIST for real-time worker
 //! discoveries that arrive outside the task result flow.
 
+pub mod acl_grants;
 pub mod admin_checks;
 pub mod containment_recovery;
 pub mod discovery_polling;
@@ -246,6 +247,10 @@ pub async fn process_completed_task(
                 );
             }
         }
+    }
+
+    if let Some(ref payload) = result.result {
+        acl_grants::publish_granted_acl_edges(payload, dispatcher).await;
     }
 
     // Domain SID extraction: scan raw text for S-1-5-21-... patterns (from secretsdump).
@@ -1129,19 +1134,20 @@ fn is_ticket_grant_vuln(vuln_id: &str) -> bool {
 /// Used by the result-processing pre-flight gate: a shadow-cred task that
 /// comes back with INSUFF_ACCESS_RIGHTS on `msDS-KeyCredentialLink` gets
 /// one-shot abandoned instead of retrying to the generic MAX.
+///
+/// `writedacl` / `writeowner` are excluded for the same reason the dispatch
+/// matcher excludes them: those edges are exploited via `dacl_edit`, and
+/// abandoning the vuln on one opportunistic pywhisker attempt would kill the
+/// escalate-first path before `dacl_edit` ever runs.
 fn is_shadow_cred_vuln_type(vuln_type: &str) -> bool {
     matches!(
         vuln_type.to_lowercase().as_str(),
         "genericall"
             | "genericwrite"
-            | "writedacl"
-            | "writeowner"
             | "shadow_credentials"
             | "writeproperty"
             | "acl_genericall"
             | "acl_genericwrite"
-            | "acl_writedacl"
-            | "acl_writeowner"
             | "acl_writeproperty"
     )
 }

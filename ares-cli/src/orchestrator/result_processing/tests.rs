@@ -2493,8 +2493,6 @@ fn shadow_cred_vuln_type_matches_dispatch_shapes() {
         "genericall",
         "GenericAll",
         "genericwrite",
-        "writedacl",
-        "writeowner",
         "writeproperty",
         "shadow_credentials",
         "acl_genericall",
@@ -2514,6 +2512,12 @@ fn shadow_cred_vuln_type_rejects_non_acl_shapes() {
         "forcechangepassword",
         "allextendedrights", // deliberately excluded — not a valid shadow-cred primitive
         "acl_allextendedrights",
+        // WriteDacl/WriteOwner never dispatch shadow creds (no property
+        // write); abandoning them here would kill the dacl_edit escalation.
+        "writedacl",
+        "writeowner",
+        "acl_writedacl",
+        "acl_writeowner",
         "",
     ] {
         assert!(!is_shadow_cred_vuln_type(t), "should NOT match: {t}");
