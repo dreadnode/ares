@@ -136,18 +136,19 @@ vars:
   AWS_PROFILE: '{{.AWS_PROFILE | default (env "AWS_PROFILE") | default "lab"}}'
   AWS_REGION: '{{.AWS_REGION | default (env "AWS_DEFAULT_REGION") | default "us-east-1"}}'
   # Blue team on by default (BLUE_ENABLED=0 to skip). The default deployment
-  # target is kali-ares on EC2, where the box can reach plundr obs directly;
-  # running with blue off there just wastes a launch.
+  # target is kali-ares on EC2, where the box reaches the observability stack
+  # directly; running with blue off there just wastes a launch.
   BLUE_ENABLED: '{{.BLUE_ENABLED | default "1"}}'
   BLUE_LLM_MODEL: '{{.BLUE_LLM_MODEL | default ""}}'
   # Box-context observability endpoints — used when the orchestrator/workers
   # run on EC2 and need to reach Loki/Grafana themselves. GRAFANA_URL/LOKI_URL
   # in .env stay as the laptop's obs:forward localhost URLs; these are the
-  # values baked into the launch script that ships to the box. Direct Loki
-  # (not the Grafana datasource proxy) — proxy IDs get renumbered when
-  # datasources are recreated, direct DNS is stable.
-  EC2_LOKI_URL: '{{.EC2_LOKI_URL | default "https://loki.dev.plundr.ai"}}'
-  EC2_GRAFANA_URL: '{{.EC2_GRAFANA_URL | default "https://grafana.dev.plundr.ai"}}'
+  # values baked into the launch script that ships to the box. Site-specific,
+  # so they come from .env (see .env.example) — leave unset to use whatever
+  # Secrets Manager holds. Point them at Loki directly rather than the Grafana
+  # datasource proxy: proxy IDs get renumbered when datasources are recreated.
+  EC2_LOKI_URL: '{{.EC2_LOKI_URL}}'
+  EC2_GRAFANA_URL: '{{.EC2_GRAFANA_URL}}'
 
 tasks:
   default:

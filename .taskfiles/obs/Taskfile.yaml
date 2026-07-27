@@ -1,13 +1,14 @@
-# kubectl port-forward the plundr observability stack (Loki + Grafana) to
-# localhost so blue-team tooling on this laptop can query them via
-# LOKI_URL / GRAFANA_URL. The plundr ingress ELB is VPC-private, so
-# port-forward through the EKS API is the practical path in.
+# kubectl port-forward the observability stack (Loki + Grafana) to localhost
+# so blue-team tooling on this laptop can query them via LOKI_URL /
+# GRAFANA_URL. The ingress ELB is typically VPC-private, so port-forward
+# through the EKS API is the practical path in.
 #
 # Requires:
-#   * `plundr` context in kubeconfig
-#     aws eks update-kubeconfig --name dev-argonaut \
-#       --profile infrastructure --region us-west-2 --alias plundr
-#   * Fresh SSO token: `aws sso login --profile infrastructure`
+#   * An observability cluster context in kubeconfig, aliased to OBS_CONTEXT
+#     (default `obs`; set OBS_CONTEXT in .env to match your own alias)
+#     aws eks update-kubeconfig --name <your-obs-cluster> \
+#       --profile <your-obs-profile> --region <your-obs-region> --alias obs
+#   * Fresh SSO token for that profile: `aws sso login --profile <profile>`
 #
 # Once running:
 #   export LOKI_URL=http://localhost:3100
@@ -23,7 +24,7 @@ vars:
   WARN: '\033[0;33m[WARN]\033[0m'
   ERROR: '\033[0;31m[ERROR]\033[0m'
 
-  OBS_CONTEXT: '{{.OBS_CONTEXT | default "plundr"}}'
+  OBS_CONTEXT: '{{.OBS_CONTEXT | default "obs"}}'
   OBS_NAMESPACE: '{{.OBS_NAMESPACE | default "observability"}}'
   LOKI_SVC: '{{.LOKI_SVC | default "loki-gateway"}}'
   LOKI_SVC_PORT: '{{.LOKI_SVC_PORT | default "80"}}'
@@ -33,11 +34,11 @@ vars:
   GRAFANA_LOCAL_PORT: '{{.GRAFANA_LOCAL_PORT | default "3000"}}'
   # Unique substring for pgrep/pkill. Includes the context+namespace so we
   # don't stomp unrelated `kubectl port-forward` sessions the user is running.
-  PF_MATCH: 'kubectl.*--context {{.OBS_CONTEXT | default "plundr"}}.*-n {{.OBS_NAMESPACE | default "observability"}}.*port-forward'
+  PF_MATCH: 'kubectl.*--context {{.OBS_CONTEXT | default "obs"}}.*-n {{.OBS_NAMESPACE | default "observability"}}.*port-forward'
 
 tasks:
   forward:
-    desc: "Port-forward plundr Loki+Grafana to localhost:3100/3000 (Ctrl+C to stop)"
+    desc: "Port-forward Loki+Grafana to localhost:3100/3000 (Ctrl+C to stop)"
     silent: true
     cmds:
       - task: stop

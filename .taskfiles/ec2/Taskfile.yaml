@@ -1079,9 +1079,10 @@ tasks:
       # Observability endpoint overrides — take precedence over Secrets Manager
       # values so laptop-shape URLs in ares/api-keys (e.g. http://localhost:3000
       # from the obs:forward pattern) don't wedge on the EC2 box, which reaches
-      # observability via VPC peering to the plundr ingress instead.
-      EC2_GRAFANA_URL: '{{.EC2_GRAFANA_URL | default "https://grafana.dev.plundr.ai"}}'
-      EC2_LOKI_URL: '{{.EC2_LOKI_URL | default "https://loki.dev.plundr.ai"}}'
+      # the observability stack over its own network path instead. Set them in
+      # .env (see .env.example); unset keeps the Secrets Manager values.
+      EC2_GRAFANA_URL: '{{.EC2_GRAFANA_URL}}'
+      EC2_LOKI_URL: '{{.EC2_LOKI_URL}}'
       OPERATION_ID: '{{.OPERATION_ID | default ""}}'
       WAIT: '{{.WAIT | default "true"}}'
       POLL_INTERVAL: '{{.POLL_INTERVAL | default "30"}}'
@@ -1187,10 +1188,9 @@ tasks:
 
         # EC2 override: the secret's GRAFANA_URL/LOKI_URL are laptop-shape
         # (localhost:PORT from `task obs:forward`) and never pass the reachability
-        # probe below. On EC2 we always want the plundr ingress URL, which is
-        # reachable via VPC peering. Override iff the task var is set (default:
-        # the plundr ingress). Set EC2_GRAFANA_URL="" / EC2_LOKI_URL="" to keep
-        # the secret's value verbatim.
+        # probe below. On EC2 we want the box-reachable ingress URL instead.
+        # Override iff the task var is set; leave EC2_GRAFANA_URL /
+        # EC2_LOKI_URL unset to keep the secret's value verbatim.
         if [ -n "{{.EC2_GRAFANA_URL}}" ]; then
           GRAFANA_URL_VAL="{{.EC2_GRAFANA_URL}}"
         fi
@@ -1227,11 +1227,11 @@ tasks:
 
         # Parse host:port from URLs for box-side reachability probes. The
         # observability endpoints in Secrets Manager may live in a VPC the box
-        # can't reach (e.g. loki.dev.plundr.ai is behind the plundr VPC ingress
-        # while personal-account kali-ares is in a separate VPC with no
-        # peering). We probe TCP connect from the box and only inject the
-        # values if the probe succeeds — blue tools then fall through to their
-        # built-in defaults instead of wedging on a black-holed URL.
+        # can't reach (a private Loki ingress in one account while kali-ares
+        # sits in a separate VPC with no peering, say). We probe TCP connect
+        # from the box and only inject the values if the probe succeeds — blue
+        # tools then fall through to their built-in defaults instead of wedging
+        # on a black-holed URL.
         _url_host() { printf %s "$1" | awk -F/ '{print $3}' | cut -d: -f1; }
         _url_port() { case "$1" in http://*) echo 80 ;; https://*|*) echo 443 ;; esac; }
         GRAFANA_HOST=$(_url_host "$GRAFANA_URL_VAL"); GRAFANA_PORT=$(_url_port "$GRAFANA_URL_VAL")

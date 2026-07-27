@@ -45,7 +45,7 @@ Run Step 0, then **before drawing any conclusion** grep the tail of `orchestrato
 | Same `task_id` shape (e.g. `trust_raise_child_<hex>`) repeated with distinct hex per tick | Dedup key churning instead of blacklisting |
 | `Processing real-time discoveries count=1` ticking every 5s with no other state change | Orchestrator stuck in discovery-replay loop |
 | `Waiting for blue team to finish\.\.\. active_investigations=[0-9]+` ticking every 10s | **Not a wedge — red is DONE.** Op is holding open until blue investigations drain. Check `red_completed_at` / `red_completion_reason` in meta (see Step 0). |
-| `Loki request error \(retryable\)` / `Retrying Loki query after transient failure` flooding the tail | Blue team's external Loki (`loki.dev.plundr.ai`) is flapping; blue investigations grind to a crawl and starve out post-red op close. Not a red bug. |
+| `Loki request error \(retryable\)` / `Retrying Loki query after transient failure` flooding the tail | Blue team's external Loki (`$LOKI_URL`) is flapping; blue investigations grind to a crawl and starve out post-red op close. Not a red bug. |
 | `Tool binary not found \(spawn failed\) — removing from available tools` firing across many recon tools (nmap_scan, enumerate_users, enumerate_shares, smb_signing_check, username_as_password) in the first seconds of the op | Tool-pruning cascade — a prior spawn failure poisoned the worker's per-process `unavailable_tools` HashSet. Deploys don't clear it (workers don't restart); fix is `task ec2:restart EC2_NAME=kali-ares`. Full mechanism + confirmation queries in Step 3.5. |
 
 If you don't see these but the op is slow vs. baseline, escalate to Loki / Tempo for cross-tick LLM latency or tool-call stalls.

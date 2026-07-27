@@ -475,7 +475,7 @@ task ec2:exec EC2_NAME=kali-ares CMD='redis-cli ping'  # Arbitrary health check
 
 **K8s:**
 
-1. **Check Grafana** (`grafana.dev.plundr.ai`) for token usage and Loki errors.
+1. **Check Grafana** (`$GRAFANA_URL`) for token usage and Loki errors.
 2. **Check failed tasks**: `ares-cli --k8s ares-red ops tasks --latest --status failed`.
 3. **Verify binary sync**: `task remote:check`.
 4. **Inject state**: If the LLM is stuck on a specific discovery step, manually inject the result.

@@ -782,11 +782,11 @@ tasks:
       AWS_REGION: '{{.AWS_REGION | default (env "AWS_REGION") | default (env "AWS_DEFAULT_REGION") | default "us-west-1"}}'
       BLUE_ENABLED: '{{.BLUE_ENABLED | default "1"}}'
       BLUE_LLM_MODEL: '{{.BLUE_LLM_MODEL | default ""}}'
-      # Box-context obs endpoints — plundr defaults are reachable from
-      # kali-ares (verified TCP:443 + /api/v1/labels 200). Distinct from
-      # GRAFANA_URL/LOKI_URL which remain the laptop's obs:forward localhost.
-      EC2_GRAFANA_URL: '{{.EC2_GRAFANA_URL | default "https://grafana.dev.plundr.ai"}}'
-      EC2_LOKI_URL: '{{.EC2_LOKI_URL | default "https://loki.dev.plundr.ai"}}'
+      # Box-context obs endpoints — set in .env to URLs the EC2 box itself can
+      # reach. Distinct from GRAFANA_URL/LOKI_URL, which remain the laptop's
+      # obs:forward localhost. Unset keeps the Secrets Manager values.
+      EC2_GRAFANA_URL: '{{.EC2_GRAFANA_URL}}'
+      EC2_LOKI_URL: '{{.EC2_LOKI_URL}}'
       EC2_DEPLOYMENT: '{{.EC2_DEPLOYMENT | default "alpha-operator-range"}}'
       STRATEGY: '{{.STRATEGY | default "comprehensive"}}'
       RESOLVED_TARGETS:

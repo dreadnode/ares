@@ -132,20 +132,20 @@ task ares:config:check
 ## EC2 workflow (kali-ares)
 
 The default deployment for ops is EC2 (`kali-ares` in the `lab` account,
-`us-west-1`). Observability lives in the `infrastructure` account's plundr
-cluster; the box reaches it directly, the laptop reaches it via kubectl
-port-forward.
+`us-west-1`). Observability lives in a separate EKS cluster; the box reaches
+it directly, the laptop reaches it via kubectl port-forward.
 
 **One-time setup:**
 
 ```bash
-# 1. AWS SSO — lab (kali-ares + secret) + infrastructure (plundr EKS)
+# 1. AWS SSO — lab (kali-ares + secret) + the observability account
 aws sso login --profile lab
 aws sso login --profile infrastructure
 
-# 2. Register the plundr EKS context (for obs:forward)
-aws eks update-kubeconfig --profile infrastructure --region us-west-2 \
-  --name dev-argonaut --alias plundr
+# 2. Register the observability EKS context (for obs:forward). The alias must
+#    match OBS_CONTEXT (default `obs`; override it in .env).
+aws eks update-kubeconfig --profile infrastructure --region <obs-region> \
+  --name <obs-cluster> --alias obs
 
 # 3. Apple Silicon: enable Docker Desktop → Settings → General →
 #    "Use Rosetta for x86_64/amd64 emulation" (task ec2:deploy cross-compiles
@@ -189,7 +189,7 @@ score, MITRE technique coverage, and grade.
 **Blue tooling on the laptop (optional):**
 
 ```bash
-# Port-forward plundr Loki+Grafana to localhost so ares blue commands
+# Port-forward Loki+Grafana to localhost so ares blue commands
 # work from the laptop.
 task obs:forward     # keep running in a separate terminal
 task obs:status      # health check the tunnels
