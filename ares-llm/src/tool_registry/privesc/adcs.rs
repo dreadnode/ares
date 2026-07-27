@@ -299,6 +299,178 @@ pub fn definitions() -> Vec<ToolDefinition> {
             }),
         },
         ToolDefinition {
+            name: "certipy_esc1_full_chain".into(),
+            description:
+                "Execute the full ESC1 (enrollee supplies subject) exploit chain: request \
+                a certificate with an attacker-chosen UPN and SID, PKINIT-authenticate with it to \
+                recover the impersonated principal's NT hash, and — when `dc_host` is supplied and \
+                the KDC refuses the u2u hash recovery (KDC_ERR_ETYPE_NOSUPP on RC4-disabled KDCs) \
+                — DCSync krbtgt with the resulting ccache. Use this when the template allows the \
+                enrollee to supply the subject. Both `upn` and `sid` are REQUIRED: KB5014754 \
+                strict certificate mapping rejects a certificate whose Security-Extension SID does \
+                not match the impersonated account. Do NOT use this for an issuance-policy \
+                template — use certipy_esc13_full_chain, which enrolls plainly."
+                    .into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "domain": {
+                        "type": "string",
+                        "description": "Target domain (e.g. contoso.local)"
+                    },
+                    "username": {
+                        "type": "string",
+                        "description": "Username for authentication (needs Enroll rights on the template)"
+                    },
+                    "password": {
+                        "type": "string",
+                        "description": "Password for authentication"
+                    },
+                    "ca": {
+                        "type": "string",
+                        "description": "Certificate Authority name (e.g. 'contoso-CA01-CA')"
+                    },
+                    "template": {
+                        "type": "string",
+                        "description": "ESC1-vulnerable certificate template name"
+                    },
+                    "dc_ip": {
+                        "type": "string",
+                        "description": "Domain controller IP address"
+                    },
+                    "upn": {
+                        "type": "string",
+                        "description": "UPN to impersonate (e.g. 'administrator@contoso.local'). REQUIRED — this is the enrollee-supplied subject."
+                    },
+                    "sid": {
+                        "type": "string",
+                        "description": "Object SID of the impersonated principal (domain SID + '-500' for Administrator). REQUIRED — KB5014754 strict mapping denies the PKINIT if it is absent or does not match the UPN."
+                    },
+                    "target": {
+                        "type": "string",
+                        "description": "CA server IP or hostname for certificate enrollment. REQUIRED when the CA is on a different host than the DC — otherwise certipy hits the DC's RPC endpoint and fails with ept_s_not_registered. `ca_host` and `target_ip` are accepted as aliases."
+                    },
+                    "dc_host": {
+                        "type": "string",
+                        "description": "DC FQDN (e.g. 'dc01.contoso.local') enabling the DCSync tail when certipy auth obtains a TGT but cannot recover the NT hash. Must be the FQDN — an IP yields KDC_ERR_S_PRINCIPAL_UNKNOWN."
+                    }
+                },
+                "required": ["domain", "username", "password", "ca", "template", "dc_ip", "upn", "sid"]
+            }),
+        },
+        ToolDefinition {
+            name: "certipy_esc3_full_chain".into(),
+            description: "Execute the full ESC3 (enrollment agent) exploit chain: enroll an \
+                enrollment-agent certificate from `agent_template` (the template carrying the \
+                Certificate Request Agent application policy), use that agent certificate to \
+                request a second certificate on behalf of `on_behalf_of` from a SEPARATE \
+                `on_behalf_template`, then authenticate with the resulting PFX to obtain NT \
+                hashes. ESC3 needs BOTH templates — a single certipy_request cannot do it, \
+                because the on-behalf-of request must be signed by the agent PFX produced by the \
+                first enrollment."
+                .into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "domain": {
+                        "type": "string",
+                        "description": "Target domain (e.g. contoso.local)"
+                    },
+                    "username": {
+                        "type": "string",
+                        "description": "Username for authentication (needs Enroll rights on the agent template)"
+                    },
+                    "password": {
+                        "type": "string",
+                        "description": "Password for authentication"
+                    },
+                    "ca": {
+                        "type": "string",
+                        "description": "Certificate Authority name (e.g. 'contoso-CA01-CA')"
+                    },
+                    "dc_ip": {
+                        "type": "string",
+                        "description": "Domain controller IP address"
+                    },
+                    "agent_template": {
+                        "type": "string",
+                        "description": "Enrollment-agent template — the one with the 'Certificate Request Agent' application policy. This is the ESC3-vulnerable template reported by certipy_find."
+                    },
+                    "on_behalf_template": {
+                        "type": "string",
+                        "description": "Template used for the on-behalf-of request. Defaults to 'User' (the universal client-auth template). Override when the on-behalf-of target is a custom template that requires agent-signed enrollment.",
+                        "default": "User"
+                    },
+                    "on_behalf_of": {
+                        "type": "string",
+                        "description": "sAMAccountName of the principal to impersonate. Defaults to 'administrator'.",
+                        "default": "administrator"
+                    },
+                    "nt_domain": {
+                        "type": "string",
+                        "description": "NetBIOS/flat domain name for certipy's -on-behalf-of (NETBIOS\\principal). Derived from the first label of `domain`, uppercased, when omitted — certipy rejects an FQDN here and the CA then denies the request. `flat_name` is accepted as an alias."
+                    },
+                    "target": {
+                        "type": "string",
+                        "description": "CA server IP or hostname for certificate enrollment. REQUIRED when the CA is on a different host than the DC. `ca_host` and `target_ip` are accepted as aliases."
+                    }
+                },
+                "required": ["domain", "username", "password", "ca", "dc_ip", "agent_template"]
+            }),
+        },
+        ToolDefinition {
+            name: "certipy_esc13_full_chain".into(),
+            description: "Execute the full ESC13 (issuance policy linked to a group) exploit \
+                chain: enroll the template AS THE LOW-PRIVILEGE USER with a PLAIN request, \
+                PKINIT-authenticate, then DCSync krbtgt with the now-elevated ccache. The \
+                template's issuance-policy OID is linked via msDS-OIDToGroupLink to a privileged \
+                group, so the DC stamps that group's SID into the enrolling user's own PKINIT TGT \
+                — there is no impersonation. This tool therefore takes NO `upn`/`sid` override: \
+                passing ESC1-style subject parameters makes the CA policy module deny the request \
+                (0x80070547) and trips KB5014754 strict mapping, because the certificate's \
+                Security-Extension SID is the requester's. Use certipy_esc1_full_chain instead \
+                when the template lets the enrollee supply the subject."
+                .into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "domain": {
+                        "type": "string",
+                        "description": "Target domain (e.g. contoso.local)"
+                    },
+                    "username": {
+                        "type": "string",
+                        "description": "Low-privilege user to enroll as — the OID-linked group lands in THIS account's ticket"
+                    },
+                    "password": {
+                        "type": "string",
+                        "description": "Password for authentication"
+                    },
+                    "ca": {
+                        "type": "string",
+                        "description": "Certificate Authority name (e.g. 'contoso-CA01-CA')"
+                    },
+                    "template": {
+                        "type": "string",
+                        "description": "Template whose issuance policy OID is linked to a privileged group"
+                    },
+                    "dc_ip": {
+                        "type": "string",
+                        "description": "Domain controller IP address"
+                    },
+                    "target": {
+                        "type": "string",
+                        "description": "CA server IP or hostname for certificate enrollment. REQUIRED when the CA is on a different host than the DC. `ca_host` and `target_ip` are accepted as aliases."
+                    },
+                    "dc_host": {
+                        "type": "string",
+                        "description": "DC FQDN (e.g. 'dc01.contoso.local') for the DCSync tail — without it the chain stops after PKINIT and only reports the enrolling user's hash. Must be the FQDN — an IP yields KDC_ERR_S_PRINCIPAL_UNKNOWN."
+                    }
+                },
+                "required": ["domain", "username", "password", "ca", "template", "dc_ip"]
+            }),
+        },
+        ToolDefinition {
             name: "certipy_ca".into(),
             description:
                 "Manage a Certificate Authority using Certipy. Can add yourself as a \

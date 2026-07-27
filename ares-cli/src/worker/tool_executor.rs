@@ -736,6 +736,91 @@ async fn send_reply(
 mod tests {
     use super::*;
 
+    // ── Dispatch/registry parity ──────────────────────────────────────────
+
+    /// The worker dispatch table, read at compile time so the parity test
+    /// below reads the real match arms rather than a hand-kept copy of them.
+    const DISPATCH_SRC: &str = include_str!("../../../ares-tools/src/lib.rs");
+
+    /// Names of the `certipy_*_full_chain` arms in `ares_tools::dispatch`.
+    fn dispatchable_full_chains() -> std::collections::BTreeSet<&'static str> {
+        DISPATCH_SRC
+            .lines()
+            .filter(|line| line.contains("=>"))
+            .filter_map(|line| {
+                let name = line.split('"').nth(1)?;
+                (name.starts_with("certipy_") && name.ends_with("_full_chain")).then_some(name)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn every_dispatchable_certipy_chain_is_advertised_to_the_llm() {
+        use ares_llm::tool_registry::{tools_for_role, AgentRole};
+
+        let dispatched = dispatchable_full_chains();
+        assert!(
+            dispatched.len() >= 5,
+            "dispatch scrape found only {dispatched:?} — the extraction broke, not the registry"
+        );
+
+        let advertised: std::collections::BTreeSet<String> = tools_for_role(AgentRole::Privesc)
+            .into_iter()
+            .map(|t| t.name)
+            .collect();
+
+        let missing: Vec<&str> = dispatched
+            .iter()
+            .copied()
+            .filter(|name| !advertised.contains(*name))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "ares_tools::dispatch routes {missing:?} but the privesc tool registry does not \
+             advertise them — the model cannot call them. Add a ToolDefinition in \
+             ares-llm/src/tool_registry/privesc/adcs.rs."
+        );
+    }
+
+    #[test]
+    fn advertised_certipy_chains_have_required_selection_parameters() {
+        use ares_llm::tool_registry::{tools_for_role, AgentRole};
+
+        let tools = tools_for_role(AgentRole::Privesc);
+        let required = |name: &str| -> Vec<String> {
+            tools
+                .iter()
+                .find(|t| t.name == name)
+                .unwrap_or_else(|| panic!("privesc registry missing {name}"))
+                .input_schema
+                .get("required")
+                .and_then(|v| v.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|v| v.as_str().map(str::to_string))
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+
+        let esc1 = required("certipy_esc1_full_chain");
+        assert!(esc1.contains(&"upn".to_string()) && esc1.contains(&"sid".to_string()));
+
+        let esc3 = required("certipy_esc3_full_chain");
+        assert!(esc3.contains(&"agent_template".to_string()));
+
+        let esc13_props = tools
+            .iter()
+            .find(|t| t.name == "certipy_esc13_full_chain")
+            .expect("privesc registry missing certipy_esc13_full_chain")
+            .input_schema["properties"]
+            .as_object()
+            .expect("esc13 schema properties")
+            .clone();
+        assert!(!esc13_props.contains_key("upn"));
+        assert!(!esc13_props.contains_key("sid"));
+    }
+
     // ── Per-worker concurrency (Serial-loop wedge fix) ────────────────────
 
     /// Env-var tests serialise on this mutex — process-wide `set_var` is
