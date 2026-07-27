@@ -66,6 +66,10 @@ Fixed in this change:
   the high-volume ACL graph drained first every run and starved the MSSQL
   families (which fell back to 10/11). ACL de-dominated to 3; MSSQL
   impersonation/linked lifted to 3. This is the "rebalance the ACL flood" lever.
+  Correction: until the `acl_abuse`/`dacl_abuse` key mismatch was fixed, this
+  lever reached no ACL driver at all — `auto_dacl_abuse` looked up `dacl_abuse`
+  and fell through to the default weight of 5. Both spellings now resolve to the
+  same weight, so the rebalance above takes effect for the first time.
 
 | # | Family | Gap | Fix |
 |---|---|---|---|

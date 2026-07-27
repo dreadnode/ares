@@ -14,7 +14,7 @@ ignored.
 | Explore all discovered attack paths | `strategy: comprehensive` |
 | Avoid noisy techniques (spray, secretsdump) | `strategy: stealth` |
 | Force ADCS-only path | `exclude_techniques: [secretsdump, dc_secretsdump]` + `technique_weights: {esc1: 1}` |
-| Force ACL chain path | `exclude_techniques: [secretsdump, dc_secretsdump, mssql_access]` + `technique_weights: {acl_abuse: 1}` |
+| Force ACL candidate paths | `exclude_techniques: [secretsdump, dc_secretsdump, mssql_access]` + `technique_weights: {acl_abuse: 1}` |
 | Keep exploiting after DA | `continue_after_da: true` |
 
 ## How It Works
@@ -92,7 +92,7 @@ lab, see `docs/goad-checklist.md`.)
 | constrained_delegation | 5 | S4U2Self/S4U2Proxy |
 | unconstrained_delegation | 5 | TGT capture via coercion |
 | rbcd | 6 | Resource-based constrained delegation |
-| acl_abuse | 6 | AD ACL chain exploitation |
+| acl_abuse | 6 | AD ACL edge enumeration + ranked candidate paths |
 | smb_signing_disabled | 7 | NTLM relay via unsigned SMB |
 
 Because secretsdump (weight 2) fires before ADCS (weight 5) or delegation
@@ -122,7 +122,7 @@ password spraying.
 | Technique | Weight | Rationale |
 |-----------|--------|-----------|
 | esc1 / esc4 | 1 | Certificate abuse is quiet |
-| acl_abuse | 1 | ACL changes don't trigger most alerts |
+| acl_abuse | 1 | ACL reads and writes don't trigger most alerts |
 | constrained_delegation | 2 | Kerberos-only, low noise |
 | unconstrained_delegation | 2 | Coercion is brief |
 | credential_reuse | 3 | Single auth attempt per target |
@@ -187,7 +187,7 @@ keys:
 | `esc1` | ADCS ESC1 (enrollee supplies SAN) |
 | `esc4` | ADCS ESC4 (template owner can modify) |
 | `esc8` | ADCS ESC8 (HTTP enrollment + relay) |
-| `acl_abuse` | AD ACL chain exploitation |
+| `acl_abuse` | AD ACL edge enumeration + ranked candidate paths (alias: `dacl_abuse`) |
 | `kerberoast` | SPN-based hash extraction |
 | `asrep_roast` | AS-REP roasting (no-preauth accounts) |
 | `password_spray` | Password spraying / username-as-password |

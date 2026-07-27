@@ -110,13 +110,20 @@ impl DeferredTask {
 
     /// Stable signature used by the deferred queue's producer-side dedup
     /// (Bug J). Hashes the task-identity tuple `(task_type, target_role,
-    /// technique, target_ip, credential_key)` — explicitly excluding the
-    /// timestamp so two automation rules dispatching equivalent work in
-    /// the same tick produce the same signature and only the first
-    /// reaches the ZSET.
+    /// technique, target_ip, credential_key, finding_key)` — explicitly
+    /// excluding the timestamp so two automation rules dispatching
+    /// equivalent work in the same tick produce the same signature and only
+    /// the first reaches the ZSET.
     ///
-    /// Fields outside the tuple (priority, vuln_id, etc.) are
-    /// intentionally NOT in the hash: a higher-priority duplicate isn't
+    /// `finding_key` is `(vuln_id, acl_type, source_user, target_user)`,
+    /// read from the payload root and from a nested `step` object. Without
+    /// it every ACL edge in a domain — same technique, same DC, same
+    /// credential, different principals — hashes identically, so paths
+    /// 2..N collapse into path 1 and the callers retire them as
+    /// successfully dispatched. That is the whole 19,453-collected /
+    /// 1-acted-on gap.
+    ///
+    /// Priority stays out of the hash: a higher-priority duplicate isn't
     /// useful — the existing copy will run and produce the same outcome.
     pub fn signature(&self) -> String {
         use std::collections::hash_map::DefaultHasher;
@@ -146,13 +153,51 @@ impl DeferredTask {
                 }
             })
             .unwrap_or_default();
+        let finding_key = self.finding_key();
         let mut h = DefaultHasher::new();
         self.task_type.hash(&mut h);
         self.target_role.hash(&mut h);
         technique.to_lowercase().hash(&mut h);
         target_ip.hash(&mut h);
         credential_key.hash(&mut h);
+        finding_key.hash(&mut h);
         format!("{:x}", h.finish())
+    }
+
+    /// `(vuln_id, acl_type, source_user, target_user)` joined into one
+    /// lowercase key, empty when the payload carries none of them.
+    ///
+    /// Looks at the payload root first, then at a nested `step` object —
+    /// `auto_acl_chain_follow` wraps the whole edge under `step`, so a
+    /// root-only lookup would leave every chain step signature-identical.
+    fn finding_key(&self) -> String {
+        let step = self.payload.get("step");
+        let field = |name: &str| -> String {
+            self.payload
+                .get(name)
+                .or_else(|| step.and_then(|s| s.get(name)))
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_lowercase()
+        };
+        let first_of = |a: &str, b: &str| -> String {
+            let v = field(a);
+            if v.is_empty() {
+                field(b)
+            } else {
+                v
+            }
+        };
+        let parts = [
+            field("vuln_id"),
+            field("acl_type"),
+            first_of("source_user", "source"),
+            first_of("target_user", "target"),
+        ];
+        if parts.iter().all(String::is_empty) {
+            return String::new();
+        }
+        parts.join("|")
     }
 }
 
@@ -1124,6 +1169,114 @@ mod tests {
             1000.0,
         );
         assert_ne!(a.signature(), b.signature());
+    }
+
+    fn make_acl_task(
+        vuln_id: &str,
+        acl_type: &str,
+        source_user: &str,
+        target_user: &str,
+    ) -> DeferredTask {
+        DeferredTask {
+            priority: 3,
+            enqueue_time: 1000.0,
+            task_type: "acl_chain_step".into(),
+            target_role: "acl".into(),
+            payload: serde_json::json!({
+                "technique": "dacl_abuse",
+                "acl_type": acl_type,
+                "vuln_id": vuln_id,
+                "source_user": source_user,
+                "target_user": target_user,
+                "target_ip": "192.168.58.10",
+                "domain": "contoso.local",
+                "credential": {
+                    "username": "alice",
+                    "domain": "contoso.local",
+                },
+            }),
+            source_agent: "orchestrator".into(),
+        }
+    }
+
+    #[test]
+    fn signature_differs_on_vuln_id() {
+        let a = make_acl_task("acl_genericall_alice_bob", "genericall", "alice", "bob");
+        let b = make_acl_task("acl_genericall_alice_carol", "genericall", "alice", "bob");
+        assert_ne!(a.signature(), b.signature());
+    }
+
+    #[test]
+    fn signature_differs_on_acl_type() {
+        let a = make_acl_task("v1", "genericall", "alice", "bob");
+        let b = make_acl_task("v1", "writedacl", "alice", "bob");
+        assert_ne!(a.signature(), b.signature());
+    }
+
+    #[test]
+    fn signature_differs_on_acl_source_user() {
+        let a = make_acl_task("v1", "genericall", "alice", "bob");
+        let b = make_acl_task("v1", "genericall", "carol", "bob");
+        assert_ne!(a.signature(), b.signature());
+    }
+
+    #[test]
+    fn signature_differs_on_acl_target_user() {
+        let a = make_acl_task("v1", "genericall", "alice", "bob");
+        let b = make_acl_task("v1", "genericall", "alice", "carol");
+        assert_ne!(a.signature(), b.signature());
+    }
+
+    #[test]
+    fn signature_differs_across_acl_edges_sharing_dc_and_credential() {
+        let edges = [
+            make_acl_task("acl_genericall_alice_bob", "genericall", "alice", "bob"),
+            make_acl_task("acl_writedacl_alice_carol", "writedacl", "alice", "carol"),
+            make_acl_task("acl_writeowner_alice_admin", "writeowner", "alice", "admin"),
+        ];
+        let sigs: std::collections::HashSet<String> =
+            edges.iter().map(DeferredTask::signature).collect();
+        assert_eq!(sigs.len(), edges.len());
+    }
+
+    #[test]
+    fn signature_reads_acl_identity_from_nested_step() {
+        let mut a = make_acl_task("", "", "", "");
+        a.payload = serde_json::json!({
+            "technique": "acl_chain_step",
+            "step": {"source": "alice", "target": "bob", "acl_type": "genericall", "vuln_id": "v1"},
+            "credential": {"username": "alice", "domain": "contoso.local"},
+        });
+        let mut b = a.clone();
+        b.payload = serde_json::json!({
+            "technique": "acl_chain_step",
+            "step": {"source": "alice", "target": "carol", "acl_type": "genericall", "vuln_id": "v2"},
+            "credential": {"username": "alice", "domain": "contoso.local"},
+        });
+        assert_ne!(a.signature(), b.signature());
+    }
+
+    #[test]
+    fn signature_unchanged_for_payloads_without_acl_identity() {
+        let a = make_signed_task(
+            "credential_access",
+            "credential_access",
+            "secretsdump",
+            "192.168.58.20",
+            "carol",
+            "fabrikam.local",
+            1000.0,
+        );
+        let b = make_signed_task(
+            "credential_access",
+            "credential_access",
+            "secretsdump",
+            "192.168.58.20",
+            "carol",
+            "fabrikam.local",
+            9000.0,
+        );
+        assert_eq!(a.signature(), b.signature());
     }
 
     #[test]

@@ -76,6 +76,8 @@ operation:
   # vulnerability_priorities defaults of 10/11 and were effectively starved.
   # ACL is de-dominated to 3 and the MSSQL impersonation/linked-server families
   # are lifted to 3 so all three families compete on a level footing.
+  # `acl_abuse` and `dacl_abuse` are aliases: either spelling sets the priority
+  # for (and can exclude) the ACL driver.
   technique_weights:
     esc1: 1
     esc4: 1
@@ -216,7 +218,7 @@ agents:
 
   acl:
     model: "gpt-5.2"
-    max_steps: 150  # ACL analysis requires complex path finding
+    max_steps: 150  # ACL enumeration is wide: many edges, each needing a separate primitive
     pod_selector: "ares.dreadnode.io/role=acl"
     # Provisioned by: ansible/playbooks/ares/acl_abuse.yml → dreadnode.nimbus_range.acl_tools
     capabilities:

@@ -4,7 +4,7 @@
 //! returns a `ToolOutput` produced by running a CLI subprocess via
 //! `CommandBuilder`.
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use serde_json::Value;
 
 use crate::args::{optional_bool, optional_str, required_str};
@@ -252,24 +252,86 @@ pub async fn smb_signing_check(args: &Value) -> Result<ToolOutput> {
         .await
 }
 
+/// Temp-directory prefix for BloodHound collector output.
+const BLOODHOUND_DIR_PREFIX: &str = "ares-bloodhound-";
+
+/// How long a collector output directory is kept before it is reclaimed.
+/// Comfortably longer than the collector's own 300s timeout plus the parse
+/// that follows, so pruning can never race a concurrent collection.
+const BLOODHOUND_DIR_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(2 * 60 * 60);
+
+/// Reclaim BloodHound output directories left by earlier collections.
+///
+/// The parser reads these after the tool returns, so the tool cannot delete
+/// its own; without this every collection leaks its JSON onto the worker's
+/// disk for the life of the pod.
+fn prune_stale_bloodhound_dirs() {
+    let Ok(entries) = std::fs::read_dir(std::env::temp_dir()) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let is_ours = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.starts_with(BLOODHOUND_DIR_PREFIX));
+        if !is_ours || !path.is_dir() {
+            continue;
+        }
+        let stale = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.elapsed().ok())
+            .is_some_and(|age| age > BLOODHOUND_DIR_MAX_AGE);
+        if stale {
+            let _ = std::fs::remove_dir_all(&path);
+        }
+    }
+}
+
 /// Collect BloodHound data via bloodhound-python.
 ///
 /// Required args: `domain`, `username`, `password`, `dc_ip`
+///
+/// bloodhound-python writes its `*_users.json` / `*_groups.json` /
+/// `*_computers.json` / `*_domains.json` documents into the process working
+/// directory. The run is pinned to a private directory and the path echoed as
+/// [`crate::parsers::BLOODHOUND_OUTPUT_DIR_MARKER`] so
+/// [`crate::parsers::parse_bloodhound_collection`] can turn the ACEs into ACL
+/// edges instead of the collection being write-only.
 pub async fn run_bloodhound(args: &Value) -> Result<ToolOutput> {
     let domain = required_str(args, "domain")?;
     let username = required_str(args, "username")?;
     let password = required_str(args, "password")?;
     let dc_ip = required_str(args, "dc_ip")?;
 
-    CommandBuilder::new("bloodhound-python")
+    prune_stale_bloodhound_dirs();
+
+    let output_dir = std::env::temp_dir().join(format!(
+        "{BLOODHOUND_DIR_PREFIX}{}",
+        uuid::Uuid::new_v4().simple()
+    ));
+    std::fs::create_dir_all(&output_dir)
+        .with_context(|| format!("creating BloodHound output dir {}", output_dir.display()))?;
+
+    let mut output = CommandBuilder::new("bloodhound-python")
         .flag("-d", domain)
         .flag("-u", username)
         .flag("-p", password)
         .flag("-ns", dc_ip)
         .flag("-c", "All")
+        .current_dir(&output_dir)
         .timeout_secs(300)
         .execute()
-        .await
+        .await?;
+
+    output.stdout.push_str(&format!(
+        "\n{}{}\n",
+        crate::parsers::BLOODHOUND_OUTPUT_DIR_MARKER,
+        output_dir.display()
+    ));
+    Ok(output)
 }
 
 /// Run an LDAP search query against a target.

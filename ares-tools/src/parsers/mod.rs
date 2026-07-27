@@ -3,6 +3,7 @@
 //! Extract structured discovery data (hosts, open ports, credentials, etc.)
 //! from raw CLI tool output without relying on LLM interpretation.
 
+mod bloodhound;
 mod certipy;
 mod cracker;
 mod credential_tools;
@@ -19,6 +20,9 @@ mod users_shares;
 use serde_json::{json, Value};
 
 // Re-export all public parser functions at module level.
+pub use bloodhound::{
+    parse_bloodhound_collection, parse_bloodhound_documents, BLOODHOUND_OUTPUT_DIR_MARKER,
+};
 pub use certipy::{parse_certipy_esc1_chain, parse_certipy_find};
 pub use cracker::parse_cracker_output;
 pub use credential_tools::{
@@ -143,9 +147,11 @@ pub fn parse_tool_output(tool_name: &str, output: &str, params: &Value) -> Value
         "enumerate_shares" => {
             set_if_nonempty(&mut discoveries, "shares", parse_netexec_shares(output))
         }
-        "run_bloodhound" => {
-            // BloodHound collection doesn't produce immediate discoveries
-        }
+        "run_bloodhound" => set_if_nonempty(
+            &mut discoveries,
+            "vulnerabilities",
+            parse_bloodhound_collection(output, params),
+        ),
         "secretsdump"
         | "secretsdump_kerberos"
         | "forge_inter_realm_and_dump"

@@ -492,7 +492,7 @@ Vulnerabilities are processed in priority order:
 | 3 | ADCS_ESC8 | Direct DA path |
 | 4 | krbtgt_hash | Golden ticket |
 | 5 | domain_admin_hash | Immediate DA |
-| 6 | acl_abuse | Path to DA |
+| 6 | acl_abuse | Ranked candidate path (enumeration + per-edge abuse; escalation to DA unproven) |
 | 7 | unconstrained_delegation | Token capture |
 | 8 | constrained_delegation | Impersonation |
 | 9 | rbcd | Impersonation |

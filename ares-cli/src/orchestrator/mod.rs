@@ -10,6 +10,7 @@
 //!      discovery poller, state refresh
 //!   6. Enter the main orchestration loop
 
+mod acl_graph;
 mod automation;
 mod automation_spawner;
 #[cfg(feature = "blue")]

@@ -10,7 +10,7 @@ use serde_json::{json, Value};
 // ── Well-known SID prefixes ────────────────────────────────────────────────
 
 /// Map well-known SIDs to friendly names.
-fn well_known_sid(sid: &str) -> Option<&'static str> {
+pub(super) fn well_known_sid(sid: &str) -> Option<&'static str> {
     match sid {
         "S-1-0-0" => Some("Nobody"),
         "S-1-1-0" => Some("Everyone"),
@@ -22,6 +22,33 @@ fn well_known_sid(sid: &str) -> Option<&'static str> {
         "S-1-5-32-545" => Some("BUILTIN\\Users"),
         _ => None,
     }
+}
+
+/// True for ACE trustees whose rights are not an escalation primitive: system
+/// principals, and groups you would already need domain-level control to
+/// authenticate as. Shared with the BloodHound collector parser so both ACL
+/// sources filter identically.
+pub(super) fn is_unactionable_acl_source(source_name: &str) -> bool {
+    let lower = source_name.to_lowercase();
+    matches!(
+        source_name,
+        "SYSTEM"
+            | "BUILTIN\\Administrators"
+            | "BUILTIN\\Users"
+            | "SELF"
+            | "Nobody"
+            | "ANONYMOUS LOGON"
+    ) || matches!(
+        lower.as_str(),
+        "administrators"
+            | "domain admins"
+            | "enterprise admins"
+            | "key admins"
+            | "enterprise key admins"
+            | "account operators"
+            | "domain controllers"
+            | "enterprise domain controllers"
+    )
 }
 
 // ── Access mask flags ──────────────────────────────────────────────────────
@@ -477,24 +504,7 @@ pub fn parse_acl_enumeration(output: &str, params: &Value) -> Vec<Value> {
 
             // Skip well-known system SIDs and high-privilege groups that aren't
             // actionable (you'd already need DA to abuse them).
-            let source_lower = source_name.to_lowercase();
-            if matches!(
-                source_name,
-                "SYSTEM"
-                    | "BUILTIN\\Administrators"
-                    | "BUILTIN\\Users"
-                    | "SELF"
-                    | "Nobody"
-                    | "ANONYMOUS LOGON"
-            ) || source_lower == "administrators"
-                || source_lower == "domain admins"
-                || source_lower == "enterprise admins"
-                || source_lower == "key admins"
-                || source_lower == "enterprise key admins"
-                || source_lower == "account operators"
-                || source_lower == "domain controllers"
-                || source_lower == "enterprise domain controllers"
-            {
+            if is_unactionable_acl_source(source_name) {
                 continue;
             }
 

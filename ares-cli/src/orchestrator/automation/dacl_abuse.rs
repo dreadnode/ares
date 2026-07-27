@@ -17,6 +17,7 @@ use tokio::sync::watch;
 use tracing::{debug, info, warn};
 
 use crate::dedup::is_ghost_machine_account;
+use crate::orchestrator::acl_graph::{self, MAX_ACL_DISPATCH_PER_TICK};
 use crate::orchestrator::dispatcher::{Dispatcher, SubmissionOutcome};
 use crate::orchestrator::state::*;
 
@@ -35,7 +36,7 @@ pub async fn auto_dacl_abuse(dispatcher: Arc<Dispatcher>, mut shutdown: watch::R
             break;
         }
 
-        if !dispatcher.is_technique_allowed("dacl_abuse") {
+        if !dispatcher.is_technique_allowed("acl_abuse") {
             continue;
         }
 
@@ -47,7 +48,7 @@ pub async fn auto_dacl_abuse(dispatcher: Arc<Dispatcher>, mut shutdown: watch::R
         for item in work {
             let payload = build_dacl_payload(&item);
 
-            let priority = dispatcher.effective_priority("dacl_abuse");
+            let priority = dispatcher.effective_priority("acl_abuse");
             // Mark dedup on Submitted OR Deferred to prevent the 30s tick from
             // re-emitting identical work each cycle and bloating the deferred
             // ZSET past its per-type cap (which silently drops entries). Only
@@ -119,6 +120,13 @@ pub(crate) fn build_dacl_payload(item: &DaclWork) -> serde_json::Value {
 ///
 /// Extracted for testability: scans `discovered_vulnerabilities` for ACL-type
 /// vulns that have a matching credential and haven't been processed yet.
+///
+/// The result is ordered by the ACL graph's hop distance to a high-value
+/// terminal and truncated to [`MAX_ACL_DISPATCH_PER_TICK`]. Edges that reach
+/// nothing privileged sort last but are not dropped — they surface once the
+/// privileged ones have been dispatched and dedup'd. Both ACL drivers share
+/// one 50-slot `acl_chain_step` deferred bucket, so an unbounded 310-path
+/// enumeration would otherwise starve every other technique.
 pub(crate) fn collect_dacl_work(state: &StateInner) -> Vec<DaclWork> {
     if state.credentials.is_empty() {
         return Vec::new();
@@ -131,19 +139,7 @@ pub(crate) fn collect_dacl_work(state: &StateInner) -> Vec<DaclWork> {
     for vuln in state.discovered_vulnerabilities.values() {
         let vtype = vuln.vuln_type.to_lowercase();
 
-        let is_acl_vuln = vtype.contains("forcechangepassword")
-            || vtype.contains("genericwrite")
-            || vtype.contains("writedacl")
-            || vtype.contains("writeowner")
-            || vtype.contains("genericall")
-            || vtype.contains("self_membership")
-            || vtype.contains("write_membership")
-            || vtype.contains("writeproperty")
-            || vtype.contains("allextendedrights")
-            || vtype.contains("addmember")
-            || vtype.contains("addself");
-
-        if !is_acl_vuln {
+        if !acl_graph::is_acl_vuln_type(&vtype) {
             continue;
         }
 
@@ -286,6 +282,14 @@ pub(crate) fn collect_dacl_work(state: &StateInner) -> Vec<DaclWork> {
         }
     }
 
+    let analysis = acl_graph::analyze(state);
+    items.sort_by(|a, b| {
+        analysis
+            .rank_of(&a.vuln_id)
+            .cmp(&analysis.rank_of(&b.vuln_id))
+            .then_with(|| a.vuln_id.cmp(&b.vuln_id))
+    });
+    items.truncate(MAX_ACL_DISPATCH_PER_TICK);
     items
 }
 
@@ -1129,6 +1133,91 @@ mod tests {
         let work = collect_dacl_work(&state);
         assert_eq!(work.len(), 1);
         assert_eq!(work[0].domain, "fabrikam.local");
+    }
+
+    #[tokio::test]
+    async fn collect_orders_privileged_reaching_edges_first() {
+        let shared = SharedState::new("test".into());
+        {
+            let mut state = shared.write().await;
+            state
+                .credentials
+                .push(make_credential("alice", "contoso.local"));
+
+            let mut dead_end = acl_details("alice", "carol", "contoso.local");
+            dead_end.insert("target_type".to_string(), serde_json::json!("User"));
+            state.discovered_vulnerabilities.insert(
+                "aaa_dead_end".to_string(),
+                make_vuln("aaa_dead_end", "WriteDacl", dead_end),
+            );
+
+            let mut to_da = acl_details("alice", "Domain Admins", "contoso.local");
+            to_da.insert("target_type".to_string(), serde_json::json!("Group"));
+            state.discovered_vulnerabilities.insert(
+                "zzz_to_da".to_string(),
+                make_vuln("zzz_to_da", "AddMember", to_da),
+            );
+        }
+
+        let state = shared.read().await;
+        let work = collect_dacl_work(&state);
+        assert_eq!(work.len(), 2);
+        assert_eq!(
+            work[0].vuln_id, "zzz_to_da",
+            "the edge that reaches Domain Admins must dispatch before the dead end"
+        );
+        assert_eq!(work[1].vuln_id, "aaa_dead_end");
+    }
+
+    #[tokio::test]
+    async fn collect_caps_dispatch_at_the_per_tick_budget() {
+        let shared = SharedState::new("test".into());
+        {
+            let mut state = shared.write().await;
+            state
+                .credentials
+                .push(make_credential("alice", "contoso.local"));
+            for i in 0..(MAX_ACL_DISPATCH_PER_TICK * 4) {
+                let details = acl_details("alice", &format!("target{i}"), "contoso.local");
+                let vuln = make_vuln(&format!("vuln-flood-{i:03}"), "WriteDacl", details);
+                state
+                    .discovered_vulnerabilities
+                    .insert(vuln.vuln_id.clone(), vuln);
+            }
+        }
+
+        let state = shared.read().await;
+        let work = collect_dacl_work(&state);
+        assert_eq!(work.len(), MAX_ACL_DISPATCH_PER_TICK);
+    }
+
+    #[tokio::test]
+    async fn collect_is_deterministic_across_calls() {
+        let shared = SharedState::new("test".into());
+        {
+            let mut state = shared.write().await;
+            state
+                .credentials
+                .push(make_credential("alice", "contoso.local"));
+            for i in 0..20 {
+                let details = acl_details("alice", &format!("target{i}"), "contoso.local");
+                let vuln = make_vuln(&format!("vuln-det-{i:03}"), "WriteDacl", details);
+                state
+                    .discovered_vulnerabilities
+                    .insert(vuln.vuln_id.clone(), vuln);
+            }
+        }
+
+        let state = shared.read().await;
+        let first: Vec<String> = collect_dacl_work(&state)
+            .iter()
+            .map(|w| w.vuln_id.clone())
+            .collect();
+        let second: Vec<String> = collect_dacl_work(&state)
+            .iter()
+            .map(|w| w.vuln_id.clone())
+            .collect();
+        assert_eq!(first, second);
     }
 
     #[tokio::test]

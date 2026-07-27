@@ -63,7 +63,7 @@ results back. The orchestrator never executes exploitation tools directly.
 - **RECON**: Network scanning, BloodHound, user/share enumeration
 - **CREDENTIAL_ACCESS**: secretsdump, kerberoasting, AS-REP roasting, password spray
 - **CRACKER**: Offline hash cracking with hashcat/john
-- **ACL**: BloodHound path analysis, ACL abuse (shadow credentials, WriteDACL)
+- **ACL**: BloodHound collection, ACL edge enumeration and ranked candidate paths, per-edge ACL primitives (shadow credentials, WriteDACL)
 - **PRIVESC**: ADCS (ESC1-8), delegation attacks, MSSQL exploitation
 - **LATERAL**: PSExec/WMI/WinRM, credential harvesting from compromised hosts
 - **COERCION**: Responder, ntlmrelayx, PetitPotam
@@ -341,7 +341,7 @@ ares --k8s ares-red ops export-detection --latest
 
 1. **Initial Access** - RECON scans, COERCION starts Responder, CREDENTIAL_ACCESS sprays
 2. **Enumeration** - BloodHound, Kerberoasting, AS-REP roasting, hash cracking
-3. **Privilege Escalation** - ADCS exploitation, delegation attacks, ACL abuse
+3. **Privilege Escalation** - ADCS exploitation, delegation attacks, ACL edge abuse (individual rights; end-to-end ACL escalation is not yet demonstrated)
 4. **Lateral Movement** - PSExec/WMI/WinRM, credential harvesting on compromised hosts
 5. **Domain Dominance** - DCSync, golden ticket generation, operation report
 
