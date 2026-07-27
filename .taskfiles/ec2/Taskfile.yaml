@@ -584,6 +584,9 @@ tasks:
     preconditions:
       - sh: '[ -n "{{.OPERATION_ID}}" ] || [ "{{.LATEST}}" = "true" ]'
         msg: "Provide OPERATION_ID=op-xxx or LATEST=true"
+      - &ares-cli-executable
+        sh: 'command -v "{{.ARES_CLI}}" >/dev/null 2>&1'
+        msg: "ARES_CLI ({{.ARES_CLI}}) not found/executable — build it first (cargo build --release -p ares-cli) or pass ARES_CLI=./target/debug/ares"
     cmd: >-
       {{.ARES_CLI}} --ec2 {{.EC2_NAME}} --ec2-profile {{.AWS_PROFILE}} --ec2-region {{.AWS_REGION}}
       ops stop
@@ -596,6 +599,8 @@ tasks:
     vars:
       OPERATION_ID: '{{.OPERATION_ID | default ""}}'
       ALL: '{{.ALL | default "false"}}'
+    preconditions:
+      - *ares-cli-executable
     cmd: >-
       {{.ARES_CLI}} --ec2 {{.EC2_NAME}} --ec2-profile {{.AWS_PROFILE}} --ec2-region {{.AWS_REGION}}
       ops kill
@@ -613,6 +618,7 @@ tasks:
     preconditions:
       - sh: '[ -n "{{.OPERATION_ID}}" ] || [ "{{.LATEST}}" = "true" ]'
         msg: "Provide OPERATION_ID=op-xxx or LATEST=true"
+      - *ares-cli-executable
     cmd: >-
       {{.ARES_CLI}} --ec2 {{.EC2_NAME}} --ec2-profile {{.AWS_PROFILE}} --ec2-region {{.AWS_REGION}}
       ops teardown
@@ -833,6 +839,8 @@ tasks:
       LATEST: '{{.LATEST | default "true"}}'
       JSON: '{{.JSON | default "false"}}'
       DIFF: '{{.DIFF | default "false"}}'
+    preconditions:
+      - *ares-cli-executable
     cmd: >-
       {{.ARES_CLI}} --ec2 {{.EC2_NAME}} --ec2-profile {{.AWS_PROFILE}} --ec2-region {{.AWS_REGION}}
       ops loot
@@ -847,6 +855,8 @@ tasks:
     vars:
       OPERATION_ID: '{{.OPERATION_ID | default ""}}'
       LATEST: '{{.LATEST | default "true"}}'
+    preconditions:
+      - *ares-cli-executable
     cmd: >-
       {{.ARES_CLI}} --ec2 {{.EC2_NAME}} --ec2-profile {{.AWS_PROFILE}} --ec2-region {{.AWS_REGION}}
       ops runtime
@@ -948,6 +958,8 @@ tasks:
     silent: true
     vars:
       LATEST: '{{.LATEST | default "false"}}'
+    preconditions:
+      - *ares-cli-executable
     cmd: >-
       {{.ARES_CLI}} --ec2 {{.EC2_NAME}} --ec2-profile {{.AWS_PROFILE}} --ec2-region {{.AWS_REGION}}
       ops list
@@ -984,8 +996,7 @@ tasks:
       # (2>&1 || true swallows "No such file or directory") and the poll loop
       # reports "no status yet" until MAX_WAIT — an op looks like it never
       # started when it is actually running fine on the box.
-      - sh: 'test -x {{.ARES_CLI}}'
-        msg: "ARES_CLI ({{.ARES_CLI}}) not found/executable — build it first (cargo build --release -p ares-cli) or pass ARES_CLI=./target/debug/ares"
+      - *ares-cli-executable
     cmds:
       - |
         if [ -z "{{.OPERATION_ID}}" ] && [ "{{.LATEST}}" != "true" ]; then
@@ -1099,6 +1110,9 @@ tasks:
       STRATEGY: '{{.STRATEGY | default ""}}'
       EXCLUDE_TECHNIQUES: '{{.EXCLUDE_TECHNIQUES | default ""}}'
       CONTINUE_AFTER_DA: '{{.CONTINUE_AFTER_DA | default ""}}'
+    preconditions:
+      - sh: '[ "{{.WAIT}}" != "true" ] || command -v "{{.ARES_CLI}}" >/dev/null 2>&1'
+        msg: "WAIT=true hands off to ec2:watch, which needs a host-native ARES_CLI ({{.ARES_CLI}}) — build it (cargo build --release -p ares-cli), pass ARES_CLI=./target/debug/ares, or launch with WAIT=false"
     cmds:
       - |
         {{.AWS_PROFILE_EXPORT}}
