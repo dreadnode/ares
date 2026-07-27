@@ -125,7 +125,7 @@ fn vuln_type_is_preauth(vtype: &str) -> bool {
 /// Matches on substrings so we cover both the bare form (e.g.
 /// `allextendedrights`) and the prefixed form emitted by acl_discovery
 /// (`acl_allextendedrights_<sid>_<target>`).
-fn is_acl_style_vuln_type(vtype: &str) -> bool {
+pub(crate) fn is_acl_style_vuln_type(vtype: &str) -> bool {
     let v = vtype.to_ascii_lowercase();
     v.contains("genericall")
         || v.contains("genericwrite")

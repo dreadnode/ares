@@ -23,6 +23,7 @@ const DEDUP_SHADOW_CREDS: &str = "shadow_creds";
 /// Interval: 30s.
 pub(crate) struct ShadowCredWorkItem {
     pub vuln_id: String,
+    pub vuln_type: String,
     pub dedup_key: String,
     pub source_user: String,
     pub target_user: String,
@@ -90,6 +91,7 @@ pub(crate) fn select_shadow_credentials_work(state: &StateInner) -> Vec<ShadowCr
 
             Some(ShadowCredWorkItem {
                 vuln_id: vuln.vuln_id.clone(),
+                vuln_type: vuln.vuln_type.clone(),
                 dedup_key,
                 source_user,
                 target_user,
@@ -170,8 +172,9 @@ pub async fn auto_shadow_credentials(
             let payload = build_shadow_credentials_payload(&item);
 
             let priority = dispatcher.effective_priority("shadow_credentials");
+            let role = shadow_cred_role(&item.vuln_type);
             match dispatcher
-                .throttled_submit("exploit", "privesc", payload, priority)
+                .throttled_submit("exploit", role, payload, priority)
                 .await
             {
                 Ok(Some(task_id)) => {
@@ -180,6 +183,7 @@ pub async fn auto_shadow_credentials(
                         vuln_id = %item.vuln_id,
                         source = %item.source_user,
                         target = %item.target_user,
+                        role = %role,
                         "Shadow credentials attack dispatched"
                     );
                     dispatcher
@@ -226,6 +230,27 @@ fn extract_target_user(
         .or_else(|| details.get("account_name"))
         .and_then(|v| v.as_str())
         .map(|s| s.to_string())
+}
+
+/// Pick the worker role for a shadow-credentials dispatch.
+///
+/// An ACL-derived edge goes to the `acl` worker, which holds `pywhisker` — the
+/// same `msDS-KeyCredentialLink` primitive as `certipy_shadow` — *plus*
+/// `dacl_edit` and `bloodyad_add_genericall`. The `privesc` worker has
+/// `certipy_shadow` but no DACL primitive at all, and no bloodyAD in its
+/// container image, so an `INSUFF_ACCESS_RIGHTS` denial there is terminal:
+/// the agent has no tool with which to grant itself the missing property
+/// write. On the `acl` worker the same denial is recoverable in-task.
+///
+/// This mirrors the inference `task_builders` already applies to generic
+/// exploit dispatches, which this automation used to bypass by hard-coding
+/// `privesc`.
+fn shadow_cred_role(vuln_type: &str) -> &'static str {
+    if crate::orchestrator::dispatcher::task_builders::is_acl_style_vuln_type(vuln_type) {
+        "acl"
+    } else {
+        "privesc"
+    }
 }
 
 /// Returns `true` if the given vulnerability type is a candidate for shadow
@@ -287,6 +312,23 @@ mod tests {
     use std::collections::HashMap;
 
     // is_shadow_cred_candidate
+
+    #[test]
+    fn shadow_cred_role_routes_acl_edges_to_the_acl_worker() {
+        // The acl worker holds pywhisker (same primitive) plus dacl_edit and
+        // bloodyad_add_genericall, so an INSUFF_ACCESS_RIGHTS denial there is
+        // recoverable in-task. privesc has certipy_shadow and no DACL tool.
+        assert_eq!(shadow_cred_role("genericall"), "acl");
+        assert_eq!(shadow_cred_role("GenericWrite"), "acl");
+        assert_eq!(shadow_cred_role("acl_genericall"), "acl");
+        assert_eq!(shadow_cred_role("writeproperty"), "acl");
+        assert_eq!(shadow_cred_role("acl_writeproperty"), "acl");
+    }
+
+    #[test]
+    fn shadow_cred_role_keeps_non_acl_types_on_privesc() {
+        assert_eq!(shadow_cred_role("shadow_credentials"), "privesc");
+    }
 
     #[test]
     fn is_shadow_cred_candidate_positive() {
@@ -555,6 +597,7 @@ mod tests {
     fn shadow_cred_work_with_credential() {
         let work = ShadowCredWorkItem {
             vuln_id: "vuln-sc-001".to_string(),
+            vuln_type: "genericall".to_string(),
             dedup_key: format!("{DEDUP_SHADOW_CREDS}:vuln-sc-001"),
             source_user: "testuser".to_string(),
             target_user: "dc01$".to_string(),
@@ -585,6 +628,7 @@ mod tests {
     fn shadow_cred_work_with_hash_fallback() {
         let work = ShadowCredWorkItem {
             vuln_id: "vuln-sc-002".to_string(),
+            vuln_type: "genericall".to_string(),
             dedup_key: format!("{DEDUP_SHADOW_CREDS}:vuln-sc-002"),
             source_user: "svc_admin".to_string(),
             target_user: "sql01$".to_string(),
@@ -622,6 +666,7 @@ mod tests {
     fn shadow_cred_work_no_dc_ip() {
         let work = ShadowCredWorkItem {
             vuln_id: "vuln-sc-003".to_string(),
+            vuln_type: "genericall".to_string(),
             dedup_key: format!("{DEDUP_SHADOW_CREDS}:vuln-sc-003"),
             source_user: "testuser".to_string(),
             target_user: "web01$".to_string(),
