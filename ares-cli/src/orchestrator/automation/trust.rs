@@ -74,6 +74,52 @@ fn forest_trust_vuln_id(source_domain: &str, target_domain: &str) -> String {
     )
 }
 
+/// Resolve the FQDN to bake into the forged inter-realm TGS request for
+/// `target_domain`, falling back to `target_dc_ip` when no usable record
+/// exists.
+///
+/// Two records must never be selected, because both yield a service ticket
+/// request the target KDC rejects identically on every retry:
+///
+///   - The zone apex (`hostname == target_domain`). No `cifs/<bare-domain>`
+///     SPN is registered, so the request returns KDC_ERR_S_PRINCIPAL_UNKNOWN.
+///   - A DC of a *child* domain. `dc02.child.contoso.local` passes a naive
+///     `ends_with(".contoso.local")`, but asking the parent KDC for a
+///     principal in the child realm returns KDC_ERR_WRONG_REALM.
+///
+/// So the suffix test requires exactly one label to remain after stripping
+/// `.{target_domain}` — the host must sit *directly* in the target domain.
+fn resolve_target_dc_hostname(
+    hosts: &[ares_core::models::Host],
+    target_dc_ip: &str,
+    target_domain: &str,
+) -> String {
+    let target_lc = target_domain.to_lowercase();
+    let non_apex = |hostname: &str| {
+        let lc = hostname.to_lowercase();
+        !lc.is_empty() && lc != target_lc
+    };
+    // Subsumes `non_apex`: the apex carries no `.{target}` suffix at all.
+    let in_target_domain = |hostname: &str| {
+        hostname
+            .to_lowercase()
+            .strip_suffix(&format!(".{target_lc}"))
+            .is_some_and(|label| !label.is_empty() && !label.contains('.'))
+    };
+
+    hosts
+        .iter()
+        .find(|h| h.ip == target_dc_ip && non_apex(&h.hostname))
+        .map(|h| h.hostname.clone())
+        .or_else(|| {
+            hosts
+                .iter()
+                .find(|h| (h.is_dc || h.detect_dc()) && in_target_domain(&h.hostname))
+                .map(|h| h.hostname.clone())
+        })
+        .unwrap_or_else(|| target_dc_ip.to_string())
+}
+
 /// Maps a `source → target` trust escalation to its scoreboard tokens:
 /// the `vuln_id`, the `vuln_type` enum used by the exploit gate, and the
 /// human-readable note prefix written into the vulnerability details.
@@ -1238,28 +1284,7 @@ pub async fn auto_trust_follow(dispatcher: Arc<Dispatcher>, mut shutdown: watch:
             // last resort.
             let target_dc_hostname = {
                 let s = dispatcher.state.read().await;
-                let target_lc = item.target_domain.to_lowercase();
-                let non_apex = |hostname: &str| {
-                    let lc = hostname.to_lowercase();
-                    !lc.is_empty() && lc != target_lc
-                };
-                s.hosts
-                    .iter()
-                    .find(|h| h.ip == target_dc_ip && non_apex(&h.hostname))
-                    .map(|h| h.hostname.clone())
-                    .or_else(|| {
-                        s.hosts
-                            .iter()
-                            .find(|h| {
-                                (h.is_dc || h.detect_dc())
-                                    && non_apex(&h.hostname)
-                                    && h.hostname
-                                        .to_lowercase()
-                                        .ends_with(&format!(".{target_lc}"))
-                            })
-                            .map(|h| h.hostname.clone())
-                    })
-                    .unwrap_or_else(|| target_dc_ip.clone())
+                resolve_target_dc_hostname(&s.hosts, &target_dc_ip, &item.target_domain)
             };
 
             // ticketer writes <username>.ccache in the worker cwd; the
@@ -1641,15 +1666,24 @@ pub async fn auto_trust_follow(dispatcher: Arc<Dispatcher>, mut shutdown: watch:
                             // malformed target on retry. Keep dedup marked so
                             // the wrapper doesn't hot-loop (we've seen 363
                             // retries in ~50 min from this exact signature).
-                            let apex_spn_wedge = tail.contains("KDC_ERR_S_PRINCIPAL_UNKNOWN");
-                            if apex_spn_wedge {
+                            //
+                            // KDC_ERR_WRONG_REALM belongs here too: it means
+                            // we asked this KDC for a principal in a realm it
+                            // does not serve, which is a wrong-target SPN by
+                            // another name. Retrying re-sends the identical
+                            // request; only new recon state can change the
+                            // answer. Left unlocked it cost 131 retries in 65
+                            // min against a child DC picked for a parent forge.
+                            let wrong_target_spn = tail.contains("KDC_ERR_S_PRINCIPAL_UNKNOWN")
+                                || tail.contains("KDC_ERR_WRONG_REALM");
+                            if wrong_target_spn {
                                 warn!(
                                     err = %err,
                                     source_domain = %source_domain_bg,
                                     target_domain = %target_domain_bg,
                                     trust_account = %trust_account_bg,
                                     output_tail = %tail,
-                                    "forge_inter_realm_and_dump: KDC_ERR_S_PRINCIPAL_UNKNOWN — likely apex/malformed SPN; locking dedup (recon must persist a real DC FQDN before retry can succeed)"
+                                    "forge_inter_realm_and_dump: wrong-target SPN (KDC_ERR_S_PRINCIPAL_UNKNOWN / KDC_ERR_WRONG_REALM) — apex, malformed, or wrong-realm target; locking dedup (recon must persist a real DC FQDN in the target domain before retry can succeed)"
                                 );
                                 {
                                     let mut state = dispatcher_bg.state.write().await;
@@ -2777,6 +2811,100 @@ mod tests {
     #[test]
     fn forest_trust_vuln_id_empty_strings() {
         assert_eq!(forest_trust_vuln_id("", ""), "forest_trust__");
+    }
+
+    fn dc(ip: &str, hostname: &str) -> ares_core::models::Host {
+        ares_core::models::Host {
+            ip: ip.into(),
+            hostname: hostname.into(),
+            os: String::new(),
+            roles: Vec::new(),
+            services: Vec::new(),
+            is_dc: true,
+            owned: false,
+        }
+    }
+
+    #[test]
+    fn resolve_target_dc_hostname_prefers_the_record_for_the_target_dc_ip() {
+        let hosts = [
+            dc("192.168.58.10", "dc01.contoso.local"),
+            dc("192.168.58.20", "dc02.child.contoso.local"),
+        ];
+        assert_eq!(
+            resolve_target_dc_hostname(&hosts, "192.168.58.10", "contoso.local"),
+            "dc01.contoso.local"
+        );
+    }
+
+    #[test]
+    fn resolve_target_dc_hostname_skips_the_zone_apex_for_a_sibling_record() {
+        // The target DC's own record carries the bare-domain A record, so the
+        // IP match is rejected and the suffix scan supplies the real FQDN.
+        let hosts = [
+            dc("192.168.58.10", "contoso.local"),
+            dc("192.168.58.11", "dc01.contoso.local"),
+        ];
+        assert_eq!(
+            resolve_target_dc_hostname(&hosts, "192.168.58.10", "contoso.local"),
+            "dc01.contoso.local"
+        );
+    }
+
+    #[test]
+    fn resolve_target_dc_hostname_never_returns_a_child_domain_dc() {
+        // Regression: `ends_with(".contoso.local")` matched the CHILD domain's
+        // DC, so the parent forge asked the parent KDC for a principal in the
+        // child realm — KDC_ERR_WRONG_REALM on every retry, forever. Falling
+        // back to the IP is correct here: no DC record for contoso.local
+        // itself is known yet.
+        let hosts = [
+            dc("192.168.58.10", "contoso.local"),
+            dc("192.168.58.20", "dc02.child.contoso.local"),
+        ];
+        assert_eq!(
+            resolve_target_dc_hostname(&hosts, "192.168.58.10", "contoso.local"),
+            "192.168.58.10"
+        );
+    }
+
+    #[test]
+    fn resolve_target_dc_hostname_matches_a_grandchild_domain_no_better() {
+        let hosts = [dc("192.168.58.30", "dc03.sub.child.contoso.local")];
+        assert_eq!(
+            resolve_target_dc_hostname(&hosts, "192.168.58.10", "contoso.local"),
+            "192.168.58.10"
+        );
+    }
+
+    #[test]
+    fn resolve_target_dc_hostname_resolves_a_child_domain_target_directly() {
+        // The child IS the target domain here, so its DC must be selected.
+        let hosts = [
+            dc("192.168.58.10", "dc01.contoso.local"),
+            dc("192.168.58.20", "dc02.child.contoso.local"),
+        ];
+        assert_eq!(
+            resolve_target_dc_hostname(&hosts, "192.168.58.99", "child.contoso.local"),
+            "dc02.child.contoso.local"
+        );
+    }
+
+    #[test]
+    fn resolve_target_dc_hostname_is_case_insensitive() {
+        let hosts = [dc("192.168.58.11", "DC01.CONTOSO.LOCAL")];
+        assert_eq!(
+            resolve_target_dc_hostname(&hosts, "192.168.58.10", "contoso.local"),
+            "DC01.CONTOSO.LOCAL"
+        );
+    }
+
+    #[test]
+    fn resolve_target_dc_hostname_falls_back_to_ip_with_no_hosts() {
+        assert_eq!(
+            resolve_target_dc_hostname(&[], "192.168.58.10", "contoso.local"),
+            "192.168.58.10"
+        );
     }
 
     #[test]
