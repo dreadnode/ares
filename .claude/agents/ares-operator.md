@@ -249,7 +249,8 @@ connections while `status=running` is the canonical wedge signature.
 | Tokens frozen, 0 OpenAI conns, `llm_count>0`, only `Task deferred` lines | Worker-slot leak (pre-#66) | `task proxmox:deploy:restart` |
 | Op submits but `Starting operation:` never logged | Dispatcher wedge | `task proxmox:deploy:restart` then re-submit |
 | `crackd backend error: failed to GET /jobs/{id}` repeatedly | Idle-keepalive race vs uvicorn (pre-#64 client; bump server `--timeout-keep-alive` if pre-deploy) | Rebuild from main; verify `pool_idle_timeout` in `ares-tools/src/cracker/remote.rs::http_client` |
-| `Cross-forest forge dispatched` count is 0 but trust hash + DCs are in state | `auto_trust_follow` dedup leak (pre-#64) | Rebuild from main; the staleness sweep clears stuck `trust_follow:*` marks every 30s tick |
+| `Child-to-parent forge dispatched` count is 0 but child trust hash + DCs are in state | `auto_trust_follow` dedup leak (pre-#64) | Rebuild from main; the staleness sweep clears stuck `trust_follow:*` marks every 30s tick |
+| Cross-forest forge dispatched but no target krbtgt | Not a bug. SID filtering on the receiving DC strips the injected claim regardless of RID — the forge has never taken a second forest | Expect the foreign forest to fall to a native escalation instead (ADCS ESC13 above all, then MSSQL linked servers, AS-REP roasting, foreign security principals). Chase why no forest-native credential was acquired, not why the forge failed |
 | Op marks `completed` at N/M domains with N<M | `compute_undominated_forests` collapses children (pre-#68) | Rebuild from main |
 | `Kerberos SessionError: KRB_AP_ERR_SKEW` / `KRB_AP_ERR_TKT_NYV` | DC clock skew vs attacker | Router-side NTP serving + DHCP option 42 — see `project-ludus-dg-clock-skew` memory |
 
