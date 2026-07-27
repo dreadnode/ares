@@ -1445,6 +1445,40 @@ mod tests {
     }
 
     #[test]
+    fn repeated_blind_start_sprays_never_exceed_the_lockout_threshold() {
+        // op-20260727-230409, reproduced. A blind start has no credential, so
+        // `password_policy` never runs and the agent falls back to
+        // `acknowledge_no_policy=true` — the DEFAULT path under testes.sh, and
+        // the one the first fix left unguarded. Eight sprays each took a fresh
+        // 2-password allowance and locked sql_svc and Administrator twice in
+        // twelve minutes against a threshold of 5.
+        let mut state = StateInner::new("op-1".into());
+        let args = serde_json::json!({
+            "domain": "essos.local",
+            "use_common_passwords": true,
+            "acknowledge_no_policy": true,
+        });
+
+        let mut spent = 0i64;
+        for _ in 0..8 {
+            let used = state.spray_attempts_used("essos.local");
+            let cost = ares_tools::credential_access::spray_attempt_cost(&args, used) as i64;
+            state.record_spray_attempts("essos.local", cost, 300);
+            spent += cost;
+        }
+
+        assert_eq!(
+            spent, 2,
+            "the no-policy allowance is a per-window total: the first spray \
+             spends it and the rest must refuse (pre-fix this was 16)"
+        );
+        assert!(
+            spent < 5,
+            "must stay under a default 5-attempt AD lockout threshold"
+        );
+    }
+
+    #[test]
     fn quarantined_principals_in_domain_filters() {
         let mut state = StateInner::new("op-1".into());
         state.quarantine_principal("testuser1", "contoso.local");

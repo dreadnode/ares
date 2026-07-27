@@ -218,7 +218,14 @@ pub(super) async fn inject_spray_attempts(
         return;
     };
 
-    let tallied = state.read().await.spray_attempts_used(&domain);
+    // One exclusive guard spans the read and the debit. Taking a read lock,
+    // computing, then taking a write lock leaves a window where every
+    // concurrent agent observes the same stale tally, each believes it has the
+    // full budget, and their sprays sum past the threshold — the exact race
+    // the tally exists to close. `spray_attempt_cost` is pure and sync, so
+    // nothing awaits while the guard is held.
+    let mut guard = state.write().await;
+    let tallied = guard.spray_attempts_used(&domain);
 
     let cost = if tool_name == "password_spray" {
         // Keep the LLM's figure when it is the larger one: it may know about
@@ -244,10 +251,8 @@ pub(super) async fn inject_spray_attempts(
 
     if cost > 0 {
         let window = spray_window_secs(arguments);
-        state
-            .write()
-            .await
-            .record_spray_attempts(&domain, cost, window);
+        guard.record_spray_attempts(&domain, cost, window);
+        drop(guard);
         debug!(
             tool = %tool_name,
             domain = %domain,

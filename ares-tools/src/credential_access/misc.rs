@@ -66,14 +66,18 @@ const SPRAY_DEFAULT_JITTER_SECS: i64 = 1;
 /// lockout line in case any account already has stale failed attempts.
 const SPRAY_LOCKOUT_BUFFER: i64 = 1;
 
-/// Passwords per account allowed when the caller waived the policy check with
-/// `acknowledge_no_policy=true`.
+/// Total passwords per account allowed across the whole observation window
+/// when the caller waived the policy check with `acknowledge_no_policy=true`.
 ///
-/// The waiver used to mean "unbounded", so a single call still sprayed the
-/// whole `DEFAULT_SPRAY_PASSWORDS` list — enough to blow past a 5-attempt
-/// threshold three times over. Not knowing the policy is a reason to spray
-/// *less*, not without limit.
-const NO_POLICY_SPRAY_CAP: usize = 2;
+/// This is a *window* allowance, not a per-call one. It first meant
+/// "unbounded", so one call sprayed the whole `DEFAULT_SPRAY_PASSWORDS` list —
+/// past a 5-attempt threshold three times over. Capping it per call was not
+/// enough either: `attempts_used` was ignored on this branch, so every call
+/// got a fresh allowance and repeated sprays still summed past the threshold
+/// (op-20260727-230409 locked essos with 8 sprays x 2 = 16 bad logons per
+/// account). Not knowing the policy is a reason to spray *less*, and to keep
+/// counting what has already been spent.
+const NO_POLICY_SPRAY_CAP: i64 = 2;
 
 /// Dump LSASS credentials remotely via `lsassy`.
 pub async fn lsassy(args: &Value) -> Result<ToolOutput> {
@@ -608,7 +612,22 @@ fn check_spray_budget(
             }
             SprayBudget::Allow(Some(budget as usize))
         }
-        None if acknowledge_no_policy => SprayBudget::Allow(Some(NO_POLICY_SPRAY_CAP)),
+        // The waiver still spends from a budget — it just spends from an
+        // assumed one. Subtracting `attempts_used` here is what stops repeated
+        // blind-start sprays from each starting over at a full allowance.
+        None if acknowledge_no_policy => {
+            let budget = NO_POLICY_SPRAY_CAP - attempts_used;
+            if budget < 1 {
+                return SprayBudget::Refuse(Box::new(spray_refusal(format!(
+                    "Refusing password_spray: no-policy spray allowance exhausted \
+                     (allowance={NO_POLICY_SPRAY_CAP} per observation window, \
+                     attempts_used_per_account={attempts_used}). Wait for the AD \
+                     observation window to reset, or run password_policy and pass \
+                     lockout_threshold to spray against the real budget."
+                ))));
+            }
+            SprayBudget::Allow(Some(budget as usize))
+        }
         None => SprayBudget::Refuse(Box::new(spray_refusal(
             "Refusing password_spray: no lockout policy provided. Run password_policy \
              first and pass lockout_threshold (and attempts_used_per_account if accounts \
@@ -1566,8 +1585,26 @@ mod tests {
         // spray the whole default list and lock the account.
         assert_eq!(
             budget_cap(None, 0, true),
-            Ok(Some(super::NO_POLICY_SPRAY_CAP))
+            Ok(Some(super::NO_POLICY_SPRAY_CAP as usize))
         );
+    }
+
+    #[test]
+    fn check_spray_budget_no_policy_allowance_shrinks_as_attempts_are_spent() {
+        // op-20260727-230409: this branch ignored `attempts_used` entirely, so
+        // every blind-start spray got a fresh allowance and 8 of them summed to
+        // 16 bad logons per account against a threshold of 5.
+        assert_eq!(budget_cap(None, 0, true), Ok(Some(2)));
+        assert_eq!(budget_cap(None, 1, true), Ok(Some(1)));
+    }
+
+    #[test]
+    fn check_spray_budget_no_policy_refuses_once_the_allowance_is_spent() {
+        assert!(
+            budget_cap(None, 2, true).is_err(),
+            "the allowance is per observation window, not per call"
+        );
+        assert!(budget_cap(None, 99, true).is_err());
     }
 
     #[test]
@@ -1668,7 +1705,14 @@ mod tests {
         });
         assert_eq!(
             super::spray_attempt_cost(&args, 0),
-            super::NO_POLICY_SPRAY_CAP
+            super::NO_POLICY_SPRAY_CAP as usize
+        );
+        // ...and the allowance is consumed, not reissued per call.
+        assert_eq!(super::spray_attempt_cost(&args, 1), 1);
+        assert_eq!(
+            super::spray_attempt_cost(&args, 2),
+            0,
+            "a spent allowance must cost nothing further — the call is refused"
         );
     }
 
