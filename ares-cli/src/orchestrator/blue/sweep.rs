@@ -35,7 +35,6 @@ use tokio::sync::Semaphore;
 use tracing::{info, warn};
 
 use ares_core::detection::detection_config;
-use ares_tools::ToolOutput;
 
 /// Default max concurrent Loki detection queries during the sweep. Loki through
 /// the Grafana proxy is the bottleneck (~25-40s/query); a handful in flight
@@ -305,6 +304,9 @@ impl GoldenTicketCorrelation {
                 .iter()
                 .map(|o| o.service_ticket_count as usize)
                 .sum(),
+            first_event_at: None,
+            last_event_at: None,
+            hosts: Vec::new(),
         })
     }
 }
@@ -318,6 +320,14 @@ pub(crate) struct FiredDetection {
     pub tactic: String,
     pub severity: String,
     pub event_count: usize,
+    /// Timestamp of the earliest matched log event. This, not the moment the
+    /// sweep noticed, is what a detection is worth correlating against: every
+    /// hit in one sweep shares a recording time, so recording time cannot
+    /// establish that a detection followed the activity it describes.
+    pub first_event_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub last_event_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// Hosts the matched events came from.
+    pub hosts: Vec<String>,
 }
 
 /// Result of a baseline sweep — what fired, what came back empty, and what the
@@ -493,6 +503,9 @@ pub(crate) async fn run_detection_sweep(investigation_id: &str) -> SweepOutcome 
             tactic: e.tactic.clone(),
             severity: e.severity.clone(),
             event_count: 0,
+            first_event_at: None,
+            last_event_at: None,
+            hosts: Vec::new(),
         })
         .collect();
     let templates_total = templates.len();
@@ -521,16 +534,21 @@ pub(crate) async fn run_detection_sweep(investigation_id: &str) -> SweepOutcome 
             let Ok(_permit) = sem.acquire_owned().await else {
                 return (tmpl.template.clone(), None);
             };
-            let out = ares_tools::blue::dispatch_blue(
-                "run_detection_query",
-                &json!({ "query_name": tmpl.template, "hours_back": SWEEP_HOURS_BACK }),
+            let out = ares_tools::blue::detection::run_detection_query_events(
+                &tmpl.template,
+                None,
+                SWEEP_HOURS_BACK,
             )
             .await;
             let fired = match out {
-                Ok(o) => parse_fire_count(&o).map(|count| FiredDetection {
-                    event_count: count,
+                Ok(ev) if ev.event_count > 0 => Some(FiredDetection {
+                    event_count: ev.event_count,
+                    first_event_at: ev.first_event_at,
+                    last_event_at: ev.last_event_at,
+                    hosts: ev.hosts,
                     ..tmpl.clone()
                 }),
+                Ok(_) => None,
                 Err(e) => {
                     warn!(template = %tmpl.template, error = %e, "Sweep detection query failed");
                     None
@@ -817,7 +835,10 @@ async fn record_orphan_accounts(investigation_id: &str, orphans: &[OrphanAccount
 /// the MITRE ID, which auto-validates the grounding check.
 async fn record_fired(investigation_id: &str, f: &FiredDetection) {
     let confidence = confidence_for_severity(&f.severity);
-    let now = chrono::Utc::now().to_rfc3339();
+    let observed_at = f
+        .first_event_at
+        .map(|t| t.to_rfc3339())
+        .unwrap_or_else(|| chrono::Utc::now().to_rfc3339());
 
     let calls = [
         (
@@ -838,7 +859,7 @@ async fn record_fired(investigation_id: &str, f: &FiredDetection) {
                 "confidence": confidence,
                 "pyramid_level": "ttps",
                 "mitre_techniques": [f.mitre_id],
-                "timestamp": now,
+                "timestamp": observed_at,
             }),
         ),
         (
@@ -846,10 +867,13 @@ async fn record_fired(investigation_id: &str, f: &FiredDetection) {
             json!({
                 "investigation_id": investigation_id,
                 "description": format!(
-                    "Baseline detection {} fired: {} ({} event(s))",
-                    f.template, f.description, f.event_count
+                    "Baseline detection {} fired: {} ({} event(s){})",
+                    f.template,
+                    f.description,
+                    f.event_count,
+                    detection_scope_suffix(f),
                 ),
-                "timestamp": now,
+                "timestamp": observed_at,
                 "mitre_techniques": [f.mitre_id],
                 "source": "detection_sweep",
                 "confidence": confidence,
@@ -862,20 +886,25 @@ async fn record_fired(investigation_id: &str, f: &FiredDetection) {
     }
 }
 
-/// Detect a Loki hit in a detection-query result and return the event count.
-///
-/// The detection runner prepends a template header to the Loki output;
-/// `format_loki_response` emits `"Found N log entries:"` on a hit and
-/// `"No results found."` otherwise. Returns `None` for a miss, an error
-/// result, or an unparsable count.
-fn parse_fire_count(out: &ToolOutput) -> Option<usize> {
-    if !out.success {
-        return None;
+/// Render a detection's observed event window and hosts for the timeline
+/// narrative. Empty when the detection carries neither.
+fn detection_scope_suffix(f: &FiredDetection) -> String {
+    let mut parts = Vec::new();
+    if let (Some(first), Some(last)) = (f.first_event_at, f.last_event_at) {
+        parts.push(if first == last {
+            format!("at {}", first.to_rfc3339())
+        } else {
+            format!("{} to {}", first.to_rfc3339(), last.to_rfc3339())
+        });
     }
-    let pos = out.stdout.find("Found ")?;
-    let rest = &out.stdout[pos + "Found ".len()..];
-    let end = rest.find(" log entries")?;
-    rest[..end].trim().parse::<usize>().ok()
+    if !f.hosts.is_empty() {
+        parts.push(format!("hosts: {}", f.hosts.join(", ")));
+    }
+    if parts.is_empty() {
+        String::new()
+    } else {
+        format!(" · {}", parts.join(" · "))
+    }
 }
 
 /// Map a detection's evidence confidence from its severity.
@@ -966,40 +995,53 @@ fn sweep_timeout_secs() -> u64 {
 mod tests {
     use super::*;
 
-    fn out(success: bool, stdout: &str) -> ToolOutput {
-        ToolOutput {
-            stdout: stdout.to_string(),
-            stderr: String::new(),
-            exit_code: Some(if success { 0 } else { 1 }),
-            success,
+    fn fired(first: Option<&str>, last: Option<&str>, hosts: &[&str]) -> FiredDetection {
+        let parse = |s: &str| {
+            chrono::DateTime::parse_from_rfc3339(s)
+                .expect("valid rfc3339")
+                .with_timezone(&chrono::Utc)
+        };
+        FiredDetection {
+            template: "detect_dcsync".to_string(),
+            mitre_id: "T1003.006".to_string(),
+            description: "DCSync Detection".to_string(),
+            tactic: "credential_access".to_string(),
+            severity: "critical".to_string(),
+            event_count: 3,
+            first_event_at: first.map(parse),
+            last_event_at: last.map(parse),
+            hosts: hosts.iter().map(|h| h.to_string()).collect(),
         }
     }
 
     #[test]
-    fn parse_fire_count_hit() {
-        let o = out(
-            true,
-            "## DCSync Detection (T1003.006)\n**Severity:** critical\nFound 5 log entries:\n\n[x] evt",
+    fn scope_suffix_renders_window_and_hosts() {
+        let f = fired(
+            Some("2026-07-26T21:41:13Z"),
+            Some("2026-07-26T21:55:02Z"),
+            &["dc01.contoso.local"],
         );
-        assert_eq!(parse_fire_count(&o), Some(5));
+        let s = detection_scope_suffix(&f);
+        assert!(s.contains("2026-07-26T21:41:13"), "{s}");
+        assert!(s.contains("to 2026-07-26T21:55:02"), "{s}");
+        assert!(s.contains("dc01.contoso.local"), "{s}");
     }
 
     #[test]
-    fn parse_fire_count_miss() {
-        let o = out(true, "## DCSync Detection (T1003.006)\nNo results found.");
-        assert_eq!(parse_fire_count(&o), None);
+    fn scope_suffix_collapses_single_instant() {
+        let f = fired(
+            Some("2026-07-26T21:41:13Z"),
+            Some("2026-07-26T21:41:13Z"),
+            &[],
+        );
+        let s = detection_scope_suffix(&f);
+        assert!(s.contains("at 2026-07-26T21:41:13"), "{s}");
+        assert!(!s.contains(" to "), "{s}");
     }
 
     #[test]
-    fn parse_fire_count_error_result() {
-        let o = out(false, "Found 5 log entries:");
-        assert_eq!(parse_fire_count(&o), None);
-    }
-
-    #[test]
-    fn parse_fire_count_large() {
-        let o = out(true, "header\nFound 100 log entries:\n\nrows");
-        assert_eq!(parse_fire_count(&o), Some(100));
+    fn scope_suffix_empty_without_times_or_hosts() {
+        assert_eq!(detection_scope_suffix(&fired(None, None, &[])), "");
     }
 
     #[test]
@@ -1080,6 +1122,9 @@ mod tests {
                 tactic: "credential_access".into(),
                 severity: "critical".into(),
                 event_count: 5,
+                first_event_at: None,
+                last_event_at: None,
+                hosts: Vec::new(),
             }],
             no_match: vec!["detect_golden_ticket".into()],
             not_run: vec![],

@@ -529,6 +529,155 @@ fn parse_metric_series(body: &str) -> Result<Vec<MetricSeries>> {
         .collect())
 }
 
+/// A matched log line: when the event actually happened, its stream labels,
+/// and the raw line.
+#[derive(Debug, Clone)]
+pub struct LogEntry {
+    pub timestamp: chrono::DateTime<chrono::Utc>,
+    pub labels: std::collections::BTreeMap<String, String>,
+    pub line: String,
+}
+
+/// Run a LogQL **log** query, returning entries with their event timestamps.
+///
+/// [`query_logs`] renders a human-readable blob and drops `values[i][0]` — the
+/// nanosecond event timestamp — along with the per-stream labels. A caller that
+/// needs to know *when* the matched activity happened cannot recover it from
+/// that text.
+///
+/// Detection correlation needs exactly that. A detection stamped at query time
+/// says nothing about whether it followed the attacker action it is credited
+/// to, and a whole sweep's worth of hits collapses onto a single instant, which
+/// makes time-to-detect meaningless.
+///
+/// Transport and HTTP failures return `Err` rather than an empty vector, so a
+/// broken query stays distinguishable from a genuine no-match.
+pub async fn query_log_entries(
+    logql: &str,
+    start_time: &str,
+    end_time: &str,
+    limit: i64,
+) -> Result<Vec<LogEntry>> {
+    let config = loki_config().await;
+    let client = http_client();
+    let url = format!("{}/loki/api/v1/query_range", config.base_url);
+    let end_clamped = clamp_end_to_replay(end_time);
+
+    let params = [
+        ("query", logql.to_string()),
+        ("start", start_time.to_string()),
+        ("end", end_clamped),
+        ("limit", limit.to_string()),
+    ];
+
+    let mut last_err: Option<String> = None;
+    for attempt in 0..MAX_RETRIES {
+        if attempt > 0 {
+            tokio::time::sleep(RETRY_BASE_DELAY * 2u32.pow(attempt - 1)).await;
+        }
+
+        let resp = match build_get(client, &url, &config).query(&params).send().await {
+            Ok(r) => r,
+            Err(e) if e.is_connect() || e.is_timeout() => {
+                let chain = err_chain(&e);
+                warn!(attempt, error = %chain, "Loki entry request error (retryable)");
+                last_err = Some(format!("Loki request failed: {chain}"));
+                continue;
+            }
+            Err(e) => anyhow::bail!("Loki request failed: {}", err_chain(&e)),
+        };
+
+        let status = resp.status();
+        let body = match resp.text().await {
+            Ok(b) => b,
+            Err(e) => {
+                let chain = err_chain(&e);
+                last_err = Some(format!("Loki response body read failed: {chain}"));
+                continue;
+            }
+        };
+
+        if status.is_success() {
+            return parse_log_entries(&body);
+        }
+        if is_retryable_status(status) {
+            warn!(attempt, %status, "Loki entry transient error (retryable)");
+            last_err = Some(format!("Loki returned {status}: {body}"));
+            continue;
+        }
+        anyhow::bail!("Loki returned {status}: {body}");
+    }
+
+    Err(anyhow::anyhow!(
+        "Loki log-entry query failed after {MAX_RETRIES} attempts: {}",
+        last_err.unwrap_or_else(|| "unknown error".to_string())
+    ))
+}
+
+/// Pull `(timestamp, labels, line)` triples out of a Loki `streams` body.
+///
+/// A body that parses but carries no `data.result` array is an empty result,
+/// not an error. Entries whose timestamp is absent or unparsable are dropped
+/// rather than defaulted to "now": a fabricated timestamp would silently
+/// corrupt the ordering checks this function exists to enable.
+fn parse_log_entries(body: &str) -> Result<Vec<LogEntry>> {
+    let json: Value = serde_json::from_str(body).context("Loki returned a non-JSON body")?;
+    let Some(results) = json
+        .get("data")
+        .and_then(|d| d.get("result"))
+        .and_then(|r| r.as_array())
+    else {
+        return Ok(Vec::new());
+    };
+
+    let mut entries = Vec::new();
+    for stream in results {
+        let labels: std::collections::BTreeMap<String, String> = stream
+            .get("stream")
+            .and_then(|s| s.as_object())
+            .map(|o| {
+                o.iter()
+                    .filter_map(|(k, v)| Some((k.clone(), v.as_str()?.to_string())))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let Some(values) = stream.get("values").and_then(|v| v.as_array()) else {
+            continue;
+        };
+        for entry in values {
+            let Some(arr) = entry.as_array() else {
+                continue;
+            };
+            let (Some(ts_raw), Some(line)) = (
+                arr.first().and_then(|v| v.as_str()),
+                arr.get(1).and_then(|v| v.as_str()),
+            ) else {
+                continue;
+            };
+            let Some(timestamp) = parse_epoch_nanos(ts_raw) else {
+                continue;
+            };
+            entries.push(LogEntry {
+                timestamp,
+                labels: labels.clone(),
+                line: line.to_string(),
+            });
+        }
+    }
+    entries.sort_by_key(|e| e.timestamp);
+    Ok(entries)
+}
+
+/// Convert Loki's stringified nanosecond epoch into a UTC datetime.
+fn parse_epoch_nanos(raw: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+    let ns: i64 = raw.trim().parse().ok()?;
+    chrono::DateTime::from_timestamp(
+        ns.div_euclid(1_000_000_000),
+        ns.rem_euclid(1_000_000_000) as u32,
+    )
+}
+
 /// Query logs around a specific timestamp.
 /// Compute `(start, end)` for a fixed-width window centred on `timestamp`.
 ///
@@ -955,6 +1104,75 @@ mod tests {
         assert!(result.contains("Event 4769"));
         assert!(result.contains("Event 4624"));
         assert!(result.contains("job=windows"));
+    }
+
+    fn streams_body(values: serde_json::Value) -> String {
+        serde_json::to_string(&json!({
+            "status": "success",
+            "data": {
+                "resultType": "streams",
+                "result": [{
+                    "stream": {"job": "windows-security", "hostname": "dc01.contoso.local"},
+                    "values": values
+                }]
+            }
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn parse_log_entries_keeps_event_time_and_labels() {
+        let body = streams_body(json!([["1700000000000000000", "Event 4662: DCSync"]]));
+        let entries = parse_log_entries(&body).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].timestamp.timestamp(), 1_700_000_000);
+        assert_eq!(entries[0].line, "Event 4662: DCSync");
+        assert_eq!(
+            entries[0].labels.get("hostname").map(String::as_str),
+            Some("dc01.contoso.local")
+        );
+    }
+
+    #[test]
+    fn parse_log_entries_sorts_chronologically() {
+        let body = streams_body(json!([
+            ["1700000600000000000", "later"],
+            ["1700000000000000000", "earlier"],
+        ]));
+        let entries = parse_log_entries(&body).unwrap();
+        assert_eq!(
+            entries.iter().map(|e| e.line.as_str()).collect::<Vec<_>>(),
+            vec!["earlier", "later"]
+        );
+    }
+
+    #[test]
+    fn parse_log_entries_drops_unparsable_timestamps() {
+        let body = streams_body(json!([
+            ["not-a-number", "dropped"],
+            ["1700000000000000000", "kept"],
+        ]));
+        let entries = parse_log_entries(&body).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].line, "kept");
+    }
+
+    #[test]
+    fn parse_log_entries_empty_without_result() {
+        let body = serde_json::to_string(&json!({"status": "success", "data": {}})).unwrap();
+        assert!(parse_log_entries(&body).unwrap().is_empty());
+    }
+
+    #[test]
+    fn parse_log_entries_errors_on_non_json() {
+        assert!(parse_log_entries("<html>502</html>").is_err());
+    }
+
+    #[test]
+    fn parse_epoch_nanos_handles_sub_second() {
+        let ts = parse_epoch_nanos("1700000000123456789").unwrap();
+        assert_eq!(ts.timestamp(), 1_700_000_000);
+        assert_eq!(ts.timestamp_subsec_nanos(), 123_456_789);
     }
 
     #[test]

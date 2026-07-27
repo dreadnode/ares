@@ -88,5 +88,6 @@ pub(super) fn build_pattern_filter(patterns: &[&str]) -> String {
 
 pub use catalog::list_detection_templates;
 pub use runner::{
-    get_host_activity, get_user_activity, run_detection_query, run_parallel_detections,
+    get_host_activity, get_user_activity, run_detection_query, run_detection_query_events,
+    run_parallel_detections, DetectionEvents,
 };

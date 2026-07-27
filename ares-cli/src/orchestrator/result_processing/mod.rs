@@ -384,16 +384,23 @@ pub async fn process_completed_task(
                     "evt-exploit-fail-{}",
                     &uuid::Uuid::new_v4().simple().to_string()[..8]
                 );
+                let techniques = self::timeline::exploitation_techniques(&vuln_id);
+                let target_ip = task_params_snapshot
+                    .get("target")
+                    .and_then(|v| v.as_str())
+                    .or(task_target_ip.as_deref());
                 let event = serde_json::json!({
                     "id": event_id,
                     "timestamp": chrono::Utc::now().to_rfc3339(),
                     "source": "exploit_failed",
+                    "outcome": "failed",
+                    "target_ip": target_ip,
                     "description": format!("Exploit attempted but failed: {vuln_id} — {err_msg}"),
-                    "mitre_techniques": ["T1210"],
+                    "mitre_techniques": techniques,
                 });
                 let _ = dispatcher
                     .state
-                    .persist_timeline_event(&dispatcher.queue, &event, &["T1210".to_string()])
+                    .persist_timeline_event(&dispatcher.queue, &event, &techniques)
                     .await;
                 info!(
                     vuln_id = %vuln_id,

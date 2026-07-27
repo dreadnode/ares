@@ -44,6 +44,83 @@ pub async fn run_detection_query(args: &Value) -> Result<ToolOutput> {
     Ok(result)
 }
 
+/// What a detection template matched, with the event times preserved.
+#[derive(Debug, Clone, Default)]
+pub struct DetectionEvents {
+    pub event_count: usize,
+    /// Earliest matched event — the anchor for "did this detection follow the
+    /// attacker action it is credited to?".
+    pub first_event_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub last_event_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// Hosts the matched events came from, from the stream labels.
+    pub hosts: Vec<String>,
+}
+
+/// Run a detection template and return its matches with event timestamps.
+///
+/// [`run_detection_query`] answers the same question as formatted text, which
+/// forces callers to scrape a count back out of prose and leaves them with no
+/// event times at all. Correlating a detection against attacker activity needs
+/// both, so this returns the aggregate directly.
+///
+/// An unknown template is an error rather than an empty result — silently
+/// scoring a typo'd template as "no matches" would understate coverage.
+pub async fn run_detection_query_events(
+    query_name: &str,
+    target_host: Option<&str>,
+    hours_back: i64,
+) -> Result<DetectionEvents> {
+    let Some(tmpl) = build_detection_template(query_name, target_host) else {
+        anyhow::bail!("Unknown detection template: '{query_name}'");
+    };
+
+    let now = chrono::Utc::now();
+    let start = now - chrono::Duration::hours(hours_back.min(2));
+
+    let entries = loki::query_log_entries(
+        &tmpl.logql,
+        &start.to_rfc3339(),
+        &now.to_rfc3339(),
+        DETECTION_ENTRY_LIMIT,
+    )
+    .await?;
+
+    if !entries.is_empty() {
+        let joined = entries
+            .iter()
+            .map(|e| e.line.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        super::super::evidence_validator::store_query_result(&joined);
+    }
+
+    let mut hosts: Vec<String> = entries
+        .iter()
+        .filter_map(|e| {
+            HOST_LABEL_KEYS
+                .iter()
+                .find_map(|k| e.labels.get(*k))
+                .cloned()
+        })
+        .collect();
+    hosts.sort();
+    hosts.dedup();
+
+    Ok(DetectionEvents {
+        event_count: entries.len(),
+        first_event_at: entries.first().map(|e| e.timestamp),
+        last_event_at: entries.last().map(|e| e.timestamp),
+        hosts,
+    })
+}
+
+/// Stream labels that carry the originating host, most specific first.
+const HOST_LABEL_KEYS: &[&str] = &["hostname", "host", "computer", "instance", "agent_hostname"];
+
+/// Line cap for a structured detection query. Matches the formatted path's
+/// limit so the two cannot disagree about whether a template fired.
+const DETECTION_ENTRY_LIMIT: i64 = 100;
+
 /// Run multiple detection queries in parallel.
 pub async fn run_parallel_detections(args: &Value) -> Result<ToolOutput> {
     let query_names = args

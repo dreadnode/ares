@@ -154,6 +154,7 @@ pub(crate) async fn create_exploitation_timeline_event(
         "id": event_id,
         "timestamp": chrono::Utc::now().to_rfc3339(),
         "source": "exploitation",
+        "outcome": "succeeded",
         "description": format!("Vulnerability exploited: {vuln_id} (task {task_id})"),
         "mitre_techniques": techniques,
     });
@@ -219,7 +220,7 @@ pub(crate) async fn create_domain_admin_timeline_event(
 }
 
 /// Map vulnerability IDs to MITRE ATT&CK technique IDs.
-fn exploitation_techniques(vuln_id: &str) -> Vec<String> {
+pub(super) fn exploitation_techniques(vuln_id: &str) -> Vec<String> {
     let vuln_lower = vuln_id.to_lowercase();
     let mut techniques = vec!["T1210".to_string()]; // Exploitation of Remote Services (base)
     if vuln_lower.contains("constrained_delegation") {
