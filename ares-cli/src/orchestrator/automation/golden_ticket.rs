@@ -11,6 +11,13 @@ use tracing::{info, warn};
 use crate::orchestrator::dispatcher::Dispatcher;
 use crate::orchestrator::state::{canonicalize_domain_label, StateInner};
 
+/// Wall-clock cap on the null-session `rpcclient lsaquery` fallback in
+/// [`resolve_domain_sid`]. One anonymous LSA RPC answers in well under a
+/// second against a reachable DC; anything longer is a connect retry against a
+/// host that is filtering or wedged. Kept below the 30 s automation tick so a
+/// dead DC cannot stall a whole `auto_trust_follow` pass.
+const LSAQUERY_TIMEOUT: Duration = Duration::from_secs(20);
+
 /// Collect the set of domains that have a captured `krbtgt` hash but no
 /// successful golden-ticket forge yet. Returns lowercased domain names in
 /// the same order that `state.hashes` traverses (deterministic per snapshot).
@@ -396,22 +403,19 @@ pub(crate) async fn resolve_domain_sid(
     // parsed by `extract_lsaquery_domain_sid`. This unblocks the
     // child→parent forge path in `auto_trust_follow` when authenticated
     // lookupsid against the parent DC fails.
-    match tokio::process::Command::new("rpcclient")
+    match ares_tools::executor::CommandBuilder::new("rpcclient")
         .arg("-U")
         .arg("")
         .arg("-N")
         .arg(dc_ip)
         .arg("-c")
         .arg("lsaquery")
-        .output()
+        .timeout(LSAQUERY_TIMEOUT)
+        .execute()
         .await
     {
         Ok(out) => {
-            let combined = format!(
-                "{}\n{}",
-                String::from_utf8_lossy(&out.stdout),
-                String::from_utf8_lossy(&out.stderr)
-            );
+            let combined = format!("{}\n{}", out.stdout, out.stderr);
             if let Some((_flat, sid)) = ares_core::parsing::extract_lsaquery_domain_sid(&combined) {
                 info!(dc_ip = %dc_ip, sid = %sid, "Resolved domain SID via null-session lsaquery fallback");
                 return Some((sid, None));

@@ -86,11 +86,17 @@ Fixed in this change:
 
 The lab is not the limiter. The orchestrator is. Provisioning already supports
 **29 distinct paths / ~133 foothold×technique permutations** to domain compromise
-(see `../DreadOps/apps/DreadGOAD/docs/domain-compromise-paths.md`). But the
-exploitation queue is pure deterministic greedy, so identical state drains in an
-identical order and every run walks the *same* path. The gap between "133
+(see `../DreadOps/apps/DreadGOAD/docs/domain-compromise-paths.md`). The
+exploitation queue defaults to deterministic greedy, so identical state drains in
+an identical order and every run walks the *same* path. The gap between "133
 available" and "1 walked per run" is the entire deficit, and it lives in
 `ares-cli/src/orchestrator/`.
+
+**Status:** the selection levers described below are implemented and shipped —
+`orchestrator/diversity.rs`, wired at `exploitation.rs:313-387` and
+`deferred.rs:386`, gated behind `selection_temperature`, `novelty.enabled` and
+`randomize_entry_foothold` in `config/ares.yaml`. All three default to off, so a
+stock run still reproduces the deterministic behaviour analysed here.
 
 Lever ranking: **add exploration to selection** (free, decisive) > **fix
 recon→vuln-state coverage** (free, unlocks dark families) > **add lab principals**
@@ -131,6 +137,11 @@ Two facts, both verified in code/spec:
    vulns, not the queue selection that picks the actual path. Accidental variance
    (recon host-discovery order, LLM temperature, tool-timeout noise) is the only
    thing producing any diversity today.
+
+   Resolved: `pop_best` now branches to softmax selection when
+   `selection_temperature > 0` or `novelty_enabled` (`exploitation.rs:323`,
+   `:370`, `:387`). With both knobs at their defaults the deterministic path
+   above is still exactly what runs.
 
 2. **Recon→vuln-state mapping leaves whole families dark.** Per the lab spec,
    MSSQL impersonation / linked-server is **13 paths**, delegation is 3, and the

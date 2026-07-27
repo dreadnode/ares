@@ -267,7 +267,7 @@ pub fn build_ldap_search_descriptions(args: &Value) -> Result<CommandBuilder> {
     let ldap_uri = format!("ldap://{target}");
 
     let mut cmd = CommandBuilder::new("ldapsearch")
-        .flag("-H", &ldap_uri)
+        .flag_visible("-H", &ldap_uri)
         .timeout_secs(120);
 
     if let Some(ccache) = ticket_path {

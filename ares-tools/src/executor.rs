@@ -1,8 +1,11 @@
-use std::time::Duration;
+use std::collections::HashSet;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use tokio::process::Command;
+use tracing::{field::Empty, Instrument};
 
+use crate::redact::redact_command_line_with_visible;
 use crate::ToolOutput;
 
 /// Default timeout for tool execution (2 minutes).
@@ -114,7 +117,9 @@ pub struct CommandBuilder {
     env_vars: Vec<(String, String)>,
     timeout: Duration,
     stdin_data: Option<String>,
+    stdin_null: bool,
     cwd: Option<std::path::PathBuf>,
+    visible_indices: HashSet<usize>,
 }
 
 impl CommandBuilder {
@@ -125,7 +130,9 @@ impl CommandBuilder {
             env_vars: Vec::new(),
             timeout: DEFAULT_TIMEOUT,
             stdin_data: None,
+            stdin_null: false,
             cwd: None,
+            visible_indices: HashSet::new(),
         }
     }
 
@@ -151,6 +158,21 @@ impl CommandBuilder {
     /// Add a flag and its value as two separate args (e.g., `-p 445`).
     pub fn flag(self, flag: &str, value: impl Into<String>) -> Self {
         self.arg(flag).arg(value)
+    }
+
+    /// Add a flag and its value, declaring that the value is NOT a secret.
+    ///
+    /// [`crate::redact::redact_command_line`] masks the argument after any
+    /// credential-bearing flag by default, including the ones that are only
+    /// sometimes secret (`-p`, `-H`, `-w`). A call site that knows its value is
+    /// benign — an nmap port spec, an ldapsearch URI, hashcat's workload
+    /// profile — uses this instead of [`CommandBuilder::flag`] so the value
+    /// stays readable in logs and traces. Everything else stays fail-closed.
+    pub fn flag_visible(mut self, flag: &str, value: impl Into<String>) -> Self {
+        self.args.push(flag.to_string());
+        self.visible_indices.insert(self.args.len());
+        self.args.push(value.into());
+        self
     }
 
     /// Add a flag and value only if the value is Some.
@@ -180,6 +202,17 @@ impl CommandBuilder {
         self
     }
 
+    /// Attach `/dev/null` to the child's stdin instead of inheriting the
+    /// worker's.
+    ///
+    /// An inherited stdin lets a tool that prompts block until the timeout
+    /// expires rather than seeing EOF and exiting. Ignored when [`Self::stdin`]
+    /// has supplied data to write.
+    pub fn stdin_null(mut self) -> Self {
+        self.stdin_null = true;
+        self
+    }
+
     pub fn current_dir(mut self, dir: impl Into<std::path::PathBuf>) -> Self {
         self.cwd = Some(dir.into());
         self
@@ -206,6 +239,16 @@ impl CommandBuilder {
         &self.env_vars
     }
 
+    /// The command line with every secret masked, safe for logs, span
+    /// attributes, and error messages surfaced to the LLM.
+    ///
+    /// Honours the indices recorded by [`CommandBuilder::flag_visible`];
+    /// everything else goes through the fail-closed rules in
+    /// [`crate::redact`].
+    pub(crate) fn redacted_command_line(&self) -> String {
+        redact_command_line_with_visible(&self.program, &self.args, &self.visible_indices)
+    }
+
     pub async fn execute(self) -> Result<ToolOutput> {
         #[cfg(test)]
         {
@@ -214,8 +257,8 @@ impl CommandBuilder {
             }
         }
 
-        let display_cmd = format!("{} {}", self.program, self.args.join(" "));
-        tracing::debug!(cmd = %display_cmd, timeout = ?self.timeout, "executing tool command");
+        let redacted_cmd = self.redacted_command_line();
+        tracing::debug!(cmd = %redacted_cmd, timeout = ?self.timeout, "executing tool command");
 
         // Global cap on concurrent subprocess spawns. Held for the full
         // spawn+wait lifetime; released when this function returns.
@@ -238,7 +281,65 @@ impl CommandBuilder {
             );
         }
 
-        let mut cmd = Command::new(&resolved_program);
+        let otel_name = format!("exec.{resolved_program}");
+        let span = tracing::info_span!(
+            "exec.command",
+            otel.name = %otel_name,
+            otel.kind = "client",
+            otel.status_code = Empty,
+            otel.status_message = Empty,
+            "process.executable.name" = %resolved_program,
+            "process.command_line" = %redacted_cmd,
+            "process.command_args.count" = self.args.len(),
+            "process.exit_code" = Empty,
+            "tool.timed_out" = Empty,
+            "tool.duration_ms" = Empty,
+        );
+
+        self.spawn_and_wait(resolved_program, redacted_cmd, span.clone())
+            .instrument(span)
+            .await
+    }
+
+    /// Time the spawn+wait, record the span's deferred fields on every exit
+    /// path, and hand the result back to [`CommandBuilder::execute`].
+    async fn spawn_and_wait(
+        self,
+        resolved_program: String,
+        redacted_cmd: String,
+        span: tracing::Span,
+    ) -> Result<ToolOutput> {
+        let started = Instant::now();
+        let outcome = self.run_child(&resolved_program, &redacted_cmd).await;
+        span.record("tool.duration_ms", started.elapsed().as_millis() as u64);
+        span.record("tool.timed_out", outcome.timed_out);
+
+        match &outcome.result {
+            Ok(output) => {
+                if let Some(code) = output.exit_code {
+                    span.record("process.exit_code", code);
+                }
+                if output.success {
+                    span.record("otel.status_code", "OK");
+                } else {
+                    span.record("otel.status_code", "ERROR");
+                    span.record(
+                        "otel.status_message",
+                        format!("exited with {:?}", output.exit_code).as_str(),
+                    );
+                }
+            }
+            Err(e) => {
+                span.record("otel.status_code", "ERROR");
+                span.record("otel.status_message", format!("{e:#}").as_str());
+            }
+        }
+
+        outcome.result
+    }
+
+    async fn run_child(self, resolved_program: &str, redacted_cmd: &str) -> ExecOutcome {
+        let mut cmd = Command::new(resolved_program);
         cmd.args(&self.args);
 
         if let Some(ref dir) = self.cwd {
@@ -251,6 +352,8 @@ impl CommandBuilder {
 
         if self.stdin_data.is_some() {
             cmd.stdin(std::process::Stdio::piped());
+        } else if self.stdin_null {
+            cmd.stdin(std::process::Stdio::null());
         }
         cmd.stdout(std::process::Stdio::piped());
         cmd.stderr(std::process::Stdio::piped());
@@ -284,16 +387,22 @@ impl CommandBuilder {
                 // Attach the typed marker before the human-readable context so
                 // `spawn_error_kind()` on the returned error can recover the
                 // discriminator without ever inspecting the message string.
-                return Err(anyhow::Error::new(e)
-                    .context(SpawnErrorKind { io_kind })
-                    .context(msg));
+                return ExecOutcome::failed(
+                    anyhow::Error::new(e)
+                        .context(SpawnErrorKind { io_kind })
+                        .context(msg),
+                );
             }
         };
 
         if let Some(data) = &self.stdin_data {
             use tokio::io::AsyncWriteExt;
             if let Some(mut stdin) = child.stdin.take() {
-                stdin.write_all(data.as_bytes()).await?;
+                if let Err(e) = stdin.write_all(data.as_bytes()).await {
+                    return ExecOutcome::failed(
+                        anyhow::Error::new(e).context("failed to write stdin"),
+                    );
+                }
                 drop(stdin);
             }
         }
@@ -323,23 +432,51 @@ impl CommandBuilder {
                     "command completed"
                 );
 
-                Ok(ToolOutput {
+                ExecOutcome::completed(ToolOutput {
                     stdout,
                     stderr,
                     exit_code,
                     success,
                 })
             }
-            Ok(Ok(Err(e))) => Err(anyhow::anyhow!("command execution failed: {e}")),
-            Ok(Err(e)) => Err(anyhow::anyhow!("task join error: {e}")),
+            Ok(Ok(Err(e))) => ExecOutcome::failed(anyhow::anyhow!("command execution failed: {e}")),
+            Ok(Err(e)) => ExecOutcome::failed(anyhow::anyhow!("task join error: {e}")),
             Err(_) => {
                 abort.abort();
-                Err(anyhow::anyhow!(
-                    "command timed out after {:?}: {}",
-                    timeout,
-                    display_cmd
+                ExecOutcome::timed_out(anyhow::anyhow!(
+                    "command timed out after {timeout:?}: {redacted_cmd}"
                 ))
             }
+        }
+    }
+}
+
+/// Result of one spawn+wait, carrying the timeout discriminator the span needs
+/// but the `anyhow` chain does not express.
+struct ExecOutcome {
+    result: Result<ToolOutput>,
+    timed_out: bool,
+}
+
+impl ExecOutcome {
+    fn completed(output: ToolOutput) -> Self {
+        Self {
+            result: Ok(output),
+            timed_out: false,
+        }
+    }
+
+    fn failed(err: anyhow::Error) -> Self {
+        Self {
+            result: Err(err),
+            timed_out: false,
+        }
+    }
+
+    fn timed_out(err: anyhow::Error) -> Self {
+        Self {
+            result: Err(err),
+            timed_out: true,
         }
     }
 }
@@ -526,6 +663,41 @@ mod tests {
     #[test]
     fn builder_stdin_chains() {
         let _b = CommandBuilder::new("cmd").stdin("input data");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn stdin_null_gives_the_child_eof_instead_of_blocking() {
+        use std::time::Instant;
+
+        let start = Instant::now();
+        let out = CommandBuilder::new("cat")
+            .stdin_null()
+            .timeout(Duration::from_secs(10))
+            .execute()
+            .await
+            .expect("cat with a null stdin must exit on EOF, not hang");
+
+        assert!(out.success, "cat should exit 0 on immediate EOF: {out:?}");
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "cat blocked on stdin instead of seeing EOF: {:?}",
+            start.elapsed()
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn stdin_data_still_reaches_the_child_when_null_is_also_set() {
+        let out = CommandBuilder::new("cat")
+            .stdin_null()
+            .stdin("hello from stdin\n")
+            .timeout(Duration::from_secs(10))
+            .execute()
+            .await
+            .expect("supplied stdin data must win over the null request");
+
+        assert_eq!(out.stdout, "hello from stdin\n");
     }
 
     #[test]

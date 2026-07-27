@@ -35,6 +35,27 @@ fn epoch_millis() -> u128 {
         .unwrap_or(0)
 }
 
+/// Delete every `*.ccache` file in `dir`, or in the process's current working
+/// directory when `dir` is `None`.
+///
+/// Certipy derives its ccache filename from the cert subject and offers no
+/// `-out` override, so a leftover file from an earlier run makes it stop on an
+/// interactive `Overwrite? (y/n)` prompt. Failures are ignored: an unreadable
+/// directory or an undeletable file leaves exactly the state the old
+/// `rm -f *.ccache 2>/dev/null` left.
+async fn remove_ccache_files(dir: Option<&std::path::Path>) {
+    let dir = dir.unwrap_or_else(|| std::path::Path::new("."));
+    let Ok(mut entries) = tokio::fs::read_dir(dir).await else {
+        return;
+    };
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) == Some("ccache") {
+            let _ = tokio::fs::remove_file(&path).await;
+        }
+    }
+}
+
 /// Switch a certipy invocation into cross-forest Kerberos mode using a forged
 /// inter-realm ccache. Adds `-k -no-pass` and exports `KRB5CCNAME` (plus the
 /// per-ccache `KRB5_CONFIG` shim) so certipy presents the cached service ticket
@@ -195,15 +216,11 @@ pub async fn certipy_auth(args: &Value) -> Result<ToolOutput> {
     // Certipy auth writes .ccache based on cert subject (e.g. administrator.ccache)
     // and does NOT support -out. Remove existing .ccache files to prevent the
     // interactive "Overwrite? (y/n)" prompt that kills non-interactive runs.
-    let _ = tokio::process::Command::new("sh")
-        .arg("-c")
-        .arg("rm -f *.ccache 2>/dev/null")
-        .output()
-        .await;
+    remove_ccache_files(None).await;
 
     CommandBuilder::new("certipy")
         .arg("auth")
-        .flag("-pfx", pfx_path)
+        .flag_visible("-pfx", pfx_path)
         .flag("-dc-ip", dc_ip)
         .flag("-domain", domain)
         .timeout_secs(120)
@@ -219,11 +236,7 @@ pub async fn certipy_shadow(args: &Value) -> Result<ToolOutput> {
     // certipy shadow auto internally calls certipy auth which writes .ccache
     // based on the target account name. Remove existing .ccache to prevent the
     // interactive "Overwrite? (y/n)" prompt.
-    let _ = tokio::process::Command::new("sh")
-        .arg("-c")
-        .arg("rm -f *.ccache 2>/dev/null")
-        .output()
-        .await;
+    remove_ccache_files(None).await;
 
     build_certipy_shadow_command(args)?.execute().await
 }
@@ -360,7 +373,7 @@ pub async fn certipy_forge(args: &Value) -> Result<ToolOutput> {
 
     CommandBuilder::new("certipy")
         .arg("forge")
-        .flag("-ca-pfx", ca_pfx)
+        .flag_visible("-ca-pfx", ca_pfx)
         .flag("-upn", upn)
         .flag_opt("-subject", subject)
         .flag_opt("-template", template)
@@ -551,15 +564,11 @@ pub async fn certipy_esc7_full_chain(args: &Value) -> Result<ToolOutput> {
         outputs.push(("Combine PFX", combine));
     }
 
-    let _ = tokio::process::Command::new("sh")
-        .arg("-c")
-        .arg("rm -f *.ccache 2>/dev/null")
-        .output()
-        .await;
+    remove_ccache_files(None).await;
 
     let step5 = CommandBuilder::new("certipy")
         .arg("auth")
-        .flag("-pfx", &pfx_path)
+        .flag_visible("-pfx", &pfx_path)
         .flag("-dc-ip", dc_ip)
         .flag("-domain", domain)
         .timeout_secs(120)
@@ -827,7 +836,7 @@ pub async fn certipy_esc3_full_chain(args: &Value) -> Result<ToolOutput> {
         .flag("-template", on_behalf_template)
         .flag("-dc-ip", dc_ip)
         .flag("-on-behalf-of", &on_behalf_target)
-        .flag("-pfx", &agent_pfx)
+        .flag_visible("-pfx", &agent_pfx)
         .flag("-out", &target_out)
         .flag_opt("-target", target)
         .current_dir(&cwd)
@@ -862,15 +871,10 @@ pub async fn certipy_esc3_full_chain(args: &Value) -> Result<ToolOutput> {
     // certipy auth writes <subject>.ccache in CWD; clear stale .ccache to
     // avoid the interactive overwrite prompt that kills non-interactive
     // runs (matches what `certipy_auth` does at module level).
-    let _ = tokio::process::Command::new("sh")
-        .arg("-c")
-        .arg("rm -f *.ccache 2>/dev/null")
-        .current_dir(&cwd)
-        .output()
-        .await;
+    remove_ccache_files(Some(&cwd)).await;
     let auth_output = CommandBuilder::new("certipy")
         .arg("auth")
-        .flag("-pfx", &target_pfx)
+        .flag_visible("-pfx", &target_pfx)
         .flag("-dc-ip", dc_ip)
         .flag("-domain", domain)
         .current_dir(&cwd)
@@ -968,7 +972,7 @@ pub async fn certipy_esc13_full_chain(args: &Value) -> Result<ToolOutput> {
         auth_attempts += 1;
         auth_output = CommandBuilder::new("certipy")
             .arg("auth")
-            .flag("-pfx", &pfx_name)
+            .flag_visible("-pfx", &pfx_name)
             .flag("-dc-ip", dc_ip)
             .flag("-domain", domain)
             .flag("-username", username)
@@ -1141,7 +1145,7 @@ pub async fn certipy_esc1_full_chain(args: &Value) -> Result<ToolOutput> {
         auth_attempts += 1;
         auth_output = CommandBuilder::new("certipy")
             .arg("auth")
-            .flag("-pfx", &pfx_name)
+            .flag_visible("-pfx", &pfx_name)
             .flag("-dc-ip", dc_ip)
             .flag("-domain", domain)
             .flag("-username", auth_user)
@@ -2009,6 +2013,59 @@ mod tests {
     }
 
     // --- render_chain_output ---
+
+    #[tokio::test]
+    async fn remove_ccache_files_deletes_every_ccache_in_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        for name in [
+            "alice.ccache",
+            "svc_sql.ccache",
+            "dc01.contoso.local.ccache",
+        ] {
+            std::fs::write(dir.path().join(name), b"ticket").unwrap();
+        }
+        super::remove_ccache_files(Some(dir.path())).await;
+        let left: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert!(left.is_empty(), "ccache files survived: {left:?}");
+    }
+
+    #[tokio::test]
+    async fn remove_ccache_files_leaves_non_ccache_files_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        for name in [
+            "admin.ccache",
+            "esc1_1.pfx",
+            "esc1_1.key",
+            "notes.txt",
+            "bob",
+        ] {
+            std::fs::write(dir.path().join(name), b"x").unwrap();
+        }
+        super::remove_ccache_files(Some(dir.path())).await;
+        assert!(!dir.path().join("admin.ccache").exists());
+        for name in ["esc1_1.pfx", "esc1_1.key", "notes.txt", "bob"] {
+            assert!(dir.path().join(name).exists(), "{name} was deleted");
+        }
+    }
+
+    #[tokio::test]
+    async fn remove_ccache_files_on_empty_dir_is_a_noop() {
+        let dir = tempfile::tempdir().unwrap();
+        super::remove_ccache_files(Some(dir.path())).await;
+        assert!(dir.path().is_dir());
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+    }
+
+    #[tokio::test]
+    async fn remove_ccache_files_ignores_a_missing_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("no_such_workdir");
+        super::remove_ccache_files(Some(&missing)).await;
+        assert!(!missing.exists());
+    }
 
     fn mk_output(stdout: &str, stderr: &str) -> crate::ToolOutput {
         crate::ToolOutput {

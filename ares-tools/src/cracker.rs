@@ -102,8 +102,7 @@ fn niced_hashcat() -> CommandBuilder {
         .arg("-n")
         .arg(adj)
         .arg("hashcat")
-        .arg("-w")
-        .arg(hashcat_workload())
+        .flag_visible("-w", hashcat_workload())
         .arg("--potfile-disable")
 }
 

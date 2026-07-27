@@ -304,7 +304,7 @@ pub async fn ssh_with_password(args: &Value) -> Result<ToolOutput> {
         .arg(&user_host);
 
     if let Some(p) = port {
-        cmd = cmd.flag("-p", p);
+        cmd = cmd.flag_visible("-p", p);
     }
 
     cmd.arg(command).timeout_secs(120).execute().await

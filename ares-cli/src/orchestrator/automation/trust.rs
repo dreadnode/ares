@@ -1624,7 +1624,7 @@ pub async fn auto_trust_follow(dispatcher: Arc<Dispatcher>, mut shutdown: watch:
                 match result {
                     Ok(exec_result) => {
                         if let Some(err) = exec_result.error.as_ref() {
-                            let tail: String = exec_result
+                            let raw_tail: String = exec_result
                                 .output
                                 .chars()
                                 .rev()
@@ -1633,6 +1633,7 @@ pub async fn auto_trust_follow(dispatcher: Arc<Dispatcher>, mut shutdown: watch:
                                 .chars()
                                 .rev()
                                 .collect();
+                            let tail = ares_tools::redact::redact_text(&raw_tail);
                             // Deterministic-failure signatures that will NOT
                             // heal on the next 30s tick — the target DC's
                             // Kerberos database won't sprout a `cifs/<apex>`
@@ -1751,7 +1752,7 @@ pub async fn auto_trust_follow(dispatcher: Arc<Dispatcher>, mut shutdown: watch:
                             // partial dumps (got hashes but no krbtgt — usually
                             // a cross-forest no-ExtraSid case where the target
                             // KDC issued a TGS but DRSUAPI rejected replication).
-                            let tail: String = exec_result
+                            let raw_tail: String = exec_result
                                 .output
                                 .chars()
                                 .rev()
@@ -1760,6 +1761,7 @@ pub async fn auto_trust_follow(dispatcher: Arc<Dispatcher>, mut shutdown: watch:
                                 .chars()
                                 .rev()
                                 .collect();
+                            let tail = ares_tools::redact::redact_text(&raw_tail);
                             let hash_count = exec_result
                                 .discoveries
                                 .as_ref()
@@ -2523,7 +2525,7 @@ async fn dispatch_create_inter_realm_ticket(
         source_domain,
         target_domain,
         task_id = %task_id,
-        args = %call.arguments,
+        args = %ares_tools::redact::redact_tool_arguments(&call.arguments),
         "Dispatching create_inter_realm_ticket for SID-filtered trust (Kerberos LDAP path)"
     );
 
@@ -2565,8 +2567,25 @@ async fn dispatch_create_inter_realm_ticket(
                 source_domain,
                 target_domain,
                 ticket_path = %ticket_path,
-                output_tail = %result.output.lines().rev().take(20).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join(" | "),
                 "Inter-realm ticket forged — persisting for Kerberos LDAP tools"
+            );
+            let output_tail = ares_tools::redact::redact_text(
+                &result
+                    .output
+                    .lines()
+                    .rev()
+                    .take(20)
+                    .collect::<Vec<_>>()
+                    .into_iter()
+                    .rev()
+                    .collect::<Vec<_>>()
+                    .join(" | "),
+            );
+            tracing::debug!(
+                source_domain,
+                target_domain,
+                output_tail = %output_tail,
+                "create_inter_realm_ticket output tail"
             );
 
             let ticket = ares_core::models::KerberosTicket {
@@ -2653,7 +2672,11 @@ async fn drain_force_forge_requests(dispatcher: &Dispatcher) {
         let request: ForceInterRealmForgeRequest = match serde_json::from_str(&raw) {
             Ok(r) => r,
             Err(e) => {
-                warn!(err = %e, raw = %raw, "force_forge drain: bad request JSON, skipping");
+                warn!(
+                    err = %e,
+                    raw_len = raw.len(),
+                    "force_forge drain: bad request JSON, skipping"
+                );
                 continue;
             }
         };

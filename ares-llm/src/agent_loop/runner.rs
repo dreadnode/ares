@@ -4,7 +4,8 @@ use std::sync::Arc;
 use tracing::{debug, info, warn, Instrument};
 
 use ares_core::telemetry::spans::{
-    trace_decision, trace_tool_call, Team, TraceDecisionParams, TraceToolCallParams,
+    record_span_status, trace_decision, trace_tool_call, Team, TraceDecisionParams,
+    TraceToolCallParams,
 };
 use ares_core::telemetry::target::{extract_target_info, infer_target_type_from_info};
 
@@ -71,6 +72,7 @@ async fn dispatch_one(
                 discoveries,
                 failure_kind,
             } = result;
+            record_span_status(&tracing::Span::current(), error.as_deref());
             // Preserve `error` for the pruning classifier while still
             // surfacing it to the LLM in the tool-result body.
             let combined = if let Some(ref err) = error {
@@ -93,6 +95,7 @@ async fn dispatch_one(
                 "Tool dispatch failed"
             );
             let err_str = e.to_string();
+            record_span_status(&tracing::Span::current(), Some(&err_str));
             DispatchResult {
                 call_id: call.id,
                 output: format!("Tool execution failed: {err_str}"),
@@ -552,6 +555,7 @@ async fn run_agent_loop_inner(p: RunAgentLoopInnerParams<'_>) -> AgentLoopOutcom
                     task_id: Some(task_id),
                     is_error: false,
                     error_message: None,
+                    defer_status: true,
                 });
                 join_set.spawn(dispatch_one(disp, r, tid, c).instrument(span));
             }
@@ -728,10 +732,13 @@ async fn run_agent_loop_inner(p: RunAgentLoopInnerParams<'_>) -> AgentLoopOutcom
                                 task_id: Some(&tid),
                                 is_error: false,
                                 error_message: None,
+                                defer_status: true,
                             });
                             let result = handle_callback(&c, Some(h.as_ref()))
-                                .instrument(cb_span)
+                                .instrument(cb_span.clone())
                                 .await;
+                            let cb_err = result.as_ref().err().map(ToString::to_string);
+                            record_span_status(&cb_span, cb_err.as_deref());
                             (c.id.clone(), result)
                         });
                     }
@@ -822,11 +829,14 @@ async fn run_agent_loop_inner(p: RunAgentLoopInnerParams<'_>) -> AgentLoopOutcom
                         task_id: Some(task_id),
                         is_error: false,
                         error_message: None,
+                        defer_status: true,
                     });
-                    match handle_callback(call, callback_handler.as_deref())
-                        .instrument(cb_span)
-                        .await
-                    {
+                    let cb_result = handle_callback(call, callback_handler.as_deref())
+                        .instrument(cb_span.clone())
+                        .await;
+                    let cb_err = cb_result.as_ref().err().map(ToString::to_string);
+                    record_span_status(&cb_span, cb_err.as_deref());
+                    match cb_result {
                         Ok(CallbackResult::TaskComplete {
                             task_id: tid,
                             result,
@@ -901,11 +911,14 @@ async fn run_agent_loop_inner(p: RunAgentLoopInnerParams<'_>) -> AgentLoopOutcom
                     task_id: Some(task_id),
                     is_error: false,
                     error_message: None,
+                    defer_status: true,
                 });
-                match handle_callback(call, callback_handler.as_deref())
-                    .instrument(cb_span)
-                    .await
-                {
+                let cb_result = handle_callback(call, callback_handler.as_deref())
+                    .instrument(cb_span.clone())
+                    .await;
+                let cb_err = cb_result.as_ref().err().map(ToString::to_string);
+                record_span_status(&cb_span, cb_err.as_deref());
+                match cb_result {
                     Ok(CallbackResult::TaskComplete {
                         task_id: tid,
                         result,

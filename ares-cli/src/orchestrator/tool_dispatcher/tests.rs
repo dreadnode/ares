@@ -607,6 +607,56 @@ fn dispatch_timeout_result_zero_seconds_still_well_formed() {
 }
 
 #[test]
+fn dispatch_status_error_is_none_for_a_clean_result() {
+    use redis_dispatcher::dispatch_status_error;
+    let ok = Ok(ares_llm::ToolExecResult {
+        output: "5 hosts up".into(),
+        error: None,
+        discoveries: None,
+        failure_kind: None,
+    });
+    assert!(dispatch_status_error(&ok).is_none());
+}
+
+#[test]
+fn dispatch_status_error_surfaces_the_timeout_path() {
+    use redis_dispatcher::{dispatch_status_error, dispatch_timeout_result};
+    let timed_out = Ok(dispatch_timeout_result(
+        "hashcat",
+        std::time::Duration::from_secs(5700),
+    ));
+    let status = dispatch_status_error(&timed_out).expect("timeout must mark the span failed");
+    assert!(status.contains("timed out"), "{status}");
+    assert!(status.contains("5700s"), "{status}");
+}
+
+#[test]
+fn dispatch_status_error_surfaces_transport_and_tool_failures() {
+    use redis_dispatcher::{dispatch_error_result, dispatch_status_error};
+    let transport = Ok(dispatch_error_result("certipy", "no responders available"));
+    assert!(dispatch_status_error(&transport)
+        .expect("transport failure must mark the span failed")
+        .contains("no responders available"));
+
+    let tool_error = Ok(ares_llm::ToolExecResult {
+        output: String::new(),
+        error: Some("tool exited with code Some(1)".into()),
+        discoveries: None,
+        failure_kind: Some(ares_llm::ToolFailureKind::ToolError),
+    });
+    assert_eq!(
+        dispatch_status_error(&tool_error).as_deref(),
+        Some("tool exited with code Some(1)")
+    );
+
+    let deserialize_failure: anyhow::Result<ares_llm::ToolExecResult> =
+        Err(anyhow::anyhow!("Failed to deserialize tool exec response"));
+    assert!(dispatch_status_error(&deserialize_failure)
+        .expect("Err must mark the span failed")
+        .contains("Failed to deserialize"));
+}
+
+#[test]
 fn default_tool_timeout_is_95_minutes() {
     // 5700s = 95min — must exceed worst-case AES hashcat queue + run time.
     assert_eq!(DEFAULT_TOOL_TIMEOUT_SECS, 95 * 60);

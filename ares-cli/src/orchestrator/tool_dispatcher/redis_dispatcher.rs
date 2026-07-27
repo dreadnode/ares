@@ -15,7 +15,7 @@ use tracing::{debug, warn, Instrument};
 
 use ares_core::nats;
 use ares_core::telemetry::propagation::inject_traceparent;
-use ares_core::telemetry::spans::{producer_span, Team};
+use ares_core::telemetry::spans::{producer_span, record_span_status, ServiceSpanParams, Team};
 use ares_llm::{ToolCall, ToolExecResult};
 
 use crate::orchestrator::state::SharedState;
@@ -131,6 +131,19 @@ pub(super) fn tool_exec_result_from_response(response: ToolExecResponse) -> Tool
     }
 }
 
+/// Terminal status message for the PRODUCER span wrapping one dispatch.
+///
+/// `None` marks the span successful. Every failure shape the dispatch can
+/// produce maps to `Some`: a transport error, the NATS request timeout, a
+/// pre-flight rejection (bad domain / cross-realm auth), and a worker reply
+/// that carries a tool-level error.
+pub(super) fn dispatch_status_error(outcome: &Result<ToolExecResult>) -> Option<String> {
+    match outcome {
+        Ok(result) => result.error.clone(),
+        Err(e) => Some(e.to_string()),
+    }
+}
+
 #[async_trait::async_trait]
 impl ares_llm::ToolDispatcher for RedisToolDispatcher {
     async fn dispatch_tool(
@@ -140,14 +153,17 @@ impl ares_llm::ToolDispatcher for RedisToolDispatcher {
         call: &ToolCall,
     ) -> Result<ToolExecResult> {
         let effective_role = super::resolve_queue_role(role, &call.name);
-        let span = producer_span(
-            &format!("dispatch.{}", call.name),
+        let span_name = format!("dispatch.{}", call.name);
+        let peer_service = format!("ares-worker-{effective_role}");
+        let span = producer_span(ServiceSpanParams {
+            name: &span_name,
             role,
-            Team::Red,
-            &format!("ares-worker-{effective_role}"),
-        );
+            team: Team::Red,
+            target_service: Some(&peer_service),
+            defer_status: true,
+        });
 
-        async {
+        let outcome = async {
             // Reject calls whose `domain` argument doesn't match a known
             // domain — catches LLM typos before they pollute credential
             // records or misroute downstream tooling.
@@ -270,7 +286,10 @@ impl ares_llm::ToolDispatcher for RedisToolDispatcher {
 
             Ok(tool_exec_result_from_response(response))
         }
-        .instrument(span)
-        .await
+        .instrument(span.clone())
+        .await;
+
+        record_span_status(&span, dispatch_status_error(&outcome).as_deref());
+        outcome
     }
 }
