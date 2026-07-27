@@ -962,6 +962,9 @@ pub(crate) fn supports_kerberos_auth_mode(tool_name: &str) -> bool {
 ///   - `lateral::execution::secretsdump_kerberos`
 ///   - `privesc::adcs::{certipy_find,certipy_request,certipy_ca,certipy_shadow}`
 ///     (adcs.rs — `apply_certipy_kerberos` sets `-k -no-pass` + `KRB5CCNAME`)
+///   - `privesc::delegation::{add_computer,addspn,rbcd_write}` (delegation.rs —
+///     the GenericAll→RBCD chain; `add_computer` additionally needs `dc_host`
+///     because impacket-addcomputer rejects `-k` without `-dc-host`)
 ///
 /// Adding a Kerberos-capable tool means appending its name here AND wiring
 /// the `optional_str("ticket_path")` read in the impl.
@@ -985,6 +988,9 @@ pub(crate) fn tool_consumes_ticket_path(tool_name: &str) -> bool {
             | "adminsd_holder_add_ace"
             | "gmsa_read_password_bloodyad"
             | "dacl_edit"
+            | "add_computer"
+            | "addspn"
+            | "rbcd_write"
             | "smbclient_kerberos_shares"
             | "certipy_find"
             | "certipy_request"
@@ -1747,6 +1753,9 @@ mod tests {
             "adminsd_holder_add_ace",
             "gmsa_read_password_bloodyad",
             "dacl_edit",
+            "add_computer",
+            "addspn",
+            "rbcd_write",
             "smbclient_kerberos_shares",
         ] {
             assert!(

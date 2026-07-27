@@ -87,7 +87,11 @@ pub fn definitions() -> Vec<ToolDefinition> {
         ToolDefinition {
             name: "add_computer".into(),
             description: "Add a computer account to the domain. Useful for RBCD attacks where \
-                a controlled computer account is needed as the attacker principal."
+                a controlled computer account is needed as the attacker principal. \
+                Auth precedence: `ticket_path` (Kerberos ccache) > `hash` (NTLM \
+                pass-the-hash) > `password` (plaintext); the worker injects whichever \
+                material the operation actually holds, so a hash-only foothold works \
+                here. Supply `dc_host` — it is mandatory for the Kerberos path."
                 .into(),
             input_schema: json!({
                 "type": "object",
@@ -102,11 +106,23 @@ pub fn definitions() -> Vec<ToolDefinition> {
                     },
                     "password": {
                         "type": "string",
-                        "description": "Password for authentication"
+                        "description": "Password for authentication (used only when no `ticket_path` or `hash` is supplied)"
+                    },
+                    "hash": {
+                        "type": "string",
+                        "description": "NTLM hash for pass-the-hash (LM:NT or bare NT), passed to impacket-addcomputer as `-hashes LMHASH:NTHASH -no-pass`. Takes precedence over `password`."
+                    },
+                    "ticket_path": {
+                        "type": "string",
+                        "description": "Path to a Kerberos ccache file. Highest auth precedence; invokes impacket-addcomputer with `-k -no-pass` and sets KRB5CCNAME. Requires `dc_host`."
                     },
                     "dc_ip": {
                         "type": "string",
                         "description": "Domain controller IP address"
+                    },
+                    "dc_host": {
+                        "type": "string",
+                        "description": "Domain controller DNS name (e.g. 'dc01.contoso.local'). Required when authenticating with a Kerberos ccache — impacket-addcomputer rejects `-k` without `-dc-host`."
                     },
                     "computer_name": {
                         "type": "string",
@@ -117,7 +133,7 @@ pub fn definitions() -> Vec<ToolDefinition> {
                         "description": "Password for the new computer account"
                     }
                 },
-                "required": ["domain", "username", "password", "dc_ip"]
+                "required": ["domain", "username", "dc_ip"]
             }),
         },
         // NOTE: addspn removed — bloodyAD not in privesc container (ACL role only).
@@ -125,7 +141,10 @@ pub fn definitions() -> Vec<ToolDefinition> {
             name: "rbcd_write".into(),
             description: "Write the msDS-AllowedToActOnBehalfOfOtherIdentity attribute on a \
                 target computer to enable Resource-Based Constrained Delegation (RBCD). \
-                Allows the attacker-controlled SID to impersonate users to the target."
+                Allows the attacker-controlled SID to impersonate users to the target. \
+                Auth precedence: `ticket_path` (Kerberos ccache) > `hash` (NTLM \
+                pass-the-hash) > `password` (plaintext); the worker injects whichever \
+                material the operation actually holds, so a hash-only foothold works here."
                 .into(),
             input_schema: json!({
                 "type": "object",
@@ -148,14 +167,26 @@ pub fn definitions() -> Vec<ToolDefinition> {
                     },
                     "password": {
                         "type": "string",
-                        "description": "Password for authentication"
+                        "description": "Password for authentication (used only when no `ticket_path` or `hash` is supplied)"
+                    },
+                    "hash": {
+                        "type": "string",
+                        "description": "NTLM hash for pass-the-hash (LM:NT or bare NT), passed to impacket-rbcd as `-hashes LMHASH:NTHASH -no-pass`. Takes precedence over `password`."
+                    },
+                    "ticket_path": {
+                        "type": "string",
+                        "description": "Path to a Kerberos ccache file. Highest auth precedence; invokes impacket-rbcd with `-k -no-pass` and sets KRB5CCNAME."
                     },
                     "dc_ip": {
                         "type": "string",
                         "description": "Domain controller IP address"
+                    },
+                    "dc_host": {
+                        "type": "string",
+                        "description": "Domain controller DNS name (e.g. 'dc01.contoso.local'). Optional, but supplying it skips impacket-rbcd's anonymous SMB lookup of the DC's machine name, which a hardened DC refuses."
                     }
                 },
-                "required": ["target_computer", "attacker_sid", "domain", "username", "password", "dc_ip"]
+                "required": ["target_computer", "attacker_sid", "domain", "username", "dc_ip"]
             }),
         },
         ToolDefinition {

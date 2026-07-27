@@ -1,6 +1,9 @@
 use anyhow::Result;
 use serde_json::Value;
 
+use crate::args::{optional_str, required_str};
+use crate::executor::CommandBuilder;
+
 /// Argument keys that hold secret material. Mirrors `CREDENTIAL_KEYS` in
 /// `ares-cli/src/worker/credential_resolver.rs` — keep in sync.
 ///
@@ -190,6 +193,98 @@ pub fn bloodyad_creds(domain: &str, username: &str, password: &str, dc_ip: &str)
         "--host".to_string(),
         dc_ip.to_string(),
     ]
+}
+
+/// The all-zero LM half every modern NTLM stack expects in front of an NT
+/// hash. Tools that take `LMHASH:NTHASH` reject a bare 32-hex NT hash.
+pub const EMPTY_LM_HASH: &str = "aad3b435b51404eeaad3b435b51404ee";
+
+/// Argument keys the credential resolver uses for NTLM hash material, in
+/// lookup order.
+pub const NTLM_HASH_KEYS: &[&str] = &["hash", "nt_hash", "ntlm_hash"];
+
+/// Error returned when a tool has no usable auth material at all.
+pub const NO_AUTH_MATERIAL: &str = "missing auth material: supply one of `ticket_path` \
+     (Kerberos ccache), `hash`/`nt_hash`/`ntlm_hash` (NTLM pass-the-hash), or `password`";
+
+/// First non-empty NTLM hash argument, checked in [`NTLM_HASH_KEYS`] order.
+pub fn ntlm_hash_arg(args: &Value) -> Option<&str> {
+    NTLM_HASH_KEYS.iter().find_map(|key| {
+        optional_str(args, key)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+    })
+}
+
+/// Normalize an NTLM hash argument to the `LMHASH:NTHASH` form.
+///
+/// A bare 32-hex NT hash gains the empty-LM prefix; an existing `LM:NT` pair
+/// (including impacket's `:NT` short form) passes through with the LM half
+/// filled in. Anything else is rejected — a malformed value handed to
+/// bloodyAD or impacket is silently treated as a cleartext password and burns
+/// a bind attempt against the account lockout counter.
+pub fn lm_nt_hash_pair(raw: &str) -> Result<String> {
+    fn is_hex32(s: &str) -> bool {
+        s.len() == 32 && s.chars().all(|c| c.is_ascii_hexdigit())
+    }
+
+    let trimmed = raw.trim();
+    match trimmed.split_once(':') {
+        Some((lm, nt)) if is_hex32(nt) && lm.is_empty() => Ok(format!("{EMPTY_LM_HASH}:{nt}")),
+        Some((lm, nt)) if is_hex32(nt) && is_hex32(lm) => Ok(format!("{lm}:{nt}")),
+        None if is_hex32(trimmed) => Ok(format!("{EMPTY_LM_HASH}:{trimmed}")),
+        _ => anyhow::bail!(
+            "malformed NTLM hash argument ({} chars): expected a 32-hex NT hash \
+             or LMHASH:NTHASH",
+            trimmed.len()
+        ),
+    }
+}
+
+/// Build a `bloodyAD` command with authentication already applied, ready for
+/// the caller to append the subcommand (`add groupMember …`, `set password …`,
+/// `add genericAll …`, `add spn …`) and a timeout.
+///
+/// Auth precedence: `ticket_path` > NTLM hash (`hash`/`nt_hash`/`ntlm_hash`) >
+/// `password`. A non-empty `ticket_path` wins because the cross-forest
+/// credential resolver injects an inter-realm ccache that an NTLM bind would
+/// reject with 0x52e (Bug B). The hash branch feeds bloodyAD's `-p` flag,
+/// which accepts `LMHASH:NTHASH` for NTLM authentication — without it every
+/// ACL edge discovered from a hash-only foothold converts to zero exploitation
+/// because the tool bails with "missing required argument: password".
+///
+/// bloodyAD's `-k` is variadic (`nargs='*'`) and takes keyword arguments like
+/// `ccache=<path>`; there is NO `-K` flag. Passing `-k -K <path>` made argparse
+/// consume `-K` as an unknown token and `<path>` landed in the subcommand slot,
+/// so bloodyAD rejected the whole call. `KRB5CCNAME`/`KRB5_CONFIG` are exported
+/// as a belt-and-braces fallback that recent bloodyAD versions read directly.
+pub fn bloodyad_base(args: &Value, domain: &str, dc_ip: &str) -> Result<CommandBuilder> {
+    if let Some(tpath) = optional_str(args, "ticket_path").filter(|s| !s.is_empty()) {
+        let (ccname_key, ccname_val) = kerberos_env(tpath);
+        let (cfg_key, cfg_val) = krb5_config_env(tpath);
+        return Ok(CommandBuilder::new("bloodyAD")
+            .flag("-d", domain)
+            .flag("--host", dc_ip)
+            .arg("-k")
+            .arg(format!("ccache={tpath}"))
+            .env(ccname_key, ccname_val)
+            .env(cfg_key, cfg_val));
+    }
+
+    let username = required_str(args, "username")?;
+
+    if let Some(raw) = ntlm_hash_arg(args) {
+        return Ok(CommandBuilder::new("bloodyAD")
+            .flag("-d", domain)
+            .flag("-u", username)
+            .flag("-p", lm_nt_hash_pair(raw)?)
+            .flag("--host", dc_ip));
+    }
+
+    let password = optional_str(args, "password")
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("{NO_AUTH_MATERIAL}"))?;
+    Ok(CommandBuilder::new("bloodyAD").args(bloodyad_creds(domain, username, password, dc_ip)))
 }
 
 /// Determine auth strategy from available credentials and return

