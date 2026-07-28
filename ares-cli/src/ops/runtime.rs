@@ -1,10 +1,21 @@
 use anyhow::{Context, Result};
 use chrono::Utc;
 
+use ares_core::models::SharedRedTeamState;
 use ares_core::state::RedisStateReader;
 
 use crate::redis_conn::{connect_redis, resolve_operation_id};
 use crate::util::{format_duration, format_number};
+
+fn finalizing_note(state: &SharedRedTeamState) -> Option<String> {
+    if state.completed_at.is_some() || state.red_completed_at.is_none() {
+        return None;
+    }
+    if state.red_blocked_on_blue {
+        return Some("waiting on blue investigations".to_string());
+    }
+    state.red_completion_reason.clone()
+}
 
 pub(crate) async fn ops_runtime(
     redis_url: Option<String>,
@@ -28,6 +39,11 @@ pub(crate) async fn ops_runtime(
             (completed - state.started_at).num_seconds().max(0) as u64,
             "completed",
         )
+    } else if let Some(red_completed) = state.red_completed_at {
+        (
+            (red_completed - state.started_at).num_seconds().max(0) as u64,
+            "completed",
+        )
     } else if is_running {
         (
             (now - state.started_at).num_seconds().max(0) as u64,
@@ -44,6 +60,9 @@ pub(crate) async fn ops_runtime(
     println!("Status:    {status}");
     println!("Started:   {}", state.started_at.to_rfc3339());
     println!("Runtime:   {}", format_duration(runtime_seconds));
+    if let Some(note) = finalizing_note(&state) {
+        println!("Finalizing: {note}");
+    }
     println!();
 
     let (creds, hashes) = super::loot::reportable_counts(&state);
@@ -131,4 +150,58 @@ pub(crate) async fn ops_runtime(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::TimeZone;
+
+    fn at(hour: u32, min: u32) -> chrono::DateTime<Utc> {
+        Utc.with_ymd_and_hms(2026, 7, 28, hour, min, 0).unwrap()
+    }
+
+    fn running_state() -> SharedRedTeamState {
+        let mut state = SharedRedTeamState::new("op-test-001".to_string());
+        state.started_at = at(3, 46);
+        state
+    }
+
+    fn red_done_state() -> SharedRedTeamState {
+        let mut state = running_state();
+        state.red_completed_at = Some(at(4, 10));
+        state.red_completion_reason = Some("all forests dominated".to_string());
+        state.red_blocked_on_blue = true;
+        state
+    }
+
+    #[test]
+    fn running_op_has_no_finalizing_note() {
+        assert_eq!(finalizing_note(&running_state()), None);
+    }
+
+    #[test]
+    fn red_done_blocked_on_blue_reports_blue_wait() {
+        assert_eq!(
+            finalizing_note(&red_done_state()),
+            Some("waiting on blue investigations".to_string())
+        );
+    }
+
+    #[test]
+    fn red_done_without_blue_reports_completion_reason() {
+        let mut state = red_done_state();
+        state.red_blocked_on_blue = false;
+        assert_eq!(
+            finalizing_note(&state),
+            Some("all forests dominated".to_string())
+        );
+    }
+
+    #[test]
+    fn fully_completed_op_has_no_finalizing_note() {
+        let mut state = red_done_state();
+        state.completed_at = Some(at(4, 30));
+        assert_eq!(finalizing_note(&state), None);
+    }
 }
