@@ -13,6 +13,7 @@ use tokio::sync::watch;
 use tracing::{debug, info, warn};
 
 use crate::orchestrator::acl_graph::{self, MAX_ACL_DISPATCH_PER_TICK};
+use crate::orchestrator::automation::dacl_abuse::{holds_target_material, is_destructive_acl_type};
 use crate::orchestrator::dispatcher::{Dispatcher, SubmissionOutcome};
 use crate::orchestrator::state::*;
 
@@ -50,6 +51,40 @@ fn extract_source_domain(step: &serde_json::Value) -> &str {
         .or_else(|| step.get("domain"))
         .and_then(|v| v.as_str())
         .unwrap_or("")
+}
+
+fn extract_target_user(step: &serde_json::Value) -> &str {
+    step.get("target")
+        .or_else(|| step.get("target_user"))
+        .or_else(|| step.get("to"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+}
+
+fn extract_edge_domain<'a>(step: &'a serde_json::Value, fallback: &'a str) -> &'a str {
+    let domain = step
+        .get("domain")
+        .or_else(|| step.get("source_domain"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    if domain.is_empty() {
+        fallback
+    } else {
+        domain
+    }
+}
+
+fn extract_acl_type(step: &serde_json::Value) -> String {
+    let declared = step
+        .get("acl_type")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_lowercase();
+    if declared.is_empty() {
+        extract_step_vuln_id(step).to_lowercase()
+    } else {
+        declared
+    }
 }
 
 /// Build ACL chain step dedup key.
@@ -170,14 +205,31 @@ pub(crate) fn collect_acl_chain_work(state: &StateInner) -> Vec<AclStepWork> {
                 continue;
             }
 
-            if let Some(credential) = resolve_step_principal(state, source_user, source_domain) {
-                items.push(AclStepWork {
-                    dedup_key,
-                    vuln_id,
-                    step: step.clone(),
-                    credential,
-                });
+            let Some(credential) = resolve_step_principal(state, source_user, source_domain) else {
+                break;
+            };
+
+            let edge_domain = extract_edge_domain(step, &credential.domain).to_lowercase();
+            if state.dominated_domains.contains(&edge_domain) {
+                debug!(vuln_id = %vuln_id, domain = %edge_domain, "ACL chain skipped: domain already dominated");
+                break;
             }
+
+            let target_user = extract_target_user(step);
+            if is_destructive_acl_type(&extract_acl_type(step))
+                && !target_user.is_empty()
+                && holds_target_material(state, target_user, &edge_domain)
+            {
+                debug!(vuln_id = %vuln_id, target = %target_user, "ACL chain step skipped: destructive ACL, target material already in state");
+                continue;
+            }
+
+            items.push(AclStepWork {
+                dedup_key,
+                vuln_id,
+                step: step.clone(),
+                credential,
+            });
 
             // Only dispatch the first undispatched step per chain
             break;
@@ -644,7 +696,51 @@ mod tests {
             .push(cred("bob", "P@ssw0rd!", "contoso.local"));
         let work = collect_acl_chain_work(&state);
         assert_eq!(work.len(), 2);
-        assert!(work.iter().all(|w| w.dedup_key.ends_with(":step:0")));
+        assert!(work.iter().all(|w| w.dedup_key.ends_with(":step:1")));
+    }
+
+    #[test]
+    fn collect_skips_destructive_step_when_target_password_already_held() {
+        let mut state = StateInner::new("op".into());
+        state.acl_chains = vec![two_step_chain()];
+        state
+            .credentials
+            .push(cred("alice", "P@ssw0rd!", "contoso.local"));
+        state
+            .credentials
+            .push(cred("bob", "P@ssw0rd!", "contoso.local"));
+
+        let work = collect_acl_chain_work(&state);
+
+        assert!(
+            work.iter().all(|w| w.vuln_id != "acl_genericall_alice_bob"),
+            "destructive ACL must not overwrite a principal we already hold"
+        );
+    }
+
+    #[test]
+    fn collect_skips_destructive_step_when_target_hash_already_held() {
+        let mut state = StateInner::new("op".into());
+        state.acl_chains = vec![two_step_chain()];
+        state
+            .credentials
+            .push(cred("alice", "P@ssw0rd!", "contoso.local"));
+        state.hashes.push(hash("bob", "contoso.local", "ntlm"));
+
+        let work = collect_acl_chain_work(&state);
+
+        assert!(
+            work.iter().all(|w| w.vuln_id != "acl_genericall_alice_bob"),
+            "destructive ACL must not overwrite a principal whose hash we already dumped"
+        );
+    }
+
+    #[test]
+    fn collect_skips_chain_whose_domain_is_already_dominated() {
+        let mut state = state_with_chain();
+        state.dominated_domains.insert("contoso.local".to_string());
+
+        assert!(collect_acl_chain_work(&state).is_empty());
     }
 
     #[test]

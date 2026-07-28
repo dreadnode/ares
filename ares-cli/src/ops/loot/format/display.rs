@@ -246,7 +246,12 @@ pub(super) fn print_loot_human(
     for cred in &unique_creds {
         let prefix = format_principal(&cred.domain, &cred.username);
         let suffix = if cred.is_admin { " (admin)" } else { "" };
-        println!("  - {prefix}:{}{suffix}", cred.password);
+        let origin = if cred.source.is_empty() {
+            String::new()
+        } else {
+            format!(" [{}]", normalize_source_label(&cred.source))
+        };
+        println!("  - {prefix}:{}{suffix}{origin}", cred.password);
     }
     println!();
 

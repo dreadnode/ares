@@ -159,6 +159,7 @@ pub(super) fn print_loot_json(
             "password": c.password,
             "domain": c.domain,
             "is_admin": c.is_admin,
+            "source": c.source,
         })).collect::<Vec<_>>(),
         "hashes": report_hashes.iter().map(|h| serde_json::json!({
             "username": h.username,

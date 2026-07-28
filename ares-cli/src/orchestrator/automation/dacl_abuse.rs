@@ -21,6 +21,24 @@ use crate::orchestrator::acl_graph::{self, MAX_ACL_DISPATCH_PER_TICK};
 use crate::orchestrator::dispatcher::{Dispatcher, SubmissionOutcome};
 use crate::orchestrator::state::*;
 
+pub(crate) fn is_destructive_acl_type(vuln_type: &str) -> bool {
+    let t = vuln_type.to_lowercase();
+    t.contains("forcechangepassword") || t.contains("genericall")
+}
+
+pub(crate) fn holds_target_material(state: &StateInner, target_user: &str, domain: &str) -> bool {
+    let target = target_user.to_lowercase();
+    let domain = domain.to_lowercase();
+    state.credentials.iter().any(|c| {
+        !c.password.is_empty()
+            && c.username.to_lowercase() == target
+            && c.domain.to_lowercase() == domain
+    }) || state
+        .hashes
+        .iter()
+        .any(|h| h.username.to_lowercase() == target && h.domain.to_lowercase() == domain)
+}
+
 /// Dispatches ACL abuse when matching credentials + bloodhound paths exist.
 /// Interval: 30s.
 pub async fn auto_dacl_abuse(dispatcher: Arc<Dispatcher>, mut shutdown: watch::Receiver<bool>) {
@@ -234,22 +252,12 @@ pub(crate) fn collect_dacl_work(state: &StateInner) -> Vec<DaclWork> {
             // plaintext via `bloodyad_set_password`. Skip when we already
             // have material so the scoreboard's back-verification against
             // the original lab-provisioned password still holds.
-            let is_destructive_acl =
-                vtype.contains("forcechangepassword") || vtype.contains("genericall");
-            if is_destructive_acl && !target_user.is_empty() {
-                let target_lower = target_user.to_lowercase();
-                let already_have_material = state.credentials.iter().any(|c| {
-                    !c.password.is_empty()
-                        && c.username.to_lowercase() == target_lower
-                        && c.domain.to_lowercase() == dispatch_domain
-                }) || state.hashes.iter().any(|h| {
-                    h.username.to_lowercase() == target_lower
-                        && h.domain.to_lowercase() == dispatch_domain
-                });
-                if already_have_material {
-                    debug!(vuln_id = %vuln.vuln_id, target = %target_user, "Destructive ACL skipped: target material already in state");
-                    continue;
-                }
+            if is_destructive_acl_type(&vtype)
+                && !target_user.is_empty()
+                && holds_target_material(state, &target_user, &dispatch_domain)
+            {
+                debug!(vuln_id = %vuln.vuln_id, target = %target_user, "Destructive ACL skipped: target material already in state");
+                continue;
             }
 
             let dc_ip = state
