@@ -839,13 +839,13 @@ fn drop_excluded_users(path: &str, excluded_users: &str) -> (String, bool) {
     if !filtered_any {
         return (path.to_string(), false);
     }
-    // Make the temp filename unique per call: parallel callers (and parallel
-    // unit tests) share the process and would otherwise overwrite each other.
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    let tmp = format!("/tmp/spray_users_excl_{}_{}.txt", std::process::id(), nanos);
+    // Per-call counter, matching `sanitize_spray_userlist`. A wall-clock stamp
+    // is not unique enough: macOS resolves `SystemTime::now` to microseconds,
+    // so two callers in the same microsecond derive the same path and clobber
+    // (or delete) each other's filtered userlist.
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let tmp = format!("/tmp/spray_users_excl_{}_{}.txt", std::process::id(), seq);
     if std::fs::write(&tmp, kept.join("\n")).is_err() {
         return (path.to_string(), false);
     }
