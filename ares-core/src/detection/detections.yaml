@@ -299,6 +299,28 @@ templates:
       - 'sp_oacreate'
       - 'sp_oamethod'
 
+  detect_mssql_server_component:
+    description: "MSSQL Server Component Modification (xp_cmdshell/CLR/OLE enablement)"
+    aliases: [detect_mssql_sp_configure, detect_mssql_clr_assembly]
+    mitre_id: "T1505"
+    tactic: persistence
+    severity: high
+    connection_types: [mssql]
+    red_team_tool: mssql_enable_xp_cmdshell
+    # The configuration change that arms the component, not its later use:
+    # detect_mssql_xp_cmdshell (T1059) catches the command running, this
+    # catches the server being reconfigured to allow it at all.
+    patterns:
+      - 'sp_configure'
+      - 'reconfigure'
+      - 'show.advanced.options'
+      - 'clr.enabled'
+      - 'ole.automation.procedures'
+      - 'sp_addextendedproc'
+      - 'create.assembly'
+      - 'sp_add_trusted_assembly'
+      - 'set.trustworthy.on'
+
   detect_mssql_impersonation:
     description: "MSSQL User Impersonation Detection"
     mitre_id: "T1134"
@@ -489,6 +511,17 @@ templates:
       - 'cachedlogon'
       - 'lsadump'
       - 'reg.query.*security'
+
+  detect_unsecured_credentials:
+    description: "Unsecured Credential Discovery (GPP / SYSVOL scripts / autologon)"
+    aliases: [detect_gpp_password, detect_credentials_in_files]
+    mitre_id: "T1552"
+    tactic: credential_access
+    severity: high
+    red_team_tool: gpp_password_finder
+    filter_stages:
+      - ['5145', '4663', '4656', 'file.*access', 'share.*access', 'object.*access', 'smbclient']
+      - ['sysvol', 'netlogon', 'groups\.xml', 'scheduledtasks\.xml', 'services\.xml', 'datasources\.xml', 'drives\.xml', 'printers\.xml', 'cpassword', 'unattend\.xml', 'sysprep\.inf', 'defaultpassword', 'autologon', 'credman', 'web\.config', '\.ps1', '\.bat', '\.vbs']
 
   detect_ntlm_relay:
     description: "NTLM Relay Attack Detection"

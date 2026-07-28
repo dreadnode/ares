@@ -222,24 +222,26 @@ pub(crate) async fn create_domain_admin_timeline_event(
 /// Map vulnerability IDs to MITRE ATT&CK technique IDs.
 pub(super) fn exploitation_techniques(vuln_id: &str) -> Vec<String> {
     let vuln_lower = vuln_id.to_lowercase();
-    let mut techniques = vec!["T1210".to_string()]; // Exploitation of Remote Services (base)
-    if vuln_lower.contains("constrained_delegation") {
-        techniques.push("T1558.003".to_string()); // Kerberoasting (S4U)
-    }
+    let mut techniques: Vec<String> = Vec::new();
     if vuln_lower.contains("unconstrained_delegation") {
-        techniques.push("T1558".to_string()); // Steal or Forge Kerberos Tickets
+        techniques.push("T1558".to_string());
+    } else if vuln_lower.contains("constrained_delegation") {
+        techniques.push("T1558.003".to_string());
     }
     if vuln_lower.contains("mssql") {
-        techniques.push("T1505".to_string()); // Server Software Component
+        techniques.push("T1505".to_string());
     }
     if vuln_lower.contains("esc1") || vuln_lower.contains("esc4") || vuln_lower.contains("esc8") {
-        techniques.push("T1649".to_string()); // Steal or Forge Authentication Certificates
+        techniques.push("T1649".to_string());
     }
     if vuln_lower.contains("rbcd") {
-        techniques.push("T1134.001".to_string()); // Access Token Manipulation: Token Impersonation
+        techniques.push("T1134.001".to_string());
     }
     if vuln_lower.contains("smb_signing") {
-        techniques.push("T1557.001".to_string()); // LLMNR/NBT-NS Poisoning (relay)
+        techniques.push("T1557.001".to_string());
+    }
+    if techniques.is_empty() {
+        techniques.push("T1210".to_string());
     }
     techniques
 }
@@ -434,5 +436,73 @@ mod tests {
     fn exploitation_techniques_unconstrained() {
         let t = exploitation_techniques("unconstrained_delegation_ws01");
         assert!(t.contains(&"T1558".to_string()));
+        assert!(
+            !t.contains(&"T1558.003".to_string()),
+            "unconstrained delegation is not S4U/kerberoasting"
+        );
+    }
+
+    #[test]
+    fn every_emitted_technique_is_coverable_by_the_blue_catalog() {
+        // A red technique with no exact or parent/child match in the detection
+        // catalog can never be credited, so it lands in the report as "missed"
+        // however well blue actually detected the activity. Retiring the blanket
+        // T1210 left mssql on T1505 alone, which no template covered until
+        // detect_mssql_server_component was added.
+        let blue: Vec<&str> = ares_core::detection::detection_config()
+            .templates
+            .values()
+            .map(|t| t.mitre_id.as_str())
+            .collect();
+
+        for vuln in [
+            "unconstrained_delegation_ws01",
+            "constrained_delegation_dc01",
+            "mssql_impersonation_sql01",
+            "esc1_template",
+            "esc4_template",
+            "esc8_ca01",
+            "rbcd_dc01",
+            "smb_signing_disabled_192.168.58.10",
+            "some_unmapped_vuln",
+        ] {
+            for red in exploitation_techniques(vuln) {
+                assert!(
+                    blue.iter().any(|b| {
+                        ares_core::correlation::redblue::RedBlueCorrelator::techniques_match(
+                            Some(&red),
+                            Some(b),
+                        )
+                    }),
+                    "{vuln} emits {red}, which no detection template can cover"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn exploitation_techniques_specific_vuln_omits_t1210() {
+        for vuln in [
+            "esc1_template",
+            "esc8_ca01",
+            "constrained_delegation_dc01",
+            "unconstrained_delegation_ws01",
+            "rbcd_dc01",
+            "mssql_impersonation_sql01",
+            "smb_signing_disabled_192.168.58.10",
+        ] {
+            let t = exploitation_techniques(vuln);
+            assert!(
+                !t.contains(&"T1210".to_string()),
+                "{vuln} is not exploitation of a remote service"
+            );
+        }
+    }
+
+    #[test]
+    fn exploitation_techniques_unrecognized_vuln_falls_back_to_t1210() {
+        for vuln in ["zerologon_dc01", "printnightmare_web01", "some_vuln"] {
+            assert_eq!(exploitation_techniques(vuln), vec!["T1210".to_string()]);
+        }
     }
 }
