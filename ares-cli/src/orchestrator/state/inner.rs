@@ -1370,14 +1370,14 @@ mod tests {
     #[test]
     fn spray_attempts_accumulate_within_the_window() {
         let mut state = StateInner::new("op-1".into());
-        assert_eq!(state.spray_attempts_used("essos.local"), 0);
+        assert_eq!(state.spray_attempts_used("contoso.local"), 0);
 
-        state.record_spray_attempts("essos.local", 3, 300);
-        assert_eq!(state.spray_attempts_used("essos.local"), 3);
+        state.record_spray_attempts("contoso.local", 3, 300);
+        assert_eq!(state.spray_attempts_used("contoso.local"), 3);
 
-        state.record_spray_attempts("essos.local", 2, 300);
+        state.record_spray_attempts("contoso.local", 2, 300);
         assert_eq!(
-            state.spray_attempts_used("essos.local"),
+            state.spray_attempts_used("contoso.local"),
             5,
             "a second spray in the same window must add to the tally, not replace it"
         );
@@ -1386,9 +1386,9 @@ mod tests {
     #[test]
     fn spray_attempts_are_scoped_per_domain_and_case_insensitive() {
         let mut state = StateInner::new("op-1".into());
-        state.record_spray_attempts("ESSOS.local", 4, 300);
-        assert_eq!(state.spray_attempts_used("essos.LOCAL"), 4);
-        assert_eq!(state.spray_attempts_used("north.sevenkingdoms.local"), 0);
+        state.record_spray_attempts("CONTOSO.local", 4, 300);
+        assert_eq!(state.spray_attempts_used("contoso.LOCAL"), 4);
+        assert_eq!(state.spray_attempts_used("child.contoso.local"), 0);
     }
 
     #[test]
@@ -1397,42 +1397,42 @@ mod tests {
         // A window that has already closed — AD has reset badPwdCount, so the
         // budget is whole again.
         state.spray_attempts.insert(
-            "essos.local".into(),
+            "contoso.local".into(),
             (4, Utc::now() - chrono::Duration::seconds(1)),
         );
-        assert_eq!(state.spray_attempts_used("essos.local"), 0);
+        assert_eq!(state.spray_attempts_used("contoso.local"), 0);
 
         // ...and a fresh debit starts the count over rather than carrying the
         // lapsed 4 forward.
-        state.record_spray_attempts("essos.local", 2, 300);
-        assert_eq!(state.spray_attempts_used("essos.local"), 2);
+        state.record_spray_attempts("contoso.local", 2, 300);
+        assert_eq!(state.spray_attempts_used("contoso.local"), 2);
     }
 
     #[test]
     fn spray_attempts_ignores_a_zero_cost_call() {
         let mut state = StateInner::new("op-1".into());
-        state.record_spray_attempts("essos.local", 0, 300);
+        state.record_spray_attempts("contoso.local", 0, 300);
         assert!(state.spray_attempts.is_empty());
     }
 
     #[test]
     fn repeated_sprays_never_exceed_the_lockout_threshold() {
-        // The essos regression, end to end. Policy is threshold 5 / 5-min
+        // The lockout regression, end to end. Policy is threshold 5 / 5-min
         // observation window. Before the tally existed, every call re-reported
         // attempts_used_per_account=0, so each one spent its full per-call cap
         // and the second spray locked every account in the domain.
         let mut state = StateInner::new("op-1".into());
         let args = serde_json::json!({
-            "domain": "essos.local",
+            "domain": "contoso.local",
             "lockout_threshold": 5,
             "use_common_passwords": true,
         });
 
         let mut spent = 0i64;
         for _ in 0..5 {
-            let used = state.spray_attempts_used("essos.local");
+            let used = state.spray_attempts_used("contoso.local");
             let cost = ares_tools::credential_access::spray_attempt_cost(&args, used) as i64;
-            state.record_spray_attempts("essos.local", cost, 300);
+            state.record_spray_attempts("contoso.local", cost, 300);
             spent += cost;
         }
 
@@ -1450,20 +1450,20 @@ mod tests {
         // `password_policy` never runs and the agent falls back to
         // `acknowledge_no_policy=true` — the DEFAULT path under testes.sh, and
         // the one the first fix left unguarded. Eight sprays each took a fresh
-        // 2-password allowance and locked sql_svc and Administrator twice in
+        // 2-password allowance and locked svc_sql and Administrator twice in
         // twelve minutes against a threshold of 5.
         let mut state = StateInner::new("op-1".into());
         let args = serde_json::json!({
-            "domain": "essos.local",
+            "domain": "contoso.local",
             "use_common_passwords": true,
             "acknowledge_no_policy": true,
         });
 
         let mut spent = 0i64;
         for _ in 0..8 {
-            let used = state.spray_attempts_used("essos.local");
+            let used = state.spray_attempts_used("contoso.local");
             let cost = ares_tools::credential_access::spray_attempt_cost(&args, used) as i64;
-            state.record_spray_attempts("essos.local", cost, 300);
+            state.record_spray_attempts("contoso.local", cost, 300);
             spent += cost;
         }
 

@@ -76,7 +76,7 @@ difficulty: hard                   # informal — signal to consumers
 tags: [cross-forest, adcs, esc5, golden-cert, kerberos]
 red_summary:
   first_da_at: 6m40s               # from op start
-  first_da_domain: child.essos.local
+  first_da_domain: child.contoso.local
   domains_dominated: 3
   techniques: [T1590.001, T1078.002, T1550.003, T1649, T1558.001]
   final_outcome: full-domain-dominance
