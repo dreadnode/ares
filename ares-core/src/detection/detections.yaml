@@ -299,28 +299,6 @@ templates:
       - 'sp_oacreate'
       - 'sp_oamethod'
 
-  detect_mssql_server_component:
-    description: "MSSQL Server Component Modification (xp_cmdshell/CLR/OLE enablement)"
-    aliases: [detect_mssql_sp_configure, detect_mssql_clr_assembly]
-    mitre_id: "T1505"
-    tactic: persistence
-    severity: high
-    connection_types: [mssql]
-    red_team_tool: mssql_enable_xp_cmdshell
-    # The configuration change that arms the component, not its later use:
-    # detect_mssql_xp_cmdshell (T1059) catches the command running, this
-    # catches the server being reconfigured to allow it at all.
-    patterns:
-      - 'sp_configure'
-      - 'reconfigure'
-      - 'show.advanced.options'
-      - 'clr.enabled'
-      - 'ole.automation.procedures'
-      - 'sp_addextendedproc'
-      - 'create.assembly'
-      - 'sp_add_trusted_assembly'
-      - 'set.trustworthy.on'
-
   detect_mssql_impersonation:
     description: "MSSQL User Impersonation Detection"
     mitre_id: "T1134"

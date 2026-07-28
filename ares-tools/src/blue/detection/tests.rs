@@ -395,26 +395,6 @@ fn unsecured_credentials_template_uses_base_technique() {
 }
 
 #[test]
-fn mssql_server_component_template_covers_red_t1505() {
-    // Red maps every mssql vuln to T1505. The other MSSQL templates are
-    // T1210/T1059/T1134, none of which is a parent or child of T1505, so
-    // without this template red's T1505 is uncoverable and MSSQL exploitation
-    // reports as missed no matter how well blue detected it.
-    let (_, entry) = ares_core::detection::find_template("detect_mssql_server_component")
-        .expect("detect_mssql_server_component must exist");
-    assert_eq!(entry.mitre_id, "T1505");
-
-    let tmpl = build_detection_template("detect_mssql_server_component", None).unwrap();
-    for indicator in ["sp_configure", "reconfigure", "sp_addextendedproc"] {
-        assert!(
-            tmpl.logql.contains(indicator),
-            "component-modification indicator {indicator} missing from {}",
-            tmpl.logql
-        );
-    }
-}
-
-#[test]
 fn lateral_patterns_load_from_yaml() {
     let cfg = ares_core::detection::detection_config();
     assert!(

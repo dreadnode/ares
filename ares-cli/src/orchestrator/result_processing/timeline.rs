@@ -229,7 +229,7 @@ pub(super) fn exploitation_techniques(vuln_id: &str) -> Vec<String> {
         techniques.push("T1558.003".to_string());
     }
     if vuln_lower.contains("mssql") {
-        techniques.push("T1505".to_string());
+        techniques.push("T1134".to_string());
     }
     if vuln_lower.contains("esc1") || vuln_lower.contains("esc4") || vuln_lower.contains("esc8") {
         techniques.push("T1649".to_string());
@@ -405,7 +405,11 @@ mod tests {
     #[test]
     fn exploitation_techniques_mssql() {
         let t = exploitation_techniques("mssql_impersonation_sql01");
-        assert!(t.contains(&"T1505".to_string()));
+        assert!(t.contains(&"T1134".to_string()));
+        assert!(
+            !t.contains(&"T1505".to_string()),
+            "T1505 is persistence via a malicious stored procedure, which ares never installs"
+        );
     }
 
     #[test]
@@ -447,8 +451,8 @@ mod tests {
         // A red technique with no exact or parent/child match in the detection
         // catalog can never be credited, so it lands in the report as "missed"
         // however well blue actually detected the activity. Retiring the blanket
-        // T1210 left mssql on T1505 alone, which no template covered until
-        // detect_mssql_server_component was added.
+        // T1210 first left mssql on T1505, which nothing covered; mapping it to
+        // T1134 puts it back under detect_mssql_impersonation.
         let blue: Vec<&str> = ares_core::detection::detection_config()
             .templates
             .values()
