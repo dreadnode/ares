@@ -178,7 +178,26 @@ fn impacket_identity_auth(
 ///                removes the named computer — used by operation teardown to
 ///                drop a machine account this op created.
 pub async fn add_computer(args: &Value) -> Result<ToolOutput> {
-    build_add_computer(args)?.execute().await
+    let mut out = build_add_computer(args)?.execute().await?;
+    if out.success && add_computer_refused(&out.combined()) {
+        out.success = false;
+    }
+    Ok(out)
+}
+
+/// impacket-addcomputer reports refusals on stdout and still exits 0.
+///
+/// A delete the authenticating principal is not entitled to perform prints
+/// `[-] User <u> doesn't have right to delete <c>$!` and returns success, so
+/// every caller — the LLM, and operation teardown — is told the machine account
+/// is gone while it is still in the directory. Teardown's read-back probe
+/// caught it as `unverified`, but only because that one plan carries a probe;
+/// the tool must not claim a mutation it did not make.
+fn add_computer_refused(output: &str) -> bool {
+    let lower = output.to_lowercase();
+    lower.contains("doesn't have right to")
+        || lower.contains("does not have right to")
+        || lower.contains("unable to delete")
 }
 
 /// Build the `impacket-addcomputer` command.
@@ -668,6 +687,28 @@ mod tests {
             "domain": "contoso.local"
         });
         assert!(optional_str(&args, "extra_sid").is_none());
+    }
+
+    /// impacket-addcomputer exits 0 on a refused delete, so the exit code
+    /// alone reports a machine account as removed while it is still in the
+    /// directory. Observed live on three noPac accounts.
+    #[test]
+    fn add_computer_refusal_is_detected_despite_exit_zero() {
+        let refused = "Impacket v0.13.0\n\n[-] User jeor.mormont doesn't have right to delete WIN-C0O8IFHGTJD$!";
+        assert!(super::add_computer_refused(refused));
+        assert!(super::add_computer_refused(
+            "[-] Unable to delete machine account"
+        ));
+    }
+
+    #[test]
+    fn add_computer_success_is_not_flagged_as_refused() {
+        assert!(!super::add_computer_refused(
+            "[*] Successfully deleted WIN-ABCDEF12$."
+        ));
+        assert!(!super::add_computer_refused(
+            "[*] Successfully added machine account"
+        ));
     }
 
     #[test]

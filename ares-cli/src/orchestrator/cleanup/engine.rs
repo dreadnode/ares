@@ -245,11 +245,13 @@ impl TeardownAuth<'_> {
 
 /// Resolve auth material able to perform a revert in `domain`.
 ///
-/// Order: the mutating principal's own password, then its hash, then any other
-/// password in the same domain, then any other hash. Reverting needs *rights*,
-/// not the original identity — the forward principal is routinely unreachable
-/// at teardown because it was owned by hash or ticket and its plaintext never
-/// recovered.
+/// Privileged material in the domain is preferred over the mutating principal's
+/// own. Reverting needs *rights*, not the original identity, and the forward
+/// principal frequently lacks them: impacket refused three machine-account
+/// deletions with `User <u> doesn't have right to delete <c>$!` because the
+/// account that created them could not remove them. A domain admin can always
+/// undo what the operation did, so teardown reaches for one first and falls
+/// back to the mutating principal only when none is held.
 ///
 /// The domain filter is never relaxed. Authenticating into one domain with
 /// another's credential is not a fallback, it is a different operation.
@@ -270,6 +272,27 @@ fn resolve_auth<'a>(
         crate::orchestrator::acl_graph::is_usable_hash(h) && !h.is_trust_key && !h.is_previous
     };
 
+    // A hash we hold for the domain's built-in Administrator is the most
+    // reliable revert identity available; krbtgt is excluded because it cannot
+    // be used to authenticate.
+    let privileged_password = || {
+        credentials
+            .iter()
+            .filter(cred_usable)
+            .filter(cred_in_domain)
+            .filter(|c| c.is_admin)
+            .max_by_key(|c| c.attack_step)
+            .map(TeardownAuth::Password)
+    };
+    let privileged_hash = || {
+        hashes
+            .iter()
+            .filter(hash_usable)
+            .filter(hash_in_domain)
+            .filter(|h| h.username.eq_ignore_ascii_case("administrator"))
+            .max_by_key(|h| h.attack_step)
+            .map(TeardownAuth::Hash)
+    };
     let own_password = || {
         credentials
             .iter()
@@ -305,7 +328,9 @@ fn resolve_auth<'a>(
             .map(TeardownAuth::Hash)
     };
 
-    own_password()
+    privileged_password()
+        .or_else(privileged_hash)
+        .or_else(own_password)
         .or_else(own_hash)
         .or_else(any_password)
         .or_else(any_hash)
@@ -532,6 +557,27 @@ mod tests {
             .expect("a hash-only domain must still be revertible");
         assert_eq!(got.username(), "administrator");
         assert!(matches!(got, TeardownAuth::Hash(_)));
+    }
+
+    /// The live failure: impacket refused three machine-account deletions with
+    /// "doesn't have right to delete" because teardown authenticated as the
+    /// principal that made the mutation rather than one that could undo it.
+    #[test]
+    fn resolve_prefers_a_domain_admin_over_the_mutating_principal() {
+        let mut admin = cred("administrator", "contoso.local", "pw-admin", 1);
+        admin.is_admin = true;
+        let creds = vec![cred("alice", "contoso.local", "pw-alice", 9), admin];
+        let got = resolve_auth(&creds, &[], "alice", "contoso.local").unwrap();
+        assert_eq!(got.username(), "administrator");
+    }
+
+    #[test]
+    fn resolve_prefers_an_administrator_hash_over_a_plain_users_password() {
+        let creds = vec![cred("alice", "contoso.local", "pw-alice", 9)];
+        let hashes = vec![nthash("Administrator", "contoso.local", 1)];
+        let got = resolve_auth(&creds, &hashes, "alice", "contoso.local").unwrap();
+        assert!(matches!(got, TeardownAuth::Hash(_)));
+        assert_eq!(got.username(), "Administrator");
     }
 
     #[test]
