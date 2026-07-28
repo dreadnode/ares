@@ -93,4 +93,8 @@ pub struct BlueTeamReportInput {
     pub recommendations: Vec<String>,
     pub investigation_details: Vec<serde_json::Value>,
     pub pyramid_distribution: HashMap<i32, i32>,
+    /// Blue coverage measured against red team ground truth. `None` when the
+    /// red operation state could not be loaded — the report then says so
+    /// rather than implying full coverage.
+    pub coverage: Option<super::coverage::RedTeamCoverage>,
 }

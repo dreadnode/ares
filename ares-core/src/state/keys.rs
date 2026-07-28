@@ -154,6 +154,14 @@ pub const BLUE_KEY_PIVOT_QUEUE: &str = "pivot_queue";
 /// Redis LIST key suffix for queued chained detection methods.
 #[cfg(feature = "blue")]
 pub const BLUE_KEY_CHAIN_QUEUE: &str = "chain_queue";
+/// Redis STRING key suffix for a supersede request signal.
+///
+/// Set when a newer investigation renders an in-flight one obsolete — the blue
+/// runner executes investigations serially, so a mid-op investigation built
+/// from partial loot must yield its slot rather than hold the terminal
+/// investigation behind it for up to a full investigation timeout.
+#[cfg(feature = "blue")]
+pub const BLUE_KEY_SUPERSEDE: &str = "supersede";
 
 /// Redis key prefix for blue team task queues.
 #[cfg(feature = "blue")]

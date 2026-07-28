@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use anyhow::{Context, Result};
 
 use ares_core::reports::BlueTeamReportGenerator;
-use ares_core::state::BlueStateReader;
+use ares_core::state::{BlueStateReader, RedisStateReader};
 
 use crate::redis_conn::connect_redis;
 
@@ -98,8 +98,29 @@ async fn generate_operation_report(
         }
     }
 
+    let red_state = match RedisStateReader::new(operation_id.to_string())
+        .load_state(conn)
+        .await
+    {
+        Ok(state) => state,
+        Err(e) => {
+            tracing::warn!(
+                operation_id,
+                error = %e,
+                "Failed to load red team state — report will declare coverage unmeasured"
+            );
+            None
+        }
+    };
+    if red_state.is_none() {
+        tracing::warn!(
+            operation_id,
+            "No red team state found — report will declare coverage unmeasured"
+        );
+    }
+
     generator
-        .generate_from_states(operation_id, &states, &queries_by_inv)
+        .generate_from_states(operation_id, &states, &queries_by_inv, red_state.as_ref())
         .context("Failed to render operation report")
 }
 

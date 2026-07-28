@@ -6,6 +6,7 @@
 //! polls an empty queue forever — investigation requests must be pushed
 //! explicitly (via CLI) or auto-submitted (this module).
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -106,14 +107,21 @@ fn collect_blue_env_vars() -> std::collections::HashMap<String, String> {
 }
 
 /// Spawn the blue auto-submit task as a background tokio task.
+///
+/// `red_draining` is the dispatcher's freeze flag. Once red completes, the
+/// completion monitor owns the terminal investigation, so this loop must stop
+/// submitting: a milestone-3 investigation queued after the freeze lands in the
+/// drain wait's own watch set and cannot finish inside it.
 pub fn spawn_blue_auto_submit(
     queue: TaskQueue,
     config: Arc<OrchestratorConfig>,
     model_spec: String,
+    red_draining: Arc<AtomicBool>,
     shutdown_rx: watch::Receiver<bool>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        if let Err(e) = auto_submit_loop(queue, config, model_spec, shutdown_rx).await {
+        if let Err(e) = auto_submit_loop(queue, config, model_spec, red_draining, shutdown_rx).await
+        {
             warn!("Blue auto-submit exited with error: {e}");
         }
     })
@@ -123,6 +131,7 @@ async fn auto_submit_loop(
     queue: TaskQueue,
     config: Arc<OrchestratorConfig>,
     model_spec: String,
+    red_draining: Arc<AtomicBool>,
     mut shutdown_rx: watch::Receiver<bool>,
 ) -> Result<()> {
     info!("Blue auto-submit: waiting {INITIAL_DELAY_SECS}s for red team activity");
@@ -140,6 +149,11 @@ async fn auto_submit_loop(
 
     loop {
         if *shutdown_rx.borrow() {
+            break;
+        }
+
+        if red_draining.load(Ordering::SeqCst) {
+            info!("Blue auto-submit: red dispatch frozen — completion owns the terminal investigation");
             break;
         }
 

@@ -330,12 +330,33 @@ pub(crate) struct FiredDetection {
     pub hosts: Vec<String>,
 }
 
+pub(crate) fn attack_window_start(
+    alert: &serde_json::Value,
+) -> Option<chrono::DateTime<chrono::Utc>> {
+    alert
+        .get("operation_context")?
+        .get("attack_window_start")?
+        .as_str()
+        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+        .map(|t| t.with_timezone(&chrono::Utc))
+}
+
+fn attributable(f: &FiredDetection, attack_start: Option<chrono::DateTime<chrono::Utc>>) -> bool {
+    match (attack_start, f.last_event_at.or(f.first_event_at)) {
+        (Some(start), Some(last)) => last >= start,
+        _ => true,
+    }
+}
+
 /// Result of a baseline sweep — what fired, what came back empty, and what the
 /// time cap cut off before it could run.
 #[derive(Debug, Default)]
 pub(crate) struct SweepOutcome {
     pub templates_total: usize,
     pub fired: Vec<FiredDetection>,
+    /// Detections whose matched events all predate the operation's attack
+    /// window. Reported, never recorded: they belong to earlier activity.
+    pub out_of_window: Vec<FiredDetection>,
     /// Templates that ran and returned no matches.
     pub no_match: Vec<String>,
     /// Templates the time cap prevented from running (empty on a clean finish).
@@ -390,6 +411,20 @@ impl SweepOutcome {
             s.push_str(&format!(
                 "Ran and returned no matches (do NOT re-query): {}\n\n",
                 self.no_match.join(", ")
+            ));
+        }
+
+        if !self.out_of_window.is_empty() {
+            s.push_str(&format!(
+                "Matched only OUTSIDE this operation's attack window ({}) — earlier activity, \
+                 NOT this operation's. These are deliberately not recorded as evidence or \
+                 techniques. Do NOT claim them as detections of this operation: {}\n\n",
+                self.out_of_window.len(),
+                self.out_of_window
+                    .iter()
+                    .map(|f| format!("{} [{}]", f.mitre_id, f.template))
+                    .collect::<Vec<_>>()
+                    .join(", ")
             ));
         }
 
@@ -491,7 +526,10 @@ impl SweepOutcome {
 /// folds into the orchestrator prompt. Best-effort throughout: a failed query
 /// or a failed record is logged and skipped — the sweep never sinks the
 /// investigation.
-pub(crate) async fn run_detection_sweep(investigation_id: &str) -> SweepOutcome {
+pub(crate) async fn run_detection_sweep(
+    investigation_id: &str,
+    attack_start: Option<chrono::DateTime<chrono::Utc>>,
+) -> SweepOutcome {
     let all_names: BTreeSet<String> = detection_config().templates.keys().cloned().collect();
     let templates: Vec<FiredDetection> = detection_config()
         .templates
@@ -628,6 +666,20 @@ pub(crate) async fn run_detection_sweep(investigation_id: &str) -> SweepOutcome 
 
     fired.sort_by(|a, b| a.template.cmp(&b.template));
 
+    let (fired, out_of_window): (Vec<FiredDetection>, Vec<FiredDetection>) = fired
+        .into_iter()
+        .partition(|f| attributable(f, attack_start));
+
+    if !out_of_window.is_empty() {
+        warn!(
+            investigation_id,
+            out_of_window = out_of_window.len(),
+            attack_start = %attack_start.map(|t| t.to_rfc3339()).unwrap_or_default(),
+            templates = %out_of_window.iter().map(|f| f.template.as_str()).collect::<Vec<_>>().join(", "),
+            "Detections fired outside the attack window — not attributed to this operation"
+        );
+    }
+
     // Record every hit into blue state (sequential, cheap: a few Redis writes
     // each). Deduped by the underlying tools, so overlap with the LLM's own
     // later recording is harmless.
@@ -643,7 +695,10 @@ pub(crate) async fn run_detection_sweep(investigation_id: &str) -> SweepOutcome 
 
     let no_match: Vec<String> = completed
         .iter()
-        .filter(|n| !fired.iter().any(|f| &f.template == *n))
+        .filter(|n| {
+            !fired.iter().any(|f| &f.template == *n)
+                && !out_of_window.iter().any(|f| &f.template == *n)
+        })
         .cloned()
         .collect();
     let not_run: Vec<String> = all_names.difference(&completed).cloned().collect();
@@ -651,6 +706,7 @@ pub(crate) async fn run_detection_sweep(investigation_id: &str) -> SweepOutcome 
     info!(
         investigation_id,
         fired = fired.len(),
+        out_of_window = out_of_window.len(),
         no_match = no_match.len(),
         not_run = not_run.len(),
         timed_out,
@@ -661,6 +717,7 @@ pub(crate) async fn run_detection_sweep(investigation_id: &str) -> SweepOutcome 
     SweepOutcome {
         templates_total,
         fired,
+        out_of_window,
         no_match,
         not_run,
         timed_out,
@@ -1126,6 +1183,7 @@ mod tests {
                 last_event_at: None,
                 hosts: Vec::new(),
             }],
+            out_of_window: vec![],
             no_match: vec!["detect_golden_ticket".into()],
             not_run: vec![],
             timed_out: false,
@@ -1145,6 +1203,7 @@ mod tests {
         let outcome = SweepOutcome {
             templates_total: 3,
             fired: vec![],
+            out_of_window: vec![],
             no_match: vec![],
             not_run: vec!["detect_esc1_attack".into()],
             timed_out: true,
@@ -1530,6 +1589,105 @@ mod tests {
     #[test]
     fn golden_summary_absent_when_correlation_disabled() {
         assert!(SweepOutcome::default().golden_ticket_summary().is_empty());
+    }
+
+    fn detection_at(last: Option<&str>) -> FiredDetection {
+        FiredDetection {
+            template: "detect_dcsync".into(),
+            mitre_id: "T1003.006".into(),
+            description: "DCSync Detection".into(),
+            tactic: "credential_access".into(),
+            severity: "critical".into(),
+            event_count: 1,
+            first_event_at: None,
+            last_event_at: last.map(|s| {
+                chrono::DateTime::parse_from_rfc3339(s)
+                    .unwrap()
+                    .with_timezone(&chrono::Utc)
+            }),
+            hosts: Vec::new(),
+        }
+    }
+
+    fn op_start(s: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+        Some(
+            chrono::DateTime::parse_from_rfc3339(s)
+                .unwrap()
+                .with_timezone(&chrono::Utc),
+        )
+    }
+
+    #[test]
+    fn attack_window_start_parses_operation_context() {
+        let alert = json!({
+            "operation_context": { "attack_window_start": "2026-07-28T00:03:34+00:00" }
+        });
+        assert_eq!(
+            attack_window_start(&alert),
+            op_start("2026-07-28T00:03:34+00:00")
+        );
+        assert_eq!(attack_window_start(&json!({})), None);
+        assert_eq!(
+            attack_window_start(&json!({"operation_context": {"attack_window_start": "nope"}})),
+            None
+        );
+    }
+
+    #[test]
+    fn detections_predating_the_operation_are_not_attributable() {
+        // The op-20260728-000334 regression: a 13-minute operation harvested a
+        // 2h lookback and credited five prior-operation detections to itself.
+        let start = op_start("2026-07-28T00:03:34+00:00");
+        assert!(!attributable(
+            &detection_at(Some("2026-07-27T23:04:33+00:00")),
+            start
+        ));
+        assert!(attributable(
+            &detection_at(Some("2026-07-28T00:11:47+00:00")),
+            start
+        ));
+    }
+
+    #[test]
+    fn attribution_is_inclusive_of_the_window_start() {
+        let start = op_start("2026-07-28T00:03:34+00:00");
+        assert!(attributable(
+            &detection_at(Some("2026-07-28T00:03:34+00:00")),
+            start
+        ));
+    }
+
+    #[test]
+    fn untimed_detections_stay_attributable() {
+        // Golden-ticket correlation reports absence of a partner event and so
+        // carries no event timestamps; dropping it would delete the only rule
+        // that can find T1558.001 at all.
+        let start = op_start("2026-07-28T00:03:34+00:00");
+        assert!(attributable(&detection_at(None), start));
+    }
+
+    #[test]
+    fn everything_is_attributable_without_a_window() {
+        assert!(attributable(
+            &detection_at(Some("2020-01-01T00:00:00+00:00")),
+            None
+        ));
+    }
+
+    #[test]
+    fn out_of_window_detections_are_flagged_in_the_prompt() {
+        let outcome = SweepOutcome {
+            templates_total: 2,
+            fired: vec![],
+            out_of_window: vec![detection_at(Some("2026-07-27T23:04:33+00:00"))],
+            no_match: vec![],
+            not_run: vec![],
+            timed_out: false,
+            golden_ticket: None,
+        };
+        let s = outcome.prompt_summary();
+        assert!(s.contains("OUTSIDE"), "must warn the LLM off them: {s}");
+        assert!(s.contains("T1003.006"));
     }
 
     #[test]

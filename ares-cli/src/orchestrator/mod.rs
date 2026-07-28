@@ -788,6 +788,7 @@ async fn run_inner() -> Result<()> {
                 queue.clone(),
                 config.clone(),
                 blue_model_spec,
+                dispatcher.red_draining.clone(),
                 shutdown_rx.clone(),
             ),
         ))

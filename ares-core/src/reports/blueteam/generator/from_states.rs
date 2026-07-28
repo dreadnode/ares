@@ -4,8 +4,9 @@ use std::collections::{HashMap, HashSet};
 
 use chrono::Utc;
 
-use crate::models::SharedBlueTeamState;
+use crate::models::{SharedBlueTeamState, SharedRedTeamState};
 
+use super::super::coverage::RedTeamCoverage;
 use super::super::types::BlueTeamReportInput;
 use super::BlueTeamReportGenerator;
 
@@ -13,15 +14,24 @@ impl BlueTeamReportGenerator {
     /// Generate a comprehensive blue team report from one or more `SharedBlueTeamState` objects.
     ///
     /// Investigation states are converted into the report input format automatically.
+    ///
+    /// `red_state` is the red team operation this investigation covered. When
+    /// supplied, the report reports blue's detections as a fraction of what red
+    /// actually did; when `None`, it says coverage was not measured rather than
+    /// presenting blue's own findings as if they were coverage.
     pub fn generate_from_states(
         &self,
         operation_id: &str,
         states: &[SharedBlueTeamState],
         queries_by_inv: &HashMap<String, Vec<serde_json::Value>>,
+        red_state: Option<&SharedRedTeamState>,
     ) -> Result<String, tera::Error> {
+        let coverage = red_state.map(|red| RedTeamCoverage::compute(red, states));
+
         if states.is_empty() {
             let input = BlueTeamReportInput {
                 operation_id: operation_id.to_string(),
+                coverage,
                 ..Default::default()
             };
             return self.generate(&input);
@@ -269,6 +279,7 @@ impl BlueTeamReportGenerator {
             recommendations: all_recommendations,
             investigation_details,
             pyramid_distribution,
+            coverage,
         };
 
         self.generate(&input)

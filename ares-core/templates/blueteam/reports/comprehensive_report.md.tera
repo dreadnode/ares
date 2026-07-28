@@ -53,7 +53,62 @@ No investigations recorded.
 
 ---
 
-## MITRE ATT&CK Coverage
+## Red Team Activity Coverage
+
+{% if coverage %}
+Measured against the red team operation's own record of what it executed.
+
+| Measure | Value |
+|---------|-------|
+| Detection rate | {{ coverage.detection_rate_display }} |
+| Techniques red executed | {{ coverage.red_technique_count }} |
+| Detected by blue | {{ coverage.detected_count }} |
+| Missed by blue | {{ coverage.missed_count }} |
+
+### Detected
+
+{% if coverage.detected | length > 0 %}
+| Red Technique | Matched By Blue |
+|---------------|-----------------|
+{% for d in coverage.detected %}
+| {{ d.id }} | {{ d.matched_by }} |
+{% endfor %}
+{% else %}
+None. Blue detected no technique the red team actually executed.
+{% endif %}
+
+### Missed
+
+{% if coverage.missed | length > 0 %}
+Red executed these and blue produced no matching detection:
+
+{% for m in coverage.missed %}
+- {{ m }}
+{% endfor %}
+{% else %}
+None — every technique red executed was detected.
+{% endif %}
+
+### Blue Detections Not In Red's Record
+
+{% if coverage.blue_only | length > 0 %}
+Either false positives, or activity red did not record. Not counted toward the detection rate either way:
+
+{% for b in coverage.blue_only %}
+- {{ b }}
+{% endfor %}
+{% else %}
+None.
+{% endif %}
+{% else %}
+**Not measured.** The red team operation state was unavailable, so blue's detections
+could not be compared against what the red team actually did. The techniques listed
+below are what blue reported finding — they are not a coverage measurement.
+{% endif %}
+
+---
+
+## Techniques Identified By Blue Team
 
 ### Tactics
 

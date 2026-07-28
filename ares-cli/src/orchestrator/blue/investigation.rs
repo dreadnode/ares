@@ -150,8 +150,10 @@ pub async fn run_investigation(
     // prompt so the LLM starts from the recorded baseline and spends its budget
     // on depth — chaining, IOCs, timeline, verdict — not on rediscovering
     // detections. Toggle with ARES_BLUE_DETERMINISTIC_SWEEP=0. See `sweep`.
+    let attack_start = super::sweep::attack_window_start(&investigation.alert);
     let sweep_summary = if super::sweep::sweep_enabled() {
-        let outcome = super::sweep::run_detection_sweep(&investigation.investigation_id).await;
+        let outcome =
+            super::sweep::run_detection_sweep(&investigation.investigation_id, attack_start).await;
         outcome.ran().then(|| outcome.prompt_summary())
     } else {
         None

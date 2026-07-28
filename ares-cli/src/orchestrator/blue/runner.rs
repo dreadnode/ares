@@ -21,7 +21,10 @@ use super::investigation::{self, Investigation};
 /// Timeout for a single investigation run (45 minutes).
 /// Loki queries via the Grafana proxy take 30-40s each from EC2,
 /// so the agent needs more headroom to complete triage + hunting.
-const INVESTIGATION_TIMEOUT_SECS: u64 = 2700;
+pub(crate) const INVESTIGATION_TIMEOUT_SECS: u64 = 2700;
+
+/// How often a running investigation checks for a supersede request.
+const SUPERSEDE_POLL_SECS: u64 = 10;
 
 /// Threshold for considering a running investigation as stale (50 minutes).
 const STALE_INVESTIGATION_THRESHOLD_SECS: i64 = 3000;
@@ -298,35 +301,73 @@ impl BlueOrchestrator {
                         .get_connection_manager()
                         .await?;
 
-                    match tokio::time::timeout(
-                        Duration::from_secs(INVESTIGATION_TIMEOUT_SECS),
-                        investigation::run_investigation(
-                            &investigation,
-                            Arc::clone(&self.provider),
-                            Arc::clone(&self.dispatcher),
-                            &mut task_queue,
-                            &self.redis_url,
-                            &mut conn,
-                            op_state_recorder.clone(),
-                        ),
-                    )
-                    .await
-                    {
-                        Ok(Ok(outcome)) => {
+                    let mut supersede_conn = conn.clone();
+                    let watched_id = investigation_id.clone();
+                    let run_result = tokio::select! {
+                        result = tokio::time::timeout(
+                            Duration::from_secs(INVESTIGATION_TIMEOUT_SECS),
+                            investigation::run_investigation(
+                                &investigation,
+                                Arc::clone(&self.provider),
+                                Arc::clone(&self.dispatcher),
+                                &mut task_queue,
+                                &self.redis_url,
+                                &mut conn,
+                                op_state_recorder.clone(),
+                            ),
+                        ) => Some(result),
+                        () = await_supersede(&mut supersede_conn, &watched_id) => None,
+                    };
+
+                    match run_result {
+                        Some(Ok(Ok(outcome))) => {
                             info!(
                                 investigation_id = %investigation_id,
                                 outcome = ?outcome,
                                 "Investigation finished"
                             );
                         }
-                        Ok(Err(e)) => {
+                        Some(Ok(Err(e))) => {
                             error!(
                                 investigation_id = %investigation_id,
                                 err = %e,
                                 "Investigation failed with error"
                             );
                         }
-                        Err(_elapsed) => {
+                        None => {
+                            warn!(
+                                investigation_id = %investigation_id,
+                                "Investigation superseded — yielding the runner slot"
+                            );
+
+                            investigation
+                                .state_writer
+                                .set_status(
+                                    &mut conn,
+                                    "superseded",
+                                    Some("Superseded by a newer investigation"),
+                                )
+                                .await
+                                .ok();
+
+                            investigation
+                                .state_writer
+                                .release_lock(&mut conn)
+                                .await
+                                .ok();
+
+                            ares_core::state::clear_blue_supersede(&mut conn, &investigation_id)
+                                .await
+                                .ok();
+
+                            investigation::generate_report(
+                                &mut conn,
+                                &investigation.investigation_id,
+                                investigation.report_dir.as_deref(),
+                            )
+                            .await;
+                        }
+                        Some(Err(_elapsed)) => {
                             error!(
                                 investigation_id = %investigation_id,
                                 timeout_secs = INVESTIGATION_TIMEOUT_SECS,
@@ -422,6 +463,29 @@ impl BlueOrchestrator {
 
         info!("Blue team orchestrator stopped");
         Ok(())
+    }
+}
+
+/// Resolve once a supersede request lands for `investigation_id`.
+///
+/// Never resolves otherwise, so it can sit in a `select!` against the
+/// investigation future without ever winning on its own. Redis errors are
+/// treated as "no request pending" — a transient read failure must not abandon
+/// a healthy investigation.
+async fn await_supersede(conn: &mut redis::aio::ConnectionManager, investigation_id: &str) {
+    loop {
+        match ares_core::state::is_blue_supersede_requested(conn, investigation_id).await {
+            Ok(true) => return,
+            Ok(false) => {}
+            Err(e) => {
+                warn!(
+                    investigation_id = %investigation_id,
+                    err = %e,
+                    "Failed to read supersede flag"
+                );
+            }
+        }
+        tokio::time::sleep(Duration::from_secs(SUPERSEDE_POLL_SECS)).await;
     }
 }
 

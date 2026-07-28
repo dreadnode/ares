@@ -340,6 +340,7 @@ impl BlueTeamReportGenerator {
         ctx.insert("recommendations", &input.recommendations);
         ctx.insert("investigation_details", &investigation_details);
         ctx.insert("pyramid_entries", &pyramid_entries);
+        ctx.insert("coverage", &input.coverage);
         ctx.insert(
             "generated_at",
             &Utc::now().format("%Y-%m-%d %H:%M:%S UTC").to_string(),

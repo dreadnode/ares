@@ -410,6 +410,63 @@ impl BlueStateWriter {
     }
 }
 
+/// Whether an investigation status string is terminal — the investigation will
+/// never make further progress and nothing should wait on it.
+pub fn blue_status_is_terminal(status: &str) -> bool {
+    matches!(
+        status,
+        "completed" | "escalated" | "failed" | "timed_out" | "superseded"
+    )
+}
+
+/// Ask the blue runner to abandon `investigation_id` at its next checkpoint.
+///
+/// Advisory: the runner polls the flag, so an investigation stuck inside a
+/// single long tool call yields only when that call returns.
+pub async fn request_blue_supersede(
+    conn: &mut impl AsyncCommands,
+    investigation_id: &str,
+) -> Result<(), redis::RedisError> {
+    let key = super::build_blue_key(investigation_id, BLUE_KEY_SUPERSEDE);
+    let _: () = conn.set_ex(&key, "1", 86400).await?;
+    Ok(())
+}
+
+/// Whether a supersede request is pending for `investigation_id`.
+pub async fn is_blue_supersede_requested(
+    conn: &mut impl AsyncCommands,
+    investigation_id: &str,
+) -> Result<bool, redis::RedisError> {
+    let key = super::build_blue_key(investigation_id, BLUE_KEY_SUPERSEDE);
+    conn.exists(&key).await
+}
+
+/// Clear a honoured supersede request.
+pub async fn clear_blue_supersede(
+    conn: &mut impl AsyncCommands,
+    investigation_id: &str,
+) -> Result<(), redis::RedisError> {
+    let key = super::build_blue_key(investigation_id, BLUE_KEY_SUPERSEDE);
+    let _: () = conn.del(&key).await?;
+    Ok(())
+}
+
+/// Read the `status` field of `ares:blue:inv:{id}:status`.
+///
+/// `Ok(None)` means the key is absent or unparsable — the investigation was
+/// submitted but the runner has not registered it yet, or its status expired.
+pub async fn read_blue_status(
+    conn: &mut impl AsyncCommands,
+    investigation_id: &str,
+) -> Result<Option<String>, redis::RedisError> {
+    let key = format!("{BLUE_STATUS_PREFIX}:{investigation_id}:status");
+    let raw: Option<String> = conn.get(&key).await?;
+    Ok(raw
+        .as_deref()
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
+        .and_then(|v| v.get("status").and_then(|s| s.as_str()).map(str::to_string)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -827,6 +884,82 @@ mod tests {
         assert_eq!(parsed["status"], "running");
         assert!(parsed.get("started_at").is_some());
         assert!(parsed.get("completed_at").is_none());
+    }
+
+    #[tokio::test]
+    async fn supersede_request_round_trip() {
+        let mut conn = MockRedisConnection::new();
+
+        assert!(!is_blue_supersede_requested(&mut conn, "inv-test")
+            .await
+            .unwrap());
+
+        request_blue_supersede(&mut conn, "inv-test").await.unwrap();
+        assert!(is_blue_supersede_requested(&mut conn, "inv-test")
+            .await
+            .unwrap());
+
+        clear_blue_supersede(&mut conn, "inv-test").await.unwrap();
+        assert!(!is_blue_supersede_requested(&mut conn, "inv-test")
+            .await
+            .unwrap());
+    }
+
+    #[tokio::test]
+    async fn supersede_request_is_per_investigation() {
+        let mut conn = MockRedisConnection::new();
+
+        request_blue_supersede(&mut conn, "inv-one").await.unwrap();
+
+        assert!(is_blue_supersede_requested(&mut conn, "inv-one")
+            .await
+            .unwrap());
+        assert!(!is_blue_supersede_requested(&mut conn, "inv-two")
+            .await
+            .unwrap());
+    }
+
+    #[tokio::test]
+    async fn read_status_returns_none_when_absent() {
+        let mut conn = MockRedisConnection::new();
+        assert_eq!(
+            read_blue_status(&mut conn, "inv-missing").await.unwrap(),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn read_status_extracts_status_field() {
+        let mut conn = MockRedisConnection::new();
+        let w = make_writer();
+
+        w.set_status(&mut conn, "in_progress", None).await.unwrap();
+        assert_eq!(
+            read_blue_status(&mut conn, "inv-test").await.unwrap(),
+            Some("in_progress".to_string())
+        );
+
+        w.set_status(&mut conn, "superseded", None).await.unwrap();
+        assert_eq!(
+            read_blue_status(&mut conn, "inv-test").await.unwrap(),
+            Some("superseded".to_string())
+        );
+    }
+
+    #[test]
+    fn terminal_status_classification() {
+        for s in [
+            "completed",
+            "escalated",
+            "failed",
+            "timed_out",
+            "superseded",
+        ] {
+            assert!(blue_status_is_terminal(s), "{s}");
+        }
+        for s in ["queued", "in_progress", "running", "triage", ""] {
+            assert!(!blue_status_is_terminal(s), "{s}");
+        }
     }
 
     #[tokio::test]

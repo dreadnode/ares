@@ -184,6 +184,109 @@ async fn is_multi_forest_op_complete(state: &SharedState) -> bool {
     )
 }
 
+/// Timeout the blue runner applies to a single investigation. The drain budget
+/// is derived from it, so the two must not drift; the assertion below fails the
+/// build if they ever do.
+const BLUE_INVESTIGATION_TIMEOUT_SECS: u64 = 2700;
+
+#[cfg(feature = "blue")]
+const _: () = assert!(
+    BLUE_INVESTIGATION_TIMEOUT_SECS
+        == crate::orchestrator::blue::runner::INVESTIGATION_TIMEOUT_SECS
+);
+
+/// Headroom the drain wait allows on top of one investigation timeout, covering
+/// runner pickup latency and final report generation.
+///
+/// The budget MUST exceed the investigation timeout. When the two were equal the
+/// drain deadline and the investigation's own timeout fired at the same instant,
+/// so an investigation submitted at red completion was always abandoned
+/// mid-flight instead of being allowed to finish or time out on its own terms.
+const BLUE_DRAIN_SLACK_SECS: u64 = 600;
+
+/// A blue investigation the drain wait is blocking on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct WatchedInvestigation {
+    pub id: String,
+    /// Whether an absent status means "still outstanding".
+    ///
+    /// True for an investigation this monitor just submitted — the runner has
+    /// not registered it yet, and treating that gap as finished would race the
+    /// op to shutdown before blue ever starts. False for pre-existing ones,
+    /// whose status key may simply have outlived its TTL from an earlier run of
+    /// the same operation.
+    pub wait_when_status_missing: bool,
+}
+
+/// Whether a watched investigation is still worth waiting for.
+pub(crate) fn still_outstanding(status: Option<&str>, wait_when_status_missing: bool) -> bool {
+    match status {
+        Some(s) => !ares_core::state::blue_status_is_terminal(s),
+        None => wait_when_status_missing,
+    }
+}
+
+/// Resolve the blue drain budget, honouring `ARES_BLUE_DRAIN_MAX_SECS`.
+pub(crate) fn resolve_blue_drain_budget(override_secs: Option<&str>) -> Duration {
+    override_secs
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .filter(|&s| s > 0)
+        .map(Duration::from_secs)
+        .unwrap_or_else(|| {
+            Duration::from_secs(BLUE_INVESTIGATION_TIMEOUT_SECS + BLUE_DRAIN_SLACK_SECS)
+        })
+}
+
+/// Filter `watched` down to the investigations that have not reached a terminal
+/// status yet.
+async fn outstanding_investigations(
+    conn: &mut redis::aio::ConnectionManager,
+    watched: &[WatchedInvestigation],
+) -> Vec<String> {
+    let mut outstanding = Vec::new();
+    for w in watched {
+        let status = ares_core::state::read_blue_status(conn, &w.id)
+            .await
+            .unwrap_or(None);
+        if still_outstanding(status.as_deref(), w.wait_when_status_missing) {
+            outstanding.push(w.id.clone());
+        }
+    }
+    outstanding
+}
+
+/// This operation's investigations that are registered and not yet terminal.
+///
+/// A member with no status key is deliberately excluded: the operation set lives
+/// for 7 days while status keys expire after 1 day, so a resumed operation would
+/// otherwise treat last week's investigations as in flight and wait out the
+/// whole drain budget.
+async fn in_flight_op_investigations(
+    conn: &mut redis::aio::ConnectionManager,
+    operation_id: &str,
+) -> Vec<String> {
+    let key = format!("ares:blue:op:{operation_id}:investigations");
+    let ids: Vec<String> = redis::cmd("SMEMBERS")
+        .arg(&key)
+        .query_async(conn)
+        .await
+        .unwrap_or_default();
+
+    let mut in_flight = Vec::new();
+    for id in ids {
+        let status = ares_core::state::read_blue_status(conn, &id)
+            .await
+            .unwrap_or(None);
+        if status
+            .as_deref()
+            .is_some_and(|s| !ares_core::state::blue_status_is_terminal(s))
+        {
+            in_flight.push(id);
+        }
+    }
+    in_flight
+}
+
 /// Redis-authoritative count of red-team tasks still pending completion.
 async fn redis_pending_red_tasks(dispatcher: &Arc<Dispatcher>) -> Result<usize, redis::RedisError> {
     let key = ares_core::state::build_key(
@@ -446,78 +549,99 @@ pub async fn wait_for_completion(
                 warn!(err = %e, "Failed to persist red completion metadata");
             }
 
-            // When blue team is enabled, auto-submit an investigation from the
-            // operation state if none have been submitted yet, then wait for all
-            // investigations to drain before signalling stop.
-            // Cap at 45 minutes to avoid hanging forever if an investigation is stuck.
+            // When blue team is enabled, submit the terminal investigation — the
+            // only one built from the complete loot and the full attack window —
+            // then wait for it and it alone. Mid-op investigations still in
+            // flight are superseded rather than waited on: the blue runner
+            // executes investigations serially, so leaving one running holds the
+            // terminal investigation behind it for up to a full investigation
+            // timeout, which is what used to strand the terminal one unfinished
+            // at the drain deadline.
             if blue_enabled {
                 info!("Blue team enabled — waiting for investigations to finish before shutdown");
                 let mut conn = dispatcher.queue.connection();
+                let op_id = dispatcher.config.operation_id.clone();
 
-                // Check if any blue investigations already exist for this operation.
-                // If not, auto-submit one so blue always gets at least one run.
-                let op_inv_key = format!(
-                    "ares:blue:op:{}:investigations",
-                    dispatcher.config.operation_id
-                );
-                let existing: i64 = redis::cmd("SCARD")
-                    .arg(&op_inv_key)
-                    .query_async(&mut conn)
-                    .await
-                    .unwrap_or(0);
-                if existing == 0 {
-                    info!("No blue investigations found — auto-submitting from operation state");
-                    if let Err(e) =
-                        auto_submit_blue_investigation(state, dispatcher, &mut conn).await
-                    {
-                        warn!(err = %e, "Failed to auto-submit blue investigation");
+                // Snapshot before submitting so the terminal investigation can
+                // never appear in its own supersede list.
+                let in_flight = in_flight_op_investigations(&mut conn, &op_id).await;
+
+                let mut watched: Vec<WatchedInvestigation> = Vec::new();
+                match auto_submit_blue_investigation(state, dispatcher, &mut conn).await {
+                    Ok(inv_id) => {
+                        info!(
+                            investigation_id = %inv_id,
+                            "Submitted terminal blue investigation from operation state"
+                        );
+                        watched.push(WatchedInvestigation {
+                            id: inv_id,
+                            wait_when_status_missing: true,
+                        });
+                    }
+                    Err(e) => {
+                        warn!(err = %e, "Failed to submit terminal blue investigation");
                     }
                 }
-                let blue_deadline = tokio::time::Instant::now() + Duration::from_secs(2700);
-                loop {
-                    if *shutdown_rx.borrow() {
-                        info!("Completion monitor interrupted by shutdown while waiting for blue");
-                        break;
+
+                for id in &in_flight {
+                    match ares_core::state::request_blue_supersede(&mut conn, id).await {
+                        Ok(()) => info!(
+                            investigation_id = %id,
+                            "Superseded mid-op investigation to free the blue runner slot"
+                        ),
+                        Err(e) => {
+                            // Couldn't cancel it, so it will keep holding the
+                            // runner — wait for it instead of stranding it.
+                            warn!(err = %e, investigation_id = %id, "Failed to request supersede");
+                            watched.push(WatchedInvestigation {
+                                id: id.clone(),
+                                wait_when_status_missing: false,
+                            });
+                        }
                     }
+                }
 
-                    if tokio::time::Instant::now() >= blue_deadline {
-                        warn!("Blue team wait deadline reached (45m) — proceeding with shutdown");
-                        break;
-                    }
-
-                    let active: i64 = redis::cmd("SCARD")
-                        .arg(ares_core::state::BLUE_ACTIVE_INVESTIGATIONS)
-                        .query_async(&mut conn)
-                        .await
-                        .unwrap_or(0);
-                    let queued: i64 = match dispatcher.queue.nats_broker() {
-                        Some(nats) => match nats
-                            .jetstream()
-                            .get_stream(ares_core::nats::BLUE_TASKS_STREAM)
-                            .await
-                        {
-                            Ok(stream) => stream.cached_info().state.messages as i64,
-                            Err(_) => 0,
-                        },
-                        None => 0,
-                    };
-
-                    if active == 0 && queued == 0 {
-                        info!("All blue investigations finished");
-                        break;
-                    }
-
-                    info!(
-                        active_investigations = active,
-                        queued_investigations = queued,
-                        "Waiting for blue team to finish..."
+                if watched.is_empty() {
+                    info!("No blue investigations to wait for");
+                } else {
+                    let budget = resolve_blue_drain_budget(
+                        std::env::var("ARES_BLUE_DRAIN_MAX_SECS").ok().as_deref(),
                     );
+                    let blue_deadline = tokio::time::Instant::now() + budget;
+                    loop {
+                        if *shutdown_rx.borrow() {
+                            info!(
+                                "Completion monitor interrupted by shutdown while waiting for blue"
+                            );
+                            break;
+                        }
 
-                    tokio::select! {
-                        _ = tokio::time::sleep(Duration::from_secs(10)) => {}
-                        _ = shutdown_rx.changed() => {
-                            if *shutdown_rx.borrow() {
-                                break;
+                        if tokio::time::Instant::now() >= blue_deadline {
+                            warn!(
+                                budget_secs = budget.as_secs(),
+                                "Blue team wait deadline reached — proceeding with shutdown"
+                            );
+                            break;
+                        }
+
+                        let outstanding = outstanding_investigations(&mut conn, &watched).await;
+                        if outstanding.is_empty() {
+                            info!("All blue investigations finished");
+                            break;
+                        }
+
+                        info!(
+                            outstanding_investigations = outstanding.len(),
+                            ids = ?outstanding,
+                            "Waiting for blue team to finish..."
+                        );
+
+                        tokio::select! {
+                            _ = tokio::time::sleep(Duration::from_secs(10)) => {}
+                            _ = shutdown_rx.changed() => {
+                                if *shutdown_rx.borrow() {
+                                    break;
+                                }
                             }
                         }
                     }
@@ -654,16 +778,18 @@ async fn mark_red_completion_for_loot(
     Ok(())
 }
 
-/// Auto-submit a blue team investigation from the current red team operation state.
+/// Submit the terminal blue investigation for this operation and return its id.
 ///
 /// Mirrors the logic in `ares-cli/src/blue/submit.rs::blue_from_operation()` but
-/// runs inline within the orchestrator process so blue always gets at least one
-/// investigation even when the red operation completes before blue's first poll.
+/// runs inline within the orchestrator process, so the investigation that sees
+/// the complete loot and the true attack window is submitted deterministically
+/// at red completion rather than racing the milestone loop in
+/// [`crate::orchestrator::blue::auto_submit`].
 async fn auto_submit_blue_investigation(
     state: &SharedState,
     dispatcher: &Arc<Dispatcher>,
     conn: &mut redis::aio::ConnectionManager,
-) -> Result<(), anyhow::Error> {
+) -> Result<String, anyhow::Error> {
     let op_id = &dispatcher.config.operation_id;
     let now = Utc::now();
     let inv_id = format!("inv-{}", now.format("%Y%m%d-%H%M%S"));
@@ -824,7 +950,7 @@ async fn auto_submit_blue_investigation(
         "Auto-submitted blue investigation from operation state"
     );
 
-    Ok(())
+    Ok(inv_id)
 }
 
 #[cfg(test)]
@@ -1676,6 +1802,87 @@ mod tests {
             ),
             CompletionDecision::Stop("hard max runtime exceeded")
         );
+    }
+
+    // ── tests for the blue drain wait ─────────────────────────────────
+
+    #[test]
+    fn drain_budget_must_outlast_one_investigation() {
+        // The regression this guards: when the budget equalled the investigation
+        // timeout, an investigation submitted at red completion was guaranteed to
+        // be abandoned at the exact instant it would have timed out.
+        assert!(
+            resolve_blue_drain_budget(None) > Duration::from_secs(BLUE_INVESTIGATION_TIMEOUT_SECS)
+        );
+    }
+
+    #[test]
+    fn drain_budget_default() {
+        assert_eq!(
+            resolve_blue_drain_budget(None),
+            Duration::from_secs(BLUE_INVESTIGATION_TIMEOUT_SECS + BLUE_DRAIN_SLACK_SECS)
+        );
+    }
+
+    #[test]
+    fn drain_budget_env_override() {
+        assert_eq!(
+            resolve_blue_drain_budget(Some("120")),
+            Duration::from_secs(120)
+        );
+        assert_eq!(
+            resolve_blue_drain_budget(Some("  900 ")),
+            Duration::from_secs(900)
+        );
+    }
+
+    #[test]
+    fn drain_budget_rejects_junk_and_zero() {
+        let default = resolve_blue_drain_budget(None);
+        assert_eq!(resolve_blue_drain_budget(Some("")), default);
+        assert_eq!(resolve_blue_drain_budget(Some("soon")), default);
+        assert_eq!(resolve_blue_drain_budget(Some("-5")), default);
+        assert_eq!(resolve_blue_drain_budget(Some("0")), default);
+    }
+
+    #[test]
+    fn outstanding_while_status_is_non_terminal() {
+        for status in ["queued", "in_progress", "triage", "hunting"] {
+            assert!(still_outstanding(Some(status), true), "{status}");
+            assert!(still_outstanding(Some(status), false), "{status}");
+        }
+    }
+
+    #[test]
+    fn not_outstanding_once_status_is_terminal() {
+        for status in [
+            "completed",
+            "escalated",
+            "failed",
+            "timed_out",
+            "superseded",
+        ] {
+            assert!(!still_outstanding(Some(status), true), "{status}");
+            assert!(!still_outstanding(Some(status), false), "{status}");
+        }
+    }
+
+    #[test]
+    fn missing_status_follows_the_wait_flag() {
+        // Just-submitted investigation: the runner hasn't registered it yet, so
+        // the gap must count as outstanding or the op shuts down before blue
+        // starts.
+        assert!(still_outstanding(None, true));
+        // Pre-existing investigation whose status key expired: not worth waiting
+        // out the whole budget for.
+        assert!(!still_outstanding(None, false));
+    }
+
+    #[test]
+    fn superseded_status_is_terminal_for_the_drain_wait() {
+        // A superseded investigation must release the drain wait — otherwise
+        // freeing the runner slot would trade one stall for another.
+        assert!(ares_core::state::blue_status_is_terminal("superseded"));
     }
 
     #[test]

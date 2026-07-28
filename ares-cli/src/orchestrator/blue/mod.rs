@@ -12,7 +12,7 @@ pub mod auto_submit;
 mod callbacks;
 pub mod chaining;
 mod investigation;
-mod runner;
+pub(crate) mod runner;
 mod simulated_response;
 mod sub_agent;
 mod sweep;
