@@ -18,6 +18,7 @@ pub mod executor;
 pub use executor::{spawn_error_kind, SpawnErrorKind};
 pub mod filter;
 pub mod lateral;
+pub mod mutation;
 pub mod parsers;
 pub mod privesc;
 pub mod recon;
@@ -77,6 +78,7 @@ impl ToolOutput {
 pub async fn dispatch(tool_name: &str, arguments: &Value) -> Result<ToolOutput> {
     credentials::validate_arguments(tool_name, arguments)?;
     scope::validate_in_scope(tool_name, arguments)?;
+    mutation::validate_mutation_allowed(tool_name)?;
 
     // Cap concurrent spider_plus dispatches process-wide to prevent the
     // netexec fork-storm OOM observed on EC2.
@@ -362,6 +364,29 @@ mod tests {
         assert!(
             msg.contains("definitely_not_real"),
             "expected tool name in error message, got: {msg}"
+        );
+    }
+
+    /// The gate has to hold at [`dispatch`], not just in the classifier: every
+    /// automation path and every direct LLM tool call funnels through here, and
+    /// a classifier nothing consults is the bug this was written to prevent.
+    #[tokio::test]
+    async fn dispatch_refuses_irreversible_tool_without_opt_in() {
+        let args = serde_json::json!({
+            "domain": "contoso.local",
+            "dc_ip": "192.168.58.10",
+            "username": "alice",
+            "password": "P@ssw0rd!",
+            "target_user": "bob",
+            "new_password": "NewP@ss123!"
+        });
+        let msg = match dispatch("bloodyad_set_password", &args).await {
+            Ok(_) => panic!("dispatch must refuse an irreversible tool without opt-in"),
+            Err(e) => e.to_string(),
+        };
+        assert!(
+            msg.contains("irreversibly") && msg.contains(mutation::ALLOW_IRREVERSIBLE_ENV),
+            "expected the irreversible-mutation refusal, got: {msg}"
         );
     }
 }
