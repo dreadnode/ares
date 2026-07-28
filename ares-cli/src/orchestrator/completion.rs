@@ -549,6 +549,98 @@ pub async fn wait_for_completion(
                 warn!(err = %e, "Failed to persist red completion metadata");
             }
 
+            // Wait for active red team tasks and deferred queue to drain
+            // before signalling shutdown. Cap at 5 minutes to avoid hanging.
+            let red_deadline = tokio::time::Instant::now() + Duration::from_secs(300);
+            loop {
+                if *shutdown_rx.borrow() {
+                    info!("Completion monitor interrupted by shutdown while waiting for red team drain");
+                    break;
+                }
+
+                if tokio::time::Instant::now() >= red_deadline {
+                    warn!("Red team drain deadline reached (5m) — proceeding with shutdown");
+                    break;
+                }
+
+                let active_tasks = dispatcher.tracker.total().await;
+                let deferred_tasks = dispatcher.deferred.total_count().await;
+                let redis_pending_tasks = match redis_pending_red_tasks(dispatcher).await {
+                    Ok(count) => count,
+                    Err(e) => {
+                        warn!(err = %e, "Failed to read pending red task count from Redis");
+                        usize::MAX
+                    }
+                };
+
+                if redis_pending_tasks == 0 && deferred_tasks == 0 {
+                    if active_tasks != 0 {
+                        warn!(
+                            active_tasks,
+                            "Local active-task tracker is non-zero, but Redis has no pending tasks; treating tracker entries as stale and proceeding with shutdown"
+                        );
+                    }
+                    info!("All red team tasks drained");
+                    break;
+                }
+
+                info!(
+                    active_tasks,
+                    redis_pending_tasks,
+                    deferred_tasks,
+                    "Waiting for red team tasks to drain before shutdown..."
+                );
+
+                tokio::select! {
+                    _ = tokio::time::sleep(Duration::from_secs(10)) => {}
+                    _ = shutdown_rx.changed() => {
+                        if *shutdown_rx.borrow() {
+                            break;
+                        }
+                    }
+                }
+            }
+
+            // Revert this operation's target mutations now that red has
+            // drained and no further mutations can be journaled.
+            //
+            // Ordering is the whole point: this runs *after* the red drain and
+            // *before* the blue wait. Blue investigations read telemetry and
+            // mutate nothing on the target, so waiting on them first is pure
+            // delay — a live run reported `completed` at 17:06 and did not
+            // revert until 17:24, eighteen minutes during which the operator
+            // had been told the run was finished and the range was still
+            // dirty. A fresh `ec2:launch` in that window flushes Redis and
+            // takes the journal with it, leaving nothing to revert from.
+            if crate::orchestrator::cleanup::auto_teardown_enabled() {
+                let mut conn = dispatcher.queue.connection();
+                match crate::orchestrator::cleanup::run_teardown_once(
+                    &mut conn,
+                    &dispatcher.config.operation_id,
+                    &crate::orchestrator::cleanup::TeardownOptions {
+                        dry_run: false,
+                        only: None,
+                    },
+                )
+                .await
+                {
+                    Ok(Some(report)) => info!(
+                        total = report.total,
+                        reverted = report.reverted,
+                        verified = report.verified,
+                        unverified = report.unverified,
+                        skipped = report.skipped,
+                        failed = report.failed,
+                        "Post-operation teardown complete"
+                    ),
+                    Ok(None) => debug!("Post-operation teardown already ran for this operation"),
+                    Err(e) => warn!(
+                        err = %e,
+                        "Post-operation teardown failed — mutations remain on the target"
+                    ),
+                }
+            }
+
             // When blue team is enabled, submit the terminal investigation — the
             // only one built from the complete loot and the full attack window —
             // then wait for it and it alone. Mid-op investigations still in
@@ -645,95 +737,6 @@ pub async fn wait_for_completion(
                             }
                         }
                     }
-                }
-            }
-
-            // Wait for active red team tasks and deferred queue to drain
-            // before signalling shutdown. Cap at 5 minutes to avoid hanging.
-            let red_deadline = tokio::time::Instant::now() + Duration::from_secs(300);
-            loop {
-                if *shutdown_rx.borrow() {
-                    info!("Completion monitor interrupted by shutdown while waiting for red team drain");
-                    break;
-                }
-
-                if tokio::time::Instant::now() >= red_deadline {
-                    warn!("Red team drain deadline reached (5m) — proceeding with shutdown");
-                    break;
-                }
-
-                let active_tasks = dispatcher.tracker.total().await;
-                let deferred_tasks = dispatcher.deferred.total_count().await;
-                let redis_pending_tasks = match redis_pending_red_tasks(dispatcher).await {
-                    Ok(count) => count,
-                    Err(e) => {
-                        warn!(err = %e, "Failed to read pending red task count from Redis");
-                        usize::MAX
-                    }
-                };
-
-                if redis_pending_tasks == 0 && deferred_tasks == 0 {
-                    if active_tasks != 0 {
-                        warn!(
-                            active_tasks,
-                            "Local active-task tracker is non-zero, but Redis has no pending tasks; treating tracker entries as stale and proceeding with shutdown"
-                        );
-                    }
-                    info!("All red team tasks drained");
-                    break;
-                }
-
-                info!(
-                    active_tasks,
-                    redis_pending_tasks,
-                    deferred_tasks,
-                    "Waiting for red team tasks to drain before shutdown..."
-                );
-
-                tokio::select! {
-                    _ = tokio::time::sleep(Duration::from_secs(10)) => {}
-                    _ = shutdown_rx.changed() => {
-                        if *shutdown_rx.borrow() {
-                            break;
-                        }
-                    }
-                }
-            }
-
-            // Revert this operation's target mutations now that red has
-            // drained and no further mutations can be journaled. Running here
-            // rather than only at process shutdown matters: shutdown is gated
-            // behind the blue drain (up to 45 minutes), during which the
-            // operation already reports `completed` and the operator has been
-            // told the run is done — while the range is still dirty. Worse, a
-            // fresh `ec2:launch` in that window flushes Redis and takes the
-            // journal with it, leaving nothing to revert from.
-            if crate::orchestrator::cleanup::auto_teardown_enabled() {
-                let mut conn = dispatcher.queue.connection();
-                match crate::orchestrator::cleanup::run_teardown_once(
-                    &mut conn,
-                    &dispatcher.config.operation_id,
-                    &crate::orchestrator::cleanup::TeardownOptions {
-                        dry_run: false,
-                        only: None,
-                    },
-                )
-                .await
-                {
-                    Ok(Some(report)) => info!(
-                        total = report.total,
-                        reverted = report.reverted,
-                        verified = report.verified,
-                        unverified = report.unverified,
-                        skipped = report.skipped,
-                        failed = report.failed,
-                        "Post-operation teardown complete"
-                    ),
-                    Ok(None) => debug!("Post-operation teardown already ran for this operation"),
-                    Err(e) => warn!(
-                        err = %e,
-                        "Post-operation teardown failed — mutations remain on the target"
-                    ),
                 }
             }
 
