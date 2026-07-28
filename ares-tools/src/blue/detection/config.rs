@@ -33,10 +33,13 @@ pub fn build_template_logql(entry: &TemplateEntry, host: Option<&str>) -> String
         logql.push_str(&build_pattern_filter(&refs));
     }
 
-    // Negative filters — exclude noise (machine accounts, SYSTEM, etc.)
+    // Negative filters — exclude noise (machine accounts, SYSTEM, etc.).
+    // Backtick string for the same reason as `build_pattern_filter`: these are
+    // regexes, and a double-quoted LogQL string would reject `\.` and friends
+    // as an invalid char escape.
     if !entry.exclude_patterns.is_empty() {
         let refs: Vec<&str> = entry.exclude_patterns.iter().map(|s| s.as_str()).collect();
-        logql.push_str(&format!(r#" !~ "(?i)({})""#, refs.join("|")));
+        logql.push_str(&format!(" !~ `(?i)({})`", refs.join("|")));
     }
 
     // Some templates also match host as a line filter

@@ -74,13 +74,24 @@ fn is_regex_pattern(pattern: &str) -> bool {
 /// (chained `|=` is conjunctive — the line must contain ALL terms), so the only
 /// way to OR multiple terms is regex alternation. Only a single literal takes
 /// the fast `|=` contains path (Loki evaluates it ~10x faster than regex);
-/// everything else uses `|~ "(?i)(…)"`. The `(?i)` also frees templates from
+/// everything else uses ``|~ `(?i)(…)` ``. The `(?i)` also frees templates from
 /// guessing log casing (e.g. `0x17` vs `RC4`).
+///
+/// The regex arm emits a **backtick** string. LogQL double-quoted strings take
+/// Go escape rules, so a pattern like `cmd\.exe` reaches Loki as the invalid
+/// escape `\.` and the whole query dies with `400 Bad Request: invalid char
+/// escape` — deterministically, and unretried, because 400 is correctly not
+/// retryable. That silently killed all 15 `filter_stages` templates
+/// (impacket/lateral/ADCS/delegation detection) while the plain-`patterns`
+/// ones kept working, so blue ran half-blind. Backticks are LogQL's raw
+/// string: no escape processing, regex metacharacters pass through intact.
+/// The `|=` arm needs no such care — `is_regex_pattern` routes anything
+/// containing a backslash to the regex arm.
 pub(super) fn build_pattern_filter(patterns: &[&str]) -> String {
     match patterns {
         [] => String::new(),
         [p] if !is_regex_pattern(p) => format!(r#" |= "{}""#, p),
-        _ => format!(r#" |~ "(?i)({})""#, patterns.join("|")),
+        _ => format!(" |~ `(?i)({})`", patterns.join("|")),
     }
 }
 

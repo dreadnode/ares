@@ -37,19 +37,19 @@ fn pattern_filter_ors_multiple_literals() {
     // chained |= (which ANDs them: a line would have to contain BOTH, so the
     // stage matches nothing).
     let filter = build_pattern_filter(&["nmap", "masscan"]);
-    assert_eq!(filter, r#" |~ "(?i)(nmap|masscan)""#);
+    assert_eq!(filter, " |~ `(?i)(nmap|masscan)`");
 }
 
 #[test]
 fn pattern_filter_uses_regex_for_many_literals() {
     let filter = build_pattern_filter(&["nmap", "masscan", "rustscan", "zmap"]);
-    assert_eq!(filter, r#" |~ "(?i)(nmap|masscan|rustscan|zmap)""#);
+    assert_eq!(filter, " |~ `(?i)(nmap|masscan|rustscan|zmap)`");
 }
 
 #[test]
 fn pattern_filter_uses_regex_for_metacharacters() {
     let filter = build_pattern_filter(&["golden.*ticket"]);
-    assert_eq!(filter, r#" |~ "(?i)(golden.*ticket)""#);
+    assert_eq!(filter, " |~ `(?i)(golden.*ticket)`");
 }
 
 #[test]
@@ -398,5 +398,122 @@ fn brute_force_no_host_line_filter() {
     assert!(
         !tmpl.logql.contains(r#"|= "192.168.58.10""#),
         "brute_force should not use host as line filter"
+    );
+}
+
+/// Return the first invalid escape sequence inside a double-quoted string
+/// literal of `logql`, if any. Backtick (raw) strings are skipped — they do no
+/// escape processing, which is exactly why regex filters use them.
+///
+/// LogQL double-quoted strings follow Go's escape rules, so `\.` is a hard
+/// parse error rather than a literal dot.
+fn first_invalid_double_quoted_escape(logql: &str) -> Option<String> {
+    let c: Vec<char> = logql.chars().collect();
+    let mut i = 0;
+    while i < c.len() {
+        match c[i] {
+            '`' => {
+                i += 1;
+                while i < c.len() && c[i] != '`' {
+                    i += 1;
+                }
+                i += 1;
+            }
+            '"' => {
+                i += 1;
+                while i < c.len() && c[i] != '"' {
+                    if c[i] == '\\' {
+                        let next = c.get(i + 1).copied().unwrap_or('\0');
+                        if !matches!(
+                            next,
+                            'a' | 'b'
+                                | 'f'
+                                | 'n'
+                                | 'r'
+                                | 't'
+                                | 'v'
+                                | '\\'
+                                | '"'
+                                | '\''
+                                | 'x'
+                                | 'u'
+                                | 'U'
+                                | '0'..='7'
+                        ) {
+                            return Some(format!("\\{next}"));
+                        }
+                        i += 2;
+                        continue;
+                    }
+                    i += 1;
+                }
+                i += 1;
+            }
+            _ => i += 1,
+        }
+    }
+    None
+}
+
+#[test]
+fn every_catalog_template_emits_parseable_logql() {
+    // Regression: `filter_stages` patterns carry regex escapes (e.g.
+    // `cmd\.exe`). Emitted into a double-quoted LogQL string they became the
+    // invalid escape `\.`, and Loki rejected the query with 400 — which is
+    // non-retryable, so all 15 such templates (impacket, lateral movement,
+    // ADCS, delegation, trust-key exfil) failed on every sweep while the
+    // plain-`patterns` templates kept working. Blue ran half-blind and the
+    // only symptom was a WARN line.
+    //
+    // The old tests asserted templates *built*, never that they *parsed*.
+    let config = ares_core::detection::detection_config();
+    let mut broken: Vec<String> = Vec::new();
+
+    for name in config.templates.keys() {
+        let tmpl = build_detection_template(name, None)
+            .unwrap_or_else(|| panic!("template {name} failed to build"));
+        if let Some(bad) = first_invalid_double_quoted_escape(&tmpl.logql) {
+            broken.push(format!("{name}: invalid escape `{bad}` in {}", tmpl.logql));
+        }
+    }
+
+    assert!(
+        broken.is_empty(),
+        "{} template(s) emit LogQL Loki will reject with 400:\n{}",
+        broken.len(),
+        broken.join("\n")
+    );
+}
+
+#[test]
+fn regex_filters_use_raw_strings_so_escapes_survive() {
+    // The concrete shape that broke: a stage carrying a regex metacharacter
+    // must be emitted as a backtick raw string, not a double-quoted one.
+    let f = build_pattern_filter(&["4688", "powershell", r"cmd\.exe"]);
+    assert!(
+        f.contains('`') && !f.contains('"'),
+        "regex filter must use a backtick raw string, got: {f}"
+    );
+    assert!(
+        f.contains(r"cmd\.exe"),
+        "the escape must reach Loki intact, got: {f}"
+    );
+    assert_eq!(first_invalid_double_quoted_escape(&f), None);
+}
+
+#[test]
+fn escape_validator_catches_the_original_bug() {
+    // Negative control: the exact string the old code produced must be
+    // rejected, otherwise the test above proves nothing.
+    let old = r#"{job="windows-security"} |~ "(?i)(4688|powershell|cmd\.exe)""#;
+    assert_eq!(
+        first_invalid_double_quoted_escape(old).as_deref(),
+        Some(r"\."),
+        "validator must flag the escape that caused the 400s"
+    );
+    // ...and a legitimately-escaped double-quoted string must pass.
+    assert_eq!(
+        first_invalid_double_quoted_escape(r#"{job="x"} |= "a\\b" |~ `c\.d`"#),
+        None
     );
 }
