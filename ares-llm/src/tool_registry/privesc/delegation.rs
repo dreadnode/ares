@@ -141,10 +141,12 @@ pub fn definitions() -> Vec<ToolDefinition> {
             name: "rbcd_write".into(),
             description: "Write the msDS-AllowedToActOnBehalfOfOtherIdentity attribute on a \
                 target computer to enable Resource-Based Constrained Delegation (RBCD). \
-                Allows the attacker-controlled SID to impersonate users to the target. \
+                Lets the attacker-controlled account impersonate users to the target. \
                 Auth precedence: `ticket_path` (Kerberos ccache) > `hash` (NTLM \
                 pass-the-hash) > `password` (plaintext); the worker injects whichever \
-                material the operation actually holds, so a hash-only foothold works here."
+                material the operation actually holds, so a hash-only foothold works here. \
+                Typically chained after `add_computer`: pass that machine account's NAME as \
+                `attacker_account`."
                 .into(),
             input_schema: json!({
                 "type": "object",
@@ -153,9 +155,13 @@ pub fn definitions() -> Vec<ToolDefinition> {
                         "type": "string",
                         "description": "Target computer account to write RBCD attribute on"
                     },
+                    "attacker_account": {
+                        "type": "string",
+                        "description": "sAMAccountName of the attacker-controlled account, e.g. 'EVILPC$' (include the trailing $ for a computer account). Passed to impacket-rbcd as `-delegate-from`, which resolves it with an (sAMAccountName=...) LDAP search — a SID here matches nothing and the write is silently skipped."
+                    },
                     "attacker_sid": {
                         "type": "string",
-                        "description": "SID of the attacker-controlled computer account"
+                        "description": "SID of the attacker-controlled account (e.g. 'S-1-5-21-...-1105'). Optional and NOT sent to impacket; teardown uses it to verify the delegation entry was removed, since the attribute reads back as SDDL containing raw SIDs. Supply it when known."
                     },
                     "domain": {
                         "type": "string",
@@ -186,7 +192,7 @@ pub fn definitions() -> Vec<ToolDefinition> {
                         "description": "Domain controller DNS name (e.g. 'dc01.contoso.local'). Optional, but supplying it skips impacket-rbcd's anonymous SMB lookup of the DC's machine name, which a hardened DC refuses."
                     }
                 },
-                "required": ["target_computer", "attacker_sid", "domain", "username", "dc_ip"]
+                "required": ["target_computer", "attacker_account", "domain", "username", "dc_ip"]
             }),
         },
         ToolDefinition {

@@ -30,9 +30,15 @@ pub fn mutation_took_effect(tool: &str, output: &str) -> bool {
             !output.contains("changed from 1 to 1")
         }
         "rbcd_write" => {
+            // impacket-rbcd exits 0 even when it wrote nothing: an unresolvable
+            // -delegate-to/-delegate-from bails out of write() early, and an
+            // already-present ACE is left alone. Both would otherwise journal a
+            // mutation that never happened, which teardown then "reverts".
             let lower = output.to_lowercase();
             !lower.contains("not modifying the delegation rights")
                 && !lower.contains("can already impersonate")
+                && !lower.contains("does not exist!")
+                && !lower.contains("user not found in ldap")
         }
         _ => true,
     }
@@ -115,6 +121,23 @@ mod tests {
 
         let real = "[*] Delegation rights modified successfully!";
         assert!(mutation_took_effect("rbcd_write", real));
+    }
+
+    /// Verbatim output from impacket-rbcd 0.13.0.dev0 when `-delegate-from`
+    /// cannot be resolved. It exits 0, so without this the orchestrator
+    /// journals a delegation entry that was never written and teardown then
+    /// reports having reverted it.
+    #[test]
+    fn rbcd_write_with_an_unresolvable_principal_is_not_a_mutation() {
+        let unresolved =
+            "[-] User not found in LDAP: S-1-5-21-412342169-2221029212-88264412-1010\n\
+                          [-] Account to escalate does not exist! \
+                          (forgot \"$\" for a computer account? wrong domain?)";
+        assert!(!mutation_took_effect("rbcd_write", unresolved));
+
+        let bad_target = "[-] Account to modify does not exist! \
+                          (forgot \"$\" for a computer account? wrong domain?)";
+        assert!(!mutation_took_effect("rbcd_write", bad_target));
     }
 
     #[test]

