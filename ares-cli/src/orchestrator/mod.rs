@@ -1078,6 +1078,45 @@ async fn run_inner() -> Result<()> {
             ),
         }
 
+        // Revert this operation's target mutations while the journal still
+        // exists. `ec2:launch` flushes Redis, so the next operation's start
+        // destroys the record teardown plans from — making shutdown the last
+        // point at which the range can be put back.
+        if cleanup::auto_teardown_enabled() {
+            match cleanup::run_teardown(
+                &mut conn,
+                &config.operation_id,
+                &cleanup::TeardownOptions {
+                    dry_run: false,
+                    only: None,
+                },
+            )
+            .await
+            {
+                Ok(report) => info!(
+                    operation_id = %config.operation_id,
+                    total = report.total,
+                    reverted = report.reverted,
+                    verified = report.verified,
+                    unverified = report.unverified,
+                    skipped = report.skipped,
+                    failed = report.failed,
+                    "Post-operation teardown complete"
+                ),
+                Err(e) => warn!(
+                    operation_id = %config.operation_id,
+                    err = %e,
+                    "Post-operation teardown failed — mutations remain on the target"
+                ),
+            }
+        } else {
+            info!(
+                operation_id = %config.operation_id,
+                "Post-operation teardown disabled by {} — target mutations left in place",
+                cleanup::AUTO_TEARDOWN_ENV
+            );
+        }
+
         // Finalize the operation to the ares-history Postgres so runs stay
         // comparable (cost, domain-admin, entity counts). The live projector
         // keeps entity tables current during the op but has no completion event,
