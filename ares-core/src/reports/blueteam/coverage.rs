@@ -4,23 +4,18 @@ use std::collections::BTreeSet;
 
 use serde::Serialize;
 
+use crate::correlation::redblue::RedBlueCorrelator;
 use crate::models::{SharedBlueTeamState, SharedRedTeamState};
 
 /// Whether a blue technique counts as a detection of a red technique.
 ///
 /// Exact matches count, and so does a parent/child pair in either direction:
 /// detecting T1003.006 evidences red's generic T1003, and a blue T1003 covers
-/// red's T1003.006. Sibling sub-techniques do NOT count — a Golden Ticket
-/// detection (T1558.001) is not a Kerberoasting detection (T1558.003), and
-/// crediting one for the other silently inflates the coverage number this
-/// section exists to report honestly.
+/// red's T1003.006. Sibling sub-techniques do not count — see
+/// [`RedBlueCorrelator::techniques_match`], which this shares so the report and
+/// `ares ops correlate` cannot disagree about what counts as a detection.
 fn covers(red: &str, blue: &str) -> bool {
-    if red == blue {
-        return true;
-    }
-    let red_parent = red.split('.').next().unwrap_or(red);
-    let blue_parent = blue.split('.').next().unwrap_or(blue);
-    red_parent == blue_parent && (red == red_parent || blue == blue_parent)
+    RedBlueCorrelator::techniques_match(Some(red), Some(blue))
 }
 
 #[derive(Debug, Clone, Serialize)]

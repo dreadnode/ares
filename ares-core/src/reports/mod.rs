@@ -296,6 +296,50 @@ mod tests {
 
     #[cfg(feature = "blue")]
     #[test]
+    fn blueteam_report_derives_tactics_from_techniques() {
+        use crate::models::SharedBlueTeamState;
+
+        let gen = BlueTeamReportGenerator::new().unwrap();
+        let mut state = SharedBlueTeamState::new("inv-tactics-001".to_string());
+        // Blue agents routinely record techniques and no tactics at all; the
+        // report used to answer that with "MITRE Tactics | 0" and a table of
+        // "Unknown".
+        state.identified_techniques = vec![
+            "T1003.006".to_string(),
+            "T1021.002".to_string(),
+            "T1649".to_string(),
+        ];
+        assert!(state.identified_tactics.is_empty());
+
+        let report = gen
+            .generate_from_states("op-tactics-001", &[state], &HashMap::new(), None)
+            .unwrap();
+
+        assert!(
+            !report.contains("MITRE Tactics | 0"),
+            "tactics must be derived, not zero: {report}"
+        );
+        assert!(report.contains("| MITRE Tactics | 2 |"), "{report}");
+        assert!(report.contains("Credential Access"));
+        assert!(report.contains("Lateral Movement"));
+        assert!(
+            report.contains("| T1003.006 | DCSync | Credential Access |"),
+            "technique rows must carry a resolved name and tactic: {report}"
+        );
+
+        let techniques_table = report
+            .split("## Techniques Identified By Blue Team")
+            .nth(1)
+            .and_then(|s| s.split("## Pyramid").next())
+            .expect("technique section present");
+        assert!(
+            !techniques_table.contains("Unknown"),
+            "no technique should render tactic Unknown: {techniques_table}"
+        );
+    }
+
+    #[cfg(feature = "blue")]
+    #[test]
     fn blueteam_report_without_red_state_refuses_to_imply_coverage() {
         let gen = BlueTeamReportGenerator::new().unwrap();
         let input = BlueTeamReportInput {

@@ -56,6 +56,18 @@ pub struct DetectionEvents {
     pub hosts: Vec<String>,
 }
 
+fn scan_start(
+    now: chrono::DateTime<chrono::Utc>,
+    hours_back: i64,
+    not_before: Option<chrono::DateTime<chrono::Utc>>,
+) -> chrono::DateTime<chrono::Utc> {
+    let lookback = now - chrono::Duration::hours(hours_back.min(2));
+    match not_before {
+        Some(nb) if nb > lookback => nb,
+        _ => lookback,
+    }
+}
+
 /// Run a detection template and return its matches with event timestamps.
 ///
 /// [`run_detection_query`] answers the same question as formatted text, which
@@ -65,17 +77,24 @@ pub struct DetectionEvents {
 ///
 /// An unknown template is an error rather than an empty result — silently
 /// scoring a typo'd template as "no matches" would understate coverage.
+///
+/// `not_before` clamps the scan to an operation's attack window. It can only
+/// narrow the `hours_back` window, never widen it. Without it a detection whose
+/// events straddle the window start reports a `first_event_at` from before the
+/// operation began, and that timestamp is what lands in the investigation
+/// timeline — dating this operation's detections to activity that predates it.
 pub async fn run_detection_query_events(
     query_name: &str,
     target_host: Option<&str>,
     hours_back: i64,
+    not_before: Option<chrono::DateTime<chrono::Utc>>,
 ) -> Result<DetectionEvents> {
     let Some(tmpl) = build_detection_template(query_name, target_host) else {
         anyhow::bail!("Unknown detection template: '{query_name}'");
     };
 
     let now = chrono::Utc::now();
-    let start = now - chrono::Duration::hours(hours_back.min(2));
+    let start = scan_start(now, hours_back, not_before);
 
     let entries = loki::query_log_entries(
         &tmpl.logql,
@@ -259,4 +278,47 @@ pub async fn get_user_activity(args: &Value) -> Result<ToolOutput> {
         result.stdout
     );
     Ok(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::scan_start;
+
+    fn t(s: &str) -> chrono::DateTime<chrono::Utc> {
+        chrono::DateTime::parse_from_rfc3339(s)
+            .unwrap()
+            .with_timezone(&chrono::Utc)
+    }
+
+    #[test]
+    fn attack_window_start_narrows_the_scan() {
+        let now = t("2026-07-28T01:52:00+00:00");
+        assert_eq!(
+            scan_start(now, 2, Some(t("2026-07-28T01:37:51+00:00"))),
+            t("2026-07-28T01:37:51+00:00")
+        );
+    }
+
+    #[test]
+    fn attack_window_start_never_widens_the_scan() {
+        // A window opening before the lookback must not pull in more history:
+        // the runner's 2h clamp exists because wider Loki queries time out.
+        let now = t("2026-07-28T01:52:00+00:00");
+        assert_eq!(
+            scan_start(now, 2, Some(t("2026-07-01T00:00:00+00:00"))),
+            t("2026-07-27T23:52:00+00:00")
+        );
+    }
+
+    #[test]
+    fn without_a_window_the_lookback_is_unchanged() {
+        let now = t("2026-07-28T01:52:00+00:00");
+        assert_eq!(scan_start(now, 2, None), t("2026-07-27T23:52:00+00:00"));
+    }
+
+    #[test]
+    fn hours_back_stays_clamped_to_two() {
+        let now = t("2026-07-28T01:52:00+00:00");
+        assert_eq!(scan_start(now, 24, None), t("2026-07-27T23:52:00+00:00"));
+    }
 }

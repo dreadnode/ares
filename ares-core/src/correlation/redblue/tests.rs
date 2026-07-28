@@ -367,16 +367,40 @@ fn determine_gap_reason_hierarchical_technique_match() {
 
 #[test]
 fn techniques_match_subtechnique_siblings() {
-    // T1003.001 and T1003.006 share parent T1003 so they should match
-    assert!(RedBlueCorrelator::techniques_match(
+    // T1003.001 and T1003.006 share parent T1003, but a shared parent is not a
+    // match: crediting an LSASS-dump detection for DCSync (or a Golden Ticket
+    // detection for Kerberoasting) overstates detection coverage.
+    assert!(!RedBlueCorrelator::techniques_match(
         Some("T1003.001"),
         Some("T1003.006")
+    ));
+    assert!(!RedBlueCorrelator::techniques_match(
+        Some("T1558.003"),
+        Some("T1558.001")
+    ));
+    // Parent/child in either direction still matches.
+    assert!(RedBlueCorrelator::techniques_match(
+        Some("T1003"),
+        Some("T1003.006")
+    ));
+    assert!(RedBlueCorrelator::techniques_match(
+        Some("T1003.006"),
+        Some("T1003")
     ));
 }
 
 #[test]
 fn techniques_match_mixed_case() {
     assert!(RedBlueCorrelator::techniques_match(
+        Some("t1558.001"),
+        Some("T1558.001")
+    ));
+    assert!(RedBlueCorrelator::techniques_match(
+        Some("t1558"),
+        Some("T1558.001")
+    ));
+    // Case folding must not resurrect sibling matching.
+    assert!(!RedBlueCorrelator::techniques_match(
         Some("t1558.001"),
         Some("T1558.003")
     ));

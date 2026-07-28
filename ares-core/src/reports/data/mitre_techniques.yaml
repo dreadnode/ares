@@ -1,96 +1,108 @@
-# MITRE ATT&CK Technique Names
-# Static mapping for report generation without network dependency
+# MITRE ATT&CK technique names and tactics.
+# Static mapping for report generation without network dependency.
 # Reference: https://attack.mitre.org/techniques/enterprise/
+#
+# A technique may belong to several ATT&CK tactics; the one recorded here is
+# the tactic ares attributes it to in reports.
 ---
 
 # Credential Access (TA0006)
-T1003: "OS Credential Dumping"
-T1003.001: "LSASS Memory"
-T1003.002: "Security Account Manager"
-T1003.003: "NTDS"
-T1003.004: "LSA Secrets"
-T1003.005: "Cached Domain Credentials"
-T1003.006: "DCSync"
+T1003: { name: "OS Credential Dumping", tactic: "Credential Access" }
+T1003.001: { name: "LSASS Memory", tactic: "Credential Access" }
+T1003.002: { name: "Security Account Manager", tactic: "Credential Access" }
+T1003.003: { name: "NTDS", tactic: "Credential Access" }
+T1003.004: { name: "LSA Secrets", tactic: "Credential Access" }
+T1003.005: { name: "Cached Domain Credentials", tactic: "Credential Access" }
+T1003.006: { name: "DCSync", tactic: "Credential Access" }
 
-T1110: "Brute Force"
-T1110.001: "Password Guessing"
-T1110.002: "Password Cracking"
-T1110.003: "Password Spraying"
-T1110.004: "Credential Stuffing"
+T1110: { name: "Brute Force", tactic: "Credential Access" }
+T1110.001: { name: "Password Guessing", tactic: "Credential Access" }
+T1110.002: { name: "Password Cracking", tactic: "Credential Access" }
+T1110.003: { name: "Password Spraying", tactic: "Credential Access" }
+T1110.004: { name: "Credential Stuffing", tactic: "Credential Access" }
 
-T1552: "Unsecured Credentials"
-T1552.001: "Credentials In Files"
-T1552.002: "Credentials in Registry"
-T1552.004: "Private Keys"
-T1552.006: "Group Policy Preferences"
+T1552: { name: "Unsecured Credentials", tactic: "Credential Access" }
+T1552.001: { name: "Credentials In Files", tactic: "Credential Access" }
+T1552.002: { name: "Credentials in Registry", tactic: "Credential Access" }
+T1552.004: { name: "Private Keys", tactic: "Credential Access" }
+T1552.006: { name: "Group Policy Preferences", tactic: "Credential Access" }
 
-T1555: "Credentials from Password Stores"
+T1555: { name: "Credentials from Password Stores", tactic: "Credential Access" }
 
-T1558: "Steal or Forge Kerberos Tickets"
-T1558.001: "Golden Ticket"
-T1558.002: "Silver Ticket"
-T1558.003: "Kerberoasting"
-T1558.004: "AS-REP Roasting"
+T1558: { name: "Steal or Forge Kerberos Tickets", tactic: "Credential Access" }
+T1558.001: { name: "Golden Ticket", tactic: "Credential Access" }
+T1558.002: { name: "Silver Ticket", tactic: "Credential Access" }
+T1558.003: { name: "Kerberoasting", tactic: "Credential Access" }
+T1558.004: { name: "AS-REP Roasting", tactic: "Credential Access" }
+
+T1649: { name: "Steal or Forge Authentication Certificates", tactic: "Credential Access" }
 
 # Discovery (TA0007)
-T1016: "System Network Configuration Discovery"
-T1018: "Remote System Discovery"
-T1033: "System Owner/User Discovery"
-T1046: "Network Service Discovery"
+T1016: { name: "System Network Configuration Discovery", tactic: "Discovery" }
+T1018: { name: "Remote System Discovery", tactic: "Discovery" }
+T1033: { name: "System Owner/User Discovery", tactic: "Discovery" }
+T1046: { name: "Network Service Discovery", tactic: "Discovery" }
 
-T1069: "Permission Groups Discovery"
-T1069.001: "Local Groups"
-T1069.002: "Domain Groups"
+T1069: { name: "Permission Groups Discovery", tactic: "Discovery" }
+T1069.001: { name: "Local Groups", tactic: "Discovery" }
+T1069.002: { name: "Domain Groups", tactic: "Discovery" }
 
-T1082: "System Information Discovery"
+T1082: { name: "System Information Discovery", tactic: "Discovery" }
 
-T1087: "Account Discovery"
-T1087.001: "Local Account"
-T1087.002: "Domain Account"
+T1087: { name: "Account Discovery", tactic: "Discovery" }
+T1087.001: { name: "Local Account", tactic: "Discovery" }
+T1087.002: { name: "Domain Account", tactic: "Discovery" }
 
-T1135: "Network Share Discovery"
-T1201: "Password Policy Discovery"
+T1135: { name: "Network Share Discovery", tactic: "Discovery" }
+T1201: { name: "Password Policy Discovery", tactic: "Discovery" }
+T1615: { name: "Group Policy Discovery", tactic: "Discovery" }
 
 # Lateral Movement (TA0008)
-T1021: "Remote Services"
-T1021.001: "Remote Desktop Protocol"
-T1021.002: "SMB/Windows Admin Shares"
-T1021.003: "Distributed Component Object Model"
-T1021.006: "Windows Remote Management"
+T1021: { name: "Remote Services", tactic: "Lateral Movement" }
+T1021.001: { name: "Remote Desktop Protocol", tactic: "Lateral Movement" }
+T1021.002: { name: "SMB/Windows Admin Shares", tactic: "Lateral Movement" }
+T1021.003: { name: "Distributed Component Object Model", tactic: "Lateral Movement" }
+T1021.006: { name: "Windows Remote Management", tactic: "Lateral Movement" }
 
-T1550: "Use Alternate Authentication Material"
-T1550.002: "Pass the Hash"
-T1550.003: "Pass the Ticket"
+T1210: { name: "Exploitation of Remote Services", tactic: "Lateral Movement" }
+
+T1550: { name: "Use Alternate Authentication Material", tactic: "Lateral Movement" }
+T1550.002: { name: "Pass the Hash", tactic: "Lateral Movement" }
+T1550.003: { name: "Pass the Ticket", tactic: "Lateral Movement" }
 
 # Privilege Escalation (TA0004)
-T1068: "Exploitation for Privilege Escalation"
+T1068: { name: "Exploitation for Privilege Escalation", tactic: "Privilege Escalation" }
 
-T1078: "Valid Accounts"
-T1078.002: "Domain Accounts"
+T1078: { name: "Valid Accounts", tactic: "Privilege Escalation" }
+T1078.002: { name: "Domain Accounts", tactic: "Privilege Escalation" }
 
-T1134: "Access Token Manipulation"
+T1134: { name: "Access Token Manipulation", tactic: "Privilege Escalation" }
+T1134.001: { name: "Token Impersonation/Theft", tactic: "Privilege Escalation" }
+T1134.005: { name: "SID-History Injection", tactic: "Privilege Escalation" }
 
-T1484: "Domain Policy Modification"
-T1484.001: "Group Policy Modification"
+T1484: { name: "Domain Policy Modification", tactic: "Privilege Escalation" }
+T1484.001: { name: "Group Policy Modification", tactic: "Privilege Escalation" }
 
 # Persistence (TA0003)
-T1098: "Account Manipulation"
+T1098: { name: "Account Manipulation", tactic: "Persistence" }
 
-T1136: "Create Account"
-T1136.002: "Domain Account"
+T1136: { name: "Create Account", tactic: "Persistence" }
+T1136.002: { name: "Domain Account", tactic: "Persistence" }
+
+T1505: { name: "Server Software Component", tactic: "Persistence" }
 
 # Execution (TA0002)
-T1047: "Windows Management Instrumentation"
-T1053: "Scheduled Task/Job"
+T1047: { name: "Windows Management Instrumentation", tactic: "Execution" }
+T1053: { name: "Scheduled Task/Job", tactic: "Execution" }
 
-T1059: "Command and Scripting Interpreter"
-T1059.001: "PowerShell"
+T1059: { name: "Command and Scripting Interpreter", tactic: "Execution" }
+T1059.001: { name: "PowerShell", tactic: "Execution" }
 
-T1569: "System Services"
-T1569.002: "Service Execution"
+T1569: { name: "System Services", tactic: "Execution" }
+T1569.002: { name: "Service Execution", tactic: "Execution" }
 
 # Defense Evasion (TA0005)
-T1070: "Indicator Removal"
-T1070.001: "Clear Windows Event Logs"
+T1070: { name: "Indicator Removal", tactic: "Defense Evasion" }
+T1070.001: { name: "Clear Windows Event Logs", tactic: "Defense Evasion" }
 
-T1562: "Impair Defenses"
+T1562: { name: "Impair Defenses", tactic: "Defense Evasion" }

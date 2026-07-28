@@ -576,6 +576,7 @@ pub(crate) async fn run_detection_sweep(
                 &tmpl.template,
                 None,
                 SWEEP_HOURS_BACK,
+                attack_start,
             )
             .await;
             let fired = match out {

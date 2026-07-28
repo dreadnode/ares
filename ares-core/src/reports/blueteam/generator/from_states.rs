@@ -208,12 +208,26 @@ impl BlueTeamReportGenerator {
             .map(|tech_id| {
                 serde_json::json!({
                     "id": tech_id,
-                    "name": technique_names.get(tech_id).unwrap_or(tech_id),
-                    "tactic": "Unknown",
+                    "name": technique_names
+                        .get(tech_id)
+                        .map(String::as_str)
+                        .or_else(|| crate::reports::get_technique_name(tech_id))
+                        .unwrap_or(tech_id),
+                    "tactic": crate::reports::get_technique_tactic(tech_id),
                 })
             })
             .collect();
 
+        // Blue agents rarely record tactics explicitly, which left the report
+        // claiming zero tactics alongside a full technique table. Derive them
+        // from the techniques so lifecycle coverage reflects what was found.
+        all_tactics.extend(
+            sorted_techniques
+                .iter()
+                .map(|t| crate::reports::get_technique_tactic(t))
+                .filter(|t| *t != "Unknown")
+                .map(String::from),
+        );
         let mut sorted_tactics: Vec<String> = all_tactics.into_iter().collect();
         sorted_tactics.sort();
         let mut sorted_hosts: Vec<String> = all_hosts.into_iter().collect();

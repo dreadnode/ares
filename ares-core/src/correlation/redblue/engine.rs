@@ -48,6 +48,12 @@ impl RedBlueCorrelator {
     /// - Exact match: T1003 == T1003
     /// - Parent matches child: T1003 matches T1003.006
     /// - Child matches parent: T1003.006 matches T1003
+    ///
+    /// Sibling sub-techniques do NOT match. They share a parent but describe
+    /// different attacker behaviour, and crediting one for the other inflates
+    /// detection coverage: a Golden Ticket detection (T1558.001) is not a
+    /// Kerberoasting detection (T1558.003), and DCSync (T1003.006) is not
+    /// LSASS dumping (T1003.001).
     pub fn techniques_match(red: Option<&str>, blue: Option<&str>) -> bool {
         let (Some(red), Some(blue)) = (red, blue) else {
             return false;
@@ -63,7 +69,7 @@ impl RedBlueCorrelator {
         let red_parent = red.split('.').next().unwrap_or(&red);
         let blue_parent = blue.split('.').next().unwrap_or(&blue);
 
-        red_parent == blue_parent
+        red_parent == blue_parent && (red == red_parent || blue == blue_parent)
     }
 
     /// Load and parse a red team report file.
@@ -828,7 +834,9 @@ mod tests {
 
     #[test]
     fn techniques_match_different_sub() {
-        assert!(RedBlueCorrelator::techniques_match(
+        // Siblings share parent T1003 but are different behaviours: detecting
+        // DCSync is not detecting LSASS dumping.
+        assert!(!RedBlueCorrelator::techniques_match(
             Some("T1003.001"),
             Some("T1003.006")
         ));
