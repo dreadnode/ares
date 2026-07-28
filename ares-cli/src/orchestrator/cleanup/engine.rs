@@ -211,6 +211,14 @@ async fn validate_revert(
 
 /// Case-insensitive username+domain match over the operation's credentials,
 /// skipping empty/placeholder passwords, preferring the latest attack step.
+///
+/// Falls back to any usable credential in the same domain when the original
+/// principal's secret is not in the store. Reverting needs *rights*, not the
+/// original identity, and the forward principal is frequently unavailable at
+/// teardown: it was reached by hash or ticket, or its plaintext was never
+/// recovered. Without the fallback those mutations are skipped and left on the
+/// target — observed live, where a machine account survived teardown because
+/// the account that created it had no password in the store.
 fn resolve_credential<'a>(
     credentials: &'a [Credential],
     username: &str,
@@ -218,11 +226,22 @@ fn resolve_credential<'a>(
 ) -> Option<&'a Credential> {
     let user_l = username.to_lowercase();
     let domain_l = domain.to_lowercase();
+    let in_domain = |c: &&Credential| domain_l.is_empty() || c.domain.to_lowercase() == domain_l;
+    let usable = |c: &&Credential| !c.password.trim().is_empty();
+
     credentials
         .iter()
-        .filter(|c| c.username.to_lowercase() == user_l && !c.password.trim().is_empty())
-        .filter(|c| domain_l.is_empty() || c.domain.to_lowercase() == domain_l)
+        .filter(usable)
+        .filter(|c| c.username.to_lowercase() == user_l)
+        .filter(in_domain)
         .max_by_key(|c| c.attack_step)
+        .or_else(|| {
+            credentials
+                .iter()
+                .filter(usable)
+                .filter(in_domain)
+                .max_by_key(|c| (c.is_admin, c.attack_step))
+        })
 }
 
 /// Inject the resolved secret so `ares_tools::dispatch` can authenticate.
@@ -369,6 +388,45 @@ mod tests {
     fn resolve_is_case_insensitive() {
         let creds = vec![cred("Alice", "CONTOSO.LOCAL", "pw", 1)];
         assert!(resolve_credential(&creds, "alice", "contoso.local").is_some());
+    }
+
+    #[test]
+    fn resolve_falls_back_to_another_principal_in_the_same_domain() {
+        // The account that made the mutation is often unreachable at teardown
+        // (owned by hash or ticket, never by plaintext). Reverting needs
+        // rights, not that identity.
+        let creds = vec![cred("bob", "contoso.local", "pw", 1)];
+        let got = resolve_credential(&creds, "alice", "contoso.local")
+            .expect("must fall back rather than skip the revert");
+        assert_eq!(got.username, "bob");
+    }
+
+    #[test]
+    fn resolve_fallback_prefers_an_admin() {
+        let mut admin = cred("carol", "contoso.local", "pw-admin", 1);
+        admin.is_admin = true;
+        let creds = vec![cred("bob", "contoso.local", "pw-user", 9), admin];
+        let got = resolve_credential(&creds, "alice", "contoso.local").unwrap();
+        assert_eq!(got.password, "pw-admin");
+    }
+
+    #[test]
+    fn resolve_fallback_never_crosses_domains() {
+        let creds = vec![cred("bob", "fabrikam.local", "pw", 1)];
+        assert!(
+            resolve_credential(&creds, "alice", "contoso.local").is_none(),
+            "a credential from another domain must not be used to revert"
+        );
+    }
+
+    #[test]
+    fn resolve_exact_principal_still_wins_over_fallback() {
+        let creds = vec![
+            cred("bob", "contoso.local", "pw-bob", 9),
+            cred("alice", "contoso.local", "pw-alice", 1),
+        ];
+        let got = resolve_credential(&creds, "alice", "contoso.local").unwrap();
+        assert_eq!(got.password, "pw-alice");
     }
 
     #[test]

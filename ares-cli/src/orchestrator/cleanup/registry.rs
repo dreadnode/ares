@@ -6,9 +6,12 @@
 //! Inverse construction is deliberately uniform: for action-parameterized tools
 //! (pywhisker, dacl_edit, addspn, and the ones given an `action` branch) the
 //! reverse is the *same* forward arguments with the `action` key overridden, so
-//! all targeting/auth keys carry over untouched. Tools that reverse via a
-//! different command (xp_cmdshell → mssql_command) build fresh args from the
-//! forward call's auth/target keys.
+//! all targeting/auth keys carry over untouched.
+//!
+//! A mutation only earns [`Reversibility::Clean`] when the journalled call
+//! proves the prior state. An idempotent "make it so" call does not: it records
+//! that we asked, not that the setting was off beforehand, so reverting it can
+//! erase configuration the range shipped with rather than our own change.
 
 use serde_json::{json, Value};
 
@@ -92,6 +95,19 @@ fn astr<'a>(args: &'a Value, key: &str) -> Option<&'a str> {
     args.get(key)
         .and_then(Value::as_str)
         .filter(|s| !s.is_empty())
+}
+
+/// Canonicalize a SID argument for substring matching against rendered output.
+///
+/// bloodyAD renders a security descriptor as SDDL, where each ACE ends in the
+/// literal `S-1-5-21-…` account SID (there is no well-known-SID abbreviation
+/// table — only `WELLKNOWN_GUID`), so a raw SID needle does match. What does
+/// not match is a SID the agent decorated: live journals contain the same
+/// principal passed both as `…-1163` and `…-1163$`. A trailing `$` can never
+/// appear in the SDDL, so the needle is absent on the first read and the probe
+/// reports the revert verified without having checked anything.
+fn normalize_sid(sid: &str) -> String {
+    sid.trim().trim_end_matches('$').to_ascii_uppercase()
 }
 
 /// Build a `bloodyad_get_object` read-back probe that reuses the forward call's
@@ -203,17 +219,34 @@ pub fn undo_plan(record: &MutationRecord) -> UndoPlan {
             inverse: Some(("rbcd_write".into(), with_override(a, "action", "remove"))),
             validate: astr(a, "target_computer").zip(astr(a, "attacker_sid")).map(
                 |(target, sid)| {
-                    get_object_probe(a, target, "msDS-AllowedToActOnBehalfOfOtherIdentity", sid)
+                    get_object_probe(
+                        a,
+                        target,
+                        "msDS-AllowedToActOnBehalfOfOtherIdentity",
+                        &normalize_sid(sid),
+                    )
                 },
             ),
-            note: "remove the RBCD delegation entry (msDS-AllowedToActOnBehalfOfOtherIdentity)".into(),
+            note: "remove the RBCD delegation entry (msDS-AllowedToActOnBehalfOfOtherIdentity). \
+                   rbcd.py write and remove are both read-modify-write scoped to the exact SID \
+                   (wiping the attribute is `-action flush`, which is never dispatched), so \
+                   unrelated ACEs survive the revert. Clean rests on one further premise: the \
+                   documented chain is add_computer -> rbcd_write, so attacker_sid is a machine \
+                   account this operation just created and no pre-existing ACE can reference it. \
+                   A write naming an already-delegated SID no-ops while still being journalled, \
+                   and the inverse would then strip an ACE we did not create"
+                .into(),
         },
-        "dacl_edit" => UndoPlan {
-            class: Reversibility::Clean,
-            inverse: Some(("dacl_edit".into(), with_override(a, "action", "remove"))),
-            validate: None,
-            note: "remove the added ACE".into(),
-        },
+        // NOT auto-reverted: same DACL read-modify-write hazard as
+        // `bloodyad_add_genericall` — `dacledit.py -action write` does not fail
+        // on an ACE that already exists, and `-action remove` deletes every ACE
+        // matching principal+rights, ours and the range's alike.
+        "dacl_edit" => UndoPlan::manual(
+            Reversibility::NeedsCapture,
+            "remove the added ACE — `dacledit -action write` no-ops when the ACE already exists, \
+             so the matching remove can strip a pre-existing (lab-provisioned) ACE; needs a \
+             read-before-write capture of the target DACL",
+        ),
         "bloodyad_add_group_member" => UndoPlan {
             class: Reversibility::Clean,
             inverse: Some((
@@ -227,27 +260,38 @@ pub fn undo_plan(record: &MutationRecord) -> UndoPlan {
             }),
             note: "remove the added group member".into(),
         },
-        "bloodyad_add_genericall" => UndoPlan {
-            class: Reversibility::Clean,
-            inverse: Some((
-                "bloodyad_add_genericall".into(),
-                with_override(a, "action", "remove"),
-            )),
-            validate: None,
-            note: "remove the GenericAll ACE".into(),
-        },
+        // NOT auto-reverted: bloodyAD's `add genericAll` is a read-modify-write
+        // of the whole DACL (getSD → addRight → write back), so it succeeds
+        // silently when the trustee already holds rights. The inverse strips
+        // every ACE matching that trustee, and GOAD provisions the very edges
+        // this tool is pointed at (GenericAll lord.varys→Domain Admins,
+        // KingsGuard→stannis.baratheon, …). Reverting an add that was a no-op
+        // therefore deletes a provisioned attack path.
+        "bloodyad_add_genericall" => UndoPlan::manual(
+            Reversibility::NeedsCapture,
+            "remove the GenericAll ACE — the add is a DACL read-modify-write that no-ops when \
+             the right already exists, so an unconditional remove can strip a pre-existing \
+             (lab-provisioned) ACE; needs a read-before-write capture of the target DACL",
+        ),
         "addspn" => UndoPlan {
             class: Reversibility::Clean,
             inverse: Some(("addspn".into(), with_override(a, "action", "remove"))),
             validate: None,
             note: "remove the added SPN".into(),
         },
-        "mssql_enable_xp_cmdshell" => UndoPlan {
-            class: Reversibility::Clean,
-            inverse: Some(("mssql_command".into(), xp_cmdshell_disable_args(a))),
-            validate: None,
-            note: "disable xp_cmdshell (sp_configure 'xp_cmdshell',0)".into(),
-        },
+        // NOT auto-reverted: `sp_configure 'xp_cmdshell',1` is idempotent, so a
+        // journalled call proves only that we asked — not that it was off
+        // beforehand. GOAD provisions the setting ON as the MSSQL vulnerability
+        // (`ansible/roles/mssql/tasks/config.yml`), so disabling it deletes a
+        // lab-provisioned weakness instead of reverting our own change. That is
+        // exactly the "revert drifts the range" failure this module exists to
+        // avoid, and it happened live before this was reclassified.
+        "mssql_enable_xp_cmdshell" => UndoPlan::manual(
+            Reversibility::NeedsCapture,
+            "xp_cmdshell may already have been enabled before the operation (GOAD ships it on); \
+             disabling it unconditionally removes a provisioned vulnerability — needs a \
+             read-before-write capture of sys.configurations.value_in_use",
+        ),
 
         // ── HARD: reversible core but leaves residue needing a scrub ──
         // No clean tool inverse: the deployed bloodyAD exposes no `aclEntry`
@@ -300,22 +344,6 @@ pub fn undo_plan(record: &MutationRecord) -> UndoPlan {
     }
 }
 
-/// Build `mssql_command` args that disable xp_cmdshell, reusing the forward
-/// call's auth/target/impersonate keys. NOTE: `mssql_command`'s SQL argument is
-/// `command`, not `query` — passing `query` fails with "missing required
-/// argument: command" (caught in a live teardown run).
-fn xp_cmdshell_disable_args(forward: &Value) -> Value {
-    let mut m = forward.as_object().cloned().unwrap_or_default();
-    m.insert(
-        "command".into(),
-        json!(
-            "EXEC sp_configure 'show advanced options',1; RECONFIGURE; \
-               EXEC sp_configure 'xp_cmdshell',0; RECONFIGURE;"
-        ),
-    );
-    Value::Object(m)
-}
-
 /// `certipy_ca` covers several sub-actions; only `add-officer` has a clean
 /// inverse (`remove-officer`). Others (backup, issue-request) are not target
 /// mutations we auto-revert.
@@ -326,15 +354,16 @@ fn certipy_ca_plan(a: &Value) -> UndoPlan {
         .or_else(|| a.get("ca_action").and_then(Value::as_str))
         .unwrap_or("");
     if action.contains("add-officer") || a.get("add_officer").is_some() {
-        UndoPlan {
-            class: Reversibility::Clean,
-            inverse: Some((
-                "certipy_ca".into(),
-                with_override(a, "action", "remove-officer"),
-            )),
-            validate: None,
-            note: "remove the CA officer we added".into(),
-        }
+        // NOT auto-reverted: GOAD provisions `adcs_esc7`, which *is* officer /
+        // ManageCA rights on the CA. Adding an officer that already holds the
+        // role does not fail, so `remove-officer` can revoke a right the range
+        // shipped with rather than the one we added.
+        UndoPlan::manual(
+            Reversibility::NeedsCapture,
+            "remove the CA officer — adding an existing officer does not fail, and the range \
+             provisions ESC7 officer rights, so an unconditional remove can revoke a \
+             lab-provisioned role; needs a read-before-write capture of the CA's officer list",
+        )
     } else {
         UndoPlan::manual(
             Reversibility::Unsupported,
@@ -366,25 +395,68 @@ mod tests {
         assert_eq!(args["delegate_to"], json!("dc01$"));
     }
 
+    /// An unconditional "remove" inverse is only safe when the forward "add"
+    /// would have FAILED had the state already existed. Where the add silently
+    /// no-ops, the revert cannot tell our change from the range's own
+    /// configuration and strips a provisioned attack path.
     #[test]
-    fn xp_cmdshell_reverses_via_mssql_command_disable() {
+    fn dacl_and_officer_grants_are_not_auto_reverted() {
+        for (tool, args) in [
+            (
+                "bloodyad_add_genericall",
+                json!({ "target_dn": "CN=Domain Admins,DC=contoso,DC=local", "principal": "alice" }),
+            ),
+            (
+                "dacl_edit",
+                json!({ "target_dn": "CN=bob,DC=contoso,DC=local", "principal": "alice", "rights": "FullControl" }),
+            ),
+            (
+                "certipy_ca",
+                json!({ "action": "add-officer", "ca": "contoso-CA" }),
+            ),
+        ] {
+            let p = undo_plan(&rec(tool, args));
+            assert_eq!(
+                p.class,
+                Reversibility::NeedsCapture,
+                "{tool} must not auto-revert without knowing the prior state"
+            );
+            assert!(p.inverse.is_none(), "{tool} must dispatch no inverse");
+        }
+    }
+
+    /// The counter-case: LDAP `Change.ADD` on an existing group member returns
+    /// `attributeOrValueExists`, so the tool errors and the mutation is never
+    /// journalled. A journalled add therefore proves we created the membership.
+    #[test]
+    fn group_member_add_stays_cleanly_reversible() {
+        let p = undo_plan(&rec(
+            "bloodyad_add_group_member",
+            json!({ "group": "Domain Admins", "target_user": "alice" }),
+        ));
+        assert_eq!(p.class, Reversibility::Clean);
+        let (tool, args) = p.inverse.expect("membership we added must be removed");
+        assert_eq!(tool, "bloodyad_add_group_member");
+        assert_eq!(args["action"], json!("remove"));
+    }
+
+    #[test]
+    fn xp_cmdshell_is_never_auto_disabled() {
+        // GOAD ships xp_cmdshell enabled as the MSSQL vulnerability, and
+        // `sp_configure ...,1` is idempotent — so a journalled enable does not
+        // prove it was off beforehand. Auto-disabling deleted a provisioned
+        // weakness from a live range; it must stay blocked until a
+        // read-before-write capture exists.
         let p = undo_plan(&rec(
             "mssql_enable_xp_cmdshell",
             json!({ "target": "192.168.58.30", "username": "sa" }),
         ));
-        assert_eq!(p.class, Reversibility::Clean);
-        let (tool, args) = p.inverse.unwrap();
-        assert_eq!(tool, "mssql_command");
-        // mssql_command's SQL arg is `command`, not `query` (the live-run bug).
+        assert_eq!(p.class, Reversibility::NeedsCapture);
         assert!(
-            args.get("query").is_none(),
-            "must not use the wrong `query` key"
+            p.inverse.is_none(),
+            "must not dispatch a disable without knowing the prior state"
         );
-        assert!(args["command"]
-            .as_str()
-            .unwrap()
-            .contains("'xp_cmdshell',0"));
-        assert_eq!(args["username"], json!("sa"));
+        assert!(p.validate.is_none());
     }
 
     #[test]
@@ -436,13 +508,13 @@ mod tests {
     }
 
     #[test]
-    fn certipy_ca_add_officer_reverses_to_remove_officer() {
+    fn certipy_ca_non_officer_actions_stay_unsupported() {
         let p = undo_plan(&rec(
             "certipy_ca",
-            json!({ "action": "add-officer", "ca": "contoso-CA" }),
+            json!({ "action": "backup", "ca": "contoso-CA" }),
         ));
-        assert_eq!(p.class, Reversibility::Clean);
-        assert_eq!(p.inverse.unwrap().1["action"], json!("remove-officer"));
+        assert_eq!(p.class, Reversibility::Unsupported);
+        assert!(p.inverse.is_none());
     }
 
     #[test]
@@ -464,6 +536,36 @@ mod tests {
         assert_eq!(probe.tool, "bloodyad_get_object");
         assert_eq!(probe.args["target"], json!("dc01$"));
         assert_eq!(probe.expect_absent.as_deref(), Some("S-1-5-21-1-2-3-1105"));
+    }
+
+    /// Live journals carry the same principal as both `…-1105` and `…-1105$`.
+    /// The `$` form can never appear in bloodyAD's SDDL rendering, so an
+    /// un-normalized needle is absent on the first read and the probe reports
+    /// a revert verified without having checked anything.
+    #[test]
+    fn rbcd_probe_needle_is_normalized_so_it_can_actually_match() {
+        let p = undo_plan(&rec(
+            "rbcd_write",
+            json!({ "target_computer": "dc01$", "attacker_sid": "s-1-5-21-1-2-3-1105$ ",
+                    "domain": "contoso.local", "dc_ip": "192.168.58.240", "username": "alice" }),
+        ));
+        let probe = p
+            .validate
+            .expect("rbcd revert should have a read-back probe");
+        assert_eq!(
+            probe.expect_absent.as_deref(),
+            Some("S-1-5-21-1-2-3-1105"),
+            "a decorated SID must be canonicalized or the probe silently always passes"
+        );
+    }
+
+    #[test]
+    fn normalize_sid_strips_decoration_without_mangling_a_clean_sid() {
+        assert_eq!(normalize_sid("S-1-5-21-1-2-3-1105"), "S-1-5-21-1-2-3-1105");
+        assert_eq!(
+            normalize_sid(" s-1-5-21-1-2-3-1105$"),
+            "S-1-5-21-1-2-3-1105"
+        );
     }
 
     #[test]
