@@ -227,26 +227,36 @@ pub(super) async fn inject_spray_attempts(
     let mut guard = state.write().await;
     let tallied = guard.spray_attempts_used(&domain);
 
+    // Every spray-style tool gets the tally injected, so each one can refuse
+    // itself once the budget is spent. Injecting for only some of them is what
+    // let `username_as_password` spend budget it could never be denied: the
+    // dispatcher debited it, nothing could decline it, and it quietly tightened
+    // `password_spray`'s allowance while staying free itself.
+    //
+    // Keep the LLM's figure when it is the larger one: it may know about
+    // attempts this tally never saw (a prior operation, a manual spray).
+    let claimed = arguments
+        .get("attempts_used_per_account")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0);
+    let effective = tallied.max(claimed);
+    if let Some(obj) = arguments.as_object_mut() {
+        obj.insert(
+            "attempts_used_per_account".to_string(),
+            serde_json::Value::from(effective),
+        );
+    }
+
     let cost = if tool_name == "password_spray" {
-        // Keep the LLM's figure when it is the larger one: it may know about
-        // attempts this tally never saw (a prior operation, a manual spray).
-        let claimed = arguments
-            .get("attempts_used_per_account")
-            .and_then(|v| v.as_i64())
-            .unwrap_or(0);
-        let effective = tallied.max(claimed);
-        if let Some(obj) = arguments.as_object_mut() {
-            obj.insert(
-                "attempts_used_per_account".to_string(),
-                serde_json::Value::from(effective),
-            );
-        }
         ares_tools::credential_access::spray_attempt_cost(arguments, effective) as i64
     } else {
-        // `username_as_password` takes no budget arguments and always tries
-        // exactly one password per account, but that attempt still counts
-        // against the same threshold, so the tally has to see it.
-        1
+        // `username_as_password` tries exactly one password per account (the
+        // account's own name). It costs 1 when it will actually run, and 0
+        // once the budget is spent — the tool refuses at that point, and a
+        // refused call authenticates against nothing.
+        i64::from(ares_tools::credential_access::spray_budget_allows(
+            arguments, effective,
+        ))
     };
 
     if cost > 0 {

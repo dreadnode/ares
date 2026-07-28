@@ -511,11 +511,15 @@ pub async fn password_spray(args: &Value) -> Result<ToolOutput> {
     let attempts_used = optional_i64(args, "attempts_used_per_account").unwrap_or(0);
     let acknowledge_no_policy = optional_bool(args, "acknowledge_no_policy").unwrap_or(false);
 
-    let password_cap =
-        match check_spray_budget(lockout_threshold, attempts_used, acknowledge_no_policy) {
-            SprayBudget::Refuse(refusal) => return Ok(*refusal),
-            SprayBudget::Allow(cap) => cap,
-        };
+    let password_cap = match check_spray_budget(
+        lockout_threshold,
+        attempts_used,
+        acknowledge_no_policy,
+        "password_spray",
+    ) {
+        SprayBudget::Refuse(refusal) => return Ok(*refusal),
+        SprayBudget::Allow(cap) => cap,
+    };
 
     // Use provided file or generate a default wordlist. When the caller
     // supplies a users_file, strip AD built-in always-disabled accounts so
@@ -594,6 +598,7 @@ fn check_spray_budget(
     lockout_threshold: Option<i64>,
     attempts_used: i64,
     acknowledge_no_policy: bool,
+    tool: &str,
 ) -> SprayBudget {
     match lockout_threshold {
         Some(t) => {
@@ -604,7 +609,7 @@ fn check_spray_budget(
             let budget = t - attempts_used - SPRAY_LOCKOUT_BUFFER;
             if budget < 1 {
                 return SprayBudget::Refuse(Box::new(spray_refusal(format!(
-                    "Refusing password_spray: lockout budget exhausted (threshold={t}, \
+                    "Refusing {tool}: lockout budget exhausted (threshold={t}, \
                      attempts_used_per_account={attempts_used}, safety_buffer={SPRAY_LOCKOUT_BUFFER}, \
                      remaining={budget}). Wait for the AD observation window to reset, \
                      reset attempts_used_per_account to 0, then resume."
@@ -619,7 +624,7 @@ fn check_spray_budget(
             let budget = NO_POLICY_SPRAY_CAP - attempts_used;
             if budget < 1 {
                 return SprayBudget::Refuse(Box::new(spray_refusal(format!(
-                    "Refusing password_spray: no-policy spray allowance exhausted \
+                    "Refusing {tool}: no-policy spray allowance exhausted \
                      (allowance={NO_POLICY_SPRAY_CAP} per observation window, \
                      attempts_used_per_account={attempts_used}). Wait for the AD \
                      observation window to reset, or run password_policy and pass \
@@ -628,13 +633,12 @@ fn check_spray_budget(
             }
             SprayBudget::Allow(Some(budget as usize))
         }
-        None => SprayBudget::Refuse(Box::new(spray_refusal(
-            "Refusing password_spray: no lockout policy provided. Run password_policy \
+        None => SprayBudget::Refuse(Box::new(spray_refusal(format!(
+            "Refusing {tool}: no lockout policy provided. Run password_policy \
              first and pass lockout_threshold (and attempts_used_per_account if accounts \
              already have failed logons this window). To override when policy retrieval \
              is impossible, set acknowledge_no_policy=true — but expect lockouts."
-                .to_string(),
-        ))),
+        )))),
     }
 }
 
@@ -671,6 +675,7 @@ pub fn spray_attempt_cost(args: &Value, attempts_used: i64) -> usize {
         optional_i64(args, "lockout_threshold"),
         attempts_used,
         optional_bool(args, "acknowledge_no_policy").unwrap_or(false),
+        "password_spray",
     ) {
         SprayBudget::Refuse(_) => return 0,
         SprayBudget::Allow(cap) => cap,
@@ -690,6 +695,24 @@ pub fn spray_attempt_cost(args: &Value, attempts_used: i64) -> usize {
         // Neither supplied — the tool bails before touching the network.
         (None, false) => 0,
     }
+}
+
+/// Whether a one-attempt-per-account spray-style call (`username_as_password`)
+/// will be allowed given `attempts_used` already spent this window.
+///
+/// Mirrors the gate the tool applies to itself so the orchestrator debits only
+/// calls that will really authenticate — a refused call touches no account and
+/// must not consume budget, or the tally would run away on its own refusals.
+pub fn spray_budget_allows(args: &Value, attempts_used: i64) -> bool {
+    !matches!(
+        check_spray_budget(
+            optional_i64(args, "lockout_threshold"),
+            attempts_used,
+            optional_bool(args, "acknowledge_no_policy").unwrap_or(false),
+            "username_as_password",
+        ),
+        SprayBudget::Refuse(_)
+    )
 }
 
 fn spray_refusal(message: String) -> ToolOutput {
@@ -754,11 +777,32 @@ Password1\n";
 /// the wordlist before netexec runs so a re-spray doesn't keep pinging an
 /// already-locked principal (each ping bumps badPwdCount and prolongs the
 /// AD lockout window).
+///
+/// Budget-gated exactly like [`password_spray`]. This is a spray by another
+/// name — one password per account, the account's own name — so each call
+/// spends one attempt of the same per-domain lockout budget. It used to spend
+/// that budget without ever being refused: the dispatcher debited the tally
+/// for it (it is in `SPRAY_TOOLS`) while nothing here could decline, so N
+/// invocations burned N attempts per account unbounded and tightened
+/// `password_spray`'s budget while staying free itself.
 pub async fn username_as_password(args: &Value) -> Result<ToolOutput> {
     let target = required_str(args, "target")?;
     let users_file = optional_str(args, "users_file");
     let domain = required_str(args, "domain")?;
     let excluded_users = optional_str(args, "excluded_users").unwrap_or("");
+    let lockout_threshold = optional_i64(args, "lockout_threshold");
+    let attempts_used = optional_i64(args, "attempts_used_per_account").unwrap_or(0);
+    let acknowledge_no_policy = optional_bool(args, "acknowledge_no_policy").unwrap_or(false);
+
+    // One attempt per account, so any non-zero allowance is enough to proceed.
+    if let SprayBudget::Refuse(refusal) = check_spray_budget(
+        lockout_threshold,
+        attempts_used,
+        acknowledge_no_policy,
+        "username_as_password",
+    ) {
+        return Ok(*refusal);
+    }
 
     // Use provided file or generate a default wordlist. Caller-supplied
     // wordlists are filtered to drop AD built-in always-disabled accounts so
@@ -1568,7 +1612,7 @@ mod tests {
         used: i64,
         ack: bool,
     ) -> Result<Option<usize>, &'static str> {
-        match super::check_spray_budget(threshold, used, ack) {
+        match super::check_spray_budget(threshold, used, ack, "password_spray") {
             super::SprayBudget::Allow(cap) => Ok(cap),
             super::SprayBudget::Refuse(_) => Err("refused"),
         }
@@ -1815,9 +1859,75 @@ mod tests {
         mock::push(mock::success());
         let args = json!({
             "target": "192.168.58.1", "domain": "contoso.local",
-            "users_file": "/tmp/users.txt"
+            "users_file": "/tmp/users.txt",
+            "lockout_threshold": 5
         });
-        assert!(super::username_as_password(&args).await.is_ok());
+        let out = super::username_as_password(&args).await.unwrap();
+        assert!(
+            out.success,
+            "should run with budget available: {}",
+            out.stdout
+        );
+    }
+
+    #[tokio::test]
+    async fn username_as_password_refuses_without_policy() {
+        // Previously unguarded: it advertised "zero lockout risk" and would
+        // run unconditionally, spending budget it could never be denied.
+        let args = json!({"target": "192.168.58.1", "domain": "contoso.local"});
+        let out = super::username_as_password(&args).await.unwrap();
+        assert!(!out.success);
+        assert!(
+            out.stdout.contains("Refusing username_as_password"),
+            "refusal must name the right tool, got: {}",
+            out.stdout
+        );
+    }
+
+    #[tokio::test]
+    async fn username_as_password_refuses_when_budget_exhausted() {
+        let args = json!({
+            "target": "192.168.58.1", "domain": "contoso.local",
+            "lockout_threshold": 5, "attempts_used_per_account": 4
+        });
+        let out = super::username_as_password(&args).await.unwrap();
+        assert!(
+            !out.success,
+            "threshold 5 with 4 spent leaves 0 after the buffer — must refuse"
+        );
+    }
+
+    #[test]
+    fn spray_budget_allows_tracks_the_same_gate_as_the_tool() {
+        let args = json!({"lockout_threshold": 5});
+        assert!(super::spray_budget_allows(&args, 0));
+        assert!(super::spray_budget_allows(&args, 3));
+        assert!(
+            !super::spray_budget_allows(&args, 4),
+            "orchestrator must not debit a call the tool will refuse"
+        );
+        // No policy and no waiver is a refusal, so it costs nothing.
+        assert!(!super::spray_budget_allows(&json!({}), 0));
+    }
+
+    #[test]
+    fn every_spray_style_tool_is_budget_gated() {
+        // Structural guard. `username_as_password` sat in SPRAY_TOOLS having
+        // its cost debited by the dispatcher while nothing could decline it,
+        // so it spent the shared budget for free and squeezed password_spray.
+        // Any future spray-style tool must be refusable the same way.
+        for tool in ["password_spray", "username_as_password"] {
+            let exhausted = json!({"lockout_threshold": 5, "attempts_used_per_account": 99});
+            let refused = matches!(
+                super::check_spray_budget(Some(5), 99, false, tool),
+                super::SprayBudget::Refuse(_)
+            );
+            assert!(refused, "{tool} must refuse once the budget is spent");
+            assert!(
+                !super::spray_budget_allows(&exhausted, 99),
+                "{tool} must cost nothing once refused"
+            );
+        }
     }
 
     #[test]
