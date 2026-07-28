@@ -1083,7 +1083,7 @@ async fn run_inner() -> Result<()> {
         // destroys the record teardown plans from — making shutdown the last
         // point at which the range can be put back.
         if cleanup::auto_teardown_enabled() {
-            match cleanup::run_teardown(
+            match cleanup::run_teardown_once(
                 &mut conn,
                 &config.operation_id,
                 &cleanup::TeardownOptions {
@@ -1093,7 +1093,7 @@ async fn run_inner() -> Result<()> {
             )
             .await
             {
-                Ok(report) => info!(
+                Ok(Some(report)) => info!(
                     operation_id = %config.operation_id,
                     total = report.total,
                     reverted = report.reverted,
@@ -1102,6 +1102,10 @@ async fn run_inner() -> Result<()> {
                     skipped = report.skipped,
                     failed = report.failed,
                     "Post-operation teardown complete"
+                ),
+                Ok(None) => debug!(
+                    operation_id = %config.operation_id,
+                    "Post-operation teardown already ran during completion"
                 ),
                 Err(e) => warn!(
                     operation_id = %config.operation_id,

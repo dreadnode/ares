@@ -17,7 +17,7 @@ use std::time::Duration;
 use chrono::{DateTime, Utc};
 use redis::AsyncCommands;
 use tokio::sync::watch;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use crate::orchestrator::dispatcher::Dispatcher;
 use crate::orchestrator::state::SharedState;
@@ -697,6 +697,43 @@ pub async fn wait_for_completion(
                             break;
                         }
                     }
+                }
+            }
+
+            // Revert this operation's target mutations now that red has
+            // drained and no further mutations can be journaled. Running here
+            // rather than only at process shutdown matters: shutdown is gated
+            // behind the blue drain (up to 45 minutes), during which the
+            // operation already reports `completed` and the operator has been
+            // told the run is done — while the range is still dirty. Worse, a
+            // fresh `ec2:launch` in that window flushes Redis and takes the
+            // journal with it, leaving nothing to revert from.
+            if crate::orchestrator::cleanup::auto_teardown_enabled() {
+                let mut conn = dispatcher.queue.connection();
+                match crate::orchestrator::cleanup::run_teardown_once(
+                    &mut conn,
+                    &dispatcher.config.operation_id,
+                    &crate::orchestrator::cleanup::TeardownOptions {
+                        dry_run: false,
+                        only: None,
+                    },
+                )
+                .await
+                {
+                    Ok(Some(report)) => info!(
+                        total = report.total,
+                        reverted = report.reverted,
+                        verified = report.verified,
+                        unverified = report.unverified,
+                        skipped = report.skipped,
+                        failed = report.failed,
+                        "Post-operation teardown complete"
+                    ),
+                    Ok(None) => debug!("Post-operation teardown already ran for this operation"),
+                    Err(e) => warn!(
+                        err = %e,
+                        "Post-operation teardown failed — mutations remain on the target"
+                    ),
                 }
             }
 

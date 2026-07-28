@@ -30,6 +30,34 @@ pub use engine::{run_teardown, TeardownOptions};
 /// Env var that disables the post-operation teardown pass.
 pub const AUTO_TEARDOWN_ENV: &str = "ARES_AUTO_TEARDOWN";
 
+/// Redis suffix claiming the single automatic teardown pass for an operation.
+const KEY_TEARDOWN_CLAIM: &str = "teardown_claimed";
+
+/// Run the automatic teardown exactly once per operation.
+///
+/// There are two call sites on purpose: the completion monitor runs it as soon
+/// as red has drained, so the range is restored while the operator is still
+/// watching, and orchestrator shutdown runs it as a fallback for operations
+/// that end without ever reaching a completion decision (deadline, stop
+/// request, crash). Whichever fires first claims the pass; the other sees the
+/// claim and returns `None` rather than dispatching a second set of inverses
+/// against already-reverted state.
+///
+/// The claim is deliberately not cleaned up: `ares ops teardown` remains the
+/// manual escape hatch and calls [`run_teardown`] directly, unaffected.
+pub async fn run_teardown_once<C: redis::AsyncCommands>(
+    conn: &mut C,
+    operation_id: &str,
+    opts: &TeardownOptions,
+) -> anyhow::Result<Option<engine::TeardownReport>> {
+    let key = ares_core::state::build_key(operation_id, KEY_TEARDOWN_CLAIM);
+    let claimed: bool = conn.set_nx(&key, "1").await?;
+    if !claimed {
+        return Ok(None);
+    }
+    run_teardown(conn, operation_id, opts).await.map(Some)
+}
+
 /// Whether orchestrator shutdown should revert the operation's mutations.
 ///
 /// On unless [`AUTO_TEARDOWN_ENV`] is explicitly falsy. Defaulting off would

@@ -8,6 +8,36 @@
 
 use serde_json::{json, Value};
 
+/// Whether a mutating call actually changed target state.
+///
+/// A zero exit code only proves the tool ran. Several mutating tools are
+/// "make it so" operations that succeed loudly while changing nothing: noPac
+/// aborts before creating its machine account, `sp_configure` reports
+/// `changed from 1 to 1` when the option was already set, and rbcd.py logs
+/// `Not modifying the delegation rights` when the SID is already delegated.
+///
+/// Journaling those produces a record of a mutation that never happened, and
+/// teardown then either reverts state we did not create — deleting a
+/// lab-provisioned setting — or reports it as un-revertible residue. Both were
+/// observed live before this gate existed.
+///
+/// Tools with no known no-op signature return `true`: the default must be to
+/// journal, so a mutation is never silently dropped from the revert plan.
+pub fn mutation_took_effect(tool: &str, output: &str) -> bool {
+    match tool {
+        "nopac" => scrape_created_computer(output).is_some(),
+        "mssql_enable_xp_cmdshell" | "mssql_linked_enable_xpcmdshell" => {
+            !output.contains("changed from 1 to 1")
+        }
+        "rbcd_write" => {
+            let lower = output.to_lowercase();
+            !lower.contains("not modifying the delegation rights")
+                && !lower.contains("can already impersonate")
+        }
+        _ => true,
+    }
+}
+
 /// Extract a cleanup hint from a successful mutating call's output, if any.
 pub fn hint_for(tool: &str, args: &Value, output: &str) -> Option<Value> {
     match tool {
@@ -63,6 +93,52 @@ fn scrape_device_id(output: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn xp_cmdshell_already_enabled_is_not_a_mutation() {
+        // sp_configure reports success either way; only the from/to pair says
+        // whether anything changed. GOAD ships xp_cmdshell on, so this is the
+        // common case, and journaling it invites teardown to disable a
+        // provisioned vulnerability.
+        let noop = "Configuration option 'xp_cmdshell' changed from 1 to 1. Run RECONFIGURE.";
+        assert!(!mutation_took_effect("mssql_enable_xp_cmdshell", noop));
+
+        let real = "Configuration option 'xp_cmdshell' changed from 0 to 1. Run RECONFIGURE.";
+        assert!(mutation_took_effect("mssql_enable_xp_cmdshell", real));
+    }
+
+    #[test]
+    fn rbcd_write_that_changed_nothing_is_not_a_mutation() {
+        let noop = "[*] alice$ can already impersonate users on dc01$\n\
+                    [*] Not modifying the delegation rights.";
+        assert!(!mutation_took_effect("rbcd_write", noop));
+
+        let real = "[*] Delegation rights modified successfully!";
+        assert!(mutation_took_effect("rbcd_write", real));
+    }
+
+    #[test]
+    fn nopac_without_a_created_account_is_not_a_mutation() {
+        // Observed live: noPac reports success having created nothing, which
+        // journaled a phantom entry teardown then flagged as NEEDS-CAPTURE
+        // residue that did not exist.
+        assert!(!mutation_took_effect(
+            "nopac",
+            "[-] Cannot exploit, quota reached"
+        ));
+        assert!(mutation_took_effect(
+            "nopac",
+            "[*] Adding Computer Account \"WIN-ABCDEF12$\""
+        ));
+    }
+
+    #[test]
+    fn tools_without_a_known_noop_signature_are_always_journaled() {
+        // The default must be to journal: dropping a real mutation from the
+        // revert plan is worse than journaling one that changed nothing.
+        assert!(mutation_took_effect("add_computer", "anything at all"));
+        assert!(mutation_took_effect("dacl_edit", ""));
+    }
 
     #[test]
     fn captures_pywhisker_device_id_on_add() {

@@ -11,6 +11,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use ares_llm::{ToolCall, ToolDispatcher, ToolExecResult};
+use tracing::debug;
 
 use super::journal::{self, MutationRecord};
 
@@ -52,10 +53,22 @@ impl ToolDispatcher for JournalingToolDispatcher {
         // state to reverse.
         if let Ok(ref exec) = result {
             if exec.error.is_none() && journal::is_mutating(&call.name) {
-                let mut record =
-                    MutationRecord::from_call(role, task_id, &call.name, &call.arguments);
-                record.hint = super::capture::hint_for(&call.name, &call.arguments, &exec.output);
-                journal::append(&self.conn, &self.operation_id, &record).await;
+                // A zero exit is not proof of a mutation: "make it so" tools
+                // report success when the state was already set. Journaling a
+                // call that changed nothing hands teardown an inverse for
+                // state it did not create.
+                if super::capture::mutation_took_effect(&call.name, &exec.output) {
+                    let mut record =
+                        MutationRecord::from_call(role, task_id, &call.name, &call.arguments);
+                    record.hint =
+                        super::capture::hint_for(&call.name, &call.arguments, &exec.output);
+                    journal::append(&self.conn, &self.operation_id, &record).await;
+                } else {
+                    debug!(
+                        tool = %call.name,
+                        "mutating tool reported success but changed nothing — not journaled"
+                    );
+                }
             }
         }
 
