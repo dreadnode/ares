@@ -100,15 +100,20 @@ async fn resolve_grafana_proxy() -> Option<LokiConfig> {
 /// Shared HTTP client — reuses connection pool across all Loki calls.
 static HTTP_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
 
+/// Per-attempt request timeout, from `LOKI_TIMEOUT_SECS`.
+pub(crate) fn request_timeout_secs() -> u64 {
+    std::env::var("LOKI_TIMEOUT_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|&v| v > 0)
+        .unwrap_or(90)
+}
+
 pub(crate) fn http_client() -> &'static reqwest::Client {
     HTTP_CLIENT.get_or_init(|| {
-        let timeout_secs = std::env::var("LOKI_TIMEOUT_SECS")
-            .ok()
-            .and_then(|v| v.parse::<u64>().ok())
-            .unwrap_or(90);
         reqwest::Client::builder()
             .connect_timeout(std::time::Duration::from_secs(10))
-            .timeout(std::time::Duration::from_secs(timeout_secs))
+            .timeout(std::time::Duration::from_secs(request_timeout_secs()))
             .build()
             .unwrap_or_default()
     })
@@ -148,6 +153,92 @@ pub(crate) const MAX_RETRIES: u32 = 3;
 
 /// Base backoff delay between retries.
 pub(crate) const RETRY_BASE_DELAY: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// Total wall-clock a single Loki query may consume across all of its attempts,
+/// from `LOKI_QUERY_BUDGET_SECS` (defaults to one attempt's timeout).
+///
+/// `MAX_RETRIES` alone bounds the attempt *count*, not the time. A query that
+/// exhausts the full request timeout on every attempt therefore occupied
+/// `MAX_RETRIES * LOKI_TIMEOUT_SECS` — 270s at the defaults. The detection
+/// sweep runs the catalog with a fixed concurrency under an overall cap, so
+/// three such queries wedged half its slots for 75% of the budget and starved
+/// the rest of the catalog, which then reported as `not_run`.
+///
+/// Retrying a request that already burned a full timeout is also the least
+/// likely retry to succeed, so the default budget deliberately equals one
+/// attempt: fast failures (connect refused, 503) still get their retries,
+/// a hung query does not get two more.
+pub(crate) fn query_budget() -> std::time::Duration {
+    let secs = std::env::var("LOKI_QUERY_BUDGET_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|&v| v > 0)
+        .unwrap_or_else(request_timeout_secs);
+    std::time::Duration::from_secs(secs)
+}
+
+/// Wall-clock guard shared by the query retry loops.
+pub(crate) struct RetryBudget {
+    deadline: tokio::time::Instant,
+}
+
+impl RetryBudget {
+    pub(crate) fn new() -> Self {
+        Self::with_budget(query_budget())
+    }
+
+    fn with_budget(budget: std::time::Duration) -> Self {
+        Self {
+            deadline: tokio::time::Instant::now() + budget,
+        }
+    }
+
+    fn remaining(&self) -> Option<std::time::Duration> {
+        let now = tokio::time::Instant::now();
+        (now < self.deadline).then(|| self.deadline - now)
+    }
+
+    /// Wait out this attempt's backoff, then hand back the time it may use.
+    ///
+    /// The result is clamped to the per-attempt request timeout so raising
+    /// `LOKI_QUERY_BUDGET_SECS` buys more retries rather than one longer hang.
+    ///
+    /// `delay_override` carries a server-supplied `Retry-After`. `None` means
+    /// the budget is spent and the caller must stop retrying — either because
+    /// it is already gone or because the backoff alone would outlast it.
+    pub(crate) async fn begin_attempt(
+        &self,
+        attempt: u32,
+        delay_override: Option<std::time::Duration>,
+    ) -> Option<std::time::Duration> {
+        if attempt > 0 {
+            let backoff = delay_override.unwrap_or(RETRY_BASE_DELAY * 2u32.pow(attempt - 1));
+            let remaining = self.remaining()?;
+            if backoff >= remaining {
+                return None;
+            }
+            warn!(
+                attempt,
+                delay_ms = backoff.as_millis() as u64,
+                "Retrying Loki query after transient failure"
+            );
+            tokio::time::sleep(backoff).await;
+        }
+        self.remaining()
+            .map(|r| r.min(std::time::Duration::from_secs(request_timeout_secs())))
+    }
+}
+
+/// Error text for a query that ran out of wall-clock rather than attempts.
+pub(crate) fn budget_exhausted_err(last_err: Option<String>) -> String {
+    match last_err {
+        Some(e) => format!(
+            "exceeded the {}s query budget: {e}",
+            query_budget().as_secs()
+        ),
+        None => format!("exceeded the {}s query budget", query_budget().as_secs()),
+    }
+}
 
 /// Check whether an HTTP status code is transient and worth retrying.
 pub(crate) fn is_retryable_status(status: reqwest::StatusCode) -> bool {
@@ -280,21 +371,18 @@ pub async fn query_logs(args: &Value) -> Result<ToolOutput> {
 
     let mut last_err: Option<String> = None;
     let mut retry_after: Option<std::time::Duration> = None;
+    let mut attempts_made = 0u32;
+    let budget = RetryBudget::new();
 
     for attempt in 0..MAX_RETRIES {
-        if attempt > 0 {
-            let delay = retry_after
-                .take()
-                .unwrap_or(RETRY_BASE_DELAY * 2u32.pow(attempt - 1));
-            warn!(
-                attempt,
-                delay_ms = delay.as_millis() as u64,
-                "Retrying Loki query after transient failure"
-            );
-            tokio::time::sleep(delay).await;
-        }
+        let Some(remaining) = budget.begin_attempt(attempt, retry_after.take()).await else {
+            last_err = Some(budget_exhausted_err(last_err));
+            break;
+        };
+        attempts_made = attempt + 1;
 
         let resp = match build_get(client, &url, &config)
+            .timeout(remaining)
             .query(&[
                 ("query", logql),
                 ("start", start_time),
@@ -395,7 +483,7 @@ pub async fn query_logs(args: &Value) -> Result<ToolOutput> {
     // All retries exhausted
     let err_msg = last_err.unwrap_or_else(|| "Unknown error".to_string());
     Ok(make_error(&format!(
-        "Loki query failed after {MAX_RETRIES} attempts: {err_msg}"
+        "Loki query failed after {attempts_made} attempt(s): {err_msg}"
     )))
 }
 
@@ -443,12 +531,21 @@ pub async fn query_metric_series(logql: &str, at: Option<&str>) -> Result<Vec<Me
     }
 
     let mut last_err: Option<String> = None;
+    let mut attempts_made = 0u32;
+    let budget = RetryBudget::new();
     for attempt in 0..MAX_RETRIES {
-        if attempt > 0 {
-            tokio::time::sleep(RETRY_BASE_DELAY * 2u32.pow(attempt - 1)).await;
-        }
+        let Some(remaining) = budget.begin_attempt(attempt, None).await else {
+            last_err = Some(budget_exhausted_err(last_err));
+            break;
+        };
+        attempts_made = attempt + 1;
 
-        let resp = match build_get(client, &url, &config).query(&params).send().await {
+        let resp = match build_get(client, &url, &config)
+            .timeout(remaining)
+            .query(&params)
+            .send()
+            .await
+        {
             Ok(r) => r,
             // Only genuine transport failures are worth retrying; a builder or
             // decode error re-fails identically.
@@ -483,7 +580,7 @@ pub async fn query_metric_series(logql: &str, at: Option<&str>) -> Result<Vec<Me
     }
 
     Err(anyhow::anyhow!(
-        "Loki metric query failed after {MAX_RETRIES} attempts: {}",
+        "Loki metric query failed after {attempts_made} attempt(s): {}",
         last_err.unwrap_or_else(|| "unknown error".to_string())
     ))
 }
@@ -571,12 +668,21 @@ pub async fn query_log_entries(
     ];
 
     let mut last_err: Option<String> = None;
+    let mut attempts_made = 0u32;
+    let budget = RetryBudget::new();
     for attempt in 0..MAX_RETRIES {
-        if attempt > 0 {
-            tokio::time::sleep(RETRY_BASE_DELAY * 2u32.pow(attempt - 1)).await;
-        }
+        let Some(remaining) = budget.begin_attempt(attempt, None).await else {
+            last_err = Some(budget_exhausted_err(last_err));
+            break;
+        };
+        attempts_made = attempt + 1;
 
-        let resp = match build_get(client, &url, &config).query(&params).send().await {
+        let resp = match build_get(client, &url, &config)
+            .timeout(remaining)
+            .query(&params)
+            .send()
+            .await
+        {
             Ok(r) => r,
             Err(e) if e.is_connect() || e.is_timeout() => {
                 let chain = err_chain(&e);
@@ -609,7 +715,7 @@ pub async fn query_log_entries(
     }
 
     Err(anyhow::anyhow!(
-        "Loki log-entry query failed after {MAX_RETRIES} attempts: {}",
+        "Loki log-entry query failed after {attempts_made} attempt(s): {}",
         last_err.unwrap_or_else(|| "unknown error".to_string())
     ))
 }
@@ -1000,6 +1106,83 @@ fn format_loki_response(body: &str) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::time::Duration;
+
+    #[tokio::test]
+    async fn first_attempt_gets_the_whole_budget() {
+        let budget = RetryBudget::with_budget(Duration::from_secs(60));
+        let remaining = budget
+            .begin_attempt(0, None)
+            .await
+            .expect("budget available");
+        assert!(remaining <= Duration::from_secs(60));
+        assert!(remaining > Duration::from_secs(55));
+    }
+
+    #[tokio::test]
+    async fn spent_budget_refuses_the_first_attempt() {
+        let budget = RetryBudget::with_budget(Duration::ZERO);
+        assert_eq!(budget.begin_attempt(0, None).await, None);
+    }
+
+    #[tokio::test]
+    async fn backoff_longer_than_remaining_stops_retrying() {
+        // The regression: a query that burned its whole timeout must not sleep
+        // out a backoff and then start another full-length attempt.
+        let budget = RetryBudget::with_budget(Duration::from_millis(200));
+        let started = std::time::Instant::now();
+        assert_eq!(budget.begin_attempt(1, None).await, None);
+        assert!(
+            started.elapsed() < RETRY_BASE_DELAY,
+            "must refuse without sleeping the backoff"
+        );
+    }
+
+    #[tokio::test]
+    async fn retry_after_override_is_honoured_when_it_fits() {
+        let budget = RetryBudget::with_budget(Duration::from_secs(30));
+        let started = std::time::Instant::now();
+        let remaining = budget
+            .begin_attempt(1, Some(Duration::from_millis(40)))
+            .await
+            .expect("budget available");
+        assert!(started.elapsed() >= Duration::from_millis(40));
+        assert!(remaining < Duration::from_secs(30));
+    }
+
+    #[tokio::test]
+    async fn retry_after_longer_than_budget_stops_retrying() {
+        let budget = RetryBudget::with_budget(Duration::from_millis(50));
+        assert_eq!(
+            budget
+                .begin_attempt(1, Some(Duration::from_secs(120)))
+                .await,
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn attempt_never_outlasts_the_per_attempt_timeout() {
+        // A generous budget must buy more retries, not one longer hang.
+        let budget = RetryBudget::with_budget(Duration::from_secs(3600));
+        let remaining = budget
+            .begin_attempt(0, None)
+            .await
+            .expect("budget available");
+        assert!(remaining <= Duration::from_secs(request_timeout_secs()));
+    }
+
+    #[test]
+    fn budget_exhausted_err_keeps_the_underlying_cause() {
+        let msg = budget_exhausted_err(Some("operation timed out".to_string()));
+        assert!(msg.contains("operation timed out"), "{msg}");
+        assert!(msg.contains("query budget"), "{msg}");
+    }
+
+    #[test]
+    fn budget_exhausted_err_without_cause_still_names_the_budget() {
+        assert!(budget_exhausted_err(None).contains("query budget"));
+    }
 
     fn vector_body(series: Value) -> String {
         serde_json::to_string(&json!({
