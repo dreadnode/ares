@@ -73,12 +73,67 @@ pub async fn bloodyad_set_password(args: &Value) -> Result<ToolOutput> {
     build_bloodyad_set_password(args)?.execute().await
 }
 
+/// Principals whose password must never be overwritten by an automated reset.
+///
+/// Hijacking one of these does not advance an operation — we already model
+/// takeover through hashes and tickets — but it destroys the account for
+/// everyone else and cannot be undone without the provisioned value, which
+/// state never holds. `Administrator` and `krbtgt` in particular are the
+/// accounts a range is rebuilt around.
+const PROTECTED_RESET_PRINCIPALS: &[&str] = &[
+    "administrator",
+    "krbtgt",
+    "guest",
+    "defaultaccount",
+    "wdagutilityaccount",
+];
+
+/// Strip any `DOMAIN\`, `user@domain` or `CN=` decoration from a principal so
+/// the protected-account check cannot be evaded by spelling.
+fn bare_principal(target_user: &str) -> String {
+    let mut name = target_user.trim();
+    if let Some((_, rest)) = name.rsplit_once('\\') {
+        name = rest;
+    }
+    if let Some((head, _)) = name.split_once('@') {
+        name = head;
+    }
+    if let Some(rest) = name
+        .strip_prefix("CN=")
+        .or_else(|| name.strip_prefix("cn="))
+    {
+        name = rest.split(',').next().unwrap_or(rest);
+    }
+    name.trim().to_ascii_lowercase()
+}
+
+/// True when `target_user` is an account an automated password reset must
+/// refuse: a built-in principal, or any machine account (trailing `$`).
+pub fn is_protected_reset_principal(target_user: &str) -> bool {
+    let name = bare_principal(target_user);
+    if name.is_empty() {
+        return false;
+    }
+    if name.ends_with('$') {
+        return true;
+    }
+    PROTECTED_RESET_PRINCIPALS.contains(&name.as_str())
+}
+
 #[doc(hidden)]
 pub fn build_bloodyad_set_password(args: &Value) -> Result<CommandBuilder> {
     let domain = required_str(args, "domain")?;
     let dc_ip = required_str(args, "dc_ip")?;
     let target_user = required_str(args, "target_user")?;
     let new_password = required_str(args, "new_password")?;
+
+    if is_protected_reset_principal(target_user) {
+        anyhow::bail!(
+            "refusing to reset the password of protected principal '{target_user}': \
+             built-in and machine accounts must never be overwritten. Use the hash \
+             or ticket already in operation state to authenticate as this principal."
+        );
+    }
 
     Ok(credentials::bloodyad_base(args, domain, dc_ip)?
         .arg("set")
@@ -676,6 +731,81 @@ mod tests {
         });
         assert_eq!(required_str(&args, "target_user").unwrap(), "victim");
         assert_eq!(required_str(&args, "new_password").unwrap(), "NewP@ss123!");
+    }
+
+    fn set_password_args(target_user: &str) -> serde_json::Value {
+        json!({
+            "domain": "contoso.local",
+            "username": "admin",
+            "password": "P@ssw0rd!",
+            "dc_ip": "192.168.58.10",
+            "target_user": target_user,
+            "new_password": "NewP@ss123!"
+        })
+    }
+
+    #[test]
+    fn set_password_refuses_builtin_administrator() {
+        for spelling in [
+            "Administrator",
+            "administrator",
+            "ADMINISTRATOR",
+            "CONTOSO\\Administrator",
+            "Administrator@contoso.local",
+            "CN=Administrator,CN=Users,DC=contoso,DC=local",
+        ] {
+            let Err(err) = super::build_bloodyad_set_password(&set_password_args(spelling)) else {
+                panic!("must refuse built-in Administrator: {spelling}");
+            };
+            assert!(
+                err.to_string().contains("protected principal"),
+                "unexpected error for {spelling}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn set_password_refuses_krbtgt_and_other_builtins() {
+        for name in ["krbtgt", "Guest", "DefaultAccount", "WDAGUtilityAccount"] {
+            assert!(
+                super::build_bloodyad_set_password(&set_password_args(name)).is_err(),
+                "must refuse built-in {name}"
+            );
+        }
+    }
+
+    #[test]
+    fn set_password_refuses_machine_accounts() {
+        for name in ["DC01$", "WS01$", "CONTOSO\\SQL01$"] {
+            assert!(
+                super::build_bloodyad_set_password(&set_password_args(name)).is_err(),
+                "must refuse machine account {name}"
+            );
+        }
+    }
+
+    #[test]
+    fn set_password_still_allows_a_normal_user() {
+        assert!(super::build_bloodyad_set_password(&set_password_args("alice")).is_ok());
+        assert!(
+            super::build_bloodyad_set_password(&set_password_args("CONTOSO\\bob")).is_ok(),
+            "domain-qualified ordinary users must still be resettable"
+        );
+    }
+
+    #[test]
+    fn protected_principal_does_not_over_match_ordinary_names() {
+        for name in [
+            "administrators",
+            "admin",
+            "alice.administrator",
+            "guestuser",
+        ] {
+            assert!(
+                !super::is_protected_reset_principal(name),
+                "{name} must not be treated as protected"
+            );
+        }
     }
 
     // ── bloodyad_add_genericall arg validation ─────────────────────────
