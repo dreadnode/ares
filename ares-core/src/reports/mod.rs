@@ -270,7 +270,10 @@ mod tests {
             host_count: 1,
             user_count: 1,
             highest_pyramid_level: 4,
+            highest_analyst_pyramid_level: 4,
+            analyst_evidence_count: 5,
             ttp_count: 0,
+            analyst_ttp_count: 0,
             escalation_count: 1,
             attack_synopses: vec!["Possible lateral movement detected".to_string()],
             alert_summaries: Vec::new(),
@@ -283,6 +286,7 @@ mod tests {
             recommendations: vec!["Review lateral movement paths".to_string()],
             investigation_details: Vec::new(),
             pyramid_distribution: HashMap::new(),
+            analyst_pyramid_distribution: HashMap::new(),
             coverage: None,
         };
 

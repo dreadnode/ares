@@ -2,6 +2,7 @@
 
 mod coverage;
 mod generator;
+mod provenance;
 mod types;
 
 pub use coverage::{CoverageEntry, RedTeamCoverage};

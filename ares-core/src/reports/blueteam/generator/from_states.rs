@@ -7,6 +7,7 @@ use chrono::Utc;
 use crate::models::{SharedBlueTeamState, SharedRedTeamState};
 
 use super::super::coverage::RedTeamCoverage;
+use super::super::provenance::EvidenceProvenance;
 use super::super::types::BlueTeamReportInput;
 use super::BlueTeamReportGenerator;
 
@@ -114,18 +115,7 @@ impl BlueTeamReportGenerator {
             }
         }
 
-        // Pyramid distribution
-        let mut pyramid_distribution: HashMap<i32, i32> = HashMap::new();
-        for ev in &all_evidence {
-            *pyramid_distribution.entry(ev.pyramid_level).or_insert(0) += 1;
-        }
-
-        let highest_pyramid_level = all_evidence
-            .iter()
-            .map(|e| e.pyramid_level)
-            .max()
-            .unwrap_or(0);
-        let ttp_count = all_evidence.iter().filter(|e| e.pyramid_level == 6).count();
+        let provenance = EvidenceProvenance::from_evidence(all_evidence.iter().copied());
 
         // Build evidence_by_level
         let mut evidence_by_level: HashMap<i32, Vec<serde_json::Value>> = HashMap::new();
@@ -164,19 +154,15 @@ impl BlueTeamReportGenerator {
                     &serde_json::Value::Null
                 };
                 let labels = alert.get("labels").unwrap_or(&serde_json::Value::Null);
-                let highest = inv
-                    .evidence
-                    .iter()
-                    .map(|e| e.pyramid_level)
-                    .max()
-                    .unwrap_or(0);
+                let split = EvidenceProvenance::from_evidence(&inv.evidence);
                 serde_json::json!({
                     "investigation_id": inv.investigation_id,
                     "alert_name": labels.get("alertname").and_then(|v| v.as_str()).unwrap_or("Unknown"),
                     "severity": labels.get("severity").and_then(|v| v.as_str()).unwrap_or("unknown"),
                     "escalated": inv.escalated,
                     "evidence_count": inv.evidence.len(),
-                    "highest_pyramid_level": highest,
+                    "highest_pyramid_level": split.highest_level,
+                    "highest_analyst_pyramid_level": split.highest_analyst_level,
                     "techniques": inv.identified_techniques,
                 })
             })
@@ -279,8 +265,11 @@ impl BlueTeamReportGenerator {
             tactic_count: sorted_tactics.len(),
             host_count: sorted_hosts.len(),
             user_count: sorted_users.len(),
-            highest_pyramid_level,
-            ttp_count,
+            highest_pyramid_level: provenance.highest_level,
+            highest_analyst_pyramid_level: provenance.highest_analyst_level,
+            analyst_evidence_count: provenance.analyst_count,
+            ttp_count: provenance.ttp_count,
+            analyst_ttp_count: provenance.analyst_ttp_count,
             escalation_count,
             attack_synopses,
             alert_summaries,
@@ -292,7 +281,8 @@ impl BlueTeamReportGenerator {
             users: sorted_users,
             recommendations: all_recommendations,
             investigation_details,
-            pyramid_distribution,
+            pyramid_distribution: provenance.distribution,
+            analyst_pyramid_distribution: provenance.analyst_distribution,
             coverage,
         };
 

@@ -12,6 +12,7 @@ pub struct BlueTeamAlertSummary {
     pub severity: String,
     pub evidence_count: usize,
     pub highest_pyramid_level: i32,
+    pub highest_analyst_pyramid_level: i32,
     pub status_display: String,
     pub techniques: Vec<String>,
 }
@@ -23,11 +24,17 @@ pub struct BlueTeamTechnique {
     pub tactic: String,
 }
 
+/// One row of the Pyramid of Pain table, split by what produced the evidence.
+///
+/// The deterministic detection sweep records every fired detection at level 6,
+/// so `count` alone cannot distinguish a catalog run from an investigation.
 #[derive(Serialize)]
 pub struct PyramidEntry {
     pub level: i32,
     pub category: String,
     pub count: i32,
+    pub analyst_count: i32,
+    pub sweep_count: i32,
     pub pain: String,
 }
 
@@ -80,7 +87,12 @@ pub struct BlueTeamReportInput {
     pub host_count: usize,
     pub user_count: usize,
     pub highest_pyramid_level: i32,
+    /// Highest level reached by evidence the analyst loop produced, ignoring
+    /// the deterministic sweep's level-6 baseline.
+    pub highest_analyst_pyramid_level: i32,
+    pub analyst_evidence_count: usize,
     pub ttp_count: usize,
+    pub analyst_ttp_count: usize,
     pub escalation_count: usize,
     pub attack_synopses: Vec<String>,
     pub alert_summaries: Vec<serde_json::Value>,
@@ -93,6 +105,7 @@ pub struct BlueTeamReportInput {
     pub recommendations: Vec<String>,
     pub investigation_details: Vec<serde_json::Value>,
     pub pyramid_distribution: HashMap<i32, i32>,
+    pub analyst_pyramid_distribution: HashMap<i32, i32>,
     /// Blue coverage measured against red team ground truth. `None` when the
     /// red operation state could not be loaded — the report then says so
     /// rather than implying full coverage.

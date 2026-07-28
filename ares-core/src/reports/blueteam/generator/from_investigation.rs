@@ -8,6 +8,7 @@ use tera::Context;
 use crate::models::SharedBlueTeamState;
 use crate::reports::context::TimelineEventCtx;
 
+use super::super::provenance::EvidenceProvenance;
 use super::super::types::{
     BlueTeamEvidenceItem, BlueTeamEvidenceLevel, BlueTeamTechnique, PyramidEntry,
 };
@@ -87,23 +88,21 @@ impl BlueTeamReportGenerator {
         sorted_techniques.sort();
         let technique_count = sorted_techniques.len();
         let evidence_count = state.evidence.len();
-        let ttp_count = state
-            .evidence
-            .iter()
-            .filter(|e| e.pyramid_level == 6)
-            .count();
-        let highest_pyramid_level = state
-            .evidence
-            .iter()
-            .map(|e| e.pyramid_level)
-            .max()
-            .unwrap_or(0);
+        let provenance = EvidenceProvenance::from_evidence(&state.evidence);
+        let ttp_count = provenance.ttp_count;
+        let highest_pyramid_level = provenance.highest_level;
 
         // Assessment
         let assessment = if state.escalated {
             "**ESCALATED** - Human analyst review required".to_string()
-        } else if ttp_count > 0 {
+        } else if provenance.analyst_ttp_count > 0 {
             "Investigation reached TTP level - actionable intelligence produced".to_string()
+        } else if ttp_count > 0 {
+            format!(
+                "All {ttp_count} TTP-level items came from the deterministic detection sweep - \
+                 the analyst loop did not elevate past level {}",
+                provenance.highest_analyst_level
+            )
         } else if technique_count > 0 {
             "Techniques identified but TTP elevation recommended".to_string()
         } else {
@@ -138,50 +137,53 @@ impl BlueTeamReportGenerator {
                 .collect();
             key_findings.push(format!("**Users Investigated:** {}", users.join(", ")));
         }
-        let high_level = state
-            .evidence
-            .iter()
-            .filter(|e| e.pyramid_level >= 5)
-            .count();
+        let high_level = provenance.at_or_above(5);
         if high_level > 0 {
             key_findings.push(format!(
-                "**High-Value Indicators:** {high_level} tools/TTPs identified"
+                "**High-Value Indicators:** {high_level} tools/TTPs identified ({} from analyst investigation)",
+                provenance.analyst_at_or_above(5)
             ));
-        }
-
-        // Pyramid distribution
-        let mut pyramid_distribution: HashMap<i32, i32> = HashMap::new();
-        for ev in &state.evidence {
-            *pyramid_distribution.entry(ev.pyramid_level).or_insert(0) += 1;
         }
 
         let pyramid_entries: Vec<PyramidEntry> = (1..=6)
             .rev()
-            .map(|level| PyramidEntry {
-                level,
-                category: level_names.get(&level).unwrap_or(&"Unknown").to_string(),
-                count: *pyramid_distribution.get(&level).unwrap_or(&0),
-                pain: level_pain.get(&level).unwrap_or(&"Unknown").to_string(),
+            .map(|level| {
+                let count = *provenance.distribution.get(&level).unwrap_or(&0);
+                let analyst_count = *provenance.analyst_distribution.get(&level).unwrap_or(&0);
+                PyramidEntry {
+                    level,
+                    category: level_names.get(&level).unwrap_or(&"Unknown").to_string(),
+                    count,
+                    analyst_count,
+                    sweep_count: count.saturating_sub(analyst_count),
+                    pain: level_pain.get(&level).unwrap_or(&"Unknown").to_string(),
+                }
             })
             .collect();
 
-        // Elevation score
-        let total = evidence_count.max(1) as f64;
-        let weighted_sum: f64 = state.evidence.iter().map(|e| e.pyramid_level as f64).sum();
-        let elevation_score = format!("{:.1}%", (weighted_sum / (total * 6.0)) * 100.0);
+        let elevation_score = format!("{:.1}%", provenance.elevation_score() * 100.0);
+        let analyst_elevation_score =
+            format!("{:.1}%", provenance.analyst_elevation_score() * 100.0);
 
         // Pyramid assessment text
-        let pyramid_assessment = if *pyramid_distribution.get(&6).unwrap_or(&0) > 0 {
-            "**Investigation successfully elevated to TTP level.** Actionable intelligence produced."
-        } else if *pyramid_distribution.get(&5).unwrap_or(&0) > 0 {
-            "**Tool-level indicators identified.** Consider further elevation to TTPs."
-        } else if (*pyramid_distribution.get(&1).unwrap_or(&0)
-            + *pyramid_distribution.get(&2).unwrap_or(&0))
-            > *pyramid_distribution.get(&5).unwrap_or(&0)
-        {
-            "**Heavy on trivial indicators.** Investigation may benefit from deeper analysis to identify tools and TTPs."
+        let pyramid_assessment = if provenance.total_count == 0 {
+            "**No evidence collected.**".to_string()
+        } else if provenance.analyst_count == 0 {
+            "**Every evidence item came from the deterministic detection sweep.** The level above reflects detection-catalog coverage, not analyst investigation.".to_string()
         } else {
-            "**Limited evidence.** More investigation may be needed."
+            let analyst = match provenance.highest_analyst_level {
+                6 => "**Investigation successfully elevated to TTP level.** Actionable intelligence produced.",
+                5 => "**Analyst evidence reached tool level.** Consider further elevation to TTPs.",
+                3 | 4 => "**Analyst evidence reached artifact level.** Consider elevation to tools and TTPs.",
+                _ => "**Analyst evidence is limited to trivial indicators.** Deeper analysis recommended.",
+            };
+            if provenance.sweep_ttp_count() > 0 && provenance.analyst_ttp_count == 0 {
+                format!(
+                    "{analyst} The TTP rows above are baseline-sweep detections, not analyst findings."
+                )
+            } else {
+                analyst.to_string()
+            }
         };
 
         // Evidence levels
@@ -282,7 +284,7 @@ impl BlueTeamReportGenerator {
             })
             .collect();
 
-        let detection_techniques: Vec<&BlueTeamTechnique> = techniques.iter().take(5).collect();
+        let detection_techniques: Vec<String> = Vec::new();
 
         // Queries
         let queries_display: Vec<&serde_json::Value> = queries.iter().take(20).collect();
@@ -304,7 +306,15 @@ impl BlueTeamReportGenerator {
         ctx.insert("technique_count", &technique_count);
         ctx.insert("tactic_count", &state.identified_tactics.len());
         ctx.insert("ttp_count", &ttp_count);
+        ctx.insert("analyst_ttp_count", &provenance.analyst_ttp_count);
+        ctx.insert("sweep_ttp_count", &provenance.sweep_ttp_count());
+        ctx.insert("analyst_evidence_count", &provenance.analyst_count);
+        ctx.insert("sweep_evidence_count", &provenance.sweep_count());
         ctx.insert("highest_pyramid_level", &highest_pyramid_level);
+        ctx.insert(
+            "highest_analyst_pyramid_level",
+            &provenance.highest_analyst_level,
+        );
         ctx.insert("key_findings", &key_findings);
         ctx.insert("attack_synopsis", &state.attack_synopsis);
         ctx.insert("timeline", &timeline);
@@ -313,7 +323,8 @@ impl BlueTeamReportGenerator {
         ctx.insert("detection_techniques", &detection_techniques);
         ctx.insert("pyramid_entries", &pyramid_entries);
         ctx.insert("elevation_score", &elevation_score);
-        ctx.insert("pyramid_assessment", pyramid_assessment);
+        ctx.insert("analyst_elevation_score", &analyst_elevation_score);
+        ctx.insert("pyramid_assessment", &pyramid_assessment);
         ctx.insert("evidence_levels", &evidence_levels);
         ctx.insert("hosts", &state.queried_hosts);
         ctx.insert("host_count", &state.queried_hosts.len());
@@ -337,5 +348,89 @@ impl BlueTeamReportGenerator {
         );
 
         self.tera.render("investigation_report", &ctx)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::models::{Evidence, SharedBlueTeamState};
+
+    use super::BlueTeamReportGenerator;
+
+    fn evidence(level: i32, source: &str) -> Evidence {
+        serde_json::from_value(serde_json::json!({
+            "id": format!("ev-{level}-{source}"),
+            "type": "credential_access",
+            "value": "T1003",
+            "source": source,
+            "pyramid_level": level,
+            "mitre_techniques": ["T1003"],
+        }))
+        .expect("evidence deserializes")
+    }
+
+    fn render(evidence: Vec<Evidence>) -> String {
+        let mut state = SharedBlueTeamState::new("inv-20260728-000000".to_string());
+        state.evidence = evidence;
+
+        BlueTeamReportGenerator::new()
+            .expect("templates load")
+            .generate_investigation(&state, &[])
+            .expect("report renders")
+    }
+
+    #[test]
+    fn sweep_only_investigation_is_not_reported_as_reaching_ttps() {
+        let report = render(vec![
+            evidence(6, "detection_sweep:detect_dcsync"),
+            evidence(6, "detection_sweep:detect_kerberoast"),
+        ]);
+
+        assert!(
+            report.contains("All 2 TTP-level items came from the deterministic detection sweep"),
+            "executive summary credited the analyst: {report}"
+        );
+        assert!(
+            report.contains("Every evidence item came from the deterministic detection sweep"),
+            "pyramid assessment credited the analyst: {report}"
+        );
+        assert!(
+            report.contains("**Highest Pyramid Level:** 0/6 analyst, 6/6 including baseline sweep"),
+            "summary reported a single conflated level: {report}"
+        );
+        assert!(
+            !report.contains("Investigation reached TTP level"),
+            "claimed TTP level with no analyst evidence: {report}"
+        );
+    }
+
+    #[test]
+    fn analyst_ttp_evidence_still_reaches_ttps() {
+        let report = render(vec![
+            evidence(6, "detection_sweep:detect_dcsync"),
+            evidence(6, "grafana_loki_query"),
+        ]);
+
+        assert!(
+            report.contains("Investigation reached TTP level"),
+            "analyst TTP evidence went uncredited: {report}"
+        );
+        assert!(
+            report.contains("**Highest Pyramid Level:** 6/6 analyst, 6/6 including baseline sweep"),
+            "analyst level was not reported: {report}"
+        );
+    }
+
+    #[test]
+    fn elevation_score_separates_analyst_evidence_from_the_sweep() {
+        let report = render(vec![
+            evidence(6, "detection_sweep:detect_dcsync"),
+            evidence(3, "grafana_loki_query"),
+        ]);
+
+        assert!(
+            report.contains("**Elevation Score:** 50.0% analyst, 75.0% including baseline sweep"),
+            "elevation score conflated the two sources: {report}"
+        );
     }
 }

@@ -19,13 +19,14 @@
 |--------|-------|
 | Investigations | {{ investigation_count }} |
 | Alerts Processed | {{ alert_count }} |
-| Evidence Collected | {{ evidence_count }} |
+| Evidence Collected | {{ evidence_count }} ({{ analyst_evidence_count }} analyst, {{ sweep_evidence_count }} baseline sweep) |
 | MITRE Techniques | {{ technique_count }} |
 | MITRE Tactics | {{ tactic_count }} |
 | Hosts Investigated | {{ host_count }} |
 | Users Investigated | {{ user_count }} |
-| Highest Pyramid Level | {{ highest_pyramid_level }}/6 |
-| TTPs Identified | {{ ttp_count }} |
+| Highest Pyramid Level (analyst) | {{ highest_analyst_pyramid_level }}/6 |
+| Highest Pyramid Level (incl. baseline sweep) | {{ highest_pyramid_level }}/6 |
+| TTPs Identified | {{ ttp_count }} ({{ analyst_ttp_count }} analyst, {{ sweep_ttp_count }} baseline sweep) |
 | Escalations | {{ escalation_count }} |
 
 {% if attack_synopses | length > 0 %}
@@ -42,10 +43,10 @@
 ## Investigation Summary
 
 {% if alert_summaries | length > 0 %}
-| Investigation | Alert | Severity | Evidence | Pyramid | Status |
-|--------------|-------|----------|----------|---------|--------|
+| Investigation | Alert | Severity | Evidence | Pyramid (analyst/all) | Status |
+|--------------|-------|----------|----------|-----------------------|--------|
 {% for alert in alert_summaries %}
-| {{ alert.investigation_id_short }}... | {{ alert.alert_name }} | {{ alert.severity }} | {{ alert.evidence_count }} | {{ alert.highest_pyramid_level }}/6 | {{ alert.status_display }} |
+| {{ alert.investigation_id_short }}... | {{ alert.alert_name }} | {{ alert.severity }} | {{ alert.evidence_count }} | {{ alert.highest_analyst_pyramid_level }}/{{ alert.highest_pyramid_level }} | {{ alert.status_display }} |
 {% endfor %}
 {% else %}
 No investigations recorded.
@@ -136,20 +137,31 @@ No techniques identified.
 
 ## Pyramid of Pain Assessment
 
-| Level | Category | Count | Adversary Pain |
-|-------|----------|-------|----------------|
+| Level | Category | Analyst | Baseline Sweep | Total | Adversary Pain |
+|-------|----------|---------|----------------|-------|----------------|
 {% for entry in pyramid_entries %}
-| {{ entry.level }} | {{ entry.category }} | {{ entry.count }} | {{ entry.pain }} |
+| {{ entry.level }} | {{ entry.category }} | {{ entry.analyst_count }} | {{ entry.sweep_count }} | {{ entry.count }} | {{ entry.pain }} |
 {% endfor %}
 
-{% if highest_pyramid_level >= 6 %}
-**Assessment**: Investigation reached TTP level - actionable intelligence produced.
-{% elif highest_pyramid_level >= 5 %}
-**Assessment**: Tool-level indicators identified. Consider further elevation to TTPs.
-{% elif highest_pyramid_level >= 3 %}
-**Assessment**: Moderate indicators identified. Deeper analysis recommended.
+{% if sweep_evidence_count > 0 %}
+The deterministic detection sweep records every fired detection at level 6 by construction — each one is a MITRE-keyed detection template, so "TTPs" is accurate per detection, but the level is a property of the catalog rather than a finding. {{ sweep_evidence_count }} of {{ evidence_count }} evidence items came from it. The Analyst column is what the investigation loop produced on its own.
+{% endif %}
+
+{% if analyst_evidence_count == 0 and evidence_count > 0 %}
+**Assessment**: Every evidence item came from the deterministic sweep. The investigation loop contributed nothing beyond the detection catalog.
+{% elif highest_analyst_pyramid_level >= 6 %}
+**Assessment**: Investigation independently reached TTP level - actionable intelligence produced.
+{% elif highest_analyst_pyramid_level >= 5 %}
+**Assessment**: Analyst evidence reached tool level. Consider further elevation to TTPs.
+{% elif highest_analyst_pyramid_level >= 3 %}
+**Assessment**: Analyst evidence reached artifact level. Consider elevation to tools and TTPs.
+{% elif highest_analyst_pyramid_level > 0 %}
+**Assessment**: Analyst evidence limited to trivial indicators. More investigation may be needed.
 {% else %}
-**Assessment**: Limited to trivial indicators. More investigation may be needed.
+**Assessment**: No evidence collected.
+{% endif %}
+{% if sweep_ttp_count > 0 and analyst_ttp_count == 0 %}
+The TTP rows above are baseline-sweep detections, not analyst findings.
 {% endif %}
 
 ---
@@ -233,11 +245,15 @@ No specific recommendations generated.
 
 ### Detection Improvements
 
-{% if techniques | length > 0 %}
-Consider adding or tuning detection rules for:
+{% if detection_techniques | length > 0 %}
+Red executed these with no matching blue detection — add or tune rules for:
 {% for tech in detection_techniques %}
-- **{{ tech.id }}** ({{ tech.name }})
+- **{{ tech }}**
 {% endfor %}
+{% elif coverage %}
+_No gaps: blue matched every technique red executed._
+{% else %}
+_Not measured: no red team ground truth available for this operation._
 {% endif %}
 
 ---
