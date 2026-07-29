@@ -711,14 +711,29 @@ async fn run_inner() -> Result<()> {
     // BEFORE any automation dispatches a tool, so this op cannot "cheat" off a
     // prior op's crack/enumeration/ticket work. Complements the post-op target
     // teardown (`ares ops teardown`). Opt out with ARES_KEEP_WORKSPACE=1.
+    // "Pre-op" must mean "this operation has not run anything yet", not "this
+    // process just started". `load_from_redis` above rehydrates an in-progress
+    // op, and restarting the orchestrator to pick up a rebuilt binary is
+    // routine — so keying off process start wiped the forged inter-realm
+    // ccaches and netexec enumeration the resumed op was still relying on.
     {
-        let report = ares_tools::sanitize::sanitize_workspace();
-        info!(
-            potfile_reset = report.potfile_reset,
-            nxc_removed = report.nxc_paths_removed,
-            ccaches_removed = report.ccaches_removed,
-            "Pre-op attacker workspace sanitized"
-        );
+        let resumed = {
+            let state = shared_state.read().await;
+            !state.completed_tasks.is_empty()
+        };
+        if resumed {
+            info!(
+                "Skipping workspace sanitation — resuming an operation that has already run tasks"
+            );
+        } else {
+            let report = ares_tools::sanitize::sanitize_workspace();
+            info!(
+                potfile_reset = report.potfile_reset,
+                nxc_removed = report.nxc_paths_removed,
+                ccaches_removed = report.ccaches_removed,
+                "Pre-op attacker workspace sanitized"
+            );
+        }
     }
 
     let auto_handles = spawn_automation_tasks(dispatcher.clone(), shutdown_rx.clone());

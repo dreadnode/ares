@@ -250,6 +250,12 @@ pub struct StateInner {
     pub coercion_phase_state:
         HashMap<String, crate::orchestrator::automation::coercion::CoercionPhaseState>,
 
+    /// Trust forges parked because they aimed at the wrong host, keyed by the
+    /// `trust_follow` dedup key. Retrying the identical request is waste, so
+    /// the dedup mark is held — but only until recon resolves a different
+    /// target, which is the one thing that can make the retry succeed.
+    pub forge_wedged: HashMap<String, crate::orchestrator::automation::trust::WedgedForge>,
+
     /// Blue-side containment observations — a credential we hold started
     /// consistently returning `STATUS_LOGON_FAILURE` or LDAP
     /// `INVALID_CREDENTIALS`. Keyed by `user@domain` (lowercase). Read by
@@ -341,6 +347,7 @@ impl StateInner {
             forge_aes_defers: HashMap::new(),
             forge_ntlm_fallback_attempts: HashMap::new(),
             forge_in_flight: HashMap::new(),
+            forge_wedged: HashMap::new(),
             mssql_link_pivot_attempts: HashMap::new(),
             containment_reject_counts: HashMap::new(),
             krbtgt_transient_counts: HashMap::new(),

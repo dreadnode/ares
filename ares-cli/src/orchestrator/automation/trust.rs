@@ -42,6 +42,45 @@ const FORGE_STALENESS_LIMIT: Duration = Duration::from_secs(180);
 ///
 /// Split out as a pure helper so the staleness logic can be unit-tested
 /// without spinning up a full `Dispatcher` / Redis fixture.
+/// A forge that failed against a specific target and will keep failing until
+/// recon changes which host we aim at.
+#[derive(Debug, Clone)]
+pub struct WedgedForge {
+    pub target_domain: String,
+    pub target_dc_ip: String,
+    /// The hostname baked into the request that failed.
+    pub hostname: String,
+}
+
+/// Re-arm forges whose target resolution has since changed.
+///
+/// `KDC_ERR_S_PRINCIPAL_UNKNOWN` / `KDC_ERR_WRONG_REALM` mean we aimed at the
+/// wrong host, so retrying the identical request is pure waste — that is why
+/// the dedup mark is held. But the mark was previously held *forever*: the
+/// wedge dropped the `forge_in_flight` heartbeat, and the staleness sweep can
+/// only recover keys that still have one. So the moment recon persisted a real
+/// DC FQDN in the target domain — the exact condition that makes a retry
+/// succeed — nothing could act on it, and the pivot stayed dead for the op.
+///
+/// Comparing against the resolution that failed re-arms on new recon and only
+/// on new recon, so the hot-loop this wedge exists to stop cannot come back.
+fn sweep_rearmable_forge_wedges(state: &mut StateInner) -> Vec<String> {
+    let rearmed: Vec<String> = state
+        .forge_wedged
+        .iter()
+        .filter(|(_, w)| {
+            resolve_target_dc_hostname(&state.hosts, &w.target_dc_ip, &w.target_domain)
+                != w.hostname
+        })
+        .map(|(k, _)| k.clone())
+        .collect();
+    for key in &rearmed {
+        state.forge_wedged.remove(key);
+        state.unmark_processed(DEDUP_TRUST_FOLLOW, key);
+    }
+    rearmed
+}
+
 fn sweep_stale_forge_in_flight(state: &mut StateInner) -> Vec<String> {
     let stale: Vec<String> = state
         .forge_in_flight
@@ -593,10 +632,21 @@ pub async fn auto_trust_follow(dispatcher: Arc<Dispatcher>, mut shutdown: watch:
         // mark if the spawn never actually runs the tool. Without this sweep,
         // a single dropped spawn kills the cross-forest pivot for the rest of
         // the op even though the trust key sits in state ready to use.
-        let stale = {
+        let (stale, rearmed) = {
             let mut state = dispatcher.state.write().await;
-            sweep_stale_forge_in_flight(&mut state)
+            let rearmed = sweep_rearmable_forge_wedges(&mut state);
+            (sweep_stale_forge_in_flight(&mut state), rearmed)
         };
+        for key in rearmed {
+            let _ = dispatcher
+                .state
+                .unpersist_dedup(&dispatcher.queue, DEDUP_TRUST_FOLLOW, &key)
+                .await;
+            info!(
+                dedup_key = %key,
+                "Re-armed trust forge — recon now resolves a different target DC than the one that failed"
+            );
+        }
         for key in stale {
             let _ = dispatcher
                 .state
@@ -1661,6 +1711,8 @@ pub async fn auto_trust_follow(dispatcher: Arc<Dispatcher>, mut shutdown: watch:
             let aes_key_bg = resolved_aes_key.clone();
             let source_domain_sid_bg = source_domain_sid.clone();
             let is_child_to_parent_bg = is_child_to_parent;
+            let target_dc_ip_bg = target_dc_ip.clone();
+            let target_dc_hostname_bg = target_dc_hostname.clone();
             tokio::spawn(async move {
                 let result = dispatcher_bg
                     .llm_runner
@@ -1724,6 +1776,14 @@ pub async fn auto_trust_follow(dispatcher: Arc<Dispatcher>, mut shutdown: watch:
                                 {
                                     let mut state = dispatcher_bg.state.write().await;
                                     state.forge_in_flight.remove(&dedup_key_bg);
+                                    state.forge_wedged.insert(
+                                        dedup_key_bg.clone(),
+                                        WedgedForge {
+                                            target_domain: target_domain_bg.clone(),
+                                            target_dc_ip: target_dc_ip_bg.clone(),
+                                            hostname: target_dc_hostname_bg.clone(),
+                                        },
+                                    );
                                 }
                                 return;
                             }
@@ -3454,6 +3514,63 @@ mod tests {
             !s.is_processed(DEDUP_TRUST_FOLLOW, &key),
             "dedup must be unmarked so the next tick re-dispatches"
         );
+    }
+
+    /// The wedge exists to stop a hot loop against a target that cannot work
+    /// (363 retries in 50 min were observed). While recon still resolves the
+    /// same wrong host, it must stay held.
+    #[test]
+    fn wedged_forge_stays_held_while_recon_is_unchanged() {
+        let mut s = StateInner::new("op".into());
+        let key = "trust_follow:contoso.local:fabrikam$".to_string();
+        s.hosts
+            .push(dc("192.168.58.99", "dc02.child.contoso.local"));
+        s.mark_processed(DEDUP_TRUST_FOLLOW, key.clone());
+        s.forge_wedged.insert(
+            key.clone(),
+            WedgedForge {
+                target_domain: "contoso.local".into(),
+                target_dc_ip: "192.168.58.99".into(),
+                hostname: resolve_target_dc_hostname(&s.hosts, "192.168.58.99", "contoso.local"),
+            },
+        );
+
+        assert!(sweep_rearmable_forge_wedges(&mut s).is_empty());
+        assert!(
+            s.is_processed(DEDUP_TRUST_FOLLOW, &key),
+            "an unchanged target must not re-dispatch the identical request"
+        );
+    }
+
+    /// A real DC FQDN in the target domain is exactly what makes the retry
+    /// succeed. Previously the mark was held forever — the wedge dropped the
+    /// `forge_in_flight` heartbeat, and the staleness sweep can only recover
+    /// keys that still have one — so the pivot stayed dead for the whole op.
+    #[test]
+    fn wedged_forge_rearms_once_recon_resolves_a_better_target() {
+        let mut s = StateInner::new("op".into());
+        let key = "trust_follow:contoso.local:fabrikam$".to_string();
+        s.hosts
+            .push(dc("192.168.58.99", "dc02.child.contoso.local"));
+        let failed = resolve_target_dc_hostname(&s.hosts, "192.168.58.10", "contoso.local");
+        s.mark_processed(DEDUP_TRUST_FOLLOW, key.clone());
+        s.forge_wedged.insert(
+            key.clone(),
+            WedgedForge {
+                target_domain: "contoso.local".into(),
+                target_dc_ip: "192.168.58.10".into(),
+                hostname: failed,
+            },
+        );
+
+        s.hosts.push(dc("192.168.58.10", "dc01.contoso.local"));
+
+        assert_eq!(sweep_rearmable_forge_wedges(&mut s), vec![key.clone()]);
+        assert!(
+            !s.is_processed(DEDUP_TRUST_FOLLOW, &key),
+            "dedup must be unmarked so the next tick retries against the real DC"
+        );
+        assert!(s.forge_wedged.is_empty());
     }
 
     #[test]

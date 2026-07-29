@@ -65,7 +65,7 @@ mod smb_signing;
 mod smbclient_enum;
 mod spooler_check;
 mod stall_detection;
-mod trust;
+pub(crate) mod trust;
 mod unconstrained;
 mod webdav_detection;
 mod winrm_lateral;

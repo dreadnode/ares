@@ -71,30 +71,6 @@ pub struct BlueCallbackHandler {
 }
 
 impl BlueCallbackHandler {
-    /// Convenience constructor with no op-state recorder — simulated
-    /// containment actions still emit a tracing span but no red-side
-    /// observation is published. Kept for tests and any future call site
-    /// that doesn't have a NATS broker to hand.
-    #[allow(dead_code)]
-    pub fn new(
-        provider: Arc<dyn LlmProvider>,
-        dispatcher: Arc<dyn ToolDispatcher>,
-        model: String,
-        investigation_id: String,
-        alert: serde_json::Value,
-        redis_url: String,
-    ) -> Self {
-        Self::with_recorder(
-            provider,
-            dispatcher,
-            model,
-            investigation_id,
-            alert,
-            redis_url,
-            OpStateRecorder::disabled(),
-        )
-    }
-
     /// Same as [`Self::new`] but wires an op-state recorder so that simulated
     /// containment actions confirmed through `confirm_escalation` are
     /// published as red-side observations. Callers that already own a
@@ -858,26 +834,28 @@ mod tests {
 
     #[test]
     fn extract_operation_id_from_alert_labels() {
-        let handler = BlueCallbackHandler::new(
+        let handler = BlueCallbackHandler::with_recorder(
             Arc::new(MockProvider),
             Arc::new(MockDispatcher),
             "test".into(),
             "inv-x".into(),
             json!({ "labels": { "operation_id": "op-hero-01" } }),
             "redis://localhost".into(),
+            OpStateRecorder::capturing(),
         );
         assert_eq!(handler.operation_id, "op-hero-01");
     }
 
     #[test]
     fn extract_operation_id_defaults_empty() {
-        let handler = BlueCallbackHandler::new(
+        let handler = BlueCallbackHandler::with_recorder(
             Arc::new(MockProvider),
             Arc::new(MockDispatcher),
             "test".into(),
             "inv-x".into(),
             json!({ "labels": { "deployment": "prod" } }),
             "redis://localhost".into(),
+            OpStateRecorder::capturing(),
         );
         assert!(handler.operation_id.is_empty());
     }
