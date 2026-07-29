@@ -478,11 +478,12 @@ pub(crate) fn select_kerberoast_work(
     state: &StateInner,
     max_items: usize,
 ) -> Vec<KerberoastWorkItem> {
+    let delegation = state.delegation_account_names();
     state
         .credentials
         .iter()
         .filter(|c| !c.domain.is_empty())
-        .filter(|c| !state.is_delegation_account(&c.username))
+        .filter(|c| !delegation.contains(&c.username.to_lowercase()))
         .filter(|c| !state.is_principal_quarantined(&c.username, &c.domain))
         .filter_map(|cred| {
             let cred_domain = cred.domain.to_lowercase();
@@ -508,12 +509,13 @@ pub(crate) fn select_username_spray_work(
     state: &StateInner,
     max_items: usize,
 ) -> Vec<SprayWorkItem> {
+    let delegation = state.delegation_account_names();
     state
         .users
         .iter()
         .filter(|u| !u.domain.is_empty())
         .filter(|u| !ares_core::models::is_always_disabled_account(&u.username))
-        .filter(|u| !state.is_delegation_account(&u.username))
+        .filter(|u| !delegation.contains(&u.username.to_lowercase()))
         .filter(|u| !state.is_principal_quarantined(&u.username, &u.domain))
         .filter_map(|u| {
             let user_domain = u.domain.to_lowercase();
@@ -549,11 +551,12 @@ pub(crate) fn select_low_hanging_work(
     state: &StateInner,
     max_items: usize,
 ) -> Vec<LowHangingWorkItem> {
+    let delegation = state.delegation_account_names();
     state
         .credentials
         .iter()
         .filter(|c| !c.domain.is_empty() && !c.password.is_empty())
-        .filter(|c| c.is_admin || !state.is_delegation_account(&c.username))
+        .filter(|c| c.is_admin || !delegation.contains(&c.username.to_lowercase()))
         .filter(|c| !state.is_principal_quarantined(&c.username, &c.domain))
         .filter_map(|cred| {
             let cred_domain = cred.domain.to_lowercase();
@@ -594,11 +597,12 @@ pub(crate) fn select_credential_secretsdump_work(
     max_items: usize,
 ) -> Vec<SdWorkItem> {
     let mut items = Vec::new();
+    let delegation = state.delegation_account_names();
     for cred in state
         .credentials
         .iter()
         .filter(|c| !c.domain.is_empty() && !c.password.is_empty())
-        .filter(|c| c.is_admin || !state.is_delegation_account(&c.username))
+        .filter(|c| c.is_admin || !delegation.contains(&c.username.to_lowercase()))
         .filter(|c| !state.is_principal_quarantined(&c.username, &c.domain))
     {
         let cred_domain = cred.domain.to_lowercase();

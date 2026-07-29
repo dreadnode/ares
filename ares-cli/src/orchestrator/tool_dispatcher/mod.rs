@@ -227,6 +227,31 @@ pub(super) async fn inject_spray_attempts(
     let mut guard = state.write().await;
     let tallied = guard.spray_attempts_used(&domain);
 
+    // The observed policy outranks the agent's argument. `check_spray_budget`
+    // reads `lockout_threshold <= 0` as "this domain has no lockout, spray
+    // freely", so an agent that guesses 0 — or omits the field after a policy
+    // read already landed — removes the only guard against locking out a live
+    // domain. Overriding here is the same move `attempts_used_per_account`
+    // already makes: the server-side observation wins over the claim.
+    if let Some(observed) = guard.password_policy_threshold(&domain) {
+        let claimed_threshold = arguments.get("lockout_threshold").and_then(|v| v.as_i64());
+        if claimed_threshold != Some(observed) {
+            if let Some(obj) = arguments.as_object_mut() {
+                obj.insert(
+                    "lockout_threshold".to_string(),
+                    serde_json::Value::from(observed),
+                );
+            }
+            debug!(
+                tool = %tool_name,
+                domain = %domain,
+                claimed = ?claimed_threshold,
+                observed,
+                "Overrode lockout_threshold with the observed password policy"
+            );
+        }
+    }
+
     // Every spray-style tool gets the tally injected, so each one can refuse
     // itself once the budget is spent. Injecting for only some of them is what
     // let `username_as_password` spend budget it could never be denied: the

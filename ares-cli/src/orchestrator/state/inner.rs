@@ -284,6 +284,16 @@ pub struct StateInner {
     /// Empty by default — tests using `StateInner::new` get deterministic
     /// no-op filtering without needing to mock interface enumeration.
     pub self_ips: HashSet<IpAddr>,
+
+    /// Observed AD account-lockout thresholds, keyed by lowercase domain.
+    /// Populated by the `password_policy` parser from real `net accounts` /
+    /// netexec output.
+    ///
+    /// The spray tools take `lockout_threshold` as a tool argument, so before
+    /// this existed the value guarding against locking out a live domain was
+    /// whatever the agent typed — and `<= 0` there means "no lockout, spray
+    /// freely". The parsed policy was extracted and then dropped on the floor.
+    pub password_policies: HashMap<String, i64>,
 }
 
 impl StateInner {
@@ -327,6 +337,7 @@ impl StateInner {
             completed_tasks: HashMap::new(),
             quarantined_principals: HashMap::new(),
             spray_attempts: HashMap::new(),
+            password_policies: HashMap::new(),
             forge_aes_defers: HashMap::new(),
             forge_ntlm_fallback_attempts: HashMap::new(),
             forge_in_flight: HashMap::new(),
@@ -375,19 +386,37 @@ impl StateInner {
     /// for S4U exploitation — spraying or secretsdump with their creds
     /// causes lockout before S4U can use them.
     pub fn is_delegation_account(&self, username: &str) -> bool {
-        let u = username.to_lowercase();
-        self.discovered_vulnerabilities.values().any(|vuln| {
-            let vtype = vuln.vuln_type.to_lowercase();
-            if vtype != "constrained_delegation" && vtype != "rbcd" {
-                return false;
-            }
-            vuln.details
-                .get("account_name")
-                .or_else(|| vuln.details.get("AccountName"))
-                .and_then(|v| v.as_str())
-                .map(|a| a.to_lowercase() == u)
-                .unwrap_or(false)
-        })
+        self.discovered_vulnerabilities
+            .values()
+            .filter(|vuln| is_delegation_vuln_type(&vuln.vuln_type))
+            .any(|vuln| {
+                vuln.details
+                    .get("account_name")
+                    .or_else(|| vuln.details.get("AccountName"))
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|a| a.eq_ignore_ascii_case(username))
+            })
+    }
+
+    /// Names of every account reserved for S4U, built once.
+    ///
+    /// Callers that test a whole credential list use this instead of calling
+    /// [`Self::is_delegation_account`] per credential, which rescans the entire
+    /// vulnerability map each time. ACL enumeration routinely puts tens of
+    /// thousands of entries in that map, so the per-credential form is
+    /// O(credentials × vulnerabilities) under the state read guard.
+    pub fn delegation_account_names(&self) -> std::collections::HashSet<String> {
+        self.discovered_vulnerabilities
+            .values()
+            .filter(|vuln| is_delegation_vuln_type(&vuln.vuln_type))
+            .filter_map(|vuln| {
+                vuln.details
+                    .get("account_name")
+                    .or_else(|| vuln.details.get("AccountName"))
+                    .and_then(|v| v.as_str())
+                    .map(str::to_lowercase)
+            })
+            .collect()
     }
 
     /// Check if a principal (`user@domain`) is quarantined due to lockout —
@@ -418,6 +447,27 @@ impl StateInner {
             .filter(|(_, expiry)| Utc::now() < *expiry)
             .map(|(used, _)| *used)
             .unwrap_or(0)
+    }
+
+    /// Record an observed account-lockout threshold for `domain`.
+    ///
+    /// Keeps the strictest value seen. A DC that answers 5 and a DC that
+    /// answers 0 ("no lockout") for the same domain means one of the reads is
+    /// wrong or the policy is per-OU; spraying against the looser answer is the
+    /// one mistake that locks out a live domain, so the tighter one wins.
+    pub fn record_password_policy(&mut self, domain: &str, lockout_threshold: i64) {
+        if lockout_threshold <= 0 {
+            return;
+        }
+        self.password_policies
+            .entry(domain.to_lowercase())
+            .and_modify(|t| *t = (*t).min(lockout_threshold))
+            .or_insert(lockout_threshold);
+    }
+
+    /// Observed lockout threshold for `domain`, if a policy read landed.
+    pub fn password_policy_threshold(&self, domain: &str) -> Option<i64> {
+        self.password_policies.get(&domain.to_lowercase()).copied()
     }
 
     /// Debit `attempts` from `domain`'s lockout budget for `window_secs`.
@@ -947,6 +997,17 @@ impl StateInner {
     }
 }
 
+/// Whether a vulnerability type reserves its account for S4U exploitation.
+///
+/// Compared without allocating: this runs once per vulnerability on a map that
+/// ACL enumeration fills with tens of thousands of entries, so lowercasing the
+/// type before the comparison allocated a String per entry per call and threw
+/// every one of them away.
+fn is_delegation_vuln_type(vuln_type: &str) -> bool {
+    vuln_type.eq_ignore_ascii_case("constrained_delegation")
+        || vuln_type.eq_ignore_ascii_case("rbcd")
+}
+
 /// Parse a principal string of form `name` or `name@domain.fqdn`.
 /// Returns `(name, Some(domain_lower))` for the @-form, `(name, None)` for bare names.
 fn parse_principal(s: &str) -> (&str, Option<String>) {
@@ -1280,6 +1341,105 @@ mod tests {
         assert!(state.is_delegation_account("john.smith"));
         assert!(state.is_delegation_account("John.Smith")); // case insensitive
         assert!(!state.is_delegation_account("sam.wilson"));
+    }
+
+    fn delegation_vuln(
+        id: &str,
+        vuln_type: &str,
+        key: &str,
+        account: &str,
+    ) -> (String, ares_core::models::VulnerabilityInfo) {
+        let mut details = std::collections::HashMap::new();
+        details.insert(key.to_string(), serde_json::json!(account));
+        (
+            id.to_string(),
+            ares_core::models::VulnerabilityInfo {
+                vuln_id: id.into(),
+                vuln_type: vuln_type.into(),
+                target: "192.168.58.240".into(),
+                discovered_by: "privesc".into(),
+                discovered_at: chrono::Utc::now(),
+                details,
+                recommended_agent: "privesc".into(),
+                priority: 8,
+            },
+        )
+    }
+
+    /// ACL enumeration fills this map with tens of thousands of entries whose
+    /// details also carry an `account_name`. Only the delegation types may
+    /// reserve an account for S4U — an ACL grant naming a principal must not.
+    #[test]
+    fn acl_vulnerabilities_never_reserve_an_account_for_s4u() {
+        let mut state = StateInner::new("op-1".into());
+        for i in 0..100 {
+            let (id, v) = delegation_vuln(
+                &format!("acl_genericall_alice_target{i}"),
+                "genericall",
+                "account_name",
+                "alice",
+            );
+            state.discovered_vulnerabilities.insert(id, v);
+        }
+        assert!(!state.is_delegation_account("alice"));
+        assert!(state.delegation_account_names().is_empty());
+    }
+
+    /// The hoisted set must agree with the per-credential predicate exactly,
+    /// including the mixed-case vuln type and the `AccountName` fallback key.
+    #[test]
+    fn delegation_name_set_matches_the_per_credential_predicate() {
+        let mut state = StateInner::new("op-1".into());
+        for (id, v) in [
+            delegation_vuln("rbcd_svc_sql", "RBCD", "AccountName", "SVC_SQL"),
+            delegation_vuln(
+                "cd_svc_web",
+                "constrained_delegation",
+                "account_name",
+                "svc_web",
+            ),
+            delegation_vuln("acl_alice", "writedacl", "account_name", "alice"),
+        ] {
+            state.discovered_vulnerabilities.insert(id, v);
+        }
+
+        let names = state.delegation_account_names();
+        for candidate in ["svc_sql", "SVC_SQL", "svc_web", "alice", "bob"] {
+            assert_eq!(
+                names.contains(&candidate.to_lowercase()),
+                state.is_delegation_account(candidate),
+                "set and predicate disagree on {candidate}"
+            );
+        }
+        assert!(state.is_delegation_account("svc_sql"));
+        assert!(!state.is_delegation_account("alice"));
+    }
+
+    /// A looser reading must never widen a threshold already observed: it is
+    /// the one mistake that locks out a live domain.
+    #[test]
+    fn password_policy_keeps_the_strictest_observed_threshold() {
+        let mut state = StateInner::new("op-1".into());
+        assert_eq!(state.password_policy_threshold("contoso.local"), None);
+
+        state.record_password_policy("CONTOSO.LOCAL", 5);
+        assert_eq!(state.password_policy_threshold("contoso.local"), Some(5));
+
+        state.record_password_policy("contoso.local", 10);
+        assert_eq!(state.password_policy_threshold("contoso.local"), Some(5));
+
+        state.record_password_policy("contoso.local", 3);
+        assert_eq!(state.password_policy_threshold("contoso.local"), Some(3));
+    }
+
+    /// `check_spray_budget` reads a non-positive threshold as "no lockout,
+    /// spray freely", so a 0 must never be stored as an observation.
+    #[test]
+    fn password_policy_ignores_non_positive_thresholds() {
+        let mut state = StateInner::new("op-1".into());
+        state.record_password_policy("contoso.local", 0);
+        state.record_password_policy("contoso.local", -1);
+        assert_eq!(state.password_policy_threshold("contoso.local"), None);
     }
 
     #[test]

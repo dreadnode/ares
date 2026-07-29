@@ -2106,12 +2106,48 @@ pub(crate) async fn extract_from_raw_text(
 }
 
 /// Extract credentials, hashes, hosts, vulns, and shares from a result payload.
+/// Persist any account-lockout threshold the `password_policy` parser found.
+///
+/// This is the ground truth the spray budget is supposed to be computed from.
+/// It was parsed into `discoveries["password_policies"]` and never read, so the
+/// only `lockout_threshold` reaching the budget check was the one the agent
+/// typed into the tool call.
+async fn record_password_policies(payload: &Value, dispatcher: &Arc<Dispatcher>) {
+    let Some(policies) = payload.get("password_policies").and_then(|v| v.as_array()) else {
+        return;
+    };
+
+    for policy in policies {
+        let Some(domain) = policy.get("domain").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        let threshold = policy.get("lockout_threshold").and_then(|v| {
+            v.as_i64()
+                .or_else(|| v.as_str().and_then(|s| s.trim().parse::<i64>().ok()))
+        });
+        let Some(threshold) = threshold else { continue };
+
+        dispatcher
+            .state
+            .write()
+            .await
+            .record_password_policy(domain, threshold);
+        info!(
+            domain = %domain,
+            lockout_threshold = threshold,
+            "Recorded observed account-lockout policy"
+        );
+    }
+}
+
 pub(crate) async fn extract_discoveries(
     payload: &Value,
     dispatcher: &Arc<Dispatcher>,
     task_target_ip: Option<&str>,
     share_auth_label: Option<&str>,
 ) -> Result<()> {
+    record_password_policies(payload, dispatcher).await;
+
     let mut parsed = parse_discoveries(payload);
 
     // Resolve credential lineage (parent_id / attack_step) before publishing.
