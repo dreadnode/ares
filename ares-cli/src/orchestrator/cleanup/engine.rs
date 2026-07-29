@@ -52,6 +52,11 @@ enum EntryStatus {
     Skipped(String),
     /// Inverse was attempted and failed. Carries the error.
     Failed(String),
+    /// The journal holds a write-ahead intent that never got an outcome: the
+    /// orchestrator died mid-call, or the dispatch timed out while the worker
+    /// ran the tool to completion. The target may or may not carry the change,
+    /// and nothing here can tell which — so it is never auto-reverted.
+    Unresolved,
 }
 
 struct EntryResult {
@@ -75,13 +80,20 @@ pub struct TeardownReport {
     pub skipped: usize,
     pub failed: usize,
     pub planned: usize,
+    /// Write-ahead intents with no recorded outcome.
+    pub unresolved: usize,
 }
 
 impl TeardownReport {
-    /// True when nothing was left un-reverted that we *could* have reverted —
-    /// i.e. no failures. Callers map this to the process exit code.
+    /// True when nothing was left un-reverted that we *could* have reverted,
+    /// and nothing is unaccounted for. Callers map this to the process exit
+    /// code.
+    ///
+    /// Unresolved intents count as unclean: an intent with no outcome means a
+    /// mutating tool may have changed the target with nothing recording it, so
+    /// reporting the range clean would be a guess.
     pub fn is_clean(&self) -> bool {
-        self.failed == 0
+        self.failed == 0 && self.unresolved == 0
     }
 }
 
@@ -92,6 +104,10 @@ pub async fn run_teardown(
     opts: &TeardownOptions,
 ) -> Result<TeardownReport> {
     let mut records = journal::read_all(conn, operation_id).await?;
+    // Aborted calls provably changed nothing — reverting one deletes state this
+    // operation did not create, which is the phantom-entry hazard the capture
+    // gate exists to stop.
+    records.retain(|r| r.status != journal::MutationStatus::Aborted);
     // LIFO: undo the most recent mutation first.
     records.reverse();
     if let Some(only) = &opts.only {
@@ -125,7 +141,9 @@ pub async fn run_teardown(
         let plan = undo_plan(record);
         let target = record.target.clone().unwrap_or_else(|| "?".into());
 
-        let status = if opts.dry_run {
+        let status = if record.status == journal::MutationStatus::Intent {
+            EntryStatus::Unresolved
+        } else if opts.dry_run {
             EntryStatus::Planned
         } else {
             match plan.inverse.clone() {
@@ -407,6 +425,7 @@ fn summarize(results: &[EntryResult]) -> TeardownReport {
             EntryStatus::Unverified(_) => r.unverified += 1,
             EntryStatus::Skipped(_) => r.skipped += 1,
             EntryStatus::Failed(_) => r.failed += 1,
+            EntryStatus::Unresolved => r.unresolved += 1,
         }
     }
     r
@@ -420,6 +439,12 @@ fn print_entry(tool: &str, target: &str, class: Reversibility, note: &str, statu
         EntryStatus::Unverified(why) => ("warn", format!("reverted, UNVERIFIED: {why}")),
         EntryStatus::Skipped(why) => ("skip", why.clone()),
         EntryStatus::Failed(why) => ("FAIL", why.clone()),
+        EntryStatus::Unresolved => (
+            "FAIL",
+            "UNRESOLVED — journalled before the call, no outcome recorded. The tool may have \
+             changed the target. Verify by hand."
+                .to_string(),
+        ),
     };
     println!(
         "  [{marker}] {tool:<28} {class:<14} {target:<22} {detail}",
@@ -438,12 +463,13 @@ fn print_summary(results: &[EntryResult], report: &TeardownReport, dry_run: bool
     }
 
     println!(
-        "Teardown complete: {} verified, {} reverted (unprobed), {} unverified, {} skipped, {} failed (of {}).",
+        "Teardown complete: {} verified, {} reverted (unprobed), {} unverified, {} skipped, {} failed, {} unresolved (of {}).",
         report.verified,
         report.reverted,
         report.unverified,
         report.skipped,
         report.failed,
+        report.unresolved,
         report.total
     );
 

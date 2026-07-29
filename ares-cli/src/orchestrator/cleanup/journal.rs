@@ -58,6 +58,29 @@ pub fn is_mutating(tool: &str) -> bool {
     MUTATING_TOOLS.contains(&tool)
 }
 
+/// How far a journalled mutation got.
+///
+/// The journal is written ahead of the call, so a record's status is what
+/// distinguishes "we know this happened" from "we asked for it and never
+/// learned the answer".
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MutationStatus {
+    /// Written before the tool ran, never resolved. The orchestrator died
+    /// mid-call, or the dispatch timed out while the worker kept running the
+    /// tool to completion. The target may or may not have been changed, so
+    /// teardown must surface it rather than guess either way.
+    Intent,
+    /// The tool ran and the mutation was observed to take effect.
+    ///
+    /// Default so records written by the pre-write-ahead journal — which only
+    /// ever appended on success — keep their meaning when read back.
+    #[default]
+    Confirmed,
+    /// The tool ran and provably changed nothing, or never started at all.
+    Aborted,
+}
+
 /// One persistent mutation performed against a target during an operation.
 ///
 /// Records *intent* (the forward tool + its arguments + who/where), not the
@@ -69,6 +92,13 @@ pub fn is_mutating(tool: &str) -> bool {
 /// surviving here.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MutationRecord {
+    /// Correlates the write-ahead intent with the outcome appended after the
+    /// call returns. `None` on records from before write-ahead journaling.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    /// How far this mutation got. See [`MutationStatus`].
+    #[serde(default)]
+    pub status: MutationStatus,
     /// RFC3339 timestamp of when the mutation succeeded.
     pub ts: String,
     /// Tool name as dispatched (e.g. `rbcd_write`, `bloodyad_set_password`).
@@ -103,6 +133,8 @@ impl MutationRecord {
     /// hints out of the argument object.
     pub fn from_call(role: &str, task_id: &str, tool: &str, args: &Value) -> Self {
         Self {
+            id: None,
+            status: MutationStatus::Confirmed,
             ts: Utc::now().to_rfc3339(),
             tool: tool.to_string(),
             role: role.to_string(),
@@ -112,6 +144,33 @@ impl MutationRecord {
             domain: extract_first(args, &["domain", "target_domain"]),
             args: strip_credentials(args),
             hint: None,
+        }
+    }
+
+    /// Build the write-ahead record appended *before* the tool runs.
+    ///
+    /// Journaling after the fact loses every mutation the process does not
+    /// outlive: a kill between the DC write and the RPUSH is silent, and a
+    /// dispatch timeout returns an error while the worker runs the tool to
+    /// completion — a mutation that succeeded and was guaranteed unjournalled.
+    pub fn intent(role: &str, task_id: &str, tool: &str, args: &Value) -> Self {
+        Self {
+            id: Some(uuid::Uuid::new_v4().to_string()),
+            status: MutationStatus::Intent,
+            ..Self::from_call(role, task_id, tool, args)
+        }
+    }
+
+    /// Build the outcome record that resolves a write-ahead intent.
+    ///
+    /// Appended rather than rewritten in place: the journal is an append-only
+    /// Redis LIST, and `read_all` folds the two together by `id`.
+    pub fn resolution(&self, status: MutationStatus, hint: Option<Value>) -> Self {
+        Self {
+            status,
+            hint,
+            ts: Utc::now().to_rfc3339(),
+            ..self.clone()
         }
     }
 }
@@ -180,7 +239,7 @@ pub async fn read_all(
 ) -> anyhow::Result<Vec<MutationRecord>> {
     let key = build_key(operation_id, KEY_MUTATION_JOURNAL);
     let raw: Vec<String> = conn.lrange(&key, 0, -1).await?;
-    Ok(raw
+    let parsed = raw
         .iter()
         .filter_map(|s| match serde_json::from_str::<MutationRecord>(s) {
             Ok(r) => Some(r),
@@ -188,8 +247,33 @@ pub async fn read_all(
                 warn!(error = %e, "mutation-journal: skipping unparsable entry");
                 None
             }
-        })
-        .collect())
+        });
+    Ok(fold_resolutions(parsed))
+}
+
+/// Collapse each write-ahead intent with the outcome appended after it.
+///
+/// Entries keep their original append position, so teardown's LIFO order still
+/// undoes the most recent mutation first. A record whose intent never got an
+/// outcome stays [`MutationStatus::Intent`] — that unresolved state is the
+/// whole point, and teardown reports it rather than guessing.
+fn fold_resolutions(records: impl Iterator<Item = MutationRecord>) -> Vec<MutationRecord> {
+    let mut folded: Vec<MutationRecord> = Vec::new();
+    let mut index_of: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+
+    for record in records {
+        match record.id.clone() {
+            Some(id) => match index_of.get(&id) {
+                Some(&i) => folded[i] = record,
+                None => {
+                    index_of.insert(id, folded.len());
+                    folded.push(record);
+                }
+            },
+            None => folded.push(record),
+        }
+    }
+    folded
 }
 
 #[cfg(test)]
@@ -227,6 +311,67 @@ mod tests {
             extract_first(&args, &["target", "target_ip"]).as_deref(),
             Some("192.168.58.10")
         );
+    }
+
+    fn rec_with(id: &str, status: MutationStatus) -> MutationRecord {
+        MutationRecord {
+            id: Some(id.into()),
+            status,
+            ..MutationRecord::from_call("privesc", "t", "add_computer", &json!({}))
+        }
+    }
+
+    /// An outcome must update its intent in place, not sit beside it — else
+    /// teardown sees the same mutation twice and reverts it twice.
+    #[test]
+    fn a_resolution_replaces_its_intent_and_keeps_its_position() {
+        let folded = fold_resolutions(
+            [
+                rec_with("a", MutationStatus::Intent),
+                rec_with("b", MutationStatus::Intent),
+                rec_with("a", MutationStatus::Confirmed),
+            ]
+            .into_iter(),
+        );
+
+        assert_eq!(folded.len(), 2, "a resolution is not a second mutation");
+        assert_eq!(folded[0].id.as_deref(), Some("a"));
+        assert_eq!(folded[0].status, MutationStatus::Confirmed);
+        assert_eq!(folded[1].status, MutationStatus::Intent);
+    }
+
+    /// The unresolved state is the whole point: it is what a kill mid-call or
+    /// a dispatch timeout leaves behind, and teardown must still see it.
+    #[test]
+    fn an_intent_with_no_outcome_survives_the_fold() {
+        let folded = fold_resolutions([rec_with("only", MutationStatus::Intent)].into_iter());
+        assert_eq!(folded.len(), 1);
+        assert_eq!(folded[0].status, MutationStatus::Intent);
+    }
+
+    /// Records written before write-ahead journaling carry no id and were only
+    /// ever appended on success, so they must read back as confirmed.
+    #[test]
+    fn a_legacy_record_defaults_to_confirmed_and_stays_standalone() {
+        let legacy: MutationRecord = serde_json::from_str(
+            r#"{"ts":"2026-07-28T00:00:00Z","tool":"rbcd_write","role":"privesc",
+                "task_id":"t","args":{}}"#,
+        )
+        .expect("pre-write-ahead records still parse");
+        assert_eq!(legacy.status, MutationStatus::Confirmed);
+        assert!(legacy.id.is_none());
+
+        let folded = fold_resolutions([legacy.clone(), legacy].into_iter());
+        assert_eq!(folded.len(), 2, "id-less records never collapse together");
+    }
+
+    #[test]
+    fn intent_and_resolution_share_an_id() {
+        let intent = MutationRecord::intent("privesc", "t", "rbcd_write", &json!({}));
+        let resolved = intent.resolution(MutationStatus::Confirmed, None);
+        assert_eq!(intent.id, resolved.id);
+        assert!(intent.id.is_some());
+        assert_eq!(resolved.status, MutationStatus::Confirmed);
     }
 
     #[test]
