@@ -467,11 +467,15 @@ templates:
     filter_stages:
       - ['TransmittedServices']
     # Drop 4769 events where TransmittedServices is empty (not actually S4U).
+    # The value must be matched in the JSON-escaped XML shape Loki stores, the
+    # same convention as PreAuthType above: a plain-text `TransmittedServices:
+    # -` form matches nothing, so the exclude silently passed every 4769 through
+    # and the rule fired on all of them (measured: 3824 events in, 3824 out).
     # Do NOT exclude machine-account targets: S4U2Proxy / RBCD abuse legitimately
     # requests a host's SPN (e.g. cifs/WEB01$), so a `TargetUserName…$` exclude
     # drops exactly the true positives this rule exists to catch.
     exclude_patterns:
-      - 'TransmittedServices\s*:\s*-\s*$'
+      - 'TransmittedServices..u003e-.u003c'
 
   detect_lsa_secrets_access:
     description: "LSA Secrets Extraction Detection"
@@ -497,9 +501,19 @@ templates:
     tactic: credential_access
     severity: high
     red_team_tool: gpp_password_finder
+    # Scoped by event id first, then by the credential-bearing artifact itself.
+    # The original rule had neither: without `event_ids` the label selector was
+    # the only pre-filter, and both stages were effectively unconditional
+    # ('object.*access' plus bare '\.ps1'/'sysvol'), so it matched 796,922 of
+    # 2,409,887 windows-security lines in 24h — a third of the log. T1552 was
+    # therefore always "detected", fabricating coverage rather than losing it,
+    # and it saturated DETECTION_ENTRY_LIMIT so event_count meant nothing.
+    # Bare path words (sysvol/netlogon) and script extensions are deliberately
+    # NOT here: touching a share is not credential discovery. The artifact names
+    # are what make this T1552 rather than generic file access.
+    event_ids: ["5145", "4663", "4656"]
     filter_stages:
-      - ['5145', '4663', '4656', 'file.*access', 'share.*access', 'object.*access', 'smbclient']
-      - ['sysvol', 'netlogon', 'groups\.xml', 'scheduledtasks\.xml', 'services\.xml', 'datasources\.xml', 'drives\.xml', 'printers\.xml', 'cpassword', 'unattend\.xml', 'sysprep\.inf', 'defaultpassword', 'autologon', 'credman', 'web\.config', '\.ps1', '\.bat', '\.vbs']
+      - ['groups\.xml', 'scheduledtasks\.xml', 'services\.xml', 'datasources\.xml', 'drives\.xml', 'printers\.xml', 'cpassword', 'unattend\.xml', 'sysprep\.inf', 'defaultpassword', 'autologon', 'credman']
 
   detect_ntlm_relay:
     description: "NTLM Relay Attack Detection"

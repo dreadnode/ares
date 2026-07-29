@@ -229,6 +229,29 @@ fn s4u_template_has_exclude_patterns() {
     );
 }
 
+/// The exclude must be written in the JSON-escaped XML shape Loki actually
+/// stores. A plain-text `TransmittedServices: -` form matched nothing, so every
+/// 4769 passed through and T1550.003 was credited on every operation — measured
+/// live at 3824 events in and 3824 out, i.e. the exclude did nothing.
+#[test]
+fn s4u_exclude_uses_the_escaped_xml_shape_loki_stores() {
+    let tmpl = build_detection_template("detect_s4u_delegation", None).unwrap();
+    let exclude = tmpl
+        .logql
+        .split("!~")
+        .nth(1)
+        .expect("S4U template carries an exclusion");
+
+    assert!(
+        exclude.contains("u003e"),
+        "the exclude must match escaped XML, not plain text: {exclude}"
+    );
+    assert!(
+        !exclude.contains(r"\s*:\s*"),
+        "a `Field: value` form never appears in the stored event: {exclude}"
+    );
+}
+
 #[test]
 fn multi_literal_stages_or_not_and() {
     // Regression: OR alternatives within one stage must compile to a single
@@ -385,10 +408,44 @@ fn unsecured_credentials_template_uses_base_technique() {
     );
 
     let tmpl = build_detection_template("detect_unsecured_credentials", None).unwrap();
-    for indicator in ["groups\\.xml", "cpassword", "sysvol", "autologon"] {
+    for indicator in ["groups\\.xml", "cpassword", "autologon", "unattend\\.xml"] {
         assert!(
             tmpl.logql.contains(indicator),
             "GPP/credential-file indicator {indicator} missing from {}",
+            tmpl.logql
+        );
+    }
+
+    for id in ["5145", "4663", "4656"] {
+        assert!(
+            tmpl.logql.contains(id),
+            "event id {id} must scope the query — without it the label selector is \
+             the only pre-filter: {}",
+            tmpl.logql
+        );
+    }
+}
+
+/// A third of every windows-security line matched this rule (796,922 of
+/// 2,409,887 in 24h) because bare path words and script extensions are normal
+/// domain traffic — every domain-joined machine reads SYSVOL for GPO. T1552 was
+/// then always "detected", which fabricates coverage instead of losing it.
+#[test]
+fn unsecured_credentials_template_does_not_match_ordinary_file_access() {
+    let tmpl = build_detection_template("detect_unsecured_credentials", None).unwrap();
+    for overbroad in [
+        "object.*access",
+        "share.*access",
+        "file.*access",
+        "sysvol",
+        "netlogon",
+        "\\.ps1",
+        "\\.bat",
+        "\\.vbs",
+    ] {
+        assert!(
+            !tmpl.logql.contains(overbroad),
+            "'{overbroad}' matches routine domain traffic, not credential discovery: {}",
             tmpl.logql
         );
     }

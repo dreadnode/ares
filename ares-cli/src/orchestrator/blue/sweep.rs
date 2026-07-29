@@ -348,6 +348,13 @@ fn attributable(f: &FiredDetection, attack_start: Option<chrono::DateTime<chrono
     }
 }
 
+/// What one detection template's query produced.
+enum TemplateResult {
+    Fired(Box<FiredDetection>),
+    NoMatch,
+    Failed,
+}
+
 /// Result of a baseline sweep — what fired, what came back empty, and what the
 /// time cap cut off before it could run.
 #[derive(Debug, Default)]
@@ -359,6 +366,11 @@ pub(crate) struct SweepOutcome {
     pub out_of_window: Vec<FiredDetection>,
     /// Templates that ran and returned no matches.
     pub no_match: Vec<String>,
+    /// Templates whose query errored. NOT the same as `no_match`: nothing was
+    /// observed either way, so the technique is unchecked, not clean. Folding
+    /// these into `no_match` told the analyst a technique was cleared when the
+    /// query never returned.
+    pub failed: Vec<String>,
     /// Templates the time cap prevented from running (empty on a clean finish).
     pub not_run: Vec<String>,
     pub timed_out: bool,
@@ -411,6 +423,16 @@ impl SweepOutcome {
             s.push_str(&format!(
                 "Ran and returned no matches (do NOT re-query): {}\n\n",
                 self.no_match.join(", ")
+            ));
+        }
+
+        if !self.failed.is_empty() {
+            s.push_str(&format!(
+                "FAILED to run ({}) — the query errored, so these techniques are UNCHECKED, not \
+                 clean. Nothing was observed either way. Re-run these yourself before concluding \
+                 anything about them, and do NOT report them as absent: {}\n\n",
+                self.failed.len(),
+                self.failed.join(", ")
             ));
         }
 
@@ -564,13 +586,12 @@ pub(crate) async fn run_detection_sweep(
     });
 
     let sem = Arc::new(Semaphore::new(sweep_concurrency()));
-    let mut set: tokio::task::JoinSet<(String, Option<FiredDetection>)> =
-        tokio::task::JoinSet::new();
+    let mut set: tokio::task::JoinSet<(String, TemplateResult)> = tokio::task::JoinSet::new();
     for tmpl in templates {
         let sem = Arc::clone(&sem);
         set.spawn(async move {
             let Ok(_permit) = sem.acquire_owned().await else {
-                return (tmpl.template.clone(), None);
+                return (tmpl.template.clone(), TemplateResult::Failed);
             };
             let out = ares_tools::blue::detection::run_detection_query_events(
                 &tmpl.template,
@@ -579,26 +600,27 @@ pub(crate) async fn run_detection_sweep(
                 attack_start,
             )
             .await;
-            let fired = match out {
-                Ok(ev) if ev.event_count > 0 => Some(FiredDetection {
+            let result = match out {
+                Ok(ev) if ev.event_count > 0 => TemplateResult::Fired(Box::new(FiredDetection {
                     event_count: ev.event_count,
                     first_event_at: ev.first_event_at,
                     last_event_at: ev.last_event_at,
                     hosts: ev.hosts,
                     ..tmpl.clone()
-                }),
-                Ok(_) => None,
+                })),
+                Ok(_) => TemplateResult::NoMatch,
                 Err(e) => {
                     warn!(template = %tmpl.template, error = %e, "Sweep detection query failed");
-                    None
+                    TemplateResult::Failed
                 }
             };
-            (tmpl.template, fired)
+            (tmpl.template, result)
         });
     }
 
     let mut fired: Vec<FiredDetection> = Vec::new();
     let mut completed: BTreeSet<String> = BTreeSet::new();
+    let mut failed: BTreeSet<String> = BTreeSet::new();
     let mut timed_out = false;
 
     let deadline_at = tokio::time::Instant::now() + Duration::from_secs(sweep_timeout_secs());
@@ -613,10 +635,18 @@ pub(crate) async fn run_detection_sweep(
             }
             res = set.join_next() => {
                 match res {
-                    Some(Ok((name, hit))) => {
-                        completed.insert(name);
-                        if let Some(f) = hit {
-                            fired.push(f);
+                    Some(Ok((name, result))) => {
+                        match result {
+                            TemplateResult::Fired(f) => {
+                                completed.insert(name);
+                                fired.push(*f);
+                            }
+                            TemplateResult::NoMatch => {
+                                completed.insert(name);
+                            }
+                            TemplateResult::Failed => {
+                                failed.insert(name);
+                            }
                         }
                     }
                     // Task panic or abort — skip it, don't sink the sweep.
@@ -702,13 +732,28 @@ pub(crate) async fn run_detection_sweep(
         })
         .cloned()
         .collect();
-    let not_run: Vec<String> = all_names.difference(&completed).cloned().collect();
+    let not_run: Vec<String> = all_names
+        .difference(&completed)
+        .filter(|n| !failed.contains(*n))
+        .cloned()
+        .collect();
+    let failed: Vec<String> = failed.into_iter().collect();
+
+    if !failed.is_empty() {
+        warn!(
+            investigation_id,
+            failed = failed.len(),
+            templates = %failed.join(", "),
+            "Detection queries errored — these techniques are UNCHECKED, not clean"
+        );
+    }
 
     info!(
         investigation_id,
         fired = fired.len(),
         out_of_window = out_of_window.len(),
         no_match = no_match.len(),
+        failed = failed.len(),
         not_run = not_run.len(),
         timed_out,
         golden_ticket = %golden_ticket_log_value(&golden_ticket),
@@ -720,6 +765,7 @@ pub(crate) async fn run_detection_sweep(
         fired,
         out_of_window,
         no_match,
+        failed,
         not_run,
         timed_out,
         golden_ticket,
@@ -1186,6 +1232,7 @@ mod tests {
             }],
             out_of_window: vec![],
             no_match: vec!["detect_golden_ticket".into()],
+            failed: vec![],
             not_run: vec![],
             timed_out: false,
             golden_ticket: None,
@@ -1206,6 +1253,7 @@ mod tests {
             fired: vec![],
             out_of_window: vec![],
             no_match: vec![],
+            failed: vec![],
             not_run: vec!["detect_esc1_attack".into()],
             timed_out: true,
             golden_ticket: None,
@@ -1214,6 +1262,38 @@ mod tests {
         assert!(s.contains("FIRED: none"));
         assert!(s.contains("time cap"));
         assert!(s.contains("detect_esc1_attack"));
+    }
+
+    /// A query that errored proves nothing. Reporting it alongside the
+    /// genuinely-clean templates told the analyst a technique was cleared when
+    /// it had never been checked — and under a one-attempt Loki budget that is
+    /// the common case, not the rare one.
+    #[test]
+    fn prompt_summary_separates_failed_queries_from_clean_ones() {
+        let outcome = SweepOutcome {
+            templates_total: 3,
+            fired: vec![],
+            out_of_window: vec![],
+            no_match: vec!["detect_esc1_attack".into()],
+            failed: vec!["detect_secretsdump".into(), "detect_pass_the_hash".into()],
+            not_run: vec![],
+            timed_out: false,
+            golden_ticket: None,
+        };
+        let s = outcome.prompt_summary();
+
+        assert!(s.contains("UNCHECKED"), "{s}");
+        assert!(s.contains("detect_secretsdump"), "{s}");
+        assert!(s.contains("detect_pass_the_hash"), "{s}");
+
+        let no_match_line = s
+            .lines()
+            .find(|l| l.starts_with("Ran and returned no matches"))
+            .expect("clean templates still listed");
+        assert!(
+            !no_match_line.contains("detect_secretsdump"),
+            "a failed query must never be listed as clean: {no_match_line}"
+        );
     }
 
     // ─── Golden ticket correlation ──────────────────────────────────────────
@@ -1682,6 +1762,7 @@ mod tests {
             fired: vec![],
             out_of_window: vec![detection_at(Some("2026-07-27T23:04:33+00:00"))],
             no_match: vec![],
+            failed: vec![],
             not_run: vec![],
             timed_out: false,
             golden_ticket: None,
