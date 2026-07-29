@@ -113,7 +113,7 @@ operation:
   # randomize_entry_foothold: false
   #
   # Emit structured per-run path records for coverage measurement (Phase 0).
-  # emit_path_records: false
+  emit_path_records: true
 
 # Agent configurations
 agents:
