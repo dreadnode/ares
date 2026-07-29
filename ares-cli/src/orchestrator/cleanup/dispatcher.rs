@@ -57,7 +57,7 @@ impl ToolDispatcher for JournalingToolDispatcher {
                 // report success when the state was already set. Journaling a
                 // call that changed nothing hands teardown an inverse for
                 // state it did not create.
-                if super::capture::mutation_took_effect(&call.name, &exec.output) {
+                if super::capture::mutation_took_effect(&call.name, &call.arguments, &exec.output) {
                     let mut record =
                         MutationRecord::from_call(role, task_id, &call.name, &call.arguments);
                     record.hint =

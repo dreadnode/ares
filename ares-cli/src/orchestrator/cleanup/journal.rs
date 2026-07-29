@@ -61,9 +61,12 @@ pub fn is_mutating(tool: &str) -> bool {
 /// One persistent mutation performed against a target during an operation.
 ///
 /// Records *intent* (the forward tool + its arguments + who/where), not the
-/// authenticating secret — passwords/hashes are injected downstream of the
-/// journaling decorator, so they never enter the journal. Teardown re-resolves
-/// a usable secret from the operation's credential store at revert time.
+/// authenticating secret. Secrets are stripped at record time via
+/// [`ares_tools::credentials::CREDENTIAL_KEYS`]: LLM-issued calls never carry
+/// them, but deterministic automation builds its own argument objects above the
+/// journaling decorator and does. Teardown re-resolves a usable secret from the
+/// operation's credential store at revert time, so nothing depends on them
+/// surviving here.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MutationRecord {
     /// RFC3339 timestamp of when the mutation succeeded.
@@ -86,7 +89,7 @@ pub struct MutationRecord {
     /// Domain of the performing principal, from the forward arguments.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub domain: Option<String>,
-    /// Full forward arguments (as journaled — secrets not yet injected).
+    /// Forward arguments with every credential-bearing key removed.
     pub args: Value,
     /// Prior-state captured at forward time to enable a faithful revert
     /// (pywhisker DeviceID, original UPN/attribute value, saved-template path).
@@ -107,10 +110,32 @@ impl MutationRecord {
             target: extract_first(args, &["target", "target_ip", "dc_ip", "host", "hostname"]),
             username: extract_first(args, &["username", "user"]),
             domain: extract_first(args, &["domain", "target_domain"]),
-            args: args.clone(),
+            args: strip_credentials(args),
             hint: None,
         }
     }
+}
+
+/// Drop every credential-bearing key from a forward argument object.
+///
+/// No `undo_plan` reads any of them — teardown's `inject_auth` supplies fresh
+/// material at revert time. Stripping `ticket_path` also closes a latent bug:
+/// the tools resolve auth `ticket_path` > `hash` > `password`, so a stale
+/// journalled ccache path would outrank the secret teardown just resolved.
+fn strip_credentials(args: &Value) -> Value {
+    let Some(obj) = args.as_object() else {
+        return args.clone();
+    };
+    Value::Object(
+        obj.iter()
+            .filter(|(k, _)| {
+                !ares_tools::credentials::CREDENTIAL_KEYS
+                    .iter()
+                    .any(|c| c.eq_ignore_ascii_case(k))
+            })
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect(),
+    )
 }
 
 /// Pull the first present, non-empty string value among `keys` from a JSON object.
@@ -212,5 +237,72 @@ mod tests {
         let back: MutationRecord = serde_json::from_str(&s).unwrap();
         assert_eq!(back.tool, "add_computer");
         assert_eq!(back.target.as_deref(), Some("192.168.58.10"));
+    }
+
+    /// Deterministic automation builds its own argument objects above the
+    /// journaling decorator and puts real cleartext in them, so the journal
+    /// would otherwise hold domain credentials in Redis for the full retention
+    /// window, outside redaction.
+    #[test]
+    fn from_call_strips_every_credential_key() {
+        let mut args = serde_json::Map::new();
+        args.insert("domain".into(), json!("contoso.local"));
+        for key in ares_tools::credentials::CREDENTIAL_KEYS {
+            args.insert((*key).to_string(), json!("P@ssw0rd!"));
+        }
+
+        let r = MutationRecord::from_call(
+            "acl",
+            "t",
+            "pygpoabuse_immediate_task",
+            &Value::Object(args),
+        );
+
+        let obj = r.args.as_object().expect("args stay an object");
+        for key in ares_tools::credentials::CREDENTIAL_KEYS {
+            assert!(!obj.contains_key(*key), "{key} survived into the journal");
+        }
+        assert_eq!(obj["domain"], json!("contoso.local"));
+    }
+
+    /// The strip must never take a key an `undo_plan` reads, or teardown goes
+    /// blind. This fails the build if a targeting key joins CREDENTIAL_KEYS.
+    #[test]
+    fn stripping_keeps_every_key_an_undo_plan_reads() {
+        let args = json!({
+            "domain": "contoso.local",
+            "dc_ip": "192.168.58.240",
+            "username": "alice",
+            "password": "P@ssw0rd!",
+            "ticket_path": "/tmp/ares-tickets/alice.ccache",
+            "computer_name": "ws01",
+            "target_computer": "dc01$",
+            "attacker_sid": "S-1-5-21-1-2-3-1105",
+            "group": "Domain Admins",
+            "target_user": "bob",
+            "action": "write",
+        });
+
+        let r = MutationRecord::from_call("privesc", "t", "rbcd_write", &args);
+        let obj = r.args.as_object().unwrap();
+
+        for key in [
+            "domain",
+            "dc_ip",
+            "username",
+            "computer_name",
+            "target_computer",
+            "attacker_sid",
+            "group",
+            "target_user",
+            "action",
+        ] {
+            assert!(
+                obj.contains_key(key),
+                "{key} is undo-plan input and must survive"
+            );
+        }
+        assert!(!obj.contains_key("password"));
+        assert!(!obj.contains_key("ticket_path"));
     }
 }

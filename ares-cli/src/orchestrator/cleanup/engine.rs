@@ -189,10 +189,10 @@ async fn execute_inverse(
 
 /// Independent read-back: dispatch the probe and confirm the mutation is gone.
 ///
-/// Verified when the probe's `expect_absent` needle is NOT present in a
-/// successful read (attribute no longer lists it), or the read fails to return
-/// the object at all (object deleted). Unverified when the needle is still
-/// visible in a successful read, or the probe itself errored.
+/// Verified only when the probe actually ran — a clean read that no longer
+/// shows the needle, or a read that failed *because the object is gone*. A
+/// probe that failed for any other reason (stale hash, LDAP referral, wrong DC)
+/// proves nothing, so absence of the needle in its output is not evidence.
 async fn validate_revert(
     record: &journal::MutationRecord,
     probe: &ValidateProbe,
@@ -207,14 +207,43 @@ async fn validate_revert(
     }
 
     match ares_tools::dispatch(&probe.tool, &args).await {
-        Ok(out) => match &probe.expect_absent {
-            Some(needle) if out.success && out.combined().contains(needle.as_str()) => {
-                EntryStatus::Unverified(format!("read-back still shows '{needle}'"))
-            }
-            _ => EntryStatus::Verified,
-        },
+        Ok(out) => probe_verdict(out.success, &out.combined(), probe.expect_absent.as_deref()),
         Err(e) => EntryStatus::Unverified(format!("probe failed: {e}")),
     }
+}
+
+/// Decide a read-back verdict from the probe's exit status and output.
+///
+/// Split out from [`validate_revert`] so the verdict logic is testable without
+/// dispatching a binary.
+fn probe_verdict(success: bool, output: &str, expect_absent: Option<&str>) -> EntryStatus {
+    // Absence is checked before the needle: bloodyAD's not-found error echoes
+    // the search filter, which contains the very name we are looking for.
+    if object_absent(output) {
+        return EntryStatus::Verified;
+    }
+    if let Some(needle) = expect_absent {
+        if output.contains(needle) {
+            return EntryStatus::Unverified(format!("read-back still shows '{needle}'"));
+        }
+    }
+    if success {
+        return EntryStatus::Verified;
+    }
+    EntryStatus::Unverified(format!(
+        "read-back probe did not run cleanly, so absence proves nothing: {}",
+        failure_reason(output)
+    ))
+}
+
+/// Whether a failed read failed *because the object is not there*.
+///
+/// Deliberately narrow. `does not exist` is excluded on purpose: it matches
+/// impacket's "Account to modify does not exist!" and a missing ccache path,
+/// either of which would restore the bug this function exists to prevent.
+fn object_absent(output: &str) -> bool {
+    let lower = output.to_lowercase();
+    lower.contains("no result found") || lower.contains("nosuchobject")
 }
 
 /// Auth material teardown can present for a revert.
@@ -700,5 +729,65 @@ mod tests {
         inject_auth(&mut args, &TeardownAuth::Password(&alice));
         assert_eq!(args["password"], json!("pw"));
         assert_eq!(args["domain"], json!("contoso.local"));
+    }
+
+    const RBCD_SID: &str = "S-1-5-21-1234567890-987654321-1122334455-1234";
+
+    /// A probe that did not run cleanly proves nothing. Treating its silence as
+    /// absence is how a revert that never landed gets reported as proven.
+    #[test]
+    fn a_probe_that_exited_non_zero_never_counts_as_proof() {
+        let out = "Impacket v0.13.0\n[-] invalidCredentials";
+        match probe_verdict(false, out, Some(RBCD_SID)) {
+            EntryStatus::Unverified(why) => assert!(why.contains("proves nothing"), "{why}"),
+            other => panic!("expected Unverified, got {other:?}"),
+        }
+    }
+
+    /// The dominant probe is a delete read-back, which fails *because* the
+    /// object is gone. Requiring a zero exit here would flip every successful
+    /// machine-account deletion to unverified.
+    #[test]
+    fn a_deleted_object_still_verifies() {
+        let out = "[-] No result found with:\n\tsearch base: DC=contoso,DC=local\n\
+                   \tsearch filter: (sAMAccountName=WS01$)";
+        assert!(matches!(
+            probe_verdict(false, out, Some("WS01$")),
+            EntryStatus::Verified
+        ));
+    }
+
+    #[test]
+    fn a_failed_probe_that_still_shows_the_needle_is_unverified() {
+        let out = format!(
+            "[-] LDAP referral\nmsDS-AllowedToActOnBehalfOfOtherIdentity: \
+             O:BAD:(A;;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;{RBCD_SID})"
+        );
+        match probe_verdict(false, &out, Some(RBCD_SID)) {
+            EntryStatus::Unverified(why) => assert!(why.contains("still shows"), "{why}"),
+            other => panic!("expected Unverified, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_clean_read_without_the_needle_verifies() {
+        assert!(matches!(
+            probe_verdict(
+                true,
+                "distinguishedName: CN=dc01,DC=contoso,DC=local",
+                Some(RBCD_SID)
+            ),
+            EntryStatus::Verified
+        ));
+    }
+
+    /// `does not exist` must not count as an object-miss: impacket prints it
+    /// for "Account to modify does not exist!" and for a missing ccache, both
+    /// of which are failures rather than proof of deletion.
+    #[test]
+    fn impacket_does_not_exist_is_not_an_object_miss() {
+        assert!(!object_absent("[-] Account to modify does not exist!"));
+        assert!(object_absent("[-] No result found with: search base ..."));
+        assert!(object_absent("[-] noSuchObject"));
     }
 }

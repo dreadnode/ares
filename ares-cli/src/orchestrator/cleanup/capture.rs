@@ -23,8 +23,14 @@ use serde_json::{json, Value};
 ///
 /// Tools with no known no-op signature return `true`: the default must be to
 /// journal, so a mutation is never silently dropped from the revert plan.
-pub fn mutation_took_effect(tool: &str, output: &str) -> bool {
+pub fn mutation_took_effect(tool: &str, args: &Value, output: &str) -> bool {
     match tool {
+        "add_computer" => {
+            !matches!(
+                args.get("action").and_then(Value::as_str).unwrap_or("add"),
+                "delete" | "del" | "remove"
+            ) && !ares_tools::privesc::add_computer_refused(output)
+        }
         "nopac" => scrape_created_computer(output).is_some(),
         "mssql_enable_xp_cmdshell" | "mssql_linked_enable_xpcmdshell" => {
             !output.contains("changed from 1 to 1")
@@ -107,20 +113,28 @@ mod tests {
         // common case, and journaling it invites teardown to disable a
         // provisioned vulnerability.
         let noop = "Configuration option 'xp_cmdshell' changed from 1 to 1. Run RECONFIGURE.";
-        assert!(!mutation_took_effect("mssql_enable_xp_cmdshell", noop));
+        assert!(!mutation_took_effect(
+            "mssql_enable_xp_cmdshell",
+            &json!({}),
+            noop
+        ));
 
         let real = "Configuration option 'xp_cmdshell' changed from 0 to 1. Run RECONFIGURE.";
-        assert!(mutation_took_effect("mssql_enable_xp_cmdshell", real));
+        assert!(mutation_took_effect(
+            "mssql_enable_xp_cmdshell",
+            &json!({}),
+            real
+        ));
     }
 
     #[test]
     fn rbcd_write_that_changed_nothing_is_not_a_mutation() {
         let noop = "[*] alice$ can already impersonate users on dc01$\n\
                     [*] Not modifying the delegation rights.";
-        assert!(!mutation_took_effect("rbcd_write", noop));
+        assert!(!mutation_took_effect("rbcd_write", &json!({}), noop));
 
         let real = "[*] Delegation rights modified successfully!";
-        assert!(mutation_took_effect("rbcd_write", real));
+        assert!(mutation_took_effect("rbcd_write", &json!({}), real));
     }
 
     /// Verbatim output from impacket-rbcd 0.13.0.dev0 when `-delegate-from`
@@ -133,11 +147,11 @@ mod tests {
             "[-] User not found in LDAP: S-1-5-21-412342169-2221029212-88264412-1010\n\
                           [-] Account to escalate does not exist! \
                           (forgot \"$\" for a computer account? wrong domain?)";
-        assert!(!mutation_took_effect("rbcd_write", unresolved));
+        assert!(!mutation_took_effect("rbcd_write", &json!({}), unresolved));
 
         let bad_target = "[-] Account to modify does not exist! \
                           (forgot \"$\" for a computer account? wrong domain?)";
-        assert!(!mutation_took_effect("rbcd_write", bad_target));
+        assert!(!mutation_took_effect("rbcd_write", &json!({}), bad_target));
     }
 
     #[test]
@@ -147,10 +161,12 @@ mod tests {
         // residue that did not exist.
         assert!(!mutation_took_effect(
             "nopac",
+            &json!({}),
             "[-] Cannot exploit, quota reached"
         ));
         assert!(mutation_took_effect(
             "nopac",
+            &json!({}),
             "[*] Adding Computer Account \"WIN-ABCDEF12$\""
         ));
     }
@@ -159,8 +175,46 @@ mod tests {
     fn tools_without_a_known_noop_signature_are_always_journaled() {
         // The default must be to journal: dropping a real mutation from the
         // revert plan is worse than journaling one that changed nothing.
-        assert!(mutation_took_effect("add_computer", "anything at all"));
-        assert!(mutation_took_effect("dacl_edit", ""));
+        assert!(mutation_took_effect(
+            "addspn",
+            &json!({}),
+            "anything at all"
+        ));
+        assert!(mutation_took_effect("dacl_edit", &json!({}), ""));
+    }
+
+    /// impacket-addcomputer exits 0 on an add it refused. A name collision is
+    /// the dangerous one: journaling it as a creation makes teardown delete an
+    /// object this operation never created, and since teardown authenticates as
+    /// a domain admin it has the rights to succeed.
+    #[test]
+    fn add_computer_that_refused_to_create_is_not_a_mutation() {
+        for refused in [
+            "[-] Account WS01$ already exists! If you just want to set a password, use -no-add.",
+            "[-] User alice machine quota exceeded!",
+            "[-] Failed to add a new computer. The server denied the operation.",
+            "[-] SMB SessionError: code: 0xc0000022 - STATUS_ACCESS_DENIED",
+        ] {
+            assert!(
+                !mutation_took_effect("add_computer", &json!({}), refused),
+                "{refused}"
+            );
+        }
+
+        let created = "[*] Successfully added machine account WS01$ with password P@ssw0rd!.";
+        assert!(mutation_took_effect("add_computer", &json!({}), created));
+    }
+
+    /// A delete is not a creation. Journaling one makes `undo_plan` invert it
+    /// into a second delete of the same name — harmless if nothing was
+    /// recreated in between, destructive if something was.
+    #[test]
+    fn add_computer_delete_is_not_journalled_as_a_creation() {
+        assert!(!mutation_took_effect(
+            "add_computer",
+            &json!({ "action": "delete", "computer_name": "ws01" }),
+            "[*] Successfully deleted WS01$."
+        ));
     }
 
     #[test]

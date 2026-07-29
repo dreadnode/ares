@@ -193,11 +193,22 @@ pub async fn add_computer(args: &Value) -> Result<ToolOutput> {
 /// is gone while it is still in the directory. Teardown's read-back probe
 /// caught it as `unverified`, but only because that one plan carries a probe;
 /// the tool must not claim a mutation it did not make.
-fn add_computer_refused(output: &str) -> bool {
+///
+/// The add side exits 0 on refusal too. A name collision is the dangerous one:
+/// the account already exists because something else owns it, and a journalled
+/// "creation" makes teardown delete an object this operation never created.
+#[doc(hidden)]
+pub fn add_computer_refused(output: &str) -> bool {
     let lower = output.to_lowercase();
     lower.contains("doesn't have right to")
         || lower.contains("does not have right to")
         || lower.contains("unable to delete")
+        || lower.contains("already exists!")
+        || lower.contains("machine quota exceeded")
+        || lower.contains("the server denied the operation")
+        || lower.contains("requires a stronger authentication")
+        || lower.contains("status_access_denied")
+        || (lower.contains("account") && lower.contains("not found in"))
 }
 
 /// Build the `impacket-addcomputer` command.
@@ -337,10 +348,19 @@ pub fn build_rbcd_write(args: &Value) -> Result<CommandBuilder> {
         );
     }
 
+    let action = match optional_str(args, "action").unwrap_or("write") {
+        "write" => "write",
+        "remove" => "remove",
+        other => anyhow::bail!(
+            "rbcd_write: unsupported action '{other}'. Use 'write' or 'remove' — 'flush' wipes \
+             the whole attribute including delegation entries this operation did not create."
+        ),
+    };
+
     let cmd = CommandBuilder::new("impacket-rbcd")
         .flag("-delegate-to", target_computer)
         .flag("-delegate-from", attacker_account)
-        .flag("-action", "write")
+        .flag("-action", action)
         .flag("-dc-ip", dc_ip)
         .flag_opt("-dc-host", dc_host);
 
@@ -701,6 +721,23 @@ mod tests {
         ));
     }
 
+    /// The add side exits 0 on refusal too. `already exists` is the one that
+    /// matters: the name collides with an object this operation did not create,
+    /// and journaling it as a creation points teardown's delete at that object.
+    #[test]
+    fn add_computer_add_side_refusals_are_detected_despite_exit_zero() {
+        for refused in [
+            "[-] Account WS01$ already exists! If you just want to set a password, use -no-add.",
+            "[-] User alice machine quota exceeded!",
+            "[-] Failed to add a new computer. The server denied the operation.",
+            "[-] Failed to add a new computer. The server requires a stronger authentication.",
+            "[-] Account WS01$ not found in DC=contoso,DC=local!",
+            "[-] SMB SessionError: code: 0xc0000022 - STATUS_ACCESS_DENIED - {Access Denied}",
+        ] {
+            assert!(super::add_computer_refused(refused), "{refused}");
+        }
+    }
+
     #[test]
     fn add_computer_success_is_not_flagged_as_refused() {
         assert!(!super::add_computer_refused(
@@ -794,6 +831,42 @@ mod tests {
         assert_eq!(flag_value(argv, "-delegate-to"), Some("dc01$"));
         assert_eq!(flag_value(argv, "-delegate-from"), Some("EVILPC$"));
         assert_eq!(flag_value(argv, "-action"), Some("write"));
+    }
+
+    /// Teardown inverts an RBCD write by overriding `action` to `remove`. The
+    /// builder previously hardcoded `-action write` and ignored the override,
+    /// so every "revert" re-applied the mutation it claimed to undo, exited 0,
+    /// and was recorded as reverted.
+    #[test]
+    fn rbcd_write_honours_the_action_override() {
+        let args = with_arg(
+            &with_arg(&rbcd_write_base(), "hash", NT),
+            "action",
+            "remove",
+        );
+        let cmd = super::build_rbcd_write(&args).unwrap();
+        assert_eq!(flag_value(cmd.args_for_test(), "-action"), Some("remove"));
+    }
+
+    #[test]
+    fn rbcd_write_defaults_to_write_when_no_action_is_given() {
+        let args = with_arg(&rbcd_write_base(), "hash", NT);
+        let cmd = super::build_rbcd_write(&args).unwrap();
+        assert_eq!(flag_value(cmd.args_for_test(), "-action"), Some("write"));
+    }
+
+    /// `flush` wipes the whole attribute, including delegation entries the
+    /// range provisioned. Teardown must never be able to reach it by passing an
+    /// action through, so unknown actions fail loudly instead of falling back.
+    #[test]
+    fn rbcd_write_refuses_flush_and_other_actions() {
+        for action in ["flush", "read", "nonsense"] {
+            let args = with_arg(&with_arg(&rbcd_write_base(), "hash", NT), "action", action);
+            assert!(
+                super::build_rbcd_write(&args).is_err(),
+                "action '{action}' must be refused"
+            );
+        }
     }
 
     /// The SID belongs to teardown's read-back needle, never to impacket.
