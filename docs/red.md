@@ -849,14 +849,28 @@ Provisioned by: `ansible/playbooks/ares/privesc.yml` → `dreadnode.nimbus_range
 - **Impacket**: impacket-findDelegation, impacket-getST, impacket-getTGT, impacket-rbcd,
   impacket-addcomputer, impacket-lookupsid, impacket-mssqlclient, impacket-raiseChild,
   impacket-ticketer, impacket-secretsdump, impacket-psexec
-- **Windows potato exploits**: PrintSpoofer, GodPotato, SweetPotato
 - **Kerberos privesc**: KrbRelayUp
-- **GPO abuse**: SharpGPOAbuse, pygpoabuse
-- **Windows enumeration**: Seatbelt, SharpUp
+- **GPO abuse**: SharpGPOAbuse (run locally under `mono`, speaks LDAP to the DC), pygpoabuse
+- **PEAS enumeration**: linPEAS
+
+#### Provisioned but NOT reachable
+
+Ares is a Linux-side remote-protocol orchestrator: it drives SMB/LDAP/Kerberos/MSSQL
+against a target but has no primitive for staging or executing a binary *on* a Windows
+host. The following are installed on the PRIVESC pod by the Ansible role, but nothing
+in the tool registry can run them on a target, so they are deliberately excluded from
+the LLM's toolset:
+
+- **Windows potato exploits**: PrintSpoofer, GodPotato, SweetPotato
+- **Windows enumeration**: Seatbelt, SharpUp, winPEAS
 - **User impersonation**: RunasCs
 - **PowerShell scripts**: PowerUp, PowerUpSQL
-- **PEAS enumeration**: winPEAS, linPEAS
 - **UAC bypass**: SCMUACBypass
+
+Consequence: the GOAD local-privilege-escalation category (SeImpersonate → SYSTEM and
+the potato family) is out of scope by construction. `SeImpersonatePrivilege` is published
+as an operator lead and never credited as exploited. Reversing this requires an upload +
+execute primitive, which is an architectural decision, not a missing parser.
 
 ### LATERAL Agent
 

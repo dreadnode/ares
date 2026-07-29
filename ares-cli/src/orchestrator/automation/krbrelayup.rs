@@ -29,14 +29,18 @@ fn collect_krbrelayup_work(state: &StateInner) -> Vec<KrbRelayUpWork> {
     }
 
     // Check if any DC has LDAP signing disabled (vuln registered by auto_ldap_signing)
-    let has_ldap_weak = state.discovered_vulnerabilities.values().any(|v| {
-        let vtype = v.vuln_type.to_lowercase();
-        vtype == "ldap_signing_disabled" || vtype == "ldap_signing_not_required"
-    });
+    let ldap_weak_vuln_id = state
+        .discovered_vulnerabilities
+        .values()
+        .find(|v| {
+            let vtype = v.vuln_type.to_lowercase();
+            vtype == "ldap_signing_disabled" || vtype == "ldap_signing_not_required"
+        })
+        .map(|v| v.vuln_id.clone());
 
-    if !has_ldap_weak {
+    let Some(ldap_weak_vuln_id) = ldap_weak_vuln_id else {
         return Vec::new();
-    }
+    };
 
     let mut items = Vec::new();
 
@@ -86,6 +90,7 @@ fn collect_krbrelayup_work(state: &StateInner) -> Vec<KrbRelayUpWork> {
             hostname: host.hostname.clone(),
             domain,
             credential: cred,
+            vuln_id: ldap_weak_vuln_id.clone(),
         });
     }
 
@@ -122,6 +127,7 @@ pub async fn auto_krbrelayup(dispatcher: Arc<Dispatcher>, mut shutdown: watch::R
                 "target_ip": item.target_ip,
                 "hostname": item.hostname,
                 "domain": item.domain,
+                "vuln_id": item.vuln_id,
                 "credential": {
                     "username": item.credential.username,
                     "password": item.credential.password,
@@ -169,6 +175,7 @@ struct KrbRelayUpWork {
     hostname: String,
     domain: String,
     credential: ares_core::models::Credential,
+    vuln_id: String,
 }
 
 #[cfg(test)]
@@ -494,6 +501,7 @@ mod tests {
             hostname: "srv01.contoso.local".into(),
             domain: "contoso.local".into(),
             credential: cred,
+            vuln_id: "ldap-weak-1".into(),
         };
 
         assert_eq!(work.dedup_key, "krbrelayup:192.168.58.30");

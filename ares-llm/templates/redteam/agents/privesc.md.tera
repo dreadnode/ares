@@ -307,9 +307,9 @@ The chain (executed inside the dispatched task):
 3. **`mssql_enable_xp_cmdshell`** while impersonating `sa` — enables OS command
    execution.
 4. **`mssql_impersonate`** with the xp_cmdshell query (e.g.
-   `EXEC xp_cmdshell 'whoami /priv'`). Look for `SeImpersonatePrivilege` (enables
-   potato attacks to SYSTEM). Common result: `NT AUTHORITY\NETWORK SERVICE`
-   (limited).
+   `EXEC xp_cmdshell 'whoami /priv'`). Look for `SeImpersonatePrivilege` — record
+   it as a lead; it cannot be escalated here (see Local Privilege Escalation).
+   Common result: `NT AUTHORITY\NETWORK SERVICE` (limited).
 5. **`mssql_enum_linked_servers`** — finds linked servers for cross-domain
    pivoting. The orchestrator auto-dispatches a follow-up exploit task per
    discovered link with `linked_server` populated, so you do NOT call
@@ -318,9 +318,9 @@ The chain (executed inside the dispatched task):
    SQL service to authenticate to your relay listener. Captures the machine
    account hash for relay to LDAPS.
 
-If `NETWORK SERVICE` is your context after step 4, escalate via potato attacks
-(GodPotato, PrintSpoofer) or pivot to other attack paths (constrained
-delegation on discovered accounts).
+If `NETWORK SERVICE` is your context after step 4, there is no local escalation
+available — pivot to other attack paths (constrained delegation on discovered
+accounts, linked-server hops, ADCS).
 
 ## Trust Attacks
 
@@ -371,16 +371,15 @@ golden ticket is preferred for persistence once a krbtgt hash is in hand.
 
 When you have a shell but need SYSTEM (e.g., SeImpersonatePrivilege):
 
-### Potato Attacks
-For service accounts with SeImpersonate/SeAssignPrimaryToken, use the binaries
-on the PRIVESC pod directly (GodPotato, PrintSpoofer, SweetPotato are pre-installed):
-```bash
-# These require shell access on the target (via psexec/evil-winrm first)
-# Upload and execute via established shell
-GodPotato.exe -cmd "cmd /c whoami"
-PrintSpoofer.exe -c "cmd /c whoami"
-SweetPotato.exe -c "cmd /c whoami"
-```
+### Potato Attacks Are NOT Available
+This harness is a Linux-side remote-protocol orchestrator. It has no primitive
+for staging or running a binary on a Windows target, so the potato family
+(GodPotato, PrintSpoofer, SweetPotato) and every other on-target executable
+(winPEAS, Seatbelt, SharpUp, PowerUp, RunasCs) CANNOT be used. Do not attempt
+them and do not report SYSTEM on the strength of an observed privilege.
+
+`SeImpersonatePrivilege` is recorded as an operator lead only. Observing it is
+not exploitation of it — when you see it, note it and move on to a path below.
 
 ### RBCD Self-Relay
 For local privilege escalation via RBCD (requires ability to add computer):
