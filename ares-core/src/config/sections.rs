@@ -102,10 +102,6 @@ pub struct AgentConfig {
     #[serde(default = "default_max_steps")]
     pub max_steps: u32,
     #[serde(default)]
-    pub pod_selector: String,
-    #[serde(default)]
-    pub capabilities: Vec<String>,
-    #[serde(default)]
     pub tools: Vec<String>,
 }
 
@@ -296,7 +292,6 @@ mod tests {
         let cfg: AgentConfig = serde_json::from_str(r#"{"model": "openai/gpt-4.1"}"#).unwrap();
         assert_eq!(cfg.model, "openai/gpt-4.1");
         assert_eq!(cfg.max_steps, 100);
-        assert!(cfg.capabilities.is_empty());
         assert!(cfg.tools.is_empty());
     }
 }

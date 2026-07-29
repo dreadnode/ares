@@ -137,7 +137,8 @@ If target is a DC, secretsdump automatically performs DCSync. Look for:
 
 ## CRITICAL: Step Limits (MUST FOLLOW)
 
-**You have a HARD LIMIT of 40 steps. Exceeding this wastes resources and fails the task.**
+**Finish in as few steps as possible. The runtime warns you when your step budget is
+almost gone; running out without calling `task_complete` fails the task.**
 
 ### Mandatory Rules:
 1. **MAX 2 access methods per target** - If psexec fails, try winrm, then STOP

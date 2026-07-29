@@ -86,22 +86,23 @@ retention tiers.
 Quick reference table for all red team agents with their key configuration and
 tool assignments. For detailed responsibilities, see sections below.
 
-| Agent | Purpose | Pod Selector | Max Steps | Tool Classes |
-|-------|---------|--------------|-----------|--------------|
-| **ORCHESTRATOR** | Central coordinator (dispatches, never executes) | `app.kubernetes.io/name=ares-orchestrator` | 200 | `OrchestratorTools`, `RedTeamReportingTools` |
-| **RECON** | Network scanning, enumeration, BloodHound | `ares.dreadnode.io/role=recon` | 100 | `NetworkEnumerationTools`, `BloodHoundTools`, `RedTeamReportingTools` |
-| **CREDENTIAL_ACCESS** | Password attacks, hash extraction | `ares.dreadnode.io/role=credential_access` | 100 | `CredentialDiscoveryTools`, `CredentialHarvestingTools`, `SharePilferingTools`, `GMSATools` |
-| **CRACKER** | Offline hash cracking | `ares.dreadnode.io/role=cracker` | 150 | `CrackingTools`, `CrackerCallbackTools` |
-| **ACL** | AD ACL abuse attacks | `ares.dreadnode.io/role=acl` | 150 | `ACLExploitTools` |
-| **PRIVESC** | Privilege escalation exploitation | `ares.dreadnode.io/role=privesc` | 100 | `CertipyTools`, `DelegationTools`, `MSSQLTools`, `CVEExploitTools`, `GoldenTicketTools`, `TrustAttackTools`, `LateralMovementTools`, `CredentialHarvestingTools` |
-| **LATERAL** | Host compromise, credential harvesting | `ares.dreadnode.io/role=lateral` | 300 | `LateralMovementTools`, `CredentialHarvestingTools`, `SharePilferingTools`, `PostureValidationTools`, `LateralCallbackTools` |
-| **COERCION** | NTLM coercion and relay attacks | `ares.dreadnode.io/role=coercion` | 30 | `CoercionTools`, `CoercionNetworkTools` |
+| Agent | Purpose | Max Steps | Tool Classes |
+|-------|---------|-----------|--------------|
+| **ORCHESTRATOR** | Central coordinator (dispatches, never executes) | 200 | `OrchestratorTools`, `RedTeamReportingTools` |
+| **RECON** | Network scanning, enumeration, BloodHound | 100 | `NetworkEnumerationTools`, `BloodHoundTools`, `RedTeamReportingTools` |
+| **CREDENTIAL_ACCESS** | Password attacks, hash extraction | 100 | `CredentialDiscoveryTools`, `CredentialHarvestingTools`, `SharePilferingTools`, `GMSATools` |
+| **CRACKER** | Offline hash cracking | 150 | `CrackingTools`, `CrackerCallbackTools` |
+| **ACL** | AD ACL abuse attacks | 150 | `ACLExploitTools` |
+| **PRIVESC** | Privilege escalation exploitation | 100 | `CertipyTools`, `DelegationTools`, `MSSQLTools`, `CVEExploitTools`, `GoldenTicketTools`, `TrustAttackTools`, `LateralMovementTools`, `CredentialHarvestingTools` |
+| **LATERAL** | Host compromise, credential harvesting | 300 | `LateralMovementTools`, `CredentialHarvestingTools`, `SharePilferingTools`, `PostureValidationTools`, `LateralCallbackTools` |
+| **COERCION** | NTLM coercion and relay attacks | 30 | `CoercionTools`, `CoercionNetworkTools` |
 
 ### Configuration Sources
 
-- **Pod selectors**: `config/ares.yaml`
-- **Tool assignments**: `config/ares.yaml` → per-agent `capabilities`
-- **Max steps defaults**: `config/ares.yaml` → per-agent `max_steps`
+- **Tool assignments**: `ares-llm/src/tool_registry/` → `tools_for_role`, keyed by
+  `AgentRole`. These are not configurable from YAML.
+- **Max steps**: `config/ares.yaml` → per-agent `max_steps`, overridden by
+  `ARES_AGENT_MAX_STEPS`; falls back to 75 when neither is set.
 - **Agent instructions**: `ares-cli/src/orchestrator/` prompt templates
 
 ### Model Selection

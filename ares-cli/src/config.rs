@@ -88,12 +88,6 @@ fn config_show(config_path: Option<String>, models_only: bool) -> Result<()> {
         println!("  {}:", role);
         println!("    model: {}", agent.model);
         println!("    max_steps: {}", agent.max_steps);
-        if !agent.pod_selector.is_empty() {
-            println!("    pod_selector: {}", agent.pod_selector);
-        }
-        if !agent.capabilities.is_empty() {
-            println!("    capabilities: {} tools", agent.capabilities.len());
-        }
         if !agent.tools.is_empty() {
             println!("    tools: {} dispatch actions", agent.tools.len());
         }

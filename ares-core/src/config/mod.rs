@@ -141,8 +141,6 @@ impl AresConfig {
                 AgentConfig {
                     model: model.to_string(),
                     max_steps: default_max_steps(),
-                    pod_selector: String::new(),
-                    capabilities: Vec::new(),
                     tools: Vec::new(),
                 },
             );
@@ -312,32 +310,55 @@ security: {}
 
     #[test]
     fn load_production_config() {
-        // Test against the actual production config if it exists at the expected relative path
         let prod_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .unwrap()
-            .parent()
-            .unwrap()
             .join("config/ares.yaml");
+        assert!(
+            prod_path.exists(),
+            "shipped config not found at {} — this test silently passed for as long as \
+             the path was wrong, so keep the assertion",
+            prod_path.display()
+        );
 
-        if prod_path.exists() {
-            let cfg = AresConfig::load(&prod_path).unwrap();
-            assert_eq!(cfg.operation.name, "ares-multi-agent");
-            assert_eq!(cfg.operation.namespace, "attack-simulation");
-            // All 8 agent roles should be present
-            assert!(cfg.agents.contains_key("orchestrator"));
-            assert!(cfg.agents.contains_key("recon"));
-            assert!(cfg.agents.contains_key("credential_access"));
-            assert!(cfg.agents.contains_key("cracker"));
-            assert!(cfg.agents.contains_key("acl"));
-            assert!(cfg.agents.contains_key("privesc"));
-            assert!(cfg.agents.contains_key("lateral"));
-            assert!(cfg.agents.contains_key("coercion"));
-            assert_eq!(cfg.agents.len(), 8);
-            // Vulnerability priorities
-            assert_eq!(cfg.vulnerability_priority("adcs_esc1"), 1);
-            assert_eq!(cfg.vulnerability_priority("password_spray"), 50);
+        let cfg = AresConfig::load(&prod_path).unwrap();
+        assert_eq!(cfg.operation.name, "ares-multi-agent");
+        assert_eq!(cfg.operation.namespace, "attack-simulation");
+
+        let mut roles: Vec<&str> = cfg.agents.keys().map(String::as_str).collect();
+        roles.sort_unstable();
+        assert_eq!(
+            roles,
+            [
+                "acl",
+                "coercion",
+                "cracker",
+                "credential_access",
+                "lateral",
+                "orchestrator",
+                "privesc",
+                "recon",
+            ]
+        );
+
+        for (role, expected) in [
+            ("orchestrator", 200),
+            ("recon", 100),
+            ("credential_access", 100),
+            ("cracker", 150),
+            ("acl", 150),
+            ("privesc", 100),
+            ("lateral", 300),
+            ("coercion", 30),
+        ] {
+            assert_eq!(
+                cfg.agents[role].max_steps, expected,
+                "{role} max_steps drifted"
+            );
         }
+
+        assert_eq!(cfg.vulnerability_priority("adcs_esc1"), 1);
+        assert_eq!(cfg.vulnerability_priority("password_spray"), 50);
     }
 
     #[test]

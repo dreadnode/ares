@@ -122,7 +122,6 @@ agents:
   orchestrator:
     model: "gpt-5.2"
     max_steps: 200
-    pod_selector: "app.kubernetes.io/name=ares-orchestrator"
     # Tools: OrchestratorTools, RedTeamReportingTools
     # NOTE: Orchestrator NEVER executes tools directly - it dispatches to workers
     tools:
@@ -154,198 +153,45 @@ agents:
     # gpt-5-mini is ~7x cheaper than gpt-5.2 with negligible quality loss here.
     model: "gpt-5-mini"
     max_steps: 100
-    pod_selector: "ares.dreadnode.io/role=recon"
     # Provisioned by: ansible/playbooks/ares/recon.yml → dreadnode.nimbus_range.recon_tools
-    capabilities:
-      # Network scanning (apt: nmap)
-      - nmap
-      # LDAP enumeration (apt: ldap-utils)
-      - ldapsearch
-      # SMB enumeration (apt: enum4linux, enum4linux-ng, samba-common-bin)
-      - enum4linux
-      - enum4linux-ng
-      - rpcclient
-      # DNS utilities (apt: dnsutils, whois)
-      - dig
-      - nslookup
-      - whois
-      # AD DNS enumeration (pipx: adidnsdump)
-      - adidnsdump
-      # AD enumeration (pipx: netexec, bloodhound, certipy-ad)
-      - netexec
-      - bloodhound-python
-      - certipy
-      # Impacket enumeration scripts (source: /opt/impacket)
-      - impacket-GetNPUsers
-      - impacket-GetUserSPNs
 
   credential_access:
     # Credential-access mostly picks a tool + target from a known matrix.
     # gpt-5 is ~29% cheaper than gpt-5.2 and handles this shape well.
     model: "gpt-5"
     max_steps: 100
-    pod_selector: "ares.dreadnode.io/role=credential_access"
     # Provisioned by: ansible/playbooks/ares/credential_access.yml → dreadnode.nimbus_range.credential_access_tools
-    capabilities:
-      # SMB access (apt: smbclient, samba-common-bin)
-      - smbclient
-      - rpcclient
-      # Password spraying (pipx: sprayhound)
-      - sprayhound
-      # Targeted kerberoasting (git: /opt/targetedKerberoast)
-      - targetedKerberoast
-      # LSASS credential extraction (pipx: lsassy)
-      - lsassy
-      # gMSA password extraction (git: /opt/gMSADumper)
-      - gMSADumper
-      # Impacket credential scripts (source: /opt/impacket)
-      - impacket-GetNPUsers
-      - impacket-GetUserSPNs
-      - impacket-secretsdump
 
   cracker:
     # Cracker dispatches hashcat and parses its output — fire-the-tool loop.
     # gpt-5-mini is ~7x cheaper and sufficient for this mechanical role.
     model: "gpt-5-mini"
     max_steps: 150
-    pod_selector: "ares.dreadnode.io/role=cracker"
     # Provisioned by: ansible/playbooks/ares/cracker.yml → dreadnode.nimbus_range.cracking_tools
-    capabilities:
-      # Password cracking (apt: hashcat, john)
-      - hashcat
-      - john
-      # Wordlists (/usr/share/wordlists/)
-      - rockyou
-      - seclists
 
   acl:
     model: "gpt-5.2"
     max_steps: 150  # ACL enumeration is wide: many edges, each needing a separate primitive
-    pod_selector: "ares.dreadnode.io/role=acl"
     # Provisioned by: ansible/playbooks/ares/acl_abuse.yml → dreadnode.nimbus_range.acl_tools
-    capabilities:
-      # ACL exploitation framework (apt/pipx: bloodyAD)
-      - bloodyAD
-      # Shadow credentials manipulation (pipx: pywhisker)
-      - pywhisker
-      # Targeted kerberoasting via ACLs (git: /opt/targetedKerberoast)
-      - targetedKerberoast
-      # RPC enumeration (apt: samba-common-bin)
-      - rpcclient
-      # Impacket ACL editing (source: /opt/impacket)
-      - impacket-dacledit
 
   privesc:
     model: "gpt-5.2"
     max_steps: 100
-    pod_selector: "ares.dreadnode.io/role=privesc"
     # Provisioned by: ansible/playbooks/ares/privesc.yml → dreadnode.nimbus_range.privesc_tools
-    capabilities:
-      # ADCS exploitation (pipx: certipy-ad)
-      - certipy
-      # LSASS credential extraction (pipx: lsassy)
-      - lsassy
-      # CVE-2021-42287/CVE-2021-42278 (git: /opt/privesc/noPac → /usr/local/bin/nopac)
-      - nopac
-      # Kerberos relay toolkit (git: /opt/krbrelayx) - includes printerbug, addspn, dnstool
-      - krbrelayx
-      - printerbug
-      - addspn
-      - dnstool
-      # Impacket delegation/ticket/MSSQL scripts (source: /opt/impacket)
-      - impacket-findDelegation
-      - impacket-getST
-      - impacket-getTGT
-      - impacket-rbcd
-      - impacket-addcomputer
-      - impacket-lookupsid
-      - impacket-mssqlclient
-      - impacket-raiseChild
-      - impacket-ticketer
-      - impacket-secretsdump  # S4U → secretsdump chain must complete on same pod
-      - impacket-psexec       # S4U → psexec chain must complete on same pod
-      # Windows potato exploits (/opt/privesc/)
-      - PrintSpoofer          # SeImpersonatePrivilege (binary: PrintSpoofer64.exe)
-      - GodPotato             # SeImpersonatePrivilege (binary: GodPotato-NET4.exe)
-      - SweetPotato           # SeImpersonatePrivilege (source repo)
-      # Kerberos relay local privesc (git: /opt/privesc/KrbRelayUp)
-      - KrbRelayUp
-      # GPO abuse tools
-      - SharpGPOAbuse         # .NET GPO abuse (git: /opt/privesc/SharpGPOAbuse)
-      - pygpoabuse            # Python GPO abuse (pipx)
-      # Windows enumeration (binaries from Ghostpack)
-      - Seatbelt
-      - SharpUp
-      # Run commands as another user (binary: /opt/privesc/RunasCs)
-      - RunasCs
-      # PowerShell privesc scripts (/opt/privesc/)
-      - PowerUp               # PowerUp.ps1
-      - PowerUpSQL            # PowerUpSQL.ps1 (MSSQL enumeration/exploitation)
-      # PEAS enumeration scripts (/opt/privesc/)
-      - winPEAS
-      - linPEAS
-      # CVE exploits
-      - printnightmare        # CVE-2021-1675 (/usr/local/bin/printnightmare)
-      - zerologon             # CVE-2020-1472 (git: /opt/privesc/zerologon)
-      - SCMUACBypass          # UAC bypass (git: /opt/privesc/SCMUACBypass)
 
   lateral:
     # Lateral picks a host + an execution tool from a known matrix.
     # gpt-5 is ~29% cheaper than gpt-5.2 without sacrificing decision quality.
     model: "gpt-5"
     max_steps: 300
-    pod_selector: "ares.dreadnode.io/role=lateral"
     # Provisioned by: ansible/playbooks/ares/lateral_movement.yml → dreadnode.nimbus_range.lateral_movement_tools
-    capabilities:
-      # WinRM remote access (gem: evil-winrm)
-      - evil-winrm
-      # RDP pass-the-hash (apt: freerdp2-x11/freerdp3-x11)
-      - xfreerdp
-      # SSH with password (apt: sshpass)
-      - sshpass
-      # SMB file access (apt: smbclient)
-      - smbclient
-      # TCP connection proxying (apt: proxychains4)
-      - proxychains4
-      # Pass-the-Hash toolkit (apt: passing-the-hash)
-      - pth-winexe
-      - pth-smbclient
-      - pth-rpcclient
-      - pth-net
-      - pth-wmic
-      # Pre-connection validation (Ares internal function)
-      - posture_validation  # check_rdp_reachability, check_winrm_reachability
-      # Impacket remote execution scripts (source: /opt/impacket)
-      - impacket-psexec
-      - impacket-wmiexec
-      - impacket-smbexec
-      - impacket-secretsdump
 
   coercion:
     # Coercion is a tight fire-the-coercion-tool loop (responder + relay).
     # gpt-5-mini is ~7x cheaper than gpt-5.2 and handles this fine.
     model: "gpt-5-mini"
     max_steps: 30
-    pod_selector: "ares.dreadnode.io/role=coercion"
     # Provisioned by: ansible/playbooks/ares/coercion.yml → dreadnode.nimbus_range.coercion_tools
-    capabilities:
-      # LLMNR/NBT-NS/MDNS poisoning (/usr/sbin/responder)
-      - responder
-      # DHCPv6 poisoning (/usr/bin/mitm6)
-      - mitm6
-      # Authentication coercion framework (/usr/bin/coercer)
-      - coercer
-      # MS-EFSRPC coercion (/usr/local/bin/petitpotam)
-      - petitpotam
-      # DFS coercion (/usr/local/bin/dfscoerce)
-      - dfscoerce
-      # Kerberos relay toolkit (/usr/local/bin/) - includes addspn, dnstool
-      - krbrelayx
-      - printerbug
-      - addspn
-      - dnstool
-      # NTLM relay (/usr/local/bin/impacket-ntlmrelayx)
-      - impacket-ntlmrelayx
 
 # Timeout configurations
 timeouts:

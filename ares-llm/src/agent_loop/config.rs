@@ -86,6 +86,18 @@ impl AgentLoopConfig {
             session_log: SessionLogConfig::from_env(),
         }
     }
+
+    /// Layer a per-role `max_steps` from YAML under the env override:
+    /// `ARES_AGENT_MAX_STEPS` > YAML > [`Self::default`]. `None`/zero is ignored.
+    pub fn with_config_max_steps(mut self, max_steps: Option<u32>) -> Self {
+        if std::env::var("ARES_AGENT_MAX_STEPS").is_ok() {
+            return self;
+        }
+        if let Some(steps) = max_steps.filter(|s| *s > 0) {
+            self.max_steps = steps;
+        }
+        self
+    }
 }
 
 /// Context window management to prevent unbounded message growth.
@@ -617,7 +629,32 @@ mod tests {
     }
 
     #[test]
+    fn with_config_max_steps_precedence() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        std::env::remove_var("ARES_AGENT_MAX_STEPS");
+
+        let base = AgentLoopConfig::from_env("m".into(), None);
+        assert_eq!(base.max_steps, 75);
+
+        let from_yaml =
+            AgentLoopConfig::from_env("m".into(), None).with_config_max_steps(Some(300));
+        assert_eq!(from_yaml.max_steps, 300);
+
+        let zero = AgentLoopConfig::from_env("m".into(), None).with_config_max_steps(Some(0));
+        assert_eq!(zero.max_steps, 75);
+
+        let absent = AgentLoopConfig::from_env("m".into(), None).with_config_max_steps(None);
+        assert_eq!(absent.max_steps, 75);
+
+        std::env::set_var("ARES_AGENT_MAX_STEPS", "13");
+        let env_wins = AgentLoopConfig::from_env("m".into(), None).with_config_max_steps(Some(300));
+        assert_eq!(env_wins.max_steps, 13);
+        std::env::remove_var("ARES_AGENT_MAX_STEPS");
+    }
+
+    #[test]
     fn agent_loop_config_from_env_layers_overrides() {
+        let _guard = ENV_LOCK.lock().unwrap();
         std::env::set_var("ARES_AGENT_MAX_STEPS", "13");
         std::env::set_var("ARES_AGENT_MAX_TOKENS", "8192");
         std::env::set_var("ARES_AGENT_MAX_TOOL_CALLS_PER_NAME", "3");

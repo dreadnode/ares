@@ -329,40 +329,6 @@ pub fn tools_for_role(role: AgentRole) -> Vec<ToolDefinition> {
     tools
 }
 
-/// Get tool definitions for a specific set of capability names.
-///
-/// This is used when the YAML config specifies which tools a role should have.
-/// Returns only the tools whose names appear in `capabilities`.
-pub fn tools_for_capabilities(capabilities: &[String]) -> Vec<ToolDefinition> {
-    // Dedup by name — same tool may appear in multiple roles
-    let mut seen = std::collections::HashSet::new();
-    let mut matched: Vec<ToolDefinition> = [
-        recon::tool_definitions(),
-        credential_access::tool_definitions(),
-        cracker::tool_definitions(),
-        acl::tool_definitions(),
-        privesc::tool_definitions(),
-        lateral::tool_definitions(),
-        lateral::mssql::definitions(),
-        coercion::tool_definitions(),
-        orchestrator_tools::tool_definitions(),
-    ]
-    .into_iter()
-    .flatten()
-    .filter(|t| capabilities.iter().any(|c| c == &t.name))
-    .filter(|t| seen.insert(t.name.clone()))
-    .collect();
-
-    // Always include reporting + callback tools
-    matched.extend(reporting::tool_definitions());
-    matched.extend(callback_tool_definitions());
-
-    // Strip credential fields — see tools_for_role.
-    strip_secrets_from_all(&mut matched);
-
-    matched
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -452,38 +418,6 @@ mod tests {
     }
 
     #[test]
-    fn no_secret_fields_in_capability_schemas() {
-        let caps: Vec<String> = ["psexec", "secretsdump", "generate_golden_ticket"]
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
-        let tools = tools_for_capabilities(&caps);
-        for tool in &tools {
-            if CALLBACK_NAMES_WITH_SECRETS.contains(&tool.name.as_str()) {
-                continue;
-            }
-            let exposed = exposed_secret_keys(&tool.name);
-            if let Some(props) = tool
-                .input_schema
-                .get("properties")
-                .and_then(|v| v.as_object())
-            {
-                for key in SECRET_SCHEMA_KEYS {
-                    if exposed.contains(key) {
-                        continue;
-                    }
-                    assert!(
-                        !props.contains_key(*key),
-                        "Capability tool '{}' leaks secret field '{}' to LLM",
-                        tool.name,
-                        key
-                    );
-                }
-            }
-        }
-    }
-
-    #[test]
     fn tool_schemas_valid_json() {
         for role in [
             AgentRole::Recon,
@@ -511,18 +445,6 @@ mod tests {
                 );
             }
         }
-    }
-
-    #[test]
-    fn returns_tools_for_capabilities() {
-        let caps = vec!["nmap_scan".to_string(), "secretsdump".to_string()];
-        let tools = tools_for_capabilities(&caps);
-        let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
-        assert!(names.contains(&"nmap_scan"));
-        assert!(names.contains(&"secretsdump"));
-        assert!(!names.contains(&"enumerate_users"));
-        // Reporting + callbacks always present
-        assert!(names.contains(&"task_complete"));
     }
 
     #[test]

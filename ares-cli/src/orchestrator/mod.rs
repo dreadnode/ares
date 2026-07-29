@@ -514,9 +514,15 @@ async fn run_inner() -> Result<()> {
         };
         let (provider, model_name) = ares_llm::create_provider(&spec)
             .with_context(|| format!("Failed to create LLM provider for role '{yaml_key}'"))?;
-        let cfg = ares_llm::AgentLoopConfig::from_env(model_name, config.strategy.llm_temperature);
+        let cfg = ares_llm::AgentLoopConfig::from_env(model_name, config.strategy.llm_temperature)
+            .with_config_max_steps(
+                ares_config
+                    .as_ref()
+                    .and_then(|c| c.agents.get(*yaml_key))
+                    .map(|a| a.max_steps),
+            );
         if *role != ares_llm::tool_registry::AgentRole::Orchestrator {
-            info!(role = %yaml_key, model = %spec, "Per-role model");
+            info!(role = %yaml_key, model = %spec, max_steps = cfg.max_steps, "Per-role model");
         }
         providers.insert(
             *role,
