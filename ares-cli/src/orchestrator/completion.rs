@@ -255,13 +255,33 @@ async fn outstanding_investigations(
     outstanding
 }
 
-/// This operation's investigations that are registered and not yet terminal.
+/// This operation's investigations that are not known to have finished, i.e.
+/// everything the terminal investigation must be freed from.
 ///
-/// A member with no status key is deliberately excluded: the operation set lives
-/// for 7 days while status keys expire after 1 day, so a resumed operation would
-/// otherwise treat last week's investigations as in flight and wait out the
-/// whole drain budget.
-async fn in_flight_op_investigations(
+/// A member with **no status key is included**. Blue runs investigations
+/// serially, so a mid-op investigation that is still queued has not written a
+/// status yet — and that is exactly the one that will start later, seize the
+/// runner, and hold the terminal investigation behind it until the drain
+/// deadline. Excluding it stranded the terminal investigation of a live
+/// operation: a queued mid-op investigation escaped supersede, started 14
+/// minutes into the drain, and ran past the budget while the investigation the
+/// orchestrator was actually waiting for never began.
+///
+/// The result is only ever superseded, never waited on, so the 7-day operation
+/// set / 1-day status TTL skew that motivated excluding them is not a hazard
+/// here: superseding an investigation that expired last week is a no-op, and a
+/// supersede that fails is re-watched with `wait_when_status_missing: false`,
+/// which keeps a ghost from consuming the drain budget.
+/// Whether an investigation still needs superseding, given its status.
+///
+/// `None` means unfinished. Blue writes a status only once an investigation
+/// starts, so a queued one reads as `None` — and that is precisely the case
+/// that must be superseded, because it is next in line for the serial runner.
+pub(crate) fn is_unfinished(status: Option<&str>) -> bool {
+    !status.is_some_and(ares_core::state::blue_status_is_terminal)
+}
+
+async fn unfinished_op_investigations(
     conn: &mut redis::aio::ConnectionManager,
     operation_id: &str,
 ) -> Vec<String> {
@@ -272,19 +292,16 @@ async fn in_flight_op_investigations(
         .await
         .unwrap_or_default();
 
-    let mut in_flight = Vec::new();
+    let mut unfinished = Vec::new();
     for id in ids {
         let status = ares_core::state::read_blue_status(conn, &id)
             .await
             .unwrap_or(None);
-        if status
-            .as_deref()
-            .is_some_and(|s| !ares_core::state::blue_status_is_terminal(s))
-        {
-            in_flight.push(id);
+        if is_unfinished(status.as_deref()) {
+            unfinished.push(id);
         }
     }
-    in_flight
+    unfinished
 }
 
 /// Redis-authoritative count of red-team tasks still pending completion.
@@ -643,12 +660,17 @@ pub async fn wait_for_completion(
 
             // When blue team is enabled, submit the terminal investigation — the
             // only one built from the complete loot and the full attack window —
-            // then wait for it and it alone. Mid-op investigations still in
-            // flight are superseded rather than waited on: the blue runner
-            // executes investigations serially, so leaving one running holds the
+            // then wait for it and it alone. Every other unfinished mid-op
+            // investigation is superseded rather than waited on: the blue runner
+            // executes investigations serially, so leaving one alive holds the
             // terminal investigation behind it for up to a full investigation
-            // timeout, which is what used to strand the terminal one unfinished
-            // at the drain deadline.
+            // timeout, which is what strands the terminal one unfinished at the
+            // drain deadline.
+            //
+            // "Unfinished" must include the ones still *queued*, not just the
+            // ones already running — a queued investigation has written no
+            // status yet, and it is the one that will grab the runner the moment
+            // the current investigation releases it.
             if blue_enabled {
                 info!("Blue team enabled — waiting for investigations to finish before shutdown");
                 let mut conn = dispatcher.queue.connection();
@@ -656,7 +678,7 @@ pub async fn wait_for_completion(
 
                 // Snapshot before submitting so the terminal investigation can
                 // never appear in its own supersede list.
-                let in_flight = in_flight_op_investigations(&mut conn, &op_id).await;
+                let unfinished = unfinished_op_investigations(&mut conn, &op_id).await;
 
                 let mut watched: Vec<WatchedInvestigation> = Vec::new();
                 match auto_submit_blue_investigation(state, dispatcher, &mut conn).await {
@@ -675,7 +697,7 @@ pub async fn wait_for_completion(
                     }
                 }
 
-                for id in &in_flight {
+                for id in &unfinished {
                     match ares_core::state::request_blue_supersede(&mut conn, id).await {
                         Ok(()) => info!(
                             investigation_id = %id,
@@ -996,6 +1018,45 @@ async fn auto_submit_blue_investigation(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The live stranding: a mid-op investigation was still queued when the
+    /// terminal one was submitted, so it had written no status. Treating that
+    /// as "finished" let it escape supersede; it then seized the serial runner
+    /// and the terminal investigation never started before the drain deadline.
+    #[test]
+    fn queued_investigation_with_no_status_is_unfinished() {
+        assert!(
+            is_unfinished(None),
+            "a queued investigation must be superseded, not assumed finished"
+        );
+    }
+
+    #[test]
+    fn running_investigation_is_unfinished() {
+        assert!(is_unfinished(Some("in_progress")));
+        assert!(is_unfinished(Some("queued")));
+    }
+
+    #[test]
+    fn terminal_investigations_are_finished() {
+        for s in [
+            "completed",
+            "escalated",
+            "failed",
+            "timed_out",
+            "superseded",
+        ] {
+            assert!(!is_unfinished(Some(s)), "{s} is terminal");
+        }
+    }
+
+    /// A supersede that fails is re-watched with `wait_when_status_missing:
+    /// false`, so including status-less members cannot make the drain wait on
+    /// an investigation whose status key expired.
+    #[test]
+    fn status_less_entries_still_do_not_burn_the_drain_budget() {
+        assert!(!still_outstanding(None, false));
+    }
 
     #[test]
     fn forest_root_of_simple() {
