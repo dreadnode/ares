@@ -15,7 +15,7 @@ use std::sync::OnceLock;
 use tokio::sync::OnceCell;
 use tracing::{info, warn};
 
-use crate::args::{optional_i64, required_str};
+use crate::args::{optional_i64, optional_str, required_str};
 use crate::ToolOutput;
 
 /// Loki connection configuration.
@@ -448,7 +448,14 @@ pub async fn query_logs(args: &Value) -> Result<ToolOutput> {
         if status.is_success() {
             let formatted = format_loki_response(&body);
             if formatted != "No results found." {
-                super::evidence_validator::store_query_result(&formatted);
+                // `evidence_source` is set by internal callers that know how the
+                // query was produced; it is not in the published tool schema, so
+                // a free-form analyst query falls through to the analyst label.
+                super::evidence_validator::store_query_result_from(
+                    &formatted,
+                    optional_str(args, "evidence_source")
+                        .unwrap_or(super::evidence_validator::ANALYST_QUERY_SOURCE),
+                );
             }
             let output = make_output(&formatted);
 

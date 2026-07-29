@@ -32,11 +32,19 @@ pub async fn run_detection_query(args: &Value) -> Result<ToolOutput> {
     let now = chrono::Utc::now();
     let start = now - chrono::Duration::hours(hours_back);
 
+    // Running a catalog template is catalog work whoever dispatched it, so the
+    // results carry the same provenance the deterministic sweep writes. Without
+    // this, an analyst re-running a template has its hits counted as
+    // independent analyst evidence in the report's provenance split.
     let query_args = serde_json::json!({
         "logql": tmpl.logql,
         "start_time": start.to_rfc3339(),
         "end_time": now.to_rfc3339(),
         "limit": 100,
+        "evidence_source": format!(
+            "{}:{query_name}",
+            super::super::evidence_validator::CATALOG_QUERY_SOURCE_PREFIX
+        ),
     });
 
     let mut result = loki::query_logs(&query_args).await?;
@@ -110,7 +118,13 @@ pub async fn run_detection_query_events(
             .map(|e| e.line.as_str())
             .collect::<Vec<_>>()
             .join("\n");
-        super::super::evidence_validator::store_query_result(&joined);
+        super::super::evidence_validator::store_query_result_from(
+            &joined,
+            &format!(
+                "{}:{query_name}",
+                super::super::evidence_validator::CATALOG_QUERY_SOURCE_PREFIX
+            ),
+        );
     }
 
     let mut hosts: Vec<String> = entries

@@ -102,7 +102,7 @@ pub async fn add_evidence(args: &Value) -> Result<ToolOutput> {
     // recent query result (or is a MITRE technique ID, which auto-validates).
     // Without this check, an agent could fabricate an IP/user/hash and have it
     // accepted as evidence — confidence-only penalties don't deter that.
-    let (query_validated, source_query_id) = evidence_validator::validate_evidence_value(value);
+    let (query_validated, provenance) = evidence_validator::validate_evidence_value(value);
     if !query_validated {
         return Ok(make_error(&format!(
             "Evidence rejected: value '{value}' was not found in any recorded query result. \
@@ -115,7 +115,16 @@ pub async fn add_evidence(args: &Value) -> Result<ToolOutput> {
         .and_then(Value::as_f64)
         .unwrap_or(0.5);
     let confidence = evidence_validator::adjust_confidence(raw_confidence, query_validated);
-    let _ = source_query_id;
+
+    // The report's analyst-vs-sweep split keys on this string, so taking it
+    // from the agent made `analyst_evidence_count` self-reported and forgeable
+    // in both directions. The query that actually observed the value knows how
+    // it was produced; prefer that and fall back to the caller's label only for
+    // values with no query behind them (MITRE IDs).
+    let source = provenance
+        .as_ref()
+        .map(|p| p.source.as_str())
+        .unwrap_or(source);
 
     // Auto-assign pyramid level from evidence type when caller omits it
     let pyramid_level = optional_str(args, "pyramid_level")

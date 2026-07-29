@@ -20,8 +20,23 @@ const UNVALIDATED_PENALTY: f64 = 0.15;
 /// Maximum suggested IOCs to return.
 const MAX_SUGGESTED_IOCS: usize = 50;
 
+/// Source label applied to a free-form query the analyst composed.
+pub const ANALYST_QUERY_SOURCE: &str = "loki_query";
+
+/// Prefix marking a result produced by running a catalog detection template.
+/// Matches the label `sweep.rs::record_fired` writes, so the report's
+/// analyst-vs-sweep split reads the same string either way.
+pub const CATALOG_QUERY_SOURCE_PREFIX: &str = "detection_sweep";
+
+/// Where a validated evidence value was actually observed.
+pub struct QueryProvenance {
+    pub query_id: String,
+    pub source: String,
+}
+
 struct StoredQueryResult {
     query_id: String,
+    source: String,
     extracted_values: HashSet<String>,
 }
 
@@ -241,6 +256,15 @@ fn extract_iocs_from_text(text: &str) -> HashSet<String> {
 ///
 /// Returns the assigned query ID.
 pub fn store_query_result(result_text: &str) -> String {
+    store_query_result_from(result_text, ANALYST_QUERY_SOURCE)
+}
+
+/// Store a query result together with the label describing how it was produced.
+///
+/// The label travels with the extracted values so evidence written later can
+/// be attributed to the query that actually observed it, rather than to a
+/// free-text `source` the agent supplies at write time.
+pub fn store_query_result_from(result_text: &str, source: &str) -> String {
     let extracted = extract_iocs_from_text(result_text);
 
     let mut st = state().lock().unwrap();
@@ -253,6 +277,7 @@ pub fn store_query_result(result_text: &str) -> String {
 
     st.results.push_back(StoredQueryResult {
         query_id: query_id.clone(),
+        source: source.to_string(),
         extracted_values: extracted,
     });
 
@@ -261,8 +286,9 @@ pub fn store_query_result(result_text: &str) -> String {
 
 /// Check if an evidence value was seen in any recent query result.
 ///
-/// Returns `(validated, source_query_id)`.
-pub fn validate_evidence_value(value: &str) -> (bool, Option<String>) {
+/// Returns `(validated, provenance)`. Provenance is `None` for MITRE technique
+/// IDs, which auto-validate and belong to no particular query.
+pub fn validate_evidence_value(value: &str) -> (bool, Option<QueryProvenance>) {
     // MITRE technique IDs are always valid
     let lower = value.to_lowercase();
     if lower.starts_with('t') && lower.len() >= 5 && lower[1..5].chars().all(|c| c.is_ascii_digit())
@@ -276,7 +302,13 @@ pub fn validate_evidence_value(value: &str) -> (bool, Option<String>) {
     // Search most recent first
     for result in st.results.iter().rev() {
         if result.extracted_values.contains(&normalized) {
-            return (true, Some(result.query_id.clone()));
+            return (
+                true,
+                Some(QueryProvenance {
+                    query_id: result.query_id.clone(),
+                    source: result.source.clone(),
+                }),
+            );
         }
     }
 
@@ -445,5 +477,40 @@ mod tests {
         assert_eq!(classify_ioc("CONTOSO\\jsmith"), Some("user"));
         assert_eq!(classify_ioc("jsmith@contoso.local"), Some("user"));
         assert_eq!(classify_ioc("random"), None);
+    }
+
+    /// A value observed by a catalog template run must be attributable to that
+    /// template, not to whatever `source` string the agent types at write time.
+    /// The report's analyst-vs-sweep split keys on this exact prefix.
+    #[test]
+    fn catalog_template_results_carry_catalog_provenance() {
+        store_query_result_from(
+            "logon from 192.168.58.171 for svc_catalogprov",
+            "detection_sweep:detect_s4u_delegation",
+        );
+        let (valid, prov) = validate_evidence_value("192.168.58.171");
+        assert!(valid);
+        let prov = prov.expect("a grounded value carries its query provenance");
+        assert_eq!(prov.source, "detection_sweep:detect_s4u_delegation");
+        assert!(prov.source.starts_with(CATALOG_QUERY_SOURCE_PREFIX));
+        assert!(prov.query_id.starts_with("q-"));
+    }
+
+    /// A free-form query the analyst composed stays analyst work.
+    #[test]
+    fn free_form_queries_stay_analyst_work() {
+        store_query_result("logon from 192.168.58.172 for svc_freeform");
+        let (valid, prov) = validate_evidence_value("192.168.58.172");
+        assert!(valid);
+        assert_eq!(prov.expect("provenance").source, ANALYST_QUERY_SOURCE);
+    }
+
+    /// MITRE IDs auto-validate and belong to no query, so they must not
+    /// inherit an unrelated query's source.
+    #[test]
+    fn a_mitre_id_has_no_query_provenance() {
+        let (valid, prov) = validate_evidence_value("T1558.001");
+        assert!(valid);
+        assert!(prov.is_none());
     }
 }
