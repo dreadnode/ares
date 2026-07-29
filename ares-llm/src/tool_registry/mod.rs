@@ -833,7 +833,6 @@ mod tests {
             assert!(names.contains(&"get_alert_history"));
             assert!(names.contains(&"get_alerts_in_time_range"));
             assert!(names.contains(&"create_annotation"));
-            assert!(names.contains(&"create_detection_rule"));
             assert!(names.contains(&"post_investigation_started"));
             assert!(names.contains(&"post_investigation_completed"));
             // Learning tools

@@ -159,4 +159,46 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn create_detection_rule_is_offered_only_when_opted_in() {
+        use ares_core::detection::RULE_CREATION_ENV;
+
+        static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let prior = std::env::var(RULE_CREATION_ENV).ok();
+
+        let roles = [
+            BlueAgentRole::Triage,
+            BlueAgentRole::ThreatHunter,
+            BlueAgentRole::LateralAnalyst,
+        ];
+
+        std::env::remove_var(RULE_CREATION_ENV);
+        for role in roles {
+            let names = tool_names(role);
+            assert!(
+                !names.iter().any(|n| n == "create_detection_rule"),
+                "{role:?} must not be offered create_detection_rule while gated off, got: {names:?}"
+            );
+            assert!(
+                names.iter().any(|n| n == "get_alerts_in_time_range"),
+                "{role:?} should keep its other grafana tools, got: {names:?}"
+            );
+        }
+
+        std::env::set_var(RULE_CREATION_ENV, "1");
+        for role in roles {
+            let names = tool_names(role);
+            assert!(
+                names.iter().any(|n| n == "create_detection_rule"),
+                "{role:?} should regain create_detection_rule when opted in, got: {names:?}"
+            );
+        }
+
+        match prior {
+            Some(v) => std::env::set_var(RULE_CREATION_ENV, v),
+            None => std::env::remove_var(RULE_CREATION_ENV),
+        }
+    }
 }

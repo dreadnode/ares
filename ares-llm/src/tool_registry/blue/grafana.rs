@@ -4,8 +4,13 @@ use serde_json::json;
 
 use crate::ToolDefinition;
 
+/// Grafana tools offered to blue roles.
+///
+/// `create_detection_rule` provisions a live alert rule, so it is offered only
+/// when [`ares_core::detection::rule_creation_enabled`] is set — otherwise the
+/// model would spend schema tokens on a tool that always refuses.
 pub(super) fn grafana_tool_definitions() -> Vec<ToolDefinition> {
-    vec![
+    let mut tools = vec![
         ToolDefinition {
             name: "get_grafana_alerts".into(),
             description: "Get alerts from Grafana. Tries multiple API endpoints for compatibility across Grafana versions.".into(),
@@ -248,5 +253,11 @@ pub(super) fn grafana_tool_definitions() -> Vec<ToolDefinition> {
                 "required": ["investigation_id", "alert_name", "status"]
             }),
         },
-    ]
+    ];
+
+    if !ares_core::detection::rule_creation_enabled() {
+        tools.retain(|t| t.name != "create_detection_rule");
+    }
+
+    tools
 }

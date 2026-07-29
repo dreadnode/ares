@@ -60,6 +60,26 @@ fn default_log_source() -> String {
     "windows-security".to_string()
 }
 
+// ─── Rule-provisioning gate ────────────────────────────────────────────────
+
+pub const RULE_CREATION_ENV: &str = "ARES_BLUE_ALLOW_RULE_CREATION";
+
+/// Whether blue agents may author and provision Grafana alert rules. Defaults
+/// off; set `ARES_BLUE_ALLOW_RULE_CREATION=1` to enable.
+///
+/// Consulted in two places that must agree: the tool registry (`ares-llm`),
+/// which omits `create_detection_rule` from a role's schema when disabled, and
+/// the tool implementation (`ares-tools`), which refuses the call.
+pub fn rule_creation_enabled() -> bool {
+    match std::env::var(RULE_CREATION_ENV) {
+        Ok(v) => matches!(
+            v.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        ),
+        Err(_) => false,
+    }
+}
+
 // ─── Singleton loader ──────────────────────────────────────────────────────
 
 static CONFIG: OnceLock<DetectionConfig> = OnceLock::new();

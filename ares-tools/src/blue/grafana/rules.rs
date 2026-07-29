@@ -8,19 +8,7 @@ use crate::ToolOutput;
 
 use super::{build_client, grafana_url, make_error, make_output};
 
-pub(crate) const RULE_CREATION_ENV: &str = "ARES_BLUE_ALLOW_RULE_CREATION";
-
-/// Whether agents may provision Grafana alert rules. Defaults off; set
-/// `ARES_BLUE_ALLOW_RULE_CREATION=1` to enable.
-pub(crate) fn rule_creation_enabled() -> bool {
-    match std::env::var(RULE_CREATION_ENV) {
-        Ok(v) => matches!(
-            v.trim().to_ascii_lowercase().as_str(),
-            "1" | "true" | "yes" | "on"
-        ),
-        Err(_) => false,
-    }
-}
+use ares_core::detection::rule_creation_enabled;
 
 /// Create a detection alert rule in Grafana.
 ///
@@ -399,6 +387,7 @@ pub async fn get_alerts_in_time_range(args: &Value) -> Result<ToolOutput> {
 #[cfg(test)]
 mod rule_gate_tests {
     use super::*;
+    use ares_core::detection::RULE_CREATION_ENV;
 
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
