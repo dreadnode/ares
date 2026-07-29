@@ -697,6 +697,35 @@ fn exploit_mssql_lateral_enumeration() {
 }
 
 #[test]
+fn exploit_mssql_lateral_renders_objectives() {
+    let payload = serde_json::json!({
+        "vuln_type": "mssql_access",
+        "target": "192.168.58.30",
+        "domain": "contoso.local",
+        "objectives": [
+            "STOP CONDITION: call `task_complete` as soon as any win lands.",
+            "1. Enable xp_cmdshell, run `whoami` to confirm code execution.",
+        ]
+    });
+    let prompt = generate_task_prompt("exploit", "t-33", &payload, None).unwrap();
+    assert!(prompt.contains("TASK OBJECTIVES"));
+    assert!(prompt.contains("STOP CONDITION: call `task_complete` as soon as any win lands."));
+    assert!(prompt.contains("1. Enable xp_cmdshell, run `whoami` to confirm code execution."));
+}
+
+#[test]
+fn exploit_mssql_lateral_omits_objectives_block_when_absent() {
+    let payload = serde_json::json!({
+        "vuln_type": "mssql_access",
+        "target": "192.168.58.30",
+        "domain": "contoso.local"
+    });
+    let prompt = generate_task_prompt("exploit", "t-34", &payload, None).unwrap();
+    assert!(!prompt.contains("TASK OBJECTIVES"));
+    assert!(prompt.contains("MSSQL LATERAL ENUMERATION"));
+}
+
+#[test]
 fn exploit_generic_fallback() {
     let payload = serde_json::json!({
         "vuln_type": "unknown_vuln",

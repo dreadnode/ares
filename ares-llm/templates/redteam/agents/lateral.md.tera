@@ -252,7 +252,11 @@ When choosing which hosts to target:
 
 ## FINAL REMINDER
 
-**After calling `report_lateral_success` or `report_lateral_failed`, your task is COMPLETE.**
+**After calling `report_lateral_success` or `report_lateral_failed`, call `task_complete`.**
+
+`report_lateral_success` and `report_lateral_failed` only record the outcome — neither
+ends the task. Ending without `task_complete` marks the task as failed and forfeits the
+work you have already done.
 
 Do not:
 - Run additional tools
@@ -261,3 +265,9 @@ Do not:
 - Loop back to try again
 
 The orchestrator will assign you a new task if more work is needed.
+
+## Stop Conditions
+
+- Call `task_complete` as soon as the lateral movement outcome has been recorded
+- Call `request_assistance` only for missing tool primitives or impossible task
+  ambiguity after you have tried the task's documented fallback paths

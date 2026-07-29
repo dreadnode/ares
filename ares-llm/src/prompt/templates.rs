@@ -511,6 +511,8 @@ mod tests {
         assert!(result.contains("Credential Access Agent"));
         assert!(result.contains("- secretsdump"));
         assert!(result.contains("- kerberoast"));
+        assert!(result.contains("## Stop Conditions"));
+        assert!(result.contains("`task_complete`"));
     }
 
     #[test]
@@ -550,6 +552,8 @@ mod tests {
                 .unwrap();
         assert!(result.contains("Lateral Movement Agent"));
         assert!(result.contains("- psexec"));
+        assert!(result.contains("## Stop Conditions"));
+        assert!(result.contains("neither\nends the task"));
     }
 
     #[test]
