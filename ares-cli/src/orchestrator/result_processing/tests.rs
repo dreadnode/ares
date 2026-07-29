@@ -1390,6 +1390,66 @@ mod emit_gmsa_exploit_token {
     }
 }
 
+mod seimpersonate_publish_only_contract {
+    use super::super::build_seimpersonate_vuln;
+    use crate::orchestrator::state::SharedState;
+    use crate::orchestrator::task_queue::TaskQueueCore;
+    use ares_core::state::mock_redis::MockRedisConnection;
+
+    fn mock_queue() -> TaskQueueCore<MockRedisConnection> {
+        TaskQueueCore::from_connection(MockRedisConnection::new())
+    }
+
+    #[tokio::test]
+    async fn publish_records_vuln_without_marking_exploited() {
+        let state = SharedState::new("op-1".to_string());
+        let q = mock_queue();
+
+        let vuln = build_seimpersonate_vuln("web01", Some("192.168.58.10"));
+        let vuln_id = vuln.vuln_id.clone();
+        assert_eq!(vuln_id, "seimpersonate_web01");
+        assert_eq!(vuln.vuln_type, "seimpersonate");
+        assert_eq!(vuln.recommended_agent, "privesc");
+
+        let added = state.publish_vulnerability(&q, vuln).await.unwrap();
+        assert!(added, "seimpersonate vuln should publish cleanly");
+
+        let s = state.read().await;
+        assert!(
+            s.discovered_vulnerabilities.contains_key(&vuln_id),
+            "vuln must be discoverable as a lead for the privesc agent"
+        );
+        assert!(
+            !s.exploited_vulnerabilities.contains(&vuln_id),
+            "publishing a seimpersonate lead MUST NOT credit exploitation \
+             (no on-target primitive can actually escalate to SYSTEM here)"
+        );
+    }
+
+    #[tokio::test]
+    async fn vuln_id_falls_back_to_host_label_when_ip_missing() {
+        let vuln = build_seimpersonate_vuln("web01", None);
+        assert_eq!(vuln.vuln_id, "seimpersonate_web01");
+        assert_eq!(vuln.target, "web01");
+        assert!(!vuln.details.contains_key("target_ip"));
+    }
+
+    #[tokio::test]
+    async fn note_documents_potato_requirement() {
+        let vuln = build_seimpersonate_vuln("web01", Some("10.0.0.1"));
+        let note = vuln
+            .details
+            .get("note")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        assert!(
+            note.to_lowercase().contains("potato"),
+            "note should tell readers that SYSTEM escalation still requires \
+             potato-family exploitation, not automatic credit — got: {note}"
+        );
+    }
+}
+
 #[test]
 fn seimpersonate_signal_detects_enabled_in_whoami_priv_output() {
     use super::result_has_seimpersonate_signal;

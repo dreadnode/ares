@@ -532,62 +532,21 @@ pub async fn process_completed_task(
         }
     }
 
-    // SeImpersonate primitive detection. When a task's output captures a
-    // `whoami /priv` (or equivalent) showing SeImpersonatePrivilege held
-    // (and enabled), we have everything needed to escalate to SYSTEM via
-    // PrintSpoofer / GodPotato. Surface this as `seimpersonate_<host>` and
-    // mark exploited so the scoreboard credits the primitive. The follow-on
-    // potato dispatch is left for the existing privesc agent (already wired
-    // with godpotato / printspoofer tools) to consume opportunistically.
     if result_has_seimpersonate_signal(&result.result) {
         let host_label =
             derive_seimpersonate_host_label(dispatcher, task_target_ip.as_deref()).await;
-        let vuln_id = format!("seimpersonate_{}", host_label);
-        let mut details = std::collections::HashMap::new();
-        details.insert("host".into(), Value::String(host_label.clone()));
-        if let Some(ref ip) = task_target_ip {
-            details.insert("target_ip".into(), Value::String(ip.clone()));
-        }
-        details.insert(
-            "note".into(),
-            Value::String(
-                "SeImpersonatePrivilege observed enabled — \
-                 escalation path via PrintSpoofer / GodPotato to SYSTEM."
-                    .into(),
-            ),
-        );
-        let vuln = ares_core::models::VulnerabilityInfo {
-            vuln_id: vuln_id.clone(),
-            vuln_type: "seimpersonate".to_string(),
-            target: task_target_ip.clone().unwrap_or_else(|| host_label.clone()),
-            discovered_by: "result_processing".to_string(),
-            discovered_at: chrono::Utc::now(),
-            details,
-            recommended_agent: "privesc".to_string(),
-            priority: 2,
-        };
+        let vuln = build_seimpersonate_vuln(&host_label, task_target_ip.as_deref());
+        let vuln_id = vuln.vuln_id.clone();
         let _ = dispatcher
             .state
             .publish_vulnerability(&dispatcher.queue, vuln)
             .await;
-        if let Err(e) = dispatcher
-            .state
-            .mark_exploited(&dispatcher.queue, &vuln_id)
-            .await
-        {
-            warn!(
-                err = %e,
-                vuln_id = %vuln_id,
-                "Failed to mark seimpersonate primitive exploited"
-            );
-        } else {
-            info!(
-                vuln_id = %vuln_id,
-                host = %host_label,
-                task_id = %task_id,
-                "SeImpersonate primitive observed in task output — exploit token emitted"
-            );
-        }
+        info!(
+            vuln_id = %vuln_id,
+            host = %host_label,
+            task_id = %task_id,
+            "SeImpersonate primitive detected — published for privesc agent (no exploit credit emitted)"
+        );
     }
 
     // NTLM Relay tokenization. The auto_ntlm_relay chain dispatches relay
@@ -970,6 +929,38 @@ async fn derive_seimpersonate_host_label(
         return ip.replace('.', "_");
     }
     "unknown".to_string()
+}
+
+fn build_seimpersonate_vuln(
+    host_label: &str,
+    target_ip: Option<&str>,
+) -> ares_core::models::VulnerabilityInfo {
+    let vuln_id = format!("seimpersonate_{}", host_label);
+    let mut details = std::collections::HashMap::new();
+    details.insert("host".into(), Value::String(host_label.to_string()));
+    if let Some(ip) = target_ip {
+        details.insert("target_ip".into(), Value::String(ip.to_string()));
+    }
+    details.insert(
+        "note".into(),
+        Value::String(
+            "SeImpersonatePrivilege observed enabled — lead for privesc agent. \
+             SYSTEM escalation still requires successful potato-family exploitation."
+                .into(),
+        ),
+    );
+    ares_core::models::VulnerabilityInfo {
+        vuln_id,
+        vuln_type: "seimpersonate".to_string(),
+        target: target_ip
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| host_label.to_string()),
+        discovered_by: "result_processing".to_string(),
+        discovered_at: chrono::Utc::now(),
+        details,
+        recommended_agent: "privesc".to_string(),
+        priority: 2,
+    }
 }
 
 /// Returns `true` when trusted tool-output payloads contain a recognised
