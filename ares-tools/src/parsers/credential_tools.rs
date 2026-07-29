@@ -451,6 +451,64 @@ fn extract_username_from_description_line(line: &str) -> Option<String> {
     None
 }
 
+// ── LAPS (netexec -M laps) ──────────────────────────────────────────────────
+
+/// Parse netexec `-M laps` output for local Administrator passwords.
+///
+/// netexec frames each line as `<PROTO> <IP> <PORT> <HOST> <payload>`; the
+/// payload for a successful LAPS read is
+/// `Computer:<hostname>  Password:<plaintext>`. Older nxc builds emit the same
+/// pair separated by whitespace runs of variable width. We fold both shapes
+/// into a `credentials[]` entry keyed to `Administrator@<hostname>` — the
+/// LAPS-managed principal is always the built-in local Administrator.
+pub fn parse_laps(output: &str, params: &Value) -> Vec<Value> {
+    let domain = params.get("domain").and_then(|v| v.as_str()).unwrap_or("");
+    let mut creds = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    for line in output.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let Some((host, password)) = extract_laps_pair(line) else {
+            continue;
+        };
+        let key = format!("{}:{}", host.to_lowercase(), password);
+        if !seen.insert(key) {
+            continue;
+        }
+        let host_slug = host.replace(['.', '$'], "_");
+        creds.push(json!({
+            "id": format!("laps_admin_{host_slug}"),
+            "username": "Administrator",
+            "password": password,
+            "domain": domain,
+            "source": "laps_dump",
+            "source_host": host,
+            "is_admin": true,
+        }));
+    }
+
+    creds
+}
+
+fn extract_laps_pair(line: &str) -> Option<(String, String)> {
+    let lower = line.to_ascii_lowercase();
+    let c_idx = lower.find("computer:")?;
+    let after_c = &line[c_idx + "computer:".len()..];
+    let host = after_c
+        .split(|c: char| c.is_whitespace() || c == ',' || c == ';')
+        .find(|s| !s.is_empty())?;
+    let p_rel = lower[c_idx..].find("password:")?;
+    let after_p = &line[c_idx + p_rel + "password:".len()..];
+    let password = after_p.split_whitespace().next()?;
+    if host.is_empty() || password.is_empty() {
+        return None;
+    }
+    Some((host.to_string(), password.to_string()))
+}
+
 // ── adidnsdump ──────────────────────────────────────────────────────────────
 
 /// Parse adidnsdump output for DNS records that map to host IPs.
@@ -626,6 +684,43 @@ sAMAccountName: sam.wilson";
         assert_eq!(creds.len(), 1);
         assert_eq!(creds[0]["username"], "sam.wilson");
         assert_eq!(creds[0]["password"], "Summer2025");
+    }
+
+    #[test]
+    fn laps_extracts_admin_password() {
+        let output = "\
+LDAP  192.168.58.10  389  DC01  [*] Getting LAPS Passwords
+LDAP  192.168.58.10  389  DC01  Computer:SRV01                    Password:Summer2026!Local
+LDAP  192.168.58.10  389  DC01  Computer:WS02                     Password:Autumn2026?Local";
+        let params = json!({"domain": "contoso.local"});
+        let creds = parse_laps(output, &params);
+        assert_eq!(creds.len(), 2);
+        assert_eq!(creds[0]["username"], "Administrator");
+        assert_eq!(creds[0]["password"], "Summer2026!Local");
+        assert_eq!(creds[0]["source_host"], "SRV01");
+        assert_eq!(creds[0]["domain"], "contoso.local");
+        assert_eq!(creds[0]["is_admin"], true);
+        assert_eq!(creds[0]["source"], "laps_dump");
+        assert_eq!(creds[1]["source_host"], "WS02");
+    }
+
+    #[test]
+    fn laps_dedups_duplicate_rows() {
+        let output = "\
+Computer:SRV01  Password:SamePw
+Computer:SRV01  Password:SamePw";
+        let params = json!({});
+        assert_eq!(parse_laps(output, &params).len(), 1);
+    }
+
+    #[test]
+    fn laps_ignores_lines_without_both_fields() {
+        let output = "\
+[*] Getting LAPS Passwords
+Computer:SRV01  (no password read)
+Password:orphan";
+        let params = json!({});
+        assert!(parse_laps(output, &params).is_empty());
     }
 
     #[test]

