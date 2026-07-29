@@ -183,6 +183,12 @@ async fn run_inner() -> Result<()> {
 
     let mut shared_state = SharedState::new(config.operation_id.clone());
 
+    if let Some(cfg) = ares_config.as_deref() {
+        shared_state
+            .set_acl_publish_cap(cfg.operation.acl_publish_cap)
+            .await;
+    }
+
     // install a Nats-backed op-state recorder when NATS is
     // available. Redis remains authoritative until Phase 4; emit failures are
     // logged (see `emit_op_state`) but never abort the op.

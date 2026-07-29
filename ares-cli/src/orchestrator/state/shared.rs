@@ -43,6 +43,10 @@ impl SharedState {
         self.recorder = recorder;
     }
 
+    pub async fn set_acl_publish_cap(&self, cap: u32) {
+        self.inner.write().await.acl_publish_cap = cap;
+    }
+
     /// Access the installed recorder. Internal — publishing methods call this
     /// to emit events after a successful Redis write.
     pub(crate) fn recorder(&self) -> &OpStateRecorder {

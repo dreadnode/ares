@@ -1162,7 +1162,7 @@ fn exploit_failure_reason<'a>(error: Option<&'a str>, result: &'a Option<Value>)
         .unwrap_or("unknown error")
 }
 
-fn is_acl_mutation_vuln(vuln_id: &str) -> bool {
+pub(crate) fn is_acl_mutation_vuln(vuln_id: &str) -> bool {
     let v = vuln_id.to_lowercase();
     v.starts_with("acl_") || v.starts_with("gpo_")
 }

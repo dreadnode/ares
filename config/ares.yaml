@@ -115,6 +115,8 @@ operation:
   # Emit structured per-run path records for coverage measurement (Phase 0).
   emit_path_records: true
 
+  acl_publish_cap: 200
+
 # Agent configurations
 agents:
   orchestrator:

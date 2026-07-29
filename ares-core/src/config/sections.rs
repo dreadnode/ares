@@ -72,6 +72,9 @@ pub struct OperationConfig {
     /// sequence) for coverage measurement. Phase 0 instrumentation; off by default.
     #[serde(default)]
     pub emit_path_records: bool,
+
+    #[serde(default = "default_acl_publish_cap")]
+    pub acl_publish_cap: u32,
 }
 
 /// Cross-run novelty memory configuration (attack-path diversity).

@@ -6,6 +6,7 @@ use std::time::Instant;
 
 use chrono::{DateTime, Utc};
 
+use ares_core::config::defaults::default_acl_publish_cap;
 use ares_core::models::*;
 
 use super::ALL_DEDUP_SETS;
@@ -300,6 +301,10 @@ pub struct StateInner {
     /// whatever the agent typed — and `<= 0` there means "no lockout, spray
     /// freely". The parsed policy was extracted and then dropped on the floor.
     pub password_policies: HashMap<String, i64>,
+
+    pub acl_publish_cap: u32,
+    pub acl_published_count: u32,
+    pub acl_cap_reached_logged: bool,
 }
 
 impl StateInner {
@@ -361,6 +366,9 @@ impl StateInner {
             krbtgt_rotated_at: HashMap::new(),
             revoked_certificates: HashMap::new(),
             self_ips: HashSet::new(),
+            acl_publish_cap: default_acl_publish_cap(),
+            acl_published_count: 0,
+            acl_cap_reached_logged: false,
         }
     }
 

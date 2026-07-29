@@ -10,6 +10,7 @@ use redis::aio::ConnectionLike;
 
 use super::{emit_op_state, realm_source_is_authoritative};
 use crate::dedup::is_ghost_machine_account;
+use crate::orchestrator::result_processing::is_acl_mutation_vuln;
 use crate::orchestrator::state::{SharedState, KEY_VULN_QUEUE};
 use crate::orchestrator::task_queue::TaskQueueCore;
 
@@ -181,6 +182,19 @@ impl SharedState {
             return Ok(false);
         }
 
+        if is_acl_mutation_vuln(&vuln.vuln_id) {
+            if let Some((cap, published, first)) = self.acl_publish_cap_reached().await {
+                if first {
+                    tracing::warn!(
+                        cap = cap,
+                        published = published,
+                        "ACL publish cap reached; further ACL/GPO vulnerabilities dropped this op"
+                    );
+                }
+                return Ok(false);
+            }
+        }
+
         // Apply strategy weight override if provided
         if let Some(strategy_cfg) = strategy {
             let effective = strategy_cfg.effective_priority(&vuln.vuln_type);
@@ -218,12 +232,31 @@ impl SharedState {
                 .unwrap_or(());
             let _: () = conn.expire(&vuln_queue_key, 86400).await.unwrap_or(());
 
+            let is_acl = is_acl_mutation_vuln(&vuln.vuln_id);
             let mut state = self.inner.write().await;
             state
                 .discovered_vulnerabilities
                 .insert(vuln.vuln_id.clone(), vuln);
+            if is_acl {
+                state.acl_published_count = state.acl_published_count.saturating_add(1);
+            }
         }
         Ok(added)
+    }
+
+    async fn acl_publish_cap_reached(&self) -> Option<(u32, u32, bool)> {
+        let read = self.inner.read().await;
+        let (cap, published) = (read.acl_publish_cap, read.acl_published_count);
+        drop(read);
+
+        if cap == 0 || published < cap {
+            return None;
+        }
+
+        let mut w = self.inner.write().await;
+        let first = !w.acl_cap_reached_logged;
+        w.acl_cap_reached_logged = true;
+        Some((cap, published, first))
     }
 
     /// Add a share to state and Redis (with dedup).
@@ -760,6 +793,60 @@ mod tests {
         let v = &s.discovered_vulnerabilities["VULN-001"];
         assert_eq!(v.vuln_type, "smb_signing");
         assert_eq!(v.target, "192.168.58.1");
+    }
+
+    #[tokio::test]
+    async fn acl_publish_cap_drops_once_limit_reached() {
+        let state = SharedState::new("op-cap".to_string());
+        let q = mock_queue();
+        state.set_acl_publish_cap(2).await;
+
+        for i in 0..2 {
+            let v = make_vuln(&format!("acl_genericall_{i}"), "genericall", "alice");
+            assert!(state.publish_vulnerability(&q, v).await.unwrap());
+        }
+
+        let over = make_vuln("acl_genericall_over", "genericall", "alice");
+        assert!(!state.publish_vulnerability(&q, over).await.unwrap());
+
+        let s = state.inner.read().await;
+        assert_eq!(s.acl_published_count, 2);
+        assert!(s.acl_cap_reached_logged);
+        assert!(!s
+            .discovered_vulnerabilities
+            .contains_key("acl_genericall_over"));
+    }
+
+    #[tokio::test]
+    async fn acl_publish_cap_does_not_apply_to_other_vuln_types() {
+        let state = SharedState::new("op-cap-scope".to_string());
+        let q = mock_queue();
+        state.set_acl_publish_cap(1).await;
+
+        let acl = make_vuln("acl_genericall_0", "genericall", "alice");
+        assert!(state.publish_vulnerability(&q, acl).await.unwrap());
+
+        let acl_over = make_vuln("acl_genericall_1", "genericall", "bob");
+        assert!(!state.publish_vulnerability(&q, acl_over).await.unwrap());
+
+        let other = make_vuln("VULN-900", "smb_signing", "192.168.58.9");
+        assert!(state.publish_vulnerability(&q, other).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn acl_publish_cap_zero_means_unlimited() {
+        let state = SharedState::new("op-cap-zero".to_string());
+        let q = mock_queue();
+        state.set_acl_publish_cap(0).await;
+
+        for i in 0..25 {
+            let v = make_vuln(&format!("acl_genericall_{i}"), "genericall", "alice");
+            assert!(state.publish_vulnerability(&q, v).await.unwrap());
+        }
+
+        let s = state.inner.read().await;
+        assert_eq!(s.acl_published_count, 25);
+        assert!(!s.acl_cap_reached_logged);
     }
 
     #[tokio::test]
