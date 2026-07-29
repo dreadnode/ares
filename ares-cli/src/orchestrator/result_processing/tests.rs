@@ -1399,9 +1399,77 @@ fn acl_evidence_detects_bloodyad_grant_and_group_add() {
     assert!(result_has_acl_mutation_evidence(&Some(genericall)));
 
     let group = json!({
-        "tool_outputs": [{"output": "[+] alice added to Domain Admins"}]
+        "tool_outputs": [{
+            "name": "bloodyad_add_group_member",
+            "output": "[+] alice added to Domain Admins"
+        }]
     });
     assert!(result_has_acl_mutation_evidence(&Some(group)));
+}
+
+/// "added to" and "has been updated" are ordinary English that unrelated tools
+/// print. Crediting them anywhere in the task lets any co-running tool mark the
+/// ACL vulnerability EXPLOITED — the same metric lie as "ACL success is
+/// structurally impossible", just inverted.
+#[test]
+fn acl_evidence_ignores_generic_markers_from_unrelated_tools() {
+    use super::result_has_acl_mutation_evidence;
+    for output in [
+        "[*] 192.168.58.60 added to the target scope",
+        "[+] Kerberos ticket cache has been updated",
+        "[+] svc_sql added to the roastable SPN list",
+    ] {
+        let payload = json!({
+            "tool_outputs": [{"name": "enumerate_users", "output": output}]
+        });
+        assert!(
+            !result_has_acl_mutation_evidence(&Some(payload)),
+            "an unrelated tool must not credit an ACL edge: {output}"
+        );
+    }
+}
+
+/// An unnamed entry cannot be attributed, so the generic markers must not fire
+/// for it either. The specific ones still do — they name the primitive.
+#[test]
+fn acl_evidence_requires_attribution_for_generic_markers() {
+    use super::result_has_acl_mutation_evidence;
+
+    let unattributed = json!({
+        "tool_outputs": [{"output": "[+] alice added to Domain Admins"}]
+    });
+    assert!(!result_has_acl_mutation_evidence(&Some(unattributed)));
+
+    let specific = json!({
+        "tool_outputs": [{"output": "[+] alice has now GenericAll on dc01"}]
+    });
+    assert!(
+        result_has_acl_mutation_evidence(&Some(specific)),
+        "a marker naming the primitive stands on its own"
+    );
+}
+
+/// The generic markers are still needed: bloodyAD's group-add and attribute
+/// write print nothing more distinctive than these.
+#[test]
+fn acl_evidence_credits_generic_markers_from_the_acl_tool_itself() {
+    use super::result_has_acl_mutation_evidence;
+    for (tool, output) in [
+        (
+            "bloodyad_add_group_member",
+            "[+] alice added to Domain Admins",
+        ),
+        (
+            "bloodyad_set_object_attr",
+            "[+] servicePrincipalName has been updated",
+        ),
+    ] {
+        let payload = json!({ "tool_outputs": [{"name": tool, "output": output}] });
+        assert!(
+            result_has_acl_mutation_evidence(&Some(payload)),
+            "{tool} must still credit its own success line"
+        );
+    }
 }
 
 #[test]

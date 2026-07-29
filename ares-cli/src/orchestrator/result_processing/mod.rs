@@ -1272,6 +1272,8 @@ fn result_has_ccache_evidence(result: &Option<Value>) -> bool {
     false
 }
 
+/// Success lines specific enough that no other tool prints them, so they stand
+/// on their own wherever in the task they appear.
 const ACL_MUTATION_MARKERS: &[&str] = &[
     "dacl modified successfully",
     "has now genericall on",
@@ -1279,24 +1281,63 @@ const ACL_MUTATION_MARKERS: &[&str] = &[
     "password changed successfully",
     "is now able to dcsync",
     "can now impersonate users on",
-    "added to ",
-    "has been updated",
     "successfully added msds-keycredentiallink",
     "updated the msds-keycredentiallink",
     "saved pfx",
+];
+
+/// Success lines that are ordinary English and appear in unrelated tool output
+/// (`[*] Host added to scope`, `[+] Cache has been updated`). Credited only
+/// when the emitting entry is itself an ACL mutation primitive — otherwise any
+/// unrelated tool in the same task marks the ACL vulnerability EXPLOITED, which
+/// trades "ACL success is structurally impossible" for a false positive in the
+/// other direction.
+const ACL_MUTATION_MARKERS_NEEDING_ATTRIBUTION: &[&str] = &["added to ", "has been updated"];
+
+/// Tools whose output may be read as proof an ACL edge was taken.
+const ACL_MUTATION_TOOLS: &[&str] = &[
+    "adminsd_holder_add_ace",
+    "bloodyad_add_genericall",
+    "bloodyad_add_group_member",
+    "bloodyad_set_object_attr",
+    "bloodyad_set_password",
+    "certipy_shadow",
+    "dacl_edit",
+    "pywhisker",
+    "rbcd_write",
 ];
 
 fn result_has_acl_mutation_evidence(result: &Option<Value>) -> bool {
     let Some(payload) = result.as_ref() else {
         return false;
     };
-    for text in collect_result_text_parts(payload) {
-        for line in text.lines() {
+    let Some(entries) = payload.get("tool_outputs").and_then(|v| v.as_array()) else {
+        return false;
+    };
+
+    for entry in entries {
+        let (name, output) = match entry.as_str() {
+            Some(s) => (None, s),
+            None => (
+                entry.get("name").and_then(Value::as_str),
+                entry.get("output").and_then(Value::as_str).unwrap_or(""),
+            ),
+        };
+        let attributed = name.is_some_and(|n| ACL_MUTATION_TOOLS.contains(&n));
+
+        for line in output.lines() {
             let lower = line.trim().to_lowercase();
             if !lower.starts_with("[+]") && !lower.starts_with("[*]") {
                 continue;
             }
             if ACL_MUTATION_MARKERS.iter().any(|m| lower.contains(m)) {
+                return true;
+            }
+            if attributed
+                && ACL_MUTATION_MARKERS_NEEDING_ATTRIBUTION
+                    .iter()
+                    .any(|m| lower.contains(m))
+            {
                 return true;
             }
         }
