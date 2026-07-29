@@ -182,7 +182,7 @@ async fn execute_inverse(
             info!(tool, "teardown: inverse succeeded");
             EntryStatus::Reverted
         }
-        Ok(out) => EntryStatus::Failed(first_line(&out.combined())),
+        Ok(out) => EntryStatus::Failed(failure_reason(&out.combined())),
         Err(e) => EntryStatus::Failed(e.to_string()),
     }
 }
@@ -450,13 +450,48 @@ fn print_summary(results: &[EntryResult], report: &TeardownReport, dry_run: bool
     }
 }
 
-fn first_line(s: &str) -> String {
-    s.lines()
-        .find(|l| !l.trim().is_empty())
-        .unwrap_or("")
-        .chars()
-        .take(160)
-        .collect()
+/// Best-effort one-line reason for a failed revert.
+///
+/// Not simply the first line: the tools we drive lead with boilerplate that
+/// hides the diagnosis. impacket prints its version banner, and argparse prints
+/// a multi-line `usage:` block whose actual complaint is the *last* line. A
+/// teardown failure reported as `usage: pywhisker [-h] (-t TARGET_SAMNAME …` is
+/// indistinguishable from a missing argument, when the real cause was
+/// "argument --no-pass: not allowed with -H/--hashes".
+///
+/// So prefer a line that looks like a diagnosis — impacket's `[-]` marker or an
+/// explicit error/failure word — then fall back to the last non-empty line, and
+/// only then to the first.
+fn failure_reason(s: &str) -> String {
+    let lines: Vec<&str> = s.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
+
+    let is_boilerplate = |l: &str| {
+        let lower = l.to_lowercase();
+        lower.starts_with("impacket v")
+            || lower.starts_with("usage:")
+            || lower.starts_with("copyright")
+            || lower.starts_with("options:")
+            || lower.starts_with("positional arguments")
+    };
+    let is_diagnosis = |l: &str| {
+        let lower = l.to_lowercase();
+        l.starts_with("[-]")
+            || lower.contains("error")
+            || lower.contains("not allowed with")
+            || lower.contains("failed")
+            || lower.contains("denied")
+            || lower.contains("doesn't have right")
+    };
+
+    let pick = lines
+        .iter()
+        .find(|l| is_diagnosis(l))
+        .or_else(|| lines.iter().rev().find(|l| !is_boilerplate(l)))
+        .or_else(|| lines.first())
+        .copied()
+        .unwrap_or("");
+
+    pick.chars().take(160).collect()
 }
 
 #[cfg(test)]
@@ -562,6 +597,32 @@ mod tests {
     /// The live failure: impacket refused three machine-account deletions with
     /// "doesn't have right to delete" because teardown authenticated as the
     /// principal that made the mutation rather than one that could undo it.
+    #[test]
+    fn failure_reason_skips_impacket_and_argparse_boilerplate() {
+        // The exact shape teardown reported as a pywhisker failure: argparse
+        // leads with usage and states the real complaint last.
+        let out = "usage: pywhisker [-h] (-t TARGET_SAMNAME | -tl TARGET_SAMNAME_LIST)\n\
+                   [-td TARGET_DOMAIN] [--no-pass | -p PASSWORD]\n\
+                   pywhisker: error: argument --no-pass: not allowed with -H/--hashes";
+        let got = failure_reason(out);
+        assert!(got.contains("not allowed with"), "got: {got}");
+        assert!(!got.starts_with("usage:"), "got: {got}");
+    }
+
+    #[test]
+    fn failure_reason_prefers_impacket_diagnosis_over_version_banner() {
+        let out = "Impacket v0.13.0.dev0 - Copyright Fortra, LLC\n\n\
+                   [-] User alice doesn\'t have right to delete WS01$!";
+        let got = failure_reason(out);
+        assert!(got.starts_with("[-]"), "got: {got}");
+    }
+
+    #[test]
+    fn failure_reason_falls_back_to_the_last_meaningful_line() {
+        let out = "Impacket v0.13.0 - Copyright Fortra\nsomething unhelpful happened";
+        assert_eq!(failure_reason(out), "something unhelpful happened");
+    }
+
     #[test]
     fn resolve_prefers_a_domain_admin_over_the_mutating_principal() {
         let mut admin = cred("administrator", "contoso.local", "pw-admin", 1);

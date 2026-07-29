@@ -306,7 +306,14 @@ pub fn build_pywhisker(args: &Value) -> Result<CommandBuilder> {
         } else {
             format!(":{h}")
         };
-        cmd = cmd.arg("--hashes").arg(nt).arg("--no-pass");
+        // No `--no-pass` here: pywhisker's auth flags are one argparse
+        // mutually-exclusive group (`--no-pass | -p | -H | ...`), so pairing it
+        // with `--hashes` aborts with "argument --no-pass: not allowed with
+        // -H/--hashes" before the tool does anything. `--hashes` already
+        // suppresses the interactive prompt on its own. This made every
+        // pass-the-hash pywhisker call a guaranteed failure — shadow-credential
+        // exploitation and teardown's KeyCredential removal alike.
+        cmd = cmd.arg("--hashes").arg(nt);
     } else {
         let password = required_str(args, "password")?;
         cmd = cmd.flag("-p", password);
@@ -1652,7 +1659,14 @@ mod tests {
             Some(":aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
             "NT-only hash must be prefixed with ':'"
         );
-        assert!(args_vec.iter().any(|a| a == "--no-pass"));
+        // `--no-pass` must NOT accompany `--hashes`: pywhisker groups its auth
+        // flags as argparse mutually-exclusive, so the pair aborts with
+        // "argument --no-pass: not allowed with -H/--hashes" and the tool never
+        // runs. Every pass-the-hash pywhisker call failed this way.
+        assert!(
+            args_vec.iter().all(|a| a != "--no-pass"),
+            "--no-pass is mutually exclusive with --hashes"
+        );
         assert!(args_vec.iter().all(|a| a != "-p"));
     }
 
