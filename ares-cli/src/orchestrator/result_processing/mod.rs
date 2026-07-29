@@ -957,8 +957,9 @@ fn build_seimpersonate_vuln(
     details.insert(
         "note".into(),
         Value::String(
-            "SeImpersonatePrivilege observed enabled — lead for privesc agent. \
-             SYSTEM escalation still requires successful potato-family exploitation."
+            "SeImpersonatePrivilege observed enabled — operator lead only. \
+             No on-target execution primitive is available in this harness, \
+             so no automated SYSTEM escalation will follow."
                 .into(),
         ),
     );

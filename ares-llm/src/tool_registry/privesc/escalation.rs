@@ -1,9 +1,4 @@
 //! Windows privilege escalation and enumeration tool definitions.
-//!
-//! NOTE: The following tools are excluded because they have no executor
-//! implemented (Windows binaries run on-target, not locally):
-//! - printspoofer, godpotato, sweetpotato, seatbelt, sharpup, powerup,
-//!   winpeas, linpeas, runas_cs, scm_uac_bypass, powerupsql
 
 use serde_json::json;
 

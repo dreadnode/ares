@@ -1759,17 +1759,19 @@ mod seimpersonate_publish_only_contract {
     }
 
     #[tokio::test]
-    async fn note_documents_potato_requirement() {
+    async fn note_documents_lead_only_status() {
         let vuln = build_seimpersonate_vuln("web01", Some("192.168.58.20"));
         let note = vuln
             .details
             .get("note")
             .and_then(|v| v.as_str())
-            .unwrap_or("");
+            .unwrap_or("")
+            .to_lowercase();
         assert!(
-            note.to_lowercase().contains("potato"),
-            "note should tell readers that SYSTEM escalation still requires \
-             potato-family exploitation, not automatic credit — got: {note}"
+            note.contains("lead") && !note.contains("potato"),
+            "note should mark the vuln as a lead-only observation and MUST NOT \
+             promise potato-family exploitation (no on-target execution primitive \
+             exists) — got: {note}"
         );
     }
 }
