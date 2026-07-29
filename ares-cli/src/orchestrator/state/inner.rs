@@ -73,6 +73,11 @@ pub struct StateInner {
     pub discovered_vulnerabilities: HashMap<String, VulnerabilityInfo>,
     pub exploited_vulnerabilities: HashSet<String>,
 
+    /// Subset of `exploited_vulnerabilities` credited only because another path
+    /// reached the same goal (see `compute_superseded`). The technique itself
+    /// was never proven to work, so reports must not present these as wins.
+    pub superseded_vulnerabilities: HashSet<String>,
+
     // Per-vuln consecutive exploit-failure counts. Drives `is_exploit_abandoned`
     // — once a vuln crosses MAX_EXPLOIT_FAILURES, the exploitation workflow
     // skips it permanently for this op. Prevents 2-hour LLM stuck-loops on
@@ -301,6 +306,7 @@ impl StateInner {
             candidate_domains: HashMap::new(),
             discovered_vulnerabilities: HashMap::new(),
             exploited_vulnerabilities: HashSet::new(),
+            superseded_vulnerabilities: HashSet::new(),
             exploit_failure_counts: HashMap::new(),
             domain_controllers: HashMap::new(),
             netbios_to_fqdn: HashMap::new(),

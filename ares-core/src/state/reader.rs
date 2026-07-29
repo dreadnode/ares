@@ -148,6 +148,15 @@ impl RedisStateReader {
         Ok(items)
     }
 
+    /// Load superseded vulnerability IDs from `ares:op:{id}:superseded` SET.
+    pub async fn get_superseded_vulnerabilities(
+        &self,
+        conn: &mut impl AsyncCommands,
+    ) -> Result<HashSet<String>, redis::RedisError> {
+        let items: HashSet<String> = conn.smembers(self.key(KEY_SUPERSEDED)).await?;
+        Ok(items)
+    }
+
     /// Load domain controller map from `ares:op:{id}:dc_map` HASH.
     pub async fn get_dc_map(
         &self,
@@ -197,6 +206,7 @@ impl RedisStateReader {
         let domains = self.get_domains(conn).await?;
         let vulnerabilities = self.get_vulnerabilities(conn).await?;
         let exploited = self.get_exploited_vulnerabilities(conn).await?;
+        let superseded = self.get_superseded_vulnerabilities(conn).await?;
         let dc_map = self.get_dc_map(conn).await?;
         let netbios_map = self.get_netbios_map(conn).await?;
 
@@ -234,6 +244,7 @@ impl RedisStateReader {
             all_shares: shares,
             discovered_vulnerabilities: vulnerabilities,
             exploited_vulnerabilities: exploited,
+            superseded_vulnerabilities: superseded,
             has_domain_admin: meta.has_domain_admin,
             has_golden_ticket: meta.has_golden_ticket,
             domain_admin_path: meta.domain_admin_path,

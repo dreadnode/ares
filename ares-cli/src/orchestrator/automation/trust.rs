@@ -147,6 +147,42 @@ fn classify_trust_escalation(
     }
 }
 
+/// Timeline description and MITRE techniques for a successful trust forge.
+///
+/// Branches on `is_inter_forest` — the same predicate
+/// [`classify_trust_escalation`] uses to pick the vuln type — so the event and
+/// the vulnerability can never disagree. Branching on `is_child_to_parent`
+/// instead put a parent→child forge (intra-forest, classified
+/// `child_to_parent`) on the inter-forest arm, stamping T1550.003 where
+/// T1003.006 belonged and corrupting the red/blue technique-ID join.
+fn trust_escalation_event_fields(
+    source_domain: &str,
+    target_domain: &str,
+    trust_account: &str,
+) -> (String, Vec<String>) {
+    if is_inter_forest(source_domain, target_domain) {
+        return (
+            format!(
+                "Forest trust escalation: {source_domain} \u{2192} {target_domain} via trust key {trust_account}"
+            ),
+            vec!["T1134.005".to_string(), "T1550.003".to_string()],
+        );
+    }
+    let source_l = source_domain.to_lowercase();
+    let target_l = target_domain.to_lowercase();
+    let direction = if source_l != target_l && source_l.ends_with(&format!(".{target_l}")) {
+        "Child-to-parent"
+    } else {
+        "Parent-to-child"
+    };
+    (
+        format!(
+            "{direction} ExtraSid escalation: {source_domain} \u{2192} {target_domain} via {trust_account} trust key"
+        ),
+        vec!["T1134.005".to_string(), "T1003.006".to_string()],
+    )
+}
+
 /// Build a trust account name from a flat name (e.g. "FABRIKAM" -> "FABRIKAM$").
 fn trust_account_name(flat_name: &str) -> String {
     format!("{}$", flat_name.to_uppercase())
@@ -1736,26 +1772,15 @@ pub async fn auto_trust_follow(dispatcher: Arc<Dispatcher>, mut shutdown: watch:
                                 .state
                                 .mark_exploited(&dispatcher_bg.queue, &vuln_id_bg)
                                 .await;
-                            let techniques = if is_child_to_parent_bg {
-                                vec!["T1134.005".to_string(), "T1003.006".to_string()]
-                            } else {
-                                vec!["T1134.005".to_string(), "T1550.003".to_string()]
-                            };
+                            let (description, techniques) = trust_escalation_event_fields(
+                                &source_domain_bg,
+                                &target_domain_bg,
+                                &trust_account_bg,
+                            );
                             let event_id = format!(
                                 "evt-trust-{}",
                                 &uuid::Uuid::new_v4().simple().to_string()[..8]
                             );
-                            let description = if is_child_to_parent_bg {
-                                format!(
-                                    "Child-to-parent ExtraSid escalation: {} \u{2192} {} via {} trust key",
-                                    source_domain_bg, target_domain_bg, trust_account_bg
-                                )
-                            } else {
-                                format!(
-                                    "Forest trust escalation: {} \u{2192} {} via trust key {}",
-                                    source_domain_bg, target_domain_bg, trust_account_bg
-                                )
-                            };
                             let event = serde_json::json!({
                                 "id": event_id,
                                 "timestamp": chrono::Utc::now().to_rfc3339(),
@@ -2790,6 +2815,54 @@ mod tests {
     #[test]
     fn child_to_parent_vuln_id_empty_strings() {
         assert_eq!(child_to_parent_vuln_id("", ""), "child_to_parent__");
+    }
+
+    #[test]
+    fn trust_event_fields_parent_to_child_is_intra_forest() {
+        let (desc, techniques) =
+            super::trust_escalation_event_fields("contoso.local", "child.contoso.local", "CHILD$");
+        assert!(
+            desc.starts_with("Parent-to-child ExtraSid escalation:"),
+            "parent->child must not be described as a forest trust: {desc}"
+        );
+        assert_eq!(techniques, vec!["T1134.005", "T1003.006"]);
+    }
+
+    #[test]
+    fn trust_event_fields_child_to_parent_is_intra_forest() {
+        let (desc, techniques) = super::trust_escalation_event_fields(
+            "child.contoso.local",
+            "contoso.local",
+            "CONTOSO$",
+        );
+        assert!(desc.starts_with("Child-to-parent ExtraSid escalation:"));
+        assert_eq!(techniques, vec!["T1134.005", "T1003.006"]);
+    }
+
+    #[test]
+    fn trust_event_fields_inter_forest_keeps_t1550() {
+        let (desc, techniques) =
+            super::trust_escalation_event_fields("contoso.local", "fabrikam.local", "FABRIKAM$");
+        assert!(desc.starts_with("Forest trust escalation:"));
+        assert_eq!(techniques, vec!["T1134.005", "T1550.003"]);
+    }
+
+    #[test]
+    fn trust_event_fields_agree_with_vuln_classification() {
+        for (source, target) in [
+            ("contoso.local", "child.contoso.local"),
+            ("child.contoso.local", "contoso.local"),
+            ("contoso.local", "fabrikam.local"),
+        ] {
+            let (_, vuln_type, _) = super::classify_trust_escalation(source, target);
+            let (desc, _) = super::trust_escalation_event_fields(source, target, "TRUST$");
+            let event_says_forest = desc.starts_with("Forest trust escalation:");
+            assert_eq!(
+                event_says_forest,
+                vuln_type == "forest_trust_escalation",
+                "{source} -> {target}: vuln_type={vuln_type} but event said {desc}"
+            );
+        }
     }
 
     #[test]

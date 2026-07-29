@@ -915,6 +915,7 @@ pub struct SharedRedTeamState {
     // Vulnerability registry
     pub discovered_vulnerabilities: HashMap<String, VulnerabilityInfo>,
     pub exploited_vulnerabilities: HashSet<String>,
+    pub superseded_vulnerabilities: HashSet<String>,
 
     // Success flags
     pub has_domain_admin: bool,
@@ -967,6 +968,7 @@ impl SharedRedTeamState {
             all_shares: Vec::new(),
             discovered_vulnerabilities: HashMap::new(),
             exploited_vulnerabilities: HashSet::new(),
+            superseded_vulnerabilities: HashSet::new(),
             has_domain_admin: false,
             has_golden_ticket: false,
             domain_admin_path: None,

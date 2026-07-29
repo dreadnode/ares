@@ -52,12 +52,26 @@ impl SharedState {
             compute_superseded(vuln_id, primary, &state.discovered_vulnerabilities)
         };
 
+        let superseded_key = format!(
+            "{}:{}:{}",
+            state::KEY_PREFIX,
+            operation_id,
+            state::KEY_SUPERSEDED
+        );
+
         let mut conn = queue.connection();
         let _: () = conn.sadd(&key, vuln_id).await?;
+        let _: () = conn.srem(&superseded_key, vuln_id).await?;
         for sid in &superseded {
-            let _: () = conn.sadd(&key, sid).await?;
+            let newly_credited: i64 = conn.sadd(&key, sid).await?;
+            if newly_credited > 0 {
+                let _: () = conn.sadd(&superseded_key, sid).await?;
+            }
         }
         let _: () = conn.expire(&key, 86400).await?;
+        if !superseded.is_empty() {
+            let _: () = conn.expire(&superseded_key, 86400).await?;
+        }
 
         emit_op_state(
             self.recorder(),
@@ -72,13 +86,16 @@ impl SharedState {
 
         let mut state = self.inner.write().await;
         state.exploited_vulnerabilities.insert(vuln_id.to_string());
+        state.superseded_vulnerabilities.remove(vuln_id);
         for sid in superseded {
             tracing::info!(
                 primary = %vuln_id,
                 superseded = %sid,
-                "Marking superseded vulnerability as exploited"
+                "Crediting superseded vulnerability — goal reached by another path, technique unproven"
             );
-            state.exploited_vulnerabilities.insert(sid);
+            if state.exploited_vulnerabilities.insert(sid.clone()) {
+                state.superseded_vulnerabilities.insert(sid);
+            }
         }
         Ok(())
     }
@@ -404,6 +421,82 @@ mod tests {
         let primary = discovered.get("mssql_impersonation_192.168.58.254");
         let out = compute_superseded("mssql_impersonation_192.168.58.254", primary, &discovered);
         assert!(out.is_empty());
+    }
+
+    #[tokio::test]
+    async fn superseded_trust_vuln_is_credited_but_not_counted_as_proven() {
+        let state = SharedState::new("op-1".to_string());
+        let q = mock_queue();
+        {
+            let mut s = state.inner.write().await;
+            for (id, v) in [
+                (
+                    "dc_secretsdump_fabrikam.local",
+                    vuln(
+                        "dc_secretsdump_fabrikam.local",
+                        "dc_secretsdump",
+                        "192.168.58.58",
+                        &[("domain", "fabrikam.local")],
+                    ),
+                ),
+                (
+                    "forest_trust_contoso.local_fabrikam.local",
+                    vuln(
+                        "forest_trust_contoso.local_fabrikam.local",
+                        "forest_trust_escalation",
+                        "192.168.58.58",
+                        &[("target_domain", "fabrikam.local")],
+                    ),
+                ),
+            ] {
+                s.discovered_vulnerabilities.insert(id.to_string(), v);
+            }
+        }
+
+        state
+            .mark_exploited(&q, "dc_secretsdump_fabrikam.local")
+            .await
+            .unwrap();
+
+        let s = state.inner.read().await;
+        assert!(s
+            .exploited_vulnerabilities
+            .contains("forest_trust_contoso.local_fabrikam.local"));
+        assert!(
+            s.superseded_vulnerabilities
+                .contains("forest_trust_contoso.local_fabrikam.local"),
+            "a trust forge credited only by a dc_secretsdump must be marked superseded"
+        );
+        assert!(
+            !s.superseded_vulnerabilities
+                .contains("dc_secretsdump_fabrikam.local"),
+            "the primary vuln is proven, not superseded"
+        );
+    }
+
+    #[tokio::test]
+    async fn directly_exploited_vuln_is_promoted_out_of_superseded() {
+        let state = SharedState::new("op-1".to_string());
+        let q = mock_queue();
+        {
+            let mut s = state.inner.write().await;
+            s.superseded_vulnerabilities
+                .insert("forest_trust_contoso.local_fabrikam.local".to_string());
+            s.exploited_vulnerabilities
+                .insert("forest_trust_contoso.local_fabrikam.local".to_string());
+        }
+
+        state
+            .mark_exploited(&q, "forest_trust_contoso.local_fabrikam.local")
+            .await
+            .unwrap();
+
+        let s = state.inner.read().await;
+        assert!(
+            !s.superseded_vulnerabilities
+                .contains("forest_trust_contoso.local_fabrikam.local"),
+            "proving the technique later must clear the superseded marker"
+        );
     }
 
     #[test]

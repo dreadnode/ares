@@ -222,7 +222,7 @@ fn extract_template_for_esc(output: &str, esc_type: &str) -> Option<String> {
     let esc_upper = esc_type.to_uppercase();
     let lines: Vec<&str> = output.lines().collect();
     for (i, line) in lines.iter().enumerate() {
-        if line.contains(&esc_upper) {
+        if esc_word_boundary_match(line, &esc_upper) {
             // Look backwards for "Template Name" line
             for j in (0..i).rev() {
                 let prev = lines[j].trim();
@@ -625,6 +625,26 @@ mod tests {
         assert_eq!(
             extract_template_for_esc(output, "esc1"),
             Some("Template2".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_template_for_esc_does_not_match_longer_esc_number() {
+        let output =
+            "Template Name : Esc13Template\n    ESC13 : 'DOMAIN\\Users' issuance policy link";
+        assert_eq!(extract_template_for_esc(output, "esc1"), None);
+        assert_eq!(
+            extract_template_for_esc(output, "esc13"),
+            Some("Esc13Template".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_template_for_esc_picks_own_template_when_esc13_precedes() {
+        let output = "Template Name : Esc13Template\n    ESC13 : issuance policy link\nTemplate Name : Esc1Template\n    ESC1 : 'DOMAIN\\Users' can enroll";
+        assert_eq!(
+            extract_template_for_esc(output, "esc1"),
+            Some("Esc1Template".to_string())
         );
     }
 

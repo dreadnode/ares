@@ -38,6 +38,10 @@ pub const KEY_CANDIDATE_DOMAINS: &str = "candidate_domains";
 pub const KEY_VULNS: &str = "vulns";
 /// Redis SET key suffix for exploited vulnerability IDs.
 pub const KEY_EXPLOITED: &str = "exploited";
+/// Redis SET key suffix for vulnerability IDs credited only because another
+/// path reached the same goal. Subset of [`KEY_EXPLOITED`]; the technique
+/// itself was never proven to work.
+pub const KEY_SUPERSEDED: &str = "superseded";
 /// Redis HASH key suffix for operation metadata.
 pub const KEY_META: &str = "meta";
 /// Redis HASH key suffix mapping IP → DC hostname.
@@ -216,6 +220,7 @@ mod tests {
             KEY_DOMAINS,
             KEY_VULNS,
             KEY_EXPLOITED,
+            KEY_SUPERSEDED,
             KEY_META,
             KEY_DC_MAP,
             KEY_NETBIOS_MAP,
@@ -264,6 +269,7 @@ mod tests {
             KEY_DOMAINS,
             KEY_VULNS,
             KEY_EXPLOITED,
+            KEY_SUPERSEDED,
             KEY_META,
             KEY_DC_MAP,
             KEY_NETBIOS_MAP,

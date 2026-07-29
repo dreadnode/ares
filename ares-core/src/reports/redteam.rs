@@ -13,6 +13,15 @@ use super::mitre::get_technique_display;
 use super::templates::{REDTEAM_COMPREHENSIVE_TEMPLATE, REDTEAM_SUMMARY_TEMPLATE};
 use super::util::{format_duration_chrono, timeline_event_from_json};
 
+/// Count of vulnerabilities whose own exploitation was proven, excluding those
+/// credited solely because another path reached the same goal.
+pub(crate) fn proven_exploited_count(state: &SharedRedTeamState) -> usize {
+    state
+        .exploited_vulnerabilities
+        .difference(&state.superseded_vulnerabilities)
+        .count()
+}
+
 /// Generates markdown reports from red team operation state using Tera templates.
 pub struct RedTeamReportGenerator {
     tera: Tera,
@@ -75,7 +84,14 @@ impl RedTeamReportGenerator {
         let mut discovered_vulns: Vec<VulnCtx> = state
             .discovered_vulnerabilities
             .iter()
-            .map(|(id, v)| build_vuln_ctx(id, v, &state.exploited_vulnerabilities))
+            .map(|(id, v)| {
+                build_vuln_ctx(
+                    id,
+                    v,
+                    &state.exploited_vulnerabilities,
+                    &state.superseded_vulnerabilities,
+                )
+            })
             .collect();
         discovered_vulns.sort_by_key(|v| v.priority);
 
@@ -161,7 +177,7 @@ impl RedTeamReportGenerator {
             "vulnerability_count",
             &state.discovered_vulnerabilities.len(),
         );
-        ctx.insert("exploited_count", &state.exploited_vulnerabilities.len());
+        ctx.insert("exploited_count", &proven_exploited_count(state));
         ctx.insert("share_count", &state.all_shares.len());
         ctx.insert("hosts", &hosts);
         ctx.insert("users", &users);
@@ -215,7 +231,14 @@ impl RedTeamReportGenerator {
         let mut discovered_vulns: Vec<VulnCtx> = state
             .discovered_vulnerabilities
             .iter()
-            .map(|(id, v)| build_vuln_ctx(id, v, &state.exploited_vulnerabilities))
+            .map(|(id, v)| {
+                build_vuln_ctx(
+                    id,
+                    v,
+                    &state.exploited_vulnerabilities,
+                    &state.superseded_vulnerabilities,
+                )
+            })
             .collect();
         discovered_vulns.sort_by_key(|v| v.priority);
 
@@ -388,9 +411,10 @@ impl RedTeamReportGenerator {
             "vulnerabilities_found",
             &state.discovered_vulnerabilities.len(),
         );
+        ctx.insert("vulnerabilities_exploited", &proven_exploited_count(state));
         ctx.insert(
-            "vulnerabilities_exploited",
-            &state.exploited_vulnerabilities.len(),
+            "vulnerabilities_superseded",
+            &state.superseded_vulnerabilities.len(),
         );
         ctx.insert(
             "generated_at",
@@ -420,7 +444,7 @@ pub(crate) fn generate_executive_summary(
     let credential_count = unique_creds.len();
     let admin_count = unique_creds.iter().filter(|c| c.is_admin).count();
     let vulnerability_count = state.discovered_vulnerabilities.len();
-    let exploited_count = state.exploited_vulnerabilities.len();
+    let exploited_count = proven_exploited_count(state);
 
     let mut summary_parts = Vec::new();
 
