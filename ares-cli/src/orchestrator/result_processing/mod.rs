@@ -287,7 +287,7 @@ pub async fn process_completed_task(
     }
 
     // Handle exploit task outcomes — create timeline events for both success and failure
-    if completed.task_id.starts_with("exploit_") {
+    if is_exploit_scoped_task_id(&completed.task_id) {
         if let Some(vuln_id) = result
             .result
             .as_ref()
@@ -311,6 +311,8 @@ pub async fn process_completed_task(
             // primitive on getST exit-0.
             let has_ticket_evidence =
                 is_ticket_grant_vuln(&vuln_id) && result_has_ccache_evidence(&result.result);
+            let has_acl_evidence =
+                is_acl_mutation_vuln(&vuln_id) && result_has_acl_mutation_evidence(&result.result);
             // Stall-tolerance: when the LLM ends its turn without calling
             // task_complete (LoopEndReason::MaxSteps or budget exhaustion),
             // submission.rs stamps `success=false` with an error string
@@ -325,11 +327,22 @@ pub async fn process_completed_task(
             let stalled_with_evidence = !result.success
                 && error_indicates_stall(result.error.as_deref())
                 && !result_text_indicates_failure(&result.result)
-                && (result_has_parser_evidence(&result.result) || has_ticket_evidence);
+                && (result_has_parser_evidence(&result.result)
+                    || has_ticket_evidence
+                    || has_acl_evidence);
+            let assisted_with_evidence = !result.success
+                && error_indicates_assistance(result.error.as_deref())
+                && !result_text_indicates_failure(&result.result)
+                && (result_has_parser_evidence(&result.result)
+                    || has_ticket_evidence
+                    || has_acl_evidence);
             let actually_succeeded = (result.success
                 && !result_text_indicates_failure(&result.result)
-                && (result_has_parser_evidence(&result.result) || has_ticket_evidence))
-                || stalled_with_evidence;
+                && (result_has_parser_evidence(&result.result)
+                    || has_ticket_evidence
+                    || has_acl_evidence))
+                || stalled_with_evidence
+                || assisted_with_evidence;
 
             if actually_succeeded {
                 info!(vuln_id = %vuln_id, task_id = %task_id, "Marking vulnerability as exploited");
@@ -1132,6 +1145,18 @@ fn is_ticket_grant_vuln(vuln_id: &str) -> bool {
         || v.starts_with("unconstrained_delegation_")
         || v.starts_with("rbcd_")
         || v.starts_with("s4u_")
+        || v.starts_with("golden_ticket_")
+}
+
+fn is_acl_mutation_vuln(vuln_id: &str) -> bool {
+    let v = vuln_id.to_lowercase();
+    v.starts_with("acl_") || v.starts_with("gpo_")
+}
+
+fn is_exploit_scoped_task_id(task_id: &str) -> bool {
+    task_id.starts_with("exploit_")
+        || task_id.starts_with("lateral_")
+        || task_id.starts_with("privesc_")
 }
 
 /// True when `vuln_type` (as recorded in `task.params.vuln_type`) belongs
@@ -1247,6 +1272,38 @@ fn result_has_ccache_evidence(result: &Option<Value>) -> bool {
     false
 }
 
+const ACL_MUTATION_MARKERS: &[&str] = &[
+    "dacl modified successfully",
+    "has now genericall on",
+    "has now genericall over",
+    "password changed successfully",
+    "is now able to dcsync",
+    "can now impersonate users on",
+    "added to ",
+    "has been updated",
+    "successfully added msds-keycredentiallink",
+    "updated the msds-keycredentiallink",
+    "saved pfx",
+];
+
+fn result_has_acl_mutation_evidence(result: &Option<Value>) -> bool {
+    let Some(payload) = result.as_ref() else {
+        return false;
+    };
+    for text in collect_result_text_parts(payload) {
+        for line in text.lines() {
+            let lower = line.trim().to_lowercase();
+            if !lower.starts_with("[+]") && !lower.starts_with("[*]") {
+                continue;
+            }
+            if ACL_MUTATION_MARKERS.iter().any(|m| lower.contains(m)) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 /// Returns `true` when the task's error string is one of the agent-loop
 /// stall conditions (LoopEndReason::MaxSteps, MaxTokens, BudgetExceeded,
 /// or "ended turn without task_complete"). These conditions indicate the
@@ -1264,6 +1321,15 @@ fn error_indicates_stall(err: Option<&str>) -> bool {
         || lower.contains("max steps")
         || lower.contains("agent hit max tokens")
         || lower.contains("budget exceeded")
+}
+
+fn error_indicates_assistance(err: Option<&str>) -> bool {
+    let Some(e) = err else {
+        return false;
+    };
+    e.trim_start()
+        .to_lowercase()
+        .starts_with("assistance needed:")
 }
 
 fn result_has_parser_evidence(result: &Option<Value>) -> bool {

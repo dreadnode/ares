@@ -224,7 +224,7 @@ pub(super) fn tool_definitions() -> Vec<ToolDefinition> {
                     },
                     "right": {
                         "type": "string",
-                        "description": "Right to grant (default: GenericAll). Examples: GenericAll, GenericWrite, WriteDacl, WriteOwner",
+                        "description": "Right to grant. Only GenericAll (equivalently FullControl) is supported — bloodyAD's genericAll verb grants full control and cannot express a narrower ACE. Use dacl_edit for GenericWrite/WriteDacl/WriteOwner.",
                         "default": "GenericAll"
                     }
                 },

