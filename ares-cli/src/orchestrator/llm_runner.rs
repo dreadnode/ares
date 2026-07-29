@@ -33,11 +33,10 @@ pub struct RoleProvider {
 /// prompts from the current operation state.
 pub struct LlmTaskRunner {
     /// Per-role LLM provider + agent-loop config. Lookup fails over to
-    /// `fallback_role` (orchestrator) for any role not in the map.
+    /// `fallback_provider` for any role not in the map.
     providers: HashMap<AgentRole, RoleProvider>,
-    /// Role to use when `providers` has no entry for the requested role.
-    /// Set to `AgentRole::Orchestrator` by construction.
-    fallback_role: AgentRole,
+    /// Used when `providers` has no entry for the requested role.
+    fallback_provider: RoleProvider,
     dispatcher: Arc<dyn ToolDispatcher>,
     state: SharedState,
     /// Sorted technique priorities from strategy (technique, weight).
@@ -79,18 +78,15 @@ impl FrozenOpContext {
 impl LlmTaskRunner {
     pub fn new(
         providers: HashMap<AgentRole, RoleProvider>,
+        fallback_provider: RoleProvider,
         dispatcher: Arc<dyn ToolDispatcher>,
         state: SharedState,
         technique_priorities: Vec<(String, i32)>,
         frozen_op_context: FrozenOpContext,
     ) -> Self {
-        assert!(
-            providers.contains_key(&AgentRole::Orchestrator),
-            "LlmTaskRunner requires a provider entry for the orchestrator role (used as fallback)"
-        );
         Self {
             providers,
-            fallback_role: AgentRole::Orchestrator,
+            fallback_provider,
             dispatcher,
             state,
             technique_priorities,
@@ -100,11 +96,7 @@ impl LlmTaskRunner {
     }
 
     fn provider_for(&self, role: AgentRole) -> &RoleProvider {
-        self.providers.get(&role).unwrap_or_else(|| {
-            self.providers
-                .get(&self.fallback_role)
-                .expect("fallback orchestrator provider must be present")
-        })
+        self.providers.get(&role).unwrap_or(&self.fallback_provider)
     }
 
     /// Set the callback handler after construction.
@@ -151,7 +143,7 @@ impl LlmTaskRunner {
         //    dynamic Operation Context block so the LLM sees current
         //    discoveries without invalidating the system-prompt cache.
         let task_prompt_body = build_task_prompt(task_type, task_id, payload, &snapshot)?;
-        let task_prompt = dynamic_context_block(role, &snapshot) + &task_prompt_body;
+        let task_prompt = dynamic_context_block(&snapshot) + &task_prompt_body;
 
         // 4. Get tool schemas for this role
         let tools = tool_registry::tools_for_role(role);
@@ -244,7 +236,6 @@ fn build_system_prompt(
         AgentRole::Privesc => templates::TEMPLATE_PRIVESC,
         AgentRole::Lateral => templates::TEMPLATE_LATERAL,
         AgentRole::Coercion => templates::TEMPLATE_COERCION,
-        AgentRole::Orchestrator => templates::TEMPLATE_ORCHESTRATOR,
     };
 
     // Render system instructions with strategy-driven priority table
@@ -269,7 +260,7 @@ fn build_system_prompt(
 /// prompt. This carries the snapshot state that previously lived in the
 /// system prompt (current discoveries, undominated forests) so the system
 /// prompt itself stays byte-stable for prefix-cache hits.
-fn dynamic_context_block(role: AgentRole, snapshot: &StateSnapshot) -> String {
+fn dynamic_context_block(snapshot: &StateSnapshot) -> String {
     let mut out = String::from("## Current Operation Context\n\n");
     if !snapshot.target_domain.is_empty() {
         out.push_str(&format!("- Target Domain: {}\n", snapshot.target_domain));
@@ -279,15 +270,6 @@ fn dynamic_context_block(role: AgentRole, snapshot: &StateSnapshot) -> String {
     }
     if !snapshot.target_dc_fqdn.is_empty() {
         out.push_str(&format!("- Target DC FQDN: {}\n", snapshot.target_dc_fqdn));
-    }
-    if role == AgentRole::Orchestrator && !snapshot.undominated_forests.is_empty() {
-        out.push_str("\n### Multi-Forest Status\n\n**The following forest roots have NOT been dominated (no krbtgt hash obtained):**\n\n");
-        for forest in &snapshot.undominated_forests {
-            out.push_str(&format!("- **{forest}** — needs krbtgt extraction\n"));
-        }
-        out.push_str(
-            "\nYou MUST NOT call `complete_operation()` until ALL forests are dominated or all attack paths are exhausted.\n",
-        );
     }
     out.push('\n');
     out
@@ -477,7 +459,6 @@ mod tests {
             AgentRole::Privesc,
             AgentRole::Lateral,
             AgentRole::Coercion,
-            AgentRole::Orchestrator,
         ] {
             let result = build_system_prompt(*role, &[], test_op());
             assert!(result.is_ok(), "Failed for role: {:?}", role);
@@ -498,33 +479,21 @@ mod tests {
         // Same frozen op context + same role → same bytes, regardless of
         // what discoveries the orchestrator has made. This is the cache
         // contract: snapshot mutations land in the user message, not here.
-        let prompt_with_data =
-            build_system_prompt(AgentRole::Orchestrator, &[], test_op()).unwrap();
-        let prompt_again = build_system_prompt(AgentRole::Orchestrator, &[], test_op()).unwrap();
+        let prompt_with_data = build_system_prompt(AgentRole::Privesc, &[], test_op()).unwrap();
+        let prompt_again = build_system_prompt(AgentRole::Privesc, &[], test_op()).unwrap();
         assert_eq!(prompt_with_data, prompt_again);
         assert!(!prompt_with_data.contains("Multi-Forest Status"));
     }
 
     #[test]
-    fn dynamic_context_block_includes_forests_for_orchestrator() {
+    fn dynamic_context_block_carries_target_not_forests() {
         let snap = StateSnapshot {
             target_dc_ip: "192.168.58.10".into(),
             undominated_forests: vec!["fabrikam.local".into()],
             ..Default::default()
         };
-        let block = dynamic_context_block(AgentRole::Orchestrator, &snap);
+        let block = dynamic_context_block(&snap);
         assert!(block.contains("Target DC IP: 192.168.58.10"));
-        assert!(block.contains("Multi-Forest Status"));
-        assert!(block.contains("fabrikam.local"));
-    }
-
-    #[test]
-    fn dynamic_context_block_omits_forests_for_non_orchestrator() {
-        let snap = StateSnapshot {
-            undominated_forests: vec!["fabrikam.local".into()],
-            ..Default::default()
-        };
-        let block = dynamic_context_block(AgentRole::Recon, &snap);
         assert!(!block.contains("Multi-Forest Status"));
         assert!(!block.contains("fabrikam.local"));
     }

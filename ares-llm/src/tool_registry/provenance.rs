@@ -123,7 +123,6 @@ mod tests {
         AgentRole::Privesc,
         AgentRole::Lateral,
         AgentRole::Coercion,
-        AgentRole::Orchestrator,
     ];
 
     fn all_registered_tool_names() -> HashSet<String> {

@@ -491,10 +491,6 @@ async fn run_inner() -> Result<()> {
         llm_runner::RoleProvider,
     > = std::collections::HashMap::new();
     let role_yaml_names: &[(ares_llm::tool_registry::AgentRole, &str)] = &[
-        (
-            ares_llm::tool_registry::AgentRole::Orchestrator,
-            "orchestrator",
-        ),
         (ares_llm::tool_registry::AgentRole::Recon, "recon"),
         (
             ares_llm::tool_registry::AgentRole::CredentialAccess,
@@ -506,12 +502,16 @@ async fn run_inner() -> Result<()> {
         (ares_llm::tool_registry::AgentRole::Lateral, "lateral"),
         (ares_llm::tool_registry::AgentRole::Coercion, "coercion"),
     ];
+    let (fb_provider, fb_model_name) = ares_llm::create_provider(&orch_spec)
+        .with_context(|| format!("Failed to create fallback LLM provider for '{orch_spec}'"))?;
+    let fallback_provider = llm_runner::RoleProvider {
+        provider: Arc::from(fb_provider),
+        config: ares_llm::AgentLoopConfig::from_env(fb_model_name, config.strategy.llm_temperature),
+    };
+
     for (role, yaml_key) in role_yaml_names {
-        let spec = if *role == ares_llm::tool_registry::AgentRole::Orchestrator {
-            orch_spec.clone()
-        } else {
-            read_role_model(yaml_doc.as_ref(), yaml_key).unwrap_or_else(|| orch_spec.clone())
-        };
+        let spec =
+            read_role_model(yaml_doc.as_ref(), yaml_key).unwrap_or_else(|| orch_spec.clone());
         let (provider, model_name) = ares_llm::create_provider(&spec)
             .with_context(|| format!("Failed to create LLM provider for role '{yaml_key}'"))?;
         let cfg = ares_llm::AgentLoopConfig::from_env(model_name, config.strategy.llm_temperature)
@@ -521,9 +521,7 @@ async fn run_inner() -> Result<()> {
                     .and_then(|c| c.agents.get(*yaml_key))
                     .map(|a| a.max_steps),
             );
-        if *role != ares_llm::tool_registry::AgentRole::Orchestrator {
-            info!(role = %yaml_key, model = %spec, max_steps = cfg.max_steps, "Per-role model");
-        }
+        info!(role = %yaml_key, model = %spec, max_steps = cfg.max_steps, "Per-role model");
         providers.insert(
             *role,
             llm_runner::RoleProvider {
@@ -532,11 +530,8 @@ async fn run_inner() -> Result<()> {
             },
         );
     }
-    // Capture orchestrator's resolved model name for downstream logging.
-    let model_name = providers
-        .get(&ares_llm::tool_registry::AgentRole::Orchestrator)
-        .map(|rp| rp.config.model.clone())
-        .unwrap_or_default();
+    // Capture the fallback model name for downstream logging.
+    let model_name = fallback_provider.config.model.clone();
 
     // Credential auth throttle — rate-limits auth-bearing tool calls per
     // credential so concurrent agents don't drive one account into lockout.
@@ -615,6 +610,7 @@ async fn run_inner() -> Result<()> {
     let frozen_target_dc_fqdn = init_snapshot.target_dc_fqdn.clone();
     let llm_runner = Arc::new(llm_runner::LlmTaskRunner::new(
         providers,
+        fallback_provider,
         tool_disp,
         shared_state.clone(),
         technique_priorities,

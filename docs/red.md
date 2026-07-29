@@ -88,7 +88,6 @@ tool assignments. For detailed responsibilities, see sections below.
 
 | Agent | Purpose | Max Steps | Tool Classes |
 |-------|---------|-----------|--------------|
-| **ORCHESTRATOR** | Central coordinator (dispatches, never executes) | 200 | `OrchestratorTools`, `RedTeamReportingTools` |
 | **RECON** | Network scanning, enumeration, BloodHound | 100 | `NetworkEnumerationTools`, `BloodHoundTools`, `RedTeamReportingTools` |
 | **CREDENTIAL_ACCESS** | Password attacks, hash extraction | 100 | `CredentialDiscoveryTools`, `CredentialHarvestingTools`, `SharePilferingTools`, `GMSATools` |
 | **CRACKER** | Offline hash cracking | 150 | `CrackingTools`, `CrackerCallbackTools` |
@@ -120,33 +119,25 @@ Models can be configured via environment variables (in order of precedence):
 
 ### Orchestrator Service
 
-**Purpose**: Central LLM-powered coordinator with the "big picture" view.
+**Purpose**: Central coordinator. It is a deterministic Rust service, **not an
+LLM agent** — nothing in it prompts a model to decide what to attack next.
 
-**Pod**: `ares-orchestrator-*` (separate from worker agents)
+**Process**: `ares orchestrator` (separate from worker processes)
 
-**Tools Available**:
+**What it does**:
 
-- `OrchestratorTools` - Dispatch functions for all worker types
-- `RedTeamReportingTools` - Status reporting, operation control
+- Runs the automations in `ares-cli/src/orchestrator/automation/`, which read
+  operation state and submit follow-on tasks via `Dispatcher::throttled_submit`
+- Hosts every red agent loop in-process (`llm_runner.rs`), one `tokio` task per
+  dispatched task, and owns the per-role LLM providers
+- Decides completion deterministically in `orchestrator/completion.rs`
 
-**Does NOT Have**:
-
-- Network enumeration tools (nmap, enum4linux) - dispatches to RECON
-- Credential harvesting tools (secretsdump, kerberoast) - dispatches to CREDENTIAL_ACCESS
-- Exploitation tools (certipy, mssqlclient) - dispatches to PRIVESC
-- Lateral movement tools (psexec, evil-winrm) - dispatches to LATERAL
-- Cracking tools (hashcat, john) - dispatches to CRACKER
-
-**Dispatch Functions**:
-
-- `dispatch_recon` - RECON, network scanning, user/share enumeration, BloodHound
-- `dispatch_credential_access` - CREDENTIAL_ACCESS, password attacks, hash extraction
-- `dispatch_crack_hash` - CRACKER, hash cracking
-- `dispatch_acl_analysis` - ACL, ACL abuse paths
-- `dispatch_lateral_movement` - LATERAL, host compromise
-- `dispatch_privesc_exploit` - PRIVESC, direct exploitation
-- `queue_vulnerability_for_exploitation` - PRIVESC, queue vuln for exploitation
-- `start_coercion` - COERCION, NTLM coercion/relay
+**What it is not**: earlier revisions of this document described a strategic
+LLM orchestrator agent with `dispatch_*` tools and a `complete_operation` call.
+That agent never ran — no code path ever produced its role, so its tools were
+never advertised to a model. The role, its tools, its prompt template and its
+dispatch handler were removed; the tool names stay trapped in
+`REMOVED_CALLBACK_TOOLS` so a hallucinated call cannot reach a worker.
 
 ### RECON
 
@@ -274,6 +265,12 @@ Models can be configured via environment variables (in order of precedence):
 4. Report captured hashes or relayed access
 
 ## Operation Lifecycle
+
+> **Notation**: `dispatch_recon(...)` / `complete_operation()` below describe *what
+> gets submitted*, not LLM tool calls. There is no orchestrator agent; the
+> automations in `ares-cli/src/orchestrator/automation/` submit these tasks in
+> Rust, and completion is decided by `orchestrator/completion.rs`.
+
 
 ### Phase 1: Initial Reconnaissance
 
@@ -631,6 +628,12 @@ When any agent discovers a credential:
 
 ## Task Flow Example
 
+> **Notation**: `dispatch_recon(...)` / `complete_operation()` below describe *what
+> gets submitted*, not LLM tool calls. There is no orchestrator agent; the
+> automations in `ares-cli/src/orchestrator/automation/` submit these tasks in
+> Rust, and completion is decided by `orchestrator/completion.rs`.
+
+
 ```text
 ┌─────────────┐    dispatch_credential_access     ┌─────────────────┐
 │ Orchestrator│ ─────────────────────────────────▶│ CREDENTIAL_ACCESS│
@@ -673,6 +676,11 @@ When any agent discovers a credential:
 ## Anti-Patterns to Avoid
 
 ### Orchestrator Should NOT
+
+These rules are enforced structurally rather than by prompting: the orchestrator
+is Rust, holds no attack tools, and no LLM agent is given a `dispatch_*` tool.
+Kept as design intent for anyone reintroducing a coordinating agent.
+
 
 1. **Execute reconnaissance tools directly**
    - Wrong: Orchestrator calls `nmap_scan`, `enumerate_users`

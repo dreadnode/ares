@@ -1,13 +1,9 @@
-//! Orchestrator-specific callback handler for state query and dispatch tools.
+//! Orchestrator-side callback handler for tools that need in-memory state access.
 //!
-//! Implements `CallbackHandler` to handle tools that need in-memory state access:
-//!
-//! **Query tools** — read from SharedState (credentials, hashes, tasks, agent status)
-//! **Dispatch tools** — submit sub-tasks via the Dispatcher (recon, credential_access, etc.)
-//!
-//! These tools are available only to the orchestrator agent role.
+//! Handles the reporting tools every agent role is offered (`list_credentials`,
+//! `get_operation_summary`) plus disabled-tool safety nets, all without going
+//! through Redis tool queues.
 
-mod dispatch;
 mod query;
 #[cfg(test)]
 mod tests;
@@ -58,18 +54,37 @@ impl OrchestratorCallbackHandler {
     }
 }
 
+impl OrchestratorCallbackHandler {
+    /// Disabled — credentials are parsed out of tool output instead. Answered
+    /// in-process so a hallucinated call gets guidance rather than an error.
+    async fn record_credential(&self, _call: &ToolCall) -> Result<CallbackResult> {
+        warn!("record_credential called but disabled — credentials are auto-extracted from tool output");
+        Ok(CallbackResult::Continue(
+            "This tool is disabled. Credentials are automatically extracted from tool output. \
+             Focus on running tools that produce credential data (secretsdump, lsassy, netexec, etc.) \
+             and the system will parse and store credentials automatically."
+                .to_string(),
+        ))
+    }
+
+    /// Disabled — timeline events are generated from discoveries in
+    /// `result_processing`. Same safety-net rationale as `record_credential`.
+    async fn record_timeline_event(&self, _call: &ToolCall) -> Result<CallbackResult> {
+        warn!("record_timeline_event called but disabled — timeline events are auto-generated from discoveries");
+        Ok(CallbackResult::Continue(
+            "This tool is disabled. Timeline events are automatically generated when \
+             credentials, hashes, and hosts are discovered from tool output. Focus on \
+             running attack tools and the system will build the timeline automatically."
+                .to_string(),
+        ))
+    }
+}
+
 #[async_trait::async_trait]
 impl CallbackHandler for OrchestratorCallbackHandler {
     async fn handle_callback(&self, call: &ToolCall) -> Option<Result<CallbackResult>> {
         match call.name.as_str() {
             // Query tools
-            "get_credential_summary" => Some(self.get_credential_summary().await),
-            "get_hash_summary" => Some(self.get_hash_summary().await),
-            "get_all_credentials" => Some(self.get_all_credentials(call).await),
-            "get_all_hashes" => Some(self.get_all_hashes(call).await),
-            "get_hash_value" => Some(self.get_hash_value(call).await),
-            "get_pending_tasks" => Some(self.get_pending_tasks().await),
-            "get_agent_status" => Some(self.get_agent_status().await),
             "get_operation_summary" => Some(self.get_operation_summary().await),
             // list_credentials delegates to get_all_credentials so non-orchestrator
             // agents (lateral, exploit) get real credential data instead of a stub.
@@ -77,13 +92,6 @@ impl CallbackHandler for OrchestratorCallbackHandler {
             // Recording tools — persist to state and Redis
             "record_credential" => Some(self.record_credential(call).await),
             "record_timeline_event" => Some(self.record_timeline_event(call).await),
-            // Dispatch tools
-            "dispatch_recon" => Some(self.dispatch_recon(call).await),
-            "dispatch_credential_access" => Some(self.dispatch_credential_access(call).await),
-            "dispatch_lateral_movement" => Some(self.dispatch_lateral(call).await),
-            "dispatch_privesc_exploit" => Some(self.dispatch_exploit(call).await),
-            "dispatch_coercion" => Some(self.dispatch_coercion(call).await),
-            "dispatch_crack" => Some(self.dispatch_crack(call).await),
             // Not ours — let built-in handler take over
             _ => None,
         }

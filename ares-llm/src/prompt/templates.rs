@@ -17,8 +17,6 @@ const ACL_TEMPLATE: &str = include_str!("../../templates/redteam/agents/acl.md.t
 const PRIVESC_TEMPLATE: &str = include_str!("../../templates/redteam/agents/privesc.md.tera");
 const LATERAL_TEMPLATE: &str = include_str!("../../templates/redteam/agents/lateral.md.tera");
 const COERCION_TEMPLATE: &str = include_str!("../../templates/redteam/agents/coercion.md.tera");
-const ORCHESTRATOR_TEMPLATE: &str =
-    include_str!("../../templates/redteam/agents/orchestrator.md.tera");
 const SYSTEM_INSTRUCTIONS_TEMPLATE: &str =
     include_str!("../../templates/redteam/agents/system_instructions.md.tera");
 
@@ -127,7 +125,6 @@ pub const TEMPLATE_ACL: &str = "redteam/agents/acl";
 pub const TEMPLATE_PRIVESC: &str = "redteam/agents/privesc";
 pub const TEMPLATE_LATERAL: &str = "redteam/agents/lateral";
 pub const TEMPLATE_COERCION: &str = "redteam/agents/coercion";
-pub const TEMPLATE_ORCHESTRATOR: &str = "redteam/agents/orchestrator";
 pub const TEMPLATE_SYSTEM_INSTRUCTIONS: &str = "redteam/agents/system_instructions";
 
 // Special-purpose templates (from Jinja2 ports)
@@ -211,7 +208,6 @@ static TEMPLATES: LazyLock<Tera> = LazyLock::new(|| {
         (TEMPLATE_PRIVESC, PRIVESC_TEMPLATE),
         (TEMPLATE_LATERAL, LATERAL_TEMPLATE),
         (TEMPLATE_COERCION, COERCION_TEMPLATE),
-        (TEMPLATE_ORCHESTRATOR, ORCHESTRATOR_TEMPLATE),
         (TEMPLATE_SYSTEM_INSTRUCTIONS, SYSTEM_INSTRUCTIONS_TEMPLATE),
         // Task templates
         (TEMPLATE_INITIAL_TASK, INITIAL_TASK_TEMPLATE),
@@ -564,15 +560,6 @@ mod tests {
                 .unwrap();
         assert!(result.contains("Coercion Agent"));
         assert!(result.contains("- petitpotam"));
-    }
-
-    #[test]
-    fn render_orchestrator_template() {
-        let capabilities = vec!["dispatch_recon".to_string()];
-        let result =
-            render_agent_instructions(TEMPLATE_ORCHESTRATOR, &capabilities, false, &[], TEST_OP)
-                .unwrap();
-        assert!(result.contains("Red Team Orchestrator"));
     }
 
     #[test]

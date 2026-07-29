@@ -2,7 +2,7 @@
 //!
 //! All task submission goes through `Dispatcher::throttled_submit()` which checks
 //! the throttler, submits or defers, and tracks active tasks. Convenience methods
-//! like `request_crack()`, `request_recon()` etc. build the correct payloads.
+//! like `request_recon()` etc. build the correct payloads.
 
 mod submission;
 pub(crate) mod task_builders;

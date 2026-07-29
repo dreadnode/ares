@@ -1,4 +1,4 @@
-//! Convenience methods for common task types (request_crack, request_recon, etc.).
+//! Convenience methods for common task types (request_recon, etc.).
 
 use anyhow::Result;
 use serde_json::json;
@@ -140,7 +140,7 @@ pub(crate) fn is_acl_style_vuln_type(vtype: &str) -> bool {
         || v.contains("addself")
 }
 
-/// Gather crack-seed material from op state for [`Dispatcher::request_crack`]:
+/// Gather crack-seed material from op state for crack automation:
 /// distinct usernames (for the cracker's dynamic username→candidate generator)
 /// and distinct recovered plaintexts (every op credential — cracked passwords
 /// AND harvested cleartext like autologon/SYSVOL/description leaks). Machine
@@ -190,68 +190,6 @@ pub(crate) fn collect_crack_seed(state: &StateInner) -> (Vec<String>, Vec<String
 }
 
 impl Dispatcher {
-    /// Submit a crack task for a single hash.
-    #[instrument(
-        name = "automation.request_crack",
-        skip(self, hash),
-        fields(username = %hash.username, domain = %hash.domain, hash_type = %hash.hash_type),
-    )]
-    pub async fn request_crack(&self, hash: &ares_core::models::Hash) -> Result<Option<String>> {
-        self.request_crack_batch(std::slice::from_ref(hash)).await
-    }
-
-    /// Submit one crack task covering a batch of hashes that share a hashcat
-    /// mode. hashcat cracks every hash in the file in a single run, so batching
-    /// all same-mode roastable tickets recovers each crackable one in the first
-    /// wordlist pass — instead of serializing a full crack budget per ticket and
-    /// letting a slow, ultimately-uncrackable AES ticket starve a crackable one
-    /// behind it. A single-hash crack is just a batch of one.
-    ///
-    /// Seeds the crack with everything the op already knows. `known_passwords`
-    /// — every plaintext already recovered, cracked or harvested cleartext — is
-    /// the high-value part: the cracker tries these first, so a fresh or
-    /// different-etype ticket for an already-cracked account, or any account
-    /// reusing another's password, cracks instantly instead of re-grinding
-    /// rockyou. `known_usernames` feeds the dynamic username-derived candidate
-    /// generator, which the automation path otherwise never populated.
-    ///
-    /// The per-task `username`/`domain` are taken from the first hash purely as
-    /// an NTLM attribution fallback (a `<32hex>:pw` cracked line carries no
-    /// principal); roastable cracked lines self-identify via their embedded
-    /// `$krb5tgs$…user$realm` / `$krb5asrep$user@realm`, so for a roastable
-    /// batch these representative fields don't affect attribution. Callers must
-    /// therefore only batch self-identifying (roastable) hashes; NTLM stays
-    /// one hash per task.
-    pub async fn request_crack_batch(
-        &self,
-        hashes: &[ares_core::models::Hash],
-    ) -> Result<Option<String>> {
-        let Some(first) = hashes.first() else {
-            return Ok(None);
-        };
-        let (known_usernames, known_passwords) = {
-            let state = self.state.read().await;
-            collect_crack_seed(&state)
-        };
-        // One hash per line: crack_with_hashcat / crack_with_john write the whole
-        // `hash_value` to the hash file verbatim, so hashcat loads every ticket.
-        let joined = hashes
-            .iter()
-            .map(|h| h.hash_value.as_str())
-            .collect::<Vec<_>>()
-            .join("\n");
-        let payload = json!({
-            "hash_type": first.hash_type,
-            "hash_value": joined,
-            "username": first.username,
-            "domain": first.domain,
-            "known_usernames": known_usernames,
-            "known_passwords": known_passwords,
-        });
-        // Crack tasks are non-LLM, normal priority
-        self.throttled_submit("crack", "cracker", payload, 5).await
-    }
-
     /// Submit a recon task.
     ///
     /// Guards:

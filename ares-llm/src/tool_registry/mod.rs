@@ -11,7 +11,6 @@ mod coercion;
 mod cracker;
 mod credential_access;
 mod lateral;
-mod orchestrator_tools;
 mod privesc;
 pub mod provenance;
 mod recon;
@@ -31,7 +30,6 @@ pub enum AgentRole {
     Privesc,
     Lateral,
     Coercion,
-    Orchestrator,
 }
 
 impl AgentRole {
@@ -44,7 +42,6 @@ impl AgentRole {
             Self::Privesc => "privesc",
             Self::Lateral => "lateral",
             Self::Coercion => "coercion",
-            Self::Orchestrator => "orchestrator",
         }
     }
 
@@ -57,7 +54,6 @@ impl AgentRole {
             "privesc" | "privesc_enumeration" => Some(Self::Privesc),
             "lateral" | "lateral_movement" => Some(Self::Lateral),
             "coercion" => Some(Self::Coercion),
-            "orchestrator" => Some(Self::Orchestrator),
             _ => None,
         }
     }
@@ -65,8 +61,8 @@ impl AgentRole {
 
 /// Names of supported callback tools that the agent loop handles directly.
 ///
-/// Includes orchestrator query and dispatch tools — these are handled by a
-/// custom `CallbackHandler` (if provided) rather than being dispatched to workers.
+/// These are handled by a custom `CallbackHandler` (if provided) rather than
+/// being dispatched to workers.
 pub const CALLBACK_TOOLS: &[&str] = &[
     // Universal callbacks
     "task_complete",
@@ -75,13 +71,26 @@ pub const CALLBACK_TOOLS: &[&str] = &[
     "report_finding",
     "report_lateral_success",
     "report_lateral_failed",
-    "complete_operation",
     // Reporting tools (handled in-process, not dispatched to workers)
     // NOTE: record_credential removed — credentials come only from tool output parsing
     // NOTE: record_timeline_event removed — timeline events auto-generated from discoveries
     "record_compromised_host",
     "list_credentials",
-    // Orchestrator query tools (handled by OrchestratorCallbackHandler)
+    "get_operation_summary",
+];
+
+/// Removed callback names that are still trapped in-process so a hallucinated
+/// call receives a deterministic "tool removed" response instead of being
+/// dispatched to a worker.
+///
+/// Keep the `dispatch_*` entries: the loop routes callbacks by tool name, not
+/// by what a role was offered, so dropping them lets a hallucinated call submit
+/// a real task.
+const REMOVED_CALLBACK_TOOLS: &[&str] = &[
+    "record_credential",
+    "record_timeline_event",
+    "report_cracked_credential",
+    "complete_operation",
     "get_credential_summary",
     "get_hash_summary",
     "get_all_credentials",
@@ -89,23 +98,12 @@ pub const CALLBACK_TOOLS: &[&str] = &[
     "get_hash_value",
     "get_pending_tasks",
     "get_agent_status",
-    "get_operation_summary",
-    // Orchestrator dispatch tools
     "dispatch_recon",
     "dispatch_credential_access",
     "dispatch_lateral_movement",
     "dispatch_privesc_exploit",
     "dispatch_coercion",
     "dispatch_crack",
-];
-
-/// Removed callback names that are still trapped in-process so a hallucinated
-/// call receives a deterministic "tool removed" response instead of being
-/// dispatched to a worker.
-const REMOVED_CALLBACK_TOOLS: &[&str] = &[
-    "record_credential",
-    "record_timeline_event",
-    "report_cracked_credential",
 ];
 
 /// Check if a tool name is a callback (handled in Rust, not dispatched).
@@ -308,7 +306,6 @@ pub fn tools_for_role(role: AgentRole) -> Vec<ToolDefinition> {
         }
         AgentRole::Lateral => lateral::tool_definitions(),
         AgentRole::Coercion => coercion::tool_definitions(),
-        AgentRole::Orchestrator => orchestrator_tools::tool_definitions(),
     };
 
     // Role-specific callback tools
@@ -373,7 +370,6 @@ mod tests {
             AgentRole::Privesc,
             AgentRole::Lateral,
             AgentRole::Coercion,
-            AgentRole::Orchestrator,
         ] {
             let tools = tools_for_role(role);
             for tool in &tools {
@@ -427,7 +423,6 @@ mod tests {
             AgentRole::Privesc,
             AgentRole::Lateral,
             AgentRole::Coercion,
-            AgentRole::Orchestrator,
         ] {
             let tools = tools_for_role(role);
             for tool in &tools {
@@ -450,7 +445,6 @@ mod tests {
     #[test]
     fn agent_role_str() {
         assert_eq!(AgentRole::Recon.as_str(), "recon");
-        assert_eq!(AgentRole::Orchestrator.as_str(), "orchestrator");
         assert_eq!(AgentRole::CredentialAccess.as_str(), "credential_access");
     }
 
@@ -475,12 +469,44 @@ mod tests {
     }
 
     #[test]
-    fn orchestrator_has_management_tools() {
-        let tools = tools_for_role(AgentRole::Orchestrator);
-        let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
-        assert!(names.contains(&"get_pending_tasks"));
-        assert!(names.contains(&"complete_operation"));
-        assert!(names.contains(&"get_hash_summary"));
+    fn orchestrator_role_is_gone_and_its_tools_stay_trapped() {
+        assert_eq!(AgentRole::parse("orchestrator"), None);
+        for name in [
+            "dispatch_recon",
+            "dispatch_credential_access",
+            "dispatch_lateral_movement",
+            "dispatch_privesc_exploit",
+            "dispatch_coercion",
+            "dispatch_crack",
+            "complete_operation",
+            "get_pending_tasks",
+            "get_hash_summary",
+        ] {
+            assert!(
+                is_callback_tool(name),
+                "{name} must stay trapped in-process, or a hallucinated call reaches a worker"
+            );
+        }
+        for role in [
+            AgentRole::Recon,
+            AgentRole::CredentialAccess,
+            AgentRole::Cracker,
+            AgentRole::Acl,
+            AgentRole::Privesc,
+            AgentRole::Lateral,
+            AgentRole::Coercion,
+        ] {
+            let names: Vec<String> = tools_for_role(role)
+                .iter()
+                .map(|t| t.name.clone())
+                .collect();
+            for name in &names {
+                assert!(
+                    !name.starts_with("dispatch_") && name != "complete_operation",
+                    "role {role:?} must not be offered orchestrator tool {name}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -493,7 +519,6 @@ mod tests {
             AgentRole::Privesc,
             AgentRole::Lateral,
             AgentRole::Coercion,
-            AgentRole::Orchestrator,
         ] {
             let tools = tools_for_role(role);
             let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
@@ -532,7 +557,6 @@ mod tests {
             AgentRole::Privesc,
             AgentRole::Lateral,
             AgentRole::Coercion,
-            AgentRole::Orchestrator,
         ] {
             let tools = tools_for_role(role);
             let mut seen = std::collections::HashSet::new();
@@ -636,10 +660,6 @@ mod tests {
         assert_eq!(AgentRole::parse("privesc"), Some(AgentRole::Privesc));
         assert_eq!(AgentRole::parse("lateral"), Some(AgentRole::Lateral));
         assert_eq!(AgentRole::parse("coercion"), Some(AgentRole::Coercion));
-        assert_eq!(
-            AgentRole::parse("orchestrator"),
-            Some(AgentRole::Orchestrator)
-        );
     }
 
     #[test]
@@ -683,7 +703,6 @@ mod tests {
             AgentRole::Privesc,
             AgentRole::Lateral,
             AgentRole::Coercion,
-            AgentRole::Orchestrator,
         ] {
             assert_eq!(
                 AgentRole::parse(role.as_str()),
