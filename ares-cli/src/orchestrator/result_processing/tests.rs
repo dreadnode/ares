@@ -1692,7 +1692,7 @@ mod seimpersonate_publish_only_contract {
 
     #[tokio::test]
     async fn note_documents_potato_requirement() {
-        let vuln = build_seimpersonate_vuln("web01", Some("10.0.0.1"));
+        let vuln = build_seimpersonate_vuln("web01", Some("192.168.58.20"));
         let note = vuln
             .details
             .get("note")
