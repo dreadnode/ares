@@ -15,6 +15,68 @@ use super::{
     BLUE_KEY_TIMELINE, BLUE_KEY_USERS, TTL_SECS,
 };
 
+/// Resolve a MITRE technique ID against the detection catalog.
+///
+/// Returns the catalog's own `mitre_id` and description, so the ID that lands
+/// in state is stamped from a template rather than typed by the agent.
+///
+/// Coverage is an ID join — exact or parent/child, never siblings — so an ID no
+/// template can match is a permanent "missed" on red's side plus a phantom
+/// `blue_only` on blue's. Refusing it at the write is the only place that
+/// contract can be enforced; `sweep.rs` already gets this right by copying
+/// `mitre_id` off the fired template.
+fn ground_technique(requested: &str) -> Result<(String, String), String> {
+    let vr = validation::validate_technique_id(requested);
+    if !vr.valid {
+        return Err(vr.warnings.join("; "));
+    }
+
+    let matched = ares_core::detection::detection_config()
+        .templates
+        .values()
+        .find(|t| {
+            ares_core::correlation::redblue::RedBlueCorrelator::techniques_match(
+                Some(&vr.normalized_type),
+                Some(&t.mitre_id),
+            )
+        });
+
+    match matched {
+        Some(entry) => Ok((vr.normalized_type, entry.description.clone())),
+        None => Err(format!(
+            "Technique '{requested}' is not covered by any detection template, so it can never \
+             be credited against red team ground truth — recording it would create a phantom \
+             blue-only detection. Use list_detection_templates to find the template that fired."
+        )),
+    }
+}
+
+/// Ground every entry of a caller-supplied `mitre_techniques` array.
+///
+/// Ungrounded IDs are dropped rather than failing the write: the evidence value
+/// itself already passed query validation, so the observation is real even when
+/// the agent mislabels which technique it belongs to.
+fn ground_technique_list(raw: Option<&Value>) -> Vec<String> {
+    raw.and_then(Value::as_array)
+        .map(|arr| {
+            arr.iter()
+                .filter_map(Value::as_str)
+                .filter_map(|t| match ground_technique(t) {
+                    Ok((id, _)) => Some(id),
+                    Err(reason) => {
+                        tracing::warn!(
+                            technique = %t,
+                            %reason,
+                            "Dropped ungrounded MITRE technique"
+                        );
+                        None
+                    }
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// Add evidence to investigation state.
 ///
 /// Required: `investigation_id`, `evidence_type`, `value`, `source`
@@ -73,16 +135,7 @@ pub async fn add_evidence(args: &Value) -> Result<ToolOutput> {
         _ => pyramid_level.parse::<i32>().unwrap_or(2),
     };
 
-    let mitre_techniques: Vec<String> = args
-        .get("mitre_techniques")
-        .and_then(Value::as_array)
-        .map(|arr| {
-            arr.iter()
-                .filter_map(Value::as_str)
-                .map(String::from)
-                .collect()
-        })
-        .unwrap_or_default();
+    let mitre_techniques: Vec<String> = ground_technique_list(args.get("mitre_techniques"));
 
     let evidence_id = Uuid::new_v4().to_string();
 
@@ -237,16 +290,7 @@ pub async fn add_evidence_batch(args: &Value) -> Result<ToolOutput> {
             _ => pyramid_level.parse::<i32>().unwrap_or(2),
         };
 
-        let mitre_techniques: Vec<String> = item
-            .get("mitre_techniques")
-            .and_then(Value::as_array)
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(Value::as_str)
-                    .map(String::from)
-                    .collect()
-            })
-            .unwrap_or_default();
+        let mitre_techniques: Vec<String> = ground_technique_list(item.get("mitre_techniques"));
 
         let evidence_id = Uuid::new_v4().to_string();
 
@@ -352,16 +396,7 @@ pub async fn record_timeline_event(args: &Value) -> Result<ToolOutput> {
         .unwrap_or(0.5);
     let source = optional_str(args, "source").unwrap_or("agent");
 
-    let mitre_techniques: Vec<String> = args
-        .get("mitre_techniques")
-        .and_then(Value::as_array)
-        .map(|arr| {
-            arr.iter()
-                .filter_map(Value::as_str)
-                .map(String::from)
-                .collect()
-        })
-        .unwrap_or_default();
+    let mitre_techniques: Vec<String> = ground_technique_list(args.get("mitre_techniques"));
 
     let evidence_ids: Vec<String> = args
         .get("evidence_ids")
@@ -414,8 +449,12 @@ pub async fn record_timeline_event(args: &Value) -> Result<ToolOutput> {
 /// Optional: `technique_name`
 pub async fn add_technique(args: &Value) -> Result<ToolOutput> {
     let investigation_id = required_str(args, "investigation_id")?;
-    let technique_id = required_str(args, "technique_id")?;
-    let technique_name = optional_str(args, "technique_name");
+    let requested = required_str(args, "technique_id")?;
+    let (technique_id, catalog_name) = match ground_technique(requested) {
+        Ok(pair) => pair,
+        Err(reason) => return Ok(make_error(&reason)),
+    };
+    let technique_name = optional_str(args, "technique_name").unwrap_or(&catalog_name);
 
     let mut conn = match get_redis_connection().await {
         Ok(c) => c,
@@ -425,24 +464,18 @@ pub async fn add_technique(args: &Value) -> Result<ToolOutput> {
     // Add technique ID to the SET
     let tech_key = blue_key(investigation_id, BLUE_KEY_TECHNIQUES);
     let added: i64 = conn
-        .sadd(&tech_key, technique_id)
+        .sadd(&tech_key, &technique_id)
         .await
         .context("SADD failed")?;
     let _: () = conn.expire(&tech_key, TTL_SECS).await?;
 
-    // If a name was provided, store the name mapping
-    if let Some(name) = technique_name {
-        let names_key = blue_key(investigation_id, BLUE_KEY_TECHNIQUE_NAMES);
-        let _: () = conn.hset(&names_key, technique_id, name).await?;
-        let _: () = conn.expire(&names_key, TTL_SECS).await?;
-    }
+    let names_key = blue_key(investigation_id, BLUE_KEY_TECHNIQUE_NAMES);
+    let _: () = conn.hset(&names_key, &technique_id, technique_name).await?;
+    let _: () = conn.expire(&names_key, TTL_SECS).await?;
 
     if added > 0 {
-        let display_name = technique_name
-            .map(|n| format!("{technique_id} ({n})"))
-            .unwrap_or_else(|| technique_id.to_string());
         Ok(make_output(&format!(
-            "[+] MITRE technique recorded: {display_name}"
+            "[+] MITRE technique recorded: {technique_id} ({technique_name})"
         )))
     } else {
         Ok(make_output(&format!(
@@ -631,5 +664,63 @@ pub async fn track_user_investigation(args: &Value) -> Result<ToolOutput> {
         Ok(make_output(&format!(
             "[*] User already tracked: {username}{suggested_queries}"
         )))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ground_technique;
+
+    /// Every template's own `mitre_id` must ground, or the deterministic sweep
+    /// can no longer record what it just detected. `sweep.rs::record_fired`
+    /// writes `f.mitre_id` straight off the fired template, so this is the
+    /// contract that keeps the grounding gate from rejecting blue's own
+    /// catalog-derived writes.
+    #[test]
+    fn every_catalog_template_grounds_its_own_technique_id() {
+        for (name, entry) in &ares_core::detection::detection_config().templates {
+            let (id, _) = ground_technique(&entry.mitre_id)
+                .unwrap_or_else(|e| panic!("{name} ({}): {e}", entry.mitre_id));
+            assert_eq!(id, entry.mitre_id.trim().to_uppercase());
+        }
+    }
+
+    /// An ID no template can match is a permanent "missed" for red plus a
+    /// phantom `blue_only` for blue — the fragile-join failure this gate exists
+    /// to stop.
+    #[test]
+    fn an_uncovered_technique_is_refused() {
+        let err = ground_technique("T1558.999")
+            .expect_err("an ID outside the catalog must not reach state");
+        assert!(
+            err.contains("not covered by any detection template"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn a_malformed_id_is_refused_before_the_catalog_join() {
+        for bad in ["T155.1", "1558.001", "TT1558", "not-an-id", ""] {
+            assert!(
+                ground_technique(bad).is_err(),
+                "{bad} is not a MITRE technique ID"
+            );
+        }
+    }
+
+    /// Case and surrounding whitespace are normalised, not rejected — the
+    /// catalog stores upper-case IDs and agents type lower-case ones.
+    #[test]
+    fn a_lowercase_id_normalises_rather_than_failing() {
+        let covered = ares_core::detection::detection_config()
+            .templates
+            .values()
+            .next()
+            .expect("catalog is not empty")
+            .mitre_id
+            .clone();
+        let (id, _) = ground_technique(&format!("  {}  ", covered.to_lowercase()))
+            .expect("normalisation happens before the join");
+        assert_eq!(id, covered.to_uppercase());
     }
 }
