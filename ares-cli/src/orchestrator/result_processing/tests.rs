@@ -1301,6 +1301,39 @@ fn ccache_evidence_empty_payload() {
 }
 
 #[test]
+fn exploit_failure_reason_prefers_explicit_error() {
+    use super::exploit_failure_reason;
+    let result = Some(json!({ "summary": "fallback summary" }));
+    assert_eq!(
+        exploit_failure_reason(Some("rpc_s_access_denied"), &result),
+        "rpc_s_access_denied"
+    );
+}
+
+#[test]
+fn exploit_failure_reason_falls_back_to_summary() {
+    use super::exploit_failure_reason;
+    let result = Some(json!({
+        "summary": "S4U failed for WS01$ -> HTTP/dc01: KDC_ERR_BADOPTION (KDC cannot accommodate requested option)"
+    }));
+    let reason = exploit_failure_reason(None, &result);
+    assert!(
+        reason.contains("KDC_ERR_BADOPTION"),
+        "an LLM-reported diagnosis must survive into the timeline event, got {reason:?}"
+    );
+}
+
+#[test]
+fn exploit_failure_reason_ignores_blank_error_and_summary() {
+    use super::exploit_failure_reason;
+    assert_eq!(
+        exploit_failure_reason(Some("   "), &Some(json!({ "summary": "  " }))),
+        "unknown error"
+    );
+    assert_eq!(exploit_failure_reason(None, &None), "unknown error");
+}
+
+#[test]
 fn is_acl_mutation_vuln_recognizes_acl_prefixes() {
     use super::is_acl_mutation_vuln;
     assert!(is_acl_mutation_vuln("acl_writeproperty_alice_bob"));

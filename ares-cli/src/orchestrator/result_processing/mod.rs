@@ -398,7 +398,7 @@ pub async fn process_completed_task(
                 // Record failed exploit attempts as timeline events so they appear
                 // in reports (e.g. noPac patched, PrintNightmare patched, Certifried
                 // tool missing). This closes the "dispatched but no report evidence" gap.
-                let err_msg = result.error.as_deref().unwrap_or("unknown error");
+                let err_msg = exploit_failure_reason(result.error.as_deref(), &result.result);
                 let event_id = format!(
                     "evt-exploit-fail-{}",
                     &uuid::Uuid::new_v4().simple().to_string()[..8]
@@ -1147,6 +1147,19 @@ fn is_ticket_grant_vuln(vuln_id: &str) -> bool {
         || v.starts_with("rbcd_")
         || v.starts_with("s4u_")
         || v.starts_with("golden_ticket_")
+}
+
+fn exploit_failure_reason<'a>(error: Option<&'a str>, result: &'a Option<Value>) -> &'a str {
+    error
+        .filter(|e| !e.trim().is_empty())
+        .or_else(|| {
+            result
+                .as_ref()
+                .and_then(|v| v.get("summary"))
+                .and_then(Value::as_str)
+                .filter(|s| !s.trim().is_empty())
+        })
+        .unwrap_or("unknown error")
 }
 
 fn is_acl_mutation_vuln(vuln_id: &str) -> bool {
