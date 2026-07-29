@@ -328,37 +328,45 @@ impl SharedState {
                 let dc_target = state.domain_controllers.get(&krbtgt_domain).cloned();
 
                 // Auto-set domain admin when the first krbtgt NTLM hash arrives.
-                if !state.has_domain_admin {
-                    let da_domain = krbtgt_domain.clone();
-                    drop(state);
-                    let path = Some("secretsdump → krbtgt NTLM hash".to_string());
+                let is_first_da = !state.has_domain_admin;
+                let da_domain = krbtgt_domain.clone();
+                drop(state);
+
+                let path = Some("secretsdump → krbtgt NTLM hash".to_string());
+                let mut da_flag_ok = true;
+                if is_first_da {
                     if let Err(e) = self.set_domain_admin(queue, path.clone()).await {
                         tracing::warn!(err = %e, "Failed to auto-set domain admin from krbtgt hash");
+                        da_flag_ok = false;
                     } else {
                         tracing::info!(
                             "🎯 Domain Admin auto-set from krbtgt NTLM hash in publish_hash"
                         );
-                        // Emit DA timeline event
-                        let techniques = vec!["T1003.006".to_string(), "T1078.002".to_string()];
-                        let event_id =
-                            format!("evt-da-{}", &uuid::Uuid::new_v4().simple().to_string()[..8]);
-                        let event = serde_json::json!({
-                            "id": event_id,
-                            "timestamp": chrono::Utc::now().to_rfc3339(),
-                            "source": "domain_admin",
-                            "description": format!(
-                                "CRITICAL: Domain Admin achieved for {} via {}",
-                                da_domain,
-                                path.as_deref().unwrap_or("krbtgt hash")
-                            ),
-                            "mitre_techniques": techniques,
-                        });
-                        let _ = self
-                            .persist_timeline_event(queue, &event, &techniques)
-                            .await;
                     }
-                } else {
-                    drop(state);
+                }
+
+                // One CRITICAL event per domain that falls. Gating this on
+                // `is_first_da` emitted a single event for the whole op, so a
+                // 3-of-3 forest compromise read as 1 domain in the report.
+                let emit_da_event = da_flag_ok && (newly_dominated.is_some() || is_first_da);
+                if emit_da_event {
+                    let techniques = vec!["T1003.006".to_string(), "T1078.002".to_string()];
+                    let event_id =
+                        format!("evt-da-{}", &uuid::Uuid::new_v4().simple().to_string()[..8]);
+                    let event = serde_json::json!({
+                        "id": event_id,
+                        "timestamp": chrono::Utc::now().to_rfc3339(),
+                        "source": "domain_admin",
+                        "description": format!(
+                            "CRITICAL: Domain Admin achieved for {} via {}",
+                            da_domain,
+                            path.as_deref().unwrap_or("krbtgt hash")
+                        ),
+                        "mitre_techniques": techniques,
+                    });
+                    let _ = self
+                        .persist_timeline_event(queue, &event, &techniques)
+                        .await;
                 }
 
                 // Mirror in-memory `dominated_domains` to a Redis SET so

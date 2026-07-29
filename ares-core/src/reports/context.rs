@@ -255,6 +255,16 @@ pub(crate) struct ChainStepCtx {
     pub hash_type: String,
 }
 
+/// Tera context for one domain's credential chain.
+///
+/// The comprehensive report iterates these as `domain_admin_chains` so a
+/// multi-domain compromise renders every domain, not just the first.
+#[derive(Serialize)]
+pub(crate) struct DomainChainCtx {
+    pub domain: String,
+    pub steps: Vec<ChainStepCtx>,
+}
+
 #[derive(Serialize)]
 pub(crate) struct VulnCtx {
     pub vuln_id: String,

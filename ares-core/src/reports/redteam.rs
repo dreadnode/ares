@@ -396,6 +396,28 @@ impl RedTeamReportGenerator {
             })
             .collect();
         ctx.insert("domain_admin_chain", &chain_ctx);
+        let compromised_domains = state.compromised_domains();
+        let domain_chains: Vec<DomainChainCtx> = state
+            .build_domain_admin_chains()
+            .into_iter()
+            .map(|(domain, steps)| DomainChainCtx {
+                domain,
+                steps: steps
+                    .iter()
+                    .map(|step| ChainStepCtx {
+                        step_number: step.step_number,
+                        item_type: step.item_type.clone(),
+                        username: step.username.clone(),
+                        domain: step.domain.clone(),
+                        source: step.source.clone(),
+                        hash_type: step.hash_type.clone(),
+                    })
+                    .collect(),
+            })
+            .collect();
+        ctx.insert("domain_admin_chains", &domain_chains);
+        ctx.insert("domains_compromised", &compromised_domains.len());
+        ctx.insert("compromised_domains", &compromised_domains);
         ctx.insert("domains", &domains);
         ctx.insert("dc_count", &dc_count);
         ctx.insert("hosts", &hosts);
@@ -707,6 +729,51 @@ mod tests {
     #[test]
     fn report_generator_default_succeeds() {
         let _gen = RedTeamReportGenerator::default();
+    }
+
+    #[test]
+    fn comprehensive_report_names_every_compromised_domain() {
+        // A 3-of-3 forest compromise used to render as a single domain: the
+        // executive summary walked only the first krbtgt hash found.
+        let mut state = empty_state();
+        state.has_domain_admin = true;
+        state.all_hashes = ["contoso.local", "child.contoso.local", "fabrikam.local"]
+            .iter()
+            .enumerate()
+            .map(|(i, domain)| crate::models::Hash {
+                id: format!("h{i}"),
+                username: "krbtgt".into(),
+                hash_value: format!("deadbeef{i}"),
+                hash_type: "ntlm".into(),
+                domain: (*domain).into(),
+                source: "secretsdump".into(),
+                cracked_password: None,
+                discovered_at: None,
+                parent_id: None,
+                attack_step: 0,
+                aes_key: None,
+                is_previous: false,
+                source_host: None,
+                is_trust_key: false,
+                trust_pair_label: None,
+            })
+            .collect();
+
+        let gen = RedTeamReportGenerator::new().expect("template init");
+        let report = gen
+            .generate_comprehensive(&state, &[], &[])
+            .expect("render");
+
+        assert!(
+            report.contains("| Domains Compromised (krbtgt) | 3 |"),
+            "metrics table must report 3 compromised domains:\n{report}"
+        );
+        for domain in ["contoso.local", "child.contoso.local", "fabrikam.local"] {
+            assert!(
+                report.contains(&format!("Credential Chain to Domain Admin — {domain}")),
+                "missing per-domain credential chain for {domain}"
+            );
+        }
     }
 
     #[test]
