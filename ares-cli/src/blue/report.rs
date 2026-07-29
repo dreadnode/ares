@@ -75,8 +75,8 @@ async fn generate_investigation_report(
         .context("Failed to render investigation report")
 }
 
-async fn generate_operation_report(
-    conn: &mut redis::aio::MultiplexedConnection,
+pub(crate) async fn generate_operation_report(
+    conn: &mut impl redis::AsyncCommands,
     generator: &BlueTeamReportGenerator,
     operation_id: &str,
 ) -> Result<String> {
@@ -125,7 +125,7 @@ async fn generate_operation_report(
 }
 
 /// Save a blue team operation report under `{output_dir}/blue/`.
-fn save_operation_report(output_dir: &str, op_id: &str, report: &str) -> Result<String> {
+pub(crate) fn save_operation_report(output_dir: &str, op_id: &str, report: &str) -> Result<String> {
     let dir = format!("{output_dir}/blue");
     std::fs::create_dir_all(&dir)
         .with_context(|| format!("Failed to create report directory: {dir}"))?;

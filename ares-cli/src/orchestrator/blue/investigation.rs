@@ -410,6 +410,10 @@ pub async fn run_investigation(
     )
     .await;
 
+    if let Some(op_id) = &investigation.operation_id {
+        generate_operation_coverage_report(conn, op_id, investigation.report_dir.as_deref()).await;
+    }
+
     Ok(investigation_outcome)
 }
 
@@ -584,6 +588,64 @@ pub(super) async fn generate_report(
                 investigation_id = investigation_id,
                 error = %e,
                 "Failed to write investigation report"
+            );
+        }
+    }
+}
+
+/// Render the operation-scoped blue report, which carries the red-vs-blue
+/// coverage scorecard, and write it to `{report_dir}/blue/{operation_id}.md`.
+///
+/// Best-effort: logs warnings on failure rather than propagating errors.
+pub(super) async fn generate_operation_coverage_report(
+    conn: &mut redis::aio::ConnectionManager,
+    operation_id: &str,
+    report_dir: Option<&str>,
+) {
+    let generator = match ares_core::reports::BlueTeamReportGenerator::new() {
+        Ok(g) => g,
+        Err(e) => {
+            warn!(error = %e, "Skipping coverage report: failed to create report generator");
+            return;
+        }
+    };
+
+    let report = match crate::blue::report::generate_operation_report(
+        conn,
+        &generator,
+        operation_id,
+    )
+    .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            warn!(
+                operation_id = operation_id,
+                error = %e,
+                "Failed to generate operation coverage report"
+            );
+            return;
+        }
+    };
+
+    let output_dir = resolve_report_dir(report_dir);
+    match crate::blue::report::save_operation_report(
+        &output_dir.to_string_lossy(),
+        operation_id,
+        &report,
+    ) {
+        Ok(path) => {
+            info!(
+                operation_id = operation_id,
+                path = %path,
+                "Operation coverage report written"
+            );
+        }
+        Err(e) => {
+            warn!(
+                operation_id = operation_id,
+                error = %e,
+                "Failed to write operation coverage report"
             );
         }
     }

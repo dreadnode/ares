@@ -2,7 +2,7 @@ mod delete;
 mod evidence;
 mod list;
 mod operation;
-mod report;
+pub(crate) mod report;
 mod runtime;
 mod status;
 pub(super) mod submit;

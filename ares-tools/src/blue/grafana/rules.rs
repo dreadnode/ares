@@ -8,7 +8,24 @@ use crate::ToolOutput;
 
 use super::{build_client, grafana_url, make_error, make_output};
 
+pub(crate) const RULE_CREATION_ENV: &str = "ARES_BLUE_ALLOW_RULE_CREATION";
+
+/// Whether agents may provision Grafana alert rules. Defaults off; set
+/// `ARES_BLUE_ALLOW_RULE_CREATION=1` to enable.
+pub(crate) fn rule_creation_enabled() -> bool {
+    match std::env::var(RULE_CREATION_ENV) {
+        Ok(v) => matches!(
+            v.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        ),
+        Err(_) => false,
+    }
+}
+
 /// Create a detection alert rule in Grafana.
+///
+/// Gated behind `ARES_BLUE_ALLOW_RULE_CREATION`; returns a tool error without
+/// contacting Grafana when unset.
 ///
 /// Parameters:
 /// - `title` (required): Rule name
@@ -21,6 +38,18 @@ use super::{build_client, grafana_url, make_error, make_output};
 pub async fn create_detection_rule(args: &Value) -> Result<ToolOutput> {
     let title = required_str(args, "title")?;
     let logql_query = required_str(args, "logql_query")?;
+
+    if !rule_creation_enabled() {
+        tracing::info!(
+            rule_title = title,
+            "Detection rule creation blocked — ARES_BLUE_ALLOW_RULE_CREATION is not set"
+        );
+        return Ok(make_error(
+            "Detection rule creation is disabled. Report the proposed rule \
+             (title, LogQL, MITRE technique) in your findings so an operator \
+             can review and deploy it.",
+        ));
+    }
     let description = optional_str(args, "description").unwrap_or("");
     let mitre_technique = optional_str(args, "mitre_technique").unwrap_or("");
     let severity = optional_str(args, "severity").unwrap_or("medium");
@@ -365,4 +394,81 @@ pub async fn get_alerts_in_time_range(args: &Value) -> Result<ToolOutput> {
         alerts.len(),
         output
     )))
+}
+
+#[cfg(test)]
+mod rule_gate_tests {
+    use super::*;
+
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    struct EnvGuard {
+        prior: Option<String>,
+        _lock: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl EnvGuard {
+        fn acquire() -> Self {
+            let lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            Self {
+                prior: std::env::var(RULE_CREATION_ENV).ok(),
+                _lock: lock,
+            }
+        }
+
+        fn set(&self, value: &str) {
+            std::env::set_var(RULE_CREATION_ENV, value);
+        }
+
+        fn unset(&self) {
+            std::env::remove_var(RULE_CREATION_ENV);
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            match &self.prior {
+                Some(v) => std::env::set_var(RULE_CREATION_ENV, v),
+                None => std::env::remove_var(RULE_CREATION_ENV),
+            }
+        }
+    }
+
+    #[test]
+    fn rule_creation_defaults_off_and_respects_opt_in() {
+        let env = EnvGuard::acquire();
+
+        env.unset();
+        assert!(!rule_creation_enabled());
+
+        for enabled in ["1", "true", "YES", " on "] {
+            env.set(enabled);
+            assert!(rule_creation_enabled(), "expected {enabled:?} to enable");
+        }
+
+        for disabled in ["0", "false", "", "maybe"] {
+            env.set(disabled);
+            assert!(!rule_creation_enabled(), "expected {disabled:?} to disable");
+        }
+    }
+
+    #[test]
+    fn create_detection_rule_refuses_when_gate_is_unset() {
+        let env = EnvGuard::acquire();
+        env.unset();
+
+        let args = serde_json::json!({
+            "title": "Detect DCSync",
+            "logql_query": r#"{job="windows"} |= "4662""#,
+        });
+        let out = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("build runtime")
+            .block_on(create_detection_rule(&args))
+            .expect("tool call");
+
+        assert!(!out.success);
+        assert!(out.stderr.contains("disabled"));
+        assert!(out.stdout.is_empty());
+    }
 }
