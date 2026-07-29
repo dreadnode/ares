@@ -14,6 +14,8 @@ use tracing::{debug, info, warn};
 use crate::orchestrator::dispatcher::Dispatcher;
 use crate::orchestrator::state::*;
 
+const NTLMV1_RECOMMENDED_AGENT: &str = "coercion";
+
 fn same_forest_domain(a: &str, b: &str) -> bool {
     let a = a.to_lowercase();
     let b = b.to_lowercase();
@@ -155,7 +157,7 @@ pub async fn auto_ntlmv1_downgrade(
                             );
                             d
                         },
-                        recommended_agent: "credential_access".to_string(),
+                        recommended_agent: NTLMV1_RECOMMENDED_AGENT.to_string(),
                         priority: dispatcher.effective_priority("ntlmv1_downgrade"),
                     };
 
@@ -416,5 +418,27 @@ mod tests {
         let key1 = format!("ntlmv1:{}", "192.168.58.10");
         let key2 = format!("ntlmv1:{}", "192.168.58.20");
         assert_ne!(key1, key2);
+    }
+
+    #[test]
+    fn ntlmv1_routes_to_a_role_that_can_actually_capture() {
+        use ares_llm::tool_registry::{tools_for_role, AgentRole};
+
+        let role = AgentRole::parse(NTLMV1_RECOMMENDED_AGENT)
+            .expect("recommended_agent must name a real role");
+        let tools: Vec<String> = tools_for_role(role).into_iter().map(|t| t.name).collect();
+
+        let can_capture = tools.iter().any(|t| {
+            t.contains("responder")
+                || t.contains("relay")
+                || t.contains("coerce")
+                || t == "petitpotam"
+        });
+        assert!(
+            can_capture,
+            "ntlmv1_downgrade dispatches to `{NTLMV1_RECOMMENDED_AGENT}`, whose toolset has no \
+             capture/relay primitive — the exploit can only ever report 'tool not available'. \
+             tools={tools:?}"
+        );
     }
 }
