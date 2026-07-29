@@ -371,3 +371,84 @@ ws01$        Computer     Constrained w/o Protocol Transition  HTTP/web01";
         );
     }
 }
+
+/// Recover the machine account created by `add_computer`.
+///
+/// impacket-addcomputer prints only a success banner — the account name and
+/// password are inputs, not output — so the credential is rebuilt from params.
+/// Without this the account is unusable by later RBCD steps, which look the
+/// principal up in operation state rather than re-reading tool text.
+pub fn parse_add_computer(output: &str, params: &Value) -> Vec<Value> {
+    if !output.contains("Successfully added machine account") {
+        return Vec::new();
+    }
+    let name = params
+        .get("computer_name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim();
+    let password = params
+        .get("computer_password")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim();
+    if name.is_empty() || password.is_empty() {
+        return Vec::new();
+    }
+    let username = if name.ends_with('$') {
+        name.to_string()
+    } else {
+        format!("{name}$")
+    };
+    vec![json!({
+        "username": username,
+        "password": password,
+        "domain": params.get("domain").and_then(|v| v.as_str()).unwrap_or(""),
+        "source": "add_computer",
+        "is_admin": false,
+    })]
+}
+
+#[cfg(test)]
+mod add_computer_tests {
+    use super::*;
+
+    fn params() -> Value {
+        json!({
+            "computer_name": "svc_rbcd",
+            "computer_password": "P@ssw0rd!",
+            "domain": "contoso.local",
+        })
+    }
+
+    #[test]
+    fn recovers_machine_account_on_success() {
+        let creds = parse_add_computer("[*] Successfully added machine account", &params());
+        assert_eq!(creds.len(), 1);
+        assert_eq!(creds[0]["username"], "svc_rbcd$");
+        assert_eq!(creds[0]["password"], "P@ssw0rd!");
+        assert_eq!(creds[0]["domain"], "contoso.local");
+        assert_eq!(creds[0]["source"], "add_computer");
+    }
+
+    #[test]
+    fn keeps_existing_trailing_dollar() {
+        let mut p = params();
+        p["computer_name"] = json!("svc_rbcd$");
+        let creds = parse_add_computer("[*] Successfully added machine account", &p);
+        assert_eq!(creds[0]["username"], "svc_rbcd$");
+    }
+
+    #[test]
+    fn ignores_refusal_that_still_exits_zero() {
+        let refused = "[-] Could not add machine account: ACCESS_DENIED";
+        assert!(parse_add_computer(refused, &params()).is_empty());
+    }
+
+    #[test]
+    fn requires_both_name_and_password() {
+        let mut p = params();
+        p["computer_password"] = json!("");
+        assert!(parse_add_computer("[*] Successfully added machine account", &p).is_empty());
+    }
+}

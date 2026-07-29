@@ -29,7 +29,7 @@ pub use credential_tools::{
     parse_adidnsdump, parse_laps, parse_ldap_descriptions, parse_lsassy, parse_ntds_dit,
     parse_spray_success,
 };
-pub use delegation::{extract_delegation_account, parse_delegation};
+pub use delegation::{extract_delegation_account, parse_add_computer, parse_delegation};
 pub use mssql::{parse_mssql_impersonation, parse_mssql_linked_servers};
 pub use nmap::{flush_nmap_host, parse_nmap_output};
 pub use ntsd::parse_acl_enumeration;
@@ -276,6 +276,7 @@ pub fn parse_tool_output(tool_name: &str, output: &str, params: &Value) -> Value
             }
         }
         "certipy_esc1_full_chain"
+        | "certipy_esc3_full_chain"
         | "certipy_esc4_full_chain"
         | "certipy_esc7_full_chain"
         | "certipy_esc13_full_chain"
@@ -286,6 +287,13 @@ pub fn parse_tool_output(tool_name: &str, output: &str, params: &Value) -> Value
                 &mut discoveries,
                 "hashes",
                 parse_certipy_esc1_chain(output, params),
+            );
+        }
+        "add_computer" => {
+            set_if_nonempty(
+                &mut discoveries,
+                "credentials",
+                parse_add_computer(output, params),
             );
         }
         "lsassy" => {
@@ -1096,6 +1104,41 @@ SMB  192.168.58.121  445  DC01  bob         2026-03-25 23:21:09 0  Bob"#;
         assert_eq!(creds.len(), 1);
         assert_eq!(creds[0]["username"], "alice");
         assert_eq!(creds[0]["password"], "Welcome1!");
+    }
+
+    #[test]
+    fn parse_tool_output_esc3_chain_extracts_hash() {
+        // Regression: certipy_esc3_full_chain ends in a `certipy auth` step and
+        // renders the same combined output as the esc1/4/7/13 chains, but was
+        // missing from their match arm, so its hash hit the default arm.
+        let output = "\
+=== certipy auth ===\n\
+[*] Got hash for 'administrator@contoso.local': aad3b435b51404eeaad3b435b51404ee:8502bb1006c05667504ad00db6225150";
+        let params = json!({"domain": "contoso.local"});
+        let disc = parse_tool_output("certipy_esc3_full_chain", output, &params);
+        let hashes = disc["hashes"].as_array().expect("hashes array");
+        assert_eq!(hashes.len(), 1);
+        assert_eq!(hashes[0]["username"], "administrator");
+    }
+
+    #[test]
+    fn parse_tool_output_add_computer_records_machine_account() {
+        // The created account is only in params; without an arm the credential
+        // is lost and later RBCD steps cannot resolve the principal.
+        let params = json!({
+            "computer_name": "svc_rbcd",
+            "computer_password": "P@ssw0rd!",
+            "domain": "contoso.local",
+        });
+        let disc = parse_tool_output(
+            "add_computer",
+            "[*] Successfully added machine account",
+            &params,
+        );
+        let creds = disc["credentials"].as_array().expect("credentials array");
+        assert_eq!(creds.len(), 1);
+        assert_eq!(creds[0]["username"], "svc_rbcd$");
+        assert_eq!(creds[0]["domain"], "contoso.local");
     }
 
     #[test]
