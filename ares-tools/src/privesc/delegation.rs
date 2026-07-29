@@ -694,7 +694,7 @@ mod tests {
     /// directory. Observed live on three noPac accounts.
     #[test]
     fn add_computer_refusal_is_detected_despite_exit_zero() {
-        let refused = "Impacket v0.13.0\n\n[-] User jeor.mormont doesn't have right to delete WIN-C0O8IFHGTJD$!";
+        let refused = "Impacket v0.13.0\n\n[-] User alice doesn't have right to delete WS01$!";
         assert!(super::add_computer_refused(refused));
         assert!(super::add_computer_refused(
             "[-] Unable to delete machine account"

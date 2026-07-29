@@ -69,6 +69,14 @@ repos:
         args: ["--baseline", ".secrets.baseline"]
         pass_filenames: false
 
+  - repo: local
+    hooks:
+      - id: goad-token-sweep
+        name: DreadGOAD lab token sweep
+        entry: scripts/goad-token-sweep.sh
+        language: script
+        types: [text]
+
   # Rust checks
   - repo: local
     hooks:

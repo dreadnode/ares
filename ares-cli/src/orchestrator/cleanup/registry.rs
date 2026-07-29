@@ -234,7 +234,10 @@ pub fn undo_plan(record: &MutationRecord) -> UndoPlan {
                    documented chain is add_computer -> rbcd_write, so attacker_sid is a machine \
                    account this operation just created and no pre-existing ACE can reference it. \
                    A write naming an already-delegated SID no-ops while still being journalled, \
-                   and the inverse would then strip an ACE we did not create"
+                   and the inverse would then strip an ACE we did not create. Note the revert is \
+                   not byte-for-byte: `-action remove` re-writes an empty descriptor \
+                   (`O:S-1-5-32-544D:`) where the attribute was previously absent — inert, since \
+                   an empty DACL delegates to nobody, but it is a detectable artifact"
                 .into(),
         },
         // NOT auto-reverted: same DACL read-modify-write hazard as
@@ -263,9 +266,8 @@ pub fn undo_plan(record: &MutationRecord) -> UndoPlan {
         // NOT auto-reverted: bloodyAD's `add genericAll` is a read-modify-write
         // of the whole DACL (getSD → addRight → write back), so it succeeds
         // silently when the trustee already holds rights. The inverse strips
-        // every ACE matching that trustee, and GOAD provisions the very edges
-        // this tool is pointed at (GenericAll lord.varys→Domain Admins,
-        // KingsGuard→stannis.baratheon, …). Reverting an add that was a no-op
+        // every ACE matching that trustee, and the lab provisions the very
+        // edges this tool is pointed at. Reverting an add that was a no-op
         // therefore deletes a provisioned attack path.
         "bloodyad_add_genericall" => UndoPlan::manual(
             Reversibility::NeedsCapture,
