@@ -116,23 +116,51 @@ pub(crate) async fn create_hash_timeline_event(
 }
 
 /// Emit a timeline event when a credential is upgraded to admin (Pwn3d! detected).
+/// Description for the admin-upgrade timeline event, naming the host the grant
+/// was proven on.
+///
+/// `Credential::is_admin` is a single global bool, so the host that produced the
+/// `Pwn3d!` was extracted and then dropped by the same function that found it —
+/// ares discovered all three of the lab's local-admin grants and recorded none
+/// of their scope. The timeline event is the one consumer that reaches a report,
+/// so the host goes here.
+///
+/// The `Admin access confirmed: ` prefix is load-bearing: the corpus
+/// reproduction greps in `GAPS.md` key off it, as do 32 historical events.
+/// Extend it, never reword it.
+pub(crate) fn admin_upgrade_description(
+    username: &str,
+    domain: &str,
+    pwned_host: Option<&str>,
+) -> String {
+    match pwned_host {
+        Some(host) => format!("Admin access confirmed: {domain}\\{username} on {host} (Pwn3d!)"),
+        None => format!("Admin access confirmed: {domain}\\{username} (Pwn3d!)"),
+    }
+}
+
 pub(crate) async fn create_admin_upgrade_timeline_event(
     dispatcher: &Arc<Dispatcher>,
     username: &str,
     domain: &str,
+    pwned_host: Option<&str>,
 ) {
     let techniques = vec!["T1078".to_string()]; // Valid Accounts
     let event_id = format!(
         "evt-admin-{}",
         &uuid::Uuid::new_v4().simple().to_string()[..8]
     );
-    let event = serde_json::json!({
+    let description = admin_upgrade_description(username, domain, pwned_host);
+    let mut event = serde_json::json!({
         "id": event_id,
         "timestamp": chrono::Utc::now().to_rfc3339(),
         "source": "admin_upgrade",
-        "description": format!("Admin access confirmed: {domain}\\{username} (Pwn3d!)"),
+        "description": description,
         "mitre_techniques": techniques,
     });
+    if let Some(host) = pwned_host {
+        event["target_ip"] = serde_json::json!(host);
+    }
     let _ = dispatcher
         .state
         .persist_timeline_event(&dispatcher.queue, &event, &techniques)

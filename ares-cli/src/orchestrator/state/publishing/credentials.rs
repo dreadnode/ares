@@ -512,6 +512,102 @@ impl SharedState {
 
         Ok(true)
     }
+
+    /// Flip `is_admin` on every credential for `username`@`domain`, in memory
+    /// **and** in Redis.
+    ///
+    /// Returns `true` only when this call performed a genuine `false → true`
+    /// transition in memory, so a repeated `Pwn3d!` line for an
+    /// already-upgraded principal does not re-fire the caller's timeline event
+    /// and priority dispatch. `false` also covers "no credential for this
+    /// principal is in state", which must stay distinguishable from success:
+    /// emitting an admin event with no credential behind it is the phantom
+    /// shape that `seimpersonate` credit had.
+    ///
+    /// The in-memory-only mutation this replaces is why 437 credential rows
+    /// across 92 reports rendered `Admin = No` and zero rendered `Yes`, in ops
+    /// that had a `Pwn3d!` event for that very principal: reports read Redis,
+    /// and `add_credential` is `hset_nx`, so re-publishing an upgraded
+    /// credential is a no-op rather than an update. This writes the field with
+    /// `hset`, the same in-memory/Redis reconciliation `mark_host_owned`
+    /// already does for `Host::owned`.
+    ///
+    /// Redis is reconciled whenever the principal matches at all, not only on a
+    /// fresh flip — an operation that already mutated memory before this fix
+    /// has `is_admin` true in state and false in Redis, and only an
+    /// unconditional pass heals that disagreement.
+    ///
+    /// Every matching row is rewritten, not just the first. The dedup key
+    /// includes a password digest (`cred:{domain}:{username}:{md5_16}`), so one
+    /// principal legitimately holds several rows — a plaintext from a
+    /// description leak and the same account's cracked password are different
+    /// fields — and leaving the others stale would let a shadow row keep
+    /// reporting the principal as non-admin.
+    pub async fn mark_credentials_admin(
+        &self,
+        queue: &TaskQueueCore<impl ConnectionLike + Clone + Send + Sync + 'static>,
+        username: &str,
+        domain: &str,
+    ) -> Result<bool> {
+        let (op_id, flipped) = {
+            let mut state = self.inner.write().await;
+            let mut matched = false;
+            let mut flipped = false;
+            for cred in state.credentials.iter_mut() {
+                if cred.username.eq_ignore_ascii_case(username)
+                    && cred.domain.eq_ignore_ascii_case(domain)
+                {
+                    matched = true;
+                    if !cred.is_admin {
+                        cred.is_admin = true;
+                        flipped = true;
+                    }
+                }
+            }
+            if !matched {
+                return Ok(false);
+            }
+            (state.operation_id.clone(), flipped)
+        };
+
+        let cred_key = format!("{}:{}:{}", state::KEY_PREFIX, op_id, state::KEY_CREDENTIALS);
+        let mut conn = queue.connection();
+        let entries: std::collections::HashMap<String, String> =
+            redis::AsyncCommands::hgetall(&mut conn, &cred_key)
+                .await
+                .unwrap_or_default();
+
+        let mut rewritten = 0usize;
+        for (field, value) in &entries {
+            let Ok(mut cred) = serde_json::from_str::<Credential>(value) else {
+                continue;
+            };
+            if !cred.username.eq_ignore_ascii_case(username)
+                || !cred.domain.eq_ignore_ascii_case(domain)
+                || cred.is_admin
+            {
+                continue;
+            }
+            cred.is_admin = true;
+            let updated = serde_json::to_string(&cred).unwrap_or_default();
+            if redis::AsyncCommands::hset::<_, _, _, ()>(&mut conn, &cred_key, field, &updated)
+                .await
+                .is_ok()
+            {
+                rewritten += 1;
+            }
+        }
+
+        tracing::info!(
+            username = %username,
+            domain = %domain,
+            rows_rewritten = rewritten,
+            flipped,
+            "Credential is_admin persisted to state and Redis"
+        );
+
+        Ok(flipped)
+    }
 }
 
 #[cfg(test)]
@@ -1047,6 +1143,200 @@ mod tests {
 
         let s = state.inner.read().await;
         assert_eq!(s.hashes[0].cracked_password.as_deref(), Some("CrackedPW!"));
+    }
+
+    /// Read the `is_admin` flags Redis actually holds for `username`.
+    ///
+    /// Every assertion about this fix has to go through Redis: reports read
+    /// Redis, and the bug was that memory and Redis disagreed. An in-memory-only
+    /// assertion passes against the broken code.
+    async fn redis_admin_flags(
+        state: &SharedState,
+        q: &TaskQueueCore<MockRedisConnection>,
+        username: &str,
+    ) -> Vec<bool> {
+        let op_id = state.inner.read().await.operation_id.clone();
+        let key = format!(
+            "{}:{}:{}",
+            ares_core::state::KEY_PREFIX,
+            op_id,
+            ares_core::state::KEY_CREDENTIALS
+        );
+        let mut conn = q.connection();
+        let entries: std::collections::HashMap<String, String> =
+            redis::AsyncCommands::hgetall(&mut conn, &key)
+                .await
+                .unwrap_or_default();
+        entries
+            .values()
+            .filter_map(|v| serde_json::from_str::<Credential>(v).ok())
+            .filter(|c| c.username.eq_ignore_ascii_case(username))
+            .map(|c| c.is_admin)
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn mark_credentials_admin_persists_the_flag_to_redis() {
+        let state = SharedState::new("op-1".to_string());
+        let q = mock_queue();
+
+        state
+            .publish_credential(&q, make_cred("alice", "P@ssw0rd!", "contoso.local"))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            redis_admin_flags(&state, &q, "alice").await,
+            vec![false],
+            "precondition: the published credential is not admin yet"
+        );
+
+        let flipped = state
+            .mark_credentials_admin(&q, "alice", "contoso.local")
+            .await
+            .unwrap();
+
+        assert!(flipped, "a false→true transition must report true");
+        assert_eq!(
+            redis_admin_flags(&state, &q, "alice").await,
+            vec![true],
+            "is_admin never reached Redis — this is the defect that rendered 437 rows as `Admin = No`"
+        );
+        assert!(state.inner.read().await.credentials[0].is_admin);
+    }
+
+    #[tokio::test]
+    async fn mark_credentials_admin_updates_every_row_for_the_principal() {
+        let state = SharedState::new("op-1".to_string());
+        let q = mock_queue();
+
+        // Two rows, one principal: the dedup key carries a password digest, so
+        // a description leak and a cracked password are separate fields.
+        state
+            .publish_credential(&q, make_cred("alice", "P@ssw0rd!", "contoso.local"))
+            .await
+            .unwrap();
+        state
+            .publish_credential(&q, make_cred("alice", "Summer2026!", "contoso.local"))
+            .await
+            .unwrap();
+
+        assert_eq!(redis_admin_flags(&state, &q, "alice").await.len(), 2);
+
+        state
+            .mark_credentials_admin(&q, "alice", "contoso.local")
+            .await
+            .unwrap();
+
+        let flags = redis_admin_flags(&state, &q, "alice").await;
+        assert_eq!(
+            flags,
+            vec![true, true],
+            "a stale shadow row keeps reporting the principal as non-admin"
+        );
+    }
+
+    #[tokio::test]
+    async fn mark_credentials_admin_is_case_insensitive_on_principal() {
+        let state = SharedState::new("op-1".to_string());
+        let q = mock_queue();
+
+        state
+            .publish_credential(&q, make_cred("alice", "P@ssw0rd!", "contoso.local"))
+            .await
+            .unwrap();
+
+        // netexec prints the domain uppercased in the `Pwn3d!` line.
+        let flipped = state
+            .mark_credentials_admin(&q, "ALICE", "CONTOSO.LOCAL")
+            .await
+            .unwrap();
+
+        assert!(flipped);
+        assert_eq!(redis_admin_flags(&state, &q, "alice").await, vec![true]);
+    }
+
+    #[tokio::test]
+    async fn mark_credentials_admin_reports_false_when_no_credential_matches() {
+        let state = SharedState::new("op-1".to_string());
+        let q = mock_queue();
+
+        state
+            .publish_credential(&q, make_cred("alice", "P@ssw0rd!", "contoso.local"))
+            .await
+            .unwrap();
+
+        // An admin event with no credential behind it is the `seimpersonate`
+        // phantom shape; the caller keys its timeline event off this bool.
+        assert!(!state
+            .mark_credentials_admin(&q, "bob", "contoso.local")
+            .await
+            .unwrap());
+        assert!(!state
+            .mark_credentials_admin(&q, "alice", "fabrikam.local")
+            .await
+            .unwrap());
+        assert_eq!(redis_admin_flags(&state, &q, "alice").await, vec![false]);
+    }
+
+    #[tokio::test]
+    async fn mark_credentials_admin_reports_false_on_a_repeat_but_still_heals_redis() {
+        let state = SharedState::new("op-1".to_string());
+        let q = mock_queue();
+
+        state
+            .publish_credential(&q, make_cred("alice", "P@ssw0rd!", "contoso.local"))
+            .await
+            .unwrap();
+
+        assert!(state
+            .mark_credentials_admin(&q, "alice", "contoso.local")
+            .await
+            .unwrap());
+        assert!(
+            !state
+                .mark_credentials_admin(&q, "alice", "contoso.local")
+                .await
+                .unwrap(),
+            "a repeated Pwn3d! line must not re-fire the caller's timeline event"
+        );
+
+        // The pre-fix shape: memory true, Redis false. Only an unconditional
+        // Redis pass reconciles it, so the repeat call must still write.
+        state.inner.write().await.credentials[0].is_admin = true;
+        let key = format!(
+            "{}:{}:{}",
+            ares_core::state::KEY_PREFIX,
+            "op-1",
+            ares_core::state::KEY_CREDENTIALS
+        );
+        let mut conn = q.connection();
+        let entries: std::collections::HashMap<String, String> =
+            redis::AsyncCommands::hgetall(&mut conn, &key)
+                .await
+                .unwrap();
+        let (field, value) = entries.iter().next().unwrap();
+        let mut stale: Credential = serde_json::from_str(value).unwrap();
+        stale.is_admin = false;
+        let _: () = redis::AsyncCommands::hset(
+            &mut conn,
+            &key,
+            field,
+            serde_json::to_string(&stale).unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(redis_admin_flags(&state, &q, "alice").await, vec![false]);
+
+        state
+            .mark_credentials_admin(&q, "alice", "contoso.local")
+            .await
+            .unwrap();
+        assert_eq!(
+            redis_admin_flags(&state, &q, "alice").await,
+            vec![true],
+            "an in-memory/Redis disagreement must heal on the next Pwn3d! line"
+        );
     }
 
     #[tokio::test]

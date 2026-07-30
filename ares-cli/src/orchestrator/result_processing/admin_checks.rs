@@ -266,19 +266,16 @@ pub(crate) async fn detect_and_upgrade_admin_credentials(text: &str, dispatcher:
             continue;
         };
         info!(username = %username, domain = %domain, "Pwn3d! detected -- upgrading credential to admin");
-        let upgraded = {
-            let mut state = dispatcher.state.write().await;
-            let mut found = false;
-            for cred in state.credentials.iter_mut() {
-                if cred.username.to_lowercase() == username.to_lowercase()
-                    && cred.domain.to_lowercase() == domain
-                    && !cred.is_admin
-                {
-                    cred.is_admin = true;
-                    found = true;
-                }
+        let upgraded = match dispatcher
+            .state
+            .mark_credentials_admin(&dispatcher.queue, &username, &domain)
+            .await
+        {
+            Ok(flipped) => flipped,
+            Err(e) => {
+                warn!(err = %e, username = %username, domain = %domain, "Failed to persist admin flag");
+                false
             }
-            found
         };
         if upgraded {
             let pwned_ip = extract_ip_from_line(line);
@@ -298,7 +295,13 @@ pub(crate) async fn detect_and_upgrade_admin_credentials(text: &str, dispatcher:
                     warn!(err = %e, ip = %ip, "Failed to mark host as owned");
                 }
             }
-            create_admin_upgrade_timeline_event(dispatcher, &username, &domain).await;
+            create_admin_upgrade_timeline_event(
+                dispatcher,
+                &username,
+                &domain,
+                pwned_ip.as_deref(),
+            )
+            .await;
             let work: Vec<(String, ares_core::models::Credential)> = {
                 let state = dispatcher.state.read().await;
                 let dc_ips: Vec<String> = state.domain_controllers.values().cloned().collect();
