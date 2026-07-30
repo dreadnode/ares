@@ -1508,6 +1508,62 @@ fn acl_evidence_credits_generic_markers_from_the_acl_tool_itself() {
 }
 
 #[test]
+fn acl_evidence_credits_llm_driven_gpo_abuse() {
+    use super::result_has_acl_mutation_evidence;
+    let pygpoabuse = json!({
+        "tool_outputs": [{
+            "name": "pygpoabuse_immediate_task",
+            "output": "[+] Version updated\n[+] ScheduledTask AresProbe created!"
+        }]
+    });
+    assert!(result_has_acl_mutation_evidence(&Some(pygpoabuse)));
+
+    let sharpgpoabuse = json!({
+        "tool_outputs": [{
+            "name": "sharpgpoabuse",
+            "output": "[+] versionNumber attribute changed successfully\n[+] Done!"
+        }]
+    });
+    assert!(result_has_acl_mutation_evidence(&Some(sharpgpoabuse)));
+}
+
+#[test]
+fn acl_evidence_ignores_gpo_markers_from_unrelated_tools() {
+    use super::result_has_acl_mutation_evidence;
+    for output in [
+        "[+] ScheduledTask enumeration complete",
+        "[*] Done!",
+        "[+] Version updated",
+    ] {
+        let payload = json!({
+            "tool_outputs": [{"name": "enumerate_users", "output": output}]
+        });
+        assert!(
+            !result_has_acl_mutation_evidence(&Some(payload)),
+            "an unrelated tool must not credit a GPO write: {output}"
+        );
+    }
+}
+
+#[test]
+fn acl_evidence_ignores_gpo_failure_output() {
+    use super::result_has_acl_mutation_evidence;
+    for output in [
+        "[-] Unable to write to the GPO: insufficient access rights",
+        "[!] Failed to open connection: KDC_ERR_PREAUTH_FAILED",
+        "[+] GUID of the GPO is {31B2F340-016D-11D2-945F-00C04FB984F9}",
+    ] {
+        let payload = json!({
+            "tool_outputs": [{"name": "pygpoabuse_immediate_task", "output": output}]
+        });
+        assert!(
+            !result_has_acl_mutation_evidence(&Some(payload)),
+            "a GPO run without a write marker must not be credited: {output}"
+        );
+    }
+}
+
+#[test]
 fn acl_evidence_detects_dacledit_and_password_reset() {
     use super::result_has_acl_mutation_evidence;
     let dacl = json!({

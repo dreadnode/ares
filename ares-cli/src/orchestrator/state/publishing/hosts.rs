@@ -212,6 +212,15 @@ impl SharedState {
                     existing.roles = host.roles.clone();
                     changed = true;
                 }
+                if host.owned && !existing.owned {
+                    existing.owned = true;
+                    changed = true;
+                    tracing::info!(
+                        ip = %existing.ip,
+                        hostname = %existing.hostname,
+                        "Host marked as owned by remote-execution evidence"
+                    );
+                }
 
                 if !changed {
                     return Ok(false);
@@ -786,6 +795,43 @@ mod tests {
         assert_eq!(s.hosts.len(), 1);
         assert!(s.hosts[0].services.contains(&"445/tcp".to_string()));
         assert!(s.hosts[0].services.contains(&"139/tcp".to_string()));
+    }
+
+    #[tokio::test]
+    async fn publish_host_merges_owned_flag_from_remote_exec_evidence() {
+        let state = SharedState::new("op-owned-merge".to_string());
+        let q = mock_queue();
+
+        let mut recon = make_host("192.168.58.20", "ws01.contoso.local", false);
+        recon.services = vec!["445/tcp".to_string(), "3389/tcp".to_string()];
+        state.publish_host(&q, recon).await.unwrap();
+        assert!(!state.inner.read().await.hosts[0].owned);
+
+        let mut exec = make_host("192.168.58.20", "", false);
+        exec.services = vec!["445/tcp".to_string()];
+        exec.owned = true;
+        let changed = state.publish_host(&q, exec).await.unwrap();
+
+        assert!(changed);
+        let s = state.inner.read().await;
+        assert_eq!(s.hosts.len(), 1);
+        assert!(s.hosts[0].owned);
+    }
+
+    #[tokio::test]
+    async fn publish_host_does_not_clear_owned_flag() {
+        let state = SharedState::new("op-owned-keep".to_string());
+        let q = mock_queue();
+
+        let mut owned = make_host("192.168.58.20", "ws01.contoso.local", false);
+        owned.owned = true;
+        state.publish_host(&q, owned).await.unwrap();
+
+        let mut later = make_host("192.168.58.20", "", false);
+        later.services = vec!["3389/tcp".to_string()];
+        state.publish_host(&q, later).await.unwrap();
+
+        assert!(state.inner.read().await.hosts[0].owned);
     }
 
     #[tokio::test]

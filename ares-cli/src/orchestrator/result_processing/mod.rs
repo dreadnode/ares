@@ -1308,6 +1308,7 @@ const ACL_MUTATION_MARKERS: &[&str] = &[
     "successfully added msds-keycredentiallink",
     "updated the msds-keycredentiallink",
     "saved pfx",
+    "versionnumber attribute changed successfully",
 ];
 
 /// Success lines that are ordinary English and appear in unrelated tool output
@@ -1316,7 +1317,14 @@ const ACL_MUTATION_MARKERS: &[&str] = &[
 /// unrelated tool in the same task marks the ACL vulnerability EXPLOITED, which
 /// trades "ACL success is structurally impossible" for a false positive in the
 /// other direction.
-const ACL_MUTATION_MARKERS_NEEDING_ATTRIBUTION: &[&str] = &["added to ", "has been updated"];
+const ACL_MUTATION_MARKERS_NEEDING_ATTRIBUTION: &[&str] = &[
+    "added to ",
+    "has been updated",
+    "scheduledtask",
+    "version updated",
+    "gpt.ini",
+    "done!",
+];
 
 /// Tools whose output may be read as proof an ACL edge was taken.
 const ACL_MUTATION_TOOLS: &[&str] = &[
@@ -1327,8 +1335,10 @@ const ACL_MUTATION_TOOLS: &[&str] = &[
     "bloodyad_set_password",
     "certipy_shadow",
     "dacl_edit",
+    "pygpoabuse_immediate_task",
     "pywhisker",
     "rbcd_write",
+    "sharpgpoabuse",
 ];
 
 fn result_has_acl_mutation_evidence(result: &Option<Value>) -> bool {

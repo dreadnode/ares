@@ -8,6 +8,7 @@ mod certipy;
 mod cracker;
 mod credential_tools;
 mod delegation;
+mod lateral;
 mod mssql;
 mod nmap;
 mod ntsd;
@@ -30,6 +31,9 @@ pub use credential_tools::{
     parse_ntds_dit, parse_spray_success,
 };
 pub use delegation::{extract_delegation_account, parse_add_computer, parse_delegation};
+pub use lateral::{
+    parse_mssql_session, parse_remote_exec, parse_smb_share_access, parse_tgt_request,
+};
 pub use mssql::{parse_mssql_impersonation, parse_mssql_linked_servers};
 pub use nmap::{flush_nmap_host, parse_nmap_output};
 pub use ntsd::parse_acl_enumeration;
@@ -446,6 +450,23 @@ pub fn parse_tool_output(tool_name: &str, output: &str, params: &Value) -> Value
                 }]);
             }
         }
+        "psexec" | "psexec_kerberos" | "wmiexec" | "wmiexec_kerberos" | "smbexec"
+        | "smbexec_kerberos" | "pth_winexe" | "pth_wmic" | "pth_rpcclient" => set_if_nonempty(
+            &mut discoveries,
+            "hosts",
+            parse_remote_exec(tool_name, output, params),
+        ),
+        "pth_smbclient" => set_if_nonempty(
+            &mut discoveries,
+            "shares",
+            parse_smb_share_access(output, params),
+        ),
+        "get_tgt" => set_if_nonempty(&mut discoveries, "hosts", parse_tgt_request(output, params)),
+        "mssql_command" => set_if_nonempty(
+            &mut discoveries,
+            "hosts",
+            parse_mssql_session(output, params),
+        ),
         "evil_winrm" => {
             // Detect successful WinRM connection from evil-winrm output.
             // A successful connection typically shows "Evil-WinRM shell" or
@@ -775,10 +796,18 @@ pub fn merge_discoveries(all: &[Value]) -> Value {
                             .unwrap_or(false);
                         let new_is_dc =
                             host.get("is_dc").and_then(|v| v.as_bool()).unwrap_or(false);
+                        let owned = [existing, host]
+                            .iter()
+                            .any(|h| h.get("owned").and_then(|v| v.as_bool()).unwrap_or(false));
 
                         // Replace if new entry has DC status or more services
                         if (new_is_dc && !existing_is_dc) || new_services > existing_services {
                             e.insert(host.clone());
+                        }
+                        if owned {
+                            if let Some(obj) = e.get_mut().as_object_mut() {
+                                obj.insert("owned".into(), Value::Bool(true));
+                            }
                         }
                     }
                 }
@@ -1954,6 +1983,43 @@ SMB  192.168.58.121  445  DC01  bob         2026-03-25 23:21:09 0  Bob"#;
     }
 
     #[test]
+    fn merge_discoveries_keeps_owned_when_richer_host_replaces_it() {
+        let exec = json!({"hosts": [
+            {"ip": "192.168.58.20", "services": ["445/tcp"], "owned": true},
+        ]});
+        let recon = json!({"hosts": [
+            {"ip": "192.168.58.20", "services": ["135/tcp", "445/tcp", "3389/tcp"], "owned": false},
+        ]});
+        let merged = merge_discoveries(&[exec, recon]);
+        let hosts = merged["hosts"].as_array().expect("hosts");
+        assert_eq!(hosts.len(), 1);
+        assert_eq!(hosts[0]["services"].as_array().unwrap().len(), 3);
+        assert_eq!(hosts[0]["owned"], true);
+    }
+
+    #[test]
+    fn merge_discoveries_keeps_owned_when_richer_host_arrives_first() {
+        let recon = json!({"hosts": [
+            {"ip": "192.168.58.20", "services": ["135/tcp", "445/tcp"], "owned": false},
+        ]});
+        let exec = json!({"hosts": [
+            {"ip": "192.168.58.20", "services": ["445/tcp"], "owned": true},
+        ]});
+        let merged = merge_discoveries(&[recon, exec]);
+        let hosts = merged["hosts"].as_array().expect("hosts");
+        assert_eq!(hosts[0]["owned"], true);
+    }
+
+    #[test]
+    fn merge_discoveries_leaves_unowned_hosts_unowned() {
+        let d1 = json!({"hosts": [{"ip": "192.168.58.20", "services": ["445/tcp"]}]});
+        let d2 = json!({"hosts": [{"ip": "192.168.58.20", "services": ["445/tcp", "88/tcp"]}]});
+        let merged = merge_discoveries(&[d1, d2]);
+        let hosts = merged["hosts"].as_array().expect("hosts");
+        assert_ne!(hosts[0]["owned"], true);
+    }
+
+    #[test]
     fn merge_discoveries_skips_hosts_with_empty_ip() {
         let d = json!({"hosts": [{"ip": "", "hostname": "mystery"}]});
         let merged = merge_discoveries(&[d]);
@@ -2218,6 +2284,109 @@ LDAP  192.168.58.10  389  DC01  Computer:SRV01                    Password:LapsP
     fn parse_tool_output_laps_dump_empty_output() {
         let disc = parse_tool_output("laps_dump", "", &json!({"domain": "contoso.local"}));
         assert!(disc.get("credentials").is_none());
+    }
+
+    #[test]
+    fn parse_tool_output_psexec_emits_owned_host() {
+        let output =
+            "[*] Creating service qWxZ on 192.168.58.20.....\n[*] Starting service qWxZ.....\n";
+        let params = json!({"target": "192.168.58.20", "username": "admin"});
+        let disc = parse_tool_output("psexec", output, &params);
+        let hosts = disc["hosts"].as_array().expect("hosts");
+        assert_eq!(hosts[0]["ip"], "192.168.58.20");
+        assert_eq!(hosts[0]["owned"], true);
+    }
+
+    #[test]
+    fn parse_tool_output_kerberos_renamed_variants_are_all_wired() {
+        let output = "[*] Starting service qWxZ.....\n";
+        let params = json!({"target": "dc01.contoso.local", "target_ip": "192.168.58.10"});
+        for tool in [
+            "psexec_kerberos",
+            "wmiexec_kerberos",
+            "smbexec_kerberos",
+            "psexec",
+            "wmiexec",
+            "smbexec",
+        ] {
+            let disc = parse_tool_output(tool, output, &params);
+            let hosts = disc["hosts"]
+                .as_array()
+                .unwrap_or_else(|| panic!("{tool} produced no hosts"));
+            assert_eq!(hosts[0]["owned"], true, "{tool} must credit ownership");
+        }
+    }
+
+    #[test]
+    fn parse_tool_output_smbexec_logon_failure_is_silent() {
+        let output = "[-] SMB SessionError: STATUS_LOGON_FAILURE(The attempted logon is invalid.)";
+        let params = json!({"target": "192.168.58.20", "username": "admin"});
+        let disc = parse_tool_output("smbexec", output, &params);
+        assert!(disc.get("hosts").is_none());
+    }
+
+    #[test]
+    fn parse_tool_output_pth_rpcclient_emits_unowned_host() {
+        let output = "Account Name: admin, Authority Name: CONTOSO\n";
+        let params = json!({"target": "192.168.58.20", "username": "admin"});
+        let disc = parse_tool_output("pth_rpcclient", output, &params);
+        let hosts = disc["hosts"].as_array().expect("hosts");
+        assert_eq!(hosts[0]["owned"], false);
+    }
+
+    #[test]
+    fn parse_tool_output_pth_smbclient_emits_share() {
+        let output = "\t\t9756244 blocks of size 4096. 5364823 blocks available";
+        let params = json!({"target": "192.168.58.20", "share": "C$"});
+        let disc = parse_tool_output("pth_smbclient", output, &params);
+        let shares = disc["shares"].as_array().expect("shares");
+        assert_eq!(shares[0]["host"], "192.168.58.20");
+        assert_eq!(shares[0]["name"], "C$");
+    }
+
+    #[test]
+    fn parse_tool_output_pth_smbclient_access_denied_is_silent() {
+        let output = "tree connect failed: NT_STATUS_ACCESS_DENIED\n";
+        let params = json!({"target": "192.168.58.20", "share": "C$"});
+        let disc = parse_tool_output("pth_smbclient", output, &params);
+        assert!(disc.get("shares").is_none());
+    }
+
+    #[test]
+    fn parse_tool_output_get_tgt_emits_kdc_host() {
+        let output = "[*] Saving ticket in admin.ccache\n";
+        let params =
+            json!({"domain": "contoso.local", "username": "admin", "dc_ip": "192.168.58.10"});
+        let disc = parse_tool_output("get_tgt", output, &params);
+        let hosts = disc["hosts"].as_array().expect("hosts");
+        assert_eq!(hosts[0]["ip"], "192.168.58.10");
+        assert_eq!(hosts[0]["services"][0], "88/tcp");
+    }
+
+    #[test]
+    fn parse_tool_output_get_tgt_preauth_failure_is_silent() {
+        let output = "[-] Kerberos SessionError: KDC_ERR_PREAUTH_FAILED";
+        let params = json!({"domain": "contoso.local", "dc_ip": "192.168.58.10"});
+        let disc = parse_tool_output("get_tgt", output, &params);
+        assert!(disc.get("hosts").is_none());
+    }
+
+    #[test]
+    fn parse_tool_output_mssql_command_emits_sql_host() {
+        let output = "[*] ENVCHANGE(DATABASE): Old Value: master, New Value: master\nname\nsql02\n";
+        let params = json!({"target": "192.168.58.30", "username": "admin"});
+        let disc = parse_tool_output("mssql_command", output, &params);
+        let hosts = disc["hosts"].as_array().expect("hosts");
+        assert_eq!(hosts[0]["services"][0], "1433/tcp (ms-sql-s)");
+        assert_eq!(hosts[0]["roles"][0], "mssql");
+    }
+
+    #[test]
+    fn parse_tool_output_mssql_command_login_failure_is_silent() {
+        let output = "[-] ERROR(SQL01): Line 1: Login failed for user 'CONTOSO\\admin'.";
+        let params = json!({"target": "192.168.58.30", "username": "admin"});
+        let disc = parse_tool_output("mssql_command", output, &params);
+        assert!(disc.get("hosts").is_none());
     }
 
     #[test]
