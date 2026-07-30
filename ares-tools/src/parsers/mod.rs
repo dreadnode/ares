@@ -58,6 +58,48 @@ fn set_if_nonempty(discoveries: &mut Value, key: &str, items: Vec<Value>) {
     }
 }
 
+/// Recover the account ntlmrelayx relayed, most faithful source first: the SMB
+/// relay server logs the exact `DOMAIN/ACCOUNT` (trailing `$` intact), whereas
+/// the ADCS attack's pfx path and base64 fallback both run through impacket's
+/// `_sanitize_filename`, which rewrites `$` and strips it at the end.
+fn parse_relayed_account(output: &str) -> Option<String> {
+    const AUTH: &str = "Authenticating connection from ";
+    const PFX_PATH: &str = "Writing PKCS#12 certificate to ";
+    const PFX_B64: &str = "Base64-encoded PKCS#12 certificate (";
+
+    let from_relay = output.lines().find_map(|l| {
+        let rest = l.get(l.find(AUTH)? + AUTH.len()..)?;
+        if !rest.contains("SUCCEED") {
+            return None;
+        }
+        rest.split('@')
+            .next()?
+            .rsplit('/')
+            .next()
+            .map(str::to_string)
+    });
+
+    from_relay
+        .or_else(|| {
+            output.lines().find_map(|l| {
+                l.get(l.find(PFX_PATH)? + PFX_PATH.len()..)?
+                    .trim()
+                    .rsplit(['/', '\\'])
+                    .next()
+                    .map(|f| f.trim_end_matches(".pfx").to_string())
+            })
+        })
+        .or_else(|| {
+            output.lines().find_map(|l| {
+                l.get(l.find(PFX_B64)? + PFX_B64.len()..)?
+                    .split(')')
+                    .next()
+                    .map(|f| f.trim_end_matches(".pfx").to_string())
+            })
+        })
+        .filter(|u| !u.is_empty())
+}
+
 /// Credential-harvesting tools that run WITHOUT a pre-existing authenticated
 /// principal and fall back to a generic, guessed userlist when the caller
 /// doesn't seed one. They exit 0 whether or not they find anything, and a
@@ -559,10 +601,12 @@ pub fn parse_tool_output(tool_name: &str, output: &str, params: &Value) -> Value
         "xfreerdp" => {
             // Detect successful RDP authentication from xfreerdp output.
             let target = params.get("target").and_then(|v| v.as_str()).unwrap_or("");
-            // xfreerdp success: shows "Authentication only" or specific success patterns
-            let success = output.contains("Authentication only, exit status 0")
-                || (output.contains("connected to") && !output.contains("ERRCONNECT"))
-                || output.contains("FREERDP_CB_SESSION_STARTED");
+            // The exit status digit is NOT a success signal: FreeRDP 2 logs
+            // `!status` and FreeRDP 3 logs `rc`, so "exit status 0" means
+            // success on 2 and failure on 3. Key off the absence of an
+            // ERRCONNECT code instead, which is stable across both.
+            let success = output.contains("Authentication only, exit status")
+                && !output.contains("ERRCONNECT");
             if success {
                 discoveries["vulnerabilities"] = json!([{
                     "vuln_id": format!("rdp_access_{}", target.replace('.', "_")),
@@ -611,18 +655,12 @@ pub fn parse_tool_output(tool_name: &str, output: &str, params: &Value) -> Value
             set_if_nonempty(&mut discoveries, "hashes", hashes);
             set_if_nonempty(&mut discoveries, "credentials", sd_creds);
 
-            if output.contains("Writing PKCS#12 certificate to")
-                || output.contains("Base64 certificate of user")
+            if output.contains("Writing PKCS#12 certificate to ")
+                || output.contains("Base64-encoded PKCS#12 certificate (")
                 || output.contains("GOT CERTIFICATE!")
             {
                 let ca_host = params.get("ca_host").and_then(|v| v.as_str()).unwrap_or("");
-                let relayed_user = output.lines().find_map(|l| {
-                    l.find("Base64 certificate of user ")
-                        .map(|i| &l[i + "Base64 certificate of user ".len()..])
-                        .and_then(|rest| rest.split_whitespace().next())
-                        .map(|u| u.trim_end_matches(':').to_string())
-                });
-                let user = relayed_user.unwrap_or_default();
+                let user = parse_relayed_account(output).unwrap_or_default();
                 let user_safe = user.replace(['$', '.'], "_");
                 let ca_safe = ca_host.replace('.', "_");
                 let mut details = serde_json::Map::new();
@@ -694,11 +732,7 @@ pub fn parse_tool_output(tool_name: &str, output: &str, params: &Value) -> Value
         "nopac" => {
             let hashes = parse_certipy_esc1_chain(output, params);
             set_if_nonempty(&mut discoveries, "hashes", hashes);
-            if output.contains(".ccache")
-                || output.contains("Impersonating")
-                || output.contains("Impersonated")
-                || output.contains("Restoring the machine account")
-            {
+            if output.contains(".ccache") || output.contains("will try to impersonate") {
                 let target_ip = params
                     .get("dc_ip")
                     .or_else(|| params.get("target_ip"))
@@ -730,11 +764,7 @@ pub fn parse_tool_output(tool_name: &str, output: &str, params: &Value) -> Value
         }
         "printnightmare" => {
             let target = params.get("target").and_then(|v| v.as_str()).unwrap_or("");
-            let looks_successful = output.contains("Stub loaded")
-                || output.contains("DLL loaded")
-                || output.contains("Exploit completed")
-                || output.contains("[+] Triggering")
-                || output.contains("Successfully triggered");
+            let looks_successful = output.to_lowercase().contains("exploit completed");
             if looks_successful && !target.is_empty() {
                 let target_safe = target.replace('.', "_");
                 discoveries["vulnerabilities"] = json!([{
@@ -1841,8 +1871,9 @@ SMB  192.168.58.121  445  DC01  bob         2026-03-25 23:21:09 0  Bob"#;
     // ── xfreerdp ─────────────────────────────────────────────────────
 
     #[test]
-    fn parse_tool_output_xfreerdp_auth_success() {
-        let output = "Authentication only, exit status 0\n";
+    fn parse_tool_output_xfreerdp3_auth_success() {
+        // FreeRDP 3 logs rc directly, so a successful auth reads "status 1".
+        let output = "[ERROR][com.freerdp.core] - Authentication only, exit status 1\n";
         let params = json!({"target": "192.168.58.20"});
         let disc = parse_tool_output("xfreerdp", output, &params);
         let vulns = disc["vulnerabilities"].as_array().expect("vulns");
@@ -1851,25 +1882,21 @@ SMB  192.168.58.121  445  DC01  bob         2026-03-25 23:21:09 0  Bob"#;
     }
 
     #[test]
-    fn parse_tool_output_xfreerdp_connected() {
-        let output = "connected to 192.168.58.20:3389\n";
-        let params = json!({"target": "192.168.58.20"});
-        let disc = parse_tool_output("xfreerdp", output, &params);
-        assert!(disc.get("vulnerabilities").is_some());
-    }
-
-    #[test]
-    fn parse_tool_output_xfreerdp_connected_with_errconnect_not_success() {
-        // `connected to` + `ERRCONNECT` should not count as success.
-        let output = "connected to 192.168.58.20:3389\nERRCONNECT_CONNECT_FAILED\n";
+    fn parse_tool_output_xfreerdp3_bad_creds_is_not_access() {
+        // Same run, wrong password: FreeRDP 3 reports "status 0" here. Reading
+        // that digit as success inverted the whole check.
+        let output = "\
+[WARN][com.freerdp.client.common] - Connection aborted: credentials do not work [ERRCONNECT_LOGON_FAILURE]\n\
+[ERROR][com.freerdp.core] - Authentication only, exit status 0\n";
         let params = json!({"target": "192.168.58.20"});
         let disc = parse_tool_output("xfreerdp", output, &params);
         assert!(disc.get("vulnerabilities").is_none());
     }
 
     #[test]
-    fn parse_tool_output_xfreerdp_session_started() {
-        let output = "FREERDP_CB_SESSION_STARTED\n";
+    fn parse_tool_output_xfreerdp2_auth_success() {
+        // FreeRDP 2 logs !status, so the same success reads "status 0".
+        let output = "[ERROR][com.freerdp.core] - Authentication only, exit status 0\n";
         let params = json!({"target": "192.168.58.20"});
         let disc = parse_tool_output("xfreerdp", output, &params);
         assert!(disc.get("vulnerabilities").is_some());
@@ -2108,12 +2135,11 @@ SMB  192.168.58.121  445  DC01  bob         2026-03-25 23:21:09 0  Bob"#;
     fn parse_tool_output_ntlmrelayx_to_adcs_emits_certificate_obtained() {
         let output = "\
 [*] Servers started, waiting for connections
-[*] SMBD-Thread-1: Received connection from 192.168.58.20, attacking target http://ca01.contoso.local/certsrv/certfnsh.asp as CONTOSO/DC01$
-[*] Authenticating against http://ca01.contoso.local/certsrv/certfnsh.asp as CONTOSO/DC01$ SUCCEED
+[*] SMBD-Thread-1: Received connection from 192.168.58.20, attacking target http://ca01.contoso.local
+[*] (SMB): Authenticating connection from CONTOSO/DC01$@192.168.58.20 against http://ca01.contoso.local SUCCEED [1]
 [*] GOT CERTIFICATE! ID 42
-[*] Base64 certificate of user DC01$:
-MIIRegistrationBlobHereBase64Data==
-[*] Writing PKCS#12 certificate to ./DC01.pfx";
+[*] Writing PKCS#12 certificate to /home/kali/loot/DC01.pfx
+[*] Certificate successfully written to file";
         let params = json!({
             "ca_host": "192.168.58.50",
         });
@@ -2125,6 +2151,39 @@ MIIRegistrationBlobHereBase64Data==
         assert_eq!(vulns[0]["target"], "192.168.58.50");
         let vid = vulns[0]["vuln_id"].as_str().unwrap();
         assert!(!vid.contains('$'), "vuln_id must sanitise $: {vid}");
+    }
+
+    #[test]
+    fn parse_tool_output_ntlmrelayx_distinct_accounts_get_distinct_vuln_ids() {
+        let relay = |account: &str, pfx: &str| {
+            format!(
+                "[*] (SMB): Authenticating connection from CONTOSO/{account}@192.168.58.20 against http://ca01.contoso.local SUCCEED [1]\n\
+[*] GOT CERTIFICATE! ID 42\n\
+[*] Writing PKCS#12 certificate to /home/kali/loot/{pfx}.pfx"
+            )
+        };
+        let params = json!({"ca_host": "192.168.58.50"});
+        let id_for = |out: &str| {
+            parse_tool_output("ntlmrelayx_to_adcs", out, &params)["vulnerabilities"][0]["vuln_id"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        };
+
+        let dc = id_for(&relay("DC01$", "DC01"));
+        let web = id_for(&relay("WEB01$", "WEB01"));
+        assert_ne!(dc, web, "each relayed account needs its own vuln_id");
+    }
+
+    #[test]
+    fn parse_tool_output_ntlmrelayx_falls_back_to_pfx_path_without_relay_line() {
+        let output = "\
+[*] GOT CERTIFICATE! ID 7
+[*] Writing PKCS#12 certificate to /home/kali/loot/alice.pfx";
+        let params = json!({"ca_host": "192.168.58.50"});
+        let disc = parse_tool_output("ntlmrelayx_to_adcs", output, &params);
+        let vulns = disc["vulnerabilities"].as_array().expect("vulns");
+        assert_eq!(vulns[0]["details"]["target_user"], "alice");
     }
 
     #[test]
@@ -2260,8 +2319,8 @@ Starting mitm6 using the domain: contoso.local
     fn parse_tool_output_nopac_extracts_dcsync_hashes() {
         let output = "\
 [*] Getting TGT for CONTOSO\\bob
-[*] Impersonating administrator
-[*] Saving ticket in administrator.ccache
+[*] will try to impersonate administrator
+[*] Rename ccache to administrator_dc01.contoso.local.ccache
 [*] Dumping Domain Credentials\nkrbtgt:502:aad3b435b51404eeaad3b435b51404ee:9163a4143c00569b53db0feef6bdf2ad:::";
         let params = json!({
             "domain": "contoso.local",
@@ -2294,7 +2353,7 @@ Starting mitm6 using the domain: contoso.local
     #[test]
     fn parse_tool_output_printnightmare_emits_vuln_on_success_marker() {
         let output = "\
-[*] Impacket v0.9.24\n[+] Connected to smb\n[+] Triggering spooler service to load DLL\n[+] Exploit completed";
+[*] Connecting to ncacn_np:192.168.58.22[\\PIPE\\spoolss]\n[+] Bind OK\n[+] pDriverPath Found C:\\Windows\\System32\\DriverStore\\FileRepository\\ntprint.inf_amd64_83aa9aebf5dffc96\\Amd64\\UNIDRV.DLL\n[*] Executing \\??\\UNC\\192.168.58.10\\share\\evil.dll\n[*] Try 1...\n[*] Stage0: 0\n[+] Exploit Completed";
         let params = json!({"target": "192.168.58.22"});
         let disc = parse_tool_output("printnightmare", output, &params);
         let vulns = disc["vulnerabilities"].as_array().expect("vulns");
@@ -2303,8 +2362,20 @@ Starting mitm6 using the domain: contoso.local
     }
 
     #[test]
+    fn parse_tool_output_printnightmare_silent_on_trigger_without_outcome() {
+        let output = "\
+[*] Connecting to ncacn_np:192.168.58.22[\\PIPE\\spoolss]\n[+] Bind OK\n[*] Executing \\??\\UNC\\192.168.58.10\\share\\evil.dll\n[*] Try 1...\n[*] Try 2...\n[*] Try 3...";
+        let disc = parse_tool_output(
+            "printnightmare",
+            output,
+            &json!({"target": "192.168.58.22"}),
+        );
+        assert!(disc.get("vulnerabilities").is_none());
+    }
+
+    #[test]
     fn parse_tool_output_printnightmare_silent_on_failure() {
-        let output = "[-] Failed to load DLL\n";
+        let output = "[*] Connecting to ncacn_np:192.168.58.22[\\PIPE\\spoolss]\n[-] Failed to find driver\n";
         let disc = parse_tool_output(
             "printnightmare",
             output,

