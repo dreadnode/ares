@@ -69,8 +69,12 @@ fn sweep_rearmable_forge_wedges(state: &mut StateInner) -> Vec<String> {
         .forge_wedged
         .iter()
         .filter(|(_, w)| {
-            resolve_target_dc_hostname(&state.hosts, &w.target_dc_ip, &w.target_domain)
-                != w.hostname
+            resolve_target_dc_hostname(
+                &state.hosts,
+                &state.netbios_to_fqdn,
+                &w.target_dc_ip,
+                &w.target_domain,
+            ) != w.hostname
         })
         .map(|(k, _)| k.clone())
         .collect();
@@ -128,8 +132,18 @@ fn forest_trust_vuln_id(source_domain: &str, target_domain: &str) -> String {
 ///
 /// So the suffix test requires exactly one label to remain after stripping
 /// `.{target_domain}` — the host must sit *directly* in the target domain.
+///
+/// When no `hosts` record qualifies, `netbios_to_fqdn` is consulted before
+/// giving up. A DC whose only `hosts` entry carries the zone apex as its
+/// hostname is rejected by both tests above, yet recon routinely records its
+/// real FQDN in the NetBIOS map from the SMB banner. Without this the fallback
+/// yields `cifs/<ip>`, which no KDC has an SPN for. Candidates are sorted so
+/// the result is stable across calls — `sweep_rearmable_forge_wedges` compares
+/// this against the previously recorded resolution, and a `HashMap`-ordered
+/// pick would re-arm the wedge at random.
 fn resolve_target_dc_hostname(
     hosts: &[ares_core::models::Host],
+    netbios_to_fqdn: &std::collections::HashMap<String, String>,
     target_dc_ip: &str,
     target_domain: &str,
 ) -> String {
@@ -155,6 +169,14 @@ fn resolve_target_dc_hostname(
                 .iter()
                 .find(|h| (h.is_dc || h.detect_dc()) && in_target_domain(&h.hostname))
                 .map(|h| h.hostname.clone())
+        })
+        .or_else(|| {
+            let mut candidates: Vec<&String> = netbios_to_fqdn
+                .values()
+                .filter(|fqdn| in_target_domain(fqdn))
+                .collect();
+            candidates.sort();
+            candidates.first().map(|fqdn| (*fqdn).clone())
         })
         .unwrap_or_else(|| target_dc_ip.to_string())
 }
@@ -1370,7 +1392,12 @@ pub async fn auto_trust_follow(dispatcher: Arc<Dispatcher>, mut shutdown: watch:
             // last resort.
             let target_dc_hostname = {
                 let s = dispatcher.state.read().await;
-                resolve_target_dc_hostname(&s.hosts, &target_dc_ip, &item.target_domain)
+                resolve_target_dc_hostname(
+                    &s.hosts,
+                    &s.netbios_to_fqdn,
+                    &target_dc_ip,
+                    &item.target_domain,
+                )
             };
 
             // ticketer writes <username>.ccache in the worker cwd; the
@@ -2958,6 +2985,80 @@ mod tests {
         }
     }
 
+    fn no_netbios() -> std::collections::HashMap<String, String> {
+        std::collections::HashMap::new()
+    }
+
+    fn netbios(pairs: &[(&str, &str)]) -> std::collections::HashMap<String, String> {
+        pairs
+            .iter()
+            .map(|(n, f)| ((*n).to_string(), (*f).to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn resolve_target_dc_hostname_uses_the_netbios_map_when_the_only_record_is_the_apex() {
+        let hosts = [dc("192.168.58.10", "contoso.local")];
+        assert_eq!(
+            resolve_target_dc_hostname(
+                &hosts,
+                &netbios(&[("DC01", "dc01.contoso.local")]),
+                "192.168.58.10",
+                "contoso.local"
+            ),
+            "dc01.contoso.local"
+        );
+    }
+
+    #[test]
+    fn resolve_target_dc_hostname_ignores_netbios_entries_outside_the_target_domain() {
+        let hosts = [dc("192.168.58.10", "contoso.local")];
+        assert_eq!(
+            resolve_target_dc_hostname(
+                &hosts,
+                &netbios(&[
+                    ("DC02", "dc02.child.contoso.local"),
+                    ("WS01", "ws01.fabrikam.local"),
+                ]),
+                "192.168.58.10",
+                "contoso.local"
+            ),
+            "192.168.58.10"
+        );
+    }
+
+    #[test]
+    fn resolve_target_dc_hostname_is_stable_when_several_netbios_entries_qualify() {
+        let hosts = [dc("192.168.58.10", "contoso.local")];
+        let map = netbios(&[
+            ("DC02", "dc02.contoso.local"),
+            ("DC01", "dc01.contoso.local"),
+            ("CA01", "ca01.contoso.local"),
+        ]);
+        let first = resolve_target_dc_hostname(&hosts, &map, "192.168.58.10", "contoso.local");
+        for _ in 0..32 {
+            assert_eq!(
+                resolve_target_dc_hostname(&hosts, &map, "192.168.58.10", "contoso.local"),
+                first
+            );
+        }
+        assert_eq!(first, "ca01.contoso.local");
+    }
+
+    #[test]
+    fn resolve_target_dc_hostname_prefers_a_real_host_record_over_the_netbios_map() {
+        let hosts = [dc("192.168.58.10", "dc01.contoso.local")];
+        assert_eq!(
+            resolve_target_dc_hostname(
+                &hosts,
+                &netbios(&[("CA01", "ca01.contoso.local")]),
+                "192.168.58.10",
+                "contoso.local"
+            ),
+            "dc01.contoso.local"
+        );
+    }
+
     #[test]
     fn resolve_target_dc_hostname_prefers_the_record_for_the_target_dc_ip() {
         let hosts = [
@@ -2965,7 +3066,7 @@ mod tests {
             dc("192.168.58.20", "dc02.child.contoso.local"),
         ];
         assert_eq!(
-            resolve_target_dc_hostname(&hosts, "192.168.58.10", "contoso.local"),
+            resolve_target_dc_hostname(&hosts, &no_netbios(), "192.168.58.10", "contoso.local"),
             "dc01.contoso.local"
         );
     }
@@ -2979,7 +3080,7 @@ mod tests {
             dc("192.168.58.11", "dc01.contoso.local"),
         ];
         assert_eq!(
-            resolve_target_dc_hostname(&hosts, "192.168.58.10", "contoso.local"),
+            resolve_target_dc_hostname(&hosts, &no_netbios(), "192.168.58.10", "contoso.local"),
             "dc01.contoso.local"
         );
     }
@@ -2996,7 +3097,7 @@ mod tests {
             dc("192.168.58.20", "dc02.child.contoso.local"),
         ];
         assert_eq!(
-            resolve_target_dc_hostname(&hosts, "192.168.58.10", "contoso.local"),
+            resolve_target_dc_hostname(&hosts, &no_netbios(), "192.168.58.10", "contoso.local"),
             "192.168.58.10"
         );
     }
@@ -3005,7 +3106,7 @@ mod tests {
     fn resolve_target_dc_hostname_matches_a_grandchild_domain_no_better() {
         let hosts = [dc("192.168.58.30", "dc03.sub.child.contoso.local")];
         assert_eq!(
-            resolve_target_dc_hostname(&hosts, "192.168.58.10", "contoso.local"),
+            resolve_target_dc_hostname(&hosts, &no_netbios(), "192.168.58.10", "contoso.local"),
             "192.168.58.10"
         );
     }
@@ -3018,7 +3119,12 @@ mod tests {
             dc("192.168.58.20", "dc02.child.contoso.local"),
         ];
         assert_eq!(
-            resolve_target_dc_hostname(&hosts, "192.168.58.99", "child.contoso.local"),
+            resolve_target_dc_hostname(
+                &hosts,
+                &no_netbios(),
+                "192.168.58.99",
+                "child.contoso.local"
+            ),
             "dc02.child.contoso.local"
         );
     }
@@ -3027,7 +3133,7 @@ mod tests {
     fn resolve_target_dc_hostname_is_case_insensitive() {
         let hosts = [dc("192.168.58.11", "DC01.CONTOSO.LOCAL")];
         assert_eq!(
-            resolve_target_dc_hostname(&hosts, "192.168.58.10", "contoso.local"),
+            resolve_target_dc_hostname(&hosts, &no_netbios(), "192.168.58.10", "contoso.local"),
             "DC01.CONTOSO.LOCAL"
         );
     }
@@ -3035,7 +3141,7 @@ mod tests {
     #[test]
     fn resolve_target_dc_hostname_falls_back_to_ip_with_no_hosts() {
         assert_eq!(
-            resolve_target_dc_hostname(&[], "192.168.58.10", "contoso.local"),
+            resolve_target_dc_hostname(&[], &no_netbios(), "192.168.58.10", "contoso.local"),
             "192.168.58.10"
         );
     }
@@ -3531,7 +3637,12 @@ mod tests {
             WedgedForge {
                 target_domain: "contoso.local".into(),
                 target_dc_ip: "192.168.58.99".into(),
-                hostname: resolve_target_dc_hostname(&s.hosts, "192.168.58.99", "contoso.local"),
+                hostname: resolve_target_dc_hostname(
+                    &s.hosts,
+                    &no_netbios(),
+                    "192.168.58.99",
+                    "contoso.local",
+                ),
             },
         );
 
@@ -3552,7 +3663,8 @@ mod tests {
         let key = "trust_follow:contoso.local:fabrikam$".to_string();
         s.hosts
             .push(dc("192.168.58.99", "dc02.child.contoso.local"));
-        let failed = resolve_target_dc_hostname(&s.hosts, "192.168.58.10", "contoso.local");
+        let failed =
+            resolve_target_dc_hostname(&s.hosts, &no_netbios(), "192.168.58.10", "contoso.local");
         s.mark_processed(DEDUP_TRUST_FOLLOW, key.clone());
         s.forge_wedged.insert(
             key.clone(),

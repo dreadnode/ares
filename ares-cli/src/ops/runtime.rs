@@ -66,11 +66,19 @@ pub(crate) async fn ops_runtime(
     println!();
 
     let (creds, hashes) = super::loot::reportable_counts(&state);
-    let vulns = state.discovered_vulnerabilities.len();
-    let exploited = state.exploited_vulnerabilities.len();
+    let vulns = super::loot::vulnerability_counts(&state);
 
     println!("Credentials: {creds}  Hashes: {hashes}");
-    println!("Vulns: {vulns} discovered, {exploited} exploited");
+    println!(
+        "Vulns: {} exploitable ({} exploited), {} findings ({} exploited)",
+        vulns.exploitable, vulns.exploitable_exploited, vulns.findings, vulns.findings_exploited
+    );
+    if vulns.orphan_credits > 0 {
+        println!(
+            "Warning: {} exploit credits have no vulnerability record (not itemised by `ops loot`)",
+            vulns.orphan_credits
+        );
+    }
     println!();
 
     super::loot::print_runtime_summary(&state);

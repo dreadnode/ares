@@ -54,6 +54,49 @@ pub(crate) fn print_loot(state: &SharedRedTeamState, json_output: bool) {
     }
 }
 
+/// Vulnerability counts split the same way `ops loot` tables them.
+///
+/// `orphan_credits` is the number of ids in `exploited_vulnerabilities` with no
+/// matching record in `discovered_vulnerabilities`. Those ids are credited by
+/// primitives that never emit a vulnerability record, so folding them into a
+/// single "exploited" total reports successes that no view can itemise.
+pub(crate) struct VulnCounts {
+    pub exploitable: usize,
+    pub exploitable_exploited: usize,
+    pub findings: usize,
+    pub findings_exploited: usize,
+    pub orphan_credits: usize,
+}
+
+pub(crate) fn vulnerability_counts(state: &SharedRedTeamState) -> VulnCounts {
+    let mut counts = VulnCounts {
+        exploitable: 0,
+        exploitable_exploited: 0,
+        findings: 0,
+        findings_exploited: 0,
+        orphan_credits: 0,
+    };
+
+    for (id, vuln) in &state.discovered_vulnerabilities {
+        let exploited = state.exploited_vulnerabilities.contains(id);
+        if display::is_exploitable(vuln) {
+            counts.exploitable += 1;
+            counts.exploitable_exploited += usize::from(exploited);
+        } else {
+            counts.findings += 1;
+            counts.findings_exploited += usize::from(exploited);
+        }
+    }
+
+    counts.orphan_credits = state
+        .exploited_vulnerabilities
+        .iter()
+        .filter(|id| !state.discovered_vulnerabilities.contains_key(*id))
+        .count();
+
+    counts
+}
+
 /// Credential and hash counts that match what `ops loot --json` would surface
 /// in its `credentials` and `hashes` arrays — i.e. after the normalize → dedup
 /// → report-filter pipeline. `ops runtime` uses these so its headline numbers
@@ -115,7 +158,77 @@ pub(crate) fn print_runtime_summary(state: &SharedRedTeamState) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ares_core::models::{Credential, Hash};
+    use ares_core::models::{Credential, Hash, VulnerabilityInfo};
+
+    fn mk_vuln(id: &str, priority: i32) -> VulnerabilityInfo {
+        VulnerabilityInfo {
+            vuln_id: id.to_string(),
+            vuln_type: "adcs_esc8".to_string(),
+            target: "192.168.58.10".to_string(),
+            discovered_by: "recon-1".to_string(),
+            discovered_at: chrono::Utc::now(),
+            details: std::collections::HashMap::new(),
+            recommended_agent: String::new(),
+            priority,
+        }
+    }
+
+    fn state_with_vulns(vulns: &[(&str, i32)], exploited: &[&str]) -> SharedRedTeamState {
+        let mut state = SharedRedTeamState::new("op-test".to_string());
+        for (id, priority) in vulns {
+            state
+                .discovered_vulnerabilities
+                .insert((*id).to_string(), mk_vuln(id, *priority));
+        }
+        for id in exploited {
+            state.exploited_vulnerabilities.insert((*id).to_string());
+        }
+        state
+    }
+
+    #[test]
+    fn vulnerability_counts_splits_on_the_same_priority_boundary_as_loot() {
+        let state = state_with_vulns(&[("v1", 1), ("v2", 3), ("v3", 4), ("v4", 5)], &["v1", "v4"]);
+
+        let counts = vulnerability_counts(&state);
+
+        assert_eq!(counts.exploitable, 2);
+        assert_eq!(counts.exploitable_exploited, 1);
+        assert_eq!(counts.findings, 2);
+        assert_eq!(counts.findings_exploited, 1);
+    }
+
+    #[test]
+    fn vulnerability_counts_reports_exploit_credits_with_no_record() {
+        let state = state_with_vulns(&[("v1", 1)], &["v1", "kerberoast_alice", "kerberoast_bob"]);
+
+        let counts = vulnerability_counts(&state);
+
+        assert_eq!(counts.orphan_credits, 2);
+        assert_eq!(counts.exploitable_exploited, 1);
+    }
+
+    #[test]
+    fn vulnerability_counts_has_no_orphans_when_every_credit_has_a_record() {
+        let state = state_with_vulns(&[("v1", 1), ("v2", 5)], &["v1", "v2"]);
+
+        assert_eq!(vulnerability_counts(&state).orphan_credits, 0);
+    }
+
+    #[test]
+    fn vulnerability_counts_never_double_counts_an_acl_graph_dump() {
+        let mut vulns: Vec<(String, i32)> = (0..216).map(|i| (format!("acl-{i}"), 5)).collect();
+        vulns.extend((0..17).map(|i| (format!("exp-{i}"), 2)));
+        let borrowed: Vec<(&str, i32)> = vulns.iter().map(|(id, p)| (id.as_str(), *p)).collect();
+        let exploited: Vec<&str> = (0..6).map(|_| "exp-0").collect();
+
+        let state = state_with_vulns(&borrowed, &exploited);
+        let counts = vulnerability_counts(&state);
+
+        assert_eq!(counts.exploitable, 17);
+        assert_eq!(counts.findings, 216);
+        assert_eq!(counts.exploitable + counts.findings, 233);
+    }
 
     #[test]
     fn reportable_counts_drops_machine_and_krbtgt_and_cracked_hashes() {

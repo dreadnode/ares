@@ -373,6 +373,13 @@ pub(super) fn print_runtime_summary(
 /// as actively exploitable rather than an informational finding.
 const EXPLOITABLE_PRIORITY_MAX: i32 = 3;
 
+/// Whether a vulnerability is actively exploitable rather than an informational
+/// finding. Shared with `super::vulnerability_counts` so the `ops runtime`
+/// headline and the `ops loot` tables can never disagree on the split.
+pub(super) fn is_exploitable(vuln: &VulnerabilityInfo) -> bool {
+    vuln.priority <= EXPLOITABLE_PRIORITY_MAX
+}
+
 /// Print vulnerabilities split into two tables: actively exploitable
 /// (priority <= EXPLOITABLE_PRIORITY_MAX) and informational findings (rest).
 fn print_vulnerabilities(
@@ -386,7 +393,7 @@ fn print_vulnerabilities(
     let mut exploitable: Vec<(&String, &VulnerabilityInfo)> = Vec::new();
     let mut findings: Vec<(&String, &VulnerabilityInfo)> = Vec::new();
     for (id, vuln) in discovered.iter() {
-        if vuln.priority <= EXPLOITABLE_PRIORITY_MAX {
+        if is_exploitable(vuln) {
             exploitable.push((id, vuln));
         } else {
             findings.push((id, vuln));
