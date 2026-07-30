@@ -394,10 +394,9 @@ jobs:
           EOF
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
+        uses: ./.github/actions/setup-buildx
         with:
-          driver-opts: |
-            image=moby/buildkit:latest
+          buildkit-image: moby/buildkit:latest
 
       - name: Test build ${{ matrix.name }} (amd64)
         run: |
@@ -584,10 +583,9 @@ jobs:
           EOF
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
+        uses: ./.github/actions/setup-buildx
         with:
-          driver-opts: |
-            image=moby/buildkit:latest
+          buildkit-image: moby/buildkit:latest
 
       - name: Check if base template was changed
         id: check-base
