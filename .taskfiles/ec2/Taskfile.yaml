@@ -1060,7 +1060,7 @@ tasks:
   # Operation Launch
   # ============================================================================
   launch:
-    desc: "Launch orchestrator on EC2 via Secrets Manager (usage: task ec2:launch EC2_NAME=kali-ares [DOMAIN=...] [TARGETS=...] [CRED_USER=...] [CRED_PASS=...] [WAIT=true] [POLL_INTERVAL=30])"
+    desc: "Launch orchestrator on EC2 via Secrets Manager — blind start by default; set CRED_USER+CRED_PASS together to seed an assumed-breach credential (usage: task ec2:launch EC2_NAME=kali-ares [DOMAIN=...] [TARGETS=...] [CRED_USER=... CRED_PASS=...] [CRED_DOMAIN=...] [WAIT=true] [POLL_INTERVAL=30])"
     silent: true
     vars:
       DOMAIN: '{{.DOMAIN | default "sevenkingdoms.local"}}'
@@ -1069,9 +1069,9 @@ tasks:
       # comma-separated IP list. The name form is preferred because it stays
       # correct when the range is redeployed and its IPs change.
       TARGETS: '{{.TARGETS | default "dreadgoad"}}'
-      CRED_USER: '{{.CRED_USER | default "samwell.tarly"}}'
-      CRED_PASS: '{{.CRED_PASS | default "Heartsbane"}}'
-      CRED_DOMAIN: '{{.CRED_DOMAIN | default "north.sevenkingdoms.local"}}'
+      CRED_USER: '{{.CRED_USER | default ""}}'
+      CRED_PASS: '{{.CRED_PASS | default ""}}'
+      CRED_DOMAIN: '{{.CRED_DOMAIN | default ""}}'
       SECRETS_ID: '{{.SECRETS_ID | default "ares/api-keys"}}'
       # Postgres history DB (ares-history). The orchestrator's projector + op
       # finalizer persist every run here so red ops are comparable across runs.
@@ -1162,19 +1162,29 @@ tasks:
           EXTRA_ARGS+=(--argjson cad "$CAD_BOOL")
         fi
 
+        if [ -n "{{.CRED_USER}}" ] || [ -n "{{.CRED_PASS}}" ]; then
+          if [ -z "{{.CRED_USER}}" ] || [ -z "{{.CRED_PASS}}" ]; then
+            echo -e "{{.ERROR}} CRED_USER and CRED_PASS must be set together (or neither, for a blind start)"
+            exit 1
+          fi
+          SEED_DOMAIN="{{.CRED_DOMAIN}}"
+          [ -n "$SEED_DOMAIN" ] || SEED_DOMAIN="{{.DOMAIN}}"
+          echo -e "{{.INFO}} Start posture: ASSUMED BREACH — seeding {{.CRED_USER}}@$SEED_DOMAIN"
+          EXTRA_JQ="$EXTRA_JQ | .initial_credential = {username: \$user, password: \$pass, domain: \$cred_domain}"
+          EXTRA_ARGS+=(--arg user "{{.CRED_USER}}" --arg pass "{{.CRED_PASS}}" --arg cred_domain "$SEED_DOMAIN")
+        else
+          echo -e "{{.INFO}} Start posture: BLIND — no initial credential seeded"
+        fi
+
         PAYLOAD=$(jq -c -n \
           --arg op_id "$OP_ID" \
           --arg domain "{{.DOMAIN}}" \
           --argjson targets "$TARGET_ARRAY" \
-          --arg user "{{.CRED_USER}}" \
-          --arg pass "{{.CRED_PASS}}" \
-          --arg cred_domain "{{.CRED_DOMAIN}}" \
           "${EXTRA_ARGS[@]}" \
           "{
             \"operation_id\": \$op_id,
             \"target_domain\": \$domain,
-            \"target_ips\": \$targets,
-            \"initial_credential\": { \"username\": \$user, \"password\": \$pass, \"domain\": \$cred_domain }
+            \"target_ips\": \$targets
           } $EXTRA_JQ")
 
         # Fetch API keys from Secrets Manager

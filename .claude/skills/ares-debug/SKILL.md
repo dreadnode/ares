@@ -46,7 +46,7 @@ Run Step 0, then **before drawing any conclusion** grep the tail of `orchestrato
 | `Processing real-time discoveries count=1` ticking every 5s with no other state change | Orchestrator stuck in discovery-replay loop |
 | `Waiting for blue team to finish\.\.\. active_investigations=[0-9]+` ticking every 10s | **Not a wedge — red is DONE.** Op is holding open until blue investigations drain. Check `red_completed_at` / `red_completion_reason` in meta (see Step 0). |
 | `Loki request error \(retryable\)` / `Retrying Loki query after transient failure` flooding the tail | Blue team's external Loki (`$LOKI_URL`) is flapping; blue investigations grind to a crawl and starve out post-red op close. Not a red bug. |
-| `Tool binary not found \(spawn failed\) — removing from available tools` firing across many recon tools (nmap_scan, enumerate_users, enumerate_shares, smb_signing_check, username_as_password) in the first seconds of the op | Tool-pruning cascade — a prior spawn failure poisoned the worker's per-process `unavailable_tools` HashSet. Deploys don't clear it (workers don't restart); fix is `task ec2:restart EC2_NAME=kali-ares`. Full mechanism + confirmation queries in Step 3.5. |
+| `Tool binary not found \(spawn failed\) — removing from available tools` firing across many recon tools (nmap_scan, enumerate_users, enumerate_shares, smb_signing_check, username_as_password) in the first seconds of the op | Tool-pruning cascade — a prior spawn failure poisoned the worker's per-process `unavailable_tools` HashSet. Only a genuine worker-process restart clears it — **not** `task ec2:restart`, which never touches `ares@` units (see Step 8). Fix: `task ec2:exec EC2_NAME=kali-ares CMD='systemctl restart "ares@*.service"'`. Full mechanism + confirmation queries in Step 3.5. |
 
 If you don't see these but the op is slow vs. baseline, escalate to Loki / Tempo for cross-tick LLM latency or tool-call stalls.
 
@@ -107,7 +107,20 @@ Only proceed past Step 0 to deeper probes (Loki, Tempo, SSM journals) if none of
 **Two footguns in the Step 0 commands themselves — read before you file a "Redis broken" bug:**
 
 - `ares --ec2 kali-ares ops list` (0e/0f) connects to **local** Redis on the machine you're running from, not to the box's Redis over SSM. From an agent host with no `redis-server` and no `ec2:redis:forward` running, it will exit with `Failed to connect to Redis: Connection refused`. That's not "the box is broken" — it's the CLI wanting a live connection. When you see it, fall back to `task ec2:exec EC2_NAME=kali-ares CMD='sudo redis-cli ...'` for anything you'd have asked the CLI for.
-- `redis-cli scard "ares:op:$OP:creds"` (and `:hashes`, `:users`) will return `WRONGTYPE Operation against a key holding the wrong kind of value`. These aren't sets — `:creds` and `:hashes` are lists (`LLEN`), `:users` is a hash (`HLEN`), `:hosts` and `:completed_tasks` are actual sets (`SCARD`). Check with `redis-cli type <key>` first if unsure. This is baked into the Step 3 snapshot script — swap in the right command per key type.
+- **There is no `ares:op:<op>:creds` key.** It is `:credentials`. Any command built on `:creds` returns an empty/zero result that reads exactly like "no credentials found" — the most expensive false negative in this document's history. Verified against `ares-core/src/state/keys.rs` and the writer verbs in `ares-core/src/state/reader.rs`:
+
+  | Key | Writer verb | TYPE | Count with | Dump with |
+  |---|---|---|---|---|
+  | `:meta` | `hset` | HASH | `HLEN` | `HGETALL` / `HMGET` |
+  | `:credentials` | `hset_nx` | HASH | `HLEN` | `HGETALL` |
+  | `:hashes` | `hset` | HASH | `HLEN` | `HGETALL` |
+  | `:vulns` | `hset_nx` | HASH | `HLEN` | `HGETALL` |
+  | `:completed_tasks` | `hset` | HASH | `HLEN` | `HGETALL` |
+  | `:hosts` | `rpush` | LIST | `LLEN` | `LRANGE k 0 -1` |
+  | `:users` | `rpush` | LIST | `LLEN` | `LRANGE k 0 -1` |
+  | `:timeline` | `rpush` | LIST | `LLEN` | `LRANGE k -50 -1` |
+
+  Wrong verb → `WRONGTYPE`, which is loud. Wrong *key name* → `0`, which is silent. When in doubt: `redis-cli type <key>`.
 
 ## Step 1 — fast triage (Loki, last hour)
 
@@ -221,10 +234,9 @@ err=failed to spawn 'netexec' — is it installed?
 **The canonical wedge is NOT "tokens flatlined" — tokens almost always keep climbing during a wedge because the LLM re-evaluates the same frozen state every tick.** The canonical wedge is "objective state frozen while tokens climb." Probe state, not tokens:
 
 ```bash
-# Snapshot 1 — mind the type-per-key gotcha in Step 0: :creds/:hashes are LISTs, :users is a HASH,
-# :hosts/:completed_tasks are SETs. Wrong command → WRONGTYPE, which reads as "0" if you don't check.
+# Snapshot 1 — verb matches TYPE per the table in Step 0. `credentials` NOT `creds`.
 task ec2:exec EC2_NAME=kali-ares \
-  CMD='redis-cli hmget "ares:op:'"$OP"':meta" has_domain_admin has_golden_ticket target_ips initialized red_completed_at red_blocked_on_blue; echo ---; redis-cli llen "ares:op:'"$OP"':creds" 2>/dev/null; redis-cli llen "ares:op:'"$OP"':hashes" 2>/dev/null; redis-cli hlen "ares:op:'"$OP"':users" 2>/dev/null; redis-cli scard "ares:op:'"$OP"':hosts" 2>/dev/null; redis-cli scard "ares:op:'"$OP"':completed_tasks" 2>/dev/null'
+  CMD='redis-cli hmget "ares:op:'"$OP"':meta" has_domain_admin has_golden_ticket target_ips initialized red_completed_at red_blocked_on_blue; echo ---; for k in credentials hashes vulns completed_tasks; do printf "%s=" "$k"; redis-cli hlen "ares:op:'"$OP"':$k"; done; for k in hosts users timeline; do printf "%s=" "$k"; redis-cli llen "ares:op:'"$OP"':$k"; done'
 # wait 60s
 # Snapshot 2 — same command. Diff the two. Identical = wedge.
 ```
@@ -249,7 +261,7 @@ mcp__grafana__query_loki_logs
 Remedy depends on root cause:
 
 - Hot retry loop on a tool (`clearing dedup for retry`) → fix the dedup/blacklist logic in the relevant `automation/auto_*.rs`; in the meantime `task ec2:stop-op ... LATEST=true` to stop the burn.
-- LLM API stall → restart workers, check the model provider's status: `task ec2:restart EC2_NAME=kali-ares` (preserves Redis state).
+- LLM API stall → check the model provider's status, then restart the orchestrator with `task ec2:restart EC2_NAME=kali-ares` (that is stop+start of `ares-orchestrator.service` and infra only — it preserves Redis but leaves workers untouched; add `task ec2:exec EC2_NAME=kali-ares CMD='systemctl restart "ares@*.service"'` if the workers are the stalled party).
 - State frozen but no signature → escalate to Tempo (Step 7) to find the slow span.
 
 ## Step 3.5 — tool-pruning cascade (recon suddenly does nothing)
@@ -272,7 +284,7 @@ If a bunch of nxc/netexec-backed tools (`nmap_scan`, `enumerate_users`, `enumera
 
 The trap: **one transient spawn failure poisons the tool for the worker's lifetime** — no TTL, no re-probe. Runs whose spawn genuinely failed (a mid-deploy race, an apt lock, an ephemeral cgroup hiccup) leave dead tool entries that persist across every subsequent op the same worker handles.
 
-**And deploys don't restart workers**, so `task ec2:deploy` won't clear the poison. `/proc/<worker-pid>/exe` will point at the pre-deploy inode with `(deleted)` on it (see the Step 8 deploy note).
+**Deploys restart workers only if their units are already `active`** (`.taskfiles/ec2/Taskfile.yaml:255-257`), so `task ec2:deploy` usually clears the poison — but silently skips any worker whose unit is inactive, printing `no ares@ worker units active — skipping restart`. When that happens the worker keeps its poisoned `unavailable_tools` set and `/proc/<worker-pid>/exe` points at the pre-deploy inode with `(deleted)` on it (see the Step 8 deploy note).
 
 **Confirmation & fix:**
 
@@ -283,8 +295,9 @@ task ec2:exec EC2_NAME=kali-ares CMD='systemctl show ares@recon.service -p Activ
 # Verify the binaries actually work from the shell (rules out "genuinely uninstalled")
 task ec2:exec EC2_NAME=kali-ares CMD='which netexec nxc nmap; nxc --version 2>&1 | head -1; nmap --version 2>&1 | head -1'
 
-# If binaries work but pruning still fires → bounce the workers (keeps Redis)
-task ec2:restart EC2_NAME=kali-ares
+# If binaries work but pruning still fires → bounce the WORKER units (keeps Redis).
+# `task ec2:restart` will NOT do this — it never touches ares@ units.
+task ec2:exec EC2_NAME=kali-ares CMD='systemctl restart "ares@*.service"; systemctl is-active "ares@*.service" | sort | uniq -c'
 ```
 
 If the pruning cascade repeats on the very next op with **fresh** workers, the spawn failure is reproducible — probe from inside the worker's cgroup for AppArmor denials, broken Python venvs (nxc/netexec is a pipx shim; `python3 -c 'from nxc.netexec import main'` is a direct test), or `system-ares.slice` restrictions.
@@ -380,10 +393,21 @@ DOCKER_DEFAULT_PLATFORM=linux/amd64 task -y ec2:deploy EC2_NAME=kali-ares S3_BUC
 
 (Both halves rely on the ambient AWS profile resolving `kali-ares` — see the "AWS auth" note above. Drop the `&&` and run just the first half for a deploy-only.)
 
-**After every deploy, restart the workers** — `task ec2:deploy` writes the new binary to `/usr/local/bin/ares` but does NOT restart `ares@<role>.service`. Workers keep running the old in-memory binary (`/proc/<pid>/exe` will show `(deleted)`), and any per-process state (like `unavailable_tools`, see Step 3) survives the deploy. Follow every deploy with:
+**`task ec2:restart` does NOT bounce the workers.** It is `stop` + `start` (`.taskfiles/ec2/Taskfile.yaml`): `stop` stops `ares-orchestrator.service` and `pkill -f "ares orchestrator"`; `start` brings up redis-server, nats-server and postgresql. **Neither touches a single `ares@<role>.service` unit.** Any advice that says otherwise — including older revisions of this file — has you running a command that cannot fix the problem it is prescribed for.
+
+**`task ec2:deploy` already restarts the workers, with one catch.** After installing the binary it runs (`.taskfiles/ec2/Taskfile.yaml:255-257`, and again at `:452-454`):
+
+```sh
+UNITS=$(systemctl list-units --type=service --state=active --no-legend "ares@*.service" | awk '{print $1}' | sort -u)
+if [ -z "$UNITS" ]; then echo "no ares@ worker units active — skipping restart"; else systemctl restart $UNITS; fi
+```
+
+The catch is `--state=active`: a worker that crashed, or one whose unit is loaded-but-inactive, is invisible to that query and silently keeps its stale binary. **`no ares@ worker units active — skipping restart` in deploy output means nothing was restarted.** Read for that line; don't assume the restart happened.
+
+To force every worker unit regardless of state:
 
 ```bash
-task ec2:restart EC2_NAME=kali-ares   # bounces all ares@<role>.service units, keeps Redis
+task ec2:exec EC2_NAME=kali-ares CMD='systemctl restart "ares@*.service"; systemctl is-active "ares@*.service" | sort | uniq -c'
 ```
 
 Faster deploy-only when you don't need to publish to S3 (builds natively on EC2):
@@ -399,7 +423,8 @@ Don't do this until you've captured logs and runtime — these are destructive.
 ```bash
 task ec2:stop-op EC2_NAME=kali-ares LATEST=true   # graceful stop of one op
 task ec2:stop    EC2_NAME=kali-ares                # stop all workers (keeps Redis)
-task ec2:restart EC2_NAME=kali-ares                # restart workers (keeps Redis state)
+task ec2:restart EC2_NAME=kali-ares                # stop+start orchestrator + infra ONLY (keeps Redis; does NOT touch ares@ workers)
+task ec2:exec EC2_NAME=kali-ares CMD='systemctl restart "ares@*.service"'   # the actual worker bounce
 ```
 
 To actually wipe state, use the CLI cleanup command instead of FLUSHALL:

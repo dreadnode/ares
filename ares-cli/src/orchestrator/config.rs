@@ -135,15 +135,18 @@ impl OrchestratorConfig {
                     ic.get("username").and_then(|v| v.as_str()),
                     ic.get("password").and_then(|v| v.as_str()),
                 ) {
-                    (Some(user), Some(pass)) => Some(InitialCredential {
-                        username: user.to_string(),
-                        password: pass.to_string(),
-                        domain: ic
-                            .get("domain")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or(&domain)
-                            .to_string(),
-                    }),
+                    (Some(user), Some(pass)) if !user.is_empty() && !pass.is_empty() => {
+                        Some(InitialCredential {
+                            username: user.to_string(),
+                            password: pass.to_string(),
+                            domain: ic
+                                .get("domain")
+                                .and_then(|v| v.as_str())
+                                .filter(|d| !d.is_empty())
+                                .unwrap_or(&domain)
+                                .to_string(),
+                        })
+                    }
                     _ => None,
                 }
             } else {
@@ -152,11 +155,17 @@ impl OrchestratorConfig {
                     v["initial_username"].as_str(),
                     v["initial_password"].as_str(),
                 ) {
-                    (Some(user), Some(pass)) => Some(InitialCredential {
-                        username: user.to_string(),
-                        password: pass.to_string(),
-                        domain: v["initial_domain"].as_str().unwrap_or(&domain).to_string(),
-                    }),
+                    (Some(user), Some(pass)) if !user.is_empty() && !pass.is_empty() => {
+                        Some(InitialCredential {
+                            username: user.to_string(),
+                            password: pass.to_string(),
+                            domain: v["initial_domain"]
+                                .as_str()
+                                .filter(|d| !d.is_empty())
+                                .unwrap_or(&domain)
+                                .to_string(),
+                        })
+                    }
                     _ => None,
                 }
             };
