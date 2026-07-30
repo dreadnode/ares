@@ -1710,12 +1710,31 @@ mod emit_gmsa_exploit_token {
     }
 
     #[tokio::test]
-    async fn marks_exploited_for_gmsa_principal() {
+    async fn marks_exploited_for_gmsa_principal_read_by_a_gmsa_tool() {
         let state = SharedState::new("op-1".to_string());
         let q = mock_queue();
-        emit_gmsa_exploit_token_if_gmsa(&state, &q, "gmsaDragon$").await;
+        emit_gmsa_exploit_token_if_gmsa(&state, &q, "gmsaDragon$", "gmsa_dump_passwords").await;
         let s = state.read().await;
         assert!(s.exploited_vulnerabilities.contains("gmsa_gmsadragon"));
+    }
+
+    #[tokio::test]
+    async fn marks_exploited_for_bloodyad_managed_password_read() {
+        let state = SharedState::new("op-1".to_string());
+        let q = mock_queue();
+        emit_gmsa_exploit_token_if_gmsa(&state, &q, "gmsaDragon$", "gmsa_read_password_bloodyad")
+            .await;
+        let s = state.read().await;
+        assert!(s.exploited_vulnerabilities.contains("gmsa_gmsadragon"));
+    }
+
+    #[tokio::test]
+    async fn no_op_for_gmsa_hash_arriving_from_dcsync() {
+        let state = SharedState::new("op-1".to_string());
+        let q = mock_queue();
+        emit_gmsa_exploit_token_if_gmsa(&state, &q, "gmsaDragon$", "secretsdump").await;
+        let s = state.read().await;
+        assert!(s.exploited_vulnerabilities.is_empty());
     }
 
     #[tokio::test]
@@ -1723,7 +1742,7 @@ mod emit_gmsa_exploit_token {
         // DC01$ ends with `$` but is not a gMSA — no token should be emitted.
         let state = SharedState::new("op-1".to_string());
         let q = mock_queue();
-        emit_gmsa_exploit_token_if_gmsa(&state, &q, "DC01$").await;
+        emit_gmsa_exploit_token_if_gmsa(&state, &q, "DC01$", "gmsa_dump_passwords").await;
         let s = state.read().await;
         assert!(s.exploited_vulnerabilities.is_empty());
     }
@@ -1732,7 +1751,7 @@ mod emit_gmsa_exploit_token {
     async fn no_op_for_regular_user() {
         let state = SharedState::new("op-1".to_string());
         let q = mock_queue();
-        emit_gmsa_exploit_token_if_gmsa(&state, &q, "alice").await;
+        emit_gmsa_exploit_token_if_gmsa(&state, &q, "alice", "gmsa_dump_passwords").await;
         let s = state.read().await;
         assert!(s.exploited_vulnerabilities.is_empty());
     }
@@ -1741,7 +1760,7 @@ mod emit_gmsa_exploit_token {
     async fn token_normalized_lowercase_for_mixed_case_input() {
         let state = SharedState::new("op-1".to_string());
         let q = mock_queue();
-        emit_gmsa_exploit_token_if_gmsa(&state, &q, "GMSA_WEB$").await;
+        emit_gmsa_exploit_token_if_gmsa(&state, &q, "GMSA_WEB$", "gmsa_dump_passwords").await;
         let s = state.read().await;
         assert!(s.exploited_vulnerabilities.contains("gmsa_gmsa_web"));
     }

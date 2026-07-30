@@ -1078,24 +1078,34 @@ fn gmsa_exploit_token(username: &str) -> String {
     format!("gmsa_{}", username.trim_end_matches('$').to_lowercase())
 }
 
-/// gMSA managed-password recovery side-effect: when secretsdump returns a
-/// Group Managed Service Account hash (account ends with `$` and name
-/// contains "gmsa"), credit the gMSA primitive even though we never went
-/// through `auto_gmsa_extraction`. Without this, gMSA hashes captured
-/// incidentally via DCSync never emit a `gmsa_*` token to the exploited
-/// set and the scoreboard understates progress.
+/// True when `source` names a tool that actually reads a gMSA managed
+/// password (`gmsa_dump_passwords`, `gmsa_read_password_bloodyad`) rather
+/// than a tool that merely returns the account's NTLM hash as a byproduct.
+fn is_gmsa_read_source(source: &str) -> bool {
+    source.to_lowercase().contains("gmsa")
+}
+
+/// gMSA managed-password recovery side-effect: credit the gMSA primitive
+/// when a managed-password read actually produced the material.
 ///
-/// No-op for non-gMSA usernames. Errors from `mark_exploited` are logged
-/// but not propagated — credit emission is best-effort and shouldn't
-/// fail the surrounding hash-publish flow.
+/// Requires BOTH a gMSA-looking principal AND a producing tool that reads
+/// managed passwords. A DCSync of the domain returns every gMSA account's
+/// NTLM hash as ordinary NTDS loot; crediting that as a gMSA read marks the
+/// primitive exploited on operations that never attempted it, which is the
+/// same precondition-as-outcome error `seimpersonate` was corrected for.
+///
+/// No-op otherwise. Errors from `mark_exploited` are logged but not
+/// propagated — credit emission is best-effort and shouldn't fail the
+/// surrounding hash-publish flow.
 async fn emit_gmsa_exploit_token_if_gmsa<C>(
     state: &SharedState,
     queue: &TaskQueueCore<C>,
     username: &str,
+    source: &str,
 ) where
     C: ConnectionLike + Clone + Send + Sync + 'static,
 {
-    if !is_gmsa_principal(username) {
+    if !is_gmsa_principal(username) || !is_gmsa_read_source(source) {
         return;
     }
     let vuln_id = gmsa_exploit_token(username);
@@ -1109,7 +1119,7 @@ async fn emit_gmsa_exploit_token_if_gmsa<C>(
         info!(
             vuln_id = %vuln_id,
             account = %username,
-            "gMSA hash captured via secretsdump — emitted exploit token"
+            "gMSA managed password read — emitted exploit token"
         );
     }
 }
@@ -2320,8 +2330,13 @@ pub(crate) async fn extract_discoveries(
                 )
                 .await;
 
-                emit_gmsa_exploit_token_if_gmsa(&dispatcher.state, &dispatcher.queue, &username)
-                    .await;
+                emit_gmsa_exploit_token_if_gmsa(
+                    &dispatcher.state,
+                    &dispatcher.queue,
+                    &username,
+                    &source,
+                )
+                .await;
 
                 // AS-REP / Kerberoast primitive credit on hash capture.
                 // dreadgoad's scoreboard otherwise infers `asrep_roast` /

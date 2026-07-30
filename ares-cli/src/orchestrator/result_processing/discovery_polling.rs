@@ -13,6 +13,7 @@ use ares_core::models::{Credential, Hash, Host, Share, TrustInfo, User, Vulnerab
 
 use super::parsing::resolve_parent_id;
 use super::reconcile_low_trust_credential_domain;
+use super::timeline::create_hash_timeline_event;
 use super::LOCKOUT_PATTERNS;
 use crate::orchestrator::dispatcher::Dispatcher;
 
@@ -33,7 +34,7 @@ pub async fn discovery_poller(dispatcher: Arc<Dispatcher>, mut shutdown: watch::
     }
 }
 
-async fn poll_discoveries(dispatcher: &Dispatcher) -> Result<()> {
+async fn poll_discoveries(dispatcher: &Arc<Dispatcher>) -> Result<()> {
     let key = dispatcher.state.discovery_key().await;
     let mut conn = dispatcher.queue.connection();
     let discoveries: Vec<String> = conn.lrange(&key, 0, -1).await.unwrap_or_default();
@@ -128,7 +129,25 @@ async fn poll_discoveries(dispatcher: &Dispatcher) -> Result<()> {
                         hash.attack_step = step;
                         drop(state);
                     }
-                    let _ = dispatcher.state.publish_hash(&dispatcher.queue, hash).await;
+                    let username = hash.username.clone();
+                    let domain = hash.domain.clone();
+                    let hash_type = hash.hash_type.clone();
+                    let hash_value = hash.hash_value.clone();
+                    let source = hash.source.clone();
+                    if matches!(
+                        dispatcher.state.publish_hash(&dispatcher.queue, hash).await,
+                        Ok(true)
+                    ) {
+                        create_hash_timeline_event(
+                            dispatcher,
+                            &username,
+                            &domain,
+                            &hash_type,
+                            &hash_value,
+                            &source,
+                        )
+                        .await;
+                    }
                 }
             }
             "vulnerability" | "delegation" => {
