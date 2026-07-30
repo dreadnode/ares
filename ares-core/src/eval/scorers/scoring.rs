@@ -6,7 +6,7 @@ use regex::Regex;
 
 use crate::eval::ground_truth::{EvaluationGroundTruth, ExpectedIOC, ExpectedTechnique};
 
-use super::types::{EvidenceItem, InvestigationSnapshot};
+use super::types::{EvidenceItem, InvestigationSnapshot, TimelineEvent};
 
 /// Kill-chain phases of an Active Directory attack, in order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -331,9 +331,46 @@ fn evidence_is_grounded(ev: &EvidenceItem, gt: &EvaluationGroundTruth) -> bool {
         .any(|t| t.matches(&ev.value) || ev.mitre_techniques.iter().any(|m| t.matches(m)))
 }
 
+/// Whether a timeline event is corroborated by something the investigation
+/// actually observed — the timeline analogue of [`evidence_is_grounded`].
+///
+/// Timeline descriptions are agent-authored prose, and event matching is a
+/// fuzzy word-overlap against the expected pattern. Ungated, that pays a
+/// verbose model for writing more words: describe every phase in enough detail
+/// and the overlap threshold is met with no additional grounding, while
+/// `score_evidence_quality` — the same scorer's other half — filters through
+/// `evidence_is_grounded`. This closes that asymmetry on the scoring side
+/// rather than on the write path, because the timeline is the deliberate
+/// channel for *derived* identities that appear verbatim in no log line.
+///
+/// An event counts when it is machine-produced, when it carries a MITRE tag
+/// that grounded evidence also carries, or when its prose names a value from
+/// grounded evidence.
+fn timeline_event_is_grounded(
+    ev: &TimelineEvent,
+    grounded_values: &HashSet<String>,
+    grounded_techniques: &HashSet<String>,
+) -> bool {
+    if ev.machine_generated {
+        return true;
+    }
+    if ev
+        .mitre_techniques
+        .iter()
+        .any(|t| grounded_techniques.contains(&t.to_uppercase()))
+    {
+        return true;
+    }
+    let description = ev.description.to_lowercase();
+    grounded_values
+        .iter()
+        .any(|v| !v.is_empty() && description.contains(v.as_str()))
+}
+
 /// Score timeline accuracy.
 ///
-/// 60% event matching, 40% technique association in timeline.
+/// 60% event matching, 40% technique association in timeline. Only grounded
+/// events are scored — see [`timeline_event_is_grounded`].
 pub fn score_timeline_accuracy(snap: &InvestigationSnapshot, gt: &EvaluationGroundTruth) -> f64 {
     if gt.expected_timeline.is_empty() {
         return 1.0;
@@ -342,14 +379,34 @@ pub fn score_timeline_accuracy(snap: &InvestigationSnapshot, gt: &EvaluationGrou
         return 0.0;
     }
 
-    let descriptions: Vec<String> = snap
+    let mut grounded_values: HashSet<String> = HashSet::new();
+    let mut grounded_techniques: HashSet<String> = HashSet::new();
+    for ev in snap
+        .evidence_values
+        .iter()
+        .filter(|ev| evidence_is_grounded(ev, gt))
+    {
+        grounded_values.insert(ev.value.to_lowercase());
+        grounded_techniques.extend(ev.mitre_techniques.iter().map(|t| t.to_uppercase()));
+    }
+    expand_aliases(&mut grounded_values, gt);
+
+    let grounded: Vec<&TimelineEvent> = snap
         .timeline
+        .iter()
+        .filter(|e| timeline_event_is_grounded(e, &grounded_values, &grounded_techniques))
+        .collect();
+    if grounded.is_empty() {
+        return 0.0;
+    }
+
+    let descriptions: Vec<String> = grounded
         .iter()
         .map(|e| e.description.to_lowercase())
         .collect();
 
     let mut found_techniques: HashSet<String> = HashSet::new();
-    for event in &snap.timeline {
+    for event in &grounded {
         found_techniques.extend(event.mitre_techniques.iter().cloned());
     }
 
@@ -850,6 +907,7 @@ mod tests {
         snap.timeline.push(TimelineEvent {
             description: "credential dump via secretsdump".into(),
             mitre_techniques: HashSet::new(),
+            machine_generated: true,
         });
 
         let mut gt = empty_gt();
@@ -861,6 +919,83 @@ mod tests {
         }];
 
         assert_abs_diff_eq!(score_timeline_accuracy(&snap, &gt), 1.0, epsilon = 0.001);
+    }
+
+    /// Prose alone earns nothing. Event matching is a fuzzy word overlap, so an
+    /// ungated timeline pays a model for describing the attack it was told to
+    /// look for — with no evidence, no technique tag, and nothing observed.
+    #[test]
+    fn timeline_accuracy_ignores_ungrounded_agent_prose() {
+        let mut snap = empty_snap();
+        snap.timeline.push(TimelineEvent {
+            description: "credential dump via secretsdump".into(),
+            mitre_techniques: HashSet::new(),
+            machine_generated: false,
+        });
+
+        let mut gt = empty_gt();
+        gt.expected_timeline = vec![ExpectedTimelineEvent {
+            description_pattern: "credential dump".into(),
+            mitre_techniques: vec![],
+            timestamp_range: None,
+            required: true,
+        }];
+
+        assert_abs_diff_eq!(score_timeline_accuracy(&snap, &gt), 0.0, epsilon = 0.001);
+    }
+
+    /// The same prose counts once the investigation holds grounded evidence
+    /// carrying the event's technique — the corroboration
+    /// `score_evidence_quality` already demands of its own half of the scorer.
+    #[test]
+    fn timeline_accuracy_credits_prose_backed_by_grounded_evidence() {
+        let mut snap = empty_snap();
+        let mut ev = make_evidence("technique", "T1003", 6, 0.9, true);
+        ev.mitre_techniques = vec!["T1003".into()];
+        snap.evidence_values.push(ev);
+        snap.timeline.push(TimelineEvent {
+            description: "credential dump via secretsdump".into(),
+            mitre_techniques: HashSet::from(["T1003".to_string()]),
+            machine_generated: false,
+        });
+
+        let mut gt = empty_gt();
+        gt.expected_techniques = vec![make_technique("T1003", true)];
+        gt.expected_timeline = vec![ExpectedTimelineEvent {
+            description_pattern: "credential dump".into(),
+            mitre_techniques: vec![],
+            timestamp_range: None,
+            required: true,
+        }];
+
+        assert_abs_diff_eq!(score_timeline_accuracy(&snap, &gt), 1.0, epsilon = 0.001);
+    }
+
+    /// A technique tag ground truth does not recognise is not grounding: the
+    /// evidence carrying it fails `evidence_is_grounded`, so the timeline event
+    /// it would have corroborated stays uncounted.
+    #[test]
+    fn timeline_accuracy_rejects_corroboration_from_ungrounded_evidence() {
+        let mut snap = empty_snap();
+        let mut ev = make_evidence("technique", "T1590", 6, 0.9, true);
+        ev.mitre_techniques = vec!["T1590".into()];
+        snap.evidence_values.push(ev);
+        snap.timeline.push(TimelineEvent {
+            description: "credential dump via secretsdump".into(),
+            mitre_techniques: HashSet::from(["T1590".to_string()]),
+            machine_generated: false,
+        });
+
+        let mut gt = empty_gt();
+        gt.expected_techniques = vec![make_technique("T1003", true)];
+        gt.expected_timeline = vec![ExpectedTimelineEvent {
+            description_pattern: "credential dump".into(),
+            mitre_techniques: vec![],
+            timestamp_range: None,
+            required: true,
+        }];
+
+        assert_abs_diff_eq!(score_timeline_accuracy(&snap, &gt), 0.0, epsilon = 0.001);
     }
 
     #[test]
@@ -1152,6 +1287,7 @@ mod tests {
         snap.timeline.push(TimelineEvent {
             description: "credential dump via secretsdump".into(),
             mitre_techniques: HashSet::new(),
+            machine_generated: true,
         });
         let mut gt = empty_gt();
         gt.expected_iocs = vec![make_ioc("ip", "192.168.58.1", true)];
@@ -1199,6 +1335,7 @@ mod tests {
         snap.timeline.push(TimelineEvent {
             description: "credential dump via secretsdump".into(),
             mitre_techniques: HashSet::from(["T1003".to_string()]),
+            machine_generated: true,
         });
         let mut gt = empty_gt();
         gt.expected_iocs = vec![

@@ -18,6 +18,8 @@ use crate::orchestrator::state::{canonicalize_domain_label, StateInner};
 /// dead DC cannot stall a whole `auto_trust_follow` pass.
 const LSAQUERY_TIMEOUT: Duration = Duration::from_secs(20);
 
+pub(crate) const GOLDEN_TICKET_DISPATCHED: &str = "golden_ticket_dispatched";
+
 /// Collect the set of domains that have a captured `krbtgt` hash but no
 /// successful golden-ticket forge yet. Returns lowercased domain names in
 /// the same order that `state.hashes` traverses (deterministic per snapshot).
@@ -56,6 +58,9 @@ pub(crate) fn collect_pending_golden_ticket_domains(state: &StateInner) -> Vec<S
         }
         let vuln_id = format!("golden_ticket_{domain}");
         if state.exploited_vulnerabilities.contains(&vuln_id) {
+            continue;
+        }
+        if state.is_processed(GOLDEN_TICKET_DISPATCHED, &domain) {
             continue;
         }
         out.push(domain);
@@ -308,15 +313,16 @@ async fn try_forge_golden_ticket(dispatcher: &Arc<Dispatcher>, domain: &str) {
     {
         Ok(Some(task_id)) => {
             info!(task_id = %task_id, domain = %domain, "Golden ticket task dispatched");
-            // Mark per-domain immediately to prevent re-dispatch on the
-            // next 30s tick. Result processing also confirms on task
-            // completion (detects "Saving ticket in *.ccache" in output).
+            {
+                let mut state = dispatcher.state.write().await;
+                state.mark_processed(GOLDEN_TICKET_DISPATCHED, domain.to_string());
+            }
             if let Err(e) = dispatcher
                 .state
-                .set_golden_ticket(&dispatcher.queue, domain)
+                .persist_dedup(&dispatcher.queue, GOLDEN_TICKET_DISPATCHED, domain)
                 .await
             {
-                warn!(err = %e, "Failed to set golden ticket flag after dispatch");
+                warn!(err = %e, "Failed to persist golden ticket dispatch marker");
             }
         }
         Ok(None) => {}
@@ -552,6 +558,28 @@ mod tests {
         let v = collect_pending_golden_ticket_domains(&s);
         assert_eq!(v.len(), 1);
         assert_eq!(v[0], "contoso.local");
+    }
+
+    #[test]
+    fn collect_pending_skips_dispatched_domain_without_marking_it_exploited() {
+        let mut s = StateInner::new("op-test".into());
+        s.has_domain_admin = true;
+        s.hashes.push(krbtgt_hash(
+            "contoso.local",
+            "31d6cfe0d16ae931b73c59d7e0c089c0",
+        ));
+        assert_eq!(
+            collect_pending_golden_ticket_domains(&s),
+            vec!["contoso.local"]
+        );
+
+        s.mark_processed(GOLDEN_TICKET_DISPATCHED, "contoso.local".into());
+
+        assert!(collect_pending_golden_ticket_domains(&s).is_empty());
+        assert!(!s.has_golden_ticket);
+        assert!(!s
+            .exploited_vulnerabilities
+            .contains("golden_ticket_contoso.local"));
     }
 
     #[test]

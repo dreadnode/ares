@@ -11,7 +11,7 @@ mod util;
 #[cfg(feature = "blue")]
 pub use blue::{
     BlueTaskInfo, Evidence, InvestigationStage, LateralMovement, PyramidLevel, SharedBlueTeamState,
-    TimelineEvent, TriageDecision, TriageRecord,
+    TimelineEvent, TriageDecision, TriageRecord, SWEEP_TIMELINE_SOURCE,
 };
 pub use core::{
     is_always_disabled_account, CandidateDomain, Credential, DomainEvidence,

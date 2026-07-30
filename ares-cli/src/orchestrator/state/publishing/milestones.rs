@@ -83,12 +83,10 @@ impl SharedState {
         let _ = self.mark_exploited(queue, &vuln_id).await;
 
         // Emit a timeline event tagged with T1558.001 so the blue-team alert's
-        // `techniques_used` includes Golden Ticket. Without this, the automation
-        // path (`automation/golden_ticket.rs`) races the tool-result path
-        // (`result_processing/admin_checks.rs`) — the automation calls this
-        // function first, `mark_exploited` fires above, and by the time the
-        // tool result comes back, `admin_checks` sees the vuln already exploited
-        // and short-circuits before emitting the technique.
+        // `techniques_used` includes Golden Ticket. This function is the sole
+        // emitter: it is reached only from the evidence-gated confirmation in
+        // `result_processing/admin_checks.rs`, which requires both a ccache
+        // marker in tool output and a krbtgt hash for the domain.
         let event_id = format!("evt-gt-{}", &uuid::Uuid::new_v4().simple().to_string()[..8]);
         let techniques = vec!["T1558.001".to_string()];
         let event = serde_json::json!({

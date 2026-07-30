@@ -125,6 +125,7 @@ pub async fn run_detection_query_events(
                 super::super::evidence_validator::CATALOG_QUERY_SOURCE_PREFIX
             ),
         );
+        super::super::evidence_validator::register_grounded_technique(tmpl.mitre_id);
     }
 
     let mut hosts: Vec<String> = entries

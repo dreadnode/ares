@@ -2,7 +2,7 @@
 
 use std::collections::HashSet;
 
-use crate::models::SharedBlueTeamState;
+use crate::models::{SharedBlueTeamState, SWEEP_TIMELINE_SOURCE};
 
 /// Input for scoring functions: investigation evidence data extracted from state.
 #[derive(Debug, Clone, Default)]
@@ -58,6 +58,7 @@ impl InvestigationSnapshot {
             .map(|e| TimelineEvent {
                 description: e.description.clone(),
                 mitre_techniques: e.mitre_techniques.iter().cloned().collect(),
+                machine_generated: e.source.starts_with(SWEEP_TIMELINE_SOURCE),
             })
             .collect();
         for e in &state.evidence {
@@ -74,6 +75,7 @@ impl InvestigationSnapshot {
                 timeline.push(TimelineEvent {
                     description,
                     mitre_techniques: e.mitre_techniques.iter().cloned().collect(),
+                    machine_generated: false,
                 });
             }
         }
@@ -84,6 +86,7 @@ impl InvestigationSnapshot {
                     l.user, l.source_host, l.destination_host, l.method
                 ),
                 mitre_techniques: std::iter::once("T1021".to_string()).collect(),
+                machine_generated: true,
             });
         }
 
@@ -117,6 +120,11 @@ pub struct EvidenceItem {
 pub struct TimelineEvent {
     pub description: String,
     pub mitre_techniques: HashSet<String>,
+    /// True when the event was produced by code rather than written by the
+    /// agent — the deterministic detection sweep, or a record this snapshot
+    /// derived from a lateral-movement connection. Agent-authored prose has to
+    /// earn its credit by corroboration; see `timeline_event_is_grounded`.
+    pub machine_generated: bool,
 }
 
 #[cfg(test)]

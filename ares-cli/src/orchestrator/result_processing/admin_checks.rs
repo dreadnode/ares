@@ -251,21 +251,6 @@ pub(crate) async fn check_golden_ticket_completion(
     {
         warn!(err = %e, "Failed to set golden ticket flag");
     }
-
-    // Emit attack path timeline event for golden ticket
-    let techniques = vec!["T1558.001".to_string()];
-    let event_id = format!("evt-gt-{}", &uuid::Uuid::new_v4().simple().to_string()[..8]);
-    let event = serde_json::json!({
-        "id": event_id,
-        "timestamp": chrono::Utc::now().to_rfc3339(),
-        "source": "golden_ticket",
-        "description": format!("Golden ticket forged for domain {domain}"),
-        "mitre_techniques": techniques,
-    });
-    let _ = dispatcher
-        .state
-        .persist_timeline_event(&dispatcher.queue, &event, &techniques)
-        .await;
 }
 
 pub(crate) async fn detect_and_upgrade_admin_credentials(text: &str, dispatcher: &Arc<Dispatcher>) {

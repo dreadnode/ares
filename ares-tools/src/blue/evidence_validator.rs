@@ -43,6 +43,7 @@ struct StoredQueryResult {
 struct ValidatorState {
     results: VecDeque<StoredQueryResult>,
     counter: u32,
+    grounded_techniques: HashSet<String>,
 }
 
 fn state() -> &'static Mutex<ValidatorState> {
@@ -51,8 +52,39 @@ fn state() -> &'static Mutex<ValidatorState> {
         Mutex::new(ValidatorState {
             results: VecDeque::with_capacity(MAX_STORED_RESULTS),
             counter: 0,
+            grounded_techniques: HashSet::new(),
         })
     })
+}
+
+/// Returns true when `value` has the shape of a MITRE technique ID.
+pub fn is_technique_id(value: &str) -> bool {
+    let lower = value.to_lowercase();
+    lower.starts_with('t') && lower.len() >= 5 && lower[1..5].chars().all(|c| c.is_ascii_digit())
+}
+
+/// Mark a technique as observed rather than asserted.
+///
+/// Called when a catalog detection template returns events, and when an
+/// evidence value that passed query grounding carries the technique as a tag.
+/// Until a technique is registered here, [`validate_evidence_value`] refuses it
+/// — otherwise any `T####`-shaped string would validate with no query behind it,
+/// which is the one gap that let an agent self-award technique coverage from a
+/// cold start.
+pub fn register_grounded_technique(technique_id: &str) {
+    if !is_technique_id(technique_id) {
+        return;
+    }
+    let mut st = state().lock().unwrap();
+    st.grounded_techniques
+        .insert(technique_id.to_lowercase().trim().to_string());
+}
+
+/// Whether `technique_id` has been observed by a query or a grounded evidence tag.
+pub fn technique_is_grounded(technique_id: &str) -> bool {
+    let normalized = technique_id.to_lowercase().trim().to_string();
+    let st = state().lock().unwrap();
+    st.grounded_techniques.contains(&normalized)
 }
 
 fn ipv4_re() -> &'static Regex {
@@ -287,13 +319,12 @@ pub fn store_query_result_from(result_text: &str, source: &str) -> String {
 /// Check if an evidence value was seen in any recent query result.
 ///
 /// Returns `(validated, provenance)`. Provenance is `None` for MITRE technique
-/// IDs, which auto-validate and belong to no particular query.
+/// IDs, which belong to no particular query; they validate only once registered
+/// as grounded by [`register_grounded_technique`].
 pub fn validate_evidence_value(value: &str) -> (bool, Option<QueryProvenance>) {
-    // MITRE technique IDs are always valid
     let lower = value.to_lowercase();
-    if lower.starts_with('t') && lower.len() >= 5 && lower[1..5].chars().all(|c| c.is_ascii_digit())
-    {
-        return (true, None);
+    if is_technique_id(value) {
+        return (technique_is_grounded(value), None);
     }
 
     let normalized = lower.trim().to_string();
@@ -447,8 +478,29 @@ mod tests {
 
     #[test]
     fn validate_mitre_technique() {
+        register_grounded_technique("T1003.006");
         let (valid, _) = validate_evidence_value("T1003.006");
         assert!(valid);
+    }
+
+    #[test]
+    fn unregistered_technique_is_rejected() {
+        assert!(!technique_is_grounded("T9042"));
+        let (valid, _) = validate_evidence_value("T9042");
+        assert!(
+            !valid,
+            "a T#### string must not validate before any query observed it"
+        );
+    }
+
+    #[test]
+    fn fabricated_ioc_is_rejected() {
+        let (valid, prov) = validate_evidence_value("192.168.58.253");
+        assert!(
+            !valid,
+            "a value that appeared in no query result must be refused"
+        );
+        assert!(prov.is_none());
     }
 
     #[test]
@@ -509,8 +561,16 @@ mod tests {
     /// inherit an unrelated query's source.
     #[test]
     fn a_mitre_id_has_no_query_provenance() {
+        register_grounded_technique("T1558.001");
         let (valid, prov) = validate_evidence_value("T1558.001");
         assert!(valid);
         assert!(prov.is_none());
+    }
+
+    #[test]
+    fn grounded_technique_registration_is_case_insensitive() {
+        register_grounded_technique("T1550.002");
+        assert!(technique_is_grounded("t1550.002"));
+        assert!(technique_is_grounded("T1550.002"));
     }
 }

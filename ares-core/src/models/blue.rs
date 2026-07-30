@@ -5,6 +5,13 @@ use std::collections::HashMap;
 
 use super::util::{default_blue_task_status, default_confidence, default_timeline_source};
 
+/// Prefix on the `source` of every timeline event written by the deterministic
+/// detection sweep, either bare or as `detection_sweep:<rule>`.
+///
+/// Scoring keys machine-produced events off this, so the sweep's writer and the
+/// scorer must agree on the literal — hence one const rather than two copies.
+pub const SWEEP_TIMELINE_SOURCE: &str = "detection_sweep";
+
 /// Levels of the Pyramid of Pain.
 ///
 /// Higher levels are harder for adversaries to change.

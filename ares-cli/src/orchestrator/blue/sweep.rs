@@ -32,9 +32,10 @@ use std::time::Duration;
 
 use serde_json::json;
 use tokio::sync::Semaphore;
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 use ares_core::detection::detection_config;
+use ares_core::models::SWEEP_TIMELINE_SOURCE;
 
 /// Default max concurrent Loki detection queries during the sweep. Loki through
 /// the Grafana proxy is the bottleneck (~25-40s/query); a handful in flight
@@ -531,6 +532,11 @@ pub(crate) struct SweepOutcome {
     pub failed: Vec<String>,
     /// Templates the time cap prevented from running (empty on a clean finish).
     pub not_run: Vec<String>,
+    /// `template/tool` pairs whose blue-state write was refused or errored.
+    /// A detection listed in `fired` whose write appears here did NOT become
+    /// coverage, so the sweep's own report would otherwise overstate what the
+    /// scorecard can see.
+    pub rejected_writes: Vec<String>,
     pub timed_out: bool,
     /// Golden-ticket correlation result; `None` when it was disabled.
     pub golden_ticket: Option<TicketOutcome>,
@@ -607,6 +613,17 @@ impl SweepOutcome {
                     .map(|f| format!("{} [{}]", f.mitre_id, f.template))
                     .collect::<Vec<_>>()
                     .join(", ")
+            ));
+        }
+
+        if !self.rejected_writes.is_empty() {
+            s.push_str(&format!(
+                "WARNING — {} sweep state write(s) were REJECTED, so the detections they carried \
+                 are NOT recorded as evidence or techniques despite being listed as FIRED above. \
+                 Re-record these yourself with add_technique / add_evidence, or they will be \
+                 missing from coverage entirely: {}\n\n",
+                self.rejected_writes.len(),
+                self.rejected_writes.join(", ")
             ));
         }
 
@@ -946,8 +963,9 @@ pub(crate) async fn run_detection_sweep(
     // Record every hit into blue state (sequential, cheap: a few Redis writes
     // each). Deduped by the underlying tools, so overlap with the LLM's own
     // later recording is harmless.
+    let mut rejected_writes = Vec::new();
     for f in &fired {
-        record_fired(investigation_id, f).await;
+        rejected_writes.extend(record_fired(investigation_id, f).await);
     }
 
     for (rule, outcome) in [
@@ -955,8 +973,18 @@ pub(crate) async fn run_detection_sweep(
         (&SILVER_TICKET_RULE, &silver_ticket),
     ] {
         if let Some(TicketOutcome::Correlated(c)) = outcome {
-            record_orphan_accounts(investigation_id, rule, &c.orphans).await;
+            rejected_writes
+                .extend(record_orphan_accounts(investigation_id, rule, &c.orphans).await);
         }
+    }
+
+    if !rejected_writes.is_empty() {
+        error!(
+            investigation_id,
+            rejected = rejected_writes.len(),
+            writes = %rejected_writes.join(", "),
+            "Sweep detections did not reach blue state — coverage is lower than this sweep reports"
+        );
     }
 
     let no_match: Vec<String> = completed
@@ -1003,6 +1031,7 @@ pub(crate) async fn run_detection_sweep(
         no_match,
         failed,
         not_run,
+        rejected_writes,
         timed_out,
         golden_ticket,
         silver_ticket,
@@ -1113,8 +1142,17 @@ async fn record_recheck(
                 "Forged-ticket correlation found a forgery on the closing re-check \
                  (the opening sweep ran before this activity was logged)"
             );
-            record_fired(investigation_id, &f).await;
-            record_orphan_accounts(investigation_id, rule, &c.orphans).await;
+            let mut rejected = record_fired(investigation_id, &f).await;
+            rejected.extend(record_orphan_accounts(investigation_id, rule, &c.orphans).await);
+            if !rejected.is_empty() {
+                error!(
+                    investigation_id,
+                    rule = rule.source,
+                    writes = %rejected.join(", "),
+                    "Closing re-check found a forgery but its state writes were refused — \
+                     the detection will not appear as coverage"
+                );
+            }
         }
     }
 
@@ -1146,19 +1184,31 @@ fn ticket_log_value(outcome: &Option<TicketOutcome>) -> String {
     }
 }
 
-/// Dispatch a blue-state write and log whatever went wrong.
+/// Dispatch a blue-state write, returning whether it landed.
 ///
 /// `dispatch_blue` reports a *rejected* write as `Ok(ToolOutput { success:
 /// false })`; only transport-level problems come back as `Err`. Matching on
 /// `Err` alone therefore swallows exactly the failures worth knowing about —
 /// a validation or grounding refusal looks identical to success.
-async fn record_state(context: &str, tool: &str, args: &serde_json::Value) {
+///
+/// A refusal is logged at `error!` and reported to the caller rather than
+/// absorbed here. These writes are how a sweep-confirmed detection becomes
+/// coverage: when one is refused the technique is gone from the scorecard while
+/// the sweep still reports it as fired. Any future tightening of the grounding
+/// gate would otherwise degrade coverage with nothing failing — which is how a
+/// grounded-technique change came within one edit of deleting the golden- and
+/// silver-ticket detections silently.
+async fn record_state(context: &str, tool: &str, args: &serde_json::Value) -> bool {
     match ares_tools::blue::dispatch_blue(tool, args).await {
         Ok(o) if !o.success => {
-            warn!(context, tool, reason = %o.stderr, "Blue state write rejected");
+            error!(context, tool, reason = %o.stderr, "Blue state write REJECTED — detection will not appear as coverage");
+            false
         }
-        Err(e) => warn!(context, tool, error = %e, "Blue state write failed"),
-        Ok(_) => {}
+        Err(e) => {
+            error!(context, tool, error = %e, "Blue state write FAILED — detection will not appear as coverage");
+            false
+        }
+        Ok(_) => true,
     }
 }
 
@@ -1175,8 +1225,8 @@ async fn record_state(context: &str, tool: &str, args: &serde_json::Value) {
 /// would be silently rejected, and satisfying the check by injecting a
 /// synthetic query result would hollow out a safeguard that exists to stop
 /// fabricated IOCs. The technique-level record in [`record_fired`] already
-/// carries the rule's MITRE ID (its value is the ID, which auto-grounds); this
-/// adds the names an analyst needs to pivot on.
+/// carries the rule's MITRE ID (grounded there by the fired detection itself);
+/// this adds the names an analyst needs to pivot on.
 ///
 /// The enumeration is capped, and the cap is logged rather than applied
 /// silently — a truncated list that looks complete would understate the blast
@@ -1185,9 +1235,9 @@ async fn record_orphan_accounts(
     investigation_id: &str,
     rule: &TicketRule,
     orphans: &[OrphanAccount],
-) {
+) -> Vec<String> {
     if orphans.is_empty() {
-        return;
+        return Vec::new();
     }
     if orphans.len() > MAX_REPORTED_ORPHANS {
         warn!(
@@ -1210,7 +1260,7 @@ async fn record_orphan_accounts(
         String::new()
     };
 
-    record_state(
+    let recorded = record_state(
         rule.source,
         "record_timeline_event",
         &json!({
@@ -1225,19 +1275,31 @@ async fn record_orphan_accounts(
             ),
             "timestamp": chrono::Utc::now().to_rfc3339(),
             "mitre_techniques": [rule.mitre_id],
-            "source": format!("detection_sweep:{}", rule.source),
+            "source": format!("{SWEEP_TIMELINE_SOURCE}:{}", rule.source),
             "confidence": 0.9,
         }),
     )
     .await;
+
+    if recorded {
+        Vec::new()
+    } else {
+        vec![format!("{}/record_timeline_event", rule.source)]
+    }
 }
 
 /// Record a fired detection as blue-team state: a MITRE technique (for coverage
 /// scoring + the report technique table), a TTP-level evidence item (for
 /// evidence count, pyramid, precision, and evidence-based chaining), and a
-/// timeline event (for the narrative + timeline scoring). The evidence value is
-/// the MITRE ID, which auto-validates the grounding check.
-async fn record_fired(investigation_id: &str, f: &FiredDetection) {
+/// timeline event (for the narrative + timeline scoring).
+///
+/// The evidence value is the MITRE ID, which grounds only once registered. This
+/// function is the single funnel for every sweep-confirmed detection — catalog
+/// templates and the Rust-side ticket correlations alike — so it registers here
+/// rather than relying on the catalog runner, which the correlation rules never
+/// go through.
+async fn record_fired(investigation_id: &str, f: &FiredDetection) -> Vec<String> {
+    ares_tools::blue::evidence_validator::register_grounded_technique(&f.mitre_id);
     let confidence = confidence_for_severity(&f.severity);
     let observed_at = f
         .first_event_at
@@ -1259,7 +1321,7 @@ async fn record_fired(investigation_id: &str, f: &FiredDetection) {
                 "investigation_id": investigation_id,
                 "evidence_type": evidence_type_for_tactic(&f.tactic),
                 "value": f.mitre_id,
-                "source": format!("detection_sweep:{}", f.template),
+                "source": format!("{SWEEP_TIMELINE_SOURCE}:{}", f.template),
                 "confidence": confidence,
                 "pyramid_level": "ttps",
                 "mitre_techniques": [f.mitre_id],
@@ -1279,15 +1341,19 @@ async fn record_fired(investigation_id: &str, f: &FiredDetection) {
                 ),
                 "timestamp": observed_at,
                 "mitre_techniques": [f.mitre_id],
-                "source": "detection_sweep",
+                "source": SWEEP_TIMELINE_SOURCE,
                 "confidence": confidence,
             }),
         ),
     ];
 
+    let mut rejected = Vec::new();
     for (tool, args) in calls {
-        record_state(&f.template, tool, &args).await;
+        if !record_state(&f.template, tool, &args).await {
+            rejected.push(format!("{}/{tool}", f.template));
+        }
     }
+    rejected
 }
 
 /// Render a detection's observed event window and hosts for the timeline
@@ -1562,6 +1628,7 @@ mod tests {
             no_match: vec!["detect_golden_ticket".into()],
             failed: vec![],
             not_run: vec![],
+            rejected_writes: vec![],
             timed_out: false,
             golden_ticket: None,
             silver_ticket: None,
@@ -1573,6 +1640,24 @@ mod tests {
         assert!(s.contains("ALREADY"));
         // Clean finish → no "time cap" note.
         assert!(!s.contains("time cap"));
+        // Nothing was refused, so the summary must not manufacture a warning.
+        assert!(!s.contains("REJECTED"));
+    }
+
+    /// A refused state write means the detection never became coverage, while
+    /// the sweep still lists it as FIRED. Saying so in the prompt is the point:
+    /// the refusal is otherwise invisible to everything downstream, which is how
+    /// a tightened grounding gate can delete detections with nothing failing.
+    #[test]
+    fn prompt_summary_flags_rejected_state_writes() {
+        let outcome = SweepOutcome {
+            templates_total: 1,
+            rejected_writes: vec!["detect_dcsync/add_technique".into()],
+            ..Default::default()
+        };
+        let s = outcome.prompt_summary();
+        assert!(s.contains("REJECTED"));
+        assert!(s.contains("detect_dcsync/add_technique"));
     }
 
     #[test]
@@ -1584,6 +1669,7 @@ mod tests {
             no_match: vec![],
             failed: vec![],
             not_run: vec!["detect_esc1_attack".into()],
+            rejected_writes: vec![],
             timed_out: true,
             golden_ticket: None,
             silver_ticket: None,
@@ -1607,6 +1693,7 @@ mod tests {
             no_match: vec!["detect_esc1_attack".into()],
             failed: vec!["detect_secretsdump".into(), "detect_pass_the_hash".into()],
             not_run: vec![],
+            rejected_writes: vec![],
             timed_out: false,
             golden_ticket: None,
             silver_ticket: None,
@@ -2437,6 +2524,7 @@ mod tests {
             no_match: vec![],
             failed: vec![],
             not_run: vec![],
+            rejected_writes: vec![],
             timed_out: false,
             golden_ticket: None,
             silver_ticket: None,

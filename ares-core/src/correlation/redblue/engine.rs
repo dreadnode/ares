@@ -16,6 +16,12 @@ use super::types::{
 /// by operation ID alongside a flat list of blue detections.
 pub type LoadedReports = (Vec<(String, Vec<RedTeamActivity>)>, Vec<BlueTeamDetection>);
 
+/// Metadata flag marking a [`RedTeamActivity`] whose timestamp was derived from
+/// the operation start time rather than read from a parser-emitted timeline row.
+/// Such activities are matched on technique and target only — scoring them by
+/// time proximity would penalise blue against a time nobody observed.
+pub const SYNTHETIC_TIMESTAMP_KEY: &str = "timestamp_synthetic";
+
 /// Correlates red team activities with blue team detections.
 ///
 /// This engine:
@@ -121,7 +127,10 @@ impl RedBlueCorrelator {
                         target_host: None,
                         credential_used: None,
                         success: true,
-                        metadata: HashMap::new(),
+                        metadata: HashMap::from([(
+                            SYNTHETIC_TIMESTAMP_KEY.to_string(),
+                            "true".to_string(),
+                        )]),
                     });
                 }
             }
@@ -157,6 +166,7 @@ impl RedBlueCorrelator {
                     metadata: HashMap::from([
                         ("username".to_string(), username.to_string()),
                         ("source".to_string(), source.to_string()),
+                        (SYNTHETIC_TIMESTAMP_KEY.to_string(), "true".to_string()),
                     ]),
                 });
             }
@@ -191,9 +201,14 @@ impl RedBlueCorrelator {
             }
         }
 
+        let already_timelined = |acts: &[RedTeamActivity], id: &str| {
+            acts.iter().any(|a| a.technique_id.as_deref() == Some(id))
+        };
+
         // Domain Admin access
-        if content.contains("Domain Admin Access**: ✓")
-            || content.to_lowercase().contains("has_domain_admin: true")
+        if !already_timelined(&activities, "T1078.002")
+            && (content.contains("Domain Admin Access**: ✓")
+                || content.to_lowercase().contains("has_domain_admin: true"))
         {
             activities.push(RedTeamActivity {
                 timestamp: started_at + Duration::minutes(5),
@@ -204,13 +219,17 @@ impl RedBlueCorrelator {
                 target_host: None,
                 credential_used: None,
                 success: true,
-                metadata: HashMap::new(),
+                metadata: HashMap::from([(
+                    SYNTHETIC_TIMESTAMP_KEY.to_string(),
+                    "true".to_string(),
+                )]),
             });
         }
 
         // Golden Ticket
-        if content.contains("Golden Ticket**: ✓")
-            || content.to_lowercase().contains("has_golden_ticket: true")
+        if !already_timelined(&activities, "T1558.001")
+            && (content.contains("Golden Ticket**: ✓")
+                || content.to_lowercase().contains("has_golden_ticket: true"))
         {
             activities.push(RedTeamActivity {
                 timestamp: started_at + Duration::minutes(6),
@@ -221,7 +240,10 @@ impl RedBlueCorrelator {
                 target_host: None,
                 credential_used: None,
                 success: true,
-                metadata: HashMap::new(),
+                metadata: HashMap::from([(
+                    SYNTHETIC_TIMESTAMP_KEY.to_string(),
+                    "true".to_string(),
+                )]),
             });
         }
 
@@ -466,12 +488,17 @@ impl RedBlueCorrelator {
             let mut best_match: Option<CorrelationMatch> = None;
             let mut best_confidence = 0.0_f64;
 
+            let synthetic_ts = red_activity
+                .metadata
+                .get(SYNTHETIC_TIMESTAMP_KEY)
+                .is_some_and(|v| v == "true");
+
             for detection in &blue_sorted {
                 let time_delta = (detection.timestamp - red_activity.timestamp).num_milliseconds()
                     as f64
                     / 1000.0;
 
-                if time_delta.abs() > time_window_secs {
+                if !synthetic_ts && time_delta.abs() > time_window_secs {
                     continue;
                 }
 
@@ -492,7 +519,11 @@ impl RedBlueCorrelator {
                     confidence += 0.3;
                 }
                 // Time proximity bonus
-                let time_bonus = (1.0 - time_delta.abs() / time_window_secs).max(0.0) * 0.2;
+                let time_bonus = if synthetic_ts {
+                    0.0
+                } else {
+                    (1.0 - time_delta.abs() / time_window_secs).max(0.0) * 0.2
+                };
                 confidence += time_bonus;
 
                 if confidence > best_confidence {

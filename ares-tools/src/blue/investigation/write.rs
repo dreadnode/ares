@@ -99,9 +99,10 @@ pub async fn add_evidence(args: &Value) -> Result<ToolOutput> {
     }
 
     // Grounding: refuse to write evidence whose value was not seen in any
-    // recent query result (or is a MITRE technique ID, which auto-validates).
-    // Without this check, an agent could fabricate an IP/user/hash and have it
-    // accepted as evidence — confidence-only penalties don't deter that.
+    // recent query result. A MITRE technique ID counts as seen only once a
+    // fired detection or a grounded evidence tag registered it. Without this
+    // check, an agent could fabricate an IP/user/hash and have it accepted as
+    // evidence — confidence-only penalties don't deter that.
     let (query_validated, provenance) = evidence_validator::validate_evidence_value(value);
     if !query_validated {
         return Ok(make_error(&format!(
@@ -145,6 +146,9 @@ pub async fn add_evidence(args: &Value) -> Result<ToolOutput> {
     };
 
     let mitre_techniques: Vec<String> = ground_technique_list(args.get("mitre_techniques"));
+    for t in &mitre_techniques {
+        evidence_validator::register_grounded_technique(t);
+    }
 
     let evidence_id = Uuid::new_v4().to_string();
 
@@ -263,9 +267,9 @@ pub async fn add_evidence_batch(args: &Value) -> Result<ToolOutput> {
         }
 
         // Grounding: reject items whose value was not seen in any recent
-        // query result (MITRE technique IDs auto-validate inside
-        // `validate_evidence_value`).
-        let (query_validated, _) = evidence_validator::validate_evidence_value(value);
+        // query result. MITRE technique IDs count as seen only once
+        // registered as grounded.
+        let (query_validated, provenance) = evidence_validator::validate_evidence_value(value);
         if !query_validated {
             validation_errors.push(format!(
                 "item[{i}] {evidence_type}={value}: value not found in any recorded query result \
@@ -273,6 +277,10 @@ pub async fn add_evidence_batch(args: &Value) -> Result<ToolOutput> {
             ));
             continue;
         }
+        let source = provenance
+            .as_ref()
+            .map(|p| p.source.as_str())
+            .unwrap_or(source);
         let raw_confidence = item
             .get("confidence")
             .and_then(Value::as_f64)
@@ -300,6 +308,9 @@ pub async fn add_evidence_batch(args: &Value) -> Result<ToolOutput> {
         };
 
         let mitre_techniques: Vec<String> = ground_technique_list(item.get("mitre_techniques"));
+        for t in &mitre_techniques {
+            evidence_validator::register_grounded_technique(t);
+        }
 
         let evidence_id = Uuid::new_v4().to_string();
 
@@ -463,6 +474,14 @@ pub async fn add_technique(args: &Value) -> Result<ToolOutput> {
         Ok(pair) => pair,
         Err(reason) => return Ok(make_error(&reason)),
     };
+    if !evidence_validator::technique_is_grounded(&technique_id) {
+        return Ok(make_error(&format!(
+            "Technique rejected: {technique_id} has not been observed in any query result. \
+             Run the detection template that covers it, or record a grounded evidence item \
+             tagged with it, before recording the technique. Techniques must follow from \
+             observed data, not be asserted by the agent."
+        )));
+    }
     let technique_name = optional_str(args, "technique_name").unwrap_or(&catalog_name);
 
     let mut conn = match get_redis_connection().await {

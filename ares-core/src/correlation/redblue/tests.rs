@@ -188,6 +188,43 @@ fn correlate_outside_time_window() {
 }
 
 #[test]
+fn synthetic_timestamp_activity_matches_outside_time_window() {
+    let correlator = RedBlueCorrelator::new("/tmp", Some(5));
+
+    let mut activity = make_red_activity("T1078.002", "192.168.58.10", utc(12, 0));
+    activity.metadata.insert(
+        super::engine::SYNTHETIC_TIMESTAMP_KEY.to_string(),
+        "true".to_string(),
+    );
+    let blue = vec![make_blue_detection(
+        "Domain Admin Logon",
+        "T1078.002",
+        "192.168.58.10",
+        utc(13, 0),
+    )];
+
+    let report = correlator.correlate(&[activity], &blue, "op-synthetic");
+    assert_eq!(report.matched_activities, 1);
+    assert_eq!(report.undetected_activities, 0);
+}
+
+#[test]
+fn observed_timestamp_activity_still_rejected_outside_time_window() {
+    let correlator = RedBlueCorrelator::new("/tmp", Some(5));
+
+    let red = vec![make_red_activity("T1078.002", "192.168.58.10", utc(12, 0))];
+    let blue = vec![make_blue_detection(
+        "Domain Admin Logon",
+        "T1078.002",
+        "192.168.58.10",
+        utc(13, 0),
+    )];
+
+    let report = correlator.correlate(&red, &blue, "op-observed");
+    assert_eq!(report.matched_activities, 0);
+}
+
+#[test]
 fn correlate_empty_inputs() {
     let correlator = RedBlueCorrelator::new("/tmp", None);
     let report = correlator.correlate(&[], &[], "op-test");
