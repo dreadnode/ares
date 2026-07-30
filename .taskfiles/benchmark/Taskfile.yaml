@@ -557,6 +557,8 @@ tasks:
       EC2_NAME: '{{.EC2_NAME | default "kali-ares"}}'
       RESET: '{{.RESET | default "false"}}'
       OUTPUT_DIR: '{{.OUTPUT_DIR | default "./reports/diversity"}}'
+      POLL_INTERVAL: '{{.POLL_INTERVAL | default "60"}}'
+      MAX_WAIT: '{{.MAX_WAIT | default "7200"}}'
       CAMPAIGN_COMPUTED:
         sh: |
           if [ -n "{{.CAMPAIGN}}" ]; then
@@ -621,29 +623,85 @@ tasks:
 
       # Sequential loop — novelty memory needs prior runs' prefixes to bias
       # against, so DO NOT parallelize.
+      #
+      # `red:ec2:multi` is submit-only: it has no FOLLOW/MAX_WAIT/OUTPUT_DIR var
+      # and its submit step carries `ignore_error: true`, so it returns 0 in
+      # ~13s whether or not the op started. Passing FOLLOW=true to it did
+      # nothing, which made this "sequential" loop fire every op concurrently
+      # and record all of them as successes. The wait and the success test
+      # therefore live here.
+      #
+      # Success is `Status: completed` (ares derives that from completed_at /
+      # red_completed_at). `stopped` means the op is neither live nor finished —
+      # a failure, and also exactly what a never-started op looks like. That is
+      # why `ec2:watch` is not usable here: it breaks on `completed|stopped`
+      # alike and exits 0 for both.
       - |
         set -euo pipefail
         CAMPAIGN="{{.CAMPAIGN_COMPUTED}}"
         SWEEP_DIR="{{.OUTPUT_DIR}}/${CAMPAIGN}"
         MANIFEST="${SWEEP_DIR}/ops.txt"
+        export AWS_PROFILE="{{.AWS_PROFILE}}"
+        export AWS_REGION="{{.AWS_REGION}}"
+        . .taskfiles/ec2/scripts/run-ssm.sh
+        INSTANCE_ID=$(resolve_instance_id "{{.EC2_NAME}}") || exit 1
+
         for i in $(seq 1 {{.N}}); do
           OP_ID="op-$(date +%Y%m%d-%H%M%S)"
           echo -e "{{.INFO}} [${i}/{{.N}}] launching ${OP_ID}"
-          if task red:ec2:multi \
+
+          if ! task red:ec2:multi \
               TARGET="{{.TARGET}}" \
               EC2_NAME="{{.EC2_NAME}}" \
-              OPERATION_ID="${OP_ID}" \
-              OUTPUT_DIR="${SWEEP_DIR}/red" \
-              FOLLOW=true; then
+              OPERATION_ID="${OP_ID}"; then
+            echo -e "{{.WARN}} [${i}/{{.N}}] ${OP_ID} submit failed — continuing sweep"
+            echo "${OP_ID} FAILED submit" >> "${MANIFEST}"
+            continue
+          fi
+
+          START=$(date +%s)
+          STATUS=""
+          while true; do
+            ELAPSED=$(( $(date +%s) - START ))
+            if [ "${ELAPSED}" -gt {{.MAX_WAIT}} ]; then
+              STATUS="timeout"
+              break
+            fi
+            STATUS=$(run_ssm_cmd "$INSTANCE_ID" \
+              "RUST_LOG=error ares ops status ${OP_ID} 2>&1 | sed -n 's/^Status: //p' | head -1" \
+              60 2>/dev/null | tr -d '\r' | tr -d '[:space:]') || STATUS=""
+            case "${STATUS}" in
+              completed|stopped) break ;;
+              running) echo -e "{{.INFO}} [${i}/{{.N}}] [${ELAPSED}s] ${OP_ID} running" ;;
+              *)       echo -e "{{.WARN}} [${i}/{{.N}}] [${ELAPSED}s] ${OP_ID} no status yet" ;;
+            esac
+            sleep {{.POLL_INTERVAL}}
+          done
+
+          if [ "${STATUS}" = "completed" ]; then
             echo "${OP_ID}" >> "${MANIFEST}"
-            echo -e "{{.SUCCESS}} [${i}/{{.N}}] ${OP_ID} completed"
+            echo -e "{{.SUCCESS}} [${i}/{{.N}}] ${OP_ID} completed in $(( $(date +%s) - START ))s"
+            task ec2:report EC2_NAME="{{.EC2_NAME}}" OPERATION_ID="${OP_ID}" \
+              LATEST=false OUTPUT_DIR="${SWEEP_DIR}" || \
+              echo -e "{{.WARN}} report fetch failed for ${OP_ID}"
           else
-            echo -e "{{.WARN}} [${i}/{{.N}}] ${OP_ID} failed — continuing sweep"
-            echo "${OP_ID} FAILED" >> "${MANIFEST}"
+            echo -e "{{.WARN}} [${i}/{{.N}}] ${OP_ID} ended ${STATUS} — continuing sweep"
+            echo "${OP_ID} FAILED ${STATUS}" >> "${MANIFEST}"
+          fi
+
+          # Never let op N+1 start while N is still live — concurrent ops share
+          # one novelty memory and one ares:operation:active pointer.
+          LIVE=$(run_ssm_cmd "$INSTANCE_ID" \
+            "RUST_LOG=error ares ops status ${OP_ID} 2>&1 | sed -n 's/^Status: //p' | head -1" \
+            60 2>/dev/null | tr -d '\r' | tr -d '[:space:]') || LIVE=""
+          if [ "${LIVE}" = "running" ]; then
+            echo -e "{{.WARN}} ${OP_ID} still running — stopping it before the next op"
+            task ec2:stop-op EC2_NAME="{{.EC2_NAME}}" OPERATION_ID="${OP_ID}" || true
           fi
           sleep 5
         done
-        echo -e "{{.SUCCESS}} sweep complete — $(wc -l < ${MANIFEST}) ops attempted"
+        OK=$(grep -cv 'FAILED' "${MANIFEST}" || true)
+        echo -e "{{.SUCCESS}} sweep complete — ${OK}/{{.N}} ops reached completed"
 
       # Pull path_record lists for every op and emit CSV rows.
       - |
@@ -679,6 +737,14 @@ tasks:
         UNIQ=$(awk -F, 'NR>1 {print $3":"$4}' "${CSV}" | sort -u | wc -l | tr -d ' ')
         OPS=$(awk -F, 'NR>1 {print $1}' "${CSV}" | sort -u | wc -l | tr -d ' ')
         TOTAL=$(($(wc -l < "${CSV}") - 1))
+        # A header-only CSV is not a sweep with no findings, it is a sweep that
+        # did not happen. Say so rather than printing zeros and exiting 0.
+        if [ "${TOTAL}" -eq 0 ]; then
+          echo -e "{{.ERROR}} coverage.csv is header-only — no op wrote a path_record."
+          echo -e "{{.ERROR}} Check: ops actually reached 'completed' (see ops.txt),"
+          echo -e "{{.ERROR}} and emit_path_records is true in /etc/ares/config.yaml."
+          exit 1
+        fi
         echo "    ops with path records: ${OPS}"
         echo "    total steps recorded:  ${TOTAL}"
         echo "    unique (technique,target) pairs: ${UNIQ}"

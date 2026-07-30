@@ -854,14 +854,15 @@ mod tests {
     }
 
     #[test]
-    fn shipped_config_enables_phase_zero_only() {
+    fn shipped_config_enables_diversity_knobs() {
         const SHIPPED: &str = include_str!("../../../config/ares.yaml");
         let cfg: ares_core::config::AresConfig = serde_yaml::from_str(SHIPPED).unwrap();
         let s = Strategy::resolve(None, Some(&cfg));
         assert!(s.emit_path_records);
-        assert_eq!(s.selection_temperature, 0.0);
-        assert!(!s.novelty_enabled);
-        assert!(!s.randomize_entry_foothold);
+        assert_eq!(s.selection_temperature, 0.7);
+        assert!(s.novelty_enabled);
+        assert_eq!(s.novelty_scope, "per-campaign");
+        assert!(s.randomize_entry_foothold);
     }
 
     #[test]

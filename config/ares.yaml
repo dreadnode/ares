@@ -101,16 +101,16 @@ operation:
   # Queue selection temperature for softmax sampling in the exploitation queue.
   # 0.0 = deterministic argmin (current behaviour). Higher = more spread across
   # near-equal-priority work. Distinct from llm_temperature above.
-  # selection_temperature: 0.0
+  selection_temperature: 0.7
   #
   # Cross-run novelty memory: bias each run away from path prefixes prior runs
   # already walked, so the fleet covers more unique paths.
-  # novelty:
-  #   enabled: false
-  #   scope: per-campaign   # which runs share/reset novelty memory
+  novelty:
+    enabled: true
+    scope: per-campaign   # which runs share/reset novelty memory
   #
   # Randomize the entry foothold per run (cheapest diversity source).
-  # randomize_entry_foothold: false
+  randomize_entry_foothold: true
   #
   # Emit structured per-run path records for coverage measurement (Phase 0).
   emit_path_records: true
