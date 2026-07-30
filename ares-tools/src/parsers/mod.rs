@@ -32,7 +32,7 @@ pub use credential_tools::{
 };
 pub use delegation::{
     extract_delegation_account, parse_add_computer, parse_delegation, parse_silver_ticket,
-    SILVER_TICKET_SPN_MARKER,
+    scrape_added_machine_account, SILVER_TICKET_SPN_MARKER,
 };
 pub use lateral::{
     parse_mssql_session, parse_remote_exec, parse_smb_share_access, parse_tgt_request,
@@ -1200,21 +1200,17 @@ SMB  192.168.58.121  445  DC01  bob         2026-03-25 23:21:09 0  Bob"#;
 
     #[test]
     fn parse_tool_output_add_computer_records_machine_account() {
-        // The created account is only in params; without an arm the credential
-        // is lost and later RBCD steps cannot resolve the principal.
-        let params = json!({
-            "computer_name": "svc_rbcd",
-            "computer_password": "P@ssw0rd!",
-            "domain": "contoso.local",
-        });
+        // The created account is only in the success banner; without an arm the
+        // credential is lost and later RBCD steps cannot resolve the principal.
+        let params = json!({ "domain": "contoso.local" });
         let disc = parse_tool_output(
             "add_computer",
-            "[*] Successfully added machine account",
+            "[*] Successfully added machine account ARES-1A2B3C4D$ with password P@ssw0rd!.",
             &params,
         );
         let creds = disc["credentials"].as_array().expect("credentials array");
         assert_eq!(creds.len(), 1);
-        assert_eq!(creds[0]["username"], "svc_rbcd$");
+        assert_eq!(creds[0]["username"], "ARES-1A2B3C4D$");
         assert_eq!(creds[0]["domain"], "contoso.local");
     }
 

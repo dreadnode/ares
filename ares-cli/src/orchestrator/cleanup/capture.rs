@@ -67,6 +67,23 @@ pub fn hint_for(tool: &str, args: &Value, output: &str) -> Option<Value> {
             // capture it so teardown can delete the orphaned computer.
             scrape_created_computer(output).map(|name| json!({ "created_computer": name }))
         }
+        "add_computer" => {
+            // The add path mints its own name, so the forward args do not name
+            // the object that was created. Capture what impacket reported or
+            // teardown's action-flip deletes the wrong account, or none.
+            let action = args.get("action").and_then(Value::as_str).unwrap_or("add");
+            if matches!(action, "delete" | "del" | "remove") {
+                return None;
+            }
+            ares_tools::parsers::scrape_added_machine_account(output).map(|(name, _)| {
+                let sam = if name.ends_with('$') {
+                    name.to_string()
+                } else {
+                    format!("{name}$")
+                };
+                json!({ "created_computer": sam })
+            })
+        }
         _ => None,
     }
 }
@@ -227,6 +244,42 @@ mod tests {
             hint["device_id"],
             json!("4b1c9f2a-1234-4a2b-9c3d-abcdef012345")
         );
+    }
+
+    /// `build_add_computer` mints the name, so the journal's only record of what
+    /// was created is impacket's banner. Miss it and teardown is blocked.
+    #[test]
+    fn captures_minted_machine_account_on_add() {
+        let out = "[*] Successfully added machine account ARES-1A2B3C4D$ \
+                   with password ArDEADBEEFCAFE1234!7z.";
+        let hint = hint_for("add_computer", &json!({}), out).expect("created name");
+        assert_eq!(hint["created_computer"], json!("ARES-1A2B3C4D$"));
+    }
+
+    /// The banner prints the bare name when impacket was given one; the hint is
+    /// a sAMAccountName, which always carries the `$`.
+    #[test]
+    fn captured_machine_account_is_normalized_to_a_sam_account_name() {
+        let out = "[*] Successfully added machine account ARES-1A2B3C4D with password x.";
+        let hint = hint_for("add_computer", &json!({}), out).unwrap();
+        assert_eq!(hint["created_computer"], json!("ARES-1A2B3C4D$"));
+    }
+
+    /// A delete created nothing, so there is nothing to capture — and a hint
+    /// here would invert into a second delete of the same name.
+    #[test]
+    fn no_hint_for_add_computer_delete() {
+        let out = "[*] Successfully added machine account ARES-1A2B3C4D$ with password x.";
+        assert!(hint_for("add_computer", &json!({ "action": "delete" }), out).is_none());
+    }
+
+    /// addcomputer exits 0 on a refused add. No banner means no account, so no
+    /// hint — otherwise teardown deletes whatever already owned the name.
+    #[test]
+    fn no_hint_when_add_was_refused() {
+        let refused = "[-] Account ARES-1A2B3C4D$ already exists! \
+                       If you just want to set a password, use -no-add.";
+        assert!(hint_for("add_computer", &json!({}), refused).is_none());
     }
 
     #[test]

@@ -199,21 +199,52 @@ fn nopac_plan(record: &MutationRecord) -> UndoPlan {
     }
 }
 
+/// `add_computer` mints its own account name, so the forward args do not name
+/// the object created; the name comes from the journal hint scraped out of
+/// impacket's success banner. The inverse flips the action onto the forward
+/// targeting args — auth is not among them, since the journal strips secrets and
+/// teardown's `inject_auth` resolves fresh material at revert time.
+///
+/// Without a hint the plan is blocked rather than guessed: an action-flip on
+/// args carrying a stale `computer_name` would point a domain-admin delete at
+/// an object this operation never created.
+fn add_computer_plan(record: &MutationRecord) -> UndoPlan {
+    let a = &record.args;
+    let sam = record
+        .hint
+        .as_ref()
+        .and_then(|h| h.get("created_computer"))
+        .and_then(Value::as_str);
+    match sam {
+        Some(sam) => {
+            let bare = sam.trim_end_matches('$');
+            let mut args = with_override(a, "action", "delete");
+            if let Some(m) = args.as_object_mut() {
+                m.insert("computer_name".into(), json!(bare));
+                m.remove("computer_password");
+            }
+            UndoPlan {
+                class: Reversibility::Clean,
+                inverse: Some(("add_computer".into(), args)),
+                // After delete, `get object <sam>` should no longer return the
+                // account — its name is absent from the read output.
+                validate: Some(get_object_probe(a, sam, "sAMAccountName", bare)),
+                note: format!("delete the created machine account ({sam})"),
+            }
+        }
+        None => UndoPlan::manual(
+            Reversibility::NeedsCapture,
+            "delete the created machine account — needs the account name from tool output",
+        ),
+    }
+}
+
 /// Build the inverse plan for a journaled mutation.
 pub fn undo_plan(record: &MutationRecord) -> UndoPlan {
     let a = &record.args;
     match record.tool.as_str() {
         // ── CLEAN: action-flip on the same forward args ──────────────
-        "add_computer" => UndoPlan {
-            class: Reversibility::Clean,
-            inverse: Some(("add_computer".into(), with_override(a, "action", "delete"))),
-            validate: astr(a, "computer_name").map(|name| {
-                // After delete, `get object <name>$` should no longer return
-                // the account — its name is absent from the read output.
-                get_object_probe(a, &format!("{name}$"), "sAMAccountName", name)
-            }),
-            note: "delete the created machine account".into(),
-        },
+        "add_computer" => add_computer_plan(record),
         "rbcd_write" => UndoPlan {
             class: Reversibility::Clean,
             inverse: Some(("rbcd_write".into(), with_override(a, "action", "remove"))),
@@ -488,6 +519,133 @@ mod tests {
             p.validate.unwrap().expect_absent.as_deref(),
             Some("WIN-ABC123$")
         );
+    }
+
+    /// The add path mints its own name, so the forward args never name the
+    /// object created. Without the captured name there is nothing safe to
+    /// delete — guessing points a domain-admin delete at another object.
+    #[test]
+    fn add_computer_is_needs_capture_without_hint() {
+        let p = undo_plan(&rec(
+            "add_computer",
+            json!({ "domain": "contoso.local", "username": "alice", "dc_ip": "192.168.58.240" }),
+        ));
+        assert_eq!(p.class, Reversibility::NeedsCapture);
+        assert!(p.inverse.is_none());
+        assert!(p.validate.is_none());
+    }
+
+    #[test]
+    fn add_computer_is_clean_with_captured_name() {
+        let mut r = rec(
+            "add_computer",
+            json!({
+                "domain": "contoso.local",
+                "username": "alice",
+                "password": "P@ssw0rd!",
+                "dc_ip": "192.168.58.240",
+            }),
+        );
+        r.hint = Some(json!({ "created_computer": "ARES-1A2B3C4D$" }));
+        let p = undo_plan(&r);
+        assert_eq!(p.class, Reversibility::Clean);
+        let (tool, args) = p.inverse.expect("an account we created must be deleted");
+        assert_eq!(tool, "add_computer");
+        assert_eq!(args["action"], json!("delete"));
+        // impacket-addcomputer takes the bare name and appends `$` itself.
+        assert_eq!(args["computer_name"], json!("ARES-1A2B3C4D"));
+        // Targeting args carry over; the journal strips secrets, and teardown's
+        // inject_auth resolves fresh material at revert time.
+        assert_eq!(args["username"], json!("alice"));
+        assert_eq!(args["dc_ip"], json!("192.168.58.240"));
+        assert!(args.get("password").is_none());
+        // The bare name is the stricter needle — it is a substring of the `$`
+        // form, so it still matches if the read renders the account either way.
+        assert_eq!(
+            p.validate.unwrap().expect_absent.as_deref(),
+            Some("ARES-1A2B3C4D")
+        );
+    }
+
+    /// The captured name must beat anything left in the forward args. An agent
+    /// that asked for `ws01` gets `ARES-…$` instead; deleting `ws01$` would
+    /// destroy a lab host account this operation never created — and teardown
+    /// authenticates as a domain admin, so it has the rights to succeed.
+    #[test]
+    fn add_computer_delete_ignores_a_stale_name_in_the_forward_args() {
+        let mut r = rec(
+            "add_computer",
+            json!({
+                "domain": "contoso.local",
+                "username": "alice",
+                "dc_ip": "192.168.58.240",
+                "computer_name": "ws01",
+                "computer_password": "Requested123!",
+            }),
+        );
+        r.hint = Some(json!({ "created_computer": "ARES-1A2B3C4D$" }));
+        let (_, args) = undo_plan(&r).inverse.expect("clean plan");
+        assert_eq!(args["computer_name"], json!("ARES-1A2B3C4D"));
+        // A delete takes no -computer-pass; carrying one forward is noise that
+        // the executor would reject as an unexpected flag pairing.
+        assert!(args.get("computer_password").is_none());
+    }
+
+    /// End-to-end contract for the minted machine account, across the three
+    /// crates that have to agree on its identity: the tool mints it, the parser
+    /// recovers it from impacket's banner, capture journals it, and teardown
+    /// deletes that exact account. A mismatch anywhere either loses the
+    /// credential (breaking the RBCD chain) or aims the delete elsewhere.
+    #[test]
+    fn minted_machine_account_survives_create_parse_journal_delete() {
+        fn flag_value<'a>(argv: &'a [String], flag: &str) -> Option<&'a str> {
+            let idx = argv.iter().position(|a| a == flag)?;
+            argv.get(idx + 1).map(String::as_str)
+        }
+
+        let forward = json!({
+            "domain": "contoso.local",
+            "username": "alice",
+            "password": "P@ssw0rd!",
+            "dc_ip": "192.168.58.240",
+        });
+
+        // 1. The tool mints the identity; the agent supplied none.
+        let cmd = ares_tools::privesc::build_add_computer(&forward).unwrap();
+        let argv = cmd.args_for_test();
+        let minted = flag_value(argv, "-computer-name").expect("minted name");
+        let minted_pass = flag_value(argv, "-computer-pass").expect("minted password");
+
+        // 2. impacket echoes both back, appending the `$` itself.
+        let banner = format!(
+            "[*] Successfully added machine account {minted}$ with password {minted_pass}."
+        );
+
+        // 3. The credential lands in state under the minted name, so a later
+        //    rbcd_write can resolve the principal.
+        let creds = ares_tools::parsers::parse_add_computer(&banner, &forward);
+        assert_eq!(creds[0]["username"], json!(format!("{minted}$")));
+        assert_eq!(creds[0]["password"], json!(minted_pass));
+
+        // 4. Capture journals what was created.
+        let hint = super::super::capture::hint_for("add_computer", &forward, &banner)
+            .expect("created account must be journalled");
+        assert_eq!(hint["created_computer"], json!(format!("{minted}$")));
+
+        // 5. Teardown targets that same account.
+        let mut r = rec("add_computer", forward);
+        r.hint = Some(hint);
+        let (tool, mut inverse) = undo_plan(&r).inverse.expect("clean plan");
+        assert_eq!(tool, "add_computer");
+        assert_eq!(inverse["computer_name"], json!(minted));
+
+        // 6. The delete command really names it. inject_auth resupplies the
+        //    secret the journal stripped.
+        inverse["password"] = json!("P@ssw0rd!");
+        let del = ares_tools::privesc::build_add_computer(&inverse).unwrap();
+        let del_argv = del.args_for_test();
+        assert_eq!(flag_value(del_argv, "-computer-name"), Some(minted));
+        assert!(del_argv.iter().any(|a| a == "-delete"));
     }
 
     #[test]

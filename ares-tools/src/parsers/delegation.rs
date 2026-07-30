@@ -372,29 +372,34 @@ ws01$        Computer     Constrained w/o Protocol Transition  HTTP/web01";
     }
 }
 
+/// Banner impacket-addcomputer prints on a successful creation, carrying the
+/// account name and password it actually used.
+pub(crate) const ADD_COMPUTER_BANNER: &str = "Successfully added machine account ";
+
+/// Pull `(name, password)` out of impacket-addcomputer's success banner
+/// (`Successfully added machine account WS01$ with password P@ssw0rd!.`).
+pub fn scrape_added_machine_account(output: &str) -> Option<(&str, &str)> {
+    let i = output.find(ADD_COMPUTER_BANNER)?;
+    let line = output[i + ADD_COMPUTER_BANNER.len()..].lines().next()?;
+    let (name, password) = line.split_once(" with password ")?;
+    let password = password.trim();
+    let password = password.strip_suffix('.').unwrap_or(password);
+    let name = name.trim();
+    (!name.is_empty() && !password.is_empty()).then_some((name, password))
+}
+
 /// Recover the machine account created by `add_computer`.
 ///
-/// impacket-addcomputer prints only a success banner — the account name and
-/// password are inputs, not output — so the credential is rebuilt from params.
-/// Without this the account is unusable by later RBCD steps, which look the
-/// principal up in operation state rather than re-reading tool text.
+/// The name and password are read back out of the success banner rather than
+/// echoed from the call's params: `build_add_computer` mints both on the add
+/// path, so the params the agent supplied are not what ended up in the
+/// directory. Without this credential the account is unusable by later RBCD
+/// steps, which look the principal up in operation state rather than
+/// re-reading tool text.
 pub fn parse_add_computer(output: &str, params: &Value) -> Vec<Value> {
-    if !output.contains("Successfully added machine account") {
+    let Some((name, password)) = scrape_added_machine_account(output) else {
         return Vec::new();
-    }
-    let name = params
-        .get("computer_name")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .trim();
-    let password = params
-        .get("computer_password")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .trim();
-    if name.is_empty() || password.is_empty() {
-        return Vec::new();
-    }
+    };
     let username = if name.ends_with('$') {
         name.to_string()
     } else {
@@ -536,29 +541,48 @@ mod add_computer_tests {
     use super::*;
 
     fn params() -> Value {
-        json!({
-            "computer_name": "svc_rbcd",
-            "computer_password": "P@ssw0rd!",
-            "domain": "contoso.local",
-        })
+        json!({ "domain": "contoso.local" })
+    }
+
+    fn banner(name: &str, password: &str) -> String {
+        format!("[*] Successfully added machine account {name} with password {password}.")
     }
 
     #[test]
     fn recovers_machine_account_on_success() {
-        let creds = parse_add_computer("[*] Successfully added machine account", &params());
+        let creds = parse_add_computer(&banner("ARES-1A2B3C4D$", "P@ssw0rd!"), &params());
         assert_eq!(creds.len(), 1);
-        assert_eq!(creds[0]["username"], "svc_rbcd$");
+        assert_eq!(creds[0]["username"], "ARES-1A2B3C4D$");
         assert_eq!(creds[0]["password"], "P@ssw0rd!");
         assert_eq!(creds[0]["domain"], "contoso.local");
         assert_eq!(creds[0]["source"], "add_computer");
     }
 
+    /// The banner is authoritative: `build_add_computer` mints the identity, so
+    /// a name the agent asked for is not what reached the directory. Trusting
+    /// params here stored a lab-flavoured name that no such account ever had.
     #[test]
-    fn keeps_existing_trailing_dollar() {
+    fn banner_wins_over_caller_supplied_params() {
         let mut p = params();
-        p["computer_name"] = json!("svc_rbcd$");
-        let creds = parse_add_computer("[*] Successfully added machine account", &p);
-        assert_eq!(creds[0]["username"], "svc_rbcd$");
+        p["computer_name"] = json!("ws01");
+        p["computer_password"] = json!("Requested123!");
+        let creds = parse_add_computer(&banner("ARES-1A2B3C4D$", "Minted123!"), &p);
+        assert_eq!(creds[0]["username"], "ARES-1A2B3C4D$");
+        assert_eq!(creds[0]["password"], "Minted123!");
+    }
+
+    #[test]
+    fn appends_missing_trailing_dollar() {
+        let creds = parse_add_computer(&banner("ARES-1A2B3C4D", "P@ssw0rd!"), &params());
+        assert_eq!(creds[0]["username"], "ARES-1A2B3C4D$");
+    }
+
+    /// impacket terminates the banner with a period; it is punctuation, not
+    /// part of the password, but only the last one is.
+    #[test]
+    fn strips_only_the_banner_terminator() {
+        let creds = parse_add_computer(&banner("ARES-1A2B3C4D$", "pass."), &params());
+        assert_eq!(creds[0]["password"], "pass.");
     }
 
     #[test]
@@ -567,10 +591,11 @@ mod add_computer_tests {
         assert!(parse_add_computer(refused, &params()).is_empty());
     }
 
+    /// A banner without the password clause cannot yield a usable credential,
+    /// and params are no longer a fallback.
     #[test]
-    fn requires_both_name_and_password() {
-        let mut p = params();
-        p["computer_password"] = json!("");
-        assert!(parse_add_computer("[*] Successfully added machine account", &p).is_empty());
+    fn requires_the_password_clause() {
+        let truncated = "[*] Successfully added machine account ARES-1A2B3C4D$";
+        assert!(parse_add_computer(truncated, &params()).is_empty());
     }
 }

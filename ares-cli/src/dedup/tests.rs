@@ -1252,6 +1252,17 @@ fn is_ghost_machine_account_matches_nopac_pattern() {
     assert!(is_ghost_machine_account("WIN-3KSGCLTS7NX"));
 }
 
+/// Accounts minted by `add_computer` are ours too. Before this, the agent named
+/// them after whatever the lab looked like, so they rendered as captured loot
+/// beside the real host account they were imitating.
+#[test]
+fn is_ghost_machine_account_matches_minted_add_computer_accounts() {
+    use super::is_ghost_machine_account;
+    assert!(is_ghost_machine_account("ARES-1A2B3C4D$"));
+    assert!(is_ghost_machine_account("ARES-1A2B3C4D"));
+    assert!(is_ghost_machine_account("ares-1a2b3c4d$"));
+}
+
 #[test]
 fn is_ghost_machine_account_rejects_real_hosts() {
     use super::is_ghost_machine_account;
@@ -1260,6 +1271,11 @@ fn is_ghost_machine_account_rejects_real_hosts() {
     assert!(!is_ghost_machine_account("WIN-2019$")); // wrong length
     assert!(!is_ghost_machine_account("administrator"));
     assert!(!is_ghost_machine_account(""));
+    // A real lab host must still count as loot, including one whose name the
+    // agent might have been imitating.
+    assert!(!is_ghost_machine_account("SQL01$"));
+    assert!(!is_ghost_machine_account("ARES-XYZ$")); // not 8 hex digits
+    assert!(!is_ghost_machine_account("ARES-1A2B3C4D5$")); // wrong length
 }
 
 #[test]

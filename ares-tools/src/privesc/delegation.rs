@@ -261,8 +261,9 @@ fn impacket_identity_auth(
 
 /// Add a computer account to the domain using impacket-addcomputer.
 ///
-/// Required args: `domain`, `username`, `computer_name`, `dc_ip`
-/// (`computer_password` required only for the default add action).
+/// Required args: `domain`, `username`, `dc_ip` (`computer_name` required only
+/// for the `delete` action; the add action mints its own — see
+/// [`mint_machine_account`]).
 /// Auth — one of (precedence: `ticket_path` > `hash` > `password`), see
 /// [`impacket_identity_auth`]:
 ///   - `ticket_path` — Kerberos ccache (`-k -no-pass` + `KRB5CCNAME`); also
@@ -274,6 +275,10 @@ fn impacket_identity_auth(
 /// Optional args: `action` (`add` [default] | `delete`), `dc_host`. `delete`
 ///                removes the named computer — used by operation teardown to
 ///                drop a machine account this op created.
+///
+/// Any caller-supplied `computer_name`/`computer_password` is ignored on the add
+/// path. The name and password are minted here so every account this operation
+/// creates is identifiable as ares residue rather than lab loot.
 pub async fn add_computer(args: &Value) -> Result<ToolOutput> {
     let mut out = build_add_computer(args)?.execute().await?;
     if out.success && add_computer_refused(&out.combined()) {
@@ -316,10 +321,19 @@ pub fn add_computer_refused(output: &str) -> bool {
 pub fn build_add_computer(args: &Value) -> Result<CommandBuilder> {
     let domain = required_str(args, "domain")?;
     let username = required_str(args, "username")?;
-    let computer_name = required_str(args, "computer_name")?;
     let dc_ip = required_str(args, "dc_ip")?;
     let action = optional_str(args, "action").unwrap_or("add");
     let dc_host = optional_str(args, "dc_host").filter(|s| !s.is_empty());
+
+    let deleting = matches!(action, "delete" | "del" | "remove");
+    let minted = (!deleting).then(mint_machine_account);
+    let computer_name: String = match &minted {
+        Some((name, _)) => name.clone(),
+        None => required_str(args, "computer_name")?
+            .trim()
+            .trim_end_matches('$')
+            .to_string(),
+    };
 
     if optional_str(args, "ticket_path").is_some_and(|s| !s.is_empty()) && dc_host.is_none() {
         anyhow::bail!(
@@ -338,12 +352,47 @@ pub fn build_add_computer(args: &Value) -> Result<CommandBuilder> {
     .flag("-dc-ip", dc_ip)
     .flag_opt("-dc-host", dc_host);
 
-    if matches!(action, "delete" | "del" | "remove") {
-        cmd = cmd.arg("-delete");
-    } else {
-        cmd = cmd.flag("-computer-pass", required_str(args, "computer_password")?);
+    match &minted {
+        Some((_, password)) => cmd = cmd.flag("-computer-pass", password.clone()),
+        None => cmd = cmd.arg("-delete"),
     }
     Ok(cmd.timeout_secs(120))
+}
+
+/// Prefix of every machine account this operation creates via `add_computer`.
+///
+/// Left to its own devices the agent names these after whatever the lab looks
+/// like — an abbreviation of a real host it just enumerated — which lands ares'
+/// own residue in loot as though it were captured lab loot, and leaves an object
+/// in the directory nobody can attribute. A fixed prefix makes ownership
+/// decidable by name alone; see `ares_cli::dedup::is_ghost_machine_account`.
+pub const MINTED_MACHINE_ACCOUNT_PREFIX: &str = "ARES-";
+
+/// Mint the `(bare_name, password)` for a new machine account.
+///
+/// The name is returned without the trailing `$`: impacket-addcomputer takes
+/// the bare sAMAccountName for `-computer-name` and appends `$` itself.
+pub fn mint_machine_account() -> (String, String) {
+    let entropy = uuid::Uuid::new_v4().simple().to_string().to_uppercase();
+    let name = format!("{MINTED_MACHINE_ACCOUNT_PREFIX}{}", &entropy[..8]);
+    let password = format!("Ar{}!7z", &entropy[8..24]);
+    (name, password)
+}
+
+/// True if `name` is a machine account minted by [`mint_machine_account`],
+/// with or without the trailing `$` and in any case.
+///
+/// The canonical ownership test. Loot filtering in `ares-cli` defers to this
+/// rather than carrying its own copy of the pattern, so the shape cannot drift
+/// away from what [`mint_machine_account`] actually produces.
+pub fn is_minted_machine_account(name: &str) -> bool {
+    let bare = name.trim().trim_end_matches('$');
+    if !bare.is_ascii() || bare.len() != MINTED_MACHINE_ACCOUNT_PREFIX.len() + 8 {
+        return false;
+    }
+    let (prefix, entropy) = bare.split_at(MINTED_MACHINE_ACCOUNT_PREFIX.len());
+    prefix.eq_ignore_ascii_case(MINTED_MACHINE_ACCOUNT_PREFIX)
+        && entropy.chars().all(|c| c.is_ascii_hexdigit())
 }
 
 /// Add or remove an SPN on a target account using bloodyAD.
@@ -993,28 +1042,83 @@ mod tests {
             "domain": "contoso.local",
             "username": "alice",
             "password": "P@ssw0rd!",
-            "computer_name": "svc_rbcd$",
-            "computer_password": "CompP@ss123!",
             "dc_ip": "192.168.58.10"
         });
         let cmd = super::build_add_computer(&args).unwrap();
         let argv = cmd.args_for_test();
         assert!(argv.iter().any(|a| a == "contoso.local/alice:P@ssw0rd!"));
-        assert_eq!(flag_value(argv, "-computer-name"), Some("svc_rbcd$"));
-        assert_eq!(flag_value(argv, "-computer-pass"), Some("CompP@ss123!"));
         assert_eq!(flag_value(argv, "-dc-ip"), Some("192.168.58.10"));
+
+        let name = flag_value(argv, "-computer-name").expect("minted name");
+        assert!(
+            super::is_minted_machine_account(name),
+            "add must mint its own name, got {name}"
+        );
+        assert!(flag_value(argv, "-computer-pass").is_some_and(|p| !p.is_empty()));
     }
 
+    /// The add path must not honour a caller-chosen identity. Left to itself the
+    /// agent names these after the lab it just enumerated, which puts ares
+    /// residue in loot dressed as captured lab loot and, when the name collides
+    /// with a real host, points teardown at an object we never created.
     #[test]
-    fn add_computer_missing_computer_name() {
+    fn add_computer_ignores_caller_supplied_identity() {
+        let args = json!({
+            "domain": "contoso.local",
+            "username": "alice",
+            "password": "P@ssw0rd!",
+            "computer_name": "ws01",
+            "computer_password": "Requested123!",
+            "dc_ip": "192.168.58.10"
+        });
+        let cmd = super::build_add_computer(&args).unwrap();
+        let argv = cmd.args_for_test();
+        assert_ne!(flag_value(argv, "-computer-name"), Some("ws01"));
+        assert_ne!(flag_value(argv, "-computer-pass"), Some("Requested123!"));
+        assert!(super::is_minted_machine_account(
+            flag_value(argv, "-computer-name").expect("minted name")
+        ));
+    }
+
+    /// Two calls must not collide: a name already in the directory makes
+    /// addcomputer refuse with `already exists!`.
+    #[test]
+    fn minted_machine_accounts_are_unique() {
+        let (first, first_pass) = super::mint_machine_account();
+        let (second, second_pass) = super::mint_machine_account();
+        assert_ne!(first, second);
+        assert_ne!(first_pass, second_pass);
+    }
+
+    /// Teardown supplies the name on the delete path, so it stays required
+    /// there — the schema no longer offers it to the agent.
+    #[test]
+    fn add_computer_delete_requires_a_caller_supplied_name() {
         let args = json!({
             "domain": "contoso.local",
             "username": "jsmith",
             "password": "P@ssw0rd!",
-            "computer_password": "CompP@ss123!",
-            "dc_ip": "192.168.58.10"
+            "dc_ip": "192.168.58.10",
+            "action": "delete"
         });
-        assert!(required_str(&args, "computer_name").is_err());
+        assert!(super::build_add_computer(&args).is_err());
+    }
+
+    /// impacket-addcomputer takes the bare sAMAccountName and appends `$`
+    /// itself; a journalled `WS01$` must not become `-computer-name WS01$`.
+    #[test]
+    fn add_computer_delete_strips_trailing_dollar() {
+        let args = json!({
+            "domain": "contoso.local",
+            "username": "jsmith",
+            "password": "P@ssw0rd!",
+            "dc_ip": "192.168.58.10",
+            "action": "delete",
+            "computer_name": "ARES-1A2B3C4D$"
+        });
+        let cmd = super::build_add_computer(&args).unwrap();
+        let argv = cmd.args_for_test();
+        assert_eq!(flag_value(argv, "-computer-name"), Some("ARES-1A2B3C4D"));
     }
 
     #[test]
@@ -1339,8 +1443,6 @@ mod tests {
             "domain": "contoso.local",
             "username": "jsmith",
             "password": "P@ssw0rd!",
-            "computer_name": "EVIL$",
-            "computer_password": "CompP@ss123!",
             "dc_ip": "192.168.58.10"
         });
         assert!(add_computer(&args).await.is_ok());
@@ -1691,16 +1793,20 @@ mod tests {
         );
     }
 
+    /// A journal written before the add path started minting its own identity
+    /// still carries `computer_password`. The delete must ignore it rather than
+    /// pair `-delete` with a `-computer-pass` addcomputer does not expect there.
     #[test]
-    fn add_computer_delete_action_needs_no_computer_password() {
-        let mut args = add_computer_base();
-        args.as_object_mut().unwrap().remove("computer_password");
+    fn add_computer_delete_ignores_a_stale_computer_password() {
         let args = with_arg(
-            &with_arg(&args, "password", "P@ssw0rd!"),
+            &with_arg(&add_computer_base(), "password", "P@ssw0rd!"),
             "action",
             "delete",
         );
-        assert!(super::build_add_computer(&args).is_ok());
+        let cmd = super::build_add_computer(&args).unwrap();
+        let argv = cmd.args_for_test();
+        assert!(argv.iter().any(|a| a == "-delete"));
+        assert!(argv.iter().all(|a| a != "-computer-pass"));
     }
 
     #[test]

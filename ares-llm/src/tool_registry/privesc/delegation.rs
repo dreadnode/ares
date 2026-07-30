@@ -91,7 +91,11 @@ pub fn definitions() -> Vec<ToolDefinition> {
                 Auth precedence: `ticket_path` (Kerberos ccache) > `hash` (NTLM \
                 pass-the-hash) > `password` (plaintext); the worker injects whichever \
                 material the operation actually holds, so a hash-only foothold works \
-                here. Supply `dc_host` — it is mandatory for the Kerberos path."
+                here. Supply `dc_host` — it is mandatory for the Kerberos path. \
+                The account name and password are minted for you and reported in the \
+                result (`Successfully added machine account ARES-…$ with password …`); \
+                do not choose them. Read the name from the result and pass it as \
+                `attacker_account` to `rbcd_write`."
                 .into(),
             input_schema: json!({
                 "type": "object",
@@ -124,14 +128,6 @@ pub fn definitions() -> Vec<ToolDefinition> {
                         "type": "string",
                         "description": "Domain controller DNS name (e.g. 'dc01.contoso.local'). Required when authenticating with a Kerberos ccache — impacket-addcomputer rejects `-k` without `-dc-host`."
                     },
-                    "computer_name": {
-                        "type": "string",
-                        "description": "Name for the new computer account"
-                    },
-                    "computer_password": {
-                        "type": "string",
-                        "description": "Password for the new computer account"
-                    }
                 },
                 "required": ["domain", "username", "dc_ip"]
             }),
