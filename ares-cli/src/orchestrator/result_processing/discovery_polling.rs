@@ -13,7 +13,6 @@ use ares_core::models::{Credential, Hash, Host, Share, TrustInfo, User, Vulnerab
 
 use super::parsing::resolve_parent_id;
 use super::reconcile_low_trust_credential_domain;
-use super::timeline::create_hash_timeline_event;
 use super::LOCKOUT_PATTERNS;
 use crate::orchestrator::dispatcher::Dispatcher;
 
@@ -138,7 +137,7 @@ async fn poll_discoveries(dispatcher: &Arc<Dispatcher>) -> Result<()> {
                         dispatcher.state.publish_hash(&dispatcher.queue, hash).await,
                         Ok(true)
                     ) {
-                        create_hash_timeline_event(
+                        super::credit_published_hash(
                             dispatcher,
                             &username,
                             &domain,
