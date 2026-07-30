@@ -286,6 +286,7 @@ pub(super) fn print_loot_human(
     print_token_coverage(
         &state.discovered_vulnerabilities,
         &state.exploited_vulnerabilities,
+        &state.superseded_vulnerabilities,
     );
 
     print_attack_path(&state.all_timeline_events);
@@ -548,9 +549,15 @@ pub(super) struct TokenCoverageRow {
 /// emitted golden ticket entries) render with `discovered=0, exploited>0` and
 /// status `"\u{2713}"` — implicit-token semantics. Categories are sorted
 /// alphabetically.
+///
+/// IDs in `superseded` are present in `exploited` but were credited by another
+/// path rather than proven, so they do not raise the exploited count. Their
+/// category still gets a row — a technique reached only by supersession is
+/// unproven, not absent.
 pub(super) fn compute_token_coverage_rows(
     discovered: &HashMap<String, VulnerabilityInfo>,
     exploited: &HashSet<String>,
+    superseded: &HashSet<String>,
 ) -> Vec<TokenCoverageRow> {
     let mut discovered_by_cat: std::collections::BTreeMap<String, usize> =
         std::collections::BTreeMap::new();
@@ -563,7 +570,10 @@ pub(super) fn compute_token_coverage_rows(
     }
     for id in exploited {
         let cat = token_category(id);
-        *exploited_by_cat.entry(cat).or_default() += 1;
+        let counter = exploited_by_cat.entry(cat).or_default();
+        if !superseded.contains(id) {
+            *counter += 1;
+        }
     }
 
     let mut categories: Vec<&String> = discovered_by_cat.keys().collect();
@@ -601,12 +611,13 @@ pub(super) fn compute_token_coverage_rows(
 fn print_token_coverage(
     discovered: &HashMap<String, VulnerabilityInfo>,
     exploited: &HashSet<String>,
+    superseded: &HashSet<String>,
 ) {
     if discovered.is_empty() && exploited.is_empty() {
         return;
     }
 
-    let rows = compute_token_coverage_rows(discovered, exploited);
+    let rows = compute_token_coverage_rows(discovered, exploited, superseded);
 
     println!(
         "Token Coverage ({} categories observed, scoreboard alignment):",
@@ -689,7 +700,10 @@ pub(super) fn token_category(vuln_id: &str) -> String {
         "sid_history",
         "asrep_roast",
         "seimpersonate",
+        "printnightmare",
+        "zerologon",
         "kerberoast",
+        "nopac",
         "ntlmv1",
         "gpo_abuse",
         "gpo",
@@ -1887,9 +1901,18 @@ mod tests {
     }
 
     #[test]
+    fn token_category_cve_techniques_are_not_other() {
+        assert_eq!(super::token_category("zerologon_dc01"), "zerologon");
+        assert_eq!(super::token_category("nopac_192.168.58.10"), "nopac");
+        assert_eq!(
+            super::token_category("printnightmare_192.168.58.10"),
+            "printnightmare"
+        );
+    }
+
+    #[test]
     fn token_category_unknown_falls_through_to_other() {
-        assert_eq!(super::token_category("zerologon_dc01"), "other");
-        assert_eq!(super::token_category("nopac_192.168.58.10"), "other");
+        assert_eq!(super::token_category("wombat_dc01"), "other");
         assert_eq!(super::token_category(""), "other");
     }
 
@@ -2061,7 +2084,8 @@ mod tests {
 
     #[test]
     fn coverage_rows_empty_when_both_empty() {
-        let rows = super::compute_token_coverage_rows(&HashMap::new(), &HashSet::new());
+        let rows =
+            super::compute_token_coverage_rows(&HashMap::new(), &HashSet::new(), &HashSet::new());
         assert!(rows.is_empty());
     }
 
@@ -2069,6 +2093,7 @@ mod tests {
     fn coverage_rows_x_mark_when_discovered_but_none_exploited() {
         let rows = super::compute_token_coverage_rows(
             &discovered_map(&["kerberoast_svc_sql"]),
+            &HashSet::new(),
             &HashSet::new(),
         );
         assert_eq!(rows.len(), 1);
@@ -2082,7 +2107,7 @@ mod tests {
     fn coverage_rows_check_mark_when_all_exploited() {
         let discovered = discovered_map(&["kerberoast_svc_sql"]);
         let exploited: HashSet<String> = ["kerberoast_svc_sql".to_string()].into_iter().collect();
-        let rows = super::compute_token_coverage_rows(&discovered, &exploited);
+        let rows = super::compute_token_coverage_rows(&discovered, &exploited, &HashSet::new());
         assert_eq!(rows[0].status, "\u{2713}");
         assert_eq!(rows[0].exploited, 1);
     }
@@ -2091,7 +2116,7 @@ mod tests {
     fn coverage_rows_partial_when_some_exploited() {
         let discovered = discovered_map(&["kerberoast_a", "kerberoast_b"]);
         let exploited: HashSet<String> = ["kerberoast_a".to_string()].into_iter().collect();
-        let rows = super::compute_token_coverage_rows(&discovered, &exploited);
+        let rows = super::compute_token_coverage_rows(&discovered, &exploited, &HashSet::new());
         assert_eq!(rows[0].category, "kerberoast");
         assert_eq!(rows[0].discovered, 2);
         assert_eq!(rows[0].exploited, 1);
@@ -2104,7 +2129,7 @@ mod tests {
         let exploited: HashSet<String> = ["golden_ticket_contoso.local".to_string()]
             .into_iter()
             .collect();
-        let rows = super::compute_token_coverage_rows(&HashMap::new(), &exploited);
+        let rows = super::compute_token_coverage_rows(&HashMap::new(), &exploited, &HashSet::new());
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].category, "golden_ticket");
         assert_eq!(rows[0].discovered, 0);
@@ -2115,7 +2140,8 @@ mod tests {
     #[test]
     fn coverage_rows_sorted_alphabetically() {
         let discovered = discovered_map(&["kerberoast_a", "asrep_roast_b", "adcs_esc1_c"]);
-        let rows = super::compute_token_coverage_rows(&discovered, &HashSet::new());
+        let rows =
+            super::compute_token_coverage_rows(&discovered, &HashSet::new(), &HashSet::new());
         let cats: Vec<&str> = rows.iter().map(|r| r.category.as_str()).collect();
         assert_eq!(cats, vec!["adcs_esc1", "asrep_roast", "kerberoast"]);
     }
@@ -2129,9 +2155,57 @@ mod tests {
         let exploited: HashSet<String> = ["kerberoast_a".to_string(), "kerberoast_b".to_string()]
             .into_iter()
             .collect();
-        let rows = super::compute_token_coverage_rows(&discovered, &exploited);
+        let rows = super::compute_token_coverage_rows(&discovered, &exploited, &HashSet::new());
         assert_eq!(rows[0].status, "\u{2713}");
         assert_eq!(rows[0].discovered, 1);
         assert_eq!(rows[0].exploited, 2);
+    }
+
+    #[test]
+    fn coverage_rows_superseded_does_not_count_as_exploited() {
+        let discovered = discovered_map(&["kerberoast_a", "kerberoast_b"]);
+        let exploited: HashSet<String> = ["kerberoast_a".to_string(), "kerberoast_b".to_string()]
+            .into_iter()
+            .collect();
+        let superseded: HashSet<String> = ["kerberoast_b".to_string()].into_iter().collect();
+        let rows = super::compute_token_coverage_rows(&discovered, &exploited, &superseded);
+        assert_eq!(rows[0].discovered, 2);
+        assert_eq!(
+            rows[0].exploited, 1,
+            "a vuln credited by supersession is not a proven technique"
+        );
+        assert_eq!(rows[0].status, "PARTIAL");
+    }
+
+    #[test]
+    fn coverage_rows_fully_superseded_category_still_renders_as_unproven() {
+        let discovered = discovered_map(&["forest_trust_contoso_local_fabrikam_local"]);
+        let exploited: HashSet<String> = ["forest_trust_contoso_local_fabrikam_local".to_string()]
+            .into_iter()
+            .collect();
+        let superseded = exploited.clone();
+        let rows = super::compute_token_coverage_rows(&discovered, &exploited, &superseded);
+        assert_eq!(rows.len(), 1, "the category must not vanish from the table");
+        assert_eq!(rows[0].category, "forest_trust");
+        assert_eq!(rows[0].exploited, 0);
+        assert_eq!(rows[0].status, "\u{2717}");
+    }
+
+    #[test]
+    fn coverage_rows_implicit_token_that_is_superseded_keeps_its_row() {
+        let exploited: HashSet<String> = ["golden_ticket_contoso.local".to_string()]
+            .into_iter()
+            .collect();
+        let superseded = exploited.clone();
+        let rows = super::compute_token_coverage_rows(&HashMap::new(), &exploited, &superseded);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].category, "golden_ticket");
+        assert_eq!(rows[0].discovered, 0);
+        assert_eq!(rows[0].exploited, 0);
+        assert_eq!(
+            rows[0].status, "\u{2717}",
+            "discovered=0 must not short-circuit to a check mark when the only \
+             credit came from supersession"
+        );
     }
 }

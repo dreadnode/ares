@@ -179,12 +179,14 @@ pub(super) fn print_loot_json(
             "target": v.target,
             "priority": v.priority,
             "exploited": state.exploited_vulnerabilities.contains(vuln_id),
+            "superseded": state.superseded_vulnerabilities.contains(vuln_id),
             "details": v.details,
             "discovered_by": v.discovered_by,
         })).collect::<Vec<_>>(),
         "token_coverage": build_token_coverage_json(
             &state.discovered_vulnerabilities,
             &state.exploited_vulnerabilities,
+            &state.superseded_vulnerabilities,
         ),
         "timeline": state.all_timeline_events,
         "techniques": state.all_techniques,
@@ -212,9 +214,13 @@ pub(super) fn print_loot_json(
 /// from raw `vuln_id` strings. Category logic mirrors
 /// `super::display::token_category` — keep them in lock-step so the
 /// text/JSON views match.
+///
+/// IDs in `superseded` are present in `exploited` but were credited by another
+/// path rather than proven, so they do not raise the exploited count.
 fn build_token_coverage_json(
     discovered: &HashMap<String, ares_core::models::VulnerabilityInfo>,
     exploited: &std::collections::HashSet<String>,
+    superseded: &std::collections::HashSet<String>,
 ) -> serde_json::Value {
     let mut discovered_by_cat: std::collections::BTreeMap<String, usize> =
         std::collections::BTreeMap::new();
@@ -226,7 +232,10 @@ fn build_token_coverage_json(
     }
     for id in exploited {
         let cat = super::display::token_category(id);
-        *exploited_by_cat.entry(cat).or_default() += 1;
+        let counter = exploited_by_cat.entry(cat).or_default();
+        if !superseded.contains(id) {
+            *counter += 1;
+        }
     }
     let mut categories: Vec<&String> = discovered_by_cat.keys().collect();
     for k in exploited_by_cat.keys() {
@@ -316,7 +325,7 @@ mod tests {
         // discovered_vulnerabilities entry. Must still appear.
         exploited.insert("golden_ticket_contoso.local".into());
 
-        let cov = build_token_coverage_json(&discovered, &exploited);
+        let cov = build_token_coverage_json(&discovered, &exploited, &HashSet::new());
         let obj = cov.as_object().expect("object");
 
         // ACL: 2 discovered, 0 exploited → missing
@@ -346,7 +355,74 @@ mod tests {
     fn token_coverage_empty_state_returns_empty_object() {
         let discovered: HashMap<String, VulnerabilityInfo> = HashMap::new();
         let exploited: HashSet<String> = HashSet::new();
-        let cov = build_token_coverage_json(&discovered, &exploited);
+        let cov = build_token_coverage_json(&discovered, &exploited, &HashSet::new());
         assert_eq!(cov, serde_json::json!({}));
+    }
+
+    #[test]
+    fn token_coverage_excludes_superseded_from_exploited_count() {
+        let mut discovered: HashMap<String, VulnerabilityInfo> = HashMap::new();
+        discovered.insert(
+            "forest_trust_contoso_local_fabrikam_local".into(),
+            vuln("forest_trust", "forest_trust_contoso_local_fabrikam_local"),
+        );
+        discovered.insert(
+            "kerberoast_svc_sql".into(),
+            vuln("kerberoast", "kerberoast_svc_sql"),
+        );
+
+        let exploited: HashSet<String> = [
+            "forest_trust_contoso_local_fabrikam_local".to_string(),
+            "kerberoast_svc_sql".to_string(),
+        ]
+        .into_iter()
+        .collect();
+        let superseded: HashSet<String> = ["forest_trust_contoso_local_fabrikam_local".to_string()]
+            .into_iter()
+            .collect();
+
+        let cov = build_token_coverage_json(&discovered, &exploited, &superseded);
+        let obj = cov.as_object().expect("object");
+
+        let trust = obj.get("forest_trust").expect("forest_trust present");
+        assert_eq!(trust.get("discovered").and_then(|v| v.as_u64()), Some(1));
+        assert_eq!(trust.get("exploited").and_then(|v| v.as_u64()), Some(0));
+        assert_eq!(
+            trust.get("status").and_then(|v| v.as_str()),
+            Some("missing"),
+            "a trust credited only by supersession is an unproven technique"
+        );
+
+        let kerb = obj.get("kerberoast").expect("kerberoast present");
+        assert_eq!(kerb.get("exploited").and_then(|v| v.as_u64()), Some(1));
+        assert_eq!(kerb.get("status").and_then(|v| v.as_str()), Some("ok"));
+    }
+
+    #[test]
+    fn token_coverage_maps_cve_techniques_out_of_other() {
+        let mut discovered: HashMap<String, VulnerabilityInfo> = HashMap::new();
+        discovered.insert(
+            "nopac_192.168.58.10".into(),
+            vuln("nopac", "nopac_192.168.58.10"),
+        );
+        discovered.insert(
+            "printnightmare_192.168.58.10".into(),
+            vuln("printnightmare", "printnightmare_192.168.58.10"),
+        );
+        discovered.insert(
+            "zerologon_192.168.58.10".into(),
+            vuln("zerologon", "zerologon_192.168.58.10"),
+        );
+
+        let cov = build_token_coverage_json(&discovered, &HashSet::new(), &HashSet::new());
+        let obj = cov.as_object().expect("object");
+
+        assert!(obj.contains_key("nopac"));
+        assert!(obj.contains_key("printnightmare"));
+        assert!(obj.contains_key("zerologon"));
+        assert!(
+            !obj.contains_key("other"),
+            "CVE techniques must carry their own scoreboard category"
+        );
     }
 }
