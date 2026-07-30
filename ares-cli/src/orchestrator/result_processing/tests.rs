@@ -2448,6 +2448,7 @@ mod reconcile_extracted_credential_domain {
             description: String::new(),
             is_admin: false,
             source: "kerberos_enum".to_string(),
+            member_of: Vec::new(),
         }
     }
 
@@ -2524,6 +2525,7 @@ mod reconcile_low_trust_credential_domain {
             description: String::new(),
             is_admin: false,
             source: "kerberos_enum".to_string(),
+            member_of: Vec::new(),
         }
     }
 

@@ -1037,6 +1037,7 @@ mod tests {
             description: String::new(),
             is_admin: false,
             source: "test".into(),
+            member_of: Vec::new(),
         }
     }
 

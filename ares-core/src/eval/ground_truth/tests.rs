@@ -134,6 +134,7 @@ fn creates_ground_truth_from_red_state() {
         description: String::new(),
         is_admin: true,
         source: String::new(),
+        member_of: Vec::new(),
     }];
     state.all_credentials = vec![Credential {
         id: String::new(),
@@ -226,6 +227,7 @@ fn create_ground_truth_deduplicates() {
         description: String::new(),
         is_admin: false,
         source: String::new(),
+        member_of: Vec::new(),
     }];
     state.all_credentials = vec![Credential {
         id: String::new(),

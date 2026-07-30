@@ -430,6 +430,7 @@ mod tests {
             description: description.to_string(),
             is_admin: false,
             source: String::new(),
+            member_of: Vec::new(),
         }
     }
 

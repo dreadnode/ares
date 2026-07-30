@@ -238,6 +238,7 @@ mod tests {
             description: String::new(),
             is_admin: false,
             source: String::new(),
+            member_of: Vec::new(),
         }
     }
 
@@ -345,6 +346,7 @@ mod tests {
             description: String::new(),
             is_admin: false,
             source: source.to_string(),
+            member_of: Vec::new(),
         }
     }
 

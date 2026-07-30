@@ -1818,6 +1818,7 @@ pub(crate) fn extract_asrep_roastable_users(payload: &Value, default_domain: &st
                         .to_string(),
                 is_admin: false,
                 source: "asrep_roastable_finding".to_string(),
+                member_of: Vec::new(),
             });
         }
     }

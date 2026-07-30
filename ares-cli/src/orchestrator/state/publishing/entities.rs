@@ -555,6 +555,7 @@ mod tests {
             description: String::new(),
             is_admin: false,
             source: "test".to_string(),
+            member_of: Vec::new(),
         }
     }
 

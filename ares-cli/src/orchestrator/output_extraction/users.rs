@@ -165,6 +165,7 @@ fn flush_ldap_record(
                 // High-confidence: sAMAccountName attribute is only
                 // emitted by an LDAP server, not by tool prose.
                 source: "ldap_extraction".to_string(),
+                member_of: Vec::new(),
             });
         }
     }
@@ -291,6 +292,7 @@ pub fn extract_users(output: &str, default_domain: &str) -> Vec<User> {
                     description: String::new(),
                     is_admin: false,
                     source: "output_extraction".to_string(),
+                    member_of: Vec::new(),
                 });
             }
         }

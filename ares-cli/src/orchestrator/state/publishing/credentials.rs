@@ -441,6 +441,7 @@ impl SharedState {
                 description: String::new(),
                 is_admin: false,
                 source: "secretsdump_implicit".to_string(),
+                member_of: Vec::new(),
             };
             // Errors here are non-fatal — the hash already landed.
             let _ = self.publish_user(queue, user).await;

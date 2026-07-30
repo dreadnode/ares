@@ -223,6 +223,7 @@ mod tests {
                 description: String::new(),
                 is_admin: false,
                 source: "ldap".into(),
+                member_of: Vec::new(),
             },
         };
         let a = OpStateEvent::new("op-1", p.clone());
@@ -283,6 +284,7 @@ mod tests {
                         description: String::new(),
                         is_admin: false,
                         source: "ldap".into(),
+                        member_of: Vec::new(),
                     },
                 },
                 "user.discovered",

@@ -500,6 +500,7 @@ mod tests {
                     description: String::new(),
                     is_admin: false,
                     source: "ldap".into(),
+                    member_of: Vec::new(),
                 },
             },
         );

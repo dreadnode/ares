@@ -373,6 +373,7 @@ mod tests {
             description: "Built-in admin".to_string(),
             is_admin: true,
             source: String::new(),
+            member_of: Vec::new(),
         };
         let ctx = UserCtx::from(&user);
         assert_eq!(ctx.username, "admin");
@@ -388,6 +389,7 @@ mod tests {
             description: String::new(),
             is_admin: false,
             source: String::new(),
+            member_of: Vec::new(),
         };
         let ctx = UserCtx::from(&user);
         assert_eq!(ctx.admin_display, "No");

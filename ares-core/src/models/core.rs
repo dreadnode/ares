@@ -65,7 +65,7 @@ impl Host {
 
 /// Discovered user account.
 ///
-/// Redis serialization: `{"username","domain","source"}`
+/// Redis serialization: `{"username","domain","source","member_of"}`
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct User {
     pub username: String,
@@ -77,6 +77,20 @@ pub struct User {
     pub is_admin: bool,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub source: String,
+    /// Groups this principal belongs to, as returned by LDAP `memberOf`.
+    ///
+    /// Aliased because every producer emits the LDAP attribute name verbatim.
+    /// Without the alias this field silently defaulted to empty on every record
+    /// — the enumerators request `memberOf` in five places, and the value was
+    /// discarded at this deserialization boundary, which is why group-sourced
+    /// ACL edges had no principal to authenticate as.
+    #[serde(
+        default,
+        alias = "memberOf",
+        alias = "member_of",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub member_of: Vec<String>,
 }
 
 /// AD built-in accounts that ship `userAccountControl & ACCOUNTDISABLE` set
@@ -407,12 +421,39 @@ mod tests {
 
     #[test]
     fn user_serde_roundtrip() {
+        let ldap_shaped = serde_json::json!({
+            "username": "alice",
+            "domain": "contoso.local",
+            "memberOf": ["CN=Small Council,OU=Groups,DC=contoso,DC=local", "Domain Users"],
+        });
+        let parsed: User = serde_json::from_value(ldap_shaped).unwrap();
+        assert_eq!(
+            parsed.member_of,
+            vec![
+                "CN=Small Council,OU=Groups,DC=contoso,DC=local".to_string(),
+                "Domain Users".to_string()
+            ],
+            "the LDAP attribute name must survive deserialization"
+        );
+
+        let snake_shaped = serde_json::json!({
+            "username": "bob",
+            "member_of": ["Small Council"],
+        });
+        let parsed: User = serde_json::from_value(snake_shaped).unwrap();
+        assert_eq!(parsed.member_of, vec!["Small Council".to_string()]);
+
+        let absent: User =
+            serde_json::from_value(serde_json::json!({"username": "carol"})).unwrap();
+        assert!(absent.member_of.is_empty());
+
         let user = User {
             username: "jdoe".to_string(),
             domain: "CONTOSO".to_string(),
             description: "John Doe".to_string(),
             is_admin: true,
             source: "ldap".to_string(),
+            member_of: Vec::new(),
         };
         let json = serde_json::to_string(&user).unwrap();
         let deser: User = serde_json::from_str(&json).unwrap();

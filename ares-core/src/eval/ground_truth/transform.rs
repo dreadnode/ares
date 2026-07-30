@@ -294,6 +294,7 @@ mod tests {
             description: String::new(),
             is_admin: true,
             source: String::new(),
+            member_of: Vec::new(),
         });
         let gt = create_ground_truth_from_red_state(&state, &[]);
         let user_iocs: Vec<_> = gt
@@ -314,6 +315,7 @@ mod tests {
             description: String::new(),
             is_admin: false,
             source: String::new(),
+            member_of: Vec::new(),
         });
         let gt = create_ground_truth_from_red_state(&state, &[]);
         let user_iocs: Vec<_> = gt

@@ -15,6 +15,7 @@ fn make_user(domain: &str, username: &str) -> User {
         description: String::new(),
         is_admin: false,
         source: String::new(),
+        member_of: Vec::new(),
     }
 }
 

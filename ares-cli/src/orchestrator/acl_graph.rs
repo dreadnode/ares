@@ -114,6 +114,42 @@ fn detail_str(vuln: &ares_core::models::VulnerabilityInfo, keys: &[&str]) -> Str
 }
 
 /// Lift the ACL-typed vulnerabilities in `state` into graph edges.
+/// Members of `group_name` derived from enumerated `memberOf`, lowercased.
+///
+/// The BloodHound collector parser is the only other producer of
+/// `source_members`, and BloodHound almost never runs — so without this an ACE
+/// granted to a group named a principal nothing could authenticate as, and the
+/// edge was undispatchable by both ACL drivers.
+///
+/// Matches the `memberOf` value either whole or on its leading `CN=` RDN, since
+/// LDAP returns full distinguished names while ACL edges carry bare names.
+fn members_from_ldap(state: &StateInner, group_name: &str) -> Vec<String> {
+    let wanted = group_name.trim().to_lowercase();
+    if wanted.is_empty() {
+        return Vec::new();
+    }
+
+    let mut members: Vec<String> = state
+        .users
+        .iter()
+        .filter(|u| {
+            u.member_of.iter().any(|g| {
+                let g = g.trim().to_lowercase();
+                g == wanted
+                    || g.split(',')
+                        .next()
+                        .and_then(|rdn| rdn.strip_prefix("cn="))
+                        .is_some_and(|cn| cn == wanted)
+            })
+        })
+        .map(|u| u.username.to_lowercase())
+        .collect();
+
+    members.sort();
+    members.dedup();
+    members
+}
+
 pub(crate) fn build_edges(state: &StateInner) -> Vec<AclEdge> {
     let mut edges: Vec<AclEdge> = state
         .discovered_vulnerabilities
@@ -128,7 +164,7 @@ pub(crate) fn build_edges(state: &StateInner) -> Vec<AclEdge> {
             }
             let domain = detail_str(v, &["domain", "source_domain"]);
             let source_domain = detail_str(v, &["source_domain", "domain"]);
-            let source_members = v
+            let source_members: Vec<String> = v
                 .details
                 .get("source_members")
                 .and_then(|m| m.as_array())
@@ -139,6 +175,11 @@ pub(crate) fn build_edges(state: &StateInner) -> Vec<AclEdge> {
                         .collect()
                 })
                 .unwrap_or_default();
+            let source_members = if source_members.is_empty() {
+                members_from_ldap(state, &source)
+            } else {
+                source_members
+            };
             Some(AclEdge {
                 vuln_id: v.vuln_id.clone(),
                 right: v.vuln_type.to_lowercase(),
@@ -613,6 +654,97 @@ mod tests {
         }
         s.credentials = creds;
         s
+    }
+
+    fn user_in(username: &str, groups: &[&str]) -> ares_core::models::User {
+        ares_core::models::User {
+            username: username.into(),
+            domain: "contoso.local".into(),
+            description: String::new(),
+            is_admin: false,
+            source: "ldap_enumeration".into(),
+            member_of: groups.iter().map(|g| (*g).to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn ldap_membership_makes_a_group_sourced_edge_dispatchable() {
+        let mut s = state_with(
+            vec![edge_vuln_typed(
+                "acl_addmember_smallcouncil_dragonstone",
+                "addmember",
+                "Small Council",
+                "DragonStone",
+                "Group",
+                &[],
+            )],
+            vec![cred("alice", "contoso.local", false)],
+        );
+        s.users.push(user_in("alice", &["Small Council"]));
+
+        let edges = build_edges(&s);
+        assert_eq!(edges.len(), 1);
+        assert_eq!(edges[0].source_members, vec!["alice".to_string()]);
+        assert!(edge_principals(&edges[0]).contains(&"alice".to_string()));
+
+        let a = analyze(&s);
+        assert_eq!(a.chains.len(), 1, "group-sourced edge must yield a chain");
+    }
+
+    #[test]
+    fn membership_matches_a_distinguished_name() {
+        let mut s = state_with(
+            vec![edge_vuln_typed(
+                "acl_addmember_smallcouncil_dragonstone",
+                "addmember",
+                "Small Council",
+                "DragonStone",
+                "Group",
+                &[],
+            )],
+            vec![],
+        );
+        s.users.push(user_in(
+            "bob",
+            &["CN=Small Council,OU=Groups,DC=contoso,DC=local"],
+        ));
+
+        assert_eq!(build_edges(&s)[0].source_members, vec!["bob".to_string()]);
+    }
+
+    #[test]
+    fn bloodhound_supplied_members_are_not_overwritten() {
+        let s = state_with(
+            vec![edge_vuln_typed(
+                "acl_addmember_smallcouncil_dragonstone",
+                "addmember",
+                "Small Council",
+                "DragonStone",
+                "Group",
+                &["carol"],
+            )],
+            vec![],
+        );
+
+        assert_eq!(build_edges(&s)[0].source_members, vec!["carol".to_string()]);
+    }
+
+    #[test]
+    fn non_members_do_not_leak_into_an_edge() {
+        let mut s = state_with(
+            vec![edge_vuln_typed(
+                "acl_addmember_smallcouncil_dragonstone",
+                "addmember",
+                "Small Council",
+                "DragonStone",
+                "Group",
+                &[],
+            )],
+            vec![],
+        );
+        s.users.push(user_in("dave", &["Domain Users"]));
+
+        assert!(build_edges(&s)[0].source_members.is_empty());
     }
 
     #[test]

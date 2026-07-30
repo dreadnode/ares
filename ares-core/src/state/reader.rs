@@ -766,6 +766,7 @@ mod tests {
             description: String::new(),
             is_admin: false,
             source: "ldap".to_string(),
+            member_of: Vec::new(),
         }
     }
 
