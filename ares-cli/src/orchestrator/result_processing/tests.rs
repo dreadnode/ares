@@ -1251,6 +1251,17 @@ fn is_ticket_grant_vuln_recognizes_delegation_prefixes() {
     assert!(is_ticket_grant_vuln("s4u_admin_at_contoso"));
 }
 
+/// A silver ticket's only product is an SPN-scoped ccache — the same shape the
+/// delegation primitives have. Without the prefix here, a clean
+/// `generate_silver_ticket` run against an injected/queued `silver_ticket_*`
+/// vuln is recorded as a FAILED exploit despite ticketer exiting 0.
+#[test]
+fn is_ticket_grant_vuln_recognizes_silver_ticket() {
+    use super::is_ticket_grant_vuln;
+    assert!(is_ticket_grant_vuln("silver_ticket_192.168.58.51_SQL01$"));
+    assert!(is_ticket_grant_vuln("SILVER_TICKET_sql01_svc_sql"));
+}
+
 #[test]
 fn is_ticket_grant_vuln_rejects_non_ticket_primitives() {
     use super::is_ticket_grant_vuln;

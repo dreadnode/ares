@@ -1157,6 +1157,7 @@ fn is_ticket_grant_vuln(vuln_id: &str) -> bool {
         || v.starts_with("rbcd_")
         || v.starts_with("s4u_")
         || v.starts_with("golden_ticket_")
+        || v.starts_with("silver_ticket_")
 }
 
 fn exploit_failure_reason<'a>(error: Option<&'a str>, result: &'a Option<Value>) -> &'a str {

@@ -127,6 +127,7 @@ pub static TOOL_TO_TECHNIQUE: LazyLock<HashMap<&str, &str>> = LazyLock::new(|| {
         ("unconstrained_tgt_dump", "T1558.001"),
         ("unconstrained_coerce_and_capture", "T1558.001"),
         ("generate_golden_ticket", "T1558.001"),
+        ("generate_silver_ticket", "T1558.002"),
         ("add_computer", "T1136.002"),
         ("addspn", "T1098.001"),
         ("krbrelayup", "T1134.001"),
@@ -317,6 +318,7 @@ pub static TOOL_TO_CATEGORY: LazyLock<HashMap<&str, &str>> = LazyLock::new(|| {
         ("mssql_linked_xpcmdshell", "MSSQLTools"),
         // ── GoldenTicketTools ───────────────────────────────────────────
         ("generate_golden_ticket", "GoldenTicketTools"),
+        ("generate_silver_ticket", "GoldenTicketTools"),
     ])
 });
 

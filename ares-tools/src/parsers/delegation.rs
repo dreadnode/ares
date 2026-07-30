@@ -409,6 +409,128 @@ pub fn parse_add_computer(output: &str, params: &Value) -> Vec<Value> {
     })]
 }
 
+/// Marker `privesc::delegation::generate_silver_ticket` appends to ticketer's
+/// stdout carrying the SPN the ticket was scoped to.
+///
+/// ticketer prints the same `Saving ticket in <principal>.ccache` line for a
+/// TGT and a TGS, so the SPN is the only thing that identifies a forge as a
+/// silver ticket. Both the parser below and the orchestrator's golden-ticket
+/// completion check key off this marker.
+pub const SILVER_TICKET_SPN_MARKER: &str = "[ares] silver_ticket_spn: ";
+
+/// Extract the forged service ticket from `generate_silver_ticket` output.
+///
+/// A silver ticket produces no credential, hash, or host — its whole result is
+/// a ccache on disk bound to one SPN. The orchestrator's exploit evidence gate
+/// only credits a task when `discoveries` carries something a parser put there,
+/// so without this the forge lands as a *failed* exploit despite ticketer
+/// exiting 0. The record goes under `spns` because that is an evidence-only
+/// discovery key: it satisfies the gate without being re-queued for
+/// exploitation the way a `vulnerabilities` entry would be.
+pub fn parse_silver_ticket(output: &str, params: &Value) -> Vec<Value> {
+    let Some(spn) = output
+        .lines()
+        .find_map(|l| l.trim().strip_prefix(SILVER_TICKET_SPN_MARKER))
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    else {
+        return Vec::new();
+    };
+    let ccache = output
+        .lines()
+        .find_map(|l| l.trim().rsplit_once("Saving ticket in "))
+        .map(|(_, path)| path.trim())
+        .filter(|p| p.ends_with(".ccache"));
+    let Some(ccache) = ccache else {
+        return Vec::new();
+    };
+    let param = |key: &str| params.get(key).and_then(|v| v.as_str()).unwrap_or("");
+    vec![json!({
+        "spn": spn,
+        "service_account": param("username"),
+        "domain": param("domain"),
+        "impersonated": params
+            .get("impersonate")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .unwrap_or("Administrator"),
+        "ticket_path": ccache,
+        "source": "generate_silver_ticket",
+    })]
+}
+
+#[cfg(test)]
+mod silver_ticket_tests {
+    use super::*;
+
+    fn params() -> Value {
+        json!({
+            "username": "SQL01$",
+            "domain": "contoso.local",
+            "spn": "MSSQLSvc/sql01.contoso.local:1433",
+        })
+    }
+
+    fn forged(spn: &str) -> String {
+        format!(
+            "Impacket v0.13.0\n\
+             [*] Creating basic skeleton ticket and PAC Infos\n\
+             [*] Signing/Encrypting final ticket\n\
+             [*] Saving ticket in Administrator.ccache\n\
+             {SILVER_TICKET_SPN_MARKER}{spn}\n"
+        )
+    }
+
+    #[test]
+    fn records_the_forged_service_ticket() {
+        let out = forged("MSSQLSvc/sql01.contoso.local:1433");
+        let spns = parse_silver_ticket(&out, &params());
+        assert_eq!(spns.len(), 1);
+        assert_eq!(spns[0]["spn"], "MSSQLSvc/sql01.contoso.local:1433");
+        assert_eq!(spns[0]["service_account"], "SQL01$");
+        assert_eq!(spns[0]["domain"], "contoso.local");
+        assert_eq!(spns[0]["impersonated"], "Administrator");
+        assert_eq!(spns[0]["ticket_path"], "Administrator.ccache");
+        assert_eq!(spns[0]["source"], "generate_silver_ticket");
+    }
+
+    #[test]
+    fn carries_the_impersonated_principal_from_params() {
+        let mut p = params();
+        p.as_object_mut()
+            .unwrap()
+            .insert("impersonate".into(), json!("alice"));
+        let spns = parse_silver_ticket(&forged("cifs/sql01.contoso.local"), &p);
+        assert_eq!(spns[0]["impersonated"], "alice");
+    }
+
+    /// ticketer exits 0 on some failures and the marker is only appended on
+    /// success, so evidence must require BOTH the marker and the saved ccache.
+    #[test]
+    fn requires_both_the_marker_and_a_saved_ccache() {
+        let no_marker = "[*] Saving ticket in Administrator.ccache\n";
+        assert!(parse_silver_ticket(no_marker, &params()).is_empty());
+
+        let no_ccache =
+            format!("[-] Kerberos SessionError\n{SILVER_TICKET_SPN_MARKER}cifs/sql01\n");
+        assert!(parse_silver_ticket(&no_ccache, &params()).is_empty());
+    }
+
+    #[test]
+    fn ignores_a_ticket_saved_to_a_non_ccache_path() {
+        let kirbi = format!(
+            "[*] Saving ticket in Administrator.kirbi\n{SILVER_TICKET_SPN_MARKER}cifs/sql01\n"
+        );
+        assert!(parse_silver_ticket(&kirbi, &params()).is_empty());
+    }
+
+    #[test]
+    fn empty_marker_value_yields_no_evidence() {
+        let blank = format!("[*] Saving ticket in a.ccache\n{SILVER_TICKET_SPN_MARKER}\n");
+        assert!(parse_silver_ticket(&blank, &params()).is_empty());
+    }
+}
+
 #[cfg(test)]
 mod add_computer_tests {
     use super::*;

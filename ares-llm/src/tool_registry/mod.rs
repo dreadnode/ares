@@ -628,6 +628,7 @@ mod tests {
         assert!(names.contains(&"certipy_find"));
         assert!(names.contains(&"find_delegation"));
         assert!(names.contains(&"generate_golden_ticket"));
+        assert!(names.contains(&"generate_silver_ticket"));
         assert!(names.contains(&"extract_trust_key"));
         // MSSQL tools shared from lateral module (privesc container has impacket-mssqlclient)
         assert!(names.contains(&"mssql_command"));
@@ -635,6 +636,35 @@ mod tests {
         assert!(names.contains(&"mssql_enum_linked_servers"));
         // secretsdump_kerberos shared from lateral for cross-forest trust exploitation
         assert!(names.contains(&"secretsdump_kerberos"));
+    }
+
+    /// The silver-ticket schema is the contract with the worker's credential
+    /// resolver: it injects the signing key off `(username, domain)` and the SID
+    /// off `domain`, so those three must stay LLM-visible while every secret is
+    /// stripped. Naming the signing account anything other than `username`
+    /// silently breaks injection and the tool dispatches with no key.
+    #[test]
+    fn silver_ticket_schema_names_the_principal_and_hides_the_key() {
+        let tools = tools_for_role(AgentRole::Privesc);
+        let schema = &tools
+            .iter()
+            .find(|t| t.name == "generate_silver_ticket")
+            .expect("privesc registry must advertise generate_silver_ticket")
+            .input_schema;
+        let props = schema["properties"].as_object().expect("properties");
+        for visible in ["username", "domain", "spn", "impersonate"] {
+            assert!(props.contains_key(visible), "{visible} must stay visible");
+        }
+        for secret in ["hash", "aes_key", "domain_sid"] {
+            assert!(!props.contains_key(secret), "{secret} must be stripped");
+        }
+        let required: Vec<&str> = schema["required"]
+            .as_array()
+            .expect("required")
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect();
+        assert_eq!(required, vec!["username", "domain", "spn"]);
     }
 
     #[test]

@@ -364,8 +364,35 @@ natively inside it:**
 - **Foreign security principals and ACL chains** — principals from
   `{{ target_domain }}` that already hold rights in the foreign forest.
 
-Note: silver ticket forging is done via impacket's ticketer.py if needed;
-golden ticket is preferred for persistence once a krbtgt hash is in hand.
+## Ticket Forging
+
+`generate_golden_ticket` (krbtgt hash → domain-wide TGT) is what you want once a
+krbtgt hash is in hand. When it is not, `generate_silver_ticket` forges a TGS for
+a single SPN using that **service account's own** key — no krbtgt, no DC traffic:
+
+```
+generate_silver_ticket(
+    username="SQL01$",
+    domain="{{ target_domain }}",
+    spn="MSSQLSvc/sql01.{{ target_domain }}:1433",
+    impersonate="Administrator"
+)
+```
+
+`username` is the account that owns the SPN and signs the ticket — a machine
+account (`SQL01$`), a gMSA, or a service user. `impersonate` is who you become.
+Do not put the principal you want to become in `username`; the key is looked up
+for whatever `username` names, and a mismatch forges nothing usable.
+
+Where the key comes from: `secretsdump` against a member server yields that
+host's own `$MACHINE.ACC` LSA secret, a gMSA read yields the managed password's
+hash, and an NTDS dump yields every machine account. A **cracked** kerberoast
+password is NOT usable here — ticketer needs the NT hash or AES key, not the
+cleartext.
+
+Scope the SPN to what you actually want: `cifs/<host>` for SMB shares,
+`host/<host>` for scheduled tasks, `MSSQLSvc/<host>:1433` for SQL,
+`HTTP/<host>` for WinRM. The ticket is rejected by every other service.
 
 ## Local Privilege Escalation
 
@@ -463,6 +490,7 @@ For local privilege escalation via RBCD (requires ability to add computer):
 |------|----------|
 | get_sid | Get domain SID for ticket forging |
 | generate_golden_ticket | Forge TGT with krbtgt hash |
+| generate_silver_ticket | Forge a TGS for one SPN with the service account's own hash (no krbtgt needed) |
 | extract_trust_key | Extract inter-realm trust key |
 | create_inter_realm_ticket | Forge inter-realm TGT |
 

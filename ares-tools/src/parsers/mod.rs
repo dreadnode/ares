@@ -30,7 +30,10 @@ pub use credential_tools::{
     parse_adidnsdump, parse_laps, parse_ldap_descriptions, parse_lsassy, parse_netexec_auth,
     parse_ntds_dit, parse_spray_success,
 };
-pub use delegation::{extract_delegation_account, parse_add_computer, parse_delegation};
+pub use delegation::{
+    extract_delegation_account, parse_add_computer, parse_delegation, parse_silver_ticket,
+    SILVER_TICKET_SPN_MARKER,
+};
 pub use lateral::{
     parse_mssql_session, parse_remote_exec, parse_smb_share_access, parse_tgt_request,
 };
@@ -298,6 +301,13 @@ pub fn parse_tool_output(tool_name: &str, output: &str, params: &Value) -> Value
                 &mut discoveries,
                 "credentials",
                 parse_add_computer(output, params),
+            );
+        }
+        "generate_silver_ticket" => {
+            set_if_nonempty(
+                &mut discoveries,
+                "spns",
+                parse_silver_ticket(output, params),
             );
         }
         "lsassy" => {
@@ -2202,6 +2212,36 @@ Starting mitm6 using the domain: contoso.local
     fn parse_tool_output_mssql_ntlm_coerce_skipped_when_params_missing() {
         let disc = parse_tool_output("mssql_ntlm_coerce", "", &json!({}));
         assert!(disc.get("vulnerabilities").is_none());
+    }
+
+    /// The wiring that keeps a successful forge from being scored as a failure:
+    /// without this arm `discoveries` comes back empty and the orchestrator's
+    /// exploit evidence gate sees nothing a parser produced.
+    #[test]
+    fn parse_tool_output_silver_ticket_records_the_forged_spn() {
+        let output = format!(
+            "[*] Signing/Encrypting final ticket\n\
+             [*] Saving ticket in Administrator.ccache\n\
+             {SILVER_TICKET_SPN_MARKER}cifs/sql01.contoso.local\n"
+        );
+        let params = json!({
+            "username": "SQL01$",
+            "domain": "contoso.local",
+            "spn": "cifs/sql01.contoso.local",
+        });
+        let disc = parse_tool_output("generate_silver_ticket", &output, &params);
+        let spns = disc["spns"].as_array().expect("spns");
+        assert_eq!(spns.len(), 1);
+        assert_eq!(spns[0]["spn"], "cifs/sql01.contoso.local");
+        assert_eq!(spns[0]["service_account"], "SQL01$");
+        assert_eq!(spns[0]["ticket_path"], "Administrator.ccache");
+    }
+
+    #[test]
+    fn parse_tool_output_silver_ticket_silent_on_failure() {
+        let output = "[-] Kerberos SessionError: KDC_ERR_ETYPE_NOSUPP";
+        let disc = parse_tool_output("generate_silver_ticket", output, &json!({}));
+        assert!(disc.get("spns").is_none());
     }
 
     // ── nopac ─────────────────────────────────────────────────────────

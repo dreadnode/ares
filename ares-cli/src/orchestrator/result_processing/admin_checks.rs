@@ -17,8 +17,16 @@ pub(crate) fn resolve_da_path(_payload: &Value) -> Option<String> {
 }
 
 /// Check if text indicates a golden ticket was saved.
+///
+/// ticketer prints the same `Saving ticket in <principal>.ccache` line whether
+/// it forged a TGT or an SPN-scoped TGS, so a silver ticket would otherwise
+/// publish the domain-wide golden-ticket milestone off a single-service ticket.
+/// `generate_silver_ticket` stamps its SPN into stdout; its presence disqualifies
+/// the text.
 pub(crate) fn has_golden_ticket_indicator(text: &str) -> bool {
-    text.contains("Saving ticket in") && text.contains(".ccache")
+    text.contains("Saving ticket in")
+        && text.contains(".ccache")
+        && !text.contains(ares_tools::parsers::SILVER_TICKET_SPN_MARKER)
 }
 
 /// Parse a Pwn3d! line to extract (domain, username).
@@ -519,6 +527,18 @@ mod tests {
         assert!(has_golden_ticket_indicator(
             "Saving ticket in administrator.ccache"
         ));
+    }
+
+    /// A silver ticket forge prints the identical `Saving ticket in
+    /// <principal>.ccache` line. Crediting it as a golden ticket would publish
+    /// the domain-wide TGT milestone off a ticket good for one service.
+    #[test]
+    fn golden_ticket_indicator_rejects_a_silver_ticket_forge() {
+        let silver = format!(
+            "[*] Saving ticket in Administrator.ccache\n{}MSSQLSvc/sql01.contoso.local:1433\n",
+            ares_tools::parsers::SILVER_TICKET_SPN_MARKER
+        );
+        assert!(!has_golden_ticket_indicator(&silver));
     }
 
     #[test]

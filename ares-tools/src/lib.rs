@@ -188,6 +188,7 @@ pub async fn dispatch(tool_name: &str, arguments: &Value) -> Result<ToolOutput> 
         "find_delegation" => privesc::find_delegation(arguments).await,
         "s4u_attack" => privesc::s4u_attack(arguments).await,
         "generate_golden_ticket" => privesc::generate_golden_ticket(arguments).await,
+        "generate_silver_ticket" => privesc::generate_silver_ticket(arguments).await,
         "add_computer" => privesc::add_computer(arguments).await,
         "addspn" => privesc::addspn(arguments).await,
         "rbcd_write" => privesc::rbcd_write(arguments).await,

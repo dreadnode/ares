@@ -110,7 +110,7 @@ roles:
           - impacket-ticketer
           - impacket-secretsdump
           - impacket-psexec
-        fn_names: [generate_golden_ticket, add_computer, rbcd_write, extract_trust_key, create_inter_realm_ticket, get_sid]
+        fn_names: [generate_golden_ticket, generate_silver_ticket, add_computer, rbcd_write, extract_trust_key, create_inter_realm_ticket, get_sid]
 
   lateral:
     provisioned_by: ansible/playbooks/ares/lateral_movement.yml
