@@ -339,13 +339,10 @@ pub async fn run_investigation(
         }
     }
 
-    // Re-check golden tickets before scoring.
-    //
-    // The opening sweep's window closes when the investigation opens, which is
-    // usually before the intrusion's final phase — and domain compromise is the
-    // last phase. Runs here, ahead of scoring and the report, so a late
-    // forged-TGT detection counts toward both.
-    super::sweep::recheck_golden_tickets(&investigation.investigation_id).await;
+    let (_golden, _silver) = tokio::join!(
+        super::sweep::recheck_golden_tickets(&investigation.investigation_id),
+        super::sweep::recheck_silver_tickets(&investigation.investigation_id),
+    );
 
     // Score investigation against red team ground truth
     if let Some(op_id) = &investigation.operation_id {

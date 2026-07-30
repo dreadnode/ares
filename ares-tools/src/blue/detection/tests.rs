@@ -299,6 +299,44 @@ fn golden_ticket_keys_on_ticket_encryption_type() {
     );
 }
 
+/// `detect_silver_ticket` is a grounding anchor, not a firing rule.
+///
+/// The blue write path refuses any MITRE ID no catalog template covers, and the
+/// coverage join matches exact or parent/child but never siblings — so T1558.002
+/// needs its own entry or the correlation in the blue orchestrator's sweep can
+/// record nothing. The entry must NOT be satisfiable: its candidate shape (4624,
+/// logon type 3, Kerberos) is every legitimate SMB/LDAP/MSSQL access in the
+/// domain, so a firing version would stamp T1558.002 on every investigation. The
+/// third stage requires a KDC ticket field that no 4624 carries — because by
+/// definition the DC never saw the forged ticket — which is exactly why the real
+/// rule has to be a cross-host correlation.
+#[test]
+fn silver_ticket_template_anchors_t1558_002_without_being_satisfiable() {
+    let (_, entry) = ares_core::detection::find_template("detect_silver_ticket")
+        .expect("T1558.002 needs a catalog template to ground blue writes");
+    assert_eq!(entry.mitre_id, "T1558.002");
+
+    let silver = build_detection_template("detect_silver_ticket", None)
+        .unwrap()
+        .logql;
+    assert!(
+        silver.contains(r#"|= "4624""#),
+        "silver must pre-filter to the logon event, got: {silver}"
+    );
+    assert!(
+        silver.contains("LogonType..u003e3.u003c"),
+        "silver must anchor LogonType to exactly 3, got: {silver}"
+    );
+    assert!(
+        silver.contains("AuthenticationPackageName..u003eKerberos"),
+        "silver must exclude NTLM logons (T1550.002, not a forged ticket), got: {silver}"
+    );
+    assert!(
+        silver.contains("TicketEncryptionType"),
+        "silver must keep the KDC-issuance stage that makes it non-firing, got: {silver}"
+    );
+}
+
 #[test]
 fn kerberoasting_keys_on_ticket_encryption_type() {
     // Same failure as golden, on the rule that actually fires. The old patterns

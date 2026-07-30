@@ -67,12 +67,62 @@ const EVENT_SERVICE_TICKET: &str = "4769";
 /// Windows event ID for a Kerberos TGT request (AS-REQ).
 const EVENT_TGT_REQUEST: &str = "4768";
 
-const GOLDEN_TICKET_MITRE_ID: &str = "T1558.001";
+/// Windows event ID for a successful logon.
+const EVENT_LOGON: &str = "4624";
 
 /// Source name recorded for correlation hits. Deliberately distinct from the
-/// `detect_golden_ticket` template so evidence points at the rule that actually
-/// concluded something.
-const GOLDEN_TICKET_SOURCE: &str = "golden_ticket_correlation";
+/// catalog template names so evidence points at the rule that actually
+/// concluded something rather than at the anchor that cannot fire.
+const GOLDEN_TICKET_RULE: TicketRule = TicketRule {
+    mitre_id: "T1558.001",
+    source: "golden_ticket_correlation",
+    description: "Golden Ticket Detection (service tickets with no preceding TGT request)",
+    tactic: "persistence",
+    severity: "critical",
+    event_noun: "service ticket",
+    finding_label: "Forged-TGT usage",
+    finding_detail: "requested Kerberos service tickets with no TGT request in the baseline window",
+};
+
+/// A Silver Ticket is the mirror image of a Golden Ticket: a TGS forged offline
+/// with the *service account's* key and handed straight to that service, so the
+/// KDC mints nothing and there is no 4769 anywhere. The service host still logs
+/// a successful Kerberos network logon (4624, LogonType 3), which line-by-line
+/// is indistinguishable from every legitimate SMB, LDAP, MSSQL and WinRM access
+/// in the domain. The discriminating signal is again an absent partner event,
+/// this time one host over — so `detect_silver_ticket` is the same kind of
+/// non-firing catalog anchor and the real rule is
+/// [`run_silver_ticket_correlation`].
+const SILVER_TICKET_RULE: TicketRule = TicketRule {
+    mitre_id: "T1558.002",
+    source: "silver_ticket_correlation",
+    description: "Silver Ticket Detection (Kerberos service logon with no KDC-issued ticket)",
+    tactic: "credential_access",
+    severity: "critical",
+    event_noun: "Kerberos logon",
+    finding_label: "Forged service-ticket usage",
+    finding_detail: "completed Kerberos network logons with no service ticket issued by any DC in \
+                     the baseline window",
+};
+
+/// Identity and prose for one forged-ticket correlation.
+///
+/// Both rules share the whole comparison pipeline and differ only in which pair
+/// of events they diff and how the result is worded, so the differences live in
+/// data rather than in a duplicated code path.
+struct TicketRule {
+    mitre_id: &'static str,
+    source: &'static str,
+    description: &'static str,
+    tactic: &'static str,
+    severity: &'static str,
+    /// Unit for the per-principal event count in prose.
+    event_noun: &'static str,
+    /// Short name for what the orphans did, opening the timeline sentence.
+    finding_label: &'static str,
+    /// Rest of that sentence, describing the absence that was observed.
+    finding_detail: &'static str,
+}
 
 /// Loki labels the account identity is aggregated into.
 const ACCOUNT_LABEL: &str = "ares_account";
@@ -88,6 +138,17 @@ const DOMAIN_LABEL: &str = "ares_domain";
 const ACCOUNT_REGEXP: &str = r#"TargetUserName'\\u003e(?P<ares_account>[^\\]*)"#;
 const DOMAIN_REGEXP: &str = r#"TargetDomainName'\\u003e(?P<ares_domain>[^\\]*)"#;
 
+/// Line filters narrowing 4624 to a Kerberos *network* logon — the shape a
+/// forged service ticket produces on the host it is presented to.
+///
+/// `LogonType` 3 excludes interactive (2), service (5), unlock (7) and RDP (10)
+/// logons, none of which a silver ticket drives, and the trailing `\\u003c`
+/// anchors the value so `3` cannot also match a two-digit type. The
+/// authentication package excludes NTLM, which is Pass-the-Hash (T1550.002),
+/// not a forged ticket. Same JSON-escaped XML shape the catalog templates match.
+const LOGON_TYPE_NETWORK_REGEXP: &str = r#"LogonType'\\u003e3\\u003c"#;
+const KERBEROS_PACKAGE_REGEXP: &str = r#"AuthenticationPackageName'\\u003eKerberos"#;
+
 /// Hours of TGT history forming the "this account got a ticket legitimately"
 /// baseline.
 ///
@@ -100,33 +161,58 @@ const DOMAIN_REGEXP: &str = r#"TargetDomainName'\\u003e(?P<ares_domain>[^\\]*)"#
 /// this 8h baseline left none.
 const DEFAULT_GOLDEN_BASELINE_HOURS: i64 = 8;
 
+/// Hours of service-ticket history forming the silver-ticket baseline.
+///
+/// Wider than the golden baseline on purpose. The quantity being bounded here is
+/// how long a *service ticket* stays usable without going back to the KDC, and
+/// that is the domain's 10h maximum ticket lifetime — a client with a cached TGS
+/// keeps authenticating to the service for the whole of it, emitting 4624s with
+/// no matching 4769. Anything under 10h therefore turns ordinary long-lived
+/// sessions into reported forgeries, which is the one error this rule cannot
+/// afford.
+const DEFAULT_SILVER_BASELINE_HOURS: i64 = 12;
+
+/// Suffix marking a Windows machine account.
+///
+/// Machine accounts are dropped from the silver-ticket candidate set. Computers
+/// authenticate to each other constantly and cache their service tickets for the
+/// full ticket lifetime, so they dominate the 4624 network-logon population and
+/// would swamp the real signal with boundary artifacts — the same reason the
+/// DCSync templates exclude them. The cost is a blind spot for a ticket forged
+/// under a machine-account client name; the point of a silver ticket is to
+/// impersonate a privileged *user* to one service, so that is the cheaper error.
+const MACHINE_ACCOUNT_SUFFIX: char = '$';
+
 /// Cap on principals enumerated in the timeline and the prompt. The count
 /// reported is always the true one; only the enumeration is bounded.
 const MAX_REPORTED_ORPHANS: usize = 20;
 
-/// An account that requested service tickets without ever requesting a TGT.
+/// A principal whose Kerberos activity has no matching KDC event.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct OrphanAccount {
     /// `account@domain`, both normalised.
     pub account: String,
-    pub service_ticket_count: u64,
+    /// Candidate-side events observed for this principal — service-ticket
+    /// requests for the golden rule, network logons for the silver rule.
+    pub event_count: u64,
 }
 
-/// A completed 4769-without-4768 comparison.
+/// A completed candidate-versus-baseline comparison.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub(crate) struct GoldenTicketCorrelation {
-    /// Distinct accounts that requested a service ticket in the candidate window.
+pub(crate) struct TicketCorrelation {
+    /// Distinct principals seen on the candidate side of the diff.
     pub candidates: usize,
-    /// Distinct accounts with a TGT request across the wider baseline window.
+    /// Distinct principals with the partner KDC event across the wider baseline
+    /// window.
     pub baseline: usize,
-    /// Candidates with no TGT request anywhere in the baseline window.
+    /// Candidates with no partner event anywhere in the baseline window.
     pub orphans: Vec<OrphanAccount>,
 }
 
-/// What the correlation was able to conclude.
+/// What a correlation was able to conclude.
 #[derive(Debug, Clone)]
-pub(crate) enum GoldenTicketOutcome {
-    Correlated(GoldenTicketCorrelation),
+pub(crate) enum TicketOutcome {
+    Correlated(TicketCorrelation),
     /// Ran but drew no conclusion — reported rather than silently treated as
     /// "clean", because "we could not tell" and "nothing was there" carry very
     /// different follow-up obligations for the analyst.
@@ -136,10 +222,10 @@ pub(crate) enum GoldenTicketOutcome {
 /// Why a comparison could not conclude.
 #[derive(Debug, PartialEq, Eq)]
 enum CorrelationGap {
-    /// No service-ticket activity at all — nothing to correlate against.
+    /// No candidate-side activity at all — nothing to correlate against.
     NoCandidates,
-    /// No TGT activity anywhere in the baseline window. A live domain always
-    /// mints TGTs, so this means the baseline query broke or the log shape
+    /// No KDC activity anywhere in the baseline window. A live domain always
+    /// mints tickets, so this means the baseline query broke or the log shape
     /// changed. Failing closed matters here: an empty baseline makes *every*
     /// account look orphaned and would report the whole domain as forged.
     NoBaseline,
@@ -198,13 +284,17 @@ fn principal_totals(series: &[ares_tools::blue::loki::MetricSeries]) -> BTreeMap
     totals
 }
 
-/// Diff service-ticket principals against TGT principals.
+/// Diff candidate principals against the principals the KDC has a record for.
+///
+/// Orphans come back loudest first: the principal with the most candidate events
+/// is the one that actually did something with the forged ticket, so it is the
+/// one worth naming when the enumeration is capped.
 fn correlate(
-    service_tickets: &[ares_tools::blue::loki::MetricSeries],
-    tgt_requests: &[ares_tools::blue::loki::MetricSeries],
-) -> Result<GoldenTicketCorrelation, CorrelationGap> {
-    let candidates = principal_totals(service_tickets);
-    let baseline = principal_totals(tgt_requests);
+    candidate_events: &[ares_tools::blue::loki::MetricSeries],
+    kdc_events: &[ares_tools::blue::loki::MetricSeries],
+) -> Result<TicketCorrelation, CorrelationGap> {
+    let candidates = principal_totals(candidate_events);
+    let baseline = principal_totals(kdc_events);
 
     if candidates.is_empty() {
         return Err(CorrelationGap::NoCandidates);
@@ -218,18 +308,16 @@ fn correlate(
         .filter(|(account, _)| !baseline.contains_key(account.as_str()))
         .map(|(account, count)| OrphanAccount {
             account: account.clone(),
-            service_ticket_count: *count,
+            event_count: *count,
         })
         .collect();
-    // Loudest first — the account with the most service tickets is the one that
-    // actually did something with the forged TGT.
     orphans.sort_by(|a, b| {
-        b.service_ticket_count
-            .cmp(&a.service_ticket_count)
+        b.event_count
+            .cmp(&a.event_count)
             .then_with(|| a.account.cmp(&b.account))
     });
 
-    Ok(GoldenTicketCorrelation {
+    Ok(TicketCorrelation {
         candidates: candidates.len(),
         baseline: baseline.len(),
         orphans,
@@ -246,12 +334,36 @@ fn correlate(
 /// mark a forged account as legitimately authenticated — a false negative in
 /// exactly the case this rule exists to catch.
 fn account_aggregation_query(event_id: &str, hours: i64) -> String {
+    event_aggregation_query(event_id, hours, &[])
+}
+
+/// Build the aggregation that returns one series per account for `event_id`,
+/// narrowed by any additional line-filter regexes.
+///
+/// The extra filters are applied before the `regexp` parsers so Loki discards
+/// non-matching lines without paying for label extraction.
+fn event_aggregation_query(event_id: &str, hours: i64, line_filters: &[&str]) -> String {
     let selector = ares_tools::blue::detection::build_selector(
         ares_tools::blue::detection::WIN_SECURITY,
         None,
     );
+    let filters: String = line_filters
+        .iter()
+        .map(|f| format!(" |~ `{f}`"))
+        .collect::<Vec<_>>()
+        .join("");
     format!(
-        r#"sum by ({ACCOUNT_LABEL}, {DOMAIN_LABEL}) (count_over_time({selector} |= `"event_id":{event_id}` | regexp `{ACCOUNT_REGEXP}` | regexp `{DOMAIN_REGEXP}` [{hours}h]))"#
+        r#"sum by ({ACCOUNT_LABEL}, {DOMAIN_LABEL}) (count_over_time({selector} |= `"event_id":{event_id}`{filters} | regexp `{ACCOUNT_REGEXP}` | regexp `{DOMAIN_REGEXP}` [{hours}h]))"#
+    )
+}
+
+/// Build the aggregation over Kerberos *network* logons — the silver-ticket
+/// candidate set.
+fn kerberos_logon_aggregation_query(hours: i64) -> String {
+    event_aggregation_query(
+        EVENT_LOGON,
+        hours,
+        &[LOGON_TYPE_NETWORK_REGEXP, KERBEROS_PACKAGE_REGEXP],
     )
 }
 
@@ -264,7 +376,7 @@ fn account_aggregation_query(event_id: &str, hours: i64) -> String {
 async fn run_golden_ticket_correlation(
     candidate_hours: i64,
     baseline_hours: i64,
-) -> Result<GoldenTicketCorrelation, String> {
+) -> Result<TicketCorrelation, String> {
     let candidate_query = account_aggregation_query(EVENT_SERVICE_TICKET, candidate_hours);
     let baseline_query = account_aggregation_query(EVENT_TGT_REQUEST, baseline_hours);
     let (service_tickets, tgt_requests) = tokio::join!(
@@ -288,22 +400,68 @@ async fn run_golden_ticket_correlation(
     })
 }
 
-impl GoldenTicketCorrelation {
+/// Whether a candidate series belongs to a Windows machine account.
+fn is_machine_account(labels: &BTreeMap<String, String>) -> bool {
+    labels
+        .get(ACCOUNT_LABEL)
+        .and_then(|raw| normalize_account(raw))
+        .is_some_and(|a| a.ends_with(MACHINE_ACCOUNT_SUFFIX))
+}
+
+/// Run the correlation: which principals completed a Kerberos network logon that
+/// no DC ever issued a service ticket for?
+///
+/// The baseline is the 4769 stream, so a legitimate client — which must ask the
+/// KDC for a TGS before it can present one — always appears on both sides. A
+/// silver ticket appears only on the candidate side, because the service host
+/// validates it with its own key and the KDC is never involved.
+///
+/// Both queries must succeed, for the same reason as the golden correlation: an
+/// empty baseline is indistinguishable from a domain nobody authenticated in and
+/// would report every active principal as a forgery.
+async fn run_silver_ticket_correlation(
+    candidate_hours: i64,
+    baseline_hours: i64,
+) -> Result<TicketCorrelation, String> {
+    let candidate_query = kerberos_logon_aggregation_query(candidate_hours);
+    let baseline_query = account_aggregation_query(EVENT_SERVICE_TICKET, baseline_hours);
+    let (logons, service_tickets) = tokio::join!(
+        ares_tools::blue::loki::query_metric_series(&candidate_query, None),
+        ares_tools::blue::loki::query_metric_series(&baseline_query, None),
+    );
+
+    let logons = logons.map_err(|e| format!("Kerberos logon ({EVENT_LOGON}) query failed: {e}"))?;
+    let service_tickets = service_tickets
+        .map_err(|e| format!("service-ticket ({EVENT_SERVICE_TICKET}) query failed: {e}"))?;
+
+    let user_logons: Vec<ares_tools::blue::loki::MetricSeries> = logons
+        .into_iter()
+        .filter(|(labels, _)| !is_machine_account(labels))
+        .collect();
+
+    correlate(&user_logons, &service_tickets).map_err(|gap| match gap {
+        CorrelationGap::NoCandidates => format!(
+            "no user Kerberos network logons ({EVENT_LOGON}, logon type 3) in the last \
+             {candidate_hours}h — nothing to correlate"
+        ),
+        CorrelationGap::NoBaseline => format!(
+            "no {EVENT_SERVICE_TICKET} activity in the last {baseline_hours}h; a live domain always \
+             issues service tickets, so the baseline is untrustworthy and no verdict is drawn"
+        ),
+    })
+}
+
+impl TicketCorrelation {
     /// Represent orphaned accounts as a fired detection so they flow through
     /// the same recording and prompt path as every template hit.
-    fn as_fired(&self) -> Option<FiredDetection> {
+    fn as_fired(&self, rule: &TicketRule) -> Option<FiredDetection> {
         (!self.orphans.is_empty()).then(|| FiredDetection {
-            template: GOLDEN_TICKET_SOURCE.to_string(),
-            mitre_id: GOLDEN_TICKET_MITRE_ID.to_string(),
-            description: "Golden Ticket Detection (service tickets with no preceding TGT request)"
-                .to_string(),
-            tactic: "persistence".to_string(),
-            severity: "critical".to_string(),
-            event_count: self
-                .orphans
-                .iter()
-                .map(|o| o.service_ticket_count as usize)
-                .sum(),
+            template: rule.source.to_string(),
+            mitre_id: rule.mitre_id.to_string(),
+            description: rule.description.to_string(),
+            tactic: rule.tactic.to_string(),
+            severity: rule.severity.to_string(),
+            event_count: self.orphans.iter().map(|o| o.event_count as usize).sum(),
             first_event_at: None,
             last_event_at: None,
             hosts: Vec::new(),
@@ -375,7 +533,9 @@ pub(crate) struct SweepOutcome {
     pub not_run: Vec<String>,
     pub timed_out: bool,
     /// Golden-ticket correlation result; `None` when it was disabled.
-    pub golden_ticket: Option<GoldenTicketOutcome>,
+    pub golden_ticket: Option<TicketOutcome>,
+    /// Silver-ticket correlation result; `None` when it was disabled.
+    pub silver_ticket: Option<TicketOutcome>,
 }
 
 impl SweepOutcome {
@@ -451,6 +611,7 @@ impl SweepOutcome {
         }
 
         s.push_str(&self.golden_ticket_summary());
+        s.push_str(&self.silver_ticket_summary());
 
         if self.timed_out && !self.not_run.is_empty() {
             s.push_str(&format!(
@@ -486,22 +647,22 @@ impl SweepOutcome {
         let Some(outcome) = &self.golden_ticket else {
             return String::new();
         };
+        let id = GOLDEN_TICKET_RULE.mitre_id;
         let mut s = String::from("Golden ticket correlation (4769 with no preceding 4768): ");
         match outcome {
-            GoldenTicketOutcome::Inconclusive(reason) => {
+            TicketOutcome::Inconclusive(reason) => {
                 s.push_str(&format!(
-                    "NO VERDICT — {reason}. Treat {GOLDEN_TICKET_MITRE_ID} as unchecked, not as \
-                     absent.\n\n"
+                    "NO VERDICT — {reason}. Treat {id} as unchecked, not as absent.\n\n"
                 ));
             }
-            GoldenTicketOutcome::Correlated(c) if c.orphans.is_empty() => {
+            TicketOutcome::Correlated(c) if c.orphans.is_empty() => {
                 s.push_str(&format!(
                     "CLEAN — all {} account(s) that requested a service ticket also requested a \
                      TGT (baseline: {} account(s)). There was no forged-TGT usage.\n\
                      This correlation is the authoritative answer for \
-                     {GOLDEN_TICKET_MITRE_ID}; it is the only signal that can distinguish a forged \
+                     {id}; it is the only signal that can distinguish a forged \
                      TGT from ordinary Kerberos traffic. Do NOT record \
-                     {GOLDEN_TICKET_MITRE_ID} on top of it. In particular, none of these are \
+                     {id} on top of it. In particular, none of these are \
                      golden-ticket indicators — each matches ordinary traffic: a 4769 whose \
                      ServiceName is krbtgt (that is a TGT renewal), a TicketOptions value like \
                      0x40810010 (that is the ordinary value), a request from a non-DC IP (every \
@@ -510,26 +671,14 @@ impl SweepOutcome {
                     c.candidates, c.baseline
                 ));
             }
-            GoldenTicketOutcome::Correlated(c) => {
+            TicketOutcome::Correlated(c) => {
                 s.push_str(&format!(
                     "{} of {} account(s) used service tickets with NO TGT request in the baseline \
-                     window — the signature of a forged TGT. Already recorded as \
-                     {GOLDEN_TICKET_MITRE_ID}:\n",
+                     window — the signature of a forged TGT. Already recorded as {id}:\n",
                     c.orphans.len(),
                     c.candidates
                 ));
-                for o in c.orphans.iter().take(MAX_REPORTED_ORPHANS) {
-                    s.push_str(&format!(
-                        "- {} ({} service ticket(s))\n",
-                        o.account, o.service_ticket_count
-                    ));
-                }
-                if c.orphans.len() > MAX_REPORTED_ORPHANS {
-                    s.push_str(&format!(
-                        "- …and {} more (listing capped at {MAX_REPORTED_ORPHANS})\n",
-                        c.orphans.len() - MAX_REPORTED_ORPHANS
-                    ));
-                }
+                s.push_str(&orphan_listing(&c.orphans, GOLDEN_TICKET_RULE.event_noun));
                 s.push_str(
                     "Pivot on these accounts: what they authenticated to and what they touched.\n\n",
                 );
@@ -537,6 +686,87 @@ impl SweepOutcome {
         }
         s
     }
+
+    /// Report the silver-ticket correlation, including when it concluded
+    /// nothing.
+    ///
+    /// Held to the same standard as the golden summary: `detect_silver_ticket`
+    /// cannot fire, so if this section were silent the analyst would read the
+    /// template's absence from the FIRED list as "checked, clean" when the truth
+    /// may be that the correlation never returned an answer.
+    fn silver_ticket_summary(&self) -> String {
+        let Some(outcome) = &self.silver_ticket else {
+            return String::new();
+        };
+        let id = SILVER_TICKET_RULE.mitre_id;
+        let mut s = String::from(
+            "Silver ticket correlation (Kerberos network logon on a service host with no 4769 on \
+             any DC): ",
+        );
+        match outcome {
+            TicketOutcome::Inconclusive(reason) => {
+                s.push_str(&format!(
+                    "NO VERDICT — {reason}. Treat {id} as unchecked, not as absent.\n\n"
+                ));
+            }
+            TicketOutcome::Correlated(c) if c.orphans.is_empty() => {
+                s.push_str(&format!(
+                    "CLEAN — all {} user account(s) that completed a Kerberos network logon were \
+                     also issued a service ticket by a DC (baseline: {} account(s)). No forged \
+                     service ticket was presented. Machine accounts are excluded from the \
+                     candidate set: they cache service tickets for the full ticket lifetime, so \
+                     they generate boundary artifacts rather than signal.\n\
+                     This correlation is the authoritative answer for {id}; it is the only signal \
+                     that can distinguish a forged service ticket from ordinary Kerberos traffic, \
+                     because the forged ticket is validated by the service's own key and the KDC \
+                     is never involved. Do NOT record {id} on top of it. In particular, none of \
+                     these are silver-ticket indicators — each matches ordinary traffic: a 4624 \
+                     with logon type 3 and AuthenticationPackageName Kerberos (that is every SMB, \
+                     LDAP, MSSQL and WinRM access in the domain), a 4672 next to it (every \
+                     administrative logon emits one), an RC4 session key, or a logon from a \
+                     non-DC IP. A forged ticket that the DC DID issue a 4769 for is not a silver \
+                     ticket — check the golden correlation instead.\n\n",
+                    c.candidates, c.baseline
+                ));
+            }
+            TicketOutcome::Correlated(c) => {
+                s.push_str(&format!(
+                    "{} of {} user account(s) completed Kerberos network logons that NO DC issued \
+                     a service ticket for in the baseline window — the signature of a service \
+                     ticket forged with the service account's own key. Already recorded as \
+                     {id}:\n",
+                    c.orphans.len(),
+                    c.candidates
+                ));
+                s.push_str(&orphan_listing(&c.orphans, SILVER_TICKET_RULE.event_noun));
+                s.push_str(
+                    "Pivot on these accounts: which hosts and services they logged on to, whether \
+                     a 4672 accompanied the logon (a forged PAC claiming privileged groups), and \
+                     what the session then accessed. The service account whose key was used is \
+                     compromised too — find how its hash was obtained.\n\n",
+                );
+            }
+        }
+        s
+    }
+}
+
+/// Render orphaned principals as a bounded bullet list.
+///
+/// The cap is declared in the output rather than applied silently: a truncated
+/// list that looks complete would understate the blast radius.
+fn orphan_listing(orphans: &[OrphanAccount], noun: &str) -> String {
+    let mut s = String::new();
+    for o in orphans.iter().take(MAX_REPORTED_ORPHANS) {
+        s.push_str(&format!("- {} ({} {noun}(s))\n", o.account, o.event_count));
+    }
+    if orphans.len() > MAX_REPORTED_ORPHANS {
+        s.push_str(&format!(
+            "- …and {} more (listing capped at {MAX_REPORTED_ORPHANS})\n",
+            orphans.len() - MAX_REPORTED_ORPHANS
+        ));
+    }
+    s
 }
 
 /// Run the deterministic baseline detection sweep and record every hit.
@@ -582,6 +812,12 @@ pub(crate) async fn run_detection_sweep(
         tokio::spawn(run_golden_ticket_correlation(
             SWEEP_HOURS_BACK,
             golden_baseline_hours(),
+        ))
+    });
+    let mut silver_task = silver_ticket_enabled().then(|| {
+        tokio::spawn(run_silver_ticket_correlation(
+            SWEEP_HOURS_BACK,
+            silver_baseline_hours(),
         ))
     });
 
@@ -657,39 +893,35 @@ pub(crate) async fn run_detection_sweep(
         }
     }
 
-    // Collect the correlation against whatever is left of the same deadline. It
-    // shares the cap rather than getting its own, so a hung Loki can't push the
-    // sweep past the budget the investigation runner allows it.
-    let golden_ticket = match golden_task.as_mut() {
-        None => None,
-        Some(handle) => Some(
-            match tokio::time::timeout_at(deadline_at, &mut *handle).await {
-                Ok(Ok(Ok(c))) => GoldenTicketOutcome::Correlated(c),
-                Ok(Ok(Err(reason))) => GoldenTicketOutcome::Inconclusive(reason),
-                Ok(Err(e)) => {
-                    GoldenTicketOutcome::Inconclusive(format!("correlation task failed: {e}"))
-                }
-                Err(_) => {
-                    // Dropping a JoinHandle only detaches the task; abort so the
-                    // in-flight Loki queries actually stop.
-                    handle.abort();
-                    timed_out = true;
-                    GoldenTicketOutcome::Inconclusive(
-                        "hit the sweep time cap before both Kerberos queries returned".to_string(),
-                    )
-                }
-            },
-        ),
-    };
+    let mut golden_ticket = None;
+    if let Some(handle) = golden_task.as_mut() {
+        let (outcome, capped) = collect_correlation(handle, deadline_at).await;
+        timed_out |= capped;
+        golden_ticket = Some(outcome);
+    }
+    let mut silver_ticket = None;
+    if let Some(handle) = silver_task.as_mut() {
+        let (outcome, capped) = collect_correlation(handle, deadline_at).await;
+        timed_out |= capped;
+        silver_ticket = Some(outcome);
+    }
 
-    if let Some(GoldenTicketOutcome::Correlated(c)) = &golden_ticket {
-        if let Some(f) = c.as_fired() {
+    for (rule, outcome) in [
+        (&GOLDEN_TICKET_RULE, &golden_ticket),
+        (&SILVER_TICKET_RULE, &silver_ticket),
+    ] {
+        let Some(TicketOutcome::Correlated(c)) = outcome else {
+            continue;
+        };
+        if let Some(f) = c.as_fired(rule) {
             warn!(
                 investigation_id,
+                rule = rule.source,
+                mitre_id = rule.mitre_id,
                 orphan_accounts = c.orphans.len(),
                 candidates = c.candidates,
                 baseline = c.baseline,
-                "Golden ticket correlation found service tickets with no preceding TGT request"
+                "Forged-ticket correlation found Kerberos activity with no matching KDC record"
             );
             fired.push(f);
         }
@@ -718,10 +950,13 @@ pub(crate) async fn run_detection_sweep(
         record_fired(investigation_id, f).await;
     }
 
-    // The technique record above says "a golden ticket was used"; these say
-    // which accounts, which is what the analyst actually pivots on.
-    if let Some(GoldenTicketOutcome::Correlated(c)) = &golden_ticket {
-        record_orphan_accounts(investigation_id, &c.orphans).await;
+    for (rule, outcome) in [
+        (&GOLDEN_TICKET_RULE, &golden_ticket),
+        (&SILVER_TICKET_RULE, &silver_ticket),
+    ] {
+        if let Some(TicketOutcome::Correlated(c)) = outcome {
+            record_orphan_accounts(investigation_id, rule, &c.orphans).await;
+        }
     }
 
     let no_match: Vec<String> = completed
@@ -756,7 +991,8 @@ pub(crate) async fn run_detection_sweep(
         failed = failed.len(),
         not_run = not_run.len(),
         timed_out,
-        golden_ticket = %golden_ticket_log_value(&golden_ticket),
+        golden_ticket = %ticket_log_value(&golden_ticket),
+        silver_ticket = %ticket_log_value(&silver_ticket),
         "Baseline detection sweep complete"
     );
 
@@ -769,6 +1005,40 @@ pub(crate) async fn run_detection_sweep(
         not_run,
         timed_out,
         golden_ticket,
+        silver_ticket,
+    }
+}
+
+/// Await one correlation task under the sweep's shared deadline.
+///
+/// The deadline is the sweep's, not the task's own, so a hung Loki cannot push
+/// the sweep past the budget the investigation runner allows it. Returns whether
+/// the deadline was what ended it, so the caller can mark the sweep as capped.
+///
+/// Every failure mode collapses to `Inconclusive` rather than to a clean verdict:
+/// a task that never answered has not cleared the technique. On timeout the
+/// handle is aborted rather than dropped — dropping a `JoinHandle` only detaches
+/// the task, leaving the in-flight Loki queries running.
+async fn collect_correlation(
+    handle: &mut tokio::task::JoinHandle<Result<TicketCorrelation, String>>,
+    deadline_at: tokio::time::Instant,
+) -> (TicketOutcome, bool) {
+    match tokio::time::timeout_at(deadline_at, &mut *handle).await {
+        Ok(Ok(Ok(c))) => (TicketOutcome::Correlated(c), false),
+        Ok(Ok(Err(reason))) => (TicketOutcome::Inconclusive(reason), false),
+        Ok(Err(e)) => (
+            TicketOutcome::Inconclusive(format!("correlation task failed: {e}")),
+            false,
+        ),
+        Err(_) => {
+            handle.abort();
+            (
+                TicketOutcome::Inconclusive(
+                    "hit the sweep time cap before both Kerberos queries returned".to_string(),
+                ),
+                true,
+            )
+        }
     }
 }
 
@@ -790,59 +1060,85 @@ pub(crate) async fn run_detection_sweep(
 /// the only way T1558.001 can be found at all, since no template can express
 /// an absent partner event. Records are deduped by the underlying tools, so an
 /// overlap with the opening sweep is harmless.
-pub(crate) async fn recheck_golden_tickets(investigation_id: &str) -> Option<GoldenTicketOutcome> {
+pub(crate) async fn recheck_golden_tickets(investigation_id: &str) -> Option<TicketOutcome> {
     if !sweep_enabled() || !golden_ticket_enabled() {
         return None;
     }
+    let result = run_golden_ticket_correlation(SWEEP_HOURS_BACK, golden_baseline_hours()).await;
+    Some(record_recheck(investigation_id, &GOLDEN_TICKET_RULE, result).await)
+}
 
-    let outcome =
-        match run_golden_ticket_correlation(SWEEP_HOURS_BACK, golden_baseline_hours()).await {
-            Ok(c) => GoldenTicketOutcome::Correlated(c),
-            Err(reason) => GoldenTicketOutcome::Inconclusive(reason),
-        };
+/// Re-run the silver-ticket correlation as the investigation closes.
+///
+/// Same reason as the golden re-check, and if anything more acute: a silver
+/// ticket is forged from a service-account key that red only obtains partway
+/// through the intrusion, so the forged logon lands even later in the timeline
+/// than a forged TGT. The opening sweep's window closes before the ticket exists.
+pub(crate) async fn recheck_silver_tickets(investigation_id: &str) -> Option<TicketOutcome> {
+    if !sweep_enabled() || !silver_ticket_enabled() {
+        return None;
+    }
+    let result = run_silver_ticket_correlation(SWEEP_HOURS_BACK, silver_baseline_hours()).await;
+    Some(record_recheck(investigation_id, &SILVER_TICKET_RULE, result).await)
+}
+
+/// Log a closing re-check's verdict and record it if it found anything.
+async fn record_recheck(
+    investigation_id: &str,
+    rule: &TicketRule,
+    result: Result<TicketCorrelation, String>,
+) -> TicketOutcome {
+    let outcome = match result {
+        Ok(c) => TicketOutcome::Correlated(c),
+        Err(reason) => TicketOutcome::Inconclusive(reason),
+    };
 
     info!(
         investigation_id,
-        golden_ticket = %golden_ticket_log_value(&Some(outcome.clone())),
-        "Golden ticket correlation re-checked at investigation close"
+        rule = rule.source,
+        mitre_id = rule.mitre_id,
+        verdict = %ticket_log_value(&Some(outcome.clone())),
+        "Forged-ticket correlation re-checked at investigation close"
     );
 
-    if let GoldenTicketOutcome::Correlated(c) = &outcome {
-        if let Some(f) = c.as_fired() {
+    if let TicketOutcome::Correlated(c) = &outcome {
+        if let Some(f) = c.as_fired(rule) {
             warn!(
                 investigation_id,
+                rule = rule.source,
+                mitre_id = rule.mitre_id,
                 orphan_accounts = c.orphans.len(),
                 candidates = c.candidates,
                 baseline = c.baseline,
-                "Golden ticket correlation found forged-TGT usage on the closing re-check \
+                "Forged-ticket correlation found a forgery on the closing re-check \
                  (the opening sweep ran before this activity was logged)"
             );
             record_fired(investigation_id, &f).await;
-            record_orphan_accounts(investigation_id, &c.orphans).await;
+            record_orphan_accounts(investigation_id, rule, &c.orphans).await;
         }
     }
 
-    Some(outcome)
+    outcome
 }
 
-/// Render the correlation's verdict for the sweep's completion log.
+/// Render a correlation's verdict for the sweep's completion log.
 ///
 /// Every outcome has to be distinguishable from the log alone. Previously only
 /// a hit was logged (via `warn!`), which made "ran, found nothing" and "never
-/// produced an answer" look identical — silence. That is the one ambiguity this
-/// rule cannot afford, since a clean verdict is treated downstream as
-/// authoritative that no forged TGT was used.
-fn golden_ticket_log_value(outcome: &Option<GoldenTicketOutcome>) -> String {
+/// produced an answer" look identical — silence. That is the one ambiguity these
+/// rules cannot afford, since a clean verdict is treated downstream as
+/// authoritative that no ticket was forged.
+fn ticket_log_value(outcome: &Option<TicketOutcome>) -> String {
     match outcome {
         None => "disabled".to_string(),
-        Some(GoldenTicketOutcome::Inconclusive(reason)) => format!("no_verdict ({reason})"),
-        Some(GoldenTicketOutcome::Correlated(c)) if c.orphans.is_empty() => {
+        Some(TicketOutcome::Inconclusive(reason)) => format!("no_verdict ({reason})"),
+        Some(TicketOutcome::Correlated(c)) if c.orphans.is_empty() => {
             format!(
                 "clean ({} candidates vs {} baseline)",
                 c.candidates, c.baseline
             )
         }
-        Some(GoldenTicketOutcome::Correlated(c)) => format!(
+        Some(TicketOutcome::Correlated(c)) => format!(
             "{} orphan(s) of {} candidates",
             c.orphans.len(),
             c.candidates
@@ -868,6 +1164,9 @@ async fn record_state(context: &str, tool: &str, args: &serde_json::Value) {
 
 /// Name the orphaned principals in the investigation timeline.
 ///
+/// The technique record from [`record_fired`] says a ticket was forged; this says
+/// which accounts, which is what the analyst actually pivots on.
+///
 /// These go in the timeline rather than `add_evidence` on purpose. Evidence
 /// values are gated by a grounding check that requires the value to appear
 /// verbatim in a stored query result, and `account@domain` is a *derived*
@@ -876,34 +1175,34 @@ async fn record_state(context: &str, tool: &str, args: &serde_json::Value) {
 /// would be silently rejected, and satisfying the check by injecting a
 /// synthetic query result would hollow out a safeguard that exists to stop
 /// fabricated IOCs. The technique-level record in [`record_fired`] already
-/// carries T1558.001 (its value is the MITRE ID, which auto-grounds); this
+/// carries the rule's MITRE ID (its value is the ID, which auto-grounds); this
 /// adds the names an analyst needs to pivot on.
 ///
 /// The enumeration is capped, and the cap is logged rather than applied
 /// silently — a truncated list that looks complete would understate the blast
 /// radius of a domain-wide forgery.
-async fn record_orphan_accounts(investigation_id: &str, orphans: &[OrphanAccount]) {
+async fn record_orphan_accounts(
+    investigation_id: &str,
+    rule: &TicketRule,
+    orphans: &[OrphanAccount],
+) {
     if orphans.is_empty() {
         return;
     }
     if orphans.len() > MAX_REPORTED_ORPHANS {
         warn!(
             investigation_id,
+            rule = rule.source,
             total = orphans.len(),
             recorded = MAX_REPORTED_ORPHANS,
-            "Golden ticket orphan list truncated; not every principal was named in the timeline"
+            "Forged-ticket orphan list truncated; not every principal was named in the timeline"
         );
     }
 
     let named: Vec<String> = orphans
         .iter()
         .take(MAX_REPORTED_ORPHANS)
-        .map(|o| {
-            format!(
-                "{} ({} service ticket(s))",
-                o.account, o.service_ticket_count
-            )
-        })
+        .map(|o| format!("{} ({} {}(s))", o.account, o.event_count, rule.event_noun))
         .collect();
     let suffix = if orphans.len() > named.len() {
         format!(" …and {} more", orphans.len() - named.len())
@@ -912,20 +1211,21 @@ async fn record_orphan_accounts(investigation_id: &str, orphans: &[OrphanAccount
     };
 
     record_state(
-        GOLDEN_TICKET_SOURCE,
+        rule.source,
         "record_timeline_event",
         &json!({
             "investigation_id": investigation_id,
             "description": format!(
-                "Forged-TGT usage: {} principal(s) requested Kerberos service tickets with no \
-                 TGT request in the baseline window — {}{}",
+                "{}: {} principal(s) {} — {}{}",
+                rule.finding_label,
                 orphans.len(),
+                rule.finding_detail,
                 named.join(", "),
                 suffix
             ),
             "timestamp": chrono::Utc::now().to_rfc3339(),
-            "mitre_techniques": [GOLDEN_TICKET_MITRE_ID],
-            "source": format!("detection_sweep:{GOLDEN_TICKET_SOURCE}"),
+            "mitre_techniques": [rule.mitre_id],
+            "source": format!("detection_sweep:{}", rule.source),
             "confidence": 0.9,
         }),
     )
@@ -1055,7 +1355,17 @@ pub(crate) fn sweep_enabled() -> bool {
 /// Whether the golden-ticket correlation should run. Defaults on; set
 /// `ARES_BLUE_GOLDEN_TICKET_CORRELATION=0` to disable.
 fn golden_ticket_enabled() -> bool {
-    match std::env::var("ARES_BLUE_GOLDEN_TICKET_CORRELATION") {
+    correlation_enabled("ARES_BLUE_GOLDEN_TICKET_CORRELATION")
+}
+
+/// Whether the silver-ticket correlation should run. Defaults on; set
+/// `ARES_BLUE_SILVER_TICKET_CORRELATION=0` to disable.
+fn silver_ticket_enabled() -> bool {
+    correlation_enabled("ARES_BLUE_SILVER_TICKET_CORRELATION")
+}
+
+fn correlation_enabled(var: &str) -> bool {
+    match std::env::var(var) {
         Ok(v) => !matches!(
             v.trim().to_ascii_lowercase().as_str(),
             "0" | "false" | "no" | "off"
@@ -1064,16 +1374,34 @@ fn golden_ticket_enabled() -> bool {
     }
 }
 
-/// Baseline width for the correlation, overridable via
-/// `ARES_BLUE_GOLDEN_BASELINE_HOURS`. Clamped to at least the candidate window;
-/// a baseline narrower than the candidates would manufacture orphans out of
-/// window-boundary artifacts rather than find forged tickets.
+/// Baseline width for the golden correlation, overridable via
+/// `ARES_BLUE_GOLDEN_BASELINE_HOURS`.
 fn golden_baseline_hours() -> i64 {
-    std::env::var("ARES_BLUE_GOLDEN_BASELINE_HOURS")
+    baseline_hours(
+        "ARES_BLUE_GOLDEN_BASELINE_HOURS",
+        DEFAULT_GOLDEN_BASELINE_HOURS,
+    )
+}
+
+/// Baseline width for the silver correlation, overridable via
+/// `ARES_BLUE_SILVER_BASELINE_HOURS`.
+fn silver_baseline_hours() -> i64 {
+    baseline_hours(
+        "ARES_BLUE_SILVER_BASELINE_HOURS",
+        DEFAULT_SILVER_BASELINE_HOURS,
+    )
+}
+
+/// Resolve a baseline width, clamped to at least the candidate window.
+///
+/// A baseline narrower than the candidates would manufacture orphans out of
+/// window-boundary artifacts rather than find forged tickets.
+fn baseline_hours(var: &str, default: i64) -> i64 {
+    std::env::var(var)
         .ok()
         .and_then(|v| v.trim().parse::<i64>().ok())
         .filter(|h| *h >= 1)
-        .unwrap_or(DEFAULT_GOLDEN_BASELINE_HOURS)
+        .unwrap_or(default)
         .max(SWEEP_HOURS_BACK)
 }
 
@@ -1236,6 +1564,7 @@ mod tests {
             not_run: vec![],
             timed_out: false,
             golden_ticket: None,
+            silver_ticket: None,
         };
         let s = outcome.prompt_summary();
         assert!(s.contains("T1003.006"));
@@ -1257,6 +1586,7 @@ mod tests {
             not_run: vec!["detect_esc1_attack".into()],
             timed_out: true,
             golden_ticket: None,
+            silver_ticket: None,
         };
         let s = outcome.prompt_summary();
         assert!(s.contains("FIRED: none"));
@@ -1279,6 +1609,7 @@ mod tests {
             not_run: vec![],
             timed_out: false,
             golden_ticket: None,
+            silver_ticket: None,
         };
         let s = outcome.prompt_summary();
 
@@ -1392,7 +1723,7 @@ mod tests {
             result.orphans,
             vec![OrphanAccount {
                 account: "bob@contoso".to_string(),
-                service_ticket_count: 9,
+                event_count: 9,
             }]
         );
     }
@@ -1431,7 +1762,7 @@ mod tests {
             result.orphans,
             vec![OrphanAccount {
                 account: "admin@fabrikam".to_string(),
-                service_ticket_count: 12,
+                event_count: 12,
             }],
             "a same-named account in a different domain must not mask the forgery"
         );
@@ -1501,29 +1832,31 @@ mod tests {
 
     #[test]
     fn correlation_fires_only_with_orphans() {
-        let clean = GoldenTicketCorrelation {
+        let clean = TicketCorrelation {
             candidates: 3,
             baseline: 3,
             orphans: vec![],
         };
-        assert!(clean.as_fired().is_none());
+        assert!(clean.as_fired(&GOLDEN_TICKET_RULE).is_none());
 
-        let hit = GoldenTicketCorrelation {
+        let hit = TicketCorrelation {
             candidates: 3,
             baseline: 2,
             orphans: vec![
                 OrphanAccount {
                     account: "bob".into(),
-                    service_ticket_count: 9,
+                    event_count: 9,
                 },
                 OrphanAccount {
                     account: "admin".into(),
-                    service_ticket_count: 4,
+                    event_count: 4,
                 },
             ],
         };
-        let fired = hit.as_fired().expect("orphans must fire");
-        assert_eq!(fired.mitre_id, GOLDEN_TICKET_MITRE_ID);
+        let fired = hit
+            .as_fired(&GOLDEN_TICKET_RULE)
+            .expect("orphans must fire");
+        assert_eq!(fired.mitre_id, GOLDEN_TICKET_RULE.mitre_id);
         assert_eq!(fired.event_count, 13);
         assert_eq!(fired.severity, "critical");
     }
@@ -1531,7 +1864,7 @@ mod tests {
     #[test]
     fn summary_distinguishes_clean_from_unchecked() {
         let clean = SweepOutcome {
-            golden_ticket: Some(GoldenTicketOutcome::Correlated(GoldenTicketCorrelation {
+            golden_ticket: Some(TicketOutcome::Correlated(TicketCorrelation {
                 candidates: 4,
                 baseline: 19,
                 orphans: vec![],
@@ -1543,7 +1876,7 @@ mod tests {
         assert!(!s.contains("NO VERDICT"), "{s}");
 
         let broken = SweepOutcome {
-            golden_ticket: Some(GoldenTicketOutcome::Inconclusive("query failed".into())),
+            golden_ticket: Some(TicketOutcome::Inconclusive("query failed".into())),
             ..Default::default()
         };
         let s = broken.golden_ticket_summary();
@@ -1561,7 +1894,7 @@ mod tests {
         // verdict has to say so, or the LLM re-derives the same false positive
         // on top of a correlation that already answered the question.
         let clean = SweepOutcome {
-            golden_ticket: Some(GoldenTicketOutcome::Correlated(GoldenTicketCorrelation {
+            golden_ticket: Some(TicketOutcome::Correlated(TicketCorrelation {
                 candidates: 4,
                 baseline: 19,
                 orphans: vec![],
@@ -1571,7 +1904,8 @@ mod tests {
         let s = clean.golden_ticket_summary();
         assert!(
             s.contains("authoritative"),
-            "clean verdict must claim authority over {GOLDEN_TICKET_MITRE_ID}: {s}"
+            "clean verdict must claim authority over {}: {s}",
+            GOLDEN_TICKET_RULE.mitre_id
         );
         assert!(
             s.contains("Do NOT record"),
@@ -1590,11 +1924,11 @@ mod tests {
         let orphans: Vec<OrphanAccount> = (0..MAX_REPORTED_ORPHANS + 5)
             .map(|i| OrphanAccount {
                 account: format!("svc_{i:02}"),
-                service_ticket_count: 1,
+                event_count: 1,
             })
             .collect();
         let outcome = SweepOutcome {
-            golden_ticket: Some(GoldenTicketOutcome::Correlated(GoldenTicketCorrelation {
+            golden_ticket: Some(TicketOutcome::Correlated(TicketCorrelation {
                 candidates: 40,
                 baseline: 12,
                 orphans,
@@ -1603,7 +1937,7 @@ mod tests {
         };
         let s = outcome.golden_ticket_summary();
         assert!(s.contains("svc_00"), "{s}");
-        assert!(s.contains(GOLDEN_TICKET_MITRE_ID), "{s}");
+        assert!(s.contains(GOLDEN_TICKET_RULE.mitre_id), "{s}");
         // The cap is stated, not applied silently.
         assert!(s.contains("5 more"), "{s}");
         assert!(!s.contains("svc_24"), "listing must stop at the cap: {s}");
@@ -1616,11 +1950,34 @@ mod tests {
         // investigation.
         std::env::set_var("ARES_BLUE_DETERMINISTIC_SWEEP", "0");
         assert!(recheck_golden_tickets("inv-test").await.is_none());
+        assert!(recheck_silver_tickets("inv-test").await.is_none());
         std::env::remove_var("ARES_BLUE_DETERMINISTIC_SWEEP");
 
         std::env::set_var("ARES_BLUE_GOLDEN_TICKET_CORRELATION", "0");
         assert!(recheck_golden_tickets("inv-test").await.is_none());
         std::env::remove_var("ARES_BLUE_GOLDEN_TICKET_CORRELATION");
+
+        std::env::set_var("ARES_BLUE_SILVER_TICKET_CORRELATION", "0");
+        assert!(recheck_silver_tickets("inv-test").await.is_none());
+        std::env::remove_var("ARES_BLUE_SILVER_TICKET_CORRELATION");
+    }
+
+    /// Each correlation must be independently switchable, or turning one off to
+    /// cut query load silently disables the other technique too.
+    #[test]
+    fn correlation_toggles_are_independent() {
+        std::env::set_var("ARES_BLUE_GOLDEN_TICKET_CORRELATION", "0");
+        assert!(!golden_ticket_enabled());
+        assert!(silver_ticket_enabled());
+        std::env::remove_var("ARES_BLUE_GOLDEN_TICKET_CORRELATION");
+
+        std::env::set_var("ARES_BLUE_SILVER_TICKET_CORRELATION", "off");
+        assert!(!silver_ticket_enabled());
+        assert!(golden_ticket_enabled());
+        std::env::remove_var("ARES_BLUE_SILVER_TICKET_CORRELATION");
+
+        assert!(golden_ticket_enabled());
+        assert!(silver_ticket_enabled());
     }
 
     #[test]
@@ -1628,31 +1985,27 @@ mod tests {
         // "ran and found nothing" must never look like "never produced an
         // answer". A clean verdict is treated as authoritative downstream, so
         // the log has to say which one actually happened.
-        assert_eq!(golden_ticket_log_value(&None), "disabled");
+        assert_eq!(ticket_log_value(&None), "disabled");
 
-        let clean = golden_ticket_log_value(&Some(GoldenTicketOutcome::Correlated(
-            GoldenTicketCorrelation {
-                candidates: 4,
-                baseline: 19,
-                orphans: vec![],
-            },
-        )));
+        let clean = ticket_log_value(&Some(TicketOutcome::Correlated(TicketCorrelation {
+            candidates: 4,
+            baseline: 19,
+            orphans: vec![],
+        })));
         assert!(clean.starts_with("clean"), "{clean}");
         assert!(clean.contains('4') && clean.contains("19"), "{clean}");
 
-        let hit = golden_ticket_log_value(&Some(GoldenTicketOutcome::Correlated(
-            GoldenTicketCorrelation {
-                candidates: 5,
-                baseline: 19,
-                orphans: vec![OrphanAccount {
-                    account: "admin@contoso".into(),
-                    service_ticket_count: 3,
-                }],
-            },
-        )));
+        let hit = ticket_log_value(&Some(TicketOutcome::Correlated(TicketCorrelation {
+            candidates: 5,
+            baseline: 19,
+            orphans: vec![OrphanAccount {
+                account: "admin@contoso".into(),
+                event_count: 3,
+            }],
+        })));
         assert!(hit.contains("1 orphan"), "{hit}");
 
-        let broken = golden_ticket_log_value(&Some(GoldenTicketOutcome::Inconclusive(
+        let broken = ticket_log_value(&Some(TicketOutcome::Inconclusive(
             "baseline query failed".into(),
         )));
         assert!(broken.starts_with("no_verdict"), "{broken}");
@@ -1670,6 +2023,326 @@ mod tests {
     #[test]
     fn golden_summary_absent_when_correlation_disabled() {
         assert!(SweepOutcome::default().golden_ticket_summary().is_empty());
+    }
+
+    /// Both correlation IDs must be covered by a catalog template.
+    ///
+    /// This is the load-bearing link between the two halves of each rule. Blue
+    /// writes are gated on a MITRE ID the detection catalog can match — exact or
+    /// parent/child, never siblings — so an ID with no template is refused at the
+    /// write and the correlation records nothing at all. T1558.001 has
+    /// `detect_golden_ticket`; T1558.002 has `detect_silver_ticket`. Deleting
+    /// either template silently switches its correlation off.
+    #[test]
+    fn every_correlation_rule_id_is_covered_by_a_catalog_template() {
+        for rule in [&GOLDEN_TICKET_RULE, &SILVER_TICKET_RULE] {
+            let covered = detection_config().templates.values().any(|t| {
+                ares_core::correlation::redblue::RedBlueCorrelator::techniques_match(
+                    Some(rule.mitre_id),
+                    Some(&t.mitre_id),
+                )
+            });
+            assert!(
+                covered,
+                "{} has no catalog template, so every blue write for it is dropped",
+                rule.mitre_id
+            );
+        }
+    }
+
+    /// The two rules must not collapse onto one ID: coverage joins never match
+    /// siblings, so a shared ID would leave the other technique permanently
+    /// missed.
+    #[test]
+    fn the_two_ticket_rules_are_distinct() {
+        assert_ne!(GOLDEN_TICKET_RULE.mitre_id, SILVER_TICKET_RULE.mitre_id);
+        assert_ne!(GOLDEN_TICKET_RULE.source, SILVER_TICKET_RULE.source);
+        assert_eq!(SILVER_TICKET_RULE.mitre_id, "T1558.002");
+    }
+
+    /// admin completed Kerberos network logons that no DC ever issued a service
+    /// ticket for — the ticket was forged with the service account's key and
+    /// handed straight to the service. alice's logon has a matching 4769 and is
+    /// ordinary.
+    #[test]
+    fn silver_correlate_flags_logon_with_no_service_ticket() {
+        let result = correlate(
+            &series(&[
+                ("alice@CONTOSO.LOCAL", "CONTOSO.LOCAL", 3),
+                ("admin@CONTOSO.LOCAL", "CONTOSO.LOCAL", 6),
+            ]),
+            &series(&[("alice", "CONTOSO", 4), ("bob", "CONTOSO", 2)]),
+        )
+        .expect("both sides populated");
+
+        assert_eq!(
+            result.orphans,
+            vec![OrphanAccount {
+                account: "admin@contoso".to_string(),
+                event_count: 6,
+            }]
+        );
+    }
+
+    /// The non-matching case: every principal that authenticated to a service was
+    /// issued a ticket for it, so nothing was forged. This is the state a clean
+    /// domain is in, and firing here would put a false T1558.002 on every
+    /// investigation.
+    #[test]
+    fn silver_correlate_clears_logon_backed_by_a_service_ticket() {
+        let result = correlate(
+            &series(&[
+                ("alice@CONTOSO.LOCAL", "CONTOSO.LOCAL", 12),
+                ("svc_sql@CONTOSO.LOCAL", "CONTOSO.LOCAL", 40),
+            ]),
+            &series(&[("alice", "CONTOSO", 2), ("svc_sql", "CONTOSO", 5)]),
+        )
+        .expect("both sides populated");
+        assert!(
+            result.orphans.is_empty(),
+            "a KDC-issued ticket must clear the logon it authorised, got {:?}",
+            result.orphans
+        );
+    }
+
+    /// Computers re-authenticate constantly and cache their service tickets for
+    /// the full ticket lifetime, so they dominate the 4624 population and would
+    /// swamp the real signal with boundary artifacts.
+    ///
+    /// A half-identity carries no account name, so there is nothing to classify:
+    /// it must not be mistaken for a machine account and dropped for the wrong
+    /// reason (`correlate` drops it on the missing key instead).
+    #[test]
+    fn machine_accounts_are_dropped_from_silver_candidates() {
+        let mut labels = BTreeMap::new();
+        labels.insert(
+            ACCOUNT_LABEL.to_string(),
+            "SQL01$@CONTOSO.LOCAL".to_string(),
+        );
+        labels.insert(DOMAIN_LABEL.to_string(), "CONTOSO.LOCAL".to_string());
+        assert!(is_machine_account(&labels));
+
+        labels.insert(ACCOUNT_LABEL.to_string(), "admin@CONTOSO.LOCAL".to_string());
+        assert!(!is_machine_account(&labels));
+
+        assert!(!is_machine_account(&BTreeMap::new()));
+    }
+
+    #[test]
+    fn kerberos_logon_query_narrows_to_network_logons_only() {
+        let q = kerberos_logon_aggregation_query(SWEEP_HOURS_BACK);
+        assert!(
+            q.contains(r#"|= `"event_id":4624`"#),
+            "event filter must be anchored to the event_id field, or record IDs \
+             and ports containing 4624 come along too, got: {q}"
+        );
+        assert!(
+            q.contains(r#"LogonType'\\u003e3\\u003c"#),
+            "must anchor LogonType to exactly 3 — an unanchored 3 also matches \
+             two-digit types, got: {q}"
+        );
+        assert!(
+            q.contains(r#"AuthenticationPackageName'\\u003eKerberos"#),
+            "must exclude NTLM logons, which are T1550.002 not a forged ticket, got: {q}"
+        );
+        assert!(
+            q.contains(&format!("sum by ({ACCOUNT_LABEL}, {DOMAIN_LABEL})")),
+            "must aggregate per account AND domain — account alone is ambiguous \
+             across a forest, got: {q}"
+        );
+        assert!(
+            q.contains(&format!("[{SWEEP_HOURS_BACK}h]")),
+            "must apply the requested window, got: {q}"
+        );
+    }
+
+    /// The line filters have to run before the `regexp` parsers, or Loki pays for
+    /// label extraction on every 4624 in the domain before discarding it.
+    #[test]
+    fn kerberos_logon_query_filters_before_parsing() {
+        let q = kerberos_logon_aggregation_query(SWEEP_HOURS_BACK);
+        let package = q
+            .find("AuthenticationPackageName")
+            .expect("package filter present");
+        let first_parse = q.find("| regexp").expect("parsers present");
+        assert!(
+            package < first_parse,
+            "line filters must precede the regexp parsers, got: {q}"
+        );
+    }
+
+    /// The silver baseline is the service-ticket stream, not the TGT stream: a
+    /// silver ticket needs no TGT, so diffing against 4768 would clear it.
+    #[test]
+    fn silver_baseline_is_the_service_ticket_stream() {
+        let q = account_aggregation_query(EVENT_SERVICE_TICKET, 12);
+        assert!(q.contains(r#"|= `"event_id":4769`"#), "{q}");
+        assert!(!q.contains("4768"), "{q}");
+        assert!(q.contains("[12h]"), "{q}");
+    }
+
+    /// The silver baseline has to outlive a cached service ticket. A client with
+    /// a valid TGS keeps authenticating without going back to the KDC for the
+    /// domain's full 10h ticket lifetime, so a shorter baseline turns ordinary
+    /// long-lived sessions into reported forgeries.
+    #[test]
+    fn silver_baseline_outlives_the_maximum_ticket_lifetime() {
+        const MAX_TICKET_LIFETIME_HOURS: i64 = 10;
+        const {
+            assert!(
+                DEFAULT_SILVER_BASELINE_HOURS > MAX_TICKET_LIFETIME_HOURS,
+                "the silver baseline cannot vouch for a ticket that outlives it"
+            )
+        };
+        const {
+            assert!(
+                DEFAULT_SILVER_BASELINE_HOURS > DEFAULT_GOLDEN_BASELINE_HOURS,
+                "a cached service ticket outlives the TGT-request recency the \
+                 golden baseline was tuned for"
+            )
+        };
+
+        std::env::set_var("ARES_BLUE_SILVER_BASELINE_HOURS", "1");
+        assert!(silver_baseline_hours() >= SWEEP_HOURS_BACK);
+        std::env::set_var("ARES_BLUE_SILVER_BASELINE_HOURS", "24");
+        assert_eq!(silver_baseline_hours(), 24);
+        std::env::remove_var("ARES_BLUE_SILVER_BASELINE_HOURS");
+        assert_eq!(silver_baseline_hours(), DEFAULT_SILVER_BASELINE_HOURS);
+    }
+
+    /// The evidence type the sweep derives from the rule's tactic must be one
+    /// `validate_evidence` accepts, or the swept `add_evidence` call is silently
+    /// rejected and the detection lands as a technique with no evidence behind it.
+    #[test]
+    fn silver_correlation_fires_under_its_own_technique_id() {
+        let clean = TicketCorrelation {
+            candidates: 5,
+            baseline: 5,
+            orphans: vec![],
+        };
+        assert!(clean.as_fired(&SILVER_TICKET_RULE).is_none());
+
+        let hit = TicketCorrelation {
+            candidates: 5,
+            baseline: 4,
+            orphans: vec![
+                OrphanAccount {
+                    account: "admin@contoso".into(),
+                    event_count: 6,
+                },
+                OrphanAccount {
+                    account: "svc_sql@fabrikam".into(),
+                    event_count: 2,
+                },
+            ],
+        };
+        let fired = hit
+            .as_fired(&SILVER_TICKET_RULE)
+            .expect("orphans must fire");
+        assert_eq!(fired.mitre_id, "T1558.002");
+        assert_eq!(fired.template, "silver_ticket_correlation");
+        assert_eq!(fired.event_count, 8);
+        assert_eq!(fired.severity, "critical");
+        let et = evidence_type_for_tactic(&fired.tactic);
+        assert!(
+            ares_tools::blue::validation::validate_evidence(et, &fired.mitre_id, "detection_sweep")
+                .valid,
+            "evidence_type '{et}' rejected by validation"
+        );
+    }
+
+    /// The clean verdict has to name the non-signals, or the LLM re-derives
+    /// T1558.002 from ordinary Kerberos traffic on top of a correlation that
+    /// already answered the question — the same false positive the golden clean
+    /// verdict had to be hardened against.
+    #[test]
+    fn silver_summary_distinguishes_clean_from_unchecked() {
+        let clean = SweepOutcome {
+            silver_ticket: Some(TicketOutcome::Correlated(TicketCorrelation {
+                candidates: 7,
+                baseline: 22,
+                orphans: vec![],
+            })),
+            ..Default::default()
+        };
+        let s = clean.silver_ticket_summary();
+        assert!(s.contains("CLEAN"), "{s}");
+        assert!(!s.contains("NO VERDICT"), "{s}");
+        assert!(s.contains("authoritative"), "{s}");
+        assert!(s.contains("Do NOT record"), "{s}");
+        for non_signal in ["logon type 3", "4672", "RC4 session key", "non-DC IP"] {
+            assert!(
+                s.contains(non_signal),
+                "clean verdict must name the non-signal '{non_signal}': {s}"
+            );
+        }
+
+        let broken = SweepOutcome {
+            silver_ticket: Some(TicketOutcome::Inconclusive("logon query failed".into())),
+            ..Default::default()
+        };
+        let s = broken.silver_ticket_summary();
+        assert!(s.contains("NO VERDICT"), "{s}");
+        assert!(s.contains("unchecked"), "{s}");
+        assert!(!s.contains("CLEAN"), "{s}");
+    }
+
+    #[test]
+    fn silver_summary_names_orphans_and_declares_truncation() {
+        let orphans: Vec<OrphanAccount> = (0..MAX_REPORTED_ORPHANS + 3)
+            .map(|i| OrphanAccount {
+                account: format!("svc_{i:02}@contoso"),
+                event_count: 1,
+            })
+            .collect();
+        let outcome = SweepOutcome {
+            silver_ticket: Some(TicketOutcome::Correlated(TicketCorrelation {
+                candidates: 30,
+                baseline: 14,
+                orphans,
+            })),
+            ..Default::default()
+        };
+        let s = outcome.silver_ticket_summary();
+        assert!(s.contains("svc_00@contoso"), "{s}");
+        assert!(s.contains("Kerberos logon(s)"), "{s}");
+        assert!(s.contains("T1558.002"), "{s}");
+        assert!(s.contains("3 more"), "{s}");
+        assert!(!s.contains("svc_22"), "listing must stop at the cap: {s}");
+    }
+
+    #[test]
+    fn silver_summary_absent_when_correlation_disabled() {
+        assert!(SweepOutcome::default().silver_ticket_summary().is_empty());
+    }
+
+    /// Both correlations have to reach the prompt. Reporting only one would tell
+    /// the analyst the other technique was clean when it was never answered.
+    #[test]
+    fn prompt_summary_reports_both_correlations() {
+        let outcome = SweepOutcome {
+            templates_total: 2,
+            golden_ticket: Some(TicketOutcome::Correlated(TicketCorrelation {
+                candidates: 4,
+                baseline: 19,
+                orphans: vec![],
+            })),
+            silver_ticket: Some(TicketOutcome::Correlated(TicketCorrelation {
+                candidates: 6,
+                baseline: 19,
+                orphans: vec![OrphanAccount {
+                    account: "admin@contoso".into(),
+                    event_count: 5,
+                }],
+            })),
+            ..Default::default()
+        };
+        let s = outcome.prompt_summary();
+        assert!(s.contains("Golden ticket correlation"), "{s}");
+        assert!(s.contains("Silver ticket correlation"), "{s}");
+        assert!(s.contains("T1558.001"), "{s}");
+        assert!(s.contains("T1558.002"), "{s}");
+        assert!(s.contains("admin@contoso"), "{s}");
     }
 
     fn detection_at(last: Option<&str>) -> FiredDetection {
@@ -1766,6 +2439,7 @@ mod tests {
             not_run: vec![],
             timed_out: false,
             golden_ticket: None,
+            silver_ticket: None,
         };
         let s = outcome.prompt_summary();
         assert!(s.contains("OUTSIDE"), "must warn the LLM off them: {s}");

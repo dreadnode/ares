@@ -124,6 +124,13 @@ pub(super) static TECHNIQUES: LazyLock<HashMap<&'static str, Technique>> = LazyL
         detection: "Monitor for TGS requests (Event 4769) that reference the krbtgt service with RC4 encryption. Look for tickets with unusually long lifetimes or issued by non-existent accounts. Compare TGT encrypted timestamps against DC records.",
     });
 
+    m.insert("T1558.002", Technique {
+        name: "Silver Ticket",
+        description: "Adversaries who have the password hash of a target service account may forge Kerberos service tickets (TGS) for that service. A silver ticket is presented directly to the service, so the KDC is never involved and no ticket request is logged on any domain controller.",
+        tactics: &["Credential Access"],
+        detection: "The KDC never issues a silver ticket, so there is no Event 4769 for it anywhere. Correlate successful Kerberos network logons on service hosts (Event 4624, logon type 3, AuthenticationPackageName Kerberos) against 4769 service-ticket requests on the DCs: a principal that authenticated to a service with no service ticket issued for it presented a forged one. Watch for an accompanying Event 4672 when the forged PAC claims privileged groups.",
+    });
+
     m.insert("T1558.003", Technique {
         name: "Kerberoasting",
         description: "Adversaries may abuse a valid Kerberos TGT or sniff network traffic to obtain a TGS ticket that may be vulnerable to brute force. Service accounts with SPNs are targeted for offline password cracking.",
@@ -308,6 +315,7 @@ pub(super) static EVIDENCE_MAP: LazyLock<HashMap<&'static str, Vec<&'static str>
                 "T1003.006",
                 "T1558",
                 "T1558.001",
+                "T1558.002",
                 "T1558.003",
                 "T1558.004",
                 "T1110",
@@ -379,6 +387,7 @@ pub(super) static EVIDENCE_MAP: LazyLock<HashMap<&'static str, Vec<&'static str>
             vec![
                 "T1558",
                 "T1558.001",
+                "T1558.002",
                 "T1558.003",
                 "T1558.004",
                 "T1550",
@@ -393,6 +402,8 @@ pub(super) static EVIDENCE_MAP: LazyLock<HashMap<&'static str, Vec<&'static str>
         m.insert("dcsync", vec!["T1003.006"]);
 
         m.insert("golden_ticket", vec!["T1558.001"]);
+
+        m.insert("silver_ticket", vec!["T1558.002"]);
 
         m.insert("service_creation", vec!["T1543", "T1543.003"]);
 

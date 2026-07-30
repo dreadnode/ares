@@ -431,6 +431,49 @@ templates:
     red_team_tool: asrep_roast
     event_ids: ["4768"]
 
+  detect_silver_ticket:
+    description: "Silver Ticket Detection (Kerberos service logon with no KDC-issued ticket)"
+    mitre_id: "T1558.002"
+    tactic: credential_access
+    severity: critical
+    red_team_tool: generate_silver_ticket
+    event_ids: ["4624"]
+    # A Silver Ticket is a TGS forged offline with the SERVICE account's key and
+    # presented straight to that service, so the KDC never mints it and no 4769
+    # exists anywhere. What the service host does log is an ordinary successful
+    # Kerberos network logon: 4624 with LogonType 3 and AuthenticationPackageName
+    # Kerberos (plus a 4672 when the forged PAC claims privileged groups).
+    #
+    # Stages 1 and 2 are that candidate shape, keyed on the fields exactly — the
+    # '..u003e' matches the JSON-escaped `'>` between an EventData field name and
+    # its value, and the trailing '.u003c' anchors the LogonType value so 3 does
+    # not also match 30/13 (same escaping and anchoring as the AS-REP rule above).
+    #
+    # Those two stages ALONE match every legitimate SMB/LDAP/MSSQL/WinRM access in
+    # the domain — thousands of events per day — so on their own this rule would
+    # not detect a silver ticket, it would record T1558.002 on every run and
+    # destroy blue precision. Stage 3 is what makes the rule honest: the only thing
+    # that separates a forged service ticket from a legitimate one is proof the KDC
+    # issued it, and that proof lives in TicketEncryptionType on the DC's 4769 — a
+    # field no 4624 line carries, because by definition the DC never saw this
+    # ticket. A single literal, so Loki takes the fast contains path and the stage
+    # cannot widen the way an alternation could.
+    #
+    # This template therefore cannot fire, by construction. It is kept because the
+    # blue write path refuses any MITRE ID no catalog template covers, and coverage
+    # is an ID join that matches exact or parent/child but NEVER siblings — so
+    # without this entry T1558.002 could not be recorded at all and red's
+    # generate_silver_ticket would be a permanent "missed". The actual detection is
+    # the cross-host correlation no line filter can express — a Kerberos network
+    # logon on a service host with NO 4769 for that principal on any DC —
+    # implemented in code in `ares-cli/src/orchestrator/blue/sweep.rs`, which is
+    # what records T1558.002. Do not "fix" this rule by dropping stage 3; see
+    # detect_golden_ticket for the same structure on the TGT side.
+    filter_stages:
+      - ['LogonType..u003e3.u003c']
+      - ['AuthenticationPackageName..u003eKerberos']
+      - ['TicketEncryptionType']
+
   detect_brute_force:
     description: "Brute Force / Password Spray Detection"
     aliases: [detect_password_spray]
