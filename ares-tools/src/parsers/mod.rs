@@ -24,7 +24,7 @@ use serde_json::{json, Value};
 pub use bloodhound::{
     parse_bloodhound_collection, parse_bloodhound_documents, BLOODHOUND_OUTPUT_DIR_MARKER,
 };
-pub use certipy::{parse_certipy_esc1_chain, parse_certipy_find};
+pub use certipy::{parse_certipy_esc1_chain, parse_certipy_find, ESC_TYPES};
 pub use cracker::parse_cracker_output;
 pub use credential_tools::{
     parse_adidnsdump, parse_laps, parse_ldap_descriptions, parse_lsassy, parse_netexec_auth,

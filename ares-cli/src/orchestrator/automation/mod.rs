@@ -76,7 +76,7 @@ pub use acl::auto_acl_chain_follow;
 pub use acl_discovery::auto_acl_discovery;
 pub use adcs::auto_adcs_enumeration;
 pub use adcs_exploitation::auto_adcs_exploitation;
-pub(crate) use adcs_exploitation::EXPLOITABLE_ESC_TYPES;
+pub(crate) use adcs_exploitation::{EXPLOITABLE_ESC_TYPES, UNEXPLOITABLE_ESC_TYPES};
 pub use bloodhound::auto_bloodhound;
 pub use certipy_auth::auto_certipy_auth;
 pub use coercion::auto_coercion;

@@ -3,7 +3,7 @@
 use serde_json::{json, Value};
 
 /// All ESC types that certipy can detect.
-const ESC_TYPES: &[&str] = &[
+pub const ESC_TYPES: &[&str] = &[
     "esc1", "esc2", "esc3", "esc4", "esc5", "esc6", "esc7", "esc8", "esc9", "esc10", "esc11",
     "esc13", "esc14", "esc15",
 ];
