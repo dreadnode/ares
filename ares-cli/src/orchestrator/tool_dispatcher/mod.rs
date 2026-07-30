@@ -83,6 +83,7 @@ const RECON_ROUTED_TOOLS: &[&str] = &[
     "smb_login_check",
     "domain_admin_checker",
     "gmsa_dump_passwords",
+    "netexec_auth_check",
 ];
 
 /// Tools that authenticate against AD targets. Tool calls with these names
@@ -116,6 +117,7 @@ const AUTH_BEARING_TOOLS: &[&str] = &[
     "dcomexec",
     "atexec",
     "smbclient_kerberos_shares",
+    "netexec_auth_check",
 ];
 
 /// Spray-style tools that accept `excluded_users` to skip already-locked

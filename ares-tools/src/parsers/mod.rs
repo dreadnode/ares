@@ -26,8 +26,8 @@ pub use bloodhound::{
 pub use certipy::{parse_certipy_esc1_chain, parse_certipy_find};
 pub use cracker::parse_cracker_output;
 pub use credential_tools::{
-    parse_adidnsdump, parse_laps, parse_ldap_descriptions, parse_lsassy, parse_ntds_dit,
-    parse_spray_success,
+    parse_adidnsdump, parse_laps, parse_ldap_descriptions, parse_lsassy, parse_netexec_auth,
+    parse_ntds_dit, parse_spray_success,
 };
 pub use delegation::{extract_delegation_account, parse_add_computer, parse_delegation};
 pub use mssql::{parse_mssql_impersonation, parse_mssql_linked_servers};
@@ -720,6 +720,13 @@ pub fn parse_tool_output(tool_name: &str, output: &str, params: &Value) -> Value
         }
         "laps_dump" => {
             set_if_nonempty(&mut discoveries, "credentials", parse_laps(output, params));
+        }
+        "netexec_auth_check" => {
+            set_if_nonempty(
+                &mut discoveries,
+                "hashes",
+                parse_netexec_auth(output, params),
+            );
         }
         _ => {}
     }
@@ -2211,6 +2218,38 @@ LDAP  192.168.58.10  389  DC01  Computer:SRV01                    Password:LapsP
     fn parse_tool_output_laps_dump_empty_output() {
         let disc = parse_tool_output("laps_dump", "", &json!({"domain": "contoso.local"}));
         assert!(disc.get("credentials").is_none());
+    }
+
+    #[test]
+    fn parse_tool_output_netexec_auth_check_credits_successful_bind() {
+        let output = "\
+SMB  192.168.58.40  445  DC02  [*] Windows Server 2022 (name:DC02) (domain:fabrikam.local)
+SMB  192.168.58.40  445  DC02  [+] fabrikam.local\\svc_sql:aad3b435b51404eeaad3b435b51404ee";
+        let params = json!({
+            "username": "svc_sql",
+            "domain": "fabrikam.local",
+            "hash": "aad3b435b51404eeaad3b435b51404ee",
+        });
+        let disc = parse_tool_output("netexec_auth_check", output, &params);
+        let hashes = disc["hashes"].as_array().expect("hashes");
+        assert_eq!(hashes.len(), 1);
+        assert_eq!(hashes[0]["username"], "svc_sql");
+        assert_eq!(hashes[0]["domain"], "fabrikam.local");
+        assert_eq!(hashes[0]["hash_type"], "NTLM");
+        assert_eq!(hashes[0]["source"], "netexec_auth");
+    }
+
+    #[test]
+    fn parse_tool_output_netexec_auth_check_ignores_logon_failure() {
+        let output = "\
+SMB  192.168.58.40  445  DC02  [-] fabrikam.local\\svc_sql:aad3b4 STATUS_LOGON_FAILURE";
+        let params = json!({
+            "username": "svc_sql",
+            "domain": "fabrikam.local",
+            "hash": "aad3b435b51404eeaad3b435b51404ee",
+        });
+        let disc = parse_tool_output("netexec_auth_check", output, &params);
+        assert!(disc.get("hashes").is_none());
     }
 
     #[test]

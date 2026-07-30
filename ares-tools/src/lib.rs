@@ -131,6 +131,7 @@ pub async fn dispatch(tool_name: &str, arguments: &Value) -> Result<ToolOutput> 
         "username_as_password" => credential_access::username_as_password(arguments).await,
         "check_credman_entries" => credential_access::check_credman_entries(arguments).await,
         "check_autologon_registry" => credential_access::check_autologon_registry(arguments).await,
+        "netexec_auth_check" => credential_access::netexec_auth_check(arguments).await,
 
         // ── Cracking ────────────────────────────────────────────────
         "crack_with_hashcat" => cracker::crack_with_hashcat(arguments).await,

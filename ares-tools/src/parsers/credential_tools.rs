@@ -461,6 +461,42 @@ fn extract_username_from_description_line(line: &str) -> Option<String> {
 /// pair separated by whitespace runs of variable width. We fold both shapes
 /// into a `credentials[]` entry keyed to `Administrator@<hostname>` — the
 /// LAPS-managed principal is always the built-in local Administrator.
+/// Parse a `netexec_auth_check` probe result.
+///
+/// netexec marks a successful bind with `[+] DOMAIN\user:secret` and a failure
+/// with `[-] ... STATUS_LOGON_FAILURE`. Only a success yields a discovery, and
+/// the emitted hash is bound to the **probed** domain — that rebinding is the
+/// whole result, since it records that the principal authenticates in a forest
+/// its hash did not come from.
+pub fn parse_netexec_auth(output: &str, params: &Value) -> Vec<Value> {
+    let username = params
+        .get("username")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let domain = params.get("domain").and_then(|v| v.as_str()).unwrap_or("");
+    let hash = params.get("hash").and_then(|v| v.as_str()).unwrap_or("");
+
+    if username.is_empty() || domain.is_empty() || hash.is_empty() {
+        return Vec::new();
+    }
+
+    let authenticated = output.lines().any(|line| {
+        let l = line.trim();
+        l.contains("[+]") && l.contains('\\') && !l.contains("STATUS_")
+    });
+    if !authenticated {
+        return Vec::new();
+    }
+
+    vec![json!({
+        "username": username,
+        "hash_value": hash,
+        "hash_type": "NTLM",
+        "domain": domain,
+        "source": "netexec_auth",
+    })]
+}
+
 pub fn parse_laps(output: &str, params: &Value) -> Vec<Value> {
     let domain = params.get("domain").and_then(|v| v.as_str()).unwrap_or("");
     let mut creds = Vec::new();

