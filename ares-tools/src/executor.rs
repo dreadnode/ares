@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
@@ -10,6 +11,11 @@ use crate::ToolOutput;
 
 /// Default timeout for tool execution (2 minutes).
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// How long a timed-out child's pipe readers get to reach EOF before they are
+/// abandoned. Bounded so a grandchild holding the write end cannot turn the
+/// tool timeout into an unbounded hang.
+const READER_DRAIN_GRACE: Duration = Duration::from_secs(2);
 
 /// Typed marker attached to the `anyhow::Error` chain when
 /// [`CommandBuilder::execute`] fails at `Command::spawn` time. Callers that
@@ -349,9 +355,9 @@ impl CommandBuilder {
         }
         cmd.stdout(std::process::Stdio::piped());
         cmd.stderr(std::process::Stdio::piped());
-        // Send SIGKILL when the `Child` is dropped. Required for the
-        // timeout-abort path below to actually terminate the OS process
-        // (tokio's default is to leave the child running on drop).
+        // Send SIGKILL when the `Child` is dropped. The timeout path below
+        // kills explicitly; this is the backstop for every early return that
+        // drops the child instead (tokio's default is to leave it running).
         cmd.kill_on_drop(true);
 
         // Only ENOENT (binary genuinely absent from PATH) uses the permanent
@@ -399,23 +405,26 @@ impl CommandBuilder {
             }
         }
 
-        // Move the child into a task so we can cancel the wait on timeout.
-        // On timeout we must `handle.abort()` — merely dropping a `JoinHandle`
-        // detaches the task and the child continues to run. Aborting drops
-        // the task's owned `Child`, and the `kill_on_drop(true)` above then
-        // sends SIGKILL to the OS process.
+        let stdout_sink = Arc::new(Mutex::new(Vec::new()));
+        let stderr_sink = Arc::new(Mutex::new(Vec::new()));
+        let readers: Vec<_> = [
+            child.stdout.take().map(|p| drain_pipe(p, &stdout_sink)),
+            child.stderr.take().map(|p| drain_pipe(p, &stderr_sink)),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+
         let timeout = self.timeout;
-        let handle = tokio::spawn(async move { child.wait_with_output().await });
-        let abort = handle.abort_handle();
+        let wait_result = tokio::time::timeout(timeout, child.wait()).await;
 
-        let join_result = tokio::time::timeout(timeout, handle).await;
-
-        match join_result {
-            Ok(Ok(Ok(output))) => {
-                let stdout = sanitize_tool_output(&output.stdout);
-                let stderr = sanitize_tool_output(&output.stderr);
-                let exit_code = output.status.code();
-                let success = output.status.success();
+        match wait_result {
+            Ok(Ok(status)) => {
+                join_readers(readers).await;
+                let stdout = sanitize_tool_output(&take_sink(&stdout_sink));
+                let stderr = sanitize_tool_output(&take_sink(&stderr_sink));
+                let exit_code = status.code();
+                let success = status.success();
 
                 tracing::debug!(
                     exit_code = ?exit_code,
@@ -431,16 +440,135 @@ impl CommandBuilder {
                     success,
                 })
             }
-            Ok(Ok(Err(e))) => ExecOutcome::failed(anyhow::anyhow!("command execution failed: {e}")),
-            Ok(Err(e)) => ExecOutcome::failed(anyhow::anyhow!("task join error: {e}")),
+            Ok(Err(e)) => ExecOutcome::failed(anyhow::anyhow!("command execution failed: {e}")),
             Err(_) => {
-                abort.abort();
-                ExecOutcome::timed_out(anyhow::anyhow!(
-                    "command timed out after {timeout:?}: {redacted_cmd}"
-                ))
+                let _ = child.kill().await;
+                join_readers(readers).await;
+                let stdout = sanitize_tool_output(&take_sink(&stdout_sink));
+                let stderr = sanitize_tool_output(&take_sink(&stderr_sink));
+
+                if stdout.is_empty() && stderr.is_empty() {
+                    return ExecOutcome::timed_out(anyhow::anyhow!(
+                        "command timed out after {timeout:?}: {redacted_cmd}"
+                    ));
+                }
+
+                tracing::info!(
+                    stdout_len = stdout.len(),
+                    stderr_len = stderr.len(),
+                    timeout = ?timeout,
+                    "command timed out with partial output — preserving it for parsing"
+                );
+
+                ExecOutcome::timed_out_with_output(ToolOutput {
+                    stdout,
+                    stderr: append_timeout_marker(stderr, timeout),
+                    exit_code: None,
+                    success: false,
+                })
             }
         }
     }
+}
+
+/// Prefix of the marker line [`CommandBuilder`] appends to a timed-out tool's
+/// stderr when it preserves partial output.
+///
+/// The timeout verdict has to cross the worker→orchestrator NATS boundary, and
+/// `ToolExecResponse` carries no field for it. Synthesising a deterministic
+/// token into the output is the same trick `coercion::relay_and_coerce` already
+/// uses for `CERT_CAPTURED_VIA=`, and it needs no wire-format change. Read it
+/// back with [`timed_out_after_secs`] rather than matching the string by hand.
+pub const TIMEOUT_MARKER_PREFIX: &str = "ARES_TOOL_TIMED_OUT_AFTER_SECS=";
+
+/// Recover the timeout duration from a tool's output, or `None` when the tool
+/// was not cut short by [`CommandBuilder`]'s deadline.
+///
+/// Callers use this to tell "ran to completion and exited non-zero" apart from
+/// "killed at the deadline holding real output" — the two need different error
+/// wording, and the mutation journal treats them differently.
+pub fn timed_out_after_secs(output: &str) -> Option<u64> {
+    output.lines().rev().find_map(|line| {
+        line.trim()
+            .strip_prefix(TIMEOUT_MARKER_PREFIX)
+            .and_then(|secs| secs.trim().parse().ok())
+    })
+}
+
+/// The `error` string an unsuccessful [`ToolOutput`] should carry, or `None`
+/// when the tool succeeded.
+///
+/// Shared by the NATS worker and the in-process dispatcher so the two cannot
+/// drift on the wording. "Timed out holding partial output" has to stay
+/// distinguishable from "ran to completion and exited non-zero": the mutation
+/// journal leaves a timed-out mutating tool's intent unresolved, because the
+/// worker holds no cancellation token and the target may well have been
+/// changed.
+pub fn failure_message(output: &ToolOutput) -> Option<String> {
+    if output.success {
+        return None;
+    }
+    Some(match timed_out_after_secs(&output.stderr) {
+        Some(secs) => {
+            format!("tool timed out after {secs}s — partial output was preserved and parsed")
+        }
+        None => format!("tool exited with code {:?}", output.exit_code),
+    })
+}
+
+fn append_timeout_marker(mut stderr: String, timeout: Duration) -> String {
+    if !stderr.is_empty() && !stderr.ends_with('\n') {
+        stderr.push('\n');
+    }
+    stderr.push_str(TIMEOUT_MARKER_PREFIX);
+    stderr.push_str(&timeout.as_secs().to_string());
+    stderr.push('\n');
+    stderr
+}
+
+/// Copy everything `pipe` yields into `sink` until EOF.
+///
+/// Spawned rather than `select!`ed so a child that writes more than a pipe
+/// buffer's worth never blocks on a full pipe while the deadline runs down.
+fn drain_pipe<R>(mut pipe: R, sink: &Arc<Mutex<Vec<u8>>>) -> tokio::task::JoinHandle<()>
+where
+    R: tokio::io::AsyncRead + Unpin + Send + 'static,
+{
+    let sink = Arc::clone(sink);
+    tokio::spawn(async move {
+        use tokio::io::AsyncReadExt;
+        let mut buf = [0u8; 8192];
+        loop {
+            match pipe.read(&mut buf).await {
+                Ok(0) | Err(_) => break,
+                Ok(n) => sink
+                    .lock()
+                    .expect("tool output sink mutex poisoned")
+                    .extend_from_slice(&buf[..n]),
+            }
+        }
+    })
+}
+
+/// Let the drain tasks reach EOF, then give up.
+///
+/// The grace is bounded because a killed child can leave the write end of a
+/// pipe open in a surviving grandchild, and blocking on that would turn the
+/// tool timeout into a hang.
+async fn join_readers(readers: Vec<tokio::task::JoinHandle<()>>) {
+    for reader in readers {
+        let abort = reader.abort_handle();
+        if tokio::time::timeout(READER_DRAIN_GRACE, reader)
+            .await
+            .is_err()
+        {
+            abort.abort();
+        }
+    }
+}
+
+fn take_sink(sink: &Arc<Mutex<Vec<u8>>>) -> Vec<u8> {
+    std::mem::take(&mut *sink.lock().expect("tool output sink mutex poisoned"))
 }
 
 /// Result of one spawn+wait, carrying the timeout discriminator the span needs
@@ -468,6 +596,13 @@ impl ExecOutcome {
     fn timed_out(err: anyhow::Error) -> Self {
         Self {
             result: Err(err),
+            timed_out: true,
+        }
+    }
+
+    fn timed_out_with_output(output: ToolOutput) -> Self {
+        Self {
+            result: Ok(output),
             timed_out: true,
         }
     }
@@ -738,9 +873,8 @@ mod tests {
             "execute() didn't return promptly on timeout: {elapsed:?}"
         );
 
-        // Give the runtime a moment to drop the aborted task and let the
-        // OS deliver SIGKILL + reap. 200ms is generous; the abort chain is
-        // synchronous up to the kernel signal.
+        // Give the OS a moment to deliver SIGKILL + reap. 200ms is generous;
+        // the timeout path awaits `Child::kill()` before returning.
         tokio::time::sleep(Duration::from_millis(200)).await;
 
         // Read the PID sh wrote before exec'ing sleep.
@@ -765,6 +899,140 @@ mod tests {
             !alive,
             "child pid {pid} is still alive after timeout — abort/kill path is broken"
         );
+    }
+
+    /// A NetNTLMv2 capture in Responder's own wrapper format, matching the
+    /// hashcat-5600 layout `USER::DOMAIN:CHALLENGE:NT_PROOF:BLOB`.
+    const RESPONDER_CAPTURE: &str = "[SMB] NTLMv2-SSP Hash     : alice::CONTOSO:1122334455667788:0123456789abcdef0123456789abcdef:0101000000000000aabbccddeeff0011";
+
+    #[tokio::test]
+    async fn timeout_preserves_partial_stdout() {
+        let result = CommandBuilder::new("sh")
+            .arg("-c")
+            .arg("echo captured-before-the-deadline; exec sleep 30")
+            .timeout(Duration::from_millis(500))
+            .execute()
+            .await;
+
+        let out = result.expect("a timeout holding real output must not discard it as an error");
+        assert!(
+            out.stdout.contains("captured-before-the-deadline"),
+            "partial stdout was discarded: {out:?}"
+        );
+        assert!(
+            !out.success,
+            "a killed child must not report success: {out:?}"
+        );
+        assert_eq!(
+            out.exit_code, None,
+            "a killed child has no exit code: {out:?}"
+        );
+        assert_eq!(
+            timed_out_after_secs(&out.stderr),
+            Some(0),
+            "the timeout marker must survive into stderr: {out:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn timeout_with_no_output_still_returns_an_error() {
+        let result = CommandBuilder::new("sh")
+            .arg("-c")
+            .arg("exec sleep 30")
+            .timeout(Duration::from_millis(500))
+            .execute()
+            .await;
+
+        let err = result.expect_err("a silent hang carries no evidence, so it stays an error");
+        assert!(
+            format!("{err:#}").contains("timed out"),
+            "silent-hang wording changed: {err:#}"
+        );
+    }
+
+    /// The point of preserving the output: a listener killed at its deadline
+    /// now reaches `parse_tool_output`, so its captures become discoveries.
+    /// Before this, `responder`'s parser arm and NetNTLMv2 extractor were
+    /// unreachable in production however correct they were.
+    #[tokio::test]
+    async fn timed_out_listener_output_reaches_the_parser() {
+        let out = CommandBuilder::new("sh")
+            .arg("-c")
+            .arg(format!("echo '{RESPONDER_CAPTURE}'; exec sleep 30"))
+            .timeout(Duration::from_millis(500))
+            .execute()
+            .await
+            .expect("timeout with a capture on stdout must return the capture");
+
+        let discoveries = crate::parsers::parse_tool_output(
+            "start_responder",
+            &out.combined_raw(),
+            &serde_json::json!({"interface": "eth0"}),
+        );
+
+        let hashes = discoveries["hashes"]
+            .as_array()
+            .expect("a captured NetNTLMv2 hash must parse out of timed-out output");
+        assert_eq!(hashes.len(), 1, "{discoveries:#}");
+        assert_eq!(hashes[0]["username"], "alice");
+        assert_eq!(hashes[0]["hash_type"], "netntlmv2");
+    }
+
+    #[test]
+    fn timeout_marker_survives_output_filtering() {
+        let out = ToolOutput {
+            stdout: String::new(),
+            stderr: append_timeout_marker(String::new(), Duration::from_secs(30)),
+            exit_code: None,
+            success: false,
+        };
+
+        assert_eq!(
+            timed_out_after_secs(&out.combined()),
+            Some(30),
+            "filter_output ate the marker: {:?}",
+            out.combined()
+        );
+    }
+
+    #[test]
+    fn timed_out_after_secs_ignores_output_from_a_completed_tool() {
+        assert_eq!(
+            timed_out_after_secs("SMB   192.168.58.10   445   DC01"),
+            None
+        );
+        assert_eq!(timed_out_after_secs(""), None);
+    }
+
+    #[test]
+    fn failure_message_distinguishes_a_timeout_from_a_nonzero_exit() {
+        let timed_out = ToolOutput {
+            stdout: "partial\n".into(),
+            stderr: append_timeout_marker(String::new(), Duration::from_secs(30)),
+            exit_code: None,
+            success: false,
+        };
+        let msg = failure_message(&timed_out).expect("an unsuccessful run carries an error");
+        assert!(msg.contains("timed out"), "{msg}");
+        assert!(msg.contains("30"), "{msg}");
+
+        let exited_nonzero = ToolOutput {
+            stdout: String::new(),
+            stderr: "connection refused\n".into(),
+            exit_code: Some(1),
+            success: false,
+        };
+        let msg = failure_message(&exited_nonzero).expect("an unsuccessful run carries an error");
+        assert!(msg.contains("exited with code Some(1)"), "{msg}");
+        assert!(!msg.contains("timed out"), "{msg}");
+
+        let ok = ToolOutput {
+            stdout: "done\n".into(),
+            stderr: String::new(),
+            exit_code: Some(0),
+            success: true,
+        };
+        assert!(failure_message(&ok).is_none());
     }
 
     // ── ENOENT wording contract ──────────────────────────────────────────────

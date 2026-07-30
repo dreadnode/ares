@@ -141,4 +141,23 @@ mod tests {
         )));
         assert!(!dispatch_timed_out(Some("tool binary not found")));
     }
+
+    /// The executor's subprocess deadline reaches this gate through
+    /// `ares_tools::executor::failure_message`, and carries the same
+    /// consequence: the tool was killed mid-flight, so a mutation may have
+    /// landed. If that wording ever stops matching, a timed-out mutating tool
+    /// silently downgrades from `Intent` to `Aborted` and the cleanup pass
+    /// stops trying to revert it.
+    #[test]
+    fn the_executors_subprocess_timeout_also_leaves_the_intent_unresolved() {
+        let timed_out = ares_tools::ToolOutput {
+            stdout: "wrote msDS-KeyCredentialLink\n".into(),
+            stderr: format!("{}30\n", ares_tools::executor::TIMEOUT_MARKER_PREFIX),
+            exit_code: None,
+            success: false,
+        };
+
+        let message = ares_tools::executor::failure_message(&timed_out);
+        assert!(dispatch_timed_out(message.as_deref()), "{message:?}");
+    }
 }

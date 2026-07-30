@@ -425,11 +425,6 @@ fn discoveries_or_none(parsed: serde_json::Value) -> Option<serde_json::Value> {
     }
 }
 
-/// Render the error string for a tool that exited with a non-zero status.
-fn tool_exit_error(exit_code: Option<i32>) -> String {
-    format!("tool exited with code {exit_code:?}")
-}
-
 /// Build the `WorkerStatus.current_task` string used while a tool call is in
 /// flight. Pulled out so the field shape stays in lock-step with consumers
 /// that key off `tool_name:call_id`.
@@ -458,22 +453,13 @@ fn count_discovery_entries(discoveries: &serde_json::Value) -> Vec<(String, usiz
 /// can be unit-tested without spawning a tool subprocess.
 fn build_success_response(
     call_id: &str,
-    success: bool,
-    exit_code: Option<i32>,
+    error: Option<String>,
     combined: String,
     discoveries: Option<serde_json::Value>,
 ) -> ToolExecResponse {
-    let (error, failure_kind) = if success {
-        (None, None)
-    } else {
-        // Ran to completion but exited non-zero — a tool-level error, not a
-        // spawn failure. Classify explicitly so the runner never confuses
-        // it with the ENOENT path.
-        (
-            Some(tool_exit_error(exit_code)),
-            Some(ares_llm::ToolFailureKind::ToolError),
-        )
-    };
+    // The tool ran; any error here is tool-level, not a spawn failure.
+    // Classify explicitly so the runner never confuses it with the ENOENT path.
+    let failure_kind = error.as_ref().map(|_| ares_llm::ToolFailureKind::ToolError);
     ToolExecResponse {
         call_id: call_id.to_string(),
         output: combined,
@@ -617,7 +603,7 @@ async fn execute_and_respond(
             let raw = output.combined_raw();
             let mut combined = output.combined();
             let success = output.success;
-            let exit_code = output.exit_code;
+            let error = ares_tools::executor::failure_message(&output);
 
             let discoveries = discoveries_or_none(ares_tools::parsers::parse_tool_output(
                 &effective_tool_name,
@@ -656,7 +642,7 @@ async fn execute_and_respond(
                 }
             }
 
-            build_success_response(&request.call_id, success, exit_code, combined, discoveries)
+            build_success_response(&request.call_id, error, combined, discoveries)
         }
         Err(e) => {
             let failure_kind = classify_dispatch_error(&e);
@@ -1424,15 +1410,8 @@ mod tests {
     }
 
     #[test]
-    fn tool_exit_error_renders_exit_code() {
-        assert_eq!(tool_exit_error(Some(0)), "tool exited with code Some(0)");
-        assert_eq!(tool_exit_error(Some(1)), "tool exited with code Some(1)");
-        assert_eq!(tool_exit_error(None), "tool exited with code None");
-    }
-
-    #[test]
     fn build_success_response_success_omits_error() {
-        let resp = build_success_response("call-1", true, Some(0), "ok\n".into(), None);
+        let resp = build_success_response("call-1", None, "ok\n".into(), None);
         assert_eq!(resp.call_id, "call-1");
         assert_eq!(resp.output, "ok\n");
         assert!(resp.error.is_none());
@@ -1441,7 +1420,12 @@ mod tests {
 
     #[test]
     fn build_success_response_failure_records_exit_code() {
-        let resp = build_success_response("call-2", false, Some(2), "err\n".into(), None);
+        let resp = build_success_response(
+            "call-2",
+            Some("tool exited with code Some(2)".into()),
+            "err\n".into(),
+            None,
+        );
         assert!(!resp.error.as_deref().unwrap().is_empty());
         assert!(resp.error.as_deref().unwrap().contains("Some(2)"));
         assert_eq!(resp.output, "err\n");
@@ -1450,7 +1434,12 @@ mod tests {
     #[test]
     fn build_success_response_failure_with_no_exit_code() {
         // Tool was killed without an exit code (signal, etc.)
-        let resp = build_success_response("call-3", false, None, String::new(), None);
+        let resp = build_success_response(
+            "call-3",
+            Some("tool exited with code None".into()),
+            String::new(),
+            None,
+        );
         let err = resp.error.as_deref().unwrap();
         assert!(err.contains("None"));
     }
@@ -1458,20 +1447,14 @@ mod tests {
     #[test]
     fn build_success_response_carries_discoveries_when_present() {
         let disc = serde_json::json!({"hosts": [{"ip": "192.168.58.10"}]});
-        let resp = build_success_response(
-            "call-4",
-            true,
-            Some(0),
-            "scan output".into(),
-            Some(disc.clone()),
-        );
+        let resp = build_success_response("call-4", None, "scan output".into(), Some(disc.clone()));
         assert_eq!(resp.discoveries.as_ref().unwrap()["hosts"], disc["hosts"]);
         assert!(resp.error.is_none());
     }
 
     #[test]
     fn build_success_response_serializes_with_omitted_discoveries_when_none() {
-        let resp = build_success_response("call-5", true, Some(0), "ok".into(), None);
+        let resp = build_success_response("call-5", None, "ok".into(), None);
         let json = serde_json::to_string(&resp).unwrap();
         // discoveries field skipped when None
         assert!(!json.contains("discoveries"));
@@ -1557,7 +1540,7 @@ mod tests {
 
     #[test]
     fn build_success_and_error_responses_share_call_id_field() {
-        let s = build_success_response("xyz", true, Some(0), "ok".into(), None);
+        let s = build_success_response("xyz", None, "ok".into(), None);
         let e = build_error_response("xyz", "bad".into(), None);
         let sj: serde_json::Value = serde_json::to_value(&s).unwrap();
         let ej: serde_json::Value = serde_json::to_value(&e).unwrap();

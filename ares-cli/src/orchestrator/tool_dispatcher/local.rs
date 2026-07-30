@@ -127,11 +127,7 @@ impl ares_llm::ToolDispatcher for LocalToolDispatcher {
             Ok(output) => {
                 let raw = output.combined_raw();
                 let mut combined = output.combined();
-                let error = if output.success {
-                    None
-                } else {
-                    Some(format!("tool exited with code {:?}", output.exit_code))
-                };
+                let error = ares_tools::executor::failure_message(&output);
 
                 // Parse structured discoveries from raw (unfiltered) output.
                 // Use the effective (post-redirect) tool name so the parser
