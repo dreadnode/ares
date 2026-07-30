@@ -133,10 +133,13 @@ impl ares_llm::ToolDispatcher for LocalToolDispatcher {
                 // Use the effective (post-redirect) tool name so the parser
                 // matches the actual binary that ran — secretsdump and
                 // secretsdump_kerberos emit slightly different output shapes.
-                let discoveries = ares_tools::parsers::parse_tool_output(
+                let discoveries = crate::orchestrator::output_extraction::gate_parsed_discoveries(
                     &effective_tool_name,
-                    &raw,
-                    &resolved_arguments,
+                    ares_tools::parsers::parse_tool_output(
+                        &effective_tool_name,
+                        &raw,
+                        &resolved_arguments,
+                    ),
                 );
                 let discoveries = if discoveries.as_object().is_none_or(|o| o.is_empty()) {
                     None

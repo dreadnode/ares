@@ -778,13 +778,29 @@ fn split_user_realm(raw: &str) -> (String, Option<String>) {
     }
 }
 
-/// Keep whichever of `slot`/`cand` has the higher `attack_step`, preferring
-/// `cand` on ties so the most recently seen record wins — the selection rule
-/// shared by every credential/hash preference bucket.
-fn keep_latest<'a, T>(slot: &mut Option<&'a T>, cand: &'a T, step: impl Fn(&T) -> i32) {
-    if slot.is_none_or(|prev| step(cand) >= step(prev)) {
+/// Keep whichever of `slot`/`cand` ranks higher, preferring `cand` on ties so
+/// the most recently seen record wins — the selection rule shared by every
+/// credential/hash preference bucket.
+///
+/// `rank` is compared lexicographically. Credentials rank by
+/// `(credential_source_trust, attack_step)`: storage is first-write-wins on a
+/// password-inclusive dedup key, so a scraped `description` credential and an
+/// authoritative one coexist as separate rows, and ordering by `attack_step`
+/// alone handed every consumption point to whichever arrived later. The
+/// publish-time trust check rejects a phantom *realm* claim, so the invariant
+/// held in the store and failed here.
+fn keep_best<'a, T, R: Ord>(slot: &mut Option<&'a T>, cand: &'a T, rank: impl Fn(&T) -> R) {
+    if slot.is_none_or(|prev| rank(cand) >= rank(prev)) {
         *slot = Some(cand);
     }
+}
+
+/// Selection rank for a credential: source trust first, recency second.
+fn cred_rank(c: &Credential) -> (u8, i32) {
+    (
+        crate::orchestrator::state::publishing::credential_source_trust(&c.source),
+        c.attack_step,
+    )
 }
 
 /// True when `a` and `b` are the same domain or one is a descendant of the
@@ -830,11 +846,11 @@ fn find_credential<'a>(
         let stored_l = cred.domain.to_lowercase();
         let domain_match = domain_empty || stored_l == domain_l;
         if domain_match {
-            keep_latest(&mut exact, cred, |c| c.attack_step);
+            keep_best(&mut exact, cred, cred_rank);
         } else if same_forest(&stored_l, &domain_l) {
-            keep_latest(&mut same_forest_cred, cred, |c| c.attack_step);
+            keep_best(&mut same_forest_cred, cred, cred_rank);
         }
-        keep_latest(&mut any_user, cred, |c| c.attack_step);
+        keep_best(&mut any_user, cred, cred_rank);
     }
     // Realm-strict callers (LDAP/RPC direct bind) get an exact-realm match
     // when available, or a same-forest parent/child match (referrals handle
@@ -1063,19 +1079,19 @@ fn find_hash<'a>(
         let domain_match = domain_empty || h.domain.is_empty() || h_domain_l == domain_l;
         let has_aes = h.aes_key.as_deref().is_some_and(|s| !s.is_empty());
         if domain_match {
-            keep_latest(&mut exact, h, |x| x.attack_step);
+            keep_best(&mut exact, h, |x| x.attack_step);
             if has_aes {
-                keep_latest(&mut exact_aes, h, |x| x.attack_step);
+                keep_best(&mut exact_aes, h, |x| x.attack_step);
             }
         } else if same_forest(&h_domain_l, &domain_l) {
-            keep_latest(&mut same_forest_hash, h, |x| x.attack_step);
+            keep_best(&mut same_forest_hash, h, |x| x.attack_step);
             if has_aes {
-                keep_latest(&mut same_forest_aes, h, |x| x.attack_step);
+                keep_best(&mut same_forest_aes, h, |x| x.attack_step);
             }
         }
-        keep_latest(&mut any_user, h, |x| x.attack_step);
+        keep_best(&mut any_user, h, |x| x.attack_step);
         if has_aes {
-            keep_latest(&mut any_user_aes, h, |x| x.attack_step);
+            keep_best(&mut any_user_aes, h, |x| x.attack_step);
         }
     }
     let exact_pick = exact_aes.or(exact);
@@ -1393,6 +1409,58 @@ mod tests {
             parent_id: None,
             attack_step: 0,
         }
+    }
+
+    fn cred_from(user: &str, domain: &str, pass: &str, source: &str, step: i32) -> Credential {
+        let mut c = cred(user, domain, pass);
+        c.id = format!("c-{user}-{source}");
+        c.source = source.into();
+        c.attack_step = step;
+        c
+    }
+
+    /// The guarantee, at the point it is actually consumed. Storage dedups on a
+    /// password-inclusive key, so both rows coexist; ordering by `attack_step`
+    /// alone handed every dispatch to whichever arrived later, which is the
+    /// scraped one whenever the scrape came second.
+    #[test]
+    fn find_credential_prefers_an_authoritative_source_over_a_later_scrape() {
+        let creds = vec![
+            cred_from("alice", "contoso.local", "FromDump!", "secretsdump", 1),
+            cred_from(
+                "alice",
+                "contoso.local",
+                "FromDesc!",
+                "description_field",
+                9,
+            ),
+        ];
+        let picked = find_credential(&creds, "alice", "contoso.local", true).unwrap();
+        assert_eq!(picked.password, "FromDump!");
+    }
+
+    /// Recency still breaks ties within a tier — the old rule, unchanged where
+    /// trust says nothing.
+    #[test]
+    fn find_credential_prefers_the_later_record_within_one_trust_tier() {
+        let creds = vec![
+            cred_from("alice", "contoso.local", "Old!", "description_field", 1),
+            cred_from("alice", "contoso.local", "New!", "sysvol_script", 9),
+        ];
+        let picked = find_credential(&creds, "alice", "contoso.local", true).unwrap();
+        assert_eq!(picked.password, "New!");
+    }
+
+    /// A source the model made up ranks 0, below every real parser label, so it
+    /// cannot displace a genuine credential by arriving late.
+    #[test]
+    fn find_credential_ignores_an_unattested_source_when_a_real_one_exists() {
+        let creds = vec![
+            cred_from("alice", "contoso.local", "Real!", "laps_dump", 1),
+            cred_from("alice", "contoso.local", "Claimed!", "llm_reported", 9),
+        ];
+        let picked = find_credential(&creds, "alice", "contoso.local", true).unwrap();
+        assert_eq!(picked.password, "Real!");
     }
 
     fn hash(user: &str, domain: &str, value: &str, aes: Option<&str>) -> Hash {

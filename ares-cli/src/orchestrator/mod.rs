@@ -27,7 +27,7 @@ mod diversity;
 mod exploitation;
 mod llm_runner;
 mod monitoring;
-mod output_extraction;
+pub(crate) mod output_extraction;
 pub(crate) mod recovery;
 mod result_processing;
 mod results;

@@ -1200,3 +1200,38 @@ fn is_llm_directed_shell_classifies_correctly() {
         assert!(!ctx.is_llm_directed_shell(), "{tool} is an authenticator");
     }
 }
+
+/// The provenance module's contract, applied to the parser that actually feeds
+/// state. `parse_tool_output` was never gated by it, so a secret "parsed" out
+/// of a command the model chose to run reached `discoveries` unchallenged.
+#[test]
+fn gate_parsed_discoveries_drops_secrets_from_an_llm_directed_shell() {
+    let parsed = serde_json::json!({
+        "credentials": [{"username": "admin", "password": "P@ssw0rd!"}],
+        "hashes": [{"username": "admin", "hash_value": "aad3b435:abcdef"}],
+        "hosts": [{"ip": "192.168.58.10"}],
+    });
+    let gated = gate_parsed_discoveries("evil_winrm", parsed);
+    assert!(gated.get("credentials").is_none());
+    assert!(gated.get("hashes").is_none());
+    // The tool's own structured signal survives — this gate is about secrets
+    // scraped from arbitrary stdout, not about the arm's success banner.
+    assert!(gated.get("hosts").is_some());
+}
+
+/// A single-character skew in the tool name must not disable the gate.
+#[test]
+fn gate_parsed_discoveries_normalizes_the_tool_name() {
+    let parsed = serde_json::json!({"credentials": [{"username": "admin"}]});
+    let gated = gate_parsed_discoveries("/usr/bin/evil-winrm.py", parsed);
+    assert!(gated.get("credentials").is_none());
+}
+
+/// An authenticator's stdout is exactly where credentials are supposed to come
+/// from — gating it would delete real loot.
+#[test]
+fn gate_parsed_discoveries_leaves_an_authenticator_alone() {
+    let parsed = serde_json::json!({"credentials": [{"username": "admin"}]});
+    let gated = gate_parsed_discoveries("secretsdump", parsed);
+    assert!(gated.get("credentials").is_some());
+}

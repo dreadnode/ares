@@ -605,11 +605,16 @@ async fn execute_and_respond(
             let success = output.success;
             let error = ares_tools::executor::failure_message(&output);
 
-            let discoveries = discoveries_or_none(ares_tools::parsers::parse_tool_output(
-                &effective_tool_name,
-                &raw,
-                &resolved_arguments,
-            ));
+            let discoveries = discoveries_or_none(
+                crate::orchestrator::output_extraction::gate_parsed_discoveries(
+                    &effective_tool_name,
+                    ares_tools::parsers::parse_tool_output(
+                        &effective_tool_name,
+                        &raw,
+                        &resolved_arguments,
+                    ),
+                ),
+            );
 
             // A zero-yield unauthenticated harvest (spray/roast) exits 0 and
             // masks its empty result as "success". Append an explicit advisory

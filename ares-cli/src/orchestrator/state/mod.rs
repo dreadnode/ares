@@ -12,7 +12,7 @@ mod dedup;
 pub mod domain_probe;
 mod inner;
 mod persistence;
-mod publishing;
+pub(crate) mod publishing;
 pub(crate) mod replay;
 mod shared;
 

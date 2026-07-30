@@ -478,14 +478,15 @@ pub fn parse_tool_output(tool_name: &str, output: &str, params: &Value) -> Value
             parse_mssql_session(output, params),
         ),
         "evil_winrm" => {
-            // Detect successful WinRM connection from evil-winrm output.
-            // A successful connection typically shows "Evil-WinRM shell" or
-            // output from executed commands (e.g., "whoami" returning a username).
+            // A successful session is evidenced by evil-winrm's own banner or
+            // its prompt. The previous test also accepted *any* backslash, on
+            // the theory that `whoami` prints `DOMAIN\user` — but the stdout of
+            // an LLM-chosen command is not evidence of anything, and a single
+            // Windows path in a failure message ("Cannot find C:\…") was enough
+            // to mint a `winrm_access` vulnerability against a host that
+            // refused the connection.
             let target = params.get("target").and_then(|v| v.as_str()).unwrap_or("");
-            if output.contains("Evil-WinRM")
-                || output.contains("\\")  // whoami output like DOMAIN\user
-                || output.contains("PS >")
-            {
+            if output.contains("Evil-WinRM") || output.contains("PS ") {
                 discoveries["vulnerabilities"] = json!([{
                     "vuln_id": format!("winrm_access_{}", target.replace('.', "_")),
                     "vuln_type": "winrm_access",
@@ -1803,13 +1804,22 @@ SMB  192.168.58.121  445  DC01  bob         2026-03-25 23:21:09 0  Bob"#;
         assert_eq!(vulns[0]["vuln_id"], "winrm_access_192_168_58_20");
     }
 
+    /// `DOMAIN\user` on its own is the stdout of a command the model chose to
+    /// run. It is not evidence a session was established, and accepting any
+    /// backslash minted `winrm_access` off a Windows path in a failure message.
     #[test]
-    fn parse_tool_output_evil_winrm_whoami_output() {
-        // whoami returning DOMAIN\user confirms access
-        let output = "CONTOSO\\alice\n";
+    fn parse_tool_output_evil_winrm_bare_backslash_is_not_access() {
         let params = json!({"target": "192.168.58.20"});
-        let disc = parse_tool_output("evil_winrm", output, &params);
-        assert!(disc.get("vulnerabilities").is_some());
+        for output in [
+            "CONTOSO\\alice\n",
+            "[-] Cannot find path 'C:\\Users\\admin\\loot.txt'\n",
+        ] {
+            let disc = parse_tool_output("evil_winrm", output, &params);
+            assert!(
+                disc.get("vulnerabilities").is_none(),
+                "minted winrm_access from {output:?}"
+            );
+        }
     }
 
     #[test]

@@ -92,11 +92,27 @@ pub(super) fn realm_source_is_authoritative(source: &str) -> bool {
 ///   inferred from surrounding tool output and can bleed across forests
 ///   (description fields, registry autologon, SYSVOL scripts).
 /// - **Unknown (0)**: anything not classified — treated as least trusted.
-pub(super) fn credential_source_trust(source: &str) -> u8 {
+pub(crate) fn credential_source_trust(source: &str) -> u8 {
     match source {
-        "secretsdump" | "lsa_secrets" | "dpapi" | "kerberos_extracted" | "initial" => 3,
-        "netexec_auth" | "cracked:hashcat" | "cracked:john" | "cracked" => 2,
+        // Deterministic: a host-pinned dump, or material this operation set
+        // itself and therefore knows exactly.
+        "secretsdump"
+        | "lsa_secrets"
+        | "dpapi"
+        | "kerberos_extracted"
+        | "initial"
+        | "lsassy"
+        | "laps_dump"
+        | "add_computer"
+        | "bloodyad_set_password" => 3,
+        // Realm validated by an auth round-trip, or cracked from a hash whose
+        // realm was already pinned.
+        "netexec_auth" | "password_spray" | "cracked:hashcat" | "cracked:john" | "cracked" => 2,
+        // Text scraped out of an attribute, script or registry value — the
+        // realm is inferred from surrounding output and can bleed across
+        // forests.
         "description_field"
+        | "ldap_description"
         | "autologon_registry"
         | "sysvol_script"
         | "user_description_leak"
@@ -663,5 +679,40 @@ mod tests {
             strip_netexec_artifact("dc02.child.contoso.local0."),
             "dc02.child.contoso.local"
         );
+    }
+
+    /// Drift guard. An unclassified source scores 0, which is *below* a
+    /// description scrape, so a writer added without a tier silently loses
+    /// every phantom-domain contest it should win.
+    #[test]
+    fn every_production_credential_source_is_classified() {
+        use crate::orchestrator::result_processing::parsing::PARSER_CREDENTIAL_SOURCES;
+        for source in PARSER_CREDENTIAL_SOURCES {
+            assert!(
+                credential_source_trust(source) > 0,
+                "credential source `{source}` is unranked, so it loses to `description_field`"
+            );
+        }
+    }
+
+    /// The guarantee this table exists to enforce: a password scraped out of an
+    /// AD description cannot displace one from an authoritative dump. Both of
+    /// these ranked 0 before, so the scrape won.
+    #[test]
+    fn authoritative_credential_sources_outrank_attribute_scrapes() {
+        for scrape in [
+            "description_field",
+            "ldap_description",
+            "user_description_leak",
+            "sysvol_script",
+            "autologon_registry",
+        ] {
+            for authoritative in ["secretsdump", "lsassy", "laps_dump", "add_computer"] {
+                assert!(
+                    credential_source_trust(authoritative) > credential_source_trust(scrape),
+                    "`{scrape}` must not outrank `{authoritative}`"
+                );
+            }
+        }
     }
 }

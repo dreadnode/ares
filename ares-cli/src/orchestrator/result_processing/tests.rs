@@ -111,7 +111,41 @@ fn parse_single_credential() {
     });
     let parsed = parse_discoveries(&payload);
     assert_eq!(parsed.credentials.len(), 1);
-    assert_eq!(parsed.credentials[0].source, "ntlm_relay");
+    // The credential is kept, but `ntlm_relay` is no parser's label, so the
+    // provenance claim does not survive into state.
+    assert_eq!(parsed.credentials[0].source, "llm_reported");
+}
+
+/// A payload can claim any `source` it likes; only labels a parser actually
+/// emits are carried through. Without this, emitting `"source": "secretsdump"`
+/// bought the top trust tier and, with it, the right to displace a realm a
+/// real dump had pinned.
+#[test]
+fn parse_credential_strips_an_unearned_provenance_claim() {
+    let payload = json!({
+        "credential": {
+            "id": "c1", "username": "admin", "password": "P@ss1",
+            "domain": "contoso.local", "source": "secretsdump", "is_admin": false,
+            "attack_step": 0
+        }
+    });
+    let parsed = parse_discoveries(&payload);
+    assert_eq!(parsed.credentials.len(), 1);
+    assert_eq!(parsed.credentials[0].source, "llm_reported");
+}
+
+/// A label a parser really does emit passes through untouched.
+#[test]
+fn parse_credential_keeps_a_real_parser_source() {
+    let payload = json!({
+        "credentials": [{
+            "id": "c1", "username": "admin", "password": "P@ss1",
+            "domain": "contoso.local", "source": "laps_dump", "is_admin": false,
+            "attack_step": 0
+        }]
+    });
+    let parsed = parse_discoveries(&payload);
+    assert_eq!(parsed.credentials[0].source, "laps_dump");
 }
 
 #[test]
@@ -122,7 +156,9 @@ fn parse_cracked_password() {
     assert_eq!(parsed.credentials.len(), 1);
     assert_eq!(parsed.credentials[0].username, "jdoe");
     assert_eq!(parsed.credentials[0].password, "Summer2024!");
-    assert_eq!(parsed.credentials[0].source, "cracked");
+    // Minted from free text in the payload, not a cracker's stdout — it must
+    // not share a tier with regex-verified `cracked:hashcat`.
+    assert_eq!(parsed.credentials[0].source, "llm_reported");
 }
 
 #[test]
@@ -714,7 +750,7 @@ fn parse_cracked_password_with_domain() {
     let parsed = parse_discoveries(&payload);
     assert_eq!(parsed.credentials.len(), 1);
     assert_eq!(parsed.credentials[0].domain, "fabrikam.local");
-    assert_eq!(parsed.credentials[0].source, "cracked");
+    assert_eq!(parsed.credentials[0].source, "llm_reported");
 }
 
 #[test]

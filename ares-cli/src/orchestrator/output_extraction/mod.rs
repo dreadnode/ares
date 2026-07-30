@@ -76,13 +76,7 @@ impl<'a> ToolOutputCtx<'a> {
     /// registered as `evil_winrm` being written `evil-winrm` (or vice versa):
     /// a single-character skew must never silently disable a security gate.
     pub(crate) fn tool_name_normalized(&self) -> Option<String> {
-        let raw = self.name?.trim();
-        if raw.is_empty() {
-            return None;
-        }
-        let last = raw.rsplit(['/', '\\']).next()?;
-        let base = last.trim_end_matches(".exe").trim_end_matches(".py");
-        Some(base.to_ascii_lowercase().replace('-', "_"))
+        normalize_tool_name(self.name?)
     }
 
     /// Returns true when this tool's stdout is trustworthy for the *high-value*
@@ -337,6 +331,57 @@ pub(crate) fn is_valid_credential(username: &str, password: &str) -> bool {
         return false;
     }
     true
+}
+
+/// Normalized tool name (lowercased, path/extension stripped, `-` folded to
+/// `_`) — the form the provenance classifier keys on.
+pub(crate) fn normalize_tool_name(raw: &str) -> Option<String> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    let last = raw.rsplit(['/', '\\']).next()?;
+    let base = last.trim_end_matches(".exe").trim_end_matches(".py");
+    Some(base.to_ascii_lowercase().replace('-', "_"))
+}
+
+/// Apply the stdout-provenance rule to the *primary* parser's output.
+///
+/// [`provenance`] is the declared single source of truth for how far a tool's
+/// stdout can be trusted, but it was wired only into this module — the regex
+/// safety net — and not into `ares_tools::parsers::parse_tool_output`, which
+/// produces the `discoveries` that actually reach state. So the module whose
+/// contract says *nothing* parsed from an LLM-directed shell is a genuine
+/// finding did not guard the path that matters.
+///
+/// Only the secret-bearing sections are dropped. The per-tool arms are
+/// structured recognizers of a tool's own success banners, unlike the regex
+/// net, so the attribute-enumerator rule is deliberately not applied here:
+/// `enumerate_users` legitimately yields credentials out of `description`
+/// attributes, and that is a real initial-access path, not a leak.
+///
+/// (`ares-tools` cannot see `ares-llm`, which is why this is applied by the
+/// caller rather than inside the parser.)
+pub(crate) fn gate_parsed_discoveries(
+    tool: &str,
+    mut discoveries: serde_json::Value,
+) -> serde_json::Value {
+    let is_shell = normalize_tool_name(tool).is_some_and(|n| provenance::is_llm_directed_shell(&n));
+    if !is_shell {
+        return discoveries;
+    }
+    if let Some(obj) = discoveries.as_object_mut() {
+        for key in ["credentials", "hashes"] {
+            if obj.remove(key).is_some() {
+                tracing::warn!(
+                    tool,
+                    key,
+                    "Dropped a secret parsed from an LLM-directed shell's stdout"
+                );
+            }
+        }
+    }
+    discoveries
 }
 
 pub(crate) fn make_credential(

@@ -756,12 +756,14 @@ pub(crate) fn merge_result_extras(
             "domain_admin_path",
             "has_golden_ticket",
             "vuln_id",
-            "domain",
             "target",
             "target_ip",
             "target_spn",
         ] {
             obj.remove(key);
+        }
+        for key in crate::orchestrator::result_processing::parsing::DISCOVERY_PAYLOAD_KEYS {
+            obj.remove(*key);
         }
     }
     if let Some(disc) = merged_discoveries {
@@ -1237,5 +1239,26 @@ mod helper_tests {
         assert_eq!(m["summary"], "ok");
         assert_eq!(m["steps"], 5);
         assert_eq!(m["tool_calls"], 12);
+    }
+
+    /// The whole payload is LLM-authored — `parse_task_complete_result` takes
+    /// the model's JSON verbatim — so every key the entity parser accepts has to
+    /// be stripped before the parser's own discoveries are attached.
+    #[test]
+    fn merge_extras_strips_every_key_the_entity_parser_reads() {
+        let mut base = json!({"summary": "ok"});
+        let obj = base.as_object_mut().unwrap();
+        for key in crate::orchestrator::result_processing::parsing::DISCOVERY_PAYLOAD_KEYS {
+            obj.insert((*key).into(), json!("fabricated"));
+        }
+
+        let m = merge_result_extras(base, None, None, Vec::new());
+        for key in crate::orchestrator::result_processing::parsing::DISCOVERY_PAYLOAD_KEYS {
+            assert!(
+                m.get(*key).is_none(),
+                "LLM-supplied `{key}` survived into the result payload"
+            );
+        }
+        assert_eq!(m["summary"], "ok");
     }
 }

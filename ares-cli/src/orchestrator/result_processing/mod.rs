@@ -2189,10 +2189,24 @@ pub(crate) async fn extract_from_raw_text(
     // immediate high-priority secretsdump.
     // Check each tool output independently (joining is safe here — Pwn3d! is a
     // standalone marker with no stateful context to leak).
+    //
+    // Gated on stdout provenance like every sibling extractor in this pass. An
+    // LLM-directed shell echoes a command the model chose, so `echo "[+]
+    // CONTOSO\admin:Pw (Pwn3d!)"` would otherwise flag a credential as local
+    // admin and queue a privileged secretsdump off nothing but the model's own
+    // output. Only netexec-family tools emit this marker for real.
     for ctx in &tool_outputs {
-        if ctx.output.contains("Pwn3d!") {
-            detect_and_upgrade_admin_credentials(ctx.output, dispatcher).await;
+        if !ctx.output.contains("Pwn3d!") {
+            continue;
         }
+        if ctx.is_llm_directed_shell() {
+            warn!(
+                tool = ?ctx.name,
+                "Ignoring Pwn3d! marker from an LLM-directed shell — its stdout is a command the model chose"
+            );
+            continue;
+        }
+        detect_and_upgrade_admin_credentials(ctx.output, dispatcher).await;
     }
 
     if new_count > 0 {

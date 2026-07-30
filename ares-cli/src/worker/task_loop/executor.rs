@@ -50,8 +50,10 @@ pub async fn run_agent_task(
             resolve_for_dispatch(conn.clone(), operation_id, task_type, params).await;
         let output = ares_tools::dispatch(&effective_name, &resolved_params).await?;
         let raw = output.combined_raw();
-        let discoveries =
-            ares_tools::parsers::parse_tool_output(&effective_name, &raw, &resolved_params);
+        let discoveries = crate::orchestrator::output_extraction::gate_parsed_discoveries(
+            &effective_name,
+            ares_tools::parsers::parse_tool_output(&effective_name, &raw, &resolved_params),
+        );
         return Ok(make_result_with_discoveries(output, discoveries));
     }
 
@@ -75,8 +77,10 @@ pub async fn run_agent_task(
                 }
                 let raw = output.combined_raw();
                 let combined = output.combined();
-                let disc =
-                    ares_tools::parsers::parse_tool_output(&effective_name, &raw, &resolved_params);
+                let disc = crate::orchestrator::output_extraction::gate_parsed_discoveries(
+                    &effective_name,
+                    ares_tools::parsers::parse_tool_output(&effective_name, &raw, &resolved_params),
+                );
                 all_discoveries.push(disc);
                 outputs.push(format!("=== {} ===\n{}", effective_name, combined));
             }
