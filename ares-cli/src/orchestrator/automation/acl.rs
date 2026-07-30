@@ -603,6 +603,42 @@ mod tests {
     }
 
     #[test]
+    fn collect_refuses_a_source_known_only_by_roast_ciphertext() {
+        let mut state = state_with_chain();
+        let mut roast = hash("alice", "contoso.local", "kerberoast");
+        roast.hash_value = "$krb5tgs$23$*alice$CONTOSO.LOCAL*".into();
+        state.hashes.push(roast);
+
+        assert!(
+            collect_acl_chain_work(&state).is_empty(),
+            "a chain seeded speculatively must wait for the crack, not dispatch"
+        );
+    }
+
+    #[test]
+    fn collect_dispatches_once_the_roast_ciphertext_is_cracked() {
+        let mut state = state_with_chain();
+        let mut roast = hash("alice", "contoso.local", "kerberoast");
+        roast.hash_value = "$krb5tgs$23$*alice$CONTOSO.LOCAL*".into();
+        state.hashes.push(roast);
+        state.credentials.push(ares_core::models::Credential {
+            id: "c-alice".into(),
+            username: "alice".into(),
+            password: "P@ssw0rd!".into(),
+            domain: "contoso.local".into(),
+            source: "cracked:hashcat".into(),
+            discovered_at: None,
+            is_admin: false,
+            parent_id: None,
+            attack_step: 0,
+        });
+
+        let work = collect_acl_chain_work(&state);
+        assert_eq!(work.len(), 1);
+        assert_eq!(work[0].vuln_id, "acl_genericall_alice_bob");
+    }
+
+    #[test]
     fn collect_dispatches_a_hash_only_source() {
         let mut state = state_with_chain();
         state.hashes.push(hash("alice", "contoso.local", "ntlm"));
