@@ -197,6 +197,27 @@ pub fn spawn_lock_keeper(
                     warn!("Lock extend timed out (Redis unresponsive?)");
                 }
             }
+
+            // Same tick, same dedicated connection: refresh the operation
+            // status record's `updated_at` so `ares ops status` can distinguish
+            // a live run from a wedged one. Without this the record is written
+            // once at bootstrap and again at finalize, so a hung orchestrator
+            // and a working one are indistinguishable from the outside.
+            let mut conn = dedicated_queue.connection();
+            let beat = tokio::time::timeout(
+                extend_timeout,
+                ares_core::state::heartbeat_operation_status(
+                    &mut conn,
+                    &config.operation_id,
+                    config.heartbeat_interval.as_secs(),
+                ),
+            )
+            .await;
+            match beat {
+                Ok(Ok(_)) => {}
+                Ok(Err(e)) => warn!(err = %e, "Failed to heartbeat operation status"),
+                Err(_) => warn!("Operation status heartbeat timed out (Redis unresponsive?)"),
+            }
         }
     })
 }

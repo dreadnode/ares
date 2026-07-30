@@ -46,6 +46,61 @@ pub async fn publish_state_update(
     Ok(0)
 }
 
+/// The only non-terminal operation status. Anything else means the orchestrator
+/// has already finalized and must never be overwritten by a late heartbeat.
+pub const OP_STATUS_RUNNING: &str = "running";
+
+/// How many heartbeat intervals may be missed before a `running` record is
+/// reported as stale rather than live.
+pub const OP_HEARTBEAT_STALE_INTERVALS: u32 = 3;
+
+/// Fallback staleness window for records written before the heartbeat carried
+/// its own interval (or by a producer that never heartbeats at all).
+pub const OP_HEARTBEAT_DEFAULT_INTERVAL_SECS: u64 = 30;
+
+/// Parsed `ares:op:{id}:status` record.
+///
+/// `status_changed_at` is when the status last *changed*; `updated_at` moves on
+/// every heartbeat. Before the heartbeat existed the two were the same field,
+/// which is why a running operation's record looked frozen at its start
+/// timestamp for the whole run and carried no liveness signal at all.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OperationStatusRecord {
+    pub status: String,
+    pub operation_id: String,
+    pub updated_at: Option<DateTime<Utc>>,
+    pub status_changed_at: Option<DateTime<Utc>>,
+    pub heartbeat_interval_secs: Option<u64>,
+}
+
+impl OperationStatusRecord {
+    pub fn is_running(&self) -> bool {
+        self.status == OP_STATUS_RUNNING
+    }
+
+    /// Seconds since the last heartbeat, or `None` when the record has no
+    /// parseable `updated_at`.
+    pub fn heartbeat_age_secs(&self, now: DateTime<Utc>) -> Option<i64> {
+        self.updated_at.map(|ts| (now - ts).num_seconds().max(0))
+    }
+
+    /// Whether a `running` record has gone quiet. Terminal records are never
+    /// stale — they are not expected to tick.
+    pub fn is_stale(&self, now: DateTime<Utc>) -> bool {
+        if !self.is_running() {
+            return false;
+        }
+        let interval = self
+            .heartbeat_interval_secs
+            .unwrap_or(OP_HEARTBEAT_DEFAULT_INTERVAL_SECS)
+            .max(1);
+        match self.heartbeat_age_secs(now) {
+            Some(age) => age as u64 > interval * u64::from(OP_HEARTBEAT_STALE_INTERVALS),
+            None => true,
+        }
+    }
+}
+
 /// Set the operation status JSON string.
 ///
 /// Key: `ares:op:{id}:status`.
@@ -55,14 +110,95 @@ pub async fn set_operation_status(
     status: &str,
 ) -> Result<(), redis::RedisError> {
     let key = build_key(operation_id, KEY_STATUS);
+    let now = chrono::Utc::now().to_rfc3339();
     let payload = serde_json::json!({
         "status": status,
         "operation_id": operation_id,
-        "updated_at": chrono::Utc::now().to_rfc3339(),
+        "updated_at": now,
+        "status_changed_at": now,
     });
     let json = serde_json::to_string(&payload).unwrap_or_default();
     conn.set_ex::<_, _, ()>(&key, &json, 86400).await?;
     Ok(())
+}
+
+/// Refresh the liveness timestamp on a `running` status record.
+///
+/// Read-modify-write rather than a blind `SET`: the orchestrator's lock keeper
+/// is the caller, and a tick that raced past finalization would otherwise flip a
+/// `completed` operation back to `running`. Returns whether a heartbeat was
+/// written — `false` means the record was absent or already terminal, both of
+/// which are ordinary and not errors.
+pub async fn heartbeat_operation_status(
+    conn: &mut impl AsyncCommands,
+    operation_id: &str,
+    interval_secs: u64,
+) -> Result<bool, redis::RedisError> {
+    let key = build_key(operation_id, KEY_STATUS);
+    let Some(existing) = read_operation_status(conn, operation_id).await? else {
+        return Ok(false);
+    };
+    if !existing.is_running() {
+        return Ok(false);
+    }
+
+    let status_changed_at = existing
+        .status_changed_at
+        .map(|ts| ts.to_rfc3339())
+        .unwrap_or_else(|| chrono::Utc::now().to_rfc3339());
+    let payload = serde_json::json!({
+        "status": existing.status,
+        "operation_id": operation_id,
+        "updated_at": chrono::Utc::now().to_rfc3339(),
+        "status_changed_at": status_changed_at,
+        "heartbeat_interval_secs": interval_secs,
+    });
+    let json = serde_json::to_string(&payload).unwrap_or_default();
+    conn.set_ex::<_, _, ()>(&key, &json, 86400).await?;
+    Ok(true)
+}
+
+/// Read and parse `ares:op:{id}:status`.
+///
+/// Returns `None` when the key is absent or holds JSON that will not parse.
+pub async fn read_operation_status(
+    conn: &mut impl AsyncCommands,
+    operation_id: &str,
+) -> Result<Option<OperationStatusRecord>, redis::RedisError> {
+    let key = build_key(operation_id, KEY_STATUS);
+    let raw: Option<String> = conn.get(&key).await?;
+    let Some(raw) = raw else {
+        return Ok(None);
+    };
+    let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return Ok(None);
+    };
+
+    let ts = |field: &str| {
+        parsed
+            .get(field)
+            .and_then(|v| v.as_str())
+            .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
+            .map(|dt| dt.with_timezone(&Utc))
+    };
+
+    Ok(Some(OperationStatusRecord {
+        status: parsed
+            .get("status")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string(),
+        operation_id: parsed
+            .get("operation_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or(operation_id)
+            .to_string(),
+        updated_at: ts("updated_at"),
+        status_changed_at: ts("status_changed_at").or_else(|| ts("updated_at")),
+        heartbeat_interval_secs: parsed
+            .get("heartbeat_interval_secs")
+            .and_then(|v| v.as_u64()),
+    }))
 }
 
 /// Finalize an operation in Redis — write completion metadata, clean up pointers.
@@ -418,6 +554,114 @@ mod tests {
         assert_eq!(parsed["status"], "running");
         assert_eq!(parsed["operation_id"], "op-1");
         assert!(parsed["updated_at"].is_string());
+    }
+
+    #[tokio::test]
+    async fn heartbeat_moves_updated_at_but_not_status_changed_at() {
+        let mut conn = MockRedisConnection::new();
+        set_operation_status(&mut conn, "op-1", "running")
+            .await
+            .unwrap();
+        let before = read_operation_status(&mut conn, "op-1")
+            .await
+            .unwrap()
+            .unwrap();
+
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        assert!(heartbeat_operation_status(&mut conn, "op-1", 30)
+            .await
+            .unwrap());
+
+        let after = read_operation_status(&mut conn, "op-1")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(after.status, "running");
+        assert_eq!(after.status_changed_at, before.status_changed_at);
+        assert!(after.updated_at > before.updated_at);
+        assert_eq!(after.heartbeat_interval_secs, Some(30));
+    }
+
+    #[tokio::test]
+    async fn heartbeat_never_resurrects_a_finalized_operation() {
+        let mut conn = MockRedisConnection::new();
+        set_operation_status(&mut conn, "op-1", "completed")
+            .await
+            .unwrap();
+
+        assert!(!heartbeat_operation_status(&mut conn, "op-1", 30)
+            .await
+            .unwrap());
+        let after = read_operation_status(&mut conn, "op-1")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(after.status, "completed");
+    }
+
+    #[tokio::test]
+    async fn heartbeat_is_a_noop_when_no_status_record_exists() {
+        let mut conn = MockRedisConnection::new();
+        assert!(!heartbeat_operation_status(&mut conn, "op-missing", 30)
+            .await
+            .unwrap());
+        assert!(read_operation_status(&mut conn, "op-missing")
+            .await
+            .unwrap()
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn read_operation_status_tolerates_garbage() {
+        let mut conn = MockRedisConnection::new();
+        let key = build_key("op-1", KEY_STATUS);
+        let _: () = conn.set(&key, "not json").await.unwrap();
+        assert!(read_operation_status(&mut conn, "op-1")
+            .await
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn running_record_goes_stale_after_three_missed_intervals() {
+        let now = Utc::now();
+        let record = |age_secs: i64| OperationStatusRecord {
+            status: OP_STATUS_RUNNING.to_string(),
+            operation_id: "op-1".to_string(),
+            updated_at: Some(now - chrono::Duration::seconds(age_secs)),
+            status_changed_at: Some(now - chrono::Duration::seconds(age_secs)),
+            heartbeat_interval_secs: Some(30),
+        };
+
+        assert!(!record(30).is_stale(now));
+        assert!(!record(90).is_stale(now));
+        assert!(record(91).is_stale(now));
+        assert_eq!(record(45).heartbeat_age_secs(now), Some(45));
+    }
+
+    #[test]
+    fn a_finalized_record_is_never_stale() {
+        let now = Utc::now();
+        let record = OperationStatusRecord {
+            status: "completed".to_string(),
+            operation_id: "op-1".to_string(),
+            updated_at: Some(now - chrono::Duration::hours(9)),
+            status_changed_at: Some(now - chrono::Duration::hours(9)),
+            heartbeat_interval_secs: Some(30),
+        };
+        assert!(!record.is_stale(now));
+    }
+
+    #[test]
+    fn a_running_record_with_no_timestamp_is_stale() {
+        let record = OperationStatusRecord {
+            status: OP_STATUS_RUNNING.to_string(),
+            operation_id: "op-1".to_string(),
+            updated_at: None,
+            status_changed_at: None,
+            heartbeat_interval_secs: None,
+        };
+        assert!(record.is_stale(Utc::now()));
     }
 
     #[tokio::test]

@@ -123,7 +123,7 @@ fn detail_str(vuln: &ares_core::models::VulnerabilityInfo, keys: &[&str]) -> Str
 ///
 /// Matches the `memberOf` value either whole or on its leading `CN=` RDN, since
 /// LDAP returns full distinguished names while ACL edges carry bare names.
-fn members_from_ldap(state: &StateInner, group_name: &str) -> Vec<String> {
+pub(crate) fn members_from_ldap(state: &StateInner, group_name: &str) -> Vec<String> {
     let wanted = group_name.trim().to_lowercase();
     if wanted.is_empty() {
         return Vec::new();

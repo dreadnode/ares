@@ -337,20 +337,20 @@ pub(crate) struct DaclWork {
     pub hash: Option<ares_core::models::Hash>,
 }
 
-/// RIDs of well-known privileged groups whose membership is owned by privileged
-/// credentials in the same domain. Resolving a SID-typed source to "any DA-cred
-/// in this domain" is correct for these RIDs because the abuse only requires
-/// *a* member of the group, not a specific principal.
-fn is_privileged_well_known_rid(rid: u32) -> bool {
-    matches!(
-        rid,
-        512 // Domain Admins
-            | 518 // Schema Admins
-            | 519 // Enterprise Admins
-            | 520 // Group Policy Creator Owners
-            | 526 // Key Admins
-            | 527 // Enterprise Key Admins
-    )
+/// Group name for the well-known privileged RIDs whose membership a SID-typed
+/// ACL source may be resolved through. Resolving such a source to a credential
+/// is only correct when that credential belongs to *a* member of the group —
+/// the RID names which group membership has to be established against.
+fn well_known_privileged_group(rid: u32) -> Option<&'static str> {
+    match rid {
+        512 => Some("Domain Admins"),
+        518 => Some("Schema Admins"),
+        519 => Some("Enterprise Admins"),
+        520 => Some("Group Policy Creator Owners"),
+        526 => Some("Key Admins"),
+        527 => Some("Enterprise Key Admins"),
+        _ => None,
+    }
 }
 
 /// When the ACL edge source is a SID (typically a well-known group), resolve
@@ -360,8 +360,15 @@ fn is_privileged_well_known_rid(rid: u32) -> bool {
 ///   1. Parse `S-1-5-21-X-Y-Z-RID` and extract the domain SID prefix and RID.
 ///   2. Reverse-look up the domain via `state.domain_sids` (or fall back to
 ///      `source_domain` from the vuln details).
-///   3. For privileged well-known RIDs, return any `is_admin` credential in
-///      that domain. As a last resort, return any credential in the domain.
+///   3. For privileged well-known RIDs, return an `is_admin` credential in that
+///      domain, else a credential whose principal LDAP `memberOf` places in the
+///      group the RID names.
+///
+/// Returns `None` when neither holds. There is deliberately no "any credential
+/// in the domain" fallback: an ACL edge granted to Enterprise Admins cannot be
+/// exercised as a non-member, and dispatching one anyway spends a queue slot, an
+/// LLM turn, and a dedup entry that then suppresses the edge from being retried
+/// once a real member *is* owned.
 fn resolve_sid_principal(
     state: &StateInner,
     source: &str,
@@ -386,9 +393,7 @@ fn resolve_sid_principal(
             }
         })?;
 
-    if !is_privileged_well_known_rid(rid) {
-        return None;
-    }
+    let group = well_known_privileged_group(rid)?;
 
     let admin = state
         .credentials
@@ -399,16 +404,138 @@ fn resolve_sid_principal(
         return admin;
     }
 
+    let members = acl_graph::members_from_ldap(state, group);
     state
         .credentials
         .iter()
-        .find(|c| c.domain.to_lowercase() == resolved_domain)
+        .find(|c| {
+            c.domain.to_lowercase() == resolved_domain
+                && members.contains(&c.username.to_lowercase())
+        })
         .cloned()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const CONTOSO_SID: &str = "S-1-5-21-1111111111-2222222222-3333333333";
+
+    fn cred(username: &str, is_admin: bool) -> ares_core::models::Credential {
+        ares_core::models::Credential {
+            id: format!("c-{username}"),
+            username: username.into(),
+            password: "P@ssw0rd!".into(),
+            domain: "contoso.local".into(),
+            source: "test".into(),
+            discovered_at: None,
+            is_admin,
+            parent_id: None,
+            attack_step: 0,
+        }
+    }
+
+    fn user_in(username: &str, groups: &[&str]) -> ares_core::models::User {
+        ares_core::models::User {
+            username: username.into(),
+            domain: "contoso.local".into(),
+            description: String::new(),
+            is_admin: false,
+            source: "ldap".into(),
+            member_of: groups.iter().map(|g| (*g).to_string()).collect(),
+        }
+    }
+
+    fn sid_state() -> StateInner {
+        let mut state = StateInner::new("op-1".into());
+        state
+            .domain_sids
+            .insert("contoso.local".into(), CONTOSO_SID.into());
+        state
+    }
+
+    #[test]
+    fn sid_source_resolves_to_an_admin_credential() {
+        let mut state = sid_state();
+        state.credentials.push(cred("alice", false));
+        state.credentials.push(cred("admin", true));
+
+        let resolved =
+            resolve_sid_principal(&state, &format!("{CONTOSO_SID}-519"), "contoso.local");
+        assert_eq!(resolved.map(|c| c.username), Some("admin".to_string()));
+    }
+
+    #[test]
+    fn sid_source_never_resolves_to_a_non_member() {
+        let mut state = sid_state();
+        state.credentials.push(cred("alice", false));
+
+        assert!(
+            resolve_sid_principal(&state, &format!("{CONTOSO_SID}-519"), "contoso.local").is_none(),
+            "an Enterprise Admins edge must not dispatch as an ordinary user"
+        );
+    }
+
+    #[test]
+    fn sid_source_resolves_through_ldap_membership_without_an_admin_flag() {
+        let mut state = sid_state();
+        state.credentials.push(cred("alice", false));
+        state.credentials.push(cred("bob", false));
+        state.users.push(user_in("alice", &["Domain Users"]));
+        state.users.push(user_in(
+            "bob",
+            &["CN=Enterprise Admins,CN=Users,DC=contoso,DC=local"],
+        ));
+
+        let resolved =
+            resolve_sid_principal(&state, &format!("{CONTOSO_SID}-519"), "contoso.local");
+        assert_eq!(resolved.map(|c| c.username), Some("bob".to_string()));
+    }
+
+    #[test]
+    fn sid_source_membership_is_matched_against_the_rids_own_group() {
+        let mut state = sid_state();
+        state.credentials.push(cred("bob", false));
+        state.users.push(user_in(
+            "bob",
+            &["CN=Enterprise Admins,CN=Users,DC=contoso,DC=local"],
+        ));
+
+        assert!(
+            resolve_sid_principal(&state, &format!("{CONTOSO_SID}-526"), "contoso.local").is_none(),
+            "membership in Enterprise Admins must not satisfy a Key Admins edge"
+        );
+    }
+
+    #[test]
+    fn sid_source_with_an_unprivileged_rid_is_not_resolved() {
+        let mut state = sid_state();
+        state.credentials.push(cred("admin", true));
+
+        assert!(
+            resolve_sid_principal(&state, &format!("{CONTOSO_SID}-1105"), "contoso.local")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn sid_source_membership_does_not_cross_domains() {
+        let mut state = sid_state();
+        let mut bob = cred("bob", false);
+        bob.domain = "fabrikam.local".into();
+        state.credentials.push(bob);
+        let mut bob_user = user_in(
+            "bob",
+            &["CN=Enterprise Admins,CN=Users,DC=contoso,DC=local"],
+        );
+        bob_user.domain = "fabrikam.local".into();
+        state.users.push(bob_user);
+
+        assert!(
+            resolve_sid_principal(&state, &format!("{CONTOSO_SID}-519"), "contoso.local").is_none(),
+            "a fabrikam.local credential cannot exercise a contoso.local group edge"
+        );
+    }
 
     #[test]
     fn dedup_key_format() {
