@@ -47,6 +47,20 @@ impl SharedState {
         self.inner.write().await.acl_publish_cap = cap;
     }
 
+    pub async fn set_diversity_recording(
+        &self,
+        emit_path_records: bool,
+        novelty_enabled: bool,
+        novelty_scope: &str,
+    ) {
+        let mut inner = self.inner.write().await;
+        inner.emit_path_records = emit_path_records;
+        inner.novelty_enabled = novelty_enabled;
+        if !novelty_scope.is_empty() {
+            inner.novelty_scope = novelty_scope.to_string();
+        }
+    }
+
     /// Access the installed recorder. Internal — publishing methods call this
     /// to emit events after a successful Redis write.
     pub(crate) fn recorder(&self) -> &OpStateRecorder {

@@ -189,6 +189,14 @@ async fn run_inner() -> Result<()> {
             .await;
     }
 
+    shared_state
+        .set_diversity_recording(
+            config.strategy.emit_path_records,
+            config.strategy.novelty_enabled,
+            &config.strategy.novelty_scope,
+        )
+        .await;
+
     // install a Nats-backed op-state recorder when NATS is
     // available. Redis remains authoritative until Phase 4; emit failures are
     // logged (see `emit_op_state`) but never abort the op.

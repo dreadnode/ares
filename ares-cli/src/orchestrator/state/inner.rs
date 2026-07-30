@@ -6,7 +6,7 @@ use std::time::Instant;
 
 use chrono::{DateTime, Utc};
 
-use ares_core::config::defaults::default_acl_publish_cap;
+use ares_core::config::defaults::{default_acl_publish_cap, default_novelty_scope};
 use ares_core::models::*;
 
 use super::ALL_DEDUP_SETS;
@@ -305,6 +305,10 @@ pub struct StateInner {
     pub acl_publish_cap: u32,
     pub acl_published_count: u32,
     pub acl_cap_reached_logged: bool,
+
+    pub emit_path_records: bool,
+    pub novelty_enabled: bool,
+    pub novelty_scope: String,
 }
 
 impl StateInner {
@@ -369,6 +373,9 @@ impl StateInner {
             acl_publish_cap: default_acl_publish_cap(),
             acl_published_count: 0,
             acl_cap_reached_logged: false,
+            emit_path_records: false,
+            novelty_enabled: false,
+            novelty_scope: default_novelty_scope(),
         }
     }
 

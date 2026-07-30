@@ -46,10 +46,25 @@ impl SharedState {
         );
 
         // Compute superseded vuln_ids from in-memory discovered_vulnerabilities.
-        let superseded: Vec<String> = {
+        let (superseded, walked_step) = {
             let state = self.inner.read().await;
             let primary = state.discovered_vulnerabilities.get(vuln_id);
-            compute_superseded(vuln_id, primary, &state.discovered_vulnerabilities)
+            let superseded: Vec<String> =
+                compute_superseded(vuln_id, primary, &state.discovered_vulnerabilities);
+            let walked_step = if state.emit_path_records || state.novelty_enabled {
+                primary.map(|v| {
+                    (
+                        state.emit_path_records,
+                        state.novelty_enabled,
+                        state.novelty_scope.clone(),
+                        v.vuln_type.clone(),
+                        v.target.clone(),
+                    )
+                })
+            } else {
+                None
+            };
+            (superseded, walked_step)
         };
 
         let superseded_key = format!(
@@ -83,6 +98,20 @@ impl SharedState {
             },
         )
         .await;
+
+        if let Some((emit, novelty, scope, vuln_type, target)) = walked_step {
+            crate::orchestrator::diversity::record_step(
+                &mut conn,
+                &operation_id,
+                &scope,
+                None,
+                &vuln_type,
+                &target,
+                emit,
+                novelty,
+            )
+            .await;
+        }
 
         let mut state = self.inner.write().await;
         state.exploited_vulnerabilities.insert(vuln_id.to_string());
@@ -597,6 +626,89 @@ mod tests {
                 .unwrap();
         assert!(members.contains("mssql_impersonation_192.168.58.51"));
         assert!(members.contains("mssql_192_168_58_51"));
+    }
+
+    async fn path_record(q: &TaskQueueCore<MockRedisConnection>) -> Vec<String> {
+        let mut conn = q.connection();
+        redis::AsyncCommands::lrange(&mut conn, "ares:op:op-1:path_record", 0, -1)
+            .await
+            .unwrap()
+    }
+
+    async fn state_with_mssql_pair(
+        emit: bool,
+    ) -> (SharedState, TaskQueueCore<MockRedisConnection>) {
+        let state = SharedState::new("op-1".to_string());
+        let q = mock_queue();
+        if emit {
+            state
+                .set_diversity_recording(true, true, "per-campaign")
+                .await;
+        }
+        {
+            let mut s = state.inner.write().await;
+            s.discovered_vulnerabilities.insert(
+                "mssql_192_168_58_51".into(),
+                vuln("mssql_192_168_58_51", "mssql_access", "192.168.58.51", &[]),
+            );
+            s.discovered_vulnerabilities.insert(
+                "mssql_impersonation_192.168.58.51".into(),
+                vuln(
+                    "mssql_impersonation_192.168.58.51",
+                    "mssql_impersonation",
+                    "192.168.58.51",
+                    &[],
+                ),
+            );
+        }
+        (state, q)
+    }
+
+    #[tokio::test]
+    async fn mark_exploited_records_walked_step_for_primary_only() {
+        let (state, q) = state_with_mssql_pair(true).await;
+
+        state
+            .mark_exploited(&q, "mssql_impersonation_192.168.58.51")
+            .await
+            .unwrap();
+
+        let steps = path_record(&q).await;
+        assert_eq!(steps.len(), 1, "superseded vuln must not be recorded");
+        assert!(steps[0].contains("mssql_impersonation"));
+        assert!(!steps[0].contains("mssql_access"));
+        assert!(steps[0].contains("192.168.58.51"));
+    }
+
+    #[tokio::test]
+    async fn mark_exploited_records_nothing_when_diversity_off() {
+        let (state, q) = state_with_mssql_pair(false).await;
+
+        state
+            .mark_exploited(&q, "mssql_impersonation_192.168.58.51")
+            .await
+            .unwrap();
+
+        assert!(path_record(&q).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn mark_exploited_records_via_any_call_path() {
+        let (state, q) = state_with_mssql_pair(true).await;
+
+        state
+            .mark_exploited(&q, "mssql_192_168_58_51")
+            .await
+            .unwrap();
+        state
+            .mark_exploited(&q, "mssql_impersonation_192.168.58.51")
+            .await
+            .unwrap();
+
+        let steps = path_record(&q).await;
+        assert_eq!(steps.len(), 2);
+        assert!(steps[0].contains("mssql_access"));
+        assert!(steps[1].contains("mssql_impersonation"));
     }
 
     #[tokio::test]

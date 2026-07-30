@@ -605,6 +605,30 @@ tasks:
         fi
         echo -e "{{.SUCCESS}} diversity knobs active on {{.EC2_NAME}}"
 
+        # Workers must already be up: launch-orchestrator.sh.tmpl leaves
+        # ARES_TOOL_DISPATCH unset so every tool call routes over NATS to an
+        # ares@<role>.service. With none running, ops launch fine and then
+        # stall with no consumer — an entire sweep burns with nothing to show.
+        # ec2:deploy does not cover this: its restart step only bounces units
+        # that are ALREADY active and prints "skipping" otherwise.
+        WORKERS=$(run_ssm_cmd "$INSTANCE_ID" 'pgrep -cf "ares worker" || true' 60) || exit 1
+        WORKERS=$(echo "$WORKERS" | tr -dc '0-9')
+        if [ -z "${WORKERS}" ] || [ "${WORKERS}" -eq 0 ]; then
+          echo -e "{{.ERROR}} no 'ares worker' processes on {{.EC2_NAME}} — every op would stall with no NATS consumer."
+          echo -e "{{.ERROR}} Start them: task ec2:exec EC2_NAME={{.EC2_NAME}} CMD='for r in recon credential_access lateral privesc acl coercion cracker; do systemctl start ares@\$r; done'"
+          exit 1
+        fi
+        echo -e "{{.SUCCESS}} ${WORKERS} ares worker process(es) live"
+
+        # A leftover lock makes `ares ops status` report `running` for an op
+        # that is already dead, which the sweep loop would wait out.
+        LOCKS=$(run_ssm_cmd "$INSTANCE_ID" 'redis-cli --scan --pattern "ares:lock:*" | head -5' 60) || exit 1
+        if [ -n "$(echo "$LOCKS" | tr -d '[:space:]')" ]; then
+          echo -e "{{.WARN}} operation lock(s) still held — a prior op may still be live:"
+          echo "$LOCKS" | sed 's/^/    /'
+          echo -e "{{.WARN}} locks carry a ~5m TTL; re-run once they clear, or stop the op first."
+        fi
+
       # Optionally wipe novelty memory so the sweep starts fresh.
       - |
         set -euo pipefail

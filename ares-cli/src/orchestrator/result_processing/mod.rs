@@ -365,35 +365,6 @@ pub async fn process_completed_task(
                     dispatcher, &vuln_id,
                 )
                 .await;
-
-                // Attack-path diversity: record the walked
-                // (foothold, technique, target) step for coverage measurement
-                // and cross-run novelty bias. Inert unless emit_path_records or
-                // novelty_enabled is set (see docs/attack-path-diversity.md).
-                let strategy = &dispatcher.config.strategy;
-                if strategy.emit_path_records || strategy.novelty_enabled {
-                    let vuln_type = task_params_snapshot
-                        .get("vuln_type")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or(vuln_id.as_str());
-                    let target = task_params_snapshot
-                        .get("target")
-                        .and_then(|v| v.as_str())
-                        .or(task_target_ip.as_deref())
-                        .unwrap_or("");
-                    let mut conn = dispatcher.queue.connection();
-                    crate::orchestrator::diversity::record_step(
-                        &mut conn,
-                        &dispatcher.config.operation_id,
-                        &strategy.novelty_scope,
-                        cred_key.as_deref(),
-                        vuln_type,
-                        target,
-                        strategy.emit_path_records,
-                        strategy.novelty_enabled,
-                    )
-                    .await;
-                }
             } else {
                 // Record failed exploit attempts as timeline events so they appear
                 // in reports (e.g. noPac patched, PrintNightmare patched, Certifried

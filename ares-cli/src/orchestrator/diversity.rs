@@ -152,8 +152,8 @@ pub async fn novelty_seen(
 /// Best-effort: Redis errors are logged at debug and swallowed so a recording
 /// failure never affects exploitation.
 #[allow(clippy::too_many_arguments)]
-pub async fn record_step(
-    conn: &mut ConnectionManager,
+pub async fn record_step<C: AsyncCommands + Send>(
+    conn: &mut C,
     operation_id: &str,
     novelty_scope: &str,
     foothold: Option<&str>,
