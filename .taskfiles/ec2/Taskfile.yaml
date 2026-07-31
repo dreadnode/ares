@@ -1267,6 +1267,9 @@ tasks:
           FLUSH_CMD="redis-cli FLUSHDB; echo Redis flushed;"
         fi
 
+        WORKER_RESTART_CMD='UNITS=$(systemctl list-units --type=service --state=active --no-legend "ares@*.service" 2>/dev/null | awk "{print \$1}" | sort -u); '
+        WORKER_RESTART_CMD+='if [ -z "$UNITS" ]; then echo "no ares@ worker units active — skipping restart"; else echo "restarting workers: $UNITS"; systemctl restart $UNITS; sleep 2; systemctl is-active $UNITS | sort -u; fi'
+
         # Write shared env vars for workers (EnvironmentFile in systemd template).
         # Values are printf %q-escaped so shell metachars in secrets
         # (parens/semicolons/dollars in RDS passwords) survive `. /etc/ares/env`.
@@ -1300,6 +1303,7 @@ tasks:
         # potfile for the per-op wipe (PotfileResetGuard). Without it the resolver
         # returns None and the wipe silently no-ops, leaking prior ops' cracks.
         ENV_FILE_CMD="$ENV_FILE_CMD; printf 'HOME=%q\n' '/root' >> \$ENV_TMP"
+        ENV_FILE_CMD="$ENV_FILE_CMD; printf 'ARES_ALLOW_IRREVERSIBLE_MUTATION=%q\n' '1' >> \$ENV_TMP"
         # OTEL: send traces to Alloy OTLP gateway → Tempo via HTTP/protobuf
         ENV_FILE_CMD="$ENV_FILE_CMD; printf 'OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=%q\n' '${OTEL_TRACES_ENDPOINT}' >> \$ENV_TMP"
         ENV_FILE_CMD="$ENV_FILE_CMD; printf 'OTEL_EXPORTER_OTLP_PROTOCOL=%q\n' 'http/protobuf' >> \$ENV_TMP"
@@ -1322,6 +1326,7 @@ tasks:
         set -e
         ${ENV_FILE_CMD}
         ${FLUSH_CMD}
+        ${WORKER_RESTART_CMD}
         pkill -f 'ares orchestrator' 2>/dev/null || true; sleep 1
         export OPENAI_API_KEY='${OPENAI_KEY}'
         export ANTHROPIC_API_KEY='${ANTHROPIC_KEY}'
