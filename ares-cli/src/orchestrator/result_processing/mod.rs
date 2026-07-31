@@ -42,8 +42,8 @@ use self::admin_checks::{
 use self::discovery_polling::has_lockout_in_result;
 use self::parsing::{parse_discoveries, resolve_parent_id};
 use self::timeline::{
-    create_credential_timeline_event, create_exploitation_timeline_event,
-    create_hash_timeline_event, create_lateral_movement_timeline_event,
+    create_exploitation_timeline_event, create_hash_timeline_event,
+    create_lateral_movement_timeline_event, publish_credential_credited,
 };
 
 /// Kerberos/SMB errors that indicate a credential is locked out.
@@ -2128,21 +2128,11 @@ pub(crate) async fn extract_from_raw_text(
             cred.domain = corrected;
         }
         let is_cracked = cred.source.starts_with("cracked:");
-        let source = cred.source.clone();
         let username = cred.username.clone();
         let domain = cred.domain.clone();
         let password = cred.password.clone();
-        let is_admin = cred.is_admin;
-        match dispatcher
-            .state
-            .publish_credential(&dispatcher.queue, cred)
-            .await
-        {
-            Ok(true) => {
-                new_count += 1;
-                create_credential_timeline_event(dispatcher, &source, &username, &domain, is_admin)
-                    .await;
-            }
+        match publish_credential_credited(dispatcher, cred).await {
+            Ok(true) => new_count += 1,
             Ok(false) => {} // duplicate credential — the hash stamp below still runs
             Err(e) => {
                 warn!(err = %e, "Failed to publish text-extracted credential");
@@ -2369,23 +2359,12 @@ pub(crate) async fn extract_discoveries(
     }
 
     for cred in parsed.credentials {
-        // Capture fields before move for timeline event
-        let source = cred.source.clone();
         let username = cred.username.clone();
         let domain = cred.domain.clone();
         let password = cred.password.clone();
-        let is_admin = cred.is_admin;
-        let is_cracked = source.starts_with("cracked");
-        match dispatcher
-            .state
-            .publish_credential(&dispatcher.queue, cred)
-            .await
-        {
-            Ok(true) => {
-                debug!("Published new credential from result");
-                create_credential_timeline_event(dispatcher, &source, &username, &domain, is_admin)
-                    .await;
-            }
+        let is_cracked = cred.source.starts_with("cracked");
+        match publish_credential_credited(dispatcher, cred).await {
+            Ok(true) => debug!("Published new credential from result"),
             Ok(false) => {} // duplicate credential — the hash stamp below still runs
             Err(e) => {
                 warn!(err = %e, "Failed to publish credential");

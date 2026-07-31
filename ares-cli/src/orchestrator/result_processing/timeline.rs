@@ -59,7 +59,25 @@ pub(crate) fn is_critical_hash(username: &str) -> bool {
     matches!(username.to_lowercase().as_str(), "krbtgt" | "administrator")
 }
 
-pub(crate) async fn create_credential_timeline_event(
+pub(crate) async fn publish_credential_credited(
+    dispatcher: &Arc<Dispatcher>,
+    cred: ares_core::models::Credential,
+) -> anyhow::Result<bool> {
+    let source = cred.source.clone();
+    let username = cred.username.clone();
+    let domain = cred.domain.clone();
+    let is_admin = cred.is_admin;
+    let published = dispatcher
+        .state
+        .publish_credential(&dispatcher.queue, cred)
+        .await?;
+    if published {
+        create_credential_timeline_event(dispatcher, &source, &username, &domain, is_admin).await;
+    }
+    Ok(published)
+}
+
+async fn create_credential_timeline_event(
     dispatcher: &Arc<Dispatcher>,
     source: &str,
     username: &str,

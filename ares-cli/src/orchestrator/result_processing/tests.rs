@@ -3485,6 +3485,55 @@ fn every_hash_credit_step_lives_in_the_shared_helper() {
     }
 }
 
+// ── Credential publish credit parity ────────────────────────────────────────
+
+const ACL_GRANTS_SRC: &str = include_str!("acl_grants.rs");
+
+const TIMELINE_SRC: &str = include_str!("timeline.rs");
+
+#[test]
+fn every_credential_publish_path_routes_through_the_shared_helper() {
+    for (name, src) in [
+        ("mod.rs", RESULT_PROCESSING_SRC),
+        ("acl_grants.rs", ACL_GRANTS_SRC),
+        ("discovery_polling.rs", DISCOVERY_POLLING_SRC),
+    ] {
+        assert!(
+            src.contains("publish_credential_credited("),
+            "{name} stopped routing credential publishes through the shared helper"
+        );
+        assert!(
+            !src.contains(".publish_credential("),
+            "{name} publishes a credential directly — that path emits no timeline \
+             event; call publish_credential_credited instead"
+        );
+        assert!(
+            !src.contains("create_credential_timeline_event("),
+            "{name} emits the credential timeline event by hand — the event and the \
+             publish must stay welded together in publish_credential_credited"
+        );
+    }
+}
+
+#[test]
+fn credential_publish_and_credit_are_welded_in_one_helper() {
+    assert!(
+        TIMELINE_SRC.contains("pub(crate) async fn publish_credential_credited("),
+        "publish_credential_credited moved or was renamed"
+    );
+    assert!(
+        TIMELINE_SRC.contains("\nasync fn create_credential_timeline_event("),
+        "create_credential_timeline_event is no longer private to timeline.rs — \
+         publish paths can call it directly again, which is the drift these \
+         guards exist to prevent"
+    );
+    assert_eq!(
+        TIMELINE_SRC.matches(".publish_credential(").count(),
+        1,
+        "credential publishing escaped the single credited call site"
+    );
+}
+
 // ── Admin-upgrade host scope ────────────────────────────────────────────────
 
 #[test]
