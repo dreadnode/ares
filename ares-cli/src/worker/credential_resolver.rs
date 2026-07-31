@@ -901,6 +901,7 @@ pub(crate) fn requires_exact_realm(tool_name: &str) -> bool {
             | "bloodyad_add_group_member"
             | "bloodyad_add_genericall"
             | "dacl_edit"
+            | "owner_edit"
             | "pywhisker"
             | "ldap_search"
             | "ldap_search_descriptions"
@@ -969,7 +970,8 @@ pub(crate) fn supports_kerberos_auth_mode(tool_name: &str) -> bool {
 /// This list must be kept in lock-step with the tool impls under
 /// `ares-tools/src/`:
 ///   - `acl::bloodyad_*`, `acl::adminsd_holder_add_ace`,
-///     `acl::gmsa_read_password_bloodyad`, `acl::dacl_edit` (acl.rs)
+///     `acl::gmsa_read_password_bloodyad`, `acl::dacl_edit`,
+///     `acl::owner_edit` (acl.rs)
 ///   - `recon::ldap_search`, `recon::ldap_acl_enumeration`,
 ///     `recon::enumerate_domain_trusts` (recon.rs)
 ///   - `credential_access::secretsdump` (credential_access/secretsdump.rs)
@@ -1004,6 +1006,7 @@ pub(crate) fn tool_consumes_ticket_path(tool_name: &str) -> bool {
             | "adminsd_holder_add_ace"
             | "gmsa_read_password_bloodyad"
             | "dacl_edit"
+            | "owner_edit"
             | "add_computer"
             | "addspn"
             | "rbcd_write"
@@ -1821,6 +1824,7 @@ mod tests {
             "adminsd_holder_add_ace",
             "gmsa_read_password_bloodyad",
             "dacl_edit",
+            "owner_edit",
             "add_computer",
             "addspn",
             "rbcd_write",
@@ -1858,6 +1862,7 @@ mod tests {
             "bloodyad_add_group_member",
             "bloodyad_add_genericall",
             "dacl_edit",
+            "owner_edit",
             "pywhisker",
             "ldap_search",
             "ldap_search_descriptions",

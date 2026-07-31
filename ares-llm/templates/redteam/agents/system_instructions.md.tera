@@ -144,7 +144,7 @@ IF BloodHound or delegation tools find opportunities:
 | ForceChangePassword | bloodyad_set_password (LDAP); if the DC rejects the `unicodePwd` modify, use certipy_shadow / pywhisker instead | New password, or NT hash via shadow credentials |
 | GenericAll on computer | certipy_shadow OR RBCD | Admin access |
 | WriteDacl | dacl_edit (grant yourself GenericAll) | Escalate permissions |
-| WriteOwner | Take ownership → modify DACL | Escalate permissions |
+| WriteOwner | owner_edit (take ownership) → dacl_edit (grant yourself GenericAll) | Escalate permissions |
 | AddMember on group | bloodyad_add_group_member | Group membership |
 
 **Delegation Abuse:**

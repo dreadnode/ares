@@ -58,8 +58,19 @@ the value above. Pass `target` as the SAM account name of the target object
 | `allextendedrights` on USER      | `bloodyad_set_password` *or* `pywhisker` | Equivalent to ForceChangePassword + DS-Replication |
 | `addmember` / `addself` on GROUP | `bloodyad_add_group_member`       | Add source principal to the group                     |
 | `writedacl`                      | `dacl_edit`                       | Grant ourselves an actionable right, then chain       |
-| `writeowner`                     | `dacl_edit` (with `rights=WriteDacl`) | Note: ownership change needed first; if dacl_edit alone fails, report insufficient_context |
+| `writeowner`                     | `owner_edit`, THEN `dacl_edit`    | Two calls, in this order — see below                  |
 | `self_membership` / `write_membership` on a GROUP | `bloodyad_add_group_member` | Add source principal to the group        |
+
+**`writeowner` is a two-step edge.** WriteOwner does not give you write access
+to the target's DACL — it lets you *become the target's owner*, and an owner
+holds WriteDacl implicitly whatever the DACL says. So call `owner_edit` first,
+with `new_owner` set to the **Source principal** above and `target` set to the
+**Target object** above. Only once it prints `OwnerSid modified successfully!`,
+call `dacl_edit` with `rights=GenericAll` against the same target, then abuse
+the GenericAll as usual. Calling `dacl_edit` first on a `writeowner` edge can
+only fail — we do not hold WriteDacl yet. If `owner_edit` itself fails, report
+that failure; do not retry it as `dacl_edit` or `bloodyad_add_genericall`,
+which need the same right you were just refused.
 
 **Group targets:** when `target_user` resolves to a group (e.g. `Domain Admins`,
 `DnsAdmins`, `Group Policy Creator Owners`, `Users`), use `bloodyad_add_group_member`

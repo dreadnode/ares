@@ -100,6 +100,102 @@ fn parse_relayed_account(output: &str) -> Option<String> {
         .filter(|u| !u.is_empty())
 }
 
+/// Reduce a principal reference to a bare account name.
+///
+/// Accepts the three shapes `owner_edit` is called with: a distinguished name
+/// (`CN=alice,CN=Users,DC=contoso,DC=local`), a down-level logon name
+/// (`CONTOSO\alice`) and a UPN (`alice@contoso.local`).
+fn bare_account_name(raw: &str) -> String {
+    let trimmed = raw.trim();
+    let leaf = if trimmed.contains('=') {
+        trimmed
+            .split(',')
+            .next()
+            .and_then(|rdn| rdn.split_once('='))
+            .map(|(_, value)| value)
+            .unwrap_or(trimmed)
+    } else {
+        trimmed
+    };
+    let after_domain = leaf.rsplit('\\').next().unwrap_or(leaf);
+    after_domain
+        .split_once('@')
+        .map(|(user, _)| user)
+        .unwrap_or(after_domain)
+        .trim()
+        .to_string()
+}
+
+/// Republish a confirmed take-ownership as the `WriteDacl` edge it acquired.
+///
+/// An object's owner holds `WRITE_DAC` implicitly, whatever its DACL says, so a
+/// successful `owneredit -action write` converts a `writeowner` edge — which no
+/// tool can abuse directly — into a `writedacl` edge the ACL drivers already
+/// know how to convert further. The record is shaped exactly like
+/// `ldap_acl_enumeration`'s output (`acl_writedacl_{source}_{target}` with the
+/// same `details` keys), so `acl_graph::build_edges` and `auto_dacl_abuse`
+/// consume it with no special-casing and `HSETNX` dedups it against a
+/// re-discovery of the same edge.
+///
+/// Gated on `owneredit.py`'s own success line and nothing else. The tool's read
+/// path prints the current owner and changes nothing; treating that as a
+/// takeover would publish an edge we do not hold and feed the ACL queue a step
+/// that can only fail.
+fn parse_owner_edit(output: &str, params: &Value) -> Vec<Value> {
+    if !output
+        .to_lowercase()
+        .contains("ownersid modified successfully")
+    {
+        return Vec::new();
+    }
+
+    let arg = |key: &str| {
+        params
+            .get(key)
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim()
+    };
+    let raw_owner = [arg("new_owner"), arg("principal"), arg("username")]
+        .into_iter()
+        .find(|v| !v.is_empty())
+        .unwrap_or("");
+    let raw_target = [arg("target_dn"), arg("target"), arg("target_user")]
+        .into_iter()
+        .find(|v| !v.is_empty())
+        .unwrap_or("");
+
+    let source = bare_account_name(raw_owner);
+    let target = bare_account_name(raw_target);
+    if source.is_empty() || target.is_empty() || source.eq_ignore_ascii_case(&target) {
+        return Vec::new();
+    }
+
+    let domain = arg("domain");
+    let vuln_id = format!(
+        "acl_writedacl_{}_{}",
+        source.to_lowercase().replace(' ', "_"),
+        target.to_lowercase().replace('$', "")
+    );
+
+    vec![json!({
+        "vuln_id": vuln_id,
+        "vuln_type": "writedacl",
+        "target": target,
+        "discovered_by": "owner_edit",
+        "details": {
+            "source": source,
+            "target": target,
+            "target_type": "Unknown",
+            "domain": domain,
+            "source_domain": domain,
+            "description": format!(
+                "{source} took ownership of {target} and therefore holds writedacl on it implicitly"
+            ),
+        },
+    })]
+}
+
 /// Credential-harvesting tools that run WITHOUT a pre-existing authenticated
 /// principal and fall back to a generic, guessed userlist when the caller
 /// doesn't seed one. They exit 0 whether or not they find anything, and a
@@ -779,6 +875,13 @@ pub fn parse_tool_output(tool_name: &str, output: &str, params: &Value) -> Value
                     },
                 }]);
             }
+        }
+        "owner_edit" => {
+            set_if_nonempty(
+                &mut discoveries,
+                "vulnerabilities",
+                parse_owner_edit(output, params),
+            );
         }
         "laps_dump" => {
             set_if_nonempty(&mut discoveries, "credentials", parse_laps(output, params));
@@ -1988,6 +2091,100 @@ SMB  192.168.58.121  445  DC01  bob         2026-03-25 23:21:09 0  Bob"#;
             "ldap_acl_enumeration",
             "",
             &json!({"domain": "contoso.local"}),
+        );
+        assert!(disc.get("vulnerabilities").is_none());
+    }
+
+    const OWNEREDIT_SUCCESS: &str = "[*] Current owner information below\n\
+                                     [*] - SID: S-1-5-21-1111111111-2222222222-3333333333-512\n\
+                                     [*] - sAMAccountName: Domain Admins\n\
+                                     [*] OwnerSid modified successfully!\n";
+
+    #[test]
+    fn owner_edit_success_publishes_the_implicit_writedacl_edge() {
+        let disc = parse_tool_output(
+            "owner_edit",
+            OWNEREDIT_SUCCESS,
+            &json!({
+                "domain": "contoso.local",
+                "username": "alice",
+                "new_owner": "alice",
+                "target": "svc_sql",
+            }),
+        );
+        let vulns = disc["vulnerabilities"].as_array().expect("vulnerabilities");
+        assert_eq!(vulns.len(), 1);
+        assert_eq!(vulns[0]["vuln_id"], "acl_writedacl_alice_svc_sql");
+        assert_eq!(vulns[0]["vuln_type"], "writedacl");
+        assert_eq!(vulns[0]["details"]["source"], "alice");
+        assert_eq!(vulns[0]["details"]["target"], "svc_sql");
+        assert_eq!(vulns[0]["details"]["domain"], "contoso.local");
+    }
+
+    #[test]
+    fn owner_edit_read_action_publishes_nothing() {
+        let disc = parse_tool_output(
+            "owner_edit",
+            "[*] Current owner information below\n\
+             [*] - SID: S-1-5-21-1111111111-2222222222-3333333333-512\n\
+             [*] - sAMAccountName: Domain Admins\n",
+            &json!({
+                "domain": "contoso.local",
+                "username": "alice",
+                "target": "svc_sql",
+                "action": "read",
+            }),
+        );
+        assert!(
+            disc.get("vulnerabilities").is_none(),
+            "reporting an object's current owner is not taking it — publishing an \
+             edge here would queue a dacl_edit we hold no right to run"
+        );
+    }
+
+    #[test]
+    fn owner_edit_failure_publishes_nothing() {
+        let disc = parse_tool_output(
+            "owner_edit",
+            "[-] Could not modify object: insufficientAccessRights\n",
+            &json!({
+                "domain": "contoso.local",
+                "username": "alice",
+                "new_owner": "alice",
+                "target": "svc_sql",
+            }),
+        );
+        assert!(disc.get("vulnerabilities").is_none());
+    }
+
+    #[test]
+    fn owner_edit_reduces_distinguished_names_to_account_names() {
+        let disc = parse_tool_output(
+            "owner_edit",
+            OWNEREDIT_SUCCESS,
+            &json!({
+                "domain": "fabrikam.local",
+                "username": "bob",
+                "new_owner": "CN=bob,CN=Users,DC=fabrikam,DC=local",
+                "target_dn": "CN=Domain Admins,CN=Users,DC=fabrikam,DC=local",
+            }),
+        );
+        let vulns = disc["vulnerabilities"].as_array().expect("vulnerabilities");
+        assert_eq!(vulns[0]["vuln_id"], "acl_writedacl_bob_domain admins");
+        assert_eq!(vulns[0]["details"]["target"], "Domain Admins");
+    }
+
+    #[test]
+    fn owner_edit_self_ownership_publishes_nothing() {
+        let disc = parse_tool_output(
+            "owner_edit",
+            OWNEREDIT_SUCCESS,
+            &json!({
+                "domain": "contoso.local",
+                "username": "alice",
+                "new_owner": "alice",
+                "target": "alice",
+            }),
         );
         assert!(disc.get("vulnerabilities").is_none());
     }

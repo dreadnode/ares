@@ -104,3 +104,53 @@ pub(crate) fn generate_acl_chain_step_prompt(
 
     render_template_with_context(TASK_ACL_CHAIN_STEP, &ctx)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn writeowner_step_routes_through_owner_edit_before_dacl_edit() {
+        let payload = json!({
+            "technique": "dacl_abuse",
+            "acl_type": "writeowner",
+            "vuln_id": "acl_writeowner_alice_svc_sql",
+            "source_user": "alice",
+            "target_user": "svc_sql",
+            "target_ip": "192.168.58.10",
+            "domain": "contoso.local",
+        });
+        let prompt = generate_acl_chain_step_prompt("acl_chain_step_1", &payload, None)
+            .expect("writeowner step must render");
+
+        let row = prompt
+            .lines()
+            .find(|l| l.starts_with("| `writeowner`"))
+            .expect("the tool-choice table must still carry a writeowner row");
+        let owner_at = row
+            .find("owner_edit")
+            .expect("writeowner has no primitive other than owner_edit");
+        let dacl_at = row.find("dacl_edit").expect("dacl_edit is step two");
+        assert!(
+            owner_at < dacl_at,
+            "owner_edit must be named before dacl_edit — dacl_edit first on a \
+             writeowner edge can only fail; row was: {row}"
+        );
+    }
+
+    #[test]
+    fn chain_step_renders_without_a_target() {
+        let payload = json!({
+            "acl_type": "writeowner",
+            "source_user": "alice",
+            "target_ip": "192.168.58.10",
+            "domain": "contoso.local",
+        });
+        assert!(
+            generate_acl_chain_step_prompt("acl_chain_step_2", &payload, None).is_ok(),
+            "target_user is inserted conditionally, so an unguarded {{ target_user }} \
+             in the template kills the whole task rather than one instruction"
+        );
+    }
+}

@@ -76,6 +76,9 @@ roles:
       - category: Impacket
         binaries: [impacket-dacledit]
         fn_names: [dacl_edit]
+      - category: Impacket
+        binaries: [impacket-owneredit]
+        fn_names: [owner_edit]
       - category: GPO abuse
         binaries: [dacledit.py]
         fn_names: [sharpgpoabuse, pygpoabuse_immediate_task]

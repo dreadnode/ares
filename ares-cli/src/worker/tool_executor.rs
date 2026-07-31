@@ -815,6 +815,49 @@ mod tests {
         assert!(!esc13_props.contains_key("sid"));
     }
 
+    #[test]
+    fn owner_edit_schema_required_fields_are_enough_to_build_a_command() {
+        use ares_llm::tool_registry::{tools_for_role, AgentRole};
+
+        let schema = tools_for_role(AgentRole::Acl)
+            .into_iter()
+            .find(|t| t.name == "owner_edit")
+            .expect("acl registry missing owner_edit")
+            .input_schema;
+
+        let required: Vec<String> = schema["required"]
+            .as_array()
+            .expect("owner_edit schema declares no required array")
+            .iter()
+            .filter_map(|v| v.as_str().map(str::to_string))
+            .collect();
+
+        let mut payload = serde_json::Map::new();
+        for field in &required {
+            let value = match field.as_str() {
+                "domain" => "contoso.local",
+                "dc_ip" => "192.168.58.10",
+                "username" | "new_owner" => "alice",
+                "target" | "target_dn" => "svc_sql",
+                other => panic!("no sample value for newly required owner_edit field {other:?}"),
+            };
+            payload.insert(field.clone(), serde_json::json!(value));
+        }
+        payload.insert("password".into(), serde_json::json!("P@ssw0rd!"));
+
+        ares_tools::acl::build_owner_edit(&serde_json::Value::Object(payload)).unwrap_or_else(
+            |e| {
+                panic!(
+                    "a schema-obedient owner_edit call carrying only {required:?} (plus the auth \
+                 material the worker injects) failed to build: {e}. The model cannot see \
+                 build_owner_edit's requirements, only the schema — every field the builder \
+                 hard-requires must appear in the schema's `required` list, or the tool errors \
+                 on every dispatch."
+                )
+            },
+        );
+    }
+
     // ── Per-worker concurrency (Serial-loop wedge fix) ────────────────────
 
     /// Env-var tests serialise on this mutex — process-wide `set_var` is

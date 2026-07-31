@@ -219,6 +219,7 @@ pub async fn dispatch(tool_name: &str, arguments: &Value) -> Result<ToolOutput> 
         "sharpgpoabuse" => acl::sharpgpoabuse(arguments).await,
         "pygpoabuse_immediate_task" => acl::pygpoabuse_immediate_task(arguments).await,
         "dacl_edit" => acl::dacl_edit(arguments).await,
+        "owner_edit" => acl::owner_edit(arguments).await,
 
         // ── Coercion & Relay ────────────────────────────────────────
         "start_responder" => coercion::start_responder(arguments).await,

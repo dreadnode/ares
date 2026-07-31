@@ -139,6 +139,7 @@ pub static TOOL_TO_TECHNIQUE: LazyLock<HashMap<&str, &str>> = LazyLock::new(|| {
         ("petitpotam_unauth", "T1187"),
         // ── ACL Exploitation ────────────────────────────────────────────
         ("dacl_edit", "T1222.001"),
+        ("owner_edit", "T1222.001"),
         ("bloodyad_add_group_member", "T1098.001"),
         ("bloodyad_set_password", "T1098.001"),
         ("bloodyad_add_genericall", "T1222.001"),
@@ -270,6 +271,7 @@ pub static TOOL_TO_CATEGORY: LazyLock<HashMap<&str, &str>> = LazyLock::new(|| {
         ("petitpotam_unauth", "CVEExploitTools"),
         // ── ACLExploitTools ─────────────────────────────────────────────
         ("dacl_edit", "ACLExploitTools"),
+        ("owner_edit", "ACLExploitTools"),
         ("bloodyad_add_group_member", "ACLExploitTools"),
         ("bloodyad_set_password", "ACLExploitTools"),
         ("bloodyad_add_genericall", "ACLExploitTools"),

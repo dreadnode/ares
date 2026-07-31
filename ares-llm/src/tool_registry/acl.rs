@@ -426,5 +426,71 @@ pub(super) fn tool_definitions() -> Vec<ToolDefinition> {
                 "required": ["target_dn", "principal", "rights", "domain", "username", "dc_ip"]
             }),
         },
+        ToolDefinition {
+            name: "owner_edit".into(),
+            description: "Take ownership of an Active Directory object by \
+                rewriting the OwnerSid in its security descriptor. This is how \
+                a `writeowner` edge is exploited, and it is a PREREQUISITE for \
+                `dacl_edit` on that edge, not an alternative to it: WriteOwner \
+                does not let you write the DACL, it lets you become the owner, \
+                and an object's owner then holds WRITE_DAC implicitly. So the \
+                sequence is `owner_edit` (new_owner = the principal we \
+                authenticate as) and THEN `dacl_edit` with \
+                `rights=GenericAll`. Calling `dacl_edit` first on a \
+                `writeowner` edge can only fail — we do not hold WriteDacl yet. \
+                Use `action=read` to report the object's current owner without \
+                changing it. Auth precedence: `ticket_path` > `hash` > \
+                `password`; the worker injects whichever material the operation \
+                actually holds."
+                .into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "target": {
+                        "type": "string",
+                        "description": "The object whose owner is being read or replaced. Accepts either a SAMAccountName (e.g. 'svc_sql', 'Domain Admins') or a distinguished name (e.g. 'CN=Domain Admins,CN=Users,DC=contoso,DC=local') — whichever the ACL edge gave you; the right owneredit.py flag is chosen for you."
+                    },
+                    "target_dn": {
+                        "type": "string",
+                        "description": "Optional alias for `target` when you specifically hold a distinguished name. Takes precedence over `target` if both are set; supplying `target` alone is always sufficient."
+                    },
+                    "new_owner": {
+                        "type": "string",
+                        "description": "SAMAccountName (or DN) of the principal that becomes the new owner — normally the same principal named in `username`, since the point is to acquire WRITE_DAC for ourselves. Required when action=write."
+                    },
+                    "domain": {
+                        "type": "string",
+                        "description": "Target domain FQDN"
+                    },
+                    "username": {
+                        "type": "string",
+                        "description": "Username for authentication (must hold WriteOwner on the target)"
+                    },
+                    "password": {
+                        "type": "string",
+                        "description": "Password for authentication (used only when no `ticket_path` or `hash` is supplied)"
+                    },
+                    "hash": {
+                        "type": "string",
+                        "description": "NTLM hash for pass-the-hash (LM:NT or bare NT), passed to owneredit.py as `-hashes LMHASH:NTHASH`. Takes precedence over `password`."
+                    },
+                    "ticket_path": {
+                        "type": "string",
+                        "description": "Path to a Kerberos ccache file. Highest auth precedence; invokes owneredit.py with `-k -no-pass` and sets KRB5CCNAME."
+                    },
+                    "dc_ip": {
+                        "type": "string",
+                        "description": "Domain controller IP address"
+                    },
+                    "action": {
+                        "type": "string",
+                        "enum": ["read", "write"],
+                        "description": "`write` takes ownership (default). `read` only reports the current owner.",
+                        "default": "write"
+                    }
+                },
+                "required": ["target", "new_owner", "domain", "username", "dc_ip"]
+            }),
+        },
     ]
 }

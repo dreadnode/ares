@@ -81,6 +81,7 @@ fn resolve_program_alias(program: &str) -> Option<&'static [&'static str]> {
             "/opt/pipx/venvs/netexec/bin/netexec",
             "crackmapexec",
         ]),
+        "owneredit.py" | "impacket-owneredit" => Some(&["owneredit.py", "impacket-owneredit"]),
         _ => None,
     }
 }
@@ -1123,5 +1124,20 @@ mod tests {
             msg.contains("is it installed?") && !msg.contains("transient"),
             "ENOENT must land in the permanent branch: {msg}"
         );
+    }
+
+    #[test]
+    fn owneredit_resolves_under_both_impacket_packaging_names() {
+        for spelling in ["owneredit.py", "impacket-owneredit"] {
+            let candidates = resolve_program_alias(spelling).unwrap_or_else(|| {
+                panic!(
+                    "{spelling} must alias: impacket examples ship as `<name>.py` from \
+                     source and as `impacket-<name>` on Kali, and which one the ACL \
+                     container has depends on how it was provisioned"
+                )
+            });
+            assert!(candidates.contains(&"owneredit.py"));
+            assert!(candidates.contains(&"impacket-owneredit"));
+        }
     }
 }

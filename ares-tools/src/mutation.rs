@@ -62,6 +62,7 @@ const REVERSIBLE_TOOLS: &[&str] = &[
     "nopac",
     "ntlmrelayx_to_adcs",
     "ntlmrelayx_to_ldaps",
+    "owner_edit",
     "printnightmare",
     "pygpoabuse_immediate_task",
     "pywhisker",
