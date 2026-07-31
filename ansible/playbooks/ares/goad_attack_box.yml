@@ -85,15 +85,31 @@
     acl_tools_install_bloodyad: true
     acl_tools_install_pywhisker: true
 
-    # Enable all privilege escalation tools for GOAD
+    # Privilege escalation tools. Split into two groups:
+    #
+    # Dispatched by ares (have a reachable code path in ares-tools/ares-llm):
+    #   - sharpgpoabuse  (ACL abuse, ares-tools/src/acl.rs)
+    #   - nopac          (CVE-2021-42278/42287, ares-cli/src/orchestrator/automation/nopac.rs)
+    #   - printnightmare (CVE-2021-1675, ares-cli/src/orchestrator/automation/print_nightmare.rs)
+    #     NOTE: printnightmare is dispatched but currently credits zero — its
+    #     success parser is gated on marker strings the real binary never
+    #     emits (fabricated-markers class of bug). Kept installed so a fix
+    #     doesn't also need an AMI rebake.
+    privesc_tools_install_sharpgpoabuse: true
+    privesc_tools_install_nopac: true
+    privesc_tools_install_printnightmare: true
+
+    # Provisioned attacker-side with no ares dispatch path today — GAPS.md §5.8
+    # is the pending work to wire them up (transfer to target, execute under an
+    # unprivileged foothold, journal for cleanup on op wrap). Kept staged so
+    # that work does not also need a second AMI rebake. If you land a code
+    # path for any of these, promote it to the group above and mark it closed
+    # in §5.8 so the grouping stays honest.
     privesc_tools_install_printspoofer: true
     privesc_tools_install_godpotato: true
     privesc_tools_install_sweetpotato: true
-    privesc_tools_install_sharpgpoabuse: true
     privesc_tools_install_winpeas: true
     privesc_tools_install_linpeas: true
-    privesc_tools_install_nopac: true
-    privesc_tools_install_printnightmare: true
     privesc_tools_install_runascs: true
     privesc_tools_install_powerupsql: true
 
