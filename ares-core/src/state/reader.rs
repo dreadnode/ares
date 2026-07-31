@@ -287,9 +287,7 @@ impl RedisStateReader {
         let data = serde_json::to_string(vuln).unwrap_or_default();
 
         let added: bool = conn.hset_nx(&key, &vuln.vuln_id, &data).await?;
-        if added {
-            let _: () = conn.expire(&key, OP_TTL_SECS).await?;
-        }
+        let _: () = conn.expire(&key, OP_TTL_SECS).await?;
         Ok(added)
     }
 

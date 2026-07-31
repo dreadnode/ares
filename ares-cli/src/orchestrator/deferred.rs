@@ -555,6 +555,18 @@ impl DeferredQueue {
         }
     }
 
+    /// Re-assert a contained task's signature so the producer-side dedup gate
+    /// keeps rejecting it. Containment is terminal, so without this the
+    /// automation re-emits the task every tick and the drain loop drops it
+    /// again, counting drop events rather than distinct work lost.
+    pub async fn tombstone_signature(&self, task: &DeferredTask) {
+        let sig_key = self.sig_key(&task.task_type);
+        let mut conn = self.queue_conn();
+        if let Err(e) = conn.sadd::<_, _, ()>(&sig_key, task.signature()).await {
+            warn!(err = %e, "Failed to tombstone contained deferred task signature");
+        }
+    }
+
     fn queue_conn(&self) -> redis::aio::ConnectionManager {
         // TaskQueue wraps a ConnectionManager which implements Clone cheaply
         // We access it through an internal method.
@@ -728,6 +740,7 @@ pub fn spawn_deferred_processor(
                         reason = %drop.detail,
                         "Dropping deferred task — invalidated by blue containment"
                     );
+                    deferred.tombstone_signature(&task).await;
                     deferred
                         .record_blue_invalidation(&task.task_type, &task.target_role, drop.kind)
                         .await;

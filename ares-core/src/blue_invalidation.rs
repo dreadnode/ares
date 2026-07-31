@@ -92,25 +92,27 @@ impl BlueInvalidatedTasks {
 
     /// Roles ordered by dropped-task count, highest first, ties broken by name.
     pub fn roles_by_count(&self) -> Vec<(&str, u64)> {
-        let mut rows: Vec<(&str, u64)> = self
-            .by_role
-            .iter()
-            .map(|(role, count)| (role.as_str(), *count))
-            .collect();
-        rows.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(b.0)));
-        rows
+        rank_by_count(&self.by_role)
     }
 
     /// Task types ordered by dropped-task count, highest first.
     pub fn task_types_by_count(&self) -> Vec<(&str, u64)> {
-        let mut rows: Vec<(&str, u64)> = self
-            .by_task_type
-            .iter()
-            .map(|(task_type, count)| (task_type.as_str(), *count))
-            .collect();
-        rows.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(b.0)));
-        rows
+        rank_by_count(&self.by_task_type)
     }
+
+    /// Containment kinds ordered by dropped-task count, highest first.
+    pub fn reasons_by_count(&self) -> Vec<(&str, u64)> {
+        rank_by_count(&self.by_reason)
+    }
+}
+
+fn rank_by_count(counts: &BTreeMap<String, u64>) -> Vec<(&str, u64)> {
+    let mut rows: Vec<(&str, u64)> = counts
+        .iter()
+        .map(|(name, count)| (name.as_str(), *count))
+        .collect();
+    rows.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(b.0)));
+    rows
 }
 
 /// Record one deferred task dropped by blue containment.
@@ -328,6 +330,24 @@ mod tests {
         assert_eq!(
             counts.task_types_by_count(),
             vec![("exploit", 3), ("acl_chain_step", 2)]
+        );
+    }
+
+    #[test]
+    fn reasons_rank_by_count_then_name() {
+        let counts = BlueInvalidatedTasks {
+            total: 75,
+            by_role: BTreeMap::new(),
+            by_task_type: BTreeMap::new(),
+            by_reason: BTreeMap::from([
+                ("host_isolated".to_string(), 16),
+                ("credential_revoked".to_string(), 59),
+            ]),
+        };
+
+        assert_eq!(
+            counts.reasons_by_count(),
+            vec![("credential_revoked", 59), ("host_isolated", 16)]
         );
     }
 }

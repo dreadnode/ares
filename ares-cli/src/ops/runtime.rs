@@ -50,6 +50,9 @@ fn format_blue_invalidated(
 
     let roles = counts.roles_by_count();
     let task_types = counts.task_types_by_count();
+    if let Some(line) = breakdown_line("reason", &counts.reasons_by_count()) {
+        lines.push(line);
+    }
     if let Some(line) = breakdown_line("role", &roles) {
         lines.push(line);
     }
@@ -118,10 +121,26 @@ pub(crate) async fn ops_runtime(
         "Vulns: {} exploitable ({} exploited), {} findings ({} exploited)",
         vulns.exploitable, vulns.exploitable_exploited, vulns.findings, vulns.findings_exploited
     );
-    if vulns.orphan_credits > 0 {
+    if vulns.attributed_credits > 0 {
+        let plural = if vulns.attributed_credits == 1 {
+            ""
+        } else {
+            "s"
+        };
         println!(
-            "Warning: {} exploit credits have no vulnerability record (not itemised by `ops loot`)",
-            vulns.orphan_credits
+            "Note: {} primitive credit{plural} carry no vulnerability record (capture-time credit; itemised under Token Coverage in `ops loot`)",
+            vulns.attributed_credits
+        );
+    }
+    if vulns.unattributed_credits > 0 {
+        let plural = if vulns.unattributed_credits == 1 {
+            ""
+        } else {
+            "s"
+        };
+        println!(
+            "Warning: {} exploit credit{plural} match no known technique category (no vulnerability record; `ops loot` can only table them as `other`)",
+            vulns.unattributed_credits
         );
     }
 
@@ -314,6 +333,25 @@ mod tests {
         let lines = format_blue_invalidated(&counts(1, &[("acl", 1)], &[("acl_chain_step", 1)]));
         assert!(lines[0].contains("1 deferred task deleted"));
         assert!(!lines[0].contains("tasks deleted"));
+    }
+
+    #[test]
+    fn reason_breakdown_leads_the_drop_detail() {
+        let mut c = counts(75, &[("recon", 40), ("lateral", 35)], &[]);
+        c.by_reason = [
+            ("credential_revoked".to_string(), 59_u64),
+            ("host_isolated".to_string(), 16),
+        ]
+        .into_iter()
+        .collect();
+
+        let lines = format_blue_invalidated(&c);
+
+        assert_eq!(
+            lines[1],
+            "  by reason: credential_revoked 59, host_isolated 16"
+        );
+        assert_eq!(lines[2], "  by role: recon 40, lateral 35");
     }
 
     #[test]

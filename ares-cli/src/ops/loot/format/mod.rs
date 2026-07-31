@@ -56,16 +56,23 @@ pub(crate) fn print_loot(state: &SharedRedTeamState, json_output: bool) {
 
 /// Vulnerability counts split the same way `ops loot` tables them.
 ///
-/// `orphan_credits` is the number of ids in `exploited_vulnerabilities` with no
-/// matching record in `discovered_vulnerabilities`. Those ids are credited by
-/// primitives that never emit a vulnerability record, so folding them into a
-/// single "exploited" total reports successes that no view can itemise.
+/// An id in `exploited_vulnerabilities` with no matching record in
+/// `discovered_vulnerabilities` is credited by a primitive that never emits a
+/// vulnerability record. Those ids split in two, because only one half is a
+/// reporting gap:
+///
+/// * `attributed_credits` classify under a known scoreboard category, so
+///   `ops loot` already tables them under Token Coverage — `kerberoast_*`,
+///   `asrep_roast_*` and `gmsa_*` are credited at capture time by design.
+/// * `unattributed_credits` fall through to `other`. No view can name the
+///   technique behind them, so they are the ones worth warning about.
 pub(crate) struct VulnCounts {
     pub exploitable: usize,
     pub exploitable_exploited: usize,
     pub findings: usize,
     pub findings_exploited: usize,
-    pub orphan_credits: usize,
+    pub attributed_credits: usize,
+    pub unattributed_credits: usize,
 }
 
 pub(crate) fn vulnerability_counts(state: &SharedRedTeamState) -> VulnCounts {
@@ -74,7 +81,8 @@ pub(crate) fn vulnerability_counts(state: &SharedRedTeamState) -> VulnCounts {
         exploitable_exploited: 0,
         findings: 0,
         findings_exploited: 0,
-        orphan_credits: 0,
+        attributed_credits: 0,
+        unattributed_credits: 0,
     };
 
     for (id, vuln) in &state.discovered_vulnerabilities {
@@ -88,11 +96,17 @@ pub(crate) fn vulnerability_counts(state: &SharedRedTeamState) -> VulnCounts {
         }
     }
 
-    counts.orphan_credits = state
+    for id in state
         .exploited_vulnerabilities
         .iter()
         .filter(|id| !state.discovered_vulnerabilities.contains_key(*id))
-        .count();
+    {
+        if display::token_category(id) == "other" {
+            counts.unattributed_credits += 1;
+        } else {
+            counts.attributed_credits += 1;
+        }
+    }
 
     counts
 }
@@ -199,20 +213,42 @@ mod tests {
     }
 
     #[test]
-    fn vulnerability_counts_reports_exploit_credits_with_no_record() {
-        let state = state_with_vulns(&[("v1", 1)], &["v1", "kerberoast_alice", "kerberoast_bob"]);
+    fn roast_and_gmsa_credits_are_attributed_not_warned_about() {
+        let state = state_with_vulns(
+            &[("v1", 1)],
+            &[
+                "v1",
+                "kerberoast_alice",
+                "asrep_roast_contoso.local",
+                "gmsa_svc_web",
+            ],
+        );
 
         let counts = vulnerability_counts(&state);
 
-        assert_eq!(counts.orphan_credits, 2);
+        assert_eq!(counts.attributed_credits, 3);
+        assert_eq!(counts.unattributed_credits, 0);
         assert_eq!(counts.exploitable_exploited, 1);
+    }
+
+    #[test]
+    fn credits_with_no_known_category_are_unattributed() {
+        let state = state_with_vulns(&[("v1", 1)], &["v1", "wombat_dc01", "kerberoast_bob"]);
+
+        let counts = vulnerability_counts(&state);
+
+        assert_eq!(counts.unattributed_credits, 1);
+        assert_eq!(counts.attributed_credits, 1);
     }
 
     #[test]
     fn vulnerability_counts_has_no_orphans_when_every_credit_has_a_record() {
         let state = state_with_vulns(&[("v1", 1), ("v2", 5)], &["v1", "v2"]);
 
-        assert_eq!(vulnerability_counts(&state).orphan_credits, 0);
+        let counts = vulnerability_counts(&state);
+
+        assert_eq!(counts.attributed_credits, 0);
+        assert_eq!(counts.unattributed_credits, 0);
     }
 
     #[test]
