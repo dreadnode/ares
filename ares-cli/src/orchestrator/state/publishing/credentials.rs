@@ -258,6 +258,7 @@ impl SharedState {
             let is_krbtgt = hash.username.to_lowercase() == "krbtgt"
                 && hash.hash_type.to_lowercase().contains("ntlm");
             let hash_domain = hash.domain.clone();
+            let hash_source = hash.source.clone();
             let mut state = self.inner.write().await;
             state.push_hash_capped(hash);
 
@@ -332,7 +333,7 @@ impl SharedState {
                 let da_domain = krbtgt_domain.clone();
                 drop(state);
 
-                let path = Some("secretsdump → krbtgt NTLM hash".to_string());
+                let path = Some(crate::orchestrator::state::krbtgt_da_path(&hash_source));
                 let mut da_flag_ok = true;
                 if is_first_da {
                     if let Err(e) = self.set_domain_admin(queue, path.clone()).await {

@@ -21,7 +21,7 @@ pub(crate) use canonicalize::{
     canonicalize_domain_label, is_valid_domain_fqdn, resolve_flat_to_fqdn, resolve_fqdn_to_flat,
 };
 pub use dedup::MAX_EXPLOIT_FAILURES;
-pub use inner::StateInner;
+pub use inner::{krbtgt_da_path, StateInner};
 pub use shared::SharedState;
 
 pub const DEDUP_CRACK_REQUESTS: &str = "crack_requests";

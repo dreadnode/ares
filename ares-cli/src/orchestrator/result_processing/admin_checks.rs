@@ -10,13 +10,23 @@ use super::parsing::has_domain_admin_indicator;
 use super::timeline::{create_admin_upgrade_timeline_event, create_domain_admin_timeline_event};
 use crate::orchestrator::dispatcher::Dispatcher;
 use crate::orchestrator::state::{
-    canonicalize_domain_label, is_valid_domain_fqdn, resolve_flat_to_fqdn, StateInner,
-    DEDUP_ADMIN_HASH_UPGRADE,
+    canonicalize_domain_label, is_valid_domain_fqdn, krbtgt_da_path, resolve_flat_to_fqdn,
+    StateInner, DEDUP_ADMIN_HASH_UPGRADE,
 };
 
-/// Determine the domain admin path from a payload.
-pub(crate) fn resolve_da_path(_payload: &Value) -> Option<String> {
-    Some("secretsdump -> krbtgt hash".to_string())
+/// Determine the domain admin path from parser-derived state.
+///
+/// The payload is deliberately not consulted: an agent's `domain_admin_path`
+/// is a model claim, and claims never feed state writes. The tool that
+/// actually produced the krbtgt hash is recorded by a parser in `Hash.source`,
+/// so that is what the path names.
+///
+/// Returns `None` when no krbtgt hash has landed — the DA flag can be set by
+/// an indicator alone, and naming a technique on that evidence is what made
+/// every report assert `secretsdump` regardless of what ran. Callers render
+/// their own fallback (the report derives a path from the credential chain).
+pub(crate) fn resolve_da_path(state: &StateInner) -> Option<String> {
+    state.latest_krbtgt_source().map(krbtgt_da_path)
 }
 
 /// Check if text indicates a golden ticket was saved.
@@ -119,11 +129,10 @@ pub(crate) async fn check_domain_admin_indicators(payload: &Value, dispatcher: &
     if !has_domain_admin_indicator(payload) {
         return;
     }
-    let already_da = {
+    let (already_da, path) = {
         let state = dispatcher.state.read().await;
-        state.has_domain_admin
+        (state.has_domain_admin, resolve_da_path(&state))
     };
-    let path = resolve_da_path(payload);
     if let Err(e) = dispatcher
         .state
         .set_domain_admin(&dispatcher.queue, path.clone())
@@ -603,44 +612,79 @@ mod tests {
 
     // -- resolve_da_path ----------------------------------------------------
 
+    fn krbtgt_hash_from(source: &str) -> ares_core::models::Hash {
+        ares_core::models::Hash {
+            id: "h1".to_string(),
+            username: "krbtgt".to_string(),
+            hash_value: "aad3b435b51404eeaad3b435b51404ee:deadbeef".to_string(),
+            hash_type: "NTLM".to_string(),
+            domain: "contoso.local".to_string(),
+            source: source.to_string(),
+            cracked_password: None,
+            discovered_at: None,
+            parent_id: None,
+            attack_step: 0,
+            aes_key: None,
+            is_previous: false,
+            source_host: None,
+            is_trust_key: false,
+            trust_pair_label: None,
+        }
+    }
+
     #[test]
-    fn resolve_da_path_always_secretsdump() {
-        // Agent-provided path fields are ignored; path is always fixed.
-        let payload = json!({
-            "has_domain_admin": true,
-            "domain_admin_path": "spray → secretsdump → krbtgt"
-        });
+    fn resolve_da_path_names_the_tool_that_produced_the_hash() {
+        let mut state = StateInner::new("op-test".to_string());
+        state
+            .hashes
+            .push(krbtgt_hash_from("certipy_esc1_full_chain"));
         assert_eq!(
-            resolve_da_path(&payload).as_deref(),
-            Some("secretsdump -> krbtgt hash")
+            resolve_da_path(&state).as_deref(),
+            Some("certipy_esc1_full_chain → krbtgt NTLM hash")
         );
     }
 
     #[test]
-    fn resolve_da_path_no_fields() {
-        let payload = json!({ "has_domain_admin": true });
+    fn resolve_da_path_tracks_secretsdump_when_that_is_the_source() {
+        let mut state = StateInner::new("op-test".to_string());
+        state.hashes.push(krbtgt_hash_from("secretsdump"));
         assert_eq!(
-            resolve_da_path(&payload).as_deref(),
-            Some("secretsdump -> krbtgt hash")
+            resolve_da_path(&state).as_deref(),
+            Some("secretsdump → krbtgt NTLM hash")
         );
     }
 
     #[test]
-    fn resolve_da_path_not_explicit_falls_back() {
-        let payload = json!({ "tool_output": "got krbtgt" });
+    fn resolve_da_path_is_none_without_a_krbtgt_hash() {
+        let state = StateInner::new("op-test".to_string());
+        assert_eq!(resolve_da_path(&state), None);
+    }
+
+    #[test]
+    fn resolve_da_path_ignores_a_non_krbtgt_hash() {
+        let mut state = StateInner::new("op-test".to_string());
+        let mut other = krbtgt_hash_from("secretsdump");
+        other.username = "alice".to_string();
+        state.hashes.push(other);
+        assert_eq!(resolve_da_path(&state), None);
+    }
+
+    #[test]
+    fn resolve_da_path_prefers_the_most_recent_capture() {
+        let mut state = StateInner::new("op-test".to_string());
+        state.hashes.push(krbtgt_hash_from("secretsdump"));
+        state
+            .hashes
+            .push(krbtgt_hash_from("certipy_esc1_full_chain"));
         assert_eq!(
-            resolve_da_path(&payload).as_deref(),
-            Some("secretsdump -> krbtgt hash")
+            resolve_da_path(&state).as_deref(),
+            Some("certipy_esc1_full_chain → krbtgt NTLM hash")
         );
     }
 
     #[test]
-    fn resolve_da_path_explicit_false_falls_back() {
-        let payload = json!({ "has_domain_admin": false });
-        assert_eq!(
-            resolve_da_path(&payload).as_deref(),
-            Some("secretsdump -> krbtgt hash")
-        );
+    fn krbtgt_da_path_omits_an_empty_source() {
+        assert_eq!(krbtgt_da_path("   "), "krbtgt NTLM hash");
     }
 
     // -- has_golden_ticket_indicator ----------------------------------------

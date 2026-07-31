@@ -8,6 +8,7 @@ use super::timeline::{
 use super::{
     extract_asrep_roastable_users, result_has_credential_evidence, result_has_parser_evidence,
 };
+use crate::orchestrator::state::StateInner;
 use ares_core::models::{Credential, Hash};
 use serde_json::json;
 
@@ -946,52 +947,51 @@ fn golden_ticket_indicator_both_present_not_adjacent() {
 
 // --- resolve_da_path tests ---
 
+fn state_with_krbtgt_from(source: &str) -> StateInner {
+    let mut state = StateInner::new("op-test".to_string());
+    let mut hash = make_test_hash("h-krbtgt", "krbtgt", "contoso.local", 0);
+    hash.source = source.to_string();
+    state.hashes.push(hash);
+    state
+}
+
 #[test]
-fn da_path_always_krbtgt() {
-    // Agent-provided path fields are ignored.
-    let payload = json!({
-        "has_domain_admin": true,
-        "domain_admin_path": "secretsdump -> Administrator"
-    });
+fn da_path_names_the_capturing_tool() {
+    let state = state_with_krbtgt_from("certipy_esc1_full_chain");
     assert_eq!(
-        resolve_da_path(&payload),
-        Some("secretsdump -> krbtgt hash".to_string())
+        resolve_da_path(&state),
+        Some("certipy_esc1_full_chain → krbtgt NTLM hash".to_string())
     );
 }
 
 #[test]
-fn da_path_no_fields_defaults_to_krbtgt() {
-    let payload = json!({"has_domain_admin": true});
+fn da_path_reports_secretsdump_only_when_secretsdump_ran() {
+    let state = state_with_krbtgt_from("secretsdump");
     assert_eq!(
-        resolve_da_path(&payload),
-        Some("secretsdump -> krbtgt hash".to_string())
+        resolve_da_path(&state),
+        Some("secretsdump → krbtgt NTLM hash".to_string())
     );
 }
 
 #[test]
-fn da_path_no_flag_defaults_to_krbtgt() {
-    let payload = json!({});
-    assert_eq!(
-        resolve_da_path(&payload),
-        Some("secretsdump -> krbtgt hash".to_string())
-    );
+fn da_path_is_none_without_a_krbtgt_capture() {
+    let state = StateInner::new("op-test".to_string());
+    assert_eq!(resolve_da_path(&state), None);
 }
 
 #[test]
-fn da_path_false_flag_defaults_to_krbtgt() {
-    let payload = json!({"has_domain_admin": false});
-    assert_eq!(
-        resolve_da_path(&payload),
-        Some("secretsdump -> krbtgt hash".to_string())
-    );
+fn da_path_ignores_an_unsourced_krbtgt_hash() {
+    let state = state_with_krbtgt_from("");
+    assert_eq!(resolve_da_path(&state), None);
 }
 
 #[test]
-fn da_path_null_flag_defaults_to_krbtgt() {
-    let payload = json!({"has_domain_admin": null});
+fn da_path_does_not_read_agent_authored_claims() {
+    let mut state = state_with_krbtgt_from("secretsdump");
+    state.domain_admin_path = Some("spray → Administrator".to_string());
     assert_eq!(
-        resolve_da_path(&payload),
-        Some("secretsdump -> krbtgt hash".to_string())
+        resolve_da_path(&state),
+        Some("secretsdump → krbtgt NTLM hash".to_string())
     );
 }
 
