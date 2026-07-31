@@ -101,6 +101,38 @@ pub fn irreversible_allowed() -> bool {
     )
 }
 
+/// Names of the tools this build refuses unless the operation opts in.
+///
+/// Exposed so a worker can announce the policy at startup. A guard whose only
+/// evidence is an agent's prose complaint inside a failed task is a guard
+/// nobody can audit: `bloodyad_set_password` was refused on every invocation
+/// for eleven consecutive operations before anyone noticed, because the refusal
+/// never reached a log line of its own.
+pub fn irreversible_tool_names() -> &'static [&'static str] {
+    IRREVERSIBLE_TOOLS
+}
+
+/// Emit the mutation policy this process will enforce.
+///
+/// Call once at worker startup, so an operation's logs record whether
+/// irreversible mutation was permitted without having to infer it from a
+/// downstream failure.
+pub fn log_mutation_policy() {
+    if irreversible_allowed() {
+        tracing::info!(
+            allow_env = ALLOW_IRREVERSIBLE_ENV,
+            irreversible_tools = ?IRREVERSIBLE_TOOLS,
+            "Mutation policy: irreversible tools PERMITTED — their effect cannot be undone by teardown"
+        );
+    } else {
+        tracing::info!(
+            allow_env = ALLOW_IRREVERSIBLE_ENV,
+            irreversible_tools = ?IRREVERSIBLE_TOOLS,
+            "Mutation policy: irreversible tools REFUSED — every call to them will fail until the env var is set"
+        );
+    }
+}
+
 /// Refuse an irreversible tool unless the operation opted in.
 ///
 /// Called by [`crate::dispatch`] before any subprocess runs.
@@ -127,6 +159,22 @@ pub fn validate_mutation_allowed_with(tool_name: &str, irreversible_allowed: boo
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_irreversible_tool_is_named_for_the_startup_line() {
+        let named = irreversible_tool_names();
+        assert!(
+            !named.is_empty(),
+            "an empty policy line tells an operator nothing"
+        );
+        for tool in named {
+            assert_eq!(
+                classify(tool),
+                MutationClass::Irreversible,
+                "{tool} is announced as irreversible but does not classify that way"
+            );
+        }
+    }
 
     /// Serializes the cases that must touch process-global env.
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());

@@ -50,6 +50,7 @@ pub async fn run() -> anyhow::Result<()> {
         task_timeout_secs = config.task_timeout.as_secs(),
         "Ares worker starting"
     );
+    ares_tools::mutation::log_mutation_policy();
 
     // Single shared Redis connection (state only — heartbeats, task status,
     // token usage, hosts sync). Queue traffic moved to NATS JetStream.
